@@ -13,8 +13,8 @@ use quant_pivot_models::{
 use quant_pivot_repository::{
     postgres::{PgEquitySnapshotRepository, PgOperationLogRepository},
     traits::{
-        EquitySnapshotRepository, OperationLogRepository, RecommendationReportRepository,
-        RecommendationRepository,
+        EquitySnapshotRepository, OperationLogRepository, RecommendationRepository,
+        ReportRunRepository,
     },
 };
 use quant_pivot_research::precision::RESEARCH_DECIMAL_SCALE;
@@ -34,8 +34,7 @@ async fn ad_hoc_publishes_report_with_recommendations() {
 
     let request_id = "ad-hoc-publish-recs";
     let report = harness
-        .lifecycle
-        .run_ad_hoc(AdHocReportRequest {
+        .execute_ad_hoc(AdHocReportRequest {
             request_id: request_id.to_owned(),
             trigger_time: Utc::now(),
             top_n: Some(5),
@@ -89,13 +88,11 @@ async fn ad_hoc_idempotent_on_trigger_key() {
         knowledge_lag_secs: Some(0),
     };
     let first = harness
-        .lifecycle
-        .run_ad_hoc(request.clone())
+        .execute_ad_hoc(request.clone())
         .await
         .expect("first ad-hoc");
     let second = harness
-        .lifecycle
-        .run_ad_hoc(request)
+        .execute_ad_hoc(request)
         .await
         .expect("second ad-hoc");
 
@@ -106,24 +103,23 @@ async fn ad_hoc_idempotent_on_trigger_key() {
 
     let trigger_key = "ad_hoc:idempotent-ad-hoc";
     let row = harness
-        .report_repo
+        .report_run_repo
         .find_by_trigger_key(trigger_key)
         .await
         .expect("lookup trigger key")
         .expect("single committed row");
-    assert_eq!(row.recommendation_report_id, first.recommendation_report_id);
+    assert_eq!(row.output_report_id, Some(first.recommendation_report_id));
 }
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn empty_selection_publishes_published_empty() {
+async fn empty_selection_publishes_formal_report() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let harness = ReportPipelineHarness::bootstrap(&db, HarnessOptions::empty_selection()).await;
 
     let report = harness
-        .lifecycle
-        .run_ad_hoc(AdHocReportRequest {
+        .execute_ad_hoc(AdHocReportRequest {
             request_id: "empty-selection".to_owned(),
             trigger_time: Utc::now(),
             top_n: Some(5),
@@ -132,11 +128,11 @@ async fn empty_selection_publishes_published_empty() {
         .await
         .expect("empty selection report");
 
-    assert_eq!(report.status, RecommendationReportStatus::PublishedEmpty);
+    assert_eq!(report.status, RecommendationReportStatus::Published);
     assert_eq!(report.summary_json.published_recommendation_count, 0);
     assert_eq!(
-        report.status_reason.as_deref(),
-        Some(EmptyReportReason::EmptySelection.as_str())
+        report.summary_json.empty_reason,
+        Some(EmptyReportReason::EmptySelection)
     );
 
     let recs = harness
@@ -156,8 +152,7 @@ async fn missing_trade_policy_publishes_explicit_non_actionable_empty_report() {
         ReportPipelineHarness::bootstrap(&db, HarnessOptions::missing_trade_policy()).await;
 
     let report = harness
-        .lifecycle
-        .run_ad_hoc(AdHocReportRequest {
+        .execute_ad_hoc(AdHocReportRequest {
             request_id: "missing-trade-policy".to_owned(),
             trigger_time: Utc::now(),
             top_n: Some(5),
@@ -166,10 +161,10 @@ async fn missing_trade_policy_publishes_explicit_non_actionable_empty_report() {
         .await
         .expect("missing policy must produce an auditable empty report");
 
-    assert_eq!(report.status, RecommendationReportStatus::PublishedEmpty);
+    assert_eq!(report.status, RecommendationReportStatus::Published);
     assert_eq!(
-        report.status_reason.as_deref(),
-        Some(EmptyReportReason::TradePolicyUnavailable.as_str())
+        report.summary_json.empty_reason,
+        Some(EmptyReportReason::TradePolicyUnavailable)
     );
     assert_eq!(report.summary_json.published_recommendation_count, 0);
     assert!(
@@ -192,8 +187,7 @@ async fn account_unavailable_fails_without_report_row() {
 
     let request_id = "account-unavailable";
     let error = harness
-        .lifecycle
-        .run_ad_hoc(AdHocReportRequest {
+        .execute_ad_hoc(AdHocReportRequest {
             request_id: request_id.to_owned(),
             trigger_time: Utc::now(),
             top_n: Some(5),
@@ -209,13 +203,13 @@ async fn account_unavailable_fails_without_report_row() {
 
     let trigger_key = format!("ad_hoc:{request_id}");
     let existing = harness
-        .report_repo
+        .report_run_repo
         .find_by_trigger_key(&trigger_key)
         .await
         .expect("lookup trigger key");
     assert!(
-        existing.is_none(),
-        "failed build must not persist a report row"
+        existing.is_some_and(|run| run.output_report_id.is_none()),
+        "failed build must retain its run but not persist a report artifact"
     );
 }
 
@@ -227,8 +221,7 @@ async fn revoke_after_publish() {
     let harness = ReportPipelineHarness::bootstrap(&db, HarnessOptions::default()).await;
 
     let report = harness
-        .lifecycle
-        .run_ad_hoc(AdHocReportRequest {
+        .execute_ad_hoc(AdHocReportRequest {
             request_id: "revoke-me".to_owned(),
             trigger_time: Utc::now(),
             top_n: Some(5),
@@ -290,8 +283,7 @@ async fn evidence_refs_and_rank_scores_populated() {
     let harness = ReportPipelineHarness::bootstrap(&db, HarnessOptions::default()).await;
 
     let report = harness
-        .lifecycle
-        .run_ad_hoc(AdHocReportRequest {
+        .execute_ad_hoc(AdHocReportRequest {
             request_id: "evidence-and-ranks".to_owned(),
             trigger_time: Utc::now(),
             top_n: Some(5),
@@ -354,8 +346,7 @@ async fn neutral_kelly_fraction(collateral: Usd) -> Decimal {
     )
     .await;
     let report = harness
-        .lifecycle
-        .run_ad_hoc(AdHocReportRequest {
+        .execute_ad_hoc(AdHocReportRequest {
             request_id: "drawdown-neutral-baseline".to_owned(),
             trigger_time: Utc::now(),
             top_n: Some(5),
@@ -418,8 +409,7 @@ async fn report_persists_real_drawdown_from_equity_history() {
     .await;
 
     let report = harness
-        .lifecycle
-        .run_ad_hoc(AdHocReportRequest {
+        .execute_ad_hoc(AdHocReportRequest {
             request_id: "drawdown-aware-sizing".to_owned(),
             trigger_time: Utc::now(),
             top_n: Some(5),

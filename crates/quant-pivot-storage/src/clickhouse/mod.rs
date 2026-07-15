@@ -9,7 +9,8 @@ pub mod write_manager;
 
 pub use migration::{
     ClickHouseMigrationSafety, ClickHouseSchemaMigrationInfo, ClickHouseSchemaPlan,
-    ClickHouseSchemaStatus, apply_online_schema_migrations, plan_schema, verify_schema,
+    ClickHouseSchemaStatus, apply_offline_schema_migrations, apply_online_schema_migrations,
+    plan_schema, verify_schema,
 };
 pub use pool::ClickHousePool;
 pub use readiness::{BookLatencyObservation, RawHistoryObservation};

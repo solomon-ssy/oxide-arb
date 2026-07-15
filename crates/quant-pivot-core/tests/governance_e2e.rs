@@ -390,7 +390,9 @@ fn healthy_coverage() -> DatasetCoverage {
         samples_dropped_insufficient: 10,
         book_decode_failures: 0,
         live_attribution_candidates: 0,
+        live_attribution_materialized: 0,
         live_attribution_dropped_missing_evidence: 0,
+        live_attribution_censored_superseded_unfilled: 0,
         matrix_probe: None,
         ..DatasetCoverage::default()
     }

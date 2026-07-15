@@ -14,6 +14,7 @@ pub mod mocks;
 pub mod pg;
 pub mod pit;
 pub mod report_fixtures;
+pub mod report_lifecycle_seed;
 pub mod report_pipeline_harness;
 pub mod report_snapshots;
 pub mod research_ui_seed;

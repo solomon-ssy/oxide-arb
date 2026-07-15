@@ -22,7 +22,7 @@ pub enum ReportError {
     #[error("report resource capacity exceeded: catalog_visible={actual}, ceiling={ceiling}")]
     ResourceCapacityExceeded { actual: usize, ceiling: usize },
 
-    /// An empty report was built but suppressed by `publish_empty_reports=false`.
-    #[error("empty report suppressed: {reason}")]
-    EmptyReportSuppressed { reason: String },
+    /// Report diff operands belong to different authority scopes.
+    #[error("reports are not comparable: {detail}")]
+    IncomparableReports { detail: String },
 }

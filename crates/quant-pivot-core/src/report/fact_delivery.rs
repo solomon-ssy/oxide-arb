@@ -1,20 +1,20 @@
 //! Crash-recoverable report fact delivery and verification worker.
 
-use std::{sync::Arc, time::Duration};
+use std::{future::Future, sync::Arc, time::Duration};
 
 use chrono::Utc;
 use quant_pivot_error::{
-    QuantResult,
+    QuantError, QuantResult,
     report::ReportError,
     storage::{StorageError, entity::QUANT_RECOMMENDATION_REPORT},
 };
 use quant_pivot_models::{
-    clickhouse::{QuantRecommendationEventRow, ReportMarketFunnelRow},
-    domain::{RecommendationReportInfo, ReportFactDeliveryInfo},
+    clickhouse::{QuantReportRecommendationFactRow, ReportMarketFunnelRow},
+    domain::{FactDeliverySettlement, RecommendationReportInfo, ReportFactDeliveryInfo},
     enums::quant::{RecommendationReportStatus, ReportFactDeliveryStatus},
     hashing::CanonicalDigest,
     types::{
-        ContentHash, REPORT_FACT_BUNDLE_FORMAT_VERSION, ReportFactBundleV1,
+        ContentHash, REPORT_FACT_BUNDLE_FORMAT_VERSION, ReportFactBundleV2,
         ReportFactTableCommitment,
     },
 };
@@ -25,12 +25,14 @@ use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use crate::observability::metrics_hub::MetricsHub;
+
 use super::{
     publisher::ReportPublisher,
-    types::{NotificationRecommendation, ReportNotificationPayload},
+    types::{NotificationRecommendation, ReportNotificationPayload, durable_report_error_summary},
 };
 
-const RECOMMENDATION_TABLE: &str = "quant_recommendation_event";
+const RECOMMENDATION_TABLE: &str = "quant_report_recommendation_fact";
 const FUNNEL_TABLE: &str = "quant_report_market_funnel";
 const CHUNK_ROWS: usize = 10_000;
 const MAX_DELIVERY_ATTEMPTS: i32 = 8;
@@ -43,6 +45,7 @@ pub struct ReportFactDeliveryDeps {
     pub clickhouse: Arc<ClickHousePool>,
     pub write_manager: Arc<ChWriteManager>,
     pub publisher: Arc<ReportPublisher>,
+    pub metrics: Arc<MetricsHub>,
 }
 
 /// Delivers immutable report bundles and makes reports actionable only after
@@ -62,64 +65,120 @@ impl ReportFactDeliveryWorker {
     }
 
     pub async fn run(&self, token: CancellationToken) -> QuantResult<()> {
-        loop {
-            if token.is_cancelled() {
-                return Ok(());
+        run_poll_loop(
+            token,
+            IDLE_POLL_INTERVAL,
+            || self.process_one(),
+            |error| {
+                self.deps
+                    .metrics
+                    .inc_report_fact_worker_error("process_one");
+                self.deps.publisher.publish_fact_worker_error();
+                tracing::error!(%error, "report fact worker poll failed; retrying");
+            },
+        )
+        .await;
+        Ok(())
+    }
+
+    fn observe_claim_lost(&self, operation: &'static str, delivery: &ReportFactDeliveryInfo) {
+        let status = delivery.status.as_str();
+        self.deps
+            .metrics
+            .inc_report_fact_settlement_claim_lost(operation, status);
+        self.deps
+            .publisher
+            .publish_fact_claim_lost(operation, delivery);
+        if delivery.status == ReportFactDeliveryStatus::Cancelled {
+            tracing::info!(
+                report_id = %delivery.recommendation_report_id,
+                operation,
+                status,
+                "report fact settlement lost an intentionally cancelled claim"
+            );
+        } else {
+            tracing::warn!(
+                report_id = %delivery.recommendation_report_id,
+                operation,
+                status,
+                "report fact settlement lost its lease claim"
+            );
+        }
+    }
+
+    async fn settle_verified_delivery(&self, delivery: &ReportFactDeliveryInfo) -> QuantResult<()> {
+        match self
+            .deps
+            .reports
+            .verify_and_publish_report(
+                &delivery.recommendation_report_id,
+                self.worker_id,
+                Utc::now(),
+            )
+            .await?
+        {
+            FactDeliverySettlement::Applied(outcome) => {
+                self.deps
+                    .publisher
+                    .publish_publication(&outcome, Utc::now());
             }
-            if !self.process_one().await? {
-                tokio::select! {
-                    () = token.cancelled() => return Ok(()),
-                    () = tokio::time::sleep(IDLE_POLL_INTERVAL) => {}
-                }
+            FactDeliverySettlement::ClaimLost(current) => {
+                self.observe_claim_lost("verify", &current);
             }
         }
+        Ok(())
     }
 
     /// Claim and settle at most one bundle. Returns whether work was claimed.
     pub async fn process_one(&self) -> QuantResult<bool> {
-        let now = Utc::now();
-        let lease_expires_at = now
-            + chrono::Duration::from_std(LEASE_DURATION).map_err(|error| {
-                ReportError::InvariantViolation {
-                    stage: "report_fact_delivery",
-                    detail: error.to_string(),
-                }
-            })?;
         let delivery = self
             .deps
             .reports
-            .claim_fact_delivery(self.worker_id, now, lease_expires_at)
+            .claim_fact_delivery(self.worker_id, LEASE_DURATION.as_secs())
             .await?;
         let Some(delivery) = delivery else {
-            return self.announce_one(now, lease_expires_at).await;
+            return self.announce_one().await;
         };
 
         match self.deliver(&delivery).await {
             Ok(()) => {
-                self.deps
-                    .reports
-                    .verify_fact_delivery(
-                        &delivery.recommendation_report_id,
-                        self.worker_id,
-                        Utc::now(),
-                    )
-                    .await?;
+                self.settle_verified_delivery(&delivery).await?;
             }
             Err(error) => {
+                let summary = durable_report_error_summary(&error);
                 let status = if delivery.attempt_count >= MAX_DELIVERY_ATTEMPTS {
                     ReportFactDeliveryStatus::Failed
                 } else {
                     ReportFactDeliveryStatus::Retrying
                 };
-                self.deps
+                let settlement = self
+                    .deps
                     .reports
                     .fail_fact_delivery(
                         &delivery.recommendation_report_id,
                         self.worker_id,
                         status,
-                        &error.to_string(),
+                        &summary,
                     )
                     .await?;
+                let updated = match settlement {
+                    FactDeliverySettlement::Applied(updated) => updated,
+                    FactDeliverySettlement::ClaimLost(current) => {
+                        self.observe_claim_lost("fail", &current);
+                        return Ok(true);
+                    }
+                };
+                if let Some(report) = self
+                    .deps
+                    .reports
+                    .find_by_id(&delivery.recommendation_report_id)
+                    .await?
+                {
+                    self.deps.publisher.publish_delivery_state(
+                        &report,
+                        updated.status == ReportFactDeliveryStatus::Failed,
+                    );
+                }
                 tracing::error!(
                     report_id = %delivery.recommendation_report_id,
                     attempt = delivery.attempt_count,
@@ -132,15 +191,11 @@ impl ReportFactDeliveryWorker {
         Ok(true)
     }
 
-    async fn announce_one(
-        &self,
-        now: chrono::DateTime<Utc>,
-        lease_expires_at: chrono::DateTime<Utc>,
-    ) -> QuantResult<bool> {
+    async fn announce_one(&self) -> QuantResult<bool> {
         let Some(delivery) = self
             .deps
             .reports
-            .claim_fact_announcement(self.worker_id, now, lease_expires_at)
+            .claim_fact_announcement(self.worker_id, LEASE_DURATION.as_secs())
             .await?
         else {
             return Ok(false);
@@ -159,11 +214,7 @@ impl ReportFactDeliveryWorker {
                 .await;
             self.deps
                 .reports
-                .acknowledge_fact_announcement(
-                    &delivery.recommendation_report_id,
-                    self.worker_id,
-                    Utc::now(),
-                )
+                .acknowledge_fact_announcement(&delivery.recommendation_report_id, self.worker_id)
                 .await?;
             QuantResult::Ok(())
         }
@@ -186,14 +237,14 @@ impl ReportFactDeliveryWorker {
             .await?;
         self.verify_recommendations(delivery).await?;
         self.verify_funnel(delivery).await?;
-        self.load_publishable_report(delivery).await?;
+        self.load_prepared_report(delivery).await?;
         Ok(())
     }
 
     async fn load_bundle(
         &self,
         delivery: &ReportFactDeliveryInfo,
-    ) -> QuantResult<ReportFactBundleV1> {
+    ) -> QuantResult<ReportFactBundleV2> {
         let bytes = self.deps.artifacts.get(&delivery.bundle_uri).await?;
         let byte_count =
             i64::try_from(bytes.len()).map_err(|error| ReportError::NumericOverflow {
@@ -208,13 +259,38 @@ impl ReportFactDeliveryWorker {
             }
             .into());
         }
-        let bundle: ReportFactBundleV1 =
+        let bundle: ReportFactBundleV2 =
             serde_json::from_slice(&bytes).map_err(|error| ReportError::InvariantViolation {
                 stage: "report_fact_delivery",
                 detail: format!("invalid report fact bundle: {error}"),
             })?;
         validate_bundle(delivery, &bundle)?;
         Ok(bundle)
+    }
+
+    async fn load_prepared_report(
+        &self,
+        delivery: &ReportFactDeliveryInfo,
+    ) -> QuantResult<RecommendationReportInfo> {
+        let report = self
+            .deps
+            .reports
+            .find_by_id(&delivery.recommendation_report_id)
+            .await?
+            .ok_or_else(|| {
+                StorageError::not_found(
+                    QUANT_RECOMMENDATION_REPORT,
+                    &delivery.recommendation_report_id,
+                )
+            })?;
+        if report.status != RecommendationReportStatus::Prepared {
+            return Err(ReportError::InvariantViolation {
+                stage: "report_fact_delivery",
+                detail: format!("report is not prepared: {}", report.status),
+            }
+            .into());
+        }
+        Ok(report)
     }
 
     async fn load_publishable_report(
@@ -232,13 +308,10 @@ impl ReportFactDeliveryWorker {
                     &delivery.recommendation_report_id,
                 )
             })?;
-        if !matches!(
-            report.status,
-            RecommendationReportStatus::Published | RecommendationReportStatus::PublishedEmpty
-        ) {
+        if report.status != RecommendationReportStatus::Published {
             return Err(ReportError::InvariantViolation {
                 stage: "report_fact_delivery",
-                detail: format!("report is not publishable: {}", report.status),
+                detail: format!("report is not published: {}", report.status),
             }
             .into());
         }
@@ -248,7 +321,7 @@ impl ReportFactDeliveryWorker {
     async fn write_recommendation_chunks(
         &self,
         bundle_hash: &ContentHash,
-        rows: &[QuantRecommendationEventRow],
+        rows: &[QuantReportRecommendationFactRow],
     ) -> QuantResult<()> {
         for (index, chunk) in rows.chunks(CHUNK_ROWS).enumerate() {
             let chunk_hash = CanonicalDigest::content_hash_json(chunk)?;
@@ -296,12 +369,12 @@ impl ReportFactDeliveryWorker {
             .clickhouse
             .client()
             .query(
-                "SELECT ?fields FROM quant_recommendation_event FINAL \
+                "SELECT ?fields FROM quant_report_recommendation_fact FINAL \
                  WHERE recommendation_report_id = ? \
                  ORDER BY rank, recommendation_id",
             )
             .bind(delivery.recommendation_report_id.clone())
-            .fetch::<QuantRecommendationEventRow>()
+            .fetch::<QuantReportRecommendationFactRow>()
             .map_err(StorageError::from)?;
         let mut verifier = RowChainVerifier::new();
         while let Some(row) = cursor.next().await.map_err(StorageError::from)? {
@@ -338,9 +411,39 @@ impl ReportFactDeliveryWorker {
     }
 }
 
+async fn run_poll_loop<Process, ProcessFuture, OnError>(
+    token: CancellationToken,
+    poll_interval: Duration,
+    mut process_one: Process,
+    mut on_error: OnError,
+) where
+    Process: FnMut() -> ProcessFuture,
+    ProcessFuture: Future<Output = QuantResult<bool>>,
+    OnError: FnMut(&QuantError),
+{
+    loop {
+        if token.is_cancelled() {
+            return;
+        }
+        let should_wait = match process_one().await {
+            Ok(claimed) => !claimed,
+            Err(error) => {
+                on_error(&error);
+                true
+            }
+        };
+        if should_wait {
+            tokio::select! {
+                () = token.cancelled() => return,
+                () = tokio::time::sleep(poll_interval) => {}
+            }
+        }
+    }
+}
+
 fn validate_bundle(
     delivery: &ReportFactDeliveryInfo,
-    bundle: &ReportFactBundleV1,
+    bundle: &ReportFactBundleV2,
 ) -> QuantResult<()> {
     if bundle.format_version != REPORT_FACT_BUNDLE_FORMAT_VERSION
         || bundle.recommendation_report_id != delivery.recommendation_report_id
@@ -468,7 +571,7 @@ impl RowChainVerifier {
     }
 }
 
-fn notification_payload(bundle: &ReportFactBundleV1) -> ReportNotificationPayload {
+fn notification_payload(bundle: &ReportFactBundleV2) -> ReportNotificationPayload {
     ReportNotificationPayload {
         report_id: bundle.recommendation_report_id.clone(),
         kind: bundle.notification.kind,
@@ -494,9 +597,58 @@ fn notification_payload(bundle: &ReportFactBundleV1) -> ReportNotificationPayloa
 
 #[cfg(test)]
 mod tests {
-    use quant_pivot_models::hashing::CanonicalDigest;
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
+    };
 
-    use super::RowChainVerifier;
+    use quant_pivot_error::{QuantResult, report::ReportError};
+    use quant_pivot_models::hashing::CanonicalDigest;
+    use tokio_util::sync::CancellationToken;
+
+    use super::{RowChainVerifier, run_poll_loop};
+
+    #[tokio::test]
+    async fn report_fact_worker_continues_after_process_error() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let errors = Arc::new(AtomicUsize::new(0));
+        let token = CancellationToken::new();
+        let process_token = token.clone();
+        let process_attempts = Arc::clone(&attempts);
+        let observed_errors = Arc::clone(&errors);
+
+        run_poll_loop(
+            token,
+            Duration::from_millis(1),
+            move || {
+                let attempt = process_attempts.fetch_add(1, Ordering::SeqCst);
+                let process_token = process_token.clone();
+                async move {
+                    if attempt == 0 {
+                        return QuantResult::Err(
+                            ReportError::InvariantViolation {
+                                stage: "test",
+                                detail: "injected poll error".to_owned(),
+                            }
+                            .into(),
+                        );
+                    }
+                    process_token.cancel();
+                    Ok(true)
+                }
+            },
+            move |_| {
+                observed_errors.fetch_add(1, Ordering::SeqCst);
+            },
+        )
+        .await;
+
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(errors.load(Ordering::SeqCst), 1);
+    }
 
     #[test]
     fn streaming_row_chain_matches_canonical_json_array() {

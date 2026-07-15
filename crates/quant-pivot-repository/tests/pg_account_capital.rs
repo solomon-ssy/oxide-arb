@@ -5,7 +5,7 @@
 //! (`account_snapshot` → `portfolio_plan` → report → recommendations) with its
 //! foreign-key ordering plus the strong-typed JSONB payload round-trip.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, str::FromStr};
 
 use chrono::{Duration, Utc};
 use quant_pivot_models::{
@@ -18,6 +18,7 @@ use quant_pivot_models::{
         NewReportDataQualitySnapshot, NewReportTransaction, NewRuntimeConfigVersion, NullablePatch,
         OperationLogQuery, Patch, ReconciliationPatch, UpsertKillSwitchState,
     },
+    entities::quant_report_fact_delivery,
     enums::{
         common::{MarketCategory, OrderType, Side},
         execution::{
@@ -34,7 +35,7 @@ use quant_pivot_models::{
             FeatureParityStateTransition, ModelRunKind, ModelRunStatus, OrderIntentStatus,
             OutcomeSide, PublicationStatus, QuantRuntimeMode, RecommendationAttributionOutcome,
             RecommendationReportStatus, RecommendationStatus, RedeemPolicy,
-            ReportFactDeliveryStatus, ReportKind, ReportTriggerKind, SizingModelKind,
+            ReportFactDeliveryStatus, ReportKind, SizingModelKind,
         },
         rbac::ResourceType,
         runtime_config::RuntimeConfigVersionSource,
@@ -67,15 +68,15 @@ use quant_pivot_repository::{
         PgMarketRepository, PgMarketSelectionRepository, PgModelRegistryRepository,
         PgModelRunRepository, PgOperationLogRepository, PgOrderIntentRepository,
         PgRecommendationReportRepository, PgRecommendationRepository, PgReconciliationRepository,
-        PgReservedCapitalRepository, PgRuntimeConfigVersionRepository,
+        PgReportRunRepository, PgReservedCapitalRepository, PgRuntimeConfigVersionRepository,
     },
     traits::{
         AccountSnapshotRepository, AttributionRepository, CapitalAllocationRepository,
         EventRepository, ExecutionOrderRepository, KillSwitchStateRepository, MarketRepository,
         MarketSelectionRepository, ModelRegistryRepository, ModelRunRepository,
         OperationLogRepository, OrderIntentRepository, RecommendationReportRepository,
-        RecommendationRepository, ReconciliationRepository, ReservedCapitalRepository,
-        RuntimeConfigVersionRepository,
+        RecommendationRepository, ReconciliationRepository, ReportRunRepository,
+        ReservedCapitalRepository, RuntimeConfigVersionRepository,
     },
 };
 use quant_pivot_test_support::{
@@ -83,11 +84,11 @@ use quant_pivot_test_support::{
     execution_pg_seed::{fixture_profile_ref, prepared_order},
     pg::setup_pg,
     report_fixtures,
+    report_lifecycle_seed::{persist_and_publish_report, persist_prepared_report},
 };
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
-use sea_orm::{EntityTrait, IntoActiveModel};
-use std::str::FromStr;
+use sea_orm::{ActiveModelTrait, ActiveValue, EntityTrait, IntoActiveModel};
 use uuid::Uuid;
 
 fn content_hash(seed: char) -> ContentHash {
@@ -232,10 +233,13 @@ async fn find_expirable_returns_published_reports_before_cutoff_only() {
     };
 
     let report_repo = PgRecommendationReportRepository::new(db.clone());
-    report_repo
-        .create_report(build_report_transaction(&ids))
-        .await
-        .expect("create report");
+    persist_prepared_report(
+        &db,
+        build_report_transaction(&ids),
+        &report_trigger_key(&ids),
+        10,
+    )
+    .await;
 
     let pending_due = report_repo
         .find_expirable(Utc::now() + Duration::hours(2), 100)
@@ -246,17 +250,18 @@ async fn find_expirable_returns_published_reports_before_cutoff_only() {
         "a report with unverified facts must not enter actionable lifecycle queries"
     );
     let worker_id = Uuid::new_v4();
-    let now = Utc::now();
     let claimed = report_repo
-        .claim_fact_delivery(worker_id, now, now + Duration::minutes(1))
+        .claim_fact_delivery(worker_id, 60)
         .await
         .expect("claim report facts")
         .expect("pending report facts");
     assert_eq!(claimed.recommendation_report_id, ids.report);
     report_repo
-        .verify_fact_delivery(&ids.report, worker_id, Utc::now())
+        .verify_and_publish_report(&ids.report, worker_id, Utc::now())
         .await
-        .expect("verify report facts");
+        .expect("verify and publish report facts")
+        .into_applied()
+        .expect("report delivery claim must remain held");
 
     // Not yet due: the report's roll-up `valid_until` is in the future (now + 1h).
     let not_due = report_repo
@@ -354,14 +359,17 @@ async fn report_fact_delivery_recovers_retry_and_expired_lease_without_early_cla
         market: market_id.to_owned(),
         event: event_id.to_owned(),
     };
-    let repo = PgRecommendationReportRepository::new(db);
-    repo.create_report(build_report_transaction(&ids))
-        .await
-        .expect("create report");
+    let repo = PgRecommendationReportRepository::new(db.clone());
+    persist_prepared_report(
+        &db,
+        build_report_transaction(&ids),
+        &report_trigger_key(&ids),
+        10,
+    )
+    .await;
 
     let worker_one = Uuid::new_v4();
-    let claimed_at = Utc::now();
-    repo.claim_fact_delivery(worker_one, claimed_at, claimed_at + Duration::minutes(1))
+    repo.claim_fact_delivery(worker_one, 60)
         .await
         .expect("claim initial delivery")
         .expect("pending delivery");
@@ -373,47 +381,57 @@ async fn report_fact_delivery_recovers_retry_and_expired_lease_without_early_cla
             "injected ClickHouse chunk crash",
         )
         .await
-        .expect("schedule retry");
-    let next_attempt_at = retrying.next_attempt_at.expect("retry deadline");
+        .expect("schedule retry")
+        .into_applied()
+        .expect("retry settlement must retain its claim");
     assert!(
-        repo.claim_fact_delivery(
-            Uuid::new_v4(),
-            next_attempt_at - Duration::milliseconds(1),
-            next_attempt_at + Duration::minutes(1),
-        )
-        .await
-        .expect("poll before retry deadline")
-        .is_none(),
+        retrying.next_attempt_at.is_some(),
+        "retrying delivery must persist its retry deadline"
+    );
+    assert!(
+        repo.claim_fact_delivery(Uuid::new_v4(), 60)
+            .await
+            .expect("poll before retry deadline")
+            .is_none(),
         "retry must not hot-loop before next_attempt_at"
     );
 
+    let row = quant_report_fact_delivery::Entity::find_by_id(ids.report.clone())
+        .one(&db)
+        .await
+        .expect("load retrying delivery")
+        .expect("retrying delivery");
+    let mut due = row.into_active_model();
+    due.next_attempt_at = ActiveValue::Set(Some(Utc::now() - Duration::milliseconds(1)));
+    due.update(&db).await.expect("make retry deadline due");
+
     let worker_two = Uuid::new_v4();
-    let second_lease_end = next_attempt_at + Duration::minutes(1);
     let second = repo
-        .claim_fact_delivery(worker_two, next_attempt_at, second_lease_end)
+        .claim_fact_delivery(worker_two, 60)
         .await
         .expect("claim due retry")
         .expect("retry became claimable");
     assert_eq!(second.attempt_count, 2);
     assert!(
-        repo.claim_fact_delivery(
-            Uuid::new_v4(),
-            second_lease_end - Duration::milliseconds(1),
-            second_lease_end + Duration::minutes(1),
-        )
-        .await
-        .expect("poll live lease")
-        .is_none(),
+        repo.claim_fact_delivery(Uuid::new_v4(), 60)
+            .await
+            .expect("poll live lease")
+            .is_none(),
         "a live delivery lease must be exclusive"
     );
 
+    let row = quant_report_fact_delivery::Entity::find_by_id(ids.report.clone())
+        .one(&db)
+        .await
+        .expect("load delivering lease")
+        .expect("delivering lease");
+    let mut expired = row.into_active_model();
+    expired.lease_expires_at = ActiveValue::Set(Some(Utc::now() - Duration::milliseconds(1)));
+    expired.update(&db).await.expect("expire delivery lease");
+
     let worker_three = Uuid::new_v4();
     let recovered = repo
-        .claim_fact_delivery(
-            worker_three,
-            second_lease_end,
-            second_lease_end + Duration::minutes(1),
-        )
+        .claim_fact_delivery(worker_three, 60)
         .await
         .expect("recover expired lease")
         .expect("expired delivery lease");
@@ -426,17 +444,15 @@ async fn report_fact_delivery_recovers_retry_and_expired_lease_without_early_cla
             "retry budget exhausted",
         )
         .await
-        .expect("terminal failure");
+        .expect("terminal failure")
+        .into_applied()
+        .expect("failure settlement must retain its claim");
     assert!(failed.next_attempt_at.is_none());
     assert!(
-        repo.claim_fact_delivery(
-            Uuid::new_v4(),
-            second_lease_end + Duration::hours(1),
-            second_lease_end + Duration::hours(2),
-        )
-        .await
-        .expect("poll terminal failure")
-        .is_none(),
+        repo.claim_fact_delivery(Uuid::new_v4(), 60)
+            .await
+            .expect("poll terminal failure")
+            .is_none(),
         "terminal delivery failure must require explicit operator intervention"
     );
 }
@@ -466,21 +482,18 @@ async fn seed_market_catalog(db: &sea_orm::DatabaseConnection, event_id: &str, m
 
 async fn create_and_assert_report_transaction(db: &sea_orm::DatabaseConnection, ids: &TxnIds) {
     let trigger_key = report_trigger_key(ids);
-    let report_repo = PgRecommendationReportRepository::new(db.clone());
-    let created = report_repo
-        .create_report(build_report_transaction(ids))
-        .await
-        .expect("create report transaction");
+    let created =
+        persist_and_publish_report(db, build_report_transaction(ids), &trigger_key, 10).await;
     assert_eq!(created.recommendation_report_id, ids.report);
     assert_eq!(created.capital_base_usd, Usd::new(dec!(10000)));
     assert_eq!(created.account_snapshot_ref, ids.account_snapshot);
 
-    let found_by_trigger = report_repo
+    let found_by_trigger = PgReportRunRepository::new(db.clone())
         .find_by_trigger_key(&trigger_key)
         .await
         .expect("find by trigger key")
         .expect("trigger key row");
-    assert_eq!(found_by_trigger.recommendation_report_id, ids.report);
+    assert_eq!(found_by_trigger.output_report_id, Some(ids.report.clone()));
 
     let op_logs = PgOperationLogRepository::new(db.clone())
         .page(OperationLogQuery {
@@ -881,10 +894,13 @@ async fn seed_report_fixture(db: &sea_orm::DatabaseConnection) -> TxnIds {
         market: market_id.to_owned(),
         event: event_id.to_owned(),
     };
-    PgRecommendationReportRepository::new(db.clone())
-        .create_report(build_report_transaction(&ids))
-        .await
-        .expect("create report");
+    persist_and_publish_report(
+        db,
+        build_report_transaction(&ids),
+        &report_trigger_key(&ids),
+        10,
+    )
+    .await;
     ids
 }
 
@@ -1119,9 +1135,10 @@ struct TxnIds {
 
 fn build_report_transaction(ids: &TxnIds) -> NewReportTransaction {
     let equity_snapshot_id = EquitySnapshotId::from_v7();
-    let report = report_row(ids, equity_snapshot_id.clone());
+    let decision_at = Utc::now();
+    let report = report_row(ids, equity_snapshot_id.clone(), decision_at);
     let sampled_feature_parity = report_fixtures::sampled_parity(&report);
-    let recommendation = report_recommendation(ids);
+    let recommendation = report_recommendation(ids, decision_at);
     let entry_condition_instance = NewEntryConditionInstance {
         condition_instance_id: ids.condition_instance.clone(),
         recommendation_id: ids.recommendation.clone(),
@@ -1151,14 +1168,14 @@ fn build_report_transaction(ids: &TxnIds) -> NewReportTransaction {
             account_snapshot_id: ids.account_snapshot.clone(),
             ..new_account_snapshot()
         },
-        equity_snapshot: report_equity_snapshot(ids, &equity_snapshot_id),
+        equity_snapshot: report_equity_snapshot(ids, &equity_snapshot_id, decision_at),
         data_quality_snapshot: NewReportDataQualitySnapshot {
             report_data_quality_snapshot_id: ids.data_quality_snapshot.clone(),
-            decision_at: Utc::now(),
+            decision_at,
             runtime_config_version_id: ids.runtime_config_version.clone(),
             tokens_json: ReportDataQualityTokens(Vec::new()),
         },
-        portfolio_plan: report_portfolio_plan(ids),
+        portfolio_plan: report_portfolio_plan(ids, decision_at),
         report,
         recommendations: vec![recommendation],
         entry_condition_artifacts: Vec::new(),
@@ -1172,10 +1189,11 @@ fn build_report_transaction(ids: &TxnIds) -> NewReportTransaction {
 fn report_equity_snapshot(
     ids: &TxnIds,
     equity_snapshot_id: &EquitySnapshotId,
+    decision_at: chrono::DateTime<Utc>,
 ) -> NewEquitySnapshot {
     NewEquitySnapshot {
         equity_snapshot_id: equity_snapshot_id.clone(),
-        as_of: Utc::now(),
+        as_of: decision_at,
         source: AccountSource::Polymarket,
         venue_net_liquidation_usd: Usd::new(dec!(10000)),
         capital_base_usd: Usd::new(dec!(10000)),
@@ -1189,12 +1207,12 @@ fn report_equity_snapshot(
     }
 }
 
-fn report_portfolio_plan(ids: &TxnIds) -> NewPortfolioPlan {
+fn report_portfolio_plan(ids: &TxnIds, decision_at: chrono::DateTime<Utc>) -> NewPortfolioPlan {
     NewPortfolioPlan {
         portfolio_plan_id: ids.portfolio_plan.clone(),
         model_run_id: Some(ids.model_run.clone()),
         market_selection_id: ids.market_selection.clone(),
-        decision_at: Utc::now(),
+        decision_at,
         budget_usd: Usd::new(dec!(10000)),
         allocated_usd: Usd::new(dec!(250)),
         risk_budget_json: PortfolioRiskBudget::default(),
@@ -1204,16 +1222,17 @@ fn report_portfolio_plan(ids: &TxnIds) -> NewPortfolioPlan {
     }
 }
 
-fn report_row(ids: &TxnIds, equity_snapshot_id: EquitySnapshotId) -> NewRecommendationReport {
+fn report_row(
+    ids: &TxnIds,
+    equity_snapshot_id: EquitySnapshotId,
+    decision_at: chrono::DateTime<Utc>,
+) -> NewRecommendationReport {
     NewRecommendationReport {
         recommendation_report_id: ids.report.clone(),
+        profile_id: quant_pivot_test_support::execution_pg_seed::fixture_profile_ref().id,
         profile_ref: quant_pivot_test_support::execution_pg_seed::fixture_profile_ref(),
         report_kind: ReportKind::TopN,
-        trigger_kind: ReportTriggerKind::Scheduled,
-        trigger_key: report_trigger_key(ids),
-        trigger_time: Utc::now(),
-        knowledge_lag_secs: 10,
-        decision_at: Utc::now(),
+        decision_at,
         horizon_secs: 86_400,
         runtime_mode: QuantRuntimeMode::ReportOnly,
         runtime_config_version_id: ids.runtime_config_version.clone(),
@@ -1222,22 +1241,25 @@ fn report_row(ids: &TxnIds, equity_snapshot_id: EquitySnapshotId) -> NewRecommen
         market_selection_id: ids.market_selection.clone(),
         portfolio_plan_id: ids.portfolio_plan.clone(),
         top_n: 20,
-        status: RecommendationReportStatus::Published,
+        status: RecommendationReportStatus::Prepared,
         account_source: AccountSource::Polymarket,
         capital_base_usd: Usd::new(dec!(10000)),
         account_snapshot_ref: ids.account_snapshot.clone(),
         equity_snapshot_ref: equity_snapshot_id,
         data_quality_snapshot_ref: ids.data_quality_snapshot.clone(),
         summary_json: report_summary(),
-        published_at: Some(Utc::now()),
-        valid_until: Some(Utc::now() + chrono::Duration::hours(1)),
+        published_at: None,
+        successor_report_id: None,
+        superseded_at: None,
+        obsoleted_at: None,
+        valid_until: Some(decision_at + chrono::Duration::hours(1)),
         revoked_at: None,
         expired_at: None,
         status_reason: None,
     }
 }
 
-fn report_recommendation(ids: &TxnIds) -> NewRecommendation {
+fn report_recommendation(ids: &TxnIds, decision_at: chrono::DateTime<Utc>) -> NewRecommendation {
     NewRecommendation {
         recommendation_id: ids.recommendation.clone(),
         profile_ref: quant_pivot_test_support::execution_pg_seed::fixture_profile_ref(),
@@ -1262,9 +1284,9 @@ fn report_recommendation(ids: &TxnIds) -> NewRecommendation {
         factor_breakdown: factor_breakdown(),
         evidence_refs: evidence_refs(),
         execution_eligibility: execution_eligibility(),
-        valid_from: Utc::now(),
-        valid_until: Utc::now(),
-        status: RecommendationStatus::Published,
+        valid_from: decision_at,
+        valid_until: decision_at + chrono::Duration::hours(1),
+        status: RecommendationStatus::Prepared,
     }
 }
 

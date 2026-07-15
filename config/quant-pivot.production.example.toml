@@ -121,6 +121,11 @@ size_threshold = 1
 # ── Quant Pivot (Phase 0) ─────────────────────────────────────────────────────
 
 [quant.workers]
+report_schedule_poll_secs = 1
+report_run_lease_secs = 120
+report_run_heartbeat_secs = 30
+report_ad_hoc_queue_capacity = 64
+report_ad_hoc_queue_ttl_secs = 300
 # Report TTL expire-sweep + deadline look-ahead cadence (seconds). Default: 300.
 report_expire_sweep_secs = 300
 # Order-intent TTL expire-sweep cadence (seconds); releases reserved capital at
@@ -267,6 +272,8 @@ max_concurrent_inserts = 8
 [db.clickhouse.migration]
 # Apply only migrations classified as online-safe during application startup.
 # Schema rewrites/backfills/partition-key changes are never auto-applied.
+# Phase 11.8 migration 2 is clean-slate/offline and must be applied explicitly
+# before runtime writers start; non-empty legacy fact tables fail closed.
 auto_apply_online = true
 require_dedicated_identity = true
 # Caution: production should use a dedicated DDL identity. Supply these only

@@ -72,6 +72,10 @@ fn page_condition(query: &OperationLogQuery) -> Condition {
                 .resource_type
                 .map(|resource| Column::ResourceType.eq(resource)),
         )
+        .add_option(
+            non_empty(query.resource_id.as_deref())
+                .map(|resource_id| Column::ResourceId.eq(resource_id)),
+        )
         .add_option(query.outcome.map(|outcome| Column::Outcome.eq(outcome)))
         .add_option(
             non_empty(query.request_id.as_deref())
@@ -139,6 +143,7 @@ mod tests {
             actor_user_id: Some(UserId::from_v7()),
             category: Some(OperationCategory::Auth),
             resource_type: Some(ResourceType::User),
+            resource_id: Some("user-1".to_owned()),
             outcome: Some(OperationOutcome::Success),
             request_id: Some(String::new()),
             governance_audit_event_id: None,
@@ -155,6 +160,7 @@ mod tests {
         assert!(sql.contains(r#""operation_log"."actor_user_id" ="#));
         assert!(sql.contains(r#""operation_log"."category" ="#));
         assert!(sql.contains(r#""operation_log"."resource_type" ="#));
+        assert!(sql.contains(r#""operation_log"."resource_id" ="#));
         assert!(sql.contains(r#""operation_log"."outcome" ="#));
         assert!(!sql.contains(r#""operation_log"."request_id" ="#));
     }

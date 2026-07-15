@@ -75,7 +75,7 @@ async fn do_load_current_activation(
         .map(|row| row.map(Into::into))
 }
 
-async fn acquire_activation_lock(txn: &DatabaseTransaction) -> Result<(), StorageError> {
+pub(crate) async fn acquire_activation_lock(txn: &DatabaseTransaction) -> Result<(), StorageError> {
     txn.execute(Statement::from_sql_and_values(
         DatabaseBackend::Postgres,
         "SELECT pg_advisory_xact_lock($1)",
@@ -147,7 +147,7 @@ async fn do_load_by_hash(
         .map(|row| row.map(Into::into))
 }
 
-async fn do_load_current(
+pub(crate) async fn do_load_current(
     db: &impl ConnectionTrait,
 ) -> Result<Option<RuntimeConfigVersionInfo>, StorageError> {
     VersionEntity::find()

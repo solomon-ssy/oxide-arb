@@ -2,15 +2,13 @@ use quant_pivot_macros::quant_schema;
 use sea_orm::{
     Iden,
     sea_query::{
-        ColumnDef, ForeignKey, ForeignKeyAction, ForeignKeyCreateStatement, Index, IndexOrder,
-        IntoIden, Table, TableCreateStatement,
+        ColumnDef, Expr, ForeignKey, ForeignKeyAction, ForeignKeyCreateStatement, Index,
+        IndexOrder, IntoIden, Table, TableCreateStatement,
     },
 };
 
 use crate::{
-    enums::quant::{
-        AccountSource, QuantRuntimeMode, RecommendationReportStatus, ReportKind, ReportTriggerKind,
-    },
+    enums::quant::{AccountSource, QuantRuntimeMode, RecommendationReportStatus, ReportKind},
     idens::{
         quant_account_snapshot::QuantAccountSnapshot, quant_equity_snapshot::QuantEquitySnapshot,
         quant_market_selection::QuantMarketSelection, quant_model_run::QuantModelRun,
@@ -30,12 +28,9 @@ use crate::{
 pub enum QuantRecommendationReport {
     Table,
     RecommendationReportId,
+    ProfileId,
     ProfileRef,
     ReportKind,
-    TriggerKind,
-    TriggerKey,
-    TriggerTime,
-    KnowledgeLagSecs,
     DecisionAt,
     HorizonSecs,
     RuntimeMode,
@@ -53,6 +48,9 @@ pub enum QuantRecommendationReport {
     DataQualitySnapshotRef,
     SummaryJson,
     PublishedAt,
+    SuccessorReportId,
+    SupersededAt,
+    ObsoletedAt,
     ValidUntil,
     RevokedAt,
     ExpiredAt,
@@ -81,6 +79,11 @@ fn add_identity_columns(table: &mut TableCreateStatement) {
             QuantRecommendationReport::RecommendationReportId,
         ))
         .col(
+            ColumnDef::new(QuantRecommendationReport::ProfileId)
+                .text()
+                .not_null(),
+        )
+        .col(
             ColumnDef::new(QuantRecommendationReport::ProfileRef)
                 .json_binary()
                 .not_null(),
@@ -88,27 +91,11 @@ fn add_identity_columns(table: &mut TableCreateStatement) {
         .col(column::pg_enum::<ReportKind>(
             QuantRecommendationReport::ReportKind,
         ))
-        .col(column::pg_enum::<ReportTriggerKind>(
-            QuantRecommendationReport::TriggerKind,
-        ))
-        .col(
-            ColumnDef::new(QuantRecommendationReport::TriggerKey)
-                .text()
-                .not_null(),
-        )
-        .col(
-            ColumnDef::new(QuantRecommendationReport::TriggerTime)
-                .timestamp_with_time_zone()
-                .not_null(),
-        )
-        .col(
-            ColumnDef::new(QuantRecommendationReport::KnowledgeLagSecs)
-                .big_integer()
-                .not_null(),
-        )
         .col(timestamp_with_write_default(
             QuantRecommendationReport::CreatedAt,
-        ));
+        ))
+        .check(Expr::cust("profile_id = profile_ref->>'id'"))
+        .check(Expr::cust("char_length(profile_id) BETWEEN 1 AND 128"));
 }
 
 fn add_runtime_columns(table: &mut TableCreateStatement) {
@@ -134,7 +121,8 @@ fn add_runtime_columns(table: &mut TableCreateStatement) {
         .col(column::uuid_fk(
             QuantRecommendationReport::MarketSelectionId,
         ))
-        .col(column::uuid_fk(QuantRecommendationReport::PortfolioPlanId));
+        .col(column::uuid_fk(QuantRecommendationReport::PortfolioPlanId))
+        .check(Expr::cust("horizon_secs > 0"));
 }
 
 fn add_payload_columns(table: &mut TableCreateStatement) {
@@ -164,13 +152,28 @@ fn add_payload_columns(table: &mut TableCreateStatement) {
             ColumnDef::new(QuantRecommendationReport::SummaryJson)
                 .json_binary()
                 .not_null(),
-        );
+        )
+        .check(Expr::cust("top_n > 0"))
+        .check(Expr::cust("capital_base_usd >= 0"));
 }
 
 fn add_lifecycle_columns(table: &mut TableCreateStatement) {
     table
         .col(
             ColumnDef::new(QuantRecommendationReport::PublishedAt)
+                .timestamp_with_time_zone()
+                .null(),
+        )
+        .col(column::uuid_null(
+            QuantRecommendationReport::SuccessorReportId,
+        ))
+        .col(
+            ColumnDef::new(QuantRecommendationReport::SupersededAt)
+                .timestamp_with_time_zone()
+                .null(),
+        )
+        .col(
+            ColumnDef::new(QuantRecommendationReport::ObsoletedAt)
                 .timestamp_with_time_zone()
                 .null(),
         )
@@ -193,11 +196,62 @@ fn add_lifecycle_columns(table: &mut TableCreateStatement) {
             ColumnDef::new(QuantRecommendationReport::StatusReason)
                 .text()
                 .null(),
-        );
+        )
+        .check(Expr::cust(
+            "valid_until IS NULL OR valid_until > decision_at",
+        ))
+        .check(Expr::cust(
+            "successor_report_id IS NULL OR successor_report_id <> recommendation_report_id",
+        ))
+        .check(Expr::cust(
+            "status_reason IS NULL OR char_length(status_reason) BETWEEN 1 AND 4096",
+        ))
+        .check(Expr::cust(
+            "(status IN ('prepared'::qp_recommendation_report_status, 'published'::qp_recommendation_report_status) AND status_reason IS NULL) OR (status NOT IN ('prepared'::qp_recommendation_report_status, 'published'::qp_recommendation_report_status) AND status_reason IS NOT NULL)",
+        ))
+        .check(Expr::cust(
+            "(status = 'prepared'::qp_recommendation_report_status AND published_at IS NULL AND successor_report_id IS NULL AND superseded_at IS NULL AND obsoleted_at IS NULL AND revoked_at IS NULL AND expired_at IS NULL) OR status <> 'prepared'::qp_recommendation_report_status",
+        ))
+        .check(Expr::cust(
+            "(status = 'published'::qp_recommendation_report_status AND published_at IS NOT NULL AND successor_report_id IS NULL AND superseded_at IS NULL AND obsoleted_at IS NULL AND revoked_at IS NULL AND expired_at IS NULL) OR status <> 'published'::qp_recommendation_report_status",
+        ))
+        .check(Expr::cust(
+            "(status = 'superseded'::qp_recommendation_report_status AND published_at IS NOT NULL AND successor_report_id IS NOT NULL AND superseded_at IS NOT NULL AND obsoleted_at IS NULL AND revoked_at IS NULL AND expired_at IS NULL) OR status <> 'superseded'::qp_recommendation_report_status",
+        ))
+        .check(Expr::cust(
+            "(status = 'obsolete'::qp_recommendation_report_status AND published_at IS NULL AND successor_report_id IS NOT NULL AND superseded_at IS NULL AND obsoleted_at IS NOT NULL AND revoked_at IS NULL AND expired_at IS NULL) OR status <> 'obsolete'::qp_recommendation_report_status",
+        ))
+        .check(Expr::cust(
+            "(status = 'revoked'::qp_recommendation_report_status AND successor_report_id IS NULL AND superseded_at IS NULL AND obsoleted_at IS NULL AND revoked_at IS NOT NULL AND expired_at IS NULL) OR status <> 'revoked'::qp_recommendation_report_status",
+        ))
+        .check(Expr::cust(
+            "(status = 'expired'::qp_recommendation_report_status AND published_at IS NOT NULL AND successor_report_id IS NULL AND superseded_at IS NULL AND obsoleted_at IS NULL AND revoked_at IS NULL AND expired_at IS NOT NULL) OR status <> 'expired'::qp_recommendation_report_status",
+        ))
+        .check(Expr::cust(
+            "published_at IS NULL OR published_at >= decision_at",
+        ))
+        .check(Expr::cust(
+            "superseded_at IS NULL OR superseded_at >= published_at",
+        ))
+        .check(Expr::cust(
+            "obsoleted_at IS NULL OR obsoleted_at >= decision_at",
+        ))
+        .check(Expr::cust(
+            "expired_at IS NULL OR expired_at >= published_at",
+        ))
+        .check(Expr::cust(
+            "revoked_at IS NULL OR revoked_at >= decision_at",
+        ));
 }
 
 fn add_foreign_keys(table: &mut TableCreateStatement) {
     table
+        .foreign_key(&mut fk_restrict(
+            "fk_quant_recommendation_report_successor",
+            QuantRecommendationReport::SuccessorReportId,
+            QuantRecommendationReport::Table,
+            QuantRecommendationReport::RecommendationReportId,
+        ))
         .foreign_key(&mut fk_restrict(
             "fk_quant_recommendation_report_model_run",
             QuantRecommendationReport::ModelRunId,
@@ -259,17 +313,14 @@ fn fk_restrict(
 
 pub fn indexes() -> Vec<IndexSpec> {
     vec![
-        IndexSpec::sea_query(
-            "uq_quant_recommendation_report_trigger_key",
+        IndexSpec::raw(
+            "uq_quant_recommendation_report_current_scope",
             quant_recommendation_report_table_name,
             IndexBuildMode::Transactional,
-            Index::create()
-                .name("uq_quant_recommendation_report_trigger_key")
-                .table(QuantRecommendationReport::Table)
-                .col(QuantRecommendationReport::TriggerKey)
-                .unique()
-                .to_owned(),
-            "report trigger idempotency key",
+            "CREATE UNIQUE INDEX uq_quant_recommendation_report_current_scope \
+             ON quant_recommendation_report (profile_id, report_kind) \
+             WHERE status = 'published'::qp_recommendation_report_status",
+            "one current report authority per profile and report kind",
         ),
         IndexSpec::sea_query(
             "uq_quant_recommendation_report_model_run",
@@ -284,24 +335,13 @@ pub fn indexes() -> Vec<IndexSpec> {
             "one committed report per serving model run",
         ),
         IndexSpec::sea_query(
-            "idx_quant_recommendation_report_trigger_time",
-            quant_recommendation_report_table_name,
-            IndexBuildMode::Transactional,
-            Index::create()
-                .name("idx_quant_recommendation_report_trigger_time")
-                .table(QuantRecommendationReport::Table)
-                .col(QuantRecommendationReport::TriggerKind)
-                .col((QuantRecommendationReport::TriggerTime, IndexOrder::Desc))
-                .to_owned(),
-            "reports by trigger source and time",
-        ),
-        IndexSpec::sea_query(
             "idx_quant_recommendation_report_kind_decision_at",
             quant_recommendation_report_table_name,
             IndexBuildMode::Transactional,
             Index::create()
                 .name("idx_quant_recommendation_report_kind_decision_at")
                 .table(QuantRecommendationReport::Table)
+                .col(QuantRecommendationReport::ProfileId)
                 .col(QuantRecommendationReport::ReportKind)
                 .col((QuantRecommendationReport::DecisionAt, IndexOrder::Desc))
                 .to_owned(),

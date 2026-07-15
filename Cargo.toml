@@ -87,12 +87,7 @@ chrono-tz = "0.10"
 # NOAA GEFS GRIB2 subset decoding after `.idx` byte-range selection.
 grib = "0.15"
 
-# Report-plane cron/interval/one-shot scheduler (Phase 4). In-process,
-# tokio-native; postgres_storage / nats_storage / signal features stay OFF —
-# schedule truth source is runtime-config, shutdown is AppRunner-driven.
-tokio-cron-scheduler = "0.15"
-# The exact cron parser tokio-cron-scheduler uses; pulled in directly so the
-# schedule-preview facade computes next fire times with identical semantics.
+# Cron parser shared by schedule preview and the PostgreSQL durable coordinator.
 croner = "3"
 
 # Error handling

@@ -4,6 +4,12 @@
 > `SignalInvalidationRule` 和 `ExitTriggerKind` 已被强类型入场/退出策略替换；新实现以
 > [`../phase-11/11.7-labeling-entry-exit-closed-loop.md`](../phase-11/11.7-labeling-entry-exit-closed-loop.md)
 > 为准。
+>
+> **Phase 11.8 覆盖说明**：本 Phase 的 report trigger/lifecycle、empty suppression、
+> `tokio-cron-scheduler`、latest API 与 ephemeral WS 契约已被
+> [`../phase-11/11.8-report-lifecycle-fsm-completion.md`](../phase-11/11.8-report-lifecycle-fsm-completion.md)
+> 破坏式取代。04.0–04.2 的 typed artifact、账户快照、builder/composer 基础仍有效；04.3 是历史 tombstone，
+> 04.4 的 current/run/WS 部分以 11.8 为准。
 
 > 状态：生产级破坏式实施拆分（设计文档；本目录不含代码）
 >
@@ -27,7 +33,7 @@ Phase 04 是 quant-pivot 的**报告平面**：把 Phase 03 在线闭环产出�
 - 受治理 `PortfolioPlanner` + Kelly sizing（直接决定"买多少"，钱相关）。
 - 账户资本抽象 `AccountSnapshot` / `AccountProvider`（sizing 的资本基数与敞口净额）。
 - 强类型报告 payload（entry / sizing / exit / risk envelope / factor / evidence）。
-- 报告生命周期服务 + `tokio-cron-scheduler` 调度层。
+- 报告生命周期服务；调度层在 Phase 11.8 升级为 PG durable coordinator。
 - 报告读/写 API、WebSocket 事件、分级通知。
 
 其体量远超单一可验证增量，因此拆成 04.0–04.4。
@@ -83,7 +89,8 @@ flowchart LR
   （[`models/src/types/ids.rs`](../../../crates/quant-pivot-models/src/types/ids.rs) §129–147）。
 - 生命周期枚举齐全
   （[`models/src/enums/quant.rs`](../../../crates/quant-pivot-models/src/enums/quant.rs)）。
-- ClickHouse fact：`quant_recommendation_event` / `quant_execution_event`（row 类型已定义）。
+- ClickHouse fact：`quant_report_recommendation_fact`（Phase 11.8 无 lifecycle decision snapshot）/
+  `quant_execution_event`。
 
 **Phase 03 已交付（报告输入）**
 
@@ -106,7 +113,8 @@ flowchart LR
 - `quant_account_snapshot` + `quant_report_data_quality_snapshot` 进单 PG 事务。
 - `liquidity_score` / `data_quality_score` / `model_score_percentile` 列；rank 列来自 **factor breakdown**（`liquidity_depth` / `data_quality`）。
 - `report_pipeline_e2e` + Web 集成默认 `CoreQuantReportPort`；insta 快照（§19 七场景 + view rank 列）。
-- 治理开关：`schedules[].enabled` / `ad_hoc_report_enabled` / `publish_empty_reports`（无 `generation_enabled` master switch）。
+- 治理开关：`schedules[].enabled` / `ad_hoc_report_enabled`；Runtime v16 删除
+  `publish_empty_reports`，有效 empty 必须正式发布并取代旧 current。
 
 **仍属 Phase 05+**
 

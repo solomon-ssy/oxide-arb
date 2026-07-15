@@ -1,5 +1,5 @@
 //! Versioned, hot-reloadable runtime configuration
-//! (`schema_version` — see [`RUNTIME_CONFIG_SCHEMA_VERSION`], currently `15`).
+//! (`schema_version` — see [`RUNTIME_CONFIG_SCHEMA_VERSION`], currently `16`).
 
 pub mod json_schema;
 pub mod preferences_schema;
@@ -14,7 +14,8 @@ pub use json_schema::{
 };
 pub use preferences_schema::{build_preferences_schema, preferences_schema_ui_gaps};
 pub use schedule_preview::{
-    MAX_PREVIEW_OCCURRENCES, preview_fire_times, validate_schedule_cadence,
+    DueScheduleWindow, MAX_PREVIEW_OCCURRENCES, due_schedule_window, preview_fire_times,
+    validate_schedule_cadence,
 };
 pub use sections::*;
 pub use validation::validate_runtime_config;
@@ -37,7 +38,7 @@ use crate::types::SchemaVersion;
 /// migration; non-matching documents are rejected). Phase 11.4 hardening bumps
 /// to 9 for honest RankIC-weighted `RankNet` naming, `TopN` pseudo-portfolio knobs,
 /// and diagnostic `ndcg_k` under `research.training`.
-pub const RUNTIME_CONFIG_SCHEMA_VERSION: SchemaVersion = SchemaVersion::new(15);
+pub const RUNTIME_CONFIG_SCHEMA_VERSION: SchemaVersion = SchemaVersion::new(16);
 
 /// Root of the quant-pivot hot-reloadable runtime configuration document.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -73,7 +74,7 @@ pub struct RuntimeConfig {
     /// Research plane: training objective + validation methodology.
     pub research: ResearchConfig,
     /// Research-feedback plane: attribution feedback + auto-retraining (reserved
-    /// skeleton; 11.9 fills fields without a further schema bump).
+    /// skeleton; Phase 11.9 replaces it with the Runtime v17 contract).
     pub feedback: FeedbackConfig,
 }
 
@@ -312,7 +313,7 @@ mod tests {
             RuntimeConfig::default().schema_version,
             RUNTIME_CONFIG_SCHEMA_VERSION
         );
-        assert_eq!(RUNTIME_CONFIG_SCHEMA_VERSION, SchemaVersion::new(15));
+        assert_eq!(RUNTIME_CONFIG_SCHEMA_VERSION, SchemaVersion::new(16));
     }
 
     #[test]

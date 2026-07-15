@@ -7,7 +7,7 @@
 
 use std::{collections::BTreeMap, str::FromStr};
 
-use chrono::Utc;
+use chrono::{Duration, Utc};
 use quant_pivot_error::storage::{
     StorageError,
     entity::{QUANT_ORDER_INTENT, QUANT_RECOMMENDATION},
@@ -21,11 +21,11 @@ use quant_pivot_models::{
         NewOrderIntent, NewPortfolioPlan, NewRecommendation, NewRecommendationReport,
         NewReconciliation, NewReportDataQualitySnapshot, NewReportTransaction,
         NewRuntimeConfigActivation, NewRuntimeConfigVersion, PositionExit, PositionFill,
-        ReconciliationLedgerWrite, SubmissionLedgerWrite, UpsertKillSwitchState,
+        ReconciliationLedgerWrite, ReportRunClaim, SubmissionLedgerWrite, UpsertKillSwitchState,
     },
     entities::{
         operation_log, quant_entry_condition_audit, quant_execution_order,
-        quant_feature_parity_state, quant_order_intent, quant_recommendation,
+        quant_feature_parity_state, quant_order_intent, quant_recommendation, quant_report_run,
     },
     enums::{
         common::{MarketCategory, OrderType, Side},
@@ -43,7 +43,8 @@ use quant_pivot_models::{
             ExecutionOrderState, ExitSettlementMode, FactorDirection, FeatureParityLatchState,
             FeatureParityStateTransition, ModelRunKind, ModelRunStatus, OrderIntentStatus,
             OutcomeSide, PublicationStatus, QuantRuntimeMode, RecommendationReportStatus,
-            RecommendationStatus, RedeemPolicy, ReportKind, ReportTriggerKind, SizingModelKind,
+            RecommendationStatus, RedeemPolicy, ReportFactDeliveryStatus, ReportKind,
+            ReportRunStatus, ReportRunTerminalReason, ReportTriggerKind, SizingModelKind,
         },
         rbac::ResourceType,
         runtime_config::{RuntimeConfigActivationKind, RuntimeConfigVersionSource},
@@ -62,11 +63,11 @@ use quant_pivot_models::{
         RecommendationFactorBreakdown, RecommendationId, RecommendationIdentity,
         RecommendationReportId, RecommendationTradePlan, ReconciliationEvidence,
         ReconciliationEvidenceChain, ReconciliationId, ReportDataQualitySnapshotId,
-        ReportDataQualityTokens, ReportSummary, RiskEnvelope, RuntimeConfigActivationId,
-        RuntimeConfigVersionId, SchemaVersion, SelectionExclusionSummary, Shares,
-        SignalCandidateId, SizingPlan, ThesisInvalidationPolicy, TokenId, TradePolicyArtifactId,
-        TradePolicyCohortDimension, TradePolicyCohortKey, TradePolicyCohortProvenance, Usd,
-        builtin_research_profiles,
+        ReportDataQualityTokens, ReportRunId, ReportSummary, RiskEnvelope,
+        RuntimeConfigActivationId, RuntimeConfigVersionId, SchemaVersion,
+        SelectionExclusionSummary, Shares, SignalCandidateId, SizingPlan, ThesisInvalidationPolicy,
+        TokenId, TradePolicyArtifactId, TradePolicyCohortDimension, TradePolicyCohortKey,
+        TradePolicyCohortProvenance, Usd, builtin_research_profiles,
     },
 };
 use quant_pivot_repository::{
@@ -75,30 +76,34 @@ use quant_pivot_repository::{
         PgExecutionSubmissionRepository, PgKillSwitchStateRepository, PgMarketRepository,
         PgMarketSelectionRepository, PgModelRegistryRepository, PgModelRunRepository,
         PgOrderIntentRepository, PgPositionRepository, PgRecommendationReportRepository,
-        PgRecommendationRepository, PgReconciliationRepository, PgRuntimeConfigVersionRepository,
+        PgRecommendationRepository, PgReconciliationRepository, PgReportRunRepository,
+        PgRuntimeConfigVersionRepository,
     },
     traits::{
         CapitalAllocationRepository, EntryConditionRepository, EventRepository,
         ExecutionSubmissionRepository, KillSwitchStateRepository, MarketRepository,
         MarketSelectionRepository, ModelRegistryRepository, ModelRunRepository,
         OrderIntentRepository, PositionRepository, RecommendationReportRepository,
-        RecommendationRepository, ReconciliationRepository, RuntimeConfigVersionRepository,
+        RecommendationRepository, ReconciliationRepository, ReportRunRepository,
+        RuntimeConfigVersionRepository,
     },
 };
 use quant_pivot_test_support::{
     catalog_fixtures::{make_event, make_market},
     execution_pg_seed::{
-        ReportSeedConfig, claim_entry_for_test, entry_claim_for_test, fixture_profile_ref,
-        prepared_order, seed_conditional_price_report_on_infra, seed_shared_demo_infra,
+        ReportBuildOptions, ReportSeedConfig, claim_entry_for_test, entry_claim_for_test,
+        fixture_profile_ref, prepared_order, seed_conditional_price_report_on_infra,
+        seed_shared_demo_infra,
     },
     pg::setup_pg,
     report_fixtures,
+    report_lifecycle_seed::{persist_and_publish_report, persist_prepared_report},
 };
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use sea_orm::{
-    ActiveModelTrait, ActiveValue, ConnectionTrait, DbBackend, EntityTrait, IntoActiveModel,
-    Statement,
+    ActiveModelTrait, ActiveValue, ColumnTrait, ConnectionTrait, DbBackend, EntityTrait,
+    IntoActiveModel, QueryFilter, Statement,
 };
 
 /// shares (100) * `limit_price` (0.6).
@@ -577,6 +582,426 @@ async fn create_entry_locks_capital_and_advances_intent() {
         .expect("intent")
         .expect("intent row");
     assert_eq!(intent.status, OrderIntentStatus::Submitted);
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn supersession_wins_before_submission_and_releases_capital() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let ids = seed_report_fixture(&db).await;
+    let intent_id = seed_approved_intent(&db, &ids).await;
+    let submission = PgExecutionSubmissionRepository::new(db.clone());
+    claim_entry_for_test(&db, &submission, &intent_id).await;
+
+    let (successor, delivery_worker) = seed_successor_prepared(&db, &ids).await;
+    PgRecommendationReportRepository::new(db.clone())
+        .verify_and_publish_report(&successor.report, delivery_worker, Utc::now())
+        .await
+        .expect("supersession commits first")
+        .into_applied()
+        .expect("successor delivery claim must remain held");
+
+    let result = submission
+        .create_entry_order_and_lock_capital(
+            new_execution_order(&intent_id, &ids),
+            &ids.feature_parity_state_id,
+        )
+        .await;
+    assert!(matches!(result, Err(StorageError::StateConflict { .. })));
+    let intent = PgOrderIntentRepository::new(db.clone())
+        .find_by_id(&intent_id)
+        .await
+        .expect("intent lookup")
+        .expect("intent");
+    assert_eq!(intent.status, OrderIntentStatus::Invalidated);
+    let capital = PgCapitalAllocationRepository::new(db.clone())
+        .find_by_intent(&intent_id)
+        .await
+        .expect("capital lookup")
+        .expect("capital");
+    assert_eq!(capital.state, CapitalAllocationState::Released);
+    assert_eq!(capital.released_usd, Usd::new(NOTIONAL));
+    let orders = quant_execution_order::Entity::find()
+        .filter(quant_execution_order::Column::OrderIntentId.eq(intent_id))
+        .all(&db)
+        .await
+        .expect("execution-order lookup");
+    assert!(orders.is_empty());
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn submitted_order_survives_later_supersession() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let ids = seed_report_fixture(&db).await;
+    let intent_id = seed_approved_intent(&db, &ids).await;
+    let submission = PgExecutionSubmissionRepository::new(db.clone());
+    claim_entry_for_test(&db, &submission, &intent_id).await;
+    let order = submission
+        .create_entry_order_and_lock_capital(
+            new_execution_order(&intent_id, &ids),
+            &ids.feature_parity_state_id,
+        )
+        .await
+        .expect("write-ahead submission commits first");
+
+    let (successor, delivery_worker) = seed_successor_prepared(&db, &ids).await;
+    PgRecommendationReportRepository::new(db.clone())
+        .verify_and_publish_report(&successor.report, delivery_worker, Utc::now())
+        .await
+        .expect("later supersession")
+        .into_applied()
+        .expect("successor delivery claim must remain held");
+
+    let persisted_order = quant_execution_order::Entity::find_by_id(order.execution_order_id)
+        .one(&db)
+        .await
+        .expect("execution-order lookup")
+        .expect("execution order");
+    assert_eq!(persisted_order.state, ExecutionOrderState::Submitted);
+    let intent = PgOrderIntentRepository::new(db.clone())
+        .find_by_id(&intent_id)
+        .await
+        .expect("intent lookup")
+        .expect("intent");
+    assert_eq!(intent.status, OrderIntentStatus::Submitted);
+    let capital = PgCapitalAllocationRepository::new(db)
+        .find_by_intent(&intent_id)
+        .await
+        .expect("capital lookup")
+        .expect("capital");
+    assert_eq!(capital.state, CapitalAllocationState::Locked);
+    assert_eq!(capital.locked_usd, Usd::new(NOTIONAL));
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn prepared_report_is_not_actionable_before_fact_verification() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let predecessor = seed_report_fixture(&db).await;
+    let (candidate, _delivery_worker) = seed_successor_prepared(&db, &predecessor).await;
+    let reports = PgRecommendationReportRepository::new(db.clone());
+
+    let current = reports
+        .current(&fixture_profile_ref().id, ReportKind::TopN)
+        .await
+        .expect("load current report")
+        .expect("predecessor remains current");
+    assert_eq!(current.recommendation_report_id, predecessor.report);
+    let prepared = reports
+        .find_by_id(&candidate.report)
+        .await
+        .expect("load prepared report")
+        .expect("prepared report");
+    assert_eq!(prepared.status, RecommendationReportStatus::Prepared);
+    assert!(!prepared.status.is_current_authority());
+    let recommendations = PgRecommendationRepository::new(db)
+        .find_by_report(&candidate.report)
+        .await
+        .expect("load prepared recommendations");
+    assert!(
+        recommendations
+            .iter()
+            .all(|recommendation| !recommendation.status.allows_new_intent())
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn verified_publication_atomically_supersedes_prior_current() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let predecessor = seed_report_fixture(&db).await;
+    let (candidate, delivery_worker) = seed_successor_prepared(&db, &predecessor).await;
+    let reports = PgRecommendationReportRepository::new(db.clone());
+
+    let outcome = reports
+        .verify_and_publish_report(&candidate.report, delivery_worker, Utc::now())
+        .await
+        .expect("verify and atomically publish candidate")
+        .into_applied()
+        .expect("candidate delivery claim must remain held");
+    assert_eq!(outcome.report.status, RecommendationReportStatus::Published);
+    assert_eq!(outcome.superseded_reports.len(), 1);
+    assert_eq!(
+        outcome.superseded_reports[0].recommendation_report_id,
+        predecessor.report
+    );
+    let current = reports
+        .current(&fixture_profile_ref().id, ReportKind::TopN)
+        .await
+        .expect("load current report")
+        .expect("candidate is current");
+    assert_eq!(current.recommendation_report_id, candidate.report);
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn fact_failure_leaves_existing_current_untouched() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let predecessor = seed_report_fixture(&db).await;
+    let (candidate, delivery_worker) = seed_successor_prepared(&db, &predecessor).await;
+    let reports = PgRecommendationReportRepository::new(db.clone());
+
+    reports
+        .fail_fact_delivery(
+            &candidate.report,
+            delivery_worker,
+            ReportFactDeliveryStatus::Failed,
+            "injected terminal delivery failure",
+        )
+        .await
+        .expect("terminalize candidate fact delivery")
+        .into_applied()
+        .expect("failure settlement must retain its claim");
+    let current = reports
+        .current(&fixture_profile_ref().id, ReportKind::TopN)
+        .await
+        .expect("load current report")
+        .expect("predecessor remains current");
+    assert_eq!(current.recommendation_report_id, predecessor.report);
+    let candidate = reports
+        .find_by_id(&candidate.report)
+        .await
+        .expect("load candidate")
+        .expect("candidate report");
+    assert_eq!(candidate.status, RecommendationReportStatus::Prepared);
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn concurrent_publications_leave_one_current_per_scope() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let predecessor = seed_report_fixture(&db).await;
+    let (older, older_worker) = seed_successor_prepared(&db, &predecessor).await;
+    let (newer, newer_worker) = seed_successor_prepared(&db, &predecessor).await;
+    let older_repo = PgRecommendationReportRepository::new(db.clone());
+    let newer_repo = PgRecommendationReportRepository::new(db.clone());
+
+    let (older_result, newer_result) = tokio::join!(
+        older_repo.verify_and_publish_report(&older.report, older_worker, Utc::now()),
+        newer_repo.verify_and_publish_report(&newer.report, newer_worker, Utc::now()),
+    );
+    if let Err(lost) = older_result
+        .expect("older concurrent publication")
+        .into_applied()
+    {
+        assert_eq!(lost.status, ReportFactDeliveryStatus::Cancelled);
+    }
+    newer_result
+        .expect("newer concurrent publication")
+        .into_applied()
+        .expect("newer publication must settle before cancellation");
+
+    let repo = PgRecommendationReportRepository::new(db);
+    let current = repo
+        .current(&fixture_profile_ref().id, ReportKind::TopN)
+        .await
+        .expect("load current report")
+        .expect("current report");
+    assert_eq!(current.recommendation_report_id, newer.report);
+    let older_report = repo
+        .find_by_id(&older.report)
+        .await
+        .expect("load older report")
+        .expect("older report");
+    assert_ne!(
+        older_report.status,
+        RecommendationReportStatus::Published,
+        "the partial unique scope must expose only the newest authority"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn out_of_order_verification_obsoletes_older_candidate() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let predecessor = seed_report_fixture(&db).await;
+    let (older, older_worker) = seed_successor_prepared(&db, &predecessor).await;
+    let (newer, newer_worker) = seed_successor_prepared(&db, &predecessor).await;
+    let repo = PgRecommendationReportRepository::new(db.clone());
+
+    repo.verify_and_publish_report(&newer.report, newer_worker, Utc::now())
+        .await
+        .expect("newer facts verify first")
+        .into_applied()
+        .expect("newer delivery claim must remain held");
+    let late_verification = repo
+        .verify_and_publish_report(&older.report, older_worker, Utc::now())
+        .await;
+    let lost = late_verification
+        .expect("cancelled delivery is a typed settlement outcome")
+        .into_applied()
+        .expect_err("older delivery claim must be cancelled");
+    assert_eq!(lost.status, ReportFactDeliveryStatus::Cancelled);
+
+    let obsolete = repo
+        .find_by_id(&older.report)
+        .await
+        .expect("load obsolete report")
+        .expect("obsolete report");
+    assert_eq!(obsolete.status, RecommendationReportStatus::Obsolete);
+    assert_eq!(obsolete.successor_report_id, Some(newer.report.clone()));
+    let cancelled = repo
+        .find_fact_delivery(&older.report)
+        .await
+        .expect("load cancelled delivery")
+        .expect("cancelled delivery");
+    assert_eq!(cancelled.status, ReportFactDeliveryStatus::Cancelled);
+    let current = repo
+        .current(&fixture_profile_ref().id, ReportKind::TopN)
+        .await
+        .expect("load current report")
+        .expect("current report");
+    assert_eq!(current.recommendation_report_id, newer.report);
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn cancelled_delivery_settlement_returns_claim_lost() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let predecessor = seed_report_fixture(&db).await;
+    let (older, older_worker) = seed_successor_prepared(&db, &predecessor).await;
+    let (newer, newer_worker) = seed_successor_prepared(&db, &predecessor).await;
+    let repo = PgRecommendationReportRepository::new(db);
+
+    repo.verify_and_publish_report(&newer.report, newer_worker, Utc::now())
+        .await
+        .expect("publish newer report")
+        .into_applied()
+        .expect("newer delivery claim must remain held");
+
+    let lost = repo
+        .fail_fact_delivery(
+            &older.report,
+            older_worker,
+            ReportFactDeliveryStatus::Retrying,
+            "late ClickHouse failure after cancellation",
+        )
+        .await
+        .expect("claim loss is not a repository error")
+        .into_applied()
+        .expect_err("older delivery must already be cancelled");
+    assert_eq!(lost.status, ReportFactDeliveryStatus::Cancelled);
+    assert!(lost.claim_owner.is_none());
+    assert!(lost.lease_expires_at.is_none());
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn empty_report_is_published_and_becomes_current() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let predecessor = seed_report_fixture(&db).await;
+    let (empty, delivery_worker) = seed_empty_successor_prepared(&db, &predecessor).await;
+    let repo = PgRecommendationReportRepository::new(db.clone());
+
+    let outcome = repo
+        .verify_and_publish_report(&empty.report, delivery_worker, Utc::now())
+        .await
+        .expect("publish formal empty report")
+        .into_applied()
+        .expect("empty report delivery claim must remain held");
+
+    assert_eq!(outcome.report.status, RecommendationReportStatus::Published);
+    assert_eq!(
+        outcome.report.summary_json.published_recommendation_count,
+        0
+    );
+    assert!(outcome.report.summary_json.empty_reason.is_some());
+    let old_report = repo
+        .find_by_id(&predecessor.report)
+        .await
+        .expect("load predecessor")
+        .expect("predecessor");
+    assert_eq!(old_report.status, RecommendationReportStatus::Superseded);
+    assert_eq!(old_report.successor_report_id, Some(empty.report.clone()));
+    let current = repo
+        .current(&fixture_profile_ref().id, ReportKind::TopN)
+        .await
+        .expect("load current report")
+        .expect("current report");
+    assert_eq!(current.recommendation_report_id, empty.report);
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn lost_lease_prevents_report_commit_and_marks_abandoned() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let predecessor = seed_report_fixture(&db).await;
+    let ids = successor_ids(&predecessor);
+    let transaction = build_report_transaction(&ids);
+    let decision_at = transaction.report.decision_at;
+    let worker_id = uuid::Uuid::now_v7();
+    let run_id = ReportRunId::from_v7();
+    let lease_expires_at = Utc::now() - Duration::seconds(1);
+    quant_report_run::ActiveModel {
+        report_run_id: ActiveValue::Set(run_id.clone()),
+        trigger_kind: ActiveValue::Set(ReportTriggerKind::Scheduled),
+        trigger_key: ActiveValue::Set(format!("scheduled:expired:{}", ids.report)),
+        schedule_id: ActiveValue::Set(Some("expired_fixture".to_owned())),
+        request_id: ActiveValue::Set(None),
+        retry_of_run_id: ActiveValue::Set(None),
+        scheduled_for: ActiveValue::Set(Some(decision_at)),
+        requested_at: ActiveValue::Set(decision_at),
+        status: ActiveValue::Set(ReportRunStatus::Running),
+        started_at: ActiveValue::Set(Some(decision_at)),
+        decision_at: ActiveValue::Set(Some(decision_at)),
+        heartbeat_at: ActiveValue::Set(Some(lease_expires_at - Duration::seconds(1))),
+        lease_expires_at: ActiveValue::Set(Some(lease_expires_at)),
+        finished_at: ActiveValue::Set(None),
+        lease_owner: ActiveValue::Set(Some(worker_id)),
+        runtime_config_version_id: ActiveValue::Set(Some(ids.runtime_config_version.clone())),
+        top_n: ActiveValue::Set(Some(transaction.report.top_n)),
+        knowledge_lag_secs: ActiveValue::Set(Some(10)),
+        output_report_id: ActiveValue::Set(None),
+        terminal_reason: ActiveValue::Set(None),
+        error_code: ActiveValue::Set(None),
+        error_summary: ActiveValue::Set(None),
+    }
+    .insert(&db)
+    .await
+    .expect("seed expired running report run");
+
+    let reports = PgRecommendationReportRepository::new(db.clone());
+    let result = reports
+        .create_prepared_report(
+            ReportRunClaim {
+                report_run_id: run_id.clone(),
+                lease_owner: worker_id,
+                lease_expires_at,
+            },
+            transaction,
+        )
+        .await;
+    assert!(matches!(result, Err(StorageError::StateConflict { .. })));
+    assert!(
+        reports
+            .find_by_id(&ids.report)
+            .await
+            .expect("load rejected artifact")
+            .is_none()
+    );
+
+    let abandoned = PgReportRunRepository::new(db)
+        .abandon_expired_runs()
+        .await
+        .expect("recover expired run");
+    assert_eq!(abandoned.len(), 1);
+    assert_eq!(abandoned[0].report_run_id, run_id);
+    assert_eq!(abandoned[0].status, ReportRunStatus::Abandoned);
+    assert_eq!(
+        abandoned[0].terminal_reason,
+        Some(ReportRunTerminalReason::LeaseExpired)
+    );
 }
 
 #[tokio::test]
@@ -1842,11 +2267,97 @@ async fn seed_report_fixture(db: &sea_orm::DatabaseConnection) -> TxnIds {
         market: market_id.to_owned(),
         event: event_id.to_owned(),
     };
-    PgRecommendationReportRepository::new(db.clone())
-        .create_report(build_report_transaction(&ids))
-        .await
-        .expect("create report");
+    persist_and_publish_report(
+        db,
+        build_report_transaction(&ids),
+        &format!("scheduled:test:{}", ids.report),
+        10,
+    )
+    .await;
     ids
+}
+
+async fn seed_successor_prepared(
+    db: &sea_orm::DatabaseConnection,
+    predecessor: &TxnIds,
+) -> (TxnIds, uuid::Uuid) {
+    let ids = successor_ids(predecessor);
+    persist_prepared_report(
+        db,
+        build_report_transaction(&ids),
+        &format!("scheduled:successor:{}", ids.report),
+        10,
+    )
+    .await;
+    let worker = uuid::Uuid::now_v7();
+    let claimed = PgRecommendationReportRepository::new(db.clone())
+        .claim_fact_delivery(worker, 600)
+        .await
+        .expect("claim successor delivery")
+        .expect("successor delivery");
+    assert_eq!(claimed.recommendation_report_id, ids.report);
+    (ids, worker)
+}
+
+fn successor_ids(predecessor: &TxnIds) -> TxnIds {
+    TxnIds {
+        feature_parity_state_id: predecessor.feature_parity_state_id.clone(),
+        account_snapshot: AccountSnapshotId::from_v7(),
+        data_quality_snapshot: ReportDataQualitySnapshotId::from_v7(),
+        portfolio_plan: PortfolioPlanId::from_v7(),
+        report: RecommendationReportId::from_v7(),
+        recommendation: RecommendationId::from_v7(),
+        condition_instance: EntryConditionInstanceId::from_v7(),
+        model_version: predecessor.model_version.clone(),
+        model_run: predecessor.model_run.clone(),
+        market_selection: predecessor.market_selection.clone(),
+        runtime_config_version: predecessor.runtime_config_version.clone(),
+        market: predecessor.market.clone(),
+        event: predecessor.event.clone(),
+    }
+}
+
+async fn seed_empty_successor_prepared(
+    db: &sea_orm::DatabaseConnection,
+    predecessor: &TxnIds,
+) -> (TxnIds, uuid::Uuid) {
+    let ids = TxnIds {
+        feature_parity_state_id: predecessor.feature_parity_state_id.clone(),
+        account_snapshot: AccountSnapshotId::from_v7(),
+        data_quality_snapshot: ReportDataQualitySnapshotId::from_v7(),
+        portfolio_plan: PortfolioPlanId::from_v7(),
+        report: RecommendationReportId::from_v7(),
+        recommendation: RecommendationId::from_v7(),
+        condition_instance: EntryConditionInstanceId::from_v7(),
+        model_version: predecessor.model_version.clone(),
+        model_run: predecessor.model_run.clone(),
+        market_selection: predecessor.market_selection.clone(),
+        runtime_config_version: predecessor.runtime_config_version.clone(),
+        market: predecessor.market.clone(),
+        event: predecessor.event.clone(),
+    };
+    let empty_options = ReportBuildOptions::empty_report();
+    let mut transaction = build_report_transaction(&ids);
+    transaction.report.summary_json = empty_options.summary;
+    transaction.portfolio_plan.allocated_usd = Usd::ZERO;
+    transaction.recommendations.clear();
+    transaction.entry_condition_artifacts.clear();
+    transaction.entry_condition_instances.clear();
+    persist_prepared_report(
+        db,
+        transaction,
+        &format!("scheduled:empty-successor:{}", ids.report),
+        10,
+    )
+    .await;
+    let worker = uuid::Uuid::now_v7();
+    let claimed = PgRecommendationReportRepository::new(db.clone())
+        .claim_fact_delivery(worker, 600)
+        .await
+        .expect("claim empty successor delivery")
+        .expect("empty successor delivery");
+    assert_eq!(claimed.recommendation_report_id, ids.report);
+    (ids, worker)
 }
 
 async fn seed_market_catalog(db: &sea_orm::DatabaseConnection, event_id: &str, market_id: &str) {
@@ -2115,13 +2626,10 @@ fn report_portfolio_plan(ids: &TxnIds) -> NewPortfolioPlan {
 
 fn report_row(ids: &TxnIds, equity_snapshot_id: EquitySnapshotId) -> NewRecommendationReport {
     NewRecommendationReport {
-        profile_ref: quant_pivot_test_support::execution_pg_seed::fixture_profile_ref(),
         recommendation_report_id: ids.report.clone(),
+        profile_id: quant_pivot_test_support::execution_pg_seed::fixture_profile_ref().id,
+        profile_ref: quant_pivot_test_support::execution_pg_seed::fixture_profile_ref(),
         report_kind: ReportKind::TopN,
-        trigger_kind: ReportTriggerKind::Scheduled,
-        trigger_key: format!("scheduled:test:{}", ids.report),
-        trigger_time: Utc::now(),
-        knowledge_lag_secs: 10,
         decision_at: Utc::now(),
         horizon_secs: 86_400,
         runtime_mode: QuantRuntimeMode::AutoExecution,
@@ -2131,14 +2639,17 @@ fn report_row(ids: &TxnIds, equity_snapshot_id: EquitySnapshotId) -> NewRecommen
         market_selection_id: ids.market_selection.clone(),
         portfolio_plan_id: ids.portfolio_plan.clone(),
         top_n: 20,
-        status: RecommendationReportStatus::Published,
+        status: RecommendationReportStatus::Prepared,
         account_source: AccountSource::Polymarket,
         capital_base_usd: Usd::new(dec!(10000)),
         account_snapshot_ref: ids.account_snapshot.clone(),
         equity_snapshot_ref: equity_snapshot_id,
         data_quality_snapshot_ref: ids.data_quality_snapshot.clone(),
         summary_json: report_summary(),
-        published_at: Some(Utc::now()),
+        published_at: None,
+        successor_report_id: None,
+        superseded_at: None,
+        obsoleted_at: None,
         valid_until: Some(Utc::now() + chrono::Duration::hours(1)),
         revoked_at: None,
         expired_at: None,
@@ -2173,7 +2684,7 @@ fn report_recommendation(ids: &TxnIds) -> NewRecommendation {
         execution_eligibility: execution_eligibility(),
         valid_from: Utc::now(),
         valid_until: Utc::now() + chrono::Duration::hours(1),
-        status: RecommendationStatus::Published,
+        status: RecommendationStatus::Prepared,
     }
 }
 

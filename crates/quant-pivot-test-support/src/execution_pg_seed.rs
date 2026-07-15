@@ -39,7 +39,7 @@ use quant_pivot_models::{
             FactorDirection, FeatureParityLatchState, FeatureParityStateTransition,
             FillRequirement, ModelRunKind, ModelRunStatus, OrderIntentStatus, OutcomeSide,
             PriceComparison, PublicationStatus, QuantRuntimeMode, RecommendationReportStatus,
-            RecommendationStatus, RedeemPolicy, ReportKind, ReportTriggerKind, SizingModelKind,
+            RecommendationStatus, RedeemPolicy, ReportKind, SizingModelKind,
             TradePolicyGovernanceAction, TradePolicyStatus,
         },
         rbac::ResourceType,
@@ -83,15 +83,13 @@ use quant_pivot_repository::{
         PgCalibrationArtifactRepository, PgEntryConditionRepository, PgEventRepository,
         PgExecutionSubmissionRepository, PgFeatureParityRepository, PgMarketRepository,
         PgMarketSelectionRepository, PgModelRegistryRepository, PgModelRunRepository,
-        PgOrderIntentRepository, PgRecommendationReportRepository,
-        PgRuntimeConfigVersionRepository, PgTradePolicyRepository,
+        PgOrderIntentRepository, PgRuntimeConfigVersionRepository, PgTradePolicyRepository,
     },
     traits::{
         CalibrationArtifactRepository, EntryConditionRepository, EventRepository,
         ExecutionSubmissionRepository, FeatureParityRepository, MarketRepository,
         MarketSelectionRepository, ModelRegistryRepository, ModelRunRepository,
-        OrderIntentRepository, RecommendationReportRepository, RuntimeConfigVersionRepository,
-        TradePolicyRepository,
+        OrderIntentRepository, RuntimeConfigVersionRepository, TradePolicyRepository,
     },
 };
 use quant_pivot_research::{
@@ -113,7 +111,9 @@ use uuid::Uuid;
 
 use crate::{
     catalog_fixtures::{make_event, make_market},
-    report_fixtures, seeded_uuid,
+    report_fixtures,
+    report_lifecycle_seed::persist_and_publish_report,
+    seeded_uuid,
 };
 
 /// shares (100) * `limit_price` (0.6).
@@ -208,10 +208,8 @@ pub struct ReportSeedConfig {
 pub struct ReportBuildOptions {
     pub recommendations: Vec<NewRecommendation>,
     pub entry_condition_artifacts: Vec<NewEntryConditionArtifact>,
-    pub status: RecommendationReportStatus,
     pub summary: ReportSummary,
     pub as_of: DateTime<Utc>,
-    pub published_at: Option<DateTime<Utc>>,
     pub runtime_mode: QuantRuntimeMode,
 }
 
@@ -230,24 +228,20 @@ impl ReportBuildOptions {
                 &ids.token,
             )],
             entry_condition_artifacts: Vec::new(),
-            status: RecommendationReportStatus::Published,
             summary: report_summary(),
             as_of: Utc::now(),
-            published_at: Some(Utc::now()),
             runtime_mode: QuantRuntimeMode::AutoExecution,
         }
     }
 
     /// Published report with zero recommendations and an explicit empty reason.
     #[must_use]
-    pub fn published_empty() -> Self {
+    pub fn empty_report() -> Self {
         Self {
             recommendations: Vec::new(),
             entry_condition_artifacts: Vec::new(),
-            status: RecommendationReportStatus::PublishedEmpty,
             summary: empty_report_summary(),
             as_of: Utc::now(),
-            published_at: Some(Utc::now()),
             runtime_mode: QuantRuntimeMode::AutoExecution,
         }
     }
@@ -401,10 +395,7 @@ pub async fn seed_report_on_infra(
     config: ReportSeedConfig,
 ) -> ExecutionTxnIds {
     let ids = prepare_report_seed(db, infra, &config).await;
-    PgRecommendationReportRepository::new(db.clone())
-        .create_report(build_report_transaction(&ids, &config.trigger_key))
-        .await
-        .expect("create report");
+    persist_and_publish_report(db, build_report_transaction(&ids), &config.trigger_key, 10).await;
     ids
 }
 
@@ -458,14 +449,13 @@ async fn seed_conditional_price_report_with_mode(
         }
     }
     options.entry_condition_artifacts.push(artifact);
-    PgRecommendationReportRepository::new(db.clone())
-        .create_report(build_report_transaction_inner(
-            &ids,
-            &config.trigger_key,
-            options,
-        ))
-        .await
-        .expect("create conditional report");
+    persist_and_publish_report(
+        db,
+        build_report_transaction_inner(&ids, options),
+        &config.trigger_key,
+        10,
+    )
+    .await;
     ids
 }
 
@@ -556,10 +546,9 @@ pub async fn seed_report_model_run(
 #[must_use]
 pub fn build_custom_report_transaction(
     ids: &ExecutionTxnIds,
-    trigger_key: &str,
     options: ReportBuildOptions,
 ) -> NewReportTransaction {
-    build_report_transaction_inner(ids, trigger_key, options)
+    build_report_transaction_inner(ids, options)
 }
 
 /// Build one ranked recommendation row wired to shared demo infra refs.
@@ -599,7 +588,7 @@ pub fn demo_recommendation(
         execution_eligibility: execution_eligibility(),
         valid_from: Utc::now(),
         valid_until: Utc::now() + chrono::Duration::hours(1),
-        status: RecommendationStatus::Published,
+        status: RecommendationStatus::Prepared,
     }
 }
 
@@ -1682,17 +1671,16 @@ async fn seed_market_selection(
     id
 }
 
-fn build_report_transaction(ids: &ExecutionTxnIds, trigger_key: &str) -> NewReportTransaction {
-    build_report_transaction_inner(ids, trigger_key, ReportBuildOptions::published_single(ids))
+fn build_report_transaction(ids: &ExecutionTxnIds) -> NewReportTransaction {
+    build_report_transaction_inner(ids, ReportBuildOptions::published_single(ids))
 }
 
 fn build_report_transaction_inner(
     ids: &ExecutionTxnIds,
-    trigger_key: &str,
     options: ReportBuildOptions,
 ) -> NewReportTransaction {
     let equity_snapshot_id = EquitySnapshotId::from_v7();
-    let (report, allocated_usd) = fixture_report(ids, trigger_key, &options, &equity_snapshot_id);
+    let (report, allocated_usd) = fixture_report(ids, &options, &equity_snapshot_id);
     let ReportBuildOptions {
         recommendations,
         entry_condition_artifacts,
@@ -1858,7 +1846,6 @@ fn price_condition_artifact(ids: &ExecutionTxnIds) -> NewEntryConditionArtifact 
 
 fn fixture_report(
     ids: &ExecutionTxnIds,
-    trigger_key: &str,
     options: &ReportBuildOptions,
     equity_snapshot_id: &EquitySnapshotId,
 ) -> (NewRecommendationReport, Usd) {
@@ -1869,12 +1856,9 @@ fn fixture_report(
         .sum();
     let report = NewRecommendationReport {
         recommendation_report_id: ids.report.clone(),
+        profile_id: fixture_profile_ref().id,
         profile_ref: fixture_profile_ref(),
         report_kind: ReportKind::TopN,
-        trigger_kind: ReportTriggerKind::Scheduled,
-        trigger_key: trigger_key.to_owned(),
-        trigger_time: options.as_of,
-        knowledge_lag_secs: 10,
         decision_at: options.as_of,
         horizon_secs: 86_400,
         runtime_mode: options.runtime_mode,
@@ -1884,14 +1868,17 @@ fn fixture_report(
         market_selection_id: ids.market_selection.clone(),
         portfolio_plan_id: ids.portfolio_plan.clone(),
         top_n: 20,
-        status: options.status,
+        status: RecommendationReportStatus::Prepared,
         account_source: AccountSource::Polymarket,
         capital_base_usd: Usd::new(dec!(10000)),
         account_snapshot_ref: ids.account_snapshot.clone(),
         equity_snapshot_ref: equity_snapshot_id.clone(),
         data_quality_snapshot_ref: ids.data_quality_snapshot.clone(),
         summary_json: options.summary.clone(),
-        published_at: options.published_at,
+        published_at: None,
+        successor_report_id: None,
+        superseded_at: None,
+        obsoleted_at: None,
         valid_until: Some(options.as_of + chrono::Duration::hours(1)),
         revoked_at: None,
         expired_at: None,

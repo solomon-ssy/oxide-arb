@@ -26,7 +26,10 @@
 > sealing、独立 async Validate 和 PG→ClickHouse verified fact-delivery outbox 已落地；真实 Published
 > research policy 与端到端激活仍受目标环境迁移/真实数据验收和
 > 连续 24 小时 ReportOnly shadow 阻断；
-> 11.0/11.2.1/11.3/11.7.2/11.8–11.11 其余工作仍在设计、实施或部分落地阶段。
+> **11.8 已完成（含 2026-07-16 P0 收尾复核）**：ReportRun / Prepared→Published、
+> PG durable scheduler、scope current、supersession execution cascade、censored attribution 与
+> operator workflow 的唯一验收真相见 11.8；11.0/11.2.1/11.3/11.7.2/11.9–11.11 其余工作仍在
+> 设计、实施或部分落地阶段。
 >
 > 父文档（概念真理）：
 > [`../03-data-factor-model-pipeline.md`](../03-data-factor-model-pipeline.md)、
@@ -45,7 +48,7 @@
 
 | Contract | 当前版本 | 下一位 owner |
 |---|---:|---|
-| Runtime config | **v15** | 后续新增 wire 字段必须显式 bump 至 v16 |
+| Runtime config | **v16** | 11.8 已完成 wire/schema 的破坏式升级；11.9 首个 feedback wire 使用 v17 |
 | Feature schema | **v6** | 仅真实 schema 变更时 bump |
 | Dataset artifact | **v5** | profile/source-slice lineage；旧 artifact audit-only |
 | Model artifact | **v5** | profile/policy/source-slice lineage；旧 artifact audit-only |
@@ -93,7 +96,7 @@ Phase 11 的唯一目标:**把阿尔法层与研究反馈闭环拉到与执行�
 | 14 | TP/SL 由模型启发式曲线推导,不用经验 MFE/MAE | [11.7](11.7-labeling-entry-exit-closed-loop.md) |
 | 15 | 退出结构最小化(partial/trailing/invalidation 恒空) | [11.7](11.7-labeling-entry-exit-closed-loop.md) |
 | 16 | 入场触发只有 LimitPrice/Immediate;无 confirmation_window | [11.7](11.7-labeling-entry-exit-closed-loop.md) |
-| 17 | 无 superseded 报告状态、无持久化 building、错过 tick 不补跑 | [11.8](11.8-report-lifecycle-fsm-completion.md) |
+| 17 | **已关闭**：构建运行无 durable ledger、报告无 superseded/current 语义、missed tick 静默 | [11.8](11.8-report-lifecycle-fsm-completion.md) |
 | 18 | FOK 来源是配置 `allow_market_orders`,非 recommendation 流动性要求;neg-risk | [11.7](11.7-labeling-entry-exit-closed-loop.md) |
 | 19 | 06.5 归因→自动再训练完全未实现 → 研究闭环开环 | [11.9](11.9-attribution-feedback-and-auto-retraining.md) |
 | 20 | 06.6 反事实因子归因未实现;`max_adverse_excursion_bps:None` | [11.10](11.10-counterfactual-factor-attribution.md) |
@@ -119,8 +122,8 @@ Phase 11 的唯一目标:**把阿尔法层与研究反馈闭环拉到与执行�
 | 11.7 | Executable Labeling, Entry & Exit Closed-Loop | TradePolicyArtifact + 可执行标签 + 审批即 Arm + 冻结退出策略 — **执行/control/operational closeout 与受保护 UI/E2E 已完成；真实 Published policy 激活受 11.7.2 阻断** | 14, 15, 16, 18 | [11.7](11.7-labeling-entry-exit-closed-loop.md) |
 | 11.7.1 | Composable Entry Conditions + Crypto/Weather Events | typed AST + PIT facts/events + Recommendation shadow + vertical gates — **实施中** | — | [11.7.1](11.7.1-composable-entry-event-triggers.md) |
 | 11.7.2 | Executable L2 Policy Validation & Research Activation | 完整冻结路径模拟 + structural volatility baseline + cash-budget + PIT fee + purged CPCV/uniqueness/DSR/PBO/ESS，交付至 ReportOnly shadow — **仓库契约已闭环：Weather/structural producers、56/21 CPCV、2× latency、Evidence v3、独立 Validate、分页 drilldown 与 fact outbox 已接通；物理迁移/真实数据验收与 24h shadow 待目标环境完成；真实 canary 已移交 11.11** | — (11.7 research activation gate) | [11.7.2](11.7.2-executable-l2-policy-validation.md) |
-| 11.8 | Report Lifecycle FSM Completion | 报告生命周期语义 | 17 | [11.8](11.8-report-lifecycle-fsm-completion.md) |
-| 11.9 | Attribution Feedback, Profile Expansion & Auto-Retraining | 研究反馈闭环 + factor governance + crypto/profile expansion + 跨 profile winner 资金治理 — **设计冻结、尚未实施；新增 wire 字段必须从当前 v15 显式升级** | 19, 21 | [11.9](11.9-attribution-feedback-and-auto-retraining.md) |
+| 11.8 | Report Lifecycle, Durable Scheduling & Operator Workflow | **已完成（含 P0 收尾复核）**：CH decision-fact、delivery claim-loss、censor accounting 与 Runtime v16 闭环 | 17 | [11.8](11.8-report-lifecycle-fsm-completion.md) |
+| 11.9 | Attribution Feedback, Profile Expansion & Auto-Retraining | 研究反馈闭环 + factor governance + crypto/profile expansion + 跨 profile winner 资金治理 — **设计冻结、尚未实施；基于 11.8 Runtime v16，首个 feedback wire 显式升级至 v17** | 19, 21 | [11.9](11.9-attribution-feedback-and-auto-retraining.md) |
 | 11.10 | Counterfactual Factor Attribution | 反事实归因 + MAE 回填 | 20 | [11.10](11.10-counterfactual-factor-attribution.md) |
 | 11.11 | Execution Governance Hardening | 执行治理探针硬化 | 22 | [11.11](11.11-execution-governance-hardening.md) |
 
@@ -162,6 +165,8 @@ flowchart TD
     P117 --> P1171
     P1171 --> P1172
     P117 --> P118
+    P118 --> P119
+    P118 --> P1111
     P115 --> P119
     P113 --> P119
     P116 --> P119
@@ -183,7 +188,9 @@ flowchart TD
   家族,只新增一个 lot 级组合回放引擎(`LotReplayBacktester`)与一个 `FoldModelSource` 实现,不重新发明
   算法层。11.5.1 不阻塞 11.7,也不被 11.7 阻塞(见 [11.5.1](11.5.1-sell-side-lot-level-validation.md)
   文档头部)。
-- **11.7 → 11.8** 是产物表达力:退出/入场结构 + 报告生命周期语义。
+- **11.7 → 11.8** 是 entry authority 闭环：退出/入场结构 → durable build/run → fact-verified
+  publication → scope current/supersession → pre-submission execution containment；11.8 不把 Building/Failed
+  塞入完整报告表。
 - **11.9 → 11.10** 是研究闭环:归因反馈 + 自动再训练 + 反事实归因,闭合"开环"。
 - **11.2 / 11.11** 相对独立,可并行。**11.2 已破坏式拆分为 [11.2.1](11.2.1-platform-structural-alpha.md)
   (平台内结构,先行) + [11.2.2](11.2.2-crypto-external-vertical.md)(crypto 外部垂直,**已落地**) + [11.2.3](11.2.3-tier2-llm-linkage.md)
@@ -193,11 +200,11 @@ flowchart TD
   11.2.1 **提前**落地 11.3 的 `FavoriteLongshotBiasTable`(favorite-longshot 因子所需),11.3 正式落地时统一收敛
   治理(见 [11.3 §3.4](11.3-probabilistic-calibration-and-kelly.md))。runtime-config 由 11.2.1 bump 至 v4、
   11.2.2 再 bump 至 **v5**（历史里程碑）；`feature_schema_version` 由 11.2.1 bump 至 4、11.2.2
-  再 bump 至 **5**（两层向量重构在 11.2.2）。当前实际 runtime config 已由后续已落地工作推进至
-  **v15**，feature schema 保持 **v6**；这是 11.7.2 的唯一有效版本组合。Tier 2 LLM linkage
+  再 bump 至 **5**（两层向量重构在 11.2.2）。文档冻结时实际 runtime config 是
+  **v15**，11.8 已破坏式升级至 **v16**；feature schema 保持 **v6**。Tier 2 LLM linkage
   不改 feature schema，但若实现时新增 runtime wire 字段，必须从届时当前版本显式 bump，
-  不得静默改写 v15（见 11.2.3）。11.9 尚未实现；其 `feedback`/profile expansion 首次获得真实字段时
-  必须显式升级至 **v16**。Dataset/model artifact 只接受 `format_version = 5`；runtime v15
+  不得静默改写当前版本（见 11.2.3）。11.9 尚未实现；其 `feedback`/profile expansion 首次获得真实字段时
+  必须基于 11.8 的 v16 显式升级至 **v17**。Dataset/model artifact 只接受 `format_version = 5`；runtime v16
   不意味着 feature v7。TradePolicy artifact 只接受 v6，Evidence bundle 只接受 v3。
 
 ## 4. 全局设计基线(贯穿全部子phase)

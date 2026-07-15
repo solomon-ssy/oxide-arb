@@ -6,7 +6,7 @@ use crate::{
         ChCapitalAllocationState, ChExecutionSide, ChExitSignalEvaluatorKind, ChExitSignalVerdict,
         ChFactorDirection, ChFactorValueState, ChFeatureCellState, ChFeatureSourceKind,
         ChFeatureValueKind, ChNormalizationSource, ChOutcomeSide, ChPositionLedgerState,
-        ChQuantLedgerEventKind, ChRecommendationAttributionOutcome, ChRecommendationStatus,
+        ChQuantLedgerEventKind, ChRecommendationAttributionOutcome,
     },
     types::{
         CapitalAllocationId, EventId, ExecutionOrderId, FeatureParityEventId, FeatureParityRunId,
@@ -189,9 +189,13 @@ pub struct QuantSignalCandidateEventRow {
     pub rejection_reason: String,
 }
 
-/// Published recommendation fact.
+/// Immutable report-scoped recommendation decision fact.
+///
+/// Live recommendation/report/delivery lifecycle belongs exclusively to
+/// Postgres and must never be copied into this prepare-time snapshot.
 #[derive(Debug, Clone, clickhouse::Row, Serialize, Deserialize)]
-pub struct QuantRecommendationEventRow {
+#[serde(deny_unknown_fields)]
+pub struct QuantReportRecommendationFactRow {
     pub event_time: i64,
     pub recommendation_report_id: RecommendationReportId,
     pub recommendation_id: RecommendationId,
@@ -204,7 +208,6 @@ pub struct QuantRecommendationEventRow {
     pub trade_plan_available: bool,
     pub suggested_usd: Option<ChUsd>,
     pub valid_until: i64,
-    pub status: ChRecommendationStatus,
 }
 
 /// Conserved, report-scoped decision for one catalog-visible market.

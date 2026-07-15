@@ -211,23 +211,13 @@ pub enum ChPositionLedgerState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
 #[repr(i8)]
-pub enum ChRecommendationStatus {
-    Published = 1,
-    Revoked = 2,
-    Expired = 3,
-    IntentCreated = 4,
-    Executed = 5,
-    Attributed = 6,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
-#[repr(i8)]
 pub enum ChRecommendationAttributionOutcome {
     FilledExited = 1,
     FilledSettled = 2,
     ExpiredUnfilled = 3,
     CancelledUnfilled = 4,
     FailedUnfilled = 5,
+    SupersededUnfilled = 6,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]

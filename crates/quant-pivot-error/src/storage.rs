@@ -22,6 +22,12 @@ pub mod entity {
     pub const QUANT_RECOMMENDATION_ATTRIBUTION: &str = "quant_recommendation_attribution";
     /// `quant_recommendation_report`.
     pub const QUANT_RECOMMENDATION_REPORT: &str = "quant_recommendation_report";
+    /// `quant_report_run`.
+    pub const QUANT_REPORT_RUN: &str = "quant_report_run";
+    /// `quant_report_schedule_state`.
+    pub const QUANT_REPORT_SCHEDULE_STATE: &str = "quant_report_schedule_state";
+    /// `quant_report_schedule_gap`.
+    pub const QUANT_REPORT_SCHEDULE_GAP: &str = "quant_report_schedule_gap";
     /// `quant_order_intent`.
     pub const QUANT_ORDER_INTENT: &str = "quant_order_intent";
     /// `quant_execution_order`.
@@ -164,6 +170,10 @@ pub enum StorageError {
         detail: String,
     },
 
+    /// A bounded durable queue cannot accept more work.
+    #[error("capacity exceeded for {entity}: limit {limit}")]
+    CapacityExceeded { entity: &'static str, limit: u64 },
+
     #[error("Operation `{operation}` timed out after {duration:?}")]
     Timeout {
         operation: String,
@@ -233,6 +243,11 @@ impl StorageError {
             entity,
             detail: detail.to_string(),
         }
+    }
+
+    /// Construct a bounded-capacity error.
+    pub const fn capacity_exceeded(entity: &'static str, limit: u64) -> Self {
+        Self::CapacityExceeded { entity, limit }
     }
 }
 

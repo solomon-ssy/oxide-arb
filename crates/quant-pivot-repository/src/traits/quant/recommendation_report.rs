@@ -2,8 +2,10 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{
-        NewOperationLog, NewReportTransaction, OrderIntentInfo, Paginated, QuantReportListQuery,
+        FactDeliverySettlement, NewOperationLog, NewReportTransaction, OrderIntentInfo, Paginated,
+        PreparedReportOutcome, PublishReportOutcome, QuantReportListQuery,
         RecommendationReportInfo, ReportDataQualitySnapshotInfo, ReportFactDeliveryInfo,
+        ReportRunClaim,
     },
     enums::quant::{ReportFactDeliveryStatus, ReportKind},
     types::{ModelRunId, RecommendationReportId},
@@ -12,18 +14,24 @@ use uuid::Uuid;
 
 #[async_trait::async_trait]
 pub trait RecommendationReportRepository: Send + Sync {
-    /// Persist a report atomically: account snapshot → portfolio plan → report →
-    /// recommendations, in one transaction.
-    async fn create_report(
+    /// Persist a complete Prepared artifact and complete its owned Running lease.
+    async fn create_prepared_report(
         &self,
+        run_claim: ReportRunClaim,
         transaction: NewReportTransaction,
-    ) -> Result<RecommendationReportInfo, StorageError>;
+    ) -> Result<PreparedReportOutcome, StorageError>;
 
     /// Load a single report by id.
     async fn find_by_id(
         &self,
         report_id: &RecommendationReportId,
     ) -> Result<Option<RecommendationReportInfo>, StorageError>;
+
+    /// Direct report that was current immediately before this report.
+    async fn find_predecessor_id(
+        &self,
+        report_id: &RecommendationReportId,
+    ) -> Result<Option<RecommendationReportId>, StorageError>;
 
     /// Load the report-scoped durable fact-delivery acknowledgement.
     async fn find_fact_delivery(
@@ -35,8 +43,7 @@ pub trait RecommendationReportRepository: Send + Sync {
     async fn claim_fact_delivery(
         &self,
         worker_id: Uuid,
-        now: DateTime<Utc>,
-        lease_expires_at: DateTime<Utc>,
+        lease_secs: u64,
     ) -> Result<Option<ReportFactDeliveryInfo>, StorageError>;
 
     /// Release a claimed delivery into an explicit retry or terminal failure.
@@ -46,23 +53,29 @@ pub trait RecommendationReportRepository: Send + Sync {
         worker_id: Uuid,
         status: ReportFactDeliveryStatus,
         error: &str,
+    ) -> Result<FactDeliverySettlement<ReportFactDeliveryInfo>, StorageError>;
+
+    /// Requeue a terminal failed delivery for the immutable Prepared artifact.
+    async fn retry_fact_delivery(
+        &self,
+        report_id: &RecommendationReportId,
+        occurred_at: DateTime<Utc>,
     ) -> Result<ReportFactDeliveryInfo, StorageError>;
 
-    /// CAS acknowledgement after independent `ClickHouse` count/hash verification.
-    async fn verify_fact_delivery(
+    /// Verify delivery and atomically publish or obsolete the candidate.
+    async fn verify_and_publish_report(
         &self,
         report_id: &RecommendationReportId,
         worker_id: Uuid,
-        verified_at: DateTime<Utc>,
-    ) -> Result<ReportFactDeliveryInfo, StorageError>;
+        occurred_at: DateTime<Utc>,
+    ) -> Result<FactDeliverySettlement<PublishReportOutcome>, StorageError>;
 
     /// Lease one verified delivery whose committed event/notification has not
     /// yet been acknowledged.
     async fn claim_fact_announcement(
         &self,
         worker_id: Uuid,
-        now: DateTime<Utc>,
-        lease_expires_at: DateTime<Utc>,
+        lease_secs: u64,
     ) -> Result<Option<ReportFactDeliveryInfo>, StorageError>;
 
     /// Acknowledge post-verification side effects under the exact lease owner.
@@ -70,7 +83,6 @@ pub trait RecommendationReportRepository: Send + Sync {
         &self,
         report_id: &RecommendationReportId,
         worker_id: Uuid,
-        announced_at: DateTime<Utc>,
     ) -> Result<ReportFactDeliveryInfo, StorageError>;
 
     /// Report produced by an exact serving run. The schema enforces at most one
@@ -103,14 +115,10 @@ pub trait RecommendationReportRepository: Send + Sync {
         query: QuantReportListQuery,
     ) -> Result<Paginated<RecommendationReportInfo>, StorageError>;
 
-    async fn latest_published(
+    async fn current(
         &self,
+        profile_id: &str,
         kind: ReportKind,
-    ) -> Result<Option<RecommendationReportInfo>, StorageError>;
-
-    async fn find_by_trigger_key(
-        &self,
-        trigger_key: &str,
     ) -> Result<Option<RecommendationReportInfo>, StorageError>;
 
     /// Risk-bearing reports whose decision lies in `[from, to)`, used by
@@ -121,7 +129,7 @@ pub trait RecommendationReportRepository: Send + Sync {
         to: DateTime<Utc>,
     ) -> Result<Vec<RecommendationReportId>, StorageError>;
 
-    /// Ids of `published` / `published_empty` reports whose roll-up
+    /// Ids of `Published` reports whose roll-up
     /// `valid_until` deadline (`max(recommendation.valid_until)`) is at or before
     /// `now`, oldest first, capped — the report roll-up backstop sweep input.
     async fn find_expirable(
@@ -130,12 +138,11 @@ pub trait RecommendationReportRepository: Send + Sync {
         limit: u64,
     ) -> Result<Vec<RecommendationReportId>, StorageError>;
 
-    /// Roll a report up to `Expired` **iff** it is still `published` /
-    /// `published_empty` and every one of its recommendations is terminal
-    /// (`is_terminal`). Sets `expired_at` and writes the operation log in one
-    /// transaction; does **not** touch recommendation rows (each already reached
-    /// its own terminal state). Returns `None` when the report is not eligible
-    /// (already terminal, or a recommendation is still actionable).
+    /// Roll a report up to `Expired` **iff** it is still `Published` and every
+    /// recommendation satisfies `completes_report_rollup`. Sets `expired_at` and
+    /// writes the operation log in one transaction; does **not** touch
+    /// recommendation rows. Returns `None` when the report is not eligible
+    /// (already closed, or a recommendation still blocks roll-up).
     async fn roll_up_to_expired(
         &self,
         report_id: &RecommendationReportId,

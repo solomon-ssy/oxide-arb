@@ -49,7 +49,7 @@ use quant_pivot_repository::{
     clickhouse::{ChFactWriter, ChFeatureParityEventRepository},
     traits::{
         CalibrationArtifactRepository, FactWriter, FeatureParityRepository,
-        RecommendationReportRepository, ResearchReadinessEvidenceRepository,
+        RecommendationReportRepository, ReportRunRepository, ResearchReadinessEvidenceRepository,
         RuntimeConfigVersionRepository, ServingEvidenceRepository, TradePolicyRepository,
     },
 };
@@ -335,6 +335,7 @@ impl AppContext {
             factors: Arc::clone(&self.research.factor_repo),
             reports: Arc::clone(&self.infra.repos.recommendation_report)
                 as Arc<dyn RecommendationReportRepository>,
+            report_runs: Arc::clone(&self.infra.repos.report_run) as Arc<dyn ReportRunRepository>,
             serving_evidence,
             fact_read: Arc::clone(&self.research.quant_fact_read),
             catalog: Arc::clone(&self.research.catalog_version_repo),

@@ -3,12 +3,12 @@
 use crate::{
     execution::breaker::ExecutionBreaker,
     governance::{BiasTableApplicator, CategoryPointerGuard, WeightOverlayApplicator},
-    infra::schedule::ReportScheduleRunner,
     ingest::{
         data_quality::BookDataQualityService, market_cache::MarketCache,
         market_filter::MarketFilter, market_registry::MarketRegistry,
     },
     observability::{alert_dispatcher::AlertDispatcher, metrics_hub::MetricsHub},
+    report::ReportScheduleReconciler,
     runtime_config::RuntimeConfigStore,
     service::ws_subscription::WsSubscriptionCoordinator,
 };
@@ -52,7 +52,7 @@ pub struct RuntimeConfigApplicator {
     /// Report schedule runner, late-bound after the report bundle is assembled
     /// (the runner depends on the report lifecycle, which is built after
     /// governance). `None` until [`Self::attach_report_scheduler`] is called.
-    report_scheduler: Mutex<Option<Arc<dyn ReportScheduleRunner>>>,
+    report_schedule_reconciler: Mutex<Option<Arc<dyn ReportScheduleReconciler>>>,
     /// Execution breaker, late-bound after the execution bundle is assembled
     /// (the breaker is built after governance). `None` until
     /// [`Self::attach_execution_breaker`] is called. Activations hot-swap its
@@ -66,14 +66,14 @@ impl RuntimeConfigApplicator {
         Self {
             store,
             subscribers,
-            report_scheduler: Mutex::new(None),
+            report_schedule_reconciler: Mutex::new(None),
             execution_breaker: Mutex::new(None),
         }
     }
 
     /// Bind the report schedule runner so activations rebuild report jobs.
-    pub fn attach_report_scheduler(&self, runner: Arc<dyn ReportScheduleRunner>) {
-        *self.report_scheduler.lock() = Some(runner);
+    pub fn attach_report_schedule_reconciler(&self, reconciler: Arc<dyn ReportScheduleReconciler>) {
+        *self.report_schedule_reconciler.lock() = Some(reconciler);
     }
 
     /// Bind the execution breaker so activations hot-reload its thresholds.
@@ -126,10 +126,10 @@ impl RuntimeConfigPort for RuntimeConfigApplicator {
         // Rebuild report jobs before mutating the live snapshot so a schedule
         // sync failure leaves store + subscribers untouched and the HTTP
         // activation path can record a compensating rollback.
-        let scheduler = self.report_scheduler.lock().clone();
-        if let Some(scheduler) = scheduler {
-            scheduler
-                .sync_from_config(&arc.reports)
+        let reconciler = self.report_schedule_reconciler.lock().clone();
+        if let Some(reconciler) = reconciler {
+            reconciler
+                .reconcile(&arc.reports)
                 .await
                 .map_err(ControlError::from)?;
         }

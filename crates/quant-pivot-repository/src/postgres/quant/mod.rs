@@ -29,6 +29,8 @@ mod position;
 mod recommendation;
 mod recommendation_report;
 mod reconciliation;
+mod report_run;
+mod report_scope;
 mod research_job;
 mod research_readiness;
 mod reserved_capital;
@@ -56,7 +58,8 @@ pub use {
     portfolio_plan::PgPortfolioPlanRepository, position::PgPositionRepository,
     recommendation::PgRecommendationRepository,
     recommendation_report::PgRecommendationReportRepository,
-    reconciliation::PgReconciliationRepository, research_job::PgResearchJobRepository,
+    reconciliation::PgReconciliationRepository, report_run::PgReportRunRepository,
+    research_job::PgResearchJobRepository,
     research_readiness::PgResearchReadinessEvidenceRepository,
     reserved_capital::PgReservedCapitalRepository, settlement_redeem::PgSettlementRedeemRepository,
     shadow_comparison::PgShadowComparisonRepository, source_slice::PgSourceSliceRepository,

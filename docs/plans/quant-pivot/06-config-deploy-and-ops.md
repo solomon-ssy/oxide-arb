@@ -11,7 +11,9 @@
 两层配置模型：
 
 - **Deploy config**（`config/quant-pivot.toml`）：进程启动绑定，改动需要重启。连接、池、shard/channel、worker cadence、credential source、web server、logging。
-- **Runtime config v7**：受治理、版本化（`runtime_config_version` WORM）、热激活（`ArcSwap` + applicator push），存 Postgres，只经治理 API 修改。
+- **Runtime config v15（Phase 11.8 目标 v16）**：受治理、版本化（`runtime_config_version` WORM）、
+  热激活（`ArcSwap` + applicator push），存 Postgres，只经治理 API 修改；11.8 删除
+  `reports.publish_empty_reports` 后破坏式升级为 v16。
 
 禁止：
 
@@ -127,9 +129,21 @@ RuntimeConfig {
 
 ### 2.8 `reports`
 
-`schedules`, `max_top_n`, `fallback_horizon_secs`, `publish_empty_reports`, `entry_window_ratio`, `ad_hoc_report_enabled`, `delivery_policy`。
+`schedules`, `max_top_n`, `ad_hoc_default_top_n`, `ad_hoc_default_knowledge_lag_secs`,
+`fallback_horizon_secs`, `entry_window_ratio`, `ad_hoc_report_enabled`, `delivery_policy`。
+
+ad-hoc 默认值是 claim 时冻结的纯构建参数，禁止从 schedule 数组位置推导；请求 override 优先，
+且有效 `top_n` 仍须满足 `1..=max_top_n`。
+
+> **Phase 11.8**：有效 empty report 始终 Prepared→Published 并取代旧 current；该行为是资金安全不变量，
+> 不再由 runtime config 开关控制。schedule occurrence、run、gap 与 lease 的权威在 PostgreSQL，runtime config
+> 只定义 schedule spec。
 
 Schedule（`ReportScheduleConfig`）：`schedule_id`, `cadence`（`interval_secs` 或 `cron{expr, timezone?}`）, `top_n`, `knowledge_lag_secs`, `enabled`。
+
+Deploy-only `[quant.workers]` 增加：`report_schedule_poll_secs=1`、`report_run_lease_secs=120`、
+`report_run_heartbeat_secs=30`、`report_ad_hoc_queue_capacity=64`、`report_ad_hoc_queue_ttl_secs=300`。
+这些 process/DB 参数不进入 WORM runtime wire；heartbeat 必须 ≤ lease/3，TTL > poll，capacity ∈ [1,1024]。
 
 > **v7 破坏式合并**：`schedule` 层是 `top_n` / `knowledge_lag` 的**唯一权威**。删除 `reports.default_top_n` 与 `data_quality.knowledge_lag_secs`。**ad-hoc 报告必须在请求中显式携带 `top_n` + `knowledge_lag_secs`**，缺失即 fail closed（无配置回退）。schedule 上删除死占位符 `market_filter_ref` / `model_version_ref`。
 

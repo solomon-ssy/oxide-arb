@@ -221,10 +221,20 @@ ghcnh_station_id = "USW00014732"
 # ── Quant Pivot (Phase 0) ─────────────────────────────────────────────────────
 
 [quant.workers]
+# Purpose: PostgreSQL report schedule/run coordinator polling cadence. Default: 1.
+report_schedule_poll_secs = 1
+# Purpose: duration of one claimed report build lease. Default: 120.
+report_run_lease_secs = 120
+# Purpose: heartbeat cadence; must be <= one third of the lease. Default: 30.
+report_run_heartbeat_secs = 30
+# Purpose: global durable ad-hoc queue bound across replicas. Default: 64.
+report_ad_hoc_queue_capacity = 64
+# Purpose: maximum queued lifetime for an ad-hoc request. Default: 300.
+report_ad_hoc_queue_ttl_secs = 300
 # Purpose: report TTL expire-sweep cadence (seconds). Serves the
 # ReportDeadlineScheduler reconcile/look-ahead interval AND the decoupled
 # ReportExpireSweep backstop — NOT report fire scheduling (cadence comes from
-# runtime-config reports.schedules[] via tokio-cron-scheduler). Default: 300.
+# runtime-config reports.schedules[] via the PostgreSQL coordinator). Default: 300.
 report_expire_sweep_secs = 300
 # Purpose: order-intent TTL expire-sweep cadence (seconds). Serves the
 # IntentDeadlineScheduler look-ahead AND the IntentExpireSweep backstop that
@@ -437,6 +447,8 @@ max_concurrent_inserts = 8
 # Purpose: apply versioned online-safe ClickHouse migrations automatically
 # before the runtime pool starts. Offline-required migrations always fail
 # closed and require an explicit maintenance rollout. Default: true.
+# Phase 11.8 migration 2 must be applied once with
+# `quant-pivot-xtask clickhouse-schema apply-offline` while legacy fact tables are empty.
 auto_apply_online = true
 require_dedicated_identity = false
 # Local development intentionally reuses db.clickhouse credentials. Production

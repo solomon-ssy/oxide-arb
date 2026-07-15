@@ -1810,7 +1810,6 @@ impl TrainingDatasetService {
             )
             .await?;
         coverage.live_attribution_candidates += attributions.len() as u64;
-        coverage.planned_samples += attributions.len() as u64;
 
         if attributions.is_empty() {
             return Ok(());
@@ -1860,19 +1859,38 @@ impl TrainingDatasetService {
             .collect::<HashMap<_, _>>();
 
         for attribution in attributions {
-            match materialize_live_attribution_example(
-                &attribution,
-                &recommendation_by_id,
-                &feature_by_id,
-                &selection_by_key,
-            ) {
-                Some(example) => {
-                    market_set.insert(example.market_id.clone());
-                    coverage.labels_available += example.labels.len() as u64;
-                    examples.push(example);
-                }
-                None => coverage.live_attribution_dropped_missing_evidence += 1,
+            record_live_attribution_materialization(
+                materialize_live_attribution_example(
+                    &attribution,
+                    &recommendation_by_id,
+                    &feature_by_id,
+                    &selection_by_key,
+                ),
+                coverage,
+                examples,
+                market_set,
+            );
+        }
+        let accounted = coverage
+            .live_attribution_materialized
+            .checked_add(coverage.live_attribution_dropped_missing_evidence)
+            .and_then(|count| {
+                count.checked_add(coverage.live_attribution_censored_superseded_unfilled)
+            })
+            .ok_or_else(|| ResearchError::DatasetBuild {
+                detail: "live attribution coverage accounting overflowed".to_owned(),
+            })?;
+        if accounted != coverage.live_attribution_candidates {
+            return Err(ResearchError::DatasetBuild {
+                detail: format!(
+                    "live attribution coverage is unbalanced: candidates={}, materialized={}, missing_evidence={}, superseded_censors={}",
+                    coverage.live_attribution_candidates,
+                    coverage.live_attribution_materialized,
+                    coverage.live_attribution_dropped_missing_evidence,
+                    coverage.live_attribution_censored_superseded_unfilled,
+                ),
             }
+            .into());
         }
         Ok(())
     }
@@ -2801,7 +2819,57 @@ fn append_historical_examples(
     Ok(())
 }
 
+enum LiveAttributionMaterialization {
+    Example(Box<TrainingExample>),
+    CensoredSupersededUnfilled,
+    MissingEvidence,
+}
+
+fn record_live_attribution_materialization(
+    materialization: LiveAttributionMaterialization,
+    coverage: &mut DatasetCoverage,
+    examples: &mut Vec<TrainingExample>,
+    market_set: &mut HashSet<MarketId>,
+) {
+    match materialization {
+        LiveAttributionMaterialization::Example(example) => {
+            coverage.planned_samples += 1;
+            coverage.live_attribution_materialized += 1;
+            market_set.insert(example.market_id.clone());
+            coverage.labels_available += example.labels.len() as u64;
+            examples.push(*example);
+        }
+        LiveAttributionMaterialization::CensoredSupersededUnfilled => {
+            coverage.live_attribution_censored_superseded_unfilled += 1;
+        }
+        LiveAttributionMaterialization::MissingEvidence => {
+            coverage.planned_samples += 1;
+            coverage.live_attribution_dropped_missing_evidence += 1;
+        }
+    }
+}
+
 fn materialize_live_attribution_example(
+    attribution: &RecommendationAttributionInfo,
+    recommendations: &HashMap<RecommendationId, RecommendationInfo>,
+    features: &HashMap<FeatureVectorId, FeatureVectorInfo>,
+    selections: &HashMap<(MarketSelectionId, MarketId), MarketSelectionMemberInfo>,
+) -> LiveAttributionMaterialization {
+    if attribution.outcome == RecommendationAttributionOutcome::SupersededUnfilled {
+        return LiveAttributionMaterialization::CensoredSupersededUnfilled;
+    }
+    materialize_uncensored_live_attribution_example(
+        attribution,
+        recommendations,
+        features,
+        selections,
+    )
+    .map_or(LiveAttributionMaterialization::MissingEvidence, |example| {
+        LiveAttributionMaterialization::Example(Box::new(example))
+    })
+}
+
+fn materialize_uncensored_live_attribution_example(
     attribution: &RecommendationAttributionInfo,
     recommendations: &HashMap<RecommendationId, RecommendationInfo>,
     features: &HashMap<FeatureVectorId, FeatureVectorInfo>,
@@ -2858,10 +2926,10 @@ fn live_attribution_bindings<'a>(
             );
             None
         })?;
-    if recommendation.status.excluded_from_attribution() {
+    if !recommendation.status.eligible_for_attribution() {
         tracing::warn!(
             recommendation_id = %attribution.recommendation_id,
-            "live attribution sample dropped: recommendation revoked",
+            "live attribution sample dropped: recommendation is not attribution-eligible",
         );
         return None;
     }
@@ -3113,12 +3181,9 @@ fn attribution_labels(
         },
         matured_at,
     );
-    push_label(
-        &mut labels,
-        "recommendation_outcome",
-        recommendation_outcome_code(attribution.outcome),
-        matured_at,
-    );
+    if let Some(code) = recommendation_outcome_code(attribution.outcome) {
+        push_label(&mut labels, "recommendation_outcome", code, matured_at);
+    }
     labels
 }
 
@@ -3137,13 +3202,14 @@ fn push_label(
     });
 }
 
-fn recommendation_outcome_code(outcome: RecommendationAttributionOutcome) -> Decimal {
+fn recommendation_outcome_code(outcome: RecommendationAttributionOutcome) -> Option<Decimal> {
     match outcome {
-        RecommendationAttributionOutcome::FilledExited => Decimal::ONE,
-        RecommendationAttributionOutcome::FilledSettled => Decimal::from(2),
-        RecommendationAttributionOutcome::ExpiredUnfilled => Decimal::NEGATIVE_ONE,
-        RecommendationAttributionOutcome::CancelledUnfilled => Decimal::from(-2),
-        RecommendationAttributionOutcome::FailedUnfilled => Decimal::from(-3),
+        RecommendationAttributionOutcome::FilledExited => Some(Decimal::ONE),
+        RecommendationAttributionOutcome::FilledSettled => Some(Decimal::from(2)),
+        RecommendationAttributionOutcome::ExpiredUnfilled => Some(Decimal::NEGATIVE_ONE),
+        RecommendationAttributionOutcome::CancelledUnfilled => Some(Decimal::from(-2)),
+        RecommendationAttributionOutcome::FailedUnfilled => Some(Decimal::from(-3)),
+        RecommendationAttributionOutcome::SupersededUnfilled => None,
     }
 }
 
@@ -3620,6 +3686,85 @@ mod decision_book_tests {
             decision_book_quote_price(&book),
             Some(Price::new(Decimal::new(55, 2)))
         );
+    }
+}
+
+#[cfg(test)]
+mod attribution_censor_tests {
+    use std::collections::{HashMap, HashSet};
+
+    use chrono::Utc;
+    use quant_pivot_models::{
+        domain::RecommendationAttributionInfo,
+        enums::quant::RecommendationAttributionOutcome,
+        types::{AttributionDetail, DatasetCoverage, EntryOutcome, ExitOutcome, RecommendationId},
+    };
+
+    use super::{
+        LiveAttributionMaterialization, materialize_live_attribution_example,
+        recommendation_outcome_code, record_live_attribution_materialization,
+    };
+
+    fn superseded_attribution() -> RecommendationAttributionInfo {
+        RecommendationAttributionInfo {
+            recommendation_id: RecommendationId::from_v7(),
+            outcome: RecommendationAttributionOutcome::SupersededUnfilled,
+            entry_outcome_json: EntryOutcome::default(),
+            exit_outcome_json: ExitOutcome::default(),
+            realized_pnl_usd: None,
+            max_adverse_excursion_bps: None,
+            max_favorable_excursion_bps: None,
+            label_available_at: Some(Utc::now()),
+            attribution_json: AttributionDetail::default(),
+            created_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn superseded_unfilled_is_censored_from_training_dataset() {
+        let attribution = superseded_attribution();
+
+        assert!(matches!(
+            materialize_live_attribution_example(
+                &attribution,
+                &HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new(),
+            ),
+            LiveAttributionMaterialization::CensoredSupersededUnfilled
+        ));
+        assert_eq!(
+            recommendation_outcome_code(RecommendationAttributionOutcome::SupersededUnfilled),
+            None
+        );
+    }
+
+    #[test]
+    fn superseded_unfilled_has_dedicated_censor_accounting() {
+        let mut coverage = DatasetCoverage {
+            live_attribution_candidates: 1,
+            ..DatasetCoverage::default()
+        };
+        let mut examples = Vec::new();
+        let mut markets = HashSet::new();
+        record_live_attribution_materialization(
+            materialize_live_attribution_example(
+                &superseded_attribution(),
+                &HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new(),
+            ),
+            &mut coverage,
+            &mut examples,
+            &mut markets,
+        );
+
+        assert_eq!(coverage.live_attribution_censored_superseded_unfilled, 1);
+        assert_eq!(coverage.live_attribution_materialized, 0);
+        assert_eq!(coverage.live_attribution_dropped_missing_evidence, 0);
+        assert_eq!(coverage.planned_samples, 0);
+        assert!(examples.is_empty());
+        assert!(markets.is_empty());
     }
 }
 

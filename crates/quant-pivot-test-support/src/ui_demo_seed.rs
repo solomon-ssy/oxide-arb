@@ -18,7 +18,7 @@ use quant_pivot_models::{
     clickhouse::{
         ChDecimal64, ChPrice, ChProbability, ChShares, ChUsd, QuantCapitalAllocationEventRow,
         QuantExecutionEventRow, QuantPositionEventRow, QuantRecommendationAttributionEventRow,
-        QuantRecommendationEventRow,
+        QuantReportRecommendationFactRow,
     },
     domain::{
         CapitalReconcileSettlement, CapitalSettlement, ConfirmSettlementRedeem, InsertFinalOutcome,
@@ -30,7 +30,7 @@ use quant_pivot_models::{
     enums::{
         clickhouse::{
             ChCapitalAllocationState, ChExecutionSide, ChOutcomeSide, ChPositionLedgerState,
-            ChQuantLedgerEventKind, ChRecommendationAttributionOutcome, ChRecommendationStatus,
+            ChQuantLedgerEventKind, ChRecommendationAttributionOutcome,
         },
         common::MarketCategory,
         execution::{
@@ -86,6 +86,7 @@ use crate::{
         seed_manual_approved_intent, seed_pending_intent, seed_report_model_run,
         seed_report_on_infra, seed_shared_demo_infra_with_artifact_store,
     },
+    report_lifecycle_seed::persist_and_publish_report,
     research_ui_seed::{ResearchUiSeedSummary, seed_research_ui_demo_pg},
 };
 
@@ -198,7 +199,7 @@ pub async fn seed_ui_demo_ck(
 
 #[derive(Default)]
 struct DemoCkFactBatches {
-    recommendation: Vec<QuantRecommendationEventRow>,
+    recommendation: Vec<QuantReportRecommendationFactRow>,
     execution: Vec<QuantExecutionEventRow>,
     position: Vec<QuantPositionEventRow>,
     capital: Vec<QuantCapitalAllocationEventRow>,
@@ -206,21 +207,22 @@ struct DemoCkFactBatches {
 }
 
 fn push_demo_ck_rows(record: &DemoSeedRecord, now: i64, batches: &mut DemoCkFactBatches) {
-    batches.recommendation.push(QuantRecommendationEventRow {
-        event_time: now,
-        recommendation_report_id: record.report_id.clone(),
-        recommendation_id: record.recommendation_id.clone(),
-        rank: 1,
-        market_id: record.market_id.clone(),
-        token_id: record.token_id.clone(),
-        side: ChOutcomeSide::Yes,
-        score: ChProbability::from(dec!(0.72)),
-        risk_adjusted_score: ChProbability::from(dec!(0.68)),
-        trade_plan_available: true,
-        suggested_usd: Some(ChUsd::from(Usd::new(EXECUTION_NOTIONAL))),
-        valid_until: now + 86_400,
-        status: ChRecommendationStatus::IntentCreated,
-    });
+    batches
+        .recommendation
+        .push(QuantReportRecommendationFactRow {
+            event_time: now,
+            recommendation_report_id: record.report_id.clone(),
+            recommendation_id: record.recommendation_id.clone(),
+            rank: 1,
+            market_id: record.market_id.clone(),
+            token_id: record.token_id.clone(),
+            side: ChOutcomeSide::Yes,
+            score: ChProbability::from(dec!(0.72)),
+            risk_adjusted_score: ChProbability::from(dec!(0.68)),
+            trade_plan_available: true,
+            suggested_usd: Some(ChUsd::from(Usd::new(EXECUTION_NOTIONAL))),
+            valid_until: now + 86_400,
+        });
 
     if let (Some(intent_id), Some(order_id)) = (&record.intent_id, &record.execution_order_id) {
         batches.execution.push(QuantExecutionEventRow {
@@ -300,7 +302,7 @@ async fn flush_demo_ck_batches(
     if !batches.recommendation.is_empty() {
         rows += batches.recommendation.len();
         facts
-            .insert_recommendation_events(batches.recommendation)
+            .insert_report_recommendation_facts(batches.recommendation)
             .await?;
     }
     if !batches.execution.is_empty() {
@@ -1194,8 +1196,7 @@ async fn seed_empty_report(
     infra: &SharedDemoInfra,
     summary: &mut UiDemoSeedSummary,
 ) {
-    let record =
-        seed_custom_report(db, infra, "empty", ReportBuildOptions::published_empty()).await;
+    let record = seed_custom_report(db, infra, "empty", ReportBuildOptions::empty_report()).await;
     summary.reports += 1;
     summary.records.push(record);
 }
@@ -1337,15 +1338,13 @@ async fn seed_diff_report(
     let mut options = ReportBuildOptions::published_single(&ids);
     options.recommendations = recommendations;
     options.as_of = as_of;
-    options.published_at = Some(as_of);
-    PgRecommendationReportRepository::new(db.clone())
-        .create_report(build_custom_report_transaction(
-            &ids,
-            &config.trigger_key,
-            options,
-        ))
-        .await
-        .expect("create diff report");
+    persist_and_publish_report(
+        db,
+        build_custom_report_transaction(&ids, options),
+        &config.trigger_key,
+        10,
+    )
+    .await;
     ids
 }
 
@@ -1383,14 +1382,13 @@ async fn seed_custom_report(
         event: format!("{DEMO_TAG}-evt-{slug}"),
         token: format!("{DEMO_TAG}-token-{slug}"),
     };
-    PgRecommendationReportRepository::new(db.clone())
-        .create_report(build_custom_report_transaction(
-            &ids,
-            &config.trigger_key,
-            options,
-        ))
-        .await
-        .expect("create custom report");
+    persist_and_publish_report(
+        db,
+        build_custom_report_transaction(&ids, options),
+        &config.trigger_key,
+        10,
+    )
+    .await;
     base_record(slug, &ids)
 }
 

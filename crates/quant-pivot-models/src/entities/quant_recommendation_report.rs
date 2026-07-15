@@ -1,9 +1,7 @@
 //! `quant_recommendation_report` table entity.
 
 use crate::{
-    enums::quant::{
-        AccountSource, QuantRuntimeMode, RecommendationReportStatus, ReportKind, ReportTriggerKind,
-    },
+    enums::quant::{AccountSource, QuantRuntimeMode, RecommendationReportStatus, ReportKind},
     types::{
         AccountSnapshotId, EquitySnapshotId, MarketSelectionId, ModelRunId, ModelVersionId,
         PortfolioPlanId, RecommendationReportId, ReportDataQualitySnapshotId, ReportSummary,
@@ -18,13 +16,10 @@ use sea_orm::entity::prelude::*;
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub recommendation_report_id: RecommendationReportId,
+    pub profile_id: String,
     #[sea_orm(column_type = "JsonBinary")]
     pub profile_ref: ResearchProfileRef,
     pub report_kind: ReportKind,
-    pub trigger_kind: ReportTriggerKind,
-    pub trigger_key: String,
-    pub trigger_time: DateTime<Utc>,
-    pub knowledge_lag_secs: i64,
     pub decision_at: DateTime<Utc>,
     pub horizon_secs: i64,
     pub runtime_mode: QuantRuntimeMode,
@@ -43,6 +38,9 @@ pub struct Model {
     #[sea_orm(column_type = "JsonBinary")]
     pub summary_json: ReportSummary,
     pub published_at: Option<DateTime<Utc>>,
+    pub successor_report_id: Option<RecommendationReportId>,
+    pub superseded_at: Option<DateTime<Utc>>,
+    pub obsoleted_at: Option<DateTime<Utc>>,
     /// Data-driven validity deadline = `max(recommendation.valid_until)` over the
     /// report's recommendations, frozen at publish (`None` for a report with no
     /// recommendations only when no fallback applies). This is the report's
@@ -57,6 +55,12 @@ pub struct Model {
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {
+    #[sea_orm(
+        belongs_to = "Entity",
+        from = "Column::SuccessorReportId",
+        to = "Column::RecommendationReportId"
+    )]
+    Successor,
     #[sea_orm(
         belongs_to = "super::quant_model_version::Entity",
         from = "Column::ModelVersionId",

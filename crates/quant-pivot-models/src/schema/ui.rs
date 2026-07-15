@@ -1682,19 +1682,26 @@ fn report_fields() -> Vec<FieldUiEntry> {
             "Hard upper bound on TopN for every schedule and ad-hoc run. Each schedule's own TopN must be within 1..=this; must be > 0.",
             "所有计划与临时运行的 TopN 硬上限。每个计划自身的 TopN 必须在 1..=此值 内；必须大于 0。",
         ),
+        integer(
+            "reports.ad_hoc_default_top_n",
+            "Ad-hoc default TopN",
+            "临时运行默认 TopN",
+            "TopN frozen by the PostgreSQL claim transaction when an ad-hoc request omits an override. Must be in 1..=maximum TopN.",
+            "临时请求未覆盖时，由 PostgreSQL claim 事务冻结的 TopN。必须位于 1..=最大 TopN。",
+        ),
+        secs(
+            "reports.ad_hoc_default_knowledge_lag_secs",
+            "Ad-hoc default knowledge lag",
+            "临时运行默认知识延迟",
+            "PIT knowledge lag frozen by the PostgreSQL claim transaction when an ad-hoc request omits an override.",
+            "临时请求未覆盖时，由 PostgreSQL claim 事务冻结的 PIT 知识延迟。",
+        ),
         secs(
             "reports.fallback_horizon_secs",
             "Fallback horizon",
             "回退预测周期",
             "Prediction horizon used only when the model provides no per-candidate suggested horizon (classical / non-ML runs). Not a flat TTL — per-recommendation validity is otherwise data-driven; must be > 0.",
             "仅当模型未提供逐候选建议周期（经典/非 ML 运行）时使用的预测周期。并非统一 TTL——逐建议有效期通常由数据驱动；必须大于 0。",
-        ),
-        boolean(
-            "reports.publish_empty_reports",
-            "Publish empty reports",
-            "发布空报告",
-            "When on, a run with no qualifying recommendations still publishes an (empty) report with a reason summary. Off suppresses empty reports (less noise, less audit trail).",
-            "开启时，即使没有合格建议，运行也会发布一份带原因摘要的（空）报告。关闭则不发布空报告（噪声更少，但审计痕迹更少）。",
         ),
         ratio_half_open(
             "reports.entry_window_ratio",
@@ -2047,8 +2054,8 @@ fn execution_semi_auto_fields() -> Vec<FieldUiEntry> {
             "execution.semi_auto.canary.allowed_cash_budget_tiers_usd",
             "Canary allowed cash-budget tiers",
             "Canary 允许的现金预算 tiers",
-            "Exact validated maximum total cash-spend tiers. Runtime v15 permits only $25.",
-            "精确验证的最大总现金支出 tiers。Runtime v15 仅允许 $25。",
+            "Exact validated maximum total cash-spend tiers. Runtime v16 permits only $25.",
+            "精确验证的最大总现金支出 tiers。Runtime v16 仅允许 $25。",
         )
         .widget(FieldWidget::StringList)
         .visible_when(enabled("execution.semi_auto.canary.enabled")),
@@ -2056,16 +2063,16 @@ fn execution_semi_auto_fields() -> Vec<FieldUiEntry> {
             "execution.semi_auto.canary.max_open_intents",
             "Canary maximum open intents",
             "Canary 最大开放 intents",
-            "Transactional cap on capital-holding or in-flight intents. Runtime v15 fixes this at one.",
-            "持有资金或在途 intent 的事务级上限。Runtime v15 固定为一个。",
+            "Transactional cap on capital-holding or in-flight intents. Runtime v16 fixes this at one.",
+            "持有资金或在途 intent 的事务级上限。Runtime v16 固定为一个。",
         )
         .visible_when(enabled("execution.semi_auto.canary.enabled")),
         usd(
             "execution.semi_auto.canary.max_total_cash_per_report",
             "Canary total cash cap per report",
             "Canary 单 report 总现金上限",
-            "Transactional cumulative maximum cash spend across intents from one report. Runtime v15 fixes this at $25.",
-            "同一 report 所创建 intents 的事务级累计最大现金支出。Runtime v15 固定为 $25。",
+            "Transactional cumulative maximum cash spend across intents from one report. Runtime v16 fixes this at $25.",
+            "同一 report 所创建 intents 的事务级累计最大现金支出。Runtime v16 固定为 $25。",
         )
         .critical()
         .visible_when(enabled("execution.semi_auto.canary.enabled")),
@@ -2813,8 +2820,8 @@ fn research_section() -> SchemaNode {
                     "lucide:shield-ellipsis",
                     ls("Executable-policy limits", "可执行 Policy 运行上限"),
                     ls(
-                        "Runtime v15 operational limits. Methodology is versioned code; publication gates come only from the immutable research profile.",
-                        "Runtime v15 运行上限。方法由代码版本化；发布门槛仅来自不可变 research profile。",
+                        "Runtime v16 operational limits. Methodology is versioned code; publication gates come only from the immutable research profile.",
+                        "Runtime v16 运行上限。方法由代码版本化；发布门槛仅来自不可变 research profile。",
                     ),
                 ),
                 fields_in_order(&[
@@ -2842,8 +2849,9 @@ fn reports_section() -> SchemaNode {
             "reports.schedules",
             "reports.hard_candidate_ceiling",
             "reports.max_top_n",
+            "reports.ad_hoc_default_top_n",
+            "reports.ad_hoc_default_knowledge_lag_secs",
             "reports.fallback_horizon_secs",
-            "reports.publish_empty_reports",
             "reports.entry_window_ratio",
             "reports.ad_hoc_report_enabled",
             "reports.delivery_policy",

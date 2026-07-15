@@ -284,6 +284,7 @@ wire_enum! {
 wire_enum! {
     pub enum ApprovalInvalidation {
         RecommendationExpired => "recommendation_expired",
+        ReportSuperseded => "report_superseded",
         ReportRevoked => "report_revoked",
         ModelVersionRetired => "model_version_retired",
         RuntimeConfigChanged => "runtime_config_changed",

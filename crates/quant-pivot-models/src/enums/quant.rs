@@ -86,16 +86,109 @@ pg_enum! {
 
 pg_enum! {
     type_name = "qp_recommendation_report_status",
-    /// Publication lifecycle state for a recommendation report.
+    /// Publication lifecycle of an immutable recommendation report artifact.
     @derive(Default)
     pub enum RecommendationReportStatus {
         #[default]
-        Building => "building",
+        Prepared => "prepared",
         Published => "published",
-        PublishedEmpty => "published_empty",
-        Failed => "failed",
+        Superseded => "superseded",
+        Obsolete => "obsolete",
         Revoked => "revoked",
         Expired => "expired",
+    }
+}
+
+impl RecommendationReportStatus {
+    /// Whether this report may authorize creation of a new entry intent.
+    #[must_use]
+    pub const fn is_current_authority(self) -> bool {
+        matches!(self, Self::Published)
+    }
+
+    /// Whether the immutable artifact has reached a terminal lifecycle state.
+    #[must_use]
+    pub const fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Superseded | Self::Obsolete | Self::Revoked | Self::Expired
+        )
+    }
+
+    /// Closed transition table for the report artifact FSM.
+    #[must_use]
+    pub const fn allows_transition_to(self, next: Self) -> bool {
+        matches!(
+            (self, next),
+            (
+                Self::Prepared,
+                Self::Published | Self::Obsolete | Self::Revoked
+            ) | (
+                Self::Published,
+                Self::Superseded | Self::Revoked | Self::Expired
+            )
+        )
+    }
+}
+
+pg_enum! {
+    type_name = "qp_report_run_status",
+    /// Durable lifecycle of one report build attempt.
+    @derive(Default)
+    pub enum ReportRunStatus {
+        #[default]
+        Queued => "queued",
+        Running => "running",
+        Succeeded => "succeeded",
+        Failed => "failed",
+        Skipped => "skipped",
+        Abandoned => "abandoned",
+    }
+}
+
+impl ReportRunStatus {
+    /// Whether this run no longer accepts lifecycle transitions.
+    #[must_use]
+    pub const fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Succeeded | Self::Failed | Self::Skipped | Self::Abandoned
+        )
+    }
+
+    /// Closed transition table for the durable report-run FSM.
+    #[must_use]
+    pub const fn allows_transition_to(self, next: Self) -> bool {
+        matches!(
+            (self, next),
+            (Self::Queued, Self::Running | Self::Skipped)
+                | (
+                    Self::Running,
+                    Self::Succeeded | Self::Failed | Self::Abandoned
+                )
+        )
+    }
+}
+
+pg_enum! {
+    type_name = "qp_report_run_terminal_reason",
+    /// Typed terminal reason for skipped, failed, or abandoned report runs.
+    pub enum ReportRunTerminalReason {
+        CoalescedByNewerOccurrence => "coalesced_by_newer_occurrence",
+        ScheduleReconfigured => "schedule_reconfigured",
+        QueueExpired => "queue_expired",
+        BuildFailed => "build_failed",
+        LeaseExpired => "lease_expired",
+    }
+}
+
+pg_enum! {
+    type_name = "qp_report_schedule_gap_reason",
+    /// Reason a contiguous range of schedule occurrences was not materialized.
+    pub enum ReportScheduleGapReason {
+        CoordinatorLag => "coordinator_lag",
+        CoalescedByNewerOccurrence => "coalesced_by_newer_occurrence",
+        ScheduleReconfigured => "schedule_reconfigured",
     }
 }
 
@@ -110,6 +203,7 @@ pg_enum! {
         Retrying => "retrying",
         Failed => "failed",
         Verified => "verified",
+        Cancelled => "cancelled",
     }
 }
 
@@ -119,7 +213,10 @@ pg_enum! {
     @derive(Default)
     pub enum RecommendationStatus {
         #[default]
+        Prepared => "prepared",
         Published => "published",
+        Superseded => "superseded",
+        Obsolete => "obsolete",
         Revoked => "revoked",
         Expired => "expired",
         IntentCreated => "intent_created",
@@ -129,33 +226,54 @@ pg_enum! {
 }
 
 impl RecommendationStatus {
-    /// Whether this is a terminal recommendation state — no further entry action
-    /// is possible. A report rolls up to `Expired` only once every one of its
-    /// recommendations is terminal. `Published` / `IntentCreated` are non-terminal
-    /// (the recommendation is still actionable / in flight).
+    /// Whether the recommendation still has authority to create a new intent.
     #[must_use]
-    pub const fn is_terminal(self) -> bool {
-        matches!(
-            self,
-            Self::Revoked | Self::Expired | Self::Executed | Self::Attributed
-        )
-    }
-
-    /// Whether a new [`OrderIntent`] may still be created from this recommendation.
-    #[must_use]
-    pub const fn is_actionable_for_intent(self) -> bool {
+    pub const fn allows_new_intent(self) -> bool {
         matches!(self, Self::Published | Self::IntentCreated)
     }
 
-    /// Statuses still eligible for intent creation (SQL `IN` filters).
-    pub const ACTIONABLE_FOR_INTENT: [Self; 2] = [Self::Published, Self::IntentCreated];
-
-    /// Operator-revoked recommendations must never receive final attribution or
-    /// advance to `Attributed` (05.7 governance guard).
+    /// Whether the recommendation may participate in attribution truth.
+    ///
+    /// `Attributed` remains eligible for downstream dataset materialization;
+    /// idempotent final writes are still protected by the attribution unique key.
     #[must_use]
-    pub const fn excluded_from_attribution(self) -> bool {
-        matches!(self, Self::Revoked)
+    pub const fn eligible_for_attribution(self) -> bool {
+        matches!(
+            self,
+            Self::IntentCreated
+                | Self::Superseded
+                | Self::Expired
+                | Self::Executed
+                | Self::Attributed
+        )
     }
+
+    /// Whether this recommendation no longer prevents report expiry roll-up.
+    #[must_use]
+    pub const fn completes_report_rollup(self) -> bool {
+        matches!(
+            self,
+            Self::Superseded
+                | Self::Obsolete
+                | Self::Revoked
+                | Self::Expired
+                | Self::Executed
+                | Self::Attributed
+        )
+    }
+
+    /// Statuses that retain new-intent authority for SQL `IN` filters.
+    pub const NEW_INTENT_AUTHORITY: [Self; 2] = [Self::Published, Self::IntentCreated];
+
+    /// Statuses that no longer block report expiry roll-up in SQL filters.
+    pub const REPORT_ROLLUP_COMPLETE: [Self; 6] = [
+        Self::Superseded,
+        Self::Obsolete,
+        Self::Revoked,
+        Self::Expired,
+        Self::Executed,
+        Self::Attributed,
+    ];
 }
 
 pg_enum! {
@@ -177,7 +295,7 @@ pg_enum! {
 impl OutcomeSide {
     /// The stable `i8` code persisted to the `ClickHouse` `side` columns of the
     /// candidate / recommendation facts (`quant_signal_candidate_event` /
-    /// `quant_recommendation_event`). Append-only contract: never renumber an
+    /// `quant_report_recommendation_fact`). Append-only contract: never renumber an
     /// existing variant.
     #[must_use]
     pub const fn as_i8(self) -> i8 {
@@ -822,6 +940,7 @@ pg_enum! {
         Won => "won",
         Lost => "lost",
         ExpiredUnfilled => "expired_unfilled",
+        SupersededUnfilled => "superseded_unfilled",
         Cancelled => "cancelled",
         Unknown => "unknown",
     }
@@ -836,6 +955,7 @@ pg_enum! {
         FilledExited => "filled_exited",
         FilledSettled => "filled_settled",
         ExpiredUnfilled => "expired_unfilled",
+        SupersededUnfilled => "superseded_unfilled",
         CancelledUnfilled => "cancelled_unfilled",
         FailedUnfilled => "failed_unfilled",
     }
@@ -1211,44 +1331,38 @@ mod tests {
     }
 
     #[test]
-    fn recommendation_terminal_states_drive_report_roll_up() {
-        // Terminal: a report rolls up to Expired once every recommendation is one of these.
-        for status in [
-            RecommendationStatus::Revoked,
-            RecommendationStatus::Expired,
-            RecommendationStatus::Executed,
-            RecommendationStatus::Attributed,
+    fn recommendation_status_predicates_are_orthogonal_and_exhaustive() {
+        for (status, allows_new_intent, eligible_for_attribution, completes_rollup) in [
+            (RecommendationStatus::Prepared, false, false, false),
+            (RecommendationStatus::Published, true, false, false),
+            (RecommendationStatus::Superseded, false, true, true),
+            (RecommendationStatus::Obsolete, false, false, true),
+            (RecommendationStatus::Revoked, false, false, true),
+            (RecommendationStatus::Expired, false, true, true),
+            (RecommendationStatus::IntentCreated, true, true, false),
+            (RecommendationStatus::Executed, false, true, true),
+            (RecommendationStatus::Attributed, false, true, true),
         ] {
-            assert!(status.is_terminal(), "{status:?} must be terminal");
-        }
-        // Non-terminal: still actionable / in flight (report stays active).
-        for status in [
-            RecommendationStatus::Published,
-            RecommendationStatus::IntentCreated,
-        ] {
-            assert!(!status.is_terminal(), "{status:?} must be non-terminal");
-            assert!(
-                status.is_actionable_for_intent(),
-                "{status:?} must accept intent creation"
+            assert_eq!(status.allows_new_intent(), allows_new_intent, "{status:?}");
+            assert_eq!(
+                status.eligible_for_attribution(),
+                eligible_for_attribution,
+                "{status:?}"
             );
-            assert!(
-                RecommendationStatus::ACTIONABLE_FOR_INTENT.contains(&status),
-                "{status:?} must be in ACTIONABLE_FOR_INTENT"
+            assert_eq!(
+                status.completes_report_rollup(),
+                completes_rollup,
+                "{status:?}"
             );
-        }
-        for status in [
-            RecommendationStatus::Revoked,
-            RecommendationStatus::Expired,
-            RecommendationStatus::Executed,
-            RecommendationStatus::Attributed,
-        ] {
-            assert!(
-                !status.is_actionable_for_intent(),
-                "{status:?} must not accept intent creation"
+            assert_eq!(
+                RecommendationStatus::NEW_INTENT_AUTHORITY.contains(&status),
+                allows_new_intent,
+                "{status:?} SQL authority must match domain predicate"
             );
-            assert!(
-                !RecommendationStatus::ACTIONABLE_FOR_INTENT.contains(&status),
-                "{status:?} must not be in ACTIONABLE_FOR_INTENT"
+            assert_eq!(
+                RecommendationStatus::REPORT_ROLLUP_COMPLETE.contains(&status),
+                completes_rollup,
+                "{status:?} SQL roll-up set must match domain predicate"
             );
         }
     }

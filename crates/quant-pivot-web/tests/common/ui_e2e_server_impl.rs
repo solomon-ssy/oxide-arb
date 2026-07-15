@@ -54,23 +54,23 @@ use quant_pivot_models::{
         ArtifactUri, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION, DatasetCoverage,
         DatasetManifest, EventId, FactorDefinitionId, FeatureVectorId, MarketId, MarketSelectionId,
         ModelVersionId, OrderIntentId, Price, RecommendationId, RecommendationReportId,
-        RecommendationTradePlan, ReportFunnelReason, ReportFunnelStage, ResearchProfileRef, Shares,
-        SignalCandidateId, SourceSliceManifestRef, SourceSliceObjectKind, TokenId,
-        TradePlanBlocker, TradePolicyArtifactId, TradePolicyEvidenceObjectKind,
-        TradePolicyGovernanceAuditId, TradePolicyValidationRunId, TrainingExampleId,
-        TrainingHorizonsSecs, TrainingSampleSources, default_sample_sources,
+        RecommendationTradePlan, ReportFunnelReason, ReportFunnelStage, ReportRunId,
+        ResearchProfileRef, Shares, SignalCandidateId, SourceSliceManifestRef,
+        SourceSliceObjectKind, TokenId, TradePlanBlocker, TradePolicyArtifactId,
+        TradePolicyEvidenceObjectKind, TradePolicyGovernanceAuditId, TradePolicyValidationRunId,
+        TrainingExampleId, TrainingHorizonsSecs, TrainingSampleSources, default_sample_sources,
     },
 };
 use quant_pivot_repository::{
     postgres::{
         PgEntryConditionRepository, PgExecutionSubmissionRepository, PgModelRegistryRepository,
         PgOrderIntentRepository, PgRecommendationReportRepository, PgRecommendationRepository,
-        PgTradePolicyRepository, PgTrainingDatasetRepository,
+        PgReportRunRepository, PgTradePolicyRepository, PgTrainingDatasetRepository,
     },
     traits::{
         EntryConditionRepository, ExecutionSubmissionRepository, ModelRegistryRepository,
         OrderIntentRepository, RecommendationReportRepository, RecommendationRepository,
-        TradePolicyRepository, TrainingDatasetRepository,
+        ReportRunRepository, TradePolicyRepository, TrainingDatasetRepository,
     },
 };
 use quant_pivot_research::{
@@ -760,7 +760,9 @@ struct E2eFixtures {
     fixture_format_version: u32,
     unavailable_recommendation_id: RecommendationId,
     frozen_recommendation_id: RecommendationId,
-    report_id: quant_pivot_models::types::RecommendationReportId,
+    report_id: RecommendationReportId,
+    current_report_id: RecommendationReportId,
+    current_report_run_id: ReportRunId,
     pending_intent_id: OrderIntentId,
     waiting_intent_id: OrderIntentId,
     position_id: quant_pivot_models::types::PositionId,
@@ -1431,19 +1433,34 @@ async fn prepare_e2e_fixtures(
     )
     .await;
 
-    let report = PgRecommendationReportRepository::new(db.clone())
+    let reports = PgRecommendationReportRepository::new(db.clone());
+    let report = reports
         .find_by_id(&frozen_record.report_id)
         .await
         .expect("load E2E funnel report")
         .expect("E2E funnel report");
     quant_facts.replace_report_funnel(vec![e2e_published_funnel_row(&report, &frozen)]);
     verify_seeded_report_fact_deliveries(db).await;
+    let current_report_id = reports
+        .current(&report.profile_id, report.report_kind)
+        .await
+        .expect("load current E2E report authority")
+        .expect("E2E report scope has current authority")
+        .recommendation_report_id;
+    let current_report_run_id = PgReportRunRepository::new(db.clone())
+        .find_by_output_report(&current_report_id)
+        .await
+        .expect("load current E2E report run")
+        .expect("current E2E report has a durable run")
+        .report_run_id;
 
     E2eFixtures {
-        fixture_format_version: 1,
+        fixture_format_version: 3,
         unavailable_recommendation_id,
         frozen_recommendation_id: frozen_record.recommendation_id.clone(),
         report_id: frozen_record.report_id.clone(),
+        current_report_id,
+        current_report_run_id,
         pending_intent_id,
         waiting_intent_id,
         position_id,
@@ -1461,18 +1478,19 @@ async fn verify_seeded_report_fact_deliveries(db: &DatabaseConnection) {
     let reports = PgRecommendationReportRepository::new(db.clone());
     let worker_id = Uuid::now_v7();
     loop {
-        let now = Utc::now();
         let delivery = reports
-            .claim_fact_delivery(worker_id, now, now + Duration::seconds(30))
+            .claim_fact_delivery(worker_id, 30)
             .await
             .expect("claim seeded report fact delivery");
         let Some(delivery) = delivery else {
             break;
         };
         reports
-            .verify_fact_delivery(&delivery.recommendation_report_id, worker_id, Utc::now())
+            .verify_and_publish_report(&delivery.recommendation_report_id, worker_id, Utc::now())
             .await
-            .expect("verify seeded report fact delivery");
+            .expect("verify seeded report fact delivery")
+            .into_applied()
+            .expect("seeded report delivery claim must remain held");
     }
 }
 

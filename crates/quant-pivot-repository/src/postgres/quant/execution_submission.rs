@@ -22,9 +22,11 @@ use crate::{
             execution_order::validate_execution_order_transition,
             feature_parity::verify_clear_latch_generation,
             order_intent::{
-                load_intent_for_update, lock_terminal_graph, validate_intent_transition,
+                load_intent, load_intent_for_update, lock_terminal_graph,
+                validate_intent_transition,
             },
             position,
+            report_scope::acquire_report_scope_lock,
         },
     },
     traits::ExecutionSubmissionRepository,
@@ -38,15 +40,19 @@ use quant_pivot_models::{
         SubmissionLedgerWrite,
     },
     entities::{
-        quant_execution_order, quant_order_intent, quant_recommendation, quant_reconciliation,
+        quant_execution_order, quant_order_intent, quant_recommendation,
+        quant_recommendation_report, quant_reconciliation,
     },
     enums::{
         execution::{ExecutionOrderPhase, ExitReason, ExitState},
-        quant::{ExecutionOrderState, OrderIntentStatus, RecommendationStatus},
+        quant::{
+            ExecutionOrderState, OrderIntentStatus, RecommendationReportStatus,
+            RecommendationStatus, ReportKind,
+        },
     },
     types::{
         ExecutionOrderId, ExitReinferenceObservation, FeatureParityStateId, OrderIntentId,
-        PendingScaleOut, Price, RecommendationId, ReconciliationId,
+        PendingScaleOut, Price, RecommendationId, RecommendationReportId, ReconciliationId,
     },
 };
 use sea_orm::{
@@ -77,6 +83,90 @@ impl PgExecutionSubmissionRepository {
     }
 }
 
+struct SubmissionReportScope {
+    report_id: RecommendationReportId,
+    recommendation_id: RecommendationId,
+    profile_id: String,
+    report_kind: ReportKind,
+}
+
+async fn probe_submission_scope(
+    db: &impl ConnectionTrait,
+    intent_id: &OrderIntentId,
+) -> Result<SubmissionReportScope, StorageError> {
+    let intent = load_intent(db, intent_id).await?;
+    let recommendation = quant_recommendation::Entity::find_by_id(intent.recommendation_id.clone())
+        .one(db)
+        .await
+        .map_err(StorageError::from)?
+        .ok_or_else(|| error::not_found(entity::QUANT_RECOMMENDATION, &intent.recommendation_id))?;
+    let report = quant_recommendation_report::Entity::find_by_id(
+        recommendation.recommendation_report_id.clone(),
+    )
+    .one(db)
+    .await
+    .map_err(StorageError::from)?
+    .ok_or_else(|| {
+        error::not_found(
+            entity::QUANT_RECOMMENDATION_REPORT,
+            &recommendation.recommendation_report_id,
+        )
+    })?;
+    Ok(SubmissionReportScope {
+        report_id: report.recommendation_report_id,
+        recommendation_id: recommendation.recommendation_id,
+        profile_id: report.profile_id,
+        report_kind: report.report_kind,
+    })
+}
+
+async fn lock_submission_graph(
+    db: &impl ConnectionTrait,
+    intent_id: &OrderIntentId,
+    scope: &SubmissionReportScope,
+) -> Result<quant_order_intent::Model, StorageError> {
+    let report = quant_recommendation_report::Entity::find_by_id(scope.report_id.clone())
+        .lock_exclusive()
+        .one(db)
+        .await
+        .map_err(StorageError::from)?
+        .ok_or_else(|| error::not_found(entity::QUANT_RECOMMENDATION_REPORT, &scope.report_id))?;
+    if report.profile_id != scope.profile_id
+        || report.report_kind != scope.report_kind
+        || report.status != RecommendationReportStatus::Published
+    {
+        return Err(error::state_conflict(
+            entity::QUANT_RECOMMENDATION_REPORT,
+            Some(&scope.report_id),
+            "parent report is no longer the published entry authority",
+        ));
+    }
+    let recommendation = quant_recommendation::Entity::find_by_id(scope.recommendation_id.clone())
+        .lock_exclusive()
+        .one(db)
+        .await
+        .map_err(StorageError::from)?
+        .ok_or_else(|| error::not_found(entity::QUANT_RECOMMENDATION, &scope.recommendation_id))?;
+    if recommendation.recommendation_report_id != scope.report_id
+        || !recommendation.status.allows_new_intent()
+    {
+        return Err(error::state_conflict(
+            entity::QUANT_RECOMMENDATION,
+            Some(&scope.recommendation_id),
+            "recommendation is no longer actionable under its parent report",
+        ));
+    }
+    let intent = load_intent_for_update(db, intent_id).await?;
+    if intent.recommendation_id != scope.recommendation_id {
+        return Err(error::state_conflict(
+            entity::QUANT_ORDER_INTENT,
+            Some(intent_id),
+            "intent recommendation changed while acquiring submission graph locks",
+        ));
+    }
+    Ok(intent)
+}
+
 #[async_trait::async_trait]
 impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
     async fn claim_for_submission(
@@ -85,7 +175,9 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
     ) -> Result<(OrderIntentInfo, EntryConditionInstanceInfo), StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
         let intent_id = &claim.order_intent_id;
-        let row = lock_terminal_graph(&txn, intent_id).await?;
+        let scope = probe_submission_scope(&txn, intent_id).await?;
+        acquire_report_scope_lock(&txn, &scope.profile_id, scope.report_kind).await?;
+        let row = lock_submission_graph(&txn, intent_id, &scope).await?;
         if !matches!(
             row.status,
             OrderIntentStatus::Approved | OrderIntentStatus::ApprovedByPolicy
@@ -185,10 +277,14 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
     ) -> Result<ExecutionOrderInfo, StorageError> {
         let intent_id = order.order_intent_id.clone();
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        verify_clear_latch_generation(&txn, feature_parity_state_id).await?;
 
-        // Re-lock the intent and re-verify the claim is still held (double-submit guard).
-        let intent = lock_terminal_graph(&txn, &intent_id).await?;
+        // Scope lock linearizes write-ahead submission against report supersession.
+        // The read-only probe is never authoritative; every parent row is
+        // re-locked and revalidated after the advisory lock is held.
+        let scope = probe_submission_scope(&txn, &intent_id).await?;
+        acquire_report_scope_lock(&txn, &scope.profile_id, scope.report_kind).await?;
+        let intent = lock_submission_graph(&txn, &intent_id, &scope).await?;
+        verify_clear_latch_generation(&txn, feature_parity_state_id).await?;
         if intent.status != OrderIntentStatus::AdmissionPending {
             return Err(error::state_conflict(
                 entity::QUANT_ORDER_INTENT,
@@ -717,7 +813,7 @@ async fn advance_recommendation_executed(
             entity: "recommendation",
             id: recommendation_id.to_string(),
         })?;
-    if row.status.is_actionable_for_intent() {
+    if row.status.allows_new_intent() {
         let mut active = row.into_active_model();
         active.status = ActiveValue::Set(RecommendationStatus::Executed);
         active.update(db).await.map_err(StorageError::from)?;

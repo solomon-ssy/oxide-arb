@@ -11,34 +11,82 @@
 use crate::{
     domain::{RecommendationInfo, RecommendationReportInfo},
     enums::quant::OutcomeSide,
-    types::{EligibilitySummary, MarketId, RecommendationId, RecommendationReportId, Usd},
+    types::{
+        Bps, EligibilitySummary, ExecutionEligibility, MarketId, Probability,
+        RecommendationFactorBreakdown, RecommendationId, RecommendationReportId,
+        RecommendationTradePlan, Usd,
+    },
 };
+use chrono::{DateTime, Utc};
 use std::collections::BTreeMap;
 
+/// A typed field whose decision semantics changed between two snapshots.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecommendationChangedField {
+    Rank,
+    CompositeScore,
+    RiskAdjustedScore,
+    Confidence,
+    ExpectedReturn,
+    Downside,
+    Sizing,
+    Validity,
+    Eligibility,
+    TradePlanAvailability,
+    Entry,
+    Exit,
+    FactorBreakdown,
+}
+
+/// Decision-relevant state of one recommendation on one side of a diff.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecommendationDiffSnapshot {
+    pub recommendation_id: RecommendationId,
+    pub rank: i32,
+    pub composite_score: Probability,
+    pub risk_adjusted_score: Probability,
+    pub confidence: Probability,
+    pub expected_return_bps: Bps,
+    pub downside_bps: Bps,
+    pub valid_from: DateTime<Utc>,
+    pub valid_until: DateTime<Utc>,
+    pub execution_eligibility: ExecutionEligibility,
+    pub trade_plan: RecommendationTradePlan,
+    pub factor_breakdown: RecommendationFactorBreakdown,
+}
+
+impl From<&RecommendationInfo> for RecommendationDiffSnapshot {
+    fn from(rec: &RecommendationInfo) -> Self {
+        Self {
+            recommendation_id: rec.recommendation_id.clone(),
+            rank: rec.rank,
+            composite_score: rec.composite_score,
+            risk_adjusted_score: rec.risk_adjusted_score,
+            confidence: rec.confidence,
+            expected_return_bps: rec.expected_return_bps,
+            downside_bps: rec.downside_bps,
+            valid_from: rec.valid_from,
+            valid_until: rec.valid_until,
+            execution_eligibility: rec.execution_eligibility.clone(),
+            trade_plan: rec.trade_plan.clone(),
+            factor_breakdown: rec.factor_breakdown.clone(),
+        }
+    }
+}
+
 /// How a single `(market, outcome_side)` position changed between two reports.
-///
-/// For an added position the `base_*` fields are `None`; for a removed position
-/// the `compare_*` fields are `None`; for a retained position both sides are
-/// present and `rank` / `suggested_usd` may differ. `suggested_usd_delta` is
-/// always `compare − base` (treating an absent side as zero), so it is signed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecommendationDelta {
     /// Market the position is opened in.
     pub market_id: MarketId,
     /// Outcome token side (the economic identity together with `market_id`).
     pub outcome_side: OutcomeSide,
-    /// Recommendation id in the base report, when present.
-    pub base_recommendation_id: Option<RecommendationId>,
-    /// Recommendation id in the compare report, when present.
-    pub compare_recommendation_id: Option<RecommendationId>,
-    /// Rank in the base report, when present.
-    pub base_rank: Option<i32>,
-    /// Rank in the compare report, when present.
-    pub compare_rank: Option<i32>,
-    /// Suggested USD in the base report, when present.
-    pub base_suggested_usd: Option<Usd>,
-    /// Suggested USD in the compare report, when present.
-    pub compare_suggested_usd: Option<Usd>,
+    /// Decision state in the base report; absent for an addition.
+    pub base: Option<RecommendationDiffSnapshot>,
+    /// Decision state in the compare report; absent for a removal.
+    pub compare: Option<RecommendationDiffSnapshot>,
+    /// Stable, typed summary used by the UI to prioritize high-signal changes.
+    pub changed_fields: Vec<RecommendationChangedField>,
     /// `compare − base` suggested USD (absent side counts as zero); signed.
     pub suggested_usd_delta: Usd,
 }
@@ -118,12 +166,13 @@ pub fn compute_report_diff(
     for key in keys {
         let base_rec = base_by_key.get(key).copied();
         let compare_rec = compare_by_key.get(key).copied();
-        let delta = recommendation_delta(base_rec, compare_rec);
-        match (base_rec, compare_rec) {
-            (Some(_), Some(_)) => retained.push(delta),
-            (None, Some(_)) => added.push(delta),
-            (Some(_), None) => removed.push(delta),
-            (None, None) => unreachable!("key originates from one of the two maps"),
+        if let Some(delta) = recommendation_delta(base_rec, compare_rec) {
+            match (base_rec, compare_rec) {
+                (Some(_), Some(_)) => retained.push(delta),
+                (None, Some(_)) => added.push(delta),
+                (Some(_), None) => removed.push(delta),
+                (None, None) => {}
+            }
         }
     }
 
@@ -149,21 +198,124 @@ pub fn compute_report_diff(
 fn recommendation_delta(
     base: Option<&RecommendationInfo>,
     compare: Option<&RecommendationInfo>,
-) -> RecommendationDelta {
-    let anchor = base.or(compare).expect("at least one side present");
+) -> Option<RecommendationDelta> {
+    let ((Some(anchor), _) | (None, Some(anchor))) = (base, compare) else {
+        return None;
+    };
     let base_usd = base.and_then(|rec| rec.trade_plan.sizing().map(|sizing| sizing.suggested_usd));
     let compare_usd =
         compare.and_then(|rec| rec.trade_plan.sizing().map(|sizing| sizing.suggested_usd));
     let delta = compare_usd.unwrap_or(Usd::ZERO) - base_usd.unwrap_or(Usd::ZERO);
-    RecommendationDelta {
+    Some(RecommendationDelta {
         market_id: anchor.market_id.clone(),
         outcome_side: anchor.outcome_side,
-        base_recommendation_id: base.map(|rec| rec.recommendation_id.clone()),
-        compare_recommendation_id: compare.map(|rec| rec.recommendation_id.clone()),
-        base_rank: base.map(|rec| rec.rank),
-        compare_rank: compare.map(|rec| rec.rank),
-        base_suggested_usd: base_usd,
-        compare_suggested_usd: compare_usd,
+        base: base.map(Into::into),
+        compare: compare.map(Into::into),
+        changed_fields: recommendation_changed_fields(base, compare),
         suggested_usd_delta: delta,
+    })
+}
+
+fn recommendation_changed_fields(
+    base: Option<&RecommendationInfo>,
+    compare: Option<&RecommendationInfo>,
+) -> Vec<RecommendationChangedField> {
+    let (Some(base), Some(compare)) = (base, compare) else {
+        return vec![
+            RecommendationChangedField::Rank,
+            RecommendationChangedField::CompositeScore,
+            RecommendationChangedField::RiskAdjustedScore,
+            RecommendationChangedField::Confidence,
+            RecommendationChangedField::ExpectedReturn,
+            RecommendationChangedField::Downside,
+            RecommendationChangedField::Sizing,
+            RecommendationChangedField::Validity,
+            RecommendationChangedField::Eligibility,
+            RecommendationChangedField::TradePlanAvailability,
+            RecommendationChangedField::Entry,
+            RecommendationChangedField::Exit,
+            RecommendationChangedField::FactorBreakdown,
+        ];
+    };
+
+    let mut changed = Vec::new();
+    push_if_changed(
+        &mut changed,
+        base.rank != compare.rank,
+        RecommendationChangedField::Rank,
+    );
+    push_if_changed(
+        &mut changed,
+        base.composite_score != compare.composite_score,
+        RecommendationChangedField::CompositeScore,
+    );
+    push_if_changed(
+        &mut changed,
+        base.risk_adjusted_score != compare.risk_adjusted_score,
+        RecommendationChangedField::RiskAdjustedScore,
+    );
+    push_if_changed(
+        &mut changed,
+        base.confidence != compare.confidence,
+        RecommendationChangedField::Confidence,
+    );
+    push_if_changed(
+        &mut changed,
+        base.expected_return_bps != compare.expected_return_bps,
+        RecommendationChangedField::ExpectedReturn,
+    );
+    push_if_changed(
+        &mut changed,
+        base.downside_bps != compare.downside_bps,
+        RecommendationChangedField::Downside,
+    );
+    push_if_changed(
+        &mut changed,
+        base.trade_plan.sizing() != compare.trade_plan.sizing(),
+        RecommendationChangedField::Sizing,
+    );
+    push_if_changed(
+        &mut changed,
+        base.valid_from != compare.valid_from || base.valid_until != compare.valid_until,
+        RecommendationChangedField::Validity,
+    );
+    push_if_changed(
+        &mut changed,
+        base.execution_eligibility != compare.execution_eligibility,
+        RecommendationChangedField::Eligibility,
+    );
+    push_if_changed(
+        &mut changed,
+        base.trade_plan.is_available() != compare.trade_plan.is_available(),
+        RecommendationChangedField::TradePlanAvailability,
+    );
+    let base_frozen = base.trade_plan.frozen();
+    let compare_frozen = compare.trade_plan.frozen();
+    push_if_changed(
+        &mut changed,
+        base_frozen.map(|(_, entry, _, _, _)| entry)
+            != compare_frozen.map(|(_, entry, _, _, _)| entry),
+        RecommendationChangedField::Entry,
+    );
+    push_if_changed(
+        &mut changed,
+        base_frozen.map(|(_, _, _, exit, _)| exit) != compare_frozen.map(|(_, _, _, exit, _)| exit),
+        RecommendationChangedField::Exit,
+    );
+    push_if_changed(
+        &mut changed,
+        base.factor_breakdown != compare.factor_breakdown,
+        RecommendationChangedField::FactorBreakdown,
+    );
+    changed
+}
+
+fn push_if_changed(
+    changed: &mut Vec<RecommendationChangedField>,
+    predicate: bool,
+    field: RecommendationChangedField,
+) {
+    if predicate {
+        changed.push(field);
     }
 }

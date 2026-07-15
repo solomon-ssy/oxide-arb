@@ -242,7 +242,7 @@ impl ResearchProfileArtifact {
     }
 }
 
-/// Return the complete closed registry for Runtime v15.
+/// Return the complete closed registry for Runtime v16.
 pub fn builtin_research_profiles() -> Result<Vec<ResearchProfileArtifact>, String> {
     let published_at = Utc
         .with_ymd_and_hms(2026, 7, 14, 0, 0, 0)
@@ -312,7 +312,7 @@ pub fn builtin_research_profiles() -> Result<Vec<ResearchProfileArtifact>, Strin
     Ok(vec![pooled, weather])
 }
 
-/// Runtime v15 raw-retention floor:
+/// Runtime v16 raw-retention floor:
 /// `max(180, 2 × max(required_days(profile)))`.
 pub fn minimum_raw_retention_days() -> Result<u32, String> {
     let max_required = builtin_research_profiles()?

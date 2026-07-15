@@ -87,6 +87,7 @@ pub struct OperationLogQuery {
     pub actor_user_id: Option<UserId>,
     pub category: Option<OperationCategory>,
     pub resource_type: Option<ResourceType>,
+    pub resource_id: Option<String>,
     pub outcome: Option<OperationOutcome>,
     pub request_id: Option<String>,
     pub governance_audit_event_id: Option<AuditEventId>,

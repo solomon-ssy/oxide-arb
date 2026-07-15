@@ -506,53 +506,20 @@ pub trait OrderIntentService {
 }
 ```
 
-## 10. Report Scheduler 伪代码
+## 10. Durable Report Coordinator
 
-报告调度是新系统主循环，替代旧 `Coalescer -> Scanner -> Funnel -> ExecutionRunner`。
+Report schedule 不是进程内 timer callback，而是 PostgreSQL 上的 durable 协调协议：
 
-**Phase 4 实现**：经 [`ReportScheduleRunner`](04-topn-report-and-recommendation.md#23-report-schedule-runnerphase-4-调度层)
-封装 `tokio-cron-scheduler`；下列逻辑在 job closure 内执行，**不是**裸
-`tokio::time::interval` loop（旧草案保留语义说明）。
+1. runtime-config activation reconcile `quant_report_schedule_state`；
+2. `croner` 计算 latest due occurrence，历史 missed occurrence 聚合写 gap；
+3. queued run 通过 `FOR UPDATE SKIP LOCKED`、全局 Running partial unique index 与 lease claim；
+4. claim 的数据库时间成为实际 `decision_at`，`scheduled_for` 只用于 lateness 审计；
+5. worker heartbeat；lease loss 后原 worker 的完成 CAS 必须失败；
+6. Prepared artifact 的 fact delivery Verified 后，publication transaction 决定 Published 或 Obsolete。
 
-```rust
-pub async fn on_report_schedule_fire(
-    schedule_id: &ScheduleId,
-    deps: &ReportSchedulerDeps,
-) -> QuantResult<()> {
-    // Skip-if-running: see 04 §23.6 overlap guard
-    let trigger_time = Utc::now();
-    let active_config = deps.runtime_config.current();
-    let schedule = active_config.reports.schedule_by_id(schedule_id)?;
-    let request = GenerateReportRequest {
-        schedule_id: schedule_id.clone(),
-        trigger_time,
-        as_of: trigger_time - Duration::from_secs(schedule.knowledge_lag_secs),
-        runtime_config_version_id: active_config.version_id(),
-        mode: deps.mode.load(),
-    };
-
-    match deps.lifecycle.run_scheduled(schedule_id).await {
-        Ok(report) => deps.publisher.publish(&report).await?,
-        Err(error) => {
-            deps.metrics.report_failed(schedule_id, &error);
-            deps.alerts.report_generation_failed(schedule_id, &error).await;
-        }
-    }
-    Ok(())
-}
-
-// AppRunner registers one TaskId::ReportGenerator:
-//   ReportScheduleRunner::sync_from_config → scheduler.start()
-//   shutdown.cancelled() → scheduler.shutdown()
-```
-
-关键点：
-
-- `as_of` 永远不是 wall-clock now，而是扣除 `knowledge_lag` 后的决策时间。
-- `runtime_config` 先冻结成版本化 snapshot，再传入整个 pipeline。
-- 报告失败不能让 ingest 退出。
-- 报告成功也不能直接下单；必须进入 mode gate。
-
+多副本共享同一 PG ledger，不需要 leader election。调度不做历史 backfill；scheduled failure 等待下一
+cadence，ad-hoc failure 由 operator 显式 retry。完整规则见
+[Phase 11.8](phase-11/11.8-report-lifecycle-fsm-completion.md)。
 ## 11. 依赖方向
 
 目标依赖方向：

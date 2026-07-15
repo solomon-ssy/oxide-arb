@@ -3,13 +3,9 @@
 use std::sync::Arc;
 
 use quant_pivot_api::ws::ClobWsManager;
-use quant_pivot_error::{QuantError, QuantResult};
-use quant_pivot_models::{
-    domain::{
-        CatalogStatusPort,
-        governance::lifecycle::{MarketDataConnectivity, OperationalPhase, WsShardConnectivity},
-    },
-    runtime_config::RuntimeConfig,
+use quant_pivot_models::domain::{
+    CatalogStatusPort,
+    governance::lifecycle::{MarketDataConnectivity, OperationalPhase, WsShardConnectivity},
 };
 
 use crate::service::catalog_readiness::CatalogReadiness;
@@ -22,16 +18,6 @@ pub trait ReportReadinessGate: Send + Sync {
     /// Whether the runtime is below the report-generation threshold.
     fn is_system_degraded(&self) -> bool {
         !matches!(self.operational_phase(), OperationalPhase::Operational)
-    }
-
-    /// Fail closed when empty reports are disabled but the runtime is degraded.
-    fn ensure_degraded_empty_allowed(&self, config: &RuntimeConfig) -> QuantResult<()> {
-        if self.is_system_degraded() && !config.reports.publish_empty_reports {
-            return Err(QuantError::config(
-                "report generation blocked: runtime degraded and publish_empty_reports=false",
-            ));
-        }
-        Ok(())
     }
 }
 

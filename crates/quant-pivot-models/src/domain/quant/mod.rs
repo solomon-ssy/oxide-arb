@@ -39,6 +39,8 @@ mod report_data_quality;
 mod report_diff;
 #[allow(clippy::needless_update)] // Insert DTO omits delivery-managed timestamps and lease fields.
 mod report_fact_delivery;
+#[allow(clippy::needless_update)] // Insert DTO intentionally contains queued-run fields only.
+mod report_run;
 mod report_txn;
 #[allow(clippy::needless_update)] // NewResearchJob omits DB-managed timestamps
 mod research_job;
@@ -82,6 +84,7 @@ pub use reconciliation::*;
 pub use report_data_quality::*;
 pub use report_diff::*;
 pub use report_fact_delivery::*;
+pub use report_run::*;
 pub use report_txn::*;
 pub use research_job::*;
 pub use research_readiness::*;

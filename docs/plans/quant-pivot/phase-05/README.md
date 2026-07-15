@@ -116,7 +116,8 @@ flowchart LR
   `ExecutionOrderState`（§340–352）、`RecommendationOutcome`（§355–367）、
   `OrderIntentKind` / `ExecutionOrderPhase` / `OrderTypeKind` / `VenueOrderStatus`
   （[`models/src/enums/execution.rs`](../../../crates/quant-pivot-models/src/enums/execution.rs)）。
-- ClickHouse fact：`quant_recommendation_event` / `quant_execution_event`（row 已定义）。
+- ClickHouse fact：`quant_report_recommendation_fact`（Phase 11.8 无 lifecycle decision snapshot）/
+  `quant_execution_event`。
 
 **Phase 04 已交付（执行输入）**
 

@@ -20,7 +20,7 @@ use actix_web::{
 use async_trait::async_trait;
 use quant_pivot_core::{
     app::ports::execution_read::CoreExecutionReadPort, execution::IntentLifecyclePublisher,
-    report::AdHocReportRequest, runtime_config::RuntimeConfigStore,
+    runtime_config::RuntimeConfigStore,
 };
 use quant_pivot_error::{
     QuantError, QuantResult, auth::AuthError, control::ControlError, execution::ExecutionError,
@@ -87,7 +87,8 @@ use quant_pivot_models::{
 use quant_pivot_repository::{
     postgres::{
         PgAttributionRepository, PgEntryConditionRepository, PgExecutionOrderRepository,
-        PgPositionRepository, PgReconciliationRepository, PgSettlementRedeemRepository,
+        PgPositionRepository, PgReconciliationRepository, PgReportRunRepository,
+        PgSettlementRedeemRepository,
     },
     traits::{
         AttributionRepository, BasisAlertRepository, DomainSourceCursorRepository,
@@ -236,8 +237,8 @@ pub struct TestEnv {
     /// Mutable report-funnel facts shared by the real report port and web state.
     pub quant_facts: Arc<MockQuantFactRead>,
     core_report: CoreReportTestHandle,
-    /// Ad-hoc enqueue capture from [`FakeReportScheduleRunner`].
-    pub ad_hoc_enqueued: Arc<Mutex<Vec<AdHocReportRequest>>>,
+    /// Durable ad-hoc/scheduled report-run ledger.
+    pub report_runs: Arc<PgReportRunRepository>,
     pg_container: ContainerAsync<Postgres>,
     redis: Option<ContainerAsync<Redis>>,
     ws_shutdown: CancellationToken,
@@ -313,7 +314,7 @@ impl TestEnv {
             model_artifact_store,
             order_intent_runtime_config,
             quant_facts: Arc::clone(&core_report.quant_facts),
-            ad_hoc_enqueued: Arc::clone(&core_report.enqueued),
+            report_runs: Arc::clone(&core_report.report_runs),
             core_report,
             pg_container,
             redis: Some(redis_container),

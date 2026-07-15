@@ -1,24 +1,22 @@
 ---
 source: crates/quant-pivot-models/tests/report_payload_snapshots.rs
+assertion_line: 17
 expression: empty_report()
 ---
 {
   "recommendation_report_id": "75e4373b-661a-59d3-94a9-3739d1217a10",
+  "profile_id": "weather_forecast_24h",
   "profile_ref": {
     "id": "weather_forecast_24h",
     "version": 1,
     "content_hash": "blake3:a6f9e3ab46e5e9e4cd8d10bbc6ebf2755d5488baac2565c0ad0c91482e3baf8f"
   },
   "report_kind": "top_n",
-  "trigger_kind": "scheduled",
-  "trigger_key": "scheduled:daily-topn:2023-11-14T22:13:20Z",
-  "trigger_time": "2023-11-14T22:13:20Z",
-  "knowledge_lag_secs": 120,
   "decision_at": "2023-11-14T22:11:20Z",
   "horizon_secs": 86400,
   "runtime_mode": "report_only",
   "top_n": 20,
-  "status": "published_empty",
+  "status": "published",
   "account_source": "polymarket",
   "capital_base_usd": "10000",
   "account_snapshot_ref": "6412901d-5f81-5835-8ada-63231d3ffc4f",
@@ -62,7 +60,13 @@ expression: empty_report()
     ]
   },
   "fact_delivery": null,
+  "run": null,
   "published_at": "2023-11-14T22:13:20Z",
+  "valid_until": "2023-11-14T23:13:20Z",
+  "successor_report_id": null,
+  "predecessor_report_id": null,
+  "superseded_at": null,
+  "obsoleted_at": null,
   "revoked_at": null,
   "expired_at": null,
   "status_reason": null,

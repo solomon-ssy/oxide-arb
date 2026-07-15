@@ -48,11 +48,14 @@ impl AttributionRepository for PgAttributionRepository {
                 .await
                 .map_err(StorageError::from)?
                 .ok_or_else(|| not_found(entity::QUANT_RECOMMENDATION, &recommendation_id))?;
-        if recommendation_row.status.excluded_from_attribution() {
+        if !recommendation_row.status.eligible_for_attribution() {
             txn.rollback().await.map_err(StorageError::from)?;
             return Err(StorageError::InvariantViolation {
                 entity: Some(entity::QUANT_RECOMMENDATION),
-                detail: format!("cannot attribute revoked recommendation {recommendation_id}"),
+                detail: format!(
+                    "cannot attribute recommendation {recommendation_id} in status {:?}",
+                    recommendation_row.status
+                ),
             });
         }
 

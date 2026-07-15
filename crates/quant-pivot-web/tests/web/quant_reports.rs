@@ -9,13 +9,23 @@ use actix_web::{
     http::{StatusCode, header::AUTHORIZATION},
     test::TestRequest,
 };
+use chrono::Utc;
 use serde_json::{Value, json};
 
 use quant_pivot_models::{
+    enums::quant::{RecommendationReportStatus, ReportFactDeliveryStatus, ReportRunTerminalReason},
     runtime_config::{ReportsConfig, RuntimeConfig},
-    types::RecommendationReportId,
+    types::{POOLED_1H_CONTROL_PROFILE_ID, RecommendationReportId, builtin_research_profiles},
 };
-use quant_pivot_test_support::report_pipeline_harness::seed_fixture_published_report;
+use quant_pivot_repository::{
+    postgres::PgRecommendationReportRepository,
+    traits::{RecommendationReportRepository, ReportRunRepository},
+};
+use quant_pivot_test_support::report_pipeline_harness::{
+    seed_fixture_prepared_report, seed_fixture_published_report,
+    seed_fixture_published_report_with_profile,
+};
+use uuid::Uuid;
 
 use crate::{
     client,
@@ -275,13 +285,22 @@ async fn report_detail_recommendations_and_evidence_views() {
 
 #[actix_web::test]
 #[ignore = "requires Docker"]
-async fn latest_returns_most_recent_published() {
+async fn current_returns_published_report_in_exact_scope() {
     let env = TestEnv::start().await;
     let admin = login(&env, "admin", "admin").await;
     let report_id = RecommendationReportId::from_v7();
-    seed_fixture_published_report(&env.db, report_id.clone(), &env.fixture_report_ctx()).await;
+    let report =
+        seed_fixture_published_report(&env.db, report_id.clone(), &env.fixture_report_ctx()).await;
 
-    let res = get(&env, "/api/quant/reports/latest", &admin).await;
+    let res = get(
+        &env,
+        &format!(
+            "/api/quant/reports/current?profile_id={}&kind=top_n",
+            report.profile_id
+        ),
+        &admin,
+    )
+    .await;
     assert_eq!(res.status, StatusCode::OK);
     assert_eq!(
         res.json()["data"]["recommendation_report_id"],
@@ -291,7 +310,17 @@ async fn latest_returns_most_recent_published() {
 
 #[actix_web::test]
 #[ignore = "requires Docker"]
-async fn report_diff_view_shape() {
+async fn legacy_latest_route_is_absent() {
+    let env = TestEnv::start().await;
+    let admin = login(&env, "admin", "admin").await;
+
+    let res = get(&env, "/api/quant/reports/latest", &admin).await;
+    assert_eq!(res.status, StatusCode::NOT_FOUND);
+}
+
+#[actix_web::test]
+#[ignore = "requires Docker"]
+async fn cross_scope_report_diff_is_bad_request() {
     let env = TestEnv::start().await;
     let admin = login(&env, "admin", "admin").await;
     let base = RecommendationReportId::from_v7();
@@ -313,11 +342,38 @@ async fn report_diff_view_shape() {
     assert!(data["retained"].is_array());
     assert!(data["base_eligibility"].is_object());
     assert!(data["total_suggested_usd_delta"].is_string());
+    let retained = data["retained"].as_array().expect("retained deltas");
+    assert_eq!(retained.len(), 2);
+    assert!(retained[0]["base"].is_object());
+    assert!(retained[0]["compare"].is_object());
+    assert!(retained[0]["changed_fields"].is_array());
+
+    let other_profile = builtin_research_profiles()
+        .expect("built-in profiles")
+        .into_iter()
+        .find(|profile| profile.profile_ref.id == POOLED_1H_CONTROL_PROFILE_ID)
+        .expect("pooled control profile")
+        .profile_ref;
+    let other_scope = RecommendationReportId::from_v7();
+    seed_fixture_published_report_with_profile(
+        &env.db,
+        other_scope.clone(),
+        &env.fixture_report_ctx(),
+        other_profile,
+    )
+    .await;
+    let rejected = get(
+        &env,
+        &format!("/api/quant/reports/{base}/diff/{other_scope}"),
+        &admin,
+    )
+    .await;
+    assert_eq!(rejected.status, StatusCode::BAD_REQUEST);
 }
 
 #[actix_web::test]
 #[ignore = "requires Docker"]
-async fn run_report_gated_by_ad_hoc_enabled_and_rbac() {
+async fn report_run_routes_enforce_rbac_idempotency_and_conflicts() {
     let env = TestEnv::start().await;
     let admin = login(&env, "admin", "admin").await;
 
@@ -350,12 +406,118 @@ async fn run_report_gated_by_ad_hoc_enabled_and_rbac() {
         accepted.json()["data"]["trigger_key"],
         json!("ad_hoc:adhoc-2")
     );
-    {
-        let enqueued = env.ad_hoc_enqueued.lock().unwrap();
-        assert_eq!(enqueued.len(), 1);
-        assert_eq!(enqueued[0].request_id, "adhoc-2");
-        drop(enqueued);
-    }
+    let run = env
+        .report_runs
+        .find_by_trigger_key("ad_hoc:adhoc-2")
+        .await
+        .expect("load durable report run")
+        .expect("ad-hoc run row");
+    assert_eq!(run.request_id.as_deref(), Some("adhoc-2"));
+
+    // Exact replay is an HTTP 200 and returns the same durable identity.
+    let replay = post(
+        &env,
+        "/api/quant/reports/run",
+        &analyst,
+        &[("X-Acting-Role", "analyst"), ("X-Request-Id", "req-run-2b")],
+        json!({ "request_id": "adhoc-2", "reason": "network replay" }),
+    )
+    .await;
+    assert_eq!(replay.status, StatusCode::OK);
+    assert_eq!(
+        replay.json()["data"]["report_run_id"],
+        json!(run.report_run_id.to_string())
+    );
+
+    let list = get(
+        &env,
+        "/api/quant/report-runs?page=1&size=10&trigger_kind=ad_hoc",
+        &analyst,
+    )
+    .await;
+    assert_eq!(list.status, StatusCode::OK);
+    assert_eq!(list.json()["data"]["total"], json!(1));
+    let detail = get(
+        &env,
+        &format!("/api/quant/report-runs/{}", run.report_run_id),
+        &analyst,
+    )
+    .await;
+    assert_eq!(detail.status, StatusCode::OK);
+    assert_eq!(detail.json()["data"]["status"], json!("queued"));
+
+    let invalid_retry = post(
+        &env,
+        &format!("/api/quant/report-runs/{}/retry", run.report_run_id),
+        &analyst,
+        &[
+            ("X-Acting-Role", "analyst"),
+            ("X-Request-Id", "req-retry-1"),
+        ],
+        json!({ "request_id": "retry-1", "reason": "retry queued run" }),
+    )
+    .await;
+    assert_eq!(invalid_retry.status, StatusCode::CONFLICT);
+
+    env.report_runs
+        .skip_queued_run(
+            &run.report_run_id,
+            ReportRunTerminalReason::QueueExpired,
+            Utc::now(),
+        )
+        .await
+        .expect("terminalize ad-hoc fixture");
+    let retried = post(
+        &env,
+        &format!("/api/quant/report-runs/{}/retry", run.report_run_id),
+        &analyst,
+        &[
+            ("X-Acting-Role", "analyst"),
+            ("X-Request-Id", "req-retry-2"),
+        ],
+        json!({ "request_id": "retry-2", "reason": "operator retry" }),
+    )
+    .await;
+    assert_eq!(retried.status, StatusCode::ACCEPTED);
+    assert_eq!(
+        retried.json()["data"]["retry_of_run_id"],
+        json!(run.report_run_id.to_string())
+    );
+    let retry_run_id = retried.json()["data"]["report_run_id"]
+        .as_str()
+        .expect("retry run id")
+        .to_owned();
+    let retry_replay = post(
+        &env,
+        &format!("/api/quant/report-runs/{}/retry", run.report_run_id),
+        &analyst,
+        &[
+            ("X-Acting-Role", "analyst"),
+            ("X-Request-Id", "req-retry-3"),
+        ],
+        json!({ "request_id": "retry-2", "reason": "retry response replay" }),
+    )
+    .await;
+    assert_eq!(retry_replay.status, StatusCode::OK);
+    assert_eq!(
+        retry_replay.json()["data"]["report_run_id"],
+        json!(retry_run_id)
+    );
+
+    let health = get(&env, "/api/quant/report-schedules/health", &analyst).await;
+    assert_eq!(health.status, StatusCode::OK);
+    assert!(health.json()["data"]["observed_at"].is_string());
+    assert!(health.json()["data"]["queued_run_count"].is_number());
+    assert!(health.json()["data"]["prepared_report_count"].is_number());
+    assert!(health.json()["data"]["current_reports"].is_array());
+    let gaps = get(
+        &env,
+        "/api/quant/report-schedule-gaps?page=1&size=10",
+        &analyst,
+    )
+    .await;
+    assert_eq!(gaps.status, StatusCode::OK);
+    assert!(gaps.json()["data"]["items"].is_array());
 
     // viewer may not enqueue → 403.
     let viewer = user_with_role(&env, &admin, "viewer1", "viewer").await;
@@ -365,6 +527,113 @@ async fn run_report_gated_by_ad_hoc_enabled_and_rbac() {
         &viewer,
         &[("X-Acting-Role", "viewer"), ("X-Request-Id", "req-run-3")],
         json!({ "request_id": "adhoc-3", "reason": "viewer refresh" }),
+    )
+    .await;
+    assert_eq!(denied.status, StatusCode::FORBIDDEN);
+}
+
+#[actix_web::test]
+#[ignore = "requires Docker"]
+async fn publication_retry_reuses_bundle_and_obsoletes_when_stale() {
+    let env = TestEnv::start().await;
+    let admin = login(&env, "admin", "admin").await;
+    let report_id = RecommendationReportId::from_v7();
+    seed_fixture_published_report(&env.db, report_id.clone(), &env.fixture_report_ctx()).await;
+
+    let timeline = get(
+        &env,
+        &format!("/api/quant/reports/{report_id}/timeline?page=1&size=20"),
+        &admin,
+    )
+    .await;
+    assert_eq!(timeline.status, StatusCode::OK);
+    assert!(
+        timeline.json()["data"]["total"]
+            .as_u64()
+            .is_some_and(|n| n >= 1)
+    );
+    assert!(
+        timeline.json()["data"]["items"]
+            .as_array()
+            .expect("timeline items")
+            .iter()
+            .all(|row| row["resource_id"] == json!(report_id.to_string()))
+    );
+
+    let already_verified = post(
+        &env,
+        &format!("/api/quant/reports/{report_id}/publication/retry"),
+        &admin,
+        &[
+            ("X-Acting-Role", "super_admin"),
+            ("X-Request-Id", "pub-retry-1"),
+        ],
+        json!({ "request_id": "publication-retry-1", "reason": "must be rejected" }),
+    )
+    .await;
+    assert_eq!(already_verified.status, StatusCode::CONFLICT);
+
+    let failed_report_id = RecommendationReportId::from_v7();
+    seed_fixture_prepared_report(&env.db, failed_report_id.clone(), &env.fixture_report_ctx())
+        .await;
+    let repository = PgRecommendationReportRepository::new(env.db.clone());
+    let delivery_worker = Uuid::now_v7();
+    repository
+        .claim_fact_delivery(delivery_worker, 60)
+        .await
+        .expect("claim prepared delivery")
+        .expect("prepared delivery is pending");
+    let failed = repository
+        .fail_fact_delivery(
+            &failed_report_id,
+            delivery_worker,
+            ReportFactDeliveryStatus::Failed,
+            "injected terminal ClickHouse failure",
+        )
+        .await
+        .expect("terminalize delivery")
+        .into_applied()
+        .expect("failure settlement must retain its claim");
+
+    let retried = post(
+        &env,
+        &format!("/api/quant/reports/{failed_report_id}/publication/retry"),
+        &admin,
+        &[
+            ("X-Acting-Role", "super_admin"),
+            ("X-Request-Id", "pub-retry-2"),
+        ],
+        json!({ "request_id": "publication-retry-2", "reason": "ClickHouse recovered" }),
+    )
+    .await;
+    assert_eq!(retried.status, StatusCode::ACCEPTED);
+    assert_eq!(retried.json()["data"]["status"], json!("retrying"));
+    assert!(retried.json()["data"]["last_error"].is_string());
+
+    let retry_worker = Uuid::now_v7();
+    let retry_claim = repository
+        .claim_fact_delivery(retry_worker, 60)
+        .await
+        .expect("claim governed publication retry")
+        .expect("retry became immediately due");
+    assert_eq!(retry_claim.recommendation_report_id, failed_report_id);
+    assert_eq!(retry_claim.bundle_hash, failed.bundle_hash);
+    let stale = repository
+        .verify_and_publish_report(&failed_report_id, retry_worker, Utc::now())
+        .await
+        .expect("verify retried immutable bundle")
+        .into_applied()
+        .expect("publication retry claim must remain held");
+    assert_eq!(stale.report.status, RecommendationReportStatus::Obsolete);
+    assert_eq!(stale.delivery.status, ReportFactDeliveryStatus::Cancelled);
+
+    let viewer = user_with_role(&env, &admin, "viewerretry", "viewer").await;
+    let denied = post(
+        &env,
+        &format!("/api/quant/reports/{failed_report_id}/publication/retry"),
+        &viewer,
+        &[("X-Acting-Role", "viewer"), ("X-Request-Id", "pub-retry-3")],
+        json!({ "request_id": "publication-retry-3", "reason": "forbidden retry" }),
     )
     .await;
     assert_eq!(denied.status, StatusCode::FORBIDDEN);

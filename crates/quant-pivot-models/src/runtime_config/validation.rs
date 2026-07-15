@@ -729,6 +729,14 @@ fn validate_reports(config: &RuntimeConfig, report: &mut ConfigValidationReport)
             detail: "must be greater than zero".to_owned(),
         });
     }
+    if config.reports.ad_hoc_default_top_n == 0
+        || config.reports.ad_hoc_default_top_n > config.reports.max_top_n
+    {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "reports.ad_hoc_default_top_n",
+            detail: "must be in 1..=reports.max_top_n".to_owned(),
+        });
+    }
     if config.reports.fallback_horizon_secs == 0 {
         report.errors.push(ConfigValidationError::InvalidValue {
             field: "reports.fallback_horizon_secs",
@@ -917,7 +925,7 @@ fn validate_execution(config: &RuntimeConfig, report: &mut ConfigValidationRepor
     if config.execution.auto_execution.enabled {
         report.errors.push(ConfigValidationError::InvalidValue {
             field: "execution.auto_execution.enabled",
-            detail: "Runtime v15 keeps AutoExecution blocked; Phase 11.11 owns its final governance gate"
+            detail: "Runtime v16 keeps AutoExecution blocked; Phase 11.11 owns its final governance gate"
                 .to_owned(),
         });
     }
@@ -997,19 +1005,19 @@ fn validate_semi_auto_canary(config: &RuntimeConfig, report: &mut ConfigValidati
     if !only_first_tier {
         report.errors.push(ConfigValidationError::InvalidValue {
             field: "execution.semi_auto.canary.allowed_cash_budget_tiers_usd",
-            detail: "runtime v15 canary must contain exactly the $25 cash-budget tier".to_owned(),
+            detail: "runtime v16 canary must contain exactly the $25 cash-budget tier".to_owned(),
         });
     }
     if canary.max_open_intents != 1 {
         report.errors.push(ConfigValidationError::InvalidValue {
             field: "execution.semi_auto.canary.max_open_intents",
-            detail: "runtime v15 canary must allow exactly one open intent".to_owned(),
+            detail: "runtime v16 canary must allow exactly one open intent".to_owned(),
         });
     }
     if canary.max_total_cash_per_report.value.parse::<Decimal>() != Ok(Decimal::new(25, 0)) {
         report.errors.push(ConfigValidationError::InvalidValue {
             field: "execution.semi_auto.canary.max_total_cash_per_report",
-            detail: "runtime v15 canary must cap each report at exactly $25 total cash".to_owned(),
+            detail: "runtime v16 canary must cap each report at exactly $25 total cash".to_owned(),
         });
     }
     if canary

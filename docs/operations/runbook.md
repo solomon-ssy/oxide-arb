@@ -138,7 +138,8 @@ curl -sS -X POST "$BASE/api/system/kill-switch" \
 
 Deploy config 只放连接、凭证、基础设施、Polymarket endpoints、账户 topology。不要把策略、风控、报告调度写进 TOML。
 
-**Runtime config** 是版本化 JSON，当前唯一可用 schema version 是 **10**。它包含：
+**Runtime config** 是版本化 JSON；当前唯一可用版本是 **v16**。v16 已删除旧的 empty
+suppression 开关；空结果始终发布为正式报告。它包含：
 
 `selection`、`data_quality`、`features`、`factors`、`domain`、`model`、`quality_gate`、`training`、`reports`、`portfolio`、`execution`、`notification`、`research`、`feedback`。
 
@@ -988,6 +989,23 @@ curl -sS "$BASE/api/runtime-config" \
 | 因子定义从哪来？ | **`POST /api/research/factors/register`** 幂等把启用因子集登记为 `Draft`，再 `publish-batch` 发布。dataset build 只要求因子**启用**（不要求 Published），但**报告**要求 Published。 |
 | 能否跳过训练手动指模型？ | 只能指向当前契约下从 frozen v2 dataset 训练、并已通过 artifact/full-parity/质量门的 **Published** 版本；空库首次激活不存在可复用旧版本。 |
 
+### 8.0.1 Phase 11.8 ClickHouse clean-slate 门禁
+
+当前 ClickHouse migration 2 `report_lifecycle_v2` 是破坏式、WORM 且 `OfflineRequired`：删除旧
+`quant_recommendation_event`，创建不含 live status 的 `quant_report_recommendation_fact`，并扩展 attribution
+outcome 闭集。在任何 report writer 启动前执行：
+
+```bash
+cargo run -p quant-pivot-xtask -- \
+  clickhouse-schema apply-offline --config-dir config
+cargo run -p quant-pivot-xtask -- \
+  clickhouse-schema verify --config-dir config
+```
+
+命令会先证明旧 recommendation/attribution 两表均为空；任一非空立即 fail closed，不搬运或删除现有数据。
+禁止修改 migration 1 checksum、手工 ALTER、搬运旧 rows、创建兼容 view 或让 runtime startup 自动执行该
+offline migration。完成后 migration ledger 的 current version 必须为 2，且旧表必须不存在。
+
 ### 8.1 从冷启动到第一份报告（完整流程）
 
 ```mermaid
@@ -1301,23 +1319,27 @@ curl -sS -X POST "$BASE/api/quant/reports/run" \
 
 | HTTP | Body | 含义 |
 |------|------|------|
-| **202 Accepted** | `{ request_id, trigger_key }` | 已入队；**尚无** `recommendation_report_id` |
+| **202 Accepted** | `ReportRunView` | 新 run 已 durable 入队；通过 `report_run_id` 跟踪 |
+| **200 OK** | 既有 `ReportRunView` | 相同 request id 的幂等重放；没有创建第二次 run |
 | **409 Conflict** | `ad-hoc report generation is disabled` | 未开启 `ad_hoc_report_enabled` |
+| **429 Too Many Requests** | queue-capacity error | durable ad-hoc queue 已达到 deploy 上限 |
 | **4xx** | validation / auth | 缺 `top_n`/`knowledge_lag_secs`、权限不足等 |
 
 **跟踪完成**（三选一，推荐 1+2）：
 
-1. **WebSocket** — 订阅 `quant.report` 频道，事件序列：`started` → `published` / `empty` / `failed`。
-2. **轮询列表** — `GET /api/quant/reports?limit=5` 按 `created_at` 查看新行；或 `GET /api/quant/reports/latest`（仅 **published** Top-N）。
-3. **Metrics** — `quant_report_runs_total`、`quant_reports_published_total`、`quant_reports_empty_total`。
+1. **Run API** — `GET /api/quant/report-runs/{report_run_id}`；刷新、重连和进程重启后仍是权威。
+2. **WebSocket** — 订阅 `quant.report_run` 作为 revision hint；收到事件后重读 run API。
+3. **Report current** — `GET /api/quant/reports/current?profile_id=<id>&kind=top_n`。
+4. **Metrics / health** — `GET /api/quant/report-schedules/health` 与 report-run/gap metrics。
 
-**幂等**：相同 `request_id` 重复 POST 不会重复构建（回归测试 `ad_hoc_idempotent_on_trigger_key`）。客户端应使用全局唯一 `request_id`（如 `manual-<date>-<seq>`）。
+**幂等**：相同 `request_id` 重复 POST 返回同一 durable run。客户端应使用全局唯一 `request_id`
+（如 `manual-<date>-<seq>`）；retry 必须调用 run retry endpoint 生成带 lineage 的新 run，不能更换 request id 绕过审计。
 
-**与 `publish_empty_reports` 的关系**：
+**Empty outcome**：
 
-- 默认 `publish_empty_reports=true`：模型跑完但无 positive signal 时仍 **持久化** empty report（带 `empty_reason`）。
-- `publish_empty_reports=false`：empty 结果 **跳过 Postgres**，仅 ephemeral WS + metric。
-- 无论哪种，**没有 active model 时在更早阶段失败**，不会产生 empty report。
+- Runtime v16 不再存在 `publish_empty_reports`。
+- 完整评估得到零 recommendations 时仍写 Prepared report，事实验证后正式 Published，并取代旧 current。
+- 没有 active model、账户读取失败或系统 readiness 不满足是 ReportRun Failed，不产生 report。
 
 **Ad-hoc 仍失败时的常见原因**（与定时报告相同）：
 
@@ -1880,7 +1902,10 @@ curl -sS -X POST "$BASE/api/quant/reconciliations/$RECON_ID/resolve" \
 | 运行 runtime full parity | `POST /api/research/feature-integrity/runs/full` |
 | Governed latch acknowledge | `POST /api/research/feature-integrity/latch/acknowledge` |
 | live account | `GET /api/quant/account/live` |
-| 最新报告 | `GET /api/quant/reports/latest` |
+| 当前报告 | `GET /api/quant/reports/current?profile_id=<id>&kind=top_n` |
+| Report run | `GET /api/quant/report-runs/{id}` |
+| Schedule health | `GET /api/quant/report-schedules/health` |
+| Schedule gaps | `GET /api/quant/report-schedule-gaps` |
 | ad-hoc report | `POST /api/quant/reports/run` |
 | report recommendations | `GET /api/quant/reports/{id}/recommendations` |
 | recommendation evidence | `GET /api/quant/recommendations/{id}/evidence` |

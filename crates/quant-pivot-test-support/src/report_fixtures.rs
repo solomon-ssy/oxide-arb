@@ -24,8 +24,8 @@ use quant_pivot_models::{
             AccountSource, BindingConstraint, ExitSettlementMode, FactorDirection,
             FeatureParityRunKind, FeatureParityRunStatus, IneligibilityReason, OutcomeSide,
             QuantRuntimeMode, RecommendationReportStatus, RecommendationStatus, RedeemPolicy,
-            ReportFactDeliveryStatus, ReportKind, ReportTriggerKind, ResearchJobKind,
-            ResearchJobStatus, SizingModelKind,
+            ReportFactDeliveryStatus, ReportKind, ResearchJobKind, ResearchJobStatus,
+            SizingModelKind,
         },
     },
     types::{
@@ -140,14 +140,12 @@ pub fn report(
     kind: ReportKind,
     status: RecommendationReportStatus,
 ) -> RecommendationReportInfo {
+    let profile_ref = fixture_profile_ref();
     RecommendationReportInfo {
         recommendation_report_id: id,
-        profile_ref: fixture_profile_ref(),
+        profile_id: profile_ref.id.clone(),
+        profile_ref,
         report_kind: kind,
-        trigger_kind: ReportTriggerKind::Scheduled,
-        trigger_key: "scheduled:daily-topn:2023-11-14T22:13:20Z".to_owned(),
-        trigger_time: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
-        knowledge_lag_secs: 120,
         decision_at: Utc.timestamp_opt(1_699_999_880, 0).unwrap(),
         horizon_secs: 86_400,
         runtime_mode: QuantRuntimeMode::ReportOnly,
@@ -165,6 +163,9 @@ pub fn report(
         data_quality_snapshot_ref: ReportDataQualitySnapshotId::from_v7(),
         summary_json: report_summary(),
         published_at: Some(Utc.timestamp_opt(1_700_000_000, 0).unwrap()),
+        successor_report_id: None,
+        superseded_at: None,
+        obsoleted_at: None,
         valid_until: Some(Utc.timestamp_opt(1_700_003_600, 0).unwrap()),
         revoked_at: None,
         expired_at: None,

@@ -64,19 +64,23 @@ if rg -n 'pub use .*::Opportunity;|pub use .*ScoredOpportunity;' \
   exit 1
 fi
 
-# tokio-cron-scheduler is the report-plane scheduling backend and MUST stay
-# behind the ReportScheduleRunner facade in core/src/infra/schedule/. Code paths
-# (underscore form) must not appear outside that module; the crate dependency
-# (hyphen form) is allowed only in quant-pivot-core's manifest.
-if rg -n 'tokio_cron_scheduler' crates/ \
-  --glob '!crates/quant-pivot-core/src/infra/schedule/**' 2>/dev/null; then
-  echo "ERROR: tokio-cron-scheduler must stay behind core/src/infra/schedule/ (ReportScheduleRunner facade)"
+# Phase 11.8 removed the in-process scheduler completely. Any dependency or
+# source reference is a forbidden lifecycle regression.
+if rg -n 'tokio[-_]cron[-_]scheduler|TokioCronScheduleRunner|ScheduleOverlapGuard' \
+  Cargo.toml crates/ --glob '!**/target/**' 2>/dev/null; then
+  echo "ERROR: in-process report scheduler semantics were deleted in Phase 11.8"
   exit 1
 fi
-if rg -n 'tokio-cron-scheduler' crates/ \
-  --glob '**/Cargo.toml' \
-  --glob '!crates/quant-pivot-core/Cargo.toml' 2>/dev/null; then
-  echo "ERROR: only quant-pivot-core may declare the tokio-cron-scheduler dependency"
+
+if rg -n 'RecommendationReportStatus::(Building|Failed|PublishedEmpty)|publish_empty_reports|reports\.lifecycle|MissedTickPolicy|BackfillLatest|SchedulerError' \
+  crates/ config/ --glob '!**/target/**' 2>/dev/null; then
+  echo "ERROR: deleted Phase 11.8 report lifecycle/config semantics returned"
+  exit 1
+fi
+
+if rg -n 'quant\.report\.(started|failed|empty)|/quant/reports/latest' \
+  crates/*/src ui/apps ui/packages --glob '!**/node_modules/**' 2>/dev/null; then
+  echo "ERROR: deleted Phase 11.8 ephemeral WS or global latest API returned"
   exit 1
 fi
 

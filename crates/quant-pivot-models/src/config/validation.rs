@@ -43,6 +43,35 @@ pub fn validate_deploy_common(deploy: &DeployConfig) -> ConfigValidationReport {
             detail: "must be > 0".into(),
         });
     }
+    let workers = &deploy.quant.workers;
+    if workers.report_schedule_poll_secs == 0
+        || workers.report_run_lease_secs == 0
+        || workers.report_run_heartbeat_secs == 0
+        || workers.report_ad_hoc_queue_ttl_secs == 0
+    {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "quant.workers.report_lifecycle",
+            detail: "poll, lease, heartbeat, and ad-hoc TTL must all be > 0".into(),
+        });
+    }
+    if workers.report_run_heartbeat_secs > workers.report_run_lease_secs / 3 {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "quant.workers.report_run_heartbeat_secs",
+            detail: "must be <= report_run_lease_secs / 3".into(),
+        });
+    }
+    if workers.report_ad_hoc_queue_ttl_secs <= workers.report_schedule_poll_secs {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "quant.workers.report_ad_hoc_queue_ttl_secs",
+            detail: "must be greater than report_schedule_poll_secs".into(),
+        });
+    }
+    if !(1..=1_024).contains(&workers.report_ad_hoc_queue_capacity) {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "quant.workers.report_ad_hoc_queue_capacity",
+            detail: "must be between 1 and 1024 inclusive".into(),
+        });
+    }
 
     if deploy.db.postgres.max_connections == 0
         || deploy.db.postgres.min_connections > deploy.db.postgres.max_connections

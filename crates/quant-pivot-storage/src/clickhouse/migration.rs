@@ -59,6 +59,7 @@ struct MigrationSpec {
     safety: ClickHouseMigrationSafety,
     sources: &'static [&'static str],
     expected_checksum: &'static str,
+    destructive_empty_tables: &'static [&'static str],
 }
 
 impl MigrationSpec {
@@ -88,14 +89,28 @@ impl MigrationSpec {
     }
 }
 
-const fn migrations() -> [MigrationSpec; 1] {
-    [MigrationSpec {
-        version: 1,
-        name: "cloud_baseline",
-        safety: ClickHouseMigrationSafety::OnlineSafe,
-        sources: schema::BASELINE_SOURCES,
-        expected_checksum: "blake3:4dcfdaaa484b6d4997d9f60007e1c24d8c5c649e8718e5cf12c757a4555cf682",
-    }]
+const fn migrations() -> [MigrationSpec; 2] {
+    [
+        MigrationSpec {
+            version: 1,
+            name: "cloud_baseline",
+            safety: ClickHouseMigrationSafety::OnlineSafe,
+            sources: schema::BASELINE_SOURCES,
+            expected_checksum: "blake3:4dcfdaaa484b6d4997d9f60007e1c24d8c5c649e8718e5cf12c757a4555cf682",
+            destructive_empty_tables: &[],
+        },
+        MigrationSpec {
+            version: 2,
+            name: "report_lifecycle_v2",
+            safety: ClickHouseMigrationSafety::OfflineRequired,
+            sources: schema::REPORT_LIFECYCLE_V2_SOURCES,
+            expected_checksum: "blake3:c831fbb3fb7719dc19138baa4dfa396f2edfe86f4bc17889e9b01e82aa2bbe57",
+            destructive_empty_tables: &[
+                "quant_recommendation_event",
+                "quant_recommendation_attribution_event",
+            ],
+        },
+    ]
 }
 
 /// Build a read-only deployment plan. The target database is never created.
@@ -135,6 +150,24 @@ pub async fn plan_schema(config: &ClickHouseConfig) -> Result<ClickHouseSchemaPl
 pub async fn apply_online_schema_migrations(
     config: &ClickHouseConfig,
 ) -> Result<ClickHouseSchemaStatus, StorageError> {
+    apply_schema_migrations(config, false).await
+}
+
+/// Apply all pending migrations during an explicit offline maintenance window.
+///
+/// Destructive migrations additionally prove every declared source table is
+/// empty before executing. This command never backfills or preserves legacy
+/// rows; a non-empty table blocks the clean-slate rollout.
+pub async fn apply_offline_schema_migrations(
+    config: &ClickHouseConfig,
+) -> Result<ClickHouseSchemaStatus, StorageError> {
+    apply_schema_migrations(config, true).await
+}
+
+async fn apply_schema_migrations(
+    config: &ClickHouseConfig,
+    allow_offline: bool,
+) -> Result<ClickHouseSchemaStatus, StorageError> {
     validate_migration_registry()?;
     ensure::ensure_database(config).await?;
     let client = client(config);
@@ -146,12 +179,6 @@ pub async fn apply_online_schema_migrations(
 
     let plan = build_plan(&client, true).await?;
     for migration in &plan.pending_migrations {
-        if migration.safety == ClickHouseMigrationSafety::OfflineRequired {
-            return Err(StorageError::Migration(format!(
-                "ClickHouse migration {} ({}) requires an offline maintenance rollout and cannot be applied during application startup",
-                migration.version, migration.name
-            )));
-        }
         let spec = migrations()
             .into_iter()
             .find(|candidate| candidate.version == migration.version)
@@ -161,6 +188,15 @@ pub async fn apply_online_schema_migrations(
                     migration.version
                 ))
             })?;
+        if migration.safety == ClickHouseMigrationSafety::OfflineRequired {
+            if !allow_offline {
+                return Err(StorageError::Migration(format!(
+                    "ClickHouse migration {} ({}) requires an explicit offline maintenance rollout",
+                    migration.version, migration.name
+                )));
+            }
+            verify_destructive_empty_tables(&client, spec).await?;
+        }
         claim_migration(&client, migration).await?;
         for statement in spec.statements() {
             client.query(&statement).execute().await?;
@@ -184,6 +220,33 @@ pub async fn apply_online_schema_migrations(
     }
 
     verify_schema_client(&client).await
+}
+
+async fn verify_destructive_empty_tables(
+    client: &clickhouse::Client,
+    migration: MigrationSpec,
+) -> Result<(), StorageError> {
+    if migration.destructive_empty_tables.is_empty() {
+        return Err(StorageError::Migration(format!(
+            "offline migration {} ({}) has no explicit destructive-table preconditions",
+            migration.version, migration.name
+        )));
+    }
+    for table in migration.destructive_empty_tables {
+        if table_exists(client, table).await?
+            && client
+                .query(&format!("SELECT 1 FROM {table} LIMIT 1"))
+                .fetch_optional::<u8>()
+                .await?
+                .is_some()
+        {
+            return Err(StorageError::Migration(format!(
+                "offline migration {} ({}) requires empty table `{table}`; clean-slate activation refuses to discard persisted rows",
+                migration.version, migration.name
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Verify the deployed migration ledger and structural runtime contract.
@@ -608,7 +671,7 @@ mod tests {
         &["ALTER TABLE events MODIFY TTL event_time + INTERVAL 30 DAY DELETE"];
 
     #[test]
-    fn compiled_migration_registry_is_contiguous_and_online_safe() {
+    fn compiled_migration_registry_is_contiguous_and_valid() {
         validate_migration_registry().expect("compiled migration registry should be valid");
     }
 
@@ -620,6 +683,7 @@ mod tests {
             safety: ClickHouseMigrationSafety::OnlineSafe,
             sources: SAFE_ADD_COLUMN,
             expected_checksum: "test-only",
+            destructive_empty_tables: &[],
         };
         validate_online_safe_statement(migration, SAFE_ADD_COLUMN[0])
             .expect("ADD COLUMN IF NOT EXISTS is resumable metadata DDL");
@@ -633,6 +697,7 @@ mod tests {
             safety: ClickHouseMigrationSafety::OnlineSafe,
             sources: UNSAFE_TTL,
             expected_checksum: "test-only",
+            destructive_empty_tables: &[],
         };
         let error = validate_online_safe_statement(migration, UNSAFE_TTL[0])
             .expect_err("TTL migration must require an offline rollout");

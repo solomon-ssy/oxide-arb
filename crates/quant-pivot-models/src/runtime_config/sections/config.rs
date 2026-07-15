@@ -893,14 +893,16 @@ pub struct ReportsConfig {
     pub hard_candidate_ceiling: u32,
     /// Maximum `TopN` size (hard upper bound for every schedule and ad-hoc run).
     pub max_top_n: u32,
+    /// Default `TopN` frozen when an ad-hoc request omits its override.
+    pub ad_hoc_default_top_n: u32,
+    /// Default global knowledge lag frozen for an ad-hoc request without an override.
+    pub ad_hoc_default_knowledge_lag_secs: u64,
     /// Fallback prediction horizon (seconds), used **only** when the model
     /// provides no per-candidate `suggested_horizon_secs` (classical / non-ML
     /// runs). The per-recommendation validity is otherwise data-driven from the
     /// model's frozen horizon capped by the market's time-to-resolution; this is
     /// never a flat TTL applied uniformly.
     pub fallback_horizon_secs: u64,
-    /// Whether empty reports are published with reason summaries.
-    pub publish_empty_reports: bool,
     /// Entry-window ratio in `(0, 1]`: a recommendation's entry-by deadline is
     /// `as_of + effective_horizon * entry_window_ratio`. `0.5` enters only while
     /// at least half the signal's edge remains (the half-life point); the
@@ -918,8 +920,9 @@ impl Default for ReportsConfig {
             schedules: vec![ReportScheduleConfig::default()],
             hard_candidate_ceiling: 100_000,
             max_top_n: 100,
+            ad_hoc_default_top_n: 20,
+            ad_hoc_default_knowledge_lag_secs: 10,
             fallback_horizon_secs: 86_400,
-            publish_empty_reports: true,
             entry_window_ratio: DecimalString::new("0.5"),
             ad_hoc_report_enabled: false,
             delivery_policy: ReportDeliveryPolicy::StoreAndNotify,
@@ -1136,7 +1139,7 @@ impl Default for SemiAutoConfig {
     }
 }
 
-/// Runtime v15 policy-bound `SemiAuto` canary.
+/// Runtime v16 policy-bound `SemiAuto` canary.
 ///
 /// An enabled canary is intentionally narrower than a published policy. It
 /// authorizes only an exact policy identity and explicit cash-budget tiers; it
@@ -1424,7 +1427,7 @@ pub struct ResearchValidationConfig {
     pub gates: ResearchValidationGatesConfig,
 }
 
-/// Runtime v15 operational limits for policy fitting.
+/// Runtime v16 operational limits for policy fitting.
 ///
 /// Statistical methodology is versioned code and publication thresholds belong
 /// exclusively to the immutable research profile. Keeping only resource and
@@ -1478,8 +1481,8 @@ pub struct ResearchConfig {
 
 /// Research-feedback plane configuration (attribution feedback + auto-retraining).
 ///
-/// Reserved skeleton carried by Runtime v15; Phase 11.9 adds the first real
-/// feedback/profile-allocation fields with a breaking bump to Runtime v15.
+/// Reserved skeleton carried by Runtime v16; Phase 11.9 adds the first real
+/// feedback/profile-allocation fields with a breaking bump to Runtime v17.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(default, deny_unknown_fields)]
 pub struct FeedbackConfig {}

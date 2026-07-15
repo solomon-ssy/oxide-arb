@@ -1233,7 +1233,9 @@ mod tests {
             labels_unavailable: 50,
             samples_dropped_insufficient: 20,
             live_attribution_candidates: 0,
+            live_attribution_materialized: 0,
             live_attribution_dropped_missing_evidence: 0,
+            live_attribution_censored_superseded_unfilled: 0,
             book_decode_failures: 0,
             matrix_probe: None,
             ..Default::default()

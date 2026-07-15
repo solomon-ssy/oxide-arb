@@ -52,10 +52,10 @@ pub enum WsChannel {
     MarketBookUpdate,
     /// A runtime-config version was activated.
     ConfigActivated,
-    /// Quant recommendation report lifecycle events (started / published /
-    /// empty / failed / revoked / expired), discriminated by the payload's
-    /// `event` field.
+    /// Durable recommendation-report artifact lifecycle revision hints.
     QuantReport,
+    /// Durable report-run queue/lease lifecycle revision hints.
+    QuantReportRun,
     /// Order-intent lifecycle events (created / approved / rejected / cancelled
     /// / expired / invalidated), discriminated by the payload's `event` field.
     QuantIntent,
@@ -74,13 +74,14 @@ pub enum WsChannel {
 
 impl WsChannel {
     /// Every channel, used by exhaustiveness tests and reverse lookup.
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::SystemStatus,
         Self::SystemAlert,
         Self::MarketResolved,
         Self::MarketBookUpdate,
         Self::ConfigActivated,
         Self::QuantReport,
+        Self::QuantReportRun,
         Self::QuantIntent,
         Self::QuantCondition,
         Self::MaterializationRunUpdate,
@@ -98,6 +99,7 @@ impl WsChannel {
             Self::MarketBookUpdate => "market.book_update",
             Self::ConfigActivated => "config.activated",
             Self::QuantReport => "quant.report",
+            Self::QuantReportRun => "quant.report_run",
             Self::QuantIntent => "quant.intent",
             Self::QuantCondition => "quant.condition",
             Self::MaterializationRunUpdate => "materialization.run_update",
@@ -115,7 +117,9 @@ impl WsChannel {
         match self {
             Self::SystemStatus | Self::SystemAlert => ResourceType::System,
             Self::MarketResolved | Self::MarketBookUpdate => ResourceType::Market,
-            Self::QuantReport | Self::QuantCondition => ResourceType::QuantReport,
+            Self::QuantReport | Self::QuantReportRun | Self::QuantCondition => {
+                ResourceType::QuantReport
+            }
             Self::QuantIntent => ResourceType::OrderIntent,
             Self::MaterializationRunUpdate => ResourceType::Materialization,
             Self::ConfigActivated => ResourceType::RuntimeConfig,

@@ -4,7 +4,7 @@
 //! shutdown. Legacy Endgame detection / execution / risk / settlement /
 //! control-factor series do not exist here.
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use prometheus::{
     Encoder, Gauge, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec,
@@ -124,14 +124,20 @@ pub struct MetricsHub {
     pub report_generated_total: IntCounterVec,
     pub report_recommendations_total: IntCounterVec,
     pub report_publish_failures_total: IntCounterVec,
-    pub report_skipped_empty_total: IntCounter,
 
-    // ── Report scheduler (04.3) ───────────────────────────────────────────
-    pub report_schedule_fires_total: IntCounterVec,
-    pub report_schedule_skipped_overlap_total: IntCounterVec,
-    pub report_schedule_run_duration_seconds: HistogramVec,
-    pub report_schedule_active_jobs: IntGauge,
+    // ── Durable report coordinator (11.8) ─────────────────────────────────
+    pub report_run_total: IntCounterVec,
+    pub report_run_duration_seconds: HistogramVec,
+    pub report_run_queue_latency_seconds: HistogramVec,
+    pub report_schedule_gap_total: IntCounterVec,
+    pub report_schedule_lateness_seconds: HistogramVec,
+    pub report_run_active: IntGauge,
+    pub report_run_queued: IntGauge,
+    pub report_prepared_backlog: IntGauge,
+    pub report_current_age_seconds: IntGaugeVec,
     pub report_expire_swept_total: IntCounter,
+    pub report_fact_settlement_claim_lost_total: IntCounterVec,
+    pub report_fact_worker_errors_total: IntCounterVec,
 
     // ── Training/serving feature parity (11.6) ────────────────────────
     /// Runs by controlled kind/status labels.
@@ -216,12 +222,18 @@ struct ReportMetrics {
     generated: IntCounterVec,
     recommendations: IntCounterVec,
     publish_failures: IntCounterVec,
-    schedule_fires: IntCounterVec,
-    schedule_skipped_overlap: IntCounterVec,
-    schedule_run_duration: HistogramVec,
-    schedule_active_jobs: IntGauge,
+    run_total: IntCounterVec,
+    run_duration: HistogramVec,
+    run_queue_latency: HistogramVec,
+    schedule_gap: IntCounterVec,
+    schedule_lateness: HistogramVec,
+    run_active: IntGauge,
+    run_queued: IntGauge,
+    prepared_backlog: IntGauge,
+    current_age: IntGaugeVec,
     expire_swept: IntCounter,
-    skipped_empty: IntCounter,
+    fact_settlement_claim_lost: IntCounterVec,
+    fact_worker_errors: IntCounterVec,
 }
 
 struct FeatureParityMetrics {
@@ -407,39 +419,76 @@ fn register_report_metrics(registry: &Registry) -> ReportMetrics {
             "Report post-commit publish failures by stage",
             &["stage"]
         ),
-        schedule_fires: register_counter_vec!(
+        run_total: register_counter_vec!(
             registry,
-            "quant_pivot_report_schedule_fires_total",
-            "Report schedule fires by schedule id and outcome (published/empty/error)",
-            &["schedule_id", "outcome"]
+            "quant_pivot_report_run_total",
+            "Durable report-run transitions by trigger, status, and terminal reason",
+            &["trigger_kind", "status", "reason"]
         ),
-        schedule_skipped_overlap: register_counter_vec!(
+        run_duration: register_histogram_vec!(
             registry,
-            "quant_pivot_report_schedule_skipped_overlap_total",
-            "Report schedule fires skipped because the prior run was still in flight",
-            &["schedule_id"]
+            "quant_pivot_report_run_duration_seconds",
+            "Durable report build duration by trigger and terminal status",
+            &["trigger_kind", "status"],
+            REPORT_RUN_BUCKETS_SECS
         ),
-        schedule_run_duration: register_histogram_vec!(
+        run_queue_latency: register_histogram_vec!(
             registry,
-            "quant_pivot_report_schedule_run_duration_seconds",
-            "Report pipeline wall-clock duration per scheduled fire",
+            "quant_pivot_report_run_queue_latency_seconds",
+            "Durable report run queue latency by trigger kind",
+            &["trigger_kind"],
+            REPORT_RUN_BUCKETS_SECS
+        ),
+        schedule_gap: register_counter_vec!(
+            registry,
+            "quant_pivot_report_schedule_gap_total",
+            "Durable missed report-schedule occurrences by schedule and reason",
+            &["schedule_id", "reason"]
+        ),
+        schedule_lateness: register_histogram_vec!(
+            registry,
+            "quant_pivot_report_schedule_lateness_seconds",
+            "Actual database decision time minus scheduled occurrence",
             &["schedule_id"],
             REPORT_RUN_BUCKETS_SECS
         ),
-        schedule_active_jobs: register_gauge_int!(
+        run_active: register_gauge_int!(
             registry,
-            "quant_pivot_report_schedule_active_jobs",
-            "Report schedules currently registered with the scheduler"
+            "quant_pivot_report_run_active",
+            "Whether a durable report build is currently running"
+        ),
+        run_queued: register_gauge_int!(
+            registry,
+            "quant_pivot_report_run_queued",
+            "Number of durable report runs currently queued"
+        ),
+        prepared_backlog: register_gauge_int!(
+            registry,
+            "quant_pivot_report_prepared_backlog",
+            "Number of immutable Prepared reports awaiting verified publication"
+        ),
+        current_age: register_gauge_vec!(
+            registry,
+            "quant_pivot_report_current_age_seconds",
+            "Age of each scope's current Published report",
+            &["profile_id", "report_kind"]
         ),
         expire_swept: register_counter!(
             registry,
             "quant_pivot_report_expire_swept_total",
             "Reports transitioned to expired by the TTL sweep"
         ),
-        skipped_empty: register_counter!(
+        fact_settlement_claim_lost: register_counter_vec!(
             registry,
-            "quant_pivot_report_skipped_empty_total",
-            "Empty reports suppressed by publish_empty_reports=false"
+            "quant_pivot_report_fact_settlement_claim_lost_total",
+            "Report fact settlement CAS losses by operation and durable status",
+            &["operation", "status"]
+        ),
+        fact_worker_errors: register_counter_vec!(
+            registry,
+            "quant_pivot_report_fact_worker_errors_total",
+            "Report fact worker process errors by bounded stage",
+            &["stage"]
         ),
     }
 }
@@ -604,12 +653,18 @@ impl MetricsHub {
             report_generated_total: report.generated,
             report_recommendations_total: report.recommendations,
             report_publish_failures_total: report.publish_failures,
-            report_skipped_empty_total: report.skipped_empty,
-            report_schedule_fires_total: report.schedule_fires,
-            report_schedule_skipped_overlap_total: report.schedule_skipped_overlap,
-            report_schedule_run_duration_seconds: report.schedule_run_duration,
-            report_schedule_active_jobs: report.schedule_active_jobs,
+            report_run_total: report.run_total,
+            report_run_duration_seconds: report.run_duration,
+            report_run_queue_latency_seconds: report.run_queue_latency,
+            report_schedule_gap_total: report.schedule_gap,
+            report_schedule_lateness_seconds: report.schedule_lateness,
+            report_run_active: report.run_active,
+            report_run_queued: report.run_queued,
+            report_prepared_backlog: report.prepared_backlog,
+            report_current_age_seconds: report.current_age,
             report_expire_swept_total: report.expire_swept,
+            report_fact_settlement_claim_lost_total: report.fact_settlement_claim_lost,
+            report_fact_worker_errors_total: report.fact_worker_errors,
             feature_parity_runs_total: feature_parity.runs,
             feature_parity_comparisons_total: feature_parity.comparisons,
             feature_parity_latch_open: feature_parity.latch_open,
@@ -743,34 +798,21 @@ impl MetricsHub {
             .set(i64::try_from(remaining).unwrap_or(i64::MAX));
     }
 
-    /// Record one scheduled report fire: increments the per-outcome counter and
-    /// observes the pipeline wall-clock duration (also for failures, capturing
-    /// time-to-failure).
-    pub fn record_report_schedule_fire(&self, schedule_id: &str, outcome: &str, elapsed: Duration) {
-        self.report_schedule_fires_total
-            .with_label_values(&[schedule_id, outcome])
-            .inc();
-        self.report_schedule_run_duration_seconds
-            .with_label_values(&[schedule_id])
-            .observe(elapsed.as_secs_f64());
-    }
-
-    /// Increment the skip-if-running counter for an overlapping fire.
-    pub fn inc_report_schedule_skipped_overlap(&self, schedule_id: &str) {
-        self.report_schedule_skipped_overlap_total
-            .with_label_values(&[schedule_id])
-            .inc();
-    }
-
-    /// Publish the number of report schedules currently registered.
-    pub fn set_report_schedule_active_jobs(&self, count: usize) {
-        self.report_schedule_active_jobs
-            .set(i64::try_from(count).unwrap_or(i64::MAX));
-    }
-
     /// Count reports expired by the TTL sweep in one pass.
     pub fn inc_report_expire_swept(&self, swept: u64) {
         self.report_expire_swept_total.inc_by(swept);
+    }
+
+    pub fn inc_report_fact_settlement_claim_lost(&self, operation: &str, status: &str) {
+        self.report_fact_settlement_claim_lost_total
+            .with_label_values(&[operation, status])
+            .inc();
+    }
+
+    pub fn inc_report_fact_worker_error(&self, stage: &str) {
+        self.report_fact_worker_errors_total
+            .with_label_values(&[stage])
+            .inc();
     }
 
     pub fn record_feature_parity_run(&self, kind: &str, status: &str) {
@@ -834,5 +876,45 @@ mod tests {
         assert!(body.contains("quant_order_intents_created_total"));
         assert!(body.contains("quant_order_intents_approved_total"));
         assert!(body.contains(r#"mode="auto_execution""#));
+    }
+
+    #[test]
+    fn durable_report_metrics_expose_frozen_observability_contract() {
+        let hub = MetricsHub::new();
+        hub.report_run_total
+            .with_label_values(&["ad_hoc", "failed", "build_failed"])
+            .inc();
+        hub.report_run_duration_seconds
+            .with_label_values(&["ad_hoc", "failed"])
+            .observe(2.0);
+        hub.report_run_queue_latency_seconds
+            .with_label_values(&["ad_hoc"])
+            .observe(0.5);
+        hub.report_schedule_gap_total
+            .with_label_values(&["hourly", "coordinator_lag"])
+            .inc();
+        hub.report_prepared_backlog.set(2);
+        hub.report_current_age_seconds
+            .with_label_values(&["weather_forecast_24h", "top_n"])
+            .set(60);
+        hub.inc_report_fact_settlement_claim_lost("verify", "cancelled");
+        hub.inc_report_fact_worker_error("process_one");
+
+        let (_, text) = hub.gather_prometheus_text().expect("gather");
+        let body = String::from_utf8(text).expect("utf8");
+        for name in [
+            "quant_pivot_report_run_total",
+            "quant_pivot_report_run_duration_seconds",
+            "quant_pivot_report_run_queue_latency_seconds",
+            "quant_pivot_report_schedule_gap_total",
+            "quant_pivot_report_prepared_backlog",
+            "quant_pivot_report_current_age_seconds",
+            "quant_pivot_report_fact_settlement_claim_lost_total",
+            "quant_pivot_report_fact_worker_errors_total",
+        ] {
+            assert!(body.contains(name), "missing metric {name}");
+        }
+        assert!(body.contains(r#"reason="build_failed""#));
+        assert!(body.contains(r#"profile_id="weather_forecast_24h""#));
     }
 }

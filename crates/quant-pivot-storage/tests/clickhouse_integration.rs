@@ -3,15 +3,22 @@
 use chrono::Utc;
 use prometheus::IntCounter;
 use quant_pivot_models::{
-    clickhouse::{ChPrice, ChSchemaVersion, ChShares, ChUsd, TradeTapeRow},
+    clickhouse::{
+        ChDecimal64, ChPrice, ChProbability, ChSchemaVersion, ChShares, ChUsd,
+        QuantRecommendationAttributionEventRow, QuantReportRecommendationFactRow, TradeTapeRow,
+    },
     config::{ClickHouseConfig, ClickHouseMigrationConfig},
     enums::clickhouse::{
-        ChTradeParticipantRole, ChTradeReconciliationStatus, ChTradeSide, ChTradeTapeSource,
+        ChOutcomeSide, ChRecommendationAttributionOutcome, ChTradeParticipantRole,
+        ChTradeReconciliationStatus, ChTradeSide, ChTradeTapeSource,
     },
-    types::{MarketId, Price, Shares, TokenId, Usd},
+    types::{MarketId, Price, RecommendationId, RecommendationReportId, Shares, TokenId, Usd},
 };
 use quant_pivot_storage::{
-    clickhouse::{ChWriteManager, ClickHousePool, apply_online_schema_migrations, verify_schema},
+    clickhouse::{
+        ChWriteManager, ClickHousePool, apply_offline_schema_migrations,
+        apply_online_schema_migrations, verify_schema,
+    },
     write::{AsyncWriter, AsyncWriterConfig, AsyncWriterObservability, AsyncWriterWorker},
 };
 use rust_decimal_macros::dec;
@@ -56,7 +63,7 @@ async fn setup_clickhouse() -> (
         .expect("ClickHouse container");
     let port = container.get_host_port_ipv4(8123).await.expect("port");
     let config = test_ch_config(port);
-    apply_online_schema_migrations(&config)
+    apply_offline_schema_migrations(&config)
         .await
         .expect("deploy schema");
     let pool = ClickHousePool::connect(&config).await.expect("connect");
@@ -92,20 +99,20 @@ async fn concurrent_first_start_creates_missing_database_and_schema() {
     assert!(missing.to_string().contains("does not exist"));
 
     let (first, second) = tokio::join!(
-        apply_online_schema_migrations(&config),
-        apply_online_schema_migrations(&config)
+        apply_offline_schema_migrations(&config),
+        apply_offline_schema_migrations(&config)
     );
     assert_eq!(
         first
             .expect("first concurrent schema migration")
             .current_version,
-        1
+        2
     );
     assert_eq!(
         second
             .expect("second concurrent schema migration")
             .current_version,
-        1
+        2
     );
     let pool = ClickHousePool::connect(&config).await.expect("connect");
     pool.verify_schema().await.expect("verify schema");
@@ -118,6 +125,65 @@ async fn concurrent_first_start_creates_missing_database_and_schema() {
         .await
         .expect("database should exist");
     assert_eq!(count, 1);
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn offline_report_lifecycle_migration_rejects_non_empty_legacy_facts() {
+    let container = testcontainers::GenericImage::new("clickhouse/clickhouse-server", "26.5")
+        .with_exposed_port(8123.into())
+        .with_wait_for(WaitFor::http(
+            HttpWaitStrategy::new("/ping")
+                .with_port(8123.into())
+                .with_expected_status_code(200u16),
+        ))
+        .with_env_var("CLICKHOUSE_SKIP_USER_SETUP", "1")
+        .with_startup_timeout(Duration::from_mins(2))
+        .start()
+        .await
+        .expect("ClickHouse container");
+    let port = container.get_host_port_ipv4(8123).await.expect("port");
+    let config = test_ch_config(port);
+
+    let online_error = apply_online_schema_migrations(&config)
+        .await
+        .expect_err("destructive report lifecycle migration requires offline rollout");
+    assert!(online_error.to_string().contains("explicit offline"));
+
+    let client = ClickHousePool::from_config(&config).client().clone();
+    client
+        .query(
+            "INSERT INTO quant_recommendation_event VALUES \
+             (now64(3), 'legacy-report', 'legacy-recommendation', 1, 'market', 'token', \
+              'yes', 0.7, 0.6, true, 10, now64(3) + INTERVAL 1 HOUR, 'published')",
+        )
+        .execute()
+        .await
+        .expect("insert legacy recommendation fact");
+
+    let offline_error = apply_offline_schema_migrations(&config)
+        .await
+        .expect_err("non-empty legacy table must block destructive migration");
+    assert!(
+        offline_error
+            .to_string()
+            .contains("requires empty table `quant_recommendation_event`")
+    );
+    let legacy_count: u64 = client
+        .query("SELECT count() FROM quant_recommendation_event")
+        .fetch_one()
+        .await
+        .expect("legacy rows remain intact");
+    let new_table_count: u64 = client
+        .query(
+            "SELECT count() FROM system.tables \
+             WHERE database = currentDatabase() AND name = 'quant_report_recommendation_fact'",
+        )
+        .fetch_one()
+        .await
+        .expect("new table absence probe");
+    assert_eq!(legacy_count, 1);
+    assert_eq!(new_table_count, 0);
 }
 
 #[tokio::test]
@@ -288,6 +354,109 @@ async fn clickhouse_fact_contract_uses_decimal_and_enum_columns() {
             );
         }
     }
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn report_fact_schema_accepts_decision_snapshot_and_superseded_censor() {
+    let (_pool, client, _port, _container) = setup_clickhouse().await;
+    let lifecycle_status_columns: u64 = client
+        .query(
+            "SELECT count() FROM system.columns \
+             WHERE database = currentDatabase() \
+             AND table = 'quant_report_recommendation_fact' AND name = 'status'",
+        )
+        .fetch_one()
+        .await
+        .expect("inspect recommendation decision schema");
+    assert_eq!(
+        lifecycle_status_columns, 0,
+        "immutable recommendation facts must not mirror live lifecycle status"
+    );
+    let now = Utc::now().timestamp_millis();
+    let report_id = RecommendationReportId::from_v7();
+    let recommendation_id = RecommendationId::from_v7();
+    let decision = QuantReportRecommendationFactRow {
+        event_time: now,
+        recommendation_report_id: report_id.clone(),
+        recommendation_id: recommendation_id.clone(),
+        rank: 1,
+        market_id: MarketId::new("report-fact-schema-market"),
+        token_id: TokenId::new("report-fact-schema-token"),
+        side: ChOutcomeSide::Yes,
+        score: ChProbability::from(dec!(0.72)),
+        risk_adjusted_score: ChProbability::from(dec!(0.68)),
+        trade_plan_available: true,
+        suggested_usd: Some(ChUsd::from(Usd::new(dec!(25)))),
+        valid_until: now + 60_000,
+    };
+    let mut decision_insert = client
+        .insert::<QuantReportRecommendationFactRow>("quant_report_recommendation_fact")
+        .await
+        .expect("start recommendation decision insert");
+    decision_insert
+        .write(&decision)
+        .await
+        .expect("write recommendation decision");
+    decision_insert
+        .end()
+        .await
+        .expect("commit recommendation decision");
+
+    let attribution = QuantRecommendationAttributionEventRow {
+        event_time: now,
+        recommendation_id: recommendation_id.clone(),
+        outcome: ChRecommendationAttributionOutcome::SupersededUnfilled,
+        realized_pnl_usd: ChUsd::from(Usd::ZERO),
+        max_adverse_excursion_bps: None,
+        max_favorable_excursion_bps: ChDecimal64::from(dec!(0)),
+        label_available_at: now,
+        ingestion_time: now,
+    };
+    let mut attribution_insert = client
+        .insert::<QuantRecommendationAttributionEventRow>("quant_recommendation_attribution_event")
+        .await
+        .expect("start superseded censor insert");
+    attribution_insert
+        .write(&attribution)
+        .await
+        .expect("write superseded censor");
+    attribution_insert
+        .end()
+        .await
+        .expect("commit superseded censor");
+
+    let decision_count: u64 = client
+        .query(
+            "SELECT count() FROM quant_report_recommendation_fact \
+             WHERE recommendation_report_id = ? AND recommendation_id = ?",
+        )
+        .bind(report_id)
+        .bind(recommendation_id.clone())
+        .fetch_one()
+        .await
+        .expect("read recommendation decision");
+    let outcome_code: i8 = client
+        .query(
+            "SELECT toInt8(outcome) FROM quant_recommendation_attribution_event \
+             WHERE recommendation_id = ?",
+        )
+        .bind(recommendation_id)
+        .fetch_one()
+        .await
+        .expect("read superseded censor outcome code");
+    assert_eq!(decision_count, 1);
+    assert_eq!(outcome_code, 6);
+
+    let ddl: TableDdl = client
+        .query("SHOW CREATE TABLE quant_report_recommendation_fact")
+        .fetch_one()
+        .await
+        .expect("show recommendation decision fact");
+    assert!(
+        !ddl.statement.contains("`status`"),
+        "immutable recommendation decision fact must not mirror PG lifecycle"
+    );
 }
 
 fn sample_trade(token_id: &str, received_at: i64) -> TradeTapeRow {

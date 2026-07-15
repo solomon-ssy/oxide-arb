@@ -4,25 +4,27 @@ use std::sync::Arc;
 
 use super::{AccountBundle, DataBundle, GovernanceBundle, InfraBundle, ResearchBundle};
 use crate::{
-    infra::schedule::ReportScheduleRunner,
     report::{
         DefaultRecommendationComposer, DefaultReportBuilder, DefaultReportReadinessGate,
-        ReportBuilderDeps, ReportFactDeliveryDeps, ReportFactDeliveryWorker, ReportLifecycleDeps,
-        ReportLifecycleService, ReportPublisher, ReportPublisherDeps, build_report_scheduler,
+        ReportBuilderDeps, ReportCoordinator, ReportCoordinatorConfig, ReportFactDeliveryDeps,
+        ReportFactDeliveryWorker, ReportLifecycleDeps, ReportLifecycleService, ReportPublisher,
+        ReportPublisherDeps,
     },
     service::equity::EquitySnapshotService,
     service::feature_integrity::{FeatureParityRunCoordinator, RepositoryFeatureParityGate},
 };
 use quant_pivot_error::QuantResult;
-use quant_pivot_models::domain::CoreEventPublisher;
+use quant_pivot_models::{config::QuantWorkersConfig, domain::CoreEventPublisher};
 use quant_pivot_repository::traits::{
     EquitySnapshotRepository, FeatureParityRepository, PositionRepository,
-    RecommendationReportRepository, RecommendationRepository, RuntimeConfigVersionRepository,
+    RecommendationReportRepository, RecommendationRepository, ReportRunRepository,
+    RuntimeConfigVersionRepository,
 };
 use quant_pivot_research::portfolio::HistoricalCorrelationEstimator;
 
 /// Dependencies for the recommendation report bundle.
 pub struct ReportBundleDeps<'a> {
+    pub workers: &'a QuantWorkersConfig,
     pub infra: &'a InfraBundle,
     pub data: &'a DataBundle,
     pub governance: &'a GovernanceBundle,
@@ -36,13 +38,13 @@ pub struct ReportBundleDeps<'a> {
 pub struct ReportBundle {
     pub lifecycle: Arc<ReportLifecycleService>,
     pub fact_delivery: Arc<ReportFactDeliveryWorker>,
-    pub scheduler: Arc<dyn ReportScheduleRunner>,
+    pub coordinator: Arc<ReportCoordinator>,
     pub feature_parity: Arc<FeatureParityRunCoordinator>,
 }
 
 impl ReportBundle {
     /// Assemble report builder/composer/publisher/lifecycle + schedule runner.
-    pub async fn assemble(deps: ReportBundleDeps<'_>) -> QuantResult<Self> {
+    pub fn assemble(deps: ReportBundleDeps<'_>) -> QuantResult<Self> {
         let repos = &deps.infra.repos;
         let report_repo: Arc<dyn RecommendationReportRepository> =
             Arc::clone(&repos.recommendation_report) as Arc<dyn RecommendationReportRepository>;
@@ -54,6 +56,8 @@ impl ReportBundle {
             Arc::clone(&repos.position) as Arc<dyn PositionRepository>;
         let runtime_config_repo: Arc<dyn RuntimeConfigVersionRepository> =
             Arc::clone(&repos.runtime_config) as Arc<dyn RuntimeConfigVersionRepository>;
+        let run_repo: Arc<dyn ReportRunRepository> =
+            Arc::clone(&repos.report_run) as Arc<dyn ReportRunRepository>;
         let feature_parity = Arc::new(FeatureParityRunCoordinator::new(
             Arc::clone(&repos.feature_parity) as Arc<dyn FeatureParityRepository>,
             Arc::clone(&runtime_config_repo),
@@ -91,18 +95,18 @@ impl ReportBundle {
         }));
         let lifecycle = Arc::new(ReportLifecycleService::new(ReportLifecycleDeps {
             report_repo,
+            run_repo: Arc::clone(&run_repo),
             recommendation_repo,
-            runtime_config_repo,
             builder,
             publisher: Arc::clone(&publisher),
-            runtime_mode: deps.governance.runtime_mode.clone(),
-            metrics: Arc::clone(&deps.infra.metrics),
             feature_parity_gate: Arc::new(RepositoryFeatureParityGate::new(Arc::clone(
                 &repos.feature_parity,
             )
                 as Arc<dyn FeatureParityRepository>)),
             feature_parity_runs: Arc::clone(&feature_parity),
             artifact_store: Arc::clone(&deps.research.artifact_store),
+            ad_hoc_queue_capacity: deps.workers.report_ad_hoc_queue_capacity,
+            ad_hoc_queue_ttl_secs: deps.workers.report_ad_hoc_queue_ttl_secs,
         }));
         let fact_delivery = Arc::new(ReportFactDeliveryWorker::new(ReportFactDeliveryDeps {
             reports: Arc::clone(&repos.recommendation_report)
@@ -110,18 +114,26 @@ impl ReportBundle {
             artifacts: Arc::clone(&deps.research.artifact_store),
             clickhouse: Arc::clone(&deps.infra.ch),
             write_manager: Arc::clone(&deps.infra.ch_write_manager),
-            publisher,
+            publisher: Arc::clone(&publisher),
+            metrics: Arc::clone(&deps.infra.metrics),
         }));
-        let scheduler = build_report_scheduler(
+        let workers = deps.workers;
+        let coordinator = Arc::new(ReportCoordinator::new(
+            run_repo,
+            runtime_config_repo,
             Arc::clone(&lifecycle),
-            Arc::clone(&deps.infra.metrics),
-            Arc::clone(&deps.governance.alerts),
-        )
-        .await?;
+            publisher,
+            ReportCoordinatorConfig {
+                poll_secs: workers.report_schedule_poll_secs,
+                lease_secs: workers.report_run_lease_secs,
+                heartbeat_secs: workers.report_run_heartbeat_secs,
+                ad_hoc_ttl_secs: workers.report_ad_hoc_queue_ttl_secs,
+            },
+        ));
         Ok(Self {
             lifecycle,
             fact_delivery,
-            scheduler,
+            coordinator,
             feature_parity,
         })
     }

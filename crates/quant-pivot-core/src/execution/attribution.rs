@@ -20,10 +20,10 @@ use quant_pivot_models::{
         PositionInfo, RecommendationAttributionInfo, RecommendationInfo, ReconciliationInfo,
     },
     enums::{
-        execution::{ExecutionOrderPhase, ExitReason, PositionLedgerState},
+        execution::{ApprovalInvalidation, ExecutionOrderPhase, ExitReason, PositionLedgerState},
         quant::{
             ExecutionOrderState, OrderIntentStatus, RecommendationAttributionOutcome,
-            RecommendationOutcome,
+            RecommendationOutcome, RecommendationStatus,
         },
     },
     types::{AttributionDetail, Bps, EntryOutcome, ExitOutcome, Price, RecommendationId, Usd},
@@ -129,11 +129,11 @@ impl AttributionService {
             return Ok(summary);
         }
 
-        let expired = self
+        let terminal_unfilled = self
             .recommendations
-            .find_expired_attribution_candidates(remaining)
+            .find_unfilled_attribution_candidates(remaining)
             .await?;
-        for recommendation in expired {
+        for recommendation in terminal_unfilled {
             if summary.considered >= batch_size {
                 break;
             }
@@ -141,7 +141,7 @@ impl AttributionService {
                 continue;
             }
             summary.considered += 1;
-            if recommendation.status.excluded_from_attribution() {
+            if !recommendation.status.eligible_for_attribution() {
                 summary.skipped += 1;
                 continue;
             }
@@ -153,7 +153,7 @@ impl AttributionService {
                 summary.skipped += 1;
                 continue;
             }
-            let row = Self::build_expired_unfilled(now, &recommendation);
+            let row = Self::build_unfilled_without_intent(now, &recommendation);
             self.insert_final(row, &mut summary).await?;
         }
 
@@ -234,7 +234,7 @@ impl AttributionService {
             );
             return Ok(None);
         };
-        if recommendation.status.excluded_from_attribution() {
+        if !recommendation.status.eligible_for_attribution() {
             return Ok(None);
         }
         let orders = self
@@ -262,6 +262,12 @@ impl AttributionService {
         let outcome = match intent.status {
             OrderIntentStatus::Expired => RecommendationAttributionOutcome::ExpiredUnfilled,
             OrderIntentStatus::Cancelled => RecommendationAttributionOutcome::CancelledUnfilled,
+            OrderIntentStatus::Invalidated
+                if intent.status_reason.as_deref()
+                    == Some(ApprovalInvalidation::ReportSuperseded.as_str()) =>
+            {
+                RecommendationAttributionOutcome::SupersededUnfilled
+            }
             OrderIntentStatus::Failed
             | OrderIntentStatus::Rejected
             | OrderIntentStatus::AdmissionRejected
@@ -276,16 +282,28 @@ impl AttributionService {
         )))
     }
 
-    fn build_expired_unfilled(
+    fn build_unfilled_without_intent(
         now: DateTime<Utc>,
         recommendation: &RecommendationInfo,
     ) -> NewRecommendationAttribution {
+        let (outcome, recommendation_outcome, note) = match recommendation.status {
+            RecommendationStatus::Superseded => (
+                RecommendationAttributionOutcome::SupersededUnfilled,
+                RecommendationOutcome::SupersededUnfilled,
+                "superseded_unfilled_without_intent",
+            ),
+            _ => (
+                RecommendationAttributionOutcome::ExpiredUnfilled,
+                RecommendationOutcome::ExpiredUnfilled,
+                "expired_unfilled_without_intent",
+            ),
+        };
         NewRecommendationAttribution {
             recommendation_id: recommendation.recommendation_id.clone(),
-            outcome: RecommendationAttributionOutcome::ExpiredUnfilled,
+            outcome,
             entry_outcome_json: EntryOutcome::default(),
             exit_outcome_json: ExitOutcome {
-                settlement_outcome: Some(RecommendationOutcome::ExpiredUnfilled),
+                settlement_outcome: Some(recommendation_outcome),
                 ..ExitOutcome::default()
             },
             realized_pnl_usd: Some(Usd::ZERO),
@@ -293,7 +311,7 @@ impl AttributionService {
             max_favorable_excursion_bps: Some(Decimal::ZERO),
             label_available_at: Some(now),
             attribution_json: AttributionDetail {
-                notes: vec!["expired_unfilled_without_intent".to_owned()],
+                notes: vec![note.to_owned()],
                 ..AttributionDetail::default()
             },
         }
@@ -487,6 +505,9 @@ fn unfilled_row(
                 }
                 RecommendationAttributionOutcome::CancelledUnfilled => {
                     RecommendationOutcome::Cancelled
+                }
+                RecommendationAttributionOutcome::SupersededUnfilled => {
+                    RecommendationOutcome::SupersededUnfilled
                 }
                 RecommendationAttributionOutcome::FailedUnfilled
                 | RecommendationAttributionOutcome::FilledExited

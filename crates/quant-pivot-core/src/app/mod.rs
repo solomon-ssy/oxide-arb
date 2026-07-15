@@ -38,8 +38,7 @@ pub use bundles::*;
 use crate::{
     execution::{DispatchWake, IntentLifecyclePublisher},
     governance::{KillSwitchHandle, RuntimeModeHandle},
-    infra::schedule::ReportScheduleRunner,
-    report::ReportLifecycleService,
+    report::{ReportCoordinator, ReportLifecycleService},
     runtime_config::{RuntimeConfigApplicator, RuntimeConfigStore},
     service::{
         factor_pipeline::FactorPipelineService, feature_pipeline::FeaturePipelineService,
@@ -117,9 +116,9 @@ impl AppContext {
         Arc::clone(&self.report.lifecycle)
     }
 
-    /// Report schedule runner (04.3): cron/interval fire + ad-hoc enqueue.
-    pub fn report_scheduler(&self) -> Arc<dyn ReportScheduleRunner> {
-        Arc::clone(&self.report.scheduler)
+    /// Durable `PostgreSQL` report schedule coordinator and global build worker.
+    pub fn report_coordinator(&self) -> Arc<ReportCoordinator> {
+        Arc::clone(&self.report.coordinator)
     }
 
     /// Postgres persistence for factor definitions and values (3.3).

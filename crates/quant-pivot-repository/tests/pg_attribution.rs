@@ -48,7 +48,7 @@ async fn patch_intent_status(
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn find_expired_attribution_candidates_succeeds_without_intent() {
+async fn find_unfilled_attribution_candidates_succeeds_without_intent() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let ids = seed_report_fixture(&db).await;
@@ -56,7 +56,7 @@ async fn find_expired_attribution_candidates_succeeds_without_intent() {
 
     let repo = PgRecommendationRepository::new(db);
     let candidates = repo
-        .find_expired_attribution_candidates(10)
+        .find_unfilled_attribution_candidates(10)
         .await
         .expect("expired attribution query must not fail on enum cast");
 
@@ -66,7 +66,7 @@ async fn find_expired_attribution_candidates_succeeds_without_intent() {
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn find_expired_attribution_candidates_includes_terminal_intent_only() {
+async fn find_unfilled_attribution_candidates_includes_terminal_intent_only() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let ids = seed_report_fixture(&db).await;
@@ -76,7 +76,7 @@ async fn find_expired_attribution_candidates_includes_terminal_intent_only() {
 
     let repo = PgRecommendationRepository::new(db);
     let candidates = repo
-        .find_expired_attribution_candidates(10)
+        .find_unfilled_attribution_candidates(10)
         .await
         .expect("terminal intent must not break expired ledger guards");
 
@@ -86,7 +86,7 @@ async fn find_expired_attribution_candidates_includes_terminal_intent_only() {
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn find_expired_attribution_candidates_excludes_non_terminal_intent() {
+async fn find_unfilled_attribution_candidates_excludes_non_terminal_intent() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let ids = seed_report_fixture(&db).await;
@@ -95,7 +95,7 @@ async fn find_expired_attribution_candidates_excludes_non_terminal_intent() {
 
     let repo = PgRecommendationRepository::new(db);
     let candidates = repo
-        .find_expired_attribution_candidates(10)
+        .find_unfilled_attribution_candidates(10)
         .await
         .expect("non-terminal intent guard query");
 

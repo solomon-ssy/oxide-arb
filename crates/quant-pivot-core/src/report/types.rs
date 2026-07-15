@@ -1,8 +1,9 @@
 //! Shared report module DTOs.
 
 use chrono::{DateTime, Utc};
+use quant_pivot_error::QuantError;
 use quant_pivot_models::{
-    clickhouse::{QuantRecommendationEventRow, ReportMarketFunnelRow},
+    clickhouse::{QuantReportRecommendationFactRow, ReportMarketFunnelRow},
     domain::NewReportTransaction,
     enums::quant::{
         EmptyReportReason, OutcomeSide, QuantRuntimeMode, ReportKind, ReportTriggerKind,
@@ -87,9 +88,43 @@ pub struct ReportNotificationPayload {
 #[derive(Debug, Clone)]
 pub struct ComposedReport {
     pub transaction: NewReportTransaction,
-    pub ch_rows: Vec<QuantRecommendationEventRow>,
+    pub ch_rows: Vec<QuantReportRecommendationFactRow>,
     pub funnel_rows: Vec<ReportMarketFunnelRow>,
     pub notification: ReportNotificationPayload,
     pub delivery_policy: ReportDeliveryPolicy,
     pub notify_operators: bool,
+}
+
+/// Stable operator-facing summary for durable/API error projections.
+///
+/// Raw dependency diagnostics may contain credentials, signed URLs, query
+/// parameters, or host paths. They remain in correlated structured logs and
+/// must never be copied into `PostgreSQL` rows returned by the report API.
+pub(super) fn durable_report_error_summary(error: &QuantError) -> String {
+    format!(
+        "{} failure; inspect correlated structured logs",
+        error.code()
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use quant_pivot_error::{QuantError, report::ReportError};
+
+    use super::durable_report_error_summary;
+
+    #[test]
+    fn durable_error_summary_does_not_persist_raw_diagnostic() {
+        let error = QuantError::from(ReportError::InvariantViolation {
+            stage: "test",
+            detail: "secret-token=must-not-persist".to_owned(),
+        });
+
+        let summary = durable_report_error_summary(&error);
+        assert_eq!(
+            summary,
+            "report failure; inspect correlated structured logs"
+        );
+        assert!(!summary.contains("must-not-persist"));
+    }
 }

@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, HashMap};
 use chrono::{DateTime, Duration, Utc};
 use quant_pivot_error::{QuantError, QuantResult, report::ReportError};
 use quant_pivot_models::{
-    clickhouse::{ChProbability, ChUsd, QuantRecommendationEventRow},
+    clickhouse::{ChProbability, ChUsd, QuantReportRecommendationFactRow},
     domain::{
         MarketSubject, NewAccountSnapshot, NewEntryConditionArtifact, NewEntryConditionInstance,
         NewEquitySnapshot, NewOperationLog, NewPortfolioPlan, NewRecommendation,
@@ -175,15 +175,16 @@ impl RecommendationComposer for DefaultRecommendationComposer {
             None => instant_plus_secs(input.decision_at, fallback_horizon_secs)?,
         };
 
-        let status = if recommendations.is_empty() {
-            RecommendationReportStatus::PublishedEmpty
-        } else {
-            RecommendationReportStatus::Published
-        };
+        let status = RecommendationReportStatus::Prepared;
         let summary = report_summary(&input, &recommendations)?;
         // Build the notification before `summary` / `recommendations` move below.
-        let notification =
-            report_notification(&report_id, status, &input, &summary, &recommendations)?;
+        let notification = report_notification(
+            &report_id,
+            RecommendationReportStatus::Published,
+            &input,
+            &summary,
+            &recommendations,
+        )?;
 
         let report = build_report_header(
             &report_id,
@@ -246,14 +247,9 @@ fn build_report_header(
     let fallback_horizon_secs = input.runtime_config.reports.fallback_horizon_secs;
     Ok(NewRecommendationReport {
         recommendation_report_id: report_id.clone(),
+        profile_id: input.profile_ref.id.clone(),
         profile_ref: input.profile_ref.clone(),
         report_kind: ReportKind::TopN,
-        trigger_kind: input.trigger.kind(),
-        trigger_key: input.trigger_key.clone(),
-        trigger_time: input.trigger_time,
-        knowledge_lag_secs: i64::try_from(input.knowledge_lag_secs).map_err(|error| {
-            QuantError::config(format!("knowledge_lag_secs too large: {error}"))
-        })?,
         decision_at: input.decision_at,
         horizon_secs: i64::try_from(fallback_horizon_secs).map_err(|error| {
             QuantError::config(format!("reports.fallback_horizon_secs too large: {error}"))
@@ -274,14 +270,14 @@ fn build_report_header(
         equity_snapshot_ref: input.equity_snapshot.equity_snapshot_id.clone(),
         data_quality_snapshot_ref,
         summary_json: summary,
-        published_at: Some(input.published_at),
+        published_at: None,
+        successor_report_id: None,
+        superseded_at: None,
+        obsoleted_at: None,
         valid_until: Some(valid_until),
         revoked_at: None,
         expired_at: None,
-        status_reason: input
-            .empty
-            .as_ref()
-            .map(|empty| empty.reason.as_str().to_owned()),
+        status_reason: None,
     })
 }
 
@@ -1500,7 +1496,7 @@ fn build_new_recommendation(
         ),
         valid_from: input.published_at,
         valid_until,
-        status: RecommendationStatus::Published,
+        status: RecommendationStatus::Prepared,
     };
     let instance = new_condition_instance(recommendation_id, condition, valid_until);
     Ok(ComposedRecommendationRows {
@@ -1982,7 +1978,7 @@ fn recommendation_events(
     report_id: &RecommendationReportId,
     recommendations: &[NewRecommendation],
     event_time: DateTime<Utc>,
-) -> QuantResult<Vec<QuantRecommendationEventRow>> {
+) -> QuantResult<Vec<QuantReportRecommendationFactRow>> {
     recommendations
         .iter()
         .map(|rec| {
@@ -1990,7 +1986,7 @@ fn recommendation_events(
                 field: "recommendation.rank",
                 detail: error.to_string(),
             })?;
-            Ok(QuantRecommendationEventRow {
+            Ok(QuantReportRecommendationFactRow {
                 event_time: event_time.timestamp_millis(),
                 recommendation_report_id: report_id.clone(),
                 recommendation_id: rec.recommendation_id.clone(),
@@ -2006,7 +2002,6 @@ fn recommendation_events(
                     .sizing()
                     .map(|sizing| ChUsd::from(sizing.suggested_usd)),
                 valid_until: rec.valid_until.timestamp_millis(),
-                status: rec.status.into(),
             })
         })
         .collect()
@@ -2020,12 +2015,12 @@ fn operation_log(
 ) -> QuantResult<NewOperationLog> {
     Ok(NewOperationLog {
         id: OperationLogId::from_v7(),
-        request_id: input.trigger_key.clone(),
+        request_id: format!("quant-report:prepare:{report_id}"),
         actor_user_id: None,
         actor_username: Some("system".to_owned()),
         acting_role: Some("report_lifecycle".to_owned()),
         category: OperationCategory::QuantReport,
-        action: "publish".to_owned(),
+        action: "prepare".to_owned(),
         resource_type: Some(ResourceType::QuantReport),
         resource_id: Some(report_id.to_string()),
         http_method: "SYSTEM".to_owned(),
@@ -2036,11 +2031,9 @@ fn operation_log(
         user_agent: None,
         latency_ms: 0,
         detail: serde_json::json!({
-            "trigger_key": input.trigger_key,
-            "trigger_kind": input.trigger.kind().as_str(),
             "status": status.as_str(),
             "decision_at": input.decision_at.to_rfc3339(),
-            "published_at": input.published_at.to_rfc3339(),
+            "prepared_at": input.published_at.to_rfc3339(),
             "candidate_count": input.candidate_count,
             "published_count": input.planned.len(),
             "empty_reason": input.empty.as_ref().map(|empty| empty.reason.as_str()),

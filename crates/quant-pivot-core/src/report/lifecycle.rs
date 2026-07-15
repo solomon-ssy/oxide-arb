@@ -1,6 +1,6 @@
 //! Report lifecycle service.
 
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use quant_pivot_error::{
@@ -9,41 +9,33 @@ use quant_pivot_error::{
     storage::{StorageError, entity},
 };
 use quant_pivot_models::{
-    domain::{NewOperationLog, OrderIntentInfo, RecommendationReportInfo, ReportLifecycleEvent},
+    domain::{
+        EnqueueReportRunOutcome, NewOperationLog, NewReportRun, RecommendationReportInfo,
+        ReportFactDeliveryInfo, ReportRunClaim, ReportRunInfo,
+    },
     enums::{
         operation_log::{OperationCategory, OperationOutcome},
-        quant::{EmptyReportReason, QuantRuntimeMode, RecommendationReportStatus, ReportKind},
+        quant::{RecommendationReportStatus, ReportRunStatus, ReportTriggerKind},
         rbac::ResourceType,
     },
-    runtime_config::RuntimeConfig,
-    types::{OperationLogId, RecommendationId, RecommendationReportId},
+    types::{OperationLogId, RecommendationId, RecommendationReportId, ReportRunId},
 };
 use quant_pivot_repository::traits::{
-    RecommendationReportRepository, RecommendationRepository, RuntimeConfigVersionRepository,
+    RecommendationReportRepository, RecommendationRepository, ReportRunRepository,
 };
 use quant_pivot_research::artifact::ArtifactStore;
-use tokio::sync::Mutex;
 
 use crate::{
     execution::IntentTerminalEventSink,
-    governance::RuntimeModeHandle,
-    observability::metrics_hub::MetricsHub,
     service::feature_integrity::{FeatureParityGatePort, FeatureParityRunCoordinator},
 };
 
 use super::{
-    builder::{ReportBuilder, report_decision_at},
+    builder::ReportBuilder,
     fact_bundle::prepare_report_fact_bundle,
     publisher::ReportPublisher,
-    types::{BuildReportRequest, ComposedReport, ReportTrigger},
+    types::{BuildReportRequest, ComposedReport, ReportTrigger, durable_report_error_summary},
 };
-
-/// Scheduled report trigger request.
-#[derive(Debug, Clone)]
-pub struct ScheduledReportRequest {
-    pub schedule_id: String,
-    pub trigger_time: DateTime<Utc>,
-}
 
 /// Ad-hoc report trigger request.
 #[derive(Debug, Clone)]
@@ -54,36 +46,40 @@ pub struct AdHocReportRequest {
     pub knowledge_lag_secs: Option<u64>,
 }
 
+/// Operator-requested retry of one terminal ad-hoc run.
+#[derive(Debug, Clone)]
+pub struct RetryAdHocReportRequest {
+    pub source_run_id: ReportRunId,
+    pub request_id: String,
+    pub requested_at: DateTime<Utc>,
+}
+
 /// Dependencies for [`ReportLifecycleService`].
 pub struct ReportLifecycleDeps {
     pub report_repo: Arc<dyn RecommendationReportRepository>,
+    pub run_repo: Arc<dyn ReportRunRepository>,
     pub recommendation_repo: Arc<dyn RecommendationRepository>,
-    pub runtime_config_repo: Arc<dyn RuntimeConfigVersionRepository>,
     pub builder: Arc<dyn ReportBuilder>,
     pub publisher: Arc<ReportPublisher>,
-    pub runtime_mode: RuntimeModeHandle,
-    pub metrics: Arc<MetricsHub>,
     pub feature_parity_gate: Arc<dyn FeatureParityGatePort>,
     pub feature_parity_runs: Arc<FeatureParityRunCoordinator>,
     pub artifact_store: Arc<dyn ArtifactStore>,
+    pub ad_hoc_queue_capacity: u64,
+    pub ad_hoc_queue_ttl_secs: u64,
 }
 
 /// End-to-end report lifecycle entry point.
 pub struct ReportLifecycleService {
     report_repo: Arc<dyn RecommendationReportRepository>,
+    run_repo: Arc<dyn ReportRunRepository>,
     recommendation_repo: Arc<dyn RecommendationRepository>,
-    runtime_config_repo: Arc<dyn RuntimeConfigVersionRepository>,
     builder: Arc<dyn ReportBuilder>,
     publisher: Arc<ReportPublisher>,
-    runtime_mode: RuntimeModeHandle,
-    metrics: Arc<MetricsHub>,
     feature_parity_gate: Arc<dyn FeatureParityGatePort>,
     feature_parity_runs: Arc<FeatureParityRunCoordinator>,
     artifact_store: Arc<dyn ArtifactStore>,
-    run_lock: Mutex<()>,
-    /// Post-commit event sink for intents atomically invalidated by report or
-    /// recommendation terminal repository commands.
-    intent_terminal_events: OnceLock<Arc<dyn IntentTerminalEventSink>>,
+    ad_hoc_queue_capacity: u64,
+    ad_hoc_queue_ttl_secs: u64,
 }
 
 impl ReportLifecycleService {
@@ -92,63 +88,135 @@ impl ReportLifecycleService {
     pub fn new(deps: ReportLifecycleDeps) -> Self {
         Self {
             report_repo: deps.report_repo,
+            run_repo: deps.run_repo,
             recommendation_repo: deps.recommendation_repo,
-            runtime_config_repo: deps.runtime_config_repo,
             builder: deps.builder,
             publisher: deps.publisher,
-            runtime_mode: deps.runtime_mode,
-            metrics: deps.metrics,
             feature_parity_gate: deps.feature_parity_gate,
             feature_parity_runs: deps.feature_parity_runs,
             artifact_store: deps.artifact_store,
-            run_lock: Mutex::new(()),
-            intent_terminal_events: OnceLock::new(),
+            ad_hoc_queue_capacity: deps.ad_hoc_queue_capacity,
+            ad_hoc_queue_ttl_secs: deps.ad_hoc_queue_ttl_secs,
         }
     }
 
     /// Install the order-intent terminal event sink (idempotent; first set wins).
     pub fn set_intent_terminal_event_sink(&self, sink: Arc<dyn IntentTerminalEventSink>) {
-        let _ = self.intent_terminal_events.set(sink);
+        self.publisher.set_intent_terminal_event_sink(sink);
     }
 
-    fn publish_invalidated_intents(&self, intents: &[OrderIntentInfo], now: DateTime<Utc>) {
-        if let Some(sink) = self.intent_terminal_events.get() {
-            sink.publish_invalidated(intents, now);
-        }
-    }
-
-    /// Run a scheduled report with fixed idempotency key semantics.
-    pub async fn run_scheduled(
-        &self,
-        request: ScheduledReportRequest,
-    ) -> QuantResult<RecommendationReportInfo> {
-        let trigger = ReportTrigger::Scheduled {
-            schedule_id: request.schedule_id,
-        };
-        self.run(BuildReportRequest {
-            trigger,
-            trigger_time: request.trigger_time,
-            top_n_override: None,
-            knowledge_lag_secs_override: None,
-        })
-        .await
-    }
-
-    /// Run an ad-hoc report with request-id idempotency.
+    /// Idempotently enqueue an ad-hoc report and return its durable run row.
     pub async fn run_ad_hoc(
         &self,
         request: AdHocReportRequest,
-    ) -> QuantResult<RecommendationReportInfo> {
-        let trigger = ReportTrigger::AdHoc {
-            request_id: request.request_id,
+    ) -> QuantResult<EnqueueReportRunOutcome> {
+        let request_id = request.request_id;
+        let top_n = request
+            .top_n
+            .map(i32::try_from)
+            .transpose()
+            .map_err(|error| QuantError::config(format!("top_n exceeds i32: {error}")))?;
+        let knowledge_lag_secs = request
+            .knowledge_lag_secs
+            .map(i64::try_from)
+            .transpose()
+            .map_err(|error| {
+                QuantError::config(format!("knowledge_lag_secs exceeds i64: {error}"))
+            })?;
+        let run = NewReportRun {
+            report_run_id: ReportRunId::from_v7(),
+            trigger_kind: ReportTriggerKind::AdHoc,
+            trigger_key: format!("ad_hoc:{request_id}"),
+            schedule_id: None,
+            request_id: Some(request_id),
+            retry_of_run_id: None,
+            scheduled_for: None,
+            requested_at: request.trigger_time,
+            status: ReportRunStatus::Queued,
+            top_n,
+            knowledge_lag_secs,
         };
-        self.run(BuildReportRequest {
-            trigger,
-            trigger_time: request.trigger_time,
-            top_n_override: request.top_n,
-            knowledge_lag_secs_override: request.knowledge_lag_secs,
-        })
-        .await
+        let outcome = self
+            .run_repo
+            .enqueue_ad_hoc(run, self.ad_hoc_queue_capacity, self.ad_hoc_queue_ttl_secs)
+            .await?;
+        if outcome.created() {
+            self.publisher.publish_run(outcome.run(), Utc::now());
+        }
+        Ok(outcome)
+    }
+
+    /// Create a new queued attempt from one terminal ad-hoc run. The source row
+    /// remains immutable and supplies exact retry lineage plus frozen overrides.
+    pub async fn retry_ad_hoc(
+        &self,
+        request: RetryAdHocReportRequest,
+    ) -> QuantResult<EnqueueReportRunOutcome> {
+        let source = self
+            .run_repo
+            .find_by_id(&request.source_run_id)
+            .await?
+            .ok_or_else(|| {
+                StorageError::not_found(entity::QUANT_REPORT_RUN, &request.source_run_id)
+            })?;
+        if source.trigger_kind != ReportTriggerKind::AdHoc
+            || !matches!(
+                source.status,
+                ReportRunStatus::Failed | ReportRunStatus::Skipped | ReportRunStatus::Abandoned
+            )
+        {
+            return Err(StorageError::state_conflict(
+                entity::QUANT_REPORT_RUN,
+                Some(&request.source_run_id),
+                "only failed, skipped, or abandoned ad-hoc runs can be retried",
+            )
+            .into());
+        }
+        let run = NewReportRun {
+            report_run_id: ReportRunId::from_v7(),
+            trigger_kind: ReportTriggerKind::AdHoc,
+            trigger_key: format!(
+                "ad_hoc_retry:{}:{}",
+                request.source_run_id, request.request_id
+            ),
+            schedule_id: None,
+            request_id: Some(request.request_id),
+            retry_of_run_id: Some(request.source_run_id),
+            scheduled_for: None,
+            requested_at: request.requested_at,
+            status: ReportRunStatus::Queued,
+            top_n: source.top_n,
+            knowledge_lag_secs: source.knowledge_lag_secs,
+        };
+        let outcome = self
+            .run_repo
+            .enqueue_ad_hoc(run, self.ad_hoc_queue_capacity, self.ad_hoc_queue_ttl_secs)
+            .await?;
+        if outcome.created() {
+            self.publisher.publish_run(outcome.run(), Utc::now());
+        }
+        Ok(outcome)
+    }
+
+    /// Requeue a failed immutable fact bundle for verification/publication.
+    pub async fn retry_publication(
+        &self,
+        report_id: &RecommendationReportId,
+        occurred_at: DateTime<Utc>,
+    ) -> QuantResult<ReportFactDeliveryInfo> {
+        let delivery = self
+            .report_repo
+            .retry_fact_delivery(report_id, occurred_at)
+            .await?;
+        let report = self
+            .report_repo
+            .find_by_id(report_id)
+            .await?
+            .ok_or_else(|| {
+                StorageError::not_found(entity::QUANT_RECOMMENDATION_REPORT, report_id)
+            })?;
+        self.publisher.publish_delivery_state(&report, false);
+        Ok(delivery)
     }
 
     /// Revoke a committed report in one repository transaction, then publish the
@@ -169,7 +237,8 @@ impl ReportLifecycleService {
             )
             .await?;
         self.publisher.publish_revoked(&report);
-        self.publish_invalidated_intents(&invalidated_intents, revoked_at);
+        self.publisher
+            .publish_invalidated_intents(&invalidated_intents, revoked_at);
         Ok(report)
     }
 
@@ -207,7 +276,8 @@ impl ReportLifecycleService {
             {
                 Ok((revoked, invalidated_intents)) => {
                     self.publisher.publish_revoked(&revoked);
-                    self.publish_invalidated_intents(&invalidated_intents, occurred_at);
+                    self.publisher
+                        .publish_invalidated_intents(&invalidated_intents, occurred_at);
                 }
                 Err(error) if is_report_revoke_transition_conflict(&error, report_id) => {
                     let latest =
@@ -260,7 +330,8 @@ impl ReportLifecycleService {
                                 field: "report.expired_recommendation_count",
                                 detail: "expiry sweep count exceeds u32".to_owned(),
                             })?;
-                    self.publish_invalidated_intents(&invalidated_intents, now);
+                    self.publisher
+                        .publish_invalidated_intents(&invalidated_intents, now);
                     self.try_roll_up_report(&recommendation.recommendation_report_id, now)
                         .await;
                 }
@@ -324,137 +395,165 @@ impl ReportLifecycleService {
         }
     }
 
-    async fn run(&self, request: BuildReportRequest) -> QuantResult<RecommendationReportInfo> {
-        let trigger_time = request.trigger_time;
-        let trigger_key = request.trigger.key(request.trigger_time);
-        if let Some(existing) = self.report_repo.find_by_trigger_key(&trigger_key).await? {
-            self.feature_parity_runs
-                .ensure_report_sample_committed(&existing)
-                .await?;
-            return Ok(existing);
-        }
-        let _run_guard = self.run_lock.lock().await;
-        if let Some(existing) = self.report_repo.find_by_trigger_key(&trigger_key).await? {
-            self.feature_parity_runs
-                .ensure_report_sample_committed(&existing)
-                .await?;
-            return Ok(existing);
-        }
-        self.feature_parity_gate
-            .ensure_clear("new report generation")
-            .await?;
-
-        // Ephemeral start/fail signals correlate by `trigger_key` (no row yet).
-        let runtime_mode = self.runtime_mode.current();
-        let decision_at = report_decision_at(self.runtime_config_repo.as_ref(), &request).await?;
-
-        self.publisher
-            .publish_ephemeral(ReportLifecycleEvent::started(
-                trigger_key.clone(),
-                ReportKind::TopN,
-                runtime_mode,
-                decision_at,
-            ));
-
-        let mut composed = match self.builder.build(request).await {
+    /// Execute a previously claimed run under its exact lease CAS identity.
+    pub async fn execute_claimed(
+        &self,
+        run: ReportRunInfo,
+    ) -> QuantResult<RecommendationReportInfo> {
+        let composed = match self.prepare_claimed(&run).await {
             Ok(composed) => composed,
             Err(error) => {
-                self.publish_failed(&trigger_key, runtime_mode, decision_at, &error);
+                self.fail_claimed_run(&run, &error).await;
                 return Err(error);
             }
         };
-        let config = active_runtime_config(self.runtime_config_repo.as_ref(), trigger_time).await?;
-        if should_suppress_empty_report(&composed, &config) {
-            let empty_reason = empty_reason_from_composed(&composed);
-            self.publisher
-                .publish_ephemeral(ReportLifecycleEvent::ephemeral_empty(
-                    trigger_key.clone(),
-                    ReportKind::TopN,
-                    runtime_mode,
-                    decision_at,
-                    empty_reason,
-                ));
-            self.metrics.report_skipped_empty_total.inc();
-            return Err(ReportError::EmptyReportSuppressed {
-                reason: empty_reason.as_str().to_owned(),
-            }
-            .into());
-        }
-        let sampled_feature_parity = self
-            .feature_parity_runs
-            .build_report_sample(&composed.transaction.report)
-            .await?;
-        composed.transaction.sampled_feature_parity = Some(sampled_feature_parity);
-        composed.transaction.feature_parity_state_id = Some(
-            self.feature_parity_gate
-                .commit_state_id("report commit")
-                .await?,
-        );
-        if let Err(error) = prepare_report_fact_bundle(&self.artifact_store, &mut composed).await {
-            self.publish_failed(&trigger_key, runtime_mode, decision_at, &error);
-            return Err(error);
-        }
-        match self
-            .report_repo
-            .create_report(composed.transaction.clone())
-            .await
-        {
+        match self.commit_claimed(&run, composed).await {
             Ok(report) => Ok(report),
             Err(error) => {
-                if let Some(existing) = self.report_repo.find_by_trigger_key(&trigger_key).await? {
-                    self.feature_parity_runs
-                        .ensure_report_sample_committed(&existing)
-                        .await?;
-                    return Ok(existing);
-                }
-                let error: QuantError = error.into();
-                self.publish_failed(&trigger_key, runtime_mode, decision_at, &error);
+                self.fail_claimed_run(&run, &error).await;
                 Err(error)
             }
         }
     }
 
-    fn publish_failed(
+    /// Build and freeze a claimed run without touching the report/run commit.
+    /// The coordinator keeps the lease alive while this future is in flight.
+    pub(crate) async fn prepare_claimed(&self, run: &ReportRunInfo) -> QuantResult<ComposedReport> {
+        let (request, _) = build_request_from_claimed_run(run)?;
+        self.feature_parity_gate
+            .ensure_clear("new report generation")
+            .await?;
+        let mut composed = self.builder.build(request).await?;
+        let sampled_feature_parity = self
+            .feature_parity_runs
+            .build_report_sample(&composed.transaction.report, run)
+            .await?;
+        composed.transaction.sampled_feature_parity = Some(sampled_feature_parity);
+        let parity_state = self
+            .feature_parity_gate
+            .commit_state_id("report commit")
+            .await?;
+        composed.transaction.feature_parity_state_id = Some(parity_state);
+        prepare_report_fact_bundle(&self.artifact_store, &mut composed).await?;
+        Ok(composed)
+    }
+
+    /// Commit one fully prepared artifact under the latest exact lease identity.
+    pub(crate) async fn commit_claimed(
         &self,
-        trigger_key: &str,
-        runtime_mode: QuantRuntimeMode,
-        as_of: DateTime<Utc>,
-        error: &QuantError,
-    ) {
-        self.publisher
-            .publish_ephemeral(ReportLifecycleEvent::failed(
-                trigger_key.to_owned(),
-                ReportKind::TopN,
-                runtime_mode,
-                as_of,
-                error.code().to_owned(),
-                error.to_string(),
-            ));
+        run: &ReportRunInfo,
+        composed: ComposedReport,
+    ) -> QuantResult<RecommendationReportInfo> {
+        let (_, claim) = build_request_from_claimed_run(run)?;
+        let prepared = self
+            .report_repo
+            .create_prepared_report(claim, composed.transaction)
+            .await?;
+        self.publisher.publish_prepared(&prepared.report);
+        self.publisher.publish_run(&prepared.run, Utc::now());
+        Ok(prepared.report)
+    }
+
+    pub(crate) async fn fail_claimed_run(&self, run: &ReportRunInfo, error: &QuantError) {
+        let Some(worker_id) = run.lease_owner else {
+            return;
+        };
+        let summary = durable_report_error_summary(error);
+        match self
+            .run_repo
+            .fail_run(&run.report_run_id, worker_id, error.code(), &summary)
+            .await
+        {
+            Ok(failed) => self.publisher.publish_run(&failed, Utc::now()),
+            Err(fail_error) => tracing::warn!(
+                run_id = %run.report_run_id,
+                %fail_error,
+                "report run failure could not be committed; lease recovery will reconcile it"
+            ),
+        }
     }
 }
 
-async fn active_runtime_config(
-    runtime_config_repo: &dyn RuntimeConfigVersionRepository,
-    trigger_time: DateTime<Utc>,
-) -> QuantResult<RuntimeConfig> {
-    let version = runtime_config_repo
-        .load_active_at(trigger_time)
-        .await?
-        .ok_or_else(|| QuantError::config("no active runtime config version"))?;
-    RuntimeConfig::from_json(&version.config_json).map_err(QuantError::from)
-}
-
-fn should_suppress_empty_report(composed: &ComposedReport, config: &RuntimeConfig) -> bool {
-    !config.reports.publish_empty_reports
-        && composed.transaction.recommendations.is_empty()
-        && composed.transaction.report.status == RecommendationReportStatus::PublishedEmpty
-}
-
-fn empty_reason_from_composed(composed: &ComposedReport) -> EmptyReportReason {
-    composed
-        .notification
-        .empty_reason
-        .unwrap_or(EmptyReportReason::EmptySelection)
+fn build_request_from_claimed_run(
+    run: &ReportRunInfo,
+) -> QuantResult<(BuildReportRequest, ReportRunClaim)> {
+    if run.status != ReportRunStatus::Running {
+        return Err(ReportError::ContractViolation {
+            detail: format!("report run {} is not Running", run.report_run_id),
+        }
+        .into());
+    }
+    let decision_at = run
+        .decision_at
+        .ok_or_else(|| ReportError::InvariantViolation {
+            stage: "report_run_claim",
+            detail: "Running report run has no decision_at".to_owned(),
+        })?;
+    let lease_owner = run
+        .lease_owner
+        .ok_or_else(|| ReportError::InvariantViolation {
+            stage: "report_run_claim",
+            detail: "Running report run has no lease_owner".to_owned(),
+        })?;
+    let lease_expires_at = run
+        .lease_expires_at
+        .ok_or_else(|| ReportError::InvariantViolation {
+            stage: "report_run_claim",
+            detail: "Running report run has no lease_expires_at".to_owned(),
+        })?;
+    let top_n = run.top_n.ok_or_else(|| ReportError::InvariantViolation {
+        stage: "report_run_claim",
+        detail: "Running report run has no frozen top_n".to_owned(),
+    })?;
+    let knowledge_lag_secs =
+        run.knowledge_lag_secs
+            .ok_or_else(|| ReportError::InvariantViolation {
+                stage: "report_run_claim",
+                detail: "Running report run has no frozen knowledge_lag_secs".to_owned(),
+            })?;
+    let trigger = match run.trigger_kind {
+        ReportTriggerKind::Scheduled => ReportTrigger::Scheduled {
+            schedule_id: run.schedule_id.clone().ok_or_else(|| {
+                ReportError::InvariantViolation {
+                    stage: "report_run_claim",
+                    detail: "scheduled report run has no schedule_id".to_owned(),
+                }
+            })?,
+        },
+        ReportTriggerKind::AdHoc => ReportTrigger::AdHoc {
+            request_id: run
+                .request_id
+                .clone()
+                .ok_or_else(|| ReportError::InvariantViolation {
+                    stage: "report_run_claim",
+                    detail: "ad-hoc report run has no request_id".to_owned(),
+                })?,
+        },
+    };
+    let request = BuildReportRequest {
+        trigger,
+        trigger_time: decision_at,
+        top_n_override: Some(u32::try_from(top_n).map_err(|error| {
+            ReportError::NumericOverflow {
+                field: "report_run.top_n",
+                detail: error.to_string(),
+            }
+        })?),
+        knowledge_lag_secs_override: Some(u64::try_from(knowledge_lag_secs).map_err(|error| {
+            ReportError::NumericOverflow {
+                field: "report_run.knowledge_lag_secs",
+                detail: error.to_string(),
+            }
+        })?),
+    };
+    Ok((
+        request,
+        ReportRunClaim {
+            report_run_id: run.report_run_id.clone(),
+            lease_owner,
+            lease_expires_at,
+        },
+    ))
 }
 
 fn recommendation_operation_log(
@@ -519,7 +618,8 @@ fn lifecycle_operation_log(
 const fn is_parity_contained_report_status(status: RecommendationReportStatus) -> bool {
     matches!(
         status,
-        RecommendationReportStatus::Failed
+        RecommendationReportStatus::Superseded
+            | RecommendationReportStatus::Obsolete
             | RecommendationReportStatus::Revoked
             | RecommendationReportStatus::Expired
     )
@@ -550,16 +650,16 @@ mod parity_containment_tests {
     #[test]
     fn only_terminal_report_states_skip_parity_revoke() {
         for status in [
-            RecommendationReportStatus::Failed,
+            RecommendationReportStatus::Superseded,
+            RecommendationReportStatus::Obsolete,
             RecommendationReportStatus::Revoked,
             RecommendationReportStatus::Expired,
         ] {
             assert!(is_parity_contained_report_status(status));
         }
         for status in [
-            RecommendationReportStatus::Building,
+            RecommendationReportStatus::Prepared,
             RecommendationReportStatus::Published,
-            RecommendationReportStatus::PublishedEmpty,
         ] {
             assert!(!is_parity_contained_report_status(status));
         }

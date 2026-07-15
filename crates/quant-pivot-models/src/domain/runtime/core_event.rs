@@ -2,18 +2,22 @@
 
 use crate::{
     domain::{
-        MarketBookView, OrderIntentInfo, RecommendationReportInfo, governance::system::SystemStatus,
+        MarketBookView, OrderIntentInfo, RecommendationReportInfo, ReportRunInfo,
+        governance::system::SystemStatus,
     },
     enums::{
         common::{AlertCategory, AlertLevel, AlertSource},
         execution::{ReconciliationResult, SettlementRedeemState},
         quant::{
             EmptyReportReason, EntryConditionState, OrderIntentStatus, QuantRuntimeMode,
-            RecommendationReportStatus, ReportKind, ResearchJobKind, ResearchJobStatus,
-            TrainingDatasetStatus,
+            RecommendationReportStatus, ReportKind, ReportRunStatus, ReportRunTerminalReason,
+            ResearchJobKind, ResearchJobStatus, TrainingDatasetStatus,
         },
     },
-    types::{ConditionTruth, ContentHash, EntryConditionInstanceId, MarketId},
+    types::{
+        ConditionTruth, ContentHash, EntryConditionInstanceId, MarketId, RecommendationReportId,
+        ReportRunId,
+    },
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -36,27 +40,18 @@ pub struct SystemAlertEvent {
     pub dedupe_secs: u64,
 }
 
-/// Which lifecycle transition a [`ReportLifecycleEvent`] describes.
-///
-/// `Started` / `Failed` are **ephemeral** observability signals emitted around
-/// the build pipeline: a build can fail before any row is persisted, so those
-/// events carry no `recommendation_report_id`. `Published` / `Empty` / `Revoked`
-/// / `Expired` are always backed by a committed report row.
+/// Durable lifecycle transition represented by a [`ReportLifecycleEvent`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReportEventKind {
-    /// A report build started (no row yet).
-    Started,
-    /// A report committed with at least one recommendation.
+    Prepared,
     Published,
-    /// A report committed with zero recommendations.
-    Empty,
-    /// A report build failed before commit (no row).
-    Failed,
-    /// A committed report was revoked.
+    Superseded,
+    Obsolete,
     Revoked,
-    /// A committed report expired by TTL.
     Expired,
+    DeliveryRetrying,
+    DeliveryFailed,
 }
 
 impl ReportEventKind {
@@ -64,26 +59,24 @@ impl ReportEventKind {
     #[must_use]
     pub const fn wire(self) -> &'static str {
         match self {
-            Self::Started => "quant.report.started",
+            Self::Prepared => "quant.report.prepared",
             Self::Published => "quant.report.published",
-            Self::Empty => "quant.report.empty",
-            Self::Failed => "quant.report.failed",
+            Self::Superseded => "quant.report.superseded",
+            Self::Obsolete => "quant.report.obsolete",
             Self::Revoked => "quant.report.revoked",
             Self::Expired => "quant.report.expired",
+            Self::DeliveryRetrying => "quant.report.delivery_retrying",
+            Self::DeliveryFailed => "quant.report.delivery_failed",
         }
     }
 }
 
-/// Report lifecycle event fanned out on the single `quant.report` channel.
-///
-/// The discriminant is [`Self::event`]; backing report fields are present only
-/// for committed-row events (`recommendation_report_id` is `None` for the
-/// ephemeral `started` / `failed` signals, which correlate by `trigger_key`).
+/// Report lifecycle revision hint backed by committed Postgres state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReportLifecycleEvent {
     pub event: ReportEventKind,
-    pub trigger_key: String,
-    pub recommendation_report_id: Option<String>,
+    pub recommendation_report_id: String,
+    pub profile_id: String,
     pub report_kind: ReportKind,
     pub runtime_mode: QuantRuntimeMode,
     pub status: RecommendationReportStatus,
@@ -96,65 +89,28 @@ pub struct ReportLifecycleEvent {
 }
 
 impl ReportLifecycleEvent {
-    /// Ephemeral `started` signal for a build keyed by `trigger_key`.
+    /// Committed prepared artifact event.
     #[must_use]
-    pub const fn started(
-        trigger_key: String,
-        report_kind: ReportKind,
-        runtime_mode: QuantRuntimeMode,
-        decision_at: DateTime<Utc>,
-    ) -> Self {
-        Self {
-            event: ReportEventKind::Started,
-            trigger_key,
-            recommendation_report_id: None,
-            report_kind,
-            runtime_mode,
-            status: RecommendationReportStatus::Building,
-            decision_at,
-            published_at: None,
-            recommendation_count: 0,
-            empty_reason: None,
-            error_code: None,
-            status_reason: None,
-        }
+    pub fn prepared(report: &RecommendationReportInfo) -> Self {
+        Self::from_report(report, ReportEventKind::Prepared)
     }
 
-    /// Ephemeral `failed` signal for a build that errored before commit.
-    #[must_use]
-    pub const fn failed(
-        trigger_key: String,
-        report_kind: ReportKind,
-        runtime_mode: QuantRuntimeMode,
-        decision_at: DateTime<Utc>,
-        error_code: String,
-        status_reason: String,
-    ) -> Self {
-        Self {
-            event: ReportEventKind::Failed,
-            trigger_key,
-            recommendation_report_id: None,
-            report_kind,
-            runtime_mode,
-            status: RecommendationReportStatus::Failed,
-            decision_at,
-            published_at: None,
-            recommendation_count: 0,
-            empty_reason: None,
-            error_code: Some(error_code),
-            status_reason: Some(status_reason),
-        }
-    }
-
-    /// Committed `published` / `empty` event, discriminated by the report status.
+    /// Committed publication event. Empty is carried in `empty_reason`, not as a state.
     #[must_use]
     pub fn committed(report: &RecommendationReportInfo) -> Self {
-        let event = if report.status == RecommendationReportStatus::PublishedEmpty {
-            ReportEventKind::Empty
-        } else {
-            ReportEventKind::Published
-        };
-        Self::from_report(report, event)
+        Self::from_report(report, ReportEventKind::Published)
+    }
+
+    /// Committed supersession event.
+    #[must_use]
+    pub fn superseded(report: &RecommendationReportInfo) -> Self {
+        Self::from_report(report, ReportEventKind::Superseded)
+    }
+
+    /// Committed obsolete event.
+    #[must_use]
+    pub fn obsolete(report: &RecommendationReportInfo) -> Self {
+        Self::from_report(report, ReportEventKind::Obsolete)
     }
 
     /// Committed `revoked` event.
@@ -169,36 +125,23 @@ impl ReportLifecycleEvent {
         Self::from_report(report, ReportEventKind::Expired)
     }
 
-    /// Ephemeral `empty` signal when `publish_empty_reports=false` suppresses PG persistence.
+    /// Durable fact-delivery retry hint.
     #[must_use]
-    pub fn ephemeral_empty(
-        trigger_key: String,
-        report_kind: ReportKind,
-        runtime_mode: QuantRuntimeMode,
-        decision_at: DateTime<Utc>,
-        empty_reason: EmptyReportReason,
-    ) -> Self {
-        Self {
-            event: ReportEventKind::Empty,
-            trigger_key,
-            recommendation_report_id: None,
-            report_kind,
-            runtime_mode,
-            status: RecommendationReportStatus::PublishedEmpty,
-            decision_at,
-            published_at: None,
-            recommendation_count: 0,
-            empty_reason: Some(empty_reason),
-            error_code: None,
-            status_reason: Some(empty_reason.as_str().to_owned()),
-        }
+    pub fn delivery_retrying(report: &RecommendationReportInfo) -> Self {
+        Self::from_report(report, ReportEventKind::DeliveryRetrying)
+    }
+
+    /// Durable terminal fact-delivery failure hint.
+    #[must_use]
+    pub fn delivery_failed(report: &RecommendationReportInfo) -> Self {
+        Self::from_report(report, ReportEventKind::DeliveryFailed)
     }
 
     fn from_report(report: &RecommendationReportInfo, event: ReportEventKind) -> Self {
         Self {
             event,
-            trigger_key: report.trigger_key.clone(),
-            recommendation_report_id: Some(report.recommendation_report_id.to_string()),
+            recommendation_report_id: report.recommendation_report_id.to_string(),
+            profile_id: report.profile_id.clone(),
             report_kind: report.report_kind,
             runtime_mode: report.runtime_mode,
             status: report.status,
@@ -208,6 +151,29 @@ impl ReportLifecycleEvent {
             empty_reason: report.summary_json.empty_reason,
             error_code: None,
             status_reason: report.status_reason.clone(),
+        }
+    }
+}
+
+/// Durable report-run revision hint; clients always re-fetch the REST view.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReportRunLifecycleEvent {
+    pub report_run_id: ReportRunId,
+    pub status: ReportRunStatus,
+    pub terminal_reason: Option<ReportRunTerminalReason>,
+    pub output_report_id: Option<RecommendationReportId>,
+    pub occurred_at: DateTime<Utc>,
+}
+
+impl ReportRunLifecycleEvent {
+    #[must_use]
+    pub fn from_run(run: &ReportRunInfo, occurred_at: DateTime<Utc>) -> Self {
+        Self {
+            report_run_id: run.report_run_id.clone(),
+            status: run.status,
+            terminal_reason: run.terminal_reason,
+            output_report_id: run.output_report_id.clone(),
+            occurred_at,
         }
     }
 }
@@ -573,6 +539,7 @@ pub enum CoreEvent {
         version_id: String,
     },
     Report(ReportLifecycleEvent),
+    ReportRun(ReportRunLifecycleEvent),
     Intent(IntentLifecycleEvent),
     Condition(EntryConditionLifecycleEvent),
     Alert(SystemAlertEvent),
@@ -590,6 +557,7 @@ impl CoreEvent {
             Self::MarketResolved { .. } => "market.resolved",
             Self::ConfigActivated { .. } => "config.activated",
             Self::Report(event) => event.event.wire(),
+            Self::ReportRun(_) => "quant.report_run",
             Self::Intent(event) => event.event.wire(),
             Self::Condition(_) => "quant.condition",
             Self::Alert(_) => "system.alert",

@@ -370,6 +370,14 @@ pub struct PortfolioPlanId(Arc<Uuid>);
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RecommendationReportId(Arc<Uuid>);
 
+/// One durable report build attempt.
+#[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ReportRunId(Arc<Uuid>);
+
+/// One append-only aggregate of missed report schedule occurrences.
+#[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ReportScheduleGapId(Arc<Uuid>);
+
 /// Single recommendation row identifier.
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RecommendationId(Arc<Uuid>);

@@ -14,28 +14,6 @@ use std::{
 };
 use teloxide::{prelude::*, types::ChatId};
 
-/// Legacy scheduler alert payload retained for notification wiring tests.
-#[derive(Debug, Clone)]
-pub struct ScheduleAlert {
-    pub schedule_id: String,
-    pub detail: String,
-}
-
-impl ScheduleAlert {
-    #[must_use]
-    pub fn operator_message(&self) -> (String, String) {
-        (
-            format!("Scheduler alert: {}", self.schedule_id),
-            self.detail.clone(),
-        )
-    }
-
-    #[must_use]
-    pub const fn idempotency_suffix(&self) -> &str {
-        self.schedule_id.as_str()
-    }
-}
-
 #[derive(Clone)]
 pub struct Alert {
     pub idempotency_key: String,
@@ -298,25 +276,6 @@ impl AlertDispatcher {
                 tracing::error!(%error, title = %alert.title, "cannot dispatch alert outside Tokio runtime");
             }
         }
-    }
-
-    /// Dispatch a scheduler cadence alert (Phase 0 stub — materialization removed).
-    pub async fn dispatch_schedule_alert(&self, alert: ScheduleAlert) {
-        let (title, body) = alert.operator_message();
-        self.dispatch(
-            Alert::new(
-                format!("materialization.scheduler.{}", alert.idempotency_suffix()),
-                AlertLevel::Warning,
-                AlertCategory::SchedulerHealth,
-                AlertSource::Scheduler,
-                title,
-                body,
-                Utc::now(),
-            )
-            .with_affects_trading(false)
-            .with_visible_toast(true),
-        )
-        .await;
     }
 }
 

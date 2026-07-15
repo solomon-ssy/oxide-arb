@@ -25,20 +25,12 @@ use crate::{
 const EXPIRE_SWEEP_BATCH: u64 = 256;
 
 impl AppContext {
-    /// Register the single report fire scheduler (`TaskId::ReportGenerator`).
-    ///
-    /// On start it rebuilds jobs from the active runtime-config snapshot (no
-    /// scheduler persistence: runtime-config is the schedule truth source), then
-    /// runs until the Execution-stage shutdown token cancels it.
-    pub fn register_report_scheduler(&self, runner: &mut AppRunner) {
-        let scheduler = self.report_scheduler();
-        let reports = self.runtime_config().current().reports.clone();
+    /// Register the durable schedule coordinator and global report build worker.
+    pub fn register_report_coordinator(&self, runner: &mut AppRunner) {
+        let coordinator = self.report_coordinator();
         runner.spawn(TaskId::ReportGenerator, move |token| async move {
-            if let Err(error) = scheduler.sync_from_config(&reports).await {
-                tracing::error!(%error, "initial report schedule sync failed");
-            }
-            if let Err(error) = scheduler.run(token).await {
-                tracing::error!(%error, "report scheduler exited with error");
+            if let Err(error) = Box::pin(coordinator.run(token)).await {
+                tracing::error!(%error, "report coordinator exited with error");
             }
         });
     }

@@ -120,6 +120,16 @@ impl ResearchJobsConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct QuantWorkersConfig {
+    /// `PostgreSQL` report schedule reconciliation cadence (seconds).
+    pub report_schedule_poll_secs: u64,
+    /// Durable report-run lease duration (seconds).
+    pub report_run_lease_secs: u64,
+    /// Heartbeat cadence for a claimed report run (seconds).
+    pub report_run_heartbeat_secs: u64,
+    /// Maximum queued ad-hoc report requests across all replicas.
+    pub report_ad_hoc_queue_capacity: u64,
+    /// Maximum time an ad-hoc request may remain queued (seconds).
+    pub report_ad_hoc_queue_ttl_secs: u64,
     /// Report TTL expiry cadence (seconds).
     ///
     /// Serves two roles for report expiry (`expires_at` deadline frozen at
@@ -127,7 +137,7 @@ pub struct QuantWorkersConfig {
     /// (precise per-report wakes) **and** the decoupled `ReportExpireSweep`
     /// backstop cadence. The DB is the source of truth; the scheduler is a
     /// latency optimization and the sweep is its durable safety net. Unrelated to
-    /// report fire scheduling (owned by `tokio-cron-scheduler`).
+    /// report fire scheduling (owned by the durable `PostgreSQL` coordinator).
     pub report_expire_sweep_secs: u64,
     /// Order-intent TTL expiry cadence (seconds).
     ///
@@ -161,6 +171,11 @@ pub struct QuantWorkersConfig {
 impl Default for QuantWorkersConfig {
     fn default() -> Self {
         Self {
+            report_schedule_poll_secs: 1,
+            report_run_lease_secs: 120,
+            report_run_heartbeat_secs: 30,
+            report_ad_hoc_queue_capacity: 64,
+            report_ad_hoc_queue_ttl_secs: 300,
             report_expire_sweep_secs: default_report_expire_sweep_secs(),
             intent_expire_sweep_secs: default_intent_expire_sweep_secs(),
             execution_dispatch_secs: default_execution_dispatch_secs(),

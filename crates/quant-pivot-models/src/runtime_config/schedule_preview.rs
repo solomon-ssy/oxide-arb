@@ -1,8 +1,7 @@
 //! Stateless "next fire times" preview for a report-schedule [`ScheduleCadence`].
 //!
-//! Uses the same `croner` parser (identical 6-field grammar and wall-clock
-//! timezone semantics) that `tokio-cron-scheduler` — and thus the live report
-//! scheduler — relies on, so the UI preview matches real scheduling. Pure and
+//! Uses the same `croner` parser and wall-clock timezone semantics as the live
+//! `PostgreSQL` coordinator, so the UI preview matches real scheduling. Pure and
 //! side-effect-free: it never touches a running scheduler.
 
 use super::ScheduleCadence;
@@ -15,6 +14,152 @@ use std::str::FromStr;
 
 /// Upper bound on previewed occurrences per request.
 pub const MAX_PREVIEW_OCCURRENCES: usize = 20;
+
+/// Exact latest-only window for a durable schedule cursor through one observation time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DueScheduleWindow {
+    pub first: DateTime<Utc>,
+    pub latest: DateTime<Utc>,
+    pub next: DateTime<Utc>,
+    pub occurrence_count: u64,
+}
+
+/// Advance a persisted first occurrence through `through`, returning an exact
+/// occurrence count without imposing a historical-backfill batch limit.
+pub fn due_schedule_window(
+    cadence: &ScheduleCadence,
+    first: DateTime<Utc>,
+    through: DateTime<Utc>,
+) -> QuantResult<Option<DueScheduleWindow>> {
+    if first > through {
+        return Ok(None);
+    }
+    match cadence {
+        ScheduleCadence::Interval { interval_secs } => {
+            if *interval_secs == 0 {
+                return Err(reject(
+                    "reports.schedules.cadence.interval_secs",
+                    "interval must be greater than zero".to_owned(),
+                ));
+            }
+            let elapsed = through.signed_duration_since(first).num_seconds();
+            let step = i64::try_from(*interval_secs).map_err(|error| {
+                reject(
+                    "reports.schedules.cadence.interval_secs",
+                    format!("interval exceeds i64 seconds: {error}"),
+                )
+            })?;
+            let offset_count = elapsed / step;
+            let occurrence_count = u64::try_from(offset_count)
+                .ok()
+                .and_then(|value| value.checked_add(1))
+                .ok_or_else(|| {
+                    reject(
+                        "reports.schedules.cadence.interval_secs",
+                        "due occurrence count overflowed u64".to_owned(),
+                    )
+                })?;
+            let latest = first
+                .checked_add_signed(Duration::seconds(step.saturating_mul(offset_count)))
+                .ok_or_else(|| {
+                    reject(
+                        "reports.schedules.cadence.interval_secs",
+                        "latest due occurrence overflowed timestamp".to_owned(),
+                    )
+                })?;
+            let next = latest
+                .checked_add_signed(Duration::seconds(step))
+                .ok_or_else(|| {
+                    reject(
+                        "reports.schedules.cadence.interval_secs",
+                        "next occurrence overflowed timestamp".to_owned(),
+                    )
+                })?;
+            Ok(Some(DueScheduleWindow {
+                first,
+                latest,
+                next,
+                occurrence_count,
+            }))
+        }
+        ScheduleCadence::Cron {
+            expr,
+            timezone: None,
+        } => Ok(
+            due_cron_window(&parse_cron(expr)?, first, &through)?.map(|window| DueScheduleWindow {
+                first,
+                latest: window.latest,
+                next: window.next,
+                occurrence_count: window.occurrence_count,
+            }),
+        ),
+        ScheduleCadence::Cron {
+            expr,
+            timezone: Some(timezone),
+        } => {
+            let zone: chrono_tz::Tz = timezone.parse().map_err(|_| {
+                reject(
+                    "reports.schedules.cadence.timezone",
+                    format!("invalid IANA timezone {timezone:?}"),
+                )
+            })?;
+            let local = due_cron_window(
+                &parse_cron(expr)?,
+                first.with_timezone(&zone),
+                &through.with_timezone(&zone),
+            )?;
+            Ok(local.map(|window| DueScheduleWindow {
+                first,
+                latest: window.latest.with_timezone(&Utc),
+                next: window.next.with_timezone(&Utc),
+                occurrence_count: window.occurrence_count,
+            }))
+        }
+    }
+}
+
+fn due_cron_window<Tz>(
+    cron: &Cron,
+    first: DateTime<Tz>,
+    through: &DateTime<Tz>,
+) -> QuantResult<Option<DueScheduleWindowTz<Tz>>>
+where
+    Tz: TimeZone,
+{
+    if &first > through {
+        return Ok(None);
+    }
+    let initial = first.clone();
+    let mut latest = first;
+    let mut count = 1_u64;
+    loop {
+        let next = cron
+            .find_next_occurrence(&latest, false)
+            .map_err(|error| reject_cron_eval(&error))?;
+        if &next > through {
+            return Ok(Some(DueScheduleWindowTz {
+                latest,
+                next,
+                occurrence_count: count,
+                _first: initial,
+            }));
+        }
+        latest = next;
+        count = count.checked_add(1).ok_or_else(|| {
+            reject(
+                "reports.schedules.cadence.expr",
+                "due occurrence count overflowed u64".to_owned(),
+            )
+        })?;
+    }
+}
+
+struct DueScheduleWindowTz<Tz: TimeZone> {
+    latest: DateTime<Tz>,
+    next: DateTime<Tz>,
+    occurrence_count: u64,
+    _first: DateTime<Tz>,
+}
 
 /// Compute the next `count` fire times (in UTC) for a cadence, starting after `now`.
 ///
@@ -112,7 +257,7 @@ fn reject_cron_eval(error: &CronError) -> QuantError {
 /// Validate a schedule cadence with the same parser used by preview and the live scheduler.
 ///
 /// Enabled schedules must pass this before create/activate; keeps validation aligned with
-/// `POST /runtime-config/schedule-preview` and `job_for_cadence`.
+/// `POST /runtime-config/schedule-preview` and durable cursor advancement.
 pub fn validate_schedule_cadence(cadence: &ScheduleCadence, report: &mut ConfigValidationReport) {
     match preview_fire_times(cadence, Utc::now(), 1) {
         Ok(_) => {}

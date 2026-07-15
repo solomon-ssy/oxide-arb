@@ -44,10 +44,11 @@ use quant_pivot_repository::{
         EntryConditionRepository, EquitySnapshotRepository, ExecutionOrderRepository,
         FeatureParityEventRepository, FeatureRepository, MenuRepository, OperationLogRepository,
         OrderIntentRepository, PositionRepository, RecommendationReportRepository,
-        RecommendationRepository, ReconciliationRepository, ResearchReadinessEvidenceRepository,
-        RoleMenuRepository, RolePermissionRepository, RoleRepository,
-        RuntimeConfigVersionRepository, ServingEvidenceRepository, SettlementRedeemRepository,
-        TradePolicyRepository, TradeTapeBlockCursorRepository, UserRepository, UserRoleRepository,
+        RecommendationRepository, ReconciliationRepository, ReportRunRepository,
+        ResearchReadinessEvidenceRepository, RoleMenuRepository, RolePermissionRepository,
+        RoleRepository, RuntimeConfigVersionRepository, ServingEvidenceRepository,
+        SettlementRedeemRepository, TradePolicyRepository, TradeTapeBlockCursorRepository,
+        UserRepository, UserRoleRepository,
     },
 };
 use quant_pivot_storage::write::{AsyncWriter, AsyncWriterConfig, AsyncWriterWorker};
@@ -191,11 +192,11 @@ async fn build_app_state(
         quant_reports: Arc::new(CoreQuantReportPort::new(CoreQuantReportPortDeps {
             report_repo: Arc::clone(&repos.recommendation_report)
                 as Arc<dyn RecommendationReportRepository>,
+            report_run_repo: Arc::clone(&repos.report_run) as Arc<dyn ReportRunRepository>,
             recommendation_repo: Arc::clone(&repos.recommendation)
                 as Arc<dyn RecommendationRepository>,
             order_intent_repo: Arc::clone(&repos.order_intent) as Arc<dyn OrderIntentRepository>,
             lifecycle: Arc::clone(&ctx.report.lifecycle),
-            scheduler: Arc::clone(&ctx.report.scheduler),
             serving_evidence: Arc::new(ChFeatureParityEventRepository::new(Arc::clone(
                 &ctx.infra.ch,
             ))) as Arc<dyn ServingEvidenceRepository>,
@@ -203,6 +204,7 @@ async fn build_app_state(
             runtime_config_repo: Arc::clone(&repos.runtime_config)
                 as Arc<dyn RuntimeConfigVersionRepository>,
             quant_fact_read: Arc::clone(&ctx.infra.quant_fact_read),
+            operation_logs: Arc::clone(&repos.operation_log) as Arc<dyn OperationLogRepository>,
         })),
         order_intents,
         entry_conditions: Arc::clone(&repos.entry_condition) as Arc<dyn EntryConditionRepository>,

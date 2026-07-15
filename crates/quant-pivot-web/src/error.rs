@@ -19,7 +19,7 @@ use actix_web::{HttpResponse, ResponseError, http::StatusCode};
 use quant_pivot_error::{
     QuantError, auth::AuthError, control::ControlError, execution::ExecutionError,
     governance::GovernanceError, infra::InfraError, query::QueryError, rbac::RbacError,
-    research::ResearchError, storage::StorageError,
+    report::ReportError, research::ResearchError, storage::StorageError,
 };
 use thiserror::Error;
 
@@ -48,6 +48,10 @@ pub enum WebError {
     #[error("conflict: {0}")]
     Conflict(String),
 
+    /// A bounded queue is full (HTTP 429).
+    #[error("too many requests: {0}")]
+    TooManyRequests(String),
+
     /// An unexpected server-side failure (HTTP 500). The detail is logged but
     /// never returned to the client.
     #[error("internal error: {0}")]
@@ -73,6 +77,7 @@ impl WebError {
             Self::NotFound(_) => StatusCode::NOT_FOUND,
             Self::BadRequest(_) => StatusCode::BAD_REQUEST,
             Self::Conflict(_) => StatusCode::CONFLICT,
+            Self::TooManyRequests(_) => StatusCode::TOO_MANY_REQUESTS,
             Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::ServiceUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
             Self::NotImplemented(_) => StatusCode::NOT_IMPLEMENTED,
@@ -87,6 +92,7 @@ impl WebError {
             | Self::NotFound(msg)
             | Self::BadRequest(msg)
             | Self::Conflict(msg)
+            | Self::TooManyRequests(msg)
             | Self::ServiceUnavailable(msg)
             | Self::NotImplemented(msg) => msg.clone(),
             Self::Forbidden => "forbidden".to_owned(),
@@ -159,6 +165,9 @@ impl From<StorageError> for WebError {
                     .map_or(String::new(), |value| format!(" `{value}`"))
             )),
             StorageError::InvariantViolation { detail, .. } => Self::BadRequest(detail),
+            StorageError::CapacityExceeded { entity, limit } => {
+                Self::TooManyRequests(format!("{entity} queue capacity {limit} reached"))
+            }
             StorageError::Connection(_)
             | StorageError::Redis(_)
             | StorageError::RedisPool(_)
@@ -236,8 +245,8 @@ impl From<QuantError> for WebError {
             ) => Self::BadRequest(detail),
             QuantError::Config(_) => Self::BadRequest(error.to_string()),
             QuantError::Governance(governance) => governance.into(),
-            QuantError::Scheduler(_) => {
-                Self::ServiceUnavailable("scheduler temporarily unavailable".to_owned())
+            QuantError::Report(ReportError::IncomparableReports { detail }) => {
+                Self::BadRequest(detail)
             }
             QuantError::Report(_) => Self::Internal(error.to_string()),
             QuantError::Execution(execution) => execution.into(),

@@ -4,13 +4,13 @@ use crate::enums::{
     clickhouse::{
         ChCapitalAllocationState, ChExecutionSide, ChFactorDirection, ChFactorValueState,
         ChFeatureSourceKind, ChFeatureValueKind, ChNormalizationSource, ChOutcomeSide,
-        ChPositionLedgerState, ChRecommendationAttributionOutcome, ChRecommendationStatus,
+        ChPositionLedgerState, ChRecommendationAttributionOutcome,
     },
     common::Side,
     execution::{CapitalAllocationState, PositionLedgerState},
     factor::{FactorValueState, NormalizationSource},
     feature::{EvidenceSourceKind, FeatureValueKind},
-    quant::{FactorDirection, OutcomeSide, RecommendationAttributionOutcome, RecommendationStatus},
+    quant::{FactorDirection, OutcomeSide, RecommendationAttributionOutcome},
 };
 
 impl From<Side> for ChExecutionSide {
@@ -54,25 +54,13 @@ impl From<PositionLedgerState> for ChPositionLedgerState {
     }
 }
 
-impl From<RecommendationStatus> for ChRecommendationStatus {
-    fn from(value: RecommendationStatus) -> Self {
-        match value {
-            RecommendationStatus::Published => Self::Published,
-            RecommendationStatus::Revoked => Self::Revoked,
-            RecommendationStatus::Expired => Self::Expired,
-            RecommendationStatus::IntentCreated => Self::IntentCreated,
-            RecommendationStatus::Executed => Self::Executed,
-            RecommendationStatus::Attributed => Self::Attributed,
-        }
-    }
-}
-
 impl From<RecommendationAttributionOutcome> for ChRecommendationAttributionOutcome {
     fn from(value: RecommendationAttributionOutcome) -> Self {
         match value {
             RecommendationAttributionOutcome::FilledExited => Self::FilledExited,
             RecommendationAttributionOutcome::FilledSettled => Self::FilledSettled,
             RecommendationAttributionOutcome::ExpiredUnfilled => Self::ExpiredUnfilled,
+            RecommendationAttributionOutcome::SupersededUnfilled => Self::SupersededUnfilled,
             RecommendationAttributionOutcome::CancelledUnfilled => Self::CancelledUnfilled,
             RecommendationAttributionOutcome::FailedUnfilled => Self::FailedUnfilled,
         }

@@ -6,7 +6,8 @@
 use super::{
     NewAccountSnapshot, NewEntryConditionArtifact, NewEntryConditionInstance, NewEquitySnapshot,
     NewFeatureParityRun, NewPortfolioPlan, NewRecommendation, NewRecommendationReport,
-    NewReportDataQualitySnapshot, NewReportFactDelivery, NewResearchJob,
+    NewReportDataQualitySnapshot, NewReportFactDelivery, NewResearchJob, OrderIntentInfo,
+    RecommendationReportInfo, ReportFactDeliveryInfo, ReportRunClaim, ReportRunInfo,
 };
 use crate::{domain::governance::NewOperationLog, types::FeatureParityStateId};
 
@@ -57,4 +58,57 @@ pub struct NewReportTransaction {
     pub fact_delivery: Option<NewReportFactDelivery>,
     /// Operator/audit trail row committed with the authoritative report rows.
     pub operation_log: NewOperationLog,
+}
+
+/// Atomic result of preparing a complete report and completing its build run.
+#[derive(Debug, Clone)]
+pub struct PreparedReportOutcome {
+    pub report: RecommendationReportInfo,
+    pub run: ReportRunInfo,
+}
+
+/// Result of settling a previously leased fact delivery.
+///
+/// Claim loss is an expected compare-and-set outcome: another transaction may
+/// cancel, replace, or reclaim the delivery while this worker performs
+/// `ClickHouse` I/O. Missing rows and persistence failures remain errors.
+#[derive(Debug, Clone)]
+#[must_use]
+pub enum FactDeliverySettlement<T> {
+    Applied(T),
+    ClaimLost(Box<ReportFactDeliveryInfo>),
+}
+
+impl<T> FactDeliverySettlement<T> {
+    pub fn into_applied(self) -> Result<T, Box<ReportFactDeliveryInfo>> {
+        match self {
+            Self::Applied(value) => Ok(value),
+            Self::ClaimLost(delivery) => Err(delivery),
+        }
+    }
+}
+
+/// Atomic publication result used to emit post-commit events.
+#[derive(Debug, Clone)]
+pub struct PublishReportOutcome {
+    pub report: RecommendationReportInfo,
+    pub delivery: ReportFactDeliveryInfo,
+    pub superseded_reports: Vec<RecommendationReportInfo>,
+    pub obsoleted_reports: Vec<RecommendationReportInfo>,
+    pub invalidated_intents: Vec<OrderIntentInfo>,
+}
+
+impl PublishReportOutcome {
+    /// Whether the candidate became the new current authority.
+    #[must_use]
+    pub const fn published(&self) -> bool {
+        self.report.status.is_current_authority()
+    }
+}
+
+/// Prepared report write command, including the exact lease CAS identity.
+#[derive(Debug, Clone)]
+pub struct CreatePreparedReport {
+    pub run_claim: ReportRunClaim,
+    pub transaction: NewReportTransaction,
 }

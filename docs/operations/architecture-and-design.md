@@ -643,7 +643,7 @@ Protected `/api/...` routes require：
 | Runtime config | `/api/runtime-config`, `/api/runtime-config/schema`, `/api/runtime-config/versions` |
 | System | `/api/system/status`, `/api/system/health`, `/api/system/quant-mode`, `/api/system/kill-switch` |
 | Account | `/api/quant/account/live`, `/api/quant/account/equity-snapshots` |
-| Reports | `/api/quant/reports`, `/api/quant/reports/latest`, `/api/quant/reports/run` |
+| Reports | `/api/quant/reports`, `/api/quant/reports/current`, `/api/quant/reports/run`, `/api/quant/report-runs`, `/api/quant/report-schedules/health` |
 | Recommendations | `/api/quant/recommendations/{id}`, `/evidence`, `/attribution` |
 | Execution | `/api/quant/intents`, `/api/quant/execution-orders`, `/api/quant/positions` |
 | Reconciliation | `/api/quant/reconciliations`, `/api/quant/reconciliations/{id}/resolve` |

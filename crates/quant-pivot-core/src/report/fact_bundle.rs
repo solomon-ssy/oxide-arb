@@ -4,12 +4,12 @@ use std::sync::Arc;
 
 use quant_pivot_error::{QuantResult, report::ReportError};
 use quant_pivot_models::{
-    clickhouse::{QuantRecommendationEventRow, ReportMarketFunnelRow},
+    clickhouse::{QuantReportRecommendationFactRow, ReportMarketFunnelRow},
     domain::NewReportFactDelivery,
     enums::quant::ReportFactDeliveryStatus,
     hashing::CanonicalDigest,
     types::{
-        ContentHash, REPORT_FACT_BUNDLE_FORMAT_VERSION, RecommendationReportId, ReportFactBundleV1,
+        ContentHash, REPORT_FACT_BUNDLE_FORMAT_VERSION, RecommendationReportId, ReportFactBundleV2,
         ReportFactNotificationRecommendationV1, ReportFactNotificationV1,
         ReportFactTableCommitment,
     },
@@ -18,7 +18,7 @@ use quant_pivot_research::artifact::{ArtifactKey, ArtifactNamespace, ArtifactSto
 
 use super::types::ComposedReport;
 
-const RECOMMENDATION_TABLE: &str = "quant_recommendation_event";
+const RECOMMENDATION_TABLE: &str = "quant_report_recommendation_fact";
 const FUNNEL_TABLE: &str = "quant_report_market_funnel";
 
 /// Serialize, persist, and read-after-write verify one immutable report bundle.
@@ -41,15 +41,10 @@ pub async fn prepare_report_fact_bundle(
     ensure_report_binding(&report_id, &recommendation_rows, &funnel_rows)?;
     let recommendation_hash = CanonicalDigest::content_hash_json(&recommendation_rows)?;
     let funnel_hash = CanonicalDigest::content_hash_json(&funnel_rows)?;
-    let bundle = ReportFactBundleV1 {
+    let bundle = ReportFactBundleV2 {
         format_version: REPORT_FACT_BUNDLE_FORMAT_VERSION,
         recommendation_report_id: report_id.clone(),
-        created_at: composed.transaction.report.published_at.ok_or_else(|| {
-            ReportError::InvariantViolation {
-                stage: "report_fact_bundle",
-                detail: "report bundle requires published_at".to_owned(),
-            }
-        })?,
+        created_at: composed.transaction.report.decision_at,
         delivery_policy: composed.delivery_policy,
         notify_operators: composed.notify_operators,
         notification: ReportFactNotificationV1 {
@@ -140,7 +135,7 @@ pub async fn prepare_report_fact_bundle(
 
 fn ensure_report_binding(
     report_id: &RecommendationReportId,
-    recommendations: &[QuantRecommendationEventRow],
+    recommendations: &[QuantReportRecommendationFactRow],
     funnel: &[ReportMarketFunnelRow],
 ) -> QuantResult<()> {
     if recommendations

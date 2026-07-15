@@ -50,6 +50,9 @@ pub(super) const BASELINE_SOURCES: &[&str] = &[
     include_str!("sql/quant_feature_parity.sql"),
 ];
 
+pub(super) const REPORT_LIFECYCLE_V2_SOURCES: &[&str] =
+    &[include_str!("sql/report_lifecycle_v2.sql")];
+
 pub(super) const REQUIRED_SCHEMA_OBJECTS: [&str; 27] = [
     "book_microstructure_1m",
     "book_microstructure_1m_mv",
@@ -71,7 +74,7 @@ pub(super) const REQUIRED_SCHEMA_OBJECTS: [&str; 27] = [
     "quant_model_input_event",
     "quant_position_event",
     "quant_recommendation_attribution_event",
-    "quant_recommendation_event",
+    "quant_report_recommendation_fact",
     "quant_report_market_funnel",
     "quant_serving_evidence_completion",
     "quant_signal_candidate_event",
@@ -80,8 +83,10 @@ pub(super) const REQUIRED_SCHEMA_OBJECTS: [&str; 27] = [
     "quant_weather_observation_report",
 ];
 
-pub(super) const FORBIDDEN_SCHEMA_OBJECTS: [&str; 1] =
-    ["book_microstructure_1m_availability_v2_mv"];
+pub(super) const FORBIDDEN_SCHEMA_OBJECTS: [&str; 2] = [
+    "book_microstructure_1m_availability_v2_mv",
+    "quant_recommendation_event",
+];
 
 /// Extract the table-level TTL expression from normalized `CREATE TABLE` SQL.
 ///

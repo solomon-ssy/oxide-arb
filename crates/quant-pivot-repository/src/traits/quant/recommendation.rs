@@ -58,10 +58,10 @@ pub trait RecommendationRepository: Send + Sync {
         operation_log: NewOperationLog,
     ) -> Result<(RecommendationInfo, Vec<OrderIntentInfo>), StorageError>;
 
-    /// Expired recommendations with no final attribution row. This covers the
-    /// report-only / never-intended path where the recommendation simply aged out
-    /// without an execution intent.
-    async fn find_expired_attribution_candidates(
+    /// Expired or superseded recommendations with no final attribution row.
+    /// Covers report-only rows that reached an unfilled terminal state without
+    /// ever creating an intent.
+    async fn find_unfilled_attribution_candidates(
         &self,
         limit: u64,
     ) -> Result<Vec<RecommendationInfo>, StorageError>;

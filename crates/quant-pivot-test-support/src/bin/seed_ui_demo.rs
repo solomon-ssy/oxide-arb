@@ -11,7 +11,7 @@ use clap::Parser;
 use quant_pivot_models::config::DeployConfig;
 use quant_pivot_research::artifact::build_artifact_store;
 use quant_pivot_storage::{
-    clickhouse::{ClickHousePool, apply_online_schema_migrations, verify_schema},
+    clickhouse::{ClickHousePool, apply_offline_schema_migrations, verify_schema},
     postgres::PostgresPool,
 };
 use quant_pivot_test_support::{
@@ -80,7 +80,7 @@ async fn main() -> Result<()> {
     }
 
     if deploy.db.clickhouse.migration.auto_apply_online {
-        apply_online_schema_migrations(&deploy.db.clickhouse.migration_connection())
+        apply_offline_schema_migrations(&deploy.db.clickhouse.migration_connection())
             .await
             .context("apply ClickHouse online-safe schema migrations")?;
     } else {

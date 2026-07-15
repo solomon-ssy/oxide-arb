@@ -2,8 +2,8 @@
 //!
 //! This is the service boundary between the web handlers and the report plane:
 //! reads go through the report / recommendation repositories, the ad-hoc run goes
-//! through the [`ReportScheduleRunner`] (async enqueue), and revoke goes through
-//! the [`ReportLifecycleService`] (transactional + post-commit event). Handlers
+//! through the durable run ledger, and revoke goes through the
+//! [`ReportLifecycleService`] (transactional + post-commit event). Handlers
 //! never touch a repository or a venue client directly.
 
 use std::{
@@ -16,54 +16,61 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use quant_pivot_error::{QuantResult, research::ResearchError};
+use quant_pivot_error::{QuantResult, report::ReportError, research::ResearchError};
 use quant_pivot_models::{
     clickhouse::{
         QuantFeatureEventRow, QuantModelInputEventRow, QuantServingEvidenceCompletionRow,
         ReportMarketFunnelCountRow, ReportMarketFunnelRow,
     },
     domain::{
-        AdHocReportCommand, AdHocReportEnqueued, DecisionBoundary, DecisionBoundaryEvidenceView,
-        FeatureCellEvidenceView, FeatureVectorInfo, ModelInputEvidenceView, ModelRouteEvidenceView,
+        AdHocReportCommand, DecisionBoundary, DecisionBoundaryEvidenceView,
+        EnqueueReportRunOutcome, FeatureCellEvidenceView, FeatureVectorInfo,
+        ModelInputEvidenceView, ModelRouteEvidenceView, OperationLogInfo, OperationLogQuery,
         PageWindow, Paginated, QuantEvidenceView, QuantRecommendationView,
         QuantReportDiagnosticsView, QuantReportFunnelView, QuantReportListQuery, QuantReportPort,
         RecommendationInfo, RecommendationReportInfo, RecommendationViewContext,
         ReportDataQualitySnapshotInfo, ReportDiagnosticsSubject, ReportDiff,
         ReportFactDeliveryInfo, ReportFunnelMarketListQuery, ReportFunnelMarketView,
-        ReportFunnelStageView, compute_report_diff,
+        ReportFunnelStageView, ReportRunInfo, ReportRunListQuery, ReportScheduleGapInfo,
+        ReportScheduleGapListQuery, ReportScheduleHealthInfo, ReportTimelineQuery,
+        compute_report_diff,
     },
-    enums::quant::{EmptyReportReason, FeatureParityStage, RecommendationReportStatus, ReportKind},
+    enums::{
+        operation_log::OperationCategory,
+        quant::{EmptyReportReason, FeatureParityStage, RecommendationReportStatus, ReportKind},
+        rbac::ResourceType,
+    },
     runtime_config::RuntimeConfig,
     types::{
         ContentHash, FeatureVectorId, ModelRunId, OrderIntentId, RecommendationId,
-        RecommendationReportId, ReportFunnelReason, ReportFunnelStage, ResearchProfileRef,
-        TokenDataQualityRecord,
+        RecommendationReportId, ReportFunnelReason, ReportFunnelStage, ReportRunId,
+        ResearchProfileRef, TokenDataQualityRecord,
     },
 };
 use quant_pivot_repository::traits::{
-    FeatureRepository, OrderIntentRepository, QuantFactReadRepository,
-    RecommendationReportRepository, RecommendationRepository, RuntimeConfigVersionRepository,
-    ServingEvidenceRepository,
+    FeatureRepository, OperationLogRepository, OrderIntentRepository, QuantFactReadRepository,
+    RecommendationReportRepository, RecommendationRepository, ReportRunRepository,
+    RuntimeConfigVersionRepository, ServingEvidenceRepository,
 };
 
 use crate::{
-    infra::schedule::ReportScheduleRunner,
     observability::serving_evidence::verify_completion,
-    report::{AdHocReportRequest, ReportLifecycleService, ReportTrigger},
+    report::{AdHocReportRequest, ReportLifecycleService, RetryAdHocReportRequest},
     service::durable_feature_parity::{persisted_capture, report_decision_boundary},
 };
 
 /// Web-facing report port assembled from the report plane.
 pub struct CoreQuantReportPort {
     report_repo: Arc<dyn RecommendationReportRepository>,
+    report_run_repo: Arc<dyn ReportRunRepository>,
     recommendation_repo: Arc<dyn RecommendationRepository>,
     order_intent_repo: Arc<dyn OrderIntentRepository>,
     lifecycle: Arc<ReportLifecycleService>,
-    scheduler: Arc<dyn ReportScheduleRunner>,
     serving_evidence: Arc<dyn ServingEvidenceRepository>,
     feature_repo: Arc<dyn FeatureRepository>,
     runtime_config_repo: Arc<dyn RuntimeConfigVersionRepository>,
     quant_fact_read: Arc<dyn QuantFactReadRepository>,
+    operation_logs: Arc<dyn OperationLogRepository>,
 }
 
 /// Explicit dependency bundle for [`CoreQuantReportPort`].
@@ -72,14 +79,15 @@ pub struct CoreQuantReportPort {
 /// bundle makes construction auditable without relying on positional wiring.
 pub struct CoreQuantReportPortDeps {
     pub report_repo: Arc<dyn RecommendationReportRepository>,
+    pub report_run_repo: Arc<dyn ReportRunRepository>,
     pub recommendation_repo: Arc<dyn RecommendationRepository>,
     pub order_intent_repo: Arc<dyn OrderIntentRepository>,
     pub lifecycle: Arc<ReportLifecycleService>,
-    pub scheduler: Arc<dyn ReportScheduleRunner>,
     pub serving_evidence: Arc<dyn ServingEvidenceRepository>,
     pub feature_repo: Arc<dyn FeatureRepository>,
     pub runtime_config_repo: Arc<dyn RuntimeConfigVersionRepository>,
     pub quant_fact_read: Arc<dyn QuantFactReadRepository>,
+    pub operation_logs: Arc<dyn OperationLogRepository>,
 }
 
 impl CoreQuantReportPort {
@@ -88,14 +96,15 @@ impl CoreQuantReportPort {
     pub fn new(deps: CoreQuantReportPortDeps) -> Self {
         Self {
             report_repo: deps.report_repo,
+            report_run_repo: deps.report_run_repo,
             recommendation_repo: deps.recommendation_repo,
             order_intent_repo: deps.order_intent_repo,
             lifecycle: deps.lifecycle,
-            scheduler: deps.scheduler,
             serving_evidence: deps.serving_evidence,
             feature_repo: deps.feature_repo,
             runtime_config_repo: deps.runtime_config_repo,
             quant_fact_read: deps.quant_fact_read,
+            operation_logs: deps.operation_logs,
         }
     }
 
@@ -158,7 +167,17 @@ impl CoreQuantReportPort {
                 ),
             })?;
         let config = RuntimeConfig::from_json(&version.config_json)?;
-        report_decision_boundary(report, &config)
+        let run = self
+            .report_run_repo
+            .find_by_output_report(&report.recommendation_report_id)
+            .await?
+            .ok_or_else(|| ResearchError::Determinism {
+                detail: format!(
+                    "report {} has no successful report-run lineage",
+                    report.recommendation_report_id
+                ),
+            })?;
+        report_decision_boundary(report, &run, &config)
     }
 
     async fn load_report_data_quality(
@@ -342,11 +361,99 @@ impl QuantReportPort for CoreQuantReportPort {
         Ok(self.report_repo.find_by_id(report_id).await?)
     }
 
+    async fn find_report_predecessor_id(
+        &self,
+        report_id: &RecommendationReportId,
+    ) -> QuantResult<Option<RecommendationReportId>> {
+        Ok(self.report_repo.find_predecessor_id(report_id).await?)
+    }
+
     async fn find_report_fact_delivery(
         &self,
         report_id: &RecommendationReportId,
     ) -> QuantResult<Option<ReportFactDeliveryInfo>> {
         Ok(self.report_repo.find_fact_delivery(report_id).await?)
+    }
+
+    async fn find_report_run(
+        &self,
+        report_id: &RecommendationReportId,
+    ) -> QuantResult<Option<ReportRunInfo>> {
+        Ok(self
+            .report_run_repo
+            .find_by_output_report(report_id)
+            .await?)
+    }
+
+    async fn list_report_runs(
+        &self,
+        query: ReportRunListQuery,
+    ) -> QuantResult<Paginated<ReportRunInfo>> {
+        Ok(self.report_run_repo.page(query).await?)
+    }
+
+    async fn find_report_run_by_id(
+        &self,
+        run_id: &ReportRunId,
+    ) -> QuantResult<Option<ReportRunInfo>> {
+        Ok(self.report_run_repo.find_by_id(run_id).await?)
+    }
+
+    async fn retry_report_run(
+        &self,
+        run_id: &ReportRunId,
+        request_id: &str,
+    ) -> QuantResult<EnqueueReportRunOutcome> {
+        self.lifecycle
+            .retry_ad_hoc(RetryAdHocReportRequest {
+                source_run_id: run_id.clone(),
+                request_id: request_id.to_owned(),
+                requested_at: Utc::now(),
+            })
+            .await
+    }
+
+    async fn report_schedule_health(&self) -> QuantResult<ReportScheduleHealthInfo> {
+        Ok(self.report_run_repo.schedule_health().await?)
+    }
+
+    async fn list_report_schedule_gaps(
+        &self,
+        query: ReportScheduleGapListQuery,
+    ) -> QuantResult<Paginated<ReportScheduleGapInfo>> {
+        Ok(self.report_run_repo.page_schedule_gaps(query).await?)
+    }
+
+    async fn retry_report_publication(
+        &self,
+        report_id: &RecommendationReportId,
+    ) -> QuantResult<ReportFactDeliveryInfo> {
+        self.lifecycle
+            .retry_publication(report_id, Utc::now())
+            .await
+    }
+
+    async fn report_timeline(
+        &self,
+        report_id: &RecommendationReportId,
+        query: ReportTimelineQuery,
+    ) -> QuantResult<Option<Paginated<OperationLogInfo>>> {
+        if self.report_repo.find_by_id(report_id).await?.is_none() {
+            return Ok(None);
+        }
+        Ok(Some(
+            self.operation_logs
+                .page(OperationLogQuery {
+                    category: Some(OperationCategory::QuantReport),
+                    resource_type: Some(ResourceType::QuantReport),
+                    resource_id: Some(report_id.to_string()),
+                    from: query.from,
+                    to: query.to,
+                    page: query.page,
+                    ..Default::default()
+                })
+                .await?,
+        ))
     }
 
     async fn find_report_diagnostics(
@@ -473,11 +580,12 @@ impl QuantReportPort for CoreQuantReportPort {
         Ok(Some(Paginated::from_window(items, total, window)))
     }
 
-    async fn latest_report(
+    async fn current_report(
         &self,
+        profile_id: &str,
         kind: ReportKind,
     ) -> QuantResult<Option<RecommendationReportInfo>> {
-        Ok(self.report_repo.latest_published(kind).await?)
+        Ok(self.report_repo.current(profile_id, kind).await?)
     }
 
     async fn find_recommendations(
@@ -609,6 +717,15 @@ impl QuantReportPort for CoreQuantReportPort {
         ) else {
             return Ok(None);
         };
+        if base.profile_id != compare.profile_id || base.report_kind != compare.report_kind {
+            return Err(ReportError::IncomparableReports {
+                detail: format!(
+                    "{}:{} cannot be compared with {}:{}",
+                    base.profile_id, base.report_kind, compare.profile_id, compare.report_kind,
+                ),
+            }
+            .into());
+        }
         let base_recs = self
             .recommendation_repo
             .find_by_report(base_report_id)
@@ -628,24 +745,16 @@ impl QuantReportPort for CoreQuantReportPort {
     async fn enqueue_ad_hoc(
         &self,
         command: AdHocReportCommand,
-    ) -> QuantResult<AdHocReportEnqueued> {
+    ) -> QuantResult<EnqueueReportRunOutcome> {
         let trigger_time = Utc::now();
-        let trigger = ReportTrigger::AdHoc {
-            request_id: command.request_id.clone(),
-        };
-        let trigger_key = trigger.key(trigger_time);
-        self.scheduler
-            .enqueue_ad_hoc(AdHocReportRequest {
-                request_id: command.request_id.clone(),
+        self.lifecycle
+            .run_ad_hoc(AdHocReportRequest {
+                request_id: command.request_id,
                 trigger_time,
                 top_n: command.top_n,
                 knowledge_lag_secs: command.knowledge_lag_secs,
             })
-            .await?;
-        Ok(AdHocReportEnqueued {
-            request_id: command.request_id,
-            trigger_key,
-        })
+            .await
     }
 
     async fn revoke(

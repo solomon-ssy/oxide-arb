@@ -21,7 +21,7 @@ use quant_pivot_models::{
     domain::{
         DecisionBoundary, DecisionClock, DecisionSource, FactorValueInfo, FeatureParityRunInfo,
         FeatureVectorInfo, MarketSelectionInfo, MarketSelectionMemberInfo, ModelRunInfo,
-        RecommendationReportInfo, ReportDataQualitySnapshotInfo,
+        RecommendationReportInfo, ReportDataQualitySnapshotInfo, ReportRunInfo,
     },
     enums::{
         clickhouse::ChFeatureCellState,
@@ -40,7 +40,8 @@ use quant_pivot_repository::traits::{
     CalibrationArtifactRepository, CatalogVersionRepository, ClobMarketInfoRepository,
     FactorRepository, FeatureRepository, MarketLinkageRepository, MarketSelectionRepository,
     ModelRegistryRepository, ModelRunRepository, QuantFactReadRepository,
-    RecommendationReportRepository, RuntimeConfigVersionRepository, ServingEvidenceRepository,
+    RecommendationReportRepository, ReportRunRepository, RuntimeConfigVersionRepository,
+    ServingEvidenceRepository,
 };
 use quant_pivot_research::{
     factors::{FactorEngine, FactorValue, MarketFactorOutcome},
@@ -91,6 +92,7 @@ pub struct DurableFeatureParityDeps {
     pub feature_vectors: Arc<dyn FeatureRepository>,
     pub factors: Arc<dyn FactorRepository>,
     pub reports: Arc<dyn RecommendationReportRepository>,
+    pub report_runs: Arc<dyn ReportRunRepository>,
     pub serving_evidence: Arc<dyn ServingEvidenceRepository>,
     pub fact_read: Arc<dyn QuantFactReadRepository>,
     pub catalog: Arc<dyn CatalogVersionRepository>,
@@ -589,6 +591,7 @@ impl DurableFeatureParitySource {
             .find_by_id(report_id)
             .await?
             .ok_or_else(|| StorageError::not_found("quant_recommendation_report", report_id))?;
+        let report_run = self.load_report_run(&report).await?;
         if report.decision_at != candidate.decision_at {
             return Err(determinism(format!(
                 "report {} decision time changed from {} to {}",
@@ -629,7 +632,7 @@ impl DurableFeatureParitySource {
                 StorageError::not_found("runtime_config_version", &report.runtime_config_version_id)
             })?;
         let config = RuntimeConfig::from_json(&config_info.config_json)?;
-        let expected_boundary = report_decision_boundary(&report, &config)?;
+        let expected_boundary = report_decision_boundary(&report, &report_run, &config)?;
         validate_report_selection_binding(&report, &selection)?;
         let online = match self
             .load_report_online_evidence(&report, &dq, ceiling, expected_boundary, candidates)
@@ -656,6 +659,32 @@ impl DurableFeatureParitySource {
                 online,
             },
         )))
+    }
+
+    async fn load_report_run(
+        &self,
+        report: &RecommendationReportInfo,
+    ) -> QuantResult<ReportRunInfo> {
+        let run = self
+            .deps
+            .report_runs
+            .find_by_output_report(&report.recommendation_report_id)
+            .await?
+            .ok_or_else(|| {
+                StorageError::not_found(
+                    "quant_report_run.output_report_id",
+                    &report.recommendation_report_id,
+                )
+            })?;
+        if run.runtime_config_version_id.as_ref() != Some(&report.runtime_config_version_id)
+            || run.decision_at != Some(report.decision_at)
+        {
+            return Err(determinism(format!(
+                "report {} is not bound to the exact successful report run",
+                report.recommendation_report_id
+            )));
+        }
+        Ok(run)
     }
 
     async fn load_report_online_evidence(
@@ -2155,12 +2184,19 @@ fn boundary_from_online(
 
 pub(crate) fn report_decision_boundary(
     report: &RecommendationReportInfo,
+    run: &ReportRunInfo,
     config: &RuntimeConfig,
 ) -> QuantResult<DecisionBoundary> {
-    let knowledge_lag_secs = u64::try_from(report.knowledge_lag_secs).map_err(|error| {
+    let persisted_lag = run.knowledge_lag_secs.ok_or_else(|| {
         determinism(format!(
-            "report {} has invalid knowledge lag {}: {error}",
-            report.recommendation_report_id, report.knowledge_lag_secs
+            "report run {} has no frozen knowledge lag",
+            run.report_run_id
+        ))
+    })?;
+    let knowledge_lag_secs = u64::try_from(persisted_lag).map_err(|error| {
+        determinism(format!(
+            "report run {} has invalid knowledge lag {}: {error}",
+            run.report_run_id, persisted_lag
         ))
     })?;
     DecisionClock::new(knowledge_lag_secs).serving_boundary(
@@ -2973,7 +3009,7 @@ mod tests {
         let mut report = report_fixtures::report(
             report_id,
             ReportKind::TopN,
-            RecommendationReportStatus::PublishedEmpty,
+            RecommendationReportStatus::Published,
         );
         report.model_run_id = None;
         report.summary_json.empty_reason = Some(EmptyReportReason::SystemDegraded);

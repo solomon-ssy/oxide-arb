@@ -120,13 +120,12 @@ use crate::{enums::quant::TradePolicyStatus, types::ContentHash};
 
 Platform failures live in **`quant-pivot-error`** as typed sub-errors composed into
 [`QuantError`](crates/quant-pivot-error/src/lib.rs) via `#[from]`. Third-party errors
-(`JobSchedulerError`, SDK, Polars) convert through **facade newtypes** in the owning
-crate (e.g. inline in `core/src/infra/schedule/runner.rs`), never inside `quant-pivot-error`.
+Third-party SDK and Polars errors convert through **facade newtypes** in the owning
+crate, never inside `quant-pivot-error`.
 HTTP status mapping stays in **`quant-pivot-web/src/error.rs`**.
 
 | Sub-error | Domain |
 |-----------|--------|
-| `SchedulerError` | Report schedule plane (`tokio-cron-scheduler` facade) |
 | `ReportError` | Report pipeline invariants / contract violations |
 | `InfraError` | Bootstrap, metrics, channels, web server runtime |
 | `ControlError` | Runtime mode / config apply / book subscriptions |

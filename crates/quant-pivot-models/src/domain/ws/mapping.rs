@@ -46,6 +46,11 @@ pub fn event_envelope(event: &CoreEvent) -> Option<(SubscriptionKey, WsEnvelope)
             None,
             serde_json::to_value(payload).ok()?,
         ),
+        CoreEvent::ReportRun(payload) => (
+            WsChannel::QuantReportRun,
+            None,
+            serde_json::to_value(payload).ok()?,
+        ),
         CoreEvent::Intent(payload) => (
             WsChannel::QuantIntent,
             None,
@@ -83,15 +88,20 @@ mod tests {
     use crate::{
         domain::{
             CoreEvent, MarketBookView, MaterializationRunEvent, MaterializationRunKind,
-            MaterializationRunStatus, ReconciliationLifecycleEvent, SettlementRedeemLifecycleEvent,
+            MaterializationRunStatus, ReconciliationLifecycleEvent, ReportEventKind,
+            ReportLifecycleEvent, ReportRunLifecycleEvent, SettlementRedeemLifecycleEvent,
             SubscriptionKey, SystemStatus, ws::channel::WsChannel,
         },
         enums::{
             execution::{ReconciliationResult, SettlementRedeemState},
-            quant::{QuantRuntimeMode, TrainingDatasetStatus},
+            quant::{
+                QuantRuntimeMode, RecommendationReportStatus, ReportKind, ReportRunStatus,
+                TrainingDatasetStatus,
+            },
         },
-        types::MarketId,
+        types::{MarketId, RecommendationReportId, ReportRunId},
     };
+    use chrono::Utc;
 
     #[test]
     fn market_book_update_maps_to_market_scoped_key() {
@@ -118,6 +128,84 @@ mod tests {
         let (key, envelope) = event_envelope(&event).expect("status maps");
         assert_eq!(key, SubscriptionKey::global(WsChannel::SystemStatus));
         assert_eq!(envelope.kind.as_str(), "system.status");
+    }
+
+    #[test]
+    fn durable_report_revision_maps_to_report_channel() {
+        let event = CoreEvent::Report(ReportLifecycleEvent {
+            event: ReportEventKind::Prepared,
+            recommendation_report_id: "report-1".to_owned(),
+            profile_id: "weather_forecast_24h".to_owned(),
+            report_kind: ReportKind::TopN,
+            runtime_mode: QuantRuntimeMode::ReportOnly,
+            status: RecommendationReportStatus::Prepared,
+            decision_at: Utc::now(),
+            published_at: None,
+            recommendation_count: 0,
+            empty_reason: None,
+            error_code: None,
+            status_reason: None,
+        });
+        let (key, envelope) = event_envelope(&event).expect("report revision maps");
+        assert_eq!(key, SubscriptionKey::global(WsChannel::QuantReport));
+        assert_eq!(envelope.kind.as_str(), "quant.report");
+        assert_eq!(envelope.data["event"], "prepared");
+        assert_eq!(envelope.data["recommendation_report_id"], "report-1");
+    }
+
+    #[test]
+    fn durable_run_revision_maps_to_dedicated_run_channel() {
+        let run_id = ReportRunId::from_v7();
+        let event = CoreEvent::ReportRun(ReportRunLifecycleEvent {
+            report_run_id: run_id.clone(),
+            status: ReportRunStatus::Running,
+            terminal_reason: None,
+            output_report_id: None,
+            occurred_at: Utc::now(),
+        });
+        let (key, envelope) = event_envelope(&event).expect("report run revision maps");
+        assert_eq!(key, SubscriptionKey::global(WsChannel::QuantReportRun));
+        assert_eq!(envelope.kind.as_str(), "quant.report_run");
+        assert_eq!(envelope.data["report_run_id"], run_id.to_string());
+        assert_eq!(envelope.data["status"], "running");
+    }
+
+    #[test]
+    fn report_run_and_report_events_have_durable_backing() {
+        let report = CoreEvent::Report(ReportLifecycleEvent {
+            event: ReportEventKind::Published,
+            recommendation_report_id: "durable-report-id".to_owned(),
+            profile_id: "weather_forecast_24h".to_owned(),
+            report_kind: ReportKind::TopN,
+            runtime_mode: QuantRuntimeMode::ReportOnly,
+            status: RecommendationReportStatus::Published,
+            decision_at: Utc::now(),
+            published_at: Some(Utc::now()),
+            recommendation_count: 3,
+            empty_reason: None,
+            error_code: None,
+            status_reason: None,
+        });
+        let (report_key, report_envelope) = event_envelope(&report).expect("map durable report");
+        assert_eq!(report_key, SubscriptionKey::global(WsChannel::QuantReport));
+        assert_eq!(
+            report_envelope.data["recommendation_report_id"],
+            "durable-report-id"
+        );
+        assert_eq!(report_envelope.data["status"], "published");
+
+        let run_id = ReportRunId::from_v7();
+        let run = CoreEvent::ReportRun(ReportRunLifecycleEvent {
+            report_run_id: run_id.clone(),
+            status: ReportRunStatus::Succeeded,
+            terminal_reason: None,
+            output_report_id: Some(RecommendationReportId::from_v7()),
+            occurred_at: Utc::now(),
+        });
+        let (run_key, run_envelope) = event_envelope(&run).expect("map durable run");
+        assert_eq!(run_key, SubscriptionKey::global(WsChannel::QuantReportRun));
+        assert_eq!(run_envelope.data["report_run_id"], run_id.to_string());
+        assert_eq!(run_envelope.data["status"], "succeeded");
     }
 
     #[test]

@@ -1,7 +1,9 @@
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 use quant_pivot_models::config::DeployConfig;
-use quant_pivot_storage::clickhouse::{apply_online_schema_migrations, plan_schema, verify_schema};
+use quant_pivot_storage::clickhouse::{
+    apply_offline_schema_migrations, apply_online_schema_migrations, plan_schema, verify_schema,
+};
 use rustls::crypto::aws_lc_rs;
 use std::{
     path::PathBuf,
@@ -87,6 +89,8 @@ enum ClickHouseSchemaCommand {
     Plan(ConfigDirArgs),
     /// Create the database and apply pending online-safe migrations.
     ApplyOnline(ConfigDirArgs),
+    /// Apply pending offline migrations after proving destructive source tables are empty.
+    ApplyOffline(ConfigDirArgs),
     /// Verify the migration ledger and runtime schema contract read-only.
     Verify(ConfigDirArgs),
 }
@@ -131,6 +135,7 @@ async fn clickhouse_schema(command: ClickHouseSchemaCommand) -> Result<()> {
     let config_dir = match &command {
         ClickHouseSchemaCommand::Plan(args)
         | ClickHouseSchemaCommand::ApplyOnline(args)
+        | ClickHouseSchemaCommand::ApplyOffline(args)
         | ClickHouseSchemaCommand::Verify(args) => &args.config_dir,
     };
     let config_dir = config_dir
@@ -165,6 +170,16 @@ async fn clickhouse_schema(command: ClickHouseSchemaCommand) -> Result<()> {
                 .context("deploy ClickHouse schema")?;
             println!(
                 "ClickHouse schema deployed: version={}, required_objects={}",
+                status.current_version, status.required_object_count
+            );
+            Ok(())
+        }
+        ClickHouseSchemaCommand::ApplyOffline(_) => {
+            let status = apply_offline_schema_migrations(&migration_config)
+                .await
+                .context("deploy offline ClickHouse schema")?;
+            println!(
+                "ClickHouse offline schema deployed: version={}, required_objects={}",
                 status.current_version, status.required_object_count
             );
             Ok(())

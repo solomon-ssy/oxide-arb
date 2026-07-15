@@ -38,9 +38,6 @@ chrono = { workspace = true, features = ["serde"] }
 chrono-tz = { workspace = true }
 uuid   = { workspace = true, features = ["v4", "v7"] }
 
-# ── Scheduling (report plane only; see infra/schedule) ─────────────
-tokio-cron-scheduler = { workspace = true }
-
 # ── Errors / logging ──────────────────────────────────────────────
 thiserror = { workspace = true }
 tracing   = { workspace = true }

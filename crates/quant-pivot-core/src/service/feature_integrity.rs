@@ -14,7 +14,7 @@ use quant_pivot_models::{
         FeatureParityEventListQuery, FeatureParityEventView, FeatureParityJobParams,
         FeatureParityRunInfo, FeatureParityRunListQuery, FeatureParityRunView, NewFeatureParityRun,
         NewRecommendationReport, NewReportFeatureParity, NewResearchJob, Paginated,
-        RecommendationReportInfo, ResearchJobView, RunFullFeatureParityRequest,
+        RecommendationReportInfo, ReportRunInfo, ResearchJobView, RunFullFeatureParityRequest,
         RuntimeConfigVersionInfo,
     },
     enums::quant::{
@@ -84,9 +84,10 @@ impl FeatureParityRunCoordinator {
     pub async fn build_report_sample(
         &self,
         report: &NewRecommendationReport,
+        report_run: &ReportRunInfo,
     ) -> QuantResult<NewReportFeatureParity> {
         let (feature_contract_hash, materialization_timeout_secs) = self
-            .feature_contract_for_report(&report.runtime_config_version_id, report)
+            .feature_contract_for_report(&report.runtime_config_version_id, report, report_run)
             .await?;
         let window_end = report
             .decision_at
@@ -320,6 +321,7 @@ impl FeatureParityRunCoordinator {
         &self,
         version_id: &RuntimeConfigVersionId,
         report: &NewRecommendationReport,
+        report_run: &ReportRunInfo,
     ) -> QuantResult<(ContentHash, u64)> {
         let version = self
             .runtime_config
@@ -327,7 +329,7 @@ impl FeatureParityRunCoordinator {
             .await
             .map_err(QuantError::from)?
             .ok_or_else(|| StorageError::not_found("runtime_config_version", version_id))?;
-        contract_and_report_timeout(&version.config_json, report)
+        contract_and_report_timeout(&version.config_json, report, report_run)
     }
 
     fn build_job(
@@ -708,13 +710,14 @@ fn contract_and_full_timeout(config_json: &serde_json::Value) -> QuantResult<(Co
 fn contract_and_report_timeout(
     config_json: &serde_json::Value,
     report: &NewRecommendationReport,
+    report_run: &ReportRunInfo,
 ) -> QuantResult<(ContentHash, u64)> {
     let (config, feature_contract_hash) = feature_contract(config_json)?;
     let timeout = report_materialization_timeout(
         &config,
-        report.trigger_kind,
-        &report.trigger_key,
-        report.trigger_time,
+        report_run.trigger_kind,
+        report_run.schedule_id.as_deref(),
+        report_run.scheduled_for.unwrap_or(report.decision_at),
         &report.recommendation_report_id,
     )?;
     Ok((feature_contract_hash, timeout))
@@ -723,14 +726,16 @@ fn contract_and_report_timeout(
 fn report_materialization_timeout(
     config: &RuntimeConfig,
     trigger_kind: ReportTriggerKind,
-    trigger_key: &str,
+    schedule_id: Option<&str>,
     trigger_time: DateTime<Utc>,
     report_id: &RecommendationReportId,
 ) -> QuantResult<u64> {
     let cadence = match trigger_kind {
         ReportTriggerKind::AdHoc => None,
         ReportTriggerKind::Scheduled => {
-            let schedule_id = scheduled_report_id(trigger_key, trigger_time, report_id)?;
+            let schedule_id = schedule_id.ok_or_else(|| ResearchError::Determinism {
+                detail: format!("scheduled report {report_id} has no schedule id"),
+            })?;
             let schedule = config
                 .reports
                 .schedules
@@ -757,26 +762,6 @@ fn report_materialization_timeout(
             })
         })
         .map(|twice_cadence| twice_cadence.max(MIN_MATERIALIZATION_TIMEOUT_SECS))
-}
-
-fn scheduled_report_id<'a>(
-    trigger_key: &'a str,
-    trigger_time: DateTime<Utc>,
-    report_id: &RecommendationReportId,
-) -> QuantResult<&'a str> {
-    let suffix = format!(":{}", trigger_time.to_rfc3339());
-    trigger_key
-        .strip_prefix("scheduled:")
-        .and_then(|key| key.strip_suffix(&suffix))
-        .filter(|schedule_id| !schedule_id.is_empty())
-        .ok_or_else(|| {
-            ResearchError::Determinism {
-                detail: format!(
-                    "scheduled report {report_id} has malformed trigger key `{trigger_key}`"
-                ),
-            }
-            .into()
-        })
 }
 
 fn cadence_secs(cadence: &ScheduleCadence, reference_at: DateTime<Utc>) -> QuantResult<u64> {
@@ -893,12 +878,13 @@ mod tests {
         enums::{
             quant::{
                 EmptyReportReason, FeatureParityStateTransition, RecommendationReportStatus,
-                ReportKind,
+                ReportKind, ReportRunStatus,
             },
             runtime_config::RuntimeConfigVersionSource,
         },
         types::{
-            ModelVersionId, RecommendationReportId, RuntimeConfigActivationId, TrainingDatasetId,
+            ModelVersionId, RecommendationReportId, ReportRunId, RuntimeConfigActivationId,
+            TrainingDatasetId,
         },
     };
     use quant_pivot_repository::traits::FeatureParityLatchActor;
@@ -1218,12 +1204,9 @@ mod tests {
     fn new_report(info: RecommendationReportInfo) -> NewRecommendationReport {
         NewRecommendationReport {
             recommendation_report_id: info.recommendation_report_id,
+            profile_id: info.profile_id,
             profile_ref: info.profile_ref,
             report_kind: info.report_kind,
-            trigger_kind: info.trigger_kind,
-            trigger_key: info.trigger_key,
-            trigger_time: info.trigger_time,
-            knowledge_lag_secs: info.knowledge_lag_secs,
             decision_at: info.decision_at,
             horizon_secs: info.horizon_secs,
             runtime_mode: info.runtime_mode,
@@ -1241,10 +1224,46 @@ mod tests {
             data_quality_snapshot_ref: info.data_quality_snapshot_ref,
             summary_json: info.summary_json,
             published_at: info.published_at,
+            successor_report_id: info.successor_report_id,
+            superseded_at: info.superseded_at,
+            obsoleted_at: info.obsoleted_at,
             valid_until: info.valid_until,
             revoked_at: info.revoked_at,
             expired_at: info.expired_at,
             status_reason: info.status_reason,
+        }
+    }
+
+    fn report_run(
+        report: &NewRecommendationReport,
+        trigger_kind: ReportTriggerKind,
+        schedule_id: Option<&str>,
+        scheduled_for: Option<DateTime<Utc>>,
+    ) -> ReportRunInfo {
+        ReportRunInfo {
+            report_run_id: ReportRunId::from_v7(),
+            trigger_kind,
+            trigger_key: format!("test:{}", report.recommendation_report_id),
+            schedule_id: schedule_id.map(str::to_owned),
+            request_id: (trigger_kind == ReportTriggerKind::AdHoc)
+                .then(|| "test-request".to_owned()),
+            retry_of_run_id: None,
+            scheduled_for,
+            requested_at: report.decision_at,
+            status: ReportRunStatus::Succeeded,
+            started_at: Some(report.decision_at),
+            decision_at: Some(report.decision_at),
+            heartbeat_at: Some(report.decision_at),
+            lease_expires_at: None,
+            finished_at: Some(report.decision_at),
+            lease_owner: None,
+            runtime_config_version_id: Some(report.runtime_config_version_id.clone()),
+            top_n: Some(report.top_n),
+            knowledge_lag_secs: Some(10),
+            output_report_id: Some(report.recommendation_report_id.clone()),
+            terminal_reason: None,
+            error_code: None,
+            error_summary: None,
         }
     }
 
@@ -1261,19 +1280,21 @@ mod tests {
         let mut info = report_fixtures::report(
             RecommendationReportId::from_v7(),
             ReportKind::TopN,
-            RecommendationReportStatus::PublishedEmpty,
+            RecommendationReportStatus::Published,
         );
         info.runtime_config_version_id = runtime_config_version_id.clone();
         info.model_run_id = None;
-        info.trigger_key = format!(
-            "scheduled:default_interval:{}",
-            info.trigger_time.to_rfc3339()
-        );
         info.summary_json.empty_reason = Some(EmptyReportReason::EmptySelection);
         let report = new_report(info);
+        let run = report_run(
+            &report,
+            ReportTriggerKind::Scheduled,
+            Some("default_interval"),
+            Some(report.decision_at),
+        );
 
         let parity = coordinator
-            .build_report_sample(&report)
+            .build_report_sample(&report, &run)
             .await
             .expect("pre-inference sampled parity");
 
@@ -1376,11 +1397,10 @@ mod tests {
         };
         config.reports.schedules = vec![exact, unrelated];
 
-        let trigger_key = format!("scheduled:desk:fast:{}", trigger_time.to_rfc3339());
         let scheduled = report_materialization_timeout(
             &config,
             ReportTriggerKind::Scheduled,
-            &trigger_key,
+            Some("desk:fast"),
             trigger_time,
             &report_id,
         )
@@ -1390,7 +1410,7 @@ mod tests {
         let ad_hoc = report_materialization_timeout(
             &config,
             ReportTriggerKind::AdHoc,
-            "ad_hoc:request-1",
+            None,
             trigger_time,
             &report_id,
         )
@@ -1399,26 +1419,25 @@ mod tests {
     }
 
     #[test]
-    fn sampled_timeout_rejects_malformed_or_unknown_schedule_binding() {
+    fn sampled_timeout_rejects_missing_or_unknown_schedule_binding() {
         let trigger_time = Utc::now();
         let report_id = RecommendationReportId::from_v7();
         let config = RuntimeConfig::default();
 
-        let malformed = report_materialization_timeout(
+        let missing = report_materialization_timeout(
             &config,
             ReportTriggerKind::Scheduled,
-            "scheduled:default_interval:wrong-time",
+            None,
             trigger_time,
             &report_id,
         )
-        .expect_err("malformed trigger key must fail closed");
-        assert!(malformed.to_string().contains("malformed trigger key"));
+        .expect_err("missing schedule id must fail closed");
+        assert!(missing.to_string().contains("has no schedule id"));
 
-        let unknown_key = format!("scheduled:unknown:{}", trigger_time.to_rfc3339());
         let unknown = report_materialization_timeout(
             &config,
             ReportTriggerKind::Scheduled,
-            &unknown_key,
+            Some("unknown"),
             trigger_time,
             &report_id,
         )

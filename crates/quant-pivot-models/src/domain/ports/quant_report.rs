@@ -1,7 +1,7 @@
 //! Web-facing port for the quant report read + governed-mutation surface.
 //!
 //! This is the dependency-inversion boundary between the HTTP handlers and the
-//! core report services (`ReportLifecycleService` + `ReportScheduleRunner` + the
+//! core report services (`ReportLifecycleService` + the durable coordinator +
 //! read repositories). Handlers depend only on this trait — never on a
 //! repository or a venue client directly. Implemented in `quant-pivot-core` and
 //! injected into `quant_pivot_web::AppState`.
@@ -10,12 +10,15 @@ use async_trait::async_trait;
 
 use crate::{
     domain::{
-        Paginated, QuantEvidenceView, QuantRecommendationView, QuantReportDiagnosticsView,
-        QuantReportFunnelView, QuantReportListQuery, RecommendationReportInfo, ReportDiff,
-        ReportFactDeliveryInfo, ReportFunnelMarketListQuery, ReportFunnelMarketView,
+        EnqueueReportRunOutcome, OperationLogInfo, Paginated, QuantEvidenceView,
+        QuantRecommendationView, QuantReportDiagnosticsView, QuantReportFunnelView,
+        QuantReportListQuery, RecommendationReportInfo, ReportDiff, ReportFactDeliveryInfo,
+        ReportFunnelMarketListQuery, ReportFunnelMarketView, ReportRunInfo, ReportRunListQuery,
+        ReportScheduleGapInfo, ReportScheduleGapListQuery, ReportScheduleHealthInfo,
+        ReportTimelineQuery,
     },
     enums::quant::ReportKind,
-    types::{RecommendationId, RecommendationReportId},
+    types::{RecommendationId, RecommendationReportId, ReportRunId},
 };
 use quant_pivot_error::QuantResult;
 
@@ -34,17 +37,6 @@ pub struct AdHocReportCommand {
     pub knowledge_lag_secs: Option<u64>,
 }
 
-/// Outcome of enqueuing an ad-hoc report: correlation handles for the async job.
-///
-/// The report id does not exist until the build commits, so the response carries
-/// the idempotency key and the derived trigger key; the client observes
-/// completion via the `quant.report` WebSocket channel or by listing reports.
-#[derive(Debug, Clone)]
-pub struct AdHocReportEnqueued {
-    pub request_id: String,
-    pub trigger_key: String,
-}
-
 /// Read + governed-mutation port for recommendation reports.
 #[async_trait]
 pub trait QuantReportPort: Send + Sync {
@@ -60,10 +52,55 @@ pub trait QuantReportPort: Send + Sync {
         report_id: &RecommendationReportId,
     ) -> QuantResult<Option<RecommendationReportInfo>>;
 
+    async fn find_report_predecessor_id(
+        &self,
+        report_id: &RecommendationReportId,
+    ) -> QuantResult<Option<RecommendationReportId>>;
+
     async fn find_report_fact_delivery(
         &self,
         report_id: &RecommendationReportId,
     ) -> QuantResult<Option<ReportFactDeliveryInfo>>;
+
+    /// Load the unique durable build lineage row for one report artifact.
+    async fn find_report_run(
+        &self,
+        report_id: &RecommendationReportId,
+    ) -> QuantResult<Option<ReportRunInfo>>;
+
+    async fn list_report_runs(
+        &self,
+        query: ReportRunListQuery,
+    ) -> QuantResult<Paginated<ReportRunInfo>>;
+
+    async fn find_report_run_by_id(
+        &self,
+        run_id: &ReportRunId,
+    ) -> QuantResult<Option<ReportRunInfo>>;
+
+    async fn retry_report_run(
+        &self,
+        run_id: &ReportRunId,
+        request_id: &str,
+    ) -> QuantResult<EnqueueReportRunOutcome>;
+
+    async fn report_schedule_health(&self) -> QuantResult<ReportScheduleHealthInfo>;
+
+    async fn list_report_schedule_gaps(
+        &self,
+        query: ReportScheduleGapListQuery,
+    ) -> QuantResult<Paginated<ReportScheduleGapInfo>>;
+
+    async fn retry_report_publication(
+        &self,
+        report_id: &RecommendationReportId,
+    ) -> QuantResult<ReportFactDeliveryInfo>;
+
+    async fn report_timeline(
+        &self,
+        report_id: &RecommendationReportId,
+        query: ReportTimelineQuery,
+    ) -> QuantResult<Option<Paginated<OperationLogInfo>>>;
 
     /// Load durable serving diagnostics for one report.
     async fn find_report_diagnostics(
@@ -82,9 +119,10 @@ pub trait QuantReportPort: Send + Sync {
         query: ReportFunnelMarketListQuery,
     ) -> QuantResult<Option<Paginated<ReportFunnelMarketView>>>;
 
-    /// Load the latest published (or published-empty) report of `kind`.
-    async fn latest_report(
+    /// Load the unique current authority for one profile and report kind.
+    async fn current_report(
         &self,
+        profile_id: &str,
         kind: ReportKind,
     ) -> QuantResult<Option<RecommendationReportInfo>>;
 
@@ -119,8 +157,10 @@ pub trait QuantReportPort: Send + Sync {
     ) -> QuantResult<Option<ReportDiff>>;
 
     /// Enqueue an ad-hoc report build (async; does not block on the pipeline).
-    async fn enqueue_ad_hoc(&self, command: AdHocReportCommand)
-    -> QuantResult<AdHocReportEnqueued>;
+    async fn enqueue_ad_hoc(
+        &self,
+        command: AdHocReportCommand,
+    ) -> QuantResult<EnqueueReportRunOutcome>;
 
     /// Revoke a published report, recording `reason` and emitting the lifecycle
     /// event. Returns the updated report row.

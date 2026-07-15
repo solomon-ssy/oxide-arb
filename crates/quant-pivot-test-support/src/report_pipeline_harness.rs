@@ -14,6 +14,7 @@ use crate::{
     factor_governance::publish_all_factor_definitions,
     pit::InMemoryDecisionSnapshotSource,
     report_fixtures,
+    report_lifecycle_seed::{persist_and_publish_report, persist_prepared_report},
     trade_tape_fixtures::live_trade_tape_block_cursor_repo,
 };
 use async_trait::async_trait;
@@ -33,7 +34,7 @@ use quant_pivot_core::{
     },
     prefetch::{feature_window::FeatureWindowProvider, market_candidates::MarketCandidateProvider},
     report::{
-        DefaultRecommendationComposer, DefaultReportBuilder, ReportBuilderDeps,
+        AdHocReportRequest, DefaultRecommendationComposer, DefaultReportBuilder, ReportBuilderDeps,
         ReportLifecycleDeps, ReportLifecycleService, ReportPublisher, ReportPublisherDeps,
         ReportReadinessGate,
     },
@@ -57,13 +58,13 @@ use quant_pivot_models::{
     },
     config::TradeTapeOnChainConfig,
     domain::{
-        BasisAlertInfo, BasisAlertListQuery, CoreEventPublisher, DecisionBoundary,
-        MarketLinkageInfo, MarketLinkageListQuery, NewAccountSnapshot, NewBasisAlert,
-        NewEntryConditionInstance, NewEquitySnapshot, NewFeatureParityState, NewMarketLinkage,
-        NewMarketSelection, NewModelSpec, NewModelVersion, NewOperationLog, NewPortfolioPlan,
-        NewRecommendation, NewRecommendationReport, NewReportDataQualitySnapshot,
+        BasisAlertInfo, BasisAlertListQuery, ClaimReportSchedule, CoreEventPublisher,
+        DecisionBoundary, MarketLinkageInfo, MarketLinkageListQuery, NewAccountSnapshot,
+        NewBasisAlert, NewEntryConditionInstance, NewEquitySnapshot, NewFeatureParityState,
+        NewMarketLinkage, NewMarketSelection, NewModelSpec, NewModelVersion, NewOperationLog,
+        NewPortfolioPlan, NewRecommendation, NewRecommendationReport, NewReportDataQualitySnapshot,
         NewReportTransaction, NewRuntimeConfigActivation, NewRuntimeConfigVersion, Paginated,
-        RecommendationInfo, RecommendationReportInfo,
+        RecommendationInfo, RecommendationReportInfo, ReportRunClaimConfig,
         governance::lifecycle::OperationalPhase,
         market::{EventRegistryInfo, MarketRegistryInfo, TokenInfo, book::BookLevel},
     },
@@ -95,8 +96,9 @@ use quant_pivot_models::{
         ModelInputContract, ModelSpecId, ModelTrainingContract, ModelVersionId, OperationLogId,
         PortfolioConstraintsSnapshot, PortfolioOptimizerMeta, PortfolioRejectedSummary,
         PortfolioRiskBudget, Price, RecommendationId, RecommendationReportId,
-        RecommendationTradePlan, ReportDataQualityTokens, RuntimeConfigActivationId,
-        RuntimeConfigVersionId, SchemaVersion, SelectionExclusionSummary, Shares, TokenId, Usd,
+        RecommendationTradePlan, ReportDataQualityTokens, ResearchProfileRef,
+        RuntimeConfigActivationId, RuntimeConfigVersionId, SchemaVersion,
+        SelectionExclusionSummary, Shares, TokenId, Usd,
     },
 };
 use quant_pivot_repository::{
@@ -105,7 +107,7 @@ use quant_pivot_repository::{
         PgFactorRepository, PgFeatureParityRepository, PgFeatureRepository, PgMarketRepository,
         PgMarketSelectionRepository, PgModelRegistryRepository, PgModelRunRepository,
         PgPositionRepository, PgRecommendationReportRepository, PgRecommendationRepository,
-        PgReservedCapitalRepository, PgRuntimeConfigVersionRepository,
+        PgReportRunRepository, PgReservedCapitalRepository, PgRuntimeConfigVersionRepository,
         PgShadowComparisonRepository, PgTradePolicyRepository,
     },
     traits::{
@@ -113,7 +115,8 @@ use quant_pivot_repository::{
         EventRepository, FactorRepository, FeatureParityRepository, MarketLinkageRepository,
         MarketRepository, MarketSelectionRepository, ModelRegistryRepository, PositionRepository,
         QuantFactReadRepository, RecommendationReportRepository, RecommendationRepository,
-        ReservedCapitalRepository, RuntimeConfigVersionRepository, TradePolicyRepository,
+        ReportRunRepository, ReservedCapitalRepository, RuntimeConfigVersionRepository,
+        TradePolicyRepository,
     },
 };
 use quant_pivot_research::{
@@ -217,9 +220,89 @@ pub struct ReportPipelineHarness {
     pub db: DatabaseConnection,
     pub lifecycle: ReportLifecycleService,
     pub report_repo: Arc<PgRecommendationReportRepository>,
+    pub report_run_repo: Arc<PgReportRunRepository>,
     pub recommendation_repo: Arc<PgRecommendationRepository>,
     pub runtime_config_version_id: RuntimeConfigVersionId,
     pub model_version_id: ModelVersionId,
+}
+
+impl ReportPipelineHarness {
+    /// Drive the durable queue, claim, build, delivery verification, and
+    /// publication contract for one ad-hoc integration-test request.
+    pub async fn execute_ad_hoc(
+        &self,
+        request: AdHocReportRequest,
+    ) -> QuantResult<RecommendationReportInfo> {
+        let outcome = self.lifecycle.run_ad_hoc(request).await?;
+        if let Some(report_id) = outcome.run().output_report_id.as_ref() {
+            return self
+                .report_repo
+                .find_by_id(report_id)
+                .await?
+                .ok_or_else(|| {
+                    StorageError::not_found("quant_recommendation_report", report_id).into()
+                });
+        }
+        let worker_id = uuid::Uuid::now_v7();
+        let run = self
+            .report_run_repo
+            .claim_next_run(
+                worker_id,
+                120,
+                300,
+                ReportRunClaimConfig {
+                    runtime_config_version_id: self.runtime_config_version_id.clone(),
+                    ad_hoc_default_top_n: 20,
+                    ad_hoc_default_knowledge_lag_secs: 10,
+                    schedules: Vec::<ClaimReportSchedule>::new(),
+                },
+            )
+            .await?
+            .ok_or_else(|| {
+                StorageError::state_conflict(
+                    "quant_report_run",
+                    Option::<&str>::None,
+                    "queued test run was not claimable",
+                )
+            })?;
+        let prepared = self.lifecycle.execute_claimed(run).await?;
+        let delivery_worker = uuid::Uuid::now_v7();
+        let now = Utc::now();
+        let claimed = self
+            .report_repo
+            .claim_fact_delivery(delivery_worker, 60)
+            .await?
+            .ok_or_else(|| {
+                StorageError::state_conflict(
+                    "quant_report_fact_delivery",
+                    Some(&prepared.recommendation_report_id),
+                    "prepared test report delivery was not claimable",
+                )
+            })?;
+        if claimed.recommendation_report_id != prepared.recommendation_report_id {
+            return Err(StorageError::state_conflict(
+                "quant_report_fact_delivery",
+                Some(&prepared.recommendation_report_id),
+                "claimed a different report delivery",
+            )
+            .into());
+        }
+        let settlement = self
+            .report_repo
+            .verify_and_publish_report(&prepared.recommendation_report_id, delivery_worker, now)
+            .await?;
+        settlement
+            .into_applied()
+            .map(|outcome| outcome.report)
+            .map_err(|lost| {
+                StorageError::state_conflict(
+                    "quant_report_fact_delivery",
+                    Some(&lost.recommendation_report_id),
+                    "prepared test report lost its delivery claim",
+                )
+                .into()
+            })
+    }
 }
 
 struct AlwaysOperationalGate;
@@ -556,6 +639,7 @@ impl ReportPipelineHarness {
             db: db.clone(),
             lifecycle,
             report_repo: Arc::new(PgRecommendationReportRepository::new(db.clone())),
+            report_run_repo: Arc::new(PgReportRunRepository::new(db.clone())),
             recommendation_repo: Arc::new(PgRecommendationRepository::new(db.clone())),
             runtime_config_version_id: version.runtime_config_version_id,
             model_version_id,
@@ -607,10 +691,8 @@ pub async fn seed_published_report(
     db: &DatabaseConnection,
     txn: NewReportTransaction,
 ) -> RecommendationReportInfo {
-    PgRecommendationReportRepository::new(db.clone())
-        .create_report(txn)
-        .await
-        .expect("seed published report")
+    let trigger_key = format!("fixture:{}", txn.report.recommendation_report_id);
+    persist_and_publish_report(db, txn, &trigger_key, 10).await
 }
 
 /// Context for seeding fixture reports against a bootstrapped harness database.
@@ -630,6 +712,39 @@ pub async fn seed_fixture_published_report(
     report_id: RecommendationReportId,
     ctx: &FixtureReportSeedContext,
 ) -> RecommendationReportInfo {
+    seed_fixture_published_report_with_profile(db, report_id, ctx, fixture_profile_ref()).await
+}
+
+/// Seed a published fixture report in an explicit authority scope.
+///
+/// All report-owned recommendations receive the same immutable profile
+/// reference so same-scope API validation is exercised without corrupting
+/// lineage.
+pub async fn seed_fixture_published_report_with_profile(
+    db: &DatabaseConnection,
+    report_id: RecommendationReportId,
+    ctx: &FixtureReportSeedContext,
+    profile_ref: ResearchProfileRef,
+) -> RecommendationReportInfo {
+    seed_fixture_report(db, report_id, ctx, profile_ref, true).await
+}
+
+/// Seed a complete Prepared fixture whose fact delivery is still Pending.
+pub async fn seed_fixture_prepared_report(
+    db: &DatabaseConnection,
+    report_id: RecommendationReportId,
+    ctx: &FixtureReportSeedContext,
+) -> RecommendationReportInfo {
+    seed_fixture_report(db, report_id, ctx, fixture_profile_ref(), false).await
+}
+
+async fn seed_fixture_report(
+    db: &DatabaseConnection,
+    report_id: RecommendationReportId,
+    ctx: &FixtureReportSeedContext,
+    profile_ref: ResearchProfileRef,
+    publish: bool,
+) -> RecommendationReportInfo {
     seed_fixture_market_catalog(db).await;
     let market_selection_id =
         seed_minimal_market_selection(db, &ctx.runtime_config_version_id).await;
@@ -642,7 +757,8 @@ pub async fn seed_fixture_published_report(
     report.runtime_config_version_id = ctx.runtime_config_version_id.clone();
     report.model_version_id = ctx.model_version_id.clone();
     report.market_selection_id = market_selection_id.clone();
-    report.trigger_key = format!("fixture:published:{}", report.recommendation_report_id);
+    report.profile_id = profile_ref.id.clone();
+    report.profile_ref = profile_ref.clone();
 
     let mut recommendations = vec![
         report_fixtures::recommendation(
@@ -663,6 +779,7 @@ pub async fn seed_fixture_published_report(
         ),
     ];
     for rec in &mut recommendations {
+        rec.profile_ref = profile_ref.clone();
         rec.event_id = EventId::new(FIXTURE_EVENT);
         rec.evidence_refs.runtime_config_version_id = ctx.runtime_config_version_id.clone();
         rec.evidence_refs.model_version_id = ctx.model_version_id.clone();
@@ -671,7 +788,12 @@ pub async fn seed_fixture_published_report(
 
     let feature_parity_state_id = seed_clear_feature_parity_state(db).await;
     let txn = fixture_report_transaction(&report, recommendations, feature_parity_state_id);
-    seed_published_report(db, txn).await
+    if publish {
+        seed_published_report(db, txn).await
+    } else {
+        let trigger_key = format!("fixture:{}", txn.report.recommendation_report_id);
+        persist_prepared_report(db, txn, &trigger_key, 10).await
+    }
 }
 
 async fn seed_fixture_market_catalog(db: &DatabaseConnection) {
@@ -867,12 +989,9 @@ fn fixture_portfolio_plan(report: &RecommendationReportInfo) -> NewPortfolioPlan
 fn fixture_new_report(report: &RecommendationReportInfo) -> NewRecommendationReport {
     NewRecommendationReport {
         recommendation_report_id: report.recommendation_report_id.clone(),
+        profile_id: report.profile_id.clone(),
         profile_ref: report.profile_ref.clone(),
         report_kind: report.report_kind,
-        trigger_kind: report.trigger_kind,
-        trigger_key: report.trigger_key.clone(),
-        trigger_time: report.trigger_time,
-        knowledge_lag_secs: report.knowledge_lag_secs,
         decision_at: report.decision_at,
         horizon_secs: report.horizon_secs,
         runtime_mode: report.runtime_mode,
@@ -890,6 +1009,9 @@ fn fixture_new_report(report: &RecommendationReportInfo) -> NewRecommendationRep
         data_quality_snapshot_ref: report.data_quality_snapshot_ref.clone(),
         summary_json: report.summary_json.clone(),
         published_at: report.published_at,
+        successor_report_id: report.successor_report_id.clone(),
+        superseded_at: report.superseded_at,
+        obsoleted_at: report.obsoleted_at,
         valid_until: report.valid_until,
         revoked_at: report.revoked_at,
         expired_at: report.expired_at,
@@ -931,7 +1053,7 @@ fn fixture_new_recommendation(rec: RecommendationInfo) -> NewRecommendation {
 fn fixture_publish_operation_log(report: &RecommendationReportInfo) -> NewOperationLog {
     NewOperationLog {
         id: OperationLogId::from_v7(),
-        request_id: report.trigger_key.clone(),
+        request_id: format!("fixture:{}", report.recommendation_report_id),
         actor_user_id: None,
         actor_username: Some("fixture".to_owned()),
         acting_role: Some("test".to_owned()),
@@ -1081,22 +1203,22 @@ async fn build_lifecycle_service(
     ));
     ReportLifecycleService::new(ReportLifecycleDeps {
         report_repo: Arc::clone(&report_repo) as Arc<dyn RecommendationReportRepository>,
+        run_repo: Arc::new(PgReportRunRepository::new(db.clone())) as Arc<dyn ReportRunRepository>,
         recommendation_repo: Arc::new(PgRecommendationRepository::new(db.clone()))
             as Arc<dyn RecommendationRepository>,
-        runtime_config_repo,
         builder,
         publisher: Arc::new(ReportPublisher::new(ReportPublisherDeps {
             events,
             alerts: recording_alerts(),
             metrics: Arc::clone(&metrics),
         })),
-        runtime_mode: RuntimeModeHandle::default(),
-        metrics,
         feature_parity_gate: Arc::new(ClearFeatureParityGate {
             state_id: seed_clear_feature_parity_state(db).await,
         }),
         feature_parity_runs,
         artifact_store,
+        ad_hoc_queue_capacity: 64,
+        ad_hoc_queue_ttl_secs: 300,
     })
 }
 
@@ -1335,7 +1457,6 @@ fn runtime_config_for_pipeline(
             ..PortfolioConfig::default()
         },
         reports: ReportsConfig {
-            publish_empty_reports: true,
             ad_hoc_report_enabled: true,
             ..ReportsConfig::default()
         },

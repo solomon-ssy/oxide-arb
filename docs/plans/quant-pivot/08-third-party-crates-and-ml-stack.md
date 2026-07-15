@@ -27,7 +27,7 @@
 | 权重优化 | `argmin` | grid search 自研 | Phase 3 | factor weight optimization |
 | 组合优化 | `good_lp` + solver | greedy 自研 | Phase 4/5 | LP/MILP 表达预算和约束 |
 | 并行特征 | `rayon` | tokio tasks | Phase 3 | CPU-bound 特征/回测 |
-| Cron 调度 | `tokio-cron-scheduler`（经 `ReportScheduleRunner`） | existing `PeriodicTask` | Phase 4 **锁定** | multi-schedule cron/interval/ad-hoc |
+| Report occurrence | `croner` + PostgreSQL durable coordinator | 无 scheduler runtime crate | Phase 11.8 | cadence 计算与 durable run/gap/lease 分离 |
 | ONNX 推理 | `ort` | `candle` | Phase 6+ | 外部训练模型线上推理 |
 | Rust-native DL 训练 | `burn` | `candle` | Phase 8+ | 深度学习后续选项 |
 | 轻量推理/transformers | `candle` | `ort` | Phase 8+ | Hugging Face/safetensors |
@@ -354,44 +354,15 @@ subject to:
 - health check。
 - report expiration。
 
-### 8.2 `tokio-cron-scheduler`（Phase 4 锁定）
+### 8.2 `croner` + PostgreSQL durable coordinator（Phase 11.8）
 
-**权威契约**：[`04-topn-report-and-recommendation.md`](04-topn-report-and-recommendation.md) §23–§25。
+`croner` 只负责从 frozen schedule spec 计算 occurrence；它不拥有 job、lease、重试或 misfire
+状态。Report scheduling 的权威数据是 `quant_report_schedule_state`、`quant_report_run` 与
+`quant_report_schedule_gap`。
 
-用途（仅 report plane 调度层）：
-
-- 多 `ReportScheduleConfig` 的 cron / interval fire。
-- `POST /api/quant/reports/run` ad-hoc one-shot job。
-- runtime-config activation 后 `sync_from_config` 动态 rebuild jobs。
-
-**不用于**：Gamma sync、data quality、CH flush、`PeriodicTask` 已有 interval worker。
-
-市场对比（2025–2026，摘要）：
-
-| 方案 | 结论 |
-|---|---|
-| `tokio-cron-scheduler` v0.15.x | **Phase 4 默认** — 进程内、tokio-native、~4M crates.io 下载 |
-| `PeriodicTask` | **保留** — 简单 interval + shutdown/jitter |
-| `apalis` + `apalis-cron` | Phase 8+ 多副本 leader/worker 再评估 — Phase 4 过重 |
-| `croner` + 自研 loop | 不引入 — 重复 JobScheduler 轮子 |
-
-**明确不启用的 feature**：`postgres_storage`、`nats_storage`（schedule 真相源是
-runtime-config，见 04 §23.8）。
-
-封装（业务 crate 禁止直接依赖 crate）：
-
-```rust
-pub trait ReportScheduleRunner {
-    async fn upsert(&self, schedule: &ReportScheduleConfig) -> QuantResult<()>;
-    async fn remove(&self, schedule_id: &str) -> QuantResult<()>;
-    async fn sync_from_config(&self, reports: &ReportsConfig) -> QuantResult<()>;
-    async fn enqueue_ad_hoc(&self, request: AdHocReportRequest) -> QuantResult<()>;
-    async fn run(&self, shutdown: CancellationToken) -> QuantResult<()>;
-}
-```
-
-实现：`TokioCronScheduleRunner` in `core/src/infra/schedule/runner.rs`。
-
+并发 claim、latest-only coalescing、全局 build slot、heartbeat 和 crash recovery 均由 PostgreSQL
+transaction/CAS 实现。项目不再依赖 scheduler runtime crate，也不保留 facade 或兼容模块。
+`PeriodicTask` 只用于 report plane 之外的简单 interval worker。
 ## 9. 依赖引入顺序
 
 ### Phase 1
@@ -439,7 +410,7 @@ smartcore
 
 可新增：
 
-- `tokio-cron-scheduler`（`quant-pivot-core`，经 `ReportScheduleRunner`；见 04 §23）。
+- `croner`（只解析 report cadence；durable ownership 由 PostgreSQL 提供）。
 
 ### Phase 5
 

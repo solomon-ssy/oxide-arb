@@ -495,7 +495,10 @@
 (model_run_id, rank_before_portfolio, market_id)
 ```
 
-#### `quant_recommendation_event`
+#### `quant_report_recommendation_fact`
+
+> Phase 11.8 破坏式替代旧 `quant_recommendation_event`。本表是 prepare 阶段冻结的 decision fact，
+> 不复制 PG recommendation/report/delivery lifecycle。
 
 字段：
 
@@ -508,14 +511,14 @@
 - `side Enum8`
 - `score Decimal128`
 - `risk_adjusted_score Decimal128`
+- `trade_plan_available Bool`
 - `suggested_usd Decimal128`
 - `valid_until DateTime64`
-- `status LowCardinality(String)`
 
 排序：
 
 ```text
-(recommendation_report_id, rank, market_id)
+(recommendation_report_id, recommendation_id)
 ```
 
 #### `quant_execution_event`

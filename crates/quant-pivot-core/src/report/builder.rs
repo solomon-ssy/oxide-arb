@@ -184,9 +184,6 @@ impl ReportBuilder for DefaultReportBuilder {
 impl DefaultReportBuilder {
     async fn build_report(&self, request: BuildReportRequest) -> QuantResult<ComposedReport> {
         let context = self.prepare_context(&request).await?;
-        self.deps
-            .readiness_gate
-            .ensure_degraded_empty_allowed(&context.config)?;
         let (selection, decision_snapshot) = self.build_selection(&context).await?;
         let account = self
             .account_snapshot(context.boundary.decision_at(), &context.config)
@@ -1196,21 +1193,6 @@ fn resolve_knowledge_lag(request: &BuildReportRequest, config: &RuntimeConfig) -
             })
         }
     }
-}
-
-pub(super) async fn report_decision_at(
-    runtime_config_repo: &dyn RuntimeConfigVersionRepository,
-    request: &BuildReportRequest,
-) -> QuantResult<chrono::DateTime<Utc>> {
-    let version = runtime_config_repo
-        .load_active_at(request.trigger_time)
-        .await?
-        .ok_or_else(|| QuantError::config("no active runtime config version"))?;
-    let config = RuntimeConfig::from_json(&version.config_json)?;
-    let knowledge_lag_secs = resolve_knowledge_lag(request, &config)?;
-    DecisionClock::new(knowledge_lag_secs)
-        .boundary(request.trigger_time)
-        .map(|boundary| boundary.decision_at())
 }
 
 fn plan_candidates<'a>(

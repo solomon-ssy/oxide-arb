@@ -14,7 +14,6 @@
 //! SigningError──────┼──► QuantError
 //! ConfigError───────┤
 //! MarketError───────┤
-//! SchedulerError────┤
 //! ReportError───────┤
 //! ExecutionError────┤
 //! InfraError────────┤
@@ -40,7 +39,6 @@ pub mod rbac;
 pub mod report;
 pub mod research;
 pub mod rpc;
-pub mod scheduler;
 pub mod security;
 pub mod seed;
 pub mod signing;
@@ -116,10 +114,6 @@ pub enum QuantError {
     #[error(transparent)]
     Hashing(#[from] hashing::CanonicalDigestError),
 
-    // ── Report schedule plane ───────────────────────────────────────────
-    #[error(transparent)]
-    Scheduler(#[from] scheduler::SchedulerError),
-
     // ── Report generation pipeline ──────────────────────────────────────
     #[error(transparent)]
     Report(#[from] report::ReportError),
@@ -150,7 +144,7 @@ impl QuantError {
     /// Stable, queryable failure taxonomy code (the sub-error family name).
     ///
     /// Used for observability surfaces that need a coarse, append-only label —
-    /// e.g. the `quant.report.failed` WebSocket event — without leaking the
+    /// e.g. a durable failed `ReportRun` projection — without leaking the
     /// human-readable message.
     #[must_use]
     pub const fn code(&self) -> &'static str {
@@ -170,7 +164,6 @@ impl QuantError {
             Self::Research(_) => "research",
             Self::Governance(_) => "governance",
             Self::Hashing(_) => "hashing",
-            Self::Scheduler(_) => "scheduler",
             Self::Report(_) => "report",
             Self::Execution(_) => "execution",
             Self::Infra(_) => "infra",
@@ -284,15 +277,6 @@ mod tests {
         };
         let oxide_err: QuantError = market_err.into();
         assert!(matches!(oxide_err, QuantError::Market(_)));
-    }
-
-    #[test]
-    fn scheduler_error_propagates() {
-        let err = scheduler::SchedulerError::Backend {
-            detail: "add failed".into(),
-        };
-        let oxide_err: QuantError = err.into();
-        assert!(matches!(oxide_err, QuantError::Scheduler(_)));
     }
 
     #[test]

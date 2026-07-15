@@ -382,7 +382,7 @@ impl CoreOrderIntentService {
             }
             .into());
         }
-        if !rec.status.is_actionable_for_intent() {
+        if !rec.status.allows_new_intent() {
             return Err(ExecutionError::IntentDenied {
                 reason: format!(
                     "recommendation {} is {} (not actionable for intent creation)",

@@ -90,7 +90,7 @@ impl OrderIntentRepository for PgOrderIntentRepository {
             .ok_or_else(|| {
                 error::not_found(entity::QUANT_RECOMMENDATION, &intent.recommendation_id)
             })?;
-        if !rec_row.status.is_actionable_for_intent() {
+        if !rec_row.status.allows_new_intent() {
             return Err(error::state_conflict(
                 entity::QUANT_RECOMMENDATION,
                 Some(&intent.recommendation_id),

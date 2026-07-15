@@ -25,9 +25,9 @@ pub use market_resolution::MarketResolutionRow;
 pub use quant_facts::{
     QuantCapitalAllocationEventRow, QuantExecutionEventRow, QuantExitSignalEvaluationEventRow,
     QuantFactorEventRow, QuantFeatureEventRow, QuantFeatureParityEventRow, QuantModelInputEventRow,
-    QuantPositionEventRow, QuantRecommendationAttributionEventRow, QuantRecommendationEventRow,
-    QuantServingEvidenceCompletionRow, QuantSignalCandidateEventRow, ReportMarketFunnelCountRow,
-    ReportMarketFunnelRow,
+    QuantPositionEventRow, QuantRecommendationAttributionEventRow,
+    QuantReportRecommendationFactRow, QuantServingEvidenceCompletionRow,
+    QuantSignalCandidateEventRow, ReportMarketFunnelCountRow, ReportMarketFunnelRow,
 };
 pub use trade_tape::TradeTapeRow;
 pub use types::{

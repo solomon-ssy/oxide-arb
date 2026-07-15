@@ -1,7 +1,9 @@
 use quant_pivot_macros::quant_schema;
 use sea_orm::{
     Iden,
-    sea_query::{ColumnDef, ForeignKey, ForeignKeyAction, Index, Table, TableCreateStatement},
+    sea_query::{
+        ColumnDef, Expr, ForeignKey, ForeignKeyAction, Index, Table, TableCreateStatement,
+    },
 };
 
 use crate::{
@@ -135,6 +137,36 @@ pub fn table() -> TableCreateStatement {
                 )
                 .on_delete(ForeignKeyAction::Restrict),
         )
+        .check(Expr::cust(
+            "bundle_bytes > 0 AND recommendation_row_count >= 0 AND funnel_row_count >= 0 AND attempt_count >= 0",
+        ))
+        .check(Expr::cust(
+            "last_error IS NULL OR char_length(last_error) BETWEEN 1 AND 4096",
+        ))
+        .check(Expr::cust(
+            "(claim_owner IS NULL) = (lease_expires_at IS NULL)",
+        ))
+        .check(Expr::cust(
+            "(status = 'pending'::qp_report_fact_delivery_status AND attempt_count = 0 AND claim_owner IS NULL AND next_attempt_at IS NULL AND last_error IS NULL AND verified_at IS NULL AND announced_at IS NULL) OR status <> 'pending'::qp_report_fact_delivery_status",
+        ))
+        .check(Expr::cust(
+            "(status = 'delivering'::qp_report_fact_delivery_status AND attempt_count > 0 AND claim_owner IS NOT NULL AND next_attempt_at IS NULL AND last_error IS NULL AND verified_at IS NULL AND announced_at IS NULL) OR status <> 'delivering'::qp_report_fact_delivery_status",
+        ))
+        .check(Expr::cust(
+            "(status = 'retrying'::qp_report_fact_delivery_status AND attempt_count > 0 AND claim_owner IS NULL AND next_attempt_at IS NOT NULL AND last_error IS NOT NULL AND verified_at IS NULL AND announced_at IS NULL) OR status <> 'retrying'::qp_report_fact_delivery_status",
+        ))
+        .check(Expr::cust(
+            "(status = 'failed'::qp_report_fact_delivery_status AND attempt_count > 0 AND claim_owner IS NULL AND next_attempt_at IS NULL AND last_error IS NOT NULL AND verified_at IS NULL AND announced_at IS NULL) OR status <> 'failed'::qp_report_fact_delivery_status",
+        ))
+        .check(Expr::cust(
+            "(status = 'verified'::qp_report_fact_delivery_status AND attempt_count > 0 AND next_attempt_at IS NULL AND last_error IS NULL AND verified_at IS NOT NULL) OR status <> 'verified'::qp_report_fact_delivery_status",
+        ))
+        .check(Expr::cust(
+            "(status = 'cancelled'::qp_report_fact_delivery_status AND claim_owner IS NULL AND next_attempt_at IS NULL AND verified_at IS NULL AND announced_at IS NULL) OR status <> 'cancelled'::qp_report_fact_delivery_status",
+        ))
+        .check(Expr::cust(
+            "announced_at IS NULL OR (status = 'verified'::qp_report_fact_delivery_status AND claim_owner IS NULL AND announced_at >= verified_at)",
+        ))
         .to_owned()
 }
 

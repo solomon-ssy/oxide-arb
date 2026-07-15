@@ -80,7 +80,7 @@ impl RecommendationRepository for PgRecommendationRepository {
         quant_recommendation::Entity::find()
             .filter(
                 quant_recommendation::Column::Status
-                    .is_in(RecommendationStatus::ACTIONABLE_FOR_INTENT),
+                    .is_in(RecommendationStatus::NEW_INTENT_AUTHORITY),
             )
             .filter(quant_recommendation::Column::ValidUntil.lte(now))
             .order_by_asc(quant_recommendation::Column::ValidUntil)
@@ -99,7 +99,7 @@ impl RecommendationRepository for PgRecommendationRepository {
         quant_recommendation::Entity::find()
             .filter(
                 quant_recommendation::Column::Status
-                    .is_in(RecommendationStatus::ACTIONABLE_FOR_INTENT),
+                    .is_in(RecommendationStatus::NEW_INTENT_AUTHORITY),
             )
             .filter(quant_recommendation::Column::ValidUntil.lte(before))
             .order_by_asc(quant_recommendation::Column::ValidUntil)
@@ -127,7 +127,7 @@ impl RecommendationRepository for PgRecommendationRepository {
             .await
             .map_err(StorageError::from)?
             .ok_or_else(|| error::not_found(entity::QUANT_RECOMMENDATION, recommendation_id))?;
-        if !row.status.is_actionable_for_intent() {
+        if !row.status.allows_new_intent() {
             return Err(error::state_conflict(
                 entity::QUANT_RECOMMENDATION,
                 Some(recommendation_id),
@@ -160,7 +160,7 @@ impl RecommendationRepository for PgRecommendationRepository {
         Ok((model.into(), invalidated))
     }
 
-    async fn find_expired_attribution_candidates(
+    async fn find_unfilled_attribution_candidates(
         &self,
         limit: u64,
     ) -> Result<Vec<RecommendationInfo>, StorageError> {
@@ -172,7 +172,10 @@ impl RecommendationRepository for PgRecommendationRepository {
                 JoinType::LeftJoin,
                 quant_recommendation::Relation::Attribution.def(),
             )
-            .filter(quant_recommendation::Column::Status.eq(RecommendationStatus::Expired))
+            .filter(quant_recommendation::Column::Status.is_in([
+                RecommendationStatus::Expired,
+                RecommendationStatus::Superseded,
+            ]))
             .filter(quant_recommendation_attribution::Column::RecommendationId.is_null())
             .order_by_asc(quant_recommendation::Column::ValidUntil)
             .limit(limit);

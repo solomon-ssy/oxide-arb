@@ -91,8 +91,6 @@ fn base_report(
 ) -> RecommendationReportInfo {
     let id = report_id(seed);
     let mut info = report_fixtures::report(id, ReportKind::TopN, status);
-    "scheduled:daily-topn:2023-11-14T22:13:20Z".clone_into(&mut info.trigger_key);
-    info.trigger_time = at(1_700_000_000);
     info.decision_at = at(1_699_999_880);
     info.runtime_config_version_id = ref_id("snapshot-runtime-config");
     info.model_version_id = ref_id("snapshot-model-version");
@@ -275,7 +273,7 @@ pub fn empty_report() -> QuantReportDetailView {
     summary.warnings = vec!["no candidates passed score floor".to_owned()];
     QuantReportDetailView::from(base_report(
         "snapshot-report-empty",
-        RecommendationReportStatus::PublishedEmpty,
+        RecommendationReportStatus::Published,
         summary,
     ))
 }
