@@ -378,10 +378,12 @@ private_key = "0xlocal"
             return;
         }
         let raw = fs::read_to_string(&template).expect("read production example");
-        let parsed: DeployConfig =
+        let mut parsed: DeployConfig =
             toml::from_str(&raw).expect("production example must deserialize");
+        parsed.db.clickhouse.migration.user = Some("quant_pivot_migrator".to_owned());
+        parsed.db.clickhouse.migration.password = Some("test-secret-manager-value".to_owned());
         parsed
             .ensure_valid_common()
-            .expect("production example must pass mode-agnostic validation");
+            .expect("production example must validate after documented secret injection");
     }
 }
