@@ -7,11 +7,7 @@
 //! into [`LabelBuildInput::forward`]; a labeler never reads a database.
 
 use chrono::Duration;
-use quant_pivot_models::{
-    enums::quant::FillRequirement,
-    hashing::CanonicalDigest,
-    types::{Bps, Price},
-};
+use quant_pivot_models::{enums::quant::FillRequirement, types::Price};
 use rust_decimal::Decimal;
 
 use crate::{
@@ -370,25 +366,10 @@ impl Labeler for HoldVsExitProceedsLabeler {
                 reason: MissingLabelReason::NoForwardData,
             };
         };
-        let Ok(schedule_hash) = CanonicalDigest::content_hash_json(fee_schedule) else {
+        let Ok(schedule) = PitFeeSchedule::from_market_fee_schedule(fee_schedule) else {
             return LabelBuildOutput::Unavailable {
                 reason: MissingLabelReason::NoExitPrice,
             };
-        };
-        let schedule = PitFeeSchedule {
-            schedule_hash,
-            effective_at: fee_schedule.observed_at,
-            available_at: fee_schedule.observed_at,
-            platform_rate: if fee_schedule.fees_enabled {
-                fee_schedule.fee_rate
-            } else {
-                Decimal::ZERO
-            },
-            exponent: fee_schedule.exponent,
-            taker_only: fee_schedule.taker_only,
-            builder_maker_fee_bps: Bps::ZERO,
-            builder_taker_fee_bps: Bps::ZERO,
-            builder_attributed: false,
         };
         let Ok(fill) = walk_sell_exact_shares(
             bids,
@@ -470,8 +451,8 @@ mod tests {
     use crate::training::{ForwardSample, ForwardWindow, MarketResolution};
     use chrono::{DateTime, TimeZone, Utc};
     use quant_pivot_models::{
-        domain::{BookLevel, MarketFeeSchedule},
-        types::{MarketId, Price, Shares, TokenId, Usd},
+        domain::{BookLevel, BuilderFeeAttribution, MarketFeeSchedule},
+        types::{Bps, ClobMarketInfoVersionId, ContentHash, MarketId, Price, Shares, TokenId, Usd},
     };
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
@@ -674,12 +655,17 @@ mod tests {
             avg_price: price("0.50"),
             fee_schedule: Some(MarketFeeSchedule {
                 market_id: market.clone(),
-                fees_enabled: false,
-                fee_rate: Decimal::ZERO,
+                market_info_version_id: ClobMarketInfoVersionId::from_v7(),
+                market_info_payload_hash: ContentHash::parse(format!("blake3:{}", "f".repeat(64)))
+                    .expect("hash"),
+                platform_rate: Decimal::ZERO,
                 exponent: Decimal::ONE,
                 taker_only: true,
-                rebate_rate: None,
-                observed_at: at(0),
+                builder_maker_fee_bps: Bps::ZERO,
+                builder_taker_fee_bps: Bps::ZERO,
+                builder_attribution: BuilderFeeAttribution::NoBuilderCode,
+                effective_at: at(0),
+                available_at: at(0),
             }),
             terminal,
             decision_book: Some(DecisionBook::L2 {

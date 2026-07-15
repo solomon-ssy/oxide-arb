@@ -2,8 +2,12 @@
 
 use chrono::{DateTime, Utc};
 use quant_pivot_models::{
-    domain::market::book::BookLevel,
+    domain::market::{
+        book::BookLevel,
+        fee::{BuilderFeeAttribution, MarketFeeSchedule},
+    },
     enums::{clickhouse::ChTradeReconciliationStatus, common::Side, quant::FillRequirement},
+    hashing::CanonicalDigest,
     types::{Bps, ContentHash, Price, Shares, Usd},
 };
 use rust_decimal::{Decimal, MathematicalOps, RoundingStrategy};
@@ -11,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// Versioned identity of the shared book-walk, queue, and fee semantics.
-pub const EXECUTION_SEMANTICS_VERSION: &str = "polymarket_execution_semantics_v1";
+pub const EXECUTION_SEMANTICS_VERSION: &str = "polymarket_execution_semantics_v2";
 
 /// Full-depth book evidence is the only publishable fidelity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -37,13 +41,30 @@ pub struct PitFeeSchedule {
     pub taker_only: bool,
     pub builder_maker_fee_bps: Bps,
     pub builder_taker_fee_bps: Bps,
-    /// Builder fees are charged only when this exact order carries an explicit
-    /// builder attribution. A market advertising builder rates is not evidence
-    /// that the order was attributed.
-    pub builder_attributed: bool,
+    pub builder_attribution: BuilderFeeAttribution,
 }
 
 impl PitFeeSchedule {
+    /// Project the canonical market-info fee fact into executable semantics.
+    /// The schedule hash includes both venue rates and the frozen route
+    /// attribution, so changing order attribution is an artifact-breaking
+    /// methodology change rather than an implicit cost-model change.
+    pub fn from_market_fee_schedule(schedule: &MarketFeeSchedule) -> Result<Self, FeeError> {
+        let schedule_hash =
+            CanonicalDigest::content_hash_json(schedule).map_err(|_| FeeError::InvalidSchedule)?;
+        Ok(Self {
+            schedule_hash,
+            effective_at: schedule.effective_at,
+            available_at: schedule.available_at,
+            platform_rate: schedule.platform_rate,
+            exponent: schedule.exponent,
+            taker_only: schedule.taker_only,
+            builder_maker_fee_bps: schedule.builder_maker_fee_bps,
+            builder_taker_fee_bps: schedule.builder_taker_fee_bps,
+            builder_attribution: schedule.builder_attribution,
+        })
+    }
+
     pub fn validate_at(&self, fill_at: DateTime<Utc>) -> Result<(), FeeError> {
         if self.effective_at > fill_at || self.available_at > fill_at {
             return Err(FeeError::NotPointInTime);
@@ -74,13 +95,11 @@ impl PitFeeSchedule {
         let curve_base = price.inner() * (Decimal::ONE - price.inner());
         let curve = curve_base.powd(self.exponent);
         let platform_rate = match role {
-            LiquidityRole::Maker => Decimal::ZERO,
-            LiquidityRole::Taker => self.platform_rate,
+            LiquidityRole::Maker if self.taker_only => Decimal::ZERO,
+            LiquidityRole::Maker | LiquidityRole::Taker => self.platform_rate,
         };
-        let builder_bps = match (self.builder_attributed, role) {
-            (false, _) => Bps::ZERO,
-            (true, LiquidityRole::Maker) => self.builder_maker_fee_bps,
-            (true, LiquidityRole::Taker) => self.builder_taker_fee_bps,
+        let builder_bps = match (self.builder_attribution, role) {
+            (BuilderFeeAttribution::NoBuilderCode, _) => Bps::ZERO,
         };
         let platform = shares.inner() * platform_rate * curve;
         let notional = shares.inner() * price.inner();
@@ -473,7 +492,7 @@ pub struct PassiveTrade {
 mod tests {
     use chrono::TimeZone;
     use quant_pivot_models::{
-        domain::market::book::BookLevel,
+        domain::market::{book::BookLevel, fee::BuilderFeeAttribution},
         enums::{clickhouse::ChTradeReconciliationStatus, common::Side, quant::FillRequirement},
         types::{Bps, ContentHash, Price, Shares, Usd},
     };
@@ -505,7 +524,7 @@ mod tests {
             taker_only: true,
             builder_maker_fee_bps: Bps::ZERO,
             builder_taker_fee_bps: Bps::ZERO,
-            builder_attributed: false,
+            builder_attribution: BuilderFeeAttribution::NoBuilderCode,
         }
     }
 
@@ -564,11 +583,12 @@ mod tests {
     }
 
     #[test]
-    fn maker_platform_fee_is_zero_and_builder_fee_requires_attribution() {
+    fn advertised_builder_rate_is_not_charged_without_builder_code() {
         let mut fees = schedule();
         fees.taker_only = false;
+        fees.platform_rate = Decimal::ZERO;
         fees.builder_maker_fee_bps = Bps::new(dec!(25));
-        let maker_without_attribution = fees
+        let maker_fee = fees
             .fee(
                 LiquidityRole::Maker,
                 Price::new(dec!(0.5)),
@@ -576,18 +596,108 @@ mod tests {
                 fees.effective_at,
             )
             .expect("maker fee");
-        assert_eq!(maker_without_attribution, Usd::ZERO);
+        assert_eq!(maker_fee, Usd::ZERO);
+    }
 
-        fees.builder_attributed = true;
-        let attributed_builder_fee = fees
-            .fee(
+    #[test]
+    fn platform_fee_golden_vectors_match_v2_formula_and_rounding() {
+        let mut fees = schedule();
+        fees.platform_rate = dec!(0.25);
+        fees.exponent = dec!(2);
+        let at = fees.effective_at;
+        for (price, expected) in [
+            (dec!(0.1), dec!(0.2025)),
+            (dec!(0.5), dec!(1.5625)),
+            (dec!(0.9), dec!(0.2025)),
+        ] {
+            assert_eq!(
+                fees.fee(
+                    LiquidityRole::Taker,
+                    Price::new(price),
+                    Shares::new(dec!(100)),
+                    at,
+                )
+                .expect("V2 fee golden vector"),
+                Usd::new(expected),
+            );
+        }
+
+        fees.platform_rate = dec!(0.0175);
+        fees.exponent = Decimal::ONE;
+        assert_eq!(
+            fees.fee(
+                LiquidityRole::Taker,
+                Price::new(dec!(0.5)),
+                Shares::new(dec!(100)),
+                at,
+            )
+            .expect("linear fee golden vector"),
+            Usd::new(dec!(0.4375)),
+        );
+
+        // Polymarket SDK production vectors express a $100 order as shares =
+        // amount / price. Preserve those external contract vectors here after
+        // deleting the parallel API fee implementation.
+        fees.exponent = Decimal::ONE;
+        for (price, rate, expected) in [
+            (dec!(0.5), dec!(0.03), dec!(1.5)),
+            (dec!(0.3), dec!(0.03), dec!(2.1)),
+            (dec!(0.7), dec!(0.03), dec!(0.9)),
+            (dec!(0.5), dec!(0.04), dec!(2.0)),
+            (dec!(0.5), dec!(0.05), dec!(2.5)),
+            (dec!(0.5), dec!(0.072), dec!(3.6)),
+        ] {
+            fees.platform_rate = rate;
+            assert_eq!(
+                fees.fee(
+                    LiquidityRole::Taker,
+                    Price::new(price),
+                    Shares::new(dec!(100) / price),
+                    at,
+                )
+                .expect("SDK production fee vector"),
+                Usd::new(expected),
+            );
+        }
+
+        fees.platform_rate = dec!(0.000001);
+        assert_eq!(
+            fees.fee(
+                LiquidityRole::Taker,
+                Price::new(dec!(0.5)),
+                Shares::new(Decimal::ONE),
+                at,
+            )
+            .expect("sub-minimum fee vector"),
+            Usd::ZERO,
+        );
+    }
+
+    #[test]
+    fn maker_platform_fee_follows_taker_only_market_fact() {
+        let mut fees = schedule();
+        let at = fees.effective_at;
+        assert_eq!(
+            fees.fee(
                 LiquidityRole::Maker,
                 Price::new(dec!(0.5)),
                 Shares::new(dec!(100)),
-                fees.effective_at,
+                at,
             )
-            .expect("attributed builder fee");
-        assert_eq!(attributed_builder_fee, Usd::new(dec!(0.125)));
+            .expect("taker-only maker fee"),
+            Usd::ZERO,
+        );
+        fees.taker_only = false;
+        assert_eq!(
+            fees.fee(
+                LiquidityRole::Maker,
+                Price::new(dec!(0.5)),
+                Shares::new(dec!(100)),
+                at,
+            )
+            .expect("two-sided maker fee"),
+            Usd::new(dec!(1.75)),
+        );
     }
 
     #[test]

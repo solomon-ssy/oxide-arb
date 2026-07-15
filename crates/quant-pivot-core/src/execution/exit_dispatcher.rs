@@ -276,7 +276,7 @@ impl CoreExitDispatcher {
                 taker_only: schedule.taker_only,
                 builder_maker_fee_bps: schedule.builder_maker_fee_bps,
                 builder_taker_fee_bps: schedule.builder_taker_fee_bps,
-                builder_attributed: schedule.builder_attributed,
+                builder_attribution: schedule.builder_attribution,
             },
             prepared_at: now,
             valid_until,

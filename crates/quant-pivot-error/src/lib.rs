@@ -21,7 +21,6 @@
 //! ControlError──────┤
 //! ResearchError─────┤
 //! GovernanceError───┤
-//! FeeQuoteError─────┤
 //! SeedError ────────┘
 //! ```
 
@@ -32,7 +31,6 @@ pub mod config;
 pub mod config_validation;
 pub mod control;
 pub mod execution;
-pub mod fee;
 pub mod governance;
 pub mod hashing;
 pub mod infra;
@@ -103,10 +101,6 @@ pub enum QuantError {
     #[error(transparent)]
     Market(#[from] market::MarketError),
 
-    // ── Polymarket fees ─────────────────────────────────────────────────
-    #[error(transparent)]
-    FeeQuote(#[from] fee::FeeQuoteError),
-
     #[error(transparent)]
     Seed(#[from] seed::SeedError),
 
@@ -172,7 +166,6 @@ impl QuantError {
             Self::Auth(_) => "auth",
             Self::Config(_) => "config",
             Self::Market(_) => "market",
-            Self::FeeQuote(_) => "fee_quote",
             Self::Seed(_) => "seed",
             Self::Research(_) => "research",
             Self::Governance(_) => "governance",

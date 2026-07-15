@@ -1220,7 +1220,7 @@ fn methodology(detail: String) -> QuantError {
 mod tests {
     use chrono::{Duration, TimeZone, Utc};
     use quant_pivot_models::{
-        domain::market::book::BookLevel,
+        domain::market::{book::BookLevel, fee::BuilderFeeAttribution},
         enums::{
             clickhouse::ChTradeReconciliationStatus,
             common::{Side, TickSize},
@@ -1269,7 +1269,7 @@ mod tests {
             taker_only: true,
             builder_maker_fee_bps: Bps::ZERO,
             builder_taker_fee_bps: Bps::ZERO,
-            builder_attributed: false,
+            builder_attribution: BuilderFeeAttribution::NoBuilderCode,
         }
     }
 

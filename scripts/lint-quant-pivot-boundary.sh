@@ -18,7 +18,7 @@ fi
 # Phase 11.7.2 breaking-contract gate. These semantics were deleted rather
 # than deprecated; tests and UI fixtures are included so no shadow contract can
 # silently keep them alive.
-PHASE_1172_DELETED='max_selection_size|SelectionCapExceeded|FeeSource::CategoryDefault|allow_category_fallback|archive_manifest_set_hash|notional_tier|min_universe_coverage|\buniverse_coverage\b|\bfee_category\b|\bfee_rank\b|X-API-Version|x-api-version'
+PHASE_1172_DELETED='max_selection_size|SelectionCapExceeded|FeeSource::CategoryDefault|allow_category_fallback|archive_manifest_set_hash|notional_tier|min_universe_coverage|\buniverse_coverage\b|\bfee_category\b|\bfee_rank\b|FeeCalculator|FeeQuote(Error)?|execution\.exit_monitor\.opportunistic_sell\.max_cumulative_exit_pct|X-API-Version|x-api-version'
 if rg -n "$PHASE_1172_DELETED" crates/ config/ ui/packages/types/src ui/apps/web-antdv-next/src 2>/dev/null; then
   echo "ERROR: deleted Phase 11.7.2 compatibility/archive/selection/fee semantic detected"
   exit 1
@@ -42,7 +42,7 @@ PHASE_117_ACTIVE_DOCS=(
   docs/plans/quant-pivot/phase-11/11.7.2-closed-loop-completion-plan-2026-07-14.md
   docs/plans/quant-pivot/phase-11/11.9-attribution-feedback-and-auto-retraining.md
 )
-PHASE_117_STALE_DOC='Runtime v13|runtime config \*\*v13\*\*|runtime config v13|v13 ?→ ?v14|dataset/model artifact (v4|`format_version = 4`)|policy v3|TradePolicy artifact (只接受 )?v3|exact-(notional|tier)|notional tier|WORM 日分区 Parquet|archive seal|archive worker 待|archive worker 驱动|30 ?天 canary|窄屏 drawer'
+PHASE_117_STALE_DOC='Runtime v1[34]|runtime config \*\*v1[34]\*\*|runtime config v1[34]|v1[34] ?→ ?v1[45]|dataset/model artifact (v4|`format_version = 4`)|Policy v[345]|Trade Policy v4|Evidence( Bundle)? v2|TradePolicy artifact (只接受 )?v[34]|exact-(notional|tier)|notional tier|WORM 日分区 Parquet|archive seal|archive worker 待|archive worker 驱动|30 ?天 canary|窄屏 drawer'
 if rg -n "$PHASE_117_STALE_DOC" "${PHASE_117_ACTIVE_DOCS[@]}" 2>/dev/null; then
   echo "ERROR: stale Phase 11.7 contract detected in an active design document"
   exit 1

@@ -42,7 +42,6 @@ chrono = { workspace = true }
 grib = { workspace = true }
 
 # Concurrency
-arc-swap = { workspace = true }
 ahash = { workspace = true }
 dashmap = { workspace = true }
 parking_lot = { workspace = true }

@@ -162,8 +162,8 @@ pub struct SizingPlan {
 
 /// Policy-fitted opportunistic exit rule frozen into recommendation and intent.
 ///
-/// Runtime configuration may disable/shadow it or tighten the cumulative cap,
-/// but never supplies these decision thresholds.
+/// Runtime configuration may disable or shadow it, but never supplies or
+/// tightens these decision thresholds.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OpportunisticExitPolicy {
     pub min_confidence: Probability,

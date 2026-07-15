@@ -313,33 +313,8 @@ impl<S: OpportunisticSellScorer> ExitSignalEvaluator for OpportunisticSellSignal
             return ExitSignalEvaluation::verdict(ExitSignalVerdict::Holds);
         };
 
-        let runtime_cap = match policy.max_cumulative_exit_pct.value.parse::<Decimal>() {
-            Ok(value) => value,
-            Err(error) => {
-                self.audit.write(audit_row(
-                    &ctx,
-                    Some(&score),
-                    None,
-                    ChExitSignalVerdict::Indeterminate,
-                    model_version_id.as_ref(),
-                    policy.shadow_mode,
-                ));
-                self.metrics
-                    .inc_opportunistic_sell_eval("invalid_runtime_cap");
-                tracing::error!(
-                    %error,
-                    value = %policy.max_cumulative_exit_pct.value,
-                    "opportunistic sell denied because the governed runtime cap is invalid"
-                );
-                return ExitSignalEvaluation::verdict(ExitSignalVerdict::Indeterminate {
-                    detail: "governed opportunistic-sell cap is invalid".to_owned(),
-                });
-            }
-        };
-        let signal_policy = SellSignalPolicy::from_frozen(
-            &ctx.intent.exit_policy_json.opportunistic_exit,
-            runtime_cap,
-        );
+        let signal_policy =
+            SellSignalPolicy::from_frozen(&ctx.intent.exit_policy_json.opportunistic_exit);
         let target = sell_signal_target(&score, &signal_policy);
         let fires = sell_signal_fires(&score, &signal_policy);
 

@@ -54,6 +54,15 @@ pub enum ResearchDecisionTrigger {
     HourlyLatestCompleteGefsCycle,
 }
 
+/// Closed set of implemented policy fitters. A profile without a fitter may
+/// still govern datasets and model research, but it cannot enter the policy-fit
+/// job graph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResearchPolicyFitter {
+    WeatherForecast,
+}
+
 /// Evaluation track requested by a fit. It never activates execution by itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -81,6 +90,7 @@ pub enum ResearchProfileDataSource {
 #[serde(deny_unknown_fields)]
 pub struct ResearchProfileSpec {
     pub information_regime: ResearchInformationRegime,
+    pub policy_fitter: Option<ResearchPolicyFitter>,
     pub market_selector: ResearchMarketSelector,
     pub category: Option<MarketCategory>,
     pub decision_trigger: ResearchDecisionTrigger,
@@ -109,6 +119,19 @@ impl ResearchProfileSpec {
         }
         if self.max_holding_secs > self.target_horizon_secs {
             return Err("research profile max holding cannot exceed target horizon".to_owned());
+        }
+        match (self.information_regime, self.policy_fitter) {
+            (ResearchInformationRegime::PooledBinaryMarket, None)
+            | (
+                ResearchInformationRegime::WeatherForecast,
+                Some(ResearchPolicyFitter::WeatherForecast),
+            ) => {}
+            _ => {
+                return Err(
+                    "research profile policy fitter does not match its information regime"
+                        .to_owned(),
+                );
+            }
         }
         if self.required_sources.is_empty()
             || self
@@ -219,7 +242,7 @@ impl ResearchProfileArtifact {
     }
 }
 
-/// Return the complete closed registry for Runtime v14.
+/// Return the complete closed registry for Runtime v15.
 pub fn builtin_research_profiles() -> Result<Vec<ResearchProfileArtifact>, String> {
     let published_at = Utc
         .with_ymd_and_hms(2026, 7, 14, 0, 0, 0)
@@ -231,6 +254,7 @@ pub fn builtin_research_profiles() -> Result<Vec<ResearchProfileArtifact>, Strin
         1,
         ResearchProfileSpec {
             information_regime: ResearchInformationRegime::PooledBinaryMarket,
+            policy_fitter: None,
             market_selector: ResearchMarketSelector::AllEligible,
             category: None,
             decision_trigger: ResearchDecisionTrigger::Hourly,
@@ -258,6 +282,7 @@ pub fn builtin_research_profiles() -> Result<Vec<ResearchProfileArtifact>, Strin
         1,
         ResearchProfileSpec {
             information_regime: ResearchInformationRegime::WeatherForecast,
+            policy_fitter: Some(ResearchPolicyFitter::WeatherForecast),
             market_selector: ResearchMarketSelector::WeatherAirportDailyHigh,
             category: Some(MarketCategory::Weather),
             decision_trigger: ResearchDecisionTrigger::HourlyLatestCompleteGefsCycle,
@@ -287,7 +312,7 @@ pub fn builtin_research_profiles() -> Result<Vec<ResearchProfileArtifact>, Strin
     Ok(vec![pooled, weather])
 }
 
-/// Runtime v14 raw-retention floor:
+/// Runtime v15 raw-retention floor:
 /// `max(180, 2 × max(required_days(profile)))`.
 pub fn minimum_raw_retention_days() -> Result<u32, String> {
     let max_required = builtin_research_profiles()?

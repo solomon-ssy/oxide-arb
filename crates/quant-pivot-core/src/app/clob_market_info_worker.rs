@@ -3,7 +3,7 @@
 use std::{sync::Arc, time::Duration};
 
 use futures_util::{StreamExt, stream};
-use quant_pivot_api::{clob::ClobClient, fees::FeeCalculator};
+use quant_pivot_api::clob::ClobClient;
 use quant_pivot_error::QuantError;
 use quant_pivot_repository::traits::{ClobMarketInfoRepository, MarketRepository};
 use tokio_util::sync::CancellationToken;
@@ -14,7 +14,6 @@ pub struct ClobMarketInfoWorker {
     clob: Arc<ClobClient>,
     markets: Arc<dyn MarketRepository>,
     observations: Arc<dyn ClobMarketInfoRepository>,
-    fees: Arc<FeeCalculator>,
     refresh_interval: Duration,
 }
 
@@ -23,14 +22,12 @@ impl ClobMarketInfoWorker {
         clob: Arc<ClobClient>,
         markets: Arc<dyn MarketRepository>,
         observations: Arc<dyn ClobMarketInfoRepository>,
-        fees: Arc<FeeCalculator>,
         refresh_interval: Duration,
     ) -> Self {
         Self {
             clob,
             markets,
             observations,
-            fees,
             refresh_interval,
         }
     }
@@ -56,7 +53,6 @@ impl ClobMarketInfoWorker {
         };
         let clob = Arc::clone(&self.clob);
         let observations = Arc::clone(&self.observations);
-        let fees = Arc::clone(&self.fees);
         let market_ids = markets
             .iter()
             .map(|market| market.market_id.clone())
@@ -65,14 +61,12 @@ impl ClobMarketInfoWorker {
             .map(move |market_id| {
                 let clob = Arc::clone(&clob);
                 let observations = Arc::clone(&observations);
-                let fees = Arc::clone(&fees);
                 async move {
                     let observation = clob.clob_market_info_version(&market_id).await?;
-                    let persisted = observations
+                    observations
                         .insert_observation(observation)
                         .await
                         .map_err(QuantError::from)?;
-                    fees.ingest_market_fee_schedules([persisted.fee_schedule()]);
                     Ok::<_, QuantError>(market_id)
                 }
             })

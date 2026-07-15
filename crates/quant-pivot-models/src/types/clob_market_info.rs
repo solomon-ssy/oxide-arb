@@ -6,11 +6,11 @@ use sea_orm::FromJsonQueryResult;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    domain::fee::MarketFeeSchedule,
+    domain::fee::{BuilderFeeAttribution, MarketFeeSchedule},
     enums::common::TickSize,
     hashing::CanonicalDigest,
     jsonb_active,
-    types::{ClobMarketInfoVersionId, ContentHash, MarketId, TokenId},
+    types::{Bps, ClobMarketInfoVersionId, ContentHash, MarketId, TokenId},
 };
 
 /// V2 platform-fee parameters returned in the CLOB `fd` payload.
@@ -91,12 +91,16 @@ impl ClobMarketInfoVersion {
     pub fn fee_schedule(&self) -> MarketFeeSchedule {
         MarketFeeSchedule {
             market_id: self.market_id.clone(),
-            fees_enabled: self.fee_details.rate > Decimal::ZERO,
-            fee_rate: self.fee_details.rate,
+            market_info_version_id: self.version_id.clone(),
+            market_info_payload_hash: self.payload_hash.clone(),
+            platform_rate: self.fee_details.rate,
             exponent: Decimal::from(self.fee_details.exponent),
             taker_only: self.fee_details.taker_only,
-            rebate_rate: None,
-            observed_at: self.available_at,
+            builder_maker_fee_bps: Bps::new(Decimal::from(self.builder_maker_fee_rate_bps)),
+            builder_taker_fee_bps: Bps::new(Decimal::from(self.builder_taker_fee_rate_bps)),
+            builder_attribution: BuilderFeeAttribution::NoBuilderCode,
+            effective_at: self.effective_at,
+            available_at: self.available_at,
         }
     }
 }

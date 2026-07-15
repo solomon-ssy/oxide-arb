@@ -231,17 +231,15 @@ impl SellSignalPolicy {
         }
     }
 
-    /// Build the live decision rule from the intent-frozen policy. The runtime
-    /// cap may only tighten the fitted cumulative exit bound.
+    /// Build the live decision rule exclusively from the intent-frozen policy.
     #[must_use]
-    pub fn from_frozen(policy: &OpportunisticExitPolicy, runtime_cap: Decimal) -> Self {
+    pub fn from_frozen(policy: &OpportunisticExitPolicy) -> Self {
         Self {
             min_confidence: policy.min_confidence.inner(),
             min_p_exit_better: policy.min_p_exit_better.inner(),
             min_expected_alpha_bps: policy.min_expected_alpha_bps.inner(),
             max_sell_pct: policy
                 .max_cumulative_exit_pct
-                .min(runtime_cap)
                 .clamp(Decimal::ZERO, Decimal::ONE),
         }
     }

@@ -22,7 +22,6 @@ use crate::{
     },
 };
 use quant_pivot_api::{
-    fees::FeeCalculator,
     gamma::GammaClient,
     ws::{ClobWsManager, WsSessionInvalidationHook, WsShardHealthPort},
 };
@@ -33,7 +32,8 @@ use quant_pivot_repository::{
     cached::{CachedEventRepository, CachedMarketRepository},
     postgres::{PgEventRepository, PgMarketRepository},
     traits::{
-        CatalogVersionRepository, EventRepository, MarketLinkageRepository, MarketRepository,
+        CatalogVersionRepository, ClobMarketInfoRepository, EventRepository,
+        MarketLinkageRepository, MarketRepository,
     },
 };
 use quant_pivot_research::pit::PointInTimeSnapshotSource;
@@ -73,8 +73,6 @@ pub struct DataBundle {
     pub pit_source: Arc<dyn PointInTimeSnapshotSource>,
     /// Best-effort nudge when pipeline status changes (web readiness).
     pub status_nudge: SystemStatusNudge,
-    /// Polymarket fee calculator populated only by CLOB market-info observations.
-    pub fee_calculator: Arc<FeeCalculator>,
 }
 
 impl DataBundle {
@@ -94,7 +92,6 @@ impl DataBundle {
             None,
         ));
         let gamma_client = Arc::new(GammaClient::new(deps.deploy.market_data.gamma.clone()));
-        let fee_calculator = Arc::new(FeeCalculator::new());
         let book_store = Arc::new(BookStore::new(Arc::clone(deps.metrics)));
         let market_registry = Arc::new(MarketRegistry::new());
         let market_filter = Arc::new(MarketFilter::new(
@@ -150,6 +147,7 @@ impl DataBundle {
         let pit_source: Arc<dyn PointInTimeSnapshotSource> = Arc::new(DurablePitSource::new(
             Arc::clone(&deps.infra.quant_fact_read),
             Arc::clone(&catalog_version_repo),
+            Arc::clone(&deps.infra.repos.clob_market_info) as Arc<dyn ClobMarketInfoRepository>,
         ));
         let data_pipeline = build_data_pipeline(
             &book_store,
@@ -178,7 +176,6 @@ impl DataBundle {
             data_quality,
             pit_source,
             status_nudge,
-            fee_calculator,
         }
     }
 }

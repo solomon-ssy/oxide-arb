@@ -1136,7 +1136,7 @@ impl Default for SemiAutoConfig {
     }
 }
 
-/// Runtime v14 policy-bound `SemiAuto` canary.
+/// Runtime v15 policy-bound `SemiAuto` canary.
 ///
 /// An enabled canary is intentionally narrower than a published policy. It
 /// authorizes only an exact policy identity and explicit cash-budget tiers; it
@@ -1424,7 +1424,7 @@ pub struct ResearchValidationConfig {
     pub gates: ResearchValidationGatesConfig,
 }
 
-/// Runtime v14 operational limits for policy fitting.
+/// Runtime v15 operational limits for policy fitting.
 ///
 /// Statistical methodology is versioned code and publication thresholds belong
 /// exclusively to the immutable research profile. Keeping only resource and
@@ -1478,7 +1478,7 @@ pub struct ResearchConfig {
 
 /// Research-feedback plane configuration (attribution feedback + auto-retraining).
 ///
-/// Reserved skeleton carried by Runtime v14; Phase 11.9 adds the first real
+/// Reserved skeleton carried by Runtime v15; Phase 11.9 adds the first real
 /// feedback/profile-allocation fields with a breaking bump to Runtime v15.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(default, deny_unknown_fields)]

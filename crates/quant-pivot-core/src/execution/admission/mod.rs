@@ -458,7 +458,7 @@ pub fn prepare_entry_order(input: &AdmissionInput) -> QuantResult<PreparedVenueO
             taker_only: input.fee_schedule.taker_only,
             builder_maker_fee_bps: input.fee_schedule.builder_maker_fee_bps,
             builder_taker_fee_bps: input.fee_schedule.builder_taker_fee_bps,
-            builder_attributed: input.fee_schedule.builder_attributed,
+            builder_attribution: input.fee_schedule.builder_attribution,
         },
         prepared_at: input.now,
         valid_until: spec.valid_until,

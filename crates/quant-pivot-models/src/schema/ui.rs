@@ -2047,8 +2047,8 @@ fn execution_semi_auto_fields() -> Vec<FieldUiEntry> {
             "execution.semi_auto.canary.allowed_cash_budget_tiers_usd",
             "Canary allowed cash-budget tiers",
             "Canary 允许的现金预算 tiers",
-            "Exact validated maximum total cash-spend tiers. Runtime v14 permits only $25.",
-            "精确验证的最大总现金支出 tiers。Runtime v14 仅允许 $25。",
+            "Exact validated maximum total cash-spend tiers. Runtime v15 permits only $25.",
+            "精确验证的最大总现金支出 tiers。Runtime v15 仅允许 $25。",
         )
         .widget(FieldWidget::StringList)
         .visible_when(enabled("execution.semi_auto.canary.enabled")),
@@ -2056,16 +2056,16 @@ fn execution_semi_auto_fields() -> Vec<FieldUiEntry> {
             "execution.semi_auto.canary.max_open_intents",
             "Canary maximum open intents",
             "Canary 最大开放 intents",
-            "Transactional cap on capital-holding or in-flight intents. Runtime v14 fixes this at one.",
-            "持有资金或在途 intent 的事务级上限。Runtime v14 固定为一个。",
+            "Transactional cap on capital-holding or in-flight intents. Runtime v15 fixes this at one.",
+            "持有资金或在途 intent 的事务级上限。Runtime v15 固定为一个。",
         )
         .visible_when(enabled("execution.semi_auto.canary.enabled")),
         usd(
             "execution.semi_auto.canary.max_total_cash_per_report",
             "Canary total cash cap per report",
             "Canary 单 report 总现金上限",
-            "Transactional cumulative maximum cash spend across intents from one report. Runtime v14 fixes this at $25.",
-            "同一 report 所创建 intents 的事务级累计最大现金支出。Runtime v14 固定为 $25。",
+            "Transactional cumulative maximum cash spend across intents from one report. Runtime v15 fixes this at $25.",
+            "同一 report 所创建 intents 的事务级累计最大现金支出。Runtime v15 固定为 $25。",
         )
         .critical()
         .visible_when(enabled("execution.semi_auto.canary.enabled")),
@@ -2255,17 +2255,6 @@ fn execution_opportunistic_sell_fields() -> Vec<FieldUiEntry> {
             "机会性卖出影子模式",
             "When on, the Sell scorer runs and writes audit rows but never submits an opportunistic exit. Use to validate the scorer before it trades.",
             "开启时卖出评分模型运行并写审计行，但绝不提交机会性退出。用于在其真正交易前验证评分器。",
-        )
-        .visible_when(enabled2(
-            "execution.exit_monitor.enabled",
-            "execution.exit_monitor.opportunistic_sell.enabled",
-        )),
-        ratio_half_open(
-            "execution.exit_monitor.opportunistic_sell.max_cumulative_exit_pct",
-            "Runtime cumulative safety cap",
-            "Runtime 累计安全上限",
-            "Runtime-only ceiling that may tighten the policy-fitted cumulative opportunistic exit ratio. Confidence, alpha, probability, and clip thresholds are frozen on each policy cohort and intent.",
-            "仅由 Runtime 收紧的机会退出累计比例上限。置信度、alpha、概率与 clip 阈值冻结在 policy cohort 和 intent 上。",
         )
         .visible_when(enabled2(
             "execution.exit_monitor.enabled",
@@ -2824,8 +2813,8 @@ fn research_section() -> SchemaNode {
                     "lucide:shield-ellipsis",
                     ls("Executable-policy limits", "可执行 Policy 运行上限"),
                     ls(
-                        "Runtime v14 operational limits. Methodology is versioned code; publication gates come only from the immutable research profile.",
-                        "Runtime v14 运行上限。方法由代码版本化；发布门槛仅来自不可变 research profile。",
+                        "Runtime v15 operational limits. Methodology is versioned code; publication gates come only from the immutable research profile.",
+                        "Runtime v15 运行上限。方法由代码版本化；发布门槛仅来自不可变 research profile。",
                     ),
                 ),
                 fields_in_order(&[
@@ -3326,7 +3315,6 @@ fn exit_monitor_subsection() -> SchemaNode {
         fields_in_order(&[
             "execution.exit_monitor.opportunistic_sell.enabled",
             "execution.exit_monitor.opportunistic_sell.shadow_mode",
-            "execution.exit_monitor.opportunistic_sell.max_cumulative_exit_pct",
         ]),
     ));
     section_node(

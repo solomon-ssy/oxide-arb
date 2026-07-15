@@ -19,7 +19,6 @@ use crate::{
         },
     },
 };
-use quant_pivot_api::fees::FeeCalculator;
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     clickhouse::QuantFeatureParityEventRow,
@@ -142,8 +141,6 @@ pub struct ResearchBundle {
     pub market_linkage_repo: Arc<dyn MarketLinkageRepository>,
     /// Position ledger for `ExitDecision` lot-timeline training (06.1).
     pub position_repo: Arc<dyn PositionRepository>,
-    /// Venue fee calculator for governed exit-fee-aware Sell labels (06.1).
-    pub fee_calculator: Arc<FeeCalculator>,
     /// Unified calibration-artifact ledger port: favorite-longshot bias-table
     /// fitter + generic catalog read/activate for every artifact kind (11.2.1, 11.3).
     pub calibration_artifact_fit: Arc<dyn CalibrationArtifactFitPort>,
@@ -318,7 +315,6 @@ impl ResearchBundle {
             market_repo: Arc::clone(&deps.data.market_repo),
             market_linkage_repo: Arc::clone(&market_linkage_repo),
             position_repo: Arc::clone(&repos.position) as Arc<dyn PositionRepository>,
-            fee_calculator: Arc::clone(&deps.data.fee_calculator),
             calibration_artifact_fit,
             calibration_artifact_repo: Arc::clone(&repos.calibration_artifact)
                 as Arc<dyn CalibrationArtifactRepository>,

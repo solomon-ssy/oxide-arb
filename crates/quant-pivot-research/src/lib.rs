@@ -35,6 +35,7 @@ mod naming;
 mod parallel;
 pub mod precision;
 pub mod stats;
+pub mod structural_volatility;
 
 pub mod artifact;
 pub mod backtest;
@@ -59,6 +60,7 @@ pub mod source_slice;
 pub mod trade_tape;
 pub mod training;
 pub mod validation;
+pub mod weather_proxy_validation;
 
 #[cfg(test)]
 mod acceptance_tests {

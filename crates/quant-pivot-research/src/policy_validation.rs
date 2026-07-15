@@ -38,6 +38,10 @@ pub const POLICY_CPCV_COMBINATIONS: u64 = 56;
 pub const POLICY_CPCV_PATHS: u64 = 21;
 pub const POLICY_PBO_BLOCKS: u32 = 8;
 pub const POLICY_BOOTSTRAP_REPLICATIONS: usize = 2_000;
+/// Hash-bound policy-performance methodology. Bump whenever candidate support,
+/// CPCV path selection, DSR/PBO inputs, ESS, or bootstrap semantics change.
+pub const POLICY_PERFORMANCE_METHODOLOGY_VERSION: &str =
+    "policy_performance_common_support_cpcv_dsr_pbo_v2";
 
 /// One observation's terminal candidate vector. `None` is an explicit replay
 /// gap and excludes this observation from every candidate's common support.

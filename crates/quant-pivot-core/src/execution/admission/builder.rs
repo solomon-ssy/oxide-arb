@@ -20,7 +20,7 @@ use quant_pivot_models::{
         RecommendationInfo, RecommendationReportInfo, RuntimeConfigVersionInfo,
     },
     enums::{market::MarketStatus, quant::PublicationStatus},
-    types::{Bps, ClobMarketInfoVersion, Usd},
+    types::{ClobMarketInfoVersion, Usd},
 };
 use quant_pivot_repository::traits::{
     CapitalAllocationRepository, ClobMarketInfoRepository, EntryConditionRepository,
@@ -343,17 +343,11 @@ pub fn pit_fee_schedule(
         }
         .into());
     }
-    let details = market_info.fee_details;
-    Ok(PitFeeSchedule {
-        schedule_hash: market_info.payload_hash.clone(),
-        effective_at: market_info.effective_at,
-        available_at: market_info.available_at,
-        platform_rate: details.rate,
-        exponent: Decimal::from(details.exponent),
-        taker_only: details.taker_only,
-        builder_maker_fee_bps: Bps::new(Decimal::from(market_info.builder_maker_fee_rate_bps)),
-        builder_taker_fee_bps: Bps::new(Decimal::from(market_info.builder_taker_fee_rate_bps)),
-        builder_attributed: false,
+    PitFeeSchedule::from_market_fee_schedule(&market_info.fee_schedule()).map_err(|error| {
+        ExecutionError::IntentDenied {
+            reason: format!("market fee schedule is invalid: {error:?}"),
+        }
+        .into()
     })
 }
 

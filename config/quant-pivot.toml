@@ -434,7 +434,7 @@ batch_size = 5000
 max_concurrent_inserts = 8
 
 [db.clickhouse.raw_lifecycle]
-# Runtime v14 requires 90d fit + 7d lookback + 1d horizon + 2d embargo,
+# Runtime v15 requires 90d fit + 7d lookback + 1d horizon + 2d embargo,
 # doubled for reproducible refits. Raw deletion remains fail-closed by default.
 hot_days = 14
 retention_days = 200

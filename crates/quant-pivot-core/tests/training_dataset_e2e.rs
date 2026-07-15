@@ -1630,10 +1630,10 @@ async fn dataset_builder_rejects_future_features() {
                 db.clone(),
                 GammaConfig::default().catalog_visibility_guard_secs,
             )),
+            Arc::new(PgClobMarketInfoRepository::new(db.clone())),
         )),
     };
-    let err = svc
-        .build_with_pit_source(plan, &leaky)
+    let err = Box::pin(svc.build_with_pit_source(plan, &leaky))
         .await
         .expect_err("a future book must fail at the PIT resolver boundary");
 

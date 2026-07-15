@@ -16,6 +16,44 @@ use crate::{
 
 pub const POLICY_EVIDENCE_OBJECT_FORMAT_VERSION: u32 = 1;
 
+/// One monthly expanding-window Polymarket OOS fold for the parameter-free
+/// deadline-resolution and fitted DR-AS volatility benchmarks.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StructuralVolatilityOosFoldRow {
+    pub fold_index: u32,
+    pub training_window_start: DateTime<Utc>,
+    pub training_window_end: DateTime<Utc>,
+    pub test_window_start: DateTime<Utc>,
+    pub test_window_end: DateTime<Utc>,
+    pub training_sample_count: u64,
+    pub forecast_count: u64,
+    pub test_volume_weight: Usd,
+    pub fitted_nonnegative_k: Decimal,
+    pub deadline_vw_interval_score: Decimal,
+    pub dr_as_vw_interval_score: Decimal,
+    pub deadline_volume_weighted_coverage: Decimal,
+    pub dr_as_volume_weighted_coverage: Decimal,
+}
+
+/// Compact artifact-level identity and validity result for the structural
+/// volatility benchmark. This is risk-model evidence, never an entry policy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StructuralVolatilityOosEvidence {
+    pub methodology_hash: ContentHash,
+    pub active_update_only: bool,
+    pub activity_proxy: String,
+    pub minimum_contract_observations: u32,
+    pub fold_count: u32,
+    pub forecast_count: u64,
+    pub deadline_vw_interval_score: Decimal,
+    pub dr_as_vw_interval_score: Decimal,
+    pub deadline_volume_weighted_coverage: Decimal,
+    pub dr_as_volume_weighted_coverage: Decimal,
+    pub valid: bool,
+}
+
 /// Why one candidate replay cannot enter the common-support matrix.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

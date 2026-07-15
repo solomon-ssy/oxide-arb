@@ -10,7 +10,7 @@ use quant_pivot_models::{
 };
 use sea_orm::{
     ActiveValue::Set, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder,
-    sea_query::OnConflict,
+    QuerySelect, sea_query::OnConflict,
 };
 
 use crate::traits::ClobMarketInfoRepository;
@@ -124,6 +124,32 @@ impl ClobMarketInfoRepository for PgClobMarketInfoRepository {
             .map_err(StorageError::from)?
             .map(model_to_domain)
             .transpose()
+    }
+
+    async fn at_many(
+        &self,
+        market_ids: &[MarketId],
+        effective_at: DateTime<Utc>,
+        available_at_cutoff: DateTime<Utc>,
+    ) -> Result<Vec<ClobMarketInfoVersion>, StorageError> {
+        if market_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        clob_market_info_version::Entity::find()
+            .filter(clob_market_info_version::Column::MarketId.is_in(market_ids.iter().cloned()))
+            .filter(clob_market_info_version::Column::EffectiveAt.lte(effective_at))
+            .filter(clob_market_info_version::Column::AvailableAt.lte(available_at_cutoff))
+            .distinct_on([clob_market_info_version::Column::MarketId])
+            .order_by_asc(clob_market_info_version::Column::MarketId)
+            .order_by_desc(clob_market_info_version::Column::EffectiveAt)
+            .order_by_desc(clob_market_info_version::Column::AvailableAt)
+            .order_by_desc(clob_market_info_version::Column::PayloadHash)
+            .all(&self.db)
+            .await
+            .map_err(StorageError::from)?
+            .into_iter()
+            .map(model_to_domain)
+            .collect()
     }
 
     async fn window(

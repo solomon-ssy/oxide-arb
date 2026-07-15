@@ -16,15 +16,15 @@ use quant_pivot_models::{
     domain::{
         DecisionBoundary, DecisionSource,
         market::{
-            MarketFeeSchedule,
+            BuilderFeeAttribution, MarketFeeSchedule,
             book::BookSnapshot,
             registry::{EventRegistryInfo, MarketRegistryInfo, NegRiskLegSet},
         },
     },
     hashing::CanonicalDigest,
     types::{
-        CatalogSyncBatchId, EventCatalogVersionId, EventId, MarketCatalogVersionId, MarketId,
-        TokenId,
+        Bps, CatalogSyncBatchId, ClobMarketInfoVersionId, EventCatalogVersionId, EventId,
+        MarketCatalogVersionId, MarketId, TokenId,
     },
 };
 use quant_pivot_research::pit::{
@@ -88,12 +88,20 @@ impl InMemoryDecisionSnapshotSource {
                     market.market_id.clone(),
                     MarketFeeSchedule {
                         market_id: market.market_id.clone(),
-                        fees_enabled: false,
-                        fee_rate: Decimal::ZERO,
+                        market_info_version_id: ClobMarketInfoVersionId::from_v7(),
+                        market_info_payload_hash: CanonicalDigest::content_hash_json(&(
+                            "test_zero_fee",
+                            &market.market_id,
+                        ))
+                        .expect("test fee hash"),
+                        platform_rate: Decimal::ZERO,
                         exponent: Decimal::from(2),
                         taker_only: true,
-                        rebate_rate: None,
-                        observed_at: market.updated_at,
+                        builder_maker_fee_bps: Bps::ZERO,
+                        builder_taker_fee_bps: Bps::ZERO,
+                        builder_attribution: BuilderFeeAttribution::NoBuilderCode,
+                        effective_at: market.updated_at,
+                        available_at: market.updated_at,
                     },
                 );
             }

@@ -1056,8 +1056,11 @@ impl TrainingDatasetService {
         if sampled.is_empty() {
             return Ok(None);
         }
-        let pit =
-            DurablePitSource::new(Arc::clone(&self.fact_read), Arc::clone(&self.catalog_repo));
+        let pit = DurablePitSource::new(
+            Arc::clone(&self.fact_read),
+            Arc::clone(&self.catalog_repo),
+            Arc::clone(&self.clob_market_info_repo),
+        );
         let model_requirements = self
             .resolve_model_requirements(&request.model_spec_id)
             .await?;
@@ -3724,7 +3727,7 @@ mod pit_fee_tests {
         )
         .expect("PIT fee schedule");
 
-        assert_eq!(schedule.fee_rate, dec!(0.02));
-        assert_eq!(schedule.observed_at, cutoff);
+        assert_eq!(schedule.platform_rate, dec!(0.02));
+        assert_eq!(schedule.available_at, cutoff);
     }
 }

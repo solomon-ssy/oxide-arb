@@ -42,6 +42,15 @@ pub trait ClobMarketInfoRepository: Send + Sync {
         available_at_cutoff: chrono::DateTime<chrono::Utc>,
     ) -> Result<Option<ClobMarketInfoVersion>, StorageError>;
 
+    /// Resolve at most one latest PIT-visible revision per market in one
+    /// repository round trip. Implementations must return unique market ids.
+    async fn at_many(
+        &self,
+        market_ids: &[MarketId],
+        effective_at: chrono::DateTime<chrono::Utc>,
+        available_at_cutoff: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<ClobMarketInfoVersion>, StorageError>;
+
     async fn latest(
         &self,
         market_id: &MarketId,

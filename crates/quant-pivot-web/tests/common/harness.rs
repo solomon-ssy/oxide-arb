@@ -29,7 +29,8 @@ use quant_pivot_error::{
 use quant_pivot_models::{
     clickhouse::{
         BookL2CheckpointRow, BookMicrostructureRow, DomainObservationRow,
-        EntryConditionEvaluationEventRow, MarketResolutionRow, MidPriceBucketRow, TradeTapeRow,
+        EntryConditionEvaluationEventRow, MarketResolutionRow, MidPriceBucketRow,
+        ReportMarketFunnelCountRow, ReportMarketFunnelRow, TradeTapeRow,
     },
     config::{CacheConfig, DeployConfig, JwtConfig, RedisConfig},
     domain::{
@@ -79,7 +80,8 @@ use quant_pivot_models::{
         BacktestPathSetId, BacktestReportId, BasisAlertId, CalibrationArtifactId, ContentHash,
         DomainInstrumentKey, DomainSourceId, EntryConditionInstanceId, FactorDefinitionId,
         MarketId, MarketLinkageId, ModelComparisonReportId, ModelSpecId, ModelVersionId,
-        ResearchJobId, RuntimeConfigVersionId, SchemaVersion, TokenId, TrainingDatasetId,
+        RecommendationReportId, ResearchJobId, RuntimeConfigVersionId, SchemaVersion, TokenId,
+        TrainingDatasetId,
     },
 };
 use quant_pivot_repository::{
@@ -111,7 +113,10 @@ use quant_pivot_web::{
 use rust_decimal::Decimal;
 use sea_orm::{DatabaseConnection, EntityTrait, QueryOrder};
 use serde_json::Value;
-use std::{collections::HashSet, sync::Mutex};
+use std::{
+    collections::{BTreeMap, HashSet},
+    sync::Mutex,
+};
 use testcontainers::ContainerAsync;
 use testcontainers_modules::{postgres::Postgres, redis::Redis};
 use tokio_util::sync::CancellationToken;
@@ -171,7 +176,7 @@ fn web_harness_app_state(input: WebHarnessAppStateInput<'_>) -> AppState {
         data_quality: Arc::clone(&input.data_quality) as Arc<dyn DataQualityPort>,
         events: input.events,
         markets: Arc::clone(&input.repos.markets),
-        quant_facts: Arc::new(MockQuantFactRead::default()),
+        quant_facts: Arc::clone(&input.core_report.quant_facts) as Arc<dyn QuantFactReadRepository>,
         ws_sessions: input.ws_sessions,
         metrics: Arc::new(MockMetricsScrape),
         readiness: Arc::new(PgRedisReadiness::new(
@@ -228,6 +233,8 @@ pub struct TestEnv {
     pub model_artifact_store: Arc<dyn ArtifactStore>,
     /// Active runtime configuration read by the real order-intent service.
     pub order_intent_runtime_config: Arc<RuntimeConfigStore>,
+    /// Mutable report-funnel facts shared by the real report port and web state.
+    pub quant_facts: Arc<MockQuantFactRead>,
     core_report: CoreReportTestHandle,
     /// Ad-hoc enqueue capture from [`FakeReportScheduleRunner`].
     pub ad_hoc_enqueued: Arc<Mutex<Vec<AdHocReportRequest>>>,
@@ -305,6 +312,7 @@ impl TestEnv {
             db,
             model_artifact_store,
             order_intent_runtime_config,
+            quant_facts: Arc::clone(&core_report.quant_facts),
             ad_hoc_enqueued: Arc::clone(&core_report.enqueued),
             core_report,
             pg_container,
@@ -449,29 +457,105 @@ impl MetricsScrapePort for MockMetricsScrape {
 /// ClickHouse-backed series are covered by repository integration tests.
 #[derive(Default)]
 pub struct MockQuantFactRead {
-    evaluation_db: Option<DatabaseConnection>,
+    evaluation_db: Mutex<Option<DatabaseConnection>>,
+    report_funnel_rows: Mutex<Vec<ReportMarketFunnelRow>>,
 }
 
 impl MockQuantFactRead {
-    pub const fn with_evaluation_outbox(db: DatabaseConnection) -> Self {
-        Self {
-            evaluation_db: Some(db),
-        }
+    pub fn set_evaluation_outbox(&self, db: DatabaseConnection) {
+        *self.evaluation_db.lock().expect("evaluation DB lock") = Some(db);
+    }
+
+    pub fn replace_report_funnel(&self, rows: Vec<ReportMarketFunnelRow>) {
+        *self.report_funnel_rows.lock().expect("report funnel lock") = rows;
     }
 }
 
 #[async_trait]
 impl QuantFactReadRepository for MockQuantFactRead {
+    async fn report_market_funnel_counts(
+        &self,
+        report_id: &RecommendationReportId,
+    ) -> Result<Vec<ReportMarketFunnelCountRow>, StorageError> {
+        let rows = self.report_funnel_rows.lock().expect("report funnel lock");
+        let mut counts = BTreeMap::<String, u64>::new();
+        for row in rows
+            .iter()
+            .filter(|row| row.recommendation_report_id == *report_id)
+        {
+            *counts.entry(row.terminal_stage.clone()).or_default() += 1;
+        }
+        drop(rows);
+        Ok(counts
+            .into_iter()
+            .map(|(terminal_stage, row_count)| ReportMarketFunnelCountRow {
+                terminal_stage,
+                row_count,
+            })
+            .collect())
+    }
+
+    async fn report_market_funnel_count(
+        &self,
+        report_id: &RecommendationReportId,
+        terminal_stage: Option<&str>,
+        primary_reason: Option<&str>,
+    ) -> Result<u64, StorageError> {
+        let rows = self.report_funnel_rows.lock().expect("report funnel lock");
+        Ok(rows
+            .iter()
+            .filter(|row| {
+                row.recommendation_report_id == *report_id
+                    && terminal_stage.is_none_or(|stage| row.terminal_stage == stage)
+                    && primary_reason.is_none_or(|reason| row.primary_reason == reason)
+            })
+            .count()
+            .try_into()
+            .unwrap_or(u64::MAX))
+    }
+
+    async fn report_market_funnel_page(
+        &self,
+        report_id: &RecommendationReportId,
+        terminal_stage: Option<&str>,
+        primary_reason: Option<&str>,
+        offset: u64,
+        limit: u64,
+    ) -> Result<Vec<ReportMarketFunnelRow>, StorageError> {
+        let mut filtered = {
+            let rows = self.report_funnel_rows.lock().expect("report funnel lock");
+            rows.iter()
+                .filter(|row| {
+                    row.recommendation_report_id == *report_id
+                        && terminal_stage.is_none_or(|stage| row.terminal_stage == stage)
+                        && primary_reason.is_none_or(|reason| row.primary_reason == reason)
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        filtered.sort_by(|left, right| left.market_id.cmp(&right.market_id));
+        Ok(filtered
+            .into_iter()
+            .skip(usize::try_from(offset).unwrap_or(usize::MAX))
+            .take(usize::try_from(limit).unwrap_or(usize::MAX))
+            .collect())
+    }
+
     async fn latest_applied_entry_condition_evaluation(
         &self,
         instance_id: &EntryConditionInstanceId,
     ) -> Result<Option<EntryConditionEvaluationEventRow>, StorageError> {
-        let Some(db) = &self.evaluation_db else {
+        let db = self
+            .evaluation_db
+            .lock()
+            .expect("evaluation DB lock")
+            .clone();
+        let Some(db) = db else {
             return Ok(None);
         };
         let rows = quant_entry_condition_evaluation_outbox::Entity::find()
             .order_by_desc(quant_entry_condition_evaluation_outbox::Column::CreatedAt)
-            .all(db)
+            .all(&db)
             .await
             .map_err(StorageError::from)?;
         Ok(rows.into_iter().map(|row| row.event_json).find(|event| {
@@ -778,6 +862,16 @@ impl TradePolicyPort for MockTradePolicyPort {
         _: &quant_pivot_models::types::TradePolicyArtifactId,
         _: quant_pivot_models::types::TradePolicyEvidenceObjectKind,
     ) -> QuantResult<Option<quant_pivot_models::domain::TradePolicyEvidenceDownloadView>> {
+        Ok(None)
+    }
+
+    async fn page_evidence_rows(
+        &self,
+        _: &quant_pivot_models::types::TradePolicyArtifactId,
+        _: quant_pivot_models::types::TradePolicyEvidenceObjectKind,
+        _: quant_pivot_models::domain::TradePolicyEvidenceRowListQuery,
+    ) -> QuantResult<Option<Paginated<quant_pivot_models::domain::TradePolicyEvidenceRowView>>>
+    {
         Ok(None)
     }
 

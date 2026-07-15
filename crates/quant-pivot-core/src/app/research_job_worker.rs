@@ -339,6 +339,7 @@ impl AppContext {
             serving_evidence,
             fact_read: Arc::clone(&self.research.quant_fact_read),
             catalog: Arc::clone(&self.research.catalog_version_repo),
+            clob_market_info: Arc::clone(&self.research.clob_market_info_repo),
             linkages: Arc::clone(&self.research.market_linkage_repo),
             calibration_artifacts: Arc::clone(&bias_table_repo),
             runtime_factory: Arc::clone(&self.research.model_runtime_factory_builder),

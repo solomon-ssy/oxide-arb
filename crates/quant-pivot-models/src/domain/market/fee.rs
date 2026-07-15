@@ -1,44 +1,35 @@
-//! Polymarket fee schedule and quote domain types.
+//! Canonical point-in-time Polymarket execution-fee schedule.
 
-use crate::{
-    enums::{common::Side, fee::FeeLiquidityRole},
-    types::{MarketId, Price, Shares, TokenId, Usd},
-};
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 
-pub use quant_pivot_error::fee::FeeQuoteError;
+use crate::types::{Bps, ClobMarketInfoVersionId, ContentHash, MarketId};
 
-/// Fee schedule observed for a Polymarket market.
+/// Exact order-route attribution used when calculating builder fees.
+///
+/// Phase 11.7.2 deliberately supports only unattributed venue orders. Builder
+/// rates remain part of the venue fact so a later builder-enabled artifact must
+/// introduce a new route contract instead of silently changing historical `PnL`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BuilderFeeAttribution {
+    NoBuilderCode,
+}
+
+/// Complete append-only fee fact resolved from one CLOB market-info revision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MarketFeeSchedule {
     pub market_id: MarketId,
-    pub fees_enabled: bool,
-    pub fee_rate: Decimal,
+    pub market_info_version_id: ClobMarketInfoVersionId,
+    pub market_info_payload_hash: ContentHash,
+    pub platform_rate: Decimal,
     pub exponent: Decimal,
     pub taker_only: bool,
-    pub rebate_rate: Option<Decimal>,
-    pub observed_at: DateTime<Utc>,
-}
-
-/// Input for a Polymarket fee quote request.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FeeQuoteInput {
-    pub market_id: MarketId,
-    pub token_id: TokenId,
-    pub side: Side,
-    pub liquidity_role: FeeLiquidityRole,
-    pub shares: Shares,
-    pub price: Price,
-}
-
-/// Fee quote returned by the Polymarket fee estimator.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FeeQuote {
-    pub fee_usd: Usd,
-    pub schedule: Arc<MarketFeeSchedule>,
-    pub formula_version: &'static str,
-    pub rounded_scale: u32,
+    pub builder_maker_fee_bps: Bps,
+    pub builder_taker_fee_bps: Bps,
+    pub builder_attribution: BuilderFeeAttribution,
+    pub effective_at: DateTime<Utc>,
+    pub available_at: DateTime<Utc>,
 }

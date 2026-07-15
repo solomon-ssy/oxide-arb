@@ -761,16 +761,19 @@ async fn position_upsert_weighted_average_cost() {
     let position_repo = PgPositionRepository::new(db.clone());
 
     // Two fills of the *same* entry intent merge into one lot (weighted average).
-    let first = position_fill(&ids, &intent_id);
-    position_repo
+    let mut first = position_fill(&ids, &intent_id);
+    first.cost_usd = Usd::new(dec!(60.25));
+    let first_position = position_repo
         .apply_fill(first.clone())
         .await
         .expect("first fill");
+    assert_eq!(first_position.avg_price, Price::new(dec!(0.6025)));
+    assert_eq!(first_position.cost_usd, Usd::new(dec!(60.25)));
 
     let second = PositionFill {
         shares: Shares::new(dec!(50)),
         price: Price::new(dec!(0.8)),
-        cost_usd: Usd::new(dec!(40)),
+        cost_usd: Usd::new(dec!(40.10)),
         ..first
     };
     position_repo.apply_fill(second).await.expect("second fill");
@@ -781,8 +784,8 @@ async fn position_upsert_weighted_average_cost() {
         .expect("position")
         .expect("row");
     assert_eq!(position.shares, Shares::new(dec!(150)));
-    // (60 + 40) / 150 = 0.666...
-    assert_eq!(position.cost_usd, Usd::new(dec!(100)));
+    // Fee-inclusive average cost: (60.25 + 40.10) / 150 = 0.669.
+    assert_eq!(position.cost_usd, Usd::new(dec!(100.35)));
     // avg_price is cost / shares; Postgres NUMERIC round-trip can widen precision.
     let implied_cost = position.avg_price.inner() * position.shares.inner();
     let drift = (implied_cost - position.cost_usd.inner()).abs();

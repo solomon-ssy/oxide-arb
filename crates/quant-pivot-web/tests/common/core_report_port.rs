@@ -97,6 +97,7 @@ pub struct CoreReportTestHandle {
     pub port: Arc<CoreQuantReportPort>,
     pub enqueued: Arc<Mutex<Vec<AdHocReportRequest>>>,
     pub fixture_ctx: FixtureReportSeedContext,
+    pub quant_facts: Arc<crate::harness::MockQuantFactRead>,
 }
 
 /// Bootstrap the report plane against Postgres and assemble [`CoreQuantReportPort`].
@@ -108,6 +109,7 @@ pub async fn build_core_report_stack(
 
     let enqueued = Arc::new(Mutex::new(Vec::new()));
     let scheduler = Arc::new(FakeReportScheduleRunner::new(Arc::clone(&enqueued)));
+    let quant_facts = Arc::new(crate::harness::MockQuantFactRead::default());
 
     let report_repo = Arc::clone(&harness.report_repo) as Arc<dyn RecommendationReportRepository>;
     let recommendation_repo =
@@ -125,8 +127,7 @@ pub async fn build_core_report_stack(
         feature_repo: Arc::new(PgFeatureRepository::new(db.clone())) as Arc<dyn FeatureRepository>,
         runtime_config_repo: Arc::new(PgRuntimeConfigVersionRepository::new(db.clone()))
             as Arc<dyn RuntimeConfigVersionRepository>,
-        quant_fact_read: Arc::new(crate::harness::MockQuantFactRead::default())
-            as Arc<dyn QuantFactReadRepository>,
+        quant_fact_read: Arc::clone(&quant_facts) as Arc<dyn QuantFactReadRepository>,
     }));
 
     CoreReportTestHandle {
@@ -136,5 +137,6 @@ pub async fn build_core_report_stack(
             runtime_config_version_id: harness.runtime_config_version_id,
             model_version_id: harness.model_version_id,
         },
+        quant_facts,
     }
 }

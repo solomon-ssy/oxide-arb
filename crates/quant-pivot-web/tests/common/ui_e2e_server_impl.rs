@@ -18,22 +18,28 @@ use quant_pivot_core::{
 };
 use quant_pivot_error::{QuantError, QuantResult, control::ControlError, storage::StorageError};
 use quant_pivot_models::{
+    clickhouse::ReportMarketFunnelRow,
     domain::{
-        ApplyEntryConditionEvaluation, BacktestPathSetInfo, BacktestPathSetListQuery,
-        BacktestReportInfo, BacktestReportListQuery, BookLevel, CompleteTrainingDatasetBuild,
-        EntryConditionArtifactInfo, EntryConditionInstanceInfo, FactorCollinearitySource,
-        FactorCollinearityView, FactorDefinitionInfo, FactorDefinitionListQuery,
-        FailTradePolicyValidation, JobProgressSink, MarketDataPort, ModelComparisonReportInfo,
+        AcknowledgeFeatureParityLatchRequest, ApplyEntryConditionEvaluation, BacktestPathSetInfo,
+        BacktestPathSetListQuery, BacktestReportInfo, BacktestReportListQuery, BookLevel,
+        CompleteTrainingDatasetBuild, EntryConditionArtifactInfo, EntryConditionInstanceInfo,
+        FactorCollinearitySource, FactorCollinearityView, FactorDefinitionInfo,
+        FactorDefinitionListQuery, FailTradePolicyValidation, FeatureIntegrityActionContext,
+        FeatureIntegrityLatchView, FeatureIntegrityPort, FeatureIntegritySummaryView,
+        FeatureParityEventListQuery, FeatureParityEventView, FeatureParityRunListQuery,
+        FeatureParityRunView, JobProgressSink, MarketDataPort, ModelComparisonReportInfo,
         ModelPublishedCatalogQuery, ModelSpecInfo, ModelSpecListQuery, ModelTrainingPort,
         ModelVersionInfo, ModelVersionListQuery, NewTradePolicyValidationRow,
         NewTradePolicyValidationRun, NewTrainingDatasetPlan, Paginated, PublishedModelOptionView,
-        RecommendationInfo, ResearchCatalogPort, TradePolicyArtifactInfo,
-        TradePolicyAuditListQuery, TradePolicyEvidenceDownloadView, TradePolicyFitPreflightRequest,
-        TradePolicyFitPreflightView, TradePolicyFitReadiness, TradePolicyGovernanceAuditInfo,
-        TradePolicyListQuery, TradePolicyPort, TradePolicyPreflightBlockerKind,
-        TradePolicyPreflightBlockerView, TradePolicyPreflightCheckStatus,
-        TradePolicySourceSliceObjectListQuery, TradePolicySourceSliceObjectView,
-        TradePolicySourceSliceView, TradePolicyValidationListQuery, TradePolicyValidationRowInfo,
+        RecommendationInfo, RecommendationReportInfo, ResearchCatalogPort, ResearchJobView,
+        RunFullFeatureParityRequest, TradePolicyArtifactInfo, TradePolicyAuditListQuery,
+        TradePolicyEvidenceDownloadView, TradePolicyEvidenceRowListQuery,
+        TradePolicyEvidenceRowView, TradePolicyFitPreflightRequest, TradePolicyFitPreflightView,
+        TradePolicyFitReadiness, TradePolicyGovernanceAuditInfo, TradePolicyListQuery,
+        TradePolicyPort, TradePolicyPreflightBlockerKind, TradePolicyPreflightBlockerView,
+        TradePolicyPreflightCheckStatus, TradePolicySourceSliceObjectListQuery,
+        TradePolicySourceSliceObjectView, TradePolicySourceSliceView,
+        TradePolicyValidationListQuery, TradePolicyValidationRowInfo,
         TradePolicyValidationRowListQuery, TradePolicyValidationRunInfo, TrainModelRequest,
         TrainedModelView, TrainingDatasetInfo, TrainingDatasetListQuery, empty_catalog_page,
     },
@@ -42,14 +48,17 @@ use quant_pivot_models::{
         DatasetPurpose, EntryConditionState, TradePolicyGovernanceAction, TradePolicyStatus,
         TradePolicyValidationStatus, TrainingDatasetStatus,
     },
+    hashing::CanonicalDigest,
     runtime_config::{DecimalString, RuntimeConfig},
     types::{
         ArtifactUri, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION, DatasetCoverage,
-        DatasetManifest, FactorDefinitionId, ModelVersionId, OrderIntentId, Price,
-        RecommendationId, RecommendationTradePlan, Shares, SourceSliceManifestRef,
-        SourceSliceObjectKind, TokenId, TradePlanBlocker, TradePolicyArtifactId,
-        TradePolicyEvidenceObjectKind, TradePolicyGovernanceAuditId, TradePolicyValidationRunId,
-        TrainingExampleId, TrainingHorizonsSecs, TrainingSampleSources, default_sample_sources,
+        DatasetManifest, EventId, FactorDefinitionId, FeatureVectorId, MarketId, MarketSelectionId,
+        ModelVersionId, OrderIntentId, Price, RecommendationId, RecommendationReportId,
+        RecommendationTradePlan, ReportFunnelReason, ReportFunnelStage, ResearchProfileRef, Shares,
+        SignalCandidateId, SourceSliceManifestRef, SourceSliceObjectKind, TokenId,
+        TradePlanBlocker, TradePolicyArtifactId, TradePolicyEvidenceObjectKind,
+        TradePolicyGovernanceAuditId, TradePolicyValidationRunId, TrainingExampleId,
+        TrainingHorizonsSecs, TrainingSampleSources, default_sample_sources,
     },
 };
 use quant_pivot_repository::{
@@ -84,6 +93,51 @@ const LISTEN_PORT: u16 = 8088;
 
 struct E2eTradePolicyPort {
     policies: PgTradePolicyRepository,
+}
+
+struct E2eFeatureIntegrityPort;
+
+#[async_trait]
+impl FeatureIntegrityPort for E2eFeatureIntegrityPort {
+    async fn summary(&self) -> QuantResult<FeatureIntegritySummaryView> {
+        Err(QuantError::NotImplemented(
+            "UI E2E feature integrity summary".into(),
+        ))
+    }
+
+    async fn list_runs(
+        &self,
+        query: FeatureParityRunListQuery,
+    ) -> QuantResult<Paginated<FeatureParityRunView>> {
+        Ok(Paginated::empty_for(&query))
+    }
+
+    async fn list_events(
+        &self,
+        query: FeatureParityEventListQuery,
+    ) -> QuantResult<Paginated<FeatureParityEventView>> {
+        Ok(Paginated::empty_for(&query))
+    }
+
+    async fn request_full_run(
+        &self,
+        _request: RunFullFeatureParityRequest,
+        _ctx: FeatureIntegrityActionContext,
+    ) -> QuantResult<ResearchJobView> {
+        Err(QuantError::NotImplemented(
+            "UI E2E feature parity full run".into(),
+        ))
+    }
+
+    async fn acknowledge_latch(
+        &self,
+        _request: AcknowledgeFeatureParityLatchRequest,
+        _ctx: FeatureIntegrityActionContext,
+    ) -> QuantResult<FeatureIntegrityLatchView> {
+        Err(QuantError::NotImplemented(
+            "UI E2E feature parity acknowledge".into(),
+        ))
+    }
 }
 
 impl E2eTradePolicyPort {
@@ -184,6 +238,7 @@ impl TradePolicyPort for E2eTradePolicyPort {
             retention_runway_days: None,
             retention_runway_proven: fail,
             contract_valid: pass,
+            profile_fitter_available: pass,
             source_dataset_ready: pass,
             source_dataset_policy_fit: pass,
             raw_trajectory_labels_present: pass,
@@ -389,6 +444,38 @@ impl TradePolicyPort for E2eTradePolicyPort {
                 signature.as_str(),
             ),
         }))
+    }
+
+    async fn page_evidence_rows(
+        &self,
+        artifact_id: &TradePolicyArtifactId,
+        kind: TradePolicyEvidenceObjectKind,
+        query: TradePolicyEvidenceRowListQuery,
+    ) -> QuantResult<Option<Paginated<TradePolicyEvidenceRowView>>> {
+        if self.find(artifact_id).await?.is_none() {
+            return Ok(None);
+        }
+        let payload = serde_json::json!({
+            "candidate_id": "weather-balanced",
+            "diagnostic": "verified UI E2E evidence row",
+            "sample_count": 128,
+        });
+        let row_hash = ResearchHasher::canonical(&(
+            "ui_e2e_policy_evidence_row_v1",
+            artifact_id,
+            kind,
+            &payload,
+        ))?;
+        let rows = vec![TradePolicyEvidenceRowView {
+            kind,
+            record_key: format!("{kind:?}/000001"),
+            event_at: Some(Utc::now()),
+            payload,
+            row_hash,
+        }];
+        let page = query.page.normalized();
+        let items = if page.page == 1 { rows } else { Vec::new() };
+        Ok(Some(Paginated::new(items, 1, page.page, page.size)))
     }
 
     async fn page(
@@ -673,12 +760,82 @@ struct E2eFixtures {
     fixture_format_version: u32,
     unavailable_recommendation_id: RecommendationId,
     frozen_recommendation_id: RecommendationId,
+    report_id: quant_pivot_models::types::RecommendationReportId,
     pending_intent_id: OrderIntentId,
     waiting_intent_id: OrderIntentId,
     position_id: quant_pivot_models::types::PositionId,
     model_version_id: quant_pivot_models::types::ModelVersionId,
     trade_policy_artifact_id: TradePolicyArtifactId,
     trade_policy_content_hash: ContentHash,
+}
+
+#[derive(Serialize)]
+struct E2eFunnelRowHashInput<'a> {
+    report_id: &'a RecommendationReportId,
+    market_selection_id: &'a MarketSelectionId,
+    profile_ref: &'a ResearchProfileRef,
+    market_id: &'a MarketId,
+    event_id: &'a EventId,
+    token_id: &'a TokenId,
+    terminal_stage: ReportFunnelStage,
+    primary_reason: ReportFunnelReason,
+    secondary_diagnostics_json: &'a str,
+    feature_vector_id: Option<&'a FeatureVectorId>,
+    signal_candidate_id: Option<&'a SignalCandidateId>,
+    recommendation_id: Option<&'a RecommendationId>,
+}
+
+fn e2e_published_funnel_row(
+    report: &RecommendationReportInfo,
+    recommendation: &RecommendationInfo,
+) -> ReportMarketFunnelRow {
+    assert_eq!(report.profile_ref, recommendation.profile_ref);
+    assert_eq!(
+        report.model_run_id.as_ref(),
+        Some(&recommendation.evidence_refs.model_run_id)
+    );
+    let terminal_stage = ReportFunnelStage::Published;
+    let primary_reason = ReportFunnelReason::Published;
+    let secondary_diagnostics_json =
+        serde_json::json!({"fixture": "verified protected UI E2E funnel"}).to_string();
+    let hash_input = E2eFunnelRowHashInput {
+        report_id: &report.recommendation_report_id,
+        market_selection_id: &report.market_selection_id,
+        profile_ref: &report.profile_ref,
+        market_id: &recommendation.market_id,
+        event_id: &recommendation.event_id,
+        token_id: &recommendation.token_id,
+        terminal_stage,
+        primary_reason,
+        secondary_diagnostics_json: &secondary_diagnostics_json,
+        feature_vector_id: Some(&recommendation.evidence_refs.feature_vector_id),
+        signal_candidate_id: Some(&recommendation.evidence_refs.signal_candidate_id),
+        recommendation_id: Some(&recommendation.recommendation_id),
+    };
+    let row_hash =
+        CanonicalDigest::content_hash_json(&hash_input).expect("hash E2E funnel decision row");
+    ReportMarketFunnelRow {
+        event_time: report.decision_at.timestamp_millis(),
+        recommendation_report_id: report.recommendation_report_id.clone(),
+        market_selection_id: report.market_selection_id.clone(),
+        profile_id: report.profile_ref.id.clone(),
+        profile_version: report.profile_ref.version,
+        profile_content_hash: report.profile_ref.content_hash.to_string(),
+        runtime_config_version_id: report.runtime_config_version_id.clone(),
+        model_version_id: report.model_version_id.clone(),
+        model_run_id: report.model_run_id.clone(),
+        market_id: recommendation.market_id.clone(),
+        event_id: recommendation.event_id.clone(),
+        token_id: recommendation.token_id.clone(),
+        terminal_stage: terminal_stage.as_str().to_owned(),
+        primary_reason: primary_reason.as_str().to_owned(),
+        secondary_diagnostics_json,
+        feature_vector_id: Some(recommendation.evidence_refs.feature_vector_id.clone()),
+        signal_candidate_id: Some(recommendation.evidence_refs.signal_candidate_id.clone()),
+        recommendation_id: Some(recommendation.recommendation_id.clone()),
+        row_hash: row_hash.to_string(),
+        ingestion_time: report.decision_at.timestamp_millis(),
+    }
 }
 
 struct E2eControlState {
@@ -1193,6 +1350,7 @@ async fn prepare_e2e_fixtures(
     db: &DatabaseConnection,
     books: &BookStore,
     model_artifact_store: &Arc<dyn ArtifactStore>,
+    quant_facts: &harness::MockQuantFactRead,
 ) -> E2eFixtures {
     let summary = seed_ui_demo_pg(
         db,
@@ -1200,7 +1358,6 @@ async fn prepare_e2e_fixtures(
         model_artifact_store,
     )
     .await;
-    verify_seeded_report_fact_deliveries(db).await;
     let unavailable_recommendation_id = summary
         .actionable_recommendation_id
         .clone()
@@ -1274,10 +1431,19 @@ async fn prepare_e2e_fixtures(
     )
     .await;
 
+    let report = PgRecommendationReportRepository::new(db.clone())
+        .find_by_id(&frozen_record.report_id)
+        .await
+        .expect("load E2E funnel report")
+        .expect("E2E funnel report");
+    quant_facts.replace_report_funnel(vec![e2e_published_funnel_row(&report, &frozen)]);
+    verify_seeded_report_fact_deliveries(db).await;
+
     E2eFixtures {
         fixture_format_version: 1,
         unavailable_recommendation_id,
         frozen_recommendation_id: frozen_record.recommendation_id.clone(),
+        report_id: frozen_record.report_id.clone(),
         pending_intent_id,
         waiting_intent_id,
         position_id,
@@ -1288,9 +1454,10 @@ async fn prepare_e2e_fixtures(
 }
 
 async fn verify_seeded_report_fact_deliveries(db: &DatabaseConnection) {
-    // `seed_ui_demo_pg` has already written the matching ClickHouse facts. Move
-    // every seeded bundle through the same repository CAS used by the delivery
-    // worker so governed execution sees only explicitly verified reports.
+    // The E2E harness installs hash-valid in-memory funnel facts above. Move
+    // seeded bundles through the repository CAS so protected routes exercise
+    // the same verified-report visibility rule without a second ClickHouse
+    // container in this web-layer suite.
     let reports = PgRecommendationReportRepository::new(db.clone());
     let worker_id = Uuid::now_v7();
     loop {
@@ -1317,7 +1484,8 @@ async fn serve_protected_ui_e2e() {
         .try_init();
     let mut env = harness::TestEnv::start_with_core_report_port().await;
     let books = Arc::new(BookStore::new(Arc::new(MetricsHub::new())));
-    let fixtures = prepare_e2e_fixtures(&env.db, &books, &env.model_artifact_store).await;
+    let fixtures =
+        prepare_e2e_fixtures(&env.db, &books, &env.model_artifact_store, &env.quant_facts).await;
     let mut runtime_config = RuntimeConfig::default();
     runtime_config.execution.semi_auto.canary.enabled = true;
     runtime_config.execution.semi_auto.canary.policy_artifact_id =
@@ -1344,9 +1512,8 @@ async fn serve_protected_ui_e2e() {
     env.state.market_data = Arc::new(E2eMarketData {
         books: Arc::clone(&books),
     });
-    env.state.quant_facts = Arc::new(harness::MockQuantFactRead::with_evaluation_outbox(
-        env.db.clone(),
-    ));
+    env.quant_facts.set_evaluation_outbox(env.db.clone());
+    env.state.feature_integrity = Arc::new(E2eFeatureIntegrityPort);
     env.state.trade_policies = Arc::new(E2eTradePolicyPort::new(env.db.clone()));
     env.state.research_catalog = Arc::new(E2eResearchCatalogPort::new(env.db.clone()));
     env.state.model_training = Arc::new(E2eModelTrainingPort::new(env.db.clone()));

@@ -7,7 +7,7 @@ expression: empty_report()
   "profile_ref": {
     "id": "weather_forecast_24h",
     "version": 1,
-    "content_hash": "blake3:83126ef2768a070066cd8c022d6902f9bfab0c69c0316402531237bb95b2916d"
+    "content_hash": "blake3:a6f9e3ab46e5e9e4cd8d10bbc6ebf2755d5488baac2565c0ad0c91482e3baf8f"
   },
   "report_kind": "top_n",
   "trigger_kind": "scheduled",

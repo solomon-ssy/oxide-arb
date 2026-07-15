@@ -5,6 +5,7 @@ use quant_pivot_models::{
     domain::{
         FitTradePolicyRequest, JobSubmitContext, Paginated, ResearchJobView,
         TradePolicyAuditListQuery, TradePolicyDetailView, TradePolicyEvidenceDownloadView,
+        TradePolicyEvidenceRowListQuery, TradePolicyEvidenceRowView,
         TradePolicyFitPreflightRequest, TradePolicyFitPreflightView,
         TradePolicyGovernanceAuditView, TradePolicyGovernanceRequest, TradePolicyListQuery,
         TradePolicyPreflightCheckStatus, TradePolicySourceSliceObjectListQuery,
@@ -102,6 +103,12 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
             "/research/trade-policies/{id}/source-slice/objects",
             Rule::ResourceOp(ResourceType::Materialization, Operation::Read),
             source_slice_objects,
+        ),
+        spec(
+            Method::GET,
+            "/research/trade-policies/{id}/evidence/{kind}",
+            Rule::ResourceOp(ResourceType::Materialization, Operation::Read),
+            evidence_rows,
         ),
         spec(
             Method::GET,
@@ -290,6 +297,20 @@ pub async fn evidence_download(
         .await?
         .ok_or_else(|| WebError::NotFound(format!("trade policy not found: {artifact_id}")))?;
     Ok(WebResponse::ok(view))
+}
+
+pub async fn evidence_rows(
+    state: web::Data<AppState>,
+    path: web::Path<(TradePolicyArtifactId, TradePolicyEvidenceObjectKind)>,
+    query: web::Query<TradePolicyEvidenceRowListQuery>,
+) -> Result<WebResponse<Paginated<TradePolicyEvidenceRowView>>, WebError> {
+    let (artifact_id, kind) = path.into_inner();
+    let page = state
+        .trade_policies
+        .page_evidence_rows(&artifact_id, kind, query.into_inner())
+        .await?
+        .ok_or_else(|| WebError::NotFound(format!("trade policy not found: {artifact_id}")))?;
+    Ok(WebResponse::ok(page))
 }
 
 pub async fn preflight(

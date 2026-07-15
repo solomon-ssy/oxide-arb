@@ -23,7 +23,7 @@ use quant_pivot_models::{
         },
         rbac::ResourceType,
     },
-    hashing::{CanonicalDigest, canonical_state_hash},
+    hashing::canonical_state_hash,
     runtime_config::RuntimeConfig,
     types::{
         Bps, ClockAnchor, ClockCondition, ConditionTruth, ConfidenceSummary, ConfirmationPolicy,
@@ -627,23 +627,8 @@ fn executable_entry_fill(
         .fee_schedule
         .as_ref()
         .ok_or_else(|| vec![TradePlanBlocker::FeeScheduleUnavailable])?;
-    let schedule_hash = CanonicalDigest::content_hash_json(fee)
+    let schedule = PitFeeSchedule::from_market_fee_schedule(fee)
         .map_err(|_| vec![TradePlanBlocker::FeeScheduleUnavailable])?;
-    let schedule = PitFeeSchedule {
-        schedule_hash,
-        effective_at: capture.market.effective_at,
-        available_at: capture.market.available_at,
-        platform_rate: if fee.fees_enabled {
-            fee.fee_rate
-        } else {
-            Decimal::ZERO
-        },
-        exponent: fee.exponent,
-        taker_only: fee.taker_only,
-        builder_maker_fee_bps: Bps::ZERO,
-        builder_taker_fee_bps: Bps::ZERO,
-        builder_attributed: false,
-    };
     let fill = walk_buy_cash_budget(
         &capture.book.asks,
         target,

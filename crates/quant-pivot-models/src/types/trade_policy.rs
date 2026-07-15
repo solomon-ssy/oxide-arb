@@ -23,14 +23,14 @@ use crate::{
         ENTRY_CONDITION_MAX_GROUP_CHILDREN, ENTRY_CONDITION_MAX_NODES,
         ENTRY_CONDITION_MIN_GROUP_CHILDREN, FactorDefinitionId, FactorMeasure, ModelVersionId,
         OpportunisticExitPolicy, Price, ResearchEvaluationTrack, ResearchJobId, ResearchProfileRef,
-        RuntimeConfigVersionId, TradePolicyArtifactId, TrainingDatasetId, Usd,
-        resolve_builtin_research_profile,
+        RuntimeConfigVersionId, StructuralVolatilityOosEvidence, TradePolicyArtifactId,
+        TrainingDatasetId, Usd, resolve_builtin_research_profile,
     },
 };
 
 /// Breaking wire version for the standalone policy artifact family.
-pub const TRADE_POLICY_ARTIFACT_FORMAT_VERSION: u32 = 5;
-pub const TRADE_POLICY_EVIDENCE_BUNDLE_FORMAT_VERSION: u32 = 2;
+pub const TRADE_POLICY_ARTIFACT_FORMAT_VERSION: u32 = 6;
+pub const TRADE_POLICY_EVIDENCE_BUNDLE_FORMAT_VERSION: u32 = 3;
 pub const TRADE_POLICY_MAX_CANDIDATES: usize = 32;
 
 /// Immutable statistical and execution-quality thresholds used for publication.
@@ -631,10 +631,12 @@ pub enum TradePolicyEvidenceObjectKind {
     CpcvPaths,
     CoverageGaps,
     StatisticalSummaries,
+    VerticalGates,
+    StructuralVolatilityOos,
 }
 
 impl TradePolicyEvidenceObjectKind {
-    pub const REQUIRED: [Self; 7] = [
+    pub const REQUIRED: [Self; 9] = [
         Self::ObservationEligibility,
         Self::Fills,
         Self::CandidateTrials,
@@ -642,6 +644,8 @@ impl TradePolicyEvidenceObjectKind {
         Self::CpcvPaths,
         Self::CoverageGaps,
         Self::StatisticalSummaries,
+        Self::VerticalGates,
+        Self::StructuralVolatilityOos,
     ];
 }
 
@@ -786,6 +790,7 @@ pub enum TradePolicyPublicationBlocker {
     MissingFeeModel,
     MissingEvidenceBundle,
     EvidenceBundleIdentityMismatch,
+    InvalidStructuralVolatilityOos,
     MissingTrialLedger,
     MissingCpcvPathCount,
     InsufficientCpcvPaths,
@@ -957,6 +962,7 @@ fn validate_exit_template(exit: &TradePolicyExitTemplate) -> Result<(), String> 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VerticalActivationTarget {
+    ResearchOnly,
     SemiAuto,
     AutoExecution,
 }
@@ -1017,6 +1023,7 @@ impl VerticalGateEvidence {
         }
         let live_days = (self.evidence_window_end - self.evidence_window_start).num_days();
         match (self.gate, target) {
+            (_, VerticalActivationTarget::ResearchOnly) => false,
             (VerticalGateKind::CryptoChainlinkResolution, VerticalActivationTarget::SemiAuto) => {
                 live_days >= 14
                     && self.sample_count >= 2_000
@@ -1061,6 +1068,7 @@ impl VerticalGateEvidence {
                         .target_subject_wilson_lower_bound
                         .is_some_and(|bound| bound >= Decimal::new(9, 1))
                     && self.availability >= Decimal::new(99, 2)
+                    && self.gaps_recovered
             }
             (VerticalGateKind::WeatherNoaaProxy, VerticalActivationTarget::AutoExecution) => {
                 self.sample_count >= 2_000
@@ -1074,6 +1082,7 @@ impl VerticalGateEvidence {
                         .target_subject_wilson_lower_bound
                         .is_some_and(|bound| bound >= Decimal::new(95, 2))
                     && self.availability >= Decimal::new(995, 3)
+                    && self.gaps_recovered
             }
         }
     }
@@ -1101,6 +1110,7 @@ pub struct TradePolicyArtifactPayload {
     pub candidates: Vec<TradePolicyCandidateSpec>,
     pub evidence_bundle: Option<TradePolicyEvidenceBundleRef>,
     pub vertical_gate_evidence: Vec<VerticalGateEvidence>,
+    pub structural_volatility_oos: StructuralVolatilityOosEvidence,
     pub cohorts: Vec<TradePolicyCohort>,
     pub validation: TradePolicyValidationEvidence,
 }
@@ -1205,6 +1215,9 @@ impl TradePolicyArtifactPayload {
         if self.execution_evidence.fee_model_hash.is_none() {
             blockers.push(TradePolicyPublicationBlocker::MissingFeeModel);
         }
+        if !self.structural_volatility_oos.valid {
+            blockers.push(TradePolicyPublicationBlocker::InvalidStructuralVolatilityOos);
+        }
         blockers
     }
 
@@ -1217,6 +1230,9 @@ impl TradePolicyArtifactPayload {
     }
 
     fn required_vertical_gates(&self) -> Vec<VerticalGateKind> {
+        if self.activation_target == VerticalActivationTarget::ResearchOnly {
+            return Vec::new();
+        }
         let mut families = self
             .cohorts
             .iter()
@@ -1441,6 +1457,7 @@ jsonb_active!(
 #[cfg(test)]
 mod tests {
     use chrono::{TimeZone, Utc};
+    use rust_decimal::Decimal;
 
     use super::{
         TRADE_POLICY_ARTIFACT_FORMAT_VERSION, TradePolicyArtifactPayload,
@@ -1449,7 +1466,7 @@ mod tests {
     };
     use crate::types::{
         ContentHash, ModelVersionId, ResearchEvaluationTrack, RuntimeConfigVersionId,
-        TrainingDatasetId, builtin_research_profiles,
+        StructuralVolatilityOosEvidence, TrainingDatasetId, builtin_research_profiles,
     };
 
     fn hash(digit: char) -> ContentHash {
@@ -1524,6 +1541,19 @@ mod tests {
             candidates: Vec::new(),
             evidence_bundle: None,
             vertical_gate_evidence: Vec::new(),
+            structural_volatility_oos: StructuralVolatilityOosEvidence {
+                methodology_hash: hash('5'),
+                active_update_only: true,
+                activity_proxy: "unavailable".to_owned(),
+                minimum_contract_observations: 48,
+                fold_count: 0,
+                forecast_count: 0,
+                deadline_vw_interval_score: Decimal::ZERO,
+                dr_as_vw_interval_score: Decimal::ZERO,
+                deadline_volume_weighted_coverage: Decimal::ZERO,
+                dr_as_volume_weighted_coverage: Decimal::ZERO,
+                valid: false,
+            },
             cohorts: Vec::new(),
             validation: TradePolicyValidationEvidence {
                 trial_ledger_cutoff: None,

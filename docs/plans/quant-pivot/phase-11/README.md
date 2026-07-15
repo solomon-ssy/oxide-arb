@@ -20,11 +20,11 @@
 > 11.7 的基础执行/control contract 已收口；11.7.1 正在破坏式落地 Recommendation-owned typed
 > condition 与 Crypto/Weather source/event/shadow 闭环；真实登录/RBAC/BookStore 状态驱动的受保护 UI/E2E
 > 与当前 golden 已通过，不以静态页面替代；仓库中不存在改造前历史截图，不伪造 before evidence。
-> 11.7.2 的 Runtime v14 / Dataset v5 / Model v5 / Policy v5 / Evidence v2、PIT CLOB market-info、
+> 11.7.2 的 Runtime v15 / Dataset v5 / Model v5 / Policy v6 / Evidence v3、PIT CLOB market-info、
 > Source Slice producer/ledger/strict replay、signed latency/retention readiness、cash-budget/fee provenance、
 > Weather candidate state-machine fitter、56-fold/21-path CPCV/DSR/PBO/ESS、2× latency、typed Evidence
 > sealing、独立 async Validate 和 PG→ClickHouse verified fact-delivery outbox 已落地；真实 Published
-> research policy 与端到端激活仍受 structural OOS baseline、目标环境迁移/真实数据验收和
+> research policy 与端到端激活仍受目标环境迁移/真实数据验收和
 > 连续 24 小时 ReportOnly shadow 阻断；
 > 11.0/11.2.1/11.3/11.7.2/11.8–11.11 其余工作仍在设计、实施或部分落地阶段。
 >
@@ -45,12 +45,12 @@
 
 | Contract | 当前版本 | 下一位 owner |
 |---|---:|---|
-| Runtime config | **v14** | 11.9 首次加入 feedback/profile-expansion 字段时 `v14 → v15` |
+| Runtime config | **v15** | 后续新增 wire 字段必须显式 bump 至 v16 |
 | Feature schema | **v6** | 仅真实 schema 变更时 bump |
 | Dataset artifact | **v5** | profile/source-slice lineage；旧 artifact audit-only |
 | Model artifact | **v5** | profile/policy/source-slice lineage；旧 artifact audit-only |
-| Trade policy artifact | **v4** | immutable profile + serving cohorts + Evidence v2 ref |
-| Evidence bundle | **v2** | WORM source/trial/replay/validation identity |
+| Trade policy artifact | **v6** | activation target + structural OOS + Evidence v3 ref |
+| Evidence bundle | **v3** | 九类 WORM source/trial/replay/gate/validation identity |
 
 11.11 只能引用本账本在实施当时的值，不得复制一份“当前版本”。项目未生产部署，schema、ClickHouse
 表和 artifacts 从空基线重建；不提供旧 runtime parser、artifact loader、JSONB 双读、alias 或 re-export。
@@ -118,9 +118,9 @@ Phase 11 的唯一目标:**把阿尔法层与研究反馈闭环拉到与执行�
 | 11.6 | Training-Serving Parity & No-Silent-Zero | 决策时钟、PIT catalog、FeatureCell、frozen transform、运行期 parity/latch — **W0–W4/W6 与全部本地/容器门禁已完成；W5 空库首次激活待执行** | 10, 11 | [11.6](11.6-training-serving-parity-and-no-silent-zero.md) |
 | 11.7 | Executable Labeling, Entry & Exit Closed-Loop | TradePolicyArtifact + 可执行标签 + 审批即 Arm + 冻结退出策略 — **执行/control/operational closeout 与受保护 UI/E2E 已完成；真实 Published policy 激活受 11.7.2 阻断** | 14, 15, 16, 18 | [11.7](11.7-labeling-entry-exit-closed-loop.md) |
 | 11.7.1 | Composable Entry Conditions + Crypto/Weather Events | typed AST + PIT facts/events + Recommendation shadow + vertical gates — **实施中** | — | [11.7.1](11.7.1-composable-entry-event-triggers.md) |
-| 11.7.2 | Executable L2 Policy Validation & Research Activation | 完整冻结路径模拟 + structural volatility baseline + cash-budget + PIT fee + purged CPCV/uniqueness/DSR/PBO/ESS，交付至 ReportOnly shadow — **实施中：Weather fitter、56/21 CPCV、2× latency、Evidence sealing、独立 Validate 与 fact outbox 代码已闭环；structural OOS baseline、物理迁移/真实数据验收与 24h shadow 待完成；真实 canary 已移交 11.11** | — (11.7 research activation gate) | [11.7.2](11.7.2-executable-l2-policy-validation.md) |
+| 11.7.2 | Executable L2 Policy Validation & Research Activation | 完整冻结路径模拟 + structural volatility baseline + cash-budget + PIT fee + purged CPCV/uniqueness/DSR/PBO/ESS，交付至 ReportOnly shadow — **仓库契约已闭环：Weather/structural producers、56/21 CPCV、2× latency、Evidence v3、独立 Validate、分页 drilldown 与 fact outbox 已接通；物理迁移/真实数据验收与 24h shadow 待目标环境完成；真实 canary 已移交 11.11** | — (11.7 research activation gate) | [11.7.2](11.7.2-executable-l2-policy-validation.md) |
 | 11.8 | Report Lifecycle FSM Completion | 报告生命周期语义 | 17 | [11.8](11.8-report-lifecycle-fsm-completion.md) |
-| 11.9 | Attribution Feedback, Profile Expansion & Auto-Retraining | 研究反馈闭环 + factor governance + crypto/profile expansion + 跨 profile winner 资金治理 — **设计冻结、尚未实施；未来 v14→v15** | 19, 21 | [11.9](11.9-attribution-feedback-and-auto-retraining.md) |
+| 11.9 | Attribution Feedback, Profile Expansion & Auto-Retraining | 研究反馈闭环 + factor governance + crypto/profile expansion + 跨 profile winner 资金治理 — **设计冻结、尚未实施；新增 wire 字段必须从当前 v15 显式升级** | 19, 21 | [11.9](11.9-attribution-feedback-and-auto-retraining.md) |
 | 11.10 | Counterfactual Factor Attribution | 反事实归因 + MAE 回填 | 20 | [11.10](11.10-counterfactual-factor-attribution.md) |
 | 11.11 | Execution Governance Hardening | 执行治理探针硬化 | 22 | [11.11](11.11-execution-governance-hardening.md) |
 
@@ -194,11 +194,11 @@ flowchart TD
   治理(见 [11.3 §3.4](11.3-probabilistic-calibration-and-kelly.md))。runtime-config 由 11.2.1 bump 至 v4、
   11.2.2 再 bump 至 **v5**（历史里程碑）；`feature_schema_version` 由 11.2.1 bump 至 4、11.2.2
   再 bump 至 **5**（两层向量重构在 11.2.2）。当前实际 runtime config 已由后续已落地工作推进至
-  **v14**，feature schema 保持 **v6**；这是 11.7.2 的唯一有效版本组合。Tier 2 LLM linkage
+  **v15**，feature schema 保持 **v6**；这是 11.7.2 的唯一有效版本组合。Tier 2 LLM linkage
   不改 feature schema，但若实现时新增 runtime wire 字段，必须从届时当前版本显式 bump，
-  不得静默改写 v14（见 11.2.3）。11.9 尚未实现；其 `feedback`/profile expansion 首次获得真实字段时
-  执行未来的 **v14 → v15**。Dataset/model artifact 只接受 `format_version = 5`；runtime v14
-  不意味着 feature v7。TradePolicy artifact 只接受 v4，Evidence bundle 只接受 v2。
+  不得静默改写 v15（见 11.2.3）。11.9 尚未实现；其 `feedback`/profile expansion 首次获得真实字段时
+  必须显式升级至 **v16**。Dataset/model artifact 只接受 `format_version = 5`；runtime v15
+  不意味着 feature v7。TradePolicy artifact 只接受 v6，Evidence bundle 只接受 v3。
 
 ## 4. 全局设计基线(贯穿全部子phase)
 

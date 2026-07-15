@@ -9,8 +9,10 @@ use quant_pivot_error::QuantResult;
 use crate::{
     domain::{
         FitTradePolicyRequest, JobProgressSink, Paginated, TradePolicyArtifactInfo,
-        TradePolicyAuditListQuery, TradePolicyEvidenceDownloadView, TradePolicyFitPreflightRequest,
-        TradePolicyFitPreflightView, TradePolicyGovernanceAuditInfo, TradePolicyListQuery,
+        TradePolicyAuditListQuery, TradePolicyEvidenceDownloadView,
+        TradePolicyEvidenceRowListQuery, TradePolicyEvidenceRowView,
+        TradePolicyFitPreflightRequest, TradePolicyFitPreflightView,
+        TradePolicyGovernanceAuditInfo, TradePolicyListQuery,
         TradePolicySourceSliceObjectListQuery, TradePolicySourceSliceObjectView,
         TradePolicySourceSliceView, TradePolicyTrialAttemptInfo, TradePolicyTrialListQuery,
         TradePolicyValidationListQuery, TradePolicyValidationRowInfo,
@@ -76,6 +78,15 @@ pub trait TradePolicyPort: Send + Sync {
         artifact_id: &TradePolicyArtifactId,
         kind: TradePolicyEvidenceObjectKind,
     ) -> QuantResult<Option<TradePolicyEvidenceDownloadView>>;
+
+    /// Page rows from one immutable evidence object after verifying its bundle
+    /// identity, byte/row-chain hashes, trial-ledger binding, and typed schema.
+    async fn page_evidence_rows(
+        &self,
+        artifact_id: &TradePolicyArtifactId,
+        kind: TradePolicyEvidenceObjectKind,
+        query: TradePolicyEvidenceRowListQuery,
+    ) -> QuantResult<Option<Paginated<TradePolicyEvidenceRowView>>>;
 
     async fn page(
         &self,

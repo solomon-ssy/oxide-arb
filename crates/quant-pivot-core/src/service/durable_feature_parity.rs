@@ -37,10 +37,10 @@ use quant_pivot_models::{
     },
 };
 use quant_pivot_repository::traits::{
-    CalibrationArtifactRepository, CatalogVersionRepository, FactorRepository, FeatureRepository,
-    MarketLinkageRepository, MarketSelectionRepository, ModelRegistryRepository,
-    ModelRunRepository, QuantFactReadRepository, RecommendationReportRepository,
-    RuntimeConfigVersionRepository, ServingEvidenceRepository,
+    CalibrationArtifactRepository, CatalogVersionRepository, ClobMarketInfoRepository,
+    FactorRepository, FeatureRepository, MarketLinkageRepository, MarketSelectionRepository,
+    ModelRegistryRepository, ModelRunRepository, QuantFactReadRepository,
+    RecommendationReportRepository, RuntimeConfigVersionRepository, ServingEvidenceRepository,
 };
 use quant_pivot_research::{
     factors::{FactorEngine, FactorValue, MarketFactorOutcome},
@@ -94,6 +94,7 @@ pub struct DurableFeatureParityDeps {
     pub serving_evidence: Arc<dyn ServingEvidenceRepository>,
     pub fact_read: Arc<dyn QuantFactReadRepository>,
     pub catalog: Arc<dyn CatalogVersionRepository>,
+    pub clob_market_info: Arc<dyn ClobMarketInfoRepository>,
     pub linkages: Arc<dyn MarketLinkageRepository>,
     pub calibration_artifacts: Arc<dyn CalibrationArtifactRepository>,
     pub runtime_factory: Arc<dyn ModelRuntimeFactoryBuilder>,
@@ -974,6 +975,7 @@ impl DurableFeatureParitySource {
         let durable_pit = Arc::new(DurablePitSource::new(
             Arc::clone(&self.deps.fact_read),
             Arc::clone(&self.deps.catalog),
+            Arc::clone(&self.deps.clob_market_info),
         ));
         let candidate_provider = MarketCandidateProvider::new(
             durable_pit,

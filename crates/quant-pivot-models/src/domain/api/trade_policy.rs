@@ -121,6 +121,13 @@ pub struct TradePolicySourceSliceObjectListQuery {
     pub page: PageRequest,
 }
 
+#[derive(Debug, Clone, Default, Deserialize, NormalizePageQuery)]
+pub struct TradePolicyEvidenceRowListQuery {
+    #[normalize_page]
+    #[serde(flatten)]
+    pub page: PageRequest,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct TradePolicyTrialAttemptView {
     pub trial_attempt_id: TradePolicyTrialAttemptId,
@@ -382,6 +389,20 @@ pub struct TradePolicyEvidenceDownloadView {
     pub url: String,
 }
 
+/// One verified row from an immutable typed policy-evidence object.
+///
+/// `payload` remains JSON at this heterogeneous API boundary, but the service
+/// validates every row against the concrete schema selected by `kind` before
+/// returning the page.
+#[derive(Debug, Clone, Serialize)]
+pub struct TradePolicyEvidenceRowView {
+    pub kind: TradePolicyEvidenceObjectKind,
+    pub record_key: String,
+    pub event_at: Option<DateTime<Utc>>,
+    pub payload: serde_json::Value,
+    pub row_hash: ContentHash,
+}
+
 impl From<TradePolicyArtifactInfo> for TradePolicyDetailView {
     fn from(info: TradePolicyArtifactInfo) -> Self {
         let blockers = info.payload_json.publication_blockers();
@@ -429,6 +450,7 @@ pub struct TradePolicyFitPreflightView {
     pub retention_runway_days: Option<u32>,
     pub retention_runway_proven: TradePolicyPreflightCheckStatus,
     pub contract_valid: TradePolicyPreflightCheckStatus,
+    pub profile_fitter_available: TradePolicyPreflightCheckStatus,
     pub source_dataset_ready: TradePolicyPreflightCheckStatus,
     pub source_dataset_policy_fit: TradePolicyPreflightCheckStatus,
     pub raw_trajectory_labels_present: TradePolicyPreflightCheckStatus,
@@ -478,6 +500,7 @@ pub enum TradePolicyFitReadiness {
 #[serde(rename_all = "snake_case")]
 pub enum TradePolicyPreflightBlockerKind {
     ContractInvalid,
+    ProfileFitterUnavailable,
     DatasetNotReady,
     DatasetPurposeMismatch,
     RawTrajectoryLabelsMissing,

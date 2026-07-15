@@ -15,6 +15,7 @@ use sea_orm::FromJsonQueryResult;
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    domain::market::fee::BuilderFeeAttribution,
     enums::{
         common::{OrderType, Side},
         quant::{ExitSettlementMode, RedeemPolicy},
@@ -59,7 +60,7 @@ pub struct PreparedFeeSchedule {
     pub taker_only: bool,
     pub builder_maker_fee_bps: Bps,
     pub builder_taker_fee_bps: Bps,
-    pub builder_attributed: bool,
+    pub builder_attribution: BuilderFeeAttribution,
 }
 
 /// Atomic, hash-linked venue order prepared by final admission.

@@ -8,6 +8,7 @@ use std::{collections::BTreeMap, str::FromStr, sync::Arc};
 use chrono::{DateTime, Duration, Utc};
 use quant_pivot_core::governance::{ModelScoreCalibrationPayload, model_score_content_hash};
 use quant_pivot_models::{
+    domain::market::fee::BuilderFeeAttribution,
     domain::{
         ApproveOrderIntent, CapitalSettlement, EntryConditionClaim, ExitLedgerWrite,
         NewAccountSnapshot, NewCalibrationArtifact, NewCapitalAllocation,
@@ -66,7 +67,7 @@ use quant_pivot_models::{
         ReportDataQualitySnapshotId, ReportDataQualityTokens, ReportSummary,
         ResearchEvaluationTrack, ResearchJobId, ResearchProfileRef, ResidualSharePolicy,
         RiskEnvelope, RuntimeConfigVersionId, SchemaVersion, SelectionExclusionSummary, Shares,
-        SignalCandidateId, SizingPlan, SourceSliceManifestRef,
+        SignalCandidateId, SizingPlan, SourceSliceManifestRef, StructuralVolatilityOosEvidence,
         TRADE_POLICY_ARTIFACT_FORMAT_VERSION, ThesisInvalidationPolicy, TokenId,
         TradePolicyArtifactId, TradePolicyArtifactPayload, TradePolicyCandidateSpec,
         TradePolicyCohort, TradePolicyCohortDimension, TradePolicyCohortKey,
@@ -483,6 +484,7 @@ async fn prepare_report_seed(
     .await;
     let market_selection_id =
         seed_market_selection(db, &infra.runtime_config_version_id, &config.market_id).await;
+    let model_run_id = seed_report_model_run(db, infra, &market_selection_id).await;
     ExecutionTxnIds {
         feature_parity_state_id: infra.feature_parity_state_id.clone(),
         account_snapshot: AccountSnapshotId::from_v7(),
@@ -492,7 +494,7 @@ async fn prepare_report_seed(
         recommendation: RecommendationId::from_v7(),
         condition_instance: EntryConditionInstanceId::from_v7(),
         model_version: infra.model_version_id.clone(),
-        model_run: infra.model_run_id.clone(),
+        model_run: model_run_id,
         market_selection: market_selection_id,
         runtime_config_version: infra.runtime_config_version_id.clone(),
         trade_policy: infra.trade_policy.clone(),
@@ -500,6 +502,54 @@ async fn prepare_report_seed(
         event: config.event_id.clone(),
         token: config.token_id.clone(),
     }
+}
+
+/// Seed the one inference run owned by a report fixture.
+///
+/// Production reports enforce a one-to-one `model_run_id` lineage. Shared demo
+/// model metadata may be reused, but its inference run must never be reused by
+/// another report.
+pub async fn seed_report_model_run(
+    db: &DatabaseConnection,
+    infra: &SharedDemoInfra,
+    market_selection_id: &MarketSelectionId,
+) -> ModelRunId {
+    let model_run_id = ModelRunId::from_v7();
+    let started_at = Utc::now();
+    let input_hash = ResearchHasher::canonical(&(
+        "execution_report_fixture_model_input_v1",
+        &model_run_id,
+        &infra.model_version_id,
+        market_selection_id,
+    ))
+    .expect("hash report fixture model input");
+    let output_hash = ResearchHasher::canonical(&(
+        "execution_report_fixture_model_output_v1",
+        &model_run_id,
+        market_selection_id,
+    ))
+    .expect("hash report fixture model output");
+    PgModelRunRepository::new(db.clone())
+        .create(NewModelRun {
+            model_run_id: model_run_id.clone(),
+            run_kind: ModelRunKind::LiveInference,
+            model_version_id: Some(infra.model_version_id.clone()),
+            runtime_config_version_id: infra.runtime_config_version_id.clone(),
+            market_selection_id: Some(market_selection_id.clone()),
+            window_start: started_at,
+            window_end: started_at,
+            status: ModelRunStatus::Succeeded,
+            input_hash,
+            output_hash: Some(output_hash),
+            metrics_json: serde_json::json!({"fixture": "execution_report"}),
+            error_code: None,
+            error_message: None,
+            started_at,
+            finished_at: Some(started_at),
+        })
+        .await
+        .expect("report fixture model run");
+    model_run_id
 }
 
 /// Compose a published report transaction with caller-controlled recommendations.
@@ -910,7 +960,7 @@ pub fn prepared_order(
             taker_only: true,
             builder_maker_fee_bps: Bps::ZERO,
             builder_taker_fee_bps: Bps::ZERO,
-            builder_attributed: false,
+            builder_attribution: BuilderFeeAttribution::NoBuilderCode,
         },
         prepared_at: now,
         valid_until: now + chrono::Duration::hours(1),
@@ -1300,6 +1350,19 @@ fn executable_policy_fixture_payload(
             trial_ledger_hash: trial_ledger_hash.clone(),
         }),
         vertical_gate_evidence,
+        structural_volatility_oos: StructuralVolatilityOosEvidence {
+            methodology_hash: content_hash('8'),
+            active_update_only: true,
+            activity_proxy: "sqrt_reconciled_hourly_volume_usd".to_owned(),
+            minimum_contract_observations: 48,
+            fold_count: 2,
+            forecast_count: 100,
+            deadline_vw_interval_score: dec!(0.5),
+            dr_as_vw_interval_score: dec!(0.4),
+            deadline_volume_weighted_coverage: dec!(0.94),
+            dr_as_volume_weighted_coverage: dec!(0.95),
+            valid: true,
+        },
         cohorts: vec![executable_policy_fixture_cohort(cohort_key.clone())],
         validation: TradePolicyValidationEvidence {
             trial_ledger_cutoff: Some(now),
@@ -1816,7 +1879,7 @@ fn fixture_report(
         horizon_secs: 86_400,
         runtime_mode: options.runtime_mode,
         runtime_config_version_id: ids.runtime_config_version.clone(),
-        model_run_id: None,
+        model_run_id: Some(ids.model_run.clone()),
         model_version_id: ids.model_version.clone(),
         market_selection_id: ids.market_selection.clone(),
         portfolio_plan_id: ids.portfolio_plan.clone(),

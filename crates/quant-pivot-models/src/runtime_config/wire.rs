@@ -400,18 +400,16 @@ impl Default for ExitSignalReinferencePolicy {
     }
 }
 
-/// Opportunistic-Sell exit policy (Phase 06.1).
+/// Opportunistic-Sell operational control (Phase 06.1 / 11.7.2).
 ///
 /// Advisory model-driven scale-out when the thesis still holds but the Sell
 /// scorer ranks exiting now as better than holding. Evaluated at the same
 /// cadence as re-inference (`signal_recheck_secs`) and gated behind
 /// re-inference being enabled (thesis validity must be checkable first).
 ///
-/// The scorer emits a **target cumulative exit fraction** of the lot's
-/// entry-filled shares; the ladder sells only the incremental delta beyond
-/// what opportunistic exits have already realized, so repeated ticks at the
-/// same target never churn the position. `shadow_mode` runs the scorer and
-/// writes audit rows but never submits an opportunistic exit.
+/// All trading thresholds and cumulative/clip bounds live exclusively in the
+/// immutable policy and intent. Runtime may only disable or shadow an already
+/// frozen rule; it cannot change that rule's decision boundary.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct OpportunisticSellPolicy {
@@ -420,9 +418,6 @@ pub struct OpportunisticSellPolicy {
     /// When true, the scorer runs and is audited but never submits an exit
     /// (fail-safe hold; SL/time/trailing/invalidation still apply).
     pub shadow_mode: bool,
-    /// Runtime safety cap on the policy-requested cumulative exit fraction.
-    /// It may only tighten the value frozen in the intent.
-    pub max_cumulative_exit_pct: DecimalString,
 }
 
 impl Default for OpportunisticSellPolicy {
@@ -430,7 +425,6 @@ impl Default for OpportunisticSellPolicy {
         Self {
             enabled: false,
             shadow_mode: true,
-            max_cumulative_exit_pct: DecimalString::new("1.0"),
         }
     }
 }

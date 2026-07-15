@@ -36,14 +36,15 @@ use quant_pivot_models::{
         EntryConditionTemplateV1, EntryConditionV1, EntryOrderTemplate, FactorCondition,
         MarketEventCondition, MarketEventTemplate, MarketId, MarketSelectionId, ModelRunId,
         ModelVersionId, Price, PriceCondition, RecommendationId, ResearchProfileArtifact,
-        RuntimeConfigVersionId, ShadowLatencyProfileV1, TemperatureCelsius, TokenId,
-        TradePolicyCandidateSpec, TradePolicyCandidateTrialRow, TradePolicyCohort,
-        TradePolicyCohortDimension, TradePolicyCohortKey, TradePolicyCohortTrialRow,
-        TradePolicyCoverageGapRow, TradePolicyCpcvPathRow, TradePolicyEvidenceFillOutcome,
-        TradePolicyEvidenceLiquidityRole, TradePolicyEvidenceObjectKind,
-        TradePolicyFillEvidenceRow, TradePolicyLatencyScenario, TradePolicyObservationCapability,
-        TradePolicyObservationEligibilityRow, TradePolicyParameterSource, TradePolicyQualityGate,
-        TradePolicyReplayGap, TradePolicyStatisticalSummaryRow, Usd, WeatherDailyHighEnteredBand,
+        RuntimeConfigVersionId, ShadowLatencyProfileV1, StructuralVolatilityOosEvidence,
+        StructuralVolatilityOosFoldRow, TemperatureCelsius, TokenId, TradePolicyCandidateSpec,
+        TradePolicyCandidateTrialRow, TradePolicyCohort, TradePolicyCohortDimension,
+        TradePolicyCohortKey, TradePolicyCohortTrialRow, TradePolicyCoverageGapRow,
+        TradePolicyCpcvPathRow, TradePolicyEvidenceFillOutcome, TradePolicyEvidenceLiquidityRole,
+        TradePolicyEvidenceObjectKind, TradePolicyFillEvidenceRow, TradePolicyLatencyScenario,
+        TradePolicyObservationCapability, TradePolicyObservationEligibilityRow,
+        TradePolicyParameterSource, TradePolicyQualityGate, TradePolicyReplayGap,
+        TradePolicyStatisticalSummaryRow, Usd, VerticalGateEvidence, WeatherDailyHighEnteredBand,
         WeatherDailyHighExceededBandUpper, WeatherObservationDayClosedOutsideBand,
     },
 };
@@ -226,6 +227,9 @@ pub(super) struct WeatherPolicyEvidence {
     pub cpcv_paths: Vec<TradePolicyCpcvPathRow>,
     pub coverage_gaps: Vec<TradePolicyCoverageGapRow>,
     pub statistical_summaries: Vec<TradePolicyStatisticalSummaryRow>,
+    pub vertical_gate_evidence: Vec<VerticalGateEvidence>,
+    pub structural_volatility_oos: StructuralVolatilityOosEvidence,
+    pub structural_volatility_folds: Vec<StructuralVolatilityOosFoldRow>,
     pub statistical_runs: Vec<PolicyStatisticalRun>,
     pub cohorts: Vec<TradePolicyCohort>,
     pub all_gates_passed: bool,
@@ -356,6 +360,32 @@ impl WeatherPolicyEvidence {
                 })
                 .collect::<QuantResult<Vec<_>>>()?,
         );
+        records.insert(
+            TradePolicyEvidenceObjectKind::VerticalGates,
+            self.vertical_gate_evidence
+                .iter()
+                .map(|row| {
+                    PolicyEvidenceRecord::from_typed(
+                        format!("{:?}:{:?}", row.gate, row.target),
+                        Some(row.evidence_window_end),
+                        row,
+                    )
+                })
+                .collect::<QuantResult<Vec<_>>>()?,
+        );
+        records.insert(
+            TradePolicyEvidenceObjectKind::StructuralVolatilityOos,
+            self.structural_volatility_folds
+                .iter()
+                .map(|row| {
+                    PolicyEvidenceRecord::from_typed(
+                        format!("{:010}", row.fold_index),
+                        Some(row.test_window_end),
+                        row,
+                    )
+                })
+                .collect::<QuantResult<Vec<_>>>()?,
+        );
         Ok(records)
     }
 }
@@ -366,6 +396,8 @@ pub(super) struct WeatherEvidenceRequest<'a> {
     pub experiment_family_hash: &'a ContentHash,
     pub min_embargo_secs: u64,
     pub replayed: &'a [WeatherExampleReplay],
+    pub structural_volatility_oos: StructuralVolatilityOosEvidence,
+    pub structural_volatility_folds: Vec<StructuralVolatilityOosFoldRow>,
 }
 
 struct WeatherLatencyRun {
@@ -391,9 +423,12 @@ pub(super) fn evaluate_weather_policy_evidence(
         cpcv_paths: Vec::new(),
         coverage_gaps: Vec::new(),
         statistical_summaries: Vec::new(),
+        vertical_gate_evidence: Vec::new(),
+        structural_volatility_oos: request.structural_volatility_oos.clone(),
+        structural_volatility_folds: request.structural_volatility_folds.clone(),
         statistical_runs: Vec::new(),
         cohorts: Vec::new(),
-        all_gates_passed: true,
+        all_gates_passed: request.structural_volatility_oos.valid,
     };
     for cash_budget in &request.profile.spec.allowed_cash_budget_tiers {
         let cohort = pooled_weather_cohort(request.profile, *cash_budget)?;
@@ -1255,7 +1290,11 @@ fn base_observations(
                 &initial_signal.token_id,
                 boundary,
             )
-            .map(pit_fee_schedule);
+            .map(|market_info| {
+                PitFeeSchedule::from_market_fee_schedule(&market_info.fee_schedule())
+                    .map_err(|error| methodology(format!("invalid PIT fee schedule: {error:?}")))
+            })
+            .transpose()?;
             let signal = request
                 .signals
                 .at(
@@ -1342,20 +1381,6 @@ fn market_info_at<'a>(
                 &right.payload_hash,
             ))
         })
-}
-
-fn pit_fee_schedule(market_info: &ClobMarketInfoVersion) -> PitFeeSchedule {
-    PitFeeSchedule {
-        schedule_hash: market_info.payload_hash.clone(),
-        effective_at: market_info.effective_at,
-        available_at: market_info.available_at,
-        platform_rate: market_info.fee_details.rate,
-        exponent: Decimal::from(market_info.fee_details.exponent),
-        taker_only: market_info.fee_details.taker_only,
-        builder_maker_fee_bps: Bps::new(Decimal::from(market_info.builder_maker_fee_rate_bps)),
-        builder_taker_fee_bps: Bps::new(Decimal::from(market_info.builder_taker_fee_rate_bps)),
-        builder_attributed: false,
-    }
 }
 
 fn passive_trades(

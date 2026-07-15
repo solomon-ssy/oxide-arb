@@ -643,7 +643,7 @@ fn reconciliation_fee(
         taker_only: prepared.taker_only,
         builder_maker_fee_bps: prepared.builder_maker_fee_bps,
         builder_taker_fee_bps: prepared.builder_taker_fee_bps,
-        builder_attributed: prepared.builder_attributed,
+        builder_attribution: prepared.builder_attribution,
     }
     .fee(role, price, filled_shares, matched_at)
     .map_err(|error| ExecutionError::ReconciliationUnresolvable {

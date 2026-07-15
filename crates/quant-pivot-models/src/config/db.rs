@@ -242,7 +242,7 @@ impl Default for ClickHouseConfig {
 pub struct ClickHouseRawLifecycleConfig {
     /// Days retained on the hot volume before native TTL MOVE.
     pub hot_days: u32,
-    /// Total raw retention; Runtime v14 profiles require at least 200 days.
+    /// Total raw retention; Runtime v15 profiles require at least 200 days.
     pub retention_days: u32,
     /// `ClickHouse` volume configured by the operator for cold/object storage.
     pub cold_volume: Option<String>,

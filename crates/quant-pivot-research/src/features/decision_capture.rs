@@ -184,7 +184,7 @@ pub fn market_context_from_resolved(
     let fee_rate = market
         .fee_schedule
         .as_ref()
-        .map(|schedule| schedule.fee_rate);
+        .map(|schedule| schedule.platform_rate);
 
     Ok(MarketContext {
         best_bid: book.best_bid(),

@@ -17,7 +17,6 @@ pub mod ctf;
 pub mod data_api;
 pub mod domain;
 pub mod exchange;
-pub mod fees;
 pub mod gamma;
 pub mod infra;
 pub mod keystore;

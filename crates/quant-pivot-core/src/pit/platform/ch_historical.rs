@@ -29,7 +29,9 @@ use quant_pivot_models::{
     },
     types::{MarketId, Price, Shares, TokenId},
 };
-use quant_pivot_repository::traits::{CatalogVersionRepository, QuantFactReadRepository};
+use quant_pivot_repository::traits::{
+    CatalogVersionRepository, ClobMarketInfoRepository, QuantFactReadRepository,
+};
 use quant_pivot_research::pit::{
     BookSnapshotAt, CanonicalBookEventRef, PointInTimeSnapshotSource, ResolvedMarketSnapshot,
     resolve_catalog_snapshot,
@@ -80,6 +82,7 @@ impl BookDecodeStatus {
 pub struct DurablePitSource {
     fact_read: Arc<dyn QuantFactReadRepository>,
     catalog_repo: Arc<dyn CatalogVersionRepository>,
+    clob_market_info_repo: Arc<dyn ClobMarketInfoRepository>,
 }
 
 impl DurablePitSource {
@@ -88,10 +91,12 @@ impl DurablePitSource {
     pub fn new(
         fact_read: Arc<dyn QuantFactReadRepository>,
         catalog_repo: Arc<dyn CatalogVersionRepository>,
+        clob_market_info_repo: Arc<dyn ClobMarketInfoRepository>,
     ) -> Self {
         Self {
             fact_read,
             catalog_repo,
+            clob_market_info_repo,
         }
     }
 }
@@ -152,24 +157,61 @@ impl PointInTimeSnapshotSource for DurablePitSource {
         market_id: &MarketId,
         boundary: &DecisionBoundary,
     ) -> QuantResult<Option<ResolvedMarketSnapshot>> {
-        self.catalog_repo
+        let snapshot = self
+            .catalog_repo
             .snapshot_at(market_id, boundary)
             .await
+            .map_err(PitResolutionStorageError::from)?;
+        let Some(snapshot) = snapshot else {
+            return Ok(None);
+        };
+        let mut resolved = resolve_catalog_snapshot(snapshot, boundary)?;
+        resolved.context.fee_schedule = self
+            .clob_market_info_repo
+            .at(
+                market_id,
+                boundary.knowledge_cutoff(),
+                boundary.decision_at(),
+            )
+            .await
             .map_err(PitResolutionStorageError::from)?
-            .map(|snapshot| resolve_catalog_snapshot(snapshot, boundary))
-            .transpose()
+            .map(|version| version.fee_schedule());
+        Ok(Some(resolved))
     }
 
     async fn market_snapshots_at_boundary(
         &self,
         boundary: &DecisionBoundary,
     ) -> QuantResult<Vec<ResolvedMarketSnapshot>> {
-        self.catalog_repo
+        let snapshots = self
+            .catalog_repo
             .snapshots_at_boundary(boundary)
+            .await
+            .map_err(PitResolutionStorageError::from)?;
+        let market_ids = snapshots
+            .iter()
+            .map(|snapshot| snapshot.market.market_id.clone())
+            .collect::<Vec<_>>();
+        let fee_schedules = self
+            .clob_market_info_repo
+            .at_many(
+                &market_ids,
+                boundary.knowledge_cutoff(),
+                boundary.decision_at(),
+            )
             .await
             .map_err(PitResolutionStorageError::from)?
             .into_iter()
-            .map(|snapshot| resolve_catalog_snapshot(snapshot, boundary))
+            .map(|version| (version.market_id.clone(), version.fee_schedule()))
+            .collect::<HashMap<_, _>>();
+        snapshots
+            .into_iter()
+            .map(|snapshot| {
+                let mut resolved = resolve_catalog_snapshot(snapshot, boundary)?;
+                resolved.context.fee_schedule =
+                    fee_schedules.get(&resolved.context.market_id).cloned();
+                Ok(resolved)
+            })
             .collect()
     }
 }

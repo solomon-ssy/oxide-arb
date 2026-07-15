@@ -12,23 +12,26 @@ use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use futures_util::StreamExt;
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError, storage::StorageError};
 use quant_pivot_models::{
+    clickhouse::TradeTapeRow,
     config::WEATHER_OBSERVATION_DAY_CLOSE_GRACE_SECS,
     domain::{
         BuildTrainingDatasetRequest, CompleteTradePolicyValidation, FailTradePolicyValidation,
-        FitTradePolicyRequest, JobProgressSink, NewTradePolicyArtifact,
+        FitTradePolicyRequest, JobProgressSink, MarketLinkage, NewTradePolicyArtifact,
         NewTradePolicyGovernanceAudit, NewTradePolicyTrialAttempt, NewTradePolicyValidationRow,
         NewTradePolicyValidationRun, Paginated, PolicyFitDatasetBuildRequest, ResearchJobProgress,
         ResearchReadinessEvidenceInfo, SourceSliceIdentity, SourceSliceIdentityInput,
         SourceSliceInfo, TradePolicyArtifactInfo, TradePolicyAuditListQuery,
-        TradePolicyEvidenceDownloadView, TradePolicyFitPreflightRequest,
-        TradePolicyFitPreflightView, TradePolicyFitReadiness, TradePolicyFitSelection,
-        TradePolicyGovernanceAuditInfo, TradePolicyListQuery, TradePolicyOperationalEvidenceView,
-        TradePolicyPort, TradePolicyPreflightBlockerKind, TradePolicyPreflightBlockerView,
+        TradePolicyEvidenceDownloadView, TradePolicyEvidenceRowListQuery,
+        TradePolicyEvidenceRowView, TradePolicyFitPreflightRequest, TradePolicyFitPreflightView,
+        TradePolicyFitReadiness, TradePolicyFitSelection, TradePolicyGovernanceAuditInfo,
+        TradePolicyListQuery, TradePolicyOperationalEvidenceView, TradePolicyPort,
+        TradePolicyPreflightBlockerKind, TradePolicyPreflightBlockerView,
         TradePolicySourceSliceObjectListQuery, TradePolicySourceSliceObjectView,
         TradePolicySourceSliceView, TradePolicyTrialAttemptInfo, TradePolicyTrialListQuery,
         TradePolicyValidationListQuery, TradePolicyValidationRowInfo,
         TradePolicyValidationRowListQuery, TradePolicyValidationRunInfo, TrainingDatasetInfo,
-        TrainingDatasetListQuery, TrainingDatasetPort, pagination::PageRequest,
+        TrainingDatasetListQuery, TrainingDatasetPort, WeatherObservationFact,
+        pagination::PageRequest,
     },
     enums::quant::{
         DatasetPurpose, PublicationStatus, SourceSliceStatus, TradePolicyGovernanceAction,
@@ -43,17 +46,17 @@ use quant_pivot_models::{
         ResearchEvaluationTrack, ResearchJobId, ResearchProfileArtifact, ResearchProfileRef,
         ResearchReadinessEvidencePayload, RetentionRunwayEvidenceV1, RuntimeConfigVersionId,
         SchemaVersion, ShadowLatencyProfileV1, SourceSliceManifestRef, SourceSliceManifestV2,
-        SourceSliceObjectKind, TRADE_POLICY_ARTIFACT_FORMAT_VERSION,
-        TRADE_POLICY_EVIDENCE_BUNDLE_FORMAT_VERSION, TokenId, TradePolicyArtifactId,
-        TradePolicyArtifactPayload, TradePolicyCandidateSpec, TradePolicyCandidateTrialRow,
-        TradePolicyCohortTrialRow, TradePolicyCoverageGapRow, TradePolicyCpcvPathRow,
-        TradePolicyEvidenceBundleManifest, TradePolicyEvidenceBundleRef,
+        SourceSliceObjectKind, StructuralVolatilityOosFoldRow,
+        TRADE_POLICY_ARTIFACT_FORMAT_VERSION, TRADE_POLICY_EVIDENCE_BUNDLE_FORMAT_VERSION, TokenId,
+        TradePolicyArtifactId, TradePolicyArtifactPayload, TradePolicyCandidateSpec,
+        TradePolicyCandidateTrialRow, TradePolicyCohortTrialRow, TradePolicyCoverageGapRow,
+        TradePolicyCpcvPathRow, TradePolicyEvidenceBundleManifest, TradePolicyEvidenceBundleRef,
         TradePolicyEvidenceObjectKind, TradePolicyEvidenceObjectRef, TradePolicyExecutionEvidence,
         TradePolicyFillEvidenceRow, TradePolicyFitContract, TradePolicyGovernanceAuditId,
         TradePolicyObservationEligibilityRow, TradePolicyPitCutoffEvidence,
         TradePolicyStatisticalSummaryRow, TradePolicyTrialAttemptId, TradePolicyTrialMetrics,
         TradePolicyValidationEvidence, TradePolicyValidationRunId, TrainingDatasetId,
-        TrainingExampleId, TrainingSampleSource, VerticalActivationTarget,
+        TrainingExampleId, TrainingSampleSource, VerticalActivationTarget, VerticalGateEvidence,
         builtin_research_profiles, canonicalize_policy_candidates,
         resolve_builtin_research_profile,
     },
@@ -69,10 +72,13 @@ use quant_pivot_research::{
     model::ModelRuntimeFactoryBuilder,
     policy_evidence::{PolicyEvidenceParquetCodec, PolicyEvidenceRecord},
     policy_replay::POLICY_REPLAY_KERNEL_VERSION,
+    policy_validation::POLICY_PERFORMANCE_METHODOLOGY_VERSION,
+    structural_volatility::evaluate_structural_volatility_oos,
     training::{
         LIQUIDITY_EXIT_POSSIBLE, MAX_ADVERSE_EXCURSION_BPS, MAX_FAVORABLE_EXCURSION_BPS,
         RETURN_TO_HORIZON, TrainingExample, TrainingLabel,
     },
+    weather_proxy_validation::evaluate_weather_proxy_gate,
 };
 use rust_decimal::Decimal;
 use tokio_util::sync::CancellationToken;
@@ -86,9 +92,10 @@ use crate::{
     service::{
         research_readiness::{ResearchReadinessEvidenceService, VerifiedOperationalEvidence},
         trade_policy_replay::{
-            PolicyStatisticalRun, WEATHER_REPLAY_ORCHESTRATOR_VERSION, WeatherEvidenceRequest,
-            WeatherPolicyEvidence, WeatherReplayRequest, evaluate_weather_policy_evidence,
-            reinfer_frozen_policy_signals, replay_weather_page,
+            FrozenPolicySignals, PolicyStatisticalRun, WEATHER_REPLAY_ORCHESTRATOR_VERSION,
+            WeatherEvidenceRequest, WeatherExampleReplay, WeatherPolicyEvidence,
+            WeatherReplayRequest, evaluate_weather_policy_evidence, reinfer_frozen_policy_signals,
+            replay_weather_page,
         },
         training_dataset::{require_dataset_materialization, verify_frozen_dataset_artifact},
     },
@@ -134,7 +141,8 @@ struct FrozenPolicyFitModel {
 }
 
 struct ContractPreflight {
-    valid: bool,
+    valid: PreflightCheck,
+    profile_fitter_available: bool,
     pit_cutoff_not_future: bool,
     profile_quality_gate_available: bool,
     runtime_config_version_id: Option<RuntimeConfigVersionId>,
@@ -235,6 +243,7 @@ struct WeatherPolicyRecomputeInput<'a> {
     fit_window_start: chrono::DateTime<chrono::Utc>,
     fit_window_end: chrono::DateTime<chrono::Utc>,
     pit_cutoff: chrono::DateTime<chrono::Utc>,
+    activation_target: VerticalActivationTarget,
     progress: &'a dyn JobProgressSink,
     cancel: &'a CancellationToken,
 }
@@ -243,6 +252,14 @@ struct WeatherPolicyRecomputeResult {
     evidence: WeatherPolicyEvidence,
     experiment_family_hash: ContentHash,
     embargo_secs: u64,
+}
+
+struct WeatherReplayInputs {
+    structural_examples: Vec<TrainingExample>,
+    replayed_examples: Vec<WeatherExampleReplay>,
+    gate_linkages: Vec<MarketLinkage>,
+    gate_observations: Vec<WeatherObservationFact>,
+    structural_trade_tape: Vec<TradeTapeRow>,
 }
 
 struct FrozenFitPlan {
@@ -439,16 +456,27 @@ impl TradePolicyService {
         })?;
         let policy = &config.research.policy_validation;
         let methodology_hash = CanonicalDigest::content_hash_json(&(
-            "trade_policy_methodology_v1",
-            PolicyValidationConfig::CPCV_N_GROUPS,
-            PolicyValidationConfig::CPCV_K_TEST,
-            PolicyValidationConfig::PBO_BLOCK_COUNT,
-            PolicyValidationConfig::FOLD_COUNT,
-            PolicyValidationConfig::COMPLETE_PATH_COUNT,
-            PolicyValidationConfig::UTILITY_CONFIDENCE_BPS,
-            PolicyValidationConfig::LATENCY_STRESS_MULTIPLIER,
-            WEATHER_OBSERVATION_DAY_CLOSE_GRACE_SECS,
-            policy.min_latency_profile_secs,
+            (
+                "trade_policy_methodology_v2",
+                POLICY_PERFORMANCE_METHODOLOGY_VERSION,
+                "common_executable_candidate_intersection",
+                "interval_uniqueness_weighted_groups",
+                "cpcv_path_closest_to_path_sharpe_median_for_dsr_observed_sharpe",
+                "governed_candidate_count_and_cross_candidate_sharpe_variance_for_dsr_trials",
+                "eight_block_cscv_pbo",
+                "market_clustered_one_sided_95pct_bootstrap_2000_replicates",
+            ),
+            (
+                PolicyValidationConfig::CPCV_N_GROUPS,
+                PolicyValidationConfig::CPCV_K_TEST,
+                PolicyValidationConfig::PBO_BLOCK_COUNT,
+                PolicyValidationConfig::FOLD_COUNT,
+                PolicyValidationConfig::COMPLETE_PATH_COUNT,
+                PolicyValidationConfig::UTILITY_CONFIDENCE_BPS,
+                PolicyValidationConfig::LATENCY_STRESS_MULTIPLIER,
+                WEATHER_OBSERVATION_DAY_CLOSE_GRACE_SECS,
+                policy.min_latency_profile_secs,
+            ),
         ))?;
         Ok(RuntimePolicyLimits {
             max_candidates: config
@@ -497,7 +525,7 @@ impl TradePolicyService {
                     Ok(limits) => Some(limits),
                     Err(error) => {
                         messages.push(format!(
-                            "frozen runtime v14 fit contract is unavailable: {error}"
+                            "frozen runtime v15 fit contract is unavailable: {error}"
                         ));
                         None
                     }
@@ -527,6 +555,12 @@ impl TradePolicyService {
         let profile_quality_gate_available = profile.is_some();
         if !profile_quality_gate_available {
             messages.push("immutable profile publication quality gate is unavailable".to_owned());
+        }
+        let profile_fitter_available = profile
+            .as_ref()
+            .is_some_and(|profile| profile.spec.policy_fitter.is_some());
+        if !profile_fitter_available {
+            messages.push("research profile has no implemented policy fitter".to_owned());
         }
         let candidate_count_allowed = runtime_limits.as_ref().is_some_and(|limits| {
             canonical_candidates.as_ref().is_some_and(|candidates| {
@@ -562,6 +596,7 @@ impl TradePolicyService {
             && evaluation_track_allowed
             && canonical_candidates.is_some()
             && profile_quality_gate_available
+            && profile_fitter_available
             && runtime_limits.is_some()
             && candidate_count_allowed;
         let candidate_set_hash = canonical_candidates
@@ -569,7 +604,8 @@ impl TradePolicyService {
             .map(CanonicalDigest::content_hash_json)
             .transpose()?;
         Ok(ContractPreflight {
-            valid,
+            valid: valid.into(),
+            profile_fitter_available,
             pit_cutoff_not_future,
             profile_quality_gate_available,
             runtime_config_version_id,
@@ -1500,6 +1536,12 @@ impl TradePolicyService {
                 fit_window_start: plan.fit_window_start,
                 fit_window_end: plan.fit_window_end,
                 pit_cutoff: request.selection.pit_cutoff,
+                activation_target: match request.evaluation_track {
+                    ResearchEvaluationTrack::ResearchOnly => VerticalActivationTarget::ResearchOnly,
+                    ResearchEvaluationTrack::SemiAutoCandidate => {
+                        VerticalActivationTarget::SemiAuto
+                    }
+                },
                 progress,
                 cancel,
             })
@@ -1764,102 +1806,36 @@ impl TradePolicyService {
             input.examples,
         )
         .await?;
-        let fit_examples = input
-            .examples
-            .iter()
-            .filter(|example| {
-                example.decision_at() >= input.fit_window_start
-                    && example.decision_at() < input.fit_window_end
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        if fit_examples.is_empty() {
-            return Err(ResearchError::ValidationMethodology {
-                detail: "Weather replay has no Dataset rows inside the frozen fit window"
-                    .to_owned(),
-            }
-            .into());
-        }
-        let total = u64::try_from(fit_examples.len()).map_err(|error| {
-            ResearchError::ValidationMethodology {
-                detail: format!("Weather replay example count does not fit u64: {error}"),
-            }
-        })?;
-        input.progress.report(ResearchJobProgress::with_total(
-            replay_progress_stage(input.purpose),
-            0,
-            total,
-        ));
-        let mut by_market = BTreeMap::<_, Vec<TrainingExample>>::new();
-        for example in fit_examples {
-            by_market
-                .entry(example.market_id.clone())
-                .or_default()
-                .push(example);
-        }
-        let (replay_window_start, replay_window_end) = weather_replay_window(&input)?;
-        let market_ids = by_market.keys().cloned().collect::<Vec<_>>();
-        let mut replayed_examples =
-            Vec::with_capacity(usize::try_from(total).map_err(|error| {
-                ResearchError::ValidationMethodology {
-                    detail: format!("Weather replay capacity does not fit usize: {error}"),
-                }
-            })?);
-        for market_chunk in market_ids.chunks(MAX_REPLAY_PAGE_MARKETS) {
-            ensure_policy_replay_active(input.purpose, input.cancel, "during L2 replay")?;
-            let page_examples = market_chunk
-                .iter()
-                .flat_map(|market_id| by_market.get(market_id).into_iter().flatten())
-                .cloned()
-                .collect::<Vec<_>>();
-            let token_ids = page_examples
-                .iter()
-                .flat_map(|example| {
-                    iter::once(example.selected_market.primary_token_id.clone())
-                        .chain(example.selected_market.secondary_token_id.clone())
-                })
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect::<Vec<_>>();
-            let page = input.source.replay_page(&ReplayPageRequest {
-                market_ids: market_chunk.to_vec(),
-                token_ids,
-                window_start: replay_window_start,
-                window_end: replay_window_end,
-                available_by: input.pit_cutoff,
-            })?;
-            replayed_examples.extend(replay_weather_page(&WeatherReplayRequest {
-                page: &page,
-                examples: &page_examples,
-                signals: &signals,
-                candidates: input.candidates,
-                profile: input.profile,
-                model_version_id: input.model_version_id,
-                runtime_config_version_id: input.runtime_config_version_id,
-                latency_profile: input.latency_profile,
-            })?);
-            let completed = u64::try_from(replayed_examples.len()).map_err(|error| {
-                ResearchError::ValidationMethodology {
-                    detail: format!("Weather replay progress does not fit u64: {error}"),
-                }
-            })?;
-            input.progress.report(ResearchJobProgress::with_total(
-                replay_progress_stage(input.purpose),
-                completed,
-                total,
-            ));
-        }
+        let replay = collect_weather_replay_inputs(&input, &signals)?;
         let embargo_secs = weather_embargo_secs(&input)?;
         input
             .progress
             .report(ResearchJobProgress::indeterminate("evaluating_trials", 0));
-        let evidence = evaluate_weather_policy_evidence(&WeatherEvidenceRequest {
+        let (structural_volatility_oos, structural_volatility_folds) =
+            evaluate_structural_volatility_oos(
+                &replay.structural_examples,
+                &replay.structural_trade_tape,
+            )?;
+        let mut evidence = evaluate_weather_policy_evidence(&WeatherEvidenceRequest {
             profile: input.profile,
             candidates: input.candidates,
             experiment_family_hash: input.experiment_family_hash,
             min_embargo_secs: embargo_secs,
-            replayed: &replayed_examples,
+            replayed: &replay.replayed_examples,
+            structural_volatility_oos,
+            structural_volatility_folds,
         })?;
+        let vertical_gate = evaluate_weather_proxy_gate(
+            &replay.gate_linkages,
+            &replay.gate_observations,
+            input.fit_window_start,
+            input.fit_window_end,
+            input.activation_target,
+        )?;
+        if input.activation_target != VerticalActivationTarget::ResearchOnly {
+            evidence.all_gates_passed &= vertical_gate.passes(input.activation_target);
+        }
+        evidence.vertical_gate_evidence = vec![vertical_gate];
         Ok(WeatherPolicyRecomputeResult {
             evidence,
             experiment_family_hash: input.experiment_family_hash.clone(),
@@ -2220,6 +2196,34 @@ impl TradePolicyService {
         })
     }
 
+    async fn require_validation_input_durability(
+        &self,
+        dataset: &TrainingDatasetInfo,
+    ) -> QuantResult<()> {
+        let materialization = require_dataset_materialization(dataset)?;
+        require_durable_artifact(&self.artifacts, materialization.parquet_uri).await?;
+        let source_ref = &materialization.manifest.source_slice;
+        require_durable_artifact(&self.artifacts, &source_ref.manifest_uri).await?;
+        let manifest_bytes = self
+            .read_and_hash_manifest(&source_ref.manifest_uri, &source_ref.manifest_hash)
+            .await?;
+        let manifest =
+            serde_json::from_slice::<SourceSliceManifestV2>(&manifest_bytes).map_err(|error| {
+                ResearchError::Serialization {
+                    detail: format!(
+                        "invalid Source Slice manifest at validation durability boundary: {error}"
+                    ),
+                }
+            })?;
+        manifest
+            .validate()
+            .map_err(|detail| ResearchError::ValidationMethodology { detail })?;
+        for object in &manifest.objects {
+            require_durable_artifact(&self.artifacts, &object.uri).await?;
+        }
+        Ok(())
+    }
+
     async fn load_validation_inputs(
         &self,
         artifact_id: &TradePolicyArtifactId,
@@ -2299,6 +2303,7 @@ impl TradePolicyService {
             .ok_or_else(|| ResearchError::ValidationMethodology {
                 detail: "trade policy has no evidence bundle".to_owned(),
             })?;
+        self.require_validation_input_durability(&dataset).await?;
         let dataset_bytes = self.artifacts.get(materialization.parquet_uri).await?;
         let examples = verify_frozen_dataset_artifact(&dataset, &dataset_bytes)?;
         Ok(ValidationInputs {
@@ -2330,7 +2335,7 @@ impl TradePolicyService {
             0,
         ));
         let verified = self
-            .verify_evidence_bundle(&inputs.current.payload_json, false)
+            .verify_evidence_bundle(&inputs.current.payload_json, true)
             .await?;
         let payload = &inputs.current.payload_json;
         payload
@@ -2400,6 +2405,7 @@ impl TradePolicyService {
                 fit_window_start: payload.fit_contract.fit_window_start,
                 fit_window_end: payload.fit_contract.fit_window_end,
                 pit_cutoff: payload.fit_contract.pit_cutoff,
+                activation_target: payload.activation_target,
                 progress,
                 cancel,
             })
@@ -2407,7 +2413,9 @@ impl TradePolicyService {
         let recomputed_contract_passes = recomputed.evidence.all_gates_passed
             && recomputed.experiment_family_hash == experiment_family_hash
             && recomputed.embargo_secs == payload.embargo_secs
-            && recomputed.evidence.cohorts == payload.cohorts;
+            && recomputed.evidence.cohorts == payload.cohorts
+            && recomputed.evidence.vertical_gate_evidence == payload.vertical_gate_evidence
+            && recomputed.evidence.structural_volatility_oos == payload.structural_volatility_oos;
         let mut actual_records = recomputed.evidence.records_by_kind()?;
         for records in actual_records.values_mut() {
             records.sort_by(|left, right| left.record_key.cmp(&right.record_key));
@@ -2689,7 +2697,10 @@ fn build_fit_artifact_payload(
     )?;
     Ok(TradePolicyArtifactPayload {
         format_version: TRADE_POLICY_ARTIFACT_FORMAT_VERSION,
-        activation_target: VerticalActivationTarget::SemiAuto,
+        activation_target: match request.evaluation_track {
+            ResearchEvaluationTrack::ResearchOnly => VerticalActivationTarget::ResearchOnly,
+            ResearchEvaluationTrack::SemiAutoCandidate => VerticalActivationTarget::SemiAuto,
+        },
         fit_contract: TradePolicyFitContract {
             profile_ref: plan.profile.profile_ref.clone(),
             evaluation_track: request.evaluation_track,
@@ -2747,7 +2758,8 @@ fn build_fit_artifact_payload(
             fit_job_id: manifest.fit_job_id.clone(),
             trial_ledger_hash: trial_ledger_hash.clone(),
         }),
-        vertical_gate_evidence: Vec::new(),
+        vertical_gate_evidence: evidence.vertical_gate_evidence,
+        structural_volatility_oos: evidence.structural_volatility_oos,
         cohorts: evidence.cohorts,
         validation: policy_validation_evidence(
             &aggregate,
@@ -2957,6 +2969,8 @@ const fn evidence_kind_slug(kind: TradePolicyEvidenceObjectKind) -> &'static str
         TradePolicyEvidenceObjectKind::CpcvPaths => "cpcv-paths",
         TradePolicyEvidenceObjectKind::CoverageGaps => "coverage-gaps",
         TradePolicyEvidenceObjectKind::StatisticalSummaries => "statistical-summaries",
+        TradePolicyEvidenceObjectKind::VerticalGates => "vertical-gates",
+        TradePolicyEvidenceObjectKind::StructuralVolatilityOos => "structural-volatility-oos",
     }
 }
 
@@ -2986,6 +3000,12 @@ fn validate_typed_policy_evidence(
             }
             TradePolicyEvidenceObjectKind::StatisticalSummaries => {
                 let _: TradePolicyStatisticalSummaryRow = record.decode_typed()?;
+            }
+            TradePolicyEvidenceObjectKind::VerticalGates => {
+                let _: VerticalGateEvidence = record.decode_typed()?;
+            }
+            TradePolicyEvidenceObjectKind::StructuralVolatilityOos => {
+                let _: StructuralVolatilityOosFoldRow = record.decode_typed()?;
             }
         }
     }
@@ -3126,7 +3146,9 @@ fn validation_row_lineage(
         }
         TradePolicyEvidenceObjectKind::CohortTrials
         | TradePolicyEvidenceObjectKind::CpcvPaths
-        | TradePolicyEvidenceObjectKind::StatisticalSummaries => ValidationRowLineage {
+        | TradePolicyEvidenceObjectKind::StatisticalSummaries
+        | TradePolicyEvidenceObjectKind::VerticalGates
+        | TradePolicyEvidenceObjectKind::StructuralVolatilityOos => ValidationRowLineage {
             example_id: None,
             market_id: None,
             token_id: None,
@@ -3159,6 +3181,8 @@ const fn evidence_kind_name(kind: TradePolicyEvidenceObjectKind) -> &'static str
         TradePolicyEvidenceObjectKind::CpcvPaths => "cpcv_paths",
         TradePolicyEvidenceObjectKind::CoverageGaps => "coverage_gaps",
         TradePolicyEvidenceObjectKind::StatisticalSummaries => "statistical_summaries",
+        TradePolicyEvidenceObjectKind::VerticalGates => "vertical_gates",
+        TradePolicyEvidenceObjectKind::StructuralVolatilityOos => "structural_volatility_oos",
     }
 }
 
@@ -3300,11 +3324,25 @@ fn append_contract_dataset_blockers(
     let dataset = context.dataset;
     push_blocker(
         blockers,
-        contract.valid,
+        contract.valid.is_pass(),
         TradePolicyPreflightBlockerKind::ContractInvalid,
         serde_json::json!({ "diagnostics": contract.messages }),
         serde_json::json!({ "profile_candidate_and_runtime_contract": "valid" }),
-        "Select a registered immutable profile and a canonical candidate family permitted by Runtime v14.",
+        "Select a registered immutable profile and a canonical candidate family permitted by Runtime v15.",
+        None,
+    );
+    push_blocker(
+        blockers,
+        contract.profile_fitter_available,
+        TradePolicyPreflightBlockerKind::ProfileFitterUnavailable,
+        serde_json::json!(
+            contract
+                .profile
+                .as_ref()
+                .and_then(|profile| profile.spec.policy_fitter)
+        ),
+        serde_json::json!({ "policy_fitter": "implemented" }),
+        "Select a profile with an explicitly implemented policy fitter.",
         None,
     );
     push_blocker(
@@ -3694,7 +3732,7 @@ fn assemble_preflight_view(
     let source_slice_messages =
         append_preflight_diagnostics(&mut contract, &mut dataset, &mut operational);
     let reusable_dataset_ready = reusable_dataset_ready(dataset_info, &dataset);
-    let operationally_ready = contract.valid
+    let operationally_ready = contract.valid.is_pass()
         && contract.profile_quality_gate_available
         && operational.latency_profile_present
         && operational.retention_runway_proven;
@@ -3772,7 +3810,8 @@ fn assemble_preflight_view(
         required_raw_retention_days: operational.required_raw_retention_days,
         retention_runway_days: operational.retention_runway_days,
         retention_runway_proven: operational.retention_runway_proven.into(),
-        contract_valid: contract.valid.into(),
+        contract_valid: contract.valid.is_pass().into(),
+        profile_fitter_available: contract.profile_fitter_available.into(),
         source_dataset_ready: dataset.ready.is_pass().into(),
         source_dataset_policy_fit: dataset.policy_fit.is_pass().into(),
         raw_trajectory_labels_present: dataset.raw_trajectory_labels_present.is_pass().into(),
@@ -4042,6 +4081,55 @@ impl TradePolicyPort for TradePolicyService {
         }))
     }
 
+    async fn page_evidence_rows(
+        &self,
+        artifact_id: &TradePolicyArtifactId,
+        kind: TradePolicyEvidenceObjectKind,
+        query: TradePolicyEvidenceRowListQuery,
+    ) -> QuantResult<Option<Paginated<TradePolicyEvidenceRowView>>> {
+        let Some(policy) = self.policies.find(artifact_id).await? else {
+            return Ok(None);
+        };
+        let mut evidence = self
+            .verify_evidence_bundle(&policy.payload_json, false)
+            .await?;
+        let rows =
+            evidence
+                .records
+                .remove(&kind)
+                .ok_or_else(|| ResearchError::ValidationMethodology {
+                    detail: format!("policy {artifact_id} evidence object {kind:?} is missing"),
+                })?;
+        let page = query.page.normalized();
+        let total =
+            u64::try_from(rows.len()).map_err(|error| ResearchError::ValidationMethodology {
+                detail: format!("policy evidence row count does not fit u64: {error}"),
+            })?;
+        let offset = usize::try_from(page.offset()).map_err(|error| {
+            ResearchError::ValidationMethodology {
+                detail: format!("policy evidence page offset does not fit usize: {error}"),
+            }
+        })?;
+        let limit = usize::try_from(page.limit()).map_err(|error| {
+            ResearchError::ValidationMethodology {
+                detail: format!("policy evidence page size does not fit usize: {error}"),
+            }
+        })?;
+        let items = rows
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .map(|record| TradePolicyEvidenceRowView {
+                kind,
+                record_key: record.record_key,
+                event_at: record.event_at,
+                payload: record.payload,
+                row_hash: record.row_hash,
+            })
+            .collect();
+        Ok(Some(Paginated::new(items, total, page.page, page.size)))
+    }
+
     async fn page(
         &self,
         query: TradePolicyListQuery,
@@ -4236,6 +4324,121 @@ const fn replay_progress_stage(purpose: PolicyReplayPurpose) -> &'static str {
         PolicyReplayPurpose::Fit => "replaying",
         PolicyReplayPurpose::Validation => "recomputing_replay",
     }
+}
+
+fn collect_weather_replay_inputs(
+    input: &WeatherPolicyRecomputeInput<'_>,
+    signals: &FrozenPolicySignals,
+) -> QuantResult<WeatherReplayInputs> {
+    let fit_examples = input
+        .examples
+        .iter()
+        .filter(|example| {
+            example.decision_at() >= input.fit_window_start
+                && example.decision_at() < input.fit_window_end
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if fit_examples.is_empty() {
+        return Err(ResearchError::ValidationMethodology {
+            detail: "Weather replay has no Dataset rows inside the frozen fit window".to_owned(),
+        }
+        .into());
+    }
+    let total = u64::try_from(fit_examples.len()).map_err(|error| {
+        ResearchError::ValidationMethodology {
+            detail: format!("Weather replay example count does not fit u64: {error}"),
+        }
+    })?;
+    input.progress.report(ResearchJobProgress::with_total(
+        replay_progress_stage(input.purpose),
+        0,
+        total,
+    ));
+    let structural_examples = fit_examples.clone();
+    let mut by_market = BTreeMap::<_, Vec<TrainingExample>>::new();
+    for example in fit_examples {
+        by_market
+            .entry(example.market_id.clone())
+            .or_default()
+            .push(example);
+    }
+    let (replay_window_start, replay_window_end) = weather_replay_window(input)?;
+    let market_ids = by_market.keys().cloned().collect::<Vec<_>>();
+    let mut replayed_examples = Vec::with_capacity(usize::try_from(total).map_err(|error| {
+        ResearchError::ValidationMethodology {
+            detail: format!("Weather replay capacity does not fit usize: {error}"),
+        }
+    })?);
+    let mut gate_linkages = BTreeMap::<ContentHash, MarketLinkage>::new();
+    let mut gate_observations = BTreeMap::<ContentHash, WeatherObservationFact>::new();
+    let mut structural_trade_tape = BTreeMap::<ContentHash, TradeTapeRow>::new();
+    for market_chunk in market_ids.chunks(MAX_REPLAY_PAGE_MARKETS) {
+        ensure_policy_replay_active(input.purpose, input.cancel, "during L2 replay")?;
+        let page_examples = market_chunk
+            .iter()
+            .flat_map(|market_id| by_market.get(market_id).into_iter().flatten())
+            .cloned()
+            .collect::<Vec<_>>();
+        let token_ids = page_examples
+            .iter()
+            .flat_map(|example| {
+                iter::once(example.selected_market.primary_token_id.clone())
+                    .chain(example.selected_market.secondary_token_id.clone())
+            })
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let page = input.source.replay_page(&ReplayPageRequest {
+            market_ids: market_chunk.to_vec(),
+            token_ids,
+            window_start: replay_window_start,
+            window_end: replay_window_end,
+            available_by: input.pit_cutoff,
+        })?;
+        for linkage in &page.linkages {
+            gate_linkages
+                .entry(linkage.content_hash.clone())
+                .or_insert_with(|| linkage.clone());
+        }
+        for observation in &page.weather_observations {
+            gate_observations
+                .entry(observation.report_hash.clone())
+                .or_insert_with(|| observation.clone());
+        }
+        for trade in &page.trade_tape {
+            structural_trade_tape
+                .entry(CanonicalDigest::content_hash_json(trade)?)
+                .or_insert_with(|| trade.clone());
+        }
+        replayed_examples.extend(replay_weather_page(&WeatherReplayRequest {
+            page: &page,
+            examples: &page_examples,
+            signals,
+            candidates: input.candidates,
+            profile: input.profile,
+            model_version_id: input.model_version_id,
+            runtime_config_version_id: input.runtime_config_version_id,
+            latency_profile: input.latency_profile,
+        })?);
+        let completed = u64::try_from(replayed_examples.len()).map_err(|error| {
+            ResearchError::ValidationMethodology {
+                detail: format!("Weather replay progress does not fit u64: {error}"),
+            }
+        })?;
+        input.progress.report(ResearchJobProgress::with_total(
+            replay_progress_stage(input.purpose),
+            completed,
+            total,
+        ));
+    }
+    Ok(WeatherReplayInputs {
+        structural_examples,
+        replayed_examples,
+        gate_linkages: gate_linkages.into_values().collect(),
+        gate_observations: gate_observations.into_values().collect(),
+        structural_trade_tape: structural_trade_tape.into_values().collect(),
+    })
 }
 
 fn weather_replay_window(

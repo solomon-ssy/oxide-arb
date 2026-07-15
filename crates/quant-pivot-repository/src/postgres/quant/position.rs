@@ -288,6 +288,10 @@ pub async fn apply_fill(
         .map_err(StorageError::from)?;
 
     let Some(row) = existing else {
+        // `cost_usd` is the fee-inclusive cash cost. Persisting the raw venue
+        // fill price here would make the first fill use gross price while a
+        // later fill switches the same lot to fee-inclusive average cost.
+        let avg_price = price_from_cost_and_shares(fill.cost_usd, fill.shares)?;
         return quant_position::Entity::insert(
             NewPosition {
                 position_id: PositionId::from_v7(),
@@ -299,7 +303,7 @@ pub async fn apply_fill(
                 side: fill.side,
                 state: PositionLedgerState::Open,
                 shares: fill.shares,
-                avg_price: fill.price,
+                avg_price,
                 cost_usd: fill.cost_usd,
                 realized_pnl_usd: Usd::ZERO,
                 source: fill.source,
