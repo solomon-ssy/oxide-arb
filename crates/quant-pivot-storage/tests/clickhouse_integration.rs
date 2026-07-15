@@ -4,14 +4,14 @@ use chrono::Utc;
 use prometheus::IntCounter;
 use quant_pivot_models::{
     clickhouse::{ChPrice, ChSchemaVersion, ChShares, ChUsd, TradeTapeRow},
-    config::{ClickHouseConfig, ClickHouseRawLifecycleConfig},
+    config::{ClickHouseConfig, ClickHouseMigrationConfig},
     enums::clickhouse::{
         ChTradeParticipantRole, ChTradeReconciliationStatus, ChTradeSide, ChTradeTapeSource,
     },
     types::{MarketId, Price, Shares, TokenId, Usd},
 };
 use quant_pivot_storage::{
-    clickhouse::{ChWriteManager, ClickHousePool},
+    clickhouse::{ChWriteManager, ClickHousePool, apply_online_schema_migrations, verify_schema},
     write::{AsyncWriter, AsyncWriterConfig, AsyncWriterObservability, AsyncWriterWorker},
 };
 use rust_decimal_macros::dec;
@@ -29,10 +29,10 @@ fn test_ch_config(port: u16) -> ClickHouseConfig {
         database: "default".into(),
         user: "default".into(),
         password: String::new(),
+        migration: ClickHouseMigrationConfig::default(),
         batch_size: 100,
         flush_interval_secs: 5,
         max_concurrent_inserts: 4,
-        raw_lifecycle: ClickHouseRawLifecycleConfig::default(),
     }
 }
 
@@ -49,21 +49,25 @@ async fn setup_clickhouse() -> (
                 .with_port(8123.into())
                 .with_expected_status_code(200u16),
         ))
+        .with_env_var("CLICKHOUSE_SKIP_USER_SETUP", "1")
         .with_startup_timeout(Duration::from_mins(2))
         .start()
         .await
         .expect("ClickHouse container");
     let port = container.get_host_port_ipv4(8123).await.expect("port");
     let config = test_ch_config(port);
+    apply_online_schema_migrations(&config)
+        .await
+        .expect("deploy schema");
     let pool = ClickHousePool::connect(&config).await.expect("connect");
-    pool.ensure_schema().await.expect("schema");
+    pool.verify_schema().await.expect("verify schema");
     let client = pool.client().clone();
     (pool, client, port, container)
 }
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn clickhouse_database_bootstrap_creates_missing_database() {
+async fn concurrent_first_start_creates_missing_database_and_schema() {
     let container = testcontainers::GenericImage::new("clickhouse/clickhouse-server", "26.5")
         .with_exposed_port(8123.into())
         .with_wait_for(WaitFor::http(
@@ -71,6 +75,7 @@ async fn clickhouse_database_bootstrap_creates_missing_database() {
                 .with_port(8123.into())
                 .with_expected_status_code(200u16),
         ))
+        .with_env_var("CLICKHOUSE_SKIP_USER_SETUP", "1")
         .with_startup_timeout(Duration::from_mins(2))
         .start()
         .await
@@ -81,8 +86,29 @@ async fn clickhouse_database_bootstrap_creates_missing_database() {
         ..test_ch_config(port)
     };
 
+    let missing = verify_schema(&config)
+        .await
+        .expect_err("read-only startup must not create a missing database");
+    assert!(missing.to_string().contains("does not exist"));
+
+    let (first, second) = tokio::join!(
+        apply_online_schema_migrations(&config),
+        apply_online_schema_migrations(&config)
+    );
+    assert_eq!(
+        first
+            .expect("first concurrent schema migration")
+            .current_version,
+        1
+    );
+    assert_eq!(
+        second
+            .expect("second concurrent schema migration")
+            .current_version,
+        1
+    );
     let pool = ClickHousePool::connect(&config).await.expect("connect");
-    pool.ensure_schema().await.expect("schema");
+    pool.verify_schema().await.expect("verify schema");
 
     let count: u64 = pool
         .client()
@@ -104,10 +130,11 @@ async fn clickhouse_health_check() {
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn clickhouse_schema_idempotent() {
-    let (pool, _client, _port, _container) = setup_clickhouse().await;
-    pool.ensure_schema()
+    let (pool, _client, port, _container) = setup_clickhouse().await;
+    apply_online_schema_migrations(&test_ch_config(port))
         .await
-        .expect("second schema creation should be idempotent");
+        .expect("second schema deployment should be idempotent");
+    pool.verify_schema().await.expect("schema remains valid");
 }
 
 #[derive(clickhouse::Row, serde::Deserialize)]
@@ -140,6 +167,45 @@ async fn canonical_evidence_tables_have_no_delete_ttl() {
 
 #[tokio::test]
 #[ignore = "requires Docker"]
+async fn runtime_schema_verification_rejects_unmanaged_raw_ttl() {
+    let (_pool, client, port, _container) = setup_clickhouse().await;
+    client
+        .query(
+            "ALTER TABLE quant_book_l2_event \
+             MODIFY TTL venue_event_time + INTERVAL 200 DAY DELETE \
+             SETTINGS materialize_ttl_after_modify = 0",
+        )
+        .execute()
+        .await
+        .expect("install unmanaged TTL");
+
+    let error = verify_schema(&test_ch_config(port))
+        .await
+        .expect_err("runtime contract must reject unmanaged TTL");
+    assert!(error.to_string().contains("unmanaged table TTL"));
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn runtime_schema_verification_rejects_migration_ledger_drift() {
+    let (_pool, client, port, _container) = setup_clickhouse().await;
+    client
+        .query(
+            "INSERT INTO quant_pivot_schema_migration \
+             SELECT 1, 'cloud_baseline', 'blake3:tampered', now64(3) + INTERVAL 1 SECOND",
+        )
+        .execute()
+        .await
+        .expect("insert conflicting migration ledger row");
+
+    let error = verify_schema(&test_ch_config(port))
+        .await
+        .expect_err("runtime contract must reject immutable migration drift");
+    assert!(error.to_string().contains("distinct definitions"));
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
 async fn clickhouse_fact_contract_uses_decimal_and_enum_columns() {
     let (_pool, client, _port, _container) = setup_clickhouse().await;
     let expected: [(&str, &[&str]); 8] = [
@@ -154,8 +220,8 @@ async fn clickhouse_fact_contract_uses_decimal_and_enum_columns() {
         (
             "quant_book_l2_checkpoint",
             &[
-                "`bid_prices` Array(Decimal(18, 8))",
-                "`bid_sizes` Array(Decimal(38, 18))",
+                "`bids_json` String CODEC(ZSTD(3))",
+                "`asks_json` String CODEC(ZSTD(3))",
                 "`source_event_hash` String",
             ],
         ),

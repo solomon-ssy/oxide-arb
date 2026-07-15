@@ -33,7 +33,7 @@ use quant_pivot_repository::{
 use super::pg_repos::PgRepositories;
 use quant_pivot_storage::{
     cache::{CacheManager, MokaBackend, RedisBackend, RedisPool, TieredCache, connect_pool},
-    clickhouse::{ChWriteManager, ClickHousePool},
+    clickhouse::{ChWriteManager, ClickHousePool, apply_online_schema_migrations, verify_schema},
     postgres::{
         PostgresPool,
         migration::{Migrator, MigratorTrait},
@@ -137,8 +137,31 @@ async fn connect_persistence(
     let pg = Arc::new(PostgresPool::connect(&deploy.db.postgres).await?);
     Migrator::up(pg.connection(), None).await?;
 
+    if deploy.db.clickhouse.migration.auto_apply_online {
+        let migration_config = deploy.db.clickhouse.migration_connection();
+        let schema = apply_online_schema_migrations(&migration_config).await?;
+        tracing::info!(
+            schema_version = schema.current_version,
+            required_objects = schema.required_object_count,
+            dedicated_identity = deploy.db.clickhouse.migration.user.is_some(),
+            "ClickHouse online-safe schema migrations completed during startup"
+        );
+    } else {
+        let schema = verify_schema(&deploy.db.clickhouse).await?;
+        tracing::info!(
+            schema_version = schema.current_version,
+            required_objects = schema.required_object_count,
+            "ClickHouse automatic migration disabled; existing schema verified"
+        );
+    }
+
     let ch = Arc::new(ClickHousePool::connect(&deploy.db.clickhouse).await?);
-    ch.ensure_schema().await?;
+    let schema = ch.verify_schema().await?;
+    tracing::info!(
+        schema_version = schema.current_version,
+        required_objects = schema.required_object_count,
+        "ClickHouse runtime schema verified"
+    );
 
     let redis = connect_pool(&deploy.cache.redis).await?;
     let cache = Arc::new(CacheManager::new(

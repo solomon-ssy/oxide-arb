@@ -243,12 +243,12 @@ application_name = "quant-pivot"
 
 [db.clickhouse]
 # Purpose: ClickHouse HTTP endpoint (analytics timeseries: ticks, books,
-# detections, evidence). Default: "http://localhost:8123".
-url = "http://REPLACE_WITH_CH_HOST:8123"
+# detections, evidence). ClickHouse Cloud HTTP/TLS endpoint uses port 8443.
+url = "https://REPLACE_WITH_CH_HOST:8443"
 # Purpose: database name. Default: "oxide_arb".
 database = "oxide_arb"
-# Purpose: user name. Default: "default".
-user = "default"
+# Purpose: least-privilege long-lived ingestion/query identity.
+user = "quant_pivot_runtime"
 # Purpose: password. Caution: set via QUANT_PIVOT__DB__CLICKHOUSE__PASSWORD in
 # production — never here. Default: "".
 password = ""
@@ -263,6 +263,18 @@ batch_size = 5000
 # Purpose: maximum concurrent insert operations (semaphore). Impact: caps
 # write pressure on the CH server under burst load. Default: 8.
 max_concurrent_inserts = 8
+
+[db.clickhouse.migration]
+# Apply only migrations classified as online-safe during application startup.
+# Schema rewrites/backfills/partition-key changes are never auto-applied.
+auto_apply_online = true
+require_dedicated_identity = true
+# Caution: production should use a dedicated DDL identity. Supply these only
+# through the secret manager/environment, never in this file:
+# QUANT_PIVOT__DB__CLICKHOUSE__MIGRATION__USER
+# QUANT_PIVOT__DB__CLICKHOUSE__MIGRATION__PASSWORD
+# The runtime role still needs metadata visibility plus SELECT on the migration
+# ledger/claim tables so post-migration verification can fail closed.
 
 # ── Cache ────────────────────────────────────────────────────────────────────
 

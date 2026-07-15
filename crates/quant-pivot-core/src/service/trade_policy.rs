@@ -44,7 +44,7 @@ use quant_pivot_models::{
         ArtifactUri, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION, ExecutablePriceBasis, MarketId,
         ModelSpecId, ModelVersionId, POLICY_EVIDENCE_OBJECT_FORMAT_VERSION,
         ResearchEvaluationTrack, ResearchJobId, ResearchProfileArtifact, ResearchProfileRef,
-        ResearchReadinessEvidencePayload, RetentionRunwayEvidenceV1, RuntimeConfigVersionId,
+        ResearchReadinessEvidencePayload, RetentionRunwayEvidenceV2, RuntimeConfigVersionId,
         SchemaVersion, ShadowLatencyProfileV1, SourceSliceManifestRef, SourceSliceManifestV2,
         SourceSliceObjectKind, StructuralVolatilityOosFoldRow,
         TRADE_POLICY_ARTIFACT_FORMAT_VERSION, TRADE_POLICY_EVIDENCE_BUNDLE_FORMAT_VERSION, TokenId,
@@ -2546,14 +2546,14 @@ impl TradePolicyService {
                 ResearchReadinessEvidencePayload::RetentionRunway(retention) => Some(retention),
                 ResearchReadinessEvidencePayload::ShadowLatencyProfile(_) => None,
             });
-        let retention_runway_days = retention.and_then(|retention| retention.effective_runway_days);
+        let retention_runway_days = retention.and_then(|retention| retention.measured_history_days);
         let retention_runway_proven =
             retention
                 .zip(required_raw_retention_days)
                 .is_some_and(|(retention, required_days)| {
                     retention.required_days >= required_days
                         && retention
-                            .effective_runway_days
+                            .measured_history_days
                             .is_some_and(|days| days >= required_days)
                         && retention.proven()
                 });
@@ -3304,7 +3304,7 @@ struct PreflightBlockerContext<'a> {
     retention_runway_days: Option<u32>,
     required_raw_retention_days: Option<u32>,
     retention_runway_proven: bool,
-    retention_evidence: Option<&'a RetentionRunwayEvidenceV1>,
+    retention_evidence: Option<&'a RetentionRunwayEvidenceV2>,
 }
 
 fn preflight_blockers(
@@ -3505,7 +3505,7 @@ fn append_source_operations_blockers(
             "evidence": context.retention_evidence,
         }),
         serde_json::json!({ "minimum_days": context.required_raw_retention_days }),
-        "Bind a signed deployment retention plan and a current ClickHouse capacity-runway measurement.",
+        "Capture signed ClickHouse Cloud raw-history evidence with monthly partitions, no unmanaged table TTL, and the required coverage window.",
         None,
     );
 }
@@ -3683,7 +3683,7 @@ fn append_preflight_diagnostics(
     }
     if !operational.retention_runway_proven {
         contract.messages.push(
-            "the latest signed retention evidence does not prove actual history and capacity runway"
+            "the latest signed retention evidence does not prove the required ClickHouse Cloud raw-history coverage"
                 .to_owned(),
         );
     }

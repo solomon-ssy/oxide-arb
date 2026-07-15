@@ -5,7 +5,7 @@ use super::{DeployConfig, WEATHER_OBSERVATION_DAY_CLOSE_GRACE_SECS};
 use crate::{
     constants::POLYGON_CHAIN_ID,
     enums::quant::{ExecutionWalletKind, QuantRuntimeMode},
-    types::{ContentHash, IcaoStation, minimum_raw_retention_days},
+    types::IcaoStation,
 };
 use quant_pivot_error::config_validation::{
     ConfigValidationError, ConfigValidationReport, ConfigWarning,
@@ -61,53 +61,43 @@ pub fn validate_deploy_common(deploy: &DeployConfig) -> ConfigValidationReport {
             detail: "batch_size, flush_interval_secs, max_concurrent_inserts must be > 0".into(),
         });
     }
-    let lifecycle = &deploy.db.clickhouse.raw_lifecycle;
-    let minimum_retention_days = match minimum_raw_retention_days() {
-        Ok(days) => days,
-        Err(detail) => {
-            report.errors.push(ConfigValidationError::InvalidValue {
-                field: "db.clickhouse.raw_lifecycle.retention_days",
-                detail: format!("cannot derive the immutable profile retention floor: {detail}"),
-            });
-            u32::MAX
-        }
-    };
-    if lifecycle.hot_days == 0
-        || lifecycle.retention_days < minimum_retention_days
-        || lifecycle.hot_days >= lifecycle.retention_days
-    {
+    let migration_credentials = &deploy.db.clickhouse.migration;
+    if migration_credentials.user.is_some() != migration_credentials.password.is_some() {
         report.errors.push(ConfigValidationError::InvalidValue {
-            field: "db.clickhouse.raw_lifecycle",
-            detail: format!(
-                "hot_days must be positive and retention_days must be at least {minimum_retention_days} and greater than hot_days"
-            ),
+            field: "db.clickhouse.migration",
+            detail: "user and password must either both be configured or both be omitted".into(),
         });
     }
-    if lifecycle.cold_volume.as_ref().is_some_and(|volume| {
-        volume.is_empty()
-            || !volume
-                .bytes()
-                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
-    }) {
-        report.errors.push(ConfigValidationError::InvalidValue {
-            field: "db.clickhouse.raw_lifecycle.cold_volume",
-            detail: "must contain only lowercase ASCII letters, digits, and underscores".into(),
-        });
-    }
-    if lifecycle.delete_enabled
-        && (lifecycle.cold_volume.is_none()
-            || lifecycle
-                .signed_retention_plan_hash
-                .as_ref()
-                .is_none_or(|hash| ContentHash::parse(hash).is_err()))
+    if migration_credentials.auto_apply_online
+        && migration_credentials.require_dedicated_identity
+        && migration_credentials.user.is_none()
     {
         report.errors.push(ConfigValidationError::InvalidValue {
-            field: "db.clickhouse.raw_lifecycle.delete_enabled",
-            detail: "TTL DELETE requires a cold volume and canonical signed_retention_plan_hash"
+            field: "db.clickhouse.migration",
+            detail: "auto_apply_online with require_dedicated_identity requires dedicated user and password"
                 .into(),
         });
     }
-
+    if migration_credentials
+        .user
+        .as_deref()
+        .is_some_and(|user| user.trim().is_empty())
+    {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "db.clickhouse.migration.user",
+            detail: "must not be empty when a dedicated migration identity is configured".into(),
+        });
+    }
+    if migration_credentials
+        .password
+        .as_deref()
+        .is_some_and(str::is_empty)
+    {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "db.clickhouse.migration.password",
+            detail: "must not be empty when a dedicated migration identity is configured".into(),
+        });
+    }
     validate_cache_redis(deploy, &mut report);
 
     if deploy
@@ -441,6 +431,18 @@ mod tests {
         deploy.market_data.gamma.catalog_visibility_guard_secs = 5;
         deploy.db.postgres.lock_timeout_ms = 5_000;
         assert!(validate_deploy_common(&deploy).has_errors());
+    }
+
+    #[test]
+    fn production_schema_auto_apply_requires_dedicated_identity_when_governed() {
+        let mut deploy = DeployConfig::default();
+        deploy.db.clickhouse.migration.require_dedicated_identity = true;
+        assert!(validate_deploy_common(&deploy).has_errors());
+
+        deploy.db.clickhouse.migration.user = Some("quant_pivot_migrator".into());
+        deploy.db.clickhouse.migration.password = Some("test-only-secret".into());
+        let report = validate_deploy_common(&deploy);
+        assert!(!report.has_errors(), "errors: {:?}", report.errors);
     }
 
     #[test]

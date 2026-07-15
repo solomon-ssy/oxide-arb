@@ -10,7 +10,10 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use quant_pivot_models::config::DeployConfig;
 use quant_pivot_research::artifact::build_artifact_store;
-use quant_pivot_storage::{clickhouse::ClickHousePool, postgres::PostgresPool};
+use quant_pivot_storage::{
+    clickhouse::{ClickHousePool, apply_online_schema_migrations, verify_schema},
+    postgres::PostgresPool,
+};
 use quant_pivot_test_support::{
     research_ui_seed::ResearchUiSeedSummary,
     ui_demo_seed::{UiDemoSeedSummary, seed_ui_demo_ck, seed_ui_demo_pg},
@@ -76,6 +79,15 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    if deploy.db.clickhouse.migration.auto_apply_online {
+        apply_online_schema_migrations(&deploy.db.clickhouse.migration_connection())
+            .await
+            .context("apply ClickHouse online-safe schema migrations")?;
+    } else {
+        verify_schema(&deploy.db.clickhouse)
+            .await
+            .context("verify ClickHouse schema")?;
+    }
     let ch = ClickHousePool::connect(&deploy.db.clickhouse)
         .await
         .context("connect clickhouse")?;

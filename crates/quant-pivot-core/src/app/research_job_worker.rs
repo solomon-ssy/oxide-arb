@@ -296,7 +296,6 @@ impl AppContext {
                 as Arc<dyn ResearchReadinessEvidenceRepository>,
             Arc::clone(&self.research.artifact_store),
             EvidenceAttestor::from_config(&self.config.research.evidence_attestation)?,
-            &self.config.db.clickhouse.raw_lifecycle,
         )?);
         let backtest_port = Arc::new(CoreBacktestPort::from_research(
             &self.research,

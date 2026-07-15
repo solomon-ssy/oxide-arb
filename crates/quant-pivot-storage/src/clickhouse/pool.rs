@@ -1,25 +1,25 @@
 //! `ClickHouse` client wrapper.
 
-use crate::clickhouse::{ensure, schema};
+use crate::clickhouse::migration;
 use quant_pivot_error::storage::StorageError;
-use quant_pivot_models::config::{ClickHouseConfig, ClickHouseRawLifecycleConfig};
+use quant_pivot_models::config::ClickHouseConfig;
 use tracing::info;
 
 pub struct ClickHousePool {
     client: clickhouse::Client,
-    raw_lifecycle: ClickHouseRawLifecycleConfig,
 }
 
 impl ClickHousePool {
-    /// Connect to the configured database, creating it on first boot when absent.
+    /// Connect to a schema-managed database without performing DDL.
     pub async fn connect(config: &ClickHouseConfig) -> Result<Self, StorageError> {
-        ensure::ensure_database(config).await?;
+        let pool = Self::from_config(config);
+        pool.health_check().await?;
         info!(
             url = %config.url,
             database = %config.database,
             "ClickHouse client initialized"
         );
-        Ok(Self::from_config(config))
+        Ok(pool)
     }
 
     /// Build a pool from config without opening a connection or ensuring the database.
@@ -34,7 +34,6 @@ impl ClickHousePool {
                 .with_database(&config.database)
                 .with_user(&config.user)
                 .with_password(&config.password),
-            raw_lifecycle: config.raw_lifecycle.clone(),
         }
     }
 
@@ -53,44 +52,8 @@ impl ClickHousePool {
         Ok(())
     }
 
-    pub async fn ensure_schema(&self) -> Result<(), StorageError> {
-        for ddl in schema::all_ddl() {
-            self.client.query(&ddl).execute().await?;
-        }
-        self.apply_raw_lifecycle().await?;
-        info!("ClickHouse schema ensured");
-        Ok(())
-    }
-
-    async fn apply_raw_lifecycle(&self) -> Result<(), StorageError> {
-        let lifecycle = &self.raw_lifecycle;
-        for spec in schema::RAW_LIFECYCLE_TABLES {
-            let query = match &lifecycle.cold_volume {
-                Some(volume) if lifecycle.delete_enabled => format!(
-                    "ALTER TABLE {} MODIFY TTL {} + INTERVAL {} DAY TO VOLUME '{}', {} + INTERVAL {} DAY DELETE",
-                    spec.table,
-                    spec.time_column,
-                    lifecycle.hot_days,
-                    volume,
-                    spec.time_column,
-                    lifecycle.retention_days,
-                ),
-                Some(volume) => format!(
-                    "ALTER TABLE {} MODIFY TTL {} + INTERVAL {} DAY TO VOLUME '{}'",
-                    spec.table, spec.time_column, lifecycle.hot_days, volume,
-                ),
-                None => format!("ALTER TABLE {} REMOVE TTL", spec.table),
-            };
-            self.client.query(&query).execute().await?;
-        }
-        info!(
-            hot_days = lifecycle.hot_days,
-            retention_days = lifecycle.retention_days,
-            cold_volume = lifecycle.cold_volume.as_deref().unwrap_or("disabled"),
-            delete_enabled = lifecycle.delete_enabled,
-            retention_plan_bound = lifecycle.signed_retention_plan_hash.is_some(),
-            "ClickHouse native raw lifecycle applied"
-        );
-        Ok(())
+    /// Verify the immutable schema contract using metadata reads only.
+    pub async fn verify_schema(&self) -> Result<migration::ClickHouseSchemaStatus, StorageError> {
+        migration::verify_schema_client(&self.client).await
     }
 }

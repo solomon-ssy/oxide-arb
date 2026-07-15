@@ -3,14 +3,14 @@
 use chrono::Utc;
 use quant_pivot_models::{
     clickhouse::{BookL2CheckpointRow, BookMicrostructureRow, ChPrice, ChSchemaVersion},
-    config::{ClickHouseConfig, ClickHouseRawLifecycleConfig},
+    config::{ClickHouseConfig, ClickHouseMigrationConfig},
     enums::clickhouse::ChFactSource,
     types::{ContentHash, MarketId, Price, Shares, TokenId, Usd},
 };
 use quant_pivot_repository::{
     clickhouse::ChQuantFactReadRepository, traits::QuantFactReadRepository,
 };
-use quant_pivot_storage::clickhouse::ClickHousePool;
+use quant_pivot_storage::clickhouse::{ClickHousePool, apply_online_schema_migrations};
 use rust_decimal::Decimal;
 use std::{sync::Arc, time::Duration};
 use testcontainers::{
@@ -26,10 +26,10 @@ fn test_ch_config(port: u16) -> ClickHouseConfig {
         database: "default".into(),
         user: "default".into(),
         password: String::new(),
+        migration: ClickHouseMigrationConfig::default(),
         batch_size: 100,
         flush_interval_secs: 5,
         max_concurrent_inserts: 4,
-        raw_lifecycle: ClickHouseRawLifecycleConfig::default(),
     }
 }
 
@@ -45,17 +45,18 @@ async fn setup_clickhouse() -> (
                 .with_port(8123.into())
                 .with_expected_status_code(200u16),
         ))
+        .with_env_var("CLICKHOUSE_SKIP_USER_SETUP", "1")
         .with_startup_timeout(Duration::from_mins(2))
         .start()
         .await
         .expect("ClickHouse container");
     let port = container.get_host_port_ipv4(8123).await.expect("port");
-    let pool = Arc::new(
-        ClickHousePool::connect(&test_ch_config(port))
-            .await
-            .expect("connect"),
-    );
-    pool.ensure_schema().await.expect("schema");
+    let config = test_ch_config(port);
+    apply_online_schema_migrations(&config)
+        .await
+        .expect("schema deploy");
+    let pool = Arc::new(ClickHousePool::connect(&config).await.expect("connect"));
+    pool.verify_schema().await.expect("schema verify");
     let client = pool.client().clone();
     (pool, client, container)
 }

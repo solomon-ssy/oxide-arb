@@ -5,10 +5,10 @@ use clickhouse::Row;
 use quant_pivot_error::storage::StorageError;
 use serde::Deserialize;
 
-use crate::clickhouse::{ClickHousePool, RawLifecycleTable};
+use crate::clickhouse::{ClickHousePool, RawHistoryTable};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RawLifecycleObservation {
+pub struct RawHistoryObservation {
     pub earliest_ms: Option<i64>,
     pub latest_ms: Option<i64>,
     pub row_count: u64,
@@ -27,11 +27,11 @@ pub struct BookLatencyObservation {
 }
 
 impl ClickHousePool {
-    pub async fn observe_raw_lifecycle_table(
+    pub async fn observe_raw_history_table(
         &self,
-        spec: RawLifecycleTable,
+        spec: RawHistoryTable,
         as_of: DateTime<Utc>,
-    ) -> Result<RawLifecycleObservation, StorageError> {
+    ) -> Result<RawHistoryObservation, StorageError> {
         let range_sql = format!(
             "SELECT toUnixTimestamp64Milli(minOrNull({time})) AS earliest_ms, \
              toUnixTimestamp64Milli(maxOrNull({time})) AS latest_ms, count() AS row_count \
@@ -64,7 +64,7 @@ impl ClickHousePool {
             .bind(spec.table)
             .fetch_one::<TableMetadataRow>()
             .await?;
-        Ok(RawLifecycleObservation {
+        Ok(RawHistoryObservation {
             earliest_ms: range.earliest_ms,
             latest_ms: range.latest_ms,
             row_count: range.row_count,
@@ -73,14 +73,6 @@ impl ClickHousePool {
             partition_key: metadata.partition_key,
             create_table_query: metadata.create_table_query,
         })
-    }
-
-    pub async fn free_disk_bytes(&self) -> Result<u64, StorageError> {
-        self.client()
-            .query("SELECT sum(free_space) AS free_disk_bytes FROM system.disks")
-            .fetch_one::<u64>()
-            .await
-            .map_err(Into::into)
     }
 
     pub async fn observe_book_latency(

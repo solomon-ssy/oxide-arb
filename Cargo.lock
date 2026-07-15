@@ -8316,6 +8316,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "quant-pivot-models",
+ "quant-pivot-storage",
+ "rustls 0.23.40",
+ "tokio",
 ]
 
 [[package]]

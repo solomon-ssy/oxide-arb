@@ -183,7 +183,7 @@ pub async fn seed_ui_demo_ck(
     pool: Arc<ClickHousePool>,
     summary: &UiDemoSeedSummary,
 ) -> Result<usize, StorageError> {
-    pool.ensure_schema().await?;
+    pool.verify_schema().await?;
     let write_manager = Arc::new(ChWriteManager::new(4));
     let facts = ChQuantFactRepository::new(pool, write_manager);
     let now = Utc::now().timestamp();

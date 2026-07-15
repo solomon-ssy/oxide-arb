@@ -206,6 +206,8 @@ pub struct ClickHouseConfig {
     /// Password. Set via `QUANT_PIVOT__DB__CLICKHOUSE__PASSWORD` in production —
     /// never in the TOML. Default: empty.
     pub password: String,
+    /// Versioned schema migration policy and optional elevated identity.
+    pub migration: ClickHouseMigrationConfig,
     /// Max age (seconds) of a partial batch before it is flushed. Lower =
     /// fresher analytics, more insert requests. Default: `5`.
     pub flush_interval_secs: u64,
@@ -216,8 +218,6 @@ pub struct ClickHouseConfig {
     /// Maximum concurrent insert operations (semaphore). Prevents overwhelming
     /// the server under high tick ingestion rates. Default: `8`.
     pub max_concurrent_inserts: usize,
-    /// Native hot/cold/delete lifecycle for raw fact tables.
-    pub raw_lifecycle: ClickHouseRawLifecycleConfig,
 }
 
 impl Default for ClickHouseConfig {
@@ -227,39 +227,56 @@ impl Default for ClickHouseConfig {
             database: default_ch_database(),
             user: default_ch_user(),
             password: String::new(),
+            migration: ClickHouseMigrationConfig::default(),
             flush_interval_secs: default_ch_flush_interval(),
             batch_size: default_ch_batch_size(),
             max_concurrent_inserts: default_ch_max_concurrent_inserts(),
-            raw_lifecycle: ClickHouseRawLifecycleConfig::default(),
         }
     }
 }
 
-/// Deploy-time lifecycle policy. Deletion is disabled unless an immutable
-/// retention-plan hash is explicitly supplied.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct ClickHouseRawLifecycleConfig {
-    /// Days retained on the hot volume before native TTL MOVE.
-    pub hot_days: u32,
-    /// Total raw retention; Runtime v15 profiles require at least 200 days.
-    pub retention_days: u32,
-    /// `ClickHouse` volume configured by the operator for cold/object storage.
-    pub cold_volume: Option<String>,
-    /// Enable native TTL DELETE after `retention_days`.
-    pub delete_enabled: bool,
-    /// Canonical hash of the signed capacity, restore, and retention plan.
-    pub signed_retention_plan_hash: Option<String>,
+impl ClickHouseConfig {
+    /// Build the connection used by the startup schema migrator.
+    ///
+    /// Local development reuses the runtime identity by default. Production
+    /// can provide an independently scoped DDL identity without granting the
+    /// long-lived ingestion connection `CREATE`, `ALTER`, or `DROP`.
+    #[must_use]
+    pub fn migration_connection(&self) -> Self {
+        let mut config = self.clone();
+        if let Some(user) = &self.migration.user {
+            config.user.clone_from(user);
+        }
+        if let Some(password) = &self.migration.password {
+            config.password.clone_from(password);
+        }
+        config
+    }
 }
 
-impl Default for ClickHouseRawLifecycleConfig {
+/// Startup schema migration policy for `ClickHouse`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ClickHouseMigrationConfig {
+    /// Automatically apply pending online-safe migrations before runtime
+    /// connections are initialized. Default: `true`.
+    pub auto_apply_online: bool,
+    /// Reject startup unless a separate DDL identity is configured. Enable in
+    /// production; local single-node development defaults to `false`.
+    pub require_dedicated_identity: bool,
+    /// Optional DDL identity. Must be configured together with `password`.
+    pub user: Option<String>,
+    /// Optional DDL credential. Must be configured together with `user`.
+    pub password: Option<String>,
+}
+
+impl Default for ClickHouseMigrationConfig {
     fn default() -> Self {
         Self {
-            hot_days: 14,
-            retention_days: 200,
-            cold_volume: None,
-            delete_enabled: false,
-            signed_retention_plan_hash: None,
+            auto_apply_online: true,
+            require_dedicated_identity: false,
+            user: None,
+            password: None,
         }
     }
 }

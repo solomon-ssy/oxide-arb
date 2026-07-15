@@ -228,7 +228,6 @@ fn build_trade_policy_port(
             as Arc<dyn ResearchReadinessEvidenceRepository>,
         Arc::clone(&ctx.research.artifact_store),
         attestor,
-        &ctx.config.db.clickhouse.raw_lifecycle,
     )?);
     Ok(Arc::new(TradePolicyService::new(TradePolicyServiceDeps {
         datasets: Arc::clone(&ctx.research.training_dataset_repo),

@@ -5,19 +5,21 @@ use std::sync::Arc;
 use chrono::{DateTime, Duration, Utc};
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
-    config::{ClickHouseRawLifecycleConfig, EvidenceAttestationConfig},
+    config::EvidenceAttestationConfig,
     domain::{NewResearchReadinessEvidence, ResearchReadinessEvidenceInfo},
     enums::quant::ResearchReadinessEvidenceKind,
     hashing::CanonicalDigest,
     types::{
         ArtifactUri, ContentHash, RETENTION_RUNWAY_EVIDENCE_FORMAT_VERSION,
-        ResearchReadinessEvidencePayload, RetentionRunwayEvidenceV1, RetentionTableObservationV1,
+        ResearchReadinessEvidencePayload, RetentionRunwayEvidenceV2, RetentionTableObservationV2,
         SHADOW_LATENCY_PROFILE_FORMAT_VERSION, ShadowLatencyProfileV1,
     },
 };
 use quant_pivot_repository::traits::ResearchReadinessEvidenceRepository;
 use quant_pivot_research::artifact::{ArtifactKey, ArtifactNamespace, ArtifactStore};
-use quant_pivot_storage::clickhouse::{ClickHousePool, RAW_LIFECYCLE_TABLES, RawLifecycleTable};
+use quant_pivot_storage::clickhouse::{
+    ClickHousePool, RAW_HISTORY_TABLES, RawHistoryTable, extract_table_ttl,
+};
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -94,7 +96,6 @@ impl ResearchReadinessEvidenceService {
         repo: Arc<dyn ResearchReadinessEvidenceRepository>,
         artifacts: Arc<dyn ArtifactStore>,
         attestor: Option<EvidenceAttestor>,
-        raw_lifecycle: &ClickHouseRawLifecycleConfig,
     ) -> QuantResult<Self> {
         Ok(Self {
             repo,
@@ -102,11 +103,9 @@ impl ResearchReadinessEvidenceService {
             attestor,
             retention_scope_hash: evidence_scope_hash(
                 ResearchReadinessEvidenceKind::RetentionRunway,
-                raw_lifecycle,
             )?,
             latency_scope_hash: evidence_scope_hash(
                 ResearchReadinessEvidenceKind::ShadowLatencyProfile,
-                raw_lifecycle,
             )?,
         })
     }
@@ -123,7 +122,8 @@ impl ResearchReadinessEvidenceService {
         {
             Ok(Some(evidence)) => Some(evidence),
             Ok(None) => {
-                diagnostics.push("no current signed retention-runway evidence exists".to_owned());
+                diagnostics
+                    .push("no current signed raw-history retention evidence exists".to_owned());
                 None
             }
             Err(error) => {
@@ -267,18 +267,18 @@ fn verify_kind_binding(
     Ok(())
 }
 
-fn evidence_scope_hash(
-    kind: ResearchReadinessEvidenceKind,
-    raw_lifecycle: &ClickHouseRawLifecycleConfig,
-) -> QuantResult<ContentHash> {
+fn evidence_scope_hash(kind: ResearchReadinessEvidenceKind) -> QuantResult<ContentHash> {
+    let format_version = match kind {
+        ResearchReadinessEvidenceKind::RetentionRunway => RETENTION_RUNWAY_EVIDENCE_FORMAT_VERSION,
+        ResearchReadinessEvidenceKind::ShadowLatencyProfile => {
+            SHADOW_LATENCY_PROFILE_FORMAT_VERSION
+        }
+    };
     CanonicalDigest::content_hash_json(&(
-        "research_readiness_evidence_scope_v1",
+        "research_readiness_evidence_scope_v2",
         kind,
-        raw_lifecycle.hot_days,
-        raw_lifecycle.retention_days,
-        raw_lifecycle.cold_volume.as_deref(),
-        raw_lifecycle.delete_enabled,
-        raw_lifecycle.signed_retention_plan_hash.as_deref(),
+        format_version,
+        "clickhouse_cloud",
     ))
     .map_err(Into::into)
 }
@@ -289,7 +289,6 @@ pub struct ResearchReadinessEvidenceProducer {
     repo: Arc<dyn ResearchReadinessEvidenceRepository>,
     artifacts: Arc<dyn ArtifactStore>,
     clickhouse: Arc<ClickHousePool>,
-    raw_lifecycle: ClickHouseRawLifecycleConfig,
     attestor: Option<EvidenceAttestor>,
 }
 
@@ -299,14 +298,12 @@ impl ResearchReadinessEvidenceProducer {
         repo: Arc<dyn ResearchReadinessEvidenceRepository>,
         artifacts: Arc<dyn ArtifactStore>,
         clickhouse: Arc<ClickHousePool>,
-        raw_lifecycle: ClickHouseRawLifecycleConfig,
         attestor: Option<EvidenceAttestor>,
     ) -> Self {
         Self {
             repo,
             artifacts,
             clickhouse,
-            raw_lifecycle,
             attestor,
         }
     }
@@ -358,7 +355,7 @@ impl ResearchReadinessEvidenceProducer {
             })
         })?;
         let payload_hash = ContentHash::parse(CanonicalDigest::prefixed_bytes(&bytes))?;
-        let scope_hash = evidence_scope_hash(kind, &self.raw_lifecycle)?;
+        let scope_hash = evidence_scope_hash(kind)?;
         let artifact_uri = self
             .artifacts
             .put(
@@ -410,9 +407,9 @@ impl ResearchReadinessEvidenceProducer {
         &self,
         required_days: u32,
         observed_at: DateTime<Utc>,
-    ) -> QuantResult<RetentionRunwayEvidenceV1> {
-        let mut tables = Vec::with_capacity(RAW_LIFECYCLE_TABLES.len());
-        for spec in RAW_LIFECYCLE_TABLES {
+    ) -> QuantResult<RetentionRunwayEvidenceV2> {
+        let mut tables = Vec::with_capacity(RAW_HISTORY_TABLES.len());
+        for spec in RAW_HISTORY_TABLES {
             tables.push(self.retention_table(spec, observed_at).await?);
         }
         let history_start = tables
@@ -434,46 +431,26 @@ impl ResearchReadinessEvidenceProducer {
                 })
             })
         })?;
-        let free_disk_bytes = self.clickhouse.free_disk_bytes().await?;
-        let estimated_growth_bytes_per_day = measured_history_days
-            .and_then(|days| (days > 0).then(|| active_raw_bytes.div_ceil(u64::from(days))));
-        let capacity_runway_days = estimated_growth_bytes_per_day
-            .filter(|growth| *growth > 0)
-            .and_then(|growth| u32::try_from(free_disk_bytes / growth).ok());
-        let effective_runway_days = measured_history_days
-            .zip(capacity_runway_days)
-            .map(|(history, capacity)| history.min(capacity));
-        let signed_retention_plan_hash = self
-            .raw_lifecycle
-            .signed_retention_plan_hash
-            .as_deref()
-            .map(ContentHash::parse)
-            .transpose()?;
-        Ok(RetentionRunwayEvidenceV1 {
+        Ok(RetentionRunwayEvidenceV2 {
             format_version: RETENTION_RUNWAY_EVIDENCE_FORMAT_VERSION,
             observed_at,
             required_days,
             measured_history_days,
-            free_disk_bytes,
             active_raw_bytes,
-            estimated_growth_bytes_per_day,
-            capacity_runway_days,
-            effective_runway_days,
-            signed_retention_plan_hash,
             tables,
         })
     }
 
     async fn retention_table(
         &self,
-        spec: RawLifecycleTable,
+        spec: RawHistoryTable,
         observed_at: DateTime<Utc>,
-    ) -> QuantResult<RetentionTableObservationV1> {
+    ) -> QuantResult<RetentionTableObservationV2> {
         let observation = self
             .clickhouse
-            .observe_raw_lifecycle_table(spec, observed_at)
+            .observe_raw_history_table(spec, observed_at)
             .await?;
-        Ok(RetentionTableObservationV1 {
+        Ok(RetentionTableObservationV2 {
             table: spec.table.to_owned(),
             time_column: spec.time_column.to_owned(),
             earliest_event_time: timestamp_millis(observation.earliest_ms)?,
@@ -482,7 +459,7 @@ impl ResearchReadinessEvidenceProducer {
             active_bytes: observation.active_bytes,
             active_partition_count: observation.active_partition_count,
             partition_key: observation.partition_key,
-            ttl_expression: extract_ttl(&observation.create_table_query),
+            table_ttl_expression: extract_table_ttl(&observation.create_table_query),
         })
     }
 
@@ -535,13 +512,6 @@ fn timestamp_millis(value: Option<i64>) -> QuantResult<Option<DateTime<Utc>>> {
         .transpose()
 }
 
-fn extract_ttl(create_table_query: &str) -> Option<String> {
-    let start = create_table_query.find(" TTL ")? + " TTL ".len();
-    let tail = &create_table_query[start..];
-    let end = tail.find(" SETTINGS").map_or(tail.len(), |index| index);
-    Some(tail[..end].trim().to_owned())
-}
-
 fn decode_key(value: &str) -> QuantResult<[u8; 32]> {
     if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(methodology(
@@ -576,7 +546,7 @@ mod tests {
         types::{ResearchReadinessEvidencePayload, ShadowLatencyProfileV1},
     };
 
-    use super::{EvidenceAttestor, extract_ttl, verify_kind_binding};
+    use super::{EvidenceAttestor, verify_kind_binding};
 
     #[test]
     fn attestation_config_is_all_or_nothing() {
@@ -592,18 +562,6 @@ mod tests {
             })
             .expect("configured attestor")
             .is_some()
-        );
-    }
-
-    #[test]
-    fn ttl_extraction_distinguishes_no_ttl_from_actual_metadata() {
-        assert_eq!(extract_ttl("CREATE TABLE x ENGINE = MergeTree"), None);
-        assert_eq!(
-            extract_ttl(
-                "CREATE TABLE x ENGINE = MergeTree TTL event_time + toIntervalDay(200) DELETE SETTINGS index_granularity = 8192"
-            )
-            .as_deref(),
-            Some("event_time + toIntervalDay(200) DELETE")
         );
     }
 

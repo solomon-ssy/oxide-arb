@@ -12,7 +12,7 @@ use tracing::info;
 const MAINTENANCE_DATABASE: &str = "default";
 
 /// Ensure the configured application database exists, creating it when absent.
-pub async fn ensure_database(config: &ClickHouseConfig) -> Result<(), StorageError> {
+pub(super) async fn ensure_database(config: &ClickHouseConfig) -> Result<(), StorageError> {
     if config.database == MAINTENANCE_DATABASE {
         return Ok(());
     }
@@ -25,18 +25,7 @@ pub async fn ensure_database(config: &ClickHouseConfig) -> Result<(), StorageErr
         .with_user(&config.user)
         .with_password(&config.password);
 
-    let exists: u64 = client
-        .query("SELECT count() FROM system.databases WHERE name = ?")
-        .bind(&config.database)
-        .fetch_one()
-        .await
-        .map_err(|e| {
-            StorageError::Connection(format!(
-                "ClickHouse maintenance connection failed ({MAINTENANCE_DATABASE}): {e}"
-            ))
-        })?;
-
-    if exists > 0 {
+    if database_exists(config).await? {
         info!(database = %config.database, "ClickHouse database already exists");
         return Ok(());
     }
@@ -55,6 +44,29 @@ pub async fn ensure_database(config: &ClickHouseConfig) -> Result<(), StorageErr
 
     info!(database = %config.database, "ClickHouse database created");
     Ok(())
+}
+
+pub(super) async fn database_exists(config: &ClickHouseConfig) -> Result<bool, StorageError> {
+    if config.database == MAINTENANCE_DATABASE {
+        return Ok(true);
+    }
+    validate_ch_identifier(&config.database, "database")?;
+    let client = clickhouse::Client::default()
+        .with_url(&config.url)
+        .with_database(MAINTENANCE_DATABASE)
+        .with_user(&config.user)
+        .with_password(&config.password);
+    client
+        .query("SELECT count() FROM system.databases WHERE name = ?")
+        .bind(&config.database)
+        .fetch_one::<u64>()
+        .await
+        .map(|count| count == 1)
+        .map_err(|error| {
+            StorageError::Connection(format!(
+                "ClickHouse maintenance connection failed ({MAINTENANCE_DATABASE}): {error}"
+            ))
+        })
 }
 
 /// Validate a `ClickHouse` unquoted identifier before embedding in DDL.

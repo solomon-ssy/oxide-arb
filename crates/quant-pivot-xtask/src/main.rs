@@ -1,5 +1,8 @@
 use anyhow::{Context, Result, bail};
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
+use quant_pivot_models::config::DeployConfig;
+use quant_pivot_storage::clickhouse::{apply_online_schema_migrations, plan_schema, verify_schema};
+use rustls::crypto::aws_lc_rs;
 use std::{
     path::PathBuf,
     process::{Command, ExitCode, Stdio},
@@ -55,6 +58,12 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Plan, apply online-safe migrations, or verify the `ClickHouse` schema.
+    #[command(name = "clickhouse-schema")]
+    ClickHouseSchema {
+        #[command(subcommand)]
+        command: ClickHouseSchemaCommand,
+    },
     /// Run the default workspace tests, Docker suites, and network suites.
     #[command(name = "test-full")]
     Full,
@@ -72,8 +81,29 @@ enum Commands {
     },
 }
 
-fn main() -> ExitCode {
-    match run() {
+#[derive(Subcommand)]
+enum ClickHouseSchemaCommand {
+    /// Print pending migrations without changing the target database.
+    Plan(ConfigDirArgs),
+    /// Create the database and apply pending online-safe migrations.
+    ApplyOnline(ConfigDirArgs),
+    /// Verify the migration ledger and runtime schema contract read-only.
+    Verify(ConfigDirArgs),
+}
+
+#[derive(Args)]
+struct ConfigDirArgs {
+    /// Directory containing quant-pivot.toml.
+    #[arg(long, env = "QUANT_PIVOT_CONFIG_DIR", default_value = "config")]
+    config_dir: PathBuf,
+}
+
+#[tokio::main]
+async fn main() -> ExitCode {
+    if aws_lc_rs::default_provider().install_default().is_err() {
+        eprintln!("rustls crypto provider already installed");
+    }
+    match run().await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("error: {error:#}");
@@ -82,8 +112,9 @@ fn main() -> ExitCode {
     }
 }
 
-fn run() -> Result<()> {
+async fn run() -> Result<()> {
     match Cli::parse().command {
+        Commands::ClickHouseSchema { command } => clickhouse_schema(command).await,
         Commands::Full => test_full(),
         Commands::Docker => test_docker(),
         Commands::Network => test_network(),
@@ -91,6 +122,61 @@ fn run() -> Result<()> {
             catalog_visible_p99,
         } => {
             println!("{}", report_capacity_ceiling(catalog_visible_p99)?);
+            Ok(())
+        }
+    }
+}
+
+async fn clickhouse_schema(command: ClickHouseSchemaCommand) -> Result<()> {
+    let config_dir = match &command {
+        ClickHouseSchemaCommand::Plan(args)
+        | ClickHouseSchemaCommand::ApplyOnline(args)
+        | ClickHouseSchemaCommand::Verify(args) => &args.config_dir,
+    };
+    let config_dir = config_dir
+        .to_str()
+        .context("ClickHouse schema config directory is not valid UTF-8")?;
+    let deploy = DeployConfig::load(config_dir).context("load deploy config")?;
+    let config = &deploy.db.clickhouse;
+    let migration_config = config.migration_connection();
+    match command {
+        ClickHouseSchemaCommand::Plan(_) => {
+            let plan = plan_schema(&migration_config)
+                .await
+                .context("plan ClickHouse schema")?;
+            println!("database_exists={}", plan.database_exists);
+            println!("migration_ledger_exists={}", plan.migration_ledger_exists);
+            println!("applied_versions={:?}", plan.applied_versions);
+            if plan.pending_migrations.is_empty() {
+                println!("pending_migrations=[]");
+            } else {
+                for migration in plan.pending_migrations {
+                    println!(
+                        "pending_migration version={} name={} safety={:?} checksum={}",
+                        migration.version, migration.name, migration.safety, migration.checksum
+                    );
+                }
+            }
+            Ok(())
+        }
+        ClickHouseSchemaCommand::ApplyOnline(_) => {
+            let status = apply_online_schema_migrations(&migration_config)
+                .await
+                .context("deploy ClickHouse schema")?;
+            println!(
+                "ClickHouse schema deployed: version={}, required_objects={}",
+                status.current_version, status.required_object_count
+            );
+            Ok(())
+        }
+        ClickHouseSchemaCommand::Verify(_) => {
+            let status = verify_schema(config)
+                .await
+                .context("verify ClickHouse schema")?;
+            println!(
+                "ClickHouse schema verified: version={}, required_objects={}",
+                status.current_version, status.required_object_count
+            );
             Ok(())
         }
     }

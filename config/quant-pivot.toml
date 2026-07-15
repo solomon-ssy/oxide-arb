@@ -433,15 +433,16 @@ batch_size = 5000
 # write pressure on the CH server under high tick rates. Default: 8.
 max_concurrent_inserts = 8
 
-[db.clickhouse.raw_lifecycle]
-# Runtime v15 requires 90d fit + 7d lookback + 1d horizon + 2d embargo,
-# doubled for reproducible refits. Raw deletion remains fail-closed by default.
-hot_days = 14
-retention_days = 200
-delete_enabled = false
-# Configure both values together only after capacity, restore, and source-slice drills.
-# cold_volume = "cold"
-# signed_retention_plan_hash = "blake3:<64 lowercase hex>"
+[db.clickhouse.migration]
+# Purpose: apply versioned online-safe ClickHouse migrations automatically
+# before the runtime pool starts. Offline-required migrations always fail
+# closed and require an explicit maintenance rollout. Default: true.
+auto_apply_online = true
+require_dedicated_identity = false
+# Local development intentionally reuses db.clickhouse credentials. Production
+# sets require_dedicated_identity=true and injects:
+# QUANT_PIVOT__DB__CLICKHOUSE__MIGRATION__USER
+# QUANT_PIVOT__DB__CLICKHOUSE__MIGRATION__PASSWORD
 
 # ── Cache ────────────────────────────────────────────────────────────────────
 

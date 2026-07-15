@@ -4,14 +4,15 @@ use chrono::{DateTime, Utc};
 use sea_orm::FromJsonQueryResult;
 use serde::{Deserialize, Serialize};
 
-use crate::{jsonb_active, types::ContentHash};
+use crate::jsonb_active;
 
-pub const RETENTION_RUNWAY_EVIDENCE_FORMAT_VERSION: u32 = 1;
+pub const RETENTION_RUNWAY_EVIDENCE_FORMAT_VERSION: u32 = 2;
 pub const SHADOW_LATENCY_PROFILE_FORMAT_VERSION: u32 = 1;
 
 /// Per-table observations read from active `ClickHouse` parts and table metadata.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RetentionTableObservationV1 {
+#[serde(deny_unknown_fields)]
+pub struct RetentionTableObservationV2 {
     pub table: String,
     pub time_column: String,
     pub earliest_event_time: Option<DateTime<Utc>>,
@@ -20,38 +21,40 @@ pub struct RetentionTableObservationV1 {
     pub active_bytes: u64,
     pub active_partition_count: u64,
     pub partition_key: String,
-    pub ttl_expression: Option<String>,
+    pub table_ttl_expression: Option<String>,
 }
 
-/// Measured raw-history and storage-capacity runway. Configuration declarations
-/// are lineage only; pass/fail is derived from these observations.
+/// Measured raw-history coverage for `ClickHouse` Cloud.
+///
+/// Cloud storage capacity is intentionally absent: local disk free-space is not
+/// a valid proxy for elastic shared object storage. Raw tables must also remain
+/// free of destructive table TTL until governed retention is implemented.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RetentionRunwayEvidenceV1 {
+#[serde(deny_unknown_fields)]
+pub struct RetentionRunwayEvidenceV2 {
     pub format_version: u32,
     pub observed_at: DateTime<Utc>,
     pub required_days: u32,
     pub measured_history_days: Option<u32>,
-    pub free_disk_bytes: u64,
     pub active_raw_bytes: u64,
-    pub estimated_growth_bytes_per_day: Option<u64>,
-    pub capacity_runway_days: Option<u32>,
-    pub effective_runway_days: Option<u32>,
-    pub signed_retention_plan_hash: Option<ContentHash>,
-    pub tables: Vec<RetentionTableObservationV1>,
+    pub tables: Vec<RetentionTableObservationV2>,
 }
 
-impl RetentionRunwayEvidenceV1 {
+impl RetentionRunwayEvidenceV2 {
     #[must_use]
     pub fn proven(&self) -> bool {
-        self.tables.iter().all(|table| {
-            table.earliest_event_time.is_some()
-                && table.latest_event_time.is_some()
-                && table.row_count > 0
-                && table.active_partition_count > 0
-                && table.partition_key.contains("toYYYYMM(")
-        }) && self.signed_retention_plan_hash.is_some()
+        self.format_version == RETENTION_RUNWAY_EVIDENCE_FORMAT_VERSION
+            && !self.tables.is_empty()
+            && self.tables.iter().all(|table| {
+                table.earliest_event_time.is_some()
+                    && table.latest_event_time.is_some()
+                    && table.row_count > 0
+                    && table.active_partition_count > 0
+                    && table.partition_key.contains("toYYYYMM(")
+                    && table.table_ttl_expression.is_none()
+            })
             && self
-                .effective_runway_days
+                .measured_history_days
                 .is_some_and(|days| days >= self.required_days)
     }
 }
@@ -101,7 +104,7 @@ impl ShadowLatencyProfileV1 {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
 #[serde(tag = "kind", content = "evidence", rename_all = "snake_case")]
 pub enum ResearchReadinessEvidencePayload {
-    RetentionRunway(RetentionRunwayEvidenceV1),
+    RetentionRunway(RetentionRunwayEvidenceV2),
     ShadowLatencyProfile(ShadowLatencyProfileV1),
 }
 
@@ -112,10 +115,9 @@ mod tests {
     use chrono::{Duration, TimeZone, Utc};
 
     use super::{
-        RETENTION_RUNWAY_EVIDENCE_FORMAT_VERSION, RetentionRunwayEvidenceV1,
-        RetentionTableObservationV1, SHADOW_LATENCY_PROFILE_FORMAT_VERSION, ShadowLatencyProfileV1,
+        RETENTION_RUNWAY_EVIDENCE_FORMAT_VERSION, RetentionRunwayEvidenceV2,
+        RetentionTableObservationV2, SHADOW_LATENCY_PROFILE_FORMAT_VERSION, ShadowLatencyProfileV1,
     };
-    use crate::types::ContentHash;
 
     fn observed_at() -> chrono::DateTime<Utc> {
         Utc.timestamp_opt(1_720_000_000, 0)
@@ -123,23 +125,15 @@ mod tests {
             .expect("valid timestamp")
     }
 
-    fn retention() -> RetentionRunwayEvidenceV1 {
+    fn retention() -> RetentionRunwayEvidenceV2 {
         let observed_at = observed_at();
-        RetentionRunwayEvidenceV1 {
+        RetentionRunwayEvidenceV2 {
             format_version: RETENTION_RUNWAY_EVIDENCE_FORMAT_VERSION,
             observed_at,
             required_days: 200,
             measured_history_days: Some(220),
-            free_disk_bytes: 10_000,
             active_raw_bytes: 5_000,
-            estimated_growth_bytes_per_day: Some(20),
-            capacity_runway_days: Some(500),
-            effective_runway_days: Some(220),
-            signed_retention_plan_hash: Some(
-                ContentHash::parse(format!("blake3:{}", "ab".repeat(32)))
-                    .expect("valid content hash"),
-            ),
-            tables: vec![RetentionTableObservationV1 {
+            tables: vec![RetentionTableObservationV2 {
                 table: "quant_book_l2_event".to_owned(),
                 time_column: "persisted_time".to_owned(),
                 earliest_event_time: Some(observed_at - Duration::days(220)),
@@ -148,13 +142,13 @@ mod tests {
                 active_bytes: 5_000,
                 active_partition_count: 8,
                 partition_key: "toYYYYMM(persisted_time)".to_owned(),
-                ttl_expression: Some("persisted_time + toIntervalDay(200) DELETE".to_owned()),
+                table_ttl_expression: None,
             }],
         }
     }
 
     #[test]
-    fn retention_requires_measured_capacity_history_and_monthly_parts() {
+    fn retention_requires_measured_history_monthly_parts_and_no_table_ttl() {
         let mut evidence = retention();
         assert!(evidence.proven());
 
@@ -162,11 +156,12 @@ mod tests {
         assert!(!evidence.proven());
 
         evidence = retention();
-        evidence.effective_runway_days = Some(199);
+        evidence.measured_history_days = Some(199);
         assert!(!evidence.proven());
 
         evidence = retention();
-        evidence.signed_retention_plan_hash = None;
+        evidence.tables[0].table_ttl_expression =
+            Some("persisted_time + toIntervalDay(200) DELETE".to_owned());
         assert!(!evidence.proven());
     }
 

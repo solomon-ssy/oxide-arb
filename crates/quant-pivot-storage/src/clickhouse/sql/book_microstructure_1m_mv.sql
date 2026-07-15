@@ -1,9 +1,4 @@
--- The legacy view omitted `available_at`; drop it once and install a new,
--- versioned view so CREATE IF NOT EXISTS cannot silently preserve the old
--- projection on an upgraded database.
-DROP TABLE IF EXISTS book_microstructure_1m_mv;
-
-CREATE MATERIALIZED VIEW IF NOT EXISTS book_microstructure_1m_availability_v2_mv
+CREATE MATERIALIZED VIEW IF NOT EXISTS book_microstructure_1m_mv
 TO book_microstructure_1m
 AS
 SELECT

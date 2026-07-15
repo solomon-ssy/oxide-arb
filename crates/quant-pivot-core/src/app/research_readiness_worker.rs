@@ -31,7 +31,6 @@ impl AppContext {
                 as Arc<dyn ResearchReadinessEvidenceRepository>,
             Arc::clone(&self.research.artifact_store),
             Arc::clone(&self.infra.ch),
-            self.config.db.clickhouse.raw_lifecycle.clone(),
             attestor,
         ));
         runner.spawn(TaskId::ResearchReadinessEvidenceWorker, move |token| async move {
