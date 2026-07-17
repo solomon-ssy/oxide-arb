@@ -128,8 +128,7 @@ fn validate_web(deploy: &DeployConfig, report: &mut ConfigValidationReport) {
         {
             report.errors.push(ConfigValidationError::InvalidValue {
                 field: "research.evidence_attestation.signing_key",
-                detail: "must be cryptographically independent from web.jwt.signing_key"
-                    .to_owned(),
+                detail: "must be cryptographically independent from web.jwt.signing_key".to_owned(),
             });
         }
     }
@@ -508,8 +507,7 @@ mod tests {
     #[test]
     fn jwt_and_evidence_signing_keys_must_not_reuse_the_same_bytes() {
         let mut deploy = DeployConfig::default();
-        deploy.web.jwt.signing_key =
-            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into();
+        deploy.web.jwt.signing_key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into();
         deploy.research.evidence_attestation.signing_key = "00".repeat(32).into();
         let report = validate_deploy_common(&deploy);
         assert!(report.has_errors());

@@ -173,7 +173,8 @@ and [entity-first schema](https://www.sea-ql.org/SeaORM/docs/generate-entity/ent
   absolute session expiry; `expires_in` reflects absolute-session clipping.
   WebSocket authentication uses a 30-second single-use session-bound ticket
   rather than a query JWT. Replacing the active key immediately invalidates all
-  previously issued JWTs.
+  previously issued JWTs. Deploy validation also decodes both key materials and
+  rejects reuse of the JWT key as the evidence-attestation key.
 - PostgreSQL and ClickHouse migration credentials are optional redacted
   secrets under their canonical `[db.*.migration]` sections. Deploy/xtask
   profiles may resolve them through base TOML, local TOML, or the canonical
@@ -267,6 +268,30 @@ may be treated as passing evidence:
 - protected login/dashboard, refresh restoration, deep-link, real 404,
   reduced-motion, keyboard/accessibility, and responsive light/dark visual
   behavior at desktop, tablet, and mobile viewports.
+
+The final local run on 2026-07-17 passed this inventory:
+
+- `rust-static` completed format, workspace clippy, every architecture and
+  semantic lint, `cargo machete`, nightly `cargo udeps`, workspace tests,
+  classical/optimizer/dataframe feature tests, benchmark release compilation,
+  and the executable hot-path benchmark.
+- `network` passed all 10 Gamma and all 5 Data API cases.
+- `docker` passed the complete registered suite twice consecutively after the
+  PostgreSQL container-concurrency and database-timestamp boundary fixes.
+- `ui` passed lint, typecheck, all 494 unit tests, production build, Knip,
+  circular-dependency checks, semantic-color and forbidden-pattern scans. The
+  dashboard-specific gzip chunk measured 37,883 bytes against the 300 KiB
+  budget.
+- `protected-e2e` passed all 8 scenarios. Desktop/mobile light and dark visual
+  snapshots and tablet layout checks passed; the Axe scan reported zero serious
+  or critical violations.
+- Targeted regression tests additionally proved decimal-string preservation in
+  dashboard monetary sections and byte-level independence of the JWT and
+  evidence signing keys.
+
+The workflow definitions invoke the same five group commands. No remote CI run
+or hosted CI artifact was produced in this local implementation session, so
+this record does not claim one.
 
 ### Explicitly deferred or externally blocked
 
