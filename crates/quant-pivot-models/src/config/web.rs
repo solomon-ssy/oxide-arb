@@ -1,15 +1,9 @@
 //! Web server + JWT configuration (`[web]` / `[web.jwt]`).
-//!
-//! Mounted at [`DeployConfig::web`](crate::config::DeployConfig). The JWT
-//! signing private key is mounted from the deployment secret manager; public
-//! verification keys remain in a rotation keyring so existing sessions survive
-//! an intentional signer rotation.
 
+use super::secret::SecretText;
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::Deserialize;
-
-const DEFAULT_JWT_KEY_ID: &str = "local-dev-2026-01";
-const DEFAULT_JWT_PRIVATE_KEY_FILE: &str = "var/secrets/jwt/ed25519-private.pem";
-const DEFAULT_JWT_PUBLIC_KEY_FILE: &str = "var/secrets/jwt/ed25519-public.pem";
+use zeroize::Zeroizing;
 
 /// HTTP/WebSocket server configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -43,65 +37,55 @@ impl Default for WebConfig {
 }
 
 impl WebConfig {
-    /// Whether the Ed25519 signer and verification keyring are structurally complete.
+    /// Whether the HS256 signing key is exactly 256 bits after `Base64URL` decoding.
     #[must_use]
-    pub fn jwt_keyring_is_configured(&self) -> bool {
-        self.jwt.keyring_is_configured()
+    pub fn jwt_signing_key_is_configured(&self) -> bool {
+        self.jwt.signing_key_bytes().is_ok()
     }
-}
-
-/// One public Ed25519 verification key retained for JWT rotation.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct JwtVerificationKeyConfig {
-    pub key_id: String,
-    pub public_key_file: String,
 }
 
 /// JWT access/refresh token configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct JwtConfig {
-    /// `kid` emitted on newly signed access and refresh tokens.
-    pub signing_key_id: String,
-    /// PKCS#8 Ed25519 private PEM mounted by the deployment secret manager.
-    pub signing_private_key_file: String,
-    /// Public keys accepted during verification, including the active signer.
-    pub verification_keys: Vec<JwtVerificationKeyConfig>,
+    /// Base64URL-no-pad encoded 32-byte HS256 key.
+    pub signing_key: SecretText,
     /// Token issuer claim (default `quant-pivot`).
     pub issuer: String,
+    /// Token audience claim (default `quant-pivot-web`).
+    pub audience: String,
     /// Access-token lifetime in seconds (default 900 = 15m).
     pub access_ttl_secs: i64,
     /// Refresh-token lifetime in seconds (default 604800 = 7d).
     pub refresh_ttl_secs: i64,
+    /// Absolute login-session lifetime in seconds (default 2592000 = 30d).
+    pub absolute_session_ttl_secs: i64,
 }
 
 impl Default for JwtConfig {
     fn default() -> Self {
         Self {
-            signing_key_id: DEFAULT_JWT_KEY_ID.to_owned(),
-            signing_private_key_file: DEFAULT_JWT_PRIVATE_KEY_FILE.to_owned(),
-            verification_keys: vec![JwtVerificationKeyConfig {
-                key_id: DEFAULT_JWT_KEY_ID.to_owned(),
-                public_key_file: DEFAULT_JWT_PUBLIC_KEY_FILE.to_owned(),
-            }],
+            signing_key: SecretText::default(),
             issuer: default_issuer(),
+            audience: default_audience(),
             access_ttl_secs: default_access_ttl(),
             refresh_ttl_secs: default_refresh_ttl(),
+            absolute_session_ttl_secs: default_absolute_session_ttl(),
         }
     }
 }
 
 impl JwtConfig {
-    #[must_use]
-    pub fn keyring_is_configured(&self) -> bool {
-        let signing_key_id = self.signing_key_id.trim();
-        !signing_key_id.is_empty()
-            && !self.signing_private_key_file.trim().is_empty()
-            && self
-                .verification_keys
-                .iter()
-                .any(|key| key.key_id == signing_key_id && !key.public_key_file.trim().is_empty())
+    /// Decode the configured signing key without ever formatting its plaintext.
+    pub fn signing_key_bytes(&self) -> Result<Zeroizing<[u8; 32]>, &'static str> {
+        let mut decoded = Zeroizing::new([0_u8; 32]);
+        let decoded_len = URL_SAFE_NO_PAD
+            .decode_slice(self.signing_key.expose_secret(), decoded.as_mut())
+            .map_err(|_| "must be unpadded Base64URL encoding exactly 32 bytes")?;
+        if decoded_len != decoded.len() {
+            return Err("must decode to exactly 32 bytes");
+        }
+        Ok(decoded)
     }
 }
 
@@ -121,6 +105,10 @@ fn default_issuer() -> String {
     "quant-pivot".to_owned()
 }
 
+fn default_audience() -> String {
+    "quant-pivot-web".to_owned()
+}
+
 const fn default_access_ttl() -> i64 {
     900
 }
@@ -129,47 +117,50 @@ const fn default_refresh_ttl() -> i64 {
     604_800
 }
 
+const fn default_absolute_session_ttl() -> i64 {
+    2_592_000
+}
+
 #[cfg(test)]
 mod tests {
     use super::WebConfig;
 
     #[test]
-    fn defaults_are_sensible() {
+    fn defaults_are_sensible_and_fail_closed_without_a_key() {
         let cfg = WebConfig::default();
         assert_eq!(cfg.listen_host, "0.0.0.0");
         assert_eq!(cfg.listen_port, 8080);
         assert!(!cfg.serve_static_ui);
         assert_eq!(cfg.jwt.issuer, "quant-pivot");
+        assert_eq!(cfg.jwt.audience, "quant-pivot-web");
         assert_eq!(cfg.jwt.access_ttl_secs, 900);
         assert_eq!(cfg.jwt.refresh_ttl_secs, 604_800);
-    }
-
-    #[test]
-    fn empty_section_deserializes_to_defaults() {
-        let cfg: WebConfig = serde_json::from_str("{}").expect("empty [web] is valid");
-        assert_eq!(cfg.listen_port, 8080);
-        assert!(cfg.jwt_keyring_is_configured());
+        assert_eq!(cfg.jwt.absolute_session_ttl_secs, 2_592_000);
+        assert!(!cfg.jwt_signing_key_is_configured());
     }
 
     #[test]
     fn nested_jwt_section_deserializes() {
         let cfg: WebConfig = serde_json::from_str(
-            r#"{ "listen_port": 9090, "jwt": { "signing_key_id": "next", "signing_private_key_file": "/run/secrets/next.pem", "verification_keys": [{ "key_id": "next", "public_key_file": "/etc/quant-pivot/next.pub.pem" }], "access_ttl_secs": 60 } }"#,
+            r#"{ "listen_port": 9090, "jwt": { "signing_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "access_ttl_secs": 60 } }"#,
         )
         .expect("valid web config");
         assert_eq!(cfg.listen_port, 9090);
-        assert_eq!(cfg.jwt.signing_key_id, "next");
+        assert!(cfg.jwt_signing_key_is_configured());
         assert_eq!(cfg.jwt.access_ttl_secs, 60);
         assert_eq!(cfg.jwt.refresh_ttl_secs, 604_800);
     }
 
     #[test]
-    fn incomplete_keyring_detection() {
-        let mut cfg = WebConfig::default();
-        assert!(cfg.jwt_keyring_is_configured());
-        cfg.jwt.signing_key_id = "missing".to_owned();
-        assert!(!cfg.jwt_keyring_is_configured());
-        cfg.jwt.verification_keys.clear();
-        assert!(!cfg.jwt_keyring_is_configured());
+    fn signing_key_rejects_passwords_short_keys_and_padding() {
+        for invalid in [
+            "human-password",
+            "c2hvcnQ",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        ] {
+            let raw = format!(r#"{{ "jwt": {{ "signing_key": "{invalid}" }} }}"#);
+            let cfg: WebConfig = serde_json::from_str(&raw).expect("parse web config");
+            assert!(!cfg.jwt_signing_key_is_configured());
+        }
     }
 }

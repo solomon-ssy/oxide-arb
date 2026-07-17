@@ -962,7 +962,7 @@ fn client(config: &ClickHouseConfig) -> clickhouse::Client {
         .with_url(&config.url)
         .with_database(&config.database)
         .with_user(&config.user)
-        .with_password(&config.password)
+        .with_password(config.password.expose_secret())
 }
 
 #[derive(Debug, Row, Deserialize)]

@@ -22,7 +22,14 @@ pub async fn ensure_database(
     validate_pg_identifier(&config.user, "user")?;
     validate_pg_identifier(database_owner, "database owner")?;
 
-    let mut opts = ConnectOptions::new(config.to_url_with_database(MAINTENANCE_DATABASE));
+    let url = config
+        .try_connection_url_with_database(MAINTENANCE_DATABASE)
+        .map_err(|_| {
+            StorageError::Connection(
+                "invalid PostgreSQL maintenance connection configuration".to_owned(),
+            )
+        })?;
+    let mut opts = ConnectOptions::new(url);
     opts.max_connections(1)
         .min_connections(1)
         .connect_timeout(Duration::from_secs(config.connect_timeout_secs))

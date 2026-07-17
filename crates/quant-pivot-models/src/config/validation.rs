@@ -9,6 +9,7 @@ use crate::{
 };
 use quant_pivot_error::config_validation::{ConfigValidationError, ConfigValidationReport};
 use rust_decimal_macros::dec;
+use zeroize::Zeroizing;
 
 /// Mode-agnostic deploy validation: structural and platform invariants that
 /// must hold regardless of quant runtime mode.
@@ -73,6 +74,7 @@ pub fn validate_deploy_common(deploy: &DeployConfig) -> ConfigValidationReport {
 
     validate_databases(deploy, &mut report);
     validate_cache_redis(deploy, &mut report);
+    validate_web(deploy, &mut report);
 
     if deploy
         .market_data
@@ -95,6 +97,42 @@ pub fn validate_deploy_common(deploy: &DeployConfig) -> ConfigValidationReport {
     validate_domain_sources(deploy, &mut report);
 
     report
+}
+
+fn validate_web(deploy: &DeployConfig, report: &mut ConfigValidationReport) {
+    let jwt = &deploy.web.jwt;
+    if jwt.issuer.trim().is_empty() || jwt.audience.trim().is_empty() {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "web.jwt",
+            detail: "issuer and audience must be non-empty".to_owned(),
+        });
+    }
+    if jwt.access_ttl_secs <= 0
+        || jwt.refresh_ttl_secs <= 0
+        || jwt.absolute_session_ttl_secs <= 0
+        || jwt.access_ttl_secs > jwt.absolute_session_ttl_secs
+        || jwt.refresh_ttl_secs > jwt.absolute_session_ttl_secs
+    {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "web.jwt",
+            detail: "token TTLs must be positive and no greater than absolute_session_ttl_secs"
+                .to_owned(),
+        });
+    }
+    let evidence_key = &deploy.research.evidence_attestation.signing_key;
+    if !evidence_key.is_empty() {
+        let mut evidence_bytes = Zeroizing::new([0_u8; 32]);
+        if let Ok(jwt_bytes) = jwt.signing_key_bytes()
+            && hex::decode_to_slice(evidence_key.expose_secret(), evidence_bytes.as_mut()).is_ok()
+            && jwt_bytes.as_ref() == evidence_bytes.as_ref()
+        {
+            report.errors.push(ConfigValidationError::InvalidValue {
+                field: "research.evidence_attestation.signing_key",
+                detail: "must be cryptographically independent from web.jwt.signing_key"
+                    .to_owned(),
+            });
+        }
+    }
 }
 
 fn validate_databases(deploy: &DeployConfig, report: &mut ConfigValidationReport) {
@@ -386,14 +424,13 @@ fn validate_web_quant_mode(
     _mode: QuantRuntimeMode,
     report: &mut ConfigValidationReport,
 ) {
-    if deploy.web.jwt_keyring_is_configured() {
+    if deploy.web.jwt_signing_key_is_configured() {
         return;
     }
     report.errors.push(ConfigValidationError::InvalidValue {
         field: "web.jwt",
-        detail:
-            "authentication requires an Ed25519 signing key and a matching public keyring entry"
-                .to_owned(),
+        detail: "authentication requires a Base64URL-no-pad encoded 32-byte HS256 signing key"
+            .to_owned(),
     });
 }
 
@@ -460,28 +497,44 @@ mod tests {
     }
 
     #[test]
-    fn auto_execution_rejects_incomplete_jwt_keyring() {
+    fn auto_execution_rejects_invalid_jwt_signing_key() {
         let mut deploy = DeployConfig::default();
         deploy.keys.private_key = Some("0xabc".into());
-        deploy.web.jwt.verification_keys.clear();
+        deploy.web.jwt.signing_key = "human-password".into();
         let report = validate_deploy_for_quant_mode(&deploy, QuantRuntimeMode::AutoExecution);
         assert!(report.has_errors(), "incomplete jwt keyring must be fatal");
     }
 
     #[test]
-    fn auto_execution_accepts_configured_jwt_keyring_and_credentials() {
+    fn jwt_and_evidence_signing_keys_must_not_reuse_the_same_bytes() {
+        let mut deploy = DeployConfig::default();
+        deploy.web.jwt.signing_key =
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into();
+        deploy.research.evidence_attestation.signing_key = "00".repeat(32).into();
+        let report = validate_deploy_common(&deploy);
+        assert!(report.has_errors());
+        assert!(report.errors.iter().any(|error| {
+            error.to_string().contains("cryptographically independent")
+                && !error.to_string().contains(&"00".repeat(32))
+        }));
+    }
+
+    #[test]
+    fn auto_execution_accepts_configured_jwt_signing_key_and_credentials() {
         let mut deploy = DeployConfig::default();
         deploy.keys.private_key = Some("0xabc".into());
         deploy.quant.account.funder = Some("0xfunder".into());
+        deploy.web.jwt.signing_key = "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc".into();
         let report = validate_deploy_for_quant_mode(&deploy, QuantRuntimeMode::AutoExecution);
         assert!(!report.has_errors(), "errors: {:?}", report.errors);
     }
 
     #[test]
-    fn report_only_with_credentials_accepts_configured_jwt_keyring() {
+    fn report_only_with_credentials_accepts_configured_jwt_signing_key() {
         let mut deploy = DeployConfig::default();
         deploy.keys.private_key = Some("0xabc".into());
         deploy.quant.account.funder = Some("0xfunder".into());
+        deploy.web.jwt.signing_key = "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc".into();
         let report = validate_deploy_for_quant_mode(&deploy, QuantRuntimeMode::ReportOnly);
         assert!(!report.has_errors(), "errors: {:?}", report.errors);
         assert!(report.warnings.is_empty());

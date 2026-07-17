@@ -54,11 +54,14 @@ gaps discovered during the 2026-07-16 implementation audit.
 
 ## Deferred Operational Validation
 
-The two-hour/twelve-reconciliation soak and browser multi-viewport UX,
-accessibility, and evidence-archive audit are intentionally outside this
-closeout execution. They remain required promotion evidence and will be run as
-a separate operator validation task; this implementation must not claim that
-either gate has passed.
+The two-hour/twelve-reconciliation soak and production evidence-archive audit
+require a separately controlled operator run. They remain required promotion
+evidence; this implementation must not claim production completion until those
+artifacts and the external-environment evidence listed below are archived.
+
+Protected browser behavior, multi-viewport layout, reduced-motion behavior,
+keyboard access, accessibility scanning, and light/dark visual snapshots are
+part of the automated closeout gate rather than deferred evidence.
 
 ## PostgreSQL Migration Contract
 
@@ -157,16 +160,39 @@ and [entity-first schema](https://www.sea-ql.org/SeaORM/docs/generate-entity/ent
 - Automatic parity freezes run subjects/candidates transactionally. A cold
   store with no serving subject creates no run and opens no latch.
 - Research source registration, typed JCS attestations, deployment-scoped
-  key IDs, ClickHouse offline-safety classes, schema manifests, and
-  ReplacingMergeTree correctness lint are implemented. The 200-day gate was
-  not reduced and fixtures cannot satisfy production readiness.
-- Access JWTs are memory-only Ed25519 tokens. Refresh families rotate through
-  one Redis CAS script with absolute session expiry; WebSocket authentication
-  uses a 30-second single-use session-bound ticket rather than a query JWT.
-- The operator UI has an offline recovery route, typed error decisions,
-  fail-closed action eligibility, authoritative snapshot replacement, grouped
-  capabilities, explicit activation UX, independent widget error states, and
-  no persisted access token/access codes.
+  deterministic key IDs, ClickHouse offline-safety classes, schema manifests,
+  and ReplacingMergeTree correctness lint are implemented. Evidence uses one
+  32-byte active BLAKE3 keyed-hash key plus optional historical verification
+  keys. Duplicate, malformed, and active-in-history configurations fail
+  closed. The 200-day gate was not reduced and fixtures cannot satisfy
+  production readiness.
+- Access JWTs are memory-only HS256 tokens signed by one Base64URL-no-pad
+  encoded 32-byte random key. Encode and decode fix the algorithm and validate
+  issuer, audience, subject, expiry, session family, typed `token_use`, and
+  media-type `typ`. Refresh families rotate through one Redis CAS script with
+  absolute session expiry; `expires_in` reflects absolute-session clipping.
+  WebSocket authentication uses a 30-second single-use session-bound ticket
+  rather than a query JWT. Replacing the active key immediately invalidates all
+  previously issued JWTs.
+- PostgreSQL and ClickHouse migration credentials are optional redacted
+  secrets under their canonical `[db.*.migration]` sections. Deploy/xtask
+  profiles may resolve them through base TOML, local TOML, or the canonical
+  nested environment variables; migration commands require them. Production
+  runtime validation rejects configurations containing DDL passwords. Runtime
+  projections do not retain the passwords, and PostgreSQL URLs are assembled
+  through structured URL mutation with reserved-character coverage.
+- The protected operator UI now exposes one snapshot-driven Quant Command
+  Center: authoritative status and CTA, account KPIs, equity/drawdown, a polar
+  recommendation orbit, execution lifecycle, exposure, data quality, research
+  readiness, subsystem health, and a severity-ordered action inbox. Sections
+  are independently ready/stale/unavailable/forbidden, permissions are clipped
+  server-side, account data stays memory-only, and dynamic-route restoration
+  precedes catch-all 404 resolution.
+- Dashboard charts use the existing ECharts stack with ARIA/decal output and
+  equivalent keyboard-readable lists. Motion pauses when hidden or interacted
+  with and disables rotation, stagger, count-up, and material interpolation
+  under `prefers-reduced-motion`. The dashboard chart code is asynchronously
+  loaded and enforced against a 300 KiB gzip budget.
 - The WebSocket ingest pipeline uses bounded canonical batches, supervised
   workers, explicit backpressure invalidation, and shutdown drain. ClickHouse
   Rust rows use `u32` for schema columns declared `UInt32`; schema migration 4
@@ -184,6 +210,10 @@ and [entity-first schema](https://www.sea-ql.org/SeaORM/docs/generate-entity/ent
 - Dependency cleanup removed 33 unused Rust manifest entries. `cargo machete`,
   nightly `cargo udeps`, UI Knip, circular-dependency checks, and production
   bundle forbidden-pattern scans are part of the closeout gates.
+- PostgreSQL Docker test containers are bounded by an RAII-owned per-process
+  semaphore. This prevents an unconstrained parallel integration-test binary
+  from starving Docker Desktop's maintenance connections while guaranteeing
+  permit release on early return or panic.
 
 ### Clean-start evidence
 
@@ -217,26 +247,31 @@ The original reported signatures are absent from the post-fix log:
 
 ### Automated verification
 
-The following gates passed during implementation and are rerun after material
-closeout changes before promotion:
+CI and local closeout use the same command inventory through
+`scripts/check-production-gates.sh`, split into `rust-static`, `ui`, `network`,
+`docker`, and `protected-e2e`. The following gates are required after material
+closeout changes before promotion; only the results recorded by the final run
+may be treated as passing evidence:
 
 - `cargo fmt --all --check`;
 - `cargo clippy --workspace --all-targets -- -D warnings`;
 - `cargo test --workspace`;
-- `cargo test-docker` (all registered PostgreSQL, Redis, ClickHouse, core, and
-  web/auth/WS suites);
+- two consecutive `cargo test-docker` passes (all registered PostgreSQL, Redis,
+  ClickHouse, core, and web/auth/WS suites);
 - `cargo test-network` (Gamma and Data API Wiremock suites);
 - all architecture, import-style, boundary, error, dead-semantics,
   ClickHouse-correctness, training-serving, and UI semantic-color lints;
 - `cargo machete --with-metadata` and `cargo +nightly udeps --workspace --all-targets`;
 - UI lint, typecheck, 494 unit tests, production build, Knip, circular checks,
-  and production bundle forbidden-pattern scan.
+  production bundle forbidden-pattern scan, and dashboard gzip-budget check;
+- protected login/dashboard, refresh restoration, deep-link, real 404,
+  reduced-motion, keyboard/accessibility, and responsive light/dark visual
+  behavior at desktop, tablet, and mobile viewports.
 
 ### Explicitly deferred or externally blocked
 
-- The user explicitly deferred the two-hour/twelve-reconciliation soak and the
-  browser multi-viewport UX/accessibility evidence audit to a separate task.
-  This record does not claim either gate passed.
+- The two-hour/twelve-reconciliation soak has not run. This record does not
+  claim that gate passed.
 - Production ClickHouse Cloud identity/DDL behavior, production secret-manager
   mounts, WORM restore proof, and Cloud retention/capacity evidence require the
   real deployment environment and remain promotion gates.
@@ -252,3 +287,8 @@ closeout changes before promotion:
   The macOS debug linker can also warn that `__eh_frame` exceeds the compact
   unwind table limit; release artifacts are not affected by this debug-only
   evidence run.
+
+The implementation is therefore code-complete against the local production
+gate inventory but is **not production-complete** until the soak, real
+ClickHouse Cloud, secret-mount, WORM restore, retention/capacity, and 200-day
+readiness artifacts are archived.

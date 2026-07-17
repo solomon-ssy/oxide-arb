@@ -2,7 +2,7 @@
 
 use actix_web::{http::Method, web};
 use quant_pivot_models::{
-    config::DeployConfig,
+    config::{DeployConfig, secret::SecretText},
     domain::{
         ActionEligibilityDecision, ActionEligibilityView, ActivateBootstrapRequest, BootstrapView,
         CapabilityView, ExecutionRecoveryView, HealthReport, KillSwitchView,
@@ -139,7 +139,7 @@ fn masked_deploy_view(deploy: &DeployConfig) -> serde_json::Value {
     })
 }
 
-const fn mask_secret(value: &str) -> &'static str {
+fn mask_secret(value: &SecretText) -> &'static str {
     if value.is_empty() { "" } else { "***" }
 }
 
@@ -202,12 +202,12 @@ fn masked_web_view(deploy: &DeployConfig) -> serde_json::Value {
         "serve_static_ui": deploy.web.serve_static_ui,
         "static_ui_dir": deploy.web.static_ui_dir,
         "jwt": {
-            "signing_key_id": deploy.web.jwt.signing_key_id,
-            "signing_private_key_file": "<secret-manager-mounted>",
-            "verification_key_ids": deploy.web.jwt.verification_keys.iter().map(|key| &key.key_id).collect::<Vec<_>>(),
+            "signing_key": mask_secret(&deploy.web.jwt.signing_key),
             "issuer": deploy.web.jwt.issuer,
+            "audience": deploy.web.jwt.audience,
             "access_ttl_secs": deploy.web.jwt.access_ttl_secs,
             "refresh_ttl_secs": deploy.web.jwt.refresh_ttl_secs,
+            "absolute_session_ttl_secs": deploy.web.jwt.absolute_session_ttl_secs,
         },
     })
 }

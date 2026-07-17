@@ -16,7 +16,7 @@ use std::env::var;
 fn test_keystore() -> Option<Keystore> {
     let key = var("QUANT_PIVOT_TEST_PRIVATE_KEY").ok()?;
     Keystore::from_config(&KeysConfig {
-        private_key: Some(key),
+        private_key: Some(key.into()),
     })
     .ok()
 }

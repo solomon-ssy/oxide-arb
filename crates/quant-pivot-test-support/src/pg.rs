@@ -7,10 +7,25 @@ use quant_pivot_models::{
 };
 use quant_pivot_storage::postgres::{PostgresPool, migration::finalize_schema_deployment};
 use sea_orm::ConnectionTrait;
+use std::sync::{Arc, LazyLock};
 use testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner};
 use testcontainers_modules::postgres::Postgres;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 pub const TEST_RUNTIME_ROLE: &str = "quant_pivot_test_runtime";
+
+/// Bound active `PostgreSQL` testcontainers per test process. Unbounded libtest
+/// parallelism can starve Docker Desktop during container readiness and surface
+/// as an unrelated `SeaORM` maintenance-pool timeout.
+const POSTGRES_CONTAINER_CONCURRENCY: usize = 2;
+static POSTGRES_CONTAINER_SLOTS: LazyLock<Arc<Semaphore>> =
+    LazyLock::new(|| Arc::new(Semaphore::new(POSTGRES_CONTAINER_CONCURRENCY)));
+
+/// `PostgreSQL` testcontainer whose lifetime also owns one bounded Docker slot.
+pub struct TestPostgresContainer {
+    _container: ContainerAsync<Postgres>,
+    _permit: OwnedSemaphorePermit,
+}
 
 /// Build a [`PostgresConfig`] aimed at a local testcontainer port.
 #[must_use]
@@ -24,6 +39,7 @@ pub fn test_pg_config(port: u16) -> PostgresConfig {
         schema: "public".into(),
         migration: SchemaMigrationConfig {
             user: "quant_pivot_test_migrator".into(),
+            password: None,
         },
         max_connections: 15,
         min_connections: 1,
@@ -45,7 +61,11 @@ pub fn test_pg_config(port: u16) -> PostgresConfig {
 ///
 /// Keep the returned container alive for the duration of the test so the pool
 /// stays connected.
-pub async fn setup_pg() -> (PostgresPool, ContainerAsync<Postgres>) {
+pub async fn setup_pg() -> (PostgresPool, TestPostgresContainer) {
+    let permit = Arc::clone(&POSTGRES_CONTAINER_SLOTS)
+        .acquire_owned()
+        .await
+        .expect("PostgreSQL testcontainer semaphore must remain open");
     let container = Postgres::default()
         .with_db_name("test_quant_pivot")
         .with_user("postgres")
@@ -75,5 +95,11 @@ pub async fn setup_pg() -> (PostgresPool, ContainerAsync<Postgres>) {
     .await
     .expect("finalize schema deployment");
 
-    (pool, container)
+    (
+        pool,
+        TestPostgresContainer {
+            _container: container,
+            _permit: permit,
+        },
+    )
 }

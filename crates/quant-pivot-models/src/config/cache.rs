@@ -1,5 +1,6 @@
 //! Cache layer configuration (`[cache]`, deploy).
 
+use super::secret::SecretText;
 use serde::Deserialize;
 use std::collections::HashMap;
 use url::Url;
@@ -76,7 +77,7 @@ pub struct RedisConfig {
     pub user: String,
     /// Password. Set via `QUANT_PIVOT__CACHE__REDIS__PASSWORD` in production —
     /// never in the TOML. Default: empty.
-    pub password: String,
+    pub password: SecretText,
     /// Logical database index (`SELECT`). Default: `0`.
     pub database: u8,
     /// Connection pool size. Default: `8`.
@@ -102,7 +103,7 @@ impl Default for RedisConfig {
             host: default_redis_host(),
             port: default_redis_port(),
             user: String::new(),
-            password: String::new(),
+            password: SecretText::default(),
             database: 0,
             pool_size: default_redis_pool(),
             timeout_ms: default_redis_timeout(),
@@ -134,7 +135,7 @@ impl RedisConfig {
             return Err(url::ParseError::InvalidDomainCharacter);
         }
         if !self.password.is_empty() {
-            url.set_password(Some(&self.password)).ok();
+            url.set_password(Some(self.password.expose_secret())).ok();
         }
         if self.database != 0 {
             url.set_path(&format!("/{}", self.database));

@@ -68,8 +68,6 @@ sea-orm = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 serde_json = { workspace = true }
 quant-pivot-test-support = { workspace = true }
-testcontainers = { workspace = true }
-testcontainers-modules = { workspace = true, features = ["postgres", "redis"] }
 
 [features]
 # Offline optimizer (argmin) for the weighted trainer's refinement step.

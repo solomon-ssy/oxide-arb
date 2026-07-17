@@ -32,7 +32,7 @@ pub type FeaturesConfigValidator = fn(&FeaturesConfig, &mut ConfigValidationRepo
 #[distributed_slice]
 pub static FEATURES_CONFIG_VALIDATORS: [FeaturesConfigValidator] = [..];
 
-/// Mode-agnostic invariants for the only supported runtime-config schema (v10).
+/// Mode-agnostic invariants for the only supported runtime-config schema (v17).
 ///
 /// Phase 11.3 added the `model.calibration` embargo/confidence bounds and the
 /// `portfolio.kelly_safety` edge-uncertainty bounds. Phase 11.4 adds the

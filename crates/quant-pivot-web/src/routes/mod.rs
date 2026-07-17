@@ -31,6 +31,7 @@ pub mod account;
 pub mod auth;
 pub mod basis_alerts;
 pub mod calibration_artifacts;
+pub mod dashboard;
 pub mod data_quality;
 pub mod domain_sources;
 pub mod execution_orders;
@@ -93,6 +94,7 @@ fn protected_route_specs() -> Vec<RouteSpec> {
     specs.extend(system::route_specs());
     specs.extend(markets::route_specs());
     specs.extend(data_quality::route_specs());
+    specs.extend(dashboard::route_specs());
     specs.extend(training_datasets::route_specs());
     specs.extend(research_models::route_specs());
     specs.extend(research_jobs::route_specs());

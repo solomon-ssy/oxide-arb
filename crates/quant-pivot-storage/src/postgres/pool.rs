@@ -12,7 +12,7 @@
 use super::ensure;
 use num_traits::ToPrimitive;
 use quant_pivot_error::storage::StorageError;
-use quant_pivot_models::config::PostgresConfig;
+use quant_pivot_models::config::{PostgresConfig, secret::SecretText};
 use sea_orm::{
     ConnectOptions, ConnectionTrait, Database, DatabaseConnection, DbBackend, Statement,
     sqlx::postgres::PgListener,
@@ -48,7 +48,7 @@ impl PostgresPool {
     /// runtime role as the owner of a newly created application database.
     pub async fn connect_migration(
         config: &PostgresConfig,
-        migration_password: &str,
+        migration_password: &SecretText,
     ) -> Result<Self, StorageError> {
         let migration = config.migration_connection(migration_password);
         ensure::ensure_database(&migration, &migration.user).await?;
@@ -57,7 +57,9 @@ impl PostgresPool {
 
     /// Connect to an existing database without attempting maintenance-catalog DDL.
     pub async fn connect_existing(config: &PostgresConfig) -> Result<Self, StorageError> {
-        let url = config.to_url();
+        let url = config.try_connection_url().map_err(|_| {
+            StorageError::Connection("invalid PostgreSQL connection configuration".to_owned())
+        })?;
         let mut opts = ConnectOptions::new(&url);
 
         opts.max_connections(config.max_connections)
@@ -132,13 +134,14 @@ impl PostgresPool {
         &self,
         channel: &'static str,
     ) -> Result<PostgresNotificationListener, StorageError> {
-        let mut listener = PgListener::connect(&self.config.to_url())
-            .await
-            .map_err(|_| {
-                StorageError::Connection(
-                    "PostgreSQL notification listener connection failed".to_owned(),
-                )
-            })?;
+        let url = self.config.try_connection_url().map_err(|_| {
+            StorageError::Connection("invalid PostgreSQL listener configuration".to_owned())
+        })?;
+        let mut listener = PgListener::connect(&url).await.map_err(|_| {
+            StorageError::Connection(
+                "PostgreSQL notification listener connection failed".to_owned(),
+            )
+        })?;
         listener.listen(channel).await.map_err(|_| {
             StorageError::Connection("PostgreSQL notification listener setup failed".to_owned())
         })?;

@@ -29,6 +29,8 @@ validator = { workspace = true }
 tracing = { workspace = true }
 config = { workspace = true }
 url = { workspace = true }
+zeroize = { workspace = true }
+base64 = { workspace = true }
 clickhouse = { workspace = true }
 thiserror = { workspace = true }
 num-traits = { workspace = true }

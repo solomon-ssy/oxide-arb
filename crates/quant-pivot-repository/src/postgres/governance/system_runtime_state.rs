@@ -275,7 +275,14 @@ impl SystemRuntimeStateRepository for PgSystemRuntimeStateRepository {
             command.require_approver_activator_separation,
         )
         .await?;
-        append_activation_if_current(&txn, None, Some(activation)).await?;
+        let activation = append_activation_if_current(&txn, None, Some(activation))
+            .await?
+            .ok_or_else(|| {
+                StorageError::invariant_violation(
+                    Some("runtime_config_activation"),
+                    "bootstrap activation CAS returned no inserted activation",
+                )
+            })?;
 
         let state = persist_phase(
             &txn,
@@ -295,6 +302,8 @@ impl SystemRuntimeStateRepository for PgSystemRuntimeStateRepository {
         Ok(BootstrapActivationInfo {
             state,
             runtime_config: validated.version.into(),
+            runtime_config_activation_id: activation.runtime_config_activation_id,
+            activated_at: activation.activated_at,
         })
     }
 

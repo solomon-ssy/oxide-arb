@@ -31,10 +31,7 @@ async fn setup_empty_pg() -> (
         .expect("PG container");
     let port = container.get_host_port_ipv4(5432).await.expect("port");
     let config = test_pg_config(port);
-    let url = format!(
-        "postgres://{}:{}@{}:{}/{}",
-        config.user, config.password, config.host, config.port, config.database
-    );
+    let url = config.try_connection_url().expect("PostgreSQL URL");
     let db = Database::connect(url).await.expect("connect");
     db.execute_unprepared(&format!(
         "CREATE ROLE {TEST_RUNTIME_ROLE} LOGIN PASSWORD 'quant-pivot-test-runtime'"

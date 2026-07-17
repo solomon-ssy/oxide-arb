@@ -12,8 +12,8 @@ use quant_pivot_models::{
         MaterializationRunKind, MaterializationRunStatus, MetricsScrapePort,
         ModelCalibrationFitPort, ModelGovernancePort, ModelSpecPort, ModelTrainingPort,
         OrderIntentPort, QuantReportPort, ReadinessPort, ReconciliationPort, ResearchCatalogPort,
-        ResearchJobPort, RuntimeConfigPort, RuntimeControlPort, StructuralMonitorPort,
-        TradePolicyPort, TrainingDatasetPort,
+        ResearchJobPort, ResearchReadinessPort, RuntimeConfigPort, RuntimeControlPort,
+        StructuralMonitorPort, TradePolicyPort, TrainingDatasetPort,
     },
 };
 use quant_pivot_repository::traits::{
@@ -83,6 +83,8 @@ pub struct AppState {
     /// Durable async research-job engine (dataset build / model train / backtest
     /// / bias-table fit): enqueue + task-center list/get/cancel/retry.
     pub research_jobs: Arc<dyn ResearchJobPort>,
+    /// Verified operational evidence for the research-readiness dashboard gate.
+    pub research_readiness: Arc<dyn ResearchReadinessPort>,
     /// Deterministic feature replay evidence and governed parity latch.
     pub feature_integrity: Arc<dyn FeatureIntegrityPort>,
     /// Favorite-longshot bias-table fit enqueue + unified calibration-artifact

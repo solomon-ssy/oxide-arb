@@ -12,7 +12,7 @@ use std::env::var;
 async fn clob_connect_succeeds_with_private_key_only() {
     let private_key = var("QUANT_PIVOT_TEST_PRIVATE_KEY").expect("QUANT_PIVOT_TEST_PRIVATE_KEY");
     let ks = Keystore::from_config(&KeysConfig {
-        private_key: Some(private_key),
+        private_key: Some(private_key.into()),
     })
     .expect("keystore from private_key");
 

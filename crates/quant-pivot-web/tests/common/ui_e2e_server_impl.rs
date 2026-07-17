@@ -1379,7 +1379,7 @@ async fn prepare_e2e_fixtures(
         .await
         .expect("mark recommendation trade plan unavailable");
 
-    let frozen_record = record(&summary.records, "pending-a");
+    let frozen_record = record(&summary.records, "active-conditional");
     let frozen = PgRecommendationRepository::new(db.clone())
         .find_by_id(&frozen_record.recommendation_id)
         .await
@@ -1394,11 +1394,7 @@ async fn prepare_e2e_fixtures(
         .intent_id
         .clone()
         .expect("pending intent fixture");
-    let waiting_record = record(&summary.records, "approved");
-    let waiting_intent_id = waiting_record
-        .intent_id
-        .clone()
-        .expect("waiting intent fixture");
+    let waiting_intent_id = pending_intent_id.clone();
     apply_book(books, &frozen.token_id, Price::new(dec!(0.60)), Utc::now())
         .expect("seed frozen recommendation book");
 

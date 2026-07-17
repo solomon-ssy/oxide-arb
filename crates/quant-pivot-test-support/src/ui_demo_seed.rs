@@ -176,6 +176,10 @@ pub async fn seed_ui_demo_pg(
     seed_report_plane_scenarios(db, &infra, &mut summary).await;
     seed_filled_closed_attribution(db, &mut summary).await;
     summary.research = seed_research_ui_demo_pg(db, &infra).await;
+    let active_conditional = Box::pin(seed_active_conditional(db, &infra, &submission)).await;
+    summary.reports += 1;
+    summary.intents += 1;
+    summary.records.push(active_conditional);
 
     summary
 }
@@ -418,6 +422,23 @@ async fn seed_pending_b(
 ) -> DemoSeedRecord {
     let ids = seed_report(db, infra, "pending-b").await;
     let mut record = base_record("pending-b", &ids);
+    let intent_id = seed_pending_intent(db, &ids).await;
+    attach_intent_meta(db, &mut record, intent_id).await;
+    record
+}
+
+/// Final authoritative report used by the protected operator flow. Keeping the
+/// pending approval and subsequent entry-condition evaluation on one current
+/// recommendation prevents later demo reports from legitimately superseding
+/// the intent before the browser can exercise it.
+async fn seed_active_conditional(
+    db: &DatabaseConnection,
+    infra: &SharedDemoInfra,
+    _: &PgExecutionSubmissionRepository,
+) -> DemoSeedRecord {
+    let ids =
+        seed_conditional_price_report_on_infra(db, infra, demo_report("active-conditional")).await;
+    let mut record = base_record("active-conditional", &ids);
     let intent_id = seed_pending_intent(db, &ids).await;
     attach_intent_meta(db, &mut record, intent_id).await;
     record

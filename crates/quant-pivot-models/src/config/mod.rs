@@ -29,6 +29,7 @@ mod observability;
 mod polymarket;
 mod quant;
 mod research;
+pub mod secret;
 pub mod validation;
 mod web;
 
@@ -50,7 +51,9 @@ use crate::{
     enums::quant::QuantRuntimeMode,
 };
 use quant_pivot_error::{
-    QuantResult, config::ConfigError, config_validation::ConfigValidationReport,
+    QuantResult,
+    config::ConfigError,
+    config_validation::{ConfigValidationError, ConfigValidationReport},
 };
 use serde::Deserialize;
 
@@ -90,14 +93,49 @@ impl DeployConfig {
     /// then merges `QUANT_PIVOT__*` environment variables (env overrides file).
     /// Runs mode-agnostic semantic validation before returning.
     pub fn load(config_dir: &str) -> QuantResult<Self> {
+        let mut deploy = Self::load_internal(config_dir)?;
+        let has_migration_password = deploy.db.postgres.migration.password.is_some()
+            || deploy.db.clickhouse.migration.password.is_some();
+        let production_profile = deploy.db.clickhouse.deployment_id != "local-development"
+            || deploy.research.artifact_store.kind == ArtifactStoreKind::S3;
+        if production_profile && has_migration_password {
+            return Err(ConfigError::from(ConfigValidationReport::single_error(
+                ConfigValidationError::invalid_value(
+                    "db.*.migration.password",
+                    "production runtime configuration must not contain DDL credentials",
+                ),
+            ))
+            .into());
+        }
+        deploy.db.postgres.migration.password = None;
+        deploy.db.clickhouse.migration.password = None;
+        Ok(deploy)
+    }
+
+    /// Load deploy configuration for schema plan/apply/manifest commands.
+    ///
+    /// Unlike the runtime projection, this retains migration-only passwords.
+    pub fn load_for_migration(config_dir: &str) -> QuantResult<Self> {
+        Self::load_internal(config_dir)
+    }
+
+    fn load_internal(config_dir: &str) -> QuantResult<Self> {
         let mut deploy: Self = build_config(config_dir, None)
             .map_err(ConfigError::Load)?
             .try_deserialize()
             .map_err(ConfigError::Load)?;
         deploy.keys.normalize();
         deploy.polymarket.relayer.normalize();
+        normalize_migration_password(&mut deploy.db.postgres.migration.password);
+        normalize_migration_password(&mut deploy.db.clickhouse.migration.password);
         deploy.ensure_valid_common()?;
         Ok(deploy)
+    }
+}
+
+fn normalize_migration_password(password: &mut Option<secret::SecretText>) {
+    if password.as_ref().is_some_and(secret::SecretText::is_empty) {
+        *password = None;
     }
 }
 
@@ -203,6 +241,7 @@ mod tests {
         let mut deploy = DeployConfig::default();
         deploy.keys.private_key = Some("0xabc".into());
         deploy.quant.account.funder = Some("0xfunder".into());
+        deploy.web.jwt.signing_key = "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc".into();
         deploy
             .ensure_valid_for_quant_mode(QuantRuntimeMode::ReportOnly)
             .expect("report_only with credentials must validate");
@@ -293,7 +332,7 @@ private_key = "0xfrom_toml"
 
         let dir_str = dir.to_str().expect("utf-8");
         let from_file = DeployConfig::load(dir_str).expect("load from toml");
-        assert_eq!(from_file.keys.private_key.as_deref(), Some("0xfrom_toml"));
+        assert_eq!(from_file.keys.private_key(), Some("0xfrom_toml"));
 
         let map = iter::once((
             "QUANT_PIVOT__KEYS__PRIVATE_KEY".to_owned(),
@@ -305,7 +344,7 @@ private_key = "0xfrom_toml"
             .try_deserialize()
             .expect("deserialize");
         from_env.keys.normalize();
-        assert_eq!(from_env.keys.private_key.as_deref(), Some("0xfrom_env"));
+        assert_eq!(from_env.keys.private_key(), Some("0xfrom_env"));
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -334,7 +373,7 @@ private_key = "0xlocal"
         .expect("write local");
 
         let deploy = DeployConfig::load(dir.to_str().expect("utf-8")).expect("load");
-        assert_eq!(deploy.keys.private_key.as_deref(), Some("0xlocal"));
+        assert_eq!(deploy.keys.private_key(), Some("0xlocal"));
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -355,6 +394,96 @@ private_key = "0xlocal"
             deploy.db.postgres.database,
             DeployConfig::default().db.postgres.database
         );
+    }
+
+    #[test]
+    fn migration_password_uses_base_local_environment_precedence() {
+        let dir = env::temp_dir().join(format!("quant_pivot_migration_cfg_{}", process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("temp config dir");
+        fs::write(
+            dir.join("quant-pivot.toml"),
+            "[db.postgres.migration]\npassword = \"base-secret\"\n",
+        )
+        .expect("write base config");
+        fs::write(
+            dir.join("quant-pivot.local.toml"),
+            "[db.postgres.migration]\npassword = \"local-secret\"\n",
+        )
+        .expect("write local config");
+
+        let local = DeployConfig::load_for_migration(dir.to_str().expect("utf-8"))
+            .expect("load local migration config");
+        assert_eq!(
+            local
+                .db
+                .postgres
+                .migration
+                .password
+                .as_ref()
+                .map(secret::SecretText::expose_secret),
+            Some("local-secret")
+        );
+
+        let map = iter::once((
+            "QUANT_PIVOT__DB__POSTGRES__MIGRATION__PASSWORD".to_owned(),
+            "environment-secret".to_owned(),
+        ))
+        .collect();
+        let from_env: DeployConfig = build_config(dir.to_str().expect("utf-8"), Some(map))
+            .expect("build environment overlay")
+            .try_deserialize()
+            .expect("deserialize environment overlay");
+        assert_eq!(
+            from_env
+                .db
+                .postgres
+                .migration
+                .password
+                .as_ref()
+                .map(secret::SecretText::expose_secret),
+            Some("environment-secret")
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn production_runtime_rejects_migration_password() {
+        let dir = env::temp_dir().join(format!("quant_pivot_runtime_secret_{}", process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("temp config dir");
+        fs::write(
+            dir.join("quant-pivot.toml"),
+            "[db.clickhouse]\ndeployment_id = \"production\"\n\
+             [db.postgres.migration]\npassword = \"ddl-secret\"\n",
+        )
+        .expect("write production config");
+        let error = DeployConfig::load(dir.to_str().expect("utf-8"))
+            .expect_err("runtime must reject DDL credentials");
+        assert!(
+            error
+                .to_string()
+                .contains("must not contain DDL credentials")
+        );
+        assert!(!error.to_string().contains("ddl-secret"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn production_runtime_treats_empty_migration_password_as_absent() {
+        let dir = env::temp_dir().join(format!("quant_pivot_empty_ddl_secret_{}", process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("temp config dir");
+        fs::write(
+            dir.join("quant-pivot.toml"),
+            "[db.clickhouse]\ndeployment_id = \"production\"\n\
+             [db.postgres.migration]\npassword = \"\"\n",
+        )
+        .expect("write production config");
+        let deploy = DeployConfig::load(dir.to_str().expect("utf-8"))
+            .expect("empty DDL password is not a credential");
+        assert!(deploy.db.postgres.migration.password.is_none());
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

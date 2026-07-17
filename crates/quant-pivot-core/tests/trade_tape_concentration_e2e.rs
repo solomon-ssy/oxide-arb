@@ -105,8 +105,6 @@ use quant_pivot_test_support::{
 use quant_pivot_test_support::{fact_sink::DiscardFactWriter, pit::InMemoryDecisionSnapshotSource};
 use rust_decimal::Decimal;
 use sea_orm::DatabaseConnection;
-use testcontainers::ContainerAsync;
-use testcontainers_modules::postgres::Postgres;
 
 struct Catalog {
     event_id: &'static str,
@@ -415,7 +413,7 @@ fn structural_features_only_config() -> FeaturesConfig {
 }
 
 struct WhaleTapeConcHarness {
-    _container: ContainerAsync<Postgres>,
+    _container: quant_pivot_test_support::pg::TestPostgresContainer,
     db: DatabaseConnection,
     registry: Arc<MarketRegistry>,
     book_store: Arc<BookStore>,
@@ -691,4 +689,5 @@ async fn whale_trade_tape_scores_feature_factor_and_monitor() {
 
     run_factor_round_and_assert_concentration(&harness, &feature_result, expected_composite).await;
     assert_monitor_concentration_matches_canonical(&harness, expected_composite).await;
+    drop(harness);
 }

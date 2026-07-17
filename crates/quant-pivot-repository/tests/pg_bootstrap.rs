@@ -1,8 +1,11 @@
 //! Durable cold-start FSM and governed activation integration tests.
 
-use chrono::Utc;
+use chrono::{Duration, Utc};
 use quant_pivot_models::{
-    domain::{ActivateBootstrapState, NewRuntimeConfigApproval, NewRuntimeConfigVersion},
+    domain::{
+        ActivateBootstrapState, BootstrapActivationInfo, NewRuntimeConfigApproval,
+        NewRuntimeConfigVersion,
+    },
     entities::system_bootstrap_transition,
     enums::{
         runtime_config::{RuntimeConfigApprovalDecision, RuntimeConfigVersionSource},
@@ -18,6 +21,45 @@ use quant_pivot_repository::{
 };
 use quant_pivot_test_support::pg::setup_pg;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
+
+async fn assert_activation_visibility(
+    configs: &PgRuntimeConfigVersionRepository,
+    activated: &BootstrapActivationInfo,
+    expected_version_id: &RuntimeConfigVersionId,
+) {
+    let current_config = configs
+        .load_current()
+        .await
+        .expect("load current config after activation commit")
+        .expect("current config must be visible after commit");
+    assert_eq!(
+        &current_config.runtime_config_version_id,
+        expected_version_id
+    );
+    let before_activation = configs
+        .load_active_at(activated.activated_at - Duration::microseconds(1))
+        .await
+        .expect("load config immediately before activation");
+    assert!(before_activation.is_none());
+    let active_at_boundary = configs
+        .load_active_at(activated.activated_at)
+        .await
+        .expect("load config at database activation boundary")
+        .expect("config must be visible at activation boundary");
+    assert_eq!(
+        &active_at_boundary.runtime_config_version_id,
+        expected_version_id
+    );
+    let current_activation = configs
+        .load_current_activation()
+        .await
+        .expect("load current activation")
+        .expect("current activation must be visible");
+    assert_eq!(
+        current_activation.runtime_config_activation_id,
+        activated.runtime_config_activation_id
+    );
+}
 
 #[tokio::test]
 #[ignore = "requires Docker"]
@@ -144,12 +186,7 @@ async fn bootstrap_transitions_are_monotonic_restart_safe_and_approval_bound() {
         .expect("activate bootstrap");
     assert_eq!(activated.state.bootstrap_phase, BootstrapPhase::Active);
     assert_eq!(activated.state.state_revision, 3);
-    let active_config = configs
-        .load_active_at(Utc::now())
-        .await
-        .expect("load activated config by decision time")
-        .expect("activated config must be visible");
-    assert_eq!(active_config.runtime_config_version_id, expected_version_id);
+    assert_activation_visibility(&configs, &activated, &expected_version_id).await;
 
     let active_restart = state
         .begin_baseline_collection()

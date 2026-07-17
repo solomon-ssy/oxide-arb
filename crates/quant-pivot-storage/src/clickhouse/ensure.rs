@@ -23,7 +23,7 @@ pub(super) async fn ensure_database(config: &ClickHouseConfig) -> Result<(), Sto
         .with_url(&config.url)
         .with_database(MAINTENANCE_DATABASE)
         .with_user(&config.user)
-        .with_password(&config.password);
+        .with_password(config.password.expose_secret());
 
     if database_exists(config).await? {
         info!(database = %config.database, "ClickHouse database already exists");
@@ -55,7 +55,7 @@ pub(super) async fn database_exists(config: &ClickHouseConfig) -> Result<bool, S
         .with_url(&config.url)
         .with_database(MAINTENANCE_DATABASE)
         .with_user(&config.user)
-        .with_password(&config.password);
+        .with_password(config.password.expose_secret());
     client
         .query("SELECT count() FROM system.databases WHERE name = ?")
         .bind(&config.database)

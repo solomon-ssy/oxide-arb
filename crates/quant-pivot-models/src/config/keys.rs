@@ -15,7 +15,8 @@
 //! `private_key` via the SDK at runtime.
 
 use serde::Deserialize;
-use std::fmt;
+
+use super::secret::SecretText;
 
 /// Environment variable for the bot wallet private key.
 pub const ENV_PRIVATE_KEY: &str = "QUANT_PIVOT__KEYS__PRIVATE_KEY";
@@ -26,27 +27,11 @@ pub const ENV_PRIVATE_KEY: &str = "QUANT_PIVOT__KEYS__PRIVATE_KEY";
 /// and/or `QUANT_PIVOT__KEYS__PRIVATE_KEY`. Environment variables override file
 /// values when present. It is the single credential the process signs with and
 /// derives Polymarket CLOB L2 read/write credentials from at connect time.
-#[derive(Clone, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct KeysConfig {
     /// Wallet private key for signing, CLOB L1 auth, and runtime L2 derivation.
-    pub private_key: Option<String>,
-}
-
-impl fmt::Debug for KeysConfig {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("KeysConfig")
-            .field("private_key", &secret_present(self.private_key.as_ref()))
-            .finish()
-    }
-}
-
-const fn secret_present(value: Option<&String>) -> &'static str {
-    if value.is_some() {
-        "<redacted>"
-    } else {
-        "<unset>"
-    }
+    pub private_key: Option<SecretText>,
 }
 
 impl KeysConfig {
@@ -54,9 +39,15 @@ impl KeysConfig {
     ///
     /// Empty strings (e.g. `private_key = ""` in TOML) are treated as unset.
     pub fn normalize(&mut self) {
-        if self.private_key.as_deref().is_some_and(str::is_empty) {
+        if self.private_key.as_ref().is_some_and(SecretText::is_empty) {
             self.private_key = None;
         }
+    }
+
+    /// Expose the private key only at the signing boundary.
+    #[must_use]
+    pub fn private_key(&self) -> Option<&str> {
+        self.private_key.as_ref().map(SecretText::expose_secret)
     }
 
     /// Whether the wallet private key is populated.
@@ -73,7 +64,7 @@ mod tests {
     #[test]
     fn normalize_clears_empty_strings() {
         let mut keys = KeysConfig {
-            private_key: Some(String::new()),
+            private_key: Some(String::new().into()),
         };
         keys.normalize();
         assert!(!keys.private_key_present());
@@ -86,7 +77,7 @@ mod tests {
         };
         let debug = format!("{keys:?}");
         assert!(!debug.contains("0xsecret"));
-        assert!(debug.contains("redacted"));
+        assert!(debug.contains("secret:redacted"));
     }
 
     #[test]

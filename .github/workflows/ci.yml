@@ -1,4 +1,4 @@
-name: CI
+name: Production Gates
 
 on:
   push:
@@ -12,187 +12,115 @@ env:
   RUSTFLAGS: "-D warnings"
 
 jobs:
-  check:
-    name: Check & Lint
+  rust-static:
+    name: rust-static
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy, rustfmt
+      - uses: dtolnay/rust-toolchain@nightly
       - uses: Swatinem/rust-cache@v2
+      - name: Install dependency gates
+        run: |
+          cargo install cargo-machete --locked
+          cargo +nightly install cargo-udeps --locked
+      - name: Run canonical rust-static gate
+        run: bash scripts/check-production-gates.sh rust-static
 
-      - name: Format check
-        run: cargo fmt --all -- --check
-
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
-      - name: Architecture lint
-        run: bash scripts/lint-architecture.sh
-      - name: ClickHouse correctness gate
-        run: bash scripts/lint-clickhouse-correctness.sh
-      - name: Quant pivot boundary gate
-        run: bash scripts/lint-quant-pivot-boundary.sh
-      - name: Quant pivot error-layer gate
-        run: bash scripts/lint-quant-pivot-errors.sh
-      - name: Dead-semantics gate
-        run: bash scripts/lint-dead-semantics.sh
-
-      - name: Build
-        run: cargo build --workspace
-
-  test:
-    name: Test
+  ui:
+    name: ui
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Run tests
-        run: cargo test --workspace
-
-      - name: Run wiremock API tests
-        run: cargo test-network
-
-  heavy-ml:
-    name: Heavy ML (classical + optimize)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+          submodules: recursive
+      - uses: pnpm/action-setup@v4
         with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-          components: clippy
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Clippy (research, ml-classical + optimize + dataframe)
-        run: cargo clippy -p quant-pivot-research --features ml-classical,optimize,dataframe --all-targets -- -D warnings
-
-      - name: Clippy (core, ml-classical + optimize)
-        run: cargo clippy -p quant-pivot-core --features ml-classical,optimize --all-targets -- -D warnings
-
-      - name: Test (research, ml-classical + optimize + dataframe)
-        run: cargo test -p quant-pivot-research --features ml-classical,optimize,dataframe
-
-      - name: Test (core, ml-classical + optimize)
-        run: cargo test -p quant-pivot-core --features ml-classical,optimize
-
-      - name: Production binary links the classical ML stack
-        run: cargo build -p quant-pivot-bin --features ml-classical,optimize
-
-  production-profile:
-    name: Production profile (feature completeness)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+          package_json_file: ui/package.json
+      - uses: actions/setup-node@v4
         with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: Swatinem/rust-cache@v2
-
-      # `report_only` is not dry-run: the deployed binary must always link the
-      # portfolio optimizer + classical model runtime. The default profile is the
-      # production profile (Phase 11.0), so a plain default build must succeed and
-      # the explicit full feature set must match it.
-      - name: Default binary links the full research stack
-        run: cargo build -p quant-pivot-bin
-
-      - name: Explicit production feature set builds
-        run: cargo build -p quant-pivot-bin --features lp-solver,optimize,ml-classical
-
-  bench:
-    name: Benchmarks
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Install critcmp
-        run: cargo install critcmp --locked
-
-      - name: Compile benchmarks
-        run: cargo bench -p quant-pivot-bench --no-run
-
-      - name: Run hot_paths benchmarks (PR regression gate)
-        if: github.event_name == 'pull_request'
-        run: bash scripts/check-bench-regression.sh
-
-      - name: Enforce absolute micro SLO ceilings
-        run: bash scripts/check-bench-slo.sh
-
-      - name: Run e2e path benchmarks
-        run: cargo bench -p quant-pivot-bench --bench e2e_paths -- --output-format bencher
-
-      - name: Run benchmarks
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        run: bash scripts/check-bench-regression.sh
-
-      - name: Archive benchmark results
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        run: cp benches/baseline/hot_paths.txt bench_results.txt
-
-      - name: Upload benchmark results
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+          node-version: "24"
+          cache: pnpm
+          cache-dependency-path: ui/pnpm-lock.yaml
+      - name: Install UI dependencies
+        working-directory: ui
+        run: pnpm install --frozen-lockfile
+      - name: Run canonical UI gate
+        run: bash scripts/check-production-gates.sh ui
+      - name: Archive UI build
         uses: actions/upload-artifact@v4
         with:
-          name: bench-results-${{ github.sha }}
-          path: bench_results.txt
-          retention-days: 90
+          name: operator-console-${{ github.sha }}
+          path: ui/apps/web-antdv-next/dist
+          retention-days: 14
 
-  pgo-build:
-    name: PGO Build
+  network:
+    name: network
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
+      - name: Run canonical network gate
+        run: bash scripts/check-production-gates.sh network
 
-      - name: Install llvm-tools
-        run: sudo apt-get update && sudo apt-get install -y llvm
-
-      - name: PGO build
-        run: bash scripts/pgo.sh
-
-  integration-docker:
-    name: Integration (Docker)
+  docker:
+    name: docker
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
+      - name: Run canonical Docker gate twice
+        run: bash scripts/check-production-gates.sh docker
 
-      - name: Run Docker integration tests
-        run: cargo test-docker
-
-  # network-integration:
-  #   name: Live API / WS / RPC (optional)
-  #   runs-on: ubuntu-latest
-  #   # Runs only on main when secrets are set; does not block PRs without secrets.
-  #   if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #     - uses: dtolnay/rust-toolchain@stable
-  #     - uses: Swatinem/rust-cache@v2
-
-  #     - name: Live integration tests
-  #       env:
-  #         QUANT_PIVOT__POLYMARKET__ONCHAIN__RPC_URL: ${{ secrets.POLYGON_RPC_URL }}
-  #         QUANT_PIVOT_TEST_RESOLVED_CONDITION_ID: ${{ secrets.RESOLVED_CONDITION_ID }}
-  #       run: |
-  #         if [ -z "$QUANT_PIVOT__POLYMARKET__ONCHAIN__RPC_URL" ] || [ -z "$QUANT_PIVOT_TEST_RESOLVED_CONDITION_ID" ]; then
-  #           echo "Skipping: set POLYGON_RPC_URL and RESOLVED_CONDITION_ID repo secrets to enable."
-  #           exit 0
-  #         fi
-  #         cargo test -p quant-pivot-api -- --ignored --test-threads=1
+  protected-e2e:
+    name: protected-e2e
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: ui/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: pnpm
+          cache-dependency-path: ui/pnpm-lock.yaml
+      - name: Install UI dependencies
+        working-directory: ui
+        run: pnpm install --frozen-lockfile
+      - name: Install Chromium
+        working-directory: ui
+        run: pnpm exec playwright install --with-deps chromium
+      - name: Run canonical protected E2E gate
+        run: bash scripts/check-production-gates.sh protected-e2e
+      - name: Archive browser evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: protected-e2e-${{ github.sha }}
+          path: |
+            ui/playwright-report
+            ui/test-results
+          if-no-files-found: ignore
+          retention-days: 30

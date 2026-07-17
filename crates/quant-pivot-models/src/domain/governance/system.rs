@@ -408,4 +408,6 @@ pub struct ActivateBootstrapState {
 pub struct BootstrapActivationInfo {
     pub state: SystemRuntimeStateInfo,
     pub runtime_config: RuntimeConfigVersionInfo,
+    pub runtime_config_activation_id: RuntimeConfigActivationId,
+    pub activated_at: DateTime<Utc>,
 }

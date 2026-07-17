@@ -110,18 +110,19 @@ mod tests {
     use super::{
         AuthzOutcome, CasbinService, Claims, Method, PermChecker, Rule, SUPER_ADMIN_ROLE, WebError,
     };
-    use crate::{extractors::ActorRoles, jwt::TokenType};
+    use crate::{extractors::ActorRoles, jwt::TokenUse};
 
     fn claims() -> Claims {
         Claims {
             jti: "jti".to_owned(),
             sub: "user-1".to_owned(),
             iss: "quant-pivot".to_owned(),
+            aud: "quant-pivot-web".to_owned(),
             iat: 0,
             nbf: 0,
             exp: 0,
             username: "tester".to_owned(),
-            token_type: TokenType::Access,
+            token_use: TokenUse::Access,
             family_id: "family-1".to_owned(),
             session_exp: 4_102_444_800,
             generation: 0,

@@ -25,7 +25,7 @@ use quant_pivot_models::{
         EntryConditionEvaluationEventRow, MarketResolutionRow, MidPriceBucketRow,
         ReportMarketFunnelCountRow, ReportMarketFunnelRow, TradeTapeRow,
     },
-    config::{CacheConfig, DeployConfig, JwtConfig, RedisConfig},
+    config::{CacheConfig, DeployConfig, JwtConfig, RedisConfig, WebConfig},
     domain::{
         AcknowledgeFeatureParityLatchRequest, ActivateBootstrapRequest, BacktestPathSetInfo,
         BacktestPathSetListQuery, BacktestPathSetView, BacktestPort, BacktestReportInfo,
@@ -56,8 +56,9 @@ use quant_pivot_models::{
         PublishModelCommand, PublishedModelOptionView, QualityGateReportView,
         QuantModeTransitionReport, ReconciliationPort, RegisterFactorDefinitionsCommand,
         ResearchCatalogPort, ResearchJobListQuery, ResearchJobPort, ResearchJobView,
-        ResolveReconciliationCommand, ResolveReconciliationOutcome, RetireFactorCommand,
-        RetireModelCommand, RollbackModelCommand, RunBacktestRequest, RunCpcvBacktestRequest,
+        ResearchReadinessPort, ResearchReadinessSnapshot, ResolveReconciliationCommand,
+        ResolveReconciliationOutcome, RetireFactorCommand, RetireModelCommand,
+        RollbackModelCommand, RunBacktestRequest, RunCpcvBacktestRequest,
         RunFullFeatureParityRequest, RuntimeConfigPort, RuntimeControlPort, SetKillSwitchCommand,
         StructuralMonitorPort, SystemCapabilities, SystemStatus, TradePolicyArtifactInfo,
         TradePolicyAuditListQuery, TradePolicyFitPreflightView, TradePolicyGovernanceAuditInfo,
@@ -190,6 +191,7 @@ fn web_harness_app_state(input: WebHarnessAppStateInput<'_>) -> AppState {
         model_spec: Arc::new(MockModelSpecPort),
         research_catalog: Arc::new(MockResearchCatalogPort),
         research_jobs: Arc::new(MockResearchJobPort),
+        research_readiness: Arc::new(MockResearchReadinessPort),
         feature_integrity: Arc::new(MockFeatureIntegrityPort),
         calibration_artifacts: Arc::new(MockCalibrationArtifactFitPort),
         model_calibration_fit: Arc::new(MockModelCalibrationFitPort),
@@ -338,25 +340,25 @@ impl Drop for TestEnv {
 }
 
 fn jwt_config() -> JwtConfig {
-    let fixtures = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/jwt");
     JwtConfig {
-        signing_key_id: "test-2026-01".to_owned(),
-        signing_private_key_file: format!("{fixtures}/test-ed25519-private.pem"),
-        verification_keys: vec![quant_pivot_models::config::JwtVerificationKeyConfig {
-            key_id: "test-2026-01".to_owned(),
-            public_key_file: format!("{fixtures}/test-ed25519-public.pem"),
-        }],
+        signing_key: "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc".into(),
         issuer: TEST_ISSUER.to_owned(),
+        audience: "quant-pivot-web-test".to_owned(),
         access_ttl_secs: 900,
         refresh_ttl_secs: 604_800,
+        absolute_session_ttl_secs: 2_592_000,
     }
 }
 
 fn test_deploy_config() -> DeployConfig {
     DeployConfig {
+        web: WebConfig {
+            cors_allowed_origins: vec!["http://127.0.0.1:6099".to_owned()],
+            ..WebConfig::default()
+        },
         cache: CacheConfig {
             redis: RedisConfig {
-                password: "harness-redis-secret".to_owned(),
+                password: "harness-redis-secret".into(),
                 ..RedisConfig::default()
             },
             ..CacheConfig::default()
@@ -1154,6 +1156,15 @@ impl CpcvBacktestPort for MockCpcvBacktestPort {
 
 /// No-op research catalog port for web integration tests (empty pages).
 pub struct MockResearchCatalogPort;
+
+pub struct MockResearchReadinessPort;
+
+#[async_trait]
+impl ResearchReadinessPort for MockResearchReadinessPort {
+    async fn snapshot(&self) -> QuantResult<Option<ResearchReadinessSnapshot>> {
+        Ok(None)
+    }
+}
 
 #[async_trait]
 impl ResearchCatalogPort for MockResearchCatalogPort {

@@ -86,8 +86,9 @@ async fn login_returns_access_token_and_hardened_refresh_cookie() {
     let data = &body["data"];
     let access_token = data["access_token"].as_str().expect("access token");
     let header = decode_header(access_token).expect("signed JWT header");
-    assert_eq!(header.alg, Algorithm::EdDSA);
-    assert_eq!(header.kid.as_deref(), Some("test-2026-01"));
+    assert_eq!(header.alg, Algorithm::HS256);
+    assert_eq!(header.typ.as_deref(), Some("at+jwt"));
+    assert!(header.kid.is_none());
     assert!(data.get("refresh_token").is_none());
     assert_eq!(data["token_type"], "Bearer");
     assert_eq!(data["expires_in"], 900);

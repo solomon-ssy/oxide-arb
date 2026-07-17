@@ -28,6 +28,8 @@ mod auth;
 mod authz;
 #[path = "web/bias_tables.rs"]
 mod bias_tables;
+#[path = "web/dashboard.rs"]
+mod dashboard;
 #[path = "web/metrics.rs"]
 mod metrics;
 #[path = "web/operation_log.rs"]

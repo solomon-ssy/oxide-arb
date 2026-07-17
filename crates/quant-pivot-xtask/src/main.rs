@@ -1,7 +1,10 @@
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 use quant_pivot_migration::{apply as apply_postgres_migrations, plan as plan_postgres_migrations};
-use quant_pivot_models::{config::DeployConfig, security::hash_password};
+use quant_pivot_models::{
+    config::{DeployConfig, secret::SecretText},
+    security::hash_password,
+};
 use quant_pivot_storage::{
     clickhouse::{
         apply_offline_schema_migrations, apply_online_schema_migrations, plan_schema,
@@ -16,6 +19,8 @@ use quant_pivot_storage::{
     },
 };
 use rustls::crypto::aws_lc_rs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::{
     env, fs,
     path::PathBuf,
@@ -23,8 +28,6 @@ use std::{
 };
 use zeroize::Zeroizing;
 
-const POSTGRES_MIGRATION_PASSWORD_ENV: &str = "QUANT_PIVOT_MIGRATION__POSTGRES_PASSWORD";
-const CLICKHOUSE_MIGRATION_PASSWORD_ENV: &str = "QUANT_PIVOT_MIGRATION__CLICKHOUSE_PASSWORD";
 const BOOTSTRAP_ADMIN_PASSWORD_FILE_ENV: &str = "QUANT_PIVOT_BOOTSTRAP__ADMIN_PASSWORD_FILE";
 
 const DOCKER_SUITES: &[(&str, &str)] = &[
@@ -198,11 +201,14 @@ async fn postgres_schema(command: PostgresSchemaCommand) -> Result<()> {
         .config_dir
         .to_str()
         .context("PostgreSQL schema config directory is not valid UTF-8")?;
-    let deploy = DeployConfig::load(config_dir).context("load deploy config")?;
+    let deploy = DeployConfig::load_for_migration(config_dir).context("load deploy config")?;
     match command {
         PostgresSchemaCommand::Plan(_) => {
-            let password = migration_password(POSTGRES_MIGRATION_PASSWORD_ENV)?;
-            let config = deploy.db.postgres.migration_connection(&password);
+            let password = migration_password(
+                deploy.db.postgres.migration.password.as_ref(),
+                "db.postgres.migration.password",
+            )?;
+            let config = deploy.db.postgres.migration_connection(password);
             let pool = PostgresPool::connect_existing(&config)
                 .await
                 .context("connect PostgreSQL for migration plan")?;
@@ -221,9 +227,12 @@ async fn postgres_schema(command: PostgresSchemaCommand) -> Result<()> {
             Ok(())
         }
         PostgresSchemaCommand::Apply(_) => {
-            let password = migration_password(POSTGRES_MIGRATION_PASSWORD_ENV)?;
+            let password = migration_password(
+                deploy.db.postgres.migration.password.as_ref(),
+                "db.postgres.migration.password",
+            )?;
             let bootstrap_admin_password_hash = bootstrap_admin_password_hash()?;
-            let pool = PostgresPool::connect_migration(&deploy.db.postgres, &password)
+            let pool = PostgresPool::connect_migration(&deploy.db.postgres, password)
                 .await
                 .context("connect PostgreSQL migration identity")?;
             apply_postgres_migrations(pool.connection())
@@ -264,10 +273,9 @@ async fn postgres_schema(command: PostgresSchemaCommand) -> Result<()> {
             Ok(())
         }
         PostgresSchemaCommand::Manifest(_) => {
-            let password = migration_password(POSTGRES_MIGRATION_PASSWORD_ENV)?;
-            let pool = PostgresPool::connect_migration(&deploy.db.postgres, &password)
+            let pool = PostgresPool::connect_existing(&deploy.db.postgres)
                 .await
-                .context("connect PostgreSQL migration identity")?;
+                .context("connect PostgreSQL runtime identity")?;
             let manifest = inspect_schema_manifest(pool.connection())
                 .await
                 .context("inspect PostgreSQL semantic manifest")?;
@@ -318,12 +326,15 @@ async fn clickhouse_schema(command: ClickHouseSchemaCommand) -> Result<()> {
     let config_dir = config_dir
         .to_str()
         .context("ClickHouse schema config directory is not valid UTF-8")?;
-    let deploy = DeployConfig::load(config_dir).context("load deploy config")?;
+    let deploy = DeployConfig::load_for_migration(config_dir).context("load deploy config")?;
     let config = &deploy.db.clickhouse;
     match command {
         ClickHouseSchemaCommand::Plan(_) => {
-            let password = migration_password(CLICKHOUSE_MIGRATION_PASSWORD_ENV)?;
-            let migration_config = config.migration_connection(&password);
+            let password = migration_password(
+                config.migration.password.as_ref(),
+                "db.clickhouse.migration.password",
+            )?;
+            let migration_config = config.migration_connection(password);
             let plan = plan_schema(&migration_config)
                 .await
                 .context("plan ClickHouse schema")?;
@@ -343,8 +354,11 @@ async fn clickhouse_schema(command: ClickHouseSchemaCommand) -> Result<()> {
             Ok(())
         }
         ClickHouseSchemaCommand::ApplyOnline(_) => {
-            let password = migration_password(CLICKHOUSE_MIGRATION_PASSWORD_ENV)?;
-            let migration_config = config.migration_connection(&password);
+            let password = migration_password(
+                config.migration.password.as_ref(),
+                "db.clickhouse.migration.password",
+            )?;
+            let migration_config = config.migration_connection(password);
             let status = apply_online_schema_migrations(&migration_config)
                 .await
                 .context("deploy ClickHouse schema")?;
@@ -355,8 +369,11 @@ async fn clickhouse_schema(command: ClickHouseSchemaCommand) -> Result<()> {
             Ok(())
         }
         ClickHouseSchemaCommand::ApplyOffline(_) => {
-            let password = migration_password(CLICKHOUSE_MIGRATION_PASSWORD_ENV)?;
-            let migration_config = config.migration_connection(&password);
+            let password = migration_password(
+                config.migration.password.as_ref(),
+                "db.clickhouse.migration.password",
+            )?;
+            let migration_config = config.migration_connection(password);
             let status = apply_offline_schema_migrations(&migration_config)
                 .await
                 .context("deploy offline ClickHouse schema")?;
@@ -377,9 +394,7 @@ async fn clickhouse_schema(command: ClickHouseSchemaCommand) -> Result<()> {
             Ok(())
         }
         ClickHouseSchemaCommand::Manifest(_) => {
-            let password = migration_password(CLICKHOUSE_MIGRATION_PASSWORD_ENV)?;
-            let migration_config = config.migration_connection(&password);
-            let rendered = render_clickhouse_schema_manifest(&migration_config)
+            let rendered = render_clickhouse_schema_manifest(config)
                 .await
                 .context("render ClickHouse semantic schema manifest")?;
             let path = workspace_root()?
@@ -395,14 +410,13 @@ async fn clickhouse_schema(command: ClickHouseSchemaCommand) -> Result<()> {
     }
 }
 
-fn migration_password(variable: &'static str) -> Result<Zeroizing<String>> {
-    let password = env::var(variable).with_context(|| {
-        format!("deployment secret `{variable}` is required for schema commands")
-    })?;
-    if password.is_empty() {
-        bail!("deployment secret `{variable}` must not be empty");
-    }
-    Ok(Zeroizing::new(password))
+fn migration_password<'a>(
+    password: Option<&'a SecretText>,
+    field: &'static str,
+) -> Result<&'a SecretText> {
+    password
+        .filter(|secret| !secret.is_empty())
+        .with_context(|| format!("configuration secret `{field}` is required for this command"))
 }
 
 fn bootstrap_admin_password_hash() -> Result<Zeroizing<String>> {
@@ -423,8 +437,6 @@ fn bootstrap_admin_password_hash() -> Result<Zeroizing<String>> {
     }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-
         if metadata.permissions().mode() & 0o077 != 0 {
             bail!(
                 "bootstrap admin password file {} must not be accessible by group or others",

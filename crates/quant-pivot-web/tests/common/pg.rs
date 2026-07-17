@@ -24,6 +24,7 @@ fn test_pg_config(port: u16) -> PostgresConfig {
         schema: "public".into(),
         migration: SchemaMigrationConfig {
             user: "quant_pivot_web_test_migrator".into(),
+            password: None,
         },
         max_connections: 5,
         min_connections: 1,

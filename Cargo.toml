@@ -190,6 +190,7 @@ governor = "0.10"
 
 # Security
 zeroize = { version = "1", features = ["derive"] }
+base64 = "0.22"
 hex = "0.4"
 blake3 = "1"
 secrecy = { version = "0.10", features = ["serde"] }
@@ -270,8 +271,8 @@ tracing-actix-web = { version = "0.7", default-features = false }
 # Dynamic RBAC authorization engine
 casbin = { version = "2", features = ["runtime-tokio"] }
 
-# JWT access/refresh tokens: Ed25519 PEM keys with the pure-Rust provider.
-jsonwebtoken = { version = "10", default-features = false, features = ["rust_crypto", "use_pem"] }
+# JWT access/refresh tokens: HS256 with an explicit 256-bit signing key.
+jsonwebtoken = { version = "10", default-features = false, features = ["rust_crypto"] }
 
 # actix runtime (integration tests: #[actix_web::test])
 actix-rt = "2"

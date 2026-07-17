@@ -712,7 +712,7 @@ crates/quant-pivot-models/src/domain/
 2. 旧表进入 drop plan；如果需要保留历史，先导出到 archive schema 或对象存储。
 3. 不创建兼容 view。
 4. 不创建旧表到新表的 trigger。
-5. runtime-config 当前权威版本为 v11；旧版本直接拒绝并重建，不保留 parser、alias 或双读路径。
+5. runtime-config 当前权威版本为 v17；旧版本直接拒绝并重建，不保留 parser、alias 或双读路径。
 6. 所有旧 API 路径删除或 410，不转发到新 API。
 7. 所有新表必须有 schema catalog、entity、domain DTO、repository、migration test。
 

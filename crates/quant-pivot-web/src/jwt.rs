@@ -1,6 +1,6 @@
 //! JWT issuance/validation and the Redis-backed token revocation blacklist.
 //!
-//! Access and refresh tokens are Ed25519-signed with an explicit `kid`. Roles are
+//! Access and refresh tokens are HS256-signed with an explicit media type. Roles are
 //! **intentionally not
 //! embedded** in the token: they are reloaded per request (see
 //! [`crate::middleware::authn`]) so that authorization changes take effect
@@ -13,7 +13,7 @@
 //! revocation status is unknown ([`AuthError::BlacklistUnavailable`] → HTTP
 //! 503).
 
-use std::{collections::HashMap, fs, io, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -101,20 +101,28 @@ const CLOCK_SKEW_LEEWAY_SECS: u64 = 5;
 /// Which kind of token a set of claims represents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum TokenType {
+pub enum TokenUse {
     /// Short-lived bearer token used to authenticate API requests.
     Access,
     /// Long-lived token used solely to mint a fresh access/refresh pair.
     Refresh,
 }
 
-impl TokenType {
+impl TokenUse {
     /// Stable lowercase label used in claims and error messages.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Access => "access",
             Self::Refresh => "refresh",
+        }
+    }
+
+    #[must_use]
+    pub const fn header_type(self) -> &'static str {
+        match self {
+            Self::Access => "at+jwt",
+            Self::Refresh => "rt+jwt",
         }
     }
 }
@@ -131,6 +139,8 @@ pub struct Claims {
     pub sub: String,
     /// Issuer (`iss`), validated against the configured value.
     pub iss: String,
+    /// Audience (`aud`), validated against the web API audience.
+    pub aud: String,
     /// Issued-at (Unix seconds).
     pub iat: i64,
     /// Not-before (Unix seconds).
@@ -140,7 +150,7 @@ pub struct Claims {
     /// Username snapshot for display/auditing (authoritative source is the DB).
     pub username: String,
     /// Access vs refresh discriminator, validated on decode.
-    pub token_type: TokenType,
+    pub token_use: TokenUse,
     /// Rotation family shared by one login session's access/refresh tokens.
     pub family_id: String,
     /// Absolute expiry of the login session. Refresh rotation never extends it.
@@ -156,29 +166,11 @@ pub enum RefreshFamilyRotation {
     RevokedOrMissing,
 }
 
-/// Deployment-time failure while loading the Ed25519 JWT keyring.
+/// Deployment-time failure while validating the HS256 JWT key.
 #[derive(Debug, Error)]
-pub enum JwtKeyringError {
-    #[error("failed to read JWT private key {path}: {source}")]
-    ReadPrivateKey { path: String, source: io::Error },
-    #[error("invalid Ed25519 JWT private key {path}: {detail}")]
-    InvalidPrivateKey { path: String, detail: String },
-    #[error("failed to read JWT public key {path} for kid {key_id}: {source}")]
-    ReadPublicKey {
-        key_id: String,
-        path: String,
-        source: io::Error,
-    },
-    #[error("invalid Ed25519 JWT public key {path} for kid {key_id}: {detail}")]
-    InvalidPublicKey {
-        key_id: String,
-        path: String,
-        detail: String,
-    },
-    #[error("duplicate JWT verification kid {0}")]
-    DuplicateKeyId(String),
-    #[error("active JWT signing kid {0} is absent from the verification keyring")]
-    MissingSigningKey(String),
+pub enum JwtSigningKeyError {
+    #[error("web.jwt.signing_key {0}")]
+    Invalid(&'static str),
 }
 
 /// A freshly signed token plus the metadata callers need for revocation.
@@ -507,11 +499,12 @@ impl TokenBlacklist for RedisTokenBlacklist {
 /// Stateless JWT signer/validator paired with a revocation blacklist.
 pub struct JwtService {
     encoding: EncodingKey,
-    decoding: HashMap<String, DecodingKey>,
-    signing_key_id: String,
+    decoding: DecodingKey,
     issuer: String,
+    audience: String,
     access_ttl_secs: i64,
     refresh_ttl_secs: i64,
+    absolute_session_ttl_secs: i64,
     blacklist: Arc<dyn TokenBlacklist>,
 }
 
@@ -520,59 +513,20 @@ impl JwtService {
     pub fn new(
         config: &JwtConfig,
         blacklist: Arc<dyn TokenBlacklist>,
-    ) -> Result<Self, JwtKeyringError> {
-        let private_pem = fs::read(&config.signing_private_key_file).map_err(|source| {
-            JwtKeyringError::ReadPrivateKey {
-                path: config.signing_private_key_file.clone(),
-                source,
-            }
-        })?;
-        let encoding = EncodingKey::from_ed_pem(&private_pem).map_err(|error| {
-            JwtKeyringError::InvalidPrivateKey {
-                path: config.signing_private_key_file.clone(),
-                detail: error.to_string(),
-            }
-        })?;
-        let mut decoding = HashMap::with_capacity(config.verification_keys.len());
-        for key in &config.verification_keys {
-            let public_pem = fs::read(&key.public_key_file).map_err(|source| {
-                JwtKeyringError::ReadPublicKey {
-                    key_id: key.key_id.clone(),
-                    path: key.public_key_file.clone(),
-                    source,
-                }
-            })?;
-            let decoding_key = DecodingKey::from_ed_pem(&public_pem).map_err(|error| {
-                JwtKeyringError::InvalidPublicKey {
-                    key_id: key.key_id.clone(),
-                    path: key.public_key_file.clone(),
-                    detail: error.to_string(),
-                }
-            })?;
-            if decoding.insert(key.key_id.clone(), decoding_key).is_some() {
-                return Err(JwtKeyringError::DuplicateKeyId(key.key_id.clone()));
-            }
-        }
-        if !decoding.contains_key(&config.signing_key_id) {
-            return Err(JwtKeyringError::MissingSigningKey(
-                config.signing_key_id.clone(),
-            ));
-        }
+    ) -> Result<Self, JwtSigningKeyError> {
+        let key = config
+            .signing_key_bytes()
+            .map_err(JwtSigningKeyError::Invalid)?;
         Ok(Self {
-            encoding,
-            decoding,
-            signing_key_id: config.signing_key_id.clone(),
+            encoding: EncodingKey::from_secret(key.as_ref()),
+            decoding: DecodingKey::from_secret(key.as_ref()),
             issuer: config.issuer.clone(),
+            audience: config.audience.clone(),
             access_ttl_secs: config.access_ttl_secs,
             refresh_ttl_secs: config.refresh_ttl_secs,
+            absolute_session_ttl_secs: config.absolute_session_ttl_secs,
             blacklist,
         })
-    }
-
-    /// Access-token lifetime in seconds (the `expires_in` of the login reply).
-    #[must_use]
-    pub const fn access_ttl_secs(&self) -> i64 {
-        self.access_ttl_secs
     }
 
     /// Refresh-token lifetime used for the `HttpOnly` cookie max-age.
@@ -581,13 +535,19 @@ impl JwtService {
         self.refresh_ttl_secs
     }
 
+    /// Absolute login-session lifetime. Refresh rotation never extends it.
+    #[must_use]
+    pub const fn absolute_session_ttl_secs(&self) -> i64 {
+        self.absolute_session_ttl_secs
+    }
+
     /// Sign a short-lived access token for `user`.
     pub fn encode_access(&self, user: &UserInfo) -> Result<IssuedToken, WebError> {
-        let session_exp = Utc::now().timestamp() + self.refresh_ttl_secs;
+        let session_exp = Utc::now().timestamp() + self.absolute_session_ttl_secs;
         self.issue(
             user,
             self.access_ttl_secs,
-            TokenType::Access,
+            TokenUse::Access,
             &Uuid::now_v7().to_string(),
             session_exp,
             0,
@@ -596,11 +556,11 @@ impl JwtService {
 
     /// Sign a long-lived refresh token for `user`.
     pub fn encode_refresh(&self, user: &UserInfo) -> Result<IssuedToken, WebError> {
-        let session_exp = Utc::now().timestamp() + self.refresh_ttl_secs;
+        let session_exp = Utc::now().timestamp() + self.absolute_session_ttl_secs;
         self.issue(
             user,
             self.refresh_ttl_secs,
-            TokenType::Refresh,
+            TokenUse::Refresh,
             &Uuid::now_v7().to_string(),
             session_exp,
             0,
@@ -617,7 +577,7 @@ impl JwtService {
         self.issue(
             user,
             self.access_ttl_secs,
-            TokenType::Access,
+            TokenUse::Access,
             family_id,
             session_exp,
             generation,
@@ -634,7 +594,7 @@ impl JwtService {
         self.issue(
             user,
             self.refresh_ttl_secs,
-            TokenType::Refresh,
+            TokenUse::Refresh,
             family_id,
             session_exp,
             generation,
@@ -645,7 +605,7 @@ impl JwtService {
         &self,
         user: &UserInfo,
         ttl_secs: i64,
-        token_type: TokenType,
+        token_use: TokenUse,
         family_id: &str,
         session_exp: i64,
         generation: u64,
@@ -660,17 +620,18 @@ impl JwtService {
             jti: jti.clone(),
             sub: user.id.to_string(),
             iss: self.issuer.clone(),
+            aud: self.audience.clone(),
             iat: now,
             nbf: now,
             exp,
             username: user.username.clone(),
-            token_type,
+            token_use,
             family_id: family_id.to_owned(),
             session_exp,
             generation,
         };
-        let mut header = Header::new(Algorithm::EdDSA);
-        header.kid = Some(self.signing_key_id.clone());
+        let mut header = Header::new(Algorithm::HS256);
+        header.typ = Some(token_use.header_type().to_owned());
         let token = encode(&header, &claims, &self.encoding)
             .map_err(|error| WebError::Internal(format!("jwt encode failed: {error}")))?;
         Ok(IssuedToken { token, jti, exp })
@@ -681,29 +642,27 @@ impl JwtService {
     /// Returns [`AuthError::ExpiredToken`] for an expired token,
     /// [`AuthError::WrongTokenType`] on access/refresh mismatch, and
     /// [`AuthError::InvalidToken`] for any other validation failure.
-    pub fn decode(&self, token: &str, expected: TokenType) -> Result<Claims, AuthError> {
+    pub fn decode(&self, token: &str, expected: TokenUse) -> Result<Claims, AuthError> {
         let header = decode_header(token).map_err(|_| AuthError::InvalidToken)?;
-        if header.alg != Algorithm::EdDSA {
+        if header.alg != Algorithm::HS256 || header.typ.as_deref() != Some(expected.header_type()) {
             return Err(AuthError::InvalidToken);
         }
-        let key_id = header.kid.ok_or(AuthError::InvalidToken)?;
-        let decoding = self.decoding.get(&key_id).ok_or(AuthError::InvalidToken)?;
-        let mut validation = Validation::new(Algorithm::EdDSA);
+        let mut validation = Validation::new(Algorithm::HS256);
         validation.set_issuer(&[self.issuer.as_str()]);
-        validation.set_required_spec_claims(&["exp", "iss", "sub"]);
+        validation.set_audience(&[self.audience.as_str()]);
+        validation.set_required_spec_claims(&["aud", "exp", "iss", "sub"]);
         validation.validate_exp = true;
         validation.validate_nbf = true;
-        validation.validate_aud = false;
         validation.leeway = CLOCK_SKEW_LEEWAY_SECS;
 
-        let claims = decode::<Claims>(token, decoding, &validation)
+        let claims = decode::<Claims>(token, &self.decoding, &validation)
             .map_err(|error| match error.kind() {
                 ErrorKind::ExpiredSignature => AuthError::ExpiredToken,
                 _ => AuthError::InvalidToken,
             })?
             .claims;
 
-        if claims.token_type != expected {
+        if claims.token_use != expected {
             return Err(AuthError::WrongTokenType {
                 expected: expected.as_str(),
             });
@@ -780,8 +739,81 @@ fn remaining_ttl(exp: i64) -> Duration {
 
 #[cfg(test)]
 mod tests {
-    use super::RedisTokenBlacklist;
+    use std::sync::Arc;
+
+    use chrono::Utc;
     use deadpool_redis::{Config, Runtime};
+    use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+    use quant_pivot_error::auth::AuthError;
+    use quant_pivot_models::{
+        config::JwtConfig, domain::UserInfo, enums::rbac::UserStatus, types::UserId,
+    };
+
+    use super::{Claims, JwtService, RedisTokenBlacklist, TokenUse};
+
+    const TEST_KEY: &[u8] = &[7; 32];
+
+    fn config(signing_key: &str) -> JwtConfig {
+        JwtConfig {
+            signing_key: signing_key.into(),
+            issuer: "quant-pivot-test".to_owned(),
+            audience: "quant-pivot-web-test".to_owned(),
+            access_ttl_secs: 900,
+            refresh_ttl_secs: 604_800,
+            absolute_session_ttl_secs: 2_592_000,
+        }
+    }
+
+    fn service(signing_key: &str) -> JwtService {
+        let pool = Config::from_url("redis://127.0.0.1:1")
+            .create_pool(Some(Runtime::Tokio1))
+            .expect("lazy pool");
+        JwtService::new(
+            &config(signing_key),
+            Arc::new(RedisTokenBlacklist::new(pool, "qp:")),
+        )
+        .expect("valid signing key")
+    }
+
+    fn user() -> UserInfo {
+        let now = Utc::now();
+        UserInfo {
+            id: UserId::from_v7(),
+            username: "operator".to_owned(),
+            password_hash: "redacted".to_owned(),
+            nickname: "Operator".to_owned(),
+            avatar: None,
+            email: None,
+            phone: None,
+            status: UserStatus::Active,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    fn claims(audience: &str, token_use: TokenUse) -> Claims {
+        let now = Utc::now().timestamp();
+        Claims {
+            jti: "test-jti".to_owned(),
+            sub: UserId::from_v7().to_string(),
+            iss: "quant-pivot-test".to_owned(),
+            aud: audience.to_owned(),
+            iat: now,
+            nbf: now,
+            exp: now + 60,
+            username: "operator".to_owned(),
+            token_use,
+            family_id: "family".to_owned(),
+            session_exp: now + 60,
+            generation: 0,
+        }
+    }
+
+    fn signed(claims: &Claims, algorithm: Algorithm, media_type: &str) -> String {
+        let mut header = Header::new(algorithm);
+        header.typ = Some(media_type.to_owned());
+        encode(&header, claims, &EncodingKey::from_secret(TEST_KEY)).expect("signed test token")
+    }
 
     #[tokio::test]
     async fn blacklist_key_derivation_matches_legacy_default_prefix() {
@@ -791,5 +823,56 @@ mod tests {
             .expect("lazy pool");
         let blacklist = RedisTokenBlacklist::new(pool, "qp:");
         assert_eq!(blacklist.key("abc-123"), "qp:jwt:blacklist:abc-123");
+    }
+
+    #[test]
+    fn decode_pins_algorithm_media_type_audience_and_token_use() {
+        let jwt = service("BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc");
+        let access = claims("quant-pivot-web-test", TokenUse::Access);
+        let valid = signed(&access, Algorithm::HS256, "at+jwt");
+        assert!(jwt.decode(&valid, TokenUse::Access).is_ok());
+
+        let wrong_algorithm = signed(&access, Algorithm::HS384, "at+jwt");
+        assert!(matches!(
+            jwt.decode(&wrong_algorithm, TokenUse::Access),
+            Err(AuthError::InvalidToken)
+        ));
+        let wrong_type = signed(&access, Algorithm::HS256, "rt+jwt");
+        assert!(matches!(
+            jwt.decode(&wrong_type, TokenUse::Access),
+            Err(AuthError::InvalidToken)
+        ));
+        let wrong_audience = signed(
+            &claims("another-service", TokenUse::Access),
+            Algorithm::HS256,
+            "at+jwt",
+        );
+        assert!(matches!(
+            jwt.decode(&wrong_audience, TokenUse::Access),
+            Err(AuthError::InvalidToken)
+        ));
+        let refresh_claim = signed(
+            &claims("quant-pivot-web-test", TokenUse::Refresh),
+            Algorithm::HS256,
+            "at+jwt",
+        );
+        assert!(matches!(
+            jwt.decode(&refresh_claim, TokenUse::Access),
+            Err(AuthError::WrongTokenType { .. })
+        ));
+    }
+
+    #[test]
+    fn key_rotation_invalidates_old_tokens_and_absolute_session_clips_access() {
+        let original = service("BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc");
+        let rotated = service("CAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg");
+        let token = original.encode_access(&user()).expect("access token");
+        assert!(rotated.decode(&token.token, TokenUse::Access).is_err());
+
+        let session_exp = Utc::now().timestamp() + 2;
+        let clipped = original
+            .encode_access_in_family(&user(), "family", session_exp, 0)
+            .expect("clipped access token");
+        assert_eq!(clipped.exp, session_exp);
     }
 }

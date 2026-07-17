@@ -9,7 +9,7 @@
 #
 # Operator tunables (detection, risk, execution operations, settlement
 # operations, market-data staleness, notification channels) are NOT here.
-# They live in the versioned runtime configuration (schema_version = 14),
+# They live in the versioned runtime configuration (schema_version = 17),
 # stored in Postgres and managed exclusively through the governed API:
 #
 #   GET  /api/runtime-config              — active config (secrets masked)
@@ -20,11 +20,11 @@
 # if absent, all defaults apply.
 #
 # Loading precedence (later wins):
-#   1. QUANT_PIVOT__* environment variables
-#   2. quant-pivot.local.toml  (optional, gitignored — copy from
+#   1. compiled-in defaults
+#   2. quant-pivot.toml        (this file — shipped defaults only)
+#   3. quant-pivot.local.toml  (optional, gitignored — copy from
 #      quant-pivot.local.toml.example for machine-specific secrets)
-#   3. quant-pivot.toml        (this file — shipped defaults only)
-#   4. compiled-in defaults
+#   4. QUANT_PIVOT__* environment variables
 #
 # Path separator in env vars is double underscore, e.g. QUANT_PIVOT__DB__POSTGRES__HOST.
 #
@@ -332,10 +332,10 @@ require_object_lock = false
 require_versioning = false
 
 [research.evidence_attestation]
-# Non-secret id selected for new keyed-BLAKE3 evidence. Key bytes and retained
-# historical keys come from a secret-manager-mounted file selected by
-# QUANT_PIVOT_EVIDENCE_ATTESTATION_KEYRING_FILE.
-signing_key_id = ""
+# Active keyed-BLAKE3 key: exactly 32 bytes encoded as 64 lowercase hex chars.
+# Historical verification-only keys are retained explicitly during rotation.
+signing_key = ""
+previous_signing_keys = []
 
 # ── Keys / Credentials ───────────────────────────────────────────────────────
 #
@@ -427,8 +427,9 @@ application_name = "quant-pivot"
 [db.postgres.migration]
 # PostgreSQL DDL is deploy-only: run `quant-pivot-xtask postgres-schema apply`.
 user = "quant_pivot_migrator"
-# The password is intentionally not part of runtime DeployConfig. Inject it
-# only into the deploy command as QUANT_PIVOT_MIGRATION__POSTGRES_PASSWORD.
+# Local development may set this in quant-pivot.local.toml or via
+# QUANT_PIVOT__DB__POSTGRES__MIGRATION__PASSWORD.
+password = ""
 
 [db.clickhouse]
 # Stable evidence scope identity. Never reuse this value across deployments.
@@ -460,7 +461,9 @@ max_concurrent_inserts = 8
 # Schema deployment is explicit through `quant-pivot-xtask`; runtime startup
 # only verifies the immutable ClickHouse contract.
 user = "quant_pivot_migrator"
-# Inject QUANT_PIVOT_MIGRATION__CLICKHOUSE_PASSWORD into deploy commands only.
+# Local development may set this in quant-pivot.local.toml or via
+# QUANT_PIVOT__DB__CLICKHOUSE__MIGRATION__PASSWORD.
+password = ""
 
 # ── Cache ────────────────────────────────────────────────────────────────────
 
@@ -524,16 +527,16 @@ serve_static_ui = false
 static_ui_dir = "static/ui"
 
 [web.jwt]
-# Purpose: active Ed25519 signer; private material is a local secret-manager mount.
-signing_key_id = "local-dev-2026-01"
-signing_private_key_file = "var/secrets/jwt/ed25519-private.pem"
+# Purpose: Base64URL-no-pad encoded 32-byte HS256 key. Set in the gitignored
+# local TOML or QUANT_PIVOT__WEB__JWT__SIGNING_KEY.
+signing_key = ""
 # Purpose: token issuer claim. Default: "quant-pivot".
 issuer = "quant-pivot"
+# Purpose: token audience claim. Default: "quant-pivot-web".
+audience = "quant-pivot-web"
 # Purpose: access-token lifetime (s). Default: 900 (15m).
 access_ttl_secs = 900
 # Purpose: refresh-token lifetime (s). Default: 604800 (7d).
 refresh_ttl_secs = 604800
-
-[[web.jwt.verification_keys]]
-key_id = "local-dev-2026-01"
-public_key_file = "var/secrets/jwt/ed25519-public.pem"
+# Purpose: absolute session family lifetime. Default: 2592000 (30d).
+absolute_session_ttl_secs = 2592000

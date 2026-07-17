@@ -91,7 +91,7 @@ Polymarket facts -> features -> factors/models -> portfolio plan
 - deploy-only、只追加且带 artifact checksum 的 `SeaORM` PostgreSQL migrations，以及规范化 schema manifest。
 - DTO 三层契约：request/query、persistence DTO、view/response。
 - Postgres、Redis、ClickHouse storage 基础设施。
-- RBAC、Casbin、operation log、Ed25519 JWT keyring、原子 refresh family 与受治理 runtime config 机制。
+- RBAC、Casbin、operation log、单 active HS256 JWT signing key、原子 refresh family 与受治理 runtime config 机制。
 - Polymarket Gamma、CLOB market data、L2 book ingest。
 - `BookStore` published snapshot 模式。
 - ClickHouse fact writer 与 async writer 模式。

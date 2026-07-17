@@ -23,7 +23,7 @@
 
 ## 1. Deploy Config
 
-根类型 [`DeployConfig`](../../../crates/quant-pivot-models/src/config/mod.rs)。每个 section 与 `[section]` 1:1。加载优先级（后者覆盖前者）：`QUANT_PIVOT__*` env → `quant-pivot.local.toml` → `quant-pivot.toml` → 编译内默认。
+根类型 [`DeployConfig`](../../../crates/quant-pivot-models/src/config/mod.rs)。每个 section 与 `[section]` 1:1。加载优先级（后者覆盖前者）：编译内默认 → `quant-pivot.toml` → `quant-pivot.local.toml` → `QUANT_PIVOT__*` env。
 
 ### 1.1 Section 清单（真实结构）
 
@@ -41,7 +41,7 @@
 | `[db.clickhouse]` | 连接/批量写 + `[db.clickhouse.migration]` 独立 deploy identity | facts/analytics；runtime 不执行 DDL |
 | `[cache]` / `[cache.redis]` / `[cache.moka]` | 见 struct | Redis L2 + Moka L1 |
 | `[keys]` | `private_key` | **唯一签名凭证**；CLOB L2 由 SDK 在 connect 时派生 |
-| `[web]` / `[web.jwt]` | 见 struct | Ed25519 `kid` keyring、内存 access token、HttpOnly refresh cookie、一次性 WS ticket |
+| `[web]` / `[web.jwt]` | `signing_key`, `issuer`, `audience`, access/refresh/absolute TTL | 单 active HS256 key、内存 access token、HttpOnly refresh cookie、一次性 WS ticket；轮换立即使旧 JWT 失效 |
 | `[quant.workers]` | `report_expire_sweep_secs`, `intent_expire_sweep_secs`, `execution_dispatch_secs`, `execution_breaker_tick_secs`, `equity_snapshot_secs` | 后台 worker cadence（restart-bound） |
 | `[quant.account]` | `funder`, `wallet_kind` | Data API 持仓读取地址 + 钱包形态 |
 | `[research.artifact_store]` | `kind`, `bucket`, `prefix`, `region`, `endpoint`, `path_style`, `require_object_lock`, `require_versioning` | Local 开发存储或生产 S3/WORM evidence store；生产发布要求 versioning + Object Lock |
@@ -184,7 +184,7 @@ Deploy-only `[quant.workers]` 增加：`report_schedule_poll_secs=1`、`report_r
 
 ### 3.1 Common validation（[`validation.rs`](../../../crates/quant-pivot-models/src/runtime_config/validation.rs)）
 
-- `schema_version` 必须为 16；unknown fields reject；Decimal string parse；USD ≥ 0；比例在合法区间；schedule id 非空；cadence 结构合法。
+- `schema_version` 必须为 17；unknown fields reject；Decimal string parse；USD ≥ 0；比例在合法区间；schedule id 非空；cadence 结构合法。
 
 ### 3.2 Mode-aware validation（deploy + preflight）
 
@@ -223,7 +223,17 @@ money-critical 字段（`money` 语义 + 确认）：portfolio budget、max reco
 
 ### 5.2 Secrets
 
-report_only 必需：Postgres/ClickHouse/Redis 密码、JWT secret、**Polymarket private key**（读真实抵押 + 派生 L2 读凭证）、**`quant.account.funder`**。
+report_only 必需：Postgres/ClickHouse/Redis 密码、JWT signing key、**Polymarket private key**（读真实抵押 + 派生 L2 读凭证）、**`quant.account.funder`**。
+
+本地 migration 可以直接在主配置的 `[db.postgres.migration].password` 与
+`[db.clickhouse.migration].password` 配置；标准环境变量分别为
+`QUANT_PIVOT__DB__POSTGRES__MIGRATION__PASSWORD` 与
+`QUANT_PIVOT__DB__CLICKHOUSE__MIGRATION__PASSWORD`。部署工具按 base TOML → local TOML → env
+覆盖读取；production runtime profile 一旦发现 DDL password 会拒绝启动，且 runtime 投影永不保留它。
+
+`research.evidence_attestation.signing_key` 是 64 个小写 hex 字符；旧 active key 轮换进
+`previous_signing_keys` 后只参与历史证据验证。`attestation_key_id` 从 domain-separated key
+fingerprint 派生，不接受操作员配置；JWT key 与 evidence key 禁止复用。
 
 semi_auto / auto_execution 额外（签名/下单）：同一 private key 用于 EIP-712 签名 + L2 写；proxy/gnosis_safe 需 relayer 凭证；Polygon RPC（attribution/redeem）。
 

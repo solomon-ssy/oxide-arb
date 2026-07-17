@@ -59,7 +59,7 @@ Live
 
 - Polymarket order client ready。
 - credentials loaded。
-- JWT secret strong。
+- JWT signing key 是 Base64URL-no-pad 编码的 32 个随机字节。
 - active model published or candidate approved for semi-auto。
 - data quality green。
 - no blocking recovery state。

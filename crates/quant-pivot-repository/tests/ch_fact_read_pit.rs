@@ -27,7 +27,7 @@ fn test_ch_config(port: u16) -> ClickHouseConfig {
         url: format!("http://localhost:{port}"),
         database: "default".into(),
         user: "default".into(),
-        password: String::new(),
+        password: "".into(),
         migration: SchemaMigrationConfig::default(),
         batch_size: 100,
         flush_interval_secs: 5,

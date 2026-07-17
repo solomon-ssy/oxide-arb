@@ -20,7 +20,7 @@ use actix_web::{
 use quant_pivot_error::{auth::AuthError, storage::StorageError};
 use quant_pivot_models::{enums::rbac::UserStatus, types::UserId};
 
-use crate::{error::WebError, extractors::ActorRoles, jwt::TokenType, state::AppState};
+use crate::{error::WebError, extractors::ActorRoles, jwt::TokenUse, state::AppState};
 
 /// Authenticate the request and attach the actor's identity + roles.
 pub async fn authn<B: MessageBody>(
@@ -35,7 +35,7 @@ pub async fn authn<B: MessageBody>(
     let token = bearer_token(&req)?;
     let claims = state
         .jwt
-        .decode(&token, TokenType::Access)
+        .decode(&token, TokenUse::Access)
         .map_err(WebError::from)?;
 
     if state

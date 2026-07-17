@@ -40,7 +40,7 @@
 | Operator | 启停进程、健康检查、运行 ad-hoc report、切 mode、设置 kill switch、处理事故 | 不修改策略参数除非有量化/负责人授权 |
 | Quant | 配置 selection、features、factors、model、portfolio、reports、execution 策略；解释推荐 | 不直接绕过治理提交订单 |
 | Approver | 在 `semi_auto` 审批或拒绝 `OrderIntent` | 不扩大 shares、price、notional |
-| Admin | 管理用户、角色、JWT、部署凭证、runtime-config 激活/回滚 | 不把私钥、JWT secret、relayer key 写入仓库 |
+| Admin | 管理用户、角色、JWT、部署凭证、runtime-config 激活/回滚 | 不把私钥、JWT signing key、relayer key 写入仓库 |
 
 新部署会 seed `admin`，但不存在默认口令。执行 `postgres-schema apply` 前，secret manager 必须把
 16–256 字符的强随机初始口令挂载为权限 `0400` 或 `0600` 的普通文件，并通过
@@ -114,7 +114,8 @@ curl -sS -X POST "$BASE/api/system/kill-switch" \
 | CLOB L2 credentials | 不单独配置 | CLOB trading endpoints | 自动派生 | SDK connect 时由 private key 和 wallet topology 派生 |
 | Polygon RPC URL | 所有 mode 必须 | on-chain 读写、结算、赎回 | `QUANT_PIVOT__POLYMARKET__ONCHAIN__RPC_URL` | 生产必须使用可靠 RPC，配置超时 |
 | Gasless relayer key/address | proxy/safe 且会提交链上交易时必须 | gasless approval/redeem/settlement | `QUANT_PIVOT__POLYMARKET__RELAYER__API_KEY`, `...__API_KEY_ADDRESS` | EOA 可直接付 gas；relayer key 不得暴露到前端 |
-| JWT secret | Web API 必须 | 登录和 API 认证 | `QUANT_PIVOT__WEB__JWT__SECRET` | `auto_execution` 前必须是强 secret，不能使用默认 |
+| JWT signing key | Web API 必须 | HS256 登录和 API 认证 | `QUANT_PIVOT__WEB__JWT__SIGNING_KEY` 或 `[web.jwt].signing_key` | Base64URL-no-pad 编码的恰好 32 个随机字节；轮换立即使所有旧 JWT 失效 |
+| Evidence signing key | 研究证据生产必须 | BLAKE3 keyed attestation | `QUANT_PIVOT__RESEARCH__EVIDENCE_ATTESTATION__SIGNING_KEY` | 64 个小写 hex；旧 key 仅放入 `previous_signing_keys` 验证历史证据，禁止与 JWT key 复用 |
 | Telegram / webhook secrets | 可选 | 通知 | runtime-config `notification.*` | runtime-config 里会 mask 敏感路径 |
 
 注意：Polymarket 官方文档列出 Deposit Wallet / `POLY_1271` 等签名类型，但当前代码只建模 `eoa`、`proxy`、`gnosis_safe`。如果要接入 Deposit Wallet，需要先扩展 wallet topology、配置校验、CLOB client 和 relayer 路径。
@@ -173,17 +174,20 @@ export QUANT_PIVOT__MARKET_DATA__DATA_API__BASE_URL="https://data-api.polymarket
 export QUANT_PIVOT__DB__POSTGRES__HOST="postgres.internal"
 export QUANT_PIVOT__DB__POSTGRES__USER="quant_pivot"
 export QUANT_PIVOT__DB__POSTGRES__PASSWORD="..."
+export QUANT_PIVOT__DB__POSTGRES__MIGRATION__PASSWORD="..." # deploy/xtask only
 export QUANT_PIVOT__DB__POSTGRES__DATABASE="quant_pivot"
 
 export QUANT_PIVOT__DB__CLICKHOUSE__URL="http://clickhouse.internal:8123"
 export QUANT_PIVOT__DB__CLICKHOUSE__USER="quant_pivot"
 export QUANT_PIVOT__DB__CLICKHOUSE__PASSWORD="..."
+export QUANT_PIVOT__DB__CLICKHOUSE__MIGRATION__PASSWORD="..." # deploy/xtask only
 export QUANT_PIVOT__DB__CLICKHOUSE__DATABASE="quant_pivot"
 
 export QUANT_PIVOT__CACHE__REDIS__HOST="redis.internal"
 export QUANT_PIVOT__CACHE__REDIS__PASSWORD="..."
 
-export QUANT_PIVOT__WEB__JWT__SECRET="replace-with-strong-secret"
+export QUANT_PIVOT__WEB__JWT__SIGNING_KEY="base64url-no-pad-encoded-32-random-bytes"
+export QUANT_PIVOT__RESEARCH__EVIDENCE_ATTESTATION__SIGNING_KEY="64-lowercase-hex-characters"
 ```
 
 proxy/safe 且需要 relayer 时增加：
@@ -323,7 +327,7 @@ cargo build --release -p quant-pivot-bin
 
 | 现象 | 可能原因 | 处理 |
 |------|----------|------|
-| deploy config validation failed | 缺 private key、funder、JWT secret、relayer config | 补齐环境变量或 TOML |
+| deploy config validation failed | 缺 private key、funder、JWT signing key、relayer config，或 production runtime 配置混入 migration DDL password | 补齐环境变量/TOML；DDL password 只挂载给 deploy/xtask profile |
 | authenticated CLOB client failed | private key 无效、wallet topology 不匹配、CLOB endpoint 不通 | 校验 signer/funder，检查网络和 CLOB auth |
 | account provider unavailable | `funder` 缺失或 Data API/CLOB collateral 读取失败 | 修复账户配置，不能降级为模拟资金 |
 | runtime-config rejected | schema version/字段错误或 unknown field | 通过 schema API 重新生成 patch |
@@ -670,15 +674,15 @@ curl -sS -X POST "$BASE/api/runtime-config/versions/$KNOWN_GOOD_VERSION_ID/rollb
   -d '{"reason":"rollback after execution admission regression"}' | jq .
 ```
 
-回滚也是 governed mutation，会写 operation log。Phase 11.6 W5 之后的 target 必须仍是可验证的 v10，
-且只能引用空库初始化后生成的 v2 dataset/model artifact；parity 事故按 §7.5.6 前向恢复，不创建 v9。
+回滚也是 governed mutation，会写 operation log。当前 target 必须仍是可验证的 v17，且只能引用当前
+契约生成的 v5 dataset/model artifact；parity 事故按 §7.5.6 前向恢复，不创建旧版本兼容路径。
 
-### 7.4 当前破坏式契约：Runtime v10 / Feature v6 / Dataset + Model Artifact v2
+### 7.4 当前破坏式契约：Runtime v17 / Feature v6 / Dataset + Model Artifact v5
 
-- runtime-config 只接受 v10，feature schema 只使用 v6；不存在 v9 或 feature v5 兼容路径。
+- runtime-config 只接受 v17，feature schema 只使用 v6；不存在旧 runtime/feature schema 兼容路径。
 - 项目从未正式生产运行；首次激活从空 PostgreSQL、ClickHouse 和 artifact namespace 初始化，不维护旧
   model/spec/dataset 的升级、退役或数据搬运 migration。
-- Parquet v2 中的 `DecisionBoundary`、`FeatureCell`、factor raw value 和 label 是训练真值。训练/CV/回测必须直接消费冻结行；rematerialization 只是 parity verification，绝不得替换 artifact 内容。
+- Parquet v5 中的 `DecisionBoundary`、`FeatureCell`、factor raw value 和 label 是训练真值。训练/CV/回测必须直接消费冻结行；rematerialization 只是 parity verification，绝不得替换 artifact 内容。
 - 任一 bytes/manifest/semantic/training-input hash 不一致都必须失败。完整 W5 首次激活步骤见 §7.5。
 
 ### 7.5 Phase 11.6 W5 首次环境激活（clean slate）
@@ -691,7 +695,7 @@ curl -sS -X POST "$BASE/api/runtime-config/versions/$KNOWN_GOOD_VERSION_ID/rollb
 W5 是一次需要 `operator` 与 `risk_owner` 共同确认的首次激活，不是旧版本滚动升级。目标状态是：
 
 - 启动时报告与新入场保持关闭，先让 ingest 和 durable catalog/fact coverage 建立；
-- 唯一 active runtime-config 为 v10 / feature v6，且初始不指向任何 model artifact；
+- 唯一 active runtime-config 为 v17 / feature v6，且初始不指向任何 model artifact；
 - model spec、factor revision、dataset 和 model 全部从当前契约在空库中首次创建；
 - 先通过 subject-bound frozen parity 和 runtime full parity，再恢复 schedule 与新入场。
 
@@ -702,15 +706,16 @@ W5 是一次需要 `operator` 与 `risk_owner` 共同确认的首次激活，不
    venue account 没有由本系统管理的未平仓头寸。只要任一项不成立，本 clean-slate SOP 立即失效，必须另行设计迁移。
 3. 停止应用进程和所有 writer，删除该环境的 PostgreSQL database、ClickHouse database 与 Phase 11.6
    artifact namespace。这里不做备份后回填，也不保留 legacy 表；目标是可证明的空状态。
-4. 重新创建空 database/volume，但不要手工建表。由同一 v10 binary 的 canonical schema initializer 创建
-   PostgreSQL 表/enum/index/trigger和 ClickHouse 表/materialized view，随后执行 seed lane。
+4. 重新创建空 database/volume，但不要手工建表。由 deploy identity 通过 `quant-pivot-xtask`
+   PostgreSQL/ClickHouse migration apply 创建权威 schema，runtime identity 只做 immutable verification；随后执行 seed lane。
 5. 首次启动前保持 report schedules、ad-hoc report 和全部 model pointers 关闭。空库不存在可恢复的
    execution，因此无需先构造 `exit_only` 维护态；若将来环境出现真实 execution 数据，不得复用本节。
 
-#### 7.5.2 初始化并激活安全 v10 配置
+#### 7.5.2 初始化并激活安全 v17 配置
 
-部署 v10 binary 并执行 PostgreSQL/ClickHouse schema ensure。空库只能产生 v10 bootstrap config，不存在
-active v9、旧 pointer 或旧 artifact；仍必须显式激活 reports disabled 的 safe config，不能只依赖未初始化 latch。
+部署 v17 binary；先由 deploy identity 显式 apply PostgreSQL/ClickHouse migrations，再由 runtime identity
+验证 schema。空库只能产生 v17 bootstrap config，不存在旧 pointer 或旧 artifact；仍必须显式激活
+reports disabled 的 safe config，不能只依赖未初始化 latch。
 
 立即从当前 masked config 生成完整 `config_json`，一次性清空所有模型指针并关闭所有报告入口：
 
@@ -721,7 +726,7 @@ SAFE_CONFIG=$(
     -H "Accept-Api-Version: v1" \
   | jq -c '
       .data.config
-      | .schema_version = 10
+      | .schema_version = 17
       | .features.feature_schema_version = 6
       | .model.active_model_version_id = null
       | .model.shadow_model_version_id = null
@@ -734,7 +739,7 @@ SAFE_CONFIG=$(
 
 SAFE_VERSION_ID=$(
   jq -n \
-    --arg reason "Phase 11.6 W5 safe v10 activation" \
+    --arg reason "cold-start safe v17 activation" \
     --argjson config "$SAFE_CONFIG" \
     '{reason: $reason, config_json: $config}' \
   | curl -sS -X POST "$BASE/api/runtime-config/versions" \
@@ -751,7 +756,7 @@ curl -sS -X POST "$BASE/api/runtime-config/versions/$SAFE_VERSION_ID/activate" \
   -H "Accept-Api-Version: v1" \
   -H "X-Acting-Role: risk_owner" \
   -H "Content-Type: application/json" \
-  -d '{"reason":"activate Phase 11.6 safe v10 config"}' | jq .
+  -d '{"reason":"activate cold-start safe v17 config"}' | jq .
 ```
 
 这里必须使用完整 `config_json`：`category_model_pointers` 是动态 map，不能靠一个不存在的 dotted leaf
@@ -815,7 +820,7 @@ curl -sS "$BASE/api/research/feature-integrity/summary" \
 
 1. 读取 `GET /api/research/feature-contract`，创建含 typed `input_contract` 和 `training_contract` 的新 model spec。
 2. 按 §8.1 Step 0.6 首次注册并发布当前 v6 feature contract 绑定的 immutable factor revisions。
-3. 只在 catalog coverage 内重建 Parquet v2 dataset，等完整性门自动进入 `ready`。
+3. 只在 catalog coverage 内重建 Parquet v5 dataset，等完整性门自动进入 `ready`。
 4. 从该 frozen dataset 异步训练新 candidate，完成 calibration、backtest、CPCV/DSR/PBO，并显式 bind publish path set。详细请求见 §8.1。
 5. 保持 schedule/ad-hoc disabled，首次调用 `POST /api/research/models/{id}/publish`。
 
@@ -861,7 +866,7 @@ curl -sS -X POST "$BASE/api/research/feature-integrity/latch/acknowledge" \
 
 #### 7.5.5 Ad-hoc canary、runtime full parity 与恢复
 
-1. `operator` 先把 kill switch 收紧到 `exit_only`，保持所有 schedule disabled，仅用 v10 sparse patch
+1. `operator` 先把 kill switch 收紧到 `exit_only`，保持所有 schedule disabled，仅用 v17 sparse patch
    开启 `reports.ad_hoc_report_enabled=true`。这一步在首次可能产生 recommendation 前建立显式执行围栏。
 2. 由 `analyst` 或 `operator` 运行一份小 Top-N ad-hoc report。等其 report-bound sampled parity 终态；必须 `passed`，报告不得处于 `revoked`。
 3. 对包含该 canary evidence 的窗口运行 runtime full parity（窗口省略时默认最近 24 小时）：
@@ -883,7 +888,7 @@ curl -sS "$BASE/api/research/jobs/$FULL_JOB_ID" \
 ```
 
 4. 作业必须 `succeeded`，对应 full run 必须非空 `passed`、mismatch/pending 为 0、latch 仍 clear。任一 mismatch/timeout 都会自动 revoke 受影响 report、cascade intent 并重新打开 latch；不得继续恢复。
-5. 按 §7.2 创建/激活新的完整 v10 config：启用预期 schedule，是否继续保留 ad-hoc 按生产策略决定；仍保持 `exit_only`，观察至少一个完整 report + sampled parity 周期。
+5. 按 §7.2 创建/激活新的完整 v17 config：启用预期 schedule，是否继续保留 ad-hoc 按生产策略决定；仍保持 `exit_only`，观察至少一个完整 report + sampled parity 周期。
 6. 只有 summary 仍 healthy，`operator` 才可把 kill switch 恢复为 `closed`：
 
 ```bash
@@ -899,12 +904,12 @@ curl -sS -X POST "$BASE/api/system/kill-switch" \
   }' | jq .
 ```
 
-恢复后立即重新读取 kill switch、active v10 config 与 Feature Integrity summary 并附到变更单；任一项不是预期值
+恢复后立即重新读取 kill switch、active v17 config 与 Feature Integrity summary 并附到变更单；任一项不是预期值
 都按 §7.5.6 回到 safe state。
 
 #### 7.5.6 失败回退与已打开 latch 的恢复
 
-W5 后的“回退”是回到 **v10 safe state**，不是返回旧 binary/schema/artifact：
+冷启动后的“回退”是回到 **v17 safe state**，不是返回旧 binary/schema/artifact：
 
 - 保持 `exit_only`、schedule/ad-hoc disabled，且三个模型指针为 `null`、category map 为 `{}`；
 - 已 open/uninitialized 的 latch 保持原样；若此前已合法 clear 且本次失败不是 parity mismatch，不得用 SQL
@@ -915,7 +920,7 @@ W5 后的“回退”是回到 **v10 safe state**，不是返回旧 binary/schem
   evidence，只能按 durable latch/containment 语义前向修复，不得选择性删除失败证据。
 
 `SAFE_VERSION_ID` 必须写入变更单。任一步失败先执行以下收紧与回滚；两个 mutation 都必须成功，随后验证
-当前配置仍是 v10/v6 且所有 report/pointer 均关闭：
+当前配置仍是 v17/v6 且所有 report/pointer 均关闭：
 
 ```bash
 curl -sS -X POST "$BASE/api/system/kill-switch" \
@@ -934,14 +939,14 @@ curl -sS -X POST "$BASE/api/runtime-config/versions/$SAFE_VERSION_ID/rollback" \
   -H "Accept-Api-Version: v1" \
   -H "X-Acting-Role: risk_owner" \
   -H "Content-Type: application/json" \
-  -d '{"reason":"Phase 11.6 W5 forward rollback to safe v10 state"}' | jq .
+  -d '{"reason":"cold-start forward rollback to safe v17 state"}' | jq .
 
 curl -sS "$BASE/api/runtime-config" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Accept-Api-Version: v1" \
 | jq -e '
     .data.config
-    | (.schema_version == 10)
+    | (.schema_version == 17)
       and (.features.feature_schema_version == 6)
       and (.model.active_model_version_id == null)
       and (.model.shadow_model_version_id == null)
@@ -1582,9 +1587,9 @@ curl -sS "$BASE/api/quant/positions?order_intent_id=$INTENT_ID" \
 
 必须全部满足：
 
-- JWT secret 已换成强 secret；
+- JWT signing key 已换成 Base64URL-no-pad 编码的 32 字节随机 key，旧 session 已按单-key语义全部失效；
 - private key、funder、wallet topology、relayer 配置通过 preflight；
-- active runtime-config schema v10 / feature schema v6 有效；
+- active runtime-config schema v17 / feature schema v6 有效；
 - feature parity latch clear，最近 sampled/full run 均为 `passed`，`parity_age_secs` 未超出运维时效；
 - `execution.auto_execution.enabled=true`；
 - `execution.auto_execution.max_orders_per_report`、`max_total_usd_per_report`、`min_score`、`min_confidence` 保守；
@@ -1868,7 +1873,7 @@ curl -sS -X POST "$BASE/api/quant/reconciliations/$RECON_ID/resolve" \
 处理：
 
 1. revoke 异常 report；
-2. 回到不引用异常 artifact 的已验证 v10 safe config；Phase 11.6 后不得回滚 v9 或旧 artifact pointer；
+2. 回到不引用异常 artifact 的已验证 v17 safe config；不得回滚旧 runtime schema 或旧 artifact pointer；
 3. rollback/retire model 或 factor publication；
 4. 重新跑 backtest / shadow report；
 5. 用小 budget 在 `semi_auto` 验证后再恢复 auto。

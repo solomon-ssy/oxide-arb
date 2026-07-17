@@ -148,16 +148,16 @@ impl DefaultModePreflight {
     }
 
     fn check_jwt(&self, target: QuantRuntimeMode) -> PreflightCheck {
-        let configured = self.deps.deploy.web.jwt_keyring_is_configured();
+        let configured = self.deps.deploy.web.jwt_signing_key_is_configured();
         let detail = if configured {
-            "web.jwt Ed25519 signer and public keyring are configured".to_owned()
+            "web.jwt HS256 signing key is configured".to_owned()
         } else {
-            "web.jwt Ed25519 signer or public keyring is incomplete".to_owned()
+            "web.jwt signing key is missing or invalid".to_owned()
         };
         if target == QuantRuntimeMode::AutoExecution {
-            PreflightCheck::hard("jwt_keyring_configured", configured, detail)
+            PreflightCheck::hard("jwt_signing_key_configured", configured, detail)
         } else {
-            PreflightCheck::soft("jwt_keyring_configured", configured, detail)
+            PreflightCheck::soft("jwt_signing_key_configured", configured, detail)
         }
     }
 

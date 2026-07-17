@@ -23,13 +23,11 @@ impl Keystore {
     ///
     /// Loads the hex-encoded `private_key` from [`KeysConfig`].
     pub fn from_config(config: &KeysConfig) -> Result<Self, SigningError> {
-        let private_key_hex =
-            config
-                .private_key
-                .as_deref()
-                .ok_or_else(|| SigningError::KeyNotLoaded {
-                    key_source: "env".into(),
-                })?;
+        let private_key_hex = config
+            .private_key()
+            .ok_or_else(|| SigningError::KeyNotLoaded {
+                key_source: "env".into(),
+            })?;
 
         let key_bytes = Zeroizing::new(
             hex::decode(

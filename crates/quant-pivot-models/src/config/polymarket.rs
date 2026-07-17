@@ -4,7 +4,8 @@
 //! quant-pivot operates exclusively on Polymarket (Polygon chain).
 
 use serde::Deserialize;
-use std::fmt;
+
+use super::secret::SecretText;
 
 /// Polymarket platform configuration. Mounted at `[polymarket]` in TOML.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -94,13 +95,13 @@ const fn default_rpc_timeout() -> u64 {
 /// `QUANT_PIVOT__POLYMARKET__RELAYER__API_KEY` or the gitignored local TOML.
 /// Only required when `quant.account.wallet_kind` is `proxy` or `gnosis_safe`;
 /// EOA settlement signs and pays gas directly and ignores these fields.
-#[derive(Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RelayerConfig {
     /// Relayer submit/status base URL. Default: `https://relayer-v2.polymarket.com`.
     pub base_url: String,
     /// Relayer API key (secret).
-    pub api_key: Option<String>,
+    pub api_key: Option<SecretText>,
     /// Ethereum address that owns the relayer API key (the signer EOA address).
     pub api_key_address: Option<String>,
     /// HTTP request timeout (ms). Default: `15000`.
@@ -118,21 +119,10 @@ impl Default for RelayerConfig {
     }
 }
 
-impl fmt::Debug for RelayerConfig {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("RelayerConfig")
-            .field("base_url", &self.base_url)
-            .field("api_key", &redacted(self.api_key.as_ref()))
-            .field("api_key_address", &self.api_key_address)
-            .field("request_timeout_ms", &self.request_timeout_ms)
-            .finish()
-    }
-}
-
 impl RelayerConfig {
     /// Normalize credential fields: empty strings (`api_key = ""`) become unset.
     pub fn normalize(&mut self) {
-        if self.api_key.as_deref().is_some_and(str::is_empty) {
+        if self.api_key.as_ref().is_some_and(SecretText::is_empty) {
             self.api_key = None;
         }
         if self.api_key_address.as_deref().is_some_and(str::is_empty) {
@@ -144,7 +134,8 @@ impl RelayerConfig {
     #[must_use]
     pub fn api_key(&self) -> Option<&str> {
         self.api_key
-            .as_deref()
+            .as_ref()
+            .map(SecretText::expose_secret)
             .map(str::trim)
             .filter(|v| !v.is_empty())
     }
@@ -162,14 +153,6 @@ impl RelayerConfig {
     #[must_use]
     pub fn is_ready(&self) -> bool {
         self.api_key().is_some() && self.api_key_address().is_some()
-    }
-}
-
-const fn redacted(value: Option<&String>) -> &'static str {
-    if value.is_some() {
-        "<redacted>"
-    } else {
-        "<unset>"
     }
 }
 

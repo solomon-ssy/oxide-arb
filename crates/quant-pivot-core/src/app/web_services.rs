@@ -35,8 +35,8 @@ use quant_pivot_error::{QuantResult, infra::InfraError};
 use quant_pivot_models::domain::{
     CatalogStatusPort, DataQualityPort, ExecutionReadPort, ExecutionRecoveryPort,
     FeatureIntegrityPort, MarketLinkageGovernancePort, ModelCalibrationFitPort, NewOperationLog,
-    OrderIntentPort, ReconciliationPort, ResearchJobPort, RuntimeConfigPort, TradePolicyPort,
-    TrainingDatasetPort,
+    OrderIntentPort, ReconciliationPort, ResearchJobPort, ResearchReadinessPort, RuntimeConfigPort,
+    TradePolicyPort, TrainingDatasetPort,
 };
 use quant_pivot_repository::{
     clickhouse::ChFeatureParityEventRepository,
@@ -125,6 +125,7 @@ async fn build_app_state(
     let research_ports = build_research_web_ports(ctx);
     let trade_policy_dataset_builder: Arc<dyn TrainingDatasetPort> =
         research_ports.training_datasets.clone();
+    let research_readiness = build_research_readiness(ctx)?;
 
     Ok(AppState {
         deploy: Arc::clone(&ctx.config),
@@ -171,11 +172,16 @@ async fn build_app_state(
         model_spec: Arc::clone(&ctx.research.model_spec),
         research_catalog: Arc::new(CoreResearchCatalogPort::from_research(&ctx.research)),
         research_jobs,
+        research_readiness: Arc::clone(&research_readiness) as Arc<dyn ResearchReadinessPort>,
         feature_integrity: build_feature_integrity(ctx),
         calibration_artifacts: Arc::clone(&ctx.research.calibration_artifact_fit),
         model_calibration_fit: research_ports.model_calibration_fit
             as Arc<dyn ModelCalibrationFitPort>,
-        trade_policies: build_trade_policy_port(ctx, trade_policy_dataset_builder)?,
+        trade_policies: build_trade_policy_port(
+            ctx,
+            trade_policy_dataset_builder,
+            research_readiness,
+        ),
         market_linkages: Arc::clone(&ctx.research.market_linkage_repo),
         domain_source_cursors: Arc::clone(&ctx.infra.repos.domain_source_cursor)
             as Arc<dyn DomainSourceCursorRepository>,
@@ -223,23 +229,29 @@ async fn build_app_state(
     })
 }
 
-fn build_trade_policy_port(
+fn build_research_readiness(
     ctx: &AppContext,
-    dataset_builder: Arc<dyn TrainingDatasetPort>,
-) -> QuantResult<Arc<dyn TradePolicyPort>> {
+) -> QuantResult<Arc<ResearchReadinessEvidenceService>> {
     let attestor = EvidenceAttestor::from_config(&ctx.config.research.evidence_attestation)?;
     let evidence_scope = EvidenceScopeIdentity::from_config(
         &ctx.config.db.clickhouse,
         &ctx.config.research.artifact_store,
     )?;
-    let readiness = Arc::new(ResearchReadinessEvidenceService::new(
+    Ok(Arc::new(ResearchReadinessEvidenceService::new(
         Arc::clone(&ctx.infra.repos.research_readiness)
             as Arc<dyn ResearchReadinessEvidenceRepository>,
         Arc::clone(&ctx.research.artifact_store),
         attestor,
         &evidence_scope,
-    )?);
-    Ok(Arc::new(TradePolicyService::new(TradePolicyServiceDeps {
+    )?))
+}
+
+fn build_trade_policy_port(
+    ctx: &AppContext,
+    dataset_builder: Arc<dyn TrainingDatasetPort>,
+    readiness: Arc<ResearchReadinessEvidenceService>,
+) -> Arc<dyn TradePolicyPort> {
+    Arc::new(TradePolicyService::new(TradePolicyServiceDeps {
         datasets: Arc::clone(&ctx.research.training_dataset_repo),
         dataset_builder,
         artifacts: Arc::clone(&ctx.research.artifact_store),
@@ -250,7 +262,7 @@ fn build_trade_policy_port(
         source_slices: Arc::clone(&ctx.research.source_slice_repo),
         readiness,
         model_runtime_factory_builder: Arc::clone(&ctx.research.model_runtime_factory_builder),
-    })))
+    }))
 }
 
 fn build_feature_integrity(ctx: &AppContext) -> Arc<dyn FeatureIntegrityPort> {

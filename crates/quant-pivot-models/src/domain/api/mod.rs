@@ -5,6 +5,7 @@ mod backtest_path_set;
 mod backtest_report;
 mod calibration_artifact;
 mod comparison_report;
+pub mod dashboard;
 mod decision_evidence;
 mod execution_recovery;
 mod factor_governance;

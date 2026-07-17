@@ -34,7 +34,7 @@ use crate::{
     auth::casbin::Rule,
     error::WebError,
     extractors::{AuthedActor, ValidatedJson},
-    jwt::{RefreshFamilyRotation, TokenType},
+    jwt::{RefreshFamilyRotation, TokenUse},
     request_security::ensure_same_origin_mutation,
     response::WebResponse,
     routes::registry::{RouteSpec, spec},
@@ -106,9 +106,7 @@ pub async fn refresh(
     let refresh_token = request
         .cookie(REFRESH_COOKIE_NAME)
         .ok_or(AuthError::InvalidToken)?;
-    let claims = state
-        .jwt
-        .decode(refresh_token.value(), TokenType::Refresh)?;
+    let claims = state.jwt.decode(refresh_token.value(), TokenUse::Refresh)?;
 
     let user_id = claims
         .sub
@@ -166,7 +164,7 @@ pub async fn logout(
     if let Some(refresh_token) = request.cookie(REFRESH_COOKIE_NAME) {
         // Best-effort: only a well-formed refresh token can be revoked; a
         // malformed one is already useless.
-        if let Ok(claims) = state.jwt.decode(refresh_token.value(), TokenType::Refresh) {
+        if let Ok(claims) = state.jwt.decode(refresh_token.value(), TokenUse::Refresh) {
             state.jwt.revoke_family(&claims.family_id).await?;
             state.ws_sessions.close_family(&claims.family_id);
         }
@@ -208,6 +206,7 @@ struct IssuedPair {
     response: TokenResponse,
     refresh_token: String,
     refresh_jti: String,
+    refresh_exp: i64,
     family_id: String,
     session_exp: i64,
 }
@@ -221,7 +220,7 @@ fn issue_pair(
 ) -> Result<IssuedPair, WebError> {
     let owned_family = family_id.map_or_else(|| uuid::Uuid::now_v7().to_string(), str::to_owned);
     let absolute_session_exp = session_exp
-        .unwrap_or_else(|| chrono::Utc::now().timestamp() + state.jwt.refresh_ttl_secs());
+        .unwrap_or_else(|| chrono::Utc::now().timestamp() + state.jwt.absolute_session_ttl_secs());
     let access =
         state
             .jwt
@@ -236,17 +235,18 @@ fn issue_pair(
         response: TokenResponse {
             access_token: access.token,
             token_type: "Bearer",
-            expires_in: state.jwt.access_ttl_secs(),
+            expires_in: (access.exp - chrono::Utc::now().timestamp()).max(0),
         },
         refresh_token: refresh.token,
         refresh_jti: refresh.jti,
+        refresh_exp: refresh.exp,
         family_id: owned_family,
         session_exp: absolute_session_exp,
     })
 }
 
 fn token_response(pair: IssuedPair) -> HttpResponse {
-    let cookie_max_age = (pair.session_exp - chrono::Utc::now().timestamp()).max(1);
+    let cookie_max_age = (pair.refresh_exp - chrono::Utc::now().timestamp()).max(1);
     HttpResponse::Ok()
         .cookie(refresh_cookie(pair.refresh_token, cookie_max_age))
         .json(WebResponse::ok(pair.response))

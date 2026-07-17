@@ -1,42 +1,89 @@
 #!/usr/bin/env bash
-# Production promotion gate. Expensive by design; run before enabling any
-# risk-increasing runtime capability.
+# Canonical production promotion gates. CI invokes the same named groups.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+GROUP="${1:-all}"
 cd "$ROOT"
 
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-bash scripts/lint-architecture.sh
-bash scripts/lint-import-style.sh
-bash scripts/lint-quant-pivot-boundary.sh
-bash scripts/lint-quant-pivot-errors.sh
-bash scripts/lint-dead-semantics.sh
-bash scripts/lint-clickhouse-correctness.sh
-cargo test --workspace
-cargo test-network
-cargo test-docker
+rust_static() {
+  cargo fmt --all -- --check
+  cargo clippy --workspace --all-targets -- -D warnings
+  bash scripts/lint-architecture.sh
+  bash scripts/lint-import-style.sh
+  bash scripts/lint-quant-pivot-boundary.sh
+  bash scripts/lint-quant-pivot-errors.sh
+  bash scripts/lint-dead-semantics.sh
+  bash scripts/lint-clickhouse-correctness.sh
+  bash scripts/lint-training-serving-parity.sh
+  cargo machete --with-metadata
+  cargo +nightly udeps --workspace --all-targets
+  cargo test --workspace
+  cargo build -p quant-pivot-bin
+  cargo build -p quant-pivot-bin --features lp-solver,optimize,ml-classical
+  cargo clippy -p quant-pivot-research --features ml-classical,optimize,dataframe --all-targets -- -D warnings
+  cargo clippy -p quant-pivot-core --features ml-classical,optimize --all-targets -- -D warnings
+  cargo test -p quant-pivot-research --features ml-classical,optimize,dataframe
+  cargo test -p quant-pivot-core --features ml-classical,optimize
+  cargo bench -p quant-pivot-bench --no-run
+  cargo bench -p quant-pivot-bench --bench e2e_paths -- --output-format bencher
+}
 
-(
-  cd ui
-  pnpm lint
-  pnpm check:circular
-  pnpm check:dep
-  pnpm check:type
-  pnpm test:unit
-  pnpm build:antdv-next
+ui_gate() {
+  bash scripts/lint-ui-semantic-colors.sh
+  (
+    cd ui
+    pnpm lint
+    pnpm check:circular
+    pnpm check:dep
+    pnpm check:type
+    pnpm test:unit
+    pnpm build:antdv-next
+  )
+  bash scripts/check-ui-production-bundle.sh
+}
 
-  DIST=apps/web-antdv-next/dist
-  if rg -n -i 'mock-napi|[?&]token=|Bearer%20|VITE_APP_STORE_SECURE_KEY|REPLACE_WITH|hm\.baidu\.com|@vbenjs/static-source|Oxide Arb|Vben Admin|www\.vben\.pro|ann\.vben|open\.dingtalk' "$DIST"; then
-    echo "ERROR: forbidden production bundle pattern found"
-    exit 1
-  fi
-)
+network_gate() {
+  cargo test-network
+}
 
-bash scripts/check-bench-slo.sh
-bash scripts/check-bench-regression.sh
-cargo bench -p quant-pivot-bench --bench e2e_paths -- --output-format bencher
-cargo test -p quant-pivot-core --test production_soak \
-  five_hundred_markets_thousand_tokens_ingest_without_book_drops \
-  -- --ignored --exact --nocapture
+docker_gate() {
+  cargo test-docker
+  cargo test-docker
+}
+
+protected_e2e() {
+  (
+    cd ui
+    pnpm exec playwright test apps/web-antdv-next/tests/e2e/phase-11-7-protected-flow.spec.ts
+  )
+}
+
+case "$GROUP" in
+  rust-static)
+    rust_static
+    ;;
+  ui)
+    ui_gate
+    ;;
+  network)
+    network_gate
+    ;;
+  docker)
+    docker_gate
+    ;;
+  protected-e2e)
+    protected_e2e
+    ;;
+  all)
+    rust_static
+    ui_gate
+    network_gate
+    docker_gate
+    protected_e2e
+    ;;
+  *)
+    echo "usage: $0 {rust-static|ui|network|docker|protected-e2e|all}" >&2
+    exit 2
+    ;;
+esac

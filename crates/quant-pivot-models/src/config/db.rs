@@ -1,6 +1,8 @@
 //! Database configuration (`[db]`, deploy): Postgres OLTP + `ClickHouse` OLAP.
 
+use super::secret::SecretText;
 use serde::Deserialize;
+use url::Url;
 
 /// Postgres + `ClickHouse` connections.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -24,7 +26,7 @@ pub struct PostgresConfig {
     pub user: String,
     /// Role password. Set via `QUANT_PIVOT__DB__POSTGRES__PASSWORD` in
     /// production — never in the TOML. Default: empty.
-    pub password: String,
+    pub password: SecretText,
     /// Database name. Default: `quant_pivot`.
     pub database: String,
     /// Schema search path. Default: `public`.
@@ -77,17 +79,32 @@ pub struct PostgresConfig {
 
 impl PostgresConfig {
     /// Build the connection URL for the configured application database.
-    pub fn to_url(&self) -> String {
-        self.to_url_with_database(&self.database)
+    pub fn try_connection_url(&self) -> Result<String, url::ParseError> {
+        self.try_connection_url_with_database(&self.database)
     }
 
     /// Build a connection URL targeting a specific database name on the same
     /// server (e.g. the `postgres` maintenance catalog).
-    pub fn to_url_with_database(&self, database: &str) -> String {
-        format!(
-            "postgres://{}:{}@{}:{}/{}?sslmode=prefer",
-            self.user, self.password, self.host, self.port, database,
-        )
+    pub fn try_connection_url_with_database(
+        &self,
+        database: &str,
+    ) -> Result<String, url::ParseError> {
+        let mut url = Url::parse("postgres://localhost/")?;
+        url.set_host(Some(self.host.as_str()))?;
+        url.set_port(Some(self.port))
+            .map_err(|()| url::ParseError::InvalidPort)?;
+        let escaped_user = escape_percent_for_url_setter(&self.user);
+        if url.set_username(&escaped_user).is_err() {
+            return Err(url::ParseError::InvalidDomainCharacter);
+        }
+        if !self.password.is_empty() {
+            let escaped_password = escape_percent_for_url_setter(self.password.expose_secret());
+            url.set_password(Some(&escaped_password))
+                .map_err(|()| url::ParseError::InvalidDomainCharacter)?;
+        }
+        url.set_path(&format!("/{database}"));
+        url.query_pairs_mut().append_pair("sslmode", "prefer");
+        Ok(url.into())
     }
 
     /// Build `-c key=value` pairs for libpq startup `options` GUC injection.
@@ -115,15 +132,21 @@ impl PostgresConfig {
 
     /// Build the connection used by deploy-time `PostgreSQL` migrations.
     #[must_use]
-    pub fn migration_connection(&self, migration_password: &str) -> Self {
+    pub fn migration_connection(&self, migration_password: &SecretText) -> Self {
         let mut config = self.clone();
         config.user.clone_from(&self.migration.user);
-        migration_password.clone_into(&mut config.password);
+        config.password.clone_from(migration_password);
         config.max_connections = 2;
         config.min_connections = 1;
         "quant-pivot-migration".clone_into(&mut config.application_name);
         config
     }
+}
+
+/// The `url` setters intentionally preserve percent-escape sequences. Escape a
+/// literal percent first so credentials such as `%2F` retain their exact bytes.
+fn escape_percent_for_url_setter(value: &str) -> String {
+    value.replace('%', "%25")
 }
 
 impl Default for PostgresConfig {
@@ -132,7 +155,7 @@ impl Default for PostgresConfig {
             host: default_host(),
             port: default_port(),
             user: default_user(),
-            password: String::new(),
+            password: SecretText::default(),
             database: default_database(),
             schema: default_schema(),
             migration: SchemaMigrationConfig::default(),
@@ -153,23 +176,21 @@ impl Default for PostgresConfig {
     }
 }
 
-/// Non-secret deploy-only schema identity shared by `PostgreSQL` and
-/// `ClickHouse` configuration.
-///
-/// Its credential is intentionally absent from [`DeployConfig`](super::DeployConfig)
-/// and is loaded only by `quant-pivot-xtask` from the deployment secret
-/// environment. The runtime process therefore cannot inherit DDL credentials.
+/// Deploy-only schema identity shared by `PostgreSQL` and `ClickHouse`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SchemaMigrationConfig {
     /// Independently provisioned DDL role.
     pub user: String,
+    /// Optional DDL credential used only by migration/plan/apply commands.
+    pub password: Option<SecretText>,
 }
 
 impl Default for SchemaMigrationConfig {
     fn default() -> Self {
         Self {
             user: "quant_pivot_migrator".to_owned(),
+            password: None,
         }
     }
 }
@@ -245,7 +266,7 @@ pub struct ClickHouseConfig {
     pub user: String,
     /// Password. Set via `QUANT_PIVOT__DB__CLICKHOUSE__PASSWORD` in production —
     /// never in the TOML. Default: empty.
-    pub password: String,
+    pub password: SecretText,
     /// Versioned schema migration policy and optional elevated identity.
     pub migration: SchemaMigrationConfig,
     /// Max age (seconds) of a partial batch before it is flushed. Lower =
@@ -268,7 +289,7 @@ impl Default for ClickHouseConfig {
             url: default_ch_url(),
             database: default_ch_database(),
             user: default_ch_user(),
-            password: String::new(),
+            password: SecretText::default(),
             migration: SchemaMigrationConfig::default(),
             flush_interval_secs: default_ch_flush_interval(),
             batch_size: default_ch_batch_size(),
@@ -284,10 +305,10 @@ impl ClickHouseConfig {
     /// can provide an independently scoped DDL identity without granting the
     /// long-lived ingestion connection `CREATE`, `ALTER`, or `DROP`.
     #[must_use]
-    pub fn migration_connection(&self, migration_password: &str) -> Self {
+    pub fn migration_connection(&self, migration_password: &SecretText) -> Self {
         let mut config = self.clone();
         config.user.clone_from(&self.migration.user);
-        migration_password.clone_into(&mut config.password);
+        config.password.clone_from(migration_password);
         config
     }
 }
@@ -309,4 +330,38 @@ const fn default_ch_batch_size() -> usize {
 }
 const fn default_ch_max_concurrent_inserts() -> usize {
     8
+}
+
+#[cfg(test)]
+mod tests {
+    use url::Url;
+
+    use super::PostgresConfig;
+
+    #[test]
+    fn postgres_url_percent_encodes_reserved_password_characters() {
+        let config = PostgresConfig {
+            password: "@:/?#%".into(),
+            ..PostgresConfig::default()
+        };
+        let connection = config.try_connection_url().expect("valid URL");
+        assert!(!connection.contains("@:/?#%"));
+        let parsed = Url::parse(&connection).expect("parse generated URL");
+        assert_eq!(parsed.host_str(), Some("localhost"));
+        assert_eq!(parsed.password(), Some("%40%3A%2F%3F%23%25"));
+        assert_eq!(parsed.path(), "/quant_pivot");
+    }
+
+    #[test]
+    fn database_debug_redacts_runtime_and_migration_passwords() {
+        let mut config = PostgresConfig {
+            password: "runtime-secret".into(),
+            ..PostgresConfig::default()
+        };
+        config.migration.password = Some("ddl-secret".into());
+        let debug = format!("{config:?}");
+        assert!(!debug.contains("runtime-secret"));
+        assert!(!debug.contains("ddl-secret"));
+        assert!(debug.contains("redacted"));
+    }
 }

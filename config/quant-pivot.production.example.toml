@@ -14,16 +14,17 @@
 #   POST /api/runtime-config/versions/{id}/activate   — audited hot activation
 #
 # Loading precedence (later wins):
-#   1. QUANT_PIVOT__* environment variables
-#   2. quant-pivot.local.toml  (optional, gitignored — see quant-pivot.local.toml.example)
-#   3. quant-pivot.toml
+#   1. compiled-in defaults
+#   2. quant-pivot.toml
+#   3. quant-pivot.local.toml  (optional, gitignored — see quant-pivot.local.toml.example)
+#   4. QUANT_PIVOT__* environment variables
 #
 # Sensitive fields — set via env OR quant-pivot.local.toml (never commit real values):
 #
 #   QUANT_PIVOT__KEYS__PRIVATE_KEY=0x...   # bot wallet; L2 creds auto-derived at connect
 #   QUANT_PIVOT__DB__POSTGRES__PASSWORD=...
 #   QUANT_PIVOT__DB__CLICKHOUSE__PASSWORD=...
-#   Mount the JWT Ed25519 private key from the deployment secret manager.
+#   QUANT_PIVOT__WEB__JWT__SIGNING_KEY=... # Base64URL-no-pad 32-byte HS256 key
 #
 # Unknown keys are FATAL at startup (deny_unknown_fields): stale sections from
 # older layouts ([detection], [risk], [sizing], [treasury], [analytics], ...)
@@ -160,10 +161,10 @@ require_object_lock = true
 require_versioning = true
 
 [research.evidence_attestation]
-# Non-secret key selected for new evidence. Point
-# QUANT_PIVOT_EVIDENCE_ATTESTATION_KEYRING_FILE at a secret-manager-mounted JSON
-# object containing this key and retained historical keys.
-signing_key_id = "REPLACE_WITH_EVIDENCE_KEY_ID"
+# Exactly 32 secret bytes encoded as 64 lowercase hex characters. During
+# rotation, move the old active value into previous_signing_keys.
+signing_key = "REPLACE_WITH_64_LOWERCASE_HEX_CHARACTERS"
+previous_signing_keys = []
 
 # ── Keys / Credentials ───────────────────────────────────────────────────────
 #
@@ -251,7 +252,9 @@ application_name = "quant-pivot"
 # The role name is non-secret; inject only its credential through the secret manager.
 user = "quant_pivot_migrator"
 # Secret-manager binding:
-# QUANT_PIVOT_MIGRATION__POSTGRES_PASSWORD
+# QUANT_PIVOT__DB__POSTGRES__MIGRATION__PASSWORD
+# Do not place `password` in the production runtime configuration; xtask may
+# consume a deployment-only overlay containing this field.
 # PostgreSQL apply also requires a one-time bootstrap administrator password
 # mounted as a 0400/0600 regular file and referenced by:
 # QUANT_PIVOT_BOOTSTRAP__ADMIN_PASSWORD_FILE
@@ -291,7 +294,7 @@ max_concurrent_inserts = 8
 user = "quant_pivot_migrator"
 # Caution: production should use a dedicated DDL identity. Supply these only
 # through the secret manager/environment, never in this file:
-# QUANT_PIVOT_MIGRATION__CLICKHOUSE_PASSWORD
+# QUANT_PIVOT__DB__CLICKHOUSE__MIGRATION__PASSWORD
 # The runtime role still needs metadata visibility plus SELECT on the migration
 # ledger/claim tables so post-migration verification can fail closed.
 
@@ -359,21 +362,20 @@ serve_static_ui = false
 static_ui_dir = "static/ui"
 
 [web.jwt]
-# Purpose: active Ed25519 signer identity and PKCS#8 private PEM mount.
-signing_key_id = "production-2026-01"
-signing_private_key_file = "/run/secrets/quant-pivot/jwt-ed25519-private.pem"
+# Purpose: Base64URL-no-pad encoded 32-byte HS256 key. Inject through
+# QUANT_PIVOT__WEB__JWT__SIGNING_KEY. Rotation invalidates every existing JWT.
+signing_key = "REPLACE_WITH_BASE64URL_NO_PAD_32_BYTE_KEY"
 # Purpose: token issuer claim. Caution: must match across restarts or all
 # sessions invalidate. Default: "quant-pivot".
 issuer = "quant-pivot"
+audience = "quant-pivot-web"
 # Purpose: access-token lifetime (s). Impact: shorter = tighter security,
 # more refreshes. Default: 900 (15m).
 access_ttl_secs = 900
 # Purpose: refresh-token lifetime (s); bounds the maximum session length.
 # Default: 604800 (7d).
 refresh_ttl_secs = 604800
-
-[[web.jwt.verification_keys]]
-key_id = "production-2026-01"
-public_key_file = "/etc/quant-pivot/jwt-ed25519-public.pem"
+# Purpose: absolute login-session lifetime. Refresh rotation never extends it.
+absolute_session_ttl_secs = 2592000
 [quant.governance]
 require_approver_activator_separation = true

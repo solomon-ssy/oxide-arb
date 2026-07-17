@@ -1,14 +1,18 @@
 //! Production operational-evidence collection and verification for fit preflight.
 
-use std::{collections::BTreeMap, env, fs, sync::Arc};
+use std::{collections::BTreeMap, sync::Arc};
 
+use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
     config::{
         ArtifactStoreDeployConfig, ArtifactStoreKind, ClickHouseConfig, EvidenceAttestationConfig,
     },
-    domain::{NewResearchReadinessEvidence, ResearchReadinessEvidenceInfo},
+    domain::{
+        NewResearchReadinessEvidence, ResearchReadinessEvidenceInfo, ResearchReadinessPort,
+        ResearchReadinessSnapshot,
+    },
     enums::quant::ResearchReadinessEvidenceKind,
     hashing::CanonicalDigest,
     types::{
@@ -25,83 +29,51 @@ use quant_pivot_research::artifact::{ArtifactKey, ArtifactNamespace, ArtifactSto
 use quant_pivot_storage::clickhouse::{ClickHousePool, extract_table_ttl, schema_contract_hash};
 use serde::Serialize;
 use uuid::Uuid;
-use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 const EVIDENCE_VALID_FOR: Duration = Duration::hours(6);
 const LATENCY_WINDOW: Duration = Duration::hours(24);
 const LOCAL_ARTIFACT_VERSION: &str = "local-development";
-pub const EVIDENCE_ATTESTATION_KEYRING_FILE_ENV: &str =
-    "QUANT_PIVOT_EVIDENCE_ATTESTATION_KEYRING_FILE";
-
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
 struct AttestationKey([u8; 32]);
 
 #[derive(Clone)]
 pub struct EvidenceAttestor {
-    signing_key_id: String,
+    active_key_id: String,
     keys: BTreeMap<String, AttestationKey>,
 }
 
 impl EvidenceAttestor {
     pub fn from_config(config: &EvidenceAttestationConfig) -> QuantResult<Option<Self>> {
-        let keyring_file = env::var(EVIDENCE_ATTESTATION_KEYRING_FILE_ENV).ok();
-        let Some(keyring_file) = keyring_file else {
-            return Self::from_config_with_keyring_json(config, None);
-        };
-        let keyring_json = Zeroizing::new(fs::read_to_string(&keyring_file).map_err(|error| {
-            methodology(format!(
-                "failed to read research evidence keyring file `{keyring_file}`: {error}"
-            ))
-        })?);
-        Self::from_config_with_keyring_json(config, Some(keyring_json.as_str()))
-    }
-
-    fn from_config_with_keyring_json(
-        config: &EvidenceAttestationConfig,
-        keyring_json: Option<&str>,
-    ) -> QuantResult<Option<Self>> {
-        let signing_key_id = config.signing_key_id.trim();
-        match (signing_key_id.is_empty(), keyring_json) {
-            (true, None) => return Ok(None),
-            (true, Some(_)) => {
-                return Err(methodology(
-                    "research evidence keyring requires a configured signing_key_id",
-                ));
+        let active = config.signing_key.expose_secret();
+        if active.is_empty() {
+            if config.previous_signing_keys.is_empty() {
+                return Ok(None);
             }
-            (false, None) => {
-                return Err(methodology(format!(
-                    "research evidence signing_key_id requires {EVIDENCE_ATTESTATION_KEYRING_FILE_ENV}"
-                )));
-            }
-            (false, Some(_)) => {}
-        }
-        let encoded =
-            serde_json::from_str::<BTreeMap<String, String>>(keyring_json.unwrap_or_default())
-                .map_err(|error| {
-                    methodology(format!(
-                        "research evidence keyring JSON is invalid: {error}"
-                    ))
-                })?;
-        if encoded.is_empty() || encoded.keys().any(|key_id| key_id.trim().is_empty()) {
             return Err(methodology(
-                "research evidence keyring must contain non-empty key ids",
+                "research evidence previous_signing_keys require an active signing_key",
             ));
         }
-        let keys = encoded
-            .into_iter()
-            .map(|(key_id, mut secret)| {
-                let decoded = decode_key(&secret).map(|key| (key_id, AttestationKey(key)));
-                secret.zeroize();
-                decoded
-            })
-            .collect::<QuantResult<BTreeMap<_, _>>>()?;
-        if !keys.contains_key(signing_key_id) {
-            return Err(methodology(format!(
-                "research evidence signing key `{signing_key_id}` is absent from the keyring"
-            )));
+        let active_key = decode_key(active)?;
+        let active_key_id = attestation_key_id(&active_key);
+        let mut keys = BTreeMap::new();
+        keys.insert(active_key_id.clone(), active_key);
+        for previous in &config.previous_signing_keys {
+            let key = decode_key(previous.expose_secret())?;
+            let key_id = attestation_key_id(&key);
+            if key_id == active_key_id {
+                return Err(methodology(
+                    "research evidence active signing_key must not appear in previous_signing_keys",
+                ));
+            }
+            if keys.insert(key_id, key).is_some() {
+                return Err(methodology(
+                    "research evidence previous_signing_keys must not contain duplicates",
+                ));
+            }
         }
         Ok(Some(Self {
-            signing_key_id: signing_key_id.to_owned(),
+            active_key_id,
             keys,
         }))
     }
@@ -109,7 +81,7 @@ impl EvidenceAttestor {
     fn mac<T: Serialize + ?Sized>(&self, key_id: &str, value: &T) -> QuantResult<ContentHash> {
         let key = self.keys.get(key_id).ok_or_else(|| {
             methodology(format!(
-                "research evidence attestation key `{key_id}` is not present in the configured historical keyring"
+                "research evidence attestation key `{key_id}` is not present in the configured active/previous key set"
             ))
         })?;
         let bytes = CanonicalDigest::canonical_json_bytes(value).map_err(|error| {
@@ -371,6 +343,43 @@ impl ResearchReadinessEvidenceService {
     }
 }
 
+#[async_trait]
+impl ResearchReadinessPort for ResearchReadinessEvidenceService {
+    async fn snapshot(&self) -> QuantResult<Option<ResearchReadinessSnapshot>> {
+        let evidence = self.latest_verified(Utc::now()).await?;
+        let retention = evidence.retention.as_ref().and_then(|item| {
+            let ResearchReadinessEvidencePayload::RetentionRunway(retention) = &item.payload_json
+            else {
+                return None;
+            };
+            Some((item.observed_at, retention))
+        });
+        let latency = evidence.latency.as_ref().and_then(|item| {
+            let ResearchReadinessEvidencePayload::ShadowLatencyProfile(latency) =
+                &item.payload_json
+            else {
+                return None;
+            };
+            Some((item.observed_at, latency))
+        });
+        let Some((retention_observed_at, retention)) = retention else {
+            return Ok(None);
+        };
+        let observed_at = latency
+            .map(|(observed_at, _)| observed_at)
+            .map_or(retention_observed_at, |latency_observed_at| {
+                retention_observed_at.max(latency_observed_at)
+            });
+        Ok(Some(ResearchReadinessSnapshot {
+            observed_at,
+            required_history_days: retention.required_days,
+            observed_history_days: retention.measured_history_days,
+            retention_ready: retention.proven(),
+            latency_ready: latency.is_some_and(|(_, profile)| profile.complete_for(1)),
+        }))
+    }
+}
+
 fn attestation_input(info: &ResearchReadinessEvidenceInfo) -> AttestationInput<'_> {
     AttestationInput {
         kind: info.kind,
@@ -536,7 +545,7 @@ impl ResearchReadinessEvidenceProducer {
             artifact_uri: &artifact_uri,
             artifact_version: &artifact_version,
         };
-        let attestation_mac = attestor.mac(&attestor.signing_key_id, &input)?;
+        let attestation_mac = attestor.mac(&attestor.active_key_id, &input)?;
         self.repo
             .append(NewResearchReadinessEvidence {
                 evidence_id: Uuid::now_v7(),
@@ -550,7 +559,7 @@ impl ResearchReadinessEvidenceProducer {
                 payload_hash,
                 artifact_uri,
                 artifact_version,
-                attestation_key_id: attestor.signing_key_id.clone(),
+                attestation_key_id: attestor.active_key_id.clone(),
                 attestation_mac,
             })
             .await?;
@@ -726,14 +735,18 @@ fn timestamp_millis(value: Option<i64>) -> QuantResult<Option<DateTime<Utc>>> {
         .transpose()
 }
 
-fn decode_key(value: &str) -> QuantResult<[u8; 32]> {
-    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+fn decode_key(value: &str) -> QuantResult<AttestationKey> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
         return Err(methodology(
-            "research evidence attestation key must contain exactly 64 hex characters",
+            "research evidence attestation key must contain exactly 64 lowercase hex characters",
         ));
     }
-    let mut key = [0_u8; 32];
-    for (index, slot) in key.iter_mut().enumerate() {
+    let mut key = AttestationKey([0_u8; 32]);
+    for (index, slot) in key.0.iter_mut().enumerate() {
         let offset = index * 2;
         *slot = u8::from_str_radix(&value[offset..offset + 2], 16).map_err(|error| {
             methodology(format!(
@@ -742,6 +755,14 @@ fn decode_key(value: &str) -> QuantResult<[u8; 32]> {
         })?;
     }
     Ok(key)
+}
+
+fn attestation_key_id(key: &AttestationKey) -> String {
+    let mut hasher = blake3::Hasher::new_derive_key(
+        "quant-pivot/research-evidence-attestation-key-fingerprint/v1",
+    );
+    hasher.update(&key.0);
+    format!("b3k1:{}", hasher.finalize().to_hex())
 }
 
 fn methodology(detail: impl Into<String>) -> QuantError {
@@ -765,48 +786,69 @@ mod tests {
     #[test]
     fn attestation_config_is_all_or_nothing() {
         assert!(
-            EvidenceAttestor::from_config_with_keyring_json(
-                &EvidenceAttestationConfig::default(),
-                None,
-            )
-            .expect("disabled attestor")
-            .is_none()
+            EvidenceAttestor::from_config(&EvidenceAttestationConfig::default())
+                .expect("disabled attestor")
+                .is_none()
         );
         assert!(
-            EvidenceAttestor::from_config_with_keyring_json(
-                &EvidenceAttestationConfig {
-                    signing_key_id: "operator-2026-07".to_owned(),
-                },
-                Some(&format!(r#"{{"operator-2026-07":"{}"}}"#, "ab".repeat(32))),
-            )
+            EvidenceAttestor::from_config(&EvidenceAttestationConfig {
+                signing_key: "ab".repeat(32).into(),
+                previous_signing_keys: Vec::new(),
+            })
             .expect("configured attestor")
             .is_some()
+        );
+        assert!(
+            EvidenceAttestor::from_config(&EvidenceAttestationConfig {
+                signing_key: "".into(),
+                previous_signing_keys: vec!["cd".repeat(32).into()],
+            })
+            .is_err()
         );
     }
 
     #[test]
     fn keyed_attestation_changes_with_content_and_retains_historical_keys() {
-        let keyring = format!(
-            r#"{{"operator-2026-06":"{}","operator-2026-07":"{}"}}"#,
-            "cd".repeat(32),
-            "ab".repeat(32)
-        );
-        let attestor = EvidenceAttestor::from_config_with_keyring_json(
-            &EvidenceAttestationConfig {
-                signing_key_id: "operator-2026-07".to_owned(),
-            },
-            Some(&keyring),
-        )
+        let attestor = EvidenceAttestor::from_config(&EvidenceAttestationConfig {
+            signing_key: "ab".repeat(32).into(),
+            previous_signing_keys: vec!["cd".repeat(32).into()],
+        })
         .expect("valid attestor config")
         .expect("configured attestor");
+        let active_key_id = attestor.active_key_id.clone();
+        let historical_key_id = attestor
+            .keys
+            .keys()
+            .find(|key_id| *key_id != &active_key_id)
+            .expect("historical key id")
+            .clone();
         let original = attestor
-            .mac("operator-2026-07", &("scope", 1_u32))
+            .mac(&active_key_id, &("scope", 1_u32))
             .expect("original MAC");
         let tampered = attestor
-            .mac("operator-2026-07", &("scope", 2_u32))
+            .mac(&active_key_id, &("scope", 2_u32))
             .expect("tampered MAC");
         assert_ne!(original, tampered);
-        assert!(attestor.mac("operator-2026-06", &("scope", 1_u32)).is_ok());
+        assert!(attestor.mac(&historical_key_id, &("scope", 1_u32)).is_ok());
+        assert!(attestor.mac("b3k1:unknown", &("scope", 1_u32)).is_err());
+    }
+
+    #[test]
+    fn attestation_keys_reject_duplicates_and_uppercase_hex() {
+        assert!(
+            EvidenceAttestor::from_config(&EvidenceAttestationConfig {
+                signing_key: "ab".repeat(32).into(),
+                previous_signing_keys: vec!["ab".repeat(32).into()],
+            })
+            .is_err()
+        );
+        assert!(
+            EvidenceAttestor::from_config(&EvidenceAttestationConfig {
+                signing_key: "AB".repeat(32).into(),
+                previous_signing_keys: Vec::new(),
+            })
+            .is_err()
+        );
     }
 
     #[test]
