@@ -571,6 +571,7 @@ mod tests {
             description: None,
             categories: vec![category],
             status: MarketStatus::Active,
+            filter_reasons: Vec::new(),
             outcome: None,
             yes_token_id: TokenId::new("yes"),
             no_token_id: TokenId::new("no"),
@@ -579,6 +580,8 @@ mod tests {
             start_date: None,
             end_date: None,
             resolved_at: None,
+            content_hash: ContentHash::parse(format!("blake3:{}", "d".repeat(64)))
+                .expect("market hash"),
             created_at: now,
             updated_at: now,
         }
@@ -653,8 +656,8 @@ mod tests {
             trade_tape: HashMap::new(),
             resolutions: HashMap::new(),
             catalog: CatalogWindowInfo {
-                market_versions: Vec::new(),
-                event_versions: Vec::new(),
+                market_changes: Vec::new(),
+                event_changes: Vec::new(),
             },
             domain_observations: HashMap::new(),
             crypto_reports: HashMap::new(),

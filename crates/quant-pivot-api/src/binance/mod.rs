@@ -122,7 +122,10 @@ impl BinanceKlineSource {
             })?;
         let instrument_key = DomainInstrumentKey::binance_kline(symbol, interval);
         let mut observations = Vec::with_capacity(rows.len());
-        for row in rows {
+        // Binance includes the currently open kline when its open time is in
+        // range, even though that row's close time is after `endTime`. An open
+        // candle is mutable evidence and must never advance the durable cursor.
+        for row in rows.into_iter().filter(|row| row.close_time_ms <= end_ms) {
             observations.extend(mapper::into_observations(&row, &instrument_key)?);
         }
         Ok(observations)
@@ -307,5 +310,43 @@ mod tests {
             .await
             .expect("fetch");
         assert_eq!(rows.len(), KLINE_PAGE_SIZE as usize + 1);
+    }
+
+    #[tokio::test]
+    async fn fetch_excludes_current_open_kline_past_scan_boundary() {
+        let server = MockServer::start().await;
+        let boundary = Utc.with_ymd_and_hms(2026, 7, 17, 3, 9, 54).unwrap();
+        let closed_open_time = boundary.timestamp_millis() - 120_000;
+        let current_open_time = boundary.timestamp_millis() - 54_000;
+        Mock::given(method("GET"))
+            .and(path("/api/v3/klines"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                full_kline_row(closed_open_time, "1"),
+                full_kline_row(current_open_time, "2")
+            ])))
+            .mount(&server)
+            .await;
+
+        let source = BinanceKlineSource::connect(BinanceSourceConfig {
+            rest_url: server.uri(),
+            ..BinanceSourceConfig::default()
+        })
+        .expect("source");
+        let rows = source
+            .fetch(DomainFetchRequest {
+                instrument_key: DomainInstrumentKey::binance_kline(
+                    &BinanceSymbol::parse("BTCUSDT").expect("symbol"),
+                    KlineInterval::OneMinute,
+                ),
+                from_exclusive: boundary - chrono::Duration::minutes(3),
+                to_inclusive: boundary,
+                bootstrap: false,
+            })
+            .await
+            .expect("fetch");
+
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].observed_at <= boundary);
+        assert_eq!(rows[0].value.to_string(), "1");
     }
 }

@@ -2,7 +2,6 @@
 
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
-use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantError, QuantResult, report::ReportError};
 use quant_pivot_models::{
@@ -22,12 +21,6 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use super::{ReportLifecycleService, publisher::ReportPublisher};
-
-/// Runtime-config activation hook for durable schedule-state reconciliation.
-#[async_trait]
-pub trait ReportScheduleReconciler: Send + Sync {
-    async fn reconcile(&self, expected: &ReportsConfig) -> QuantResult<()>;
-}
 
 /// Structural settings for the durable coordinator.
 #[derive(Debug, Clone, Copy)]
@@ -108,7 +101,7 @@ impl ReportCoordinator {
             self.execute_with_heartbeat(run).await?;
         }
         let health = self.runs.schedule_health().await?;
-        self.publisher.record_schedule_health(&health);
+        self.publisher.record_schedule_health(&health)?;
         Ok(())
     }
 
@@ -155,7 +148,7 @@ impl ReportCoordinator {
             .reconcile_schedules(&version.runtime_config_version_id, schedules)
             .await?;
         for gap in &outcome.gaps {
-            self.publisher.record_schedule_gap(gap);
+            self.publisher.record_schedule_gap(gap)?;
         }
         for skipped in outcome.skipped_runs {
             self.publisher.publish_run(&skipped, Utc::now());
@@ -213,7 +206,7 @@ impl ReportCoordinator {
             };
             let outcome = self.runs.materialize_schedule(command).await?;
             for gap in &outcome.gaps {
-                self.publisher.record_schedule_gap(gap);
+                self.publisher.record_schedule_gap(gap)?;
             }
             if let Some(skipped) = outcome.skipped_run {
                 self.publisher.publish_run(&skipped, Utc::now());
@@ -256,13 +249,6 @@ impl ReportCoordinator {
             return Err(error);
         }
         Ok(())
-    }
-}
-
-#[async_trait]
-impl ReportScheduleReconciler for ReportCoordinator {
-    async fn reconcile(&self, expected: &ReportsConfig) -> QuantResult<()> {
-        self.reconcile_active(Some(expected)).await.map(|_| ())
     }
 }
 

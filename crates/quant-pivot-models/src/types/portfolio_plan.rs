@@ -12,7 +12,6 @@ use crate::{
     enums::quant::{
         CorrelationSource, OptimizerSolverStatus, PortfolioSolveMode, PortfolioSolverKind,
     },
-    jsonb_active,
     types::{RejectionReasonCount, Usd},
 };
 
@@ -86,10 +85,3 @@ pub struct PortfolioOptimizerMeta {
     /// Human-readable conflicting constraints when the model was infeasible.
     pub constraint_conflicts: Vec<String>,
 }
-
-jsonb_active!(
-    PortfolioRiskBudget,
-    PortfolioConstraintsSnapshot,
-    PortfolioRejectedSummary,
-    PortfolioOptimizerMeta,
-);

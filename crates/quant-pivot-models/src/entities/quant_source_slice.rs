@@ -11,6 +11,7 @@ use crate::{
     },
 };
 
+#[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "quant_source_slice")]
 pub struct Model {
@@ -36,22 +37,14 @@ pub struct Model {
     pub failure_detail: Option<String>,
     pub completed_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
-}
 
-#[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-pub enum Relation {
     #[sea_orm(
-        belongs_to = "super::runtime_config_version::Entity",
-        from = "Column::RuntimeConfigVersionId",
-        to = "super::runtime_config_version::Column::RuntimeConfigVersionId"
+        belongs_to,
+        relation_enum = "RuntimeConfigVersion",
+        from = "runtime_config_version_id",
+        to = "runtime_config_version_id"
     )]
-    RuntimeConfigVersion,
-}
-
-impl Related<super::runtime_config_version::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::RuntimeConfigVersion.def()
-    }
+    pub runtime_config_version: BelongsTo<super::runtime_config_version::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

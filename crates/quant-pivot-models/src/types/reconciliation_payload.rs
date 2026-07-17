@@ -6,7 +6,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     enums::execution::ReconciliationEvidenceKind,
-    jsonb_active,
     types::{FeeEvidence, Price, Shares},
 };
 
@@ -38,8 +37,6 @@ impl ReconciliationEvidenceChain {
         self.0.push(evidence);
     }
 }
-
-jsonb_active!(ReconciliationEvidenceChain);
 
 #[cfg(test)]
 mod tests {

@@ -110,7 +110,7 @@ mod tests {
 
     #[test]
     fn validate_accepts_default_database_name() {
-        assert!(validate_ch_identifier("oxide_arb", "database").is_ok());
+        assert!(validate_ch_identifier("quant_pivot", "database").is_ok());
     }
 
     #[test]

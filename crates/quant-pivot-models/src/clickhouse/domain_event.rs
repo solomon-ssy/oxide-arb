@@ -2,12 +2,11 @@
 
 use sea_orm::FromJsonQueryResult;
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::{
     clickhouse::{ChDecimal64, ChSchemaVersion},
-    types::{
-        ContentHash, DomainEventId, DomainInstrumentKey, DomainSourceId, EntryConditionInstanceId,
-    },
+    types::{ContentHash, DomainInstrumentKey, DomainSourceId, EntryConditionInstanceId},
 };
 
 #[derive(Debug, Clone, clickhouse::Row, Serialize, Deserialize)]
@@ -63,7 +62,8 @@ pub struct WeatherForecastPointRow {
 
 #[derive(Debug, Clone, clickhouse::Row, Serialize, Deserialize)]
 pub struct DomainEventRow {
-    pub event_id: DomainEventId,
+    #[serde(with = "clickhouse::serde::uuid")]
+    pub event_id: Uuid,
     pub source: String,
     pub event_type: String,
     pub subject: String,
@@ -72,7 +72,8 @@ pub struct DomainEventRow {
     pub available_at: i64,
     pub schema_version: ChSchemaVersion,
     pub revision: u32,
-    pub supersedes_event_id: Option<DomainEventId>,
+    #[serde(with = "clickhouse::serde::uuid::option")]
+    pub supersedes_event_id: Option<Uuid>,
     pub payload_hash: ContentHash,
     pub source_checkpoint_hash: ContentHash,
     pub payload_json: String,
@@ -97,5 +98,3 @@ pub struct EntryConditionEvaluationEventRow {
     pub tree_json: String,
     pub schema_version: ChSchemaVersion,
 }
-
-crate::jsonb_active!(EntryConditionEvaluationEventRow);

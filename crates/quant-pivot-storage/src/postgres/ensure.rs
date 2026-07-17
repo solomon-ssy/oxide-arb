@@ -14,9 +14,13 @@ use tracing::info;
 const MAINTENANCE_DATABASE: &str = "postgres";
 
 /// Ensure the configured application database exists, creating it when absent.
-pub async fn ensure_database(config: &PostgresConfig) -> Result<(), StorageError> {
+pub async fn ensure_database(
+    config: &PostgresConfig,
+    database_owner: &str,
+) -> Result<(), StorageError> {
     validate_pg_identifier(&config.database, "database")?;
     validate_pg_identifier(&config.user, "user")?;
+    validate_pg_identifier(database_owner, "database owner")?;
 
     let mut opts = ConnectOptions::new(config.to_url_with_database(MAINTENANCE_DATABASE));
     opts.max_connections(1)
@@ -31,7 +35,7 @@ pub async fn ensure_database(config: &PostgresConfig) -> Result<(), StorageError
     })?;
 
     let exists = db
-        .query_one(Statement::from_sql_and_values(
+        .query_one_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
             "SELECT 1 FROM pg_database WHERE datname = $1",
             [Value::from(config.database.clone())],
@@ -47,15 +51,15 @@ pub async fn ensure_database(config: &PostgresConfig) -> Result<(), StorageError
     let create_sql = format!(
         "CREATE DATABASE {} OWNER {}",
         quote_ident(&config.database),
-        quote_ident(&config.user),
+        quote_ident(database_owner),
     );
 
     match db
-        .execute(Statement::from_string(DbBackend::Postgres, create_sql))
+        .execute_raw(Statement::from_string(DbBackend::Postgres, create_sql))
         .await
     {
         Ok(_) => {
-            info!(database = %config.database, owner = %config.user, "PostgreSQL database created");
+            info!(database = %config.database, owner = %database_owner, "PostgreSQL database created");
         }
         Err(e) if duplicate_database_error(&e) => {
             info!(
@@ -132,7 +136,7 @@ mod tests {
 
     #[test]
     fn validate_accepts_default_database_name() {
-        assert!(validate_pg_identifier("oxide_arb", "database").is_ok());
+        assert!(validate_pg_identifier("quant_pivot", "database").is_ok());
     }
 
     #[test]

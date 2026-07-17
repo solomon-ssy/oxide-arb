@@ -16,7 +16,7 @@ use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
 use serde::{Deserialize, Serialize};
 
 /// Governed model specification row.
-#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
+#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
 #[sea_orm(entity = "crate::entities::quant_model_spec::Entity")]
 pub struct ModelSpecInfo {
     pub model_spec_id: ModelSpecId,
@@ -106,7 +106,7 @@ pub struct NewModelVersion {
 }
 
 /// Training, backtest, shadow, or inference run row.
-#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
+#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
 #[sea_orm(entity = "crate::entities::quant_model_run::Entity")]
 pub struct ModelRunInfo {
     pub model_run_id: ModelRunId,

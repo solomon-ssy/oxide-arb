@@ -6,6 +6,7 @@ use uuid::Uuid;
 
 use crate::{clickhouse::EntryConditionEvaluationEventRow, types::ContentHash};
 
+#[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "quant_entry_condition_evaluation_outbox")]
 pub struct Model {
@@ -22,8 +23,5 @@ pub struct Model {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
-
-#[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-pub enum Relation {}
 
 impl ActiveModelBehavior for ActiveModel {}

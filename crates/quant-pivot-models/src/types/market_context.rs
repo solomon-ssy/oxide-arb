@@ -6,7 +6,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     enums::{common::TickSize, market::MarketStatus},
-    jsonb_active,
     types::{Bps, Price, Usd},
 };
 
@@ -26,5 +25,3 @@ pub struct MarketContext {
     pub tick_size: TickSize,
     pub fee_rate: Option<Decimal>,
 }
-
-jsonb_active!(MarketContext);

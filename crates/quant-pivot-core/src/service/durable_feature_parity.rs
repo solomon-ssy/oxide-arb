@@ -20,8 +20,11 @@ use quant_pivot_models::{
     },
     domain::{
         DecisionBoundary, DecisionClock, DecisionSource, FactorValueInfo, FeatureParityRunInfo,
-        FeatureVectorInfo, MarketSelectionInfo, MarketSelectionMemberInfo, ModelRunInfo,
-        RecommendationReportInfo, ReportDataQualitySnapshotInfo, ReportRunInfo,
+        FeatureVectorInfo, FrozenFeatureParitySubject, FrozenFeatureParitySubjectId,
+        MarketSelectionInfo, MarketSelectionMemberInfo, ModelRunInfo, RecommendationReportInfo,
+        ReportDataQualitySnapshotInfo, ReportRunInfo, model_run_parity_evidence_hash,
+        parity_candidate_membership_hash, parity_selection_hash, report_parity_evidence_hash,
+        report_parity_generation_hash,
     },
     enums::{
         clickhouse::ChFeatureCellState,
@@ -37,11 +40,11 @@ use quant_pivot_models::{
     },
 };
 use quant_pivot_repository::traits::{
-    CalibrationArtifactRepository, CatalogVersionRepository, ClobMarketInfoRepository,
-    FactorRepository, FeatureRepository, MarketLinkageRepository, MarketSelectionRepository,
-    ModelRegistryRepository, ModelRunRepository, QuantFactReadRepository,
-    RecommendationReportRepository, ReportRunRepository, RuntimeConfigVersionRepository,
-    ServingEvidenceRepository,
+    CalibrationArtifactRepository, CatalogLedgerRepository, ClobMarketInfoRepository,
+    FactorRepository, FeatureParityRepository, FeatureRepository, MarketLinkageRepository,
+    MarketSelectionRepository, ModelRegistryRepository, ModelRunRepository,
+    QuantFactReadRepository, RecommendationReportRepository, ReportRunRepository,
+    RuntimeConfigVersionRepository, ServingEvidenceRepository,
 };
 use quant_pivot_research::{
     factors::{FactorEngine, FactorValue, MarketFactorOutcome},
@@ -85,6 +88,7 @@ use crate::{
 };
 /// Process-lifetime dependencies of the production parity source.
 pub struct DurableFeatureParityDeps {
+    pub parity: Arc<dyn FeatureParityRepository>,
     pub model_runs: Arc<dyn ModelRunRepository>,
     pub model_registry: Arc<dyn ModelRegistryRepository>,
     pub runtime_configs: Arc<dyn RuntimeConfigVersionRepository>,
@@ -95,7 +99,7 @@ pub struct DurableFeatureParityDeps {
     pub report_runs: Arc<dyn ReportRunRepository>,
     pub serving_evidence: Arc<dyn ServingEvidenceRepository>,
     pub fact_read: Arc<dyn QuantFactReadRepository>,
-    pub catalog: Arc<dyn CatalogVersionRepository>,
+    pub catalog: Arc<dyn CatalogLedgerRepository>,
     pub clob_market_info: Arc<dyn ClobMarketInfoRepository>,
     pub linkages: Arc<dyn MarketLinkageRepository>,
     pub calibration_artifacts: Arc<dyn CalibrationArtifactRepository>,
@@ -222,6 +226,21 @@ impl FeatureParityReplaySource for DurableFeatureParitySource {
         &self,
         run: &FeatureParityRunInfo,
     ) -> QuantResult<Vec<FeatureParityCandidate>> {
+        let frozen = self.deps.parity.load_frozen_subjects(&run.run_id).await?;
+        if !frozen.is_empty() {
+            return self.frozen_candidates(run, frozen).await;
+        }
+        if run.kind == FeatureParityRunKind::Sampled
+            || (run.kind == FeatureParityRunKind::Full
+                && run.report_id.is_none()
+                && run.model_version_id.is_none()
+                && run.training_dataset_id.is_none())
+        {
+            return Err(determinism(format!(
+                "parity run {} has no atomically frozen serving subjects",
+                run.run_id
+            )));
+        }
         let subjects = self.candidate_subjects(run).await?;
         for row in &subjects.model_runs {
             validate_candidate_run(row, run)?;
@@ -250,6 +269,248 @@ impl FeatureParityReplaySource for DurableFeatureParitySource {
 }
 
 impl DurableFeatureParitySource {
+    async fn frozen_candidates(
+        &self,
+        run: &FeatureParityRunInfo,
+        frozen: Vec<FrozenFeatureParitySubject>,
+    ) -> QuantResult<Vec<FeatureParityCandidate>> {
+        let mut candidates = Vec::new();
+        for subject in frozen {
+            self.validate_frozen_subject(run, &subject).await?;
+            let subject_label = match &subject.subject_id {
+                FrozenFeatureParitySubjectId::ModelRun(id) => id.to_string(),
+                FrozenFeatureParitySubjectId::RecommendationReport(id) => id.to_string(),
+                FrozenFeatureParitySubjectId::ModelVersion { .. } => {
+                    return Err(determinism(format!(
+                        "offline model-version proof {} cannot enter serving replay",
+                        run.run_id
+                    )));
+                }
+            };
+            let owner = match subject.subject_id {
+                FrozenFeatureParitySubjectId::ModelRun(id) => FeatureParitySubject::ModelRun(id),
+                FrozenFeatureParitySubjectId::RecommendationReport(id) => {
+                    FeatureParitySubject::PreInferenceReport(id)
+                }
+                FrozenFeatureParitySubjectId::ModelVersion { .. } => {
+                    return Err(determinism(format!(
+                        "offline model-version proof {} cannot enter serving replay",
+                        run.run_id
+                    )));
+                }
+            };
+            let decision_at = subject.decision_at.ok_or_else(|| {
+                determinism(format!(
+                    "serving parity subject {subject_label} has no decision time"
+                ))
+            })?;
+            if subject.candidates.is_empty() {
+                if matches!(owner, FeatureParitySubject::ModelRun(_)) {
+                    return Err(determinism(format!(
+                        "frozen model-run subject {subject_label} has no market membership"
+                    )));
+                }
+                candidates.push(FeatureParityCandidate {
+                    sampling_key: format!("report/{subject_label}/selection"),
+                    subject: owner,
+                    market_id: None,
+                    decision_at,
+                });
+                continue;
+            }
+            for candidate in subject.candidates {
+                candidates.push(FeatureParityCandidate {
+                    sampling_key: format!("{subject_label}/{}", candidate.market_id),
+                    subject: owner.clone(),
+                    market_id: Some(candidate.market_id),
+                    decision_at,
+                });
+            }
+        }
+        Ok(candidates)
+    }
+
+    async fn validate_frozen_subject(
+        &self,
+        parity_run: &FeatureParityRunInfo,
+        subject: &FrozenFeatureParitySubject,
+    ) -> QuantResult<()> {
+        if matches!(
+            subject.subject_id,
+            FrozenFeatureParitySubjectId::ModelVersion { .. }
+        ) {
+            return Err(determinism(format!(
+                "offline model-version proof {} cannot enter serving replay",
+                parity_run.run_id
+            )));
+        }
+        let (selection_id, decision_at) =
+            self.validate_frozen_selection(parity_run, subject).await?;
+
+        match &subject.subject_id {
+            FrozenFeatureParitySubjectId::ModelRun(model_run_id) => {
+                let model_run = self
+                    .deps
+                    .model_runs
+                    .find_by_id(model_run_id)
+                    .await?
+                    .ok_or_else(|| StorageError::not_found("quant_model_run", model_run_id))?;
+                let output_hash = model_run.output_hash.as_ref().ok_or_else(|| {
+                    determinism(format!(
+                        "frozen model run {model_run_id} no longer has an output hash"
+                    ))
+                })?;
+                let evidence_hash = model_run_parity_evidence_hash(
+                    &model_run.model_run_id,
+                    &model_run.input_hash,
+                    output_hash,
+                    &model_run.model_version_id,
+                    &model_run.runtime_config_version_id,
+                )?;
+                if model_run.run_kind != ModelRunKind::LiveInference
+                    || model_run.status != ModelRunStatus::Succeeded
+                    || model_run.market_selection_id.as_ref() != Some(selection_id)
+                    || model_run.window_start != decision_at
+                    || output_hash != &subject.subject_generation
+                    || evidence_hash != subject.evidence_hash
+                {
+                    return Err(determinism(format!(
+                        "frozen model-run evidence drifted for parity run {} subject {model_run_id}",
+                        parity_run.run_id
+                    )));
+                }
+                if let Some(report_id) = parity_run.report_id.as_ref() {
+                    let report =
+                        self.deps
+                            .reports
+                            .find_by_id(report_id)
+                            .await?
+                            .ok_or_else(|| {
+                                StorageError::not_found("quant_recommendation_report", report_id)
+                            })?;
+                    if report.model_run_id.as_ref() != Some(model_run_id) {
+                        return Err(determinism(format!(
+                            "parity run {} report does not bind frozen model run {model_run_id}",
+                            parity_run.run_id
+                        )));
+                    }
+                }
+            }
+            FrozenFeatureParitySubjectId::RecommendationReport(report_id) => {
+                let report = self
+                    .deps
+                    .reports
+                    .find_by_id(report_id)
+                    .await?
+                    .ok_or_else(|| {
+                        StorageError::not_found("quant_recommendation_report", report_id)
+                    })?;
+                let generation = report_parity_generation_hash(
+                    &report.recommendation_report_id,
+                    report.decision_at,
+                    report.created_at,
+                )?;
+                let evidence_hash = report_parity_evidence_hash(
+                    &generation,
+                    &report.model_version_id,
+                    &report.runtime_config_version_id,
+                    &report.market_selection_id,
+                    &report.data_quality_snapshot_ref,
+                    &report.portfolio_plan_id,
+                )?;
+                if report.model_run_id.is_some()
+                    || &report.market_selection_id != selection_id
+                    || report.decision_at != decision_at
+                    || generation != subject.subject_generation
+                    || evidence_hash != subject.evidence_hash
+                    || parity_run
+                        .report_id
+                        .as_ref()
+                        .is_some_and(|bound| bound != report_id)
+                {
+                    return Err(determinism(format!(
+                        "frozen report evidence drifted for parity run {} subject {report_id}",
+                        parity_run.run_id
+                    )));
+                }
+            }
+            FrozenFeatureParitySubjectId::ModelVersion { .. } => {
+                return Err(determinism(format!(
+                    "offline model-version proof {} cannot enter serving replay",
+                    parity_run.run_id
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    async fn validate_frozen_selection<'a>(
+        &self,
+        parity_run: &FeatureParityRunInfo,
+        subject: &'a FrozenFeatureParitySubject,
+    ) -> QuantResult<(&'a MarketSelectionId, DateTime<Utc>)> {
+        let selection_id = subject.market_selection_id.as_ref().ok_or_else(|| {
+            determinism(format!(
+                "serving parity run {} has no frozen market selection",
+                parity_run.run_id
+            ))
+        })?;
+        let decision_at = subject.decision_at.ok_or_else(|| {
+            determinism(format!(
+                "serving parity run {} has no frozen decision time",
+                parity_run.run_id
+            ))
+        })?;
+        let selection_hash = subject.selection_hash.as_ref().ok_or_else(|| {
+            determinism(format!(
+                "serving parity run {} has no frozen selection hash",
+                parity_run.run_id
+            ))
+        })?;
+        let selection = self
+            .deps
+            .selections
+            .find_by_id(selection_id)
+            .await?
+            .ok_or_else(|| StorageError::not_found("quant_market_selection", selection_id))?;
+        let mut members = self.deps.selections.list_members(selection_id).await?;
+        members.sort_by(|left, right| left.market_id.cmp(&right.market_id));
+        let market_ids = members
+            .iter()
+            .map(|member| member.market_id.clone())
+            .collect::<Vec<_>>();
+        let expected_selection_hash = parity_selection_hash(
+            &selection.market_selection_id,
+            &selection.selector_hash,
+            &market_ids,
+        )?;
+        if &expected_selection_hash != selection_hash
+            || usize::try_from(selection.market_count).ok() != Some(members.len())
+            || subject.candidates.len() != members.len()
+        {
+            return Err(determinism(format!(
+                "frozen selection evidence drifted for parity run {} subject {:?}",
+                parity_run.run_id, subject.subject_id
+            )));
+        }
+        for (ordinal, (candidate, member)) in subject.candidates.iter().zip(&members).enumerate() {
+            let ordinal = i32::try_from(ordinal)
+                .map_err(|_| determinism("frozen selection exceeds i32 capacity".to_owned()))?;
+            let expected_membership =
+                parity_candidate_membership_hash(selection_hash, &member.market_id, ordinal)?;
+            if candidate.ordinal != ordinal
+                || candidate.market_id != member.market_id
+                || candidate.membership_hash != expected_membership
+            {
+                return Err(determinism(format!(
+                    "frozen candidate membership drifted for parity run {} subject {:?}",
+                    parity_run.run_id, subject.subject_id
+                )));
+            }
+        }
+        Ok((selection_id, decision_at))
+    }
+
     async fn candidate_subjects(
         &self,
         run: &FeatureParityRunInfo,
@@ -1790,8 +2051,8 @@ fn snapshot_and_feature_comparisons(
             transform_hash: None,
             detail: serde_json::json!({
                 "feature_vector_id": vector_id.to_string(),
-                "online_catalog_version_id": online_capture.snapshot.catalog.market_catalog_version_id.to_string(),
-                "replay_catalog_version_id": replay_capture_evidence.snapshot.catalog.market_catalog_version_id.to_string(),
+                "online_catalog_change_id": online_capture.snapshot.catalog.market_change_id.to_string(),
+                "replay_catalog_change_id": replay_capture_evidence.snapshot.catalog.market_change_id.to_string(),
                 "online_book_ref": online_capture.snapshot.book_snapshot_ref.to_string(),
                 "replay_book_ref": replay_capture_evidence.snapshot.book_snapshot_ref.to_string(),
             }),

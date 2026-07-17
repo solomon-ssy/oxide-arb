@@ -5,12 +5,7 @@
 //! settlement deadline has passed are downgraded to [`MarketStatus::Paused`].
 
 use chrono::{DateTime, Utc};
-use quant_pivot_models::{
-    domain::market::{MarketRegistryInfo, UpsertMarket},
-    enums::market::MarketStatus,
-    types::MarketId,
-};
-use std::collections::HashMap;
+use quant_pivot_models::{domain::market::MarketRegistryInfo, enums::market::MarketStatus};
 /// Reason a market was transitioned to [`MarketStatus::Paused`] during sync.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PauseReason {
@@ -49,33 +44,15 @@ pub fn apply_past_deadline_lifecycle(
     Some(PauseReason::PastDeadline)
 }
 
-/// Apply past-deadline lifecycle to registry rows and mirror `status` into upserts.
+/// Apply the local past-deadline lifecycle to normalized registry rows.
 #[must_use]
-pub fn apply_past_deadline_to_sync_batch(
+pub fn apply_past_deadline_to_catalog(
     registry_markets: &mut [MarketRegistryInfo],
-    upsert_markets: &mut [UpsertMarket],
     now: DateTime<Utc>,
 ) -> u64 {
-    let mut paused = 0_u64;
-    for entry in registry_markets.iter_mut() {
-        if apply_past_deadline_lifecycle(entry, now).is_some() {
-            paused += 1;
-        }
-    }
-    if paused == 0 {
-        return 0;
-    }
-
-    let status_by_id: HashMap<&MarketId, MarketStatus> = registry_markets
-        .iter()
-        .map(|entry| (&entry.market_id, entry.status))
-        .collect();
-    for upsert in upsert_markets.iter_mut() {
-        if let Some(status) = status_by_id.get(&upsert.market_id) {
-            upsert.status = *status;
-        }
-    }
-    paused
+    registry_markets.iter_mut().fold(0_u64, |count, entry| {
+        count + u64::from(apply_past_deadline_lifecycle(entry, now).is_some())
+    })
 }
 
 #[cfg(test)]
@@ -84,8 +61,11 @@ mod tests {
     use chrono::Duration;
     use quant_pivot_models::{
         domain::market::TokenInfo,
-        enums::common::{CategorySet, MarketCategory, TickSize},
-        types::{EventId, TokenId},
+        enums::{
+            catalog::CatalogFilterReasonSet,
+            common::{CategorySet, MarketCategory, TickSize},
+        },
+        types::{EventId, MarketId, TokenId},
     };
     use rust_decimal_macros::dec;
     use std::slice;
@@ -101,6 +81,7 @@ mod tests {
             description: None,
             categories: CategorySet::from(MarketCategory::Politics),
             status,
+            filter_reasons: CatalogFilterReasonSet::default(),
             outcome: None,
             neg_risk: false,
             tick_size: TickSize::Hundredth,
@@ -160,17 +141,11 @@ mod tests {
     }
 
     #[test]
-    fn batch_sync_mirrors_status_into_upsert() {
+    fn catalog_batch_applies_status_once() {
         let now = Utc::now();
         let mut registry = sample_market(MarketStatus::Active, Some(now - Duration::hours(2)));
-        let mut upsert = UpsertMarket::try_from(&registry).expect("valid upsert");
-        let paused = apply_past_deadline_to_sync_batch(
-            slice::from_mut(&mut registry),
-            slice::from_mut(&mut upsert),
-            now,
-        );
+        let paused = apply_past_deadline_to_catalog(slice::from_mut(&mut registry), now);
         assert_eq!(paused, 1);
         assert_eq!(registry.status, MarketStatus::Paused);
-        assert_eq!(upsert.status, MarketStatus::Paused);
     }
 }

@@ -74,8 +74,6 @@ impl ConfigValidationError {
 pub enum ConfigWarning {
     #[error("kelly_fraction={0} is aggressive (>0.5); consider reducing")]
     LargeKellyFraction(Decimal),
-    #[error(
-        "web.jwt.secret is empty or a known placeholder; set a strong secret before order-submitting modes"
-    )]
-    WeakJwtSecret,
+    #[error("web.jwt Ed25519 signer/keyring configuration is incomplete")]
+    JwtKeyringUnconfigured,
 }

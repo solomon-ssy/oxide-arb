@@ -10,7 +10,7 @@ use std::str::FromStr;
 
 use chrono::{DateTime, TimeZone, Utc};
 use rust_decimal::Decimal;
-use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromJsonQueryResult, FromQueryResult};
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromJsonQueryResult};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -180,12 +180,8 @@ impl DomainSourceCheckpoint {
     }
 }
 
-crate::jsonb_active!(DomainSourceCheckpoint);
-
 /// Persisted ingest checkpoint for one `(source, instrument)` stream.
-#[derive(
-    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, DerivePartialModel, FromQueryResult,
-)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, DerivePartialModel)]
 #[sea_orm(entity = "crate::entities::quant_domain_source_cursor::Entity")]
 pub struct DomainSourceCursorInfo {
     pub source_id: DomainSourceId,

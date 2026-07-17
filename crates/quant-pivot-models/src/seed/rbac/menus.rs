@@ -3,16 +3,14 @@
 use crate::{
     entities::menu,
     enums::rbac::{MenuKind, Operation, ResourceType, RoleStatus},
-    idens::menu::menu_table_name,
-    schema::seed::{SeedArtifact, SeedDependency, SeedSpec},
     seed::{
-        SeedConflictPolicy, SeedContext,
+        SeedArtifact, SeedConflictPolicy, SeedContext, SeedDependency, SeedSpec,
         rbac::{MENU_GRANTS_ARTIFACT, MENUS_ARTIFACT},
     },
     types::MenuId,
 };
 use sea_orm::{
-    ActiveValue::Set, ConnectionTrait, DbErr, EntityTrait, QueryTrait, sea_query::OnConflict,
+    ActiveValue::Set, ColumnTrait, DbErr, EntityTrait, QueryFilter, sea_query::OnConflict,
 };
 use std::{future::Future, pin::Pin};
 use uuid::Uuid;
@@ -27,15 +25,16 @@ const PRODUCES: &[SeedArtifact] = &[
 
 pub const MENUS_SEED: SeedSpec = SeedSpec {
     id: SEED_ID,
-    // v16 adds the governed training-serving feature-integrity workbench.
+    // v17 fixes identity collisions for same-name nodes under different parents.
     // The loader is idempotent (`on_conflict do_nothing`).
-    version: 16,
-    target_table: menu_table_name,
+    version: 18,
+    target_table: "menu",
     depends_on: DEPENDS_ON,
     produces: PRODUCES,
     conflict_policy: SeedConflictPolicy::GraphOrdered,
-    checksum: "rbac.menus.bootstrap.v16",
-    loader: load_boxed,
+    checksum: "rbac.menus.bootstrap.v18.governed-bootstrap-and-approval",
+    apply: load_boxed,
+    hydrate: hydrate_boxed,
 };
 
 /// Stable namespace for deterministic menu UUIDs (v5 over node `name`).
@@ -48,8 +47,12 @@ fn perm(resource: ResourceType, operation: Operation) -> String {
     format!("{}:{}", resource.as_str(), operation.as_str())
 }
 
-fn stable_menu_id(name: &str) -> MenuId {
-    MenuId::new(Uuid::new_v5(&menu_namespace(), name.as_bytes()))
+fn stable_menu_id(parent: Option<&MenuId>, name: &str) -> MenuId {
+    let identity = parent.map_or_else(
+        || format!("root/{name}"),
+        |parent_id| format!("{parent_id}/{name}"),
+    );
+    MenuId::new(Uuid::new_v5(&menu_namespace(), identity.as_bytes()))
 }
 
 /// Minimal menu projection for role-menu assignment seeds.
@@ -126,7 +129,7 @@ impl MenuTree {
     }
 
     fn push(&mut self, spec: NodeSpec<'_>) -> MenuId {
-        let id = stable_menu_id(spec.name);
+        let id = stable_menu_id(spec.parent, spec.name);
         let sort = self.next_sort;
         self.next_sort += 1;
         let hide_in_menu = spec.hide_in_menu || matches!(spec.kind, MenuKind::Button);
@@ -244,6 +247,12 @@ fn build_command_center(t: &mut MenuTree) {
         "system:switch_mode",
         "Switch Runtime Mode",
         perm(ResourceType::System, Operation::SwitchMode),
+    );
+    t.button(
+        &dashboard,
+        "system:bootstrap_activate",
+        "Activate Bootstrap",
+        perm(ResourceType::System, Operation::BootstrapActivate),
     );
     t.button(
         &dashboard,
@@ -733,6 +742,12 @@ fn build_governance(t: &mut MenuTree) {
     );
     t.button(
         &runtime_config,
+        "runtime_config:approve",
+        "Approve Version",
+        perm(ResourceType::RuntimeConfig, Operation::Approve),
+    );
+    t.button(
+        &runtime_config,
         "runtime_config:activate",
         "Activate Version",
         perm(ResourceType::RuntimeConfig, Operation::Activate),
@@ -879,26 +894,63 @@ fn build_access_control_menus(t: &mut MenuTree, access: &MenuId) {
 }
 
 /// Insert the menu tree and publish all menu IDs to the context.
-pub async fn load(db: &dyn ConnectionTrait, ctx: &mut SeedContext) -> Result<u64, DbErr> {
+pub async fn load(db: &sea_orm::DatabaseTransaction, ctx: &mut SeedContext) -> Result<u64, DbErr> {
     let tree = build_tree();
-    let ids = tree.ids.clone();
 
-    let backend = db.get_database_backend();
-    let stmt = menu::Entity::insert_many(tree.models)
+    let rows_affected = menu::Entity::insert_many(tree.models)
         .on_conflict(OnConflict::column(menu::Column::Id).do_nothing().to_owned())
-        .build(backend);
-    let result = db.execute(stmt).await?;
+        .exec_without_returning(db)
+        .await?;
 
-    ctx.put(MENUS_ARTIFACT, ids);
+    let _ = ctx;
+    Ok(rows_affected)
+}
+
+async fn hydrate(db: &sea_orm::DatabaseTransaction, ctx: &mut SeedContext) -> Result<(), DbErr> {
+    let tree = build_tree();
+    let rows = menu::Entity::find()
+        .filter(menu::Column::Id.is_in(tree.ids.clone()))
+        .all(db)
+        .await?;
+    if rows.len() != tree.ids.len() {
+        return Err(DbErr::Custom(format!(
+            "menu seed expected {} rows; found {}",
+            tree.ids.len(),
+            rows.len()
+        )));
+    }
+    for expected in &tree.grants {
+        let row = rows
+            .iter()
+            .find(|row| row.id == expected.id)
+            .ok_or_else(|| DbErr::Custom(format!("seeded menu {} is missing", expected.id)))?;
+        if row.kind != expected.kind
+            || row.permission_code != expected.permission_code
+            || row.status != RoleStatus::Enabled
+        {
+            return Err(DbErr::Custom(format!(
+                "seeded menu {} differs from seed contract",
+                expected.id
+            )));
+        }
+    }
+    ctx.put(MENUS_ARTIFACT, tree.ids);
     ctx.put(MENU_GRANTS_ARTIFACT, tree.grants);
-    Ok(result.rows_affected())
+    Ok(())
 }
 
 fn load_boxed<'a>(
-    db: &'a dyn ConnectionTrait,
+    db: &'a sea_orm::DatabaseTransaction,
     ctx: &'a mut SeedContext,
 ) -> Pin<Box<dyn Future<Output = Result<u64, DbErr>> + Send + 'a>> {
     Box::pin(load(db, ctx))
+}
+
+fn hydrate_boxed<'a>(
+    db: &'a sea_orm::DatabaseTransaction,
+    ctx: &'a mut SeedContext,
+) -> Pin<Box<dyn Future<Output = Result<(), DbErr>> + Send + 'a>> {
+    Box::pin(hydrate(db, ctx))
 }
 
 #[cfg(test)]
@@ -909,9 +961,19 @@ mod tests {
 
     #[test]
     fn menu_ids_are_stable_for_node_name() {
-        let first = stable_menu_id("markets");
-        let second = stable_menu_id("markets");
+        let first = stable_menu_id(None, "markets");
+        let second = stable_menu_id(None, "markets");
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn same_name_under_different_parents_has_distinct_id() {
+        let left = stable_menu_id(None, "left");
+        let right = stable_menu_id(None, "right");
+        assert_ne!(
+            stable_menu_id(Some(&left), "create"),
+            stable_menu_id(Some(&right), "create")
+        );
     }
 
     #[test]
@@ -1037,7 +1099,10 @@ mod tests {
             .expect("feature-integrity governed action");
         assert_eq!(
             action.parent_id,
-            sea_orm::ActiveValue::Set(Some(stable_menu_id("research-feature-integrity")))
+            sea_orm::ActiveValue::Set(Some(stable_menu_id(
+                Some(&stable_menu_id(None, "research")),
+                "research-feature-integrity",
+            )))
         );
         assert_eq!(
             action.permission_code,
@@ -1061,7 +1126,7 @@ mod tests {
     #[test]
     fn dashboard_is_under_command_center() {
         let tree = build_tree();
-        let command_center = stable_menu_id("command-center");
+        let command_center = stable_menu_id(None, "command-center");
         let dashboard = tree
             .models
             .iter()

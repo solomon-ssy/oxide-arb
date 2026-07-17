@@ -326,6 +326,7 @@ mod tests {
             endpoint: "/events".into(),
             status: 500,
             body: "error".into(),
+            retry_after_ms: None,
         };
         assert!(gamma_5xx.is_retryable());
 
@@ -333,6 +334,7 @@ mod tests {
             endpoint: "/events".into(),
             status: 404,
             body: "not found".into(),
+            retry_after_ms: None,
         };
         assert!(!gamma_4xx.is_retryable());
     }

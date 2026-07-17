@@ -32,7 +32,7 @@ use quant_pivot_repository::{
     clickhouse::ChFactWriter,
     traits::{
         AttributionRepository, BacktestPathSetRepository, BacktestReportRepository,
-        BasisAlertRepository, CalibrationArtifactRepository, CatalogVersionRepository,
+        BasisAlertRepository, CalibrationArtifactRepository, CatalogLedgerRepository,
         ClobMarketInfoRepository, FactWriter, FactorRepository, FeatureParityRepository,
         FeatureRepository, MarketLinkageRepository, MarketRepository, MarketSelectionRepository,
         ModelComparisonReportRepository, ModelGovernanceAuditRepository, ModelRegistryRepository,
@@ -132,7 +132,7 @@ pub struct ResearchBundle {
     /// Historical fact read port (PIT book / microstructure / settlement) (3.5).
     pub quant_fact_read: Arc<dyn QuantFactReadRepository>,
     /// Append-only catalog ledger for every offline PIT metadata read.
-    pub catalog_version_repo: Arc<dyn CatalogVersionRepository>,
+    pub catalog_ledger_repo: Arc<dyn CatalogLedgerRepository>,
     /// Append-only point-in-time CLOB parameters and fee schedules.
     pub clob_market_info_repo: Arc<dyn ClobMarketInfoRepository>,
     /// Market catalog read port for PIT metadata + sampling candidates (3.5).
@@ -309,7 +309,7 @@ impl ResearchBundle {
             model_runtime_factory_builder,
             calibration_loader,
             quant_fact_read: Arc::clone(&deps.infra.quant_fact_read),
-            catalog_version_repo: Arc::clone(&deps.data.catalog_version_repo),
+            catalog_ledger_repo: Arc::clone(&deps.data.catalog_ledger_repo),
             clob_market_info_repo: Arc::clone(&repos.clob_market_info)
                 as Arc<dyn ClobMarketInfoRepository>,
             market_repo: Arc::clone(&deps.data.market_repo),
@@ -332,7 +332,7 @@ impl ResearchBundle {
         TrainingDatasetService::new(
             TrainingDatasetServiceDeps {
                 fact_read: Arc::clone(&self.quant_fact_read),
-                catalog_repo: Arc::clone(&self.catalog_version_repo),
+                catalog_repo: Arc::clone(&self.catalog_ledger_repo),
                 market_repo: Arc::clone(&self.market_repo),
                 artifact_store: Arc::clone(&self.artifact_store),
                 dataset_repo: Arc::clone(&self.training_dataset_repo),
@@ -449,7 +449,7 @@ fn assemble_calibration_artifact_fit(
 ) -> Arc<dyn CalibrationArtifactFitPort> {
     Arc::new(BiasTableFitService::new(
         Arc::clone(&deps.infra.quant_fact_read),
-        Arc::clone(&deps.data.catalog_version_repo),
+        Arc::clone(&deps.data.catalog_ledger_repo),
         Arc::clone(&deps.data.market_repo),
         Arc::clone(market_linkage_repo),
         Arc::clone(&deps.infra.repos.calibration_artifact)

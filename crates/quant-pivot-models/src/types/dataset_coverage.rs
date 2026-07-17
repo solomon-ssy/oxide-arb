@@ -4,7 +4,7 @@ use rust_decimal::Decimal;
 use sea_orm::FromJsonQueryResult;
 use serde::{Deserialize, Serialize};
 
-use crate::{jsonb_active, types::ContentHash, types::SelectionExclusionSummary};
+use crate::{types::ContentHash, types::SelectionExclusionSummary};
 
 /// Decimal scale for coverage ratio helpers (matches research-plane precision).
 const DATASET_COVERAGE_DECIMAL_SCALE: u32 = 12;
@@ -150,5 +150,3 @@ impl DatasetCoverage {
 /// Forward label horizons (seconds) persisted on a training-dataset ledger row.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
 pub struct TrainingHorizonsSecs(pub Vec<u64>);
-
-jsonb_active!(DatasetCoverage, MatrixCoverageProbe, TrainingHorizonsSecs);

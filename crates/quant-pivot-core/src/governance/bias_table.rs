@@ -52,10 +52,12 @@ impl BiasTableApplicator {
     ///
     /// Returns [`ControlError::Precondition`] when the ref is malformed, the
     /// table is absent, or its recomputed content hash does not match.
-    pub async fn reload(&self, config: &FavoriteLongshotConfig) -> Result<(), ControlError> {
+    pub async fn prepare(
+        &self,
+        config: &FavoriteLongshotConfig,
+    ) -> Result<Option<Arc<FavoriteLongshotBiasTable>>, ControlError> {
         let Some(raw) = config.bias_table_ref.as_ref() else {
-            self.snapshot.store(Arc::new(None));
-            return Ok(());
+            return Ok(None);
         };
         let id: CalibrationArtifactId = raw.trim().parse().map_err(|error| {
             ControlError::Precondition(format!(
@@ -78,8 +80,12 @@ impl BiasTableApplicator {
         let table = FavoriteLongshotBiasTable::from_persisted(&info).map_err(|error| {
             ControlError::Precondition(format!("bias-table `{id}` failed to rehydrate: {error}"))
         })?;
-        self.snapshot.store(Arc::new(Some(Arc::new(table))));
-        Ok(())
+        Ok(Some(Arc::new(table)))
+    }
+
+    /// Publish a table resolved by [`Self::prepare`] using one lock-free swap.
+    pub fn publish(&self, table: Option<Arc<FavoriteLongshotBiasTable>>) {
+        self.snapshot.store(Arc::new(table));
     }
 
     /// The bias table under the current snapshot, if one is bound.

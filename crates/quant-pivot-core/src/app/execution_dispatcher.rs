@@ -19,6 +19,7 @@ use quant_pivot_models::{
     enums::{
         execution::{ReconciliationEvidenceKind, ReconciliationResult},
         quant::{EntryConditionState, OrderIntentStatus, QuantRuntimeMode},
+        system::CapabilityId,
     },
     types::{ReconciliationEvidence, ReconciliationEvidenceChain, ReconciliationId},
 };
@@ -29,7 +30,7 @@ use quant_pivot_repository::traits::{
 
 use super::AppContext;
 use crate::{
-    app::{task_id::TaskId, task_registry::AppRunner},
+    app::{capability_gate::wait_for_capability, task_id::TaskId, task_registry::AppRunner},
     governance::{KillSwitchHandle, RuntimeModeHandle},
     infra::periodic_task::PeriodicTask,
 };
@@ -86,6 +87,7 @@ impl AppContext {
             kill_switch: self.kill_switch_handle(),
         };
         let wake = self.execution_wake();
+        let bootstrap = Arc::clone(&self.governance.bootstrap);
         let poll = Duration::from_secs(self.config.quant.workers.execution_dispatch_secs);
         runner.spawn(TaskId::ExecutionDispatcher, move |token| async move {
             // Crash recovery is the dispatcher's first action — it must complete
@@ -123,18 +125,49 @@ impl AppContext {
             }
 
             loop {
-                // Low-latency wake on a fresh `ApprovedByPolicy` approval, or the
-                // poll backstop (catches missed wakes, retried admission defers,
-                // and crash-recovery work). The Postgres row lock — not this
-                // signal — is the authoritative durable queue. Cancellation wins.
-                tokio::select! {
-                    biased;
-                    () = token.cancelled() => break,
-                    () = wake.wait() => {}
-                    () = tokio::time::sleep(poll) => {}
+                if !wait_for_capability(
+                    Arc::clone(&bootstrap),
+                    CapabilityId::OrderSubmissionEligible,
+                    &token,
+                )
+                .await
+                {
+                    return;
                 }
-                if let Err(error) = armed_dispatch_pass(&worker).await {
-                    tracing::warn!(%error, "auto-execution dispatch pass failed");
+
+                let mut capabilities = bootstrap.subscribe_capabilities();
+                loop {
+                    // Low-latency wake on a fresh `ApprovedByPolicy` approval, or the
+                    // poll backstop. Capability revisions revoke submission immediately.
+                    tokio::select! {
+                        biased;
+                        () = token.cancelled() => return,
+                        changed = capabilities.changed() => {
+                            if changed.is_err() {
+                                return;
+                            }
+                            if !capabilities
+                                .borrow()
+                                .get(CapabilityId::OrderSubmissionEligible)
+                                .enabled
+                            {
+                                break;
+                            }
+                            continue;
+                        }
+                        () = wake.wait() => {}
+                        () = tokio::time::sleep(poll) => {}
+                    }
+                    if !bootstrap
+                        .capability_snapshot()
+                        .get(CapabilityId::OrderSubmissionEligible)
+                        .enabled
+                    {
+                        break;
+                    }
+                    if let Err(error) = armed_dispatch_pass(&worker).await {
+                        tracing::warn!(%error, "auto-execution dispatch pass failed");
+                    }
                 }
             }
         });

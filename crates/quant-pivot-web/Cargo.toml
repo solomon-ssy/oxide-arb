@@ -38,10 +38,9 @@ thiserror = { workspace = true }
 async-trait = { workspace = true }
 
 [dev-dependencies]
+quant-pivot-migration = { path = "../quant-pivot-migration" }
 actix-http = { workspace = true }
-actix-rt = { workspace = true }
 actix-test = { workspace = true }
-prometheus = { workspace = true }
 quant-pivot-core = { workspace = true }
 quant-pivot-research = { workspace = true }
 quant-pivot-storage = { workspace = true, features = ["test-util"] }

@@ -14,7 +14,10 @@ use actix_test::{TestServer, start as start_test_server};
 use actix_web::{App, http::StatusCode, middleware::from_fn, test::TestRequest, web};
 use futures_util::{SinkExt, StreamExt};
 use quant_pivot_models::{
-    domain::{CoreEvent, SubscriptionKey, SystemAlertEvent, WsChannel, api::MarketBookView},
+    domain::{
+        CoreEvent, SubscriptionKey, SystemAlertEvent, SystemStatus, SystemStatusView, WsChannel,
+        api::MarketBookView,
+    },
     enums::common::{AlertCategory, AlertLevel, AlertSource},
     types::MarketId,
 };
@@ -39,28 +42,57 @@ fn test_alert(key: &str, message: &str) -> CoreEvent {
     })
 }
 
-const WS_KEY: &str = "dGhlIHNhbXBsZSBub25jZQ==";
+fn control_plane_status(env: &TestEnv, runtime: SystemStatus) -> SystemStatusView {
+    SystemStatusView {
+        runtime,
+        bootstrap: env.state.bootstrap.view(),
+        capabilities: env.state.bootstrap.capability_snapshot(),
+    }
+}
 
-fn ws_upgrade_request(uri: &str) -> TestRequest {
-    ws_upgrade_request_with_api_version(uri, true)
+const WS_KEY: &str = "dGhlIHNhbXBsZSBub25jZQ==";
+const WS_TICKET_PROTOCOL_PREFIX: &str = "qp-ticket.";
+
+fn ws_upgrade_request(ticket: Option<&str>) -> TestRequest {
+    ws_upgrade_request_with_api_version(ticket, true)
 }
 
 /// Browser WebSocket handshakes cannot set `Accept-Api-Version`; regression guard.
-fn ws_upgrade_request_without_api_version(uri: &str) -> TestRequest {
-    ws_upgrade_request_with_api_version(uri, false)
+fn ws_upgrade_request_without_api_version(ticket: Option<&str>) -> TestRequest {
+    ws_upgrade_request_with_api_version(ticket, false)
 }
 
-fn ws_upgrade_request_with_api_version(uri: &str, with_api_version: bool) -> TestRequest {
+fn ws_upgrade_request_with_api_version(
+    ticket: Option<&str>,
+    with_api_version: bool,
+) -> TestRequest {
     let mut req = TestRequest::get()
-        .uri(uri)
+        .uri("/api/ws")
         .insert_header(("Connection", "Upgrade"))
         .insert_header(("Upgrade", "websocket"))
         .insert_header(("Sec-WebSocket-Version", "13"))
-        .insert_header(("Sec-WebSocket-Key", WS_KEY));
+        .insert_header(("Sec-WebSocket-Key", WS_KEY))
+        .insert_header(("Origin", "http://localhost:8080"));
     if with_api_version {
         req = req.insert_header(API_VERSION);
     }
+    if let Some(ticket) = ticket {
+        req = req.insert_header((
+            "Sec-WebSocket-Protocol",
+            format!("{WS_TICKET_PROTOCOL_PREFIX}{ticket}"),
+        ));
+    }
     req
+}
+
+async fn issue_ws_ticket(env: &TestEnv, access_token: &str) -> String {
+    let response = client::post(env, "/api/ws/tickets", access_token, serde_json::json!({})).await;
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(response.json()["data"]["expires_in"], 30);
+    response.json()["data"]["ticket"]
+        .as_str()
+        .expect("websocket ticket")
+        .to_owned()
 }
 
 fn start_ws_server(state: quant_pivot_web::AppState) -> TestServer {
@@ -84,14 +116,23 @@ fn attach_api_version(server: &mut TestServer) {
 
 async fn connect_ws(
     server: &mut TestServer,
-    token: &str,
+    ticket: &str,
 ) -> impl StreamExt<Item = Result<WsFrame, ProtocolError>>
 + SinkExt<WsMessage, Error = ProtocolError>
 + Unpin {
-    server
-        .ws_at(&format!("/api/ws?token={token}"))
-        .await
-        .expect("websocket connect")
+    let origin = server.url("").trim_end_matches('/').to_owned();
+    if let Some(headers) = server.client_headers() {
+        headers.insert(
+            actix_http::header::SEC_WEBSOCKET_PROTOCOL,
+            HeaderValue::from_str(&format!("{WS_TICKET_PROTOCOL_PREFIX}{ticket}"))
+                .expect("valid ticket protocol"),
+        );
+        headers.insert(
+            actix_http::header::ORIGIN,
+            HeaderValue::from_str(&origin).expect("valid test server origin"),
+        );
+    }
+    server.ws_at("/api/ws").await.expect("websocket connect")
 }
 
 async fn recv_text_json(
@@ -142,35 +183,72 @@ async fn recv_until_type(
 
 #[actix_web::test]
 #[ignore = "requires Docker"]
-async fn ws_upgrade_rejects_missing_token() {
+async fn ws_upgrade_rejects_missing_ticket() {
     let env = TestEnv::start().await;
-    let res = harness::call(&env.state, ws_upgrade_request("/api/ws")).await;
+    let res = harness::call(&env.state, ws_upgrade_request(None)).await;
     assert_eq!(res.status, StatusCode::UNAUTHORIZED);
 }
 
 #[actix_web::test]
 #[ignore = "requires Docker"]
-async fn ws_upgrade_rejects_invalid_token() {
-    let env = TestEnv::start().await;
-    let res = harness::call(
-        &env.state,
-        ws_upgrade_request("/api/ws?token=not-a-valid-jwt"),
-    )
-    .await;
-    assert_eq!(res.status, StatusCode::UNAUTHORIZED);
-}
-
-#[actix_web::test]
-#[ignore = "requires Docker"]
-async fn ws_upgrade_succeeds_with_valid_access_token() {
+async fn ws_upgrade_rejects_query_access_token() {
     let env = TestEnv::start().await;
     let token = client::login(&env, "admin", "admin").await;
-    let res = harness::call(
-        &env.state,
-        ws_upgrade_request(&format!("/api/ws?token={token}")),
-    )
-    .await;
-    assert_eq!(res.status, StatusCode::SWITCHING_PROTOCOLS);
+    let request = TestRequest::get()
+        .uri(&format!("/api/ws?token={token}"))
+        .insert_header(("Connection", "Upgrade"))
+        .insert_header(("Upgrade", "websocket"))
+        .insert_header(("Sec-WebSocket-Version", "13"))
+        .insert_header(("Sec-WebSocket-Key", WS_KEY));
+    let res = harness::call(&env.state, request).await;
+    assert_eq!(res.status, StatusCode::UNAUTHORIZED);
+}
+
+#[actix_web::test]
+#[ignore = "requires Docker"]
+async fn ws_upgrade_rejects_unknown_ticket() {
+    let env = TestEnv::start().await;
+    let res = harness::call(&env.state, ws_upgrade_request(Some("unknown"))).await;
+    assert_eq!(res.status, StatusCode::UNAUTHORIZED);
+}
+
+#[actix_web::test]
+#[ignore = "requires Docker"]
+async fn ws_upgrade_consumes_ticket_exactly_once() {
+    let env = TestEnv::start().await;
+    let token = client::login(&env, "admin", "admin").await;
+    let ticket = issue_ws_ticket(&env, &token).await;
+    let res = harness::call(&env.state, ws_upgrade_request(Some(&ticket))).await;
+    assert_eq!(
+        res.status,
+        StatusCode::SWITCHING_PROTOCOLS,
+        "upgrade response: {}",
+        String::from_utf8_lossy(&res.raw_body)
+    );
+    assert_eq!(
+        res.header("sec-websocket-protocol"),
+        Some(format!("{WS_TICKET_PROTOCOL_PREFIX}{ticket}").as_str())
+    );
+
+    let replay = harness::call(&env.state, ws_upgrade_request(Some(&ticket))).await;
+    assert_eq!(replay.status, StatusCode::UNAUTHORIZED);
+}
+
+#[actix_web::test]
+#[ignore = "requires Docker"]
+async fn ws_upgrade_rejects_ticket_from_an_old_authorization_revision() {
+    let env = TestEnv::start().await;
+    let token = client::login(&env, "admin", "admin").await;
+    let ticket = issue_ws_ticket(&env, &token).await;
+
+    env.state
+        .casbin
+        .reload()
+        .await
+        .expect("reload authorization policy");
+
+    let response = harness::call(&env.state, ws_upgrade_request(Some(&ticket))).await;
+    assert_eq!(response.status, StatusCode::UNAUTHORIZED);
 }
 
 #[actix_web::test]
@@ -178,9 +256,10 @@ async fn ws_upgrade_succeeds_with_valid_access_token() {
 async fn ws_upgrade_succeeds_without_api_version_header() {
     let env = TestEnv::start().await;
     let token = client::login(&env, "admin", "admin").await;
+    let ticket = issue_ws_ticket(&env, &token).await;
     let res = harness::call(
         &env.state,
-        ws_upgrade_request_without_api_version(&format!("/api/ws?token={token}")),
+        ws_upgrade_request_without_api_version(Some(&ticket)),
     )
     .await;
     assert_eq!(res.status, StatusCode::SWITCHING_PROTOCOLS);
@@ -191,9 +270,10 @@ async fn ws_upgrade_succeeds_without_api_version_header() {
 async fn ws_ping_command_returns_pong_frame() {
     let env = TestEnv::start().await;
     let token = client::login(&env, "admin", "admin").await;
+    let ticket = issue_ws_ticket(&env, &token).await;
     let mut server = start_ws_server(env.state.clone());
     attach_api_version(&mut server);
-    let mut session = connect_ws(&mut server, &token).await;
+    let mut session = connect_ws(&mut server, &ticket).await;
 
     session
         .send(WsMessage::Text(r#"{"action":"ping"}"#.into()))
@@ -209,9 +289,10 @@ async fn ws_ping_command_returns_pong_frame() {
 async fn ws_sync_command_returns_snapshot_frame() {
     let env = TestEnv::start().await;
     let token = client::login(&env, "admin", "admin").await;
+    let ticket = issue_ws_ticket(&env, &token).await;
     let mut server = start_ws_server(env.state.clone());
     attach_api_version(&mut server);
-    let mut session = connect_ws(&mut server, &token).await;
+    let mut session = connect_ws(&mut server, &ticket).await;
 
     session
         .send(WsMessage::Text(r#"{"action":"sync"}"#.into()))
@@ -227,9 +308,10 @@ async fn ws_sync_command_returns_snapshot_frame() {
 async fn ws_subscribe_receives_fanned_alert_over_framed_connection() {
     let env = TestEnv::start().await;
     let token = client::login(&env, "admin", "admin").await;
+    let ticket = issue_ws_ticket(&env, &token).await;
     let mut server = start_ws_server(env.state.clone());
     attach_api_version(&mut server);
-    let mut session = connect_ws(&mut server, &token).await;
+    let mut session = connect_ws(&mut server, &ticket).await;
 
     // The session pushes an initial `system.status` frame after auth; drain it so
     // the subscribe/alert assertions are not conflated with the welcome message.
@@ -267,6 +349,10 @@ async fn ws_broadcaster_delivers_subscribed_core_event() {
     env.state.ws_sessions.register(SessionHandle {
         outbound,
         subscriptions,
+        subject: "test-user".to_owned(),
+        family_id: "test-family".to_owned(),
+        can_read_system: true,
+        cancellation: tokio_util::sync::CancellationToken::new(),
     });
 
     env.state
@@ -305,6 +391,10 @@ async fn ws_market_scoped_book_update_reaches_only_matching_subscriber() {
             WsChannel::MarketBookUpdate,
             MarketId::new("0xaaa"),
         )]))),
+        subject: "test-user".to_owned(),
+        family_id: "test-family-a".to_owned(),
+        can_read_system: false,
+        cancellation: tokio_util::sync::CancellationToken::new(),
     });
 
     let (other_tx, other_rx) = flume::bounded::<String>(8);
@@ -314,6 +404,10 @@ async fn ws_market_scoped_book_update_reaches_only_matching_subscriber() {
             WsChannel::MarketBookUpdate,
             MarketId::new("0xbbb"),
         )]))),
+        subject: "test-user".to_owned(),
+        family_id: "test-family-b".to_owned(),
+        can_read_system: false,
+        cancellation: tokio_util::sync::CancellationToken::new(),
     });
 
     env.state.events.publish(book_update("0xaaa"));
@@ -343,6 +437,10 @@ async fn ws_market_resolved_reaches_global_subscriber() {
         subscriptions: Arc::new(RwLock::new(HashSet::from([SubscriptionKey::global(
             WsChannel::MarketResolved,
         )]))),
+        subject: "test-user".to_owned(),
+        family_id: "test-family".to_owned(),
+        can_read_system: false,
+        cancellation: tokio_util::sync::CancellationToken::new(),
     });
 
     env.state.events.publish(CoreEvent::MarketResolved {
@@ -365,9 +463,10 @@ async fn ws_market_resolved_reaches_global_subscriber() {
 async fn ws_system_status_broadcast_without_subscribe() {
     let env = TestEnv::start().await;
     let token = client::login(&env, "admin", "admin").await;
+    let ticket = issue_ws_ticket(&env, &token).await;
     let mut server = start_ws_server(env.state.clone());
     attach_api_version(&mut server);
-    let mut session = connect_ws(&mut server, &token).await;
+    let mut session = connect_ws(&mut server, &ticket).await;
 
     // Drain connect-time snapshot.
     let _ = recv_until_type(&mut session, "system.status", Duration::from_millis(500)).await;
@@ -375,7 +474,9 @@ async fn ws_system_status_broadcast_without_subscribe() {
     let status = env.state.control.system_status();
     env.state
         .events
-        .publish(CoreEvent::SystemStatusChanged(status));
+        .publish(CoreEvent::SystemStatusChanged(Box::new(
+            control_plane_status(&env, status),
+        )));
     let pushed = recv_until_type(&mut session, "system.status", Duration::from_secs(2)).await;
     assert_eq!(
         pushed["data"]["operational_phase"]["phase"],
@@ -388,9 +489,10 @@ async fn ws_system_status_broadcast_without_subscribe() {
 async fn ws_subscribe_receives_multiple_system_status_events() {
     let env = TestEnv::start().await;
     let token = client::login(&env, "admin", "admin").await;
+    let ticket = issue_ws_ticket(&env, &token).await;
     let mut server = start_ws_server(env.state.clone());
     attach_api_version(&mut server);
-    let mut session = connect_ws(&mut server, &token).await;
+    let mut session = connect_ws(&mut server, &ticket).await;
 
     session
         .send(WsMessage::Text(
@@ -403,13 +505,17 @@ async fn ws_subscribe_receives_multiple_system_status_events() {
     let status = env.state.control.system_status();
     env.state
         .events
-        .publish(CoreEvent::SystemStatusChanged(status.clone()));
+        .publish(CoreEvent::SystemStatusChanged(Box::new(
+            control_plane_status(&env, status.clone()),
+        )));
     let first = recv_until_type(&mut session, "system.status", Duration::from_secs(2)).await;
     assert!(first["data"]["checked_at"].is_string());
 
     env.state
         .events
-        .publish(CoreEvent::SystemStatusChanged(status));
+        .publish(CoreEvent::SystemStatusChanged(Box::new(
+            control_plane_status(&env, status),
+        )));
     let second = recv_until_type(&mut session, "system.status", Duration::from_secs(2)).await;
     assert!(second["data"]["checked_at"].is_string());
 }
@@ -426,9 +532,10 @@ async fn ws_system_status_lifecycle_phase_push() {
 
     let env = TestEnv::start().await;
     let token = client::login(&env, "admin", "admin").await;
+    let ticket = issue_ws_ticket(&env, &token).await;
     let mut server = start_ws_server(env.state.clone());
     attach_api_version(&mut server);
-    let mut session = connect_ws(&mut server, &token).await;
+    let mut session = connect_ws(&mut server, &ticket).await;
 
     let warming = recv_until_type(&mut session, "system.status", Duration::from_millis(500)).await;
     assert_eq!(
@@ -454,7 +561,9 @@ async fn ws_system_status_lifecycle_phase_push() {
     };
     env.state
         .events
-        .publish(CoreEvent::SystemStatusChanged(status));
+        .publish(CoreEvent::SystemStatusChanged(Box::new(
+            control_plane_status(&env, status),
+        )));
 
     let pushed = recv_until_type(&mut session, "system.status", Duration::from_secs(2)).await;
     assert_eq!(

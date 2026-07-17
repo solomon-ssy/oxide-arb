@@ -44,7 +44,7 @@ use quant_pivot_models::{
         ArtifactUri, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION, ExecutablePriceBasis, MarketId,
         ModelSpecId, ModelVersionId, POLICY_EVIDENCE_OBJECT_FORMAT_VERSION,
         ResearchEvaluationTrack, ResearchJobId, ResearchProfileArtifact, ResearchProfileRef,
-        ResearchReadinessEvidencePayload, RetentionRunwayEvidenceV2, RuntimeConfigVersionId,
+        ResearchReadinessEvidencePayload, RetentionRunwayEvidenceV3, RuntimeConfigVersionId,
         SchemaVersion, ShadowLatencyProfileV1, SourceSliceManifestRef, SourceSliceManifestV2,
         SourceSliceObjectKind, StructuralVolatilityOosFoldRow,
         TRADE_POLICY_ARTIFACT_FORMAT_VERSION, TRADE_POLICY_EVIDENCE_BUNDLE_FORMAT_VERSION, TokenId,
@@ -525,7 +525,7 @@ impl TradePolicyService {
                     Ok(limits) => Some(limits),
                     Err(error) => {
                         messages.push(format!(
-                            "frozen runtime v16 fit contract is unavailable: {error}"
+                            "frozen runtime v17 fit contract is unavailable: {error}"
                         ));
                         None
                     }
@@ -3304,7 +3304,7 @@ struct PreflightBlockerContext<'a> {
     retention_runway_days: Option<u32>,
     required_raw_retention_days: Option<u32>,
     retention_runway_proven: bool,
-    retention_evidence: Option<&'a RetentionRunwayEvidenceV2>,
+    retention_evidence: Option<&'a RetentionRunwayEvidenceV3>,
 }
 
 fn preflight_blockers(
@@ -3328,7 +3328,7 @@ fn append_contract_dataset_blockers(
         TradePolicyPreflightBlockerKind::ContractInvalid,
         serde_json::json!({ "diagnostics": contract.messages }),
         serde_json::json!({ "profile_candidate_and_runtime_contract": "valid" }),
-        "Select a registered immutable profile and a canonical candidate family permitted by Runtime v16.",
+        "Select a registered immutable profile and a canonical candidate family permitted by Runtime v17.",
         None,
     );
     push_blocker(
@@ -3781,7 +3781,13 @@ fn assemble_preflight_view(
         retention_evidence,
     };
     let blockers = preflight_blockers(&blocker_context);
-    let readiness = if !blockers.is_empty() {
+    let insufficient_history = operational
+        .retention_runway_days
+        .zip(operational.required_raw_retention_days)
+        .is_some_and(|(observed, required)| observed < required);
+    let readiness = if !blockers.is_empty() && insufficient_history {
+        TradePolicyFitReadiness::BlockedInsufficientHistory
+    } else if !blockers.is_empty() {
         TradePolicyFitReadiness::Blocked
     } else if reusable_dataset_ready {
         TradePolicyFitReadiness::Reusable

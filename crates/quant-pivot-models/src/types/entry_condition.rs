@@ -13,7 +13,6 @@ use crate::{
     domain::PriceComparator,
     enums::quant::{OutcomeSide, PriceComparison},
     hashing::CanonicalDigest,
-    jsonb_active,
     types::{
         ContentHash, DomainInstrumentKey, DomainSourceId, EntryConditionArtifactId,
         FactorDefinitionId, MarketId, MarketLinkageId, MarketSelectionId, ModelVersionId, Price,
@@ -639,12 +638,6 @@ pub enum EntryConditionValidationError {
     #[error("condition canonical hash failed: {0}")]
     Hash(String),
 }
-
-jsonb_active!(
-    EntryConditionArtifactV1,
-    ConditionTruth,
-    EntryConditionFoldState
-);
 
 #[cfg(test)]
 mod tests {

@@ -6,7 +6,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     enums::quant::DatasetPurpose,
-    jsonb_active,
     types::{
         ContentHash, ModelSpecId, ResearchProfileRef, RuntimeConfigVersionId,
         SourceSliceManifestRef, TradePolicyArtifactId, TrainingDatasetId,
@@ -59,8 +58,6 @@ pub enum TrainingSampleSource {
 /// Ordered sample-source contract frozen on a dataset plan.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
 pub struct TrainingSampleSources(pub Vec<TrainingSampleSource>);
-
-jsonb_active!(DatasetManifest, TrainingSampleSources);
 
 #[must_use]
 pub fn default_sample_sources() -> Vec<TrainingSampleSource> {

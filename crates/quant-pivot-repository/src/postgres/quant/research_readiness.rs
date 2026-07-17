@@ -10,11 +10,14 @@ use quant_pivot_models::{
     types::{ContentHash, ResearchReadinessEvidencePayload},
 };
 use sea_orm::{
-    ColumnTrait, ConnectionTrait, DatabaseBackend, DatabaseConnection, EntityTrait,
-    IntoActiveModel, QueryFilter, QueryOrder, Statement, TryGetable, sea_query::OnConflict,
+    ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder,
+    sea_query::OnConflict,
 };
 
-use crate::traits::{ResearchReadinessEvidenceRepository, ShadowLatencyObservation};
+use crate::{
+    postgres::primitives,
+    traits::{ResearchReadinessEvidenceRepository, ShadowLatencyObservation},
+};
 
 pub struct PgResearchReadinessEvidenceRepository {
     db: DatabaseConnection,
@@ -105,77 +108,31 @@ impl ResearchReadinessEvidenceRepository for PgResearchReadinessEvidenceReposito
                 "shadow latency observation window must be half-open and non-empty",
             ));
         }
-        let row = self
-            .db
-            .query_one(Statement::from_sql_and_values(
-                DatabaseBackend::Postgres,
-                r"
-WITH decision_prepared AS (
-    SELECT
-        COUNT(*)::bigint AS sample_count,
-        percentile_cont(0.95) WITHIN GROUP (
-            ORDER BY EXTRACT(EPOCH FROM (created_at - decision_at)) * 1000
-        )::bigint AS p95_ms
-    FROM quant_recommendation_report
-    WHERE runtime_mode = 'report_only'
-      AND created_at >= $1 AND created_at < $2
-      AND decision_at <= created_at
-), endpoint_rtt AS (
-    SELECT
-        COUNT(*)::bigint AS sample_count,
-        percentile_cont(0.95) WITHIN GROUP (
-            ORDER BY EXTRACT(EPOCH FROM (fetched_at - started_at)) * 1000
-        )::bigint AS p95_ms
-    FROM catalog_sync_batch
-    WHERE status = 'committed'
-      AND fetched_at >= $1 AND fetched_at < $2
-      AND started_at <= fetched_at
-), market_delay AS (
-    SELECT
-        COUNT(*)::bigint AS sample_count,
-        percentile_cont(0.95) WITHIN GROUP (
-            ORDER BY COALESCE(minimum_order_age_secs, 0)::double precision * 1000
-        )::bigint AS p95_ms
-    FROM clob_market_info_version
-    WHERE available_at >= $1 AND available_at < $2
-)
-SELECT
-    decision_prepared.sample_count AS decision_prepared_count,
-    decision_prepared.p95_ms AS decision_prepared_p95_ms,
-    endpoint_rtt.sample_count AS endpoint_rtt_count,
-    endpoint_rtt.p95_ms AS endpoint_rtt_p95_ms,
-    market_delay.sample_count AS market_delay_count,
-    market_delay.p95_ms AS market_delay_p95_ms
-FROM decision_prepared, endpoint_rtt, market_delay
-",
-                [window_start.into(), window_end.into()],
-            ))
-            .await
-            .map_err(StorageError::from)?
-            .ok_or_else(|| {
-                StorageError::invariant_violation(
-                    Some(entity::QUANT_RESEARCH_READINESS_EVIDENCE),
-                    "shadow latency aggregate returned no row",
-                )
-            })?;
+        let row = primitives::shadow_latency_aggregate(&self.db, window_start, window_end).await?;
         Ok(ShadowLatencyObservation {
-            decision_prepared_count: read_count(&row, "decision_prepared_count")?,
-            decision_prepared_p95_ms: read_percentile(&row, "decision_prepared_p95_ms")?,
-            endpoint_rtt_count: read_count(&row, "endpoint_rtt_count")?,
-            endpoint_rtt_p95_ms: read_percentile(&row, "endpoint_rtt_p95_ms")?,
-            market_delay_count: read_count(&row, "market_delay_count")?,
-            market_delay_p95_ms: read_percentile(&row, "market_delay_p95_ms")?,
+            decision_prepared_count: checked_count(
+                "decision_prepared_count",
+                row.decision_prepared_count,
+            )?,
+            decision_prepared_p95_ms: checked_percentile(
+                "decision_prepared_p95_ms",
+                row.decision_prepared_p95_ms,
+            )?,
+            endpoint_rtt_count: checked_count("endpoint_rtt_count", row.endpoint_rtt_count)?,
+            endpoint_rtt_p95_ms: checked_percentile(
+                "endpoint_rtt_p95_ms",
+                row.endpoint_rtt_p95_ms,
+            )?,
+            market_delay_count: checked_count("market_delay_count", row.market_delay_count)?,
+            market_delay_p95_ms: checked_percentile(
+                "market_delay_p95_ms",
+                row.market_delay_p95_ms,
+            )?,
         })
     }
 }
 
-fn read_count(row: &sea_orm::QueryResult, column: &str) -> Result<u64, StorageError> {
-    let value = i64::try_get(row, "", column).map_err(|error| {
-        StorageError::invariant_violation(
-            Some(entity::QUANT_RESEARCH_READINESS_EVIDENCE),
-            format!("shadow latency aggregate has no valid {column}: {error:?}"),
-        )
-    })?;
+fn checked_count(column: &str, value: i64) -> Result<u64, StorageError> {
     u64::try_from(value).map_err(|error| {
         StorageError::invariant_violation(
             Some(entity::QUANT_RESEARCH_READINESS_EVIDENCE),
@@ -184,14 +141,8 @@ fn read_count(row: &sea_orm::QueryResult, column: &str) -> Result<u64, StorageEr
     })
 }
 
-fn read_percentile(row: &sea_orm::QueryResult, column: &str) -> Result<Option<u64>, StorageError> {
-    Option::<i64>::try_get(row, "", column)
-        .map_err(|error| {
-            StorageError::invariant_violation(
-                Some(entity::QUANT_RESEARCH_READINESS_EVIDENCE),
-                format!("shadow latency aggregate has no valid {column}: {error:?}"),
-            )
-        })?
+fn checked_percentile(column: &str, value: Option<i64>) -> Result<Option<u64>, StorageError> {
+    value
         .map(|value| {
             u64::try_from(value).map_err(|error| {
                 StorageError::invariant_violation(
@@ -215,12 +166,13 @@ fn validate_new(evidence: &NewResearchReadinessEvidence) -> Result<(), StorageEr
             "readiness evidence time, artifact, or attestation contract is invalid",
         ));
     }
-    let payload_bytes = serde_json::to_vec(&evidence.payload_json).map_err(|error| {
-        StorageError::invariant_violation(
-            Some(entity::QUANT_RESEARCH_READINESS_EVIDENCE),
-            format!("readiness evidence payload cannot be serialized: {error}"),
-        )
-    })?;
+    let payload_bytes =
+        CanonicalDigest::canonical_json_bytes(&evidence.payload_json).map_err(|error| {
+            StorageError::invariant_violation(
+                Some(entity::QUANT_RESEARCH_READINESS_EVIDENCE),
+                format!("readiness evidence payload cannot be serialized: {error}"),
+            )
+        })?;
     let actual_payload_hash = ContentHash::parse(CanonicalDigest::prefixed_bytes(&payload_bytes))
         .map_err(|error| {
         StorageError::invariant_violation(

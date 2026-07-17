@@ -9,58 +9,42 @@ use chrono::{Duration as ChronoDuration, Utc};
 use quant_pivot_models::{
     domain::{
         DecisionBoundary, DecisionClock, DecisionSource, LinkageOutcome, MarketLinkageDerivation,
-        NewMarketLinkage, UpsertEvent, UpsertMarket,
+        NewMarketLinkage,
     },
-    enums::{
-        common::{CategorySet, MarketCategory, TickSize},
-        domain::ResolverTier,
-        market::{EventStatus, MarketStatus},
-    },
-    types::{ContentHash, EventId, MarketId, Probability, ResolverVersion, TokenId},
+    enums::{common::MarketCategory, domain::ResolverTier},
+    types::{ContentHash, MarketId, Probability, ResolverVersion},
 };
 use quant_pivot_repository::{
     postgres::{PgEventRepository, PgMarketLinkageRepository, PgMarketRepository},
     traits::{EventRepository, MarketLinkageRepository, MarketRepository},
 };
-use quant_pivot_test_support::pg::setup_pg;
+use quant_pivot_test_support::{
+    catalog_fixtures::{make_event, make_market},
+    pg::setup_pg,
+};
 
 async fn seed_market(db: &sea_orm::DatabaseConnection, market_id: &str) {
     let events = PgEventRepository::new(db.clone());
     events
-        .upsert(UpsertEvent {
-            event_id: EventId::new("evt-linkage-pit"),
-            title: "Bitcoin up or down".to_owned(),
-            slug: "btc-updown".to_owned(),
-            series_slug: None,
-            status: EventStatus::Active,
-            tags: vec!["crypto".to_owned()].into(),
-            neg_risk: false,
-            catalog_market_ids: Vec::new().into(),
-            end_date: None,
-            raw_gamma: None,
-        })
+        .upsert(make_event(
+            "evt-linkage-pit",
+            "Bitcoin up or down",
+            "btc-updown",
+            MarketCategory::Crypto,
+        ))
         .await
         .expect("seed event");
 
     let markets = PgMarketRepository::new(db.clone());
     markets
-        .upsert(UpsertMarket {
-            market_id: MarketId::new(market_id),
-            event_id: EventId::new("evt-linkage-pit"),
-            question: "Will BTC be up?".to_owned(),
-            slug: "btc-updown-5m-1".to_owned(),
-            description: None,
-            categories: CategorySet::from(MarketCategory::Crypto),
-            status: MarketStatus::Active,
-            outcome: None,
-            yes_token_id: TokenId::new("111"),
-            no_token_id: TokenId::new("222"),
-            tick_size: TickSize::Hundredth,
-            neg_risk: false,
-            start_date: None,
-            end_date: None,
-            resolved_at: None,
-        })
+        .upsert(make_market(
+            market_id,
+            "evt-linkage-pit",
+            "Will BTC be up?",
+            "btc-updown-5m-1",
+            MarketCategory::Crypto,
+            None,
+        ))
         .await
         .expect("seed market");
 }

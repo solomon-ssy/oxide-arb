@@ -11,6 +11,7 @@ use crate::{
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
+#[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "quant_position")]
 pub struct Model {
@@ -31,46 +32,28 @@ pub struct Model {
     pub opened_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub closed_at: Option<DateTime<Utc>>,
-}
 
-#[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-pub enum Relation {
     #[sea_orm(
-        belongs_to = "super::quant_order_intent::Entity",
-        from = "Column::OrderIntentId",
-        to = "super::quant_order_intent::Column::OrderIntentId"
+        belongs_to,
+        relation_enum = "OrderIntent",
+        from = "order_intent_id",
+        to = "order_intent_id"
     )]
-    OrderIntent,
+    pub order_intent: BelongsTo<super::quant_order_intent::Entity>,
     #[sea_orm(
-        belongs_to = "super::market::Entity",
-        from = "Column::MarketId",
-        to = "super::market::Column::MarketId"
+        belongs_to,
+        relation_enum = "Market",
+        from = "market_id",
+        to = "market_id"
     )]
-    Market,
+    pub market: BelongsTo<super::market::Entity>,
     #[sea_orm(
-        belongs_to = "super::event::Entity",
-        from = "Column::EventId",
-        to = "super::event::Column::EventId"
+        belongs_to,
+        relation_enum = "Event",
+        from = "event_id",
+        to = "event_id"
     )]
-    Event,
-}
-
-impl Related<super::quant_order_intent::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::OrderIntent.def()
-    }
-}
-
-impl Related<super::market::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::Market.def()
-    }
-}
-
-impl Related<super::event::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::Event.def()
-    }
+    pub event: BelongsTo<Option<super::event::Entity>>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

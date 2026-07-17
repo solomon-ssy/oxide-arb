@@ -51,9 +51,10 @@ use quant_pivot_models::{
     types::{
         BacktestPathSetId, Bps, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION, DatasetCoverage,
         DatasetManifest, EventId, FactorDefinitionId, MarketId, ModelInputContract, ModelSpecId,
-        ModelTrainingContract, ModelVersionId, Probability, RuntimeConfigVersionId, SchemaVersion,
-        TokenId, TrainingDatasetId, TrainingExampleId, TrainingHorizonsSecs, TrainingSampleSource,
-        TrainingSampleSources, Usd, default_sample_sources,
+        ModelTrainingContract, ModelVersionId, POOLED_1H_CONTROL_PROFILE_ID, Probability,
+        RuntimeConfigVersionId, SchemaVersion, TokenId, TrainingDatasetId, TrainingExampleId,
+        TrainingHorizonsSecs, TrainingSampleSource, TrainingSampleSources, Usd,
+        builtin_research_profiles, default_sample_sources,
     },
 };
 use quant_pivot_repository::{
@@ -93,6 +94,10 @@ use quant_pivot_research::{
 use quant_pivot_test_support::{
     catalog_fixtures::{make_event, make_market},
     pg::setup_pg,
+    research_fixtures::{
+        ReplayableSourceSliceFixture, bind_fixture_decision_capture,
+        persist_replayable_source_slice,
+    },
 };
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -110,7 +115,8 @@ const TICK_INTERVAL_SECS: i64 = 3600;
 const KNOWLEDGE_LAG_SECS: i64 = 10;
 
 fn content_hash(seed: char) -> ContentHash {
-    ContentHash::parse(format!("blake3:{}", seed.to_string().repeat(64))).expect("hash")
+    CanonicalDigest::content_hash_typed("quant-pivot:test:model-train-backtest", 1, &seed)
+        .expect("canonical fixture hash")
 }
 
 fn settlement() -> LabelName {
@@ -203,7 +209,7 @@ fn examples() -> Vec<TrainingExample> {
                 },
                 input_feature_refs: Vec::new(),
             };
-            out.push(TrainingExample {
+            let mut example = TrainingExample {
                 example_id: TrainingExampleId::from_v7(),
                 market_id: market.clone(),
                 token_id: token.clone(),
@@ -241,7 +247,9 @@ fn examples() -> Vec<TrainingExample> {
                 lot_context: None,
                 position_state: None,
                 book_fidelity: None,
-            });
+            };
+            bind_fixture_decision_capture(&mut example);
+            out.push(example);
         }
     }
     out
@@ -448,12 +456,33 @@ async fn seed_dataset(
         &examples,
     )
     .expect("semantic dataset hash");
+    let profile_ref = builtin_research_profiles()
+        .expect("built-in research profiles")
+        .into_iter()
+        .find(|profile| profile.profile_ref.id == POOLED_1H_CONTROL_PROFILE_ID)
+        .expect("pooled research profile")
+        .profile_ref;
+    let research_program_hash = content_hash('p');
+    let source_slice = persist_replayable_source_slice(
+        store,
+        &examples,
+        ReplayableSourceSliceFixture {
+            profile_ref: profile_ref.clone(),
+            research_program_hash: research_program_hash.clone(),
+            runtime_config_version_id: rc_id.clone(),
+            runtime_config_hash: content_hash('c'),
+            window_start,
+            window_end,
+        },
+    )
+    .await
+    .expect("persist replayable Source Slice");
     let manifest = DatasetManifest {
         format_version: DATASET_ARTIFACT_FORMAT_VERSION,
         training_dataset_id: dataset_id.clone(),
-        profile_ref: quant_pivot_test_support::execution_pg_seed::fixture_profile_ref(),
-        research_program_hash: content_hash('p'),
-        source_slice: quant_pivot_test_support::execution_pg_seed::source_slice_ref('s'),
+        profile_ref,
+        research_program_hash,
+        source_slice,
         model_spec_id: model_spec_id.clone(),
         trade_policy_artifact_id: None,
         trade_policy_hash: None,

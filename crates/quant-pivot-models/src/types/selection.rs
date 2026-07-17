@@ -8,8 +8,6 @@ use std::{
 use sea_orm::FromJsonQueryResult;
 use serde::{Deserialize, Serialize};
 
-use crate::jsonb_active;
-
 /// Aggregate counts of exclusion reasons for a market selection snapshot.
 ///
 /// Shared by the `quant_market_selection.exclusion_summary` JSONB column,
@@ -54,5 +52,3 @@ impl Sum for SelectionExclusionSummary {
         iter.fold(Self::default(), Add::add)
     }
 }
-
-jsonb_active!(SelectionExclusionSummary);

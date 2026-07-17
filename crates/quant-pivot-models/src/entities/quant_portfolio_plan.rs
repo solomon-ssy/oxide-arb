@@ -7,6 +7,7 @@ use crate::types::{
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
+#[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "quant_portfolio_plan")]
 pub struct Model {
@@ -26,34 +27,21 @@ pub struct Model {
     #[sea_orm(column_type = "JsonBinary")]
     pub optimizer_meta_json: PortfolioOptimizerMeta,
     pub created_at: DateTime<Utc>,
-}
 
-#[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-pub enum Relation {
     #[sea_orm(
-        belongs_to = "super::quant_model_run::Entity",
-        from = "Column::ModelRunId",
-        to = "super::quant_model_run::Column::ModelRunId"
+        belongs_to,
+        relation_enum = "ModelRun",
+        from = "model_run_id",
+        to = "model_run_id"
     )]
-    ModelRun,
+    pub model_run: BelongsTo<Option<super::quant_model_run::Entity>>,
     #[sea_orm(
-        belongs_to = "super::quant_market_selection::Entity",
-        from = "Column::MarketSelectionId",
-        to = "super::quant_market_selection::Column::MarketSelectionId"
+        belongs_to,
+        relation_enum = "MarketSelection",
+        from = "market_selection_id",
+        to = "market_selection_id"
     )]
-    MarketSelection,
-}
-
-impl Related<super::quant_model_run::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::ModelRun.def()
-    }
-}
-
-impl Related<super::quant_market_selection::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::MarketSelection.def()
-    }
+    pub market_selection: BelongsTo<super::quant_market_selection::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

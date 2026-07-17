@@ -1,7 +1,7 @@
 //! Durable report-run and schedule-coordinator contracts.
 
 use chrono::{DateTime, Utc};
-use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -21,7 +21,7 @@ use crate::{
 };
 
 /// Full durable projection of one report build attempt.
-#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
+#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
 #[sea_orm(entity = "crate::entities::quant_report_run::Entity")]
 pub struct ReportRunInfo {
     pub report_run_id: ReportRunId,
@@ -120,7 +120,7 @@ impl EnqueueReportRunOutcome {
 }
 
 /// Durable derived state for one configured report schedule.
-#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
+#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
 #[sea_orm(entity = "crate::entities::quant_report_schedule_state::Entity")]
 pub struct ReportScheduleStateInfo {
     pub schedule_id: String,
@@ -145,7 +145,7 @@ info_from_model!(ReportScheduleStateInfo, quant_report_schedule_state::Model, {
 });
 
 /// Append-only aggregate of contiguous missed occurrences.
-#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
+#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
 #[sea_orm(entity = "crate::entities::quant_report_schedule_gap::Entity")]
 pub struct ReportScheduleGapInfo {
     pub gap_id: ReportScheduleGapId,
@@ -174,7 +174,7 @@ pub struct ReportScheduleHealthInfo {
 }
 
 /// One scope's current report authority in the durable health projection.
-#[derive(Debug, Clone, DerivePartialModel, FromQueryResult)]
+#[derive(Debug, Clone, DerivePartialModel)]
 #[sea_orm(entity = "crate::entities::quant_recommendation_report::Entity")]
 pub struct ReportCurrentHealthInfo {
     pub recommendation_report_id: RecommendationReportId,

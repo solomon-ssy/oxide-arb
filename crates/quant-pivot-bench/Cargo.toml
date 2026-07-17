@@ -7,21 +7,13 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
-quant-pivot-api = { workspace = true }
 quant-pivot-core = { workspace = true }
 quant-pivot-models = { workspace = true }
-quant-pivot-repository = { workspace = true }
-quant-pivot-test-support = { workspace = true }
 quant-pivot-research = { workspace = true, features = ["lp-solver"] }
 rust_decimal = { workspace = true }
 rust_decimal_macros = { workspace = true }
 chrono = { workspace = true }
 criterion = { workspace = true }
-num-traits = { workspace = true }
-tokio = { workspace = true }
-tokio-util = { workspace = true }
-flume = { workspace = true }
-polymarket_client_sdk_v2 = { workspace = true }
 
 [[bench]]
 name = "hot_paths"

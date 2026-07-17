@@ -63,7 +63,7 @@ use quant_pivot_models::{
     },
 };
 use quant_pivot_repository::traits::{
-    AttributionRepository, CalibrationArtifactRepository, CatalogVersionRepository,
+    AttributionRepository, CalibrationArtifactRepository, CatalogLedgerRepository,
     ClobMarketInfoRepository, FeatureRepository, MarketLinkageRepository, MarketRepository,
     MarketSelectionRepository, ModelRegistryRepository, PositionRepository,
     QuantFactReadRepository, RecommendationRepository, TradePolicyRepository,
@@ -432,7 +432,7 @@ pub struct TrainingDatasetServiceDeps {
     /// `ClickHouse` fact reader for batch prefetch.
     pub fact_read: Arc<dyn QuantFactReadRepository>,
     /// Append-only catalog ledger for all historical metadata resolution.
-    pub catalog_repo: Arc<dyn CatalogVersionRepository>,
+    pub catalog_repo: Arc<dyn CatalogLedgerRepository>,
     /// Postgres market catalog.
     pub market_repo: Arc<dyn MarketRepository>,
     /// Content-addressed artifact store for Parquet output.
@@ -513,7 +513,7 @@ pub struct TrainingDatasetBuildConfig {
 /// Orchestrates the offline training-dataset build for one frozen config.
 pub struct TrainingDatasetService {
     fact_read: Arc<dyn QuantFactReadRepository>,
-    catalog_repo: Arc<dyn CatalogVersionRepository>,
+    catalog_repo: Arc<dyn CatalogLedgerRepository>,
     market_repo: Arc<dyn MarketRepository>,
     artifact_store: Arc<dyn ArtifactStore>,
     dataset_repo: Arc<dyn TrainingDatasetRepository>,
@@ -596,7 +596,7 @@ impl TrainingDatasetService {
         prefetched: &Prefetched,
     ) -> QuantResult<Vec<PlanMarket>> {
         let mut versions = BTreeMap::<MarketId, Vec<_>>::new();
-        for version in &prefetched.catalog.market_versions {
+        for version in &prefetched.catalog.market_changes {
             versions
                 .entry(version.market_id.clone())
                 .or_default()
@@ -608,12 +608,12 @@ impl TrainingDatasetService {
                 (
                     left.source_effective_at,
                     left.available_at,
-                    &left.market_catalog_version_id,
+                    &left.market_change_id,
                 )
                     .cmp(&(
                         right.source_effective_at,
                         right.available_at,
-                        &right.market_catalog_version_id,
+                        &right.market_change_id,
                     ))
             });
             let Some(latest) = history.last() else {

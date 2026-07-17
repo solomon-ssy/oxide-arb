@@ -48,6 +48,8 @@ impl PipelineEventSource for MockEventSource {
     fn mark_token_applied(&self, _token_id: &TokenId, _at: Instant) {}
 
     fn invalidate_token(&self, _token_id: &TokenId) {}
+
+    fn invalidate_tokens(&self, _token_ids: &[TokenId]) {}
 }
 
 #[cfg(test)]

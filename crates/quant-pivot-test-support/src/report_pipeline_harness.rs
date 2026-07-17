@@ -18,7 +18,7 @@ use crate::{
     trade_tape_fixtures::live_trade_tape_block_cursor_repo,
 };
 use async_trait::async_trait;
-use chrono::{Duration as ChronoDuration, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use quant_pivot_api::data_api::VenuePosition;
 use quant_pivot_core::{
     governance::{
@@ -61,15 +61,17 @@ use quant_pivot_models::{
         BasisAlertInfo, BasisAlertListQuery, ClaimReportSchedule, CoreEventPublisher,
         DecisionBoundary, MarketLinkageInfo, MarketLinkageListQuery, NewAccountSnapshot,
         NewBasisAlert, NewEntryConditionInstance, NewEquitySnapshot, NewFeatureParityState,
-        NewMarketLinkage, NewMarketSelection, NewModelSpec, NewModelVersion, NewOperationLog,
-        NewPortfolioPlan, NewRecommendation, NewRecommendationReport, NewReportDataQualitySnapshot,
-        NewReportTransaction, NewRuntimeConfigActivation, NewRuntimeConfigVersion, Paginated,
-        RecommendationInfo, RecommendationReportInfo, ReportRunClaimConfig,
+        NewMarketLinkage, NewMarketSelection, NewModelRun, NewModelSpec, NewModelVersion,
+        NewOperationLog, NewPortfolioPlan, NewRecommendation, NewRecommendationReport,
+        NewReportDataQualitySnapshot, NewReportTransaction, NewRuntimeConfigActivation,
+        NewRuntimeConfigVersion, Paginated, RecommendationInfo, RecommendationReportInfo,
+        ReportRunClaimConfig,
         governance::lifecycle::OperationalPhase,
         market::{EventRegistryInfo, MarketRegistryInfo, TokenInfo, book::BookLevel},
     },
     entities::quant_feature_parity_state,
     enums::{
+        catalog::CatalogFilterReasonSet,
         common::{CategorySet, MarketCategory, TickSize},
         factor::FactorFamily,
         market::{EventStatus, MarketStatus},
@@ -77,8 +79,8 @@ use quant_pivot_models::{
         operation_log::{OperationCategory, OperationOutcome},
         quant::{
             DownsideSource, EntryConditionState, FeatureParityLatchState,
-            FeatureParityStateTransition, OutcomeSide, PublicationStatus,
-            RecommendationReportStatus, ReportKind,
+            FeatureParityStateTransition, ModelRunKind, ModelRunStatus, OutcomeSide,
+            PublicationStatus, RecommendationReportStatus, ReportKind,
         },
         rbac::ResourceType,
         runtime_config::{RuntimeConfigActivationKind, RuntimeConfigVersionSource},
@@ -93,11 +95,11 @@ use quant_pivot_models::{
         AccountPositions, BasisAlertId, ConditionTruth, ContentHash, DomainInstrumentKey,
         EntryConditionFoldState, EntryConditionInstanceId, EntryConditionPlan, EventId,
         ExposureBreakdown, FeatureParityStateId, MarketId, MarketLinkageId, MarketSelectionId,
-        ModelInputContract, ModelSpecId, ModelTrainingContract, ModelVersionId, OperationLogId,
-        PortfolioConstraintsSnapshot, PortfolioOptimizerMeta, PortfolioRejectedSummary,
-        PortfolioRiskBudget, Price, RecommendationId, RecommendationReportId,
-        RecommendationTradePlan, ReportDataQualityTokens, ResearchProfileRef,
-        RuntimeConfigActivationId, RuntimeConfigVersionId, SchemaVersion,
+        ModelInputContract, ModelRunId, ModelSpecId, ModelTrainingContract, ModelVersionId,
+        OperationLogId, PortfolioConstraintsSnapshot, PortfolioOptimizerMeta,
+        PortfolioRejectedSummary, PortfolioRiskBudget, Price, RecommendationId,
+        RecommendationReportId, RecommendationTradePlan, ReportDataQualityTokens,
+        ResearchProfileRef, RuntimeConfigActivationId, RuntimeConfigVersionId, SchemaVersion,
         SelectionExclusionSummary, Shares, TokenId, Usd,
     },
 };
@@ -113,10 +115,10 @@ use quant_pivot_repository::{
     traits::{
         BasisAlertRepository, CalibrationArtifactRepository, EquitySnapshotRepository,
         EventRepository, FactorRepository, FeatureParityRepository, MarketLinkageRepository,
-        MarketRepository, MarketSelectionRepository, ModelRegistryRepository, PositionRepository,
-        QuantFactReadRepository, RecommendationReportRepository, RecommendationRepository,
-        ReportRunRepository, ReservedCapitalRepository, RuntimeConfigVersionRepository,
-        TradePolicyRepository,
+        MarketRepository, MarketSelectionRepository, ModelRegistryRepository, ModelRunRepository,
+        PositionRepository, QuantFactReadRepository, RecommendationReportRepository,
+        RecommendationRepository, ReportRunRepository, ReservedCapitalRepository,
+        RuntimeConfigVersionRepository, TradePolicyRepository,
     },
 };
 use quant_pivot_research::{
@@ -615,7 +617,7 @@ impl ReportPipelineHarness {
         .await;
 
         let version = runtime_config_repo
-            .load_active_at(Utc::now())
+            .load_current()
             .await
             .expect("active runtime config")
             .expect("active runtime config row");
@@ -673,7 +675,7 @@ pub async fn bootstrap_runtime_config_activation(
     repo.activate_version(NewRuntimeConfigActivation {
         runtime_config_activation_id: RuntimeConfigActivationId::from_v7(),
         runtime_config_version_id: version.runtime_config_version_id,
-        activated_at: Utc::now(),
+        runtime_config_approval_id: None,
         activated_by: "report-pipeline-it".to_owned(),
         reason: "report pipeline integration test bootstrap".to_owned(),
         activation_kind: RuntimeConfigActivationKind::Initial,
@@ -757,6 +759,9 @@ async fn seed_fixture_report(
     report.runtime_config_version_id = ctx.runtime_config_version_id.clone();
     report.model_version_id = ctx.model_version_id.clone();
     report.market_selection_id = market_selection_id.clone();
+    let model_run_id =
+        seed_fixture_model_run(db, ctx, &market_selection_id, report.decision_at).await;
+    report.model_run_id = Some(model_run_id.clone());
     report.profile_id = profile_ref.id.clone();
     report.profile_ref = profile_ref.clone();
 
@@ -783,6 +788,7 @@ async fn seed_fixture_report(
         rec.event_id = EventId::new(FIXTURE_EVENT);
         rec.evidence_refs.runtime_config_version_id = ctx.runtime_config_version_id.clone();
         rec.evidence_refs.model_version_id = ctx.model_version_id.clone();
+        rec.evidence_refs.model_run_id = model_run_id.clone();
         rec.evidence_refs.market_selection_id = market_selection_id.clone();
     }
 
@@ -794,6 +800,49 @@ async fn seed_fixture_report(
         let trigger_key = format!("fixture:{}", txn.report.recommendation_report_id);
         persist_prepared_report(db, txn, &trigger_key, 10).await
     }
+}
+
+async fn seed_fixture_model_run(
+    db: &DatabaseConnection,
+    ctx: &FixtureReportSeedContext,
+    market_selection_id: &MarketSelectionId,
+    decision_at: DateTime<Utc>,
+) -> ModelRunId {
+    let model_run_id = ModelRunId::from_v7();
+    let input_hash = ResearchHasher::canonical(&(
+        "web_report_fixture_model_input_v1",
+        &model_run_id,
+        &ctx.model_version_id,
+        market_selection_id,
+    ))
+    .expect("hash web report fixture model input");
+    let output_hash = ResearchHasher::canonical(&(
+        "web_report_fixture_model_output_v1",
+        &model_run_id,
+        market_selection_id,
+    ))
+    .expect("hash web report fixture model output");
+    PgModelRunRepository::new(db.clone())
+        .create(NewModelRun {
+            model_run_id: model_run_id.clone(),
+            run_kind: ModelRunKind::LiveInference,
+            model_version_id: Some(ctx.model_version_id.clone()),
+            runtime_config_version_id: ctx.runtime_config_version_id.clone(),
+            market_selection_id: Some(market_selection_id.clone()),
+            window_start: decision_at,
+            window_end: decision_at,
+            status: ModelRunStatus::Succeeded,
+            input_hash,
+            output_hash: Some(output_hash),
+            metrics_json: serde_json::json!({"fixture": "web_report"}),
+            error_code: None,
+            error_message: None,
+            started_at: decision_at,
+            finished_at: Some(decision_at),
+        })
+        .await
+        .expect("seed web report fixture model run");
+    model_run_id
 }
 
 async fn seed_fixture_market_catalog(db: &DatabaseConnection) {
@@ -974,7 +1023,7 @@ fn fixture_data_quality_snapshot(
 fn fixture_portfolio_plan(report: &RecommendationReportInfo) -> NewPortfolioPlan {
     NewPortfolioPlan {
         portfolio_plan_id: report.portfolio_plan_id.clone(),
-        model_run_id: None,
+        model_run_id: report.model_run_id.clone(),
         market_selection_id: report.market_selection_id.clone(),
         decision_at: report.decision_at,
         budget_usd: report.capital_base_usd,
@@ -1275,6 +1324,7 @@ fn registry_market(
         description: None,
         categories: CategorySet::from(MarketCategory::Sports),
         status: MarketStatus::Active,
+        filter_reasons: CatalogFilterReasonSet::default(),
         outcome: None,
         neg_risk: false,
         tick_size: TickSize::Hundredth,

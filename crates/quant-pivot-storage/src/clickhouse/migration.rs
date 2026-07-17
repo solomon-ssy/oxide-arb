@@ -4,14 +4,21 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use clickhouse::Row;
 use quant_pivot_error::storage::StorageError;
-use quant_pivot_models::{config::ClickHouseConfig, hashing::CanonicalDigest};
-use serde::Deserialize;
+use quant_pivot_models::{
+    config::ClickHouseConfig,
+    hashing::CanonicalDigest,
+    types::{ResearchSourceStorageKind, research_source_registry},
+};
+use serde::{Deserialize, Serialize};
 use tracing::info;
 
 use crate::clickhouse::{ensure, schema};
 
 const MIGRATION_TABLE: &str = "quant_pivot_schema_migration";
 const MIGRATION_CLAIM_PREFIX: &str = "quant_pivot_schema_migration_claim_";
+const DEPLOYMENT_LOCK_TABLE: &str = "quant_pivot_schema_deployment_lock";
+const SCHEMA_MANIFEST_FORMAT_VERSION: u32 = 1;
+const EXPECTED_SCHEMA_MANIFEST: &str = include_str!("../../../../schema/clickhouse/manifest.json");
 const MIGRATION_TABLE_DDL: &str = "CREATE TABLE IF NOT EXISTS quant_pivot_schema_migration (
     version UInt32,
     name String,
@@ -33,9 +40,11 @@ pub struct ClickHouseSchemaMigrationInfo {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClickHouseMigrationSafety {
     /// Idempotent metadata DDL that is safe to resume and run concurrently.
-    OnlineSafe,
-    /// Data rewrites, backfills, key changes, or destructive lifecycle DDL.
-    OfflineRequired,
+    OnlineMetadata,
+    /// Offline metadata cleanup or additive work that does not destroy facts.
+    OfflineNonDestructive,
+    /// Data rewrites, key changes, or destructive lifecycle DDL.
+    OfflineDestructive,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,6 +59,35 @@ pub struct ClickHouseSchemaPlan {
 pub struct ClickHouseSchemaStatus {
     pub current_version: u32,
     pub required_object_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct ClickHouseSchemaManifest {
+    format_version: u32,
+    objects: Vec<ClickHouseSchemaObjectManifest>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct ClickHouseSchemaObjectManifest {
+    name: String,
+    engine: String,
+    engine_full: String,
+    partition_key: String,
+    sorting_key: String,
+    primary_key: String,
+    sampling_key: String,
+    create_table_query: String,
+    columns: Vec<ClickHouseColumnManifest>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct ClickHouseColumnManifest {
+    position: u64,
+    name: String,
+    column_type: String,
+    default_kind: String,
+    default_expression: String,
+    compression_codec: String,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -89,12 +127,12 @@ impl MigrationSpec {
     }
 }
 
-const fn migrations() -> [MigrationSpec; 2] {
+const fn migrations() -> [MigrationSpec; 4] {
     [
         MigrationSpec {
             version: 1,
             name: "cloud_baseline",
-            safety: ClickHouseMigrationSafety::OnlineSafe,
+            safety: ClickHouseMigrationSafety::OnlineMetadata,
             sources: schema::BASELINE_SOURCES,
             expected_checksum: "blake3:4dcfdaaa484b6d4997d9f60007e1c24d8c5c649e8718e5cf12c757a4555cf682",
             destructive_empty_tables: &[],
@@ -102,7 +140,7 @@ const fn migrations() -> [MigrationSpec; 2] {
         MigrationSpec {
             version: 2,
             name: "report_lifecycle_v2",
-            safety: ClickHouseMigrationSafety::OfflineRequired,
+            safety: ClickHouseMigrationSafety::OfflineDestructive,
             sources: schema::REPORT_LIFECYCLE_V2_SOURCES,
             expected_checksum: "blake3:c831fbb3fb7719dc19138baa4dfa396f2edfe86f4bc17889e9b01e82aa2bbe57",
             destructive_empty_tables: &[
@@ -110,7 +148,47 @@ const fn migrations() -> [MigrationSpec; 2] {
                 "quant_recommendation_attribution_event",
             ],
         },
+        MigrationSpec {
+            version: 3,
+            name: "remove_unmanaged_rollup_ttl",
+            safety: ClickHouseMigrationSafety::OfflineNonDestructive,
+            sources: schema::REMOVE_UNMANAGED_ROLLUP_TTL_SOURCES,
+            expected_checksum: "blake3:c31b51579cfb505ba0da215325277c3bbd132f7a254b1747f32f55b734d40837",
+            destructive_empty_tables: &[],
+        },
+        MigrationSpec {
+            version: 4,
+            name: "schema_version_uint32",
+            safety: ClickHouseMigrationSafety::OfflineNonDestructive,
+            sources: schema::SCHEMA_VERSION_UINT32_SOURCES,
+            expected_checksum: "blake3:21a550a792226c7edbea627b1b3fe3eca269177de7d4cda31c1661dbc1b19a04",
+            destructive_empty_tables: &[],
+        },
     ]
+}
+
+/// Content hash of the complete immutable `ClickHouse` schema migration contract.
+#[must_use]
+pub fn schema_contract_hash() -> String {
+    let mut framed = Vec::new();
+    for migration in migrations() {
+        framed.extend_from_slice(&migration.version.to_le_bytes());
+        framed.extend_from_slice(&(migration.expected_checksum.len() as u64).to_le_bytes());
+        framed.extend_from_slice(migration.expected_checksum.as_bytes());
+    }
+    framed.extend_from_slice(&(EXPECTED_SCHEMA_MANIFEST.len() as u64).to_le_bytes());
+    framed.extend_from_slice(EXPECTED_SCHEMA_MANIFEST.as_bytes());
+    CanonicalDigest::prefixed_bytes(&framed)
+}
+
+/// Inspect the deployed managed objects and render the normalized semantic
+/// manifest committed alongside the immutable migrations.
+pub async fn render_schema_manifest(config: &ClickHouseConfig) -> Result<String, StorageError> {
+    let manifest = inspect_schema_manifest(&client(config)).await?;
+    let mut rendered = serde_json::to_string_pretty(&manifest)
+        .map_err(|error| StorageError::Migration(format!("render ClickHouse manifest: {error}")))?;
+    rendered.push('\n');
+    Ok(rendered)
 }
 
 /// Build a read-only deployment plan. The target database is never created.
@@ -171,13 +249,33 @@ async fn apply_schema_migrations(
     validate_migration_registry()?;
     ensure::ensure_database(config).await?;
     let client = client(config);
-    let names = schema_object_names(&client).await?;
+    let lock_owner = uuid::Uuid::now_v7().to_string();
+    acquire_deployment_lock(&client, &lock_owner).await?;
+    let result = apply_schema_migrations_locked(&client, allow_offline).await;
+    let release = release_deployment_lock(&client, &lock_owner).await;
+    match (result, release) {
+        (Ok(status), Ok(())) => Ok(status),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(error)) => Err(StorageError::Migration(format!(
+            "ClickHouse schema applied but deployment lock release failed: {error}"
+        ))),
+        (Err(apply_error), Err(release_error)) => Err(StorageError::Migration(format!(
+            "ClickHouse schema apply failed: {apply_error}; deployment lock release also failed: {release_error}"
+        ))),
+    }
+}
+
+async fn apply_schema_migrations_locked(
+    client: &clickhouse::Client,
+    allow_offline: bool,
+) -> Result<ClickHouseSchemaStatus, StorageError> {
+    let names = schema_object_names(client).await?;
     if !names.contains(MIGRATION_TABLE) {
         reject_unmanaged_schema(&names)?;
         client.query(MIGRATION_TABLE_DDL).execute().await?;
     }
 
-    let plan = build_plan(&client, true).await?;
+    let plan = build_plan(client, true).await?;
     for migration in &plan.pending_migrations {
         let spec = migrations()
             .into_iter()
@@ -188,16 +286,18 @@ async fn apply_schema_migrations(
                     migration.version
                 ))
             })?;
-        if migration.safety == ClickHouseMigrationSafety::OfflineRequired {
+        if migration.safety != ClickHouseMigrationSafety::OnlineMetadata {
             if !allow_offline {
                 return Err(StorageError::Migration(format!(
                     "ClickHouse migration {} ({}) requires an explicit offline maintenance rollout",
                     migration.version, migration.name
                 )));
             }
-            verify_destructive_empty_tables(&client, spec).await?;
+            if migration.safety == ClickHouseMigrationSafety::OfflineDestructive {
+                verify_destructive_empty_tables(client, spec).await?;
+            }
         }
-        claim_migration(&client, migration).await?;
+        claim_migration(client, migration).await?;
         for statement in spec.statements() {
             client.query(&statement).execute().await?;
         }
@@ -219,7 +319,48 @@ async fn apply_schema_migrations(
         );
     }
 
-    verify_schema_client(&client).await
+    verify_schema_client_during_deployment(client).await
+}
+
+async fn acquire_deployment_lock(
+    client: &clickhouse::Client,
+    owner: &str,
+) -> Result<(), StorageError> {
+    let ddl = format!(
+        "CREATE TABLE {DEPLOYMENT_LOCK_TABLE} (owner String) \
+         ENGINE = TinyLog COMMENT '{owner}'"
+    );
+    client.query(&ddl).execute().await.map_err(|error| {
+        StorageError::Migration(format!(
+            "ClickHouse schema deployment lock is already held or could not be acquired; inspect `{DEPLOYMENT_LOCK_TABLE}` before retrying: {error}"
+        ))
+    })?;
+    Ok(())
+}
+
+async fn release_deployment_lock(
+    client: &clickhouse::Client,
+    owner: &str,
+) -> Result<(), StorageError> {
+    let observed = client
+        .query(
+            "SELECT comment FROM system.tables \
+             WHERE database = currentDatabase() AND name = ?",
+        )
+        .bind(DEPLOYMENT_LOCK_TABLE)
+        .fetch_optional::<String>()
+        .await?;
+    if observed.as_deref() != Some(owner) {
+        return Err(StorageError::Migration(format!(
+            "ClickHouse schema deployment lock ownership changed before release; expected `{owner}`, observed `{}`",
+            observed.as_deref().unwrap_or("missing")
+        )));
+    }
+    client
+        .query(&format!("DROP TABLE {DEPLOYMENT_LOCK_TABLE}"))
+        .execute()
+        .await?;
+    Ok(())
 }
 
 async fn verify_destructive_empty_tables(
@@ -296,10 +437,26 @@ fn validate_migration_registry() -> Result<(), StorageError> {
                 spec.version
             )));
         }
-        if spec.safety == ClickHouseMigrationSafety::OnlineSafe {
+        if spec.safety == ClickHouseMigrationSafety::OnlineMetadata {
             for statement in statements {
                 validate_online_safe_statement(spec, &statement)?;
             }
+        }
+        if spec.safety == ClickHouseMigrationSafety::OfflineDestructive
+            && spec.destructive_empty_tables.is_empty()
+        {
+            return Err(StorageError::Migration(format!(
+                "destructive ClickHouse migration {} must declare every table requiring an emptiness proof",
+                spec.version
+            )));
+        }
+        if spec.safety != ClickHouseMigrationSafety::OfflineDestructive
+            && !spec.destructive_empty_tables.is_empty()
+        {
+            return Err(StorageError::Migration(format!(
+                "non-destructive ClickHouse migration {} cannot declare destructive table proofs",
+                spec.version
+            )));
         }
     }
     Ok(())
@@ -339,7 +496,7 @@ fn validate_online_safe_statement(
     let unsafe_alter = resumable_add_column && forbidden_alter.is_some();
     if !(resumable_create || resumable_add_column) || unsafe_create || unsafe_alter {
         return Err(StorageError::Migration(format!(
-            "ClickHouse migration {} ({}) is classified OnlineSafe but contains non-resumable or potentially destructive DDL: `{}`",
+            "ClickHouse migration {} ({}) is classified OnlineMetadata but contains non-resumable or potentially destructive DDL: `{}`",
             migration.version,
             migration.name,
             normalized.chars().take(160).collect::<String>()
@@ -351,9 +508,27 @@ fn validate_online_safe_statement(
 pub(super) async fn verify_schema_client(
     client: &clickhouse::Client,
 ) -> Result<ClickHouseSchemaStatus, StorageError> {
+    verify_schema_client_with_lock_policy(client, false).await
+}
+
+async fn verify_schema_client_during_deployment(
+    client: &clickhouse::Client,
+) -> Result<ClickHouseSchemaStatus, StorageError> {
+    verify_schema_client_with_lock_policy(client, true).await
+}
+
+async fn verify_schema_client_with_lock_policy(
+    client: &clickhouse::Client,
+    deployment_lock_owned: bool,
+) -> Result<ClickHouseSchemaStatus, StorageError> {
+    if !deployment_lock_owned && table_exists(client, DEPLOYMENT_LOCK_TABLE).await? {
+        return Err(StorageError::Migration(format!(
+            "ClickHouse schema deployment lock `{DEPLOYMENT_LOCK_TABLE}` is present; runtime startup is blocked until the deploy owner completes or an operator proves and clears a stale lock"
+        )));
+    }
     if !table_exists(client, MIGRATION_TABLE).await? {
         return Err(StorageError::Migration(
-            "ClickHouse migration ledger is absent and automatic online migration did not initialize it"
+            "ClickHouse migration ledger is absent; run the deploy-only clickhouse-schema apply command"
                 .to_owned(),
         ));
     }
@@ -530,7 +705,8 @@ async fn applied_migrations(
 async fn verify_structure(client: &clickhouse::Client) -> Result<(), StorageError> {
     let rows = client
         .query(
-            "SELECT name, engine, partition_key, create_table_query \
+            "SELECT name, engine, engine_full, partition_key, sorting_key, \
+             primary_key, sampling_key, create_table_query \
              FROM system.tables WHERE database = currentDatabase()",
         )
         .fetch_all::<TableMetadataRow>()
@@ -568,27 +744,178 @@ async fn verify_structure(client: &clickhouse::Client) -> Result<(), StorageErro
             "ClickHouse object `book_microstructure_1m_mv` is not a MaterializedView".to_owned(),
         ));
     }
-    for spec in schema::RAW_HISTORY_TABLES {
-        let table = by_name.get(spec.table).ok_or_else(|| {
-            StorageError::Migration(format!(
-                "ClickHouse raw-history table `{}` is absent",
-                spec.table
-            ))
+    for name in schema::REQUIRED_SCHEMA_OBJECTS {
+        let object = by_name.get(name).ok_or_else(|| {
+            StorageError::Migration(format!("ClickHouse managed object `{name}` is absent"))
         })?;
-        if table.partition_key != spec.partition_key {
+        if schema::extract_table_ttl(&object.create_table_query).is_some() {
             return Err(StorageError::Migration(format!(
-                "ClickHouse table `{}` partition key is `{}`, expected `{}`",
-                spec.table, table.partition_key, spec.partition_key
-            )));
-        }
-        if schema::extract_table_ttl(&table.create_table_query).is_some() {
-            return Err(StorageError::Migration(format!(
-                "ClickHouse raw-history table `{}` has an unmanaged table TTL",
-                spec.table
+                "ClickHouse managed object `{name}` has an unmanaged table TTL"
             )));
         }
     }
+    for spec in research_source_registry()
+        .map_err(StorageError::Migration)?
+        .bindings
+        .into_iter()
+        .filter(|binding| binding.storage == ResearchSourceStorageKind::ClickHouseTable)
+    {
+        let table = by_name.get(spec.object.as_str()).ok_or_else(|| {
+            StorageError::Migration(format!(
+                "ClickHouse raw-history table `{}` is absent",
+                spec.object
+            ))
+        })?;
+        let expected_partition = spec.partition_key.as_deref().ok_or_else(|| {
+            StorageError::Migration(format!(
+                "ClickHouse source binding `{}` has no partition contract",
+                spec.object
+            ))
+        })?;
+        if table.partition_key != expected_partition {
+            return Err(StorageError::Migration(format!(
+                "ClickHouse table `{}` partition key is `{}`, expected `{}`",
+                spec.object, table.partition_key, expected_partition
+            )));
+        }
+    }
+    verify_schema_manifest(client).await?;
     Ok(())
+}
+
+async fn verify_schema_manifest(client: &clickhouse::Client) -> Result<(), StorageError> {
+    let expected: ClickHouseSchemaManifest = serde_json::from_str(EXPECTED_SCHEMA_MANIFEST)
+        .map_err(|error| {
+            StorageError::Migration(format!(
+                "committed ClickHouse schema manifest is invalid: {error}"
+            ))
+        })?;
+    if expected.format_version != SCHEMA_MANIFEST_FORMAT_VERSION {
+        return Err(StorageError::Migration(format!(
+            "ClickHouse schema manifest format {} is unsupported; expected {SCHEMA_MANIFEST_FORMAT_VERSION}",
+            expected.format_version
+        )));
+    }
+    let observed = inspect_schema_manifest(client).await?;
+    if expected == observed {
+        return Ok(());
+    }
+    let expected_hash = CanonicalDigest::blake3_json(&expected)
+        .map_err(|error| StorageError::Migration(error.to_string()))?;
+    let observed_hash = CanonicalDigest::blake3_json(&observed)
+        .map_err(|error| StorageError::Migration(error.to_string()))?;
+    let object = expected
+        .objects
+        .iter()
+        .zip(&observed.objects)
+        .find(|(left, right)| left != right)
+        .map_or_else(
+            || "managed object inventory".to_owned(),
+            |(left, right)| format!("`{}` / `{}`", left.name, right.name),
+        );
+    Err(StorageError::Migration(format!(
+        "ClickHouse semantic schema drift detected at {object}; expected manifest {expected_hash}, observed {observed_hash}; regenerate only from an intentionally migrated clean database"
+    )))
+}
+
+async fn inspect_schema_manifest(
+    client: &clickhouse::Client,
+) -> Result<ClickHouseSchemaManifest, StorageError> {
+    let database = client
+        .query("SELECT currentDatabase()")
+        .fetch_one::<String>()
+        .await?;
+    let required = schema::REQUIRED_SCHEMA_OBJECTS
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let mut columns_by_table = BTreeMap::<String, Vec<ClickHouseColumnManifest>>::new();
+    for column in client
+        .query(
+            "SELECT table, position, name, type AS column_type, default_kind, \
+             default_expression, compression_codec \
+             FROM system.columns WHERE database = currentDatabase() \
+             ORDER BY table, position",
+        )
+        .fetch_all::<ColumnMetadataRow>()
+        .await?
+    {
+        if required.contains(column.table.as_str()) {
+            columns_by_table
+                .entry(column.table)
+                .or_default()
+                .push(ClickHouseColumnManifest {
+                    position: column.position,
+                    name: column.name,
+                    column_type: column.column_type,
+                    default_kind: column.default_kind,
+                    default_expression: column.default_expression,
+                    compression_codec: column.compression_codec,
+                });
+        }
+    }
+
+    let rows = client
+        .query(
+            "SELECT name, engine, engine_full, partition_key, sorting_key, \
+             primary_key, sampling_key, create_table_query \
+             FROM system.tables WHERE database = currentDatabase() ORDER BY name",
+        )
+        .fetch_all::<TableMetadataRow>()
+        .await?;
+    let mut objects = Vec::with_capacity(schema::REQUIRED_SCHEMA_OBJECTS.len());
+    for row in rows {
+        if !required.contains(row.name.as_str()) {
+            continue;
+        }
+        let columns = columns_by_table.remove(&row.name).ok_or_else(|| {
+            StorageError::Migration(format!(
+                "ClickHouse managed object `{}` has no system.columns contract",
+                row.name
+            ))
+        })?;
+        objects.push(ClickHouseSchemaObjectManifest {
+            name: row.name,
+            engine: row.engine,
+            engine_full: row.engine_full,
+            partition_key: row.partition_key,
+            sorting_key: row.sorting_key,
+            primary_key: row.primary_key,
+            sampling_key: row.sampling_key,
+            create_table_query: normalize_create_table_query(&database, &row.create_table_query),
+            columns,
+        });
+    }
+    if objects.len() != schema::REQUIRED_SCHEMA_OBJECTS.len() {
+        return Err(StorageError::Migration(format!(
+            "ClickHouse semantic manifest observed {} managed objects, expected {}",
+            objects.len(),
+            schema::REQUIRED_SCHEMA_OBJECTS.len()
+        )));
+    }
+    Ok(ClickHouseSchemaManifest {
+        format_version: SCHEMA_MANIFEST_FORMAT_VERSION,
+        objects,
+    })
+}
+
+fn normalize_create_table_query(database: &str, query: &str) -> String {
+    let mut normalized = query
+        .replace(&format!("`{database}`."), "")
+        .replace(&format!("{database}."), "");
+    while let Some(start) = normalized.find(" UUID '") {
+        let value_start = start + " UUID '".len();
+        let Some(value_end) = normalized[value_start..].find('\'') else {
+            break;
+        };
+        normalized.replace_range(start..=(value_start + value_end), "");
+    }
+    normalized
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn reject_unmanaged_schema(names: &BTreeSet<String>) -> Result<(), StorageError> {
@@ -650,8 +977,23 @@ struct AppliedMigrationRow {
 struct TableMetadataRow {
     name: String,
     engine: String,
+    engine_full: String,
     partition_key: String,
+    sorting_key: String,
+    primary_key: String,
+    sampling_key: String,
     create_table_query: String,
+}
+
+#[derive(Debug, Row, Deserialize)]
+struct ColumnMetadataRow {
+    table: String,
+    position: u64,
+    name: String,
+    column_type: String,
+    default_kind: String,
+    default_expression: String,
+    compression_codec: String,
 }
 
 #[derive(Debug, Row, Deserialize)]
@@ -680,7 +1022,7 @@ mod tests {
         let migration = MigrationSpec {
             version: 2,
             name: "add_source",
-            safety: ClickHouseMigrationSafety::OnlineSafe,
+            safety: ClickHouseMigrationSafety::OnlineMetadata,
             sources: SAFE_ADD_COLUMN,
             expected_checksum: "test-only",
             destructive_empty_tables: &[],
@@ -694,7 +1036,7 @@ mod tests {
         let migration = MigrationSpec {
             version: 2,
             name: "ttl_delete",
-            safety: ClickHouseMigrationSafety::OnlineSafe,
+            safety: ClickHouseMigrationSafety::OnlineMetadata,
             sources: UNSAFE_TTL,
             expected_checksum: "test-only",
             destructive_empty_tables: &[],

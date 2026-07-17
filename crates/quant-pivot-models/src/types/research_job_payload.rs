@@ -3,7 +3,7 @@
 use sea_orm::FromJsonQueryResult;
 use serde::{Deserialize, Serialize};
 
-use crate::{enums::quant::ResearchJobErrorCode, jsonb_active};
+use crate::enums::quant::ResearchJobErrorCode;
 
 /// Live progress snapshot persisted to `progress_json` and pushed over WS.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
@@ -71,5 +71,3 @@ impl ResearchJobError {
         }
     }
 }
-
-jsonb_active!(ResearchJobProgress, ResearchJobError);

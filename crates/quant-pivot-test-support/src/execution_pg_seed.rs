@@ -18,7 +18,7 @@ use quant_pivot_models::{
         NewRecommendationReport, NewReconciliation, NewReportDataQualitySnapshot,
         NewReportTransaction, NewRuntimeConfigVersion, NewTradePolicyArtifact,
         NewTradePolicyGovernanceAudit, PositionExit, PositionFill, SubmissionLedgerWrite,
-        TimeWindow,
+        TimeWindow, UpsertKillSwitchState,
     },
     entities::{
         quant_feature_parity_state, quant_model_run, quant_model_spec, quant_model_version,
@@ -26,8 +26,9 @@ use quant_pivot_models::{
     enums::{
         common::{MarketCategory, OrderType, Side, TickSize::Hundredth},
         execution::{
-            CapitalAllocationState, ExecutionOrderPhase, ExitReason, ExitState, OrderIntentKind,
-            OrderTypeKind, ReconciliationEvidenceKind, ReconciliationResult, VenueOrderStatus,
+            CapitalAllocationState, ExecutionOrderPhase, ExitReason, ExitState, KillSwitchState,
+            OrderIntentKind, OrderTypeKind, ReconciliationEvidenceKind, ReconciliationResult,
+            VenueOrderStatus,
         },
         factor::{FactorFamily, FactorValueState, NormalizationSource},
         market::MarketStatus,
@@ -45,6 +46,7 @@ use quant_pivot_models::{
         rbac::ResourceType,
         runtime_config::RuntimeConfigVersionSource,
     },
+    hashing::CanonicalDigest,
     runtime_config::FactorCrossSectionConfig,
     types::{
         AccountPositions, AccountSnapshotId, ArtifactUri, BookSnapshotRef, Bps,
@@ -81,14 +83,15 @@ use quant_pivot_models::{
 use quant_pivot_repository::{
     postgres::{
         PgCalibrationArtifactRepository, PgEntryConditionRepository, PgEventRepository,
-        PgExecutionSubmissionRepository, PgFeatureParityRepository, PgMarketRepository,
-        PgMarketSelectionRepository, PgModelRegistryRepository, PgModelRunRepository,
-        PgOrderIntentRepository, PgRuntimeConfigVersionRepository, PgTradePolicyRepository,
+        PgExecutionSubmissionRepository, PgFeatureParityRepository, PgKillSwitchStateRepository,
+        PgMarketRepository, PgMarketSelectionRepository, PgModelRegistryRepository,
+        PgModelRunRepository, PgOrderIntentRepository, PgRuntimeConfigVersionRepository,
+        PgTradePolicyRepository,
     },
     traits::{
         CalibrationArtifactRepository, EntryConditionRepository, EventRepository,
-        ExecutionSubmissionRepository, FeatureParityRepository, MarketRepository,
-        MarketSelectionRepository, ModelRegistryRepository, ModelRunRepository,
+        ExecutionSubmissionRepository, FeatureParityRepository, KillSwitchStateRepository,
+        MarketRepository, MarketSelectionRepository, ModelRegistryRepository, ModelRunRepository,
         OrderIntentRepository, RuntimeConfigVersionRepository, TradePolicyRepository,
     },
 };
@@ -119,6 +122,23 @@ use crate::{
 /// shares (100) * `limit_price` (0.6).
 /// Weather `SemiAuto` fixtures use the profile's only governed total cash-budget tier.
 pub const EXECUTION_NOTIONAL: Decimal = dec!(25);
+
+/// Explicitly close the fail-closed bootstrap kill switch for integration tests
+/// that exercise risk-increasing entry paths.
+pub async fn enable_entry_admission_for_test(db: &DatabaseConnection, actor: &str) {
+    let state = PgKillSwitchStateRepository::new(db.clone())
+        .upsert(UpsertKillSwitchState {
+            id: 1,
+            state: KillSwitchState::Closed,
+            changed_by: actor.to_owned(),
+            reason: "explicitly enable risk-increasing integration test".to_owned(),
+            requires_operator_ack: false,
+            changed_at: Utc::now(),
+        })
+        .await
+        .expect("explicitly close kill switch for risk-increasing test");
+    assert_eq!(state.state, KillSwitchState::Closed);
+}
 
 /// Claim the fixture's current condition and intent through the same atomic
 /// transaction used by the production dispatcher.
@@ -168,6 +188,7 @@ pub async fn entry_claim_for_test(
 
 /// Stable ids produced by [`seed_report_fixture`] / [`seed_report_on_infra`].
 pub struct ExecutionTxnIds {
+    pub decision_at: DateTime<Utc>,
     pub feature_parity_state_id: FeatureParityStateId,
     pub account_snapshot: AccountSnapshotId,
     pub data_quality_snapshot: ReportDataQualitySnapshotId,
@@ -229,7 +250,7 @@ impl ReportBuildOptions {
             )],
             entry_condition_artifacts: Vec::new(),
             summary: report_summary(),
-            as_of: Utc::now(),
+            as_of: ids.decision_at,
             runtime_mode: QuantRuntimeMode::AutoExecution,
         }
     }
@@ -474,8 +495,10 @@ async fn prepare_report_seed(
     .await;
     let market_selection_id =
         seed_market_selection(db, &infra.runtime_config_version_id, &config.market_id).await;
-    let model_run_id = seed_report_model_run(db, infra, &market_selection_id).await;
+    let decision_at = Utc::now();
+    let model_run_id = seed_report_model_run(db, infra, &market_selection_id, decision_at).await;
     ExecutionTxnIds {
+        decision_at,
         feature_parity_state_id: infra.feature_parity_state_id.clone(),
         account_snapshot: AccountSnapshotId::from_v7(),
         data_quality_snapshot: ReportDataQualitySnapshotId::from_v7(),
@@ -503,9 +526,9 @@ pub async fn seed_report_model_run(
     db: &DatabaseConnection,
     infra: &SharedDemoInfra,
     market_selection_id: &MarketSelectionId,
+    decision_at: DateTime<Utc>,
 ) -> ModelRunId {
     let model_run_id = ModelRunId::from_v7();
-    let started_at = Utc::now();
     let input_hash = ResearchHasher::canonical(&(
         "execution_report_fixture_model_input_v1",
         &model_run_id,
@@ -526,16 +549,16 @@ pub async fn seed_report_model_run(
             model_version_id: Some(infra.model_version_id.clone()),
             runtime_config_version_id: infra.runtime_config_version_id.clone(),
             market_selection_id: Some(market_selection_id.clone()),
-            window_start: started_at,
-            window_end: started_at,
+            window_start: decision_at,
+            window_end: decision_at,
             status: ModelRunStatus::Succeeded,
             input_hash,
             output_hash: Some(output_hash),
             metrics_json: serde_json::json!({"fixture": "execution_report"}),
             error_code: None,
             error_message: None,
-            started_at,
-            finished_at: Some(started_at),
+            started_at: decision_at,
+            finished_at: Some(decision_at),
         })
         .await
         .expect("report fixture model run");
@@ -1888,7 +1911,7 @@ fn fixture_report(
 }
 
 pub fn content_hash(seed: char) -> ContentHash {
-    ContentHash::parse(format!("blake3:{}", seed.to_string().repeat(64))).expect("hash")
+    CanonicalDigest::content_hash_json(&seed).expect("canonical fixture content hash")
 }
 
 pub fn source_slice_ref(seed: char) -> SourceSliceManifestRef {

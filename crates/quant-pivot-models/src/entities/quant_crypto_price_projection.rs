@@ -5,6 +5,7 @@ use sea_orm::entity::prelude::*;
 
 use crate::types::{ContentHash, DomainInstrumentKey, DomainSourceId, Usd};
 
+#[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "quant_crypto_price_projection")]
 pub struct Model {
@@ -14,7 +15,8 @@ pub struct Model {
     pub instrument_key: DomainInstrumentKey,
     pub previous_price: Option<Usd>,
     pub current_price: Usd,
-    pub source_sequence: u64,
+    /// `PostgreSQL` `BIGINT` storage representation; converted to domain `u64` at the repository boundary.
+    pub source_sequence: i64,
     pub event_time: DateTime<Utc>,
     pub available_at: DateTime<Utc>,
     pub report_hash: ContentHash,
@@ -22,8 +24,5 @@ pub struct Model {
     pub source_healthy: bool,
     pub updated_at: DateTime<Utc>,
 }
-
-#[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-pub enum Relation {}
 
 impl ActiveModelBehavior for ActiveModel {}

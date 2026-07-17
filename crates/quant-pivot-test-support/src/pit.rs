@@ -21,10 +21,11 @@ use quant_pivot_models::{
             registry::{EventRegistryInfo, MarketRegistryInfo, NegRiskLegSet},
         },
     },
+    enums::catalog::CatalogTimestampQuality,
     hashing::CanonicalDigest,
     types::{
-        Bps, CatalogSyncBatchId, ClobMarketInfoVersionId, EventCatalogVersionId, EventId,
-        MarketCatalogVersionId, MarketId, TokenId,
+        Bps, CatalogEventChangeId, CatalogMarketChangeId, CatalogSyncBatchId,
+        ClobMarketInfoVersionId, EventId, MarketId, TokenId,
     },
 };
 use quant_pivot_research::pit::{
@@ -210,13 +211,13 @@ impl PointInTimeSnapshotSource for InMemoryDecisionSnapshotSource {
                 .cloned()
                 .unwrap_or_else(NegRiskLegSet::empty),
             catalog_sync_batch_id: CatalogSyncBatchId::from_v7(),
-            market_catalog_version_id: MarketCatalogVersionId::from_v7(),
-            event_catalog_version_id: EventCatalogVersionId::from_v7(),
+            market_change_id: CatalogMarketChangeId::from_v7(),
+            event_change_id: CatalogEventChangeId::from_v7(),
             market_content_hash: CanonicalDigest::content_hash_json(market.as_ref())?,
             event_content_hash: CanonicalDigest::content_hash_json(event.as_ref())?,
             membership_hash: CanonicalDigest::content_hash_json(&event.market_ids)?,
-            market_timestamp_quality: "source".to_owned(),
-            event_timestamp_quality: "source".to_owned(),
+            market_timestamp_quality: CatalogTimestampQuality::Source,
+            event_timestamp_quality: CatalogTimestampQuality::Source,
             market_effective_at: market.updated_at,
             market_available_at: market.updated_at,
             event_effective_at: event.updated_at,

@@ -20,15 +20,17 @@ pub struct PostgresConfig {
     pub host: String,
     /// Server port. Default: `5432`.
     pub port: u16,
-    /// Role name. Default: `oxide`.
+    /// Role name. Default: `quant_pivot_runtime`.
     pub user: String,
     /// Role password. Set via `QUANT_PIVOT__DB__POSTGRES__PASSWORD` in
     /// production — never in the TOML. Default: empty.
     pub password: String,
-    /// Database name. Default: `oxide_arb`.
+    /// Database name. Default: `quant_pivot`.
     pub database: String,
     /// Schema search path. Default: `public`.
     pub schema: String,
+    /// Immutable schema migration policy and optional elevated identity.
+    pub migration: SchemaMigrationConfig,
     /// Pool upper bound. Size for worst-case concurrent repository access.
     /// Default: `10`.
     pub max_connections: u32,
@@ -110,6 +112,18 @@ impl PostgresConfig {
         }
         pairs
     }
+
+    /// Build the connection used by deploy-time `PostgreSQL` migrations.
+    #[must_use]
+    pub fn migration_connection(&self, migration_password: &str) -> Self {
+        let mut config = self.clone();
+        config.user.clone_from(&self.migration.user);
+        migration_password.clone_into(&mut config.password);
+        config.max_connections = 2;
+        config.min_connections = 1;
+        "quant-pivot-migration".clone_into(&mut config.application_name);
+        config
+    }
 }
 
 impl Default for PostgresConfig {
@@ -121,6 +135,7 @@ impl Default for PostgresConfig {
             password: String::new(),
             database: default_database(),
             schema: default_schema(),
+            migration: SchemaMigrationConfig::default(),
             max_connections: default_max_conns(),
             min_connections: default_min_conns(),
             connect_timeout_secs: default_connect_timeout(),
@@ -138,6 +153,27 @@ impl Default for PostgresConfig {
     }
 }
 
+/// Non-secret deploy-only schema identity shared by `PostgreSQL` and
+/// `ClickHouse` configuration.
+///
+/// Its credential is intentionally absent from [`DeployConfig`](super::DeployConfig)
+/// and is loaded only by `quant-pivot-xtask` from the deployment secret
+/// environment. The runtime process therefore cannot inherit DDL credentials.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SchemaMigrationConfig {
+    /// Independently provisioned DDL role.
+    pub user: String,
+}
+
+impl Default for SchemaMigrationConfig {
+    fn default() -> Self {
+        Self {
+            user: "quant_pivot_migrator".to_owned(),
+        }
+    }
+}
+
 fn default_host() -> String {
     "localhost".into()
 }
@@ -145,10 +181,10 @@ const fn default_port() -> u16 {
     5432
 }
 fn default_user() -> String {
-    "oxide".into()
+    "quant_pivot_runtime".into()
 }
 fn default_database() -> String {
-    "oxide_arb".into()
+    "quant_pivot".into()
 }
 fn default_schema() -> String {
     "public".into()
@@ -197,9 +233,13 @@ fn default_application_name() -> String {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ClickHouseConfig {
+    /// Stable deployment identity included in signed research evidence.
+    pub deployment_id: String,
+    /// `ClickHouse` Cloud cluster/service identity, or an explicit local identity.
+    pub cluster_id: String,
     /// HTTP endpoint. Default: `http://localhost:8123`.
     pub url: String,
-    /// Database name. Default: `oxide_arb`.
+    /// Database name. Default: `quant_pivot`.
     pub database: String,
     /// User name. Default: `default`.
     pub user: String,
@@ -207,7 +247,7 @@ pub struct ClickHouseConfig {
     /// never in the TOML. Default: empty.
     pub password: String,
     /// Versioned schema migration policy and optional elevated identity.
-    pub migration: ClickHouseMigrationConfig,
+    pub migration: SchemaMigrationConfig,
     /// Max age (seconds) of a partial batch before it is flushed. Lower =
     /// fresher analytics, more insert requests. Default: `5`.
     pub flush_interval_secs: u64,
@@ -223,11 +263,13 @@ pub struct ClickHouseConfig {
 impl Default for ClickHouseConfig {
     fn default() -> Self {
         Self {
+            deployment_id: "local-development".to_owned(),
+            cluster_id: "local-clickhouse".to_owned(),
             url: default_ch_url(),
             database: default_ch_database(),
             user: default_ch_user(),
             password: String::new(),
-            migration: ClickHouseMigrationConfig::default(),
+            migration: SchemaMigrationConfig::default(),
             flush_interval_secs: default_ch_flush_interval(),
             batch_size: default_ch_batch_size(),
             max_concurrent_inserts: default_ch_max_concurrent_inserts(),
@@ -236,48 +278,17 @@ impl Default for ClickHouseConfig {
 }
 
 impl ClickHouseConfig {
-    /// Build the connection used by the startup schema migrator.
+    /// Build the connection used by the deploy-only schema migrator.
     ///
     /// Local development reuses the runtime identity by default. Production
     /// can provide an independently scoped DDL identity without granting the
     /// long-lived ingestion connection `CREATE`, `ALTER`, or `DROP`.
     #[must_use]
-    pub fn migration_connection(&self) -> Self {
+    pub fn migration_connection(&self, migration_password: &str) -> Self {
         let mut config = self.clone();
-        if let Some(user) = &self.migration.user {
-            config.user.clone_from(user);
-        }
-        if let Some(password) = &self.migration.password {
-            config.password.clone_from(password);
-        }
+        config.user.clone_from(&self.migration.user);
+        migration_password.clone_into(&mut config.password);
         config
-    }
-}
-
-/// Startup schema migration policy for `ClickHouse`.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct ClickHouseMigrationConfig {
-    /// Automatically apply pending online-safe migrations before runtime
-    /// connections are initialized. Default: `true`.
-    pub auto_apply_online: bool,
-    /// Reject startup unless a separate DDL identity is configured. Enable in
-    /// production; local single-node development defaults to `false`.
-    pub require_dedicated_identity: bool,
-    /// Optional DDL identity. Must be configured together with `password`.
-    pub user: Option<String>,
-    /// Optional DDL credential. Must be configured together with `user`.
-    pub password: Option<String>,
-}
-
-impl Default for ClickHouseMigrationConfig {
-    fn default() -> Self {
-        Self {
-            auto_apply_online: true,
-            require_dedicated_identity: false,
-            user: None,
-            password: None,
-        }
     }
 }
 
@@ -285,7 +296,7 @@ fn default_ch_url() -> String {
     "http://localhost:8123".into()
 }
 fn default_ch_database() -> String {
-    "oxide_arb".into()
+    "quant_pivot".into()
 }
 fn default_ch_user() -> String {
     "default".into()

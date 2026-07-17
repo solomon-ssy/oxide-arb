@@ -25,7 +25,7 @@ use quant_pivot_models::{
     },
 };
 use quant_pivot_repository::traits::{
-    AttributionRepository, CalibrationArtifactRepository, CatalogVersionRepository,
+    AttributionRepository, CalibrationArtifactRepository, CatalogLedgerRepository,
     ClobMarketInfoRepository, FeatureRepository, MarketLinkageRepository, MarketRepository,
     MarketSelectionRepository, ModelRegistryRepository, PositionRepository,
     QuantFactReadRepository, RecommendationRepository, RuntimeConfigVersionRepository,
@@ -50,7 +50,7 @@ use crate::{
 /// Admin port wired from [`ResearchBundle`] plus runtime-config catalog reads.
 pub struct CoreTrainingDatasetPort {
     fact_read: Arc<dyn QuantFactReadRepository>,
-    catalog_repo: Arc<dyn CatalogVersionRepository>,
+    catalog_repo: Arc<dyn CatalogLedgerRepository>,
     market_repo: Arc<dyn MarketRepository>,
     artifact_store: Arc<dyn ArtifactStore>,
     dataset_repo: Arc<dyn TrainingDatasetRepository>,
@@ -83,7 +83,7 @@ impl CoreTrainingDatasetPort {
     ) -> Self {
         Self {
             fact_read: Arc::clone(&research.quant_fact_read),
-            catalog_repo: Arc::clone(&research.catalog_version_repo),
+            catalog_repo: Arc::clone(&research.catalog_ledger_repo),
             market_repo: Arc::clone(&research.market_repo),
             artifact_store: Arc::clone(&research.artifact_store),
             dataset_repo: Arc::clone(&research.training_dataset_repo),

@@ -1,15 +1,13 @@
 //! Deploy-config validation: detects infeasible values and credential-policy
 //! violations that would cause silent failure at runtime.
 
-use super::{DeployConfig, WEATHER_OBSERVATION_DAY_CLOSE_GRACE_SECS};
+use super::{DeployConfig, SchemaMigrationConfig, WEATHER_OBSERVATION_DAY_CLOSE_GRACE_SECS};
 use crate::{
     constants::POLYGON_CHAIN_ID,
     enums::quant::{ExecutionWalletKind, QuantRuntimeMode},
     types::IcaoStation,
 };
-use quant_pivot_error::config_validation::{
-    ConfigValidationError, ConfigValidationReport, ConfigWarning,
-};
+use quant_pivot_error::config_validation::{ConfigValidationError, ConfigValidationReport};
 use rust_decimal_macros::dec;
 
 /// Mode-agnostic deploy validation: structural and platform invariants that
@@ -73,60 +71,7 @@ pub fn validate_deploy_common(deploy: &DeployConfig) -> ConfigValidationReport {
         });
     }
 
-    if deploy.db.postgres.max_connections == 0
-        || deploy.db.postgres.min_connections > deploy.db.postgres.max_connections
-    {
-        report.errors.push(ConfigValidationError::InvalidValue {
-            field: "db.postgres",
-            detail: "max_connections must be > 0 and >= min_connections".into(),
-        });
-    }
-    if deploy.db.clickhouse.batch_size == 0
-        || deploy.db.clickhouse.flush_interval_secs == 0
-        || deploy.db.clickhouse.max_concurrent_inserts == 0
-    {
-        report.errors.push(ConfigValidationError::InvalidValue {
-            field: "db.clickhouse",
-            detail: "batch_size, flush_interval_secs, max_concurrent_inserts must be > 0".into(),
-        });
-    }
-    let migration_credentials = &deploy.db.clickhouse.migration;
-    if migration_credentials.user.is_some() != migration_credentials.password.is_some() {
-        report.errors.push(ConfigValidationError::InvalidValue {
-            field: "db.clickhouse.migration",
-            detail: "user and password must either both be configured or both be omitted".into(),
-        });
-    }
-    if migration_credentials.auto_apply_online
-        && migration_credentials.require_dedicated_identity
-        && migration_credentials.user.is_none()
-    {
-        report.errors.push(ConfigValidationError::InvalidValue {
-            field: "db.clickhouse.migration",
-            detail: "auto_apply_online with require_dedicated_identity requires dedicated user and password"
-                .into(),
-        });
-    }
-    if migration_credentials
-        .user
-        .as_deref()
-        .is_some_and(|user| user.trim().is_empty())
-    {
-        report.errors.push(ConfigValidationError::InvalidValue {
-            field: "db.clickhouse.migration.user",
-            detail: "must not be empty when a dedicated migration identity is configured".into(),
-        });
-    }
-    if migration_credentials
-        .password
-        .as_deref()
-        .is_some_and(str::is_empty)
-    {
-        report.errors.push(ConfigValidationError::InvalidValue {
-            field: "db.clickhouse.migration.password",
-            detail: "must not be empty when a dedicated migration identity is configured".into(),
-        });
-    }
+    validate_databases(deploy, &mut report);
     validate_cache_redis(deploy, &mut report);
 
     if deploy
@@ -150,6 +95,54 @@ pub fn validate_deploy_common(deploy: &DeployConfig) -> ConfigValidationReport {
     validate_domain_sources(deploy, &mut report);
 
     report
+}
+
+fn validate_databases(deploy: &DeployConfig, report: &mut ConfigValidationReport) {
+    let postgres = &deploy.db.postgres;
+    if postgres.max_connections == 0 || postgres.min_connections > postgres.max_connections {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "db.postgres",
+            detail: "max_connections must be > 0 and >= min_connections".into(),
+        });
+    }
+    validate_migration_identity(
+        &postgres.migration,
+        &postgres.user,
+        "db.postgres.migration",
+        report,
+    );
+
+    let clickhouse = &deploy.db.clickhouse;
+    if clickhouse.batch_size == 0
+        || clickhouse.flush_interval_secs == 0
+        || clickhouse.max_concurrent_inserts == 0
+    {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "db.clickhouse",
+            detail: "batch_size, flush_interval_secs, max_concurrent_inserts must be > 0".into(),
+        });
+    }
+    validate_migration_identity(
+        &clickhouse.migration,
+        &clickhouse.user,
+        "db.clickhouse.migration",
+        report,
+    );
+}
+
+fn validate_migration_identity(
+    identity: &SchemaMigrationConfig,
+    runtime_user: &str,
+    field: &'static str,
+    report: &mut ConfigValidationReport,
+) {
+    if identity.user.trim().is_empty() || identity.user == runtime_user {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field,
+            detail: "dedicated migration user must be non-empty and differ from the runtime user"
+                .into(),
+        });
+    }
 }
 
 fn validate_domain_sources(deploy: &DeployConfig, report: &mut ConfigValidationReport) {
@@ -245,33 +238,25 @@ fn validate_domain_sources(deploy: &DeployConfig, report: &mut ConfigValidationR
 
 fn validate_market_data(deploy: &DeployConfig, report: &mut ConfigValidationReport) {
     if deploy.market_data.gamma.page_size == 0
-        || deploy.market_data.gamma.full_sync_interval_secs == 0
-        || deploy.market_data.gamma.catalog_visibility_guard_secs == 0
+        || deploy.market_data.gamma.reconcile_interval_secs == 0
+        || deploy.market_data.gamma.max_keyset_pages == 0
+        || deploy.market_data.gamma.max_keyset_requests == 0
     {
         report.errors.push(ConfigValidationError::InvalidValue {
             field: "market_data.gamma",
-            detail:
-                "page_size, full_sync_interval_secs, and catalog_visibility_guard_secs must be > 0"
-                    .into(),
+            detail: "page_size, reconcile_interval_secs, max_keyset_pages, and max_keyset_requests must be > 0".into(),
+        });
+    }
+    if deploy.market_data.gamma.max_keyset_requests < deploy.market_data.gamma.max_keyset_pages {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "market_data.gamma.max_keyset_requests",
+            detail: "must be >= max_keyset_pages".into(),
         });
     }
     if deploy.market_data.gamma.page_size > 500 {
         report.errors.push(ConfigValidationError::InvalidValue {
             field: "market_data.gamma.page_size",
             detail: "must be <= 500 (Gamma /events/keyset limit)".into(),
-        });
-    }
-    let catalog_visibility_guard_ms = deploy
-        .market_data
-        .gamma
-        .catalog_visibility_guard_secs
-        .saturating_mul(1_000);
-    if deploy.db.postgres.lock_timeout_ms > 0
-        && catalog_visibility_guard_ms >= deploy.db.postgres.lock_timeout_ms
-    {
-        report.errors.push(ConfigValidationError::InvalidValue {
-            field: "market_data.gamma.catalog_visibility_guard_secs",
-            detail: "must be lower than db.postgres.lock_timeout_ms".into(),
         });
     }
     let trade_tape = &deploy.market_data.trade_tape_on_chain;
@@ -398,25 +383,18 @@ fn validate_credentials_quant_mode(
 
 fn validate_web_quant_mode(
     deploy: &DeployConfig,
-    mode: QuantRuntimeMode,
+    _mode: QuantRuntimeMode,
     report: &mut ConfigValidationReport,
 ) {
-    if !deploy.web.jwt_secret_is_weak() {
+    if deploy.web.jwt_keyring_is_configured() {
         return;
     }
-    match mode {
-        QuantRuntimeMode::AutoExecution => {
-            report.errors.push(ConfigValidationError::InvalidValue {
-                field: "web.jwt.secret",
-                detail: "AutoExecution mode requires a strong, non-placeholder JWT secret \
-                         (set QUANT_PIVOT__WEB__JWT__SECRET)"
-                    .to_owned(),
-            });
-        }
-        QuantRuntimeMode::ReportOnly | QuantRuntimeMode::SemiAuto => {
-            report.warnings.push(ConfigWarning::WeakJwtSecret);
-        }
-    }
+    report.errors.push(ConfigValidationError::InvalidValue {
+        field: "web.jwt",
+        detail:
+            "authentication requires an Ed25519 signing key and a matching public keyring entry"
+                .to_owned(),
+    });
 }
 
 #[cfg(test)]
@@ -455,21 +433,12 @@ mod tests {
     }
 
     #[test]
-    fn catalog_visibility_guard_must_fit_postgres_lock_timeout() {
+    fn clickhouse_migration_requires_dedicated_identity_when_governed() {
         let mut deploy = DeployConfig::default();
-        deploy.market_data.gamma.catalog_visibility_guard_secs = 5;
-        deploy.db.postgres.lock_timeout_ms = 5_000;
-        assert!(validate_deploy_common(&deploy).has_errors());
-    }
-
-    #[test]
-    fn production_schema_auto_apply_requires_dedicated_identity_when_governed() {
-        let mut deploy = DeployConfig::default();
-        deploy.db.clickhouse.migration.require_dedicated_identity = true;
+        deploy.db.clickhouse.migration.user = deploy.db.clickhouse.user.clone();
         assert!(validate_deploy_common(&deploy).has_errors());
 
-        deploy.db.clickhouse.migration.user = Some("quant_pivot_migrator".into());
-        deploy.db.clickhouse.migration.password = Some("test-only-secret".into());
+        deploy.db.clickhouse.migration.user = "quant_pivot_migrator".into();
         let report = validate_deploy_common(&deploy);
         assert!(!report.has_errors(), "errors: {:?}", report.errors);
     }
@@ -491,33 +460,30 @@ mod tests {
     }
 
     #[test]
-    fn auto_execution_rejects_weak_jwt_secret() {
+    fn auto_execution_rejects_incomplete_jwt_keyring() {
         let mut deploy = DeployConfig::default();
         deploy.keys.private_key = Some("0xabc".into());
+        deploy.web.jwt.verification_keys.clear();
         let report = validate_deploy_for_quant_mode(&deploy, QuantRuntimeMode::AutoExecution);
-        assert!(
-            report.has_errors(),
-            "empty jwt secret must be fatal in AutoExecution"
-        );
+        assert!(report.has_errors(), "incomplete jwt keyring must be fatal");
     }
 
     #[test]
-    fn auto_execution_accepts_strong_jwt_secret_and_credentials() {
+    fn auto_execution_accepts_configured_jwt_keyring_and_credentials() {
         let mut deploy = DeployConfig::default();
         deploy.keys.private_key = Some("0xabc".into());
         deploy.quant.account.funder = Some("0xfunder".into());
-        deploy.web.jwt.secret = "a-strong-production-secret".to_owned();
         let report = validate_deploy_for_quant_mode(&deploy, QuantRuntimeMode::AutoExecution);
         assert!(!report.has_errors(), "errors: {:?}", report.errors);
     }
 
     #[test]
-    fn report_only_with_credentials_only_warns_on_weak_jwt_secret() {
+    fn report_only_with_credentials_accepts_configured_jwt_keyring() {
         let mut deploy = DeployConfig::default();
         deploy.keys.private_key = Some("0xabc".into());
         deploy.quant.account.funder = Some("0xfunder".into());
         let report = validate_deploy_for_quant_mode(&deploy, QuantRuntimeMode::ReportOnly);
         assert!(!report.has_errors(), "errors: {:?}", report.errors);
-        assert!(!report.warnings.is_empty(), "weak secret should warn");
+        assert!(report.warnings.is_empty());
     }
 }

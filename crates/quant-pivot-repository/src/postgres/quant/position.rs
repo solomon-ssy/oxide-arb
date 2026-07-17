@@ -30,7 +30,7 @@ use quant_pivot_models::{
 use rust_decimal::Decimal;
 use sea_orm::{
     ActiveModelTrait, ActiveValue, ColumnTrait, Condition, ConnectionTrait, DatabaseConnection,
-    EntityTrait, FromQueryResult, IntoActiveModel, QueryFilter, QueryOrder, QuerySelect,
+    EntityTrait, ExprTrait, FromQueryResult, IntoActiveModel, QueryFilter, QueryOrder, QuerySelect,
     TransactionTrait, sea_query::Expr,
 };
 use std::collections::HashMap;
@@ -188,7 +188,10 @@ impl PositionRepository for PgPositionRepository {
     async fn realized_pnl_cumulative_usd(&self) -> Result<Usd, StorageError> {
         let row = quant_position::Entity::find()
             .select_only()
-            .column_as(Expr::cust("SUM(realized_pnl_usd)"), "total")
+            .column_as(
+                Expr::col(quant_position::Column::RealizedPnlUsd).sum(),
+                "total",
+            )
             .into_model::<RealizedPnlSum>()
             .one(&self.db)
             .await

@@ -54,6 +54,7 @@ impl DomainProjectionRepository for PgDomainProjectionRepository {
     ) -> Result<CryptoPriceProjectionInfo, StorageError> {
         validate_binding(&report.source_id, &report.instrument_key)?;
         let gap_generation = to_i64(gap_generation, "crypto gap generation")?;
+        let source_sequence = to_i64(report.source_sequence, "crypto source sequence")?;
         let checkpoint_hash = hash_checkpoint(&checkpoint)?;
         let txn = self.db.begin().await.map_err(StorageError::from)?;
         let existing = quant_crypto_price_projection::Entity::find_by_id((
@@ -68,8 +69,8 @@ impl DomainProjectionRepository for PgDomainProjectionRepository {
         let model = match existing {
             Some(existing) if existing.report_hash == report.report_hash => existing,
             Some(existing) => {
-                if report.source_sequence < existing.source_sequence
-                    || (report.source_sequence == existing.source_sequence
+                if source_sequence < existing.source_sequence
+                    || (source_sequence == existing.source_sequence
                         && report.available_at <= existing.available_at)
                 {
                     return Err(conflict("crypto report is older than current projection"));
@@ -78,7 +79,7 @@ impl DomainProjectionRepository for PgDomainProjectionRepository {
                 let mut active = existing.into_active_model();
                 active.previous_price = ActiveValue::Set(Some(previous_price));
                 active.current_price = ActiveValue::Set(report.price);
-                active.source_sequence = ActiveValue::Set(report.source_sequence);
+                active.source_sequence = ActiveValue::Set(source_sequence);
                 active.event_time = ActiveValue::Set(report.event_time);
                 active.available_at = ActiveValue::Set(report.available_at);
                 active.report_hash = ActiveValue::Set(report.report_hash.clone());
@@ -101,7 +102,7 @@ impl DomainProjectionRepository for PgDomainProjectionRepository {
                 instrument_key: ActiveValue::Set(report.instrument_key.clone()),
                 previous_price: ActiveValue::Set(None),
                 current_price: ActiveValue::Set(report.price),
-                source_sequence: ActiveValue::Set(report.source_sequence),
+                source_sequence: ActiveValue::Set(source_sequence),
                 event_time: ActiveValue::Set(report.event_time),
                 available_at: ActiveValue::Set(report.available_at),
                 report_hash: ActiveValue::Set(report.report_hash.clone()),
@@ -123,7 +124,7 @@ impl DomainProjectionRepository for PgDomainProjectionRepository {
         .await?;
         notify_input_change(&txn, "crypto").await?;
         txn.commit().await.map_err(StorageError::from)?;
-        Ok(crypto_info(model))
+        crypto_info(model)
     }
 
     async fn apply_weather_report(
@@ -728,12 +729,7 @@ async fn insert_outbox<C: sea_orm::ConnectionTrait>(
         last_error: ActiveValue::Set(None),
         ..Default::default()
     })
-    .on_conflict(
-        OnConflict::column(quant_domain_event_outbox::Column::EventId)
-            .do_nothing()
-            .to_owned(),
-    )
-    .do_nothing()
+    .on_conflict_do_nothing_on([quant_domain_event_outbox::Column::EventId])
     .exec(db)
     .await
     .map_err(StorageError::from)?;
@@ -791,19 +787,21 @@ fn hash_checkpoint(checkpoint: &DomainSourceCheckpoint) -> Result<ContentHash, S
     CanonicalDigest::content_hash_json(checkpoint).map_err(|error| invariant(error.to_string()))
 }
 
-fn crypto_info(row: quant_crypto_price_projection::Model) -> CryptoPriceProjectionInfo {
-    CryptoPriceProjectionInfo {
+fn crypto_info(
+    row: quant_crypto_price_projection::Model,
+) -> Result<CryptoPriceProjectionInfo, StorageError> {
+    Ok(CryptoPriceProjectionInfo {
         source_id: row.source_id,
         instrument_key: row.instrument_key,
         previous_price: row.previous_price,
         current_price: row.current_price,
-        source_sequence: row.source_sequence,
+        source_sequence: from_i64(row.source_sequence, "crypto source sequence")?,
         event_time: row.event_time,
         available_at: row.available_at,
         report_hash: row.report_hash,
         gap_generation: row.gap_generation,
         source_healthy: row.source_healthy,
-    }
+    })
 }
 
 fn weather_info(row: quant_weather_daily_high_projection::Model) -> WeatherDailyHighProjectionInfo {

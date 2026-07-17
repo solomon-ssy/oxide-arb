@@ -2,27 +2,33 @@
 
 use super::AppContext;
 use crate::{
-    app::{task_id::TaskId, task_registry::AppRunner},
+    app::{capability_gate::wait_for_capability, task_id::TaskId, task_registry::AppRunner},
     infra::periodic_task::PeriodicTask,
     ingest::data_quality::DataQualityService,
     service::{equity::EquitySnapshotService, feature_integrity::AutomaticFullParityOutcome},
 };
 use quant_pivot_error::{QuantError, QuantResult};
-use quant_pivot_models::{domain::RuntimeConfigPort, types::Usd};
+use quant_pivot_models::{
+    domain::RuntimeConfigPort,
+    enums::system::{BootstrapPhase, CapabilityId},
+    types::Usd,
+};
 use quant_pivot_repository::traits::{EquitySnapshotRepository, PositionRepository};
 use rust_decimal::Decimal;
 use std::{str::FromStr, sync::Arc, time::Duration};
 
 /// Interval between data-quality snapshot refreshes into Prometheus.
 const DATA_QUALITY_REFRESH_SECS: u64 = 5;
-/// Fast reconciliation cadence; the coordinator itself admits at most one full
-/// 24-hour replay per day and deduplicates exact windows in Postgres.
-const FEATURE_PARITY_SCHEDULER_SECS: u64 = 60;
 
 impl AppContext {
     pub fn register_periodic_services(&self, runner: &mut AppRunner) {
         let gamma = Arc::clone(&self.data.gamma_service);
-        let interval_secs = self.config.market_data.gamma.full_sync_interval_secs;
+        let linkage_gamma = Arc::clone(&gamma);
+        runner.spawn(TaskId::CatalogLinkageResolver, move |token| async move {
+            linkage_gamma.run_linkage_resolver(token).await;
+        });
+        let bootstrap = Arc::clone(&self.governance.bootstrap);
+        let interval_secs = self.config.market_data.gamma.reconcile_interval_secs;
         runner.spawn(TaskId::GammaSync, move |token| async move {
             let _ = PeriodicTask::run(
                 "gamma-sync",
@@ -32,7 +38,14 @@ impl AppContext {
                 token,
                 move || {
                     let gamma = Arc::clone(&gamma);
-                    async move { gamma.sync().await }
+                    let bootstrap = Arc::clone(&bootstrap);
+                    async move {
+                        gamma.sync().await?;
+                        if bootstrap.view().phase == BootstrapPhase::CollectingBaseline {
+                            bootstrap.mark_catalog_ready().await?;
+                        }
+                        QuantResult::Ok(())
+                    }
                 },
             )
             .await;
@@ -109,22 +122,43 @@ impl AppContext {
 
     pub fn register_feature_parity_scheduler(&self, runner: &mut AppRunner) {
         let coordinator = Arc::clone(&self.report.feature_parity);
+        let bootstrap = Arc::clone(&self.governance.bootstrap);
         runner.spawn(TaskId::FeatureParityScheduler, move |token| async move {
+            if !wait_for_capability(
+                Arc::clone(&bootstrap),
+                CapabilityId::AutomaticParityEligible,
+                &token,
+            )
+            .await
+            {
+                return;
+            }
             let _ = PeriodicTask::run(
                 "feature-parity-scheduler",
-                || Duration::from_secs(FEATURE_PARITY_SCHEDULER_SECS),
+                || duration_until_next_utc_hour(chrono::Utc::now()),
                 0.0,
                 true,
                 token,
                 move || {
                     let coordinator = Arc::clone(&coordinator);
+                    let bootstrap = Arc::clone(&bootstrap);
                     async move {
+                        if !bootstrap
+                            .capability_snapshot()
+                            .get(CapabilityId::AutomaticParityEligible)
+                            .enabled
+                        {
+                            return QuantResult::Ok(());
+                        }
                         match coordinator.ensure_automatic_full(chrono::Utc::now()).await? {
                             AutomaticFullParityOutcome::Enqueued { run_id, job_id } => {
                                 tracing::info!(%run_id, %job_id, "enqueued automatic 24-hour feature parity replay");
                             }
                             AutomaticFullParityOutcome::Existing(run_id) => {
                                 tracing::debug!(%run_id, "automatic feature parity window already queued");
+                            }
+                            AutomaticFullParityOutcome::NotEligible { reason } => {
+                                tracing::debug!(reason = reason.as_str(), "automatic feature parity is waiting for serving evidence");
                             }
                             AutomaticFullParityOutcome::NotDue => {}
                         }
@@ -134,6 +168,17 @@ impl AppContext {
             )
             .await;
         });
+    }
+}
+
+const fn duration_until_next_utc_hour(now: chrono::DateTime<chrono::Utc>) -> Duration {
+    let elapsed = now.timestamp().rem_euclid(60 * 60) as u64;
+    let nanos = now.timestamp_subsec_nanos();
+    let seconds = 60 * 60 - elapsed;
+    if nanos == 0 {
+        Duration::from_secs(seconds)
+    } else {
+        Duration::new(seconds - 1, 1_000_000_000 - nanos)
     }
 }
 

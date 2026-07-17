@@ -19,10 +19,10 @@ use chrono::{DateTime, Duration, Utc};
 use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{
     domain::{
-        CatalogSnapshotInfo, CatalogWindowInfo, DecisionBoundary, DecisionSource,
-        EventCatalogVersionInfo, MarketCatalogVersionInfo,
+        CatalogEventChangeInfo, CatalogMarketChangeInfo, CatalogSnapshotInfo, CatalogWindowInfo,
+        DecisionBoundary, DecisionSource,
     },
-    types::{EventCatalogVersionId, MarketId, TokenId},
+    types::{CatalogEventChangeId, MarketId, TokenId},
 };
 
 use super::{
@@ -37,8 +37,8 @@ use super::{
 /// that source cutoff is treated as missing, so online and replay agree.
 pub struct MaterializedPitEngine {
     books: HashMap<TokenId, Vec<BookSnapshotAt>>,
-    markets: HashMap<MarketId, Vec<MarketCatalogVersionInfo>>,
-    events: HashMap<EventCatalogVersionId, EventCatalogVersionInfo>,
+    markets: HashMap<MarketId, Vec<CatalogMarketChangeInfo>>,
+    events: HashMap<CatalogEventChangeId, CatalogEventChangeInfo>,
     max_book_staleness: Duration,
 }
 
@@ -62,17 +62,17 @@ impl MaterializedPitEngine {
             });
         }
         let events: HashMap<_, _> = catalog
-            .event_versions
+            .event_changes
             .into_iter()
-            .map(|event| (event.event_catalog_version_id.clone(), event))
+            .map(|event| (event.event_change_id.clone(), event))
             .collect();
-        let mut markets: HashMap<MarketId, Vec<MarketCatalogVersionInfo>> = HashMap::new();
-        for market in catalog.market_versions {
-            if !events.contains_key(&market.event_catalog_version_id) {
+        let mut markets: HashMap<MarketId, Vec<CatalogMarketChangeInfo>> = HashMap::new();
+        for market in catalog.market_changes {
+            if !events.contains_key(&market.event_change_id) {
                 return Err(ResearchError::PitResolution {
                     detail: format!(
                         "materialized market version {} references absent event version {}",
-                        market.market_catalog_version_id, market.event_catalog_version_id
+                        market.market_change_id, market.event_change_id
                     ),
                 }
                 .into());
@@ -88,9 +88,9 @@ impl MaterializedPitEngine {
                     .cmp(&right.source_effective_at)
                     .then_with(|| left.available_at.cmp(&right.available_at))
                     .then_with(|| {
-                        left.market_catalog_version_id
+                        left.market_change_id
                             .to_string()
-                            .cmp(&right.market_catalog_version_id.to_string())
+                            .cmp(&right.market_change_id.to_string())
                     })
             });
         }
@@ -145,13 +145,13 @@ impl PointInTimeSnapshotSource for MaterializedPitEngine {
         };
         let event = self
             .events
-            .get(&market.event_catalog_version_id)
+            .get(&market.event_change_id)
             .filter(|event| event_visible(event, boundary))
             .cloned()
             .ok_or_else(|| ResearchError::PitResolution {
                 detail: format!(
                     "visible market version {} has no visible event version {}",
-                    market.market_catalog_version_id, market.event_catalog_version_id
+                    market.market_change_id, market.event_change_id
                 ),
             })?;
         let event_markets = self
@@ -159,7 +159,7 @@ impl PointInTimeSnapshotSource for MaterializedPitEngine {
             .values()
             .filter_map(|series| {
                 series.iter().rev().find(|candidate| {
-                    candidate.event_catalog_version_id == event.event_catalog_version_id
+                    candidate.event_change_id == event.event_change_id
                         && market_visible(candidate, boundary)
                 })
             })
@@ -206,23 +206,23 @@ impl MaterializedPitEngine {
         &self,
         market_id: &MarketId,
         boundary: &DecisionBoundary,
-    ) -> Option<&MarketCatalogVersionInfo> {
+    ) -> Option<&CatalogMarketChangeInfo> {
         self.markets.get(market_id)?.iter().rev().find(|market| {
             market_visible(market, boundary)
                 && self
                     .events
-                    .get(&market.event_catalog_version_id)
+                    .get(&market.event_change_id)
                     .is_some_and(|event| event_visible(event, boundary))
         })
     }
 }
 
-fn market_visible(market: &MarketCatalogVersionInfo, boundary: &DecisionBoundary) -> bool {
+fn market_visible(market: &CatalogMarketChangeInfo, boundary: &DecisionBoundary) -> bool {
     market.source_effective_at <= boundary.cutoff_for(DecisionSource::Catalog)
         && market.available_at <= boundary.decision_at()
 }
 
-fn event_visible(event: &EventCatalogVersionInfo, boundary: &DecisionBoundary) -> bool {
+fn event_visible(event: &CatalogEventChangeInfo, boundary: &DecisionBoundary) -> bool {
     event.source_effective_at <= boundary.cutoff_for(DecisionSource::Catalog)
         && event.available_at <= boundary.decision_at()
 }
@@ -244,17 +244,19 @@ mod tests {
     use chrono::{Duration, TimeZone, Utc};
     use quant_pivot_models::{
         domain::{
-            CatalogWindowInfo, DecisionClock, EventCatalogVersionInfo, EventRegistryInfo,
-            MarketCatalogVersionInfo,
+            CATALOG_OBJECT_SCHEMA_VERSION, CatalogEventChangeInfo, CatalogMarketChangeInfo,
+            CatalogWindowInfo, DecisionClock, EventRegistryInfo,
             market::{book::BookLevel, registry::MarketRegistryInfo},
         },
         enums::{
+            catalog::{CatalogChangeType, CatalogFilterReasonSet, CatalogTimestampQuality},
             common::{CategorySet, MarketCategory, TickSize},
             market::{EventStatus, MarketStatus},
         },
         types::{
-            CatalogSyncBatchId, ContentHash, EventCatalogVersionId, EventId,
-            MarketCatalogVersionId, MarketId, Price, Shares, TokenId,
+            CatalogEventChangeId, CatalogEventObjectId, CatalogMarketChangeId,
+            CatalogMarketObjectId, CatalogSyncBatchId, ContentHash, EventId, MarketId, Price,
+            Shares, TokenId,
         },
     };
     use rust_decimal::Decimal;
@@ -292,7 +294,7 @@ mod tests {
         revisions: &[(chrono::DateTime<Utc>, MarketStatus)],
     ) -> CatalogWindowInfo {
         let event_id = EventId::new("event");
-        let event_version_id = EventCatalogVersionId::from_v7();
+        let event_version_id = CatalogEventChangeId::from_v7();
         let batch_id = CatalogSyncBatchId::from_v7();
         let event_time = revisions[0].0;
         let event = EventRegistryInfo {
@@ -309,19 +311,22 @@ mod tests {
             created_at: event_time,
             updated_at: event_time,
         };
-        let event_version = EventCatalogVersionInfo {
-            event_catalog_version_id: event_version_id.clone(),
+        let event_hash = hash('e');
+        let event_version = CatalogEventChangeInfo {
+            event_change_id: event_version_id.clone(),
             catalog_sync_batch_id: batch_id.clone(),
+            event_object_id: CatalogEventObjectId::from_content_hash(&event_hash),
             event_id: event_id.clone(),
             source_effective_at: event_time,
-            source_timestamp_quality: "source".to_owned(),
+            source_timestamp_quality: CatalogTimestampQuality::Source,
             available_at: event_time,
-            origin: "gamma_sync".to_owned(),
-            content_hash: hash('e'),
+            change_type: CatalogChangeType::GammaScanUpsert,
+            content_hash: event_hash,
+            schema_version: CATALOG_OBJECT_SCHEMA_VERSION,
             payload: serde_json::to_value(event).expect("event payload"),
             created_at: event_time,
         };
-        let market_versions = revisions
+        let market_changes = revisions
             .iter()
             .map(|(at, status)| {
                 let market = MarketRegistryInfo {
@@ -334,6 +339,7 @@ mod tests {
                     description: None,
                     categories: CategorySet::from(MarketCategory::Sports),
                     status: *status,
+                    filter_reasons: CatalogFilterReasonSet::default(),
                     outcome: None,
                     neg_risk: false,
                     tick_size: TickSize::Hundredth,
@@ -350,30 +356,33 @@ mod tests {
                     created_at: Some(event_time),
                     updated_at: *at,
                 };
-                MarketCatalogVersionInfo {
-                    market_catalog_version_id: MarketCatalogVersionId::from_v7(),
+                let market_hash = hash(if *status == MarketStatus::Active {
+                    'a'
+                } else {
+                    'b'
+                });
+                CatalogMarketChangeInfo {
+                    market_change_id: CatalogMarketChangeId::from_v7(),
                     catalog_sync_batch_id: batch_id.clone(),
-                    event_catalog_version_id: event_version_id.clone(),
+                    event_change_id: event_version_id.clone(),
+                    market_object_id: CatalogMarketObjectId::from_content_hash(&market_hash),
                     market_id: market_id.clone(),
                     event_id: event_id.clone(),
                     source_effective_at: *at,
-                    source_timestamp_quality: "source".to_owned(),
+                    source_timestamp_quality: CatalogTimestampQuality::Source,
                     source_created_at: Some(event_time),
                     available_at: *at,
-                    origin: "gamma_sync".to_owned(),
-                    content_hash: hash(if *status == MarketStatus::Active {
-                        'a'
-                    } else {
-                        'b'
-                    }),
+                    change_type: CatalogChangeType::GammaScanUpsert,
+                    content_hash: market_hash,
+                    schema_version: CATALOG_OBJECT_SCHEMA_VERSION,
                     payload: serde_json::to_value(market).expect("market payload"),
                     created_at: *at,
                 }
             })
             .collect();
         CatalogWindowInfo {
-            market_versions,
-            event_versions: vec![event_version],
+            market_changes,
+            event_changes: vec![event_version],
         }
     }
 
@@ -399,8 +408,8 @@ mod tests {
         let engine = MaterializedPitEngine::new(
             books,
             CatalogWindowInfo {
-                market_versions: Vec::new(),
-                event_versions: Vec::new(),
+                market_changes: Vec::new(),
+                event_changes: Vec::new(),
             },
             Duration::seconds(2),
         )
@@ -418,8 +427,8 @@ mod tests {
         let stale_only = MaterializedPitEngine::new(
             HashMap::from([(token.clone(), vec![snapshot("t", 1_000)])]),
             CatalogWindowInfo {
-                market_versions: Vec::new(),
-                event_versions: Vec::new(),
+                market_changes: Vec::new(),
+                event_changes: Vec::new(),
             },
             Duration::seconds(2),
         )
@@ -442,7 +451,7 @@ mod tests {
             &market_id,
             &[(t0, MarketStatus::Active), (t1, MarketStatus::Settled)],
         );
-        catalog.market_versions[1].available_at =
+        catalog.market_changes[1].available_at =
             Utc.timestamp_millis_opt(7_000).single().expect("ts");
         let engine = MaterializedPitEngine::new(HashMap::new(), catalog, Duration::seconds(60))
             .expect("engine");

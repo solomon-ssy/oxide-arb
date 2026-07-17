@@ -11,6 +11,7 @@ use crate::{
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
+#[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "quant_recommendation")]
 pub struct Model {
@@ -49,62 +50,32 @@ pub struct Model {
     pub valid_until: DateTime<Utc>,
     pub status: RecommendationStatus,
     pub created_at: DateTime<Utc>,
-}
 
-#[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-pub enum Relation {
     #[sea_orm(
-        belongs_to = "super::quant_recommendation_report::Entity",
-        from = "Column::RecommendationReportId",
-        to = "super::quant_recommendation_report::Column::RecommendationReportId"
+        belongs_to,
+        relation_enum = "RecommendationReport",
+        from = "recommendation_report_id",
+        to = "recommendation_report_id"
     )]
-    RecommendationReport,
+    pub recommendation_report: BelongsTo<super::quant_recommendation_report::Entity>,
     #[sea_orm(
-        belongs_to = "super::market::Entity",
-        from = "Column::MarketId",
-        to = "super::market::Column::MarketId"
+        belongs_to,
+        relation_enum = "Market",
+        from = "market_id",
+        to = "market_id"
     )]
-    Market,
+    pub market: BelongsTo<super::market::Entity>,
     #[sea_orm(
-        belongs_to = "super::event::Entity",
-        from = "Column::EventId",
-        to = "super::event::Column::EventId"
+        belongs_to,
+        relation_enum = "Event",
+        from = "event_id",
+        to = "event_id"
     )]
-    Event,
-    #[sea_orm(has_many = "super::quant_order_intent::Entity")]
-    OrderIntent,
-    #[sea_orm(has_one = "super::quant_recommendation_attribution::Entity")]
-    Attribution,
-}
-
-impl Related<super::quant_recommendation_report::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::RecommendationReport.def()
-    }
-}
-
-impl Related<super::market::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::Market.def()
-    }
-}
-
-impl Related<super::event::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::Event.def()
-    }
-}
-
-impl Related<super::quant_order_intent::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::OrderIntent.def()
-    }
-}
-
-impl Related<super::quant_recommendation_attribution::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::Attribution.def()
-    }
+    pub event: BelongsTo<super::event::Entity>,
+    #[sea_orm(has_many, relation_enum = "OrderIntent")]
+    pub order_intent: HasMany<super::quant_order_intent::Entity>,
+    #[sea_orm(has_one, relation_enum = "Attribution")]
+    pub attribution: HasOne<super::quant_recommendation_attribution::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

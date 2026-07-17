@@ -1,35 +1,49 @@
 //! Postgres feature-parity run lifecycle and append-only latch ledger.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use chrono::Utc;
-use quant_pivot_error::storage::{StorageError, entity};
+use quant_pivot_error::{
+    hashing::CanonicalDigestError,
+    storage::{StorageError, entity},
+};
 use quant_pivot_models::{
     domain::{
         CompleteFeatureParityRun, FeatureParityRunInfo, FeatureParityRunListQuery,
-        FeatureParityStateInfo, NewFeatureParityRun, NewFeatureParityState, NewResearchJob,
-        PageWindow, Paginated, ResearchJobInfo,
+        FeatureParityStateInfo, FrozenFeatureParityCandidate, FrozenFeatureParitySubject,
+        FrozenFeatureParitySubjectId, NewFeatureParityRun, NewFeatureParityState,
+        NewFrozenModelParitySubject, NewResearchJob, PageWindow, Paginated, ResearchJobInfo,
+        model_run_parity_evidence_hash, parity_candidate_membership_hash, parity_selection_hash,
+        report_parity_evidence_hash, report_parity_generation_hash,
     },
-    entities::{quant_feature_parity_run, quant_feature_parity_state, quant_research_job},
+    entities::{
+        quant_feature_parity_candidate, quant_feature_parity_run, quant_feature_parity_state,
+        quant_feature_parity_subject, quant_market_selection, quant_market_selection_member,
+        quant_model_run, quant_recommendation_report, quant_research_job,
+    },
     enums::quant::{
         FeatureParityLatchState, FeatureParityRunKind, FeatureParityRunStatus,
-        FeatureParityStateTransition, ResearchJobKind,
+        FeatureParityStateTransition, ModelRunKind, ModelRunStatus, ParitySubjectKind,
+        ResearchJobKind,
     },
-    schema::column,
     types::{
-        FeatureParityRunId, FeatureParityStateId, ModelVersionId, RecommendationReportId,
-        TrainingDatasetId,
+        ContentHash, FeatureParityCandidateId, FeatureParityRunId, FeatureParityStateId,
+        FeatureParitySubjectId, MarketSelectionId, ModelRunId, ModelVersionId,
+        RecommendationReportId, TrainingDatasetId,
     },
 };
 use sea_orm::{
-    ColumnTrait, Condition, ConnectionTrait, DatabaseBackend, DatabaseConnection,
-    DatabaseTransaction, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, Statement,
+    ActiveValue::Set, ColumnTrait, Condition, ConnectionTrait, DatabaseConnection,
+    DatabaseTransaction, EntityTrait, IntoActiveModel, LoaderTrait, QueryFilter, QueryOrder,
     TransactionTrait, sea_query::Expr,
 };
 
 use crate::{
-    postgres::{error, query::paginate_mapped},
-    traits::{FeatureParityLatchActor, FeatureParityRepository},
+    postgres::{error, primitives, query::paginate_mapped},
+    traits::{
+        EnqueueFrozenFeatureParityOutcome, FeatureParityLatchActor, FeatureParityRepository,
+        PublishFeatureParityPermit,
+    },
 };
 
 pub(super) const LATCH_ADVISORY_LOCK_KEY: i64 = 0x_11_06_50_41;
@@ -46,6 +60,331 @@ impl PgFeatureParityRepository {
     }
 }
 
+struct ServingSubjectSeed {
+    identity: ServingSubjectIdentity,
+    generation: ContentHash,
+    decision_at: chrono::DateTime<Utc>,
+    selection_id: MarketSelectionId,
+    evidence_hash: ContentHash,
+}
+
+enum ServingSubjectIdentity {
+    ModelRun(ModelRunId),
+    RecommendationReport(RecommendationReportId),
+}
+
+fn map_parity_hash_error(error: &CanonicalDigestError, context: &'static str) -> StorageError {
+    StorageError::invariant_violation(
+        Some(entity::QUANT_FEATURE_PARITY_RUN),
+        format!("{context} canonical hash failed: {error}"),
+    )
+}
+
+async fn freeze_full_window(
+    txn: &DatabaseTransaction,
+    run: &NewFeatureParityRun,
+) -> Result<Vec<ServingSubjectSeed>, StorageError> {
+    if run.kind != FeatureParityRunKind::Full
+        || run.report_id.is_some()
+        || run.model_version_id.is_some()
+        || run.training_dataset_id.is_some()
+    {
+        return Err(StorageError::invariant_violation(
+            Some(entity::QUANT_FEATURE_PARITY_RUN),
+            "frozen serving-window enqueue requires an unbound full parity run",
+        ));
+    }
+    let reports = quant_recommendation_report::Entity::find()
+        .filter(quant_recommendation_report::Column::DecisionAt.gte(run.window_start))
+        .filter(quant_recommendation_report::Column::DecisionAt.lt(run.window_end))
+        .order_by_asc(quant_recommendation_report::Column::DecisionAt)
+        .order_by_asc(quant_recommendation_report::Column::RecommendationReportId)
+        .all(txn)
+        .await
+        .map_err(StorageError::from)?;
+    let model_runs = quant_model_run::Entity::find()
+        .filter(quant_model_run::Column::RunKind.eq(ModelRunKind::LiveInference))
+        .filter(quant_model_run::Column::Status.eq(ModelRunStatus::Succeeded))
+        .filter(quant_model_run::Column::WindowStart.gte(run.window_start))
+        .filter(quant_model_run::Column::WindowStart.lt(run.window_end))
+        .order_by_asc(quant_model_run::Column::WindowStart)
+        .order_by_asc(quant_model_run::Column::ModelRunId)
+        .all(txn)
+        .await
+        .map_err(StorageError::from)?;
+    let report_by_run = reports
+        .iter()
+        .filter_map(|report| {
+            report
+                .model_run_id
+                .as_ref()
+                .map(|run_id| (run_id.clone(), report))
+        })
+        .collect::<HashMap<_, _>>();
+    let model_run_ids = model_runs
+        .iter()
+        .map(|model_run| model_run.model_run_id.clone())
+        .collect::<HashSet<_>>();
+    for run_id in report_by_run.keys() {
+        if !model_run_ids.contains(run_id) {
+            return Err(StorageError::state_conflict(
+                entity::QUANT_FEATURE_PARITY_RUN,
+                Some(&run.run_id),
+                format!(
+                    "serving report references model run {run_id} outside the frozen full window"
+                ),
+            ));
+        }
+    }
+
+    let mut seeds = Vec::with_capacity(model_runs.len() + reports.len());
+    for model_run in model_runs {
+        let selection_id = model_run.market_selection_id.clone().ok_or_else(|| {
+            StorageError::state_conflict(
+                "quant_model_run",
+                Some(&model_run.model_run_id),
+                "successful live model run has no market selection",
+            )
+        })?;
+        let generation = model_run.output_hash.clone().ok_or_else(|| {
+            StorageError::state_conflict(
+                "quant_model_run",
+                Some(&model_run.model_run_id),
+                "successful live model run has no output hash",
+            )
+        })?;
+        let evidence_hash = model_run_parity_evidence_hash(
+            &model_run.model_run_id,
+            &model_run.input_hash,
+            &generation,
+            &model_run.model_version_id,
+            &model_run.runtime_config_version_id,
+        )
+        .map_err(|error| map_parity_hash_error(&error, "model-run evidence"))?;
+        seeds.push(ServingSubjectSeed {
+            identity: ServingSubjectIdentity::ModelRun(model_run.model_run_id),
+            generation,
+            decision_at: model_run.window_start,
+            selection_id,
+            evidence_hash,
+        });
+    }
+    for report in reports
+        .into_iter()
+        .filter(|report| report.model_run_id.is_none())
+    {
+        let generation = report_parity_generation_hash(
+            &report.recommendation_report_id,
+            report.decision_at,
+            report.created_at,
+        )
+        .map_err(|error| map_parity_hash_error(&error, "report generation"))?;
+        let evidence_hash = report_parity_evidence_hash(
+            &generation,
+            &report.model_version_id,
+            &report.runtime_config_version_id,
+            &report.market_selection_id,
+            &report.data_quality_snapshot_ref,
+            &report.portfolio_plan_id,
+        )
+        .map_err(|error| map_parity_hash_error(&error, "report evidence"))?;
+        seeds.push(ServingSubjectSeed {
+            identity: ServingSubjectIdentity::RecommendationReport(report.recommendation_report_id),
+            generation,
+            decision_at: report.decision_at,
+            selection_id: report.market_selection_id,
+            evidence_hash,
+        });
+    }
+    seeds.sort_by_key(|seed| {
+        let (kind, id) = match &seed.identity {
+            ServingSubjectIdentity::ModelRun(id) => ("model_run", id.to_string()),
+            ServingSubjectIdentity::RecommendationReport(id) => {
+                ("recommendation_report", id.to_string())
+            }
+        };
+        (seed.decision_at, kind, id)
+    });
+    Ok(seeds)
+}
+
+pub(super) async fn insert_frozen_report_subject(
+    txn: &DatabaseTransaction,
+    run_id: &FeatureParityRunId,
+    report: &quant_recommendation_report::Model,
+) -> Result<(), StorageError> {
+    let seed = if let Some(model_run_id) = report.model_run_id.as_ref() {
+        let model_run = quant_model_run::Entity::find_by_id(model_run_id.clone())
+            .one(txn)
+            .await
+            .map_err(StorageError::from)?
+            .ok_or_else(|| StorageError::not_found("quant_model_run", model_run_id))?;
+        if model_run.run_kind != ModelRunKind::LiveInference
+            || model_run.status != ModelRunStatus::Succeeded
+            || model_run.window_start != report.decision_at
+            || model_run.market_selection_id.as_ref() != Some(&report.market_selection_id)
+            || model_run.runtime_config_version_id != report.runtime_config_version_id
+            || model_run.model_version_id.as_ref() != Some(&report.model_version_id)
+        {
+            return Err(StorageError::state_conflict(
+                entity::QUANT_FEATURE_PARITY_RUN,
+                Some(run_id),
+                "sampled parity report does not bind an exact successful live model run",
+            ));
+        }
+        let generation = model_run.output_hash.clone().ok_or_else(|| {
+            StorageError::state_conflict(
+                "quant_model_run",
+                Some(model_run_id),
+                "successful live model run has no output hash",
+            )
+        })?;
+        let evidence_hash = model_run_parity_evidence_hash(
+            &model_run.model_run_id,
+            &model_run.input_hash,
+            &generation,
+            &model_run.model_version_id,
+            &model_run.runtime_config_version_id,
+        )
+        .map_err(|error| map_parity_hash_error(&error, "model-run evidence"))?;
+        ServingSubjectSeed {
+            identity: ServingSubjectIdentity::ModelRun(model_run.model_run_id),
+            generation,
+            decision_at: model_run.window_start,
+            selection_id: report.market_selection_id.clone(),
+            evidence_hash,
+        }
+    } else {
+        let generation = report_parity_generation_hash(
+            &report.recommendation_report_id,
+            report.decision_at,
+            report.created_at,
+        )
+        .map_err(|error| map_parity_hash_error(&error, "report generation"))?;
+        let evidence_hash = report_parity_evidence_hash(
+            &generation,
+            &report.model_version_id,
+            &report.runtime_config_version_id,
+            &report.market_selection_id,
+            &report.data_quality_snapshot_ref,
+            &report.portfolio_plan_id,
+        )
+        .map_err(|error| map_parity_hash_error(&error, "report evidence"))?;
+        ServingSubjectSeed {
+            identity: ServingSubjectIdentity::RecommendationReport(
+                report.recommendation_report_id.clone(),
+            ),
+            generation,
+            decision_at: report.decision_at,
+            selection_id: report.market_selection_id.clone(),
+            evidence_hash,
+        }
+    };
+    insert_frozen_subjects(txn, run_id, vec![seed]).await
+}
+
+async fn insert_frozen_subjects(
+    txn: &DatabaseTransaction,
+    run_id: &FeatureParityRunId,
+    seeds: Vec<ServingSubjectSeed>,
+) -> Result<(), StorageError> {
+    let selection_ids = seeds
+        .iter()
+        .map(|seed| seed.selection_id.clone())
+        .collect::<Vec<_>>();
+    let selections = quant_market_selection::Entity::find()
+        .filter(quant_market_selection::Column::MarketSelectionId.is_in(selection_ids.clone()))
+        .all(txn)
+        .await
+        .map_err(StorageError::from)?
+        .into_iter()
+        .map(|selection| (selection.market_selection_id.clone(), selection))
+        .collect::<HashMap<_, _>>();
+    let members = quant_market_selection_member::Entity::find()
+        .filter(quant_market_selection_member::Column::MarketSelectionId.is_in(selection_ids))
+        .order_by_asc(quant_market_selection_member::Column::MarketSelectionId)
+        .order_by_asc(quant_market_selection_member::Column::MarketId)
+        .all(txn)
+        .await
+        .map_err(StorageError::from)?;
+    let mut members_by_selection: HashMap<MarketSelectionId, Vec<_>> = HashMap::new();
+    for member in members {
+        members_by_selection
+            .entry(member.market_selection_id.clone())
+            .or_default()
+            .push(member);
+    }
+
+    for seed in seeds {
+        let selection = selections
+            .get(&seed.selection_id)
+            .ok_or_else(|| StorageError::not_found("quant_market_selection", &seed.selection_id))?;
+        let members = members_by_selection
+            .get(&seed.selection_id)
+            .cloned()
+            .unwrap_or_default();
+        let market_ids = members
+            .iter()
+            .map(|member| member.market_id.clone())
+            .collect::<Vec<_>>();
+        let selection_hash =
+            parity_selection_hash(&seed.selection_id, &selection.selector_hash, &market_ids)
+                .map_err(|error| map_parity_hash_error(&error, "selection membership"))?;
+        let subject_id = FeatureParitySubjectId::from_v7();
+        let (subject_kind, model_run_id, recommendation_report_id) = match seed.identity {
+            ServingSubjectIdentity::ModelRun(id) => (ParitySubjectKind::ModelRun, Some(id), None),
+            ServingSubjectIdentity::RecommendationReport(id) => {
+                (ParitySubjectKind::RecommendationReport, None, Some(id))
+            }
+        };
+        quant_feature_parity_subject::Entity::insert(quant_feature_parity_subject::ActiveModel {
+            parity_subject_id: Set(subject_id.clone()),
+            run_id: Set(run_id.clone()),
+            subject_kind: Set(subject_kind),
+            model_run_id: Set(model_run_id),
+            recommendation_report_id: Set(recommendation_report_id),
+            model_version_id: Set(None),
+            training_dataset_id: Set(None),
+            market_selection_id: Set(Some(seed.selection_id)),
+            subject_generation: Set(seed.generation),
+            decision_at: Set(Some(seed.decision_at)),
+            selection_hash: Set(Some(selection_hash.clone())),
+            evidence_hash: Set(seed.evidence_hash),
+            created_at: sea_orm::ActiveValue::NotSet,
+        })
+        .exec(txn)
+        .await
+        .map_err(StorageError::from)?;
+        for (ordinal, member) in members.into_iter().enumerate() {
+            let ordinal = i32::try_from(ordinal).map_err(|_| {
+                StorageError::invariant_violation(
+                    Some("quant_feature_parity_candidate"),
+                    "selection membership exceeds i32 ordinal capacity",
+                )
+            })?;
+            let membership_hash =
+                parity_candidate_membership_hash(&selection_hash, &member.market_id, ordinal)
+                    .map_err(|error| {
+                        map_parity_hash_error(&error, "parity candidate membership")
+                    })?;
+            quant_feature_parity_candidate::Entity::insert(
+                quant_feature_parity_candidate::ActiveModel {
+                    parity_candidate_id: Set(FeatureParityCandidateId::from_v7()),
+                    parity_subject_id: Set(subject_id.clone()),
+                    market_id: Set(member.market_id),
+                    ordinal: Set(ordinal),
+                    membership_hash: Set(membership_hash),
+                    created_at: sea_orm::ActiveValue::NotSet,
+                },
+            )
+            .exec(txn)
+            .await
+            .map_err(StorageError::from)?;
+        }
+    }
+    Ok(())
+}
+
 #[async_trait::async_trait]
 impl FeatureParityRepository for PgFeatureParityRepository {
     async fn create_run(
@@ -59,6 +398,53 @@ impl FeatureParityRepository for PgFeatureParityRepository {
             .await
             .map_err(|error| error::map_unique(error, entity::QUANT_FEATURE_PARITY_RUN, &run_id))
             .map(Into::into)
+    }
+
+    async fn create_frozen_model_run(
+        &self,
+        run: NewFeatureParityRun,
+        subject: NewFrozenModelParitySubject,
+    ) -> Result<FeatureParityRunInfo, StorageError> {
+        validate_new_run(&run)?;
+        if run.kind != FeatureParityRunKind::Full
+            || run.report_id.is_some()
+            || run.model_version_id.as_ref() != Some(&subject.model_version_id)
+            || run.training_dataset_id.as_ref() != Some(&subject.training_dataset_id)
+        {
+            return Err(StorageError::invariant_violation(
+                Some(entity::QUANT_FEATURE_PARITY_RUN),
+                "offline frozen parity subject must exactly bind its full model/dataset run",
+            ));
+        }
+        let run_id = run.run_id.clone();
+        let run_key = run_id.to_string();
+        let txn = self.db.begin().await.map_err(StorageError::from)?;
+        let run_model = quant_feature_parity_run::Entity::insert(run.into_active_model())
+            .exec_with_returning(&txn)
+            .await
+            .map_err(|error| {
+                error::map_unique(error, entity::QUANT_FEATURE_PARITY_RUN, &run_key)
+            })?;
+        quant_feature_parity_subject::Entity::insert(quant_feature_parity_subject::ActiveModel {
+            parity_subject_id: Set(FeatureParitySubjectId::from_v7()),
+            run_id: Set(run_id),
+            subject_kind: Set(ParitySubjectKind::ModelVersion),
+            model_run_id: Set(None),
+            recommendation_report_id: Set(None),
+            model_version_id: Set(Some(subject.model_version_id)),
+            training_dataset_id: Set(Some(subject.training_dataset_id)),
+            market_selection_id: Set(None),
+            subject_generation: Set(subject.subject_generation),
+            decision_at: Set(None),
+            selection_hash: Set(None),
+            evidence_hash: Set(subject.evidence_hash),
+            created_at: sea_orm::ActiveValue::NotSet,
+        })
+        .exec(&txn)
+        .await
+        .map_err(StorageError::from)?;
+        txn.commit().await.map_err(StorageError::from)?;
+        Ok(run_model.into())
     }
 
     async fn enqueue_run(
@@ -98,6 +484,127 @@ impl FeatureParityRepository for PgFeatureParityRepository {
             .map_err(StorageError::from)?;
         txn.commit().await.map_err(StorageError::from)?;
         Ok((run_model.into(), job_model.into()))
+    }
+
+    async fn enqueue_frozen_full(
+        &self,
+        run: NewFeatureParityRun,
+        job: NewResearchJob,
+    ) -> Result<EnqueueFrozenFeatureParityOutcome, StorageError> {
+        validate_new_run(&run)?;
+        if job.kind != ResearchJobKind::FeatureParity {
+            return Err(StorageError::invariant_violation(
+                Some(entity::QUANT_RESEARCH_JOB),
+                "parity run must be paired with a feature_parity research job",
+            ));
+        }
+        let expected_run_id = run.run_id.to_string();
+        if job
+            .params_json
+            .get("parity_run_id")
+            .and_then(serde_json::Value::as_str)
+            != Some(expected_run_id.as_str())
+        {
+            return Err(StorageError::invariant_violation(
+                Some(entity::QUANT_RESEARCH_JOB),
+                "feature_parity job params must reference the same parity_run_id",
+            ));
+        }
+        let txn = self.db.begin().await.map_err(StorageError::from)?;
+        let seeds = freeze_full_window(&txn, &run).await?;
+        if seeds.is_empty() {
+            txn.rollback().await.map_err(StorageError::from)?;
+            return Ok(EnqueueFrozenFeatureParityOutcome::NotEligible);
+        }
+        let run_id = run.run_id.clone();
+        let run_model = quant_feature_parity_run::Entity::insert(run.into_active_model())
+            .exec_with_returning(&txn)
+            .await
+            .map_err(|error| {
+                error::map_unique(error, entity::QUANT_FEATURE_PARITY_RUN, &expected_run_id)
+            })?;
+        insert_frozen_subjects(&txn, &run_id, seeds).await?;
+        let job_model = quant_research_job::Entity::insert(job.into_active_model())
+            .exec_with_returning(&txn)
+            .await
+            .map_err(StorageError::from)?;
+        txn.commit().await.map_err(StorageError::from)?;
+        Ok(EnqueueFrozenFeatureParityOutcome::Enqueued {
+            run: Box::new(run_model.into()),
+            job: Box::new(job_model.into()),
+        })
+    }
+
+    async fn load_frozen_subjects(
+        &self,
+        run_id: &FeatureParityRunId,
+    ) -> Result<Vec<FrozenFeatureParitySubject>, StorageError> {
+        let subjects = quant_feature_parity_subject::Entity::find()
+            .filter(quant_feature_parity_subject::Column::RunId.eq(run_id.clone()))
+            .order_by_asc(quant_feature_parity_subject::Column::DecisionAt)
+            .order_by_asc(quant_feature_parity_subject::Column::SubjectKind)
+            .order_by_asc(quant_feature_parity_subject::Column::ModelRunId)
+            .order_by_asc(quant_feature_parity_subject::Column::RecommendationReportId)
+            .all(&self.db)
+            .await
+            .map_err(StorageError::from)?;
+        let candidates = subjects
+            .load_many(quant_feature_parity_candidate::Entity, &self.db)
+            .await
+            .map_err(StorageError::from)?;
+        subjects
+            .into_iter()
+            .zip(candidates)
+            .map(|(subject, mut candidates)| {
+                candidates.sort_by_key(|candidate| candidate.ordinal);
+                let subject_id = match (
+                    subject.subject_kind,
+                    subject.model_run_id,
+                    subject.recommendation_report_id,
+                    subject.model_version_id,
+                    subject.training_dataset_id,
+                ) {
+                    (ParitySubjectKind::ModelRun, Some(id), None, None, None) => {
+                        FrozenFeatureParitySubjectId::ModelRun(id)
+                    }
+                    (ParitySubjectKind::RecommendationReport, None, Some(id), None, None) => {
+                        FrozenFeatureParitySubjectId::RecommendationReport(id)
+                    }
+                    (
+                        ParitySubjectKind::ModelVersion,
+                        None,
+                        None,
+                        Some(model_version_id),
+                        Some(training_dataset_id),
+                    ) => FrozenFeatureParitySubjectId::ModelVersion {
+                        model_version_id,
+                        training_dataset_id,
+                    },
+                    _ => {
+                        return Err(StorageError::invariant_violation(
+                            Some("quant_feature_parity_subject"),
+                            "subject kind and typed foreign-key identity disagree",
+                        ));
+                    }
+                };
+                Ok(FrozenFeatureParitySubject {
+                    subject_id,
+                    market_selection_id: subject.market_selection_id,
+                    subject_generation: subject.subject_generation,
+                    decision_at: subject.decision_at,
+                    selection_hash: subject.selection_hash,
+                    evidence_hash: subject.evidence_hash,
+                    candidates: candidates
+                        .into_iter()
+                        .map(|candidate| FrozenFeatureParityCandidate {
+                            market_id: candidate.market_id,
+                            ordinal: candidate.ordinal,
+                            membership_hash: candidate.membership_hash,
+                        })
+                        .collect(),
+                })
+            })
+            .collect()
     }
 
     async fn find_run(
@@ -239,11 +746,11 @@ impl FeatureParityRepository for PgFeatureParityRepository {
         let result = quant_feature_parity_run::Entity::update_many()
             .col_expr(
                 quant_feature_parity_run::Column::Status,
-                column::pg_enum_value(&FeatureParityRunStatus::Running),
+                primitives::enum_value(&FeatureParityRunStatus::Running),
             )
             .col_expr(
                 quant_feature_parity_run::Column::StartedAt,
-                Expr::cust("COALESCE(started_at, NOW())"),
+                primitives::timestamp_once(quant_feature_parity_run::Column::StartedAt),
             )
             .filter(quant_feature_parity_run::Column::RunId.eq(run_id.clone()))
             .filter(
@@ -272,11 +779,15 @@ impl FeatureParityRepository for PgFeatureParityRepository {
     ) -> Result<FeatureParityRunInfo, StorageError> {
         validate_completion(&result)?;
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let finished_at = result.status.is_terminal().then(Utc::now);
+        let finished_at = if result.status.is_terminal() {
+            Expr::current_timestamp()
+        } else {
+            Expr::value(Option::<chrono::DateTime<Utc>>::None)
+        };
         let mut statement = quant_feature_parity_run::Entity::update_many()
             .col_expr(
                 quant_feature_parity_run::Column::Status,
-                column::pg_enum_value(&result.status),
+                primitives::enum_value(&result.status),
             )
             .col_expr(
                 quant_feature_parity_run::Column::TotalCount,
@@ -314,14 +825,11 @@ impl FeatureParityRepository for PgFeatureParityRepository {
                 quant_feature_parity_run::Column::FailureDetail,
                 Expr::value(result.failure_detail.clone()),
             )
-            .col_expr(
-                quant_feature_parity_run::Column::FinishedAt,
-                Expr::value(finished_at),
-            );
+            .col_expr(quant_feature_parity_run::Column::FinishedAt, finished_at);
         if result.status == FeatureParityRunStatus::PendingMaterialization {
             statement = statement.col_expr(
                 quant_feature_parity_run::Column::PendingSince,
-                Expr::cust("COALESCE(pending_since, NOW())"),
+                primitives::timestamp_once(quant_feature_parity_run::Column::PendingSince),
             );
         }
         let update = statement
@@ -357,7 +865,9 @@ impl FeatureParityRepository for PgFeatureParityRepository {
         let result = quant_feature_parity_run::Entity::update_many()
             .col_expr(
                 quant_feature_parity_run::Column::ContainmentCompletedAt,
-                Expr::cust("COALESCE(containment_completed_at, NOW())"),
+                primitives::timestamp_once(
+                    quant_feature_parity_run::Column::ContainmentCompletedAt,
+                ),
             )
             .filter(quant_feature_parity_run::Column::RunId.eq(run_id.clone()))
             .filter(quant_feature_parity_run::Column::Status.is_in([
@@ -399,10 +909,14 @@ impl FeatureParityRepository for PgFeatureParityRepository {
         transition: FeatureParityStateTransition,
         reason: String,
     ) -> Result<FeatureParityStateInfo, StorageError> {
-        if transition == FeatureParityStateTransition::GovernedAcknowledge {
+        if matches!(
+            transition,
+            FeatureParityStateTransition::BootstrapProof
+                | FeatureParityStateTransition::GovernedAcknowledge
+        ) {
             return Err(StorageError::invariant_violation(
                 Some(entity::QUANT_FEATURE_PARITY_STATE),
-                "opening the latch cannot use governed_acknowledge",
+                "opening the latch requires a failure transition",
             ));
         }
         let txn = self.db.begin().await.map_err(StorageError::from)?;
@@ -413,7 +927,8 @@ impl FeatureParityRepository for PgFeatureParityRepository {
                 FeatureParityRunStatus::Mismatched
             }
             FeatureParityStateTransition::IntegrityFailure => FeatureParityRunStatus::Failed,
-            FeatureParityStateTransition::GovernedAcknowledge => unreachable!(),
+            FeatureParityStateTransition::BootstrapProof
+            | FeatureParityStateTransition::GovernedAcknowledge => unreachable!(),
         };
         if cause.status != expected {
             return Err(StorageError::state_conflict(
@@ -715,11 +1230,11 @@ fn validate_bootstrap_recovery(run: &FeatureParityRunInfo) -> Result<(), Storage
             "bootstrap recovery run has no completion timestamp",
         )
     })?;
-    if finished_at <= run.created_at {
+    if finished_at < run.created_at {
         return Err(StorageError::state_conflict(
             entity::QUANT_FEATURE_PARITY_RUN,
             Some(&run.run_id),
-            "bootstrap recovery run must complete after it was initialized",
+            "bootstrap recovery run cannot complete before it was initialized",
         ));
     }
     Ok(())
@@ -891,14 +1406,7 @@ fn validate_recovery_scope(
 }
 
 async fn acquire_latch_lock(txn: &DatabaseTransaction) -> Result<(), StorageError> {
-    txn.execute(Statement::from_sql_and_values(
-        DatabaseBackend::Postgres,
-        "SELECT pg_advisory_xact_lock($1)",
-        [LATCH_ADVISORY_LOCK_KEY.into()],
-    ))
-    .await
-    .map_err(StorageError::from)?;
-    Ok(())
+    primitives::advisory_xact_lock(txn, LATCH_ADVISORY_LOCK_KEY).await
 }
 
 pub(super) async fn verify_clear_latch_generation(
@@ -926,6 +1434,83 @@ pub(super) async fn verify_clear_latch_generation(
         ));
     }
     Ok(())
+}
+
+pub(super) async fn resolve_publish_latch_generation(
+    txn: &DatabaseTransaction,
+    permit: PublishFeatureParityPermit,
+    recovery_run_id: &FeatureParityRunId,
+) -> Result<FeatureParityStateId, StorageError> {
+    acquire_latch_lock(txn).await?;
+    let current = current_state_on(txn).await?;
+    match permit {
+        PublishFeatureParityPermit::ExistingGeneration(expected_state_id) => {
+            let current = current.ok_or_else(|| {
+                StorageError::state_conflict(
+                    entity::QUANT_FEATURE_PARITY_STATE,
+                    Option::<&str>::None,
+                    "feature parity latch became uninitialized before model publish",
+                )
+            })?;
+            if current.state != FeatureParityLatchState::Clear
+                || current.state_id != expected_state_id
+            {
+                return Err(StorageError::state_conflict(
+                    entity::QUANT_FEATURE_PARITY_STATE,
+                    Some(&current.state_id),
+                    format!(
+                        "model publish permit {expected_state_id} is stale; current latch state is {} generation {}",
+                        current.state.as_str(),
+                        current.state_id
+                    ),
+                ));
+            }
+            Ok(current.state_id)
+        }
+        PublishFeatureParityPermit::InitializeFromProof {
+            actor,
+            acting_role,
+            reason,
+        } => {
+            if let Some(current) = current {
+                return Err(StorageError::state_conflict(
+                    entity::QUANT_FEATURE_PARITY_STATE,
+                    Some(&current.state_id),
+                    "bootstrap publish permit cannot replace an existing parity latch generation",
+                ));
+            }
+            if actor.trim().is_empty()
+                || acting_role
+                    .as_deref()
+                    .is_some_and(|role| role.trim().is_empty())
+                || reason.trim().is_empty()
+            {
+                return Err(StorageError::invariant_violation(
+                    Some(entity::QUANT_FEATURE_PARITY_STATE),
+                    "bootstrap publish actor/reason are required and acting_role cannot be blank",
+                ));
+            }
+            let recovery = require_run_on(txn, recovery_run_id).await?;
+            validate_recovery_run(&recovery)?;
+            validate_bootstrap_recovery(&recovery)?;
+            let state = NewFeatureParityState {
+                state_id: FeatureParityStateId::from_v7(),
+                state: FeatureParityLatchState::Clear,
+                transition: FeatureParityStateTransition::BootstrapProof,
+                cause_run_id: None,
+                recovery_run_id: Some(recovery_run_id.clone()),
+                previous_state_id: None,
+                actor: Some(actor),
+                acting_role,
+                reason,
+            };
+            quant_feature_parity_state::Entity::insert(state.into_active_model())
+                .exec_with_returning(txn)
+                .await
+                .map_err(StorageError::from)
+                .map(|state| state.state_id)
+        }
+    }
 }
 
 async fn append_open_state(
@@ -1324,10 +1909,14 @@ mod tests {
         assert!(validate_bootstrap_recovery(&recovery).is_err());
         recovery.report_id = None;
 
-        recovery.finished_at = Some(recovery.created_at);
+        recovery.finished_at = Some(recovery.created_at - Duration::microseconds(1));
         let error = validate_bootstrap_recovery(&recovery)
-            .expect_err("proof must finish after durable initialization");
-        assert!(error.to_string().contains("after it was initialized"));
+            .expect_err("proof must not finish before durable initialization");
+        assert!(error.to_string().contains("before it was initialized"));
+
+        recovery.finished_at = Some(recovery.created_at);
+        validate_bootstrap_recovery(&recovery)
+            .expect("equal PostgreSQL timestamp precision still represents a later transition");
     }
 
     #[test]

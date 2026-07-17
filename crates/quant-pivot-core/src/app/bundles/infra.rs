@@ -33,12 +33,12 @@ use quant_pivot_repository::{
 use super::pg_repos::PgRepositories;
 use quant_pivot_storage::{
     cache::{CacheManager, MokaBackend, RedisBackend, RedisPool, TieredCache, connect_pool},
-    clickhouse::{ChWriteManager, ClickHousePool, apply_online_schema_migrations, verify_schema},
-    postgres::{
-        PostgresPool,
-        migration::{Migrator, MigratorTrait},
+    clickhouse::{ChWriteManager, ClickHousePool, verify_schema as verify_clickhouse_schema},
+    postgres::{PostgresPool, migration::verify_schema as verify_postgres_schema},
+    write::{
+        AsyncWriter, AsyncWriterConfig, AsyncWriterObservability, DurableWriter,
+        DurableWriterConfig,
     },
-    write::{AsyncWriter, AsyncWriterConfig, AsyncWriterObservability, DurableWriter},
 };
 use quant_pivot_web::jwt::RedisTokenBlacklist;
 use std::{sync::Arc, time::Duration};
@@ -134,26 +134,22 @@ async fn connect_persistence(
     deploy: &DeployConfig,
     metrics: &MetricsHub,
 ) -> QuantResult<PersistenceConnections> {
-    let pg = Arc::new(PostgresPool::connect(&deploy.db.postgres).await?);
-    Migrator::up(pg.connection(), None).await?;
+    let pg = Arc::new(PostgresPool::connect_existing(&deploy.db.postgres).await?);
+    let pg_schema = verify_postgres_schema(pg.connection()).await?;
+    tracing::info!(
+        schema_version = pg_schema.current_version,
+        migrations = pg_schema.migration_count,
+        required_tables = pg_schema.required_table_count,
+        required_indexes = pg_schema.required_index_count,
+        "PostgreSQL runtime schema verified"
+    );
 
-    if deploy.db.clickhouse.migration.auto_apply_online {
-        let migration_config = deploy.db.clickhouse.migration_connection();
-        let schema = apply_online_schema_migrations(&migration_config).await?;
-        tracing::info!(
-            schema_version = schema.current_version,
-            required_objects = schema.required_object_count,
-            dedicated_identity = deploy.db.clickhouse.migration.user.is_some(),
-            "ClickHouse online-safe schema migrations completed during startup"
-        );
-    } else {
-        let schema = verify_schema(&deploy.db.clickhouse).await?;
-        tracing::info!(
-            schema_version = schema.current_version,
-            required_objects = schema.required_object_count,
-            "ClickHouse automatic migration disabled; existing schema verified"
-        );
-    }
+    let schema = verify_clickhouse_schema(&deploy.db.clickhouse).await?;
+    tracing::info!(
+        schema_version = schema.current_version,
+        required_objects = schema.required_object_count,
+        "ClickHouse runtime schema verified before pool initialization"
+    );
 
     let ch = Arc::new(ClickHousePool::connect(&deploy.db.clickhouse).await?);
     let schema = ch.verify_schema().await?;
@@ -182,7 +178,7 @@ async fn connect_persistence(
         redis.clone(),
         &deploy.cache.redis.key_prefix,
     ));
-    let repos = PgRepositories::wire(&pg, &deploy.market_data.gamma);
+    let repos = PgRepositories::wire(&pg);
     let ingest_lag_tracker = Arc::new(IngestPipelineLagTracker::new());
     let ch_write_manager = Arc::new(ChWriteManager::new(
         deploy.db.clickhouse.max_concurrent_inserts,
@@ -290,11 +286,17 @@ fn build_book_fact_writer(
     let queue = PendingTaskQueue::default();
     let capacity = ch.batch_size.saturating_mul(4).max(8_192);
     let flush_interval = Duration::from_secs(ch.flush_interval_secs.max(1));
-    let config = |name: &'static str| {
+    let async_config = |name: &'static str| {
         AsyncWriterConfig::new(name)
             .capacity(capacity)
             .batch_size(ch.batch_size)
             .flush_interval(flush_interval)
+    };
+    let durable_config = |name: &'static str| {
+        DurableWriterConfig::new(name)
+            .capacity(capacity)
+            .max_batch_size(ch.batch_size.min(256))
+            .max_batch_delay(Duration::from_millis(5))
     };
     let drops = |name: &'static str| metrics.async_writer_dropped.with_label_values(&[name]);
     // Observability that also feeds the enqueue→flush pipeline lag into the
@@ -319,7 +321,7 @@ fn build_book_fact_writer(
             "quant_book_stream_session",
         )),
         lag_obs("quant_book_stream_session"),
-        config("quant_book_stream_session"),
+        durable_config("quant_book_stream_session"),
     );
     let l2 = spawn_durable_fact_stream::<BookL2EventRow>(
         &queue,
@@ -330,7 +332,7 @@ fn build_book_fact_writer(
             "quant_book_l2_event",
         )),
         lag_obs("quant_book_l2_event"),
-        config("quant_book_l2_event"),
+        durable_config("quant_book_l2_event"),
     );
     let checkpoints = spawn_durable_fact_stream::<BookL2CheckpointRow>(
         &queue,
@@ -341,7 +343,7 @@ fn build_book_fact_writer(
             "quant_book_l2_checkpoint",
         )),
         lag_obs("quant_book_l2_checkpoint"),
-        config("quant_book_l2_checkpoint"),
+        durable_config("quant_book_l2_checkpoint"),
     );
     let trades = spawn_durable_fact_stream::<TradeTapeRow>(
         &queue,
@@ -352,7 +354,7 @@ fn build_book_fact_writer(
             "quant_trade_tape",
         )),
         lag_obs("quant_trade_tape"),
-        config("quant_trade_tape"),
+        durable_config("quant_trade_tape"),
     );
     let microstructure = spawn_fact_stream::<BookMicrostructureRow>(
         &queue,
@@ -364,7 +366,7 @@ fn build_book_fact_writer(
         )),
         drops("book_microstructure_1s"),
         lag_obs("book_microstructure_1s"),
-        config("book_microstructure_1s"),
+        async_config("book_microstructure_1s"),
     );
     let resolutions = spawn_fact_stream::<MarketResolutionRow>(
         &queue,
@@ -376,7 +378,7 @@ fn build_book_fact_writer(
         )),
         drops("market_resolution_event"),
         lag_obs("market_resolution_event"),
-        config("market_resolution_event"),
+        async_config("market_resolution_event"),
     );
 
     let writer = Arc::new(BookFactWriter::new(
@@ -706,7 +708,7 @@ fn spawn_durable_fact_stream<T>(
     task: TaskId,
     sink: Arc<dyn FactWriter<T>>,
     observability: AsyncWriterObservability,
-    config: AsyncWriterConfig,
+    config: DurableWriterConfig,
 ) -> Arc<DurableWriter<T>>
 where
     T: Send + 'static,

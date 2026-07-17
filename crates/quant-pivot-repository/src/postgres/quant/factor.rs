@@ -1,7 +1,9 @@
 //! Postgres-backed factor definition + value repository.
 
 use crate::{
-    postgres::{error, quant::condition_wake::notify_input_change, query::paginate_mapped},
+    postgres::{
+        error, primitives, quant::condition_wake::notify_input_change, query::paginate_mapped,
+    },
     traits::FactorRepository,
 };
 use std::{
@@ -20,13 +22,11 @@ use quant_pivot_models::{
     entities::{quant_factor_definition, quant_factor_value, quant_model_run},
     enums::{factor::FactorValueState, quant::PublicationStatus},
     hashing::CanonicalDigest,
-    schema::column,
     types::{FactorDefinitionId, MarketId, ModelRunId, ModelVersionId},
 };
 use sea_orm::{
-    ActiveModelTrait, ActiveValue, ColumnTrait, Condition, ConnectionTrait, DatabaseBackend,
-    DatabaseConnection, DatabaseTransaction, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder,
-    QuerySelect, SqlErr, Statement, TransactionTrait,
+    ActiveModelTrait, ActiveValue, ColumnTrait, Condition, DatabaseConnection, DatabaseTransaction,
+    EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, QuerySelect, SqlErr, TransactionTrait,
 };
 
 /// Postgres-backed factor repository: immutable, content-addressed definition
@@ -558,8 +558,17 @@ async fn publish_definition_revisions(
         .map_err(StorageError::from)?;
     let locked_by_id = definitions_by_id(locked);
     validate_publish_transitions(factor_definition_ids, &locked_by_id)?;
+    let newly_published_ids = factor_definition_ids
+        .iter()
+        .filter(|id| {
+            locked_by_id
+                .get(*id)
+                .is_some_and(|row| row.status != PublicationStatus::Published)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
     replace_published_revisions(&txn, factor_definition_ids, &locked_by_id).await?;
-    let published = load_published_batch(&txn, factor_definition_ids).await?;
+    let published = load_published_batch(&txn, &newly_published_ids).await?;
     txn.commit().await.map_err(StorageError::from)?;
     Ok(published)
 }
@@ -648,7 +657,7 @@ async fn replace_published_revisions(
         quant_factor_definition::Entity::update_many()
             .col_expr(
                 quant_factor_definition::Column::Status,
-                column::pg_enum_value(&PublicationStatus::Retired),
+                primitives::enum_value(&PublicationStatus::Retired),
             )
             .filter(quant_factor_definition::Column::Name.eq(target.name.clone()))
             .filter(quant_factor_definition::Column::FactorDefinitionId.ne(id.clone()))
@@ -697,14 +706,7 @@ async fn acquire_factor_publication_lock(
     txn: &DatabaseTransaction,
     logical_name: &str,
 ) -> Result<(), StorageError> {
-    txn.execute(Statement::from_sql_and_values(
-        DatabaseBackend::Postgres,
-        "SELECT pg_advisory_xact_lock(hashtextextended($1, 8609321192504036405))",
-        [logical_name.into()],
-    ))
-    .await
-    .map_err(StorageError::from)?;
-    Ok(())
+    primitives::advisory_text_xact_lock(txn, logical_name, 8_609_321_192_504_036_405).await
 }
 
 async fn update_definition_status(

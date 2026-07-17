@@ -6,6 +6,7 @@
 // Crate-internal helpers.
 pub mod arc_repo;
 pub(crate) mod error;
+pub(crate) mod primitives;
 pub(crate) mod query;
 pub(crate) mod state_hash;
 pub(crate) mod write;

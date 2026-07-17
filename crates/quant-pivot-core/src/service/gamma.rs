@@ -7,42 +7,54 @@ use crate::{
     },
     observability::metrics_hub::MetricsHub,
     service::{
-        catalog_lifecycle::apply_past_deadline_to_sync_batch, catalog_readiness::CatalogReadiness,
+        catalog_lifecycle::apply_past_deadline_to_catalog, catalog_readiness::CatalogReadiness,
         system_status_nudge::SystemStatusNudge, ws_subscription::WsSubscriptionCoordinator,
     },
 };
 use chrono::{DateTime, Utc};
 use num_traits::ToPrimitive;
 use quant_pivot_api::{
-    gamma::{CatalogSourceTimestamps, GammaClient, RejectedMarket},
+    gamma::{
+        CatalogMarketReject, CatalogSourceTimestamps, FilteredPrelistingMarket, GammaCatalogBatch,
+        GammaClient, RejectedMarket,
+    },
     ws::TOKEN_INTERN,
 };
-use quant_pivot_error::{QuantError, market::MarketError};
+use quant_pivot_error::{QuantError, api::ApiError, market::MarketError, storage::StorageError};
 use quant_pivot_models::{
     domain::{
-        CATALOG_ORIGIN_GAMMA_SYNC, CatalogCommit, CatalogStatusPort, CatalogSyncFailureStage,
-        CatalogSyncKind, CatalogTimestampQuality, CoreEvent, CoreEventPublisher,
-        NewCatalogSyncBatch, NewEventCatalogVersion, NewFailedCatalogSyncBatch,
-        NewMarketCatalogVersion,
-        market::{EventRegistryInfo, MarketRegistryInfo, UpsertEvent, UpsertMarket},
+        CATALOG_OBJECT_SCHEMA_VERSION, CatalogBatchCommit, CatalogBatchFailure,
+        CatalogEventCandidate, CatalogMarketCandidate, CatalogStatusPort, CoreEvent,
+        CoreEventPublisher, DecisionClock, NewCatalogEventChange, NewCatalogEventObject,
+        NewCatalogMarketObject, NewCatalogSyncBatch, NewCatalogSyncRejection,
+        market::{EventRegistryInfo, EventTags, MarketRegistryInfo, UpsertEvent, UpsertMarket},
     },
-    enums::market::MarketStatus,
+    enums::{
+        catalog::{
+            CatalogChangeType, CatalogEntityKind, CatalogRejectionReason, CatalogSyncFailureStage,
+            CatalogSyncKind, CatalogTimestampQuality,
+        },
+        market::MarketStatus,
+    },
     hashing::CanonicalDigest,
     types::{
-        CatalogSyncBatchId, ContentHash, EventCatalogVersionId, EventId, MarketCatalogVersionId,
+        CatalogEventChangeId, CatalogEventObjectId, CatalogMarketChangeId, CatalogMarketIds,
+        CatalogMarketObjectId, CatalogSyncBatchId, CatalogSyncRejectionId, ContentHash, EventId,
         MarketId,
     },
 };
-use quant_pivot_repository::traits::{CatalogVersionRepository, MarketRepository};
+use quant_pivot_repository::traits::{CatalogLedgerRepository, MarketRepository};
 use quant_pivot_storage::cache::{CacheKey, CacheManager};
-use serde::Serialize;
+use serde::{Serialize, de::DeserializeOwned};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
+    mem,
     sync::Arc,
     time::Instant,
 };
+use tokio::sync::Notify;
+use tokio_util::sync::CancellationToken;
 
-const INCREMENTAL_FETCH_CONCURRENCY: usize = 10;
 /// Only publish `market.resolved` for settlements whose `resolved_at` falls
 /// within this window — filters historical reconciliation during full sync.
 const LIVE_RESOLUTION_WINDOW: chrono::Duration = chrono::Duration::hours(48);
@@ -54,7 +66,7 @@ pub struct GammaServiceDeps {
     pub market_cache: Arc<MarketCache>,
     pub market_filter: Arc<MarketFilter>,
     pub market_repo: Arc<dyn MarketRepository>,
-    pub catalog_version_repo: Arc<dyn CatalogVersionRepository>,
+    pub catalog_ledger_repo: Arc<dyn CatalogLedgerRepository>,
     pub cache: Arc<CacheManager>,
     pub metrics: Arc<MetricsHub>,
     pub catalog: Arc<CatalogReadiness>,
@@ -66,8 +78,6 @@ pub struct GammaServiceDeps {
     pub status_nudge: SystemStatusNudge,
     /// WS subscription look-ahead window (hours) from deploy config.
     pub subscription_window_hours: u64,
-    /// Minimum seconds between full catalog refreshes (from `[market_data.gamma]`).
-    pub full_sync_interval_secs: u64,
     /// Offline linkage resolver — runs after successful sync (Phase 11.2.2).
     pub linkage_resolver: Option<Arc<LinkageResolverService>>,
 }
@@ -78,7 +88,7 @@ pub struct GammaService {
     market_cache: Arc<MarketCache>,
     market_filter: Arc<MarketFilter>,
     market_repo: Arc<dyn MarketRepository>,
-    catalog_version_repo: Arc<dyn CatalogVersionRepository>,
+    catalog_ledger_repo: Arc<dyn CatalogLedgerRepository>,
     cache: Arc<CacheManager>,
     metrics: Arc<MetricsHub>,
     catalog: Arc<CatalogReadiness>,
@@ -86,9 +96,8 @@ pub struct GammaService {
     events: CoreEventPublisher,
     status_nudge: SystemStatusNudge,
     subscription_window_hours: u64,
-    full_sync_interval_secs: u64,
     linkage_resolver: Option<Arc<LinkageResolverService>>,
-    last_sync_at: parking_lot::Mutex<Option<DateTime<Utc>>>,
+    linkage_wake: Arc<Notify>,
 }
 
 impl GammaService {
@@ -99,7 +108,7 @@ impl GammaService {
             market_cache: deps.market_cache,
             market_filter: deps.market_filter,
             market_repo: deps.market_repo,
-            catalog_version_repo: deps.catalog_version_repo,
+            catalog_ledger_repo: deps.catalog_ledger_repo,
             cache: deps.cache,
             metrics: deps.metrics,
             catalog: deps.catalog,
@@ -107,9 +116,8 @@ impl GammaService {
             events: deps.events,
             status_nudge: deps.status_nudge,
             subscription_window_hours: deps.subscription_window_hours,
-            full_sync_interval_secs: deps.full_sync_interval_secs.max(60),
             linkage_resolver: deps.linkage_resolver,
-            last_sync_at: parking_lot::Mutex::new(None),
+            linkage_wake: Arc::new(Notify::new()),
         }
     }
 
@@ -132,11 +140,21 @@ impl GammaService {
     }
 
     fn trigger_linkage_resolution(&self) {
+        if self.linkage_resolver.is_some() {
+            self.linkage_wake.notify_one();
+        }
+    }
+
+    pub async fn run_linkage_resolver(&self, shutdown: CancellationToken) {
         let Some(resolver) = self.linkage_resolver.as_ref() else {
             return;
         };
-        let resolver = Arc::clone(resolver);
-        tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                biased;
+                () = shutdown.cancelled() => return,
+                () = self.linkage_wake.notified() => {}
+            }
             match resolver.resolve_changed_markets(&[]).await {
                 Ok(summary) => {
                     tracing::info!(
@@ -152,11 +170,11 @@ impl GammaService {
                     tracing::warn!(%error, "linkage resolver pass failed after gamma sync");
                 }
             }
-        });
+        }
     }
 
     fn publish_catalog_ready(&self) {
-        let synced_at = (*self.last_sync_at.lock()).unwrap_or_else(Utc::now);
+        let synced_at = Utc::now();
         let markets =
             u64::try_from(self.market_registry.active_markets().len()).unwrap_or(u64::MAX);
         self.catalog.mark_ready(markets, synced_at);
@@ -165,75 +183,93 @@ impl GammaService {
     }
 
     async fn sync_inner(&self) -> Result<(), QuantError> {
-        let now = Utc::now();
-        let last = *self.last_sync_at.lock();
-        let needs_full = last.is_none_or(|t| {
-            (now - t).num_seconds()
-                > i64::try_from(self.full_sync_interval_secs).unwrap_or(i64::MAX)
-        });
-
-        let (sync_kind, source_cursor) = if needs_full {
-            (CatalogSyncKind::Full, None)
-        } else if let Some(since) = last {
-            (CatalogSyncKind::Incremental, Some(since))
+        let sync_kind = if self.catalog_ledger_repo.coverage_start().await?.is_some() {
+            CatalogSyncKind::Reconcile
         } else {
-            return Ok(());
+            CatalogSyncKind::Baseline
         };
         let attempt = CatalogSyncAttempt {
             batch_id: CatalogSyncBatchId::from_v7(),
             sync_kind,
-            source_cursor,
             started_at: Utc::now(),
         };
-        let result = match source_cursor {
-            None => self.full_sync(&attempt).await,
-            Some(since) => self.incremental_sync(&attempt, since).await,
-        };
-        if let Err(error) = result {
-            let stage = catalog_failure_stage(&error);
+        let result = self.full_sync(&attempt).await;
+        if let Err(failure) = result {
+            let stage = catalog_failure_stage(&failure.error);
             if let Err(audit_error) = self
-                .catalog_version_repo
-                .record_failure(NewFailedCatalogSyncBatch {
+                .catalog_ledger_repo
+                .record_failure(CatalogBatchFailure {
                     catalog_sync_batch_id: attempt.batch_id,
-                    sync_kind: attempt.sync_kind.as_str().to_owned(),
-                    source_cursor: attempt.source_cursor,
+                    sync_kind: attempt.sync_kind,
                     started_at: attempt.started_at,
-                    fetched_at: None,
+                    fetched_at: failure.fetched_at,
                     failure_stage: stage,
-                    failure_detail: error.to_string(),
+                    failure_detail: failure.error.to_string(),
+                    rejections: failure.rejections,
                 })
                 .await
             {
                 tracing::error!(
-                    sync_error = %error,
+                    sync_error = %failure.error,
                     audit_error = %audit_error,
                     "gamma sync failed and its catalog attempt audit could not be persisted"
                 );
                 return Err(audit_error.into());
             }
-            return Err(error);
+            return Err(failure.error);
         }
 
-        *self.last_sync_at.lock() = Some(Utc::now());
-        self.cache.invalidate(&CacheKey::ActiveMarkets).await;
         Ok(())
     }
 
-    async fn full_sync(&self, attempt: &CatalogSyncAttempt) -> Result<(), QuantError> {
+    async fn full_sync(&self, attempt: &CatalogSyncAttempt) -> Result<(), CatalogSyncFailure> {
         let mut batch = self
             .gamma_client
             .full_sync_with_fees()
             .await
-            .map_err(QuantError::from)?;
+            .map_err(CatalogSyncFailure::from)?;
         let fetched_at = Utc::now();
 
-        let event_count = batch.registry_events.len();
-        let market_count = batch.registry_markets.len();
+        let filtered_count = batch.filtered.len();
+        self.record_prelisting_filters(&batch.filtered);
         let rejected_count = batch.rejected.len();
-
-        if market_count == 0 {
-            return Err(MarketError::EmptyCatalog.into());
+        if rejected_count != 0 {
+            self.record_rejections(&batch.rejected);
+            return Err(CatalogSyncFailure {
+                error: MarketError::CatalogInputRejected {
+                    count: rejected_count,
+                }
+                .into(),
+                fetched_at: Some(fetched_at),
+                rejections: build_catalog_rejections(&attempt.batch_id, &batch.rejected),
+            });
         }
+
+        if batch.registry_markets.is_empty() {
+            return Err(CatalogSyncFailure::at(
+                MarketError::EmptyCatalog.into(),
+                fetched_at,
+            ));
+        }
+
+        reject_duplicate_catalog_ids(
+            "event",
+            sorted_ids(
+                batch
+                    .registry_events
+                    .iter()
+                    .map(|event| event.event_id.as_str()),
+            ),
+        )?;
+        reject_duplicate_catalog_ids(
+            "market",
+            sorted_ids(
+                batch
+                    .registry_markets
+                    .iter()
+                    .map(|market| market.market_id.as_str()),
+            ),
+        )?;
 
         let seen_ids: HashSet<MarketId> = batch
             .registry_markets
@@ -241,17 +277,25 @@ impl GammaService {
             .map(|m| m.market_id.clone())
             .collect();
 
-        let now = Utc::now();
         let past_deadline_paused =
-            apply_past_deadline_to_sync_batch(&mut batch.registry_markets, &mut batch.markets, now);
-        self.preserve_manual_blocks(&mut batch.registry_markets, &mut batch.markets)
+            apply_past_deadline_to_catalog(&mut batch.registry_markets, fetched_at);
+        let mut event_mutations = HashMap::new();
+        let mut market_mutations = HashMap::new();
+        let tombstoned_count = if attempt.sync_kind == CatalogSyncKind::Reconcile {
+            self.reconcile_missing_markets(
+                &mut batch,
+                &seen_ids,
+                fetched_at,
+                &mut event_mutations,
+                &mut market_mutations,
+            )
+            .await?
+        } else {
+            0
+        };
+        coalesce_catalog_batch(&mut batch);
+        self.preserve_manual_blocks(&mut batch.registry_markets)
             .await?;
-
-        let deactivated = self.collect_stale_markets(&seen_ids);
-        let deactivated_count = deactivated.len();
-        let deactivated_upserts = convert_registry_to_upsert(&deactivated);
-        batch.registry_markets.extend(deactivated);
-        batch.markets.extend(deactivated_upserts);
         self.append_missing_registry_events(&mut batch.registry_events, &batch.registry_markets);
 
         let newly_settled = self
@@ -259,19 +303,17 @@ impl GammaService {
             .await?;
         let commit = build_catalog_commit(CatalogCommitInput {
             batch_id: attempt.batch_id.clone(),
-            sync_kind: CatalogSyncKind::Full,
-            source_cursor: None,
+            sync_kind: attempt.sync_kind,
             started_at: attempt.started_at,
             fetched_at,
-            rejected_count: batch.rejected.len(),
-            current_events: batch.events,
             registry_events: &batch.registry_events,
             event_source_timestamps: &batch.event_source_timestamps,
-            current_markets: batch.markets,
             registry_markets: &batch.registry_markets,
             market_source_timestamps: &batch.market_source_timestamps,
+            event_mutations: &event_mutations,
+            market_mutations: &market_mutations,
         })?;
-        self.catalog_version_repo.commit(commit).await?;
+        self.catalog_ledger_repo.commit(commit).await?;
         self.invalidate_projection_cache(&batch.registry_events, &batch.registry_markets)
             .await;
 
@@ -284,20 +326,21 @@ impl GammaService {
         self.market_cache.rebuild();
         self.sync_ws_subscriptions();
 
-        self.record_rejections(&batch.rejected);
         if past_deadline_paused > 0 {
             self.metrics
                 .gamma_markets_paused
                 .with_label_values(&["past_deadline"])
                 .inc_by(past_deadline_paused);
         }
-        if deactivated_count > 0 {
+        if tombstoned_count > 0 {
             self.metrics
                 .gamma_markets_paused
-                .with_label_values(&["stale_catalog"])
-                .inc_by(u64::try_from(deactivated_count).unwrap_or(u64::MAX));
+                .with_label_values(&["gamma_tombstone"])
+                .inc_by(u64::try_from(tombstoned_count).unwrap_or(u64::MAX));
         }
 
+        let event_count = batch.registry_events.len();
+        let market_count = batch.registry_markets.len();
         self.metrics
             .gamma_markets_total
             .set(ToPrimitive::to_i64(&market_count).unwrap_or(i64::MAX));
@@ -305,114 +348,11 @@ impl GammaService {
         tracing::info!(
             events = event_count,
             registered = market_count,
+            filtered = filtered_count,
             rejected = rejected_count,
-            deactivated = deactivated_count,
-            "gamma full sync complete"
-        );
-
-        Ok(())
-    }
-
-    async fn incremental_sync(
-        &self,
-        attempt: &CatalogSyncAttempt,
-        since: DateTime<Utc>,
-    ) -> Result<(), QuantError> {
-        let mut batch = self
-            .gamma_client
-            .incremental_sync_with_fees(since)
-            .await
-            .map_err(QuantError::from)?;
-        let fetched_at = Utc::now();
-
-        let embedded_ids: HashSet<MarketId> = batch
-            .registry_markets
-            .iter()
-            .map(|m| m.market_id.clone())
-            .collect();
-
-        let missing_ids = collect_missing_market_ids(&batch.registry_events, &embedded_ids);
-        let mut extra_registry = Vec::new();
-        let extra_upserts = if missing_ids.is_empty() {
-            Vec::new()
-        } else {
-            let fetched = self
-                .gamma_client
-                .fetch_markets_bounded(&missing_ids, INCREMENTAL_FETCH_CONCURRENCY)
-                .await;
-
-            for (market_id, result) in missing_ids.into_iter().zip(fetched) {
-                match result {
-                    Ok(market) => {
-                        batch
-                            .market_source_timestamps
-                            .insert(market_id, market.source_timestamps);
-                        extra_registry.push(market.registry);
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            market_id = %market_id,
-                            error = %e,
-                            "failed to fetch market during incremental sync"
-                        );
-                    }
-                }
-            }
-            convert_registry_to_upsert(&extra_registry)
-        };
-
-        let mut all_registry = batch.registry_markets;
-        all_registry.extend(extra_registry);
-
-        let now = Utc::now();
-        let mut persist_upserts: Vec<UpsertMarket> = batch.markets;
-        persist_upserts.extend(extra_upserts);
-        let past_deadline_paused =
-            apply_past_deadline_to_sync_batch(&mut all_registry, &mut persist_upserts, now);
-        self.preserve_manual_blocks(&mut all_registry, &mut persist_upserts)
-            .await?;
-
-        let registered = all_registry.len();
-        let newly_settled = self.detect_settlement_transitions(&all_registry).await?;
-        let commit = build_catalog_commit(CatalogCommitInput {
-            batch_id: attempt.batch_id.clone(),
-            sync_kind: CatalogSyncKind::Incremental,
-            source_cursor: Some(since),
-            started_at: attempt.started_at,
-            fetched_at,
-            rejected_count: batch.rejected.len(),
-            current_events: batch.events,
-            registry_events: &batch.registry_events,
-            event_source_timestamps: &batch.event_source_timestamps,
-            current_markets: persist_upserts,
-            registry_markets: &all_registry,
-            market_source_timestamps: &batch.market_source_timestamps,
-        })?;
-        self.catalog_version_repo.commit(commit).await?;
-        self.invalidate_projection_cache(&batch.registry_events, &all_registry)
-            .await;
-
-        self.market_registry
-            .register_events(batch.registry_events.clone());
-        prewarm_token_intern(&all_registry);
-        self.market_registry.register_markets(all_registry);
-        self.publish_market_resolutions(newly_settled);
-        self.market_cache.rebuild();
-        self.sync_ws_subscriptions();
-
-        self.record_rejections(&batch.rejected);
-        if past_deadline_paused > 0 {
-            self.metrics
-                .gamma_markets_paused
-                .with_label_values(&["past_deadline"])
-                .inc_by(past_deadline_paused);
-        }
-
-        tracing::info!(
-            events = batch.registry_events.len(),
-            registered,
-            rejected = batch.rejected.len(),
-            "gamma incremental sync complete"
+            tombstoned = tombstoned_count,
+            sync_kind = %attempt.sync_kind,
+            "gamma catalog reconciliation complete"
         );
 
         Ok(())
@@ -425,6 +365,15 @@ impl GammaService {
             self.metrics
                 .gamma_markets_rejected
                 .with_label_values(&[rejection.reject.reason_label()])
+                .inc();
+        }
+    }
+
+    fn record_prelisting_filters(&self, filtered: &[FilteredPrelistingMarket]) {
+        for market in filtered {
+            self.metrics
+                .gamma_markets_filtered
+                .with_label_values(&[market.reason.as_str()])
                 .inc();
         }
     }
@@ -509,12 +458,10 @@ impl GammaService {
     async fn preserve_manual_blocks(
         &self,
         registry_markets: &mut [MarketRegistryInfo],
-        upsert_markets: &mut [UpsertMarket],
     ) -> Result<(), QuantError> {
         let ids = registry_markets
             .iter()
             .map(|market| market.market_id.clone())
-            .chain(upsert_markets.iter().map(|market| market.market_id.clone()))
             .collect::<Vec<_>>();
         if ids.is_empty() {
             return Ok(());
@@ -535,28 +482,93 @@ impl GammaService {
                 market.status = MarketStatus::ManuallyBlocked;
             }
         }
-        for market in upsert_markets {
-            if blocked.contains(market.market_id.as_str()) {
-                market.status = MarketStatus::ManuallyBlocked;
-            }
-        }
         Ok(())
     }
 
-    /// Compute stale entries without mutating the live registry. The returned
-    /// projection is published only after the ledger transaction commits.
-    fn collect_stale_markets(&self, seen_ids: &HashSet<MarketId>) -> Vec<MarketRegistryInfo> {
-        self.market_registry
-            .active_markets()
+    async fn reconcile_missing_markets(
+        &self,
+        batch: &mut GammaCatalogBatch,
+        seen_ids: &HashSet<MarketId>,
+        fetched_at: DateTime<Utc>,
+        event_mutations: &mut HashMap<EventId, CatalogMutation>,
+        market_mutations: &mut HashMap<MarketId, CatalogMutation>,
+    ) -> Result<usize, CatalogSyncFailure> {
+        let missing_ids = self
+            .market_repo
+            .find_active()
+            .await?
             .iter()
-            .filter(|market_id| !seen_ids.contains(*market_id))
-            .filter_map(|market_id| self.market_registry.get_market(market_id))
-            .map(|market| {
-                let mut market = (*market).clone();
-                market.status = MarketStatus::Paused;
-                market
-            })
-            .collect()
+            .map(|market| market.market_id.clone())
+            .filter(|market_id| !seen_ids.contains(market_id))
+            .collect::<Vec<_>>();
+        let results = self
+            .gamma_client
+            .fetch_markets_bounded(&missing_ids, 8)
+            .await;
+        let mut tombstoned = 0_usize;
+        let boundary = DecisionClock::new(0).boundary(fetched_at)?;
+        for (market_id, result) in results {
+            match result {
+                Ok(mut fetched) => {
+                    if fetched.event.market_ids.is_empty()
+                        && let Some(previous_event) =
+                            self.market_registry.get_event(&fetched.event.event_id)
+                    {
+                        fetched.event.market_ids = previous_event.market_ids;
+                    }
+                    batch.registry_events.push(fetched.event.clone());
+                    batch.registry_markets.push(fetched.registry.clone());
+                    batch.event_source_timestamps.insert(
+                        fetched.event.event_id.clone(),
+                        fetched.event_source_timestamps,
+                    );
+                    batch.market_source_timestamps.insert(
+                        fetched.registry.market_id.clone(),
+                        fetched.source_timestamps,
+                    );
+                    event_mutations.insert(fetched.event.event_id, CatalogMutation::recheck());
+                    market_mutations.insert(market_id, CatalogMutation::recheck());
+                }
+                Err(error) if api_error_is_not_found(&error) => {
+                    let prior = self
+                        .catalog_ledger_repo
+                        .market_at(&market_id, &boundary)
+                        .await?
+                        .ok_or_else(|| MarketError::CatalogSerialization {
+                            entity: "market",
+                            id: market_id.to_string(),
+                            reason: "active projection has no immutable catalog object".to_owned(),
+                        })?;
+                    let mut tombstone: MarketRegistryInfo =
+                        decode_catalog_payload("market", market_id.as_str(), prior.payload)?;
+                    tombstone.status = MarketStatus::Delisted;
+                    let event_id = tombstone.event_id.clone();
+                    batch.registry_markets.push(tombstone);
+                    let prior_event = self
+                        .catalog_ledger_repo
+                        .event_at(&event_id, &boundary)
+                        .await?
+                        .ok_or_else(|| MarketError::MissingEventVersion {
+                            market_id: market_id.to_string(),
+                            event_id: event_id.to_string(),
+                        })?;
+                    batch.registry_events.push(decode_catalog_payload(
+                        "event",
+                        event_id.as_str(),
+                        prior_event.payload,
+                    )?);
+                    market_mutations.insert(market_id, CatalogMutation::tombstone());
+                    tombstoned += 1;
+                }
+                Err(error) if error.is_retryable() => {
+                    return Err(CatalogSyncFailure::at(error.into(), fetched_at));
+                }
+                Err(error) => {
+                    return Err(CatalogSyncFailure::at(error.into(), fetched_at));
+                }
+            }
+        }
+        Ok(tombstoned)
     }
 
     /// Stale markets can belong to events absent from the new full response.
@@ -606,128 +618,198 @@ impl GammaService {
                 })
                 .await;
         }
-        self.cache.invalidate(&CacheKey::ActiveMarkets).await;
     }
+}
+
+fn decode_catalog_payload<T: DeserializeOwned>(
+    entity: &'static str,
+    id: &str,
+    payload: serde_json::Value,
+) -> Result<T, MarketError> {
+    serde_json::from_value(payload).map_err(|error| MarketError::CatalogSerialization {
+        entity,
+        id: id.to_owned(),
+        reason: error.to_string(),
+    })
 }
 
 #[derive(Debug, Clone)]
 struct CatalogSyncAttempt {
     batch_id: CatalogSyncBatchId,
     sync_kind: CatalogSyncKind,
-    source_cursor: Option<DateTime<Utc>>,
     started_at: DateTime<Utc>,
+}
+
+struct CatalogSyncFailure {
+    error: QuantError,
+    fetched_at: Option<DateTime<Utc>>,
+    rejections: Vec<NewCatalogSyncRejection>,
+}
+
+impl CatalogSyncFailure {
+    const fn at(error: QuantError, fetched_at: DateTime<Utc>) -> Self {
+        Self {
+            error,
+            fetched_at: Some(fetched_at),
+            rejections: Vec::new(),
+        }
+    }
+}
+
+impl From<QuantError> for CatalogSyncFailure {
+    fn from(error: QuantError) -> Self {
+        Self {
+            error,
+            fetched_at: None,
+            rejections: Vec::new(),
+        }
+    }
+}
+
+impl From<ApiError> for CatalogSyncFailure {
+    fn from(error: ApiError) -> Self {
+        Self::from(QuantError::from(error))
+    }
+}
+
+impl From<MarketError> for CatalogSyncFailure {
+    fn from(error: MarketError) -> Self {
+        Self::from(QuantError::from(error))
+    }
+}
+
+impl From<StorageError> for CatalogSyncFailure {
+    fn from(error: StorageError) -> Self {
+        Self::from(QuantError::from(error))
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CatalogMutation {
+    change_type: CatalogChangeType,
+}
+
+impl CatalogMutation {
+    const fn sync() -> Self {
+        Self {
+            change_type: CatalogChangeType::GammaScanUpsert,
+        }
+    }
+
+    const fn recheck() -> Self {
+        Self {
+            change_type: CatalogChangeType::GammaIdRecheckUpsert,
+        }
+    }
+
+    const fn tombstone() -> Self {
+        Self {
+            change_type: CatalogChangeType::GammaConfirmedTombstone,
+        }
+    }
 }
 
 const fn catalog_failure_stage(error: &QuantError) -> CatalogSyncFailureStage {
     match error {
         QuantError::Api(_) => CatalogSyncFailureStage::Fetch,
         QuantError::Storage(_) => CatalogSyncFailureStage::Persist,
-        _ => CatalogSyncFailureStage::Prepare,
+        _ => CatalogSyncFailureStage::Normalize,
     }
 }
 
 struct CatalogCommitInput<'a> {
     batch_id: CatalogSyncBatchId,
     sync_kind: CatalogSyncKind,
-    source_cursor: Option<DateTime<Utc>>,
     started_at: DateTime<Utc>,
     fetched_at: DateTime<Utc>,
-    rejected_count: usize,
-    current_events: Vec<UpsertEvent>,
     registry_events: &'a [EventRegistryInfo],
     event_source_timestamps: &'a HashMap<EventId, CatalogSourceTimestamps>,
-    current_markets: Vec<UpsertMarket>,
     registry_markets: &'a [MarketRegistryInfo],
     market_source_timestamps: &'a HashMap<MarketId, CatalogSourceTimestamps>,
+    event_mutations: &'a HashMap<EventId, CatalogMutation>,
+    market_mutations: &'a HashMap<MarketId, CatalogMutation>,
 }
 
 #[derive(Serialize)]
 struct CatalogBatchDigest {
-    sync_kind: CatalogSyncKind,
-    source_cursor: Option<DateTime<Utc>>,
-    fetched_at: DateTime<Utc>,
-    rejected_count: usize,
-    events: Vec<(EventId, ContentHash)>,
-    markets: Vec<(MarketId, ContentHash)>,
+    events: Vec<(EventId, CatalogChangeType, ContentHash)>,
+    markets: Vec<(MarketId, CatalogChangeType, ContentHash)>,
 }
 
-fn build_catalog_commit(input: CatalogCommitInput<'_>) -> Result<CatalogCommit, QuantError> {
+fn build_catalog_commit(input: CatalogCommitInput<'_>) -> Result<CatalogBatchCommit, QuantError> {
     let CatalogCommitInput {
         sync_kind,
-        source_cursor,
         batch_id: catalog_sync_batch_id,
         started_at,
         fetched_at,
-        rejected_count,
-        current_events,
         registry_events,
         event_source_timestamps,
-        current_markets,
         registry_markets,
         market_source_timestamps,
+        event_mutations,
+        market_mutations,
     } = input;
-    let event_build = build_event_versions(
+    let event_build = build_event_candidates(
         &catalog_sync_batch_id,
         registry_events,
         event_source_timestamps,
+        event_mutations,
         fetched_at,
     )?;
-    let market_build = build_market_versions(
+    let market_build = build_market_candidates(
         &catalog_sync_batch_id,
         registry_markets,
         market_source_timestamps,
-        &event_build.version_ids,
+        market_mutations,
+        &event_build.object_ids,
         fetched_at,
     )?;
 
-    let batch_hash = CanonicalDigest::content_hash_json(&CatalogBatchDigest {
-        sync_kind,
-        source_cursor,
-        fetched_at,
-        rejected_count,
-        events: event_build.digests,
-        markets: market_build.digests,
-    })?;
-    let event_count = catalog_count("event", event_build.versions.len())?;
-    let market_count = catalog_count("market", market_build.versions.len())?;
-    let rejected_count = catalog_count("rejected", rejected_count)?;
+    let batch_hash = CanonicalDigest::content_hash_typed(
+        "quant-pivot/catalog-manifest",
+        1,
+        &CatalogBatchDigest {
+            events: event_build.digests,
+            markets: market_build.digests,
+        },
+    )?;
+    let event_count = catalog_count("event", event_build.candidates.len())?;
+    let market_count = catalog_count("market", market_build.candidates.len())?;
 
-    Ok(CatalogCommit {
+    Ok(CatalogBatchCommit {
         batch: NewCatalogSyncBatch {
             catalog_sync_batch_id,
-            sync_kind: sync_kind.as_str().to_owned(),
-            source_cursor,
+            sync_kind,
             started_at,
             fetched_at,
             event_count,
             market_count,
-            rejected_count,
+            rejected_count: 0,
             batch_hash,
         },
-        current_events,
-        event_versions: event_build.versions,
-        current_markets,
-        market_versions: market_build.versions,
+        events: event_build.candidates,
+        markets: market_build.candidates,
     })
 }
 
-struct EventVersionBuild {
-    version_ids: BTreeMap<EventId, EventCatalogVersionId>,
-    versions: Vec<NewEventCatalogVersion>,
-    digests: Vec<(EventId, ContentHash)>,
+struct EventCandidateBuild {
+    object_ids: BTreeMap<EventId, CatalogEventObjectId>,
+    candidates: Vec<CatalogEventCandidate>,
+    digests: Vec<(EventId, CatalogChangeType, ContentHash)>,
 }
 
-fn build_event_versions(
+fn build_event_candidates(
     batch_id: &CatalogSyncBatchId,
     events: &[EventRegistryInfo],
     source_timestamps: &HashMap<EventId, CatalogSourceTimestamps>,
+    mutations: &HashMap<EventId, CatalogMutation>,
     available_at: DateTime<Utc>,
-) -> Result<EventVersionBuild, QuantError> {
+) -> Result<EventCandidateBuild, QuantError> {
     let mut ordered = events.iter().collect::<Vec<_>>();
     ordered.sort_by(|left, right| left.event_id.cmp(&right.event_id));
     reject_duplicate_catalog_ids("event", ordered.iter().map(|event| event.event_id.as_str()))?;
-    let mut version_ids = BTreeMap::new();
-    let mut versions = Vec::with_capacity(ordered.len());
+    let mut object_ids = BTreeMap::new();
+    let mut candidates = Vec::with_capacity(ordered.len());
     let mut digests = Vec::with_capacity(ordered.len());
     for event in ordered {
         let timestamps = resolve_catalog_timestamps(
@@ -742,51 +824,79 @@ fn build_event_versions(
                 id: event.event_id.to_string(),
                 reason: error.to_string(),
             })?;
-        let content_hash = CanonicalDigest::content_hash_json(event)?;
-        let version_id = EventCatalogVersionId::from_v7();
-        version_ids.insert(event.event_id.clone(), version_id.clone());
-        digests.push((event.event_id.clone(), content_hash.clone()));
-        versions.push(NewEventCatalogVersion {
-            event_catalog_version_id: version_id,
-            catalog_sync_batch_id: batch_id.clone(),
-            event_id: event.event_id.clone(),
-            source_effective_at: timestamps.source_effective_at,
-            source_timestamp_quality: timestamps.quality.as_str().to_owned(),
-            available_at,
-            origin: CATALOG_ORIGIN_GAMMA_SYNC.to_owned(),
-            content_hash,
-            payload,
+        let content_hash =
+            CanonicalDigest::content_hash_typed("quant-pivot/catalog-event-object", 1, event)?;
+        let event_object_id = CatalogEventObjectId::from_content_hash(&content_hash);
+        let mutation = mutations
+            .get(&event.event_id)
+            .copied()
+            .unwrap_or_else(CatalogMutation::sync);
+        object_ids.insert(event.event_id.clone(), event_object_id.clone());
+        digests.push((
+            event.event_id.clone(),
+            mutation.change_type,
+            content_hash.clone(),
+        ));
+        candidates.push(CatalogEventCandidate {
+            projection: UpsertEvent {
+                event_id: event.event_id.clone(),
+                title: event.title.clone(),
+                slug: event.slug.clone(),
+                series_slug: event.series_slug.clone(),
+                status: event.status,
+                tags: EventTags(event.tags.clone()),
+                neg_risk: event.neg_risk,
+                catalog_market_ids: CatalogMarketIds(event.market_ids.clone()),
+                end_date: event.end_date,
+                content_hash: content_hash.clone(),
+            },
+            object: NewCatalogEventObject {
+                event_object_id: event_object_id.clone(),
+                content_hash,
+                schema_version: CATALOG_OBJECT_SCHEMA_VERSION,
+                payload,
+            },
+            change: NewCatalogEventChange {
+                event_change_id: CatalogEventChangeId::from_v7(),
+                catalog_sync_batch_id: batch_id.clone(),
+                event_object_id,
+                event_id: event.event_id.clone(),
+                source_effective_at: timestamps.source_effective_at,
+                source_timestamp_quality: timestamps.quality,
+                change_type: mutation.change_type,
+            },
         });
     }
-    Ok(EventVersionBuild {
-        version_ids,
-        versions,
+    Ok(EventCandidateBuild {
+        object_ids,
+        candidates,
         digests,
     })
 }
 
-struct MarketVersionBuild {
-    versions: Vec<NewMarketCatalogVersion>,
-    digests: Vec<(MarketId, ContentHash)>,
+struct MarketCandidateBuild {
+    candidates: Vec<CatalogMarketCandidate>,
+    digests: Vec<(MarketId, CatalogChangeType, ContentHash)>,
 }
 
-fn build_market_versions(
+fn build_market_candidates(
     batch_id: &CatalogSyncBatchId,
     markets: &[MarketRegistryInfo],
     source_timestamps: &HashMap<MarketId, CatalogSourceTimestamps>,
-    event_version_ids: &BTreeMap<EventId, EventCatalogVersionId>,
+    mutations: &HashMap<MarketId, CatalogMutation>,
+    event_object_ids: &BTreeMap<EventId, CatalogEventObjectId>,
     available_at: DateTime<Utc>,
-) -> Result<MarketVersionBuild, QuantError> {
+) -> Result<MarketCandidateBuild, QuantError> {
     let mut ordered = markets.iter().collect::<Vec<_>>();
     ordered.sort_by(|left, right| left.market_id.cmp(&right.market_id));
     reject_duplicate_catalog_ids(
         "market",
         ordered.iter().map(|market| market.market_id.as_str()),
     )?;
-    let mut versions = Vec::with_capacity(ordered.len());
+    let mut candidates = Vec::with_capacity(ordered.len());
     let mut digests = Vec::with_capacity(ordered.len());
     for market in ordered {
-        let event_catalog_version_id = event_version_ids
+        let event_object_id = event_object_ids
             .get(&market.event_id)
             .cloned()
             .ok_or_else(|| MarketError::MissingEventVersion {
@@ -805,24 +915,39 @@ fn build_market_versions(
                 id: market.market_id.to_string(),
                 reason: error.to_string(),
             })?;
-        let content_hash = CanonicalDigest::content_hash_json(market)?;
-        digests.push((market.market_id.clone(), content_hash.clone()));
-        versions.push(NewMarketCatalogVersion {
-            market_catalog_version_id: MarketCatalogVersionId::from_v7(),
+        let content_hash =
+            CanonicalDigest::content_hash_typed("quant-pivot/catalog-market-object", 1, market)?;
+        let market_object_id = CatalogMarketObjectId::from_content_hash(&content_hash);
+        let mutation = mutations
+            .get(&market.market_id)
+            .copied()
+            .unwrap_or_else(CatalogMutation::sync);
+        digests.push((
+            market.market_id.clone(),
+            mutation.change_type,
+            content_hash.clone(),
+        ));
+        candidates.push(CatalogMarketCandidate {
+            projection: UpsertMarket::from_registry(market)?,
+            object: NewCatalogMarketObject {
+                market_object_id,
+                content_hash,
+                schema_version: CATALOG_OBJECT_SCHEMA_VERSION,
+                payload,
+            },
+            market_change_id: CatalogMarketChangeId::from_v7(),
             catalog_sync_batch_id: batch_id.clone(),
-            event_catalog_version_id,
-            market_id: market.market_id.clone(),
-            event_id: market.event_id.clone(),
+            event_object_id,
             source_effective_at: timestamps.source_effective_at,
-            source_timestamp_quality: timestamps.quality.as_str().to_owned(),
+            source_timestamp_quality: timestamps.quality,
             source_created_at: timestamps.source_created_at,
-            available_at,
-            origin: CATALOG_ORIGIN_GAMMA_SYNC.to_owned(),
-            content_hash,
-            payload,
+            change_type: mutation.change_type,
         });
     }
-    Ok(MarketVersionBuild { versions, digests })
+    Ok(MarketCandidateBuild {
+        candidates,
+        digests,
+    })
 }
 
 struct ResolvedCatalogTimestamps {
@@ -857,7 +982,7 @@ fn resolve_catalog_timestamps(
     Ok(source_updated_at.map_or(
         ResolvedCatalogTimestamps {
             source_effective_at: available_at,
-            quality: CatalogTimestampQuality::AvailableAtFallback,
+            quality: CatalogTimestampQuality::CommitTimeFallback,
             source_created_at,
         },
         |source_effective_at| ResolvedCatalogTimestamps {
@@ -887,6 +1012,61 @@ fn reject_duplicate_catalog_ids<'a>(
 
 fn catalog_count(entity: &'static str, count: usize) -> Result<i64, MarketError> {
     i64::try_from(count).map_err(|_| MarketError::CatalogCountOverflow { entity })
+}
+
+fn build_catalog_rejections(
+    batch_id: &CatalogSyncBatchId,
+    rejected: &[RejectedMarket],
+) -> Vec<NewCatalogSyncRejection> {
+    rejected
+        .iter()
+        .map(|rejection| NewCatalogSyncRejection {
+            catalog_sync_rejection_id: CatalogSyncRejectionId::from_v7(),
+            catalog_sync_batch_id: batch_id.clone(),
+            entity_kind: CatalogEntityKind::Market,
+            source_id: (!rejection.condition_id.is_empty()).then(|| rejection.condition_id.clone()),
+            reason_code: rejection_reason(&rejection.reject),
+            detail: rejection.reject.to_string(),
+            raw_payload: rejection.raw_payload.clone(),
+        })
+        .collect()
+}
+
+const fn rejection_reason(rejection: &CatalogMarketReject) -> CatalogRejectionReason {
+    match rejection {
+        CatalogMarketReject::EmptyConditionId => CatalogRejectionReason::EmptyConditionId,
+        CatalogMarketReject::MissingClobTokenIds => CatalogRejectionReason::MissingClobTokenIds,
+        CatalogMarketReject::NotBinary { .. } => CatalogRejectionReason::NotBinary,
+        CatalogMarketReject::InvalidTokenPair { .. } => CatalogRejectionReason::InvalidTokenPair,
+        CatalogMarketReject::UnsupportedTickSize { .. } => {
+            CatalogRejectionReason::UnsupportedTickSize
+        }
+    }
+}
+
+const fn api_error_is_not_found(error: &ApiError) -> bool {
+    matches!(error, ApiError::Gamma { status: 404, .. })
+}
+
+fn sorted_ids<'a>(ids: impl IntoIterator<Item = &'a str>) -> Vec<&'a str> {
+    let mut ids = ids.into_iter().collect::<Vec<_>>();
+    ids.sort_unstable();
+    ids
+}
+
+fn coalesce_catalog_batch(batch: &mut GammaCatalogBatch) {
+    batch.registry_events = mem::take(&mut batch.registry_events)
+        .into_iter()
+        .map(|event| (event.event_id.clone(), event))
+        .collect::<BTreeMap<_, _>>()
+        .into_values()
+        .collect();
+    batch.registry_markets = mem::take(&mut batch.registry_markets)
+        .into_iter()
+        .map(|market| (market.market_id.clone(), market))
+        .collect::<BTreeMap<_, _>>()
+        .into_values()
+        .collect();
 }
 
 /// Result of scanning one committed catalog projection for live settlements.
@@ -977,78 +1157,18 @@ fn prewarm_token_intern(markets: &[MarketRegistryInfo]) {
     );
 }
 
-/// Convert `MarketRegistryInfo` → `UpsertMarket` for individually-fetched and deactivated markets.
-fn convert_registry_to_upsert(markets: &[MarketRegistryInfo]) -> Vec<UpsertMarket> {
-    let mut out = Vec::with_capacity(markets.len());
-    for m in markets {
-        match UpsertMarket::try_from(m) {
-            Ok(dto) => out.push(dto),
-            Err(e) => {
-                tracing::warn!(
-                    market_id = %m.market_id,
-                    error = %e,
-                    "skipping market persistence: invalid token pair"
-                );
-            }
-        }
-    }
-    out
-}
-
-fn collect_missing_market_ids(
-    events: &[EventRegistryInfo],
-    embedded: &HashSet<MarketId>,
-) -> Vec<MarketId> {
-    let mut missing = Vec::new();
-    for event in events {
-        for market_id in &event.market_ids {
-            if !embedded.contains(market_id) {
-                missing.push(market_id.clone());
-            }
-        }
-    }
-    missing.sort_by(|a, b| a.as_str().cmp(b.as_str()));
-    missing.dedup_by(|a, b| a.as_str() == b.as_str());
-    missing
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use quant_pivot_models::{
         domain::market::TokenInfo,
         enums::{
+            catalog::CatalogFilterReasonSet,
             common::{CategorySet, TickSize},
-            market::EventStatus,
         },
         types::{EventId, TokenId},
     };
     use rust_decimal::Decimal;
-
-    #[test]
-    fn collect_missing_dedupes_and_skips_embedded() {
-        let events = vec![EventRegistryInfo {
-            event_id: EventId::new("evt-1"),
-            title: "t".into(),
-            slug: "s".into(),
-            series_slug: None,
-            status: EventStatus::Active,
-            market_ids: vec![
-                MarketId::new("m1"),
-                MarketId::new("m2"),
-                MarketId::new("m1"),
-            ],
-            categories: CategorySet::EMPTY,
-            tags: Vec::new(),
-            neg_risk: false,
-            end_date: None,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        }];
-        let embedded = HashSet::from([MarketId::new("m1")]);
-        let missing = collect_missing_market_ids(&events, &embedded);
-        assert_eq!(missing, vec![MarketId::new("m2")]);
-    }
 
     fn registry_market(
         id: &str,
@@ -1078,6 +1198,7 @@ mod tests {
             description: None,
             categories: CategorySet::EMPTY,
             status,
+            filter_reasons: CatalogFilterReasonSet::default(),
             outcome: outcome.map(str::to_owned),
             neg_risk: false,
             tick_size: TickSize::Hundredth,

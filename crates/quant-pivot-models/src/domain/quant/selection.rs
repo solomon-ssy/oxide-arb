@@ -9,11 +9,11 @@ use crate::{
     },
 };
 use chrono::{DateTime, Utc};
-use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
 use serde::{Deserialize, Serialize};
 
 /// Persisted selection snapshot metadata.
-#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
+#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
 #[sea_orm(entity = "crate::entities::quant_market_selection::Entity")]
 pub struct MarketSelectionInfo {
     pub market_selection_id: MarketSelectionId,
@@ -52,7 +52,7 @@ pub struct NewMarketSelection {
 }
 
 /// Persisted queryable selection member.
-#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
+#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
 #[sea_orm(entity = "crate::entities::quant_market_selection_member::Entity")]
 pub struct MarketSelectionMemberInfo {
     pub market_selection_id: MarketSelectionId,

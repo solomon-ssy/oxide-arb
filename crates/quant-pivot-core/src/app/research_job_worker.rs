@@ -68,7 +68,9 @@ use crate::service::{
     durable_feature_parity::{DurableFeatureParityDeps, DurableFeatureParitySource},
     feature_parity_executor::{FeatureParityExecutor, ReportFeatureParityIncidentResponse},
     model_calibration_fit::ModelCalibrationFitService,
-    research_readiness::{EvidenceAttestor, ResearchReadinessEvidenceService},
+    research_readiness::{
+        EvidenceAttestor, EvidenceScopeIdentity, ResearchReadinessEvidenceService,
+    },
     trade_policy::{TradePolicyService, TradePolicyServiceDeps},
 };
 
@@ -291,11 +293,16 @@ impl AppContext {
         let bias_table_repo = Arc::clone(&self.infra.repos.calibration_artifact)
             as Arc<dyn CalibrationArtifactRepository>;
         let config = self.config.quant.research_jobs;
+        let evidence_scope = EvidenceScopeIdentity::from_config(
+            &self.config.db.clickhouse,
+            &self.config.research.artifact_store,
+        )?;
         let readiness = Arc::new(ResearchReadinessEvidenceService::new(
             Arc::clone(&self.infra.repos.research_readiness)
                 as Arc<dyn ResearchReadinessEvidenceRepository>,
             Arc::clone(&self.research.artifact_store),
             EvidenceAttestor::from_config(&self.config.research.evidence_attestation)?,
+            &evidence_scope,
         )?);
         let backtest_port = Arc::new(CoreBacktestPort::from_research(
             &self.research,
@@ -327,6 +334,8 @@ impl AppContext {
             config.plan_sample_markets,
         )) as Arc<dyn TrainingDatasetPort>;
         let parity_replay = Arc::new(DurableFeatureParitySource::new(DurableFeatureParityDeps {
+            parity: Arc::clone(&self.infra.repos.feature_parity)
+                as Arc<dyn FeatureParityRepository>,
             model_runs: Arc::clone(&self.research.model_run_repo),
             model_registry: Arc::clone(&self.research.model_registry_repo),
             runtime_configs: Arc::clone(&runtime_config),
@@ -338,7 +347,7 @@ impl AppContext {
             report_runs: Arc::clone(&self.infra.repos.report_run) as Arc<dyn ReportRunRepository>,
             serving_evidence,
             fact_read: Arc::clone(&self.research.quant_fact_read),
-            catalog: Arc::clone(&self.research.catalog_version_repo),
+            catalog: Arc::clone(&self.research.catalog_ledger_repo),
             clob_market_info: Arc::clone(&self.research.clob_market_info_repo),
             linkages: Arc::clone(&self.research.market_linkage_repo),
             calibration_artifacts: Arc::clone(&bias_table_repo),

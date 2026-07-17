@@ -52,18 +52,35 @@ async fn ad_hoc_publishes_report_with_recommendations() {
     );
     assert!(report.summary_json.published_recommendation_count >= 1);
 
-    let publish_logs = PgOperationLogRepository::new(db.clone())
+    let operation_logs = PgOperationLogRepository::new(db.clone());
+    let prepare_logs = operation_logs
         .page(OperationLogQuery {
             request_id: Some(format!("ad_hoc:{request_id}")),
             ..OperationLogQuery::default()
         })
         .await
+        .expect("prepare operation log");
+    assert_eq!(prepare_logs.total, 1);
+    assert_eq!(prepare_logs.items[0].action, "prepare");
+    assert!(
+        prepare_logs.items[0].after_hash.is_some(),
+        "prepare must record after_hash"
+    );
+
+    let publish_logs = operation_logs
+        .page(OperationLogQuery {
+            request_id: Some(format!(
+                "quant-report:publish:{}",
+                report.recommendation_report_id
+            )),
+            ..OperationLogQuery::default()
+        })
+        .await
         .expect("publish operation log");
     assert_eq!(publish_logs.total, 1);
-    assert!(
-        publish_logs.items[0].after_hash.is_some(),
-        "publish must record after_hash"
-    );
+    assert_eq!(publish_logs.items[0].action, "report.publish");
+    assert!(publish_logs.items[0].before_hash.is_some());
+    assert!(publish_logs.items[0].after_hash.is_some());
 
     let recs = harness
         .recommendation_repo

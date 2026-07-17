@@ -8,10 +8,7 @@ use super::{
         ReportBundleDeps, ResearchBundle, ResearchBundleDeps, RuntimeSnapshot,
     },
 };
-use crate::{
-    execution::IntentLifecyclePublisher, observability::metrics_hub::MetricsHub,
-    report::ReportScheduleReconciler,
-};
+use crate::{execution::IntentLifecyclePublisher, observability::metrics_hub::MetricsHub};
 use parking_lot::Mutex;
 use quant_pivot_api::{
     clob::ClobClient,
@@ -49,7 +46,8 @@ impl AppContext {
             data: &data,
             runtime,
             events: events.clone(),
-        })?;
+        })
+        .await?;
         let research = ResearchBundle::assemble(&ResearchBundleDeps {
             deploy: &deploy,
             infra: &infra,
@@ -94,11 +92,6 @@ impl AppContext {
             events: events.clone(),
             max_recovery_attempts: deploy.quant.research_jobs.max_recovery_attempts,
         })?;
-        // Late-bind the durable report schedule reconciler after the report
-        // lifecycle is assembled.
-        governance.applicator.attach_report_schedule_reconciler(
-            Arc::clone(&report.coordinator) as Arc<dyn ReportScheduleReconciler>
-        );
         // Late-bind the execution breaker so activation hot-swaps its venue /
         // daily-loss thresholds without a restart (the breaker is built with the
         // execution bundle, after governance).

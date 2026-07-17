@@ -266,8 +266,6 @@ pub struct DomainEventEnvelope {
     pub payload: DomainEventPayload,
 }
 
-crate::jsonb_active!(DomainEventEnvelope);
-
 impl DomainEventEnvelope {
     #[must_use]
     pub fn validate_payload_hash(&self) -> bool {

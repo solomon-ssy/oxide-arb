@@ -1,7 +1,7 @@
 //! Postgres-backed durable research-job ledger repository.
 
 use crate::{
-    postgres::{error, query::paginate_mapped},
+    postgres::{error, primitives, query::paginate_mapped},
     traits::{KindRunningCount, ReclaimOutcome, ResearchJobRepository},
 };
 use chrono::{DateTime, Utc};
@@ -13,13 +13,12 @@ use quant_pivot_models::{
     },
     entities::quant_research_job,
     enums::quant::{ResearchJobErrorCode, ResearchJobKind, ResearchJobStatus},
-    schema::column,
     types::{DatasetCoverage, ResearchJobId, ResearchJobProgress},
 };
 use sea_orm::{
     ActiveValue::Set,
-    ColumnTrait, Condition, DatabaseConnection, EntityTrait, FromQueryResult, IntoActiveModel,
-    QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
+    ColumnTrait, Condition, DatabaseConnection, EntityTrait, ExprTrait, FromQueryResult,
+    IntoActiveModel, QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
     sea_query::{Expr, LockBehavior, LockType},
 };
 use uuid::Uuid;
@@ -182,7 +181,7 @@ impl ResearchJobRepository for PgResearchJobRepository {
         let result = quant_research_job::Entity::update_many()
             .col_expr(
                 quant_research_job::Column::Status,
-                column::pg_enum_value(&status),
+                primitives::enum_value(&status),
             )
             .col_expr(
                 quant_research_job::Column::ResultRef,
@@ -233,7 +232,7 @@ impl ResearchJobRepository for PgResearchJobRepository {
         let result = quant_research_job::Entity::update_many()
             .col_expr(
                 quant_research_job::Column::Status,
-                column::pg_enum_value(&ResearchJobStatus::Cancelled),
+                primitives::enum_value(&ResearchJobStatus::Cancelled),
             )
             .col_expr(quant_research_job::Column::ErrorJson, Expr::value(error))
             .col_expr(
@@ -277,7 +276,7 @@ async fn reclaim_by_condition(
     let quarantined = quant_research_job::Entity::update_many()
         .col_expr(
             quant_research_job::Column::Status,
-            column::pg_enum_value(&ResearchJobStatus::Failed),
+            primitives::enum_value(&ResearchJobStatus::Failed),
         )
         .col_expr(
             quant_research_job::Column::LeaseOwner,
@@ -311,7 +310,7 @@ async fn reclaim_by_condition(
     let requeued = quant_research_job::Entity::update_many()
         .col_expr(
             quant_research_job::Column::Status,
-            column::pg_enum_value(&ResearchJobStatus::Queued),
+            primitives::enum_value(&ResearchJobStatus::Queued),
         )
         .col_expr(
             quant_research_job::Column::RecoveryAttempt,

@@ -294,7 +294,7 @@ async fn resolve_selected_catalog_snapshot(
         .await?
         .ok_or_else(|| ResearchError::PitResolution {
             detail: format!(
-                "no market catalog version for {} at source cutoff {catalog_cutoff}",
+                "no market catalog change for {} at source cutoff {catalog_cutoff}",
                 market.market_id
             ),
         })?;

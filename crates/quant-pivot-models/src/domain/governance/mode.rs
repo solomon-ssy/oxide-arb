@@ -77,7 +77,7 @@ impl PreflightReport {
             .checks
             .iter()
             .filter(|check| check.hard && !check.passed)
-            .map(|check| format!("{}: {}", &check.name, check.detail))
+            .map(|check| format!("{}: {}", check.name, check.detail))
             .collect();
         if failed.is_empty() {
             "all preflight checks passed".to_owned()

@@ -1,11 +1,9 @@
 //! Seeds Casbin policies: the `admin → super_admin` grouping (`g`) and the full
 //! per-role permission matrix (`p`) for the built-in roles.
 
-use std::{future::Future, pin::Pin};
+use std::{collections::HashSet, future::Future, pin::Pin};
 
-use sea_orm::{
-    ActiveValue::Set, ConnectionTrait, DbErr, EntityTrait, QueryTrait, sea_query::OnConflict,
-};
+use sea_orm::{ActiveValue::Set, DbErr, EntityTrait, sea_query::OnConflict};
 
 use crate::{
     entities::casbin_rule,
@@ -13,10 +11,8 @@ use crate::{
         Operation, ResourceType,
         casbin::{OBJECT_TYPE_RESOURCE, PTYPE_GROUPING, PTYPE_POLICY},
     },
-    idens::casbin_rule::casbin_rule_table_name,
-    schema::seed::{SeedArtifact, SeedDependency, SeedSpec},
     seed::{
-        SeedConflictPolicy, SeedContext,
+        SeedArtifact, SeedConflictPolicy, SeedContext, SeedDependency, SeedSpec,
         rbac::{
             ADMIN_USER_ARTIFACT, ROLE_ADMIN, ROLE_ANALYST, ROLE_EMERGENCY_OPERATOR, ROLE_OPERATOR,
             ROLE_RISK_OWNER, ROLE_SUPER_ADMIN, ROLE_VIEWER, ROLES_ARTIFACT,
@@ -35,13 +31,14 @@ const PRODUCES: &[SeedArtifact] = &[];
 
 pub const CASBIN_SEED: SeedSpec = SeedSpec {
     id: SEED_ID,
-    version: 14,
-    target_table: casbin_rule_table_name,
+    version: 15,
+    target_table: "casbin_rule",
     depends_on: DEPENDS_ON,
     produces: PRODUCES,
     conflict_policy: SeedConflictPolicy::GraphOrdered,
-    checksum: "rbac.casbin.bootstrap.v14",
-    loader: load_boxed,
+    checksum: "rbac.casbin.bootstrap.v15.bootstrap-activation-and-config-approval",
+    apply: load_boxed,
+    hydrate: hydrate_boxed,
 };
 
 /// Resources granted read access to every non-super-admin built-in role (Phase 0).
@@ -75,6 +72,53 @@ pub fn builtin_role_policies() -> Vec<(&'static str, Vec<(ResourceType, Operatio
         (ROLE_ADMIN, admin_policies()),
         (ROLE_EMERGENCY_OPERATOR, emergency_operator_policies()),
     ]
+}
+
+fn expected_policy_keys(ctx: &SeedContext) -> Result<HashSet<[String; 7]>, DbErr> {
+    let admin_id = ctx
+        .require::<UserId>(ADMIN_USER_ARTIFACT)
+        .map_err(|error| DbErr::Custom(error.to_string()))?;
+    let mut keys = HashSet::new();
+    keys.insert([
+        PTYPE_GROUPING.to_owned(),
+        admin_id.to_string(),
+        ROLE_SUPER_ADMIN.to_owned(),
+        String::new(),
+        String::new(),
+        String::new(),
+        String::new(),
+    ]);
+    for (role_code, permissions) in builtin_role_policies() {
+        for (resource, operation) in permissions {
+            keys.insert([
+                PTYPE_POLICY.to_owned(),
+                role_code.to_owned(),
+                resource.as_str().to_owned(),
+                operation.as_str().to_owned(),
+                OBJECT_TYPE_RESOURCE.to_owned(),
+                String::new(),
+                String::new(),
+            ]);
+        }
+    }
+    Ok(keys)
+}
+
+async fn hydrate(db: &sea_orm::DatabaseTransaction, ctx: &SeedContext) -> Result<(), DbErr> {
+    let expected = expected_policy_keys(ctx)?;
+    let actual = casbin_rule::Entity::find()
+        .all(db)
+        .await?
+        .into_iter()
+        .map(|row| [row.ptype, row.v0, row.v1, row.v2, row.v3, row.v4, row.v5])
+        .collect::<HashSet<_>>();
+    let missing = expected.difference(&actual).count();
+    if missing != 0 {
+        return Err(DbErr::Custom(format!(
+            "Casbin bootstrap policy seed is missing {missing} canonical rows"
+        )));
+    }
+    Ok(())
 }
 
 fn read_only() -> Vec<(ResourceType, Operation)> {
@@ -116,7 +160,9 @@ fn operator_policies() -> Vec<(ResourceType, Operation)> {
 fn risk_owner_policies() -> Vec<(ResourceType, Operation)> {
     let mut policies = read_only();
     policies.extend([
+        (ResourceType::System, Operation::BootstrapActivate),
         (ResourceType::RuntimeConfig, Operation::Create),
+        (ResourceType::RuntimeConfig, Operation::Approve),
         (ResourceType::RuntimeConfig, Operation::Activate),
         (ResourceType::RuntimeConfig, Operation::Rollback),
         // Offline research: train models (Materialization:Create) and run
@@ -205,7 +251,7 @@ fn grouping_row(subject: &str, role_code: &str) -> casbin_rule::ActiveModel {
     }
 }
 
-pub async fn load(db: &dyn ConnectionTrait, ctx: &mut SeedContext) -> Result<u64, DbErr> {
+pub async fn load(db: &sea_orm::DatabaseTransaction, ctx: &mut SeedContext) -> Result<u64, DbErr> {
     let admin_id = ctx
         .require::<UserId>(ADMIN_USER_ARTIFACT)
         .map_err(|error| DbErr::Custom(error.to_string()))?
@@ -218,8 +264,7 @@ pub async fn load(db: &dyn ConnectionTrait, ctx: &mut SeedContext) -> Result<u64
         }
     }
 
-    let backend = db.get_database_backend();
-    let stmt = casbin_rule::Entity::insert_many(models)
+    casbin_rule::Entity::insert_many(models)
         .on_conflict(
             OnConflict::columns([
                 casbin_rule::Column::Ptype,
@@ -233,16 +278,22 @@ pub async fn load(db: &dyn ConnectionTrait, ctx: &mut SeedContext) -> Result<u64
             .do_nothing()
             .to_owned(),
         )
-        .build(backend);
-    let result = db.execute(stmt).await?;
-    Ok(result.rows_affected())
+        .exec_without_returning(db)
+        .await
 }
 
 fn load_boxed<'a>(
-    db: &'a dyn ConnectionTrait,
+    db: &'a sea_orm::DatabaseTransaction,
     ctx: &'a mut SeedContext,
 ) -> Pin<Box<dyn Future<Output = Result<u64, DbErr>> + Send + 'a>> {
     Box::pin(load(db, ctx))
+}
+
+fn hydrate_boxed<'a>(
+    db: &'a sea_orm::DatabaseTransaction,
+    ctx: &'a mut SeedContext,
+) -> Pin<Box<dyn Future<Output = Result<(), DbErr>> + Send + 'a>> {
+    Box::pin(hydrate(db, ctx))
 }
 
 #[cfg(test)]

@@ -10,6 +10,7 @@ pub trait PipelineEventSource: Send + Sync {
     fn events(&self) -> &Receiver<PipelineEvent>;
     fn mark_token_applied(&self, token_id: &TokenId, at: Instant);
     fn invalidate_token(&self, token_id: &TokenId);
+    fn invalidate_tokens(&self, token_ids: &[TokenId]);
 }
 
 impl PipelineEventSource for ClobWsManager {
@@ -23,5 +24,9 @@ impl PipelineEventSource for ClobWsManager {
 
     fn invalidate_token(&self, token_id: &TokenId) {
         Self::invalidate_token(self, token_id);
+    }
+
+    fn invalidate_tokens(&self, token_ids: &[TokenId]) {
+        Self::invalidate_tokens(self, token_ids);
     }
 }

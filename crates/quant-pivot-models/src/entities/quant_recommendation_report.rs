@@ -11,6 +11,7 @@ use crate::{
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
+#[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "quant_recommendation_report")]
 pub struct Model {
@@ -51,116 +52,67 @@ pub struct Model {
     pub expired_at: Option<DateTime<Utc>>,
     pub status_reason: Option<String>,
     pub created_at: DateTime<Utc>,
-}
 
-#[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-pub enum Relation {
     #[sea_orm(
-        belongs_to = "Entity",
-        from = "Column::SuccessorReportId",
-        to = "Column::RecommendationReportId"
+        self_ref,
+        relation_enum = "Successor",
+        from = "successor_report_id",
+        to = "recommendation_report_id"
     )]
-    Successor,
+    pub successor: BelongsTo<Option<Entity>>,
     #[sea_orm(
-        belongs_to = "super::quant_model_version::Entity",
-        from = "Column::ModelVersionId",
-        to = "super::quant_model_version::Column::ModelVersionId"
+        belongs_to,
+        relation_enum = "ModelVersion",
+        from = "model_version_id",
+        to = "model_version_id"
     )]
-    ModelVersion,
+    pub model_version: BelongsTo<super::quant_model_version::Entity>,
     #[sea_orm(
-        belongs_to = "super::quant_model_run::Entity",
-        from = "Column::ModelRunId",
-        to = "super::quant_model_run::Column::ModelRunId"
+        belongs_to,
+        relation_enum = "ModelRun",
+        from = "model_run_id",
+        to = "model_run_id"
     )]
-    ModelRun,
+    pub model_run: BelongsTo<Option<super::quant_model_run::Entity>>,
     #[sea_orm(
-        belongs_to = "super::quant_market_selection::Entity",
-        from = "Column::MarketSelectionId",
-        to = "super::quant_market_selection::Column::MarketSelectionId"
+        belongs_to,
+        relation_enum = "MarketSelection",
+        from = "market_selection_id",
+        to = "market_selection_id"
     )]
-    MarketSelection,
+    pub market_selection: BelongsTo<super::quant_market_selection::Entity>,
     #[sea_orm(
-        belongs_to = "super::quant_portfolio_plan::Entity",
-        from = "Column::PortfolioPlanId",
-        to = "super::quant_portfolio_plan::Column::PortfolioPlanId"
+        belongs_to,
+        relation_enum = "PortfolioPlan",
+        from = "portfolio_plan_id",
+        to = "portfolio_plan_id"
     )]
-    PortfolioPlan,
+    pub portfolio_plan: BelongsTo<super::quant_portfolio_plan::Entity>,
     #[sea_orm(
-        belongs_to = "super::quant_account_snapshot::Entity",
-        from = "Column::AccountSnapshotRef",
-        to = "super::quant_account_snapshot::Column::AccountSnapshotId"
+        belongs_to,
+        relation_enum = "AccountSnapshot",
+        from = "account_snapshot_ref",
+        to = "account_snapshot_id"
     )]
-    AccountSnapshot,
+    pub account_snapshot: BelongsTo<super::quant_account_snapshot::Entity>,
     #[sea_orm(
-        belongs_to = "super::quant_equity_snapshot::Entity",
-        from = "Column::EquitySnapshotRef",
-        to = "super::quant_equity_snapshot::Column::EquitySnapshotId"
+        belongs_to,
+        relation_enum = "EquitySnapshot",
+        from = "equity_snapshot_ref",
+        to = "equity_snapshot_id"
     )]
-    EquitySnapshot,
+    pub equity_snapshot: BelongsTo<super::quant_equity_snapshot::Entity>,
     #[sea_orm(
-        belongs_to = "super::quant_report_data_quality_snapshot::Entity",
-        from = "Column::DataQualitySnapshotRef",
-        to = "super::quant_report_data_quality_snapshot::Column::ReportDataQualitySnapshotId"
+        belongs_to,
+        relation_enum = "DataQualitySnapshot",
+        from = "data_quality_snapshot_ref",
+        to = "report_data_quality_snapshot_id"
     )]
-    DataQualitySnapshot,
-    #[sea_orm(has_many = "super::quant_recommendation::Entity")]
-    Recommendation,
-    #[sea_orm(has_one = "super::quant_report_fact_delivery::Entity")]
-    FactDelivery,
-}
-
-impl Related<super::quant_model_version::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::ModelVersion.def()
-    }
-}
-
-impl Related<super::quant_model_run::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::ModelRun.def()
-    }
-}
-
-impl Related<super::quant_market_selection::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::MarketSelection.def()
-    }
-}
-
-impl Related<super::quant_portfolio_plan::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::PortfolioPlan.def()
-    }
-}
-
-impl Related<super::quant_account_snapshot::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::AccountSnapshot.def()
-    }
-}
-
-impl Related<super::quant_equity_snapshot::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::EquitySnapshot.def()
-    }
-}
-
-impl Related<super::quant_report_data_quality_snapshot::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::DataQualitySnapshot.def()
-    }
-}
-
-impl Related<super::quant_recommendation::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::Recommendation.def()
-    }
-}
-
-impl Related<super::quant_report_fact_delivery::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::FactDelivery.def()
-    }
+    pub data_quality_snapshot: BelongsTo<super::quant_report_data_quality_snapshot::Entity>,
+    #[sea_orm(has_many, relation_enum = "Recommendation")]
+    pub recommendation: HasMany<super::quant_recommendation::Entity>,
+    #[sea_orm(has_one, relation_enum = "FactDelivery")]
+    pub fact_delivery: HasOne<super::quant_report_fact_delivery::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

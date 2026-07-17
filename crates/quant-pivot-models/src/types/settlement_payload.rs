@@ -3,8 +3,6 @@
 use sea_orm::FromJsonQueryResult;
 use serde::{Deserialize, Serialize};
 
-use crate::jsonb_active;
-
 /// CTF payout vector observed before a redemption transaction is sent.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
 pub struct SettlementPayoutVector {
@@ -44,9 +42,3 @@ pub struct SettlementRedeemIndexSets {
     /// Ordered CTF index sets.
     pub index_sets: Vec<u8>,
 }
-
-jsonb_active!(
-    SettlementPayoutVector,
-    SettlementBalanceEvidence,
-    SettlementRedeemIndexSets
-);

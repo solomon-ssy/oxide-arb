@@ -7,6 +7,7 @@ use crate::{
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
+#[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "quant_calibration_artifact")]
 pub struct Model {
@@ -23,8 +24,5 @@ pub struct Model {
     pub active: bool,
     pub created_at: DateTime<Utc>,
 }
-
-#[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-pub enum Relation {}
 
 impl ActiveModelBehavior for ActiveModel {}

@@ -1,12 +1,14 @@
 //! Governance bundle: runtime config, mode control, health, notifications.
 
+use std::sync::{Arc, OnceLock};
+
 use super::{DataBundle, InfraBundle, PgRepositories};
 use crate::{
     execution::ExitMonitorHealthHandle,
     governance::{
-        BiasTableApplicator, CategoryPointerGuard, DefaultModePreflight, DefaultModeTransitionGate,
-        KillSwitchControl, KillSwitchHandle, ModePreflightDeps, RuntimeModeHandle,
-        SystemStatusPublisher, WeightOverlayApplicator,
+        BiasTableApplicator, BootstrapService, CategoryPointerGuard, DefaultModePreflight,
+        DefaultModeTransitionGate, KillSwitchControl, KillSwitchHandle, ModePreflightDeps,
+        RuntimeModeHandle, SystemStatusPublisher, WeightOverlayApplicator,
         execution_recovery::{ExecutionRecoveryCoordinator, ExecutionRecoveryHandle},
         runtime_control::{QuantRuntimeControl, QuantRuntimeControlDeps},
     },
@@ -14,37 +16,28 @@ use crate::{
     observability::{alert_dispatcher::AlertDispatcher, metrics_hub::MetricsHub},
     runtime_config::{RuntimeConfigApplicator, RuntimeConfigStore, RuntimeConfigSubscribers},
 };
-use chrono::Utc;
 use quant_pivot_api::ws::WsShardHealthPort;
-use quant_pivot_error::{QuantError, QuantResult};
+use quant_pivot_error::{QuantError, QuantResult, storage::StorageError};
 use quant_pivot_models::{
     config::DeployConfig,
     domain::{
-        CoreEventPublisher, DataQualityPort, KillSwitchPort, KillSwitchStateInfo, KillSwitchView,
-        NewRuntimeConfigActivation, NewRuntimeConfigVersion, RuntimeControlPort, SystemStatus,
-        UpsertKillSwitchState,
+        BootstrapPort, CoreEventPublisher, DataQualityPort, KillSwitchPort, KillSwitchStateInfo,
+        KillSwitchView, RuntimeConfigPort, RuntimeControlPort, SystemRuntimeStateInfo,
+        SystemStatus,
     },
-    enums::{
-        execution::KillSwitchState,
-        quant::QuantRuntimeMode,
-        runtime_config::{RuntimeConfigActivationKind, RuntimeConfigVersionSource},
-    },
-    hashing::CanonicalDigest,
-    runtime_config::{RUNTIME_CONFIG_SCHEMA_VERSION, RuntimeConfig},
-    types::{RuntimeConfigActivationId, RuntimeConfigVersionId},
+    enums::system::BootstrapPhase,
+    runtime_config::RuntimeConfig,
 };
 use quant_pivot_repository::{
-    postgres::{
-        PgKillSwitchStateRepository, PgSystemRuntimeStateRepository, SYSTEM_KILL_SWITCH_ID,
-    },
+    postgres::{PgKillSwitchStateRepository, PgSystemRuntimeStateRepository},
     traits::{
         CalibrationArtifactRepository, CapitalAllocationRepository, KillSwitchStateRepository,
-        ModelRegistryRepository, ReconciliationRepository, RuntimeConfigVersionRepository,
-        ShadowComparisonRepository, SystemRuntimeStateRepository,
+        ModelRegistryRepository, ModelRunRepository, RecommendationReportRepository,
+        ReconciliationRepository, RuntimeConfigVersionRepository, ShadowComparisonRepository,
+        SystemRuntimeStateRepository,
     },
 };
 use quant_pivot_research::artifact::{ArtifactStore, build_artifact_store};
-use std::sync::{Arc, OnceLock};
 
 /// Active runtime config, mode, kill-switch, and notification wiring loaded from Postgres.
 pub struct RuntimeSnapshot {
@@ -60,12 +53,16 @@ impl RuntimeSnapshot {
     /// Bootstrap or restore the active runtime config, quant runtime mode, and
     /// operational kill-switch (both operational singletons fail closed if missing).
     pub async fn bootstrap(repos: &PgRepositories) -> QuantResult<Self> {
-        let config = ensure_runtime_config_activation(repos.runtime_config.as_ref()).await?;
+        let runtime_state =
+            restore_system_runtime_state(repos.system_runtime_state.as_ref()).await?;
+        let config = ensure_runtime_config_activation(
+            repos.runtime_config.as_ref(),
+            runtime_state.bootstrap_phase,
+        )
+        .await?;
         let alerts = Arc::new(AlertDispatcher::new(&config.notification));
         let store = Arc::new(RuntimeConfigStore::new(config.clone()));
-        let mode = RuntimeModeHandle::new(
-            restore_quant_runtime_mode(repos.system_runtime_state.as_ref()).await?,
-        );
+        let mode = RuntimeModeHandle::new(runtime_state.quant_runtime_mode);
         let kill_switch_info = restore_kill_switch(repos.kill_switch_state.as_ref()).await?;
         let kill_switch_handle = KillSwitchHandle::new(kill_switch_info.state);
         let kill_switch_view = KillSwitchView::from(kill_switch_info);
@@ -100,6 +97,8 @@ pub struct GovernanceBundle {
     pub alerts: Arc<AlertDispatcher>,
     pub health_checker: Arc<HealthChecker>,
     pub runtime_control: Arc<dyn RuntimeControlPort>,
+    /// Durable cold-start lifecycle and derived capability surface.
+    pub bootstrap: Arc<dyn BootstrapPort>,
     /// Operational kill-switch control surface (governed read/write).
     pub kill_switch: Arc<dyn KillSwitchPort>,
     /// Candidate / shadow factor-weight overlay snapshot, reloaded on activation.
@@ -118,7 +117,7 @@ pub struct GovernanceBundle {
 
 impl GovernanceBundle {
     /// Finish governance wiring once infra and data bundles are assembled.
-    pub fn assemble(deps: GovernanceBundleDeps<'_>) -> QuantResult<Self> {
+    pub async fn assemble(deps: GovernanceBundleDeps<'_>) -> QuantResult<Self> {
         let GovernanceBundleDeps {
             deploy,
             metrics,
@@ -136,7 +135,7 @@ impl GovernanceBundle {
             alerts,
         } = runtime;
 
-        let status_publisher = SystemStatusPublisher::new(events);
+        let status_publisher = SystemStatusPublisher::new(events.clone());
         let weight_overlay = seed_weight_overlay(&runtime_config);
         let bias_table = Arc::new(BiasTableApplicator::new(Arc::clone(
             &infra.repos.calibration_artifact,
@@ -149,8 +148,6 @@ impl GovernanceBundle {
             artifact_store,
         ));
         let applicator = build_runtime_config_applicator(RuntimeConfigApplicatorDeps {
-            deploy,
-            metrics,
             runtime_config: &runtime_config,
             alerts: &alerts,
             weight_overlay: &weight_overlay,
@@ -158,6 +155,23 @@ impl GovernanceBundle {
             category_pointer_guard: &category_pointer_guard,
             data,
         });
+        let bootstrap: Arc<dyn BootstrapPort> = Arc::new(
+            BootstrapService::initialize(
+                Arc::clone(&infra.repos.system_runtime_state)
+                    as Arc<dyn SystemRuntimeStateRepository>,
+                Arc::clone(&infra.repos.runtime_config) as Arc<dyn RuntimeConfigVersionRepository>,
+                Arc::clone(&applicator) as Arc<dyn RuntimeConfigPort>,
+                Arc::clone(&infra.repos.model_run) as Arc<dyn ModelRunRepository>,
+                Arc::clone(&infra.repos.recommendation_report)
+                    as Arc<dyn RecommendationReportRepository>,
+                events.clone(),
+                deploy
+                    .quant
+                    .governance
+                    .require_approver_activator_separation,
+            )
+            .await?,
+        );
         let health_checker = build_health_checker(infra, data, &runtime_mode);
         let reconciliation_repo: Arc<dyn ReconciliationRepository> =
             Arc::clone(&infra.repos.reconciliation) as Arc<dyn ReconciliationRepository>;
@@ -180,6 +194,8 @@ impl GovernanceBundle {
             health_checker: &health_checker,
             reconciliation_repo: &reconciliation_repo,
         });
+        status_publisher.register_bootstrap(Arc::clone(&bootstrap));
+        status_publisher.publish();
 
         Ok(Self {
             runtime_config,
@@ -189,6 +205,7 @@ impl GovernanceBundle {
             alerts,
             health_checker,
             runtime_control,
+            bootstrap,
             kill_switch,
             weight_overlay,
             bias_table,
@@ -207,8 +224,9 @@ impl GovernanceBundle {
     /// the factor plane binds the pinned table before the first re-activation. A
     /// pinned-but-unloadable table fails boot closed (never silently inert).
     pub async fn bootstrap_bias_table(&self) -> QuantResult<()> {
-        self.bias_table
-            .reload(
+        let table = self
+            .bias_table
+            .prepare(
                 &self
                     .runtime_config
                     .current()
@@ -217,7 +235,9 @@ impl GovernanceBundle {
                     .favorite_longshot,
             )
             .await
-            .map_err(QuantError::from)
+            .map_err(QuantError::from)?;
+        self.bias_table.publish(table);
+        Ok(())
     }
 }
 
@@ -235,8 +255,6 @@ fn seed_weight_overlay(runtime_config: &Arc<RuntimeConfigStore>) -> Arc<WeightOv
 /// Dependencies for [`build_runtime_config_applicator`].
 #[derive(Clone, Copy)]
 struct RuntimeConfigApplicatorDeps<'a> {
-    deploy: &'a Arc<DeployConfig>,
-    metrics: &'a Arc<MetricsHub>,
     runtime_config: &'a Arc<RuntimeConfigStore>,
     alerts: &'a Arc<AlertDispatcher>,
     weight_overlay: &'a Arc<WeightOverlayApplicator>,
@@ -249,8 +267,6 @@ fn build_runtime_config_applicator(
     deps: RuntimeConfigApplicatorDeps<'_>,
 ) -> Arc<RuntimeConfigApplicator> {
     let RuntimeConfigApplicatorDeps {
-        deploy,
-        metrics,
         runtime_config,
         alerts,
         weight_overlay,
@@ -262,19 +278,12 @@ fn build_runtime_config_applicator(
         Arc::clone(runtime_config),
         RuntimeConfigSubscribers {
             market_filter: Arc::clone(&data.market_filter),
-            market_registry: Arc::clone(&data.market_registry),
             market_cache: Arc::clone(&data.market_cache),
-            ws_subscription: Some(Arc::clone(&data.ws_subscription)),
             data_quality: Arc::clone(&data.data_quality),
-            metrics: Arc::clone(metrics),
             alerts: Arc::clone(alerts),
             weight_overlay: Arc::clone(weight_overlay),
             bias_table: Arc::clone(bias_table),
             category_pointer_guard: Arc::clone(category_pointer_guard),
-            subscription_window_hours: deploy
-                .market_data
-                .websocket
-                .engine_subscription_window_hours,
         },
     ))
 }
@@ -382,17 +391,13 @@ fn wire_operational_controls(deps: OperationalControlsDeps<'_>) -> OperationalCo
     }
 }
 
-async fn restore_quant_runtime_mode(
+async fn restore_system_runtime_state(
     repo: &PgSystemRuntimeStateRepository,
-) -> QuantResult<QuantRuntimeMode> {
+) -> QuantResult<SystemRuntimeStateInfo> {
     if let Some(state) = repo.load().await? {
-        return Ok(state.quant_runtime_mode);
+        return Ok(state);
     }
-    tracing::warn!("system_runtime_state singleton missing; re-seeding ReportOnly");
-    let mode = QuantRuntimeMode::ReportOnly;
-    repo.upsert_quant_runtime_mode(mode, "bootstrap", "fail-closed re-seed (row missing)")
-        .await?;
-    Ok(mode)
+    Err(StorageError::not_found("system_runtime_state", "1").into())
 }
 
 async fn restore_kill_switch(
@@ -401,22 +406,12 @@ async fn restore_kill_switch(
     if let Some(info) = repo.load().await? {
         return Ok(info);
     }
-    tracing::warn!("system_kill_switch singleton missing; re-seeding Closed (fail-closed)");
-    let info = repo
-        .upsert(UpsertKillSwitchState {
-            id: SYSTEM_KILL_SWITCH_ID,
-            state: KillSwitchState::Closed,
-            changed_by: "bootstrap".to_owned(),
-            reason: "fail-closed re-seed (row missing)".to_owned(),
-            requires_operator_ack: false,
-            changed_at: Utc::now(),
-        })
-        .await?;
-    Ok(info)
+    Err(StorageError::not_found("system_kill_switch", "1").into())
 }
 
 async fn ensure_runtime_config_activation(
     repo: &dyn RuntimeConfigVersionRepository,
+    bootstrap_phase: BootstrapPhase,
 ) -> QuantResult<RuntimeConfig> {
     let current = repo.load_current().await?;
     // Fast path: the active config already parses under the current schema.
@@ -426,48 +421,13 @@ async fn ensure_runtime_config_activation(
         return Ok(config);
     }
 
-    // Otherwise fail closed to defaults (no schema migration — project is pre-production).
-    if current.is_some() {
-        tracing::warn!("active runtime config invalid — reseeding defaults");
+    if current.is_none() && bootstrap_phase != BootstrapPhase::Active {
+        tracing::info!("runtime config awaits explicit bootstrap activation");
+        return Ok(RuntimeConfig::default());
     }
-    let config = RuntimeConfig::default();
-    let reason = format!(
-        "bootstrap default runtime config (schema_version={RUNTIME_CONFIG_SCHEMA_VERSION})"
-    );
-
-    let config_json = config.to_json();
-    let config_hash = CanonicalDigest::content_hash_json(&config_json)?;
-    let version = match repo.load_by_hash(&config_hash).await? {
-        Some(version) => version,
-        None => {
-            repo.create_version(NewRuntimeConfigVersion {
-                runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
-                config_hash,
-                schema_version: RUNTIME_CONFIG_SCHEMA_VERSION,
-                config_json,
-                source: RuntimeConfigVersionSource::Bootstrap,
-                created_by: "system".to_owned(),
-                reason,
-            })
-            .await?
-        }
-    };
-
-    repo.activate_version(NewRuntimeConfigActivation {
-        runtime_config_activation_id: RuntimeConfigActivationId::from_v7(),
-        runtime_config_version_id: version.runtime_config_version_id.clone(),
-        activated_at: chrono::Utc::now(),
-        activated_by: "system".to_owned(),
-        reason: "bootstrap runtime config activation".to_owned(),
-        activation_kind: if current.is_some() {
-            RuntimeConfigActivationKind::Promote
-        } else {
-            RuntimeConfigActivationKind::Initial
-        },
-        previous_runtime_config_version_id: current.map(|v| v.runtime_config_version_id),
-        rollback_target_version_id: None,
-        audit_event_id: None,
-    })
-    .await?;
-    Ok(config)
+    Err(StorageError::InvariantViolation {
+        entity: Some("runtime_config_version"),
+        detail: "active runtime config is invalid for the current schema".to_owned(),
+    }
+    .into())
 }

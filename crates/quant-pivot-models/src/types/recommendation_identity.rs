@@ -3,7 +3,7 @@
 use sea_orm::FromJsonQueryResult;
 use serde::{Deserialize, Serialize};
 
-use crate::{enums::common::MarketCategory, jsonb_active};
+use crate::enums::common::MarketCategory;
 
 /// Display identity frozen at decision time.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
@@ -12,5 +12,3 @@ pub struct RecommendationIdentity {
     pub question: String,
     pub outcome_name: String,
 }
-
-jsonb_active!(RecommendationIdentity);

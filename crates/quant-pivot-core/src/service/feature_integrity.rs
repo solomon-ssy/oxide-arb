@@ -17,9 +17,12 @@ use quant_pivot_models::{
         RecommendationReportInfo, ReportRunInfo, ResearchJobView, RunFullFeatureParityRequest,
         RuntimeConfigVersionInfo,
     },
-    enums::quant::{
-        FeatureParityLatchState, FeatureParityRunKind, FeatureParityRunStatus, ReportTriggerKind,
-        ResearchJobKind, ResearchJobStatus,
+    enums::{
+        quant::{
+            FeatureParityLatchState, FeatureParityRunKind, FeatureParityRunStatus,
+            ReportTriggerKind, ResearchJobKind, ResearchJobStatus,
+        },
+        system::CapabilityReason,
     },
     runtime_config::{RuntimeConfig, ScheduleCadence, preview_fire_times},
     types::{
@@ -28,8 +31,8 @@ use quant_pivot_models::{
     },
 };
 use quant_pivot_repository::traits::{
-    CatalogVersionRepository, FeatureParityEventRepository, FeatureParityLatchActor,
-    FeatureParityRepository, RuntimeConfigVersionRepository,
+    CatalogLedgerRepository, EnqueueFrozenFeatureParityOutcome, FeatureParityEventRepository,
+    FeatureParityLatchActor, FeatureParityRepository, RuntimeConfigVersionRepository,
 };
 use quant_pivot_research::{features::FeatureSchema, hashing::ResearchHasher};
 
@@ -46,6 +49,9 @@ const SYSTEM_ACTING_ROLE: &str = "system";
 /// Result of one idempotent automatic full-parity scheduling tick.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AutomaticFullParityOutcome {
+    NotEligible {
+        reason: CapabilityReason,
+    },
     NotDue,
     Existing(FeatureParityRunId),
     Enqueued {
@@ -218,12 +224,22 @@ impl FeatureParityRunCoordinator {
             ctx.acting_role,
             materialization_timeout_secs,
         )?;
-        let (_, job) = self
+        let outcome = self
             .parity
-            .enqueue_run(run, job)
+            .enqueue_frozen_full(run, job)
             .await
             .map_err(QuantError::from)?;
-        Ok(ResearchJobView::from(job))
+        match outcome {
+            EnqueueFrozenFeatureParityOutcome::NotEligible => Err(ResearchError::NotEligible {
+                code: "no_serving_evidence",
+                detail: "the requested parity window contains no durable serving subject"
+                    .to_owned(),
+            }
+            .into()),
+            EnqueueFrozenFeatureParityOutcome::Enqueued { job, .. } => {
+                Ok(ResearchJobView::from(*job))
+            }
+        }
     }
 
     /// Ensure one full replay of the latest complete 24-hour UTC window. The
@@ -288,8 +304,15 @@ impl FeatureParityRunCoordinator {
             materialization_timeout_secs,
         )?;
         let job_id = job.job_id.clone();
-        match self.parity.enqueue_run(run, job).await {
-            Ok(_) => Ok(AutomaticFullParityOutcome::Enqueued { run_id, job_id }),
+        match self.parity.enqueue_frozen_full(run, job).await {
+            Ok(EnqueueFrozenFeatureParityOutcome::NotEligible) => {
+                Ok(AutomaticFullParityOutcome::NotEligible {
+                    reason: CapabilityReason::NoServingEvidence,
+                })
+            }
+            Ok(EnqueueFrozenFeatureParityOutcome::Enqueued { .. }) => {
+                Ok(AutomaticFullParityOutcome::Enqueued { run_id, job_id })
+            }
             Err(StorageError::Duplicate { .. }) => self
                 .parity
                 .find_full_window(window_start, window_end)
@@ -386,6 +409,16 @@ pub trait FeatureParityGatePort: Send + Sync {
         .into())
     }
 
+    /// Capture an existing clear generation, or explicitly report that the
+    /// append-only latch has never been initialized. Only first model publish
+    /// may consume the uninitialized outcome with a subject-bound full proof.
+    async fn publish_state_id(
+        &self,
+        action: &'static str,
+    ) -> QuantResult<Option<FeatureParityStateId>> {
+        self.commit_state_id(action).await.map(Some)
+    }
+
     /// Record a governance integrity incident and open the global safety latch.
     /// Implementations must make the incident+latch transition durable before
     /// returning success.
@@ -477,6 +510,30 @@ impl FeatureParityGatePort for RepositoryFeatureParityGate {
         }
     }
 
+    async fn publish_state_id(
+        &self,
+        action: &'static str,
+    ) -> QuantResult<Option<FeatureParityStateId>> {
+        let state = self.parity.current_state().await?;
+        match state {
+            Some(state) if state.state == FeatureParityLatchState::Clear => {
+                Ok(Some(state.state_id))
+            }
+            Some(state) => Err(ResearchError::Determinism {
+                detail: format!(
+                    "feature parity latch blocks {action}: cause_run_id={}, reason={}",
+                    state
+                        .cause_run_id
+                        .as_ref()
+                        .map_or_else(|| "unknown".to_owned(), ToString::to_string),
+                    state.reason
+                ),
+            }
+            .into()),
+            None => Ok(None),
+        }
+    }
+
     async fn trip_integrity_failure(
         &self,
         source_run_id: &FeatureParityRunId,
@@ -508,12 +565,12 @@ pub struct FeatureIntegrityCoverage {
 
 /// Catalog-ledger coverage adapter used by the Feature Integrity summary.
 pub struct CatalogFeatureIntegrityCoverage {
-    catalog: Arc<dyn CatalogVersionRepository>,
+    catalog: Arc<dyn CatalogLedgerRepository>,
 }
 
 impl CatalogFeatureIntegrityCoverage {
     #[must_use]
-    pub const fn new(catalog: Arc<dyn CatalogVersionRepository>) -> Self {
+    pub const fn new(catalog: Arc<dyn CatalogLedgerRepository>) -> Self {
         Self { catalog }
     }
 }
@@ -872,8 +929,9 @@ mod tests {
     use quant_pivot_models::{
         domain::{
             CompleteFeatureParityRun, FeatureParityRunInfo, FeatureParityStateInfo,
-            NewRuntimeConfigActivation, NewRuntimeConfigVersion, ResearchJobInfo,
-            RuntimeConfigActivationInfo, RuntimeConfigVersionInfo,
+            FrozenFeatureParitySubject, NewFrozenModelParitySubject, NewRuntimeConfigActivation,
+            NewRuntimeConfigApproval, NewRuntimeConfigVersion, ResearchJobInfo,
+            RuntimeConfigActivationInfo, RuntimeConfigApprovalInfo, RuntimeConfigVersionInfo,
         },
         enums::{
             quant::{
@@ -884,7 +942,7 @@ mod tests {
         },
         types::{
             ModelVersionId, RecommendationReportId, ReportRunId, RuntimeConfigActivationId,
-            TrainingDatasetId,
+            RuntimeConfigApprovalId, TrainingDatasetId,
         },
     };
     use quant_pivot_repository::traits::FeatureParityLatchActor;
@@ -982,6 +1040,14 @@ mod tests {
             Err(unexpected("create_run"))
         }
 
+        async fn create_frozen_model_run(
+            &self,
+            _run: NewFeatureParityRun,
+            _subject: NewFrozenModelParitySubject,
+        ) -> Result<FeatureParityRunInfo, StorageError> {
+            Err(unexpected("create_frozen_model_run"))
+        }
+
         async fn enqueue_run(
             &self,
             run: NewFeatureParityRun,
@@ -994,6 +1060,26 @@ mod tests {
             *lock(&self.latest) = Some(info.clone());
             *lock(&self.exact_window) = Some(info.clone());
             Ok((info, job_info))
+        }
+
+        async fn enqueue_frozen_full(
+            &self,
+            run: NewFeatureParityRun,
+            job: NewResearchJob,
+        ) -> Result<EnqueueFrozenFeatureParityOutcome, StorageError> {
+            self.enqueue_run(run, job).await.map(|(run, job)| {
+                EnqueueFrozenFeatureParityOutcome::Enqueued {
+                    run: Box::new(run),
+                    job: Box::new(job),
+                }
+            })
+        }
+
+        async fn load_frozen_subjects(
+            &self,
+            _run_id: &FeatureParityRunId,
+        ) -> Result<Vec<FrozenFeatureParitySubject>, StorageError> {
+            Ok(Vec::new())
         }
 
         async fn find_run(
@@ -1096,6 +1182,27 @@ mod tests {
 
     #[async_trait]
     impl RuntimeConfigVersionRepository for FixedRuntimeConfigRepository {
+        async fn record_approval(
+            &self,
+            _approval: NewRuntimeConfigApproval,
+        ) -> Result<RuntimeConfigApprovalInfo, StorageError> {
+            Err(unexpected("record_approval"))
+        }
+
+        async fn load_approval(
+            &self,
+            _approval_id: &RuntimeConfigApprovalId,
+        ) -> Result<Option<RuntimeConfigApprovalInfo>, StorageError> {
+            Err(unexpected("load_approval"))
+        }
+
+        async fn list_valid_approvals(
+            &self,
+            _limit: u64,
+        ) -> Result<Vec<RuntimeConfigApprovalInfo>, StorageError> {
+            Err(unexpected("list_valid_approvals"))
+        }
+
         async fn create_version(
             &self,
             _version: NewRuntimeConfigVersion,
@@ -1108,6 +1215,14 @@ mod tests {
             _activation: NewRuntimeConfigActivation,
         ) -> Result<RuntimeConfigActivationInfo, StorageError> {
             Err(unexpected("activate_version"))
+        }
+
+        async fn activate_approved_version(
+            &self,
+            _activation: NewRuntimeConfigActivation,
+            _require_approver_activator_separation: bool,
+        ) -> Result<RuntimeConfigActivationInfo, StorageError> {
+            Err(unexpected("activate_approved_version"))
         }
 
         async fn activate_version_if_current(

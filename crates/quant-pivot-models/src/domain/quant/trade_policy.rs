@@ -1,7 +1,7 @@
 //! Trade-policy artifact persistence DTOs.
 
 use chrono::{DateTime, Utc};
-use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -18,7 +18,7 @@ use crate::{
     },
 };
 
-#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
+#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
 #[sea_orm(entity = "crate::entities::quant_trade_policy_artifact::Entity")]
 pub struct TradePolicyArtifactInfo {
     pub artifact_id: TradePolicyArtifactId,
@@ -101,7 +101,7 @@ pub struct NewTradePolicyValidationRow {
     pub row_hash: ContentHash,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
+#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
 #[sea_orm(entity = "crate::entities::quant_trade_policy_validation::Entity")]
 pub struct TradePolicyValidationRunInfo {
     pub validation_run_id: TradePolicyValidationRunId,
@@ -149,7 +149,7 @@ info_from_model!(
     }
 );
 
-#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
+#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
 #[sea_orm(entity = "crate::entities::quant_trade_policy_validation_row::Entity")]
 pub struct TradePolicyValidationRowInfo {
     pub validation_run_id: TradePolicyValidationRunId,
@@ -206,7 +206,7 @@ pub struct FailTradePolicyValidation {
     pub failure_detail: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
+#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
 #[sea_orm(entity = "crate::entities::quant_trade_policy_governance_audit::Entity")]
 pub struct TradePolicyGovernanceAuditInfo {
     pub audit_id: TradePolicyGovernanceAuditId,

@@ -57,7 +57,7 @@
 
 ## 2. 新 Postgres 表
 
-所有表必须通过 `quant_schema` iden、SeaORM entity、domain persistence DTO、repository trait、migration graph 增加。禁止手写裸 migration。
+所有表必须通过新的 immutable SeaORM `MigrationTrait`、dense runtime entity、domain persistence DTO 和 repository trait 增加。DDL 的唯一事实源是 `quant-pivot-migration`；禁止恢复已删除的 `quant_schema`/`idens` 双轨模型，也禁止在 repository 或 runtime 启动路径中手写 DDL。
 
 ### 2.1 Market Selection
 

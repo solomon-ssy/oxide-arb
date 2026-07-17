@@ -1571,12 +1571,12 @@ mod tests {
             enums::quant::{DownsideSource, PublicationStatus},
             runtime_config::FactorCrossSectionConfig,
             types::{
-                BacktestPathSetId, CalibrationArtifactId, ContentHash, FeatureParityRunId,
-                FeatureParityStateId, ModelInputContract, ModelSpecId, ModelVersionId,
+                BacktestPathSetId, CalibrationArtifactId, ContentHash, ModelInputContract,
+                ModelSpecId, ModelVersionId,
             },
         };
         use quant_pivot_repository::traits::{
-            CompensateRollbackModelVersionCommit, ModelRegistryRepository,
+            ModelRegistryRepository, PublishModelVersionCommit, PublishModelVersionOutcome,
             RollbackModelVersionCommit,
         };
         use quant_pivot_research::{
@@ -1658,18 +1658,8 @@ mod tests {
             }
             async fn publish_replacing_predecessors(
                 &self,
-                _model_spec_id: &ModelSpecId,
-                _model_version_id: &ModelVersionId,
-                _feature_parity_state_id: &FeatureParityStateId,
-                _feature_parity_run_id: &FeatureParityRunId,
-            ) -> Result<
-                (
-                    ModelVersionInfo,
-                    Vec<ModelVersionId>,
-                    Option<ModelVersionInfo>,
-                ),
-                StorageError,
-            > {
+                _commit: PublishModelVersionCommit<'_>,
+            ) -> Result<PublishModelVersionOutcome, StorageError> {
                 unimplemented!("not exercised by the calibration recheck tests")
             }
             async fn promote_model_to_shadow(
@@ -1681,12 +1671,6 @@ mod tests {
             async fn rollback_to_retired_predecessor(
                 &self,
                 _commit: RollbackModelVersionCommit<'_>,
-            ) -> Result<(ModelVersionInfo, ModelVersionInfo), StorageError> {
-                unimplemented!("not exercised by the calibration recheck tests")
-            }
-            async fn compensate_failed_rollback(
-                &self,
-                _commit: CompensateRollbackModelVersionCommit<'_>,
             ) -> Result<(ModelVersionInfo, ModelVersionInfo), StorageError> {
                 unimplemented!("not exercised by the calibration recheck tests")
             }

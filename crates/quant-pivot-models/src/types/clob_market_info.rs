@@ -9,7 +9,6 @@ use crate::{
     domain::fee::{BuilderFeeAttribution, MarketFeeSchedule},
     enums::common::TickSize,
     hashing::CanonicalDigest,
-    jsonb_active,
     types::{Bps, ClobMarketInfoVersionId, ContentHash, MarketId, TokenId},
 };
 
@@ -34,8 +33,6 @@ pub struct ClobTokenDescriptor {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
 #[serde(transparent)]
 pub struct ClobTokenSet(pub Vec<ClobTokenDescriptor>);
-
-jsonb_active!(ClobFeeDetails, ClobTokenSet);
 
 /// Append-only bitemporal CLOB truth used by research and live admission.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

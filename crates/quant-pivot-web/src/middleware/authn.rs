@@ -17,8 +17,8 @@ use actix_web::{
     middleware::Next,
     web,
 };
-use quant_pivot_error::auth::AuthError;
-use quant_pivot_models::types::UserId;
+use quant_pivot_error::{auth::AuthError, storage::StorageError};
+use quant_pivot_models::{enums::rbac::UserStatus, types::UserId};
 
 use crate::{error::WebError, extractors::ActorRoles, jwt::TokenType, state::AppState};
 
@@ -46,11 +46,29 @@ pub async fn authn<B: MessageBody>(
     {
         return Err(WebError::from(AuthError::Blacklisted).into());
     }
+    if !state
+        .jwt
+        .family_active(&claims.family_id)
+        .await
+        .map_err(WebError::from)?
+    {
+        return Err(WebError::from(AuthError::Blacklisted).into());
+    }
 
     let user_id = claims
         .sub
         .parse::<UserId>()
         .map_err(|_| WebError::from(AuthError::InvalidToken))?;
+    let user = match state.users.find_by_id(&user_id).await {
+        Ok(user) => user,
+        Err(StorageError::NotFound { .. }) => {
+            return Err(WebError::from(AuthError::InvalidToken).into());
+        }
+        Err(error) => return Err(WebError::from(error).into()),
+    };
+    if user.status != UserStatus::Active {
+        return Err(WebError::from(AuthError::Blacklisted).into());
+    }
     let roles = state
         .user_roles
         .list_roles_for_user(&user_id)

@@ -7,7 +7,7 @@
 
 use std::{collections::BTreeMap, str::FromStr};
 
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, Utc};
 use quant_pivot_models::{
     domain::{
         AppendReconciliationEvidence, ExecutionOrderPatch, InsertFinalOutcome, NewAccountSnapshot,
@@ -193,6 +193,7 @@ async fn report_transaction_persists_chain_and_reserved_capital_sums_pending_int
     };
     create_and_assert_report_transaction(&db, &ids).await;
     assert_recommendation_roundtrip(&db, &ids.report).await;
+    explicitly_enable_entry_for_test(&db).await;
     assert_reserved_capital_tracks_pending_intent(
         &db,
         &ids.recommendation,
@@ -402,7 +403,7 @@ async fn report_fact_delivery_recovers_retry_and_expired_lease_without_early_cla
         .expect("load retrying delivery")
         .expect("retrying delivery");
     let mut due = row.into_active_model();
-    due.next_attempt_at = ActiveValue::Set(Some(Utc::now() - Duration::milliseconds(1)));
+    due.next_attempt_at = ActiveValue::Set(Some(DateTime::<Utc>::UNIX_EPOCH));
     due.update(&db).await.expect("make retry deadline due");
 
     let worker_two = Uuid::new_v4();
@@ -426,7 +427,7 @@ async fn report_fact_delivery_recovers_retry_and_expired_lease_without_early_cla
         .expect("load delivering lease")
         .expect("delivering lease");
     let mut expired = row.into_active_model();
-    expired.lease_expires_at = ActiveValue::Set(Some(Utc::now() - Duration::milliseconds(1)));
+    expired.lease_expires_at = ActiveValue::Set(Some(DateTime::<Utc>::UNIX_EPOCH));
     expired.update(&db).await.expect("expire delivery lease");
 
     let worker_three = Uuid::new_v4();
@@ -639,6 +640,7 @@ async fn execution_order_and_reconciliation_repositories_round_trip() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let ids = seed_report_fixture(&db).await;
+    explicitly_enable_entry_for_test(&db).await;
     let order_intent_id = create_pending_intent(&db, &ids).await;
     let execution_order_id = ExecutionOrderId::from_v7();
 
@@ -793,6 +795,7 @@ async fn capital_kill_switch_and_attribution_repositories_round_trip() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let ids = seed_report_fixture(&db).await;
+    explicitly_enable_entry_for_test(&db).await;
     // Creating an intent reserves its capital atomically (planned = allocated).
     let _order_intent_id = create_pending_intent(&db, &ids).await;
 
@@ -1001,6 +1004,21 @@ async fn create_pending_intent(db: &sea_orm::DatabaseConnection, ids: &TxnIds) -
         .await
         .expect("create intent with allocation")
         .order_intent_id
+}
+
+async fn explicitly_enable_entry_for_test(db: &sea_orm::DatabaseConnection) {
+    let state = PgKillSwitchStateRepository::new(db.clone())
+        .upsert(UpsertKillSwitchState {
+            id: 1,
+            state: KillSwitchState::Closed,
+            changed_by: "pg-account-it-operator".to_owned(),
+            reason: "explicitly enable risk-increasing integration test".to_owned(),
+            requires_operator_ack: false,
+            changed_at: Utc::now(),
+        })
+        .await
+        .expect("explicitly close kill switch for risk-increasing test");
+    assert_eq!(state.state, KillSwitchState::Closed);
 }
 
 // ── Seed helpers ────────────────────────────────────────────────────────────

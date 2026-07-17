@@ -10,6 +10,7 @@ use uuid::Uuid;
 /// Canonical, loss-intolerant L2 event used for replay and policy evidence.
 #[derive(Debug, Clone, clickhouse::Row, Serialize, Deserialize)]
 pub struct BookL2EventRow {
+    #[serde(with = "clickhouse::serde::uuid")]
     pub stream_session_id: Uuid,
     pub shard_id: u32,
     pub token_id: TokenId,

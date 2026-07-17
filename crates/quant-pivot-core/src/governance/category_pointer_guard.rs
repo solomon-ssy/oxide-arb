@@ -123,12 +123,13 @@ mod tests {
         enums::{common::MarketCategory, model::ModelFamily, quant::PublicationStatus},
         runtime_config::{FactorCrossSectionConfig, ModelConfig, ModelVersionRef},
         types::{
-            BacktestPathSetId, ContentHash, FeatureParityRunId, FeatureParityStateId,
-            ModelInputContract, ModelSpecId, ModelTrainingContract, ModelVersionId, SchemaVersion,
+            BacktestPathSetId, ContentHash, ModelInputContract, ModelSpecId, ModelTrainingContract,
+            ModelVersionId, SchemaVersion,
         },
     };
     use quant_pivot_repository::traits::{
-        CompensateRollbackModelVersionCommit, ModelRegistryRepository, RollbackModelVersionCommit,
+        ModelRegistryRepository, PublishModelVersionCommit, PublishModelVersionOutcome,
+        RollbackModelVersionCommit,
     };
     use quant_pivot_research::{
         artifact::{ArtifactStore, LocalArtifactStore},
@@ -213,18 +214,8 @@ mod tests {
         }
         async fn publish_replacing_predecessors(
             &self,
-            _model_spec_id: &ModelSpecId,
-            _model_version_id: &ModelVersionId,
-            _feature_parity_state_id: &FeatureParityStateId,
-            _feature_parity_run_id: &FeatureParityRunId,
-        ) -> Result<
-            (
-                ModelVersionInfo,
-                Vec<ModelVersionId>,
-                Option<ModelVersionInfo>,
-            ),
-            StorageError,
-        > {
+            _commit: PublishModelVersionCommit<'_>,
+        ) -> Result<PublishModelVersionOutcome, StorageError> {
             unimplemented!()
         }
         async fn promote_model_to_shadow(
@@ -236,12 +227,6 @@ mod tests {
         async fn rollback_to_retired_predecessor(
             &self,
             _commit: RollbackModelVersionCommit<'_>,
-        ) -> Result<(ModelVersionInfo, ModelVersionInfo), StorageError> {
-            unimplemented!()
-        }
-        async fn compensate_failed_rollback(
-            &self,
-            _commit: CompensateRollbackModelVersionCommit<'_>,
         ) -> Result<(ModelVersionInfo, ModelVersionInfo), StorageError> {
             unimplemented!()
         }

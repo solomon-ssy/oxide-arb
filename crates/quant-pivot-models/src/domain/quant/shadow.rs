@@ -5,11 +5,11 @@ use crate::{
     types::{ContentHash, ModelVersionId, Probability, ShadowComparisonId},
 };
 use chrono::{DateTime, Utc};
-use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
 use serde::{Deserialize, Serialize};
 
 /// Frozen, content-addressed shadow-comparison row.
-#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
+#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
 #[sea_orm(entity = "crate::entities::quant_shadow_comparison::Entity")]
 pub struct ShadowComparisonInfo {
     pub shadow_comparison_id: ShadowComparisonId,

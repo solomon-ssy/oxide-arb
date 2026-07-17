@@ -9,6 +9,7 @@ use quant_pivot_error::{
 use quant_pivot_models::{
     clickhouse::{ChSchemaVersion, DomainEventRow},
     domain::{DomainEventEnvelope, DomainEventType},
+    types::DomainEventId,
 };
 use quant_pivot_repository::traits::{DomainProjectionRepository, FactWriter};
 use tokio_util::sync::CancellationToken;
@@ -108,7 +109,7 @@ fn to_clickhouse_row(event: &DomainEventEnvelope) -> Result<DomainEventRow, Quan
         )
     })?;
     Ok(DomainEventRow {
-        event_id: event.id.clone(),
+        event_id: event.id.as_uuid(),
         source: event.source.to_string(),
         event_type: event_type_name(event.event_type).to_owned(),
         subject: event.subject.clone(),
@@ -117,7 +118,10 @@ fn to_clickhouse_row(event: &DomainEventEnvelope) -> Result<DomainEventRow, Quan
         available_at: event.available_at.timestamp_millis(),
         schema_version: ChSchemaVersion(event.schema_version),
         revision: event.revision,
-        supersedes_event_id: event.supersedes_event_id.clone(),
+        supersedes_event_id: event
+            .supersedes_event_id
+            .as_ref()
+            .map(DomainEventId::as_uuid),
         payload_hash: event.payload_hash.clone(),
         source_checkpoint_hash: event.source_checkpoint_hash.clone(),
         payload_json,

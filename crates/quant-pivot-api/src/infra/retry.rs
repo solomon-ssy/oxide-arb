@@ -11,7 +11,11 @@
 use backoff::{ExponentialBackoff, backoff::Backoff};
 use quant_pivot_error::api::ApiError;
 use serde::{Deserialize, Serialize};
-use std::{fmt::Display, future::Future, time::Duration};
+use std::{
+    fmt::Display,
+    future::Future,
+    time::{Duration, Instant},
+};
 
 // ─── Error classification ───────────────────────────────────────────────────
 
@@ -37,6 +41,25 @@ impl From<&ApiError> for ErrorKind {
 impl From<ApiError> for ErrorKind {
     fn from(err: ApiError) -> Self {
         Self::from(&err)
+    }
+}
+
+/// Error contract consumed by the retry executor.
+pub trait RetryableError: Display {
+    fn error_kind(&self) -> ErrorKind;
+
+    fn retry_after(&self) -> Option<Duration> {
+        None
+    }
+}
+
+impl RetryableError for ApiError {
+    fn error_kind(&self) -> ErrorKind {
+        ErrorKind::from(self)
+    }
+
+    fn retry_after(&self) -> Option<Duration> {
+        self.retry_after_ms().map(Duration::from_millis)
     }
 }
 
@@ -137,14 +160,16 @@ impl RetryPolicy {
     /// Build the underlying [`ExponentialBackoff`] from this policy.
     #[must_use]
     fn build_backoff(&self) -> ExponentialBackoff {
-        ExponentialBackoff {
+        let mut backoff = ExponentialBackoff {
             initial_interval: Duration::from_millis(self.initial_interval_ms.max(1)),
             max_interval: Duration::from_millis(self.max_interval_ms.max(self.initial_interval_ms)),
             randomization_factor: self.randomization_factor.clamp(0.0, 1.0),
             multiplier: self.multiplier.max(1.0),
             max_elapsed_time: self.max_elapsed_time_ms.map(Duration::from_millis),
             ..ExponentialBackoff::default()
-        }
+        };
+        backoff.reset();
+        backoff
     }
 }
 
@@ -164,6 +189,8 @@ pub enum RetryDecision {
 pub struct RetryController {
     backoff: ExponentialBackoff,
     max_attempts: Option<u32>,
+    max_elapsed_time: Option<Duration>,
+    started_at: Instant,
     retries_used: u32,
 }
 
@@ -173,6 +200,8 @@ impl RetryController {
         Self {
             backoff: policy.build_backoff(),
             max_attempts: policy.max_attempts,
+            max_elapsed_time: policy.max_elapsed_time_ms.map(Duration::from_millis),
+            started_at: Instant::now(),
             retries_used: 0,
         }
     }
@@ -180,20 +209,33 @@ impl RetryController {
     /// Reset after a successful operation.
     pub fn reset(&mut self) {
         self.backoff.reset();
+        self.started_at = Instant::now();
         self.retries_used = 0;
     }
 
     /// Process a failure and decide whether to retry.
     pub fn on_failure(&mut self) -> RetryDecision {
+        self.on_failure_with_minimum(None)
+    }
+
+    /// Process a failure while honoring an upstream `Retry-After` lower bound.
+    pub fn on_failure_with_minimum(&mut self, minimum: Option<Duration>) -> RetryDecision {
         if let Some(max) = self.max_attempts
             && self.retries_used >= max
         {
             return RetryDecision::Exhausted;
         }
         match self.backoff.next_backoff() {
-            Some(dur) => {
+            Some(backoff) => {
+                let delay = minimum.map_or(backoff, |minimum| minimum.max(backoff));
+                if self
+                    .max_elapsed_time
+                    .is_some_and(|budget| self.started_at.elapsed().saturating_add(delay) > budget)
+                {
+                    return RetryDecision::Exhausted;
+                }
                 self.retries_used = self.retries_used.saturating_add(1);
-                RetryDecision::RetryAfter(dur)
+                RetryDecision::RetryAfter(delay)
             }
             None => RetryDecision::Exhausted,
         }
@@ -208,13 +250,13 @@ impl RetryController {
 
 /// Execute an async operation with the given [`RetryPolicy`].
 ///
-/// Errors are classified via [`ErrorKind::from`] (`&E: Into<ErrorKind>`).
+/// Errors provide classification and optional server retry hints through
+/// [`RetryableError`].
 pub async fn retry_with_policy<F, Fut, T, E>(policy: &RetryPolicy, operation: F) -> Result<T, E>
 where
     F: Fn() -> Fut,
     Fut: Future<Output = Result<T, E>>,
-    E: Display,
-    for<'a> ErrorKind: From<&'a E>,
+    E: RetryableError,
 {
     let mut ctrl = RetryController::new(policy);
 
@@ -222,12 +264,12 @@ where
         match operation().await {
             Ok(value) => return Ok(value),
             Err(err) => {
-                if ErrorKind::from(&err) == ErrorKind::Permanent {
+                if err.error_kind() == ErrorKind::Permanent {
                     tracing::warn!(error = %err, "Permanent error — not retrying");
                     return Err(err);
                 }
 
-                match ctrl.on_failure() {
+                match ctrl.on_failure_with_minimum(err.retry_after()) {
                     RetryDecision::Exhausted => {
                         tracing::warn!(
                             retries_used = ctrl.retries_used(),
@@ -305,6 +347,33 @@ mod tests {
         assert!(matches!(ctrl.on_failure(), RetryDecision::RetryAfter(_)));
     }
 
+    #[test]
+    fn server_retry_hint_is_a_lower_bound_within_total_budget() {
+        let within_budget = RetryPolicy {
+            max_attempts: Some(1),
+            initial_interval_ms: 10,
+            max_interval_ms: 10,
+            randomization_factor: 0.0,
+            multiplier: 1.0,
+            max_elapsed_time_ms: Some(100),
+        };
+        let mut controller = RetryController::new(&within_budget);
+        assert_eq!(
+            controller.on_failure_with_minimum(Some(Duration::from_millis(50))),
+            RetryDecision::RetryAfter(Duration::from_millis(50))
+        );
+
+        let outside_budget = RetryPolicy {
+            max_elapsed_time_ms: Some(40),
+            ..within_budget
+        };
+        let mut controller = RetryController::new(&outside_budget);
+        assert_eq!(
+            controller.on_failure_with_minimum(Some(Duration::from_millis(50))),
+            RetryDecision::Exhausted
+        );
+    }
+
     #[derive(Debug)]
     struct TestErr(ErrorKind, String);
 
@@ -317,6 +386,12 @@ mod tests {
     impl From<&TestErr> for ErrorKind {
         fn from(err: &TestErr) -> Self {
             err.0
+        }
+    }
+
+    impl RetryableError for TestErr {
+        fn error_kind(&self) -> ErrorKind {
+            self.0
         }
     }
 
@@ -365,6 +440,7 @@ mod tests {
             endpoint: "/events".into(),
             status: 400,
             body: "bad".into(),
+            retry_after_ms: None,
         };
         assert_eq!(ErrorKind::from(permanent), ErrorKind::Permanent);
     }

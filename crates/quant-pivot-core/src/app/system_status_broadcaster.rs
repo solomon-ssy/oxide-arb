@@ -13,7 +13,7 @@ use crate::{
     service::{catalog_readiness::CatalogReadiness, system_status_nudge::SystemStatusNudge},
 };
 use quant_pivot_models::{
-    domain::{OperationalPhase, SystemStatus, ports::runtime_control::CatalogState},
+    domain::{BootstrapPort, OperationalPhase, SystemStatus, ports::runtime_control::CatalogState},
     enums::quant::QuantRuntimeMode,
 };
 use std::{sync::Arc, time::Duration};
@@ -71,6 +71,7 @@ const fn is_startup_phase(phase: &OperationalPhase) -> bool {
 /// the operator-visible snapshot changes or on startup-phase periodic ticks.
 pub struct SystemStatusBroadcaster {
     publisher: Arc<SystemStatusPublisher>,
+    bootstrap: Option<Arc<dyn BootstrapPort>>,
     nudge: SystemStatusNudge,
     catalog: Arc<CatalogReadiness>,
     last_fingerprint: Option<StatusFingerprint>,
@@ -85,10 +86,17 @@ impl SystemStatusBroadcaster {
     ) -> Self {
         Self {
             publisher,
+            bootstrap: None,
             nudge,
             catalog,
             last_fingerprint: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_bootstrap(mut self, bootstrap: Arc<dyn BootstrapPort>) -> Self {
+        self.bootstrap = Some(bootstrap);
+        self
     }
 
     /// Run until `shutdown` is cancelled.
@@ -106,17 +114,17 @@ impl SystemStatusBroadcaster {
                 }
 
                 () = self.nudge.notified() => {
-                    self.maybe_publish();
+                    self.maybe_publish().await;
                 }
 
                 result = catalog_rx.changed() => {
                     if result.is_ok() {
-                        self.maybe_publish();
+                        self.maybe_publish().await;
                     }
                 }
 
                 () = sleep(tick_delay) => {
-                    self.maybe_publish();
+                    self.maybe_publish().await;
                 }
             }
         }
@@ -133,8 +141,13 @@ impl SystemStatusBroadcaster {
     }
 
     /// Publish when the operator-visible fingerprint changed since the last push.
-    fn maybe_publish(&mut self) {
+    async fn maybe_publish(&mut self) {
         let status = self.current_status();
+        if let Some(bootstrap) = &self.bootstrap
+            && let Err(error) = bootstrap.capabilities(&status).await
+        {
+            tracing::warn!(%error, "capability evidence refresh failed; cached decisions remain fail-closed");
+        }
         let fingerprint = status_fingerprint(&status);
         if self.last_fingerprint.as_ref() == Some(&fingerprint) {
             return;
@@ -158,7 +171,8 @@ impl AppContext {
             Arc::clone(&self.governance.status_publisher),
             self.data.status_nudge.clone(),
             Arc::clone(&self.data.catalog),
-        );
+        )
+        .with_bootstrap(Arc::clone(&self.governance.bootstrap));
         runner.spawn(TaskId::SystemStatusBroadcaster, move |token| {
             broadcaster.run(token)
         });
@@ -178,18 +192,71 @@ mod tests {
     use quant_pivot_error::QuantResult;
     use quant_pivot_models::{
         domain::{
-            CatalogStatusPort, CoreEvent, CoreEventPublisher, HealthReport, OperationalPhase,
-            QuantModeTransitionReport, RuntimeControlPort, SystemStatus,
+            ActivateBootstrapRequest, BootstrapPort, BootstrapView, CatalogStatusPort, CoreEvent,
+            CoreEventPublisher, HealthReport, OperationalPhase, QuantModeTransitionReport,
+            RuntimeControlPort, SystemCapabilities, SystemStatus,
             lifecycle::{MarketDataConnectivity, WsShardConnectivity},
             ports::runtime_control::CatalogState,
         },
-        enums::{execution::KillSwitchState, quant::QuantRuntimeMode},
+        enums::{
+            execution::KillSwitchState,
+            quant::QuantRuntimeMode,
+            system::{BootstrapPhase, CapabilityReason},
+        },
     };
     use std::{sync::Arc, time::Duration};
     use tokio_util::sync::CancellationToken;
 
     struct CatalogAwareControl {
         catalog: Arc<CatalogReadiness>,
+    }
+
+    struct TestBootstrap;
+
+    #[async_trait]
+    impl BootstrapPort for TestBootstrap {
+        fn view(&self) -> BootstrapView {
+            BootstrapView {
+                phase: BootstrapPhase::CollectingBaseline,
+                bootstrap_contract_version: 1,
+                state_revision: 1,
+            }
+        }
+
+        fn subscribe(&self) -> tokio::sync::watch::Receiver<BootstrapView> {
+            let (_, receiver) = tokio::sync::watch::channel(self.view());
+            receiver
+        }
+
+        fn capability_snapshot(&self) -> SystemCapabilities {
+            SystemCapabilities::fail_closed(CapabilityReason::CatalogBaselineMissing)
+        }
+
+        fn subscribe_capabilities(&self) -> tokio::sync::watch::Receiver<SystemCapabilities> {
+            let (_, receiver) = tokio::sync::watch::channel(self.capability_snapshot());
+            receiver
+        }
+
+        fn refresh_operational_capabilities(&self, _status: &SystemStatus) -> SystemCapabilities {
+            self.capability_snapshot()
+        }
+
+        async fn capabilities(&self, _status: &SystemStatus) -> QuantResult<SystemCapabilities> {
+            Ok(self.capability_snapshot())
+        }
+
+        async fn mark_catalog_ready(&self) -> QuantResult<BootstrapView> {
+            Ok(self.view())
+        }
+
+        async fn activate(
+            &self,
+            _request: ActivateBootstrapRequest,
+            _actor: &str,
+            _acting_role: &str,
+        ) -> QuantResult<BootstrapView> {
+            Ok(self.view())
+        }
     }
 
     #[async_trait]
@@ -301,6 +368,7 @@ mod tests {
             catalog: Arc::clone(&catalog),
         });
         status_publisher.register(control as Arc<dyn RuntimeControlPort>);
+        status_publisher.register_bootstrap(Arc::new(TestBootstrap));
 
         let nudge = SystemStatusNudge::default();
         let shutdown = CancellationToken::new();
@@ -325,10 +393,10 @@ mod tests {
         match event {
             CoreEvent::SystemStatusChanged(status) => {
                 assert_eq!(
-                    status.operational_phase,
+                    status.runtime.operational_phase,
                     OperationalPhase::MarketDataConnecting
                 );
-                assert!(status.catalog.is_ready());
+                assert!(status.runtime.catalog.is_ready());
             }
             other => panic!("expected SystemStatusChanged, got {other:?}"),
         }

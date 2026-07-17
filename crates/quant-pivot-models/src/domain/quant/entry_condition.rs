@@ -1,7 +1,7 @@
 //! Durable entry-condition artifact, instance, lease, and audit DTOs.
 
 use chrono::{DateTime, Utc};
-use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -17,7 +17,7 @@ use crate::{
     },
 };
 
-#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
+#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
 #[sea_orm(entity = "quant_entry_condition_artifact::Entity")]
 pub struct EntryConditionArtifactInfo {
     pub artifact_id: EntryConditionArtifactId,
@@ -51,7 +51,7 @@ pub struct NewEntryConditionArtifact {
     pub payload_json: EntryConditionArtifactV1,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
+#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
 #[sea_orm(entity = "quant_entry_condition_instance::Entity")]
 pub struct EntryConditionInstanceInfo {
     pub condition_instance_id: EntryConditionInstanceId,
@@ -135,7 +135,7 @@ pub struct NewEntryConditionInstance {
     pub consumed_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
+#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
 #[sea_orm(entity = "quant_entry_condition_audit::Entity")]
 pub struct EntryConditionAuditInfo {
     pub audit_id: EntryConditionAuditId,

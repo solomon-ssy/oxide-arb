@@ -130,7 +130,7 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
                          PARTITION BY evaluation_id \
                          ORDER BY evaluated_at DESC\
                      ) AS dedupe_rank \
-                     FROM quant_entry_condition_evaluation_event \
+                     FROM quant_entry_condition_evaluation_event FINAL \
                      WHERE condition_instance_id = ? AND trace_kind = 'applied'\
                  ) WHERE dedupe_rank = 1 \
                  ORDER BY applied_revision DESC, evaluated_at DESC, evaluation_id DESC \
@@ -158,7 +158,7 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
                          PARTITION BY source_id, instrument_key, source_sequence, event_time, report_hash \
                          ORDER BY available_at DESC\
                      ) AS dedupe_rank \
-                     FROM quant_crypto_price_report \
+                     FROM quant_crypto_price_report FINAL \
                      WHERE source_id = ? \
                      AND instrument_key = ? \
                      AND ifNull(observations_timestamp, event_time) <= fromUnixTimestamp64Milli(?) \
@@ -196,7 +196,7 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
                          PARTITION BY source_id, instrument_key, source_sequence, event_time, report_hash \
                          ORDER BY available_at DESC\
                      ) AS dedupe_rank \
-                     FROM quant_crypto_price_report \
+                     FROM quant_crypto_price_report FINAL \
                      WHERE instrument_key IN ? \
                      AND event_time >= fromUnixTimestamp64Milli(?) \
                      AND event_time < fromUnixTimestamp64Milli(?) \
@@ -233,7 +233,7 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
                          PARTITION BY source_id, instrument_key, source_sequence, event_time, report_hash \
                          ORDER BY available_at DESC\
                      ) AS dedupe_rank \
-                     FROM quant_crypto_price_report \
+                     FROM quant_crypto_price_report FINAL \
                      WHERE instrument_key IN ? \
                      AND available_at >= fromUnixTimestamp64Milli(?) \
                      AND available_at < fromUnixTimestamp64Milli(?) \
@@ -269,7 +269,7 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
                          PARTITION BY station, local_date, observation_time, revision, report_hash \
                          ORDER BY available_at DESC\
                      ) AS dedupe_rank \
-                     FROM quant_weather_observation_report \
+                     FROM quant_weather_observation_report FINAL \
                      WHERE station IN ? \
                      AND observation_time >= fromUnixTimestamp64Milli(?) \
                      AND observation_time < fromUnixTimestamp64Milli(?) \
@@ -307,7 +307,7 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
                          PARTITION BY station, reference_time, valid_time, member, run_manifest_hash \
                          ORDER BY available_at DESC\
                      ) AS dedupe_rank \
-                     FROM quant_weather_forecast_point \
+                     FROM quant_weather_forecast_point FINAL \
                      WHERE station IN ? \
                      AND valid_time >= fromUnixTimestamp64Milli(?) \
                      AND valid_time < fromUnixTimestamp64Milli(?) \

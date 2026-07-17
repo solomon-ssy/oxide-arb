@@ -16,17 +16,17 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{
     domain::{
-        CatalogMarketLeg, CatalogSnapshotInfo, DecisionBoundary, DecisionSource,
-        MarketCatalogVersionInfo,
+        CatalogMarketChangeInfo, CatalogMarketLeg, CatalogSnapshotInfo, DecisionBoundary,
+        DecisionSource,
         market::{
             book::BookLevel,
             fee::MarketFeeSchedule,
             registry::{EventRegistryInfo, MarketRegistryInfo, NegRiskLegSet},
         },
     },
-    enums::market::MarketStatus,
+    enums::{catalog::CatalogTimestampQuality, market::MarketStatus},
     types::{
-        CatalogSyncBatchId, ContentHash, EventCatalogVersionId, MarketCatalogVersionId, MarketId,
+        CatalogEventChangeId, CatalogMarketChangeId, CatalogSyncBatchId, ContentHash, MarketId,
         TokenId,
     },
 };
@@ -131,9 +131,9 @@ pub struct ResolvedMarketSnapshot {
     /// Atomic synchronization batch owning the market revision.
     pub catalog_sync_batch_id: CatalogSyncBatchId,
     /// Immutable market revision identity.
-    pub market_catalog_version_id: MarketCatalogVersionId,
+    pub market_change_id: CatalogMarketChangeId,
     /// Immutable event revision identity linked by the market revision.
-    pub event_catalog_version_id: EventCatalogVersionId,
+    pub event_change_id: CatalogEventChangeId,
     /// Canonical normalized market content identity.
     pub market_content_hash: ContentHash,
     /// Canonical normalized event content identity.
@@ -141,8 +141,8 @@ pub struct ResolvedMarketSnapshot {
     /// Canonical identity of the exact event membership revision.
     pub membership_hash: ContentHash,
     /// Upstream timestamp quality labels for the selected revisions.
-    pub market_timestamp_quality: String,
-    pub event_timestamp_quality: String,
+    pub market_timestamp_quality: CatalogTimestampQuality,
+    pub event_timestamp_quality: CatalogTimestampQuality,
     /// Source-effective and availability clocks of the exact market revision.
     pub market_effective_at: DateTime<Utc>,
     pub market_available_at: DateTime<Utc>,
@@ -160,15 +160,15 @@ pub fn resolve_catalog_snapshot(
     validate_catalog_visibility(&snapshot, boundary)?;
     let market: MarketRegistryInfo = decode_catalog_payload(
         "market",
-        &snapshot.market.market_catalog_version_id,
+        &snapshot.market.market_change_id,
         snapshot.market.payload.clone(),
     )?;
     let event: EventRegistryInfo = decode_catalog_payload(
         "event",
-        &snapshot.event.event_catalog_version_id,
+        &snapshot.event.event_change_id,
         snapshot.event.payload.clone(),
     )?;
-    if snapshot.market.event_catalog_version_id != snapshot.event.event_catalog_version_id
+    if snapshot.market.event_change_id != snapshot.event.event_change_id
         || market.event_id != event.event_id
         || snapshot.market.event_id != event.event_id
     {
@@ -176,8 +176,8 @@ pub fn resolve_catalog_snapshot(
             detail: format!(
                 "catalog snapshot linkage mismatch for market {}: market event version {}, event version {}, market event {}, event {}",
                 market.market_id,
-                snapshot.market.event_catalog_version_id,
-                snapshot.event.event_catalog_version_id,
+                snapshot.market.event_change_id,
+                snapshot.event.event_change_id,
                 market.event_id,
                 event.event_id
             ),
@@ -188,14 +188,14 @@ pub fn resolve_catalog_snapshot(
         return Err(ResearchError::PitResolution {
             detail: format!(
                 "catalog event version {} does not contain market {}",
-                snapshot.event.event_catalog_version_id, market.market_id
+                snapshot.event.event_change_id, market.market_id
             ),
         }
         .into());
     }
 
     let membership_hash = catalog_membership_hash(
-        &snapshot.event.event_catalog_version_id,
+        &snapshot.event.event_change_id,
         &event,
         &snapshot.event_markets,
     )?;
@@ -219,8 +219,8 @@ pub fn resolve_catalog_snapshot(
         context,
         neg_risk_leg_set,
         catalog_sync_batch_id: snapshot.market.catalog_sync_batch_id,
-        market_catalog_version_id: snapshot.market.market_catalog_version_id,
-        event_catalog_version_id: snapshot.event.event_catalog_version_id,
+        market_change_id: snapshot.market.market_change_id,
+        event_change_id: snapshot.event.event_change_id,
         market_content_hash: snapshot.market.content_hash,
         event_content_hash: snapshot.event.content_hash,
         membership_hash,
@@ -248,8 +248,8 @@ fn validate_catalog_visibility(
     ) {
         return Err(ResearchError::PitResolution {
             detail: format!(
-                "market catalog version {} is outside boundary: effective {}, available {}, source cutoff {source_cutoff}, decision {decision_at}",
-                snapshot.market.market_catalog_version_id,
+                "market catalog change {} is outside boundary: effective {}, available {}, source cutoff {source_cutoff}, decision {decision_at}",
+                snapshot.market.market_change_id,
                 snapshot.market.source_effective_at,
                 snapshot.market.available_at,
             ),
@@ -262,8 +262,8 @@ fn validate_catalog_visibility(
     ) {
         return Err(ResearchError::PitResolution {
             detail: format!(
-                "event catalog version {} is outside boundary: effective {}, available {}, source cutoff {source_cutoff}, decision {decision_at}",
-                snapshot.event.event_catalog_version_id,
+                "event catalog change {} is outside boundary: effective {}, available {}, source cutoff {source_cutoff}, decision {decision_at}",
+                snapshot.event.event_change_id,
                 snapshot.event.source_effective_at,
                 snapshot.event.available_at,
             ),
@@ -277,8 +277,8 @@ fn validate_catalog_visibility(
     {
         return Err(ResearchError::PitResolution {
             detail: format!(
-                "event member market catalog version {} is outside boundary: effective {}, available {}, source cutoff {source_cutoff}, decision {decision_at}",
-                member.market_catalog_version_id,
+                "event member market catalog change {} is outside boundary: effective {}, available {}, source cutoff {source_cutoff}, decision {decision_at}",
+                member.market_change_id,
                 member.source_effective_at,
                 member.available_at,
             ),
@@ -289,20 +289,20 @@ fn validate_catalog_visibility(
 }
 
 fn catalog_membership_hash(
-    event_version_id: &EventCatalogVersionId,
+    event_version_id: &CatalogEventChangeId,
     event: &EventRegistryInfo,
-    versions: &[MarketCatalogVersionInfo],
+    versions: &[CatalogMarketChangeInfo],
 ) -> QuantResult<ContentHash> {
     #[derive(Serialize)]
     struct Member<'a> {
         market_id: &'a MarketId,
-        market_catalog_version_id: &'a MarketCatalogVersionId,
+        market_change_id: &'a CatalogMarketChangeId,
         content_hash: &'a ContentHash,
     }
 
     #[derive(Serialize)]
     struct Membership<'a> {
-        event_catalog_version_id: &'a EventCatalogVersionId,
+        event_change_id: &'a CatalogEventChangeId,
         expected_market_ids: Vec<&'a MarketId>,
         materialized_members: Vec<Member<'a>>,
     }
@@ -313,29 +313,29 @@ fn catalog_membership_hash(
         .iter()
         .map(|version| Member {
             market_id: &version.market_id,
-            market_catalog_version_id: &version.market_catalog_version_id,
+            market_change_id: &version.market_change_id,
             content_hash: &version.content_hash,
         })
         .collect::<Vec<_>>();
     materialized_members
         .sort_by(|left, right| left.market_id.as_str().cmp(right.market_id.as_str()));
     ResearchHasher::canonical(&Membership {
-        event_catalog_version_id: event_version_id,
+        event_change_id: event_version_id,
         expected_market_ids,
         materialized_members,
     })
 }
 
 fn decode_event_members(
-    versions: &[MarketCatalogVersionInfo],
+    changes: &[CatalogMarketChangeInfo],
 ) -> QuantResult<HashMap<MarketId, MarketRegistryInfo>> {
-    versions
+    changes
         .iter()
-        .map(|version| {
+        .map(|change| {
             decode_catalog_payload::<MarketRegistryInfo>(
                 "market",
-                &version.market_catalog_version_id,
-                version.payload.clone(),
+                &change.market_change_id,
+                change.payload.clone(),
             )
             .map(|market| (market.market_id.clone(), market))
         })
@@ -344,7 +344,7 @@ fn decode_event_members(
 
 fn decode_catalog_payload<T>(
     entity: &'static str,
-    version_id: &impl Display,
+    change_id: &impl Display,
     payload: serde_json::Value,
 ) -> QuantResult<T>
 where
@@ -352,7 +352,7 @@ where
 {
     serde_json::from_value(payload).map_err(|error| {
         ResearchError::PitResolution {
-            detail: format!("{entity} catalog version {version_id} payload is invalid: {error}"),
+            detail: format!("{entity} catalog change {change_id} payload is invalid: {error}"),
         }
         .into()
     })

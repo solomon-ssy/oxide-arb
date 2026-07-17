@@ -1,6 +1,6 @@
 //! Postgres-backed shadow-comparison ledger repository (append-only).
 
-use crate::traits::ShadowComparisonRepository;
+use crate::{postgres::primitives, traits::ShadowComparisonRepository};
 use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
@@ -10,9 +10,10 @@ use quant_pivot_models::{
 };
 use rust_decimal::Decimal;
 use sea_orm::{
-    ColumnTrait, DatabaseConnection, EntityTrait, FromQueryResult, IntoActiveModel, QueryFilter,
-    QuerySelect, sea_query::Expr,
+    ColumnTrait, DatabaseConnection, EntityTrait, ExprTrait, FromQueryResult, IntoActiveModel,
+    QueryFilter, QuerySelect, sea_query::Expr,
 };
+use std::cmp;
 
 /// Postgres-backed shadow-comparison ledger repository.
 pub struct PgShadowComparisonRepository {
@@ -59,12 +60,24 @@ impl ShadowComparisonRepository for PgShadowComparisonRepository {
             )
             .filter(quant_shadow_comparison::Column::DecisionAt.gte(since))
             .select_only()
-            .column_as(Expr::cust("COUNT(*)"), "sample_count")
-            .column_as(Expr::cust("MIN(decision_at)"), "window_start")
-            .column_as(Expr::cust("MAX(decision_at)"), "window_end")
-            .column_as(Expr::cust("AVG(topn_overlap)"), "mean_topn_overlap")
             .column_as(
-                Expr::cust("BOOL_OR(hard_divergence)"),
+                Expr::col(quant_shadow_comparison::Column::ShadowComparisonId).count(),
+                "sample_count",
+            )
+            .column_as(
+                Expr::col(quant_shadow_comparison::Column::DecisionAt).min(),
+                "window_start",
+            )
+            .column_as(
+                Expr::col(quant_shadow_comparison::Column::DecisionAt).max(),
+                "window_end",
+            )
+            .column_as(
+                Expr::col(quant_shadow_comparison::Column::TopnOverlap).avg(),
+                "mean_topn_overlap",
+            )
+            .column_as(
+                primitives::bool_or(quant_shadow_comparison::Column::HardDivergence),
                 "any_hard_divergence",
             )
             .into_model::<ShadowSummaryRow>()
@@ -83,7 +96,7 @@ impl ShadowComparisonRepository for PgShadowComparisonRepository {
             });
         };
 
-        let sample_count = u64::try_from(row.sample_count.max(0)).unwrap_or(u64::MAX);
+        let sample_count = u64::try_from(cmp::max(row.sample_count, 0)).unwrap_or(u64::MAX);
         Ok(ShadowStabilitySummary {
             shadow_model_version_id: shadow_model_version_id.clone(),
             sample_count,

@@ -13,11 +13,12 @@
 use std::{sync::Arc, time::Duration};
 
 use chrono::Utc;
+use quant_pivot_models::enums::system::CapabilityId;
 use quant_pivot_repository::traits::RecommendationRepository;
 
 use super::AppContext;
 use crate::{
-    app::{task_id::TaskId, task_registry::AppRunner},
+    app::{capability_gate::run_while_capable, task_id::TaskId, task_registry::AppRunner},
     infra::{deadline_scheduler, periodic_task::PeriodicTask},
 };
 
@@ -28,10 +29,22 @@ impl AppContext {
     /// Register the durable schedule coordinator and global report build worker.
     pub fn register_report_coordinator(&self, runner: &mut AppRunner) {
         let coordinator = self.report_coordinator();
+        let bootstrap = Arc::clone(&self.governance.bootstrap);
         runner.spawn(TaskId::ReportGenerator, move |token| async move {
-            if let Err(error) = Box::pin(coordinator.run(token)).await {
-                tracing::error!(%error, "report coordinator exited with error");
-            }
+            run_while_capable(
+                bootstrap,
+                CapabilityId::ReportGenerationEligible,
+                token,
+                move |worker_token| {
+                    let coordinator = Arc::clone(&coordinator);
+                    async move {
+                        if let Err(error) = Box::pin(coordinator.run(worker_token)).await {
+                            tracing::error!(%error, "report coordinator exited with error");
+                        }
+                    }
+                },
+            )
+            .await;
         });
     }
 

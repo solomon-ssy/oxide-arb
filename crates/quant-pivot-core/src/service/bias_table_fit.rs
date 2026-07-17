@@ -45,7 +45,7 @@ use quant_pivot_models::{
     types::{CalibrationArtifactId, MarketId, ResearchJobProgress, TokenId},
 };
 use quant_pivot_repository::traits::{
-    CalibrationArtifactRepository, CatalogVersionRepository, MarketLinkageRepository,
+    CalibrationArtifactRepository, CatalogLedgerRepository, MarketLinkageRepository,
     MarketRepository, QuantFactReadRepository, RuntimeConfigVersionRepository,
     TrainingDatasetRepository,
 };
@@ -194,7 +194,7 @@ struct SettledMarket {
 /// Core bias-table fitter + calibration-artifact read port.
 pub struct BiasTableFitService {
     fact_read: Arc<dyn QuantFactReadRepository>,
-    catalog_repo: Arc<dyn CatalogVersionRepository>,
+    catalog_repo: Arc<dyn CatalogLedgerRepository>,
     market_repo: Arc<dyn MarketRepository>,
     linkage_repo: Arc<dyn MarketLinkageRepository>,
     calibration_repo: Arc<dyn CalibrationArtifactRepository>,
@@ -207,7 +207,7 @@ impl BiasTableFitService {
     #[must_use]
     pub const fn new(
         fact_read: Arc<dyn QuantFactReadRepository>,
-        catalog_repo: Arc<dyn CatalogVersionRepository>,
+        catalog_repo: Arc<dyn CatalogLedgerRepository>,
         market_repo: Arc<dyn MarketRepository>,
         linkage_repo: Arc<dyn MarketLinkageRepository>,
         calibration_repo: Arc<dyn CalibrationArtifactRepository>,

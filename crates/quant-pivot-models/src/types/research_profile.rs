@@ -8,7 +8,6 @@ use serde::{Deserialize, Serialize};
 use crate::{
     enums::common::MarketCategory,
     hashing::CanonicalDigest,
-    jsonb_active,
     types::{Bps, ContentHash, TradePolicyQualityGate, Usd},
 };
 
@@ -27,8 +26,6 @@ pub struct ResearchProfileRef {
     pub version: u32,
     pub content_hash: ContentHash,
 }
-
-jsonb_active!(ResearchProfileRef);
 
 /// Information set under which policy decisions are evaluated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -242,7 +239,7 @@ impl ResearchProfileArtifact {
     }
 }
 
-/// Return the complete closed registry for Runtime v16.
+/// Return the complete closed registry for Runtime v17.
 pub fn builtin_research_profiles() -> Result<Vec<ResearchProfileArtifact>, String> {
     let published_at = Utc
         .with_ymd_and_hms(2026, 7, 14, 0, 0, 0)
@@ -312,7 +309,7 @@ pub fn builtin_research_profiles() -> Result<Vec<ResearchProfileArtifact>, Strin
     Ok(vec![pooled, weather])
 }
 
-/// Runtime v16 raw-retention floor:
+/// Runtime v17 raw-retention floor:
 /// `max(180, 2 × max(required_days(profile)))`.
 pub fn minimum_raw_retention_days() -> Result<u32, String> {
     let max_required = builtin_research_profiles()?

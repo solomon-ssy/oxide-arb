@@ -99,3 +99,19 @@ async fn system_status_exposes_kill_switch_projection() {
     assert!(res.json()["data"]["kill_switch"]["state"].is_string());
     assert!(res.json()["data"].get("execution_emergency").is_none());
 }
+
+#[actix_web::test]
+#[ignore = "requires Docker"]
+async fn action_eligibility_merges_actor_permissions_with_capability_revision() {
+    let env = TestEnv::start().await;
+    let admin = client::login(&env, "admin", "admin").await;
+    let res = client::get(&env, "/api/system/action-eligibility", &admin).await;
+    assert_eq!(res.status, StatusCode::OK);
+    let data = &res.json()["data"];
+    assert_eq!(data["capability_revision"].as_u64(), Some(1));
+    for action in ["report_generation", "entry_admission", "order_submission"] {
+        assert_eq!(data[action]["permission_granted"].as_bool(), Some(true));
+        assert_eq!(data[action]["capability"]["enabled"].as_bool(), Some(true));
+        assert_eq!(data[action]["enabled"].as_bool(), Some(true));
+    }
+}

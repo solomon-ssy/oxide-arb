@@ -8,7 +8,7 @@ use crate::{
     types::{AuditEventId, OperationLogId, UserId},
 };
 use chrono::{DateTime, Utc};
-use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
 use serde::{Deserialize, Serialize};
 
 /// Insert payload for one operation-log row.
@@ -41,7 +41,7 @@ pub struct NewOperationLog {
     pub governance_audit_event_id: Option<AuditEventId>,
     pub governance_audit_sequence: Option<i64>,
 }
-#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
+#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
 #[sea_orm(entity = "crate::entities::operation_log::Entity")]
 pub struct OperationLogInfo {
     pub id: OperationLogId,

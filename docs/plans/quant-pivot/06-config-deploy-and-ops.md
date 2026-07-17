@@ -2,24 +2,23 @@
 
 > 状态：生产级目标设计（与实现对齐）
 >
-> 目标：用 deploy-config + runtime-config **v7** 支撑 quant-pivot，删除旧 Endgame trading 配置面。
+> 目标：用 deploy-config + runtime-config **v17** 支撑 quant-pivot，删除旧 Endgame trading 配置面。
 
-本文件描述**当前实现态**：deploy config 树见 [`crates/quant-pivot-models/src/config/`](../../../crates/quant-pivot-models/src/config/mod.rs)，runtime config v7 见 [`crates/quant-pivot-models/src/runtime_config/`](../../../crates/quant-pivot-models/src/runtime_config/mod.rs)。
+本文件描述**当前实现态**：deploy config 树见 [`crates/quant-pivot-models/src/config/`](../../../crates/quant-pivot-models/src/config/mod.rs)，runtime config v17 见 [`crates/quant-pivot-models/src/runtime_config/`](../../../crates/quant-pivot-models/src/runtime_config/mod.rs)。
 
 ## 0. 配置分层
 
 两层配置模型：
 
 - **Deploy config**（`config/quant-pivot.toml`）：进程启动绑定，改动需要重启。连接、池、shard/channel、worker cadence、credential source、web server、logging。
-- **Runtime config v15（Phase 11.8 目标 v16）**：受治理、版本化（`runtime_config_version` WORM）、
-  热激活（`ArcSwap` + applicator push），存 Postgres，只经治理 API 修改；11.8 删除
-  `reports.publish_empty_reports` 后破坏式升级为 v16。
+- **Runtime config v17**：受治理、版本化（`runtime_config_version` WORM）、显式审批、
+  热激活（`ArcSwap` + applicator push），存 PostgreSQL，只经治理 API 修改。
 
 禁止：
 
 - 把可热更新策略参数放进 TOML。
 - 把连接池、worker 并发、credential source 放进 runtime config。
-- 保留旧 runtime-config parser（v7 之前的 schema 一律拒绝；仅 bootstrap 迁移路径读旧文档，见 §10）。
+- 保留旧 runtime-config parser 或兼容 shim；任何非 v17 文档一律拒绝。
 - 允许未知 key 静默通过（deploy + runtime 全部 `deny_unknown_fields`）。
 
 ## 1. Deploy Config
@@ -35,14 +34,14 @@
 | `[polymarket.relayer]` | `base_url`, `api_key`, `api_key_address`, `request_timeout_ms` | proxy/gnosis_safe 的 gasless money-moving；EOA 忽略 |
 | `[polymarket.fees]` | `exponent`, `unknown_category_rate`, `category_rates{}` | fee = C×feeRate×p×(1−p)^exponent |
 | `[market_data.websocket]` | `reconnect_delay_ms`, `max_reconnect_delay_ms`, `max_subscriptions_per_connection`, `engine_max_subscription_tokens`, `engine_subscription_window_hours` | WS transport + 引擎订阅 hotset cap/窗口 |
-| `[market_data.gamma]` | `base_url`, `full_sync_interval_secs`, `page_size` | market catalog sync |
+| `[market_data.gamma]` | `base_url`, `reconcile_interval_secs`, `page_size`, `max_keyset_pages`, `max_keyset_requests` | Gamma keyset 全量 reconcile；只持久化内容变化 |
 | `[market_data.data_api]` | `base_url`, `page_size`, `size_threshold` | keyless 持仓读取（report capital base） |
 | `[observability]` | `log_level`, `log_json` | logging（metrics 常开于 `GET /metrics`） |
-| `[db.postgres]` | 连接/池/GUC（17 字段） | 权威状态 |
-| `[db.clickhouse]` | `url`, `database`, `user`, `password`, `flush_interval_secs`, `batch_size`, `max_concurrent_inserts` | facts/analytics |
+| `[db.postgres]` | 连接/池/GUC + `[db.postgres.migration]` 独立 deploy identity | 权威状态；runtime identity 无 DDL 权限 |
+| `[db.clickhouse]` | 连接/批量写 + `[db.clickhouse.migration]` 独立 deploy identity | facts/analytics；runtime 不执行 DDL |
 | `[cache]` / `[cache.redis]` / `[cache.moka]` | 见 struct | Redis L2 + Moka L1 |
 | `[keys]` | `private_key` | **唯一签名凭证**；CLOB L2 由 SDK 在 connect 时派生 |
-| `[web]` / `[web.jwt]` | 见 struct | admin API/WS + JWT |
+| `[web]` / `[web.jwt]` | 见 struct | Ed25519 `kid` keyring、内存 access token、HttpOnly refresh cookie、一次性 WS ticket |
 | `[quant.workers]` | `report_expire_sweep_secs`, `intent_expire_sweep_secs`, `execution_dispatch_secs`, `execution_breaker_tick_secs`, `equity_snapshot_secs` | 后台 worker cadence（restart-bound） |
 | `[quant.account]` | `funder`, `wallet_kind` | Data API 持仓读取地址 + 钱包形态 |
 | `[research.artifact_store]` | `kind`, `bucket`, `prefix`, `region`, `endpoint`, `path_style`, `require_object_lock`, `require_versioning` | Local 开发存储或生产 S3/WORM evidence store；生产发布要求 versioning + Object Lock |
@@ -63,15 +62,15 @@
 - `polymarket.onchain.rpc_timeout_ms` 已接线进 alloy provider 的 reqwest client：redeem/oracle 调用超时即失败，绝不无限挂起。
 - `polymarket.order_post_timeout_ms` 只约束单次资金订单 POST：超时归类为 Ambiguous 并进入 reconciliation，绝不自动重试。
 
-## 2. Runtime Config v7
+## 2. Runtime Config v17
 
-根类型 [`RuntimeConfig`](../../../crates/quant-pivot-models/src/runtime_config/mod.rs)，`RUNTIME_CONFIG_SCHEMA_VERSION = 7`（以代码为准）。
+根类型 [`RuntimeConfig`](../../../crates/quant-pivot-models/src/runtime_config/mod.rs)，`RUNTIME_CONFIG_SCHEMA_VERSION = 17`（以代码为准）。
 
 > **schema 版本历史**：v7 基线 → … → v9（Phase 06.1）→ **v10**（Phase 10.7：移除线上死配置 `model.prediction_horizon_secs`→训练 API；`data_quality.min_book_depth_usd` 迁移正名为 `execution.entry_order_policy.min_entry_book_depth_usd`）。
 
 ```text
 RuntimeConfig {
-  schema_version: 10,
+  schema_version: 17,
   selection,
   data_quality,
   features,
@@ -185,7 +184,7 @@ Deploy-only `[quant.workers]` 增加：`report_schedule_poll_secs=1`、`report_r
 
 ### 3.1 Common validation（[`validation.rs`](../../../crates/quant-pivot-models/src/runtime_config/validation.rs)）
 
-- `schema_version` 必须为 10；unknown fields reject；Decimal string parse；USD ≥ 0；比例在合法区间；schedule id 非空；cadence 结构合法。
+- `schema_version` 必须为 16；unknown fields reject；Decimal string parse；USD ≥ 0；比例在合法区间；schedule id 非空；cadence 结构合法。
 
 ### 3.2 Mode-aware validation（deploy + preflight）
 
@@ -208,11 +207,11 @@ admission 由 20 条增至 **22 条固定顺序检查**，两门紧邻 `CapitalB
 
 ### 3.5 热更新机制
 
-`RuntimeConfigStore`（`ArcSwap<RuntimeConfig>`）承载 live active 快照；激活路径 `POST /api/runtime-config/versions/{id}/activate` → 校验 → 持久化激活链 → `RuntimeConfigApplicator::apply`：先 push 订阅者（market filter/cache、data quality、alerts、weight overlay、WS 订阅、**execution breaker**），再 swap store，最后 rebuild report schedule。worker（recon/exit_monitor/settlement/attribution）每轮重读 `store.current()`。报告构建按 `trigger_time` 从 PG 取 point-in-time 版本（回放确定性）。
+`RuntimeConfigStore`（`ArcSwap<RuntimeConfig>`）承载 live active 快照。候选配置先完成纯函数解析、校验并构造不可变 snapshot；审批必须绑定 exact `version + hash`。激活事务锁定 bootstrap singleton，校验 approval 与 `expected_state_revision`，原子写 activation、bootstrap transition 和 WORM audit；事务提交后再一次发布 `ArcSwap`。进程若在 commit 后崩溃，重启从 PostgreSQL active revision 重建同一 snapshot，不运行补偿 rollback。worker 每轮读取已发布 snapshot；报告构建按 `trigger_time` 从 PostgreSQL 取 point-in-time 版本。
 
 ## 4. Runtime Config UI
 
-UI groups（[`schema/ui.rs`](../../../crates/quant-pivot-models/src/schema/ui.rs)，经 `preferences_schema` 校验与 struct 1:1）：Selection、Data Quality、Features、Factors、Model、Quality Gate、Training、Reports、Portfolio、Execution、Notifications。
+UI groups 由 [`preferences_schema.rs`](../../../crates/quant-pivot-models/src/runtime_config/preferences_schema.rs) 生成并校验与 struct 1:1：Selection、Data Quality、Features、Factors、Model、Quality Gate、Training、Reports、Portfolio、Execution、Notifications。
 
 money-critical 字段（`money` 语义 + 确认）：portfolio budget、max recommendation size、capital caps、auto execution enable、breaker 亏损上限、mode switch、model publish。
 
@@ -242,7 +241,7 @@ Dataset plan/build 经 Admin HTTP API（非 xtask CLI）：`POST /api/research/t
 
 保留：`cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace`、architecture lint、MSRV。
 
-新增/维护：no old Endgame symbols gate、no old `ExecutionMode` gate、no prior-schema runtime config gate、no compatibility re-export gate、schema graph includes quant tables、**runtime config schema snapshot（schema_version=7）**、report payload snapshot、ClickHouse row snapshot。
+新增/维护：no old Endgame symbols gate、no old `ExecutionMode` gate、no prior-schema runtime config gate、no compatibility re-export gate、PostgreSQL semantic manifest、migration artifact checksum、**runtime config schema snapshot（schema_version=17）**、report payload snapshot、ClickHouse semantic manifest/row snapshot。
 
 ## 7. Benchmark
 
@@ -268,16 +267,19 @@ Critical：report schedule missed、model quality gate failed、fact writer lag�
 
 ## 10. Bootstrap 与 schema 变更
 
-- 项目尚未正式运行，**不做** runtime config schema 迁移；bootstrap（[`governance.rs`](../../../crates/quant-pivot-core/src/app/bundles/governance.rs) `ensure_runtime_config_activation`）在直接解析失败后 fail-closed 到默认 v7 文档并激活。
+- PostgreSQL DDL 的唯一所有者是 deploy-only [`quant-pivot-migration`](../../../crates/quant-pivot-migration/src/lib.rs)。每个 `SeaORM` migration 是只追加、不可修改的编译 artifact；`seaql_migrations` 记录原生版本，`schema_migration_audit` 记录 BLAKE3 checksum、artifact length 与 migration engine。部署用独立 identity 执行 `quant-pivot-xtask postgres-schema plan|apply|verify`，runtime 只读验证 migration ledger 与规范化 schema manifest，禁止启动时 apply DDL。新增未应用 migration 后必须执行 `cargo run -p quant-pivot-xtask -- postgres-schema migration-manifest`，人工复核并提交 `schema/postgres/migrations.json`；该命令不连接数据库、不执行 DDL。
+- ClickHouse DDL 同样只允许 deploy identity 通过 `quant-pivot-xtask clickhouse-schema` 执行；runtime 只验证规范化 `SHOW CREATE` manifest。
+- 冷启动 FSM 固定为 `initializing -> collecting_baseline -> awaiting_activation -> active`，每次 transition 在锁定 singleton 的 PostgreSQL 事务内递增 `state_revision` 并写 WORM audit。等待激活时允许没有 active runtime config；active 系统的关键 singleton 缺失或非法必须启动失败，禁止自动 reseed/self-heal。
+- 首次激活必须选择 exact approved runtime revision，并显式确认 `ReportOnlyForced`。生产 profile 要求 approver 与 activator 分离；local profile 可显式关闭双人审批，但不能关闭 approval/audit/capability gate。
 - env var 旧 key（如 `QUANT_PIVOT__KEYS__SOURCE`）会因 `deny_unknown_fields` 导致启动失败，必须同步清理。
-- UI schema snapshot 必须更新（schema_version=7）。
-- 旧 tests 大量失败者需删除或改名隔离。
-- `EntryPlan.confirmation_window_secs` 删除影响 report payload snapshot，须重生成。
+- UI/runtime schema snapshot 必须固定为 schema_version 17。
 
 ## 11. 验收标准
 
 - `config/quant-pivot.toml` / `production.example.toml` 与 `DeployConfig` struct **1:1**，无 old execution/settlement/endgame hotset、无 `[keys].source`。
-- `RuntimeConfig::schema_version == 7`；runtime schema 不含 `detection`、old `risk`、old `settlement`、`exit_order_policy`、`admission`、`domain_feature_policy`、`default_top_n`。
+- `RuntimeConfig::schema_version == 17`；runtime schema 不含 `detection`、old `risk`、old `settlement`、`exit_order_policy`、`admission`、`domain_feature_policy`、`default_top_n`。
+- 空 PostgreSQL 由 deploy identity 迁移后 manifest 字节级语义一致；runtime identity 无 `CREATE`/DDL 权限；migration checksum、enum、约束、索引、trigger、grant 任一漂移都确定失败。
+- 冷库先进入 `collecting_baseline`，完成 Gamma baseline 后进入 `awaiting_activation`；没有 serving subject 时不创建 parity run、不打开 latch。
 - report_only 启动要求 private key + `quant.account.funder`；缺失则报告生成 fail closed。
 - semi_auto/auto_execution preflight 额外覆盖签名/下单 credentials 与 order client readiness。
 - admission 为 22 条；`capital.{max_open_intents, max_reserved_usd}` 生效（0=禁用）。

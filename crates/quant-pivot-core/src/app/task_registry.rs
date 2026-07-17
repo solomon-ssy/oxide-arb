@@ -10,12 +10,13 @@ use super::{
 };
 use crate::observability::metrics_hub::MetricsHub;
 use core::array;
+use quant_pivot_error::QuantError;
 use quant_pivot_models::enums::quant::QuantRuntimeMode;
 use std::{
     mem::take,
     pin::Pin,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, PoisonError,
         atomic::{AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
@@ -196,6 +197,7 @@ struct StageBucket {
     tracker: TaskTracker,
     aborts: Vec<AbortHandle>,
     exited: Arc<AtomicUsize>,
+    failed: Arc<AtomicUsize>,
     panicked: Arc<AtomicUsize>,
 }
 
@@ -205,6 +207,7 @@ impl Default for StageBucket {
             tracker: TaskTracker::new(),
             aborts: Vec::new(),
             exited: Arc::new(AtomicUsize::new(0)),
+            failed: Arc::new(AtomicUsize::new(0)),
             panicked: Arc::new(AtomicUsize::new(0)),
         }
     }
@@ -268,17 +271,27 @@ pub struct TaskRegistry {
     stage_tokens: [CancellationToken; ShutdownStage::COUNT],
     stages: [StageBucket; ShutdownStage::COUNT],
     telemetry: DrainTelemetry,
+    fatal_failure: Arc<Mutex<Option<QuantError>>>,
+}
+
+enum TaskCompletion {
+    Clean,
+    Failed(QuantError),
 }
 
 impl TaskRegistry {
     #[must_use]
     pub fn new(root_shutdown: CancellationToken) -> Self {
-        let stage_tokens = array::from_fn(|_| root_shutdown.child_token());
+        // Root cancellation only requests shutdown. Independent stage tokens
+        // are cancelled by `drain` in order so consumers remain alive until all
+        // earlier producer stages have completed.
+        let stage_tokens = array::from_fn(|_| CancellationToken::new());
         Self {
             root: root_shutdown,
             stage_tokens,
             stages: array::from_fn(|_| StageBucket::default()),
             telemetry: DrainTelemetry::default(),
+            fatal_failure: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -303,6 +316,34 @@ impl TaskRegistry {
         F: FnOnce(CancellationToken) -> Fut + Send + 'static,
         Fut: Future<Output = ()> + Send + 'static,
     {
+        self.spawn_tracked(id, move |token| async move {
+            f(token).await;
+            TaskCompletion::Clean
+        })
+    }
+
+    /// Register a critical resident task whose error terminates the process cleanly.
+    ///
+    /// The first typed failure is returned from [`AppRunner::run`]; the root
+    /// cancellation token wakes [`AppRunner`], which then performs staged drain.
+    pub fn spawn_critical<F, Fut>(&mut self, id: TaskId, f: F) -> &mut Self
+    where
+        F: FnOnce(CancellationToken) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<(), QuantError>> + Send + 'static,
+    {
+        self.spawn_tracked(id, move |token| async move {
+            match f(token).await {
+                Ok(()) => TaskCompletion::Clean,
+                Err(error) => TaskCompletion::Failed(error),
+            }
+        })
+    }
+
+    fn spawn_tracked<F, Fut>(&mut self, id: TaskId, f: F) -> &mut Self
+    where
+        F: FnOnce(CancellationToken) -> Fut + Send + 'static,
+        Fut: Future<Output = TaskCompletion> + Send + 'static,
+    {
         let stage = id.kind().shutdown_stage();
         let stage_idx = stage.index();
         let token = self.stage_tokens[stage_idx].clone();
@@ -311,16 +352,35 @@ impl TaskRegistry {
         let name = id.display_name();
         let kind = id.kind().as_str();
         let exited = Arc::clone(&bucket.exited);
+        let failed = Arc::clone(&bucket.failed);
         let panicked = Arc::clone(&bucket.panicked);
+        let fatal_failure = Arc::clone(&self.fatal_failure);
+        let root = self.root.clone();
 
         let inner = tokio::spawn(f(token));
         bucket.aborts.push(inner.abort_handle());
 
         bucket.tracker.spawn(async move {
             match inner.await {
-                Ok(()) => {
+                Ok(TaskCompletion::Clean) => {
                     exited.fetch_add(1, Ordering::Relaxed);
                     info!(stage = stage.as_str(), task = %name, kind, "Task exited cleanly");
+                }
+                Ok(TaskCompletion::Failed(error)) => {
+                    failed.fetch_add(1, Ordering::Relaxed);
+                    error!(
+                        stage = stage.as_str(),
+                        task = %name,
+                        kind,
+                        %error,
+                        "Critical task failed; initiating process shutdown"
+                    );
+                    let mut failure = fatal_failure.lock().unwrap_or_else(PoisonError::into_inner);
+                    if failure.is_none() {
+                        *failure = Some(error);
+                    }
+                    drop(failure);
+                    root.cancel();
                 }
                 Err(e) if e.is_cancelled() => {
                     exited.fetch_add(1, Ordering::Relaxed);
@@ -352,7 +412,7 @@ impl TaskRegistry {
         self.stages.iter().all(|bucket| bucket.tracker.is_empty())
     }
 
-    pub async fn drain(mut self, budget: ShutdownBudget) {
+    pub async fn drain(mut self, budget: ShutdownBudget) -> Option<QuantError> {
         let total_tasks = self.len();
         info!(
             total_tasks,
@@ -375,6 +435,10 @@ impl TaskRegistry {
         }
 
         info!("Staged drain complete");
+        self.fatal_failure
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
     }
 }
 
@@ -417,12 +481,14 @@ async fn drain_stage(
             () = &mut deadline => {
                 let abandoned = bucket.tracker.len();
                 let exited = bucket.exited.load(Ordering::Relaxed);
+                let failed = bucket.failed.load(Ordering::Relaxed);
                 let panicked = bucket.panicked.load(Ordering::Relaxed);
                 warn!(
                     stage = stage.as_str(),
                     budget_secs = budget.as_secs(),
                     abandoned_tasks = abandoned,
                     exited_tasks = exited,
+                    failed_tasks = failed,
                     panicked_tasks = panicked,
                     "Stage drain timeout — aborting remaining tasks (STATE-AT-RISK)"
                 );
@@ -439,11 +505,13 @@ async fn drain_stage(
             _ = heartbeat.tick() => {
                 let remaining = bucket.tracker.len();
                 let exited = bucket.exited.load(Ordering::Relaxed);
+                let failed = bucket.failed.load(Ordering::Relaxed);
                 let panicked = bucket.panicked.load(Ordering::Relaxed);
                 info!(
                     stage = stage.as_str(),
                     remaining,
                     exited,
+                    failed,
                     panicked,
                     elapsed_ms = start.elapsed().as_millis(),
                     budget_secs = budget.as_secs(),
@@ -457,12 +525,14 @@ async fn drain_stage(
     }
 
     let exited = bucket.exited.load(Ordering::Relaxed);
+    let failed = bucket.failed.load(Ordering::Relaxed);
     let panicked = bucket.panicked.load(Ordering::Relaxed);
     info!(
         stage = stage.as_str(),
         elapsed_ms = start.elapsed().as_millis(),
         tasks = count,
         exited,
+        failed,
         panicked,
         "Stage drain finished"
     );
@@ -526,6 +596,15 @@ impl AppRunner {
         self
     }
 
+    pub fn spawn_critical<F, Fut>(&mut self, id: TaskId, f: F) -> &mut Self
+    where
+        F: FnOnce(CancellationToken) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<(), QuantError>> + Send + 'static,
+    {
+        self.registry.spawn_critical(id, f);
+        self
+    }
+
     fn absorb_pending_tasks(&mut self) {
         let pending = self.pending_tasks.drain();
         if pending.is_empty() {
@@ -569,17 +648,18 @@ impl AppRunner {
         info!("Shutdown signal received — draining tasks");
 
         let force_exit_guard = tokio::spawn(force_exit_on_second_signal());
-        self.registry.drain(self.budget).await;
+        let fatal_failure = self.registry.drain(self.budget).await;
         force_exit_guard.abort();
 
         info!("Shutdown complete");
-        Ok(())
+        fatal_failure.map_or(Ok(()), Err)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use quant_pivot_error::infra::InfraError;
     use std::sync::atomic::{AtomicBool, Ordering};
 
     fn tick_budget() -> ShutdownBudget {
@@ -620,8 +700,11 @@ mod tests {
         });
 
         root.cancel();
-        registry.drain(tick_budget()).await;
+        tokio::task::yield_now().await;
+        assert!(order.lock().await.is_empty());
+        let failure = registry.drain(tick_budget()).await;
 
+        assert!(failure.is_none());
         assert_eq!(*order.lock().await, vec!["ws", "cache", "persist"]);
     }
 
@@ -666,8 +749,29 @@ mod tests {
         let budget = ShutdownBudget::new(budget);
 
         root.cancel();
-        registry.drain(budget).await;
+        let failure = registry.drain(budget).await;
 
+        assert!(failure.is_none());
         assert!(!stubborn_ran.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test]
+    async fn critical_task_failure_cancels_root_and_is_returned() {
+        let root = CancellationToken::new();
+        let mut registry = TaskRegistry::new(root.clone());
+        registry.spawn_critical(TaskId::DataPipeline, |_token| async move {
+            Err(InfraError::ChannelClosed {
+                name: "critical-test",
+            }
+            .into())
+        });
+
+        root.cancelled().await;
+        let failure = registry
+            .drain(tick_budget())
+            .await
+            .expect("critical failure must be returned");
+
+        assert!(failure.to_string().contains("critical-test"));
     }
 }

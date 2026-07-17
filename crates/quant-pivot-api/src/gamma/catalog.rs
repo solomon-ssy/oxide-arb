@@ -4,13 +4,13 @@ use super::wire::{WireEvent, WireMarket};
 use chrono::{DateTime, Utc};
 use quant_pivot_models::{
     enums::{
+        catalog::{CatalogFilterReason, CatalogFilterReasonSet, CatalogPrelistingFilterReason},
         common::{CategorySet, TickSize},
         market::{EventStatus, MarketStatus},
     },
     types::Usd,
 };
 use rust_decimal::Decimal;
-use serde_json::Value;
 use thiserror::Error;
 
 /// Tradeable token row after Gamma wire normalization.
@@ -44,6 +44,7 @@ pub struct CatalogMarket {
     /// Exactly two legs — the binary invariant is encoded in the type.
     pub tokens: [CatalogToken; 2],
     pub status: MarketStatus,
+    pub filter_reasons: CatalogFilterReasonSet,
     pub neg_risk: bool,
     /// Settlement conclusion; present only when `closed` and
     /// `umaResolutionStatus == "resolved"` with an unambiguous `"1"` price.
@@ -78,20 +79,29 @@ pub struct CatalogEvent {
     pub neg_risk: bool,
     pub end_date: Option<DateTime<Utc>>,
     pub markets: Vec<CatalogMarket>,
-    /// Embedded markets dropped during normalization (for sync summaries).
+    /// Legitimate pre-listing objects excluded until Gamma assigns a CTF id.
+    pub filtered_markets: Vec<FilteredPrelistingMarket>,
+    /// Structurally invalid embedded markets rejected during normalization.
     pub rejected_markets: Vec<RejectedMarket>,
     pub created_at: Option<DateTime<Utc>>,
     pub updated_at: Option<DateTime<Utc>>,
-    /// Original wire payload for `event.raw_gamma` audit storage.
-    pub raw_wire: Value,
 }
 
-/// A market dropped during catalog normalization, kept for sync summaries.
+/// A legitimate Gamma market object observed before venue listing completes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FilteredPrelistingMarket {
+    pub source_id: String,
+    pub reason: CatalogPrelistingFilterReason,
+    pub raw_payload: serde_json::Value,
+}
+
+/// A structurally invalid market dropped during catalog normalization.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RejectedMarket {
     /// `condition_id` as received (may be empty for `EmptyConditionId`).
     pub condition_id: String,
     pub reject: CatalogMarketReject,
+    pub raw_payload: Option<serde_json::Value>,
 }
 
 /// Why a single embedded market was dropped during catalog normalization.
@@ -125,7 +135,6 @@ impl CatalogMarketReject {
 
 impl From<WireEvent> for CatalogEvent {
     fn from(wire: WireEvent) -> Self {
-        let raw_wire = serde_json::to_value(&wire).unwrap_or(Value::Null);
         let end_date = wire.end_date();
         let tags = wire.tag_slugs();
         let categories = CategorySet::from_slugs(tags.iter().map(String::as_str));
@@ -146,9 +155,25 @@ impl From<WireEvent> for CatalogEvent {
         let updated_at = parse_gamma_timestamp(wire.updated_at.as_deref());
         let wire_markets = wire.markets.unwrap_or_default();
         let mut markets = Vec::with_capacity(wire_markets.len());
+        let mut filtered_markets = Vec::new();
         let mut rejected_markets = Vec::new();
         for market in wire_markets {
             let condition_id = market.condition_id.clone();
+            let raw_payload = serde_json::to_value(&market).ok();
+            if condition_id.trim().is_empty()
+                && let Some(source_id) = market
+                    .id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+            {
+                filtered_markets.push(FilteredPrelistingMarket {
+                    source_id: source_id.to_owned(),
+                    reason: CatalogPrelistingFilterReason::MissingConditionId,
+                    raw_payload: raw_payload.unwrap_or(serde_json::Value::Null),
+                });
+                continue;
+            }
             match CatalogMarket::try_from(market) {
                 Ok(row) => markets.push(row),
                 Err(reject) => {
@@ -160,6 +185,7 @@ impl From<WireEvent> for CatalogEvent {
                     rejected_markets.push(RejectedMarket {
                         condition_id,
                         reject,
+                        raw_payload,
                     });
                 }
             }
@@ -176,10 +202,10 @@ impl From<WireEvent> for CatalogEvent {
             neg_risk,
             end_date,
             markets,
+            filtered_markets,
             rejected_markets,
             created_at,
             updated_at,
-            raw_wire,
         }
     }
 }
@@ -212,7 +238,8 @@ impl TryFrom<WireMarket> for CatalogMarket {
         let start_date = wire.start_date();
         let end_date = wire.end_date();
         let closed = wire.closed.unwrap_or(false);
-        let status = market_status_from_wire(closed, wire.active.unwrap_or(true));
+        let filter_reasons = filter_reasons_from_wire(&wire);
+        let status = market_status_from_wire(closed, filter_reasons);
         let settlement = derive_settlement(&wire, &tokens);
         let resolved_at = if status == MarketStatus::Settled {
             parse_gamma_timestamp(wire.closed_time.as_deref())
@@ -230,6 +257,7 @@ impl TryFrom<WireMarket> for CatalogMarket {
                 .filter(|value| !value.is_empty()),
             tokens,
             status,
+            filter_reasons,
             neg_risk: wire.neg_risk.unwrap_or(false),
             settlement,
             resolved_at,
@@ -295,14 +323,34 @@ fn zip_tokens(token_ids: [&String; 2], outcomes: &[String]) -> [CatalogToken; 2]
     [leg(0, "Yes"), leg(1, "No")]
 }
 
-const fn market_status_from_wire(closed: bool, active: bool) -> MarketStatus {
+const fn market_status_from_wire(
+    closed: bool,
+    filter_reasons: CatalogFilterReasonSet,
+) -> MarketStatus {
     if closed {
         MarketStatus::Settled
-    } else if active {
+    } else if filter_reasons.is_empty() {
         MarketStatus::Active
     } else {
-        MarketStatus::Paused
+        MarketStatus::Filtered
     }
+}
+
+fn filter_reasons_from_wire(wire: &WireMarket) -> CatalogFilterReasonSet {
+    let mut reasons = CatalogFilterReasonSet::EMPTY;
+    if wire.closed == Some(true) {
+        reasons.insert(CatalogFilterReason::Closed);
+    }
+    if wire.active == Some(false) {
+        reasons.insert(CatalogFilterReason::Inactive);
+    }
+    if wire.enable_order_book == Some(false) {
+        reasons.insert(CatalogFilterReason::ClobDisabled);
+    }
+    if wire.accepting_orders == Some(false) {
+        reasons.insert(CatalogFilterReason::OrdersNotAccepted);
+    }
+    reasons
 }
 
 /// Parse Gamma timestamps leniently.
@@ -325,6 +373,7 @@ mod tests {
     use crate::gamma::wire::{WireEvent, WireMarket};
     use quant_pivot_models::{
         enums::{
+            catalog::{CatalogFilterReason, CatalogPrelistingFilterReason},
             common::{MarketCategory, TickSize},
             market::{EventStatus, MarketStatus},
         },
@@ -332,13 +381,14 @@ mod tests {
     };
 
     #[test]
-    fn skips_market_with_empty_condition_id() {
+    fn filters_prelisting_market_with_source_id_and_empty_condition_id() {
         let wire: WireEvent = serde_json::from_str(
             r#"{
                 "id": "1",
                 "title": "E",
                 "slug": "e",
                 "markets": [{
+                    "id": "pending-1",
                     "conditionId": "",
                     "question": "pending?",
                     "clobTokenIds": ["1"],
@@ -355,7 +405,34 @@ mod tests {
         let event = CatalogEvent::from(wire);
         assert_eq!(event.markets.len(), 1);
         assert_eq!(event.markets[0].condition_id, "0xabc");
-        assert_eq!(event.rejected_markets.len(), 1);
+        assert!(event.rejected_markets.is_empty());
+        assert_eq!(event.filtered_markets.len(), 1);
+        assert_eq!(event.filtered_markets[0].source_id, "pending-1");
+        assert_eq!(
+            event.filtered_markets[0].reason,
+            CatalogPrelistingFilterReason::MissingConditionId
+        );
+    }
+
+    #[test]
+    fn rejects_empty_condition_id_without_source_identity() {
+        let wire: WireEvent = serde_json::from_str(
+            r#"{
+                "id": "1",
+                "markets": [{
+                    "conditionId": "",
+                    "question": "unknown source",
+                    "clobTokenIds": []
+                }]
+            }"#,
+        )
+        .expect("wire event");
+        let event = CatalogEvent::from(wire);
+        assert!(event.filtered_markets.is_empty());
+        assert!(matches!(
+            event.rejected_markets[0].reject,
+            CatalogMarketReject::EmptyConditionId
+        ));
     }
 
     #[test]
@@ -468,6 +545,57 @@ mod tests {
         let market = CatalogMarket::try_from(wire).expect("binary market accepted");
         assert_eq!(market.tokens[0].outcome, "Team A");
         assert_eq!(market.tokens[1].outcome, "Team B");
+    }
+
+    #[test]
+    fn explicit_trading_flags_produce_typed_filter_reasons() {
+        let wire: WireMarket = serde_json::from_str(
+            r#"{
+                "conditionId": "0xfiltered",
+                "question": "Q?",
+                "active": false,
+                "enableOrderBook": false,
+                "acceptingOrders": false,
+                "clobTokenIds": ["1", "2"],
+                "outcomes": ["Yes", "No"]
+            }"#,
+        )
+        .expect("wire market");
+        let market = CatalogMarket::try_from(wire).expect("valid filtered market");
+
+        assert_eq!(market.status, MarketStatus::Filtered);
+        assert!(
+            market
+                .filter_reasons
+                .contains(CatalogFilterReason::Inactive)
+        );
+        assert!(
+            market
+                .filter_reasons
+                .contains(CatalogFilterReason::ClobDisabled)
+        );
+        assert!(
+            market
+                .filter_reasons
+                .contains(CatalogFilterReason::OrdersNotAccepted)
+        );
+    }
+
+    #[test]
+    fn absent_trading_flags_do_not_fabricate_filter_reasons() {
+        let wire: WireMarket = serde_json::from_str(
+            r#"{
+                "conditionId": "0xactive",
+                "question": "Q?",
+                "clobTokenIds": ["1", "2"],
+                "outcomes": ["Yes", "No"]
+            }"#,
+        )
+        .expect("wire market");
+        let market = CatalogMarket::try_from(wire).expect("valid active market");
+
+        assert_eq!(market.status, MarketStatus::Active);
+        assert!(market.filter_reasons.is_empty());
     }
 
     #[test]

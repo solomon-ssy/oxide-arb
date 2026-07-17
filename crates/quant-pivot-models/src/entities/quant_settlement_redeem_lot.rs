@@ -9,6 +9,7 @@ use crate::{
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
+#[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "quant_settlement_redeem_lot")]
 pub struct Model {
@@ -24,46 +25,28 @@ pub struct Model {
     pub payout_usd: Usd,
     pub realized_pnl_usd: Usd,
     pub created_at: DateTime<Utc>,
-}
 
-#[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-pub enum Relation {
     #[sea_orm(
-        belongs_to = "super::quant_settlement_redeem::Entity",
-        from = "Column::SettlementRedeemId",
-        to = "super::quant_settlement_redeem::Column::SettlementRedeemId"
+        belongs_to,
+        relation_enum = "SettlementRedeem",
+        from = "settlement_redeem_id",
+        to = "settlement_redeem_id"
     )]
-    SettlementRedeem,
+    pub settlement_redeem: BelongsTo<super::quant_settlement_redeem::Entity>,
     #[sea_orm(
-        belongs_to = "super::quant_position::Entity",
-        from = "Column::PositionId",
-        to = "super::quant_position::Column::PositionId"
+        belongs_to,
+        relation_enum = "Position",
+        from = "position_id",
+        to = "position_id"
     )]
-    Position,
+    pub position: BelongsTo<super::quant_position::Entity>,
     #[sea_orm(
-        belongs_to = "super::quant_order_intent::Entity",
-        from = "Column::OrderIntentId",
-        to = "super::quant_order_intent::Column::OrderIntentId"
+        belongs_to,
+        relation_enum = "OrderIntent",
+        from = "order_intent_id",
+        to = "order_intent_id"
     )]
-    OrderIntent,
-}
-
-impl Related<super::quant_settlement_redeem::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::SettlementRedeem.def()
-    }
-}
-
-impl Related<super::quant_position::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::Position.def()
-    }
-}
-
-impl Related<super::quant_order_intent::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::OrderIntent.def()
-    }
+    pub order_intent: BelongsTo<super::quant_order_intent::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

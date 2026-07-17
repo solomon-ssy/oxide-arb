@@ -18,11 +18,11 @@ use crate::{
     },
 };
 use chrono::{DateTime, Utc};
-use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
 use serde::{Deserialize, Serialize};
 
 /// Immutable `TopN` recommendation report row.
-#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
+#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
 #[sea_orm(entity = "crate::entities::quant_recommendation_report::Entity")]
 pub struct RecommendationReportInfo {
     pub recommendation_report_id: RecommendationReportId,
@@ -129,7 +129,7 @@ pub struct NewRecommendationReport {
 }
 
 /// Single actionable recommendation row.
-#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
+#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
 #[sea_orm(entity = "crate::entities::quant_recommendation::Entity")]
 pub struct RecommendationInfo {
     pub recommendation_id: RecommendationId,

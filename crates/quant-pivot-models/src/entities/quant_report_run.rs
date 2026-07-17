@@ -9,6 +9,7 @@ use crate::{
     types::{RecommendationReportId, ReportRunId, RuntimeConfigVersionId},
 };
 
+#[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "quant_report_run")]
 pub struct Model {
@@ -36,40 +37,28 @@ pub struct Model {
     pub error_code: Option<String>,
     #[sea_orm(column_type = "Text", nullable)]
     pub error_summary: Option<String>,
-}
 
-#[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-pub enum Relation {
     #[sea_orm(
-        belongs_to = "Entity",
-        from = "Column::RetryOfRunId",
-        to = "Column::ReportRunId"
+        self_ref,
+        relation_enum = "RetryOf",
+        from = "retry_of_run_id",
+        to = "report_run_id"
     )]
-    RetryOf,
+    pub retry_of: BelongsTo<Option<Entity>>,
     #[sea_orm(
-        belongs_to = "super::runtime_config_version::Entity",
-        from = "Column::RuntimeConfigVersionId",
-        to = "super::runtime_config_version::Column::RuntimeConfigVersionId"
+        belongs_to,
+        relation_enum = "RuntimeConfigVersion",
+        from = "runtime_config_version_id",
+        to = "runtime_config_version_id"
     )]
-    RuntimeConfigVersion,
+    pub runtime_config_version: BelongsTo<Option<super::runtime_config_version::Entity>>,
     #[sea_orm(
-        belongs_to = "super::quant_recommendation_report::Entity",
-        from = "Column::OutputReportId",
-        to = "super::quant_recommendation_report::Column::RecommendationReportId"
+        belongs_to,
+        relation_enum = "OutputReport",
+        from = "output_report_id",
+        to = "recommendation_report_id"
     )]
-    OutputReport,
-}
-
-impl Related<super::runtime_config_version::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::RuntimeConfigVersion.def()
-    }
-}
-
-impl Related<super::quant_recommendation_report::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::OutputReport.def()
-    }
+    pub output_report: BelongsTo<Option<super::quant_recommendation_report::Entity>>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

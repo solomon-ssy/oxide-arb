@@ -1,7 +1,7 @@
 //! Preferences UI schema projection (`GET /runtime-config/schema`).
 //!
 //! Merges the JSON-Schema-derived leaf data (types, defaults, constraints,
-//! sensitivity) with the hand-authored UI overlay in [`crate::schema::ui`] into
+//! sensitivity) with the hand-authored UI overlay in this module into
 //! a normalized field dictionary plus a layout tree. `preferences_schema_ui_gaps`
 //! enforces the two stay consistent: every schema leaf is covered by exactly one
 //! tree node and one dictionary entry that carries real, bilingual `help`.
@@ -12,7 +12,9 @@ use crate::{
         RuntimeConfigSchemaView, UiText,
     },
     runtime_config::RuntimeConfig,
-    schema::ui::{FieldUiEntry, enum_label, field_ui, field_ui_map, schema_tree, tree_field_paths},
+    runtime_config::ui::{
+        FieldUiEntry, enum_label, field_ui, field_ui_map, schema_tree, tree_field_paths,
+    },
 };
 
 use super::json_schema::fields::{SchemaLeaf, walk_schema_leaves};

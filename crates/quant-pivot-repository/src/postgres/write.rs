@@ -59,7 +59,7 @@ where
     for chunk in chunk_for_insert(&models, rows_per_insert) {
         E::insert_many(chunk.to_vec())
             .on_conflict(on_conflict.clone())
-            .exec(db)
+            .exec_without_returning(db)
             .await
             .map_err(StorageError::from)?;
     }

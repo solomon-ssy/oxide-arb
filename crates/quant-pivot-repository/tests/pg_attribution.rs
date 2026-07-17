@@ -12,7 +12,9 @@ use quant_pivot_repository::{
     postgres::PgRecommendationRepository, traits::RecommendationRepository,
 };
 use quant_pivot_test_support::{
-    execution_pg_seed::{ExecutionTxnIds, seed_approved_intent, seed_report_fixture},
+    execution_pg_seed::{
+        ExecutionTxnIds, enable_entry_admission_for_test, seed_approved_intent, seed_report_fixture,
+    },
     pg::setup_pg,
 };
 use sea_orm::{ActiveModelTrait, ActiveValue, EntityTrait, IntoActiveModel};
@@ -70,6 +72,7 @@ async fn find_unfilled_attribution_candidates_includes_terminal_intent_only() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let ids = seed_report_fixture(&db).await;
+    enable_entry_admission_for_test(&db, "pg-attribution-it-operator").await;
     let intent_id = seed_approved_intent(&db, &ids).await;
     patch_intent_status(&db, &intent_id, OrderIntentStatus::Expired).await;
     mark_recommendation_expired(&db, &ids).await;
@@ -90,6 +93,7 @@ async fn find_unfilled_attribution_candidates_excludes_non_terminal_intent() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let ids = seed_report_fixture(&db).await;
+    enable_entry_admission_for_test(&db, "pg-attribution-it-operator").await;
     let _intent_id = seed_approved_intent(&db, &ids).await;
     mark_recommendation_expired(&db, &ids).await;
 
@@ -111,6 +115,7 @@ async fn blocks_attribution_reflects_non_terminal_intent() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let ids = seed_report_fixture(&db).await;
+    enable_entry_admission_for_test(&db, "pg-attribution-it-operator").await;
     let _intent_id = seed_approved_intent(&db, &ids).await;
 
     let repo = PgRecommendationRepository::new(db);

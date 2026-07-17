@@ -25,12 +25,12 @@ use crate::{
     },
 };
 use chrono::{DateTime, Utc};
-use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// Governed bridge from a recommendation to execution.
-#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
+#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
 #[sea_orm(entity = "crate::entities::quant_order_intent::Entity")]
 pub struct OrderIntentInfo {
     pub order_intent_id: OrderIntentId,
@@ -122,7 +122,7 @@ pub struct ApproveOrderIntent {
 }
 
 /// Internal execution-order lifecycle row.
-#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
+#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
 #[sea_orm(entity = "crate::entities::quant_execution_order::Entity")]
 pub struct ExecutionOrderInfo {
     pub execution_order_id: ExecutionOrderId,

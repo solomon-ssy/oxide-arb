@@ -42,9 +42,8 @@ fn new_evidence(
     scope_hash: ContentHash,
 ) -> NewResearchReadinessEvidence {
     let payload_json = latency_payload(observed_at);
-    let bytes = serde_json::to_vec(&payload_json).expect("serialize payload");
     let payload_hash =
-        ContentHash::parse(CanonicalDigest::prefixed_bytes(&bytes)).expect("payload content hash");
+        CanonicalDigest::content_hash_json(&payload_json).expect("canonical payload content hash");
     NewResearchReadinessEvidence {
         evidence_id: Uuid::now_v7(),
         kind: ResearchReadinessEvidenceKind::ShadowLatencyProfile,

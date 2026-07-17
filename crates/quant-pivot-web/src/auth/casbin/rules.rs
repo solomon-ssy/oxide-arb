@@ -183,6 +183,9 @@ mod tests {
             exp: 0,
             username: "tester".to_owned(),
             token_type: TokenType::Access,
+            family_id: "family-1".to_owned(),
+            session_exp: 4_102_444_800,
+            generation: 0,
         }
     }
 

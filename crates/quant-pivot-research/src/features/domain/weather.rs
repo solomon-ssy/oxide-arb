@@ -599,9 +599,13 @@ fn noaa_basis_risk(
             })
         })
         .collect::<Vec<_>>();
-    if differences.len()
-        < usize::try_from(config.minimum_bias_samples_per_lead).unwrap_or(usize::MAX)
-    {
+    let Ok(sample_count) = u64::try_from(differences.len()) else {
+        return RawFeature::missing(
+            names::NOAA_RESOLUTION_BASIS_RISK,
+            NullReason::OutOfValidRange,
+        );
+    };
+    if sample_count < u64::from(config.minimum_bias_samples_per_lead) {
         return RawFeature::missing(
             names::NOAA_RESOLUTION_BASIS_RISK,
             NullReason::InsufficientHistory,

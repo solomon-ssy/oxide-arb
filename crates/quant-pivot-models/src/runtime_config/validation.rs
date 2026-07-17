@@ -925,7 +925,7 @@ fn validate_execution(config: &RuntimeConfig, report: &mut ConfigValidationRepor
     if config.execution.auto_execution.enabled {
         report.errors.push(ConfigValidationError::InvalidValue {
             field: "execution.auto_execution.enabled",
-            detail: "Runtime v16 keeps AutoExecution blocked; Phase 11.11 owns its final governance gate"
+            detail: "Runtime v17 keeps AutoExecution blocked; Phase 11.11 owns its final governance gate"
                 .to_owned(),
         });
     }
@@ -1005,19 +1005,19 @@ fn validate_semi_auto_canary(config: &RuntimeConfig, report: &mut ConfigValidati
     if !only_first_tier {
         report.errors.push(ConfigValidationError::InvalidValue {
             field: "execution.semi_auto.canary.allowed_cash_budget_tiers_usd",
-            detail: "runtime v16 canary must contain exactly the $25 cash-budget tier".to_owned(),
+            detail: "runtime v17 canary must contain exactly the $25 cash-budget tier".to_owned(),
         });
     }
     if canary.max_open_intents != 1 {
         report.errors.push(ConfigValidationError::InvalidValue {
             field: "execution.semi_auto.canary.max_open_intents",
-            detail: "runtime v16 canary must allow exactly one open intent".to_owned(),
+            detail: "runtime v17 canary must allow exactly one open intent".to_owned(),
         });
     }
     if canary.max_total_cash_per_report.value.parse::<Decimal>() != Ok(Decimal::new(25, 0)) {
         report.errors.push(ConfigValidationError::InvalidValue {
             field: "execution.semi_auto.canary.max_total_cash_per_report",
-            detail: "runtime v16 canary must cap each report at exactly $25 total cash".to_owned(),
+            detail: "runtime v17 canary must cap each report at exactly $25 total cash".to_owned(),
         });
     }
     if canary

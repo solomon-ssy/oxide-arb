@@ -20,29 +20,12 @@ pub struct LoginRequest {
     pub password: String,
 }
 
-/// Refresh-token rotation request.
-#[derive(Debug, Deserialize, Validate)]
-pub struct RefreshRequest {
-    /// The refresh token to exchange for a fresh access/refresh pair.
-    #[validate(length(min = 1))]
-    pub refresh_token: String,
-}
-
-/// Optional logout payload carrying the refresh token to revoke alongside the
-/// access token.
-#[derive(Debug, Deserialize)]
-pub struct LogoutRequest {
-    /// Refresh token to revoke (optional; the access token is always revoked).
-    pub refresh_token: Option<String>,
-}
-
-/// Token pair issued on login/refresh.
+/// Access token issued on login/refresh. The rotating refresh token is emitted
+/// only as an `HttpOnly` cookie and never enters a response body.
 #[derive(Debug, Serialize)]
 pub struct TokenResponse {
     /// Short-lived access token.
     pub access_token: String,
-    /// Long-lived refresh token.
-    pub refresh_token: String,
     /// Always `"Bearer"`.
     pub token_type: &'static str,
     /// Access-token lifetime in seconds.

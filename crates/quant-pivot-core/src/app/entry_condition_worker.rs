@@ -3,7 +3,8 @@
 use std::sync::Arc;
 
 use quant_pivot_models::{
-    clickhouse::EntryConditionEvaluationEventRow, types::ENTRY_CONDITION_INPUT_CHANNEL,
+    clickhouse::EntryConditionEvaluationEventRow, enums::system::CapabilityId,
+    types::ENTRY_CONDITION_INPUT_CHANNEL,
 };
 use quant_pivot_repository::{
     clickhouse::ChFactWriter,
@@ -15,7 +16,8 @@ use quant_pivot_repository::{
 };
 
 use super::{
-    AppContext, entry_condition_evaluation_outbox_worker::EntryConditionEvaluationOutboxWorker,
+    AppContext, capability_gate::run_while_capable,
+    entry_condition_evaluation_outbox_worker::EntryConditionEvaluationOutboxWorker,
     task_id::TaskId, task_registry::AppRunner,
 };
 use crate::execution::{
@@ -63,15 +65,28 @@ impl AppContext {
             self.events.clone(),
         ));
         let pg = Arc::clone(&self.infra.pg);
+        let bootstrap = Arc::clone(&self.governance.bootstrap);
         runner.spawn(TaskId::EntryConditionWorker, move |token| async move {
-            let notifications = match pg.listen(ENTRY_CONDITION_INPUT_CHANNEL).await {
-                Ok(listener) => Some(listener),
-                Err(error) => {
-                    tracing::warn!(%error, "entry-condition PostgreSQL wake listener unavailable; using backstop");
-                    None
-                }
-            };
-            worker.run(token, notifications).await;
+            run_while_capable(
+                bootstrap,
+                CapabilityId::ReportGenerationEligible,
+                token,
+                move |worker_token| {
+                    let pg = Arc::clone(&pg);
+                    let worker = Arc::clone(&worker);
+                    async move {
+                        let notifications = match pg.listen(ENTRY_CONDITION_INPUT_CHANNEL).await {
+                            Ok(listener) => Some(listener),
+                            Err(error) => {
+                                tracing::warn!(%error, "entry-condition PostgreSQL wake listener unavailable; using backstop");
+                                None
+                            }
+                        };
+                        worker.run(worker_token, notifications).await;
+                    }
+                },
+            )
+            .await;
         });
         let outbox_worker = Arc::new(EntryConditionEvaluationOutboxWorker::new(
             conditions,

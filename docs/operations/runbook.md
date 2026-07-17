@@ -42,7 +42,11 @@
 | Approver | 在 `semi_auto` 审批或拒绝 `OrderIntent` | 不扩大 shares、price、notional |
 | Admin | 管理用户、角色、JWT、部署凭证、runtime-config 激活/回滚 | 不把私钥、JWT secret、relayer key 写入仓库 |
 
-新部署会 seed `admin` / `admin`。首次启动后必须立即改密码或创建新的管理员并禁用默认口令。
+新部署会 seed `admin`，但不存在默认口令。执行 `postgres-schema apply` 前，secret manager 必须把
+16–256 字符的强随机初始口令挂载为权限 `0400` 或 `0600` 的普通文件，并通过
+`QUANT_PIVOT_BOOTSTRAP__ADMIN_PASSWORD_FILE` 传给 deploy-only xtask。缺失、权限过宽、`admin` 等模板值都会
+使 schema finalize 失败；应用 runtime 不读取该文件。首次登录后仍应轮换口令或创建实名管理员并禁用
+bootstrap 账户。
 
 ## 3. Runtime mode 与 kill switch
 
@@ -138,7 +142,7 @@ curl -sS -X POST "$BASE/api/system/kill-switch" \
 
 Deploy config 只放连接、凭证、基础设施、Polymarket endpoints、账户 topology。不要把策略、风控、报告调度写进 TOML。
 
-**Runtime config** 是版本化 JSON；当前唯一可用版本是 **v16**。v16 已删除旧的 empty
+**Runtime config** 是版本化 JSON；当前唯一可用版本是 **v17**。v17 已删除旧的 empty
 suppression 开关；空结果始终发布为正式报告。它包含：
 
 `selection`、`data_quality`、`features`、`factors`、`domain`、`model`、`quality_gate`、`training`、`reports`、`portfolio`、`execution`、`notification`、`research`、`feedback`。
@@ -1337,7 +1341,7 @@ curl -sS -X POST "$BASE/api/quant/reports/run" \
 
 **Empty outcome**：
 
-- Runtime v16 不再存在 `publish_empty_reports`。
+- Runtime v17 不再存在 `publish_empty_reports`。
 - 完整评估得到零 recommendations 时仍写 Prepared report，事实验证后正式 Published，并取代旧 current。
 - 没有 active model、账户读取失败或系统 readiness 不满足是 ReportRun Failed，不产生 report。
 

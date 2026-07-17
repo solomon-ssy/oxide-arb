@@ -4,6 +4,7 @@ members = [
   "crates/quant-pivot-error",
   "crates/quant-pivot-macros",
   "crates/quant-pivot-models",
+  "crates/quant-pivot-migration",
   "crates/quant-pivot-api",
   "crates/quant-pivot-storage",
   "crates/quant-pivot-repository",
@@ -19,7 +20,7 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.91"
+rust-version = "1.97.1"
 license = "MIT"
 
 [workspace.lints.rust]
@@ -49,7 +50,6 @@ tokio-util = { version = "0.7", features = ["rt", "io"] }
 # must share the same patch version).
 futures-util = "0.3.32"
 bytes = "1"
-bytecount = "0.6"
 object_store = { version = "0.14", features = ["aws", "tokio"] }
 aws-config = { version = "=1.8.14", default-features = false, features = ["behavior-version-latest", "default-https-client", "rt-tokio"] }
 aws-sdk-s3 = { version = "=1.124.0", default-features = false, features = ["behavior-version-latest", "default-https-client", "rt-tokio", "rustls"] }
@@ -58,6 +58,7 @@ tokio-tungstenite = { version = "0.29.0", features = ["rustls-tls-webpki-roots"]
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_json_canonicalizer = "0.3.2"
 csv = "1"
 # Canonical serde adapters (PickFirst/DisplayFromStr for query-string number
 # coercion, rust::double_option for three-way-null PATCH fields, and the
@@ -80,7 +81,7 @@ rust_decimal = { version = "1", features = ["serde-with-str", "maths"] }
 rust_decimal_macros = "1"
 
 # Time
-chrono = { version = "0.4", features = ["serde"] }
+chrono = { version = "=0.4.44", features = ["serde"] }
 # IANA timezone database for wall-clock cron report schedules (pure Rust).
 chrono-tz = "0.10"
 
@@ -115,26 +116,32 @@ validator = { version = "0.20", features = ["derive"] }
 bitcode = { version = "0.6", features = ["derive", "serde", "rust_decimal"] }
 
 # ORM + migrations (PostgreSQL only)
-sea-orm = { version = "1", features = [
+sea-orm = { version = "=2.0.0-rc.43", features = [
   "sqlx-postgres",
   "runtime-tokio-rustls",
   "macros",
+  "entity-registry",
   "with-chrono",
   "with-json",
   "with-rust_decimal",
   "with-uuid",
   "postgres-array",
 ] }
-sea-orm-migration = { version = "1", features = [
+sea-orm-migration = { version = "=2.0.0-rc.43", default-features = false, features = [
   "sqlx-postgres",
   "runtime-tokio-rustls",
+] }
+sqlx = { version = "=0.9.0", default-features = false, features = [
+  "macros",
+  "postgres",
+  "runtime-tokio",
+  "tls-rustls-aws-lc-rs",
 ] }
 
 # Proc-macro infrastructure
 syn = { version = "2", features = ["full", "extra-traits"] }
 quote = "1"
 proc-macro2 = "1"
-darling = "0.23"
 linkme = "0.3"
 paste = "1"
 
@@ -161,7 +168,8 @@ alloy = { version = "1.8", features = [
 ] }
 
 # HTTP client (aligned with SDK's reqwest ^0.13)
-reqwest = { version = "0.13", features = ["json", "rustls"] }
+reqwest = { version = "0.13", features = ["json", "rustls", "stream"] }
+httpdate = "1"
 
 # TLS: the dependency tree enables both rustls crypto backends (`ring` via
 # sea-orm/sqlx, `aws-lc-rs` via reqwest), so the binary must install the
@@ -204,7 +212,7 @@ redis = { version = "1.2", features = ["aio", "tokio-comp"] }
 moka = { version = "0.12", features = ["future", "sync"] }
 
 # ClickHouse typed client (official)
-clickhouse = { version = "0.15", features = ["lz4"] }
+clickhouse = { version = "0.15", features = ["lz4", "uuid"] }
 
 # Prometheus metrics
 prometheus = "0.14"
@@ -225,15 +233,13 @@ testcontainers-modules = { version = "0.15", features = ["postgres", "redis"] }
 
 # stats: numeric matrices, summary statistics, distributions, CPU parallelism
 ndarray = "0.17"
-ndarray-stats = "0.7"
 statrs = "0.18"
 rayon = "1"
 
 # dataframe: offline feature/dataset materialization (lazy frames + parquet).
 # 0.54.4+ fixes chrono <=0.4.41 cap in 0.53 (conflicts with polymarket SDK).
 # default-features = false avoids broken `streaming` → polars-stream compile bug.
-polars = { version = "0.54.4", default-features = false, features = ["lazy", "parquet"] }
-arrow = "59"
+polars = { version = "=0.54.4", default-features = false, features = ["lazy", "parquet"] }
 parquet = "59"
 
 # optimize: factor-weight / threshold optimization
@@ -264,18 +270,15 @@ tracing-actix-web = { version = "0.7", default-features = false }
 # Dynamic RBAC authorization engine
 casbin = { version = "2", features = ["runtime-tokio"] }
 
-# JWT access/refresh tokens.
-# jsonwebtoken 10 ships no crypto backend by default (`default = ["use_pem"]`),
-# which makes `encode`/`decode` panic at runtime. We sign HS256 only, so we
-# select the pure-Rust provider (`rust_crypto`, no native C toolchain) and drop
-# the unused PEM parsing pulled in by the default feature.
-jsonwebtoken = { version = "10", default-features = false, features = ["rust_crypto"] }
+# JWT access/refresh tokens: Ed25519 PEM keys with the pure-Rust provider.
+jsonwebtoken = { version = "10", default-features = false, features = ["rust_crypto", "use_pem"] }
 
 # actix runtime (integration tests: #[actix_web::test])
 actix-rt = "2"
 
 # Password hashing (argon2id) — shared by seed + web login
 argon2 = "0.5"
+rand_core_06 = { package = "rand_core", version = "0.6", features = ["getrandom"] }
 
 # CLI / process entrypoints (quant-pivot-bin, quant-pivot-xtask)
 clap = { version = "4", features = ["derive"] }
@@ -283,7 +286,6 @@ anyhow = "1.0"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # Property-based / snapshot testing
-proptest = "1"
 insta = { version = "1.42", features = ["json"] }
 
 # Serialization helpers

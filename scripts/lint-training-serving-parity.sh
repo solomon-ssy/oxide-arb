@@ -55,7 +55,7 @@ check_production_prefix_forbidden() {
 
 # Discover every PIT-source implementation, including integration-test fakes,
 # then inspect only those files plus the canonical trait. Repository APIs such
-# as CatalogVersionRepository::market_at are intentionally outside this set.
+# such as CatalogLedgerRepository::market_at are intentionally outside this set.
 check_retired_pit_methods() {
     local title=$1
     local message=$2

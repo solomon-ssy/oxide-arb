@@ -2,19 +2,21 @@
 
 use crate::{
     enums::{
+        catalog::{CatalogFilterReason, CatalogFilterReasonSet},
         common::{CategorySet, MarketCategory, TickSize},
         market::{EventStatus, MarketStatus},
     },
-    types::{EventId, MarketId, TokenId, Usd},
+    hashing::CanonicalDigest,
+    types::{ContentHash, EventId, MarketId, TokenId, Usd},
 };
 use chrono::{DateTime, Utc};
 use quant_pivot_error::market::MarketError;
 use rust_decimal::Decimal;
-use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
 use serde::{Deserialize, Serialize};
 
 /// DB row projection matching `entities::market::Model` columns exactly.
-#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
+#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
 #[sea_orm(entity = "crate::entities::market::Entity")]
 pub struct MarketInfo {
     pub market_id: MarketId,
@@ -26,6 +28,7 @@ pub struct MarketInfo {
     /// Persisted category memberships (`text[]`).
     pub categories: Vec<MarketCategory>,
     pub status: MarketStatus,
+    pub filter_reasons: Vec<CatalogFilterReason>,
     pub outcome: Option<String>,
     pub yes_token_id: TokenId,
     pub no_token_id: TokenId,
@@ -34,14 +37,15 @@ pub struct MarketInfo {
     pub start_date: Option<DateTime<Utc>>,
     pub end_date: Option<DateTime<Utc>>,
     pub resolved_at: Option<DateTime<Utc>>,
+    pub content_hash: ContentHash,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
 
 info_from_model!(MarketInfo, crate::entities::market::Model, {
-    market_id, event_id, question, slug, description, categories, status, outcome,
+    market_id, event_id, question, slug, description, categories, status, filter_reasons, outcome,
     yes_token_id, no_token_id, tick_size, neg_risk, start_date, end_date, resolved_at,
-    created_at, updated_at,
+    content_hash, created_at, updated_at,
 });
 
 impl MarketInfo {
@@ -69,6 +73,7 @@ pub struct UpsertMarket {
     pub description: Option<String>,
     pub categories: CategorySet,
     pub status: MarketStatus,
+    pub filter_reasons: CatalogFilterReasonSet,
     pub outcome: Option<String>,
     pub yes_token_id: TokenId,
     pub no_token_id: TokenId,
@@ -77,6 +82,7 @@ pub struct UpsertMarket {
     pub start_date: Option<DateTime<Utc>>,
     pub end_date: Option<DateTime<Utc>>,
     pub resolved_at: Option<DateTime<Utc>>,
+    pub content_hash: ContentHash,
 }
 
 /// Outcome token metadata held in the in-memory market registry.
@@ -204,6 +210,8 @@ pub struct MarketRegistryInfo {
     pub description: Option<String>,
     pub categories: CategorySet,
     pub status: MarketStatus,
+    /// Explicit upstream facts that make this otherwise valid market non-tradeable.
+    pub filter_reasons: CatalogFilterReasonSet,
     pub outcome: Option<String>,
     pub neg_risk: bool,
     pub tick_size: TickSize,
@@ -263,6 +271,7 @@ impl UpsertMarket {
             description: value.description.clone(),
             categories: value.categories,
             status: value.status,
+            filter_reasons: value.filter_reasons,
             outcome: value.outcome.clone(),
             yes_token_id: value.token_yes.clone(),
             no_token_id: value.token_no.clone(),
@@ -271,6 +280,16 @@ impl UpsertMarket {
             start_date: value.start_date,
             end_date: value.end_date,
             resolved_at: value.resolved_at,
+            content_hash: CanonicalDigest::content_hash_typed(
+                "quant-pivot/catalog-market-object",
+                1,
+                value,
+            )
+            .map_err(|error| MarketError::CatalogSerialization {
+                entity: "market",
+                id: value.market_id.to_string(),
+                reason: error.to_string(),
+            })?,
         })
     }
 }

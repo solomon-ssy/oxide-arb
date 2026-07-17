@@ -11,8 +11,8 @@ use tracing_actix_web::{DefaultRootSpanBuilder, RequestId, RootSpanBuilder};
 
 /// Root span builder that excludes query strings from `http.target`.
 ///
-/// Browser WebSocket authentication currently uses `?token=...`; recording the
-/// full URI would therefore persist an access token in logs and traces.
+/// Query strings may contain operator-supplied filters or third-party callback
+/// material, so the tracing target is always the stable path only.
 pub struct HttpRootSpanBuilder;
 
 impl RootSpanBuilder for HttpRootSpanBuilder {
@@ -99,12 +99,12 @@ mod tests {
     use actix_web::test::TestRequest;
 
     #[test]
-    fn request_path_excludes_query_credentials() {
+    fn request_path_excludes_query_values() {
         let request = TestRequest::get()
-            .uri("/api/ws?token=secret-access-token")
+            .uri("/api/markets?search=operator-input")
             .to_srv_request();
 
-        assert_eq!(request_target(&request), "/api/ws");
-        assert!(!request_target(&request).contains("secret-access-token"));
+        assert_eq!(request_target(&request), "/api/markets");
+        assert!(!request_target(&request).contains("operator-input"));
     }
 }

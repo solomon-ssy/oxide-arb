@@ -11,7 +11,7 @@
 //!
 //! The append-only catalog ledger historizes Gamma liquidity and 24h volume, so
 //! offline replay applies the exact governed selection thresholds to the PIT
-//! catalog version. Live feed health / ingest lag is explicitly
+//! catalog change. Live feed health / ingest lag is explicitly
 //! `NotApplicable` for durable replay; book freshness remains enforced from the
 //! persisted event time.
 //!
@@ -79,7 +79,7 @@ use crate::prefetch::domain_availability::DomainAvailabilitySource;
 /// Replays the online selection funnel over point-in-time facts, per `as_of`.
 pub struct OfflinePitSelector {
     selector: ConfiguredMarketSelector,
-    /// Frozen selection policy applied to the historical catalog version.
+    /// Frozen selection policy applied to the historical catalog change.
     selection: SelectionConfig,
     data_quality: DataQualityConfig,
     features: FeaturesConfig,
@@ -270,16 +270,17 @@ mod tests {
             },
         },
         enums::{
+            catalog::{CatalogFilterReasonSet, CatalogTimestampQuality},
             common::{CategorySet, MarketCategory, TickSize},
             domain::{DomainFamily, DomainMetric, KlineInterval, LinkageSourceRole, ResolverTier},
             market::{EventStatus, MarketStatus},
         },
         runtime_config::{DataQualityConfig, DomainConfig, FeaturesConfig, SelectionConfig},
         types::{
-            BinanceSymbol, CatalogSyncBatchId, ContentHash, CryptoAsset, CryptoQuote,
-            DomainInstrumentKey, DomainSourceId, EventCatalogVersionId, EventId,
-            MarketCatalogVersionId, MarketId, MarketLinkageId, Price, Probability, ResolverVersion,
-            RuntimeConfigVersionId, Shares, TokenId, Usd,
+            BinanceSymbol, CatalogEventChangeId, CatalogMarketChangeId, CatalogSyncBatchId,
+            ContentHash, CryptoAsset, CryptoQuote, DomainInstrumentKey, DomainSourceId, EventId,
+            MarketId, MarketLinkageId, Price, Probability, ResolverVersion, RuntimeConfigVersionId,
+            Shares, TokenId, Usd,
         },
     };
     use quant_pivot_research::{
@@ -303,6 +304,7 @@ mod tests {
             description: None,
             categories: CategorySet::from(MarketCategory::Sports),
             status: MarketStatus::Active,
+            filter_reasons: CatalogFilterReasonSet::default(),
             outcome: None,
             neg_risk: false,
             tick_size: TickSize::Hundredth,
@@ -492,16 +494,16 @@ mod tests {
             event: Arc::new(event),
             neg_risk_leg_set: NegRiskLegSet::empty(),
             catalog_sync_batch_id: CatalogSyncBatchId::from_v7(),
-            market_catalog_version_id: MarketCatalogVersionId::from_v7(),
-            event_catalog_version_id: EventCatalogVersionId::from_v7(),
+            market_change_id: CatalogMarketChangeId::from_v7(),
+            event_change_id: CatalogEventChangeId::from_v7(),
             market_content_hash: ContentHash::parse(format!("blake3:{}", "a".repeat(64)))
                 .expect("hash"),
             event_content_hash: ContentHash::parse(format!("blake3:{}", "b".repeat(64)))
                 .expect("hash"),
             membership_hash: ContentHash::parse(format!("blake3:{}", "c".repeat(64)))
                 .expect("hash"),
-            market_timestamp_quality: "source".to_owned(),
-            event_timestamp_quality: "source".to_owned(),
+            market_timestamp_quality: CatalogTimestampQuality::Source,
+            event_timestamp_quality: CatalogTimestampQuality::Source,
             market_effective_at: boundary.cutoff_for(DecisionSource::Catalog),
             market_available_at: boundary.decision_at(),
             event_effective_at: boundary.cutoff_for(DecisionSource::Catalog),
@@ -590,8 +592,8 @@ mod tests {
             trade_tape: HashMap::new(),
             resolutions: HashMap::new(),
             catalog: CatalogWindowInfo {
-                market_versions: Vec::new(),
-                event_versions: Vec::new(),
+                market_changes: Vec::new(),
+                event_changes: Vec::new(),
             },
             domain_observations: HashMap::new(),
             crypto_reports: HashMap::new(),

@@ -8,6 +8,7 @@ use crate::{
     types::{ConditionTruth, ContentHash, EntryConditionAuditId, EntryConditionInstanceId},
 };
 
+#[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "quant_entry_condition_audit")]
 pub struct Model {
@@ -28,22 +29,14 @@ pub struct Model {
     pub detail: Option<String>,
     pub occurred_at: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
-}
 
-#[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-pub enum Relation {
     #[sea_orm(
-        belongs_to = "super::quant_entry_condition_instance::Entity",
-        from = "Column::ConditionInstanceId",
-        to = "super::quant_entry_condition_instance::Column::ConditionInstanceId"
+        belongs_to,
+        relation_enum = "Instance",
+        from = "condition_instance_id",
+        to = "condition_instance_id"
     )]
-    Instance,
-}
-
-impl Related<super::quant_entry_condition_instance::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::Instance.def()
-    }
+    pub instance: BelongsTo<super::quant_entry_condition_instance::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

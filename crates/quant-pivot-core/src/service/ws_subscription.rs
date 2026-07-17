@@ -332,7 +332,10 @@ mod tests {
     use chrono::Duration;
     use quant_pivot_models::{
         domain::market::{MarketRegistryInfo, TokenInfo},
-        enums::common::{MarketCategory, TickSize},
+        enums::{
+            catalog::CatalogFilterReasonSet,
+            common::{MarketCategory, TickSize},
+        },
         types::{EventId, MarketId},
     };
     use rust_decimal_macros::dec;
@@ -348,6 +351,7 @@ mod tests {
             description: None,
             categories: MarketCategory::Politics.into(),
             status: MarketStatus::Active,
+            filter_reasons: CatalogFilterReasonSet::default(),
             outcome: None,
             neg_risk: false,
             tick_size: TickSize::Hundredth,

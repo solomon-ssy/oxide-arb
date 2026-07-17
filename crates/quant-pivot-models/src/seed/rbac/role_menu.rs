@@ -3,18 +3,17 @@
 use crate::{
     entities::role_menu,
     enums::rbac::MenuKind,
-    idens::role_menu::role_menu_table_name,
-    schema::seed::{SeedArtifact, SeedDependency, SeedSpec},
     seed::{
-        SeedConflictPolicy, SeedContext,
+        SeedArtifact, SeedConflictPolicy, SeedContext, SeedDependency, SeedSpec,
         rbac::{
             MENU_GRANTS_ARTIFACT, ROLE_SUPER_ADMIN, ROLES_ARTIFACT, RoleIdMap,
             casbin::builtin_role_policies, menus::MenuGrantSpec,
         },
     },
+    types::{MenuId, RoleId},
 };
 use sea_orm::{
-    ActiveValue::Set, ConnectionTrait, DbErr, EntityTrait, QueryTrait, sea_query::OnConflict,
+    ActiveValue::Set, ColumnTrait, DbErr, EntityTrait, QueryFilter, sea_query::OnConflict,
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -32,15 +31,15 @@ const PRODUCES: &[SeedArtifact] = &[];
 
 pub const ROLE_MENU_SEED: SeedSpec = SeedSpec {
     id: SEED_ID,
-    // v3 grants visibility for the feature-integrity page and its governed
-    // action button (idempotent inserts only add the new grants).
-    version: 3,
-    target_table: role_menu_table_name,
+    // v4 binds grants to the hierarchical menu identity contract.
+    version: 5,
+    target_table: "role_menu",
     depends_on: DEPENDS_ON,
     produces: PRODUCES,
     conflict_policy: SeedConflictPolicy::GraphOrdered,
-    checksum: "rbac.role_menu.bootstrap.v3",
-    loader: load_boxed,
+    checksum: "rbac.role_menu.bootstrap.v5.governed-bootstrap-and-approval",
+    apply: load_boxed,
+    hydrate: hydrate_boxed,
 };
 
 fn policy_sets() -> HashMap<&'static str, HashSet<String>> {
@@ -67,7 +66,7 @@ fn menu_granted(kind: MenuKind, permission_code: Option<&str>, policies: &HashSe
 }
 
 /// Assign menu nodes to every built-in role (`super_admin` receives the full tree).
-pub async fn load(db: &dyn ConnectionTrait, ctx: &mut SeedContext) -> Result<u64, DbErr> {
+fn expected_grants(ctx: &SeedContext) -> Result<Vec<(RoleId, MenuId)>, DbErr> {
     let roles = ctx
         .require::<RoleIdMap>(ROLES_ARTIFACT)
         .map_err(|error| DbErr::Custom(error.to_string()))?;
@@ -77,7 +76,7 @@ pub async fn load(db: &dyn ConnectionTrait, ctx: &mut SeedContext) -> Result<u64
         .clone();
 
     let policies_by_role = policy_sets();
-    let mut models = Vec::new();
+    let mut grants = Vec::new();
 
     for row in &menu_grants {
         for (role_code, role_id) in roles {
@@ -91,32 +90,70 @@ pub async fn load(db: &dyn ConnectionTrait, ctx: &mut SeedContext) -> Result<u64
             };
 
             if grant {
-                models.push(role_menu::ActiveModel {
-                    role_id: Set(role_id.clone()),
-                    menu_id: Set(row.id.clone()),
-                    ..Default::default()
-                });
+                grants.push((role_id.clone(), row.id.clone()));
             }
         }
     }
 
-    let backend = db.get_database_backend();
-    let stmt = role_menu::Entity::insert_many(models)
+    Ok(grants)
+}
+
+pub async fn load(db: &sea_orm::DatabaseTransaction, ctx: &mut SeedContext) -> Result<u64, DbErr> {
+    let models = expected_grants(ctx)?
+        .into_iter()
+        .map(|(role_id, menu_id)| role_menu::ActiveModel {
+            role_id: Set(role_id),
+            menu_id: Set(menu_id),
+            ..Default::default()
+        })
+        .collect::<Vec<_>>();
+    role_menu::Entity::insert_many(models)
         .on_conflict(
             OnConflict::columns([role_menu::Column::RoleId, role_menu::Column::MenuId])
                 .do_nothing()
                 .to_owned(),
         )
-        .build(backend);
-    let result = db.execute(stmt).await?;
-    Ok(result.rows_affected())
+        .exec_without_returning(db)
+        .await
+}
+
+async fn hydrate(db: &sea_orm::DatabaseTransaction, ctx: &SeedContext) -> Result<(), DbErr> {
+    let expected = expected_grants(ctx)?.into_iter().collect::<HashSet<_>>();
+    let role_ids = ctx
+        .require::<RoleIdMap>(ROLES_ARTIFACT)
+        .map_err(|error| DbErr::Custom(error.to_string()))?
+        .values()
+        .cloned()
+        .collect::<Vec<_>>();
+    let actual = role_menu::Entity::find()
+        .filter(role_menu::Column::RoleId.is_in(role_ids))
+        .all(db)
+        .await?
+        .into_iter()
+        .map(|row| (row.role_id, row.menu_id))
+        .collect::<HashSet<_>>();
+    if actual != expected {
+        return Err(DbErr::Custom(format!(
+            "built-in role-menu seed drift: expected={} actual={}",
+            expected.len(),
+            actual.len()
+        )));
+    }
+    Ok(())
 }
 
 fn load_boxed<'a>(
-    db: &'a dyn ConnectionTrait,
+    db: &'a sea_orm::DatabaseTransaction,
     ctx: &'a mut SeedContext,
 ) -> Pin<Box<dyn Future<Output = Result<u64, DbErr>> + Send + 'a>> {
     Box::pin(load(db, ctx))
+}
+
+fn hydrate_boxed<'a>(
+    db: &'a sea_orm::DatabaseTransaction,
+    ctx: &'a mut SeedContext,
+) -> Pin<Box<dyn Future<Output = Result<(), DbErr>> + Send + 'a>> {
+    Box::pin(hydrate(db, ctx))
 }
 
 #[cfg(test)]

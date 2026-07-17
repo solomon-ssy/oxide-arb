@@ -20,16 +20,15 @@ quant-pivot-web        = { workspace = true }
 tokio      = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "time", "sync"] }
 tokio-util = { workspace = true, features = ["rt", "time"] }
 futures-util = { workspace = true }
-bytecount = { workspace = true }
 async-trait  = { workspace = true }
 num-traits   = { workspace = true }
 
 # ── Serialization ──────────────────────────────────────────────────
 serde      = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
-serde_repr = { workspace = true }
 sha2       = { workspace = true }
 blake3     = { workspace = true }
+zeroize    = { workspace = true }
 
 # ── Money / time ───────────────────────────────────────────────────
 rust_decimal       = { workspace = true }
@@ -39,7 +38,6 @@ chrono-tz = { workspace = true }
 uuid   = { workspace = true, features = ["v4", "v7"] }
 
 # ── Errors / logging ──────────────────────────────────────────────
-thiserror = { workspace = true }
 tracing   = { workspace = true }
 
 # ── Concurrency ────────────────────────────────────────────────────
@@ -51,8 +49,6 @@ flume       = { workspace = true }
 rayon       = { workspace = true }
 
 # ── Resilience ─────────────────────────────────────────────────────
-backoff  = { workspace = true, features = ["tokio"] }
-governor = { workspace = true }
 
 # ── Observability ──────────────────────────────────────────────────
 prometheus = { workspace = true }
@@ -60,7 +56,6 @@ teloxide   = { workspace = true, features = ["macros"] }
 reqwest    = { workspace = true, features = ["json"] }
 
 # ── Cache ──────────────────────────────────────────────────────────
-moka = { workspace = true, features = ["future"] }
 
 # ── Misc ───────────────────────────────────────────────────────────
 rand = { workspace = true }
@@ -71,16 +66,10 @@ strum = { workspace = true, features = ["derive"] }
 # the runtime-config applicator propagation test.
 sea-orm = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
-wiremock = { workspace = true }
-hex = { workspace = true }
 serde_json = { workspace = true }
-alloy = { workspace = true }
-polymarket_client_sdk_v2 = { workspace = true }
 quant-pivot-test-support = { workspace = true }
 testcontainers = { workspace = true }
 testcontainers-modules = { workspace = true, features = ["postgres", "redis"] }
-proptest = { workspace = true }
-criterion = { workspace = true }
 
 [features]
 # Offline optimizer (argmin) for the weighted trainer's refinement step.

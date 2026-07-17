@@ -4,9 +4,10 @@ use actix_web::{http::Method, web};
 use quant_pivot_models::{
     config::DeployConfig,
     domain::{
-        ExecutionRecoveryView, HealthReport, KillSwitchView, QuantModeTransitionReport,
-        QuantModeView, SetKillSwitchCommand, SetKillSwitchRequest, SwitchQuantModeRequest,
-        SystemStatus,
+        ActionEligibilityDecision, ActionEligibilityView, ActivateBootstrapRequest, BootstrapView,
+        CapabilityView, ExecutionRecoveryView, HealthReport, KillSwitchView,
+        QuantModeTransitionReport, QuantModeView, SetKillSwitchCommand, SetKillSwitchRequest,
+        SwitchQuantModeRequest, SystemStatusView,
     },
     enums::{
         execution::KillSwitchState,
@@ -34,6 +35,18 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
             "/system/status",
             Rule::ResourceOp(ResourceType::System, Operation::Read),
             status,
+        ),
+        spec(
+            Method::GET,
+            "/system/action-eligibility",
+            Rule::AuthenticatedOnly,
+            action_eligibility,
+        ),
+        spec(
+            Method::POST,
+            "/system/bootstrap/activate",
+            Rule::ActingRoleGoverned(ResourceType::System, Operation::BootstrapActivate),
+            activate_bootstrap,
         ),
         spec(
             Method::GET,
@@ -109,8 +122,7 @@ fn masked_deploy_view(deploy: &DeployConfig) -> serde_json::Value {
             },
             "gamma": {
                 "base_url": deploy.market_data.gamma.base_url,
-                "full_sync_interval_secs": deploy.market_data.gamma.full_sync_interval_secs,
-                "catalog_visibility_guard_secs": deploy.market_data.gamma.catalog_visibility_guard_secs,
+                "reconcile_interval_secs": deploy.market_data.gamma.reconcile_interval_secs,
                 "page_size": deploy.market_data.gamma.page_size,
             },
         },
@@ -150,6 +162,8 @@ fn masked_db_view(deploy: &DeployConfig) -> serde_json::Value {
             "min_connections": deploy.db.postgres.min_connections,
         },
         "clickhouse": {
+            "deployment_id": deploy.db.clickhouse.deployment_id,
+            "cluster_id": deploy.db.clickhouse.cluster_id,
             "url": mask_url_credentials(&deploy.db.clickhouse.url),
             "database": deploy.db.clickhouse.database,
             "user": deploy.db.clickhouse.user,
@@ -188,7 +202,9 @@ fn masked_web_view(deploy: &DeployConfig) -> serde_json::Value {
         "serve_static_ui": deploy.web.serve_static_ui,
         "static_ui_dir": deploy.web.static_ui_dir,
         "jwt": {
-            "secret": mask_secret(&deploy.web.jwt.secret),
+            "signing_key_id": deploy.web.jwt.signing_key_id,
+            "signing_private_key_file": "<secret-manager-mounted>",
+            "verification_key_ids": deploy.web.jwt.verification_keys.iter().map(|key| &key.key_id).collect::<Vec<_>>(),
             "issuer": deploy.web.jwt.issuer,
             "access_ttl_secs": deploy.web.jwt.access_ttl_secs,
             "refresh_ttl_secs": deploy.web.jwt.refresh_ttl_secs,
@@ -196,8 +212,91 @@ fn masked_web_view(deploy: &DeployConfig) -> serde_json::Value {
     })
 }
 
-pub async fn status(state: web::Data<AppState>) -> Result<WebResponse<SystemStatus>, WebError> {
-    Ok(WebResponse::ok(state.control.system_status()))
+pub async fn status(state: web::Data<AppState>) -> Result<WebResponse<SystemStatusView>, WebError> {
+    let runtime = state.control.system_status();
+    let capabilities = state.bootstrap.capabilities(&runtime).await?;
+    Ok(WebResponse::ok(SystemStatusView {
+        runtime,
+        bootstrap: state.bootstrap.view(),
+        capabilities,
+    }))
+}
+
+pub async fn action_eligibility(
+    state: web::Data<AppState>,
+    actor: AuthedActor,
+) -> Result<WebResponse<ActionEligibilityView>, WebError> {
+    let runtime = state.control.system_status();
+    let capabilities = state.bootstrap.capabilities(&runtime).await?;
+    let subject = &actor.claims.sub;
+    let report_permission = state
+        .casbin
+        .enforce(
+            subject,
+            ResourceType::QuantReport.as_str(),
+            Operation::Enqueue.as_str(),
+        )
+        .await?;
+    let entry_permission = state
+        .casbin
+        .enforce(
+            subject,
+            ResourceType::OrderIntent.as_str(),
+            Operation::Create.as_str(),
+        )
+        .await?;
+    let order_permission = state
+        .casbin
+        .enforce(
+            subject,
+            ResourceType::ExecutionOrder.as_str(),
+            Operation::Create.as_str(),
+        )
+        .await?;
+    Ok(WebResponse::ok(ActionEligibilityView {
+        capability_revision: capabilities.revision,
+        report_generation: action_decision(
+            report_permission,
+            capabilities.report_generation_eligible,
+        ),
+        entry_admission: action_decision(entry_permission, capabilities.entry_admission_eligible),
+        order_submission: action_decision(order_permission, capabilities.order_submission_eligible),
+    }))
+}
+
+const fn action_decision(
+    permission_granted: bool,
+    capability: CapabilityView,
+) -> ActionEligibilityDecision {
+    ActionEligibilityDecision {
+        enabled: permission_granted && capability.enabled,
+        permission_granted,
+        capability,
+    }
+}
+
+pub async fn activate_bootstrap(
+    state: web::Data<AppState>,
+    actor: AuthedActor,
+    ActingRole(acting_role): ActingRole,
+    op_ctx: OperationCtx,
+    body: ValidatedJson<ActivateBootstrapRequest>,
+) -> Result<WebResponse<BootstrapView>, WebError> {
+    let request = body.into_inner();
+    op_ctx.set_action(OperationCategory::System, "system.bootstrap.activate");
+    op_ctx.set_detail(serde_json::json!({
+        "runtime_config_version_id": &request.runtime_config_version_id,
+        "runtime_config_approval_id": &request.runtime_config_approval_id,
+        "bootstrap_contract_version": request.bootstrap_contract_version,
+        "expected_state_revision": request.expected_state_revision,
+        "reason": &request.reason,
+        "report_only_forced_ack": request.report_only_forced_ack,
+    }));
+    let view = state
+        .bootstrap
+        .activate(request, &actor.claims.username, &acting_role)
+        .await?;
+    Ok(WebResponse::ok(view))
 }
 
 pub async fn health(state: web::Data<AppState>) -> Result<WebResponse<HealthReport>, WebError> {

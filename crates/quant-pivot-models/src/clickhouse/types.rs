@@ -6,7 +6,10 @@
 use crate::types::{Bps, Price, Probability, SchemaVersion, Shares, Usd};
 use quant_pivot_error::hashing::CanonicalDigestError;
 use rust_decimal::Decimal;
-use serde::{Deserialize, Serialize};
+use serde::{
+    Deserialize, Deserializer, Serialize, Serializer,
+    de::{Error as DeError, Visitor},
+};
 use std::fmt::{self, Display, Formatter};
 
 const PRICE_SCALE: u32 = 8;
@@ -29,12 +32,10 @@ pub struct ChFactor(i64);
 #[serde(transparent)]
 pub struct ChBps(i64);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChUsd(i128);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChShares(i128);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -173,6 +174,76 @@ impl From<Decimal> for ChShares {
     }
 }
 
+fn serialize_scaled_i128<S: Serializer>(value: i128, serializer: S) -> Result<S::Ok, S::Error> {
+    if serializer.is_human_readable() {
+        serializer.serialize_str(&value.to_string())
+    } else {
+        serializer.serialize_i128(value)
+    }
+}
+
+struct ScaledI128Visitor;
+
+impl Visitor<'_> for ScaledI128Visitor {
+    type Value = i128;
+
+    fn expecting(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter.write_str("an exact signed 128-bit integer encoded as a decimal string")
+    }
+
+    fn visit_str<E: DeError>(self, value: &str) -> Result<Self::Value, E> {
+        value.parse().map_err(E::custom)
+    }
+
+    fn visit_i64<E: DeError>(self, value: i64) -> Result<Self::Value, E> {
+        Ok(i128::from(value))
+    }
+
+    fn visit_u64<E: DeError>(self, value: u64) -> Result<Self::Value, E> {
+        Ok(i128::from(value))
+    }
+
+    fn visit_i128<E: DeError>(self, value: i128) -> Result<Self::Value, E> {
+        Ok(value)
+    }
+
+    fn visit_u128<E: DeError>(self, value: u128) -> Result<Self::Value, E> {
+        i128::try_from(value).map_err(E::custom)
+    }
+}
+
+fn deserialize_scaled_i128<'de, D: Deserializer<'de>>(deserializer: D) -> Result<i128, D::Error> {
+    if !deserializer.is_human_readable() {
+        return i128::deserialize(deserializer);
+    }
+
+    deserializer.deserialize_any(ScaledI128Visitor)
+}
+
+impl Serialize for ChUsd {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serialize_scaled_i128(self.0, serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ChUsd {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserialize_scaled_i128(deserializer).map(Self)
+    }
+}
+
+impl Serialize for ChShares {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serialize_scaled_i128(self.0, serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ChShares {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserialize_scaled_i128(deserializer).map(Self)
+    }
+}
+
 impl ChDecimal64 {
     #[must_use]
     pub fn to_decimal(self) -> Decimal {
@@ -275,5 +346,19 @@ mod tests {
     fn shares_roundtrips_scaled_decimal128() {
         let shares = Shares::new(dec!(1000.000000000000000001));
         assert_eq!(ChShares::from(shares).to_shares(), shares);
+    }
+
+    #[test]
+    fn decimal128_json_uses_lossless_strings() {
+        let usd = ChUsd::from(Usd::new(dec!(123.456789123456789123)));
+        let shares = ChShares::from(Shares::new(dec!(1000.000000000000000001)));
+        let encoded = serde_json::to_value((usd, shares)).expect("serialize exact decimals");
+        assert_eq!(
+            encoded,
+            serde_json::json!(["123456789123456789123", "1000000000000000000001"])
+        );
+        let decoded: (ChUsd, ChShares) =
+            serde_json::from_value(encoded).expect("deserialize exact decimals");
+        assert_eq!(decoded, (usd, shares));
     }
 }

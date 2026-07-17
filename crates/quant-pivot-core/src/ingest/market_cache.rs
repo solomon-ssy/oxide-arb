@@ -105,7 +105,7 @@ mod tests {
     use chrono::Utc;
     use quant_pivot_models::{
         domain::market::{MarketRegistryInfo, TokenInfo},
-        enums::{common::MarketCategory, market::MarketStatus},
+        enums::{catalog::CatalogFilterReasonSet, common::MarketCategory, market::MarketStatus},
     };
     use rust_decimal_macros::dec;
 
@@ -132,6 +132,7 @@ mod tests {
             description: None,
             categories,
             status: MarketStatus::Active,
+            filter_reasons: CatalogFilterReasonSet::default(),
             outcome: None,
             neg_risk: false,
             tick_size: TickSize::Hundredth,

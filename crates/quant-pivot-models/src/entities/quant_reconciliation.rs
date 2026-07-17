@@ -10,6 +10,7 @@ use crate::{
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
+#[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "quant_reconciliation")]
 pub struct Model {
@@ -33,34 +34,21 @@ pub struct Model {
     pub resolved_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
-}
 
-#[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-pub enum Relation {
     #[sea_orm(
-        belongs_to = "super::quant_execution_order::Entity",
-        from = "Column::ExecutionOrderId",
-        to = "super::quant_execution_order::Column::ExecutionOrderId"
+        belongs_to,
+        relation_enum = "ExecutionOrder",
+        from = "execution_order_id",
+        to = "execution_order_id"
     )]
-    ExecutionOrder,
+    pub execution_order: BelongsTo<super::quant_execution_order::Entity>,
     #[sea_orm(
-        belongs_to = "super::quant_order_intent::Entity",
-        from = "Column::OrderIntentId",
-        to = "super::quant_order_intent::Column::OrderIntentId"
+        belongs_to,
+        relation_enum = "OrderIntent",
+        from = "order_intent_id",
+        to = "order_intent_id"
     )]
-    OrderIntent,
-}
-
-impl Related<super::quant_execution_order::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::ExecutionOrder.def()
-    }
-}
-
-impl Related<super::quant_order_intent::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::OrderIntent.def()
-    }
+    pub order_intent: BelongsTo<super::quant_order_intent::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

@@ -2,12 +2,13 @@
 
 use crate::{
     enums::market::EventStatus,
-    types::{CatalogMarketIds, EventId},
+    types::{CatalogMarketIds, ContentHash, EventId},
 };
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
 
+#[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]
 #[sea_orm(table_name = "event")]
 pub struct Model {
@@ -27,22 +28,12 @@ pub struct Model {
     /// Ordered Gamma `condition_id`s at sync time (mirrors `EventRegistryInfo.market_ids`).
     pub catalog_market_ids: CatalogMarketIds,
     pub end_date: Option<DateTime<Utc>>,
-    #[sea_orm(column_type = "JsonBinary", nullable)]
-    pub raw_gamma: Option<serde_json::Value>,
+    pub content_hash: ContentHash,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
-}
 
-#[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-pub enum Relation {
-    #[sea_orm(has_many = "super::market::Entity")]
-    Market,
-}
-
-impl Related<super::market::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::Market.def()
-    }
+    #[sea_orm(has_many, relation_enum = "Market")]
+    pub market: HasMany<super::market::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

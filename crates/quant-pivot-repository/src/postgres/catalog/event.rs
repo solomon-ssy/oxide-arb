@@ -1,6 +1,7 @@
 use crate::{
     postgres::{
         catalog::ingest::{find_existing_str_id_chunks, find_models_by_str_id_chunks},
+        primitives,
         write::upsert_many_chunked,
     },
     traits::EventRepository,
@@ -10,7 +11,6 @@ use quant_pivot_models::{
     domain::{EventInfo, UpsertEvent},
     entities::event::{Column, Entity},
     enums::market::EventStatus,
-    schema::column,
     types::EventId,
 };
 use sea_orm::{
@@ -83,11 +83,11 @@ fn event_upsert_on_conflict() -> OnConflict {
             Column::NegRisk,
             Column::CatalogMarketIds,
             Column::EndDate,
-            Column::RawGamma,
+            Column::ContentHash,
         ])
         .values([(
             Column::Status,
-            column::pg_enum_excluded::<EventStatus>(Column::Status),
+            primitives::excluded_enum::<EventStatus>(Column::Status),
         )])
         .to_owned()
 }

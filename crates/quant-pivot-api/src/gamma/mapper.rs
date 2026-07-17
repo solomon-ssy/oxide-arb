@@ -1,20 +1,16 @@
 //! Maps normalized Gamma catalog rows to domain types.
 //!
 //! `CatalogMarket` construction already enforces the binary-market invariant,
-//! so persistence (`UpsertMarket`) and registry (`MarketRegistryInfo`) rows
-//! are produced from the same canonical token pair — the two stores can never
-//! disagree about a market's YES/NO legs.
+//! so downstream persistence and the in-memory registry share one canonical
+//! normalized representation.
 
 use crate::gamma::CatalogMarketReject;
 
-use super::catalog::{CatalogEvent, CatalogMarket, RejectedMarket};
+use super::catalog::{CatalogEvent, CatalogMarket, FilteredPrelistingMarket, RejectedMarket};
 use chrono::{DateTime, Utc};
 use quant_pivot_error::market::MarketError;
 use quant_pivot_models::{
-    domain::market::{
-        EventRegistryInfo, MarketRegistryInfo, TokenInfo, UpsertEvent, UpsertMarket,
-        resolve_binary_pair_exact,
-    },
+    domain::market::{EventRegistryInfo, MarketRegistryInfo, TokenInfo, resolve_binary_pair_exact},
     enums::common::CategorySet,
     types::{EventId, MarketId, TokenId},
 };
@@ -29,14 +25,14 @@ pub struct CatalogSourceTimestamps {
     pub updated_at: Option<DateTime<Utc>>,
 }
 
-/// Complete output of a Gamma catalog sync — persistence DTOs and in-memory views.
+/// Complete output of a Gamma catalog sync after wire validation.
 pub struct GammaCatalogBatch {
-    pub events: Vec<UpsertEvent>,
-    pub markets: Vec<UpsertMarket>,
     pub registry_events: Vec<EventRegistryInfo>,
     pub registry_markets: Vec<MarketRegistryInfo>,
     pub event_source_timestamps: HashMap<EventId, CatalogSourceTimestamps>,
     pub market_source_timestamps: HashMap<MarketId, CatalogSourceTimestamps>,
+    /// Legitimate Gamma pre-listing objects excluded from the venue projection.
+    pub filtered: Vec<FilteredPrelistingMarket>,
     /// Markets dropped during normalization, for sync summaries and metrics.
     pub rejected: Vec<RejectedMarket>,
 }
@@ -69,17 +65,16 @@ impl From<Vec<CatalogEvent>> for GammaCatalogBatch {
                 })
             })
             .collect();
-        let mut upsert_events = Vec::with_capacity(events.len());
-        let mut upsert_markets = Vec::new();
         let mut registry_events = Vec::with_capacity(events.len());
         let mut registry_markets = Vec::new();
+        let mut filtered = Vec::new();
         let mut rejected = Vec::new();
 
         for mut event in events {
             let event_id = EventId::new(&event.id);
             let event_categories = event.categories;
+            filtered.append(&mut event.filtered_markets);
             rejected.append(&mut event.rejected_markets);
-            upsert_events.push(UpsertEvent::from(&event));
             registry_events.push(EventRegistryInfo::from(&event));
 
             for market in event.markets {
@@ -88,28 +83,25 @@ impl From<Vec<CatalogEvent>> for GammaCatalogBatch {
                     event_id: event_id.clone(),
                     categories: event_categories,
                 };
-                match TryFrom::try_from(CatalogMarketWithCtx { market, ctx }) {
-                    Ok((upsert, registry)) => {
-                        upsert_markets.push(upsert);
-                        registry_markets.push(registry);
-                    }
+                match MarketRegistryInfo::try_from(CatalogMarketWithCtx { market, ctx }) {
+                    Ok(registry) => registry_markets.push(registry),
                     Err(error) => rejected.push(RejectedMarket {
                         condition_id,
                         reject: CatalogMarketReject::InvalidTokenPair {
                             reason: error.to_string(),
                         },
+                        raw_payload: None,
                     }),
                 }
             }
         }
 
         Self {
-            events: upsert_events,
-            markets: upsert_markets,
             registry_events,
             registry_markets,
             event_source_timestamps,
             market_source_timestamps,
+            filtered,
             rejected,
         }
     }
@@ -132,30 +124,11 @@ impl From<&CatalogEvent> for EventRegistryInfo {
             tags: event.tags.clone(),
             neg_risk: event.neg_risk,
             end_date: event.end_date,
-            created_at: event.created_at.unwrap_or_else(Utc::now),
-            updated_at: event.updated_at.unwrap_or_else(Utc::now),
-        }
-    }
-}
-
-impl From<&CatalogEvent> for UpsertEvent {
-    fn from(event: &CatalogEvent) -> Self {
-        Self {
-            event_id: EventId::new(&event.id),
-            title: event.title.clone(),
-            slug: event.slug.clone(),
-            series_slug: event.series_slug.clone(),
-            status: event.status,
-            tags: event.tags.clone().into(),
-            neg_risk: event.neg_risk,
-            catalog_market_ids: event
-                .markets
-                .iter()
-                .map(|market| MarketId::new(&market.condition_id))
-                .collect::<Vec<_>>()
-                .into(),
-            end_date: event.end_date,
-            raw_gamma: Some(event.raw_wire.clone()),
+            created_at: event.created_at.unwrap_or(DateTime::<Utc>::UNIX_EPOCH),
+            updated_at: event
+                .updated_at
+                .or(event.created_at)
+                .unwrap_or(DateTime::<Utc>::UNIX_EPOCH),
         }
     }
 }
@@ -172,7 +145,7 @@ pub struct CatalogMarketWithCtx {
     pub ctx: CatalogMarketMapCtx,
 }
 
-impl TryFrom<CatalogMarketWithCtx> for (UpsertMarket, MarketRegistryInfo) {
+impl TryFrom<CatalogMarketWithCtx> for MarketRegistryInfo {
     type Error = MarketError;
 
     fn try_from(value: CatalogMarketWithCtx) -> Result<Self, Self::Error> {
@@ -182,7 +155,10 @@ impl TryFrom<CatalogMarketWithCtx> for (UpsertMarket, MarketRegistryInfo) {
         let (yes_token, no_token) = resolve_binary_pair_exact(&market_id, &tokens.0)?;
         let status = market.status;
         let created = market.created_at;
-        let updated = market.updated_at.unwrap_or_else(Utc::now);
+        let updated = market
+            .updated_at
+            .or(market.created_at)
+            .unwrap_or(DateTime::<Utc>::UNIX_EPOCH);
         let outcome = market
             .settlement
             .as_ref()
@@ -192,25 +168,7 @@ impl TryFrom<CatalogMarketWithCtx> for (UpsertMarket, MarketRegistryInfo) {
         // would fabricate label maturity and a live settlement transition.
         let resolved_at = market.resolved_at;
 
-        let upsert = UpsertMarket {
-            market_id: market_id.clone(),
-            event_id: ctx.event_id.clone(),
-            question: market.question.clone(),
-            slug: market.slug.clone().unwrap_or_default(),
-            description: market.description.clone(),
-            categories: ctx.categories,
-            status,
-            outcome: outcome.clone(),
-            yes_token_id: yes_token.clone(),
-            no_token_id: no_token.clone(),
-            tick_size: market.tick_size,
-            neg_risk: market.neg_risk,
-            start_date: market.start_date,
-            end_date: market.end_date,
-            resolved_at,
-        };
-
-        let registry = MarketRegistryInfo {
+        let registry = Self {
             market_id,
             event_id: ctx.event_id,
             token_yes: yes_token,
@@ -220,6 +178,7 @@ impl TryFrom<CatalogMarketWithCtx> for (UpsertMarket, MarketRegistryInfo) {
             description: market.description,
             categories: ctx.categories,
             status,
+            filter_reasons: market.filter_reasons,
             outcome,
             neg_risk: market.neg_risk,
             tick_size: market.tick_size,
@@ -237,7 +196,7 @@ impl TryFrom<CatalogMarketWithCtx> for (UpsertMarket, MarketRegistryInfo) {
             updated_at: updated,
         };
 
-        Ok((upsert, registry))
+        Ok(registry)
     }
 }
 
@@ -258,7 +217,10 @@ impl From<&CatalogMarket> for TokenInfoPair {
 mod tests {
     use super::*;
     use crate::gamma::wire::WireEvent;
-    use quant_pivot_models::enums::{common::MarketCategory, market::MarketStatus};
+    use quant_pivot_models::{
+        domain::UpsertMarket,
+        enums::{common::MarketCategory, market::MarketStatus},
+    };
 
     fn batch_from(json: &str) -> GammaCatalogBatch {
         let wire: WireEvent = serde_json::from_str(json).expect("wire event");
@@ -282,8 +244,9 @@ mod tests {
             }"#,
         );
 
-        let upsert = &batch.markets[0];
         let registry = &batch.registry_markets[0];
+        let upsert =
+            UpsertMarket::from_registry(registry).expect("normalized market remains persistable");
         assert_eq!(upsert.yes_token_id, registry.token_yes);
         assert_eq!(upsert.no_token_id, registry.token_no);
         assert_eq!(upsert.yes_token_id.as_str(), "11");
@@ -316,10 +279,10 @@ mod tests {
             }"#,
         );
 
-        let upsert = &batch.markets[0];
-        assert_eq!(upsert.status, MarketStatus::Settled);
-        assert_eq!(upsert.outcome.as_deref(), Some("Over"));
-        let resolved_at = upsert.resolved_at.expect("resolved_at from closedTime");
+        let registry = &batch.registry_markets[0];
+        assert_eq!(registry.status, MarketStatus::Settled);
+        assert_eq!(registry.outcome.as_deref(), Some("Over"));
+        let resolved_at = registry.resolved_at.expect("resolved_at from closedTime");
         assert_eq!(resolved_at.to_rfc3339(), "2026-06-11T04:05:01+00:00");
     }
 
@@ -344,8 +307,7 @@ mod tests {
             }"#,
         );
 
-        assert_eq!(batch.markets[0].status, MarketStatus::Settled);
-        assert!(batch.markets[0].resolved_at.is_none());
+        assert_eq!(batch.registry_markets[0].status, MarketStatus::Settled);
         assert!(batch.registry_markets[0].resolved_at.is_none());
     }
 
@@ -364,7 +326,7 @@ mod tests {
                 }]
             }"#,
         );
-        assert!(batch.markets.is_empty());
+        assert!(batch.registry_markets.is_empty());
         assert_eq!(batch.rejected.len(), 1);
         assert_eq!(batch.rejected[0].condition_id, "0xmulti");
     }

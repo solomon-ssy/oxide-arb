@@ -78,23 +78,24 @@ const fn default_engine_subscription_window_hours() -> u64 {
 pub struct GammaConfig {
     /// Gamma REST base URL. Default: `https://gamma-api.polymarket.com`.
     pub base_url: String,
-    /// Interval (seconds) between full market-catalog syncs (also the gamma
-    /// periodic task cadence). Default: `300`.
-    pub full_sync_interval_secs: u64,
+    /// Interval between complete keyset reconciliations. Default: `300` seconds.
+    pub reconcile_interval_secs: u64,
     /// Page size for catalog pagination. Default: `100`.
     pub page_size: u32,
-    /// Safety margin (seconds) between catalog finalize commit and logical
-    /// `available_at` / `committed_at` visibility. Default: `2`.
-    pub catalog_visibility_guard_secs: u64,
+    /// Maximum successful keyset pages in one scan. Default: `10_000`.
+    pub max_keyset_pages: u32,
+    /// Maximum HTTP attempts, including retries, in one scan. Default: `50_000`.
+    pub max_keyset_requests: u32,
 }
 
 impl Default for GammaConfig {
     fn default() -> Self {
         Self {
             base_url: default_gamma_url(),
-            full_sync_interval_secs: default_gamma_full_sync_interval(),
+            reconcile_interval_secs: default_gamma_reconcile_interval(),
             page_size: default_gamma_page_size(),
-            catalog_visibility_guard_secs: default_gamma_catalog_visibility_guard_secs(),
+            max_keyset_pages: default_gamma_max_keyset_pages(),
+            max_keyset_requests: default_gamma_max_keyset_requests(),
         }
     }
 }
@@ -102,16 +103,18 @@ impl Default for GammaConfig {
 fn default_gamma_url() -> String {
     "https://gamma-api.polymarket.com".into()
 }
-const fn default_gamma_full_sync_interval() -> u64 {
+const fn default_gamma_reconcile_interval() -> u64 {
     300
 }
 const fn default_gamma_page_size() -> u32 {
     100
 }
-const fn default_gamma_catalog_visibility_guard_secs() -> u64 {
-    2
+const fn default_gamma_max_keyset_pages() -> u32 {
+    10_000
 }
-
+const fn default_gamma_max_keyset_requests() -> u32 {
+    50_000
+}
 /// Polymarket Data API configuration (keyless positions reads).
 ///
 /// The Data API serves the venue position ledger (`GET /positions?user=<funder>`)

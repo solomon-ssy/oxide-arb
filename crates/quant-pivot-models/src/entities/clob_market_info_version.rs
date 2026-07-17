@@ -9,6 +9,7 @@ use crate::{
     types::{ClobFeeDetails, ClobMarketInfoVersionId, ClobTokenSet, ContentHash, MarketId},
 };
 
+#[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "clob_market_info_version")]
 pub struct Model {
@@ -33,22 +34,14 @@ pub struct Model {
     #[sea_orm(column_type = "JsonBinary")]
     pub raw_payload: Json,
     pub created_at: DateTime<Utc>,
-}
 
-#[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-pub enum Relation {
     #[sea_orm(
-        belongs_to = "super::market::Entity",
-        from = "Column::MarketId",
-        to = "super::market::Column::MarketId"
+        belongs_to,
+        relation_enum = "Market",
+        from = "market_id",
+        to = "market_id"
     )]
-    Market,
-}
-
-impl Related<super::market::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::Market.def()
-    }
+    pub market: BelongsTo<super::market::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

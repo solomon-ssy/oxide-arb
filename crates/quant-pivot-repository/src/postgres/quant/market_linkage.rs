@@ -12,8 +12,9 @@ use quant_pivot_models::{
     types::{MarketId, MarketLinkageId},
 };
 use sea_orm::{
-    ActiveValue, ColumnTrait, Condition, DatabaseConnection, EntityTrait, IntoActiveModel,
-    QueryFilter, QueryOrder, QuerySelect, TransactionTrait, sea_query::OnConflict,
+    ActiveValue, ColumnTrait, Condition, DatabaseConnection, EntityTrait, ExprTrait,
+    IntoActiveModel, QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
+    sea_query::{Alias, Expr, Query},
 };
 
 /// Reduce rows already ordered `(market_id ASC, derived_at DESC, created_at
@@ -29,6 +30,53 @@ fn reduce_to_first_per_market(rows: Vec<quant_market_linkage::Model>) -> Vec<Mar
         }
     }
     kept
+}
+
+fn latest_linkage_condition() -> sea_orm::sea_query::Expr {
+    let newer = Alias::new("newer");
+    let newer_col = |column| Expr::col((newer.clone(), column));
+    let current_col = |column| Expr::col((quant_market_linkage::Entity, column));
+    let newer_rank = Condition::any()
+        .add(
+            newer_col(quant_market_linkage::Column::DerivedAt)
+                .gt(current_col(quant_market_linkage::Column::DerivedAt)),
+        )
+        .add(
+            Condition::all()
+                .add(
+                    newer_col(quant_market_linkage::Column::DerivedAt)
+                        .eq(current_col(quant_market_linkage::Column::DerivedAt)),
+                )
+                .add(
+                    newer_col(quant_market_linkage::Column::CreatedAt)
+                        .gt(current_col(quant_market_linkage::Column::CreatedAt)),
+                ),
+        )
+        .add(
+            Condition::all()
+                .add(
+                    newer_col(quant_market_linkage::Column::DerivedAt)
+                        .eq(current_col(quant_market_linkage::Column::DerivedAt)),
+                )
+                .add(
+                    newer_col(quant_market_linkage::Column::CreatedAt)
+                        .eq(current_col(quant_market_linkage::Column::CreatedAt)),
+                )
+                .add(
+                    newer_col(quant_market_linkage::Column::LinkageId)
+                        .gt(current_col(quant_market_linkage::Column::LinkageId)),
+                ),
+        );
+    let mut query = Query::select();
+    query
+        .expr(Expr::value(1_i32))
+        .from_as(quant_market_linkage::Entity, newer.clone())
+        .and_where(
+            newer_col(quant_market_linkage::Column::MarketId)
+                .eq(current_col(quant_market_linkage::Column::MarketId)),
+        )
+        .cond_where(newer_rank);
+    Expr::exists(query.take()).not()
 }
 
 /// Postgres-backed append-only linkage ledger.
@@ -61,12 +109,7 @@ impl MarketLinkageRepository for PgMarketLinkageRepository {
         // Idempotent append: a duplicate content hash is a resolver no-op, not
         // an error — the ledger row for that outcome already exists.
         quant_market_linkage::Entity::insert(linkage.into_active_model())
-            .on_conflict(
-                OnConflict::column(quant_market_linkage::Column::ContentHash)
-                    .do_nothing()
-                    .to_owned(),
-            )
-            .do_nothing()
+            .on_conflict_do_nothing_on([quant_market_linkage::Column::ContentHash])
             .exec(&txn)
             .await
             .map_err(StorageError::from)?;
@@ -89,17 +132,12 @@ impl MarketLinkageRepository for PgMarketLinkageRepository {
                 available_at: ActiveValue::Set(binding.available_at),
                 created_at: ActiveValue::NotSet,
             })
-            .on_conflict(
-                OnConflict::columns([
-                    quant_market_linkage_source::Column::LinkageId,
-                    quant_market_linkage_source::Column::Role,
-                    quant_market_linkage_source::Column::SourceId,
-                    quant_market_linkage_source::Column::InstrumentKey,
-                ])
-                .do_nothing()
-                .to_owned(),
-            )
-            .do_nothing()
+            .on_conflict_do_nothing_on([
+                quant_market_linkage_source::Column::LinkageId,
+                quant_market_linkage_source::Column::Role,
+                quant_market_linkage_source::Column::SourceId,
+                quant_market_linkage_source::Column::InstrumentKey,
+            ])
             .exec(&txn)
             .await
             .map_err(StorageError::from)?;
@@ -259,15 +297,7 @@ impl MarketLinkageRepository for PgMarketLinkageRepository {
                     .map(|to| quant_market_linkage::Column::DerivedAt.lt(to)),
             );
         if query.latest_only {
-            // Correlated "no newer row for the same market" guard keeps the
-            // catalog to one row per market while staying index-friendly.
-            condition = condition.add(sea_orm::sea_query::Expr::cust(
-                "NOT EXISTS (SELECT 1 FROM quant_market_linkage newer \
-                 WHERE newer.market_id = quant_market_linkage.market_id \
-                 AND (newer.derived_at, newer.created_at, newer.linkage_id) > \
-                     (quant_market_linkage.derived_at, quant_market_linkage.created_at, \
-                      quant_market_linkage.linkage_id))",
-            ));
+            condition = condition.add(latest_linkage_condition());
         }
         let select = quant_market_linkage::Entity::find()
             .filter(condition)

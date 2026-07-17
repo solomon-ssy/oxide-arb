@@ -8,6 +8,7 @@ use crate::{
     types::{ContentHash, DomainInstrumentKey, DomainSourceId, MarketLinkageId},
 };
 
+#[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "quant_market_linkage_source")]
 pub struct Model {
@@ -22,22 +23,14 @@ pub struct Model {
     pub binding_hash: ContentHash,
     pub available_at: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
-}
 
-#[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-pub enum Relation {
     #[sea_orm(
-        belongs_to = "super::quant_market_linkage::Entity",
-        from = "Column::LinkageId",
-        to = "super::quant_market_linkage::Column::LinkageId"
+        belongs_to,
+        relation_enum = "MarketLinkage",
+        from = "linkage_id",
+        to = "linkage_id"
     )]
-    MarketLinkage,
-}
-
-impl Related<super::quant_market_linkage::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::MarketLinkage.def()
-    }
+    pub market_linkage: BelongsTo<super::quant_market_linkage::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

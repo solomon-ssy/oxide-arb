@@ -91,9 +91,9 @@ use quant_pivot_repository::{
 use quant_pivot_test_support::{
     catalog_fixtures::{make_event, make_market},
     execution_pg_seed::{
-        ReportBuildOptions, ReportSeedConfig, claim_entry_for_test, entry_claim_for_test,
-        fixture_profile_ref, prepared_order, seed_conditional_price_report_on_infra,
-        seed_shared_demo_infra,
+        ReportBuildOptions, ReportSeedConfig, claim_entry_for_test,
+        enable_entry_admission_for_test, entry_claim_for_test, fixture_profile_ref, prepared_order,
+        seed_conditional_price_report_on_infra, seed_shared_demo_infra,
     },
     pg::setup_pg,
     report_fixtures,
@@ -163,7 +163,7 @@ async fn entry_condition_artifact_and_audit_are_database_worm() {
         .expect("condition instance");
     let artifact_id = condition.artifact_id.expect("conditional artifact");
     let artifact_update = db
-        .execute(Statement::from_sql_and_values(
+        .execute_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
             "UPDATE quant_entry_condition_artifact SET artifact_hash = artifact_hash \
              WHERE artifact_id = $1",
@@ -175,7 +175,7 @@ async fn entry_condition_artifact_and_audit_are_database_worm() {
         "entry-condition artifact UPDATE must be rejected by the WORM trigger"
     );
     let audit_delete = db
-        .execute(Statement::from_sql_and_values(
+        .execute_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
             "DELETE FROM quant_entry_condition_audit WHERE condition_instance_id = $1",
             [condition.condition_instance_id.as_uuid().into()],
@@ -942,7 +942,8 @@ async fn lost_lease_prevents_report_commit_and_marks_abandoned() {
     let decision_at = transaction.report.decision_at;
     let worker_id = uuid::Uuid::now_v7();
     let run_id = ReportRunId::from_v7();
-    let lease_expires_at = Utc::now() - Duration::seconds(1);
+    let run_started_at = decision_at - Duration::minutes(1);
+    let lease_expires_at = run_started_at + Duration::seconds(30);
     quant_report_run::ActiveModel {
         report_run_id: ActiveValue::Set(run_id.clone()),
         trigger_kind: ActiveValue::Set(ReportTriggerKind::Scheduled),
@@ -950,11 +951,11 @@ async fn lost_lease_prevents_report_commit_and_marks_abandoned() {
         schedule_id: ActiveValue::Set(Some("expired_fixture".to_owned())),
         request_id: ActiveValue::Set(None),
         retry_of_run_id: ActiveValue::Set(None),
-        scheduled_for: ActiveValue::Set(Some(decision_at)),
-        requested_at: ActiveValue::Set(decision_at),
+        scheduled_for: ActiveValue::Set(Some(run_started_at)),
+        requested_at: ActiveValue::Set(run_started_at),
         status: ActiveValue::Set(ReportRunStatus::Running),
-        started_at: ActiveValue::Set(Some(decision_at)),
-        decision_at: ActiveValue::Set(Some(decision_at)),
+        started_at: ActiveValue::Set(Some(run_started_at)),
+        decision_at: ActiveValue::Set(Some(run_started_at)),
         heartbeat_at: ActiveValue::Set(Some(lease_expires_at - Duration::seconds(1))),
         lease_expires_at: ActiveValue::Set(Some(lease_expires_at)),
         finished_at: ActiveValue::Set(None),
@@ -2148,6 +2149,7 @@ fn reconciliation_row(
 // ── Fixture chain (self-contained; mirrors pg_account_capital) ────────────────
 
 async fn seed_approved_intent(db: &sea_orm::DatabaseConnection, ids: &TxnIds) -> OrderIntentId {
+    enable_entry_admission_for_test(db, "pg-execution-submission-it-operator").await;
     let order_intent_id = OrderIntentId::from_v7();
     PgOrderIntentRepository::new(db.clone())
         .create_with_allocation(
@@ -2391,7 +2393,7 @@ async fn seed_approval_governance(
         .activate_version(NewRuntimeConfigActivation {
             runtime_config_activation_id: RuntimeConfigActivationId::from_v7(),
             runtime_config_version_id: runtime_config_version_id.clone(),
-            activated_at: Utc::now(),
+            runtime_config_approval_id: None,
             activated_by: "concurrent-approval-test".to_owned(),
             reason: "activate intent runtime contract".to_owned(),
             activation_kind: RuntimeConfigActivationKind::Initial,

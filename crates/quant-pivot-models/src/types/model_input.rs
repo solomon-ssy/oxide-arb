@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use sea_orm::FromJsonQueryResult;
 use serde::{Deserialize, Serialize};
 
-use crate::{jsonb_active, types::TradePolicyArtifactId};
+use crate::types::TradePolicyArtifactId;
 
 /// Whether a raw feature may be imputed by the fitted model-input transform.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -55,8 +55,6 @@ pub struct ModelInputContract {
     pub inputs: Vec<ModelInputSpec>,
 }
 
-jsonb_active!(ModelInputContract);
-
 /// Frozen supervised-target and cross-validation policy owned by a model spec.
 /// Training requests cannot override these fields.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
@@ -71,8 +69,6 @@ pub struct ModelTrainingContract {
     /// Required for executable policy-derived targets; absent for unrelated labels.
     pub trade_policy_artifact_id: Option<TradePolicyArtifactId>,
 }
-
-jsonb_active!(ModelTrainingContract);
 
 impl ModelTrainingContract {
     /// Common settlement classifier contract used by non-training fixtures.

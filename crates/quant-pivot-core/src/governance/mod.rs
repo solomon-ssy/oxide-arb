@@ -1,6 +1,7 @@
 //! Runtime mode handle and quant governance primitives.
 
 pub mod bias_table;
+pub mod bootstrap;
 pub mod calibration_loader;
 pub mod category_pointer_guard;
 pub mod execution_recovery;
@@ -20,6 +21,7 @@ pub mod system_status;
 pub mod weight_overlay;
 
 pub use bias_table::BiasTableApplicator;
+pub use bootstrap::BootstrapService;
 pub use calibration_loader::{
     CoreCalibrationArtifactLoader, ModelScoreCalibrationPayload, model_score_content_hash,
     resolve_return_model_calibration,
@@ -40,7 +42,7 @@ pub use quality_gate_load::{
 pub use runtime_control::QuantRuntimeControl;
 pub use runtime_mode::RuntimeModeHandle;
 pub use runtime_model_pointers::{
-    RuntimeModelPointerSync, sync_production_active, sync_shadow_candidate,
+    RuntimeModelPointerSync, prepare_production_active, sync_shadow_candidate,
 };
 pub use system_status::SystemStatusPublisher;
 pub use weight_overlay::{WeightOverlayApplicator, WeightOverlaySnapshot};

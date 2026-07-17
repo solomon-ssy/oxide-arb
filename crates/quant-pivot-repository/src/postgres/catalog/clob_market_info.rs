@@ -6,11 +6,11 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     entities::clob_market_info_version,
-    types::{ClobMarketInfoVersion, ClobTokenSet, ContentHash, MarketId},
+    types::{ClobMarketInfoVersion, ClobTokenSet, ContentHash, HistoryCoverage, MarketId},
 };
 use sea_orm::{
-    ActiveValue::Set, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder,
-    QuerySelect, sea_query::OnConflict,
+    ActiveValue::Set, ColumnTrait, DatabaseConnection, EntityTrait, FromQueryResult, QueryFilter,
+    QueryOrder, QuerySelect, sea_query::OnConflict,
 };
 
 use crate::traits::ClobMarketInfoRepository;
@@ -27,6 +27,37 @@ impl PgClobMarketInfoRepository {
 
 #[async_trait::async_trait]
 impl ClobMarketInfoRepository for PgClobMarketInfoRepository {
+    async fn research_history_coverage(
+        &self,
+        as_of: DateTime<Utc>,
+    ) -> Result<Vec<HistoryCoverage>, StorageError> {
+        let row = clob_market_info_version::Entity::find()
+            .select_only()
+            .column_as(
+                clob_market_info_version::Column::EffectiveAt.min(),
+                "earliest_event_time",
+            )
+            .column_as(
+                clob_market_info_version::Column::EffectiveAt.max(),
+                "latest_event_time",
+            )
+            .column_as(
+                clob_market_info_version::Column::VersionId.count(),
+                "row_count",
+            )
+            .filter(clob_market_info_version::Column::EffectiveAt.lte(as_of))
+            .into_model::<HistoryRangeRow>()
+            .one(&self.db)
+            .await
+            .map_err(StorageError::from)?
+            .unwrap_or_default();
+        Ok(vec![history_coverage(
+            "clob_market_info_version",
+            "effective_at",
+            &row,
+        )?])
+    }
+
     async fn insert_observation(
         &self,
         observation: ClobMarketInfoVersion,
@@ -198,6 +229,28 @@ impl ClobMarketInfoRepository for PgClobMarketInfoRepository {
         });
         selected.into_iter().map(model_to_domain).collect()
     }
+}
+
+#[derive(Debug, Default, FromQueryResult)]
+struct HistoryRangeRow {
+    earliest_event_time: Option<DateTime<Utc>>,
+    latest_event_time: Option<DateTime<Utc>>,
+    row_count: i64,
+}
+
+fn history_coverage(
+    object: &str,
+    time_column: &str,
+    row: &HistoryRangeRow,
+) -> Result<HistoryCoverage, StorageError> {
+    Ok(HistoryCoverage {
+        object: object.to_owned(),
+        time_column: time_column.to_owned(),
+        earliest_event_time: row.earliest_event_time,
+        latest_event_time: row.latest_event_time,
+        row_count: u64::try_from(row.row_count)
+            .map_err(|error| invariant("row_count", error.to_string()))?,
+    })
 }
 
 async fn find_by_hash(

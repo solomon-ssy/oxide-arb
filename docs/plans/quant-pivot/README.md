@@ -33,10 +33,10 @@ Polymarket facts -> features -> factors/models -> portfolio plan
 4. [`03-data-factor-model-pipeline.md`](03-data-factor-model-pipeline.md)：数据、特征、因子、模型、训练、point-in-time 验证平面（概念规格）。可执行的子phase实施契约（3.0–3.7）见 [`phase-03/README.md`](phase-03/README.md)。
 5. [`04-topn-report-and-recommendation.md`](04-topn-report-and-recommendation.md)：TopN 报告 payload，明确买什么、什么时候买、买多少、什么时候卖、卖多少、入场触发、止盈、止损、出场节点。
 6. [`05-execution-risk-and-governance.md`](05-execution-risk-and-governance.md)：`report_only`、`semi_auto`、`auto_execution` 的语义、审批、OrderIntent、组合风险、审计规则。
-7. [`06-config-deploy-and-ops.md`](06-config-deploy-and-ops.md)：deploy-config、runtime-config v3、CI、benchmark、Docker、observability、runbook 调整。
-8. [`07-implementation-phases.md`](07-implementation-phases.md)：实施 Phase、退出标准、测试矩阵、迁移顺序。
-9. [`08-third-party-crates-and-ml-stack.md`](08-third-party-crates-and-ml-stack.md)：第三方 crate、模型训练、推理、优化、依赖引入顺序和 MSRV/native 风险。
-10. [`09-account-capital-position-reconciliation.md`](09-account-capital-position-reconciliation.md)：账户/资本/持仓/对账平面——`AccountSnapshot`、planner 资金感知签名、资金状态机、对账证据链、Polymarket 余额/持仓数据源（设计先行，实现分相位到 Phase 4/5/6）。
+7. [`06-config-deploy-and-ops.md`](06-config-deploy-and-ops.md)：deploy-config、runtime-config v17、CI、migration、Docker、observability、runbook 调整。
+8. [`08-third-party-crates-and-ml-stack.md`](08-third-party-crates-and-ml-stack.md)：第三方 crate、模型训练、推理、优化、依赖引入顺序和 MSRV/native 风险。
+9. [`09-account-capital-position-reconciliation.md`](09-account-capital-position-reconciliation.md)：账户/资本/持仓/对账平面——`AccountSnapshot`、planner 资金感知签名、资金状态机、对账证据链、Polymarket 余额/持仓数据源（设计先行，实现分相位到 Phase 4/5/6）。
+10. [`08-cold-start-production-closeout.md`](08-cold-start-production-closeout.md)：冷启动、schema、catalog、bootstrap、parity、认证和 UI 的生产收尾契约与验收矩阵。
 
 **子phase实施目录（按 Phase 推进时读）：**
 
@@ -45,7 +45,6 @@ Polymarket facts -> features -> factors/models -> portfolio plan
 - [`phase-05/README.md`](phase-05/README.md) — 执行/风险/治理 05.0–05.10
 - [`phase-06/README.md`](phase-06/README.md) — ML 扩展（退出信号、跨账户对账、ONNX/classical publish、attribution feedback、反事实归因；**闭合 Phase 5 延后 seam**）
 - [`phase-10/README.md`](phase-10/README.md) — 前端破坏式重构 10.0–10.6（概念规格：[`10-frontend-refactor.md`](10-frontend-refactor.md)）
-- [`phase-08/README.md`](phase-08/README.md) — 部署架构（多副本 leader election、高频 trailing）
 
 ## 2. 硬边界
 
@@ -55,7 +54,7 @@ Polymarket facts -> features -> factors/models -> portfolio plan
 - 运行模式重建为 `report_only`、`semi_auto`、`auto_execution`。
 - `report_only` 是默认、最安全、最先上线的模式。
 - 旧 `ExecutionMode::DryRun`、`ExecutionMode::Paper`、`ExecutionMode::Live` 必须删除，不做 alias。
-- 旧 runtime-config schema v2 被 schema v3 替换，不做迁就旧 JSON 的 shim。
+- 旧 runtime-config schema v2 被 schema v17 替换，不做迁就旧 JSON 的 shim。
 - 旧 Endgame 文档只能作为删除盘点资料，不能作为活跃实现依据。
 - 禁止 compatibility re-export。公开 API 必须显式、收敛、语义精准。
 - 不追求最小变更、最小侵入、最小工作量；优先追求正确领域模型、清晰边界和生产可维护性。
@@ -89,10 +88,10 @@ Polymarket facts -> features -> factors/models -> portfolio plan
 以下基础能力可以保留，但必须改名、改语义、改边界：
 
 - `quant-pivot-models` 中的 typed IDs 和 Decimal money newtypes。
-- declarative schema catalog 与 migration graph。
+- deploy-only、只追加且带 artifact checksum 的 `SeaORM` PostgreSQL migrations，以及规范化 schema manifest。
 - DTO 三层契约：request/query、persistence DTO、view/response。
 - Postgres、Redis、ClickHouse storage 基础设施。
-- RBAC、JWT、Casbin、operation log、受治理 runtime config 机制。
+- RBAC、Casbin、operation log、Ed25519 JWT keyring、原子 refresh family 与受治理 runtime config 机制。
 - Polymarket Gamma、CLOB market data、L2 book ingest。
 - `BookStore` published snapshot 模式。
 - ClickHouse fact writer 与 async writer 模式。
@@ -104,7 +103,7 @@ Polymarket facts -> features -> factors/models -> portfolio plan
 
 - 添加替代代码前必须删除哪些 crate、模块、类型和配置；
 - 新领域类型名、新表名、新 ClickHouse fact 名；
-- deploy-config key 与 runtime-config v3 path；
+- deploy-config key 与 runtime-config v17 path；
 - 生产不变量和失败语义；
 - Phase 完成前必须更新的测试、benchmark、architecture lint。
 - 第三方 crate 选型、feature gate、MSRV/native 依赖风险和替代方案。

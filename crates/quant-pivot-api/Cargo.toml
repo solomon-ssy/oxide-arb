@@ -19,6 +19,7 @@ alloy = { workspace = true }
 
 # Networking
 reqwest = { workspace = true }
+httpdate = { workspace = true }
 
 # Async runtime
 tokio = { workspace = true }
@@ -60,6 +61,7 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 
 # Security
+blake3 = { workspace = true }
 zeroize = { workspace = true }
 hex = { workspace = true }
 secrecy = { workspace = true }
@@ -77,7 +79,6 @@ wiremock = { workspace = true }
 serde_json = { workspace = true }
 hex = { workspace = true }
 alloy = { workspace = true }
-quant-pivot-core = { workspace = true }
 
 [lints]
 workspace = true

@@ -5,7 +5,7 @@
 
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
-use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -155,9 +155,7 @@ impl TradeTapeBlockCursorStatus {
 }
 
 /// Persisted block cursor for one `(source, contract_address)` exchange stream.
-#[derive(
-    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, DerivePartialModel, FromQueryResult,
-)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, DerivePartialModel)]
 #[sea_orm(entity = "crate::entities::quant_trade_tape_block_cursor::Entity")]
 pub struct TradeTapeBlockCursorInfo {
     pub source: String,

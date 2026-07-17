@@ -7,6 +7,7 @@ use crate::{
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
+#[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "quant_model_governance_audit")]
 pub struct Model {
@@ -29,34 +30,21 @@ pub struct Model {
     pub detail_json: Json,
     pub audit_event_id: Option<AuditEventId>,
     pub created_at: DateTime<Utc>,
-}
 
-#[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-pub enum Relation {
     #[sea_orm(
-        belongs_to = "super::quant_model_version::Entity",
-        from = "Column::ModelVersionId",
-        to = "super::quant_model_version::Column::ModelVersionId"
+        belongs_to,
+        relation_enum = "ModelVersion",
+        from = "model_version_id",
+        to = "model_version_id"
     )]
-    ModelVersion,
+    pub model_version: BelongsTo<Option<super::quant_model_version::Entity>>,
     #[sea_orm(
-        belongs_to = "super::quant_training_dataset::Entity",
-        from = "Column::TrainingDatasetId",
-        to = "super::quant_training_dataset::Column::TrainingDatasetId"
+        belongs_to,
+        relation_enum = "TrainingDataset",
+        from = "training_dataset_id",
+        to = "training_dataset_id"
     )]
-    TrainingDataset,
-}
-
-impl Related<super::quant_model_version::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::ModelVersion.def()
-    }
-}
-
-impl Related<super::quant_training_dataset::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::TrainingDataset.def()
-    }
+    pub training_dataset: BelongsTo<Option<super::quant_training_dataset::Entity>>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

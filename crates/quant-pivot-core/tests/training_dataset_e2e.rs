@@ -21,15 +21,15 @@ use quant_pivot_models::{
         ChDecimal64, ChPrice, ChSchemaVersion, ChShares, ChUsd, DomainObservationRow,
         MarketResolutionRow, MidPriceBucketRow, TradeTapeRow,
     },
-    config::GammaConfig,
     domain::{
-        CatalogCommit, CompleteTrainingDatasetBuild, CryptoSubject, DecisionBoundary,
+        CATALOG_OBJECT_SCHEMA_VERSION, CatalogBatchCommit, CatalogEventCandidate,
+        CatalogMarketCandidate, CompleteTrainingDatasetBuild, CryptoSubject, DecisionBoundary,
         DecisionSource, EventRegistryInfo, GroundingProof, JobProgressSink, LinkageOutcome,
-        MarketLinkageDerivation, MarketRegistryInfo, MarketSubject, NewCatalogSyncBatch,
-        NewEventCatalogVersion, NewMarketCatalogVersion, NewMarketLinkage, NewModelSpec,
-        NewModelVersion, NewRuntimeConfigVersion, NewTrainingDatasetPlan, NoopProgressSink,
-        PriceComparator, ResolutionOracle, ResolvedBinding, ResolvedSourceBinding, UpsertEvent,
-        UpsertMarket,
+        MarketLinkageDerivation, MarketRegistryInfo, MarketSubject, NewCatalogEventChange,
+        NewCatalogEventObject, NewCatalogMarketObject, NewCatalogSyncBatch, NewMarketLinkage,
+        NewModelSpec, NewModelVersion, NewRuntimeConfigVersion, NewTrainingDatasetPlan,
+        NoopProgressSink, PriceComparator, ResolutionOracle, ResolvedBinding,
+        ResolvedSourceBinding, UpsertEvent, UpsertMarket,
         market::{book::BookLevel, registry::TokenInfo},
     },
     entities::{
@@ -37,6 +37,9 @@ use quant_pivot_models::{
         quant_market_linkage::{Column as LinkageColumn, Entity as LinkageEntity},
     },
     enums::{
+        catalog::{
+            CatalogChangeType, CatalogFilterReasonSet, CatalogSyncKind, CatalogTimestampQuality,
+        },
         clickhouse::{
             ChCanonicalBookEventType, ChFactSource, ChStreamSessionEndReason, ChStreamSessionState,
         },
@@ -48,30 +51,32 @@ use quant_pivot_models::{
         quant::{DatasetPurpose, PublicationStatus, TrainingDatasetStatus},
         runtime_config::RuntimeConfigVersionSource,
     },
+    hashing::CanonicalDigest,
     runtime_config::{
         DataQualityConfig, DecimalString, DomainConfig, FactorsConfig, FeatureFamily,
         FeaturesConfig, SelectionConfig, TrainingConfig,
     },
     types::{
-        ArtifactUri, BinanceSymbol, CatalogSyncBatchId, ContentHash, CryptoAsset, CryptoQuote,
-        DATASET_ARTIFACT_FORMAT_VERSION, DatasetCoverage, DatasetManifest, DomainInstrumentKey,
-        DomainSourceId, EventCatalogVersionId, EventId, MarketCatalogVersionId, MarketId,
-        ModelInputContract, ModelSpecId, ModelTrainingContract, ModelVersionId, Price, Probability,
-        ResolverVersion, RuntimeConfigVersionId, SchemaVersion, Shares, TokenId, TrainingDatasetId,
+        ArtifactUri, BinanceSymbol, CatalogEventChangeId, CatalogEventObjectId,
+        CatalogMarketChangeId, CatalogMarketObjectId, CatalogSyncBatchId, ContentHash, CryptoAsset,
+        CryptoQuote, DATASET_ARTIFACT_FORMAT_VERSION, DatasetCoverage, DatasetManifest,
+        DomainInstrumentKey, DomainSourceId, EventId, MarketId, ModelInputContract, ModelSpecId,
+        ModelTrainingContract, ModelVersionId, Price, Probability, ResolverVersion,
+        RuntimeConfigVersionId, SchemaVersion, Shares, TokenId, TrainingDatasetId,
         TrainingHorizonsSecs, TrainingSampleSource, TrainingSampleSources, Usd,
         default_sample_sources,
     },
 };
 use quant_pivot_repository::{
     postgres::{
-        PgAttributionRepository, PgCalibrationArtifactRepository, PgCatalogVersionRepository,
+        PgAttributionRepository, PgCalibrationArtifactRepository, PgCatalogLedgerRepository,
         PgClobMarketInfoRepository, PgFeatureRepository, PgMarketLinkageRepository,
         PgMarketRepository, PgMarketSelectionRepository, PgModelRegistryRepository,
         PgPositionRepository, PgRecommendationRepository, PgRuntimeConfigVersionRepository,
         PgTradePolicyRepository, PgTrainingDatasetRepository,
     },
     traits::{
-        CatalogVersionRepository, MarketLinkageRepository, ModelRegistryRepository,
+        CatalogLedgerRepository, MarketLinkageRepository, ModelRegistryRepository,
         QuantFactReadRepository, RuntimeConfigVersionRepository, TrainingDatasetRepository,
     },
 };
@@ -684,7 +689,7 @@ struct CatalogSeedContext {
     source_effective_at: DateTime<Utc>,
     end_date: DateTime<Utc>,
     batch_id: CatalogSyncBatchId,
-    event_version_id: EventCatalogVersionId,
+    event_version_id: CatalogEventChangeId,
     event_id: EventId,
     market_id: MarketId,
 }
@@ -695,7 +700,7 @@ impl CatalogSeedContext {
             source_effective_at: window_start - ChronoDuration::days(1),
             end_date: window_start + ChronoDuration::days(7),
             batch_id: CatalogSyncBatchId::from_v7(),
-            event_version_id: EventCatalogVersionId::from_v7(),
+            event_version_id: CatalogEventChangeId::from_v7(),
             event_id: EventId::new(EVENT_ID),
             market_id: MarketId::new(MARKET_ID),
         }
@@ -764,6 +769,7 @@ fn market_registry_payload(
         description: None,
         categories: CategorySet::from(category),
         status: MarketStatus::Active,
+        filter_reasons: CatalogFilterReasonSet::default(),
         outcome: None,
         neg_risk: false,
         tick_size: TickSize::Hundredth,
@@ -793,15 +799,33 @@ fn market_registry_payload(
     }
 }
 
-fn durable_catalog_commit(context: &CatalogSeedContext, category: MarketCategory) -> CatalogCommit {
+fn durable_catalog_commit(
+    context: &CatalogSeedContext,
+    category: MarketCategory,
+) -> CatalogBatchCommit {
     let event_payload = event_registry_payload(context, category);
     let market_payload = market_registry_payload(context, category);
+    let event_payload = serde_json::to_value(&event_payload).expect("event payload");
+    let market_payload = serde_json::to_value(&market_payload).expect("market payload");
+    let event_hash =
+        CanonicalDigest::content_hash_typed("quant-pivot/catalog-event-object", 1, &event_payload)
+            .expect("event content identity");
+    let market_hash = CanonicalDigest::content_hash_typed(
+        "quant-pivot/catalog-market-object",
+        1,
+        &market_payload,
+    )
+    .expect("market content identity");
+    let event_object_id = CatalogEventObjectId::from_content_hash(&event_hash);
+    let mut event_projection = current_event_projection(context, category);
+    event_projection.content_hash = event_hash.clone();
+    let mut market_projection = current_market_projection(context, category);
+    market_projection.content_hash = market_hash.clone();
 
-    CatalogCommit {
+    CatalogBatchCommit {
         batch: NewCatalogSyncBatch {
             catalog_sync_batch_id: context.batch_id.clone(),
-            sync_kind: "full".to_owned(),
-            source_cursor: None,
+            sync_kind: CatalogSyncKind::Baseline,
             started_at: context.source_effective_at,
             fetched_at: context.source_effective_at,
             event_count: 1,
@@ -809,32 +833,39 @@ fn durable_catalog_commit(context: &CatalogSeedContext, category: MarketCategory
             rejected_count: 0,
             batch_hash: catalog_fixture_hash('1'),
         },
-        current_events: vec![current_event_projection(context, category)],
-        event_versions: vec![NewEventCatalogVersion {
-            event_catalog_version_id: context.event_version_id.clone(),
-            catalog_sync_batch_id: context.batch_id.clone(),
-            event_id: context.event_id.clone(),
-            source_effective_at: context.source_effective_at,
-            source_timestamp_quality: "source".to_owned(),
-            available_at: context.source_effective_at,
-            origin: "gamma_sync".to_owned(),
-            content_hash: catalog_fixture_hash('2'),
-            payload: serde_json::to_value(&event_payload).expect("event payload"),
+        events: vec![CatalogEventCandidate {
+            projection: event_projection,
+            object: NewCatalogEventObject {
+                event_object_id: event_object_id.clone(),
+                content_hash: event_hash,
+                schema_version: CATALOG_OBJECT_SCHEMA_VERSION,
+                payload: event_payload,
+            },
+            change: NewCatalogEventChange {
+                event_change_id: context.event_version_id.clone(),
+                catalog_sync_batch_id: context.batch_id.clone(),
+                event_object_id: event_object_id.clone(),
+                event_id: context.event_id.clone(),
+                source_effective_at: context.source_effective_at,
+                source_timestamp_quality: CatalogTimestampQuality::Source,
+                change_type: CatalogChangeType::GammaScanUpsert,
+            },
         }],
-        current_markets: vec![current_market_projection(context, category)],
-        market_versions: vec![NewMarketCatalogVersion {
-            market_catalog_version_id: MarketCatalogVersionId::from_v7(),
+        markets: vec![CatalogMarketCandidate {
+            projection: market_projection,
+            object: NewCatalogMarketObject {
+                market_object_id: CatalogMarketObjectId::from_content_hash(&market_hash),
+                content_hash: market_hash,
+                schema_version: CATALOG_OBJECT_SCHEMA_VERSION,
+                payload: market_payload,
+            },
+            market_change_id: CatalogMarketChangeId::from_v7(),
             catalog_sync_batch_id: context.batch_id.clone(),
-            event_catalog_version_id: context.event_version_id.clone(),
-            market_id: context.market_id.clone(),
-            event_id: context.event_id.clone(),
+            event_object_id,
             source_effective_at: context.source_effective_at,
-            source_timestamp_quality: "source".to_owned(),
+            source_timestamp_quality: CatalogTimestampQuality::Source,
             source_created_at: Some(context.source_effective_at),
-            available_at: context.source_effective_at,
-            origin: "gamma_sync".to_owned(),
-            content_hash: catalog_fixture_hash('3'),
-            payload: serde_json::to_value(&market_payload).expect("market payload"),
+            change_type: CatalogChangeType::GammaScanUpsert,
         }],
     }
 }
@@ -845,13 +876,10 @@ async fn seed_catalog_with_category(
     category: MarketCategory,
 ) {
     let context = CatalogSeedContext::new(window_start);
-    PgCatalogVersionRepository::new(
-        db.clone(),
-        GammaConfig::default().catalog_visibility_guard_secs,
-    )
-    .commit(durable_catalog_commit(&context, category))
-    .await
-    .expect("seed durable catalog");
+    PgCatalogLedgerRepository::new(db.clone())
+        .commit(durable_catalog_commit(&context, category))
+        .await
+        .expect("seed durable catalog");
 
     MarketEntity::update_many()
         .col_expr(
@@ -941,10 +969,7 @@ fn service_with_selection_and_linkage(
     TrainingDatasetService::new(
         TrainingDatasetServiceDeps {
             fact_read,
-            catalog_repo: Arc::new(PgCatalogVersionRepository::new(
-                db.clone(),
-                GammaConfig::default().catalog_visibility_guard_secs,
-            )),
+            catalog_repo: Arc::new(PgCatalogLedgerRepository::new(db.clone())),
             market_repo: Arc::new(PgMarketRepository::new(db.clone())),
             artifact_store: store,
             dataset_repo: Arc::new(PgTrainingDatasetRepository::new(db.clone())),
@@ -1626,10 +1651,7 @@ async fn dataset_builder_rejects_future_features() {
         leak_ms: 5_000,
         catalog: Arc::new(DurablePitSource::new(
             fact_read as Arc<dyn QuantFactReadRepository>,
-            Arc::new(PgCatalogVersionRepository::new(
-                db.clone(),
-                GammaConfig::default().catalog_visibility_guard_secs,
-            )),
+            Arc::new(PgCatalogLedgerRepository::new(db.clone())),
             Arc::new(PgClobMarketInfoRepository::new(db.clone())),
         )),
     };

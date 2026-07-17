@@ -1,7 +1,7 @@
 use crate::{
     postgres::{
         catalog::ingest::{find_existing_str_id_chunks, find_models_by_str_id_chunks},
-        error,
+        primitives,
         query::{non_empty, paginate_mapped},
         write::upsert_many_chunked,
     },
@@ -14,10 +14,10 @@ use quant_pivot_models::{
         ActiveModel as MarketActiveModel, Column as MarketColumn, Entity as MarketEntity,
     },
     enums::{
+        catalog::CatalogFilterReason,
         common::{MarketCategory, TickSize},
         market::MarketStatus,
     },
-    schema::column,
     types::{MarketId, TokenId},
 };
 use sea_orm::{
@@ -118,6 +118,7 @@ fn market_upsert_on_conflict() -> OnConflict {
             MarketColumn::EventId,
             MarketColumn::Question,
             MarketColumn::Slug,
+            MarketColumn::Description,
             MarketColumn::YesTokenId,
             MarketColumn::NoTokenId,
             MarketColumn::NegRisk,
@@ -125,19 +126,24 @@ fn market_upsert_on_conflict() -> OnConflict {
             MarketColumn::StartDate,
             MarketColumn::EndDate,
             MarketColumn::ResolvedAt,
+            MarketColumn::ContentHash,
         ])
         .values([
             (
                 MarketColumn::Categories,
-                column::pg_enum_array_excluded::<MarketCategory>(MarketColumn::Categories),
+                primitives::excluded_enum_array::<MarketCategory>(MarketColumn::Categories),
             ),
             (
                 MarketColumn::Status,
-                column::pg_enum_excluded::<MarketStatus>(MarketColumn::Status),
+                primitives::excluded_enum::<MarketStatus>(MarketColumn::Status),
+            ),
+            (
+                MarketColumn::FilterReasons,
+                primitives::excluded_enum_array::<CatalogFilterReason>(MarketColumn::FilterReasons),
             ),
             (
                 MarketColumn::TickSize,
-                column::pg_enum_excluded::<TickSize>(MarketColumn::TickSize),
+                primitives::excluded_enum::<TickSize>(MarketColumn::TickSize),
             ),
         ])
         .to_owned()
@@ -165,24 +171,21 @@ async fn do_upsert_batch(
 async fn do_update_status(
     db: &impl ConnectionTrait,
     id: &MarketId,
-    status: &str,
+    status: MarketStatus,
     outcome: Option<&str>,
 ) -> Result<(), StorageError> {
-    let status = match status {
-        "discovered" => MarketStatus::Discovered,
-        "active" => MarketStatus::Active,
-        "filtered" => MarketStatus::Filtered,
-        "paused" => MarketStatus::Paused,
-        "manually_blocked" => MarketStatus::ManuallyBlocked,
-        "settled" => MarketStatus::Settled,
-        "delisted" => MarketStatus::Delisted,
-        other => {
-            return Err(error::invariant_violation(
-                Some(entity::MARKET),
-                format!("invalid market status `{other}`"),
-            ));
-        }
-    };
+    let current = MarketEntity::find_by_id(id.clone())
+        .one(db)
+        .await
+        .map_err(StorageError::from)?
+        .ok_or_else(|| StorageError::not_found(entity::MARKET, id))?;
+    if status == MarketStatus::Active && !current.filter_reasons.is_empty() {
+        return Err(StorageError::state_conflict(
+            entity::MARKET,
+            Some(id),
+            "an upstream-filtered market cannot be activated until filter reasons clear",
+        ));
+    }
     let mut model = MarketActiveModel {
         market_id: ActiveValue::Set(id.clone()),
         status: ActiveValue::Set(status),
@@ -208,15 +211,13 @@ fn page_condition(query: &MarketPageQuery) -> Condition {
         );
 
     if query.category_unknown == Some(true) {
-        condition = condition.add(Expr::cust(
-            r#""market"."categories" = '{}'::qp_market_category[]"#,
-        ));
+        condition = condition.add(primitives::enum_array_is_empty::<MarketCategory>((
+            MarketEntity,
+            MarketColumn::Categories,
+        )));
     } else {
         condition = condition.add_option(query.category.map(|category| {
-            Expr::cust_with_values(
-                r#"$1::qp_market_category = ANY("market"."categories")"#,
-                vec![category],
-            )
+            primitives::enum_array_contains((MarketEntity, MarketColumn::Categories), &category)
         }));
     }
 
@@ -225,7 +226,7 @@ fn page_condition(query: &MarketPageQuery) -> Condition {
     {
         if want_subscribed {
             if tokens.is_empty() {
-                condition = condition.add(Expr::cust("1 = 0"));
+                condition = condition.add(Expr::value(false));
             } else {
                 let token_ids: Vec<TokenId> = tokens.iter().cloned().collect();
                 condition = condition
@@ -307,7 +308,7 @@ impl MarketRepository for PgMarketRepository {
     async fn update_status(
         &self,
         id: &MarketId,
-        status: &str,
+        status: MarketStatus,
         outcome: Option<&str>,
     ) -> Result<(), StorageError> {
         do_update_status(&self.db, id, status, outcome).await
@@ -351,7 +352,7 @@ impl MarketRepository for PgMarketRepositoryTxn<'_> {
     async fn update_status(
         &self,
         id: &MarketId,
-        status: &str,
+        status: MarketStatus,
         outcome: Option<&str>,
     ) -> Result<(), StorageError> {
         do_update_status(self.txn, id, status, outcome).await
@@ -387,7 +388,10 @@ mod tests {
 
         assert!(sql.contains(r#""market"."status" ="#));
         assert!(sql.contains(r#""market"."event_id" ="#));
-        assert!(sql.contains(r#"::qp_market_category = ANY("market"."categories")"#));
+        assert!(
+            sql.contains(r#"CAST('politics' AS qp_market_category) = ANY("market"."categories")"#),
+            "{sql}"
+        );
         assert!(sql.contains("ILIKE"));
         assert!(sql.contains("election"));
     }
@@ -447,7 +451,10 @@ mod tests {
             .build(DbBackend::Postgres)
             .to_string();
 
-        assert!(sql.contains(r#""market"."categories" = '{}'"#));
+        assert!(
+            sql.contains(r#""market"."categories" = CAST('{}' AS qp_market_category[])"#),
+            "{sql}"
+        );
     }
 
     #[test]
@@ -462,7 +469,7 @@ mod tests {
             .build(DbBackend::Postgres)
             .to_string();
 
-        assert!(sql.contains("1 = 0"));
+        assert!(sql.contains("WHERE FALSE"), "{sql}");
     }
 
     #[test]

@@ -20,7 +20,6 @@ use crate::{
         common::{OrderType, Side},
         quant::{ExitSettlementMode, RedeemPolicy},
     },
-    jsonb_active,
     types::{
         Bps, ContentHash, ModelVersionId, OpportunisticExitPolicy, Price, Probability,
         ResearchProfileRef, ScaleOutTarget, Shares, ThesisInvalidationPolicy, TokenId,
@@ -367,14 +366,6 @@ impl ScaleOutState {
         })
     }
 }
-
-jsonb_active!(
-    EntryOrderSpec,
-    ExitPolicySpec,
-    ExitReinferenceObservation,
-    PreparedVenueOrder,
-    ScaleOutState
-);
 
 #[cfg(test)]
 mod tests {

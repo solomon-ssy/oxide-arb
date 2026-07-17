@@ -7,19 +7,22 @@ use crate::{
         lifecycle::{MarketDataConnectivity, OperationalPhase, WsShardConnectivity},
         ports::runtime_control::CatalogState,
     },
-    entities::{runtime_config_activation, system_runtime_state},
+    entities::{runtime_config_activation, runtime_config_approval, system_runtime_state},
     enums::{
         execution::KillSwitchState,
         quant::QuantRuntimeMode,
-        runtime_config::{RuntimeConfigActivationKind, RuntimeConfigVersionSource},
-        system::ShutdownStage,
+        runtime_config::{
+            RuntimeConfigActivationKind, RuntimeConfigApprovalDecision, RuntimeConfigVersionSource,
+        },
+        system::{BootstrapPhase, ShutdownStage},
     },
     types::{
-        AuditEventId, ContentHash, RuntimeConfigActivationId, RuntimeConfigVersionId, SchemaVersion,
+        AuditEventId, BootstrapTransitionId, ContentHash, RuntimeConfigActivationId,
+        RuntimeConfigApprovalId, RuntimeConfigVersionId, SchemaVersion,
     },
 };
 use chrono::{DateTime, Utc};
-use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
 use serde::{Deserialize, Serialize};
 
 /// Overall system status reported by the health endpoint.
@@ -141,17 +144,17 @@ impl SystemStatus {
                 },
             },
             kill_switch: KillSwitchView {
-                state: KillSwitchState::Closed,
-                requires_operator_ack: false,
-                last_reason: "bootstrap".to_owned(),
+                state: KillSwitchState::ReportOnlyForced,
+                requires_operator_ack: true,
+                last_reason: "authoritative control state is not loaded".to_owned(),
                 changed_by: "system".to_owned(),
                 changed_at: Utc::now(),
             },
             execution_recovery: ExecutionRecoverySummary {
                 has_unresolvable_reconciliation: false,
                 unresolvable_count: 0,
-                kill_switch_requires_ack: false,
-                kill_switch_state: KillSwitchState::Closed,
+                kill_switch_requires_ack: true,
+                kill_switch_state: KillSwitchState::ReportOnlyForced,
                 quant_runtime_mode,
                 auto_execution_blocked: false,
                 next_steps: Vec::new(),
@@ -193,7 +196,7 @@ pub struct ShutdownProgress {
 // carries the persistence DTOs.
 
 /// DB row projection for the immutable `runtime_config_version` table.
-#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
+#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
 #[sea_orm(entity = "crate::entities::runtime_config_version::Entity")]
 pub struct RuntimeConfigVersionInfo {
     pub runtime_config_version_id: RuntimeConfigVersionId,
@@ -204,6 +207,51 @@ pub struct RuntimeConfigVersionInfo {
     pub created_by: String,
     pub reason: String,
     pub created_at: DateTime<Utc>,
+}
+
+/// Append-only approval decision bound to one exact config version and hash.
+#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
+#[sea_orm(entity = "crate::entities::runtime_config_approval::Entity")]
+pub struct RuntimeConfigApprovalInfo {
+    pub runtime_config_approval_id: RuntimeConfigApprovalId,
+    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub config_hash: ContentHash,
+    pub decision: RuntimeConfigApprovalDecision,
+    pub decided_by: String,
+    pub reason: String,
+    pub decided_at: DateTime<Utc>,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+}
+
+info_from_model!(
+    RuntimeConfigApprovalInfo,
+    runtime_config_approval::Model,
+    {
+        runtime_config_approval_id,
+        runtime_config_version_id,
+        config_hash,
+        decision,
+        decided_by,
+        reason,
+        decided_at,
+        expires_at,
+        created_at,
+    }
+);
+
+/// Insert payload for a WORM runtime-config approval decision.
+#[derive(Debug, Clone, DeriveIntoActiveModel)]
+#[sea_orm(active_model = "crate::entities::runtime_config_approval::ActiveModel")]
+pub struct NewRuntimeConfigApproval {
+    pub runtime_config_approval_id: RuntimeConfigApprovalId,
+    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub config_hash: ContentHash,
+    pub decision: RuntimeConfigApprovalDecision,
+    pub decided_by: String,
+    pub reason: String,
+    pub decided_at: DateTime<Utc>,
+    pub expires_at: Option<DateTime<Utc>>,
 }
 
 info_from_model!(RuntimeConfigVersionInfo, crate::entities::runtime_config_version::Model, {
@@ -225,11 +273,12 @@ pub struct NewRuntimeConfigVersion {
 }
 
 /// DB row projection for append-only runtime config activation history.
-#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
+#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
 #[sea_orm(entity = "crate::entities::runtime_config_activation::Entity")]
 pub struct RuntimeConfigActivationInfo {
     pub runtime_config_activation_id: RuntimeConfigActivationId,
     pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub runtime_config_approval_id: Option<RuntimeConfigApprovalId>,
     pub activated_at: DateTime<Utc>,
     pub activated_by: String,
     pub reason: String,
@@ -246,6 +295,7 @@ info_from_model!(
     {
         runtime_config_activation_id,
         runtime_config_version_id,
+        runtime_config_approval_id,
         activated_at,
         activated_by,
         reason,
@@ -263,7 +313,7 @@ info_from_model!(
 pub struct NewRuntimeConfigActivation {
     pub runtime_config_activation_id: RuntimeConfigActivationId,
     pub runtime_config_version_id: RuntimeConfigVersionId,
-    pub activated_at: DateTime<Utc>,
+    pub runtime_config_approval_id: Option<RuntimeConfigApprovalId>,
     pub activated_by: String,
     pub reason: String,
     pub activation_kind: RuntimeConfigActivationKind,
@@ -275,11 +325,14 @@ pub struct NewRuntimeConfigActivation {
 // ── System runtime state (operational control singleton) ─────────────
 
 /// DB row projection for the `system_runtime_state` singleton.
-#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
+#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
 #[sea_orm(entity = "crate::entities::system_runtime_state::Entity")]
 pub struct SystemRuntimeStateInfo {
     pub id: i32,
     pub quant_runtime_mode: QuantRuntimeMode,
+    pub bootstrap_phase: BootstrapPhase,
+    pub bootstrap_contract_version: i32,
+    pub state_revision: i64,
     pub changed_by: String,
     pub reason: String,
     pub changed_at: DateTime<Utc>,
@@ -292,6 +345,9 @@ info_from_model!(
     {
         id,
         quant_runtime_mode,
+        bootstrap_phase,
+        bootstrap_contract_version,
+        state_revision,
         changed_by,
         reason,
         changed_at,
@@ -305,7 +361,51 @@ info_from_model!(
 pub struct UpsertSystemRuntimeState {
     pub id: i32,
     pub quant_runtime_mode: QuantRuntimeMode,
+    pub bootstrap_phase: BootstrapPhase,
+    pub bootstrap_contract_version: i32,
+    pub state_revision: i64,
     pub changed_by: String,
     pub reason: String,
     pub changed_at: DateTime<Utc>,
+}
+
+/// Append-only bootstrap transition insert payload.
+#[derive(Debug, Clone, DeriveIntoActiveModel)]
+#[sea_orm(
+    active_model = "crate::entities::system_bootstrap_transition::ActiveModel",
+    exhaustive
+)]
+pub struct NewSystemBootstrapTransition {
+    pub bootstrap_transition_id: BootstrapTransitionId,
+    pub bootstrap_contract_version: i32,
+    pub state_revision: i64,
+    pub from_phase: BootstrapPhase,
+    pub to_phase: BootstrapPhase,
+    pub runtime_config_version_id: Option<RuntimeConfigVersionId>,
+    pub runtime_config_approval_id: Option<RuntimeConfigApprovalId>,
+    pub actor: String,
+    pub acting_role: Option<String>,
+    pub reason: String,
+    pub report_only_forced_ack: bool,
+    pub occurred_at: DateTime<Utc>,
+}
+
+/// Repository command for the one permitted operator activation transition.
+#[derive(Debug, Clone)]
+pub struct ActivateBootstrapState {
+    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub runtime_config_approval_id: RuntimeConfigApprovalId,
+    pub bootstrap_contract_version: i32,
+    pub expected_state_revision: i64,
+    pub actor: String,
+    pub acting_role: String,
+    pub reason: String,
+    pub report_only_forced_ack: bool,
+    pub require_approver_activator_separation: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct BootstrapActivationInfo {
+    pub state: SystemRuntimeStateInfo,
+    pub runtime_config: RuntimeConfigVersionInfo,
 }

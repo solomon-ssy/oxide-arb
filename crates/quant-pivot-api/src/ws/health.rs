@@ -101,6 +101,14 @@ impl TokenFreshnessBoard {
         self.tokens.write().remove(token_id);
     }
 
+    /// Remove a session's token freshness under one lock acquisition.
+    pub fn invalidate_tokens(&self, token_ids: &[TokenId]) {
+        let mut tokens = self.tokens.write();
+        for token_id in token_ids {
+            tokens.remove(token_id);
+        }
+    }
+
     /// Milliseconds since the last WS event for a token.
     #[must_use]
     pub fn token_age_ms(&self, token_id: &TokenId) -> Option<u64> {

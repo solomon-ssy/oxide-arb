@@ -3,10 +3,8 @@
 use crate::{
     entities::role,
     enums::rbac::{RoleKind, RoleStatus},
-    idens::role::role_table_name,
-    schema::seed::{SeedArtifact, SeedDependency, SeedSpec},
     seed::{
-        SeedConflictPolicy, SeedContext,
+        SeedArtifact, SeedConflictPolicy, SeedContext, SeedDependency, SeedSpec,
         rbac::{
             ROLE_ADMIN, ROLE_ANALYST, ROLE_EMERGENCY_OPERATOR, ROLE_OPERATOR, ROLE_RISK_OWNER,
             ROLE_SUPER_ADMIN, ROLE_VIEWER, ROLES_ARTIFACT, RoleIdMap,
@@ -15,7 +13,7 @@ use crate::{
     types::RoleId,
 };
 use sea_orm::{
-    ActiveValue::Set, ConnectionTrait, DbErr, EntityTrait, QueryTrait, sea_query::OnConflict,
+    ActiveValue::Set, ColumnTrait, DbErr, EntityTrait, QueryFilter, sea_query::OnConflict,
 };
 use std::{future::Future, pin::Pin};
 
@@ -68,21 +66,20 @@ const BUILTIN_ROLES: &[(&str, &str, &str, i32)] = &[
 pub const ROLES_SEED: SeedSpec = SeedSpec {
     id: SEED_ID,
     version: 1,
-    target_table: role_table_name,
+    target_table: "role",
     depends_on: DEPENDS_ON,
     produces: PRODUCES,
     conflict_policy: SeedConflictPolicy::GraphOrdered,
     checksum: "rbac.roles.bootstrap.v1",
-    loader: load_boxed,
+    apply: load_boxed,
+    hydrate: hydrate_boxed,
 };
 
 /// Insert built-in roles and publish the `code -> RoleId` map to the context.
-pub async fn load(db: &dyn ConnectionTrait, ctx: &mut SeedContext) -> Result<u64, DbErr> {
-    let mut id_map = RoleIdMap::new();
+pub async fn load(db: &sea_orm::DatabaseTransaction, ctx: &mut SeedContext) -> Result<u64, DbErr> {
     let mut models = Vec::with_capacity(BUILTIN_ROLES.len());
     for (code, name, description, sort) in BUILTIN_ROLES {
         let id = RoleId::from_v7();
-        id_map.insert(*code, id.clone());
         models.push(role::ActiveModel {
             id: Set(id),
             code: Set((*code).to_owned()),
@@ -95,23 +92,68 @@ pub async fn load(db: &dyn ConnectionTrait, ctx: &mut SeedContext) -> Result<u64
         });
     }
 
-    let backend = db.get_database_backend();
-    let stmt = role::Entity::insert_many(models)
+    let rows_affected = role::Entity::insert_many(models)
         .on_conflict(
             OnConflict::column(role::Column::Code)
                 .do_nothing()
                 .to_owned(),
         )
-        .build(backend);
-    let result = db.execute(stmt).await?;
+        .exec_without_returning(db)
+        .await?;
 
+    let _ = ctx;
+    Ok(rows_affected)
+}
+
+async fn hydrate(db: &sea_orm::DatabaseTransaction, ctx: &mut SeedContext) -> Result<(), DbErr> {
+    let codes = BUILTIN_ROLES
+        .iter()
+        .map(|(code, _, _, _)| *code)
+        .collect::<Vec<_>>();
+    let rows = role::Entity::find()
+        .filter(role::Column::Code.is_in(codes))
+        .all(db)
+        .await?;
+    if rows.len() != BUILTIN_ROLES.len() {
+        return Err(DbErr::Custom(format!(
+            "built-in role seed expected {} rows; found {}",
+            BUILTIN_ROLES.len(),
+            rows.len()
+        )));
+    }
+
+    let mut id_map = RoleIdMap::new();
+    for (code, name, description, sort) in BUILTIN_ROLES {
+        let row = rows
+            .iter()
+            .find(|row| row.code == *code)
+            .ok_or_else(|| DbErr::Custom(format!("built-in role `{code}` is missing")))?;
+        if row.name != *name
+            || row.description.as_deref() != Some(*description)
+            || row.kind != RoleKind::Builtin
+            || row.status != RoleStatus::Enabled
+            || row.sort != *sort
+        {
+            return Err(DbErr::Custom(format!(
+                "built-in role `{code}` differs from seed contract"
+            )));
+        }
+        id_map.insert(*code, row.id.clone());
+    }
     ctx.put(ROLES_ARTIFACT, id_map);
-    Ok(result.rows_affected())
+    Ok(())
 }
 
 fn load_boxed<'a>(
-    db: &'a dyn ConnectionTrait,
+    db: &'a sea_orm::DatabaseTransaction,
     ctx: &'a mut SeedContext,
 ) -> Pin<Box<dyn Future<Output = Result<u64, DbErr>> + Send + 'a>> {
     Box::pin(load(db, ctx))
+}
+
+fn hydrate_boxed<'a>(
+    db: &'a sea_orm::DatabaseTransaction,
+    ctx: &'a mut SeedContext,
+) -> Pin<Box<dyn Future<Output = Result<(), DbErr>> + Send + 'a>> {
+    Box::pin(hydrate(db, ctx))
 }

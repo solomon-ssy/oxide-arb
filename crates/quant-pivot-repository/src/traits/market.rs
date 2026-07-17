@@ -1,11 +1,12 @@
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{
-        CatalogBatchChainInfo, CatalogCommit, CatalogSnapshotInfo, CatalogSyncBatchInfo,
-        CatalogWindowInfo, DecisionBoundary, EventCatalogVersionInfo, MarketCatalogVersionInfo,
-        MarketInfo, MarketPageQuery, NewFailedCatalogSyncBatch, Paginated, UpsertMarket,
+        CatalogBatchChainInfo, CatalogBatchCommit, CatalogBatchFailure, CatalogEventChangeInfo,
+        CatalogMarketChangeInfo, CatalogSnapshotInfo, CatalogSyncBatchInfo, CatalogWindowInfo,
+        DecisionBoundary, MarketInfo, MarketPageQuery, Paginated, UpsertMarket,
     },
-    types::{ClobMarketInfoVersion, EventId, MarketId},
+    enums::market::MarketStatus,
+    types::{ClobMarketInfoVersion, EventId, HistoryCoverage, MarketId},
 };
 use std::{collections::HashSet, sync::Arc};
 
@@ -22,7 +23,7 @@ pub trait MarketRepository: Send + Sync {
     async fn update_status(
         &self,
         id: &MarketId,
-        status: &str,
+        status: MarketStatus,
         outcome: Option<&str>,
     ) -> Result<(), StorageError>;
 }
@@ -30,6 +31,17 @@ pub trait MarketRepository: Send + Sync {
 /// Append-only bitemporal authority for CLOB market parameters and fees.
 #[async_trait::async_trait]
 pub trait ClobMarketInfoRepository: Send + Sync {
+    /// Retention coverage of the append-only bitemporal source.
+    async fn research_history_coverage(
+        &self,
+        _as_of: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<HistoryCoverage>, StorageError> {
+        Err(StorageError::invariant_violation(
+            Some("clob_market_info_version"),
+            "repository does not implement research history coverage",
+        ))
+    }
+
     async fn insert_observation(
         &self,
         observation: ClobMarketInfoVersion,
@@ -75,13 +87,27 @@ pub trait ClobMarketInfoRepository: Send + Sync {
 /// Historical/replay callers must use this repository instead of the mutable
 /// `market` / `event` projections.
 #[async_trait::async_trait]
-pub trait CatalogVersionRepository: Send + Sync {
-    async fn commit(&self, commit: CatalogCommit) -> Result<CatalogSyncBatchInfo, StorageError>;
+pub trait CatalogLedgerRepository: Send + Sync {
+    /// Retention coverage for both event and market change ledgers.
+    async fn research_history_coverage(
+        &self,
+        _as_of: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<HistoryCoverage>, StorageError> {
+        Err(StorageError::invariant_violation(
+            Some("catalog_sync_batch"),
+            "repository does not implement research history coverage",
+        ))
+    }
+
+    async fn commit(
+        &self,
+        commit: CatalogBatchCommit,
+    ) -> Result<CatalogSyncBatchInfo, StorageError>;
 
     /// Persist a terminal failure for an attempt that never reached a durable commit.
     async fn record_failure(
         &self,
-        failure: NewFailedCatalogSyncBatch,
+        failure: CatalogBatchFailure,
     ) -> Result<CatalogSyncBatchInfo, StorageError>;
 
     async fn coverage_start(&self) -> Result<Option<chrono::DateTime<chrono::Utc>>, StorageError>;
@@ -105,25 +131,25 @@ pub trait CatalogVersionRepository: Send + Sync {
         &self,
         market_id: &MarketId,
         boundary: &DecisionBoundary,
-    ) -> Result<Option<MarketCatalogVersionInfo>, StorageError>;
+    ) -> Result<Option<CatalogMarketChangeInfo>, StorageError>;
 
     async fn markets_at(
         &self,
         market_ids: &[MarketId],
         boundary: &DecisionBoundary,
-    ) -> Result<Vec<MarketCatalogVersionInfo>, StorageError>;
+    ) -> Result<Vec<CatalogMarketChangeInfo>, StorageError>;
 
     async fn event_at(
         &self,
         event_id: &EventId,
         boundary: &DecisionBoundary,
-    ) -> Result<Option<EventCatalogVersionInfo>, StorageError>;
+    ) -> Result<Option<CatalogEventChangeInfo>, StorageError>;
 
     async fn event_markets_at(
         &self,
         event_id: &EventId,
         boundary: &DecisionBoundary,
-    ) -> Result<Vec<MarketCatalogVersionInfo>, StorageError>;
+    ) -> Result<Vec<CatalogMarketChangeInfo>, StorageError>;
 
     /// Resolve market metadata, its exact event revision, and visible event
     /// membership from one repeatable-read database snapshot.

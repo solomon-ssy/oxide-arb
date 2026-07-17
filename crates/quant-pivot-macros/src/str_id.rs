@@ -143,21 +143,21 @@ fn expand_seaorm(
         impl #impl_generics From<#name #ty_generics> for sea_orm::sea_query::Value #where_clause {
             #[inline]
             fn from(id: #name #ty_generics) -> Self {
-                sea_orm::sea_query::Value::String(Some(Box::new(id.as_str().to_owned())))
+                sea_orm::sea_query::Value::String(Some(id.as_str().to_owned()))
             }
         }
 
         impl #impl_generics From<&#name #ty_generics> for sea_orm::sea_query::Value #where_clause {
             #[inline]
             fn from(id: &#name #ty_generics) -> Self {
-                sea_orm::sea_query::Value::String(Some(Box::new(id.as_str().to_owned())))
+                sea_orm::sea_query::Value::String(Some(id.as_str().to_owned()))
             }
         }
 
         impl #impl_generics sea_orm::sea_query::ValueType for #name #ty_generics #where_clause {
             fn try_from(v: sea_orm::sea_query::Value) -> ::std::result::Result<Self, sea_orm::sea_query::ValueTypeErr> {
                 match v {
-                    sea_orm::sea_query::Value::String(Some(s)) => Ok(Self::from(*s)),
+                    sea_orm::sea_query::Value::String(Some(s)) => Ok(Self::from(s)),
                     _ => Err(sea_orm::sea_query::ValueTypeErr),
                 }
             }

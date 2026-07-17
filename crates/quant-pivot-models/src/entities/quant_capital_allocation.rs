@@ -7,6 +7,7 @@ use crate::{
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
+#[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "quant_capital_allocation")]
 pub struct Model {
@@ -24,34 +25,21 @@ pub struct Model {
     pub reason: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
-}
 
-#[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-pub enum Relation {
     #[sea_orm(
-        belongs_to = "super::quant_order_intent::Entity",
-        from = "Column::OrderIntentId",
-        to = "super::quant_order_intent::Column::OrderIntentId"
+        belongs_to,
+        relation_enum = "OrderIntent",
+        from = "order_intent_id",
+        to = "order_intent_id"
     )]
-    OrderIntent,
+    pub order_intent: BelongsTo<super::quant_order_intent::Entity>,
     #[sea_orm(
-        belongs_to = "super::quant_recommendation::Entity",
-        from = "Column::RecommendationId",
-        to = "super::quant_recommendation::Column::RecommendationId"
+        belongs_to,
+        relation_enum = "Recommendation",
+        from = "recommendation_id",
+        to = "recommendation_id"
     )]
-    Recommendation,
-}
-
-impl Related<super::quant_order_intent::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::OrderIntent.def()
-    }
-}
-
-impl Related<super::quant_recommendation::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::Recommendation.def()
-    }
+    pub recommendation: BelongsTo<super::quant_recommendation::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

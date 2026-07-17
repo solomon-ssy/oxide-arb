@@ -90,6 +90,7 @@ pub struct MetricsHub {
     pub book_snapshots_applied: IntCounter,
     pub price_changes_applied: IntCounter,
     pub ws_session_backpressure_invalidations: IntCounter,
+    pub book_apply_backpressure_invalidations: IntCounter,
     pub markets_resolved_ws: IntCounter,
     pub shard_status_changes: IntCounter,
     pub ws_shard_connected: IntGaugeVec,
@@ -99,6 +100,7 @@ pub struct MetricsHub {
     pub gamma_sync_duration_ms: IntGauge,
     pub gamma_markets_total: IntGauge,
     pub gamma_last_sync_success: IntGauge,
+    pub gamma_markets_filtered: IntCounterVec,
     pub gamma_markets_rejected: IntCounterVec,
     pub gamma_markets_paused: IntCounterVec,
     pub catalog_ready: IntGauge,
@@ -189,6 +191,7 @@ struct PipelineMetrics {
     book_snapshots_applied: IntCounter,
     price_changes_applied: IntCounter,
     ws_session_backpressure_invalidations: IntCounter,
+    book_apply_backpressure_invalidations: IntCounter,
     markets_resolved_ws: IntCounter,
     shard_status_changes: IntCounter,
     ws_shard_connected: IntGaugeVec,
@@ -199,6 +202,7 @@ struct GammaMetrics {
     gamma_sync_duration_ms: IntGauge,
     gamma_markets_total: IntGauge,
     gamma_last_sync_success: IntGauge,
+    gamma_markets_filtered: IntCounterVec,
     gamma_markets_rejected: IntCounterVec,
     gamma_markets_paused: IntCounterVec,
     catalog_ready: IntGauge,
@@ -281,6 +285,11 @@ fn register_pipeline_metrics(registry: &Registry) -> PipelineMetrics {
             "quant_pivot_ws_session_backpressure_invalidations_total",
             "WebSocket sessions invalidated after bounded output enqueue timeout"
         ),
+        book_apply_backpressure_invalidations: register_counter!(
+            registry,
+            "quant_pivot_book_apply_backpressure_invalidations_total",
+            "Tokens invalidated after bounded book-apply queue timeout"
+        ),
         markets_resolved_ws: register_counter!(
             registry,
             "quant_pivot_pipeline_markets_resolved_ws_total",
@@ -321,6 +330,12 @@ fn register_gamma_metrics(registry: &Registry) -> GammaMetrics {
             registry,
             "quant_pivot_gamma_last_sync_success",
             "1 when the last Gamma sync succeeded, 0 otherwise"
+        ),
+        gamma_markets_filtered: register_counter_vec!(
+            registry,
+            "quant_pivot_gamma_markets_filtered_total",
+            "Legitimate Gamma pre-listing objects excluded from the canonical market projection",
+            &["reason"]
         ),
         gamma_markets_rejected: register_counter_vec!(
             registry,
@@ -629,6 +644,7 @@ impl MetricsHub {
             book_snapshots_applied: pipeline.book_snapshots_applied,
             price_changes_applied: pipeline.price_changes_applied,
             ws_session_backpressure_invalidations: pipeline.ws_session_backpressure_invalidations,
+            book_apply_backpressure_invalidations: pipeline.book_apply_backpressure_invalidations,
             markets_resolved_ws: pipeline.markets_resolved_ws,
             shard_status_changes: pipeline.shard_status_changes,
             ws_shard_connected: pipeline.ws_shard_connected,
@@ -636,6 +652,7 @@ impl MetricsHub {
             gamma_sync_duration_ms: gamma.gamma_sync_duration_ms,
             gamma_markets_total: gamma.gamma_markets_total,
             gamma_last_sync_success: gamma.gamma_last_sync_success,
+            gamma_markets_filtered: gamma.gamma_markets_filtered,
             gamma_markets_rejected: gamma.gamma_markets_rejected,
             gamma_markets_paused: gamma.gamma_markets_paused,
             catalog_ready: gamma.catalog_ready,

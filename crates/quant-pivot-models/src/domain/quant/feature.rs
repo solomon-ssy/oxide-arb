@@ -6,11 +6,11 @@ use crate::{
     types::{ContentHash, FeatureVectorId, MarketId, SchemaVersion, TokenId},
 };
 use chrono::{DateTime, Utc};
-use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
 use serde::{Deserialize, Serialize};
 
 /// Persisted point-in-time feature vector metadata.
-#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
+#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
 #[sea_orm(entity = "crate::entities::quant_feature_vector::Entity")]
 pub struct FeatureVectorInfo {
     pub feature_vector_id: FeatureVectorId,

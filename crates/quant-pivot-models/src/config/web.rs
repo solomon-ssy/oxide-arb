@@ -1,15 +1,15 @@
 //! Web server + JWT configuration (`[web]` / `[web.jwt]`).
 //!
 //! Mounted at [`DeployConfig::web`](crate::config::DeployConfig). The JWT
-//! secret must be provided via environment (`QUANT_PIVOT__WEB__JWT__SECRET`) in
-//! production; an empty or placeholder secret is fatal in order-submitting modes (see
-//! `config::validation`).
+//! signing private key is mounted from the deployment secret manager; public
+//! verification keys remain in a rotation keyring so existing sessions survive
+//! an intentional signer rotation.
 
 use serde::Deserialize;
 
-/// Known-insecure placeholder secret shipped in the example TOML. Order-submitting modes
-/// reject this value so a real secret must be supplied via env.
-pub const JWT_SECRET_PLACEHOLDER: &str = "change-me-in-production";
+const DEFAULT_JWT_KEY_ID: &str = "local-dev-2026-01";
+const DEFAULT_JWT_PRIVATE_KEY_FILE: &str = "var/secrets/jwt/ed25519-private.pem";
+const DEFAULT_JWT_PUBLIC_KEY_FILE: &str = "var/secrets/jwt/ed25519-public.pem";
 
 /// HTTP/WebSocket server configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -43,21 +43,31 @@ impl Default for WebConfig {
 }
 
 impl WebConfig {
-    /// Whether the configured JWT secret is unusable for production (empty,
-    /// whitespace, or the shipped placeholder).
+    /// Whether the Ed25519 signer and verification keyring are structurally complete.
     #[must_use]
-    pub fn jwt_secret_is_weak(&self) -> bool {
-        let secret = self.jwt.secret.trim();
-        secret.is_empty() || secret == JWT_SECRET_PLACEHOLDER
+    pub fn jwt_keyring_is_configured(&self) -> bool {
+        self.jwt.keyring_is_configured()
     }
+}
+
+/// One public Ed25519 verification key retained for JWT rotation.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JwtVerificationKeyConfig {
+    pub key_id: String,
+    pub public_key_file: String,
 }
 
 /// JWT access/refresh token configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct JwtConfig {
-    /// HMAC signing secret. Env-only in production: `QUANT_PIVOT__WEB__JWT__SECRET`.
-    pub secret: String,
+    /// `kid` emitted on newly signed access and refresh tokens.
+    pub signing_key_id: String,
+    /// PKCS#8 Ed25519 private PEM mounted by the deployment secret manager.
+    pub signing_private_key_file: String,
+    /// Public keys accepted during verification, including the active signer.
+    pub verification_keys: Vec<JwtVerificationKeyConfig>,
     /// Token issuer claim (default `quant-pivot`).
     pub issuer: String,
     /// Access-token lifetime in seconds (default 900 = 15m).
@@ -69,11 +79,29 @@ pub struct JwtConfig {
 impl Default for JwtConfig {
     fn default() -> Self {
         Self {
-            secret: String::new(),
+            signing_key_id: DEFAULT_JWT_KEY_ID.to_owned(),
+            signing_private_key_file: DEFAULT_JWT_PRIVATE_KEY_FILE.to_owned(),
+            verification_keys: vec![JwtVerificationKeyConfig {
+                key_id: DEFAULT_JWT_KEY_ID.to_owned(),
+                public_key_file: DEFAULT_JWT_PUBLIC_KEY_FILE.to_owned(),
+            }],
             issuer: default_issuer(),
             access_ttl_secs: default_access_ttl(),
             refresh_ttl_secs: default_refresh_ttl(),
         }
+    }
+}
+
+impl JwtConfig {
+    #[must_use]
+    pub fn keyring_is_configured(&self) -> bool {
+        let signing_key_id = self.signing_key_id.trim();
+        !signing_key_id.is_empty()
+            && !self.signing_private_key_file.trim().is_empty()
+            && self
+                .verification_keys
+                .iter()
+                .any(|key| key.key_id == signing_key_id && !key.public_key_file.trim().is_empty())
     }
 }
 
@@ -103,7 +131,7 @@ const fn default_refresh_ttl() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{JWT_SECRET_PLACEHOLDER, WebConfig};
+    use super::WebConfig;
 
     #[test]
     fn defaults_are_sensible() {
@@ -120,30 +148,28 @@ mod tests {
     fn empty_section_deserializes_to_defaults() {
         let cfg: WebConfig = serde_json::from_str("{}").expect("empty [web] is valid");
         assert_eq!(cfg.listen_port, 8080);
-        assert!(cfg.jwt.secret.is_empty());
+        assert!(cfg.jwt_keyring_is_configured());
     }
 
     #[test]
     fn nested_jwt_section_deserializes() {
         let cfg: WebConfig = serde_json::from_str(
-            r#"{ "listen_port": 9090, "jwt": { "secret": "s3cret", "access_ttl_secs": 60 } }"#,
+            r#"{ "listen_port": 9090, "jwt": { "signing_key_id": "next", "signing_private_key_file": "/run/secrets/next.pem", "verification_keys": [{ "key_id": "next", "public_key_file": "/etc/quant-pivot/next.pub.pem" }], "access_ttl_secs": 60 } }"#,
         )
         .expect("valid web config");
         assert_eq!(cfg.listen_port, 9090);
-        assert_eq!(cfg.jwt.secret, "s3cret");
+        assert_eq!(cfg.jwt.signing_key_id, "next");
         assert_eq!(cfg.jwt.access_ttl_secs, 60);
         assert_eq!(cfg.jwt.refresh_ttl_secs, 604_800);
     }
 
     #[test]
-    fn weak_secret_detection() {
+    fn incomplete_keyring_detection() {
         let mut cfg = WebConfig::default();
-        assert!(cfg.jwt_secret_is_weak(), "empty secret is weak");
-        cfg.jwt.secret = JWT_SECRET_PLACEHOLDER.to_owned();
-        assert!(cfg.jwt_secret_is_weak(), "placeholder secret is weak");
-        cfg.jwt.secret = "  ".to_owned();
-        assert!(cfg.jwt_secret_is_weak(), "whitespace secret is weak");
-        cfg.jwt.secret = "a-real-strong-secret".to_owned();
-        assert!(!cfg.jwt_secret_is_weak());
+        assert!(cfg.jwt_keyring_is_configured());
+        cfg.jwt.signing_key_id = "missing".to_owned();
+        assert!(!cfg.jwt_keyring_is_configured());
+        cfg.jwt.verification_keys.clear();
+        assert!(!cfg.jwt_keyring_is_configured());
     }
 }

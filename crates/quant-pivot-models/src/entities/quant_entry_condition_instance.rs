@@ -12,6 +12,7 @@ use crate::{
     },
 };
 
+#[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "quant_entry_condition_instance")]
 pub struct Model {
@@ -41,50 +42,25 @@ pub struct Model {
     pub consumed_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
-}
 
-#[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-pub enum Relation {
     #[sea_orm(
-        belongs_to = "super::quant_recommendation::Entity",
-        from = "Column::RecommendationId",
-        to = "super::quant_recommendation::Column::RecommendationId"
+        belongs_to,
+        relation_enum = "Recommendation",
+        from = "recommendation_id",
+        to = "recommendation_id"
     )]
-    Recommendation,
+    pub recommendation: BelongsTo<super::quant_recommendation::Entity>,
     #[sea_orm(
-        belongs_to = "super::quant_entry_condition_artifact::Entity",
-        from = "Column::ArtifactId",
-        to = "super::quant_entry_condition_artifact::Column::ArtifactId"
+        belongs_to,
+        relation_enum = "Artifact",
+        from = "artifact_id",
+        to = "artifact_id"
     )]
-    Artifact,
-    #[sea_orm(has_many = "super::quant_entry_condition_audit::Entity")]
-    Audit,
-    #[sea_orm(has_many = "super::quant_order_intent::Entity")]
-    OrderIntent,
-}
-
-impl Related<super::quant_recommendation::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::Recommendation.def()
-    }
-}
-
-impl Related<super::quant_entry_condition_artifact::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::Artifact.def()
-    }
-}
-
-impl Related<super::quant_entry_condition_audit::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::Audit.def()
-    }
-}
-
-impl Related<super::quant_order_intent::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::OrderIntent.def()
-    }
+    pub artifact: BelongsTo<Option<super::quant_entry_condition_artifact::Entity>>,
+    #[sea_orm(has_many, relation_enum = "Audit")]
+    pub audit: HasMany<super::quant_entry_condition_audit::Entity>,
+    #[sea_orm(has_many, relation_enum = "OrderIntent")]
+    pub order_intent: HasMany<super::quant_order_intent::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

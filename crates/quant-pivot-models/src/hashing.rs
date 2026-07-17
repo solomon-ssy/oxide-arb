@@ -32,18 +32,25 @@ impl CanonicalDigest {
         digest
     }
 
-    /// Prefixed `blake3:<hex>` digest over the canonical JSON of `value`.
+    /// Prefixed `blake3:<hex>` digest over RFC 8785 JCS bytes.
     ///
-    /// Determinism note: callers that need order-independent digests (e.g. sets
-    /// of IDs) must sort the relevant fields before serialization; this helper
-    /// hashes the serialized bytes verbatim.
+    /// Arrays retain their business ordering. Callers hashing mathematical sets
+    /// must still sort their elements before invoking this primitive.
     pub fn blake3_json<T>(value: &T) -> Result<String, CanonicalDigestError>
     where
         T: Serialize + ?Sized,
     {
-        let bytes = serde_json::to_vec(value)
-            .map_err(|error| CanonicalDigestError::Serialize(error.to_string()))?;
+        let bytes = Self::canonical_json_bytes(value)?;
         Ok(Self::prefixed_bytes(&bytes))
+    }
+
+    /// Serialize `value` using RFC 8785 JSON Canonicalization Scheme semantics.
+    pub fn canonical_json_bytes<T>(value: &T) -> Result<Vec<u8>, CanonicalDigestError>
+    where
+        T: Serialize + ?Sized,
+    {
+        serde_json_canonicalizer::to_vec(&value)
+            .map_err(|error| CanonicalDigestError::Serialize(error.to_string()))
     }
 
     /// Typed `blake3:<hex>` digest over the canonical JSON of `value`.
@@ -57,6 +64,36 @@ impl CanonicalDigest {
         T: Serialize + ?Sized,
     {
         ContentHash::parse(Self::blake3_json(value)?)
+    }
+
+    /// RFC 8785 canonical, domain-separated content identifier.
+    ///
+    /// The NUL delimiter makes the domain prefix unambiguous. `schema_version`
+    /// is part of the hashed typed envelope, so incompatible payload schemas
+    /// cannot accidentally share an identifier.
+    pub fn content_hash_typed<T>(
+        domain_separator: &str,
+        schema_version: u32,
+        value: &T,
+    ) -> Result<ContentHash, CanonicalDigestError>
+    where
+        T: Serialize + ?Sized,
+    {
+        #[derive(Serialize)]
+        struct TypedEnvelope<'a, T: ?Sized> {
+            schema_version: u32,
+            payload: &'a T,
+        }
+
+        let canonical = Self::canonical_json_bytes(&TypedEnvelope {
+            schema_version,
+            payload: value,
+        })?;
+        let mut input = Vec::with_capacity(domain_separator.len() + 1 + canonical.len());
+        input.extend_from_slice(domain_separator.as_bytes());
+        input.push(0);
+        input.extend_from_slice(&canonical);
+        ContentHash::parse(Self::prefixed_bytes(&input))
     }
 }
 
@@ -110,5 +147,30 @@ mod tests {
         let hex = CanonicalDigest::raw_hex(b"abc");
         assert!(!hex.starts_with(BLAKE3_PREFIX));
         assert_eq!(hex.len(), 64);
+    }
+
+    #[test]
+    fn typed_digest_is_key_order_independent_and_domain_separated() {
+        let left = serde_json::json!({"z": 1, "a": 2});
+        let right = serde_json::json!({"a": 2, "z": 1});
+        let left_hash =
+            CanonicalDigest::content_hash_typed("catalog.event", 1, &left).expect("left digest");
+        let right_hash =
+            CanonicalDigest::content_hash_typed("catalog.event", 1, &right).expect("right digest");
+        assert_eq!(left_hash, right_hash);
+        assert_ne!(
+            left_hash,
+            CanonicalDigest::content_hash_typed("catalog.market", 1, &right).expect("other domain")
+        );
+    }
+
+    #[test]
+    fn untyped_digest_is_key_order_independent() {
+        let left = serde_json::json!({"z": 1, "a": 2});
+        let right = serde_json::json!({"a": 2, "z": 1});
+        assert_eq!(
+            CanonicalDigest::content_hash_json(&left).expect("left digest"),
+            CanonicalDigest::content_hash_json(&right).expect("right digest")
+        );
     }
 }

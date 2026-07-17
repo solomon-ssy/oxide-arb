@@ -42,14 +42,14 @@ use quant_pivot_models::{
     runtime_config::{QualityGateConfig, sections::ResearchValidationGatesConfig},
     types::{
         AuditEventId, BacktestReportId, CalibrationArtifactId, ContentHash, FeatureParityRunId,
-        FeatureParityStateId, ModelGovernanceAuditId, ModelVersionId, Probability,
+        ModelGovernanceAuditId, ModelVersionId, Probability,
     },
 };
 use quant_pivot_repository::traits::{
     BacktestPathSetRepository, BacktestReportRepository, CalibrationArtifactRepository,
-    CompensateRollbackModelVersionCommit, ModelGovernanceAuditRepository, ModelRegistryRepository,
-    RollbackModelVersionCommit, RuntimeConfigVersionRepository, ShadowComparisonRepository,
-    TrainingDatasetRepository,
+    ModelGovernanceAuditRepository, ModelRegistryRepository, PublishFeatureParityPermit,
+    PublishModelVersionCommit, RollbackModelVersionCommit, RuntimeConfigVersionRepository,
+    ShadowComparisonRepository, TrainingDatasetRepository,
 };
 use quant_pivot_research::{
     artifact::ArtifactStore,
@@ -72,9 +72,9 @@ use crate::{
     governance::{
         resolve_return_model_calibration,
         runtime_model_pointers::{
-            RollbackPointerPreflight, RollbackPointerRecovery, RuntimeModelPointerSync,
-            finalize_rollback_pointer_recovery, preflight_rollback_production_pointer,
-            sync_after_model_retire, sync_production_active, sync_rollback_production_active,
+            PreparedProductionPointer, RollbackPointerPreflight, RuntimeModelPointerSync,
+            preflight_rollback_production_pointer, prepare_production_active,
+            sync_after_model_retire,
         },
     },
     runtime_config::RuntimeConfigStore,
@@ -257,11 +257,19 @@ impl ModelGovernancePort for ModelGovernanceService {
             }
             .into());
         }
+        if version.training_dataset_id.is_none() {
+            return Err(GovernanceError::IllegalTransition {
+                detail: format!(
+                    "model version {} has no linked training_dataset_id; publishing requires an immutable frozen dataset",
+                    version.model_version_id
+                ),
+            }
+            .into());
+        }
 
-        // This subject-bound proof is deliberately checked before the global
-        // latch: a freshly rebuilt model can establish a legitimate recovery
-        // run without any prior live report, but publication still requires a
-        // separately governed latch acknowledgement below.
+        // The subject-bound proof is checked before latch resolution. On the
+        // first publish it is the only evidence allowed to mint the initial
+        // clear generation inside the atomic registry transaction.
         let parity_run = self
             .deps
             .frozen_model_parity
@@ -271,11 +279,6 @@ impl ModelGovernancePort for ModelGovernanceService {
                 "pre-publication full frozen dataset/model parity",
             )
             .await?;
-        self.deps
-            .feature_parity_gate
-            .ensure_clear("model publish")
-            .await?;
-
         let required_window = self
             .deps
             .runtime_config
@@ -403,10 +406,16 @@ impl ModelGovernancePort for ModelGovernanceService {
         }
         Self::validate_publish_artifact(&evaluation.artifact)?;
         let pointer_sync = self.pointer_sync();
+        let pointer_reason = format!(
+            "rollback from {} to {}",
+            version.model_version_id, target.model_version_id
+        );
         let pointer_preflight = Box::pin(preflight_rollback_production_pointer(
             &pointer_sync,
             &version.model_version_id,
             &target.model_version_id,
+            &pointer_reason,
+            &actor.username,
         ))
         .await?;
 
@@ -625,37 +634,6 @@ struct RollbackCommit {
     actor: GovernanceActor,
 }
 
-struct RollbackPointerFailure {
-    current: ModelVersionInfo,
-    target: ModelVersionInfo,
-    retired: ModelVersionInfo,
-    restored: ModelVersionInfo,
-    parity_run_id: FeatureParityRunId,
-    quality_gate_payload_hash: ContentHash,
-    feature_parity_state_id: FeatureParityStateId,
-    report: QualityGateReport,
-    shadow_window_secs: i64,
-    command: RollbackModelCommand,
-    actor: GovernanceActor,
-    pointer_error: String,
-    pointer_recovery: Option<RollbackPointerRecovery>,
-}
-
-struct RollbackRecoveryOutcome {
-    code: &'static str,
-    after_status: PublicationStatus,
-    after_hash: String,
-    compensation_error: Option<String>,
-    live_recovery_error: Option<String>,
-    durable_reverted: bool,
-    live_reverted: bool,
-}
-
-struct RollbackRecoveryLatch {
-    run_id: Option<FeatureParityRunId>,
-    error: Option<String>,
-}
-
 impl ModelGovernanceService {
     async fn commit_publish(&self, input: PublishCommit) -> QuantResult<ModelVersionInfo> {
         let PublishCommit {
@@ -671,36 +649,49 @@ impl ModelGovernanceService {
         let feature_parity_state_id = self
             .deps
             .feature_parity_gate
-            .commit_state_id("model publish commit")
+            .publish_state_id("model publish commit")
             .await?;
-        let (published, retired_predecessors, rollback_target) = self
-            .deps
-            .model_registry_repo
-            .publish_replacing_predecessors(
-                &version.model_spec_id,
-                &version.model_version_id,
-                &feature_parity_state_id,
-                &parity_run_id,
-            )
-            .await?;
-
-        // The registry transaction already compared the exact latch generation.
-        // Recheck at the second persistence boundary so a mismatch opened after
-        // registry commit cannot be followed by pointer activation. Reports and
-        // entry admission remain independently generation-gated as well.
-        self.deps
-            .feature_parity_gate
-            .ensure_clear("model pointer activation")
-            .await?;
-
-        sync_production_active(
+        let feature_parity_permit = match feature_parity_state_id {
+            Some(state_id) => PublishFeatureParityPermit::ExistingGeneration(state_id),
+            None => PublishFeatureParityPermit::InitializeFromProof {
+                actor: actor.username.clone(),
+                acting_role: actor.role.clone(),
+                reason: format!(
+                    "initialize parity latch from pre-publication proof {}: {}",
+                    parity_run_id, command.reason
+                ),
+            },
+        };
+        let pointer_reason = format!("publish model version {}", version.model_version_id);
+        let PreparedProductionPointer {
+            snapshot,
+            expected_activation_id,
+            activation,
+        } = prepare_production_active(
             &self.pointer_sync(),
-            &published.model_version_id,
+            &version.model_version_id,
             true,
-            &format!("publish model version {}", published.model_version_id),
+            &pointer_reason,
             &actor.username,
         )
         .await?;
+        let outcome = self
+            .deps
+            .model_registry_repo
+            .publish_replacing_predecessors(PublishModelVersionCommit {
+                model_spec_id: &version.model_spec_id,
+                model_version_id: &version.model_version_id,
+                feature_parity_permit,
+                feature_parity_run_id: &parity_run_id,
+                expected_runtime_config_activation_id: Some(&expected_activation_id),
+                runtime_config_activation: activation,
+            })
+            .await?;
+        snapshot.publish();
+        let published = outcome.published;
+        let retired_predecessors = outcome.retired_predecessors;
+        let rollback_target = outcome.rollback_target;
+        let feature_parity_state_id = outcome.feature_parity_state_id;
 
         self.write_audit(NewModelGovernanceAudit {
             audit_id: ModelGovernanceAuditId::from_v7(),
@@ -727,6 +718,7 @@ impl ModelGovernanceService {
                 "shadow_samples": summary.sample_count,
                 "shadow_mean_overlap": summary.mean_topn_overlap.inner().to_string(),
                 "retired_predecessors": retired_predecessors.iter().map(ToString::to_string).collect::<Vec<_>>(),
+                "feature_parity_state_id": feature_parity_state_id.to_string(),
             }),
             audit_event_id: Some(AuditEventId::from_v7()),
         })
@@ -755,6 +747,11 @@ impl ModelGovernanceService {
             .feature_parity_gate
             .commit_state_id("model rollback commit")
             .await?;
+        let PreparedProductionPointer {
+            snapshot,
+            expected_activation_id,
+            activation,
+        } = pointer_preflight.prepared;
         let (retired, restored) = self
             .deps
             .model_registry_repo
@@ -767,39 +764,11 @@ impl ModelGovernanceService {
                 quality_gate_payload_hash: &quality_gate_payload_hash,
                 feature_parity_state_id: &feature_parity_state_id,
                 feature_parity_run_id: &parity_run_id,
+                expected_runtime_config_activation_id: Some(&expected_activation_id),
+                runtime_config_activation: activation,
             })
             .await?;
-
-        if let Err(pointer_error) = Box::pin(sync_rollback_production_active(
-            &self.pointer_sync(),
-            pointer_preflight,
-            &format!(
-                "rollback from {} to {}",
-                retired.model_version_id, restored.model_version_id
-            ),
-            &actor.username,
-        ))
-        .await
-        {
-            let pointer_error_detail = pointer_error.to_string();
-            return self
-                .compensate_failed_rollback_pointer(RollbackPointerFailure {
-                    current,
-                    target,
-                    retired,
-                    restored,
-                    parity_run_id,
-                    quality_gate_payload_hash,
-                    feature_parity_state_id,
-                    report,
-                    shadow_window_secs,
-                    command,
-                    actor,
-                    pointer_error: pointer_error_detail,
-                    pointer_recovery: pointer_error.recovery,
-                })
-                .await;
-        }
+        snapshot.publish();
 
         self.write_audit(NewModelGovernanceAudit {
             audit_id: ModelGovernanceAuditId::from_v7(),
@@ -832,195 +801,6 @@ impl ModelGovernanceService {
         .await?;
 
         Ok(restored)
-    }
-
-    async fn compensate_failed_rollback_pointer(
-        &self,
-        failure: RollbackPointerFailure,
-    ) -> QuantResult<ModelVersionInfo> {
-        let outcome = self.recover_failed_rollback_pointer(&failure).await;
-        let latch = self
-            .contain_failed_rollback_recovery(&failure, &outcome)
-            .await;
-        let audit_error = self
-            .audit_failed_rollback_recovery(&failure, &outcome, &latch)
-            .await;
-        Err(GovernanceError::IllegalTransition {
-            detail: format!(
-                "rollback runtime pointer sync failed ({pointer}); outcome={outcome}; compensation_error={compensation:?}; live_recovery_error={live_recovery:?}; safety_latch_error={latch:?}; audit_error={audit:?}",
-                pointer = failure.pointer_error,
-                outcome = outcome.code,
-                compensation = outcome.compensation_error,
-                live_recovery = outcome.live_recovery_error,
-                latch = latch.error,
-                audit = audit_error,
-            ),
-        }
-        .into())
-    }
-
-    async fn recover_failed_rollback_pointer(
-        &self,
-        failure: &RollbackPointerFailure,
-    ) -> RollbackRecoveryOutcome {
-        let Some(recovery) = failure.pointer_recovery.as_ref() else {
-            return RollbackRecoveryOutcome {
-                code: "no_recovery_permit_registry_target_preserved",
-                after_status: failure.retired.publication_status,
-                after_hash: failure.restored.artifact_hash.as_str().to_owned(),
-                compensation_error: None,
-                live_recovery_error: None,
-                durable_reverted: false,
-                live_reverted: false,
-            };
-        };
-        let compensation = self
-            .deps
-            .model_registry_repo
-            .compensate_failed_rollback(CompensateRollbackModelVersionCommit {
-                model_spec_id: &failure.current.model_spec_id,
-                original_current_model_version_id: &failure.current.model_version_id,
-                failed_target_model_version_id: &failure.target.model_version_id,
-                expected_current_retired_at: failure.retired.retired_at,
-                expected_target_published_at: failure.restored.published_at,
-                expected_target_artifact_hash: &failure.target.artifact_hash,
-                expected_target_publish_path_set_id: failure.target.publish_path_set_id.as_ref(),
-                quality_gate_payload_hash: &failure.quality_gate_payload_hash,
-                feature_parity_run_id: &failure.parity_run_id,
-                expected_runtime_config_activation_id: &recovery
-                    .expected_runtime_config_activation_id,
-                runtime_config_compensation: recovery.runtime_config_compensation.clone(),
-            })
-            .await;
-        let (restored_current, _retired_target) = match compensation {
-            Ok(compensated) => compensated,
-            Err(error) => {
-                return RollbackRecoveryOutcome {
-                    code: "atomic_compensation_failed_registry_target_preserved",
-                    after_status: failure.retired.publication_status,
-                    after_hash: failure.restored.artifact_hash.as_str().to_owned(),
-                    compensation_error: Some(error.to_string()),
-                    live_recovery_error: None,
-                    durable_reverted: false,
-                    live_reverted: false,
-                };
-            }
-        };
-        let live_recovery_error = finalize_rollback_pointer_recovery(
-            &self.pointer_sync(),
-            &failure.current.model_version_id,
-            recovery,
-        )
-        .await
-        .err();
-        RollbackRecoveryOutcome {
-            code: if live_recovery_error.is_none() {
-                "compensated"
-            } else {
-                "compensated_durable_live_fail_closed"
-            },
-            after_status: restored_current.publication_status,
-            after_hash: restored_current.artifact_hash.as_str().to_owned(),
-            compensation_error: None,
-            live_reverted: live_recovery_error.is_none(),
-            live_recovery_error,
-            durable_reverted: true,
-        }
-    }
-
-    async fn contain_failed_rollback_recovery(
-        &self,
-        failure: &RollbackPointerFailure,
-        outcome: &RollbackRecoveryOutcome,
-    ) -> RollbackRecoveryLatch {
-        if outcome.code == "compensated" {
-            return RollbackRecoveryLatch {
-                run_id: None,
-                error: None,
-            };
-        }
-        let reason = format!(
-            "rollback pointer recovery integrity failure: outcome={}; current={}; target={}; pointer_error={}",
-            outcome.code,
-            failure.current.model_version_id,
-            failure.target.model_version_id,
-            failure.pointer_error
-        );
-        let latch = match self
-            .deps
-            .feature_parity_gate
-            .trip_integrity_failure(
-                &failure.parity_run_id,
-                "model rollback pointer recovery",
-                reason,
-            )
-            .await
-        {
-            Ok(run_id) => RollbackRecoveryLatch {
-                run_id: Some(run_id),
-                error: None,
-            },
-            Err(error) => RollbackRecoveryLatch {
-                run_id: None,
-                error: Some(error.to_string()),
-            },
-        };
-        tracing::error!(
-            outcome = outcome.code,
-            recovery_permit = failure.pointer_recovery.is_some(),
-            durable_reverted = outcome.durable_reverted,
-            live_reverted = outcome.live_reverted,
-            current_model_version_id = %failure.current.model_version_id,
-            target_model_version_id = %failure.target.model_version_id,
-            safety_latch_run_id = ?latch.run_id,
-            safety_latch_error = ?latch.error,
-            "critical rollback pointer recovery did not restore both live and durable state"
-        );
-        latch
-    }
-
-    async fn audit_failed_rollback_recovery(
-        &self,
-        failure: &RollbackPointerFailure,
-        outcome: &RollbackRecoveryOutcome,
-        latch: &RollbackRecoveryLatch,
-    ) -> Option<String> {
-        self.write_audit(NewModelGovernanceAudit {
-            audit_id: ModelGovernanceAuditId::from_v7(),
-            model_version_id: Some(failure.current.model_version_id.clone()),
-            training_dataset_id: failure.target.training_dataset_id.clone(),
-            action: ModelGovernanceAction::Rollback,
-            actor_username: failure.actor.username.clone(),
-            actor_role: failure.actor.role.clone(),
-            reason: failure.command.reason.clone(),
-            before_status: failure.current.publication_status,
-            after_status: outcome.after_status,
-            before_hash: Some(failure.current.artifact_hash.as_str().to_owned()),
-            after_hash: Some(outcome.after_hash.clone()),
-            quality_gate_passed: true,
-            rollback_target_version_id: Some(failure.target.model_version_id.clone()),
-            shadow_window_secs: Some(failure.shadow_window_secs),
-            detail_json: serde_json::json!({
-                "outcome": outcome.code,
-                "pointer_sync_error": failure.pointer_error,
-                "compensation_error": outcome.compensation_error,
-                "live_recovery_error": outcome.live_recovery_error,
-                "safety_latch_run_id": latch.run_id.as_ref().map(ToString::to_string),
-                "safety_latch_error": latch.error,
-                "recovery_permit": failure.pointer_recovery.is_some(),
-                "durable_reverted": outcome.durable_reverted,
-                "live_reverted": outcome.live_reverted,
-                "attempted_target": failure.target.model_version_id.to_string(),
-                "gate_report_hash": failure.report.report_hash.as_str(),
-                "quality_gate_payload_hash": failure.quality_gate_payload_hash.as_str(),
-                "feature_parity_run_id": failure.parity_run_id.to_string(),
-                "feature_parity_state_id": failure.feature_parity_state_id.to_string(),
-            }),
-            audit_event_id: Some(AuditEventId::from_v7()),
-        })
-        .await
-        .err()
-        .map(|error| error.to_string())
     }
 
     async fn ensure_model_score_calibrator(

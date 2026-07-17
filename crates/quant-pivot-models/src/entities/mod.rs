@@ -1,13 +1,23 @@
 //! `SeaORM` entity definitions for the quant-pivot database schema.
 
+// SeaORM 2 generates `ActiveModel` with `PartialEq`; `ActiveValue<T>` cannot
+// implement `Eq` because it represents Set/Unchanged/NotSet mutation state.
+#![expect(
+    clippy::derive_partial_eq_without_eq,
+    reason = "generated SeaORM ActiveModel intentionally has PartialEq without Eq"
+)]
+
 pub mod casbin_rule;
+pub mod catalog_event_change;
+pub mod catalog_event_object;
+pub mod catalog_market_change;
+pub mod catalog_market_object;
 pub mod catalog_sync_batch;
+pub mod catalog_sync_rejection;
 #[cfg(feature = "repository")]
 pub mod clob_market_info_version;
 pub mod event;
-pub mod event_catalog_version;
 pub mod market;
-pub mod market_catalog_version;
 pub mod menu;
 pub mod operation_log;
 pub mod quant_account_snapshot;
@@ -32,8 +42,10 @@ pub mod quant_equity_snapshot;
 pub mod quant_execution_order;
 pub mod quant_factor_definition;
 pub mod quant_factor_value;
+pub mod quant_feature_parity_candidate;
 pub mod quant_feature_parity_run;
 pub mod quant_feature_parity_state;
+pub mod quant_feature_parity_subject;
 pub mod quant_feature_vector;
 pub mod quant_market_linkage;
 #[cfg_attr(not(feature = "repository"), allow(dead_code))]
@@ -77,7 +89,11 @@ pub mod quant_weather_observation_current;
 pub mod role;
 pub mod role_menu;
 pub mod runtime_config_activation;
+pub mod runtime_config_approval;
 pub mod runtime_config_version;
+#[cfg(feature = "repository")]
+pub mod seed_application;
+pub mod system_bootstrap_transition;
 pub mod system_kill_switch;
 pub mod system_runtime_state;
 pub mod user;

@@ -1,0 +1,352 @@
+//! Immutable `SeaORM` v1 schema time capsule generated from the reviewed `PostgreSQL` contract.
+
+pub mod casbin_rule;
+pub mod catalog_event_change;
+pub mod catalog_event_object;
+pub mod catalog_market_change;
+pub mod catalog_market_object;
+pub mod catalog_sync_batch;
+pub mod catalog_sync_rejection;
+pub mod clob_market_info_version;
+pub mod event;
+pub mod market;
+pub mod menu;
+pub mod operation_log;
+pub mod quant_account_snapshot;
+pub mod quant_backtest_path_set;
+pub mod quant_backtest_report;
+pub mod quant_basis_alert;
+pub mod quant_calibration_artifact;
+pub mod quant_calibration_artifact_publication;
+pub mod quant_capital_allocation;
+pub mod quant_crypto_price_projection;
+pub mod quant_domain_event_outbox;
+pub mod quant_domain_source_cursor;
+pub mod quant_entry_condition_artifact;
+pub mod quant_entry_condition_audit;
+pub mod quant_entry_condition_evaluation_outbox;
+pub mod quant_entry_condition_instance;
+pub mod quant_equity_snapshot;
+pub mod quant_execution_order;
+pub mod quant_factor_definition;
+pub mod quant_factor_value;
+pub mod quant_feature_parity_candidate;
+pub mod quant_feature_parity_run;
+pub mod quant_feature_parity_state;
+pub mod quant_feature_parity_subject;
+pub mod quant_feature_vector;
+pub mod quant_market_linkage;
+pub mod quant_market_linkage_source;
+pub mod quant_market_selection;
+pub mod quant_market_selection_member;
+pub mod quant_model_comparison_report;
+pub mod quant_model_governance_audit;
+pub mod quant_model_run;
+pub mod quant_model_spec;
+pub mod quant_model_version;
+pub mod quant_order_intent;
+pub mod quant_portfolio_plan;
+pub mod quant_position;
+pub mod quant_recommendation;
+pub mod quant_recommendation_attribution;
+pub mod quant_recommendation_report;
+pub mod quant_reconciliation;
+pub mod quant_report_data_quality_snapshot;
+pub mod quant_report_fact_delivery;
+pub mod quant_report_run;
+pub mod quant_report_schedule_gap;
+pub mod quant_report_schedule_state;
+pub mod quant_research_job;
+pub mod quant_research_readiness_evidence;
+pub mod quant_settlement_redeem;
+pub mod quant_settlement_redeem_lot;
+pub mod quant_shadow_comparison;
+pub mod quant_source_slice;
+pub mod quant_trade_policy_artifact;
+pub mod quant_trade_policy_governance_audit;
+pub mod quant_trade_policy_trial_attempt;
+pub mod quant_trade_policy_validation;
+pub mod quant_trade_policy_validation_row;
+pub mod quant_trade_tape_block_cursor;
+pub mod quant_training_dataset;
+pub mod quant_weather_daily_high_projection;
+pub mod quant_weather_observation_current;
+pub mod role;
+pub mod role_menu;
+pub mod runtime_config_activation;
+pub mod runtime_config_approval;
+pub mod runtime_config_version;
+pub mod schema_migration_audit;
+pub mod sea_orm_active_enums;
+pub mod seed_application;
+pub mod system_bootstrap_transition;
+pub mod system_kill_switch;
+pub mod system_runtime_state;
+pub mod user;
+pub mod user_role;
+
+pub const MODULE_PREFIX: &str = "quant_pivot_migration::snapshots::v1::*";
+
+pub const TABLES: &[&str] = &[
+    "casbin_rule",
+    "catalog_event_change",
+    "catalog_event_object",
+    "catalog_market_change",
+    "catalog_market_object",
+    "catalog_sync_batch",
+    "catalog_sync_rejection",
+    "clob_market_info_version",
+    "event",
+    "market",
+    "menu",
+    "operation_log",
+    "quant_account_snapshot",
+    "quant_backtest_path_set",
+    "quant_backtest_report",
+    "quant_basis_alert",
+    "quant_calibration_artifact",
+    "quant_calibration_artifact_publication",
+    "quant_capital_allocation",
+    "quant_crypto_price_projection",
+    "quant_domain_event_outbox",
+    "quant_domain_source_cursor",
+    "quant_entry_condition_artifact",
+    "quant_entry_condition_audit",
+    "quant_entry_condition_evaluation_outbox",
+    "quant_entry_condition_instance",
+    "quant_equity_snapshot",
+    "quant_execution_order",
+    "quant_factor_definition",
+    "quant_factor_value",
+    "quant_feature_parity_candidate",
+    "quant_feature_parity_run",
+    "quant_feature_parity_state",
+    "quant_feature_parity_subject",
+    "quant_feature_vector",
+    "quant_market_linkage",
+    "quant_market_linkage_source",
+    "quant_market_selection",
+    "quant_market_selection_member",
+    "quant_model_comparison_report",
+    "quant_model_governance_audit",
+    "quant_model_run",
+    "quant_model_spec",
+    "quant_model_version",
+    "quant_order_intent",
+    "quant_portfolio_plan",
+    "quant_position",
+    "quant_recommendation",
+    "quant_recommendation_attribution",
+    "quant_recommendation_report",
+    "quant_reconciliation",
+    "quant_report_data_quality_snapshot",
+    "quant_report_fact_delivery",
+    "quant_report_run",
+    "quant_report_schedule_gap",
+    "quant_report_schedule_state",
+    "quant_research_job",
+    "quant_research_readiness_evidence",
+    "quant_settlement_redeem",
+    "quant_settlement_redeem_lot",
+    "quant_shadow_comparison",
+    "quant_source_slice",
+    "quant_trade_policy_artifact",
+    "quant_trade_policy_governance_audit",
+    "quant_trade_policy_trial_attempt",
+    "quant_trade_policy_validation",
+    "quant_trade_policy_validation_row",
+    "quant_trade_tape_block_cursor",
+    "quant_training_dataset",
+    "quant_weather_daily_high_projection",
+    "quant_weather_observation_current",
+    "role",
+    "role_menu",
+    "runtime_config_activation",
+    "runtime_config_approval",
+    "runtime_config_version",
+    "schema_migration_audit",
+    "seed_application",
+    "system_bootstrap_transition",
+    "system_kill_switch",
+    "system_runtime_state",
+    "user",
+    "user_role",
+];
+
+pub const ENUMS: &[&str] = &[
+    "qp_account_source",
+    "qp_approval_status",
+    "qp_bootstrap_phase",
+    "qp_calibration_kind",
+    "qp_capital_allocation_state",
+    "qp_catalog_change_type",
+    "qp_catalog_entity_kind",
+    "qp_catalog_filter_reason",
+    "qp_catalog_rejection_reason",
+    "qp_catalog_sync_failure_stage",
+    "qp_catalog_sync_kind",
+    "qp_catalog_sync_status",
+    "qp_catalog_timestamp_quality",
+    "qp_data_quality_status",
+    "qp_dataset_purpose",
+    "qp_domain_family",
+    "qp_entry_condition_audit_action",
+    "qp_entry_condition_state",
+    "qp_event_status",
+    "qp_execution_order_phase",
+    "qp_execution_order_state",
+    "qp_execution_wallet_kind",
+    "qp_exit_reason",
+    "qp_exit_state",
+    "qp_factor_definition_scope",
+    "qp_factor_direction",
+    "qp_factor_family",
+    "qp_factor_indeterminate_reason",
+    "qp_factor_value_state",
+    "qp_feature_parity_latch_state",
+    "qp_feature_parity_run_kind",
+    "qp_feature_parity_run_status",
+    "qp_feature_parity_state_transition",
+    "qp_kill_switch_state",
+    "qp_linkage_source_role",
+    "qp_linkage_status",
+    "qp_market_category",
+    "qp_market_status",
+    "qp_menu_kind",
+    "qp_model_family",
+    "qp_model_governance_action",
+    "qp_model_run_error_code",
+    "qp_model_run_kind",
+    "qp_model_run_status",
+    "qp_normalization_source",
+    "qp_operation_category",
+    "qp_operation_outcome",
+    "qp_order_intent_kind",
+    "qp_order_intent_status",
+    "qp_order_type_kind",
+    "qp_outcome_side",
+    "qp_parity_subject_kind",
+    "qp_position_ledger_state",
+    "qp_publication_status",
+    "qp_quant_runtime_mode",
+    "qp_recommendation_attribution_outcome",
+    "qp_recommendation_report_status",
+    "qp_recommendation_status",
+    "qp_reconciliation_result",
+    "qp_report_fact_delivery_status",
+    "qp_report_kind",
+    "qp_report_run_status",
+    "qp_report_run_terminal_reason",
+    "qp_report_schedule_gap_reason",
+    "qp_report_trigger_kind",
+    "qp_research_job_kind",
+    "qp_research_job_status",
+    "qp_research_readiness_evidence_kind",
+    "qp_resolver_tier",
+    "qp_resource_type",
+    "qp_role_kind",
+    "qp_role_status",
+    "qp_runtime_config_activation_kind",
+    "qp_runtime_config_approval_decision",
+    "qp_runtime_config_source",
+    "qp_settlement_redeem_state",
+    "qp_side",
+    "qp_source_slice_status",
+    "qp_tick_size",
+    "qp_trade_policy_governance_action",
+    "qp_trade_policy_status",
+    "qp_trade_policy_trial_scope",
+    "qp_trade_policy_trial_status",
+    "qp_trade_policy_validation_status",
+    "qp_training_dataset_status",
+    "qp_user_status",
+    "qp_venue_order_status",
+];
+
+pub const ARTIFACTS: &[&[u8]] = &[
+    include_bytes!("casbin_rule.rs"),
+    include_bytes!("catalog_event_change.rs"),
+    include_bytes!("catalog_event_object.rs"),
+    include_bytes!("catalog_market_change.rs"),
+    include_bytes!("catalog_market_object.rs"),
+    include_bytes!("catalog_sync_batch.rs"),
+    include_bytes!("catalog_sync_rejection.rs"),
+    include_bytes!("clob_market_info_version.rs"),
+    include_bytes!("event.rs"),
+    include_bytes!("market.rs"),
+    include_bytes!("menu.rs"),
+    include_bytes!("mod.rs"),
+    include_bytes!("operation_log.rs"),
+    include_bytes!("quant_account_snapshot.rs"),
+    include_bytes!("quant_backtest_path_set.rs"),
+    include_bytes!("quant_backtest_report.rs"),
+    include_bytes!("quant_basis_alert.rs"),
+    include_bytes!("quant_calibration_artifact.rs"),
+    include_bytes!("quant_calibration_artifact_publication.rs"),
+    include_bytes!("quant_capital_allocation.rs"),
+    include_bytes!("quant_crypto_price_projection.rs"),
+    include_bytes!("quant_domain_event_outbox.rs"),
+    include_bytes!("quant_domain_source_cursor.rs"),
+    include_bytes!("quant_entry_condition_artifact.rs"),
+    include_bytes!("quant_entry_condition_audit.rs"),
+    include_bytes!("quant_entry_condition_evaluation_outbox.rs"),
+    include_bytes!("quant_entry_condition_instance.rs"),
+    include_bytes!("quant_equity_snapshot.rs"),
+    include_bytes!("quant_execution_order.rs"),
+    include_bytes!("quant_factor_definition.rs"),
+    include_bytes!("quant_factor_value.rs"),
+    include_bytes!("quant_feature_parity_candidate.rs"),
+    include_bytes!("quant_feature_parity_run.rs"),
+    include_bytes!("quant_feature_parity_state.rs"),
+    include_bytes!("quant_feature_parity_subject.rs"),
+    include_bytes!("quant_feature_vector.rs"),
+    include_bytes!("quant_market_linkage.rs"),
+    include_bytes!("quant_market_linkage_source.rs"),
+    include_bytes!("quant_market_selection.rs"),
+    include_bytes!("quant_market_selection_member.rs"),
+    include_bytes!("quant_model_comparison_report.rs"),
+    include_bytes!("quant_model_governance_audit.rs"),
+    include_bytes!("quant_model_run.rs"),
+    include_bytes!("quant_model_spec.rs"),
+    include_bytes!("quant_model_version.rs"),
+    include_bytes!("quant_order_intent.rs"),
+    include_bytes!("quant_portfolio_plan.rs"),
+    include_bytes!("quant_position.rs"),
+    include_bytes!("quant_recommendation.rs"),
+    include_bytes!("quant_recommendation_attribution.rs"),
+    include_bytes!("quant_recommendation_report.rs"),
+    include_bytes!("quant_reconciliation.rs"),
+    include_bytes!("quant_report_data_quality_snapshot.rs"),
+    include_bytes!("quant_report_fact_delivery.rs"),
+    include_bytes!("quant_report_run.rs"),
+    include_bytes!("quant_report_schedule_gap.rs"),
+    include_bytes!("quant_report_schedule_state.rs"),
+    include_bytes!("quant_research_job.rs"),
+    include_bytes!("quant_research_readiness_evidence.rs"),
+    include_bytes!("quant_settlement_redeem.rs"),
+    include_bytes!("quant_settlement_redeem_lot.rs"),
+    include_bytes!("quant_shadow_comparison.rs"),
+    include_bytes!("quant_source_slice.rs"),
+    include_bytes!("quant_trade_policy_artifact.rs"),
+    include_bytes!("quant_trade_policy_governance_audit.rs"),
+    include_bytes!("quant_trade_policy_trial_attempt.rs"),
+    include_bytes!("quant_trade_policy_validation.rs"),
+    include_bytes!("quant_trade_policy_validation_row.rs"),
+    include_bytes!("quant_trade_tape_block_cursor.rs"),
+    include_bytes!("quant_training_dataset.rs"),
+    include_bytes!("quant_weather_daily_high_projection.rs"),
+    include_bytes!("quant_weather_observation_current.rs"),
+    include_bytes!("role.rs"),
+    include_bytes!("role_menu.rs"),
+    include_bytes!("runtime_config_activation.rs"),
+    include_bytes!("runtime_config_approval.rs"),
+    include_bytes!("runtime_config_version.rs"),
+    include_bytes!("schema_migration_audit.rs"),
+    include_bytes!("sea_orm_active_enums.rs"),
+    include_bytes!("seed_application.rs"),
+    include_bytes!("system_bootstrap_transition.rs"),
+    include_bytes!("system_kill_switch.rs"),
+    include_bytes!("system_runtime_state.rs"),
+    include_bytes!("user.rs"),
+    include_bytes!("user_role.rs"),
+];

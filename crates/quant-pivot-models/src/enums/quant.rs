@@ -770,6 +770,7 @@ pg_enum! {
     type_name = "qp_feature_parity_state_transition",
     /// Why a new append-only latch-state row exists.
     pub enum FeatureParityStateTransition {
+        BootstrapProof => "bootstrap_proof",
         DeterministicMismatch => "deterministic_mismatch",
         IntegrityFailure => "integrity_failure",
         GovernedAcknowledge => "governed_acknowledge",
@@ -1396,5 +1397,13 @@ mod tests {
                 "{status:?} blocks_sibling_intent_creation"
             );
         }
+    }
+}
+pg_enum! {
+    type_name = "qp_parity_subject_kind",
+    pub enum ParitySubjectKind {
+        RecommendationReport => "recommendation_report",
+        ModelRun => "model_run",
+        ModelVersion => "model_version",
     }
 }

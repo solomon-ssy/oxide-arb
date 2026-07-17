@@ -1,4 +1,3 @@
-use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{
@@ -11,8 +10,38 @@ use quant_pivot_models::{
     },
 };
 
+/// Durable latch permit consumed by the atomic model-publish transaction.
+#[derive(Debug, Clone)]
+pub enum PublishFeatureParityPermit {
+    /// Compare-and-swap against an already governed clear generation.
+    ExistingGeneration(FeatureParityStateId),
+    /// Mint the first clear generation from the exact pre-publication proof.
+    InitializeFromProof {
+        actor: String,
+        acting_role: Option<String>,
+        reason: String,
+    },
+}
+
+/// Atomic model publication plus runtime-pointer activation command.
+pub struct PublishModelVersionCommit<'a> {
+    pub model_spec_id: &'a ModelSpecId,
+    pub model_version_id: &'a ModelVersionId,
+    pub feature_parity_permit: PublishFeatureParityPermit,
+    pub feature_parity_run_id: &'a FeatureParityRunId,
+    pub expected_runtime_config_activation_id: Option<&'a RuntimeConfigActivationId>,
+    pub runtime_config_activation: NewRuntimeConfigActivation,
+}
+
+/// Result of the indivisible model publication/config activation transaction.
+pub struct PublishModelVersionOutcome {
+    pub published: ModelVersionInfo,
+    pub retired_predecessors: Vec<ModelVersionId>,
+    pub rollback_target: Option<ModelVersionInfo>,
+    pub feature_parity_state_id: FeatureParityStateId,
+}
+
 /// Compare-and-swap permit for one governed model rollback commit.
-#[derive(Clone, Copy)]
 pub struct RollbackModelVersionCommit<'a> {
     /// Spec whose publication slot is being changed.
     pub model_spec_id: &'a ModelSpecId,
@@ -30,37 +59,10 @@ pub struct RollbackModelVersionCommit<'a> {
     pub feature_parity_state_id: &'a FeatureParityStateId,
     /// Full subject-bound frozen parity permit for the target.
     pub feature_parity_run_id: &'a FeatureParityRunId,
-}
-
-/// Exact reverse compare-and-swap used only when the runtime pointer could not
-/// be switched after a committed rollback.
-#[derive(Clone)]
-pub struct CompensateRollbackModelVersionCommit<'a> {
-    /// Spec whose just-committed rollback is being reversed.
-    pub model_spec_id: &'a ModelSpecId,
-    /// Original current version to restore to `Published`.
-    pub original_current_model_version_id: &'a ModelVersionId,
-    /// Rollback target to return to `Retired`.
-    pub failed_target_model_version_id: &'a ModelVersionId,
-    /// Exact retirement timestamp minted by the failed switch.
-    pub expected_current_retired_at: Option<DateTime<Utc>>,
-    /// Exact publication timestamp minted by the failed switch.
-    pub expected_target_published_at: Option<DateTime<Utc>>,
-    /// Artifact hash validated for the failed target switch.
-    pub expected_target_artifact_hash: &'a ContentHash,
-    /// CPCV binding evaluated for the failed target switch.
-    pub expected_target_publish_path_set_id: Option<&'a BacktestPathSetId>,
-    /// Canonical exact gate-report payload used by the failed switch.
-    pub quality_gate_payload_hash: &'a ContentHash,
-    /// Subject-bound full parity run that authorized the failed switch.
-    pub feature_parity_run_id: &'a FeatureParityRunId,
-    /// Exact durable activation generation created (or observed) by the failed
-    /// pointer switch.
-    pub expected_runtime_config_activation_id: &'a RuntimeConfigActivationId,
-    /// Optional compensating activation back to the original config. Inserted
-    /// atomically with the model-status reversal; `None` means durable config
-    /// never left the original generation and is only CAS-verified.
-    pub runtime_config_compensation: Option<NewRuntimeConfigActivation>,
+    /// Exact runtime-config activation generation observed by pointer preflight.
+    pub expected_runtime_config_activation_id: Option<&'a RuntimeConfigActivationId>,
+    /// Prepared target pointer activation committed with both status changes.
+    pub runtime_config_activation: NewRuntimeConfigActivation,
 }
 
 #[async_trait::async_trait]
@@ -126,18 +128,8 @@ pub trait ModelRegistryRepository: Send + Sync {
     /// retirement (if any).
     async fn publish_replacing_predecessors(
         &self,
-        model_spec_id: &ModelSpecId,
-        model_version_id: &ModelVersionId,
-        feature_parity_state_id: &FeatureParityStateId,
-        feature_parity_run_id: &FeatureParityRunId,
-    ) -> Result<
-        (
-            ModelVersionInfo,
-            Vec<ModelVersionId>,
-            Option<ModelVersionInfo>,
-        ),
-        StorageError,
-    >;
+        commit: PublishModelVersionCommit<'_>,
+    ) -> Result<PublishModelVersionOutcome, StorageError>;
 
     /// Promote a backtested candidate into shadow evaluation (`Candidate → Shadow`).
     ///
@@ -158,14 +150,6 @@ pub trait ModelRegistryRepository: Send + Sync {
     async fn rollback_to_retired_predecessor(
         &self,
         commit: RollbackModelVersionCommit<'_>,
-    ) -> Result<(ModelVersionInfo, ModelVersionInfo), StorageError>;
-
-    /// Reverse only the exact just-committed rollback when runtime pointer sync
-    /// failed. This is not a generic restore: timestamps, artifact, path set,
-    /// canonical gate payload, and subject parity permit must all still match.
-    async fn compensate_failed_rollback(
-        &self,
-        commit: CompensateRollbackModelVersionCommit<'_>,
     ) -> Result<(ModelVersionInfo, ModelVersionInfo), StorageError>;
 
     /// Persist a model version's quality-gate report JSON (the governance layer

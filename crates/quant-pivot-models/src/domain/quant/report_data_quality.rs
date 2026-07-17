@@ -5,11 +5,11 @@ use crate::{
     types::{ReportDataQualitySnapshotId, ReportDataQualityTokens, RuntimeConfigVersionId},
 };
 use chrono::{DateTime, Utc};
-use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
 use serde::{Deserialize, Serialize};
 
 /// Persisted per-fire data-quality snapshot (accepted + rejected markets).
-#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
+#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
 #[sea_orm(entity = "crate::entities::quant_report_data_quality_snapshot::Entity")]
 pub struct ReportDataQualitySnapshotInfo {
     pub report_data_quality_snapshot_id: ReportDataQualitySnapshotId,

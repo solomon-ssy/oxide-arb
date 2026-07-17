@@ -3,12 +3,18 @@
 use std::{sync::Arc, time::Duration};
 
 use quant_pivot_error::{QuantResult, research::ResearchError};
-use quant_pivot_models::types::minimum_raw_retention_days;
-use quant_pivot_repository::traits::ResearchReadinessEvidenceRepository;
+use quant_pivot_models::{enums::system::CapabilityId, types::minimum_raw_retention_days};
+use quant_pivot_repository::traits::{
+    CatalogLedgerRepository, ClobMarketInfoRepository, ResearchReadinessEvidenceRepository,
+};
 
-use crate::service::research_readiness::{EvidenceAttestor, ResearchReadinessEvidenceProducer};
+use crate::service::research_readiness::{
+    EvidenceAttestor, EvidenceScopeIdentity, ResearchReadinessEvidenceProducer,
+};
 
-use super::{AppContext, task_id::TaskId, task_registry::AppRunner};
+use super::{
+    AppContext, capability_gate::wait_for_capability, task_id::TaskId, task_registry::AppRunner,
+};
 
 const CAPTURE_INTERVAL: Duration = Duration::from_mins(5);
 
@@ -26,16 +32,30 @@ impl AppContext {
         }
         let required_days = minimum_raw_retention_days()
             .map_err(|detail| ResearchError::ValidationMethodology { detail })?;
+        let scope = EvidenceScopeIdentity::from_config(
+            &self.config.db.clickhouse,
+            &self.config.research.artifact_store,
+        )?;
         let producer = Arc::new(ResearchReadinessEvidenceProducer::new(
             Arc::clone(&self.infra.repos.research_readiness)
                 as Arc<dyn ResearchReadinessEvidenceRepository>,
             Arc::clone(&self.research.artifact_store),
             Arc::clone(&self.infra.ch),
+            Arc::clone(&self.data.catalog_ledger_repo) as Arc<dyn CatalogLedgerRepository>,
+            Arc::clone(&self.infra.repos.clob_market_info) as Arc<dyn ClobMarketInfoRepository>,
             attestor,
-        ));
+            scope,
+        )?);
+        let bootstrap = Arc::clone(&self.governance.bootstrap);
         runner.spawn(TaskId::ResearchReadinessEvidenceWorker, move |token| async move {
             loop {
-                if token.is_cancelled() {
+                if !wait_for_capability(
+                    Arc::clone(&bootstrap),
+                    CapabilityId::ResearchCaptureEnabled,
+                    &token,
+                )
+                .await
+                {
                     return;
                 }
                 match producer.capture(required_days).await {
@@ -49,8 +69,14 @@ impl AppContext {
                         "research readiness evidence capture failed; previous evidence is not extended"
                     ),
                 }
+                let mut capabilities = bootstrap.subscribe_capabilities();
                 tokio::select! {
                     () = token.cancelled() => return,
+                    changed = capabilities.changed() => {
+                        if changed.is_err() {
+                            return;
+                        }
+                    }
                     () = tokio::time::sleep(CAPTURE_INTERVAL) => {}
                 }
             }

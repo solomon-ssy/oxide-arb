@@ -4,6 +4,7 @@ pub mod attribution_worker;
 pub mod book_update_coalescer;
 pub mod bootstrap;
 pub mod build;
+pub mod capability_gate;
 pub mod domain_event_outbox_worker;
 pub mod domain_ingest_worker;
 pub mod domain_live_ingest_worker;

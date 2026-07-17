@@ -22,9 +22,6 @@ pub enum CacheKey {
     /// Market metadata used by detection and scoring (category, deadline).
     MarketMetadata { market_id: MarketId },
 
-    /// Cached active market list used by scanner startup and periodic refresh.
-    ActiveMarkets,
-
     // ── Configuration ───────────────────────────────────────────────────
     /// Active runtime configuration version document.
     ActiveRuntimeConfig,
@@ -40,7 +37,6 @@ impl CacheKey {
             Self::MarketInfo { market_id } => format!("mkt:{market_id}"),
             Self::EventInfo { event_id } => format!("evt:{event_id}"),
             Self::MarketMetadata { market_id } => format!("mkt_meta:{market_id}"),
-            Self::ActiveMarkets => "mkt:__active__".to_owned(),
             Self::ActiveRuntimeConfig => "cfg:active".to_owned(),
             Self::RuntimeConfigVersion { version_id } => format!("cfg:version:{version_id}"),
         }
@@ -51,9 +47,7 @@ impl CacheKey {
     /// L1 (Moka) TTL is derived as `ttl / 4` by the tiered cache layer.
     pub const fn ttl(&self) -> Duration {
         match self {
-            Self::MarketInfo { .. } | Self::EventInfo { .. } | Self::ActiveMarkets => {
-                Duration::from_mins(5)
-            }
+            Self::MarketInfo { .. } | Self::EventInfo { .. } => Duration::from_mins(5),
             Self::MarketMetadata { .. } => Duration::from_mins(30),
             Self::ActiveRuntimeConfig | Self::RuntimeConfigVersion { .. } => Duration::from_mins(1),
         }
@@ -62,7 +56,7 @@ impl CacheKey {
     /// Domain label used for metrics partitioning (cache hit/miss counters).
     pub const fn domain(&self) -> &'static str {
         match self {
-            Self::MarketInfo { .. } | Self::ActiveMarkets => "market",
+            Self::MarketInfo { .. } => "market",
             Self::EventInfo { .. } => "event",
             Self::MarketMetadata { .. } => "market_metadata",
             Self::ActiveRuntimeConfig | Self::RuntimeConfigVersion { .. } => "config",

@@ -16,12 +16,12 @@ use crate::{
 };
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
-use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// Governed factor definition row.
-#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
+#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
 #[sea_orm(entity = "crate::entities::quant_factor_definition::Entity")]
 pub struct FactorDefinitionInfo {
     pub factor_definition_id: FactorDefinitionId,
@@ -79,7 +79,7 @@ pub struct NewFactorDefinition {
 }
 
 /// Persisted factor value row.
-#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
+#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
 #[sea_orm(entity = "crate::entities::quant_factor_value::Entity")]
 pub struct FactorValueInfo {
     pub factor_value_id: FactorValueId,

@@ -1,6 +1,13 @@
 //! Authentication integration tests.
 
-use actix_web::http::{StatusCode, header::AUTHORIZATION};
+use actix_web::{
+    cookie::Cookie,
+    http::{
+        StatusCode,
+        header::{AUTHORIZATION, COOKIE, SET_COOKIE},
+    },
+};
+use jsonwebtoken::{Algorithm, decode_header};
 use quant_pivot_models::domain::UserInfo;
 use serde_json::json;
 
@@ -9,7 +16,10 @@ use crate::{
     harness::{self, API_VERSION, TestEnv},
 };
 
-/// Authenticate as the seeded `admin` and return `(access, refresh)`.
+const REFRESH_COOKIE_NAME: &str = "qp_refresh";
+const SAME_ORIGIN: (&str, &str) = ("Origin", "http://localhost:8080");
+
+/// Authenticate as the seeded `admin` and return `(access, refresh-cookie value)`.
 async fn login_admin(env: &TestEnv) -> (String, String) {
     let req = actix_web::test::TestRequest::post()
         .uri("/api/auth/login")
@@ -20,16 +30,29 @@ async fn login_admin(env: &TestEnv) -> (String, String) {
 
     let body = res.json();
     let data = &body["data"];
+    let refresh = refresh_cookie_value(&res);
     (
         data["access_token"]
             .as_str()
             .expect("access_token")
             .to_owned(),
-        data["refresh_token"]
-            .as_str()
-            .expect("refresh_token")
-            .to_owned(),
+        refresh,
     )
+}
+
+fn refresh_cookie_value(response: &harness::Resp) -> String {
+    let set_cookie = response
+        .headers
+        .get(SET_COOKIE)
+        .and_then(|value| value.to_str().ok())
+        .expect("refresh Set-Cookie header");
+    let cookie = Cookie::parse(set_cookie.to_owned()).expect("valid refresh cookie");
+    assert_eq!(cookie.name(), REFRESH_COOKIE_NAME);
+    cookie.value().to_owned()
+}
+
+fn refresh_cookie_header(value: &str) -> (actix_web::http::header::HeaderName, String) {
+    (COOKIE, format!("{REFRESH_COOKIE_NAME}={value}"))
 }
 
 fn bearer(token: &str) -> (actix_web::http::header::HeaderName, String) {
@@ -47,7 +70,7 @@ async fn fetch_admin(env: &TestEnv) -> UserInfo {
 
 #[actix_web::test]
 #[ignore = "requires Docker"]
-async fn login_success_issues_token_pair_in_unified_envelope() {
+async fn login_returns_access_token_and_hardened_refresh_cookie() {
     let env = TestEnv::start().await;
 
     let req = actix_web::test::TestRequest::post()
@@ -61,10 +84,18 @@ async fn login_success_issues_token_pair_in_unified_envelope() {
     assert_eq!(body["code"], 200);
     assert_eq!(body["message"], "ok");
     let data = &body["data"];
-    assert!(!data["access_token"].as_str().unwrap().is_empty());
-    assert!(!data["refresh_token"].as_str().unwrap().is_empty());
+    let access_token = data["access_token"].as_str().expect("access token");
+    let header = decode_header(access_token).expect("signed JWT header");
+    assert_eq!(header.alg, Algorithm::EdDSA);
+    assert_eq!(header.kid.as_deref(), Some("test-2026-01"));
+    assert!(data.get("refresh_token").is_none());
     assert_eq!(data["token_type"], "Bearer");
     assert_eq!(data["expires_in"], 900);
+    let set_cookie = res.header("set-cookie").expect("refresh cookie");
+    assert!(set_cookie.contains("HttpOnly"));
+    assert!(set_cookie.contains("Secure"));
+    assert!(set_cookie.contains("SameSite=Strict"));
+    assert!(set_cookie.contains("Path=/api/auth"));
 }
 
 #[actix_web::test]
@@ -142,35 +173,135 @@ async fn refresh_rotates_pair_and_old_refresh_replay_is_rejected() {
     let env = TestEnv::start().await;
     let (_access, refresh) = login_admin(&env).await;
 
-    // First rotation succeeds and yields a brand-new pair.
+    // First rotation succeeds and returns a new cookie, never a body token.
     let req = actix_web::test::TestRequest::post()
         .uri("/api/auth/refresh")
         .insert_header(API_VERSION)
-        .set_json(json!({ "refresh_token": refresh }));
+        .insert_header(SAME_ORIGIN)
+        .insert_header(refresh_cookie_header(&refresh));
     let res = harness::call(&env.state, req).await;
     assert_eq!(res.status, StatusCode::OK);
-    let new_refresh = res.json()["data"]["refresh_token"]
-        .as_str()
-        .unwrap()
-        .to_owned();
+    assert!(res.json()["data"].get("refresh_token").is_none());
+    let new_refresh = refresh_cookie_value(&res);
     assert_ne!(new_refresh, refresh, "refresh token must rotate");
 
-    // Replaying the consumed refresh token is rejected (it was revoked).
+    // Normal forward rotation remains valid.
+    let next = actix_web::test::TestRequest::post()
+        .uri("/api/auth/refresh")
+        .insert_header(API_VERSION)
+        .insert_header(SAME_ORIGIN)
+        .insert_header(refresh_cookie_header(&new_refresh));
+    let next_res = harness::call(&env.state, next).await;
+    assert_eq!(next_res.status, StatusCode::OK);
+    let latest_refresh = refresh_cookie_value(&next_res);
+
+    // Replaying any consumed token terminates the entire rotation family.
     let replay = actix_web::test::TestRequest::post()
         .uri("/api/auth/refresh")
         .insert_header(API_VERSION)
-        .set_json(json!({ "refresh_token": refresh }));
+        .insert_header(SAME_ORIGIN)
+        .insert_header(refresh_cookie_header(&refresh));
     assert_eq!(
         harness::call(&env.state, replay).await.status,
         StatusCode::UNAUTHORIZED
     );
 
-    // The freshly issued refresh token still works.
-    let next = actix_web::test::TestRequest::post()
+    // Even the newest token is rejected after family replay detection.
+    let family_rejected = actix_web::test::TestRequest::post()
         .uri("/api/auth/refresh")
         .insert_header(API_VERSION)
-        .set_json(json!({ "refresh_token": new_refresh }));
-    assert_eq!(harness::call(&env.state, next).await.status, StatusCode::OK);
+        .insert_header(SAME_ORIGIN)
+        .insert_header(refresh_cookie_header(&latest_refresh));
+    assert_eq!(
+        harness::call(&env.state, family_rejected).await.status,
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+#[actix_web::test]
+#[ignore = "requires Docker"]
+async fn refresh_rejects_missing_or_cross_site_browser_origin() {
+    let env = TestEnv::start().await;
+    let (_access, refresh) = login_admin(&env).await;
+
+    let missing_origin = actix_web::test::TestRequest::post()
+        .uri("/api/auth/refresh")
+        .insert_header(API_VERSION)
+        .insert_header(refresh_cookie_header(&refresh));
+    assert_eq!(
+        harness::call(&env.state, missing_origin).await.status,
+        StatusCode::UNAUTHORIZED
+    );
+
+    let cross_site = actix_web::test::TestRequest::post()
+        .uri("/api/auth/refresh")
+        .insert_header(API_VERSION)
+        .insert_header(SAME_ORIGIN)
+        .insert_header(("Sec-Fetch-Site", "cross-site"))
+        .insert_header(refresh_cookie_header(&refresh));
+    assert_eq!(
+        harness::call(&env.state, cross_site).await.status,
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+#[actix_web::test]
+#[ignore = "requires Docker"]
+async fn concurrent_refresh_replay_revokes_the_entire_session_family() {
+    let env = TestEnv::start().await;
+    let (_access, refresh) = login_admin(&env).await;
+
+    let first = actix_web::test::TestRequest::post()
+        .uri("/api/auth/refresh")
+        .insert_header(API_VERSION)
+        .insert_header(SAME_ORIGIN)
+        .insert_header(refresh_cookie_header(&refresh));
+    let second = actix_web::test::TestRequest::post()
+        .uri("/api/auth/refresh")
+        .insert_header(API_VERSION)
+        .insert_header(SAME_ORIGIN)
+        .insert_header(refresh_cookie_header(&refresh));
+
+    let (first_response, second_response) = tokio::join!(
+        harness::call(&env.state, first),
+        harness::call(&env.state, second),
+    );
+    let responses: [_; 2] = (first_response, second_response).into();
+    assert_eq!(
+        responses
+            .iter()
+            .filter(|response| response.status == StatusCode::OK)
+            .count(),
+        1,
+        "exactly one refresh CAS may succeed"
+    );
+    assert_eq!(
+        responses
+            .iter()
+            .filter(|response| response.status == StatusCode::UNAUTHORIZED)
+            .count(),
+        1,
+        "the competing refresh must be classified as replay"
+    );
+
+    let issued_access = responses
+        .iter()
+        .find(|response| response.status == StatusCode::OK)
+        .and_then(|response| {
+            response.json()["data"]["access_token"]
+                .as_str()
+                .map(str::to_owned)
+        })
+        .expect("successful refresh access token");
+    let me = actix_web::test::TestRequest::get()
+        .uri("/api/auth/me")
+        .insert_header(API_VERSION)
+        .insert_header(bearer(&issued_access));
+    assert_eq!(
+        harness::call(&env.state, me).await.status,
+        StatusCode::UNAUTHORIZED,
+        "replay revocation must invalidate every token in the family"
+    );
 }
 
 #[actix_web::test]
@@ -182,11 +313,16 @@ async fn logout_revokes_both_access_and_refresh_tokens() {
     let logout = actix_web::test::TestRequest::post()
         .uri("/api/auth/logout")
         .insert_header(API_VERSION)
+        .insert_header(SAME_ORIGIN)
         .insert_header(bearer(&access))
-        .set_json(json!({ "refresh_token": refresh }));
-    assert_eq!(
-        harness::call(&env.state, logout).await.status,
-        StatusCode::OK
+        .insert_header(refresh_cookie_header(&refresh));
+    let logout_res = harness::call(&env.state, logout).await;
+    assert_eq!(logout_res.status, StatusCode::OK);
+    assert!(
+        logout_res
+            .header("set-cookie")
+            .expect("expired refresh cookie")
+            .contains("Max-Age=0")
     );
 
     // The revoked access token can no longer reach a protected route.
@@ -203,10 +339,110 @@ async fn logout_revokes_both_access_and_refresh_tokens() {
     let refresh_req = actix_web::test::TestRequest::post()
         .uri("/api/auth/refresh")
         .insert_header(API_VERSION)
-        .set_json(json!({ "refresh_token": refresh }));
+        .insert_header(SAME_ORIGIN)
+        .insert_header(refresh_cookie_header(&refresh));
     assert_eq!(
         harness::call(&env.state, refresh_req).await.status,
         StatusCode::UNAUTHORIZED
+    );
+}
+
+#[actix_web::test]
+#[ignore = "requires Docker"]
+async fn disabling_user_revokes_every_session_family_for_the_subject() {
+    let env = TestEnv::start().await;
+    let (operator_access, _operator_refresh) = login_admin(&env).await;
+    let (other_access, other_refresh) = login_admin(&env).await;
+    let admin = fetch_admin(&env).await;
+
+    let disable = actix_web::test::TestRequest::put()
+        .uri(&format!("/api/users/{}/status", admin.id))
+        .insert_header(API_VERSION)
+        .insert_header(bearer(&operator_access))
+        .set_json(json!({ "status": "disabled" }));
+    assert_eq!(
+        harness::call(&env.state, disable).await.status,
+        StatusCode::OK
+    );
+
+    let me = actix_web::test::TestRequest::get()
+        .uri("/api/auth/me")
+        .insert_header(API_VERSION)
+        .insert_header(bearer(&other_access));
+    assert_eq!(
+        harness::call(&env.state, me).await.status,
+        StatusCode::UNAUTHORIZED,
+        "every access token for a disabled subject must fail immediately"
+    );
+
+    let refresh = actix_web::test::TestRequest::post()
+        .uri("/api/auth/refresh")
+        .insert_header(API_VERSION)
+        .insert_header(SAME_ORIGIN)
+        .insert_header(refresh_cookie_header(&other_refresh));
+    assert_eq!(
+        harness::call(&env.state, refresh).await.status,
+        StatusCode::UNAUTHORIZED,
+        "every refresh family for a disabled subject must be revoked"
+    );
+}
+
+#[actix_web::test]
+#[ignore = "requires Docker"]
+async fn password_change_revokes_all_sessions_and_requires_the_new_secret() {
+    let env = TestEnv::start().await;
+    let (operator_access, _operator_refresh) = login_admin(&env).await;
+    let (other_access, other_refresh) = login_admin(&env).await;
+    let admin = fetch_admin(&env).await;
+
+    let change = actix_web::test::TestRequest::put()
+        .uri(&format!("/api/users/{}/password", admin.id))
+        .insert_header(API_VERSION)
+        .insert_header(bearer(&operator_access))
+        .set_json(json!({ "password": "new-production-password-2026" }));
+    assert_eq!(
+        harness::call(&env.state, change).await.status,
+        StatusCode::OK
+    );
+
+    let me = actix_web::test::TestRequest::get()
+        .uri("/api/auth/me")
+        .insert_header(API_VERSION)
+        .insert_header(bearer(&other_access));
+    assert_eq!(
+        harness::call(&env.state, me).await.status,
+        StatusCode::UNAUTHORIZED
+    );
+
+    let refresh = actix_web::test::TestRequest::post()
+        .uri("/api/auth/refresh")
+        .insert_header(API_VERSION)
+        .insert_header(SAME_ORIGIN)
+        .insert_header(refresh_cookie_header(&other_refresh));
+    assert_eq!(
+        harness::call(&env.state, refresh).await.status,
+        StatusCode::UNAUTHORIZED
+    );
+
+    let old_secret = actix_web::test::TestRequest::post()
+        .uri("/api/auth/login")
+        .insert_header(API_VERSION)
+        .set_json(json!({ "username": "admin", "password": "admin" }));
+    assert_eq!(
+        harness::call(&env.state, old_secret).await.status,
+        StatusCode::UNAUTHORIZED
+    );
+
+    let new_secret = actix_web::test::TestRequest::post()
+        .uri("/api/auth/login")
+        .insert_header(API_VERSION)
+        .set_json(json!({
+            "username": "admin",
+            "password": "new-production-password-2026"
+        }));
+    assert_eq!(
+        harness::call(&env.state, new_secret).await.status,
+        StatusCode::OK
     );
 }
 

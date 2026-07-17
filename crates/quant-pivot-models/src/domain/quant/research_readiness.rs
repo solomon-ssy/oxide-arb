@@ -1,7 +1,7 @@
 //! Persistence DTOs for append-only operational readiness evidence.
 
 use chrono::{DateTime, Utc};
-use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -29,7 +29,7 @@ pub struct NewResearchReadinessEvidence {
     pub attestation_mac: ContentHash,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
+#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
 #[sea_orm(entity = "crate::entities::quant_research_readiness_evidence::Entity")]
 pub struct ResearchReadinessEvidenceInfo {
     pub evidence_id: Uuid,

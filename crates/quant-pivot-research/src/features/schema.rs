@@ -110,7 +110,7 @@ pub enum PitRule {
     /// The fact must be effective at or before its already-derived source
     /// cutoff. The feature plane must never subtract knowledge lag again.
     FactAtOrBeforeSourceCutoff,
-    /// The catalog version must be effective at or before its source cutoff and
+    /// The catalog change must be effective at or before its source cutoff and
     /// available no later than the decision time.
     MetadataVersionAtOrBeforeSourceCutoff,
     /// The linkage revision must be effective at or before its source cutoff

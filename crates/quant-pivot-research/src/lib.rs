@@ -22,11 +22,11 @@
 //!
 //! # Feature flags
 //!
-//! The base build links only the pure-Rust numeric stack (`ndarray` /
-//! `ndarray-stats` / `statrs` / `rayon`), which the online feature plane needs
+//! The base build links only the pure-Rust numeric stack (`ndarray` / `statrs` /
+//! `rayon`), which the online feature plane needs
 //! for rolling statistics and parallel batch build. The heavy / native-adjacent
 //! stacks are feature-gated and never appear in the default `report_only` build:
-//! `dataframe` (polars / arrow / parquet), `optimize` (argmin), `ml-classical`
+//! `dataframe` (polars / parquet), `optimize` (argmin), `ml-classical`
 //! (smartcore).
 
 #![deny(unsafe_code)]
@@ -176,7 +176,7 @@ mod feature_guard_tests {
     /// The optimizer (`argmin`) and classical-ML (`smartcore`) stacks stay gated
     /// until Phase 3.6 and must never be linked by default.
     ///
-    /// `dataframe` (polars/arrow/parquet) is **intentionally excluded** from this
+    /// `dataframe` (polars/parquet) is **intentionally excluded** from this
     /// guard: Phase 3.5 links it workspace-wide so `quant-pivot-core` can
     /// materialize offline training datasets (the `always_compile` decision —
     /// `quant-pivot-core` enables `quant-pivot-research/dataframe`). Under

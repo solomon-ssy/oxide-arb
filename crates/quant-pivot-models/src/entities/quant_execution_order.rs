@@ -14,6 +14,7 @@ use crate::{
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
+#[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "quant_execution_order")]
 pub struct Model {
@@ -41,42 +42,23 @@ pub struct Model {
     pub error_message: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
-}
 
-#[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-pub enum Relation {
     #[sea_orm(
-        belongs_to = "super::quant_order_intent::Entity",
-        from = "Column::OrderIntentId",
-        to = "super::quant_order_intent::Column::OrderIntentId"
+        belongs_to,
+        relation_enum = "OrderIntent",
+        from = "order_intent_id",
+        to = "order_intent_id"
     )]
-    OrderIntent,
+    pub order_intent: BelongsTo<super::quant_order_intent::Entity>,
     #[sea_orm(
-        belongs_to = "super::market::Entity",
-        from = "Column::MarketId",
-        to = "super::market::Column::MarketId"
+        belongs_to,
+        relation_enum = "Market",
+        from = "market_id",
+        to = "market_id"
     )]
-    Market,
-    #[sea_orm(has_one = "super::quant_reconciliation::Entity")]
-    Reconciliation,
-}
-
-impl Related<super::quant_order_intent::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::OrderIntent.def()
-    }
-}
-
-impl Related<super::market::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::Market.def()
-    }
-}
-
-impl Related<super::quant_reconciliation::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::Reconciliation.def()
-    }
+    pub market: BelongsTo<super::market::Entity>,
+    #[sea_orm(has_one, relation_enum = "Reconciliation")]
+    pub reconciliation: HasOne<super::quant_reconciliation::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

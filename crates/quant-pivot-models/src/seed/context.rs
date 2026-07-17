@@ -2,7 +2,7 @@
 
 use std::{any::Any, collections::HashMap};
 
-use crate::schema::seed::SeedArtifactKey;
+use crate::seed::SeedArtifactKey;
 use quant_pivot_error::seed::SeedError;
 
 /// Shared state passed through a seed plan's execution.

@@ -30,7 +30,7 @@ use quant_pivot_models::{
     types::{MarketId, Price, Shares, TokenId},
 };
 use quant_pivot_repository::traits::{
-    CatalogVersionRepository, ClobMarketInfoRepository, QuantFactReadRepository,
+    CatalogLedgerRepository, ClobMarketInfoRepository, QuantFactReadRepository,
 };
 use quant_pivot_research::pit::{
     BookSnapshotAt, CanonicalBookEventRef, PointInTimeSnapshotSource, ResolvedMarketSnapshot,
@@ -81,7 +81,7 @@ impl BookDecodeStatus {
 /// Resolves durable book and catalog state with no look-ahead.
 pub struct DurablePitSource {
     fact_read: Arc<dyn QuantFactReadRepository>,
-    catalog_repo: Arc<dyn CatalogVersionRepository>,
+    catalog_repo: Arc<dyn CatalogLedgerRepository>,
     clob_market_info_repo: Arc<dyn ClobMarketInfoRepository>,
 }
 
@@ -90,7 +90,7 @@ impl DurablePitSource {
     #[must_use]
     pub fn new(
         fact_read: Arc<dyn QuantFactReadRepository>,
-        catalog_repo: Arc<dyn CatalogVersionRepository>,
+        catalog_repo: Arc<dyn CatalogLedgerRepository>,
         clob_market_info_repo: Arc<dyn ClobMarketInfoRepository>,
     ) -> Self {
         Self {

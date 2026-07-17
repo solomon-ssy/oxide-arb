@@ -105,7 +105,7 @@ impl RuntimeControlPort for QuantRuntimeControl {
 
         // Persist operational truth, then hot-swap the in-process handle.
         self.runtime_state_repo
-            .upsert_quant_runtime_mode(target, actor, reason)
+            .set_quant_runtime_mode(target, actor, reason)
             .await?;
         self.runtime_mode.store(target);
         self.status_publisher.publish();

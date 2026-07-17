@@ -4,8 +4,6 @@
 //! artifact store is Local for development or S3-compatible WORM storage for
 //! production evidence and model artifacts.
 
-use std::fmt;
-
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -54,19 +52,10 @@ pub struct ResearchDeployConfig {
 
 /// Dedicated keyed-BLAKE3 attestation identity for operational evidence.
 /// This key is separate from venue signing and JWT credentials.
-#[derive(Clone, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct EvidenceAttestationConfig {
-    pub key_id: String,
-    pub secret_hex: Option<String>,
-}
-
-impl fmt::Debug for EvidenceAttestationConfig {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("EvidenceAttestationConfig")
-            .field("key_id", &self.key_id)
-            .field("secret_hex", &self.secret_hex.as_ref().map(|_| "***"))
-            .finish()
-    }
+    /// Key selected for new evidence. Key bytes are loaded exclusively from
+    /// the external secret-manager keyring environment.
+    pub signing_key_id: String,
 }

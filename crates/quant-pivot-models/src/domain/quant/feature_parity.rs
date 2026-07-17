@@ -6,17 +6,20 @@ use crate::{
         FeatureParityLatchState, FeatureParityRunKind, FeatureParityRunStatus,
         FeatureParityStateTransition,
     },
+    hashing::CanonicalDigest,
     types::{
-        ContentHash, FeatureParityRunId, FeatureParityStateId, ModelVersionId,
-        RecommendationReportId, TrainingDatasetId,
+        ContentHash, FeatureParityRunId, FeatureParityStateId, MarketId, MarketSelectionId,
+        ModelRunId, ModelSpecId, ModelVersionId, PortfolioPlanId, RecommendationReportId,
+        ReportDataQualitySnapshotId, RuntimeConfigVersionId, TrainingDatasetId,
     },
 };
 use chrono::{DateTime, Utc};
-use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
+use quant_pivot_error::hashing::CanonicalDigestError;
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
 use serde::{Deserialize, Serialize};
 
 /// One persisted deterministic parity replay.
-#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
+#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
 #[sea_orm(entity = "crate::entities::quant_feature_parity_run::Entity")]
 pub struct FeatureParityRunInfo {
     pub run_id: FeatureParityRunId,
@@ -128,8 +131,208 @@ pub struct CompleteFeatureParityRun {
     pub failure_detail: Option<String>,
 }
 
+/// Frozen market membership loaded from the WORM parity ledger.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrozenFeatureParityCandidate {
+    pub market_id: MarketId,
+    pub ordinal: i32,
+    pub membership_hash: ContentHash,
+}
+
+/// Typed identity of one frozen serving decision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FrozenFeatureParitySubjectId {
+    ModelRun(ModelRunId),
+    RecommendationReport(RecommendationReportId),
+    ModelVersion {
+        model_version_id: ModelVersionId,
+        training_dataset_id: TrainingDatasetId,
+    },
+}
+
+/// Exact serving subject and membership frozen before a parity job is visible.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrozenFeatureParitySubject {
+    pub subject_id: FrozenFeatureParitySubjectId,
+    pub market_selection_id: Option<MarketSelectionId>,
+    pub subject_generation: ContentHash,
+    pub decision_at: Option<DateTime<Utc>>,
+    pub selection_hash: Option<ContentHash>,
+    pub evidence_hash: ContentHash,
+    pub candidates: Vec<FrozenFeatureParityCandidate>,
+}
+
+/// WORM subject written atomically with an offline pre-publication full proof.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewFrozenModelParitySubject {
+    pub model_version_id: ModelVersionId,
+    pub training_dataset_id: TrainingDatasetId,
+    pub subject_generation: ContentHash,
+    pub evidence_hash: ContentHash,
+}
+
+/// Exact model artifact and dataset materialization covered by a publication proof.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct ModelVersionParityEvidence<'a> {
+    pub model_version_id: &'a ModelVersionId,
+    pub model_spec_id: &'a ModelSpecId,
+    pub artifact_hash: &'a ContentHash,
+    pub training_dataset_id: &'a TrainingDatasetId,
+    pub dataset_hash: &'a ContentHash,
+    pub manifest_hash: &'a ContentHash,
+    pub artifact_bytes_hash: &'a ContentHash,
+}
+
+pub fn model_version_parity_evidence_hash(
+    evidence: &ModelVersionParityEvidence<'_>,
+) -> Result<ContentHash, CanonicalDigestError> {
+    CanonicalDigest::content_hash_typed(
+        "quant-pivot/feature-parity/model-version-evidence",
+        1,
+        evidence,
+    )
+}
+
+/// Exact immutable model-run fields covered by a frozen parity subject.
+pub fn model_run_parity_evidence_hash(
+    model_run_id: &ModelRunId,
+    input_hash: &ContentHash,
+    output_hash: &ContentHash,
+    model_version_id: &Option<ModelVersionId>,
+    runtime_config_version_id: &RuntimeConfigVersionId,
+) -> Result<ContentHash, CanonicalDigestError> {
+    #[derive(Serialize)]
+    struct Evidence<'a> {
+        model_run_id: &'a ModelRunId,
+        input_hash: &'a ContentHash,
+        output_hash: &'a ContentHash,
+        model_version_id: &'a Option<ModelVersionId>,
+        runtime_config_version_id: &'a RuntimeConfigVersionId,
+    }
+
+    CanonicalDigest::content_hash_typed(
+        "quant-pivot/feature-parity/model-run-evidence",
+        1,
+        &Evidence {
+            model_run_id,
+            input_hash,
+            output_hash,
+            model_version_id,
+            runtime_config_version_id,
+        },
+    )
+}
+
+/// Stable generation identifier for an immutable report artifact.
+pub fn report_parity_generation_hash(
+    report_id: &RecommendationReportId,
+    decision_at: DateTime<Utc>,
+    created_at: DateTime<Utc>,
+) -> Result<ContentHash, CanonicalDigestError> {
+    #[derive(Serialize)]
+    struct Generation<'a> {
+        report_id: &'a RecommendationReportId,
+        decision_at: DateTime<Utc>,
+        created_at: DateTime<Utc>,
+    }
+
+    CanonicalDigest::content_hash_typed(
+        "quant-pivot/feature-parity/report-generation",
+        1,
+        &Generation {
+            report_id,
+            decision_at,
+            created_at,
+        },
+    )
+}
+
+/// Immutable report evidence bound to its generation and selection.
+pub fn report_parity_evidence_hash(
+    generation: &ContentHash,
+    model_version_id: &ModelVersionId,
+    runtime_config_version_id: &RuntimeConfigVersionId,
+    market_selection_id: &MarketSelectionId,
+    data_quality_snapshot_id: &ReportDataQualitySnapshotId,
+    portfolio_plan_id: &PortfolioPlanId,
+) -> Result<ContentHash, CanonicalDigestError> {
+    #[derive(Serialize)]
+    struct Evidence<'a> {
+        generation: &'a ContentHash,
+        model_version_id: &'a ModelVersionId,
+        runtime_config_version_id: &'a RuntimeConfigVersionId,
+        market_selection_id: &'a MarketSelectionId,
+        data_quality_snapshot_id: &'a ReportDataQualitySnapshotId,
+        portfolio_plan_id: &'a PortfolioPlanId,
+    }
+
+    CanonicalDigest::content_hash_typed(
+        "quant-pivot/feature-parity/report-evidence",
+        1,
+        &Evidence {
+            generation,
+            model_version_id,
+            runtime_config_version_id,
+            market_selection_id,
+            data_quality_snapshot_id,
+            portfolio_plan_id,
+        },
+    )
+}
+
+/// Canonical set identity for a selector result. Market ids are sorted here so
+/// callers cannot accidentally make the digest depend on query row order.
+pub fn parity_selection_hash(
+    selection_id: &MarketSelectionId,
+    selector_hash: &ContentHash,
+    market_ids: &[MarketId],
+) -> Result<ContentHash, CanonicalDigestError> {
+    #[derive(Serialize)]
+    struct ParityMembership<'a> {
+        selection_id: &'a MarketSelectionId,
+        selector_hash: &'a ContentHash,
+        market_ids: Vec<&'a MarketId>,
+    }
+
+    let mut market_ids = market_ids.iter().collect::<Vec<_>>();
+    market_ids.sort();
+    CanonicalDigest::content_hash_typed(
+        "quant-pivot/feature-parity/selection",
+        1,
+        &ParityMembership {
+            selection_id,
+            selector_hash,
+            market_ids,
+        },
+    )
+}
+
+/// Exact ordinal membership proof within a frozen selection.
+pub fn parity_candidate_membership_hash(
+    selection_hash: &ContentHash,
+    market_id: &MarketId,
+    ordinal: i32,
+) -> Result<ContentHash, CanonicalDigestError> {
+    #[derive(Serialize)]
+    struct Membership<'a> {
+        selection_hash: &'a ContentHash,
+        market_id: &'a MarketId,
+        ordinal: i32,
+    }
+
+    CanonicalDigest::content_hash_typed(
+        "quant-pivot/feature-parity/candidate-membership",
+        1,
+        &Membership {
+            selection_hash,
+            market_id,
+            ordinal,
+        },
+    )
+}
+
 /// One immutable transition of the admission latch.
-#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
+#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
 #[sea_orm(entity = "crate::entities::quant_feature_parity_state::Entity")]
 pub struct FeatureParityStateInfo {
     pub state_id: FeatureParityStateId,

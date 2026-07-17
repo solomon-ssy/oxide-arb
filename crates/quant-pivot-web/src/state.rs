@@ -5,10 +5,10 @@ use std::sync::Arc;
 use quant_pivot_models::{
     config::DeployConfig,
     domain::{
-        AccountReadPort, BacktestPort, CalibrationArtifactFitPort, CatalogStatusPort, CoreEvent,
-        CoreEventPublisher, CpcvBacktestPort, DataQualityPort, ExecutionReadPort,
-        ExecutionRecoveryPort, FactorGovernancePort, FeatureIntegrityPort, KillSwitchPort,
-        MarketDataPort, MarketLinkageGovernancePort, MaterializationRunEvent,
+        AccountReadPort, BacktestPort, BootstrapPort, CalibrationArtifactFitPort,
+        CatalogStatusPort, CoreEvent, CoreEventPublisher, CpcvBacktestPort, DataQualityPort,
+        ExecutionReadPort, ExecutionRecoveryPort, FactorGovernancePort, FeatureIntegrityPort,
+        KillSwitchPort, MarketDataPort, MarketLinkageGovernancePort, MaterializationRunEvent,
         MaterializationRunKind, MaterializationRunStatus, MetricsScrapePort,
         ModelCalibrationFitPort, ModelGovernancePort, ModelSpecPort, ModelTrainingPort,
         OrderIntentPort, QuantReportPort, ReadinessPort, ReconciliationPort, ResearchCatalogPort,
@@ -49,6 +49,7 @@ pub struct AppState {
     pub operation_logs: Arc<dyn OperationLogRepository>,
     pub operation_log: OperationLogBuffer,
     pub control: Arc<dyn RuntimeControlPort>,
+    pub bootstrap: Arc<dyn BootstrapPort>,
     /// Operational kill-switch governed read/write surface (05.1).
     pub kill_switch: Arc<dyn KillSwitchPort>,
     pub market_data: Arc<dyn MarketDataPort>,

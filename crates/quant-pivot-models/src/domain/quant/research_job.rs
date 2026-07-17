@@ -5,14 +5,14 @@ use crate::{
     types::{DatasetCoverage, ModelSpecId, ResearchJobId, RuntimeConfigVersionId},
 };
 use chrono::{DateTime, Utc};
-use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 pub use crate::types::{ResearchJobError, ResearchJobProgress};
 
 /// Durable research-job ledger row (full projection).
-#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
+#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
 #[sea_orm(entity = "crate::entities::quant_research_job::Entity")]
 pub struct ResearchJobInfo {
     pub job_id: ResearchJobId,

@@ -52,6 +52,10 @@ pub enum WebError {
     #[error("too many requests: {0}")]
     TooManyRequests(String),
 
+    /// Well-formed request whose domain preconditions are not met (HTTP 422).
+    #[error("unprocessable entity: {0}")]
+    UnprocessableEntity(String),
+
     /// An unexpected server-side failure (HTTP 500). The detail is logged but
     /// never returned to the client.
     #[error("internal error: {0}")]
@@ -78,6 +82,7 @@ impl WebError {
             Self::BadRequest(_) => StatusCode::BAD_REQUEST,
             Self::Conflict(_) => StatusCode::CONFLICT,
             Self::TooManyRequests(_) => StatusCode::TOO_MANY_REQUESTS,
+            Self::UnprocessableEntity(_) => StatusCode::UNPROCESSABLE_ENTITY,
             Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::ServiceUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
             Self::NotImplemented(_) => StatusCode::NOT_IMPLEMENTED,
@@ -93,6 +98,7 @@ impl WebError {
             | Self::BadRequest(msg)
             | Self::Conflict(msg)
             | Self::TooManyRequests(msg)
+            | Self::UnprocessableEntity(msg)
             | Self::ServiceUnavailable(msg)
             | Self::NotImplemented(msg) => msg.clone(),
             Self::Forbidden => "forbidden".to_owned(),
@@ -237,6 +243,9 @@ impl From<QuantError> for WebError {
         match error {
             QuantError::Storage(storage) => storage.into(),
             QuantError::Rbac(rbac) => rbac.into(),
+            QuantError::Research(ResearchError::NotEligible { code, detail }) => {
+                Self::UnprocessableEntity(format!("{code}: {detail}"))
+            }
             QuantError::Research(
                 ResearchError::DatasetPlan { detail }
                 | ResearchError::LeakageDetected { detail }

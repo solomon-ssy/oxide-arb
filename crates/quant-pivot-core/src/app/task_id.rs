@@ -40,6 +40,7 @@ pub enum TaskId {
 
     // ── Catalog ───────────────────────────────────────────────────────
     GammaSync,
+    CatalogLinkageResolver,
     ClobMarketInfoSync,
     CalibrationUpdater,
 
@@ -146,9 +147,10 @@ impl TaskId {
             | Self::TradeTapeWorker
             | Self::DomainIngestWorker
             | Self::DomainLiveIngestWorker => TaskKind::WsIngress,
-            Self::GammaSync | Self::ClobMarketInfoSync | Self::CalibrationUpdater => {
-                TaskKind::CatalogSync
-            }
+            Self::GammaSync
+            | Self::CatalogLinkageResolver
+            | Self::ClobMarketInfoSync
+            | Self::CalibrationUpdater => TaskKind::CatalogSync,
             Self::Coalescer => TaskKind::CacheWorker,
             Self::TradeTapeReconciliationWorker => TaskKind::BookReconciliation,
             Self::PotentialLossEscalation

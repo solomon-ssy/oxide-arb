@@ -47,7 +47,7 @@ impl PgRedisReadiness {
         let start = Instant::now();
         let result = self
             .db
-            .execute(Statement::from_string(
+            .execute_raw(Statement::from_string(
                 self.db.get_database_backend(),
                 "SELECT 1".to_owned(),
             ))

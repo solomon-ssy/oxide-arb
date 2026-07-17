@@ -14,11 +14,11 @@ use crate::{
 };
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
-use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
 use serde::{Deserialize, Serialize};
 
 /// One on-chain CTF redemption batch for a `(condition_id, funder)` pair.
-#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
+#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
 #[sea_orm(entity = "crate::entities::quant_settlement_redeem::Entity")]
 pub struct SettlementRedeemInfo {
     pub settlement_redeem_id: SettlementRedeemId,
@@ -80,7 +80,7 @@ pub struct NewSettlementRedeem {
 }
 
 /// Per-lot allocation within a settlement redemption batch.
-#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
+#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
 #[sea_orm(entity = "crate::entities::quant_settlement_redeem_lot::Entity")]
 pub struct SettlementRedeemLotInfo {
     pub settlement_redeem_lot_id: SettlementRedeemLotId,

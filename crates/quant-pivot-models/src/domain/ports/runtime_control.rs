@@ -2,7 +2,7 @@
 
 use crate::{
     domain::{
-        ReadinessReport,
+        ActivateBootstrapRequest, BootstrapView, ReadinessReport, SystemCapabilities,
         data_plane::DataQualitySnapshot,
         governance::{
             kill_switch::KillSwitchView,
@@ -43,6 +43,23 @@ impl CatalogState {
 pub trait CatalogStatusPort: Send + Sync {
     fn catalog_state(&self) -> CatalogState;
     fn is_ready(&self) -> bool;
+}
+
+#[async_trait]
+pub trait BootstrapPort: Send + Sync {
+    fn view(&self) -> BootstrapView;
+    fn subscribe(&self) -> tokio::sync::watch::Receiver<BootstrapView>;
+    fn capability_snapshot(&self) -> SystemCapabilities;
+    fn subscribe_capabilities(&self) -> tokio::sync::watch::Receiver<SystemCapabilities>;
+    fn refresh_operational_capabilities(&self, status: &SystemStatus) -> SystemCapabilities;
+    async fn capabilities(&self, status: &SystemStatus) -> QuantResult<SystemCapabilities>;
+    async fn mark_catalog_ready(&self) -> QuantResult<BootstrapView>;
+    async fn activate(
+        &self,
+        request: ActivateBootstrapRequest,
+        actor: &str,
+        acting_role: &str,
+    ) -> QuantResult<BootstrapView>;
 }
 
 /// Outcome of a successful governed quant runtime mode transition.
@@ -114,11 +131,36 @@ pub trait KillSwitchPort: Send + Sync {
 #[async_trait]
 pub trait RuntimeConfigPort: Send + Sync {
     fn current(&self) -> Arc<RuntimeConfig>;
-    fn preflight(&self, candidate: &RuntimeConfig) -> Result<(), ControlError>;
-    /// Apply one complete live snapshot. Returning `Err` must leave
-    /// [`Self::current`] at the previous snapshot; callers use that invariant
-    /// to coordinate durable activation compensation.
-    async fn apply(&self, config: RuntimeConfig) -> Result<(), ControlError>;
+    /// Resolve and validate every fallible dependency without mutating live state.
+    async fn prepare(&self, config: RuntimeConfig) -> Result<PreparedRuntimeConfig, ControlError>;
+}
+
+/// One-shot, fully validated runtime snapshot publication command.
+///
+/// The callback contains only infallible in-memory swaps. Constructing this
+/// value is fallible; consuming it after the durable activation commits is not.
+pub struct PreparedRuntimeConfig {
+    config: Arc<RuntimeConfig>,
+    publish: Box<dyn FnOnce() + Send + 'static>,
+}
+
+impl PreparedRuntimeConfig {
+    #[must_use]
+    pub fn new(config: Arc<RuntimeConfig>, publish: impl FnOnce() + Send + 'static) -> Self {
+        Self {
+            config,
+            publish: Box::new(publish),
+        }
+    }
+
+    #[must_use]
+    pub const fn config(&self) -> &Arc<RuntimeConfig> {
+        &self.config
+    }
+
+    pub fn publish(self) {
+        (self.publish)();
+    }
 }
 
 #[async_trait]

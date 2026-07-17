@@ -38,15 +38,10 @@ use std::{sync::Arc, time::Duration};
 impl AppContext {
     pub fn register_runtime_tasks(&self, runner: &mut AppRunner) {
         let pipeline = Arc::clone(&self.data.data_pipeline);
-        runner.spawn(TaskId::DataPipeline, move |token| async move {
-            tokio::select! {
-                () = token.cancelled() => {}
-                result = pipeline.run() => {
-                    if let Err(error) = result {
-                        tracing::error!(%error, "DataPipeline exited with error");
-                    }
-                }
-            }
+        runner.spawn_critical(TaskId::DataPipeline, move |_token| async move {
+            // DataPipeline owns the root shutdown token and must finish its
+            // ingress/worker drain before the Analytics stage closes sinks.
+            pipeline.run().await
         });
         if let Some(worker) = self.build_trade_tape_worker() {
             runner.spawn(TaskId::TradeTapeWorker, move |token| async move {

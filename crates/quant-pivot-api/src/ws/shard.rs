@@ -7,7 +7,7 @@
 //! shard. An empty token set parks the actor instead of busy-looping.
 
 use super::{
-    health::ShardHealthBoard,
+    health::{ShardHealthBoard, TokenFreshnessBoard},
     ingest_hooks::BookLevelRejectHook,
     normalize::normalize_ws_message,
     reconnect::{ReconnectPolicy, ReconnectState},
@@ -73,6 +73,8 @@ pub(super) struct ShardDeps {
     pub connect_limiter: Arc<Semaphore>,
     /// Aggregated connection-state board for health summaries.
     pub health: Arc<ShardHealthBoard>,
+    /// Per-token freshness is invalidated synchronously at every broken session boundary.
+    pub token_freshness: Arc<TokenFreshnessBoard>,
 }
 
 /// Why a streaming session ended.
@@ -256,8 +258,8 @@ async fn connect_and_stream(
         Err(error) => return StreamEnd::Failed(format!("WS client creation failed: {error}")),
     };
 
-    // `subscribe_market_resolutions` first — enables SDK `custom_features`
-    // on the channel (also required by `best_bid_ask`).
+    // `subscribe_market_resolutions` first so the SDK enables custom features
+    // before the other production streams are registered.
     macro_rules! subscribe {
         ($method:ident) => {
             match client.$method(asset_ids.clone()) {
@@ -273,18 +275,20 @@ async fn connect_and_stream(
     let mut price_stream = subscribe!(subscribe_prices);
     let mut last_trade_stream = subscribe!(subscribe_last_trade_price);
     let mut tick_size_stream = subscribe!(subscribe_tick_size_change);
-    let mut bbo_stream = subscribe!(subscribe_best_bid_ask);
 
     reconnect.reset();
     deps.health.set_connected(shard_id, true);
     emit_status(deps, shard_id, ShardConnectionStatus::Connected);
     let stream_session_id = Uuid::now_v7();
     let opened_at_ms = chrono::Utc::now().timestamp_millis();
-    let subscription_token_hash = match subscription_token_hash(&tokens) {
+    let mut subscription_tokens = tokens.iter().cloned().collect::<Vec<_>>();
+    subscription_tokens.sort_unstable_by(|left, right| left.as_str().cmp(right.as_str()));
+    let subscription_token_hash = match subscription_token_hash(&subscription_tokens) {
         Ok(hash) => hash,
         Err(error) => return StreamEnd::Failed(error),
     };
-    let subscription_token_count = u32::try_from(tokens.len()).unwrap_or(u32::MAX);
+    let subscription_tokens: Arc<[TokenId]> = Arc::from(subscription_tokens);
+    let subscription_token_count = u32::try_from(subscription_tokens.len()).unwrap_or(u32::MAX);
     if !send_session_event(
         deps,
         PipelineEvent::StreamSessionOpened {
@@ -292,11 +296,16 @@ async fn connect_and_stream(
             shard_id: u32::try_from(shard_id).unwrap_or(u32::MAX),
             subscription_token_hash: subscription_token_hash.clone(),
             subscription_token_count,
+            subscription_tokens: Arc::clone(&subscription_tokens),
             opened_at_ms,
         },
     )
     .await
     {
+        deps.token_freshness.invalidate_tokens(&subscription_tokens);
+        if let Some(hook) = &deps.on_session_invalidated {
+            hook(1);
+        }
         return StreamEnd::Overflow("stream-session open ledger enqueue timed out".to_owned());
     }
     let mut token_sequences = HashMap::<TokenId, u64>::new();
@@ -347,8 +356,6 @@ async fn connect_and_stream(
                 stream_arm!(item, "last trade", WsMessage::LastTradePrice),
             item = tick_size_stream.next() =>
                 stream_arm!(item, "tick size", WsMessage::TickSizeChange),
-            item = bbo_stream.next() =>
-                stream_arm!(item, "best bid/ask", WsMessage::BestBidAsk),
         }
     };
     let closing = ClosingStreamSession {
@@ -356,6 +363,7 @@ async fn connect_and_stream(
         shard_id,
         subscription_token_hash,
         subscription_token_count,
+        subscription_tokens: &subscription_tokens,
         opened_at_ms,
         token_sequences: &token_sequences,
     };
@@ -453,9 +461,8 @@ async fn dispatch_events(
     Ok(())
 }
 
-fn subscription_token_hash(tokens: &HashSet<TokenId>) -> Result<ContentHash, String> {
-    let mut token_ids = tokens.iter().map(TokenId::as_str).collect::<Vec<_>>();
-    token_ids.sort_unstable();
+fn subscription_token_hash(tokens: &[TokenId]) -> Result<ContentHash, String> {
+    let token_ids = tokens.iter().map(TokenId::as_str).collect::<Vec<_>>();
     CanonicalDigest::content_hash_json(&token_ids).map_err(|error| error.to_string())
 }
 
@@ -480,6 +487,7 @@ struct ClosingStreamSession<'a> {
     shard_id: usize,
     subscription_token_hash: ContentHash,
     subscription_token_count: u32,
+    subscription_tokens: &'a [TokenId],
     opened_at_ms: i64,
     token_sequences: &'a HashMap<TokenId, u64>,
 }
@@ -494,9 +502,13 @@ async fn close_stream_session(
         shard_id,
         subscription_token_hash,
         subscription_token_count,
+        subscription_tokens,
         opened_at_ms,
         token_sequences,
     } = session;
+    if reason != StreamSessionEndReason::Normal {
+        deps.token_freshness.invalidate_tokens(subscription_tokens);
+    }
     let closed_at_ms = chrono::Utc::now().timestamp_millis();
     let mut received_sequences = token_sequences
         .iter()
@@ -514,11 +526,22 @@ async fn close_stream_session(
         reason,
     };
     if !send_session_event(deps, closed).await {
-        tracing::error!(%stream_session_id, shard_id, "failed to enqueue invalid stream-session close ledger");
+        if let Some(hook) = &deps.on_session_invalidated {
+            hook(1);
+        }
+        tracing::error!(
+            %stream_session_id,
+            shard_id,
+            affected_tokens = subscription_tokens.len(),
+            ?reason,
+            "failed to enqueue stream-session close ledger; gap fan-out suppressed"
+        );
+        return;
     }
     if reason == StreamSessionEndReason::Normal {
         return;
     }
+    let mut failed_gaps = 0_u64;
     for (token_id, last_received_sequence) in received_sequences {
         let gap = PipelineEvent::StreamGap {
             asset_id: token_id,
@@ -528,8 +551,16 @@ async fn close_stream_session(
             timestamp_ms: u64::try_from(closed_at_ms).unwrap_or(0),
         };
         if !send_session_event(deps, gap).await {
-            tracing::error!(%stream_session_id, shard_id, "failed to enqueue stream gap");
+            failed_gaps = failed_gaps.saturating_add(1);
         }
+    }
+    if failed_gaps > 0 {
+        tracing::error!(
+            %stream_session_id,
+            shard_id,
+            failed_gaps,
+            "failed to enqueue one or more stream gaps"
+        );
     }
 }
 
@@ -542,7 +573,10 @@ fn emit_status(deps: &ShardDeps, shard_id: usize, status: ShardConnectionStatus)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::{
+        slice,
+        sync::atomic::{AtomicU64, Ordering},
+    };
 
     fn test_deps(
         output_tx: flume::Sender<PipelineEvent>,
@@ -560,6 +594,7 @@ mod tests {
             sdk_max_backoff: Duration::from_secs(30),
             connect_limiter: Arc::new(Semaphore::new(4)),
             health: Arc::new(ShardHealthBoard::default()),
+            token_freshness: Arc::new(TokenFreshnessBoard::default()),
         }
     }
 
@@ -593,6 +628,52 @@ mod tests {
 
         assert_eq!(rx.len(), 3);
         assert_eq!(dropped.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn failed_session_close_invalidates_freshness_without_gap_fanout() {
+        let (tx, rx) = flume::bounded(1);
+        tx.send(PipelineEvent::ShardStatus {
+            shard_id: 0,
+            status: ShardConnectionStatus::Connected,
+        })
+        .expect("fill output queue");
+        let invalidations = Arc::new(AtomicU64::new(0));
+        let hook: WsSessionInvalidationHook = {
+            let invalidations = Arc::clone(&invalidations);
+            Arc::new(move |count| {
+                invalidations.fetch_add(count, Ordering::Relaxed);
+            })
+        };
+        let deps = test_deps(tx, Some(hook));
+        let token = TokenId::new("1");
+        deps.token_freshness.mark_token(&token, Instant::now());
+        let session_id = Uuid::new_v4();
+        let sequences = HashMap::from([(token.clone(), 7)]);
+
+        close_stream_session(
+            &deps,
+            ClosingStreamSession {
+                stream_session_id: session_id,
+                shard_id: 0,
+                subscription_token_hash: subscription_token_hash(slice::from_ref(&token))
+                    .expect("subscription hash"),
+                subscription_token_count: 1,
+                subscription_tokens: slice::from_ref(&token),
+                opened_at_ms: 1,
+                token_sequences: &sequences,
+            },
+            StreamSessionEndReason::Overflow,
+        )
+        .await;
+
+        assert_eq!(
+            rx.len(),
+            1,
+            "no per-token gaps are queued after close failure"
+        );
+        assert_eq!(invalidations.load(Ordering::Relaxed), 1);
+        assert!(deps.token_freshness.token_age_ms(&token).is_none());
     }
 
     #[tokio::test(start_paused = true)]

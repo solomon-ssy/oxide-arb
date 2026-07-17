@@ -14,7 +14,8 @@ use quant_pivot_models::{
     clickhouse::QuantFeatureParityEventRow,
     domain::{
         CompleteFeatureParityRun, DecisionBoundary, FeatureParityRunInfo, ModelSpecInfo,
-        ModelVersionInfo, NewFeatureParityRun, TrainingDatasetInfo,
+        ModelVersionInfo, ModelVersionParityEvidence, NewFeatureParityRun,
+        NewFrozenModelParitySubject, TrainingDatasetInfo, model_version_parity_evidence_hash,
     },
     enums::quant::{
         FeatureParityEventStatus, FeatureParityRunKind, FeatureParityRunStatus, FeatureParityStage,
@@ -98,36 +99,53 @@ impl FrozenModelParityService {
 
         let materialization = require_dataset_materialization(&dataset)?;
         let run_id = FeatureParityRunId::from_v7();
+        let frozen_subject = NewFrozenModelParitySubject {
+            model_version_id: version.model_version_id.clone(),
+            training_dataset_id: dataset.training_dataset_id.clone(),
+            subject_generation: version.artifact_hash.clone(),
+            evidence_hash: model_version_parity_evidence_hash(&ModelVersionParityEvidence {
+                model_version_id: &version.model_version_id,
+                model_spec_id: &version.model_spec_id,
+                artifact_hash: &version.artifact_hash,
+                training_dataset_id: &dataset.training_dataset_id,
+                dataset_hash: materialization.dataset_hash,
+                manifest_hash: materialization.manifest_hash,
+                artifact_bytes_hash: materialization.artifact_bytes_hash,
+            })?,
+        };
         let queued = self
             .deps
             .parity_repo
-            .create_run(NewFeatureParityRun {
-                run_id: run_id.clone(),
-                kind: FeatureParityRunKind::Full,
-                status: FeatureParityRunStatus::Queued,
-                window_start: dataset.window_start,
-                window_end: dataset.window_end,
-                report_id: None,
-                model_version_id: Some(version.model_version_id.clone()),
-                training_dataset_id: Some(dataset.training_dataset_id.clone()),
-                triggered_by: triggered_by.to_owned(),
-                requested_by: None,
-                acting_role: "system".to_owned(),
-                reason: reason.to_owned(),
-                total_count: 0,
-                compared_count: 0,
-                matched_count: 0,
-                mismatched_count: 0,
-                pending_materialization_count: 0,
-                feature_contract_hash: Some(materialization.feature_schema_hash.clone()),
-                transform_hash: None,
-                failure_code: None,
-                failure_detail: None,
-                started_at: None,
-                pending_since: None,
-                containment_completed_at: None,
-                finished_at: None,
-            })
+            .create_frozen_model_run(
+                NewFeatureParityRun {
+                    run_id: run_id.clone(),
+                    kind: FeatureParityRunKind::Full,
+                    status: FeatureParityRunStatus::Queued,
+                    window_start: dataset.window_start,
+                    window_end: dataset.window_end,
+                    report_id: None,
+                    model_version_id: Some(version.model_version_id.clone()),
+                    training_dataset_id: Some(dataset.training_dataset_id.clone()),
+                    triggered_by: triggered_by.to_owned(),
+                    requested_by: None,
+                    acting_role: "system".to_owned(),
+                    reason: reason.to_owned(),
+                    total_count: 0,
+                    compared_count: 0,
+                    matched_count: 0,
+                    mismatched_count: 0,
+                    pending_materialization_count: 0,
+                    feature_contract_hash: Some(materialization.feature_schema_hash.clone()),
+                    transform_hash: None,
+                    failure_code: None,
+                    failure_detail: None,
+                    started_at: None,
+                    pending_since: None,
+                    containment_completed_at: None,
+                    finished_at: None,
+                },
+                frozen_subject,
+            )
             .await?;
         self.deps.parity_repo.mark_running(&queued.run_id).await?;
 
@@ -212,11 +230,11 @@ impl FrozenModelParityService {
     ) -> QuantResult<(TrainingDatasetInfo, ModelSpecInfo)> {
         if !matches!(
             version.publication_status,
-            PublicationStatus::Candidate | PublicationStatus::Shadow
+            PublicationStatus::Candidate | PublicationStatus::Shadow | PublicationStatus::Retired
         ) {
             return Err(ResearchError::Determinism {
                 detail: format!(
-                    "frozen model parity only verifies non-production candidates, got {} for {}",
+                    "frozen model parity only verifies candidate, shadow, or retired rollback subjects, got {} for {}",
                     version.publication_status.as_str(),
                     version.model_version_id
                 ),

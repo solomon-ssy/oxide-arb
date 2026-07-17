@@ -5,7 +5,7 @@ use std::{collections::HashSet, convert::identity};
 use super::equity_snapshot::insert_equity_snapshot_monotonic;
 use crate::{
     postgres::{
-        error,
+        error, primitives,
         quant::{
             feature_parity, order_intent::invalidate_pre_submission_for_recommendation,
             report_scope::acquire_report_scope_lock,
@@ -52,9 +52,9 @@ use quant_pivot_models::{
     },
 };
 use sea_orm::{
-    ActiveModelTrait, ActiveValue, ColumnTrait, Condition, ConnectionTrait, DatabaseBackend,
-    DatabaseConnection, DatabaseTransaction, EntityTrait, IntoActiveModel, PaginatorTrait,
-    QueryFilter, QueryOrder, QuerySelect, Statement, TransactionTrait,
+    ActiveModelTrait, ActiveValue, ColumnTrait, Condition, DatabaseConnection, DatabaseTransaction,
+    EntityTrait, IntoActiveModel, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect,
+    TransactionTrait,
     sea_query::{LockBehavior, LockType},
 };
 
@@ -114,23 +114,6 @@ async fn fact_delivery_claim(
         return Ok(FactDeliveryClaim::Lost(row));
     }
     Ok(FactDeliveryClaim::Held(row))
-}
-
-async fn database_now(db: &impl ConnectionTrait) -> Result<DateTime<Utc>, StorageError> {
-    let row = db
-        .query_one(Statement::from_string(
-            DatabaseBackend::Postgres,
-            "SELECT statement_timestamp() AS now".to_owned(),
-        ))
-        .await
-        .map_err(StorageError::from)?
-        .ok_or_else(|| {
-            StorageError::invariant_violation(
-                Some(entity::QUANT_RECOMMENDATION_REPORT),
-                "database did not return statement_timestamp",
-            )
-        })?;
-    row.try_get("", "now").map_err(StorageError::from)
 }
 
 fn publication_operation_log(
@@ -442,16 +425,18 @@ fn new_condition_audit(
 async fn insert_sampled_feature_parity(
     txn: &DatabaseTransaction,
     parity: Option<NewReportFeatureParity>,
-    report_id: &RecommendationReportId,
+    report: &quant_recommendation_report::Model,
 ) -> Result<(), StorageError> {
     let Some(parity) = parity else {
         return Ok(());
     };
-    let parity_key = report_id.to_string();
+    let parity_key = report.recommendation_report_id.to_string();
+    let run_id = parity.run.run_id.clone();
     quant_feature_parity_run::Entity::insert(parity.run.into_active_model())
         .exec(txn)
         .await
         .map_err(|error| error::map_unique(error, entity::QUANT_FEATURE_PARITY_RUN, &parity_key))?;
+    feature_parity::insert_frozen_report_subject(txn, &run_id, report).await?;
     quant_research_job::Entity::insert(parity.job.into_active_model())
         .exec(txn)
         .await
@@ -810,7 +795,7 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
         })?;
 
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let commit_at = database_now(&txn).await?;
+        let commit_at = primitives::statement_timestamp(&txn).await?;
         let run = quant_report_run::Entity::find_by_id(run_claim.report_run_id.clone())
             .lock_exclusive()
             .one(&txn)
@@ -876,12 +861,7 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
             .await
             .map_err(StorageError::from)?;
         }
-        insert_sampled_feature_parity(
-            &txn,
-            sampled_feature_parity,
-            &report_model.recommendation_report_id,
-        )
-        .await?;
+        insert_sampled_feature_parity(&txn, sampled_feature_parity, &report_model).await?;
         if !recommendations.is_empty() {
             quant_recommendation::Entity::insert_many(
                 recommendations
@@ -979,7 +959,7 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
     ) -> Result<Option<ReportFactDeliveryInfo>, StorageError> {
         let lease_duration = report_fact_lease_duration(lease_secs)?;
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let database_now = database_now(&txn).await?;
+        let database_now = primitives::statement_timestamp(&txn).await?;
         let effective_lease_expires_at = database_now + lease_duration;
         let row = quant_report_fact_delivery::Entity::find()
             .filter(
@@ -1061,7 +1041,7 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
             ));
         }
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let now = database_now(&txn).await?;
+        let now = primitives::statement_timestamp(&txn).await?;
         let row = match fact_delivery_claim(&txn, report_id, worker_id, now).await? {
             FactDeliveryClaim::Held(row) => row,
             FactDeliveryClaim::Lost(row) => {
@@ -1094,13 +1074,6 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
         occurred_at: DateTime<Utc>,
     ) -> Result<ReportFactDeliveryInfo, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let now = database_now(&txn).await?;
-        if occurred_at > now + chrono::Duration::seconds(5) {
-            return Err(StorageError::invariant_violation(
-                Some(entity::QUANT_RECOMMENDATION_REPORT),
-                "publication retry occurrence time cannot be in the future",
-            ));
-        }
         let report_probe = quant_recommendation_report::Entity::find_by_id(report_id.clone())
             .one(&txn)
             .await
@@ -1109,6 +1082,13 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
                 StorageError::not_found(entity::QUANT_RECOMMENDATION_REPORT, report_id)
             })?;
         acquire_report_scope_lock(&txn, &report_probe.profile_id, report_probe.report_kind).await?;
+        let now = primitives::statement_timestamp(&txn).await?;
+        if occurred_at > now + chrono::Duration::seconds(5) {
+            return Err(StorageError::invariant_violation(
+                Some(entity::QUANT_RECOMMENDATION_REPORT),
+                "publication retry occurrence time cannot be in the future",
+            ));
+        }
         let report = quant_recommendation_report::Entity::find_by_id(report_id.clone())
             .lock_exclusive()
             .one(&txn)
@@ -1160,13 +1140,6 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
         occurred_at: DateTime<Utc>,
     ) -> Result<FactDeliverySettlement<PublishReportOutcome>, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let now = database_now(&txn).await?;
-        if occurred_at > now + chrono::Duration::seconds(5) {
-            return Err(StorageError::invariant_violation(
-                Some(entity::QUANT_RECOMMENDATION_REPORT),
-                "publication occurrence time cannot be in the future",
-            ));
-        }
         let candidate_probe = quant_recommendation_report::Entity::find_by_id(report_id.clone())
             .one(&txn)
             .await
@@ -1180,6 +1153,13 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
             candidate_probe.report_kind,
         )
         .await?;
+        let now = primitives::statement_timestamp(&txn).await?;
+        if occurred_at > now + chrono::Duration::seconds(5) {
+            return Err(StorageError::invariant_violation(
+                Some(entity::QUANT_RECOMMENDATION_REPORT),
+                "publication occurrence time cannot be in the future",
+            ));
+        }
         let delivery = match fact_delivery_claim(&txn, report_id, worker_id, now).await? {
             FactDeliveryClaim::Held(row) => row,
             FactDeliveryClaim::Lost(row) => {
@@ -1275,7 +1255,7 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
     ) -> Result<Option<ReportFactDeliveryInfo>, StorageError> {
         let lease_duration = report_fact_lease_duration(lease_secs)?;
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let database_now = database_now(&txn).await?;
+        let database_now = primitives::statement_timestamp(&txn).await?;
         let effective_lease_expires_at = database_now + lease_duration;
         let row = quant_report_fact_delivery::Entity::find()
             .filter(
@@ -1311,7 +1291,7 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
         worker_id: Uuid,
     ) -> Result<ReportFactDeliveryInfo, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let now = database_now(&txn).await?;
+        let now = primitives::statement_timestamp(&txn).await?;
         let row = quant_report_fact_delivery::Entity::find_by_id(report_id.clone())
             .lock_exclusive()
             .one(&txn)
@@ -1500,13 +1480,6 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
         operation_log: NewOperationLog,
     ) -> Result<Option<RecommendationReportInfo>, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let now = database_now(&txn).await?;
-        if expired_at > now + chrono::Duration::seconds(5) {
-            return Err(StorageError::invariant_violation(
-                Some(entity::QUANT_RECOMMENDATION_REPORT),
-                "report expiry occurrence time cannot be in the future",
-            ));
-        }
         let probe = quant_recommendation_report::Entity::find_by_id(report_id.clone())
             .one(&txn)
             .await
@@ -1515,6 +1488,13 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
                 StorageError::not_found(entity::QUANT_RECOMMENDATION_REPORT, report_id)
             })?;
         acquire_report_scope_lock(&txn, &probe.profile_id, probe.report_kind).await?;
+        let now = primitives::statement_timestamp(&txn).await?;
+        if expired_at > now + chrono::Duration::seconds(5) {
+            return Err(StorageError::invariant_violation(
+                Some(entity::QUANT_RECOMMENDATION_REPORT),
+                "report expiry occurrence time cannot be in the future",
+            ));
+        }
 
         let Some(report) = quant_recommendation_report::Entity::find_by_id(report_id.clone())
             .lock_exclusive()
@@ -1581,7 +1561,7 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
         revoked_at: DateTime<Utc>,
         operation_log: NewOperationLog,
     ) -> Result<(RecommendationReportInfo, Vec<OrderIntentInfo>), StorageError> {
-        transition_report_status(
+        Box::pin(transition_report_status(
             &self.db,
             report_id,
             RecommendationReportStatus::Revoked,
@@ -1589,7 +1569,7 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
             reason,
             revoked_at,
             operation_log,
-        )
+        ))
         .await
     }
 }
@@ -1645,19 +1625,19 @@ async fn transition_report_status(
     operation_log: NewOperationLog,
 ) -> Result<(RecommendationReportInfo, Vec<OrderIntentInfo>), StorageError> {
     let txn = db.begin().await.map_err(StorageError::from)?;
-    let now = database_now(&txn).await?;
-    if occurred_at > now + chrono::Duration::seconds(5) {
-        return Err(StorageError::invariant_violation(
-            Some(entity::QUANT_RECOMMENDATION_REPORT),
-            "report lifecycle occurrence time cannot be in the future",
-        ));
-    }
     let probe = quant_recommendation_report::Entity::find_by_id(report_id.clone())
         .one(&txn)
         .await
         .map_err(StorageError::from)?
         .ok_or_else(|| StorageError::not_found(entity::QUANT_RECOMMENDATION_REPORT, report_id))?;
     acquire_report_scope_lock(&txn, &probe.profile_id, probe.report_kind).await?;
+    let now = primitives::statement_timestamp(&txn).await?;
+    if occurred_at > now + chrono::Duration::seconds(5) {
+        return Err(StorageError::invariant_violation(
+            Some(entity::QUANT_RECOMMENDATION_REPORT),
+            "report lifecycle occurrence time cannot be in the future",
+        ));
+    }
 
     let Some(row) = quant_recommendation_report::Entity::find_by_id(report_id.clone())
         .lock_exclusive()

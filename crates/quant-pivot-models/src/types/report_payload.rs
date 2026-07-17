@@ -34,7 +34,6 @@ use crate::{
         },
     },
     hashing::CanonicalDigest,
-    jsonb_active,
     types::{
         BookSnapshotRef, Bps, ContentHash, EntryConditionPlan, EventId, FactorDefinitionId,
         FeatureVectorId, MarketSelectionId, ModelRunId, ModelVersionId, Price, Probability,
@@ -665,16 +664,3 @@ impl Sum for EligibilitySummary {
         iter.fold(Self::default(), Add::add)
     }
 }
-
-jsonb_active!(
-    EntryConditionPlan,
-    EntryPlan,
-    SizingPlan,
-    ExitPlan,
-    RiskEnvelope,
-    RecommendationTradePlan,
-    RecommendationFactorBreakdown,
-    EvidenceRefs,
-    ExecutionEligibility,
-    ReportSummary,
-);

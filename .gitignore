@@ -10,6 +10,7 @@
 .env.*
 !.env.example
 config/quant-pivot.local.toml
+var/
 .DS_Store
 
 # VS Code extension stats

@@ -10,6 +10,7 @@ use crate::{
 /// Append-only stream-session ledger record.
 #[derive(Debug, Clone, clickhouse::Row, Serialize, Deserialize)]
 pub struct BookStreamSessionRow {
+    #[serde(with = "clickhouse::serde::uuid")]
     pub stream_session_id: Uuid,
     pub shard_id: u32,
     pub ledger_sequence: u32,

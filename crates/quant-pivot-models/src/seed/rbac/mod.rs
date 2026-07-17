@@ -17,16 +17,10 @@ pub mod user_role;
 
 use std::collections::HashMap;
 
-use crate::{schema::seed::SeedArtifactKey, types::RoleId};
+use crate::{seed::SeedArtifactKey, types::RoleId};
 
-/// Default bootstrap admin username. Changeable post-deploy via the UI/API.
+/// Bootstrap admin username. Changeable post-deploy via the UI/API.
 pub const DEFAULT_ADMIN_USERNAME: &str = "admin";
-/// Default bootstrap admin password, hashed with argon2id at seed time.
-///
-/// This is a known, deliberately weak default for first login; operators must
-/// change it immediately via the account API. It is never stored in plaintext —
-/// only its argon2id PHC hash is persisted.
-pub const DEFAULT_ADMIN_PASSWORD: &str = "admin";
 /// Default bootstrap admin display name.
 pub const DEFAULT_ADMIN_NICKNAME: &str = "Administrator";
 
@@ -53,6 +47,9 @@ pub const MENUS_ARTIFACT: SeedArtifactKey = SeedArtifactKey::new("rbac.menus");
 pub const MENU_GRANTS_ARTIFACT: SeedArtifactKey = SeedArtifactKey::new("rbac.menu_grants");
 /// Seed artifact: bootstrap admin `UserId` produced by the admin-user seed.
 pub const ADMIN_USER_ARTIFACT: SeedArtifactKey = SeedArtifactKey::new("rbac.admin_user");
+/// Deploy-only input: Argon2id PHC hash for the bootstrap administrator.
+pub const BOOTSTRAP_ADMIN_PASSWORD_HASH_INPUT: SeedArtifactKey =
+    SeedArtifactKey::new("rbac.bootstrap_admin_password_hash");
 
 /// Map of built-in role code to its freshly-assigned [`RoleId`].
 pub type RoleIdMap = HashMap<&'static str, RoleId>;

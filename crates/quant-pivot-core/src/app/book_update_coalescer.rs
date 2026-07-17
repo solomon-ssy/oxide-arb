@@ -158,6 +158,7 @@ mod tests {
             market::{MarketRegistryInfo, TokenInfo},
         },
         enums::{
+            catalog::CatalogFilterReasonSet,
             common::{CategorySet, MarketCategory, TickSize},
             market::MarketStatus,
         },
@@ -181,6 +182,7 @@ mod tests {
             description: None,
             categories: CategorySet::from(MarketCategory::Other),
             status: MarketStatus::Active,
+            filter_reasons: CatalogFilterReasonSet::default(),
             outcome: None,
             neg_risk: false,
             tick_size: TickSize::Hundredth,
@@ -219,6 +221,10 @@ mod tests {
         registry.register(SessionHandle {
             outbound,
             subscriptions: Arc::new(RwLock::new(keys)),
+            subject: "test-user".to_owned(),
+            family_id: "test-family".to_owned(),
+            can_read_system: false,
+            cancellation: tokio_util::sync::CancellationToken::new(),
         });
         drop(rx);
     }

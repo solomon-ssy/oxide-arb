@@ -6,14 +6,16 @@ mod resolution;
 mod sync;
 mod wire;
 
-pub use catalog::{CatalogMarketReject, RejectedMarket};
+pub use catalog::{CatalogMarketReject, FilteredPrelistingMarket, RejectedMarket};
 use mapper::{CatalogMarketMapCtx, CatalogMarketWithCtx};
 pub use mapper::{CatalogSourceTimestamps, GammaCatalogBatch};
 pub use resolution::GammaResolution;
 
-use crate::infra::retry::{self, RetryPolicy};
+use crate::infra::{
+    http::retry_after_ms,
+    retry::{self, RetryPolicy},
+};
 use catalog::CatalogMarket;
-use chrono::{DateTime, Utc};
 use futures_util::stream::{self, StreamExt};
 use quant_pivot_error::api::ApiError;
 use quant_pivot_models::{
@@ -26,6 +28,8 @@ use wire::WireMarket;
 
 /// One individually fetched market together with unmodified upstream clocks.
 pub struct FetchedCatalogMarket {
+    pub event: EventRegistryInfo,
+    pub event_source_timestamps: CatalogSourceTimestamps,
     pub registry: MarketRegistryInfo,
     pub source_timestamps: CatalogSourceTimestamps,
 }
@@ -62,46 +66,40 @@ impl GammaClient {
 
     /// Full sync: paginate all active events + their markets.
     pub async fn full_sync(&self) -> Result<Vec<EventRegistryInfo>, ApiError> {
-        sync::full_sync(&self.http, &self.config).await
+        sync::full_sync(&self.http, &self.config, &self.retry_policy).await
     }
 
     /// Full sync returning both events and their embedded market entries.
     pub async fn full_sync_detailed(
         &self,
     ) -> Result<(Vec<EventRegistryInfo>, Vec<MarketRegistryInfo>), ApiError> {
-        let catalog = sync::full_sync_raw(&self.http, &self.config).await?;
+        let catalog = sync::full_sync_raw(&self.http, &self.config, &self.retry_policy).await?;
         let batch = GammaCatalogBatch::from(catalog);
         Ok((batch.registry_events, batch.registry_markets))
     }
 
     /// Full sync returning a `GammaCatalogBatch` with persistence DTOs and registry views.
     pub async fn full_sync_with_fees(&self) -> Result<GammaCatalogBatch, ApiError> {
-        let catalog = sync::full_sync_raw(&self.http, &self.config).await?;
+        let catalog = sync::full_sync_raw(&self.http, &self.config, &self.retry_policy).await?;
         Ok(GammaCatalogBatch::from(catalog))
     }
 
-    /// Incremental sync returning a `GammaCatalogBatch` with persistence DTOs and registry views.
-    pub async fn incremental_sync_with_fees(
-        &self,
-        since: DateTime<Utc>,
-    ) -> Result<GammaCatalogBatch, ApiError> {
-        let catalog = sync::incremental_sync_raw(&self.http, &self.config, since).await?;
-        Ok(GammaCatalogBatch::from(catalog))
-    }
-
-    /// Fetch markets not embedded in an incremental event payload, with bounded concurrency.
+    /// Fetch markets by condition id with bounded concurrency.
     pub async fn fetch_markets_bounded(
         &self,
         market_ids: &[MarketId],
         max_concurrency: usize,
-    ) -> Vec<Result<FetchedCatalogMarket, ApiError>> {
+    ) -> Vec<(MarketId, Result<FetchedCatalogMarket, ApiError>)> {
         if market_ids.is_empty() {
             return Vec::new();
         }
 
         let concurrency = max_concurrency.max(1);
         stream::iter(market_ids.iter().cloned())
-            .map(|market_id| async move { self.get_market_with_source_time(&market_id).await })
+            .map(|market_id| async move {
+                let result = self.get_market_with_source_time(&market_id).await;
+                (market_id, result)
+            })
             .buffer_unordered(concurrency)
             .collect()
             .await
@@ -109,20 +107,12 @@ impl GammaClient {
 
     /// Discover one liquid/active token for smoke tests (first page of active events).
     pub async fn discover_active_token(&self) -> Result<TokenId, ApiError> {
-        sync::discover_active_token(&self.http, &self.config).await
+        sync::discover_active_token(&self.http, &self.config, &self.retry_policy).await
     }
 
     /// Discover up to `limit` active CLOB token ids (keyset walk).
     pub async fn discover_active_tokens(&self, limit: usize) -> Result<Vec<TokenId>, ApiError> {
-        sync::discover_active_tokens(&self.http, &self.config, limit).await
-    }
-
-    /// Incremental sync: events changed since timestamp.
-    pub async fn incremental_sync(
-        &self,
-        since: DateTime<Utc>,
-    ) -> Result<Vec<EventRegistryInfo>, ApiError> {
-        sync::incremental_sync(&self.http, &self.config, since).await
+        sync::discover_active_tokens(&self.http, &self.config, &self.retry_policy, limit).await
     }
 
     /// Fetch a single market by `condition_id`.
@@ -150,10 +140,11 @@ impl GammaClient {
                 endpoint: format!("/markets?condition_ids={cid}"),
                 status: 404,
                 body: "no market for condition_id".into(),
+                retry_after_ms: None,
             });
         };
 
-        let parent = wire.events.as_deref().and_then(<[_]>::first);
+        let parent = wire.events.as_deref().and_then(<[_]>::first).cloned();
         let Some(parent) = parent else {
             return Err(ApiError::Deserialize {
                 context: format!("gamma get_market({cid})"),
@@ -163,6 +154,12 @@ impl GammaClient {
         let event_id = EventId::new(&parent.id);
         let tags = parent.tag_slugs();
         let categories = CategorySet::from_slugs(tags.iter().map(String::as_str));
+        let catalog_event = catalog::CatalogEvent::from(parent);
+        let event_source_timestamps = CatalogSourceTimestamps {
+            created_at: catalog_event.created_at,
+            updated_at: catalog_event.updated_at,
+        };
+        let event = EventRegistryInfo::from(&catalog_event);
 
         let catalog = CatalogMarket::try_from(wire).map_err(|reason| ApiError::Deserialize {
             context: format!("gamma get_market({cid})"),
@@ -180,7 +177,9 @@ impl GammaClient {
             },
         }
         .try_into()
-        .map(|(_, registry)| FetchedCatalogMarket {
+        .map(|registry| FetchedCatalogMarket {
+            event,
+            event_source_timestamps,
             registry,
             source_timestamps,
         })
@@ -245,13 +244,16 @@ impl GammaClient {
                     endpoint: endpoint.clone(),
                     status: e.status().map_or(0, |s| s.as_u16()),
                     body: e.to_string(),
+                    retry_after_ms: None,
                 })?;
 
                 if !resp.status().is_success() {
+                    let retry_after_ms = retry_after_ms(resp.headers());
                     return Err(ApiError::Gamma {
                         endpoint,
                         status: resp.status().as_u16(),
                         body: resp.text().await.unwrap_or_default(),
+                        retry_after_ms,
                     });
                 }
 

@@ -9,6 +9,7 @@ use crate::{
     types::{ArtifactUri, ContentHash, RecommendationReportId},
 };
 
+#[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "quant_report_fact_delivery")]
 pub struct Model {
@@ -32,22 +33,14 @@ pub struct Model {
     pub announced_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
-}
 
-#[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-pub enum Relation {
     #[sea_orm(
-        belongs_to = "super::quant_recommendation_report::Entity",
-        from = "Column::RecommendationReportId",
-        to = "super::quant_recommendation_report::Column::RecommendationReportId"
+        belongs_to,
+        relation_enum = "RecommendationReport",
+        from = "recommendation_report_id",
+        to = "recommendation_report_id"
     )]
-    RecommendationReport,
-}
-
-impl Related<super::quant_recommendation_report::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::RecommendationReport.def()
-    }
+    pub recommendation_report: BelongsTo<super::quant_recommendation_report::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

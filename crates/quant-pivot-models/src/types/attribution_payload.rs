@@ -17,7 +17,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     enums::{execution::ExitReason, quant::RecommendationOutcome},
-    jsonb_active,
     types::{Bps, Price, Shares},
 };
 
@@ -65,5 +64,3 @@ pub struct AttributionDetail {
     /// Free-form attribution notes.
     pub notes: Vec<String>,
 }
-
-jsonb_active!(EntryOutcome, ExitOutcome, AttributionDetail);

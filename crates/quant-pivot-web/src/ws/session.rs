@@ -10,8 +10,10 @@ use std::{
 };
 
 use quant_pivot_models::{
-    domain::{ClientCommand, SubscriptionKey, SyncSnapshot, WsChannel, WsEnvelope},
-    enums::rbac::{Operation, ResourceType},
+    domain::{
+        ClientCommand, SubscriptionKey, SyncSnapshot, SystemStatusView, WsChannel, WsEnvelope,
+    },
+    enums::rbac::{Operation, ResourceType, UserStatus},
 };
 
 use crate::{
@@ -27,6 +29,10 @@ pub struct SessionContext {
     pub state: web::Data<AppState>,
     pub registry: SessionRegistry,
     pub user_id: String,
+    pub family_id: String,
+    pub access_jti: String,
+    pub authorization_revision: u64,
+    pub can_read_system: bool,
 }
 
 impl SessionContext {
@@ -42,13 +48,18 @@ impl SessionContext {
 pub async fn run(mut session: Session, mut msg_stream: MessageStream, ctx: SessionContext) {
     let subscriptions = Arc::new(RwLock::new(HashSet::<SubscriptionKey>::new()));
     let (outbound_tx, outbound_rx) = flume::bounded::<String>(OUTBOUND_CAPACITY);
+    let cancellation = tokio_util::sync::CancellationToken::new();
     let session_id = ctx.registry.register(SessionHandle {
         outbound: outbound_tx,
         subscriptions: Arc::clone(&subscriptions),
+        subject: ctx.user_id.clone(),
+        family_id: ctx.family_id.clone(),
+        can_read_system: ctx.can_read_system,
+        cancellation: cancellation.clone(),
     });
 
-    if ctx.can_read(ResourceType::System).await {
-        let status = ctx.state.control.system_status();
+    if ctx.can_read_system {
+        let status = control_plane_status(&ctx);
         if let Ok(data) = serde_json::to_value(&status) {
             let _ = session
                 .text(WsEnvelope::channel(WsChannel::SystemStatus, data).to_text())
@@ -62,6 +73,7 @@ pub async fn run(mut session: Session, mut msg_stream: MessageStream, ctx: Sessi
 
     loop {
         tokio::select! {
+            () = cancellation.cancelled() => break,
             outbound = outbound_rx.recv_async() => {
                 match outbound {
                     Ok(text) => {
@@ -82,11 +94,7 @@ pub async fn run(mut session: Session, mut msg_stream: MessageStream, ctx: Sessi
                             break;
                         }
                     }
-                    Message::Ping(bytes) => {
-                        if session.pong(&bytes).await.is_err() {
-                            break;
-                        }
-                    }
+                    Message::Ping(bytes) if session.pong(&bytes).await.is_err() => break,
                     Message::Pong(_) => last_pong = Instant::now(),
                     Message::Close(_) => break,
                     _ => {}
@@ -95,6 +103,10 @@ pub async fn run(mut session: Session, mut msg_stream: MessageStream, ctx: Sessi
             _ = heartbeat.tick() => {
                 if last_pong.elapsed() > CLIENT_TIMEOUT {
                     tracing::debug!(session_id, "ws session timed out (no pong)");
+                    break;
+                }
+                if !session_identity_active(&ctx).await {
+                    tracing::debug!(session_id, "ws session identity is no longer active");
                     break;
                 }
                 if session.ping(b"").await.is_err() {
@@ -106,6 +118,34 @@ pub async fn run(mut session: Session, mut msg_stream: MessageStream, ctx: Sessi
 
     ctx.registry.deregister(session_id);
     let _ = session.close(None).await;
+}
+
+async fn session_identity_active(ctx: &SessionContext) -> bool {
+    if !ctx.state.casbin.is_healthy()
+        || ctx.state.casbin.authorization_revision() != ctx.authorization_revision
+        || ctx
+            .state
+            .jwt
+            .is_revoked(&ctx.access_jti)
+            .await
+            .unwrap_or(true)
+        || !ctx
+            .state
+            .jwt
+            .family_active(&ctx.family_id)
+            .await
+            .unwrap_or(false)
+    {
+        return false;
+    }
+    let Ok(user_id) = ctx.user_id.parse() else {
+        return false;
+    };
+    ctx.state
+        .users
+        .find_by_id(&user_id)
+        .await
+        .is_ok_and(|user| user.status == UserStatus::Active)
 }
 
 async fn handle_command(
@@ -153,8 +193,16 @@ async fn handle_command(
 async fn sync_snapshot(ctx: &SessionContext) -> String {
     let mut snapshot = SyncSnapshot::default();
     if ctx.can_read(ResourceType::System).await {
-        snapshot.system_status = Some(ctx.state.control.system_status());
+        snapshot.system_status = Some(control_plane_status(ctx));
     }
     let data = serde_json::to_value(&snapshot).unwrap_or_else(|_| serde_json::json!({}));
     WsEnvelope::sync(data).to_text()
+}
+
+fn control_plane_status(ctx: &SessionContext) -> SystemStatusView {
+    SystemStatusView {
+        runtime: ctx.state.control.system_status(),
+        bootstrap: ctx.state.bootstrap.view(),
+        capabilities: ctx.state.bootstrap.capability_snapshot(),
+    }
 }

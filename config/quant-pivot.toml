@@ -107,15 +107,14 @@ base_url = "https://gamma-api.polymarket.com"
 # Purpose: interval (s) between full market-catalog syncs (also the periodic
 # gamma task cadence). Impact: how quickly new/closed markets are picked up.
 # Default: 300.
-full_sync_interval_secs = 300
+reconcile_interval_secs = 300
 # Purpose: catalog pagination page size. Impact: sync request count.
 # Default: 100.
 page_size = 100
-# Purpose: safety margin (seconds) between catalog finalize commit and logical
-# available_at visibility during Gamma sync. Larger values tolerate slower full
-# sync finalization; catalog becomes readable later after each commit.
-# Default: 2. Must remain below db.postgres.lock_timeout_ms.
-catalog_visibility_guard_secs = 2
+# Purpose: bound one keyset scan independently of upstream cursor correctness.
+max_keyset_pages = 10000
+# Purpose: bound all HTTP attempts, including retries, during one keyset scan.
+max_keyset_requests = 50000
 
 [market_data.data_api]
 # Purpose: Data API base URL for keyless venue position reads
@@ -256,6 +255,10 @@ execution_breaker_tick_secs = 5
 # Default: 300.
 equity_snapshot_secs = 300
 
+[quant.governance]
+# Local single-user development keeps audit but does not require two operators.
+require_approver_activator_separation = false
+
 [quant.research_jobs]
 # Async research-job engine (dataset build / model train / backtest). These are
 # operational/infra knobs, distinct from the frozen per-dataset runtime config
@@ -329,10 +332,10 @@ require_object_lock = false
 require_versioning = false
 
 [research.evidence_attestation]
-# Dedicated 32-byte keyed-BLAKE3 secret; never reuse the wallet or JWT key.
-# Set through QUANT_PIVOT__RESEARCH__EVIDENCE_ATTESTATION__SECRET_HEX.
-key_id = ""
-# secret_hex = "64 lowercase hex characters"
+# Non-secret id selected for new keyed-BLAKE3 evidence. Key bytes and retained
+# historical keys come from a secret-manager-mounted file selected by
+# QUANT_PIVOT_EVIDENCE_ATTESTATION_KEYRING_FILE.
+signing_key_id = ""
 
 # ── Keys / Credentials ───────────────────────────────────────────────────────
 #
@@ -378,13 +381,13 @@ log_json = false
 host = "localhost"
 # Purpose: Postgres port. Default: 5432.
 port = 5432
-# Purpose: role name. Default: "oxide".
-user = "oxide"
+# Purpose: least-privilege runtime role. Default: "quant_pivot_runtime".
+user = "quant_pivot_runtime"
 # Purpose: role password. Caution: set via QUANT_PIVOT__DB__POSTGRES__PASSWORD
 # or quant-pivot.local.toml — never commit real values here. Default: "".
 password = ""
-# Purpose: database name. Default: "oxide_arb".
-database = "oxide_arb"
+# Purpose: database name. Default: "quant_pivot".
+database = "quant_pivot"
 # Purpose: schema search path. Default: "public".
 schema = "public"
 # Purpose: pool upper bound. Impact: worst-case concurrent repository access;
@@ -421,12 +424,22 @@ statement_cache_capacity = 256
 # Purpose: application name reported to pg_stat_activity. Default: "quant-pivot".
 application_name = "quant-pivot"
 
+[db.postgres.migration]
+# PostgreSQL DDL is deploy-only: run `quant-pivot-xtask postgres-schema apply`.
+user = "quant_pivot_migrator"
+# The password is intentionally not part of runtime DeployConfig. Inject it
+# only into the deploy command as QUANT_PIVOT_MIGRATION__POSTGRES_PASSWORD.
+
 [db.clickhouse]
+# Stable evidence scope identity. Never reuse this value across deployments.
+deployment_id = "local-development"
+# Explicit local cluster identity; production uses the ClickHouse Cloud service id.
+cluster_id = "local-clickhouse"
 # Purpose: ClickHouse HTTP endpoint (analytics timeseries: ticks, books,
 # detections, evidence). Default: "http://localhost:8123".
 url = "http://localhost:8123"
-# Purpose: database name. Default: "oxide_arb".
-database = "oxide_arb"
+# Purpose: database name. Default: "quant_pivot".
+database = "quant_pivot"
 # Purpose: user name. Default: "default".
 user = "default"
 # Purpose: password. Caution: set via QUANT_PIVOT__DB__CLICKHOUSE__PASSWORD or
@@ -444,17 +457,10 @@ batch_size = 5000
 max_concurrent_inserts = 8
 
 [db.clickhouse.migration]
-# Purpose: apply versioned online-safe ClickHouse migrations automatically
-# before the runtime pool starts. Offline-required migrations always fail
-# closed and require an explicit maintenance rollout. Default: true.
-# Phase 11.8 migration 2 must be applied once with
-# `quant-pivot-xtask clickhouse-schema apply-offline` while legacy fact tables are empty.
-auto_apply_online = true
-require_dedicated_identity = false
-# Local development intentionally reuses db.clickhouse credentials. Production
-# sets require_dedicated_identity=true and injects:
-# QUANT_PIVOT__DB__CLICKHOUSE__MIGRATION__USER
-# QUANT_PIVOT__DB__CLICKHOUSE__MIGRATION__PASSWORD
+# Schema deployment is explicit through `quant-pivot-xtask`; runtime startup
+# only verifies the immutable ClickHouse contract.
+user = "quant_pivot_migrator"
+# Inject QUANT_PIVOT_MIGRATION__CLICKHOUSE_PASSWORD into deploy commands only.
 
 # ── Cache ────────────────────────────────────────────────────────────────────
 
@@ -493,7 +499,7 @@ timeout_ms = 1000
 # process fails closed. Kept separate from timeout_ms so a tight per-operation
 # deadline never starves initial connection establishment. Default: 5000.
 connect_timeout_ms = 5000
-# Purpose: key namespace prefix. Default: "oarb:".
+# Purpose: key namespace prefix. Default: "qp:".
 key_prefix = "qp:"
 
 [cache.moka]
@@ -518,14 +524,16 @@ serve_static_ui = false
 static_ui_dir = "static/ui"
 
 [web.jwt]
-# Purpose: HMAC signing secret. SECURITY: never commit a real secret; provide
-# it via env in production: QUANT_PIVOT__WEB__JWT__SECRET=<strong-random-secret>.
-# Caution: an empty/placeholder secret is fatal in order-submitting modes and a warning
-# otherwise. Default: "".
-secret = ""
+# Purpose: active Ed25519 signer; private material is a local secret-manager mount.
+signing_key_id = "local-dev-2026-01"
+signing_private_key_file = "var/secrets/jwt/ed25519-private.pem"
 # Purpose: token issuer claim. Default: "quant-pivot".
 issuer = "quant-pivot"
 # Purpose: access-token lifetime (s). Default: 900 (15m).
 access_ttl_secs = 900
 # Purpose: refresh-token lifetime (s). Default: 604800 (7d).
 refresh_ttl_secs = 604800
+
+[[web.jwt.verification_keys]]
+key_id = "local-dev-2026-01"
+public_key_file = "var/secrets/jwt/ed25519-public.pem"

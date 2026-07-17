@@ -101,17 +101,17 @@ impl Display for ResolverVersion {
     }
 }
 
-impl<'de> Deserialize<'de> for ResolverVersion {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let raw = i32::deserialize(deserializer)?;
-        Self::try_new(raw).map_err(serde::de::Error::custom)
-    }
-}
-
 impl IntoActiveValue<Self> for ResolverVersion {
     #[inline]
     fn into_active_value(self) -> ActiveValue<Self> {
         ActiveValue::Set(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for ResolverVersion {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = i32::deserialize(deserializer)?;
+        Self::try_new(raw).map_err(serde::de::Error::custom)
     }
 }
 

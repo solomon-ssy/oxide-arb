@@ -1,7 +1,7 @@
 //! WebSocket real-time push infrastructure.
 //!
-//! - [`handler`] performs the upgrade with query-token authentication (fixing the
-//!   ng-gateway unauthenticated-WS defect);
+//! - [`handler`] consumes a short-lived single-use ticket from the negotiated
+//!   `Sec-WebSocket-Protocol` during upgrade;
 //! - [`session`] runs the per-connection loop (subscriptions, heartbeat, sync);
 //! - [`protocol`] defines the envelope + client command grammar;
 //! - [`SessionRegistry`] + [`spawn_ws_broadcaster`] fan `CoreEvent`s out to the
@@ -38,6 +38,14 @@ pub struct SessionHandle {
     pub outbound: flume::Sender<String>,
     /// Subscription keys this session holds (shared with the session task).
     pub subscriptions: Arc<RwLock<HashSet<SubscriptionKey>>>,
+    /// Authenticated subject owning the socket.
+    pub subject: String,
+    /// Refresh-session family owning the socket.
+    pub family_id: String,
+    /// Whether this session may receive always-on control-plane events.
+    pub can_read_system: bool,
+    /// Immediate lifecycle cancellation on logout, replay, or account disable.
+    pub cancellation: CancellationToken,
 }
 
 /// Concurrent registry of live WebSocket sessions, shared between the upgrade
@@ -59,6 +67,31 @@ impl SessionRegistry {
     /// Remove a session on disconnect.
     pub fn deregister(&self, id: SessionId) {
         self.sessions.remove(&id);
+    }
+
+    /// Close every live socket issued from one refresh-session family.
+    pub fn close_family(&self, family_id: &str) {
+        for entry in self.sessions.iter() {
+            if entry.value().family_id == family_id {
+                entry.value().cancellation.cancel();
+            }
+        }
+    }
+
+    /// Close every live socket owned by a user whose account was disabled or deleted.
+    pub fn close_subject(&self, subject: &str) {
+        for entry in self.sessions.iter() {
+            if entry.value().subject == subject {
+                entry.value().cancellation.cancel();
+            }
+        }
+    }
+
+    /// Close all sockets after a global RBAC policy revision changes.
+    pub fn close_all(&self) {
+        for entry in self.sessions.iter() {
+            entry.value().cancellation.cancel();
+        }
     }
 
     /// Send `text` to every session subscribed to `key` (drops on a full
@@ -88,7 +121,9 @@ impl SessionRegistry {
             WsChannel::SystemStatus | WsChannel::SystemAlert
         ) {
             for entry in self.sessions.iter() {
-                let _ = entry.value().outbound.try_send(text.to_owned());
+                if entry.value().can_read_system {
+                    let _ = entry.value().outbound.try_send(text.to_owned());
+                }
             }
             return;
         }
@@ -170,6 +205,10 @@ mod tests {
             SessionHandle {
                 outbound,
                 subscriptions: Arc::new(RwLock::new(subscriptions)),
+                subject: "test-user".to_owned(),
+                family_id: "test-family".to_owned(),
+                can_read_system: true,
+                cancellation: tokio_util::sync::CancellationToken::new(),
             },
             rx,
         )
@@ -272,5 +311,21 @@ mod tests {
 
         assert_eq!(with_subs_rx.try_recv().as_deref(), Ok("status-frame"));
         assert_eq!(bare_rx.try_recv().as_deref(), Ok("status-frame"));
+    }
+
+    #[test]
+    fn close_all_cancels_every_registered_session() {
+        let registry = SessionRegistry::default();
+        let (first, _first_rx) = handle_with(vec![]);
+        let first_cancel = first.cancellation.clone();
+        registry.register(first);
+        let (second, _second_rx) = handle_with(vec![]);
+        let second_cancel = second.cancellation.clone();
+        registry.register(second);
+
+        registry.close_all();
+
+        assert!(first_cancel.is_cancelled());
+        assert!(second_cancel.is_cancelled());
     }
 }

@@ -61,6 +61,28 @@ if rg 'impl IntoActiveModel' crates/quant-pivot-models/src/domain/ 2>/dev/null; 
     ERRORS=$((ERRORS + 1))
 fi
 
+echo "=== Checking PostgreSQL repository dialect primitives are centralized ==="
+if rg '\bStatement\b|Expr::cust|Func::cust|query_(one|all)_raw|execute_raw' \
+    crates/quant-pivot-repository/src/postgres/ \
+    --glob '*.rs' \
+    --glob '!primitives.rs' 2>/dev/null; then
+    echo "ERROR: PostgreSQL-specific SQL must be encapsulated in postgres/primitives.rs"
+    ERRORS=$((ERRORS + 1))
+fi
+
+echo "=== Checking SeaORM migration modules use typed DDL ==="
+if rg '\bStatement\b|execute_unprepared|Expr::cust|Func::cust|raw_sql|AssertSqlSafe' \
+    crates/quant-pivot-migration/src/migrations/ \
+    --glob '*.rs' \
+    --glob '!**/support/**' 2>/dev/null; then
+    echo "ERROR: migration modules must use SeaORM/SeaQuery typed DDL; PostgreSQL gaps belong in versioned support"
+    ERRORS=$((ERRORS + 1))
+fi
+if rg --files crates/quant-pivot-migration/src/migrations/ --glob '*.sql' | grep -q .; then
+    echo "ERROR: standalone raw SQL migration artifacts are forbidden"
+    ERRORS=$((ERRORS + 1))
+fi
+
 echo "=== Checking postgres/quant monolith ==="
 # The threshold tracks "one `mod` + one `pub use` line per repository", not a
 # hard cap on the number of repositories — it grows as the schema grows.

@@ -19,12 +19,8 @@ tracing = { workspace = true }
 clickhouse = { workspace = true }
 uuid = { workspace = true }
 rust_decimal = { workspace = true }
-bitcode = { workspace = true }
-tokio-util = { workspace = true }
 tokio = { workspace = true }
 async-trait = { workspace = true }
-blake3 = { workspace = true }
-hex = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
@@ -33,7 +29,6 @@ rust_decimal_macros = { workspace = true }
 quant-pivot-storage = { workspace = true, features = ["test-util"] }
 quant-pivot-test-support = { workspace = true }
 testcontainers = { workspace = true }
-testcontainers-modules = { workspace = true }
 sea-orm = { workspace = true }
 chrono = { workspace = true }
 

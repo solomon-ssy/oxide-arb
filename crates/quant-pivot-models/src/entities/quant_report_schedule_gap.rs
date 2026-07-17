@@ -8,6 +8,7 @@ use crate::{
     types::{ReportScheduleGapId, RuntimeConfigVersionId},
 };
 
+#[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "quant_report_schedule_gap")]
 pub struct Model {
@@ -22,22 +23,14 @@ pub struct Model {
     pub detected_at: DateTime<Utc>,
     #[sea_orm(column_type = "Text", nullable)]
     pub detail: Option<String>,
-}
 
-#[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-pub enum Relation {
     #[sea_orm(
-        belongs_to = "super::runtime_config_version::Entity",
-        from = "Column::RuntimeConfigVersionId",
-        to = "super::runtime_config_version::Column::RuntimeConfigVersionId"
+        belongs_to,
+        relation_enum = "RuntimeConfigVersion",
+        from = "runtime_config_version_id",
+        to = "runtime_config_version_id"
     )]
-    RuntimeConfigVersion,
-}
-
-impl Related<super::runtime_config_version::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::RuntimeConfigVersion.def()
-    }
+    pub runtime_config_version: BelongsTo<super::runtime_config_version::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

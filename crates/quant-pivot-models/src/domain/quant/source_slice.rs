@@ -2,7 +2,7 @@
 
 use chrono::{DateTime, Utc};
 use quant_pivot_error::hashing::CanonicalDigestError;
-use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -135,7 +135,7 @@ pub struct CompleteSourceSlice {
 }
 
 /// Operator/read-model projection for one source slice.
-#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
+#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
 #[sea_orm(entity = "crate::entities::quant_source_slice::Entity")]
 pub struct SourceSliceInfo {
     pub source_slice_id: SourceSliceId,

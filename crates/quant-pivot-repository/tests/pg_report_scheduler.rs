@@ -46,7 +46,7 @@ async fn activate_runtime(db: &sea_orm::DatabaseConnection) -> RuntimeConfigVers
         .activate_version(NewRuntimeConfigActivation {
             runtime_config_activation_id: RuntimeConfigActivationId::from_v7(),
             runtime_config_version_id: version_id.clone(),
-            activated_at: Utc::now(),
+            runtime_config_approval_id: None,
             activated_by: "pg-report-scheduler".to_owned(),
             reason: "scheduler integration fixture".to_owned(),
             activation_kind: RuntimeConfigActivationKind::Initial,
@@ -189,6 +189,17 @@ async fn restart_coalesces_latest_and_records_aggregate_gap() {
             .iter()
             .any(|gap| { gap.reason == ReportScheduleGapReason::CoalescedByNewerOccurrence })
     );
+    let expected_missed_count = materialized
+        .gaps
+        .iter()
+        .chain(coalesced.gaps.iter())
+        .map(|gap| gap.missed_count)
+        .sum::<i64>();
+    let health = repository
+        .schedule_health()
+        .await
+        .expect("load report schedule health");
+    assert_eq!(health.missed_occurrence_count_24h, expected_missed_count);
 }
 
 #[tokio::test]

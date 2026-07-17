@@ -1472,6 +1472,7 @@ mod tests {
             description: None,
             categories: vec![MarketCategory::Politics],
             status: MarketStatus::Settled,
+            filter_reasons: Vec::new(),
             outcome: Some("Yes".to_owned()),
             yes_token_id: TokenId::new("111"),
             no_token_id: TokenId::new("222"),
@@ -1480,6 +1481,7 @@ mod tests {
             start_date: None,
             end_date: None,
             resolved_at: Some(now),
+            content_hash: test_content_hash(b'm'),
             created_at: now,
             updated_at: now,
         }

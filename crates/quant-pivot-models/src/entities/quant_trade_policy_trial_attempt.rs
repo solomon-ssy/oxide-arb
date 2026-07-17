@@ -10,6 +10,7 @@ use crate::{
     },
 };
 
+#[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "quant_trade_policy_trial_attempt")]
 pub struct Model {
@@ -33,22 +34,14 @@ pub struct Model {
     pub failure_detail: Option<String>,
     pub row_hash: ContentHash,
     pub created_at: DateTime<Utc>,
-}
 
-#[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-pub enum Relation {
     #[sea_orm(
-        belongs_to = "super::quant_research_job::Entity",
-        from = "Column::FitJobId",
-        to = "super::quant_research_job::Column::JobId"
+        belongs_to,
+        relation_enum = "ResearchJob",
+        from = "fit_job_id",
+        to = "job_id"
     )]
-    ResearchJob,
-}
-
-impl Related<super::quant_research_job::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::ResearchJob.def()
-    }
+    pub research_job: BelongsTo<super::quant_research_job::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

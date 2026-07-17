@@ -2015,7 +2015,7 @@ fn operation_log(
 ) -> QuantResult<NewOperationLog> {
     Ok(NewOperationLog {
         id: OperationLogId::from_v7(),
-        request_id: format!("quant-report:prepare:{report_id}"),
+        request_id: input.trigger_key.clone(),
         actor_user_id: None,
         actor_username: Some("system".to_owned()),
         acting_role: Some("report_lifecycle".to_owned()),
@@ -2031,6 +2031,8 @@ fn operation_log(
         user_agent: None,
         latency_ms: 0,
         detail: serde_json::json!({
+            "trigger_key": input.trigger_key,
+            "trigger_kind": input.trigger.kind().as_str(),
             "status": status.as_str(),
             "decision_at": input.decision_at.to_rfc3339(),
             "prepared_at": input.published_at.to_rfc3339(),

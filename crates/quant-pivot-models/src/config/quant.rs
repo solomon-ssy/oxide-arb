@@ -13,6 +13,16 @@ pub struct QuantDeployConfig {
     pub account: QuantAccountDeployConfig,
     /// Async research-job engine tunables (concurrency, lease, recovery, guards).
     pub research_jobs: ResearchJobsConfig,
+    /// Cold-start and runtime-config approval controls.
+    pub governance: QuantGovernanceConfig,
+}
+
+/// Deploy-bound separation-of-duties policy.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct QuantGovernanceConfig {
+    /// Require config approver and activation operator to be different users.
+    pub require_approver_activator_separation: bool,
 }
 
 /// Async research-job engine tunables (`[quant.research_jobs]`, restart to apply).

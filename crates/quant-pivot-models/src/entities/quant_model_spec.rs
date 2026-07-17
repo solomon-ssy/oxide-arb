@@ -7,6 +7,7 @@ use crate::{
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
+#[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "quant_model_spec")]
 pub struct Model {
@@ -30,18 +31,9 @@ pub struct Model {
     pub status: PublicationStatus,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
-}
 
-#[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-pub enum Relation {
-    #[sea_orm(has_many = "super::quant_model_version::Entity")]
-    ModelVersion,
-}
-
-impl Related<super::quant_model_version::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::ModelVersion.def()
-    }
+    #[sea_orm(has_many, relation_enum = "ModelVersion")]
+    pub model_version: HasMany<super::quant_model_version::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

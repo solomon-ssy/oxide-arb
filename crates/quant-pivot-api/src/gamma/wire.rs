@@ -155,6 +155,9 @@ impl WireEvent {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WireMarket {
+    /// Stable Gamma source object id, available before CTF/CLOB listing.
+    #[serde(default)]
+    pub id: Option<String>,
     pub condition_id: String,
     pub question: String,
     #[serde(default)]
@@ -173,6 +176,12 @@ pub struct WireMarket {
     pub active: Option<bool>,
     #[serde(default)]
     pub closed: Option<bool>,
+    /// Whether Gamma has enabled the CLOB order book for this market.
+    #[serde(default)]
+    pub enable_order_book: Option<bool>,
+    /// Whether the CLOB currently accepts new orders for this market.
+    #[serde(default)]
+    pub accepting_orders: Option<bool>,
     /// Per-outcome settlement prices; `"1"` marks the winning leg once
     /// `uma_resolution_status` is `resolved`.
     #[serde(default)]

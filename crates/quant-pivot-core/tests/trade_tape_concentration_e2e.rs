@@ -45,7 +45,9 @@ use quant_pivot_core::{
     },
 };
 use quant_pivot_error::{control::ControlError, storage::StorageError};
-use quant_pivot_models::domain::{DecisionClock, RuntimeConfigPort, StructuralMonitorPort};
+use quant_pivot_models::domain::{
+    DecisionClock, PreparedRuntimeConfig, RuntimeConfigPort, StructuralMonitorPort,
+};
 use quant_pivot_models::runtime_config::FeatureFamily;
 use quant_pivot_models::{
     clickhouse::{
@@ -58,6 +60,7 @@ use quant_pivot_models::{
         market::{EventRegistryInfo, MarketRegistryInfo, TokenInfo, book::BookLevel},
     },
     enums::{
+        catalog::CatalogFilterReasonSet,
         common::{CategorySet, MarketCategory, TickSize},
         factor::FactorFamily,
         market::{EventStatus, MarketStatus},
@@ -135,12 +138,8 @@ impl RuntimeConfigPort for FixedRuntimeConfig {
         Arc::clone(&self.0)
     }
 
-    fn preflight(&self, _candidate: &RuntimeConfig) -> Result<(), ControlError> {
-        Ok(())
-    }
-
-    async fn apply(&self, _config: RuntimeConfig) -> Result<(), ControlError> {
-        Ok(())
+    async fn prepare(&self, config: RuntimeConfig) -> Result<PreparedRuntimeConfig, ControlError> {
+        Ok(PreparedRuntimeConfig::new(Arc::new(config), || {}))
     }
 }
 
@@ -280,6 +279,7 @@ fn registry_market(catalog: &Catalog) -> MarketRegistryInfo {
         description: None,
         categories: CategorySet::from(MarketCategory::Sports),
         status: MarketStatus::Active,
+        filter_reasons: CatalogFilterReasonSet::default(),
         outcome: None,
         neg_risk: false,
         tick_size: TickSize::Hundredth,

@@ -15,7 +15,7 @@ use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{
     config::WEATHER_OBSERVATION_DAY_CLOSE_GRACE_SECS,
     domain::{
-        DecisionBoundary, DecisionSource, LinkageOutcome, MarketCatalogVersionInfo, MarketLinkage,
+        CatalogMarketChangeInfo, DecisionBoundary, DecisionSource, LinkageOutcome, MarketLinkage,
         MarketRegistryInfo, MarketSubject, ModelVersionInfo, WeatherObservationFact,
         WeatherObservationReportKind,
     },
@@ -2012,7 +2012,7 @@ fn catalog_market_at(
                         .cutoff_for(DecisionSource::Catalog)
                 && version.available_at <= example.decision_at()
         })
-        .max_by(|left, right| catalog_version_order(left, right))
+        .max_by(|left, right| catalog_change_order(left, right))
         .ok_or_else(|| {
             methodology(format!(
                 "market {} has no PIT catalog row",
@@ -2027,9 +2027,9 @@ fn catalog_market_at(
     })
 }
 
-fn catalog_version_order(
-    left: &MarketCatalogVersionInfo,
-    right: &MarketCatalogVersionInfo,
+fn catalog_change_order(
+    left: &CatalogMarketChangeInfo,
+    right: &CatalogMarketChangeInfo,
 ) -> Ordering {
     (
         left.source_effective_at,

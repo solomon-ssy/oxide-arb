@@ -40,8 +40,23 @@ impl PostgresNotificationListener {
 
 impl PostgresPool {
     pub async fn connect(config: &PostgresConfig) -> Result<Self, StorageError> {
-        ensure::ensure_database(config).await?;
+        ensure::ensure_database(config, &config.user).await?;
+        Self::connect_existing(config).await
+    }
 
+    /// Connect with the optional deploy-only identity while preserving the
+    /// runtime role as the owner of a newly created application database.
+    pub async fn connect_migration(
+        config: &PostgresConfig,
+        migration_password: &str,
+    ) -> Result<Self, StorageError> {
+        let migration = config.migration_connection(migration_password);
+        ensure::ensure_database(&migration, &migration.user).await?;
+        Self::connect_existing(&migration).await
+    }
+
+    /// Connect to an existing database without attempting maintenance-catalog DDL.
+    pub async fn connect_existing(config: &PostgresConfig) -> Result<Self, StorageError> {
         let url = config.to_url();
         let mut opts = ConnectOptions::new(&url);
 
@@ -133,7 +148,7 @@ impl PostgresPool {
     /// Verify the connection is alive.
     pub async fn health_check(&self) -> Result<(), StorageError> {
         self.db
-            .execute(Statement::from_string(DbBackend::Postgres, "SELECT 1"))
+            .execute_raw(Statement::from_string(DbBackend::Postgres, "SELECT 1"))
             .await
             .map_err(|e| {
                 StorageError::Connection(format!("PostgreSQL health check failed: {e}"))
@@ -207,7 +222,7 @@ impl PostgresPool {
         let sql = format!("SHOW {param}");
         let result = self
             .db
-            .query_one(Statement::from_string(DbBackend::Postgres, sql))
+            .query_one_raw(Statement::from_string(DbBackend::Postgres, sql))
             .await
             .map_err(|e| StorageError::Connection(format!("Failed to SHOW {param}: {e}")))?;
 

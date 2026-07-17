@@ -10,9 +10,9 @@ pub mod write_manager;
 pub use migration::{
     ClickHouseMigrationSafety, ClickHouseSchemaMigrationInfo, ClickHouseSchemaPlan,
     ClickHouseSchemaStatus, apply_offline_schema_migrations, apply_online_schema_migrations,
-    plan_schema, verify_schema,
+    plan_schema, render_schema_manifest, schema_contract_hash, verify_schema,
 };
 pub use pool::ClickHousePool;
 pub use readiness::{BookLatencyObservation, RawHistoryObservation};
-pub use schema::{RAW_HISTORY_TABLES, RawHistoryTable, extract_table_ttl};
+pub use schema::extract_table_ttl;
 pub use write_manager::{ChWriteManager, ChWriteMetrics, WritePermit};

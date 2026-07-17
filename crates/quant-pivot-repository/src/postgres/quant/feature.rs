@@ -45,7 +45,7 @@ impl FeatureRepository for PgFeatureRepository {
         let models = quant_feature_vector::Entity::insert_many(
             vectors.into_iter().map(IntoActiveModel::into_active_model),
         )
-        .exec_with_returning_many(&self.db)
+        .exec_with_returning(&self.db)
         .await
         .map_err(StorageError::from)?;
         Ok(models.into_iter().map(Into::into).collect())

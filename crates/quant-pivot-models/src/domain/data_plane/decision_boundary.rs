@@ -49,8 +49,6 @@ pub struct DecisionBoundary {
     per_source_cutoffs: BTreeMap<DecisionSource, DateTime<Utc>>,
 }
 
-crate::jsonb_active!(DecisionBoundary);
-
 impl DecisionBoundary {
     /// Validate a boundary loaded from an artifact or persistence layer.
     ///

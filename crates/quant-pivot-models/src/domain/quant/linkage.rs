@@ -24,7 +24,7 @@
 
 use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantResult, governance::GovernanceError, hashing::CanonicalDigestError};
-use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -434,7 +434,7 @@ impl MarketLinkage {
 // ── Persistence DTOs (`quant_market_linkage`) ───────────────────────────────
 
 /// Ledger row projection of one frozen linkage record.
-#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
+#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
 #[sea_orm(entity = "crate::entities::quant_market_linkage::Entity")]
 pub struct MarketLinkageInfo {
     pub linkage_id: MarketLinkageId,

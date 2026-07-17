@@ -15,6 +15,7 @@ use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 use uuid::Uuid;
 
+#[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "quant_order_intent")]
 pub struct Model {
@@ -58,58 +59,27 @@ pub struct Model {
     pub scale_out_state: ScaleOutState,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
-}
 
-#[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-pub enum Relation {
     #[sea_orm(
-        belongs_to = "super::quant_recommendation::Entity",
-        from = "Column::RecommendationId",
-        to = "super::quant_recommendation::Column::RecommendationId"
+        belongs_to,
+        relation_enum = "Recommendation",
+        from = "recommendation_id",
+        to = "recommendation_id"
     )]
-    Recommendation,
+    pub recommendation: BelongsTo<super::quant_recommendation::Entity>,
     #[sea_orm(
-        belongs_to = "super::quant_entry_condition_instance::Entity",
-        from = "Column::ConditionInstanceId",
-        to = "super::quant_entry_condition_instance::Column::ConditionInstanceId"
+        belongs_to,
+        relation_enum = "ConditionInstance",
+        from = "condition_instance_id",
+        to = "condition_instance_id"
     )]
-    ConditionInstance,
-    #[sea_orm(has_many = "super::quant_execution_order::Entity")]
-    ExecutionOrder,
-    #[sea_orm(has_one = "super::quant_capital_allocation::Entity")]
-    CapitalAllocation,
-    #[sea_orm(has_one = "super::quant_position::Entity")]
-    Position,
-}
-
-impl Related<super::quant_recommendation::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::Recommendation.def()
-    }
-}
-
-impl Related<super::quant_entry_condition_instance::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::ConditionInstance.def()
-    }
-}
-
-impl Related<super::quant_execution_order::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::ExecutionOrder.def()
-    }
-}
-
-impl Related<super::quant_capital_allocation::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::CapitalAllocation.def()
-    }
-}
-
-impl Related<super::quant_position::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::Position.def()
-    }
+    pub condition_instance: BelongsTo<super::quant_entry_condition_instance::Entity>,
+    #[sea_orm(has_many, relation_enum = "ExecutionOrder")]
+    pub execution_order: HasMany<super::quant_execution_order::Entity>,
+    #[sea_orm(has_one, relation_enum = "CapitalAllocation")]
+    pub capital_allocation: HasOne<super::quant_capital_allocation::Entity>,
+    #[sea_orm(has_one, relation_enum = "Position")]
+    pub position: HasOne<super::quant_position::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

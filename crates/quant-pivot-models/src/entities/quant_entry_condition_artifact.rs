@@ -5,6 +5,7 @@ use sea_orm::entity::prelude::*;
 
 use crate::types::{ContentHash, EntryConditionArtifactId, EntryConditionArtifactV1};
 
+#[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "quant_entry_condition_artifact")]
 pub struct Model {
@@ -16,18 +17,9 @@ pub struct Model {
     #[sea_orm(column_type = "JsonBinary")]
     pub payload_json: EntryConditionArtifactV1,
     pub created_at: DateTime<Utc>,
-}
 
-#[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-pub enum Relation {
-    #[sea_orm(has_many = "super::quant_entry_condition_instance::Entity")]
-    Instance,
-}
-
-impl Related<super::quant_entry_condition_instance::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::Instance.def()
-    }
+    #[sea_orm(has_many, relation_enum = "Instance")]
+    pub instance: HasMany<super::quant_entry_condition_instance::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

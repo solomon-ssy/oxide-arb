@@ -47,14 +47,14 @@ macro_rules! validated_text_seaorm {
         impl From<$name> for Value {
             #[inline]
             fn from(v: $name) -> Self {
-                Self::String(Some(Box::new(v.0)))
+                Self::String(Some(v.0))
             }
         }
 
         impl From<&$name> for Value {
             #[inline]
             fn from(v: &$name) -> Self {
-                Self::String(Some(Box::new(v.0.clone())))
+                Self::String(Some(v.0.clone()))
             }
         }
 
@@ -72,7 +72,7 @@ macro_rules! validated_text_seaorm {
         impl ValueType for $name {
             fn try_from(v: Value) -> Result<Self, ValueTypeErr> {
                 match v {
-                    Value::String(Some(s)) => Self::parse(*s).map_err(|_| ValueTypeErr),
+                    Value::String(Some(s)) => Self::parse(s).map_err(|_| ValueTypeErr),
                     _ => Err(ValueTypeErr),
                 }
             }
@@ -410,12 +410,12 @@ mod tests {
 
     #[test]
     fn content_hash_seaorm_value_type_validates() {
-        let valid = Value::String(Some(Box::new(VALID_HASH.to_owned())));
+        let valid = Value::String(Some(VALID_HASH.to_owned()));
         let parsed = <ContentHash as ValueType>::try_from(valid).expect("valid db value");
         assert_eq!(parsed.as_str(), VALID_HASH);
 
         let sha = format!("sha256:{}", "a".repeat(BLAKE3_HEX_LEN));
-        let invalid = Value::String(Some(Box::new(sha)));
+        let invalid = Value::String(Some(sha));
         assert!(<ContentHash as ValueType>::try_from(invalid).is_err());
 
         assert!(<ContentHash as ValueType>::try_from(Value::String(None)).is_err());

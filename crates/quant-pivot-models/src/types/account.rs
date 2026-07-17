@@ -12,7 +12,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     enums::common::MarketCategory,
-    jsonb_active,
     types::{EventId, MarketId, Price, Shares, TokenId, Usd},
 };
 
@@ -89,5 +88,3 @@ impl ExposureBreakdown {
 /// JSONB column wrapper for the held positions of an account snapshot.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
 pub struct AccountPositions(pub Vec<PositionSnapshot>);
-
-jsonb_active!(ExposureBreakdown, AccountPositions);

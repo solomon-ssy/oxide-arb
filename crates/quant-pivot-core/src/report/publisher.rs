@@ -6,6 +6,7 @@ use std::{
 };
 
 use chrono::Utc;
+use quant_pivot_error::{QuantResult, report::ReportError};
 use quant_pivot_models::{
     domain::{
         CoreEvent, CoreEventPublisher, PublishReportOutcome, RecommendationReportInfo,
@@ -184,11 +185,16 @@ impl ReportPublisher {
     }
 
     /// Record one committed append-only schedule gap.
-    pub fn record_schedule_gap(&self, gap: &ReportScheduleGapInfo) {
+    pub fn record_schedule_gap(&self, gap: &ReportScheduleGapInfo) -> QuantResult<()> {
+        let missed_count =
+            u64::try_from(gap.missed_count).map_err(|error| ReportError::NumericOverflow {
+                field: "report_schedule_gap.missed_count",
+                detail: error.to_string(),
+            })?;
         self.metrics
             .report_schedule_gap_total
             .with_label_values(&[gap.schedule_id.as_str(), gap.reason.as_str()])
-            .inc_by(u64::try_from(gap.missed_count).unwrap_or(0));
+            .inc_by(missed_count);
         self.alerts.dispatch_background(
             Alert::new(
                 format!(
@@ -213,19 +219,31 @@ impl ReportPublisher {
             .with_visible_toast(true)
             .with_dedupe_secs(900),
         );
+        Ok(())
     }
 
     /// Publish durable queue gauges from a `PostgreSQL` health snapshot.
-    pub fn record_schedule_health(&self, health: &ReportScheduleHealthInfo) {
+    pub fn record_schedule_health(&self, health: &ReportScheduleHealthInfo) -> QuantResult<()> {
+        let queued_run_count = i64::try_from(health.queued_run_count).map_err(|error| {
+            ReportError::NumericOverflow {
+                field: "report_schedule_health.queued_run_count",
+                detail: error.to_string(),
+            }
+        })?;
+        let prepared_report_count =
+            i64::try_from(health.prepared_report_count).map_err(|error| {
+                ReportError::NumericOverflow {
+                    field: "report_schedule_health.prepared_report_count",
+                    detail: error.to_string(),
+                }
+            })?;
         self.metrics
             .report_run_active
             .set(i64::from(health.active_run.is_some()));
-        self.metrics
-            .report_run_queued
-            .set(i64::try_from(health.queued_run_count).unwrap_or(i64::MAX));
+        self.metrics.report_run_queued.set(queued_run_count);
         self.metrics
             .report_prepared_backlog
-            .set(i64::try_from(health.prepared_report_count).unwrap_or(i64::MAX));
+            .set(prepared_report_count);
         self.metrics.report_current_age_seconds.reset();
         for current in &health.current_reports {
             if let Some(published_at) = current.published_at {
@@ -236,6 +254,7 @@ impl ReportPublisher {
             }
         }
         self.publish_health_alerts(health);
+        Ok(())
     }
 
     fn publish_health_alerts(&self, health: &ReportScheduleHealthInfo) {

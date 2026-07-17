@@ -14,7 +14,8 @@ use quant_pivot_models::{
 use rust_decimal::Decimal;
 use sea_orm::{
     ActiveModelTrait, ActiveValue, ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait,
-    FromQueryResult, IntoActiveModel, PaginatorTrait, QueryFilter, QuerySelect, sea_query::Expr,
+    ExprTrait, FromQueryResult, IntoActiveModel, PaginatorTrait, QueryFilter, QuerySelect,
+    sea_query::{Expr, Func},
 };
 
 /// Allocation rows included in the reserved-capital aggregate.
@@ -90,15 +91,18 @@ impl ReservedCapitalRepository for PgCapitalAllocationRepository {
 ///   invariants must not free budget for new entries.
 /// - **`Spent` / `Released`**: excluded.
 pub async fn sum_reserved_usd(db: &DatabaseConnection) -> Result<Usd, StorageError> {
+    let gross_reserved = Func::greatest([
+        Expr::col(quant_capital_allocation::Column::AllocatedUsd),
+        Expr::col(quant_capital_allocation::Column::LockedUsd),
+    ]);
+    let net_reserved = gross_reserved
+        .sub(Expr::col(quant_capital_allocation::Column::SpentUsd))
+        .sub(Expr::col(quant_capital_allocation::Column::ReleasedUsd));
+    let non_negative = Func::greatest([net_reserved, Expr::value(Decimal::ZERO)]).sum();
     let row = quant_capital_allocation::Entity::find()
         .filter(quant_capital_allocation::Column::State.is_in(RESERVED_STATES))
         .select_only()
-        .column_as(
-            Expr::cust(
-                "SUM(GREATEST(GREATEST(allocated_usd, locked_usd) - spent_usd - released_usd, 0))",
-            ),
-            "total",
-        )
+        .column_as(non_negative, "total")
         .into_model::<LockedCapitalSum>()
         .one(db)
         .await

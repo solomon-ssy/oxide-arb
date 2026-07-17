@@ -20,7 +20,7 @@ pub struct RedisBackend {
 impl RedisBackend {
     /// Wrap a shared, already-verified connection pool.
     ///
-    /// `key_prefix` is the platform namespace (e.g. `oarb:`) prepended to
+    /// `key_prefix` is the platform namespace (e.g. `qp:`) prepended to
     /// every cache key before it reaches Redis.
     #[must_use]
     pub fn new(pool: Pool, key_prefix: &str) -> Self {

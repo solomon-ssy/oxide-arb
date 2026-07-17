@@ -1,6 +1,9 @@
 //! Shared HTTP GET helpers with retry classification.
 
+use std::time::{Duration, SystemTime};
+
 use quant_pivot_error::api::ApiError;
+use reqwest::header::{HeaderMap, RETRY_AFTER};
 
 use super::retry::{self, RetryPolicy};
 
@@ -8,6 +11,21 @@ use super::retry::{self, RetryPolicy};
 #[must_use]
 pub const fn is_retryable_status(status: u16) -> bool {
     matches!(status, 429 | 500 | 502 | 503 | 504)
+}
+
+/// Parse RFC-compliant `Retry-After` seconds or HTTP-date into milliseconds.
+#[must_use]
+pub(crate) fn retry_after_ms(headers: &HeaderMap) -> Option<u64> {
+    let value = headers.get(RETRY_AFTER)?.to_str().ok()?.trim();
+    let duration = if let Ok(seconds) = value.parse::<u64>() {
+        Duration::from_secs(seconds)
+    } else {
+        httpdate::parse_http_date(value)
+            .ok()?
+            .duration_since(SystemTime::now())
+            .unwrap_or_default()
+    };
+    u64::try_from(duration.as_millis()).ok()
 }
 
 /// Perform one GET and return the response body text on success.
@@ -104,4 +122,24 @@ pub async fn get_optional_bytes_with_retry(
         }
     })
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::retry_after_ms;
+    use reqwest::header::{HeaderMap, HeaderValue, RETRY_AFTER};
+
+    #[test]
+    fn retry_after_seconds_are_converted_to_milliseconds() {
+        let mut headers = HeaderMap::new();
+        headers.insert(RETRY_AFTER, HeaderValue::from_static("7"));
+        assert_eq!(retry_after_ms(&headers), Some(7_000));
+    }
+
+    #[test]
+    fn invalid_retry_after_is_ignored() {
+        let mut headers = HeaderMap::new();
+        headers.insert(RETRY_AFTER, HeaderValue::from_static("not-a-date"));
+        assert_eq!(retry_after_ms(&headers), None);
+    }
 }

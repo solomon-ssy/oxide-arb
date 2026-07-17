@@ -83,6 +83,7 @@ use crate::{
 fn protected_route_specs() -> Vec<RouteSpec> {
     let mut specs = Vec::new();
     specs.extend(auth::route_specs());
+    specs.extend(ws::route_specs());
     specs.extend(users::route_specs());
     specs.extend(roles::route_specs());
     specs.extend(menus::route_specs());
@@ -165,11 +166,12 @@ pub fn configure(cfg: &mut ServiceConfig) {
     let protected = web::scope("").wrap(from_fn(authn)).service(authorized);
 
     cfg.route("/health", web::get().to(health::health))
+        .route("/startup", web::get().to(health::startup))
         .route("/ready", web::get().to(health::ready))
         .route("/metrics", web::get().to(metrics::metrics))
         .service(
             web::scope(API_PREFIX)
-                // WebSocket upgrade authenticates via query token before upgrade.
+                // WebSocket upgrade consumes a short-lived single-use ticket.
                 // It deliberately sits outside `ApiV1Guard` (browsers cannot set
                 // `Accept-Api-Version` on the handshake) and outside Bearer `authn`
                 // (self-authenticates in the handler).

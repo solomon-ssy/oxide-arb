@@ -1,40 +1,5 @@
 //! `ClickHouse` DDL statements for `MergeTree` tables and materialized views.
 
-#[derive(Debug, Clone, Copy)]
-pub struct RawHistoryTable {
-    pub table: &'static str,
-    pub time_column: &'static str,
-    pub partition_key: &'static str,
-}
-
-pub const RAW_HISTORY_TABLES: [RawHistoryTable; 5] = [
-    RawHistoryTable {
-        table: "quant_book_stream_session",
-        time_column: "opened_at",
-        partition_key: "toYYYYMM(session_date)",
-    },
-    RawHistoryTable {
-        table: "quant_book_l2_event",
-        time_column: "venue_event_time",
-        partition_key: "toYYYYMM(event_date)",
-    },
-    RawHistoryTable {
-        table: "quant_book_l2_checkpoint",
-        time_column: "event_time",
-        partition_key: "toYYYYMM(checkpoint_date)",
-    },
-    RawHistoryTable {
-        table: "book_microstructure_1s",
-        time_column: "bucket_time",
-        partition_key: "toYYYYMM(bucket_date)",
-    },
-    RawHistoryTable {
-        table: "quant_trade_tape",
-        time_column: "event_time",
-        partition_key: "toYYYYMM(event_date)",
-    },
-];
-
 pub(super) const BASELINE_SOURCES: &[&str] = &[
     include_str!("sql/quant_book_stream_session.sql"),
     include_str!("sql/quant_book_l2_event.sql"),
@@ -52,6 +17,12 @@ pub(super) const BASELINE_SOURCES: &[&str] = &[
 
 pub(super) const REPORT_LIFECYCLE_V2_SOURCES: &[&str] =
     &[include_str!("sql/report_lifecycle_v2.sql")];
+
+pub(super) const REMOVE_UNMANAGED_ROLLUP_TTL_SOURCES: &[&str] =
+    &[include_str!("sql/remove_unmanaged_rollup_ttl.sql")];
+
+pub(super) const SCHEMA_VERSION_UINT32_SOURCES: &[&str] =
+    &[include_str!("sql/schema_version_uint32.sql")];
 
 pub(super) const REQUIRED_SCHEMA_OBJECTS: [&str; 27] = [
     "book_microstructure_1m",

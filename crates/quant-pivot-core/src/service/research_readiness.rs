@@ -1,64 +1,125 @@
 //! Production operational-evidence collection and verification for fit preflight.
 
-use std::sync::Arc;
+use std::{collections::BTreeMap, env, fs, sync::Arc};
 
 use chrono::{DateTime, Duration, Utc};
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
-    config::EvidenceAttestationConfig,
+    config::{
+        ArtifactStoreDeployConfig, ArtifactStoreKind, ClickHouseConfig, EvidenceAttestationConfig,
+    },
     domain::{NewResearchReadinessEvidence, ResearchReadinessEvidenceInfo},
     enums::quant::ResearchReadinessEvidenceKind,
     hashing::CanonicalDigest,
     types::{
-        ArtifactUri, ContentHash, RETENTION_RUNWAY_EVIDENCE_FORMAT_VERSION,
-        ResearchReadinessEvidencePayload, RetentionRunwayEvidenceV2, RetentionTableObservationV2,
-        SHADOW_LATENCY_PROFILE_FORMAT_VERSION, ShadowLatencyProfileV1,
+        ArtifactUri, ContentHash, HistoryCoverage, RETENTION_RUNWAY_EVIDENCE_FORMAT_VERSION,
+        ResearchReadinessEvidencePayload, ResearchSourceBinding, ResearchSourceRegistry,
+        ResearchSourceStorageKind, RetentionRunwayEvidenceV3, RetentionSourceObservationV3,
+        SHADOW_LATENCY_PROFILE_FORMAT_VERSION, ShadowLatencyProfileV1, research_source_registry,
     },
 };
-use quant_pivot_repository::traits::ResearchReadinessEvidenceRepository;
-use quant_pivot_research::artifact::{ArtifactKey, ArtifactNamespace, ArtifactStore};
-use quant_pivot_storage::clickhouse::{
-    ClickHousePool, RAW_HISTORY_TABLES, RawHistoryTable, extract_table_ttl,
+use quant_pivot_repository::traits::{
+    CatalogLedgerRepository, ClobMarketInfoRepository, ResearchReadinessEvidenceRepository,
 };
+use quant_pivot_research::artifact::{ArtifactKey, ArtifactNamespace, ArtifactStore};
+use quant_pivot_storage::clickhouse::{ClickHousePool, extract_table_ttl, schema_contract_hash};
 use serde::Serialize;
 use uuid::Uuid;
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 const EVIDENCE_VALID_FOR: Duration = Duration::hours(6);
 const LATENCY_WINDOW: Duration = Duration::hours(24);
 const LOCAL_ARTIFACT_VERSION: &str = "local-development";
+pub const EVIDENCE_ATTESTATION_KEYRING_FILE_ENV: &str =
+    "QUANT_PIVOT_EVIDENCE_ATTESTATION_KEYRING_FILE";
+
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
+struct AttestationKey([u8; 32]);
 
 #[derive(Clone)]
 pub struct EvidenceAttestor {
-    key_id: String,
-    key: [u8; 32],
+    signing_key_id: String,
+    keys: BTreeMap<String, AttestationKey>,
 }
 
 impl EvidenceAttestor {
     pub fn from_config(config: &EvidenceAttestationConfig) -> QuantResult<Option<Self>> {
-        match (config.key_id.trim(), config.secret_hex.as_deref()) {
-            ("", None) => Ok(None),
-            ("", Some(_)) => Err(methodology(
-                "research evidence attestation secret requires a non-empty key_id",
-            )),
-            (_, None) => Err(methodology(
-                "research evidence attestation key_id requires secret_hex",
-            )),
-            (key_id, Some(secret)) => Ok(Some(Self {
-                key_id: key_id.to_owned(),
-                key: decode_key(secret)?,
-            })),
-        }
+        let keyring_file = env::var(EVIDENCE_ATTESTATION_KEYRING_FILE_ENV).ok();
+        let Some(keyring_file) = keyring_file else {
+            return Self::from_config_with_keyring_json(config, None);
+        };
+        let keyring_json = Zeroizing::new(fs::read_to_string(&keyring_file).map_err(|error| {
+            methodology(format!(
+                "failed to read research evidence keyring file `{keyring_file}`: {error}"
+            ))
+        })?);
+        Self::from_config_with_keyring_json(config, Some(keyring_json.as_str()))
     }
 
-    fn mac<T: Serialize + ?Sized>(&self, value: &T) -> QuantResult<ContentHash> {
-        let bytes = serde_json::to_vec(value).map_err(|error| {
+    fn from_config_with_keyring_json(
+        config: &EvidenceAttestationConfig,
+        keyring_json: Option<&str>,
+    ) -> QuantResult<Option<Self>> {
+        let signing_key_id = config.signing_key_id.trim();
+        match (signing_key_id.is_empty(), keyring_json) {
+            (true, None) => return Ok(None),
+            (true, Some(_)) => {
+                return Err(methodology(
+                    "research evidence keyring requires a configured signing_key_id",
+                ));
+            }
+            (false, None) => {
+                return Err(methodology(format!(
+                    "research evidence signing_key_id requires {EVIDENCE_ATTESTATION_KEYRING_FILE_ENV}"
+                )));
+            }
+            (false, Some(_)) => {}
+        }
+        let encoded =
+            serde_json::from_str::<BTreeMap<String, String>>(keyring_json.unwrap_or_default())
+                .map_err(|error| {
+                    methodology(format!(
+                        "research evidence keyring JSON is invalid: {error}"
+                    ))
+                })?;
+        if encoded.is_empty() || encoded.keys().any(|key_id| key_id.trim().is_empty()) {
+            return Err(methodology(
+                "research evidence keyring must contain non-empty key ids",
+            ));
+        }
+        let keys = encoded
+            .into_iter()
+            .map(|(key_id, mut secret)| {
+                let decoded = decode_key(&secret).map(|key| (key_id, AttestationKey(key)));
+                secret.zeroize();
+                decoded
+            })
+            .collect::<QuantResult<BTreeMap<_, _>>>()?;
+        if !keys.contains_key(signing_key_id) {
+            return Err(methodology(format!(
+                "research evidence signing key `{signing_key_id}` is absent from the keyring"
+            )));
+        }
+        Ok(Some(Self {
+            signing_key_id: signing_key_id.to_owned(),
+            keys,
+        }))
+    }
+
+    fn mac<T: Serialize + ?Sized>(&self, key_id: &str, value: &T) -> QuantResult<ContentHash> {
+        let key = self.keys.get(key_id).ok_or_else(|| {
+            methodology(format!(
+                "research evidence attestation key `{key_id}` is not present in the configured historical keyring"
+            ))
+        })?;
+        let bytes = CanonicalDigest::canonical_json_bytes(value).map_err(|error| {
             QuantError::from(ResearchError::Serialization {
                 detail: format!("readiness attestation serialization failed: {error}"),
             })
         })?;
         ContentHash::parse(format!(
             "blake3:{}",
-            blake3::keyed_hash(&self.key, &bytes).to_hex()
+            blake3::keyed_hash(&key.0, &bytes).to_hex()
         ))
         .map_err(Into::into)
     }
@@ -77,6 +138,77 @@ struct AttestationInput<'a> {
     artifact_version: &'a str,
 }
 
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum EvidenceArtifactDurabilityClass {
+    LocalEphemeral,
+    RemoteUnverified,
+    VersionedObjectLock,
+}
+
+macro_rules! evidence_identity {
+    ($name:ident, $label:literal) => {
+        #[derive(Debug, Clone, Serialize)]
+        #[serde(transparent)]
+        struct $name(String);
+
+        impl $name {
+            fn parse(value: &str) -> QuantResult<Self> {
+                let value = value.trim();
+                if value.is_empty() || value.len() > 128 {
+                    return Err(methodology(concat!(
+                        $label,
+                        " must contain 1..=128 non-whitespace characters"
+                    )));
+                }
+                Ok(Self(value.to_owned()))
+            }
+        }
+    };
+}
+
+evidence_identity!(DeploymentIdentity, "deployment_id");
+evidence_identity!(ClickHouseClusterIdentity, "clickhouse_cluster_id");
+evidence_identity!(ClickHouseDatabaseIdentity, "clickhouse_database");
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EvidenceScopeIdentity {
+    deployment_id: DeploymentIdentity,
+    clickhouse_cluster_id: ClickHouseClusterIdentity,
+    clickhouse_database: ClickHouseDatabaseIdentity,
+    clickhouse_schema_contract_hash: String,
+    research_source_registry_hash: ContentHash,
+    artifact_durability_class: EvidenceArtifactDurabilityClass,
+}
+
+impl EvidenceScopeIdentity {
+    pub fn from_config(
+        clickhouse: &ClickHouseConfig,
+        artifacts: &ArtifactStoreDeployConfig,
+    ) -> QuantResult<Self> {
+        let artifact_durability_class = match artifacts.kind {
+            ArtifactStoreKind::Local => EvidenceArtifactDurabilityClass::LocalEphemeral,
+            ArtifactStoreKind::S3
+                if artifacts.require_versioning && artifacts.require_object_lock =>
+            {
+                EvidenceArtifactDurabilityClass::VersionedObjectLock
+            }
+            ArtifactStoreKind::S3 => EvidenceArtifactDurabilityClass::RemoteUnverified,
+        };
+        let registry_hash = research_source_registry()
+            .and_then(|registry| registry.contract_hash())
+            .map_err(methodology)?;
+        Ok(Self {
+            deployment_id: DeploymentIdentity::parse(&clickhouse.deployment_id)?,
+            clickhouse_cluster_id: ClickHouseClusterIdentity::parse(&clickhouse.cluster_id)?,
+            clickhouse_database: ClickHouseDatabaseIdentity::parse(&clickhouse.database)?,
+            clickhouse_schema_contract_hash: schema_contract_hash(),
+            research_source_registry_hash: registry_hash,
+            artifact_durability_class,
+        })
+    }
+}
+
 pub struct VerifiedOperationalEvidence {
     pub retention: Option<ResearchReadinessEvidenceInfo>,
     pub latency: Option<ResearchReadinessEvidenceInfo>,
@@ -89,6 +221,7 @@ pub struct ResearchReadinessEvidenceService {
     attestor: Option<EvidenceAttestor>,
     retention_scope_hash: ContentHash,
     latency_scope_hash: ContentHash,
+    research_source_registry: ResearchSourceRegistry,
 }
 
 impl ResearchReadinessEvidenceService {
@@ -96,17 +229,22 @@ impl ResearchReadinessEvidenceService {
         repo: Arc<dyn ResearchReadinessEvidenceRepository>,
         artifacts: Arc<dyn ArtifactStore>,
         attestor: Option<EvidenceAttestor>,
+        scope: &EvidenceScopeIdentity,
     ) -> QuantResult<Self> {
+        let research_source_registry = research_source_registry().map_err(methodology)?;
         Ok(Self {
             repo,
             artifacts,
             attestor,
             retention_scope_hash: evidence_scope_hash(
                 ResearchReadinessEvidenceKind::RetentionRunway,
+                scope,
             )?,
             latency_scope_hash: evidence_scope_hash(
                 ResearchReadinessEvidenceKind::ShadowLatencyProfile,
+                scope,
             )?,
+            research_source_registry,
         })
     }
 
@@ -195,12 +333,14 @@ impl ResearchReadinessEvidenceService {
                 .ok_or_else(|| ResearchError::ValidationMethodology {
                     detail: "readiness evidence attestation key is not configured".to_owned(),
                 })?;
-        if info.attestation_key_id != attestor.key_id {
+        verify_kind_binding(info.kind, &info.payload_json)?;
+        if let ResearchReadinessEvidencePayload::RetentionRunway(retention) = &info.payload_json
+            && !retention.matches_registry(&self.research_source_registry)
+        {
             return Err(methodology(
-                "readiness evidence was signed by a non-current attestation key",
+                "retention evidence does not contain the exact current research source registry",
             ));
         }
-        verify_kind_binding(info.kind, &info.payload_json)?;
         let bytes = self.artifacts.get(&info.artifact_uri).await?;
         let actual_hash = ContentHash::parse(CanonicalDigest::prefixed_bytes(&bytes))?;
         let metadata = self.artifacts.metadata(&info.artifact_uri).await?;
@@ -223,7 +363,7 @@ impl ResearchReadinessEvidenceService {
                 "readiness evidence artifact differs from the append-only index payload",
             ));
         }
-        let mac = attestor.mac(&attestation_input(&info))?;
+        let mac = attestor.mac(&info.attestation_key_id, &attestation_input(&info))?;
         if mac != info.attestation_mac {
             return Err(methodology("readiness evidence attestation MAC is invalid"));
         }
@@ -267,7 +407,10 @@ fn verify_kind_binding(
     Ok(())
 }
 
-fn evidence_scope_hash(kind: ResearchReadinessEvidenceKind) -> QuantResult<ContentHash> {
+fn evidence_scope_hash(
+    kind: ResearchReadinessEvidenceKind,
+    identity: &EvidenceScopeIdentity,
+) -> QuantResult<ContentHash> {
     let format_version = match kind {
         ResearchReadinessEvidenceKind::RetentionRunway => RETENTION_RUNWAY_EVIDENCE_FORMAT_VERSION,
         ResearchReadinessEvidenceKind::ShadowLatencyProfile => {
@@ -275,10 +418,10 @@ fn evidence_scope_hash(kind: ResearchReadinessEvidenceKind) -> QuantResult<Conte
         }
     };
     CanonicalDigest::content_hash_json(&(
-        "research_readiness_evidence_scope_v2",
+        "research_readiness_evidence_scope_v4",
         kind,
         format_version,
-        "clickhouse_cloud",
+        identity,
     ))
     .map_err(Into::into)
 }
@@ -289,23 +432,34 @@ pub struct ResearchReadinessEvidenceProducer {
     repo: Arc<dyn ResearchReadinessEvidenceRepository>,
     artifacts: Arc<dyn ArtifactStore>,
     clickhouse: Arc<ClickHousePool>,
+    catalog: Arc<dyn CatalogLedgerRepository>,
+    clob_market_info: Arc<dyn ClobMarketInfoRepository>,
     attestor: Option<EvidenceAttestor>,
+    scope: EvidenceScopeIdentity,
+    source_registry: ResearchSourceRegistry,
 }
 
 impl ResearchReadinessEvidenceProducer {
-    #[must_use]
-    pub const fn new(
+    pub fn new(
         repo: Arc<dyn ResearchReadinessEvidenceRepository>,
         artifacts: Arc<dyn ArtifactStore>,
         clickhouse: Arc<ClickHousePool>,
+        catalog: Arc<dyn CatalogLedgerRepository>,
+        clob_market_info: Arc<dyn ClobMarketInfoRepository>,
         attestor: Option<EvidenceAttestor>,
-    ) -> Self {
-        Self {
+        scope: EvidenceScopeIdentity,
+    ) -> QuantResult<Self> {
+        let source_registry = research_source_registry().map_err(methodology)?;
+        Ok(Self {
             repo,
             artifacts,
             clickhouse,
+            catalog,
+            clob_market_info,
             attestor,
-        }
+            scope,
+            source_registry,
+        })
     }
 
     pub async fn capture(&self, required_days: u32) -> QuantResult<bool> {
@@ -349,13 +503,13 @@ impl ResearchReadinessEvidenceProducer {
         attestor: &EvidenceAttestor,
     ) -> QuantResult<()> {
         let expires_at = observed_at + EVIDENCE_VALID_FOR;
-        let bytes = serde_json::to_vec(&payload).map_err(|error| {
+        let bytes = CanonicalDigest::canonical_json_bytes(&payload).map_err(|error| {
             QuantError::from(ResearchError::Serialization {
                 detail: format!("readiness evidence serialization failed: {error}"),
             })
         })?;
         let payload_hash = ContentHash::parse(CanonicalDigest::prefixed_bytes(&bytes))?;
-        let scope_hash = evidence_scope_hash(kind)?;
+        let scope_hash = evidence_scope_hash(kind, &self.scope)?;
         let artifact_uri = self
             .artifacts
             .put(
@@ -382,7 +536,7 @@ impl ResearchReadinessEvidenceProducer {
             artifact_uri: &artifact_uri,
             artifact_version: &artifact_version,
         };
-        let attestation_mac = attestor.mac(&input)?;
+        let attestation_mac = attestor.mac(&attestor.signing_key_id, &input)?;
         self.repo
             .append(NewResearchReadinessEvidence {
                 evidence_id: Uuid::now_v7(),
@@ -396,7 +550,7 @@ impl ResearchReadinessEvidenceProducer {
                 payload_hash,
                 artifact_uri,
                 artifact_version,
-                attestation_key_id: attestor.key_id.clone(),
+                attestation_key_id: attestor.signing_key_id.clone(),
                 attestation_mac,
             })
             .await?;
@@ -407,60 +561,86 @@ impl ResearchReadinessEvidenceProducer {
         &self,
         required_days: u32,
         observed_at: DateTime<Utc>,
-    ) -> QuantResult<RetentionRunwayEvidenceV2> {
-        let mut tables = Vec::with_capacity(RAW_HISTORY_TABLES.len());
-        for spec in RAW_HISTORY_TABLES {
-            tables.push(self.retention_table(spec, observed_at).await?);
+    ) -> QuantResult<RetentionRunwayEvidenceV3> {
+        let catalog_coverage = self.catalog.research_history_coverage(observed_at).await?;
+        let clob_coverage = self
+            .clob_market_info
+            .research_history_coverage(observed_at)
+            .await?;
+        let mut observations = Vec::with_capacity(self.source_registry.bindings.len());
+        for binding in &self.source_registry.bindings {
+            observations.push(
+                self.retention_source(binding, observed_at, &catalog_coverage, &clob_coverage)
+                    .await?,
+            );
         }
-        let history_start = tables
+        let history_start = observations
             .iter()
-            .filter_map(|table| table.earliest_event_time)
+            .filter_map(|observation| observation.earliest_event_time)
             .max();
-        let all_tables_observed = tables
+        let all_sources_observed = observations
             .iter()
-            .all(|table| table.earliest_event_time.is_some());
-        let measured_history_days = if all_tables_observed {
+            .all(|observation| observation.earliest_event_time.is_some());
+        let measured_history_days = if all_sources_observed {
             history_start.and_then(|start| duration_days(observed_at - start))
         } else {
             None
         };
-        let active_raw_bytes = tables.iter().try_fold(0_u64, |total, table| {
-            total.checked_add(table.active_bytes).ok_or_else(|| {
-                QuantError::from(ResearchError::ValidationMethodology {
-                    detail: "raw ClickHouse byte count overflow".to_owned(),
+        let active_raw_bytes = observations.iter().try_fold(0_u64, |total, observation| {
+            total
+                .checked_add(observation.active_bytes.unwrap_or(0))
+                .ok_or_else(|| {
+                    QuantError::from(ResearchError::ValidationMethodology {
+                        detail: "raw ClickHouse byte count overflow".to_owned(),
+                    })
                 })
-            })
         })?;
-        Ok(RetentionRunwayEvidenceV2 {
+        Ok(RetentionRunwayEvidenceV3 {
             format_version: RETENTION_RUNWAY_EVIDENCE_FORMAT_VERSION,
+            registry_hash: self.source_registry.contract_hash().map_err(methodology)?,
+            required_sources: self.source_registry.required_sources.clone(),
             observed_at,
             required_days,
             measured_history_days,
             active_raw_bytes,
-            tables,
+            observations,
         })
     }
 
-    async fn retention_table(
+    async fn retention_source(
         &self,
-        spec: RawHistoryTable,
+        binding: &ResearchSourceBinding,
         observed_at: DateTime<Utc>,
-    ) -> QuantResult<RetentionTableObservationV2> {
-        let observation = self
-            .clickhouse
-            .observe_raw_history_table(spec, observed_at)
-            .await?;
-        Ok(RetentionTableObservationV2 {
-            table: spec.table.to_owned(),
-            time_column: spec.time_column.to_owned(),
-            earliest_event_time: timestamp_millis(observation.earliest_ms)?,
-            latest_event_time: timestamp_millis(observation.latest_ms)?,
-            row_count: observation.row_count,
-            active_bytes: observation.active_bytes,
-            active_partition_count: observation.active_partition_count,
-            partition_key: observation.partition_key,
-            table_ttl_expression: extract_table_ttl(&observation.create_table_query),
-        })
+        catalog_coverage: &[HistoryCoverage],
+        clob_coverage: &[HistoryCoverage],
+    ) -> QuantResult<RetentionSourceObservationV3> {
+        match binding.storage {
+            ResearchSourceStorageKind::ClickHouseTable => {
+                let observation = self
+                    .clickhouse
+                    .observe_raw_history_table(binding, observed_at)
+                    .await?;
+                Ok(RetentionSourceObservationV3 {
+                    source: binding.source,
+                    storage: binding.storage,
+                    object: binding.object.clone(),
+                    time_column: binding.time_column.clone(),
+                    earliest_event_time: timestamp_millis(observation.earliest_ms)?,
+                    latest_event_time: timestamp_millis(observation.latest_ms)?,
+                    row_count: observation.row_count,
+                    active_bytes: Some(observation.active_bytes),
+                    active_partition_count: Some(observation.active_partition_count),
+                    partition_key: Some(observation.partition_key),
+                    table_ttl_expression: extract_table_ttl(&observation.create_table_query),
+                })
+            }
+            ResearchSourceStorageKind::PostgresLedger => {
+                pg_retention_observation(binding, catalog_coverage)
+            }
+            ResearchSourceStorageKind::PostgresVersionedProjection => {
+                pg_retention_observation(binding, clob_coverage)
+            }
+        }
     }
 
     async fn capture_shadow_latency(
@@ -495,6 +675,40 @@ impl ResearchReadinessEvidenceProducer {
     }
 }
 
+fn pg_retention_observation(
+    binding: &ResearchSourceBinding,
+    coverage: &[HistoryCoverage],
+) -> QuantResult<RetentionSourceObservationV3> {
+    let observed = coverage
+        .iter()
+        .find(|observed| observed.object == binding.object)
+        .ok_or_else(|| {
+            methodology(format!(
+                "PostgreSQL research source `{}` returned no coverage observation",
+                binding.object
+            ))
+        })?;
+    if observed.time_column != binding.time_column {
+        return Err(methodology(format!(
+            "PostgreSQL research source `{}` reported time column `{}`, expected `{}`",
+            binding.object, observed.time_column, binding.time_column
+        )));
+    }
+    Ok(RetentionSourceObservationV3 {
+        source: binding.source,
+        storage: binding.storage,
+        object: binding.object.clone(),
+        time_column: binding.time_column.clone(),
+        earliest_event_time: observed.earliest_event_time,
+        latest_event_time: observed.latest_event_time,
+        row_count: observed.row_count,
+        active_bytes: None,
+        active_partition_count: None,
+        partition_key: None,
+        table_ttl_expression: None,
+    })
+}
+
 fn duration_days(duration: Duration) -> Option<u32> {
     let seconds = duration.num_seconds();
     (seconds >= 0)
@@ -515,7 +729,7 @@ fn timestamp_millis(value: Option<i64>) -> QuantResult<Option<DateTime<Utc>>> {
 fn decode_key(value: &str) -> QuantResult<[u8; 32]> {
     if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(methodology(
-            "research evidence attestation secret_hex must contain exactly 64 hex characters",
+            "research evidence attestation key must contain exactly 64 hex characters",
         ));
     }
     let mut key = [0_u8; 32];
@@ -523,7 +737,7 @@ fn decode_key(value: &str) -> QuantResult<[u8; 32]> {
         let offset = index * 2;
         *slot = u8::from_str_radix(&value[offset..offset + 2], 16).map_err(|error| {
             methodology(format!(
-                "research evidence attestation secret_hex is invalid: {error}"
+                "research evidence attestation key is invalid: {error}"
             ))
         })?;
     }
@@ -551,31 +765,48 @@ mod tests {
     #[test]
     fn attestation_config_is_all_or_nothing() {
         assert!(
-            EvidenceAttestor::from_config(&EvidenceAttestationConfig::default())
-                .expect("disabled attestor")
-                .is_none()
+            EvidenceAttestor::from_config_with_keyring_json(
+                &EvidenceAttestationConfig::default(),
+                None,
+            )
+            .expect("disabled attestor")
+            .is_none()
         );
         assert!(
-            EvidenceAttestor::from_config(&EvidenceAttestationConfig {
-                key_id: "operator-2026-07".to_owned(),
-                secret_hex: Some("ab".repeat(32)),
-            })
+            EvidenceAttestor::from_config_with_keyring_json(
+                &EvidenceAttestationConfig {
+                    signing_key_id: "operator-2026-07".to_owned(),
+                },
+                Some(&format!(r#"{{"operator-2026-07":"{}"}}"#, "ab".repeat(32))),
+            )
             .expect("configured attestor")
             .is_some()
         );
     }
 
     #[test]
-    fn keyed_attestation_changes_when_signed_content_changes() {
-        let attestor = EvidenceAttestor::from_config(&EvidenceAttestationConfig {
-            key_id: "operator-2026-07".to_owned(),
-            secret_hex: Some("ab".repeat(32)),
-        })
+    fn keyed_attestation_changes_with_content_and_retains_historical_keys() {
+        let keyring = format!(
+            r#"{{"operator-2026-06":"{}","operator-2026-07":"{}"}}"#,
+            "cd".repeat(32),
+            "ab".repeat(32)
+        );
+        let attestor = EvidenceAttestor::from_config_with_keyring_json(
+            &EvidenceAttestationConfig {
+                signing_key_id: "operator-2026-07".to_owned(),
+            },
+            Some(&keyring),
+        )
         .expect("valid attestor config")
         .expect("configured attestor");
-        let original = attestor.mac(&("scope", 1_u32)).expect("original MAC");
-        let tampered = attestor.mac(&("scope", 2_u32)).expect("tampered MAC");
+        let original = attestor
+            .mac("operator-2026-07", &("scope", 1_u32))
+            .expect("original MAC");
+        let tampered = attestor
+            .mac("operator-2026-07", &("scope", 2_u32))
+            .expect("tampered MAC");
         assert_ne!(original, tampered);
+        assert!(attestor.mac("operator-2026-06", &("scope", 1_u32)).is_ok());
     }
 
     #[test]

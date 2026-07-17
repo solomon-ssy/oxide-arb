@@ -9,10 +9,12 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{
-        NewRuntimeConfigActivation, NewRuntimeConfigVersion, RuntimeConfigActivationInfo,
-        RuntimeConfigVersionInfo,
+        NewRuntimeConfigActivation, NewRuntimeConfigApproval, NewRuntimeConfigVersion,
+        RuntimeConfigActivationInfo, RuntimeConfigApprovalInfo, RuntimeConfigVersionInfo,
     },
-    types::{ContentHash, RuntimeConfigActivationId, RuntimeConfigVersionId},
+    types::{
+        ContentHash, RuntimeConfigActivationId, RuntimeConfigApprovalId, RuntimeConfigVersionId,
+    },
 };
 use quant_pivot_storage::cache::{CacheKey, CacheManager};
 use std::sync::Arc;
@@ -37,6 +39,27 @@ impl<R: RuntimeConfigVersionRepository> CachedRuntimeConfigVersionRepository<R> 
 impl<R: RuntimeConfigVersionRepository> RuntimeConfigVersionRepository
     for CachedRuntimeConfigVersionRepository<R>
 {
+    async fn record_approval(
+        &self,
+        approval: NewRuntimeConfigApproval,
+    ) -> Result<RuntimeConfigApprovalInfo, StorageError> {
+        self.inner.record_approval(approval).await
+    }
+
+    async fn load_approval(
+        &self,
+        approval_id: &RuntimeConfigApprovalId,
+    ) -> Result<Option<RuntimeConfigApprovalInfo>, StorageError> {
+        self.inner.load_approval(approval_id).await
+    }
+
+    async fn list_valid_approvals(
+        &self,
+        limit: u64,
+    ) -> Result<Vec<RuntimeConfigApprovalInfo>, StorageError> {
+        self.inner.list_valid_approvals(limit).await
+    }
+
     async fn create_version(
         &self,
         version: NewRuntimeConfigVersion,
@@ -54,6 +77,19 @@ impl<R: RuntimeConfigVersionRepository> RuntimeConfigVersionRepository
         activation: NewRuntimeConfigActivation,
     ) -> Result<RuntimeConfigActivationInfo, StorageError> {
         let info = self.inner.activate_version(activation).await?;
+        self.invalidate_active().await;
+        Ok(info)
+    }
+
+    async fn activate_approved_version(
+        &self,
+        activation: NewRuntimeConfigActivation,
+        require_approver_activator_separation: bool,
+    ) -> Result<RuntimeConfigActivationInfo, StorageError> {
+        let info = self
+            .inner
+            .activate_approved_version(activation, require_approver_activator_separation)
+            .await?;
         self.invalidate_active().await;
         Ok(info)
     }

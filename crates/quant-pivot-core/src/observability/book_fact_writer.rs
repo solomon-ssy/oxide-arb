@@ -51,18 +51,6 @@ pub(crate) struct MarketWsTradeFact<'a> {
     pub trace: IngressTrace,
 }
 
-struct SnapshotLevels<'a> {
-    token_id: &'a TokenId,
-    market_id: Option<MarketId>,
-    bids: &'a [BookLevel],
-    asks: &'a [BookLevel],
-    event_time: i64,
-    stream_session_id: Uuid,
-    token_sequence: u64,
-    book_version: u64,
-    source_event_hash: ContentHash,
-}
-
 #[derive(Serialize)]
 struct SnapshotHashPayload {
     event_type: &'static str,
@@ -127,7 +115,12 @@ impl BookFactWriter {
         }
     }
 
-    pub fn write_snapshot_event(
+    /// Persist the canonical snapshot event and its replay checkpoint together.
+    ///
+    /// The two `ClickHouse` tables cannot share a transaction, so serving state is
+    /// published only after both acknowledged inserts succeed. A partial write
+    /// invalidates the enclosing stream session and is never served.
+    pub async fn write_snapshot_bundle(
         &self,
         cmd: &BookSnapshotCmd,
         market_id: Option<MarketId>,
@@ -138,7 +131,7 @@ impl BookFactWriter {
             stream_session_id: cmd.trace.stream_session_id,
             shard_id: cmd.trace.shard_id,
             token_id: cmd.asset_id.clone(),
-            market_id,
+            market_id: market_id.clone(),
             token_sequence: cmd.trace.token_sequence,
             event_type: ChCanonicalBookEventType::Snapshot,
             bid_prices: cmd
@@ -174,35 +167,42 @@ impl BookFactWriter {
             payload_hash: payload_hash.clone(),
             schema_version: L2_SCHEMA_VERSION,
         };
-        self.l2
-            .write_timeout(l2, CANONICAL_WRITE_TIMEOUT)
-            .ok()
-            .map(|()| payload_hash)
-    }
-
-    pub fn write_checkpoint(
-        &self,
-        token_id: &TokenId,
-        market_id: Option<MarketId>,
-        snapshot: &BookSnapshot,
-        stream_session_id: Uuid,
-        token_sequence: u64,
-        source_event_hash: ContentHash,
-    ) -> bool {
-        self.write_snapshot_levels(SnapshotLevels {
-            token_id,
+        let bids_json = serde_json::to_string(&levels_to_pairs(&cmd.bids.levels)).ok()?;
+        let asks_json = serde_json::to_string(&levels_to_pairs(&cmd.asks.levels)).ok()?;
+        let checkpoint_payload = serde_json::json!({
+            "token_id": cmd.asset_id,
+            "stream_session_id": cmd.trace.stream_session_id,
+            "token_sequence": cmd.trace.token_sequence,
+            "bids": bids_json,
+            "asks": asks_json,
+            "source_event_hash": payload_hash,
+        });
+        let checkpoint_hash = CanonicalDigest::content_hash_json(&checkpoint_payload).ok()?;
+        let checkpoint = BookL2CheckpointRow {
+            token_id: cmd.asset_id.clone(),
             market_id,
-            bids: &snapshot.bids,
-            asks: &snapshot.asks,
-            event_time: i64::try_from(snapshot.timestamp_ms).unwrap_or(i64::MAX),
-            stream_session_id,
-            token_sequence,
-            book_version: snapshot.version,
-            source_event_hash,
-        })
+            stream_session_id: cmd.trace.stream_session_id,
+            token_sequence: cmd.trace.token_sequence,
+            bids_json,
+            asks_json,
+            // Persistent replay versions follow the canonical token sequence;
+            // BookStore's local publish counter is intentionally not durable.
+            book_version: cmd.trace.token_sequence,
+            source_event_hash: payload_hash.clone(),
+            checkpoint_hash,
+            event_time: i64::try_from(cmd.timestamp_ms).unwrap_or(i64::MAX),
+            created_at: Utc::now().timestamp_millis(),
+            schema_version: L2_SCHEMA_VERSION,
+        };
+        let (event_result, checkpoint_result) = tokio::join!(
+            self.l2.write_async_timeout(l2, CANONICAL_WRITE_TIMEOUT),
+            self.checkpoints
+                .write_async_timeout(checkpoint, CANONICAL_WRITE_TIMEOUT),
+        );
+        (event_result.is_ok() && checkpoint_result.is_ok()).then_some(payload_hash)
     }
 
-    pub fn write_delta_event(
+    pub async fn write_delta_event(
         &self,
         cmd: &PriceDeltaCmd,
         market_id: Option<MarketId>,
@@ -243,7 +243,8 @@ impl BookFactWriter {
             schema_version: L2_SCHEMA_VERSION,
         };
         self.l2
-            .write_timeout(row, CANONICAL_WRITE_TIMEOUT)
+            .write_async_timeout(row, CANONICAL_WRITE_TIMEOUT)
+            .await
             .ok()
             .map(|()| payload_hash)
     }
@@ -265,7 +266,7 @@ impl BookFactWriter {
         );
     }
 
-    pub fn write_tick_size_change(
+    pub async fn write_tick_size_change(
         &self,
         token_id: &TokenId,
         market_id: Option<MarketId>,
@@ -285,7 +286,7 @@ impl BookFactWriter {
         };
         let now_ms = Utc::now().timestamp_millis();
         self.l2
-            .write_timeout(
+            .write_async_timeout(
                 BookL2EventRow {
                     stream_session_id: trace.stream_session_id,
                     shard_id: trace.shard_id,
@@ -308,10 +309,11 @@ impl BookFactWriter {
                 },
                 CANONICAL_WRITE_TIMEOUT,
             )
+            .await
             .is_ok()
     }
 
-    pub(crate) fn write_last_trade(&self, fact: MarketWsTradeFact<'_>) -> bool {
+    pub(crate) async fn write_last_trade(&self, fact: MarketWsTradeFact<'_>) -> bool {
         let MarketWsTradeFact {
             token_id,
             market_id,
@@ -352,7 +354,7 @@ impl BookFactWriter {
             observed_field_flags |= trade_tape_coverage::FEE_RATE;
         }
         self.trades
-            .write_timeout(
+            .write_async_timeout(
                 TradeTapeRow {
                     market_id,
                     token_id: token_id.clone(),
@@ -388,6 +390,7 @@ impl BookFactWriter {
                 },
                 CANONICAL_WRITE_TIMEOUT,
             )
+            .await
             .is_ok()
     }
 
@@ -419,7 +422,7 @@ impl BookFactWriter {
         });
     }
 
-    pub fn write_stream_session_open(
+    pub async fn write_stream_session_open(
         &self,
         stream_session_id: Uuid,
         shard_id: u32,
@@ -441,19 +444,21 @@ impl BookFactWriter {
             recorded_at: Utc::now().timestamp_millis(),
             schema_version: L2_SCHEMA_VERSION,
         })
+        .await
     }
 
-    pub fn write_stream_session_close(&self, row: BookStreamSessionRow) -> bool {
-        self.write_stream_session(row)
+    pub async fn write_stream_session_close(&self, row: BookStreamSessionRow) -> bool {
+        self.write_stream_session(row).await
     }
 
-    fn write_stream_session(&self, row: BookStreamSessionRow) -> bool {
+    async fn write_stream_session(&self, row: BookStreamSessionRow) -> bool {
         self.sessions
-            .write_timeout(row, CANONICAL_WRITE_TIMEOUT)
+            .write_async_timeout(row, CANONICAL_WRITE_TIMEOUT)
+            .await
             .is_ok()
     }
 
-    pub fn write_gap(
+    pub async fn write_gap(
         &self,
         token_id: &TokenId,
         market_id: Option<MarketId>,
@@ -472,7 +477,7 @@ impl BookFactWriter {
             return false;
         };
         self.l2
-            .write_timeout(
+            .write_async_timeout(
                 BookL2EventRow {
                     stream_session_id,
                     shard_id,
@@ -495,47 +500,7 @@ impl BookFactWriter {
                 },
                 CANONICAL_WRITE_TIMEOUT,
             )
-            .is_ok()
-    }
-
-    fn write_snapshot_levels(&self, input: SnapshotLevels<'_>) -> bool {
-        let bids_json = levels_to_pairs(input.bids);
-        let asks_json = levels_to_pairs(input.asks);
-        let Ok(bids_json) = serde_json::to_string(&bids_json) else {
-            return false;
-        };
-        let Ok(asks_json) = serde_json::to_string(&asks_json) else {
-            return false;
-        };
-        let checkpoint_payload = serde_json::json!({
-            "token_id": input.token_id,
-            "stream_session_id": input.stream_session_id,
-            "token_sequence": input.token_sequence,
-            "bids": bids_json,
-            "asks": asks_json,
-            "source_event_hash": input.source_event_hash,
-        });
-        let Ok(checkpoint_hash) = CanonicalDigest::content_hash_json(&checkpoint_payload) else {
-            return false;
-        };
-        self.checkpoints
-            .write_timeout(
-                BookL2CheckpointRow {
-                    token_id: input.token_id.clone(),
-                    market_id: input.market_id,
-                    stream_session_id: input.stream_session_id,
-                    token_sequence: input.token_sequence,
-                    bids_json,
-                    asks_json,
-                    book_version: input.book_version,
-                    source_event_hash: input.source_event_hash,
-                    checkpoint_hash,
-                    event_time: input.event_time,
-                    created_at: Utc::now().timestamp_millis(),
-                    schema_version: L2_SCHEMA_VERSION,
-                },
-                CANONICAL_WRITE_TIMEOUT,
-            )
+            .await
             .is_ok()
     }
 

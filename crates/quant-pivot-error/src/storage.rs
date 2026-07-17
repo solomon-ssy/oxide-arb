@@ -70,6 +70,8 @@ pub mod entity {
     pub const QUANT_MODEL_RUN: &str = "quant_model_run";
     /// `runtime_config_version`.
     pub const RUNTIME_CONFIG_VERSION: &str = "runtime_config_version";
+    /// `runtime_config_activation`.
+    pub const RUNTIME_CONFIG_ACTIVATION: &str = "runtime_config_activation";
     /// `quant_factor`.
     pub const QUANT_FACTOR: &str = "quant_factor";
     /// `quant_kill_switch`.

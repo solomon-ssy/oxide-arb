@@ -5,29 +5,25 @@ use crate::{
     governance::{BiasTableApplicator, CategoryPointerGuard, WeightOverlayApplicator},
     ingest::{
         data_quality::BookDataQualityService, market_cache::MarketCache,
-        market_filter::MarketFilter, market_registry::MarketRegistry,
+        market_filter::MarketFilter,
     },
-    observability::{alert_dispatcher::AlertDispatcher, metrics_hub::MetricsHub},
-    report::ReportScheduleReconciler,
+    observability::alert_dispatcher::AlertDispatcher,
     runtime_config::RuntimeConfigStore,
-    service::ws_subscription::WsSubscriptionCoordinator,
 };
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use quant_pivot_error::control::ControlError;
 use quant_pivot_models::{
-    domain::RuntimeConfigPort,
+    domain::{PreparedRuntimeConfig, RuntimeConfigPort},
     runtime_config::{RUNTIME_CONFIG_SCHEMA_VERSION, RuntimeConfig},
 };
 use std::sync::Arc;
 
+#[derive(Clone)]
 pub struct RuntimeConfigSubscribers {
     pub market_filter: Arc<MarketFilter>,
-    pub market_registry: Arc<MarketRegistry>,
     pub market_cache: Arc<MarketCache>,
-    pub ws_subscription: Option<Arc<WsSubscriptionCoordinator>>,
     pub data_quality: Arc<BookDataQualityService>,
-    pub metrics: Arc<MetricsHub>,
     /// Operator alert dispatcher; its notification channels are hot-swapped on
     /// activation so a new Telegram/webhook config takes effect without restart.
     pub alerts: Arc<AlertDispatcher>,
@@ -41,18 +37,11 @@ pub struct RuntimeConfigSubscribers {
     /// remediation R7): a dangling or mis-scoped pointer fails the activation
     /// closed rather than surfacing only as a runtime fallback.
     pub category_pointer_guard: Arc<CategoryPointerGuard>,
-    /// Deploy-time WS subscription look-ahead (hours); this is a structural
-    /// (restart-bound) parameter from `market_data.websocket`, not runtime config.
-    pub subscription_window_hours: u64,
 }
 
 pub struct RuntimeConfigApplicator {
     store: Arc<RuntimeConfigStore>,
     subscribers: RuntimeConfigSubscribers,
-    /// Report schedule runner, late-bound after the report bundle is assembled
-    /// (the runner depends on the report lifecycle, which is built after
-    /// governance). `None` until [`Self::attach_report_scheduler`] is called.
-    report_schedule_reconciler: Mutex<Option<Arc<dyn ReportScheduleReconciler>>>,
     /// Execution breaker, late-bound after the execution bundle is assembled
     /// (the breaker is built after governance). `None` until
     /// [`Self::attach_execution_breaker`] is called. Activations hot-swap its
@@ -62,18 +51,15 @@ pub struct RuntimeConfigApplicator {
 
 impl RuntimeConfigApplicator {
     #[must_use]
-    pub fn new(store: Arc<RuntimeConfigStore>, subscribers: RuntimeConfigSubscribers) -> Self {
+    pub const fn new(
+        store: Arc<RuntimeConfigStore>,
+        subscribers: RuntimeConfigSubscribers,
+    ) -> Self {
         Self {
             store,
             subscribers,
-            report_schedule_reconciler: Mutex::new(None),
             execution_breaker: Mutex::new(None),
         }
-    }
-
-    /// Bind the report schedule runner so activations rebuild report jobs.
-    pub fn attach_report_schedule_reconciler(&self, reconciler: Arc<dyn ReportScheduleReconciler>) {
-        *self.report_schedule_reconciler.lock() = Some(reconciler);
     }
 
     /// Bind the execution breaker so activations hot-reload its thresholds.
@@ -90,22 +76,13 @@ impl RuntimeConfigApplicator {
         Ok(())
     }
 
-    fn propagate(&self, config: &Arc<RuntimeConfig>) {
-        let subs = &self.subscribers;
+    fn propagate(subs: &RuntimeConfigSubscribers, config: &Arc<RuntimeConfig>) {
         subs.market_filter
             .reload(&config.selection.enabled_categories);
         subs.market_cache.rebuild();
         subs.data_quality.reload(&config.data_quality);
         subs.alerts.reload(&config.notification);
         subs.weight_overlay.reload(&config.factors, &config.model);
-        if let Some(ws) = &subs.ws_subscription {
-            let _ = ws.sync_subscription(
-                subs.market_registry.as_ref(),
-                subs.market_filter.as_ref(),
-                subs.subscription_window_hours,
-                &subs.metrics,
-            );
-        }
     }
 }
 
@@ -115,31 +92,13 @@ impl RuntimeConfigPort for RuntimeConfigApplicator {
         self.store.current()
     }
 
-    fn preflight(&self, candidate: &RuntimeConfig) -> Result<(), ControlError> {
-        Self::preflight_internal(candidate)
-    }
-
-    async fn apply(&self, config: RuntimeConfig) -> Result<(), ControlError> {
+    async fn prepare(&self, config: RuntimeConfig) -> Result<PreparedRuntimeConfig, ControlError> {
         Self::preflight_internal(&config)?;
         let arc = Arc::new(config);
-
-        // Rebuild report jobs before mutating the live snapshot so a schedule
-        // sync failure leaves store + subscribers untouched and the HTTP
-        // activation path can record a compensating rollback.
-        let reconciler = self.report_schedule_reconciler.lock().clone();
-        if let Some(reconciler) = reconciler {
-            reconciler
-                .reconcile(&arc.reports)
-                .await
-                .map_err(ControlError::from)?;
-        }
-
-        // Resolve + hash-verify the favorite-longshot bias table before mutating
-        // the live snapshot: a config pinning a missing / corrupt table must fail
-        // the activation closed, never bind a stale table to the factor plane.
-        self.subscribers
+        let bias_table = self
+            .subscribers
             .bias_table
-            .reload(&arc.factors.structural.favorite_longshot)
+            .prepare(&arc.factors.structural.favorite_longshot)
             .await?;
 
         // Validate every category pointer before mutating the live snapshot:
@@ -152,13 +111,21 @@ impl RuntimeConfigPort for RuntimeConfigApplicator {
             .await?;
 
         let breaker = self.execution_breaker.lock().clone();
-        if let Some(breaker) = breaker {
-            breaker
-                .reload(&arc.execution.breaker)
-                .map_err(ControlError::from)?;
-        }
-        self.propagate(&arc);
-        self.store.swap(Arc::clone(&arc));
-        Ok(())
+        let breaker_thresholds = breaker
+            .as_ref()
+            .map(|_| ExecutionBreaker::prepare_reload(&arc.execution.breaker))
+            .transpose()
+            .map_err(ControlError::from)?;
+        let store = Arc::clone(&self.store);
+        let subscribers = self.subscribers.clone();
+        let publish_config = Arc::clone(&arc);
+        Ok(PreparedRuntimeConfig::new(arc, move || {
+            subscribers.bias_table.publish(bias_table);
+            if let (Some(breaker), Some(thresholds)) = (breaker, breaker_thresholds) {
+                breaker.publish_reload(thresholds);
+            }
+            Self::propagate(&subscribers, &publish_config);
+            store.swap(publish_config);
+        }))
     }
 }

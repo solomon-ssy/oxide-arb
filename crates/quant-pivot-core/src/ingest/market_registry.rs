@@ -275,6 +275,7 @@ mod tests {
     use quant_pivot_models::{
         domain::market::TokenInfo,
         enums::{
+            catalog::CatalogFilterReasonSet,
             common::{CategorySet, MarketCategory, TickSize},
             market::EventStatus,
         },
@@ -300,6 +301,7 @@ mod tests {
             description: None,
             categories: CategorySet::from(MarketCategory::Other),
             status,
+            filter_reasons: CatalogFilterReasonSet::default(),
             outcome: None,
             neg_risk,
             tick_size: TickSize::Hundredth,

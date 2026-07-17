@@ -2,14 +2,31 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{
-        NewRuntimeConfigActivation, NewRuntimeConfigVersion, RuntimeConfigActivationInfo,
-        RuntimeConfigVersionInfo,
+        NewRuntimeConfigActivation, NewRuntimeConfigApproval, NewRuntimeConfigVersion,
+        RuntimeConfigActivationInfo, RuntimeConfigApprovalInfo, RuntimeConfigVersionInfo,
     },
-    types::{ContentHash, RuntimeConfigActivationId, RuntimeConfigVersionId},
+    types::{
+        ContentHash, RuntimeConfigActivationId, RuntimeConfigApprovalId, RuntimeConfigVersionId,
+    },
 };
 
 #[async_trait::async_trait]
 pub trait RuntimeConfigVersionRepository: Send + Sync {
+    async fn record_approval(
+        &self,
+        approval: NewRuntimeConfigApproval,
+    ) -> Result<RuntimeConfigApprovalInfo, StorageError>;
+
+    async fn load_approval(
+        &self,
+        approval_id: &RuntimeConfigApprovalId,
+    ) -> Result<Option<RuntimeConfigApprovalInfo>, StorageError>;
+
+    async fn list_valid_approvals(
+        &self,
+        limit: u64,
+    ) -> Result<Vec<RuntimeConfigApprovalInfo>, StorageError>;
+
     async fn create_version(
         &self,
         version: NewRuntimeConfigVersion,
@@ -18,6 +35,14 @@ pub trait RuntimeConfigVersionRepository: Send + Sync {
     async fn activate_version(
         &self,
         activation: NewRuntimeConfigActivation,
+    ) -> Result<RuntimeConfigActivationInfo, StorageError>;
+
+    /// Activate an operator-selected version only after transactionally
+    /// validating its exact approval evidence.
+    async fn activate_approved_version(
+        &self,
+        activation: NewRuntimeConfigActivation,
+        require_approver_activator_separation: bool,
     ) -> Result<RuntimeConfigActivationInfo, StorageError>;
 
     /// Append an activation only when the exact expected activation is still

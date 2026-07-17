@@ -4,6 +4,7 @@ use crate::types::{ContentHash, ModelVersionId, Probability, ShadowComparisonId}
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
+#[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "quant_shadow_comparison")]
 pub struct Model {
@@ -22,22 +23,21 @@ pub struct Model {
     pub hard_divergence: bool,
     pub comparison_hash: ContentHash,
     pub created_at: DateTime<Utc>,
-}
 
-#[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-pub enum Relation {
     #[sea_orm(
-        belongs_to = "super::quant_model_version::Entity",
-        from = "Column::ActiveModelVersionId",
-        to = "super::quant_model_version::Column::ModelVersionId"
+        belongs_to,
+        relation_enum = "ActiveVersion",
+        from = "active_model_version_id",
+        to = "model_version_id"
     )]
-    ActiveVersion,
+    pub active_version: BelongsTo<super::quant_model_version::Entity>,
     #[sea_orm(
-        belongs_to = "super::quant_model_version::Entity",
-        from = "Column::ShadowModelVersionId",
-        to = "super::quant_model_version::Column::ModelVersionId"
+        belongs_to,
+        relation_enum = "ShadowVersion",
+        from = "shadow_model_version_id",
+        to = "model_version_id"
     )]
-    ShadowVersion,
+    pub shadow_version: BelongsTo<super::quant_model_version::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

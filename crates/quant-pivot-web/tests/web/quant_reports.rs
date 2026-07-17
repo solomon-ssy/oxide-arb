@@ -140,9 +140,10 @@ async fn enable_ad_hoc(env: &TestEnv) {
     };
     env.state
         .runtime_config_apply
-        .apply(cfg)
+        .prepare(cfg)
         .await
-        .expect("apply runtime config");
+        .expect("prepare runtime config")
+        .publish();
 }
 
 #[actix_web::test]
@@ -197,7 +198,7 @@ async fn report_detail_recommendations_and_evidence_views() {
     seed_fixture_published_report(&env.db, report_id.clone(), &env.fixture_report_ctx()).await;
 
     let detail = get(&env, &format!("/api/quant/reports/{report_id}"), &admin).await;
-    assert_eq!(detail.status, StatusCode::OK);
+    assert_eq!(detail.status, StatusCode::OK, "response: {}", detail.json());
     assert_eq!(detail.json()["data"]["account_source"], json!("polymarket"));
     assert!(
         detail.json()["data"]["capital_base_usd"]
@@ -214,7 +215,23 @@ async fn report_detail_recommendations_and_evidence_views() {
         &admin,
     )
     .await;
-    assert_eq!(diagnostics.status, StatusCode::OK);
+    if diagnostics.status != StatusCode::OK {
+        let direct = env
+            .state
+            .quant_reports
+            .find_report_diagnostics(&report_id)
+            .await;
+        panic!(
+            "diagnostics response: {}; direct port result: {direct:?}",
+            diagnostics.json()
+        );
+    }
+    assert_eq!(
+        diagnostics.status,
+        StatusCode::OK,
+        "response: {}",
+        diagnostics.json()
+    );
     assert_eq!(
         diagnostics.json()["data"]["evidence_complete"],
         json!(false)
@@ -247,9 +264,11 @@ async fn report_detail_recommendations_and_evidence_views() {
         .expect("recommendations")
         .clone();
     assert_eq!(items.len(), 2);
-    assert!(items[0]["entry_plan"].is_object());
-    assert!(items[0]["sizing_plan"].is_object());
-    assert!(items[0]["exit_plan"].is_object());
+    assert_eq!(items[0]["trade_plan"]["kind"], json!("frozen"));
+    assert!(items[0]["trade_plan"]["entry"].is_object());
+    assert!(items[0]["trade_plan"]["sizing"].is_object());
+    assert!(items[0]["trade_plan"]["exit"].is_object());
+    assert!(items[0]["trade_plan"]["risk_envelope"].is_object());
     assert!(items[0]["execution_eligibility"].is_object());
     // Enriched governance facts: parent report status + blocking intent id.
     assert_eq!(items[0]["report_status"], json!("published"));
@@ -505,7 +524,14 @@ async fn report_run_routes_enforce_rbac_idempotency_and_conflicts() {
     );
 
     let health = get(&env, "/api/quant/report-schedules/health", &analyst).await;
-    assert_eq!(health.status, StatusCode::OK);
+    if health.status != StatusCode::OK {
+        let direct = env.state.quant_reports.report_schedule_health().await;
+        panic!(
+            "schedule health response: {}; direct port result: {direct:?}",
+            health.json()
+        );
+    }
+    assert_eq!(health.status, StatusCode::OK, "response: {}", health.json());
     assert!(health.json()["data"]["observed_at"].is_string());
     assert!(health.json()["data"]["queued_run_count"].is_number());
     assert!(health.json()["data"]["prepared_report_count"].is_number());

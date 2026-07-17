@@ -3,9 +3,10 @@
 use chrono::{DateTime, Utc};
 use clickhouse::Row;
 use quant_pivot_error::storage::StorageError;
+use quant_pivot_models::types::{ResearchSourceBinding, ResearchSourceStorageKind};
 use serde::Deserialize;
 
-use crate::clickhouse::{ClickHousePool, RawHistoryTable};
+use crate::clickhouse::ClickHousePool;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawHistoryObservation {
@@ -29,22 +30,37 @@ pub struct BookLatencyObservation {
 impl ClickHousePool {
     pub async fn observe_raw_history_table(
         &self,
-        spec: RawHistoryTable,
+        spec: &ResearchSourceBinding,
         as_of: DateTime<Utc>,
     ) -> Result<RawHistoryObservation, StorageError> {
+        if spec.storage != ResearchSourceStorageKind::ClickHouseTable {
+            return Err(StorageError::invariant_violation(
+                Some("research_source_registry"),
+                format!("{} is not a ClickHouse source binding", spec.object),
+            ));
+        }
+        let filter_sql = spec.filter.as_ref().map_or(String::new(), |filter| {
+            format!(" AND {} = ?", filter.column)
+        });
         let range_sql = format!(
             "SELECT toUnixTimestamp64Milli(minOrNull({time})) AS earliest_ms, \
              toUnixTimestamp64Milli(maxOrNull({time})) AS latest_ms, count() AS row_count \
-             FROM {table} WHERE {time} <= fromUnixTimestamp64Milli(?)",
+             FROM {table} WHERE {time} <= fromUnixTimestamp64Milli(?){filter_sql}",
             time = spec.time_column,
-            table = spec.table,
+            table = spec.object,
         );
-        let range = self
+        let range_query = self
             .client()
             .query(&range_sql)
-            .bind(as_of.timestamp_millis())
-            .fetch_one::<TimeRangeRow>()
-            .await?;
+            .bind(as_of.timestamp_millis());
+        let range = if let Some(filter) = &spec.filter {
+            range_query
+                .bind(&filter.value)
+                .fetch_one::<TimeRangeRow>()
+                .await?
+        } else {
+            range_query.fetch_one::<TimeRangeRow>().await?
+        };
         let parts = self
             .client()
             .query(
@@ -52,7 +68,7 @@ impl ClickHousePool {
                  uniqExact(partition) AS active_partition_count FROM system.parts \
                  WHERE active AND database = currentDatabase() AND table = ?",
             )
-            .bind(spec.table)
+            .bind(&spec.object)
             .fetch_one::<PartStatsRow>()
             .await?;
         let metadata = self
@@ -61,7 +77,7 @@ impl ClickHousePool {
                 "SELECT partition_key, create_table_query FROM system.tables \
                  WHERE database = currentDatabase() AND name = ?",
             )
-            .bind(spec.table)
+            .bind(&spec.object)
             .fetch_one::<TableMetadataRow>()
             .await?;
         Ok(RawHistoryObservation {

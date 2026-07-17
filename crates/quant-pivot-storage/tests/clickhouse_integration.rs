@@ -5,14 +5,19 @@ use prometheus::IntCounter;
 use quant_pivot_models::{
     clickhouse::{
         ChDecimal64, ChPrice, ChProbability, ChSchemaVersion, ChShares, ChUsd,
-        QuantRecommendationAttributionEventRow, QuantReportRecommendationFactRow, TradeTapeRow,
+        CryptoPriceReportRow, DomainEventRow, QuantRecommendationAttributionEventRow,
+        QuantReportRecommendationFactRow, TradeTapeRow,
     },
-    config::{ClickHouseConfig, ClickHouseMigrationConfig},
+    config::{ClickHouseConfig, SchemaMigrationConfig},
     enums::clickhouse::{
         ChOutcomeSide, ChRecommendationAttributionOutcome, ChTradeParticipantRole,
         ChTradeReconciliationStatus, ChTradeSide, ChTradeTapeSource,
     },
-    types::{MarketId, Price, RecommendationId, RecommendationReportId, Shares, TokenId, Usd},
+    hashing::CanonicalDigest,
+    types::{
+        DomainInstrumentKey, DomainSourceId, MarketId, Price, RecommendationId,
+        RecommendationReportId, Shares, TokenId, Usd,
+    },
 };
 use quant_pivot_storage::{
     clickhouse::{
@@ -32,11 +37,13 @@ use tokio_util::sync::CancellationToken;
 
 fn test_ch_config(port: u16) -> ClickHouseConfig {
     ClickHouseConfig {
+        deployment_id: "clickhouse-integration".into(),
+        cluster_id: "testcontainer".into(),
         url: format!("http://localhost:{port}"),
         database: "default".into(),
         user: "default".into(),
         password: String::new(),
-        migration: ClickHouseMigrationConfig::default(),
+        migration: SchemaMigrationConfig::default(),
         batch_size: 100,
         flush_interval_secs: 5,
         max_concurrent_inserts: 4,
@@ -74,7 +81,7 @@ async fn setup_clickhouse() -> (
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn concurrent_first_start_creates_missing_database_and_schema() {
+async fn first_deployment_creates_missing_database_and_schema() {
     let container = testcontainers::GenericImage::new("clickhouse/clickhouse-server", "26.5")
         .with_exposed_port(8123.into())
         .with_wait_for(WaitFor::http(
@@ -98,21 +105,12 @@ async fn concurrent_first_start_creates_missing_database_and_schema() {
         .expect_err("read-only startup must not create a missing database");
     assert!(missing.to_string().contains("does not exist"));
 
-    let (first, second) = tokio::join!(
-        apply_offline_schema_migrations(&config),
+    assert_eq!(
         apply_offline_schema_migrations(&config)
-    );
-    assert_eq!(
-        first
-            .expect("first concurrent schema migration")
+            .await
+            .expect("first schema migration")
             .current_version,
-        2
-    );
-    assert_eq!(
-        second
-            .expect("second concurrent schema migration")
-            .current_version,
-        2
+        4
     );
     let pool = ClickHousePool::connect(&config).await.expect("connect");
     pool.verify_schema().await.expect("verify schema");
@@ -125,6 +123,30 @@ async fn concurrent_first_start_creates_missing_database_and_schema() {
         .await
         .expect("database should exist");
     assert_eq!(count, 1);
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn deployment_and_runtime_fail_closed_while_schema_lock_is_held() {
+    let (_pool, client, port, _container) = setup_clickhouse().await;
+    client
+        .query(
+            "CREATE TABLE quant_pivot_schema_deployment_lock (owner String) \
+             ENGINE = TinyLog COMMENT 'test-deploy-owner'",
+        )
+        .execute()
+        .await
+        .expect("install deployment lock");
+
+    let deploy_error = apply_offline_schema_migrations(&test_ch_config(port))
+        .await
+        .expect_err("second schema deployer must not run concurrently");
+    assert!(deploy_error.to_string().contains("deployment lock"));
+
+    let runtime_error = verify_schema(&test_ch_config(port))
+        .await
+        .expect_err("runtime must not start while schema deployment is active");
+    assert!(runtime_error.to_string().contains("deployment lock"));
 }
 
 #[tokio::test]
@@ -272,6 +294,26 @@ async fn runtime_schema_verification_rejects_migration_ledger_drift() {
 
 #[tokio::test]
 #[ignore = "requires Docker"]
+async fn runtime_schema_verification_rejects_semantic_column_drift() {
+    let (_pool, client, port, _container) = setup_clickhouse().await;
+    client
+        .query(
+            "ALTER TABLE quant_trade_tape \
+             ADD COLUMN IF NOT EXISTS unmanaged_probe Nullable(String)",
+        )
+        .execute()
+        .await
+        .expect("install semantic schema drift");
+
+    let error = verify_schema(&test_ch_config(port))
+        .await
+        .expect_err("runtime contract must reject unmanaged columns");
+    assert!(error.to_string().contains("semantic schema drift"));
+    assert!(error.to_string().contains("quant_trade_tape"));
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
 async fn clickhouse_fact_contract_uses_decimal_and_enum_columns() {
     let (_pool, client, _port, _container) = setup_clickhouse().await;
     let expected: [(&str, &[&str]); 8] = [
@@ -354,6 +396,98 @@ async fn clickhouse_fact_contract_uses_decimal_and_enum_columns() {
             );
         }
     }
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn crypto_price_report_rust_row_matches_clickhouse_schema() {
+    let (_pool, client, _port, _container) = setup_clickhouse().await;
+    let now = Utc::now().timestamp_millis();
+    let row = CryptoPriceReportRow {
+        source_id: DomainSourceId::binance(),
+        instrument_key: DomainInstrumentKey::new("BINANCE_AGG_TRADE:BTCUSDT"),
+        source_sequence: 1,
+        price: ChDecimal64::from(dec!(50000)),
+        quantity: Some(ChDecimal64::from(dec!(0.01))),
+        event_time: now,
+        published_at: now,
+        available_at: now,
+        valid_from: None,
+        observations_timestamp: None,
+        expires_at: None,
+        report_hash: CanonicalDigest::content_hash_json(&serde_json::json!({
+            "source": "integration-test",
+            "sequence": 1,
+        }))
+        .expect("canonical report hash"),
+        raw_report: r#"{"test":true}"#.to_owned(),
+        schema_version: ChSchemaVersion::FIRST,
+    };
+
+    let mut insert = client
+        .insert::<CryptoPriceReportRow>("quant_crypto_price_report")
+        .await
+        .expect("start crypto report insert");
+    insert
+        .write(&row)
+        .await
+        .expect("serialize crypto report row");
+    insert.end().await.expect("commit crypto report row");
+
+    let count: u64 = client
+        .query(
+            "SELECT count() FROM quant_crypto_price_report \
+             WHERE source_id = 'binance' AND source_sequence = 1",
+        )
+        .fetch_one()
+        .await
+        .expect("read inserted crypto report");
+    assert_eq!(count, 1);
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn domain_event_rust_row_matches_clickhouse_schema() {
+    let (_pool, client, _port, _container) = setup_clickhouse().await;
+    let now = Utc::now().timestamp_millis();
+    let row = DomainEventRow {
+        event_id: uuid::Uuid::now_v7(),
+        source: "binance".to_owned(),
+        event_type: "crypto.price_transition".to_owned(),
+        subject: "BINANCE_AGG_TRADE:BTCUSDT".to_owned(),
+        event_time: now,
+        published_at: now,
+        available_at: now,
+        schema_version: ChSchemaVersion::FIRST,
+        revision: 1,
+        supersedes_event_id: Some(uuid::Uuid::now_v7()),
+        payload_hash: CanonicalDigest::content_hash_json(&serde_json::json!({
+            "event": "integration-test",
+        }))
+        .expect("canonical payload hash"),
+        source_checkpoint_hash: CanonicalDigest::content_hash_json(&serde_json::json!({
+            "checkpoint": 1,
+        }))
+        .expect("canonical checkpoint hash"),
+        payload_json: r#"{"test":true}"#.to_owned(),
+    };
+
+    let mut insert = client
+        .insert::<DomainEventRow>("quant_domain_event")
+        .await
+        .expect("start domain event insert");
+    insert
+        .write(&row)
+        .await
+        .expect("serialize domain event row");
+    insert.end().await.expect("commit domain event row");
+
+    let count: u64 = client
+        .query("SELECT count() FROM quant_domain_event")
+        .fetch_one()
+        .await
+        .expect("read inserted domain event");
+    assert_eq!(count, 1);
 }
 
 #[tokio::test]

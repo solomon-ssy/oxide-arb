@@ -4,6 +4,7 @@ use crate::types::{ReportDataQualitySnapshotId, ReportDataQualityTokens, Runtime
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
+#[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "quant_report_data_quality_snapshot")]
 pub struct Model {
@@ -14,30 +15,16 @@ pub struct Model {
     #[sea_orm(column_type = "JsonBinary")]
     pub tokens_json: ReportDataQualityTokens,
     pub created_at: DateTime<Utc>,
-}
 
-#[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-pub enum Relation {
     #[sea_orm(
-        belongs_to = "super::runtime_config_version::Entity",
-        from = "Column::RuntimeConfigVersionId",
-        to = "super::runtime_config_version::Column::RuntimeConfigVersionId"
+        belongs_to,
+        relation_enum = "RuntimeConfigVersion",
+        from = "runtime_config_version_id",
+        to = "runtime_config_version_id"
     )]
-    RuntimeConfigVersion,
-    #[sea_orm(has_many = "super::quant_recommendation_report::Entity")]
-    RecommendationReport,
-}
-
-impl Related<super::runtime_config_version::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::RuntimeConfigVersion.def()
-    }
-}
-
-impl Related<super::quant_recommendation_report::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::RecommendationReport.def()
-    }
+    pub runtime_config_version: BelongsTo<super::runtime_config_version::Entity>,
+    #[sea_orm(has_many, relation_enum = "RecommendationReport")]
+    pub recommendation_report: HasMany<super::quant_recommendation_report::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

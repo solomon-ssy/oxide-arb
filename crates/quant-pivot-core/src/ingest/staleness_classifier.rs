@@ -16,7 +16,6 @@ struct StalenessThresholds {
     fresh: u64,
     acceptable: u64,
     stale: u64,
-    expired: u64,
 }
 
 impl StalenessThresholds {
@@ -25,7 +24,6 @@ impl StalenessThresholds {
             fresh: config.max_book_age_ms / 2,
             acceptable: config.max_book_age_ms,
             stale: config.max_book_age_ms.saturating_mul(2),
-            expired: config.max_book_age_ms.saturating_mul(4),
         }
     }
 }
@@ -71,12 +69,6 @@ impl StalenessClassifier {
     pub fn acceptable_ms(&self) -> u64 {
         self.thresholds.load().acceptable
     }
-
-    /// Return the expired threshold (legacy alias).
-    #[inline]
-    pub fn expired_ms(&self) -> u64 {
-        self.thresholds.load().expired
-    }
 }
 
 #[cfg(test)]
@@ -93,7 +85,7 @@ mod tests {
     #[test]
     fn classify_levels() {
         // max_book_age_ms = 3_000 → ladder fresh<=1500, acceptable<=3000,
-        // stale<=6000, expired>6000 (from_config multipliers 0.5/1/2/4).
+        // stale<=6000, expired>6000 (from_config multipliers 0.5/1/2).
         let c = StalenessClassifier::new(&test_config());
         assert_eq!(c.classify(500), StalenessLevel::Fresh);
         assert_eq!(c.classify(1500), StalenessLevel::Fresh);
@@ -104,12 +96,6 @@ mod tests {
         assert_eq!(c.classify(6001), StalenessLevel::Expired);
         assert_eq!(c.classify(9000), StalenessLevel::Expired);
         assert_eq!(c.classify(12001), StalenessLevel::Expired);
-    }
-
-    #[test]
-    fn expired_threshold_accessor() {
-        let c = StalenessClassifier::new(&test_config());
-        assert_eq!(c.expired_ms(), 12000);
     }
 
     #[test]

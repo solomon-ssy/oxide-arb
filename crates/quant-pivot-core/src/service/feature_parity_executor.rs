@@ -1337,13 +1337,16 @@ mod tests {
 
     use quant_pivot_models::{
         domain::{
-            FeatureParityRunListQuery, FeatureParityStateInfo, NewFeatureParityRun, NewResearchJob,
-            NoopProgressSink, Paginated, ResearchJobInfo, RunFullFeatureParityRequest,
+            FeatureParityRunListQuery, FeatureParityStateInfo, FrozenFeatureParitySubject,
+            NewFeatureParityRun, NewFrozenModelParitySubject, NewResearchJob, NoopProgressSink,
+            Paginated, ResearchJobInfo, RunFullFeatureParityRequest,
         },
         enums::quant::FeatureParityLatchState,
         types::{FeatureParityRunId, FeatureParityStateId},
     };
-    use quant_pivot_repository::traits::FeatureParityLatchActor;
+    use quant_pivot_repository::traits::{
+        EnqueueFrozenFeatureParityOutcome, FeatureParityLatchActor,
+    };
 
     fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
         mutex.lock().expect("test mutex")
@@ -1393,12 +1396,35 @@ mod tests {
             Err(unexpected_repo_call("create_run"))
         }
 
+        async fn create_frozen_model_run(
+            &self,
+            _run: NewFeatureParityRun,
+            _subject: NewFrozenModelParitySubject,
+        ) -> Result<FeatureParityRunInfo, StorageError> {
+            Err(unexpected_repo_call("create_frozen_model_run"))
+        }
+
         async fn enqueue_run(
             &self,
             _run: NewFeatureParityRun,
             _job: NewResearchJob,
         ) -> Result<(FeatureParityRunInfo, ResearchJobInfo), StorageError> {
             Err(unexpected_repo_call("enqueue_run"))
+        }
+
+        async fn enqueue_frozen_full(
+            &self,
+            _run: NewFeatureParityRun,
+            _job: NewResearchJob,
+        ) -> Result<EnqueueFrozenFeatureParityOutcome, StorageError> {
+            Err(unexpected_repo_call("enqueue_frozen_full"))
+        }
+
+        async fn load_frozen_subjects(
+            &self,
+            _run_id: &FeatureParityRunId,
+        ) -> Result<Vec<FrozenFeatureParitySubject>, StorageError> {
+            Err(unexpected_repo_call("load_frozen_subjects"))
         }
 
         async fn find_run(

@@ -11,7 +11,6 @@ quant-pivot-error = { path = "../quant-pivot-error" }
 quant-pivot-models = { path = "../quant-pivot-models" }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
-tracing = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
 chrono-tz = { workspace = true }
@@ -19,7 +18,6 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 rust_decimal = { workspace = true }
 uuid = { workspace = true, features = ["v5"] }
-linkme = { workspace = true }
 # Deterministic Tier-1 linkage template parsing (11.2.2).
 regex = { workspace = true }
 url = { workspace = true }
@@ -34,13 +32,11 @@ aws-sdk-s3 = { workspace = true }
 # statistics, realized vol, CPU-parallel batch build), so these are base deps,
 # not gated. The heavy / native-adjacent stacks below stay feature-gated.
 ndarray = { workspace = true }
-ndarray-stats = { workspace = true }
 statrs = { workspace = true }
 rayon = { workspace = true }
 
 # ── Heavy / offline stack (feature-gated; see [features]) ─────────────────────
 polars = { workspace = true, optional = true }
-arrow = { workspace = true, optional = true }
 parquet = { workspace = true, optional = true }
 argmin = { workspace = true, optional = true }
 argmin-math = { workspace = true, optional = true }
@@ -58,7 +54,7 @@ rust_decimal_macros = { workspace = true }
 # stacks (polars / smartcore / argmin / HiGHS) stay opt-in.
 default = ["lp-solver"]
 # Offline feature / dataset materialization (lazy frames + parquet).
-dataframe = ["dep:polars", "dep:arrow", "dep:parquet"]
+dataframe = ["dep:polars", "dep:parquet"]
 # Factor-weight / threshold optimization.
 optimize = ["dep:argmin", "dep:argmin-math"]
 # Classical ML (tree / ensemble / linear) for shadow candidates.

@@ -4,11 +4,10 @@
 //! [`PgRepositories::wire`] constructs each repository exactly once; downstream
 //! bundles and services [`Arc::clone`] the shared instances.
 
-use quant_pivot_models::config::GammaConfig;
 use quant_pivot_repository::postgres::{
     PgAccountSnapshotRepository, PgAttributionRepository, PgBacktestPathSetRepository,
     PgBacktestReportRepository, PgBasisAlertRepository, PgCalibrationArtifactRepository,
-    PgCapitalAllocationRepository, PgCatalogVersionRepository, PgClobMarketInfoRepository,
+    PgCapitalAllocationRepository, PgCatalogLedgerRepository, PgClobMarketInfoRepository,
     PgDomainProjectionRepository, PgDomainSourceCursorRepository, PgEntryConditionRepository,
     PgEquitySnapshotRepository, PgEventRepository, PgExecutionOrderRepository,
     PgExecutionSubmissionRepository, PgFactorRepository, PgFeatureParityRepository,
@@ -35,7 +34,7 @@ pub struct PgRepositories {
     pub operation_log: Arc<PgOperationLogRepository>,
     pub market: Arc<PgMarketRepository>,
     pub event: Arc<PgEventRepository>,
-    pub catalog_version: Arc<PgCatalogVersionRepository>,
+    pub catalog_ledger: Arc<PgCatalogLedgerRepository>,
     pub clob_market_info: Arc<PgClobMarketInfoRepository>,
     pub order_intent: Arc<PgOrderIntentRepository>,
     pub entry_condition: Arc<PgEntryConditionRepository>,
@@ -85,9 +84,8 @@ pub struct PgRepositories {
 impl PgRepositories {
     /// Construct every shared repository from the connected pool (boot-only).
     #[must_use]
-    pub fn wire(pg: &PostgresPool, gamma: &GammaConfig) -> Self {
+    pub fn wire(pg: &PostgresPool) -> Self {
         let db = pg.connection().clone();
-        let catalog_visibility_guard_secs = gamma.catalog_visibility_guard_secs;
         Self {
             runtime_config: arc_repo(&db, PgRuntimeConfigVersionRepository::new),
             system_runtime_state: arc_repo(&db, PgSystemRuntimeStateRepository::new),
@@ -95,9 +93,7 @@ impl PgRepositories {
             operation_log: arc_repo(&db, PgOperationLogRepository::new),
             market: arc_repo(&db, PgMarketRepository::new),
             event: arc_repo(&db, PgEventRepository::new),
-            catalog_version: arc_repo(&db, |db| {
-                PgCatalogVersionRepository::new(db, catalog_visibility_guard_secs)
-            }),
+            catalog_ledger: arc_repo(&db, PgCatalogLedgerRepository::new),
             clob_market_info: arc_repo(&db, PgClobMarketInfoRepository::new),
             order_intent: arc_repo(&db, PgOrderIntentRepository::new),
             entry_condition: arc_repo(&db, PgEntryConditionRepository::new),

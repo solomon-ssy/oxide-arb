@@ -2,8 +2,7 @@
 
 use crate::{
     domain::{
-        MarketBookView, OrderIntentInfo, RecommendationReportInfo, ReportRunInfo,
-        governance::system::SystemStatus,
+        MarketBookView, OrderIntentInfo, RecommendationReportInfo, ReportRunInfo, SystemStatusView,
     },
     enums::{
         common::{AlertCategory, AlertLevel, AlertSource},
@@ -526,7 +525,7 @@ pub struct EntryConditionLifecycleEvent {
 /// Cross-subsystem runtime events consumed by web and observability layers.
 #[derive(Debug, Clone)]
 pub enum CoreEvent {
-    SystemStatusChanged(SystemStatus),
+    SystemStatusChanged(Box<SystemStatusView>),
     MarketBookUpdate {
         market_id: MarketId,
         view: Box<MarketBookView>,

@@ -152,7 +152,9 @@ pub async fn delete(
     id: web::Path<UserId>,
     op_ctx: OperationCtx,
 ) -> Result<WebResponse<()>, WebError> {
+    state.jwt.revoke_subject_sessions(&id.to_string()).await?;
     state.users.delete(&id).await?;
+    state.ws_sessions.close_subject(&id.to_string());
     state.casbin.reload().await?;
     op_ctx.set_action(OperationCategory::Rbac, "user.delete");
     op_ctx.set_resource(ResourceType::User, id.to_string());
@@ -167,7 +169,13 @@ pub async fn change_status(
     body: ValidatedJson<ChangeUserStatusRequest>,
 ) -> Result<WebResponse<()>, WebError> {
     let status = body.into_inner().status;
+    if status != UserStatus::Active {
+        state.jwt.revoke_subject_sessions(&id.to_string()).await?;
+    }
     state.users.change_status(&id, status).await?;
+    if status != UserStatus::Active {
+        state.ws_sessions.close_subject(&id.to_string());
+    }
     op_ctx.set_action(OperationCategory::Rbac, "user.change_status");
     op_ctx.set_resource(ResourceType::User, id.to_string());
     op_ctx.set_detail(serde_json::json!({ "status": status }));
@@ -183,10 +191,12 @@ pub async fn change_password(
 ) -> Result<WebResponse<()>, WebError> {
     let password_hash = hash_password(&body.into_inner().password)
         .map_err(|error| WebError::Internal(format!("password hashing failed: {error}")))?;
+    state.jwt.revoke_subject_sessions(&id.to_string()).await?;
     state
         .users
         .change_password(&id, ChangeUserPassword { password_hash })
         .await?;
+    state.ws_sessions.close_subject(&id.to_string());
     // Record the act only — never the new password or its hash.
     op_ctx.set_action(OperationCategory::Rbac, "user.change_password");
     op_ctx.set_resource(ResourceType::User, id.to_string());
@@ -208,8 +218,12 @@ pub async fn set_roles(
     op_ctx.set_detail(serde_json::json!({ "role_count": role_ids.len() }));
     state
         .user_roles
-        .set_roles_for_user(AssignRoles { user_id, role_ids })
+        .set_roles_for_user(AssignRoles {
+            user_id: user_id.clone(),
+            role_ids,
+        })
         .await?;
+    state.ws_sessions.close_subject(&user_id.to_string());
     state.casbin.reload().await?;
     Ok(WebResponse::ok(()))
 }

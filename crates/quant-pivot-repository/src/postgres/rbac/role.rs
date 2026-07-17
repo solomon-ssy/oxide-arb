@@ -6,7 +6,6 @@ use quant_pivot_models::{
     domain::{NewRole, RoleInfo, RolePatch},
     entities::{role, role_menu, user_role},
     enums::rbac::{RoleKind, RoleStatus},
-    schema::column,
     types::{RoleId, UserId},
 };
 use sea_orm::{
@@ -15,7 +14,7 @@ use sea_orm::{
 };
 
 use crate::{
-    postgres::{error, rbac::casbin::sync},
+    postgres::{error, primitives, rbac::casbin::sync},
     traits::rbac::RoleRepository,
 };
 
@@ -118,7 +117,7 @@ async fn do_change_status(
     }
 
     role::Entity::update_many()
-        .col_expr(role::Column::Status, column::pg_enum_value(&status))
+        .col_expr(role::Column::Status, primitives::enum_value(&status))
         .filter(role::Column::Id.eq(id.clone()))
         .exec(&txn)
         .await

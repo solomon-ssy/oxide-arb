@@ -14,11 +14,10 @@ quant-pivot-error = { workspace = true, features = ["storage"] }
 quant-pivot-models = { workspace = true, features = ["repository"] }
 num-traits = { workspace = true }
 sea-orm = { workspace = true }
-sea-orm-migration = { workspace = true }
+sqlx = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
-thiserror = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -30,20 +29,25 @@ redis = { workspace = true }
 clickhouse = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
-rust_decimal = { workspace = true }
-backoff = { workspace = true }
+blake3 = { workspace = true }
 flume = { workspace = true }
 parking_lot = { workspace = true }
 testcontainers = { workspace = true, optional = true }
 testcontainers-modules = { workspace = true, optional = true }
 
 [dev-dependencies]
+quant-pivot-migration = { path = "../quant-pivot-migration" }
 tokio = { workspace = true, features = ["test-util"] }
+# `rust_decimal_macros::dec!` expands to `::rust_decimal::Decimal` in integration tests.
 rust_decimal = { workspace = true }
 rust_decimal_macros = { workspace = true }
 quant-pivot-test-support = { workspace = true }
+sea-orm-migration = { workspace = true }
 testcontainers = { workspace = true }
 testcontainers-modules = { workspace = true }
+
+[package.metadata.cargo-machete]
+ignored = ["rust_decimal"]
 
 [lints]
 workspace = true

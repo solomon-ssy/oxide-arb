@@ -38,7 +38,13 @@ impl ClobMarketInfoWorker {
         loop {
             tokio::select! {
                 () = token.cancelled() => break,
-                _ = interval.tick() => self.refresh_once().await,
+                _ = interval.tick() => {
+                    tokio::select! {
+                        biased;
+                        () = token.cancelled() => break,
+                        () = self.refresh_once() => {}
+                    }
+                },
             }
         }
     }

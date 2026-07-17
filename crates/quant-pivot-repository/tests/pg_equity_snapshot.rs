@@ -11,7 +11,10 @@ use quant_pivot_repository::{
     traits::{EquitySnapshotRepository, PositionRepository},
 };
 use quant_pivot_test_support::{
-    execution_pg_seed::{close_position_full, seed_approved_intent, seed_report_fixture},
+    execution_pg_seed::{
+        close_position_full, enable_entry_admission_for_test, seed_approved_intent,
+        seed_report_fixture,
+    },
     pg::setup_pg,
 };
 use rust_decimal_macros::dec;
@@ -139,6 +142,7 @@ async fn realized_pnl_cumulative_matches_position_ledger_sum() {
     let submission = PgExecutionSubmissionRepository::new(db.clone());
 
     let ids = seed_report_fixture(&db).await;
+    enable_entry_admission_for_test(&db, "pg-equity-snapshot-it-operator").await;
     let intent_id = seed_approved_intent(&db, &ids).await;
     close_position_full(&db, &submission, &ids, &intent_id, None).await;
 

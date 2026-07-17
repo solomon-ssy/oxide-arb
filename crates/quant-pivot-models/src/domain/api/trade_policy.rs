@@ -492,6 +492,7 @@ pub struct TradePolicyOperationalEvidenceView {
 #[serde(rename_all = "snake_case")]
 pub enum TradePolicyFitReadiness {
     Blocked,
+    BlockedInsufficientHistory,
     ReadyToMaterialize,
     Reusable,
 }

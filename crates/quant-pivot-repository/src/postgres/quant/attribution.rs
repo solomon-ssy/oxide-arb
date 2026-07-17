@@ -16,9 +16,9 @@ use quant_pivot_models::{
     types::RecommendationId,
 };
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, IntoActiveModel,
-    Iterable, JoinType, QueryFilter, QueryOrder, QuerySelect, QueryTrait, RelationTrait, Set,
-    TransactionTrait,
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, ExprTrait,
+    IntoActiveModel, Iterable, JoinType, QueryFilter, QueryOrder, QuerySelect, QueryTrait,
+    RelationTrait, Set, TransactionTrait,
     sea_query::{Expr, OnConflict, SelectStatement, SimpleExpr},
 };
 

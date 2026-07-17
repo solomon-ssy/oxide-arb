@@ -996,14 +996,15 @@ pub(crate) mod fixtures {
     use quant_pivot_models::{
         domain::{DecisionClock, DecisionSource},
         enums::{
+            catalog::CatalogTimestampQuality,
             common::{MarketCategory, TickSize::Hundredth},
             market::MarketStatus,
             quant::DataQualityStatus,
         },
         types::{
-            BookSnapshotRef, BookSnapshotSource, Bps, CatalogSyncBatchId, ContentHash,
-            EventCatalogVersionId, EventId, MarketCatalogVersionId, MarketContext, MarketId, Price,
-            Probability, RecommendationIdentity, SchemaVersion, TokenId, TrainingExampleId,
+            BookSnapshotRef, BookSnapshotSource, Bps, CatalogEventChangeId, CatalogMarketChangeId,
+            CatalogSyncBatchId, ContentHash, EventId, MarketContext, MarketId, Price, Probability,
+            RecommendationIdentity, SchemaVersion, TokenId, TrainingExampleId,
             TrainingSampleSource, Usd,
         },
     };
@@ -1091,8 +1092,8 @@ pub(crate) mod fixtures {
                 token_id: token_id.clone(),
                 catalog: CatalogDecisionRef {
                     catalog_sync_batch_id: CatalogSyncBatchId::new(Uuid::from_u128(1)),
-                    market_catalog_version_id: MarketCatalogVersionId::new(Uuid::from_u128(2)),
-                    event_catalog_version_id: EventCatalogVersionId::new(Uuid::from_u128(3)),
+                    market_change_id: CatalogMarketChangeId::new(Uuid::from_u128(2)),
+                    event_change_id: CatalogEventChangeId::new(Uuid::from_u128(3)),
                     market_content_hash: hash('1'),
                     event_content_hash: hash('2'),
                     membership_hash: hash('3'),
@@ -1100,8 +1101,8 @@ pub(crate) mod fixtures {
                     market_available_at: decision_at,
                     event_effective_at: catalog_effective_at,
                     event_available_at: decision_at,
-                    market_timestamp_quality: "source".to_owned(),
-                    event_timestamp_quality: "source".to_owned(),
+                    market_timestamp_quality: CatalogTimestampQuality::Source,
+                    event_timestamp_quality: CatalogTimestampQuality::Source,
                 },
                 book_snapshot_ref: BookSnapshotRef {
                     token_id,

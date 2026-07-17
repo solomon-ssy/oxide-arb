@@ -31,6 +31,7 @@ use quant_pivot_models::{
         market::{EventRegistryInfo, MarketRegistryInfo, TokenInfo, book::BookLevel},
     },
     enums::{
+        catalog::CatalogFilterReasonSet,
         clickhouse::ChFeatureCellState,
         common::{CategorySet, MarketCategory, TickSize},
         market::{EventStatus, MarketStatus},
@@ -96,6 +97,7 @@ fn registry_market(catalog: &E2eCatalog) -> MarketRegistryInfo {
         description: None,
         categories: CategorySet::from(MarketCategory::Sports),
         status: MarketStatus::Active,
+        filter_reasons: CatalogFilterReasonSet::default(),
         outcome: None,
         neg_risk: false,
         tick_size: TickSize::Hundredth,

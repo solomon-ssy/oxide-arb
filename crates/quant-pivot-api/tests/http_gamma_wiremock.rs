@@ -1,6 +1,5 @@
 //! Gamma HTTP client tests with wiremock (no live network).
 
-use chrono::{Duration, Utc};
 use quant_pivot_api::{gamma::GammaClient, infra::retry::RetryPolicy};
 use quant_pivot_models::{
     config::GammaConfig,
@@ -208,6 +207,7 @@ async fn gamma_full_sync_follows_keyset_cursor() {
 
     Mock::given(method("GET"))
         .and(path("/events/keyset"))
+        .and(query_param("active", "true"))
         .and(query_param("closed", "false"))
         .and(query_param("limit", "100"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
@@ -233,6 +233,7 @@ async fn gamma_full_sync_follows_keyset_cursor() {
 
     Mock::given(method("GET"))
         .and(path("/events/keyset"))
+        .and(query_param("active", "true"))
         .and(query_param("closed", "false"))
         .and(query_param("limit", "100"))
         .and(query_param("after_cursor", "cursor-page-2"))
@@ -268,27 +269,25 @@ async fn gamma_full_sync_follows_keyset_cursor() {
 
 #[tokio::test]
 #[ignore = "run with cargo test-network"]
-async fn gamma_incremental_sync_uses_updated_since_query() {
+async fn gamma_full_sync_retries_transient_invalid_json_without_logging_body() {
     let server = MockServer::start().await;
-    let since = Utc::now() - Duration::hours(2);
     Mock::given(method("GET"))
-        .and(path("/events"))
-        .and(query_param("active", "true"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
-            {
-                "id": "evt-1",
-                "title": "Updated event",
-                "slug": "updated-event",
-                "markets": [{
-                    "conditionId": "0xdeadbeef",
-                    "question": "Q?",
-                    "active": true,
-                    "closed": false,
-                    "clobTokenIds": ["111", "222"],
-                    "outcomes": ["Yes", "No"]
-                }]
-            }
-        ])))
+        .and(path("/events/keyset"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/html")
+                .set_body_string("<html>temporary edge failure</html>"),
+        )
+        .up_to_n_times(1)
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/events/keyset"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "events": [{ "id": "evt-recovered", "markets": [] }]
+        })))
+        .expect(1)
         .mount(&server)
         .await;
 
@@ -296,16 +295,123 @@ async fn gamma_incremental_sync_uses_updated_since_query() {
         base_url: server.uri(),
         ..GammaConfig::default()
     })
-    .with_http_client(fast_http_client());
+    .with_http_client(fast_http_client())
+    .with_retry_policy(fast_retry_policy());
 
-    let events = client
-        .incremental_sync(since)
-        .await
-        .expect("incremental_sync");
-
+    let events = client.full_sync().await.expect("syntax failure is retried");
     assert_eq!(events.len(), 1);
-    assert_eq!(events[0].slug, "updated-event");
-    assert_eq!(events[0].market_ids.len(), 1);
+    assert_eq!(events[0].event_id.as_str(), "evt-recovered");
+}
+
+#[tokio::test]
+#[ignore = "run with cargo test-network"]
+async fn gamma_full_sync_does_not_retry_structural_contract_drift() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/events/keyset"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "events": [{ "markets": [] }]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = GammaClient::new(GammaConfig {
+        base_url: server.uri(),
+        ..GammaConfig::default()
+    })
+    .with_http_client(fast_http_client())
+    .with_retry_policy(fast_retry_policy());
+
+    let error = client
+        .full_sync()
+        .await
+        .expect_err("missing event id is permanent contract drift");
+    let rendered = error.to_string();
+    assert!(rendered.contains("body_hash=blake3:"));
+    assert!(!rendered.contains("markets"));
+}
+
+#[tokio::test]
+#[ignore = "run with cargo test-network"]
+async fn gamma_keyset_page_budget_rejects_unbounded_continuation() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/events/keyset"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "events": [{ "id": "evt-1", "markets": [] }],
+            "next_cursor": "unexpected-page-2"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = GammaClient::new(GammaConfig {
+        base_url: server.uri(),
+        max_keyset_pages: 1,
+        max_keyset_requests: 1,
+        ..GammaConfig::default()
+    })
+    .with_http_client(fast_http_client())
+    .with_retry_policy(fast_retry_policy());
+
+    let error = client
+        .full_sync()
+        .await
+        .expect_err("continuation beyond configured page budget must fail");
+    assert!(error.to_string().contains("page budget exhausted"));
+}
+
+#[tokio::test]
+#[ignore = "run with cargo test-network"]
+async fn gamma_token_discovery_uses_the_shared_keyset_paginator() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/events/keyset"))
+        .and(query_param("limit", "50"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "events": [{ "id": "evt-empty", "markets": [] }],
+            "next_cursor": "token-page"
+        })))
+        .up_to_n_times(1)
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/events/keyset"))
+        .and(query_param("limit", "50"))
+        .and(query_param("after_cursor", "token-page"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "events": [{
+                "id": "evt-token",
+                "title": "Token event",
+                "slug": "token-event",
+                "markets": [{
+                    "conditionId": "0xtoken",
+                    "question": "Token market?",
+                    "active": true,
+                    "closed": false,
+                    "clobTokenIds": ["101", "102"],
+                    "outcomes": ["Yes", "No"]
+                }]
+            }]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = GammaClient::new(GammaConfig {
+        base_url: server.uri(),
+        ..GammaConfig::default()
+    })
+    .with_http_client(fast_http_client())
+    .with_retry_policy(fast_retry_policy());
+
+    let token = client
+        .discover_active_token()
+        .await
+        .expect("token from second page");
+    assert_eq!(token.as_str(), "101");
 }
 
 const fn fast_retry_policy() -> RetryPolicy {

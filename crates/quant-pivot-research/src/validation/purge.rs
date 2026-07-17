@@ -372,12 +372,12 @@ mod tests {
             .split(&groups, &[2], &PurgeConfig::pct_only(dec!(0.1)))
             .expect("split");
         assert_eq!(split.test_indices, vec![2]);
-        assert!(
+        assert_eq!(
             split.train_indices.len()
                 + split.purged_indices.len()
                 + split.embargoed_indices.len()
-                + 1
-                == groups.len()
+                + 1,
+            groups.len()
         );
     }
 

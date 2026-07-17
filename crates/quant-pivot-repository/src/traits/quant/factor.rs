@@ -43,8 +43,9 @@ pub trait FactorRepository: Send + Sync {
         factor_definition_id: &FactorDefinitionId,
     ) -> Result<FactorDefinitionInfo, StorageError>;
 
-    /// Atomically publish all requested revisions, retiring any previously
-    /// published revision with the same logical name in the same transaction.
+    /// Atomically publish all requested revisions, returning only definitions
+    /// changed by this call and retiring any previously published revision with
+    /// the same logical name in the same transaction.
     async fn publish_definitions(
         &self,
         factor_definition_ids: &[FactorDefinitionId],

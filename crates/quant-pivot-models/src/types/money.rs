@@ -21,7 +21,7 @@
 //! `PRECISION` associated constant, consumed by the schema column builders.
 
 use rust_decimal::Decimal;
-use sea_orm::{ActiveValue, DeriveValueType, IntoActiveValue};
+use sea_orm::DeriveValueType;
 use serde::{Deserialize, Serialize};
 use std::{
     fmt,
@@ -155,13 +155,6 @@ macro_rules! decimal_newtype {
             fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
                 iter.fold(Self::ZERO, Add::add)
             }
-        }
-
-        // ── SeaORM: DeriveValueType (NUMERIC column, lossless round-trip) ──
-
-        impl IntoActiveValue<$name> for $name {
-            #[inline]
-            fn into_active_value(self) -> ActiveValue<$name> { ActiveValue::Set(self) }
         }
     };
 }

@@ -1,7 +1,7 @@
 //! Durable report-fact outbox persistence contracts.
 
 use chrono::{DateTime, Utc};
-use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -11,7 +11,7 @@ use crate::{
     types::{ArtifactUri, ContentHash, RecommendationReportId},
 };
 
-#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
+#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
 #[sea_orm(entity = "crate::entities::quant_report_fact_delivery::Entity")]
 pub struct ReportFactDeliveryInfo {
     pub recommendation_report_id: RecommendationReportId,

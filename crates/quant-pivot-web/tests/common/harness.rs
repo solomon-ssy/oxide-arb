@@ -1,13 +1,6 @@
 //! Integration-test harness (Phase 0).
 
-use std::{
-    collections::HashMap,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
-    time::Duration,
-};
+use std::{collections::HashMap, sync::Arc};
 
 use actix_test::TestRequest;
 use actix_web::{
@@ -23,7 +16,7 @@ use quant_pivot_core::{
     runtime_config::RuntimeConfigStore,
 };
 use quant_pivot_error::{
-    QuantError, QuantResult, auth::AuthError, control::ControlError, execution::ExecutionError,
+    QuantError, QuantResult, control::ControlError, execution::ExecutionError,
     storage::StorageError,
 };
 use quant_pivot_models::{
@@ -34,15 +27,16 @@ use quant_pivot_models::{
     },
     config::{CacheConfig, DeployConfig, JwtConfig, RedisConfig},
     domain::{
-        AcknowledgeFeatureParityLatchRequest, BacktestPathSetInfo, BacktestPathSetListQuery,
-        BacktestPathSetView, BacktestPort, BacktestReportInfo, BacktestReportListQuery,
-        BacktestReportView, BasisAlertInfo, BasisAlertListQuery, BiasTableFitJobParams,
-        BiasTableFitOutcome, BindCalibrationRequest, BindPublishPathSetRequest, BookSnapshot,
+        AcknowledgeFeatureParityLatchRequest, ActivateBootstrapRequest, BacktestPathSetInfo,
+        BacktestPathSetListQuery, BacktestPathSetView, BacktestPort, BacktestReportInfo,
+        BacktestReportListQuery, BacktestReportView, BasisAlertInfo, BasisAlertListQuery,
+        BiasTableFitJobParams, BiasTableFitOutcome, BindCalibrationRequest,
+        BindPublishPathSetRequest, BookSnapshot, BootstrapPort, BootstrapView,
         BuildTrainingDatasetRequest, CalibrationArtifactFitPort, CalibrationArtifactInfo,
-        CalibrationArtifactListQuery, CatalogState, CatalogStatusPort, ComparisonReportListQuery,
-        CoreEventPublisher, CpcvBacktestPort, CreateModelSpecCommand, DataQualityPort,
-        DataQualitySnapshot, DecisionBoundary, DomainSourceCursorInfo, ExecutionReadPort,
-        ExecutionRecoveryPort, ExecutionRecoveryView, FactorCollinearitySource,
+        CalibrationArtifactListQuery, CapabilityView, CatalogState, CatalogStatusPort,
+        ComparisonReportListQuery, CoreEventPublisher, CpcvBacktestPort, CreateModelSpecCommand,
+        DataQualityPort, DataQualitySnapshot, DecisionBoundary, DomainSourceCursorInfo,
+        ExecutionReadPort, ExecutionRecoveryPort, ExecutionRecoveryView, FactorCollinearitySource,
         FactorCollinearityView, FactorDefinitionInfo, FactorDefinitionListQuery,
         FactorGovernancePort, FeatureContractEntryView, FeatureContractView,
         FeatureIntegrityActionContext, FeatureIntegrityLatchView, FeatureIntegrityPort,
@@ -58,23 +52,24 @@ use quant_pivot_models::{
         ModelTrainingPort, ModelVersionInfo, ModelVersionListQuery, NegRiskEventDriftView,
         NewBasisAlert, NewMarketLinkage, OverrideLinkageRequest, Paginated,
         ParticipantConcentrationDetailView, ParticipantConcentrationSummaryView,
-        PublishFactorCommand, PublishFactorsBatchCommand, PublishModelCommand,
-        PublishedModelOptionView, QualityGateReportView, QuantModeTransitionReport,
-        ReconciliationPort, RegisterFactorDefinitionsCommand, ResearchCatalogPort,
-        ResearchJobListQuery, ResearchJobPort, ResearchJobView, ResolveReconciliationCommand,
-        ResolveReconciliationOutcome, RetireFactorCommand, RetireModelCommand,
-        RollbackModelCommand, RunBacktestRequest, RunCpcvBacktestRequest,
+        PreparedRuntimeConfig, PublishFactorCommand, PublishFactorsBatchCommand,
+        PublishModelCommand, PublishedModelOptionView, QualityGateReportView,
+        QuantModeTransitionReport, ReconciliationPort, RegisterFactorDefinitionsCommand,
+        ResearchCatalogPort, ResearchJobListQuery, ResearchJobPort, ResearchJobView,
+        ResolveReconciliationCommand, ResolveReconciliationOutcome, RetireFactorCommand,
+        RetireModelCommand, RollbackModelCommand, RunBacktestRequest, RunCpcvBacktestRequest,
         RunFullFeatureParityRequest, RuntimeConfigPort, RuntimeControlPort, SetKillSwitchCommand,
-        StructuralMonitorPort, SystemStatus, TradePolicyArtifactInfo, TradePolicyAuditListQuery,
-        TradePolicyFitPreflightView, TradePolicyGovernanceAuditInfo, TradePolicyListQuery,
-        TradePolicyPort, TradePolicyValidationListQuery, TradePolicyValidationRowInfo,
-        TradePolicyValidationRowListQuery, TradePolicyValidationRunInfo, TradeTapeCoverageView,
-        TradeTapeSourceHealthView, TrainModelRequest, TrainedModelView, TrainingDatasetInfo,
-        TrainingDatasetListQuery, TrainingDatasetPlanView, TrainingDatasetPort,
-        TrainingDatasetView, UpsertDomainSourceCursor, empty_catalog_page,
+        StructuralMonitorPort, SystemCapabilities, SystemStatus, TradePolicyArtifactInfo,
+        TradePolicyAuditListQuery, TradePolicyFitPreflightView, TradePolicyGovernanceAuditInfo,
+        TradePolicyListQuery, TradePolicyPort, TradePolicyValidationListQuery,
+        TradePolicyValidationRowInfo, TradePolicyValidationRowListQuery,
+        TradePolicyValidationRunInfo, TradeTapeCoverageView, TradeTapeSourceHealthView,
+        TrainModelRequest, TrainedModelView, TrainingDatasetInfo, TrainingDatasetListQuery,
+        TrainingDatasetPlanView, TrainingDatasetPort, TrainingDatasetView,
+        UpsertDomainSourceCursor, empty_catalog_page,
     },
     entities::quant_entry_condition_evaluation_outbox,
-    enums::{execution::KillSwitchState, quant::QuantRuntimeMode},
+    enums::{execution::KillSwitchState, quant::QuantRuntimeMode, system::BootstrapPhase},
     runtime_config::{FeatureFamily, RuntimeConfig},
     types::{
         BacktestPathSetId, BacktestReportId, BasisAlertId, CalibrationArtifactId, ContentHash,
@@ -133,7 +128,6 @@ use crate::{
 
 pub const API_VERSION: (&str, &str) = ("Accept-Api-Version", "v1");
 
-const TEST_JWT_SECRET: &str = "quant-pivot-integration-test-secret-not-for-production";
 const TEST_ISSUER: &str = "quant-pivot-test";
 
 struct WebHarnessAppStateInput<'a> {
@@ -171,6 +165,7 @@ fn web_harness_app_state(input: WebHarnessAppStateInput<'_>) -> AppState {
         operation_logs: Arc::clone(&input.repos.operation_logs),
         operation_log: input.operation_log,
         control: Arc::new(MockRuntimeControl::default()),
+        bootstrap: Arc::new(MockBootstrap),
         kill_switch: Arc::new(MockKillSwitch::default()),
         market_data: Arc::new(MockMarketData),
         catalog: Arc::clone(&input.catalog) as Arc<dyn CatalogStatusPort>,
@@ -265,7 +260,9 @@ impl TestEnv {
         let (redis_port, redis_container) = redis::setup_redis().await;
         let jwt_blacklist = connect_blacklist(&redis::test_redis_config(redis_port)).await;
         let blacklist = Arc::clone(&jwt_blacklist) as Arc<dyn TokenBlacklist>;
-        let jwt = Arc::new(JwtService::new(&jwt_config(), Arc::clone(&blacklist)));
+        let jwt = Arc::new(
+            JwtService::new(&jwt_config(), Arc::clone(&blacklist)).expect("test JWT keyring"),
+        );
         let db = pool.connection().clone();
         let casbin = Arc::new(
             CasbinService::new(db.clone())
@@ -341,8 +338,14 @@ impl Drop for TestEnv {
 }
 
 fn jwt_config() -> JwtConfig {
+    let fixtures = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/jwt");
     JwtConfig {
-        secret: TEST_JWT_SECRET.to_owned(),
+        signing_key_id: "test-2026-01".to_owned(),
+        signing_private_key_file: format!("{fixtures}/test-ed25519-private.pem"),
+        verification_keys: vec![quant_pivot_models::config::JwtVerificationKeyConfig {
+            key_id: "test-2026-01".to_owned(),
+            public_key_file: format!("{fixtures}/test-ed25519-public.pem"),
+        }],
         issuer: TEST_ISSUER.to_owned(),
         access_ttl_secs: 900,
         refresh_ttl_secs: 604_800,
@@ -434,6 +437,72 @@ impl CatalogStatusPort for MockCatalogStatus {
 
     fn is_ready(&self) -> bool {
         true
+    }
+}
+
+struct MockBootstrap;
+
+const fn enabled_capability() -> CapabilityView {
+    CapabilityView {
+        enabled: true,
+        reasons: Vec::new(),
+    }
+}
+
+const fn enabled_capabilities() -> SystemCapabilities {
+    SystemCapabilities {
+        revision: 1,
+        control_plane_ready: enabled_capability(),
+        catalog_baseline_ready: enabled_capability(),
+        research_capture_enabled: enabled_capability(),
+        report_generation_eligible: enabled_capability(),
+        entry_admission_eligible: enabled_capability(),
+        order_submission_eligible: enabled_capability(),
+        automatic_parity_eligible: enabled_capability(),
+    }
+}
+
+#[async_trait]
+impl BootstrapPort for MockBootstrap {
+    fn view(&self) -> BootstrapView {
+        BootstrapView {
+            phase: BootstrapPhase::Active,
+            bootstrap_contract_version: 1,
+            state_revision: 0,
+        }
+    }
+
+    fn subscribe(&self) -> tokio::sync::watch::Receiver<BootstrapView> {
+        tokio::sync::watch::channel(self.view()).1
+    }
+
+    fn capability_snapshot(&self) -> SystemCapabilities {
+        enabled_capabilities()
+    }
+
+    fn subscribe_capabilities(&self) -> tokio::sync::watch::Receiver<SystemCapabilities> {
+        tokio::sync::watch::channel(enabled_capabilities()).1
+    }
+
+    fn refresh_operational_capabilities(&self, _status: &SystemStatus) -> SystemCapabilities {
+        enabled_capabilities()
+    }
+
+    async fn capabilities(&self, _status: &SystemStatus) -> QuantResult<SystemCapabilities> {
+        Ok(enabled_capabilities())
+    }
+
+    async fn mark_catalog_ready(&self) -> QuantResult<BootstrapView> {
+        Ok(self.view())
+    }
+
+    async fn activate(
+        &self,
+        _request: ActivateBootstrapRequest,
+        _actor: &str,
+        _acting_role: &str,
+    ) -> QuantResult<BootstrapView> {
+        Ok(self.view())
     }
 }
 
@@ -715,15 +784,13 @@ impl MarketDataPort for MockMarketData {
 }
 
 pub struct MockRuntimeConfigApply {
-    current: Mutex<Arc<RuntimeConfig>>,
-    fail_next_apply: AtomicBool,
+    current: Arc<Mutex<Arc<RuntimeConfig>>>,
 }
 
 impl Default for MockRuntimeConfigApply {
     fn default() -> Self {
         Self {
-            current: Mutex::new(Arc::new(RuntimeConfig::default())),
-            fail_next_apply: AtomicBool::new(false),
+            current: Arc::new(Mutex::new(Arc::new(RuntimeConfig::default()))),
         }
     }
 }
@@ -734,34 +801,13 @@ impl RuntimeConfigPort for MockRuntimeConfigApply {
         Arc::clone(&self.current.lock().unwrap())
     }
 
-    fn preflight(&self, _candidate: &RuntimeConfig) -> Result<(), ControlError> {
-        Ok(())
-    }
-
-    async fn apply(&self, config: RuntimeConfig) -> Result<(), ControlError> {
-        if self.fail_next_apply.swap(false, Ordering::SeqCst) {
-            return Err(ControlError::Engine("injected apply failure".into()));
-        }
-        *self.current.lock().unwrap() = Arc::new(config);
-        Ok(())
-    }
-}
-
-#[derive(Default)]
-pub struct NoopBlacklist;
-
-#[async_trait]
-impl TokenBlacklist for NoopBlacklist {
-    async fn revoke(&self, _jti: &str, _ttl: Duration) -> Result<(), AuthError> {
-        Ok(())
-    }
-
-    async fn is_revoked(&self, _jti: &str) -> Result<bool, AuthError> {
-        Ok(false)
-    }
-
-    async fn health_check(&self) -> Result<(), AuthError> {
-        Ok(())
+    async fn prepare(&self, config: RuntimeConfig) -> Result<PreparedRuntimeConfig, ControlError> {
+        let config = Arc::new(config);
+        let current = Arc::clone(&self.current);
+        let published = Arc::clone(&config);
+        Ok(PreparedRuntimeConfig::new(config, move || {
+            *current.lock().unwrap() = published;
+        }))
     }
 }
 

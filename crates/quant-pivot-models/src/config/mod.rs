@@ -203,7 +203,6 @@ mod tests {
         let mut deploy = DeployConfig::default();
         deploy.keys.private_key = Some("0xabc".into());
         deploy.quant.account.funder = Some("0xfunder".into());
-        deploy.web.jwt.secret = "a-strong-production-secret".to_owned();
         deploy
             .ensure_valid_for_quant_mode(QuantRuntimeMode::ReportOnly)
             .expect("report_only with credentials must validate");
@@ -378,10 +377,10 @@ private_key = "0xlocal"
             return;
         }
         let raw = fs::read_to_string(&template).expect("read production example");
-        let mut parsed: DeployConfig =
+        let parsed: DeployConfig =
             toml::from_str(&raw).expect("production example must deserialize");
-        parsed.db.clickhouse.migration.user = Some("quant_pivot_migrator".to_owned());
-        parsed.db.clickhouse.migration.password = Some("test-secret-manager-value".to_owned());
+        assert_eq!(parsed.db.postgres.migration.user, "quant_pivot_migrator");
+        assert_eq!(parsed.db.clickhouse.migration.user, "quant_pivot_migrator");
         parsed
             .ensure_valid_common()
             .expect("production example must validate after documented secret injection");

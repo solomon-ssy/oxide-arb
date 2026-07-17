@@ -17,11 +17,11 @@ use crate::{
 use chrono::{DateTime, Utc};
 use quant_pivot_macros::NormalizePageQuery;
 use rust_decimal::Decimal;
-use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
 use serde::{Deserialize, Serialize};
 
 /// Persisted decision-time account capital snapshot.
-#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
+#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
 #[sea_orm(entity = "crate::entities::quant_account_snapshot::Entity")]
 pub struct AccountSnapshotInfo {
     pub account_snapshot_id: AccountSnapshotId,
@@ -106,7 +106,7 @@ pub struct NewAccountSnapshot {
 }
 
 /// Persisted strategy-capital equity curve snapshot.
-#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
+#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
 #[sea_orm(entity = "crate::entities::quant_equity_snapshot::Entity")]
 pub struct EquitySnapshotInfo {
     pub equity_snapshot_id: EquitySnapshotId,

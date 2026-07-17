@@ -1,12 +1,16 @@
 //! Testcontainers Postgres pool + migration bootstrap for integration tests.
 
-use quant_pivot_models::config::PostgresConfig;
-use quant_pivot_storage::postgres::{
-    PostgresPool,
-    migration::{Migrator, MigratorTrait},
+use quant_pivot_migration::apply as apply_postgres_migrations;
+use quant_pivot_models::{
+    config::{PostgresConfig, SchemaMigrationConfig},
+    security::hash_password,
 };
+use quant_pivot_storage::postgres::{PostgresPool, migration::finalize_schema_deployment};
+use sea_orm::ConnectionTrait;
 use testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner};
 use testcontainers_modules::postgres::Postgres;
+
+pub const TEST_RUNTIME_ROLE: &str = "quant_pivot_test_runtime";
 
 /// Build a [`PostgresConfig`] aimed at a local testcontainer port.
 #[must_use]
@@ -16,8 +20,11 @@ pub fn test_pg_config(port: u16) -> PostgresConfig {
         port,
         user: "postgres".into(),
         password: "postgres".into(),
-        database: "test_oxide_arb".into(),
+        database: "test_quant_pivot".into(),
         schema: "public".into(),
+        migration: SchemaMigrationConfig {
+            user: "quant_pivot_test_migrator".into(),
+        },
         max_connections: 15,
         min_connections: 1,
         connect_timeout_secs: 10,
@@ -40,7 +47,7 @@ pub fn test_pg_config(port: u16) -> PostgresConfig {
 /// stays connected.
 pub async fn setup_pg() -> (PostgresPool, ContainerAsync<Postgres>) {
     let container = Postgres::default()
-        .with_db_name("test_oxide_arb")
+        .with_db_name("test_quant_pivot")
         .with_user("postgres")
         .with_password("postgres")
         .with_tag("16")
@@ -51,9 +58,22 @@ pub async fn setup_pg() -> (PostgresPool, ContainerAsync<Postgres>) {
     let port = container.get_host_port_ipv4(5432).await.expect("port");
     let config = test_pg_config(port);
     let pool = PostgresPool::connect(&config).await.expect("connect");
-    Migrator::up(pool.connection(), None)
+    pool.connection()
+        .execute_unprepared(&format!("CREATE ROLE {TEST_RUNTIME_ROLE} NOLOGIN"))
         .await
-        .expect("migrate");
+        .expect("create runtime role");
+    apply_postgres_migrations(pool.connection())
+        .await
+        .expect("apply migrations");
+    let bootstrap_admin_password_hash =
+        hash_password("admin").expect("hash test bootstrap admin password");
+    finalize_schema_deployment(
+        pool.connection(),
+        TEST_RUNTIME_ROLE,
+        &bootstrap_admin_password_hash,
+    )
+    .await
+    .expect("finalize schema deployment");
 
     (pool, container)
 }

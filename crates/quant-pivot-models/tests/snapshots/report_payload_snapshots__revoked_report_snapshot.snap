@@ -1,6 +1,5 @@
 ---
 source: crates/quant-pivot-models/tests/report_payload_snapshots.rs
-assertion_line: 42
 expression: revoked_report()
 ---
 {
@@ -9,7 +8,7 @@ expression: revoked_report()
   "profile_ref": {
     "id": "weather_forecast_24h",
     "version": 1,
-    "content_hash": "blake3:a6f9e3ab46e5e9e4cd8d10bbc6ebf2755d5488baac2565c0ad0c91482e3baf8f"
+    "content_hash": "blake3:b3633262b9924ca589c5fd3fdbed564ffcbaf0a30933b03ae65e35bf941ee515"
   },
   "report_kind": "top_n",
   "decision_at": "2023-11-14T22:11:20Z",

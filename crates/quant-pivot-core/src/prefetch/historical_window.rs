@@ -39,7 +39,7 @@ use quant_pivot_models::{
     types::{DomainInstrumentKey, IcaoStation, MarketId, TokenId},
 };
 use quant_pivot_repository::traits::{
-    CalibrationArtifactRepository, CatalogVersionRepository, MarketLinkageRepository,
+    CalibrationArtifactRepository, CatalogLedgerRepository, MarketLinkageRepository,
     QuantFactReadRepository,
 };
 use quant_pivot_research::{
@@ -139,7 +139,7 @@ pub(crate) fn historical_window_from_prefetched(
 /// point-in-time lookup from memory.
 pub struct HistoricalWindowLoader {
     fact_read: Arc<dyn QuantFactReadRepository>,
-    catalog_repo: Arc<dyn CatalogVersionRepository>,
+    catalog_repo: Arc<dyn CatalogLedgerRepository>,
     linkage_repo: Arc<dyn MarketLinkageRepository>,
     calibration_repo: Arc<dyn CalibrationArtifactRepository>,
     max_book_staleness: Duration,
@@ -151,7 +151,7 @@ impl HistoricalWindowLoader {
     #[must_use]
     pub fn new(
         fact_read: Arc<dyn QuantFactReadRepository>,
-        catalog_repo: Arc<dyn CatalogVersionRepository>,
+        catalog_repo: Arc<dyn CatalogLedgerRepository>,
         linkage_repo: Arc<dyn MarketLinkageRepository>,
         calibration_repo: Arc<dyn CalibrationArtifactRepository>,
         max_book_staleness: Duration,
@@ -762,14 +762,14 @@ pub fn replay_boundary(
 
 fn decode_catalog_markets(catalog: &CatalogWindowInfo) -> QuantResult<Vec<MarketRegistryInfo>> {
     catalog
-        .market_versions
+        .market_changes
         .iter()
         .map(|version| {
             serde_json::from_value(version.payload.clone()).map_err(|error| {
                 ResearchError::PitResolution {
                     detail: format!(
-                        "market catalog version {} payload is invalid: {error}",
-                        version.market_catalog_version_id
+                        "market catalog change {} payload is invalid: {error}",
+                        version.market_change_id
                     ),
                 }
                 .into()
@@ -856,7 +856,7 @@ fn window_subjects(samples: &[ReplaySample]) -> WindowSubjects {
 
 /// Project a market catalog row into a selection entry (primary = YES token).
 ///
-/// Liquidity and volume come from the exact PIT catalog version. The offline
+/// Liquidity and volume come from the exact PIT catalog change. The offline
 /// plane never substitutes a live selection snapshot or re-derives these fields
 /// from a different evidence source.
 #[must_use]

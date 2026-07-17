@@ -111,13 +111,6 @@ pub struct PriceDeltaCmd {
 pub enum PipelineEvent {
     BookSnapshot(BookSnapshotCmd),
     PriceDelta(PriceDeltaCmd),
-    BestBidAsk {
-        asset_id: TokenId,
-        best_bid: Price,
-        best_ask: Price,
-        timestamp_ms: u64,
-        trace: IngressTrace,
-    },
     TickSizeChange {
         asset_id: TokenId,
         old_tick: TickSize,
@@ -151,6 +144,7 @@ pub enum PipelineEvent {
         shard_id: u32,
         subscription_token_hash: ContentHash,
         subscription_token_count: u32,
+        subscription_tokens: Arc<[TokenId]>,
         opened_at_ms: i64,
     },
     StreamSessionClosed {
@@ -184,7 +178,6 @@ impl PipelineEvent {
             self,
             Self::BookSnapshot(_)
                 | Self::PriceDelta(_)
-                | Self::BestBidAsk { .. }
                 | Self::TickSizeChange { .. }
                 | Self::LastTradePrice { .. }
         )
@@ -195,8 +188,7 @@ impl PipelineEvent {
         match self {
             Self::BookSnapshot(cmd) => Some(&cmd.asset_id),
             Self::PriceDelta(cmd) => Some(&cmd.asset_id),
-            Self::BestBidAsk { asset_id, .. }
-            | Self::TickSizeChange { asset_id, .. }
+            Self::TickSizeChange { asset_id, .. }
             | Self::LastTradePrice { asset_id, .. }
             | Self::StreamGap { asset_id, .. } => Some(asset_id),
             Self::MarketResolved { .. }
@@ -216,8 +208,7 @@ impl PipelineEvent {
         let trace = match self {
             Self::BookSnapshot(command) => Some(&mut command.trace),
             Self::PriceDelta(command) => Some(&mut command.trace),
-            Self::BestBidAsk { trace, .. }
-            | Self::TickSizeChange { trace, .. }
+            Self::TickSizeChange { trace, .. }
             | Self::LastTradePrice { trace, .. }
             | Self::MarketResolved { trace, .. } => Some(trace),
             Self::ShardStatus { .. }

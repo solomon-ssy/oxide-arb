@@ -3,7 +3,7 @@
 use chrono::Utc;
 use quant_pivot_models::{
     clickhouse::{BookL2CheckpointRow, BookMicrostructureRow, ChPrice, ChSchemaVersion},
-    config::{ClickHouseConfig, ClickHouseMigrationConfig},
+    config::{ClickHouseConfig, SchemaMigrationConfig},
     enums::clickhouse::ChFactSource,
     types::{ContentHash, MarketId, Price, Shares, TokenId, Usd},
 };
@@ -22,11 +22,13 @@ use uuid::Uuid;
 
 fn test_ch_config(port: u16) -> ClickHouseConfig {
     ClickHouseConfig {
+        deployment_id: "ch-fact-read-pit".into(),
+        cluster_id: "testcontainer".into(),
         url: format!("http://localhost:{port}"),
         database: "default".into(),
         user: "default".into(),
         password: String::new(),
-        migration: ClickHouseMigrationConfig::default(),
+        migration: SchemaMigrationConfig::default(),
         batch_size: 100,
         flush_interval_secs: 5,
         max_concurrent_inserts: 4,

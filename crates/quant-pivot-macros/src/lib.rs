@@ -11,19 +11,10 @@
 
 mod into_active_value;
 mod normalize_page_query;
-mod quant_schema;
 mod str_id;
 mod uuid_id;
 
 use proc_macro::TokenStream;
-
-/// Declare a schema iden enum and register its table metadata.
-#[proc_macro_attribute]
-pub fn quant_schema(args: TokenStream, input: TokenStream) -> TokenStream {
-    quant_schema::expand(args.into(), input.into())
-        .unwrap_or_else(|e| e.to_compile_error())
-        .into()
-}
 
 /// Derive a type-safe string ID newtype backed by `Arc<str>`.
 ///

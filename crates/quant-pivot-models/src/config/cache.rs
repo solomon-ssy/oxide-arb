@@ -92,7 +92,7 @@ pub struct RedisConfig {
     pub connect_timeout_ms: u64,
     /// Key namespace prefix applied to every platform Redis key (cache keys
     /// directly; revoked JWT ids under `{key_prefix}jwt:blacklist:`).
-    /// Default: `oarb:`.
+    /// Default: `qp:`.
     pub key_prefix: String,
 }
 
@@ -176,7 +176,7 @@ const fn default_redis_connect_timeout() -> u64 {
     5000
 }
 fn default_redis_key_prefix() -> String {
-    "oarb:".into()
+    "qp:".into()
 }
 
 /// In-process Moka (L1) cache.

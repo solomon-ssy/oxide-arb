@@ -777,6 +777,7 @@ mod tests {
             market::registry::{EventRegistryInfo, MarketRegistryInfo, NegRiskLegSet},
         },
         enums::{
+            catalog::{CatalogFilterReasonSet, CatalogTimestampQuality},
             common::{CategorySet, MarketCategory, TickSize},
             execution::PositionLedgerState,
             market::{EventStatus, MarketStatus},
@@ -784,9 +785,9 @@ mod tests {
         },
         runtime_config::RuntimeConfig,
         types::{
-            CatalogSyncBatchId, ContentHash, EventCatalogVersionId, EventId,
-            MarketCatalogVersionId, MarketId, ModelRunId, OrderIntentId, PositionId, Price,
-            Probability, Shares, SignalCandidateId, TokenId, Usd,
+            CatalogEventChangeId, CatalogMarketChangeId, CatalogSyncBatchId, ContentHash, EventId,
+            MarketId, ModelRunId, OrderIntentId, PositionId, Price, Probability, Shares,
+            SignalCandidateId, TokenId, Usd,
         },
     };
     use quant_pivot_research::{
@@ -869,6 +870,7 @@ mod tests {
             description: None,
             categories: CategorySet::from(MarketCategory::Sports),
             status: MarketStatus::Active,
+            filter_reasons: CatalogFilterReasonSet::default(),
             outcome: None,
             neg_risk: false,
             tick_size: TickSize::Hundredth,
@@ -917,16 +919,16 @@ mod tests {
             },
             neg_risk_leg_set: NegRiskLegSet::empty(),
             catalog_sync_batch_id: CatalogSyncBatchId::from_v7(),
-            market_catalog_version_id: MarketCatalogVersionId::from_v7(),
-            event_catalog_version_id: EventCatalogVersionId::from_v7(),
+            market_change_id: CatalogMarketChangeId::from_v7(),
+            event_change_id: CatalogEventChangeId::from_v7(),
             market_content_hash: ContentHash::parse(format!("blake3:{}", "a".repeat(64)))
                 .expect("hash"),
             event_content_hash: ContentHash::parse(format!("blake3:{}", "b".repeat(64)))
                 .expect("hash"),
             membership_hash: ContentHash::parse(format!("blake3:{}", "c".repeat(64)))
                 .expect("hash"),
-            market_timestamp_quality: "source".to_owned(),
-            event_timestamp_quality: "source".to_owned(),
+            market_timestamp_quality: CatalogTimestampQuality::Source,
+            event_timestamp_quality: CatalogTimestampQuality::Source,
             market_effective_at: now,
             market_available_at: now,
             event_effective_at: now,

@@ -9,11 +9,11 @@ use crate::{
     types::{EventId, MarketId, OrderIntentId, PositionId, Price, Shares, TokenId, Usd},
 };
 use chrono::{DateTime, Utc};
-use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
 use serde::{Deserialize, Serialize};
 
 /// Persisted current-position ledger row (one lot per filled entry intent).
-#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
+#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
 #[sea_orm(entity = "crate::entities::quant_position::Entity")]
 pub struct PositionInfo {
     pub position_id: PositionId,

@@ -6,23 +6,21 @@
 //! 1. `POST /runtime-config/versions` — typed-parse (exact current schema version,
 //!    unknown fields rejected) + semantic validation, canonical JSON, content
 //!    hash, immutable row.
-//! 2. `POST .../activate` (or `.../rollback`) — re-parse + validate, audited
-//!    registry activation (hash chain), then [`RuntimeConfigPort::apply`]
-//!    propagates to live subscribers. If the live apply fails after the durable
-//!    write, a compensating rollback activation is recorded so the active
-//!    version never diverges from the live config.
+//! 2. `POST .../activate` (or `.../rollback`) — prepare every fallible live
+//!    dependency, atomically append the approved activation, then publish the
+//!    already-prepared immutable snapshot.
 //!
 //! Phase 0: preflight is a no-op; exposure/reservation checks return in Phase 1.
 //! Reads mask notification credentials (`bot_token`, `webhook.url`).
 
 use actix_web::{http::Method, web};
 use chrono::Utc;
-use quant_pivot_error::control::ControlError;
 use quant_pivot_models::{
     domain::{
         ActivateRuntimeConfigRequest, CoreEvent, CoreEventPublisher,
-        CreateRuntimeConfigVersionRequest, NewRuntimeConfigActivation, NewRuntimeConfigVersion,
-        RollbackRuntimeConfigRequest, RuntimeConfigActivationInfo, RuntimeConfigCurrentView,
+        CreateRuntimeConfigVersionRequest, NewRuntimeConfigActivation, NewRuntimeConfigApproval,
+        NewRuntimeConfigVersion, RecordRuntimeConfigApprovalRequest, RollbackRuntimeConfigRequest,
+        RuntimeConfigActivationInfo, RuntimeConfigApprovalInfo, RuntimeConfigCurrentView,
         RuntimeConfigSchemaView, RuntimeConfigVersionListQuery, RuntimeConfigVersionView,
         SchedulePreviewRequest, SchedulePreviewView,
     },
@@ -36,7 +34,7 @@ use quant_pivot_models::{
         RuntimeConfig, apply_runtime_config_patch, build_preferences_schema, mask_config_json,
         preview_fire_times, unmask_with, validate_runtime_config,
     },
-    types::{RuntimeConfigActivationId, RuntimeConfigVersionId},
+    types::{RuntimeConfigActivationId, RuntimeConfigApprovalId, RuntimeConfigVersionId},
 };
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -89,6 +87,18 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
             create_version,
         ),
         spec(
+            Method::GET,
+            "/runtime-config/approvals",
+            Rule::ResourceOp(ResourceType::RuntimeConfig, Operation::Read),
+            list_valid_approvals,
+        ),
+        spec(
+            Method::POST,
+            "/runtime-config/versions/{id}/approvals",
+            Rule::ActingRoleGoverned(ResourceType::RuntimeConfig, Operation::Approve),
+            record_approval,
+        ),
+        spec(
             Method::POST,
             "/runtime-config/versions/{id}/activate",
             Rule::ActingRoleGoverned(ResourceType::RuntimeConfig, Operation::Activate),
@@ -101,6 +111,74 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
             rollback_version,
         ),
     ]
+}
+
+/// `GET /api/runtime-config/approvals` — approvals currently eligible for activation.
+pub async fn list_valid_approvals(
+    state: web::Data<AppState>,
+) -> Result<WebResponse<Vec<RuntimeConfigApprovalInfo>>, WebError> {
+    Ok(WebResponse::ok(
+        state
+            .runtime_config
+            .list_valid_approvals(MAX_VERSION_LIMIT)
+            .await?,
+    ))
+}
+
+/// `POST /api/runtime-config/versions/{id}/approvals` — append a WORM decision.
+pub async fn record_approval(
+    state: web::Data<AppState>,
+    id: web::Path<RuntimeConfigVersionId>,
+    actor: AuthedActor,
+    acting_role: ActingRole,
+    request_id: RequestId,
+    op_ctx: OperationCtx,
+    body: ValidatedJson<RecordRuntimeConfigApprovalRequest>,
+) -> Result<WebResponse<RuntimeConfigApprovalInfo>, WebError> {
+    let version_id = id.into_inner();
+    let request = body.into_inner();
+    if request
+        .expires_at
+        .is_some_and(|expires_at| expires_at <= Utc::now())
+    {
+        return Err(WebError::BadRequest(
+            "approval expiry must be in the future".to_owned(),
+        ));
+    }
+    let version = state
+        .runtime_config
+        .load_version(&version_id)
+        .await?
+        .ok_or_else(|| {
+            WebError::NotFound(format!("runtime config version not found: {version_id}"))
+        })?;
+    let approval = state
+        .runtime_config
+        .record_approval(NewRuntimeConfigApproval {
+            runtime_config_approval_id: RuntimeConfigApprovalId::from_v7(),
+            runtime_config_version_id: version.runtime_config_version_id,
+            config_hash: version.config_hash.clone(),
+            decision: request.decision,
+            decided_by: actor.claims.username.clone(),
+            reason: request.reason,
+            decided_at: Utc::now(),
+            expires_at: request.expires_at,
+        })
+        .await?;
+    op_ctx.set_action(OperationCategory::RuntimeConfig, "runtime_config.approval");
+    op_ctx.set_resource(
+        ResourceType::RuntimeConfig,
+        approval.runtime_config_version_id.to_string(),
+    );
+    op_ctx.set_state_hashes(None, Some(approval.config_hash.to_string()));
+    op_ctx.set_detail(serde_json::json!({
+        "runtime_config_approval_id": approval.runtime_config_approval_id,
+        "decision": approval.decision,
+        "acting_role": acting_role.0,
+        "request_id": request_id.0,
+        "expires_at": approval.expires_at,
+    }));
+    Ok(WebResponse::ok(approval))
 }
 
 /// `GET /api/runtime-config` — the live (applied) runtime config plus the
@@ -241,13 +319,13 @@ pub async fn activate_version(
         .config_hash
         .as_str()
         .to_owned();
+    let request = body.into_inner();
     let audited = transition_version(
         &state,
         version_id,
         &actor,
-        acting_role.clone(),
-        &request_id,
-        body.into_inner().reason,
+        request.runtime_config_approval_id,
+        request.reason,
         RuntimeConfigActivationKind::Promote,
     )
     .await?;
@@ -284,13 +362,13 @@ pub async fn rollback_version(
         .config_hash
         .as_str()
         .to_owned();
+    let request = body.into_inner();
     let audited = transition_version(
         &state,
         version_id,
         &actor,
-        acting_role.clone(),
-        &request_id,
-        body.into_inner().reason,
+        request.runtime_config_approval_id,
+        request.reason,
         RuntimeConfigActivationKind::Rollback,
     )
     .await?;
@@ -343,8 +421,7 @@ async fn transition_version(
     state: &AppState,
     version_id: RuntimeConfigVersionId,
     actor: &AuthedActor,
-    acting_role: ActingRole,
-    request_id: &RequestId,
+    approval_id: RuntimeConfigApprovalId,
     reason: String,
     kind: RuntimeConfigActivationKind,
 ) -> Result<RuntimeConfigActivationInfo, WebError> {
@@ -354,9 +431,7 @@ async fn transition_version(
         )));
     };
     let config = parse_and_validate(&version.config_json)?;
-    // Live money-state preflight (mode validity + exposure ceilings vs
-    // in-flight reservations). Rejecting here leaves DB + live state untouched.
-    state.runtime_config_apply.preflight(&config)?;
+    let prepared = state.runtime_config_apply.prepare(config).await?;
 
     let previous = state
         .runtime_config
@@ -369,7 +444,7 @@ async fn transition_version(
     let activation = NewRuntimeConfigActivation {
         runtime_config_activation_id: RuntimeConfigActivationId::from_v7(),
         runtime_config_version_id: version_id,
-        activated_at: Utc::now(),
+        runtime_config_approval_id: Some(approval_id),
         activated_by: actor.claims.username.clone(),
         reason: reason.clone(),
         activation_kind: kind,
@@ -378,106 +453,21 @@ async fn transition_version(
         // The registry assigns this from the chained audit event it appends.
         audit_event_id: None,
     };
-    let activation = state.runtime_config.activate_version(activation).await?;
-
-    // Propagate to the live system. The applicator re-preflights against the
-    // money state at this exact moment; a failure here means the durable
-    // activation exists but the live system kept the previous configuration —
-    // compensate durably so the active version and the live config never
-    // diverge.
-    if let Err(error) = state.runtime_config_apply.apply(config).await {
-        return Err(revert_unapplied_activation(
-            state,
-            actor,
-            acting_role,
-            request_id,
-            &activation,
-            previous,
-            &error,
+    let activation = state
+        .runtime_config
+        .activate_approved_version(
+            activation,
+            state
+                .deploy
+                .quant
+                .governance
+                .require_approver_activator_separation,
         )
-        .await);
-    }
+        .await?;
+
+    prepared.publish();
 
     Ok(activation)
-}
-
-/// Compensate a durable activation whose live apply failed.
-///
-/// The live system never left the previous configuration, so consistency is
-/// restored on the durable side: a compensating `Rollback` activation
-/// re-points the active version at the previous one, keeping the audit chain
-/// truthful — both the failed promotion and its automatic revert are
-/// recorded. Returns the conflict error to surface to the operator.
-async fn revert_unapplied_activation(
-    state: &AppState,
-    actor: &AuthedActor,
-    acting_role: ActingRole,
-    request_id: &RequestId,
-    failed: &RuntimeConfigActivationInfo,
-    previous: Option<RuntimeConfigVersionId>,
-    apply_error: &ControlError,
-) -> WebError {
-    let failed_version = failed.runtime_config_version_id.clone();
-    let Some(previous_id) = previous else {
-        tracing::error!(
-            %apply_error,
-            version_id = %failed_version,
-            "runtime config activation not applied and no previous version exists to revert to"
-        );
-        return WebError::Conflict(format!(
-            "activation recorded but not applied to the live system: {apply_error}; \
-             no previous version exists to auto-revert to — re-activate manually"
-        ));
-    };
-
-    let reason = format!(
-        "auto-revert: live apply of version {failed_version} failed: {apply_error}; \
-         acting_role={}; request_id={}",
-        acting_role.0, request_id.0
-    );
-    let activation = NewRuntimeConfigActivation {
-        runtime_config_activation_id: RuntimeConfigActivationId::from_v7(),
-        runtime_config_version_id: previous_id.clone(),
-        activated_at: Utc::now(),
-        activated_by: actor.claims.username.clone(),
-        reason: reason.clone(),
-        activation_kind: RuntimeConfigActivationKind::Rollback,
-        previous_runtime_config_version_id: Some(failed_version.clone()),
-        rollback_target_version_id: Some(previous_id),
-        audit_event_id: None,
-    };
-    match state.runtime_config.activate_version(activation).await {
-        Ok(_) => {
-            tracing::warn!(
-                %apply_error,
-                version_id = %failed_version,
-                acting_role = %acting_role.0,
-                request_id = %request_id.0,
-                "runtime config activation not applied; durable state auto-reverted"
-            );
-            WebError::Conflict(format!(
-                "activation was not applied to the live system: {apply_error}; \
-                 the durable activation was automatically reverted and the \
-                 previous configuration remains in effect"
-            ))
-        }
-        Err(revert_error) => {
-            tracing::error!(
-                %apply_error,
-                %revert_error,
-                version_id = %failed_version,
-                acting_role = %acting_role.0,
-                request_id = %request_id.0,
-                "runtime config activation not applied AND auto-revert failed — \
-                 active version diverges from the live config until rolled back"
-            );
-            WebError::Conflict(format!(
-                "activation recorded but not applied ({apply_error}) and the \
-                 automatic revert failed ({revert_error}); the live system keeps \
-                 running the previous configuration — roll back manually"
-            ))
-        }
-    }
 }
 
 /// Stamp the operation log for a runtime-config activation, linking the chained

@@ -8,11 +8,11 @@ use crate::types::{
     PortfolioPlanId, PortfolioRejectedSummary, PortfolioRiskBudget, Usd,
 };
 use chrono::{DateTime, Utc};
-use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
 use serde::{Deserialize, Serialize};
 
 /// Persisted portfolio pruning and allocation result.
-#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
+#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
 #[sea_orm(entity = "crate::entities::quant_portfolio_plan::Entity")]
 pub struct PortfolioPlanInfo {
     pub portfolio_plan_id: PortfolioPlanId,

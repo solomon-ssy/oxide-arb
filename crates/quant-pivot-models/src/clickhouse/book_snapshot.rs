@@ -11,6 +11,7 @@ use uuid::Uuid;
 pub struct BookL2CheckpointRow {
     pub token_id: TokenId,
     pub market_id: Option<MarketId>,
+    #[serde(with = "clickhouse::serde::uuid")]
     pub stream_session_id: Uuid,
     pub token_sequence: u64,
     pub bids_json: String,

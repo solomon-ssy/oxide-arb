@@ -13,6 +13,7 @@ use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use sea_orm::entity::prelude::*;
 
+#[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "quant_factor_value")]
 pub struct Model {
@@ -39,58 +40,35 @@ pub struct Model {
     #[sea_orm(column_type = "JsonBinary")]
     pub explanation: Json,
     pub created_at: DateTime<Utc>,
-}
 
-#[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-pub enum Relation {
     #[sea_orm(
-        belongs_to = "super::quant_factor_definition::Entity",
-        from = "Column::FactorDefinitionId",
-        to = "super::quant_factor_definition::Column::FactorDefinitionId"
+        belongs_to,
+        relation_enum = "FactorDefinition",
+        from = "factor_definition_id",
+        to = "factor_definition_id"
     )]
-    FactorDefinition,
+    pub factor_definition: BelongsTo<super::quant_factor_definition::Entity>,
     #[sea_orm(
-        belongs_to = "super::quant_feature_vector::Entity",
-        from = "Column::FeatureVectorId",
-        to = "super::quant_feature_vector::Column::FeatureVectorId"
+        belongs_to,
+        relation_enum = "FeatureVector",
+        from = "feature_vector_id",
+        to = "feature_vector_id"
     )]
-    FeatureVector,
+    pub feature_vector: BelongsTo<super::quant_feature_vector::Entity>,
     #[sea_orm(
-        belongs_to = "super::market::Entity",
-        from = "Column::MarketId",
-        to = "super::market::Column::MarketId"
+        belongs_to,
+        relation_enum = "Market",
+        from = "market_id",
+        to = "market_id"
     )]
-    Market,
+    pub market: BelongsTo<super::market::Entity>,
     #[sea_orm(
-        belongs_to = "super::quant_model_run::Entity",
-        from = "Column::ModelRunId",
-        to = "super::quant_model_run::Column::ModelRunId"
+        belongs_to,
+        relation_enum = "ModelRun",
+        from = "model_run_id",
+        to = "model_run_id"
     )]
-    ModelRun,
-}
-
-impl Related<super::quant_factor_definition::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::FactorDefinition.def()
-    }
-}
-
-impl Related<super::quant_feature_vector::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::FeatureVector.def()
-    }
-}
-
-impl Related<super::market::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::Market.def()
-    }
-}
-
-impl Related<super::quant_model_run::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::ModelRun.def()
-    }
+    pub model_run: BelongsTo<super::quant_model_run::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

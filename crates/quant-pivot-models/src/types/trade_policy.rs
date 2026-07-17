@@ -17,7 +17,6 @@ use crate::{
         },
     },
     hashing::CanonicalDigest,
-    jsonb_active,
     types::{
         ArtifactUri, Bps, ClockAnchor, ContentHash, ENTRY_CONDITION_MAX_DEPTH,
         ENTRY_CONDITION_MAX_GROUP_CHILDREN, ENTRY_CONDITION_MAX_NODES,
@@ -1447,12 +1446,6 @@ pub struct TradePolicyArtifact {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
-
-jsonb_active!(
-    TradePolicyFitContract,
-    TradePolicyArtifactPayload,
-    TradePolicyTrialMetrics
-);
 
 #[cfg(test)]
 mod tests {

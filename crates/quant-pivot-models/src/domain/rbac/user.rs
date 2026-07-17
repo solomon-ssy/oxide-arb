@@ -6,14 +6,14 @@ use crate::{
     types::UserId,
 };
 use chrono::{DateTime, Utc};
-use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
 use serde::{Deserialize, Serialize};
 
 /// DB row projection for the `user` table.
 ///
 /// Carries `password_hash` because the repository login path needs it; the web
 /// layer projects this into a response type that omits the credential.
-#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
+#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
 #[sea_orm(entity = "crate::entities::user::Entity")]
 pub struct UserInfo {
     pub id: UserId,

@@ -172,6 +172,20 @@ impl DomainIngestor {
                 bootstrap,
             })
             .await?;
+        if let Some(future) = observations
+            .iter()
+            .map(|observation| observation.observed_at)
+            .filter(|observed_at| *observed_at > now)
+            .min()
+        {
+            return Err(StorageError::invariant_violation(
+                Some(entity::QUANT_DOMAIN_SOURCE_CURSOR),
+                format!(
+                    "source {source_id}/{instrument_key} returned future observation {future} after scan boundary {now}"
+                ),
+            )
+            .into());
+        }
 
         let last_event_time = observations
             .iter()

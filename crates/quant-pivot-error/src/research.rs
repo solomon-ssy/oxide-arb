@@ -18,6 +18,16 @@ use crate::{QuantError, storage::StorageError};
 /// variants so callers can reject loads rather than silently degrade.
 #[derive(Debug, Error)]
 pub enum ResearchError {
+    /// A valid research operation cannot run because required serving evidence
+    /// does not exist yet.
+    #[error("research operation not eligible ({code}): {detail}")]
+    NotEligible {
+        /// Stable machine-readable reason code.
+        code: &'static str,
+        /// Operator-facing explanation.
+        detail: String,
+    },
+
     /// An artifact-store IO operation failed.
     #[error("artifact store IO failed for `{uri}`: {detail}")]
     ArtifactIo {

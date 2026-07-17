@@ -6,6 +6,7 @@ use crate::{
 };
 use sea_orm::entity::prelude::*;
 
+#[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "quant_market_selection_member")]
 pub struct Model {
@@ -20,46 +21,28 @@ pub struct Model {
     pub secondary_token_id: Option<TokenId>,
     pub liquidity_usd: Option<Usd>,
     pub volume_24h_usd: Option<Usd>,
-}
 
-#[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-pub enum Relation {
     #[sea_orm(
-        belongs_to = "super::quant_market_selection::Entity",
-        from = "Column::MarketSelectionId",
-        to = "super::quant_market_selection::Column::MarketSelectionId"
+        belongs_to,
+        relation_enum = "MarketSelection",
+        from = "market_selection_id",
+        to = "market_selection_id"
     )]
-    MarketSelection,
+    pub market_selection: BelongsTo<super::quant_market_selection::Entity>,
     #[sea_orm(
-        belongs_to = "super::market::Entity",
-        from = "Column::MarketId",
-        to = "super::market::Column::MarketId"
+        belongs_to,
+        relation_enum = "Market",
+        from = "market_id",
+        to = "market_id"
     )]
-    Market,
+    pub market: BelongsTo<super::market::Entity>,
     #[sea_orm(
-        belongs_to = "super::event::Entity",
-        from = "Column::EventId",
-        to = "super::event::Column::EventId"
+        belongs_to,
+        relation_enum = "Event",
+        from = "event_id",
+        to = "event_id"
     )]
-    Event,
-}
-
-impl Related<super::quant_market_selection::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::MarketSelection.def()
-    }
-}
-
-impl Related<super::market::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::Market.def()
-    }
-}
-
-impl Related<super::event::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::Event.def()
-    }
+    pub event: BelongsTo<super::event::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

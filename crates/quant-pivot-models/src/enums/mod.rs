@@ -9,7 +9,7 @@
 
 /// Postgres native enum persisted as `CREATE TYPE qp_* AS ENUM`.
 ///
-/// Registers the type in [`crate::schema::pg_enum::PG_ENUM_SPECS`] for migrations.
+/// Audited immutable `SeaORM` migrations own DDL; this macro owns the Rust type.
 #[macro_export]
 macro_rules! pg_enum {
     (
@@ -162,7 +162,6 @@ macro_rules! pg_enum {
             serde::Deserialize,
             sea_orm::EnumIter,
             sea_orm::DeriveActiveEnum,
-            quant_pivot_macros::IntoActiveValue,
         )]
         #[sea_orm(rs_type = "String", db_type = "Enum", enum_name = $type_name)]
         pub enum $name {
@@ -187,16 +186,6 @@ macro_rules! pg_enum {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 f.write_str(self.as_str())
             }
-        }
-
-        ::paste::paste! {
-            #[allow(unsafe_code, dead_code, non_upper_case_globals)]
-            #[::linkme::distributed_slice($crate::schema::pg_enum::PG_ENUM_SPECS)]
-            static [< __PG_ENUM_ $name >]: $crate::schema::pg_enum::PgEnumSpec =
-                $crate::schema::pg_enum::PgEnumSpec {
-                    type_name: $type_name,
-                    create_stmt: || $crate::schema::pg_enum::create_type::<$name>(),
-                };
         }
     };
 }
@@ -411,6 +400,7 @@ macro_rules! __enum_from_str_impl {
     };
 }
 
+pub mod catalog;
 pub mod clickhouse;
 pub mod common;
 pub mod domain;

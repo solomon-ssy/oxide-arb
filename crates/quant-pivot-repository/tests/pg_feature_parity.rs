@@ -3,15 +3,20 @@
 use chrono::{DateTime, Duration, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    domain::{CompleteFeatureParityRun, NewFeatureParityRun},
-    enums::quant::{FeatureParityLatchState, FeatureParityRunKind, FeatureParityRunStatus},
-    types::{ContentHash, FeatureParityRunId},
+    domain::{CompleteFeatureParityRun, NewFeatureParityRun, NewResearchJob},
+    entities::quant_research_job,
+    enums::quant::{
+        FeatureParityLatchState, FeatureParityRunKind, FeatureParityRunStatus, ResearchJobKind,
+        ResearchJobStatus,
+    },
+    types::{ContentHash, FeatureParityRunId, ResearchJobId},
 };
 use quant_pivot_repository::{
     postgres::PgFeatureParityRepository,
-    traits::{FeatureParityLatchActor, FeatureParityRepository},
+    traits::{EnqueueFrozenFeatureParityOutcome, FeatureParityLatchActor, FeatureParityRepository},
 };
 use quant_pivot_test_support::pg::setup_pg;
+use sea_orm::EntityTrait;
 
 fn hash(byte: char) -> ContentHash {
     ContentHash::parse(format!("blake3:{}", byte.to_string().repeat(64)))
@@ -121,6 +126,47 @@ fn actor() -> FeatureParityLatchActor {
         acting_role: "risk_owner".to_owned(),
         reason: "all deterministic causes replayed".to_owned(),
     }
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn cold_window_is_not_eligible_and_writes_no_run_or_job() {
+    let (pool, _container) = setup_pg().await;
+    let repo = PgFeatureParityRepository::new(pool.connection().clone());
+    let window_end = Utc::now();
+    let run = queued_run(window_end - Duration::hours(24), window_end);
+    let run_id = run.run_id.clone();
+    let job_id = ResearchJobId::from_v7();
+    let job = NewResearchJob {
+        job_id: job_id.clone(),
+        kind: ResearchJobKind::FeatureParity,
+        status: ResearchJobStatus::Queued,
+        model_spec_id: None,
+        runtime_config_version_id: None,
+        params_json: serde_json::json!({ "parity_run_id": run_id }),
+        requested_by: None,
+        acting_role: "system".to_owned(),
+        parent_job_id: None,
+        recovery_attempt: 0,
+        max_recovery_attempts: 3,
+    };
+
+    let outcome = repo
+        .enqueue_frozen_full(run, job)
+        .await
+        .expect("cold window eligibility");
+    assert!(matches!(
+        outcome,
+        EnqueueFrozenFeatureParityOutcome::NotEligible
+    ));
+    assert!(repo.find_run(&run_id).await.expect("run lookup").is_none());
+    assert!(
+        quant_research_job::Entity::find_by_id(job_id)
+            .one(pool.connection())
+            .await
+            .expect("job lookup")
+            .is_none()
+    );
 }
 
 #[tokio::test]

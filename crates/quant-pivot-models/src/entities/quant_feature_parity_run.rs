@@ -9,6 +9,7 @@ use crate::{
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
+#[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "quant_feature_parity_run")]
 pub struct Model {
@@ -40,9 +41,9 @@ pub struct Model {
     pub finished_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
-}
 
-#[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-pub enum Relation {}
+    #[sea_orm(has_many, relation_enum = "Subject")]
+    pub subject: HasMany<super::quant_feature_parity_subject::Entity>,
+}
 
 impl ActiveModelBehavior for ActiveModel {}

@@ -9,9 +9,9 @@ quant-pivot-error = { workspace = true, features = ["config"] }
 quant-pivot-macros = { workspace = true }
 rust_decimal = { workspace = true }
 rust_decimal_macros = { workspace = true }
-regex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+serde_json_canonicalizer = { workspace = true }
 serde_with = { workspace = true }
 schemars = { workspace = true }
 chrono = { workspace = true }
@@ -21,12 +21,11 @@ croner = { workspace = true }
 chrono-tz = { workspace = true }
 uuid = { workspace = true, features = ["v5"] }
 sea-orm = { workspace = true }
-strum = { workspace = true }
 async-trait = { workspace = true }
+tokio = { workspace = true }
 tokio-util = { workspace = true }
 flume = { workspace = true }
 validator = { workspace = true }
-bitcode = { workspace = true }
 tracing = { workspace = true }
 config = { workspace = true }
 url = { workspace = true }
@@ -38,8 +37,8 @@ paste = { workspace = true }
 serde_repr = { workspace = true }
 hex = { workspace = true }
 blake3 = { workspace = true }
-sha2 = { workspace = true }
 argon2 = { workspace = true }
+rand_core_06 = { workspace = true }
 secrecy = { workspace = true }
 
 [dev-dependencies]

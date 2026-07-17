@@ -1,107 +1,31 @@
-//! Append-only, bitemporal Gamma catalog versions.
+//! Content-addressed Gamma catalog objects and append-only change ledger.
 
 use crate::{
     domain::{UpsertEvent, UpsertMarket},
-    entities::{event_catalog_version, market_catalog_version},
+    entities::{
+        catalog_event_change, catalog_event_object, catalog_market_change, catalog_market_object,
+        catalog_sync_rejection,
+    },
+    enums::catalog::{
+        CatalogChangeType, CatalogEntityKind, CatalogRejectionReason, CatalogSyncFailureStage,
+        CatalogSyncKind, CatalogSyncStatus, CatalogTimestampQuality,
+    },
     types::{
-        CatalogSyncBatchId, ContentHash, EventCatalogVersionId, EventId, MarketCatalogVersionId,
-        MarketId,
+        CatalogEventChangeId, CatalogEventObjectId, CatalogMarketChangeId, CatalogMarketObjectId,
+        CatalogSyncBatchId, CatalogSyncRejectionId, ContentHash, EventId, MarketId,
     },
 };
 use chrono::{DateTime, Utc};
-use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
+use sea_orm::{DeriveIntoActiveModel, FromQueryResult};
 use serde::{Deserialize, Serialize};
 
-/// Which Gamma synchronization produced a committed catalog batch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CatalogSyncKind {
-    Full,
-    Incremental,
-}
+pub const CATALOG_OBJECT_SCHEMA_VERSION: i32 = 1;
 
-/// Durable lifecycle of one catalog synchronization attempt.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CatalogSyncStatus {
-    Preparing,
-    Committed,
-    Failed,
-}
-
-impl CatalogSyncStatus {
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Preparing => "preparing",
-            Self::Committed => "committed",
-            Self::Failed => "failed",
-        }
-    }
-}
-
-/// Stable stage taxonomy for failed catalog attempts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CatalogSyncFailureStage {
-    Fetch,
-    Prepare,
-    Persist,
-    CommitVisibility,
-    Recovery,
-}
-
-impl CatalogSyncFailureStage {
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Fetch => "fetch",
-            Self::Prepare => "prepare",
-            Self::Persist => "persist",
-            Self::CommitVisibility => "commit_visibility",
-            Self::Recovery => "recovery",
-        }
-    }
-}
-
-impl CatalogSyncKind {
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Full => "full",
-            Self::Incremental => "incremental",
-        }
-    }
-}
-
-/// Provenance quality of a catalog row's effective timestamp.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CatalogTimestampQuality {
-    Source,
-    AvailableAtFallback,
-}
-
-impl CatalogTimestampQuality {
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Source => "source",
-            Self::AvailableAtFallback => "available_at_fallback",
-        }
-    }
-}
-
-/// Origin recorded for versions committed by the transactional Gamma writer.
-pub const CATALOG_ORIGIN_GAMMA_SYNC: &str = "gamma_sync";
-
-#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
-#[sea_orm(entity = "crate::entities::catalog_sync_batch::Entity")]
+#[derive(Debug, Clone, Serialize, Deserialize, FromQueryResult)]
 pub struct CatalogSyncBatchInfo {
     pub catalog_sync_batch_id: CatalogSyncBatchId,
-    pub sync_kind: String,
-    pub status: String,
-    pub source_cursor: Option<DateTime<Utc>>,
+    pub sync_kind: CatalogSyncKind,
+    pub status: CatalogSyncStatus,
     pub started_at: DateTime<Utc>,
     pub fetched_at: Option<DateTime<Utc>>,
     pub committed_at: Option<DateTime<Utc>>,
@@ -109,7 +33,7 @@ pub struct CatalogSyncBatchInfo {
     pub market_count: i64,
     pub rejected_count: i64,
     pub batch_hash: Option<ContentHash>,
-    pub failure_stage: Option<String>,
+    pub failure_stage: Option<CatalogSyncFailureStage>,
     pub failure_detail: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -119,7 +43,6 @@ info_from_model!(CatalogSyncBatchInfo, crate::entities::catalog_sync_batch::Mode
     catalog_sync_batch_id,
     sync_kind,
     status,
-    source_cursor,
     started_at,
     fetched_at,
     committed_at,
@@ -137,8 +60,7 @@ info_from_model!(CatalogSyncBatchInfo, crate::entities::catalog_sync_batch::Mode
 #[sea_orm(active_model = "crate::entities::catalog_sync_batch::ActiveModel")]
 pub struct NewCatalogSyncBatch {
     pub catalog_sync_batch_id: CatalogSyncBatchId,
-    pub sync_kind: String,
-    pub source_cursor: Option<DateTime<Utc>>,
+    pub sync_kind: CatalogSyncKind,
     pub started_at: DateTime<Utc>,
     pub fetched_at: DateTime<Utc>,
     pub event_count: i64,
@@ -149,159 +71,155 @@ pub struct NewCatalogSyncBatch {
 
 /// Immutable audit payload for an attempt that failed before a catalog commit.
 #[derive(Debug, Clone)]
-pub struct NewFailedCatalogSyncBatch {
+pub struct CatalogBatchFailure {
     pub catalog_sync_batch_id: CatalogSyncBatchId,
-    pub sync_kind: String,
-    pub source_cursor: Option<DateTime<Utc>>,
+    pub sync_kind: CatalogSyncKind,
     pub started_at: DateTime<Utc>,
     pub fetched_at: Option<DateTime<Utc>>,
     pub failure_stage: CatalogSyncFailureStage,
     pub failure_detail: String,
+    pub rejections: Vec<NewCatalogSyncRejection>,
 }
-
-#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
-#[sea_orm(entity = "crate::entities::event_catalog_version::Entity")]
-pub struct EventCatalogVersionInfo {
-    pub event_catalog_version_id: EventCatalogVersionId,
-    pub catalog_sync_batch_id: CatalogSyncBatchId,
-    pub event_id: EventId,
-    pub source_effective_at: DateTime<Utc>,
-    pub source_timestamp_quality: String,
-    pub available_at: DateTime<Utc>,
-    pub origin: String,
-    pub content_hash: ContentHash,
-    pub payload: serde_json::Value,
-    pub created_at: DateTime<Utc>,
-}
-
-info_from_model!(
-    EventCatalogVersionInfo,
-    event_catalog_version::Model,
-    {
-        event_catalog_version_id,
-        catalog_sync_batch_id,
-        event_id,
-        source_effective_at,
-        source_timestamp_quality,
-        available_at,
-        origin,
-        content_hash,
-        payload,
-        created_at,
-    }
-);
 
 #[derive(Debug, Clone, DeriveIntoActiveModel)]
-#[sea_orm(active_model = "crate::entities::event_catalog_version::ActiveModel")]
-pub struct NewEventCatalogVersion {
-    pub event_catalog_version_id: EventCatalogVersionId,
-    pub catalog_sync_batch_id: CatalogSyncBatchId,
-    pub event_id: EventId,
-    pub source_effective_at: DateTime<Utc>,
-    pub source_timestamp_quality: String,
-    pub available_at: DateTime<Utc>,
-    pub origin: String,
+#[sea_orm(active_model = "catalog_event_object::ActiveModel")]
+pub struct NewCatalogEventObject {
+    pub event_object_id: CatalogEventObjectId,
     pub content_hash: ContentHash,
+    pub schema_version: i32,
     pub payload: serde_json::Value,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
-#[sea_orm(entity = "crate::entities::market_catalog_version::Entity")]
-pub struct MarketCatalogVersionInfo {
-    pub market_catalog_version_id: MarketCatalogVersionId,
+#[derive(Debug, Clone, DeriveIntoActiveModel)]
+#[sea_orm(active_model = "catalog_event_change::ActiveModel")]
+pub struct NewCatalogEventChange {
+    pub event_change_id: CatalogEventChangeId,
     pub catalog_sync_batch_id: CatalogSyncBatchId,
-    pub event_catalog_version_id: EventCatalogVersionId,
+    pub event_object_id: CatalogEventObjectId,
+    pub event_id: EventId,
+    pub source_effective_at: DateTime<Utc>,
+    pub source_timestamp_quality: CatalogTimestampQuality,
+    pub change_type: CatalogChangeType,
+}
+
+#[derive(Debug, Clone, DeriveIntoActiveModel)]
+#[sea_orm(active_model = "catalog_market_object::ActiveModel")]
+pub struct NewCatalogMarketObject {
+    pub market_object_id: CatalogMarketObjectId,
+    pub content_hash: ContentHash,
+    pub schema_version: i32,
+    pub payload: serde_json::Value,
+}
+
+#[derive(Debug, Clone, DeriveIntoActiveModel)]
+#[sea_orm(active_model = "catalog_market_change::ActiveModel")]
+pub struct NewCatalogMarketChange {
+    pub market_change_id: CatalogMarketChangeId,
+    pub catalog_sync_batch_id: CatalogSyncBatchId,
+    pub event_change_id: CatalogEventChangeId,
+    pub market_object_id: CatalogMarketObjectId,
     pub market_id: MarketId,
     pub event_id: EventId,
     pub source_effective_at: DateTime<Utc>,
-    pub source_timestamp_quality: String,
+    pub source_timestamp_quality: CatalogTimestampQuality,
     pub source_created_at: Option<DateTime<Utc>>,
-    pub available_at: DateTime<Utc>,
-    pub origin: String,
-    pub content_hash: ContentHash,
-    pub payload: serde_json::Value,
-    pub created_at: DateTime<Utc>,
+    pub change_type: CatalogChangeType,
 }
-
-info_from_model!(
-    MarketCatalogVersionInfo,
-    market_catalog_version::Model,
-    {
-        market_catalog_version_id,
-        catalog_sync_batch_id,
-        event_catalog_version_id,
-        market_id,
-        event_id,
-        source_effective_at,
-        source_timestamp_quality,
-        source_created_at,
-        available_at,
-        origin,
-        content_hash,
-        payload,
-        created_at,
-    }
-);
 
 #[derive(Debug, Clone, DeriveIntoActiveModel)]
-#[sea_orm(active_model = "crate::entities::market_catalog_version::ActiveModel")]
-pub struct NewMarketCatalogVersion {
-    pub market_catalog_version_id: MarketCatalogVersionId,
+#[sea_orm(active_model = "catalog_sync_rejection::ActiveModel")]
+pub struct NewCatalogSyncRejection {
+    pub catalog_sync_rejection_id: CatalogSyncRejectionId,
     pub catalog_sync_batch_id: CatalogSyncBatchId,
-    pub event_catalog_version_id: EventCatalogVersionId,
-    pub market_id: MarketId,
-    pub event_id: EventId,
-    pub source_effective_at: DateTime<Utc>,
-    pub source_timestamp_quality: String,
-    pub source_created_at: Option<DateTime<Utc>>,
-    pub available_at: DateTime<Utc>,
-    pub origin: String,
-    pub content_hash: ContentHash,
-    pub payload: serde_json::Value,
+    pub entity_kind: CatalogEntityKind,
+    pub source_id: Option<String>,
+    pub reason_code: CatalogRejectionReason,
+    pub detail: String,
+    pub raw_payload: Option<serde_json::Value>,
 }
 
-/// Atomic write payload: current projections and immutable versions commit together.
-pub struct CatalogCommit {
+/// Candidate event object/change/projection evaluated against the current hash in the writer transaction.
+#[derive(Debug, Clone)]
+pub struct CatalogEventCandidate {
+    pub projection: UpsertEvent,
+    pub object: NewCatalogEventObject,
+    pub change: NewCatalogEventChange,
+}
+
+/// Candidate market object/change/projection evaluated against the current hash in the writer transaction.
+#[derive(Debug, Clone)]
+pub struct CatalogMarketCandidate {
+    pub projection: UpsertMarket,
+    pub object: NewCatalogMarketObject,
+    pub market_change_id: CatalogMarketChangeId,
+    pub catalog_sync_batch_id: CatalogSyncBatchId,
+    pub event_object_id: CatalogEventObjectId,
+    pub source_effective_at: DateTime<Utc>,
+    pub source_timestamp_quality: CatalogTimestampQuality,
+    pub source_created_at: Option<DateTime<Utc>>,
+    pub change_type: CatalogChangeType,
+}
+
+/// Atomic write payload: objects, changes, and current projections commit together.
+pub struct CatalogBatchCommit {
     pub batch: NewCatalogSyncBatch,
-    pub current_events: Vec<UpsertEvent>,
-    pub event_versions: Vec<NewEventCatalogVersion>,
-    pub current_markets: Vec<UpsertMarket>,
-    pub market_versions: Vec<NewMarketCatalogVersion>,
+    pub events: Vec<CatalogEventCandidate>,
+    pub markets: Vec<CatalogMarketCandidate>,
+}
+
+/// Joined event change and its immutable content object.
+#[derive(Debug, Clone, Serialize, Deserialize, FromQueryResult)]
+pub struct CatalogEventChangeInfo {
+    pub event_change_id: CatalogEventChangeId,
+    pub catalog_sync_batch_id: CatalogSyncBatchId,
+    pub event_object_id: CatalogEventObjectId,
+    pub event_id: EventId,
+    pub source_effective_at: DateTime<Utc>,
+    pub source_timestamp_quality: CatalogTimestampQuality,
+    pub available_at: DateTime<Utc>,
+    pub change_type: CatalogChangeType,
+    pub content_hash: ContentHash,
+    pub schema_version: i32,
+    pub payload: serde_json::Value,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Joined market change and its immutable content object.
+#[derive(Debug, Clone, Serialize, Deserialize, FromQueryResult)]
+pub struct CatalogMarketChangeInfo {
+    pub market_change_id: CatalogMarketChangeId,
+    pub catalog_sync_batch_id: CatalogSyncBatchId,
+    pub event_change_id: CatalogEventChangeId,
+    pub market_object_id: CatalogMarketObjectId,
+    pub market_id: MarketId,
+    pub event_id: EventId,
+    pub source_effective_at: DateTime<Utc>,
+    pub source_timestamp_quality: CatalogTimestampQuality,
+    pub source_created_at: Option<DateTime<Utc>>,
+    pub available_at: DateTime<Utc>,
+    pub change_type: CatalogChangeType,
+    pub content_hash: ContentHash,
+    pub schema_version: i32,
+    pub payload: serde_json::Value,
+    pub created_at: DateTime<Utc>,
 }
 
 /// One transactionally consistent point-in-time catalog snapshot.
-///
-/// `market` and `event` are linked by the immutable
-/// `event_catalog_version_id`. `event_markets` contains the latest visible
-/// version of every materialized market named by that exact event version.
-/// Missing members are intentionally omitted so callers can preserve the
-/// event's expected membership count and fail closed.
 #[derive(Debug, Clone)]
 pub struct CatalogSnapshotInfo {
-    pub market: MarketCatalogVersionInfo,
-    pub event: EventCatalogVersionInfo,
-    pub event_markets: Vec<MarketCatalogVersionInfo>,
+    pub market: CatalogMarketChangeInfo,
+    pub event: CatalogEventChangeInfo,
+    pub event_markets: Vec<CatalogMarketChangeInfo>,
 }
 
-/// Immutable catalog revisions required to replay a bounded historical window.
-///
-/// The repository returns every visible revision through the supplied end
-/// boundary, including pre-window baselines and all event members referenced by
-/// those revisions. The materialized PIT engine applies each sample's own
-/// boundary in memory without touching Postgres.
+/// Immutable catalog changes required to replay a bounded historical window.
 #[derive(Debug, Clone)]
 pub struct CatalogWindowInfo {
-    pub market_versions: Vec<MarketCatalogVersionInfo>,
-    pub event_versions: Vec<EventCatalogVersionInfo>,
+    pub market_changes: Vec<CatalogMarketChangeInfo>,
+    pub event_changes: Vec<CatalogEventChangeInfo>,
 }
 
-/// Ordered committed catalog batches proving the ledger prefix used by a
-/// source slice.
-///
-/// The first row is always a complete synchronization committed no later than
-/// the requested source window start. Every later committed batch through the
-/// PIT cutoff is retained in canonical commit order. The materializer hashes
-/// this exact vector; it never substitutes mutable catalog projections.
+/// Ordered committed catalog batches proving the ledger prefix used by a source slice.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CatalogBatchChainInfo {
     pub batches: Vec<CatalogSyncBatchInfo>,

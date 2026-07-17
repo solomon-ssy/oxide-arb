@@ -2,11 +2,11 @@
 
 use crate::{entities::system_kill_switch, enums::execution::KillSwitchState};
 use chrono::{DateTime, Utc};
-use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
 use serde::{Deserialize, Serialize};
 
 /// DB row projection for the `system_kill_switch` singleton.
-#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
+#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
 #[sea_orm(entity = "crate::entities::system_kill_switch::Entity")]
 pub struct KillSwitchStateInfo {
     pub id: i32,

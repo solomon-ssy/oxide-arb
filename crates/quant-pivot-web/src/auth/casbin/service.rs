@@ -19,6 +19,8 @@
 //! [`enforce`]: CasbinService::enforce
 //! [`has_policy`]: CasbinService::has_policy
 
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
 use casbin::{CoreApi, DefaultModel, Enforcer, MgmtApi};
 use quant_pivot_models::enums::rbac::casbin::OBJECT_TYPE_RESOURCE;
 use quant_pivot_repository::postgres::PgCasbinAdapter;
@@ -30,6 +32,8 @@ use crate::{auth::casbin::model::CASBIN_MODEL, error::WebError};
 /// Thread-safe wrapper around a live Casbin [`Enforcer`].
 pub struct CasbinService {
     enforcer: RwLock<Enforcer>,
+    healthy: AtomicBool,
+    authorization_revision: AtomicU64,
 }
 
 impl CasbinService {
@@ -44,12 +48,19 @@ impl CasbinService {
             .map_err(|error| WebError::Internal(format!("casbin enforcer init failed: {error}")))?;
         Ok(Self {
             enforcer: RwLock::new(enforcer),
+            healthy: AtomicBool::new(true),
+            authorization_revision: AtomicU64::new(1),
         })
     }
 
     /// Whether `subject` (a stable `user_id`) may perform `act` on a `resource`
     /// of type `obj`. Honors the `super_admin` bypass encoded in the matcher.
     pub async fn enforce(&self, subject: &str, obj: &str, act: &str) -> Result<bool, WebError> {
+        if !self.healthy.load(Ordering::Acquire) {
+            return Err(WebError::ServiceUnavailable(
+                "authorization policy is unavailable".to_owned(),
+            ));
+        }
         self.enforcer
             .read()
             .await
@@ -63,6 +74,9 @@ impl CasbinService {
     /// or any grouping), used to validate an explicit `acting_role` on governed
     /// endpoints.
     pub async fn has_policy(&self, role_code: &str, obj: &str, act: &str) -> bool {
+        if !self.healthy.load(Ordering::Acquire) {
+            return false;
+        }
         self.enforcer.read().await.has_policy(vec![
             role_code.to_owned(),
             obj.to_owned(),
@@ -77,12 +91,31 @@ impl CasbinService {
     /// (role/permission/grouping changes, role enable/disable, user/role
     /// deletion), so subsequent authorization decisions see the new state.
     pub async fn reload(&self) -> Result<(), WebError> {
-        self.enforcer
+        self.healthy.store(false, Ordering::Release);
+        let result = self
+            .enforcer
             .write()
             .await
             .load_policy()
             .await
-            .map_err(|error| WebError::Internal(format!("casbin reload failed: {error}")))
+            .map_err(|error| WebError::Internal(format!("casbin reload failed: {error}")));
+        if result.is_ok() {
+            self.authorization_revision.fetch_add(1, Ordering::AcqRel);
+            self.healthy.store(true, Ordering::Release);
+        }
+        result
+    }
+
+    /// Monotonic revision of the successfully loaded authorization snapshot.
+    #[must_use]
+    pub fn authorization_revision(&self) -> u64 {
+        self.authorization_revision.load(Ordering::Acquire)
+    }
+
+    /// Whether the in-memory policy is known to match the persistence source.
+    #[must_use]
+    pub fn is_healthy(&self) -> bool {
+        self.healthy.load(Ordering::Acquire)
     }
 }
 
@@ -98,6 +131,8 @@ impl CasbinService {
             .expect("in-memory enforcer");
         Self {
             enforcer: RwLock::new(enforcer),
+            healthy: AtomicBool::new(true),
+            authorization_revision: AtomicU64::new(1),
         }
     }
 

@@ -12,12 +12,12 @@
 //! The sink is backend-agnostic: `ClickHouse` facts flush through
 //! `ChWriteManager::write_batch`, `Postgres` audit rows through a repository.
 //!
-//! The producer calls [`AsyncWriter::write`] from any thread (including the
-//! synchronous book-apply OS threads): it is non-blocking and drops the item if
-//! the bounded channel is full, incrementing a Prometheus counter and emitting a
-//! rate-limited warning. The paired [`AsyncWriterWorker`] batches items by size
-//! and interval and flushes them through a caller-supplied sink, draining
-//! cleanly on shutdown so no buffered item is lost on a graceful stop.
+//! The producer calls [`AsyncWriter::write`] from synchronous or asynchronous
+//! code: it is non-blocking and drops the item if the bounded channel is full,
+//! incrementing a Prometheus counter and emitting a rate-limited warning. The
+//! paired [`AsyncWriterWorker`] batches items by size and interval and flushes
+//! them through a caller-supplied sink, draining cleanly on shutdown so no
+//! buffered item is lost on a graceful stop.
 
 use std::{
     future::Future,
@@ -31,6 +31,7 @@ use std::{
 use parking_lot::Mutex;
 use prometheus::{IntCounter, IntGauge};
 use quant_pivot_error::storage::StorageError;
+use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
@@ -77,6 +78,50 @@ pub struct AsyncWriterConfig {
     pub capacity: usize,
     pub batch_size: usize,
     pub flush_interval: Duration,
+}
+
+/// Construction parameters for an acknowledged canonical-fact writer.
+///
+/// This is intentionally distinct from [`AsyncWriterConfig`]. Canonical
+/// producers wait for a persistence acknowledgement, so their maximum batching
+/// delay must remain short and must never inherit the multi-second analytics
+/// flush interval.
+#[derive(Debug, Clone, Copy)]
+pub struct DurableWriterConfig {
+    pub name: &'static str,
+    pub capacity: usize,
+    pub max_batch_size: usize,
+    pub max_batch_delay: Duration,
+}
+
+impl DurableWriterConfig {
+    #[must_use]
+    pub const fn new(name: &'static str) -> Self {
+        Self {
+            name,
+            capacity: 8_192,
+            max_batch_size: 256,
+            max_batch_delay: Duration::from_millis(5),
+        }
+    }
+
+    #[must_use]
+    pub const fn capacity(mut self, capacity: usize) -> Self {
+        self.capacity = capacity;
+        self
+    }
+
+    #[must_use]
+    pub const fn max_batch_size(mut self, max_batch_size: usize) -> Self {
+        self.max_batch_size = max_batch_size;
+        self
+    }
+
+    #[must_use]
+    pub const fn max_batch_delay(mut self, max_batch_delay: Duration) -> Self {
+        self.max_batch_delay = max_batch_delay;
+        self
+    }
 }
 
 impl AsyncWriterConfig {
@@ -149,7 +194,7 @@ pub struct DurableWriter<T: Send + 'static> {
 
 impl<T: Send + 'static> DurableWriter<T> {
     pub fn new<F>(
-        config: AsyncWriterConfig,
+        config: DurableWriterConfig,
         flush: F,
         observability: AsyncWriterObservability,
     ) -> (Self, DurableWriterWorker<T>)
@@ -159,7 +204,7 @@ impl<T: Send + 'static> DurableWriter<T> {
             + Sync
             + 'static,
     {
-        let (tx, rx) = flume::bounded(config.capacity);
+        let (tx, rx) = flume::bounded(config.capacity.max(1));
         let writer = Self {
             tx,
             name: config.name,
@@ -169,8 +214,8 @@ impl<T: Send + 'static> DurableWriter<T> {
             rx,
             flush: Box::new(flush),
             name: config.name,
-            batch_size: config.batch_size,
-            flush_interval: config.flush_interval,
+            max_batch_size: config.max_batch_size.max(1),
+            max_batch_delay: config.max_batch_delay,
             observability,
         };
         (writer, worker)
@@ -200,6 +245,37 @@ impl<T: Send + 'static> DurableWriter<T> {
             .ok_or(DurableWriteError::PersistenceFailed)
     }
 
+    /// Enqueue one canonical fact and asynchronously wait for persistence.
+    ///
+    /// This preserves the same two bounded waits as [`Self::write_timeout`]
+    /// without blocking a Tokio worker. It allows independent token streams to
+    /// fill one durable batch concurrently while callers retain a strict
+    /// persistence barrier before publishing derived state.
+    pub async fn write_async_timeout(
+        &self,
+        item: T,
+        timeout_duration: Duration,
+    ) -> Result<(), DurableWriteError> {
+        let (acknowledgement, ack_rx) = flume::bounded(1);
+        let queued = DurableQueued {
+            item,
+            enqueued: Instant::now(),
+            acknowledgement,
+        };
+        match timeout(timeout_duration, self.tx.send_async(queued)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => return Err(DurableWriteError::QueueClosed),
+            Err(_) => return Err(DurableWriteError::QueueTimeout),
+        }
+        self.publish_queue_depth();
+        match timeout(timeout_duration, ack_rx.recv_async()).await {
+            Ok(Ok(true)) => Ok(()),
+            Ok(Ok(false)) => Err(DurableWriteError::PersistenceFailed),
+            Ok(Err(_)) => Err(DurableWriteError::QueueClosed),
+            Err(_) => Err(DurableWriteError::AcknowledgementTimeout),
+        }
+    }
+
     fn publish_queue_depth(&self) {
         if let Some(gauge) = &self.observability.queue_depth {
             gauge.set(i64::try_from(self.tx.len()).unwrap_or(i64::MAX));
@@ -216,8 +292,8 @@ pub struct DurableWriterWorker<T: Send + 'static> {
     rx: flume::Receiver<DurableQueued<T>>,
     flush: FlushFn<T>,
     name: &'static str,
-    batch_size: usize,
-    flush_interval: Duration,
+    max_batch_size: usize,
+    max_batch_delay: Duration,
     observability: AsyncWriterObservability,
 }
 
@@ -227,21 +303,23 @@ impl<T: Send + 'static> DurableWriterWorker<T> {
             rx,
             flush,
             name,
-            batch_size,
-            flush_interval,
+            max_batch_size,
+            max_batch_delay,
             observability,
         } = self;
-        let mut buffer = Vec::with_capacity(batch_size);
-        let mut interval = tokio::time::interval(flush_interval);
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut buffer = Vec::with_capacity(max_batch_size);
         loop {
-            tokio::select! {
+            let first = tokio::select! {
                 biased;
                 () = shutdown.cancelled() => {
-                    while let Ok(item) = rx.try_recv() {
-                        buffer.push(item);
-                    }
-                    Self::flush_batch(&flush, name, &observability, &mut buffer).await;
+                    Self::drain_and_flush(
+                        &rx,
+                        &flush,
+                        name,
+                        &observability,
+                        max_batch_size,
+                        &mut buffer,
+                    ).await;
                     return;
                 }
                 item = rx.recv_async() => {
@@ -249,18 +327,64 @@ impl<T: Send + 'static> DurableWriterWorker<T> {
                         Self::flush_batch(&flush, name, &observability, &mut buffer).await;
                         return;
                     };
-                    buffer.push(item);
-                    if buffer.len() >= batch_size {
-                        Self::flush_batch(&flush, name, &observability, &mut buffer).await;
-                    }
+                    item
                 }
-                _ = interval.tick() => {
-                    Self::flush_batch(&flush, name, &observability, &mut buffer).await;
+            };
+            buffer.push(first);
+
+            let deadline = tokio::time::sleep(max_batch_delay);
+            tokio::pin!(deadline);
+            let mut disconnected = false;
+            while buffer.len() < max_batch_size {
+                tokio::select! {
+                    biased;
+                    () = shutdown.cancelled() => {
+                        Self::drain_and_flush(
+                            &rx,
+                            &flush,
+                            name,
+                            &observability,
+                            max_batch_size,
+                            &mut buffer,
+                        ).await;
+                        return;
+                    }
+                    item = rx.recv_async() => if let Ok(item) = item {
+                        buffer.push(item);
+                    } else {
+                        disconnected = true;
+                        break;
+                    },
+                    () = &mut deadline => break,
                 }
             }
+            Self::flush_batch(&flush, name, &observability, &mut buffer).await;
             if let Some(gauge) = &observability.queue_depth {
                 gauge.set(i64::try_from(rx.len()).unwrap_or(i64::MAX));
             }
+            if disconnected {
+                return;
+            }
+        }
+    }
+
+    async fn drain_and_flush(
+        rx: &flume::Receiver<DurableQueued<T>>,
+        flush: &FlushFn<T>,
+        name: &'static str,
+        observability: &AsyncWriterObservability,
+        max_batch_size: usize,
+        buffer: &mut Vec<DurableQueued<T>>,
+    ) {
+        while let Ok(item) = rx.try_recv() {
+            buffer.push(item);
+            if buffer.len() >= max_batch_size {
+                Self::flush_batch(flush, name, observability, buffer).await;
+            }
+        }
+        Self::flush_batch(flush, name, observability, buffer).await;
+        if let Some(gauge) = &observability.queue_depth {
+            gauge.set(i64::try_from(rx.len()).unwrap_or(i64::MAX));
         }
     }
 
@@ -493,5 +617,104 @@ impl<T: Send + 'static> AsyncWriterWorker<T> {
                 warn!(writer = name, %error, "batch flush failed; batch dropped");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AsyncWriterObservability, DurableWriteError, DurableWriter, DurableWriterConfig};
+    use parking_lot::Mutex;
+    use std::{sync::Arc, time::Duration};
+    use tokio_util::sync::CancellationToken;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn durable_writer_acknowledges_within_its_low_latency_batch_contract() {
+        let persisted = Arc::new(Mutex::new(Vec::<u32>::new()));
+        let observed = Arc::clone(&persisted);
+        let (writer, worker) = DurableWriter::new(
+            DurableWriterConfig::new("durable-test")
+                .capacity(8)
+                .max_batch_size(8)
+                .max_batch_delay(Duration::from_millis(10)),
+            move |rows| {
+                let observed = Arc::clone(&observed);
+                Box::pin(async move {
+                    observed.lock().extend(rows);
+                    Ok(())
+                })
+            },
+            AsyncWriterObservability::default(),
+        );
+        let shutdown = CancellationToken::new();
+        let worker_task = tokio::spawn(worker.run(shutdown.clone()));
+        let writer = Arc::new(writer);
+
+        let result = tokio::task::spawn_blocking({
+            let writer = Arc::clone(&writer);
+            move || writer.write_timeout(7, Duration::from_millis(250))
+        })
+        .await
+        .expect("blocking producer task");
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(*persisted.lock(), vec![7]);
+        shutdown.cancel();
+        worker_task.await.expect("durable worker shutdown");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn async_durable_producers_fill_one_acknowledged_batch() {
+        let persisted = Arc::new(Mutex::new(Vec::<u32>::new()));
+        let observed = Arc::clone(&persisted);
+        let (writer, worker) = DurableWriter::new(
+            DurableWriterConfig::new("async-durable-test")
+                .capacity(8)
+                .max_batch_size(8)
+                .max_batch_delay(Duration::from_millis(50)),
+            move |rows| {
+                let observed = Arc::clone(&observed);
+                Box::pin(async move {
+                    observed.lock().extend(rows);
+                    Ok(())
+                })
+            },
+            AsyncWriterObservability::default(),
+        );
+        let shutdown = CancellationToken::new();
+        let worker_task = tokio::spawn(worker.run(shutdown.clone()));
+        let writer = Arc::new(writer);
+        let mut producers = tokio::task::JoinSet::new();
+        for value in 0..8 {
+            let writer = Arc::clone(&writer);
+            producers.spawn(async move {
+                writer
+                    .write_async_timeout(value, Duration::from_millis(250))
+                    .await
+            });
+        }
+        while let Some(result) = producers.join_next().await {
+            assert_eq!(result.expect("async producer task"), Ok(()));
+        }
+
+        let mut values = persisted.lock().clone();
+        values.sort_unstable();
+        assert_eq!(values, (0..8).collect::<Vec<_>>());
+        shutdown.cancel();
+        worker_task.await.expect("durable worker shutdown");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn durable_writer_reports_closed_worker_without_false_acknowledgement() {
+        let (writer, worker) = DurableWriter::new(
+            DurableWriterConfig::new("closed-test"),
+            |_rows: Vec<u32>| Box::pin(async { Ok(()) }),
+            AsyncWriterObservability::default(),
+        );
+        drop(worker);
+
+        assert_eq!(
+            writer.write_timeout(1, Duration::from_millis(10)),
+            Err(DurableWriteError::QueueClosed)
+        );
     }
 }

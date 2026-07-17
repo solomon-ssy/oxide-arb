@@ -19,6 +19,7 @@ pub mod extractors;
 pub mod jwt;
 pub mod middleware;
 pub mod readiness;
+mod request_security;
 mod request_tracing;
 pub mod response;
 pub mod routes;

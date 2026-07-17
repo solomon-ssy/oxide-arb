@@ -26,7 +26,7 @@ use quant_pivot_models::{
 use sea_orm::{
     ActiveModelTrait, ActiveValue, ColumnTrait, Condition, DatabaseConnection, EntityTrait,
     IntoActiveModel, QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
-    sea_query::{Expr, LockBehavior, LockType, OnConflict},
+    sea_query::{Expr, LockBehavior, LockType},
 };
 use uuid::Uuid;
 
@@ -70,12 +70,7 @@ impl EntryConditionRepository for PgEntryConditionRepository {
         }
         artifact.payload_json = canonical;
         quant_entry_condition_artifact::Entity::insert(artifact.into_active_model())
-            .on_conflict(
-                OnConflict::column(quant_entry_condition_artifact::Column::ContentHash)
-                    .do_nothing()
-                    .to_owned(),
-            )
-            .do_nothing()
+            .on_conflict_do_nothing_on([quant_entry_condition_artifact::Column::ContentHash])
             .exec(&self.db)
             .await
             .map_err(StorageError::from)?;
@@ -190,19 +185,28 @@ impl EntryConditionRepository for PgEntryConditionRepository {
         .one(&self.db)
         .await
         .map_err(StorageError::from)
-        .map(|row| {
-            row.map(|row| CryptoPriceProjectionInfo {
-                source_id: row.source_id,
-                instrument_key: row.instrument_key,
-                previous_price: row.previous_price,
-                current_price: row.current_price,
-                source_sequence: row.source_sequence,
-                event_time: row.event_time,
-                available_at: row.available_at,
-                report_hash: row.report_hash,
-                gap_generation: row.gap_generation,
-                source_healthy: row.source_healthy,
+        .and_then(|row| {
+            row.map(|row| {
+                let source_sequence = u64::try_from(row.source_sequence).map_err(|error| {
+                    invariant(
+                        "quant_crypto_price_projection",
+                        format!("source_sequence: {error}"),
+                    )
+                })?;
+                Ok(CryptoPriceProjectionInfo {
+                    source_id: row.source_id,
+                    instrument_key: row.instrument_key,
+                    previous_price: row.previous_price,
+                    current_price: row.current_price,
+                    source_sequence,
+                    event_time: row.event_time,
+                    available_at: row.available_at,
+                    report_hash: row.report_hash,
+                    gap_generation: row.gap_generation,
+                    source_healthy: row.source_healthy,
+                })
             })
+            .transpose()
         })
     }
 

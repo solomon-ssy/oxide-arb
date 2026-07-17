@@ -3,6 +3,7 @@
 use crate::{
     postgres::{
         governance::runtime_config::{acquire_activation_lock, do_load_current},
+        primitives,
         query::paginate_mapped,
     },
     traits::ReportRunRepository,
@@ -28,10 +29,10 @@ use quant_pivot_models::{
     types::{RecommendationReportId, ReportRunId, ReportScheduleGapId, RuntimeConfigVersionId},
 };
 use sea_orm::{
-    ActiveModelTrait, ActiveValue, ColumnTrait, ConnectionTrait, DatabaseBackend,
-    DatabaseConnection, DatabaseTransaction, EntityTrait, IntoActiveModel, PaginatorTrait,
-    QueryFilter, QueryOrder, QuerySelect, Statement, TransactionTrait,
-    sea_query::{LockBehavior, LockType},
+    ActiveModelTrait, ActiveValue, ColumnTrait, DatabaseConnection, DatabaseTransaction,
+    EntityTrait, ExprTrait, IntoActiveModel, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect,
+    TransactionTrait,
+    sea_query::{Alias, Expr, LockBehavior, LockType},
 };
 use std::collections::{BTreeMap, HashSet};
 use uuid::Uuid;
@@ -51,34 +52,6 @@ impl PgReportRunRepository {
     pub const fn new(db: DatabaseConnection) -> Self {
         Self { db }
     }
-}
-
-async fn advisory_lock(txn: &DatabaseTransaction, key: i64) -> Result<(), StorageError> {
-    txn.execute(Statement::from_sql_and_values(
-        DatabaseBackend::Postgres,
-        "SELECT pg_advisory_xact_lock($1)",
-        [key.into()],
-    ))
-    .await
-    .map_err(StorageError::from)?;
-    Ok(())
-}
-
-async fn database_now(db: &impl ConnectionTrait) -> Result<DateTime<Utc>, StorageError> {
-    let row = db
-        .query_one(Statement::from_string(
-            DatabaseBackend::Postgres,
-            "SELECT statement_timestamp() AS now".to_owned(),
-        ))
-        .await
-        .map_err(StorageError::from)?
-        .ok_or_else(|| {
-            StorageError::invariant_violation(
-                Some(entity::QUANT_REPORT_RUN),
-                "database did not return statement_timestamp",
-            )
-        })?;
-    row.try_get("", "now").map_err(StorageError::from)
 }
 
 fn checked_duration(field: &'static str, secs: u64) -> Result<Duration, StorageError> {
@@ -291,7 +264,7 @@ async fn insert_schedule_gap(
 #[async_trait::async_trait]
 impl ReportRunRepository for PgReportRunRepository {
     async fn database_time(&self) -> Result<DateTime<Utc>, StorageError> {
-        database_now(&self.db).await
+        primitives::statement_timestamp(&self.db).await
     }
 
     async fn reconcile_schedules(
@@ -314,9 +287,9 @@ impl ReportRunRepository for PgReportRunRepository {
             }
         }
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        advisory_lock(&txn, REPORT_SCHEDULE_LOCK_KEY).await?;
+        primitives::advisory_xact_lock(&txn, REPORT_SCHEDULE_LOCK_KEY).await?;
         verify_active_config(&txn, runtime_config_version_id).await?;
-        let now = database_now(&txn).await?;
+        let now = primitives::statement_timestamp(&txn).await?;
         let existing = quant_report_schedule_state::Entity::find()
             .order_by_asc(quant_report_schedule_state::Column::ScheduleId)
             .lock_exclusive()
@@ -452,9 +425,9 @@ impl ReportRunRepository for PgReportRunRepository {
             ));
         }
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        advisory_lock(&txn, REPORT_SCHEDULE_LOCK_KEY).await?;
+        primitives::advisory_xact_lock(&txn, REPORT_SCHEDULE_LOCK_KEY).await?;
         verify_active_config(&txn, &command.runtime_config_version_id).await?;
-        let now = database_now(&txn).await?;
+        let now = primitives::statement_timestamp(&txn).await?;
         let state = quant_report_schedule_state::Entity::find_by_id(command.schedule_id.clone())
             .lock_exclusive()
             .one(&txn)
@@ -583,7 +556,7 @@ impl ReportRunRepository for PgReportRunRepository {
 
     async fn schedule_health(&self) -> Result<ReportScheduleHealthInfo, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let observed_at = database_now(&txn).await?;
+        let observed_at = primitives::statement_timestamp(&txn).await?;
         let since = observed_at - Duration::hours(24);
         let active_run = quant_report_run::Entity::find()
             .filter(quant_report_run::Column::Status.eq(ReportRunStatus::Running))
@@ -611,12 +584,18 @@ impl ReportRunRepository for PgReportRunRepository {
             .count(&txn)
             .await
             .map_err(StorageError::from)?;
-        let missed_row = txn
-            .query_one(Statement::from_sql_and_values(
-                DatabaseBackend::Postgres,
-                "SELECT COALESCE(SUM(missed_count), 0)::BIGINT AS missed_count FROM quant_report_schedule_gap WHERE detected_at >= $1",
-                [since.into()],
-            ))
+        let missed_occurrence_count_24h = quant_report_schedule_gap::Entity::find()
+            .filter(quant_report_schedule_gap::Column::DetectedAt.gte(since))
+            .select_only()
+            .column_as(
+                Expr::col(quant_report_schedule_gap::Column::MissedCount)
+                    .sum()
+                    .cast_as(Alias::new("bigint"))
+                    .if_null(0_i64),
+                "missed_count",
+            )
+            .into_tuple::<i64>()
+            .one(&txn)
             .await
             .map_err(StorageError::from)?
             .ok_or_else(|| {
@@ -625,9 +604,6 @@ impl ReportRunRepository for PgReportRunRepository {
                     "schedule health aggregate returned no row",
                 )
             })?;
-        let missed_occurrence_count_24h = missed_row
-            .try_get("", "missed_count")
-            .map_err(StorageError::from)?;
         let prepared_report_count = quant_recommendation_report::Entity::find()
             .filter(
                 quant_recommendation_report::Column::Status
@@ -687,7 +663,7 @@ impl ReportRunRepository for PgReportRunRepository {
         }
         let ttl = checked_duration("ad_hoc_ttl_secs", ttl_secs)?;
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        advisory_lock(&txn, REPORT_RUN_QUEUE_LOCK_KEY).await?;
+        primitives::advisory_xact_lock(&txn, REPORT_RUN_QUEUE_LOCK_KEY).await?;
         if let Some(existing) = quant_report_run::Entity::find()
             .filter(quant_report_run::Column::TriggerKey.eq(run.trigger_key.clone()))
             .one(&txn)
@@ -697,7 +673,7 @@ impl ReportRunRepository for PgReportRunRepository {
             txn.commit().await.map_err(StorageError::from)?;
             return Ok(EnqueueReportRunOutcome::Existing(existing.into()));
         }
-        let now = database_now(&txn).await?;
+        let now = primitives::statement_timestamp(&txn).await?;
         expire_stale_ad_hoc(&txn, now, ttl).await?;
         let queued = quant_report_run::Entity::find()
             .filter(quant_report_run::Column::Status.eq(ReportRunStatus::Queued))
@@ -801,9 +777,9 @@ impl ReportRunRepository for PgReportRunRepository {
             ));
         }
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        advisory_lock(&txn, REPORT_RUN_CLAIM_LOCK_KEY).await?;
+        primitives::advisory_xact_lock(&txn, REPORT_RUN_CLAIM_LOCK_KEY).await?;
         verify_active_config(&txn, &config.runtime_config_version_id).await?;
-        let now = database_now(&txn).await?;
+        let now = primitives::statement_timestamp(&txn).await?;
         expire_stale_ad_hoc(&txn, now, ttl).await?;
         let running = quant_report_run::Entity::find()
             .filter(quant_report_run::Column::Status.eq(ReportRunStatus::Running))
@@ -872,7 +848,7 @@ impl ReportRunRepository for PgReportRunRepository {
     ) -> Result<ReportRunInfo, StorageError> {
         let lease = checked_duration("lease_secs", lease_secs)?;
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let now = database_now(&txn).await?;
+        let now = primitives::statement_timestamp(&txn).await?;
         let row = quant_report_run::Entity::find_by_id(run_id.clone())
             .lock_exclusive()
             .one(&txn)
@@ -913,7 +889,7 @@ impl ReportRunRepository for PgReportRunRepository {
             ));
         }
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let now = database_now(&txn).await?;
+        let now = primitives::statement_timestamp(&txn).await?;
         let row = quant_report_run::Entity::find_by_id(run_id.clone())
             .lock_exclusive()
             .one(&txn)
@@ -948,7 +924,7 @@ impl ReportRunRepository for PgReportRunRepository {
 
     async fn abandon_expired_runs(&self) -> Result<Vec<ReportRunInfo>, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let now = database_now(&txn).await?;
+        let now = primitives::statement_timestamp(&txn).await?;
         let rows = quant_report_run::Entity::find()
             .filter(quant_report_run::Column::Status.eq(ReportRunStatus::Running))
             .filter(quant_report_run::Column::LeaseExpiresAt.lte(now))

@@ -29,9 +29,12 @@ pub enum MarketError {
     #[error("Gamma sync returned zero active markets — cannot start without market catalog")]
     EmptyCatalog,
 
-    /// A market catalog version cannot be committed without the event version
+    #[error("Gamma catalog normalization rejected {count} structurally invalid input rows")]
+    CatalogInputRejected { count: usize },
+
+    /// A market catalog change cannot be committed without the event object
     /// that freezes membership and event-level semantics for the same batch.
-    #[error("market {market_id} references event {event_id} without a catalog version")]
+    #[error("market {market_id} references event {event_id} without a catalog object")]
     MissingEventVersion { market_id: String, event_id: String },
 
     #[error("duplicate {entity} `{id}` in one Gamma catalog batch")]

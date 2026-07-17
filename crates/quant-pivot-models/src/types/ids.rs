@@ -137,13 +137,43 @@ pub struct MarketSelectionId(Arc<Uuid>);
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CatalogSyncBatchId(Arc<Uuid>);
 
-/// Immutable event-catalog version observed in one sync batch.
+/// Content-addressed normalized Gamma event object.
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct EventCatalogVersionId(Arc<Uuid>);
+pub struct CatalogEventObjectId(Arc<Uuid>);
 
-/// Immutable market-catalog version observed in one sync batch.
+impl CatalogEventObjectId {
+    /// Stable projection of a catalog event content identifier.
+    #[must_use]
+    pub fn from_content_hash(content_hash: &ContentHash) -> Self {
+        const NAMESPACE: Uuid = Uuid::from_u128(0x7c48_b3cf_f8bb_4e06_b099_2db7_4d1f_4ec1);
+        Self::new(Uuid::new_v5(&NAMESPACE, content_hash.as_str().as_bytes()))
+    }
+}
+
+/// One append-only event change observed in a committed sync batch.
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct MarketCatalogVersionId(Arc<Uuid>);
+pub struct CatalogEventChangeId(Arc<Uuid>);
+
+/// Content-addressed normalized Gamma market object.
+#[derive(UuidId, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CatalogMarketObjectId(Arc<Uuid>);
+
+impl CatalogMarketObjectId {
+    /// Stable projection of a catalog market content identifier.
+    #[must_use]
+    pub fn from_content_hash(content_hash: &ContentHash) -> Self {
+        const NAMESPACE: Uuid = Uuid::from_u128(0xb7dd_4b1e_f861_4b4f_a787_7c54_b1da_1690);
+        Self::new(Uuid::new_v5(&NAMESPACE, content_hash.as_str().as_bytes()))
+    }
+}
+
+/// One append-only market change observed in a committed sync batch.
+#[derive(UuidId, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CatalogMarketChangeId(Arc<Uuid>);
+
+/// One typed catalog input rejection attached to a failed sync attempt.
+#[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CatalogSyncRejectionId(Arc<Uuid>);
 
 /// Append-only point-in-time CLOB market-info observation.
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -422,9 +452,25 @@ pub struct RuntimeConfigVersionId(Arc<Uuid>);
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RuntimeConfigActivationId(Arc<Uuid>);
 
+/// Append-only runtime-config approval decision identifier.
+#[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RuntimeConfigApprovalId(Arc<Uuid>);
+
 /// Append-only operation-log row identifier.
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AuditEventId(Arc<Uuid>);
+
+/// Append-only bootstrap lifecycle transition identifier.
+#[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct BootstrapTransitionId(Arc<Uuid>);
+
+/// Frozen parity subject identifier.
+#[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FeatureParitySubjectId(Arc<Uuid>);
+
+/// Frozen parity candidate identifier.
+#[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FeatureParityCandidateId(Arc<Uuid>);
 
 // ── RBAC identifiers (web layer) ─────────────────────────────────────────
 

@@ -6,11 +6,11 @@ use crate::{
     types::{AuditEventId, ModelGovernanceAuditId, ModelVersionId, TrainingDatasetId},
 };
 use chrono::{DateTime, Utc};
-use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
 use serde::{Deserialize, Serialize};
 
 /// One persisted model-governance audit row.
-#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
+#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
 #[sea_orm(entity = "crate::entities::quant_model_governance_audit::Entity")]
 pub struct ModelGovernanceAuditInfo {
     pub audit_id: ModelGovernanceAuditId,

@@ -299,7 +299,9 @@ fn parse_threshold_question(metadata: &LinkageSourceMetadata) -> Option<Extracte
                 above.end(),
             ));
             PriceComparator::Above
-        } else if let Some(below) = BELOW_PHRASE.find(question) {
+        } else {
+            // A dollar amount with no recognizable direction is ambiguous.
+            let below = BELOW_PHRASE.find(question)?;
             spans.push(question_span(
                 "comparator",
                 question,
@@ -307,10 +309,6 @@ fn parse_threshold_question(metadata: &LinkageSourceMetadata) -> Option<Extracte
                 below.end(),
             ));
             PriceComparator::Below
-        } else {
-            // A dollar amount with no recognizable direction is ambiguous —
-            // fail through, never guess a side.
-            return None;
         };
         (comparator, Some(Usd::new(strike)))
     };

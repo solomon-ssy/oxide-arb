@@ -12,7 +12,7 @@ use crate::{
         market_filter::MarketFilter,
         market_registry::MarketRegistry,
     },
-    observability::{book_fact_writer::BookFactWriter, metrics_hub::MetricsHub},
+    observability::metrics_hub::MetricsHub,
     pit::platform::ch_historical::DurablePitSource,
     service::{
         catalog_readiness::CatalogReadiness,
@@ -32,7 +32,7 @@ use quant_pivot_repository::{
     cached::{CachedEventRepository, CachedMarketRepository},
     postgres::{PgEventRepository, PgMarketRepository},
     traits::{
-        CatalogVersionRepository, ClobMarketInfoRepository, EventRepository,
+        CatalogLedgerRepository, ClobMarketInfoRepository, EventRepository,
         MarketLinkageRepository, MarketRepository,
     },
 };
@@ -65,7 +65,7 @@ pub struct DataBundle {
     pub catalog: Arc<CatalogReadiness>,
     pub market_repo: Arc<dyn MarketRepository>,
     /// Immutable catalog ledger used by every historical/replay resolver.
-    pub catalog_version_repo: Arc<dyn CatalogVersionRepository>,
+    pub catalog_ledger_repo: Arc<dyn CatalogLedgerRepository>,
     pub gamma_client: Arc<GammaClient>,
     /// Token freshness snapshots and fact-lag aggregation for governance and web.
     pub data_quality: Arc<BookDataQualityService>,
@@ -107,8 +107,8 @@ impl DataBundle {
             Arc::clone(&deps.infra.cache),
         ));
         let event_repo: Arc<dyn EventRepository> = cached_event_repo(deps);
-        let catalog_version_repo: Arc<dyn CatalogVersionRepository> =
-            Arc::clone(&deps.infra.repos.catalog_version) as Arc<dyn CatalogVersionRepository>;
+        let catalog_ledger_repo: Arc<dyn CatalogLedgerRepository> =
+            Arc::clone(&deps.infra.repos.catalog_ledger) as Arc<dyn CatalogLedgerRepository>;
         let linkage_resolver = Arc::new(LinkageResolverService::new(
             LinkageResolverDeps {
                 linkage_repo: Arc::clone(&deps.infra.repos.market_linkage)
@@ -129,7 +129,7 @@ impl DataBundle {
             gamma_client: &gamma_client,
             ws_manager: &ws_manager,
             market_repo: &market_repo,
-            catalog_version_repo: &catalog_version_repo,
+            catalog_ledger_repo: &catalog_ledger_repo,
             market_registry: &market_registry,
             market_cache: &market_cache,
             market_filter: &market_filter,
@@ -146,18 +146,16 @@ impl DataBundle {
         ));
         let pit_source: Arc<dyn PointInTimeSnapshotSource> = Arc::new(DurablePitSource::new(
             Arc::clone(&deps.infra.quant_fact_read),
-            Arc::clone(&catalog_version_repo),
+            Arc::clone(&catalog_ledger_repo),
             Arc::clone(&deps.infra.repos.clob_market_info) as Arc<dyn ClobMarketInfoRepository>,
         ));
-        let data_pipeline = build_data_pipeline(
-            &book_store,
-            &market_registry,
-            &ws_manager,
-            deps.metrics,
-            deps.shutdown,
-            status_nudge.clone(),
-            Arc::clone(&deps.infra.book_fact_writer),
-        );
+        let data_pipeline = build_data_pipeline(DataPipelineAssembly {
+            deps,
+            book_store: &book_store,
+            market_registry: &market_registry,
+            ws_manager: &ws_manager,
+            status_nudge: status_nudge.clone(),
+        });
 
         Self {
             book_store,
@@ -171,7 +169,7 @@ impl DataBundle {
             ws_subscription,
             catalog,
             market_repo,
-            catalog_version_repo,
+            catalog_ledger_repo,
             gamma_client,
             data_quality,
             pit_source,
@@ -192,7 +190,7 @@ struct GammaServiceAssembly<'a> {
     gamma_client: &'a Arc<GammaClient>,
     ws_manager: &'a Arc<ClobWsManager>,
     market_repo: &'a Arc<dyn MarketRepository>,
-    catalog_version_repo: &'a Arc<dyn CatalogVersionRepository>,
+    catalog_ledger_repo: &'a Arc<dyn CatalogLedgerRepository>,
     market_registry: &'a Arc<MarketRegistry>,
     market_cache: &'a Arc<MarketCache>,
     market_filter: &'a Arc<MarketFilter>,
@@ -209,7 +207,7 @@ fn assemble_gamma_service(
         gamma_client,
         ws_manager,
         market_repo,
-        catalog_version_repo,
+        catalog_ledger_repo,
         market_registry,
         market_cache,
         market_filter,
@@ -236,7 +234,7 @@ fn assemble_gamma_service(
         market_cache: Arc::clone(market_cache),
         market_filter: Arc::clone(market_filter),
         market_repo: Arc::clone(market_repo),
-        catalog_version_repo: Arc::clone(catalog_version_repo),
+        catalog_ledger_repo: Arc::clone(catalog_ledger_repo),
         cache: Arc::clone(&deps.infra.cache),
         metrics: Arc::clone(deps.metrics),
         catalog: Arc::clone(catalog),
@@ -248,32 +246,44 @@ fn assemble_gamma_service(
             .market_data
             .websocket
             .engine_subscription_window_hours,
-        full_sync_interval_secs: deps.deploy.market_data.gamma.full_sync_interval_secs,
         linkage_resolver: Some(Arc::clone(linkage_resolver)),
     }));
     (gamma_service, ws_subscription)
 }
 
-fn build_data_pipeline(
-    book_store: &Arc<BookStore>,
-    market_registry: &Arc<MarketRegistry>,
-    ws_manager: &Arc<ClobWsManager>,
-    metrics: &Arc<MetricsHub>,
-    shutdown: &CancellationToken,
+struct DataPipelineAssembly<'a> {
+    deps: &'a DataBundleDeps<'a>,
+    book_store: &'a Arc<BookStore>,
+    market_registry: &'a Arc<MarketRegistry>,
+    ws_manager: &'a Arc<ClobWsManager>,
     status_nudge: SystemStatusNudge,
-    book_fact_writer: Arc<BookFactWriter>,
-) -> Arc<DataPipeline> {
+}
+
+fn build_data_pipeline(inputs: DataPipelineAssembly<'_>) -> Arc<DataPipeline> {
+    let DataPipelineAssembly {
+        deps,
+        book_store,
+        market_registry,
+        ws_manager,
+        status_nudge,
+    } = inputs;
     let event_source: Arc<dyn PipelineEventSource> =
         Arc::clone(ws_manager) as Arc<dyn PipelineEventSource>;
+    let (book_shard_count, book_channel_capacity) = data_pipeline::book_apply_topology(
+        deps.deploy
+            .market_data
+            .websocket
+            .engine_max_subscription_tokens,
+    );
     Arc::new(DataPipeline::new(DataPipelineDeps {
         event_source,
         book_store: Arc::clone(book_store),
         market_registry: Arc::clone(market_registry),
-        metrics: Arc::clone(metrics),
-        book_fact_writer,
-        book_shard_count: data_pipeline::DEFAULT_BOOK_SHARD_COUNT,
-        book_channel_capacity: data_pipeline::DEFAULT_BOOK_CHANNEL_CAPACITY,
-        shutdown: shutdown.clone(),
+        metrics: Arc::clone(deps.metrics),
+        book_fact_writer: Arc::clone(&deps.infra.book_fact_writer),
+        book_shard_count,
+        book_channel_capacity,
+        shutdown: deps.shutdown.clone(),
         status_nudge,
     }))
 }

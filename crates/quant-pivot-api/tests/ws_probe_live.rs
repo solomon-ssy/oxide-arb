@@ -82,7 +82,7 @@ async fn run_sdk_multiplex_probe(
     let client =
         SdkWsClient::new(&ws_url, SdkWsConfig::default()).expect("SDK WS client should construct");
 
-    // Production order: resolutions first (enables custom_features / best_bid_ask).
+    // Production order: resolutions first so the SDK enables custom features.
     let mut resolution_stream = Box::pin(
         client
             .subscribe_market_resolutions(asset_ids.clone())
@@ -108,12 +108,6 @@ async fn run_sdk_multiplex_probe(
             .subscribe_tick_size_change(asset_ids.clone())
             .expect("subscribe_tick_size_change"),
     );
-    let mut bbo_stream = Box::pin(
-        client
-            .subscribe_best_bid_ask(asset_ids)
-            .expect("subscribe_best_bid_ask"),
-    );
-
     let started = Instant::now();
     let deadline = started + timeout;
     let mut counts: HashMap<&'static str, u64> = HashMap::new();
@@ -142,9 +136,6 @@ async fn run_sdk_multiplex_probe(
             }
             item = tick_size_stream.next() => {
                 tally_sdk_item("tick_size", item, &mut counts, &mut stream_errors, &mut stream_closed);
-            }
-            item = bbo_stream.next() => {
-                tally_sdk_item("bbo", item, &mut counts, &mut stream_errors, &mut stream_closed);
             }
         }
     }
@@ -326,9 +317,6 @@ async fn probe_manager_single_token() {
                 }
                 PipelineEvent::PriceDelta(cmd) if cmd.asset_id == token => {
                     *counts.entry("price_delta").or_insert(0) += 1;
-                }
-                PipelineEvent::BestBidAsk { asset_id, .. } if *asset_id == token => {
-                    *counts.entry("bbo").or_insert(0) += 1;
                 }
                 PipelineEvent::ShardStatus { .. } => {
                     *counts.entry("shard_status").or_insert(0) += 1;

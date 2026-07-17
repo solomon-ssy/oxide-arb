@@ -11,6 +11,7 @@ use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use sea_orm::entity::prelude::*;
 
+#[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "quant_settlement_redeem")]
 pub struct Model {
@@ -35,30 +36,16 @@ pub struct Model {
     pub failed_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
-}
 
-#[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-pub enum Relation {
-    #[sea_orm(has_many = "super::quant_settlement_redeem_lot::Entity")]
-    RedeemLot,
+    #[sea_orm(has_many, relation_enum = "RedeemLot")]
+    pub redeem_lot: HasMany<super::quant_settlement_redeem_lot::Entity>,
     #[sea_orm(
-        belongs_to = "super::market::Entity",
-        from = "Column::MarketId",
-        to = "super::market::Column::MarketId"
+        belongs_to,
+        relation_enum = "Market",
+        from = "market_id",
+        to = "market_id"
     )]
-    Market,
-}
-
-impl Related<super::quant_settlement_redeem_lot::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::RedeemLot.def()
-    }
-}
-
-impl Related<super::market::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::Market.def()
-    }
+    pub market: BelongsTo<super::market::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

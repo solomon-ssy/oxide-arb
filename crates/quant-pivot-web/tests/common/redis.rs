@@ -12,7 +12,7 @@ pub fn test_redis_config(port: u16) -> RedisConfig {
         port,
         pool_size: 16,
         timeout_ms: 5_000,
-        key_prefix: "oarb:test:".to_owned(),
+        key_prefix: "qp:test:".to_owned(),
         ..RedisConfig::default()
     }
 }

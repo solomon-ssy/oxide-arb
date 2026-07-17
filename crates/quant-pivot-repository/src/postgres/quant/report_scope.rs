@@ -1,8 +1,9 @@
 //! Shared serialization lock for report publication and entry submission.
 
+use crate::postgres::primitives;
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::enums::quant::ReportKind;
-use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
+use sea_orm::ConnectionTrait;
 
 /// Serialize every authority-changing mutation for one report scope.
 ///
@@ -15,12 +16,5 @@ pub(super) async fn acquire_report_scope_lock(
     kind: ReportKind,
 ) -> Result<(), StorageError> {
     let scope = format!("{profile_id}:{}", kind.as_str());
-    db.execute(Statement::from_sql_and_values(
-        DatabaseBackend::Postgres,
-        "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
-        [scope.into()],
-    ))
-    .await
-    .map_err(StorageError::from)?;
-    Ok(())
+    primitives::advisory_text_xact_lock(db, &scope, 0).await
 }

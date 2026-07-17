@@ -148,18 +148,16 @@ impl DefaultModePreflight {
     }
 
     fn check_jwt(&self, target: QuantRuntimeMode) -> PreflightCheck {
-        let weak = self.deps.deploy.web.jwt_secret_is_weak();
-        let detail = if weak {
-            "web.jwt.secret is empty or the insecure placeholder".to_owned()
+        let configured = self.deps.deploy.web.jwt_keyring_is_configured();
+        let detail = if configured {
+            "web.jwt Ed25519 signer and public keyring are configured".to_owned()
         } else {
-            "web.jwt.secret is strong".to_owned()
+            "web.jwt Ed25519 signer or public keyring is incomplete".to_owned()
         };
-        // Strong JWT is mandatory before unattended execution; for semi_auto it is
-        // an informational warning (mirrors `validate_for_quant_mode`).
         if target == QuantRuntimeMode::AutoExecution {
-            PreflightCheck::hard("jwt_secret_strong", !weak, detail)
+            PreflightCheck::hard("jwt_keyring_configured", configured, detail)
         } else {
-            PreflightCheck::soft("jwt_secret_strong", !weak, detail)
+            PreflightCheck::soft("jwt_keyring_configured", configured, detail)
         }
     }
 

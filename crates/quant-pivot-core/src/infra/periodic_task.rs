@@ -28,11 +28,13 @@ impl PeriodicTask {
         Fut: Future<Output = Result<(), QuantError>>,
     {
         if !skip_first_tick {
-            if shutdown.is_cancelled() {
-                return Ok(());
-            }
-            if let Err(e) = task_fn().await {
-                tracing::warn!(task = name, error = %e, "periodic task iteration failed");
+            let result = tokio::select! {
+                biased;
+                () = shutdown.cancelled() => return Ok(()),
+                result = task_fn() => result,
+            };
+            if let Err(error) = result {
+                tracing::warn!(task = name, %error, "periodic task iteration failed");
             }
         }
 
@@ -45,13 +47,65 @@ impl PeriodicTask {
                     if jitter_pct > 0.0 {
                         let max_jitter = interval.mul_f64(jitter_pct);
                         let jitter_roll = rand::rng().random_range(0.0..1.0);
-                        tokio::time::sleep(max_jitter.mul_f64(jitter_roll)).await;
+                        tokio::select! {
+                            biased;
+                            () = shutdown.cancelled() => return Ok(()),
+                            () = tokio::time::sleep(max_jitter.mul_f64(jitter_roll)) => {}
+                        }
                     }
-                    if let Err(e) = task_fn().await {
-                        tracing::warn!(task = name, error = %e, "periodic task iteration failed");
+                    let result = tokio::select! {
+                        biased;
+                        () = shutdown.cancelled() => return Ok(()),
+                        result = task_fn() => result,
+                    };
+                    if let Err(error) = result {
+                        tracing::warn!(task = name, %error, "periodic task iteration failed");
                     }
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{future, sync::Arc, time::Duration};
+
+    use tokio::sync::Notify;
+    use tokio_util::sync::CancellationToken;
+
+    use super::PeriodicTask;
+
+    #[tokio::test]
+    async fn cancellation_interrupts_an_in_flight_iteration() {
+        let shutdown = CancellationToken::new();
+        let entered = Arc::new(Notify::new());
+        let task_entered = Arc::clone(&entered);
+        let task_shutdown = shutdown.clone();
+        let handle = tokio::spawn(async move {
+            PeriodicTask::run(
+                "cancellation-test",
+                || Duration::from_mins(1),
+                0.0,
+                false,
+                task_shutdown,
+                move || {
+                    let entered = Arc::clone(&task_entered);
+                    async move {
+                        entered.notify_one();
+                        future::pending().await
+                    }
+                },
+            )
+            .await
+        });
+
+        entered.notified().await;
+        shutdown.cancel();
+        let result = tokio::time::timeout(Duration::from_millis(100), handle)
+            .await
+            .expect("periodic task must honor cancellation")
+            .expect("periodic task join");
+        assert!(result.is_ok());
     }
 }

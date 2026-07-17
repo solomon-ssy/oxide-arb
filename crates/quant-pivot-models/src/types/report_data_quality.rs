@@ -5,7 +5,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     enums::quant::DataQualityStatus,
-    jsonb_active,
     types::{FeatureVectorId, MarketId, Probability, TokenId, report_payload::DataQualitySummary},
 };
 use rust_decimal::Decimal;
@@ -35,8 +34,6 @@ pub struct TokenDataQualityRecord {
 /// JSONB column wrapper for `quant_report_data_quality_snapshot.tokens_json`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
 pub struct ReportDataQualityTokens(pub Vec<TokenDataQualityRecord>);
-
-jsonb_active!(ReportDataQualityTokens);
 
 impl ReportDataQualityTokens {
     /// Aggregate token rows into the report-summary DQ block.

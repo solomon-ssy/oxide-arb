@@ -1502,8 +1502,13 @@ async fn serve_protected_ui_e2e() {
         .try_init();
     let mut env = harness::TestEnv::start_with_core_report_port().await;
     let books = Arc::new(BookStore::new(Arc::new(MetricsHub::new())));
-    let fixtures =
-        prepare_e2e_fixtures(&env.db, &books, &env.model_artifact_store, &env.quant_facts).await;
+    let fixtures = Box::pin(prepare_e2e_fixtures(
+        &env.db,
+        &books,
+        &env.model_artifact_store,
+        &env.quant_facts,
+    ))
+    .await;
     let mut runtime_config = RuntimeConfig::default();
     runtime_config.execution.semi_auto.canary.enabled = true;
     runtime_config.execution.semi_auto.canary.policy_artifact_id =

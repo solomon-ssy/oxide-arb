@@ -301,7 +301,7 @@ pub async fn block(
         .markets
         .update_status(
             &market_id,
-            MarketStatus::ManuallyBlocked.as_str(),
+            MarketStatus::ManuallyBlocked,
             before.outcome.as_deref(),
         )
         .await?;
@@ -356,7 +356,7 @@ pub async fn unblock(
         .markets
         .update_status(
             &market_id,
-            request.restore_status.as_str(),
+            request.restore_status,
             before.outcome.as_deref(),
         )
         .await?;

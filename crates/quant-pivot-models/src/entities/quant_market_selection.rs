@@ -6,6 +6,7 @@ use crate::types::{
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
+#[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "quant_market_selection")]
 pub struct Model {
@@ -18,18 +19,9 @@ pub struct Model {
     #[sea_orm(column_type = "JsonBinary")]
     pub exclusion_summary: SelectionExclusionSummary,
     pub created_at: DateTime<Utc>,
-}
 
-#[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-pub enum Relation {
-    #[sea_orm(has_many = "super::quant_market_selection_member::Entity")]
-    Member,
-}
-
-impl Related<super::quant_market_selection_member::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::Member.def()
-    }
+    #[sea_orm(has_many, relation_enum = "Member")]
+    pub member: HasMany<super::quant_market_selection_member::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

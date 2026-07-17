@@ -8,6 +8,7 @@ use crate::{
     types::{ContentHash, TradePolicyArtifactId, TradePolicyGovernanceAuditId},
 };
 
+#[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "quant_trade_policy_governance_audit")]
 pub struct Model {
@@ -23,8 +24,5 @@ pub struct Model {
     pub reason: String,
     pub created_at: DateTime<Utc>,
 }
-
-#[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-pub enum Relation {}
 
 impl ActiveModelBehavior for ActiveModel {}

@@ -32,6 +32,7 @@ use router::ShardRouter;
 use shard::ShardDeps;
 use std::{
     collections::HashSet,
+    slice,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -196,6 +197,7 @@ impl ClobWsManager {
                 sdk_max_backoff: max_backoff,
                 connect_limiter: Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTS)),
                 health: Arc::clone(&health),
+                token_freshness: Arc::clone(&token_freshness),
             },
         );
 
@@ -295,8 +297,13 @@ impl ClobWsManager {
 
     /// Fail closed when a stream/session boundary invalidates token continuity.
     pub fn invalidate_token(&self, token_id: &TokenId) {
-        self.token_freshness.invalidate_token(token_id);
-        self.router.restart_token(token_id);
+        self.invalidate_tokens(slice::from_ref(token_id));
+    }
+
+    /// Fail closed for a whole stream session and coalesce transport restarts by shard.
+    pub fn invalidate_tokens(&self, token_ids: &[TokenId]) {
+        self.token_freshness.invalidate_tokens(token_ids);
+        self.router.restart_tokens(token_ids);
     }
 
     /// Returns the number of active shards.

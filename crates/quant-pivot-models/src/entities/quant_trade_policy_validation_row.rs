@@ -5,6 +5,7 @@ use sea_orm::entity::prelude::*;
 
 use crate::types::{ContentHash, MarketId, TokenId, TradePolicyValidationRunId, TrainingExampleId};
 
+#[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "quant_trade_policy_validation_row")]
 pub struct Model {
@@ -27,8 +28,5 @@ pub struct Model {
     pub row_hash: ContentHash,
     pub created_at: DateTime<Utc>,
 }
-
-#[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-pub enum Relation {}
 
 impl ActiveModelBehavior for ActiveModel {}

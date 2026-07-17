@@ -8,6 +8,7 @@ use crate::traits::MarketRepository;
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{MarketInfo, MarketPageQuery, Paginated, UpsertMarket},
+    enums::market::MarketStatus,
     types::MarketId,
 };
 use quant_pivot_storage::cache::{CacheKey, CacheManager};
@@ -35,7 +36,6 @@ impl<R: MarketRepository> CachedMarketRepository<R> {
                 market_id: market_id.clone(),
             })
             .await;
-        self.cache.invalidate(&CacheKey::ActiveMarkets).await;
     }
 }
 
@@ -68,13 +68,11 @@ impl<R: MarketRepository> MarketRepository for CachedMarketRepository<R> {
 
     #[inline]
     async fn find_active(&self) -> Result<Arc<[MarketInfo]>, StorageError> {
-        let key = CacheKey::ActiveMarkets;
-        if let Some(cached) = self.cache.get_json::<Vec<MarketInfo>>(&key).await {
-            return Ok(cached.into());
-        }
-        let markets = self.inner.find_active().await?;
-        let _ = self.cache.set_json(&key, &markets.as_ref()).await;
-        Ok(markets)
+        // This projection is intentionally not cached as one value. A full
+        // Gamma catalog contains tens of thousands of rows, so serializing it
+        // into a single Redis/Moka entry creates a multi-megabyte hot key and
+        // makes freshness invalidation more expensive than the indexed query.
+        self.inner.find_active().await
     }
 
     #[inline]
@@ -97,16 +95,14 @@ impl<R: MarketRepository> MarketRepository for CachedMarketRepository<R> {
 
     #[inline]
     async fn upsert_batch(&self, dtos: Vec<UpsertMarket>) -> Result<u64, StorageError> {
-        let count = self.inner.upsert_batch(dtos).await?;
-        self.cache.invalidate(&CacheKey::ActiveMarkets).await;
-        Ok(count)
+        self.inner.upsert_batch(dtos).await
     }
 
     #[inline]
     async fn update_status(
         &self,
         id: &MarketId,
-        status: &str,
+        status: MarketStatus,
         outcome: Option<&str>,
     ) -> Result<(), StorageError> {
         self.inner.update_status(id, status, outcome).await?;

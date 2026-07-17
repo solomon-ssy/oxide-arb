@@ -8,6 +8,7 @@ use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use sea_orm::entity::prelude::*;
 
+#[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "quant_equity_snapshot")]
 pub struct Model {
@@ -25,30 +26,16 @@ pub struct Model {
     pub drawdown_pct: Decimal,
     pub account_snapshot_ref: Option<AccountSnapshotId>,
     pub created_at: DateTime<Utc>,
-}
 
-#[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-pub enum Relation {
     #[sea_orm(
-        belongs_to = "super::quant_account_snapshot::Entity",
-        from = "Column::AccountSnapshotRef",
-        to = "super::quant_account_snapshot::Column::AccountSnapshotId"
+        belongs_to,
+        relation_enum = "AccountSnapshot",
+        from = "account_snapshot_ref",
+        to = "account_snapshot_id"
     )]
-    AccountSnapshot,
-    #[sea_orm(has_many = "super::quant_recommendation_report::Entity")]
-    RecommendationReport,
-}
-
-impl Related<super::quant_account_snapshot::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::AccountSnapshot.def()
-    }
-}
-
-impl Related<super::quant_recommendation_report::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::RecommendationReport.def()
-    }
+    pub account_snapshot: BelongsTo<Option<super::quant_account_snapshot::Entity>>,
+    #[sea_orm(has_many, relation_enum = "RecommendationReport")]
+    pub recommendation_report: HasMany<super::quant_recommendation_report::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

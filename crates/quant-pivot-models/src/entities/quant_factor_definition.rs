@@ -11,6 +11,7 @@ use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 use uuid::Uuid;
 
+#[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "quant_factor_definition")]
 pub struct Model {
@@ -32,18 +33,9 @@ pub struct Model {
     pub created_by: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
-}
 
-#[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-pub enum Relation {
-    #[sea_orm(has_many = "super::quant_factor_value::Entity")]
-    FactorValue,
-}
-
-impl Related<super::quant_factor_value::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::FactorValue.def()
-    }
+    #[sea_orm(has_many, relation_enum = "FactorValue")]
+    pub factor_value: HasMany<super::quant_factor_value::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

@@ -13,9 +13,9 @@ use quant_pivot_models::{
         MarketResolutionRow, TradeTapeRow,
     },
     domain::{
-        CryptoPriceReport, DecisionBoundary, DecisionSource, DomainObservation,
-        EventCatalogVersionInfo, LinkageOutcome, MarketCatalogVersionInfo, MarketLinkage,
-        MarketSubject, WeatherForecastPoint, WeatherObservationFact,
+        CatalogEventChangeInfo, CatalogMarketChangeInfo, CryptoPriceReport, DecisionBoundary,
+        DecisionSource, DomainObservation, LinkageOutcome, MarketLinkage, MarketSubject,
+        WeatherForecastPoint, WeatherObservationFact,
     },
     types::{
         ClobMarketInfoVersion, DomainInstrumentKey, IcaoStation, MarketId,
@@ -87,8 +87,8 @@ impl ReplayPageRequest {
 pub struct ReplayPage {
     pub market_ids: Vec<MarketId>,
     pub token_ids: Vec<TokenId>,
-    pub catalog_markets: Vec<MarketCatalogVersionInfo>,
-    pub catalog_events: Vec<EventCatalogVersionInfo>,
+    pub catalog_markets: Vec<CatalogMarketChangeInfo>,
+    pub catalog_events: Vec<CatalogEventChangeInfo>,
     pub clob_market_info: Vec<ClobMarketInfoVersion>,
     pub checkpoints: Vec<BookL2CheckpointRow>,
     pub sessions: Vec<BookStreamSessionRow>,
@@ -460,8 +460,8 @@ impl<'a> ReplayPageScope<'a> {
 }
 
 struct CatalogPage {
-    markets: Vec<MarketCatalogVersionInfo>,
-    events: Vec<EventCatalogVersionInfo>,
+    markets: Vec<CatalogMarketChangeInfo>,
+    events: Vec<CatalogEventChangeInfo>,
     clob_market_info: Vec<ClobMarketInfoVersion>,
 }
 
@@ -469,7 +469,7 @@ fn page_catalog(source: &FrozenSourceSlice, scope: &ReplayPageScope<'_>) -> Cata
     let markets = source
         .prefetched
         .catalog
-        .market_versions
+        .market_changes
         .iter()
         .filter(|row| {
             scope.markets.contains(&row.market_id)
@@ -485,7 +485,7 @@ fn page_catalog(source: &FrozenSourceSlice, scope: &ReplayPageScope<'_>) -> Cata
     let events = source
         .prefetched
         .catalog
-        .event_versions
+        .event_changes
         .iter()
         .filter(|row| {
             event_ids.contains(&row.event_id)
@@ -903,8 +903,8 @@ mod tests {
             trade_tape: HashMap::new(),
             resolutions: HashMap::new(),
             catalog: CatalogWindowInfo {
-                market_versions: Vec::new(),
-                event_versions: Vec::new(),
+                market_changes: Vec::new(),
+                event_changes: Vec::new(),
             },
             domain_observations: HashMap::new(),
             crypto_reports: HashMap::new(),

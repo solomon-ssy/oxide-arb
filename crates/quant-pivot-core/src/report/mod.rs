@@ -13,7 +13,7 @@ mod types;
 
 pub use builder::{DefaultReportBuilder, ReportBuilder, ReportBuilderDeps};
 pub use composer::{DefaultRecommendationComposer, RecommendationComposer};
-pub use coordinator::{ReportCoordinator, ReportCoordinatorConfig, ReportScheduleReconciler};
+pub use coordinator::{ReportCoordinator, ReportCoordinatorConfig};
 pub use fact_delivery::{ReportFactDeliveryDeps, ReportFactDeliveryWorker};
 pub use lifecycle::{
     AdHocReportRequest, ReportLifecycleDeps, ReportLifecycleService, RetryAdHocReportRequest,

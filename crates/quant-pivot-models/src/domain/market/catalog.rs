@@ -2,16 +2,14 @@
 
 use crate::{
     enums::market::EventStatus,
-    types::{CatalogMarketIds, EventId},
+    types::{CatalogMarketIds, ContentHash, EventId},
 };
 use chrono::{DateTime, Utc};
-use sea_orm::{
-    ActiveValue, DeriveIntoActiveModel, DerivePartialModel, FromQueryResult, IntoActiveValue,
-};
+use sea_orm::{ActiveValue, DeriveIntoActiveModel, DerivePartialModel, IntoActiveValue};
 use serde::{Deserialize, Serialize};
 
 /// DB row projection matching `entities::event::Model` columns exactly.
-#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
+#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
 #[sea_orm(entity = "crate::entities::event::Entity")]
 pub struct EventInfo {
     pub event_id: EventId,
@@ -25,7 +23,7 @@ pub struct EventInfo {
     /// Ordered Gamma `condition_id`s at sync time (mirrors `EventRegistryInfo.market_ids`).
     pub catalog_market_ids: CatalogMarketIds,
     pub end_date: Option<DateTime<Utc>>,
-    pub raw_gamma: Option<serde_json::Value>,
+    pub content_hash: ContentHash,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -40,7 +38,7 @@ info_from_model!(EventInfo, crate::entities::event::Model, {
     neg_risk,
     catalog_market_ids,
     end_date,
-    raw_gamma,
+    content_hash,
     created_at,
     updated_at,
 });
@@ -77,5 +75,5 @@ pub struct UpsertEvent {
     pub neg_risk: bool,
     pub catalog_market_ids: CatalogMarketIds,
     pub end_date: Option<DateTime<Utc>>,
-    pub raw_gamma: Option<serde_json::Value>,
+    pub content_hash: ContentHash,
 }

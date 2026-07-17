@@ -1,10 +1,12 @@
 //! Versioned, hot-reloadable runtime configuration
-//! (`schema_version` — see [`RUNTIME_CONFIG_SCHEMA_VERSION`], currently `16`).
+//! (`schema_version` — see [`RUNTIME_CONFIG_SCHEMA_VERSION`], currently `17`).
 
+mod factor_names;
 pub mod json_schema;
 pub mod preferences_schema;
 pub mod schedule_preview;
 pub mod sections;
+mod ui;
 pub mod validation;
 pub mod wire;
 
@@ -35,10 +37,10 @@ use crate::types::SchemaVersion;
 ///
 /// This is a **monotonic** version: every schema-changing phase bumps it by one
 /// and the greenfield database is reset (zero compatibility — no shim, no
-/// migration; non-matching documents are rejected). Phase 11.4 hardening bumps
-/// to 9 for honest RankIC-weighted `RankNet` naming, `TopN` pseudo-portfolio knobs,
-/// and diagnostic `ndcg_k` under `research.training`.
-pub const RUNTIME_CONFIG_SCHEMA_VERSION: SchemaVersion = SchemaVersion::new(16);
+/// migration; non-matching documents are rejected). Version 17 removes the
+/// unimplemented top-level `feedback` placeholder instead of carrying a wire
+/// contract with no executable semantics.
+pub const RUNTIME_CONFIG_SCHEMA_VERSION: SchemaVersion = SchemaVersion::new(17);
 
 /// Root of the quant-pivot hot-reloadable runtime configuration document.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -73,9 +75,6 @@ pub struct RuntimeConfig {
     pub notification: NotificationConfig,
     /// Research plane: training objective + validation methodology.
     pub research: ResearchConfig,
-    /// Research-feedback plane: attribution feedback + auto-retraining (reserved
-    /// skeleton; Phase 11.9 replaces it with the Runtime v17 contract).
-    pub feedback: FeedbackConfig,
 }
 
 impl Default for RuntimeConfig {
@@ -95,7 +94,6 @@ impl Default for RuntimeConfig {
             execution: ExecutionConfig::default(),
             notification: NotificationConfig::default(),
             research: ResearchConfig::default(),
-            feedback: FeedbackConfig::default(),
         }
     }
 }
@@ -313,7 +311,7 @@ mod tests {
             RuntimeConfig::default().schema_version,
             RUNTIME_CONFIG_SCHEMA_VERSION
         );
-        assert_eq!(RUNTIME_CONFIG_SCHEMA_VERSION, SchemaVersion::new(16));
+        assert_eq!(RUNTIME_CONFIG_SCHEMA_VERSION, SchemaVersion::new(17));
     }
 
     #[test]

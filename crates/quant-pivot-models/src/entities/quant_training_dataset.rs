@@ -11,6 +11,7 @@ use crate::{
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
+#[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "quant_training_dataset")]
 pub struct Model {
@@ -44,30 +45,16 @@ pub struct Model {
     pub failure_detail: Option<String>,
     pub completed_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
-}
 
-#[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-pub enum Relation {
     #[sea_orm(
-        belongs_to = "super::quant_model_spec::Entity",
-        from = "Column::ModelSpecId",
-        to = "super::quant_model_spec::Column::ModelSpecId"
+        belongs_to,
+        relation_enum = "ModelSpec",
+        from = "model_spec_id",
+        to = "model_spec_id"
     )]
-    ModelSpec,
-    #[sea_orm(has_many = "super::quant_model_version::Entity")]
-    ModelVersion,
-}
-
-impl Related<super::quant_model_spec::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::ModelSpec.def()
-    }
-}
-
-impl Related<super::quant_model_version::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::ModelVersion.def()
-    }
+    pub model_spec: BelongsTo<super::quant_model_spec::Entity>,
+    #[sea_orm(has_many, relation_enum = "ModelVersion")]
+    pub model_version: HasMany<super::quant_model_version::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

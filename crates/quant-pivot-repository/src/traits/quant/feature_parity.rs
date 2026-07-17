@@ -9,7 +9,8 @@ use quant_pivot_models::{
     domain::{
         CompleteFeatureParityRun, FeatureIntegrityCounts, FeatureParityEventListQuery,
         FeatureParityEventView, FeatureParityRunInfo, FeatureParityRunListQuery,
-        FeatureParityStateInfo, NewFeatureParityRun, NewResearchJob, Paginated, ResearchJobInfo,
+        FeatureParityStateInfo, FrozenFeatureParitySubject, NewFeatureParityRun,
+        NewFrozenModelParitySubject, NewResearchJob, Paginated, ResearchJobInfo,
     },
     enums::quant::{FeatureParityRunKind, FeatureParityStateTransition},
     types::{
@@ -26,6 +27,16 @@ pub struct FeatureParityLatchActor {
     pub reason: String,
 }
 
+/// Atomic result of freezing a full serving window and publishing its job.
+#[derive(Debug, Clone)]
+pub enum EnqueueFrozenFeatureParityOutcome {
+    NotEligible,
+    Enqueued {
+        run: Box<FeatureParityRunInfo>,
+        job: Box<ResearchJobInfo>,
+    },
+}
+
 /// Postgres parity-run and latch ledger.
 #[async_trait::async_trait]
 pub trait FeatureParityRepository: Send + Sync {
@@ -34,12 +45,36 @@ pub trait FeatureParityRepository: Send + Sync {
         run: NewFeatureParityRun,
     ) -> Result<FeatureParityRunInfo, StorageError>;
 
+    /// Atomically bind an offline full proof to the exact model artifact and
+    /// training-dataset generation before verification begins.
+    async fn create_frozen_model_run(
+        &self,
+        run: NewFeatureParityRun,
+        subject: NewFrozenModelParitySubject,
+    ) -> Result<FeatureParityRunInfo, StorageError>;
+
     /// Atomically create the parity run and its durable `feature_parity` job.
     async fn enqueue_run(
         &self,
         run: NewFeatureParityRun,
         job: NewResearchJob,
     ) -> Result<(FeatureParityRunInfo, ResearchJobInfo), StorageError>;
+
+    /// In one transaction, enumerate the exact serving window, freeze every
+    /// subject and market membership, then insert the run/job. No ledger row is
+    /// created when the window contains no serving subject.
+    async fn enqueue_frozen_full(
+        &self,
+        run: NewFeatureParityRun,
+        job: NewResearchJob,
+    ) -> Result<EnqueueFrozenFeatureParityOutcome, StorageError>;
+
+    /// Load only the immutable subjects bound to this run. Executors must not
+    /// rediscover live subjects from a time-window query.
+    async fn load_frozen_subjects(
+        &self,
+        run_id: &FeatureParityRunId,
+    ) -> Result<Vec<FrozenFeatureParitySubject>, StorageError>;
 
     async fn find_run(
         &self,

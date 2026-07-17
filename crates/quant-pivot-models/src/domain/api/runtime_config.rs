@@ -12,10 +12,15 @@
 use std::collections::BTreeMap;
 
 use crate::{
-    domain::governance::{RuntimeConfigActivationInfo, RuntimeConfigVersionInfo},
-    enums::{common::MarketCategory, runtime_config::RuntimeConfigVersionSource},
+    domain::governance::{
+        RuntimeConfigActivationInfo, RuntimeConfigApprovalInfo, RuntimeConfigVersionInfo,
+    },
+    enums::{
+        common::MarketCategory,
+        runtime_config::{RuntimeConfigApprovalDecision, RuntimeConfigVersionSource},
+    },
     runtime_config::ScheduleCadence,
-    types::{ContentHash, RuntimeConfigVersionId, SchemaVersion},
+    types::{ContentHash, RuntimeConfigApprovalId, RuntimeConfigVersionId, SchemaVersion},
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -250,6 +255,7 @@ impl CreateRuntimeConfigVersionRequest {
 /// Activate an existing runtime-config version (Promote).
 #[derive(Debug, Deserialize, Validate)]
 pub struct ActivateRuntimeConfigRequest {
+    pub runtime_config_approval_id: RuntimeConfigApprovalId,
     #[validate(length(min = 1, max = 1024))]
     pub reason: String,
 }
@@ -257,8 +263,25 @@ pub struct ActivateRuntimeConfigRequest {
 /// Roll back to an existing runtime-config version (Rollback).
 #[derive(Debug, Deserialize, Validate)]
 pub struct RollbackRuntimeConfigRequest {
+    pub runtime_config_approval_id: RuntimeConfigApprovalId,
     #[validate(length(min = 1, max = 1024))]
     pub reason: String,
+}
+
+/// Append one immutable approval or rejection for an exact config version.
+#[derive(Debug, Deserialize, Validate)]
+pub struct RecordRuntimeConfigApprovalRequest {
+    pub decision: RuntimeConfigApprovalDecision,
+    #[validate(length(min = 1, max = 1024))]
+    pub reason: String,
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+/// Approved revisions eligible for an operator activation selector.
+#[derive(Debug, Clone, Serialize)]
+pub struct RuntimeConfigApprovalView {
+    #[serde(flatten)]
+    pub approval: RuntimeConfigApprovalInfo,
 }
 
 /// Version-catalog page size (capped in the handler).

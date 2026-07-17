@@ -12,13 +12,13 @@ use quant_pivot_models::{
         market::{book::BookLevel, registry::MarketRegistryInfo},
         quant::NewReportDataQualitySnapshot,
     },
-    enums::quant::DataQualityStatus,
+    enums::{catalog::CatalogTimestampQuality, quant::DataQualityStatus},
     hashing::CanonicalDigest,
     types::{
-        BookSnapshotRef, BookSnapshotSource, Bps, CatalogSyncBatchId, ContentHash,
-        EventCatalogVersionId, EventId, MarketCatalogVersionId, MarketContext, MarketId,
-        MarketLinkageId, Probability, RecommendationIdentity, ReportDataQualitySnapshotId,
-        ReportDataQualityTokens, RuntimeConfigVersionId, TokenDataQualityRecord, TokenId, Usd,
+        BookSnapshotRef, BookSnapshotSource, Bps, CatalogEventChangeId, CatalogMarketChangeId,
+        CatalogSyncBatchId, ContentHash, EventId, MarketContext, MarketId, MarketLinkageId,
+        Probability, RecommendationIdentity, ReportDataQualitySnapshotId, ReportDataQualityTokens,
+        RuntimeConfigVersionId, TokenDataQualityRecord, TokenId, Usd,
     },
 };
 use rust_decimal::Decimal;
@@ -41,8 +41,8 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CatalogDecisionRef {
     pub catalog_sync_batch_id: CatalogSyncBatchId,
-    pub market_catalog_version_id: MarketCatalogVersionId,
-    pub event_catalog_version_id: EventCatalogVersionId,
+    pub market_change_id: CatalogMarketChangeId,
+    pub event_change_id: CatalogEventChangeId,
     pub market_content_hash: ContentHash,
     pub event_content_hash: ContentHash,
     pub membership_hash: ContentHash,
@@ -50,16 +50,16 @@ pub struct CatalogDecisionRef {
     pub market_available_at: DateTime<Utc>,
     pub event_effective_at: DateTime<Utc>,
     pub event_available_at: DateTime<Utc>,
-    pub market_timestamp_quality: String,
-    pub event_timestamp_quality: String,
+    pub market_timestamp_quality: CatalogTimestampQuality,
+    pub event_timestamp_quality: CatalogTimestampQuality,
 }
 
 impl From<&ResolvedMarketSnapshot> for CatalogDecisionRef {
     fn from(snapshot: &ResolvedMarketSnapshot) -> Self {
         Self {
             catalog_sync_batch_id: snapshot.catalog_sync_batch_id.clone(),
-            market_catalog_version_id: snapshot.market_catalog_version_id.clone(),
-            event_catalog_version_id: snapshot.event_catalog_version_id.clone(),
+            market_change_id: snapshot.market_change_id.clone(),
+            event_change_id: snapshot.event_change_id.clone(),
             market_content_hash: snapshot.market_content_hash.clone(),
             event_content_hash: snapshot.event_content_hash.clone(),
             membership_hash: snapshot.membership_hash.clone(),
@@ -67,8 +67,8 @@ impl From<&ResolvedMarketSnapshot> for CatalogDecisionRef {
             market_available_at: snapshot.market_available_at,
             event_effective_at: snapshot.event_effective_at,
             event_available_at: snapshot.event_available_at,
-            market_timestamp_quality: snapshot.market_timestamp_quality.clone(),
-            event_timestamp_quality: snapshot.event_timestamp_quality.clone(),
+            market_timestamp_quality: snapshot.market_timestamp_quality,
+            event_timestamp_quality: snapshot.event_timestamp_quality,
         }
     }
 }
@@ -514,6 +514,7 @@ mod tests {
             market::{book::BookLevel, registry::MarketRegistryInfo},
         },
         enums::{
+            catalog::CatalogFilterReasonSet,
             common::{CategorySet, MarketCategory, TickSize},
             market::MarketStatus,
         },
@@ -561,6 +562,7 @@ mod tests {
             description: None,
             categories: CategorySet::default(),
             status: MarketStatus::Active,
+            filter_reasons: CatalogFilterReasonSet::default(),
             outcome: None,
             neg_risk: false,
             tick_size: TickSize::Hundredth,

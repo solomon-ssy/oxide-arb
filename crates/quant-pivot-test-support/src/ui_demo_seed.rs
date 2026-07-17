@@ -81,10 +81,10 @@ use crate::{
     execution_pg_seed::{
         self, EXECUTION_NOTIONAL, ExecutionTxnIds, ReportBuildOptions, ReportSeedConfig,
         SharedDemoInfra, build_custom_report_transaction, claim_entry_for_test,
-        close_position_full, demo_recommendation, entry_execution_order, fill_entry_lot,
-        report_operation_log, seed_approved_intent, seed_conditional_price_report_on_infra,
-        seed_manual_approved_intent, seed_pending_intent, seed_report_model_run,
-        seed_report_on_infra, seed_shared_demo_infra_with_artifact_store,
+        close_position_full, demo_recommendation, enable_entry_admission_for_test,
+        entry_execution_order, fill_entry_lot, report_operation_log, seed_approved_intent,
+        seed_conditional_price_report_on_infra, seed_manual_approved_intent, seed_pending_intent,
+        seed_report_model_run, seed_report_on_infra, seed_shared_demo_infra_with_artifact_store,
     },
     report_lifecycle_seed::persist_and_publish_report,
     research_ui_seed::{ResearchUiSeedSummary, seed_research_ui_demo_pg},
@@ -137,6 +137,7 @@ pub async fn seed_ui_demo_pg(
     funder: &str,
     model_artifact_store: &Arc<dyn ArtifactStore>,
 ) -> UiDemoSeedSummary {
+    enable_entry_admission_for_test(db, "ui-e2e-demo-seed").await;
     let infra = seed_shared_demo_infra_with_artifact_store(db, model_artifact_store).await;
     let submission = PgExecutionSubmissionRepository::new(db.clone());
     let mut summary = UiDemoSeedSummary::default();
@@ -1300,10 +1301,11 @@ async fn seed_diff_report(
     let config = demo_report(slug);
     let market_selection_id =
         seed_market_selection_for_diff(db, &infra.runtime_config_version_id).await;
-    let model_run_id = seed_report_model_run(db, infra, &market_selection_id).await;
+    let model_run_id = seed_report_model_run(db, infra, &market_selection_id, as_of).await;
     let report_id = RecommendationReportId::from_v7();
     let primary = markets.first().expect("at least one market");
     let ids = ExecutionTxnIds {
+        decision_at: as_of,
         feature_parity_state_id: infra.feature_parity_state_id.clone(),
         account_snapshot: AccountSnapshotId::from_v7(),
         data_quality_snapshot: ReportDataQualitySnapshotId::from_v7(),
@@ -1364,8 +1366,9 @@ async fn seed_custom_report(
     .await;
     let market_selection_id =
         seed_market_selection_for_diff(db, &infra.runtime_config_version_id).await;
-    let model_run_id = seed_report_model_run(db, infra, &market_selection_id).await;
+    let model_run_id = seed_report_model_run(db, infra, &market_selection_id, options.as_of).await;
     let ids = ExecutionTxnIds {
+        decision_at: options.as_of,
         feature_parity_state_id: infra.feature_parity_state_id.clone(),
         account_snapshot: AccountSnapshotId::from_v7(),
         data_quality_snapshot: ReportDataQualitySnapshotId::from_v7(),

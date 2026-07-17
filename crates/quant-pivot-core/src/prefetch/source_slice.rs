@@ -15,8 +15,8 @@ use quant_pivot_models::{
         MarketResolutionRow, TradeTapeRow,
     },
     domain::{
-        CatalogWindowInfo, CompleteSourceSlice, CryptoPriceReport, DecisionBoundary, DecisionClock,
-        DomainObservation, MarketCatalogVersionInfo, MarketLinkage, MarketRegistryInfo,
+        CatalogMarketChangeInfo, CatalogWindowInfo, CompleteSourceSlice, CryptoPriceReport,
+        DecisionBoundary, DecisionClock, DomainObservation, MarketLinkage, MarketRegistryInfo,
         NewSourceSlice, SourceSliceIdentity, SourceSliceInfo, WeatherForecastPoint,
         WeatherObservationFact,
     },
@@ -32,7 +32,7 @@ use quant_pivot_models::{
     },
 };
 use quant_pivot_repository::traits::{
-    CalibrationArtifactRepository, CatalogVersionRepository, ClobMarketInfoRepository,
+    CalibrationArtifactRepository, CatalogLedgerRepository, ClobMarketInfoRepository,
     MarketLinkageRepository, QuantFactReadRepository, SourceSliceRepository,
 };
 use quant_pivot_research::{
@@ -47,7 +47,7 @@ use super::historical_window::{HistoricalWindowLoader, Prefetched, ReplaySample,
 /// Dependencies used by the single server-owned source materializer.
 pub struct SourceSliceMaterializerDeps {
     pub facts: Arc<dyn QuantFactReadRepository>,
-    pub catalog: Arc<dyn CatalogVersionRepository>,
+    pub catalog: Arc<dyn CatalogLedgerRepository>,
     pub clob_market_info: Arc<dyn ClobMarketInfoRepository>,
     pub linkage: Arc<dyn MarketLinkageRepository>,
     pub calibration: Arc<dyn CalibrationArtifactRepository>,
@@ -293,8 +293,8 @@ fn decode_frozen_source_slice(
     mut by_kind: SourceRecordsByKind,
 ) -> QuantResult<FrozenSourceSlice> {
     let catalog = CatalogWindowInfo {
-        market_versions: decode_records(take(&mut by_kind, SourceSliceObjectKind::CatalogMarket))?,
-        event_versions: decode_records(take(&mut by_kind, SourceSliceObjectKind::CatalogEvent))?,
+        market_changes: decode_records(take(&mut by_kind, SourceSliceObjectKind::CatalogMarket))?,
+        event_changes: decode_records(take(&mut by_kind, SourceSliceObjectKind::CatalogEvent))?,
     };
     let books = group_by(
         decode_records::<BookL2CheckpointRow>(take(
@@ -506,8 +506,8 @@ impl SourceSliceMaterializer {
             }
             .into());
         }
-        let market_versions = self.deps.catalog.markets_at(&market_ids, &boundary).await?;
-        let samples = replay_samples(&market_versions)?;
+        let market_changes = self.deps.catalog.markets_at(&market_ids, &boundary).await?;
+        let samples = replay_samples(&market_changes)?;
         if samples.is_empty() {
             return Err(ResearchError::DatasetBuild {
                 detail: "Source Slice catalog has no decodable market/token pairs".to_owned(),
@@ -583,7 +583,7 @@ impl SourceSliceMaterializer {
             self.write_object(
                 SourceSliceObjectKind::CatalogMarket,
                 records(
-                    &prefetched.catalog.market_versions,
+                    &prefetched.catalog.market_changes,
                     |row| Some(row.source_effective_at),
                     |row| Some(row.available_at),
                 )?,
@@ -594,7 +594,7 @@ impl SourceSliceMaterializer {
             self.write_object(
                 SourceSliceObjectKind::CatalogEvent,
                 records(
-                    &prefetched.catalog.event_versions,
+                    &prefetched.catalog.event_changes,
                     |row| Some(row.source_effective_at),
                     |row| Some(row.available_at),
                 )?,
@@ -830,10 +830,7 @@ impl SourceSliceMaterializer {
             )
             .map_err(|detail| ResearchError::DatasetBuild { detail })?;
         ensure_not_cancelled(cancel, "before Source Slice manifest seal")?;
-        let manifest_bytes =
-            serde_json::to_vec(&manifest).map_err(|error| ResearchError::DatasetBuild {
-                detail: format!("Source Slice manifest serialization failed: {error}"),
-            })?;
+        let manifest_bytes = CanonicalDigest::canonical_json_bytes(&manifest)?;
         let manifest_hash = ContentHash::parse(CanonicalDigest::prefixed_bytes(&manifest_bytes))?;
         let manifest_uri = self
             .put_verified(&manifest_hash, "json", &manifest_bytes)
@@ -953,7 +950,7 @@ fn source_boundary(identity: &SourceSliceIdentity) -> QuantResult<DecisionBounda
     DecisionClock::new(lag_secs).serving_boundary(identity.pit_cutoff, lag_secs, lag_secs)
 }
 
-fn replay_samples(versions: &[MarketCatalogVersionInfo]) -> QuantResult<Vec<ReplaySample>> {
+fn replay_samples(versions: &[CatalogMarketChangeInfo]) -> QuantResult<Vec<ReplaySample>> {
     let mut samples = Vec::with_capacity(versions.len().saturating_mul(2));
     for version in versions {
         let market = serde_json::from_value::<MarketRegistryInfo>(version.payload.clone())
@@ -1026,7 +1023,7 @@ fn gap_evidence(
 }
 
 async fn catalog_proof(
-    repository: &dyn CatalogVersionRepository,
+    repository: &dyn CatalogLedgerRepository,
     identity: &SourceSliceIdentity,
     prefetched: &Prefetched,
 ) -> QuantResult<SourceSliceCatalogProof> {
@@ -1060,7 +1057,7 @@ async fn catalog_proof(
         .map(|batch| {
             Ok((
                 batch.catalog_sync_batch_id.clone(),
-                batch.sync_kind.clone(),
+                batch.sync_kind,
                 batch
                     .committed_at
                     .ok_or_else(|| ResearchError::DatasetBuild {
@@ -1081,13 +1078,12 @@ async fn catalog_proof(
             ))
         })
         .collect::<QuantResult<Vec<_>>>()?;
-    let market_count =
-        u64::try_from(prefetched.catalog.market_versions.len()).map_err(|error| {
-            ResearchError::DatasetBuild {
-                detail: error.to_string(),
-            }
-        })?;
-    let event_count = u64::try_from(prefetched.catalog.event_versions.len()).map_err(|error| {
+    let market_count = u64::try_from(prefetched.catalog.market_changes.len()).map_err(|error| {
+        ResearchError::DatasetBuild {
+            detail: error.to_string(),
+        }
+    })?;
+    let event_count = u64::try_from(prefetched.catalog.event_changes.len()).map_err(|error| {
         ResearchError::DatasetBuild {
             detail: error.to_string(),
         }
@@ -1100,8 +1096,8 @@ async fn catalog_proof(
         market_count,
         event_count,
         snapshot_hash: CanonicalDigest::content_hash_json(&(
-            &prefetched.catalog.market_versions,
-            &prefetched.catalog.event_versions,
+            &prefetched.catalog.market_changes,
+            &prefetched.catalog.event_changes,
         ))?,
     })
 }
@@ -1156,7 +1152,8 @@ fn decode_records<T: DeserializeOwned>(records: Vec<SourceSliceRecord>) -> Quant
     records
         .into_iter()
         .map(|record| {
-            serde_json::from_value(record.payload).map_err(|error| {
+            let payload = CanonicalDigest::canonical_json_bytes(&record.payload)?;
+            serde_json::from_slice(&payload).map_err(|error| {
                 ResearchError::DatasetBuild {
                     detail: format!(
                         "Source Slice record {} payload cannot be decoded: {error}",

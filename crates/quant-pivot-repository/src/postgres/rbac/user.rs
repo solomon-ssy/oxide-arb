@@ -8,7 +8,6 @@ use quant_pivot_models::{
     },
     entities::{user, user_role},
     enums::rbac::UserStatus,
-    schema::column,
     types::UserId,
 };
 use sea_orm::{
@@ -21,7 +20,7 @@ use sea_orm::{
 
 use crate::{
     postgres::{
-        error,
+        error, primitives,
         query::{non_empty, paginate_mapped},
         rbac::casbin::sync,
     },
@@ -91,7 +90,7 @@ async fn do_change_status(
     status: UserStatus,
 ) -> Result<(), StorageError> {
     let result = user::Entity::update_many()
-        .col_expr(user::Column::Status, column::pg_enum_value(&status))
+        .col_expr(user::Column::Status, primitives::enum_value(&status))
         .filter(user::Column::Id.eq(id.clone()))
         .exec(db)
         .await

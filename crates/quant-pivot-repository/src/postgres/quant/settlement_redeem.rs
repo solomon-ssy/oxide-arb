@@ -23,8 +23,8 @@ use quant_pivot_models::{
 };
 use sea_orm::{
     ActiveModelTrait, ActiveValue, ColumnTrait, Condition, DatabaseConnection, EntityTrait,
-    FromQueryResult, IntoActiveModel, QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
-    sea_query::Expr,
+    ExprTrait, FromQueryResult, IntoActiveModel, QueryFilter, QueryOrder, QuerySelect,
+    TransactionTrait, sea_query::Expr,
 };
 
 pub struct PgSettlementRedeemRepository {
@@ -285,7 +285,10 @@ async fn lot_counts_for(
     let rows = quant_settlement_redeem_lot::Entity::find()
         .select_only()
         .column(quant_settlement_redeem_lot::Column::SettlementRedeemId)
-        .column_as(Expr::cust("COUNT(*)"), "lot_count")
+        .column_as(
+            Expr::col(quant_settlement_redeem_lot::Column::SettlementRedeemLotId).count(),
+            "lot_count",
+        )
         .filter(quant_settlement_redeem_lot::Column::SettlementRedeemId.is_in(ids))
         .group_by(quant_settlement_redeem_lot::Column::SettlementRedeemId)
         .into_model::<LotCountRow>()

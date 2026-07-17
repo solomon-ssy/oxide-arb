@@ -232,7 +232,7 @@ impl BreakerInner {
 /// daily realized-loss cap. Held behind an [`ArcSwap`] so a runtime-config
 /// activation atomically replaces the thresholds without touching the rolling
 /// window accumulator in [`BreakerInner`].
-struct BreakerThresholds {
+pub(crate) struct BreakerThresholds {
     config: ExecutionBreakerConfig,
     /// Parsed daily realized-loss cap (USD). `0` disables the dimension.
     daily_loss_cap: Decimal,
@@ -297,8 +297,13 @@ impl ExecutionBreaker {
     /// an activation never resets in-flight safety state. The published venue
     /// health is recomputed immediately so a tightened daily-loss cap can move
     /// the breaker into the 80% degrade band without waiting for the next event.
-    pub fn reload(&self, config: &ExecutionBreakerConfig) -> QuantResult<()> {
-        let thresholds = BreakerThresholds::new(config.clone())?;
+    pub(crate) fn prepare_reload(
+        config: &ExecutionBreakerConfig,
+    ) -> QuantResult<BreakerThresholds> {
+        BreakerThresholds::new(config.clone())
+    }
+
+    pub(crate) fn publish_reload(&self, thresholds: BreakerThresholds) {
         self.thresholds.store(Arc::new(thresholds));
         let (venue_health, daily_loss) = {
             let inner = self.lock();
@@ -306,7 +311,6 @@ impl ExecutionBreaker {
         };
         self.health
             .store(self.combined_health(&venue_health, daily_loss));
-        Ok(())
     }
 
     /// Clone of the venue-health hot-read handle (injected into admission).

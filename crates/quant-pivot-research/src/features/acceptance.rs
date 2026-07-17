@@ -21,6 +21,7 @@ use quant_pivot_models::{
         },
     },
     enums::{
+        catalog::{CatalogFilterReasonSet, CatalogTimestampQuality},
         clickhouse::{ChFeatureCellState, ChFeatureSourceKind, ChFeatureValueKind},
         common::{CategorySet, MarketCategory, TickSize},
         market::{EventStatus, MarketStatus},
@@ -31,9 +32,8 @@ use quant_pivot_models::{
         SelectionConfig,
     },
     types::{
-        Bps, CatalogSyncBatchId, ContentHash, EventCatalogVersionId, EventId,
-        MarketCatalogVersionId, MarketId, Price, Probability, RuntimeConfigVersionId,
-        SchemaVersion, Shares, TokenId, Usd,
+        Bps, CatalogEventChangeId, CatalogMarketChangeId, CatalogSyncBatchId, ContentHash, EventId,
+        MarketId, Price, Probability, RuntimeConfigVersionId, SchemaVersion, Shares, TokenId, Usd,
     },
 };
 use rust_decimal::Decimal;
@@ -127,6 +127,7 @@ fn test_catalog_snapshot(
         description: None,
         categories: CategorySet::from(category),
         status: context.status,
+        filter_reasons: CatalogFilterReasonSet::default(),
         outcome: Some("Yes".to_owned()),
         neg_risk: context.neg_risk,
         tick_size: TickSize::Hundredth,
@@ -154,16 +155,16 @@ fn test_catalog_snapshot(
         context,
         neg_risk_leg_set,
         catalog_sync_batch_id: CatalogSyncBatchId::from_v7(),
-        market_catalog_version_id: MarketCatalogVersionId::from_v7(),
-        event_catalog_version_id: EventCatalogVersionId::from_v7(),
+        market_change_id: CatalogMarketChangeId::from_v7(),
+        event_change_id: CatalogEventChangeId::from_v7(),
         market_content_hash: ContentHash::parse(format!("blake3:{}", "a".repeat(64)))
             .expect("valid market hash"),
         event_content_hash: ContentHash::parse(format!("blake3:{}", "b".repeat(64)))
             .expect("valid event hash"),
         membership_hash: ContentHash::parse(format!("blake3:{}", "c".repeat(64)))
             .expect("valid membership hash"),
-        market_timestamp_quality: "source".to_owned(),
-        event_timestamp_quality: "source".to_owned(),
+        market_timestamp_quality: CatalogTimestampQuality::Source,
+        event_timestamp_quality: CatalogTimestampQuality::Source,
         market_effective_at: effective_at,
         market_available_at: available_at,
         event_effective_at: effective_at,
@@ -2100,6 +2101,7 @@ fn negrisk_from_catalog_excludes_non_neg_risk_members() {
             description: None,
             categories: vec![MarketCategory::Crypto],
             status: MarketStatus::Active,
+            filter_reasons: Vec::new(),
             outcome: None,
             yes_token_id: TokenId::new(format!("{id}-yes")),
             no_token_id: TokenId::new(format!("{id}-no")),
@@ -2108,6 +2110,8 @@ fn negrisk_from_catalog_excludes_non_neg_risk_members() {
             start_date: None,
             end_date: None,
             resolved_at: None,
+            content_hash: ContentHash::parse(format!("blake3:{}", "d".repeat(64)))
+                .expect("catalog hash"),
             created_at: now,
             updated_at: now,
         })

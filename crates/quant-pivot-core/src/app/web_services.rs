@@ -25,7 +25,9 @@ use crate::{
     service::{
         feature_integrity::{CatalogFeatureIntegrityCoverage, FeatureIntegrityService},
         model_calibration_fit::ModelCalibrationFitService,
-        research_readiness::{EvidenceAttestor, ResearchReadinessEvidenceService},
+        research_readiness::{
+            EvidenceAttestor, EvidenceScopeIdentity, ResearchReadinessEvidenceService,
+        },
         trade_policy::{TradePolicyService, TradePolicyServiceDeps},
     },
 };
@@ -40,7 +42,7 @@ use quant_pivot_repository::{
     clickhouse::ChFeatureParityEventRepository,
     traits::{
         AccountSnapshotRepository, AttributionRepository, BasisAlertRepository,
-        CalibrationArtifactRepository, CatalogVersionRepository, DomainSourceCursorRepository,
+        CalibrationArtifactRepository, CatalogLedgerRepository, DomainSourceCursorRepository,
         EntryConditionRepository, EquitySnapshotRepository, ExecutionOrderRepository,
         FeatureParityEventRepository, FeatureRepository, MenuRepository, OperationLogRepository,
         OrderIntentRepository, PositionRepository, RecommendationReportRepository,
@@ -142,6 +144,7 @@ async fn build_app_state(
         operation_logs: Arc::clone(&repos.operation_log) as Arc<dyn OperationLogRepository>,
         operation_log,
         control: Arc::clone(&ctx.governance.runtime_control),
+        bootstrap: Arc::clone(&ctx.governance.bootstrap),
         kill_switch: Arc::clone(&ctx.governance.kill_switch),
         market_data: Arc::new(CoreMarketData::new(
             Arc::clone(&ctx.data.book_store),
@@ -225,11 +228,16 @@ fn build_trade_policy_port(
     dataset_builder: Arc<dyn TrainingDatasetPort>,
 ) -> QuantResult<Arc<dyn TradePolicyPort>> {
     let attestor = EvidenceAttestor::from_config(&ctx.config.research.evidence_attestation)?;
+    let evidence_scope = EvidenceScopeIdentity::from_config(
+        &ctx.config.db.clickhouse,
+        &ctx.config.research.artifact_store,
+    )?;
     let readiness = Arc::new(ResearchReadinessEvidenceService::new(
         Arc::clone(&ctx.infra.repos.research_readiness)
             as Arc<dyn ResearchReadinessEvidenceRepository>,
         Arc::clone(&ctx.research.artifact_store),
         attestor,
+        &evidence_scope,
     )?);
     Ok(Arc::new(TradePolicyService::new(TradePolicyServiceDeps {
         datasets: Arc::clone(&ctx.research.training_dataset_repo),
@@ -252,9 +260,9 @@ fn build_feature_integrity(ctx: &AppContext) -> Arc<dyn FeatureIntegrityPort> {
             &ctx.infra.ch,
         ))) as Arc<dyn FeatureParityEventRepository>,
         Some(Arc::new(CatalogFeatureIntegrityCoverage::new(Arc::clone(
-            &ctx.research.catalog_version_repo,
+            &ctx.research.catalog_ledger_repo,
         )
-            as Arc<dyn CatalogVersionRepository>))),
+            as Arc<dyn CatalogLedgerRepository>))),
         Arc::clone(&ctx.infra.metrics),
     ))
 }
@@ -274,10 +282,15 @@ async fn build_web_auth(ctx: &AppContext) -> QuantResult<WebAuthServices> {
                 detail: error.to_string(),
             })?,
     );
-    let jwt = Arc::new(JwtService::new(
-        &ctx.config.web.jwt,
-        Arc::clone(&ctx.infra.jwt_blacklist) as Arc<dyn TokenBlacklist>,
-    ));
+    let jwt = Arc::new(
+        JwtService::new(
+            &ctx.config.web.jwt,
+            Arc::clone(&ctx.infra.jwt_blacklist) as Arc<dyn TokenBlacklist>,
+        )
+        .map_err(|error| InfraError::Misconfigured {
+            detail: error.to_string(),
+        })?,
+    );
     Ok(WebAuthServices {
         casbin,
         jwt,

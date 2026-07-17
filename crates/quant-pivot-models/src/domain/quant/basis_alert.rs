@@ -8,13 +8,13 @@
 //! operator marks an alert as triaged, recording who and when.
 
 use chrono::{DateTime, Utc};
-use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
 use serde::{Deserialize, Serialize};
 
 use crate::types::{BasisAlertId, Bps, MarketId};
 
 /// Persisted basis-exceedance alert row.
-#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
+#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
 #[sea_orm(entity = "crate::entities::quant_basis_alert::Entity")]
 pub struct BasisAlertInfo {
     pub alert_id: BasisAlertId,

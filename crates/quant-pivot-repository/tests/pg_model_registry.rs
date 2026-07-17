@@ -2,11 +2,17 @@
 
 use quant_pivot_error::storage::{StorageError, entity};
 use quant_pivot_models::{
-    domain::{ModelVersionListQuery, NewModelSpec, NewModelVersion, PageRequest},
-    enums::{model::ModelFamily, quant::PublicationStatus},
+    domain::{
+        ModelVersionListQuery, NewModelSpec, NewModelVersion, NewRuntimeConfigActivation,
+        PageRequest,
+    },
+    enums::{
+        model::ModelFamily, quant::PublicationStatus, runtime_config::RuntimeConfigActivationKind,
+    },
     types::{
         ContentHash, FeatureParityRunId, FeatureParityStateId, ModelInputContract, ModelSpecId,
-        ModelTrainingContract, ModelVersionId, SchemaVersion,
+        ModelTrainingContract, ModelVersionId, RuntimeConfigActivationId, RuntimeConfigVersionId,
+        SchemaVersion,
     },
 };
 use quant_pivot_repository::{
@@ -205,6 +211,18 @@ async fn rollback_without_durable_latch_and_subject_permit_leaves_both_statuses_
             quality_gate_payload_hash: &content_hash('g'),
             feature_parity_state_id: &FeatureParityStateId::from_v7(),
             feature_parity_run_id: &FeatureParityRunId::from_v7(),
+            expected_runtime_config_activation_id: None,
+            runtime_config_activation: NewRuntimeConfigActivation {
+                runtime_config_activation_id: RuntimeConfigActivationId::from_v7(),
+                runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
+                runtime_config_approval_id: None,
+                activated_by: "test".to_owned(),
+                reason: "test rollback".to_owned(),
+                activation_kind: RuntimeConfigActivationKind::Promote,
+                previous_runtime_config_version_id: None,
+                rollback_target_version_id: None,
+                audit_event_id: None,
+            },
         })
         .await
         .expect_err("missing durable permits must block rollback");

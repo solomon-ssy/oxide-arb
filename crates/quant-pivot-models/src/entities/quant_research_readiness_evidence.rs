@@ -8,6 +8,7 @@ use crate::{
     types::{ArtifactUri, ContentHash, ResearchReadinessEvidencePayload},
 };
 
+#[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "quant_research_readiness_evidence")]
 pub struct Model {
@@ -28,8 +29,5 @@ pub struct Model {
     pub attestation_mac: ContentHash,
     pub created_at: DateTime<Utc>,
 }
-
-#[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-pub enum Relation {}
 
 impl ActiveModelBehavior for ActiveModel {}

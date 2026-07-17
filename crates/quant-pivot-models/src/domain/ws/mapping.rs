@@ -87,10 +87,11 @@ mod tests {
     use super::event_envelope;
     use crate::{
         domain::{
-            CoreEvent, MarketBookView, MaterializationRunEvent, MaterializationRunKind,
-            MaterializationRunStatus, ReconciliationLifecycleEvent, ReportEventKind,
-            ReportLifecycleEvent, ReportRunLifecycleEvent, SettlementRedeemLifecycleEvent,
-            SubscriptionKey, SystemStatus, ws::channel::WsChannel,
+            BootstrapView, CoreEvent, MarketBookView, MaterializationRunEvent,
+            MaterializationRunKind, MaterializationRunStatus, ReconciliationLifecycleEvent,
+            ReportEventKind, ReportLifecycleEvent, ReportRunLifecycleEvent,
+            SettlementRedeemLifecycleEvent, SubscriptionKey, SystemCapabilities, SystemStatus,
+            SystemStatusView, ws::channel::WsChannel,
         },
         enums::{
             execution::{ReconciliationResult, SettlementRedeemState},
@@ -98,6 +99,7 @@ mod tests {
                 QuantRuntimeMode, RecommendationReportStatus, ReportKind, ReportRunStatus,
                 TrainingDatasetStatus,
             },
+            system::{BootstrapPhase, CapabilityReason},
         },
         types::{MarketId, RecommendationReportId, ReportRunId},
     };
@@ -123,8 +125,15 @@ mod tests {
 
     #[test]
     fn system_status_maps_to_global_key() {
-        let event =
-            CoreEvent::SystemStatusChanged(SystemStatus::bootstrap(QuantRuntimeMode::ReportOnly));
+        let event = CoreEvent::SystemStatusChanged(Box::new(SystemStatusView {
+            runtime: SystemStatus::bootstrap(QuantRuntimeMode::ReportOnly),
+            bootstrap: BootstrapView {
+                phase: BootstrapPhase::Initializing,
+                bootstrap_contract_version: 1,
+                state_revision: 0,
+            },
+            capabilities: SystemCapabilities::fail_closed(CapabilityReason::BootstrapInitializing),
+        }));
         let (key, envelope) = event_envelope(&event).expect("status maps");
         assert_eq!(key, SubscriptionKey::global(WsChannel::SystemStatus));
         assert_eq!(envelope.kind.as_str(), "system.status");

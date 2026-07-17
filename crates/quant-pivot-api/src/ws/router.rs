@@ -84,17 +84,28 @@ impl ShardRouter {
         drop(ledger);
     }
 
-    /// Force the owning shard to tear down and establish a fresh stream session.
-    pub fn restart_token(&self, token: &TokenId) {
+    /// Force each owning shard touched by `tokens` to establish one fresh stream session.
+    ///
+    /// A session-level invalidation can contain hundreds of tokens from the
+    /// same shard. Publishing once per shard avoids a reconnect storm while
+    /// preserving the full-state watch contract.
+    pub fn restart_tokens(&self, tokens: &[TokenId]) {
         let ledger = self.ledger.lock();
-        let Some(shard_id) = ledger.assignments.get(token).copied() else {
-            return;
-        };
-        let slot = &ledger.shards[shard_id];
-        let tokens_tx = slot.tokens_tx.clone();
-        let assigned = Arc::new(slot.assigned.clone());
+        let dirty = tokens
+            .iter()
+            .filter_map(|token| ledger.assignments.get(token).copied())
+            .collect::<HashSet<_>>();
+        let publications = dirty
+            .into_iter()
+            .map(|shard_id| {
+                let slot = &ledger.shards[shard_id];
+                (slot.tokens_tx.clone(), Arc::new(slot.assigned.clone()))
+            })
+            .collect::<Vec<_>>();
         drop(ledger);
-        tokens_tx.send_replace(assigned);
+        for (tokens_tx, assigned) in publications {
+            tokens_tx.send_replace(assigned);
+        }
     }
 
     /// Number of shards spawned so far.
@@ -150,7 +161,10 @@ fn publish(ledger: &RouterLedger, dirty: &HashSet<usize>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ws::{health::ShardHealthBoard, reconnect::ReconnectPolicy};
+    use crate::ws::{
+        health::{ShardHealthBoard, TokenFreshnessBoard},
+        reconnect::ReconnectPolicy,
+    };
     use std::{sync::Arc, time::Duration};
     use tokio::sync::Semaphore;
     use tokio_util::sync::CancellationToken;
@@ -171,6 +185,7 @@ mod tests {
                 sdk_max_backoff: Duration::from_secs(30),
                 connect_limiter: Arc::new(Semaphore::new(4)),
                 health: Arc::new(ShardHealthBoard::default()),
+                token_freshness: Arc::new(TokenFreshnessBoard::default()),
             },
         )
     }
