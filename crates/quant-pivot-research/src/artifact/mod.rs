@@ -70,6 +70,8 @@ pub enum ArtifactNamespace {
     ReportFacts,
     /// Signed operational-readiness observations consumed by fit preflight.
     ReadinessEvidence,
+    /// Immutable full-catalog Crypto/Weather capability audits.
+    CapabilityAudit,
 }
 
 impl ArtifactNamespace {
@@ -84,6 +86,7 @@ impl ArtifactNamespace {
             Self::SourceSlice => "source-slices",
             Self::ReportFacts => "report-facts",
             Self::ReadinessEvidence => "readiness-evidence",
+            Self::CapabilityAudit => "capability-audits",
         }
     }
 }

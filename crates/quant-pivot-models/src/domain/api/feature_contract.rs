@@ -62,7 +62,7 @@ mod tests {
                 "0000000000000000000000000000000000000000000000000000000000000000"
             ))
             .expect("canonical feature schema hash fixture"),
-            feature_schema_version: SchemaVersion::new(6),
+            feature_schema_version: SchemaVersion::new(7),
             features: vec![FeatureContractEntryView {
                 name: "book.mid".to_owned(),
                 compute_revision: 1,
@@ -80,7 +80,7 @@ mod tests {
         };
 
         let encoded = serde_json::to_value(view).expect("serialize feature contract view");
-        assert_eq!(encoded["feature_schema_version"], 6);
+        assert_eq!(encoded["feature_schema_version"], 7);
         assert_eq!(encoded["features"][0]["family"], "price_book");
         assert_eq!(encoded["features"][0]["value_kind"], "probability");
         assert!(encoded["features"][0]["null_policy"].get("value").is_none());

@@ -16,7 +16,7 @@ use quant_pivot_models::{
         BookL2CheckpointRow, BookL2EventRow, BookMicrostructureRow, BookStreamSessionRow,
         CryptoPriceReportRow, DomainObservationRow, EntryConditionEvaluationEventRow,
         MarketResolutionRow, MidPriceBucketRow, ReportMarketFunnelCountRow, ReportMarketFunnelRow,
-        TradeTapeRow, WeatherForecastPointRow, WeatherObservationReportRow,
+        TradeTapeRow, WeatherForecastFactRow, WeatherObservationFactRow,
     },
     types::{
         DomainInstrumentKey, DomainSourceId, EntryConditionInstanceId, MarketId,
@@ -108,26 +108,26 @@ pub trait QuantFactReadRepository: Send + Sync {
 
     /// Weather observations, explicitly deduplicated by station, observation,
     /// revision, and report hash while retaining later COR revisions.
-    async fn weather_observation_reports_between(
+    async fn weather_observation_facts_between(
         &self,
         _stations: Vec<String>,
         _from_ms: i64,
         _to_ms: i64,
         _publish_cutoff_ms: i64,
         _decision_at_ms: i64,
-    ) -> Result<Vec<WeatherObservationReportRow>, StorageError> {
+    ) -> Result<Vec<WeatherObservationFactRow>, StorageError> {
         Ok(Vec::new())
     }
 
     /// GEFS points, explicitly deduplicated by member and frozen run manifest.
-    async fn weather_forecast_points_between(
+    async fn weather_forecast_facts_between(
         &self,
         _stations: Vec<String>,
         _valid_from_ms: i64,
         _valid_to_ms: i64,
         _reference_cutoff_ms: i64,
         _decision_at_ms: i64,
-    ) -> Result<Vec<WeatherForecastPointRow>, StorageError> {
+    ) -> Result<Vec<WeatherForecastFactRow>, StorageError> {
         Ok(Vec::new())
     }
 

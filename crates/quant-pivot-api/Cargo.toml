@@ -25,6 +25,7 @@ httpdate = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 futures-util = { workspace = true }
+flate2 = { workspace = true }
 tokio-tungstenite = { workspace = true }
 
 # Serialization
@@ -40,6 +41,7 @@ rust_decimal_macros = { workspace = true }
 
 # Time
 chrono = { workspace = true }
+chrono-tz = { workspace = true }
 grib = { workspace = true }
 
 # Concurrency
@@ -79,6 +81,7 @@ wiremock = { workspace = true }
 serde_json = { workspace = true }
 hex = { workspace = true }
 alloy = { workspace = true }
+rustls = { workspace = true }
 
 [lints]
 workspace = true

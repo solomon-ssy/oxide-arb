@@ -33,6 +33,7 @@ pub mod quant_crypto_price_projection;
 #[cfg_attr(not(feature = "repository"), allow(dead_code))]
 pub mod quant_domain_event_outbox;
 pub mod quant_domain_source_cursor;
+pub mod quant_domain_source_expectation;
 pub mod quant_entry_condition_artifact;
 pub mod quant_entry_condition_audit;
 #[cfg_attr(not(feature = "repository"), allow(dead_code))]
@@ -83,7 +84,7 @@ pub mod quant_trade_policy_validation_row;
 pub mod quant_trade_tape_block_cursor;
 pub mod quant_training_dataset;
 #[cfg_attr(not(feature = "repository"), allow(dead_code))]
-pub mod quant_weather_daily_high_projection;
+pub mod quant_weather_daily_temperature_projection;
 #[cfg_attr(not(feature = "repository"), allow(dead_code))]
 pub mod quant_weather_observation_current;
 pub mod role;

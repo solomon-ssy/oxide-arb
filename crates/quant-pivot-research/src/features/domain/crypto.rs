@@ -137,13 +137,13 @@ fn distance_to_strike(ctx: &CryptoComputeCtx<'_>, subject: &CryptoSubject) -> Ra
     };
     let close_value = close.value;
     let ratio = match (&subject.comparator, subject.strike) {
-        (PriceComparator::Above, Some(strike)) => {
+        (PriceComparator::GreaterThan | PriceComparator::GreaterThanOrEqual, Some(strike)) => {
             signed_relative(close_value, strike.inner(), false)
         }
-        (PriceComparator::Below, Some(strike)) => {
+        (PriceComparator::LessThan | PriceComparator::LessThanOrEqual, Some(strike)) => {
             signed_relative(close_value, strike.inner(), true)
         }
-        (PriceComparator::Between { hi }, Some(lo)) => {
+        (PriceComparator::Between { hi, .. }, Some(lo)) => {
             band_distance(close_value, lo.inner(), hi.inner())
         }
         (PriceComparator::UpVsReference, _) => {
@@ -317,7 +317,9 @@ mod tests {
             PriceComparator, ResolutionOracle, ResolvedBinding, ResolvedSourceBinding,
         },
         enums::{
-            domain::{DomainFamily, DomainMetric, KlineInterval, LinkageSourceRole},
+            domain::{
+                BinanceMarketSegment, DomainFamily, DomainMetric, KlineInterval, LinkageSourceRole,
+            },
             feature::EvidenceSourceKind,
         },
         runtime_config::{CryptoDomainConfig, DomainConfig},
@@ -451,7 +453,10 @@ mod tests {
     fn above_threshold_distance_is_signed_toward_yes() {
         let as_of = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
         let primary = window(&[(2, dec!(99000)), (1, dec!(101000))]);
-        let binding = binding(PriceComparator::Above, Some(Usd::new(dec!(100000))));
+        let binding = binding(
+            PriceComparator::GreaterThanOrEqual,
+            Some(Usd::new(dec!(100000))),
+        );
         let domain = domain(CryptoDomainConfig::default());
         let linkage_evidence = linkage_evidence(as_of);
         let ctx = DomainComputeCtx {
@@ -477,7 +482,10 @@ mod tests {
     fn missing_close_fails_closed() {
         let as_of = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
         let primary = DomainObservationWindow::default();
-        let binding = binding(PriceComparator::Above, Some(Usd::new(dec!(100000))));
+        let binding = binding(
+            PriceComparator::GreaterThanOrEqual,
+            Some(Usd::new(dec!(100000))),
+        );
         let domain = domain(CryptoDomainConfig::default());
         let linkage_evidence = linkage_evidence(as_of);
         let ctx = DomainComputeCtx {
@@ -602,6 +610,7 @@ mod tests {
             PriceComparator::UpVsReference,
             None,
             ResolutionOracle::BinanceKline {
+                market: BinanceMarketSegment::Spot,
                 symbol: BinanceSymbol::parse("BTCUSDT").expect("symbol"),
                 interval: KlineInterval::OneMinute,
             },
@@ -744,7 +753,10 @@ mod tests {
                 dec!(100000),
             )],
         };
-        let binding = binding(PriceComparator::Above, Some(Usd::new(dec!(100000))));
+        let binding = binding(
+            PriceComparator::GreaterThanOrEqual,
+            Some(Usd::new(dec!(100000))),
+        );
         let domain = domain(CryptoDomainConfig::default());
         let linkage_evidence = linkage_evidence(as_of);
         let ctx = DomainComputeCtx {
@@ -772,7 +784,10 @@ mod tests {
     fn unrepresentable_feature_windows_are_explicitly_missing() {
         let as_of = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
         let primary = window(&[(1, dec!(100000))]);
-        let binding = binding(PriceComparator::Above, Some(Usd::new(dec!(100000))));
+        let binding = binding(
+            PriceComparator::GreaterThanOrEqual,
+            Some(Usd::new(dec!(100000))),
+        );
         let domain = domain(CryptoDomainConfig {
             momentum_window_secs: u64::MAX,
             volatility_window_secs: u64::MAX,

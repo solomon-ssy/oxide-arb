@@ -179,17 +179,24 @@ fn validate_weather_candidate(candidate: &ExtractedCandidate) -> ValidationOutco
         };
     };
     for field in [
-        "station",
-        "settlement_rule_url",
+        "decision_group.station",
+        "decision_group.settlement_rule_url",
         "outcome_band",
-        "market_unit",
-        "local_date",
+        "decision_group.market_unit",
+        "decision_group.local_date",
+        "decision_group.temperature_statistic",
+        "decision_group.finalization_policy",
     ] {
         if !has_span_of_kind(candidate, field, GroundingKind::LiteralSpan) {
             return ValidationOutcome::Rejected {
                 reason: format!("weather candidate carries no literal grounding for `{field}`"),
             };
         }
+    }
+    if !subject.has_valid_decision_group_id() {
+        return ValidationOutcome::Rejected {
+            reason: "weather decision-group id does not match its canonical key".to_owned(),
+        };
     }
     if !subject.outcome_band.is_valid() {
         return ValidationOutcome::Rejected {
@@ -209,12 +216,17 @@ fn validate_weather_candidate(candidate: &ExtractedCandidate) -> ValidationOutco
             reason: "weather outcome band must use whole-degree bounds".to_owned(),
         };
     }
-    if subject.timezone.parse::<chrono_tz::Tz>().is_err() {
+    if subject
+        .decision_group
+        .timezone
+        .parse::<chrono_tz::Tz>()
+        .is_err()
+    {
         return ValidationOutcome::Rejected {
             reason: "weather station profile has an invalid IANA timezone".to_owned(),
         };
     }
-    let expected = DomainInstrumentKey::aviation_weather(&subject.station);
+    let expected = DomainInstrumentKey::aviation_weather(&subject.decision_group.station);
     if candidate.instrument_key != expected {
         return ValidationOutcome::Rejected {
             reason: format!(
@@ -276,19 +288,19 @@ pub fn validate_structural_consistency(
     }
 
     // Same consistency check for the Binance-settled path (R4 hardening):
-    // automated extraction always binds `symbol` from `rule.symbol()` so this
+    // automated extraction binds product+symbol from the frozen venue rule so this
     // can never fire there, but an operator override supplies the oracle
     // independently — a mismatched symbol would silently join the basis
     // cross-check (or the settlement price itself) to the wrong venue series.
-    if let ResolutionOracle::BinanceKline { symbol, .. } = &subject.resolution_oracle
-        && *symbol != rule.symbol()
-    {
-        return Err(format!(
-            "resolution oracle cites Binance symbol `{symbol}`, which disagrees with the \
-             ruleset's `{}` symbol for asset `{}`",
-            rule.symbol(),
-            subject.asset
-        ));
+    if let ResolutionOracle::BinanceKline { market, symbol, .. } = &subject.resolution_oracle {
+        let expected = rule.symbol();
+        if *market != rule.binance_market || *symbol != expected {
+            return Err(format!(
+                "resolution oracle cites Binance {market:?}/{symbol}, which disagrees with the \
+                 ruleset's {:?}/{expected} for asset `{}`",
+                rule.binance_market, subject.asset
+            ));
+        }
     }
 
     Ok(())

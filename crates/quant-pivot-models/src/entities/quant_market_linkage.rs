@@ -22,6 +22,7 @@ pub struct Model {
     #[sea_orm(column_type = "JsonBinary")]
     pub outcome: Json,
     pub metadata_hash: ContentHash,
+    pub capability_registry_hash: Option<ContentHash>,
     pub content_hash: ContentHash,
     pub derived_at: DateTime<Utc>,
     pub override_reason: Option<String>,

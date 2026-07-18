@@ -167,7 +167,7 @@ pub mod domain_crypto {
         FeatureName::from_static("domain.crypto.basis_vs_resolution_source");
 }
 
-/// Airport daily-high Weather features. Values are emitted only from typed
+/// Airport daily-temperature Weather features. Values are emitted only from typed
 /// AviationWeather/GHCNh/GEFS facts bound by the market linkage.
 pub mod domain_weather {
     use super::FeatureName;
@@ -176,8 +176,8 @@ pub mod domain_weather {
         FeatureName::from_static("domain.weather.ensemble_bin_probability");
     pub const ENSEMBLE_SPREAD: FeatureName =
         FeatureName::from_static("domain.weather.ensemble_spread");
-    pub const OBSERVED_HIGH_HEADROOM: FeatureName =
-        FeatureName::from_static("domain.weather.observed_high_headroom");
+    pub const OBSERVED_EXTREME_HEADROOM: FeatureName =
+        FeatureName::from_static("domain.weather.observed_extreme_headroom");
     pub const NOAA_RESOLUTION_BASIS_RISK: FeatureName =
         FeatureName::from_static("domain.weather.noaa_resolution_basis_risk");
 }

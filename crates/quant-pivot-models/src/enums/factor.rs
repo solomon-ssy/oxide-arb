@@ -25,7 +25,7 @@ pg_enum! {
         /// oracle). Routed by market category via `DomainFactorRegistry` —
         /// never selectable through `enabled_factor_families`.
         DomainCrypto => "domain_crypto",
-        /// Airport daily-high Weather external vertical.
+        /// Airport daily maximum/minimum Weather external vertical.
         DomainWeather => "domain_weather",
     }
 }

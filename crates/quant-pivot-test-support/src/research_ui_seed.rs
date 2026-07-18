@@ -391,7 +391,7 @@ async fn seed_training_dataset_scenario(
         knowledge_lag_secs: 10,
         sample_interval_secs: 3_600,
         horizons_secs: TrainingHorizonsSecs(horizons_secs.clone()),
-        feature_schema_version: Some(SchemaVersion::new(6)),
+        feature_schema_version: Some(SchemaVersion::new(7)),
         sample_sources: Some(TrainingSampleSources(default_sample_sources())),
         runtime_config_version_id: runtime_config_version_id.clone(),
     })

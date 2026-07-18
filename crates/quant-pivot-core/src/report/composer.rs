@@ -43,8 +43,8 @@ use quant_pivot_models::{
         ReportFunnelReason, ReportFunnelStage, ReportSummary, ResearchProfileRef, RiskEnvelope,
         RuntimeConfigVersionId, ScaleOutTarget, Shares, SizingPlan, ThesisInvalidationPolicy,
         TradePlanBlocker, TradePolicyCohort, TradePolicyCohortProvenance, TrailingStopPolicy, Usd,
-        WeatherDailyHighEnteredBand, WeatherDailyHighExceededBandUpper,
-        WeatherObservationDayClosedOutsideBand,
+        WeatherDailyTemperatureCrossedTerminalBound, WeatherDailyTemperatureEnteredBand,
+        WeatherObservationDayClosedOutsideBand, WeatherTemperatureStatistic,
     },
 };
 use quant_pivot_research::{
@@ -1100,7 +1100,7 @@ fn materialize_market_event(
             MarketEventTemplate::CryptoSubjectPredicateEntered { .. }
         ) | (
             MarketSubject::Weather(_),
-            MarketEventTemplate::WeatherDailyHighPredicate { .. }
+            MarketEventTemplate::WeatherDailyTemperaturePredicate { .. }
         )
     );
     if !family_matches {
@@ -1153,29 +1153,48 @@ fn materialize_event_payload(
         }),
         (
             MarketSubject::Weather(subject),
-            MarketEventTemplate::WeatherDailyHighPredicate { max_input_age_ms },
+            MarketEventTemplate::WeatherDailyTemperaturePredicate { max_input_age_ms },
         ) => match candidate.outcome_side {
                 OutcomeSide::Yes => {
-                    MarketEventCondition::WeatherDailyHighEnteredBand(WeatherDailyHighEnteredBand {
-                        source,
-                        station: subject.station.to_string(),
-                        local_date: subject.local_date,
-                        unit: subject.market_unit,
-                        band: subject.outcome_band.clone(),
-                        proxy_methodology_hash: subject.proxy_methodology_hash.clone(),
-                        max_input_age_ms,
-                    })
+                    MarketEventCondition::WeatherDailyTemperatureEnteredBand(
+                        WeatherDailyTemperatureEnteredBand {
+                            source,
+                            station: subject.decision_group.station.to_string(),
+                            local_date: subject.decision_group.local_date,
+                            temperature_statistic: subject.decision_group.temperature_statistic,
+                            unit: subject.decision_group.market_unit,
+                            band: subject.outcome_band.clone(),
+                            proxy_methodology_hash: subject
+                                .decision_group
+                                .proxy_methodology_hash
+                                .clone(),
+                            max_input_age_ms,
+                        },
+                    )
                 }
-                OutcomeSide::No => match subject.outcome_band.upper_inclusive {
-                    Some(upper_inclusive) => {
-                        MarketEventCondition::WeatherDailyHighExceededBandUpper(
-                            WeatherDailyHighExceededBandUpper {
+                OutcomeSide::No => match match subject.decision_group.temperature_statistic {
+                    WeatherTemperatureStatistic::Maximum => {
+                        subject.outcome_band.upper_inclusive
+                    }
+                    WeatherTemperatureStatistic::Minimum => {
+                        subject.outcome_band.lower_inclusive
+                    }
+                } {
+                    Some(terminal_bound) => {
+                        MarketEventCondition::WeatherDailyTemperatureCrossedTerminalBound(
+                            WeatherDailyTemperatureCrossedTerminalBound {
                                 source,
-                                station: subject.station.to_string(),
-                                local_date: subject.local_date,
-                                unit: subject.market_unit,
-                                upper_inclusive,
-                                proxy_methodology_hash: subject.proxy_methodology_hash.clone(),
+                                station: subject.decision_group.station.to_string(),
+                                local_date: subject.decision_group.local_date,
+                                temperature_statistic: subject
+                                    .decision_group
+                                    .temperature_statistic,
+                                unit: subject.decision_group.market_unit,
+                                terminal_bound,
+                                proxy_methodology_hash: subject
+                                    .decision_group
+                                    .proxy_methodology_hash
+                                    .clone(),
                                 max_input_age_ms,
                             },
                         )
@@ -1183,11 +1202,15 @@ fn materialize_event_payload(
                     None => MarketEventCondition::WeatherObservationDayClosedOutsideBand(
                         WeatherObservationDayClosedOutsideBand {
                             source,
-                            station: subject.station.to_string(),
-                            local_date: subject.local_date,
-                            unit: subject.market_unit,
+                            station: subject.decision_group.station.to_string(),
+                            local_date: subject.decision_group.local_date,
+                            temperature_statistic: subject.decision_group.temperature_statistic,
+                            unit: subject.decision_group.market_unit,
                             band: subject.outcome_band.clone(),
-                            proxy_methodology_hash: subject.proxy_methodology_hash.clone(),
+                            proxy_methodology_hash: subject
+                                .decision_group
+                                .proxy_methodology_hash
+                                .clone(),
                         },
                     ),
                 },
@@ -1239,8 +1262,10 @@ fn collect_condition_leaf_bindings(
         EntryConditionV1::MarketEvent { event: condition } => {
             let source = match condition {
                 MarketEventCondition::CryptoSubjectPredicateEntered(event) => &event.source,
-                MarketEventCondition::WeatherDailyHighEnteredBand(event) => &event.source,
-                MarketEventCondition::WeatherDailyHighExceededBandUpper(event) => &event.source,
+                MarketEventCondition::WeatherDailyTemperatureEnteredBand(event) => &event.source,
+                MarketEventCondition::WeatherDailyTemperatureCrossedTerminalBound(event) => {
+                    &event.source
+                }
                 MarketEventCondition::WeatherObservationDayClosedOutsideBand(event) => {
                     &event.source
                 }

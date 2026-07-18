@@ -1,10 +1,13 @@
 use quant_pivot_error::storage::StorageError;
-use quant_pivot_models::clickhouse::{
-    QuantCapitalAllocationEventRow, QuantExecutionEventRow, QuantExitSignalEvaluationEventRow,
-    QuantFactorEventRow, QuantFeatureEventRow, QuantFeatureParityEventRow, QuantModelInputEventRow,
-    QuantPositionEventRow, QuantRecommendationAttributionEventRow,
-    QuantReportRecommendationFactRow, QuantServingEvidenceCompletionRow,
-    QuantSignalCandidateEventRow, ReportMarketFunnelRow,
+use quant_pivot_models::{
+    clickhouse::{
+        QuantCapitalAllocationEventRow, QuantExecutionEventRow, QuantExitSignalEvaluationEventRow,
+        QuantFactorEventRow, QuantFeatureEventRow, QuantFeatureParityEventRow,
+        QuantModelInputEventRow, QuantPositionEventRow, QuantRecommendationAttributionEventRow,
+        QuantReportRecommendationFactRow, QuantServingEvidenceCompletionRow,
+        QuantSignalCandidateEventRow, ReportMarketFunnelRow,
+    },
+    types::ContentHash,
 };
 
 /// Generic batch sink for one `ClickHouse` fact stream.
@@ -13,10 +16,23 @@ use quant_pivot_models::clickhouse::{
 /// evidence callers await it directly and must not declare completion until
 /// the insert acknowledgement is returned.
 #[async_trait::async_trait]
-pub trait FactWriter<T: Send>: Send + Sync {
+pub trait FactWriter<T: Send + 'static>: Send + Sync {
     /// Persist a batch of fact rows. Best-effort callers may log a failure;
     /// durable callers propagate it and fail closed.
     async fn write_batch(&self, rows: Vec<T>) -> Result<(), StorageError>;
+
+    /// Persist one immutable logical chunk with a deterministic identity.
+    ///
+    /// The default preserves test/in-memory sink behavior. Durable `ClickHouse`
+    /// sinks override this method so an acknowledged insert retried before its
+    /// cross-store cursor commit cannot create a second physical fact block.
+    async fn write_batch_idempotent(
+        &self,
+        _deduplication_token: &ContentHash,
+        rows: Vec<T>,
+    ) -> Result<(), StorageError> {
+        self.write_batch(rows).await
+    }
 }
 
 #[async_trait::async_trait]

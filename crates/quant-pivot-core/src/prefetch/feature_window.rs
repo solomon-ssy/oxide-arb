@@ -259,7 +259,7 @@ impl FeatureWindowProvider {
         let from = window_start(cutoff, lookback, "Weather calibration lookback")?;
         let rows = self
             .fact_read
-            .weather_observation_reports_between(
+            .weather_observation_facts_between(
                 stations.iter().map(ToString::to_string).collect(),
                 from.timestamp_millis(),
                 cutoff.timestamp_millis().checked_add(1).ok_or_else(|| {
@@ -280,25 +280,26 @@ impl FeatureWindowProvider {
                 return Err(ResearchError::PitResolution {
                     detail: format!(
                         "Weather observation {} at {} is outside the PIT boundary",
-                        fact.station, fact.observation_time
+                        fact.subject_key, fact.observed_at
                     ),
                 }
                 .into());
             }
-            grouped.entry(fact.station.clone()).or_default().push(fact);
+            let station = fact.station().ok_or_else(|| ResearchError::PitResolution {
+                detail: format!(
+                    "Weather observation subject `{}` is not an ICAO station",
+                    fact.subject_key
+                ),
+            })?;
+            grouped.entry(station).or_default().push(fact);
         }
         for facts in grouped.values_mut() {
             facts.sort_by(|left, right| {
-                (
-                    left.observation_time,
-                    left.revision,
-                    left.report_hash.as_str(),
-                )
-                    .cmp(&(
-                        right.observation_time,
-                        right.revision,
-                        right.report_hash.as_str(),
-                    ))
+                (left.observed_at, left.revision, left.report_hash.as_str()).cmp(&(
+                    right.observed_at,
+                    right.revision,
+                    right.report_hash.as_str(),
+                ))
             });
         }
         Ok(grouped)
@@ -321,7 +322,7 @@ impl FeatureWindowProvider {
         let from = window_start(cutoff, lookback, "GEFS calibration lookback")?;
         let rows =
             self.fact_read
-                .weather_forecast_points_between(
+                .weather_forecast_facts_between(
                     stations.iter().map(ToString::to_string).collect(),
                     from.timestamp_millis(),
                     valid_to.timestamp_millis().checked_add(1).ok_or_else(|| {
@@ -342,12 +343,18 @@ impl FeatureWindowProvider {
                 return Err(ResearchError::PitResolution {
                     detail: format!(
                         "GEFS point {} / {} is outside the PIT boundary",
-                        fact.station, fact.valid_time
+                        fact.subject_key, fact.valid_time
                     ),
                 }
                 .into());
             }
-            grouped.entry(fact.station.clone()).or_default().push(fact);
+            let station = fact.station().ok_or_else(|| ResearchError::PitResolution {
+                detail: format!(
+                    "Weather forecast subject `{}` is not an ICAO station",
+                    fact.subject_key
+                ),
+            })?;
+            grouped.entry(station).or_default().push(fact);
         }
         for facts in grouped.values_mut() {
             facts.sort_by(|left, right| {

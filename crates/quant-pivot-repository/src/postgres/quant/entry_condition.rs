@@ -8,12 +8,12 @@ use quant_pivot_models::{
         ApplyEntryConditionEvaluation, ApplyEntryConditionEvaluationOutcome,
         CryptoPriceProjectionInfo, EntryConditionArtifactInfo, EntryConditionAuditInfo,
         EntryConditionClaim, EntryConditionInstanceInfo, NewEntryConditionArtifact,
-        NewEntryConditionAudit, NewEntryConditionInstance, WeatherDailyHighProjectionInfo,
+        NewEntryConditionAudit, NewEntryConditionInstance, WeatherDailyTemperatureProjectionInfo,
     },
     entities::{
         quant_crypto_price_projection, quant_entry_condition_artifact, quant_entry_condition_audit,
         quant_entry_condition_evaluation_outbox, quant_entry_condition_instance,
-        quant_weather_daily_high_projection,
+        quant_weather_daily_temperature_projection,
     },
     enums::quant::{EntryConditionAuditAction, EntryConditionState},
     hashing::CanonicalDigest,
@@ -21,6 +21,7 @@ use quant_pivot_models::{
         ConditionTruth, ContentHash, CryptoEnteredFoldState, DomainInstrumentKey, DomainSourceId,
         EntryConditionArtifactId, EntryConditionAuditId, EntryConditionFoldState,
         EntryConditionInstanceId, OrderIntentId, RecommendationId, TemperatureCelsius,
+        WeatherTemperatureStatistic,
     },
 };
 use sea_orm::{
@@ -216,24 +217,27 @@ impl EntryConditionRepository for PgEntryConditionRepository {
         instrument_key: &DomainInstrumentKey,
         station: &str,
         local_date: chrono::NaiveDate,
-    ) -> Result<Option<WeatherDailyHighProjectionInfo>, StorageError> {
-        quant_weather_daily_high_projection::Entity::find_by_id((
+        temperature_statistic: WeatherTemperatureStatistic,
+    ) -> Result<Option<WeatherDailyTemperatureProjectionInfo>, StorageError> {
+        quant_weather_daily_temperature_projection::Entity::find_by_id((
             source_id.clone(),
             instrument_key.clone(),
             local_date,
+            temperature_statistic.as_str().to_owned(),
         ))
-        .filter(quant_weather_daily_high_projection::Column::Station.eq(station))
+        .filter(quant_weather_daily_temperature_projection::Column::Station.eq(station))
         .one(&self.db)
         .await
         .map_err(StorageError::from)
         .map(|row| {
-            row.map(|row| WeatherDailyHighProjectionInfo {
+            row.map(|row| WeatherDailyTemperatureProjectionInfo {
                 source_id: row.source_id,
                 instrument_key: row.instrument_key,
                 station: row.station,
                 local_date: row.local_date,
                 timezone: row.timezone,
-                current_high: TemperatureCelsius::new(row.current_high_celsius),
+                temperature_statistic,
+                current_extreme: TemperatureCelsius::new(row.current_extreme_celsius),
                 last_observation_time: row.last_observation_time,
                 last_report_hash: row.last_report_hash,
                 revision: row.revision,

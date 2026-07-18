@@ -12,13 +12,20 @@ use quant_pivot_models::{
     hashing::CanonicalDigest,
     types::{
         IcaoStation, TemperatureCelsius, TemperatureUnit, VerticalActivationTarget,
-        VerticalGateEvidence, VerticalGateKind,
+        VerticalGateEvidence, VerticalGateKind, WeatherTemperatureStatistic,
     },
 };
 use rust_decimal::{Decimal, MathematicalOps};
 
 /// Semantic identity of the sealed Weather proxy methodology.
-pub const WEATHER_PROXY_VALIDATION_VERSION: &str = "awc_ghcnh_daily_high_proxy_v1";
+pub const WEATHER_PROXY_VALIDATION_VERSION: &str = "awc_ghcnh_daily_temperature_proxy_v2";
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct ProxySubject {
+    station: IcaoStation,
+    statistic: WeatherTemperatureStatistic,
+    unit: TemperatureUnit,
+}
 
 /// Produce the fail-closed Weather activation gate from one verified Source
 /// Slice. Inputs must already be bounded by the artifact PIT cutoff.
@@ -34,8 +41,8 @@ pub fn evaluate_weather_proxy_gate(
             "Weather proxy gate requires a non-empty activation evidence window".to_owned(),
         ));
     }
-    let station_units = station_units(linkages)?;
-    if station_units.is_empty() {
+    let subjects = proxy_subjects(linkages);
+    if subjects.is_empty() {
         return Err(methodology(
             "Weather proxy gate has no resolved Weather station subjects".to_owned(),
         ));
@@ -43,10 +50,12 @@ pub fn evaluate_weather_proxy_gate(
     let relevant = observations
         .iter()
         .filter(|fact| {
-            station_units.contains_key(&fact.station)
-                && fact.observation_time >= window_start
-                && fact.observation_time < window_end
+            fact.station()
+                .is_some_and(|station| subjects.iter().any(|subject| subject.station == station))
+                && fact.observed_at >= window_start
+                && fact.observed_at < window_end
                 && fact.available_at <= window_end
+                && fact.temperature_celsius().is_some()
         })
         .collect::<Vec<_>>();
     let report_hashes = relevant
@@ -58,59 +67,60 @@ pub fn evaluate_weather_proxy_gate(
             .as_ref()
             .is_none_or(|hash| report_hashes.contains(hash))
     });
-    let live = daily_highs(&relevant, false);
-    let historical = daily_highs(&relevant, true);
+    let live = daily_extremes(&relevant, false);
+    let historical = daily_extremes(&relevant, true);
     let mut total_reference_days = 0_u64;
     let mut total_paired_days = 0_u64;
     let mut total_agreements = 0_u64;
     let mut paired_dates = BTreeSet::new();
-    let mut per_station = BTreeMap::<IcaoStation, (u64, u64)>::new();
-    for ((station, local_date), historical_high) in &historical {
-        total_reference_days = total_reference_days
-            .checked_add(1)
-            .ok_or_else(|| methodology("Weather proxy reference-day count overflow".to_owned()))?;
-        let Some(live_high) = live.get(&(station.clone(), *local_date)) else {
-            continue;
-        };
-        let unit = station_units.get(station).ok_or_else(|| {
-            methodology(format!(
-                "Weather proxy station {station} has no frozen market unit"
-            ))
-        })?;
-        total_paired_days = total_paired_days
-            .checked_add(1)
-            .ok_or_else(|| methodology("Weather proxy paired-day count overflow".to_owned()))?;
-        paired_dates.insert(*local_date);
-        let entry = per_station.entry(station.clone()).or_default();
-        entry.1 = entry
-            .1
-            .checked_add(1)
-            .ok_or_else(|| methodology("Weather proxy station sample count overflow".to_owned()))?;
-        if live_high.whole_degrees(*unit) == historical_high.whole_degrees(*unit) {
-            total_agreements = total_agreements
-                .checked_add(1)
-                .ok_or_else(|| methodology("Weather proxy agreement count overflow".to_owned()))?;
-            entry.0 = entry.0.checked_add(1).ok_or_else(|| {
-                methodology("Weather proxy station agreement count overflow".to_owned())
+    let mut per_subject = BTreeMap::<ProxySubject, (u64, u64)>::new();
+    for subject in &subjects {
+        for ((station, local_date, statistic), historical_extreme) in &historical {
+            if station != &subject.station || statistic != &subject.statistic {
+                continue;
+            }
+            total_reference_days = total_reference_days.checked_add(1).ok_or_else(|| {
+                methodology("Weather proxy reference-day count overflow".to_owned())
             })?;
+            let Some(live_extreme) = live.get(&(station.clone(), *local_date, *statistic)) else {
+                continue;
+            };
+            total_paired_days = total_paired_days
+                .checked_add(1)
+                .ok_or_else(|| methodology("Weather proxy paired-day count overflow".to_owned()))?;
+            paired_dates.insert(*local_date);
+            let entry = per_subject.entry(subject.clone()).or_default();
+            entry.1 = entry.1.checked_add(1).ok_or_else(|| {
+                methodology("Weather proxy subject sample count overflow".to_owned())
+            })?;
+            if live_extreme.whole_degrees(subject.unit)
+                == historical_extreme.whole_degrees(subject.unit)
+            {
+                total_agreements = total_agreements.checked_add(1).ok_or_else(|| {
+                    methodology("Weather proxy agreement count overflow".to_owned())
+                })?;
+                entry.0 = entry.0.checked_add(1).ok_or_else(|| {
+                    methodology("Weather proxy subject agreement count overflow".to_owned())
+                })?;
+            }
         }
     }
-    let station_results = station_units
-        .keys()
-        .map(|station| {
-            let (agreements, samples) = per_station.get(station).copied().unwrap_or_default();
+    let subject_results = subjects
+        .iter()
+        .map(|subject| {
+            let (agreements, samples) = per_subject.get(subject).copied().unwrap_or_default();
             Ok((samples, wilson_lower_bound(agreements, samples)?))
         })
         .collect::<QuantResult<Vec<_>>>()?;
-    // These are independent worst-case guarantees. Selecting one station by
-    // sample count and reusing its bound would let a different low-agreement
-    // station escape the per-subject publication gate.
-    let target_subject_sample_count = station_results.iter().map(|row| row.0).min();
-    let target_subject_wilson_lower_bound = station_results.iter().map(|row| row.1).min();
+    // These are independent worst-case guarantees. Selecting one
+    // station/statistic/unit subject by sample count and reusing its bound
+    // would let a different low-agreement contract family escape the gate.
+    let target_subject_sample_count = subject_results.iter().map(|row| row.0).min();
+    let target_subject_wilson_lower_bound = subject_results.iter().map(|row| row.1).min();
     let methodology_hash = CanonicalDigest::content_hash_json(&(
         WEATHER_PROXY_VALIDATION_VERSION,
-        "AWC_METAR_SPECI_COR_latest_revision_daily_max",
-        "GHCNh_latest_revision_daily_max",
+        "AWC_METAR_SPECI_COR_latest_revision_daily_max_and_min",
+        "GHCNh_latest_revision_daily_max_and_min",
         "whole_degree_midpoint_away_from_zero",
         "two_sided_wilson_95_lower_bound",
     ))?;
@@ -121,9 +131,9 @@ pub fn evaluate_weather_proxy_gate(
         evidence_window_start: window_start,
         evidence_window_end: window_end,
         sample_count: total_paired_days,
-        distinct_subject_count: u32::try_from(per_station.len()).map_err(|error| {
+        distinct_subject_count: u32::try_from(subjects.len()).map_err(|error| {
             methodology(format!(
-                "Weather proxy station count does not fit u32: {error}"
+                "Weather proxy subject count does not fit u32: {error}"
             ))
         })?,
         distinct_local_dates: u32::try_from(paired_dates.len()).map_err(|error| {
@@ -140,10 +150,8 @@ pub fn evaluate_weather_proxy_gate(
     })
 }
 
-fn station_units(
-    linkages: &[MarketLinkage],
-) -> QuantResult<BTreeMap<IcaoStation, TemperatureUnit>> {
-    let mut units = BTreeMap::new();
+fn proxy_subjects(linkages: &[MarketLinkage]) -> BTreeSet<ProxySubject> {
+    let mut subjects = BTreeSet::new();
     for linkage in linkages {
         let LinkageOutcome::Resolved(binding) = &linkage.outcome else {
             continue;
@@ -151,23 +159,19 @@ fn station_units(
         let MarketSubject::Weather(subject) = &binding.subject else {
             continue;
         };
-        if units
-            .insert(subject.station.clone(), subject.market_unit)
-            .is_some_and(|prior| prior != subject.market_unit)
-        {
-            return Err(methodology(format!(
-                "Weather proxy station {} is linked with conflicting market units",
-                subject.station
-            )));
-        }
+        subjects.insert(ProxySubject {
+            station: subject.decision_group.station.clone(),
+            statistic: subject.decision_group.temperature_statistic,
+            unit: subject.decision_group.market_unit,
+        });
     }
-    Ok(units)
+    subjects
 }
 
-fn daily_highs(
+fn daily_extremes(
     facts: &[&WeatherObservationFact],
     historical: bool,
-) -> BTreeMap<(IcaoStation, NaiveDate), TemperatureCelsius> {
+) -> BTreeMap<(IcaoStation, NaiveDate, WeatherTemperatureStatistic), TemperatureCelsius> {
     let accepted = |kind| {
         if historical {
             kind == WeatherObservationReportKind::HistoricalGhcnh
@@ -186,8 +190,11 @@ fn daily_highs(
         .copied()
         .filter(|fact| accepted(fact.report_kind))
     {
+        let Some(station) = fact.station() else {
+            continue;
+        };
         latest
-            .entry((fact.station.clone(), fact.observation_time))
+            .entry((station, fact.observed_at))
             .and_modify(|current| {
                 if (fact.revision, fact.available_at, fact.report_hash.as_str())
                     > (
@@ -201,16 +208,28 @@ fn daily_highs(
             })
             .or_insert(fact);
     }
-    let mut highs = BTreeMap::new();
+    let mut extremes = BTreeMap::new();
     for fact in latest.into_values() {
-        highs
-            .entry((fact.station.clone(), fact.local_date))
-            .and_modify(|current: &mut TemperatureCelsius| {
-                *current = (*current).max(fact.temperature);
-            })
-            .or_insert(fact.temperature);
+        let (Some(station), Some(temperature)) = (fact.station(), fact.temperature_celsius())
+        else {
+            continue;
+        };
+        for statistic in [
+            WeatherTemperatureStatistic::Maximum,
+            WeatherTemperatureStatistic::Minimum,
+        ] {
+            extremes
+                .entry((station.clone(), fact.local_date, statistic))
+                .and_modify(|current: &mut TemperatureCelsius| {
+                    *current = match statistic {
+                        WeatherTemperatureStatistic::Maximum => (*current).max(temperature),
+                        WeatherTemperatureStatistic::Minimum => (*current).min(temperature),
+                    };
+                })
+                .or_insert(temperature);
+        }
     }
-    highs
+    extremes
 }
 
 fn ratio(numerator: u64, denominator: u64) -> Decimal {

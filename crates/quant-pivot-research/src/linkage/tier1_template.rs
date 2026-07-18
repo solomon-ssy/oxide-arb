@@ -27,7 +27,7 @@ use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     domain::{
         CryptoSubject, GroundingField, GroundingKind, GroundingProof, GroundingSpan,
-        LinkageSourceMetadata, MarketSubject, PriceComparator,
+        LinkageSourceMetadata, MarketSubject, PriceBoundaryInclusion, PriceComparator,
     },
     enums::domain::ResolverTier,
     types::{Probability, Usd},
@@ -52,11 +52,6 @@ static DAILY_SLUG: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^([a-z]+)-up-or-down-on-([a-z]+)-(\d{1,2})(?:-(\d{4}))?$").expect("static regex")
 });
 
-/// A dollar amount with optional thousands separators and `k`/`m` suffix.
-static DOLLAR_AMOUNT: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\$([0-9][0-9,]*(?:\.[0-9]+)?)\s*([kKmM])?").expect("static regex")
-});
-
 /// A band question: "between $X and $Y".
 static DOLLAR_BAND: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
@@ -65,15 +60,13 @@ static DOLLAR_BAND: LazyLock<Regex> = LazyLock::new(|| {
     .expect("static regex")
 });
 
-/// Upward comparators in threshold questions.
-static ABOVE_PHRASE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\b(reach|hit|close above|above|exceed|surpass)\b").expect("static regex")
-});
-
-/// Downward comparators in threshold questions.
-static BELOW_PHRASE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\b(dip to|drop to|fall to|close below|below|fall under)\b")
-        .expect("static regex")
+/// A threshold phrase followed by an optional-dollar amount. Anchoring the
+/// amount to the comparator prevents date/year digits from becoming strikes.
+static THRESHOLD_PHRASE_AMOUNT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)\b(reach|hit|at or above|at least|close above|greater than|above|exceed|surpass|dip to|drop to|fall to|at or below|at most|close below|less than|below|fall under)\s+\$?([0-9][0-9,]*(?:\.[0-9]+)?)\s*([kKmM])?\b",
+    )
+    .expect("static regex")
 });
 
 /// Tier 1 deterministic template parser.
@@ -277,39 +270,33 @@ fn parse_threshold_question(metadata: &LinkageSourceMetadata) -> Option<Extracte
             full.start(),
             full.end(),
         ));
+        let (lower, upper) = band_boundary_policy(metadata.description.as_deref()?)?;
         (
-            PriceComparator::Between { hi: Usd::new(hi) },
+            PriceComparator::Between {
+                hi: Usd::new(hi),
+                lower,
+                upper,
+            },
             Some(Usd::new(lo)),
         )
     } else {
-        let amount = DOLLAR_AMOUNT.captures(question)?;
-        let strike = parse_dollars(amount.get(1)?.as_str(), amount.get(2))?;
-        let amount_full = amount.get(0)?;
+        let threshold = THRESHOLD_PHRASE_AMOUNT.captures(question)?;
+        let strike = parse_dollars(threshold.get(2)?.as_str(), threshold.get(3))?;
+        let amount_full = threshold.get(2)?;
         spans.push(question_span(
             "strike",
             question,
             amount_full.start(),
             amount_full.end(),
         ));
-        let comparator = if let Some(above) = ABOVE_PHRASE.find(question) {
-            spans.push(question_span(
-                "comparator",
-                question,
-                above.start(),
-                above.end(),
-            ));
-            PriceComparator::Above
-        } else {
-            // A dollar amount with no recognizable direction is ambiguous.
-            let below = BELOW_PHRASE.find(question)?;
-            spans.push(question_span(
-                "comparator",
-                question,
-                below.start(),
-                below.end(),
-            ));
-            PriceComparator::Below
-        };
+        let phrase = threshold.get(1)?;
+        spans.push(question_span(
+            "comparator",
+            question,
+            phrase.start(),
+            phrase.end(),
+        ));
+        let comparator = threshold_comparator(phrase.as_str())?;
         (comparator, Some(Usd::new(strike)))
     };
 
@@ -328,6 +315,45 @@ fn parse_threshold_question(metadata: &LinkageSourceMetadata) -> Option<Extracte
         confidence: Probability::ONE,
         grounding: GroundingProof { spans },
     })
+}
+
+/// Freeze exact threshold semantics from the literal question phrase.
+fn threshold_comparator(phrase: &str) -> Option<PriceComparator> {
+    Some(match phrase.to_ascii_lowercase().as_str() {
+        "above" | "close above" | "greater than" | "exceed" | "surpass" => {
+            PriceComparator::GreaterThan
+        }
+        "reach" | "hit" | "at or above" | "at least" => PriceComparator::GreaterThanOrEqual,
+        "below" | "close below" | "less than" | "fall under" => PriceComparator::LessThan,
+        "dip to" | "drop to" | "fall to" | "at or below" | "at most" => {
+            PriceComparator::LessThanOrEqual
+        }
+        _ => return None,
+    })
+}
+
+/// Derive a band's exact endpoint ownership from its resolution rules.
+/// Ambiguous prose fails closed because sibling neg-risk bands cannot both own
+/// the same settlement value.
+fn band_boundary_policy(
+    description: &str,
+) -> Option<(PriceBoundaryInclusion, PriceBoundaryInclusion)> {
+    let rules = description.to_ascii_lowercase();
+    if rules.contains("falls exactly between two brackets")
+        && rules.contains("higher range bracket")
+    {
+        return Some((
+            PriceBoundaryInclusion::Inclusive,
+            PriceBoundaryInclusion::Exclusive,
+        ));
+    }
+    if rules.contains("inclusive of both") || rules.contains("both endpoints are inclusive") {
+        return Some((
+            PriceBoundaryInclusion::Inclusive,
+            PriceBoundaryInclusion::Inclusive,
+        ));
+    }
+    None
 }
 
 /// A literal grounding span over the question text.
@@ -454,12 +480,19 @@ fn infer_year(
 #[cfg(test)]
 mod tests {
     use super::CryptoSubjectParser;
-    use crate::linkage::extractor::{
-        DefaultSubjectValidator, SubjectExtractor, SubjectValidator, ValidationOutcome,
+    use crate::linkage::{
+        extractor::{
+            DefaultSubjectValidator, SubjectExtractor, SubjectValidator, ValidationOutcome,
+        },
+        rules,
     };
     use chrono::{TimeZone, Utc};
     use quant_pivot_models::{
-        domain::{LinkageSourceMetadata, MarketSubject, PriceComparator, ResolutionOracle},
+        domain::{
+            LinkageSourceMetadata, MarketSubject, PriceBoundaryInclusion, PriceComparator,
+            ResolutionOracle,
+        },
+        enums::domain::KlineInterval,
         types::{MarketId, Usd},
     };
     use rust_decimal_macros::dec;
@@ -473,6 +506,10 @@ mod tests {
     const BINANCE_RULES: &str = "This market will resolve according to the Binance BTCUSDT \
          1 minute candle closing price on the resolution date.";
 
+    const HIGHER_BRACKET_RULES: &str = "The resolution source is the Binance ETH/USDT 1 minute \
+         candle close. If the reported value falls exactly between two brackets, then this \
+         market will resolve to the higher range bracket.";
+
     fn metadata(slug: &str, question: &str, description: Option<&str>) -> LinkageSourceMetadata {
         LinkageSourceMetadata {
             market_id: MarketId::new("0xmarket"),
@@ -480,6 +517,7 @@ mod tests {
             question: question.to_owned(),
             description: description.map(str::to_owned),
             series_slug: None,
+            decision_group_market_ids: Vec::new(),
             end_date: Some(Utc.with_ymd_and_hms(2026, 7, 8, 12, 0, 0).unwrap()),
         }
     }
@@ -564,7 +602,7 @@ mod tests {
         let MarketSubject::Crypto(subject) = &candidate.subject else {
             panic!("crypto subject")
         };
-        assert_eq!(subject.comparator, PriceComparator::Above);
+        assert_eq!(subject.comparator, PriceComparator::GreaterThanOrEqual);
         assert_eq!(subject.strike, Some(Usd::new(dec!(150000))));
         assert!(matches!(
             &subject.resolution_oracle,
@@ -578,11 +616,10 @@ mod tests {
 
     #[test]
     fn band_question_extracts_between() {
-        let eth_rules = CHAINLINK_RULES.replace("btc-usd", "eth-usd");
         let metadata = metadata(
             "what-price-will-ethereum-hit-in-july",
             "Will Ethereum close between $2,500 and $3,000 on July 31?",
-            Some(&eth_rules),
+            Some(HIGHER_BRACKET_RULES),
         );
         let candidate = CryptoSubjectParser
             .extract(&metadata)
@@ -595,7 +632,9 @@ mod tests {
         assert_eq!(
             subject.comparator,
             PriceComparator::Between {
-                hi: Usd::new(dec!(3000))
+                hi: Usd::new(dec!(3000)),
+                lower: PriceBoundaryInclusion::Inclusive,
+                upper: PriceBoundaryInclusion::Exclusive,
             }
         );
     }
@@ -627,6 +666,103 @@ mod tests {
                 .expect("extract")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn every_supported_asset_parses_hourly_and_full_name_above_templates() {
+        for rule in rules() {
+            let ticker = rule.ticker.to_ascii_lowercase();
+            let feed = rule.chainlink_feed.to_ascii_lowercase();
+            let chainlink_rules =
+                format!("The resolution source is https://data.chain.link/streams/{feed}.");
+            let hourly = metadata(
+                &format!("{ticker}-up-or-down-july-7-3pm-et"),
+                &format!("{} Up or Down - July 7, 3PM ET", rule.ticker),
+                Some(&chainlink_rules),
+            );
+            let hourly_candidate = CryptoSubjectParser
+                .extract(&hourly)
+                .expect("hourly extract")
+                .expect("hourly fixture");
+            let MarketSubject::Crypto(hourly_subject) = &hourly_candidate.subject else {
+                panic!("crypto subject")
+            };
+            assert_eq!(hourly_subject.asset.as_str(), rule.ticker);
+            assert_eq!(
+                DefaultSubjectValidator.validate(&hourly_candidate, &hourly),
+                ValidationOutcome::Accepted
+            );
+
+            let full_name = rule.aliases[0];
+            let resolution_rules = format!(
+                "This market resolves per the Binance {} 1 minute candle close.",
+                rule.binance_symbol
+            );
+            let threshold = metadata(
+                &format!("will-{ticker}-close-above-100"),
+                &format!("Will {full_name} close above $100?"),
+                Some(&resolution_rules),
+            );
+            let threshold_candidate = CryptoSubjectParser
+                .extract(&threshold)
+                .expect("threshold extract")
+                .expect("full-name above fixture");
+            let MarketSubject::Crypto(threshold_subject) = &threshold_candidate.subject else {
+                panic!("crypto subject")
+            };
+            assert_eq!(threshold_subject.asset.as_str(), rule.ticker);
+            assert_eq!(threshold_subject.comparator, PriceComparator::GreaterThan);
+            assert_eq!(
+                DefaultSubjectValidator.validate(&threshold_candidate, &threshold),
+                ValidationOutcome::Accepted
+            );
+        }
+    }
+
+    #[test]
+    fn real_hourly_binance_templates_freeze_one_hour_and_optional_dollar_strike() {
+        let updown_rules = "This market resolves using the Binance BTC/USDT 1 hour candle close.";
+        let updown = metadata(
+            "bitcoin-up-or-down-july-18-2026-8pm-et",
+            "Bitcoin Up or Down - July 18, 2026, 8PM ET",
+            Some(updown_rules),
+        );
+        let candidate = CryptoSubjectParser
+            .extract(&updown)
+            .expect("extract")
+            .expect("hourly up/down");
+        let MarketSubject::Crypto(subject) = &candidate.subject else {
+            panic!("crypto subject")
+        };
+        assert!(matches!(
+            subject.resolution_oracle,
+            ResolutionOracle::BinanceKline {
+                interval: KlineInterval::OneHour,
+                ..
+            }
+        ));
+
+        let threshold = metadata(
+            "bitcoin-above-61400-on-july-17-2026-1pm-et",
+            "Will Bitcoin be above 61,400 on July 17, 2026 at 1PM ET?",
+            Some(updown_rules),
+        );
+        let candidate = CryptoSubjectParser
+            .extract(&threshold)
+            .expect("extract")
+            .expect("hourly threshold");
+        let MarketSubject::Crypto(subject) = &candidate.subject else {
+            panic!("crypto subject")
+        };
+        assert_eq!(subject.strike, Some(Usd::new(dec!(61400))));
+        assert_eq!(subject.comparator, PriceComparator::GreaterThan);
+        assert!(matches!(
+            subject.resolution_oracle,
+            ResolutionOracle::BinanceKline {
+                interval: KlineInterval::OneHour,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -670,6 +806,7 @@ mod tests {
             question: "Bitcoin Up or Down - Dec 31, 11PM ET".to_owned(),
             description: Some(CHAINLINK_RULES.to_owned()),
             series_slug: None,
+            decision_group_market_ids: Vec::new(),
             end_date: Some(end_date),
         };
         let candidate = CryptoSubjectParser
@@ -694,6 +831,7 @@ mod tests {
             question: "Bitcoin Up or Down - June 15, 3PM ET".to_owned(),
             description: Some(CHAINLINK_RULES.to_owned()),
             series_slug: None,
+            decision_group_market_ids: Vec::new(),
             end_date: Some(Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap()),
         };
         assert!(

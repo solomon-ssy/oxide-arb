@@ -8,7 +8,10 @@ use quant_pivot_models::{
     config::AviationWeatherSourceConfig,
     domain::{WeatherObservationReport, WeatherObservationReportKind},
     hashing::CanonicalDigest,
-    types::{ContentHash, DomainSourceId, IcaoStation, TemperatureCelsius},
+    types::{
+        ContentHash, DomainInstrumentKey, DomainMeasurementUnit, DomainSourceId, IcaoStation,
+        WeatherVariable,
+    },
 };
 use rust_decimal::Decimal;
 use serde::{Deserialize, Deserializer};
@@ -88,7 +91,7 @@ impl AviationWeatherSource {
             left.available_at
                 .cmp(&right.available_at)
                 .then_with(|| left.published_at.cmp(&right.published_at))
-                .then_with(|| left.observation_time.cmp(&right.observation_time))
+                .then_with(|| left.observed_at.cmp(&right.observed_at))
                 .then_with(|| left.report_hash.as_str().cmp(right.report_hash.as_str()))
         });
         Ok(reports)
@@ -118,10 +121,13 @@ fn map_report(
             context: "AviationWeather METAR JSON".into(),
             detail: format!("invalid obsTime: {}", row.obs_time),
         })?;
-    if row.receipt_time < observation_time || available_at < row.receipt_time {
+    // AWC exposes source receipt and nominal observation as independent fields.
+    // Some valid METARs arrive before their nominal report minute; retaining
+    // both timestamps lets PIT selection conservatively gate on event time.
+    if available_at < row.receipt_time {
         return Err(ApiError::Deserialize {
             context: "AviationWeather METAR timing".into(),
-            detail: "observation/receipt/availability timestamps are not monotonic".to_owned(),
+            detail: "local availability precedes the source receipt timestamp".to_owned(),
         }
         .into());
     }
@@ -146,11 +152,16 @@ fn map_report(
     let precision_celsius = Decimal::new(1, temperature.scale().min(1));
     Ok(Some(WeatherObservationReport {
         source_id: DomainSourceId::aviation_weather(),
-        station: station.clone(),
+        instrument_key: DomainInstrumentKey::aviation_weather(station),
+        subject_key: station.to_string(),
         report_kind,
-        temperature: TemperatureCelsius::new(temperature),
-        precision_celsius,
-        observation_time,
+        variable: WeatherVariable::Temperature,
+        value: temperature,
+        unit: DomainMeasurementUnit::Celsius,
+        precision: precision_celsius,
+        observed_at: observation_time,
+        valid_from: None,
+        valid_to: None,
         published_at: row.receipt_time,
         available_at,
         report_hash,
@@ -219,8 +230,46 @@ mod tests {
             .await
             .expect("observations");
         assert_eq!(reports.len(), 2);
-        assert_eq!(reports[0].temperature.value(), dec!(26.7));
-        assert_eq!(reports[1].temperature.value(), dec!(26.1));
+        assert_eq!(reports[0].value, dec!(26.7));
+        assert_eq!(reports[1].value, dec!(26.1));
         assert_ne!(reports[0].report_hash, reports[1].report_hash);
+    }
+
+    #[tokio::test]
+    async fn preserves_a_source_receipt_that_precedes_nominal_observation_time() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/metar"))
+            .and(query_param("ids", "KBKF"))
+            .and(query_param("format", "json"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!([{
+                    "icaoId": "KBKF",
+                    "receiptTime": "2026-07-15T02:56:35.906Z",
+                    "obsTime": 1_784_084_280,
+                    "temp": 27.8,
+                    "metarType": "METAR",
+                    "rawOb": "METAR KBKF 150258Z 14016KT 10SM FEW140 28/09 A3018"
+                }])),
+            )
+            .mount(&server)
+            .await;
+        let source = AviationWeatherSource::connect(AviationWeatherSourceConfig {
+            base_url: server.uri(),
+            ..AviationWeatherSourceConfig::default()
+        })
+        .expect("source");
+        let reports = source
+            .observations(
+                &IcaoStation::parse("KBKF").expect("station"),
+                2,
+                Utc.with_ymd_and_hms(2026, 7, 15, 3, 0, 0).unwrap(),
+            )
+            .await
+            .expect("observations");
+
+        assert_eq!(reports.len(), 1);
+        assert!(reports[0].published_at < reports[0].observed_at);
+        assert!(reports[0].published_at <= reports[0].available_at);
     }
 }

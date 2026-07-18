@@ -14,13 +14,16 @@ use validator::Validate;
 
 use crate::{
     domain::{
-        BasisAlertInfo, DomainSourceCheckpoint, DomainSourceCursorInfo, LinkageOutcome,
-        ManualEvidenceInput, MarketLinkageInfo, ResolvedSourceBinding, pagination::PageRequest,
+        BasisAlertInfo, DomainSourceCheckpoint, DomainSourceCursorInfo,
+        DomainSourceExpectationInfo, LinkageOutcome, ManualEvidenceInput, MarketLinkageInfo,
+        ResolvedSourceBinding, pagination::PageRequest,
     },
-    enums::domain::{DomainFamily, LinkageSourceRole, LinkageStatus, ResolverTier},
+    enums::domain::{
+        DomainFamily, DomainSourceExpectationStatus, LinkageSourceRole, LinkageStatus, ResolverTier,
+    },
     types::{
-        BasisAlertId, Bps, ContentHash, DomainInstrumentKey, DomainSourceId, MarketId,
-        MarketLinkageId, Probability, ResolverVersion,
+        BasisAlertId, Bps, ContentHash, DomainInstrumentKey, DomainSourceExpectationId,
+        DomainSourceId, MarketId, MarketLinkageId, Probability, ResolverVersion,
     },
 };
 
@@ -246,49 +249,140 @@ pub struct LinkageResolveSummaryView {
     pub unresolved: u64,
 }
 
-/// One `(source, instrument)` domain ingest cursor health row.
+/// Expected + observed health for one capability-declared source binding.
 #[derive(Debug, Clone, Serialize)]
-pub struct DomainSourceCursorView {
+pub struct DomainSourceExpectationView {
+    pub expectation_id: DomainSourceExpectationId,
     pub family: DomainFamily,
     pub source_id: String,
     pub instrument_key: String,
-    pub checkpoint: DomainSourceCheckpoint,
-    pub last_event_time: DateTime<Utc>,
-    pub checkpoint_hash: ContentHash,
-    pub status: String,
-    /// Detail from the most recent failed tick; `null` when the last tick for
-    /// this instrument succeeded (R10 ingest hardening).
-    pub last_error: Option<String>,
-    /// Seconds since the last persisted observation (ingest lag proxy).
-    pub lag_secs: i64,
-    pub updated_at: DateTime<Utc>,
+    pub capability_registry_hash: ContentHash,
+    pub binding_hash: ContentHash,
+    pub required: bool,
+    pub credential_required: bool,
+    pub freshness_secs: i64,
+    pub affected_market_ids: Vec<MarketId>,
+    pub affected_profile_ids: Vec<String>,
+    pub status: DomainSourceExpectationStatus,
+    pub status_reason: Option<String>,
+    pub cursor_status: Option<String>,
+    pub checkpoint: Option<DomainSourceCheckpoint>,
+    pub checkpoint_hash: Option<ContentHash>,
+    pub last_event_time: Option<DateTime<Utc>>,
+    /// Source liveness timestamp. Archive checkpoints use their last
+    /// successful refresh while live feeds use the source-effective event.
+    pub freshness_observed_at: Option<DateTime<Utc>>,
+    /// `None` means no cursor exists. It must never be rendered as zero lag.
+    pub lag_secs: Option<i64>,
+    pub cursor_updated_at: Option<DateTime<Utc>>,
+    pub observed_at: DateTime<Utc>,
 }
 
-impl From<DomainSourceCursorInfo> for DomainSourceCursorView {
-    fn from(info: DomainSourceCursorInfo) -> Self {
-        let last_event_time = info.checkpoint_json.event_time();
-        let family = match &info.checkpoint_json {
-            DomainSourceCheckpoint::BinanceKline { .. }
-            | DomainSourceCheckpoint::BinanceAggTrade { .. }
-            | DomainSourceCheckpoint::ChainlinkDataStreams { .. } => DomainFamily::Crypto,
-            DomainSourceCheckpoint::AviationWeather { .. }
-            | DomainSourceCheckpoint::Ghcnh { .. }
-            | DomainSourceCheckpoint::Gefs { .. }
-            | DomainSourceCheckpoint::GefsBackfill { .. } => DomainFamily::Weather,
-        };
-        let lag_secs = (Utc::now() - last_event_time).num_seconds();
-        Self {
-            family,
-            source_id: info.source_id.to_string(),
-            instrument_key: info.instrument_key.to_string(),
-            checkpoint: info.checkpoint_json,
+impl DomainSourceExpectationView {
+    #[must_use]
+    pub fn from_expected_and_observed(
+        expected: DomainSourceExpectationInfo,
+        cursor: Option<DomainSourceCursorInfo>,
+        observed_at: DateTime<Utc>,
+    ) -> Self {
+        let observation = cursor.map(|cursor| {
+            let last_event_time = cursor.checkpoint_json.event_time();
+            let freshness_observed_at = cursor.checkpoint_json.freshness_time(cursor.updated_at);
+            let lag_secs = (observed_at - freshness_observed_at).num_seconds();
+            (cursor, last_event_time, freshness_observed_at, lag_secs)
+        });
+        let (status, status_reason) = effective_source_status(&expected, observation.as_ref());
+        let (
+            cursor_status,
+            checkpoint,
+            checkpoint_hash,
             last_event_time,
-            checkpoint_hash: info.checkpoint_hash,
-            status: info.status,
-            last_error: info.last_error,
+            freshness_observed_at,
             lag_secs,
-            updated_at: info.updated_at,
+            cursor_updated_at,
+        ) = match observation {
+            Some((cursor, last_event_time, freshness_observed_at, lag_secs)) => (
+                Some(cursor.status),
+                Some(cursor.checkpoint_json),
+                Some(cursor.checkpoint_hash),
+                Some(last_event_time),
+                Some(freshness_observed_at),
+                Some(lag_secs),
+                Some(cursor.updated_at),
+            ),
+            None => (None, None, None, None, None, None, None),
+        };
+        Self {
+            expectation_id: expected.expectation_id,
+            family: expected.family,
+            source_id: expected.source_id.to_string(),
+            instrument_key: expected.instrument_key.to_string(),
+            capability_registry_hash: expected.capability_registry_hash,
+            binding_hash: expected.binding_hash,
+            required: expected.required,
+            credential_required: expected.credential_required,
+            freshness_secs: expected.freshness_secs,
+            affected_market_ids: expected.affected_market_ids.0,
+            affected_profile_ids: expected.affected_profile_ids.0,
+            status,
+            status_reason,
+            cursor_status,
+            checkpoint,
+            checkpoint_hash,
+            last_event_time,
+            freshness_observed_at,
+            lag_secs,
+            cursor_updated_at,
+            observed_at,
         }
+    }
+}
+
+fn effective_source_status(
+    expected: &DomainSourceExpectationInfo,
+    observation: Option<&(DomainSourceCursorInfo, DateTime<Utc>, DateTime<Utc>, i64)>,
+) -> (DomainSourceExpectationStatus, Option<String>) {
+    if matches!(
+        expected.status,
+        DomainSourceExpectationStatus::CredentialBlocked
+            | DomainSourceExpectationStatus::Failed
+            | DomainSourceExpectationStatus::Unsupported
+    ) {
+        return (expected.status, expected.status_reason.clone());
+    }
+    let Some((cursor, _, _, lag_secs)) = observation else {
+        return (
+            DomainSourceExpectationStatus::NotStarted,
+            Some("cursor_not_created".to_owned()),
+        );
+    };
+    match cursor.status.as_str() {
+        "error" => (
+            DomainSourceExpectationStatus::Failed,
+            Some(
+                cursor
+                    .last_error
+                    .clone()
+                    .unwrap_or_else(|| "cursor_error_without_detail".to_owned()),
+            ),
+        ),
+        "bootstrap" | "backfilling" => (
+            DomainSourceExpectationStatus::NotStarted,
+            Some(format!("cursor_{}", cursor.status)),
+        ),
+        "live" if *lag_secs < 0 => (
+            DomainSourceExpectationStatus::Failed,
+            Some("cursor_event_time_in_future".to_owned()),
+        ),
+        "live" if *lag_secs > expected.freshness_secs => (
+            DomainSourceExpectationStatus::Stale,
+            Some("freshness_budget_exceeded".to_owned()),
+        ),
+        "live" => (DomainSourceExpectationStatus::Live, None),
+        _ => (
+            DomainSourceExpectationStatus::Failed,
+            Some("unknown_cursor_status".to_owned()),
+        ),
     }
 }
 
@@ -350,5 +444,134 @@ impl From<BasisAlertInfo> for BasisAlertView {
             acknowledged_by: info.acknowledged_by,
             created_at: info.created_at,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::{DateTime, Duration, TimeZone, Utc};
+
+    use super::DomainSourceExpectationView;
+    use crate::{
+        domain::{
+            AffectedMarketIds, AffectedProfileIds, DomainSourceCheckpoint, DomainSourceCursorInfo,
+            DomainSourceExpectationInfo,
+        },
+        enums::domain::{DomainFamily, DomainSourceExpectationStatus},
+        types::{ContentHash, DomainInstrumentKey, DomainSourceExpectationId, DomainSourceId},
+    };
+
+    fn hash(fill: char) -> ContentHash {
+        ContentHash::parse(format!("blake3:{}", fill.to_string().repeat(64))).expect("hash")
+    }
+
+    fn expectation(
+        status: DomainSourceExpectationStatus,
+        status_reason: Option<&str>,
+    ) -> DomainSourceExpectationInfo {
+        let now = Utc.with_ymd_and_hms(2026, 7, 18, 12, 0, 0).unwrap();
+        DomainSourceExpectationInfo {
+            expectation_id: DomainSourceExpectationId::from_v7(),
+            family: DomainFamily::Weather,
+            source_id: DomainSourceId::aviation_weather(),
+            instrument_key: DomainInstrumentKey::new("METAR:KLGA"),
+            capability_registry_hash: hash('a'),
+            binding_hash: hash('b'),
+            required: true,
+            credential_required: false,
+            freshness_secs: 900,
+            affected_market_ids: AffectedMarketIds::default(),
+            affected_profile_ids: AffectedProfileIds::new(vec!["weather_forecast_24h".to_owned()]),
+            status,
+            status_reason: status_reason.map(str::to_owned),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    fn cursor(event_time: DateTime<Utc>) -> DomainSourceCursorInfo {
+        DomainSourceCursorInfo {
+            source_id: DomainSourceId::aviation_weather(),
+            instrument_key: DomainInstrumentKey::new("METAR:KLGA"),
+            checkpoint_json: DomainSourceCheckpoint::AviationWeather {
+                available_at: event_time,
+                published_at: event_time,
+                observation_time: event_time,
+                revision: 1,
+                report_hash: hash('c'),
+            },
+            checkpoint_hash: hash('d'),
+            status: "live".to_owned(),
+            last_error: None,
+            created_at: event_time,
+            updated_at: event_time,
+        }
+    }
+
+    #[test]
+    fn missing_cursor_is_unknown_not_zero_lag() {
+        let observed_at = Utc.with_ymd_and_hms(2026, 7, 18, 12, 0, 0).unwrap();
+        let view = DomainSourceExpectationView::from_expected_and_observed(
+            expectation(DomainSourceExpectationStatus::NotStarted, None),
+            None,
+            observed_at,
+        );
+        assert_eq!(view.status, DomainSourceExpectationStatus::NotStarted);
+        assert_eq!(view.status_reason.as_deref(), Some("cursor_not_created"));
+        assert_eq!(view.lag_secs, None);
+        assert_eq!(view.last_event_time, None);
+    }
+
+    #[test]
+    fn observed_freshness_and_declared_blockers_fail_closed() {
+        let observed_at = Utc.with_ymd_and_hms(2026, 7, 18, 12, 0, 0).unwrap();
+        let stale = DomainSourceExpectationView::from_expected_and_observed(
+            expectation(DomainSourceExpectationStatus::Live, None),
+            Some(cursor(observed_at - Duration::seconds(901))),
+            observed_at,
+        );
+        assert_eq!(stale.status, DomainSourceExpectationStatus::Stale);
+
+        let blocked = DomainSourceExpectationView::from_expected_and_observed(
+            expectation(
+                DomainSourceExpectationStatus::CredentialBlocked,
+                Some("credential_required"),
+            ),
+            Some(cursor(observed_at)),
+            observed_at,
+        );
+        assert_eq!(
+            blocked.status,
+            DomainSourceExpectationStatus::CredentialBlocked
+        );
+        assert_eq!(
+            blocked.status_reason.as_deref(),
+            Some("credential_required")
+        );
+    }
+
+    #[test]
+    fn historical_archive_health_uses_successful_refresh_not_old_event_time() {
+        let observed_at = Utc.with_ymd_and_hms(2026, 7, 18, 12, 0, 0).unwrap();
+        let event_time = Utc.with_ymd_and_hms(2021, 8, 29, 18, 0, 0).unwrap();
+        let mut archive_cursor = cursor(event_time);
+        archive_cursor.checkpoint_json = DomainSourceCheckpoint::NhcHurdat2 {
+            last_observation: event_time,
+            collection_date: chrono::NaiveDate::from_ymd_opt(2026, 4, 2).expect("date"),
+            file_hash: hash('e'),
+        };
+        archive_cursor.updated_at = observed_at - Duration::seconds(10);
+        let view = DomainSourceExpectationView::from_expected_and_observed(
+            expectation(DomainSourceExpectationStatus::Live, None),
+            Some(archive_cursor),
+            observed_at,
+        );
+        assert_eq!(view.last_event_time, Some(event_time));
+        assert_eq!(
+            view.freshness_observed_at,
+            Some(observed_at - Duration::seconds(10))
+        );
+        assert_eq!(view.lag_secs, Some(10));
+        assert_eq!(view.status, DomainSourceExpectationStatus::Live);
     }
 }

@@ -65,7 +65,7 @@ impl WeatherFactWindow {
     pub fn freshest_time(&self) -> Option<DateTime<Utc>> {
         self.observations
             .iter()
-            .map(|fact| fact.observation_time)
+            .map(|fact| fact.observed_at)
             .chain(self.forecasts.iter().map(|fact| fact.valid_time))
             .max()
     }

@@ -36,7 +36,8 @@ use quant_pivot_models::{
         CalibrationArtifactListQuery, CapabilityView, CatalogState, CatalogStatusPort,
         ComparisonReportListQuery, CoreEventPublisher, CpcvBacktestPort, CreateModelSpecCommand,
         DataQualityPort, DataQualitySnapshot, DecisionBoundary, DomainSourceCursorInfo,
-        ExecutionReadPort, ExecutionRecoveryPort, ExecutionRecoveryView, FactorCollinearitySource,
+        DomainSourceExpectationInfo, DomainSourceExpectationTransition, ExecutionReadPort,
+        ExecutionRecoveryPort, ExecutionRecoveryView, FactorCollinearitySource,
         FactorCollinearityView, FactorDefinitionInfo, FactorDefinitionListQuery,
         FactorGovernancePort, FeatureContractEntryView, FeatureContractView,
         FeatureIntegrityActionContext, FeatureIntegrityLatchView, FeatureIntegrityPort,
@@ -67,17 +68,17 @@ use quant_pivot_models::{
         TradePolicyValidationRunInfo, TradeTapeCoverageView, TradeTapeSourceHealthView,
         TrainModelRequest, TrainedModelView, TrainingDatasetInfo, TrainingDatasetListQuery,
         TrainingDatasetPlanView, TrainingDatasetPort, TrainingDatasetView,
-        UpsertDomainSourceCursor, empty_catalog_page,
+        UpsertDomainSourceCursor, UpsertDomainSourceExpectation, empty_catalog_page,
     },
     entities::quant_entry_condition_evaluation_outbox,
     enums::{execution::KillSwitchState, quant::QuantRuntimeMode, system::BootstrapPhase},
     runtime_config::{FeatureFamily, RuntimeConfig},
     types::{
         BacktestPathSetId, BacktestReportId, BasisAlertId, CalibrationArtifactId, ContentHash,
-        DomainInstrumentKey, DomainSourceId, EntryConditionInstanceId, FactorDefinitionId,
-        MarketId, MarketLinkageId, ModelComparisonReportId, ModelSpecId, ModelVersionId,
-        RecommendationReportId, ResearchJobId, RuntimeConfigVersionId, SchemaVersion, TokenId,
-        TrainingDatasetId,
+        DomainInstrumentKey, DomainSourceExpectationId, DomainSourceId, EntryConditionInstanceId,
+        FactorDefinitionId, MarketId, MarketLinkageId, ModelComparisonReportId, ModelSpecId,
+        ModelVersionId, RecommendationReportId, ResearchJobId, RuntimeConfigVersionId,
+        SchemaVersion, TokenId, TrainingDatasetId,
     },
 };
 use quant_pivot_repository::{
@@ -88,8 +89,9 @@ use quant_pivot_repository::{
     },
     traits::{
         AttributionRepository, BasisAlertRepository, DomainSourceCursorRepository,
-        ExecutionOrderRepository, MarketLinkageRepository, PositionRepository,
-        QuantFactReadRepository, ReconciliationRepository, SettlementRedeemRepository,
+        DomainSourceExpectationRepository, ExecutionOrderRepository, MarketLinkageRepository,
+        PositionRepository, QuantFactReadRepository, ReconciliationRepository,
+        SettlementRedeemRepository,
     },
 };
 use quant_pivot_research::{artifact::ArtifactStore, features::FeatureValueKind};
@@ -197,6 +199,7 @@ fn web_harness_app_state(input: WebHarnessAppStateInput<'_>) -> AppState {
         model_calibration_fit: Arc::new(MockModelCalibrationFitPort),
         market_linkages: Arc::new(MockMarketLinkageRepository),
         domain_source_cursors: Arc::new(MockDomainSourceCursorRepository),
+        domain_source_expectations: Arc::new(MockDomainSourceExpectationRepository),
         basis_alerts: Arc::new(MockBasisAlertRepository),
         linkage_governance: Arc::new(MockMarketLinkageGovernancePort),
         structural_monitor: Arc::new(MockStructuralMonitorPort),
@@ -1368,7 +1371,7 @@ impl ModelSpecPort for MockModelSpecPort {
                 "0000000000000000000000000000000000000000000000000000000000000000"
             ))
             .expect("canonical feature schema hash fixture"),
-            feature_schema_version: SchemaVersion::new(6),
+            feature_schema_version: SchemaVersion::new(7),
             features: vec![FeatureContractEntryView {
                 name: "book.mid".to_owned(),
                 compute_revision: 1,
@@ -1752,6 +1755,16 @@ impl MarketLinkageRepository for MockMarketLinkageRepository {
         })
     }
 
+    async fn append_batch(
+        &self,
+        _linkages: Vec<NewMarketLinkage>,
+    ) -> Result<Vec<MarketLinkageInfo>, StorageError> {
+        Err(StorageError::InvariantViolation {
+            entity: Some("quant_market_linkage"),
+            detail: "mock".to_owned(),
+        })
+    }
+
     async fn valid_at(
         &self,
         _market_id: &MarketId,
@@ -1857,6 +1870,43 @@ impl DomainSourceCursorRepository for MockDomainSourceCursorRepository {
     }
 
     async fn list_all(&self) -> Result<Vec<DomainSourceCursorInfo>, StorageError> {
+        Ok(Vec::new())
+    }
+}
+
+#[derive(Default)]
+pub struct MockDomainSourceExpectationRepository;
+
+#[async_trait]
+impl DomainSourceExpectationRepository for MockDomainSourceExpectationRepository {
+    async fn find(
+        &self,
+        _expectation_id: &DomainSourceExpectationId,
+    ) -> Result<Option<DomainSourceExpectationInfo>, StorageError> {
+        Ok(None)
+    }
+
+    async fn upsert(
+        &self,
+        _expectation: UpsertDomainSourceExpectation,
+    ) -> Result<DomainSourceExpectationInfo, StorageError> {
+        Err(StorageError::InvariantViolation {
+            entity: Some("quant_domain_source_expectation"),
+            detail: "mock".to_owned(),
+        })
+    }
+
+    async fn transition(
+        &self,
+        _transition: DomainSourceExpectationTransition,
+    ) -> Result<DomainSourceExpectationInfo, StorageError> {
+        Err(StorageError::InvariantViolation {
+            entity: Some("quant_domain_source_expectation"),
+            detail: "mock".to_owned(),
+        })
+    }
+
+    async fn list_all(&self) -> Result<Vec<DomainSourceExpectationInfo>, StorageError> {
         Ok(Vec::new())
     }
 }

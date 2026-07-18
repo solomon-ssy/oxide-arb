@@ -525,7 +525,7 @@ impl TradePolicyService {
                     Ok(limits) => Some(limits),
                     Err(error) => {
                         messages.push(format!(
-                            "frozen runtime v17 fit contract is unavailable: {error}"
+                            "frozen runtime v18 fit contract is unavailable: {error}"
                         ));
                         None
                     }
@@ -3328,7 +3328,7 @@ fn append_contract_dataset_blockers(
         TradePolicyPreflightBlockerKind::ContractInvalid,
         serde_json::json!({ "diagnostics": contract.messages }),
         serde_json::json!({ "profile_candidate_and_runtime_contract": "valid" }),
-        "Select a registered immutable profile and a canonical candidate family permitted by Runtime v17.",
+        "Select a registered immutable profile and a canonical candidate family permitted by Runtime v18.",
         None,
     );
     push_blocker(

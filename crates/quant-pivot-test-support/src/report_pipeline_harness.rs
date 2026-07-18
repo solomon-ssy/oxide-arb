@@ -358,6 +358,16 @@ impl MarketLinkageRepository for EmptyLinkageRepo {
         })
     }
 
+    async fn append_batch(
+        &self,
+        _linkages: Vec<NewMarketLinkage>,
+    ) -> Result<Vec<MarketLinkageInfo>, StorageError> {
+        Err(StorageError::InvariantViolation {
+            entity: Some("quant_market_linkage"),
+            detail: "EmptyLinkageRepo is read-only".to_owned(),
+        })
+    }
+
     async fn valid_at(
         &self,
         _market_id: &MarketId,

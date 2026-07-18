@@ -15,13 +15,15 @@
 //! `LinkageResolverService`; persistence is `quant-pivot-repository`'s
 //! `MarketLinkageRepository`.
 
+pub mod capability_registry;
+pub mod catalog_classification;
 pub mod extractor;
 pub mod manual_evidence;
 pub mod oracle;
 pub mod ruleset;
 pub mod tier0_slug;
 pub mod tier1_template;
-pub mod weather_daily_high;
+pub mod weather_daily_temperature;
 
 pub use extractor::{
     DefaultSubjectValidator, ExtractedCandidate, SubjectExtractor, SubjectValidator,
@@ -31,7 +33,10 @@ pub use manual_evidence::validate_manual_override;
 pub use ruleset::{AssetRule, DOMAIN_RESOLVER_VERSION, find_alias, rule_for_alias, rules};
 pub use tier0_slug::Tier0SlugExtractor;
 pub use tier1_template::CryptoSubjectParser;
-pub use weather_daily_high::{WeatherDailyHighExtractor, WeatherStationCatalog};
+pub use weather_daily_temperature::{
+    WeatherDailyTemperatureExtractor, WeatherDecisionGroupMember, WeatherDecisionGroupValidation,
+    WeatherStationRegistry, validate_weather_decision_group, weather_station_profile_hash,
+};
 
 use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantError, QuantResult};
@@ -68,12 +73,12 @@ pub struct LayeredResolver {
 impl LayeredResolver {
     /// The 11.2.2 production resolver: Tier 0 → Tier 1, default grounding gate.
     #[must_use]
-    pub fn deterministic(weather_stations: WeatherStationCatalog) -> Self {
+    pub fn deterministic(weather_stations: WeatherStationRegistry) -> Self {
         Self {
             tiers: vec![
                 Box::new(Tier0SlugExtractor),
                 Box::new(CryptoSubjectParser),
-                Box::new(WeatherDailyHighExtractor::new(weather_stations)),
+                Box::new(WeatherDailyTemperatureExtractor::new(weather_stations)),
             ],
             validator: Box::new(DefaultSubjectValidator),
             resolver_version: DOMAIN_RESOLVER_VERSION,
@@ -164,33 +169,46 @@ pub fn source_bindings_for_subject(
             })?;
             let mut specs = vec![(
                 LinkageSourceRole::Feature,
-                DomainSourceId::binance(),
+                rule.kline_source_id(),
                 rule.instrument_key(),
             )];
             match &subject.resolution_oracle {
                 ResolutionOracle::ChainlinkDataStreams { .. } => {
-                    let instrument = rule.chainlink_instrument();
+                    let (source_id, instrument) = if rule.public_rtds_supported() {
+                        (
+                            DomainSourceId::polymarket_rtds_chainlink(),
+                            rule.rtds_chainlink_instrument(),
+                        )
+                    } else {
+                        (
+                            DomainSourceId::chainlink_data_streams(),
+                            rule.chainlink_instrument(),
+                        )
+                    };
                     specs.push((
                         LinkageSourceRole::LiveEvent,
-                        DomainSourceId::chainlink_data_streams(),
+                        source_id.clone(),
                         instrument.clone(),
                     ));
-                    specs.push((
-                        LinkageSourceRole::Resolution,
-                        DomainSourceId::chainlink_data_streams(),
-                        instrument,
-                    ));
+                    specs.push((LinkageSourceRole::Resolution, source_id, instrument));
                 }
-                ResolutionOracle::BinanceKline { .. } => {
-                    specs.push((
-                        LinkageSourceRole::LiveEvent,
-                        DomainSourceId::binance_agg_trade(),
-                        rule.binance_event_instrument(),
-                    ));
+                ResolutionOracle::BinanceKline { interval, .. } => {
+                    let (source_id, instrument) = if rule.public_rtds_supported() {
+                        (
+                            DomainSourceId::polymarket_rtds_binance(),
+                            rule.rtds_binance_instrument(),
+                        )
+                    } else {
+                        (
+                            rule.binance_event_source_id(),
+                            rule.binance_event_instrument(),
+                        )
+                    };
+                    specs.push((LinkageSourceRole::LiveEvent, source_id, instrument));
                     specs.push((
                         LinkageSourceRole::Resolution,
-                        DomainSourceId::binance(),
-                        rule.instrument_key(),
+                        rule.kline_source_id(),
+                        rule.kline_instrument(*interval),
                     ));
                 }
             }
@@ -201,20 +219,20 @@ pub fn source_bindings_for_subject(
                 (
                     LinkageSourceRole::LiveEvent,
                     DomainSourceId::aviation_weather(),
-                    DomainInstrumentKey::aviation_weather(&subject.station),
+                    DomainInstrumentKey::aviation_weather(&subject.decision_group.station),
                 ),
                 (
                     LinkageSourceRole::HistoricalCalibration,
                     DomainSourceId::ghcnh(),
-                    DomainInstrumentKey::ghcnh(&subject.station),
+                    DomainInstrumentKey::ghcnh(&subject.decision_group.station),
                 ),
                 (
                     LinkageSourceRole::Forecast,
                     DomainSourceId::gefs(),
-                    DomainInstrumentKey::gefs(&subject.station),
+                    DomainInstrumentKey::gefs(&subject.decision_group.station),
                 ),
             ],
-            subject.station.to_string(),
+            subject.decision_group.station.to_string(),
         ),
     };
     specs
@@ -243,13 +261,13 @@ pub fn source_bindings_for_subject(
 mod tests {
     use super::{
         DefaultSubjectValidator, LayeredResolver, SubjectExtractor, SubjectValidator,
-        Tier0SlugExtractor, ValidationOutcome, WeatherStationCatalog,
+        Tier0SlugExtractor, ValidationOutcome, WeatherStationRegistry,
     };
     use chrono::{TimeZone, Utc};
     use quant_pivot_models::{
-        domain::{GroundingField, LinkageOutcome, LinkageSourceMetadata},
-        enums::domain::ResolverTier,
-        types::MarketId,
+        domain::{GroundingField, LinkageOutcome, LinkageSourceMetadata, ResolvedSourceBinding},
+        enums::domain::{LinkageSourceRole, ResolverTier},
+        types::{DomainSourceId, MarketId},
     };
 
     /// The literal Chainlink Data Streams rules-text anchor every observed
@@ -264,13 +282,14 @@ mod tests {
             question: question.to_owned(),
             description: description.map(str::to_owned),
             series_slug: None,
+            decision_group_market_ids: Vec::new(),
             end_date: Some(Utc.with_ymd_and_hms(2026, 7, 8, 12, 0, 0).unwrap()),
         }
     }
 
     #[test]
     fn tier0_wins_before_tier1_and_unrecognized_fails_closed() {
-        let resolver = LayeredResolver::deterministic(WeatherStationCatalog::default());
+        let resolver = LayeredResolver::deterministic(WeatherStationRegistry::default());
 
         let tier0 = resolver
             .resolve(
@@ -328,5 +347,90 @@ mod tests {
             DefaultSubjectValidator.validate(&candidate, &source),
             ValidationOutcome::Rejected { .. }
         ));
+    }
+
+    fn resolved_bindings(outcome: LinkageOutcome) -> Vec<ResolvedSourceBinding> {
+        let LinkageOutcome::Resolved(resolved) = outcome else {
+            panic!("fixture must resolve")
+        };
+        resolved.source_bindings
+    }
+
+    #[test]
+    fn public_chainlink_assets_route_to_rtds_and_private_assets_fail_closed() {
+        let resolver = LayeredResolver::deterministic(WeatherStationRegistry::default());
+        let btc = resolver
+            .resolve(
+                &metadata(
+                    "btc-updown-5m-1780319100",
+                    "Bitcoin Up or Down",
+                    Some(CHAINLINK_STREAM_RULES),
+                ),
+                Utc::now(),
+            )
+            .expect("resolve BTC");
+        let btc = resolved_bindings(btc.outcome);
+        assert!(btc.iter().any(|binding| {
+            binding.role == LinkageSourceRole::LiveEvent
+                && binding.source_id == DomainSourceId::polymarket_rtds_chainlink()
+                && binding.instrument_key.as_str() == "RTDS:CHAINLINK:BTC-USD"
+        }));
+        assert!(btc.iter().any(|binding| {
+            binding.role == LinkageSourceRole::Resolution
+                && binding.source_id == DomainSourceId::polymarket_rtds_chainlink()
+        }));
+
+        let doge_rules = "The resolution source is the Chainlink DOGE/USD data stream at \
+            https://data.chain.link/streams/doge-usd.";
+        let doge = resolver
+            .resolve(
+                &metadata(
+                    "doge-updown-5m-1800000000",
+                    "Dogecoin Up or Down",
+                    Some(doge_rules),
+                ),
+                Utc::now(),
+            )
+            .expect("resolve DOGE");
+        let doge = resolved_bindings(doge.outcome);
+        assert!(doge.iter().any(|binding| {
+            binding.role == LinkageSourceRole::LiveEvent
+                && binding.source_id == DomainSourceId::chainlink_data_streams()
+                && binding.instrument_key.as_str() == "CHAINLINK_DATA_STREAMS:DOGE-USD"
+        }));
+        assert!(
+            doge.iter().all(|binding| {
+                binding.source_id != DomainSourceId::polymarket_rtds_chainlink()
+            })
+        );
+    }
+
+    #[test]
+    fn public_binance_oracle_routes_live_event_to_rtds() {
+        let resolver = LayeredResolver::deterministic(WeatherStationRegistry::default());
+        let outcome = resolver
+            .resolve(
+                &metadata(
+                    "will-bitcoin-reach-150000-in-july",
+                    "Will Bitcoin reach $150,000 in July?",
+                    Some(
+                        "This market resolves according to the Binance BTCUSDT 1 hour candle \
+                         closing price on the resolution date.",
+                    ),
+                ),
+                Utc::now(),
+            )
+            .expect("resolve Binance market");
+        let bindings = resolved_bindings(outcome.outcome);
+        assert!(bindings.iter().any(|binding| {
+            binding.role == LinkageSourceRole::LiveEvent
+                && binding.source_id == DomainSourceId::polymarket_rtds_binance()
+                && binding.instrument_key.as_str() == "RTDS:BINANCE:BTCUSDT"
+        }));
+        assert!(bindings.iter().any(|binding| {
+            binding.role == LinkageSourceRole::Resolution
+                && binding.source_id == DomainSourceId::binance()
+                && binding.instrument_key.as_str() == "BINANCE:BTCUSDT:1h"
+        }));
     }
 }

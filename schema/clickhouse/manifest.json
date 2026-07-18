@@ -1387,13 +1387,13 @@
     },
     {
       "name": "quant_crypto_price_report",
-      "engine": "ReplacingMergeTree",
-      "engine_full": "ReplacingMergeTree(available_at) PARTITION BY toYYYYMM(event_time) ORDER BY (source_id, instrument_key, source_sequence, event_time, report_hash) SETTINGS index_granularity = 8192",
+      "engine": "MergeTree",
+      "engine_full": "MergeTree PARTITION BY toYYYYMM(event_time) ORDER BY (source_id, instrument_key, source_sequence, event_time, report_hash) SETTINGS non_replicated_deduplication_window = 10000, index_granularity = 8192",
       "partition_key": "toYYYYMM(event_time)",
       "sorting_key": "source_id, instrument_key, source_sequence, event_time, report_hash",
       "primary_key": "source_id, instrument_key, source_sequence, event_time, report_hash",
       "sampling_key": "",
-      "create_table_query": "CREATE TABLE quant_crypto_price_report (`source_id` LowCardinality(String), `instrument_key` String, `source_sequence` UInt64, `price` Decimal(18, 8), `quantity` Nullable(Decimal(18, 8)), `event_time` DateTime64(3, 'UTC'), `published_at` DateTime64(3, 'UTC'), `available_at` DateTime64(3, 'UTC'), `valid_from` Nullable(DateTime64(3, 'UTC')), `observations_timestamp` Nullable(DateTime64(3, 'UTC')), `expires_at` Nullable(DateTime64(3, 'UTC')), `report_hash` String, `raw_report` String, `schema_version` UInt32) ENGINE = ReplacingMergeTree(available_at) PARTITION BY toYYYYMM(event_time) ORDER BY (source_id, instrument_key, source_sequence, event_time, report_hash) SETTINGS index_granularity = 8192",
+      "create_table_query": "CREATE TABLE quant_crypto_price_report (`source_id` LowCardinality(String), `instrument_key` String, `source_sequence` UInt64, `price` Decimal(18, 8), `quantity` Nullable(Decimal(18, 8)), `event_time` DateTime64(3, 'UTC'), `published_at` DateTime64(3, 'UTC'), `available_at` DateTime64(3, 'UTC'), `valid_from` Nullable(DateTime64(3, 'UTC')), `observations_timestamp` Nullable(DateTime64(3, 'UTC')), `expires_at` Nullable(DateTime64(3, 'UTC')), `report_hash` String, `raw_report` String, `schema_version` UInt32) ENGINE = MergeTree PARTITION BY toYYYYMM(event_time) ORDER BY (source_id, instrument_key, source_sequence, event_time, report_hash) SETTINGS non_replicated_deduplication_window = 10000, index_granularity = 8192",
       "columns": [
         {
           "position": 1,
@@ -1628,12 +1628,12 @@
     {
       "name": "quant_domain_observation",
       "engine": "MergeTree",
-      "engine_full": "MergeTree PARTITION BY toYYYYMM(event_date) ORDER BY (instrument_key, metric, event_time) SETTINGS index_granularity = 8192",
+      "engine_full": "MergeTree PARTITION BY toYYYYMM(event_date) ORDER BY (instrument_key, metric, event_time) SETTINGS non_replicated_deduplication_window = 10000, index_granularity = 8192",
       "partition_key": "toYYYYMM(event_date)",
       "sorting_key": "instrument_key, metric, event_time",
       "primary_key": "instrument_key, metric, event_time",
       "sampling_key": "",
-      "create_table_query": "CREATE TABLE quant_domain_observation (`family` LowCardinality(String), `source_id` LowCardinality(String), `instrument_key` LowCardinality(String), `metric` LowCardinality(String), `value` Decimal(18, 8), `event_time` DateTime64(3, 'UTC'), `publish_time` DateTime64(3, 'UTC'), `ingestion_time` DateTime64(3, 'UTC'), `schema_version` UInt32, `event_date` Date MATERIALIZED toDate(event_time)) ENGINE = MergeTree PARTITION BY toYYYYMM(event_date) ORDER BY (instrument_key, metric, event_time) SETTINGS index_granularity = 8192",
+      "create_table_query": "CREATE TABLE quant_domain_observation (`family` LowCardinality(String), `source_id` LowCardinality(String), `instrument_key` LowCardinality(String), `metric` LowCardinality(String), `value` Decimal(18, 8), `event_time` DateTime64(3, 'UTC'), `publish_time` DateTime64(3, 'UTC'), `ingestion_time` DateTime64(3, 'UTC'), `schema_version` UInt32, `event_date` Date MATERIALIZED toDate(event_time)) ENGINE = MergeTree PARTITION BY toYYYYMM(event_date) ORDER BY (instrument_key, metric, event_time) SETTINGS non_replicated_deduplication_window = 10000, index_granularity = 8192",
       "columns": [
         {
           "position": 1,
@@ -3758,14 +3758,14 @@
       ]
     },
     {
-      "name": "quant_weather_forecast_point",
-      "engine": "ReplacingMergeTree",
-      "engine_full": "ReplacingMergeTree(available_at) PARTITION BY toYYYYMM(reference_time) ORDER BY (station, reference_time, valid_time, member, run_manifest_hash) SETTINGS index_granularity = 8192",
+      "name": "quant_weather_forecast_fact",
+      "engine": "MergeTree",
+      "engine_full": "MergeTree PARTITION BY toYYYYMM(reference_time) ORDER BY (source_id, instrument_key, variable, reference_time, valid_time, ifNull(member, 65535), revision, report_hash) SETTINGS non_replicated_deduplication_window = 10000, index_granularity = 8192",
       "partition_key": "toYYYYMM(reference_time)",
-      "sorting_key": "station, reference_time, valid_time, member, run_manifest_hash",
-      "primary_key": "station, reference_time, valid_time, member, run_manifest_hash",
+      "sorting_key": "source_id, instrument_key, variable, reference_time, valid_time, ifNull(member, 65535), revision, report_hash",
+      "primary_key": "source_id, instrument_key, variable, reference_time, valid_time, ifNull(member, 65535), revision, report_hash",
       "sampling_key": "",
-      "create_table_query": "CREATE TABLE quant_weather_forecast_point (`source_id` LowCardinality(String), `station` LowCardinality(String), `reference_time` DateTime64(3, 'UTC'), `valid_time` DateTime64(3, 'UTC'), `available_at` DateTime64(3, 'UTC'), `lead_hours` UInt16, `member` UInt8, `tmax_celsius` Decimal(18, 4), `grid_binding_hash` String, `run_manifest_hash` String, `schema_version` UInt32) ENGINE = ReplacingMergeTree(available_at) PARTITION BY toYYYYMM(reference_time) ORDER BY (station, reference_time, valid_time, member, run_manifest_hash) SETTINGS index_granularity = 8192",
+      "create_table_query": "CREATE TABLE quant_weather_forecast_fact (`source_id` LowCardinality(String), `instrument_key` String, `subject_key` LowCardinality(String), `variable` LowCardinality(String), `value` Decimal(18, 8), `unit` LowCardinality(String), `precision` Decimal(18, 8), `reference_time` DateTime64(3, 'UTC'), `valid_time` DateTime64(3, 'UTC'), `published_at` DateTime64(3, 'UTC'), `available_at` DateTime64(3, 'UTC'), `lead_hours` UInt16, `member` Nullable(UInt16), `revision` UInt32, `grid_binding_hash` String, `run_manifest_hash` String, `report_hash` String, `schema_version` UInt32) ENGINE = MergeTree PARTITION BY toYYYYMM(reference_time) ORDER BY (source_id, instrument_key, variable, reference_time, valid_time, ifNull(member, 65535), revision, report_hash) SETTINGS non_replicated_deduplication_window = 10000, index_granularity = 8192",
       "columns": [
         {
           "position": 1,
@@ -3777,14 +3777,54 @@
         },
         {
           "position": 2,
-          "name": "station",
-          "column_type": "LowCardinality(String)",
+          "name": "instrument_key",
+          "column_type": "String",
           "default_kind": "",
           "default_expression": "",
           "compression_codec": ""
         },
         {
           "position": 3,
+          "name": "subject_key",
+          "column_type": "LowCardinality(String)",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 4,
+          "name": "variable",
+          "column_type": "LowCardinality(String)",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 5,
+          "name": "value",
+          "column_type": "Decimal(18, 8)",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 6,
+          "name": "unit",
+          "column_type": "LowCardinality(String)",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 7,
+          "name": "precision",
+          "column_type": "Decimal(18, 8)",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 8,
           "name": "reference_time",
           "column_type": "DateTime64(3, 'UTC')",
           "default_kind": "",
@@ -3792,7 +3832,7 @@
           "compression_codec": ""
         },
         {
-          "position": 4,
+          "position": 9,
           "name": "valid_time",
           "column_type": "DateTime64(3, 'UTC')",
           "default_kind": "",
@@ -3800,7 +3840,15 @@
           "compression_codec": ""
         },
         {
-          "position": 5,
+          "position": 10,
+          "name": "published_at",
+          "column_type": "DateTime64(3, 'UTC')",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 11,
           "name": "available_at",
           "column_type": "DateTime64(3, 'UTC')",
           "default_kind": "",
@@ -3808,7 +3856,7 @@
           "compression_codec": ""
         },
         {
-          "position": 6,
+          "position": 12,
           "name": "lead_hours",
           "column_type": "UInt16",
           "default_kind": "",
@@ -3816,23 +3864,23 @@
           "compression_codec": ""
         },
         {
-          "position": 7,
+          "position": 13,
           "name": "member",
-          "column_type": "UInt8",
+          "column_type": "Nullable(UInt16)",
           "default_kind": "",
           "default_expression": "",
           "compression_codec": ""
         },
         {
-          "position": 8,
-          "name": "tmax_celsius",
-          "column_type": "Decimal(18, 4)",
+          "position": 14,
+          "name": "revision",
+          "column_type": "UInt32",
           "default_kind": "",
           "default_expression": "",
           "compression_codec": ""
         },
         {
-          "position": 9,
+          "position": 15,
           "name": "grid_binding_hash",
           "column_type": "String",
           "default_kind": "",
@@ -3840,7 +3888,7 @@
           "compression_codec": ""
         },
         {
-          "position": 10,
+          "position": 16,
           "name": "run_manifest_hash",
           "column_type": "String",
           "default_kind": "",
@@ -3848,7 +3896,15 @@
           "compression_codec": ""
         },
         {
-          "position": 11,
+          "position": 17,
+          "name": "report_hash",
+          "column_type": "String",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 18,
           "name": "schema_version",
           "column_type": "UInt32",
           "default_kind": "",
@@ -3858,14 +3914,14 @@
       ]
     },
     {
-      "name": "quant_weather_observation_report",
-      "engine": "ReplacingMergeTree",
-      "engine_full": "ReplacingMergeTree(available_at) PARTITION BY toYYYYMM(local_date) ORDER BY (station, local_date, observation_time, revision, report_hash) SETTINGS index_granularity = 8192",
-      "partition_key": "toYYYYMM(local_date)",
-      "sorting_key": "station, local_date, observation_time, revision, report_hash",
-      "primary_key": "station, local_date, observation_time, revision, report_hash",
+      "name": "quant_weather_observation_fact",
+      "engine": "MergeTree",
+      "engine_full": "MergeTree PARTITION BY intDiv(local_date, 3660) ORDER BY (source_id, instrument_key, variable, observed_at, revision, report_hash) SETTINGS non_replicated_deduplication_window = 10000, index_granularity = 8192",
+      "partition_key": "intDiv(local_date, 3660)",
+      "sorting_key": "source_id, instrument_key, variable, observed_at, revision, report_hash",
+      "primary_key": "source_id, instrument_key, variable, observed_at, revision, report_hash",
       "sampling_key": "",
-      "create_table_query": "CREATE TABLE quant_weather_observation_report (`source_id` LowCardinality(String), `station` LowCardinality(String), `local_date` Date, `report_kind` LowCardinality(String), `temperature_celsius` Decimal(18, 4), `precision_celsius` Decimal(18, 4), `observation_time` DateTime64(3, 'UTC'), `published_at` DateTime64(3, 'UTC'), `available_at` DateTime64(3, 'UTC'), `revision` UInt32, `report_hash` String, `supersedes_report_hash` Nullable(String), `raw_report` String, `schema_version` UInt32) ENGINE = ReplacingMergeTree(available_at) PARTITION BY toYYYYMM(local_date) ORDER BY (station, local_date, observation_time, revision, report_hash) SETTINGS index_granularity = 8192",
+      "create_table_query": "CREATE TABLE quant_weather_observation_fact (`source_id` LowCardinality(String), `instrument_key` String, `subject_key` LowCardinality(String), `local_date` Int32, `report_kind` LowCardinality(String), `variable` LowCardinality(String), `value` Decimal(18, 8), `unit` LowCardinality(String), `precision` Decimal(18, 8), `observed_at` Int64, `valid_from` Nullable(Int64), `valid_to` Nullable(Int64), `published_at` DateTime64(3, 'UTC'), `available_at` DateTime64(3, 'UTC'), `revision` UInt32, `report_hash` String, `supersedes_report_hash` Nullable(String), `raw_report` String, `schema_version` UInt32) ENGINE = MergeTree PARTITION BY intDiv(local_date, 3660) ORDER BY (source_id, instrument_key, variable, observed_at, revision, report_hash) SETTINGS non_replicated_deduplication_window = 10000, index_granularity = 8192",
       "columns": [
         {
           "position": 1,
@@ -3877,22 +3933,30 @@
         },
         {
           "position": 2,
-          "name": "station",
-          "column_type": "LowCardinality(String)",
+          "name": "instrument_key",
+          "column_type": "String",
           "default_kind": "",
           "default_expression": "",
           "compression_codec": ""
         },
         {
           "position": 3,
-          "name": "local_date",
-          "column_type": "Date",
+          "name": "subject_key",
+          "column_type": "LowCardinality(String)",
           "default_kind": "",
           "default_expression": "",
           "compression_codec": ""
         },
         {
           "position": 4,
+          "name": "local_date",
+          "column_type": "Int32",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 5,
           "name": "report_kind",
           "column_type": "LowCardinality(String)",
           "default_kind": "",
@@ -3900,31 +3964,63 @@
           "compression_codec": ""
         },
         {
-          "position": 5,
-          "name": "temperature_celsius",
-          "column_type": "Decimal(18, 4)",
-          "default_kind": "",
-          "default_expression": "",
-          "compression_codec": ""
-        },
-        {
           "position": 6,
-          "name": "precision_celsius",
-          "column_type": "Decimal(18, 4)",
+          "name": "variable",
+          "column_type": "LowCardinality(String)",
           "default_kind": "",
           "default_expression": "",
           "compression_codec": ""
         },
         {
           "position": 7,
-          "name": "observation_time",
-          "column_type": "DateTime64(3, 'UTC')",
+          "name": "value",
+          "column_type": "Decimal(18, 8)",
           "default_kind": "",
           "default_expression": "",
           "compression_codec": ""
         },
         {
           "position": 8,
+          "name": "unit",
+          "column_type": "LowCardinality(String)",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 9,
+          "name": "precision",
+          "column_type": "Decimal(18, 8)",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 10,
+          "name": "observed_at",
+          "column_type": "Int64",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 11,
+          "name": "valid_from",
+          "column_type": "Nullable(Int64)",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 12,
+          "name": "valid_to",
+          "column_type": "Nullable(Int64)",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 13,
           "name": "published_at",
           "column_type": "DateTime64(3, 'UTC')",
           "default_kind": "",
@@ -3932,7 +4028,7 @@
           "compression_codec": ""
         },
         {
-          "position": 9,
+          "position": 14,
           "name": "available_at",
           "column_type": "DateTime64(3, 'UTC')",
           "default_kind": "",
@@ -3940,7 +4036,7 @@
           "compression_codec": ""
         },
         {
-          "position": 10,
+          "position": 15,
           "name": "revision",
           "column_type": "UInt32",
           "default_kind": "",
@@ -3948,7 +4044,7 @@
           "compression_codec": ""
         },
         {
-          "position": 11,
+          "position": 16,
           "name": "report_hash",
           "column_type": "String",
           "default_kind": "",
@@ -3956,7 +4052,7 @@
           "compression_codec": ""
         },
         {
-          "position": 12,
+          "position": 17,
           "name": "supersedes_report_hash",
           "column_type": "Nullable(String)",
           "default_kind": "",
@@ -3964,7 +4060,7 @@
           "compression_codec": ""
         },
         {
-          "position": 13,
+          "position": 18,
           "name": "raw_report",
           "column_type": "String",
           "default_kind": "",
@@ -3972,7 +4068,7 @@
           "compression_codec": ""
         },
         {
-          "position": 14,
+          "position": 19,
           "name": "schema_version",
           "column_type": "UInt32",
           "default_kind": "",

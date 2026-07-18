@@ -155,16 +155,16 @@ pub fn domain_availability_at(
                 })
         }
         MarketSubject::Weather(subject) => {
-            if !valid_weather_sources(binding, &subject.station) {
+            if !valid_weather_sources(binding, &subject.decision_group.station) {
                 return DomainAvailability::Unresolved;
             }
             let cutoff = boundary.cutoff_for(DecisionSource::DomainWeather);
             facts
                 .weather_observations
-                .get(&subject.station)
+                .get(&subject.decision_group.station)
                 .is_some_and(|series| {
                     series.iter().any(|observation| {
-                        observation.local_date == subject.local_date
+                        observation.local_date == subject.decision_group.local_date
                             && observation.report_kind
                                 != WeatherObservationReportKind::HistoricalGhcnh
                             && observation.published_at <= cutoff
@@ -248,13 +248,13 @@ pub fn build_domain_slice_inputs(
             DomainSliceData::Crypto { primary, oracle }
         }
         (MarketSubject::Weather(subject), DomainFamily::Weather) => {
-            if !valid_weather_sources(&binding, &subject.station) {
+            if !valid_weather_sources(&binding, &subject.decision_group.station) {
                 return Ok(None);
             }
             let cutoff = boundary.cutoff_for(DecisionSource::DomainWeather);
             let observations = facts
                 .weather_observations
-                .get(&subject.station)
+                .get(&subject.decision_group.station)
                 .into_iter()
                 .flatten()
                 .filter(|fact| {
@@ -264,7 +264,7 @@ pub fn build_domain_slice_inputs(
                 .collect();
             let forecasts = facts
                 .weather_forecasts
-                .get(&subject.station)
+                .get(&subject.decision_group.station)
                 .into_iter()
                 .flatten()
                 .filter(|fact| {
@@ -505,6 +505,8 @@ mod tests {
     fn linkage(outcome: LinkageOutcome, derived_minute: u32) -> MarketLinkage {
         let market_id = MarketId::new("0xmarket");
         let metadata_hash = ContentHash::parse(format!("blake3:{}", "0".repeat(64))).expect("hash");
+        let capability_registry_hash =
+            ContentHash::parse(format!("blake3:{}", "f".repeat(64))).expect("hash");
         let content_hash = MarketLinkage::compute_content_hash(
             &market_id,
             DomainFamily::Crypto,
@@ -512,6 +514,7 @@ mod tests {
             ResolverTier::Tier0Slug,
             ResolverVersion::FIRST,
             &metadata_hash,
+            &capability_registry_hash,
         )
         .expect("hash");
         let effective_at = Utc
@@ -526,6 +529,7 @@ mod tests {
             resolver_tier: ResolverTier::Tier0Slug,
             resolver_version: ResolverVersion::FIRST,
             metadata_hash,
+            capability_registry_hash: Some(capability_registry_hash),
             content_hash,
             effective_at,
             available_at: effective_at,

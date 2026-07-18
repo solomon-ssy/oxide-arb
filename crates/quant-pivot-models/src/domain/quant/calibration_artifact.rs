@@ -9,7 +9,7 @@
 use crate::{
     entities::quant_calibration_artifact,
     enums::quant::CalibrationKind,
-    types::{CalibrationArtifactId, ContentHash, IcaoStation},
+    types::{CalibrationArtifactId, ContentHash, IcaoStation, WeatherTemperatureStatistic},
 };
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
@@ -78,6 +78,7 @@ pub struct WeatherLeadBiasV1 {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WeatherStationBiasV1 {
     pub station: IcaoStation,
+    pub temperature_statistic: WeatherTemperatureStatistic,
     pub leads: Vec<WeatherLeadBiasV1>,
 }
 

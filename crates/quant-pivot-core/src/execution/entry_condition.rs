@@ -3,7 +3,7 @@
 use chrono::{DateTime, Duration, Utc};
 use quant_pivot_error::{QuantError, QuantResult, report::ReportError};
 use quant_pivot_models::{
-    domain::PriceComparator,
+    domain::{PriceBoundaryInclusion, PriceComparator},
     enums::quant::{EntryConditionState, OutcomeSide, PriceComparison},
     hashing::CanonicalDigest,
     types::{
@@ -11,8 +11,9 @@ use quant_pivot_models::{
         CryptoSubjectPredicateEntered, EntryConditionArtifactV1, EntryConditionBinding,
         EntryConditionFoldState, EntryConditionSourceBinding, EntryConditionV1, FactorCondition,
         FactorDefinitionId, FactorMeasure, MarketEventCondition, ModelVersionId, Price,
-        PriceCondition, TemperatureCelsius, TokenId, Usd, WeatherDailyHighEnteredBand,
-        WeatherDailyHighExceededBandUpper, WeatherObservationDayClosedOutsideBand,
+        PriceCondition, TemperatureCelsius, TokenId, Usd,
+        WeatherDailyTemperatureCrossedTerminalBound, WeatherDailyTemperatureEnteredBand,
+        WeatherObservationDayClosedOutsideBand, WeatherTemperatureStatistic,
     },
 };
 use rust_decimal::Decimal;
@@ -63,11 +64,12 @@ pub struct CryptoPriceInput {
 
 /// Current corrected NOAA proxy state for one station/local day.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct WeatherDailyHighInput {
+pub struct WeatherDailyTemperatureInput {
     pub source: EntryConditionSourceBinding,
     pub station: String,
     pub local_date: chrono::NaiveDate,
-    pub current_high: TemperatureCelsius,
+    pub temperature_statistic: WeatherTemperatureStatistic,
+    pub current_extreme: TemperatureCelsius,
     pub observation_time: DateTime<Utc>,
     pub available_at: DateTime<Utc>,
     pub revision: u64,
@@ -88,7 +90,7 @@ pub struct EntryConditionInputSet {
     pub prices: Vec<ExecutablePriceInput>,
     pub factors: Vec<FactorSnapshotInput>,
     pub crypto: Vec<CryptoPriceInput>,
-    pub weather: Vec<WeatherDailyHighInput>,
+    pub weather: Vec<WeatherDailyTemperatureInput>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -104,7 +106,7 @@ pub enum ConditionLeafEvidence {
         input: CryptoPriceInput,
         state: CryptoEnteredFoldState,
     },
-    Weather(WeatherDailyHighInput),
+    Weather(WeatherDailyTemperatureInput),
     Unavailable(ConditionUnavailableReason),
 }
 
@@ -430,11 +432,11 @@ fn evaluate_market_event(
         MarketEventCondition::CryptoSubjectPredicateEntered(condition) => {
             evaluate_crypto(node_id, condition, input, fold_state)
         }
-        MarketEventCondition::WeatherDailyHighEnteredBand(condition) => {
+        MarketEventCondition::WeatherDailyTemperatureEnteredBand(condition) => {
             evaluate_weather_entered(condition, input)
         }
-        MarketEventCondition::WeatherDailyHighExceededBandUpper(condition) => {
-            evaluate_weather_exceeded(condition, input)
+        MarketEventCondition::WeatherDailyTemperatureCrossedTerminalBound(condition) => {
+            evaluate_weather_crossed_terminal_bound(condition, input)
         }
         MarketEventCondition::WeatherObservationDayClosedOutsideBand(condition) => {
             evaluate_weather_closed_outside(condition, input)
@@ -619,9 +621,22 @@ fn crypto_outcome(
     price: Usd,
 ) -> Option<OutcomeSide> {
     let yes = match comparator {
-        PriceComparator::Above => price >= strike?,
-        PriceComparator::Below => price <= strike?,
-        PriceComparator::Between { hi } => price >= strike? && price <= hi,
+        PriceComparator::GreaterThan => price > strike?,
+        PriceComparator::GreaterThanOrEqual => price >= strike?,
+        PriceComparator::LessThan => price < strike?,
+        PriceComparator::LessThanOrEqual => price <= strike?,
+        PriceComparator::Between { hi, lower, upper } => {
+            let strike = strike?;
+            let above_lower = match lower {
+                PriceBoundaryInclusion::Inclusive => price >= strike,
+                PriceBoundaryInclusion::Exclusive => price > strike,
+            };
+            let below_upper = match upper {
+                PriceBoundaryInclusion::Inclusive => price <= hi,
+                PriceBoundaryInclusion::Exclusive => price < hi,
+            };
+            above_lower && below_upper
+        }
         PriceComparator::UpVsReference => price >= reference?,
     };
     Some(if yes {
@@ -632,21 +647,25 @@ fn crypto_outcome(
 }
 
 fn evaluate_weather_entered(
-    condition: &WeatherDailyHighEnteredBand,
+    condition: &WeatherDailyTemperatureEnteredBand,
     input: &EntryConditionInputSet,
 ) -> (ConditionTruth, ConditionLeafEvidence) {
     evaluate_weather(condition, input, |value| {
-        let high = value.current_high.whole_degrees(condition.unit);
-        condition.band.contains(high)
+        let extreme = value.current_extreme.whole_degrees(condition.unit);
+        condition.band.contains(extreme)
     })
 }
 
-fn evaluate_weather_exceeded(
-    condition: &WeatherDailyHighExceededBandUpper,
+fn evaluate_weather_crossed_terminal_bound(
+    condition: &WeatherDailyTemperatureCrossedTerminalBound,
     input: &EntryConditionInputSet,
 ) -> (ConditionTruth, ConditionLeafEvidence) {
     evaluate_weather(condition, input, |value| {
-        value.current_high.whole_degrees(condition.unit) > condition.upper_inclusive
+        let extreme = value.current_extreme.whole_degrees(condition.unit);
+        match condition.temperature_statistic {
+            WeatherTemperatureStatistic::Maximum => extreme > condition.terminal_bound,
+            WeatherTemperatureStatistic::Minimum => extreme < condition.terminal_bound,
+        }
     })
 }
 
@@ -655,16 +674,16 @@ fn evaluate_weather_closed_outside(
     input: &EntryConditionInputSet,
 ) -> (ConditionTruth, ConditionLeafEvidence) {
     evaluate_weather(condition, input, |value| {
-        let high = value.current_high.whole_degrees(condition.unit);
+        let extreme = value.current_extreme.whole_degrees(condition.unit);
         value.day_closed
             && (condition
                 .band
                 .lower_inclusive
-                .is_some_and(|lower| high < lower)
+                .is_some_and(|lower| extreme < lower)
                 || condition
                     .band
                     .upper_inclusive
-                    .is_some_and(|upper| high > upper))
+                    .is_some_and(|upper| extreme > upper))
     })
 }
 
@@ -672,10 +691,11 @@ trait WeatherPredicate {
     fn source(&self) -> &EntryConditionSourceBinding;
     fn station(&self) -> &str;
     fn local_date(&self) -> chrono::NaiveDate;
+    fn temperature_statistic(&self) -> WeatherTemperatureStatistic;
     fn max_input_age_ms(&self) -> Option<u64>;
 }
 
-impl WeatherPredicate for WeatherDailyHighEnteredBand {
+impl WeatherPredicate for WeatherDailyTemperatureEnteredBand {
     fn source(&self) -> &EntryConditionSourceBinding {
         &self.source
     }
@@ -684,13 +704,16 @@ impl WeatherPredicate for WeatherDailyHighEnteredBand {
     }
     fn local_date(&self) -> chrono::NaiveDate {
         self.local_date
+    }
+    fn temperature_statistic(&self) -> WeatherTemperatureStatistic {
+        self.temperature_statistic
     }
     fn max_input_age_ms(&self) -> Option<u64> {
         Some(self.max_input_age_ms)
     }
 }
 
-impl WeatherPredicate for WeatherDailyHighExceededBandUpper {
+impl WeatherPredicate for WeatherDailyTemperatureCrossedTerminalBound {
     fn source(&self) -> &EntryConditionSourceBinding {
         &self.source
     }
@@ -699,6 +722,9 @@ impl WeatherPredicate for WeatherDailyHighExceededBandUpper {
     }
     fn local_date(&self) -> chrono::NaiveDate {
         self.local_date
+    }
+    fn temperature_statistic(&self) -> WeatherTemperatureStatistic {
+        self.temperature_statistic
     }
     fn max_input_age_ms(&self) -> Option<u64> {
         Some(self.max_input_age_ms)
@@ -715,6 +741,9 @@ impl WeatherPredicate for WeatherObservationDayClosedOutsideBand {
     fn local_date(&self) -> chrono::NaiveDate {
         self.local_date
     }
+    fn temperature_statistic(&self) -> WeatherTemperatureStatistic {
+        self.temperature_statistic
+    }
     fn max_input_age_ms(&self) -> Option<u64> {
         None
     }
@@ -727,7 +756,7 @@ fn evaluate_weather<T, F>(
 ) -> (ConditionTruth, ConditionLeafEvidence)
 where
     T: WeatherPredicate,
-    F: FnOnce(&WeatherDailyHighInput) -> bool,
+    F: FnOnce(&WeatherDailyTemperatureInput) -> bool,
 {
     let Some(value) = input
         .weather
@@ -736,6 +765,7 @@ where
             value.source == *condition.source()
                 && value.station == condition.station()
                 && value.local_date == condition.local_date()
+                && value.temperature_statistic == condition.temperature_statistic()
         })
         .cloned()
     else {
@@ -971,7 +1001,7 @@ pub fn decide_entry_condition_state(
 mod tests {
     use chrono::{DateTime, Duration, NaiveDate, TimeZone, Utc};
     use quant_pivot_models::{
-        domain::PriceComparator,
+        domain::{PriceBoundaryInclusion, PriceComparator},
         enums::quant::{EntryConditionState, OutcomeSide},
         types::{
             ClockAnchor, ClockCondition, ConditionTruth, ConditionUnavailableReason,
@@ -981,8 +1011,8 @@ mod tests {
             EntryConditionSourceBinding, EntryConditionV1, MarketEventCondition, MarketId,
             MarketLinkageId, MarketSelectionId, ModelVersionId, RecommendationId,
             RuntimeConfigVersionId, TemperatureBand, TemperatureCelsius, TemperatureUnit, TokenId,
-            Usd, WeatherDailyHighEnteredBand, WeatherDailyHighExceededBandUpper,
-            WeatherObservationDayClosedOutsideBand,
+            Usd, WeatherDailyTemperatureCrossedTerminalBound, WeatherDailyTemperatureEnteredBand,
+            WeatherObservationDayClosedOutsideBand, WeatherTemperatureStatistic,
         },
     };
     use rust_decimal::Decimal;
@@ -990,7 +1020,7 @@ mod tests {
 
     use super::{
         CompositeKind, ConditionNodeEvaluation, CryptoPriceInput, CryptoPriceReportInput,
-        EntryConditionInputSet, WeatherDailyHighInput, composite_truth,
+        EntryConditionInputSet, WeatherDailyTemperatureInput, composite_truth, crypto_outcome,
         decide_entry_condition_state, evaluate_entry_condition,
     };
 
@@ -1010,6 +1040,34 @@ mod tests {
 
     fn hash(seed: char) -> ContentHash {
         ContentHash::parse(format!("blake3:{}", seed.to_string().repeat(64))).expect("hash")
+    }
+
+    #[test]
+    fn crypto_outcome_honors_strict_and_owned_band_boundaries() {
+        let strike = Some(Usd::new(dec!(100)));
+        let price = Usd::new(dec!(100));
+        assert_eq!(
+            crypto_outcome(PriceComparator::GreaterThan, strike, None, price),
+            Some(OutcomeSide::No)
+        );
+        assert_eq!(
+            crypto_outcome(PriceComparator::GreaterThanOrEqual, strike, None, price),
+            Some(OutcomeSide::Yes)
+        );
+
+        let band = PriceComparator::Between {
+            hi: Usd::new(dec!(110)),
+            lower: PriceBoundaryInclusion::Inclusive,
+            upper: PriceBoundaryInclusion::Exclusive,
+        };
+        assert_eq!(
+            crypto_outcome(band, strike, None, Usd::new(dec!(100))),
+            Some(OutcomeSide::Yes)
+        );
+        assert_eq!(
+            crypto_outcome(band, strike, None, Usd::new(dec!(110))),
+            Some(OutcomeSide::No)
+        );
     }
 
     fn binding() -> EntryConditionBinding {
@@ -1488,30 +1546,34 @@ mod tests {
     }
 
     #[test]
-    fn weather_yes_and_bounded_no_follow_corrected_whole_degree_high() {
+    fn weather_maximum_yes_and_bounded_no_follow_corrected_whole_degree_extreme() {
         let evaluated_at = timestamp();
         let local_date = NaiveDate::from_ymd_opt(2026, 7, 13).expect("local date");
         let frozen_source = source(DomainSourceId::aviation_weather(), "AVIATION_WEATHER:KJFK");
         let yes_artifact = market_event_artifact(
-            MarketEventCondition::WeatherDailyHighEnteredBand(WeatherDailyHighEnteredBand {
-                source: frozen_source.clone(),
-                station: "KJFK".to_owned(),
-                local_date,
-                unit: TemperatureUnit::Fahrenheit,
-                band: TemperatureBand {
-                    lower_inclusive: Some(dec!(80)),
-                    upper_inclusive: Some(dec!(81)),
+            MarketEventCondition::WeatherDailyTemperatureEnteredBand(
+                WeatherDailyTemperatureEnteredBand {
+                    source: frozen_source.clone(),
+                    station: "KJFK".to_owned(),
+                    local_date,
+                    temperature_statistic: WeatherTemperatureStatistic::Maximum,
+                    unit: TemperatureUnit::Fahrenheit,
+                    band: TemperatureBand {
+                        lower_inclusive: Some(dec!(80)),
+                        upper_inclusive: Some(dec!(81)),
+                    },
+                    proxy_methodology_hash: hash('f'),
+                    max_input_age_ms: 2_000,
                 },
-                proxy_methodology_hash: hash('f'),
-                max_input_age_ms: 2_000,
-            }),
+            ),
             frozen_source.clone(),
         );
-        let weather = WeatherDailyHighInput {
+        let weather = WeatherDailyTemperatureInput {
             source: frozen_source.clone(),
             station: "KJFK".to_owned(),
             local_date,
-            current_high: TemperatureCelsius::new(dec!(26.7)),
+            temperature_statistic: WeatherTemperatureStatistic::Maximum,
+            current_extreme: TemperatureCelsius::new(dec!(26.7)),
             observation_time: evaluated_at,
             available_at: evaluated_at,
             revision: 0,
@@ -1526,7 +1588,7 @@ mod tests {
             evaluate_entry_condition(&yes_artifact, &yes_input).expect("weather YES evaluation");
         assert_eq!(entered.truth, ConditionTruth::Satisfied);
 
-        yes_input.weather[0].current_high = TemperatureCelsius::new(dec!(25));
+        yes_input.weather[0].current_extreme = TemperatureCelsius::new(dec!(25));
         yes_input.weather[0].revision = 1;
         yes_input.weather[0].report_hash = hash('2');
         let corrected = evaluate_entry_condition(&yes_artifact, &yes_input)
@@ -1534,13 +1596,14 @@ mod tests {
         assert_eq!(corrected.truth, ConditionTruth::Unsatisfied);
 
         let no_artifact = market_event_artifact(
-            MarketEventCondition::WeatherDailyHighExceededBandUpper(
-                WeatherDailyHighExceededBandUpper {
+            MarketEventCondition::WeatherDailyTemperatureCrossedTerminalBound(
+                WeatherDailyTemperatureCrossedTerminalBound {
                     source: frozen_source,
                     station: "KJFK".to_owned(),
                     local_date,
+                    temperature_statistic: WeatherTemperatureStatistic::Maximum,
                     unit: TemperatureUnit::Fahrenheit,
-                    upper_inclusive: dec!(80),
+                    terminal_bound: dec!(80),
                     proxy_methodology_hash: hash('f'),
                     max_input_age_ms: 2_000,
                 },
@@ -1548,13 +1611,60 @@ mod tests {
             weather.source.clone(),
         );
         let mut no_input = input(&no_artifact, evaluated_at);
-        no_input.weather.push(WeatherDailyHighInput {
-            current_high: TemperatureCelsius::new(dec!(27.3)),
+        no_input.weather.push(WeatherDailyTemperatureInput {
+            current_extreme: TemperatureCelsius::new(dec!(27.3)),
             ..weather
         });
         let exceeded =
             evaluate_entry_condition(&no_artifact, &no_input).expect("bounded NO evaluation");
         assert_eq!(exceeded.truth, ConditionTruth::Satisfied);
+    }
+
+    #[test]
+    fn weather_minimum_crosses_lower_terminal_bound_and_rejects_maximum_input() {
+        let evaluated_at = timestamp();
+        let local_date = NaiveDate::from_ymd_opt(2026, 7, 13).expect("local date");
+        let frozen_source = source(DomainSourceId::aviation_weather(), "AVIATION_WEATHER:KJFK");
+        let artifact = market_event_artifact(
+            MarketEventCondition::WeatherDailyTemperatureCrossedTerminalBound(
+                WeatherDailyTemperatureCrossedTerminalBound {
+                    source: frozen_source.clone(),
+                    station: "KJFK".to_owned(),
+                    local_date,
+                    temperature_statistic: WeatherTemperatureStatistic::Minimum,
+                    unit: TemperatureUnit::Fahrenheit,
+                    terminal_bound: dec!(60),
+                    proxy_methodology_hash: hash('f'),
+                    max_input_age_ms: 2_000,
+                },
+            ),
+            frozen_source.clone(),
+        );
+        let mut inputs = input(&artifact, evaluated_at);
+        inputs.weather.push(WeatherDailyTemperatureInput {
+            source: frozen_source,
+            station: "KJFK".to_owned(),
+            local_date,
+            temperature_statistic: WeatherTemperatureStatistic::Minimum,
+            current_extreme: TemperatureCelsius::new(dec!(15)),
+            observation_time: evaluated_at,
+            available_at: evaluated_at,
+            revision: 0,
+            day_closed: false,
+            report_hash: hash('5'),
+            gap_generation: 0,
+            source_healthy: true,
+        });
+        let crossed = evaluate_entry_condition(&artifact, &inputs).expect("minimum evaluation");
+        assert_eq!(crossed.truth, ConditionTruth::Satisfied);
+
+        inputs.weather[0].temperature_statistic = WeatherTemperatureStatistic::Maximum;
+        let wrong_statistic =
+            evaluate_entry_condition(&artifact, &inputs).expect("statistic isolation");
+        assert_eq!(
+            wrong_statistic.truth,
+            ConditionTruth::Unavailable(ConditionUnavailableReason::InputMissing)
+        );
     }
 
     #[test]
@@ -1568,6 +1678,7 @@ mod tests {
                     source: frozen_source.clone(),
                     station: "KJFK".to_owned(),
                     local_date,
+                    temperature_statistic: WeatherTemperatureStatistic::Maximum,
                     unit: TemperatureUnit::Fahrenheit,
                     band: TemperatureBand {
                         lower_inclusive: Some(dec!(90)),
@@ -1579,11 +1690,12 @@ mod tests {
             frozen_source.clone(),
         );
         let mut inputs = input(&artifact, evaluated_at);
-        inputs.weather.push(WeatherDailyHighInput {
+        inputs.weather.push(WeatherDailyTemperatureInput {
             source: frozen_source,
             station: "KJFK".to_owned(),
             local_date,
-            current_high: TemperatureCelsius::new(dec!(29.4)),
+            temperature_statistic: WeatherTemperatureStatistic::Maximum,
+            current_extreme: TemperatureCelsius::new(dec!(29.4)),
             observation_time: evaluated_at,
             available_at: evaluated_at,
             revision: 0,

@@ -38,7 +38,7 @@ impl AppContext {
             infra: &infra,
             runtime: &runtime.config,
             events: &events,
-        });
+        })?;
         let governance = GovernanceBundle::assemble(GovernanceBundleDeps {
             deploy: &deploy,
             metrics: &metrics,

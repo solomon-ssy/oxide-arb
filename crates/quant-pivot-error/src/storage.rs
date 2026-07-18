@@ -54,6 +54,8 @@ pub mod entity {
     pub const QUANT_TRADE_POLICY_ARTIFACT: &str = "quant_trade_policy_artifact";
     /// `quant_domain_source_cursor`.
     pub const QUANT_DOMAIN_SOURCE_CURSOR: &str = "quant_domain_source_cursor";
+    /// `quant_domain_source_expectation`.
+    pub const QUANT_DOMAIN_SOURCE_EXPECTATION: &str = "quant_domain_source_expectation";
     /// `quant_domain_event_outbox`.
     pub const QUANT_DOMAIN_EVENT_OUTBOX: &str = "quant_domain_event_outbox";
     /// `quant_research_job`.

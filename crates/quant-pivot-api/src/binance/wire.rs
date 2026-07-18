@@ -16,6 +16,13 @@ use crate::wire::decimal::parse_decimal_value;
 /// Fixed field count of one Binance kline row.
 pub const KLINE_FIELD_COUNT: usize = 12;
 
+/// Binance `GET /api/v3/time` response.
+#[derive(Debug, Clone, Copy, Deserialize)]
+pub struct BinanceServerTime {
+    #[serde(rename = "serverTime")]
+    pub server_time_ms: i64,
+}
+
 /// Binance aggregate-trade payload shared by REST `/aggTrades` and the
 /// `<symbol>@aggTrade` WebSocket stream.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

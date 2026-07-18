@@ -18,7 +18,10 @@ use quant_pivot_models::{
     enums::{
         catalog::{CatalogFilterReasonSet, CatalogTimestampQuality},
         common::{CategorySet, MarketCategory, TickSize},
-        domain::{DomainFamily, DomainMetric, KlineInterval, LinkageSourceRole, ResolverTier},
+        domain::{
+            BinanceMarketSegment, DomainFamily, DomainMetric, KlineInterval, LinkageSourceRole,
+            ResolverTier,
+        },
         feature::EvidenceSourceKind,
         market::MarketStatus,
         quant::{DataQualityStatus, DatasetPurpose},
@@ -55,7 +58,7 @@ use quant_pivot_research::{
     hashing::ResearchHasher,
     linkage::{
         CryptoSubjectParser, DefaultSubjectValidator, LayeredResolver, SubjectExtractor,
-        SubjectValidator, Tier0SlugExtractor, ValidationOutcome, WeatherStationCatalog,
+        SubjectValidator, Tier0SlugExtractor, ValidationOutcome, WeatherStationRegistry,
     },
     pit::CanonicalBookEventRef,
     selection::SelectedMarket,
@@ -100,6 +103,7 @@ fn metadata(slug: &str) -> LinkageSourceMetadata {
                 .to_owned(),
         ),
         series_slug: None,
+        decision_group_market_ids: Vec::new(),
         end_date: Some(Utc.with_ymd_and_hms(2026, 7, 8, 12, 0, 0).unwrap()),
     }
 }
@@ -318,11 +322,12 @@ fn crypto_domain_inputs(as_of: chrono::DateTime<Utc>) -> DomainSliceInputs {
             subject: MarketSubject::Crypto(CryptoSubject {
                 asset: CryptoAsset::parse("BTC").expect("asset"),
                 quote: CryptoQuote::parse("USD").expect("quote"),
-                comparator: PriceComparator::Above,
+                comparator: PriceComparator::GreaterThanOrEqual,
                 strike: Some(Usd::new(dec!(99000))),
                 reference_at: None,
                 observation_at: as_of,
                 resolution_oracle: ResolutionOracle::BinanceKline {
+                    market: BinanceMarketSegment::Spot,
                     symbol: BinanceSymbol::parse("BTCUSDT").expect("symbol"),
                     interval: KlineInterval::OneMinute,
                 },
@@ -642,6 +647,7 @@ fn crypto_subject_parser_tier1_deterministic_fail_closed() {
                 .to_owned(),
         ),
         series_slug: None,
+        decision_group_market_ids: Vec::new(),
         end_date: Some(Utc.with_ymd_and_hms(2026, 7, 7, 17, 0, 0).unwrap()),
     };
     let candidate = parser.extract(&meta).expect("extract");
@@ -702,7 +708,7 @@ fn linkage_tier0_slug_direct_read_matches_tier1() {
 
     // Cross-check against the full layered resolver: it must reach the exact
     // same subject Tier 0 produced directly.
-    let resolver = LayeredResolver::deterministic(WeatherStationCatalog::default());
+    let resolver = LayeredResolver::deterministic(WeatherStationRegistry::default());
     let resolution = resolver.resolve(&meta, Utc::now()).expect("resolve");
     assert_eq!(resolution.resolver_tier, ResolverTier::Tier0Slug);
     let LinkageOutcome::Resolved(binding) = resolution.outcome else {
@@ -720,7 +726,7 @@ fn linkage_tier0_slug_direct_read_matches_tier1() {
 
 #[test]
 fn linkage_grounding_rejects_field_absent_from_source() {
-    let resolver = LayeredResolver::deterministic(WeatherStationCatalog::default());
+    let resolver = LayeredResolver::deterministic(WeatherStationRegistry::default());
     let bad = resolver
         .resolve(&metadata("totally-unknown-market-slug"), Utc::now())
         .expect("resolve");
@@ -789,11 +795,12 @@ fn crypto_domain_feature_present_with_domain_external_evidence() {
         subject: MarketSubject::Crypto(CryptoSubject {
             asset: CryptoAsset::parse("BTC").expect("asset"),
             quote: CryptoQuote::parse("USD").expect("quote"),
-            comparator: PriceComparator::Above,
+            comparator: PriceComparator::GreaterThanOrEqual,
             strike: Some(Usd::new(dec!(99000))),
             reference_at: None,
             observation_at: as_of,
             resolution_oracle: ResolutionOracle::BinanceKline {
+                market: BinanceMarketSegment::Spot,
                 symbol: BinanceSymbol::parse("BTCUSDT").expect("symbol"),
                 interval: KlineInterval::OneMinute,
             },
@@ -842,6 +849,7 @@ fn crypto_pit_linkage(
             reference_at: None,
             observation_at: as_of,
             resolution_oracle: ResolutionOracle::BinanceKline {
+                market: BinanceMarketSegment::Spot,
                 symbol: BinanceSymbol::parse("BTCUSDT").expect("symbol"),
                 interval: KlineInterval::OneMinute,
             },
@@ -865,6 +873,7 @@ fn crypto_pit_linkage(
         resolver_tier: ResolverTier::Tier0Slug,
         resolver_version: ResolverVersion::FIRST,
         metadata_hash: content_hash.clone(),
+        capability_registry_hash: Some(content_hash.clone()),
         content_hash,
         effective_at: as_of - Duration::days(1),
         available_at: as_of - Duration::days(1),
@@ -969,6 +978,7 @@ fn linkage_pit_uses_metadata_version_not_future_revision() {
             reference_at: None,
             observation_at: Utc.with_ymd_and_hms(2026, 7, 8, 12, 0, 0).unwrap(),
             resolution_oracle: ResolutionOracle::BinanceKline {
+                market: BinanceMarketSegment::Spot,
                 symbol: BinanceSymbol::parse(format!("{asset}USDT")).expect("symbol"),
                 interval: KlineInterval::OneMinute,
             },
@@ -997,6 +1007,7 @@ fn linkage_pit_uses_metadata_version_not_future_revision() {
         resolver_tier: ResolverTier::Tier0Slug,
         resolver_version: ResolverVersion::FIRST,
         metadata_hash: hash("aa"),
+        capability_registry_hash: Some(hash("cc")),
         content_hash: hash("11"),
         effective_at: t1,
         available_at: t1,
@@ -1012,6 +1023,7 @@ fn linkage_pit_uses_metadata_version_not_future_revision() {
         resolver_tier: ResolverTier::Tier0Slug,
         resolver_version: ResolverVersion::FIRST,
         metadata_hash: hash("bb"),
+        capability_registry_hash: Some(hash("cc")),
         content_hash: hash("22"),
         effective_at: t2,
         available_at: t2,

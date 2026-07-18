@@ -20,6 +20,7 @@ pub mod gamma;
 pub mod infra;
 pub mod keystore;
 pub mod relayer;
+pub mod rtds;
 pub mod wallet;
 pub mod weather;
 pub mod wire;

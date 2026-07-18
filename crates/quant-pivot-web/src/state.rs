@@ -17,10 +17,10 @@ use quant_pivot_models::{
     },
 };
 use quant_pivot_repository::traits::{
-    BasisAlertRepository, DomainSourceCursorRepository, EntryConditionRepository,
-    MarketLinkageRepository, MarketRepository, MenuRepository, OperationLogRepository,
-    QuantFactReadRepository, RoleMenuRepository, RolePermissionRepository, RoleRepository,
-    RuntimeConfigVersionRepository, UserRepository, UserRoleRepository,
+    BasisAlertRepository, DomainSourceCursorRepository, DomainSourceExpectationRepository,
+    EntryConditionRepository, MarketLinkageRepository, MarketRepository, MenuRepository,
+    OperationLogRepository, QuantFactReadRepository, RoleMenuRepository, RolePermissionRepository,
+    RoleRepository, RuntimeConfigVersionRepository, UserRepository, UserRoleRepository,
 };
 
 use crate::{
@@ -98,6 +98,8 @@ pub struct AppState {
     pub market_linkages: Arc<dyn MarketLinkageRepository>,
     /// Domain-source ingest cursor health (Phase 11.2.2).
     pub domain_source_cursors: Arc<dyn DomainSourceCursorRepository>,
+    /// Capability-declared source bindings, including pre-cursor blockers.
+    pub domain_source_expectations: Arc<dyn DomainSourceExpectationRepository>,
     /// Basis-cross-check exceedance alert feed (11.2.2 remediation R6).
     pub basis_alerts: Arc<dyn BasisAlertRepository>,
     /// Offline market-linkage resolver (Phase 11.2.2).

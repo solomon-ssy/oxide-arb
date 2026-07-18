@@ -12,8 +12,10 @@ use crate::{
 };
 
 pub const POOLED_1H_CONTROL_PROFILE_ID: &str = "pooled_1h_control";
+pub const CRYPTO_PRICE_15M_PROFILE_ID: &str = "crypto_price_15m";
 pub const WEATHER_FORECAST_24H_PROFILE_ID: &str = "weather_forecast_24h";
 pub const POOLED_1H_HORIZON_SECS: u64 = 3_600;
+pub const CRYPTO_PRICE_15M_HORIZON_SECS: u64 = 900;
 pub const WEATHER_FORECAST_24H_HORIZON_SECS: u64 = 86_400;
 
 /// Stable immutable profile identity carried by every downstream artifact.
@@ -32,6 +34,7 @@ pub struct ResearchProfileRef {
 #[serde(rename_all = "snake_case")]
 pub enum ResearchInformationRegime {
     PooledBinaryMarket,
+    CryptoPrice,
     WeatherForecast,
 }
 
@@ -40,13 +43,15 @@ pub enum ResearchInformationRegime {
 #[serde(rename_all = "snake_case")]
 pub enum ResearchMarketSelector {
     AllEligible,
-    WeatherAirportDailyHigh,
+    CryptoPriceContract,
+    WeatherContract,
 }
 
 /// Deterministic decision-clock contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResearchDecisionTrigger {
+    EveryFiveMinutes,
     Hourly,
     HourlyLatestCompleteGefsCycle,
 }
@@ -76,10 +81,56 @@ pub enum ResearchProfileDataSource {
     ClobMarketInfo,
     ClobL2,
     TradeTape,
+    BinanceMarketData,
+    PolymarketRtds,
     AviationWeather,
     GhcnhCalibration,
     GefsEnsemble,
     PolymarketResolution,
+}
+
+/// Immutable feedback methodology and promotion thresholds owned by a profile.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResearchFeedbackPolicy {
+    pub evaluation_window_days: u32,
+    pub minimum_mature_labels: u64,
+    pub minimum_coverage: Decimal,
+    pub data_drift_psi_threshold: Decimal,
+    pub data_drift_ks_p_value: Decimal,
+    pub concept_rank_ic_drop: Decimal,
+    pub label_js_divergence: Decimal,
+    pub minimum_effect_bps: Bps,
+    pub effect_confidence: Decimal,
+    pub shadow_minimum_observations: u64,
+    pub auto_publish_eligible: bool,
+}
+
+impl ResearchFeedbackPolicy {
+    fn validate(&self) -> Result<(), String> {
+        if self.evaluation_window_days == 0
+            || self.minimum_mature_labels == 0
+            || self.shadow_minimum_observations == 0
+            || self.minimum_effect_bps.inner() <= Decimal::ZERO
+        {
+            return Err("feedback policy counts/windows/effect must be positive".to_owned());
+        }
+        for (name, value) in [
+            ("minimum_coverage", self.minimum_coverage),
+            ("data_drift_ks_p_value", self.data_drift_ks_p_value),
+            ("concept_rank_ic_drop", self.concept_rank_ic_drop),
+            ("label_js_divergence", self.label_js_divergence),
+            ("effect_confidence", self.effect_confidence),
+        ] {
+            if value <= Decimal::ZERO || value > Decimal::ONE {
+                return Err(format!("feedback policy {name} must be within (0, 1]"));
+            }
+        }
+        if self.data_drift_psi_threshold <= Decimal::ZERO {
+            return Err("feedback policy PSI threshold must be positive".to_owned());
+        }
+        Ok(())
+    }
 }
 
 /// Profile content. The content hash excludes publication metadata.
@@ -102,6 +153,7 @@ pub struct ResearchProfileSpec {
     pub allowed_cash_budget_tiers: Vec<Usd>,
     pub activation_eligibility: ResearchEvaluationTrack,
     pub quality_gate: TradePolicyQualityGate,
+    pub feedback_policy: ResearchFeedbackPolicy,
 }
 
 impl ResearchProfileSpec {
@@ -118,7 +170,11 @@ impl ResearchProfileSpec {
             return Err("research profile max holding cannot exceed target horizon".to_owned());
         }
         match (self.information_regime, self.policy_fitter) {
-            (ResearchInformationRegime::PooledBinaryMarket, None)
+            (
+                ResearchInformationRegime::PooledBinaryMarket
+                | ResearchInformationRegime::CryptoPrice,
+                None,
+            )
             | (
                 ResearchInformationRegime::WeatherForecast,
                 Some(ResearchPolicyFitter::WeatherForecast),
@@ -155,7 +211,8 @@ impl ResearchProfileSpec {
                     .to_owned(),
             );
         }
-        self.quality_gate.validate()
+        self.quality_gate.validate()?;
+        self.feedback_policy.validate()
     }
 
     #[must_use]
@@ -232,14 +289,15 @@ impl ResearchProfileArtifact {
                 content_hash,
             },
             spec,
-            published_by: "phase-11.7.2".to_owned(),
+            published_by: "phase-11.9".to_owned(),
             published_at,
-            governance_reason: "Phase 11.7.2 immutable research-profile freeze".to_owned(),
+            governance_reason: "Phase 11.9 immutable vertical and feedback-policy freeze"
+                .to_owned(),
         })
     }
 }
 
-/// Return the complete closed registry for Runtime v17.
+/// Return the complete closed registry for Runtime v18.
 pub fn builtin_research_profiles() -> Result<Vec<ResearchProfileArtifact>, String> {
     let published_at = Utc
         .with_ymd_and_hms(2026, 7, 14, 0, 0, 0)
@@ -248,7 +306,7 @@ pub fn builtin_research_profiles() -> Result<Vec<ResearchProfileArtifact>, Strin
     let cash_budget = vec![Usd::new(Decimal::new(25, 0))];
     let pooled = ResearchProfileArtifact::try_new(
         POOLED_1H_CONTROL_PROFILE_ID,
-        1,
+        2,
         ResearchProfileSpec {
             information_regime: ResearchInformationRegime::PooledBinaryMarket,
             policy_fitter: None,
@@ -271,16 +329,49 @@ pub fn builtin_research_profiles() -> Result<Vec<ResearchProfileArtifact>, Strin
             allowed_cash_budget_tiers: cash_budget.clone(),
             activation_eligibility: ResearchEvaluationTrack::ResearchOnly,
             quality_gate: production_quality_gate(),
+            feedback_policy: production_feedback_policy(false),
+        },
+        published_at,
+    )?;
+    let crypto = ResearchProfileArtifact::try_new(
+        CRYPTO_PRICE_15M_PROFILE_ID,
+        1,
+        ResearchProfileSpec {
+            information_regime: ResearchInformationRegime::CryptoPrice,
+            policy_fitter: None,
+            market_selector: ResearchMarketSelector::CryptoPriceContract,
+            category: Some(MarketCategory::Crypto),
+            decision_trigger: ResearchDecisionTrigger::EveryFiveMinutes,
+            decision_cadence_secs: 300,
+            target_horizon_secs: CRYPTO_PRICE_15M_HORIZON_SECS,
+            max_holding_secs: CRYPTO_PRICE_15M_HORIZON_SECS,
+            exit_heartbeat_secs: 30,
+            fit_span_days: 90,
+            max_feature_lookback_secs: 86_400,
+            purge_embargo_secs: 3_600,
+            required_sources: vec![
+                ResearchProfileDataSource::CatalogLedger,
+                ResearchProfileDataSource::ClobMarketInfo,
+                ResearchProfileDataSource::ClobL2,
+                ResearchProfileDataSource::TradeTape,
+                ResearchProfileDataSource::BinanceMarketData,
+                ResearchProfileDataSource::PolymarketRtds,
+                ResearchProfileDataSource::PolymarketResolution,
+            ],
+            allowed_cash_budget_tiers: cash_budget.clone(),
+            activation_eligibility: ResearchEvaluationTrack::ResearchOnly,
+            quality_gate: production_quality_gate(),
+            feedback_policy: production_feedback_policy(true),
         },
         published_at,
     )?;
     let weather = ResearchProfileArtifact::try_new(
         WEATHER_FORECAST_24H_PROFILE_ID,
-        1,
+        2,
         ResearchProfileSpec {
             information_regime: ResearchInformationRegime::WeatherForecast,
             policy_fitter: Some(ResearchPolicyFitter::WeatherForecast),
-            market_selector: ResearchMarketSelector::WeatherAirportDailyHigh,
+            market_selector: ResearchMarketSelector::WeatherContract,
             category: Some(MarketCategory::Weather),
             decision_trigger: ResearchDecisionTrigger::HourlyLatestCompleteGefsCycle,
             decision_cadence_secs: 3_600,
@@ -303,13 +394,14 @@ pub fn builtin_research_profiles() -> Result<Vec<ResearchProfileArtifact>, Strin
             allowed_cash_budget_tiers: cash_budget,
             activation_eligibility: ResearchEvaluationTrack::SemiAutoCandidate,
             quality_gate: production_quality_gate(),
+            feedback_policy: production_feedback_policy(true),
         },
         published_at,
     )?;
-    Ok(vec![pooled, weather])
+    Ok(vec![pooled, crypto, weather])
 }
 
-/// Runtime v17 raw-retention floor:
+/// Runtime v18 raw-retention floor:
 /// `max(180, 2 × max(required_days(profile)))`.
 pub fn minimum_raw_retention_days() -> Result<u32, String> {
     let max_required = builtin_research_profiles()?
@@ -357,6 +449,22 @@ fn production_quality_gate() -> TradePolicyQualityGate {
     }
 }
 
+fn production_feedback_policy(auto_publish_eligible: bool) -> ResearchFeedbackPolicy {
+    ResearchFeedbackPolicy {
+        evaluation_window_days: 30,
+        minimum_mature_labels: 500,
+        minimum_coverage: Decimal::new(95, 2),
+        data_drift_psi_threshold: Decimal::new(2, 1),
+        data_drift_ks_p_value: Decimal::new(5, 2),
+        concept_rank_ic_drop: Decimal::new(3, 1),
+        label_js_divergence: Decimal::new(1, 1),
+        minimum_effect_bps: Bps::new(Decimal::from(25)),
+        effect_confidence: Decimal::new(95, 2),
+        shadow_minimum_observations: 1_000,
+        auto_publish_eligible,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -367,7 +475,7 @@ mod tests {
     #[test]
     fn builtins_are_hash_stable_and_weather_is_the_only_semi_auto_candidate() {
         let profiles = builtin_research_profiles().expect("profiles");
-        assert_eq!(profiles.len(), 2);
+        assert_eq!(profiles.len(), 3);
         let weather = profiles
             .iter()
             .find(|profile| profile.spec.target_horizon_secs == WEATHER_FORECAST_24H_HORIZON_SECS)

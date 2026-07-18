@@ -1,6 +1,6 @@
 //! External domain-source ingestion (Phase 11.2.2).
 //!
-//! [`DomainIngestor`] polls enabled [`DomainDataSource`] clients, normalizes
+//! [`CryptoKlineIngestor`] polls enabled [`DomainDataSource`] clients, normalizes
 //! observations into `quant_domain_observation`, and advances durable
 //! `(source, instrument)` cursors only after a successful `ClickHouse` write.
 
@@ -10,7 +10,10 @@ use std::{
 };
 
 use chrono::{DateTime, Duration, Utc};
-use quant_pivot_api::domain::{DomainDataSource, DomainFetchRequest};
+use quant_pivot_api::{
+    binance::BinanceKlineSource,
+    domain::{DomainDataSource, DomainFetchRequest},
+};
 use quant_pivot_error::{
     QuantError, QuantResult,
     storage::{StorageError, entity},
@@ -22,12 +25,12 @@ use quant_pivot_models::{
         DomainCursorStatus, DomainObservation, DomainSourceCheckpoint, DomainSourceCursorInfo,
         UpsertDomainSourceCursor,
     },
-    enums::domain::DomainFamily,
+    enums::domain::{DomainFamily, KlineInterval},
     hashing::CanonicalDigest,
     types::{ContentHash, DomainInstrumentKey, DomainSourceId},
 };
 use quant_pivot_repository::traits::{DomainSourceCursorRepository, FactWriter};
-use quant_pivot_research::linkage::{AssetRule, rules};
+use quant_pivot_research::linkage::rules;
 
 use crate::runtime_config::RuntimeConfigStore;
 
@@ -51,10 +54,26 @@ struct InstrumentCheckpoint {
     status: DomainCursorStatus,
 }
 
+/// Source-supervisor transition emitted only after the corresponding cursor
+/// write has completed (or a scan failure has been durably recorded).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CryptoKlineBindingOutcome {
+    Recovered {
+        source_id: DomainSourceId,
+        instrument_key: DomainInstrumentKey,
+    },
+    Failed {
+        source_id: DomainSourceId,
+        instrument_key: DomainInstrumentKey,
+        reason: String,
+    },
+}
+
 /// Polls external domain sources and writes normalized observations to
 /// `quant_domain_observation`.
-pub struct DomainIngestor {
+pub struct CryptoKlineIngestor {
     sources: Vec<Arc<dyn DomainDataSource>>,
+    binance_archive_sources: HashMap<DomainSourceId, Arc<BinanceKlineSource>>,
     cursor_repo: Arc<dyn DomainSourceCursorRepository>,
     writer: Arc<dyn FactWriter<DomainObservationRow>>,
     runtime_config: Arc<RuntimeConfigStore>,
@@ -62,10 +81,11 @@ pub struct DomainIngestor {
     instruments_by_source: HashMap<DomainSourceId, Vec<DomainInstrumentKey>>,
 }
 
-impl DomainIngestor {
+impl CryptoKlineIngestor {
     #[must_use]
     pub fn new(
         sources: Vec<Arc<dyn DomainDataSource>>,
+        binance_archive_sources: Vec<Arc<BinanceKlineSource>>,
         cursor_repo: Arc<dyn DomainSourceCursorRepository>,
         writer: Arc<dyn FactWriter<DomainObservationRow>>,
         runtime_config: Arc<RuntimeConfigStore>,
@@ -73,6 +93,10 @@ impl DomainIngestor {
     ) -> Self {
         Self {
             sources,
+            binance_archive_sources: binance_archive_sources
+                .into_iter()
+                .map(|source| (source.source_id(), source))
+                .collect(),
             cursor_repo,
             writer,
             runtime_config,
@@ -88,10 +112,10 @@ impl DomainIngestor {
     /// with the failure detail and is skipped, but never aborts the whole
     /// tick — every other instrument still scans, and the batch still writes
     /// and commits for every instrument that succeeded.
-    pub async fn run_once(&self) -> QuantResult<()> {
+    pub async fn run_once(&self) -> QuantResult<Vec<CryptoKlineBindingOutcome>> {
         let runtime = self.runtime_config.load();
         if !runtime.domain.family_enabled(DomainFamily::Crypto) {
-            return Ok(());
+            return Ok(Vec::new());
         }
 
         let backfill_days = runtime.domain.crypto.backfill_days;
@@ -100,12 +124,48 @@ impl DomainIngestor {
         let batch_size = self.domain_sources.binance.batch_size.max(1);
 
         let mut outcomes = Vec::new();
+        let mut binding_outcomes = Vec::new();
         for source in &self.sources {
             let source_id = source.source_id();
             let Some(instruments) = self.instruments_by_source.get(&source_id) else {
                 continue;
             };
             for instrument_key in instruments {
+                if let Some(archive_source) = self.binance_archive_sources.get(&source_id) {
+                    match self
+                        .backfill_archive_instrument(
+                            archive_source,
+                            instrument_key,
+                            bootstrap_from,
+                            now,
+                            batch_size,
+                        )
+                        .await
+                    {
+                        Ok(true) => continue,
+                        Ok(false) => {}
+                        Err(error) => {
+                            tracing::warn!(
+                                %source_id, %instrument_key, %error,
+                                "Binance archive backfill failed for this instrument; \
+                                 other instruments continue this tick"
+                            );
+                            self.record_scan_failure(
+                                &source_id,
+                                instrument_key,
+                                bootstrap_from,
+                                &error,
+                            )
+                            .await;
+                            binding_outcomes.push(CryptoKlineBindingOutcome::Failed {
+                                source_id: source_id.clone(),
+                                instrument_key: instrument_key.clone(),
+                                reason: error.to_string(),
+                            });
+                            continue;
+                        }
+                    }
+                }
                 match self
                     .scan_instrument(source.as_ref(), instrument_key, bootstrap_from, now)
                     .await
@@ -124,6 +184,11 @@ impl DomainIngestor {
                             &error,
                         )
                         .await;
+                        binding_outcomes.push(CryptoKlineBindingOutcome::Failed {
+                            source_id: source_id.clone(),
+                            instrument_key: instrument_key.clone(),
+                            reason: error.to_string(),
+                        });
                     }
                 }
             }
@@ -142,14 +207,134 @@ impl DomainIngestor {
                 .map(|observation| observation.into_clickhouse_row(ingestion_time))
                 .collect::<Vec<_>>();
             for batch in rows.chunks(batch_size) {
-                self.writer.write_batch(batch.to_vec()).await?;
+                let token = domain_observation_batch_token(batch)?;
+                self.writer
+                    .write_batch_idempotent(&token, batch.to_vec())
+                    .await?;
             }
         }
 
         for checkpoint in outcomes.into_iter().map(|outcome| outcome.checkpoint) {
+            let recovered = (checkpoint.status == DomainCursorStatus::Live).then(|| {
+                CryptoKlineBindingOutcome::Recovered {
+                    source_id: checkpoint.source_id.clone(),
+                    instrument_key: checkpoint.instrument_key.clone(),
+                }
+            });
             self.commit_checkpoint(checkpoint).await?;
+            binding_outcomes.extend(recovered);
         }
-        Ok(())
+        Ok(binding_outcomes)
+    }
+
+    async fn backfill_archive_instrument(
+        &self,
+        source: &BinanceKlineSource,
+        instrument_key: &DomainInstrumentKey,
+        bootstrap_from: DateTime<Utc>,
+        now: DateTime<Utc>,
+        batch_size: usize,
+    ) -> QuantResult<bool> {
+        let source_id = source.source_id();
+        let cursor = self.cursor_repo.find(&source_id, instrument_key).await?;
+        let (from_exclusive, bootstrap, _) = resume_point(cursor.as_ref(), bootstrap_from, now)?;
+        if !bootstrap {
+            return Ok(false);
+        }
+        let (_, symbol, interval) = instrument_key.as_binance_market_kline().ok_or_else(|| {
+            StorageError::invariant_violation(
+                Some(entity::QUANT_DOMAIN_SOURCE_CURSOR),
+                format!("non-canonical Binance kline instrument `{instrument_key}`"),
+            )
+        })?;
+        let step = kline_step(interval)?;
+        let archive_date = (from_exclusive + step).date_naive();
+        if archive_date >= now.date_naive() {
+            return Ok(false);
+        }
+        source.validate_system_clock().await?;
+        let Some(mut archive) = source
+            .recover_archive_day(&symbol, interval, archive_date, now)
+            .await?
+        else {
+            return Ok(false);
+        };
+
+        let mut expected = cursor.as_ref().map(|_| from_exclusive + step);
+        let mut wrote = false;
+        while let Some(observations) = archive.next_batch().await? {
+            let observations = observations
+                .into_iter()
+                .filter(|observation| {
+                    observation.observed_at > from_exclusive && observation.observed_at <= now
+                })
+                .collect::<Vec<_>>();
+            if observations.is_empty() {
+                continue;
+            }
+            validate_archive_observations(&observations, expected, from_exclusive, step)?;
+            let last_event_time = observations
+                .last()
+                .map(|observation| observation.observed_at)
+                .ok_or_else(|| {
+                    StorageError::invariant_violation(
+                        Some(entity::QUANT_DOMAIN_SOURCE_CURSOR),
+                        "non-empty Binance archive batch lost its terminal observation",
+                    )
+                })?;
+            self.persist_archive_observations(
+                &source_id,
+                instrument_key,
+                observations,
+                last_event_time,
+                batch_size,
+            )
+            .await?;
+            expected = Some(last_event_time + step);
+            wrote = true;
+        }
+        if !wrote {
+            return Err(StorageError::invariant_violation(
+                Some(entity::QUANT_DOMAIN_SOURCE_CURSOR),
+                format!(
+                    "verified Binance archive {archive_date} contains no observation after {from_exclusive}"
+                ),
+            )
+            .into());
+        }
+        Ok(true)
+    }
+
+    async fn persist_archive_observations(
+        &self,
+        source_id: &DomainSourceId,
+        instrument_key: &DomainInstrumentKey,
+        observations: Vec<DomainObservation>,
+        last_event_time: DateTime<Utc>,
+        batch_size: usize,
+    ) -> QuantResult<()> {
+        let ingestion_time = Utc::now();
+        let rows = observations
+            .into_iter()
+            .map(|observation| observation.into_clickhouse_row(ingestion_time))
+            .collect::<Vec<_>>();
+        for rows in rows.chunks(batch_size.max(1)) {
+            let token = domain_observation_batch_token(rows)?;
+            self.writer
+                .write_batch_idempotent(&token, rows.to_vec())
+                .await?;
+        }
+        let checkpoint = DomainSourceCheckpoint::BinanceKline {
+            close_time: last_event_time,
+        };
+        self.commit_checkpoint(InstrumentCheckpoint {
+            source_id: source_id.clone(),
+            instrument_key: instrument_key.clone(),
+            checkpoint_hash: CanonicalDigest::content_hash_json(&checkpoint)?,
+            checkpoint,
+            status: DomainCursorStatus::Backfilling,
+        })
+        .await
     }
 
     async fn scan_instrument(
@@ -192,7 +377,18 @@ impl DomainIngestor {
             .map(|observation| observation.observed_at)
             .max()
             .unwrap_or(prior_last_event_time);
-        let status = checkpoint_status(cursor.as_ref(), bootstrap, last_event_time, now);
+        let (_, _, interval) = instrument_key.as_binance_market_kline().ok_or_else(|| {
+            StorageError::invariant_violation(
+                Some(entity::QUANT_DOMAIN_SOURCE_CURSOR),
+                format!("non-canonical Binance kline instrument `{instrument_key}`"),
+            )
+        })?;
+        let status = checkpoint_status(
+            cursor.as_ref(),
+            bootstrap,
+            last_event_time,
+            latest_closed_kline_time(interval, now)?,
+        );
         let checkpoint = DomainSourceCheckpoint::BinanceKline {
             close_time: last_event_time,
         };
@@ -303,6 +499,26 @@ impl DomainIngestor {
     }
 }
 
+fn domain_observation_batch_token(rows: &[DomainObservationRow]) -> QuantResult<ContentHash> {
+    let identities = rows
+        .iter()
+        .map(|row| {
+            (
+                &row.family,
+                &row.source_id,
+                &row.instrument_key,
+                &row.metric,
+                row.value,
+                row.event_time,
+                row.publish_time,
+                row.schema_version,
+            )
+        })
+        .collect::<Vec<_>>();
+    CanonicalDigest::content_hash_json(&("domain_observation_batch_v1", identities))
+        .map_err(Into::into)
+}
+
 /// Discover canonical instrument keys from the frozen linkage ruleset and
 /// active legacy factor sources. Live event sources are discovered from
 /// linkage role projections by their dedicated workers.
@@ -312,10 +528,91 @@ pub fn discover_instruments(
 ) -> HashMap<DomainSourceId, Vec<DomainInstrumentKey>> {
     let mut map = HashMap::new();
     if domain_sources.binance.enabled {
-        let keys = rules().iter().map(AssetRule::instrument_key).collect();
+        let keys = rules()
+            .iter()
+            .filter(|rule| rule.kline_source_id() == DomainSourceId::binance())
+            .flat_map(|rule| {
+                [
+                    rule.instrument_key(),
+                    rule.kline_instrument(KlineInterval::OneHour),
+                ]
+            })
+            .collect();
         map.insert(DomainSourceId::binance(), keys);
     }
+    if domain_sources.binance_usdm_futures.enabled {
+        let keys = rules()
+            .iter()
+            .filter(|rule| rule.kline_source_id() == DomainSourceId::binance_usdm_futures())
+            .flat_map(|rule| {
+                [
+                    rule.instrument_key(),
+                    rule.kline_instrument(KlineInterval::OneHour),
+                ]
+            })
+            .collect();
+        map.insert(DomainSourceId::binance_usdm_futures(), keys);
+    }
     map
+}
+
+fn kline_step(interval: KlineInterval) -> QuantResult<Duration> {
+    let seconds = i64::try_from(interval.secs()).map_err(|error| {
+        StorageError::invariant_violation(
+            Some(entity::QUANT_DOMAIN_SOURCE_CURSOR),
+            format!("Binance kline interval does not fit chrono duration: {error}"),
+        )
+    })?;
+    Ok(Duration::seconds(seconds))
+}
+
+fn validate_archive_observations(
+    observations: &[DomainObservation],
+    expected: Option<DateTime<Utc>>,
+    lower_bound: DateTime<Utc>,
+    step: Duration,
+) -> QuantResult<()> {
+    let first = observations.first().ok_or_else(|| {
+        StorageError::invariant_violation(
+            Some(entity::QUANT_DOMAIN_SOURCE_CURSOR),
+            "Binance archive continuity received an empty batch",
+        )
+    })?;
+    if let Some(expected) = expected {
+        if first.observed_at != expected {
+            return Err(StorageError::invariant_violation(
+                Some(entity::QUANT_DOMAIN_SOURCE_CURSOR),
+                format!(
+                    "Binance archive first close {} does not continue cursor at {expected}",
+                    first.observed_at
+                ),
+            )
+            .into());
+        }
+    } else if first.observed_at <= lower_bound || first.observed_at > lower_bound + step {
+        return Err(StorageError::invariant_violation(
+            Some(entity::QUANT_DOMAIN_SOURCE_CURSOR),
+            format!(
+                "Binance archive first close {} does not cover bootstrap boundary {lower_bound}",
+                first.observed_at
+            ),
+        )
+        .into());
+    }
+    for pair in observations.windows(2) {
+        let expected = pair[0].observed_at + step;
+        if pair[1].observed_at != expected {
+            return Err(StorageError::invariant_violation(
+                Some(entity::QUANT_DOMAIN_SOURCE_CURSOR),
+                format!(
+                    "Binance archive close {} does not continue previous close at {expected}",
+                    pair[1].observed_at
+                ),
+            )
+            .into());
+        }
+    }
+    Ok(())
 }
 
 /// Resume point: exclusive lower bound and whether this tick bootstraps history.
@@ -362,16 +659,45 @@ fn checkpoint_status(
     cursor: Option<&DomainSourceCursorInfo>,
     bootstrap: bool,
     last_event_time: DateTime<Utc>,
-    now: DateTime<Utc>,
+    latest_closed_kline_time: DateTime<Utc>,
 ) -> DomainCursorStatus {
-    let live_edge = now - Duration::minutes(2);
-    if bootstrap && last_event_time < live_edge {
+    if bootstrap && last_event_time < latest_closed_kline_time {
         DomainCursorStatus::Backfilling
     } else if cursor.is_none() && bootstrap {
         DomainCursorStatus::Bootstrap
     } else {
         DomainCursorStatus::Live
     }
+}
+
+fn latest_closed_kline_time(
+    interval: KlineInterval,
+    now: DateTime<Utc>,
+) -> QuantResult<DateTime<Utc>> {
+    let interval_millis = kline_step(interval)?.num_milliseconds();
+    let open_time_millis = now
+        .timestamp_millis()
+        .div_euclid(interval_millis)
+        .checked_mul(interval_millis)
+        .ok_or_else(|| {
+            StorageError::invariant_violation(
+                Some(entity::QUANT_DOMAIN_SOURCE_CURSOR),
+                "Binance kline frontier overflow",
+            )
+        })?;
+    let close_time_millis = open_time_millis.checked_sub(1).ok_or_else(|| {
+        StorageError::invariant_violation(
+            Some(entity::QUANT_DOMAIN_SOURCE_CURSOR),
+            "Binance kline frontier underflow",
+        )
+    })?;
+    DateTime::from_timestamp_millis(close_time_millis).ok_or_else(|| {
+        StorageError::invariant_violation(
+            Some(entity::QUANT_DOMAIN_SOURCE_CURSOR),
+            format!("Binance kline frontier `{close_time_millis}` is outside UTC range"),
+        )
+        .into()
+    })
 }
 
 fn dedup_observations(observations: Vec<DomainObservation>) -> Vec<DomainObservation> {
@@ -392,7 +718,10 @@ fn dedup_observations(observations: Vec<DomainObservation>) -> Vec<DomainObserva
 
 #[cfg(test)]
 mod tests {
-    use super::{checkpoint_status, dedup_observations, discover_instruments, resume_point};
+    use super::{
+        checkpoint_status, dedup_observations, discover_instruments, latest_closed_kline_time,
+        resume_point, validate_archive_observations,
+    };
     use chrono::{TimeZone, Utc};
     use quant_pivot_models::{
         config::DomainSourcesConfig,
@@ -402,6 +731,7 @@ mod tests {
         enums::domain::{DomainFamily, DomainMetric, KlineInterval},
         types::{BinanceSymbol, ContentHash, DomainInstrumentKey, DomainSourceId},
     };
+    use quant_pivot_research::linkage::ruleset::BINANCE_SPOT_ASSETS;
     use rust_decimal_macros::dec;
 
     #[test]
@@ -410,7 +740,10 @@ mod tests {
         let map = discover_instruments(&config);
         assert!(map.contains_key(&DomainSourceId::binance()));
         assert!(!map.contains_key(&DomainSourceId::chainlink_data_streams()));
-        assert_eq!(map[&DomainSourceId::binance()].len(), 5);
+        assert_eq!(
+            map[&DomainSourceId::binance()].len(),
+            BINANCE_SPOT_ASSETS.len() * 2
+        );
     }
 
     fn cursor(last: chrono::DateTime<Utc>, status: DomainCursorStatus) -> DomainSourceCursorInfo {
@@ -503,23 +836,110 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_status_marks_backfill_until_live_edge() {
-        let now = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
-        let stale = now - chrono::Duration::hours(1);
+    fn archive_batches_must_cover_bootstrap_and_continue_the_durable_cursor() {
+        let key = DomainInstrumentKey::binance_kline(
+            &BinanceSymbol::parse("BTCUSDT").expect("symbol"),
+            KlineInterval::OneMinute,
+        );
+        let lower = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 10).unwrap();
+        let first = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 59).unwrap()
+            + chrono::Duration::milliseconds(999);
+        let observation = |observed_at| DomainObservation {
+            family: DomainFamily::Crypto,
+            source_id: DomainSourceId::binance(),
+            instrument_key: key.clone(),
+            metric: DomainMetric::Close,
+            value: dec!(1),
+            observed_at,
+            publish_time: observed_at,
+            available_at: Some(observed_at),
+        };
+        let batch = vec![
+            observation(first),
+            observation(first + chrono::Duration::minutes(1)),
+        ];
+        validate_archive_observations(&batch, None, lower, chrono::Duration::minutes(1))
+            .expect("initial archive covers bootstrap boundary");
+        validate_archive_observations(
+            &batch[1..],
+            Some(first + chrono::Duration::minutes(1)),
+            lower,
+            chrono::Duration::minutes(1),
+        )
+        .expect("next batch continues cursor");
+        assert!(
+            validate_archive_observations(
+                &batch[1..],
+                Some(first + chrono::Duration::minutes(2)),
+                lower,
+                chrono::Duration::minutes(1),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn checkpoint_status_uses_the_interval_closed_bar_frontier() {
+        let now = Utc.with_ymd_and_hms(2026, 7, 1, 12, 24, 48).unwrap();
+        let one_minute_frontier =
+            latest_closed_kline_time(KlineInterval::OneMinute, now).expect("1m frontier");
+        let one_hour_frontier =
+            latest_closed_kline_time(KlineInterval::OneHour, now).expect("1h frontier");
         assert_eq!(
-            checkpoint_status(None, true, stale, now),
+            one_minute_frontier,
+            Utc.with_ymd_and_hms(2026, 7, 1, 12, 23, 59).unwrap()
+                + chrono::Duration::milliseconds(999)
+        );
+        assert_eq!(
+            one_hour_frontier,
+            Utc.with_ymd_and_hms(2026, 7, 1, 11, 59, 59).unwrap()
+                + chrono::Duration::milliseconds(999)
+        );
+        assert_eq!(
+            checkpoint_status(
+                None,
+                true,
+                one_hour_frontier - chrono::Duration::hours(1),
+                one_hour_frontier,
+            ),
             DomainCursorStatus::Backfilling
         );
         assert_eq!(
-            checkpoint_status(None, false, now, now),
+            checkpoint_status(None, true, one_hour_frontier, one_hour_frontier),
+            DomainCursorStatus::Bootstrap
+        );
+        assert_eq!(
+            checkpoint_status(
+                Some(&cursor(one_hour_frontier, DomainCursorStatus::Backfilling)),
+                true,
+                one_hour_frontier,
+                one_hour_frontier,
+            ),
             DomainCursorStatus::Live
+        );
+    }
+
+    #[test]
+    fn latest_closed_kline_time_is_stable_at_interval_boundaries() {
+        let boundary = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
+        assert_eq!(
+            latest_closed_kline_time(KlineInterval::OneHour, boundary).expect("boundary frontier"),
+            boundary - chrono::Duration::milliseconds(1)
+        );
+        assert_eq!(
+            latest_closed_kline_time(
+                KlineInterval::OneHour,
+                boundary - chrono::Duration::milliseconds(1),
+            )
+            .expect("pre-boundary frontier"),
+            boundary - chrono::Duration::hours(1) - chrono::Duration::milliseconds(1)
         );
     }
 }
 
 #[cfg(test)]
 mod isolation_tests {
-    use super::{DomainIngestor, discover_instruments};
+    use super::{CryptoKlineIngestor, discover_instruments};
     use crate::runtime_config::RuntimeConfigStore;
     use async_trait::async_trait;
     use chrono::Utc;
@@ -539,7 +959,10 @@ mod isolation_tests {
     use rust_decimal_macros::dec;
     use std::{
         collections::HashMap,
-        sync::{Arc, Mutex},
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
     };
 
     /// A source that fails `fetch` for exactly one instrument key, succeeding
@@ -636,6 +1059,102 @@ mod isolation_tests {
         }
     }
 
+    struct FailSecondWrite {
+        calls: AtomicUsize,
+        written: Mutex<Vec<DomainObservationRow>>,
+    }
+
+    #[async_trait::async_trait]
+    impl FactWriter<DomainObservationRow> for FailSecondWrite {
+        async fn write_batch(&self, rows: Vec<DomainObservationRow>) -> Result<(), StorageError> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+            if call == 2 {
+                return Err(StorageError::Connection(
+                    "synthetic second archive batch failure".to_owned(),
+                ));
+            }
+            self.written.lock().expect("lock").extend(rows);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn archive_cursor_advances_only_after_each_successful_fact_batch() {
+        let domain_sources = DomainSourcesConfig::default();
+        let cursor_repo = Arc::new(FakeCursorRepo::default());
+        let writer = Arc::new(FailSecondWrite {
+            calls: AtomicUsize::new(0),
+            written: Mutex::new(Vec::new()),
+        });
+        let ingestor = CryptoKlineIngestor::new(
+            Vec::new(),
+            Vec::new(),
+            Arc::clone(&cursor_repo) as Arc<dyn DomainSourceCursorRepository>,
+            Arc::clone(&writer) as Arc<dyn FactWriter<DomainObservationRow>>,
+            Arc::new(RuntimeConfigStore::new(RuntimeConfig::default())),
+            domain_sources,
+        );
+        let instrument = DomainInstrumentKey::new("BINANCE:BTCUSDT:1m");
+        let first = Utc::now() - chrono::Duration::minutes(3);
+        let second = first + chrono::Duration::minutes(1);
+        let third = second + chrono::Duration::minutes(1);
+        let observation = |observed_at| DomainObservation {
+            family: DomainFamily::Crypto,
+            source_id: DomainSourceId::binance(),
+            instrument_key: instrument.clone(),
+            metric: DomainMetric::Close,
+            value: dec!(1),
+            observed_at,
+            publish_time: observed_at,
+            available_at: Some(observed_at),
+        };
+
+        ingestor
+            .persist_archive_observations(
+                &DomainSourceId::binance(),
+                &instrument,
+                vec![observation(first), observation(second)],
+                second,
+                2,
+            )
+            .await
+            .expect("first batch persists and commits");
+        ingestor
+            .persist_archive_observations(
+                &DomainSourceId::binance(),
+                &instrument,
+                vec![observation(third)],
+                third,
+                2,
+            )
+            .await
+            .expect_err("second fact write fails before cursor commit");
+        let after_failure = cursor_repo
+            .find(&DomainSourceId::binance(), &instrument)
+            .await
+            .expect("find cursor")
+            .expect("first checkpoint exists");
+        assert_eq!(after_failure.checkpoint_json.event_time(), second);
+
+        ingestor
+            .persist_archive_observations(
+                &DomainSourceId::binance(),
+                &instrument,
+                vec![observation(third)],
+                third,
+                2,
+            )
+            .await
+            .expect("retry resumes from last committed batch");
+        let after_retry = cursor_repo
+            .find(&DomainSourceId::binance(), &instrument)
+            .await
+            .expect("find cursor")
+            .expect("retry checkpoint exists");
+        assert_eq!(after_retry.checkpoint_json.event_time(), third);
+        assert_eq!(writer.written.lock().expect("lock").len(), 3);
+    }
+
     #[tokio::test]
     async fn one_instrument_failure_does_not_abort_the_tick() {
         let domain_sources = DomainSourcesConfig::default();
@@ -659,8 +1178,9 @@ mod isolation_tests {
         let writer = Arc::new(FakeWriter::default());
         let runtime_config = Arc::new(RuntimeConfigStore::new(RuntimeConfig::default()));
 
-        let ingestor = DomainIngestor::new(
+        let ingestor = CryptoKlineIngestor::new(
             vec![source],
+            Vec::new(),
             Arc::clone(&cursor_repo) as Arc<dyn DomainSourceCursorRepository>,
             Arc::clone(&writer) as Arc<dyn FactWriter<DomainObservationRow>>,
             runtime_config,

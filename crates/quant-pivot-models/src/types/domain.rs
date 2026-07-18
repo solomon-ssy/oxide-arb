@@ -26,7 +26,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
 use crate::{
-    enums::domain::KlineInterval,
+    enums::domain::{BinanceMarketSegment, KlineInterval},
     types::{DomainInstrumentKey, DomainSourceId},
 };
 
@@ -267,6 +267,11 @@ validated_token! {
     IcaoStation, kind = "ICAO station", max_len = 4, allow_dash = false
 }
 
+validated_token! {
+    /// A source-native Hong Kong Observatory station code (e.g. `HKO`).
+    HkoStation, kind = "HKO station", max_len = 3, allow_dash = false
+}
+
 /// Temperature unit exposed by a Polymarket weather contract.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
@@ -275,6 +280,49 @@ validated_token! {
 pub enum TemperatureUnit {
     Celsius,
     Fahrenheit,
+}
+
+/// Daily temperature statistic named by the Polymarket contract.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum WeatherTemperatureStatistic {
+    Maximum,
+    Minimum,
+}
+
+impl WeatherTemperatureStatistic {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Maximum => "maximum",
+            Self::Minimum => "minimum",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "maximum" => Some(Self::Maximum),
+            "minimum" => Some(Self::Minimum),
+            _ => None,
+        }
+    }
+}
+
+/// Contract-specific finalization instant.
+///
+/// Source revisions after this instant no longer affect the resolved sibling
+/// group. The instant is frozen from the rules text; it is not inferred from
+/// an observation worker's operational close cadence.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum WeatherContractFinalizationPolicy {
+    SourceFinalized,
+    NextLocalDayFirstObservation,
 }
 
 /// Temperature stored canonically in degrees Celsius.
@@ -373,6 +421,33 @@ impl DomainInstrumentKey {
         Self::new(format!("BINANCE_AGG_TRADE:{symbol}"))
     }
 
+    /// Canonical key for a Binance USD-M Futures kline series.
+    #[must_use]
+    pub fn binance_usdm_futures_kline(symbol: &BinanceSymbol, interval: KlineInterval) -> Self {
+        Self::new(format!(
+            "BINANCE_USDM_FUTURES:{symbol}:{}",
+            interval.as_str()
+        ))
+    }
+
+    /// Canonical key for a Binance USD-M Futures aggregate-trade stream.
+    #[must_use]
+    pub fn binance_usdm_futures_agg_trade(symbol: &BinanceSymbol) -> Self {
+        Self::new(format!("BINANCE_USDM_FUTURES_AGG_TRADE:{symbol}"))
+    }
+
+    /// Canonical Polymarket RTDS Binance feed key.
+    #[must_use]
+    pub fn polymarket_rtds_binance(symbol: &BinanceSymbol) -> Self {
+        Self::new(format!("RTDS:BINANCE:{symbol}"))
+    }
+
+    /// Canonical Polymarket RTDS Chainlink feed key.
+    #[must_use]
+    pub fn polymarket_rtds_chainlink(feed: &ChainlinkFeedKey) -> Self {
+        Self::new(format!("RTDS:CHAINLINK:{feed}"))
+    }
+
     /// Canonical key for a Chainlink Data Streams feed.
     #[must_use]
     pub fn chainlink_data_streams(feed: &ChainlinkFeedKey) -> Self {
@@ -403,16 +478,119 @@ impl DomainInstrumentKey {
         Self::new(format!("GEFS_BACKFILL:{station}"))
     }
 
+    /// Canonical HKO rainfall reporting-place key.
+    #[must_use]
+    pub fn hko_rainfall(place: &str) -> Self {
+        Self::new(format!("HKO:{place}:RAIN"))
+    }
+
+    /// Canonical HKO daily maximum/minimum temperature series.
+    #[must_use]
+    pub fn hko_daily_temperature(
+        station: &HkoStation,
+        statistic: WeatherTemperatureStatistic,
+    ) -> Self {
+        let suffix = match statistic {
+            WeatherTemperatureStatistic::Maximum => "TMAX",
+            WeatherTemperatureStatistic::Minimum => "TMIN",
+        };
+        Self::new(format!("HKO:{station}:{suffix}"))
+    }
+
+    /// Canonical `AirNow` reporting-area PM2.5 observation key.
+    #[must_use]
+    pub fn airnow_pm25_observation(area_key: &str) -> Self {
+        Self::new(format!("AIRNOW:{area_key}:PM25:OBS"))
+    }
+
+    /// Canonical `AirNow` reporting-area PM2.5 forecast key.
+    #[must_use]
+    pub fn airnow_pm25_forecast(area_key: &str) -> Self {
+        Self::new(format!("AIRNOW:{area_key}:PM25:FORECAST"))
+    }
+
+    /// Canonical `AirNow` exact monitoring-site PM2.5 AQI series.
+    #[must_use]
+    pub fn airnow_pm25_site(aqsid: &str) -> Self {
+        Self::new(format!("AIRNOW_SITE:{aqsid}:PM25_AQI"))
+    }
+
+    /// Canonical SPC preliminary tornado-report region key.
+    #[must_use]
+    pub fn spc_tornado(region: &str) -> Self {
+        Self::new(format!("SPC:{region}:TORNADO"))
+    }
+
+    /// Canonical NCEI final tornado-event region key.
+    #[must_use]
+    pub fn ncei_tornado(region: &str) -> Self {
+        Self::new(format!("NCEI:{region}:TORNADO"))
+    }
+
+    /// Canonical NHC current-advisory storm key.
+    #[must_use]
+    pub fn nhc_advisory(basin: &str, storm: &str) -> Self {
+        Self::new(format!("NHC:{basin}:{storm}"))
+    }
+
+    /// Canonical NHC HURDAT2 best-track storm key.
+    #[must_use]
+    pub fn nhc_hurdat2(basin: &str, storm: &str) -> Self {
+        Self::new(format!("HURDAT2:{basin}:{storm}"))
+    }
+
+    /// Canonical NASA GISTEMP v4 land-ocean global anomaly key.
+    #[must_use]
+    pub fn nasa_gistemp_loti() -> Self {
+        Self::new("GISTEMP:LOTI")
+    }
+
+    /// Canonical NSIDC Sea Ice Index hemisphere extent key.
+    #[must_use]
+    pub fn nsidc_sea_ice_extent(hemisphere: &str) -> Self {
+        Self::new(format!("NSIDC:{hemisphere}:EXTENT"))
+    }
+
+    /// Canonical NWS station wind-speed key.
+    #[must_use]
+    pub fn nws_wind_speed(station: &IcaoStation) -> Self {
+        Self::new(format!("NWS:{station}:WIND"))
+    }
+
+    /// Canonical NWS station wind-gust key.
+    #[must_use]
+    pub fn nws_wind_gust(station: &IcaoStation) -> Self {
+        Self::new(format!("NWS:{station}:GUST"))
+    }
+
     /// The source this key belongs to, derived from the canonical prefix.
     #[must_use]
     pub fn source_id(&self) -> Option<DomainSourceId> {
         match self.as_str().split_once(':')?.0 {
             "BINANCE" => Some(DomainSourceId::binance()),
             "BINANCE_AGG_TRADE" => Some(DomainSourceId::binance_agg_trade()),
+            "BINANCE_USDM_FUTURES" => Some(DomainSourceId::binance_usdm_futures()),
+            "BINANCE_USDM_FUTURES_AGG_TRADE" => {
+                Some(DomainSourceId::binance_usdm_futures_agg_trade())
+            }
+            "RTDS" => match self.as_str().split(':').nth(1)? {
+                "BINANCE" => Some(DomainSourceId::polymarket_rtds_binance()),
+                "CHAINLINK" => Some(DomainSourceId::polymarket_rtds_chainlink()),
+                _ => None,
+            },
             "CHAINLINK_DATA_STREAMS" => Some(DomainSourceId::chainlink_data_streams()),
             "AVIATION_WEATHER" => Some(DomainSourceId::aviation_weather()),
             "GHCNH" => Some(DomainSourceId::ghcnh()),
             "GEFS" | "GEFS_BACKFILL" => Some(DomainSourceId::gefs()),
+            "HKO" => Some(DomainSourceId::hko_open_data()),
+            "AIRNOW" => Some(DomainSourceId::airnow()),
+            "SPC" => Some(DomainSourceId::spc_storm_reports()),
+            "NCEI" => Some(DomainSourceId::ncei_storm_events()),
+            "NHC" => Some(DomainSourceId::nhc_advisory()),
+            "HURDAT2" => Some(DomainSourceId::nhc_hurdat2()),
+            "GISTEMP" => Some(DomainSourceId::nasa_gistemp()),
+            "NSIDC" => Some(DomainSourceId::nsidc_sea_ice_index()),
+            "NWS" => Some(DomainSourceId::nws_observation()),
             _ => None,
         }
     }
@@ -421,6 +599,56 @@ impl DomainInstrumentKey {
     #[must_use]
     pub fn as_binance_agg_trade_symbol(&self) -> Option<BinanceSymbol> {
         BinanceSymbol::parse(self.as_str().strip_prefix("BINANCE_AGG_TRADE:")?).ok()
+    }
+
+    /// Decode a canonical USD-M Futures aggregate-trade instrument.
+    #[must_use]
+    pub fn as_binance_usdm_futures_agg_trade_symbol(&self) -> Option<BinanceSymbol> {
+        BinanceSymbol::parse(
+            self.as_str()
+                .strip_prefix("BINANCE_USDM_FUTURES_AGG_TRADE:")?,
+        )
+        .ok()
+    }
+
+    /// Decode a canonical Binance kline instrument without accepting aliases.
+    #[must_use]
+    pub fn as_binance_kline(&self) -> Option<(BinanceSymbol, KlineInterval)> {
+        let binding = self.as_str().strip_prefix("BINANCE:")?;
+        let (symbol, interval) = binding.rsplit_once(':')?;
+        Some((
+            BinanceSymbol::parse(symbol).ok()?,
+            KlineInterval::from_str(interval).ok()?,
+        ))
+    }
+
+    /// Decode a canonical kline instrument and preserve its Binance product.
+    #[must_use]
+    pub fn as_binance_market_kline(
+        &self,
+    ) -> Option<(BinanceMarketSegment, BinanceSymbol, KlineInterval)> {
+        if let Some((symbol, interval)) = self.as_binance_kline() {
+            return Some((BinanceMarketSegment::Spot, symbol, interval));
+        }
+        let binding = self.as_str().strip_prefix("BINANCE_USDM_FUTURES:")?;
+        let (symbol, interval) = binding.rsplit_once(':')?;
+        Some((
+            BinanceMarketSegment::UsdmFutures,
+            BinanceSymbol::parse(symbol).ok()?,
+            KlineInterval::from_str(interval).ok()?,
+        ))
+    }
+
+    /// Decode a canonical RTDS Binance instrument.
+    #[must_use]
+    pub fn as_polymarket_rtds_binance_symbol(&self) -> Option<BinanceSymbol> {
+        BinanceSymbol::parse(self.as_str().strip_prefix("RTDS:BINANCE:")?).ok()
+    }
+
+    /// Decode a canonical RTDS Chainlink instrument.
+    #[must_use]
+    pub fn as_polymarket_rtds_chainlink_feed(&self) -> Option<ChainlinkFeedKey> {
+        ChainlinkFeedKey::parse(self.as_str().strip_prefix("RTDS:CHAINLINK:")?).ok()
     }
 
     /// Decode a canonical Data Streams instrument without accepting aliases.
@@ -439,8 +667,8 @@ impl DomainInstrumentKey {
 #[cfg(test)]
 mod tests {
     use super::{
-        BinanceSymbol, ChainlinkFeedKey, CryptoAsset, DomainInstrumentKey, KlineInterval,
-        ResolverVersion,
+        BinanceMarketSegment, BinanceSymbol, ChainlinkFeedKey, CryptoAsset, DomainInstrumentKey,
+        KlineInterval, ResolverVersion,
     };
     use crate::types::DomainSourceId;
 
@@ -461,6 +689,18 @@ mod tests {
         );
         assert_eq!(key.as_str(), "BINANCE:BTCUSDT:1m");
         assert_eq!(key.source_id(), Some(DomainSourceId::binance()));
+        assert_eq!(
+            key.as_binance_kline(),
+            Some((
+                BinanceSymbol::parse("BTCUSDT").expect("symbol"),
+                KlineInterval::OneMinute,
+            ))
+        );
+        assert!(
+            DomainInstrumentKey::new("BINANCE:BTCUSDT:legacy")
+                .as_binance_kline()
+                .is_none()
+        );
 
         let feed = DomainInstrumentKey::chainlink_data_streams(
             &ChainlinkFeedKey::parse("BTC-USD").expect("feed"),
@@ -470,6 +710,38 @@ mod tests {
             feed.source_id(),
             Some(DomainSourceId::chainlink_data_streams())
         );
+    }
+
+    #[test]
+    fn binance_usdm_futures_keys_preserve_product_provenance() {
+        let symbol = BinanceSymbol::parse("HYPEUSDT").expect("symbol");
+        let kline =
+            DomainInstrumentKey::binance_usdm_futures_kline(&symbol, KlineInterval::OneHour);
+        assert_eq!(kline.as_str(), "BINANCE_USDM_FUTURES:HYPEUSDT:1h");
+        assert_eq!(
+            kline.source_id(),
+            Some(DomainSourceId::binance_usdm_futures())
+        );
+        assert_eq!(
+            kline.as_binance_market_kline(),
+            Some((
+                BinanceMarketSegment::UsdmFutures,
+                symbol.clone(),
+                KlineInterval::OneHour,
+            ))
+        );
+        assert!(kline.as_binance_kline().is_none());
+
+        let aggregate_trade = DomainInstrumentKey::binance_usdm_futures_agg_trade(&symbol);
+        assert_eq!(
+            aggregate_trade.source_id(),
+            Some(DomainSourceId::binance_usdm_futures_agg_trade())
+        );
+        assert_eq!(
+            aggregate_trade.as_binance_usdm_futures_agg_trade_symbol(),
+            Some(symbol)
+        );
+        assert!(aggregate_trade.as_binance_agg_trade_symbol().is_none());
     }
 
     #[test]

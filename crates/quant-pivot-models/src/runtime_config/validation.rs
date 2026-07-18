@@ -5,7 +5,7 @@
 //! runtime configuration).
 
 use crate::{
-    enums::factor::FactorNormalization,
+    enums::{common::MarketCategory, factor::FactorNormalization},
     runtime_config::{FeatureFamily, PerFactorNormalization},
     types::CalibrationArtifactId,
 };
@@ -32,7 +32,7 @@ pub type FeaturesConfigValidator = fn(&FeaturesConfig, &mut ConfigValidationRepo
 #[distributed_slice]
 pub static FEATURES_CONFIG_VALIDATORS: [FeaturesConfigValidator] = [..];
 
-/// Mode-agnostic invariants for the only supported runtime-config schema (v17).
+/// Mode-agnostic invariants for the only supported runtime-config schema (v18).
 ///
 /// Phase 11.3 added the `model.calibration` embargo/confidence bounds and the
 /// `portfolio.kelly_safety` edge-uncertainty bounds. Phase 11.4 adds the
@@ -54,7 +54,53 @@ pub fn validate_runtime_config(config: &RuntimeConfig) -> ConfigValidationReport
     validate_portfolio(config, &mut report);
     validate_execution(config, &mut report);
     validate_research(config, &mut report);
+    validate_feedback(config, &mut report);
     report
+}
+
+fn validate_feedback(config: &RuntimeConfig, report: &mut ConfigValidationReport) {
+    let feedback = &config.feedback;
+    for (field, value) in [
+        ("feedback.cadence_secs", feedback.cadence_secs),
+        ("feedback.run_timeout_secs", feedback.run_timeout_secs),
+        ("feedback.retry_backoff_secs", feedback.retry_backoff_secs),
+    ] {
+        if value == 0 {
+            report.errors.push(ConfigValidationError::InvalidValue {
+                field,
+                detail: "must be greater than zero".to_owned(),
+            });
+        }
+    }
+    if feedback.max_concurrency == 0 {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "feedback.max_concurrency",
+            detail: "must be greater than zero".to_owned(),
+        });
+    }
+    let mut categories = HashSet::new();
+    for category in &feedback.auto_publish_categories {
+        if !matches!(category, MarketCategory::Crypto | MarketCategory::Weather) {
+            report.errors.push(ConfigValidationError::InvalidValue {
+                field: "feedback.auto_publish_categories",
+                detail: format!(
+                    "automatic model + factor publication is limited to crypto/weather, found {category}"
+                ),
+            });
+        }
+        if !categories.insert(*category) {
+            report.errors.push(ConfigValidationError::InvalidValue {
+                field: "feedback.auto_publish_categories",
+                detail: format!("duplicate category `{category}`"),
+            });
+        }
+    }
+    if feedback.auto_publish_enabled && feedback.auto_publish_categories.is_empty() {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "feedback.auto_publish_categories",
+            detail: "must be non-empty when auto_publish_enabled is true".to_owned(),
+        });
+    }
 }
 
 fn validate_domain(config: &RuntimeConfig, report: &mut ConfigValidationReport) {
@@ -925,7 +971,7 @@ fn validate_execution(config: &RuntimeConfig, report: &mut ConfigValidationRepor
     if config.execution.auto_execution.enabled {
         report.errors.push(ConfigValidationError::InvalidValue {
             field: "execution.auto_execution.enabled",
-            detail: "Runtime v17 keeps AutoExecution blocked; Phase 11.11 owns its final governance gate"
+            detail: "Runtime v18 keeps AutoExecution blocked; Phase 11.11 owns its final governance gate"
                 .to_owned(),
         });
     }
@@ -1005,19 +1051,19 @@ fn validate_semi_auto_canary(config: &RuntimeConfig, report: &mut ConfigValidati
     if !only_first_tier {
         report.errors.push(ConfigValidationError::InvalidValue {
             field: "execution.semi_auto.canary.allowed_cash_budget_tiers_usd",
-            detail: "runtime v17 canary must contain exactly the $25 cash-budget tier".to_owned(),
+            detail: "runtime v18 canary must contain exactly the $25 cash-budget tier".to_owned(),
         });
     }
     if canary.max_open_intents != 1 {
         report.errors.push(ConfigValidationError::InvalidValue {
             field: "execution.semi_auto.canary.max_open_intents",
-            detail: "runtime v17 canary must allow exactly one open intent".to_owned(),
+            detail: "runtime v18 canary must allow exactly one open intent".to_owned(),
         });
     }
     if canary.max_total_cash_per_report.value.parse::<Decimal>() != Ok(Decimal::new(25, 0)) {
         report.errors.push(ConfigValidationError::InvalidValue {
             field: "execution.semi_auto.canary.max_total_cash_per_report",
-            detail: "runtime v17 canary must cap each report at exactly $25 total cash".to_owned(),
+            detail: "runtime v18 canary must cap each report at exactly $25 total cash".to_owned(),
         });
     }
     if canary
@@ -1441,7 +1487,7 @@ fn non_empty_numbers(field: &'static str, values: &[u64], report: &mut ConfigVal
 mod tests {
     use super::{ConfigValidationError, RuntimeConfig, validate_runtime_config};
     use crate::{
-        enums::factor::FactorFamily,
+        enums::{common::MarketCategory, factor::FactorFamily},
         runtime_config::{
             DecimalString, FeatureFamily, RUNTIME_CONFIG_SCHEMA_VERSION, ReportScheduleConfig,
             ScheduleCadence,
@@ -1453,6 +1499,36 @@ mod tests {
     fn default_runtime_config_is_valid() {
         let report = validate_runtime_config(&RuntimeConfig::default());
         assert!(!report.has_errors());
+    }
+
+    #[test]
+    fn feedback_operational_bounds_must_be_positive() {
+        let mut config = RuntimeConfig::default();
+        config.feedback.cadence_secs = 0;
+        config.feedback.max_concurrency = 0;
+        config.feedback.run_timeout_secs = 0;
+        config.feedback.retry_backoff_secs = 0;
+        let report = validate_runtime_config(&config);
+        assert!(report.has_errors());
+    }
+
+    #[test]
+    fn feedback_auto_publish_is_closed_to_crypto_and_weather() {
+        let mut config = RuntimeConfig::default();
+        config.feedback.auto_publish_categories =
+            vec![MarketCategory::Crypto, MarketCategory::Sports];
+        let report = validate_runtime_config(&config);
+        assert!(report.has_errors());
+
+        config.feedback.auto_publish_categories =
+            vec![MarketCategory::Weather, MarketCategory::Weather];
+        let report = validate_runtime_config(&config);
+        assert!(report.has_errors());
+
+        config.feedback.auto_publish_enabled = true;
+        config.feedback.auto_publish_categories.clear();
+        let report = validate_runtime_config(&config);
+        assert!(report.has_errors());
     }
 
     #[test]

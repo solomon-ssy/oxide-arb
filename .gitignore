@@ -10,6 +10,7 @@
 .env.*
 !.env.example
 config/quant-pivot.local.toml
+.local/
 var/
 .DS_Store
 

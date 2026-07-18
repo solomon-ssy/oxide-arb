@@ -24,6 +24,20 @@ pub(super) const REMOVE_UNMANAGED_ROLLUP_TTL_SOURCES: &[&str] =
 pub(super) const SCHEMA_VERSION_UINT32_SOURCES: &[&str] =
     &[include_str!("sql/schema_version_uint32.sql")];
 
+pub(super) const WEATHER_LONG_FORM_V2_SOURCES: &[&str] =
+    &[include_str!("sql/weather_long_form_v2.sql")];
+
+pub(super) const WEATHER_HISTORICAL_DATE32_SOURCES: &[&str] =
+    &[include_str!("sql/weather_historical_date32.sql")];
+
+pub(super) const WEATHER_EPOCH_DAY_SOURCES: &[&str] = &[include_str!("sql/weather_epoch_day.sql")];
+
+pub(super) const WEATHER_OBSERVATION_EPOCH_TIME_SOURCES: &[&str] =
+    &[include_str!("sql/weather_observation_epoch_time.sql")];
+
+pub(super) const IMMUTABLE_DOMAIN_FACT_IDEMPOTENCY_SOURCES: &[&str] =
+    &[include_str!("sql/immutable_domain_fact_idempotency.sql")];
+
 pub(super) const REQUIRED_SCHEMA_OBJECTS: [&str; 27] = [
     "book_microstructure_1m",
     "book_microstructure_1m_mv",
@@ -50,13 +64,15 @@ pub(super) const REQUIRED_SCHEMA_OBJECTS: [&str; 27] = [
     "quant_serving_evidence_completion",
     "quant_signal_candidate_event",
     "quant_trade_tape",
-    "quant_weather_forecast_point",
-    "quant_weather_observation_report",
+    "quant_weather_forecast_fact",
+    "quant_weather_observation_fact",
 ];
 
-pub(super) const FORBIDDEN_SCHEMA_OBJECTS: [&str; 2] = [
+pub(super) const FORBIDDEN_SCHEMA_OBJECTS: [&str; 4] = [
     "book_microstructure_1m_availability_v2_mv",
     "quant_recommendation_event",
+    "quant_weather_forecast_point",
+    "quant_weather_observation_report",
 ];
 
 /// Extract the table-level TTL expression from normalized `CREATE TABLE` SQL.

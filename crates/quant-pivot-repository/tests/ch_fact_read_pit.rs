@@ -2,10 +2,15 @@
 
 use chrono::Utc;
 use quant_pivot_models::{
-    clickhouse::{BookL2CheckpointRow, BookMicrostructureRow, ChPrice, ChSchemaVersion},
+    clickhouse::{
+        BookL2CheckpointRow, BookMicrostructureRow, ChDecimal64, ChPrice, ChSchemaVersion,
+        WeatherForecastFactRow, WeatherObservationFactRow,
+    },
     config::{ClickHouseConfig, SchemaMigrationConfig},
     enums::clickhouse::ChFactSource,
-    types::{ContentHash, MarketId, Price, Shares, TokenId, Usd},
+    types::{
+        ContentHash, DomainInstrumentKey, DomainSourceId, MarketId, Price, Shares, TokenId, Usd,
+    },
 };
 use quant_pivot_repository::{
     clickhouse::ChQuantFactReadRepository, traits::QuantFactReadRepository,
@@ -115,6 +120,11 @@ async fn wait_for_book_snapshot_rows(client: &clickhouse::Client, token: &TokenI
 /// Current epoch millis for deterministic point-in-time visibility checks.
 fn fresh_event_time_ms() -> i64 {
     Utc::now().timestamp_millis()
+}
+
+fn content_hash(digit: char) -> ContentHash {
+    ContentHash::parse(format!("blake3:{}", digit.to_string().repeat(64)))
+        .expect("valid content hash")
 }
 
 fn book_row(
@@ -426,59 +436,278 @@ async fn resolution_at_is_pit_bounded() {
 
 #[tokio::test]
 #[ignore = "requires Docker ClickHouse"]
-async fn domain_observation_preserves_prior_revisions_after_merge() {
-    use quant_pivot_models::{
-        clickhouse::{ChDecimal64, DomainObservationRow},
-        types::{DomainInstrumentKey, DomainSourceId},
-    };
-
+async fn weather_long_form_facts_are_pit_visible_and_revision_preserving() {
     let (pool, client, _container) = setup_clickhouse().await;
     let read = ChQuantFactReadRepository::new(pool);
-    let event_time = fresh_event_time_ms();
-    let visible_at = event_time + 1_000;
-    let corrected_at = event_time + 2_000;
-    let instrument_key = DomainInstrumentKey::new("BINANCE:BTCUSDT:1m");
-    let base = DomainObservationRow {
-        family: "crypto".to_owned(),
-        source_id: DomainSourceId::binance(),
-        instrument_key: instrument_key.clone(),
-        metric: "close".to_owned(),
-        value: ChDecimal64::from(Decimal::new(40, 2)),
-        event_time,
-        publish_time: event_time,
-        ingestion_time: visible_at,
+    let observed_at = fresh_event_time_ms();
+    let first_visible_at = observed_at + 1_000;
+    let correction_visible_at = observed_at + 2_000;
+    let station = "KJFK".to_owned();
+    let observation_instrument = DomainInstrumentKey::new("AVIATION_WEATHER:KJFK");
+    let original_hash = content_hash('3');
+
+    let original = WeatherObservationFactRow {
+        source_id: DomainSourceId::aviation_weather(),
+        instrument_key: observation_instrument.clone(),
+        subject_key: station.clone(),
+        local_date: Utc::now().date_naive().into(),
+        report_kind: "metar".to_owned(),
+        variable: "temperature".to_owned(),
+        value: ChDecimal64::from(Decimal::new(21_25, 2)),
+        unit: "celsius".to_owned(),
+        precision: ChDecimal64::from(Decimal::new(25, 2)),
+        observed_at,
+        valid_from: Some(observed_at),
+        valid_to: None,
+        published_at: observed_at,
+        available_at: first_visible_at,
+        revision: 1,
+        report_hash: original_hash.clone(),
+        supersedes_report_hash: None,
+        raw_report: "METAR KJFK TEST".to_owned(),
         schema_version: ChSchemaVersion::FIRST,
     };
-    let mut correction = base.clone();
-    correction.value = ChDecimal64::from(Decimal::new(60, 2));
-    correction.ingestion_time = corrected_at;
+    let correction = WeatherObservationFactRow {
+        report_kind: "correction".to_owned(),
+        value: ChDecimal64::from(Decimal::new(22_00, 2)),
+        published_at: observed_at + 1_500,
+        available_at: correction_visible_at,
+        revision: 2,
+        report_hash: content_hash('4'),
+        supersedes_report_hash: Some(original_hash),
+        raw_report: "METAR KJFK COR TEST".to_owned(),
+        ..original.clone()
+    };
+    let precipitation = WeatherObservationFactRow {
+        source_id: DomainSourceId::new("nws_precipitation"),
+        instrument_key: DomainInstrumentKey::new("NWS_PRECIPITATION:KJFK"),
+        report_kind: "historical_ghcnh".to_owned(),
+        variable: "precipitation".to_owned(),
+        value: ChDecimal64::from(Decimal::new(12_70, 2)),
+        unit: "millimeter".to_owned(),
+        precision: ChDecimal64::from(Decimal::new(10, 2)),
+        available_at: observed_at + 500,
+        report_hash: content_hash('5'),
+        raw_report: "PRECIP KJFK TEST".to_owned(),
+        ..original.clone()
+    };
+    let mut observation_insert = client
+        .insert::<WeatherObservationFactRow>("quant_weather_observation_fact")
+        .await
+        .expect("insert weather observations");
+    for row in [&original, &original, &correction, &precipitation] {
+        observation_insert
+            .write(row)
+            .await
+            .expect("write weather observation");
+    }
+    observation_insert
+        .end()
+        .await
+        .expect("end weather observation insert");
 
+    assert_preposted_nhc_advisory_pit(&client, &read, observed_at, first_visible_at).await;
+
+    let before_correction = read
+        .weather_observation_facts_between(
+            vec![station.clone()],
+            observed_at - 1,
+            observed_at + 1,
+            first_visible_at,
+            first_visible_at,
+        )
+        .await
+        .expect("read observations before correction");
+    assert_eq!(before_correction.len(), 2);
+    assert_eq!(
+        before_correction
+            .iter()
+            .filter(|row| row.variable == "temperature")
+            .count(),
+        1,
+        "an exact writer retry must not duplicate one immutable report"
+    );
+    assert!(
+        before_correction
+            .iter()
+            .any(|row| row.variable == "precipitation" && row.unit == "millimeter"),
+        "the long-form table must retain a non-temperature variable"
+    );
+
+    let after_correction = read
+        .weather_observation_facts_between(
+            vec![station.clone()],
+            observed_at - 1,
+            observed_at + 1,
+            correction_visible_at,
+            correction_visible_at,
+        )
+        .await
+        .expect("read observations after correction");
+    assert_eq!(after_correction.len(), 3);
+    assert!(
+        after_correction.iter().any(|row| {
+            row.variable == "temperature"
+                && row.revision == 2
+                && row.supersedes_report_hash.as_ref() == Some(&original.report_hash)
+        }),
+        "a visible correction must retain explicit supersession provenance"
+    );
+
+    assert_weather_forecast_pit(
+        &client,
+        &read,
+        &station,
+        observed_at,
+        first_visible_at,
+        correction_visible_at,
+    )
+    .await;
+}
+
+async fn assert_preposted_nhc_advisory_pit(
+    client: &clickhouse::Client,
+    read: &ChQuantFactReadRepository,
+    base_time: i64,
+    first_visible_at: i64,
+) {
+    let advisory_issuance = base_time + 5_000;
+    let advisory = WeatherObservationFactRow {
+        source_id: DomainSourceId::nhc_advisory(),
+        instrument_key: DomainInstrumentKey::new("NHC_ADVISORY:eastern_pacific:EP052026"),
+        subject_key: "EP052026".to_owned(),
+        local_date: Utc::now().date_naive().into(),
+        report_kind: "nhc_advisory".to_owned(),
+        variable: "cyclone_intensity".to_owned(),
+        value: ChDecimal64::from(Decimal::new(55, 0)),
+        unit: "knot".to_owned(),
+        precision: ChDecimal64::from(Decimal::ONE),
+        observed_at: advisory_issuance,
+        valid_from: Some(advisory_issuance),
+        valid_to: None,
+        published_at: base_time + 500,
+        available_at: first_visible_at,
+        revision: 0,
+        report_hash: content_hash('6'),
+        supersedes_report_hash: None,
+        raw_report: "NHC EP052026 ADVISORY 013".to_owned(),
+        schema_version: ChSchemaVersion::FIRST,
+    };
     let mut insert = client
-        .insert::<DomainObservationRow>("quant_domain_observation")
+        .insert::<WeatherObservationFactRow>("quant_weather_observation_fact")
         .await
-        .expect("insert domain observations");
-    insert.write(&base).await.expect("write original");
-    insert.write(&correction).await.expect("write correction");
-    insert.end().await.expect("end domain insert");
-    client
-        .query("OPTIMIZE TABLE quant_domain_observation FINAL")
-        .execute()
-        .await
-        .expect("merge domain observation parts");
+        .expect("insert preposted NHC advisory");
+    insert.write(&advisory).await.expect("write NHC advisory");
+    insert.end().await.expect("end NHC advisory insert");
 
-    let before = read
-        .domain_observation_at(&instrument_key, "close", event_time, visible_at)
+    let before_issuance = read
+        .weather_observation_facts_between(
+            vec![advisory.subject_key.clone()],
+            base_time,
+            advisory_issuance,
+            advisory_issuance - 1,
+            advisory_issuance - 1,
+        )
         .await
-        .expect("observation before correction")
-        .expect("original observation remains queryable");
-    assert_eq!(before.value.to_decimal(), Decimal::new(40, 2));
+        .expect("read before nominal advisory issuance");
+    assert!(
+        before_issuance.is_empty(),
+        "a preposted NHC file must not enter the observation window before nominal issuance"
+    );
+    let at_issuance = read
+        .weather_observation_facts_between(
+            vec![advisory.subject_key.clone()],
+            base_time,
+            advisory_issuance + 1,
+            advisory_issuance,
+            advisory_issuance,
+        )
+        .await
+        .expect("read at nominal advisory issuance");
+    assert_eq!(at_issuance.len(), 1);
+    assert_eq!(at_issuance[0].report_hash, advisory.report_hash);
+}
 
-    let after = read
-        .domain_observation_at(&instrument_key, "close", event_time, corrected_at)
+async fn assert_weather_forecast_pit(
+    client: &clickhouse::Client,
+    read: &ChQuantFactReadRepository,
+    station: &str,
+    reference_time: i64,
+    first_visible_at: i64,
+    correction_visible_at: i64,
+) {
+    let valid_time = reference_time + 86_400_000;
+    let deterministic = WeatherForecastFactRow {
+        source_id: DomainSourceId::gefs(),
+        instrument_key: DomainInstrumentKey::new("GEFS:KJFK"),
+        subject_key: station.to_owned(),
+        variable: "temperature_maximum".to_owned(),
+        value: ChDecimal64::from(Decimal::new(23_50, 2)),
+        unit: "celsius".to_owned(),
+        precision: ChDecimal64::from(Decimal::new(10, 2)),
+        reference_time,
+        valid_time,
+        published_at: reference_time + 500,
+        available_at: first_visible_at,
+        lead_hours: 24,
+        member: None,
+        revision: 1,
+        grid_binding_hash: content_hash('6'),
+        run_manifest_hash: content_hash('7'),
+        report_hash: content_hash('8'),
+        schema_version: ChSchemaVersion::FIRST,
+    };
+    let ensemble_member = WeatherForecastFactRow {
+        value: ChDecimal64::from(Decimal::new(24_25, 2)),
+        available_at: correction_visible_at,
+        member: Some(0),
+        report_hash: content_hash('9'),
+        ..deterministic.clone()
+    };
+    let mut forecast_insert = client
+        .insert::<WeatherForecastFactRow>("quant_weather_forecast_fact")
         .await
-        .expect("observation after correction")
-        .expect("corrected observation");
-    assert_eq!(after.value.to_decimal(), Decimal::new(60, 2));
+        .expect("insert weather forecasts");
+    for row in [&deterministic, &ensemble_member] {
+        forecast_insert
+            .write(row)
+            .await
+            .expect("write weather forecast");
+    }
+    forecast_insert
+        .end()
+        .await
+        .expect("end weather forecast insert");
+
+    let forecast_before_member = read
+        .weather_forecast_facts_between(
+            vec![station.to_owned()],
+            valid_time - 1,
+            valid_time + 1,
+            reference_time,
+            first_visible_at,
+        )
+        .await
+        .expect("read forecast before ensemble member");
+    assert_eq!(forecast_before_member.len(), 1);
+    assert_eq!(forecast_before_member[0].member, None);
+
+    let forecast_after_member = read
+        .weather_forecast_facts_between(
+            vec![station.to_owned()],
+            valid_time - 1,
+            valid_time + 1,
+            reference_time,
+            correction_visible_at,
+        )
+        .await
+        .expect("read forecast after ensemble member");
+    assert_eq!(forecast_after_member.len(), 2);
+    assert!(
+        forecast_after_member
+            .iter()
+            .any(|row| row.member == Some(0))
+    );
 }
 
 #[tokio::test]

@@ -23,6 +23,8 @@ wire_enum! {
         ClobMarketInfo => "clob_market_info",
         ClobL2 => "clob_l2",
         TradeTape => "trade_tape",
+        BinanceMarketData => "binance_market_data",
+        PolymarketRtds => "polymarket_rtds",
         DomainObservation => "domain_observation",
         AviationWeather => "aviation_weather",
         GhcnhCalibration => "ghcnh_calibration",
@@ -126,6 +128,8 @@ impl From<ResearchProfileDataSource> for ResearchReadinessSource {
             ResearchProfileDataSource::ClobMarketInfo => Self::ClobMarketInfo,
             ResearchProfileDataSource::ClobL2 => Self::ClobL2,
             ResearchProfileDataSource::TradeTape => Self::TradeTape,
+            ResearchProfileDataSource::BinanceMarketData => Self::BinanceMarketData,
+            ResearchProfileDataSource::PolymarketRtds => Self::PolymarketRtds,
             ResearchProfileDataSource::AviationWeather => Self::AviationWeather,
             ResearchProfileDataSource::GhcnhCalibration => Self::GhcnhCalibration,
             ResearchProfileDataSource::GefsEnsemble => Self::GefsEnsemble,
@@ -190,6 +194,20 @@ fn source_bindings() -> Vec<ResearchSourceBinding> {
             None,
         ),
         ch_binding(
+            Source::BinanceMarketData,
+            "quant_crypto_price_report",
+            "event_time",
+            "toYYYYMM(event_time)",
+            Some(("source_id", "binance")),
+        ),
+        ch_binding(
+            Source::PolymarketRtds,
+            "quant_crypto_price_report",
+            "event_time",
+            "toYYYYMM(event_time)",
+            Some(("source_id", "polymarket_rtds_binance")),
+        ),
+        ch_binding(
             Source::DomainObservation,
             "quant_domain_observation",
             "event_time",
@@ -198,21 +216,21 @@ fn source_bindings() -> Vec<ResearchSourceBinding> {
         ),
         ch_binding(
             Source::AviationWeather,
-            "quant_weather_observation_report",
-            "observation_time",
-            "toYYYYMM(local_date)",
+            "quant_weather_observation_fact",
+            "observed_at",
+            "intDiv(local_date, 3660)",
             Some(("source_id", "aviation_weather")),
         ),
         ch_binding(
             Source::GhcnhCalibration,
-            "quant_weather_observation_report",
-            "observation_time",
-            "toYYYYMM(local_date)",
+            "quant_weather_observation_fact",
+            "observed_at",
+            "intDiv(local_date, 3660)",
             Some(("source_id", "ghcnh")),
         ),
         ch_binding(
             Source::GefsEnsemble,
-            "quant_weather_forecast_point",
+            "quant_weather_forecast_fact",
             "valid_time",
             "toYYYYMM(reference_time)",
             Some(("source_id", "gefs")),
@@ -504,7 +522,7 @@ mod tests {
     }
 
     #[test]
-    fn canonical_registry_has_filtered_weather_sources_and_domain_observations() {
+    fn canonical_registry_has_filtered_vertical_sources_and_domain_observations() {
         let registry = super::research_source_registry().expect("source registry");
         assert!(
             registry
@@ -512,6 +530,8 @@ mod tests {
                 .contains(&ResearchReadinessSource::DomainObservation)
         );
         for source in [
+            ResearchReadinessSource::BinanceMarketData,
+            ResearchReadinessSource::PolymarketRtds,
             ResearchReadinessSource::AviationWeather,
             ResearchReadinessSource::GhcnhCalibration,
             ResearchReadinessSource::GefsEnsemble,

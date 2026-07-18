@@ -228,18 +228,20 @@ fn weather_availability_binding(
         return Ok(None);
     };
     let sources_match = live.source_id == DomainSourceId::aviation_weather()
-        && live.instrument_key == DomainInstrumentKey::aviation_weather(&subject.station)
+        && live.instrument_key
+            == DomainInstrumentKey::aviation_weather(&subject.decision_group.station)
         && forecast.source_id == DomainSourceId::gefs()
-        && forecast.instrument_key == DomainInstrumentKey::gefs(&subject.station)
+        && forecast.instrument_key == DomainInstrumentKey::gefs(&subject.decision_group.station)
         && calibration.source_id == DomainSourceId::ghcnh()
-        && calibration.instrument_key == DomainInstrumentKey::ghcnh(&subject.station);
+        && calibration.instrument_key
+            == DomainInstrumentKey::ghcnh(&subject.decision_group.station);
     if !sources_match {
         return Ok(None);
     }
     let (from, to) = weather_day_bounds(subject)?;
     Ok(Some(AvailabilityBinding::Weather {
-        station: subject.station.clone(),
-        local_date: subject.local_date,
+        station: subject.decision_group.station.clone(),
+        local_date: subject.decision_group.local_date,
         from,
         to,
     }))
@@ -288,7 +290,7 @@ async fn load_weather_availability(
         .cutoff_for(DecisionSource::DomainWeather)
         .timestamp_millis();
     for row in fact_read
-        .weather_observation_reports_between(
+        .weather_observation_facts_between(
             stations.clone(),
             from.timestamp_millis(),
             to.timestamp_millis(),
@@ -301,14 +303,20 @@ async fn load_weather_availability(
         let fact = WeatherObservationFact::from_clickhouse_row(row).ok_or_else(|| {
             QuantError::config("invalid Weather observation in availability projection")
         })?;
+        let station = fact.station().ok_or_else(|| {
+            QuantError::config(format!(
+                "Weather observation subject `{}` is not an ICAO station",
+                fact.subject_key
+            ))
+        })?;
         available
             .observations
-            .entry(fact.station.clone())
+            .entry(station)
             .or_default()
             .push(fact);
     }
     for row in fact_read
-        .weather_forecast_points_between(
+        .weather_forecast_facts_between(
             stations,
             from.timestamp_millis(),
             to.timestamp_millis(),
@@ -320,11 +328,13 @@ async fn load_weather_availability(
     {
         let fact = WeatherForecastPoint::from_clickhouse_row(row)
             .ok_or_else(|| QuantError::config("invalid GEFS point in availability projection"))?;
-        available
-            .forecasts
-            .entry(fact.station.clone())
-            .or_default()
-            .push(fact);
+        let station = fact.station().ok_or_else(|| {
+            QuantError::config(format!(
+                "Weather forecast subject `{}` is not an ICAO station",
+                fact.subject_key
+            ))
+        })?;
+        available.forecasts.entry(station).or_default().push(fact);
     }
     Ok(available)
 }
@@ -377,14 +387,20 @@ fn project_availability(
 }
 
 fn weather_day_bounds(subject: &WeatherSubject) -> QuantResult<(DateTime<Utc>, DateTime<Utc>)> {
-    let timezone = subject.timezone.parse::<Tz>().map_err(|error| {
-        QuantError::config(format!("invalid Weather linkage timezone: {error}"))
-    })?;
+    let timezone = subject
+        .decision_group
+        .timezone
+        .parse::<Tz>()
+        .map_err(|error| {
+            QuantError::config(format!("invalid Weather linkage timezone: {error}"))
+        })?;
     let next_date = subject
+        .decision_group
         .local_date
         .succ_opt()
         .ok_or_else(|| QuantError::config("Weather local date overflow"))?;
     let local_start = subject
+        .decision_group
         .local_date
         .and_hms_opt(0, 0, 0)
         .ok_or_else(|| QuantError::config("invalid Weather local day start"))?;
@@ -523,8 +539,8 @@ mod tests {
         enums::{
             common::{MarketCategory, TickSize},
             domain::{
-                DomainFamily, DomainMetric, KlineInterval, LinkageSourceRole, LinkageStatus,
-                ResolverTier,
+                BinanceMarketSegment, DomainFamily, DomainMetric, KlineInterval, LinkageSourceRole,
+                LinkageStatus, ResolverTier,
             },
             market::MarketStatus,
         },
@@ -598,6 +614,7 @@ mod tests {
                 reference_at: Some(now - ChronoDuration::minutes(5)),
                 observation_at: now,
                 resolution_oracle: ResolutionOracle::BinanceKline {
+                    market: BinanceMarketSegment::Spot,
                     symbol: BinanceSymbol::parse(symbol).expect("symbol"),
                     interval: KlineInterval::OneMinute,
                 },
@@ -622,6 +639,8 @@ mod tests {
     fn linkage(market_id: &str, outcome: LinkageOutcome) -> MarketLinkage {
         let market_id = MarketId::new(market_id);
         let metadata_hash = ContentHash::parse(format!("blake3:{}", "0".repeat(64))).expect("hash");
+        let capability_registry_hash =
+            ContentHash::parse(format!("blake3:{}", "f".repeat(64))).expect("hash");
         let content_hash = MarketLinkage::compute_content_hash(
             &market_id,
             DomainFamily::Crypto,
@@ -629,6 +648,7 @@ mod tests {
             ResolverTier::Tier0Slug,
             ResolverVersion::FIRST,
             &metadata_hash,
+            &capability_registry_hash,
         )
         .expect("hash");
         let effective_at = Utc.with_ymd_and_hms(2026, 7, 1, 11, 0, 0).unwrap();
@@ -641,6 +661,7 @@ mod tests {
             resolver_tier: ResolverTier::Tier0Slug,
             resolver_version: ResolverVersion::FIRST,
             metadata_hash,
+            capability_registry_hash: Some(capability_registry_hash),
             content_hash,
             effective_at,
             available_at: effective_at + ChronoDuration::milliseconds(1),
@@ -755,6 +776,13 @@ mod tests {
             &self,
             _linkage: NewMarketLinkage,
         ) -> Result<MarketLinkageInfo, StorageError> {
+            unimplemented!("read-only fake")
+        }
+
+        async fn append_batch(
+            &self,
+            _linkages: Vec<NewMarketLinkage>,
+        ) -> Result<Vec<MarketLinkageInfo>, StorageError> {
             unimplemented!("read-only fake")
         }
 
@@ -974,6 +1002,7 @@ mod tests {
             confidence: linkage.confidence,
             outcome: serde_json::to_value(&linkage.outcome).expect("serialize outcome"),
             metadata_hash: linkage.metadata_hash,
+            capability_registry_hash: linkage.capability_registry_hash,
             content_hash: linkage.content_hash,
             derived_at: linkage.effective_at,
             override_reason: None,

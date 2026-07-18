@@ -41,7 +41,7 @@ use crate::{
         names::{
             DOMAIN_CRYPTO_BETA_REGIME, DOMAIN_CRYPTO_STRIKE_PRESSURE,
             DOMAIN_WEATHER_ENSEMBLE_BIN_PROBABILITY, DOMAIN_WEATHER_ENSEMBLE_SPREAD,
-            DOMAIN_WEATHER_NOAA_RESOLUTION_BASIS_RISK, DOMAIN_WEATHER_OBSERVED_HIGH_HEADROOM,
+            DOMAIN_WEATHER_NOAA_RESOLUTION_BASIS_RISK, DOMAIN_WEATHER_OBSERVED_EXTREME_HEADROOM,
         },
         value::{
             FactorDefinitionSpec, FactorDriver, FactorName, FactorOutputKind, RawFactor,
@@ -142,8 +142,8 @@ pub fn weather_domain_factors() -> Vec<(FactorDefinitionSpec, Arc<dyn FactorComp
             FactorDirection::Negative,
         ),
         (
-            DOMAIN_WEATHER_OBSERVED_HIGH_HEADROOM,
-            domain_weather::OBSERVED_HIGH_HEADROOM,
+            DOMAIN_WEATHER_OBSERVED_EXTREME_HEADROOM,
+            domain_weather::OBSERVED_EXTREME_HEADROOM,
             FactorDirection::Neutral,
         ),
         (

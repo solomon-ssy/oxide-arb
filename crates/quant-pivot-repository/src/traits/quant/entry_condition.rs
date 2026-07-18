@@ -6,11 +6,11 @@ use quant_pivot_models::{
         ApplyEntryConditionEvaluation, ApplyEntryConditionEvaluationOutcome,
         CryptoPriceProjectionInfo, EntryConditionArtifactInfo, EntryConditionAuditInfo,
         EntryConditionInstanceInfo, NewEntryConditionArtifact, NewEntryConditionInstance,
-        WeatherDailyHighProjectionInfo,
+        WeatherDailyTemperatureProjectionInfo,
     },
     types::{
         ContentHash, DomainInstrumentKey, DomainSourceId, EntryConditionArtifactId,
-        EntryConditionInstanceId, RecommendationId,
+        EntryConditionInstanceId, RecommendationId, WeatherTemperatureStatistic,
     },
 };
 use uuid::Uuid;
@@ -61,7 +61,8 @@ pub trait EntryConditionRepository: Send + Sync {
         instrument_key: &DomainInstrumentKey,
         station: &str,
         local_date: chrono::NaiveDate,
-    ) -> Result<Option<WeatherDailyHighProjectionInfo>, StorageError>;
+        temperature_statistic: WeatherTemperatureStatistic,
+    ) -> Result<Option<WeatherDailyTemperatureProjectionInfo>, StorageError>;
 
     /// Atomically expire due active instances and append one audit per transition.
     async fn expire_due(

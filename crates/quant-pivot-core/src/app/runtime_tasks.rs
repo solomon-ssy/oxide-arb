@@ -4,39 +4,96 @@ use super::AppContext;
 use crate::{
     app::{
         clob_market_info_worker::ClobMarketInfoWorker,
+        crypto_kline_ingest_worker::CryptoKlineIngestWorker,
+        crypto_live_ingest_worker::{CryptoLiveIngestDeps, CryptoLiveIngestWorker},
+        crypto_rtds_ingest_worker::{CryptoRtdsIngestDeps, CryptoRtdsIngestWorker},
         domain_event_outbox_worker::DomainEventOutboxWorker,
-        domain_ingest_worker::DomainIngestWorker,
-        domain_live_ingest_worker::{DomainLiveIngestDeps, DomainLiveIngestWorker},
+        domain_source_supervisor::DomainSourceSupervisor,
         task_id::TaskId,
         task_registry::AppRunner,
         trade_tape_reconciliation_worker::TradeTapeReconciliationWorker,
         trade_tape_worker::TradeTapeWorker,
+        weather_backfill_worker::WeatherBackfillWorker,
+        weather_ingest_worker::{WeatherIngestDeps, WeatherIngestWorker},
+        weather_public_ingest_worker::{WeatherPublicIngestDeps, WeatherPublicIngestWorker},
     },
-    service::domain_ingest::DomainIngestor,
+    service::{
+        crypto_kline_ingest::CryptoKlineIngestor, weather_fact_ingest::WeatherFactIngestService,
+    },
 };
 use quant_pivot_api::{
-    binance::{BinanceAggTradeSource, BinanceKlineSource},
+    binance::{BinanceAggTradeSource, BinanceKlineSource, BinanceRequestBudget},
     chainlink::ChainlinkDataStreamsSource,
     domain::DomainDataSource,
     exchange::ExchangeLogClient,
-    weather::{AviationWeatherSource, GefsSource, GhcnhSource},
+    rtds::PolymarketRtdsSource,
+    weather::{
+        AviationWeatherSource, GefsSource, GhcnhSource, airnow::AirNowSource,
+        gistemp::NasaGistempSource, hko::HkoOpenDataSource, nhc::NhcSource,
+        nsidc::NsidcSeaIceSource, nws::NwsObservationSource, tornado::TornadoSource,
+    },
 };
-use quant_pivot_models::clickhouse::{
-    CryptoPriceReportRow, DomainEventRow, DomainObservationRow, TradeTapeRow,
-    WeatherForecastPointRow, WeatherObservationReportRow,
+use quant_pivot_models::{
+    clickhouse::{
+        CryptoPriceReportRow, DomainEventRow, DomainObservationRow, TradeTapeRow,
+        WeatherForecastFactRow, WeatherObservationFactRow,
+    },
+    config::BinanceSourceConfig,
+    types::DomainSourceId,
 };
 use quant_pivot_repository::{
     clickhouse::ChFactWriter,
     traits::{
         CalibrationArtifactRepository, ClobMarketInfoRepository, DomainProjectionRepository,
-        DomainSourceCursorRepository, FactWriter, MarketLinkageRepository, MarketRepository,
-        TradeTapeBlockCursorRepository,
+        DomainSourceCursorRepository, DomainSourceExpectationRepository, FactWriter,
+        MarketLinkageRepository, MarketRepository, TradeTapeBlockCursorRepository,
     },
 };
-use std::{sync::Arc, time::Duration};
+use std::{collections::BTreeSet, sync::Arc, time::Duration};
+
+struct ConnectedDomainSources {
+    binance: Option<Arc<BinanceAggTradeSource>>,
+    binance_usdm_futures: Option<Arc<BinanceAggTradeSource>>,
+    chainlink: Option<Arc<ChainlinkDataStreamsSource>>,
+    rtds: Option<Arc<PolymarketRtdsSource>>,
+    aviation: Option<Arc<AviationWeatherSource>>,
+    ghcnh: Option<Arc<GhcnhSource>>,
+    gefs: Option<Arc<GefsSource>>,
+    weather_public: ConnectedPublicWeatherSources,
+}
+
+struct ConnectedCryptoSources {
+    binance: Option<Arc<BinanceAggTradeSource>>,
+    binance_usdm_futures: Option<Arc<BinanceAggTradeSource>>,
+    chainlink: Option<Arc<ChainlinkDataStreamsSource>>,
+    rtds: Option<Arc<PolymarketRtdsSource>>,
+}
+
+#[derive(Clone)]
+struct BinanceBudgets {
+    spot: Option<BinanceRequestBudget>,
+    usdm_futures: Option<BinanceRequestBudget>,
+}
+
+struct ConnectedPublicWeatherSources {
+    hko: Option<Arc<HkoOpenDataSource>>,
+    airnow: Option<Arc<AirNowSource>>,
+    tornado: Option<Arc<TornadoSource>>,
+    nhc: Option<Arc<NhcSource>>,
+    gistemp: Option<Arc<NasaGistempSource>>,
+    nsidc: Option<Arc<NsidcSeaIceSource>>,
+    nws: Option<Arc<NwsObservationSource>>,
+}
 
 impl AppContext {
     pub fn register_runtime_tasks(&self, runner: &mut AppRunner) {
+        let binance_budgets = BinanceBudgets {
+            spot: build_binance_budget(&self.config.domain_sources.binance, "Spot"),
+            usdm_futures: build_binance_budget(
+                &self.config.domain_sources.binance_usdm_futures,
+                "USD-M Futures",
+            ),
+        };
         let pipeline = Arc::clone(&self.data.data_pipeline);
         runner.spawn_critical(TaskId::DataPipeline, move |_token| async move {
             // DataPipeline owns the root shutdown token and must finish its
@@ -60,14 +117,7 @@ impl AppContext {
                 },
             );
         }
-        if let Some(worker) = self.build_domain_ingest_worker() {
-            runner.spawn(TaskId::DomainIngestWorker, move |token| async move {
-                if let Err(error) = worker.run(token).await {
-                    tracing::error!(%error, "DomainIngestWorker exited with error");
-                }
-            });
-        }
-        self.register_domain_live_ingest_worker(runner);
+        self.register_domain_ingest_workers(runner, binance_budgets);
         let projections =
             Arc::clone(&self.infra.repos.domain_projection) as Arc<dyn DomainProjectionRepository>;
         let worker = Arc::new(DomainEventOutboxWorker::new(
@@ -100,91 +150,293 @@ impl AppContext {
         });
     }
 
-    fn register_domain_live_ingest_worker(&self, runner: &mut AppRunner) {
+    fn connect_domain_sources(&self, binance_budgets: BinanceBudgets) -> ConnectedDomainSources {
         let sources = &self.config.domain_sources;
         let binance = if sources.binance.enabled {
-            match BinanceAggTradeSource::connect(sources.binance.clone()) {
-                Ok(source) => Some(Arc::new(source)),
-                Err(error) => {
-                    tracing::error!(%error, "Binance aggTrade unavailable; bound conditions fail closed");
+            binance_budgets.spot.map_or_else(
+                || {
+                    tracing::error!(
+                        "Binance aggTrade unavailable without a shared request budget"
+                    );
                     None
-                }
-            }
+                },
+                |binance_budget| {
+                    BinanceAggTradeSource::connect_with_budget(
+                        sources.binance.clone(),
+                        binance_budget,
+                    )
+                    .map(Arc::new)
+                    .map_err(|error| {
+                        tracing::error!(%error, "Binance aggTrade unavailable; bound conditions fail closed");
+                    })
+                    .ok()
+                },
+            )
         } else {
             None
         };
-        let chainlink = if sources.chainlink_data_streams.enabled {
-            match ChainlinkDataStreamsSource::connect(sources.chainlink_data_streams.clone()) {
-                Ok(source) => Some(Arc::new(source)),
-                Err(error) => {
+        let binance_usdm_futures = if sources.binance_usdm_futures.enabled {
+            binance_budgets.usdm_futures.map_or_else(
+                || {
+                    tracing::error!(
+                        "Binance USD-M Futures aggTrade unavailable without a request budget"
+                    );
+                    None
+                },
+                |budget| {
+                    BinanceAggTradeSource::connect_usdm_futures_with_budget(
+                        sources.binance_usdm_futures.clone(),
+                        budget,
+                    )
+                    .map(Arc::new)
+                    .map_err(|error| {
+                        tracing::error!(%error, "Binance USD-M Futures aggTrade unavailable");
+                    })
+                    .ok()
+                },
+            )
+        } else {
+            None
+        };
+        let chainlink = sources.chainlink_data_streams.enabled.then(|| {
+            ChainlinkDataStreamsSource::connect(sources.chainlink_data_streams.clone())
+                .map(Arc::new)
+                .map_err(|error| {
                     tracing::error!(%error, "Chainlink Data Streams unavailable; bound conditions fail closed");
-                    None
-                }
-            }
-        } else {
-            None
-        };
-        let aviation = if sources.aviation_weather.enabled {
-            match AviationWeatherSource::connect(sources.aviation_weather.clone()) {
-                Ok(source) => Some(Arc::new(source)),
-                Err(error) => {
+                })
+                .ok()
+        }).flatten();
+        let rtds = sources.polymarket_rtds.enabled.then(|| {
+            Arc::new(PolymarketRtdsSource::connect(
+                sources.polymarket_rtds.clone(),
+            ))
+        });
+        let aviation = sources.aviation_weather.enabled.then(|| {
+            AviationWeatherSource::connect(sources.aviation_weather.clone())
+                .map(Arc::new)
+                .map_err(|error| {
                     tracing::error!(%error, "AviationWeather unavailable; bound conditions fail closed");
-                    None
-                }
-            }
-        } else {
-            None
-        };
-        let ghcnh = if sources.ghcnh.enabled {
-            match GhcnhSource::connect(sources.ghcnh.clone()) {
-                Ok(source) => Some(Arc::new(source)),
-                Err(error) => {
+                })
+                .ok()
+        }).flatten();
+        let ghcnh = sources.ghcnh.enabled.then(|| {
+            GhcnhSource::connect(sources.ghcnh.clone())
+                .map(Arc::new)
+                .map_err(|error| {
                     tracing::error!(%error, "GHCNh unavailable; Weather calibration remains blocked");
-                    None
-                }
-            }
-        } else {
-            None
-        };
-        let gefs = if sources.gefs.enabled {
-            match GefsSource::connect(sources.gefs.clone()) {
-                Ok(source) => Some(Arc::new(source)),
-                Err(error) => {
+                })
+                .ok()
+        }).flatten();
+        let gefs = sources.gefs.enabled.then(|| {
+            GefsSource::connect(sources.gefs.clone())
+                .map(Arc::new)
+                .map_err(|error| {
                     tracing::error!(%error, "GEFS unavailable; Weather forecast factors remain blocked");
-                    None
-                }
+                })
+                .ok()
+        }).flatten();
+        let weather_public = self.connect_public_weather_sources();
+        ConnectedDomainSources {
+            binance,
+            binance_usdm_futures,
+            chainlink,
+            rtds,
+            aviation,
+            ghcnh,
+            gefs,
+            weather_public,
+        }
+    }
+
+    fn connect_public_weather_sources(&self) -> ConnectedPublicWeatherSources {
+        let sources = &self.config.domain_sources;
+        let hko = sources
+            .hko_open_data
+            .enabled
+            .then(|| {
+                HkoOpenDataSource::connect(sources.hko_open_data.clone())
+                    .map(Arc::new)
+                    .map_err(|error| {
+                        tracing::error!(%error, "HKO unavailable; precipitation remains blocked");
+                    })
+                    .ok()
+            })
+            .flatten();
+        let airnow = sources
+            .airnow
+            .enabled
+            .then(|| {
+                AirNowSource::connect(sources.airnow.clone())
+                    .map(Arc::new)
+                    .map_err(|error| {
+                        tracing::error!(%error, "AirNow unavailable; AQI remains blocked");
+                    })
+                    .ok()
+            })
+            .flatten();
+        let tornado = sources
+            .tornado
+            .enabled
+            .then(|| {
+                TornadoSource::connect(sources.tornado.clone())
+                    .map(Arc::new)
+                    .map_err(|error| {
+                        tracing::error!(%error, "NOAA tornado sources unavailable");
+                    })
+                    .ok()
+            })
+            .flatten();
+        let nhc = sources
+            .nhc
+            .enabled
+            .then(|| {
+                NhcSource::connect(sources.nhc.clone())
+                    .map(Arc::new)
+                    .map_err(|error| {
+                        tracing::error!(%error, "NHC unavailable; cyclone facts remain blocked");
+                    })
+                    .ok()
+            })
+            .flatten();
+        let gistemp = sources
+            .nasa_gistemp
+            .enabled
+            .then(|| {
+                NasaGistempSource::connect(sources.nasa_gistemp.clone())
+                    .map(Arc::new)
+                    .map_err(|error| {
+                        tracing::error!(%error, "NASA GISTEMP unavailable");
+                    })
+                    .ok()
+            })
+            .flatten();
+        let nsidc = sources
+            .nsidc_sea_ice
+            .enabled
+            .then(|| {
+                NsidcSeaIceSource::connect(sources.nsidc_sea_ice.clone())
+                    .map(Arc::new)
+                    .map_err(|error| {
+                        tracing::error!(%error, "NSIDC unavailable; sea-ice facts remain blocked");
+                    })
+                    .ok()
+            })
+            .flatten();
+        let nws = sources
+            .nws_observation
+            .enabled
+            .then(|| {
+                NwsObservationSource::connect(sources.nws_observation.clone())
+                    .map(Arc::new)
+                    .map_err(|error| {
+                        tracing::error!(%error, "NWS unavailable; wind facts remain blocked");
+                    })
+                    .ok()
+            })
+            .flatten();
+        ConnectedPublicWeatherSources {
+            hko,
+            airnow,
+            tornado,
+            nhc,
+            gistemp,
+            nsidc,
+            nws,
+        }
+    }
+
+    fn register_domain_ingest_workers(
+        &self,
+        runner: &mut AppRunner,
+        binance_budgets: BinanceBudgets,
+    ) {
+        let sources = &self.config.domain_sources;
+        let ConnectedDomainSources {
+            binance,
+            binance_usdm_futures,
+            chainlink,
+            rtds,
+            aviation,
+            ghcnh,
+            gefs,
+            weather_public:
+                ConnectedPublicWeatherSources {
+                    hko,
+                    airnow,
+                    tornado,
+                    nhc,
+                    gistemp,
+                    nsidc,
+                    nws,
+                },
+        } = self.connect_domain_sources(binance_budgets.clone());
+        let credential_ready_sources = chainlink
+            .is_some()
+            .then(DomainSourceId::chainlink_data_streams)
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let source_supervisor = match DomainSourceSupervisor::new(
+            Arc::clone(&self.infra.repos.domain_source_expectation)
+                as Arc<dyn DomainSourceExpectationRepository>,
+            Arc::clone(&self.infra.repos.market_linkage) as Arc<dyn MarketLinkageRepository>,
+            sources.weather_stations.clone(),
+            sources.weather_vertical_bindings.clone(),
+            credential_ready_sources,
+        ) {
+            Ok(supervisor) => Arc::new(supervisor),
+            Err(error) => {
+                tracing::error!(%error, "domain ingest disabled: capability registry is invalid");
+                return;
             }
-        } else {
-            None
         };
-        let worker = Arc::new(DomainLiveIngestWorker::new(DomainLiveIngestDeps {
+        let supervisor_task = Arc::clone(&source_supervisor);
+        runner.spawn(TaskId::DomainSourceSupervisor, move |token| async move {
+            if let Err(error) = supervisor_task.ensure_boot_reconciled().await {
+                tracing::error!(%error, "domain source supervisor boot reconciliation failed");
+                return;
+            }
+            supervisor_task.run_periodic(token).await;
+        });
+        self.register_crypto_ingest_workers(
+            runner,
+            binance_budgets,
+            Arc::clone(&source_supervisor),
+            ConnectedCryptoSources {
+                binance,
+                binance_usdm_futures,
+                chainlink,
+                rtds,
+            },
+        );
+        let weather_writer = Arc::new(ChFactWriter::<WeatherObservationFactRow>::new(
+            Arc::clone(&self.infra.ch),
+            Arc::clone(&self.infra.ch_write_manager),
+            "quant_weather_observation_fact",
+        )) as Arc<dyn FactWriter<WeatherObservationFactRow>>;
+        let forecast_writer = Arc::new(ChFactWriter::<WeatherForecastFactRow>::new(
+            Arc::clone(&self.infra.ch),
+            Arc::clone(&self.infra.ch_write_manager),
+            "quant_weather_forecast_fact",
+        )) as Arc<dyn FactWriter<WeatherForecastFactRow>>;
+        let weather_facts = Arc::new(WeatherFactIngestService::new(
+            Arc::clone(&weather_writer),
+            Arc::clone(&forecast_writer),
+            Arc::clone(&self.infra.quant_fact_read),
+        ));
+        let weather_worker = Arc::new(WeatherIngestWorker::new(WeatherIngestDeps {
+            source_supervisor: Arc::clone(&source_supervisor),
             linkages: Arc::clone(&self.infra.repos.market_linkage)
                 as Arc<dyn MarketLinkageRepository>,
             cursors: Arc::clone(&self.infra.repos.domain_source_cursor)
                 as Arc<dyn DomainSourceCursorRepository>,
             projections: Arc::clone(&self.infra.repos.domain_projection)
                 as Arc<dyn DomainProjectionRepository>,
-            crypto_writer: Arc::new(ChFactWriter::<CryptoPriceReportRow>::new(
-                Arc::clone(&self.infra.ch),
-                Arc::clone(&self.infra.ch_write_manager),
-                "quant_crypto_price_report",
-            )),
-            weather_writer: Arc::new(ChFactWriter::<WeatherObservationReportRow>::new(
-                Arc::clone(&self.infra.ch),
-                Arc::clone(&self.infra.ch_write_manager),
-                "quant_weather_observation_report",
-            )),
-            forecast_writer: Arc::new(ChFactWriter::<WeatherForecastPointRow>::new(
-                Arc::clone(&self.infra.ch),
-                Arc::clone(&self.infra.ch_write_manager),
-                "quant_weather_forecast_point",
-            )),
+            weather_writer,
+            forecast_writer,
             fact_read: Arc::clone(&self.infra.quant_fact_read),
             calibrations: Arc::clone(&self.infra.repos.calibration_artifact)
                 as Arc<dyn CalibrationArtifactRepository>,
             runtime_config: Arc::clone(&self.governance.runtime_config),
-            binance,
-            chainlink,
             aviation,
             ghcnh,
             gefs,
@@ -193,8 +445,89 @@ impl AppContext {
             gefs_config: sources.gefs.clone(),
             station_profiles: sources.weather_stations.clone(),
         }));
-        runner.spawn(TaskId::DomainLiveIngestWorker, move |token| async move {
-            worker.run(token).await;
+        let weather_backfill = Arc::new(WeatherBackfillWorker::new(Arc::clone(&weather_worker)));
+        runner.spawn(TaskId::WeatherBackfillWorker, move |token| async move {
+            weather_backfill.run(token).await;
+        });
+        runner.spawn(TaskId::WeatherIngestWorker, move |token| async move {
+            weather_worker.run(token).await;
+        });
+        let weather_public = Arc::new(WeatherPublicIngestWorker::new(WeatherPublicIngestDeps {
+            source_supervisor,
+            cursors: Arc::clone(&self.infra.repos.domain_source_cursor)
+                as Arc<dyn DomainSourceCursorRepository>,
+            facts: weather_facts,
+            hko,
+            airnow,
+            tornado,
+            nhc,
+            gistemp,
+            nsidc,
+            nws,
+            hko_config: sources.hko_open_data.clone(),
+            airnow_config: sources.airnow.clone(),
+            tornado_config: sources.tornado.clone(),
+            nhc_config: sources.nhc.clone(),
+            gistemp_config: sources.nasa_gistemp.clone(),
+            nsidc_config: sources.nsidc_sea_ice.clone(),
+            nws_config: sources.nws_observation.clone(),
+            bindings: sources.weather_vertical_bindings.clone(),
+        }));
+        runner.spawn(TaskId::WeatherPublicIngestWorker, move |token| async move {
+            Box::pin(weather_public.run(token)).await;
+        });
+    }
+
+    fn register_crypto_ingest_workers(
+        &self,
+        runner: &mut AppRunner,
+        binance_budgets: BinanceBudgets,
+        source_supervisor: Arc<DomainSourceSupervisor>,
+        sources: ConnectedCryptoSources,
+    ) {
+        if let Some(worker) =
+            self.build_crypto_kline_ingest_worker(binance_budgets, Arc::clone(&source_supervisor))
+        {
+            runner.spawn(TaskId::CryptoKlineIngestWorker, move |token| async move {
+                if let Err(error) = worker.run(token).await {
+                    tracing::error!(%error, "CryptoKlineIngestWorker exited with error");
+                }
+            });
+        }
+        let crypto_writer = Arc::new(ChFactWriter::<CryptoPriceReportRow>::new(
+            Arc::clone(&self.infra.ch),
+            Arc::clone(&self.infra.ch_write_manager),
+            "quant_crypto_price_report",
+        )) as Arc<dyn FactWriter<CryptoPriceReportRow>>;
+        let rtds_worker = Arc::new(CryptoRtdsIngestWorker::new(CryptoRtdsIngestDeps {
+            source_supervisor: Arc::clone(&source_supervisor),
+            linkages: Arc::clone(&self.infra.repos.market_linkage)
+                as Arc<dyn MarketLinkageRepository>,
+            cursors: Arc::clone(&self.infra.repos.domain_source_cursor)
+                as Arc<dyn DomainSourceCursorRepository>,
+            projections: Arc::clone(&self.infra.repos.domain_projection)
+                as Arc<dyn DomainProjectionRepository>,
+            writer: Arc::clone(&crypto_writer),
+            source: sources.rtds,
+        }));
+        runner.spawn(TaskId::CryptoRtdsIngestWorker, move |token| async move {
+            rtds_worker.run(token).await;
+        });
+        let crypto_worker = Arc::new(CryptoLiveIngestWorker::new(CryptoLiveIngestDeps {
+            source_supervisor,
+            linkages: Arc::clone(&self.infra.repos.market_linkage)
+                as Arc<dyn MarketLinkageRepository>,
+            cursors: Arc::clone(&self.infra.repos.domain_source_cursor)
+                as Arc<dyn DomainSourceCursorRepository>,
+            projections: Arc::clone(&self.infra.repos.domain_projection)
+                as Arc<dyn DomainProjectionRepository>,
+            crypto_writer,
+            binance: sources.binance,
+            binance_usdm_futures: sources.binance_usdm_futures,
+            chainlink: sources.chainlink,
+        }));
+        runner.spawn(TaskId::CryptoLiveIngestWorker, move |token| async move {
+            crypto_worker.run(token).await;
         });
     }
 
@@ -239,34 +572,63 @@ impl AppContext {
         })
     }
 
-    fn build_domain_ingest_worker(&self) -> Option<Arc<DomainIngestWorker>> {
+    fn build_crypto_kline_ingest_worker(
+        &self,
+        binance_budgets: BinanceBudgets,
+        source_supervisor: Arc<DomainSourceSupervisor>,
+    ) -> Option<Arc<CryptoKlineIngestWorker>> {
         let sources_config = &self.config.domain_sources;
-        if !sources_config.binance.enabled {
+        if !sources_config.binance.enabled && !sources_config.binance_usdm_futures.enabled {
             return None;
         }
 
         let mut sources: Vec<Arc<dyn DomainDataSource>> = Vec::new();
+        let mut binance_archive_sources = Vec::new();
         let mut poll_secs = u64::MAX;
 
         if sources_config.binance.enabled {
-            let source = match BinanceKlineSource::connect(sources_config.binance.clone()) {
+            let binance_budget = binance_budgets.spot?;
+            let source = match BinanceKlineSource::connect_with_budget(
+                sources_config.binance.clone(),
+                binance_budget,
+            ) {
                 Ok(source) => source,
                 Err(error) => {
                     tracing::error!(%error, "Binance kline source unavailable");
                     return None;
                 }
             };
-            sources.push(Arc::new(source));
+            let source = Arc::new(source);
+            sources.push(Arc::clone(&source) as Arc<dyn DomainDataSource>);
+            binance_archive_sources.push(source);
             poll_secs = poll_secs.min(sources_config.binance.kline_poll_secs);
+        }
+
+        if sources_config.binance_usdm_futures.enabled {
+            let budget = binance_budgets.usdm_futures?;
+            let source = match BinanceKlineSource::connect_usdm_futures_with_budget(
+                sources_config.binance_usdm_futures.clone(),
+                budget,
+            ) {
+                Ok(source) => Arc::new(source),
+                Err(error) => {
+                    tracing::error!(%error, "Binance USD-M Futures kline source unavailable");
+                    return None;
+                }
+            };
+            sources.push(Arc::clone(&source) as Arc<dyn DomainDataSource>);
+            binance_archive_sources.push(source);
+            poll_secs = poll_secs.min(sources_config.binance_usdm_futures.kline_poll_secs);
         }
 
         if sources.is_empty() {
             return None;
         }
 
-        Some(Arc::new(DomainIngestWorker::new(
-            Arc::new(DomainIngestor::new(
+        Some(Arc::new(CryptoKlineIngestWorker::new(
+            Arc::new(CryptoKlineIngestor::new(
                 sources,
+                binance_archive_sources,
                 Arc::clone(&self.infra.repos.domain_source_cursor)
                     as Arc<dyn DomainSourceCursorRepository>,
                 Arc::new(ChFactWriter::<DomainObservationRow>::new(
@@ -277,7 +639,22 @@ impl AppContext {
                 self.runtime_config(),
                 sources_config.clone(),
             )),
+            source_supervisor,
             poll_secs.max(1),
         )))
     }
+}
+
+fn build_binance_budget(
+    config: &BinanceSourceConfig,
+    market_label: &'static str,
+) -> Option<BinanceRequestBudget> {
+    if !config.enabled {
+        return None;
+    }
+    BinanceRequestBudget::new(config)
+        .map_err(|error| {
+            tracing::error!(%error, market = market_label, "Binance request budget unavailable");
+        })
+        .ok()
 }

@@ -2,15 +2,27 @@
 //! tiers, and domain-observation metrics (Phase 11.2.2).
 //!
 //! The domain plane models category-routed alpha built on **external** data
-//! sources (crypto underlying prices and airport daily-high weather). Everything
+//! sources (crypto underlying prices and airport daily-temperature weather). Everything
 //! here is deliberately open along the four extension axes: new vertical = new [`DomainFamily`] variant, new
 //! asset = resolver-ruleset entry, new oracle = [`ResolutionOracle`] variant
 //! (in `domain::quant::linkage`), new feed = new `DomainSourceId` — the
 //! long-format `quant_domain_observation` fact never changes shape.
 
 use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 
 use crate::enums::common::MarketCategory;
+
+/// Binance product whose market data is cited by a contract. Spot and USD-M
+/// Futures are distinct provenance planes and may never share a source ID.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum BinanceMarketSegment {
+    Spot,
+    UsdmFutures,
+}
 
 pg_enum! {
     type_name = "qp_domain_family",
@@ -25,6 +37,19 @@ pg_enum! {
         Crypto => "crypto",
         /// Airport local-calendar-day maximum-temperature vertical.
         Weather => "weather",
+    }
+}
+
+pg_enum! {
+    type_name = "qp_domain_source_expectation_status",
+    /// Operational state of one capability-declared source binding.
+    pub enum DomainSourceExpectationStatus {
+        NotStarted => "not_started",
+        Live => "live",
+        Stale => "stale",
+        CredentialBlocked => "credential_blocked",
+        Failed => "error",
+        Unsupported => "unsupported",
     }
 }
 
@@ -122,6 +147,8 @@ wire_enum! {
     pub enum KlineInterval {
         /// One-minute candles (the crypto feature-source resolution).
         OneMinute => "1m",
+        /// One-hour candles used by hourly Binance settlement contracts.
+        OneHour => "1h",
     }
 }
 
@@ -131,6 +158,7 @@ impl KlineInterval {
     pub const fn secs(self) -> u64 {
         match self {
             Self::OneMinute => 60,
+            Self::OneHour => 60 * 60,
         }
     }
 }

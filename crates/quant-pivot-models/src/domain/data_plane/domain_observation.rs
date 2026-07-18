@@ -134,6 +134,11 @@ pub enum DomainSourceCheckpoint {
         observations_timestamp: DateTime<Utc>,
         report_hash: ContentHash,
     },
+    PolymarketRtds {
+        source_timestamp: DateTime<Utc>,
+        envelope_timestamp: DateTime<Utc>,
+        report_hash: ContentHash,
+    },
     AviationWeather {
         available_at: DateTime<Utc>,
         published_at: DateTime<Utc>,
@@ -144,6 +149,7 @@ pub enum DomainSourceCheckpoint {
     Ghcnh {
         last_hour: DateTime<Utc>,
         file_hash: ContentHash,
+        unpublished_years: Vec<i32>,
     },
     Gefs {
         reference_time: DateTime<Utc>,
@@ -154,6 +160,71 @@ pub enum DomainSourceCheckpoint {
         completed_reference_time: DateTime<Utc>,
         request_hash: ContentHash,
         manifest_hash: ContentHash,
+    },
+    HkoRainfall {
+        window_end: DateTime<Utc>,
+        published_at: DateTime<Utc>,
+        report_hash: ContentHash,
+    },
+    HkoDailyTemperature {
+        day_end: DateTime<Utc>,
+        available_at: DateTime<Utc>,
+        response_hash: ContentHash,
+        report_hash: ContentHash,
+    },
+    AirNowPm25Area {
+        valid_time: DateTime<Utc>,
+        available_at: DateTime<Utc>,
+        report_hash: ContentHash,
+        correction_scan_hour: DateTime<Utc>,
+    },
+    AirNowPm25Forecast {
+        reference_time: DateTime<Utc>,
+        max_valid_time: DateTime<Utc>,
+        available_at: DateTime<Utc>,
+        file_hash: ContentHash,
+    },
+    AirNowPm25Site {
+        last_valid_time: Option<DateTime<Utc>>,
+        available_at: DateTime<Utc>,
+        last_report_hash: Option<ContentHash>,
+        correction_scan_hour: DateTime<Utc>,
+    },
+    SpcTornado {
+        report_window_end: DateTime<Utc>,
+        available_at: DateTime<Utc>,
+        report_hash: ContentHash,
+    },
+    NceiStormEvents {
+        report_window_end: DateTime<Utc>,
+        collection_date: chrono::NaiveDate,
+        file_hash: ContentHash,
+    },
+    NhcAdvisory {
+        issuance: DateTime<Utc>,
+        storm_id: String,
+        advisory_number: String,
+        report_hash: ContentHash,
+    },
+    NhcHurdat2 {
+        last_observation: DateTime<Utc>,
+        collection_date: chrono::NaiveDate,
+        file_hash: ContentHash,
+    },
+    NasaGistemp {
+        last_month_end: DateTime<Utc>,
+        available_at: DateTime<Utc>,
+        file_hash: ContentHash,
+    },
+    NsidcSeaIce {
+        last_day_end: DateTime<Utc>,
+        available_at: DateTime<Utc>,
+        file_hash: ContentHash,
+    },
+    NwsObservation {
+        observed_at: DateTime<Utc>,
+        available_at: DateTime<Utc>,
+        report_hash: ContentHash,
     },
 }
 
@@ -167,15 +238,63 @@ impl DomainSourceCheckpoint {
                 observations_timestamp,
                 ..
             } => *observations_timestamp,
+            Self::PolymarketRtds {
+                source_timestamp, ..
+            } => *source_timestamp,
             Self::AviationWeather {
                 observation_time, ..
             } => *observation_time,
             Self::Ghcnh { last_hour, .. } => *last_hour,
-            Self::Gefs { reference_time, .. } => *reference_time,
+            Self::Gefs { reference_time, .. } | Self::AirNowPm25Forecast { reference_time, .. } => {
+                *reference_time
+            }
+            Self::AirNowPm25Site {
+                last_valid_time: Some(last_valid_time),
+                ..
+            } => *last_valid_time,
+            Self::AirNowPm25Site {
+                last_valid_time: None,
+                correction_scan_hour,
+                ..
+            } => *correction_scan_hour,
             Self::GefsBackfill {
                 completed_reference_time,
                 ..
             } => *completed_reference_time,
+            Self::HkoRainfall { window_end, .. } => *window_end,
+            Self::HkoDailyTemperature { day_end, .. } => *day_end,
+            Self::AirNowPm25Area { valid_time, .. } => *valid_time,
+            Self::SpcTornado {
+                report_window_end, ..
+            }
+            | Self::NceiStormEvents {
+                report_window_end, ..
+            } => *report_window_end,
+            Self::NhcAdvisory { issuance, .. } => *issuance,
+            Self::NhcHurdat2 {
+                last_observation, ..
+            } => *last_observation,
+            Self::NasaGistemp { last_month_end, .. } => *last_month_end,
+            Self::NsidcSeaIce { last_day_end, .. } => *last_day_end,
+            Self::NwsObservation { observed_at, .. } => *observed_at,
+        }
+    }
+
+    /// Timestamp used to evaluate source liveness. Immutable archive cursors
+    /// describe old economic events by design, so their successful refresh
+    /// time—not the last historical event—is the health clock. Live feeds and
+    /// forecast cycles continue to use their source-effective event time.
+    #[must_use]
+    pub const fn freshness_time(&self, cursor_updated_at: DateTime<Utc>) -> DateTime<Utc> {
+        match self {
+            Self::Ghcnh { .. }
+            | Self::GefsBackfill { .. }
+            | Self::HkoDailyTemperature { .. }
+            | Self::NceiStormEvents { .. }
+            | Self::NhcHurdat2 { .. }
+            | Self::NasaGistemp { .. }
+            | Self::NsidcSeaIce { .. } => cursor_updated_at,
+            _ => self.event_time(),
         }
     }
 }

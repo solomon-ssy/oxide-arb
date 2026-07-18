@@ -1059,7 +1059,7 @@ fn weather_domain_specs(out: &mut Vec<FeatureSpec>) {
     );
     out.push(
         spec(
-            domain_weather_names::OBSERVED_HIGH_HEADROOM,
+            domain_weather_names::OBSERVED_EXTREME_HEADROOM,
             FeatureFamily::Domain,
             FeatureValueKind::Decimal,
             SourceRequirement::DomainObservationWindow,

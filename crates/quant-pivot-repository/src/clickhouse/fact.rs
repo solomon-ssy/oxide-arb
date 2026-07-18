@@ -11,12 +11,15 @@ use std::{marker::PhantomData, sync::Arc};
 use async_trait::async_trait;
 use clickhouse::{RowOwned, RowWrite};
 use quant_pivot_error::storage::StorageError;
-use quant_pivot_models::clickhouse::{
-    QuantCapitalAllocationEventRow, QuantExecutionEventRow, QuantExitSignalEvaluationEventRow,
-    QuantFactorEventRow, QuantFeatureEventRow, QuantFeatureParityEventRow, QuantModelInputEventRow,
-    QuantPositionEventRow, QuantRecommendationAttributionEventRow,
-    QuantReportRecommendationFactRow, QuantServingEvidenceCompletionRow,
-    QuantSignalCandidateEventRow, ReportMarketFunnelRow,
+use quant_pivot_models::{
+    clickhouse::{
+        QuantCapitalAllocationEventRow, QuantExecutionEventRow, QuantExitSignalEvaluationEventRow,
+        QuantFactorEventRow, QuantFeatureEventRow, QuantFeatureParityEventRow,
+        QuantModelInputEventRow, QuantPositionEventRow, QuantRecommendationAttributionEventRow,
+        QuantReportRecommendationFactRow, QuantServingEvidenceCompletionRow,
+        QuantSignalCandidateEventRow, ReportMarketFunnelRow,
+    },
+    types::ContentHash,
 };
 use quant_pivot_storage::clickhouse::{ChWriteManager, ClickHousePool};
 
@@ -58,6 +61,21 @@ where
     async fn write_batch(&self, rows: Vec<T>) -> Result<(), StorageError> {
         self.write_manager
             .write_batch(self.pool.client(), self.table, rows)
+            .await
+    }
+
+    async fn write_batch_idempotent(
+        &self,
+        deduplication_token: &ContentHash,
+        rows: Vec<T>,
+    ) -> Result<(), StorageError> {
+        self.write_manager
+            .write_batch_deduplicated(
+                self.pool.client(),
+                self.table,
+                deduplication_token.as_str(),
+                rows,
+            )
             .await
     }
 }

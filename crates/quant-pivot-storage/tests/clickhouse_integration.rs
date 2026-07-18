@@ -110,7 +110,7 @@ async fn first_deployment_creates_missing_database_and_schema() {
             .await
             .expect("first schema migration")
             .current_version,
-        4
+        5
     );
     let pool = ClickHousePool::connect(&config).await.expect("connect");
     pool.verify_schema().await.expect("verify schema");

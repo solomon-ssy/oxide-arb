@@ -1,4 +1,4 @@
-//! Current corrected airport-local-day high-temperature projection.
+//! Current corrected airport-local-day maximum/minimum-temperature projection.
 
 use chrono::{DateTime, NaiveDate, Utc};
 use rust_decimal::Decimal;
@@ -8,7 +8,7 @@ use crate::types::{ContentHash, DomainEventId, DomainInstrumentKey, DomainSource
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
-#[sea_orm(table_name = "quant_weather_daily_high_projection")]
+#[sea_orm(table_name = "quant_weather_daily_temperature_projection")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub source_id: DomainSourceId,
@@ -16,10 +16,12 @@ pub struct Model {
     pub instrument_key: DomainInstrumentKey,
     #[sea_orm(primary_key, auto_increment = false)]
     pub local_date: NaiveDate,
+    #[sea_orm(primary_key, auto_increment = false)]
+    pub temperature_statistic: String,
     pub station: String,
     pub timezone: String,
-    pub current_high_celsius: Decimal,
-    pub previous_high_celsius: Option<Decimal>,
+    pub current_extreme_celsius: Decimal,
+    pub previous_extreme_celsius: Option<Decimal>,
     pub last_observation_time: DateTime<Utc>,
     pub last_report_hash: ContentHash,
     pub last_event_id: Option<DomainEventId>,

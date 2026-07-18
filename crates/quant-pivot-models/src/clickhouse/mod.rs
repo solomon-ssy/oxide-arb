@@ -17,8 +17,8 @@ pub use book_microstructure::{BookMicrostructureRow, MidPriceBucketRow};
 pub use book_snapshot::BookL2CheckpointRow;
 pub use book_stream_session::BookStreamSessionRow;
 pub use domain_event::{
-    CryptoPriceReportRow, DomainEventRow, EntryConditionEvaluationEventRow,
-    WeatherForecastPointRow, WeatherObservationReportRow,
+    CryptoPriceReportRow, DomainEventRow, EntryConditionEvaluationEventRow, WeatherForecastFactRow,
+    WeatherObservationFactRow,
 };
 pub use domain_observation::DomainObservationRow;
 pub use market_resolution::MarketResolutionRow;
@@ -31,5 +31,6 @@ pub use quant_facts::{
 };
 pub use trade_tape::TradeTapeRow;
 pub use types::{
-    ChBps, ChDecimal64, ChFactor, ChPrice, ChProbability, ChSchemaVersion, ChShares, ChUsd,
+    ChBps, ChDecimal64, ChEpochDay, ChFactor, ChPrice, ChProbability, ChSchemaVersion, ChShares,
+    ChUsd,
 };

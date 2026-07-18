@@ -1,38 +1,28 @@
-//! Dynamic live-event ingestion for active Crypto and Weather linkages.
+//! Weather observation, forecast, backfill and calibration ingestion.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    future::Future,
-    mem, slice,
     sync::Arc,
     time::Duration as StdDuration,
 };
 
-use chrono::{DateTime, Datelike, Duration, NaiveDate, TimeZone, Utc};
+use chrono::{DateTime, Datelike, Days, Duration, NaiveDate, TimeZone, Utc};
 use chrono_tz::Tz;
 use futures_util::{StreamExt, TryStreamExt, stream};
-use quant_pivot_api::{
-    binance::BinanceAggTradeSource,
-    chainlink::ChainlinkDataStreamsSource,
-    weather::{
-        AviationWeatherSource, GefsDecodedMember, GefsSource, GefsStationBinding, GhcnhSource,
-    },
+use quant_pivot_api::weather::{
+    AviationWeatherSource, GefsDecodedMember, GefsSource, GefsStationBinding, GhcnhSource,
 };
 use quant_pivot_error::{QuantError, QuantResult, storage::StorageError};
 use quant_pivot_models::{
-    clickhouse::{
-        ChDecimal64, ChSchemaVersion, CryptoPriceReportRow, WeatherForecastPointRow,
-        WeatherObservationReportRow,
-    },
+    clickhouse::{WeatherForecastFactRow, WeatherObservationFactRow},
     config::{
         AviationWeatherSourceConfig, GefsSourceConfig, GhcnhSourceConfig,
         WeatherStationProfileConfig,
     },
     domain::{
-        CryptoPriceReport, DomainCursorStatus, DomainSourceCheckpoint, DomainSourceCursorInfo,
-        LinkageOutcome, MarketLinkage, MarketSubject, NewCalibrationArtifact,
-        UpsertDomainSourceCursor, WeatherForecastPoint, WeatherObservationFact,
-        WeatherObservationReport,
+        DomainCursorStatus, DomainSourceCheckpoint, DomainSourceCursorInfo, LinkageOutcome,
+        MarketLinkage, MarketSubject, NewCalibrationArtifact, UpsertDomainSourceCursor,
+        WeatherForecastPoint, WeatherObservationFact, WeatherObservationReport,
     },
     enums::{
         domain::{DomainFamily, LinkageSourceRole},
@@ -40,26 +30,29 @@ use quant_pivot_models::{
     },
     hashing::CanonicalDigest,
     types::{
-        BinanceSymbol, CalibrationArtifactId, ChainlinkFeedKey, ContentHash, DomainInstrumentKey,
-        DomainSourceId, IcaoStation,
+        CalibrationArtifactId, ContentHash, DomainInstrumentKey, DomainMeasurementUnit,
+        DomainSourceId, IcaoStation, WeatherVariable,
     },
 };
 use quant_pivot_repository::traits::{
     CalibrationArtifactRepository, DomainProjectionRepository, DomainSourceCursorRepository,
     FactWriter, MarketLinkageRepository, QuantFactReadRepository,
 };
-use quant_pivot_research::features::domain::weather::{
-    WeatherStationLeadBiasFit, fit_weather_station_lead_bias,
+use quant_pivot_research::{
+    features::domain::weather::{WeatherStationLeadBiasFit, fit_weather_station_lead_bias},
+    linkage::weather_station_profile_hash,
 };
-use tokio::{task::JoinHandle, time::MissedTickBehavior};
+use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 
-use crate::runtime_config::RuntimeConfigStore;
+use crate::{
+    app::domain_source_supervisor::DomainSourceSupervisor,
+    runtime_config::RuntimeConfigStore,
+    service::weather_fact_ingest::{WeatherFactIngestService, WeatherObservationCandidate},
+};
 
-const DISCOVERY_INTERVAL: StdDuration = StdDuration::from_secs(30);
-const RECONNECT_BACKOFF: StdDuration = StdDuration::from_secs(2);
-const BINANCE_PAGE_SIZE: u16 = 1_000;
 const AVIATION_REQUEST_SPACING: StdDuration = StdDuration::from_millis(650);
+const WEATHER_BOOTSTRAP_DAYS: u64 = 14;
 
 #[derive(Clone)]
 struct WeatherTarget {
@@ -68,37 +61,24 @@ struct WeatherTarget {
     local_date: NaiveDate,
     latitude: rust_decimal::Decimal,
     longitude: rust_decimal::Decimal,
-    ghcnh_station_id: String,
+    ghcnh_station_id: Option<String>,
     station_profile_hash: ContentHash,
 }
 
 #[derive(Default)]
-struct LiveBindings {
-    binance: BTreeMap<DomainInstrumentKey, BinanceSymbol>,
-    chainlink: BTreeMap<DomainInstrumentKey, ChainlinkFeedKey>,
+struct WeatherBindings {
     weather: BTreeMap<(String, NaiveDate), WeatherTarget>,
 }
 
-struct SourceTask {
-    cancel: CancellationToken,
-    handle: JoinHandle<()>,
-}
-
-/// Supervises source-native workers from the latest resolved active-market
-/// bindings. Static Crypto rules and configured Weather profiles never create
-/// subscriptions by themselves.
-pub struct DomainLiveIngestWorker {
+pub struct WeatherIngestWorker {
+    source_supervisor: Arc<DomainSourceSupervisor>,
     linkages: Arc<dyn MarketLinkageRepository>,
     cursors: Arc<dyn DomainSourceCursorRepository>,
     projections: Arc<dyn DomainProjectionRepository>,
-    crypto_writer: Arc<dyn FactWriter<CryptoPriceReportRow>>,
-    weather_writer: Arc<dyn FactWriter<WeatherObservationReportRow>>,
-    forecast_writer: Arc<dyn FactWriter<WeatherForecastPointRow>>,
+    facts: WeatherFactIngestService,
     fact_read: Arc<dyn QuantFactReadRepository>,
     calibrations: Arc<dyn CalibrationArtifactRepository>,
     runtime_config: Arc<RuntimeConfigStore>,
-    binance: Option<Arc<BinanceAggTradeSource>>,
-    chainlink: Option<Arc<ChainlinkDataStreamsSource>>,
     aviation: Option<Arc<AviationWeatherSource>>,
     ghcnh: Option<Arc<GhcnhSource>>,
     gefs: Option<Arc<GefsSource>>,
@@ -108,18 +88,16 @@ pub struct DomainLiveIngestWorker {
     station_profiles: BTreeMap<String, WeatherStationProfileConfig>,
 }
 
-pub struct DomainLiveIngestDeps {
+pub struct WeatherIngestDeps {
+    pub source_supervisor: Arc<DomainSourceSupervisor>,
     pub linkages: Arc<dyn MarketLinkageRepository>,
     pub cursors: Arc<dyn DomainSourceCursorRepository>,
     pub projections: Arc<dyn DomainProjectionRepository>,
-    pub crypto_writer: Arc<dyn FactWriter<CryptoPriceReportRow>>,
-    pub weather_writer: Arc<dyn FactWriter<WeatherObservationReportRow>>,
-    pub forecast_writer: Arc<dyn FactWriter<WeatherForecastPointRow>>,
+    pub weather_writer: Arc<dyn FactWriter<WeatherObservationFactRow>>,
+    pub forecast_writer: Arc<dyn FactWriter<WeatherForecastFactRow>>,
     pub fact_read: Arc<dyn QuantFactReadRepository>,
     pub calibrations: Arc<dyn CalibrationArtifactRepository>,
     pub runtime_config: Arc<RuntimeConfigStore>,
-    pub binance: Option<Arc<BinanceAggTradeSource>>,
-    pub chainlink: Option<Arc<ChainlinkDataStreamsSource>>,
     pub aviation: Option<Arc<AviationWeatherSource>>,
     pub ghcnh: Option<Arc<GhcnhSource>>,
     pub gefs: Option<Arc<GefsSource>>,
@@ -129,21 +107,23 @@ pub struct DomainLiveIngestDeps {
     pub station_profiles: BTreeMap<String, WeatherStationProfileConfig>,
 }
 
-impl DomainLiveIngestWorker {
+impl WeatherIngestWorker {
     #[must_use]
-    pub fn new(deps: DomainLiveIngestDeps) -> Self {
+    pub fn new(deps: WeatherIngestDeps) -> Self {
+        let facts = WeatherFactIngestService::new(
+            Arc::clone(&deps.weather_writer),
+            Arc::clone(&deps.forecast_writer),
+            Arc::clone(&deps.fact_read),
+        );
         Self {
+            source_supervisor: deps.source_supervisor,
             linkages: deps.linkages,
             cursors: deps.cursors,
             projections: deps.projections,
-            crypto_writer: deps.crypto_writer,
-            weather_writer: deps.weather_writer,
-            forecast_writer: deps.forecast_writer,
+            facts,
             fact_read: deps.fact_read,
             calibrations: deps.calibrations,
             runtime_config: deps.runtime_config,
-            binance: deps.binance,
-            chainlink: deps.chainlink,
             aviation: deps.aviation,
             ghcnh: deps.ghcnh,
             gefs: deps.gefs,
@@ -154,19 +134,182 @@ impl DomainLiveIngestWorker {
         }
     }
 
+    /// Run one finite observation/archive/forecast pass for evidence bootstrap.
+    ///
+    /// An empty filter means every frozen station profile. A non-empty filter
+    /// is validated against the discovered bindings and is intended for a
+    /// governed, reviewable bootstrap shard. Every selected station is
+    /// attempted before a combined failure is returned.
+    pub async fn run_evidence_once(&self, station_filter: &BTreeSet<String>) -> QuantResult<()> {
+        self.source_supervisor.ensure_boot_reconciled().await?;
+        let mut bindings = self.discover().await?.weather;
+        if !station_filter.is_empty() {
+            bindings.retain(|(station, _), _| station_filter.contains(station));
+        }
+        if bindings.is_empty() {
+            return Err(QuantError::config(
+                "Weather evidence station filter matched no frozen binding",
+            ));
+        }
+        let selected_stations = weather_stations(&bindings);
+        let discovered = selected_stations
+            .keys()
+            .map(ToString::to_string)
+            .collect::<BTreeSet<_>>();
+        let missing = station_filter
+            .difference(&discovered)
+            .cloned()
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            return Err(QuantError::config(format!(
+                "Weather evidence station filter contains unknown bindings: {}",
+                missing.join(",")
+            )));
+        }
+
+        let mut failures = Vec::new();
+        match self.aviation.as_ref() {
+            Some(source) => {
+                for (index, (station, targets)) in selected_stations.iter().enumerate() {
+                    let gap_generations = targets
+                        .iter()
+                        .map(|target| (target.local_date, 0_u64))
+                        .collect::<BTreeMap<_, _>>();
+                    if let Err(error) = self
+                        .poll_weather_station(source, station, targets, &gap_generations)
+                        .await
+                    {
+                        for target in targets {
+                            self.mark_weather_unavailable(target).await;
+                        }
+                        self.record_evidence_failure(
+                            &DomainSourceId::aviation_weather(),
+                            &DomainInstrumentKey::aviation_weather(station),
+                            &error,
+                            &mut failures,
+                        )
+                        .await;
+                    }
+                    if index + 1 < selected_stations.len() {
+                        tokio::time::sleep(AVIATION_REQUEST_SPACING).await;
+                    }
+                }
+            }
+            None => failures.push("aviation_weather: adapter is unavailable".to_owned()),
+        }
+
+        match self.ghcnh.as_ref() {
+            Some(source) => {
+                let tasks = selected_stations
+                    .iter()
+                    .filter_map(|(station, targets)| {
+                        targets
+                            .first()
+                            .filter(|target| target.ghcnh_station_id.is_some())
+                            .cloned()
+                            .map(|target| (station.clone(), target))
+                    })
+                    .collect::<Vec<_>>();
+                let outcomes = stream::iter(tasks)
+                    .map(|(station, target)| async move {
+                        let result = self.ingest_ghcnh_station(source, &station, &target).await;
+                        (station.clone(), result)
+                    })
+                    .buffer_unordered(self.ghcnh_config.max_concurrency)
+                    .collect::<Vec<_>>()
+                    .await;
+                for (station, result) in outcomes {
+                    if let Err(error) = result {
+                        self.record_evidence_failure(
+                            &DomainSourceId::ghcnh(),
+                            &DomainInstrumentKey::ghcnh(&station),
+                            &error,
+                            &mut failures,
+                        )
+                        .await;
+                    }
+                }
+            }
+            None => failures.push("ghcnh: adapter is unavailable".to_owned()),
+        }
+
+        match self.gefs.as_ref() {
+            Some(source) => {
+                if let Err(error) = self.ingest_gefs_cycle(source, &bindings, Utc::now()).await {
+                    for station in selected_stations.keys() {
+                        self.record_evidence_failure(
+                            &DomainSourceId::gefs(),
+                            &DomainInstrumentKey::gefs(station),
+                            &error,
+                            &mut failures,
+                        )
+                        .await;
+                    }
+                }
+            }
+            None => failures.push("gefs: adapter is unavailable".to_owned()),
+        }
+
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(QuantError::config(format!(
+                "Weather daily-temperature evidence pass failed for {} bindings: {}",
+                failures.len(),
+                failures.join(" | ")
+            )))
+        }
+    }
+
     pub async fn run(self: Arc<Self>, shutdown: CancellationToken) {
-        let binance = Arc::clone(&self).run_binance_supervisor(shutdown.child_token());
-        let chainlink = Arc::clone(&self).run_chainlink_supervisor(shutdown.child_token());
+        if let Err(error) = self.source_supervisor.ensure_boot_reconciled().await {
+            tracing::error!(%error, "Weather ingest blocked: expected-source reconciliation failed");
+            return;
+        }
         let weather = Arc::clone(&self).run_weather_loop(shutdown.child_token());
         let ghcnh = Arc::clone(&self).run_ghcnh_loop(shutdown.child_token());
         let gefs = Arc::clone(&self).run_gefs_loop(shutdown.child_token());
         let calibration = Arc::clone(&self).run_weather_calibration_loop(shutdown.child_token());
-        tokio::join!(binance, chainlink, weather, ghcnh, gefs, calibration);
+        tokio::join!(weather, ghcnh, gefs, calibration);
     }
 
-    async fn discover(&self) -> QuantResult<LiveBindings> {
+    pub(super) async fn run_backfill(self: Arc<Self>, shutdown: CancellationToken) {
+        if let Err(error) = self.source_supervisor.ensure_boot_reconciled().await {
+            tracing::error!(%error, "Weather backfill blocked: expected-source reconciliation failed");
+            return;
+        }
+        loop {
+            if shutdown.is_cancelled() {
+                return;
+            }
+            let bindings = match self.discover().await {
+                Ok(bindings) => bindings.weather,
+                Err(error) => {
+                    tracing::warn!(%error, "Weather backfill binding discovery failed");
+                    tokio::time::sleep(StdDuration::from_secs(1)).await;
+                    continue;
+                }
+            };
+            if let Some(source) = self.gefs.as_ref()
+                && !bindings.is_empty()
+                && let Err(error) = self
+                    .ingest_gefs_backfill_cycle(source, &bindings, Utc::now())
+                    .await
+            {
+                tracing::warn!(%error, "GEFS historical calibration backfill failed");
+            }
+            tokio::select! {
+                () = shutdown.cancelled() => return,
+                () = tokio::time::sleep(StdDuration::from_secs(self.gefs_config.poll_secs.max(1))) => {}
+            }
+        }
+    }
+
+    async fn discover(&self) -> QuantResult<WeatherBindings> {
         let rows = self.linkages.latest_for_active_markets().await?;
-        let mut bindings = LiveBindings::default();
+        let mut bindings = WeatherBindings {
+            weather: configured_weather_targets(&self.station_profiles, Utc::now())?,
+        };
         for row in rows {
             let linkage = row
                 .into_domain()
@@ -178,81 +321,60 @@ impl DomainLiveIngestWorker {
 
     fn add_discovered_linkage(
         &self,
-        bindings: &mut LiveBindings,
+        bindings: &mut WeatherBindings,
         linkage: MarketLinkage,
     ) -> QuantResult<()> {
         let LinkageOutcome::Resolved(resolved) = linkage.outcome else {
+            return Ok(());
+        };
+        let MarketSubject::Weather(subject) = &resolved.subject else {
             return Ok(());
         };
         let live = resolved
             .source_bindings
             .iter()
             .find(|binding| binding.role == LinkageSourceRole::LiveEvent);
-        match (&resolved.subject, live) {
-            (MarketSubject::Crypto(_), Some(source))
-                if source.source_id == DomainSourceId::binance_agg_trade() =>
-            {
-                let symbol = source
-                    .instrument_key
-                    .as_binance_agg_trade_symbol()
-                    .ok_or_else(|| {
-                        QuantError::config("invalid Binance live-event linkage instrument")
-                    })?;
-                bindings
-                    .binance
-                    .insert(source.instrument_key.clone(), symbol);
-            }
-            (MarketSubject::Crypto(_), Some(source))
-                if source.source_id == DomainSourceId::chainlink_data_streams() =>
-            {
-                let feed = source.instrument_key.as_chainlink_feed().ok_or_else(|| {
-                    QuantError::config("invalid Chainlink live-event linkage instrument")
-                })?;
-                bindings
-                    .chainlink
-                    .insert(source.instrument_key.clone(), feed);
-            }
-            (MarketSubject::Weather(subject), Some(source))
-                if source.source_id == DomainSourceId::aviation_weather() =>
-            {
+        match live {
+            Some(source) if source.source_id == DomainSourceId::aviation_weather() => {
                 let profile = self
                     .station_profiles
-                    .get(subject.station.as_str())
+                    .get(subject.decision_group.station.as_str())
                     .ok_or_else(|| {
                         QuantError::config(format!(
                             "Weather station {} is absent from deploy profiles",
-                            subject.station
+                            subject.decision_group.station
                         ))
                     })?;
-                let profile_hash = CanonicalDigest::content_hash_json(&(
-                    "weather_station_profile_v1",
-                    &subject.station,
-                    profile,
-                ))?;
-                if profile_hash != subject.station_profile_hash
-                    || profile.timezone != subject.timezone
+                let profile_hash =
+                    weather_station_profile_hash(&subject.decision_group.station, profile)?;
+                if profile_hash != subject.decision_group.station_profile_hash
+                    || profile.timezone != subject.decision_group.timezone
                 {
                     return Err(QuantError::config(format!(
                         "Weather station profile drift for {}",
-                        subject.station
+                        subject.decision_group.station
                     )));
                 }
                 let station = source
                     .instrument_key
                     .as_aviation_weather_station()
-                    .filter(|station| station == &subject.station)
+                    .filter(|station| station == &subject.decision_group.station)
                     .ok_or_else(|| {
                         QuantError::config("Weather subject/source station binding mismatch")
                     })?;
-                let timezone = subject.timezone.parse::<Tz>().map_err(|error| {
-                    QuantError::config(format!("invalid Weather linkage timezone: {error}"))
-                })?;
+                let timezone = subject
+                    .decision_group
+                    .timezone
+                    .parse::<Tz>()
+                    .map_err(|error| {
+                        QuantError::config(format!("invalid Weather linkage timezone: {error}"))
+                    })?;
                 bindings.weather.insert(
-                    (station.to_string(), subject.local_date),
+                    (station.to_string(), subject.decision_group.local_date),
                     WeatherTarget {
                         station,
                         timezone,
-                        local_date: subject.local_date,
+                        local_date: subject.decision_group.local_date,
                         latitude: profile.latitude,
                         longitude: profile.longitude,
                         ghcnh_station_id: profile.ghcnh_station_id.clone(),
@@ -260,486 +382,20 @@ impl DomainLiveIngestWorker {
                     },
                 );
             }
-            (MarketSubject::Crypto(_) | MarketSubject::Weather(_), None) => {
+            None => {
                 tracing::warn!(
                     market_id = %linkage.market_id,
-                    "resolved active linkage has no live-event source binding"
+                    "resolved active Weather linkage has no live-event source binding"
                 );
             }
-            _ => {
+            Some(_) => {
                 return Err(QuantError::config(format!(
-                    "active linkage {} has a cross-family live-event source",
+                    "active Weather linkage {} has an unsupported live-event source",
                     linkage.market_id
                 )));
             }
         }
         Ok(())
-    }
-
-    async fn run_binance_supervisor(self: Arc<Self>, shutdown: CancellationToken) {
-        let mut tasks = BTreeMap::<DomainInstrumentKey, SourceTask>::new();
-        let mut interval = tokio::time::interval(DISCOVERY_INTERVAL);
-        interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
-        loop {
-            tokio::select! {
-                biased;
-                () = shutdown.cancelled() => break,
-                _ = interval.tick() => {}
-            }
-            let desired = match self.discover().await {
-                Ok(bindings) => bindings.binance,
-                Err(error) => {
-                    tracing::warn!(%error, "Binance live binding discovery failed");
-                    continue;
-                }
-            };
-            stop_removed(&mut tasks, desired.keys().collect()).await;
-            let Some(source) = self.binance.as_ref() else {
-                for instrument in desired.keys() {
-                    self.mark_crypto_unavailable(instrument).await;
-                }
-                continue;
-            };
-            for (instrument, symbol) in desired {
-                if tasks.contains_key(&instrument) {
-                    continue;
-                }
-                let cancel = shutdown.child_token();
-                let child_cancel = cancel.clone();
-                let worker = Arc::clone(&self);
-                let source = Arc::clone(source);
-                let task_instrument = instrument.clone();
-                let handle = tokio::spawn(async move {
-                    worker
-                        .run_binance_symbol(source, task_instrument, symbol, child_cancel)
-                        .await;
-                });
-                tasks.insert(instrument, SourceTask { cancel, handle });
-            }
-        }
-        stop_all(tasks).await;
-    }
-
-    async fn run_binance_symbol(
-        &self,
-        source: Arc<BinanceAggTradeSource>,
-        instrument: DomainInstrumentKey,
-        symbol: BinanceSymbol,
-        shutdown: CancellationToken,
-    ) {
-        let mut gap_generation = self
-            .projections
-            .mark_crypto_source_gap(
-                &DomainSourceId::binance_agg_trade(),
-                &instrument,
-                Utc::now(),
-            )
-            .await
-            .unwrap_or(0);
-        loop {
-            if shutdown.is_cancelled() {
-                return;
-            }
-            match self
-                .run_binance_session(
-                    source.as_ref(),
-                    &instrument,
-                    &symbol,
-                    gap_generation,
-                    &shutdown,
-                )
-                .await
-            {
-                Ok(()) => return,
-                Err(error) => {
-                    tracing::warn!(%instrument, %error, "Binance aggTrade session failed");
-                    gap_generation = self
-                        .projections
-                        .mark_crypto_source_gap(
-                            &DomainSourceId::binance_agg_trade(),
-                            &instrument,
-                            Utc::now(),
-                        )
-                        .await
-                        .unwrap_or_else(|mark_error| {
-                            tracing::error!(%instrument, %mark_error, "failed to persist Binance source gap");
-                            gap_generation.saturating_add(1)
-                        });
-                    tokio::select! {
-                        () = shutdown.cancelled() => return,
-                        () = tokio::time::sleep(RECONNECT_BACKOFF) => {}
-                    }
-                }
-            }
-        }
-    }
-
-    async fn run_binance_session(
-        &self,
-        source: &BinanceAggTradeSource,
-        instrument: &DomainInstrumentKey,
-        symbol: &BinanceSymbol,
-        mut gap_generation: u64,
-        shutdown: &CancellationToken,
-    ) -> QuantResult<()> {
-        let mut expected = self
-            .resume_binance_sequence(source, instrument, symbol, gap_generation)
-            .await?;
-        let mut stream = source.stream(symbol).await?;
-        loop {
-            let (report, planned_rotation) = if stream.rotation_due() {
-                match source.stream(symbol).await {
-                    Ok(mut replacement) => {
-                        let report = tokio::select! {
-                            () = shutdown.cancelled() => return Ok(()),
-                            result = replacement.next_report() => result?,
-                            () = tokio::time::sleep(StdDuration::from_secs(10)) => {
-                                tracing::warn!(%instrument, "Binance overlap rotation produced no first report");
-                                continue;
-                            }
-                        };
-                        stream = replacement;
-                        (report, true)
-                    }
-                    Err(error) => {
-                        tracing::warn!(%instrument, %error, "Binance overlap rotation connection failed");
-                        let report = tokio::select! {
-                            () = shutdown.cancelled() => return Ok(()),
-                            result = stream.next_report() => result?,
-                            () = tokio::time::sleep(StdDuration::from_secs(1)) => continue,
-                        };
-                        (report, false)
-                    }
-                }
-            } else {
-                let report = tokio::select! {
-                    () = shutdown.cancelled() => return Ok(()),
-                    result = stream.next_report() => result?,
-                    () = tokio::time::sleep(StdDuration::from_secs(1)) => continue,
-                };
-                (report, false)
-            };
-            if let Some(next_id) = expected {
-                if report.source_sequence < next_id {
-                    continue;
-                }
-                if report.source_sequence > next_id {
-                    if !planned_rotation {
-                        gap_generation = self
-                            .projections
-                            .mark_crypto_source_gap(
-                                &DomainSourceId::binance_agg_trade(),
-                                instrument,
-                                Utc::now(),
-                            )
-                            .await?;
-                    }
-                    expected = Some(
-                        self.recover_binance(
-                            source,
-                            symbol,
-                            next_id,
-                            Some(report.source_sequence),
-                            gap_generation,
-                        )
-                        .await?,
-                    );
-                }
-            }
-            if expected.is_none_or(|next_id| report.source_sequence >= next_id) {
-                self.persist_crypto(report.clone(), gap_generation).await?;
-                expected = Some(next_sequence(report.source_sequence)?);
-            }
-        }
-    }
-
-    async fn resume_binance_sequence(
-        &self,
-        source: &BinanceAggTradeSource,
-        instrument: &DomainInstrumentKey,
-        symbol: &BinanceSymbol,
-        gap_generation: u64,
-    ) -> QuantResult<Option<u64>> {
-        let cursor = self
-            .cursors
-            .find(&DomainSourceId::binance_agg_trade(), instrument)
-            .await?;
-        let (mut expected, archive_from) = match cursor.map(|cursor| cursor.checkpoint_json) {
-            Some(DomainSourceCheckpoint::BinanceAggTrade {
-                aggregate_trade_id,
-                event_time,
-            }) => (
-                Some(next_sequence(aggregate_trade_id)?),
-                Some(event_time.date_naive()),
-            ),
-            Some(_) => {
-                return Err(QuantError::config(
-                    "Binance aggTrade cursor contains a different source checkpoint type",
-                ));
-            }
-            None => (None, None),
-        };
-        if let Some(from_id) = expected {
-            let archive_recovered = self
-                .recover_binance_archive(
-                    source,
-                    symbol,
-                    from_id,
-                    archive_from.ok_or_else(|| {
-                        QuantError::config("Binance cursor lacks archive start date")
-                    })?,
-                    gap_generation,
-                )
-                .await?;
-            expected = Some(
-                self.recover_binance(source, symbol, archive_recovered, None, gap_generation)
-                    .await?,
-            );
-        }
-        Ok(expected)
-    }
-
-    async fn recover_binance_archive(
-        &self,
-        source: &BinanceAggTradeSource,
-        symbol: &BinanceSymbol,
-        mut from_id: u64,
-        mut date: NaiveDate,
-        gap_generation: u64,
-    ) -> QuantResult<u64> {
-        let today = Utc::now().date_naive();
-        while date < today {
-            let Some(reports) = source.recover_archive_day(symbol, date, Utc::now()).await? else {
-                break;
-            };
-            let mut pending = Vec::with_capacity(5_000);
-            for report in reports {
-                if report.source_sequence < from_id {
-                    continue;
-                }
-                if report.source_sequence != from_id {
-                    return Err(QuantError::config(format!(
-                        "Binance archive recovery gap: expected {from_id}, got {} on {date}",
-                        report.source_sequence
-                    )));
-                }
-                from_id = next_sequence(from_id)?;
-                pending.push(report);
-                if pending.len() == 5_000 {
-                    self.persist_crypto_batch(mem::take(&mut pending), gap_generation)
-                        .await?;
-                }
-            }
-            self.persist_crypto_batch(pending, gap_generation).await?;
-            date = date
-                .succ_opt()
-                .ok_or_else(|| QuantError::config("Binance archive date overflow"))?;
-        }
-        Ok(from_id)
-    }
-
-    async fn recover_binance(
-        &self,
-        source: &BinanceAggTradeSource,
-        symbol: &BinanceSymbol,
-        mut from_id: u64,
-        stop_before: Option<u64>,
-        gap_generation: u64,
-    ) -> QuantResult<u64> {
-        loop {
-            let reports = source
-                .recover_from(symbol, from_id, BINANCE_PAGE_SIZE, Utc::now())
-                .await?;
-            if reports.is_empty() {
-                return Ok(from_id);
-            }
-            let page_len = reports.len();
-            let mut pending = Vec::with_capacity(page_len);
-            for report in reports {
-                if stop_before.is_some_and(|limit| report.source_sequence >= limit) {
-                    self.persist_crypto_batch(pending, gap_generation).await?;
-                    return Ok(from_id);
-                }
-                if report.source_sequence != from_id {
-                    return Err(QuantError::config(format!(
-                        "Binance aggTrade recovery gap: expected {from_id}, got {}",
-                        report.source_sequence
-                    )));
-                }
-                pending.push(report);
-                from_id = next_sequence(from_id)?;
-            }
-            self.persist_crypto_batch(pending, gap_generation).await?;
-            if page_len < usize::from(BINANCE_PAGE_SIZE) {
-                return Ok(from_id);
-            }
-        }
-    }
-
-    async fn run_chainlink_supervisor(self: Arc<Self>, shutdown: CancellationToken) {
-        let mut tasks = BTreeMap::<DomainInstrumentKey, SourceTask>::new();
-        let mut interval = tokio::time::interval(DISCOVERY_INTERVAL);
-        interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
-        loop {
-            tokio::select! {
-                biased;
-                () = shutdown.cancelled() => break,
-                _ = interval.tick() => {}
-            }
-            let desired = match self.discover().await {
-                Ok(bindings) => bindings.chainlink,
-                Err(error) => {
-                    tracing::warn!(%error, "Chainlink live binding discovery failed");
-                    continue;
-                }
-            };
-            stop_removed(&mut tasks, desired.keys().collect()).await;
-            let Some(source) = self.chainlink.as_ref() else {
-                for instrument in desired.keys() {
-                    self.mark_crypto_unavailable(instrument).await;
-                }
-                continue;
-            };
-            for (instrument, feed) in desired {
-                if tasks.contains_key(&instrument) {
-                    continue;
-                }
-                if !source.instruments().contains(&instrument) {
-                    self.mark_crypto_unavailable(&instrument).await;
-                    tracing::error!(%instrument, "active Chainlink feed is not configured");
-                    continue;
-                }
-                let cancel = shutdown.child_token();
-                let child_cancel = cancel.clone();
-                let worker = Arc::clone(&self);
-                let source = Arc::clone(source);
-                let task_instrument = instrument.clone();
-                let handle = tokio::spawn(async move {
-                    worker
-                        .run_chainlink_feed(source, task_instrument, feed, child_cancel)
-                        .await;
-                });
-                tasks.insert(instrument, SourceTask { cancel, handle });
-            }
-        }
-        stop_all(tasks).await;
-    }
-
-    async fn run_chainlink_feed(
-        &self,
-        source: Arc<ChainlinkDataStreamsSource>,
-        instrument: DomainInstrumentKey,
-        feed: ChainlinkFeedKey,
-        shutdown: CancellationToken,
-    ) {
-        let mut gap_generation = self
-            .projections
-            .mark_crypto_source_gap(
-                &DomainSourceId::chainlink_data_streams(),
-                &instrument,
-                Utc::now(),
-            )
-            .await
-            .unwrap_or(0);
-        loop {
-            if shutdown.is_cancelled() {
-                return;
-            }
-            match self
-                .run_chainlink_session(
-                    source.as_ref(),
-                    &instrument,
-                    &feed,
-                    gap_generation,
-                    &shutdown,
-                )
-                .await
-            {
-                Ok(()) => return,
-                Err(error) => {
-                    tracing::warn!(%instrument, %error, "Chainlink Data Streams session failed");
-                    gap_generation = self
-                        .projections
-                        .mark_crypto_source_gap(
-                            &DomainSourceId::chainlink_data_streams(),
-                            &instrument,
-                            Utc::now(),
-                        )
-                        .await
-                        .unwrap_or_else(|_| gap_generation.saturating_add(1));
-                    tokio::select! {
-                        () = shutdown.cancelled() => return,
-                        () = tokio::time::sleep(RECONNECT_BACKOFF) => {}
-                    }
-                }
-            }
-        }
-    }
-
-    async fn run_chainlink_session(
-        &self,
-        source: &ChainlinkDataStreamsSource,
-        instrument: &DomainInstrumentKey,
-        feed: &ChainlinkFeedKey,
-        gap_generation: u64,
-        shutdown: &CancellationToken,
-    ) -> QuantResult<()> {
-        source.validate_system_clock().await?;
-        let cursor = self
-            .cursors
-            .find(&DomainSourceId::chainlink_data_streams(), instrument)
-            .await?;
-        let mut last = match cursor.map(|cursor| cursor.checkpoint_json) {
-            Some(DomainSourceCheckpoint::ChainlinkDataStreams {
-                observations_timestamp,
-                report_hash,
-            }) => Some((observations_timestamp, report_hash)),
-            Some(_) => {
-                return Err(QuantError::config(
-                    "Chainlink cursor contains a different source checkpoint type",
-                ));
-            }
-            None => None,
-        };
-        if let Some((timestamp, _)) = &last {
-            let start = u128::try_from(timestamp.timestamp()).map_err(|error| {
-                QuantError::config(format!("negative Chainlink checkpoint timestamp: {error}"))
-            })?;
-            last = catch_up_chainlink_pages(
-                start,
-                source.rest_page_limit(),
-                last,
-                |page_start| source.reports_page(feed, page_start, Utc::now()),
-                |report| self.persist_crypto(report, gap_generation),
-            )
-            .await?;
-        }
-        let mut stream = source.stream(slice::from_ref(feed)).await?;
-        stream.listen().await.map_err(|error| {
-            QuantError::config(format!("Chainlink stream listen failed: {error}"))
-        })?;
-        let mut clock_check = tokio::time::interval(StdDuration::from_secs(30));
-        clock_check.set_missed_tick_behavior(MissedTickBehavior::Skip);
-        clock_check.tick().await;
-        loop {
-            let report = tokio::select! {
-                () = shutdown.cancelled() => {
-                    stream.close().await.map_err(|error| {
-                        QuantError::config(format!("Chainlink stream close failed: {error}"))
-                    })?;
-                    return Ok(());
-                }
-                _ = clock_check.tick() => {
-                    source.validate_system_clock().await?;
-                    continue;
-                }
-                report = source.next_report(&mut stream, Utc::now()) => report?,
-            };
-            if should_process_crypto(&report, last.as_ref()) {
-                self.persist_crypto(report.clone(), gap_generation).await?;
-                last = Some((report.event_time, report.report_hash.clone()));
-            }
-        }
     }
 
     async fn run_weather_loop(self: Arc<Self>, shutdown: CancellationToken) {
@@ -835,11 +491,12 @@ impl DomainLiveIngestWorker {
             .map_err(|error| QuantError::config(format!("Weather history window: {error}")))?;
         let reports = source.observations(station, hours, Utc::now()).await?;
         let indices = weather_resume_indices(&reports, cursor.as_ref())?;
+        let mut candidates = Vec::with_capacity(indices.len());
         for index in indices {
             let report = &reports[index];
             let target = targets.iter().find(|target| {
                 report
-                    .observation_time
+                    .observed_at
                     .with_timezone(&target.timezone)
                     .date_naive()
                     == target.local_date
@@ -847,31 +504,36 @@ impl DomainLiveIngestWorker {
             let Some(target) = target else {
                 continue;
             };
-            let (revision, supersedes) = weather_revision(&reports, index)?;
-            self.weather_writer
-                .write_batch(vec![report.to_clickhouse_row(
-                    target.local_date,
-                    revision,
-                    supersedes,
-                )])
-                .await?;
+            candidates.push(WeatherObservationCandidate {
+                report: report.clone(),
+                local_date: target.local_date,
+            });
+        }
+        let persisted = self.facts.persist_observations(candidates).await?;
+        for item in persisted {
+            let target = targets
+                .iter()
+                .find(|target| target.local_date == item.local_date)
+                .ok_or_else(|| {
+                    QuantError::config(format!(
+                        "persisted AviationWeather report has no target for {}",
+                        item.local_date
+                    ))
+                })?;
             let checkpoint = DomainSourceCheckpoint::AviationWeather {
-                available_at: report.available_at,
-                published_at: report.published_at,
-                observation_time: report.observation_time,
-                revision,
-                report_hash: report.report_hash.clone(),
+                available_at: item.report.available_at,
+                published_at: item.report.published_at,
+                observation_time: item.report.observed_at,
+                revision: item.revision,
+                report_hash: item.report.report_hash.clone(),
             };
             self.projections
                 .apply_weather_report(
-                    report.clone(),
+                    item.report,
                     target.timezone.to_string(),
-                    target.local_date,
+                    item.local_date,
                     checkpoint,
-                    gap_generations
-                        .get(&target.local_date)
-                        .copied()
-                        .unwrap_or(0),
+                    gap_generations.get(&item.local_date).copied().unwrap_or(0),
                     true,
                 )
                 .await?;
@@ -879,6 +541,7 @@ impl DomainLiveIngestWorker {
         for target in targets {
             if weather_day_close_due(
                 target,
+                &reports,
                 Utc::now(),
                 self.aviation_config.day_close_grace_secs,
             )? {
@@ -886,6 +549,11 @@ impl DomainLiveIngestWorker {
                     .close_weather_day(&target.station, target.local_date, Utc::now())
                     .await?;
             }
+        }
+        if !reports.is_empty() {
+            self.source_supervisor
+                .mark_source_recovered(&DomainSourceId::aviation_weather(), &instrument)
+                .await?;
         }
         Ok(())
     }
@@ -904,11 +572,33 @@ impl DomainLiveIngestWorker {
                 }
             };
             if let Some(source) = self.ghcnh.as_ref() {
-                for (station, targets) in weather_stations(&bindings) {
-                    let Some(target) = targets.first() else {
-                        continue;
-                    };
-                    if let Err(error) = self.ingest_ghcnh_station(source, &station, target).await {
+                let stations = weather_stations(&bindings);
+                let worker = Arc::clone(&self);
+                let source = Arc::clone(source);
+                let outcomes = stream::iter(stations)
+                    .map(move |(station, targets)| {
+                        let worker = Arc::clone(&worker);
+                        let source = Arc::clone(&source);
+                        let target = targets
+                            .into_iter()
+                            .find(|target| target.ghcnh_station_id.is_some());
+                        async move {
+                            let result = match target {
+                                Some(target) => {
+                                    worker
+                                        .ingest_ghcnh_station(&source, &station, &target)
+                                        .await
+                                }
+                                None => Ok(()),
+                            };
+                            (station.clone(), result)
+                        }
+                    })
+                    .buffer_unordered(self.ghcnh_config.max_concurrency)
+                    .collect::<Vec<_>>()
+                    .await;
+                for (station, result) in outcomes {
+                    if let Err(error) = result {
                         tracing::warn!(%station, %error, "GHCNh station calibration ingest failed");
                     }
                 }
@@ -932,20 +622,45 @@ impl DomainLiveIngestWorker {
             .year()
             .checked_sub(years.saturating_sub(1))
             .ok_or_else(|| QuantError::config("GHCNh calibration year underflow"))?;
+        let current_year = available_at.year();
+        let ghcnh_station_id = target.ghcnh_station_id.as_deref().ok_or_else(|| {
+            QuantError::config(format!(
+                "GHCNh historical calibration is unavailable for {station}"
+            ))
+        })?;
         let mut year_files = Vec::new();
+        let mut partition_manifest = Vec::new();
+        let mut unpublished_years = Vec::new();
         for year in first_year..=available_at.year() {
-            year_files.push(
-                source
-                    .yearly_station(station, &target.ghcnh_station_id, year, available_at)
-                    .await?,
-            );
+            match source
+                .yearly_station(station, ghcnh_station_id, year, available_at)
+                .await?
+            {
+                Some(year_file) => {
+                    partition_manifest.push((year, Some(year_file.file_hash.clone())));
+                    year_files.push((year, year_file));
+                }
+                None if year == current_year => {
+                    partition_manifest.push((year, None));
+                    unpublished_years.push(year);
+                }
+                None => {
+                    return Err(QuantError::config(format!(
+                        "GHCNh historical partition {year} is missing for {station}"
+                    )));
+                }
+            }
         }
-        let file_hash = CanonicalDigest::content_hash_json(
-            &year_files
-                .iter()
-                .map(|year| year.file_hash.clone())
-                .collect::<Vec<_>>(),
-        )?;
+        if year_files.is_empty() {
+            return Err(QuantError::config(format!(
+                "GHCNh returned no published calibration partitions for {station}"
+            )));
+        }
+        let file_hash = CanonicalDigest::content_hash_json(&(
+            "ghcnh_partition_manifest_v1",
+            ghcnh_station_id,
+            &partition_manifest,
+        ))?;
         let instrument = DomainInstrumentKey::ghcnh(station);
         let existing = self
             .cursors
@@ -966,39 +681,20 @@ impl DomainLiveIngestWorker {
                 .map(|cursor| cursor.checkpoint_json.event_time())
         } else {
             let mut last_hour: Option<DateTime<Utc>> = None;
-            let mut revisions = BTreeMap::<DateTime<Utc>, u32>::new();
-            let mut rows = Vec::new();
-            for year in year_files {
+            let mut candidates = Vec::new();
+            for (_, year) in year_files {
                 for report in year.reports {
-                    last_hour = Some(last_hour.map_or(report.observation_time, |current| {
-                        current.max(report.observation_time)
+                    last_hour = Some(last_hour.map_or(report.observed_at, |current| {
+                        current.max(report.observed_at)
                     }));
-                    let revision = revisions.entry(report.observation_time).or_insert(0);
                     let local_date = report
-                        .observation_time
+                        .observed_at
                         .with_timezone(&target.timezone)
                         .date_naive();
-                    rows.push(report.to_clickhouse_row(local_date, *revision, None));
-                    *revision = revision.checked_add(1).ok_or_else(|| {
-                        QuantError::config("GHCNh same-hour revision count overflow")
-                    })?;
+                    candidates.push(WeatherObservationCandidate { report, local_date });
                 }
             }
-            rows.sort_by(|left, right| {
-                (
-                    left.observation_time,
-                    left.revision,
-                    left.report_hash.as_str(),
-                )
-                    .cmp(&(
-                        right.observation_time,
-                        right.revision,
-                        right.report_hash.as_str(),
-                    ))
-            });
-            for batch in rows.chunks(5_000) {
-                self.weather_writer.write_batch(batch.to_vec()).await?;
-            }
+            self.facts.persist_observations(candidates).await?;
             last_hour
         };
         let last_hour = last_hour.ok_or_else(|| {
@@ -1009,6 +705,7 @@ impl DomainLiveIngestWorker {
         let checkpoint = DomainSourceCheckpoint::Ghcnh {
             last_hour,
             file_hash,
+            unpublished_years,
         };
         self.upsert_source_cursor(DomainSourceId::ghcnh(), instrument, checkpoint)
             .await
@@ -1029,16 +726,9 @@ impl DomainLiveIngestWorker {
             };
             if let Some(source) = self.gefs.as_ref()
                 && !bindings.is_empty()
+                && let Err(error) = self.ingest_gefs_cycle(source, &bindings, Utc::now()).await
             {
-                if let Err(error) = self.ingest_gefs_cycle(source, &bindings, Utc::now()).await {
-                    tracing::warn!(%error, "GEFS ensemble ingest failed");
-                }
-                if let Err(error) = self
-                    .ingest_gefs_backfill_cycle(source, &bindings, Utc::now())
-                    .await
-                {
-                    tracing::warn!(%error, "GEFS historical calibration backfill failed");
-                }
+                tracing::warn!(%error, "GEFS ensemble ingest failed");
             }
             tokio::select! {
                 () = shutdown.cancelled() => return,
@@ -1138,7 +828,7 @@ impl DomainLiveIngestWorker {
     ) -> QuantResult<(Vec<WeatherObservationFact>, Vec<WeatherForecastPoint>)> {
         let observation_rows = self
             .fact_read
-            .weather_observation_reports_between(
+            .weather_observation_facts_between(
                 station_names.clone(),
                 (fit_start - Duration::hours(3)).timestamp_millis(),
                 fit_end.timestamp_millis(),
@@ -1156,7 +846,7 @@ impl DomainLiveIngestWorker {
             .collect::<QuantResult<Vec<_>>>()?;
         let forecast_rows = self
             .fact_read
-            .weather_forecast_points_between(
+            .weather_forecast_facts_between(
                 station_names,
                 fit_start.timestamp_millis(),
                 fit_end.timestamp_millis(),
@@ -1305,6 +995,14 @@ impl DomainLiveIngestWorker {
             .gefs_request_already_complete(bindings, reference_time, &request_hash)
             .await?
         {
+            for station in weather_stations(bindings).keys() {
+                self.source_supervisor
+                    .mark_source_recovered(
+                        &DomainSourceId::gefs(),
+                        &DomainInstrumentKey::gefs(station),
+                    )
+                    .await?;
+            }
             return Ok(());
         }
 
@@ -1500,7 +1198,7 @@ impl DomainLiveIngestWorker {
                     let stations = stations.clone();
                     async move {
                         source
-                            .tmax_member(reference_time, lead_hours, member, &stations)
+                            .daily_temperature_member(reference_time, lead_hours, member, &stations)
                             .await
                     }
                 })
@@ -1537,7 +1235,7 @@ impl DomainLiveIngestWorker {
                     let stations = stations.to_vec();
                     async move {
                         source
-                            .tmax_member(reference_time, lead_hours, member, &stations)
+                            .daily_temperature_member(reference_time, lead_hours, member, &stations)
                             .await
                     }
                 })
@@ -1560,38 +1258,48 @@ impl DomainLiveIngestWorker {
         decoded: Vec<GefsDecodedMember>,
         run_manifest_hash: &ContentHash,
     ) -> QuantResult<()> {
-        let mut rows = decoded
-            .into_iter()
-            .flat_map(|member| {
-                let manifest = run_manifest_hash.clone();
-                member
-                    .points
-                    .into_iter()
-                    .map(move |point| WeatherForecastPointRow {
+        let mut points = Vec::new();
+        for member in decoded {
+            for point in member.points {
+                let instrument_key = DomainInstrumentKey::gefs(&point.station);
+                for (variable, temperature) in [
+                    (WeatherVariable::TemperatureMaximum, point.tmax_celsius),
+                    (WeatherVariable::TemperatureMinimum, point.tmin_celsius),
+                ] {
+                    let report_hash = CanonicalDigest::content_hash_json(&(
+                        "weather_forecast_fact_v2",
+                        &instrument_key,
+                        variable,
+                        member.reference_time,
+                        member.valid_time,
+                        member.member,
+                        temperature,
+                        &point.grid_binding_hash,
+                        run_manifest_hash,
+                    ))?;
+                    points.push(WeatherForecastPoint {
                         source_id: DomainSourceId::gefs(),
-                        station: point.station.to_string(),
-                        reference_time: member.reference_time.timestamp_millis(),
-                        valid_time: member.valid_time.timestamp_millis(),
-                        available_at: member.available_at.timestamp_millis(),
+                        instrument_key: instrument_key.clone(),
+                        subject_key: point.station.to_string(),
+                        variable,
+                        value: temperature.value(),
+                        unit: DomainMeasurementUnit::Celsius,
+                        precision: rust_decimal::Decimal::new(1, 1),
+                        reference_time: member.reference_time,
+                        valid_time: member.valid_time,
+                        published_at: member.available_at,
+                        available_at: member.available_at,
                         lead_hours: member.lead_hours,
-                        member: member.member,
-                        tmax_celsius: ChDecimal64::from(point.tmax_celsius.value()),
-                        grid_binding_hash: point.grid_binding_hash,
-                        run_manifest_hash: manifest.clone(),
-                        schema_version: ChSchemaVersion::FIRST,
-                    })
-            })
-            .collect::<Vec<_>>();
-        rows.sort_by(|left, right| {
-            (&left.station, left.valid_time, left.member).cmp(&(
-                &right.station,
-                right.valid_time,
-                right.member,
-            ))
-        });
-        for batch in rows.chunks(5_000) {
-            self.forecast_writer.write_batch(batch.to_vec()).await?;
+                        member: Some(u16::from(member.member)),
+                        revision: 0,
+                        grid_binding_hash: point.grid_binding_hash.clone(),
+                        run_manifest_hash: run_manifest_hash.clone(),
+                        report_hash,
+                    });
+                }
+            }
         }
+        self.facts.persist_forecasts(points).await?;
         Ok(())
     }
 
@@ -1632,8 +1340,8 @@ impl DomainLiveIngestWorker {
         let checkpoint_hash = CanonicalDigest::content_hash_json(&checkpoint)?;
         self.cursors
             .upsert(UpsertDomainSourceCursor {
-                source_id,
-                instrument_key,
+                source_id: source_id.clone(),
+                instrument_key: instrument_key.clone(),
                 checkpoint_json: checkpoint,
                 checkpoint_hash,
                 status: DomainCursorStatus::Live.as_str().to_owned(),
@@ -1641,77 +1349,30 @@ impl DomainLiveIngestWorker {
                 updated_at: Utc::now(),
             })
             .await?;
+        self.source_supervisor
+            .mark_source_recovered(&source_id, &instrument_key)
+            .await?;
         Ok(())
     }
 
-    async fn persist_crypto(
+    async fn record_evidence_failure(
         &self,
-        report: CryptoPriceReport,
-        gap_generation: u64,
-    ) -> QuantResult<()> {
-        self.crypto_writer
-            .write_batch(vec![report.to_clickhouse_row()])
-            .await?;
-        let checkpoint = if report.source_id == DomainSourceId::binance_agg_trade() {
-            DomainSourceCheckpoint::BinanceAggTrade {
-                aggregate_trade_id: report.source_sequence,
-                event_time: report.event_time,
-            }
-        } else if report.source_id == DomainSourceId::chainlink_data_streams() {
-            DomainSourceCheckpoint::ChainlinkDataStreams {
-                observations_timestamp: report.observations_timestamp.ok_or_else(|| {
-                    QuantError::config("Chainlink report lacks observations timestamp")
-                })?,
-                report_hash: report.report_hash.clone(),
-            }
-        } else {
-            return Err(QuantError::config(format!(
-                "unsupported crypto report source {}",
-                report.source_id
-            )));
-        };
-        self.projections
-            .apply_crypto_report(report, checkpoint, gap_generation, true)
-            .await?;
-        Ok(())
-    }
-
-    async fn persist_crypto_batch(
-        &self,
-        reports: Vec<CryptoPriceReport>,
-        gap_generation: u64,
-    ) -> QuantResult<()> {
-        let Some(last) = reports.last().cloned() else {
-            return Ok(());
-        };
-        self.crypto_writer
-            .write_batch(
-                reports
-                    .into_iter()
-                    .map(|report| report.to_clickhouse_row())
-                    .collect(),
-            )
-            .await?;
-        let checkpoint = DomainSourceCheckpoint::BinanceAggTrade {
-            aggregate_trade_id: last.source_sequence,
-            event_time: last.event_time,
-        };
-        self.projections
-            .apply_crypto_report(last, checkpoint, gap_generation, true)
-            .await?;
-        Ok(())
-    }
-
-    async fn mark_crypto_unavailable(&self, instrument: &DomainInstrumentKey) {
-        let Some(source_id) = instrument.source_id() else {
-            return;
-        };
-        if let Err(error) = self
-            .projections
-            .mark_crypto_source_gap(&source_id, instrument, Utc::now())
+        source_id: &DomainSourceId,
+        instrument_key: &DomainInstrumentKey,
+        error: &QuantError,
+        failures: &mut Vec<String>,
+    ) {
+        let reason = error.to_string();
+        if let Err(status_error) = self
+            .source_supervisor
+            .mark_source_failed(source_id, instrument_key, reason.clone())
             .await
         {
-            tracing::error!(%instrument, %error, "failed to mark crypto source unavailable");
+            failures.push(format!(
+                "{source_id}/{instrument_key}: {reason}; source-health update failed: {status_error}"
+            ));
+        } else {
+            failures.push(format!("{source_id}/{instrument_key}: {reason}"));
         }
     }
 
@@ -1726,60 +1387,43 @@ impl DomainLiveIngestWorker {
     }
 }
 
-fn should_process_crypto(
-    report: &CryptoPriceReport,
-    last: Option<&(DateTime<Utc>, ContentHash)>,
-) -> bool {
-    last.is_none_or(|(time, hash)| {
-        report.event_time > *time || (report.event_time == *time && report.report_hash != *hash)
-    })
-}
-
-async fn catch_up_chainlink_pages<Fetch, FetchFuture, Persist, PersistFuture>(
-    mut start: u128,
-    page_limit: usize,
-    mut last: Option<(DateTime<Utc>, ContentHash)>,
-    mut fetch: Fetch,
-    mut persist: Persist,
-) -> QuantResult<Option<(DateTime<Utc>, ContentHash)>>
-where
-    Fetch: FnMut(u128) -> FetchFuture,
-    FetchFuture: Future<Output = QuantResult<Vec<CryptoPriceReport>>>,
-    Persist: FnMut(CryptoPriceReport) -> PersistFuture,
-    PersistFuture: Future<Output = QuantResult<()>>,
-{
-    if page_limit == 0 {
-        return Err(QuantError::config(
-            "Chainlink report page limit must be positive",
-        ));
-    }
-    loop {
-        let reports = fetch(start).await?;
-        let page_len = reports.len();
-        let last_sequence = reports.last().map(|report| report.source_sequence);
-        for report in reports {
-            if should_process_crypto(&report, last.as_ref()) {
-                let checkpoint = (report.event_time, report.report_hash.clone());
-                persist(report).await?;
-                last = Some(checkpoint);
-            }
-        }
-        if page_len < page_limit {
-            return Ok(last);
-        }
-        let last_sequence = last_sequence.ok_or_else(|| {
-            QuantError::config("Chainlink returned an empty page at the configured page limit")
+fn configured_weather_targets(
+    station_profiles: &BTreeMap<String, WeatherStationProfileConfig>,
+    now: DateTime<Utc>,
+) -> QuantResult<BTreeMap<(String, NaiveDate), WeatherTarget>> {
+    let mut targets = BTreeMap::new();
+    for (station_code, profile) in station_profiles {
+        let station = IcaoStation::parse(station_code).map_err(|error| {
+            QuantError::config(format!(
+                "invalid configured Weather station {station_code}: {error}"
+            ))
         })?;
-        start = u128::from(last_sequence.checked_add(1).ok_or_else(|| {
-            QuantError::config("Chainlink report sequence overflow during catch-up")
-        })?);
+        let timezone = profile.timezone.parse::<Tz>().map_err(|error| {
+            QuantError::config(format!(
+                "invalid timezone for Weather station {station}: {error}"
+            ))
+        })?;
+        let station_profile_hash = weather_station_profile_hash(&station, profile)?;
+        let local_today = now.with_timezone(&timezone).date_naive();
+        for days_ago in 0..=WEATHER_BOOTSTRAP_DAYS {
+            let local_date = local_today
+                .checked_sub_days(Days::new(days_ago))
+                .ok_or_else(|| QuantError::config("Weather bootstrap date underflow"))?;
+            targets.insert(
+                (station.to_string(), local_date),
+                WeatherTarget {
+                    station: station.clone(),
+                    timezone,
+                    local_date,
+                    latitude: profile.latitude,
+                    longitude: profile.longitude,
+                    ghcnh_station_id: profile.ghcnh_station_id.clone(),
+                    station_profile_hash: station_profile_hash.clone(),
+                },
+            );
+        }
     }
-}
-
-fn next_sequence(value: u64) -> QuantResult<u64> {
-    value
-        .checked_add(1)
-        .ok_or_else(|| QuantError::config("source sequence overflow"))
+    Ok(targets)
 }
 
 fn weather_stations(
@@ -1873,7 +1517,7 @@ fn weather_resume_indices(
         if (
             report.available_at,
             report.published_at,
-            report.observation_time,
+            report.observed_at,
             report_revision,
             &report.report_hash,
         ) > (
@@ -1898,7 +1542,7 @@ fn weather_revision(
         .ok_or_else(|| QuantError::config("Weather report revision index is out of bounds"))?;
     let prior = reports[..index]
         .iter()
-        .filter(|candidate| candidate.observation_time == report.observation_time)
+        .filter(|candidate| candidate.observed_at == report.observed_at)
         .collect::<Vec<_>>();
     let revision = u32::try_from(prior.len())
         .map_err(|error| QuantError::config(format!("Weather revision overflow: {error}")))?;
@@ -1910,6 +1554,7 @@ fn weather_revision(
 
 fn weather_day_close_due(
     target: &WeatherTarget,
+    reports: &[WeatherObservationReport],
     now: DateTime<Utc>,
     grace_secs: u64,
 ) -> QuantResult<bool> {
@@ -1928,172 +1573,151 @@ fn weather_day_close_due(
         .ok_or_else(|| QuantError::config("Weather local midnight is ambiguous or missing"))?;
     let grace = i64::try_from(grace_secs)
         .map_err(|error| QuantError::config(format!("Weather close grace overflow: {error}")))?;
-    Ok(now >= (midnight + Duration::seconds(grace)).with_timezone(&Utc))
-}
-
-async fn stop_removed(
-    tasks: &mut BTreeMap<DomainInstrumentKey, SourceTask>,
-    desired: BTreeSet<&DomainInstrumentKey>,
-) {
-    let removed = tasks
-        .keys()
-        .filter(|key| !desired.contains(key))
-        .cloned()
-        .collect::<Vec<_>>();
-    for key in removed {
-        if let Some(task) = tasks.remove(&key) {
-            task.cancel.cancel();
-            if let Err(error) = task.handle.await {
-                tracing::warn!(%key, %error, "domain source task join failed");
-            }
-        }
-    }
-}
-
-async fn stop_all(tasks: BTreeMap<DomainInstrumentKey, SourceTask>) {
-    for (_, task) in tasks {
-        task.cancel.cancel();
-        if let Err(error) = task.handle.await {
-            tracing::warn!(%error, "domain source task join failed during shutdown");
-        }
-    }
+    let grace_elapsed = now >= (midnight + Duration::seconds(grace)).with_timezone(&Utc);
+    let next_day_observed = reports.iter().any(|report| {
+        report.subject_key == target.station.as_str()
+            && report
+                .observed_at
+                .with_timezone(&target.timezone)
+                .date_naive()
+                >= next_date
+            && report.available_at <= now
+    });
+    Ok(grace_elapsed && next_day_observed)
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::VecDeque, future::ready};
+    use std::collections::BTreeMap;
 
-    use chrono::{DateTime, TimeZone, Utc};
+    use chrono::{DateTime, Duration, NaiveDate, TimeZone, Utc};
     use quant_pivot_models::{
+        config::{WeatherHistoricalBindingKind, WeatherStationProfileConfig},
         domain::{
-            CryptoPriceReport, DomainSourceCheckpoint, DomainSourceCursorInfo,
+            DomainCursorStatus, DomainSourceCheckpoint, DomainSourceCursorInfo,
             WeatherObservationReport, WeatherObservationReportKind,
         },
         types::{
-            ChainlinkFeedKey, ContentHash, DomainInstrumentKey, DomainSourceId, IcaoStation,
-            TemperatureCelsius, Usd,
+            ContentHash, DomainInstrumentKey, DomainMeasurementUnit, DomainSourceId, IcaoStation,
+            WeatherVariable,
         },
     };
     use rust_decimal_macros::dec;
 
-    use super::{catch_up_chainlink_pages, weather_resume_indices, weather_revision};
+    use super::{
+        WEATHER_BOOTSTRAP_DAYS, WeatherTarget, configured_weather_targets, weather_day_close_due,
+        weather_resume_indices,
+    };
 
     fn hash(seed: char) -> ContentHash {
-        ContentHash::parse(format!("blake3:{}", seed.to_string().repeat(64))).expect("test hash")
+        ContentHash::parse(format!("blake3:{}", seed.to_string().repeat(64))).expect("hash")
     }
 
     fn report(
-        hash_seed: char,
-        published_minute: u32,
-        temperature: rust_decimal::Decimal,
+        observed_at: DateTime<Utc>,
+        available_at: DateTime<Utc>,
+        seed: char,
     ) -> WeatherObservationReport {
+        let station = IcaoStation::parse("KJFK").expect("station");
         WeatherObservationReport {
             source_id: DomainSourceId::aviation_weather(),
-            station: IcaoStation::parse("KLGA").expect("station"),
-            report_kind: if published_minute == 2 {
-                WeatherObservationReportKind::Correction
-            } else {
-                WeatherObservationReportKind::Metar
-            },
-            temperature: TemperatureCelsius::new(temperature),
-            precision_celsius: dec!(0.1),
-            observation_time: Utc.with_ymd_and_hms(2026, 7, 13, 16, 0, 0).unwrap(),
-            published_at: Utc
-                .with_ymd_and_hms(2026, 7, 13, 16, published_minute, 0)
-                .unwrap(),
-            available_at: Utc.with_ymd_and_hms(2026, 7, 13, 16, 3, 0).unwrap(),
-            report_hash: hash(hash_seed),
-            raw_report: hash_seed.to_string(),
+            instrument_key: DomainInstrumentKey::aviation_weather(&station),
+            subject_key: station.to_string(),
+            report_kind: WeatherObservationReportKind::Metar,
+            variable: WeatherVariable::Temperature,
+            value: dec!(20),
+            unit: DomainMeasurementUnit::Celsius,
+            precision: dec!(0.1),
+            observed_at,
+            valid_from: None,
+            valid_to: None,
+            published_at: available_at,
+            available_at,
+            report_hash: hash(seed),
+            raw_report: seed.to_string(),
         }
     }
 
-    fn chainlink_report(
-        sequence: u64,
-        event_time: DateTime<Utc>,
-        hash_seed: char,
-    ) -> CryptoPriceReport {
-        let feed = ChainlinkFeedKey::parse("BTC-USD").expect("feed");
-        CryptoPriceReport {
-            source_id: DomainSourceId::chainlink_data_streams(),
-            instrument_key: DomainInstrumentKey::chainlink_data_streams(&feed),
-            source_sequence: sequence,
-            price: Usd::new(dec!(65000)),
-            quantity: None,
-            event_time,
-            published_at: event_time,
-            available_at: event_time,
-            valid_from: Some(event_time),
-            observations_timestamp: Some(event_time),
-            expires_at: None,
-            report_hash: hash(hash_seed),
-            raw_report: hash_seed.to_string(),
-        }
-    }
-
-    #[tokio::test]
-    async fn chainlink_catch_up_reads_full_pages_until_source_is_caught_up() {
-        let t0 = Utc.with_ymd_and_hms(2026, 7, 13, 16, 0, 0).unwrap();
-        let mut pages = VecDeque::from([
-            vec![
-                chainlink_report(100, t0, 'a'),
-                chainlink_report(101, t0 + chrono::Duration::seconds(1), 'b'),
-            ],
-            vec![chainlink_report(
-                102,
-                t0 + chrono::Duration::seconds(2),
-                'c',
-            )],
-        ]);
-        let mut starts = Vec::new();
-        let mut persisted = Vec::new();
-
-        let last = catch_up_chainlink_pages(
-            100,
-            2,
-            Some((t0, hash('a'))),
-            |start| {
-                starts.push(start);
-                ready(Ok(pages.pop_front().unwrap_or_default()))
+    #[test]
+    fn configured_station_bootstraps_without_market_linkage() {
+        let profiles = BTreeMap::from([(
+            "KJFK".to_owned(),
+            WeatherStationProfileConfig {
+                timezone: "America/New_York".to_owned(),
+                latitude: dec!(40.6398),
+                longitude: dec!(-73.7789),
+                elevation_meters: dec!(4),
+                ghcnh_station_id: Some("USW00094789".to_owned()),
+                historical_binding_kind: WeatherHistoricalBindingKind::ExactStation,
             },
-            |report| {
-                persisted.push(report.source_sequence);
-                ready(Ok(()))
-            },
+        )]);
+        let targets = configured_weather_targets(
+            &profiles,
+            Utc.with_ymd_and_hms(2026, 7, 18, 12, 0, 0).unwrap(),
         )
-        .await
-        .expect("catch up");
+        .expect("configured targets");
+        assert_eq!(
+            targets.len(),
+            usize::try_from(WEATHER_BOOTSTRAP_DAYS + 1).expect("bootstrap window fits usize")
+        );
+        assert!(
+            targets
+                .values()
+                .all(|target| target.station.as_str() == "KJFK")
+        );
+    }
 
-        assert_eq!(starts, vec![100, 102]);
-        assert_eq!(persisted, vec![101, 102]);
-        assert_eq!(last, Some((t0 + chrono::Duration::seconds(2), hash('c'))));
+    #[test]
+    fn day_close_requires_first_observation_from_the_following_local_day() {
+        let timezone = "America/New_York".parse().expect("timezone");
+        let local_date = NaiveDate::from_ymd_opt(2026, 7, 1).expect("date");
+        let target = WeatherTarget {
+            station: IcaoStation::parse("KJFK").expect("station"),
+            timezone,
+            local_date,
+            latitude: dec!(40.6398),
+            longitude: dec!(-73.7789),
+            ghcnh_station_id: Some("USW00094789".to_owned()),
+            station_profile_hash: hash('d'),
+        };
+        let now = Utc.with_ymd_and_hms(2026, 7, 2, 6, 0, 0).unwrap();
+        assert!(!weather_day_close_due(&target, &[], now, 3_600).expect("close gate"));
+        let next_day = Utc.with_ymd_and_hms(2026, 7, 2, 4, 5, 0).unwrap();
+        assert!(
+            weather_day_close_due(
+                &target,
+                &[report(next_day, next_day + Duration::minutes(1), 'e')],
+                now,
+                3_600,
+            )
+            .expect("close gate")
+        );
     }
 
     #[test]
     fn same_time_correction_resumes_after_exact_report_hash() {
-        let reports = vec![report('a', 1, dec!(27)), report('b', 2, dec!(26))];
+        let observed = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
+        let first = report(observed, observed + Duration::minutes(1), 'a');
+        let correction = report(observed, observed + Duration::minutes(2), 'b');
         let cursor = DomainSourceCursorInfo {
             source_id: DomainSourceId::aviation_weather(),
-            instrument_key: DomainInstrumentKey::aviation_weather(&reports[0].station),
+            instrument_key: first.instrument_key.clone(),
             checkpoint_json: DomainSourceCheckpoint::AviationWeather {
-                available_at: reports[0].available_at,
-                published_at: reports[0].published_at,
-                observation_time: reports[0].observation_time,
+                available_at: first.available_at,
+                published_at: first.published_at,
+                observation_time: first.observed_at,
                 revision: 0,
-                report_hash: reports[0].report_hash.clone(),
+                report_hash: first.report_hash.clone(),
             },
             checkpoint_hash: hash('c'),
-            status: "live".to_owned(),
+            status: DomainCursorStatus::Live.as_str().to_owned(),
             last_error: None,
-            created_at: reports[0].available_at,
-            updated_at: reports[0].available_at,
+            created_at: observed,
+            updated_at: observed,
         };
         assert_eq!(
-            weather_resume_indices(&reports, Some(&cursor)).expect("resume"),
+            weather_resume_indices(&[first, correction], Some(&cursor)).expect("resume"),
             vec![1]
-        );
-        assert_eq!(
-            weather_revision(&reports, 1).expect("revision"),
-            (1, Some(reports[0].report_hash.clone()))
         );
     }
 }

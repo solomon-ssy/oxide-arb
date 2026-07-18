@@ -58,6 +58,8 @@ fn linkage(
     let market_id = MarketId::new(market_id);
     let metadata_hash =
         ContentHash::parse(format!("blake3:{}", format!("{seed:02x}").repeat(32))).expect("hash");
+    let capability_registry_hash =
+        ContentHash::parse(format!("blake3:{}", "f".repeat(64))).expect("hash");
     NewMarketLinkage::from_derivation(MarketLinkageDerivation {
         market_id,
         outcome,
@@ -65,6 +67,7 @@ fn linkage(
         resolver_tier: ResolverTier::Tier0Slug,
         resolver_version: ResolverVersion::FIRST,
         metadata_hash,
+        capability_registry_hash,
         effective_at,
     })
     .expect("new linkage")
@@ -269,5 +272,72 @@ async fn backdated_row_is_invisible_before_database_availability() {
             .expect("visible ledger")
             .len(),
         1
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn append_batch_rolls_back_the_entire_group_when_any_member_is_invalid() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    seed_market(&db, "0xlinkage-batch-a").await;
+    seed_market(&db, "0xlinkage-batch-b").await;
+
+    let repo = PgMarketLinkageRepository::new(db);
+    let effective_at = Utc::now() - ChronoDuration::minutes(1);
+    let first = linkage(
+        "0xlinkage-batch-a",
+        LinkageOutcome::Unresolved {
+            reason: "valid first member".to_owned(),
+        },
+        effective_at,
+        6,
+    );
+    let mut invalid = linkage(
+        "0xlinkage-batch-b",
+        LinkageOutcome::Unresolved {
+            reason: "will be corrupted".to_owned(),
+        },
+        effective_at,
+        7,
+    );
+    invalid.outcome = serde_json::json!({ "invalid": "linkage outcome" });
+
+    assert!(
+        repo.append_batch(vec![first.clone(), invalid])
+            .await
+            .is_err()
+    );
+    let market_ids = vec![
+        MarketId::new("0xlinkage-batch-a"),
+        MarketId::new("0xlinkage-batch-b"),
+    ];
+    assert!(
+        repo.latest_for_markets(&market_ids)
+            .await
+            .expect("latest after rollback")
+            .is_empty(),
+        "the valid first insert must roll back with the invalid sibling"
+    );
+
+    let second = linkage(
+        "0xlinkage-batch-b",
+        LinkageOutcome::Unresolved {
+            reason: "valid second member".to_owned(),
+        },
+        effective_at,
+        8,
+    );
+    let appended = repo
+        .append_batch(vec![first, second])
+        .await
+        .expect("valid atomic batch");
+    assert_eq!(appended.len(), 2);
+    assert_eq!(
+        repo.latest_for_markets(&market_ids)
+            .await
+            .expect("latest valid batch")
+            .len(),
+        2
     );
 }

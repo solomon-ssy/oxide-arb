@@ -12,8 +12,8 @@ use quant_pivot_models::{
     types::{MarketId, MarketLinkageId},
 };
 use sea_orm::{
-    ActiveValue, ColumnTrait, Condition, DatabaseConnection, EntityTrait, ExprTrait,
-    IntoActiveModel, QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
+    ActiveValue, ColumnTrait, Condition, DatabaseConnection, DatabaseTransaction, EntityTrait,
+    ExprTrait, IntoActiveModel, QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
     sea_query::{Alias, Expr, Query},
 };
 
@@ -91,59 +91,78 @@ impl PgMarketLinkageRepository {
     }
 }
 
-#[async_trait::async_trait]
-impl MarketLinkageRepository for PgMarketLinkageRepository {
-    async fn append(&self, linkage: NewMarketLinkage) -> Result<MarketLinkageInfo, StorageError> {
-        let content_hash = linkage.content_hash.clone();
-        let source_bindings = match serde_json::from_value::<LinkageOutcome>(
-            linkage.outcome.clone(),
-        )
+async fn append_in_transaction(
+    txn: &DatabaseTransaction,
+    linkage: NewMarketLinkage,
+) -> Result<MarketLinkageInfo, StorageError> {
+    let content_hash = linkage.content_hash.clone();
+    let source_bindings = match serde_json::from_value::<LinkageOutcome>(linkage.outcome.clone())
         .map_err(|error| StorageError::InvariantViolation {
             entity: Some("quant_market_linkage"),
             detail: format!("invalid typed linkage outcome: {error}"),
         })? {
-            LinkageOutcome::Resolved(binding) => binding.source_bindings,
-            LinkageOutcome::Unresolved { .. } => Vec::new(),
-        };
+        LinkageOutcome::Resolved(binding) => binding.source_bindings,
+        LinkageOutcome::Unresolved { .. } => Vec::new(),
+    };
+    // Idempotent append: a duplicate content hash is a resolver no-op, not
+    // an error — the ledger row for that outcome already exists.
+    quant_market_linkage::Entity::insert(linkage.into_active_model())
+        .on_conflict_do_nothing_on([quant_market_linkage::Column::ContentHash])
+        .exec(txn)
+        .await
+        .map_err(StorageError::from)?;
+    let row = quant_market_linkage::Entity::find()
+        .filter(quant_market_linkage::Column::ContentHash.eq(content_hash.clone()))
+        .one(txn)
+        .await
+        .map_err(StorageError::from)?
+        .ok_or(StorageError::NotFound {
+            entity: "quant_market_linkage",
+            id: content_hash.to_string(),
+        })?;
+    for binding in source_bindings {
+        quant_market_linkage_source::Entity::insert(quant_market_linkage_source::ActiveModel {
+            linkage_id: ActiveValue::Set(row.linkage_id.clone()),
+            role: ActiveValue::Set(binding.role),
+            source_id: ActiveValue::Set(binding.source_id),
+            instrument_key: ActiveValue::Set(binding.instrument_key),
+            binding_hash: ActiveValue::Set(binding.binding_hash),
+            available_at: ActiveValue::Set(binding.available_at),
+            created_at: ActiveValue::NotSet,
+        })
+        .on_conflict_do_nothing_on([
+            quant_market_linkage_source::Column::LinkageId,
+            quant_market_linkage_source::Column::Role,
+            quant_market_linkage_source::Column::SourceId,
+            quant_market_linkage_source::Column::InstrumentKey,
+        ])
+        .exec(txn)
+        .await
+        .map_err(StorageError::from)?;
+    }
+    Ok(row.into())
+}
+
+#[async_trait::async_trait]
+impl MarketLinkageRepository for PgMarketLinkageRepository {
+    async fn append(&self, linkage: NewMarketLinkage) -> Result<MarketLinkageInfo, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        // Idempotent append: a duplicate content hash is a resolver no-op, not
-        // an error — the ledger row for that outcome already exists.
-        quant_market_linkage::Entity::insert(linkage.into_active_model())
-            .on_conflict_do_nothing_on([quant_market_linkage::Column::ContentHash])
-            .exec(&txn)
-            .await
-            .map_err(StorageError::from)?;
-        let row = quant_market_linkage::Entity::find()
-            .filter(quant_market_linkage::Column::ContentHash.eq(content_hash.clone()))
-            .one(&txn)
-            .await
-            .map_err(StorageError::from)?
-            .ok_or(StorageError::NotFound {
-                entity: "quant_market_linkage",
-                id: content_hash.to_string(),
-            })?;
-        for binding in source_bindings {
-            quant_market_linkage_source::Entity::insert(quant_market_linkage_source::ActiveModel {
-                linkage_id: ActiveValue::Set(row.linkage_id.clone()),
-                role: ActiveValue::Set(binding.role),
-                source_id: ActiveValue::Set(binding.source_id),
-                instrument_key: ActiveValue::Set(binding.instrument_key),
-                binding_hash: ActiveValue::Set(binding.binding_hash),
-                available_at: ActiveValue::Set(binding.available_at),
-                created_at: ActiveValue::NotSet,
-            })
-            .on_conflict_do_nothing_on([
-                quant_market_linkage_source::Column::LinkageId,
-                quant_market_linkage_source::Column::Role,
-                quant_market_linkage_source::Column::SourceId,
-                quant_market_linkage_source::Column::InstrumentKey,
-            ])
-            .exec(&txn)
-            .await
-            .map_err(StorageError::from)?;
+        let row = append_in_transaction(&txn, linkage).await?;
+        txn.commit().await.map_err(StorageError::from)?;
+        Ok(row)
+    }
+
+    async fn append_batch(
+        &self,
+        linkages: Vec<NewMarketLinkage>,
+    ) -> Result<Vec<MarketLinkageInfo>, StorageError> {
+        let txn = self.db.begin().await.map_err(StorageError::from)?;
+        let mut rows = Vec::with_capacity(linkages.len());
+        for linkage in linkages {
+            rows.push(append_in_transaction(&txn, linkage).await?);
         }
         txn.commit().await.map_err(StorageError::from)?;
-        Ok(row.into())
+        Ok(rows)
     }
 
     async fn valid_at(

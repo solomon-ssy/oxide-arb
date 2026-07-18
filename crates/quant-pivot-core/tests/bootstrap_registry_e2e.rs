@@ -52,7 +52,7 @@ async fn model_spec_service_authors_draft_spec() {
                 name: "buy-weighted-baseline".to_owned(),
                 model_family: ModelFamily::WeightedFactor,
                 prediction_horizon_secs: 86_400,
-                feature_schema_version: SchemaVersion::new(6),
+                feature_schema_version: SchemaVersion::new(7),
                 label_schema_version: SchemaVersion::FIRST,
                 spec_json: serde_json::json!({ "notes": "day-1 cold-start ranker" }),
                 input_contract: ModelInputContract::single_required("book.mid"),

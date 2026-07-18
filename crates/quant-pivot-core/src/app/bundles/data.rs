@@ -25,6 +25,7 @@ use quant_pivot_api::{
     gamma::GammaClient,
     ws::{ClobWsManager, WsSessionInvalidationHook, WsShardHealthPort},
 };
+use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     config::DeployConfig, domain::CoreEventPublisher, runtime_config::RuntimeConfig,
 };
@@ -75,9 +76,27 @@ pub struct DataBundle {
     pub status_nudge: SystemStatusNudge,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CatalogSyncComposition {
+    Runtime,
+    MetadataOnly,
+}
+
 impl DataBundle {
     /// Wire the full Polymarket ingest stack from deploy config and infra handles.
-    pub fn assemble(deps: &DataBundleDeps<'_>) -> Self {
+    pub fn assemble(deps: &DataBundleDeps<'_>) -> QuantResult<Self> {
+        Self::assemble_with_catalog_sync(deps, CatalogSyncComposition::Runtime)
+    }
+
+    /// Wire authoritative catalog/linkage services without starting CLOB book subscriptions.
+    pub(crate) fn assemble_metadata_only(deps: &DataBundleDeps<'_>) -> QuantResult<Self> {
+        Self::assemble_with_catalog_sync(deps, CatalogSyncComposition::MetadataOnly)
+    }
+
+    fn assemble_with_catalog_sync(
+        deps: &DataBundleDeps<'_>,
+        catalog_sync: CatalogSyncComposition,
+    ) -> QuantResult<Self> {
         let invalidation_metrics = Arc::clone(deps.metrics);
         let on_session_invalidated: WsSessionInvalidationHook = Arc::new(move |n| {
             invalidation_metrics
@@ -122,7 +141,8 @@ impl DataBundle {
                 .clone()
                 .into_iter()
                 .collect(),
-        ));
+            &deps.deploy.domain_sources.weather_vertical_bindings,
+        )?);
         let status_nudge = SystemStatusNudge::default();
         let (gamma_service, ws_subscription) = assemble_gamma_service(GammaServiceAssembly {
             deps,
@@ -136,6 +156,7 @@ impl DataBundle {
             catalog: &catalog,
             linkage_resolver: &linkage_resolver,
             status_nudge: status_nudge.clone(),
+            catalog_sync,
         });
 
         let data_quality = Arc::new(BookDataQualityService::new(
@@ -157,7 +178,7 @@ impl DataBundle {
             status_nudge: status_nudge.clone(),
         });
 
-        Self {
+        Ok(Self {
             book_store,
             market_registry,
             market_cache,
@@ -174,7 +195,7 @@ impl DataBundle {
             data_quality,
             pit_source,
             status_nudge,
-        }
+        })
     }
 }
 
@@ -197,6 +218,7 @@ struct GammaServiceAssembly<'a> {
     catalog: &'a Arc<CatalogReadiness>,
     linkage_resolver: &'a Arc<LinkageResolverService>,
     status_nudge: SystemStatusNudge,
+    catalog_sync: CatalogSyncComposition,
 }
 
 fn assemble_gamma_service(
@@ -214,6 +236,7 @@ fn assemble_gamma_service(
         catalog,
         linkage_resolver,
         status_nudge,
+        catalog_sync,
     } = inputs;
     let ws_subscription = Arc::new(WsSubscriptionCoordinator::new(
         Arc::clone(ws_manager),
@@ -238,7 +261,10 @@ fn assemble_gamma_service(
         cache: Arc::clone(&deps.infra.cache),
         metrics: Arc::clone(deps.metrics),
         catalog: Arc::clone(catalog),
-        ws_subscription: Some(Arc::clone(&ws_subscription)),
+        ws_subscription: match catalog_sync {
+            CatalogSyncComposition::Runtime => Some(Arc::clone(&ws_subscription)),
+            CatalogSyncComposition::MetadataOnly => None,
+        },
         events: deps.events.clone(),
         status_nudge,
         subscription_window_hours: deps

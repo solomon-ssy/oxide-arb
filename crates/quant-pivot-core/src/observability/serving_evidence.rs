@@ -507,7 +507,7 @@ mod tests {
             per_source_cutoffs_json: "{}".to_owned(),
             market_id: market_id.clone(),
             token_id: None,
-            feature_schema_version: 6,
+            feature_schema_version: 7,
             feature_schema_hash: "schema".to_owned(),
             feature_hash: "feature".to_owned(),
             decision_capture_hash: "capture".to_owned(),

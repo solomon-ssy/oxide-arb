@@ -461,7 +461,9 @@ async fn load_domain_linkages(
                 window.oracle_instruments.insert(oracle_key);
             }
             if let MarketSubject::Weather(subject) = &binding.subject {
-                window.weather_stations.insert(subject.station.clone());
+                window
+                    .weather_stations
+                    .insert(subject.decision_group.station.clone());
                 window.weather_valid_to =
                     window.weather_valid_to.max(weather_local_day_end(subject)?);
             }
@@ -587,7 +589,7 @@ async fn load_weather_facts(
         .checked_add(1)
         .ok_or_else(|| QuantError::config("Weather observation cutoff overflowed i64"))?;
     let rows = fact_read
-        .weather_observation_reports_between(
+        .weather_observation_facts_between(
             stations.clone(),
             from.timestamp_millis(),
             observation_to,
@@ -603,23 +605,21 @@ async fn load_weather_facts(
                 detail: "Weather observation contains an invalid persisted value".to_owned(),
             }
         })?;
-        observations
-            .entry(fact.station.clone())
-            .or_default()
-            .push(fact);
+        let station = fact.station().ok_or_else(|| ResearchError::PitResolution {
+            detail: format!(
+                "Weather observation subject `{}` is not an ICAO station",
+                fact.subject_key
+            ),
+        })?;
+        observations.entry(station).or_default().push(fact);
     }
     for series in observations.values_mut() {
         series.sort_by(|left, right| {
-            (
-                left.observation_time,
-                left.revision,
-                left.report_hash.as_str(),
-            )
-                .cmp(&(
-                    right.observation_time,
-                    right.revision,
-                    right.report_hash.as_str(),
-                ))
+            (left.observed_at, left.revision, left.report_hash.as_str()).cmp(&(
+                right.observed_at,
+                right.revision,
+                right.report_hash.as_str(),
+            ))
         });
     }
     let forecast_to = valid_to
@@ -627,7 +627,7 @@ async fn load_weather_facts(
         .checked_add(1)
         .ok_or_else(|| QuantError::config("GEFS valid-time cutoff overflowed i64"))?;
     let rows = fact_read
-        .weather_forecast_points_between(
+        .weather_forecast_facts_between(
             stations,
             from.timestamp_millis(),
             forecast_to,
@@ -643,10 +643,13 @@ async fn load_weather_facts(
                 detail: "GEFS point contains an invalid persisted value".to_owned(),
             }
         })?;
-        forecasts
-            .entry(fact.station.clone())
-            .or_default()
-            .push(fact);
+        let station = fact.station().ok_or_else(|| ResearchError::PitResolution {
+            detail: format!(
+                "Weather forecast subject `{}` is not an ICAO station",
+                fact.subject_key
+            ),
+        })?;
+        forecasts.entry(station).or_default().push(fact);
     }
     for series in forecasts.values_mut() {
         series.sort_by_key(|point| {
@@ -662,10 +665,15 @@ async fn load_weather_facts(
 }
 
 fn weather_local_day_end(subject: &WeatherSubject) -> QuantResult<DateTime<Utc>> {
-    let timezone = subject.timezone.parse::<Tz>().map_err(|error| {
-        QuantError::config(format!("invalid Weather linkage timezone: {error}"))
-    })?;
+    let timezone = subject
+        .decision_group
+        .timezone
+        .parse::<Tz>()
+        .map_err(|error| {
+            QuantError::config(format!("invalid Weather linkage timezone: {error}"))
+        })?;
     let next_date = subject
+        .decision_group
         .local_date
         .succ_opt()
         .ok_or_else(|| QuantError::config("Weather local date overflow"))?;

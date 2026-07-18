@@ -8,11 +8,16 @@ use quant_pivot_models::{
     config::GhcnhSourceConfig,
     domain::{WeatherObservationReport, WeatherObservationReportKind},
     hashing::CanonicalDigest,
-    types::{ContentHash, DomainSourceId, IcaoStation, TemperatureCelsius},
+    types::{
+        ContentHash, DomainInstrumentKey, DomainMeasurementUnit, DomainSourceId, IcaoStation,
+        WeatherVariable,
+    },
 };
 use rust_decimal::Decimal;
 
-use crate::infra::{http::get_text_with_retry, retry::RetryPolicy};
+use crate::infra::{http::get_optional_bounded_bytes_with_retry, retry::RetryPolicy};
+
+const MAX_YEAR_FILE_BYTES: usize = 64 * 1024 * 1024;
 
 const REQUIRED_COLUMNS: [&str; 6] = [
     "STATION",
@@ -63,17 +68,26 @@ impl GhcnhSource {
         ghcnh_station_id: &str,
         year: i32,
         available_at: DateTime<Utc>,
-    ) -> QuantResult<GhcnhYear> {
+    ) -> QuantResult<Option<GhcnhYear>> {
         validate_station_id(ghcnh_station_id)?;
         let url = format!(
             "{base}/{year}/psv/GHCNh_{station_id}_{year}.psv",
             base = self.config.base_url.trim_end_matches('/'),
             station_id = ghcnh_station_id,
         );
-        let body = get_text_with_retry(&self.http, &self.retry_policy, &url)
-            .await
-            .map_err(QuantError::from)?;
-        parse_year_file(station, ghcnh_station_id, year, available_at, &body)
+        let Some(body) = get_optional_bounded_bytes_with_retry(
+            &self.http,
+            &self.retry_policy,
+            &url,
+            "NOAA GHCNh yearly station file",
+            MAX_YEAR_FILE_BYTES,
+        )
+        .await
+        .map_err(QuantError::from)?
+        else {
+            return Ok(None);
+        };
+        parse_year_file(station, ghcnh_station_id, year, available_at, &body).map(Some)
     }
 }
 
@@ -82,13 +96,13 @@ fn parse_year_file(
     ghcnh_station_id: &str,
     year: i32,
     available_at: DateTime<Utc>,
-    body: &str,
+    body: &[u8],
 ) -> QuantResult<GhcnhYear> {
-    let file_hash = ContentHash::parse(CanonicalDigest::prefixed_bytes(body.as_bytes()))?;
+    let file_hash = ContentHash::parse(CanonicalDigest::prefixed_bytes(body))?;
     let mut reader = csv::ReaderBuilder::new()
         .delimiter(b'|')
         .flexible(true)
-        .from_reader(body.as_bytes());
+        .from_reader(body);
     let headers = reader
         .headers()
         .map_err(|error| parse_error(format!("invalid header: {error}")))?
@@ -125,11 +139,16 @@ fn parse_year_file(
             ContentHash::parse(CanonicalDigest::prefixed_bytes(raw_report.as_bytes()))?;
         reports.push(WeatherObservationReport {
             source_id: DomainSourceId::ghcnh(),
-            station: station.clone(),
+            instrument_key: DomainInstrumentKey::ghcnh(station),
+            subject_key: station.to_string(),
             report_kind: WeatherObservationReportKind::HistoricalGhcnh,
-            temperature: TemperatureCelsius::new(temperature),
-            precision_celsius: Decimal::new(1, temperature.scale()),
-            observation_time: observed_at,
+            variable: WeatherVariable::Temperature,
+            value: temperature,
+            unit: DomainMeasurementUnit::Celsius,
+            precision: Decimal::new(1, temperature.scale()),
+            observed_at,
+            valid_from: None,
+            valid_to: None,
             published_at: available_at,
             available_at,
             report_hash,
@@ -137,8 +156,8 @@ fn parse_year_file(
         });
     }
     reports.sort_by(|left, right| {
-        left.observation_time
-            .cmp(&right.observation_time)
+        left.observed_at
+            .cmp(&right.observed_at)
             .then_with(|| left.report_hash.as_str().cmp(right.report_hash.as_str()))
     });
     Ok(GhcnhYear { file_hash, reports })
@@ -175,11 +194,12 @@ fn validate_station_id(value: &str) -> QuantResult<()> {
     let valid = value.len() == 11
         && value
             .bytes()
-            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit());
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'-');
     if !valid {
-        return Err(
-            parse_error("GHCNh station id must be 11 uppercase ASCII letters/digits").into(),
-        );
+        return Err(parse_error(
+            "GHCNh station id must be 11 uppercase ASCII letters/digits/hyphen",
+        )
+        .into());
     }
     Ok(())
 }
@@ -240,8 +260,35 @@ mod tests {
                 Utc.with_ymd_and_hms(2026, 7, 13, 0, 0, 0).unwrap(),
             )
             .await
-            .expect("year");
+            .expect("year request")
+            .expect("published year");
         assert_eq!(year.reports.len(), 1);
-        assert_eq!(year.reports[0].temperature.value(), dec!(25.6));
+        assert_eq!(year.reports[0].value, dec!(25.6));
+    }
+
+    #[tokio::test]
+    async fn represents_unpublished_year_partition_without_fabricating_empty_data() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/2026/psv/GHCNh_USW00014732_2026.psv"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        let source = GhcnhSource::connect(GhcnhSourceConfig {
+            enabled: true,
+            base_url: server.uri(),
+            ..GhcnhSourceConfig::default()
+        })
+        .expect("source");
+        let year = source
+            .yearly_station(
+                &IcaoStation::parse("KLGA").expect("station"),
+                "USW00014732",
+                2026,
+                Utc.with_ymd_and_hms(2026, 7, 13, 0, 0, 0).unwrap(),
+            )
+            .await
+            .expect("year request");
+        assert!(year.is_none());
     }
 }

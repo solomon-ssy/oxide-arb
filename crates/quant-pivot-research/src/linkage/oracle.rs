@@ -12,13 +12,14 @@
 //! default to the ruleset's Chainlink feed when the description didn't
 //! ground one.
 
+use std::{collections::BTreeSet, sync::LazyLock};
+
 use quant_pivot_models::{
     domain::{GroundingField, GroundingKind, GroundingSpan, ResolutionOracle},
     enums::domain::KlineInterval,
     types::ChainlinkFeedKey,
 };
 use regex::Regex;
-use std::sync::LazyLock;
 
 use crate::linkage::ruleset::AssetRule;
 
@@ -27,11 +28,22 @@ static CHAINLINK_STREAM: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"data\.chain\.link/streams/([a-z0-9]+-[a-z0-9]+)").expect("static regex")
 });
 
-/// A Binance 1-minute candle citation in the rules text.
-static BINANCE_CANDLE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)Binance[^.]{0,120}?(?:1[- ]minute|one[- ]minute)[^.]{0,40}?candle")
-        .expect("static regex")
+/// Literal venue anchor around which pair/interval/candle evidence is bound.
+static BINANCE_WORD: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\bbinance\b").expect("static regex"));
+
+static BINANCE_PAIR: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\b([a-z0-9]+)\s*/?\s*usdt\b").expect("static regex"));
+
+static BINANCE_INTERVAL: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)\b(1\s*(?:-| )?\s*minute|one[- ]minute|1m|1\s*(?:-| )?\s*hour|one[- ]hour|1h)\b",
+    )
+    .expect("static regex")
 });
+
+static CANDLE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\b(?:candle|candlestick)\b").expect("static regex"));
 
 /// Extract the settlement oracle from the rules text with its literal anchor.
 ///
@@ -61,23 +73,91 @@ pub fn extract_oracle(
             span(full.start(), full.end()),
         ));
     }
-    if let Some(matched) = BINANCE_CANDLE.find(description) {
+    if let Some((interval, start, end)) = extract_binance_oracle(rule, description) {
         return Some((
             ResolutionOracle::BinanceKline {
+                market: rule.binance_market,
                 symbol: rule.symbol(),
-                interval: KlineInterval::OneMinute,
+                interval,
             },
-            span(matched.start(), matched.end()),
+            span(start, end),
         ));
     }
     None
+}
+
+/// Accept exactly one unambiguous Binance pair/interval settlement citation.
+fn extract_binance_oracle(
+    rule: &AssetRule,
+    description: &str,
+) -> Option<(KlineInterval, usize, usize)> {
+    let symbol = rule.symbol();
+    let mut candidate: Option<(KlineInterval, usize, usize)> = None;
+    for venue in BINANCE_WORD.find_iter(description) {
+        let mut window_start = venue.start().saturating_sub(500);
+        while !description.is_char_boundary(window_start) {
+            window_start += 1;
+        }
+        let mut window_end = (venue.end() + 500).min(description.len());
+        while !description.is_char_boundary(window_end) {
+            window_end -= 1;
+        }
+        let window = &description[window_start..window_end];
+        let Some(candle) = CANDLE.find(window) else {
+            continue;
+        };
+        let pairs = BINANCE_PAIR
+            .captures_iter(window)
+            .filter_map(|captures| captures.get(1))
+            .map(|asset| format!("{}USDT", asset.as_str().to_ascii_uppercase()))
+            .collect::<BTreeSet<_>>();
+        if pairs.len() != 1 || !pairs.contains(symbol.as_str()) {
+            return None;
+        }
+        let intervals = BINANCE_INTERVAL
+            .captures_iter(window)
+            .filter_map(|captures| captures.get(1))
+            .filter_map(|interval| parse_interval(interval.as_str()))
+            .collect::<BTreeSet<_>>();
+        if intervals.len() != 1 {
+            return None;
+        }
+        let interval = *intervals.first()?;
+        let pair = BINANCE_PAIR.find(window)?;
+        let interval_span = BINANCE_INTERVAL.find(window)?;
+        let venue_start = venue.start() - window_start;
+        let venue_end = venue.end() - window_start;
+        let next = (
+            interval,
+            window_start + venue_start.min(pair.start()).min(interval_span.start()),
+            window_start
+                + venue_end
+                    .max(pair.end())
+                    .max(interval_span.end())
+                    .max(candle.end()),
+        );
+        if candidate.is_some_and(|current| current.0 != interval) {
+            return None;
+        }
+        candidate.get_or_insert(next);
+    }
+    candidate
+}
+
+fn parse_interval(value: &str) -> Option<KlineInterval> {
+    let normalized = value.to_ascii_lowercase().replace([' ', '-'], "");
+    match normalized.as_str() {
+        "1minute" | "oneminute" | "1m" => Some(KlineInterval::OneMinute),
+        "1hour" | "onehour" | "1h" => Some(KlineInterval::OneHour),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::extract_oracle;
     use crate::linkage::ruleset::rule_for_alias;
-    use quant_pivot_models::domain::ResolutionOracle;
+    use quant_pivot_models::{domain::ResolutionOracle, enums::domain::KlineInterval};
 
     #[test]
     fn no_description_grounds_no_oracle() {
@@ -115,5 +195,46 @@ mod tests {
         )
         .expect("oracle");
         assert!(matches!(oracle, ResolutionOracle::BinanceKline { .. }));
+    }
+
+    #[test]
+    fn binance_hourly_candle_freezes_pair_and_interval() {
+        let rule = rule_for_alias("btc").expect("rule");
+        let (oracle, span) = extract_oracle(
+            rule,
+            Some(
+                "The close price is read from the BTC/USDT 1 hour candle. The resolution source \
+                 is information from Binance, specifically the BTC/USDT pair.",
+            ),
+        )
+        .expect("oracle");
+        assert!(matches!(
+            oracle,
+            ResolutionOracle::BinanceKline {
+                interval: KlineInterval::OneHour,
+                ..
+            }
+        ));
+        assert!(span.text.contains("BTC/USDT 1 hour candle"));
+        assert!(span.text.contains("Binance"));
+    }
+
+    #[test]
+    fn binance_citation_rejects_wrong_pair_or_conflicting_interval() {
+        let rule = rule_for_alias("btc").expect("rule");
+        assert!(
+            extract_oracle(
+                rule,
+                Some("Resolution uses the Binance ETH/USDT 1 hour candle close."),
+            )
+            .is_none()
+        );
+        assert!(
+            extract_oracle(
+                rule,
+                Some("Resolution uses the Binance BTC/USDT 1 minute and 1 hour candle close."),
+            )
+            .is_none()
+        );
     }
 }

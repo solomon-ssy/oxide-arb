@@ -17,7 +17,7 @@ use quant_pivot_models::{
         ConditionUnavailableReason, ContentHash, CryptoSubjectPredicateEntered,
         EntryConditionArtifactV1, EntryConditionBinding, EntryConditionSourceBinding,
         EntryConditionV1, FactorCondition, MarketEventCondition, MarketId, ModelVersionId, TokenId,
-        Usd,
+        Usd, WeatherTemperatureStatistic,
     },
 };
 use quant_pivot_repository::traits::{
@@ -31,8 +31,8 @@ use uuid::Uuid;
 
 use super::{
     CryptoPriceInput, CryptoPriceReportInput, EntryConditionEvaluation, EntryConditionInputSet,
-    EntryConditionStateDecision, ExecutablePriceInput, FactorSnapshotInput, WeatherDailyHighInput,
-    decide_entry_condition_state, evaluate_entry_condition,
+    EntryConditionStateDecision, ExecutablePriceInput, FactorSnapshotInput,
+    WeatherDailyTemperatureInput, decide_entry_condition_state, evaluate_entry_condition,
 };
 use crate::{ingest::book_store::BookStore, runtime_config::RuntimeConfigStore};
 
@@ -388,7 +388,7 @@ impl LiveEntryConditionInputProvider {
     async fn load_weather(
         &self,
         required: Vec<RequiredWeather>,
-    ) -> QuantResult<Vec<WeatherDailyHighInput>> {
+    ) -> QuantResult<Vec<WeatherDailyTemperatureInput>> {
         let mut inputs = Vec::with_capacity(required.len());
         for condition in required {
             let Some(projection) = self
@@ -398,6 +398,7 @@ impl LiveEntryConditionInputProvider {
                     &condition.source.instrument_key,
                     &condition.station,
                     condition.local_date,
+                    condition.temperature_statistic,
                 )
                 .await?
             else {
@@ -409,7 +410,7 @@ impl LiveEntryConditionInputProvider {
             ) else {
                 continue;
             };
-            inputs.push(WeatherDailyHighInput {
+            inputs.push(WeatherDailyTemperatureInput {
                 source: EntryConditionSourceBinding {
                     source_id: projection.source_id,
                     instrument_key: projection.instrument_key,
@@ -417,7 +418,8 @@ impl LiveEntryConditionInputProvider {
                 },
                 station: projection.station,
                 local_date: projection.local_date,
-                current_high: projection.current_high,
+                temperature_statistic: projection.temperature_statistic,
+                current_extreme: projection.current_extreme,
                 observation_time: projection.last_observation_time,
                 available_at: projection.available_at,
                 revision,
@@ -496,6 +498,7 @@ struct RequiredWeather {
     source: EntryConditionSourceBinding,
     station: String,
     local_date: chrono::NaiveDate,
+    temperature_statistic: WeatherTemperatureStatistic,
 }
 
 impl RequiredInputs {
@@ -512,23 +515,25 @@ impl RequiredInputs {
                 MarketEventCondition::CryptoSubjectPredicateEntered(condition) => {
                     push_unique(&mut self.crypto, condition.clone());
                 }
-                MarketEventCondition::WeatherDailyHighEnteredBand(condition) => {
+                MarketEventCondition::WeatherDailyTemperatureEnteredBand(condition) => {
                     push_unique(
                         &mut self.weather,
                         RequiredWeather {
                             source: condition.source.clone(),
                             station: condition.station.clone(),
                             local_date: condition.local_date,
+                            temperature_statistic: condition.temperature_statistic,
                         },
                     );
                 }
-                MarketEventCondition::WeatherDailyHighExceededBandUpper(condition) => {
+                MarketEventCondition::WeatherDailyTemperatureCrossedTerminalBound(condition) => {
                     push_unique(
                         &mut self.weather,
                         RequiredWeather {
                             source: condition.source.clone(),
                             station: condition.station.clone(),
                             local_date: condition.local_date,
+                            temperature_statistic: condition.temperature_statistic,
                         },
                     );
                 }
@@ -539,6 +544,7 @@ impl RequiredInputs {
                             source: condition.source.clone(),
                             station: condition.station.clone(),
                             local_date: condition.local_date,
+                            temperature_statistic: condition.temperature_statistic,
                         },
                     );
                 }

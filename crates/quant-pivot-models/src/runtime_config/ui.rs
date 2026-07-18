@@ -1,4 +1,4 @@
-//! Runtime-config v13 UI metadata.
+//! Runtime-config v18 UI metadata.
 //!
 //! Two artifacts, one authored source of truth:
 //!
@@ -494,6 +494,7 @@ fn build_fields() -> Vec<FieldUiEntry> {
         research_training_fields(),
         research_validation_fields(),
         research_policy_validation_fields(),
+        feedback_fields(),
         training_fields(),
         report_fields(),
         portfolio_fields(),
@@ -1655,6 +1656,67 @@ fn training_fields() -> Vec<FieldUiEntry> {
 }
 
 // ---------------------------------------------------------------------------
+// Field dictionary — Feedback cycles
+// ---------------------------------------------------------------------------
+
+fn feedback_fields() -> Vec<FieldUiEntry> {
+    vec![
+        boolean(
+            "feedback.enabled",
+            "Enable feedback cycles",
+            "启用反馈周期",
+            "Allows scheduled and label-maturity triggers to enqueue durable feedback cycles. Manual governed triggers remain separately authorized.",
+            "允许定时和标签成熟触发器创建持久化反馈周期；手工触发仍需单独治理授权。",
+        ),
+        secs(
+            "feedback.cadence_secs",
+            "Schedule cadence",
+            "调度周期",
+            "Operational interval between scheduled trigger checks. This is not an evaluation-window or statistical threshold.",
+            "定时触发检查之间的运行间隔；它不是评估窗口或统计门槛。",
+        ),
+        integer(
+            "feedback.max_concurrency",
+            "Maximum concurrency",
+            "最大并发数",
+            "Hard process-level bound on concurrently executing feedback cycles.",
+            "同一进程内同时执行反馈周期的硬上限。",
+        ),
+        secs(
+            "feedback.run_timeout_secs",
+            "Run timeout",
+            "运行超时",
+            "Hard wall-clock deadline for a complete feedback cycle, including evidence persistence.",
+            "单次完整反馈周期（含证据持久化）的墙钟时间硬上限。",
+        ),
+        secs(
+            "feedback.retry_backoff_secs",
+            "Retry backoff",
+            "重试退避",
+            "Initial delay before retrying a retryable stage failure.",
+            "可重试阶段失败后的首次重试等待时间。",
+        ),
+        boolean(
+            "feedback.auto_publish_enabled",
+            "Enable atomic auto-publication",
+            "启用原子自动发布",
+            "Allows a passing cycle to atomically publish only its model and factor bundle. It cannot change trade policy, runtime mode, execution authority, or capital allocation.",
+            "允许通过门禁的周期仅原子发布模型与 factor bundle；不能修改 Trade Policy、运行模式、执行权限或资金分配。",
+        )
+        .critical(),
+        f(
+            "feedback.auto_publish_categories",
+            "Auto-publication categories",
+            "自动发布分类",
+            "Closed category allowlist for atomic model + factor publication. Runtime v18 accepts only Crypto and Weather.",
+            "模型与 factor 原子发布的封闭分类白名单；Runtime v18 仅接受 Crypto 与 Weather。",
+        )
+        .widget(FieldWidget::EnumSet)
+        .critical(),
+    ]
+}
+
+// ---------------------------------------------------------------------------
 // Field dictionary — Reports
 // ---------------------------------------------------------------------------
 
@@ -2054,8 +2116,8 @@ fn execution_semi_auto_fields() -> Vec<FieldUiEntry> {
             "execution.semi_auto.canary.allowed_cash_budget_tiers_usd",
             "Canary allowed cash-budget tiers",
             "Canary 允许的现金预算 tiers",
-            "Exact validated maximum total cash-spend tiers. Runtime v17 permits only $25.",
-            "精确验证的最大总现金支出 tiers。Runtime v17 仅允许 $25。",
+            "Exact validated maximum total cash-spend tiers. Runtime v18 permits only $25.",
+            "精确验证的最大总现金支出 tiers。Runtime v18 仅允许 $25。",
         )
         .widget(FieldWidget::StringList)
         .visible_when(enabled("execution.semi_auto.canary.enabled")),
@@ -2063,16 +2125,16 @@ fn execution_semi_auto_fields() -> Vec<FieldUiEntry> {
             "execution.semi_auto.canary.max_open_intents",
             "Canary maximum open intents",
             "Canary 最大开放 intents",
-            "Transactional cap on capital-holding or in-flight intents. Runtime v17 fixes this at one.",
-            "持有资金或在途 intent 的事务级上限。Runtime v17 固定为一个。",
+            "Transactional cap on capital-holding or in-flight intents. Runtime v18 fixes this at one.",
+            "持有资金或在途 intent 的事务级上限。Runtime v18 固定为一个。",
         )
         .visible_when(enabled("execution.semi_auto.canary.enabled")),
         usd(
             "execution.semi_auto.canary.max_total_cash_per_report",
             "Canary total cash cap per report",
             "Canary 单 report 总现金上限",
-            "Transactional cumulative maximum cash spend across intents from one report. Runtime v17 fixes this at $25.",
-            "同一 report 所创建 intents 的事务级累计最大现金支出。Runtime v17 固定为 $25。",
+            "Transactional cumulative maximum cash spend across intents from one report. Runtime v18 fixes this at $25.",
+            "同一 report 所创建 intents 的事务级累计最大现金支出。Runtime v18 固定为 $25。",
         )
         .critical()
         .visible_when(enabled("execution.semi_auto.canary.enabled")),
@@ -2513,6 +2575,7 @@ fn build_tree() -> Vec<SchemaNode> {
         model_section(),
         quality_gate_section(),
         research_section(),
+        feedback_section(),
         training_section(),
         reports_section(),
         portfolio_section(),
@@ -2820,8 +2883,8 @@ fn research_section() -> SchemaNode {
                     "lucide:shield-ellipsis",
                     ls("Executable-policy limits", "可执行 Policy 运行上限"),
                     ls(
-                        "Runtime v17 operational limits. Methodology is versioned code; publication gates come only from the immutable research profile.",
-                        "Runtime v17 运行上限。方法由代码版本化；发布门槛仅来自不可变 research profile。",
+                        "Runtime v18 operational limits. Methodology is versioned code; publication gates come only from the immutable research profile.",
+                        "Runtime v18 运行上限。方法由代码版本化；发布门槛仅来自不可变 research profile。",
                     ),
                 ),
                 fields_in_order(&[
@@ -2830,6 +2893,30 @@ fn research_section() -> SchemaNode {
                 ]),
             ),
         ],
+    )
+}
+
+fn feedback_section() -> SchemaNode {
+    section(
+        section_spec(
+            "feedback",
+            56,
+            "lucide:refresh-cw",
+            ls("Feedback & retraining", "反馈与再训练"),
+            ls(
+                "Operational scheduling and resource bounds for durable attribution-feedback cycles.",
+                "持久化 attribution 反馈周期的运行调度与资源边界。",
+            ),
+        ),
+        fields_in_order(&[
+            "feedback.enabled",
+            "feedback.cadence_secs",
+            "feedback.max_concurrency",
+            "feedback.run_timeout_secs",
+            "feedback.retry_backoff_secs",
+            "feedback.auto_publish_enabled",
+            "feedback.auto_publish_categories",
+        ]),
     )
 }
 

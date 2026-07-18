@@ -1,18 +1,19 @@
 //! Source facts and append-only derived domain-event envelopes.
 
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
+use rust_decimal::Decimal;
 use sea_orm::FromJsonQueryResult;
 use serde::{Deserialize, Serialize};
 
 use crate::{
     clickhouse::{
-        ChDecimal64, ChSchemaVersion, CryptoPriceReportRow, WeatherForecastPointRow,
-        WeatherObservationReportRow,
+        ChDecimal64, ChSchemaVersion, CryptoPriceReportRow, WeatherForecastFactRow,
+        WeatherObservationFactRow,
     },
     hashing::CanonicalDigest,
     types::{
-        ContentHash, DomainEventId, DomainInstrumentKey, DomainSourceId, IcaoStation, Shares,
-        TemperatureCelsius, Usd,
+        ContentHash, DomainEventId, DomainInstrumentKey, DomainMeasurementUnit, DomainSourceId,
+        IcaoStation, Shares, TemperatureCelsius, Usd, WeatherTemperatureStatistic, WeatherVariable,
     },
 };
 
@@ -108,19 +109,49 @@ pub enum WeatherObservationReportKind {
     /// Historical `GHCNh` calibration fact. It is never projected as live
     /// `AviationWeather` state.
     HistoricalGhcnh,
+    /// HKO rolling rainfall window from the public current-weather feed.
+    HkoRainfall,
+    /// HKO finalized daily maximum/minimum temperature from the climate API.
+    HkoDailyTemperature,
+    /// Preliminary `AirNow` reporting-area PM2.5 observation or prior-day maximum.
+    AirNowPm25AreaObservation,
+    /// Preliminary `AirNow` exact monitoring-site PM2.5 AQI observation.
+    AirNowPm25SiteObservation,
+    /// Preliminary, realtime SPC local storm-report count.
+    SpcPreliminaryTornado,
+    /// Post-storm NCEI Storm Events tornado count.
+    NceiFinalTornado,
+    /// NHC realtime tropical-cyclone advisory intensity.
+    NhcAdvisory,
+    /// NHC post-analysis HURDAT2 best-track intensity.
+    NhcBestTrack,
+    /// NASA GISTEMP v4 monthly global land-ocean anomaly.
+    NasaGistemp,
+    /// NOAA/NSIDC Sea Ice Index v4 daily hemisphere extent.
+    NsidcSeaIce,
+    /// NOAA/NWS API quality-controlled station wind observation.
+    NwsStation,
 }
 
-/// Immutable `AviationWeather` METAR/SPECI/COR fact. Station-local date and
-/// revision/supersession are assigned only after applying the frozen station
-/// profile in the projection transaction.
+/// Immutable long-form Weather observation.
+///
+/// Station/site/region identity is carried by `subject_key`; the source-native
+/// instrument remains explicit. Local date and revision/supersession are
+/// assigned only after applying the frozen capability binding in the
+/// projection transaction.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WeatherObservationReport {
     pub source_id: DomainSourceId,
-    pub station: IcaoStation,
+    pub instrument_key: DomainInstrumentKey,
+    pub subject_key: String,
     pub report_kind: WeatherObservationReportKind,
-    pub temperature: TemperatureCelsius,
-    pub precision_celsius: rust_decimal::Decimal,
-    pub observation_time: DateTime<Utc>,
+    pub variable: WeatherVariable,
+    pub value: Decimal,
+    pub unit: DomainMeasurementUnit,
+    pub precision: Decimal,
+    pub observed_at: DateTime<Utc>,
+    pub valid_from: Option<DateTime<Utc>>,
+    pub valid_to: Option<DateTime<Utc>>,
     pub published_at: DateTime<Utc>,
     pub available_at: DateTime<Utc>,
     pub report_hash: ContentHash,
@@ -134,15 +165,20 @@ impl WeatherObservationReport {
         local_date: NaiveDate,
         revision: u32,
         supersedes_report_hash: Option<ContentHash>,
-    ) -> WeatherObservationReportRow {
-        WeatherObservationReportRow {
+    ) -> WeatherObservationFactRow {
+        WeatherObservationFactRow {
             source_id: self.source_id.clone(),
-            station: self.station.to_string(),
-            local_date: local_date.to_string(),
+            instrument_key: self.instrument_key.clone(),
+            subject_key: self.subject_key.clone(),
+            local_date: local_date.into(),
             report_kind: self.report_kind.as_str().to_owned(),
-            temperature_celsius: ChDecimal64::from(self.temperature.value()),
-            precision_celsius: ChDecimal64::from(self.precision_celsius),
-            observation_time: self.observation_time.timestamp_millis(),
+            variable: self.variable.as_str().to_owned(),
+            value: ChDecimal64::from(self.value),
+            unit: self.unit.as_str().to_owned(),
+            precision: ChDecimal64::from(self.precision),
+            observed_at: self.observed_at.timestamp_millis(),
+            valid_from: self.valid_from.map(|value| value.timestamp_millis()),
+            valid_to: self.valid_to.map(|value| value.timestamp_millis()),
             published_at: self.published_at.timestamp_millis(),
             available_at: self.available_at.timestamp_millis(),
             revision,
@@ -162,6 +198,17 @@ impl WeatherObservationReportKind {
             Self::Speci => "speci",
             Self::Correction => "correction",
             Self::HistoricalGhcnh => "historical_ghcnh",
+            Self::HkoRainfall => "hko_rainfall",
+            Self::HkoDailyTemperature => "hko_daily_temperature",
+            Self::AirNowPm25AreaObservation => "airnow_pm25_area_observation",
+            Self::AirNowPm25SiteObservation => "airnow_pm25_site_observation",
+            Self::SpcPreliminaryTornado => "spc_preliminary_tornado",
+            Self::NceiFinalTornado => "ncei_final_tornado",
+            Self::NhcAdvisory => "nhc_advisory",
+            Self::NhcBestTrack => "nhc_best_track",
+            Self::NasaGistemp => "nasa_gistemp",
+            Self::NsidcSeaIce => "nsidc_sea_ice",
+            Self::NwsStation => "nws_station",
         }
     }
 
@@ -172,6 +219,17 @@ impl WeatherObservationReportKind {
             "speci" => Some(Self::Speci),
             "correction" => Some(Self::Correction),
             "historical_ghcnh" => Some(Self::HistoricalGhcnh),
+            "hko_rainfall" => Some(Self::HkoRainfall),
+            "hko_daily_temperature" => Some(Self::HkoDailyTemperature),
+            "airnow_pm25_area_observation" => Some(Self::AirNowPm25AreaObservation),
+            "airnow_pm25_site_observation" => Some(Self::AirNowPm25SiteObservation),
+            "spc_preliminary_tornado" => Some(Self::SpcPreliminaryTornado),
+            "ncei_final_tornado" => Some(Self::NceiFinalTornado),
+            "nhc_advisory" => Some(Self::NhcAdvisory),
+            "nhc_best_track" => Some(Self::NhcBestTrack),
+            "nasa_gistemp" => Some(Self::NasaGistemp),
+            "nsidc_sea_ice" => Some(Self::NsidcSeaIce),
+            "nws_station" => Some(Self::NwsStation),
             _ => None,
         }
     }
@@ -181,12 +239,17 @@ impl WeatherObservationReportKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WeatherObservationFact {
     pub source_id: DomainSourceId,
-    pub station: IcaoStation,
+    pub instrument_key: DomainInstrumentKey,
+    pub subject_key: String,
     pub local_date: NaiveDate,
     pub report_kind: WeatherObservationReportKind,
-    pub temperature: TemperatureCelsius,
-    pub precision_celsius: rust_decimal::Decimal,
-    pub observation_time: DateTime<Utc>,
+    pub variable: WeatherVariable,
+    pub value: Decimal,
+    pub unit: DomainMeasurementUnit,
+    pub precision: Decimal,
+    pub observed_at: DateTime<Utc>,
+    pub valid_from: Option<DateTime<Utc>>,
+    pub valid_to: Option<DateTime<Utc>>,
     pub published_at: DateTime<Utc>,
     pub available_at: DateTime<Utc>,
     pub revision: u32,
@@ -196,21 +259,38 @@ pub struct WeatherObservationFact {
 
 impl WeatherObservationFact {
     #[must_use]
-    pub fn from_clickhouse_row(row: WeatherObservationReportRow) -> Option<Self> {
+    pub fn from_clickhouse_row(row: WeatherObservationFactRow) -> Option<Self> {
         Some(Self {
             source_id: row.source_id,
-            station: IcaoStation::parse(row.station).ok()?,
-            local_date: row.local_date.parse().ok()?,
+            instrument_key: row.instrument_key,
+            subject_key: row.subject_key,
+            local_date: row.local_date.to_naive_date()?,
             report_kind: WeatherObservationReportKind::parse(&row.report_kind)?,
-            temperature: TemperatureCelsius::new(row.temperature_celsius.to_decimal()),
-            precision_celsius: row.precision_celsius.to_decimal(),
-            observation_time: Utc.timestamp_millis_opt(row.observation_time).single()?,
+            variable: WeatherVariable::parse(&row.variable)?,
+            value: row.value.to_decimal(),
+            unit: DomainMeasurementUnit::parse(&row.unit)?,
+            precision: row.precision.to_decimal(),
+            observed_at: Utc.timestamp_millis_opt(row.observed_at).single()?,
+            valid_from: decode_optional_millis(row.valid_from).ok()?,
+            valid_to: decode_optional_millis(row.valid_to).ok()?,
             published_at: Utc.timestamp_millis_opt(row.published_at).single()?,
             available_at: Utc.timestamp_millis_opt(row.available_at).single()?,
             revision: row.revision,
             report_hash: row.report_hash,
             supersedes_report_hash: row.supersedes_report_hash,
         })
+    }
+
+    #[must_use]
+    pub fn station(&self) -> Option<IcaoStation> {
+        IcaoStation::parse(&self.subject_key).ok()
+    }
+
+    #[must_use]
+    pub fn temperature_celsius(&self) -> Option<TemperatureCelsius> {
+        (self.variable == WeatherVariable::Temperature
+            && self.unit == DomainMeasurementUnit::Celsius)
+            .then(|| TemperatureCelsius::new(self.value))
     }
 }
 
@@ -219,32 +299,88 @@ impl WeatherObservationFact {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WeatherForecastPoint {
     pub source_id: DomainSourceId,
-    pub station: IcaoStation,
+    pub instrument_key: DomainInstrumentKey,
+    pub subject_key: String,
+    pub variable: WeatherVariable,
+    pub value: Decimal,
+    pub unit: DomainMeasurementUnit,
+    pub precision: Decimal,
     pub reference_time: DateTime<Utc>,
     pub valid_time: DateTime<Utc>,
+    pub published_at: DateTime<Utc>,
     pub available_at: DateTime<Utc>,
     pub lead_hours: u16,
-    pub member: u8,
-    pub tmax_celsius: TemperatureCelsius,
+    pub member: Option<u16>,
+    pub revision: u32,
     pub grid_binding_hash: ContentHash,
     pub run_manifest_hash: ContentHash,
+    pub report_hash: ContentHash,
 }
 
 impl WeatherForecastPoint {
     #[must_use]
-    pub fn from_clickhouse_row(row: WeatherForecastPointRow) -> Option<Self> {
+    pub fn to_clickhouse_row(&self) -> WeatherForecastFactRow {
+        WeatherForecastFactRow {
+            source_id: self.source_id.clone(),
+            instrument_key: self.instrument_key.clone(),
+            subject_key: self.subject_key.clone(),
+            variable: self.variable.as_str().to_owned(),
+            value: ChDecimal64::from(self.value),
+            unit: self.unit.as_str().to_owned(),
+            precision: ChDecimal64::from(self.precision),
+            reference_time: self.reference_time.timestamp_millis(),
+            valid_time: self.valid_time.timestamp_millis(),
+            published_at: self.published_at.timestamp_millis(),
+            available_at: self.available_at.timestamp_millis(),
+            lead_hours: self.lead_hours,
+            member: self.member,
+            revision: self.revision,
+            grid_binding_hash: self.grid_binding_hash.clone(),
+            run_manifest_hash: self.run_manifest_hash.clone(),
+            report_hash: self.report_hash.clone(),
+            schema_version: ChSchemaVersion::FIRST,
+        }
+    }
+
+    #[must_use]
+    pub fn from_clickhouse_row(row: WeatherForecastFactRow) -> Option<Self> {
         Some(Self {
             source_id: row.source_id,
-            station: IcaoStation::parse(row.station).ok()?,
+            instrument_key: row.instrument_key,
+            subject_key: row.subject_key,
+            variable: WeatherVariable::parse(&row.variable)?,
+            value: row.value.to_decimal(),
+            unit: DomainMeasurementUnit::parse(&row.unit)?,
+            precision: row.precision.to_decimal(),
             reference_time: Utc.timestamp_millis_opt(row.reference_time).single()?,
             valid_time: Utc.timestamp_millis_opt(row.valid_time).single()?,
+            published_at: Utc.timestamp_millis_opt(row.published_at).single()?,
             available_at: Utc.timestamp_millis_opt(row.available_at).single()?,
             lead_hours: row.lead_hours,
             member: row.member,
-            tmax_celsius: TemperatureCelsius::new(row.tmax_celsius.to_decimal()),
+            revision: row.revision,
             grid_binding_hash: row.grid_binding_hash,
             run_manifest_hash: row.run_manifest_hash,
+            report_hash: row.report_hash,
         })
+    }
+
+    #[must_use]
+    pub fn station(&self) -> Option<IcaoStation> {
+        IcaoStation::parse(&self.subject_key).ok()
+    }
+
+    #[must_use]
+    pub fn temperature_celsius(
+        &self,
+        statistic: WeatherTemperatureStatistic,
+    ) -> Option<TemperatureCelsius> {
+        let expected = match statistic {
+            WeatherTemperatureStatistic::Maximum => WeatherVariable::TemperatureMaximum,
+            WeatherTemperatureStatistic::Minimum => WeatherVariable::TemperatureMinimum,
+        };
+        (self.variable == expected && self.unit == DomainMeasurementUnit::Celsius)
+            .then(|| TemperatureCelsius::new(self.value))
     }
 }
 
@@ -278,8 +414,8 @@ impl DomainEventEnvelope {
 #[serde(rename_all = "snake_case")]
 pub enum DomainEventType {
     CryptoPriceTransition,
-    WeatherDailyHighAdvanced,
-    WeatherDailyHighCorrected,
+    WeatherDailyTemperatureExtremeAdvanced,
+    WeatherDailyTemperatureExtremeCorrected,
     WeatherObservationDayClosed,
 }
 
@@ -287,8 +423,8 @@ pub enum DomainEventType {
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum DomainEventPayload {
     CryptoPriceTransition(CryptoPriceTransition),
-    WeatherDailyHighAdvanced(WeatherDailyHighChange),
-    WeatherDailyHighCorrected(WeatherDailyHighChange),
+    WeatherDailyTemperatureExtremeAdvanced(WeatherDailyTemperatureExtremeChange),
+    WeatherDailyTemperatureExtremeCorrected(WeatherDailyTemperatureExtremeChange),
     WeatherObservationDayClosed(WeatherObservationDayClosed),
 }
 
@@ -303,11 +439,12 @@ pub struct CryptoPriceTransition {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WeatherDailyHighChange {
+pub struct WeatherDailyTemperatureExtremeChange {
     pub station: String,
     pub local_date: NaiveDate,
-    pub previous_high: Option<TemperatureCelsius>,
-    pub current_high: TemperatureCelsius,
+    pub temperature_statistic: WeatherTemperatureStatistic,
+    pub previous_extreme: Option<TemperatureCelsius>,
+    pub current_extreme: TemperatureCelsius,
     pub report_hash: ContentHash,
     pub gap_generation: u64,
 }
@@ -316,7 +453,8 @@ pub struct WeatherDailyHighChange {
 pub struct WeatherObservationDayClosed {
     pub station: String,
     pub local_date: NaiveDate,
-    pub final_noaa_high: TemperatureCelsius,
+    pub temperature_statistic: WeatherTemperatureStatistic,
+    pub final_noaa_extreme: TemperatureCelsius,
     pub last_report_hash: ContentHash,
     pub gap_generation: u64,
 }

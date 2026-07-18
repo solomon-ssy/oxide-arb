@@ -1,9 +1,42 @@
 use anyhow::{Context, Result, bail};
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
+use quant_pivot_core::app::phase_11_9_evidence_bootstrap::{
+    Phase119EvidenceBootstrapOptions, run_phase_11_9_evidence_bootstrap,
+};
 use quant_pivot_migration::{apply as apply_postgres_migrations, plan as plan_postgres_migrations};
 use quant_pivot_models::{
     config::{DeployConfig, secret::SecretText},
+    domain::{NewRuntimeConfigActivation, NewRuntimeConfigVersion},
+    enums::{
+        common::MarketCategory,
+        domain::DomainFamily,
+        runtime_config::{RuntimeConfigActivationKind, RuntimeConfigVersionSource},
+    },
+    hashing::CanonicalDigest,
+    runtime_config::{FeedbackConfig, RuntimeConfig, validate_runtime_config},
     security::hash_password,
+    types::{
+        EventId, RuntimeConfigActivationId, RuntimeConfigVersionId, SchemaVersion,
+        domain_capability::DomainContractFamily,
+        domain_classification::DomainMarketClassificationOutcome,
+    },
+};
+use quant_pivot_repository::{
+    postgres::{
+        PgRuntimeConfigVersionRepository,
+        catalog::{event::PgEventRepository, market::PgMarketRepository},
+    },
+    traits::{
+        RuntimeConfigVersionRepository, governance::event::EventRepository,
+        market::MarketRepository,
+    },
+};
+use quant_pivot_research::{
+    artifact::{ArtifactKey, ArtifactNamespace, build_artifact_store},
+    linkage::{
+        catalog_classification::DomainCatalogClassifier,
+        weather_daily_temperature::WeatherStationRegistry,
+    },
 };
 use quant_pivot_storage::{
     clickhouse::{
@@ -22,9 +55,11 @@ use rustls::crypto::aws_lc_rs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::{
+    collections::{BTreeMap, BTreeSet},
     env, fs,
     path::PathBuf,
     process::{Command, ExitCode, Stdio},
+    sync::Arc,
 };
 use zeroize::Zeroizing;
 
@@ -118,6 +153,15 @@ enum Commands {
         #[arg(long)]
         catalog_visible_p99: u64,
     },
+    /// Classify every active Crypto/Weather market and write immutable evidence.
+    #[command(name = "phase-11-9-classify-catalog")]
+    Phase119ClassifyCatalog(ConfigDirArgs),
+    /// Bootstrap durable Crypto/Weather evidence and emit a gap-audited manifest.
+    #[command(name = "phase-11-9-evidence-bootstrap")]
+    Phase119EvidenceBootstrap(Phase119EvidenceBootstrapArgs),
+    /// One-shot audited activation of an active Runtime v17 document as v18.
+    #[command(name = "phase-11-9-activate-runtime-v18")]
+    Phase119ActivateRuntimeV18(ConfigDirArgs),
 }
 
 #[derive(Subcommand)]
@@ -155,12 +199,42 @@ struct ConfigDirArgs {
     config_dir: PathBuf,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum Phase119EvidenceCategory {
+    Crypto,
+    Weather,
+}
+
+#[derive(Args)]
+struct Phase119EvidenceBootstrapArgs {
+    #[command(flatten)]
+    config: ConfigDirArgs,
+    /// Comma-delimited verticals to ingest and audit.
+    #[arg(long, value_delimiter = ',', default_value = "crypto,weather")]
+    categories: Vec<Phase119EvidenceCategory>,
+    /// Content-addressed evidence manifest directory.
+    #[arg(long, default_value = ".local/phase-11-9/manifests")]
+    manifest_dir: PathBuf,
+    /// Optional frozen ICAO station shard; repeat or pass comma-delimited values.
+    #[arg(long = "weather-station", value_delimiter = ',')]
+    weather_stations: Vec<String>,
+    /// Skip the authoritative Gamma keyset reconciliation for an offline rerun.
+    #[arg(long)]
+    skip_catalog_sync: bool,
+    /// Bounded number of one-day Binance archive recovery passes.
+    #[arg(long, default_value_t = 64)]
+    max_crypto_cycles: u16,
+    /// Maximum wait for all public Crypto live bindings to commit a live cursor.
+    #[arg(long, default_value_t = 120)]
+    crypto_live_timeout_secs: u64,
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
     if aws_lc_rs::default_provider().install_default().is_err() {
         eprintln!("rustls crypto provider already installed");
     }
-    match run().await {
+    match Box::pin(run()).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("error: {error:#}");
@@ -182,6 +256,353 @@ async fn run() -> Result<()> {
             println!("{}", report_capacity_ceiling(catalog_visible_p99)?);
             Ok(())
         }
+        Commands::Phase119ClassifyCatalog(args) => classify_phase_11_9_catalog(args).await,
+        Commands::Phase119EvidenceBootstrap(args) => {
+            Box::pin(phase_11_9_evidence_bootstrap(args)).await
+        }
+        Commands::Phase119ActivateRuntimeV18(args) => activate_phase_11_9_runtime_v18(args).await,
+    }
+}
+
+async fn activate_phase_11_9_runtime_v18(args: ConfigDirArgs) -> Result<()> {
+    const ACTOR: &str = "phase_11_9_runtime_v18_migration";
+    const REASON: &str = "one-shot Runtime v17 to v18 schema activation for Phase 11.9";
+
+    let config_dir = args
+        .config_dir
+        .to_str()
+        .context("runtime migration config directory is not valid UTF-8")?;
+    let deploy = DeployConfig::load(config_dir).context("load deploy config")?;
+    let pool = PostgresPool::connect_existing(&deploy.db.postgres)
+        .await
+        .context("connect PostgreSQL for Runtime v18 activation")?;
+    let repo = PgRuntimeConfigVersionRepository::new(pool.connection().clone());
+    let current_activation = repo
+        .load_current_activation()
+        .await
+        .context("load current runtime activation")?
+        .context("Runtime v18 activation requires an existing current activation")?;
+    let current = repo
+        .load_current()
+        .await
+        .context("load current runtime config")?
+        .context("Runtime v18 activation requires an existing current config")?;
+    if current.schema_version == SchemaVersion::new(18) {
+        RuntimeConfig::from_json(&current.config_json)
+            .context("current Runtime v18 document is invalid")?;
+        println!("status=already_active");
+        println!(
+            "runtime_config_version_id={}",
+            current.runtime_config_version_id
+        );
+        println!("config_hash={}", current.config_hash);
+        pool.close().await;
+        return Ok(());
+    }
+
+    let config = migrate_runtime_v17_json(&current.config_json)?;
+    let validation = validate_runtime_config(&config);
+    if validation.has_errors() {
+        bail!("migrated Runtime v18 document failed validation: {validation:?}");
+    }
+    let config_json = config.to_json();
+    let config_hash = CanonicalDigest::content_hash_json(&config_json)
+        .context("hash migrated Runtime v18 document")?;
+    let version = match repo
+        .load_by_hash(&config_hash)
+        .await
+        .context("lookup existing Runtime v18 migration candidate")?
+    {
+        Some(version) => version,
+        None => repo
+            .create_version(NewRuntimeConfigVersion {
+                runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
+                config_hash: config_hash.clone(),
+                schema_version: config.schema_version,
+                config_json,
+                source: RuntimeConfigVersionSource::Import,
+                created_by: ACTOR.to_owned(),
+                reason: REASON.to_owned(),
+            })
+            .await
+            .context("create immutable Runtime v18 migration candidate")?,
+    };
+    let activation = repo
+        .activate_version_if_current(
+            Some(&current_activation.runtime_config_activation_id),
+            NewRuntimeConfigActivation {
+                runtime_config_activation_id: RuntimeConfigActivationId::from_v7(),
+                runtime_config_version_id: version.runtime_config_version_id.clone(),
+                runtime_config_approval_id: None,
+                activated_by: ACTOR.to_owned(),
+                reason: REASON.to_owned(),
+                activation_kind: RuntimeConfigActivationKind::Promote,
+                previous_runtime_config_version_id: Some(current.runtime_config_version_id),
+                rollback_target_version_id: None,
+                audit_event_id: None,
+            },
+        )
+        .await
+        .context("CAS-activate Runtime v18 migration candidate")?;
+    let active = repo
+        .load_current()
+        .await
+        .context("read Runtime v18 activation back")?
+        .context("Runtime v18 activation read-back is absent")?;
+    if active.runtime_config_version_id != version.runtime_config_version_id
+        || active.config_hash != config_hash
+    {
+        bail!("Runtime v18 activation read-after-write mismatch");
+    }
+    RuntimeConfig::from_json(&active.config_json)
+        .context("activated Runtime v18 document failed typed read-back")?;
+    println!("status=activated");
+    println!(
+        "runtime_config_activation_id={}",
+        activation.runtime_config_activation_id
+    );
+    println!(
+        "runtime_config_version_id={}",
+        active.runtime_config_version_id
+    );
+    println!("config_hash={}", active.config_hash);
+    pool.close().await;
+    Ok(())
+}
+
+fn migrate_runtime_v17_json(config_json: &serde_json::Value) -> Result<RuntimeConfig> {
+    let mut migrated = config_json.clone();
+    let document = migrated
+        .as_object_mut()
+        .context("Runtime v17 document must be a JSON object")?;
+    let schema_version = document
+        .get("schema_version")
+        .and_then(serde_json::Value::as_u64)
+        .context("Runtime v17 document has no integer schema_version")?;
+    if schema_version != 17 {
+        bail!("one-shot Runtime migration only accepts schema_version 17, found {schema_version}");
+    }
+    if document.contains_key("feedback") {
+        bail!("Runtime v17 document unexpectedly contains feedback; refusing ambiguous migration");
+    }
+    document.insert("schema_version".to_owned(), serde_json::json!(18));
+    document.insert(
+        "feedback".to_owned(),
+        serde_json::to_value(FeedbackConfig::default())
+            .context("encode Runtime v18 feedback defaults")?,
+    );
+    RuntimeConfig::from_json(&migrated).context("typed parse of migrated Runtime v18 document")
+}
+
+async fn phase_11_9_evidence_bootstrap(args: Phase119EvidenceBootstrapArgs) -> Result<()> {
+    let config_dir = args
+        .config
+        .config_dir
+        .to_str()
+        .context("evidence bootstrap config directory is not valid UTF-8")?;
+    let deploy = Arc::new(DeployConfig::load(config_dir).context("load deploy config")?);
+    let categories = args
+        .categories
+        .into_iter()
+        .map(|category| match category {
+            Phase119EvidenceCategory::Crypto => DomainFamily::Crypto,
+            Phase119EvidenceCategory::Weather => DomainFamily::Weather,
+        })
+        .collect::<BTreeSet<_>>();
+    let weather_stations = args
+        .weather_stations
+        .into_iter()
+        .map(|station| station.trim().to_ascii_uppercase())
+        .filter(|station| !station.is_empty())
+        .collect::<BTreeSet<_>>();
+    let manifest = Box::pin(run_phase_11_9_evidence_bootstrap(
+        deploy,
+        Phase119EvidenceBootstrapOptions {
+            categories,
+            weather_stations,
+            sync_catalog: !args.skip_catalog_sync,
+            max_crypto_cycles: args.max_crypto_cycles,
+            crypto_live_timeout_secs: args.crypto_live_timeout_secs,
+        },
+    ))
+    .await
+    .context("run Phase 11.9 evidence bootstrap")?;
+    let manifest_hash =
+        CanonicalDigest::content_hash_json(&("phase_11_9_evidence_manifest_v4", &manifest))
+            .context("hash Phase 11.9 evidence manifest")?;
+    let bytes = serde_json::to_vec_pretty(&manifest).context("encode evidence manifest")?;
+    fs::create_dir_all(&args.manifest_dir).with_context(|| {
+        format!(
+            "create evidence manifest directory {}",
+            args.manifest_dir.display()
+        )
+    })?;
+    let path = args
+        .manifest_dir
+        .join(format!("{}.json", manifest_hash.hex()));
+    if path.exists() {
+        let current = fs::read(&path)
+            .with_context(|| format!("read existing evidence manifest {}", path.display()))?;
+        if current != bytes {
+            bail!(
+                "content-addressed evidence manifest {} has different bytes",
+                path.display()
+            );
+        }
+    } else {
+        fs::write(&path, bytes)
+            .with_context(|| format!("write evidence manifest {}", path.display()))?;
+    }
+    println!("manifest_path={}", path.display());
+    println!("manifest_hash={manifest_hash}");
+    println!("passed={}", manifest.passed());
+    println!("catalog_markets={}", manifest.catalog_market_count);
+    println!("linkages={}", manifest.linkage_count);
+    println!("source_expectations={}", manifest.source_expectation_count);
+    println!("source_cursors={}", manifest.source_cursor_count);
+    println!(
+        "crypto_observation_rows={}",
+        manifest.crypto_observation_rows
+    );
+    println!(
+        "weather_observation_rows={}",
+        manifest.weather_observation_rows
+    );
+    println!("weather_forecast_rows={}", manifest.weather_forecast_rows);
+    if !manifest.passed() {
+        bail!(
+            "Phase 11.9 evidence gap audit failed: {}",
+            manifest.blockers.join(" | ")
+        );
+    }
+    Ok(())
+}
+
+async fn classify_phase_11_9_catalog(args: ConfigDirArgs) -> Result<()> {
+    let config_dir = args
+        .config_dir
+        .to_str()
+        .context("catalog classification config directory is not valid UTF-8")?;
+    let deploy = DeployConfig::load(config_dir).context("load deploy config")?;
+    let pool = PostgresPool::connect_existing(&deploy.db.postgres)
+        .await
+        .context("connect PostgreSQL for catalog classification")?;
+    let market_repo = PgMarketRepository::new(pool.connection().clone());
+    let event_repo = PgEventRepository::new(pool.connection().clone());
+    let markets = market_repo
+        .find_active()
+        .await
+        .context("load active market catalog")?;
+    let event_ids: Vec<EventId> = markets
+        .iter()
+        .filter(|market| {
+            let categories = market.category_set();
+            categories.contains(MarketCategory::Crypto)
+                || categories.contains(MarketCategory::Weather)
+        })
+        .map(|market| market.event_id.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let events: BTreeMap<_, _> = event_repo
+        .find_by_ids(&event_ids)
+        .await
+        .context("load domain events")?
+        .into_iter()
+        .map(|event| (event.event_id.clone(), event))
+        .collect();
+    let stations = WeatherStationRegistry::try_new(deploy.domain_sources.weather_stations.clone())
+        .context("build Weather station registry")?;
+    let classifier =
+        DomainCatalogClassifier::new(stations, &deploy.domain_sources.weather_vertical_bindings)
+            .context("build catalog classifier")?;
+    let artifact = classifier
+        .classify_catalog(&markets, &events)
+        .context("classify active Crypto/Weather catalog")?;
+    let bytes = serde_json::to_vec_pretty(&artifact).context("encode classification artifact")?;
+    let store = build_artifact_store(&deploy.research.artifact_store)
+        .context("build classification artifact store")?;
+    let key = ArtifactKey::new(
+        ArtifactNamespace::CapabilityAudit,
+        artifact.artifact_hash.hex(),
+        "json",
+    )
+    .context("build classification artifact key")?;
+    let uri = store
+        .put(key, &bytes)
+        .await
+        .context("write classification artifact")?;
+    let persisted = store
+        .get(&uri)
+        .await
+        .context("read classification artifact back")?;
+    if persisted != bytes {
+        bail!("catalog classification artifact read-after-write mismatch");
+    }
+
+    let mut family_counts = BTreeMap::new();
+    let mut contract_counts = BTreeMap::new();
+    let mut outcome_counts = BTreeMap::new();
+    for row in &artifact.classifications {
+        *family_counts
+            .entry(family_label(row.family))
+            .or_insert(0_usize) += 1;
+        if let Some(contract_family) = row.contract_family {
+            *contract_counts
+                .entry(contract_family_label(contract_family))
+                .or_insert(0_usize) += 1;
+        }
+        *outcome_counts
+            .entry(outcome_label(row.outcome))
+            .or_insert(0_usize) += 1;
+    }
+    println!("artifact_uri={uri}");
+    println!("artifact_hash={}", artifact.artifact_hash);
+    println!("catalog_hash={}", artifact.catalog_hash);
+    println!("markets={}", artifact.classifications.len());
+    for (family, count) in family_counts {
+        println!("family.{family}={count}");
+    }
+    for (contract_family, count) in contract_counts {
+        println!("contract_family.{contract_family}={count}");
+    }
+    for (outcome, count) in outcome_counts {
+        println!("outcome.{outcome}={count}");
+    }
+    pool.close().await;
+    Ok(())
+}
+
+const fn family_label(family: DomainFamily) -> &'static str {
+    match family {
+        DomainFamily::Crypto => "crypto",
+        DomainFamily::Weather => "weather",
+    }
+}
+
+const fn contract_family_label(family: DomainContractFamily) -> &'static str {
+    match family {
+        DomainContractFamily::CryptoDirection => "crypto_direction",
+        DomainContractFamily::CryptoThreshold => "crypto_threshold",
+        DomainContractFamily::CryptoBand => "crypto_band",
+        DomainContractFamily::WeatherDailyTemperature => "weather_daily_temperature",
+        DomainContractFamily::WeatherPrecipitation => "weather_precipitation",
+        DomainContractFamily::WeatherAqi => "weather_aqi",
+        DomainContractFamily::WeatherTornado => "weather_tornado",
+        DomainContractFamily::WeatherTropicalCyclone => "weather_tropical_cyclone",
+        DomainContractFamily::WeatherGlobalTemperature => "weather_global_temperature",
+        DomainContractFamily::WeatherSeaIce => "weather_sea_ice",
+        DomainContractFamily::WeatherWindExtreme => "weather_wind_extreme",
+    }
+}
+
+const fn outcome_label(outcome: DomainMarketClassificationOutcome) -> &'static str {
+    match outcome {
+        DomainMarketClassificationOutcome::Supported => "supported",
+        DomainMarketClassificationOutcome::CredentialBlocked { .. } => "credential_blocked",
+        DomainMarketClassificationOutcome::InsufficientEvidence { .. } => "insufficient_evidence",
+        DomainMarketClassificationOutcome::Excluded { .. } => "excluded",
+        DomainMarketClassificationOutcome::UnsupportedTemplate { .. } => "unsupported_template",
     }
 }
 
@@ -569,7 +990,9 @@ fn run_ignored_suites(suites: &[(&str, &str)], label: &str) -> Result<()> {
 mod tests {
     use std::{collections::BTreeSet, fs, path::Path};
 
-    use super::{DOCKER_SUITES, report_capacity_ceiling, workspace_root};
+    use quant_pivot_models::runtime_config::{FeedbackConfig, RuntimeConfig};
+
+    use super::{DOCKER_SUITES, migrate_runtime_v17_json, report_capacity_ceiling, workspace_root};
 
     const DOCKER_IGNORE_MARKER: &str = "#[ignore = \"requires Docker\"]";
 
@@ -578,6 +1001,37 @@ mod tests {
         assert_eq!(report_capacity_ceiling(1).expect("ceiling"), 100_000);
         assert_eq!(report_capacity_ceiling(50_001).expect("ceiling"), 101_000);
         assert_eq!(report_capacity_ceiling(120_000).expect("ceiling"), 240_000);
+    }
+
+    #[test]
+    fn runtime_v17_migration_is_exact_and_preserves_existing_policy() {
+        let mut legacy = RuntimeConfig::default().to_json();
+        let document = legacy.as_object_mut().expect("runtime object");
+        document.insert("schema_version".to_owned(), serde_json::json!(17));
+        document.remove("feedback");
+        document
+            .get_mut("selection")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("selection")
+            .insert("max_spread_bps".to_owned(), serde_json::json!(4321));
+
+        let migrated = migrate_runtime_v17_json(&legacy).expect("v17 to v18 migration");
+        assert_eq!(migrated.schema_version.get(), 18);
+        assert_eq!(migrated.selection.max_spread_bps, 4321);
+        assert_eq!(migrated.feedback, FeedbackConfig::default());
+    }
+
+    #[test]
+    fn runtime_v17_migration_rejects_every_other_document_shape() {
+        let current = RuntimeConfig::default().to_json();
+        assert!(migrate_runtime_v17_json(&current).is_err());
+
+        let mut ambiguous = current;
+        ambiguous
+            .as_object_mut()
+            .expect("runtime object")
+            .insert("schema_version".to_owned(), serde_json::json!(17));
+        assert!(migrate_runtime_v17_json(&ambiguous).is_err());
     }
 
     #[test]

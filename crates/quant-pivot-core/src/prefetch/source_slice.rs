@@ -25,9 +25,10 @@ use quant_pivot_models::{
     runtime_config::DomainConfig,
     types::{
         ArtifactUri, ClobMarketInfoVersion, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION,
-        ResearchProfileArtifact, ResearchProfileDataSource, SOURCE_SLICE_MANIFEST_FORMAT_VERSION,
-        SourceSliceCatalogProof, SourceSliceId, SourceSliceInvalidSession, SourceSliceManifestRef,
-        SourceSliceManifestV2, SourceSliceObjectKind, SourceSliceObjectRef, SourceSlicePitCutoffs,
+        IcaoStation, ResearchProfileArtifact, ResearchProfileDataSource,
+        SOURCE_SLICE_MANIFEST_FORMAT_VERSION, SourceSliceCatalogProof, SourceSliceId,
+        SourceSliceInvalidSession, SourceSliceManifestRef, SourceSliceManifestV2,
+        SourceSliceObjectKind, SourceSliceObjectRef, SourceSlicePitCutoffs,
         SourceSliceSessionInvalidationReason,
     },
 };
@@ -339,20 +340,14 @@ fn decode_frozen_source_slice(
         ))?,
         |row| row.instrument_key.clone(),
     );
-    let weather_observations = group_by(
-        decode_records::<WeatherObservationFact>(take(
+    let weather_observations =
+        group_weather_observations(decode_records::<WeatherObservationFact>(take(
             &mut by_kind,
             SourceSliceObjectKind::WeatherObservation,
-        ))?,
-        |row| row.station.clone(),
-    );
-    let weather_forecasts = group_by(
-        decode_records::<WeatherForecastPoint>(take(
-            &mut by_kind,
-            SourceSliceObjectKind::WeatherForecast,
-        ))?,
-        |row| row.station.clone(),
-    );
+        ))?)?;
+    let weather_forecasts = group_weather_forecasts(decode_records::<WeatherForecastPoint>(
+        take(&mut by_kind, SourceSliceObjectKind::WeatherForecast),
+    )?)?;
     let weather_calibrations = decode_records(take(
         &mut by_kind,
         SourceSliceObjectKind::CalibrationReference,
@@ -732,7 +727,7 @@ impl SourceSliceMaterializer {
                 SourceSliceObjectKind::WeatherObservation,
                 records(
                     &weather_observations,
-                    |row| Some(row.observation_time),
+                    |row| Some(row.observed_at),
                     |row| Some(row.available_at),
                 )?,
             )
@@ -1179,6 +1174,38 @@ where
             .push(value);
     }
     grouped
+}
+
+fn group_weather_observations(
+    values: Vec<WeatherObservationFact>,
+) -> QuantResult<HashMap<IcaoStation, Vec<WeatherObservationFact>>> {
+    let mut grouped = HashMap::new();
+    for value in values {
+        let station = value.station().ok_or_else(|| ResearchError::DatasetBuild {
+            detail: format!(
+                "Weather observation subject `{}` is not an ICAO station",
+                value.subject_key
+            ),
+        })?;
+        grouped.entry(station).or_insert_with(Vec::new).push(value);
+    }
+    Ok(grouped)
+}
+
+fn group_weather_forecasts(
+    values: Vec<WeatherForecastPoint>,
+) -> QuantResult<HashMap<IcaoStation, Vec<WeatherForecastPoint>>> {
+    let mut grouped = HashMap::new();
+    for value in values {
+        let station = value.station().ok_or_else(|| ResearchError::DatasetBuild {
+            detail: format!(
+                "Weather forecast subject `{}` is not an ICAO station",
+                value.subject_key
+            ),
+        })?;
+        grouped.entry(station).or_insert_with(Vec::new).push(value);
+    }
+    Ok(grouped)
 }
 
 const fn millis(value: i64) -> Option<DateTime<Utc>> {

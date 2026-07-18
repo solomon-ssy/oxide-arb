@@ -772,8 +772,8 @@ fn page_domain_facts(
                 .flatten()
         })
         .filter(|row| {
-            row.observation_time >= scope.request.window_start
-                && row.observation_time < scope.request.window_end
+            row.observed_at >= scope.request.window_start
+                && row.observed_at < scope.request.window_end
                 && row.available_at <= scope.request.available_by
         })
         .cloned()
@@ -819,7 +819,7 @@ fn page_domain_bindings(
                 .map(|source| source.instrument_key.clone()),
         );
         if let MarketSubject::Weather(subject) = &binding.subject {
-            stations.insert(subject.station.clone());
+            stations.insert(subject.decision_group.station.clone());
         }
     }
     (instrument_keys, stations)

@@ -3438,6 +3438,357 @@
       "default": null,
       "generated": "",
       "identity": "",
+      "name": "expectation_id",
+      "nullable": false,
+      "ordinal": 1,
+      "storage": "p",
+      "table": "quant_domain_source_expectation",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "family",
+      "nullable": false,
+      "ordinal": 2,
+      "storage": "p",
+      "table": "quant_domain_source_expectation",
+      "type": "qp_domain_family"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "source_id",
+      "nullable": false,
+      "ordinal": 3,
+      "storage": "x",
+      "table": "quant_domain_source_expectation",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "instrument_key",
+      "nullable": false,
+      "ordinal": 4,
+      "storage": "x",
+      "table": "quant_domain_source_expectation",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "capability_registry_hash",
+      "nullable": false,
+      "ordinal": 5,
+      "storage": "x",
+      "table": "quant_domain_source_expectation",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "binding_hash",
+      "nullable": false,
+      "ordinal": 6,
+      "storage": "x",
+      "table": "quant_domain_source_expectation",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "required",
+      "nullable": false,
+      "ordinal": 7,
+      "storage": "p",
+      "table": "quant_domain_source_expectation",
+      "type": "boolean"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "credential_required",
+      "nullable": false,
+      "ordinal": 8,
+      "storage": "p",
+      "table": "quant_domain_source_expectation",
+      "type": "boolean"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "freshness_secs",
+      "nullable": false,
+      "ordinal": 9,
+      "storage": "p",
+      "table": "quant_domain_source_expectation",
+      "type": "bigint"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": "'[]'::jsonb",
+      "generated": "",
+      "identity": "",
+      "name": "affected_market_ids",
+      "nullable": false,
+      "ordinal": 10,
+      "storage": "x",
+      "table": "quant_domain_source_expectation",
+      "type": "jsonb"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": "'[]'::jsonb",
+      "generated": "",
+      "identity": "",
+      "name": "affected_profile_ids",
+      "nullable": false,
+      "ordinal": 11,
+      "storage": "x",
+      "table": "quant_domain_source_expectation",
+      "type": "jsonb"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "status",
+      "nullable": false,
+      "ordinal": 12,
+      "storage": "p",
+      "table": "quant_domain_source_expectation",
+      "type": "qp_domain_source_expectation_status"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "status_reason",
+      "nullable": true,
+      "ordinal": 13,
+      "storage": "x",
+      "table": "quant_domain_source_expectation",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": "now()",
+      "generated": "",
+      "identity": "",
+      "name": "created_at",
+      "nullable": false,
+      "ordinal": 14,
+      "storage": "p",
+      "table": "quant_domain_source_expectation",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": "now()",
+      "generated": "",
+      "identity": "",
+      "name": "updated_at",
+      "nullable": false,
+      "ordinal": 15,
+      "storage": "p",
+      "table": "quant_domain_source_expectation",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "drift_report_id",
+      "nullable": false,
+      "ordinal": 1,
+      "storage": "p",
+      "table": "quant_drift_report",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "feedback_run_id",
+      "nullable": true,
+      "ordinal": 2,
+      "storage": "p",
+      "table": "quant_drift_report",
+      "type": "uuid"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "profile_id",
+      "nullable": false,
+      "ordinal": 3,
+      "storage": "x",
+      "table": "quant_drift_report",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "category",
+      "nullable": false,
+      "ordinal": 4,
+      "storage": "p",
+      "table": "quant_drift_report",
+      "type": "qp_market_category"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "drift_kind",
+      "nullable": false,
+      "ordinal": 5,
+      "storage": "x",
+      "table": "quant_drift_report",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "window_start",
+      "nullable": false,
+      "ordinal": 6,
+      "storage": "p",
+      "table": "quant_drift_report",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "window_end",
+      "nullable": false,
+      "ordinal": 7,
+      "storage": "p",
+      "table": "quant_drift_report",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "detected",
+      "nullable": false,
+      "ordinal": 8,
+      "storage": "p",
+      "table": "quant_drift_report",
+      "type": "boolean"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "severity",
+      "nullable": false,
+      "ordinal": 9,
+      "storage": "x",
+      "table": "quant_drift_report",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "metrics_json",
+      "nullable": false,
+      "ordinal": 10,
+      "storage": "x",
+      "table": "quant_drift_report",
+      "type": "jsonb"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "report_hash",
+      "nullable": false,
+      "ordinal": 11,
+      "storage": "x",
+      "table": "quant_drift_report",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": "now()",
+      "generated": "",
+      "identity": "",
+      "name": "created_at",
+      "nullable": false,
+      "ordinal": 12,
+      "storage": "p",
+      "table": "quant_drift_report",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
       "name": "artifact_id",
       "nullable": false,
       "ordinal": 1,
@@ -4569,6 +4920,149 @@
       "default": null,
       "generated": "",
       "identity": "",
+      "name": "factor_bundle_id",
+      "nullable": false,
+      "ordinal": 1,
+      "storage": "p",
+      "table": "quant_factor_bundle_artifact",
+      "type": "uuid"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "profile_id",
+      "nullable": false,
+      "ordinal": 2,
+      "storage": "x",
+      "table": "quant_factor_bundle_artifact",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "category",
+      "nullable": false,
+      "ordinal": 3,
+      "storage": "p",
+      "table": "quant_factor_bundle_artifact",
+      "type": "qp_market_category"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "feature_schema_version",
+      "nullable": false,
+      "ordinal": 4,
+      "storage": "p",
+      "table": "quant_factor_bundle_artifact",
+      "type": "integer"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "feature_contract_hash",
+      "nullable": false,
+      "ordinal": 5,
+      "storage": "x",
+      "table": "quant_factor_bundle_artifact",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "definition_refs",
+      "nullable": false,
+      "ordinal": 6,
+      "storage": "x",
+      "table": "quant_factor_bundle_artifact",
+      "type": "jsonb"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "bundle_hash",
+      "nullable": false,
+      "ordinal": 7,
+      "storage": "x",
+      "table": "quant_factor_bundle_artifact",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "artifact_uri",
+      "nullable": false,
+      "ordinal": 8,
+      "storage": "x",
+      "table": "quant_factor_bundle_artifact",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "status",
+      "nullable": false,
+      "ordinal": 9,
+      "storage": "x",
+      "table": "quant_factor_bundle_artifact",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "created_by",
+      "nullable": false,
+      "ordinal": 10,
+      "storage": "x",
+      "table": "quant_factor_bundle_artifact",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": "now()",
+      "generated": "",
+      "identity": "",
+      "name": "created_at",
+      "nullable": false,
+      "ordinal": 11,
+      "storage": "p",
+      "table": "quant_factor_bundle_artifact",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
       "name": "factor_definition_id",
       "nullable": false,
       "ordinal": 1,
@@ -4730,6 +5224,162 @@
       "ordinal": 13,
       "storage": "p",
       "table": "quant_factor_definition",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "factor_governance_audit_id",
+      "nullable": false,
+      "ordinal": 1,
+      "storage": "p",
+      "table": "quant_factor_governance_audit",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "feedback_run_id",
+      "nullable": true,
+      "ordinal": 2,
+      "storage": "p",
+      "table": "quant_factor_governance_audit",
+      "type": "uuid"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "actor",
+      "nullable": false,
+      "ordinal": 3,
+      "storage": "x",
+      "table": "quant_factor_governance_audit",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "acting_role",
+      "nullable": false,
+      "ordinal": 4,
+      "storage": "x",
+      "table": "quant_factor_governance_audit",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "action",
+      "nullable": false,
+      "ordinal": 5,
+      "storage": "x",
+      "table": "quant_factor_governance_audit",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "reason",
+      "nullable": false,
+      "ordinal": 6,
+      "storage": "x",
+      "table": "quant_factor_governance_audit",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "model_version_id",
+      "nullable": false,
+      "ordinal": 7,
+      "storage": "p",
+      "table": "quant_factor_governance_audit",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "factor_bundle_id",
+      "nullable": false,
+      "ordinal": 8,
+      "storage": "p",
+      "table": "quant_factor_governance_audit",
+      "type": "uuid"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "before_pointer_hash",
+      "nullable": true,
+      "ordinal": 9,
+      "storage": "x",
+      "table": "quant_factor_governance_audit",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "after_pointer_hash",
+      "nullable": false,
+      "ordinal": 10,
+      "storage": "x",
+      "table": "quant_factor_governance_audit",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "audit_hash",
+      "nullable": false,
+      "ordinal": 11,
+      "storage": "x",
+      "table": "quant_factor_governance_audit",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": "now()",
+      "generated": "",
+      "identity": "",
+      "name": "created_at",
+      "nullable": false,
+      "ordinal": 12,
+      "storage": "p",
+      "table": "quant_factor_governance_audit",
       "type": "timestamp with time zone"
     },
     {
@@ -5843,6 +6493,435 @@
       "default": null,
       "generated": "",
       "identity": "",
+      "name": "feedback_run_id",
+      "nullable": false,
+      "ordinal": 1,
+      "storage": "p",
+      "table": "quant_feedback_run",
+      "type": "uuid"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "profile_id",
+      "nullable": false,
+      "ordinal": 2,
+      "storage": "x",
+      "table": "quant_feedback_run",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "category",
+      "nullable": false,
+      "ordinal": 3,
+      "storage": "p",
+      "table": "quant_feedback_run",
+      "type": "qp_market_category"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "trigger_kind",
+      "nullable": false,
+      "ordinal": 4,
+      "storage": "x",
+      "table": "quant_feedback_run",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "idempotency_key",
+      "nullable": false,
+      "ordinal": 5,
+      "storage": "x",
+      "table": "quant_feedback_run",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "status",
+      "nullable": false,
+      "ordinal": 6,
+      "storage": "x",
+      "table": "quant_feedback_run",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "label_cutoff",
+      "nullable": false,
+      "ordinal": 7,
+      "storage": "p",
+      "table": "quant_feedback_run",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "feedback_policy_hash",
+      "nullable": false,
+      "ordinal": 8,
+      "storage": "x",
+      "table": "quant_feedback_run",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "capability_registry_hash",
+      "nullable": false,
+      "ordinal": 9,
+      "storage": "x",
+      "table": "quant_feedback_run",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "runtime_config_version_id",
+      "nullable": true,
+      "ordinal": 10,
+      "storage": "p",
+      "table": "quant_feedback_run",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "dataset_id",
+      "nullable": true,
+      "ordinal": 11,
+      "storage": "p",
+      "table": "quant_feedback_run",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "challenger_model_version_id",
+      "nullable": true,
+      "ordinal": 12,
+      "storage": "p",
+      "table": "quant_feedback_run",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "challenger_factor_bundle_id",
+      "nullable": true,
+      "ordinal": 13,
+      "storage": "p",
+      "table": "quant_feedback_run",
+      "type": "uuid"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "decision",
+      "nullable": true,
+      "ordinal": 14,
+      "storage": "x",
+      "table": "quant_feedback_run",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "decision_reason",
+      "nullable": true,
+      "ordinal": 15,
+      "storage": "x",
+      "table": "quant_feedback_run",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "requested_by",
+      "nullable": true,
+      "ordinal": 16,
+      "storage": "x",
+      "table": "quant_feedback_run",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "acting_role",
+      "nullable": false,
+      "ordinal": 17,
+      "storage": "x",
+      "table": "quant_feedback_run",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "cancel_requested_at",
+      "nullable": true,
+      "ordinal": 18,
+      "storage": "p",
+      "table": "quant_feedback_run",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "started_at",
+      "nullable": true,
+      "ordinal": 19,
+      "storage": "p",
+      "table": "quant_feedback_run",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "finished_at",
+      "nullable": true,
+      "ordinal": 20,
+      "storage": "p",
+      "table": "quant_feedback_run",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": "now()",
+      "generated": "",
+      "identity": "",
+      "name": "created_at",
+      "nullable": false,
+      "ordinal": 21,
+      "storage": "p",
+      "table": "quant_feedback_run",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": "now()",
+      "generated": "",
+      "identity": "",
+      "name": "updated_at",
+      "nullable": false,
+      "ordinal": 22,
+      "storage": "p",
+      "table": "quant_feedback_run",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "feedback_run_stage_id",
+      "nullable": false,
+      "ordinal": 1,
+      "storage": "p",
+      "table": "quant_feedback_run_stage",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "feedback_run_id",
+      "nullable": false,
+      "ordinal": 2,
+      "storage": "p",
+      "table": "quant_feedback_run_stage",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "sequence",
+      "nullable": false,
+      "ordinal": 3,
+      "storage": "p",
+      "table": "quant_feedback_run_stage",
+      "type": "integer"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "stage_kind",
+      "nullable": false,
+      "ordinal": 4,
+      "storage": "x",
+      "table": "quant_feedback_run_stage",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "status",
+      "nullable": false,
+      "ordinal": 5,
+      "storage": "x",
+      "table": "quant_feedback_run_stage",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "evidence_hash",
+      "nullable": false,
+      "ordinal": 6,
+      "storage": "x",
+      "table": "quant_feedback_run_stage",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": "'{}'::jsonb",
+      "generated": "",
+      "identity": "",
+      "name": "metrics_json",
+      "nullable": false,
+      "ordinal": 7,
+      "storage": "x",
+      "table": "quant_feedback_run_stage",
+      "type": "jsonb"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "detail",
+      "nullable": true,
+      "ordinal": 8,
+      "storage": "x",
+      "table": "quant_feedback_run_stage",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "started_at",
+      "nullable": false,
+      "ordinal": 9,
+      "storage": "p",
+      "table": "quant_feedback_run_stage",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "finished_at",
+      "nullable": true,
+      "ordinal": 10,
+      "storage": "p",
+      "table": "quant_feedback_run_stage",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": "now()",
+      "generated": "",
+      "identity": "",
+      "name": "created_at",
+      "nullable": false,
+      "ordinal": 11,
+      "storage": "p",
+      "table": "quant_feedback_run_stage",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
       "name": "linkage_id",
       "nullable": false,
       "ordinal": 1,
@@ -6018,6 +7097,19 @@
       "storage": "p",
       "table": "quant_market_linkage",
       "type": "timestamp with time zone"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "capability_registry_hash",
+      "nullable": true,
+      "ordinal": 15,
+      "storage": "x",
+      "table": "quant_market_linkage",
+      "type": "text"
     },
     {
       "collation": null,
@@ -8032,6 +9124,123 @@
       "ordinal": 16,
       "storage": "p",
       "table": "quant_position",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "profile_allocation_id",
+      "nullable": false,
+      "ordinal": 1,
+      "storage": "p",
+      "table": "quant_profile_allocation_artifact",
+      "type": "uuid"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "candidate_family_hash",
+      "nullable": false,
+      "ordinal": 2,
+      "storage": "x",
+      "table": "quant_profile_allocation_artifact",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "evaluation_window_hash",
+      "nullable": false,
+      "ordinal": 3,
+      "storage": "x",
+      "table": "quant_profile_allocation_artifact",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "correction_method",
+      "nullable": false,
+      "ordinal": 4,
+      "storage": "x",
+      "table": "quant_profile_allocation_artifact",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "allocation_json",
+      "nullable": false,
+      "ordinal": 5,
+      "storage": "x",
+      "table": "quant_profile_allocation_artifact",
+      "type": "jsonb"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "artifact_hash",
+      "nullable": false,
+      "ordinal": 6,
+      "storage": "x",
+      "table": "quant_profile_allocation_artifact",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": "'proposed'::text",
+      "generated": "",
+      "identity": "",
+      "name": "activation_status",
+      "nullable": false,
+      "ordinal": 7,
+      "storage": "x",
+      "table": "quant_profile_allocation_artifact",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "created_by",
+      "nullable": false,
+      "ordinal": 8,
+      "storage": "x",
+      "table": "quant_profile_allocation_artifact",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": "now()",
+      "generated": "",
+      "identity": "",
+      "name": "created_at",
+      "nullable": false,
+      "ordinal": 9,
+      "storage": "p",
+      "table": "quant_profile_allocation_artifact",
       "type": "timestamp with time zone"
     },
     {
@@ -12490,7 +13699,7 @@
       "nullable": false,
       "ordinal": 1,
       "storage": "x",
-      "table": "quant_weather_daily_high_projection",
+      "table": "quant_weather_daily_temperature_projection",
       "type": "text"
     },
     {
@@ -12503,7 +13712,7 @@
       "nullable": false,
       "ordinal": 2,
       "storage": "x",
-      "table": "quant_weather_daily_high_projection",
+      "table": "quant_weather_daily_temperature_projection",
       "type": "text"
     },
     {
@@ -12516,7 +13725,7 @@
       "nullable": false,
       "ordinal": 3,
       "storage": "x",
-      "table": "quant_weather_daily_high_projection",
+      "table": "quant_weather_daily_temperature_projection",
       "type": "text"
     },
     {
@@ -12529,7 +13738,7 @@
       "nullable": false,
       "ordinal": 4,
       "storage": "p",
-      "table": "quant_weather_daily_high_projection",
+      "table": "quant_weather_daily_temperature_projection",
       "type": "date"
     },
     {
@@ -12542,7 +13751,7 @@
       "nullable": false,
       "ordinal": 5,
       "storage": "x",
-      "table": "quant_weather_daily_high_projection",
+      "table": "quant_weather_daily_temperature_projection",
       "type": "text"
     },
     {
@@ -12551,11 +13760,11 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "current_high_celsius",
+      "name": "current_extreme_celsius",
       "nullable": false,
       "ordinal": 6,
       "storage": "m",
-      "table": "quant_weather_daily_high_projection",
+      "table": "quant_weather_daily_temperature_projection",
       "type": "numeric(8,4)"
     },
     {
@@ -12564,11 +13773,11 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "previous_high_celsius",
+      "name": "previous_extreme_celsius",
       "nullable": true,
       "ordinal": 7,
       "storage": "m",
-      "table": "quant_weather_daily_high_projection",
+      "table": "quant_weather_daily_temperature_projection",
       "type": "numeric(8,4)"
     },
     {
@@ -12581,7 +13790,7 @@
       "nullable": false,
       "ordinal": 8,
       "storage": "p",
-      "table": "quant_weather_daily_high_projection",
+      "table": "quant_weather_daily_temperature_projection",
       "type": "timestamp with time zone"
     },
     {
@@ -12594,7 +13803,7 @@
       "nullable": false,
       "ordinal": 9,
       "storage": "x",
-      "table": "quant_weather_daily_high_projection",
+      "table": "quant_weather_daily_temperature_projection",
       "type": "text"
     },
     {
@@ -12607,7 +13816,7 @@
       "nullable": true,
       "ordinal": 10,
       "storage": "p",
-      "table": "quant_weather_daily_high_projection",
+      "table": "quant_weather_daily_temperature_projection",
       "type": "uuid"
     },
     {
@@ -12620,7 +13829,7 @@
       "nullable": false,
       "ordinal": 11,
       "storage": "p",
-      "table": "quant_weather_daily_high_projection",
+      "table": "quant_weather_daily_temperature_projection",
       "type": "bigint"
     },
     {
@@ -12633,7 +13842,7 @@
       "nullable": false,
       "ordinal": 12,
       "storage": "p",
-      "table": "quant_weather_daily_high_projection",
+      "table": "quant_weather_daily_temperature_projection",
       "type": "boolean"
     },
     {
@@ -12646,7 +13855,7 @@
       "nullable": false,
       "ordinal": 13,
       "storage": "p",
-      "table": "quant_weather_daily_high_projection",
+      "table": "quant_weather_daily_temperature_projection",
       "type": "bigint"
     },
     {
@@ -12659,7 +13868,7 @@
       "nullable": false,
       "ordinal": 14,
       "storage": "p",
-      "table": "quant_weather_daily_high_projection",
+      "table": "quant_weather_daily_temperature_projection",
       "type": "boolean"
     },
     {
@@ -12672,7 +13881,7 @@
       "nullable": false,
       "ordinal": 15,
       "storage": "p",
-      "table": "quant_weather_daily_high_projection",
+      "table": "quant_weather_daily_temperature_projection",
       "type": "timestamp with time zone"
     },
     {
@@ -12685,8 +13894,21 @@
       "nullable": false,
       "ordinal": 16,
       "storage": "p",
-      "table": "quant_weather_daily_high_projection",
+      "table": "quant_weather_daily_temperature_projection",
       "type": "timestamp with time zone"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "temperature_statistic",
+      "nullable": false,
+      "ordinal": 17,
+      "storage": "x",
+      "table": "quant_weather_daily_temperature_projection",
+      "type": "text"
     },
     {
       "collation": "default",
@@ -14454,6 +15676,105 @@
     },
     {
       "deferrable": false,
+      "definition": "CHECK (((status <> ALL (ARRAY['credential_blocked'::qp_domain_source_expectation_status, 'error'::qp_domain_source_expectation_status, 'unsupported'::qp_domain_source_expectation_status])) OR ((status_reason IS NOT NULL) AND (btrim(status_reason) <> ''::text))))",
+      "initially_deferred": false,
+      "name": "ck_quant_domain_source_expectation_blocker_reason",
+      "table": "quant_domain_source_expectation",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK ((freshness_secs > 0))",
+      "initially_deferred": false,
+      "name": "ck_quant_domain_source_expectation_freshness",
+      "table": "quant_domain_source_expectation",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "PRIMARY KEY (expectation_id)",
+      "initially_deferred": false,
+      "name": "quant_domain_source_expectation_pkey",
+      "table": "quant_domain_source_expectation",
+      "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "UNIQUE (source_id, instrument_key)",
+      "initially_deferred": false,
+      "name": "uq_quant_domain_source_expectation_binding",
+      "table": "quant_domain_source_expectation",
+      "type": "u",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "UNIQUE (binding_hash)",
+      "initially_deferred": false,
+      "name": "uq_quant_domain_source_expectation_binding_hash",
+      "table": "quant_domain_source_expectation",
+      "type": "u",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK ((drift_kind = ANY (ARRAY['data'::text, 'concept'::text, 'label'::text])))",
+      "initially_deferred": false,
+      "name": "ck_quant_drift_report_kind",
+      "table": "quant_drift_report",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK ((severity = ANY (ARRAY['none'::text, 'warning'::text, 'critical'::text])))",
+      "initially_deferred": false,
+      "name": "ck_quant_drift_report_severity",
+      "table": "quant_drift_report",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK ((window_start < window_end))",
+      "initially_deferred": false,
+      "name": "ck_quant_drift_report_window",
+      "table": "quant_drift_report",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (feedback_run_id) REFERENCES quant_feedback_run(feedback_run_id)",
+      "initially_deferred": false,
+      "name": "quant_drift_report_feedback_run_id_fkey",
+      "table": "quant_drift_report",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "PRIMARY KEY (drift_report_id)",
+      "initially_deferred": false,
+      "name": "quant_drift_report_pkey",
+      "table": "quant_drift_report",
+      "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "UNIQUE (report_hash)",
+      "initially_deferred": false,
+      "name": "quant_drift_report_report_hash_key",
+      "table": "quant_drift_report",
+      "type": "u",
+      "validated": true
+    },
+    {
+      "deferrable": false,
       "definition": "PRIMARY KEY (artifact_id)",
       "initially_deferred": false,
       "name": "quant_entry_condition_artifact_pkey",
@@ -14562,6 +15883,42 @@
     },
     {
       "deferrable": false,
+      "definition": "CHECK ((feature_schema_version > 0))",
+      "initially_deferred": false,
+      "name": "ck_quant_factor_bundle_artifact_schema",
+      "table": "quant_factor_bundle_artifact",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK ((status = ANY (ARRAY['candidate'::text, 'published'::text, 'retired'::text])))",
+      "initially_deferred": false,
+      "name": "ck_quant_factor_bundle_artifact_status",
+      "table": "quant_factor_bundle_artifact",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "UNIQUE (bundle_hash)",
+      "initially_deferred": false,
+      "name": "quant_factor_bundle_artifact_bundle_hash_key",
+      "table": "quant_factor_bundle_artifact",
+      "type": "u",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "PRIMARY KEY (factor_bundle_id)",
+      "initially_deferred": false,
+      "name": "quant_factor_bundle_artifact_pkey",
+      "table": "quant_factor_bundle_artifact",
+      "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
       "definition": "CHECK ((definition_hash ~ '^blake3:[0-9a-f]{64}$'::text))",
       "initially_deferred": false,
       "name": "quant_factor_definition_definition_hash_check",
@@ -14584,6 +15941,51 @@
       "initially_deferred": false,
       "name": "quant_factor_definition_pkey",
       "table": "quant_factor_definition",
+      "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK ((action = ANY (ARRAY['publish_bundle_with_model'::text, 'reject_bundle'::text, 'retire_bundle'::text])))",
+      "initially_deferred": false,
+      "name": "ck_quant_factor_governance_action",
+      "table": "quant_factor_governance_audit",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "UNIQUE (audit_hash)",
+      "initially_deferred": false,
+      "name": "quant_factor_governance_audit_audit_hash_key",
+      "table": "quant_factor_governance_audit",
+      "type": "u",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (factor_bundle_id) REFERENCES quant_factor_bundle_artifact(factor_bundle_id)",
+      "initially_deferred": false,
+      "name": "quant_factor_governance_audit_factor_bundle_id_fkey",
+      "table": "quant_factor_governance_audit",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (feedback_run_id) REFERENCES quant_feedback_run(feedback_run_id)",
+      "initially_deferred": false,
+      "name": "quant_factor_governance_audit_feedback_run_id_fkey",
+      "table": "quant_factor_governance_audit",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "PRIMARY KEY (factor_governance_audit_id)",
+      "initially_deferred": false,
+      "name": "quant_factor_governance_audit_pkey",
+      "table": "quant_factor_governance_audit",
       "type": "p",
       "validated": true
     },
@@ -14837,6 +16239,96 @@
       "name": "quant_feature_vector_pkey",
       "table": "quant_feature_vector",
       "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK (((decision IS NULL) OR (decision = ANY (ARRAY['promote'::text, 'reject'::text, 'insufficient_evidence'::text]))))",
+      "initially_deferred": false,
+      "name": "ck_quant_feedback_run_decision",
+      "table": "quant_feedback_run",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK ((status = ANY (ARRAY['queued'::text, 'running'::text, 'passed'::text, 'rejected'::text, 'failed'::text, 'cancelled'::text])))",
+      "initially_deferred": false,
+      "name": "ck_quant_feedback_run_status",
+      "table": "quant_feedback_run",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK ((trigger_kind = ANY (ARRAY['scheduled'::text, 'label_maturity'::text, 'data_drift'::text, 'concept_drift'::text, 'label_drift'::text, 'manual'::text])))",
+      "initially_deferred": false,
+      "name": "ck_quant_feedback_run_trigger_kind",
+      "table": "quant_feedback_run",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "UNIQUE (idempotency_key)",
+      "initially_deferred": false,
+      "name": "quant_feedback_run_idempotency_key_key",
+      "table": "quant_feedback_run",
+      "type": "u",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "PRIMARY KEY (feedback_run_id)",
+      "initially_deferred": false,
+      "name": "quant_feedback_run_pkey",
+      "table": "quant_feedback_run",
+      "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK ((stage_kind = ANY (ARRAY['coverage'::text, 'drift'::text, 'dataset_seal'::text, 'train'::text, 'calibration_cpcv'::text, 'champion_comparison'::text, 'shadow_replay'::text, 'decision'::text])))",
+      "initially_deferred": false,
+      "name": "ck_quant_feedback_run_stage_kind",
+      "table": "quant_feedback_run_stage",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK ((status = ANY (ARRAY['running'::text, 'passed'::text, 'rejected'::text, 'failed'::text, 'cancelled'::text])))",
+      "initially_deferred": false,
+      "name": "ck_quant_feedback_run_stage_status",
+      "table": "quant_feedback_run_stage",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (feedback_run_id) REFERENCES quant_feedback_run(feedback_run_id)",
+      "initially_deferred": false,
+      "name": "quant_feedback_run_stage_feedback_run_id_fkey",
+      "table": "quant_feedback_run_stage",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "PRIMARY KEY (feedback_run_stage_id)",
+      "initially_deferred": false,
+      "name": "quant_feedback_run_stage_pkey",
+      "table": "quant_feedback_run_stage",
+      "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "UNIQUE (feedback_run_id, sequence)",
+      "initially_deferred": false,
+      "name": "uq_quant_feedback_run_stage_sequence",
+      "table": "quant_feedback_run_stage",
+      "type": "u",
       "validated": true
     },
     {
@@ -15196,6 +16688,42 @@
       "initially_deferred": false,
       "name": "quant_position_pkey",
       "table": "quant_position",
+      "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK ((correction_method = 'romano_wolf_stepdown'::text))",
+      "initially_deferred": false,
+      "name": "ck_quant_profile_allocation_correction",
+      "table": "quant_profile_allocation_artifact",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK ((activation_status = ANY (ARRAY['proposed'::text, 'activated'::text, 'rejected'::text])))",
+      "initially_deferred": false,
+      "name": "ck_quant_profile_allocation_status",
+      "table": "quant_profile_allocation_artifact",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "UNIQUE (artifact_hash)",
+      "initially_deferred": false,
+      "name": "quant_profile_allocation_artifact_artifact_hash_key",
+      "table": "quant_profile_allocation_artifact",
+      "type": "u",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "PRIMARY KEY (profile_allocation_id)",
+      "initially_deferred": false,
+      "name": "quant_profile_allocation_artifact_pkey",
+      "table": "quant_profile_allocation_artifact",
       "type": "p",
       "validated": true
     },
@@ -16299,10 +17827,19 @@
     },
     {
       "deferrable": false,
-      "definition": "PRIMARY KEY (source_id, instrument_key, local_date)",
+      "definition": "CHECK ((temperature_statistic = ANY (ARRAY['maximum'::text, 'minimum'::text])))",
       "initially_deferred": false,
-      "name": "pk-quant_weather_daily_high_projection",
-      "table": "quant_weather_daily_high_projection",
+      "name": "ck_quant_weather_daily_temperature_statistic",
+      "table": "quant_weather_daily_temperature_projection",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "PRIMARY KEY (source_id, instrument_key, local_date, temperature_statistic)",
+      "initially_deferred": false,
+      "name": "pk-quant_weather_daily_temperature_projection",
+      "table": "quant_weather_daily_temperature_projection",
       "type": "p",
       "validated": true
     },
@@ -16758,6 +18295,17 @@
         "weather"
       ],
       "name": "qp_domain_family"
+    },
+    {
+      "labels": [
+        "not_started",
+        "live",
+        "stale",
+        "credential_blocked",
+        "error",
+        "unsupported"
+      ],
+      "name": "qp_domain_source_expectation_status"
     },
     {
       "labels": [
@@ -19284,6 +20832,160 @@
       "grantable": "NO",
       "grantee": "$schema_owner",
       "object_kind": "table",
+      "object_name": "quant_domain_source_expectation",
+      "privilege": "DELETE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_domain_source_expectation",
+      "privilege": "INSERT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_domain_source_expectation",
+      "privilege": "REFERENCES"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_domain_source_expectation",
+      "privilege": "SELECT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_domain_source_expectation",
+      "privilege": "TRIGGER"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_domain_source_expectation",
+      "privilege": "TRUNCATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_domain_source_expectation",
+      "privilege": "UPDATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$runtime_grantee",
+      "object_kind": "table",
+      "object_name": "quant_domain_source_expectation",
+      "privilege": "DELETE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$runtime_grantee",
+      "object_kind": "table",
+      "object_name": "quant_domain_source_expectation",
+      "privilege": "INSERT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$runtime_grantee",
+      "object_kind": "table",
+      "object_name": "quant_domain_source_expectation",
+      "privilege": "SELECT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$runtime_grantee",
+      "object_kind": "table",
+      "object_name": "quant_domain_source_expectation",
+      "privilege": "UPDATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_drift_report",
+      "privilege": "DELETE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_drift_report",
+      "privilege": "INSERT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_drift_report",
+      "privilege": "REFERENCES"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_drift_report",
+      "privilege": "SELECT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_drift_report",
+      "privilege": "TRIGGER"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_drift_report",
+      "privilege": "TRUNCATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_drift_report",
+      "privilege": "UPDATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$runtime_grantee",
+      "object_kind": "table",
+      "object_name": "quant_drift_report",
+      "privilege": "DELETE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$runtime_grantee",
+      "object_kind": "table",
+      "object_name": "quant_drift_report",
+      "privilege": "INSERT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$runtime_grantee",
+      "object_kind": "table",
+      "object_name": "quant_drift_report",
+      "privilege": "SELECT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$runtime_grantee",
+      "object_kind": "table",
+      "object_name": "quant_drift_report",
+      "privilege": "UPDATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
       "object_name": "quant_entry_condition_artifact",
       "privilege": "DELETE"
     },
@@ -19746,6 +21448,83 @@
       "grantable": "NO",
       "grantee": "$schema_owner",
       "object_kind": "table",
+      "object_name": "quant_factor_bundle_artifact",
+      "privilege": "DELETE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_factor_bundle_artifact",
+      "privilege": "INSERT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_factor_bundle_artifact",
+      "privilege": "REFERENCES"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_factor_bundle_artifact",
+      "privilege": "SELECT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_factor_bundle_artifact",
+      "privilege": "TRIGGER"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_factor_bundle_artifact",
+      "privilege": "TRUNCATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_factor_bundle_artifact",
+      "privilege": "UPDATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$runtime_grantee",
+      "object_kind": "table",
+      "object_name": "quant_factor_bundle_artifact",
+      "privilege": "DELETE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$runtime_grantee",
+      "object_kind": "table",
+      "object_name": "quant_factor_bundle_artifact",
+      "privilege": "INSERT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$runtime_grantee",
+      "object_kind": "table",
+      "object_name": "quant_factor_bundle_artifact",
+      "privilege": "SELECT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$runtime_grantee",
+      "object_kind": "table",
+      "object_name": "quant_factor_bundle_artifact",
+      "privilege": "UPDATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
       "object_name": "quant_factor_definition",
       "privilege": "DELETE"
     },
@@ -19823,6 +21602,83 @@
       "grantable": "NO",
       "grantee": "$schema_owner",
       "object_kind": "table",
+      "object_name": "quant_factor_governance_audit",
+      "privilege": "DELETE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_factor_governance_audit",
+      "privilege": "INSERT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_factor_governance_audit",
+      "privilege": "REFERENCES"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_factor_governance_audit",
+      "privilege": "SELECT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_factor_governance_audit",
+      "privilege": "TRIGGER"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_factor_governance_audit",
+      "privilege": "TRUNCATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_factor_governance_audit",
+      "privilege": "UPDATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$runtime_grantee",
+      "object_kind": "table",
+      "object_name": "quant_factor_governance_audit",
+      "privilege": "DELETE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$runtime_grantee",
+      "object_kind": "table",
+      "object_name": "quant_factor_governance_audit",
+      "privilege": "INSERT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$runtime_grantee",
+      "object_kind": "table",
+      "object_name": "quant_factor_governance_audit",
+      "privilege": "SELECT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$runtime_grantee",
+      "object_kind": "table",
+      "object_name": "quant_factor_governance_audit",
+      "privilege": "UPDATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
       "object_name": "quant_factor_value",
       "privilege": "DELETE"
     },
@@ -20279,6 +22135,160 @@
       "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "quant_feature_vector",
+      "privilege": "UPDATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_feedback_run",
+      "privilege": "DELETE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_feedback_run",
+      "privilege": "INSERT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_feedback_run",
+      "privilege": "REFERENCES"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_feedback_run",
+      "privilege": "SELECT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_feedback_run",
+      "privilege": "TRIGGER"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_feedback_run",
+      "privilege": "TRUNCATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_feedback_run",
+      "privilege": "UPDATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$runtime_grantee",
+      "object_kind": "table",
+      "object_name": "quant_feedback_run",
+      "privilege": "DELETE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$runtime_grantee",
+      "object_kind": "table",
+      "object_name": "quant_feedback_run",
+      "privilege": "INSERT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$runtime_grantee",
+      "object_kind": "table",
+      "object_name": "quant_feedback_run",
+      "privilege": "SELECT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$runtime_grantee",
+      "object_kind": "table",
+      "object_name": "quant_feedback_run",
+      "privilege": "UPDATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_feedback_run_stage",
+      "privilege": "DELETE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_feedback_run_stage",
+      "privilege": "INSERT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_feedback_run_stage",
+      "privilege": "REFERENCES"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_feedback_run_stage",
+      "privilege": "SELECT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_feedback_run_stage",
+      "privilege": "TRIGGER"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_feedback_run_stage",
+      "privilege": "TRUNCATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_feedback_run_stage",
+      "privilege": "UPDATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$runtime_grantee",
+      "object_kind": "table",
+      "object_name": "quant_feedback_run_stage",
+      "privilege": "DELETE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$runtime_grantee",
+      "object_kind": "table",
+      "object_name": "quant_feedback_run_stage",
+      "privilege": "INSERT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$runtime_grantee",
+      "object_kind": "table",
+      "object_name": "quant_feedback_run_stage",
+      "privilege": "SELECT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$runtime_grantee",
+      "object_kind": "table",
+      "object_name": "quant_feedback_run_stage",
       "privilege": "UPDATE"
     },
     {
@@ -21203,6 +23213,83 @@
       "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "quant_position",
+      "privilege": "UPDATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_profile_allocation_artifact",
+      "privilege": "DELETE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_profile_allocation_artifact",
+      "privilege": "INSERT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_profile_allocation_artifact",
+      "privilege": "REFERENCES"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_profile_allocation_artifact",
+      "privilege": "SELECT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_profile_allocation_artifact",
+      "privilege": "TRIGGER"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_profile_allocation_artifact",
+      "privilege": "TRUNCATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_profile_allocation_artifact",
+      "privilege": "UPDATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$runtime_grantee",
+      "object_kind": "table",
+      "object_name": "quant_profile_allocation_artifact",
+      "privilege": "DELETE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$runtime_grantee",
+      "object_kind": "table",
+      "object_name": "quant_profile_allocation_artifact",
+      "privilege": "INSERT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$runtime_grantee",
+      "object_kind": "table",
+      "object_name": "quant_profile_allocation_artifact",
+      "privilege": "SELECT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$runtime_grantee",
+      "object_kind": "table",
+      "object_name": "quant_profile_allocation_artifact",
       "privilege": "UPDATE"
     },
     {
@@ -22903,77 +24990,77 @@
       "grantable": "NO",
       "grantee": "$schema_owner",
       "object_kind": "table",
-      "object_name": "quant_weather_daily_high_projection",
+      "object_name": "quant_weather_daily_temperature_projection",
       "privilege": "DELETE"
     },
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
       "object_kind": "table",
-      "object_name": "quant_weather_daily_high_projection",
+      "object_name": "quant_weather_daily_temperature_projection",
       "privilege": "INSERT"
     },
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
       "object_kind": "table",
-      "object_name": "quant_weather_daily_high_projection",
+      "object_name": "quant_weather_daily_temperature_projection",
       "privilege": "REFERENCES"
     },
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
       "object_kind": "table",
-      "object_name": "quant_weather_daily_high_projection",
+      "object_name": "quant_weather_daily_temperature_projection",
       "privilege": "SELECT"
     },
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
       "object_kind": "table",
-      "object_name": "quant_weather_daily_high_projection",
+      "object_name": "quant_weather_daily_temperature_projection",
       "privilege": "TRIGGER"
     },
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
       "object_kind": "table",
-      "object_name": "quant_weather_daily_high_projection",
+      "object_name": "quant_weather_daily_temperature_projection",
       "privilege": "TRUNCATE"
     },
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
       "object_kind": "table",
-      "object_name": "quant_weather_daily_high_projection",
+      "object_name": "quant_weather_daily_temperature_projection",
       "privilege": "UPDATE"
     },
     {
       "grantable": "NO",
       "grantee": "$runtime_grantee",
       "object_kind": "table",
-      "object_name": "quant_weather_daily_high_projection",
+      "object_name": "quant_weather_daily_temperature_projection",
       "privilege": "DELETE"
     },
     {
       "grantable": "NO",
       "grantee": "$runtime_grantee",
       "object_kind": "table",
-      "object_name": "quant_weather_daily_high_projection",
+      "object_name": "quant_weather_daily_temperature_projection",
       "privilege": "INSERT"
     },
     {
       "grantable": "NO",
       "grantee": "$runtime_grantee",
       "object_kind": "table",
-      "object_name": "quant_weather_daily_high_projection",
+      "object_name": "quant_weather_daily_temperature_projection",
       "privilege": "SELECT"
     },
     {
       "grantable": "NO",
       "grantee": "$runtime_grantee",
       "object_kind": "table",
-      "object_name": "quant_weather_daily_high_projection",
+      "object_name": "quant_weather_daily_temperature_projection",
       "privilege": "UPDATE"
     },
     {
@@ -24675,6 +26762,76 @@
       "valid": true
     },
     {
+      "definition": "CREATE INDEX idx_quant_domain_source_expectation_family_status ON public.quant_domain_source_expectation USING btree (family, status, source_id, instrument_key)",
+      "method": "btree",
+      "name": "idx_quant_domain_source_expectation_family_status",
+      "primary": false,
+      "ready": true,
+      "table": "quant_domain_source_expectation",
+      "unique": false,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX quant_domain_source_expectation_pkey ON public.quant_domain_source_expectation USING btree (expectation_id)",
+      "method": "btree",
+      "name": "quant_domain_source_expectation_pkey",
+      "primary": true,
+      "ready": true,
+      "table": "quant_domain_source_expectation",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX uq_quant_domain_source_expectation_binding ON public.quant_domain_source_expectation USING btree (source_id, instrument_key)",
+      "method": "btree",
+      "name": "uq_quant_domain_source_expectation_binding",
+      "primary": false,
+      "ready": true,
+      "table": "quant_domain_source_expectation",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX uq_quant_domain_source_expectation_binding_hash ON public.quant_domain_source_expectation USING btree (binding_hash)",
+      "method": "btree",
+      "name": "uq_quant_domain_source_expectation_binding_hash",
+      "primary": false,
+      "ready": true,
+      "table": "quant_domain_source_expectation",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE INDEX idx_quant_drift_report_profile_window ON public.quant_drift_report USING btree (profile_id, window_end DESC, drift_report_id DESC)",
+      "method": "btree",
+      "name": "idx_quant_drift_report_profile_window",
+      "primary": false,
+      "ready": true,
+      "table": "quant_drift_report",
+      "unique": false,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX quant_drift_report_pkey ON public.quant_drift_report USING btree (drift_report_id)",
+      "method": "btree",
+      "name": "quant_drift_report_pkey",
+      "primary": true,
+      "ready": true,
+      "table": "quant_drift_report",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX quant_drift_report_report_hash_key ON public.quant_drift_report USING btree (report_hash)",
+      "method": "btree",
+      "name": "quant_drift_report_report_hash_key",
+      "primary": false,
+      "ready": true,
+      "table": "quant_drift_report",
+      "unique": true,
+      "valid": true
+    },
+    {
       "definition": "CREATE UNIQUE INDEX quant_entry_condition_artifact_pkey ON public.quant_entry_condition_artifact USING btree (artifact_id)",
       "method": "btree",
       "name": "quant_entry_condition_artifact_pkey",
@@ -24845,6 +27002,36 @@
       "valid": true
     },
     {
+      "definition": "CREATE INDEX idx_quant_factor_bundle_profile_status ON public.quant_factor_bundle_artifact USING btree (profile_id, status, created_at DESC)",
+      "method": "btree",
+      "name": "idx_quant_factor_bundle_profile_status",
+      "primary": false,
+      "ready": true,
+      "table": "quant_factor_bundle_artifact",
+      "unique": false,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX quant_factor_bundle_artifact_bundle_hash_key ON public.quant_factor_bundle_artifact USING btree (bundle_hash)",
+      "method": "btree",
+      "name": "quant_factor_bundle_artifact_bundle_hash_key",
+      "primary": false,
+      "ready": true,
+      "table": "quant_factor_bundle_artifact",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX quant_factor_bundle_artifact_pkey ON public.quant_factor_bundle_artifact USING btree (factor_bundle_id)",
+      "method": "btree",
+      "name": "quant_factor_bundle_artifact_pkey",
+      "primary": true,
+      "ready": true,
+      "table": "quant_factor_bundle_artifact",
+      "unique": true,
+      "valid": true
+    },
+    {
       "definition": "CREATE INDEX idx_quant_factor_definition_family_status ON public.quant_factor_definition USING btree (factor_family, status)",
       "method": "btree",
       "name": "idx_quant_factor_definition_family_status",
@@ -24881,6 +27068,36 @@
       "primary": false,
       "ready": true,
       "table": "quant_factor_definition",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE INDEX idx_quant_factor_governance_timeline ON public.quant_factor_governance_audit USING btree (created_at DESC, factor_governance_audit_id DESC)",
+      "method": "btree",
+      "name": "idx_quant_factor_governance_timeline",
+      "primary": false,
+      "ready": true,
+      "table": "quant_factor_governance_audit",
+      "unique": false,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX quant_factor_governance_audit_audit_hash_key ON public.quant_factor_governance_audit USING btree (audit_hash)",
+      "method": "btree",
+      "name": "quant_factor_governance_audit_audit_hash_key",
+      "primary": false,
+      "ready": true,
+      "table": "quant_factor_governance_audit",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX quant_factor_governance_audit_pkey ON public.quant_factor_governance_audit USING btree (factor_governance_audit_id)",
+      "method": "btree",
+      "name": "quant_factor_governance_audit_pkey",
+      "primary": true,
+      "ready": true,
+      "table": "quant_factor_governance_audit",
       "unique": true,
       "valid": true
     },
@@ -25111,6 +27328,76 @@
       "primary": true,
       "ready": true,
       "table": "quant_feature_vector",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE INDEX idx_quant_feedback_run_profile_created ON public.quant_feedback_run USING btree (profile_id, created_at DESC, feedback_run_id DESC)",
+      "method": "btree",
+      "name": "idx_quant_feedback_run_profile_created",
+      "primary": false,
+      "ready": true,
+      "table": "quant_feedback_run",
+      "unique": false,
+      "valid": true
+    },
+    {
+      "definition": "CREATE INDEX idx_quant_feedback_run_status_created ON public.quant_feedback_run USING btree (status, created_at, feedback_run_id)",
+      "method": "btree",
+      "name": "idx_quant_feedback_run_status_created",
+      "primary": false,
+      "ready": true,
+      "table": "quant_feedback_run",
+      "unique": false,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX quant_feedback_run_idempotency_key_key ON public.quant_feedback_run USING btree (idempotency_key)",
+      "method": "btree",
+      "name": "quant_feedback_run_idempotency_key_key",
+      "primary": false,
+      "ready": true,
+      "table": "quant_feedback_run",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX quant_feedback_run_pkey ON public.quant_feedback_run USING btree (feedback_run_id)",
+      "method": "btree",
+      "name": "quant_feedback_run_pkey",
+      "primary": true,
+      "ready": true,
+      "table": "quant_feedback_run",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE INDEX idx_quant_feedback_run_stage_timeline ON public.quant_feedback_run_stage USING btree (feedback_run_id, sequence)",
+      "method": "btree",
+      "name": "idx_quant_feedback_run_stage_timeline",
+      "primary": false,
+      "ready": true,
+      "table": "quant_feedback_run_stage",
+      "unique": false,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX quant_feedback_run_stage_pkey ON public.quant_feedback_run_stage USING btree (feedback_run_stage_id)",
+      "method": "btree",
+      "name": "quant_feedback_run_stage_pkey",
+      "primary": true,
+      "ready": true,
+      "table": "quant_feedback_run_stage",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX uq_quant_feedback_run_stage_sequence ON public.quant_feedback_run_stage USING btree (feedback_run_id, sequence)",
+      "method": "btree",
+      "name": "uq_quant_feedback_run_stage_sequence",
+      "primary": false,
+      "ready": true,
+      "table": "quant_feedback_run_stage",
       "unique": true,
       "valid": true
     },
@@ -25491,6 +27778,26 @@
       "primary": false,
       "ready": true,
       "table": "quant_position",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX quant_profile_allocation_artifact_artifact_hash_key ON public.quant_profile_allocation_artifact USING btree (artifact_hash)",
+      "method": "btree",
+      "name": "quant_profile_allocation_artifact_artifact_hash_key",
+      "primary": false,
+      "ready": true,
+      "table": "quant_profile_allocation_artifact",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX quant_profile_allocation_artifact_pkey ON public.quant_profile_allocation_artifact USING btree (profile_allocation_id)",
+      "method": "btree",
+      "name": "quant_profile_allocation_artifact_pkey",
+      "primary": true,
+      "ready": true,
+      "table": "quant_profile_allocation_artifact",
       "unique": true,
       "valid": true
     },
@@ -26205,22 +28512,22 @@
       "valid": true
     },
     {
-      "definition": "CREATE INDEX idx_quant_weather_daily_high_open ON public.quant_weather_daily_high_projection USING btree (day_closed, local_date, station)",
+      "definition": "CREATE INDEX idx_quant_weather_daily_temperature_open ON public.quant_weather_daily_temperature_projection USING btree (day_closed, local_date, station)",
       "method": "btree",
-      "name": "idx_quant_weather_daily_high_open",
+      "name": "idx_quant_weather_daily_temperature_open",
       "primary": false,
       "ready": true,
-      "table": "quant_weather_daily_high_projection",
+      "table": "quant_weather_daily_temperature_projection",
       "unique": false,
       "valid": true
     },
     {
-      "definition": "CREATE UNIQUE INDEX \"pk-quant_weather_daily_high_projection\" ON public.quant_weather_daily_high_projection USING btree (source_id, instrument_key, local_date)",
+      "definition": "CREATE UNIQUE INDEX \"pk-quant_weather_daily_temperature_projection\" ON public.quant_weather_daily_temperature_projection USING btree (source_id, instrument_key, local_date, temperature_statistic)",
       "method": "btree",
-      "name": "pk-quant_weather_daily_high_projection",
+      "name": "pk-quant_weather_daily_temperature_projection",
       "primary": true,
       "ready": true,
-      "table": "quant_weather_daily_high_projection",
+      "table": "quant_weather_daily_temperature_projection",
       "unique": true,
       "valid": true
     },
@@ -26646,6 +28953,20 @@
     },
     {
       "kind": "r",
+      "name": "quant_domain_source_expectation",
+      "owner": "$schema_owner",
+      "rls_enabled": false,
+      "rls_forced": false
+    },
+    {
+      "kind": "r",
+      "name": "quant_drift_report",
+      "owner": "$schema_owner",
+      "rls_enabled": false,
+      "rls_forced": false
+    },
+    {
+      "kind": "r",
       "name": "quant_entry_condition_artifact",
       "owner": "$schema_owner",
       "rls_enabled": false,
@@ -26688,7 +29009,21 @@
     },
     {
       "kind": "r",
+      "name": "quant_factor_bundle_artifact",
+      "owner": "$schema_owner",
+      "rls_enabled": false,
+      "rls_forced": false
+    },
+    {
+      "kind": "r",
       "name": "quant_factor_definition",
+      "owner": "$schema_owner",
+      "rls_enabled": false,
+      "rls_forced": false
+    },
+    {
+      "kind": "r",
+      "name": "quant_factor_governance_audit",
       "owner": "$schema_owner",
       "rls_enabled": false,
       "rls_forced": false
@@ -26731,6 +29066,20 @@
     {
       "kind": "r",
       "name": "quant_feature_vector",
+      "owner": "$schema_owner",
+      "rls_enabled": false,
+      "rls_forced": false
+    },
+    {
+      "kind": "r",
+      "name": "quant_feedback_run",
+      "owner": "$schema_owner",
+      "rls_enabled": false,
+      "rls_forced": false
+    },
+    {
+      "kind": "r",
+      "name": "quant_feedback_run_stage",
       "owner": "$schema_owner",
       "rls_enabled": false,
       "rls_forced": false
@@ -26815,6 +29164,13 @@
     {
       "kind": "r",
       "name": "quant_position",
+      "owner": "$schema_owner",
+      "rls_enabled": false,
+      "rls_forced": false
+    },
+    {
+      "kind": "r",
+      "name": "quant_profile_allocation_artifact",
       "owner": "$schema_owner",
       "rls_enabled": false,
       "rls_forced": false
@@ -26975,7 +29331,7 @@
     },
     {
       "kind": "r",
-      "name": "quant_weather_daily_high_projection",
+      "name": "quant_weather_daily_temperature_projection",
       "owner": "$schema_owner",
       "rls_enabled": false,
       "rls_forced": false
@@ -27171,6 +29527,18 @@
       "table": "quant_domain_source_cursor"
     },
     {
+      "definition": "CREATE TRIGGER trg_quant_domain_source_expectation_updated_at BEFORE UPDATE ON public.quant_domain_source_expectation FOR EACH ROW EXECUTE FUNCTION trigger_set_updated_at()",
+      "enabled": "O",
+      "name": "trg_quant_domain_source_expectation_updated_at",
+      "table": "quant_domain_source_expectation"
+    },
+    {
+      "definition": "CREATE TRIGGER trg_quant_drift_report_append_only BEFORE DELETE OR UPDATE ON public.quant_drift_report FOR EACH ROW EXECUTE FUNCTION trigger_deny_write()",
+      "enabled": "O",
+      "name": "trg_quant_drift_report_append_only",
+      "table": "quant_drift_report"
+    },
+    {
       "definition": "CREATE TRIGGER trg_quant_entry_condition_artifact_append_only BEFORE DELETE OR UPDATE ON public.quant_entry_condition_artifact FOR EACH ROW EXECUTE FUNCTION trigger_deny_write()",
       "enabled": "O",
       "name": "trg_quant_entry_condition_artifact_append_only",
@@ -27201,10 +29569,22 @@
       "table": "quant_execution_order"
     },
     {
+      "definition": "CREATE TRIGGER trg_quant_factor_bundle_artifact_append_only BEFORE DELETE OR UPDATE ON public.quant_factor_bundle_artifact FOR EACH ROW EXECUTE FUNCTION trigger_deny_write()",
+      "enabled": "O",
+      "name": "trg_quant_factor_bundle_artifact_append_only",
+      "table": "quant_factor_bundle_artifact"
+    },
+    {
       "definition": "CREATE TRIGGER trg_quant_factor_definition_updated_at BEFORE UPDATE ON public.quant_factor_definition FOR EACH ROW EXECUTE FUNCTION trigger_set_updated_at()",
       "enabled": "O",
       "name": "trg_quant_factor_definition_updated_at",
       "table": "quant_factor_definition"
+    },
+    {
+      "definition": "CREATE TRIGGER trg_quant_factor_governance_audit_append_only BEFORE DELETE OR UPDATE ON public.quant_factor_governance_audit FOR EACH ROW EXECUTE FUNCTION trigger_deny_write()",
+      "enabled": "O",
+      "name": "trg_quant_factor_governance_audit_append_only",
+      "table": "quant_factor_governance_audit"
     },
     {
       "definition": "CREATE TRIGGER trg_quant_feature_parity_candidate_append_only BEFORE DELETE OR UPDATE ON public.quant_feature_parity_candidate FOR EACH ROW EXECUTE FUNCTION trigger_deny_write()",
@@ -27231,6 +29611,18 @@
       "table": "quant_feature_parity_subject"
     },
     {
+      "definition": "CREATE TRIGGER trg_quant_feedback_run_updated_at BEFORE UPDATE ON public.quant_feedback_run FOR EACH ROW EXECUTE FUNCTION trigger_set_updated_at()",
+      "enabled": "O",
+      "name": "trg_quant_feedback_run_updated_at",
+      "table": "quant_feedback_run"
+    },
+    {
+      "definition": "CREATE TRIGGER trg_quant_feedback_run_stage_append_only BEFORE DELETE OR UPDATE ON public.quant_feedback_run_stage FOR EACH ROW EXECUTE FUNCTION trigger_deny_write()",
+      "enabled": "O",
+      "name": "trg_quant_feedback_run_stage_append_only",
+      "table": "quant_feedback_run_stage"
+    },
+    {
       "definition": "CREATE TRIGGER trg_quant_model_governance_audit_append_only BEFORE DELETE OR UPDATE ON public.quant_model_governance_audit FOR EACH ROW EXECUTE FUNCTION trigger_deny_write()",
       "enabled": "O",
       "name": "trg_quant_model_governance_audit_append_only",
@@ -27253,6 +29645,12 @@
       "enabled": "O",
       "name": "trg_quant_position_updated_at",
       "table": "quant_position"
+    },
+    {
+      "definition": "CREATE TRIGGER trg_quant_profile_allocation_artifact_append_only BEFORE DELETE OR UPDATE ON public.quant_profile_allocation_artifact FOR EACH ROW EXECUTE FUNCTION trigger_deny_write()",
+      "enabled": "O",
+      "name": "trg_quant_profile_allocation_artifact_append_only",
+      "table": "quant_profile_allocation_artifact"
     },
     {
       "definition": "CREATE TRIGGER trg_quant_recommendation_attribution_append_only BEFORE DELETE OR UPDATE ON public.quant_recommendation_attribution FOR EACH ROW EXECUTE FUNCTION trigger_deny_write()",
@@ -27333,10 +29731,10 @@
       "table": "quant_trade_tape_block_cursor"
     },
     {
-      "definition": "CREATE TRIGGER trg_quant_weather_daily_high_projection_updated_at BEFORE UPDATE ON public.quant_weather_daily_high_projection FOR EACH ROW EXECUTE FUNCTION trigger_set_updated_at()",
+      "definition": "CREATE TRIGGER trg_quant_weather_daily_temperature_projection_updated_at BEFORE UPDATE ON public.quant_weather_daily_temperature_projection FOR EACH ROW EXECUTE FUNCTION trigger_set_updated_at()",
       "enabled": "O",
-      "name": "trg_quant_weather_daily_high_projection_updated_at",
-      "table": "quant_weather_daily_high_projection"
+      "name": "trg_quant_weather_daily_temperature_projection_updated_at",
+      "table": "quant_weather_daily_temperature_projection"
     },
     {
       "definition": "CREATE TRIGGER trg_quant_weather_observation_current_updated_at BEFORE UPDATE ON public.quant_weather_observation_current FOR EACH ROW EXECUTE FUNCTION trigger_set_updated_at()",

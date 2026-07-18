@@ -49,6 +49,7 @@ tokio-util = { version = "0.7", features = ["rt", "io"] }
 # Pin to match polymarket_client_sdk_v2's `futures = "^0.3.32"` (futures-* crates
 # must share the same patch version).
 futures-util = "0.3.32"
+flate2 = "1"
 bytes = "1"
 object_store = { version = "0.14", features = ["aws", "tokio"] }
 aws-config = { version = "=1.8.14", default-features = false, features = ["behavior-version-latest", "default-https-client", "rt-tokio"] }
@@ -213,7 +214,7 @@ redis = { version = "1.2", features = ["aio", "tokio-comp"] }
 moka = { version = "0.12", features = ["future", "sync"] }
 
 # ClickHouse typed client (official)
-clickhouse = { version = "0.15", features = ["lz4", "uuid"] }
+clickhouse = { version = "0.15", features = ["chrono", "lz4", "uuid"] }
 
 # Prometheus metrics
 prometheus = "0.14"

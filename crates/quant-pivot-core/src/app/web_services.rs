@@ -43,14 +43,14 @@ use quant_pivot_repository::{
     traits::{
         AccountSnapshotRepository, AttributionRepository, BasisAlertRepository,
         CalibrationArtifactRepository, CatalogLedgerRepository, DomainSourceCursorRepository,
-        EntryConditionRepository, EquitySnapshotRepository, ExecutionOrderRepository,
-        FeatureParityEventRepository, FeatureRepository, MenuRepository, OperationLogRepository,
-        OrderIntentRepository, PositionRepository, RecommendationReportRepository,
-        RecommendationRepository, ReconciliationRepository, ReportRunRepository,
-        ResearchReadinessEvidenceRepository, RoleMenuRepository, RolePermissionRepository,
-        RoleRepository, RuntimeConfigVersionRepository, ServingEvidenceRepository,
-        SettlementRedeemRepository, TradePolicyRepository, TradeTapeBlockCursorRepository,
-        UserRepository, UserRoleRepository,
+        DomainSourceExpectationRepository, EntryConditionRepository, EquitySnapshotRepository,
+        ExecutionOrderRepository, FeatureParityEventRepository, FeatureRepository, MenuRepository,
+        OperationLogRepository, OrderIntentRepository, PositionRepository,
+        RecommendationReportRepository, RecommendationRepository, ReconciliationRepository,
+        ReportRunRepository, ResearchReadinessEvidenceRepository, RoleMenuRepository,
+        RolePermissionRepository, RoleRepository, RuntimeConfigVersionRepository,
+        ServingEvidenceRepository, SettlementRedeemRepository, TradePolicyRepository,
+        TradeTapeBlockCursorRepository, UserRepository, UserRoleRepository,
     },
 };
 use quant_pivot_storage::write::{AsyncWriter, AsyncWriterConfig, AsyncWriterWorker};
@@ -185,6 +185,8 @@ async fn build_app_state(
         market_linkages: Arc::clone(&ctx.research.market_linkage_repo),
         domain_source_cursors: Arc::clone(&ctx.infra.repos.domain_source_cursor)
             as Arc<dyn DomainSourceCursorRepository>,
+        domain_source_expectations: Arc::clone(&ctx.infra.repos.domain_source_expectation)
+            as Arc<dyn DomainSourceExpectationRepository>,
         basis_alerts: Arc::clone(&ctx.infra.repos.basis_alert) as Arc<dyn BasisAlertRepository>,
         linkage_governance: Arc::clone(&ctx.data.linkage_resolver)
             as Arc<dyn MarketLinkageGovernancePort>,

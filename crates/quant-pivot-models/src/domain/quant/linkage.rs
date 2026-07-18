@@ -29,12 +29,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     entities::quant_market_linkage,
-    enums::domain::{DomainFamily, KlineInterval, LinkageSourceRole, LinkageStatus, ResolverTier},
+    enums::domain::{
+        BinanceMarketSegment, DomainFamily, KlineInterval, LinkageSourceRole, LinkageStatus,
+        ResolverTier,
+    },
     hashing::CanonicalDigest,
     types::{
         BinanceSymbol, ChainlinkFeedKey, ContentHash, CryptoAsset, CryptoQuote,
         DomainInstrumentKey, DomainSourceId, IcaoStation, MarketId, MarketLinkageId, Probability,
-        ResolverVersion, TemperatureBand, TemperatureUnit, Usd,
+        ResolverVersion, TemperatureBand, TemperatureUnit, Usd, WeatherContractFinalizationPolicy,
+        WeatherTemperatureStatistic,
     },
 };
 
@@ -43,8 +47,8 @@ use crate::{
 /// This is the resolver's **entire** input surface: every grounding span must
 /// anchor into one of these fields, and [`Self::metadata_hash`] is the
 /// bitemporal knowledge axis persisted on the derived record. Any metadata
-/// revision (question edit, description edit, series change, end-date move)
-/// changes the hash and triggers re-resolution.
+/// revision (question edit, description edit, series/group-membership change,
+/// end-date move) changes the hash and triggers re-resolution.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LinkageSourceMetadata {
     /// The market being resolved.
@@ -57,6 +61,11 @@ pub struct LinkageSourceMetadata {
     pub description: Option<String>,
     /// Owning event's recurring-series slug, when present.
     pub series_slug: Option<String>,
+    /// Ordered Gamma sibling membership for a mutually exclusive decision
+    /// group. Empty for standalone contracts. Including this catalog snapshot
+    /// in [`Self::metadata_hash`] prevents a newly added or removed Weather
+    /// bucket from leaving otherwise unchanged sibling linkages current.
+    pub decision_group_market_ids: Vec<MarketId>,
     /// Scheduled resolution time, when published.
     pub end_date: Option<DateTime<Utc>>,
 }
@@ -72,18 +81,34 @@ impl LinkageSourceMetadata {
     }
 }
 
+/// Whether an exact strike/band endpoint belongs to the outcome region.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PriceBoundaryInclusion {
+    Inclusive,
+    Exclusive,
+}
+
 /// How a crypto market's question compares the underlying price to its strike.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PriceComparator {
+    /// Resolves YES when the underlying settles strictly above the strike.
+    GreaterThan,
     /// Resolves YES when the underlying settles at or above the strike.
-    Above,
+    GreaterThanOrEqual,
+    /// Resolves YES when the underlying settles strictly below the strike.
+    LessThan,
     /// Resolves YES when the underlying settles at or below the strike.
-    Below,
-    /// Resolves YES when the underlying settles inside `[strike, hi]`.
+    LessThanOrEqual,
+    /// Resolves YES inside the explicitly frozen lower/upper boundary policy.
     Between {
-        /// Inclusive upper bound of the band (the strike is the lower bound).
+        /// Upper bound of the band (the strike is the lower bound).
         hi: Usd,
+        /// Whether the lower strike itself belongs to this band.
+        lower: PriceBoundaryInclusion,
+        /// Whether the upper bound itself belongs to this band.
+        upper: PriceBoundaryInclusion,
     },
     /// Up-or-down market: resolves against the reference observation at
     /// [`CryptoSubject::reference_at`] (no absolute strike exists).
@@ -108,6 +133,8 @@ pub enum ResolutionOracle {
     /// Binance candle close (daily / threshold markets whose rules cite the
     /// Binance 1-minute candle).
     BinanceKline {
+        /// Exact Binance product cited by the rules.
+        market: BinanceMarketSegment,
         /// Venue symbol, e.g. `BTCUSDT`.
         symbol: BinanceSymbol,
         /// Candle interval cited by the rules text.
@@ -135,25 +162,63 @@ pub struct CryptoSubject {
     pub resolution_oracle: ResolutionOracle,
 }
 
-/// Frozen airport daily-high subject supported by the Weather vertical.
+/// Identity shared by every mutually exclusive sibling in one airport
+/// daily-temperature event. The outcome band is deliberately absent so all
+/// siblings hash to the same decision-group id.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WeatherSubject {
+pub struct WeatherDecisionGroupKey {
+    /// Whether the contract settles against the local-day maximum or minimum.
+    pub temperature_statistic: WeatherTemperatureStatistic,
     /// ICAO station whose observations proxy the settlement location.
     pub station: IcaoStation,
     /// IANA timezone used to derive the local calendar day.
     pub timezone: String,
     /// Local calendar date in `timezone`.
     pub local_date: chrono::NaiveDate,
-    /// Recommended token's inclusive temperature band.
-    pub outcome_band: TemperatureBand,
     /// Unit displayed by the market contract.
     pub market_unit: TemperatureUnit,
     /// Frozen settlement-rule URL. It is evidence only and is never scraped.
     pub settlement_rule_url: String,
+    /// Exact rule-text finalization semantics.
+    pub finalization_policy: WeatherContractFinalizationPolicy,
+    /// Canonical hash of the complete deploy-time station registry.
+    pub station_registry_hash: ContentHash,
     /// Canonical hash of the station coordinates, elevation and source station ids.
     pub station_profile_hash: ContentHash,
-    /// Canonical hash of the whole-degree, midpoint-away-from-zero proxy methodology.
+    /// Canonical hash of statistic aggregation plus whole-degree conversion.
     pub proxy_methodology_hash: ContentHash,
+}
+
+impl WeatherDecisionGroupKey {
+    /// Content-address this sibling-group identity.
+    ///
+    /// # Errors
+    ///
+    /// Propagates canonical serialization failures.
+    pub fn decision_group_id(&self) -> Result<ContentHash, CanonicalDigestError> {
+        CanonicalDigest::content_hash_json(&("weather_decision_group_v1", self))
+    }
+}
+
+/// Frozen airport daily-temperature contract subject.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WeatherSubject {
+    /// Stable group identity shared by all sibling markets.
+    pub decision_group_id: ContentHash,
+    /// Group-level identity and settlement semantics.
+    pub decision_group: WeatherDecisionGroupKey,
+    /// This binary sibling's inclusive whole-degree outcome band.
+    pub outcome_band: TemperatureBand,
+}
+
+impl WeatherSubject {
+    /// Verify the persisted group id against the canonical group key.
+    #[must_use]
+    pub fn has_valid_decision_group_id(&self) -> bool {
+        self.decision_group
+            .decision_group_id()
+            .is_ok_and(|expected| expected == self.decision_group_id)
+    }
 }
 
 /// One exact source/instrument binding frozen into a linkage revision.
@@ -177,7 +242,7 @@ pub struct ResolvedSourceBinding {
 pub enum MarketSubject {
     /// Crypto underlying-price subject.
     Crypto(CryptoSubject),
-    /// Airport local-day maximum-temperature subject.
+    /// Airport local-day temperature sibling subject.
     Weather(WeatherSubject),
 }
 
@@ -357,6 +422,10 @@ pub struct MarketLinkage {
     /// Canonical hash of the Gamma metadata snapshot this record was derived
     /// from (immutable provenance, distinct from the two time axes).
     pub metadata_hash: ContentHash,
+    /// Capability registry that governed classification and source bindings.
+    /// Historical rows created before Runtime v18 remain readable as `None`
+    /// but are never considered current by the resolver.
+    pub capability_registry_hash: Option<ContentHash>,
     /// Content address over the full outcome (idempotent-write key).
     pub content_hash: ContentHash,
     /// Source-effective instant of this resolver outcome. A PIT reader may use
@@ -383,6 +452,7 @@ struct LinkageHashInput<'a> {
     resolver_tier: ResolverTier,
     resolver_version: ResolverVersion,
     metadata_hash: &'a ContentHash,
+    capability_registry_hash: &'a ContentHash,
 }
 
 impl MarketLinkage {
@@ -398,6 +468,7 @@ impl MarketLinkage {
         resolver_tier: ResolverTier,
         resolver_version: ResolverVersion,
         metadata_hash: &ContentHash,
+        capability_registry_hash: &ContentHash,
     ) -> Result<ContentHash, CanonicalDigestError> {
         CanonicalDigest::content_hash_json(&LinkageHashInput {
             market_id,
@@ -406,6 +477,7 @@ impl MarketLinkage {
             resolver_tier,
             resolver_version,
             metadata_hash,
+            capability_registry_hash,
         })
     }
 
@@ -446,6 +518,7 @@ pub struct MarketLinkageInfo {
     pub confidence: Probability,
     pub outcome: serde_json::Value,
     pub metadata_hash: ContentHash,
+    pub capability_registry_hash: Option<ContentHash>,
     pub content_hash: ContentHash,
     pub derived_at: DateTime<Utc>,
     /// First-class projection of `outcome.override_context.reason` (11.2.2
@@ -469,6 +542,7 @@ info_from_model!(
         confidence,
         outcome,
         metadata_hash,
+        capability_registry_hash,
         content_hash,
         derived_at,
         override_reason,
@@ -492,6 +566,7 @@ pub struct NewMarketLinkage {
     pub confidence: Probability,
     pub outcome: serde_json::Value,
     pub metadata_hash: ContentHash,
+    pub capability_registry_hash: Option<ContentHash>,
     pub content_hash: ContentHash,
     pub derived_at: DateTime<Utc>,
     pub override_reason: Option<String>,
@@ -511,6 +586,7 @@ pub struct MarketLinkageDerivation {
     pub resolver_tier: ResolverTier,
     pub resolver_version: ResolverVersion,
     pub metadata_hash: ContentHash,
+    pub capability_registry_hash: ContentHash,
     pub effective_at: DateTime<Utc>,
 }
 
@@ -538,6 +614,7 @@ impl NewMarketLinkage {
             resolver_tier,
             resolver_version,
             metadata_hash,
+            capability_registry_hash,
             effective_at,
         } = derivation;
         let domain_family = match &outcome {
@@ -562,6 +639,7 @@ impl NewMarketLinkage {
             resolver_tier,
             resolver_version,
             &metadata_hash,
+            &capability_registry_hash,
         )?;
         let override_context = binding.and_then(|binding| binding.override_context.as_ref());
         let override_reason = override_context.map(|context| context.reason.clone());
@@ -582,6 +660,7 @@ impl NewMarketLinkage {
             confidence,
             outcome,
             metadata_hash,
+            capability_registry_hash: Some(capability_registry_hash),
             content_hash,
             derived_at: effective_at,
             override_reason,
@@ -618,6 +697,7 @@ impl MarketLinkageInfo {
             resolver_tier: self.resolver_tier,
             resolver_version: self.resolver_version,
             metadata_hash: self.metadata_hash,
+            capability_registry_hash: self.capability_registry_hash,
             content_hash: self.content_hash,
             effective_at: self.derived_at,
             available_at: self.created_at,
@@ -628,14 +708,15 @@ impl MarketLinkageInfo {
 #[cfg(test)]
 mod tests {
     use super::{
-        CryptoSubject, GroundingProof, GroundingSpan, LinkageOutcome, MarketLinkage,
-        MarketLinkageDerivation, MarketSubject, NewMarketLinkage, PriceComparator,
+        CryptoSubject, GroundingProof, GroundingSpan, LinkageOutcome, LinkageSourceMetadata,
+        MarketLinkage, MarketLinkageDerivation, MarketSubject, NewMarketLinkage, PriceComparator,
         ResolutionOracle, ResolvedBinding, ResolvedSourceBinding,
     };
     use crate::{
         domain::{GroundingField, GroundingKind},
         enums::domain::{
-            DomainFamily, KlineInterval, LinkageSourceRole, LinkageStatus, ResolverTier,
+            BinanceMarketSegment, DomainFamily, KlineInterval, LinkageSourceRole, LinkageStatus,
+            ResolverTier,
         },
         types::{
             BinanceSymbol, ContentHash, CryptoAsset, CryptoQuote, DomainInstrumentKey,
@@ -655,6 +736,7 @@ mod tests {
                 reference_at: Some(Utc::now()),
                 observation_at: Utc::now(),
                 resolution_oracle: ResolutionOracle::BinanceKline {
+                    market: BinanceMarketSegment::Spot,
                     symbol: symbol.clone(),
                     interval: KlineInterval::OneMinute,
                 },
@@ -687,6 +769,8 @@ mod tests {
     fn sample_linkage(outcome: LinkageOutcome, tier: ResolverTier) -> MarketLinkage {
         let market_id = MarketId::new("0xmarket");
         let metadata_hash = ContentHash::parse(format!("blake3:{}", "0".repeat(64))).expect("hash");
+        let capability_registry_hash =
+            ContentHash::parse(format!("blake3:{}", "f".repeat(64))).expect("hash");
         let content_hash = MarketLinkage::compute_content_hash(
             &market_id,
             DomainFamily::Crypto,
@@ -694,6 +778,7 @@ mod tests {
             tier,
             ResolverVersion::FIRST,
             &metadata_hash,
+            &capability_registry_hash,
         )
         .expect("content hash");
         MarketLinkage {
@@ -705,6 +790,7 @@ mod tests {
             resolver_tier: tier,
             resolver_version: ResolverVersion::FIRST,
             metadata_hash,
+            capability_registry_hash: Some(capability_registry_hash),
             content_hash,
             effective_at: Utc::now(),
             available_at: Utc::now(),
@@ -746,6 +832,8 @@ mod tests {
             resolver_tier: ResolverTier::Tier0Slug,
             resolver_version: ResolverVersion::FIRST,
             metadata_hash: ContentHash::parse(format!("blake3:{}", "1".repeat(64))).expect("hash"),
+            capability_registry_hash: ContentHash::parse(format!("blake3:{}", "f".repeat(64)))
+                .expect("hash"),
             effective_at,
         })
         .expect("derivation");
@@ -760,9 +848,38 @@ mod tests {
     }
 
     #[test]
+    fn metadata_hash_binds_decision_group_membership() {
+        let metadata = LinkageSourceMetadata {
+            market_id: MarketId::new("weather-middle"),
+            slug: "weather-middle".to_owned(),
+            question: "Will the highest temperature be 13°F?".to_owned(),
+            description: None,
+            series_slug: None,
+            decision_group_market_ids: vec![
+                MarketId::new("weather-low"),
+                MarketId::new("weather-middle"),
+                MarketId::new("weather-high"),
+            ],
+            end_date: None,
+        };
+        let original = metadata.metadata_hash().expect("metadata hash");
+        let mut changed = metadata;
+        changed
+            .decision_group_market_ids
+            .push(MarketId::new("weather-new-tail"));
+        assert_ne!(
+            original,
+            changed.metadata_hash().expect("changed metadata hash"),
+            "adding a sibling must invalidate every group's current linkage"
+        );
+    }
+
+    #[test]
     fn content_hash_is_idempotent_and_outcome_sensitive() {
         let market_id = MarketId::new("0xmarket");
         let metadata_hash = ContentHash::parse(format!("blake3:{}", "0".repeat(64))).expect("hash");
+        let capability_registry_hash =
+            ContentHash::parse(format!("blake3:{}", "f".repeat(64))).expect("hash");
         let resolved = LinkageOutcome::Resolved(Box::new(sample_binding()));
         let a = MarketLinkage::compute_content_hash(
             &market_id,
@@ -771,6 +888,7 @@ mod tests {
             ResolverTier::Tier0Slug,
             ResolverVersion::FIRST,
             &metadata_hash,
+            &capability_registry_hash,
         )
         .expect("hash");
         let b = MarketLinkage::compute_content_hash(
@@ -780,6 +898,7 @@ mod tests {
             ResolverTier::Tier0Slug,
             ResolverVersion::FIRST,
             &metadata_hash,
+            &capability_registry_hash,
         )
         .expect("hash");
         assert_eq!(a, b, "same inputs must be idempotent");
@@ -794,8 +913,23 @@ mod tests {
             ResolverTier::Tier0Slug,
             ResolverVersion::FIRST,
             &metadata_hash,
+            &capability_registry_hash,
         )
         .expect("hash");
         assert_ne!(a, c, "outcome must perturb the digest");
+
+        let different_registry_hash =
+            ContentHash::parse(format!("blake3:{}", "e".repeat(64))).expect("hash");
+        let d = MarketLinkage::compute_content_hash(
+            &market_id,
+            DomainFamily::Crypto,
+            &resolved,
+            ResolverTier::Tier0Slug,
+            ResolverVersion::FIRST,
+            &metadata_hash,
+            &different_registry_hash,
+        )
+        .expect("hash");
+        assert_ne!(a, d, "capability registry must perturb the digest");
     }
 }

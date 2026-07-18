@@ -44,7 +44,10 @@ use quant_pivot_models::{
             ChCanonicalBookEventType, ChFactSource, ChStreamSessionEndReason, ChStreamSessionState,
         },
         common::{CategorySet, MarketCategory, TickSize},
-        domain::{DomainFamily, DomainMetric, KlineInterval, LinkageSourceRole, ResolverTier},
+        domain::{
+            BinanceMarketSegment, DomainFamily, DomainMetric, KlineInterval, LinkageSourceRole,
+            ResolverTier,
+        },
         factor::FactorFamily,
         market::{EventStatus, MarketStatus},
         model::ModelFamily,
@@ -1407,6 +1410,7 @@ fn resolved_crypto_linkage(
             reference_at: Some(reference_at),
             observation_at: reference_at + ChronoDuration::days(1),
             resolution_oracle: ResolutionOracle::BinanceKline {
+                market: BinanceMarketSegment::Spot,
                 symbol: BinanceSymbol::parse("BTCUSDT").expect("symbol"),
                 interval: KlineInterval::OneMinute,
             },
@@ -1423,6 +1427,8 @@ fn resolved_crypto_linkage(
         override_context: None,
     }));
     let metadata_hash = ContentHash::parse(format!("blake3:{}", "7".repeat(64))).expect("hash");
+    let capability_registry_hash =
+        ContentHash::parse(format!("blake3:{}", "f".repeat(64))).expect("hash");
     NewMarketLinkage::from_derivation(MarketLinkageDerivation {
         market_id,
         outcome,
@@ -1430,6 +1436,7 @@ fn resolved_crypto_linkage(
         resolver_tier: ResolverTier::Tier0Slug,
         resolver_version: ResolverVersion::FIRST,
         metadata_hash,
+        capability_registry_hash,
         effective_at: derived_at,
     })
     .expect("new linkage")

@@ -1,5 +1,5 @@
 //! Versioned, hot-reloadable runtime configuration
-//! (`schema_version` — see [`RUNTIME_CONFIG_SCHEMA_VERSION`], currently `17`).
+//! (`schema_version` — see [`RUNTIME_CONFIG_SCHEMA_VERSION`], currently `18`).
 
 mod factor_names;
 pub mod json_schema;
@@ -37,10 +37,11 @@ use crate::types::SchemaVersion;
 ///
 /// This is a **monotonic** version: every schema-changing phase bumps it by one
 /// and the greenfield database is reset (zero compatibility — no shim, no
-/// migration; non-matching documents are rejected). Version 17 removes the
-/// unimplemented top-level `feedback` placeholder instead of carrying a wire
-/// contract with no executable semantics.
-pub const RUNTIME_CONFIG_SCHEMA_VERSION: SchemaVersion = SchemaVersion::new(17);
+/// migration; non-matching documents are rejected). Version 18 adds only the
+/// operational controls for the durable feedback-cycle worker. Statistical
+/// methodology and publication thresholds remain frozen in immutable research
+/// profile artifacts, never in mutable runtime configuration.
+pub const RUNTIME_CONFIG_SCHEMA_VERSION: SchemaVersion = SchemaVersion::new(18);
 
 /// Root of the quant-pivot hot-reloadable runtime configuration document.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -75,6 +76,8 @@ pub struct RuntimeConfig {
     pub notification: NotificationConfig,
     /// Research plane: training objective + validation methodology.
     pub research: ResearchConfig,
+    /// Operational controls for durable feedback and retraining cycles.
+    pub feedback: FeedbackConfig,
 }
 
 impl Default for RuntimeConfig {
@@ -94,6 +97,7 @@ impl Default for RuntimeConfig {
             execution: ExecutionConfig::default(),
             notification: NotificationConfig::default(),
             research: ResearchConfig::default(),
+            feedback: FeedbackConfig::default(),
         }
     }
 }
@@ -311,7 +315,7 @@ mod tests {
             RuntimeConfig::default().schema_version,
             RUNTIME_CONFIG_SCHEMA_VERSION
         );
-        assert_eq!(RUNTIME_CONFIG_SCHEMA_VERSION, SchemaVersion::new(17));
+        assert_eq!(RUNTIME_CONFIG_SCHEMA_VERSION, SchemaVersion::new(18));
     }
 
     #[test]

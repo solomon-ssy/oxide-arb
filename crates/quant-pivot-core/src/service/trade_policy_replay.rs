@@ -44,8 +44,9 @@ use quant_pivot_models::{
         TradePolicyEvidenceObjectKind, TradePolicyFillEvidenceRow, TradePolicyLatencyScenario,
         TradePolicyObservationCapability, TradePolicyObservationEligibilityRow,
         TradePolicyParameterSource, TradePolicyQualityGate, TradePolicyReplayGap,
-        TradePolicyStatisticalSummaryRow, Usd, VerticalGateEvidence, WeatherDailyHighEnteredBand,
-        WeatherDailyHighExceededBandUpper, WeatherObservationDayClosedOutsideBand,
+        TradePolicyStatisticalSummaryRow, Usd, VerticalGateEvidence,
+        WeatherDailyTemperatureCrossedTerminalBound, WeatherDailyTemperatureEnteredBand,
+        WeatherObservationDayClosedOutsideBand, WeatherTemperatureStatistic,
     },
 };
 use quant_pivot_research::{
@@ -68,8 +69,8 @@ use uuid::Uuid;
 
 use crate::{
     execution::entry_condition::{
-        EntryConditionInputSet, ExecutablePriceInput, FactorSnapshotInput, WeatherDailyHighInput,
-        evaluate_entry_condition,
+        EntryConditionInputSet, ExecutablePriceInput, FactorSnapshotInput,
+        WeatherDailyTemperatureInput, evaluate_entry_condition,
     },
     prefetch::replay_page::ReplayPage,
     projection::inference_batch::build_frozen_runtime_input,
@@ -1750,43 +1751,55 @@ fn materialize_weather_event(
             binding_hash: source.binding_hash.clone(),
         })
         .ok_or_else(|| methodology("Weather linkage has no live-event source".to_owned()))?;
-    let MarketEventTemplate::WeatherDailyHighPredicate { max_input_age_ms } = template else {
+    let MarketEventTemplate::WeatherDailyTemperaturePredicate { max_input_age_ms } = template
+    else {
         return Err(methodology(
             "Weather candidate contains a non-Weather event template".to_owned(),
         ));
     };
     Ok(match signal.outcome_side {
-        OutcomeSide::Yes => {
-            MarketEventCondition::WeatherDailyHighEnteredBand(WeatherDailyHighEnteredBand {
+        OutcomeSide::Yes => MarketEventCondition::WeatherDailyTemperatureEnteredBand(
+            WeatherDailyTemperatureEnteredBand {
                 source,
-                station: subject.station.to_string(),
-                local_date: subject.local_date,
-                unit: subject.market_unit,
+                station: subject.decision_group.station.to_string(),
+                local_date: subject.decision_group.local_date,
+                temperature_statistic: subject.decision_group.temperature_statistic,
+                unit: subject.decision_group.market_unit,
                 band: subject.outcome_band.clone(),
-                proxy_methodology_hash: subject.proxy_methodology_hash.clone(),
+                proxy_methodology_hash: subject.decision_group.proxy_methodology_hash.clone(),
                 max_input_age_ms,
-            })
-        }
-        OutcomeSide::No => match subject.outcome_band.upper_inclusive {
-            Some(upper_inclusive) => MarketEventCondition::WeatherDailyHighExceededBandUpper(
-                WeatherDailyHighExceededBandUpper {
-                    source,
-                    station: subject.station.to_string(),
-                    local_date: subject.local_date,
-                    unit: subject.market_unit,
-                    upper_inclusive,
-                    proxy_methodology_hash: subject.proxy_methodology_hash.clone(),
-                    max_input_age_ms,
-                },
-            ),
+            },
+        ),
+        OutcomeSide::No => match match subject.decision_group.temperature_statistic {
+            WeatherTemperatureStatistic::Maximum => subject.outcome_band.upper_inclusive,
+            WeatherTemperatureStatistic::Minimum => subject.outcome_band.lower_inclusive,
+        } {
+            Some(terminal_bound) => {
+                MarketEventCondition::WeatherDailyTemperatureCrossedTerminalBound(
+                    WeatherDailyTemperatureCrossedTerminalBound {
+                        source,
+                        station: subject.decision_group.station.to_string(),
+                        local_date: subject.decision_group.local_date,
+                        temperature_statistic: subject.decision_group.temperature_statistic,
+                        unit: subject.decision_group.market_unit,
+                        terminal_bound,
+                        proxy_methodology_hash: subject
+                            .decision_group
+                            .proxy_methodology_hash
+                            .clone(),
+                        max_input_age_ms,
+                    },
+                )
+            }
             None => MarketEventCondition::WeatherObservationDayClosedOutsideBand(
                 WeatherObservationDayClosedOutsideBand {
                     source,
-                    station: subject.station.to_string(),
-                    local_date: subject.local_date,
-                    unit: subject.market_unit,
+                    station: subject.decision_group.station.to_string(),
+                    local_date: subject.decision_group.local_date,
+                    temperature_statistic: subject.decision_group.temperature_statistic,
+                    unit: subject.decision_group.market_unit,
                     band: subject.outcome_band.clone(),
-                    proxy_methodology_hash: subject.proxy_methodology_hash.clone(),
+                    proxy_methodology_hash: subject.decision_group.proxy_methodology_hash.clone(),
                 },
             ),
         },
@@ -1903,7 +1916,7 @@ fn weather_input(
     linkage: &MarketLinkage,
     at: DateTime<Utc>,
     initial_boundary: &DecisionBoundary,
-) -> QuantResult<Option<WeatherDailyHighInput>> {
+) -> QuantResult<Option<WeatherDailyTemperatureInput>> {
     let LinkageOutcome::Resolved(binding) = &linkage.outcome else {
         return Ok(None);
     };
@@ -1921,45 +1934,54 @@ fn weather_input(
     let cutoff = boundary.cutoff_for(DecisionSource::DomainWeather);
     let mut latest = BTreeMap::<DateTime<Utc>, &WeatherObservationFact>::new();
     for fact in page.weather_observations.iter().filter(|fact| {
-        fact.station == subject.station
-            && fact.local_date == subject.local_date
+        fact.station().as_ref() == Some(&subject.decision_group.station)
+            && fact.local_date == subject.decision_group.local_date
             && fact.report_kind != WeatherObservationReportKind::HistoricalGhcnh
-            && fact.observation_time <= cutoff
+            && fact.observed_at <= cutoff
             && fact.available_at <= at
+            && fact.temperature_celsius().is_some()
     }) {
-        let replace = latest.get(&fact.observation_time).is_none_or(|current| {
+        let replace = latest.get(&fact.observed_at).is_none_or(|current| {
             (current.revision, current.available_at, &current.report_hash)
                 < (fact.revision, fact.available_at, &fact.report_hash)
         });
         if replace {
-            latest.insert(fact.observation_time, fact);
+            latest.insert(fact.observed_at, fact);
         }
     }
     if latest.is_empty() {
         return Ok(None);
     }
-    let current_high = latest
+    let temperatures = latest
         .values()
-        .map(|fact| fact.temperature.value())
-        .max()
-        .ok_or_else(|| methodology("Weather daily-high fold is empty".to_owned()))?;
+        .filter_map(|fact| fact.temperature_celsius().map(TemperatureCelsius::value));
+    let current_extreme = match subject.decision_group.temperature_statistic {
+        WeatherTemperatureStatistic::Maximum => temperatures.max(),
+        WeatherTemperatureStatistic::Minimum => temperatures.min(),
+    }
+    .ok_or_else(|| methodology("Weather daily-temperature fold is empty".to_owned()))?;
     let latest_fact = latest
         .values()
-        .max_by_key(|fact| (fact.observation_time, fact.available_at, fact.revision))
-        .ok_or_else(|| methodology("Weather daily-high has no latest fact".to_owned()))?;
+        .max_by_key(|fact| (fact.observed_at, fact.available_at, fact.revision))
+        .ok_or_else(|| methodology("Weather daily-temperature has no latest fact".to_owned()))?;
     let report_hash = CanonicalDigest::content_hash_json(
         &latest
             .iter()
             .map(|(observation_time, fact)| (*observation_time, fact.revision, &fact.report_hash))
             .collect::<Vec<_>>(),
     )?;
-    let timezone = subject.timezone.parse::<Tz>().map_err(|error| {
-        methodology(format!(
-            "Weather timezone {} is invalid: {error}",
-            subject.timezone
-        ))
-    })?;
+    let timezone = subject
+        .decision_group
+        .timezone
+        .parse::<Tz>()
+        .map_err(|error| {
+            methodology(format!(
+                "Weather timezone {} is invalid: {error}",
+                subject.decision_group.timezone
+            ))
+        })?;
     let next_date = subject
+        .decision_group
         .local_date
         .succ_opt()
         .ok_or_else(|| methodology("Weather local date overflows".to_owned()))?;
@@ -1977,20 +1999,27 @@ fn weather_input(
         ))
     })?;
     let close_at = (local_midnight + Duration::seconds(grace)).with_timezone(&Utc);
-    Ok(Some(WeatherDailyHighInput {
+    let next_day_observed = page.weather_observations.iter().any(|fact| {
+        fact.station().as_ref() == Some(&subject.decision_group.station)
+            && fact.local_date >= next_date
+            && fact.available_at <= at
+            && fact.report_kind != WeatherObservationReportKind::HistoricalGhcnh
+    });
+    Ok(Some(WeatherDailyTemperatureInput {
         source: EntryConditionSourceBinding {
             source_id: source.source_id.clone(),
             instrument_key: source.instrument_key.clone(),
             binding_hash: source.binding_hash.clone(),
         },
-        station: subject.station.to_string(),
-        local_date: subject.local_date,
-        current_high: TemperatureCelsius::new(current_high),
-        observation_time: latest_fact.observation_time,
+        station: subject.decision_group.station.to_string(),
+        local_date: subject.decision_group.local_date,
+        temperature_statistic: subject.decision_group.temperature_statistic,
+        current_extreme: TemperatureCelsius::new(current_extreme),
+        observation_time: latest_fact.observed_at,
         available_at: latest_fact.available_at,
         revision: u64::try_from(latest.len())
             .map_err(|error| methodology(format!("Weather revision overflow: {error}")))?,
-        day_closed: at >= close_at,
+        day_closed: at >= close_at && next_day_observed,
         report_hash,
         gap_generation: 0,
         source_healthy: true,
@@ -2057,10 +2086,10 @@ fn collect_bindings(
             MarketEventCondition::CryptoSubjectPredicateEntered(condition) => {
                 condition.source.clone()
             }
-            MarketEventCondition::WeatherDailyHighEnteredBand(condition) => {
+            MarketEventCondition::WeatherDailyTemperatureEnteredBand(condition) => {
                 condition.source.clone()
             }
-            MarketEventCondition::WeatherDailyHighExceededBandUpper(condition) => {
+            MarketEventCondition::WeatherDailyTemperatureCrossedTerminalBound(condition) => {
                 condition.source.clone()
             }
             MarketEventCondition::WeatherObservationDayClosedOutsideBand(condition) => {

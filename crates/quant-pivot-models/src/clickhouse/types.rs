@@ -3,7 +3,7 @@
 //! `ClickHouse` `Decimal*` values are serialized by the Rust client as scaled
 //! signed integers. These wrappers keep that storage detail out of domain code.
 
-use crate::types::{Bps, Price, Probability, SchemaVersion, Shares, Usd};
+use chrono::{Datelike, NaiveDate};
 use quant_pivot_error::hashing::CanonicalDigestError;
 use rust_decimal::Decimal;
 use serde::{
@@ -12,9 +12,12 @@ use serde::{
 };
 use std::fmt::{self, Display, Formatter};
 
+use crate::types::{Bps, Price, Probability, SchemaVersion, Shares, Usd};
+
 const PRICE_SCALE: u32 = 8;
 const MONEY_SCALE: u32 = 18;
 const BPS_SCALE: u32 = 4;
+const UNIX_EPOCH_FROM_CE_DAYS: i32 = 719_163;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -42,6 +45,16 @@ pub struct ChShares(i128);
 #[serde(transparent)]
 pub struct ChDecimal64(i64);
 
+/// Signed days since 1970-01-01 for historical calendar dates.
+///
+/// `ClickHouse` `Date` starts in 1970 and the Rust client's `Date32` serializer
+/// starts in 1900, while GISTEMP begins in 1880. The explicit `Int32` storage
+/// contract is lossless across chrono's supported `NaiveDate` range and keeps
+/// calendar conversion at this typed boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ChEpochDay(i32);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ChSchemaVersion(pub u32);
@@ -60,6 +73,21 @@ impl ChSchemaVersion {
         u32::try_from(raw)
             .map(Self)
             .map_err(|_| CanonicalDigestError::InvalidSchemaVersion { value: raw })
+    }
+}
+
+impl ChEpochDay {
+    #[must_use]
+    pub fn to_naive_date(self) -> Option<NaiveDate> {
+        self.0
+            .checked_add(UNIX_EPOCH_FROM_CE_DAYS)
+            .and_then(NaiveDate::from_num_days_from_ce_opt)
+    }
+}
+
+impl From<NaiveDate> for ChEpochDay {
+    fn from(value: NaiveDate) -> Self {
+        Self(value.num_days_from_ce() - UNIX_EPOCH_FROM_CE_DAYS)
     }
 }
 
@@ -303,7 +331,9 @@ fn decimal_from_i128(value: i128, scale: u32) -> Decimal {
 
 #[cfg(test)]
 mod tests {
-    use super::{ChPrice, ChSchemaVersion, ChShares, ChUsd};
+    use chrono::NaiveDate;
+
+    use super::{ChEpochDay, ChPrice, ChSchemaVersion, ChShares, ChUsd};
     use crate::types::{Price, SchemaVersion, Shares, Usd};
     use quant_pivot_error::hashing::CanonicalDigestError;
     use rust_decimal_macros::dec;
@@ -328,6 +358,17 @@ mod tests {
     #[test]
     fn schema_version_rejects_i32_min() {
         assert!(ChSchemaVersion::try_from_schema_version(SchemaVersion::new(i32::MIN)).is_err());
+    }
+
+    #[test]
+    fn epoch_day_roundtrips_pre_1900_and_modern_dates() {
+        for date in [
+            NaiveDate::from_ymd_opt(1880, 1, 1).expect("historical date"),
+            NaiveDate::from_ymd_opt(1970, 1, 1).expect("epoch"),
+            NaiveDate::from_ymd_opt(2026, 7, 18).expect("modern date"),
+        ] {
+            assert_eq!(ChEpochDay::from(date).to_naive_date(), Some(date));
+        }
     }
 
     #[test]

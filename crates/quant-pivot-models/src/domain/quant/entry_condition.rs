@@ -14,6 +14,7 @@ use crate::{
         ConditionTruth, ContentHash, DomainInstrumentKey, DomainSourceId, EntryConditionArtifactId,
         EntryConditionArtifactV1, EntryConditionAuditId, EntryConditionFoldState,
         EntryConditionInstanceId, OrderIntentId, RecommendationId, TemperatureCelsius, Usd,
+        WeatherTemperatureStatistic,
     },
 };
 
@@ -245,15 +246,17 @@ pub struct CryptoPriceProjectionInfo {
     pub source_healthy: bool,
 }
 
-/// Current corrected NOAA airport-local-day high used by the live evaluator.
+/// Current corrected NOAA airport-local-day temperature extreme used by the
+/// live evaluator.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WeatherDailyHighProjectionInfo {
+pub struct WeatherDailyTemperatureProjectionInfo {
     pub source_id: DomainSourceId,
     pub instrument_key: DomainInstrumentKey,
     pub station: String,
     pub local_date: chrono::NaiveDate,
     pub timezone: String,
-    pub current_high: TemperatureCelsius,
+    pub temperature_statistic: WeatherTemperatureStatistic,
+    pub current_extreme: TemperatureCelsius,
     pub last_observation_time: DateTime<Utc>,
     pub last_report_hash: ContentHash,
     pub revision: i64,

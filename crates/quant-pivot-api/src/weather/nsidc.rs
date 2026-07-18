@@ -1,0 +1,284 @@
+//! NOAA/NSIDC Sea Ice Index v4 daily extent adapter.
+
+use std::{fmt::Display, str::FromStr, time::Duration};
+
+use chrono::{DateTime, NaiveDate, Utc};
+use quant_pivot_error::{QuantError, QuantResult, api::ApiError};
+use quant_pivot_models::{
+    config::NsidcSeaIceSourceConfig,
+    domain::{WeatherObservationReport, WeatherObservationReportKind},
+    hashing::CanonicalDigest,
+    types::{
+        ContentHash, DomainInstrumentKey, DomainMeasurementUnit, DomainSourceId, WeatherVariable,
+    },
+};
+use rust_decimal::Decimal;
+use serde::Serialize;
+
+use crate::infra::{http::get_text_with_retry, retry::RetryPolicy};
+
+/// NSIDC hemisphere partition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SeaIceHemisphere {
+    North,
+    South,
+}
+
+impl SeaIceHemisphere {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::North => "arctic",
+            Self::South => "antarctic",
+        }
+    }
+}
+
+/// One immutable view of a hemisphere's current v4 CSV.
+pub struct SeaIceDataset {
+    pub file_hash: ContentHash,
+    pub reports: Vec<WeatherObservationReport>,
+}
+
+/// Public NOAA@NSIDC file client.
+pub struct NsidcSeaIceSource {
+    config: NsidcSeaIceSourceConfig,
+    http: reqwest::Client,
+    retry_policy: RetryPolicy,
+}
+
+impl NsidcSeaIceSource {
+    pub fn connect(config: NsidcSeaIceSourceConfig) -> QuantResult<Self> {
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_millis(config.request_timeout_ms))
+            .user_agent("quant-pivot/0.1 nsidc-sea-ice-ingest")
+            .build()
+            .map_err(|error| ApiError::Sdk(format!("NSIDC HTTP client: {error}")))?;
+        Ok(Self {
+            config,
+            http,
+            retry_policy: RetryPolicy::gamma_default(),
+        })
+    }
+
+    #[must_use]
+    pub fn with_http_client(mut self, http: reqwest::Client) -> Self {
+        self.http = http;
+        self
+    }
+
+    pub async fn daily_extent(
+        &self,
+        hemisphere: SeaIceHemisphere,
+        available_at: DateTime<Utc>,
+    ) -> QuantResult<SeaIceDataset> {
+        let url = match hemisphere {
+            SeaIceHemisphere::North => &self.config.north_csv_url,
+            SeaIceHemisphere::South => &self.config.south_csv_url,
+        };
+        let body = get_text_with_retry(&self.http, &self.retry_policy, url)
+            .await
+            .map_err(QuantError::from)?;
+        parse_extent(&body, hemisphere, available_at)
+    }
+}
+
+#[derive(Serialize)]
+struct CanonicalSeaIceDay<'a> {
+    product: &'static str,
+    hemisphere: &'a str,
+    date: NaiveDate,
+    extent_million_square_km: Decimal,
+    missing_million_square_km: Decimal,
+    source_data: &'a str,
+}
+
+fn parse_extent(
+    body: &str,
+    hemisphere: SeaIceHemisphere,
+    available_at: DateTime<Utc>,
+) -> QuantResult<SeaIceDataset> {
+    let file_hash = ContentHash::parse(CanonicalDigest::prefixed_bytes(body.as_bytes()))?;
+    let mut reader = csv::ReaderBuilder::new()
+        .has_headers(false)
+        .flexible(true)
+        .from_reader(body.as_bytes());
+    let mut rows = reader.records();
+    let header = rows
+        .next()
+        .ok_or_else(|| parse_error("missing field header"))?
+        .map_err(|error| parse_error(error.to_string()))?;
+    let expected = ["Year", "Month", "Day", "Extent", "Missing", "Source Data"];
+    if header
+        .iter()
+        .take(expected.len())
+        .map(str::trim)
+        .ne(expected)
+    {
+        return Err(parse_error("unexpected daily extent header contract").into());
+    }
+    let units = rows
+        .next()
+        .ok_or_else(|| parse_error("missing unit header"))?
+        .map_err(|error| parse_error(error.to_string()))?;
+    if units.get(3).map(str::trim) != Some("10^6 sq km")
+        || units.get(4).map(str::trim) != Some("10^6 sq km")
+    {
+        return Err(parse_error("unexpected extent/missing units").into());
+    }
+    let mut reports = Vec::new();
+    for row in rows {
+        let row = row.map_err(|error| parse_error(error.to_string()))?;
+        if row.len() < 5 {
+            return Err(parse_error("daily extent row has fewer than five fields").into());
+        }
+        let year = parse_component(&row, 0, "year")?;
+        let month = parse_component(&row, 1, "month")?;
+        let day = parse_component(&row, 2, "day")?;
+        let date = NaiveDate::from_ymd_opt(year, month, day)
+            .ok_or_else(|| parse_error("invalid daily extent date"))?;
+        let extent = parse_decimal(&row, 3, "extent")?;
+        let missing = parse_decimal(&row, 4, "missing")?;
+        if extent < Decimal::ZERO || missing < Decimal::ZERO {
+            return Err(parse_error("extent/missing area cannot be negative").into());
+        }
+        let next_date = date
+            .succ_opt()
+            .ok_or_else(|| parse_error("daily extent date overflow"))?;
+        let observed_at = next_date
+            .and_hms_opt(0, 0, 0)
+            .ok_or_else(|| parse_error("invalid daily boundary"))?
+            .and_utc();
+        if observed_at > available_at {
+            return Err(parse_error("published extent belongs to an incomplete future day").into());
+        }
+        let source_data = row.iter().skip(5).collect::<Vec<_>>().join(",");
+        let canonical = CanonicalSeaIceDay {
+            product: "NOAA_NSIDC_Sea_Ice_Index_v4",
+            hemisphere: hemisphere.as_str(),
+            date,
+            extent_million_square_km: extent,
+            missing_million_square_km: missing,
+            source_data: &source_data,
+        };
+        let report_hash = CanonicalDigest::content_hash_json(&canonical)?;
+        let raw_report =
+            serde_json::to_string(&canonical).map_err(|error| parse_error(error.to_string()))?;
+        reports.push(WeatherObservationReport {
+            source_id: DomainSourceId::nsidc_sea_ice_index(),
+            instrument_key: DomainInstrumentKey::nsidc_sea_ice_extent(hemisphere.as_str()),
+            subject_key: hemisphere.as_str().to_owned(),
+            report_kind: WeatherObservationReportKind::NsidcSeaIce,
+            variable: WeatherVariable::SeaIceExtent,
+            value: extent,
+            unit: DomainMeasurementUnit::MillionSquareKilometer,
+            precision: Decimal::new(1, 3),
+            observed_at,
+            valid_from: Some(
+                date.and_hms_opt(0, 0, 0)
+                    .ok_or_else(|| parse_error("invalid day start"))?
+                    .and_utc(),
+            ),
+            valid_to: Some(observed_at),
+            published_at: available_at,
+            available_at,
+            report_hash,
+            raw_report,
+        });
+    }
+    reports.sort_by_key(|report| report.observed_at);
+    Ok(SeaIceDataset { file_hash, reports })
+}
+
+fn parse_component<T>(row: &csv::StringRecord, index: usize, name: &str) -> QuantResult<T>
+where
+    T: FromStr,
+    T::Err: Display,
+{
+    row.get(index)
+        .map(str::trim)
+        .ok_or_else(|| parse_error(format!("missing {name}")))?
+        .parse::<T>()
+        .map_err(|error| parse_error(format!("invalid {name}: {error}")).into())
+}
+
+fn parse_decimal(row: &csv::StringRecord, index: usize, name: &str) -> QuantResult<Decimal> {
+    parse_component(row, index, name)
+}
+
+fn parse_error(detail: impl Into<String>) -> ApiError {
+    ApiError::Deserialize {
+        context: "NOAA/NSIDC Sea Ice Index v4 CSV".to_owned(),
+        detail: detail.into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::{TimeZone, Utc};
+    use quant_pivot_models::{
+        config::NsidcSeaIceSourceConfig, domain::WeatherObservationReportKind,
+    };
+    use rust_decimal_macros::dec;
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+
+    use super::{NsidcSeaIceSource, SeaIceHemisphere};
+
+    #[tokio::test]
+    async fn parses_extent_and_preserves_missing_area_quality() {
+        let server = MockServer::start().await;
+        let body = concat!(
+            "Year, Month, Day, Extent, Missing, Source Data\n",
+            "YYYY, MM, DD, 10^6 sq km, 10^6 sq km, source\n",
+            "2025, 09, 15, 4.123, 0.010, ['source-a']\n",
+        );
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(body))
+            .mount(&server)
+            .await;
+        let source = NsidcSeaIceSource::connect(NsidcSeaIceSourceConfig {
+            north_csv_url: server.uri(),
+            ..NsidcSeaIceSourceConfig::default()
+        })
+        .expect("source");
+        let dataset = source
+            .daily_extent(
+                SeaIceHemisphere::North,
+                Utc.with_ymd_and_hms(2026, 7, 18, 0, 0, 0).unwrap(),
+            )
+            .await
+            .expect("dataset");
+        assert_eq!(dataset.reports.len(), 1);
+        assert_eq!(dataset.reports[0].value, dec!(4.123));
+        assert!(dataset.reports[0].raw_report.contains("0.010"));
+        assert_eq!(
+            dataset.reports[0].report_kind,
+            WeatherObservationReportKind::NsidcSeaIce
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_negative_missing_area() {
+        let server = MockServer::start().await;
+        let body = concat!(
+            "Year, Month, Day, Extent, Missing, Source Data\n",
+            "YYYY, MM, DD, 10^6 sq km, 10^6 sq km, source\n",
+            "2025, 09, 15, 4.123, -0.010, source\n",
+        );
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(body))
+            .mount(&server)
+            .await;
+        let source = NsidcSeaIceSource::connect(NsidcSeaIceSourceConfig {
+            north_csv_url: server.uri(),
+            ..NsidcSeaIceSourceConfig::default()
+        })
+        .expect("source");
+        assert!(
+            source
+                .daily_extent(SeaIceHemisphere::North, Utc::now())
+                .await
+                .is_err()
+        );
+    }
+}

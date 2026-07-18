@@ -122,6 +122,7 @@ mod tests {
                     .to_owned(),
             ),
             series_slug: None,
+            decision_group_market_ids: Vec::new(),
             end_date: Some(Utc.with_ymd_and_hms(2026, 7, 8, 12, 0, 0).unwrap()),
         }
     }
@@ -209,7 +210,7 @@ mod tests {
     #[test]
     fn strike_is_required_only_when_present() {
         let mut with_strike = subject();
-        with_strike.comparator = PriceComparator::Above;
+        with_strike.comparator = PriceComparator::GreaterThanOrEqual;
         with_strike.strike = Some(Usd::new(rust_decimal::Decimal::from(100_000)));
         let evidence = vec![
             ManualEvidenceInput {

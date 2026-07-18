@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    clickhouse::{ChDecimal64, ChSchemaVersion},
+    clickhouse::{ChDecimal64, ChEpochDay, ChSchemaVersion},
     types::{ContentHash, DomainInstrumentKey, DomainSourceId, EntryConditionInstanceId},
 };
 
@@ -28,14 +28,19 @@ pub struct CryptoPriceReportRow {
 }
 
 #[derive(Debug, Clone, clickhouse::Row, Serialize, Deserialize)]
-pub struct WeatherObservationReportRow {
+pub struct WeatherObservationFactRow {
     pub source_id: DomainSourceId,
-    pub station: String,
-    pub local_date: String,
+    pub instrument_key: DomainInstrumentKey,
+    pub subject_key: String,
+    pub local_date: ChEpochDay,
     pub report_kind: String,
-    pub temperature_celsius: ChDecimal64,
-    pub precision_celsius: ChDecimal64,
-    pub observation_time: i64,
+    pub variable: String,
+    pub value: ChDecimal64,
+    pub unit: String,
+    pub precision: ChDecimal64,
+    pub observed_at: i64,
+    pub valid_from: Option<i64>,
+    pub valid_to: Option<i64>,
     pub published_at: i64,
     pub available_at: i64,
     pub revision: u32,
@@ -46,17 +51,24 @@ pub struct WeatherObservationReportRow {
 }
 
 #[derive(Debug, Clone, clickhouse::Row, Serialize, Deserialize)]
-pub struct WeatherForecastPointRow {
+pub struct WeatherForecastFactRow {
     pub source_id: DomainSourceId,
-    pub station: String,
+    pub instrument_key: DomainInstrumentKey,
+    pub subject_key: String,
+    pub variable: String,
+    pub value: ChDecimal64,
+    pub unit: String,
+    pub precision: ChDecimal64,
     pub reference_time: i64,
     pub valid_time: i64,
+    pub published_at: i64,
     pub available_at: i64,
     pub lead_hours: u16,
-    pub member: u8,
-    pub tmax_celsius: ChDecimal64,
+    pub member: Option<u16>,
+    pub revision: u32,
     pub grid_binding_hash: ContentHash,
     pub run_manifest_hash: ContentHash,
+    pub report_hash: ContentHash,
     pub schema_version: ChSchemaVersion,
 }
 

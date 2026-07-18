@@ -17,6 +17,7 @@ use crate::{
         ContentHash, DomainInstrumentKey, DomainSourceId, EntryConditionArtifactId,
         FactorDefinitionId, MarketId, MarketLinkageId, MarketSelectionId, ModelVersionId, Price,
         RecommendationId, RuntimeConfigVersionId, TemperatureBand, TemperatureUnit, TokenId, Usd,
+        WeatherTemperatureStatistic,
     },
 };
 
@@ -260,10 +261,13 @@ fn validate_leaf_bindings(
                         PriceComparator::UpVsReference => {
                             condition.reference_price.is_some() && condition.strike.is_none()
                         }
-                        PriceComparator::Above | PriceComparator::Below => {
+                        PriceComparator::GreaterThan
+                        | PriceComparator::GreaterThanOrEqual
+                        | PriceComparator::LessThan
+                        | PriceComparator::LessThanOrEqual => {
                             condition.strike.is_some() && condition.reference_price.is_none()
                         }
-                        PriceComparator::Between { hi } => {
+                        PriceComparator::Between { hi, .. } => {
                             condition.strike.is_some_and(|strike| strike <= hi)
                                 && condition.reference_price.is_none()
                         }
@@ -273,13 +277,13 @@ fn validate_leaf_bindings(
                         subject_valid && condition.max_input_age_ms > 0,
                     )
                 }
-                MarketEventCondition::WeatherDailyHighEnteredBand(condition) => (
+                MarketEventCondition::WeatherDailyTemperatureEnteredBand(condition) => (
                     &condition.source,
                     !condition.station.is_empty()
                         && condition.band.is_valid()
                         && condition.max_input_age_ms > 0,
                 ),
-                MarketEventCondition::WeatherDailyHighExceededBandUpper(condition) => (
+                MarketEventCondition::WeatherDailyTemperatureCrossedTerminalBound(condition) => (
                     &condition.source,
                     !condition.station.is_empty() && condition.max_input_age_ms > 0,
                 ),
@@ -499,8 +503,8 @@ pub struct FactorCondition {
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum MarketEventCondition {
     CryptoSubjectPredicateEntered(CryptoSubjectPredicateEntered),
-    WeatherDailyHighEnteredBand(WeatherDailyHighEnteredBand),
-    WeatherDailyHighExceededBandUpper(WeatherDailyHighExceededBandUpper),
+    WeatherDailyTemperatureEnteredBand(WeatherDailyTemperatureEnteredBand),
+    WeatherDailyTemperatureCrossedTerminalBound(WeatherDailyTemperatureCrossedTerminalBound),
     WeatherObservationDayClosedOutsideBand(WeatherObservationDayClosedOutsideBand),
 }
 
@@ -515,26 +519,30 @@ pub struct CryptoSubjectPredicateEntered {
     pub max_input_age_ms: u64,
 }
 
-/// Weather YES predicate: the current corrected daily high is inside the band.
+/// Weather YES predicate: the current corrected daily extreme is inside the band.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WeatherDailyHighEnteredBand {
+pub struct WeatherDailyTemperatureEnteredBand {
     pub source: EntryConditionSourceBinding,
     pub station: String,
     pub local_date: chrono::NaiveDate,
+    pub temperature_statistic: WeatherTemperatureStatistic,
     pub unit: TemperatureUnit,
     pub band: TemperatureBand,
     pub proxy_methodology_hash: ContentHash,
     pub max_input_age_ms: u64,
 }
 
-/// Weather bounded-NO predicate: the corrected daily high exceeded the upper band.
+/// Weather bounded-NO predicate: the monotonic daily extreme crossed the bound
+/// that makes this outcome impossible. Maximum crosses above an upper bound;
+/// minimum crosses below a lower bound.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WeatherDailyHighExceededBandUpper {
+pub struct WeatherDailyTemperatureCrossedTerminalBound {
     pub source: EntryConditionSourceBinding,
     pub station: String,
     pub local_date: chrono::NaiveDate,
+    pub temperature_statistic: WeatherTemperatureStatistic,
     pub unit: TemperatureUnit,
-    pub upper_inclusive: Decimal,
+    pub terminal_bound: Decimal,
     pub proxy_methodology_hash: ContentHash,
     pub max_input_age_ms: u64,
 }
@@ -545,6 +553,7 @@ pub struct WeatherObservationDayClosedOutsideBand {
     pub source: EntryConditionSourceBinding,
     pub station: String,
     pub local_date: chrono::NaiveDate,
+    pub temperature_statistic: WeatherTemperatureStatistic,
     pub unit: TemperatureUnit,
     pub band: TemperatureBand,
     pub proxy_methodology_hash: ContentHash,

@@ -45,6 +45,9 @@ pub enum ClickHouseMigrationSafety {
     OfflineNonDestructive,
     /// Data rewrites, key changes, or destructive lifecycle DDL.
     OfflineDestructive,
+    /// Resumable offline rebuild that preserves validated rows and explicitly
+    /// excludes one reproducible source with a known corrupt representation.
+    OfflineRebuildableDataRepair,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -127,7 +130,7 @@ impl MigrationSpec {
     }
 }
 
-const fn migrations() -> [MigrationSpec; 4] {
+const fn migrations() -> [MigrationSpec; 9] {
     [
         MigrationSpec {
             version: 1,
@@ -162,6 +165,49 @@ const fn migrations() -> [MigrationSpec; 4] {
             safety: ClickHouseMigrationSafety::OfflineNonDestructive,
             sources: schema::SCHEMA_VERSION_UINT32_SOURCES,
             expected_checksum: "blake3:21a550a792226c7edbea627b1b3fe3eca269177de7d4cda31c1661dbc1b19a04",
+            destructive_empty_tables: &[],
+        },
+        MigrationSpec {
+            version: 5,
+            name: "weather_long_form_v2",
+            safety: ClickHouseMigrationSafety::OfflineDestructive,
+            sources: schema::WEATHER_LONG_FORM_V2_SOURCES,
+            expected_checksum: "blake3:793e84a9ffc5a65f69c6989d0d06f5148670bf8d8524e4d2e5f48ea1e97e1fc7",
+            destructive_empty_tables: &[
+                "quant_weather_observation_report",
+                "quant_weather_forecast_point",
+            ],
+        },
+        MigrationSpec {
+            version: 6,
+            name: "weather_historical_date32",
+            safety: ClickHouseMigrationSafety::OfflineNonDestructive,
+            sources: schema::WEATHER_HISTORICAL_DATE32_SOURCES,
+            expected_checksum: "blake3:b226177fa5f82a07f7ae3aac24cfcffe811e29cc68aec0bfd1417b2b6b066b50",
+            destructive_empty_tables: &[],
+        },
+        MigrationSpec {
+            version: 7,
+            name: "weather_epoch_day",
+            safety: ClickHouseMigrationSafety::OfflineNonDestructive,
+            sources: schema::WEATHER_EPOCH_DAY_SOURCES,
+            expected_checksum: "blake3:6df662b111f277011f3fd13e25e4b300f98a5e9b605608f82adc00ac56a2d4b5",
+            destructive_empty_tables: &[],
+        },
+        MigrationSpec {
+            version: 8,
+            name: "weather_observation_epoch_time",
+            safety: ClickHouseMigrationSafety::OfflineRebuildableDataRepair,
+            sources: schema::WEATHER_OBSERVATION_EPOCH_TIME_SOURCES,
+            expected_checksum: "blake3:49d3d7e1107275b598806bf927f03e249972f3598e813b97b5dcfe3173b49226",
+            destructive_empty_tables: &[],
+        },
+        MigrationSpec {
+            version: 9,
+            name: "immutable_domain_fact_idempotency",
+            safety: ClickHouseMigrationSafety::OfflineRebuildableDataRepair,
+            sources: schema::IMMUTABLE_DOMAIN_FACT_IDEMPOTENCY_SOURCES,
+            expected_checksum: "blake3:e3141e29ffb93b9c60839cb2da925bf8dfb1abb4890e51131b175e503a8158e5",
             destructive_empty_tables: &[],
         },
     ]
@@ -298,8 +344,25 @@ async fn apply_schema_migrations_locked(
             }
         }
         claim_migration(client, migration).await?;
-        for statement in spec.statements() {
-            client.query(&statement).execute().await?;
+        if migration.safety == ClickHouseMigrationSafety::OfflineRebuildableDataRepair {
+            match spec.name {
+                "weather_observation_epoch_time" => {
+                    rebuild_weather_observation_epoch_time(client, spec).await?;
+                }
+                "immutable_domain_fact_idempotency" => {
+                    rebuild_immutable_domain_facts(client, spec).await?;
+                }
+                name => {
+                    return Err(StorageError::Migration(format!(
+                        "ClickHouse rebuildable migration {} has no typed executor for `{name}`",
+                        spec.version
+                    )));
+                }
+            }
+        } else {
+            for statement in spec.statements() {
+                client.query(&statement).execute().await?;
+            }
         }
         client
             .query(
@@ -460,6 +523,424 @@ fn validate_migration_registry() -> Result<(), StorageError> {
         }
     }
     Ok(())
+}
+
+struct ImmutableFactTableRepair {
+    table: &'static str,
+    stage: &'static str,
+    backup: &'static str,
+    insert_sql: &'static str,
+    source_key_count_sql: &'static str,
+    repaired_key_count_sql: &'static str,
+    repaired_revision_conflict_sql: Option<&'static str>,
+}
+
+const DOMAIN_OBSERVATION_REPAIR: ImmutableFactTableRepair = ImmutableFactTableRepair {
+    table: "quant_domain_observation",
+    stage: "quant_domain_observation_idempotent_stage",
+    backup: "quant_domain_observation_pre_idempotency_backup",
+    insert_sql: "INSERT INTO __STAGE__ \
+        SELECT argMin(family, ingestion_time), source_id, instrument_key, metric, \
+               argMin(value, ingestion_time), event_time, \
+               argMin(publish_time, ingestion_time), min(ingestion_time), \
+               argMin(schema_version, ingestion_time) \
+        FROM __SOURCE__ \
+        GROUP BY source_id, instrument_key, metric, event_time",
+    source_key_count_sql: "SELECT uniqExact(tuple(source_id, instrument_key, metric, event_time)) FROM __SOURCE__",
+    repaired_key_count_sql: "SELECT toUInt64(count() - uniqExact(tuple(source_id, instrument_key, metric, event_time))) FROM __REPAIRED__",
+    repaired_revision_conflict_sql: None,
+};
+
+const CRYPTO_PRICE_REPORT_REPAIR: ImmutableFactTableRepair = ImmutableFactTableRepair {
+    table: "quant_crypto_price_report",
+    stage: "quant_crypto_price_report_idempotent_stage",
+    backup: "quant_crypto_price_report_pre_idempotency_backup",
+    insert_sql: "INSERT INTO __STAGE__ \
+        SELECT source_id, instrument_key, source_sequence, \
+               argMin(price, available_at), argMin(quantity, available_at), event_time, \
+               argMin(published_at, available_at), min(available_at), \
+               argMin(valid_from, available_at), argMin(observations_timestamp, available_at), \
+               argMin(expires_at, available_at), report_hash, \
+               argMin(raw_report, available_at), argMin(schema_version, available_at) \
+        FROM __SOURCE__ \
+        GROUP BY source_id, instrument_key, source_sequence, event_time, report_hash",
+    source_key_count_sql: "SELECT uniqExact(tuple(source_id, instrument_key, source_sequence, event_time, report_hash)) FROM __SOURCE__",
+    repaired_key_count_sql: "SELECT toUInt64(count() - uniqExact(tuple(source_id, instrument_key, source_sequence, event_time, report_hash))) FROM __REPAIRED__",
+    repaired_revision_conflict_sql: None,
+};
+
+const WEATHER_OBSERVATION_REPAIR: ImmutableFactTableRepair = ImmutableFactTableRepair {
+    table: "quant_weather_observation_fact",
+    stage: "quant_weather_observation_fact_idempotent_stage",
+    backup: "quant_weather_observation_fact_pre_idempotency_backup",
+    insert_sql: "INSERT INTO __STAGE__ \
+        SELECT source_id, instrument_key, tupleElement(chosen, 1), tupleElement(chosen, 2), \
+               tupleElement(chosen, 3), variable, tupleElement(chosen, 4), \
+               tupleElement(chosen, 5), tupleElement(chosen, 6), observed_at, \
+               tupleElement(chosen, 7), tupleElement(chosen, 8), tupleElement(chosen, 9), \
+               earliest_available_at, \
+               toUInt32(row_number() OVER identity_window - 1), report_hash, \
+               lagInFrame(toNullable(report_hash), 1, CAST(NULL, 'Nullable(String)')) \
+                   OVER identity_window, \
+               tupleElement(chosen, 10), tupleElement(chosen, 11) \
+        FROM (\
+            SELECT source_id, instrument_key, variable, observed_at, report_hash, \
+                   min(available_at) AS earliest_available_at, \
+                   argMin(tuple(subject_key, local_date, report_kind, value, unit, precision, \
+                                valid_from, valid_to, published_at, raw_report, schema_version), \
+                          tuple(available_at, cityHash64(tuple(subject_key, local_date, report_kind, \
+                               value, unit, precision, valid_from, valid_to, published_at, raw_report, schema_version)))) AS chosen \
+            FROM __SOURCE__ \
+            GROUP BY source_id, instrument_key, variable, observed_at, report_hash\
+        ) \
+        WINDOW identity_window AS (\
+            PARTITION BY source_id, instrument_key, variable, observed_at \
+            ORDER BY earliest_available_at, report_hash \
+            ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING\
+        )",
+    source_key_count_sql: "SELECT uniqExact(tuple(source_id, instrument_key, variable, observed_at, report_hash)) FROM __SOURCE__",
+    repaired_key_count_sql: "SELECT toUInt64(count() - uniqExact(tuple(source_id, instrument_key, variable, observed_at, report_hash))) FROM __REPAIRED__",
+    repaired_revision_conflict_sql: Some(
+        "SELECT toUInt64(count() - uniqExact(tuple(source_id, instrument_key, variable, observed_at, revision))) FROM __REPAIRED__",
+    ),
+};
+
+const WEATHER_FORECAST_REPAIR: ImmutableFactTableRepair = ImmutableFactTableRepair {
+    table: "quant_weather_forecast_fact",
+    stage: "quant_weather_forecast_fact_idempotent_stage",
+    backup: "quant_weather_forecast_fact_pre_idempotency_backup",
+    insert_sql: "INSERT INTO __STAGE__ \
+        SELECT source_id, instrument_key, tupleElement(chosen, 1), variable, \
+               tupleElement(chosen, 2), tupleElement(chosen, 3), tupleElement(chosen, 4), \
+               reference_time, valid_time, tupleElement(chosen, 5), earliest_available_at, \
+               tupleElement(chosen, 6), member, \
+               toUInt32(row_number() OVER identity_window - 1), \
+               tupleElement(chosen, 7), tupleElement(chosen, 8), report_hash, \
+               tupleElement(chosen, 9) \
+        FROM (\
+            SELECT source_id, instrument_key, variable, reference_time, valid_time, member, report_hash, \
+                   min(available_at) AS earliest_available_at, \
+                   argMin(tuple(subject_key, value, unit, precision, published_at, lead_hours, \
+                                grid_binding_hash, run_manifest_hash, schema_version), \
+                          tuple(available_at, cityHash64(tuple(subject_key, value, unit, precision, \
+                               published_at, lead_hours, grid_binding_hash, run_manifest_hash, schema_version)))) AS chosen \
+            FROM __SOURCE__ \
+            GROUP BY source_id, instrument_key, variable, reference_time, valid_time, member, report_hash\
+        ) \
+        WINDOW identity_window AS (\
+            PARTITION BY source_id, instrument_key, variable, reference_time, valid_time, member \
+            ORDER BY earliest_available_at, report_hash \
+            ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING\
+        )",
+    source_key_count_sql: "SELECT uniqExact(tuple(source_id, instrument_key, variable, reference_time, valid_time, ifNull(member, 65535), report_hash)) FROM __SOURCE__",
+    repaired_key_count_sql: "SELECT toUInt64(count() - uniqExact(tuple(source_id, instrument_key, variable, reference_time, valid_time, ifNull(member, 65535), report_hash))) FROM __REPAIRED__",
+    repaired_revision_conflict_sql: Some(
+        "SELECT toUInt64(count() - uniqExact(tuple(source_id, instrument_key, variable, reference_time, valid_time, ifNull(member, 65535), revision))) FROM __REPAIRED__",
+    ),
+};
+
+async fn rebuild_immutable_domain_facts(
+    client: &clickhouse::Client,
+    migration: MigrationSpec,
+) -> Result<(), StorageError> {
+    for repair in [
+        &DOMAIN_OBSERVATION_REPAIR,
+        &CRYPTO_PRICE_REPORT_REPAIR,
+        &WEATHER_OBSERVATION_REPAIR,
+        &WEATHER_FORECAST_REPAIR,
+    ] {
+        rebuild_immutable_fact_table(client, migration, repair).await?;
+    }
+    Ok(())
+}
+
+async fn rebuild_immutable_fact_table(
+    client: &clickhouse::Client,
+    migration: MigrationSpec,
+    repair: &ImmutableFactTableRepair,
+) -> Result<(), StorageError> {
+    if immutable_fact_schema_is_current(client, repair.table).await? {
+        if table_exists(client, repair.backup).await? {
+            verify_immutable_fact_repair(client, repair, repair.table, repair.backup).await?;
+            client
+                .query(&format!("DROP TABLE {}", repair.backup))
+                .execute()
+                .await?;
+        }
+        if table_exists(client, repair.stage).await? {
+            client
+                .query(&format!("DROP TABLE {}", repair.stage))
+                .execute()
+                .await?;
+        }
+        return Ok(());
+    }
+    if table_exists(client, repair.backup).await? {
+        return Err(StorageError::Migration(format!(
+            "ClickHouse data repair {} found backup `{}` while `{}` is still legacy; operator inspection is required",
+            migration.version, repair.backup, repair.table
+        )));
+    }
+    if table_exists(client, repair.stage).await? {
+        client
+            .query(&format!("DROP TABLE {}", repair.stage))
+            .execute()
+            .await?;
+    }
+    let stage_marker = format!("CREATE TABLE IF NOT EXISTS {}", repair.stage);
+    let create_stage = migration
+        .statements()
+        .into_iter()
+        .find(|statement| statement.starts_with(&stage_marker))
+        .ok_or_else(|| {
+            StorageError::Migration(format!(
+                "ClickHouse data repair {} has no stage DDL for `{}`",
+                migration.version, repair.stage
+            ))
+        })?;
+    client.query(&create_stage).execute().await?;
+    let insert = render_repair_sql(repair.insert_sql, repair.stage, repair.table, repair.stage);
+    client.query(&insert).execute().await?;
+    verify_immutable_fact_repair(client, repair, repair.stage, repair.table).await?;
+    client
+        .query(&format!(
+            "RENAME TABLE {} TO {}, {} TO {}",
+            repair.table, repair.backup, repair.stage, repair.table
+        ))
+        .execute()
+        .await?;
+    verify_immutable_fact_repair(client, repair, repair.table, repair.backup).await?;
+    client
+        .query(&format!("DROP TABLE {}", repair.backup))
+        .execute()
+        .await?;
+    Ok(())
+}
+
+async fn immutable_fact_schema_is_current(
+    client: &clickhouse::Client,
+    table: &str,
+) -> Result<bool, StorageError> {
+    let query = client
+        .query(
+            "SELECT engine, create_table_query FROM system.tables \
+             WHERE database = currentDatabase() AND name = ?",
+        )
+        .bind(table)
+        .fetch_optional::<(String, String)>()
+        .await?;
+    let Some((engine, create_table_query)) = query else {
+        return Err(StorageError::Migration(format!(
+            "ClickHouse immutable fact table `{table}` is absent"
+        )));
+    };
+    Ok(engine == "MergeTree"
+        && create_table_query.contains("non_replicated_deduplication_window = 10000"))
+}
+
+async fn verify_immutable_fact_repair(
+    client: &clickhouse::Client,
+    repair: &ImmutableFactTableRepair,
+    repaired: &str,
+    source: &str,
+) -> Result<(), StorageError> {
+    let expected = client
+        .query(&render_repair_sql(
+            repair.source_key_count_sql,
+            repair.stage,
+            source,
+            repaired,
+        ))
+        .fetch_one::<u64>()
+        .await?;
+    let actual = table_row_count(client, repaired).await?;
+    let duplicate_keys = client
+        .query(&render_repair_sql(
+            repair.repaired_key_count_sql,
+            repair.stage,
+            source,
+            repaired,
+        ))
+        .fetch_one::<u64>()
+        .await?;
+    let revision_conflicts = if let Some(sql) = repair.repaired_revision_conflict_sql {
+        client
+            .query(&render_repair_sql(sql, repair.stage, source, repaired))
+            .fetch_one::<u64>()
+            .await?
+    } else {
+        0
+    };
+    if actual != expected || duplicate_keys != 0 || revision_conflicts != 0 {
+        return Err(StorageError::Migration(format!(
+            "ClickHouse immutable fact repair failed for `{}`: expected_keys={expected}, actual_rows={actual}, duplicate_keys={duplicate_keys}, revision_conflicts={revision_conflicts}",
+            repair.table
+        )));
+    }
+    Ok(())
+}
+
+fn render_repair_sql(template: &str, stage: &str, source: &str, repaired: &str) -> String {
+    template
+        .replace("__STAGE__", stage)
+        .replace("__SOURCE__", source)
+        .replace("__REPAIRED__", repaired)
+}
+
+async fn rebuild_weather_observation_epoch_time(
+    client: &clickhouse::Client,
+    migration: MigrationSpec,
+) -> Result<(), StorageError> {
+    const TABLE: &str = "quant_weather_observation_fact";
+    const STAGE: &str = "quant_weather_observation_fact_epoch_stage";
+    const BACKUP: &str = "quant_weather_observation_fact_date32_backup";
+    const REBUILDABLE_SOURCE: &str = "nasa_gistemp";
+
+    let observed_type = column_type(client, TABLE, "observed_at")
+        .await?
+        .ok_or_else(|| {
+            StorageError::Migration(format!(
+                "ClickHouse data repair {} requires `{TABLE}.observed_at`",
+                migration.version
+            ))
+        })?;
+    if observed_type == "Int64" {
+        if table_exists(client, BACKUP).await? {
+            verify_rebuild_row_counts(client, TABLE, BACKUP, REBUILDABLE_SOURCE).await?;
+            client
+                .query(&format!("DROP TABLE {BACKUP}"))
+                .execute()
+                .await?;
+        }
+        if table_exists(client, STAGE).await? {
+            client
+                .query(&format!("DROP TABLE {STAGE}"))
+                .execute()
+                .await?;
+        }
+        return Ok(());
+    }
+    if observed_type != "DateTime64(3, 'UTC')" {
+        return Err(StorageError::Migration(format!(
+            "ClickHouse data repair {} expected `{TABLE}.observed_at` to be DateTime64(3, 'UTC') or Int64, observed `{observed_type}`",
+            migration.version
+        )));
+    }
+    if table_exists(client, BACKUP).await? {
+        return Err(StorageError::Migration(format!(
+            "ClickHouse data repair {} found unexpected backup `{BACKUP}` while `{TABLE}` is still legacy; operator inspection is required",
+            migration.version
+        )));
+    }
+    if table_exists(client, STAGE).await? {
+        client
+            .query(&format!("DROP TABLE {STAGE}"))
+            .execute()
+            .await?;
+    }
+    for statement in migration.statements() {
+        client.query(&statement).execute().await?;
+    }
+    client
+        .query(&format!(
+            "INSERT INTO {STAGE} SELECT \
+             source_id, instrument_key, subject_key, local_date, report_kind, variable, value, unit, precision, \
+             toUnixTimestamp64Milli(observed_at), toUnixTimestamp64Milli(valid_from), toUnixTimestamp64Milli(valid_to), \
+             published_at, available_at, revision, report_hash, supersedes_report_hash, raw_report, schema_version \
+             FROM {TABLE} WHERE source_id != ?"
+        ))
+        .bind(REBUILDABLE_SOURCE)
+        .execute()
+        .await?;
+    verify_rebuild_row_counts(client, STAGE, TABLE, REBUILDABLE_SOURCE).await?;
+    client
+        .query(&format!(
+            "RENAME TABLE {TABLE} TO {BACKUP}, {STAGE} TO {TABLE}"
+        ))
+        .execute()
+        .await?;
+    verify_rebuild_row_counts(client, TABLE, BACKUP, REBUILDABLE_SOURCE).await?;
+    client
+        .query(&format!("DROP TABLE {BACKUP}"))
+        .execute()
+        .await?;
+    Ok(())
+}
+
+async fn verify_rebuild_row_counts(
+    client: &clickhouse::Client,
+    repaired_table: &str,
+    source_table: &str,
+    rebuildable_source: &str,
+) -> Result<(), StorageError> {
+    let source_rows = table_row_count(client, source_table).await?;
+    let excluded_rows = client
+        .query(&format!(
+            "SELECT count() FROM {source_table} FINAL WHERE source_id = ?"
+        ))
+        .bind(rebuildable_source)
+        .fetch_one::<u64>()
+        .await?;
+    let expected_rows = source_rows.checked_sub(excluded_rows).ok_or_else(|| {
+        StorageError::Migration("Weather observation repair row-count underflow".to_owned())
+    })?;
+    let repaired_rows = table_row_count(client, repaired_table).await?;
+    let unexpected_rebuildable = client
+        .query(&format!(
+            "SELECT count() FROM {repaired_table} FINAL WHERE source_id = ?"
+        ))
+        .bind(rebuildable_source)
+        .fetch_one::<u64>()
+        .await?;
+    if repaired_rows != expected_rows || unexpected_rebuildable != 0 {
+        return Err(StorageError::Migration(format!(
+            "Weather observation repair invariant failed: source_rows={source_rows}, explicitly_rebuildable_rows={excluded_rows}, expected_preserved={expected_rows}, observed_preserved={repaired_rows}, unexpected_rebuildable={unexpected_rebuildable}"
+        )));
+    }
+    Ok(())
+}
+
+async fn table_row_count(client: &clickhouse::Client, table: &str) -> Result<u64, StorageError> {
+    let engine = client
+        .query(
+            "SELECT engine FROM system.tables \
+             WHERE database = currentDatabase() AND name = ?",
+        )
+        .bind(table)
+        .fetch_optional::<String>()
+        .await?
+        .ok_or_else(|| {
+            StorageError::Migration(format!(
+                "ClickHouse row-count verification table `{table}` is absent"
+            ))
+        })?;
+    let final_clause = if engine.starts_with("ReplacingMergeTree") {
+        " FINAL"
+    } else {
+        ""
+    };
+    client
+        .query(&format!("SELECT count() FROM {table}{final_clause}"))
+        .fetch_one::<u64>()
+        .await
+        .map_err(Into::into)
+}
+
+async fn column_type(
+    client: &clickhouse::Client,
+    table: &str,
+    column: &str,
+) -> Result<Option<String>, StorageError> {
+    client
+        .query(
+            "SELECT type FROM system.columns \
+             WHERE database = currentDatabase() AND table = ? AND name = ?",
+        )
+        .bind(table)
+        .bind(column)
+        .fetch_optional::<String>()
+        .await
+        .map_err(Into::into)
 }
 
 fn validate_online_safe_statement(

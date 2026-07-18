@@ -11,6 +11,7 @@ pub(crate) mod condition_wake;
 mod dataset;
 mod domain_projection;
 mod domain_source_cursor;
+mod domain_source_expectation;
 mod entry_condition;
 mod equity_snapshot;
 mod execution_order;
@@ -48,6 +49,7 @@ pub use {
     comparison_report::PgModelComparisonReportRepository, dataset::PgTrainingDatasetRepository,
     domain_projection::PgDomainProjectionRepository,
     domain_source_cursor::PgDomainSourceCursorRepository,
+    domain_source_expectation::PgDomainSourceExpectationRepository,
     entry_condition::PgEntryConditionRepository, equity_snapshot::PgEquitySnapshotRepository,
     execution_order::PgExecutionOrderRepository,
     execution_submission::PgExecutionSubmissionRepository, factor::PgFactorRepository,

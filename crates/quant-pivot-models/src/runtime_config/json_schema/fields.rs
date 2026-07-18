@@ -466,7 +466,7 @@ mod tests {
     }
 
     #[test]
-    fn research_training_paths_are_schema_leaves_and_feedback_is_absent() {
+    fn research_and_feedback_paths_are_schema_leaves() {
         let paths = schema_leaf_paths();
         assert!(paths.contains("research.training.rank_loss"));
         assert!(paths.contains("research.training.optimizer"));
@@ -476,7 +476,13 @@ mod tests {
         assert!(paths.contains("research.training.lambda_l2"));
         assert!(paths.contains("research.training.ndcg_k"));
         assert!(paths.contains("research.training.pseudo_top_n"));
-        assert!(!paths.contains("feedback"));
+        assert!(paths.contains("feedback.enabled"));
+        assert!(paths.contains("feedback.cadence_secs"));
+        assert!(paths.contains("feedback.max_concurrency"));
+        assert!(paths.contains("feedback.run_timeout_secs"));
+        assert!(paths.contains("feedback.retry_backoff_secs"));
+        assert!(paths.contains("feedback.auto_publish_enabled"));
+        assert!(paths.contains("feedback.auto_publish_categories"));
     }
 
     #[test]

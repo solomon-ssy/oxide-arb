@@ -272,7 +272,10 @@ mod tests {
         enums::{
             catalog::{CatalogFilterReasonSet, CatalogTimestampQuality},
             common::{CategorySet, MarketCategory, TickSize},
-            domain::{DomainFamily, DomainMetric, KlineInterval, LinkageSourceRole, ResolverTier},
+            domain::{
+                BinanceMarketSegment, DomainFamily, DomainMetric, KlineInterval, LinkageSourceRole,
+                ResolverTier,
+            },
             market::{EventStatus, MarketStatus},
         },
         runtime_config::{DataQualityConfig, DomainConfig, FeaturesConfig, SelectionConfig},
@@ -545,6 +548,7 @@ mod tests {
                 reference_at: Some(now - ChronoDuration::minutes(5)),
                 observation_at: now + ChronoDuration::days(1),
                 resolution_oracle: ResolutionOracle::BinanceKline {
+                    market: BinanceMarketSegment::Spot,
                     symbol: BinanceSymbol::parse("BTCUSDT").expect("symbol"),
                     interval: KlineInterval::OneMinute,
                 },
@@ -561,6 +565,8 @@ mod tests {
             override_context: None,
         }));
         let metadata_hash = ContentHash::parse(format!("blake3:{}", "0".repeat(64))).expect("hash");
+        let capability_registry_hash =
+            ContentHash::parse(format!("blake3:{}", "f".repeat(64))).expect("hash");
         let content_hash = MarketLinkage::compute_content_hash(
             &market_id,
             DomainFamily::Crypto,
@@ -568,6 +574,7 @@ mod tests {
             ResolverTier::Tier0Slug,
             ResolverVersion::FIRST,
             &metadata_hash,
+            &capability_registry_hash,
         )
         .expect("hash");
         MarketLinkage {
@@ -579,6 +586,7 @@ mod tests {
             resolver_tier: ResolverTier::Tier0Slug,
             resolver_version: ResolverVersion::FIRST,
             metadata_hash,
+            capability_registry_hash: Some(capability_registry_hash),
             content_hash,
             effective_at,
             available_at: effective_at + ChronoDuration::milliseconds(1),

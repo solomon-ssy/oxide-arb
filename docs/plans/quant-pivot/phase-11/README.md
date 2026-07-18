@@ -28,8 +28,10 @@
 > 连续 24 小时 ReportOnly shadow 阻断；
 > **11.8 已完成（含 2026-07-16 P0 收尾复核）**：ReportRun / Prepared→Published、
 > PG durable scheduler、scope current、supersession execution cascade、censored attribution 与
-> operator workflow 的唯一验收真相见 11.8；11.0/11.2.1/11.3/11.7.2/11.9–11.11 其余工作仍在
-> 设计、实施或部分落地阶段。
+> operator workflow 的唯一验收真相见 11.8；**11.9 的 Crypto/Weather Vertical Data Closure 已于
+> 2026-07-18 完成，canonical v4 evidence=`blake3:488a22188f2fae8c6663175e8f6ad0b6a1f77c2bd986fcdb95567fb386e715a3`；
+> Feedback/Published profile/UI/WS 等后续范围按用户指令 PAUSED，故 11.9 本身尚未完成**；
+> 11.0/11.2.1/11.3/11.7.2/11.10–11.11 其余工作仍在设计、实施或部分落地阶段。
 >
 > 父文档（概念真理）：
 > [`../03-data-factor-model-pipeline.md`](../03-data-factor-model-pipeline.md)、
@@ -48,10 +50,10 @@
 
 | Contract | 当前版本 | 下一位 owner |
 |---|---:|---|
-| Runtime config | **v16** | 11.8 已完成 wire/schema 的破坏式升级；11.9 首个 feedback wire 使用 v17 |
-| Feature schema | **v6** | 仅真实 schema 变更时 bump |
-| Dataset artifact | **v5** | profile/source-slice lineage；旧 artifact audit-only |
-| Model artifact | **v5** | profile/policy/source-slice lineage；旧 artifact audit-only |
+| Runtime config | **v18（11.9 数据闭环已落地，后续 PAUSED）** | v17 已删除空 feedback 占位；11.9 加入真实运维字段并显式 bump v18 |
+| Feature schema | **v7（11.9 部分落地，后续 PAUSED）** | 通用 Weather contract 已落地；factor-bundle binding 尚未完成；旧 schema audit-only |
+| Dataset artifact | **v6（11.9 部分落地，后续 PAUSED）** | factor bundle / capability / cohort coverage lineage 尚未完成验收；旧 artifact audit-only |
+| Model artifact | **v6（11.9 部分落地，后续 PAUSED）** | factor bundle / evaluation-window / feedback policy lineage 尚未完成验收；旧 artifact audit-only |
 | Trade policy artifact | **v6** | activation target + structural OOS + Evidence v3 ref |
 | Evidence bundle | **v3** | 九类 WORM source/trial/replay/gate/validation identity |
 
@@ -123,7 +125,7 @@ Phase 11 的唯一目标:**把阿尔法层与研究反馈闭环拉到与执行�
 | 11.7.1 | Composable Entry Conditions + Crypto/Weather Events | typed AST + PIT facts/events + Recommendation shadow + vertical gates — **实施中** | — | [11.7.1](11.7.1-composable-entry-event-triggers.md) |
 | 11.7.2 | Executable L2 Policy Validation & Research Activation | 完整冻结路径模拟 + structural volatility baseline + cash-budget + PIT fee + purged CPCV/uniqueness/DSR/PBO/ESS，交付至 ReportOnly shadow — **仓库契约已闭环：Weather/structural producers、56/21 CPCV、2× latency、Evidence v3、独立 Validate、分页 drilldown 与 fact outbox 已接通；物理迁移/真实数据验收与 24h shadow 待目标环境完成；真实 canary 已移交 11.11** | — (11.7 research activation gate) | [11.7.2](11.7.2-executable-l2-policy-validation.md) |
 | 11.8 | Report Lifecycle, Durable Scheduling & Operator Workflow | **已完成（含 P0 收尾复核）**：CH decision-fact、delivery claim-loss、censor accounting 与 Runtime v16 闭环 | 17 | [11.8](11.8-report-lifecycle-fsm-completion.md) |
-| 11.9 | Attribution Feedback, Profile Expansion & Auto-Retraining | 研究反馈闭环 + factor governance + crypto/profile expansion + 跨 profile winner 资金治理 — **设计冻结、尚未实施；基于 11.8 Runtime v16，首个 feedback wire 显式升级至 v17** | 19, 21 | [11.9](11.9-attribution-feedback-and-auto-retraining.md) |
+| 11.9 | Crypto / Weather Verticals, Attribution Feedback & Auto-Retraining | 双垂直真实数据与 serving、研究反馈闭环、model+factor 原子晋升、WS/UI 实时验收 — **Vertical Data Closure 已完成；其余 PAUSED；Phase 尚未完成；唯一进度真相见 11.9 Implementation Ledger** | 19, 21 | [11.9](11.9-attribution-feedback-and-auto-retraining.md) |
 | 11.10 | Counterfactual Factor Attribution | 反事实归因 + MAE 回填 | 20 | [11.10](11.10-counterfactual-factor-attribution.md) |
 | 11.11 | Execution Governance Hardening | 执行治理探针硬化 | 22 | [11.11](11.11-execution-governance-hardening.md) |
 
@@ -201,11 +203,12 @@ flowchart TD
   治理(见 [11.3 §3.4](11.3-probabilistic-calibration-and-kelly.md))。runtime-config 由 11.2.1 bump 至 v4、
   11.2.2 再 bump 至 **v5**（历史里程碑）；`feature_schema_version` 由 11.2.1 bump 至 4、11.2.2
   再 bump 至 **5**（两层向量重构在 11.2.2）。文档冻结时实际 runtime config 是
-  **v15**，11.8 已破坏式升级至 **v16**；feature schema 保持 **v6**。Tier 2 LLM linkage
-  不改 feature schema，但若实现时新增 runtime wire 字段，必须从届时当前版本显式 bump，
-  不得静默改写当前版本（见 11.2.3）。11.9 尚未实现；其 `feedback`/profile expansion 首次获得真实字段时
-  必须基于 11.8 的 v16 显式升级至 **v17**。Dataset/model artifact 只接受 `format_version = 5`；runtime v16
-  不意味着 feature v7。TradePolicy artifact 只接受 v6，Evidence bundle 只接受 v3。
+  **v15**，11.8 的历史里程碑为 **v16**；随后 v17 删除无执行语义的空 feedback 占位。11.9 已以
+  Runtime **v18**、Feature **v7**、Dataset/Model **v6** 完成双垂直数据闭环，反馈/serving/UI 后续范围
+  PAUSED；完整字段、迁移、测试和逐项状态只见
+  [11.9 Implementation Ledger](11.9-attribution-feedback-and-auto-retraining.md#11-implementation-ledger)。
+  Tier 2 LLM linkage 若新增 runtime wire 字段，仍须从届时当前版本显式 bump，不得静默改写。TradePolicy
+  artifact 继续只接受 v6，Evidence bundle 继续只接受 v3。
 
 ## 4. 全局设计基线(贯穿全部子phase)
 

@@ -24,7 +24,14 @@ SELECT jsonb_build_object(
   'columns', COALESCE((
     SELECT jsonb_agg(jsonb_build_object(
       'table', c.relname,
-      'ordinal', a.attnum,
+      'ordinal', a.attnum - (
+        SELECT COUNT(*)::integer
+        FROM pg_attribute dropped
+        WHERE dropped.attrelid = a.attrelid
+          AND dropped.attnum > 0
+          AND dropped.attnum <= a.attnum
+          AND dropped.attisdropped
+      ),
       'name', a.attname,
       'type', pg_catalog.format_type(a.atttypid, a.atttypmod),
       'nullable', NOT a.attnotnull,

@@ -232,7 +232,7 @@ impl FeaturesConfig {
 impl Default for FeaturesConfig {
     fn default() -> Self {
         Self {
-            feature_schema_version: SchemaVersion::new(6),
+            feature_schema_version: SchemaVersion::new(7),
             enabled_feature_families: vec![
                 FeatureFamily::MarketMetadata,
                 FeatureFamily::PriceBook,
@@ -1139,7 +1139,7 @@ impl Default for SemiAutoConfig {
     }
 }
 
-/// Runtime v17 policy-bound `SemiAuto` canary.
+/// Runtime v18 policy-bound `SemiAuto` canary.
 ///
 /// An enabled canary is intentionally narrower than a published policy. It
 /// authorizes only an exact policy identity and explicit cash-budget tiers; it
@@ -1427,7 +1427,7 @@ pub struct ResearchValidationConfig {
     pub gates: ResearchValidationGatesConfig,
 }
 
-/// Runtime v17 operational limits for policy fitting.
+/// Runtime v18 operational limits for policy fitting.
 ///
 /// Statistical methodology is versioned code and publication thresholds belong
 /// exclusively to the immutable research profile. Keeping only resource and
@@ -1477,4 +1477,42 @@ pub struct ResearchConfig {
     pub validation: ResearchValidationConfig,
     /// Executable L2 policy-fit operational limits.
     pub policy_validation: PolicyValidationConfig,
+}
+
+/// Runtime-only controls for durable attribution feedback cycles.
+///
+/// Model methodology, evaluation windows, and publish thresholds deliberately
+/// do not live here: they are immutable members of the selected research
+/// profile. These fields only control scheduling and bounded worker resources.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct FeedbackConfig {
+    /// Whether scheduled and label-maturity triggers may enqueue cycles.
+    pub enabled: bool,
+    /// Cadence for the scheduled trigger.
+    pub cadence_secs: u64,
+    /// Maximum feedback cycles that may execute concurrently.
+    pub max_concurrency: u32,
+    /// Hard wall-clock deadline for one cycle.
+    pub run_timeout_secs: u64,
+    /// Initial retry backoff for retryable stage failures.
+    pub retry_backoff_secs: u64,
+    /// Whether a passing cycle may atomically publish a model + factor bundle.
+    pub auto_publish_enabled: bool,
+    /// Closed category allowlist for automatic model + factor publication.
+    pub auto_publish_categories: Vec<MarketCategory>,
+}
+
+impl Default for FeedbackConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            cadence_secs: 86_400,
+            max_concurrency: 1,
+            run_timeout_secs: 14_400,
+            retry_backoff_secs: 60,
+            auto_publish_enabled: false,
+            auto_publish_categories: vec![MarketCategory::Crypto, MarketCategory::Weather],
+        }
+    }
 }

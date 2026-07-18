@@ -80,7 +80,7 @@ async fn migration_plan_is_read_only_on_empty_database() {
 
     assert!(!plan.migration_ledger_exists);
     assert!(plan.applied_versions.is_empty());
-    assert_eq!(plan.pending_migrations.len(), 4);
+    assert_eq!(plan.pending_migrations.len(), 7);
     assert!(!relation_exists(&db, "seaql_migrations").await);
     assert!(!relation_exists(&db, "schema_migration_audit").await);
 }
@@ -98,9 +98,9 @@ async fn immutable_baseline_is_idempotent_and_drift_is_rejected() {
         .expect("finalize baseline");
     assert_eq!(
         status.current_version,
-        "m20260716_000004_worm_and_update_triggers"
+        "m20260718_000007_airnow_pm25_operational_state"
     );
-    assert_eq!(status.migration_count, 4);
+    assert_eq!(status.migration_count, 7);
     assert!(relation_exists(&db, "quant_report_schedule_state").await);
     assert!(relation_exists(&db, "seaql_migrations").await);
     assert!(relation_exists(&db, "schema_migration_audit").await);
@@ -121,6 +121,92 @@ async fn immutable_baseline_is_idempotent_and_drift_is_rejected() {
     .await
     .expect("inject schema drift");
     assert_manifest_drift(&db, "tables").await;
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn airnow_pm25_migration_removes_only_legacy_generic_operational_state() {
+    let (db, _container, _port) = setup_empty_pg().await;
+    PostgresMigrator::up(&db, Some(6))
+        .await
+        .expect("apply migrations before AirNow cleanup");
+
+    db.execute_unprepared(
+        r#"
+INSERT INTO quant_domain_source_cursor (
+    source_id, instrument_key, checkpoint_json, checkpoint_hash, status
+) VALUES
+    ('airnow', 'AIRNOW:NY:New York City Region:OBS', '{"kind":"air_now"}', 'blake3:old-observation', 'live'),
+    ('airnow', 'AIRNOW:NY:New York City Region:FORECAST', '{"kind":"air_now_forecast"}', 'blake3:old-forecast', 'live'),
+    ('airnow', 'AIRNOW:NY:New York City Region:PM25:OBS', '{"kind":"air_now_pm25_area"}', 'blake3:new-observation', 'live'),
+    ('airnow', 'AIRNOW_SITE:840340170008:PM25_AQI', '{"kind":"air_now_pm25_site"}', 'blake3:new-site', 'live'),
+    ('other_source', 'AIRNOW:NY:New York City Region:OBS', '{"kind":"air_now_forecast"}', 'blake3:other-source', 'live');
+
+INSERT INTO quant_domain_source_expectation (
+    expectation_id, family, source_id, instrument_key, capability_registry_hash,
+    binding_hash, required, credential_required, freshness_secs,
+    affected_market_ids, affected_profile_ids, status
+) VALUES
+    ('00000000-0000-0000-0000-000000000001', 'weather', 'airnow',
+     'AIRNOW:NY:New York City Region:OBS', 'blake3:registry-old', 'blake3:binding-old',
+     TRUE, FALSE, 7200, '[]', '[]', 'live'),
+    ('00000000-0000-0000-0000-000000000002', 'weather', 'airnow',
+     'AIRNOW:NY:New York City Region:PM25:OBS', 'blake3:registry-new', 'blake3:binding-new',
+     TRUE, FALSE, 7200, '[]', '[]', 'live');
+"#,
+    )
+    .await
+    .expect("seed legacy and current AirNow state");
+
+    PostgresMigrator::up(&db, Some(1))
+        .await
+        .expect("apply AirNow PM2.5 cleanup");
+    db.execute_unprepared(
+        r"
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM quant_domain_source_cursor
+        WHERE source_id = 'airnow'
+          AND instrument_key IN (
+              'AIRNOW:NY:New York City Region:OBS',
+              'AIRNOW:NY:New York City Region:FORECAST'
+          )
+    ) THEN
+        RAISE EXCEPTION 'legacy AirNow cursor survived';
+    END IF;
+    IF EXISTS (
+        SELECT 1 FROM quant_domain_source_expectation
+        WHERE source_id = 'airnow'
+          AND instrument_key = 'AIRNOW:NY:New York City Region:OBS'
+    ) THEN
+        RAISE EXCEPTION 'legacy AirNow expectation survived';
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM quant_domain_source_cursor
+        WHERE source_id = 'airnow'
+          AND instrument_key = 'AIRNOW:NY:New York City Region:PM25:OBS'
+    ) OR NOT EXISTS (
+        SELECT 1 FROM quant_domain_source_cursor
+        WHERE source_id = 'airnow'
+          AND instrument_key = 'AIRNOW_SITE:840340170008:PM25_AQI'
+    ) OR NOT EXISTS (
+        SELECT 1 FROM quant_domain_source_cursor
+        WHERE source_id = 'other_source'
+          AND instrument_key = 'AIRNOW:NY:New York City Region:OBS'
+    ) OR NOT EXISTS (
+        SELECT 1 FROM quant_domain_source_expectation
+        WHERE source_id = 'airnow'
+          AND instrument_key = 'AIRNOW:NY:New York City Region:PM25:OBS'
+    ) THEN
+        RAISE EXCEPTION 'PM2.5 or unrelated operational state was deleted';
+    END IF;
+END
+$$;
+",
+    )
+    .await
+    .expect("verify precise AirNow cleanup scope");
 }
 
 #[tokio::test]

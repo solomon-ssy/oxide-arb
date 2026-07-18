@@ -3,7 +3,7 @@ use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{
         CryptoPriceProjectionInfo, CryptoPriceReport, DomainEventEnvelope, DomainSourceCheckpoint,
-        WeatherDailyHighProjectionInfo, WeatherObservationReport,
+        WeatherDailyTemperatureProjectionInfo, WeatherObservationReport,
     },
     types::{DomainEventId, DomainInstrumentKey, DomainSourceId, IcaoStation},
 };
@@ -28,14 +28,14 @@ pub trait DomainProjectionRepository: Send + Sync {
         checkpoint: DomainSourceCheckpoint,
         gap_generation: u64,
         source_healthy: bool,
-    ) -> Result<WeatherDailyHighProjectionInfo, StorageError>;
+    ) -> Result<Vec<WeatherDailyTemperatureProjectionInfo>, StorageError>;
 
     async fn close_weather_day(
         &self,
         station: &IcaoStation,
         local_date: NaiveDate,
         closed_at: DateTime<Utc>,
-    ) -> Result<Option<WeatherDailyHighProjectionInfo>, StorageError>;
+    ) -> Result<Vec<WeatherDailyTemperatureProjectionInfo>, StorageError>;
 
     /// Persist an observed crypto-source continuity break. The incremented
     /// generation is returned for the subsequent recovered reports.

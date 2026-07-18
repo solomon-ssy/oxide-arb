@@ -646,7 +646,9 @@ fn collect_live_domain_linkages(
                 collected.oracle_instruments.insert(oracle_key);
             }
             if let MarketSubject::Weather(subject) = &binding.subject {
-                collected.weather_stations.insert(subject.station.clone());
+                collected
+                    .weather_stations
+                    .insert(subject.decision_group.station.clone());
                 collected.weather_valid_to = collected
                     .weather_valid_to
                     .max(weather_local_day_end(subject)?);
@@ -662,10 +664,15 @@ fn collect_live_domain_linkages(
 }
 
 fn weather_local_day_end(subject: &WeatherSubject) -> QuantResult<chrono::DateTime<Utc>> {
-    let timezone = subject.timezone.parse::<Tz>().map_err(|error| {
-        QuantError::config(format!("invalid Weather linkage timezone: {error}"))
-    })?;
+    let timezone = subject
+        .decision_group
+        .timezone
+        .parse::<Tz>()
+        .map_err(|error| {
+            QuantError::config(format!("invalid Weather linkage timezone: {error}"))
+        })?;
     let next_date = subject
+        .decision_group
         .local_date
         .succ_opt()
         .ok_or_else(|| QuantError::config("Weather local date overflow"))?;

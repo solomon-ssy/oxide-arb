@@ -10,7 +10,7 @@ use quant_pivot_models::{
         BookL2CheckpointRow, BookL2EventRow, BookMicrostructureRow, BookStreamSessionRow,
         CryptoPriceReportRow, DomainObservationRow, EntryConditionEvaluationEventRow,
         MarketResolutionRow, MidPriceBucketRow, ReportMarketFunnelCountRow, ReportMarketFunnelRow,
-        TradeTapeRow, WeatherForecastPointRow, WeatherObservationReportRow,
+        TradeTapeRow, WeatherForecastFactRow, WeatherObservationFactRow,
     },
     enums::clickhouse::{ChTradeReconciliationStatus, ChTradeTapeSource},
     types::{
@@ -158,7 +158,7 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
                          PARTITION BY source_id, instrument_key, source_sequence, event_time, report_hash \
                          ORDER BY available_at DESC\
                      ) AS dedupe_rank \
-                     FROM quant_crypto_price_report FINAL \
+                     FROM quant_crypto_price_report \
                      WHERE source_id = ? \
                      AND instrument_key = ? \
                      AND ifNull(observations_timestamp, event_time) <= fromUnixTimestamp64Milli(?) \
@@ -196,7 +196,7 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
                          PARTITION BY source_id, instrument_key, source_sequence, event_time, report_hash \
                          ORDER BY available_at DESC\
                      ) AS dedupe_rank \
-                     FROM quant_crypto_price_report FINAL \
+                     FROM quant_crypto_price_report \
                      WHERE instrument_key IN ? \
                      AND event_time >= fromUnixTimestamp64Milli(?) \
                      AND event_time < fromUnixTimestamp64Milli(?) \
@@ -233,7 +233,7 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
                          PARTITION BY source_id, instrument_key, source_sequence, event_time, report_hash \
                          ORDER BY available_at DESC\
                      ) AS dedupe_rank \
-                     FROM quant_crypto_price_report FINAL \
+                     FROM quant_crypto_price_report \
                      WHERE instrument_key IN ? \
                      AND available_at >= fromUnixTimestamp64Milli(?) \
                      AND available_at < fromUnixTimestamp64Milli(?) \
@@ -250,14 +250,14 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
             .map_err(StorageError::from)
     }
 
-    async fn weather_observation_reports_between(
+    async fn weather_observation_facts_between(
         &self,
         stations: Vec<String>,
         from_ms: i64,
         to_ms: i64,
         publish_cutoff_ms: i64,
         decision_at_ms: i64,
-    ) -> Result<Vec<WeatherObservationReportRow>, StorageError> {
+    ) -> Result<Vec<WeatherObservationFactRow>, StorageError> {
         if stations.is_empty() {
             return Ok(Vec::new());
         }
@@ -266,36 +266,36 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
             .query(
                 "SELECT ?fields FROM (\
                      SELECT *, row_number() OVER (\
-                         PARTITION BY station, local_date, observation_time, revision, report_hash \
+                         PARTITION BY instrument_key, variable, observed_at, revision, report_hash \
                          ORDER BY available_at DESC\
                      ) AS dedupe_rank \
-                     FROM quant_weather_observation_report FINAL \
-                     WHERE station IN ? \
-                     AND observation_time >= fromUnixTimestamp64Milli(?) \
-                     AND observation_time < fromUnixTimestamp64Milli(?) \
+                     FROM quant_weather_observation_fact \
+                     WHERE subject_key IN ? \
+                     AND observed_at >= ? \
+                     AND observed_at < ? \
                      AND published_at <= fromUnixTimestamp64Milli(?) \
                      AND available_at <= fromUnixTimestamp64Milli(?)\
                  ) WHERE dedupe_rank = 1 \
-                 ORDER BY station, local_date, observation_time, revision, available_at, report_hash",
+                 ORDER BY subject_key, variable, local_date, observed_at, revision, available_at, report_hash",
             )
             .bind(stations)
             .bind(from_ms)
             .bind(to_ms)
             .bind(publish_cutoff_ms)
             .bind(decision_at_ms)
-            .fetch_all::<WeatherObservationReportRow>()
+            .fetch_all::<WeatherObservationFactRow>()
             .await
             .map_err(StorageError::from)
     }
 
-    async fn weather_forecast_points_between(
+    async fn weather_forecast_facts_between(
         &self,
         stations: Vec<String>,
         valid_from_ms: i64,
         valid_to_ms: i64,
         reference_cutoff_ms: i64,
         decision_at_ms: i64,
-    ) -> Result<Vec<WeatherForecastPointRow>, StorageError> {
+    ) -> Result<Vec<WeatherForecastFactRow>, StorageError> {
         if stations.is_empty() {
             return Ok(Vec::new());
         }
@@ -304,24 +304,24 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
             .query(
                 "SELECT ?fields FROM (\
                      SELECT *, row_number() OVER (\
-                         PARTITION BY station, reference_time, valid_time, member, run_manifest_hash \
+                         PARTITION BY instrument_key, variable, reference_time, valid_time, member, revision, report_hash \
                          ORDER BY available_at DESC\
                      ) AS dedupe_rank \
-                     FROM quant_weather_forecast_point FINAL \
-                     WHERE station IN ? \
+                     FROM quant_weather_forecast_fact \
+                     WHERE subject_key IN ? \
                      AND valid_time >= fromUnixTimestamp64Milli(?) \
                      AND valid_time < fromUnixTimestamp64Milli(?) \
                      AND reference_time <= fromUnixTimestamp64Milli(?) \
                      AND available_at <= fromUnixTimestamp64Milli(?)\
                  ) WHERE dedupe_rank = 1 \
-                 ORDER BY station, reference_time, valid_time, member, available_at, run_manifest_hash",
+                 ORDER BY subject_key, variable, reference_time, valid_time, member, revision, available_at, report_hash",
             )
             .bind(stations)
             .bind(valid_from_ms)
             .bind(valid_to_ms)
             .bind(reference_cutoff_ms)
             .bind(decision_at_ms)
-            .fetch_all::<WeatherForecastPointRow>()
+            .fetch_all::<WeatherForecastFactRow>()
             .await
             .map_err(StorageError::from)
     }

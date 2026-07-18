@@ -20,6 +20,16 @@ pub trait MarketLinkageRepository: Send + Sync {
     /// `content_hash` already exists, the existing row is returned untouched.
     async fn append(&self, linkage: NewMarketLinkage) -> Result<MarketLinkageInfo, StorageError>;
 
+    /// Atomically append one already validated decision-group batch.
+    ///
+    /// Implementations must commit all rows and source bindings together or
+    /// leave the ledger unchanged. This prevents a persistence failure from
+    /// exposing only part of a mutually exclusive Weather sibling set.
+    async fn append_batch(
+        &self,
+        linkages: Vec<NewMarketLinkage>,
+    ) -> Result<Vec<MarketLinkageInfo>, StorageError>;
+
     /// The latest row visible at `boundary`: source-effective no later than the
     /// linkage cutoff and system-available no later than the decision time.
     async fn valid_at(

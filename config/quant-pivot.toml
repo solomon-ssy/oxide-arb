@@ -9,7 +9,7 @@
 #
 # Operator tunables (detection, risk, execution operations, settlement
 # operations, market-data staleness, notification channels) are NOT here.
-# They live in the versioned runtime configuration (schema_version = 17),
+# They live in the versioned runtime configuration (schema_version = 18),
 # stored in Postgres and managed exclusively through the governed API:
 #
 #   GET  /api/runtime-config              — active config (secrets masked)
@@ -167,9 +167,39 @@ archive_url = "https://data.binance.vision"
 weight_budget_per_min = 1000
 # Purpose: incremental poll cadence (seconds). Default: 30.
 kline_poll_secs = 30
+# Purpose: if a raw aggTrade stream emits no fact, reconcile the exact
+# sequence from the official REST endpoint at this bounded cadence.
+agg_trade_recovery_poll_secs = 5
 websocket_rotation_secs = 82800
 # Purpose: ClickHouse batch size. Default: 5000.
 batch_size = 5000
+# Purpose: fail closed when local time differs from Binance server time.
+# Default: 2000ms.
+max_clock_skew_ms = 2000
+
+[domain_sources.binance_usdm_futures]
+# Public Binance USD-M Futures market data. Kept separate from Spot because
+# HYPE contracts cite the Futures product and provenance cannot be aliased.
+enabled = true
+rest_url = "https://fapi.binance.com"
+websocket_url = "wss://fstream.binance.com/ws"
+archive_url = "https://data.binance.vision"
+weight_budget_per_min = 1000
+kline_poll_secs = 30
+agg_trade_recovery_poll_secs = 5
+websocket_rotation_secs = 82800
+batch_size = 5000
+request_timeout_ms = 10000
+max_clock_skew_ms = 2000
+
+[domain_sources.polymarket_rtds]
+# Public Polymarket RTDS Crypto feeds. The protocol requires a text PING every
+# five seconds; changing that cadence is rejected by deploy validation.
+enabled = true
+websocket_url = "wss://ws-live-data.polymarket.com"
+connect_timeout_ms = 10000
+keepalive_secs = 5
+max_clock_skew_ms = 30000
 
 [domain_sources.chainlink_data_streams]
 # Credentials are intentionally absent from this file. Inject them through
@@ -197,6 +227,9 @@ base_url = "https://www.ncei.noaa.gov/oa/global-historical-climatology-network/h
 request_timeout_ms = 120000
 refresh_secs = 86400
 calibration_years = 2
+# Purpose: bounded station-file downloads/decodes. Each response has a 64MiB
+# hard limit, so this also bounds worst-case GHCNh memory pressure.
+max_concurrency = 4
 
 [domain_sources.gefs]
 enabled = true
@@ -207,15 +240,113 @@ publication_lag_secs = 18000
 max_lead_hours = 240
 max_concurrency = 8
 
-# Weather markets are resolved only when their exact ICAO station has a
-# content-addressed profile. Add global stations through the local deploy
-# overlay; never infer station/timezone from a city name.
-[domain_sources.weather_stations.KLGA]
+[domain_sources.hko_open_data]
+enabled = true
+base_url = "https://data.weather.gov.hk/weatherAPI/opendata"
+request_timeout_ms = 10000
+rainfall_poll_secs = 300
+daily_temperature_poll_secs = 1800
+daily_temperature_lookback_months = 24
+
+[domain_sources.airnow]
+enabled = true
+reporting_area_url = "https://files.airnowtech.org/airnow/today/reportingarea.dat"
+hourly_aq_base_url = "https://files.airnowtech.org/airnow"
+request_timeout_ms = 30000
+poll_secs = 1800
+correction_lookback_hours = 72
+
+[domain_sources.tornado]
+enabled = true
+spc_base_url = "https://www.spc.noaa.gov/climo/reports"
+ncei_csv_base_url = "https://www.ncei.noaa.gov/pub/data/swdi/stormevents/csvfiles"
+request_timeout_ms = 120000
+spc_poll_secs = 600
+ncei_refresh_secs = 2678400
+
+[domain_sources.nhc]
+enabled = true
+current_storms_url = "https://www.nhc.noaa.gov/CurrentStorms.json"
+data_archive_url = "https://www.nhc.noaa.gov/data/"
+request_timeout_ms = 120000
+advisory_poll_secs = 900
+best_track_refresh_secs = 31536000
+
+[domain_sources.nasa_gistemp]
+enabled = true
+csv_url = "https://data.giss.nasa.gov/gistemp/tabledata_v4/GLB.Ts+dSST.csv"
+request_timeout_ms = 30000
+refresh_secs = 2678400
+
+[domain_sources.nsidc_sea_ice]
+enabled = true
+north_csv_url = "https://noaadata.apps.nsidc.org/NOAA/G02135/north/daily/data/N_seaice_extent_daily_v4.0.csv"
+south_csv_url = "https://noaadata.apps.nsidc.org/NOAA/G02135/south/daily/data/S_seaice_extent_daily_v4.0.csv"
+request_timeout_ms = 120000
+refresh_secs = 86400
+
+[domain_sources.nws_observation]
+enabled = true
+base_url = "https://api.weather.gov"
+request_timeout_ms = 30000
+poll_secs = 300
+lookback_observations = 24
+
+[[domain_sources.weather_vertical_bindings.hko_rainfall]]
+place = "North District"
+timezone = "Asia/Hong_Kong"
+
+[[domain_sources.weather_vertical_bindings.hko_daily_temperature]]
+station = "HKO"
+timezone = "Asia/Hong_Kong"
+
+[[domain_sources.weather_vertical_bindings.airnow_pm25_reporting_areas]]
+area = "New York City Region"
+state = "NY"
 timezone = "America/New_York"
-latitude = "40.7769"
-longitude = "-73.8740"
-elevation_meters = "6.4"
-ghcnh_station_id = "USW00014732"
+
+[[domain_sources.weather_vertical_bindings.airnow_pm25_reporting_areas]]
+area = "Philadelphia"
+state = "PA"
+timezone = "America/New_York"
+
+[[domain_sources.weather_vertical_bindings.airnow_pm25_reporting_areas]]
+area = "Columbus"
+state = "OH"
+timezone = "America/New_York"
+
+[[domain_sources.weather_vertical_bindings.airnow_pm25_reporting_areas]]
+area = "Chicago"
+state = "IL"
+timezone = "America/Chicago"
+
+[[domain_sources.weather_vertical_bindings.airnow_pm25_sites]]
+contract_location = "East Rutherford"
+primary_resolution_url = "https://www.airnow.gov/?city=East%20Rutherford&state=NJ&country=USA"
+aqsid = "840340170008"
+site_name = "Union City High School"
+state = "NJ"
+latitude = "40.770908"
+longitude = "-74.036218"
+timezone = "America/New_York"
+
+[[domain_sources.weather_vertical_bindings.tornado_regions]]
+region_id = "oklahoma"
+spc_state_code = "OK"
+ncei_state_name = "OKLAHOMA"
+timezone = "America/Chicago"
+
+[[domain_sources.weather_vertical_bindings.nhc_historical_storms]]
+basin = "atlantic"
+storm_id = "AL092021"
+
+[[domain_sources.weather_vertical_bindings.nws_wind_stations]]
+station = "KMWN"
+timezone = "America/New_York"
+
+# The active catalog's frozen airport profiles are compiled into
+# `builtin_weather_station_profiles()`. Deploy-local additions/overrides belong
+# in `quant-pivot.local.toml`; city-name inference is forbidden.
 
 # ── Quant Pivot (Phase 0) ─────────────────────────────────────────────────────
 

@@ -17,6 +17,16 @@ pub enum ApiError {
     #[error("Rate limited: retry after {retry_after_ms}ms (bucket: {bucket})")]
     RateLimited { retry_after_ms: u64, bucket: String },
 
+    #[error(
+        "Clock skew for {provider}: {skew_ms}ms exceeds {max_skew_ms}ms (round trip {round_trip_ms}ms)"
+    )]
+    ClockSkew {
+        provider: String,
+        skew_ms: u64,
+        max_skew_ms: u64,
+        round_trip_ms: u64,
+    },
+
     #[error("Gamma API {endpoint}: status {status} — {body}")]
     Gamma {
         endpoint: String,
@@ -64,7 +74,7 @@ impl ApiError {
             | Self::UpstreamPayload { retryable, .. } => *retryable,
             Self::RateLimited { .. } | Self::Timeout { .. } => true,
             Self::Gamma { status, .. } => *status == 0 || *status == 429 || *status >= 500,
-            Self::Deserialize { .. } | Self::Sdk(_) => false,
+            Self::ClockSkew { .. } | Self::Deserialize { .. } | Self::Sdk(_) => false,
         }
     }
 

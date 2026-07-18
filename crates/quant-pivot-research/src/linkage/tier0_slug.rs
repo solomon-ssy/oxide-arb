@@ -154,8 +154,11 @@ pub fn window_bounds(slug: &str) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
 #[cfg(test)]
 mod tests {
     use super::{Tier0SlugExtractor, window_bounds};
-    use crate::linkage::extractor::{
-        DefaultSubjectValidator, SubjectExtractor, SubjectValidator, ValidationOutcome,
+    use crate::linkage::{
+        extractor::{
+            DefaultSubjectValidator, SubjectExtractor, SubjectValidator, ValidationOutcome,
+        },
+        rules,
     };
     use chrono::{TimeZone, Utc};
     use quant_pivot_models::{
@@ -177,6 +180,7 @@ mod tests {
             question: "Bitcoin Up or Down".to_owned(),
             description: description.map(str::to_owned),
             series_slug: Some("btc-updown-5m".to_owned()),
+            decision_group_market_ids: Vec::new(),
             end_date: None,
         }
     }
@@ -274,5 +278,34 @@ mod tests {
         let (open, close) = window_bounds("eth-updown-15m-1780318800").expect("bounds");
         assert_eq!((close - open).num_seconds(), 900);
         assert_eq!(open.timestamp(), 1_780_318_800);
+    }
+
+    #[test]
+    fn every_supported_asset_parses_every_epoch_interval() {
+        const ALIGNED_EPOCH: i64 = 1_800_000_000;
+        for rule in rules() {
+            let feed = rule.chainlink_feed.to_ascii_lowercase();
+            let description =
+                format!("The resolution source is https://data.chain.link/streams/{feed}.");
+            for interval in ["5m", "15m", "4h"] {
+                let slug = format!(
+                    "{}-updown-{interval}-{ALIGNED_EPOCH}",
+                    rule.ticker.to_ascii_lowercase()
+                );
+                let source = metadata(&slug, Some(&description));
+                let candidate = Tier0SlugExtractor
+                    .extract(&source)
+                    .expect("extract")
+                    .expect("recognized asset/interval fixture");
+                let MarketSubject::Crypto(subject) = &candidate.subject else {
+                    panic!("crypto subject")
+                };
+                assert_eq!(subject.asset.as_str(), rule.ticker);
+                assert_eq!(
+                    DefaultSubjectValidator.validate(&candidate, &source),
+                    ValidationOutcome::Accepted
+                );
+            }
+        }
     }
 }

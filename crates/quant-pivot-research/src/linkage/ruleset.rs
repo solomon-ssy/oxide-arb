@@ -11,17 +11,36 @@
 //! resolver never guesses a venue symbol or feed binding.
 
 use quant_pivot_models::{
-    enums::domain::KlineInterval,
+    enums::domain::{BinanceMarketSegment, KlineInterval},
     types::{
         BinanceSymbol, ChainlinkFeedKey, CryptoAsset, CryptoQuote, DomainInstrumentKey,
-        ResolverVersion,
+        DomainSourceId, ResolverVersion,
     },
 };
 
 /// The current deterministic resolver ruleset version.
 ///
 /// Bump **every** time the alias / symbol / feed table below changes.
-pub const DOMAIN_RESOLVER_VERSION: ResolverVersion = ResolverVersion::new(2);
+pub const DOMAIN_RESOLVER_VERSION: ResolverVersion = ResolverVersion::new(6);
+
+/// Symbols officially exposed by both public Polymarket RTDS Crypto topics.
+pub const PUBLIC_RTDS_ASSETS: &[&str] = &["BTC", "ETH", "SOL", "XRP"];
+
+/// Assets currently listed on the configured Binance Spot source.
+pub const BINANCE_SPOT_ASSETS: &[&str] = &["BTC", "ETH", "SOL", "XRP", "DOGE", "BNB"];
+
+/// Complete frozen price-contract scope.
+pub const ALL_CRYPTO_ASSETS: &[&str] = &["BTC", "ETH", "SOL", "XRP", "DOGE", "BNB", "HYPE"];
+
+/// Ruleset assets whose Chainlink settlement feed requires the authenticated
+/// Data Streams adapter rather than public RTDS.
+pub const CREDENTIAL_CHAINLINK_ASSETS: &[&str] = &["BNB", "DOGE", "HYPE"];
+
+/// Credential-settled assets that still have a public Binance Spot feature plane.
+pub const CREDENTIAL_BINANCE_ASSETS: &[&str] = &["BNB", "DOGE"];
+
+/// Assets whose Binance contract cites USD-M Futures instead of Spot.
+pub const BINANCE_USDM_FUTURES_ASSETS: &[&str] = &["HYPE"];
 
 /// One asset's frozen resolution bindings.
 #[derive(Debug, Clone, Copy)]
@@ -32,7 +51,9 @@ pub struct AssetRule {
     /// `bitcoin`, …). Order is by specificity (longest first) so alias
     /// scanning is deterministic.
     pub aliases: &'static [&'static str],
-    /// Binance spot symbol (feature source).
+    /// Exact Binance product used by Binance-cited contracts.
+    pub binance_market: BinanceMarketSegment,
+    /// Symbol within the exact Binance product.
     pub binance_symbol: &'static str,
     /// Chainlink feed key (`{ASSET}-USD`, deploy-config `feeds` map key).
     pub chainlink_feed: &'static str,
@@ -44,32 +65,51 @@ const RULES: &[AssetRule] = &[
     AssetRule {
         ticker: "BTC",
         aliases: &["bitcoin", "btc"],
+        binance_market: BinanceMarketSegment::Spot,
         binance_symbol: "BTCUSDT",
         chainlink_feed: "BTC-USD",
     },
     AssetRule {
         ticker: "ETH",
         aliases: &["ethereum", "eth"],
+        binance_market: BinanceMarketSegment::Spot,
         binance_symbol: "ETHUSDT",
         chainlink_feed: "ETH-USD",
     },
     AssetRule {
         ticker: "SOL",
         aliases: &["solana", "sol"],
+        binance_market: BinanceMarketSegment::Spot,
         binance_symbol: "SOLUSDT",
         chainlink_feed: "SOL-USD",
     },
     AssetRule {
         ticker: "XRP",
         aliases: &["ripple", "xrp"],
+        binance_market: BinanceMarketSegment::Spot,
         binance_symbol: "XRPUSDT",
         chainlink_feed: "XRP-USD",
     },
     AssetRule {
         ticker: "DOGE",
         aliases: &["dogecoin", "doge"],
+        binance_market: BinanceMarketSegment::Spot,
         binance_symbol: "DOGEUSDT",
         chainlink_feed: "DOGE-USD",
+    },
+    AssetRule {
+        ticker: "BNB",
+        aliases: &["binance coin", "bnb"],
+        binance_market: BinanceMarketSegment::Spot,
+        binance_symbol: "BNBUSDT",
+        chainlink_feed: "BNB-USD",
+    },
+    AssetRule {
+        ticker: "HYPE",
+        aliases: &["hyperliquid", "hype"],
+        binance_market: BinanceMarketSegment::UsdmFutures,
+        binance_symbol: "HYPEUSDT",
+        chainlink_feed: "HYPE-USD",
     },
 ];
 
@@ -94,7 +134,10 @@ pub fn find_alias(text: &str) -> Option<(&'static AssetRule, &'static str, usize
     let mut best: Option<(&'static AssetRule, &'static str, usize)> = None;
     for rule in RULES {
         for alias in rule.aliases {
-            if let Some(offset) = text.find(alias) {
+            for (offset, _) in text.match_indices(alias) {
+                if !alias_has_token_boundaries(text, offset, alias.len()) {
+                    continue;
+                }
                 let better = match best {
                     None => true,
                     Some((_, best_alias, best_offset)) => {
@@ -109,6 +152,13 @@ pub fn find_alias(text: &str) -> Option<(&'static AssetRule, &'static str, usize
         }
     }
     best
+}
+
+fn alias_has_token_boundaries(text: &str, offset: usize, length: usize) -> bool {
+    let preceding = text[..offset].chars().next_back();
+    let following = text[offset + length..].chars().next();
+    preceding.is_none_or(|character| !character.is_ascii_alphanumeric())
+        && following.is_none_or(|character| !character.is_ascii_alphanumeric())
 }
 
 impl AssetRule {
@@ -141,16 +191,67 @@ impl AssetRule {
         ChainlinkFeedKey::parse(self.chainlink_feed).expect("ruleset feed is validated by tests")
     }
 
-    /// The canonical feature-source instrument key (`BINANCE:{symbol}:1m`).
+    /// Canonical feature-source key in the exact Binance product.
     #[must_use]
     pub fn instrument_key(&self) -> DomainInstrumentKey {
-        DomainInstrumentKey::binance_kline(&self.symbol(), KlineInterval::OneMinute)
+        self.kline_instrument(KlineInterval::OneMinute)
+    }
+
+    #[must_use]
+    pub fn kline_instrument(&self, interval: KlineInterval) -> DomainInstrumentKey {
+        match self.binance_market {
+            BinanceMarketSegment::Spot => {
+                DomainInstrumentKey::binance_kline(&self.symbol(), interval)
+            }
+            BinanceMarketSegment::UsdmFutures => {
+                DomainInstrumentKey::binance_usdm_futures_kline(&self.symbol(), interval)
+            }
+        }
+    }
+
+    #[must_use]
+    pub fn kline_source_id(&self) -> DomainSourceId {
+        match self.binance_market {
+            BinanceMarketSegment::Spot => DomainSourceId::binance(),
+            BinanceMarketSegment::UsdmFutures => DomainSourceId::binance_usdm_futures(),
+        }
     }
 
     /// Low-latency Binance event stream used only by Binance-bound markets.
     #[must_use]
     pub fn binance_event_instrument(&self) -> DomainInstrumentKey {
-        DomainInstrumentKey::binance_agg_trade(&self.symbol())
+        match self.binance_market {
+            BinanceMarketSegment::Spot => DomainInstrumentKey::binance_agg_trade(&self.symbol()),
+            BinanceMarketSegment::UsdmFutures => {
+                DomainInstrumentKey::binance_usdm_futures_agg_trade(&self.symbol())
+            }
+        }
+    }
+
+    #[must_use]
+    pub fn binance_event_source_id(&self) -> DomainSourceId {
+        match self.binance_market {
+            BinanceMarketSegment::Spot => DomainSourceId::binance_agg_trade(),
+            BinanceMarketSegment::UsdmFutures => DomainSourceId::binance_usdm_futures_agg_trade(),
+        }
+    }
+
+    /// Whether both public RTDS topics document this asset.
+    #[must_use]
+    pub fn public_rtds_supported(&self) -> bool {
+        PUBLIC_RTDS_ASSETS.contains(&self.ticker)
+    }
+
+    /// Exact public RTDS Binance event feed.
+    #[must_use]
+    pub fn rtds_binance_instrument(&self) -> DomainInstrumentKey {
+        DomainInstrumentKey::polymarket_rtds_binance(&self.symbol())
+    }
+
+    /// Exact public RTDS Chainlink event/resolution feed.
+    #[must_use]
+    pub fn rtds_chainlink_instrument(&self) -> DomainInstrumentKey {
+        DomainInstrumentKey::polymarket_rtds_chainlink(&self.feed())
     }
 
     /// Exact Chainlink Data Streams resolution/event feed.
@@ -194,6 +295,8 @@ mod tests {
         assert_eq!(rule.ticker, "BTC");
         assert_eq!(alias, "bitcoin");
         assert_eq!(offset, 0);
+        assert!(find_alias("will this resolve without an asset").is_none());
+        assert!(find_alias("whether the event occurs").is_none());
 
         let (rule, alias, _) = find_alias("will ethereum reach $5,000?").expect("alias found");
         assert_eq!(rule.ticker, "ETH");

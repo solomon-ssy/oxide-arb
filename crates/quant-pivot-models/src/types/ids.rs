@@ -85,6 +85,30 @@ impl DomainSourceId {
         Self::new("binance_agg_trade")
     }
 
+    /// Binance USD-M Futures kline source.
+    #[must_use]
+    pub fn binance_usdm_futures() -> Self {
+        Self::new("binance_usdm_futures")
+    }
+
+    /// Binance USD-M Futures aggregate-trade stream.
+    #[must_use]
+    pub fn binance_usdm_futures_agg_trade() -> Self {
+        Self::new("binance_usdm_futures_agg_trade")
+    }
+
+    /// Binance price updates relayed by the public Polymarket RTDS.
+    #[must_use]
+    pub fn polymarket_rtds_binance() -> Self {
+        Self::new("polymarket_rtds_binance")
+    }
+
+    /// Chainlink price updates relayed by the public Polymarket RTDS.
+    #[must_use]
+    pub fn polymarket_rtds_chainlink() -> Self {
+        Self::new("polymarket_rtds_chainlink")
+    }
+
     /// The Chainlink Data Streams signed-report source.
     #[must_use]
     pub fn chainlink_data_streams() -> Self {
@@ -107,6 +131,60 @@ impl DomainSourceId {
     #[must_use]
     pub fn gefs() -> Self {
         Self::new("gefs")
+    }
+
+    /// Hong Kong Observatory Open Data API.
+    #[must_use]
+    pub fn hko_open_data() -> Self {
+        Self::new("hko_open_data")
+    }
+
+    /// EPA `AirNow` nationwide reporting-area files.
+    #[must_use]
+    pub fn airnow() -> Self {
+        Self::new("airnow")
+    }
+
+    /// NOAA Storm Prediction Center preliminary local storm reports.
+    #[must_use]
+    pub fn spc_storm_reports() -> Self {
+        Self::new("spc_storm_reports")
+    }
+
+    /// NOAA NCEI final Storm Events archive.
+    #[must_use]
+    pub fn ncei_storm_events() -> Self {
+        Self::new("ncei_storm_events")
+    }
+
+    /// NOAA NHC current tropical-cyclone advisory summary.
+    #[must_use]
+    pub fn nhc_advisory() -> Self {
+        Self::new("nhc_advisory")
+    }
+
+    /// NOAA NHC post-analysis HURDAT2 best track.
+    #[must_use]
+    pub fn nhc_hurdat2() -> Self {
+        Self::new("nhc_hurdat2")
+    }
+
+    /// NASA GISS GISTEMP v4 monthly global anomaly.
+    #[must_use]
+    pub fn nasa_gistemp() -> Self {
+        Self::new("nasa_gistemp")
+    }
+
+    /// NOAA/NSIDC Sea Ice Index v4.
+    #[must_use]
+    pub fn nsidc_sea_ice_index() -> Self {
+        Self::new("nsidc_sea_ice_index")
+    }
+
+    /// NOAA/NWS API quality-controlled station observation.
+    #[must_use]
+    pub fn nws_observation() -> Self {
+        Self::new("nws_observation")
     }
 }
 
@@ -343,6 +421,43 @@ pub struct ShadowComparisonId(Arc<Uuid>);
 /// Frozen market → external-subject linkage ledger row identifier (11.2.2).
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct MarketLinkageId(Arc<Uuid>);
+
+/// One capability-declared domain source binding.
+#[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DomainSourceExpectationId(Arc<Uuid>);
+
+impl DomainSourceExpectationId {
+    /// Stable identity for one canonical `(source_id, instrument_key)` pair.
+    #[must_use]
+    pub fn from_identity_hash(identity_hash: &ContentHash) -> Self {
+        const NAMESPACE: Uuid = Uuid::from_u128(0x37fa_7992_019c_4ef1_a225_9f35_d5da_86d9);
+        Self::new(Uuid::new_v5(&NAMESPACE, identity_hash.as_str().as_bytes()))
+    }
+}
+
+/// One durable feedback-cycle run.
+#[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FeedbackRunId(Arc<Uuid>);
+
+/// One append-only stage event in a feedback run.
+#[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FeedbackRunStageId(Arc<Uuid>);
+
+/// One immutable data/concept/label drift report.
+#[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DriftReportId(Arc<Uuid>);
+
+/// One immutable factor bundle promoted atomically with a model.
+#[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FactorBundleId(Arc<Uuid>);
+
+/// One append-only model + factor governance decision.
+#[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FactorGovernanceAuditId(Arc<Uuid>);
+
+/// One governed cross-profile allocation proposal.
+#[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ProfileAllocationId(Arc<Uuid>);
 
 /// Basis-cross-check exceedance alert row identifier (11.2.2 remediation R6).
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]

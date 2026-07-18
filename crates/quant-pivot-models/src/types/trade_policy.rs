@@ -277,7 +277,7 @@ pub enum EntryConditionTemplateV1 {
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum MarketEventTemplate {
     CryptoSubjectPredicateEntered { max_input_age_ms: u64 },
-    WeatherDailyHighPredicate { max_input_age_ms: u64 },
+    WeatherDailyTemperaturePredicate { max_input_age_ms: u64 },
 }
 
 impl EntryConditionTemplateV1 {
@@ -310,7 +310,7 @@ impl EntryConditionTemplateV1 {
                     MarketEventTemplate::CryptoSubjectPredicateEntered {
                         max_input_age_ms: 0,
                     }
-                    | MarketEventTemplate::WeatherDailyHighPredicate {
+                    | MarketEventTemplate::WeatherDailyTemperaturePredicate {
                         max_input_age_ms: 0,
                     },
             } => Err("entry-condition template freshness must be positive".to_owned()),

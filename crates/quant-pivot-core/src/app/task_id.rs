@@ -29,10 +29,21 @@ pub enum TaskId {
     TradeTapeWorker,
     /// Reconciles Market WS prints with finalized on-chain fills one-to-one.
     TradeTapeReconciliationWorker,
-    /// Periodically ingests external domain observations into `quant_domain_observation`.
-    DomainIngestWorker,
-    /// Dynamically ingests source-native Crypto/Weather live events from active linkages.
-    DomainLiveIngestWorker,
+    /// Reconciles the capability registry into the expected-source ledger.
+    DomainSourceSupervisor,
+    /// Ingests Binance kline archives and incremental close observations.
+    CryptoKlineIngestWorker,
+    /// Ingests source-native Binance/Chainlink Crypto reports.
+    CryptoLiveIngestWorker,
+    /// Ingests public Polymarket RTDS Binance and Chainlink price topics.
+    CryptoRtdsIngestWorker,
+    /// Ingests Weather observations, forecasts and calibration history.
+    WeatherIngestWorker,
+    /// Ingests public precipitation, AQI, tornado, cyclone, climate, sea-ice,
+    /// and wind facts through source-native durable cursors.
+    WeatherPublicIngestWorker,
+    /// Recovers historical GEFS cycles through independent durable cursors.
+    WeatherBackfillWorker,
     /// Delivers typed derived-domain events from the `PostgreSQL` outbox to `ClickHouse`.
     DomainEventOutboxWorker,
     /// Delivers and verifies report facts before reports become actionable.
@@ -145,8 +156,13 @@ impl TaskId {
             | Self::SystemStatusBroadcaster => TaskKind::ApiIngress,
             Self::DataPipeline
             | Self::TradeTapeWorker
-            | Self::DomainIngestWorker
-            | Self::DomainLiveIngestWorker => TaskKind::WsIngress,
+            | Self::DomainSourceSupervisor
+            | Self::CryptoKlineIngestWorker
+            | Self::CryptoLiveIngestWorker
+            | Self::CryptoRtdsIngestWorker
+            | Self::WeatherIngestWorker
+            | Self::WeatherPublicIngestWorker
+            | Self::WeatherBackfillWorker => TaskKind::WsIngress,
             Self::GammaSync
             | Self::CatalogLinkageResolver
             | Self::ClobMarketInfoSync

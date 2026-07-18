@@ -58,7 +58,7 @@ const fn default_schema_version() -> SchemaVersion {
 }
 
 const fn default_feature_schema_version() -> SchemaVersion {
-    SchemaVersion::new(6)
+    SchemaVersion::new(7)
 }
 
 /// Outbound projection for a model specification row (the training entry point:
@@ -170,7 +170,7 @@ mod tests {
         });
         let decoded = serde_json::from_value::<CreateModelSpecRequest>(request)
             .expect("typed model spec request");
-        assert_eq!(decoded.feature_schema_version.get(), 6);
+        assert_eq!(decoded.feature_schema_version.get(), 7);
         assert_eq!(decoded.label_schema_version.get(), 1);
         assert_eq!(decoded.input_contract.inputs[0].feature_name, "book.mid");
     }

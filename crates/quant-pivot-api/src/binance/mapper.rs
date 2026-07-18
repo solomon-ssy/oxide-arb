@@ -21,6 +21,19 @@ pub fn into_observations(
     row: &BinanceKlineRow,
     instrument_key: &DomainInstrumentKey,
 ) -> QuantResult<[DomainObservation; 1]> {
+    let source_id = match instrument_key.source_id() {
+        Some(source_id)
+            if source_id == DomainSourceId::binance()
+                || source_id == DomainSourceId::binance_usdm_futures() =>
+        {
+            source_id
+        }
+        _ => {
+            return Err(QuantError::config(format!(
+                "not a canonical Binance kline instrument: {instrument_key}"
+            )));
+        }
+    };
     let observed_at = Utc
         .timestamp_millis_opt(row.close_time_ms)
         .single()
@@ -33,7 +46,7 @@ pub fn into_observations(
 
     Ok([DomainObservation {
         family: DomainFamily::Crypto,
-        source_id: DomainSourceId::binance(),
+        source_id,
         instrument_key: instrument_key.clone(),
         metric: DomainMetric::Close,
         value: row.close,
