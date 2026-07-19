@@ -44,13 +44,13 @@ use quant_pivot_models::{
     },
     types::{
         AccountSnapshotId, AttributionDetail, CapitalAllocationId, ContentHash,
-        EntryConditionInstanceId, EntryOutcome, ExecutionOrderId, ExitOutcome, MarketId,
-        MarketSelectionId, OrderId, OrderIntentId, PortfolioPlanId, PositionId, Price,
-        RecommendationId, RecommendationReportId, ReconciliationEvidence,
+        DecisionPolicySnapshotId, EntryConditionInstanceId, EntryOutcome, ExecutionOrderId,
+        ExitOutcome, MarketId, MarketSelectionId, OrderId, OrderIntentId, PortfolioPlanId,
+        PositionId, Price, RecommendationId, RecommendationReportId, ReconciliationEvidence,
         ReconciliationEvidenceChain, ReconciliationId, ReportDataQualitySnapshotId,
-        RuntimeConfigVersionId, SelectionExclusionSummary, SettlementBalanceEvidence,
-        SettlementPayoutVector, SettlementRedeemId, SettlementRedeemIndexSets,
-        SettlementRedeemLotId, SettlementTokenBalance, Shares, TokenId, Usd,
+        SelectionExclusionSummary, SettlementBalanceEvidence, SettlementPayoutVector,
+        SettlementRedeemId, SettlementRedeemIndexSets, SettlementRedeemLotId,
+        SettlementTokenBalance, Shares, TokenId, Usd,
     },
 };
 use quant_pivot_repository::{
@@ -1321,7 +1321,7 @@ async fn seed_diff_report(
     }
     let config = demo_report(slug);
     let market_selection_id =
-        seed_market_selection_for_diff(db, &infra.runtime_config_version_id).await;
+        seed_market_selection_for_diff(db, &infra.decision_policy_snapshot_id).await;
     let model_run_id = seed_report_model_run(db, infra, &market_selection_id, as_of).await;
     let report_id = RecommendationReportId::from_v7();
     let primary = markets.first().expect("at least one market");
@@ -1337,7 +1337,7 @@ async fn seed_diff_report(
         model_version: infra.model_version_id.clone(),
         model_run: model_run_id,
         market_selection: market_selection_id,
-        runtime_config_version: infra.runtime_config_version_id.clone(),
+        decision_policy_snapshot: infra.decision_policy_snapshot_id.clone(),
         trade_policy: infra.trade_policy.clone(),
         market: primary.0.to_owned(),
         event: primary.1.to_owned(),
@@ -1386,7 +1386,7 @@ async fn seed_custom_report(
     )
     .await;
     let market_selection_id =
-        seed_market_selection_for_diff(db, &infra.runtime_config_version_id).await;
+        seed_market_selection_for_diff(db, &infra.decision_policy_snapshot_id).await;
     let model_run_id = seed_report_model_run(db, infra, &market_selection_id, options.as_of).await;
     let ids = ExecutionTxnIds {
         decision_at: options.as_of,
@@ -1400,7 +1400,7 @@ async fn seed_custom_report(
         model_version: infra.model_version_id.clone(),
         model_run: model_run_id,
         market_selection: market_selection_id,
-        runtime_config_version: infra.runtime_config_version_id.clone(),
+        decision_policy_snapshot: infra.decision_policy_snapshot_id.clone(),
         trade_policy: infra.trade_policy.clone(),
         market: format!("{DEMO_TAG}-mkt-{slug}"),
         event: format!("{DEMO_TAG}-evt-{slug}"),
@@ -1446,7 +1446,7 @@ async fn seed_market_catalog_for_diff(
 
 async fn seed_market_selection_for_diff(
     db: &DatabaseConnection,
-    runtime_config_version_id: &RuntimeConfigVersionId,
+    decision_policy_snapshot_id: &DecisionPolicySnapshotId,
 ) -> MarketSelectionId {
     let id = MarketSelectionId::from_v7();
     PgMarketSelectionRepository::new(db.clone())
@@ -1454,7 +1454,7 @@ async fn seed_market_selection_for_diff(
             NewMarketSelection {
                 market_selection_id: id.clone(),
                 decision_at: Utc::now(),
-                runtime_config_version_id: runtime_config_version_id.clone(),
+                decision_policy_snapshot_id: decision_policy_snapshot_id.clone(),
                 selector_hash: ContentHash::parse(format!("blake3:{}", "d".repeat(64)))
                     .expect("hash"),
                 market_count: 1,

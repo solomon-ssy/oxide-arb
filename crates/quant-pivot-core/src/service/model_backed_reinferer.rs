@@ -5,7 +5,7 @@
 //! factor, or feature rows. Loads the **intent-frozen** model version and
 //! runtime-config snapshot so exit evaluation matches the entry thesis.
 
-use std::{slice, str::FromStr, sync::Arc, time::Duration};
+use std::{slice, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -20,15 +20,15 @@ use quant_pivot_models::{
         quant::{DataQualityStatus, OutcomeSide, PublicationStatus},
     },
     runtime_config::{
-        DataQualityConfig, DomainConfig, FactorsConfig, FeaturesConfig, RuntimeConfig,
+        DataQualityConfig, DecisionPolicySnapshot, DomainConfig, FactorsConfig, FeaturesConfig,
     },
     types::{
-        Bps, ContentHash, MarketId, ModelRunId, ModelVersionId, Price, RuntimeConfigVersionId, Usd,
+        Bps, ContentHash, DecisionPolicySnapshotId, MarketId, ModelRunId, ModelVersionId, Price,
+        Usd,
     },
 };
 use quant_pivot_repository::traits::{
-    FactorRepository, ModelRegistryRepository, RecommendationRepository,
-    RuntimeConfigVersionRepository,
+    FactorRepository, ModelRegistryRepository, PolicyRepository, RecommendationRepository,
 };
 use quant_pivot_research::{
     factors::{
@@ -61,7 +61,7 @@ pub struct ModelBackedExitSignalReinfererDeps {
     pub model_registry: Arc<dyn ModelRegistryRepository>,
     pub factory_builder: Arc<dyn ModelRuntimeFactoryBuilder>,
     pub weight_overlay: Arc<WeightOverlayApplicator>,
-    pub config_versions: Arc<dyn RuntimeConfigVersionRepository>,
+    pub config_versions: Arc<dyn PolicyRepository>,
     /// Source of the recommendation's exact governed factor-definition set.
     pub recommendations: Arc<dyn RecommendationRepository>,
     /// Coherent latest persisted factor snapshots for exit-side inference.
@@ -113,9 +113,14 @@ impl ModelBackedExitSignalReinferer {
     async fn load_runtime(
         &self,
         version: &ModelVersionInfo,
-        config: &RuntimeConfig,
+        config: &DecisionPolicySnapshot,
     ) -> QuantResult<Option<Box<dyn QuantModelRuntime>>> {
-        let binding = schema_binding(&config.features, &config.factors, &config.domain, None)?;
+        let binding = schema_binding(
+            &config.profile_artifacts.features.definition,
+            &config.profile_artifacts.scoring.definition,
+            &config.profile_artifacts.domain.definition,
+            None,
+        )?;
         let factory = self.deps.factory_builder.build(binding);
         let overlay = resolve_overlay(&self.deps.weight_overlay, version);
         match factory.load(version, overlay).await {
@@ -143,7 +148,7 @@ impl ExitSignalReinferer for ModelBackedExitSignalReinferer {
     ) -> QuantResult<Option<FreshSignal>> {
         let Some(config) = resolve_frozen_config(
             self.deps.config_versions.as_ref(),
-            &intent.runtime_config_version_id,
+            &intent.decision_policy_snapshot_id,
         )
         .await?
         else {
@@ -172,16 +177,16 @@ impl ExitSignalReinferer for ModelBackedExitSignalReinferer {
             return Ok(None);
         };
         let market = selected_market_for_lot(&snapshot, lot)?;
-        let Some(liquidity_cap_usd) = liquidity_score_cap(&config)? else {
+        let Some(liquidity_cap_usd) = liquidity_score_cap(&config) else {
             return Ok(None);
         };
         let request = LiveFeatureBuildRequest {
             pit: self.deps.pit_source.as_ref(),
             window_provider: &self.deps.window_provider,
             market: &market,
-            features: &config.features,
-            domain: &config.domain,
-            data_quality: &config.data_quality,
+            features: &config.profile_artifacts.features.definition,
+            domain: &config.profile_artifacts.domain.definition,
+            data_quality: &config.recommendation.data_quality,
             requirements: &requirements,
             boundary: &boundary,
             liquidity_cap_usd,
@@ -196,8 +201,11 @@ impl ExitSignalReinferer for ModelBackedExitSignalReinferer {
             intent,
             vector.market_id.clone(),
             boundary.decision_at(),
-            config.data_quality.max_feature_bucket_age_secs,
-            &config.factors,
+            config
+                .recommendation
+                .data_quality
+                .max_feature_bucket_age_secs,
+            &config.profile_artifacts.scoring.definition,
         )
         .await?
         else {
@@ -227,7 +235,7 @@ impl ExitSignalReinferer for ModelBackedExitSignalReinferer {
             &config,
             &version.artifact_hash,
             &fresh.snapshot_hash,
-        )?))
+        )))
     }
 }
 
@@ -354,8 +362,7 @@ fn snapshot_bundle_outcome(
     as_of: DateTime<Utc>,
     factor_config: &FactorsConfig,
 ) -> QuantResult<MarketFactorOutcome> {
-    let confidence_floor = Decimal::from_str(&factor_config.min_factor_confidence.value)
-        .map_err(|error| QuantError::config(format!("invalid factor confidence floor: {error}")))?;
+    let confidence_floor = factor_config.min_factor_confidence.value;
     let mut projected = Vec::with_capacity(bundle.values.len());
     for snapshot in bundle.values {
         let normalization = match snapshot.value_state {
@@ -460,11 +467,11 @@ fn require_unscored_snapshot(snapshot: &LatestFactorSnapshotValueInfo) -> QuantR
 /// caller holds rather than scoring the forced-exit tier against drifted live
 /// thresholds. Exit evaluation must reproduce the *entry* thesis or not run.
 async fn resolve_frozen_config(
-    config_versions: &dyn RuntimeConfigVersionRepository,
-    version_id: &RuntimeConfigVersionId,
-) -> QuantResult<Option<RuntimeConfig>> {
+    config_versions: &dyn PolicyRepository,
+    version_id: &DecisionPolicySnapshotId,
+) -> QuantResult<Option<DecisionPolicySnapshot>> {
     let Some(info) = config_versions
-        .load_version(version_id)
+        .load_snapshot(version_id)
         .await
         .map_err(QuantError::from)?
     else {
@@ -474,17 +481,7 @@ async fn resolve_frozen_config(
         );
         return Ok(None);
     };
-    match RuntimeConfig::from_json(&info.config_json) {
-        Ok(config) => Ok(Some(config)),
-        Err(error) => {
-            tracing::warn!(
-                %version_id,
-                %error,
-                "frozen runtime config invalid for exit re-inference; holding (fail-safe)"
-            );
-            Ok(None)
-        }
-    }
+    Ok(Some(info.snapshot))
 }
 
 /// Build the [`ActiveSchemaBinding`] from a config snapshot.
@@ -675,7 +672,7 @@ async fn load_trade_tape_window(
 }
 
 pub(crate) fn runtime_decision_boundary(
-    config: &RuntimeConfig,
+    config: &DecisionPolicySnapshot,
     decision_at: DateTime<Utc>,
 ) -> QuantResult<DecisionBoundary> {
     let knowledge_lag_secs = config.pit_knowledge_lag_secs().ok_or_else(|| {
@@ -683,22 +680,42 @@ pub(crate) fn runtime_decision_boundary(
     })?;
     DecisionClock::new(knowledge_lag_secs).serving_boundary(
         decision_at,
-        config.domain.crypto.availability_lag_secs,
-        config.domain.weather.availability_lag_secs,
+        config
+            .profile_artifacts
+            .domain
+            .definition
+            .crypto
+            .availability_lag_secs,
+        config
+            .profile_artifacts
+            .domain
+            .definition
+            .weather
+            .availability_lag_secs,
     )
 }
 
-pub(crate) fn liquidity_score_cap(config: &RuntimeConfig) -> QuantResult<Option<Usd>> {
+pub(crate) fn liquidity_score_cap(config: &DecisionPolicySnapshot) -> Option<Usd> {
     let max_single = parse_config_decimal(
         "portfolio.budget.max_single_recommendation_usd",
-        &config.portfolio.budget.max_single_recommendation_usd.value,
-    )?;
+        &config
+            .execution_risk
+            .portfolio
+            .budget
+            .max_single_recommendation_usd
+            .value,
+    );
     let usage_cap = parse_config_decimal(
         "portfolio.constraints.liquidity_usage_cap_pct",
-        &config.portfolio.constraints.liquidity_usage_cap_pct.value,
-    )?;
+        &config
+            .execution_risk
+            .portfolio
+            .constraints
+            .liquidity_usage_cap_pct
+            .value,
+    );
     if usage_cap > Decimal::ZERO && max_single > Decimal::ZERO {
-        return Ok(Some(Usd::new(max_single / usage_cap)));
+        return Some(Usd::new(max_single / usage_cap));
     }
     // No positive cap to normalize the liquidity feature against — hold rather
     // than guess a magic cap that would silently shift the composite score.
@@ -707,7 +724,7 @@ pub(crate) fn liquidity_score_cap(config: &RuntimeConfig) -> QuantResult<Option<
         %usage_cap,
         "liquidity score cap unavailable (non-positive budget/usage); holding (fail-safe)"
     );
-    Ok(None)
+    None
 }
 
 /// Find the model candidate matching the lot's outcome token and side.
@@ -725,45 +742,38 @@ pub fn find_lot_candidate<'a>(
 
 fn fresh_signal_from_candidate(
     candidate: &SignalCandidate,
-    config: &RuntimeConfig,
+    config: &DecisionPolicySnapshot,
     model_artifact_hash: &ContentHash,
     factor_snapshot_hash: &ContentHash,
-) -> QuantResult<FreshSignal> {
-    Ok(FreshSignal {
+) -> FreshSignal {
+    FreshSignal {
         model_artifact_hash: model_artifact_hash.clone(),
         factor_snapshot_hash: factor_snapshot_hash.clone(),
         composite_score: candidate.composite_score,
         expected_return_bps: Bps::new(candidate.expected_return_bps),
-        auto_exec_eligible: fresh_auto_exec_eligible(candidate, config)?,
-    })
+        auto_exec_eligible: fresh_auto_exec_eligible(candidate, config),
+    }
 }
 
-fn fresh_auto_exec_eligible(
-    candidate: &SignalCandidate,
-    config: &RuntimeConfig,
-) -> QuantResult<bool> {
+fn fresh_auto_exec_eligible(candidate: &SignalCandidate, config: &DecisionPolicySnapshot) -> bool {
     // Thesis eligibility is purely the score/confidence bar — NOT the
     // `auto_execution.enabled` admission toggle. The evaluator already gates
     // forced exits to auto-execution intents (see `ReinferenceSignalEvaluator`),
     // so keying invalidation off `enabled` here would only mis-fire.
-    let policy = &config.execution.auto_execution;
+    let policy = &config.execution_authorization.auto_execution;
     let min_score = parse_config_decimal(
         "execution.auto_execution.min_score",
         &policy.min_score.value,
-    )?;
+    );
     let min_confidence = parse_config_decimal(
         "execution.auto_execution.min_confidence",
         &policy.min_confidence.value,
-    )?;
-    Ok(candidate.composite_score.inner() >= min_score
-        && candidate.confidence.inner() >= min_confidence)
+    );
+    candidate.composite_score.inner() >= min_score && candidate.confidence.inner() >= min_confidence
 }
 
-fn parse_config_decimal(field: &str, value: &str) -> QuantResult<Decimal> {
-    value
-        .trim()
-        .parse::<Decimal>()
-        .map_err(|error| QuantError::config(format!("{field} is not a valid decimal: {error}")))
+const fn parse_config_decimal(_field: &str, value: &Decimal) -> Decimal {
+    *value
 }
 
 #[cfg(test)]
@@ -783,7 +793,7 @@ mod tests {
             market::{EventStatus, MarketStatus},
             quant::{AccountSource, OutcomeSide},
         },
-        runtime_config::RuntimeConfig,
+        runtime_config::DecisionPolicySnapshot,
         types::{
             CatalogEventChangeId, CatalogMarketChangeId, CatalogSyncBatchId, ContentHash, EventId,
             MarketId, ModelRunId, OrderIntentId, PositionId, Price, Probability, Shares,
@@ -962,22 +972,42 @@ mod tests {
 
     #[test]
     fn liquidity_score_cap_none_when_budget_non_positive() {
-        let mut config = RuntimeConfig::default();
+        let mut config = DecisionPolicySnapshot::default();
         // Positive budget + usage cap resolve a usable normalization cap.
-        "1000".clone_into(&mut config.portfolio.budget.max_single_recommendation_usd.value);
-        "0.1".clone_into(&mut config.portfolio.constraints.liquidity_usage_cap_pct.value);
-        assert!(liquidity_score_cap(&config).expect("ok").is_some());
+        config
+            .execution_risk
+            .portfolio
+            .budget
+            .max_single_recommendation_usd
+            .value = dec!(1000);
+        config
+            .execution_risk
+            .portfolio
+            .constraints
+            .liquidity_usage_cap_pct
+            .value = dec!(0.1);
+        assert!(liquidity_score_cap(&config).is_some());
         // A zero single-recommendation budget cannot normalize the liquidity
         // feature → fail-safe None (hold) rather than a guessed magic cap.
-        "0".clone_into(&mut config.portfolio.budget.max_single_recommendation_usd.value);
-        assert!(liquidity_score_cap(&config).expect("ok").is_none());
+        config
+            .execution_risk
+            .portfolio
+            .budget
+            .max_single_recommendation_usd
+            .value = rust_decimal::Decimal::ZERO;
+        assert!(liquidity_score_cap(&config).is_none());
     }
 
     #[test]
     fn runtime_boundary_derives_each_cutoff_once_from_decision_time() {
-        let mut config = RuntimeConfig::default();
-        config.reports.schedules[0].knowledge_lag_secs = 10;
-        config.domain.crypto.availability_lag_secs = 30;
+        let mut config = DecisionPolicySnapshot::default();
+        config.report_schedule.schedules[0].knowledge_lag_secs = 10;
+        config
+            .profile_artifacts
+            .domain
+            .definition
+            .crypto
+            .availability_lag_secs = 30;
         let decision_at = Utc::now();
 
         let boundary = runtime_decision_boundary(&config, decision_at).expect("boundary");

@@ -1,7 +1,7 @@
 //! `quant_backtest_path_set` table entity (Phase 11.5 CPCV result).
 
 use crate::types::{
-    BacktestPathSetId, ContentHash, ModelRunId, ModelVersionId, RuntimeConfigVersionId,
+    BacktestPathSetId, ContentHash, DecisionPolicySnapshotId, ModelRunId, ModelVersionId,
     TrainingDatasetId,
 };
 use chrono::{DateTime, Utc};
@@ -17,7 +17,7 @@ pub struct Model {
     pub model_version_id: ModelVersionId,
     pub model_run_id: ModelRunId,
     pub training_dataset_id: TrainingDatasetId,
-    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub window_start: DateTime<Utc>,
     pub window_end: DateTime<Utc>,
     pub path_count: i64,
@@ -62,6 +62,13 @@ pub struct Model {
         to = "training_dataset_id"
     )]
     pub training_dataset: BelongsTo<super::quant_training_dataset::Entity>,
+    #[sea_orm(
+        belongs_to,
+        relation_enum = "DecisionPolicySnapshot",
+        from = "decision_policy_snapshot_id",
+        to = "decision_policy_snapshot_id"
+    )]
+    pub decision_policy_snapshot: BelongsTo<super::decision_policy_snapshot::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

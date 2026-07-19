@@ -10,12 +10,12 @@ use crate::{
     hashing::CanonicalDigest,
     types::{
         ArtifactUri, CatalogSyncBatchId, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION,
-        ResearchEvaluationTrack, ResearchProfileArtifact, ResearchProfileDataSource,
-        ResearchProfileRef, RuntimeConfigVersionId,
+        DecisionPolicySnapshotId, ResearchEvaluationTrack, ResearchProfileArtifact,
+        ResearchProfileDataSource, ResearchProfileRef,
     },
 };
 
-pub const SOURCE_SLICE_MANIFEST_FORMAT_VERSION: u32 = 2;
+pub const SOURCE_SLICE_MANIFEST_FORMAT_VERSION: u32 = 1;
 
 /// Immutable artifact-store location and content identity of one source slice.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -110,7 +110,7 @@ pub struct SourceSlicePitCutoffs {
 /// The only readable input to fitting and validation after materialization.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
 #[serde(deny_unknown_fields)]
-pub struct SourceSliceManifestV2 {
+pub struct SourceSliceManifestV1 {
     pub format_version: u32,
     pub profile_ref: ResearchProfileRef,
     pub evaluation_track: ResearchEvaluationTrack,
@@ -122,7 +122,7 @@ pub struct SourceSliceManifestV2 {
     pub catalog_proof: SourceSliceCatalogProof,
     pub reader_contract_version: String,
     pub schema_contract_version: String,
-    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub runtime_config_hash: ContentHash,
     pub dataset_format_version: u32,
     pub pit_cutoffs: SourceSlicePitCutoffs,
@@ -130,7 +130,7 @@ pub struct SourceSliceManifestV2 {
     pub objects: Vec<SourceSliceObjectRef>,
 }
 
-impl SourceSliceManifestV2 {
+impl SourceSliceManifestV1 {
     pub fn validate(&self) -> Result<(), String> {
         if self.format_version != SOURCE_SLICE_MANIFEST_FORMAT_VERSION {
             return Err(format!(
@@ -366,7 +366,7 @@ mod tests {
         window_start: DateTime<Utc>,
         window_end: DateTime<Utc>,
         materialized_at: DateTime<Utc>,
-    ) -> (SourceSliceManifestV2, ResearchProfileArtifact, ContentHash) {
+    ) -> (SourceSliceManifestV1, ResearchProfileArtifact, ContentHash) {
         let profile = builtin_research_profiles()
             .expect("profiles")
             .into_iter()
@@ -409,7 +409,7 @@ mod tests {
                 max_available_at: Some(materialized_at),
             })
             .collect();
-        let manifest = SourceSliceManifestV2 {
+        let manifest = SourceSliceManifestV1 {
             format_version: SOURCE_SLICE_MANIFEST_FORMAT_VERSION,
             profile_ref: profile.profile_ref.clone(),
             evaluation_track: ResearchEvaluationTrack::SemiAutoCandidate,
@@ -429,9 +429,9 @@ mod tests {
             },
             reader_contract_version: "reader@2".to_owned(),
             schema_contract_version: "source-slice@2".to_owned(),
-            runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
+            decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
             runtime_config_hash: hash(203),
-            dataset_format_version: 5,
+            dataset_format_version: DATASET_ARTIFACT_FORMAT_VERSION,
             pit_cutoffs: SourceSlicePitCutoffs {
                 catalog_available_at: materialized_at,
                 clob_market_info_available_at: materialized_at,
@@ -463,7 +463,7 @@ mod tests {
             min_available_at: Some(now),
             max_available_at: Some(now),
         };
-        let manifest = SourceSliceManifestV2 {
+        let manifest = SourceSliceManifestV1 {
             format_version: SOURCE_SLICE_MANIFEST_FORMAT_VERSION,
             profile_ref: ResearchProfileRef {
                 id: "test".to_owned(),
@@ -487,9 +487,9 @@ mod tests {
             },
             reader_contract_version: "reader@1".to_owned(),
             schema_contract_version: "schema@1".to_owned(),
-            runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
+            decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
             runtime_config_hash: hash,
-            dataset_format_version: 5,
+            dataset_format_version: DATASET_ARTIFACT_FORMAT_VERSION,
             pit_cutoffs: SourceSlicePitCutoffs {
                 catalog_available_at: now,
                 clob_market_info_available_at: now,

@@ -124,7 +124,7 @@ impl MarketSelector for ConfiguredMarketSelector {
         Ok(MarketSelectionSnapshot {
             market_selection_id: MarketSelectionId::from_v7(),
             decision_at: request.decision_at,
-            runtime_config_version_id: request.runtime_config_version_id,
+            decision_policy_snapshot_id: request.decision_policy_snapshot_id,
             selector_hash,
             included,
             excluded,
@@ -150,8 +150,8 @@ mod tests {
     use quant_pivot_models::{
         domain::{DomainAvailability, MarketCandidate, MarketDataHealth},
         enums::{common::MarketCategory, market::MarketStatus},
-        runtime_config::{DataQualityConfig, DecimalString, FeaturesConfig, SelectionConfig},
-        types::{EventId, MarketId, Price, RuntimeConfigVersionId, TokenId, Usd},
+        runtime_config::{DataQualityConfig, DecimalValue, FeaturesConfig, SelectionConfig},
+        types::{DecisionPolicySnapshotId, EventId, MarketId, Price, TokenId, Usd},
     };
     use rust_decimal::Decimal;
 
@@ -187,8 +187,8 @@ mod tests {
     fn selection_config() -> SelectionConfig {
         SelectionConfig {
             enabled_categories: vec![MarketCategory::Sports],
-            min_liquidity_usd: DecimalString::new("1000"),
-            min_volume_24h_usd: DecimalString::new("1000"),
+            min_liquidity_usd: DecimalValue::new(rust_decimal_macros::dec!(1000)),
+            min_volume_24h_usd: DecimalValue::new(rust_decimal_macros::dec!(1000)),
             ..SelectionConfig::default()
         }
     }
@@ -203,7 +203,7 @@ mod tests {
     ) -> MarketSelectionBuildRequest {
         MarketSelectionBuildRequest {
             decision_at: as_of(),
-            runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
+            decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
             selection,
             data_quality: DataQualityConfig::default(),
             features: FeaturesConfig::default(),

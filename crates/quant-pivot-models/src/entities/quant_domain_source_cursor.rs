@@ -1,7 +1,7 @@
 //! `quant_domain_source_cursor` table entity.
 
 use crate::{
-    domain::DomainSourceCheckpoint,
+    domain::{DomainCursorStatus, DomainSourceCheckpoint},
     types::{ContentHash, DomainInstrumentKey, DomainSourceId},
 };
 use chrono::{DateTime, Utc};
@@ -18,7 +18,7 @@ pub struct Model {
     #[sea_orm(column_type = "JsonBinary")]
     pub checkpoint_json: DomainSourceCheckpoint,
     pub checkpoint_hash: ContentHash,
-    pub status: String,
+    pub status: DomainCursorStatus,
     pub last_error: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,

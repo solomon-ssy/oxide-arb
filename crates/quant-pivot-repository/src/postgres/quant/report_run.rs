@@ -26,7 +26,7 @@ use quant_pivot_models::{
         RecommendationReportStatus, ReportRunStatus, ReportRunTerminalReason,
         ReportScheduleGapReason, ReportTriggerKind,
     },
-    types::{RecommendationReportId, ReportRunId, ReportScheduleGapId, RuntimeConfigVersionId},
+    types::{DecisionPolicySnapshotId, RecommendationReportId, ReportRunId, ReportScheduleGapId},
 };
 use sea_orm::{
     ActiveModelTrait, ActiveValue, ColumnTrait, DatabaseConnection, DatabaseTransaction,
@@ -176,19 +176,19 @@ fn gap_page_condition(query: &ReportScheduleGapListQuery) -> sea_orm::Condition 
 
 async fn verify_active_config(
     txn: &DatabaseTransaction,
-    expected: &RuntimeConfigVersionId,
+    expected: &DecisionPolicySnapshotId,
 ) -> Result<(), StorageError> {
     acquire_activation_lock(txn).await?;
     let current = do_load_current(txn).await?.ok_or_else(|| {
         StorageError::state_conflict(
-            entity::RUNTIME_CONFIG_VERSION,
-            Option::<&RuntimeConfigVersionId>::None,
+            entity::DECISION_POLICY_SNAPSHOT,
+            Option::<&DecisionPolicySnapshotId>::None,
             "no active runtime config",
         )
     })?;
-    if current.runtime_config_version_id != *expected {
+    if current.decision_policy_snapshot_id != *expected {
         return Err(StorageError::state_conflict(
-            entity::RUNTIME_CONFIG_VERSION,
+            entity::DECISION_POLICY_SNAPSHOT,
             Some(expected),
             "runtime config changed during report schedule operation",
         ));
@@ -226,7 +226,7 @@ async fn skip_queued_schedule(
 
 struct ScheduleGapInsert<'a> {
     schedule_id: &'a str,
-    runtime_config_version_id: &'a RuntimeConfigVersionId,
+    decision_policy_snapshot_id: &'a DecisionPolicySnapshotId,
     reason: ReportScheduleGapReason,
     first: DateTime<Utc>,
     last: DateTime<Utc>,
@@ -248,7 +248,7 @@ async fn insert_schedule_gap(
     quant_report_schedule_gap::ActiveModel {
         gap_id: ActiveValue::Set(ReportScheduleGapId::from_v7()),
         schedule_id: ActiveValue::Set(gap.schedule_id.to_owned()),
-        runtime_config_version_id: ActiveValue::Set(gap.runtime_config_version_id.clone()),
+        decision_policy_snapshot_id: ActiveValue::Set(gap.decision_policy_snapshot_id.clone()),
         reason: ActiveValue::Set(gap.reason),
         first_scheduled_for: ActiveValue::Set(gap.first),
         last_scheduled_for: ActiveValue::Set(gap.last),
@@ -269,13 +269,13 @@ impl ReportRunRepository for PgReportRunRepository {
 
     async fn reconcile_schedules(
         &self,
-        runtime_config_version_id: &RuntimeConfigVersionId,
+        decision_policy_snapshot_id: &DecisionPolicySnapshotId,
         schedules: Vec<ReconcileReportSchedule>,
     ) -> Result<ReconcileReportSchedulesOutcome, StorageError> {
         let mut desired = BTreeMap::new();
         for schedule in schedules {
             if schedule.schedule_id.trim().is_empty()
-                || schedule.runtime_config_version_id != *runtime_config_version_id
+                || schedule.decision_policy_snapshot_id != *decision_policy_snapshot_id
                 || desired
                     .insert(schedule.schedule_id.clone(), schedule)
                     .is_some()
@@ -288,7 +288,7 @@ impl ReportRunRepository for PgReportRunRepository {
         }
         let txn = self.db.begin().await.map_err(StorageError::from)?;
         primitives::advisory_xact_lock(&txn, REPORT_SCHEDULE_LOCK_KEY).await?;
-        verify_active_config(&txn, runtime_config_version_id).await?;
+        verify_active_config(&txn, decision_policy_snapshot_id).await?;
         let now = primitives::statement_timestamp(&txn).await?;
         let existing = quant_report_schedule_state::Entity::find()
             .order_by_asc(quant_report_schedule_state::Column::ScheduleId)
@@ -325,7 +325,7 @@ impl ReportRunRepository for PgReportRunRepository {
                     &txn,
                     ScheduleGapInsert {
                         schedule_id: &schedule_id,
-                        runtime_config_version_id,
+                        decision_policy_snapshot_id,
                         reason: ReportScheduleGapReason::ScheduleReconfigured,
                         first: scheduled_for,
                         last: scheduled_for,
@@ -344,8 +344,8 @@ impl ReportRunRepository for PgReportRunRepository {
             let mut active = row.into_active_model();
             if let Some(spec) = incoming {
                 visited.insert(schedule_id);
-                active.runtime_config_version_id =
-                    ActiveValue::Set(runtime_config_version_id.clone());
+                active.decision_policy_snapshot_id =
+                    ActiveValue::Set(decision_policy_snapshot_id.clone());
                 active.updated_at = ActiveValue::Set(now);
                 if spec_changed {
                     active.spec_hash = ActiveValue::Set(spec.spec_hash.clone());
@@ -354,8 +354,8 @@ impl ReportRunRepository for PgReportRunRepository {
                     active.enabled = ActiveValue::Set(spec.enabled);
                 }
             } else {
-                active.runtime_config_version_id =
-                    ActiveValue::Set(runtime_config_version_id.clone());
+                active.decision_policy_snapshot_id =
+                    ActiveValue::Set(decision_policy_snapshot_id.clone());
                 active.enabled = ActiveValue::Set(false);
                 active.updated_at = ActiveValue::Set(now);
             }
@@ -371,7 +371,7 @@ impl ReportRunRepository for PgReportRunRepository {
             }
             let created = quant_report_schedule_state::ActiveModel {
                 schedule_id: ActiveValue::Set(schedule_id),
-                runtime_config_version_id: ActiveValue::Set(runtime_config_version_id.clone()),
+                decision_policy_snapshot_id: ActiveValue::Set(decision_policy_snapshot_id.clone()),
                 spec_hash: ActiveValue::Set(spec.spec_hash),
                 next_scheduled_for: ActiveValue::Set(spec.next_scheduled_for),
                 last_materialized_for: ActiveValue::Set(None),
@@ -426,7 +426,7 @@ impl ReportRunRepository for PgReportRunRepository {
         }
         let txn = self.db.begin().await.map_err(StorageError::from)?;
         primitives::advisory_xact_lock(&txn, REPORT_SCHEDULE_LOCK_KEY).await?;
-        verify_active_config(&txn, &command.runtime_config_version_id).await?;
+        verify_active_config(&txn, &command.decision_policy_snapshot_id).await?;
         let now = primitives::statement_timestamp(&txn).await?;
         let state = quant_report_schedule_state::Entity::find_by_id(command.schedule_id.clone())
             .lock_exclusive()
@@ -436,7 +436,8 @@ impl ReportRunRepository for PgReportRunRepository {
             .ok_or_else(|| {
                 StorageError::not_found(entity::QUANT_REPORT_SCHEDULE_STATE, &command.schedule_id)
             })?;
-        let version_changed = state.runtime_config_version_id != command.runtime_config_version_id;
+        let version_changed =
+            state.decision_policy_snapshot_id != command.decision_policy_snapshot_id;
         let spec_changed = state.spec_hash != command.spec_hash;
         let cursor_changed = state.next_scheduled_for != command.expected_next_scheduled_for;
         if !state.enabled || version_changed || spec_changed || cursor_changed {
@@ -485,7 +486,7 @@ impl ReportRunRepository for PgReportRunRepository {
                     &txn,
                     ScheduleGapInsert {
                         schedule_id: &command.schedule_id,
-                        runtime_config_version_id: &command.runtime_config_version_id,
+                        decision_policy_snapshot_id: &command.decision_policy_snapshot_id,
                         reason,
                         first,
                         last,
@@ -778,7 +779,7 @@ impl ReportRunRepository for PgReportRunRepository {
         }
         let txn = self.db.begin().await.map_err(StorageError::from)?;
         primitives::advisory_xact_lock(&txn, REPORT_RUN_CLAIM_LOCK_KEY).await?;
-        verify_active_config(&txn, &config.runtime_config_version_id).await?;
+        verify_active_config(&txn, &config.decision_policy_snapshot_id).await?;
         let now = primitives::statement_timestamp(&txn).await?;
         expire_stale_ad_hoc(&txn, now, ttl).await?;
         let running = quant_report_run::Entity::find()
@@ -832,7 +833,8 @@ impl ReportRunRepository for PgReportRunRepository {
         active.heartbeat_at = ActiveValue::Set(Some(now));
         active.lease_expires_at = ActiveValue::Set(Some(now + lease));
         active.lease_owner = ActiveValue::Set(Some(worker_id));
-        active.runtime_config_version_id = ActiveValue::Set(Some(config.runtime_config_version_id));
+        active.decision_policy_snapshot_id =
+            ActiveValue::Set(Some(config.decision_policy_snapshot_id));
         active.top_n = ActiveValue::Set(Some(effective_top_n));
         active.knowledge_lag_secs = ActiveValue::Set(Some(effective_lag));
         let claimed = active.update(&txn).await.map_err(StorageError::from)?;

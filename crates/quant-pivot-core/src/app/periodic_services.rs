@@ -7,15 +7,14 @@ use crate::{
     ingest::data_quality::DataQualityService,
     service::{equity::EquitySnapshotService, feature_integrity::AutomaticFullParityOutcome},
 };
-use quant_pivot_error::{QuantError, QuantResult};
+use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
-    domain::RuntimeConfigPort,
+    domain::PolicySnapshotPort,
     enums::system::{BootstrapPhase, CapabilityId},
     types::Usd,
 };
 use quant_pivot_repository::traits::{EquitySnapshotRepository, PositionRepository};
-use rust_decimal::Decimal;
-use std::{str::FromStr, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 /// Interval between data-quality snapshot refreshes into Prometheus.
 const DATA_QUALITY_REFRESH_SECS: u64 = 5;
@@ -101,14 +100,15 @@ impl AppContext {
                     let runtime_config = Arc::clone(&runtime_config);
                     let equity_service = Arc::clone(&equity_service);
                     async move {
-                        let budget_cap = parse_budget_cap(
-                            &runtime_config
+                        let budget_cap = Usd::new(
+                            runtime_config
                                 .current()
+                                .execution_risk
                                 .portfolio
                                 .budget
                                 .total_budget_usd
                                 .value,
-                        )?;
+                        );
                         let as_of = chrono::Utc::now();
                         let account = account_factory.create(budget_cap)?.snapshot(as_of).await?;
                         equity_service.record_history_snapshot(&account).await?;
@@ -180,13 +180,4 @@ const fn duration_until_next_utc_hour(now: chrono::DateTime<chrono::Utc>) -> Dur
     } else {
         Duration::new(seconds - 1, 1_000_000_000 - nanos)
     }
-}
-
-fn parse_budget_cap(raw: &str) -> QuantResult<Usd> {
-    let value = Decimal::from_str(raw.trim()).map_err(|error| {
-        QuantError::config(format!(
-            "invalid portfolio.budget.total_budget_usd `{raw}`: {error}"
-        ))
-    })?;
-    Ok(Usd::new(value))
 }

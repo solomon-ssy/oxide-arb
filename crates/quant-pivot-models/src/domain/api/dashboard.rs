@@ -137,12 +137,33 @@ pub enum DashboardActionSeverity {
     Info,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DashboardActionReasonCode {
+    BasisAlertUnacknowledged,
+    KillSwitchNotClosed,
+    MarketDataDegraded,
+    PolicyRevisionAwaitingActivation,
+    ReportRunFailed,
+    UnresolvedReconciliation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DashboardActionOwner {
+    Data,
+    Governance,
+    Operations,
+    Research,
+    Risk,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct DashboardActionItemView {
     pub id: String,
     pub severity: DashboardActionSeverity,
-    pub reason_code: String,
-    pub owner: String,
+    pub reason_code: DashboardActionReasonCode,
+    pub owner: DashboardActionOwner,
     pub observed_at: DateTime<Utc>,
     pub target_route: String,
 }

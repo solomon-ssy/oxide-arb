@@ -40,8 +40,8 @@ use quant_pivot_models::{
     },
     runtime_config::{DataQualityConfig, DomainConfig, FactorsConfig, FeaturesConfig},
     types::{
-        ContentHash, DomainInstrumentKey, EventId, FeatureVectorId, MarketId, ModelRunId, Price,
-        RuntimeConfigVersionId, Shares, TokenId, Usd,
+        ContentHash, DecisionPolicySnapshotId, DomainInstrumentKey, EventId, FeatureVectorId,
+        MarketId, ModelRunId, Price, Shares, TokenId, Usd,
     },
 };
 use quant_pivot_repository::{
@@ -375,7 +375,7 @@ async fn build_features(db: &DatabaseConnection) -> (Vec<FeatureVector>, Vec<Fea
             data_quality: &DataQualityConfig::default(),
             model_requirements: &ModelFeatureRequirements::default(),
             pit: &live_pit,
-            runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
+            decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
             liquidity_cap_usd: Usd::new(Decimal::from(10_000)),
         })
         .await
@@ -421,7 +421,7 @@ async fn create_definition_and_values_then_list_for_run() {
             model_run_id: model_run_id.clone(),
             run_kind: ModelRunKind::LiveInference,
             model_version_id: None,
-            runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
+            decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
             market_selection_id: None,
             window_start: Utc::now(),
             window_end: Utc::now(),
@@ -524,7 +524,7 @@ async fn unpublished_factor_definitions_block_pipeline() {
             model_run_id: model_run_id.clone(),
             run_kind: ModelRunKind::LiveInference,
             model_version_id: None,
-            runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
+            decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
             market_selection_id: None,
             window_start: Utc::now(),
             window_end: Utc::now(),

@@ -142,7 +142,7 @@ async fn cold_window_is_not_eligible_and_writes_no_run_or_job() {
         kind: ResearchJobKind::FeatureParity,
         status: ResearchJobStatus::Queued,
         model_spec_id: None,
-        runtime_config_version_id: None,
+        decision_policy_snapshot_id: None,
         params_json: serde_json::json!({ "parity_run_id": run_id }),
         requested_by: None,
         acting_role: "system".to_owned(),

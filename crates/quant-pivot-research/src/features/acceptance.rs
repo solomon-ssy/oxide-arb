@@ -32,8 +32,9 @@ use quant_pivot_models::{
         SelectionConfig,
     },
     types::{
-        Bps, CatalogEventChangeId, CatalogMarketChangeId, CatalogSyncBatchId, ContentHash, EventId,
-        MarketId, Price, Probability, RuntimeConfigVersionId, SchemaVersion, Shares, TokenId, Usd,
+        Bps, CatalogEventChangeId, CatalogMarketChangeId, CatalogSyncBatchId, ContentHash,
+        DecisionPolicySnapshotId, EventId, MarketId, Price, Probability, SchemaVersion, Shares,
+        TokenId, Usd,
     },
 };
 use rust_decimal::Decimal;
@@ -938,13 +939,13 @@ fn feature_event_writer_emits_every_cell_state_with_full_audit_context() {
         .with_source_cutoff(DecisionSource::Book, 60)
         .expect("book cutoff");
     let persisted = persisted_feature_at(&vector, &boundary);
-    let runtime_config_version_id = RuntimeConfigVersionId::from_v7();
+    let decision_policy_snapshot_id = DecisionPolicySnapshotId::from_v7();
 
     let rows = feature_events(
         &vector,
         &persisted,
         &boundary,
-        &runtime_config_version_id,
+        &decision_policy_snapshot_id,
         &schema,
         1_000,
     )
@@ -974,8 +975,8 @@ fn feature_event_writer_emits_every_cell_state_with_full_audit_context() {
     assert_eq!(observed.staleness_ms, Some(60_000));
     assert_eq!(observed.feature_vector_id, persisted.feature_vector_id);
     assert_eq!(
-        observed.runtime_config_version_id,
-        runtime_config_version_id
+        observed.decision_policy_snapshot_id,
+        decision_policy_snapshot_id
     );
     assert_eq!(observed.decision_at, vector.decision_at.timestamp_millis());
     assert_eq!(
@@ -1027,7 +1028,7 @@ fn feature_event_writer_rejects_persistence_binding_mismatch() {
         &vector,
         &persisted,
         &boundary,
-        &RuntimeConfigVersionId::from_v7(),
+        &DecisionPolicySnapshotId::from_v7(),
         &schema,
         1_000,
     )
@@ -1658,7 +1659,7 @@ fn category_feature_projects_table_index() {
         &vector,
         &persisted,
         &DecisionClock::new(0).boundary(as_of).expect("boundary"),
-        &RuntimeConfigVersionId::from_v7(),
+        &DecisionPolicySnapshotId::from_v7(),
         &schema,
         10,
     )

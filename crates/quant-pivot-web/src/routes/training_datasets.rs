@@ -10,7 +10,7 @@
 //!
 //! Recommended SPA flow:
 //!
-//! 1. Operator selects `runtime_config_version_id` + `model_spec_id` + window.
+//! 1. Operator selects `decision_policy_snapshot_id` + `model_spec_id` + window.
 //! 2. Call **plan** → display `planned_samples` and save `training_dataset_id`.
 //! 3. Call **build** with the same body **plus** the plan's `training_dataset_id`.
 //! 4. Poll **GET** every few seconds until `status` is terminal.

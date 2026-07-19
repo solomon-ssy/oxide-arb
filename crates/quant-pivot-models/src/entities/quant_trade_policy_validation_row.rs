@@ -27,6 +27,14 @@ pub struct Model {
     pub detail: Option<String>,
     pub row_hash: ContentHash,
     pub created_at: DateTime<Utc>,
+
+    #[sea_orm(
+        belongs_to,
+        relation_enum = "ValidationRun",
+        from = "validation_run_id",
+        to = "validation_run_id"
+    )]
+    pub validation_run: BelongsTo<super::quant_trade_policy_validation::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

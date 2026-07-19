@@ -4,7 +4,6 @@ use std::{
     cmp::Reverse,
     collections::{BTreeMap, HashMap},
     iter,
-    str::FromStr,
     sync::Arc,
     time::Duration,
 };
@@ -18,7 +17,7 @@ use quant_pivot_models::{
         DecisionBoundary, DecisionClock, DecisionSource, MissingReasonCountView,
         NegRiskEventDriftView, NegRiskLegView, ParticipantConcentrationDetailView,
         ParticipantConcentrationMarketView, ParticipantConcentrationParticipantView,
-        ParticipantConcentrationSummaryView, RuntimeConfigPort, StructuralMonitorPort,
+        ParticipantConcentrationSummaryView, PolicySnapshotPort, StructuralMonitorPort,
         TradeParticipantRole, TradeTapeCoverageView, TradeTapePrint, TradeTapeSourceHealthView,
         TradeTapeSourceKind,
         market::{MarketRegistryInfo, registry::NegRiskLeg},
@@ -56,7 +55,7 @@ pub struct CoreStructuralMonitor {
     book_store: Arc<BookStore>,
     feature_windows: Arc<FeatureWindowProvider>,
     block_cursor_repo: Arc<dyn TradeTapeBlockCursorRepository>,
-    runtime_config: Arc<dyn RuntimeConfigPort>,
+    runtime_config: Arc<dyn PolicySnapshotPort>,
     trade_tape_on_chain: TradeTapeOnChainConfig,
 }
 
@@ -67,7 +66,7 @@ impl CoreStructuralMonitor {
         book_store: Arc<BookStore>,
         feature_windows: Arc<FeatureWindowProvider>,
         block_cursor_repo: Arc<dyn TradeTapeBlockCursorRepository>,
-        runtime_config: Arc<dyn RuntimeConfigPort>,
+        runtime_config: Arc<dyn PolicySnapshotPort>,
         trade_tape_on_chain: TradeTapeOnChainConfig,
     ) -> Self {
         Self {
@@ -124,7 +123,14 @@ impl CoreStructuralMonitor {
             .with_source_cutoff(DecisionSource::TradeTape, 0)?;
         Ok((
             boundary,
-            Duration::from_secs(runtime.features.structural.trade_tape_window_secs),
+            Duration::from_secs(
+                runtime
+                    .profile_artifacts
+                    .features
+                    .definition
+                    .structural
+                    .trade_tape_window_secs,
+            ),
         ))
     }
 
@@ -139,40 +145,51 @@ impl CoreStructuralMonitor {
         let runtime = self.runtime_config.current();
         let gate = ParticipantConcentrationGate {
             min_unique_participants: runtime
+                .profile_artifacts
                 .features
+                .definition
                 .structural
                 .trade_tape_min_unique_participants,
             min_notional_usd: parse_decimal(
                 "features.structural.trade_tape_min_notional_usd",
                 &runtime
+                    .profile_artifacts
                     .features
+                    .definition
                     .structural
                     .trade_tape_min_notional_usd
                     .value,
-            )?,
+            ),
             min_coverage_ratio: parse_decimal(
                 "features.structural.trade_tape_min_coverage_ratio",
                 &runtime
+                    .profile_artifacts
                     .features
+                    .definition
                     .structural
                     .trade_tape_min_coverage_ratio
                     .value,
-            )?,
+            ),
         };
-        let factor = &runtime.factors.structural.participant_concentration;
+        let factor = &runtime
+            .profile_artifacts
+            .scoring
+            .definition
+            .structural
+            .participant_concentration;
         let weights = ConcentrationCompositeWeights {
             gini: parse_decimal(
                 "factors.structural.participant_concentration.gini_weight",
                 &factor.gini_weight.value,
-            )?,
+            ),
             cr1_share: parse_decimal(
                 "factors.structural.participant_concentration.cr1_share_weight",
                 &factor.cr1_share_weight.value,
-            )?,
+            ),
             hhi: parse_decimal(
                 "factors.structural.participant_concentration.hhi_weight",
                 &factor.hhi_weight.value,
-            )?,
+            ),
         };
         let trigger_time = Utc::now();
         let (boundary, lookback) = self.pit_boundary(trigger_time)?;
@@ -335,7 +352,12 @@ impl StructuralMonitorPort for CoreStructuralMonitor {
         Ok(TradeTapeCoverageView {
             decision_at: trigger_time,
             knowledge_cutoff: boundary.cutoff_for(DecisionSource::TradeTape),
-            window_secs: runtime.features.structural.trade_tape_window_secs,
+            window_secs: runtime
+                .profile_artifacts
+                .features
+                .definition
+                .structural
+                .trade_tape_window_secs,
             knowledge_lag_secs: boundary.knowledge_lag_secs(),
             active_market_count,
             token_cursor_count: contract_cursor_count,
@@ -379,28 +401,39 @@ impl StructuralMonitorPort for CoreStructuralMonitor {
         Ok(ParticipantConcentrationSummaryView {
             decision_at: boundary.decision_at(),
             knowledge_cutoff: boundary.cutoff_for(DecisionSource::TradeTape),
-            window_secs: runtime.features.structural.trade_tape_window_secs,
+            window_secs: runtime
+                .profile_artifacts
+                .features
+                .definition
+                .structural
+                .trade_tape_window_secs,
             knowledge_lag_secs: boundary.knowledge_lag_secs(),
             min_unique_participants: runtime
+                .profile_artifacts
                 .features
+                .definition
                 .structural
                 .trade_tape_min_unique_participants,
             min_notional_usd: parse_decimal(
                 "features.structural.trade_tape_min_notional_usd",
                 &runtime
+                    .profile_artifacts
                     .features
+                    .definition
                     .structural
                     .trade_tape_min_notional_usd
                     .value,
-            )?,
+            ),
             min_coverage_ratio: parse_decimal(
                 "features.structural.trade_tape_min_coverage_ratio",
                 &runtime
+                    .profile_artifacts
                     .features
+                    .definition
                     .structural
                     .trade_tape_min_coverage_ratio
                     .value,
-            )?,
+            ),
             markets,
             missing_reason_breakdown,
         })
@@ -433,12 +466,8 @@ impl StructuralMonitorPort for CoreStructuralMonitor {
     }
 }
 
-fn parse_decimal(field: &'static str, value: &str) -> QuantResult<Decimal> {
-    Decimal::from_str(value).map_err(|error| {
-        QuantError::config(format!(
-            "runtime config field {field} is not a valid decimal: {error}"
-        ))
-    })
+const fn parse_decimal(_field: &'static str, value: &Decimal) -> Decimal {
+    *value
 }
 
 fn leg_sum(legs: &[NegRiskLegView]) -> (Option<Decimal>, Option<Decimal>) {

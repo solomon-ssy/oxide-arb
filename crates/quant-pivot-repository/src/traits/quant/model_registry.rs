@@ -1,12 +1,12 @@
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{
-        ModelSpecInfo, ModelSpecListQuery, ModelVersionInfo, ModelVersionListQuery, NewModelSpec,
-        NewModelVersion, NewRuntimeConfigActivation, Paginated,
+        ModelPickerSide, ModelSpecInfo, ModelSpecListQuery, ModelVersionInfo,
+        ModelVersionListQuery, NewModelSpec, NewModelVersion, Paginated, PublishedModelCatalogInfo,
     },
+    enums::common::MarketCategory,
     types::{
-        BacktestPathSetId, ContentHash, FeatureParityRunId, FeatureParityStateId, ModelSpecId,
-        ModelVersionId, RuntimeConfigActivationId,
+        BacktestPathSetId, FeatureParityRunId, FeatureParityStateId, ModelSpecId, ModelVersionId,
     },
 };
 
@@ -23,46 +23,19 @@ pub enum PublishFeatureParityPermit {
     },
 }
 
-/// Atomic model publication plus runtime-pointer activation command.
+/// Atomic model publication command. Runtime routing is governed separately by
+/// the `ModelRouting` configuration resource.
 pub struct PublishModelVersionCommit<'a> {
     pub model_spec_id: &'a ModelSpecId,
     pub model_version_id: &'a ModelVersionId,
     pub feature_parity_permit: PublishFeatureParityPermit,
     pub feature_parity_run_id: &'a FeatureParityRunId,
-    pub expected_runtime_config_activation_id: Option<&'a RuntimeConfigActivationId>,
-    pub runtime_config_activation: NewRuntimeConfigActivation,
 }
 
-/// Result of the indivisible model publication/config activation transaction.
-pub struct PublishModelVersionOutcome {
+/// Result of the model publication transaction.
+pub struct PublishModelVersionResult {
     pub published: ModelVersionInfo,
-    pub retired_predecessors: Vec<ModelVersionId>,
-    pub rollback_target: Option<ModelVersionInfo>,
     pub feature_parity_state_id: FeatureParityStateId,
-}
-
-/// Compare-and-swap permit for one governed model rollback commit.
-pub struct RollbackModelVersionCommit<'a> {
-    /// Spec whose publication slot is being changed.
-    pub model_spec_id: &'a ModelSpecId,
-    /// Exact version expected to be the spec's sole published version.
-    pub expected_current_model_version_id: &'a ModelVersionId,
-    /// Audited retired predecessor to restore.
-    pub target_model_version_id: &'a ModelVersionId,
-    /// Artifact hash validated by governance before the commit boundary.
-    pub expected_target_artifact_hash: &'a ContentHash,
-    /// CPCV binding evaluated by the current publish quality gate.
-    pub expected_target_publish_path_set_id: Option<&'a BacktestPathSetId>,
-    /// Canonical content hash of the exact persisted, passed gate-report JSON.
-    pub quality_gate_payload_hash: &'a ContentHash,
-    /// Durable clear-latch generation captured for this commit.
-    pub feature_parity_state_id: &'a FeatureParityStateId,
-    /// Full subject-bound frozen parity permit for the target.
-    pub feature_parity_run_id: &'a FeatureParityRunId,
-    /// Exact runtime-config activation generation observed by pointer preflight.
-    pub expected_runtime_config_activation_id: Option<&'a RuntimeConfigActivationId>,
-    /// Prepared target pointer activation committed with both status changes.
-    pub runtime_config_activation: NewRuntimeConfigActivation,
 }
 
 #[async_trait::async_trait]
@@ -106,6 +79,16 @@ pub trait ModelRegistryRepository: Send + Sync {
         query: ModelVersionListQuery,
     ) -> Result<Paginated<ModelVersionInfo>, StorageError>;
 
+    /// Return the complete published picker catalog using one typed joined
+    /// query. Category filtering includes generic artifacts (`NULL`) because
+    /// they remain valid fallbacks; category-pointer UI applies exact-scope
+    /// filtering before allowing a governed selection.
+    async fn list_published_catalog(
+        &self,
+        side: ModelPickerSide,
+        category: Option<MarketCategory>,
+    ) -> Result<Vec<PublishedModelCatalogInfo>, StorageError>;
+
     /// All currently `Published` versions of a spec, most recent first. Used by
     /// governance inspection and invariant tests; rollback resolves only the
     /// predecessor recorded in the publish audit and never guesses from here.
@@ -119,17 +102,12 @@ pub trait ModelRegistryRepository: Send + Sync {
         model_version_id: &ModelVersionId,
     ) -> Result<ModelVersionInfo, StorageError>;
 
-    /// Retire every currently `Published` version of `model_spec_id` except
-    /// `model_version_id`, then publish `model_version_id` — all in one
-    /// transaction (spec row locked first).
-    ///
-    /// Returns `(published, retired_predecessor_ids, rollback_target)` where
-    /// `rollback_target` is the most recently published predecessor before
-    /// retirement (if any).
-    async fn publish_replacing_predecessors(
+    /// Publish one immutable, gate-approved artifact without changing routing
+    /// or the lifecycle of any other published artifact.
+    async fn publish_model_version(
         &self,
         commit: PublishModelVersionCommit<'_>,
-    ) -> Result<PublishModelVersionOutcome, StorageError>;
+    ) -> Result<PublishModelVersionResult, StorageError>;
 
     /// Promote a backtested candidate into shadow evaluation (`Candidate → Shadow`).
     ///
@@ -138,19 +116,6 @@ pub trait ModelRegistryRepository: Send + Sync {
         &self,
         model_version_id: &ModelVersionId,
     ) -> Result<ModelVersionInfo, StorageError>;
-
-    /// Atomically replace the exact currently-published version with one
-    /// retired predecessor after every rollback gate has passed.
-    ///
-    /// The transaction compares the durable clear-latch generation and the
-    /// subject-bound full-parity permit, then locks the spec/current/target
-    /// rows and performs `Published → Retired` plus `Retired → Published`
-    /// as one indivisible commit. The expected current id prevents a stale
-    /// operator request from rolling back a newer publication.
-    async fn rollback_to_retired_predecessor(
-        &self,
-        commit: RollbackModelVersionCommit<'_>,
-    ) -> Result<(ModelVersionInfo, ModelVersionInfo), StorageError>;
 
     /// Persist a model version's quality-gate report JSON (the governance layer
     /// writes the gate decision into `quant_model_version.quality_gate_report`

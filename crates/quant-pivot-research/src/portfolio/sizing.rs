@@ -46,7 +46,7 @@
 //! Every intermediate stays in [`Decimal`]; `f64` never appears, so no precision
 //! drift can leak into a money value.
 
-use quant_pivot_error::{QuantError, QuantResult};
+use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     enums::quant::{BindingConstraint, RejectionReason, SizingModelKind},
     runtime_config::{
@@ -403,29 +403,14 @@ pub fn sizing_model_from_config(
     kelly_safety: &KellySafetyConfig,
 ) -> QuantResult<Box<dyn SizingModel>> {
     Ok(Box::new(KellySizingModel::new(
-        parse_decimal(
-            "portfolio.sizing.kelly_fraction",
-            &sizing.kelly_fraction.value,
-        )?,
-        parse_decimal(
-            "portfolio.sizing.max_position_pct",
-            &sizing.max_position_pct.value,
-        )?,
+        sizing.kelly_fraction.value,
+        sizing.max_position_pct.value,
         sizing.confidence_weighting,
         sizing.drawdown_scaling,
         KellySafetyParams::new(
-            parse_decimal(
-                "portfolio.kelly_safety.edge_uncertainty_k",
-                &kelly_safety.edge_uncertainty_k.value,
-            )?,
-            parse_decimal(
-                "portfolio.kelly_safety.edge_uncertainty_floor",
-                &kelly_safety.edge_uncertainty_floor.value,
-            )?,
-            parse_decimal(
-                "portfolio.kelly_safety.binding_materiality_threshold",
-                &kelly_safety.binding_materiality_threshold.value,
-            )?,
+            kelly_safety.edge_uncertainty_k.value,
+            kelly_safety.edge_uncertainty_floor.value,
+            kelly_safety.binding_materiality_threshold.value,
         ),
     )))
 }
@@ -503,13 +488,6 @@ fn resolve_kelly_stage_binding(
     } else {
         None
     }
-}
-
-/// Parse a config decimal, attributing a malformed value to its field path.
-fn parse_decimal(field: &str, value: &str) -> QuantResult<Decimal> {
-    value
-        .parse::<Decimal>()
-        .map_err(|error| QuantError::config(format!("{field} is not a valid decimal: {error}")))
 }
 
 #[cfg(test)]

@@ -13,13 +13,13 @@ use quant_pivot_models::{
     types::{FeatureVectorId, ModelRunId},
 };
 use quant_pivot_repository::postgres::{
-    PgFeatureRepository, PgOperationLogRepository, PgOrderIntentRepository, PgReportRunRepository,
-    PgRuntimeConfigVersionRepository,
+    PgFeatureRepository, PgOperationLogRepository, PgOrderIntentRepository, PgPolicyRepository,
+    PgReportRunRepository,
 };
 use quant_pivot_repository::traits::{
-    FeatureRepository, OperationLogRepository, OrderIntentRepository, QuantFactReadRepository,
-    RecommendationReportRepository, RecommendationRepository, ReportRunRepository,
-    RuntimeConfigVersionRepository, ServingEvidenceRepository,
+    FeatureRepository, OperationLogRepository, OrderIntentRepository, PolicyRepository,
+    QuantFactReadRepository, RecommendationReportRepository, RecommendationRepository,
+    ReportRunRepository, ServingEvidenceRepository,
 };
 use quant_pivot_test_support::report_pipeline_harness::FixtureReportSeedContext;
 use quant_pivot_test_support::report_pipeline_harness::{HarnessOptions, ReportPipelineHarness};
@@ -83,8 +83,8 @@ pub async fn build_core_report_stack(
         lifecycle: Arc::new(harness.lifecycle),
         serving_evidence: Arc::new(EmptyServingEvidenceRepository),
         feature_repo: Arc::new(PgFeatureRepository::new(db.clone())) as Arc<dyn FeatureRepository>,
-        runtime_config_repo: Arc::new(PgRuntimeConfigVersionRepository::new(db.clone()))
-            as Arc<dyn RuntimeConfigVersionRepository>,
+        runtime_config_repo: Arc::new(PgPolicyRepository::new(db.clone()))
+            as Arc<dyn PolicyRepository>,
         quant_fact_read: Arc::clone(&quant_facts) as Arc<dyn QuantFactReadRepository>,
         operation_logs: Arc::new(PgOperationLogRepository::new(db.clone()))
             as Arc<dyn OperationLogRepository>,
@@ -94,7 +94,7 @@ pub async fn build_core_report_stack(
         port,
         report_runs,
         fixture_ctx: FixtureReportSeedContext {
-            runtime_config_version_id: harness.runtime_config_version_id,
+            decision_policy_snapshot_id: harness.decision_policy_snapshot_id,
             model_version_id: harness.model_version_id,
         },
         quant_facts,

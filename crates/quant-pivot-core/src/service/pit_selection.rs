@@ -64,7 +64,7 @@ use quant_pivot_models::{
         DecisionBoundary, DomainAvailability, MarketCandidate, MarketDataHealth, MarketRegistryInfo,
     },
     runtime_config::{DataQualityConfig, FeaturesConfig, SelectionConfig},
-    types::{MarketId, RuntimeConfigVersionId},
+    types::{DecisionPolicySnapshotId, MarketId},
 };
 use quant_pivot_research::{
     features::ResolvedBook,
@@ -83,7 +83,7 @@ pub struct OfflinePitSelector {
     selection: SelectionConfig,
     data_quality: DataQualityConfig,
     features: FeaturesConfig,
-    runtime_config_version_id: RuntimeConfigVersionId,
+    decision_policy_snapshot_id: DecisionPolicySnapshotId,
     knowledge_lag_secs: u64,
     /// The target `ModelSpec`'s declared feature requirements (11.2.2
     /// remediation R7) — genuinely gates `ModelFeatureUnavailable`, mirroring
@@ -99,7 +99,7 @@ impl OfflinePitSelector {
         selection: &SelectionConfig,
         data_quality: &DataQualityConfig,
         features: &FeaturesConfig,
-        runtime_config_version_id: RuntimeConfigVersionId,
+        decision_policy_snapshot_id: DecisionPolicySnapshotId,
         knowledge_lag_secs: u64,
         model_requirements: ModelFeatureRequirements,
     ) -> Self {
@@ -108,7 +108,7 @@ impl OfflinePitSelector {
             selection: selection.clone(),
             data_quality: data_quality.clone(),
             features: features.clone(),
-            runtime_config_version_id,
+            decision_policy_snapshot_id,
             knowledge_lag_secs,
             model_requirements,
         }
@@ -168,7 +168,7 @@ impl OfflinePitSelector {
     fn request(&self, decision_at: DateTime<Utc>) -> MarketSelectionBuildRequest {
         MarketSelectionBuildRequest {
             decision_at,
-            runtime_config_version_id: self.runtime_config_version_id.clone(),
+            decision_policy_snapshot_id: self.decision_policy_snapshot_id.clone(),
             selection: self.selection.clone(),
             data_quality: self.data_quality.clone(),
             features: self.features.clone(),
@@ -281,9 +281,9 @@ mod tests {
         runtime_config::{DataQualityConfig, DomainConfig, FeaturesConfig, SelectionConfig},
         types::{
             BinanceSymbol, CatalogEventChangeId, CatalogMarketChangeId, CatalogSyncBatchId,
-            ContentHash, CryptoAsset, CryptoQuote, DomainInstrumentKey, DomainSourceId, EventId,
-            MarketId, MarketLinkageId, Price, Probability, ResolverVersion, RuntimeConfigVersionId,
-            Shares, TokenId, Usd,
+            ContentHash, CryptoAsset, CryptoQuote, DecisionPolicySnapshotId, DomainInstrumentKey,
+            DomainSourceId, EventId, MarketId, MarketLinkageId, Price, Probability,
+            ResolverVersion, Shares, TokenId, Usd,
         },
     };
     use quant_pivot_research::{
@@ -657,7 +657,7 @@ mod tests {
             },
             &DataQualityConfig::default(),
             &FeaturesConfig::default(),
-            RuntimeConfigVersionId::from_v7(),
+            DecisionPolicySnapshotId::from_v7(),
             domain_config.crypto.availability_lag_secs,
             crypto_model_requirements(),
         );
@@ -711,7 +711,7 @@ mod tests {
             },
             &DataQualityConfig::default(),
             &FeaturesConfig::default(),
-            RuntimeConfigVersionId::from_v7(),
+            DecisionPolicySnapshotId::from_v7(),
             domain_config.crypto.availability_lag_secs,
             crypto_model_requirements(),
         );

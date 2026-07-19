@@ -2,13 +2,13 @@
 
 use sea_orm::entity::prelude::*;
 
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(rs_type = "Enum", db_type = "Enum", enum_name = "qp_account_source")]
 pub enum QpAccountSource {
     #[sea_orm(string_value = "polymarket")]
     Polymarket,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(rs_type = "Enum", db_type = "Enum", enum_name = "qp_approval_status")]
 pub enum QpApprovalStatus {
     #[sea_orm(string_value = "not_required")]
@@ -22,7 +22,7 @@ pub enum QpApprovalStatus {
     #[sea_orm(string_value = "expired")]
     Expired,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(rs_type = "Enum", db_type = "Enum", enum_name = "qp_bootstrap_phase")]
 pub enum QpBootstrapPhase {
     #[sea_orm(string_value = "initializing")]
@@ -34,7 +34,7 @@ pub enum QpBootstrapPhase {
     #[sea_orm(string_value = "active")]
     Active,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(rs_type = "Enum", db_type = "Enum", enum_name = "qp_calibration_kind")]
 pub enum QpCalibrationKind {
     #[sea_orm(string_value = "model_score")]
@@ -44,7 +44,7 @@ pub enum QpCalibrationKind {
     #[sea_orm(string_value = "weather_station_lead_bias")]
     WeatherStationLeadBias,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(
     rs_type = "Enum",
     db_type = "Enum",
@@ -62,7 +62,7 @@ pub enum QpCapitalAllocationState {
     #[sea_orm(string_value = "impaired")]
     Impaired,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(
     rs_type = "Enum",
     db_type = "Enum",
@@ -76,7 +76,7 @@ pub enum QpCatalogChangeType {
     #[sea_orm(string_value = "gamma_confirmed_tombstone")]
     GammaConfirmedTombstone,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(
     rs_type = "Enum",
     db_type = "Enum",
@@ -90,7 +90,7 @@ pub enum QpCatalogEntityKind {
     #[sea_orm(string_value = "cursor")]
     Cursor,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(
     rs_type = "Enum",
     db_type = "Enum",
@@ -106,7 +106,7 @@ pub enum QpCatalogFilterReason {
     #[sea_orm(string_value = "orders_not_accepted")]
     OrdersNotAccepted,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(
     rs_type = "Enum",
     db_type = "Enum",
@@ -130,7 +130,7 @@ pub enum QpCatalogRejectionReason {
     #[sea_orm(string_value = "cursor_protocol_violation")]
     CursorProtocolViolation,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(
     rs_type = "Enum",
     db_type = "Enum",
@@ -146,7 +146,7 @@ pub enum QpCatalogSyncFailureStage {
     #[sea_orm(string_value = "recovery")]
     Recovery,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(rs_type = "Enum", db_type = "Enum", enum_name = "qp_catalog_sync_kind")]
 pub enum QpCatalogSyncKind {
     #[sea_orm(string_value = "baseline")]
@@ -154,7 +154,7 @@ pub enum QpCatalogSyncKind {
     #[sea_orm(string_value = "reconcile")]
     Reconcile,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(
     rs_type = "Enum",
     db_type = "Enum",
@@ -166,7 +166,7 @@ pub enum QpCatalogSyncStatus {
     #[sea_orm(string_value = "failed")]
     Failed,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(
     rs_type = "Enum",
     db_type = "Enum",
@@ -178,7 +178,27 @@ pub enum QpCatalogTimestampQuality {
     #[sea_orm(string_value = "commit_time_fallback")]
     CommitTimeFallback,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(
+    rs_type = "Enum",
+    db_type = "Enum",
+    enum_name = "qp_config_resource_kind"
+)]
+pub enum QpConfigResourceKind {
+    #[sea_orm(string_value = "recommendation_policy")]
+    RecommendationPolicy,
+    #[sea_orm(string_value = "execution_risk_policy")]
+    ExecutionRiskPolicy,
+    #[sea_orm(string_value = "model_routing")]
+    ModelRouting,
+    #[sea_orm(string_value = "report_schedule")]
+    ReportSchedule,
+    #[sea_orm(string_value = "operational_control")]
+    OperationalControl,
+    #[sea_orm(string_value = "execution_authorization")]
+    ExecutionAuthorization,
+}
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(
     rs_type = "Enum",
     db_type = "Enum",
@@ -196,7 +216,7 @@ pub enum QpDataQualityStatus {
     #[sea_orm(string_value = "insufficient")]
     Insufficient,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(rs_type = "Enum", db_type = "Enum", enum_name = "qp_dataset_purpose")]
 pub enum QpDatasetPurpose {
     #[sea_orm(string_value = "training")]
@@ -206,7 +226,37 @@ pub enum QpDatasetPurpose {
     #[sea_orm(string_value = "policy_fit")]
     PolicyFit,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(
+    rs_type = "Enum",
+    db_type = "Enum",
+    enum_name = "qp_decision_policy_snapshot_source"
+)]
+pub enum QpDecisionPolicySnapshotSource {
+    #[sea_orm(string_value = "bootstrap")]
+    Bootstrap,
+    #[sea_orm(string_value = "activation")]
+    Activation,
+    #[sea_orm(string_value = "rollback")]
+    Rollback,
+}
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(
+    rs_type = "Enum",
+    db_type = "Enum",
+    enum_name = "qp_domain_cursor_status"
+)]
+pub enum QpDomainCursorStatus {
+    #[sea_orm(string_value = "bootstrap")]
+    Bootstrap,
+    #[sea_orm(string_value = "backfilling")]
+    Backfilling,
+    #[sea_orm(string_value = "live")]
+    Live,
+    #[sea_orm(string_value = "error")]
+    Failed,
+}
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(rs_type = "Enum", db_type = "Enum", enum_name = "qp_domain_family")]
 pub enum QpDomainFamily {
     #[sea_orm(string_value = "crypto")]
@@ -214,7 +264,27 @@ pub enum QpDomainFamily {
     #[sea_orm(string_value = "weather")]
     Weather,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(
+    rs_type = "Enum",
+    db_type = "Enum",
+    enum_name = "qp_domain_source_expectation_status"
+)]
+pub enum QpDomainSourceExpectationStatus {
+    #[sea_orm(string_value = "not_started")]
+    NotStarted,
+    #[sea_orm(string_value = "live")]
+    Live,
+    #[sea_orm(string_value = "stale")]
+    Stale,
+    #[sea_orm(string_value = "credential_blocked")]
+    CredentialBlocked,
+    #[sea_orm(string_value = "error")]
+    Failed,
+    #[sea_orm(string_value = "unsupported")]
+    Unsupported,
+}
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(
     rs_type = "Enum",
     db_type = "Enum",
@@ -236,7 +306,7 @@ pub enum QpEntryConditionAuditAction {
     #[sea_orm(string_value = "invalidated")]
     Invalidated,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(
     rs_type = "Enum",
     db_type = "Enum",
@@ -260,7 +330,7 @@ pub enum QpEntryConditionState {
     #[sea_orm(string_value = "invalidated")]
     Invalidated,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(rs_type = "Enum", db_type = "Enum", enum_name = "qp_event_status")]
 pub enum QpEventStatus {
     #[sea_orm(string_value = "active")]
@@ -272,7 +342,7 @@ pub enum QpEventStatus {
     #[sea_orm(string_value = "unknown")]
     Unknown,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(
     rs_type = "Enum",
     db_type = "Enum",
@@ -284,7 +354,7 @@ pub enum QpExecutionOrderPhase {
     #[sea_orm(string_value = "exit")]
     Exit,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(
     rs_type = "Enum",
     db_type = "Enum",
@@ -310,7 +380,7 @@ pub enum QpExecutionOrderState {
     #[sea_orm(string_value = "ambiguous")]
     Ambiguous,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(
     rs_type = "Enum",
     db_type = "Enum",
@@ -324,7 +394,7 @@ pub enum QpExecutionWalletKind {
     #[sea_orm(string_value = "gnosis_safe")]
     GnosisSafe,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(rs_type = "Enum", db_type = "Enum", enum_name = "qp_exit_reason")]
 pub enum QpExitReason {
     #[sea_orm(string_value = "take_profit")]
@@ -354,7 +424,7 @@ pub enum QpExitReason {
     #[sea_orm(string_value = "data_stale")]
     DataStale,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(rs_type = "Enum", db_type = "Enum", enum_name = "qp_exit_state")]
 pub enum QpExitState {
     #[sea_orm(string_value = "not_started")]
@@ -374,7 +444,7 @@ pub enum QpExitState {
     #[sea_orm(string_value = "manual_required")]
     ManualRequired,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(
     rs_type = "Enum",
     db_type = "Enum",
@@ -390,7 +460,7 @@ pub enum QpFactorDefinitionScope {
     #[sea_orm(string_value = "domain_weather")]
     DomainWeather,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(rs_type = "Enum", db_type = "Enum", enum_name = "qp_factor_direction")]
 pub enum QpFactorDirection {
     #[sea_orm(string_value = "positive")]
@@ -400,7 +470,7 @@ pub enum QpFactorDirection {
     #[sea_orm(string_value = "neutral")]
     Neutral,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(rs_type = "Enum", db_type = "Enum", enum_name = "qp_factor_family")]
 pub enum QpFactorFamily {
     #[sea_orm(string_value = "liquidity")]
@@ -426,7 +496,7 @@ pub enum QpFactorFamily {
     #[sea_orm(string_value = "domain_weather")]
     DomainWeather,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(
     rs_type = "Enum",
     db_type = "Enum",
@@ -442,7 +512,7 @@ pub enum QpFactorIndeterminateReason {
     #[sea_orm(string_value = "leg_book_missing")]
     LegBookMissing,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(
     rs_type = "Enum",
     db_type = "Enum",
@@ -458,7 +528,7 @@ pub enum QpFactorValueState {
     #[sea_orm(string_value = "indeterminate")]
     Indeterminate,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(
     rs_type = "Enum",
     db_type = "Enum",
@@ -470,7 +540,7 @@ pub enum QpFeatureParityLatchState {
     #[sea_orm(string_value = "clear")]
     Clear,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(
     rs_type = "Enum",
     db_type = "Enum",
@@ -482,7 +552,7 @@ pub enum QpFeatureParityRunKind {
     #[sea_orm(string_value = "full")]
     Full,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(
     rs_type = "Enum",
     db_type = "Enum",
@@ -502,7 +572,7 @@ pub enum QpFeatureParityRunStatus {
     #[sea_orm(string_value = "failed")]
     Failed,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(
     rs_type = "Enum",
     db_type = "Enum",
@@ -518,7 +588,7 @@ pub enum QpFeatureParityStateTransition {
     #[sea_orm(string_value = "governed_acknowledge")]
     GovernedAcknowledge,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(rs_type = "Enum", db_type = "Enum", enum_name = "qp_kill_switch_state")]
 pub enum QpKillSwitchState {
     #[sea_orm(string_value = "closed")]
@@ -532,7 +602,7 @@ pub enum QpKillSwitchState {
     #[sea_orm(string_value = "emergency_halted")]
     EmergencyHalted,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(
     rs_type = "Enum",
     db_type = "Enum",
@@ -550,7 +620,7 @@ pub enum QpLinkageSourceRole {
     #[sea_orm(string_value = "forecast")]
     Forecast,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(rs_type = "Enum", db_type = "Enum", enum_name = "qp_linkage_status")]
 pub enum QpLinkageStatus {
     #[sea_orm(string_value = "resolved")]
@@ -560,7 +630,7 @@ pub enum QpLinkageStatus {
     #[sea_orm(string_value = "overridden")]
     Overridden,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(rs_type = "Enum", db_type = "Enum", enum_name = "qp_market_category")]
 pub enum QpMarketCategory {
     #[sea_orm(string_value = "geopolitics")]
@@ -584,7 +654,7 @@ pub enum QpMarketCategory {
     #[sea_orm(string_value = "other")]
     Other,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(rs_type = "Enum", db_type = "Enum", enum_name = "qp_market_status")]
 pub enum QpMarketStatus {
     #[sea_orm(string_value = "discovered")]
@@ -602,7 +672,7 @@ pub enum QpMarketStatus {
     #[sea_orm(string_value = "delisted")]
     Delisted,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(rs_type = "Enum", db_type = "Enum", enum_name = "qp_menu_kind")]
 pub enum QpMenuKind {
     #[sea_orm(string_value = "directory")]
@@ -612,7 +682,7 @@ pub enum QpMenuKind {
     #[sea_orm(string_value = "button")]
     Button,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(rs_type = "Enum", db_type = "Enum", enum_name = "qp_model_family")]
 pub enum QpModelFamily {
     #[sea_orm(string_value = "weighted_factor")]
@@ -632,7 +702,7 @@ pub enum QpModelFamily {
     #[sea_orm(string_value = "hold_vs_exit_weighted")]
     HoldVsExitWeighted,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(
     rs_type = "Enum",
     db_type = "Enum",
@@ -650,7 +720,7 @@ pub enum QpModelGovernanceAction {
     #[sea_orm(string_value = "bind_publish_path_set")]
     BindPublishPathSet,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(
     rs_type = "Enum",
     db_type = "Enum",
@@ -676,7 +746,7 @@ pub enum QpModelRunErrorCode {
     #[sea_orm(string_value = "cancelled_by_operator")]
     CancelledByOperator,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(rs_type = "Enum", db_type = "Enum", enum_name = "qp_model_run_kind")]
 pub enum QpModelRunKind {
     #[sea_orm(string_value = "training")]
@@ -690,7 +760,7 @@ pub enum QpModelRunKind {
     #[sea_orm(string_value = "live_inference")]
     LiveInference,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(rs_type = "Enum", db_type = "Enum", enum_name = "qp_model_run_status")]
 pub enum QpModelRunStatus {
     #[sea_orm(string_value = "running")]
@@ -702,7 +772,7 @@ pub enum QpModelRunStatus {
     #[sea_orm(string_value = "cancelled")]
     Cancelled,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(
     rs_type = "Enum",
     db_type = "Enum",
@@ -716,7 +786,7 @@ pub enum QpNormalizationSource {
     #[sea_orm(string_value = "frozen_reference_quantile")]
     FrozenReferenceQuantile,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(
     rs_type = "Enum",
     db_type = "Enum",
@@ -729,8 +799,10 @@ pub enum QpOperationCategory {
     Rbac,
     #[sea_orm(string_value = "governance")]
     Governance,
-    #[sea_orm(string_value = "runtime_config")]
-    RuntimeConfig,
+    #[sea_orm(string_value = "config")]
+    Config,
+    #[sea_orm(string_value = "config_lifecycle")]
+    ConfigLifecycle,
     #[sea_orm(string_value = "system")]
     System,
     #[sea_orm(string_value = "risk")]
@@ -744,7 +816,7 @@ pub enum QpOperationCategory {
     #[sea_orm(string_value = "other")]
     Other,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(rs_type = "Enum", db_type = "Enum", enum_name = "qp_operation_outcome")]
 pub enum QpOperationOutcome {
     #[sea_orm(string_value = "success")]
@@ -754,13 +826,13 @@ pub enum QpOperationOutcome {
     #[sea_orm(string_value = "denied")]
     Denied,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(rs_type = "Enum", db_type = "Enum", enum_name = "qp_order_intent_kind")]
 pub enum QpOrderIntentKind {
     #[sea_orm(string_value = "buy")]
     Buy,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(
     rs_type = "Enum",
     db_type = "Enum",
@@ -796,7 +868,7 @@ pub enum QpOrderIntentStatus {
     #[sea_orm(string_value = "invalidated")]
     Invalidated,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(rs_type = "Enum", db_type = "Enum", enum_name = "qp_order_type_kind")]
 pub enum QpOrderTypeKind {
     #[sea_orm(string_value = "fok")]
@@ -808,7 +880,7 @@ pub enum QpOrderTypeKind {
     #[sea_orm(string_value = "gtd")]
     Gtd,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(rs_type = "Enum", db_type = "Enum", enum_name = "qp_outcome_side")]
 pub enum QpOutcomeSide {
     #[sea_orm(string_value = "yes")]
@@ -816,7 +888,7 @@ pub enum QpOutcomeSide {
     #[sea_orm(string_value = "no")]
     No,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(
     rs_type = "Enum",
     db_type = "Enum",
@@ -830,7 +902,53 @@ pub enum QpParitySubjectKind {
     #[sea_orm(string_value = "model_version")]
     ModelVersion,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(
+    rs_type = "Enum",
+    db_type = "Enum",
+    enum_name = "qp_policy_activation_kind"
+)]
+pub enum QpPolicyActivationKind {
+    #[sea_orm(string_value = "initial")]
+    Initial,
+    #[sea_orm(string_value = "promote")]
+    Promote,
+    #[sea_orm(string_value = "rollback")]
+    Rollback,
+}
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(rs_type = "Enum", db_type = "Enum", enum_name = "qp_policy_actor_kind")]
+pub enum QpPolicyActorKind {
+    #[sea_orm(string_value = "operator")]
+    Operator,
+    #[sea_orm(string_value = "system")]
+    System,
+}
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(
+    rs_type = "Enum",
+    db_type = "Enum",
+    enum_name = "qp_policy_approval_decision"
+)]
+pub enum QpPolicyApprovalDecision {
+    #[sea_orm(string_value = "approved")]
+    Approved,
+    #[sea_orm(string_value = "rejected")]
+    Rejected,
+}
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(
+    rs_type = "Enum",
+    db_type = "Enum",
+    enum_name = "qp_policy_revision_status"
+)]
+pub enum QpPolicyRevisionStatus {
+    #[sea_orm(string_value = "draft")]
+    Draft,
+    #[sea_orm(string_value = "validated")]
+    Validated,
+}
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(
     rs_type = "Enum",
     db_type = "Enum",
@@ -846,7 +964,7 @@ pub enum QpPositionLedgerState {
     #[sea_orm(string_value = "settled")]
     Settled,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(
     rs_type = "Enum",
     db_type = "Enum",
@@ -866,7 +984,7 @@ pub enum QpPublicationStatus {
     #[sea_orm(string_value = "rejected")]
     Rejected,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(
     rs_type = "Enum",
     db_type = "Enum",
@@ -880,7 +998,7 @@ pub enum QpQuantRuntimeMode {
     #[sea_orm(string_value = "auto_execution")]
     AutoExecution,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(
     rs_type = "Enum",
     db_type = "Enum",
@@ -900,7 +1018,7 @@ pub enum QpRecommendationAttributionOutcome {
     #[sea_orm(string_value = "failed_unfilled")]
     FailedUnfilled,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(
     rs_type = "Enum",
     db_type = "Enum",
@@ -920,7 +1038,7 @@ pub enum QpRecommendationReportStatus {
     #[sea_orm(string_value = "expired")]
     Expired,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(
     rs_type = "Enum",
     db_type = "Enum",
@@ -946,7 +1064,7 @@ pub enum QpRecommendationStatus {
     #[sea_orm(string_value = "attributed")]
     Attributed,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(
     rs_type = "Enum",
     db_type = "Enum",
@@ -966,7 +1084,7 @@ pub enum QpReconciliationResult {
     #[sea_orm(string_value = "unresolvable")]
     Unresolvable,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(
     rs_type = "Enum",
     db_type = "Enum",
@@ -986,7 +1104,7 @@ pub enum QpReportFactDeliveryStatus {
     #[sea_orm(string_value = "cancelled")]
     Cancelled,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(rs_type = "Enum", db_type = "Enum", enum_name = "qp_report_kind")]
 pub enum QpReportKind {
     #[sea_orm(string_value = "top_n")]
@@ -996,7 +1114,7 @@ pub enum QpReportKind {
     #[sea_orm(string_value = "post_run_audit")]
     PostRunAudit,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(rs_type = "Enum", db_type = "Enum", enum_name = "qp_report_run_status")]
 pub enum QpReportRunStatus {
     #[sea_orm(string_value = "queued")]
@@ -1012,7 +1130,7 @@ pub enum QpReportRunStatus {
     #[sea_orm(string_value = "abandoned")]
     Abandoned,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(
     rs_type = "Enum",
     db_type = "Enum",
@@ -1030,7 +1148,7 @@ pub enum QpReportRunTerminalReason {
     #[sea_orm(string_value = "lease_expired")]
     LeaseExpired,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(
     rs_type = "Enum",
     db_type = "Enum",
@@ -1044,7 +1162,7 @@ pub enum QpReportScheduleGapReason {
     #[sea_orm(string_value = "schedule_reconfigured")]
     ScheduleReconfigured,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(
     rs_type = "Enum",
     db_type = "Enum",
@@ -1056,7 +1174,7 @@ pub enum QpReportTriggerKind {
     #[sea_orm(string_value = "ad_hoc")]
     AdHoc,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(rs_type = "Enum", db_type = "Enum", enum_name = "qp_research_job_kind")]
 pub enum QpResearchJobKind {
     #[sea_orm(string_value = "dataset_build")]
@@ -1078,7 +1196,7 @@ pub enum QpResearchJobKind {
     #[sea_orm(string_value = "trade_policy_validation")]
     TradePolicyValidation,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(
     rs_type = "Enum",
     db_type = "Enum",
@@ -1096,7 +1214,7 @@ pub enum QpResearchJobStatus {
     #[sea_orm(string_value = "cancelled")]
     Cancelled,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(
     rs_type = "Enum",
     db_type = "Enum",
@@ -1108,7 +1226,7 @@ pub enum QpResearchReadinessEvidenceKind {
     #[sea_orm(string_value = "shadow_latency_profile")]
     ShadowLatencyProfile,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(rs_type = "Enum", db_type = "Enum", enum_name = "qp_resolver_tier")]
 pub enum QpResolverTier {
     #[sea_orm(string_value = "tier0_slug")]
@@ -1118,15 +1236,17 @@ pub enum QpResolverTier {
     #[sea_orm(string_value = "override")]
     Override,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(rs_type = "Enum", db_type = "Enum", enum_name = "qp_resource_type")]
 pub enum QpResourceType {
     #[sea_orm(string_value = "system")]
     System,
     #[sea_orm(string_value = "market")]
     Market,
-    #[sea_orm(string_value = "runtime_config")]
-    RuntimeConfig,
+    #[sea_orm(string_value = "config")]
+    Config,
+    #[sea_orm(string_value = "config_lifecycle")]
+    ConfigLifecycle,
     #[sea_orm(string_value = "publication")]
     Publication,
     #[sea_orm(string_value = "materialization")]
@@ -1164,7 +1284,7 @@ pub enum QpResourceType {
     #[sea_orm(string_value = "permission")]
     Permission,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(rs_type = "Enum", db_type = "Enum", enum_name = "qp_role_kind")]
 pub enum QpRoleKind {
     #[sea_orm(string_value = "builtin")]
@@ -1172,7 +1292,7 @@ pub enum QpRoleKind {
     #[sea_orm(string_value = "custom")]
     Custom,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(rs_type = "Enum", db_type = "Enum", enum_name = "qp_role_status")]
 pub enum QpRoleStatus {
     #[sea_orm(string_value = "enabled")]
@@ -1180,47 +1300,7 @@ pub enum QpRoleStatus {
     #[sea_orm(string_value = "disabled")]
     Disabled,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
-#[sea_orm(
-    rs_type = "Enum",
-    db_type = "Enum",
-    enum_name = "qp_runtime_config_activation_kind"
-)]
-pub enum QpRuntimeConfigActivationKind {
-    #[sea_orm(string_value = "initial")]
-    Initial,
-    #[sea_orm(string_value = "promote")]
-    Promote,
-    #[sea_orm(string_value = "rollback")]
-    Rollback,
-}
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
-#[sea_orm(
-    rs_type = "Enum",
-    db_type = "Enum",
-    enum_name = "qp_runtime_config_approval_decision"
-)]
-pub enum QpRuntimeConfigApprovalDecision {
-    #[sea_orm(string_value = "approved")]
-    Approved,
-    #[sea_orm(string_value = "rejected")]
-    Rejected,
-}
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
-#[sea_orm(
-    rs_type = "Enum",
-    db_type = "Enum",
-    enum_name = "qp_runtime_config_source"
-)]
-pub enum QpRuntimeConfigSource {
-    #[sea_orm(string_value = "bootstrap")]
-    Bootstrap,
-    #[sea_orm(string_value = "operator")]
-    Operator,
-    #[sea_orm(string_value = "import")]
-    Import,
-}
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(
     rs_type = "Enum",
     db_type = "Enum",
@@ -1238,7 +1318,7 @@ pub enum QpSettlementRedeemState {
     #[sea_orm(string_value = "manual_required")]
     ManualRequired,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(rs_type = "Enum", db_type = "Enum", enum_name = "qp_side")]
 pub enum QpSide {
     #[sea_orm(string_value = "BUY")]
@@ -1246,7 +1326,7 @@ pub enum QpSide {
     #[sea_orm(string_value = "SELL")]
     Sell,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(
     rs_type = "Enum",
     db_type = "Enum",
@@ -1260,7 +1340,7 @@ pub enum QpSourceSliceStatus {
     #[sea_orm(string_value = "failed")]
     Failed,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(rs_type = "Enum", db_type = "Enum", enum_name = "qp_tick_size")]
 pub enum QpTickSize {
     #[sea_orm(string_value = "0.1")]
@@ -1276,7 +1356,7 @@ pub enum QpTickSize {
     #[sea_orm(string_value = "0.0001")]
     _0U002E0001,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(
     rs_type = "Enum",
     db_type = "Enum",
@@ -1290,7 +1370,7 @@ pub enum QpTradePolicyGovernanceAction {
     #[sea_orm(string_value = "retire")]
     Retire,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(
     rs_type = "Enum",
     db_type = "Enum",
@@ -1306,7 +1386,7 @@ pub enum QpTradePolicyStatus {
     #[sea_orm(string_value = "retired")]
     Retired,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(
     rs_type = "Enum",
     db_type = "Enum",
@@ -1322,7 +1402,7 @@ pub enum QpTradePolicyTrialScope {
     #[sea_orm(string_value = "latency_stress")]
     LatencyStress,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(
     rs_type = "Enum",
     db_type = "Enum",
@@ -1336,7 +1416,7 @@ pub enum QpTradePolicyTrialStatus {
     #[sea_orm(string_value = "cancelled")]
     Cancelled,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(
     rs_type = "Enum",
     db_type = "Enum",
@@ -1352,7 +1432,7 @@ pub enum QpTradePolicyValidationStatus {
     #[sea_orm(string_value = "cancelled")]
     Cancelled,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(
     rs_type = "Enum",
     db_type = "Enum",
@@ -1372,7 +1452,7 @@ pub enum QpTrainingDatasetStatus {
     #[sea_orm(string_value = "failed")]
     Failed,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(rs_type = "Enum", db_type = "Enum", enum_name = "qp_user_status")]
 pub enum QpUserStatus {
     #[sea_orm(string_value = "active")]
@@ -1380,7 +1460,7 @@ pub enum QpUserStatus {
     #[sea_orm(string_value = "disabled")]
     Disabled,
 }
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(
     rs_type = "Enum",
     db_type = "Enum",
@@ -1399,4 +1479,16 @@ pub enum QpVenueOrderStatus {
     Open,
     #[sea_orm(string_value = "expired")]
     Expired,
+}
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(
+    rs_type = "Enum",
+    db_type = "Enum",
+    enum_name = "qp_weather_temperature_statistic"
+)]
+pub enum QpWeatherTemperatureStatistic {
+    #[sea_orm(string_value = "maximum")]
+    Maximum,
+    #[sea_orm(string_value = "minimum")]
+    Minimum,
 }

@@ -55,7 +55,7 @@ mod request_tests {
             "model_family",
             "target_label_name",
             "prediction_horizon_secs",
-            "runtime_config_version_id",
+            "decision_policy_snapshot_id",
             "input_contract",
         ] {
             let mut request = base.clone();

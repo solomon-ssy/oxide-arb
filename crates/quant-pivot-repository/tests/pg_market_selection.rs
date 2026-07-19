@@ -10,7 +10,7 @@ use quant_pivot_models::{
     domain::{NewMarketSelection, NewMarketSelectionMember},
     enums::{common::MarketCategory, market::MarketStatus},
     types::{
-        ContentHash, EventId, MarketId, MarketSelectionId, RuntimeConfigVersionId,
+        ContentHash, DecisionPolicySnapshotId, EventId, MarketId, MarketSelectionId,
         SelectionExclusionSummary, TokenId, Usd,
     },
 };
@@ -62,7 +62,7 @@ async fn create_snapshot_then_find_and_list_members() {
     let snapshot = NewMarketSelection {
         market_selection_id: selection_id.clone(),
         decision_at: Utc::now(),
-        runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
+        decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
         selector_hash: ContentHash::parse(format!("blake3:{}", "a".repeat(64)))
             .expect("valid content hash"),
         market_count: 1,

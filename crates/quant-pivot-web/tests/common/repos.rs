@@ -7,20 +7,20 @@ use sea_orm::DatabaseConnection;
 use quant_pivot_repository::{
     pg_arc_repo,
     postgres::{
-        PgMarketRepository, PgMenuRepository, PgOperationLogRepository, PgRoleMenuRepository,
-        PgRolePermissionRepository, PgRoleRepository, PgRuntimeConfigVersionRepository,
-        PgUserRepository, PgUserRoleRepository,
+        PgMarketRepository, PgMenuRepository, PgOperationLogRepository, PgPolicyRepository,
+        PgRoleMenuRepository, PgRolePermissionRepository, PgRoleRepository, PgUserRepository,
+        PgUserRoleRepository,
     },
     traits::{
-        MarketRepository, MenuRepository, OperationLogRepository, RoleMenuRepository,
-        RolePermissionRepository, RoleRepository, RuntimeConfigVersionRepository, UserRepository,
+        MarketRepository, MenuRepository, OperationLogRepository, PolicyRepository,
+        RoleMenuRepository, RolePermissionRepository, RoleRepository, UserRepository,
         UserRoleRepository,
     },
 };
 
 /// Postgres repositories wired into the Phase 0 web integration harness.
 pub struct WebHarnessRepos {
-    pub runtime_config: Arc<dyn RuntimeConfigVersionRepository>,
+    pub runtime_config: Arc<dyn PolicyRepository>,
     pub operation_logs: Arc<dyn OperationLogRepository>,
     pub users: Arc<dyn UserRepository>,
     pub roles: Arc<dyn RoleRepository>,
@@ -34,7 +34,7 @@ pub struct WebHarnessRepos {
 impl WebHarnessRepos {
     pub fn from_connection(db: &DatabaseConnection) -> Self {
         Self {
-            runtime_config: pg_arc_repo!(db, PgRuntimeConfigVersionRepository),
+            runtime_config: pg_arc_repo!(db, PgPolicyRepository),
             operation_logs: pg_arc_repo!(db, PgOperationLogRepository),
             users: pg_arc_repo!(db, PgUserRepository),
             roles: pg_arc_repo!(db, PgRoleRepository),

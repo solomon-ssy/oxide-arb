@@ -38,8 +38,8 @@ use quant_pivot_models::{
     },
     runtime_config::{DataQualityConfig, DomainConfig, FeaturesConfig, SelectionConfig},
     types::{
-        CalibrationArtifactId, ContentHash, DomainInstrumentKey, EventId, FeatureVectorId,
-        MarketId, Price, RuntimeConfigVersionId, Shares, TokenId, Usd,
+        CalibrationArtifactId, ContentHash, DecisionPolicySnapshotId, DomainInstrumentKey, EventId,
+        FeatureVectorId, MarketId, Price, Shares, TokenId, Usd,
     },
 };
 use quant_pivot_repository::{
@@ -520,7 +520,7 @@ async fn insufficient_vectors_are_audited_but_partitioned_from_model_input() {
                 names::micro::QUOTE_UPDATE_RATE,
             ]),
             pit: &live_pit,
-            runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
+            decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
             liquidity_cap_usd: Usd::new(rust_decimal::Decimal::from(10_000)),
         })
         .await
@@ -581,7 +581,7 @@ async fn create_feature_vector_then_find() {
 
     let request = MarketSelectionBuildRequest {
         decision_at: as_of,
-        runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
+        decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
         selection: SelectionConfig {
             enabled_categories: vec![MarketCategory::Sports],
             ..SelectionConfig::default()
@@ -634,7 +634,7 @@ async fn create_feature_vector_then_find() {
             data_quality: &DataQualityConfig::default(),
             model_requirements: &ModelFeatureRequirements::default(),
             pit: candidate_batch.snapshot_source.as_ref(),
-            runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
+            decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
             liquidity_cap_usd: Usd::new(rust_decimal::Decimal::from(10_000)),
         })
         .await

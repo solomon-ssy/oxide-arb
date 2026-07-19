@@ -4,17 +4,17 @@ use super::sea_orm_active_enums::{
     QpApprovalStatus, QpExitReason, QpExitState, QpOrderIntentKind, QpOrderIntentStatus,
     QpQuantRuntimeMode,
 };
-use sea_orm::{entity::prelude::*, sea_query::Expr};
+use sea_orm::entity::prelude::*;
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
-#[sea_orm(schema_name = "public", table_name = "quant_order_intent")]
+#[sea_orm(table_name = "quant_order_intent")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub order_intent_id: Uuid,
     pub recommendation_id: Uuid,
     pub runtime_mode: QpQuantRuntimeMode,
-    pub runtime_config_version_id: Uuid,
+    pub decision_policy_snapshot_id: Uuid,
     pub model_version_id: Uuid,
     #[sea_orm(column_type = "JsonBinary")]
     pub profile_ref: Json,
@@ -41,24 +41,59 @@ pub struct Model {
     #[sea_orm(column_type = "Text")]
     pub risk_envelope_hash: String,
     pub expires_at: DateTimeWithTimeZone,
-    #[sea_orm(default_expr = "Expr::cust(\"'not_started'::qp_exit_state\")")]
     pub exit_state: QpExitState,
     pub exit_reason: Option<QpExitReason>,
     pub next_check_at: Option<DateTimeWithTimeZone>,
-    #[sea_orm(column_type = "Decimal(Some((20, 18)))", nullable)]
     pub peak_mark_price: Option<Decimal>,
     pub last_signal_recheck_at: Option<DateTimeWithTimeZone>,
     #[sea_orm(column_type = "JsonBinary", nullable)]
     pub latest_reinference_json: Option<Json>,
     #[sea_orm(column_type = "JsonBinary")]
-    #[sea_orm(
-        default_expr = "Expr::cust(\"'{\\\"pending_target\\\": null, \\\"denominator_shares\\\": null, \\\"settled_target_ids\\\": [], \\\"cumulative_exited_shares\\\": \\\"0\\\"}'::jsonb\")"
-    )]
     pub scale_out_state: Json,
-    #[sea_orm(default_expr = "Expr::cust(\"statement_timestamp()\")")]
     pub created_at: DateTimeWithTimeZone,
-    #[sea_orm(default_expr = "Expr::cust(\"statement_timestamp()\")")]
     pub updated_at: DateTimeWithTimeZone,
+    #[sea_orm(
+        belongs_to,
+        from = "decision_policy_snapshot_id",
+        to = "decision_policy_snapshot_id",
+        on_update = "NoAction",
+        on_delete = "NoAction"
+    )]
+    pub decision_policy_snapshot: BelongsTo<super::decision_policy_snapshot::Entity>,
+    #[sea_orm(has_many)]
+    pub quant_capital_allocations: HasMany<super::quant_capital_allocation::Entity>,
+    #[sea_orm(
+        belongs_to,
+        from = "condition_instance_id",
+        to = "condition_instance_id",
+        on_update = "NoAction",
+        on_delete = "NoAction"
+    )]
+    pub quant_entry_condition_instance: BelongsTo<super::quant_entry_condition_instance::Entity>,
+    #[sea_orm(has_many)]
+    pub quant_execution_orders: HasMany<super::quant_execution_order::Entity>,
+    #[sea_orm(
+        belongs_to,
+        from = "model_version_id",
+        to = "model_version_id",
+        on_update = "NoAction",
+        on_delete = "NoAction"
+    )]
+    pub quant_model_version: BelongsTo<super::quant_model_version::Entity>,
+    #[sea_orm(has_many)]
+    pub quant_positions: HasMany<super::quant_position::Entity>,
+    #[sea_orm(
+        belongs_to,
+        from = "recommendation_id",
+        to = "recommendation_id",
+        on_update = "NoAction",
+        on_delete = "NoAction"
+    )]
+    pub quant_recommendation: BelongsTo<super::quant_recommendation::Entity>,
+    #[sea_orm(has_many)]
+    pub quant_reconciliations: HasMany<super::quant_reconciliation::Entity>,
+    #[sea_orm(has_many)]
+    pub quant_settlement_redeem_lots: HasMany<super::quant_settlement_redeem_lot::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

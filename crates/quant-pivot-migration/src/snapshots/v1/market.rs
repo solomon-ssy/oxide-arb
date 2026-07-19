@@ -3,17 +3,13 @@
 use super::sea_orm_active_enums::{
     QpCatalogFilterReason, QpMarketCategory, QpMarketStatus, QpTickSize,
 };
-use sea_orm::{entity::prelude::*, sea_query::Expr};
+use sea_orm::entity::prelude::*;
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
-#[sea_orm(schema_name = "public", table_name = "market")]
+#[sea_orm(table_name = "market")]
 pub struct Model {
-    #[sea_orm(
-        primary_key,
-        auto_increment = false,
-        column_type = "String(StringLen::N(66))"
-    )]
+    #[sea_orm(primary_key, auto_increment = false, column_type = "Text")]
     pub market_id: String,
     #[sea_orm(column_type = "Text")]
     pub event_id: String,
@@ -23,11 +19,8 @@ pub struct Model {
     pub slug: String,
     #[sea_orm(column_type = "Text", nullable)]
     pub description: Option<String>,
-    #[sea_orm(default_expr = "Expr::cust(\"'{}'::qp_market_category[]\")")]
     pub categories: Vec<QpMarketCategory>,
-    #[sea_orm(default_expr = "Expr::cust(\"'active'::qp_market_status\")")]
     pub status: QpMarketStatus,
-    #[sea_orm(default_expr = "Expr::cust(\"'{}'::qp_catalog_filter_reason[]\")")]
     pub filter_reasons: Vec<QpCatalogFilterReason>,
     #[sea_orm(column_type = "Text", nullable)]
     pub outcome: Option<String>,
@@ -35,19 +28,43 @@ pub struct Model {
     pub yes_token_id: String,
     #[sea_orm(column_type = "Text")]
     pub no_token_id: String,
-    #[sea_orm(default_expr = "Expr::cust(\"'0.01'::qp_tick_size\")")]
     pub tick_size: QpTickSize,
-    #[sea_orm(default_expr = "Expr::cust(\"false\")")]
     pub neg_risk: bool,
     pub start_date: Option<DateTimeWithTimeZone>,
     pub end_date: Option<DateTimeWithTimeZone>,
     pub resolved_at: Option<DateTimeWithTimeZone>,
     #[sea_orm(column_type = "Text")]
     pub content_hash: String,
-    #[sea_orm(default_expr = "Expr::cust(\"statement_timestamp()\")")]
     pub created_at: DateTimeWithTimeZone,
-    #[sea_orm(default_expr = "Expr::cust(\"statement_timestamp()\")")]
     pub updated_at: DateTimeWithTimeZone,
+    #[sea_orm(has_many)]
+    pub clob_market_info_versions: HasMany<super::clob_market_info_version::Entity>,
+    #[sea_orm(
+        belongs_to,
+        from = "event_id",
+        to = "event_id",
+        on_update = "NoAction",
+        on_delete = "NoAction"
+    )]
+    pub event: BelongsTo<super::event::Entity>,
+    #[sea_orm(has_many)]
+    pub quant_basis_alerts: HasMany<super::quant_basis_alert::Entity>,
+    #[sea_orm(has_many)]
+    pub quant_execution_orders: HasMany<super::quant_execution_order::Entity>,
+    #[sea_orm(has_many)]
+    pub quant_factor_values: HasMany<super::quant_factor_value::Entity>,
+    #[sea_orm(has_many)]
+    pub quant_feature_vectors: HasMany<super::quant_feature_vector::Entity>,
+    #[sea_orm(has_many)]
+    pub quant_market_linkages: HasMany<super::quant_market_linkage::Entity>,
+    #[sea_orm(has_many)]
+    pub quant_market_selection_members: HasMany<super::quant_market_selection_member::Entity>,
+    #[sea_orm(has_many)]
+    pub quant_positions: HasMany<super::quant_position::Entity>,
+    #[sea_orm(has_many)]
+    pub quant_recommendations: HasMany<super::quant_recommendation::Entity>,
+    #[sea_orm(has_many)]
+    pub quant_settlement_redeems: HasMany<super::quant_settlement_redeem::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

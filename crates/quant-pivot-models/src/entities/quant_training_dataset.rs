@@ -3,9 +3,8 @@
 use crate::{
     enums::quant::{DatasetPurpose, TrainingDatasetStatus},
     types::{
-        ArtifactUri, ContentHash, DatasetCoverage, DatasetManifest, ModelSpecId,
-        RuntimeConfigVersionId, SchemaVersion, TrainingDatasetId, TrainingHorizonsSecs,
-        TrainingSampleSources,
+        ArtifactUri, ContentHash, DatasetCoverage, DatasetManifest, DecisionPolicySnapshotId,
+        ModelSpecId, SchemaVersion, TrainingDatasetId, TrainingHorizonsSecs, TrainingSampleSources,
     },
 };
 use chrono::{DateTime, Utc};
@@ -41,7 +40,7 @@ pub struct Model {
     pub sample_sources: Option<TrainingSampleSources>,
     #[sea_orm(column_type = "JsonBinary")]
     pub coverage_json: Option<DatasetCoverage>,
-    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub failure_detail: Option<String>,
     pub completed_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
@@ -53,6 +52,13 @@ pub struct Model {
         to = "model_spec_id"
     )]
     pub model_spec: BelongsTo<super::quant_model_spec::Entity>,
+    #[sea_orm(
+        belongs_to,
+        relation_enum = "DecisionPolicySnapshot",
+        from = "decision_policy_snapshot_id",
+        to = "decision_policy_snapshot_id"
+    )]
+    pub decision_policy_snapshot: BelongsTo<super::decision_policy_snapshot::Entity>,
     #[sea_orm(has_many, relation_enum = "ModelVersion")]
     pub model_version: HasMany<super::quant_model_version::Entity>,
 }

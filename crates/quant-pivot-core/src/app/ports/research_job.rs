@@ -19,20 +19,20 @@ use quant_pivot_models::{
     },
     enums::quant::{ResearchJobErrorCode, ResearchJobKind, ResearchJobStatus},
     types::{
-        BacktestPathSetId, BacktestReportId, ModelSpecId, ModelVersionId, ResearchJobId,
-        RuntimeConfigVersionId, TrainingDatasetId,
+        BacktestPathSetId, BacktestReportId, DecisionPolicySnapshotId, ModelSpecId, ModelVersionId,
+        ResearchJobId, TrainingDatasetId,
     },
 };
 
 use crate::app::research_job::ResearchJobEngine;
-use quant_pivot_repository::traits::{RuntimeConfigVersionRepository, TrainingDatasetRepository};
+use quant_pivot_repository::traits::{PolicyRepository, TrainingDatasetRepository};
 use std::sync::Arc;
 
 /// Core implementation of [`ResearchJobPort`] — the HTTP enqueue/cancel/retry surface.
 pub struct CoreResearchJobPort {
     engine: ResearchJobEngine,
     training_datasets: Arc<dyn TrainingDatasetRepository>,
-    runtime_configs: Arc<dyn RuntimeConfigVersionRepository>,
+    runtime_configs: Arc<dyn PolicyRepository>,
     max_recovery_attempts: i32,
 }
 
@@ -42,7 +42,7 @@ impl CoreResearchJobPort {
     pub const fn new(
         engine: ResearchJobEngine,
         training_datasets: Arc<dyn TrainingDatasetRepository>,
-        runtime_configs: Arc<dyn RuntimeConfigVersionRepository>,
+        runtime_configs: Arc<dyn PolicyRepository>,
         max_recovery_attempts: i32,
     ) -> Self {
         Self {
@@ -58,7 +58,7 @@ impl CoreResearchJobPort {
         kind: ResearchJobKind,
         params: serde_json::Value,
         model_spec_id: Option<ModelSpecId>,
-        runtime_config_version_id: Option<RuntimeConfigVersionId>,
+        decision_policy_snapshot_id: Option<DecisionPolicySnapshotId>,
         parent_job_id: Option<ResearchJobId>,
         ctx: &JobSubmitContext,
     ) -> NewResearchJob {
@@ -67,7 +67,7 @@ impl CoreResearchJobPort {
             kind,
             status: ResearchJobStatus::Queued,
             model_spec_id,
-            runtime_config_version_id,
+            decision_policy_snapshot_id,
             params_json: params,
             requested_by: ctx.requested_by.clone(),
             acting_role: ctx.acting_role.clone(),
@@ -110,13 +110,13 @@ impl ResearchJobPort for CoreResearchJobPort {
             request.training_dataset_id = Some(TrainingDatasetId::from_v7());
         }
         let model_spec_id = Some(request.model_spec_id.clone());
-        let runtime_config_version_id = Some(request.runtime_config_version_id.clone());
+        let decision_policy_snapshot_id = Some(request.decision_policy_snapshot_id.clone());
         let params = to_params(&request)?;
         let job = self.new_job(
             ResearchJobKind::DatasetBuild,
             params,
             model_spec_id,
-            runtime_config_version_id,
+            decision_policy_snapshot_id,
             None,
             &ctx,
         );
@@ -138,7 +138,7 @@ impl ResearchJobPort for CoreResearchJobPort {
                 id: request.training_dataset_id.to_string(),
             })?;
         let model_spec_id = Some(dataset.model_spec_id.clone());
-        let runtime_config_version_id = Some(dataset.runtime_config_version_id.clone());
+        let decision_policy_snapshot_id = Some(dataset.decision_policy_snapshot_id.clone());
         let params = to_params(&ModelTrainJobParams {
             model_version_id: ModelVersionId::from_v7(),
             request,
@@ -147,7 +147,7 @@ impl ResearchJobPort for CoreResearchJobPort {
             ResearchJobKind::ModelTrain,
             params,
             model_spec_id,
-            runtime_config_version_id,
+            decision_policy_snapshot_id,
             None,
             &ctx,
         );
@@ -163,7 +163,7 @@ impl ResearchJobPort for CoreResearchJobPort {
         if request.backtest_report_id.is_none() {
             request.backtest_report_id = Some(BacktestReportId::from_v7());
         }
-        let runtime_config_version_id = Some(request.runtime_config_version_id.clone());
+        let decision_policy_snapshot_id = Some(request.decision_policy_snapshot_id.clone());
         let params = to_params(&BacktestJobParams {
             model_version_id,
             request,
@@ -172,7 +172,7 @@ impl ResearchJobPort for CoreResearchJobPort {
             ResearchJobKind::Backtest,
             params,
             None,
-            runtime_config_version_id,
+            decision_policy_snapshot_id,
             None,
             &ctx,
         );
@@ -188,7 +188,7 @@ impl ResearchJobPort for CoreResearchJobPort {
         if request.path_set_id.is_none() {
             request.path_set_id = Some(BacktestPathSetId::from_v7());
         }
-        let runtime_config_version_id = Some(request.runtime_config_version_id.clone());
+        let decision_policy_snapshot_id = Some(request.decision_policy_snapshot_id.clone());
         let params = to_params(&CpcvBacktestJobParams {
             model_version_id,
             request,
@@ -197,7 +197,7 @@ impl ResearchJobPort for CoreResearchJobPort {
             ResearchJobKind::CpcvBacktest,
             params,
             None,
-            runtime_config_version_id,
+            decision_policy_snapshot_id,
             None,
             &ctx,
         );
@@ -207,18 +207,18 @@ impl ResearchJobPort for CoreResearchJobPort {
     async fn enqueue_bias_table_fit(
         &self,
         request: FitBiasTableRequest,
-        runtime_config_version_id: RuntimeConfigVersionId,
+        decision_policy_snapshot_id: DecisionPolicySnapshotId,
         ctx: JobSubmitContext,
     ) -> QuantResult<ResearchJobView> {
         let params = to_params(&BiasTableFitJobParams {
             request,
-            runtime_config_version_id: runtime_config_version_id.clone(),
+            decision_policy_snapshot_id: decision_policy_snapshot_id.clone(),
         })?;
         let job = self.new_job(
             ResearchJobKind::BiasTableFit,
             params,
             None,
-            Some(runtime_config_version_id),
+            Some(decision_policy_snapshot_id),
             None,
             &ctx,
         );
@@ -228,18 +228,18 @@ impl ResearchJobPort for CoreResearchJobPort {
     async fn enqueue_model_calibration_fit(
         &self,
         request: FitModelCalibratorRequest,
-        runtime_config_version_id: RuntimeConfigVersionId,
+        decision_policy_snapshot_id: DecisionPolicySnapshotId,
         ctx: JobSubmitContext,
     ) -> QuantResult<ResearchJobView> {
         let params = to_params(&ModelCalibrationFitJobParams {
             request,
-            runtime_config_version_id: runtime_config_version_id.clone(),
+            decision_policy_snapshot_id: decision_policy_snapshot_id.clone(),
         })?;
         let job = self.new_job(
             ResearchJobKind::ModelCalibrationFit,
             params,
             None,
-            Some(runtime_config_version_id),
+            Some(decision_policy_snapshot_id),
             None,
             &ctx,
         );
@@ -257,10 +257,10 @@ impl ResearchJobPort for CoreResearchJobPort {
             .await
             .map_err(QuantError::from)?
             .ok_or_else(|| StorageError::NotFound {
-                entity: "runtime_config_version",
+                entity: "decision_policy_snapshot",
                 id: format!("active_at: {}", request.selection.pit_cutoff),
             })?;
-        let runtime_config_version_id = Some(runtime_config.runtime_config_version_id);
+        let decision_policy_snapshot_id = Some(runtime_config.decision_policy_snapshot_id);
         let params = to_params(&TradePolicyFitJobParams {
             training_dataset_id: TrainingDatasetId::from_v7(),
             request,
@@ -269,7 +269,7 @@ impl ResearchJobPort for CoreResearchJobPort {
             ResearchJobKind::TradePolicyFit,
             params,
             None,
-            runtime_config_version_id,
+            decision_policy_snapshot_id,
             None,
             &ctx,
         );
@@ -384,7 +384,7 @@ impl ResearchJobPort for CoreResearchJobPort {
             info.kind,
             info.params_json.clone(),
             info.model_spec_id.clone(),
-            info.runtime_config_version_id.clone(),
+            info.decision_policy_snapshot_id.clone(),
             Some(info.job_id.clone()),
             &ctx,
         );

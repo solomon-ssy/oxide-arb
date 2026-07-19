@@ -18,10 +18,10 @@ use crate::{
         },
     },
     types::{
-        ContentHash, EntryConditionInstanceId, EntryOrderSpec, ExecutionOrderId, ExitPolicySpec,
-        ExitReinferenceObservation, MarketId, ModelVersionId, OrderId, OrderIntentId,
-        PreparedVenueOrder, Price, RecommendationId, RecommendationReportId, ResearchProfileRef,
-        RuntimeConfigVersionId, ScaleOutState, Shares, TokenId, Usd,
+        ContentHash, DecisionPolicySnapshotId, EntryConditionInstanceId, EntryOrderSpec,
+        ExecutionOrderId, ExitPolicySpec, ExitReinferenceObservation, MarketId, ModelVersionId,
+        OrderId, OrderIntentId, PreparedVenueOrder, Price, RecommendationId,
+        RecommendationReportId, ResearchProfileRef, ScaleOutState, Shares, TokenId, Usd,
     },
 };
 use chrono::{DateTime, Utc};
@@ -36,7 +36,7 @@ pub struct OrderIntentInfo {
     pub order_intent_id: OrderIntentId,
     pub recommendation_id: RecommendationId,
     pub runtime_mode: QuantRuntimeMode,
-    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub model_version_id: ModelVersionId,
     pub profile_ref: ResearchProfileRef,
     pub intent_kind: OrderIntentKind,
@@ -66,7 +66,7 @@ pub struct OrderIntentInfo {
 }
 
 info_from_model!(OrderIntentInfo, crate::entities::quant_order_intent::Model, {
-    order_intent_id, recommendation_id, runtime_mode, runtime_config_version_id,
+    order_intent_id, recommendation_id, runtime_mode, decision_policy_snapshot_id,
     model_version_id, profile_ref, intent_kind, status, approval_status, approved_by,
     approval_reason, approved_at, policy_id, policy_hash, status_reason,
     admission_trace_ref, condition_instance_id, entry_order_json, exit_policy_json, risk_envelope_hash,
@@ -81,7 +81,7 @@ pub struct NewOrderIntent {
     pub order_intent_id: OrderIntentId,
     pub recommendation_id: RecommendationId,
     pub runtime_mode: QuantRuntimeMode,
-    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub model_version_id: ModelVersionId,
     pub profile_ref: ResearchProfileRef,
     pub intent_kind: OrderIntentKind,
@@ -211,8 +211,8 @@ pub fn evaluate_intent_approval_invalidation(
     rec: &RecommendationInfo,
     report: &RecommendationReportInfo,
     kill_switch_allows_entry: bool,
-    active_config_version_id: &RuntimeConfigVersionId,
-    intent_config_version_id: &RuntimeConfigVersionId,
+    active_config_version_id: &DecisionPolicySnapshotId,
+    intent_config_version_id: &DecisionPolicySnapshotId,
     intent_risk_envelope_hash: &ContentHash,
     now: DateTime<Utc>,
 ) -> Option<ApprovalInvalidation> {

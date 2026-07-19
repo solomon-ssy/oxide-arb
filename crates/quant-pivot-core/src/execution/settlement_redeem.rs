@@ -48,7 +48,7 @@ use crate::{
         ledger_fact_projection::{project_capital_event, project_position_event},
         position_fact_writer::PositionEventWriter,
     },
-    runtime_config::RuntimeConfigStore,
+    runtime_config::DecisionPolicyStore,
 };
 
 // Gnosis CTF binary partition: YES = 0b01, NO = 0b10. This matches the
@@ -425,7 +425,7 @@ pub struct SettlementRedeemServiceDeps {
     pub ctf: Arc<dyn SettlementCtfClient>,
     pub runtime_mode: RuntimeModeHandle,
     pub kill_switch: KillSwitchHandle,
-    pub config: Arc<RuntimeConfigStore>,
+    pub config: Arc<DecisionPolicyStore>,
     pub funder_address: String,
     pub wallet_kind: ExecutionWalletKind,
     pub capital_events: Arc<CapitalAllocationEventWriter>,
@@ -462,7 +462,7 @@ impl SettlementRedeemService {
             .deps
             .config
             .current()
-            .execution
+            .execution_risk
             .settlement_redeem
             .clone();
         if !policy.enabled || policy.batch_size == 0 {
@@ -580,7 +580,7 @@ impl SettlementRedeemService {
                         self.deps
                             .config
                             .current()
-                            .execution
+                            .execution_risk
                             .settlement_redeem
                             .max_attempts,
                     ) =>
@@ -638,7 +638,7 @@ impl SettlementRedeemService {
             .deps
             .config
             .current()
-            .execution
+            .execution_risk
             .settlement_redeem
             .confirmation_blocks;
         let status = self
@@ -759,7 +759,7 @@ impl SettlementRedeemService {
             .deps
             .config
             .current()
-            .execution
+            .execution_risk
             .settlement_redeem
             .confirmation_blocks;
         let receipt = match pending.wait(confirmations).await {
@@ -978,7 +978,7 @@ impl SettlementRedeemService {
             .deps
             .config
             .current()
-            .execution
+            .execution_risk
             .settlement_redeem
             .clone();
         let manual_required = manual_required
@@ -1261,9 +1261,9 @@ mod tests {
             },
         },
         types::{
-            Bps, ContentHash, EntryConditionInstanceId, EntryOrderSpec, EventId, ExitPolicySpec,
-            ModelVersionId, OpportunisticExitPolicy, OrderAmount, OrderIntentId, PositionId, Price,
-            Probability, RecommendationId, RuntimeConfigVersionId, ScaleOutState,
+            Bps, ContentHash, DecisionPolicySnapshotId, EntryConditionInstanceId, EntryOrderSpec,
+            EventId, ExitPolicySpec, ModelVersionId, OpportunisticExitPolicy, OrderAmount,
+            OrderIntentId, PositionId, Price, Probability, RecommendationId, ScaleOutState,
             ThesisInvalidationPolicy,
         },
     };
@@ -1395,7 +1395,7 @@ mod tests {
             order_intent_id: OrderIntentId::from_v7(),
             recommendation_id: RecommendationId::from_v7(),
             runtime_mode: QuantRuntimeMode::AutoExecution,
-            runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
+            decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
             model_version_id: ModelVersionId::from_v7(),
             profile_ref: fixture_profile_ref(),
             intent_kind: OrderIntentKind::Buy,

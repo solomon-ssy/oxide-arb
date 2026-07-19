@@ -1,42 +1,10 @@
 //! `ClickHouse` DDL statements for `MergeTree` tables and materialized views.
 
-pub(super) const BASELINE_SOURCES: &[&str] = &[
-    include_str!("sql/quant_book_stream_session.sql"),
-    include_str!("sql/quant_book_l2_event.sql"),
-    include_str!("sql/quant_book_l2_checkpoint.sql"),
-    include_str!("sql/book_microstructure_1s.sql"),
-    include_str!("sql/book_microstructure_1m.sql"),
-    include_str!("sql/book_microstructure_1m_mv.sql"),
-    include_str!("sql/market_resolution_event.sql"),
-    include_str!("sql/quant_trade_tape.sql"),
-    include_str!("sql/quant_domain_observation.sql"),
-    include_str!("sql/quant_domain_events.sql"),
-    include_str!("sql/quant_facts.sql"),
-    include_str!("sql/quant_feature_parity.sql"),
-];
-
-pub(super) const REPORT_LIFECYCLE_V2_SOURCES: &[&str] =
-    &[include_str!("sql/report_lifecycle_v2.sql")];
-
-pub(super) const REMOVE_UNMANAGED_ROLLUP_TTL_SOURCES: &[&str] =
-    &[include_str!("sql/remove_unmanaged_rollup_ttl.sql")];
-
-pub(super) const SCHEMA_VERSION_UINT32_SOURCES: &[&str] =
-    &[include_str!("sql/schema_version_uint32.sql")];
-
-pub(super) const WEATHER_LONG_FORM_V2_SOURCES: &[&str] =
-    &[include_str!("sql/weather_long_form_v2.sql")];
-
-pub(super) const WEATHER_HISTORICAL_DATE32_SOURCES: &[&str] =
-    &[include_str!("sql/weather_historical_date32.sql")];
-
-pub(super) const WEATHER_EPOCH_DAY_SOURCES: &[&str] = &[include_str!("sql/weather_epoch_day.sql")];
-
-pub(super) const WEATHER_OBSERVATION_EPOCH_TIME_SOURCES: &[&str] =
-    &[include_str!("sql/weather_observation_epoch_time.sql")];
-
-pub(super) const IMMUTABLE_DOMAIN_FACT_IDEMPOTENCY_SOURCES: &[&str] =
-    &[include_str!("sql/immutable_domain_fact_idempotency.sql")];
+/// Complete boot schema generated from the reviewed semantic manifest.
+///
+/// The project has not entered production, so `ClickHouse` owns one clean-slate
+/// migration instead of replaying historical ALTER/data-repair waves.
+pub(super) const BOOTSTRAP_SOURCES: &[&str] = &[include_str!("sql/bootstrap.sql")];
 
 pub(super) const REQUIRED_SCHEMA_OBJECTS: [&str; 27] = [
     "book_microstructure_1m",
@@ -204,11 +172,11 @@ const fn is_identifier_continue(byte: u8) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{BASELINE_SOURCES, extract_table_ttl, split_statements};
+    use super::{BOOTSTRAP_SOURCES, extract_table_ttl, split_statements};
 
     #[test]
     fn schema_replaces_legacy_microstructure_view_and_has_no_parallel_capture_table() {
-        let ddl = BASELINE_SOURCES
+        let ddl = BOOTSTRAP_SOURCES
             .iter()
             .flat_map(|source| split_statements(source))
             .collect::<Vec<_>>()

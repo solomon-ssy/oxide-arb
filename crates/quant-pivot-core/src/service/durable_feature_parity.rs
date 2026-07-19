@@ -33,18 +33,18 @@ use quant_pivot_models::{
             FeatureParityStage, ModelRunKind, ModelRunStatus,
         },
     },
-    runtime_config::RuntimeConfig,
+    runtime_config::DecisionPolicySnapshot,
     types::{
-        ContentHash, FeatureVectorId, MarketId, MarketSelectionId, ModelRunId, ModelVersionId,
-        RecommendationReportId, RuntimeConfigVersionId, SelectionExclusionSummary,
+        ContentHash, DecisionPolicySnapshotId, FeatureVectorId, MarketId, MarketSelectionId,
+        ModelRunId, ModelVersionId, RecommendationReportId, SelectionExclusionSummary,
     },
 };
 use quant_pivot_repository::traits::{
     CalibrationArtifactRepository, CatalogLedgerRepository, ClobMarketInfoRepository,
     FactorRepository, FeatureParityRepository, FeatureRepository, MarketLinkageRepository,
-    MarketSelectionRepository, ModelRegistryRepository, ModelRunRepository,
+    MarketSelectionRepository, ModelRegistryRepository, ModelRunRepository, PolicyRepository,
     QuantFactReadRepository, RecommendationReportRepository, ReportRunRepository,
-    RuntimeConfigVersionRepository, ServingEvidenceRepository,
+    ServingEvidenceRepository,
 };
 use quant_pivot_research::{
     factors::{FactorEngine, FactorValue, MarketFactorOutcome},
@@ -91,7 +91,7 @@ pub struct DurableFeatureParityDeps {
     pub parity: Arc<dyn FeatureParityRepository>,
     pub model_runs: Arc<dyn ModelRunRepository>,
     pub model_registry: Arc<dyn ModelRegistryRepository>,
-    pub runtime_configs: Arc<dyn RuntimeConfigVersionRepository>,
+    pub runtime_configs: Arc<dyn PolicyRepository>,
     pub selections: Arc<dyn MarketSelectionRepository>,
     pub feature_vectors: Arc<dyn FeatureRepository>,
     pub factors: Arc<dyn FactorRepository>,
@@ -120,8 +120,8 @@ struct DurableReplayEvidence {
 
 struct ReplayRunContext {
     model_version_id: ModelVersionId,
-    runtime_config_version_id: RuntimeConfigVersionId,
-    config: RuntimeConfig,
+    decision_policy_snapshot_id: DecisionPolicySnapshotId,
+    config: DecisionPolicySnapshot,
     boundary: DecisionBoundary,
     report_id: Option<RecommendationReportId>,
     selection: MarketSelectionInfo,
@@ -145,7 +145,7 @@ struct MaterializedSelectionReplay {
 
 struct ModelRouteReplayRequest<'a> {
     run: &'a ModelRunInfo,
-    config: &'a RuntimeConfig,
+    config: &'a DecisionPolicySnapshot,
     boundary: &'a DecisionBoundary,
     online_inputs: &'a [QuantModelInputEventRow],
     markets: &'a [SelectedMarket],
@@ -174,7 +174,7 @@ struct FeatureComparisonInputs<'a> {
     replay_captures: &'a HashMap<MarketId, MarketDecisionCapture>,
     vector_binding: &'a HashMap<MarketId, FeatureVectorId>,
     boundary: &'a DecisionBoundary,
-    runtime_config_version_id: &'a RuntimeConfigVersionId,
+    decision_policy_snapshot_id: &'a DecisionPolicySnapshotId,
     schema: &'a FeatureSchema,
 }
 
@@ -365,7 +365,7 @@ impl DurableFeatureParitySource {
                     &model_run.input_hash,
                     output_hash,
                     &model_run.model_version_id,
-                    &model_run.runtime_config_version_id,
+                    &model_run.decision_policy_snapshot_id,
                 )?;
                 if model_run.run_kind != ModelRunKind::LiveInference
                     || model_run.status != ModelRunStatus::Succeeded
@@ -413,7 +413,7 @@ impl DurableFeatureParitySource {
                 let evidence_hash = report_parity_evidence_hash(
                     &generation,
                     &report.model_version_id,
-                    &report.runtime_config_version_id,
+                    &report.decision_policy_snapshot_id,
                     &report.market_selection_id,
                     &report.data_quality_snapshot_ref,
                     &report.portfolio_plan_id,
@@ -887,12 +887,15 @@ impl DurableFeatureParitySource {
         let config_info = self
             .deps
             .runtime_configs
-            .load_version(&report.runtime_config_version_id)
+            .load_snapshot(&report.decision_policy_snapshot_id)
             .await?
             .ok_or_else(|| {
-                StorageError::not_found("runtime_config_version", &report.runtime_config_version_id)
+                StorageError::not_found(
+                    "decision_policy_snapshot",
+                    &report.decision_policy_snapshot_id,
+                )
             })?;
-        let config = RuntimeConfig::from_json(&config_info.config_json)?;
+        let config = config_info.snapshot;
         let expected_boundary = report_decision_boundary(&report, &report_run, &config)?;
         validate_report_selection_binding(&report, &selection)?;
         let online = match self
@@ -910,7 +913,7 @@ impl DurableFeatureParitySource {
                 ceiling,
                 context: ReplayRunContext {
                     model_version_id: report.model_version_id,
-                    runtime_config_version_id: report.runtime_config_version_id,
+                    decision_policy_snapshot_id: report.decision_policy_snapshot_id,
                     config,
                     boundary: online.boundary.clone(),
                     report_id: Some(report_id.clone()),
@@ -937,7 +940,7 @@ impl DurableFeatureParitySource {
                     &report.recommendation_report_id,
                 )
             })?;
-        if run.runtime_config_version_id.as_ref() != Some(&report.runtime_config_version_id)
+        if run.decision_policy_snapshot_id.as_ref() != Some(&report.decision_policy_snapshot_id)
             || run.decision_at != Some(report.decision_at)
         {
             return Err(determinism(format!(
@@ -1069,7 +1072,7 @@ impl DurableFeatureParitySource {
                 replay_captures: &replay.cross_section.captures,
                 vector_binding: &vector_binding,
                 boundary: &context.boundary,
-                runtime_config_version_id: &context.runtime_config_version_id,
+                decision_policy_snapshot_id: &context.decision_policy_snapshot_id,
                 schema: replay.builder.schema(),
             },
         )?);
@@ -1104,12 +1107,15 @@ impl DurableFeatureParitySource {
         let config_info = self
             .deps
             .runtime_configs
-            .load_version(&run.runtime_config_version_id)
+            .load_snapshot(&run.decision_policy_snapshot_id)
             .await?
             .ok_or_else(|| {
-                StorageError::not_found("runtime_config_version", &run.runtime_config_version_id)
+                StorageError::not_found(
+                    "decision_policy_snapshot",
+                    &run.decision_policy_snapshot_id,
+                )
             })?;
-        let config = RuntimeConfig::from_json(&config_info.config_json)?;
+        let config = config_info.snapshot;
         let boundary = boundary_from_online(online_inputs, online_features)?;
         if boundary.decision_at() != candidate.decision_at {
             return Err(determinism(format!(
@@ -1132,7 +1138,7 @@ impl DurableFeatureParitySource {
             .await?
             .ok_or_else(|| StorageError::not_found("quant_market_selection", &selection_id))?;
         if selection.decision_at != boundary.decision_at()
-            || selection.runtime_config_version_id != run.runtime_config_version_id
+            || selection.decision_policy_snapshot_id != run.decision_policy_snapshot_id
         {
             return Err(determinism(format!(
                 "selection {selection_id} is not bound to model run {} decision/config",
@@ -1149,7 +1155,7 @@ impl DurableFeatureParitySource {
         )?;
         Ok(ReplayRunContext {
             model_version_id,
-            runtime_config_version_id: run.runtime_config_version_id.clone(),
+            decision_policy_snapshot_id: run.decision_policy_snapshot_id.clone(),
             config,
             boundary,
             report_id,
@@ -1180,13 +1186,25 @@ impl DurableFeatureParitySource {
                 "durable selector replay produced no markets for {subject}"
             )));
         }
-        let lookback = Duration::from_secs(config.features.max_lookback_secs());
+        let lookback = Duration::from_secs(
+            config
+                .profile_artifacts
+                .features
+                .definition
+                .max_lookback_secs(),
+        );
         let loader = HistoricalWindowLoader::new(
             Arc::clone(&self.deps.fact_read),
             Arc::clone(&self.deps.catalog),
             Arc::clone(&self.deps.linkages),
             Arc::clone(&self.deps.calibration_artifacts),
-            Duration::from_millis(config.training.max_book_staleness_ms),
+            Duration::from_millis(
+                config
+                    .profile_artifacts
+                    .research_method
+                    .training
+                    .max_book_staleness_ms,
+            ),
         );
         let window_end = boundary
             .decision_at()
@@ -1201,7 +1219,7 @@ impl DurableFeatureParitySource {
                 lookback,
                 knowledge_lag: boundary.knowledge_lag(),
                 max_horizon_secs: 0,
-                domain: config.domain.clone(),
+                domain: config.profile_artifacts.domain.definition.clone(),
             })
             .await?;
         let cross = materialize_cross_section(
@@ -1237,21 +1255,26 @@ impl DurableFeatureParitySource {
     ) -> QuantResult<MaterializedSelectionReplay> {
         let config = &context.config;
         let boundary = &context.boundary;
-        let bias_table =
-            resolve_frozen_bias_table(self.deps.calibration_artifacts.as_ref(), &config.factors)
-                .await?;
+        let bias_table = resolve_frozen_bias_table(
+            self.deps.calibration_artifacts.as_ref(),
+            &config.profile_artifacts.scoring.definition,
+        )
+        .await?;
         let replay_config = ReplayConfig {
-            features: config.features.clone(),
-            factors: config.factors.clone(),
-            domain: config.domain.clone(),
-            data_quality: config.data_quality.clone(),
+            features: config.profile_artifacts.features.definition.clone(),
+            factors: config.profile_artifacts.scoring.definition.clone(),
+            domain: config.profile_artifacts.domain.definition.clone(),
+            data_quality: config.recommendation.data_quality.clone(),
             bias_table: bias_table.as_ref().map(Arc::clone),
         };
-        let builder = ConfiguredFeatureBuilder::new(&config.features, &config.domain)?;
+        let builder = ConfiguredFeatureBuilder::new(
+            &config.profile_artifacts.features.definition,
+            &config.profile_artifacts.domain.definition,
+        )?;
         let factor_engine = FactorEngine::new(
-            &config.factors,
-            &config.features,
-            &config.domain,
+            &config.profile_artifacts.scoring.definition,
+            &config.profile_artifacts.features.definition,
+            &config.profile_artifacts.domain.definition,
             bias_table.clone(),
         );
         let model_requirements = self
@@ -1273,16 +1296,16 @@ impl DurableFeatureParitySource {
             Arc::clone(&self.deps.fact_read),
         );
         let candidate_batch = candidate_provider
-            .candidates(boundary, &config.domain)
+            .candidates(boundary, &config.profile_artifacts.domain.definition)
             .await?;
         let selection = ConfiguredMarketSelector::new()
             .build_snapshot(
                 MarketSelectionBuildRequest {
                     decision_at: boundary.decision_at(),
-                    runtime_config_version_id: context.runtime_config_version_id.clone(),
-                    selection: config.selection.clone(),
-                    data_quality: config.data_quality.clone(),
-                    features: config.features.clone(),
+                    decision_policy_snapshot_id: context.decision_policy_snapshot_id.clone(),
+                    selection: config.recommendation.selection.clone(),
+                    data_quality: config.recommendation.data_quality.clone(),
+                    features: config.profile_artifacts.features.definition.clone(),
                     model_requirements,
                     knowledge_lag_secs: boundary.knowledge_lag_secs(),
                 },
@@ -1307,11 +1330,12 @@ impl DurableFeatureParitySource {
     ) -> QuantResult<ModelFeatureRequirements> {
         let configured_generic = context
             .config
+            .model_routing
             .model
             .active_model_version_id
             .as_ref()
             .ok_or_else(|| determinism("frozen config has no active model pointer".to_owned()))
-            .and_then(ModelVersionId::try_from)?;
+            .map(|reference| reference.id.clone())?;
         if configured_generic != context.model_version_id {
             return Err(determinism(format!(
                 "frozen config generic model {configured_generic} differs from serving run model {}",
@@ -1337,8 +1361,8 @@ impl DurableFeatureParitySource {
             )));
         }
         let mut by_category = BTreeMap::new();
-        for (category, reference) in &context.config.model.category_model_pointers {
-            let version_id = ModelVersionId::try_from(reference)?;
+        for (category, reference) in &context.config.model_routing.model.category_model_pointers {
+            let version_id = reference.id.clone();
             let version = self
                 .deps
                 .model_registry
@@ -1408,7 +1432,7 @@ impl DurableFeatureParitySource {
                 replay_captures: &replay.cross_section.captures,
                 vector_binding: &all_vector_binding,
                 boundary: &context.boundary,
-                runtime_config_version_id: &run.runtime_config_version_id,
+                decision_policy_snapshot_id: &run.decision_policy_snapshot_id,
                 schema: replay.builder.schema(),
             },
         )?);
@@ -1469,8 +1493,9 @@ impl DurableFeatureParitySource {
         &self,
         request: ModelRouteReplayRequest<'_>,
     ) -> QuantResult<ReplayedModelOutput> {
-        let feature_schema_hash =
-            ResearchHasher::feature_schema(&FeatureSchema::build(&request.config.features)?)?;
+        let feature_schema_hash = ResearchHasher::feature_schema(&FeatureSchema::build(
+            &request.config.profile_artifacts.features.definition,
+        )?)?;
         let factor_schema_hash = request.factor_engine.factor_schema_hash()?;
         let factory = self.deps.runtime_factory.build(ActiveSchemaBinding {
             feature_schema_hash,
@@ -1515,7 +1540,7 @@ impl DurableFeatureParitySource {
                 request.vector_binding,
             )?;
             let outcomes = if runtime.model_family() == ModelFamily::WeightedFactor {
-                let mut factor_config = request.config.factors.clone();
+                let mut factor_config = request.config.profile_artifacts.scoring.definition.clone();
                 factor_config.cross_section =
                     runtime.factor_cross_section().cloned().ok_or_else(|| {
                         determinism(format!(
@@ -1780,7 +1805,7 @@ fn selection_comparisons(
     #[derive(Serialize)]
     struct SelectionProjection<'a> {
         decision_at: DateTime<Utc>,
-        runtime_config_version_id: &'a RuntimeConfigVersionId,
+        decision_policy_snapshot_id: &'a DecisionPolicySnapshotId,
         selector_hash: &'a ContentHash,
         market_count: usize,
         exclusion_summary: SelectionExclusionSummary,
@@ -1822,7 +1847,7 @@ fn selection_comparisons(
     replay_members.sort();
     let online_projection = SelectionProjection {
         decision_at: online_selection.decision_at,
-        runtime_config_version_id: &online_selection.runtime_config_version_id,
+        decision_policy_snapshot_id: &online_selection.decision_policy_snapshot_id,
         selector_hash: &online_selection.selector_hash,
         market_count: online_market_count,
         exclusion_summary: online_selection.exclusion_summary,
@@ -1830,7 +1855,7 @@ fn selection_comparisons(
     };
     let replay_projection = SelectionProjection {
         decision_at: replay.decision_at,
-        runtime_config_version_id: &replay.runtime_config_version_id,
+        decision_policy_snapshot_id: &replay.decision_policy_snapshot_id,
         selector_hash: &replay.selector_hash,
         market_count: replay.included.len(),
         exclusion_summary: replay.exclusion_summary,
@@ -2078,7 +2103,7 @@ fn snapshot_and_feature_comparisons(
             replay_vector,
             &replay_info,
             inputs.boundary,
-            inputs.runtime_config_version_id,
+            inputs.decision_policy_snapshot_id,
             inputs.schema,
             inputs.boundary.decision_at().timestamp_millis(),
         )?;
@@ -2446,7 +2471,7 @@ fn boundary_from_online(
 pub(crate) fn report_decision_boundary(
     report: &RecommendationReportInfo,
     run: &ReportRunInfo,
-    config: &RuntimeConfig,
+    config: &DecisionPolicySnapshot,
 ) -> QuantResult<DecisionBoundary> {
     let persisted_lag = run.knowledge_lag_secs.ok_or_else(|| {
         determinism(format!(
@@ -2462,8 +2487,18 @@ pub(crate) fn report_decision_boundary(
     })?;
     DecisionClock::new(knowledge_lag_secs).serving_boundary(
         report.decision_at,
-        config.domain.crypto.availability_lag_secs,
-        config.domain.weather.availability_lag_secs,
+        config
+            .profile_artifacts
+            .domain
+            .definition
+            .crypto
+            .availability_lag_secs,
+        config
+            .profile_artifacts
+            .domain
+            .definition
+            .weather
+            .availability_lag_secs,
     )
 }
 
@@ -2793,7 +2828,7 @@ fn validate_report_run_binding(
 ) -> QuantResult<()> {
     if report.model_run_id.as_ref() != Some(&run.model_run_id)
         || run.window_start != report.decision_at
-        || run.runtime_config_version_id != report.runtime_config_version_id
+        || run.decision_policy_snapshot_id != report.decision_policy_snapshot_id
         || run.model_version_id.as_ref() != Some(&report.model_version_id)
         || run.market_selection_id.as_ref() != Some(&report.market_selection_id)
     {
@@ -2865,7 +2900,7 @@ fn validate_pre_inference_stage_evidence(
 ) -> QuantResult<PreInferenceStageCeiling> {
     let wrong_snapshot = dq.report_data_quality_snapshot_id != report.data_quality_snapshot_ref;
     let wrong_decision = dq.decision_at != report.decision_at;
-    let wrong_config = dq.runtime_config_version_id != report.runtime_config_version_id;
+    let wrong_config = dq.decision_policy_snapshot_id != report.decision_policy_snapshot_id;
     if wrong_snapshot || wrong_decision || wrong_config {
         return Err(determinism(format!(
             "report {} DQ snapshot is not bound to its decision/config",
@@ -2936,7 +2971,7 @@ fn validate_report_selection_binding(
     selection: &MarketSelectionInfo,
 ) -> QuantResult<()> {
     if selection.decision_at != report.decision_at
-        || selection.runtime_config_version_id != report.runtime_config_version_id
+        || selection.decision_policy_snapshot_id != report.decision_policy_snapshot_id
     {
         return Err(determinism(format!(
             "selection {} is not bound to pre-inference report {} decision/config",
@@ -3288,7 +3323,7 @@ mod tests {
         let mut dq = ReportDataQualitySnapshotInfo {
             report_data_quality_snapshot_id: report.data_quality_snapshot_ref.clone(),
             decision_at: report.decision_at,
-            runtime_config_version_id: report.runtime_config_version_id.clone(),
+            decision_policy_snapshot_id: report.decision_policy_snapshot_id.clone(),
             tokens_json: ReportDataQualityTokens(Vec::new()),
             created_at: report.created_at,
         };

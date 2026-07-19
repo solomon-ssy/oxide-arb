@@ -25,14 +25,12 @@ const PRODUCES: &[SeedArtifact] = &[
 
 pub const MENUS_SEED: SeedSpec = SeedSpec {
     id: SEED_ID,
-    // v17 fixes identity collisions for same-name nodes under different parents.
-    // The loader is idempotent (`on_conflict do_nothing`).
-    version: 18,
+    version: 1,
     target_table: "menu",
     depends_on: DEPENDS_ON,
     produces: PRODUCES,
     conflict_policy: SeedConflictPolicy::GraphOrdered,
-    checksum: "rbac.menus.bootstrap.v18.governed-bootstrap-and-approval",
+    checksum: "rbac.menus.bootstrap.v1.boot-config-control-plane",
     apply: load_boxed,
     hydrate: hydrate_boxed,
 };
@@ -659,12 +657,6 @@ fn build_research_calibration_artifacts(t: &mut MenuTree, research: &MenuId) {
         "Fit Calibration Artifact",
         perm(ResourceType::Materialization, Operation::Create),
     );
-    t.button(
-        &calibration_artifacts,
-        "runtime_config:create",
-        "Activate Bias Table",
-        perm(ResourceType::RuntimeConfig, Operation::Create),
-    );
 }
 
 /// Market-linkage ledger + domain-source ingest health (Phase 11.2.2).
@@ -718,45 +710,95 @@ fn build_research_jobs(t: &mut MenuTree, research: &MenuId) {
     });
 }
 
-/// Governance plane: runtime-config version lifecycle (hot-activatable config).
+/// Governance plane: independently revisioned policies and project lifecycle.
 fn build_governance(t: &mut MenuTree) {
     let governance = t.dir(
         "governance",
         "page.menu.group.governance",
         "lucide:settings-2",
     );
-    let runtime_config = t.page(PageSpec {
+    let config = t.page(PageSpec {
         parent: &governance,
-        name: "runtime-config",
-        title: "page.menu.runtimeConfig",
-        path: "/runtime-config",
-        component: "runtime-config/index",
-        permission_code: Some(perm(ResourceType::RuntimeConfig, Operation::Read)),
+        name: "config",
+        title: "page.menu.config",
+        path: "/system/config",
+        component: "config/index",
+        permission_code: Some(perm(ResourceType::DecisionPolicySnapshot, Operation::Read)),
         icon: "lucide:sliders-horizontal",
     });
+    for (name, title, path, component, permission_code, icon) in [
+        (
+            "config-deployment",
+            "page.config.deployment.title",
+            "/system/config/deployment",
+            "config/deployment",
+            perm(ResourceType::DecisionPolicySnapshot, Operation::Read),
+            "lucide:server-cog",
+        ),
+        (
+            "config-activity",
+            "page.config.activity.title",
+            "/system/config/activity",
+            "config/activity",
+            perm(ResourceType::DecisionPolicySnapshot, Operation::Read),
+            "lucide:history",
+        ),
+        (
+            "config-lifecycle",
+            "page.config.lifecycle.title",
+            "/system/config/lifecycle",
+            "config/lifecycle",
+            perm(ResourceType::ConfigLifecycle, Operation::Read),
+            "lucide:shield-check",
+        ),
+        (
+            "config-resource",
+            "page.config.resource.title",
+            "/system/config/:resource",
+            "config/resource",
+            perm(ResourceType::DecisionPolicySnapshot, Operation::Read),
+            "lucide:sliders-horizontal",
+        ),
+    ] {
+        t.page_hidden(PageSpec {
+            parent: &governance,
+            name,
+            title,
+            path,
+            component,
+            permission_code: Some(permission_code),
+            icon,
+        });
+    }
     t.button(
-        &runtime_config,
-        "runtime_config:create",
-        "Create Version",
-        perm(ResourceType::RuntimeConfig, Operation::Create),
+        &config,
+        "config:create",
+        "Create Draft",
+        perm(ResourceType::DecisionPolicySnapshot, Operation::Create),
     );
     t.button(
-        &runtime_config,
-        "runtime_config:approve",
-        "Approve Version",
-        perm(ResourceType::RuntimeConfig, Operation::Approve),
+        &config,
+        "config:approve",
+        "Approve Revision",
+        perm(ResourceType::DecisionPolicySnapshot, Operation::Approve),
     );
     t.button(
-        &runtime_config,
-        "runtime_config:activate",
-        "Activate Version",
-        perm(ResourceType::RuntimeConfig, Operation::Activate),
+        &config,
+        "config:activate",
+        "Activate Revision",
+        perm(ResourceType::DecisionPolicySnapshot, Operation::Activate),
     );
     t.button(
-        &runtime_config,
-        "runtime_config:rollback",
-        "Rollback Version",
-        perm(ResourceType::RuntimeConfig, Operation::Rollback),
+        &config,
+        "config:rollback",
+        "Rollback Revision",
+        perm(ResourceType::DecisionPolicySnapshot, Operation::Rollback),
+    );
+    t.button(
+        &config,
+        "config_lifecycle:seal",
+        "Seal Production Baseline",
+        perm(ResourceType::ConfigLifecycle, Operation::Seal),
     );
 }
 

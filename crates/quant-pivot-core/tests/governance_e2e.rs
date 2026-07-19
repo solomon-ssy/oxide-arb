@@ -6,66 +6,55 @@
 //! restoration, runtime-config pointer sync, and the `InsufficientLabels`
 //! promotion block.
 
-use std::sync::{
-    Arc,
-    atomic::{AtomicU8, Ordering},
-};
+use std::sync::Arc;
 
-use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
 use quant_pivot_core::governance::{
     CoreCalibrationArtifactLoader, ModelGovernanceDeps, ModelGovernanceService,
 };
-use quant_pivot_core::runtime_config::RuntimeConfigStore;
+use quant_pivot_core::runtime_config::DecisionPolicyStore;
 use quant_pivot_core::service::{
     feature_integrity::RepositoryFeatureParityGate,
     frozen_model_parity::{FrozenModelParityDeps, FrozenModelParityService},
 };
-use quant_pivot_error::QuantError;
-use quant_pivot_error::{control::ControlError, governance::GovernanceError};
 use quant_pivot_models::{
     clickhouse::QuantFeatureParityEventRow,
     domain::{
         BindCalibrationRequest, CompleteTrainingDatasetBuild, DecisionClock, GovernanceActor,
         ModelGovernancePort, NewBacktestPathSet, NewBacktestReport, NewModelRun, NewModelSpec,
-        NewModelVersion, NewRuntimeConfigActivation, NewRuntimeConfigVersion, NewShadowComparison,
-        NewTrainingDatasetPlan, PreparedRuntimeConfig, PublishModelCommand, RetireModelCommand,
-        RollbackModelCommand, RuntimeConfigPort,
+        NewModelVersion, NewShadowComparison, NewTrainingDatasetPlan, PublishModelCommand,
+        RetireModelCommand,
     },
     enums::{
         common::MarketCategory,
         model::ModelFamily,
         quant::{
-            DataQualityStatus, DatasetPurpose, DownsideSource, FeatureParityLatchState,
-            ModelRunKind, ModelRunStatus, PublicationStatus, TrainingDatasetStatus,
+            DataQualityStatus, DatasetPurpose, DownsideSource, ModelRunKind, ModelRunStatus,
+            PublicationStatus, TrainingDatasetStatus,
         },
-        runtime_config::{RuntimeConfigActivationKind, RuntimeConfigVersionSource},
     },
     hashing::CanonicalDigest,
-    runtime_config::{
-        FactorCrossSectionConfig, ModelVersionRef, RUNTIME_CONFIG_SCHEMA_VERSION, RuntimeConfig,
-    },
+    runtime_config::{DecisionPolicySnapshot, FactorCrossSectionConfig, ModelVersionRef},
     types::{
         ArtifactUri, BacktestPathSetId, BacktestReportId, ContentHash,
-        DATASET_ARTIFACT_FORMAT_VERSION, DatasetCoverage, DatasetManifest, EventId, MarketId,
-        ModelInputContract, ModelRunId, ModelSpecId, ModelTrainingContract, ModelVersionId,
-        Probability, RuntimeConfigActivationId, RuntimeConfigVersionId, SchemaVersion,
-        ShadowComparisonId, TrainingDatasetId, TrainingExampleId, TrainingHorizonsSecs,
-        TrainingSampleSources, default_sample_sources,
+        DATASET_ARTIFACT_FORMAT_VERSION, DatasetCoverage, DatasetManifest,
+        DecisionPolicySnapshotId, EventId, MarketId, ModelInputContract, ModelRunId, ModelSpecId,
+        ModelTrainingContract, ModelVersionId, Probability, SchemaVersion, ShadowComparisonId,
+        TrainingDatasetId, TrainingExampleId, TrainingHorizonsSecs, TrainingSampleSources,
+        default_sample_sources,
     },
 };
 use quant_pivot_repository::{
     postgres::{
         PgBacktestPathSetRepository, PgBacktestReportRepository, PgCalibrationArtifactRepository,
         PgFeatureParityRepository, PgModelGovernanceAuditRepository, PgModelRegistryRepository,
-        PgModelRunRepository, PgRuntimeConfigVersionRepository, PgShadowComparisonRepository,
+        PgModelRunRepository, PgPolicyRepository, PgShadowComparisonRepository,
         PgTrainingDatasetRepository,
     },
     traits::{
         BacktestPathSetRepository, BacktestReportRepository, CalibrationArtifactRepository,
         FeatureParityRepository, ModelGovernanceAuditRepository, ModelRegistryRepository,
-        ModelRunRepository, RuntimeConfigVersionRepository, ShadowComparisonRepository,
-        TrainingDatasetRepository,
+        ModelRunRepository, ShadowComparisonRepository, TrainingDatasetRepository,
     },
 };
 use quant_pivot_research::factors::FrozenReferenceQuantiles;
@@ -92,6 +81,7 @@ use quant_pivot_test_support::{
     execution_pg_seed::{fixture_profile_ref, seed_model_score_calibration_fixture},
     fact_sink::DiscardFactWriter,
     pg::setup_pg,
+    policy_fixtures::{bootstrap_default_policy_bundle, bootstrap_policy_bundle},
     research_fixtures::bind_fixture_decision_capture,
 };
 use rust_decimal_macros::dec;
@@ -100,42 +90,8 @@ use sea_orm::DatabaseConnection;
 /// Test harness wiring governance against a real store + config repo.
 struct GovernanceHarness {
     service: ModelGovernanceService,
-    store: Arc<RuntimeConfigStore>,
-    runtime_apply: Arc<TestRuntimeConfigApply>,
+    store: Arc<DecisionPolicyStore>,
     artifact_store: Arc<dyn ArtifactStore>,
-}
-
-/// Minimal [`RuntimeConfigPort`] for integration tests (store swap only).
-struct TestRuntimeConfigApply {
-    store: Arc<RuntimeConfigStore>,
-    fault_mode: AtomicU8,
-}
-
-impl TestRuntimeConfigApply {
-    fn fail_next_apply(&self) {
-        self.fault_mode.store(1, Ordering::SeqCst);
-    }
-}
-
-#[async_trait]
-impl RuntimeConfigPort for TestRuntimeConfigApply {
-    fn current(&self) -> Arc<RuntimeConfig> {
-        self.store.current()
-    }
-
-    async fn prepare(&self, config: RuntimeConfig) -> Result<PreparedRuntimeConfig, ControlError> {
-        if self.fault_mode.swap(0, Ordering::SeqCst) == 1 {
-            return Err(ControlError::Precondition(
-                "injected runtime pointer prepare failure".to_owned(),
-            ));
-        }
-        let config = Arc::new(config);
-        let store = Arc::clone(&self.store);
-        let published = Arc::clone(&config);
-        Ok(PreparedRuntimeConfig::new(config, move || {
-            store.replace((*published).clone());
-        }))
-    }
 }
 
 fn content_hash(seed: u32) -> ContentHash {
@@ -145,11 +101,15 @@ fn content_hash(seed: u32) -> ContentHash {
 }
 
 async fn harness(db: &DatabaseConnection) -> GovernanceHarness {
-    let config = RuntimeConfig::default();
-    let store = Arc::new(RuntimeConfigStore::new(config.clone()));
-    let runtime_config_repo: Arc<dyn RuntimeConfigVersionRepository> =
-        Arc::new(PgRuntimeConfigVersionRepository::new(db.clone()));
-    bootstrap_runtime_config_activation(runtime_config_repo.as_ref(), &config).await;
+    let config = DecisionPolicySnapshot::default();
+    let store = Arc::new(DecisionPolicyStore::new(config.clone()));
+    bootstrap_policy_bundle(
+        &PgPolicyRepository::new(db.clone()),
+        &config,
+        "governance-it",
+        "governance integration test bootstrap",
+    )
+    .await;
 
     let artifact_store: Arc<dyn ArtifactStore> =
         Arc::new(LocalArtifactStore::new(std::env::temp_dir().join(format!(
@@ -159,11 +119,6 @@ async fn harness(db: &DatabaseConnection) -> GovernanceHarness {
         ))));
 
     let gate: Arc<dyn ModelQualityGate> = Arc::new(DefaultModelQualityGate::new());
-    let runtime_apply = Arc::new(TestRuntimeConfigApply {
-        store: Arc::clone(&store),
-        fault_mode: AtomicU8::new(0),
-    });
-    let apply: Arc<dyn RuntimeConfigPort> = runtime_apply.clone();
     let calibration_repo: Arc<dyn CalibrationArtifactRepository> =
         Arc::new(PgCalibrationArtifactRepository::new(db.clone()));
     let calibration_loader: Arc<dyn CalibrationArtifactLoader> = Arc::new(
@@ -194,75 +149,18 @@ async fn harness(db: &DatabaseConnection) -> GovernanceHarness {
         calibration_loader,
         gate,
         runtime_config: Arc::clone(&store),
-        runtime_config_apply: apply,
-        runtime_config_repo,
         feature_parity_gate: Arc::new(RepositoryFeatureParityGate::new(parity_repo)),
         frozen_model_parity,
     });
     GovernanceHarness {
         service,
         store,
-        runtime_apply,
         artifact_store,
     }
 }
 
-async fn bootstrap_runtime_config_activation(
-    repo: &dyn RuntimeConfigVersionRepository,
-    config: &RuntimeConfig,
-) {
-    if repo
-        .load_current_activation()
-        .await
-        .expect("activation")
-        .is_some()
-    {
-        return;
-    }
-    let config_json = config.to_json();
-    let config_hash = CanonicalDigest::content_hash_json(&config_json).expect("hash");
-    let version = repo
-        .create_version(NewRuntimeConfigVersion {
-            runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
-            config_hash,
-            schema_version: RUNTIME_CONFIG_SCHEMA_VERSION,
-            config_json,
-            source: RuntimeConfigVersionSource::Bootstrap,
-            created_by: "governance-it".to_owned(),
-            reason: "governance integration test bootstrap".to_owned(),
-        })
-        .await
-        .expect("runtime config version");
-    repo.activate_version(NewRuntimeConfigActivation {
-        runtime_config_activation_id: RuntimeConfigActivationId::from_v7(),
-        runtime_config_version_id: version.runtime_config_version_id,
-        runtime_config_approval_id: None,
-        activated_by: "governance-it".to_owned(),
-        reason: "governance integration test bootstrap".to_owned(),
-        activation_kind: RuntimeConfigActivationKind::Initial,
-        previous_runtime_config_version_id: None,
-        rollback_target_version_id: None,
-        audit_event_id: None,
-    })
-    .await
-    .expect("runtime config activation");
-}
-
-async fn seed_runtime_config(db: &DatabaseConnection) -> RuntimeConfigVersionId {
-    let id = RuntimeConfigVersionId::from_v7();
-    PgRuntimeConfigVersionRepository::new(db.clone())
-        .create_version(NewRuntimeConfigVersion {
-            runtime_config_version_id: id.clone(),
-            config_hash: content_hash(u32::from('c')),
-            schema_version: SchemaVersion::FIRST,
-            config_json: serde_json::json!({}),
-            source: RuntimeConfigVersionSource::Bootstrap,
-            created_by: "governance-it".to_owned(),
-            reason: "integration test".to_owned(),
-        })
-        .await
-        .expect("runtime config");
-    id
+async fn seed_runtime_config(db: &DatabaseConnection) -> DecisionPolicySnapshotId {
+    bootstrap_default_policy_bundle(db, "governance-it", "integration test").await
 }
 
 async fn seed_spec(db: &DatabaseConnection) -> ModelSpecId {
@@ -383,7 +281,7 @@ struct FrozenDatasetFixture {
 async fn build_frozen_dataset_fixture(
     artifact_store: &Arc<dyn ArtifactStore>,
     spec: &ModelSpecId,
-    rc_id: &RuntimeConfigVersionId,
+    rc_id: &DecisionPolicySnapshotId,
 ) -> FrozenDatasetFixture {
     let id = TrainingDatasetId::from_v7();
     let window_start = Utc::now() - ChronoDuration::hours(2);
@@ -415,7 +313,7 @@ async fn build_frozen_dataset_fixture(
         model_spec_id: spec.clone(),
         trade_policy_artifact_id: None,
         trade_policy_hash: None,
-        runtime_config_version_id: rc_id.clone(),
+        decision_policy_snapshot_id: rc_id.clone(),
         window_start,
         window_end,
         purpose: DatasetPurpose::Training,
@@ -505,7 +403,7 @@ async fn seed_dataset(
     db: &DatabaseConnection,
     artifact_store: &Arc<dyn ArtifactStore>,
     spec: &ModelSpecId,
-    rc_id: &RuntimeConfigVersionId,
+    rc_id: &DecisionPolicySnapshotId,
     status: TrainingDatasetStatus,
     coverage_json: DatasetCoverage,
     dataset_hash_seed: char,
@@ -525,7 +423,7 @@ async fn seed_dataset(
             horizons_secs: TrainingHorizonsSecs(vec![3600]),
             feature_schema_version: Some(SchemaVersion::FIRST),
             sample_sources: Some(TrainingSampleSources(default_sample_sources())),
-            runtime_config_version_id: rc_id.clone(),
+            decision_policy_snapshot_id: rc_id.clone(),
         })
         .await
         .expect("dataset plan");
@@ -628,6 +526,7 @@ async fn seed_version(
             model_spec_id: spec.clone(),
             version,
             artifact_hash,
+            category_scope: None,
             profile_ref: fixture_profile_ref(),
             training_dataset_id: dataset,
             trade_policy_artifact_id: None,
@@ -800,6 +699,7 @@ async fn seed_sell_version(
             model_spec_id: spec.clone(),
             version,
             artifact_hash,
+            category_scope: None,
             profile_ref: fixture_profile_ref(),
             training_dataset_id: dataset,
             trade_policy_artifact_id: None,
@@ -820,7 +720,7 @@ async fn seed_sell_version(
 async fn seed_backtest(
     db: &DatabaseConnection,
     version: &ModelVersionId,
-    rc_id: &RuntimeConfigVersionId,
+    rc_id: &DecisionPolicySnapshotId,
     hash_seed: char,
 ) {
     let model_run_id = ModelRunId::from_v7();
@@ -830,7 +730,7 @@ async fn seed_backtest(
             model_run_id: model_run_id.clone(),
             run_kind: ModelRunKind::Backtest,
             model_version_id: Some(version.clone()),
-            runtime_config_version_id: rc_id.clone(),
+            decision_policy_snapshot_id: rc_id.clone(),
             market_selection_id: None,
             window_start,
             window_end: window_start + ChronoDuration::hours(1),
@@ -866,7 +766,7 @@ async fn seed_backtest(
             backtest_report_id: BacktestReportId::from_v7(),
             model_version_id: version.clone(),
             model_run_id,
-            runtime_config_version_id: rc_id.clone(),
+            decision_policy_snapshot_id: rc_id.clone(),
             window_start,
             window_end: window_start + ChronoDuration::hours(1),
             coverage: dec!(0.99),
@@ -1122,7 +1022,7 @@ async fn publish_requires_shadow_stability() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires Docker"]
-async fn publish_succeeds_then_published_version_is_immutable() {
+async fn publish_succeeds_without_mutating_routing_then_version_is_immutable() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let rc_id = seed_runtime_config(&db).await;
@@ -1173,25 +1073,25 @@ async fn publish_succeeds_then_published_version_is_immutable() {
     assert_eq!(audits.len(), 1);
     assert!(audits[0].quality_gate_passed);
 
-    assert_eq!(
+    assert!(
         harness
             .store
             .current()
+            .model_routing
             .model
             .active_model_version_id
-            .as_ref()
-            .map(|reference| reference.id.as_str()),
-        Some(candidate.to_string().as_str()),
-        "publish must wire the active runtime-config pointer"
+            .is_none(),
+        "artifact publication must not bypass ModelRouting governance"
     );
     assert!(
         harness
             .store
             .current()
+            .model_routing
             .model
             .shadow_model_version_id
             .is_none(),
-        "publish must clear the shadow slot"
+        "artifact publication must not mutate the shadow slot"
     );
 
     // Re-publishing a published version is rejected (immutability).
@@ -1212,7 +1112,7 @@ async fn publish_succeeds_then_published_version_is_immutable() {
 struct PublishReadyParams<'a> {
     governance: &'a ModelGovernanceService,
     db: &'a DatabaseConnection,
-    rc_id: &'a RuntimeConfigVersionId,
+    rc_id: &'a DecisionPolicySnapshotId,
     version: &'a ModelVersionId,
     active_for_shadow: &'a ModelVersionId,
     backtest_seed: char,
@@ -1260,7 +1160,7 @@ async fn publish_ready_version(params: PublishReadyParams<'_>) {
 async fn seed_path_set(
     db: &DatabaseConnection,
     version: &ModelVersionId,
-    rc_id: &RuntimeConfigVersionId,
+    rc_id: &DecisionPolicySnapshotId,
     hash_seed: char,
 ) {
     let model_run_id = ModelRunId::from_v7();
@@ -1270,7 +1170,7 @@ async fn seed_path_set(
             model_run_id: model_run_id.clone(),
             run_kind: ModelRunKind::Cpcv,
             model_version_id: Some(version.clone()),
-            runtime_config_version_id: rc_id.clone(),
+            decision_policy_snapshot_id: rc_id.clone(),
             market_selection_id: None,
             window_start,
             window_end: window_start + ChronoDuration::hours(1),
@@ -1303,7 +1203,7 @@ async fn seed_path_set(
             model_version_id: version.clone(),
             model_run_id,
             training_dataset_id,
-            runtime_config_version_id: rc_id.clone(),
+            decision_policy_snapshot_id: rc_id.clone(),
             window_start,
             window_end: window_start + ChronoDuration::hours(1),
             path_count: 7,
@@ -1341,575 +1241,9 @@ async fn seed_path_set(
         .expect("bind publish path set");
 }
 
-/// Seeds for [`seed_and_publish_version`].
-struct PublishableVersionSeeds {
-    dataset_seed: char,
-    version_seed: char,
-    version_number: i32,
-    backtest_seed: char,
-    shadow_seed: char,
-    publish_reason: &'static str,
-}
-
-/// Build a Ready dataset, train a candidate version, and publish it through every gate.
-async fn seed_and_publish_version(
-    harness: &GovernanceHarness,
-    db: &DatabaseConnection,
-    spec: &ModelSpecId,
-    rc_id: &RuntimeConfigVersionId,
-    seeds: PublishableVersionSeeds,
-) -> ModelVersionId {
-    let dataset = seed_dataset(
-        db,
-        &harness.artifact_store,
-        spec,
-        rc_id,
-        TrainingDatasetStatus::Ready,
-        healthy_coverage(),
-        seeds.dataset_seed,
-    )
-    .await;
-    let version = seed_version(
-        db,
-        &harness.artifact_store,
-        spec,
-        seeds.version_seed,
-        seeds.version_number,
-        Some(dataset),
-        true,
-    )
-    .await;
-    publish_ready_version(PublishReadyParams {
-        governance: &harness.service,
-        db,
-        rc_id,
-        version: &version,
-        active_for_shadow: &version,
-        backtest_seed: seeds.backtest_seed,
-        shadow_seed: seeds.shadow_seed,
-        reason: seeds.publish_reason,
-    })
-    .await;
-    version
-}
-
-async fn assert_rollback_restored_predecessor(
-    db: &DatabaseConnection,
-    store: &RuntimeConfigStore,
-    rolled_back: &ModelVersionId,
-    predecessor: &ModelVersionId,
-    rollback_reason: &str,
-) {
-    let registry = PgModelRegistryRepository::new(db.clone());
-    let rolled_back_row = registry
-        .find_model_version_by_id(rolled_back)
-        .await
-        .expect("find")
-        .expect("row");
-    assert_eq!(
-        rolled_back_row.publication_status,
-        PublicationStatus::Retired
-    );
-    let predecessor_row = registry
-        .find_model_version_by_id(predecessor)
-        .await
-        .expect("find")
-        .expect("row");
-    assert_eq!(
-        predecessor_row.publication_status,
-        PublicationStatus::Published,
-        "rollback must re-publish the retired predecessor"
-    );
-    assert_eq!(
-        store
-            .current()
-            .model
-            .active_model_version_id
-            .as_ref()
-            .map(|reference| reference.id.as_str()),
-        Some(predecessor.to_string().as_str()),
-        "rollback must wire runtime config back to the restored version"
-    );
-    let audits = PgModelGovernanceAuditRepository::new(db.clone())
-        .list_by_version(rolled_back)
-        .await
-        .expect("audits");
-    let rollback_audit = audits
-        .iter()
-        .find(|audit| audit.reason == rollback_reason)
-        .expect("the rollback reason is audited");
-    assert!(
-        rollback_audit.quality_gate_passed,
-        "rollback must audit a freshly passed publish gate"
-    );
-    assert_eq!(
-        rollback_audit.rollback_target_version_id.as_ref(),
-        Some(predecessor)
-    );
-    assert!(
-        rollback_audit
-            .detail_json
-            .get("feature_parity_run_id")
-            .and_then(serde_json::Value::as_str)
-            .is_some(),
-        "rollback audit must bind the exact subject full-parity permit"
-    );
-    assert!(
-        rollback_audit
-            .detail_json
-            .get("feature_parity_state_id")
-            .and_then(serde_json::Value::as_str)
-            .is_some(),
-        "rollback audit must bind the exact clear-latch generation"
-    );
-    assert_eq!(
-        predecessor_row
-            .quality_gate_report
-            .get("passed")
-            .and_then(serde_json::Value::as_bool),
-        Some(true),
-        "rollback target must persist its current publish gate report"
-    );
-}
-
-async fn assert_single_active_published(
-    registry: &PgModelRegistryRepository,
-    spec: &ModelSpecId,
-    retired: &ModelVersionId,
-    active: &ModelVersionId,
-    store: &RuntimeConfigStore,
-) {
-    let retired_row = registry
-        .find_model_version_by_id(retired)
-        .await
-        .expect("find")
-        .expect("row");
-    assert_eq!(
-        retired_row.publication_status,
-        PublicationStatus::Retired,
-        "publish must retire the predecessor"
-    );
-    assert_eq!(
-        registry
-            .list_published_for_spec(spec)
-            .await
-            .expect("published")
-            .len(),
-        1,
-        "only one published version may exist per spec"
-    );
-    assert_eq!(
-        store
-            .current()
-            .model
-            .active_model_version_id
-            .as_ref()
-            .map(|reference| reference.id.as_str()),
-        Some(active.to_string().as_str()),
-        "runtime config must point at the active published version"
-    );
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires Docker"]
-async fn rollback_retains_previous_and_writes_reason() {
-    let (pool, _container) = setup_pg().await;
-    let db = pool.connection().clone();
-    let rc_id = seed_runtime_config(&db).await;
-    let spec = seed_spec(&db).await;
-    let harness = harness(&db).await;
-
-    let v1 = seed_and_publish_version(
-        &harness,
-        &db,
-        &spec,
-        &rc_id,
-        PublishableVersionSeeds {
-            dataset_seed: '1',
-            version_seed: 'a',
-            version_number: 1,
-            backtest_seed: '1',
-            shadow_seed: 'a',
-            publish_reason: "publish v1",
-        },
-    )
-    .await;
-    let v2 = seed_and_publish_version(
-        &harness,
-        &db,
-        &spec,
-        &rc_id,
-        PublishableVersionSeeds {
-            dataset_seed: '2',
-            version_seed: 'b',
-            version_number: 2,
-            backtest_seed: '2',
-            shadow_seed: 'm',
-            publish_reason: "publish v2",
-        },
-    )
-    .await;
-
-    let registry = PgModelRegistryRepository::new(db.clone());
-    assert_single_active_published(&registry, &spec, &v1, &v2, &harness.store).await;
-
-    let restored = harness
-        .service
-        .rollback(
-            RollbackModelCommand {
-                model_version_id: v2.clone(),
-                reason: "v2 regressed".to_owned(),
-            },
-            GovernanceActor::system(),
-        )
-        .await
-        .expect("rollback");
-    assert_eq!(
-        restored.model_version_id, v1,
-        "rollback restores the predecessor"
-    );
-    assert_rollback_restored_predecessor(&db, &harness.store, &v2, &v1, "v2 regressed").await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires Docker"]
-async fn rollback_broken_pointer_preflight_leaves_registry_untouched() {
-    let (pool, _container) = setup_pg().await;
-    let db = pool.connection().clone();
-    let rc_id = seed_runtime_config(&db).await;
-    let spec = seed_spec(&db).await;
-    let harness = harness(&db).await;
-
-    let predecessor = seed_and_publish_version(
-        &harness,
-        &db,
-        &spec,
-        &rc_id,
-        PublishableVersionSeeds {
-            dataset_seed: 'b',
-            version_seed: 'b',
-            version_number: 1,
-            backtest_seed: 'b',
-            shadow_seed: 'b',
-            publish_reason: "publish preflight target",
-        },
-    )
-    .await;
-    let current = seed_and_publish_version(
-        &harness,
-        &db,
-        &spec,
-        &rc_id,
-        PublishableVersionSeeds {
-            dataset_seed: 'c',
-            version_seed: 'c',
-            version_number: 2,
-            backtest_seed: 'c',
-            shadow_seed: 'c',
-            publish_reason: "publish preflight current",
-        },
-    )
-    .await;
-    let mut broken_live = (*harness.store.current()).clone();
-    broken_live.model.active_model_version_id = Some(ModelVersionRef {
-        id: predecessor.to_string(),
-    });
-    harness.store.replace(broken_live);
-
-    let error = harness
-        .service
-        .rollback(
-            RollbackModelCommand {
-                model_version_id: current.clone(),
-                reason: "must reject broken pointer preflight".to_owned(),
-            },
-            GovernanceActor::system(),
-        )
-        .await
-        .expect_err("broken live/durable ownership must fail before status CAS");
-    assert!(
-        error
-            .to_string()
-            .contains("live runtime config does not point")
-    );
-
-    let registry = PgModelRegistryRepository::new(db.clone());
-    assert_eq!(
-        registry
-            .find_model_version_by_id(&current)
-            .await
-            .expect("current lookup")
-            .expect("current row")
-            .publication_status,
-        PublicationStatus::Published
-    );
-    assert_eq!(
-        registry
-            .find_model_version_by_id(&predecessor)
-            .await
-            .expect("target lookup")
-            .expect("target row")
-            .publication_status,
-        PublicationStatus::Retired
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires Docker"]
-async fn rollback_pointer_prepare_failure_leaves_all_state_unchanged() {
-    let (pool, _container) = setup_pg().await;
-    let db = pool.connection().clone();
-    let rc_id = seed_runtime_config(&db).await;
-    let spec = seed_spec(&db).await;
-    let harness = harness(&db).await;
-
-    let predecessor = seed_and_publish_version(
-        &harness,
-        &db,
-        &spec,
-        &rc_id,
-        PublishableVersionSeeds {
-            dataset_seed: '7',
-            version_seed: '7',
-            version_number: 1,
-            backtest_seed: '7',
-            shadow_seed: '7',
-            publish_reason: "publish pointer-failure target",
-        },
-    )
-    .await;
-    let current = seed_and_publish_version(
-        &harness,
-        &db,
-        &spec,
-        &rc_id,
-        PublishableVersionSeeds {
-            dataset_seed: '8',
-            version_seed: '8',
-            version_number: 2,
-            backtest_seed: '8',
-            shadow_seed: '8',
-            publish_reason: "publish pointer-failure current",
-        },
-    )
-    .await;
-    harness.runtime_apply.fail_next_apply();
-
-    let error = harness
-        .service
-        .rollback(
-            RollbackModelCommand {
-                model_version_id: current.clone(),
-                reason: "inject pointer apply failure".to_owned(),
-            },
-            GovernanceActor::system(),
-        )
-        .await
-        .expect_err("failed pointer preparation must surface to the operator");
-    assert!(
-        error
-            .to_string()
-            .contains("injected runtime pointer prepare failure")
-    );
-
-    let registry = PgModelRegistryRepository::new(db.clone());
-    assert_single_active_published(&registry, &spec, &predecessor, &current, &harness.store).await;
-    let durable = PgRuntimeConfigVersionRepository::new(db.clone())
-        .load_current()
-        .await
-        .expect("durable runtime config")
-        .expect("active runtime config");
-    let durable_config = RuntimeConfig::from_json(&durable.config_json).expect("typed config");
-    assert_eq!(
-        durable_config
-            .model
-            .active_model_version_id
-            .as_ref()
-            .map(|reference| reference.id.as_str()),
-        Some(current.to_string().as_str()),
-        "failed preparation must leave the durable current model unchanged"
-    );
-    let audits = PgModelGovernanceAuditRepository::new(db.clone())
-        .list_by_version(&current)
-        .await
-        .expect("rollback audit");
-    assert!(
-        audits
-            .iter()
-            .all(|audit| audit.reason != "inject pointer apply failure"),
-        "a prepare failure occurs before the governance commit and must not invent a completed rollback audit"
-    );
-    let latch = PgFeatureParityRepository::new(db.clone())
-        .current_state()
-        .await
-        .expect("latch read")
-        .expect("safety latch state");
-    assert_eq!(latch.state, FeatureParityLatchState::Clear);
-    assert!(latch.cause_run_id.is_none());
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires Docker"]
-async fn concurrent_rollbacks_commit_exactly_one_complete_switch() {
-    let (pool, _container) = setup_pg().await;
-    let db = pool.connection().clone();
-    let rc_id = seed_runtime_config(&db).await;
-    let spec = seed_spec(&db).await;
-    let harness = harness(&db).await;
-
-    let predecessor = seed_and_publish_version(
-        &harness,
-        &db,
-        &spec,
-        &rc_id,
-        PublishableVersionSeeds {
-            dataset_seed: '5',
-            version_seed: 'e',
-            version_number: 1,
-            backtest_seed: '5',
-            shadow_seed: 'e',
-            publish_reason: "publish concurrent rollback target",
-        },
-    )
-    .await;
-    let current = seed_and_publish_version(
-        &harness,
-        &db,
-        &spec,
-        &rc_id,
-        PublishableVersionSeeds {
-            dataset_seed: '6',
-            version_seed: 'f',
-            version_number: 2,
-            backtest_seed: '6',
-            shadow_seed: 'f',
-            publish_reason: "publish concurrent rollback current",
-        },
-    )
-    .await;
-
-    let left = harness.service.rollback(
-        RollbackModelCommand {
-            model_version_id: current.clone(),
-            reason: "concurrent rollback left".to_owned(),
-        },
-        GovernanceActor::system(),
-    );
-    let right = harness.service.rollback(
-        RollbackModelCommand {
-            model_version_id: current.clone(),
-            reason: "concurrent rollback right".to_owned(),
-        },
-        GovernanceActor::system(),
-    );
-    let (left_result, right_result) = tokio::join!(left, right);
-    assert_eq!(
-        usize::from(left_result.is_ok()) + usize::from(right_result.is_ok()),
-        1,
-        "the spec/current compare-and-swap must admit exactly one rollback"
-    );
-
-    let registry = PgModelRegistryRepository::new(db.clone());
-    assert_single_active_published(&registry, &spec, &current, &predecessor, &harness.store).await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires Docker"]
-async fn rollback_quality_gate_failure_persists_report_without_half_switching() {
-    let (pool, _container) = setup_pg().await;
-    let db = pool.connection().clone();
-    let rc_id = seed_runtime_config(&db).await;
-    let spec = seed_spec(&db).await;
-    let harness = harness(&db).await;
-
-    let v1 = seed_and_publish_version(
-        &harness,
-        &db,
-        &spec,
-        &rc_id,
-        PublishableVersionSeeds {
-            dataset_seed: '3',
-            version_seed: 'c',
-            version_number: 1,
-            backtest_seed: '3',
-            shadow_seed: 'c',
-            publish_reason: "publish rollback target",
-        },
-    )
-    .await;
-    let v2 = seed_and_publish_version(
-        &harness,
-        &db,
-        &spec,
-        &rc_id,
-        PublishableVersionSeeds {
-            dataset_seed: '4',
-            version_seed: 'd',
-            version_number: 2,
-            backtest_seed: '4',
-            shadow_seed: 'd',
-            publish_reason: "publish current",
-        },
-    )
-    .await;
-    let registry = PgModelRegistryRepository::new(db.clone());
-    registry
-        .set_publish_path_set_id(&v1, None)
-        .await
-        .expect("invalidate retired target's current CPCV binding");
-
-    let error = harness
-        .service
-        .rollback(
-            RollbackModelCommand {
-                model_version_id: v2.clone(),
-                reason: "must not bypass current quality".to_owned(),
-            },
-            GovernanceActor::system(),
-        )
-        .await
-        .expect_err("rollback must run today's publish gate");
-    assert!(matches!(
-        error,
-        QuantError::Governance(GovernanceError::QualityGateFailed { .. })
-    ));
-
-    let current = registry
-        .find_model_version_by_id(&v2)
-        .await
-        .expect("current lookup")
-        .expect("current row");
-    let target = registry
-        .find_model_version_by_id(&v1)
-        .await
-        .expect("target lookup")
-        .expect("target row");
-    assert_eq!(current.publication_status, PublicationStatus::Published);
-    assert_eq!(target.publication_status, PublicationStatus::Retired);
-    assert_eq!(
-        target
-            .quality_gate_report
-            .get("passed")
-            .and_then(serde_json::Value::as_bool),
-        Some(false),
-        "failed rollback gate report remains durable for operator diagnosis"
-    );
-    assert_eq!(
-        harness
-            .store
-            .current()
-            .model
-            .active_model_version_id
-            .as_ref()
-            .map(|reference| reference.id.as_str()),
-        Some(v2.to_string().as_str()),
-        "runtime pointer must remain on the exact published current"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires Docker"]
-async fn retire_published_version_clears_runtime_pointer_and_audits() {
+async fn retire_unrouted_published_version_audits_without_mutating_routing() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let rc_id = seed_runtime_config(&db).await;
@@ -1964,10 +1298,11 @@ async fn retire_published_version_clears_runtime_pointer_and_audits() {
         harness
             .store
             .current()
+            .model_routing
             .model
             .active_model_version_id
             .is_none(),
-        "retire must clear the active runtime pointer"
+        "retirement must not mutate ModelRouting"
     );
 
     let audits = PgModelGovernanceAuditRepository::new(db.clone())
@@ -1982,11 +1317,7 @@ async fn retire_published_version_clears_runtime_pointer_and_audits() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires Docker"]
-async fn retire_published_version_clears_dangling_category_pointer() {
-    // 11.2.2 remediation R7: a category-specific pointer left dangling after
-    // its target retires must never survive silently — the retire-sync must
-    // clear it in the same activation as the generic active pointer, so the
-    // online runner never routes another round onto a dead version.
+async fn retire_routed_published_version_is_rejected_fail_closed() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let rc_id = seed_runtime_config(&db).await;
@@ -2028,24 +1359,23 @@ async fn retire_published_version_clears_dangling_category_pointer() {
     // Simulate an operator having pinned this same version to a category
     // route (independent of the generic active pointer publish already set).
     let mut config = (*harness.store.current()).clone();
-    config.model.category_model_pointers.insert(
+    config.model_routing.model.category_model_pointers.insert(
         MarketCategory::Crypto,
-        ModelVersionRef {
-            id: version.to_string(),
-        },
+        ModelVersionRef::new(version.clone()),
     );
     harness.store.replace(config);
     assert!(
         harness
             .store
             .current()
+            .model_routing
             .model
             .category_model_pointers
             .contains_key(&MarketCategory::Crypto),
         "precondition: category pointer is armed before retire"
     );
 
-    harness
+    let error = harness
         .service
         .retire(
             RetireModelCommand {
@@ -2055,26 +1385,39 @@ async fn retire_published_version_clears_dangling_category_pointer() {
             GovernanceActor::system(),
         )
         .await
-        .expect("retire");
+        .expect_err("routed model retirement must fail closed");
+    assert!(
+        error
+            .to_string()
+            .contains("activate a ModelRouting revision")
+    );
 
     assert!(
         harness
             .store
             .current()
+            .model_routing
             .model
             .active_model_version_id
             .is_none(),
-        "retire must clear the active runtime pointer"
+        "failed retirement must not invent a generic route"
     );
     assert!(
-        !harness
+        harness
             .store
             .current()
+            .model_routing
             .model
             .category_model_pointers
             .contains_key(&MarketCategory::Crypto),
-        "retire must also clear a dangling category_model_pointers entry"
+        "failed retirement must preserve the governed category route"
     );
+    let row = PgModelRegistryRepository::new(db)
+        .find_model_version_by_id(&version)
+        .await
+        .expect("model lookup")
+        .expect("model version");
+    assert_eq!(row.publication_status, PublicationStatus::Published);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2321,7 +1664,7 @@ async fn seed_leaking_dataset(
     db: &DatabaseConnection,
     artifact_store: &Arc<dyn ArtifactStore>,
     spec: &ModelSpecId,
-    rc_id: &RuntimeConfigVersionId,
+    rc_id: &DecisionPolicySnapshotId,
 ) -> TrainingDatasetId {
     let dataset_id = TrainingDatasetId::from_v7();
     let window_start = Utc::now() - ChronoDuration::hours(2);
@@ -2360,7 +1703,7 @@ async fn seed_leaking_dataset(
         model_spec_id: spec.clone(),
         trade_policy_artifact_id: None,
         trade_policy_hash: None,
-        runtime_config_version_id: rc_id.clone(),
+        decision_policy_snapshot_id: rc_id.clone(),
         window_start,
         window_end,
         purpose: DatasetPurpose::Training,
@@ -2394,7 +1737,7 @@ async fn seed_leaking_dataset(
             horizons_secs: TrainingHorizonsSecs(vec![0]),
             feature_schema_version: Some(SchemaVersion::FIRST),
             sample_sources: Some(TrainingSampleSources(default_sample_sources())),
-            runtime_config_version_id: rc_id.clone(),
+            decision_policy_snapshot_id: rc_id.clone(),
         })
         .await
         .expect("dataset plan");

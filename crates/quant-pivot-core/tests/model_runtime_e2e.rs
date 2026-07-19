@@ -47,13 +47,13 @@ use quant_pivot_models::{
         quant::{ModelRunErrorCode, ModelRunKind, ModelRunStatus, PublicationStatus},
     },
     runtime_config::{
-        DataQualityConfig, DecimalString, DomainConfig, FactorCrossSectionConfig, FactorWeights,
+        DataQualityConfig, DecimalValue, DomainConfig, FactorCrossSectionConfig, FactorWeights,
         FactorsConfig, FeaturesConfig, ModelConfig, ModelVersionRef,
     },
     types::{
-        ContentHash, DomainInstrumentKey, EventId, FeatureVectorId, MarketId, ModelInputContract,
-        ModelRunId, ModelSpecId, ModelTrainingContract, ModelVersionId, Price,
-        RuntimeConfigVersionId, SchemaVersion, Shares, TokenId, Usd,
+        ContentHash, DecisionPolicySnapshotId, DomainInstrumentKey, EventId, FeatureVectorId,
+        MarketId, ModelInputContract, ModelRunId, ModelSpecId, ModelTrainingContract,
+        ModelVersionId, Price, SchemaVersion, Shares, TokenId, Usd,
     },
 };
 use quant_pivot_repository::{
@@ -428,7 +428,7 @@ async fn build_features(
             data_quality: &DataQualityConfig::default(),
             model_requirements: &ModelFeatureRequirements::default(),
             pit: &live_pit,
-            runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
+            decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
             liquidity_cap_usd: Usd::new(rust_decimal::Decimal::from(10_000)),
         })
         .await
@@ -660,7 +660,7 @@ async fn build_cross_section_features(
             data_quality: &DataQualityConfig::default(),
             model_requirements: &ModelFeatureRequirements::default(),
             pit: &live_pit,
-            runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
+            decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
             liquidity_cap_usd: Usd::new(rust_decimal::Decimal::from(10_000)),
         })
         .await
@@ -779,6 +779,7 @@ async fn publish_weighted_model(
             model_spec_id,
             version: 1,
             artifact_hash,
+            category_scope: None,
             profile_ref: quant_pivot_test_support::execution_pg_seed::fixture_profile_ref(),
             training_dataset_id: None,
             trade_policy_artifact_id: None,
@@ -844,6 +845,7 @@ async fn register_candidate_sibling(
             model_spec_id: published.model_spec_id.clone(),
             version: published.version + 1,
             artifact_hash,
+            category_scope: None,
             profile_ref: published.profile_ref.clone(),
             training_dataset_id: published.training_dataset_id.clone(),
             trade_policy_artifact_id: published.trade_policy_artifact_id.clone(),
@@ -879,24 +881,21 @@ fn factors_with_overlay_skew(
     let mut weights = FactorWeights::default();
     for (index, spec) in definitions.iter().enumerate() {
         let value = if index == lead_index { lead } else { tail };
-        weights.weights.insert(
-            spec.name.as_str().to_owned(),
-            DecimalString::new(value.to_string()),
-        );
+        weights
+            .weights
+            .insert(spec.name.as_str().to_owned(), DecimalValue::new(value));
     }
     let mut config = base.clone();
     config.factor_weights = weights;
     config
 }
 
-fn model_config(active: &ModelVersionId, shadow: Option<&str>) -> ModelConfig {
+fn model_config(active: &ModelVersionId, shadow: Option<&ModelVersionId>) -> ModelConfig {
     ModelConfig {
-        active_model_version_id: Some(ModelVersionRef {
-            id: active.to_string(),
-        }),
-        shadow_model_version_id: shadow.map(|id| ModelVersionRef { id: id.to_owned() }),
-        min_model_confidence: DecimalString::new("0.00"),
-        candidate_score_floor: DecimalString::new("0.00"),
+        active_model_version_id: Some(ModelVersionRef::new(active.clone())),
+        shadow_model_version_id: shadow.cloned().map(ModelVersionRef::new),
+        min_model_confidence: DecimalValue::new(rust_decimal_macros::dec!(0.00)),
+        candidate_score_floor: DecimalValue::new(rust_decimal_macros::dec!(0.00)),
         ..ModelConfig::default()
     }
 }
@@ -987,7 +986,7 @@ async fn online_loop_selection_to_signal_candidates() {
     let selection = vec![selected_market()];
     let outcome = runner
         .run(ModelRunRequest {
-            runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
+            decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
             market_selection_id: None,
             selection: &selection,
             feature_vectors: &vectors,
@@ -1060,11 +1059,11 @@ async fn inference_degradation_shadow_failure_keeps_active() {
 
     // Shadow points at a version that does not exist: the shadow path degrades,
     // the active result is unaffected, and no critical alert fires.
-    let missing_shadow = ModelVersionId::from_v7().to_string();
+    let missing_shadow = ModelVersionId::from_v7();
     let selection = vec![selected_market()];
     let outcome = runner
         .run(ModelRunRequest {
-            runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
+            decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
             market_selection_id: None,
             selection: &selection,
             feature_vectors: &vectors,
@@ -1128,7 +1127,7 @@ async fn run_overlay_round(input: OverlayRoundInput<'_>) -> ModelRunOutcome {
     );
     runner
         .run(ModelRunRequest {
-            runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
+            decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
             market_selection_id: None,
             selection,
             feature_vectors: vectors,
@@ -1173,7 +1172,7 @@ async fn hot_update_changes_candidate_weights_not_published_artifact() {
         Arc::clone(&overlay),
     );
 
-    let model = model_config(&published, Some(&candidate.to_string()));
+    let model = model_config(&published, Some(&candidate));
     let first = run_overlay_round(OverlayRoundInput {
         runner: &runner,
         overlay: &overlay,
@@ -1276,7 +1275,7 @@ async fn inference_rejects_retired_active_model() {
     let selection = [selected_market()];
     let result = runner
         .run(ModelRunRequest {
-            runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
+            decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
             market_selection_id: None,
             selection: &selection,
             feature_vectors: &vectors,
@@ -1311,7 +1310,7 @@ async fn model_run_create_find_succeed_fail() {
         model_run_id: id.clone(),
         run_kind: ModelRunKind::LiveInference,
         model_version_id: None,
-        runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
+        decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
         market_selection_id: None,
         window_start: Utc::now(),
         window_end: Utc::now(),

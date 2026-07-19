@@ -4,39 +4,9 @@
   "migration_engine": "sea-orm-migration/2.0.0-rc.43",
   "migrations": [
     {
-      "version": "m20260716_000001_schema_snapshot",
-      "checksum": "a95eee06f6970e25076d56c86bad4a43b5794a50a3b92e6b4bf5f4d7598d7d7f",
-      "artifact_length": 164842
-    },
-    {
-      "version": "m20260716_000002_relational_invariants",
-      "checksum": "113e8718cd039564e7e8a38bd97b576beed705374b8ea670c2df1b11bd7000ed",
-      "artifact_length": 84861
-    },
-    {
-      "version": "m20260716_000003_query_indexes",
-      "checksum": "6318938e08f11c2ab17f996207967f1999d3bf38f968d6602c9f7c08d30d5261",
-      "artifact_length": 79918
-    },
-    {
-      "version": "m20260716_000004_worm_and_update_triggers",
-      "checksum": "57fd038f160928431d1be52563363d8a26d89d3ed6ce66525eee4cdf046e44d1",
-      "artifact_length": 18864
-    },
-    {
-      "version": "m20260718_000005_phase_11_9_feedback_verticals",
-      "checksum": "0f50b5f83d74cc7d258bb265be746fa9cd4d97fc02a1877cdad3c67321eaa87e",
-      "artifact_length": 17905
-    },
-    {
-      "version": "m20260718_000006_weather_daily_temperature_projection",
-      "checksum": "950806400bd7b2116c1c3a8f0ad7cc863cedb9190aadd73e87853e922d3218b0",
-      "artifact_length": 13428
-    },
-    {
-      "version": "m20260718_000007_airnow_pm25_operational_state",
-      "checksum": "7d06a5e7710c77f5f894d9b1d325ab553bd2c688e2bde8e729744e7dd8c7f4bb",
-      "artifact_length": 8697
+      "version": "m00000000_000001_bootstrap",
+      "checksum": "1f182c5d9eb6b8238e9f0885677c7cb8f1ffa01b6a331e977abd293333c2f3da",
+      "artifact_length": 351242
     }
   ]
 }

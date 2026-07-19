@@ -9,7 +9,7 @@
 use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
     enums::factor::{FactorIndeterminateReason, FactorNormalization, NormalizationSource},
-    runtime_config::{DecimalString, FactorNormalizationConfig},
+    runtime_config::{DecimalValue, FactorNormalizationConfig},
     types::Probability,
 };
 use rust_decimal::Decimal;
@@ -312,16 +312,14 @@ pub fn resolve_normalizer(
     let method = over.map_or(default_method, |spec| spec.method);
     match method {
         FactorNormalization::WinsorizedZScore => {
-            let winsor_p = parse_param(
+            let winsor_p = resolve_param(
                 over.and_then(|spec| spec.winsor_p.as_ref()),
                 &config.default_winsor_p,
-                "winsor_p",
-            )?;
-            let clamp_sigma = parse_param(
+            );
+            let clamp_sigma = resolve_param(
                 over.and_then(|spec| spec.clamp_sigma.as_ref()),
                 &config.default_clamp_sigma,
-                "clamp_sigma",
-            )?;
+            );
             Ok(Box::new(WinsorizedZScoreNormalizer {
                 winsor_p,
                 clamp_sigma,
@@ -337,8 +335,8 @@ pub fn resolve_normalizer(
                     "factor `{factor_name}` uses MinMax normalization but has no min/max bounds in factors.normalization.per_factor"
                 )));
             };
-            let lo = parse_decimal(min, "min")?;
-            let hi = parse_decimal(max, "max")?;
+            let lo = min.value;
+            let hi = max.value;
             if hi <= lo {
                 return Err(QuantError::config(format!(
                     "factor `{factor_name}` MinMax bounds invalid: max {hi} must exceed min {lo}"
@@ -385,20 +383,8 @@ fn unit_probability(value: Decimal) -> Probability {
     )
 }
 
-fn parse_param(
-    over: Option<&DecimalString>,
-    default: &DecimalString,
-    label: &str,
-) -> QuantResult<Decimal> {
-    parse_decimal(over.unwrap_or(default), label)
-}
-
-fn parse_decimal(value: &DecimalString, label: &str) -> QuantResult<Decimal> {
-    value
-        .value
-        .trim()
-        .parse::<Decimal>()
-        .map_err(|error| QuantError::config(format!("invalid normalization {label}: {error}")))
+fn resolve_param(over: Option<&DecimalValue>, default: &DecimalValue) -> Decimal {
+    over.unwrap_or(default).value
 }
 
 #[cfg(test)]

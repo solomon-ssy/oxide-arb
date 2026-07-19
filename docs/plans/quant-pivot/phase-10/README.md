@@ -1,5 +1,13 @@
 # Phase 10 — Frontend Refactor 子phase索引
 
+<!-- quant-pivot-lifecycle-contract:v1 -->
+> **Lifecycle contract**
+> - `lifecycle_assumption`: 项目尚未正式生产上线，当前状态为 `pre_production_resettable`，系统自有基线统一为 `boot` / schema version `1`。
+> - `schema_data_version_impact`: 本文中的历史版本号与递增路径不再具有实施效力；当前实现不迁移测试数据、旧结构或旧版本。
+> - `pre_production_behavior`: 允许 clean-break、migration squash 与全新基础设施 bootstrap，但任何数据销毁仍需操作者单独授权。
+> - `production_frozen_behavior`: 一旦完成不可逆 production seal，后续变更必须提供前向 migration、兼容性评估、回滚方案与数据验证。
+> - `rollback_and_data_verification`: 封存前通过清空后的 fresh-install 验证；封存后不得回退到 boot reset。
+
 > 状态：10.0 契约冻结（含后端破坏式对齐）已完成；**10.1 types/API/WS/store 地基**、**10.2 导航/首屏/markets/account**、**10.3 Report Plane**、**10.4 Execution Plane**、**10.5 Research Catalog & Realtime**、**10.7 Deploy Config & Runtime Config**（单入口 `/runtime-config` 页：schema 编辑器迁出 preferences、UiText locale-map、`when` 联动、widget/semantics 分离 governance-critical、deploy 只读快照）已落地并通过质量门禁（前端 typecheck/build/unit/eslint 全绿；后端 fmt/clippy/boundary/errors/architecture + models/repository/web/core 单测全绿）；10.6 hardening、10.8 admin 为设计计划，未进入代码落地。
 >
 > 父文档（概念规格）：[`../10-frontend-refactor.md`](../10-frontend-refactor.md)、

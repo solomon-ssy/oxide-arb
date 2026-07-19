@@ -32,8 +32,8 @@ use quant_pivot_models::{
     hashing::CanonicalDigest,
     runtime_config::PortfolioConfig,
     types::{
-        BacktestReportId, Bps, ContentHash, MarketId, ModelComparisonReportId, ModelRunId,
-        ModelVersionId, RuntimeConfigVersionId, TokenId, TrainingDatasetId, Usd,
+        BacktestReportId, Bps, ContentHash, DecisionPolicySnapshotId, MarketId,
+        ModelComparisonReportId, ModelRunId, ModelVersionId, TokenId, TrainingDatasetId, Usd,
     },
 };
 use quant_pivot_repository::traits::{
@@ -89,8 +89,8 @@ pub struct BacktestInput {
     pub model_version_id: ModelVersionId,
     /// Frozen dataset whose schedule + settlement truth the replay uses.
     pub training_dataset_id: TrainingDatasetId,
-    /// Runtime-config version (provenance + portfolio caps).
-    pub runtime_config_version_id: RuntimeConfigVersionId,
+    /// Frozen decision-policy snapshot (provenance + portfolio caps).
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     /// Whether to fit a calibrated return curve and register a child candidate.
     pub calibrate: bool,
     /// Pre-assigned candidate report id (async job engine); minted when absent.
@@ -162,7 +162,7 @@ impl BacktestService {
         let baseline_input = BacktestInput {
             model_version_id: baseline_version_id,
             training_dataset_id: input.training_dataset_id.clone(),
-            runtime_config_version_id: input.runtime_config_version_id.clone(),
+            decision_policy_snapshot_id: input.decision_policy_snapshot_id.clone(),
             calibrate: false,
             backtest_report_id: None,
         };
@@ -366,7 +366,7 @@ impl BacktestService {
         let request = BacktestRequest {
             backtest_report_id: backtest_report_id.clone(),
             model_version_id: version.model_version_id.clone(),
-            runtime_config_version_id: input.runtime_config_version_id.clone(),
+            decision_policy_snapshot_id: input.decision_policy_snapshot_id.clone(),
             window_start: dataset.window_start,
             window_end: dataset.window_end,
         };
@@ -422,7 +422,7 @@ impl BacktestService {
                 backtest_report_id: report.backtest_report_id.clone(),
                 model_version_id: report.model_version_id.clone(),
                 model_run_id: model_run_id.clone(),
-                runtime_config_version_id: report.runtime_config_version_id.clone(),
+                decision_policy_snapshot_id: report.decision_policy_snapshot_id.clone(),
                 window_start: report.window_start,
                 window_end: report.window_end,
                 coverage: report.coverage,
@@ -508,6 +508,7 @@ impl BacktestService {
                 model_spec_id: version.model_spec_id.clone(),
                 version: next,
                 artifact_hash,
+                category_scope: calibrated.category_scope(),
                 profile_ref: version.profile_ref.clone(),
                 training_dataset_id: Some(dataset.training_dataset_id.clone()),
                 trade_policy_artifact_id: calibrated.header().trade_policy_artifact_id.clone(),
@@ -565,7 +566,7 @@ impl BacktestService {
                 model_run_id: model_run_id.clone(),
                 run_kind: ModelRunKind::Backtest,
                 model_version_id: Some(input.model_version_id.clone()),
-                runtime_config_version_id: input.runtime_config_version_id.clone(),
+                decision_policy_snapshot_id: input.decision_policy_snapshot_id.clone(),
                 market_selection_id: None,
                 window_start: dataset.window_start,
                 window_end: dataset.window_end,

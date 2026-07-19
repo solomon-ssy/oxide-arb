@@ -13,6 +13,7 @@ use crate::{
     fact_sink::DiscardFactWriter,
     factor_governance::publish_all_factor_definitions,
     pit::InMemoryDecisionSnapshotSource,
+    policy_fixtures::bootstrap_policy_bundle,
     report_fixtures,
     report_lifecycle_seed::{persist_and_publish_report, persist_prepared_report},
     trade_tape_fixtures::live_trade_tape_block_cursor_repo,
@@ -63,9 +64,8 @@ use quant_pivot_models::{
         NewBasisAlert, NewEntryConditionInstance, NewEquitySnapshot, NewFeatureParityState,
         NewMarketLinkage, NewMarketSelection, NewModelRun, NewModelSpec, NewModelVersion,
         NewOperationLog, NewPortfolioPlan, NewRecommendation, NewRecommendationReport,
-        NewReportDataQualitySnapshot, NewReportTransaction, NewRuntimeConfigActivation,
-        NewRuntimeConfigVersion, Paginated, RecommendationInfo, RecommendationReportInfo,
-        ReportRunClaimConfig,
+        NewReportDataQualitySnapshot, NewReportTransaction, Paginated, RecommendationInfo,
+        RecommendationReportInfo, ReportRunClaimConfig,
         governance::lifecycle::OperationalPhase,
         market::{EventRegistryInfo, MarketRegistryInfo, TokenInfo, book::BookLevel},
     },
@@ -83,24 +83,21 @@ use quant_pivot_models::{
             PublicationStatus, RecommendationReportStatus, ReportKind,
         },
         rbac::ResourceType,
-        runtime_config::{RuntimeConfigActivationKind, RuntimeConfigVersionSource},
     },
-    hashing::CanonicalDigest,
     runtime_config::{
-        DecimalString, DomainConfig, FactorCrossSectionConfig, FactorsConfig, FeaturesConfig,
-        ModelConfig, ModelVersionRef, PortfolioBudget, PortfolioConfig, PortfolioConstraints,
-        RUNTIME_CONFIG_SCHEMA_VERSION, ReportsConfig, RuntimeConfig, SelectionConfig,
+        DecimalValue, DecisionPolicySnapshot, DomainConfig, FactorCrossSectionConfig,
+        FactorsConfig, FeaturesConfig, ModelConfig, ModelVersionRef, PortfolioBudget,
+        PortfolioConfig, PortfolioConstraints, ReportsConfig, SelectionConfig,
     },
     types::{
-        AccountPositions, BasisAlertId, ConditionTruth, ContentHash, DomainInstrumentKey,
-        EntryConditionFoldState, EntryConditionInstanceId, EntryConditionPlan, EventId,
-        ExposureBreakdown, FeatureParityStateId, MarketId, MarketLinkageId, MarketSelectionId,
-        ModelInputContract, ModelRunId, ModelSpecId, ModelTrainingContract, ModelVersionId,
-        OperationLogId, PortfolioConstraintsSnapshot, PortfolioOptimizerMeta,
+        AccountPositions, BasisAlertId, ConditionTruth, ContentHash, DecisionPolicySnapshotId,
+        DomainInstrumentKey, EntryConditionFoldState, EntryConditionInstanceId, EntryConditionPlan,
+        EventId, ExposureBreakdown, FeatureParityStateId, MarketId, MarketLinkageId,
+        MarketSelectionId, ModelInputContract, ModelRunId, ModelSpecId, ModelTrainingContract,
+        ModelVersionId, OperationLogId, PortfolioConstraintsSnapshot, PortfolioOptimizerMeta,
         PortfolioRejectedSummary, PortfolioRiskBudget, Price, RecommendationId,
         RecommendationReportId, RecommendationTradePlan, ReportDataQualityTokens,
-        ResearchProfileRef, RuntimeConfigActivationId, RuntimeConfigVersionId, SchemaVersion,
-        SelectionExclusionSummary, Shares, TokenId, Usd,
+        ResearchProfileRef, SchemaVersion, SelectionExclusionSummary, Shares, TokenId, Usd,
     },
 };
 use quant_pivot_repository::{
@@ -108,17 +105,17 @@ use quant_pivot_repository::{
         PgCalibrationArtifactRepository, PgEquitySnapshotRepository, PgEventRepository,
         PgFactorRepository, PgFeatureParityRepository, PgFeatureRepository, PgMarketRepository,
         PgMarketSelectionRepository, PgModelRegistryRepository, PgModelRunRepository,
-        PgPositionRepository, PgRecommendationReportRepository, PgRecommendationRepository,
-        PgReportRunRepository, PgReservedCapitalRepository, PgRuntimeConfigVersionRepository,
+        PgPolicyRepository, PgPositionRepository, PgRecommendationReportRepository,
+        PgRecommendationRepository, PgReportRunRepository, PgReservedCapitalRepository,
         PgShadowComparisonRepository, PgTradePolicyRepository,
     },
     traits::{
         BasisAlertRepository, CalibrationArtifactRepository, EquitySnapshotRepository,
         EventRepository, FactorRepository, FeatureParityRepository, MarketLinkageRepository,
         MarketRepository, MarketSelectionRepository, ModelRegistryRepository, ModelRunRepository,
-        PositionRepository, QuantFactReadRepository, RecommendationReportRepository,
-        RecommendationRepository, ReportRunRepository, ReservedCapitalRepository,
-        RuntimeConfigVersionRepository, TradePolicyRepository,
+        PolicyRepository, PositionRepository, QuantFactReadRepository,
+        RecommendationReportRepository, RecommendationRepository, ReportRunRepository,
+        ReservedCapitalRepository, TradePolicyRepository,
     },
 };
 use quant_pivot_research::{
@@ -224,7 +221,7 @@ pub struct ReportPipelineHarness {
     pub report_repo: Arc<PgRecommendationReportRepository>,
     pub report_run_repo: Arc<PgReportRunRepository>,
     pub recommendation_repo: Arc<PgRecommendationRepository>,
-    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub model_version_id: ModelVersionId,
 }
 
@@ -253,7 +250,7 @@ impl ReportPipelineHarness {
                 120,
                 300,
                 ReportRunClaimConfig {
-                    runtime_config_version_id: self.runtime_config_version_id.clone(),
+                    decision_policy_snapshot_id: self.decision_policy_snapshot_id.clone(),
                     ad_hoc_default_top_n: 20,
                     ad_hoc_default_knowledge_lag_secs: 10,
                     schedules: Vec::<ClaimReportSchedule>::new(),
@@ -609,11 +606,10 @@ impl ReportPipelineHarness {
             &factors,
             &features,
         );
-        let runtime_config_repo = Arc::new(PgRuntimeConfigVersionRepository::new(db.clone()))
-            as Arc<dyn RuntimeConfigVersionRepository>;
-        let runtime_config_version_id =
-            bootstrap_runtime_config_activation(runtime_config_repo.as_ref(), &runtime_config)
-                .await;
+        let runtime_config_repo =
+            Arc::new(PgPolicyRepository::new(db.clone())) as Arc<dyn PolicyRepository>;
+        let decision_policy_snapshot_id =
+            bootstrap_policy_activation(runtime_config_repo.as_ref(), &runtime_config).await;
         publish_weighted_model(&WeightedModelFixture {
             db,
             store: &store,
@@ -621,7 +617,7 @@ impl ReportPipelineHarness {
             features: &features,
             domain: &domain,
             model_version_id: &model_version_id,
-            runtime_config_version_id: &runtime_config_version_id,
+            decision_policy_snapshot_id: &decision_policy_snapshot_id,
             bind_trade_policy: options.bind_trade_policy,
         })
         .await;
@@ -653,49 +649,24 @@ impl ReportPipelineHarness {
             report_repo: Arc::new(PgRecommendationReportRepository::new(db.clone())),
             report_run_repo: Arc::new(PgReportRunRepository::new(db.clone())),
             recommendation_repo: Arc::new(PgRecommendationRepository::new(db.clone())),
-            runtime_config_version_id: version.runtime_config_version_id,
+            decision_policy_snapshot_id: version.decision_policy_snapshot_id,
             model_version_id,
         }
     }
 }
 
 /// Activate a runtime config version when the store is empty.
-pub async fn bootstrap_runtime_config_activation(
-    repo: &dyn RuntimeConfigVersionRepository,
-    config: &RuntimeConfig,
-) -> RuntimeConfigVersionId {
-    if let Some(activation) = repo.load_current_activation().await.expect("activation") {
-        return activation.runtime_config_version_id;
-    }
-    let config_json = config.to_json();
-    let config_hash = CanonicalDigest::content_hash_json(&config_json).expect("hash");
-    let version = repo
-        .create_version(NewRuntimeConfigVersion {
-            runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
-            config_hash,
-            schema_version: RUNTIME_CONFIG_SCHEMA_VERSION,
-            config_json,
-            source: RuntimeConfigVersionSource::Bootstrap,
-            created_by: "report-pipeline-it".to_owned(),
-            reason: "report pipeline integration test bootstrap".to_owned(),
-        })
-        .await
-        .expect("runtime config version");
-    let runtime_config_version_id = version.runtime_config_version_id.clone();
-    repo.activate_version(NewRuntimeConfigActivation {
-        runtime_config_activation_id: RuntimeConfigActivationId::from_v7(),
-        runtime_config_version_id: version.runtime_config_version_id,
-        runtime_config_approval_id: None,
-        activated_by: "report-pipeline-it".to_owned(),
-        reason: "report pipeline integration test bootstrap".to_owned(),
-        activation_kind: RuntimeConfigActivationKind::Initial,
-        previous_runtime_config_version_id: None,
-        rollback_target_version_id: None,
-        audit_event_id: None,
-    })
+pub async fn bootstrap_policy_activation(
+    repo: &dyn PolicyRepository,
+    config: &DecisionPolicySnapshot,
+) -> DecisionPolicySnapshotId {
+    bootstrap_policy_bundle(
+        repo,
+        config,
+        "report-pipeline-it",
+        "report pipeline integration test bootstrap",
+    )
     .await
-    .expect("runtime config activation");
-    runtime_config_version_id
 }
 
 /// Persist a pre-built report transaction via the production repository.
@@ -710,7 +681,7 @@ pub async fn seed_published_report(
 /// Context for seeding fixture reports against a bootstrapped harness database.
 #[derive(Debug, Clone)]
 pub struct FixtureReportSeedContext {
-    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub model_version_id: ModelVersionId,
 }
 
@@ -759,14 +730,14 @@ async fn seed_fixture_report(
 ) -> RecommendationReportInfo {
     seed_fixture_market_catalog(db).await;
     let market_selection_id =
-        seed_minimal_market_selection(db, &ctx.runtime_config_version_id).await;
+        seed_minimal_market_selection(db, &ctx.decision_policy_snapshot_id).await;
 
     let mut report = report_fixtures::report(
         report_id.clone(),
         ReportKind::TopN,
         RecommendationReportStatus::Published,
     );
-    report.runtime_config_version_id = ctx.runtime_config_version_id.clone();
+    report.decision_policy_snapshot_id = ctx.decision_policy_snapshot_id.clone();
     report.model_version_id = ctx.model_version_id.clone();
     report.market_selection_id = market_selection_id.clone();
     let model_run_id =
@@ -796,7 +767,7 @@ async fn seed_fixture_report(
     for rec in &mut recommendations {
         rec.profile_ref = profile_ref.clone();
         rec.event_id = EventId::new(FIXTURE_EVENT);
-        rec.evidence_refs.runtime_config_version_id = ctx.runtime_config_version_id.clone();
+        rec.evidence_refs.decision_policy_snapshot_id = ctx.decision_policy_snapshot_id.clone();
         rec.evidence_refs.model_version_id = ctx.model_version_id.clone();
         rec.evidence_refs.model_run_id = model_run_id.clone();
         rec.evidence_refs.market_selection_id = market_selection_id.clone();
@@ -837,7 +808,7 @@ async fn seed_fixture_model_run(
             model_run_id: model_run_id.clone(),
             run_kind: ModelRunKind::LiveInference,
             model_version_id: Some(ctx.model_version_id.clone()),
-            runtime_config_version_id: ctx.runtime_config_version_id.clone(),
+            decision_policy_snapshot_id: ctx.decision_policy_snapshot_id.clone(),
             market_selection_id: Some(market_selection_id.clone()),
             window_start: decision_at,
             window_end: decision_at,
@@ -885,7 +856,7 @@ async fn seed_fixture_market_catalog(db: &DatabaseConnection) {
 
 async fn seed_minimal_market_selection(
     db: &DatabaseConnection,
-    runtime_config_version_id: &RuntimeConfigVersionId,
+    decision_policy_snapshot_id: &DecisionPolicySnapshotId,
 ) -> MarketSelectionId {
     let market_selection_id = MarketSelectionId::from_v7();
     PgMarketSelectionRepository::new(db.clone())
@@ -893,7 +864,7 @@ async fn seed_minimal_market_selection(
             NewMarketSelection {
                 market_selection_id: market_selection_id.clone(),
                 decision_at: Utc::now(),
-                runtime_config_version_id: runtime_config_version_id.clone(),
+                decision_policy_snapshot_id: decision_policy_snapshot_id.clone(),
                 selector_hash: ContentHash::parse(format!("blake3:{}", "b".repeat(64)))
                     .expect("selector hash"),
                 market_count: 2,
@@ -1025,7 +996,7 @@ fn fixture_data_quality_snapshot(
     NewReportDataQualitySnapshot {
         report_data_quality_snapshot_id: report.data_quality_snapshot_ref.clone(),
         decision_at: report.decision_at,
-        runtime_config_version_id: report.runtime_config_version_id.clone(),
+        decision_policy_snapshot_id: report.decision_policy_snapshot_id.clone(),
         tokens_json: ReportDataQualityTokens(Vec::new()),
     }
 }
@@ -1054,7 +1025,7 @@ fn fixture_new_report(report: &RecommendationReportInfo) -> NewRecommendationRep
         decision_at: report.decision_at,
         horizon_secs: report.horizon_secs,
         runtime_mode: report.runtime_mode,
-        runtime_config_version_id: report.runtime_config_version_id.clone(),
+        decision_policy_snapshot_id: report.decision_policy_snapshot_id.clone(),
         model_run_id: report.model_run_id.clone(),
         model_version_id: report.model_version_id.clone(),
         market_selection_id: report.market_selection_id.clone(),
@@ -1181,7 +1152,7 @@ fn build_model_runner(
 
 struct ReportBuilderHarnessInput<'a> {
     db: &'a DatabaseConnection,
-    runtime_config_repo: Arc<dyn RuntimeConfigVersionRepository>,
+    runtime_config_repo: Arc<dyn PolicyRepository>,
     registry: &'a Arc<MarketRegistry>,
     book_store: &'a Arc<BookStore>,
     model_runner: Arc<ModelRunner>,
@@ -1248,7 +1219,7 @@ fn build_report_builder(input: ReportBuilderHarnessInput<'_>) -> Arc<DefaultRepo
 
 async fn build_lifecycle_service(
     db: &DatabaseConnection,
-    runtime_config_repo: Arc<dyn RuntimeConfigVersionRepository>,
+    runtime_config_repo: Arc<dyn PolicyRepository>,
     builder: Arc<DefaultReportBuilder>,
     artifact_store: Arc<dyn ArtifactStore>,
 ) -> ReportLifecycleService {
@@ -1487,41 +1458,38 @@ fn selection_config(preset: SelectionPreset) -> SelectionConfig {
 fn runtime_config_for_pipeline(
     model_version_id: &ModelVersionId,
     selection: SelectionConfig,
-    _factors: &FactorsConfig,
-    _features: &FeaturesConfig,
-) -> RuntimeConfig {
-    RuntimeConfig {
-        selection,
-        factors: factors_config(),
-        features: FeaturesConfig::default(),
-        model: ModelConfig {
-            active_model_version_id: Some(ModelVersionRef {
-                id: model_version_id.to_string(),
-            }),
-            min_model_confidence: DecimalString::new("0.00"),
-            candidate_score_floor: DecimalString::new("0.00"),
-            ..ModelConfig::default()
+    factors: &FactorsConfig,
+    features: &FeaturesConfig,
+) -> DecisionPolicySnapshot {
+    let mut config = DecisionPolicySnapshot::default();
+    config.recommendation.selection = selection;
+    config.profile_artifacts.scoring.definition = factors.clone();
+    config.profile_artifacts.features.definition = features.clone();
+    config.model_routing.model = ModelConfig {
+        active_model_version_id: Some(ModelVersionRef::new(model_version_id.clone())),
+        min_model_confidence: DecimalValue::new(rust_decimal_macros::dec!(0.00)),
+        candidate_score_floor: DecimalValue::new(rust_decimal_macros::dec!(0.00)),
+        ..ModelConfig::default()
+    };
+    config.execution_risk.portfolio = PortfolioConfig {
+        budget: PortfolioBudget {
+            total_budget_usd: DecimalValue::new(rust_decimal_macros::dec!(50000)),
+            min_recommendation_usd: DecimalValue::new(rust_decimal_macros::dec!(10)),
+            max_single_recommendation_usd: DecimalValue::new(rust_decimal_macros::dec!(5000)),
         },
-        portfolio: PortfolioConfig {
-            budget: PortfolioBudget {
-                total_budget_usd: DecimalString::new("50000"),
-                min_recommendation_usd: DecimalString::new("10"),
-                max_single_recommendation_usd: DecimalString::new("5000"),
-            },
-            constraints: PortfolioConstraints {
-                max_market_exposure_usd: DecimalString::new("10000"),
-                max_event_exposure_usd: DecimalString::new("10000"),
-                max_category_exposure_usd: DecimalString::new("20000"),
-                ..PortfolioConstraints::default()
-            },
-            ..PortfolioConfig::default()
+        constraints: PortfolioConstraints {
+            max_market_exposure_usd: DecimalValue::new(rust_decimal_macros::dec!(10000)),
+            max_event_exposure_usd: DecimalValue::new(rust_decimal_macros::dec!(10000)),
+            max_category_exposure_usd: DecimalValue::new(rust_decimal_macros::dec!(20000)),
+            ..PortfolioConstraints::default()
         },
-        reports: ReportsConfig {
-            ad_hoc_report_enabled: true,
-            ..ReportsConfig::default()
-        },
-        ..RuntimeConfig::default()
-    }
+        ..PortfolioConfig::default()
+    };
+    config.recommendation.reports = ReportsConfig {
+        ad_hoc_report_enabled: true,
+        ..ReportsConfig::default()
+    };
+    config
 }
 
 fn account_factory(
@@ -1554,7 +1522,7 @@ struct WeightedModelFixture<'a> {
     features: &'a FeaturesConfig,
     domain: &'a DomainConfig,
     model_version_id: &'a ModelVersionId,
-    runtime_config_version_id: &'a RuntimeConfigVersionId,
+    decision_policy_snapshot_id: &'a DecisionPolicySnapshotId,
     bind_trade_policy: bool,
 }
 
@@ -1579,7 +1547,7 @@ async fn publish_weighted_model(input: &WeightedModelFixture<'_>) {
         Some(
             seed_report_trade_policy_fixture(
                 input.db,
-                input.runtime_config_version_id,
+                input.decision_policy_snapshot_id,
                 MarketCategory::Sports,
             )
             .await,
@@ -1661,6 +1629,7 @@ async fn publish_weighted_model(input: &WeightedModelFixture<'_>) {
             model_spec_id,
             version: 1,
             artifact_hash,
+            category_scope: None,
             profile_ref: fixture_profile_ref(),
             training_dataset_id: None,
             trade_policy_artifact_id: trade_policy

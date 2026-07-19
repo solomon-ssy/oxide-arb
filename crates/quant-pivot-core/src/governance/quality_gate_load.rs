@@ -125,6 +125,7 @@ mod tests {
             model_family: ModelFamily::WeightedFactor,
             version: 1,
             artifact_hash: ContentHash::parse(format!("blake3:{}", "0".repeat(64))).expect("hash"),
+            category_scope: None,
             profile_ref: fixture_profile_ref(),
             training_dataset_id: None,
             trade_policy_artifact_id: None,

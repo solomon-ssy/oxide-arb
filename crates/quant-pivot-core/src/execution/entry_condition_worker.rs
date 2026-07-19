@@ -22,8 +22,7 @@ use quant_pivot_models::{
 };
 use quant_pivot_repository::traits::{
     EntryConditionRepository, FactorRepository, MarketLinkageRepository, MarketSelectionRepository,
-    ModelRegistryRepository, QuantFactReadRepository, RecommendationRepository,
-    RuntimeConfigVersionRepository,
+    ModelRegistryRepository, PolicyRepository, QuantFactReadRepository, RecommendationRepository,
 };
 use quant_pivot_storage::postgres::PostgresNotificationListener;
 use tokio_util::sync::CancellationToken;
@@ -34,7 +33,7 @@ use super::{
     EntryConditionStateDecision, ExecutablePriceInput, FactorSnapshotInput,
     WeatherDailyTemperatureInput, decide_entry_condition_state, evaluate_entry_condition,
 };
-use crate::{ingest::book_store::BookStore, runtime_config::RuntimeConfigStore};
+use crate::{ingest::book_store::BookStore, runtime_config::DecisionPolicyStore};
 
 /// Supplies exactly the persisted/in-memory PIT projections consumed by the evaluator.
 #[async_trait]
@@ -58,8 +57,8 @@ pub struct LiveEntryConditionInputProvider {
     linkages: Arc<dyn MarketLinkageRepository>,
     selections: Arc<dyn MarketSelectionRepository>,
     models: Arc<dyn ModelRegistryRepository>,
-    runtime_configs: Arc<dyn RuntimeConfigVersionRepository>,
-    runtime_config: Arc<RuntimeConfigStore>,
+    runtime_configs: Arc<dyn PolicyRepository>,
+    runtime_config: Arc<DecisionPolicyStore>,
 }
 
 /// Repository and runtime dependencies for the live condition input provider.
@@ -72,8 +71,8 @@ pub struct LiveEntryConditionInputDeps {
     pub linkages: Arc<dyn MarketLinkageRepository>,
     pub selections: Arc<dyn MarketSelectionRepository>,
     pub models: Arc<dyn ModelRegistryRepository>,
-    pub runtime_configs: Arc<dyn RuntimeConfigVersionRepository>,
-    pub runtime_config: Arc<RuntimeConfigStore>,
+    pub runtime_configs: Arc<dyn PolicyRepository>,
+    pub runtime_config: Arc<DecisionPolicyStore>,
 }
 
 impl LiveEntryConditionInputProvider {
@@ -143,14 +142,14 @@ impl LiveEntryConditionInputProvider {
                 || recommendation.outcome_side != expected.outcome_side
                 || recommendation.evidence_refs.market_selection_id != expected.catalog_snapshot_id
                 || recommendation.evidence_refs.model_version_id != expected.model_version_id
-                || recommendation.evidence_refs.runtime_config_version_id
-                    != expected.runtime_config_version_id
+                || recommendation.evidence_refs.decision_policy_snapshot_id
+                    != expected.decision_policy_snapshot_id
         }) {
             Some(ConditionUnavailableReason::BindingDrift)
         } else if selection.as_ref().is_none_or(|selection| {
             let snapshot_matches = selection.selector_hash == expected.catalog_snapshot_hash;
             let runtime_config_matches =
-                selection.runtime_config_version_id == expected.runtime_config_version_id;
+                selection.decision_policy_snapshot_id == expected.decision_policy_snapshot_id;
             !snapshot_matches || !runtime_config_matches
         }) {
             Some(ConditionUnavailableReason::CatalogSnapshotMismatch)
@@ -172,7 +171,7 @@ impl LiveEntryConditionInputProvider {
             .as_ref()
             .is_none_or(|model| model.publication_status != PublicationStatus::Published)
             || current_runtime_config.as_ref().is_none_or(|config| {
-                config.runtime_config_version_id != expected.runtime_config_version_id
+                config.decision_policy_snapshot_id != expected.decision_policy_snapshot_id
             })
             || !runtime_model_is_active(&self.runtime_config, &expected.model_version_id)
         {
@@ -200,7 +199,7 @@ impl LiveEntryConditionInputProvider {
             model.as_ref().map(|value| &value.artifact_hash),
             current_runtime_config
                 .as_ref()
-                .map(|value| &value.config_hash),
+                .map(|value| &value.snapshot_hash),
             factors
                 .iter()
                 .map(|value| (&value.factor_definition_id, &value.definition_hash))
@@ -473,16 +472,19 @@ struct ResolvedBinding {
     unavailable_reason: Option<ConditionUnavailableReason>,
 }
 
-fn runtime_model_is_active(runtime_config: &RuntimeConfigStore, expected: &ModelVersionId) -> bool {
+fn runtime_model_is_active(
+    runtime_config: &DecisionPolicyStore,
+    expected: &ModelVersionId,
+) -> bool {
     let config = runtime_config.load();
     config
+        .model_routing
         .model
         .active_model_version_id
         .as_ref()
         .into_iter()
-        .chain(config.model.category_model_pointers.values())
-        .filter_map(|reference| ModelVersionId::try_from(reference).ok())
-        .any(|model_version_id| &model_version_id == expected)
+        .chain(config.model_routing.model.category_model_pointers.values())
+        .any(|reference| &reference.id == expected)
 }
 
 #[derive(Default)]
@@ -571,7 +573,7 @@ pub struct EntryConditionWorker {
     conditions: Arc<dyn EntryConditionRepository>,
     inputs: Arc<dyn EntryConditionInputProvider>,
     books: Arc<BookStore>,
-    runtime_config: Arc<RuntimeConfigStore>,
+    runtime_config: Arc<DecisionPolicyStore>,
     events: CoreEventPublisher,
 }
 
@@ -581,7 +583,7 @@ impl EntryConditionWorker {
         conditions: Arc<dyn EntryConditionRepository>,
         inputs: Arc<dyn EntryConditionInputProvider>,
         books: Arc<BookStore>,
-        runtime_config: Arc<RuntimeConfigStore>,
+        runtime_config: Arc<DecisionPolicyStore>,
         events: CoreEventPublisher,
     ) -> Self {
         Self {
@@ -603,7 +605,7 @@ impl EntryConditionWorker {
             let policy = self
                 .runtime_config
                 .current()
-                .execution
+                .operational_control
                 .entry_condition
                 .clone();
             if let Err(error) = self.run_pass(Utc::now(), &policy).await {
@@ -688,7 +690,7 @@ impl EntryConditionWorker {
         let policy = self
             .runtime_config
             .current()
-            .execution
+            .operational_control
             .entry_condition
             .clone();
         let stop_renewal = CancellationToken::new();

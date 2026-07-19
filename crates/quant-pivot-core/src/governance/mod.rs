@@ -13,10 +13,10 @@ pub mod mode_transition;
 pub mod model_governance;
 pub mod model_spec;
 pub mod operational_phase;
+pub mod project_lifecycle;
 pub mod quality_gate_load;
 pub mod runtime_control;
 pub mod runtime_mode;
-pub mod runtime_model_pointers;
 pub mod system_status;
 pub mod weight_overlay;
 
@@ -41,8 +41,5 @@ pub use quality_gate_load::{
 };
 pub use runtime_control::QuantRuntimeControl;
 pub use runtime_mode::RuntimeModeHandle;
-pub use runtime_model_pointers::{
-    RuntimeModelPointerSync, prepare_production_active, sync_shadow_candidate,
-};
 pub use system_status::SystemStatusPublisher;
 pub use weight_overlay::{WeightOverlayApplicator, WeightOverlaySnapshot};

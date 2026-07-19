@@ -32,7 +32,7 @@ use quant_pivot_models::{
 use quant_pivot_repository::traits::{DomainSourceCursorRepository, FactWriter};
 use quant_pivot_research::linkage::rules;
 
-use crate::runtime_config::RuntimeConfigStore;
+use crate::runtime_config::DecisionPolicyStore;
 
 /// One `(source, instrument)` scan tick — observations to persist plus the
 /// cursor row to commit after `ClickHouse` acknowledges the batch.
@@ -76,7 +76,7 @@ pub struct CryptoKlineIngestor {
     binance_archive_sources: HashMap<DomainSourceId, Arc<BinanceKlineSource>>,
     cursor_repo: Arc<dyn DomainSourceCursorRepository>,
     writer: Arc<dyn FactWriter<DomainObservationRow>>,
-    runtime_config: Arc<RuntimeConfigStore>,
+    runtime_config: Arc<DecisionPolicyStore>,
     domain_sources: DomainSourcesConfig,
     instruments_by_source: HashMap<DomainSourceId, Vec<DomainInstrumentKey>>,
 }
@@ -88,7 +88,7 @@ impl CryptoKlineIngestor {
         binance_archive_sources: Vec<Arc<BinanceKlineSource>>,
         cursor_repo: Arc<dyn DomainSourceCursorRepository>,
         writer: Arc<dyn FactWriter<DomainObservationRow>>,
-        runtime_config: Arc<RuntimeConfigStore>,
+        runtime_config: Arc<DecisionPolicyStore>,
         domain_sources: DomainSourcesConfig,
     ) -> Self {
         Self {
@@ -108,17 +108,27 @@ impl CryptoKlineIngestor {
     /// One ingest tick across every enabled `(source, instrument)` stream.
     ///
     /// Each instrument is isolated (R10 ingest hardening): one symbol's fetch
-    /// failure records that instrument's cursor as [`DomainCursorStatus::Error`]
+    /// failure records that instrument's cursor as [`DomainCursorStatus::Failed`]
     /// with the failure detail and is skipped, but never aborts the whole
     /// tick — every other instrument still scans, and the batch still writes
     /// and commits for every instrument that succeeded.
     pub async fn run_once(&self) -> QuantResult<Vec<CryptoKlineBindingOutcome>> {
         let runtime = self.runtime_config.load();
-        if !runtime.domain.family_enabled(DomainFamily::Crypto) {
+        if !runtime
+            .profile_artifacts
+            .domain
+            .definition
+            .family_enabled(DomainFamily::Crypto)
+        {
             return Ok(Vec::new());
         }
 
-        let backfill_days = runtime.domain.crypto.backfill_days;
+        let backfill_days = runtime
+            .profile_artifacts
+            .domain
+            .definition
+            .crypto
+            .backfill_days;
         let now = Utc::now();
         let bootstrap_from = now - Duration::days(i64::from(backfill_days.max(1)));
         let batch_size = self.domain_sources.binance.batch_size.max(1);
@@ -415,7 +425,7 @@ impl CryptoKlineIngestor {
                 instrument_key: checkpoint.instrument_key,
                 checkpoint_json: checkpoint.checkpoint,
                 checkpoint_hash: checkpoint.checkpoint_hash,
-                status: checkpoint.status.as_str().to_owned(),
+                status: checkpoint.status,
                 // A checkpoint is only ever constructed on this tick's
                 // success path, so any error recorded on a prior failed tick
                 // is now resolved — clear it rather than let it linger.
@@ -450,16 +460,6 @@ impl CryptoKlineIngestor {
                 return;
             }
         };
-        if let Some(row) = existing.as_ref()
-            && DomainCursorStatus::parse(&row.status).is_none()
-        {
-            tracing::error!(
-                status = %row.status, %source_id, %instrument_key,
-                "domain-ingest cursor has an unknown persisted status; \
-                 refusing to overwrite the invalid state"
-            );
-            return;
-        }
         // A failed initial fetch has not observed any source event. Persist the
         // configured coverage floor, never `now`, so the retry cannot skip the
         // entire historical bootstrap window.
@@ -485,7 +485,7 @@ impl CryptoKlineIngestor {
                 instrument_key: instrument_key.clone(),
                 checkpoint_json,
                 checkpoint_hash,
-                status: DomainCursorStatus::Error.as_str().to_owned(),
+                status: DomainCursorStatus::Failed,
                 last_error: Some(error.to_string()),
                 updated_at: Utc::now(),
             })
@@ -635,18 +635,9 @@ fn resume_point(
         )
         .into());
     }
-    let status = DomainCursorStatus::parse(&row.status).ok_or_else(|| {
-        StorageError::invariant_violation(
-            Some(entity::QUANT_DOMAIN_SOURCE_CURSOR),
-            format!(
-                "cursor {}/{} has unknown status `{}`",
-                row.source_id, row.instrument_key, row.status
-            ),
-        )
-    })?;
-    Ok(match status {
+    Ok(match row.status {
         DomainCursorStatus::Bootstrap => (bootstrap_from, true, last_event_time),
-        DomainCursorStatus::Backfilling | DomainCursorStatus::Error => {
+        DomainCursorStatus::Backfilling | DomainCursorStatus::Failed => {
             (last_event_time, true, last_event_time)
         }
         DomainCursorStatus::Live => (last_event_time, false, last_event_time),
@@ -756,7 +747,7 @@ mod tests {
             checkpoint_json: DomainSourceCheckpoint::BinanceKline { close_time: last },
             checkpoint_hash: ContentHash::parse(format!("blake3:{}", "a".repeat(64)))
                 .expect("checkpoint hash"),
-            status: status.as_str().to_owned(),
+            status,
             last_error: None,
             created_at: last,
             updated_at: last,
@@ -786,7 +777,7 @@ mod tests {
     fn resume_point_keeps_backfilling_and_error_cursors_in_bootstrap_mode() {
         let last = Utc.with_ymd_and_hms(2026, 7, 1, 10, 0, 0).unwrap();
         let now = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
-        for status in [DomainCursorStatus::Backfilling, DomainCursorStatus::Error] {
+        for status in [DomainCursorStatus::Backfilling, DomainCursorStatus::Failed] {
             let cursor = cursor(last, status);
             let (start, bootstrap, prior) = resume_point(Some(&cursor), last, now)
                 .expect("backfill/error cursor must resume conservatively");
@@ -797,15 +788,9 @@ mod tests {
     }
 
     #[test]
-    fn resume_point_rejects_unknown_status_and_future_checkpoint() {
+    fn resume_point_rejects_future_checkpoint() {
         let now = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
         let mut cursor = cursor(now, DomainCursorStatus::Live);
-        cursor.status = "legacy_unknown".to_owned();
-        let error = resume_point(Some(&cursor), now, now)
-            .expect_err("unknown persisted status must fail closed");
-        assert!(error.to_string().contains("unknown status"));
-
-        cursor.status = DomainCursorStatus::Live.as_str().to_owned();
         cursor.checkpoint_json = DomainSourceCheckpoint::BinanceKline {
             close_time: now + chrono::Duration::seconds(1),
         };
@@ -940,7 +925,7 @@ mod tests {
 #[cfg(test)]
 mod isolation_tests {
     use super::{CryptoKlineIngestor, discover_instruments};
-    use crate::runtime_config::RuntimeConfigStore;
+    use crate::runtime_config::DecisionPolicyStore;
     use async_trait::async_trait;
     use chrono::Utc;
     use quant_pivot_api::domain::{DomainDataSource, DomainFetchRequest};
@@ -952,7 +937,7 @@ mod isolation_tests {
             DomainCursorStatus, DomainObservation, DomainSourceCursorInfo, UpsertDomainSourceCursor,
         },
         enums::domain::{DomainFamily, DomainMetric},
-        runtime_config::RuntimeConfig,
+        runtime_config::DecisionPolicySnapshot,
         types::{DomainInstrumentKey, DomainSourceId},
     };
     use quant_pivot_repository::traits::{DomainSourceCursorRepository, FactWriter};
@@ -1091,7 +1076,7 @@ mod isolation_tests {
             Vec::new(),
             Arc::clone(&cursor_repo) as Arc<dyn DomainSourceCursorRepository>,
             Arc::clone(&writer) as Arc<dyn FactWriter<DomainObservationRow>>,
-            Arc::new(RuntimeConfigStore::new(RuntimeConfig::default())),
+            Arc::new(DecisionPolicyStore::new(DecisionPolicySnapshot::default())),
             domain_sources,
         );
         let instrument = DomainInstrumentKey::new("BINANCE:BTCUSDT:1m");
@@ -1176,7 +1161,7 @@ mod isolation_tests {
         });
         let cursor_repo = Arc::new(FakeCursorRepo::default());
         let writer = Arc::new(FakeWriter::default());
-        let runtime_config = Arc::new(RuntimeConfigStore::new(RuntimeConfig::default()));
+        let runtime_config = Arc::new(DecisionPolicyStore::new(DecisionPolicySnapshot::default()));
 
         let ingestor = CryptoKlineIngestor::new(
             vec![source],
@@ -1194,10 +1179,7 @@ mod isolation_tests {
             .await
             .expect("find")
             .expect("failed instrument gets a cursor row");
-        assert_eq!(
-            DomainCursorStatus::parse(&failed_cursor.status),
-            Some(DomainCursorStatus::Error)
-        );
+        assert_eq!(failed_cursor.status, DomainCursorStatus::Failed);
         assert!(
             failed_cursor
                 .last_error
@@ -1211,10 +1193,7 @@ mod isolation_tests {
             .await
             .expect("find")
             .expect("healthy instrument still commits a cursor");
-        assert_ne!(
-            DomainCursorStatus::parse(&healthy_cursor.status),
-            Some(DomainCursorStatus::Error)
-        );
+        assert_ne!(healthy_cursor.status, DomainCursorStatus::Failed);
         assert!(
             healthy_cursor.last_error.is_none(),
             "a successful instrument must not carry a stale error"

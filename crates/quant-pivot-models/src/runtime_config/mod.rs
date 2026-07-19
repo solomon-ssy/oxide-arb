@@ -1,20 +1,10 @@
-//! Versioned, hot-reloadable runtime configuration
-//! (`schema_version` — see [`RUNTIME_CONFIG_SCHEMA_VERSION`], currently `18`).
+//! Governed, hot-reloadable configuration resources.
 
-mod factor_names;
-pub mod json_schema;
-pub mod preferences_schema;
 pub mod schedule_preview;
 pub mod sections;
-mod ui;
 pub mod validation;
 pub mod wire;
 
-pub use json_schema::{
-    RuntimeConfigPatchError, apply_runtime_config_patch, build_schema_fields, schema_leaf_paths,
-    sensitive_leaf_paths,
-};
-pub use preferences_schema::{build_preferences_schema, preferences_schema_ui_gaps};
 pub use schedule_preview::{
     DueScheduleWindow, MAX_PREVIEW_OCCURRENCES, due_schedule_window, preview_fire_times,
     validate_schedule_cadence,
@@ -23,164 +13,707 @@ pub use sections::*;
 pub use validation::validate_runtime_config;
 pub use wire::*;
 
-use schemars::{JsonSchema, SchemaGenerator, generate::SchemaSettings};
+use chrono::{DateTime, Utc};
+use schemars::{JsonSchema, Schema, SchemaGenerator, generate::SchemaSettings};
+use sea_orm::FromJsonQueryResult;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use quant_pivot_error::{
     ConfigValidationError, ConfigValidationReport, QuantError, config::ConfigError,
+    hashing::CanonicalDigestError,
 };
 
-use crate::types::SchemaVersion;
+use crate::{
+    enums::runtime_config::{
+        CheckOutcome, ConfigResourceKind, LifecycleCheckKind, PolicyApplyBoundary, PolicyConsumer,
+        PolicyPreflightCheckKind, PolicyPreflightDetailCode, PolicyValidationCode,
+        PolicyValidationSeverity,
+    },
+    hashing::CanonicalDigest,
+    types::{ContentHash, PolicyRevisionId, SchemaVersion},
+};
 
-/// The current, only supported runtime-config schema version.
-///
-/// This is a **monotonic** version: every schema-changing phase bumps it by one
-/// and the greenfield database is reset (zero compatibility — no shim, no
-/// migration; non-matching documents are rejected). Version 18 adds only the
-/// operational controls for the durable feedback-cycle worker. Statistical
-/// methodology and publication thresholds remain frozen in immutable research
-/// profile artifacts, never in mutable runtime configuration.
-pub const RUNTIME_CONFIG_SCHEMA_VERSION: SchemaVersion = SchemaVersion::new(18);
+/// Boot schema shared by the six independent governed policy resources.
+pub const POLICY_RESOURCE_SCHEMA_VERSION: SchemaVersion = SchemaVersion::FIRST;
 
-/// Root of the quant-pivot hot-reloadable runtime configuration document.
+/// Market-selection, data-quality, and recommendation payload semantics.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
-pub struct RuntimeConfig {
-    /// Document schema version; must equal [`RUNTIME_CONFIG_SCHEMA_VERSION`].
+pub struct RecommendationPolicy {
     #[schemars(extend("x-format" = "integer", "x-ui-visible" = false))]
     pub schema_version: SchemaVersion,
-    /// Market selection selection policy for reports and model runs.
     pub selection: SelectionConfig,
-    /// Data-quality gates used before feature/model/report generation.
     pub data_quality: DataQualityConfig,
-    /// Feature schema and enabled feature families.
-    pub features: FeaturesConfig,
-    /// Factor selection and weighted-scorer configuration.
-    pub factors: FactorsConfig,
-    /// External-vertical domain plane (category-routed; Phase 11.2.2).
-    pub domain: DomainConfig,
-    /// Active and shadow model references.
-    pub model: ModelConfig,
-    /// Governed quality-gate thresholds (model publication / dataset promotion).
-    pub quality_gate: QualityGateConfig,
-    /// Offline training-dataset build parameters.
-    pub training: TrainingConfig,
-    /// Report schedules and payload sizing.
     pub reports: ReportsConfig,
-    /// Portfolio budget and exposure constraints.
-    pub portfolio: PortfolioConfig,
-    /// Optional execution policy rooted in recommendations.
-    pub execution: ExecutionConfig,
-    /// Operator notification channels.
-    pub notification: NotificationConfig,
-    /// Research plane: training objective + validation methodology.
-    pub research: ResearchConfig,
-    /// Operational controls for durable feedback and retraining cycles.
-    pub feedback: FeedbackConfig,
 }
 
-impl Default for RuntimeConfig {
+impl Default for RecommendationPolicy {
     fn default() -> Self {
         Self {
-            schema_version: RUNTIME_CONFIG_SCHEMA_VERSION,
+            schema_version: POLICY_RESOURCE_SCHEMA_VERSION,
             selection: SelectionConfig::default(),
             data_quality: DataQualityConfig::default(),
-            features: FeaturesConfig::default(),
-            factors: FactorsConfig::default(),
-            domain: DomainConfig::default(),
-            model: ModelConfig::default(),
-            quality_gate: QualityGateConfig::default(),
-            training: TrainingConfig::default(),
             reports: ReportsConfig::default(),
-            portfolio: PortfolioConfig::default(),
-            execution: ExecutionConfig::default(),
-            notification: NotificationConfig::default(),
-            research: ResearchConfig::default(),
-            feedback: FeedbackConfig::default(),
         }
     }
 }
 
-/// Runtime-config parse / encode failures.
-#[derive(Debug, Error)]
-pub enum RuntimeConfigError {
-    /// The document failed to deserialize into [`RuntimeConfig`].
-    #[error("runtime config parse failed: {0}")]
-    Parse(#[from] serde_json::Error),
-    /// The document declares an unsupported schema version.
-    #[error(
-        "unsupported runtime config schema_version {found} (expected {RUNTIME_CONFIG_SCHEMA_VERSION})"
-    )]
-    UnsupportedSchemaVersion { found: SchemaVersion },
+/// Capital, sizing, order, exit, reconciliation, and breaker policy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct ExecutionRiskPolicy {
+    #[schemars(extend("x-format" = "integer", "x-ui-visible" = false))]
+    pub schema_version: SchemaVersion,
+    pub portfolio: PortfolioConfig,
+    pub entry_order_policy: EntryOrderPolicy,
+    pub exit_monitor: ExitMonitorPolicy,
+    pub capital: CapitalPolicy,
+    pub reconciliation: ReconciliationPolicy,
+    pub settlement_redeem: SettlementRedeemPolicy,
+    pub breaker: ExecutionBreakerConfig,
 }
 
-impl From<RuntimeConfigError> for ConfigError {
-    fn from(error: RuntimeConfigError) -> Self {
-        match error {
-            RuntimeConfigError::Parse(err) => ConfigValidationReport::single_error(
-                ConfigValidationError::invalid_value("runtime_config", err.to_string()),
-            )
-            .into(),
-            RuntimeConfigError::UnsupportedSchemaVersion { found } => {
-                ConfigValidationReport::single_error(ConfigValidationError::invalid_value(
-                    "schema_version",
-                    format!(
-                        "unsupported runtime config schema_version {} (expected {})",
-                        found.get(),
-                        RUNTIME_CONFIG_SCHEMA_VERSION.get()
-                    ),
-                ))
-                .into()
+impl Default for ExecutionRiskPolicy {
+    fn default() -> Self {
+        Self {
+            schema_version: POLICY_RESOURCE_SCHEMA_VERSION,
+            portfolio: PortfolioConfig::default(),
+            entry_order_policy: EntryOrderPolicy::default(),
+            exit_monitor: ExitMonitorPolicy::default(),
+            capital: CapitalPolicy::default(),
+            reconciliation: ReconciliationPolicy::default(),
+            settlement_redeem: SettlementRedeemPolicy::default(),
+            breaker: ExecutionBreakerConfig::default(),
+        }
+    }
+}
+
+/// Active, shadow, and exit artifact routing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct ModelRouting {
+    #[schemars(extend("x-format" = "integer", "x-ui-visible" = false))]
+    pub schema_version: SchemaVersion,
+    pub model: ModelConfig,
+}
+
+impl Default for ModelRouting {
+    fn default() -> Self {
+        Self {
+            schema_version: POLICY_RESOURCE_SCHEMA_VERSION,
+            model: ModelConfig::default(),
+        }
+    }
+}
+
+/// Durable report schedule resource, isolated from report decision semantics.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct ReportSchedule {
+    #[schemars(extend("x-format" = "integer", "x-ui-visible" = false))]
+    pub schema_version: SchemaVersion,
+    pub schedules: Vec<ReportScheduleConfig>,
+}
+
+impl Default for ReportSchedule {
+    fn default() -> Self {
+        Self {
+            schema_version: POLICY_RESOURCE_SCHEMA_VERSION,
+            schedules: vec![ReportScheduleConfig::default()],
+        }
+    }
+}
+
+/// Immediate operational admission controls and notification routing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct OperationalControl {
+    #[schemars(extend("x-format" = "integer", "x-ui-visible" = false))]
+    pub schema_version: SchemaVersion,
+    pub entry_condition: EntryConditionWorkerConfig,
+    pub kill_switch: KillSwitchPolicy,
+    pub attribution: AttributionPolicy,
+    pub notifications: NotificationPolicies,
+}
+
+impl Default for OperationalControl {
+    fn default() -> Self {
+        Self {
+            schema_version: POLICY_RESOURCE_SCHEMA_VERSION,
+            entry_condition: EntryConditionWorkerConfig::default(),
+            kill_switch: KillSwitchPolicy::default(),
+            attribution: AttributionPolicy::default(),
+            notifications: NotificationPolicies::default(),
+        }
+    }
+}
+
+/// Explicit authorization for semi-automatic and automatic execution.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct ExecutionAuthorization {
+    #[schemars(extend("x-format" = "integer", "x-ui-visible" = false))]
+    pub schema_version: SchemaVersion,
+    pub semi_auto: SemiAutoConfig,
+    pub auto_execution: AutoExecutionConfig,
+}
+
+impl Default for ExecutionAuthorization {
+    fn default() -> Self {
+        Self {
+            schema_version: POLICY_RESOURCE_SCHEMA_VERSION,
+            semi_auto: SemiAutoConfig::default(),
+            auto_execution: AutoExecutionConfig::default(),
+        }
+    }
+}
+
+/// Closed set of documents accepted by the governed policy repository.
+///
+/// `PostgreSQL` stores this aggregate in `JSONB` because revisions are immutable
+/// documents and none of their leaf fields participate in database queries.
+/// `SeaORM` still reads and writes the column as this Rust enum, never as an
+/// untyped `serde_json::Value`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, FromJsonQueryResult)]
+#[serde(tag = "resource_kind", content = "document", rename_all = "snake_case")]
+pub enum PolicyDocument {
+    RecommendationPolicy(RecommendationPolicy),
+    ExecutionRiskPolicy(Box<ExecutionRiskPolicy>),
+    ModelRouting(ModelRouting),
+    ReportSchedule(ReportSchedule),
+    OperationalControl(OperationalControl),
+    ExecutionAuthorization(ExecutionAuthorization),
+}
+
+impl PolicyDocument {
+    #[must_use]
+    pub const fn kind(&self) -> ConfigResourceKind {
+        match self {
+            Self::RecommendationPolicy(_) => ConfigResourceKind::RecommendationPolicy,
+            Self::ExecutionRiskPolicy(_) => ConfigResourceKind::ExecutionRiskPolicy,
+            Self::ModelRouting(_) => ConfigResourceKind::ModelRouting,
+            Self::ReportSchedule(_) => ConfigResourceKind::ReportSchedule,
+            Self::OperationalControl(_) => ConfigResourceKind::OperationalControl,
+            Self::ExecutionAuthorization(_) => ConfigResourceKind::ExecutionAuthorization,
+        }
+    }
+
+    #[must_use]
+    pub const fn schema_version(&self) -> SchemaVersion {
+        match self {
+            Self::RecommendationPolicy(policy) => policy.schema_version,
+            Self::ExecutionRiskPolicy(policy) => policy.schema_version,
+            Self::ModelRouting(policy) => policy.schema_version,
+            Self::ReportSchedule(policy) => policy.schema_version,
+            Self::OperationalControl(policy) => policy.schema_version,
+            Self::ExecutionAuthorization(policy) => policy.schema_version,
+        }
+    }
+}
+
+/// One stable, machine-readable validation diagnostic.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PolicyValidationIssue {
+    pub severity: PolicyValidationSeverity,
+    pub code: PolicyValidationCode,
+    /// Canonical field path. A path is data, not a categorical state, so a
+    /// validated string is the correct representation.
+    pub path: String,
+    pub message: String,
+}
+
+/// One dependency or consumer preflight result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PolicyPreflightResult {
+    pub check: PolicyPreflightCheckKind,
+    pub outcome: CheckOutcome,
+    pub detail_code: PolicyPreflightDetailCode,
+    /// Optional machine-produced diagnostic for a failed dependency. Stable
+    /// success and skip explanations are represented by `detail_code`.
+    pub failure_detail: Option<String>,
+}
+
+/// Typed validation evidence persisted with a validated policy revision.
+#[derive(
+    Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema, FromJsonQueryResult,
+)]
+#[serde(default, deny_unknown_fields)]
+pub struct PolicyValidationEvidence {
+    pub issues: Vec<PolicyValidationIssue>,
+    pub preflight: Vec<PolicyPreflightResult>,
+}
+
+impl PolicyValidationEvidence {
+    #[must_use]
+    pub fn is_valid(&self) -> bool {
+        !self
+            .issues
+            .iter()
+            .any(|issue| issue.severity == PolicyValidationSeverity::Error)
+            && self
+                .preflight
+                .iter()
+                .all(|check| check.outcome != CheckOutcome::Failed)
+    }
+}
+
+/// One typed item in the irreversible production-seal evidence bundle.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProductionSealCheck {
+    pub kind: LifecycleCheckKind,
+    pub outcome: CheckOutcome,
+    #[schemars(with = "String")]
+    pub checked_at: DateTime<Utc>,
+    pub detail: LifecycleCheckDetail,
+}
+
+/// Closed, strongly typed detail vocabulary for production-seal checks.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "detail_kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum LifecycleCheckDetail {
+    ContractMatched,
+    SchemaFingerprint {
+        #[schemars(with = "String", extend("x-format" = "content-hash"))]
+        fingerprint: ContentHash,
+    },
+    MigrationLedgersVerified,
+    PolicyBundle {
+        #[schemars(with = "String", extend("x-format" = "content-hash"))]
+        policy_bundle_hash: ContentHash,
+    },
+    ExternalEvidence {
+        #[schemars(with = "Option<String>", extend("x-format" = "content-hash"))]
+        evidence_hash: Option<ContentHash>,
+    },
+}
+
+/// Evidence persisted with the production baseline. The physical column is
+/// JSONB because this is an immutable aggregate, while `SeaORM` exposes the
+/// strongly typed structure end to end.
+#[derive(
+    Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema, FromJsonQueryResult,
+)]
+#[serde(default, deny_unknown_fields)]
+pub struct ProductionSealEvidence {
+    pub checks: Vec<ProductionSealCheck>,
+    #[schemars(with = "Option<String>", extend("x-format" = "content-hash"))]
+    pub backup_evidence_hash: Option<ContentHash>,
+    #[schemars(with = "Option<String>", extend("x-format" = "content-hash"))]
+    pub config_e2e_evidence_hash: Option<ContentHash>,
+}
+
+impl ConfigResourceKind {
+    #[must_use]
+    pub const fn apply_boundary(self) -> PolicyApplyBoundary {
+        match self {
+            Self::RecommendationPolicy => PolicyApplyBoundary::ReportRunClaim,
+            Self::ExecutionRiskPolicy => PolicyApplyBoundary::OrderIntentCreation,
+            Self::ModelRouting => PolicyApplyBoundary::ModelEvaluationClaim,
+            Self::ReportSchedule => PolicyApplyBoundary::FutureReportRunReconcile,
+            Self::OperationalControl => PolicyApplyBoundary::OperationalAdmission,
+            Self::ExecutionAuthorization => PolicyApplyBoundary::ExecutionAuthorizationAdmission,
+        }
+    }
+
+    #[must_use]
+    pub const fn consumers(self) -> &'static [PolicyConsumer] {
+        match self {
+            Self::RecommendationPolicy => &[
+                PolicyConsumer::MarketSelection,
+                PolicyConsumer::DataQualityGate,
+                PolicyConsumer::RecommendationComposer,
+                PolicyConsumer::ReportCoordinator,
+            ],
+            Self::ExecutionRiskPolicy => &[
+                PolicyConsumer::PortfolioOptimizer,
+                PolicyConsumer::OrderIntentService,
+                PolicyConsumer::ExecutionAdmission,
+                PolicyConsumer::ExitMonitor,
+            ],
+            Self::ModelRouting => &[PolicyConsumer::ModelRunner],
+            Self::ReportSchedule => &[PolicyConsumer::ReportScheduler],
+            Self::OperationalControl => &[
+                PolicyConsumer::WorkerAdmission,
+                PolicyConsumer::ExecutionAdmission,
+                PolicyConsumer::AlertDispatcher,
+            ],
+            Self::ExecutionAuthorization => &[
+                PolicyConsumer::RuntimeModeGate,
+                PolicyConsumer::ExecutionAdmission,
+            ],
+        }
+    }
+}
+
+/// Immutable feature-definition artifact. Its content hash is the artifact id.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct FeatureProfileArtifact {
+    pub schema_version: SchemaVersion,
+    pub definition: FeaturesConfig,
+}
+
+impl Default for FeatureProfileArtifact {
+    fn default() -> Self {
+        Self {
+            schema_version: SchemaVersion::FIRST,
+            definition: FeaturesConfig::default(),
+        }
+    }
+}
+
+/// Immutable factor/scoring methodology artifact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct ScoringProfileArtifact {
+    pub schema_version: SchemaVersion,
+    pub definition: FactorsConfig,
+}
+
+impl Default for ScoringProfileArtifact {
+    fn default() -> Self {
+        Self {
+            schema_version: SchemaVersion::FIRST,
+            definition: FactorsConfig::default(),
+        }
+    }
+}
+
+/// Immutable domain semantics artifact; provider endpoints are Deploy Config.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct DomainProfileArtifact {
+    pub schema_version: SchemaVersion,
+    pub definition: DomainConfig,
+}
+
+impl Default for DomainProfileArtifact {
+    fn default() -> Self {
+        Self {
+            schema_version: SchemaVersion::FIRST,
+            definition: DomainConfig::default(),
+        }
+    }
+}
+
+/// Immutable training, validation and promotion methodology artifact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct ResearchMethodProfileArtifact {
+    pub schema_version: SchemaVersion,
+    pub model_promotion: QualityGateConfig,
+    pub training: TrainingConfig,
+    pub research: ResearchConfig,
+}
+
+impl Default for ResearchMethodProfileArtifact {
+    fn default() -> Self {
+        Self {
+            schema_version: SchemaVersion::FIRST,
+            model_promotion: QualityGateConfig::default(),
+            training: TrainingConfig::default(),
+            research: ResearchConfig::default(),
+        }
+    }
+}
+
+/// Non-hot artifacts frozen into every decision snapshot and downstream run.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct ImmutableProfileArtifacts {
+    pub features: FeatureProfileArtifact,
+    pub scoring: ScoringProfileArtifact,
+    pub domain: DomainProfileArtifact,
+    pub research_method: ResearchMethodProfileArtifact,
+}
+
+impl ImmutableProfileArtifacts {
+    /// Content-address each artifact independently for lineage and evidence.
+    pub fn content_hashes(&self) -> Result<ImmutableProfileArtifactHashes, PolicySnapshotError> {
+        Ok(ImmutableProfileArtifactHashes {
+            feature_profile: CanonicalDigest::content_hash_json(&self.features)
+                .map_err(PolicySnapshotError::ArtifactHash)?,
+            scoring_profile: CanonicalDigest::content_hash_json(&self.scoring)
+                .map_err(PolicySnapshotError::ArtifactHash)?,
+            domain_profile: CanonicalDigest::content_hash_json(&self.domain)
+                .map_err(PolicySnapshotError::ArtifactHash)?,
+            research_method_profile: CanonicalDigest::content_hash_json(&self.research_method)
+                .map_err(PolicySnapshotError::ArtifactHash)?,
+        })
+    }
+
+    #[must_use]
+    pub fn uses_boot_schemas(&self) -> bool {
+        [
+            self.features.schema_version,
+            self.scoring.schema_version,
+            self.domain.schema_version,
+            self.research_method.schema_version,
+        ]
+        .into_iter()
+        .all(|version| version == SchemaVersion::FIRST)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ImmutableProfileArtifactHashes {
+    #[schemars(with = "String", extend("x-format" = "content-hash"))]
+    pub feature_profile: ContentHash,
+    #[schemars(with = "String", extend("x-format" = "content-hash"))]
+    pub scoring_profile: ContentHash,
+    #[schemars(with = "String", extend("x-format" = "content-hash"))]
+    pub domain_profile: ContentHash,
+    #[schemars(with = "String", extend("x-format" = "content-hash"))]
+    pub research_method_profile: ContentHash,
+}
+
+/// Revision identities frozen at a decision boundary.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct PolicyRevisionBundle {
+    #[schemars(with = "Option<String>")]
+    pub recommendation_policy: Option<PolicyRevisionId>,
+    #[schemars(with = "Option<String>")]
+    pub execution_risk_policy: Option<PolicyRevisionId>,
+    #[schemars(with = "Option<String>")]
+    pub model_routing: Option<PolicyRevisionId>,
+    #[schemars(with = "Option<String>")]
+    pub report_schedule: Option<PolicyRevisionId>,
+    #[schemars(with = "Option<String>")]
+    pub operational_control: Option<PolicyRevisionId>,
+    #[schemars(with = "Option<String>")]
+    pub execution_authorization: Option<PolicyRevisionId>,
+}
+
+/// Immutable aggregate read by decision pipelines. Each hot resource is still
+/// revised, approved, activated, and audited independently.
+#[derive(
+    Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema, FromJsonQueryResult,
+)]
+#[serde(default, deny_unknown_fields)]
+pub struct DecisionPolicySnapshot {
+    pub revisions: PolicyRevisionBundle,
+    pub recommendation: RecommendationPolicy,
+    pub execution_risk: ExecutionRiskPolicy,
+    pub model_routing: ModelRouting,
+    pub report_schedule: ReportSchedule,
+    pub operational_control: OperationalControl,
+    pub execution_authorization: ExecutionAuthorization,
+    pub profile_artifacts: ImmutableProfileArtifacts,
+}
+
+impl DecisionPolicySnapshot {
+    #[must_use]
+    pub fn uses_current_resource_schemas(&self) -> bool {
+        [
+            self.recommendation.schema_version,
+            self.execution_risk.schema_version,
+            self.model_routing.schema_version,
+            self.report_schedule.schema_version,
+            self.operational_control.schema_version,
+            self.execution_authorization.schema_version,
+        ]
+        .into_iter()
+        .all(|version| version == POLICY_RESOURCE_SCHEMA_VERSION)
+            && self.profile_artifacts.uses_boot_schemas()
+    }
+
+    #[must_use]
+    pub const fn resource_revision_id(
+        &self,
+        kind: ConfigResourceKind,
+    ) -> Option<&PolicyRevisionId> {
+        match kind {
+            ConfigResourceKind::RecommendationPolicy => {
+                self.revisions.recommendation_policy.as_ref()
+            }
+            ConfigResourceKind::ExecutionRiskPolicy => {
+                self.revisions.execution_risk_policy.as_ref()
+            }
+            ConfigResourceKind::ModelRouting => self.revisions.model_routing.as_ref(),
+            ConfigResourceKind::ReportSchedule => self.revisions.report_schedule.as_ref(),
+            ConfigResourceKind::OperationalControl => self.revisions.operational_control.as_ref(),
+            ConfigResourceKind::ExecutionAuthorization => {
+                self.revisions.execution_authorization.as_ref()
+            }
+        }
+    }
+
+    pub fn set_resource_revision_id(
+        &mut self,
+        kind: ConfigResourceKind,
+        revision_id: PolicyRevisionId,
+    ) {
+        let target = match kind {
+            ConfigResourceKind::RecommendationPolicy => &mut self.revisions.recommendation_policy,
+            ConfigResourceKind::ExecutionRiskPolicy => &mut self.revisions.execution_risk_policy,
+            ConfigResourceKind::ModelRouting => &mut self.revisions.model_routing,
+            ConfigResourceKind::ReportSchedule => &mut self.revisions.report_schedule,
+            ConfigResourceKind::OperationalControl => &mut self.revisions.operational_control,
+            ConfigResourceKind::ExecutionAuthorization => {
+                &mut self.revisions.execution_authorization
+            }
+        };
+        *target = Some(revision_id);
+    }
+
+    #[must_use]
+    pub fn resource_document(&self, kind: ConfigResourceKind) -> PolicyDocument {
+        match kind {
+            ConfigResourceKind::RecommendationPolicy => {
+                PolicyDocument::RecommendationPolicy(self.recommendation.clone())
+            }
+            ConfigResourceKind::ExecutionRiskPolicy => {
+                PolicyDocument::ExecutionRiskPolicy(Box::new(self.execution_risk.clone()))
+            }
+            ConfigResourceKind::ModelRouting => {
+                PolicyDocument::ModelRouting(self.model_routing.clone())
+            }
+            ConfigResourceKind::ReportSchedule => {
+                PolicyDocument::ReportSchedule(self.report_schedule.clone())
+            }
+            ConfigResourceKind::OperationalControl => {
+                PolicyDocument::OperationalControl(self.operational_control.clone())
+            }
+            ConfigResourceKind::ExecutionAuthorization => {
+                PolicyDocument::ExecutionAuthorization(self.execution_authorization.clone())
+            }
+        }
+    }
+
+    pub fn replace_resource_document(
+        &mut self,
+        kind: ConfigResourceKind,
+        document: PolicyDocument,
+    ) -> Result<(), PolicySnapshotError> {
+        if document.kind() != kind {
+            return Err(PolicySnapshotError::ResourceKindMismatch {
+                expected: kind,
+                actual: document.kind(),
+            });
+        }
+        match document {
+            PolicyDocument::RecommendationPolicy(policy) => self.recommendation = policy,
+            PolicyDocument::ExecutionRiskPolicy(policy) => self.execution_risk = *policy,
+            PolicyDocument::ModelRouting(policy) => self.model_routing = policy,
+            PolicyDocument::ReportSchedule(policy) => self.report_schedule = policy,
+            PolicyDocument::OperationalControl(policy) => self.operational_control = policy,
+            PolicyDocument::ExecutionAuthorization(policy) => {
+                self.execution_authorization = policy;
+            }
+        }
+        if !self.uses_current_resource_schemas() {
+            return Err(PolicySnapshotError::UnsupportedSchemaVersion);
+        }
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn resource_json_schema(kind: ConfigResourceKind) -> Schema {
+        let settings = SchemaSettings::default().with(|settings| settings.inline_subschemas = true);
+        let generator = SchemaGenerator::new(settings);
+        match kind {
+            ConfigResourceKind::RecommendationPolicy => {
+                generator.into_root_schema_for::<RecommendationPolicy>()
+            }
+            ConfigResourceKind::ExecutionRiskPolicy => {
+                generator.into_root_schema_for::<ExecutionRiskPolicy>()
+            }
+            ConfigResourceKind::ModelRouting => generator.into_root_schema_for::<ModelRouting>(),
+            ConfigResourceKind::ReportSchedule => {
+                generator.into_root_schema_for::<ReportSchedule>()
+            }
+            ConfigResourceKind::OperationalControl => {
+                generator.into_root_schema_for::<OperationalControl>()
+            }
+            ConfigResourceKind::ExecutionAuthorization => {
+                generator.into_root_schema_for::<ExecutionAuthorization>()
             }
         }
     }
 }
 
-impl From<RuntimeConfigError> for QuantError {
-    fn from(error: RuntimeConfigError) -> Self {
+/// Policy snapshot parse / encode failures.
+#[derive(Debug, Error)]
+pub enum PolicySnapshotError {
+    #[error("policy snapshot parse failed: {0}")]
+    Parse(#[from] serde_json::Error),
+    #[error("policy document kind mismatch: expected {expected}, got {actual}")]
+    ResourceKindMismatch {
+        expected: ConfigResourceKind,
+        actual: ConfigResourceKind,
+    },
+    #[error(
+        "one or more policy resources do not use boot schema version {POLICY_RESOURCE_SCHEMA_VERSION}"
+    )]
+    UnsupportedSchemaVersion,
+    #[error("immutable profile artifact hashing failed: {0}")]
+    ArtifactHash(CanonicalDigestError),
+}
+
+impl From<PolicySnapshotError> for ConfigError {
+    fn from(error: PolicySnapshotError) -> Self {
+        match error {
+            PolicySnapshotError::Parse(err) => ConfigValidationReport::single_error(
+                ConfigValidationError::invalid_value("policy_snapshot", err.to_string()),
+            )
+            .into(),
+            PolicySnapshotError::ResourceKindMismatch { expected, actual } => {
+                ConfigValidationReport::single_error(ConfigValidationError::invalid_value(
+                    "resource_kind",
+                    format!("expected {expected}, got {actual}"),
+                ))
+                .into()
+            }
+            PolicySnapshotError::UnsupportedSchemaVersion => {
+                ConfigValidationReport::single_error(ConfigValidationError::invalid_value(
+                    "schema_version",
+                    format!("every policy resource must use {POLICY_RESOURCE_SCHEMA_VERSION}"),
+                ))
+                .into()
+            }
+            PolicySnapshotError::ArtifactHash(error) => ConfigValidationReport::single_error(
+                ConfigValidationError::invalid_value("profile_artifacts", error.to_string()),
+            )
+            .into(),
+        }
+    }
+}
+
+impl From<PolicySnapshotError> for QuantError {
+    fn from(error: PolicySnapshotError) -> Self {
         ConfigError::from(error).into()
     }
 }
 
-impl RuntimeConfig {
-    /// Typed parse of a stored `config_json` document (must be the current schema).
-    pub fn from_json(config_json: &serde_json::Value) -> Result<Self, RuntimeConfigError> {
+impl DecisionPolicySnapshot {
+    pub fn from_json(config_json: &serde_json::Value) -> Result<Self, PolicySnapshotError> {
         let config: Self = serde_json::from_value(config_json.clone())?;
-        if config.schema_version != RUNTIME_CONFIG_SCHEMA_VERSION {
-            return Err(RuntimeConfigError::UnsupportedSchemaVersion {
-                found: config.schema_version,
-            });
+        if !config.uses_current_resource_schemas() {
+            return Err(PolicySnapshotError::UnsupportedSchemaVersion);
         }
         Ok(config)
     }
 
-    /// Encode to the canonical JSON document stored in `runtime_config_version`.
+    /// Encode to the canonical JSON document stored in `decision_policy_snapshot`.
     #[must_use]
     pub fn to_json(&self) -> serde_json::Value {
         serde_json::to_value(self).unwrap_or(serde_json::Value::Null)
     }
 
-    /// Generate the inlined JSON Schema for the runtime-config document.
     #[must_use]
-    pub fn json_schema() -> serde_json::Value {
+    pub fn json_schema() -> Schema {
         let settings = SchemaSettings::default().with(|s| s.inline_subschemas = true);
-        SchemaGenerator::new(settings)
-            .into_root_schema_for::<Self>()
-            .to_value()
+        SchemaGenerator::new(settings).into_root_schema_for::<Self>()
     }
 
-    /// Encode to JSON with sensitive notification credentials masked.
     #[must_use]
     pub fn to_masked_json(&self) -> serde_json::Value {
-        let mut masked = self.clone();
-        if !masked.notification.telegram.bot_token.trim().is_empty() {
-            MASKED_SECRET.clone_into(&mut masked.notification.telegram.bot_token);
-        }
-        if !masked.notification.webhook.url.trim().is_empty() {
-            MASKED_SECRET.clone_into(&mut masked.notification.webhook.url);
-        }
-        masked.to_json()
+        self.to_json()
     }
 
     /// Canonical PIT knowledge lag from enabled report schedules.
@@ -189,7 +722,7 @@ impl RuntimeConfig {
     #[must_use]
     pub fn pit_knowledge_lag_secs(&self) -> Option<u64> {
         let delays: Vec<u64> = self
-            .reports
+            .report_schedule
             .schedules
             .iter()
             .filter(|schedule| schedule.enabled)
@@ -197,7 +730,7 @@ impl RuntimeConfig {
             .collect();
         if delays.is_empty() {
             return self
-                .reports
+                .report_schedule
                 .schedules
                 .first()
                 .map(|schedule| schedule.knowledge_lag_secs);
@@ -211,132 +744,32 @@ impl RuntimeConfig {
     }
 }
 
-/// Dotted document paths whose values are masked on read surfaces.
-#[must_use]
-pub fn sensitive_paths() -> Vec<String> {
-    let schema = RuntimeConfig::json_schema();
-    let mut paths = Vec::new();
-    schema_paths_with_flag(&schema, "x-sensitive", "", &mut paths);
-    paths.sort();
-    paths
-}
-
-/// Replace masked sensitive placeholders with values from the current config.
-pub fn unmask_with(incoming: &mut serde_json::Value, current: &RuntimeConfig) {
-    let current_json = current.to_json();
-    for path in sensitive_paths() {
-        let segments = path.split('.').collect::<Vec<_>>();
-        let Some(incoming_leaf) = leaf_mut(incoming, &segments) else {
-            continue;
-        };
-        if *incoming_leaf != serde_json::json!(MASKED_SECRET) {
-            continue;
-        }
-        let Some(current_leaf) = leaf(&current_json, &segments) else {
-            continue;
-        };
-        if current_leaf
-            .as_str()
-            .is_some_and(|value| value.trim().is_empty())
-        {
-            continue;
-        }
-        *incoming_leaf = current_leaf.clone();
-    }
-}
-
-/// Mask a stored `config_json` document for a read surface.
-#[must_use]
-pub fn mask_config_json(config_json: &serde_json::Value) -> serde_json::Value {
-    RuntimeConfig::from_json(config_json).map_or_else(
-        |_| {
-            let mut document = config_json.clone();
-            if let Some(object) = document.as_object_mut() {
-                object.remove("notification");
-            }
-            document
-        },
-        |config| config.to_masked_json(),
-    )
-}
-
-fn schema_paths_with_flag(
-    schema: &serde_json::Value,
-    flag: &str,
-    prefix: &str,
-    out: &mut Vec<String>,
-) {
-    let Some(properties) = schema.get("properties").and_then(|p| p.as_object()) else {
-        return;
-    };
-    for (key, child) in properties {
-        let path = if prefix.is_empty() {
-            key.clone()
-        } else {
-            format!("{prefix}.{key}")
-        };
-        if child.get(flag).and_then(serde_json::Value::as_bool) == Some(true) {
-            out.push(path.clone());
-        }
-        schema_paths_with_flag(child, flag, &path, out);
-    }
-}
-
-fn leaf<'a>(document: &'a serde_json::Value, segments: &[&str]) -> Option<&'a serde_json::Value> {
-    let mut cursor = document;
-    for segment in segments {
-        cursor = cursor.get(*segment)?;
-    }
-    Some(cursor)
-}
-
-fn leaf_mut<'a>(
-    document: &'a mut serde_json::Value,
-    segments: &[&str],
-) -> Option<&'a mut serde_json::Value> {
-    let mut cursor = document;
-    for segment in segments {
-        cursor = cursor.get_mut(*segment)?;
-    }
-    Some(cursor)
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{
-        RUNTIME_CONFIG_SCHEMA_VERSION, RuntimeConfig, RuntimeConfigError, sensitive_paths,
-    };
+    use super::{DecisionPolicySnapshot, POLICY_RESOURCE_SCHEMA_VERSION, PolicySnapshotError};
     use crate::types::SchemaVersion;
     use serde_json::json;
 
     #[test]
     fn schema_version_is_current() {
         assert_eq!(
-            RuntimeConfig::default().schema_version,
-            RUNTIME_CONFIG_SCHEMA_VERSION
+            DecisionPolicySnapshot::default()
+                .recommendation
+                .schema_version,
+            POLICY_RESOURCE_SCHEMA_VERSION
         );
-        assert_eq!(RUNTIME_CONFIG_SCHEMA_VERSION, SchemaVersion::new(18));
+        assert_eq!(POLICY_RESOURCE_SCHEMA_VERSION, SchemaVersion::new(1));
     }
 
     #[test]
     fn rejects_non_current_schema_documents() {
-        let mut document = RuntimeConfig::default().to_json();
-        document["schema_version"] = json!(SchemaVersion::FIRST.get());
-        let error = RuntimeConfig::from_json(&document).expect_err("non-current must be rejected");
+        let mut document = DecisionPolicySnapshot::default().to_json();
+        document["recommendation"]["schema_version"] = json!(2);
+        let error =
+            DecisionPolicySnapshot::from_json(&document).expect_err("non-current must be rejected");
         assert!(matches!(
             error,
-            RuntimeConfigError::UnsupportedSchemaVersion { found } if found == SchemaVersion::FIRST
+            PolicySnapshotError::UnsupportedSchemaVersion
         ));
-    }
-
-    #[test]
-    fn sensitive_paths_are_schema_derived() {
-        assert_eq!(
-            sensitive_paths(),
-            vec![
-                "notification.telegram.bot_token".to_owned(),
-                "notification.webhook.url".to_owned(),
-            ]
-        );
     }
 }

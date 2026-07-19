@@ -158,7 +158,7 @@ async fn freeze_full_window(
             &model_run.input_hash,
             &generation,
             &model_run.model_version_id,
-            &model_run.runtime_config_version_id,
+            &model_run.decision_policy_snapshot_id,
         )
         .map_err(|error| map_parity_hash_error(&error, "model-run evidence"))?;
         seeds.push(ServingSubjectSeed {
@@ -182,7 +182,7 @@ async fn freeze_full_window(
         let evidence_hash = report_parity_evidence_hash(
             &generation,
             &report.model_version_id,
-            &report.runtime_config_version_id,
+            &report.decision_policy_snapshot_id,
             &report.market_selection_id,
             &report.data_quality_snapshot_ref,
             &report.portfolio_plan_id,
@@ -223,7 +223,7 @@ pub(super) async fn insert_frozen_report_subject(
             || model_run.status != ModelRunStatus::Succeeded
             || model_run.window_start != report.decision_at
             || model_run.market_selection_id.as_ref() != Some(&report.market_selection_id)
-            || model_run.runtime_config_version_id != report.runtime_config_version_id
+            || model_run.decision_policy_snapshot_id != report.decision_policy_snapshot_id
             || model_run.model_version_id.as_ref() != Some(&report.model_version_id)
         {
             return Err(StorageError::state_conflict(
@@ -244,7 +244,7 @@ pub(super) async fn insert_frozen_report_subject(
             &model_run.input_hash,
             &generation,
             &model_run.model_version_id,
-            &model_run.runtime_config_version_id,
+            &model_run.decision_policy_snapshot_id,
         )
         .map_err(|error| map_parity_hash_error(&error, "model-run evidence"))?;
         ServingSubjectSeed {
@@ -264,7 +264,7 @@ pub(super) async fn insert_frozen_report_subject(
         let evidence_hash = report_parity_evidence_hash(
             &generation,
             &report.model_version_id,
-            &report.runtime_config_version_id,
+            &report.decision_policy_snapshot_id,
             &report.market_selection_id,
             &report.data_quality_snapshot_ref,
             &report.portfolio_plan_id,

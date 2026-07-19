@@ -27,9 +27,8 @@ use quant_pivot_models::{
         DecisionSource, EventRegistryInfo, GroundingProof, JobProgressSink, LinkageOutcome,
         MarketLinkageDerivation, MarketRegistryInfo, MarketSubject, NewCatalogEventChange,
         NewCatalogEventObject, NewCatalogMarketObject, NewCatalogSyncBatch, NewMarketLinkage,
-        NewModelSpec, NewModelVersion, NewRuntimeConfigVersion, NewTrainingDatasetPlan,
-        NoopProgressSink, PriceComparator, ResolutionOracle, ResolvedBinding,
-        ResolvedSourceBinding, UpsertEvent, UpsertMarket,
+        NewModelSpec, NewModelVersion, NewTrainingDatasetPlan, NoopProgressSink, PriceComparator,
+        ResolutionOracle, ResolvedBinding, ResolvedSourceBinding, UpsertEvent, UpsertMarket,
         market::{book::BookLevel, registry::TokenInfo},
     },
     entities::{
@@ -52,22 +51,20 @@ use quant_pivot_models::{
         market::{EventStatus, MarketStatus},
         model::ModelFamily,
         quant::{DatasetPurpose, PublicationStatus, TrainingDatasetStatus},
-        runtime_config::RuntimeConfigVersionSource,
     },
     hashing::CanonicalDigest,
     runtime_config::{
-        DataQualityConfig, DecimalString, DomainConfig, FactorsConfig, FeatureFamily,
+        DataQualityConfig, DecimalValue, DomainConfig, FactorsConfig, FeatureFamily,
         FeaturesConfig, SelectionConfig, TrainingConfig,
     },
     types::{
         ArtifactUri, BinanceSymbol, CatalogEventChangeId, CatalogEventObjectId,
         CatalogMarketChangeId, CatalogMarketObjectId, CatalogSyncBatchId, ContentHash, CryptoAsset,
         CryptoQuote, DATASET_ARTIFACT_FORMAT_VERSION, DatasetCoverage, DatasetManifest,
-        DomainInstrumentKey, DomainSourceId, EventId, MarketId, ModelInputContract, ModelSpecId,
-        ModelTrainingContract, ModelVersionId, Price, Probability, ResolverVersion,
-        RuntimeConfigVersionId, SchemaVersion, Shares, TokenId, TrainingDatasetId,
-        TrainingHorizonsSecs, TrainingSampleSource, TrainingSampleSources, Usd,
-        default_sample_sources,
+        DecisionPolicySnapshotId, DomainInstrumentKey, DomainSourceId, EventId, MarketId,
+        ModelInputContract, ModelSpecId, ModelTrainingContract, ModelVersionId, Price, Probability,
+        ResolverVersion, SchemaVersion, Shares, TokenId, TrainingDatasetId, TrainingHorizonsSecs,
+        TrainingSampleSource, TrainingSampleSources, Usd, default_sample_sources,
     },
 };
 use quant_pivot_repository::{
@@ -75,12 +72,12 @@ use quant_pivot_repository::{
         PgAttributionRepository, PgCalibrationArtifactRepository, PgCatalogLedgerRepository,
         PgClobMarketInfoRepository, PgFeatureRepository, PgMarketLinkageRepository,
         PgMarketRepository, PgMarketSelectionRepository, PgModelRegistryRepository,
-        PgPositionRepository, PgRecommendationRepository, PgRuntimeConfigVersionRepository,
-        PgTradePolicyRepository, PgTrainingDatasetRepository,
+        PgPositionRepository, PgRecommendationRepository, PgTradePolicyRepository,
+        PgTrainingDatasetRepository,
     },
     traits::{
         CatalogLedgerRepository, MarketLinkageRepository, ModelRegistryRepository,
-        QuantFactReadRepository, RuntimeConfigVersionRepository, TrainingDatasetRepository,
+        QuantFactReadRepository, TrainingDatasetRepository,
     },
 };
 use quant_pivot_research::{
@@ -98,6 +95,7 @@ use quant_pivot_test_support::{
     catalog_fixtures::{make_event, make_market},
     execution_pg_seed::{content_hash as fixture_hash, fixture_profile_ref},
     pg::setup_pg,
+    policy_fixtures::bootstrap_default_policy_bundle,
     report_pipeline_harness::EmptyLinkageRepo,
 };
 use rust_decimal::Decimal;
@@ -113,26 +111,8 @@ const NO_TOKEN: &str = "dataset-no";
 
 const SETTLEMENT_LABEL: LabelName = LabelName::from_static("settlement_outcome");
 
-fn runtime_config_id() -> RuntimeConfigVersionId {
-    RuntimeConfigVersionId::from_v7()
-}
-
-async fn seed_runtime_config(db: &DatabaseConnection) -> RuntimeConfigVersionId {
-    let id = runtime_config_id();
-    let hash = ContentHash::parse(format!("blake3:{}", "c".repeat(64))).expect("hash");
-    PgRuntimeConfigVersionRepository::new(db.clone())
-        .create_version(NewRuntimeConfigVersion {
-            runtime_config_version_id: id.clone(),
-            config_hash: hash,
-            schema_version: SchemaVersion::FIRST,
-            config_json: serde_json::json!({}),
-            source: RuntimeConfigVersionSource::Bootstrap,
-            created_by: "dataset-e2e".to_owned(),
-            reason: "dataset e2e".to_owned(),
-        })
-        .await
-        .expect("runtime config version");
-    id
+async fn seed_runtime_config(db: &DatabaseConnection) -> DecisionPolicySnapshotId {
+    bootstrap_default_policy_bundle(db, "dataset-e2e", "dataset e2e").await
 }
 
 fn dataset_window() -> (chrono::DateTime<Utc>, chrono::DateTime<Utc>) {
@@ -153,7 +133,7 @@ const fn sample_as_of(window_start: chrono::DateTime<Utc>) -> chrono::DateTime<U
 fn ledger_manifest(
     training_dataset_id: &TrainingDatasetId,
     model_spec_id: &ModelSpecId,
-    runtime_config_version_id: &RuntimeConfigVersionId,
+    decision_policy_snapshot_id: &DecisionPolicySnapshotId,
     window_start: DateTime<Utc>,
     window_end: DateTime<Utc>,
     hash: &ContentHash,
@@ -168,7 +148,7 @@ fn ledger_manifest(
         model_spec_id: model_spec_id.clone(),
         trade_policy_artifact_id: None,
         trade_policy_hash: None,
-        runtime_config_version_id: runtime_config_version_id.clone(),
+        decision_policy_snapshot_id: decision_policy_snapshot_id.clone(),
         window_start,
         window_end,
         purpose: DatasetPurpose::Training,
@@ -1023,7 +1003,7 @@ fn temp_artifact_store() -> Arc<dyn ArtifactStore> {
 async fn plan_request(
     service: &TrainingDatasetService,
     model_spec_id: ModelSpecId,
-    runtime_config_version_id: RuntimeConfigVersionId,
+    decision_policy_snapshot_id: DecisionPolicySnapshotId,
     window_start: chrono::DateTime<Utc>,
     window_end: chrono::DateTime<Utc>,
 ) -> DatasetPlan {
@@ -1033,7 +1013,7 @@ async fn plan_request(
             profile_ref: fixture_profile_ref(),
             research_program_hash: fixture_hash('4'),
             source_slice: quant_pivot_test_support::execution_pg_seed::source_slice_ref('5'),
-            runtime_config_version_id,
+            decision_policy_snapshot_id,
             window_start,
             window_end,
             pit_cutoff: window_end + chrono::Duration::seconds(60),
@@ -1163,7 +1143,7 @@ async fn calibration_dataset_build_fails_closed_on_purge_overlap() {
             horizons_secs: TrainingHorizonsSecs(vec![3600]),
             feature_schema_version: Some(SchemaVersion::FIRST),
             sample_sources: Some(TrainingSampleSources(default_sample_sources())),
-            runtime_config_version_id: rc_id.clone(),
+            decision_policy_snapshot_id: rc_id.clone(),
         })
         .await
         .expect("seed existing training dataset plan");
@@ -1208,7 +1188,7 @@ async fn calibration_dataset_build_fails_closed_on_purge_overlap() {
             profile_ref: fixture_profile_ref(),
             research_program_hash: fixture_hash('4'),
             source_slice: quant_pivot_test_support::execution_pg_seed::source_slice_ref('5'),
-            runtime_config_version_id: rc_id,
+            decision_policy_snapshot_id: rc_id,
             window_start,
             window_end,
             pit_cutoff: window_end + chrono::Duration::seconds(60),
@@ -1305,7 +1285,7 @@ async fn pit_selection_excludes_disabled_category_market() {
         Arc::new(ControllableFactRead::new(Arc::clone(&scenario))),
         SelectionConfig {
             enabled_categories: vec![MarketCategory::Sports],
-            min_liquidity_usd: DecimalString::new("1000000"),
+            min_liquidity_usd: DecimalValue::new(rust_decimal_macros::dec!(1000000)),
             ..SelectionConfig::default()
         },
     );
@@ -1520,7 +1500,7 @@ async fn build_crypto_pit_dataset_with_resolved_linkage() -> TrainingDatasetArti
             profile_ref: fixture_profile_ref(),
             research_program_hash: fixture_hash('4'),
             source_slice: quant_pivot_test_support::execution_pg_seed::source_slice_ref('5'),
-            runtime_config_version_id: rc_id,
+            decision_policy_snapshot_id: rc_id,
             window_start,
             window_end,
             pit_cutoff: window_end + chrono::Duration::seconds(60),
@@ -1604,7 +1584,7 @@ async fn plan_estimates_pit_keep_rate() {
         profile_ref: fixture_profile_ref(),
         research_program_hash: fixture_hash('4'),
         source_slice: quant_pivot_test_support::execution_pg_seed::source_slice_ref('5'),
-        runtime_config_version_id: rc_id,
+        decision_policy_snapshot_id: rc_id,
         window_start,
         window_end,
         pit_cutoff: window_end + chrono::Duration::seconds(60),
@@ -2010,7 +1990,7 @@ async fn model_version_training_dataset_id_is_typed() {
             horizons_secs: TrainingHorizonsSecs(vec![3600]),
             feature_schema_version: Some(SchemaVersion::FIRST),
             sample_sources: Some(TrainingSampleSources(default_sample_sources())),
-            runtime_config_version_id: rc_id,
+            decision_policy_snapshot_id: rc_id,
         })
         .await
         .expect("create dataset plan");
@@ -2046,6 +2026,7 @@ async fn model_version_training_dataset_id_is_typed() {
             model_spec_id,
             version: 2,
             artifact_hash: hash,
+            category_scope: None,
             profile_ref: fixture_profile_ref(),
             training_dataset_id: Some(dataset_id.clone()),
             trade_policy_artifact_id: None,
@@ -2101,7 +2082,7 @@ async fn plan_count_respects_sample_sources() {
             profile_ref: fixture_profile_ref(),
             research_program_hash: fixture_hash('4'),
             source_slice: quant_pivot_test_support::execution_pg_seed::source_slice_ref('5'),
-            runtime_config_version_id: rc_id,
+            decision_policy_snapshot_id: rc_id,
             window_start,
             window_end,
             pit_cutoff: window_end + chrono::Duration::seconds(60),

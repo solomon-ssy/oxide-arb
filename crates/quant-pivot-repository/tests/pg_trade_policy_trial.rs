@@ -29,7 +29,7 @@ fn job(job_id: ResearchJobId) -> NewResearchJob {
         kind: ResearchJobKind::TradePolicyFit,
         status: ResearchJobStatus::Queued,
         model_spec_id: None,
-        runtime_config_version_id: None,
+        decision_policy_snapshot_id: None,
         params_json: serde_json::json!({"reason": "trial-ledger-it"}),
         requested_by: None,
         acting_role: "admin".to_owned(),

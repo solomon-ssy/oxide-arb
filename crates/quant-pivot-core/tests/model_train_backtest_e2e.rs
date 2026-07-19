@@ -24,8 +24,8 @@ use quant_pivot_core::{
 use quant_pivot_models::{
     domain::{
         BacktestPathSetView, CompleteTrainingDatasetBuild, CpcvBacktestPort, DecisionClock,
-        ModelVersionInfo, NewModelSpec, NewRuntimeConfigVersion, NewTrainingDatasetPlan,
-        NoopProgressSink, RunCpcvBacktestRequest,
+        ModelVersionInfo, NewModelSpec, NewTrainingDatasetPlan, NoopProgressSink,
+        RunCpcvBacktestRequest,
     },
     entities::{
         market::{Column as MarketColumn, Entity as MarketEntity},
@@ -39,21 +39,20 @@ use quant_pivot_models::{
             DataQualityStatus, DatasetPurpose, FactorDirection, ModelRunKind, ModelRunStatus,
             PublicationStatus, TrainingDatasetStatus,
         },
-        runtime_config::RuntimeConfigVersionSource,
     },
     hashing::CanonicalDigest,
     runtime_config::{
-        DataQualityConfig, DomainConfig, FactorWeights, FactorsConfig, FeatureFamily,
-        FeaturesConfig, MomentumFeaturesConfig, PortfolioBudget, PortfolioConfig,
-        PortfolioConstraints, RankLossKind, ResearchTrainingConfig, RuntimeConfig,
-        StructuralFeaturesConfig, TrainingOptimizerKind, wire::DecimalString,
+        DataQualityConfig, DecisionPolicySnapshot, DomainConfig, FactorWeights, FactorsConfig,
+        FeatureFamily, FeaturesConfig, MomentumFeaturesConfig, PortfolioBudget, PortfolioConfig,
+        PortfolioConstraints, RankLossKind, ResearchTrainingConfig, StructuralFeaturesConfig,
+        TrainingOptimizerKind, wire::DecimalValue,
     },
     types::{
         BacktestPathSetId, Bps, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION, DatasetCoverage,
-        DatasetManifest, EventId, FactorDefinitionId, MarketId, ModelInputContract, ModelSpecId,
-        ModelTrainingContract, ModelVersionId, POOLED_1H_CONTROL_PROFILE_ID, Probability,
-        RuntimeConfigVersionId, SchemaVersion, TokenId, TrainingDatasetId, TrainingExampleId,
-        TrainingHorizonsSecs, TrainingSampleSource, TrainingSampleSources, Usd,
+        DatasetManifest, DecisionPolicySnapshotId, EventId, FactorDefinitionId, MarketId,
+        ModelInputContract, ModelSpecId, ModelTrainingContract, ModelVersionId,
+        POOLED_1H_CONTROL_PROFILE_ID, Probability, SchemaVersion, TokenId, TrainingDatasetId,
+        TrainingExampleId, TrainingHorizonsSecs, TrainingSampleSource, TrainingSampleSources, Usd,
         builtin_research_profiles, default_sample_sources,
     },
 };
@@ -61,13 +60,12 @@ use quant_pivot_repository::{
     postgres::{
         PgBacktestPathSetRepository, PgBacktestReportRepository, PgCalibrationArtifactRepository,
         PgEventRepository, PgMarketRepository, PgModelComparisonReportRepository,
-        PgModelRegistryRepository, PgModelRunRepository, PgRuntimeConfigVersionRepository,
+        PgModelRegistryRepository, PgModelRunRepository, PgPolicyRepository,
         PgTrainingDatasetRepository,
     },
     traits::{
         BacktestPathSetRepository, CalibrationArtifactRepository, EventRepository,
-        MarketRepository, ModelRegistryRepository, RuntimeConfigVersionRepository,
-        TrainingDatasetRepository,
+        MarketRepository, ModelRegistryRepository, TrainingDatasetRepository,
     },
 };
 use quant_pivot_research::{
@@ -94,6 +92,7 @@ use quant_pivot_research::{
 use quant_pivot_test_support::{
     catalog_fixtures::{make_event, make_market},
     pg::setup_pg,
+    policy_fixtures::bootstrap_policy_bundle,
     research_fixtures::{
         ReplayableSourceSliceFixture, bind_fixture_decision_capture,
         persist_replayable_source_slice,
@@ -258,14 +257,14 @@ fn examples() -> Vec<TrainingExample> {
 // ── Postgres catalog + ledger seeding ───────────────────────────────────────────────────────────────────────────────
 
 /// Governed training knobs exercised through `TrainingObjectiveSpec::from_runtime_config`.
-fn e2e_research_training() -> ResearchTrainingConfig {
+const fn e2e_research_training() -> ResearchTrainingConfig {
     ResearchTrainingConfig {
         rank_loss: RankLossKind::RankIcWeightedRanknet,
         optimizer: TrainingOptimizerKind::CoordinateSearch,
-        lambda_tail: DecimalString::new("0.5"),
-        tail_fraction: DecimalString::new("0.10"),
-        lambda_turnover: DecimalString::new("0.2"),
-        lambda_l2: DecimalString::new("0.01"),
+        lambda_tail: DecimalValue::new(rust_decimal_macros::dec!(0.5)),
+        tail_fraction: DecimalValue::new(rust_decimal_macros::dec!(0.10)),
+        lambda_turnover: DecimalValue::new(rust_decimal_macros::dec!(0.2)),
+        lambda_l2: DecimalValue::new(rust_decimal_macros::dec!(0.01)),
         ndcg_k: 5,
         pseudo_top_n: 3,
     }
@@ -282,7 +281,10 @@ struct E2eReplaySlice {
 
 fn e2e_replay_slice() -> E2eReplaySlice {
     let mut weights = BTreeMap::new();
-    weights.insert(LIQUIDITY_DEPTH.as_str().to_owned(), DecimalString::new("1"));
+    weights.insert(
+        LIQUIDITY_DEPTH.as_str().to_owned(),
+        DecimalValue::new(rust_decimal_macros::dec!(1)),
+    );
     // PriceBook + MarketMetadata only. Cap every lookback-driving window so
     // `features.max_lookback_secs()` (→ CPCV `min_embargo_secs`) stays well
     // below the 1h tick spacing — default 3600s micro / 86400s tape windows
@@ -323,44 +325,85 @@ fn e2e_replay_slice() -> E2eReplaySlice {
     }
 }
 
-fn e2e_runtime_config() -> RuntimeConfig {
-    let mut config = RuntimeConfig::default();
+fn e2e_runtime_config() -> DecisionPolicySnapshot {
+    let mut config = DecisionPolicySnapshot::default();
     let replay = e2e_replay_slice();
-    config.features = replay.features;
-    config.factors = replay.factors;
-    config.domain = replay.domain;
-    config.data_quality = replay.data_quality;
-    config.training.max_book_staleness_ms = replay.max_book_staleness_ms;
-    config.research.training = e2e_research_training();
+    config.profile_artifacts.features.definition = replay.features;
+    config.profile_artifacts.scoring.definition = replay.factors;
+    config.profile_artifacts.domain.definition = replay.domain;
+    config.recommendation.data_quality = replay.data_quality;
+    config
+        .profile_artifacts
+        .research_method
+        .training
+        .max_book_staleness_ms = replay.max_book_staleness_ms;
+    config.profile_artifacts.research_method.research.training = e2e_research_training();
     // Dataset has 4 as_of groups — size CPCV/PBO so the port path can run
     // without failing the T < block_count preflight.
-    config.research.validation.cpcv.n_groups = 4;
-    config.research.validation.cpcv.k_test = 2;
-    config.research.validation.pbo.block_count = 4;
-    config.research.validation.trials.lambda_multipliers =
-        vec![DecimalString::new("1"), DecimalString::new("0.5")];
-    config.research.validation.trials.rank_loss_kinds = vec![RankLossKind::RankIcWeightedRanknet];
-    config.research.validation.trials.max_trials = 4;
-    config.research.validation.purge.embargo_pct = DecimalString::new("0.02");
+    config
+        .profile_artifacts
+        .research_method
+        .research
+        .validation
+        .cpcv
+        .n_groups = 4;
+    config
+        .profile_artifacts
+        .research_method
+        .research
+        .validation
+        .cpcv
+        .k_test = 2;
+    config
+        .profile_artifacts
+        .research_method
+        .research
+        .validation
+        .pbo
+        .block_count = 4;
+    config
+        .profile_artifacts
+        .research_method
+        .research
+        .validation
+        .trials
+        .lambda_multipliers = vec![
+        DecimalValue::new(rust_decimal_macros::dec!(1)),
+        DecimalValue::new(rust_decimal_macros::dec!(0.5)),
+    ];
+    config
+        .profile_artifacts
+        .research_method
+        .research
+        .validation
+        .trials
+        .rank_loss_kinds = vec![RankLossKind::RankIcWeightedRanknet];
+    config
+        .profile_artifacts
+        .research_method
+        .research
+        .validation
+        .trials
+        .max_trials = 4;
+    config
+        .profile_artifacts
+        .research_method
+        .research
+        .validation
+        .purge
+        .embargo_pct = DecimalValue::new(rust_decimal_macros::dec!(0.02));
     config
 }
 
-async fn seed_runtime_config(db: &DatabaseConnection) -> RuntimeConfigVersionId {
+async fn seed_runtime_config(db: &DatabaseConnection) -> DecisionPolicySnapshotId {
     let config = e2e_runtime_config();
-    let id = RuntimeConfigVersionId::from_v7();
-    PgRuntimeConfigVersionRepository::new(db.clone())
-        .create_version(NewRuntimeConfigVersion {
-            runtime_config_version_id: id.clone(),
-            config_hash: content_hash('c'),
-            schema_version: config.schema_version,
-            config_json: config.to_json(),
-            source: RuntimeConfigVersionSource::Bootstrap,
-            created_by: "train-backtest-e2e".to_owned(),
-            reason: "integration test".to_owned(),
-        })
-        .await
-        .expect("runtime config");
-    id
+    bootstrap_policy_bundle(
+        &PgPolicyRepository::new(db.clone()),
+        &config,
+        "train-backtest-e2e",
+        "integration test",
+    )
+    .await
 }
 
 async fn seed_model_spec(db: &DatabaseConnection) -> ModelSpecId {
@@ -427,7 +470,7 @@ async fn seed_dataset(
     db: &DatabaseConnection,
     store: &Arc<dyn ArtifactStore>,
     model_spec_id: &ModelSpecId,
-    rc_id: &RuntimeConfigVersionId,
+    rc_id: &DecisionPolicySnapshotId,
 ) -> (TrainingDatasetId, ContentHash) {
     let dataset_id = TrainingDatasetId::from_v7();
     let examples = examples();
@@ -469,7 +512,7 @@ async fn seed_dataset(
         ReplayableSourceSliceFixture {
             profile_ref: profile_ref.clone(),
             research_program_hash: research_program_hash.clone(),
-            runtime_config_version_id: rc_id.clone(),
+            decision_policy_snapshot_id: rc_id.clone(),
             runtime_config_hash: content_hash('c'),
             window_start,
             window_end,
@@ -486,7 +529,7 @@ async fn seed_dataset(
         model_spec_id: model_spec_id.clone(),
         trade_policy_artifact_id: None,
         trade_policy_hash: None,
-        runtime_config_version_id: rc_id.clone(),
+        decision_policy_snapshot_id: rc_id.clone(),
         window_start,
         window_end,
         purpose: DatasetPurpose::Training,
@@ -521,7 +564,7 @@ async fn seed_dataset(
             horizons_secs: TrainingHorizonsSecs(vec![0]),
             feature_schema_version: Some(SchemaVersion::FIRST),
             sample_sources: Some(TrainingSampleSources(default_sample_sources())),
-            runtime_config_version_id: rc_id.clone(),
+            decision_policy_snapshot_id: rc_id.clone(),
         })
         .await
         .expect("dataset plan");
@@ -558,11 +601,17 @@ fn trainer_config() -> ModelTrainerConfig {
     ModelTrainerConfig {
         factors: replay.factors,
         // Same path as the production port: parse frozen `research.training`.
-        objective: TrainingObjectiveSpec::from_runtime_config(&runtime.research.training)
-            .expect("parse research.training"),
+        objective: TrainingObjectiveSpec::from_runtime_config(
+            &runtime.profile_artifacts.research_method.research.training,
+        )
+        .expect("parse research.training"),
         validation_purge: PurgeConfig {
             embargo_pct: dec!(0.02),
-            min_embargo_secs: runtime.features.max_lookback_secs(),
+            min_embargo_secs: runtime
+                .profile_artifacts
+                .features
+                .definition
+                .max_lookback_secs(),
         },
     }
 }
@@ -570,12 +619,12 @@ fn trainer_config() -> ModelTrainerConfig {
 fn portfolio() -> PortfolioConfig {
     PortfolioConfig {
         budget: PortfolioBudget {
-            total_budget_usd: DecimalString::new("1000"),
-            min_recommendation_usd: DecimalString::new("10"),
-            max_single_recommendation_usd: DecimalString::new("200"),
+            total_budget_usd: DecimalValue::new(rust_decimal_macros::dec!(1000)),
+            min_recommendation_usd: DecimalValue::new(rust_decimal_macros::dec!(10)),
+            max_single_recommendation_usd: DecimalValue::new(rust_decimal_macros::dec!(200)),
         },
         constraints: PortfolioConstraints {
-            liquidity_usage_cap_pct: DecimalString::new("0.5"),
+            liquidity_usage_cap_pct: DecimalValue::new(rust_decimal_macros::dec!(0.5)),
             ..PortfolioConstraints::default()
         },
         ..PortfolioConfig::default()
@@ -624,13 +673,13 @@ async fn assert_training_run_ledger(
 fn weighted_train_input(
     model_spec_id: ModelSpecId,
     dataset_id: TrainingDatasetId,
-    rc_id: RuntimeConfigVersionId,
+    rc_id: DecisionPolicySnapshotId,
 ) -> TrainModelInput {
     TrainModelInput {
         model_version_id: ModelVersionId::from_v7(),
         model_spec_id,
         training_dataset_id: dataset_id,
-        runtime_config_version_id: rc_id,
+        decision_policy_snapshot_id: rc_id,
         model_family: ModelFamily::WeightedFactor,
         input_contract: ModelInputContract::single_required("book.mid"),
         label: LabelSelector {
@@ -796,7 +845,7 @@ async fn train_then_backtest_then_calibrate_e2e() {
             BacktestInput {
                 model_version_id: version.model_version_id.clone(),
                 training_dataset_id: dataset_id.clone(),
-                runtime_config_version_id: rc_id.clone(),
+                decision_policy_snapshot_id: rc_id.clone(),
                 calibrate: true,
                 backtest_report_id: None,
             },
@@ -866,7 +915,7 @@ async fn train_then_cpcv_persists_path_set_with_dsr_n_decomposition() {
         path_set_repo: Arc::new(PgBacktestPathSetRepository::new(db.clone())),
         model_registry_repo: Arc::clone(&registry),
         model_run_repo: Arc::new(PgModelRunRepository::new(db.clone())),
-        runtime_config: Arc::new(PgRuntimeConfigVersionRepository::new(db.clone())),
+        runtime_config: Arc::new(PgPolicyRepository::new(db.clone())),
         bias_table_repo: Arc::new(PgCalibrationArtifactRepository::new(db.clone())),
     });
     let view = port
@@ -874,7 +923,7 @@ async fn train_then_cpcv_persists_path_set_with_dsr_n_decomposition() {
             version.model_version_id.clone(),
             RunCpcvBacktestRequest {
                 training_dataset_id: dataset_id,
-                runtime_config_version_id: rc_id,
+                decision_policy_snapshot_id: rc_id,
                 reason: "train-then-cpcv e2e".to_owned(),
                 path_set_id: Some(path_set_id.clone()),
             },

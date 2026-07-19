@@ -14,6 +14,11 @@ pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub menu_id: MenuId,
     pub created_at: DateTime<Utc>,
+
+    #[sea_orm(belongs_to, relation_enum = "Role", from = "role_id", to = "id")]
+    pub role: BelongsTo<super::role::Entity>,
+    #[sea_orm(belongs_to, relation_enum = "Menu", from = "menu_id", to = "id")]
+    pub menu: BelongsTo<super::menu::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

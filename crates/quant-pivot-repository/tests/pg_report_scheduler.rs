@@ -3,23 +3,16 @@
 use chrono::{Duration, Utc};
 use quant_pivot_models::{
     domain::{
-        ClaimReportSchedule, MaterializeReportSchedule, NewReportRun, NewRuntimeConfigActivation,
-        NewRuntimeConfigVersion, ReconcileReportSchedule, ReportRunClaimConfig,
+        ClaimReportSchedule, MaterializeReportSchedule, NewReportRun, ReconcileReportSchedule,
+        ReportRunClaimConfig,
     },
-    enums::{
-        quant::{
-            ReportRunStatus, ReportRunTerminalReason, ReportScheduleGapReason, ReportTriggerKind,
-        },
-        runtime_config::{RuntimeConfigActivationKind, RuntimeConfigVersionSource},
+    enums::quant::{
+        ReportRunStatus, ReportRunTerminalReason, ReportScheduleGapReason, ReportTriggerKind,
     },
-    runtime_config::RUNTIME_CONFIG_SCHEMA_VERSION,
-    types::{ContentHash, ReportRunId, RuntimeConfigActivationId, RuntimeConfigVersionId},
+    types::{ContentHash, DecisionPolicySnapshotId, ReportRunId},
 };
-use quant_pivot_repository::{
-    postgres::{PgReportRunRepository, PgRuntimeConfigVersionRepository},
-    traits::{ReportRunRepository, RuntimeConfigVersionRepository},
-};
-use quant_pivot_test_support::pg::setup_pg;
+use quant_pivot_repository::{postgres::PgReportRunRepository, traits::ReportRunRepository};
+use quant_pivot_test_support::{pg::setup_pg, policy_fixtures::bootstrap_default_policy_bundle};
 use uuid::Uuid;
 
 fn hash(byte: char) -> ContentHash {
@@ -27,36 +20,9 @@ fn hash(byte: char) -> ContentHash {
         .expect("valid content hash")
 }
 
-async fn activate_runtime(db: &sea_orm::DatabaseConnection) -> RuntimeConfigVersionId {
-    let repository = PgRuntimeConfigVersionRepository::new(db.clone());
-    let version_id = RuntimeConfigVersionId::from_v7();
-    repository
-        .create_version(NewRuntimeConfigVersion {
-            runtime_config_version_id: version_id.clone(),
-            config_hash: hash('a'),
-            schema_version: RUNTIME_CONFIG_SCHEMA_VERSION,
-            config_json: serde_json::json!({}),
-            source: RuntimeConfigVersionSource::Bootstrap,
-            created_by: "pg-report-scheduler".to_owned(),
-            reason: "scheduler integration fixture".to_owned(),
-        })
+async fn activate_runtime(db: &sea_orm::DatabaseConnection) -> DecisionPolicySnapshotId {
+    bootstrap_default_policy_bundle(db, "pg-report-scheduler", "scheduler integration fixture")
         .await
-        .expect("create runtime config");
-    repository
-        .activate_version(NewRuntimeConfigActivation {
-            runtime_config_activation_id: RuntimeConfigActivationId::from_v7(),
-            runtime_config_version_id: version_id.clone(),
-            runtime_config_approval_id: None,
-            activated_by: "pg-report-scheduler".to_owned(),
-            reason: "scheduler integration fixture".to_owned(),
-            activation_kind: RuntimeConfigActivationKind::Initial,
-            previous_runtime_config_version_id: None,
-            rollback_target_version_id: None,
-            audit_event_id: None,
-        })
-        .await
-        .expect("activate runtime config");
-    version_id
 }
 
 fn ad_hoc(request_id: &str) -> NewReportRun {
@@ -75,9 +41,9 @@ fn ad_hoc(request_id: &str) -> NewReportRun {
     }
 }
 
-fn claim_config(version_id: &RuntimeConfigVersionId) -> ReportRunClaimConfig {
+fn claim_config(version_id: &DecisionPolicySnapshotId) -> ReportRunClaimConfig {
     ReportRunClaimConfig {
-        runtime_config_version_id: version_id.clone(),
+        decision_policy_snapshot_id: version_id.clone(),
         ad_hoc_default_top_n: 20,
         ad_hoc_default_knowledge_lag_secs: 10,
         schedules: vec![ClaimReportSchedule {
@@ -130,7 +96,7 @@ async fn restart_coalesces_latest_and_records_aggregate_gap() {
             &version_id,
             vec![ReconcileReportSchedule {
                 schedule_id: "primary".to_owned(),
-                runtime_config_version_id: version_id.clone(),
+                decision_policy_snapshot_id: version_id.clone(),
                 spec_hash: hash('b'),
                 next_scheduled_for: first_due,
                 enabled: true,
@@ -144,7 +110,7 @@ async fn restart_coalesces_latest_and_records_aggregate_gap() {
     let materialized = repository
         .materialize_schedule(MaterializeReportSchedule {
             schedule_id: "primary".to_owned(),
-            runtime_config_version_id: version_id.clone(),
+            decision_policy_snapshot_id: version_id.clone(),
             spec_hash: hash('b'),
             expected_next_scheduled_for: first_due,
             latest_scheduled_for: latest,
@@ -167,7 +133,7 @@ async fn restart_coalesces_latest_and_records_aggregate_gap() {
     let coalesced = repository
         .materialize_schedule(MaterializeReportSchedule {
             schedule_id: "primary".to_owned(),
-            runtime_config_version_id: version_id,
+            decision_policy_snapshot_id: version_id,
             spec_hash: hash('b'),
             expected_next_scheduled_for: next,
             latest_scheduled_for: newer,
@@ -215,7 +181,7 @@ async fn config_change_skips_old_queued_occurrence() {
             &version_id,
             vec![ReconcileReportSchedule {
                 schedule_id: "primary".to_owned(),
-                runtime_config_version_id: version_id.clone(),
+                decision_policy_snapshot_id: version_id.clone(),
                 spec_hash: hash('b'),
                 next_scheduled_for: due,
                 enabled: true,
@@ -226,7 +192,7 @@ async fn config_change_skips_old_queued_occurrence() {
     repository
         .materialize_schedule(MaterializeReportSchedule {
             schedule_id: "primary".to_owned(),
-            runtime_config_version_id: version_id.clone(),
+            decision_policy_snapshot_id: version_id.clone(),
             spec_hash: hash('b'),
             expected_next_scheduled_for: due,
             latest_scheduled_for: due,
@@ -243,7 +209,7 @@ async fn config_change_skips_old_queued_occurrence() {
             &version_id,
             vec![ReconcileReportSchedule {
                 schedule_id: "primary".to_owned(),
-                runtime_config_version_id: version_id.clone(),
+                decision_policy_snapshot_id: version_id.clone(),
                 spec_hash: hash('c'),
                 next_scheduled_for: due + Duration::minutes(2),
                 enabled: true,

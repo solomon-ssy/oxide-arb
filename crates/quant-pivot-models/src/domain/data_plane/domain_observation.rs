@@ -79,42 +79,19 @@ impl DomainObservation {
     }
 }
 
-/// Typed lifecycle status for a domain-source ingest cursor.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DomainCursorStatus {
-    /// No checkpoint yet; the historical backfill has not started.
-    Bootstrap,
-    /// Backfilling history toward the live edge.
-    Backfilling,
-    /// At the live edge, ingesting incrementally.
-    Live,
-    /// The last tick failed; the cursor did not advance.
-    Error,
-}
-
-impl DomainCursorStatus {
-    /// Stable persisted label.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Bootstrap => "bootstrap",
-            Self::Backfilling => "backfilling",
-            Self::Live => "live",
-            Self::Error => "error",
-        }
-    }
-
-    /// Decode a persisted label.
-    #[must_use]
-    pub fn parse(value: &str) -> Option<Self> {
-        match value {
-            "bootstrap" => Some(Self::Bootstrap),
-            "backfilling" => Some(Self::Backfilling),
-            "live" => Some(Self::Live),
-            "error" => Some(Self::Error),
-            _ => None,
-        }
+crate::pg_enum! {
+    type_name = "qp_domain_cursor_status",
+    /// Typed lifecycle status for a domain-source ingest cursor.
+    @derive(PartialOrd, Ord)
+    pub enum DomainCursorStatus {
+        /// No checkpoint yet; the historical backfill has not started.
+        Bootstrap => "bootstrap",
+        /// Backfilling history toward the live edge.
+        Backfilling => "backfilling",
+        /// At the live edge, ingesting incrementally.
+        Live => "live",
+        /// The last tick failed; the cursor did not advance.
+        Failed => "error",
     }
 }
 
@@ -307,7 +284,7 @@ pub struct DomainSourceCursorInfo {
     pub instrument_key: DomainInstrumentKey,
     pub checkpoint_json: DomainSourceCheckpoint,
     pub checkpoint_hash: ContentHash,
-    pub status: String,
+    pub status: DomainCursorStatus,
     /// Detail from the most recent failed tick; `None` when the last tick
     /// for this instrument succeeded (R10 ingest hardening).
     pub last_error: Option<String>,
@@ -338,7 +315,7 @@ pub struct UpsertDomainSourceCursor {
     pub instrument_key: DomainInstrumentKey,
     pub checkpoint_json: DomainSourceCheckpoint,
     pub checkpoint_hash: ContentHash,
-    pub status: String,
+    pub status: DomainCursorStatus,
     /// Set on a failed tick; explicitly cleared to `None` on the next
     /// success so a resolved error never lingers in the read view.
     pub last_error: Option<String>,

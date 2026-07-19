@@ -198,7 +198,7 @@ fn ensure_manifest_binding(
     let bound = manifest.profile_ref == row.profile_ref
         && track_name(manifest.evaluation_track) == row.evaluation_track
         && manifest.research_program_hash == row.research_program_hash
-        && manifest.runtime_config_version_id == row.runtime_config_version_id
+        && manifest.decision_policy_snapshot_id == row.decision_policy_snapshot_id
         && manifest.runtime_config_hash == row.runtime_config_hash
         && manifest.window_start == row.window_start
         && manifest.window_end == row.window_end

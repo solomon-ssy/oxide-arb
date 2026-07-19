@@ -240,15 +240,7 @@ pub(crate) struct BreakerThresholds {
 
 impl BreakerThresholds {
     fn new(config: ExecutionBreakerConfig) -> QuantResult<Self> {
-        let daily_loss_cap = config
-            .daily_realized_loss_cap_usd
-            .value
-            .parse::<Decimal>()
-            .map_err(|error| {
-                QuantError::config(format!(
-                    "execution.breaker.daily_realized_loss_cap_usd is not a Decimal: {error}"
-                ))
-            })?;
+        let daily_loss_cap = config.daily_realized_loss_cap_usd.value;
         if daily_loss_cap < Decimal::ZERO {
             return Err(QuantError::config(
                 "execution.breaker.daily_realized_loss_cap_usd must be non-negative",
@@ -525,18 +517,17 @@ impl ExecutionBreaker {
 
 #[cfg(test)]
 mod tests {
-    use quant_pivot_models::runtime_config::{DecimalString, ExecutionBreakerConfig};
+    use quant_pivot_models::runtime_config::{DecimalValue, ExecutionBreakerConfig};
+    use rust_decimal_macros::dec;
 
     use super::BreakerThresholds;
 
     #[test]
-    fn breaker_thresholds_reject_invalid_or_negative_daily_cap() {
-        for value in ["not-a-decimal", "-1"] {
-            let config = ExecutionBreakerConfig {
-                daily_realized_loss_cap_usd: DecimalString::new(value),
-                ..ExecutionBreakerConfig::default()
-            };
-            assert!(BreakerThresholds::new(config).is_err());
-        }
+    fn breaker_thresholds_reject_negative_daily_cap() {
+        let config = ExecutionBreakerConfig {
+            daily_realized_loss_cap_usd: DecimalValue::new(dec!(-1)),
+            ..ExecutionBreakerConfig::default()
+        };
+        assert!(BreakerThresholds::new(config).is_err());
     }
 }

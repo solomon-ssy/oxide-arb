@@ -215,7 +215,7 @@ fn validate_sampled_feature_parity(
     }
     if job.kind != ResearchJobKind::FeatureParity
         || job.status != ResearchJobStatus::Queued
-        || job.runtime_config_version_id.as_ref() != Some(&report.runtime_config_version_id)
+        || job.decision_policy_snapshot_id.as_ref() != Some(&report.decision_policy_snapshot_id)
         || job.model_spec_id.is_some()
         || job.parent_job_id.is_some()
         || job.recovery_attempt != 0
@@ -240,7 +240,7 @@ fn validate_report_data_quality(
 ) -> Result<(), StorageError> {
     let wrong_snapshot = dq.report_data_quality_snapshot_id != report.data_quality_snapshot_ref;
     let wrong_decision = dq.decision_at != report.decision_at;
-    let wrong_config = dq.runtime_config_version_id != report.runtime_config_version_id;
+    let wrong_config = dq.decision_policy_snapshot_id != report.decision_policy_snapshot_id;
     if wrong_snapshot || wrong_decision || wrong_config {
         return Err(StorageError::invariant_violation(
             Some(entity::QUANT_RECOMMENDATION_REPORT),
@@ -809,7 +809,7 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
             || run.lease_expires_at != Some(run_claim.lease_expires_at)
             || run_claim.lease_expires_at <= commit_at
             || run.output_report_id.is_some()
-            || run.runtime_config_version_id.as_ref() != Some(&report.runtime_config_version_id)
+            || run.decision_policy_snapshot_id.as_ref() != Some(&report.decision_policy_snapshot_id)
             || run.decision_at != Some(report.decision_at)
             || run.top_n != Some(report.top_n)
         {

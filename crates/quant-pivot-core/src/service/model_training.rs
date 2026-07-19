@@ -30,7 +30,7 @@ use quant_pivot_models::{
     },
     runtime_config::sections::FactorsConfig,
     types::{
-        ModelInputContract, ModelRunId, ModelSpecId, ModelVersionId, RuntimeConfigVersionId,
+        DecisionPolicySnapshotId, ModelInputContract, ModelRunId, ModelSpecId, ModelVersionId,
         TrainingDatasetId, training::TrainingSampleSource,
     },
 };
@@ -90,15 +90,9 @@ pub(crate) fn weighted_seed_weights(
         .factor_weights
         .weights
         .iter()
-        .filter_map(|(name, value)| {
-            value
-                .value
-                .parse::<Decimal>()
-                .ok()
-                .map(|weight| FactorWeight {
-                    factor: FactorName::new(name.clone()),
-                    weight,
-                })
+        .map(|(name, value)| FactorWeight {
+            factor: FactorName::new(name.clone()),
+            weight: value.value,
         })
         .collect();
     if !configured.is_empty() {
@@ -165,7 +159,7 @@ pub struct TrainModelInput {
     /// Frozen dataset to train on.
     pub training_dataset_id: TrainingDatasetId,
     /// Frozen runtime-config version (provenance on the run).
-    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     /// Family to train.
     pub model_family: ModelFamily,
     /// Exact ordered raw-input contract frozen by the owning model spec.
@@ -393,6 +387,7 @@ impl ModelTrainerService {
                 }
             };
 
+        let category_scope = artifact.category_scope();
         let metrics_json = attach_artifact_diagnostics(metrics_json, &artifact)?;
         let trade_policy_artifact_id = artifact.header().trade_policy_artifact_id.clone();
         let trade_policy_hash = artifact.header().trade_policy_hash.clone();
@@ -416,6 +411,7 @@ impl ModelTrainerService {
                 model_spec_id: input.model_spec_id.clone(),
                 version,
                 artifact_hash,
+                category_scope,
                 profile_ref: manifest.profile_ref.clone(),
                 training_dataset_id: Some(input.training_dataset_id.clone()),
                 trade_policy_artifact_id,
@@ -632,7 +628,7 @@ impl ModelTrainerService {
                 model_run_id: model_run_id.clone(),
                 run_kind: ModelRunKind::Training,
                 model_version_id: None,
-                runtime_config_version_id: input.runtime_config_version_id.clone(),
+                decision_policy_snapshot_id: input.decision_policy_snapshot_id.clone(),
                 market_selection_id: None,
                 window_start: dataset.window_start,
                 window_end: dataset.window_end,

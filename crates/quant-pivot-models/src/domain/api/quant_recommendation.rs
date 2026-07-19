@@ -131,7 +131,7 @@ pub struct QuantEvidenceView {
     pub model_run_id: String,
     pub market_selection_id: String,
     pub book_snapshot_ref: String,
-    pub runtime_config_version_id: String,
+    pub decision_policy_snapshot_id: String,
     pub model_version_id: String,
     pub factor_definition_versions: Vec<String>,
     pub data_quality_snapshot_ref: String,
@@ -155,7 +155,7 @@ impl QuantEvidenceView {
             model_run_id: evidence.model_run_id.to_string(),
             market_selection_id: evidence.market_selection_id.to_string(),
             book_snapshot_ref: evidence.book_snapshot_ref.canonical_string(),
-            runtime_config_version_id: evidence.runtime_config_version_id.to_string(),
+            decision_policy_snapshot_id: evidence.decision_policy_snapshot_id.to_string(),
             model_version_id: evidence.model_version_id.to_string(),
             factor_definition_versions: evidence
                 .factor_definition_versions

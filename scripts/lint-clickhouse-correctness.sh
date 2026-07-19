@@ -6,9 +6,6 @@ cd "$ROOT"
 
 ERRORS=0
 REPLACING_TABLES=(
-  quant_crypto_price_report
-  quant_weather_observation_report
-  quant_weather_forecast_point
   quant_domain_event
   quant_entry_condition_evaluation_event
   quant_feature_parity_event

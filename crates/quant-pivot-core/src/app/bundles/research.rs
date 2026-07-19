@@ -25,7 +25,6 @@ use quant_pivot_models::{
     config::DeployConfig,
     domain::{
         CalibrationArtifactFitPort, FactorGovernancePort, ModelGovernancePort, ModelSpecPort,
-        RuntimeConfigPort,
     },
 };
 use quant_pivot_repository::{
@@ -36,8 +35,8 @@ use quant_pivot_repository::{
         ClobMarketInfoRepository, FactWriter, FactorRepository, FeatureParityRepository,
         FeatureRepository, MarketLinkageRepository, MarketRepository, MarketSelectionRepository,
         ModelComparisonReportRepository, ModelGovernanceAuditRepository, ModelRegistryRepository,
-        ModelRunRepository, PositionRepository, QuantFactReadRepository, RecommendationRepository,
-        RuntimeConfigVersionRepository, ShadowComparisonRepository, SourceSliceRepository,
+        ModelRunRepository, PolicyRepository, PositionRepository, QuantFactReadRepository,
+        RecommendationRepository, ShadowComparisonRepository, SourceSliceRepository,
         TradePolicyRepository, TradeTapeBlockCursorRepository, TrainingDatasetRepository,
     },
 };
@@ -406,10 +405,6 @@ impl ResearchBundle {
         frozen_model_parity: &Arc<FrozenModelParityService>,
     ) -> Arc<dyn ModelGovernancePort> {
         let gate: Arc<dyn ModelQualityGate> = Arc::new(DefaultModelQualityGate::new());
-        let runtime_config_repo: Arc<dyn RuntimeConfigVersionRepository> =
-            Arc::clone(&deps.infra.repos.runtime_config) as Arc<dyn RuntimeConfigVersionRepository>;
-        let runtime_config_apply: Arc<dyn RuntimeConfigPort> =
-            Arc::clone(&deps.governance.applicator) as Arc<dyn RuntimeConfigPort>;
         Arc::new(ModelGovernanceService::new(ModelGovernanceDeps {
             model_registry_repo: Arc::clone(model_registry_repo),
             backtest_report_repo: Arc::clone(&offline.backtest_report),
@@ -423,8 +418,6 @@ impl ResearchBundle {
             calibration_loader: Arc::clone(calibration_loader),
             gate,
             runtime_config: Arc::clone(&deps.governance.runtime_config),
-            runtime_config_apply,
-            runtime_config_repo,
             feature_parity_gate: Arc::new(RepositoryFeatureParityGate::new(Arc::clone(
                 &deps.infra.repos.feature_parity,
             )
@@ -454,7 +447,7 @@ fn assemble_calibration_artifact_fit(
         Arc::clone(market_linkage_repo),
         Arc::clone(&deps.infra.repos.calibration_artifact)
             as Arc<dyn CalibrationArtifactRepository>,
-        Arc::clone(&deps.infra.repos.runtime_config) as Arc<dyn RuntimeConfigVersionRepository>,
+        Arc::clone(&deps.infra.repos.runtime_config) as Arc<dyn PolicyRepository>,
         Arc::clone(&offline.training_dataset) as Arc<dyn TrainingDatasetRepository>,
     ))
 }

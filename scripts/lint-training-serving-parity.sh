@@ -176,7 +176,8 @@ check_production_prefix_forbidden \
     "Checking domain-ingest cursor integrity" \
     "persisted cursor status/time must be validated; an unknown status or failed initial read cannot invent a bootstrap checkpoint" \
     'DomainCursorStatus::parse\([^;\n]*\)\.unwrap_or|\.find\([^;\n]*\)\s*\.await\s*\.ok\(\)\s*\.flatten\(\)|map_or_else\(Utc::now,[^;\n]*last_event_time' \
-    crates/quant-pivot-core/src/service/domain_ingest.rs
+    crates/quant-pivot-core/src/service/crypto_kline_ingest.rs \
+    crates/quant-pivot-core/src/service/weather_fact_ingest.rs
 
 check_forbidden \
     "Checking for the retired classical missing-value protocol" \

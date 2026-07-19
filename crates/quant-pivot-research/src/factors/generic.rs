@@ -430,7 +430,7 @@ pub(super) fn extract_decimal(value: &FeatureValue) -> Option<Decimal> {
 /// full trust, Insufficient is none), not the tunable *normalization* heuristics
 /// audit #3 removed — those (winsor / clamp / min-max) are fully config-driven in
 /// [`crate::factors::normalize`]. Keeping this mapping fixed also preserves the
-/// factor engine's infallible construction (no per-compute `DecimalString`
+/// factor engine's infallible construction (no per-compute `DecimalValue`
 /// parse). Distributional tuning of the alpha itself is learned in 11.4.
 pub(super) fn data_quality_confidence(status: DataQualityStatus) -> Decimal {
     match status {

@@ -3,39 +3,58 @@
 use super::sea_orm_active_enums::{
     QpAccountSource, QpMarketCategory, QpOutcomeSide, QpPositionLedgerState,
 };
-use sea_orm::{entity::prelude::*, sea_query::Expr};
+use sea_orm::entity::prelude::*;
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
-#[sea_orm(schema_name = "public", table_name = "quant_position")]
+#[sea_orm(table_name = "quant_position")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub position_id: Uuid,
     pub order_intent_id: Uuid,
     #[sea_orm(column_type = "Text")]
     pub token_id: String,
-    #[sea_orm(column_type = "String(StringLen::N(66))")]
+    #[sea_orm(column_type = "Text")]
     pub market_id: String,
     #[sea_orm(column_type = "Text", nullable)]
     pub event_id: Option<String>,
-    #[sea_orm(column_type = "Custom(QpMarketCategory::name())")]
     pub category: QpMarketCategory,
     pub side: QpOutcomeSide,
     pub state: QpPositionLedgerState,
-    #[sea_orm(column_type = "Decimal(Some((38, 18)))")]
     pub shares: Decimal,
-    #[sea_orm(column_type = "Decimal(Some((20, 18)))")]
     pub avg_price: Decimal,
-    #[sea_orm(column_type = "Decimal(Some((28, 8)))")]
     pub cost_usd: Decimal,
-    #[sea_orm(column_type = "Decimal(Some((28, 8)))")]
     pub realized_pnl_usd: Decimal,
     pub source: QpAccountSource,
-    #[sea_orm(default_expr = "Expr::cust(\"statement_timestamp()\")")]
     pub opened_at: DateTimeWithTimeZone,
-    #[sea_orm(default_expr = "Expr::cust(\"statement_timestamp()\")")]
     pub updated_at: DateTimeWithTimeZone,
     pub closed_at: Option<DateTimeWithTimeZone>,
+    #[sea_orm(
+        belongs_to,
+        from = "event_id",
+        to = "event_id",
+        on_update = "NoAction",
+        on_delete = "NoAction"
+    )]
+    pub event: BelongsTo<Option<super::event::Entity>>,
+    #[sea_orm(
+        belongs_to,
+        from = "market_id",
+        to = "market_id",
+        on_update = "NoAction",
+        on_delete = "NoAction"
+    )]
+    pub market: BelongsTo<super::market::Entity>,
+    #[sea_orm(
+        belongs_to,
+        from = "order_intent_id",
+        to = "order_intent_id",
+        on_update = "NoAction",
+        on_delete = "NoAction"
+    )]
+    pub quant_order_intent: BelongsTo<super::quant_order_intent::Entity>,
+    #[sea_orm(has_many)]
+    pub quant_settlement_redeem_lots: HasMany<super::quant_settlement_redeem_lot::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

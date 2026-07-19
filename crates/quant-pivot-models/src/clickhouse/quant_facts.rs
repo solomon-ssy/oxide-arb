@@ -9,10 +9,10 @@ use crate::{
         ChQuantLedgerEventKind, ChRecommendationAttributionOutcome,
     },
     types::{
-        CapitalAllocationId, EventId, ExecutionOrderId, FeatureParityEventId, FeatureParityRunId,
-        FeatureVectorId, MarketId, MarketSelectionId, ModelRunId, ModelVersionId, OrderId,
-        OrderIntentId, PositionId, RecommendationId, RecommendationReportId,
-        RuntimeConfigVersionId, SignalCandidateId, TokenId, TrainingDatasetId,
+        CapitalAllocationId, DecisionPolicySnapshotId, EventId, ExecutionOrderId,
+        FeatureParityEventId, FeatureParityRunId, FeatureVectorId, MarketId, MarketSelectionId,
+        ModelRunId, ModelVersionId, OrderId, OrderIntentId, PositionId, RecommendationId,
+        RecommendationReportId, SignalCandidateId, TokenId, TrainingDatasetId,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 pub struct QuantFeatureEventRow {
     pub event_time: i64,
     pub feature_vector_id: FeatureVectorId,
-    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub decision_at: i64,
     pub knowledge_cutoff: i64,
     pub per_source_cutoffs_json: String,
@@ -223,7 +223,7 @@ pub struct ReportMarketFunnelRow {
     pub profile_id: String,
     pub profile_version: u32,
     pub profile_content_hash: String,
-    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub model_version_id: ModelVersionId,
     pub model_run_id: Option<ModelRunId>,
     pub market_id: MarketId,

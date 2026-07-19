@@ -29,9 +29,9 @@ use quant_pivot_models::{
         evaluate_intent_approval_invalidation,
     },
     entities::{
-        operation_log, quant_capital_allocation, quant_entry_condition_instance,
-        quant_order_intent, quant_recommendation, quant_recommendation_report,
-        runtime_config_activation, runtime_config_version, system_kill_switch,
+        decision_policy_snapshot, operation_log, policy_activation, quant_capital_allocation,
+        quant_entry_condition_instance, quant_order_intent, quant_recommendation,
+        quant_recommendation_report, system_kill_switch,
     },
     enums::{
         execution::{ApprovalInvalidation, CapitalAllocationState},
@@ -40,8 +40,8 @@ use quant_pivot_models::{
         rbac::ResourceType,
     },
     types::{
-        EntryOrderSpec, OperationLogId, OrderIntentId, RecommendationId, RecommendationReportId,
-        RuntimeConfigVersionId, ScaleOutState, Usd,
+        DecisionPolicySnapshotId, EntryOrderSpec, OperationLogId, OrderIntentId, RecommendationId,
+        RecommendationReportId, ScaleOutState, Usd,
     },
 };
 use sea_orm::{
@@ -168,19 +168,19 @@ impl OrderIntentRepository for PgOrderIntentRepository {
         }
 
         let (rec, report) = load_recommendation_with_report(&txn, &row.recommendation_id).await?;
-        let active_config_version_id = load_current_config_version_id(&txn).await?;
+        let active_policy_snapshot_id = load_current_policy_snapshot_id(&txn).await?;
         let kill_switch_allows_entry = load_kill_switch_allows_entry(&txn).await?;
 
         let invalidation = if row.expires_at <= now {
             Some(ApprovalInvalidation::IntentExpired)
         } else {
-            match active_config_version_id.as_ref() {
-                Some(active_version_id) => evaluate_intent_approval_invalidation(
+            match active_policy_snapshot_id.as_ref() {
+                Some(active_snapshot_id) => evaluate_intent_approval_invalidation(
                     &rec,
                     &report,
                     kill_switch_allows_entry,
-                    active_version_id,
-                    &row.runtime_config_version_id,
+                    active_snapshot_id,
+                    &row.decision_policy_snapshot_id,
                     &row.risk_envelope_hash,
                     now,
                 ),
@@ -616,19 +616,19 @@ async fn load_recommendation_with_report(
     Ok((rec.into(), report.into()))
 }
 
-async fn load_current_config_version_id(
+async fn load_current_policy_snapshot_id(
     db: &impl ConnectionTrait,
-) -> Result<Option<RuntimeConfigVersionId>, StorageError> {
-    runtime_config_version::Entity::find()
+) -> Result<Option<DecisionPolicySnapshotId>, StorageError> {
+    decision_policy_snapshot::Entity::find()
         .join_rev(
             JoinType::InnerJoin,
-            runtime_config_activation::Relation::Version.def(),
+            policy_activation::Relation::Snapshot.def(),
         )
-        .order_by_desc(runtime_config_activation::Column::ActivatedAt)
+        .order_by_desc(policy_activation::Column::ActivatedAt)
         .one(db)
         .await
         .map_err(StorageError::from)
-        .map(|row| row.map(|version| version.runtime_config_version_id))
+        .map(|row| row.map(|version| version.decision_policy_snapshot_id))
 }
 
 async fn load_kill_switch_allows_entry(db: &impl ConnectionTrait) -> Result<bool, StorageError> {

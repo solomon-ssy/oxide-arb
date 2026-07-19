@@ -12,7 +12,7 @@ use crate::{
         kill_switch::KillSwitchHandle,
         quality_gate_load::{active_load_ok, active_publication_status_ok, shadow_load_ok},
     },
-    runtime_config::RuntimeConfigStore,
+    runtime_config::DecisionPolicyStore,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
@@ -24,8 +24,7 @@ use quant_pivot_models::{
         execution::KillSwitchState,
         quant::{ExecutionWalletKind, QuantRuntimeMode},
     },
-    runtime_config::{ModelVersionRef, RuntimeConfig, validate_runtime_config},
-    types::ModelVersionId,
+    runtime_config::{DecisionPolicySnapshot, ModelVersionRef, validate_runtime_config},
 };
 use quant_pivot_repository::traits::{
     CapitalAllocationRepository, ModelRegistryRepository, ReconciliationRepository,
@@ -33,9 +32,6 @@ use quant_pivot_repository::traits::{
 };
 use rust_decimal::Decimal;
 use std::sync::Arc;
-
-/// Maximum tolerated share of stale tokens (basis points) for "data quality green".
-const MAX_STALE_RATIO_BPS: u64 = 2_000;
 
 /// Mode-upgrade preflight boundary.
 #[async_trait]
@@ -51,7 +47,7 @@ pub trait ModePreflight: Send + Sync {
 /// Read-only dependency bundle for [`DefaultModePreflight`].
 pub struct ModePreflightDeps {
     pub deploy: Arc<DeployConfig>,
-    pub config_store: Arc<RuntimeConfigStore>,
+    pub config_store: Arc<DecisionPolicyStore>,
     pub data_quality: Arc<dyn DataQualityPort>,
     pub model_registry: Arc<dyn ModelRegistryRepository>,
     pub shadow_comparison: Arc<dyn ShadowComparisonRepository>,
@@ -84,7 +80,7 @@ impl ModePreflight for DefaultModePreflight {
             self.check_jwt(target),
             self.check_order_client_ready(),
             self.check_model_available(&config, now).await?,
-            self.check_data_quality(),
+            self.check_data_quality(&config),
             self.check_no_unresolvable().await?,
             self.check_no_impaired_capital().await?,
             Self::check_runtime_config_valid(&config),
@@ -172,7 +168,7 @@ impl DefaultModePreflight {
         )
     }
 
-    fn check_data_quality(&self) -> PreflightCheck {
+    fn check_data_quality(&self, config: &DecisionPolicySnapshot) -> PreflightCheck {
         let snapshot = self.deps.data_quality.snapshot();
         let stale_bps = if snapshot.total_tokens == 0 {
             u64::MAX
@@ -185,7 +181,7 @@ impl DefaultModePreflight {
         let green = snapshot.total_tokens > 0
             && !snapshot.ingest_lag_exceeded
             && snapshot.insufficient == 0
-            && stale_bps <= MAX_STALE_RATIO_BPS;
+            && stale_bps <= config.recommendation.data_quality.max_stale_book_ratio_bps;
         let detail = format!(
             "tokens={}, insufficient={}, stale={}, ingest_lag_exceeded={}",
             snapshot.total_tokens,
@@ -222,7 +218,7 @@ impl DefaultModePreflight {
         ))
     }
 
-    fn check_runtime_config_valid(config: &RuntimeConfig) -> PreflightCheck {
+    fn check_runtime_config_valid(config: &DecisionPolicySnapshot) -> PreflightCheck {
         let report = validate_runtime_config(config);
         let passed = !report.has_errors();
         let detail = if passed {
@@ -235,11 +231,11 @@ impl DefaultModePreflight {
 
     async fn check_model_available(
         &self,
-        config: &RuntimeConfig,
+        config: &DecisionPolicySnapshot,
         now: DateTime<Utc>,
     ) -> QuantResult<PreflightCheck> {
-        let min_age = config.model.min_quality_gate_age_secs;
-        let active = match &config.model.active_model_version_id {
+        let min_age = config.model_routing.model.min_quality_gate_age_secs;
+        let active = match &config.model_routing.model.active_model_version_id {
             Some(reference) => self.active_status(reference, min_age, now).await?,
             None => Err("no active model configured".to_owned()),
         };
@@ -250,7 +246,7 @@ impl DefaultModePreflight {
                 "active published model is loadable",
             ));
         }
-        let shadow = match &config.model.shadow_model_version_id {
+        let shadow = match &config.model_routing.model.shadow_model_version_id {
             Some(reference) => self.shadow_status(reference, min_age, now).await?,
             None => Err("no shadow model configured".to_owned()),
         };
@@ -271,24 +267,18 @@ impl DefaultModePreflight {
         }
     }
 
-    async fn check_published_model(&self, config: &RuntimeConfig) -> QuantResult<PreflightCheck> {
-        let Some(reference) = &config.model.active_model_version_id else {
+    async fn check_published_model(
+        &self,
+        config: &DecisionPolicySnapshot,
+    ) -> QuantResult<PreflightCheck> {
+        let Some(reference) = &config.model_routing.model.active_model_version_id else {
             return Ok(PreflightCheck::hard(
                 "published_model",
                 false,
                 "auto_execution requires an active published model",
             ));
         };
-        let id = match ModelVersionId::try_from(reference) {
-            Ok(id) => id,
-            Err(error) => {
-                return Ok(PreflightCheck::hard(
-                    "published_model",
-                    false,
-                    format!("invalid active model ref: {error}"),
-                ));
-            }
-        };
+        let id = reference.id.clone();
         let Some(version) = self
             .deps
             .model_registry
@@ -309,27 +299,22 @@ impl DefaultModePreflight {
 
     async fn check_shadow_period(
         &self,
-        config: &RuntimeConfig,
+        config: &DecisionPolicySnapshot,
         now: DateTime<Utc>,
     ) -> QuantResult<PreflightCheck> {
-        let Some(reference) = &config.model.shadow_model_version_id else {
+        let Some(reference) = &config.model_routing.model.shadow_model_version_id else {
             return Ok(PreflightCheck::hard(
                 "shadow_period_complete",
                 true,
                 "no shadow configured; active model cleared its publish-time shadow gate",
             ));
         };
-        let id = match ModelVersionId::try_from(reference) {
-            Ok(id) => id,
-            Err(error) => {
-                return Ok(PreflightCheck::hard(
-                    "shadow_period_complete",
-                    false,
-                    format!("invalid shadow model ref: {error}"),
-                ));
-            }
-        };
-        let required = config.quality_gate.required_shadow_window_secs;
+        let id = reference.id.clone();
+        let required = config
+            .profile_artifacts
+            .research_method
+            .model_promotion
+            .required_shadow_window_secs;
         let since = now - Duration::seconds(i64::try_from(required).unwrap_or(i64::MAX));
         let summary = self.deps.shadow_comparison.summary(&id, since).await?;
         let covered = match (summary.window_start, summary.window_end) {
@@ -350,21 +335,16 @@ impl DefaultModePreflight {
         ))
     }
 
-    fn check_auto_policy(config: &RuntimeConfig) -> PreflightCheck {
-        let auto = &config.execution.auto_execution;
-        let capital = &config.execution.capital;
-        let ok = auto.min_score.value.parse::<Decimal>().is_ok()
-            && auto.min_confidence.value.parse::<Decimal>().is_ok()
-            && auto
-                .max_total_usd_per_report
-                .value
-                .parse::<Decimal>()
-                .is_ok()
-            && capital.max_reserved_usd.value.parse::<Decimal>().is_ok();
+    fn check_auto_policy(config: &DecisionPolicySnapshot) -> PreflightCheck {
+        let auto = &config.execution_authorization.auto_execution;
+        let capital = &config.execution_risk.capital;
+        let ok = (Decimal::ZERO..=Decimal::ONE).contains(&auto.min_confidence.value)
+            && auto.max_total_usd_per_report.value >= Decimal::ZERO
+            && capital.max_reserved_usd.value >= Decimal::ZERO;
         PreflightCheck::hard(
             "auto_policy_valid",
             ok,
-            "execution.auto_execution + capital thresholds parseable",
+            "execution.auto_execution + capital thresholds satisfy typed ranges",
         )
     }
 
@@ -377,14 +357,14 @@ impl DefaultModePreflight {
         )
     }
 
-    fn check_capital_budget(config: &RuntimeConfig) -> PreflightCheck {
+    fn check_capital_budget(config: &DecisionPolicySnapshot) -> PreflightCheck {
         let budget = config
+            .execution_risk
             .portfolio
             .budget
             .total_budget_usd
-            .value
-            .parse::<Decimal>();
-        let ok = matches!(budget, Ok(value) if value > Decimal::ZERO);
+            .value;
+        let ok = budget > Decimal::ZERO;
         PreflightCheck::hard(
             "max_capital_budget_set",
             ok,
@@ -406,10 +386,7 @@ impl DefaultModePreflight {
         min_age: u64,
         now: DateTime<Utc>,
     ) -> QuantResult<Result<(), String>> {
-        let id = match ModelVersionId::try_from(reference) {
-            Ok(id) => id,
-            Err(error) => return Ok(Err(format!("invalid active model ref: {error}"))),
-        };
+        let id = reference.id.clone();
         let Some(version) = self
             .deps
             .model_registry
@@ -427,10 +404,7 @@ impl DefaultModePreflight {
         min_age: u64,
         now: DateTime<Utc>,
     ) -> QuantResult<Result<(), String>> {
-        let id = match ModelVersionId::try_from(reference) {
-            Ok(id) => id,
-            Err(error) => return Ok(Err(format!("invalid shadow model ref: {error}"))),
-        };
+        let id = reference.id.clone();
         let Some(version) = self
             .deps
             .model_registry

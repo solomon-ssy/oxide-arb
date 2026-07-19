@@ -14,7 +14,7 @@ use validator::Validate;
 
 use crate::{
     domain::{
-        BasisAlertInfo, DomainSourceCheckpoint, DomainSourceCursorInfo,
+        BasisAlertInfo, DomainCursorStatus, DomainSourceCheckpoint, DomainSourceCursorInfo,
         DomainSourceExpectationInfo, LinkageOutcome, ManualEvidenceInput, MarketLinkageInfo,
         ResolvedSourceBinding, pagination::PageRequest,
     },
@@ -265,7 +265,7 @@ pub struct DomainSourceExpectationView {
     pub affected_profile_ids: Vec<String>,
     pub status: DomainSourceExpectationStatus,
     pub status_reason: Option<String>,
-    pub cursor_status: Option<String>,
+    pub cursor_status: Option<DomainCursorStatus>,
     pub checkpoint: Option<DomainSourceCheckpoint>,
     pub checkpoint_hash: Option<ContentHash>,
     pub last_event_time: Option<DateTime<Utc>>,
@@ -356,8 +356,8 @@ fn effective_source_status(
             Some("cursor_not_created".to_owned()),
         );
     };
-    match cursor.status.as_str() {
-        "error" => (
+    match cursor.status {
+        DomainCursorStatus::Failed => (
             DomainSourceExpectationStatus::Failed,
             Some(
                 cursor
@@ -366,23 +366,19 @@ fn effective_source_status(
                     .unwrap_or_else(|| "cursor_error_without_detail".to_owned()),
             ),
         ),
-        "bootstrap" | "backfilling" => (
+        DomainCursorStatus::Bootstrap | DomainCursorStatus::Backfilling => (
             DomainSourceExpectationStatus::NotStarted,
             Some(format!("cursor_{}", cursor.status)),
         ),
-        "live" if *lag_secs < 0 => (
+        DomainCursorStatus::Live if *lag_secs < 0 => (
             DomainSourceExpectationStatus::Failed,
             Some("cursor_event_time_in_future".to_owned()),
         ),
-        "live" if *lag_secs > expected.freshness_secs => (
+        DomainCursorStatus::Live if *lag_secs > expected.freshness_secs => (
             DomainSourceExpectationStatus::Stale,
             Some("freshness_budget_exceeded".to_owned()),
         ),
-        "live" => (DomainSourceExpectationStatus::Live, None),
-        _ => (
-            DomainSourceExpectationStatus::Failed,
-            Some("unknown_cursor_status".to_owned()),
-        ),
+        DomainCursorStatus::Live => (DomainSourceExpectationStatus::Live, None),
     }
 }
 
@@ -454,8 +450,8 @@ mod tests {
     use super::DomainSourceExpectationView;
     use crate::{
         domain::{
-            AffectedMarketIds, AffectedProfileIds, DomainSourceCheckpoint, DomainSourceCursorInfo,
-            DomainSourceExpectationInfo,
+            AffectedMarketIds, AffectedProfileIds, DomainCursorStatus, DomainSourceCheckpoint,
+            DomainSourceCursorInfo, DomainSourceExpectationInfo,
         },
         enums::domain::{DomainFamily, DomainSourceExpectationStatus},
         types::{ContentHash, DomainInstrumentKey, DomainSourceExpectationId, DomainSourceId},
@@ -501,7 +497,7 @@ mod tests {
                 report_hash: hash('c'),
             },
             checkpoint_hash: hash('d'),
-            status: "live".to_owned(),
+            status: DomainCursorStatus::Live,
             last_error: None,
             created_at: event_time,
             updated_at: event_time,

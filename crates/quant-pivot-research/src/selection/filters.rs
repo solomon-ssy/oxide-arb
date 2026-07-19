@@ -12,14 +12,14 @@
 //! or a never-published book all reject the candidate rather than admit it on
 //! incomplete evidence — money decisions must be made on data we actually have.
 
-use std::{collections::HashSet, str::FromStr};
+use std::collections::HashSet;
 
 use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
     domain::{MarketCandidate, MarketDataHealth},
     enums::{common::MarketCategory, market::MarketStatus},
-    runtime_config::{DataQualityConfig, DecimalString, SelectionConfig},
+    runtime_config::{DataQualityConfig, SelectionConfig},
     types::{Bps, SelectionExclusionSummary, Usd},
 };
 use rust_decimal::Decimal;
@@ -30,8 +30,8 @@ use crate::{
 };
 
 /// Once-per-round resolution of every config threshold the filters compare
-/// against, parsed out of the string/`DecimalString` config wire forms so the
-/// hot filter loop performs no parsing or allocation.
+/// against. Typed decimal values cross the governance boundary without string
+/// parsing or allocation in the hot filter loop.
 #[derive(Debug, Clone)]
 pub struct SelectionThresholds {
     /// Categories eligible for selection.
@@ -69,8 +69,8 @@ impl SelectionThresholds {
     ) -> QuantResult<Self> {
         Ok(Self {
             enabled_categories: selection.enabled_categories.iter().copied().collect(),
-            min_liquidity_usd: parse_usd(&selection.min_liquidity_usd)?,
-            min_volume_24h_usd: parse_usd(&selection.min_volume_24h_usd)?,
+            min_liquidity_usd: Usd::new(selection.min_liquidity_usd.value),
+            min_volume_24h_usd: Usd::new(selection.min_volume_24h_usd.value),
             max_spread_bps: Decimal::from(selection.max_spread_bps),
             allow_near_resolution: selection.allow_near_resolution,
             min_time_to_resolution_secs: i64::try_from(selection.min_time_to_resolution_secs)
@@ -91,14 +91,6 @@ impl SelectionThresholds {
             reject_empty_books: data_quality.reject_empty_books,
         })
     }
-}
-
-/// Parse a `DecimalString` threshold into a `Usd`, failing closed on garbage.
-fn parse_usd(value: &DecimalString) -> QuantResult<Usd> {
-    let raw = value.value.trim();
-    let decimal = Decimal::from_str(raw)
-        .map_err(|err| QuantError::config(format!("invalid decimal threshold `{raw}`: {err}")))?;
-    Ok(Usd::new(decimal))
 }
 
 /// Everything one filter needs to judge a single market, all borrowed.

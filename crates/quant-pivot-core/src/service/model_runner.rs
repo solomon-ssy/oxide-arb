@@ -20,7 +20,6 @@
 use std::{
     collections::{BTreeSet, HashMap},
     mem,
-    str::FromStr,
     sync::{
         Arc,
         atomic::{AtomicU32, Ordering},
@@ -37,12 +36,12 @@ use quant_pivot_models::{
         quant::{ModelRunKind, ModelRunStatus, OutcomeSide, PublicationStatus},
     },
     runtime_config::{
-        DecimalString, DomainConfig, FactorCrossSectionConfig, FactorsConfig, FeaturesConfig,
-        ModelConfig, ModelVersionRef,
+        DomainConfig, FactorCrossSectionConfig, FactorsConfig, FeaturesConfig, ModelConfig,
+        ModelVersionRef,
     },
     types::{
-        ContentHash, FeatureVectorId, MarketId, MarketSelectionId, ModelRunId, ModelVersionId,
-        Probability, RuntimeConfigVersionId, SignalCandidateId, TokenId,
+        ContentHash, DecisionPolicySnapshotId, FeatureVectorId, MarketId, MarketSelectionId,
+        ModelRunId, ModelVersionId, Probability, SignalCandidateId, TokenId,
     },
 };
 use quant_pivot_repository::traits::{
@@ -121,7 +120,7 @@ impl InferenceAlertSink for DispatcherAlertSink {
 /// Frozen inputs for one inference round.
 pub struct ModelRunRequest<'a> {
     /// Config version governing this round.
-    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     /// The selection snapshot this round scores, when persisted.
     pub market_selection_id: Option<MarketSelectionId>,
     /// Selected markets (token ids, liquidity) for the scoring context.
@@ -338,10 +337,11 @@ impl ModelRunner {
             bias_table_hash: bias_table_hash.clone(),
         };
 
-        let active_version_id = match request.model.active_model_version_id.as_ref() {
-            Some(reference) => Some(ModelVersionId::try_from(reference)?),
-            None => None,
-        };
+        let active_version_id = request
+            .model
+            .active_model_version_id
+            .as_ref()
+            .map(|reference| reference.id.clone());
 
         let model_run_id = ModelRunId::from_v7();
         let input_hash = input_hash(
@@ -436,7 +436,7 @@ impl ModelRunner {
             .active_model_version_id
             .as_ref()
             .ok_or_else(|| QuantError::config("model.active_model_version_id is not configured"))
-            .and_then(ModelVersionId::try_from)?;
+            .map(|reference| reference.id.clone())?;
         let version = self
             .model_registry_repo
             .find_model_version_by_id(&version_id)
@@ -508,7 +508,7 @@ impl ModelRunner {
         factory: &Arc<dyn ModelRuntimeFactory>,
         request: &ActiveModelRequirementsRequest<'_>,
     ) -> QuantResult<Vec<FeatureName>> {
-        let version_id = ModelVersionId::try_from(reference)?;
+        let version_id = reference.id.clone();
         let version = self
             .model_registry_repo
             .find_model_version_by_id(&version_id)
@@ -584,14 +584,8 @@ impl ModelRunner {
             })
             .collect();
 
-        let floor = parse_decimal(
-            &request.model.candidate_score_floor,
-            "candidate_score_floor",
-        )
-        .map_err(|error| (InferenceStage::ActiveInference, error))?;
-        let min_confidence =
-            parse_decimal(&request.model.min_model_confidence, "min_model_confidence")
-                .map_err(|error| (InferenceStage::ActiveInference, error))?;
+        let floor = request.model.candidate_score_floor.value;
+        let min_confidence = request.model.min_model_confidence.value;
         let event_time = Utc::now().timestamp_millis();
         let model_input_rows = project_model_input_rows(
             model_run_id,
@@ -646,20 +640,7 @@ impl ModelRunner {
         active: &ActiveResult,
     ) -> Option<ShadowRunOutcome> {
         let reference = request.model.shadow_model_version_id.as_ref()?;
-        let shadow_version_id = match ModelVersionId::try_from(reference) {
-            Ok(id) => id,
-            Err(error) => {
-                return Some(
-                    finalize_shadow_failure(
-                        &self.model_run_repo,
-                        None,
-                        InferenceStage::ShadowLoad,
-                        error,
-                    )
-                    .await,
-                );
-            }
-        };
+        let shadow_version_id = reference.id.clone();
 
         let model_run_id = ModelRunId::from_v7();
         let input_hash = match input_hash(
@@ -735,11 +716,7 @@ impl ModelRunner {
 
         let output_hash = canonical_business_prediction_hash(&output.candidates)
             .map_err(|error| (InferenceStage::ShadowInference, error))?;
-        let threshold = parse_decimal(
-            &request.model.shadow_diff_threshold,
-            "shadow_diff_threshold",
-        )
-        .map_err(|error| (InferenceStage::ShadowInference, error))?;
+        let threshold = request.model.shadow_diff_threshold.value;
         let diff = shadow_diff(&active.active_index, &output.candidates, threshold);
 
         let event_time = Utc::now().timestamp_millis();
@@ -967,8 +944,7 @@ impl ModelRunner {
         let mut category_routes = HashMap::new();
         let mut runtimes = HashMap::from([(generic_version_id.clone(), generic_runtime)]);
         for (category, reference) in &request.model.category_model_pointers {
-            let version_id = ModelVersionId::try_from(reference)
-                .map_err(|error| (InferenceStage::ActiveLoad, error))?;
+            let version_id = reference.id.clone();
             let version = self.resolve_active_version(&version_id, request).await?;
             let runtime = factory
                 .load(&version, self.resolve_overlay(&version))
@@ -1136,16 +1112,7 @@ impl ModelRunner {
         shadow_version_id: &ModelVersionId,
         shadow_candidates: &[SignalCandidate],
     ) {
-        let threshold = match parse_decimal(
-            &request.model.shadow_diff_threshold,
-            "shadow_diff_threshold",
-        ) {
-            Ok(threshold) => threshold,
-            Err(error) => {
-                tracing::warn!(%error, "skipping shadow comparison: invalid shadow_diff_threshold");
-                return;
-            }
-        };
+        let threshold = request.model.shadow_diff_threshold.value;
         let comparison = match compute_shadow_comparison(
             active.active_version_id.clone(),
             shadow_version_id.clone(),
@@ -1229,7 +1196,7 @@ impl ModelRunner {
             model_run_id: model_run_id.clone(),
             run_kind,
             model_version_id,
-            runtime_config_version_id: request.runtime_config_version_id.clone(),
+            decision_policy_snapshot_id: request.decision_policy_snapshot_id.clone(),
             market_selection_id: request.market_selection_id.clone(),
             window_start: request.boundary.decision_at(),
             window_end: request.boundary.decision_at(),
@@ -1820,12 +1787,6 @@ fn input_hash(
     })
 }
 
-/// Parse a governed decimal-string config value, failing closed.
-fn parse_decimal(value: &DecimalString, field: &str) -> QuantResult<Decimal> {
-    Decimal::from_str(value.value.trim())
-        .map_err(|error| QuantError::config(format!("invalid {field} `{}`: {error}", value.value)))
-}
-
 #[cfg(test)]
 mod tests {
     use super::{AlignedFeatureCrossSection, project_model_input_rows};
@@ -1856,6 +1817,7 @@ mod tests {
             model_family: ModelFamily::WeightedFactor,
             version: 1,
             artifact_hash: ContentHash::parse(format!("blake3:{}", "0".repeat(64))).expect("hash"),
+            category_scope: None,
             profile_ref: fixture_profile_ref(),
             training_dataset_id: None,
             trade_policy_artifact_id: None,

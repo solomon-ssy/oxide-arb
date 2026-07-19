@@ -1,7 +1,8 @@
 //! `quant_backtest_report` table entity.
 
 use crate::types::{
-    BacktestReportId, ContentHash, ModelRunId, ModelVersionId, Probability, RuntimeConfigVersionId,
+    BacktestReportId, ContentHash, DecisionPolicySnapshotId, ModelRunId, ModelVersionId,
+    Probability,
 };
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
@@ -15,7 +16,7 @@ pub struct Model {
     pub backtest_report_id: BacktestReportId,
     pub model_version_id: ModelVersionId,
     pub model_run_id: ModelRunId,
-    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub window_start: DateTime<Utc>,
     pub window_end: DateTime<Utc>,
     pub coverage: Decimal,
@@ -52,6 +53,13 @@ pub struct Model {
         to = "model_run_id"
     )]
     pub model_run: BelongsTo<super::quant_model_run::Entity>,
+    #[sea_orm(
+        belongs_to,
+        relation_enum = "DecisionPolicySnapshot",
+        from = "decision_policy_snapshot_id",
+        to = "decision_policy_snapshot_id"
+    )]
+    pub decision_policy_snapshot: BelongsTo<super::decision_policy_snapshot::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

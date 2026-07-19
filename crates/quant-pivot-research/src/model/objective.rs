@@ -69,16 +69,16 @@ impl TrainingObjectiveSpec {
             optimizer: config.optimizer,
             lambda_tail: parse_non_negative_decimal(
                 "research.training.lambda_tail",
-                &config.lambda_tail.value,
+                config.lambda_tail.value,
             )?,
-            tail_fraction: parse_tail_fraction(&config.tail_fraction.value)?,
+            tail_fraction: parse_tail_fraction(config.tail_fraction.value)?,
             lambda_turnover: parse_non_negative_decimal(
                 "research.training.lambda_turnover",
-                &config.lambda_turnover.value,
+                config.lambda_turnover.value,
             )?,
             lambda_l2: parse_non_negative_decimal(
                 "research.training.lambda_l2",
-                &config.lambda_l2.value,
+                config.lambda_l2.value,
             )?,
             ndcg_k: config.ndcg_k,
             pseudo_top_n: config.pseudo_top_n,
@@ -586,41 +586,31 @@ fn decimal_to_f64(field: &str, value: Decimal) -> QuantResult<f64> {
     })
 }
 
-fn parse_non_negative_decimal(field: &'static str, value: &str) -> QuantResult<Decimal> {
-    let parsed = value
-        .parse::<Decimal>()
-        .map_err(|error| ResearchError::DatasetBuild {
-            detail: format!("{field} must be a decimal string: {error}"),
-        })?;
-    if parsed < Decimal::ZERO {
+fn parse_non_negative_decimal(field: &'static str, value: Decimal) -> QuantResult<Decimal> {
+    if value < Decimal::ZERO {
         return Err(ResearchError::DatasetBuild {
-            detail: format!("{field} must be >= 0, got {parsed}"),
+            detail: format!("{field} must be >= 0, got {value}"),
         }
         .into());
     }
-    Ok(parsed)
+    Ok(value)
 }
 
-fn parse_tail_fraction(value: &str) -> QuantResult<Decimal> {
-    let parsed = value
-        .parse::<Decimal>()
-        .map_err(|error| ResearchError::DatasetBuild {
-            detail: format!("research.training.tail_fraction must be a decimal string: {error}"),
-        })?;
-    if parsed <= Decimal::ZERO || parsed > Decimal::ONE {
+fn parse_tail_fraction(value: Decimal) -> QuantResult<Decimal> {
+    if value <= Decimal::ZERO || value > Decimal::ONE {
         return Err(ResearchError::DatasetBuild {
-            detail: format!("research.training.tail_fraction must be within (0, 1], got {parsed}"),
+            detail: format!("research.training.tail_fraction must be within (0, 1], got {value}"),
         }
         .into());
     }
-    Ok(parsed)
+    Ok(value)
 }
 
 #[cfg(test)]
 mod tests {
     use chrono::{TimeZone, Utc};
     use quant_pivot_models::runtime_config::{
-        RankLossKind, ResearchTrainingConfig, TrainingOptimizerKind, wire::DecimalString,
+        RankLossKind, ResearchTrainingConfig, TrainingOptimizerKind, wire::DecimalValue,
     };
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
@@ -830,10 +820,10 @@ mod tests {
         let config = ResearchTrainingConfig {
             rank_loss: RankLossKind::PairwiseRanknet,
             optimizer: TrainingOptimizerKind::CoordinateSearch,
-            lambda_tail: DecimalString::new("0.25"),
-            tail_fraction: DecimalString::new("0.05"),
-            lambda_turnover: DecimalString::new("0.1"),
-            lambda_l2: DecimalString::new("0.02"),
+            lambda_tail: DecimalValue::new(rust_decimal_macros::dec!(0.25)),
+            tail_fraction: DecimalValue::new(rust_decimal_macros::dec!(0.05)),
+            lambda_turnover: DecimalValue::new(rust_decimal_macros::dec!(0.1)),
+            lambda_l2: DecimalValue::new(rust_decimal_macros::dec!(0.02)),
             ndcg_k: 7,
             pseudo_top_n: 4,
         };

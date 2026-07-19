@@ -6,8 +6,8 @@ use sea_orm::entity::prelude::*;
 use crate::{
     enums::quant::SourceSliceStatus,
     types::{
-        ArtifactUri, ContentHash, ResearchProfileRef, RuntimeConfigVersionId, SourceSliceId,
-        SourceSliceManifestV2,
+        ArtifactUri, ContentHash, DecisionPolicySnapshotId, ResearchProfileRef, SourceSliceId,
+        SourceSliceManifestV1,
     },
 };
 
@@ -22,7 +22,7 @@ pub struct Model {
     pub profile_ref: ResearchProfileRef,
     pub evaluation_track: String,
     pub research_program_hash: ContentHash,
-    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub runtime_config_hash: ContentHash,
     pub window_start: DateTime<Utc>,
     pub window_end: DateTime<Utc>,
@@ -33,18 +33,18 @@ pub struct Model {
     pub manifest_uri: Option<ArtifactUri>,
     pub manifest_hash: Option<ContentHash>,
     #[sea_orm(column_type = "JsonBinary")]
-    pub manifest_json: Option<SourceSliceManifestV2>,
+    pub manifest_json: Option<SourceSliceManifestV1>,
     pub failure_detail: Option<String>,
     pub completed_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
 
     #[sea_orm(
         belongs_to,
-        relation_enum = "RuntimeConfigVersion",
-        from = "runtime_config_version_id",
-        to = "runtime_config_version_id"
+        relation_enum = "DecisionPolicySnapshot",
+        from = "decision_policy_snapshot_id",
+        to = "decision_policy_snapshot_id"
     )]
-    pub runtime_config_version: BelongsTo<super::runtime_config_version::Entity>,
+    pub decision_policy_snapshot: BelongsTo<super::decision_policy_snapshot::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

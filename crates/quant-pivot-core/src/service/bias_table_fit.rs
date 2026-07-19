@@ -39,15 +39,12 @@ use quant_pivot_models::{
         Paginated, WeatherStationLeadBiasArtifactV1, WindowBoundsError, query::TimeWindow,
     },
     enums::{common::MarketCategory, quant::CalibrationKind},
-    runtime_config::{
-        DataQualityConfig, DomainConfig, FactorsConfig, FavoriteLongshotConfig, RuntimeConfig,
-    },
+    runtime_config::{DataQualityConfig, DomainConfig, FactorsConfig, FavoriteLongshotConfig},
     types::{CalibrationArtifactId, MarketId, ResearchJobProgress, TokenId},
 };
 use quant_pivot_repository::traits::{
     CalibrationArtifactRepository, CatalogLedgerRepository, MarketLinkageRepository,
-    MarketRepository, QuantFactReadRepository, RuntimeConfigVersionRepository,
-    TrainingDatasetRepository,
+    MarketRepository, PolicyRepository, QuantFactReadRepository, TrainingDatasetRepository,
 };
 use quant_pivot_research::{
     features::ResolvedBook,
@@ -126,13 +123,8 @@ fn validate_payload_shape(info: &CalibrationArtifactInfo) -> QuantResult<()> {
     Ok(())
 }
 
-/// Parse a runtime-config decimal string (must have passed validation on write).
-fn config_decimal(raw: &str, field: &'static str) -> QuantResult<Decimal> {
-    raw.trim().parse().map_err(|error| {
-        QuantError::from(ResearchError::DatasetBuild {
-            detail: format!("{field} `{raw}` invalid despite config validation: {error}"),
-        })
-    })
+const fn config_decimal(raw: &Decimal, _field: &'static str) -> Decimal {
+    *raw
 }
 
 /// Resolve the favorite-longshot bias table pinned by a **frozen** factor config.
@@ -198,7 +190,7 @@ pub struct BiasTableFitService {
     market_repo: Arc<dyn MarketRepository>,
     linkage_repo: Arc<dyn MarketLinkageRepository>,
     calibration_repo: Arc<dyn CalibrationArtifactRepository>,
-    runtime_config_repo: Arc<dyn RuntimeConfigVersionRepository>,
+    runtime_config_repo: Arc<dyn PolicyRepository>,
     training_dataset_repo: Arc<dyn TrainingDatasetRepository>,
 }
 
@@ -211,7 +203,7 @@ impl BiasTableFitService {
         market_repo: Arc<dyn MarketRepository>,
         linkage_repo: Arc<dyn MarketLinkageRepository>,
         calibration_repo: Arc<dyn CalibrationArtifactRepository>,
-        runtime_config_repo: Arc<dyn RuntimeConfigVersionRepository>,
+        runtime_config_repo: Arc<dyn PolicyRepository>,
         training_dataset_repo: Arc<dyn TrainingDatasetRepository>,
     ) -> Self {
         Self {
@@ -230,7 +222,7 @@ impl BiasTableFitService {
     async fn frozen_fit(&self, params: &BiasTableFitJobParams) -> QuantResult<FrozenFit> {
         let version = self
             .runtime_config_repo
-            .load_version(&params.runtime_config_version_id)
+            .load_snapshot(&params.decision_policy_snapshot_id)
             .await
             .map_err(QuantError::from)?
             .ok_or_else(|| {
@@ -238,12 +230,8 @@ impl BiasTableFitService {
                     detail: "runtime config version for bias-table fit not found".to_owned(),
                 })
             })?;
-        let config = RuntimeConfig::from_json(&version.config_json).map_err(|error| {
-            QuantError::from(ResearchError::DatasetBuild {
-                detail: format!("frozen runtime config parse failed: {error}"),
-            })
-        })?;
-        let max_book_staleness = book_staleness(&config.data_quality);
+        let config = version.snapshot;
+        let max_book_staleness = book_staleness(&config.recommendation.data_quality);
         let knowledge_lag_secs =
             config
                 .pit_knowledge_lag_secs()
@@ -251,7 +239,12 @@ impl BiasTableFitService {
                     detail: "frozen runtime config has no unambiguous PIT knowledge lag".to_owned(),
                 })?;
         Ok(FrozenFit {
-            favorite_longshot: config.factors.structural.favorite_longshot,
+            favorite_longshot: config
+                .profile_artifacts
+                .scoring
+                .definition
+                .structural
+                .favorite_longshot,
             max_book_staleness,
             knowledge_lag: StdDuration::from_secs(knowledge_lag_secs),
         })
@@ -487,11 +480,11 @@ impl CalibrationArtifactFitPort for BiasTableFitService {
             ci_confidence: config_decimal(
                 &config.ci_confidence.value,
                 "factors.structural.favorite_longshot.ci_confidence",
-            )?,
+            ),
             ic_significance_min: config_decimal(
                 &config.ic_significance_min.value,
                 "factors.structural.favorite_longshot.ic_significance_min",
-            )?,
+            ),
         };
         // The split hash anchors the artifact to the *exact* fit sample set
         // (sorted market keys + window), not just a coarse window/count — a real

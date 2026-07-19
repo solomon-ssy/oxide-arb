@@ -47,7 +47,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     app::domain_source_supervisor::DomainSourceSupervisor,
-    runtime_config::RuntimeConfigStore,
+    runtime_config::DecisionPolicyStore,
     service::weather_fact_ingest::{WeatherFactIngestService, WeatherObservationCandidate},
 };
 
@@ -78,7 +78,7 @@ pub struct WeatherIngestWorker {
     facts: WeatherFactIngestService,
     fact_read: Arc<dyn QuantFactReadRepository>,
     calibrations: Arc<dyn CalibrationArtifactRepository>,
-    runtime_config: Arc<RuntimeConfigStore>,
+    runtime_config: Arc<DecisionPolicyStore>,
     aviation: Option<Arc<AviationWeatherSource>>,
     ghcnh: Option<Arc<GhcnhSource>>,
     gefs: Option<Arc<GefsSource>>,
@@ -97,7 +97,7 @@ pub struct WeatherIngestDeps {
     pub forecast_writer: Arc<dyn FactWriter<WeatherForecastFactRow>>,
     pub fact_read: Arc<dyn QuantFactReadRepository>,
     pub calibrations: Arc<dyn CalibrationArtifactRepository>,
-    pub runtime_config: Arc<RuntimeConfigStore>,
+    pub runtime_config: Arc<DecisionPolicyStore>,
     pub aviation: Option<Arc<AviationWeatherSource>>,
     pub ghcnh: Option<Arc<GhcnhSource>>,
     pub gefs: Option<Arc<GefsSource>>,
@@ -771,10 +771,15 @@ impl WeatherIngestWorker {
         now: DateTime<Utc>,
     ) -> QuantResult<()> {
         let runtime = self.runtime_config.load();
-        if !runtime.domain.family_enabled(DomainFamily::Weather) {
+        if !runtime
+            .profile_artifacts
+            .domain
+            .definition
+            .family_enabled(DomainFamily::Weather)
+        {
             return Ok(());
         }
-        let config = &runtime.domain.weather;
+        let config = &runtime.profile_artifacts.domain.definition.weather;
         let stations = weather_stations(bindings);
         if !self.gefs_backfill_complete(stations.keys(), now).await? {
             return Err(QuantError::config(
@@ -1137,7 +1142,9 @@ impl WeatherIngestWorker {
         let runtime_days = self
             .runtime_config
             .load()
+            .profile_artifacts
             .domain
+            .definition
             .weather
             .calibration_lookback_days;
         let backfill_start = backfill_end
@@ -1344,7 +1351,7 @@ impl WeatherIngestWorker {
                 instrument_key: instrument_key.clone(),
                 checkpoint_json: checkpoint,
                 checkpoint_hash,
-                status: DomainCursorStatus::Live.as_str().to_owned(),
+                status: DomainCursorStatus::Live,
                 last_error: None,
                 updated_at: Utc::now(),
             })
@@ -1710,7 +1717,7 @@ mod tests {
                 report_hash: first.report_hash.clone(),
             },
             checkpoint_hash: hash('c'),
-            status: DomainCursorStatus::Live.as_str().to_owned(),
+            status: DomainCursorStatus::Live,
             last_error: None,
             created_at: observed,
             updated_at: observed,

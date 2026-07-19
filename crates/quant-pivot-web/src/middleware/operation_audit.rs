@@ -163,7 +163,7 @@ fn fallback_category(path: &str) -> OperationCategory {
     } else if path.starts_with("/control-factor") {
         OperationCategory::Governance
     } else if path.starts_with("/runtime-config") {
-        OperationCategory::RuntimeConfig
+        OperationCategory::DecisionPolicySnapshot
     } else if path.starts_with("/system") {
         OperationCategory::System
     } else if path.starts_with("/quant/reports") || path.starts_with("/quant/recommendations") {

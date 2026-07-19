@@ -833,9 +833,10 @@ mod tests {
             },
         },
         types::{
-            ContentHash, EventId, FeatureParityRunId, MarketId, ModelInputContract, ModelInputSpec,
-            ModelSpecId, ModelVersionId, RuntimeConfigVersionId, SchemaVersion, TokenId,
-            TrainingDatasetId, TrainingExampleId, TrainingHorizonsSecs, TrainingSampleSource,
+            ContentHash, DecisionPolicySnapshotId, EventId, FeatureParityRunId, MarketId,
+            ModelInputContract, ModelInputSpec, ModelSpecId, ModelVersionId, SchemaVersion,
+            TokenId, TrainingDatasetId, TrainingExampleId, TrainingHorizonsSecs,
+            TrainingSampleSource,
         },
     };
     use quant_pivot_research::{
@@ -866,6 +867,7 @@ mod tests {
             model_family: ModelFamily::WeightedFactor,
             version: 1,
             artifact_hash: hash('b'),
+            category_scope: None,
             profile_ref: fixture_profile_ref(),
             training_dataset_id: Some(training_dataset_id.clone()),
             trade_policy_artifact_id: None,
@@ -901,7 +903,7 @@ mod tests {
             feature_schema_version: None,
             sample_sources: None,
             coverage_json: None,
-            runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
+            decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
             failure_detail: None,
             completed_at: Some(now),
             created_at: now - Duration::hours(3),

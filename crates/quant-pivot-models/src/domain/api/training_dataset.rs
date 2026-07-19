@@ -3,7 +3,7 @@
 //! These types are the **UI integration surface** for offline dataset plan/build.
 //! The Admin SPA (Phase 07) should:
 //!
-//! 1. Let the operator pick a frozen [`RuntimeConfigVersionId`] and [`ModelSpecId`].
+//! 1. Let the operator pick a frozen [`DecisionPolicySnapshotId`] and [`ModelSpecId`].
 //! 2. `POST /research/training-datasets/plan` — validate the window and show
 //!    `planned_samples` before committing to a long build.
 //! 3. `POST /research/training-datasets/build` — materialize using the same body
@@ -28,8 +28,8 @@ use crate::{
     enums::quant::{DatasetPurpose, TrainingDatasetStatus},
     half_open_window_request,
     types::{
-        ContentHash, DatasetCoverage, DatasetManifest, ModelSpecId, ResearchProfileRef,
-        RuntimeConfigVersionId, SchemaVersion, TrainingDatasetId, TrainingHorizonsSecs,
+        ContentHash, DatasetCoverage, DatasetManifest, DecisionPolicySnapshotId, ModelSpecId,
+        ResearchProfileRef, SchemaVersion, TrainingDatasetId, TrainingHorizonsSecs,
         TrainingSampleSource, TrainingSampleSources, default_sample_sources,
     },
 };
@@ -55,7 +55,7 @@ pub struct BuildTrainingDatasetRequest {
     #[serde(default)]
     pub purpose: DatasetPurpose,
     /// Frozen runtime-config version governing feature/factor/label schemas.
-    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     /// Inclusive first sample `as_of`.
     pub window_start: DateTime<Utc>,
     /// Exclusive window end (samples are strictly before this instant).
@@ -99,7 +99,7 @@ pub struct TrainingDatasetPlanView {
     /// Pre-assigned id that the subsequent build will use (stable across plan → build).
     pub training_dataset_id: TrainingDatasetId,
     pub model_spec_id: ModelSpecId,
-    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub window_start: DateTime<Utc>,
     pub window_end: DateTime<Utc>,
     /// Number of `(as_of, market)` samples the build would iterate (spine size
@@ -155,7 +155,7 @@ pub struct TrainingDatasetView {
     pub sample_sources: Option<TrainingSampleSources>,
     /// Build diagnostics: planned vs built examples, decode failures, label skips, etc.
     pub coverage_json: Option<DatasetCoverage>,
-    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub failure_detail: Option<String>,
     pub completed_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
@@ -207,7 +207,7 @@ impl From<TrainingDatasetInfo> for TrainingDatasetView {
             feature_schema_version: info.feature_schema_version,
             sample_sources: info.sample_sources,
             coverage_json: info.coverage_json,
-            runtime_config_version_id: info.runtime_config_version_id,
+            decision_policy_snapshot_id: info.decision_policy_snapshot_id,
             failure_detail: info.failure_detail,
             completed_at: info.completed_at,
             created_at: info.created_at,

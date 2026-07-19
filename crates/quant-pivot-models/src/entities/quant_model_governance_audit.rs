@@ -24,7 +24,6 @@ pub struct Model {
     pub before_hash: Option<String>,
     pub after_hash: Option<String>,
     pub quality_gate_passed: bool,
-    pub rollback_target_version_id: Option<ModelVersionId>,
     pub shadow_window_secs: Option<i64>,
     #[sea_orm(column_type = "JsonBinary")]
     pub detail_json: Json,

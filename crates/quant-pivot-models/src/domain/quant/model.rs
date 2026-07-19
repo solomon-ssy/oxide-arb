@@ -2,13 +2,14 @@
 
 use crate::{
     enums::{
+        common::MarketCategory,
         model::ModelFamily,
         quant::{ModelRunErrorCode, ModelRunKind, ModelRunStatus, PublicationStatus},
     },
     types::{
-        BacktestPathSetId, ContentHash, MarketSelectionId, ModelInputContract, ModelRunId,
-        ModelSpecId, ModelTrainingContract, ModelVersionId, ResearchProfileRef,
-        RuntimeConfigVersionId, SchemaVersion, TradePolicyArtifactId, TrainingDatasetId,
+        BacktestPathSetId, ContentHash, DecisionPolicySnapshotId, MarketSelectionId,
+        ModelInputContract, ModelRunId, ModelSpecId, ModelTrainingContract, ModelVersionId,
+        ResearchProfileRef, SchemaVersion, TradePolicyArtifactId, TrainingDatasetId,
     },
 };
 use chrono::{DateTime, Utc};
@@ -70,6 +71,7 @@ pub struct ModelVersionInfo {
     pub model_family: ModelFamily,
     pub version: i32,
     pub artifact_hash: ContentHash,
+    pub category_scope: Option<MarketCategory>,
     pub profile_ref: ResearchProfileRef,
     pub training_dataset_id: Option<TrainingDatasetId>,
     pub trade_policy_artifact_id: Option<TradePolicyArtifactId>,
@@ -92,6 +94,7 @@ pub struct NewModelVersion {
     pub model_spec_id: ModelSpecId,
     pub version: i32,
     pub artifact_hash: ContentHash,
+    pub category_scope: Option<MarketCategory>,
     pub profile_ref: ResearchProfileRef,
     pub training_dataset_id: Option<TrainingDatasetId>,
     pub trade_policy_artifact_id: Option<TradePolicyArtifactId>,
@@ -105,6 +108,22 @@ pub struct NewModelVersion {
     pub retired_at: Option<DateTime<Utc>>,
 }
 
+/// Minimal typed projection for the governed model picker.
+///
+/// This is intentionally produced by one joined `SeaORM` query: the picker does
+/// not page model versions and then issue one model-spec lookup per row.
+#[derive(Debug, Clone, FromQueryResult)]
+pub struct PublishedModelCatalogInfo {
+    pub model_version_id: ModelVersionId,
+    pub model_spec_id: ModelSpecId,
+    pub spec_name: String,
+    pub version: i32,
+    pub artifact_hash: ContentHash,
+    pub model_family: ModelFamily,
+    pub category_scope: Option<MarketCategory>,
+    pub published_at: Option<DateTime<Utc>>,
+}
+
 /// Training, backtest, shadow, or inference run row.
 #[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
 #[sea_orm(entity = "crate::entities::quant_model_run::Entity")]
@@ -112,7 +131,7 @@ pub struct ModelRunInfo {
     pub model_run_id: ModelRunId,
     pub run_kind: ModelRunKind,
     pub model_version_id: Option<ModelVersionId>,
-    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub market_selection_id: Option<MarketSelectionId>,
     pub window_start: DateTime<Utc>,
     pub window_end: DateTime<Utc>,
@@ -127,7 +146,7 @@ pub struct ModelRunInfo {
 }
 
 info_from_model!(ModelRunInfo, crate::entities::quant_model_run::Model, {
-    model_run_id, run_kind, model_version_id, runtime_config_version_id,
+    model_run_id, run_kind, model_version_id, decision_policy_snapshot_id,
     market_selection_id, window_start, window_end, status, input_hash, output_hash,
     metrics_json, error_code, error_message, started_at, finished_at,
 });
@@ -142,7 +161,7 @@ pub struct NewModelRun {
     pub model_run_id: ModelRunId,
     pub run_kind: ModelRunKind,
     pub model_version_id: Option<ModelVersionId>,
-    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub market_selection_id: Option<MarketSelectionId>,
     pub window_start: DateTime<Utc>,
     pub window_end: DateTime<Utc>,

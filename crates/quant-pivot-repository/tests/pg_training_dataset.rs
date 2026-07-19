@@ -3,50 +3,31 @@
 use chrono::{Duration as ChronoDuration, Utc};
 use quant_pivot_error::storage::{StorageError, entity};
 use quant_pivot_models::{
-    domain::{
-        CompleteTrainingDatasetBuild, NewModelSpec, NewModelVersion, NewRuntimeConfigVersion,
-        NewTrainingDatasetPlan,
-    },
+    domain::{CompleteTrainingDatasetBuild, NewModelSpec, NewModelVersion, NewTrainingDatasetPlan},
     enums::{
         model::ModelFamily,
         quant::{DatasetPurpose, PublicationStatus, TrainingDatasetStatus},
-        runtime_config::RuntimeConfigVersionSource,
     },
     hashing::CanonicalDigest,
     types::{
         ArtifactUri, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION, DatasetCoverage,
-        DatasetManifest, ModelInputContract, ModelSpecId, ModelTrainingContract, ModelVersionId,
-        RuntimeConfigVersionId, SchemaVersion, TrainingDatasetId, TrainingHorizonsSecs,
-        TrainingSampleSources, default_sample_sources,
+        DatasetManifest, DecisionPolicySnapshotId, ModelInputContract, ModelSpecId,
+        ModelTrainingContract, ModelVersionId, SchemaVersion, TrainingDatasetId,
+        TrainingHorizonsSecs, TrainingSampleSources, default_sample_sources,
     },
 };
 use quant_pivot_repository::{
-    postgres::{
-        PgModelRegistryRepository, PgRuntimeConfigVersionRepository, PgTrainingDatasetRepository,
-    },
-    traits::{ModelRegistryRepository, RuntimeConfigVersionRepository, TrainingDatasetRepository},
+    postgres::{PgModelRegistryRepository, PgTrainingDatasetRepository},
+    traits::{ModelRegistryRepository, TrainingDatasetRepository},
 };
-use quant_pivot_test_support::pg::setup_pg;
+use quant_pivot_test_support::{pg::setup_pg, policy_fixtures::bootstrap_default_policy_bundle};
 
 fn content_hash(seed: char) -> ContentHash {
     ContentHash::parse(format!("blake3:{}", seed.to_string().repeat(64))).expect("hash")
 }
 
-async fn seed_runtime_config(db: &sea_orm::DatabaseConnection) -> RuntimeConfigVersionId {
-    let id = RuntimeConfigVersionId::from_v7();
-    PgRuntimeConfigVersionRepository::new(db.clone())
-        .create_version(NewRuntimeConfigVersion {
-            runtime_config_version_id: id.clone(),
-            config_hash: content_hash('c'),
-            schema_version: SchemaVersion::FIRST,
-            config_json: serde_json::json!({}),
-            source: RuntimeConfigVersionSource::Bootstrap,
-            created_by: "pg-training-dataset-it".to_owned(),
-            reason: "integration test".to_owned(),
-        })
-        .await
-        .expect("runtime config");
-    id
+async fn seed_runtime_config(db: &sea_orm::DatabaseConnection) -> DecisionPolicySnapshotId {
+    bootstrap_default_policy_bundle(db, "pg-training-dataset-it", "integration test").await
 }
 
 async fn seed_model_spec(db: &sea_orm::DatabaseConnection) -> ModelSpecId {
@@ -79,7 +60,7 @@ fn dataset_hash(dataset_id: &TrainingDatasetId) -> ContentHash {
 fn new_plan(
     dataset_id: TrainingDatasetId,
     model_spec_id: ModelSpecId,
-    runtime_config_version_id: RuntimeConfigVersionId,
+    decision_policy_snapshot_id: DecisionPolicySnapshotId,
 ) -> NewTrainingDatasetPlan {
     let window_start = Utc::now() - ChronoDuration::hours(2);
     NewTrainingDatasetPlan {
@@ -93,7 +74,7 @@ fn new_plan(
         horizons_secs: TrainingHorizonsSecs(vec![3600]),
         feature_schema_version: Some(SchemaVersion::FIRST),
         sample_sources: Some(TrainingSampleSources(default_sample_sources())),
-        runtime_config_version_id,
+        decision_policy_snapshot_id,
     }
 }
 
@@ -111,7 +92,7 @@ fn completion(
         model_spec_id: plan.model_spec_id.clone(),
         trade_policy_artifact_id: None,
         trade_policy_hash: None,
-        runtime_config_version_id: plan.runtime_config_version_id.clone(),
+        decision_policy_snapshot_id: plan.decision_policy_snapshot_id.clone(),
         window_start: plan.window_start,
         window_end: plan.window_end,
         purpose: plan.purpose,
@@ -150,9 +131,13 @@ async fn create_ready(
     repo: &PgTrainingDatasetRepository,
     dataset_id: TrainingDatasetId,
     model_spec_id: ModelSpecId,
-    runtime_config_version_id: RuntimeConfigVersionId,
+    decision_policy_snapshot_id: DecisionPolicySnapshotId,
 ) {
-    let plan = new_plan(dataset_id.clone(), model_spec_id, runtime_config_version_id);
+    let plan = new_plan(
+        dataset_id.clone(),
+        model_spec_id,
+        decision_policy_snapshot_id,
+    );
     repo.create_plan(plan.clone()).await.expect("create plan");
     repo.start_build(&dataset_id).await.expect("start build");
     repo.complete_build(&dataset_id, completion(&plan, TrainingDatasetStatus::Ready))
@@ -273,6 +258,7 @@ async fn model_version_training_dataset_foreign_key() {
             model_spec_id: model_spec_id.clone(),
             version: 1,
             artifact_hash: hash.clone(),
+            category_scope: None,
             profile_ref: quant_pivot_test_support::execution_pg_seed::fixture_profile_ref(),
             training_dataset_id: Some(dataset_id.clone()),
             trade_policy_artifact_id: None,
@@ -295,6 +281,7 @@ async fn model_version_training_dataset_foreign_key() {
             model_spec_id,
             version: 2,
             artifact_hash: hash,
+            category_scope: None,
             profile_ref: quant_pivot_test_support::execution_pg_seed::fixture_profile_ref(),
             training_dataset_id: Some(missing_dataset),
             trade_policy_artifact_id: None,

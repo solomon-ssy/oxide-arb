@@ -17,12 +17,12 @@ const SINGLETON_ID: i32 = 1;
 
 pub const SYSTEM_KILL_SWITCH_SEED: SeedSpec = SeedSpec {
     id: "operational.system_kill_switch.bootstrap",
-    version: 2,
+    version: 1,
     target_table: "system_kill_switch",
     depends_on: DEPENDS_ON,
     produces: PRODUCES,
     conflict_policy: SeedConflictPolicy::InsertIfAbsent,
-    checksum: "system_kill_switch.bootstrap.v2.report-only-forced",
+    checksum: "system_kill_switch.bootstrap.v1.boot-report-only",
     apply: load_boxed,
     hydrate: hydrate_boxed,
 };

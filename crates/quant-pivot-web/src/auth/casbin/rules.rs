@@ -246,14 +246,15 @@ mod tests {
     #[actix_web::test]
     async fn acting_role_missing_is_bad_request() {
         let casbin = CasbinService::in_memory().await;
-        let result = Rule::ActingRoleGoverned(ResourceType::RuntimeConfig, Operation::Activate)
-            .evaluate(
-                &claims(),
-                &roles(&[("risk_owner", RoleStatus::Enabled)]),
-                &casbin,
-                None,
-            )
-            .await;
+        let result =
+            Rule::ActingRoleGoverned(ResourceType::DecisionPolicySnapshot, Operation::Activate)
+                .evaluate(
+                    &claims(),
+                    &roles(&[("risk_owner", RoleStatus::Enabled)]),
+                    &casbin,
+                    None,
+                )
+                .await;
         assert!(matches!(result, Err(WebError::BadRequest(_))));
     }
 
@@ -263,14 +264,15 @@ mod tests {
         casbin
             .add_test_policy("risk_owner", "runtime_config", "activate")
             .await;
-        let result = Rule::ActingRoleGoverned(ResourceType::RuntimeConfig, Operation::Activate)
-            .evaluate(
-                &claims(),
-                &roles(&[("viewer", RoleStatus::Enabled)]),
-                &casbin,
-                Some("risk_owner"),
-            )
-            .await;
+        let result =
+            Rule::ActingRoleGoverned(ResourceType::DecisionPolicySnapshot, Operation::Activate)
+                .evaluate(
+                    &claims(),
+                    &roles(&[("viewer", RoleStatus::Enabled)]),
+                    &casbin,
+                    Some("risk_owner"),
+                )
+                .await;
         assert!(matches!(result, Err(WebError::Forbidden)));
     }
 
@@ -280,28 +282,30 @@ mod tests {
         casbin
             .add_test_policy("risk_owner", "runtime_config", "activate")
             .await;
-        let result = Rule::ActingRoleGoverned(ResourceType::RuntimeConfig, Operation::Activate)
-            .evaluate(
-                &claims(),
-                &roles(&[("risk_owner", RoleStatus::Disabled)]),
-                &casbin,
-                Some("risk_owner"),
-            )
-            .await;
+        let result =
+            Rule::ActingRoleGoverned(ResourceType::DecisionPolicySnapshot, Operation::Activate)
+                .evaluate(
+                    &claims(),
+                    &roles(&[("risk_owner", RoleStatus::Disabled)]),
+                    &casbin,
+                    Some("risk_owner"),
+                )
+                .await;
         assert!(matches!(result, Err(WebError::Forbidden)));
     }
 
     #[actix_web::test]
     async fn acting_role_held_without_policy_is_forbidden() {
         let casbin = CasbinService::in_memory().await;
-        let result = Rule::ActingRoleGoverned(ResourceType::RuntimeConfig, Operation::Activate)
-            .evaluate(
-                &claims(),
-                &roles(&[("risk_owner", RoleStatus::Enabled)]),
-                &casbin,
-                Some("risk_owner"),
-            )
-            .await;
+        let result =
+            Rule::ActingRoleGoverned(ResourceType::DecisionPolicySnapshot, Operation::Activate)
+                .evaluate(
+                    &claims(),
+                    &roles(&[("risk_owner", RoleStatus::Enabled)]),
+                    &casbin,
+                    Some("risk_owner"),
+                )
+                .await;
         assert!(matches!(result, Err(WebError::Forbidden)));
     }
 
@@ -311,15 +315,16 @@ mod tests {
         casbin
             .add_test_policy("risk_owner", "runtime_config", "activate")
             .await;
-        let outcome = Rule::ActingRoleGoverned(ResourceType::RuntimeConfig, Operation::Activate)
-            .evaluate(
-                &claims(),
-                &roles(&[("risk_owner", RoleStatus::Enabled)]),
-                &casbin,
-                Some("  risk_owner  "),
-            )
-            .await
-            .expect("governed action with held role + policy is allowed");
+        let outcome =
+            Rule::ActingRoleGoverned(ResourceType::DecisionPolicySnapshot, Operation::Activate)
+                .evaluate(
+                    &claims(),
+                    &roles(&[("risk_owner", RoleStatus::Enabled)]),
+                    &casbin,
+                    Some("  risk_owner  "),
+                )
+                .await
+                .expect("governed action with held role + policy is allowed");
         assert_eq!(outcome.acting_role.as_deref(), Some("risk_owner"));
     }
 

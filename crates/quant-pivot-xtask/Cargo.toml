@@ -19,6 +19,7 @@ quant-pivot-repository = { workspace = true }
 quant-pivot-research = { workspace = true }
 quant-pivot-storage = { workspace = true }
 rustls = { workspace = true }
+schemars = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 zeroize = { workspace = true }

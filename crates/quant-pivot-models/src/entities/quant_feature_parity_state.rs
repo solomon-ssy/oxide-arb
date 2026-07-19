@@ -22,6 +22,28 @@ pub struct Model {
     pub acting_role: Option<String>,
     pub reason: String,
     pub created_at: DateTime<Utc>,
+
+    #[sea_orm(
+        belongs_to,
+        relation_enum = "CauseRun",
+        from = "cause_run_id",
+        to = "run_id"
+    )]
+    pub cause_run: BelongsTo<Option<super::quant_feature_parity_run::Entity>>,
+    #[sea_orm(
+        belongs_to,
+        relation_enum = "RecoveryRun",
+        from = "recovery_run_id",
+        to = "run_id"
+    )]
+    pub recovery_run: BelongsTo<Option<super::quant_feature_parity_run::Entity>>,
+    #[sea_orm(
+        belongs_to,
+        relation_enum = "PreviousState",
+        from = "previous_state_id",
+        to = "state_id"
+    )]
+    pub previous_state: BelongsTo<Option<super::quant_feature_parity_state::Entity>>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

@@ -233,8 +233,8 @@ mod tests {
             quant::{DataQualityStatus, OutcomeSide},
         },
         types::{
-            BacktestReportId, ContentHash, MarketId, ModelVersionId, Probability,
-            RuntimeConfigVersionId, Shares, TokenId, Usd,
+            BacktestReportId, ContentHash, DecisionPolicySnapshotId, MarketId, ModelVersionId,
+            Probability, Shares, TokenId, Usd,
         },
     };
     use rust_decimal::Decimal;
@@ -290,7 +290,7 @@ mod tests {
         let report = BacktestReport {
             backtest_report_id: BacktestReportId::from_v7(),
             model_version_id: ModelVersionId::from_v7(),
-            runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
+            decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
             window_start: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
             window_end: Utc.timestamp_opt(1_700_100_000, 0).unwrap(),
             coverage: dec!(1),

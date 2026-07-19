@@ -3,27 +3,24 @@
 use super::sea_orm_active_enums::{
     QpExecutionOrderPhase, QpExecutionOrderState, QpOrderTypeKind, QpSide, QpVenueOrderStatus,
 };
-use sea_orm::{entity::prelude::*, sea_query::Expr};
+use sea_orm::entity::prelude::*;
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
-#[sea_orm(schema_name = "public", table_name = "quant_execution_order")]
+#[sea_orm(table_name = "quant_execution_order")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub execution_order_id: Uuid,
     pub order_intent_id: Uuid,
     pub order_phase: QpExecutionOrderPhase,
-    #[sea_orm(column_type = "String(StringLen::N(66))")]
+    #[sea_orm(column_type = "Text")]
     pub market_id: String,
     #[sea_orm(column_type = "Text")]
     pub token_id: String,
     pub side: QpSide,
     pub order_type: QpOrderTypeKind,
-    #[sea_orm(column_type = "Decimal(Some((20, 18)))")]
     pub price: Decimal,
-    #[sea_orm(column_type = "Decimal(Some((38, 18)))")]
     pub shares: Decimal,
-    #[sea_orm(column_type = "Decimal(Some((28, 8)))")]
     pub cost_usd: Decimal,
     #[sea_orm(column_type = "JsonBinary")]
     pub prepared_order_json: Json,
@@ -37,10 +34,26 @@ pub struct Model {
     pub gtd_expiration_at: Option<DateTimeWithTimeZone>,
     #[sea_orm(column_type = "Text", nullable)]
     pub error_message: Option<String>,
-    #[sea_orm(default_expr = "Expr::cust(\"statement_timestamp()\")")]
     pub created_at: DateTimeWithTimeZone,
-    #[sea_orm(default_expr = "Expr::cust(\"statement_timestamp()\")")]
     pub updated_at: DateTimeWithTimeZone,
+    #[sea_orm(
+        belongs_to,
+        from = "market_id",
+        to = "market_id",
+        on_update = "NoAction",
+        on_delete = "NoAction"
+    )]
+    pub market: BelongsTo<super::market::Entity>,
+    #[sea_orm(
+        belongs_to,
+        from = "order_intent_id",
+        to = "order_intent_id",
+        on_update = "NoAction",
+        on_delete = "NoAction"
+    )]
+    pub quant_order_intent: BelongsTo<super::quant_order_intent::Entity>,
+    #[sea_orm(has_many)]
+    pub quant_reconciliations: HasMany<super::quant_reconciliation::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

@@ -34,7 +34,7 @@ use quant_pivot_models::{
     },
     enums::{domain::DomainFamily, quant::DataQualityStatus},
     runtime_config::{DataQualityConfig, DomainConfig, FeaturesConfig},
-    types::{DomainInstrumentKey, IcaoStation, MarketId, RuntimeConfigVersionId, TokenId, Usd},
+    types::{DecisionPolicySnapshotId, DomainInstrumentKey, IcaoStation, MarketId, TokenId, Usd},
 };
 use quant_pivot_repository::traits::{
     BasisAlertRepository, CalibrationArtifactRepository, FeatureRepository,
@@ -76,7 +76,7 @@ pub struct FeaturePipelineRequest<'a> {
     /// Durable point-in-time snapshot source.
     pub pit: &'a dyn PointInTimeSnapshotSource,
     /// Config version governing this round (DQ snapshot header).
-    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     /// Liquidity cap used to normalize capture liquidity scores.
     pub liquidity_cap_usd: Usd,
 }
@@ -234,7 +234,7 @@ impl FeaturePipelineService {
             .await?;
         let data_quality_snapshot = draft_data_quality_snapshot(
             request.boundary.decision_at(),
-            request.runtime_config_version_id.clone(),
+            request.decision_policy_snapshot_id.clone(),
             &bundles,
             &vectors,
             &persistence.all,
@@ -329,7 +329,7 @@ impl FeaturePipelineService {
                     vector,
                     persisted,
                     &request.boundary,
-                    &request.runtime_config_version_id,
+                    &request.decision_policy_snapshot_id,
                     schema,
                     ingestion_time,
                 )

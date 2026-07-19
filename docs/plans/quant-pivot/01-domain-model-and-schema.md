@@ -1,5 +1,13 @@
 # 01 — 领域模型与 Schema 设计
 
+<!-- quant-pivot-lifecycle-contract:v1 -->
+> **Lifecycle contract**
+> - `lifecycle_assumption`: 项目尚未正式生产上线，当前状态为 `pre_production_resettable`，系统自有基线统一为 `boot` / schema version `1`。
+> - `schema_data_version_impact`: 本文中的历史版本号与递增路径不再具有实施效力；当前实现不迁移测试数据、旧结构或旧版本。
+> - `pre_production_behavior`: 允许 clean-break、migration squash 与全新基础设施 bootstrap，但任何数据销毁仍需操作者单独授权。
+> - `production_frozen_behavior`: 一旦完成不可逆 production seal，后续变更必须提供前向 migration、兼容性评估、回滚方案与数据验证。
+> - `rollback_and_data_verification`: 封存前通过清空后的 fresh-install 验证；封存后不得回退到 boot reset。
+
 > 状态：生产级目标设计
 >
 > 目标：用 quant-pivot 领域模型替换 Endgame opportunity/trade/report schema
@@ -69,7 +77,7 @@
 
 - `market_selection_id uuid pk`
 - `as_of timestamptz not null`
-- `runtime_config_version_id uuid not null`
+- `decision_policy_snapshot_id uuid not null`
 - `selector_hash text not null`
 - `market_count int not null`
 - `exclusion_summary jsonb not null`
@@ -78,7 +86,7 @@
 索引：
 
 - `(as_of desc)`
-- `(runtime_config_version_id, as_of desc)`
+- `(decision_policy_snapshot_id, as_of desc)`
 - `selector_hash`
 
 #### `quant_market_selection_member`
@@ -227,7 +235,7 @@
 - `model_run_id uuid pk`
 - `run_kind qp_model_run_kind not null`
 - `model_version_id uuid null`
-- `runtime_config_version_id uuid not null`
+- `decision_policy_snapshot_id uuid not null`
 - `market_selection_id uuid null`
 - `window_start timestamptz not null`
 - `window_end timestamptz not null`
@@ -270,7 +278,7 @@
 - `as_of timestamptz not null`
 - `horizon_secs bigint not null`
 - `runtime_mode qp_quant_runtime_mode not null`
-- `runtime_config_version_id uuid not null`
+- `decision_policy_snapshot_id uuid not null`
 - `model_version_id uuid not null`
 - `market_selection_id uuid not null`
 - `portfolio_plan_id uuid not null`
@@ -572,8 +580,8 @@
 | `market` | `market` 保留 | Polymarket catalog 权威，字段去 Endgame 假设 |
 | `event` | `event` 保留 | Polymarket event metadata |
 | `report` | 删除或迁移为 `quant_recommendation_report` | 旧 daily/weekly JSON report 不再作为主表 |
-| `runtime_config_version` | 保留 | config_json schema v3 |
-| `runtime_config_activation` | 保留 | activation 审计保留 |
+| `decision_policy_snapshot` | 保留 | config_json schema v3 |
+| `policy_activation` | 保留 | activation 审计保留 |
 | `operation_log` | 保留 | 扩展 quant actions |
 | `system_runtime_state` | 重建字段 | 删除 `execution_mode`，新增 `quant_runtime_mode` |
 | `control_factor_*` | 大部分重命名为 `quant_factor_*` / `quant_model_*` | 不保留旧 control factor 语义 |
@@ -712,7 +720,7 @@ crates/quant-pivot-models/src/domain/
 2. 旧表进入 drop plan；如果需要保留历史，先导出到 archive schema 或对象存储。
 3. 不创建兼容 view。
 4. 不创建旧表到新表的 trigger。
-5. runtime-config 当前权威版本为 v17；旧版本直接拒绝并重建，不保留 parser、alias 或双读路径。
+5. 六类 runtime policy 与系统自有 artifact 当前均为 boot schema `1`；不保留旧 parser、alias、版本映射或双读路径。
 6. 所有旧 API 路径删除或 410，不转发到新 API。
 7. 所有新表必须有 schema catalog、entity、domain DTO、repository、migration test。
 
@@ -738,7 +746,7 @@ pub struct RecommendationReport {
     pub as_of: DateTime<Utc>,
     pub horizon_secs: u64,
     pub runtime_mode: QuantRuntimeMode,
-    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub model_version_id: ModelVersionId,
     pub market_selection_id: MarketSelectionId,
     pub portfolio_plan_id: PortfolioPlanId,

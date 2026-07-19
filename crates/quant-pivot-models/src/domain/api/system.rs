@@ -7,7 +7,6 @@ use crate::{
         quant::QuantRuntimeMode,
         system::{BootstrapPhase, CapabilityId, CapabilityReason},
     },
-    types::{RuntimeConfigApprovalId, RuntimeConfigVersionId},
 };
 use serde::{Deserialize, Serialize};
 use validator::Validate;
@@ -41,8 +40,6 @@ pub struct SetKillSwitchRequest {
 /// and cannot be confused with a generic confirmation checkbox.
 #[derive(Debug, Deserialize, Validate)]
 pub struct ActivateBootstrapRequest {
-    pub runtime_config_version_id: RuntimeConfigVersionId,
-    pub runtime_config_approval_id: RuntimeConfigApprovalId,
     #[validate(range(min = 1))]
     pub bootstrap_contract_version: i32,
     #[validate(range(min = 0))]

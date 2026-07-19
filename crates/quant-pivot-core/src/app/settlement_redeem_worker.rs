@@ -26,7 +26,7 @@ impl AppContext {
                 move || {
                     let secs = config
                         .current()
-                        .execution
+                        .execution_risk
                         .settlement_redeem
                         .interval_secs
                         .max(1);

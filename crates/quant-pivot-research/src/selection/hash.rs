@@ -10,7 +10,7 @@
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     domain::MarketCandidate,
-    types::{ContentHash, RuntimeConfigVersionId, SelectionExclusionSummary},
+    types::{ContentHash, DecisionPolicySnapshotId, SelectionExclusionSummary},
 };
 use serde::Serialize;
 
@@ -26,7 +26,7 @@ pub struct SelectorHashInput {
     /// Exact decision time in epoch milliseconds.
     pub decision_at: i64,
     /// Governing runtime-config version.
-    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     /// Sorted enabled category slugs.
     pub enabled_categories: Vec<String>,
     /// Minimum liquidity threshold, as the verbatim config string.
@@ -95,10 +95,10 @@ impl SelectorHashInput {
 
         Ok(Self {
             decision_at: request.decision_at.timestamp_millis(),
-            runtime_config_version_id: request.runtime_config_version_id.clone(),
+            decision_policy_snapshot_id: request.decision_policy_snapshot_id.clone(),
             enabled_categories,
-            min_liquidity_usd: selection.min_liquidity_usd.value.clone(),
-            min_volume_24h_usd: selection.min_volume_24h_usd.value.clone(),
+            min_liquidity_usd: selection.min_liquidity_usd.value.to_string(),
+            min_volume_24h_usd: selection.min_volume_24h_usd.value.to_string(),
             max_spread_bps: selection.max_spread_bps,
             allow_near_resolution: selection.allow_near_resolution,
             min_time_to_resolution_secs: selection.min_time_to_resolution_secs,

@@ -30,7 +30,7 @@ pub fn map_snapshot_to_model(
     let snapshot_row = NewMarketSelection {
         market_selection_id: snapshot.market_selection_id.clone(),
         decision_at: snapshot.decision_at,
-        runtime_config_version_id: snapshot.runtime_config_version_id.clone(),
+        decision_policy_snapshot_id: snapshot.decision_policy_snapshot_id.clone(),
         selector_hash: snapshot.selector_hash.clone(),
         market_count: i32::try_from(snapshot.included.len()).map_err(|err| {
             ReportError::NumericOverflow {
@@ -86,7 +86,7 @@ mod tests {
         domain::{DomainAvailability, MarketCandidate, MarketDataHealth},
         enums::{common::MarketCategory, market::MarketStatus},
         types::{
-            ContentHash, EventId, MarketId, MarketSelectionId, Price, RuntimeConfigVersionId,
+            ContentHash, DecisionPolicySnapshotId, EventId, MarketId, MarketSelectionId, Price,
             SelectionExclusionSummary, TokenId, Usd,
         },
     };
@@ -128,7 +128,7 @@ mod tests {
         let snapshot = MarketSelectionSnapshot {
             market_selection_id: MarketSelectionId::from_v7(),
             decision_at: as_of(),
-            runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
+            decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
             selector_hash: ContentHash::parse(format!("blake3:{}", "b".repeat(64)))
                 .expect("valid hash"),
             included: vec![SelectedMarket {

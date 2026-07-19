@@ -39,14 +39,14 @@ use quant_pivot_models::{
         TradePolicyValidationStatus, TrainingDatasetStatus,
     },
     hashing::CanonicalDigest,
-    runtime_config::{PolicyValidationConfig, RuntimeConfig},
+    runtime_config::PolicyValidationConfig,
     types::{
-        ArtifactUri, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION, ExecutablePriceBasis, MarketId,
-        ModelSpecId, ModelVersionId, POLICY_EVIDENCE_OBJECT_FORMAT_VERSION,
-        ResearchEvaluationTrack, ResearchJobId, ResearchProfileArtifact, ResearchProfileRef,
-        ResearchReadinessEvidencePayload, RetentionRunwayEvidenceV3, RuntimeConfigVersionId,
-        SchemaVersion, ShadowLatencyProfileV1, SourceSliceManifestRef, SourceSliceManifestV2,
-        SourceSliceObjectKind, StructuralVolatilityOosFoldRow,
+        ArtifactUri, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION, DecisionPolicySnapshotId,
+        ExecutablePriceBasis, MarketId, ModelSpecId, ModelVersionId,
+        POLICY_EVIDENCE_OBJECT_FORMAT_VERSION, ResearchEvaluationTrack, ResearchJobId,
+        ResearchProfileArtifact, ResearchProfileRef, ResearchReadinessEvidencePayload,
+        RetentionRunwayEvidenceV1, SchemaVersion, ShadowLatencyProfileV1, SourceSliceManifestRef,
+        SourceSliceManifestV1, SourceSliceObjectKind, StructuralVolatilityOosFoldRow,
         TRADE_POLICY_ARTIFACT_FORMAT_VERSION, TRADE_POLICY_EVIDENCE_BUNDLE_FORMAT_VERSION, TokenId,
         TradePolicyArtifactId, TradePolicyArtifactPayload, TradePolicyCandidateSpec,
         TradePolicyCandidateTrialRow, TradePolicyCohortTrialRow, TradePolicyCoverageGapRow,
@@ -62,8 +62,8 @@ use quant_pivot_models::{
     },
 };
 use quant_pivot_repository::traits::{
-    ModelRegistryRepository, RuntimeConfigVersionRepository, SourceSliceRepository,
-    TradePolicyRepository, TrainingDatasetRepository,
+    ModelRegistryRepository, PolicyRepository, SourceSliceRepository, TradePolicyRepository,
+    TrainingDatasetRepository,
 };
 use quant_pivot_research::{
     artifact::{ArtifactKey, ArtifactNamespace, ArtifactStore},
@@ -107,7 +107,7 @@ pub struct TradePolicyService {
     artifacts: Arc<dyn ArtifactStore>,
     policies: Arc<dyn TradePolicyRepository>,
     model_registry: Arc<dyn ModelRegistryRepository>,
-    runtime_configs: Arc<dyn RuntimeConfigVersionRepository>,
+    runtime_configs: Arc<dyn PolicyRepository>,
     source_slices: Arc<dyn SourceSliceRepository>,
     readiness: Arc<ResearchReadinessEvidenceService>,
     model_runtime_factory_builder: Arc<dyn ModelRuntimeFactoryBuilder>,
@@ -119,7 +119,7 @@ pub struct TradePolicyServiceDeps {
     pub artifacts: Arc<dyn ArtifactStore>,
     pub policies: Arc<dyn TradePolicyRepository>,
     pub model_registry: Arc<dyn ModelRegistryRepository>,
-    pub runtime_configs: Arc<dyn RuntimeConfigVersionRepository>,
+    pub runtime_configs: Arc<dyn PolicyRepository>,
     pub source_slices: Arc<dyn SourceSliceRepository>,
     pub readiness: Arc<ResearchReadinessEvidenceService>,
     pub model_runtime_factory_builder: Arc<dyn ModelRuntimeFactoryBuilder>,
@@ -145,7 +145,7 @@ struct ContractPreflight {
     profile_fitter_available: bool,
     pit_cutoff_not_future: bool,
     profile_quality_gate_available: bool,
-    runtime_config_version_id: Option<RuntimeConfigVersionId>,
+    decision_policy_snapshot_id: Option<DecisionPolicySnapshotId>,
     runtime_limits: Option<RuntimePolicyLimits>,
     canonical_candidates: Option<Vec<TradePolicyCandidateSpec>>,
     candidate_set_hash: Option<ContentHash>,
@@ -235,7 +235,7 @@ struct WeatherPolicyRecomputeInput<'a> {
     profile: &'a ResearchProfileArtifact,
     candidates: &'a [TradePolicyCandidateSpec],
     model_version_id: &'a ModelVersionId,
-    runtime_config_version_id: &'a RuntimeConfigVersionId,
+    decision_policy_snapshot_id: &'a DecisionPolicySnapshotId,
     feature_schema_hash: &'a ContentHash,
     factor_schema_hash: &'a ContentHash,
     experiment_family_hash: &'a ContentHash,
@@ -264,7 +264,7 @@ struct WeatherReplayInputs {
 
 struct FrozenFitPlan {
     profile: ResearchProfileArtifact,
-    runtime_config_version_id: RuntimeConfigVersionId,
+    decision_policy_snapshot_id: DecisionPolicySnapshotId,
     runtime_limits: RuntimePolicyLimits,
     research_program_hash: ContentHash,
     fit_window_start: DateTime<Utc>,
@@ -315,7 +315,7 @@ struct WeatherExperimentFamilyInput<'a> {
 
 struct PolicySourceSlice {
     manifest_ref: SourceSliceManifestRef,
-    manifest: SourceSliceManifestV2,
+    manifest: SourceSliceManifestV1,
 }
 
 struct ValidationCompletionInput<'a> {
@@ -344,7 +344,7 @@ struct ContractIdentityInput<'a> {
     request: &'a TradePolicyFitPreflightRequest,
     profile: Option<&'a ResearchProfileArtifact>,
     research_program_hash: Option<&'a ContentHash>,
-    runtime_config_version_id: Option<&'a RuntimeConfigVersionId>,
+    decision_policy_snapshot_id: Option<&'a DecisionPolicySnapshotId>,
     runtime_limits: Option<&'a RuntimePolicyLimits>,
     fit_window_start: Option<chrono::DateTime<chrono::Utc>>,
     fit_window_end: Option<chrono::DateTime<chrono::Utc>>,
@@ -387,30 +387,36 @@ impl TradePolicyService {
 
     async fn runtime_policy_limits(
         &self,
-        version_id: &RuntimeConfigVersionId,
+        version_id: &DecisionPolicySnapshotId,
         profile: &ResearchProfileArtifact,
     ) -> QuantResult<RuntimePolicyLimits> {
         let version = self
             .runtime_configs
-            .load_version(version_id)
+            .load_snapshot(version_id)
             .await?
             .ok_or_else(|| StorageError::NotFound {
-                entity: "runtime_config_version",
+                entity: "decision_policy_snapshot",
                 id: version_id.to_string(),
             })?;
-        let config = RuntimeConfig::from_json(&version.config_json)?;
+        let config = version.snapshot;
         let model_reference = profile
             .spec
             .category
-            .and_then(|category| config.model.category_model_pointers.get(&category))
-            .or(config.model.active_model_version_id.as_ref())
+            .and_then(|category| {
+                config
+                    .model_routing
+                    .model
+                    .category_model_pointers
+                    .get(&category)
+            })
+            .or(config.model_routing.model.active_model_version_id.as_ref())
             .ok_or_else(|| ResearchError::ValidationMethodology {
                 detail: format!(
                     "runtime config {} has no governed model pointer for profile {}",
                     version_id, profile.profile_ref.id
                 ),
             })?;
-        let model_version_id = ModelVersionId::try_from(model_reference)?;
+        let model_version_id = model_reference.id.clone();
         let model_version = self
             .model_registry
             .find_model_version_by_id(&model_version_id)
@@ -439,7 +445,12 @@ impl TradePolicyService {
                 id: model_version.model_spec_id.to_string(),
             })?;
         if model_spec.status != PublicationStatus::Published
-            || model_spec.feature_schema_version != config.features.feature_schema_version
+            || model_spec.feature_schema_version
+                != config
+                    .profile_artifacts
+                    .features
+                    .definition
+                    .feature_schema_version
         {
             return Err(ResearchError::ValidationMethodology {
                 detail: format!(
@@ -454,7 +465,11 @@ impl TradePolicyService {
                 detail: "frozen runtime config has no unambiguous PIT knowledge lag".to_owned(),
             }
         })?;
-        let policy = &config.research.policy_validation;
+        let policy = &config
+            .profile_artifacts
+            .research_method
+            .research
+            .policy_validation;
         let methodology_hash = CanonicalDigest::content_hash_json(&(
             (
                 "trade_policy_methodology_v2",
@@ -480,11 +495,13 @@ impl TradePolicyService {
         ))?;
         Ok(RuntimePolicyLimits {
             max_candidates: config
+                .profile_artifacts
+                .research_method
                 .research
                 .policy_validation
                 .max_candidates_per_experiment,
             methodology_hash,
-            runtime_config_hash: version.config_hash,
+            runtime_config_hash: version.snapshot_hash,
             min_latency_profile_secs: policy.min_latency_profile_secs,
             fit_model: FrozenPolicyFitModel {
                 model_version_id,
@@ -514,12 +531,12 @@ impl TradePolicyService {
                 None
             }
         };
-        let runtime_config_version_id = self
+        let decision_policy_snapshot_id = self
             .runtime_configs
             .load_active_at(request.selection.pit_cutoff)
             .await?
-            .map(|version| version.runtime_config_version_id);
-        let runtime_limits = match (runtime_config_version_id.as_ref(), profile.as_ref()) {
+            .map(|version| version.decision_policy_snapshot_id);
+        let runtime_limits = match (decision_policy_snapshot_id.as_ref(), profile.as_ref()) {
             (Some(version_id), Some(profile)) => {
                 match self.runtime_policy_limits(version_id, profile).await {
                     Ok(limits) => Some(limits),
@@ -579,14 +596,14 @@ impl TradePolicyService {
             request,
             profile.as_ref(),
             canonical_candidates.as_deref(),
-            runtime_config_version_id.as_ref(),
+            decision_policy_snapshot_id.as_ref(),
             runtime_limits.as_ref(),
         )?;
         let source_slice_identity = derive_contract_source_identity(&ContractIdentityInput {
             request,
             profile: profile.as_ref(),
             research_program_hash: research_program_hash.as_ref(),
-            runtime_config_version_id: runtime_config_version_id.as_ref(),
+            decision_policy_snapshot_id: decision_policy_snapshot_id.as_ref(),
             runtime_limits: runtime_limits.as_ref(),
             fit_window_start,
             fit_window_end,
@@ -608,7 +625,7 @@ impl TradePolicyService {
             profile_fitter_available,
             pit_cutoff_not_future,
             profile_quality_gate_available,
-            runtime_config_version_id,
+            decision_policy_snapshot_id,
             runtime_limits,
             canonical_candidates,
             candidate_set_hash,
@@ -641,13 +658,13 @@ impl TradePolicyService {
         let (
             Some(profile),
             Some(program_hash),
-            Some(runtime_config_version_id),
+            Some(decision_policy_snapshot_id),
             Some(fit_window_start),
             Some(fit_window_end),
         ) = (
             contract.profile.as_ref(),
             contract.research_program_hash.as_ref(),
-            contract.runtime_config_version_id.as_ref(),
+            contract.decision_policy_snapshot_id.as_ref(),
             contract.fit_window_start,
             contract.fit_window_end,
         )
@@ -664,7 +681,7 @@ impl TradePolicyService {
             })
             .await?;
         Ok(page.items.into_iter().find(|dataset| {
-            dataset.runtime_config_version_id == *runtime_config_version_id
+            dataset.decision_policy_snapshot_id == *decision_policy_snapshot_id
                 && dataset.window_start <= fit_window_start
                 && dataset.window_end >= fit_window_end
                 && dataset.manifest_json.as_ref().is_some_and(|manifest| {
@@ -1322,7 +1339,7 @@ impl TradePolicyService {
             )
             .await?;
         let manifest =
-            serde_json::from_slice::<SourceSliceManifestV2>(&bytes).map_err(|error| {
+            serde_json::from_slice::<SourceSliceManifestV1>(&bytes).map_err(|error| {
                 ResearchError::Serialization {
                     detail: format!("invalid Source Slice manifest during validation: {error}"),
                 }
@@ -1331,7 +1348,7 @@ impl TradePolicyService {
             profile_ref: manifest.profile_ref.clone(),
             evaluation_track: manifest.evaluation_track,
             research_program_hash: manifest.research_program_hash.clone(),
-            runtime_config_version_id: manifest.runtime_config_version_id.clone(),
+            decision_policy_snapshot_id: manifest.decision_policy_snapshot_id.clone(),
             runtime_config_hash: manifest.runtime_config_hash.clone(),
             window_start: manifest.window_start,
             window_end: manifest.window_end,
@@ -1387,8 +1404,8 @@ impl TradePolicyService {
             profile: contract
                 .profile
                 .ok_or_else(|| missing("frozen fit profile"))?,
-            runtime_config_version_id: contract
-                .runtime_config_version_id
+            decision_policy_snapshot_id: contract
+                .decision_policy_snapshot_id
                 .ok_or_else(|| missing("frozen runtime config"))?,
             runtime_limits: contract
                 .runtime_limits
@@ -1432,7 +1449,7 @@ impl TradePolicyService {
                     model_spec_id: plan.runtime_limits.fit_model.model_spec_id.clone(),
                     profile_ref: plan.profile.profile_ref.clone(),
                     purpose: DatasetPurpose::PolicyFit,
-                    runtime_config_version_id: plan.runtime_config_version_id.clone(),
+                    decision_policy_snapshot_id: plan.decision_policy_snapshot_id.clone(),
                     window_start: plan.fit_window_start,
                     window_end: plan.fit_window_end,
                     pit_cutoff: request.selection.pit_cutoff,
@@ -1528,7 +1545,7 @@ impl TradePolicyService {
                 profile: &plan.profile,
                 candidates: &plan.candidates,
                 model_version_id: &plan.runtime_limits.fit_model.model_version_id,
-                runtime_config_version_id: &plan.runtime_config_version_id,
+                decision_policy_snapshot_id: &plan.decision_policy_snapshot_id,
                 feature_schema_hash: &data.feature_schema_hash,
                 factor_schema_hash: &data.factor_schema_hash,
                 experiment_family_hash: &experiment_family_hash,
@@ -1684,7 +1701,7 @@ impl TradePolicyService {
             )
             .await?;
         let manifest =
-            serde_json::from_slice::<SourceSliceManifestV2>(&bytes).map_err(|error| {
+            serde_json::from_slice::<SourceSliceManifestV1>(&bytes).map_err(|error| {
                 ResearchError::Serialization {
                     detail: format!("invalid Source Slice manifest while sealing policy: {error}"),
                 }
@@ -1892,7 +1909,7 @@ impl TradePolicyService {
             .read_and_hash_manifest(&manifest_ref.manifest_uri, &manifest_ref.manifest_hash)
             .await?;
         let manifest =
-            serde_json::from_slice::<SourceSliceManifestV2>(&bytes).map_err(|error| {
+            serde_json::from_slice::<SourceSliceManifestV1>(&bytes).map_err(|error| {
                 ResearchError::Serialization {
                     detail: format!("invalid policy Source Slice manifest: {error}"),
                 }
@@ -1903,8 +1920,8 @@ impl TradePolicyService {
         if manifest.profile_ref != policy.payload_json.fit_contract.profile_ref
             || manifest.research_program_hash
                 != policy.payload_json.fit_contract.research_program_hash
-            || manifest.runtime_config_version_id
-                != policy.payload_json.fit_contract.runtime_config_version_id
+            || manifest.decision_policy_snapshot_id
+                != policy.payload_json.fit_contract.decision_policy_snapshot_id
         {
             return Err(ResearchError::ValidationMethodology {
                 detail: format!(
@@ -1917,7 +1934,7 @@ impl TradePolicyService {
             profile_ref: manifest.profile_ref.clone(),
             evaluation_track: manifest.evaluation_track,
             research_program_hash: manifest.research_program_hash.clone(),
-            runtime_config_version_id: manifest.runtime_config_version_id.clone(),
+            decision_policy_snapshot_id: manifest.decision_policy_snapshot_id.clone(),
             runtime_config_hash: manifest.runtime_config_hash.clone(),
             window_start: manifest.window_start,
             window_end: manifest.window_end,
@@ -2031,7 +2048,7 @@ impl TradePolicyService {
                 &source_manifest.manifest_hash,
             )
             .await?;
-        let source_manifest_v2 = serde_json::from_slice::<SourceSliceManifestV2>(
+        let source_manifest_v2 = serde_json::from_slice::<SourceSliceManifestV1>(
             &source_manifest_bytes,
         )
         .map_err(|error| ResearchError::Serialization {
@@ -2208,7 +2225,7 @@ impl TradePolicyService {
             .read_and_hash_manifest(&source_ref.manifest_uri, &source_ref.manifest_hash)
             .await?;
         let manifest =
-            serde_json::from_slice::<SourceSliceManifestV2>(&manifest_bytes).map_err(|error| {
+            serde_json::from_slice::<SourceSliceManifestV1>(&manifest_bytes).map_err(|error| {
                 ResearchError::Serialization {
                     detail: format!(
                         "invalid Source Slice manifest at validation durability boundary: {error}"
@@ -2345,7 +2362,7 @@ impl TradePolicyService {
         let profile = resolve_builtin_research_profile(&payload.fit_contract.profile_ref)
             .map_err(|detail| ResearchError::ValidationMethodology { detail })?;
         let runtime_limits = self
-            .runtime_policy_limits(&payload.fit_contract.runtime_config_version_id, &profile)
+            .runtime_policy_limits(&payload.fit_contract.decision_policy_snapshot_id, &profile)
             .await?;
         if runtime_limits.fit_model.model_version_id != payload.fit_contract.model_version_id
             || runtime_limits.methodology_hash != payload.fit_contract.methodology_hash
@@ -2397,7 +2414,7 @@ impl TradePolicyService {
                 profile: &profile,
                 candidates: &candidates,
                 model_version_id: &payload.fit_contract.model_version_id,
-                runtime_config_version_id: &payload.fit_contract.runtime_config_version_id,
+                decision_policy_snapshot_id: &payload.fit_contract.decision_policy_snapshot_id,
                 feature_schema_hash: materialization.feature_schema_hash,
                 factor_schema_hash: materialization.factor_schema_hash,
                 experiment_family_hash: &experiment_family_hash,
@@ -2707,7 +2724,7 @@ fn build_fit_artifact_payload(
             research_program_hash: plan.research_program_hash.clone(),
             source_dataset_id: data.source_dataset_id.clone(),
             model_version_id: plan.runtime_limits.fit_model.model_version_id.clone(),
-            runtime_config_version_id: plan.runtime_config_version_id.clone(),
+            decision_policy_snapshot_id: plan.decision_policy_snapshot_id.clone(),
             fit_window_start: plan.fit_window_start,
             fit_window_end: plan.fit_window_end,
             pit_cutoff: request.selection.pit_cutoff,
@@ -3304,7 +3321,7 @@ struct PreflightBlockerContext<'a> {
     retention_runway_days: Option<u32>,
     required_raw_retention_days: Option<u32>,
     retention_runway_proven: bool,
-    retention_evidence: Option<&'a RetentionRunwayEvidenceV3>,
+    retention_evidence: Option<&'a RetentionRunwayEvidenceV1>,
 }
 
 fn preflight_blockers(
@@ -3574,7 +3591,7 @@ fn derive_research_program_hash(
     request: &TradePolicyFitPreflightRequest,
     profile: Option<&ResearchProfileArtifact>,
     candidates: Option<&[TradePolicyCandidateSpec]>,
-    runtime_config_version_id: Option<&RuntimeConfigVersionId>,
+    decision_policy_snapshot_id: Option<&DecisionPolicySnapshotId>,
     limits: Option<&RuntimePolicyLimits>,
 ) -> QuantResult<Option<ContentHash>> {
     profile
@@ -3585,13 +3602,13 @@ fn derive_research_program_hash(
                 &profile.profile_ref,
                 request.evaluation_track,
                 candidates,
-                runtime_config_version_id,
+                decision_policy_snapshot_id,
                 &limits.runtime_config_hash,
                 &limits.methodology_hash,
                 &limits.fit_model.model_version_id,
                 &limits.fit_model.model_spec_id,
-                "source_slice_reader_v2",
-                "source_slice_schema_v2",
+                "source_slice_reader_v1",
+                "source_slice_schema_v1",
                 DATASET_ARTIFACT_FORMAT_VERSION,
             ))
             .map_err(Into::into)
@@ -3608,7 +3625,7 @@ fn derive_contract_source_identity(
     let Some(program_hash) = input.research_program_hash else {
         return Ok(None);
     };
-    let Some(runtime_config_version_id) = input.runtime_config_version_id else {
+    let Some(decision_policy_snapshot_id) = input.decision_policy_snapshot_id else {
         return Ok(None);
     };
     let Some(limits) = input.runtime_limits else {
@@ -3644,7 +3661,7 @@ fn derive_contract_source_identity(
         profile_ref: profile.profile_ref.clone(),
         evaluation_track: input.request.evaluation_track,
         research_program_hash: program_hash.clone(),
-        runtime_config_version_id: runtime_config_version_id.clone(),
+        decision_policy_snapshot_id: decision_policy_snapshot_id.clone(),
         runtime_config_hash: limits.runtime_config_hash.clone(),
         window_start,
         window_end,
@@ -3825,7 +3842,7 @@ fn assemble_preflight_view(
         source_slice_verified: dataset.source_slice_verified.is_pass().into(),
         fit_window_contained: dataset.fit_window_contained.is_pass().into(),
         profile_quality_gate_available: contract.profile_quality_gate_available.into(),
-        runtime_config_version_id: contract.runtime_config_version_id,
+        decision_policy_snapshot_id: contract.decision_policy_snapshot_id,
         methodology_hash,
         latency_profile_present: operational.latency_profile_present.into(),
         latency_evidence: operational
@@ -4424,7 +4441,7 @@ fn collect_weather_replay_inputs(
             candidates: input.candidates,
             profile: input.profile,
             model_version_id: input.model_version_id,
-            runtime_config_version_id: input.runtime_config_version_id,
+            decision_policy_snapshot_id: input.decision_policy_snapshot_id,
             latency_profile: input.latency_profile,
         })?);
         let completed = u64::try_from(replayed_examples.len()).map_err(|error| {

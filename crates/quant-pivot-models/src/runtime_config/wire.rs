@@ -1,22 +1,23 @@
 //! Shared wire types and nested policy documents for runtime config.
 
-use quant_pivot_error::QuantError;
+use rust_decimal::Decimal;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, str::FromStr};
+use std::collections::BTreeMap;
 
 use crate::{enums::quant::PortfolioSolverKind, types::ModelVersionId};
 
 /// Placeholder substituted for sensitive values on read surfaces.
 pub const MASKED_SECRET: &str = "***";
 
-/// Decimal wire value stored as a string to preserve exact operator input.
+/// Validated decimal value serialized as a JSON string without losing precision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(transparent)]
 #[schemars(transparent)]
-pub struct DecimalString {
-    #[schemars(extend("x-format" = "decimal"))]
-    pub value: String,
+pub struct DecimalValue {
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schemars(with = "String", extend("x-format" = "decimal"))]
+    pub value: Decimal,
 }
 
 /// Runtime-config model-version id reference.
@@ -24,35 +25,39 @@ pub struct DecimalString {
 #[serde(transparent)]
 #[schemars(transparent)]
 pub struct ModelVersionRef {
-    pub id: String,
+    #[schemars(with = "String", extend("x-format" = "uuid"))]
+    pub id: ModelVersionId,
 }
 
-impl TryFrom<&ModelVersionRef> for ModelVersionId {
-    type Error = QuantError;
-
-    fn try_from(reference: &ModelVersionRef) -> Result<Self, Self::Error> {
-        Self::from_str(reference.id.trim()).map_err(|error| {
-            Self::Error::config(format!(
-                "invalid model_version_id `{}`: {error}",
-                reference.id
-            ))
-        })
-    }
-}
-
-impl DecimalString {
-    /// Build a decimal string value from a static default.
+impl ModelVersionRef {
     #[must_use]
-    pub fn new(value: impl Into<String>) -> Self {
-        Self {
-            value: value.into(),
-        }
+    pub const fn new(id: ModelVersionId) -> Self {
+        Self { id }
+    }
+
+    #[must_use]
+    pub const fn id(&self) -> &ModelVersionId {
+        &self.id
     }
 }
 
-impl Default for DecimalString {
+impl DecimalValue {
+    /// Build a validated decimal wire value.
+    #[must_use]
+    pub const fn new(value: Decimal) -> Self {
+        Self { value }
+    }
+
+    /// Return the exact decimal value.
+    #[must_use]
+    pub const fn value(&self) -> Decimal {
+        self.value
+    }
+}
+
+impl Default for DecimalValue {
     fn default() -> Self {
-        Self::new("0")
+        Self::new(Decimal::ZERO)
     }
 }
 
@@ -175,9 +180,9 @@ pub enum DrawdownMultiplierPolicy {
 #[serde(default, deny_unknown_fields)]
 pub struct SizingModelConfig {
     /// Fraction of full Kelly to apply, in `(0, 1]` (half-Kelly ≈ `0.5`).
-    pub kelly_fraction: DecimalString,
+    pub kelly_fraction: DecimalValue,
     /// Maximum single-position size as a fraction of equity (`(0, 1]`).
-    pub max_position_pct: DecimalString,
+    pub max_position_pct: DecimalValue,
     /// Confidence-driven shrinkage of the Kelly fraction (estimation
     /// uncertainty): `confidence` high → near fractional Kelly, low → compressed.
     pub confidence_weighting: ConfidenceSizeCurve,
@@ -188,8 +193,8 @@ pub struct SizingModelConfig {
 impl Default for SizingModelConfig {
     fn default() -> Self {
         Self {
-            kelly_fraction: DecimalString::new("0.5"),
-            max_position_pct: DecimalString::new("0.1"),
+            kelly_fraction: DecimalValue::new(rust_decimal_macros::dec!(0.5)),
+            max_position_pct: DecimalValue::new(rust_decimal_macros::dec!(0.1)),
             confidence_weighting: ConfidenceSizeCurve::Linear,
             drawdown_scaling: DrawdownMultiplierPolicy::Conservative,
         }
@@ -219,7 +224,7 @@ pub struct PortfolioOptimizerConfig {
     /// `λ ≥ 0`: weight on normalized expected return in the per-dollar objective
     /// weight `wᵢ = scoreᵢ · (1 + λ · ret_normᵢ)`. `0` ⇒ pure conviction weighting
     /// (semantically equivalent to the former greedy fill order).
-    pub objective_return_weight: DecimalString,
+    pub objective_return_weight: DecimalValue,
 }
 
 impl Default for PortfolioOptimizerConfig {
@@ -227,7 +232,7 @@ impl Default for PortfolioOptimizerConfig {
         Self {
             solver: PortfolioSolverKind::Microlp,
             integer_inclusion: true,
-            objective_return_weight: DecimalString::new("0"),
+            objective_return_weight: DecimalValue::new(rust_decimal_macros::dec!(0)),
         }
     }
 }
@@ -247,7 +252,7 @@ pub struct CorrelationConfig {
     /// below this the estimator falls back to event/category proxy clusters.
     pub min_observations: u32,
     /// Absolute Pearson correlation at or above which two markets are clustered.
-    pub cluster_threshold: DecimalString,
+    pub cluster_threshold: DecimalValue,
 }
 
 impl Default for CorrelationConfig {
@@ -256,7 +261,7 @@ impl Default for CorrelationConfig {
             enabled: false,
             lookback_days: 30,
             min_observations: 20,
-            cluster_threshold: DecimalString::new("0.7"),
+            cluster_threshold: DecimalValue::new(rust_decimal_macros::dec!(0.7)),
         }
     }
 }
@@ -345,7 +350,7 @@ impl FeatureFamily {
 #[serde(transparent)]
 #[schemars(transparent)]
 pub struct FactorWeights {
-    pub weights: BTreeMap<String, DecimalString>,
+    pub weights: BTreeMap<String, DecimalValue>,
 }
 
 /// Entry order policy for recommendations.
@@ -359,14 +364,14 @@ pub struct EntryOrderPolicy {
     /// by execution admission (`LiquidityDepthCheck`): an intent is deferred
     /// when the fillable ask notional up to the limit price is below this
     /// floor. `0` disables the depth floor.
-    pub min_entry_book_depth_usd: DecimalString,
+    pub min_entry_book_depth_usd: DecimalValue,
 }
 
 impl Default for EntryOrderPolicy {
     fn default() -> Self {
         Self {
             max_slippage_bps: 50,
-            min_entry_book_depth_usd: DecimalString::new("0"),
+            min_entry_book_depth_usd: DecimalValue::new(rust_decimal_macros::dec!(0)),
         }
     }
 }
@@ -512,7 +517,7 @@ pub struct KillSwitchPolicy {
 pub struct CapitalPolicy {
     /// Maximum USD that may be reserved across all open execution intents.
     /// `0` disables the reserved-capital cap. Enforced by admission `#22`.
-    pub max_reserved_usd: DecimalString,
+    pub max_reserved_usd: DecimalValue,
     /// Maximum number of concurrently open execution intents. `0` disables the
     /// open-intent count cap. Enforced by admission `#21`.
     pub max_open_intents: u32,
@@ -521,7 +526,7 @@ pub struct CapitalPolicy {
 impl Default for CapitalPolicy {
     fn default() -> Self {
         Self {
-            max_reserved_usd: DecimalString::new("0"),
+            max_reserved_usd: DecimalValue::new(rust_decimal_macros::dec!(0)),
             max_open_intents: 0,
         }
     }
@@ -560,16 +565,6 @@ pub struct SettlementRedeemPolicy {
     pub confirmation_blocks: u64,
     /// Whether automatic redeem may sign new transactions in emergency halt.
     pub allow_during_emergency: bool,
-    /// Whether the report composer may elect `HoldToResolution` (and, when the
-    /// worker is enabled, `RedeemPolicy::Auto`) for near-resolution lots instead
-    /// of forcing an on-book exit. Off by default (safe — preserves the on-book
-    /// Kelly exit ladder); enabling it lets settled lots redeem the full payout.
-    pub hold_to_resolution_enabled: bool,
-    /// When `hold_to_resolution_enabled`, a recommendation whose market resolves
-    /// within this many seconds (from `as_of`) is held to resolution rather than
-    /// exited on the book — the on-book time-exit would otherwise fire moments
-    /// before settlement, paying spread/slippage on a position about to pay 0/1.
-    pub hold_to_resolution_within_secs: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -603,8 +598,6 @@ impl Default for SettlementRedeemPolicy {
             retry_backoff_secs: 300,
             confirmation_blocks: 3,
             allow_during_emergency: false,
-            hold_to_resolution_enabled: false,
-            hold_to_resolution_within_secs: 86_400,
         }
     }
 }
@@ -645,7 +638,7 @@ pub struct ExecutionBreakerConfig {
     /// loss `≥ 80%` of the cap degrades venue health (admission `#18` defers);
     /// `≥` the cap trips the kill-switch (`execution_halted`, latched). `0`
     /// disables the daily-realized-loss dimension.
-    pub daily_realized_loss_cap_usd: DecimalString,
+    pub daily_realized_loss_cap_usd: DecimalValue,
 }
 
 impl Default for ExecutionBreakerConfig {
@@ -657,7 +650,7 @@ impl Default for ExecutionBreakerConfig {
             venue_min_window_samples: 10,
             venue_window_secs: 60,
             cooldown_secs: 30,
-            daily_realized_loss_cap_usd: DecimalString::new("0"),
+            daily_realized_loss_cap_usd: DecimalValue::new(rust_decimal_macros::dec!(0)),
         }
     }
 }

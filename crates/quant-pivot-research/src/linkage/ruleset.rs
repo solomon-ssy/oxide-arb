@@ -21,7 +21,7 @@ use quant_pivot_models::{
 /// The current deterministic resolver ruleset version.
 ///
 /// Bump **every** time the alias / symbol / feed table below changes.
-pub const DOMAIN_RESOLVER_VERSION: ResolverVersion = ResolverVersion::new(6);
+pub const DOMAIN_RESOLVER_VERSION: ResolverVersion = ResolverVersion::new(1);
 
 /// Symbols officially exposed by both public Polymarket RTDS Crypto topics.
 pub const PUBLIC_RTDS_ASSETS: &[&str] = &["BTC", "ETH", "SOL", "XRP"];

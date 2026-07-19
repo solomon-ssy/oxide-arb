@@ -11,7 +11,7 @@ use quant_pivot_core::{
 };
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
-    domain::{AccountReadPort, RuntimeConfigPort},
+    domain::{AccountReadPort, PolicySnapshotPort},
     types::Usd,
 };
 use quant_pivot_repository::{
@@ -60,7 +60,7 @@ pub fn stub_account_provider_factory() -> Arc<AccountProviderFactory> {
 #[must_use]
 pub fn core_account_read_port(
     db: &DatabaseConnection,
-    runtime_config: Arc<dyn RuntimeConfigPort>,
+    runtime_config: Arc<dyn PolicySnapshotPort>,
 ) -> Arc<dyn AccountReadPort> {
     Arc::new(CoreAccountReadPort::new(
         Arc::new(PgAccountSnapshotRepository::new(db.clone()))

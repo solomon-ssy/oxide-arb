@@ -97,8 +97,8 @@ pub async fn persist_prepared_report(
         lease_expires_at: ActiveValue::Set(Some(lease_expires_at)),
         finished_at: ActiveValue::Set(None),
         lease_owner: ActiveValue::Set(Some(worker_id)),
-        runtime_config_version_id: ActiveValue::Set(Some(
-            transaction.report.runtime_config_version_id.clone(),
+        decision_policy_snapshot_id: ActiveValue::Set(Some(
+            transaction.report.decision_policy_snapshot_id.clone(),
         )),
         top_n: ActiveValue::Set(Some(transaction.report.top_n)),
         knowledge_lag_secs: ActiveValue::Set(Some(knowledge_lag_secs)),

@@ -1,15 +1,15 @@
 //! Deploy-time connections for typed external-domain sources.
 //!
-//! Credentials are held in [`SecretString`] and are expected through
-//! `QUANT_PIVOT__DOMAIN_SOURCES__CHAINLINK_DATA_STREAMS__*`. Runtime policy,
+//! Provider secrets are typed systemd credential references. Runtime policy,
 //! source readiness, and vertical activation gates do not belong here.
 
 use std::collections::BTreeMap;
 
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
-use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
+
+use super::secret::SystemdCredentialRef;
 
 use self::WeatherHistoricalBindingKind::{ExactStation as Exact, OfficialNearbyProxy as Proxy};
 
@@ -966,7 +966,7 @@ impl BinanceSourceConfig {
 }
 
 /// Chainlink Data Streams REST/WebSocket connection.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ChainlinkDataStreamsSourceConfig {
     /// A missing subscription is valid for unrelated reports. Any bound
@@ -974,31 +974,12 @@ pub struct ChainlinkDataStreamsSourceConfig {
     pub enabled: bool,
     pub rest_url: String,
     pub websocket_url: String,
-    pub api_key: Option<SecretString>,
-    pub api_secret: Option<SecretString>,
+    pub api_key: Option<SystemdCredentialRef>,
+    pub api_secret: Option<SystemdCredentialRef>,
     /// Logical feed key (`BTC-USD`) to immutable V3 feed metadata.
     pub feeds: BTreeMap<String, ChainlinkDataStreamFeedConfig>,
     pub max_clock_skew_ms: u64,
     pub rest_page_limit: usize,
-}
-
-impl PartialEq for ChainlinkDataStreamsSourceConfig {
-    fn eq(&self, other: &Self) -> bool {
-        self.enabled == other.enabled
-            && self.rest_url == other.rest_url
-            && self.websocket_url == other.websocket_url
-            && exposed(self.api_key.as_ref()) == exposed(other.api_key.as_ref())
-            && exposed(self.api_secret.as_ref()) == exposed(other.api_secret.as_ref())
-            && self.feeds == other.feeds
-            && self.max_clock_skew_ms == other.max_clock_skew_ms
-            && self.rest_page_limit == other.rest_page_limit
-    }
-}
-
-impl Eq for ChainlinkDataStreamsSourceConfig {}
-
-fn exposed(secret: Option<&SecretString>) -> Option<&str> {
-    secret.map(ExposeSecret::expose_secret)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -1020,6 +1001,25 @@ impl Default for ChainlinkDataStreamsSourceConfig {
             feeds: BTreeMap::new(),
             max_clock_skew_ms: 2_000,
             rest_page_limit: 1_000,
+        }
+    }
+}
+
+impl ChainlinkDataStreamsSourceConfig {
+    pub fn normalize_credentials(&mut self) {
+        if self
+            .api_key
+            .as_ref()
+            .is_some_and(|credential| !credential.is_configured())
+        {
+            self.api_key = None;
+        }
+        if self
+            .api_secret
+            .as_ref()
+            .is_some_and(|credential| !credential.is_configured())
+        {
+            self.api_secret = None;
         }
     }
 }

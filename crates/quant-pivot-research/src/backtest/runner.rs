@@ -16,8 +16,8 @@ use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{
     enums::quant::{DataQualityStatus, FillRequirement},
     types::{
-        BacktestReportId, ContentHash, ExposureBreakdown, ModelVersionId, Probability,
-        RuntimeConfigVersionId, Usd,
+        BacktestReportId, ContentHash, DecisionPolicySnapshotId, ExposureBreakdown, ModelVersionId,
+        Probability, Usd,
     },
 };
 use rust_decimal::Decimal;
@@ -415,7 +415,7 @@ fn build_report(request: &BacktestRequest, m: &BuildMetrics<'_>) -> QuantResult<
     let report_hash = hash_report(&ReportHashInput {
         backtest_report_id: &request.backtest_report_id,
         model_version_id: &request.model_version_id,
-        runtime_config_version_id: &request.runtime_config_version_id,
+        decision_policy_snapshot_id: &request.decision_policy_snapshot_id,
         window_start: request.window_start,
         window_end: request.window_end,
         coverage,
@@ -436,7 +436,7 @@ fn build_report(request: &BacktestRequest, m: &BuildMetrics<'_>) -> QuantResult<
     Ok(BacktestReport {
         backtest_report_id: request.backtest_report_id.clone(),
         model_version_id: request.model_version_id.clone(),
-        runtime_config_version_id: request.runtime_config_version_id.clone(),
+        decision_policy_snapshot_id: request.decision_policy_snapshot_id.clone(),
         window_start: request.window_start,
         window_end: request.window_end,
         coverage,
@@ -461,7 +461,7 @@ fn build_report(request: &BacktestRequest, m: &BuildMetrics<'_>) -> QuantResult<
 struct ReportHashInput<'a> {
     backtest_report_id: &'a BacktestReportId,
     model_version_id: &'a ModelVersionId,
-    runtime_config_version_id: &'a RuntimeConfigVersionId,
+    decision_policy_snapshot_id: &'a DecisionPolicySnapshotId,
     window_start: DateTime<Utc>,
     window_end: DateTime<Utc>,
     coverage: Decimal,
@@ -497,8 +497,8 @@ mod tests {
         },
         runtime_config::FactorCrossSectionConfig,
         types::{
-            BacktestReportId, Bps, ContentHash, FactorDefinitionId, MarketId, ModelInputContract,
-            ModelRunId, ModelVersionId, Price, Probability, RuntimeConfigVersionId, Shares,
+            BacktestReportId, Bps, ContentHash, DecisionPolicySnapshotId, FactorDefinitionId,
+            MarketId, ModelInputContract, ModelRunId, ModelVersionId, Price, Probability, Shares,
             TokenId, Usd, builtin_research_profiles,
         },
     };
@@ -703,7 +703,7 @@ mod tests {
         BacktestRequest {
             backtest_report_id: BacktestReportId::from_v7(),
             model_version_id: ModelVersionId::from_v7(),
-            runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
+            decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
             window_start: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
             window_end: Utc.timestamp_opt(1_700_100_000, 0).unwrap(),
         }

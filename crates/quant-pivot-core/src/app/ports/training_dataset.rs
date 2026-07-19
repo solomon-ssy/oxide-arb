@@ -16,20 +16,20 @@ use quant_pivot_models::{
     },
     enums::quant::{DatasetPurpose, SourceSliceStatus, TrainingDatasetStatus},
     hashing::CanonicalDigest,
-    runtime_config::RuntimeConfig,
+    runtime_config::DecisionPolicySnapshot,
     types::{
-        ContentHash, DATASET_ARTIFACT_FORMAT_VERSION, ResearchEvaluationTrack,
-        ResearchProfileArtifact, RuntimeConfigVersionId, SourceSliceManifestRef,
-        SourceSliceManifestV2, TrainingDatasetId, TrainingSampleSource,
+        ContentHash, DATASET_ARTIFACT_FORMAT_VERSION, DecisionPolicySnapshotId,
+        ResearchEvaluationTrack, ResearchProfileArtifact, SourceSliceManifestRef,
+        SourceSliceManifestV1, TrainingDatasetId, TrainingSampleSource,
         resolve_builtin_research_profile,
     },
 };
 use quant_pivot_repository::traits::{
     AttributionRepository, CalibrationArtifactRepository, CatalogLedgerRepository,
     ClobMarketInfoRepository, FeatureRepository, MarketLinkageRepository, MarketRepository,
-    MarketSelectionRepository, ModelRegistryRepository, PositionRepository,
-    QuantFactReadRepository, RecommendationRepository, RuntimeConfigVersionRepository,
-    SourceSliceRepository, TradePolicyRepository, TrainingDatasetRepository,
+    MarketSelectionRepository, ModelRegistryRepository, PolicyRepository, PositionRepository,
+    QuantFactReadRepository, RecommendationRepository, SourceSliceRepository,
+    TradePolicyRepository, TrainingDatasetRepository,
 };
 use quant_pivot_research::{artifact::ArtifactStore, training::DatasetPlanRequest};
 
@@ -62,7 +62,7 @@ pub struct CoreTrainingDatasetPort {
     linkage_repo: Arc<dyn MarketLinkageRepository>,
     model_registry: Arc<dyn ModelRegistryRepository>,
     trade_policy_repo: Arc<dyn TradePolicyRepository>,
-    runtime_config: Arc<dyn RuntimeConfigVersionRepository>,
+    runtime_config: Arc<dyn PolicyRepository>,
     bias_table_repo: Arc<dyn CalibrationArtifactRepository>,
     source_slice_repo: Arc<dyn SourceSliceRepository>,
     clob_market_info_repo: Arc<dyn ClobMarketInfoRepository>,
@@ -75,7 +75,7 @@ impl CoreTrainingDatasetPort {
     #[must_use]
     pub fn from_research(
         research: &ResearchBundle,
-        runtime_config: Arc<dyn RuntimeConfigVersionRepository>,
+        runtime_config: Arc<dyn PolicyRepository>,
         bias_table_repo: Arc<dyn CalibrationArtifactRepository>,
         max_spine_samples: u64,
         _plan_sample_slices: u32,
@@ -105,19 +105,22 @@ impl CoreTrainingDatasetPort {
 
     async fn service_for(
         &self,
-        runtime_config_version_id: &RuntimeConfigVersionId,
+        decision_policy_snapshot_id: &DecisionPolicySnapshotId,
     ) -> QuantResult<TrainingDatasetService> {
         let version = self
             .runtime_config
-            .load_version(runtime_config_version_id)
+            .load_snapshot(decision_policy_snapshot_id)
             .await?
             .ok_or_else(|| StorageError::NotFound {
-                entity: "runtime_config_version",
-                id: runtime_config_version_id.to_string(),
+                entity: "decision_policy_snapshot",
+                id: decision_policy_snapshot_id.to_string(),
             })?;
-        let runtime = RuntimeConfig::from_json(&version.config_json)?;
-        let bias_table =
-            resolve_frozen_bias_table(self.bias_table_repo.as_ref(), &runtime.factors).await?;
+        let runtime = version.snapshot;
+        let bias_table = resolve_frozen_bias_table(
+            self.bias_table_repo.as_ref(),
+            &runtime.profile_artifacts.scoring.definition,
+        )
+        .await?;
         TrainingDatasetService::new(
             TrainingDatasetServiceDeps {
                 fact_read: Arc::clone(&self.fact_read),
@@ -137,12 +140,12 @@ impl CoreTrainingDatasetPort {
                 calibration_repo: Arc::clone(&self.bias_table_repo),
             },
             TrainingDatasetBuildConfig {
-                features: runtime.features,
-                factors: runtime.factors,
-                domain: runtime.domain,
-                data_quality: runtime.data_quality,
-                training: runtime.training,
-                selection: runtime.selection,
+                features: runtime.profile_artifacts.features.definition,
+                factors: runtime.profile_artifacts.scoring.definition,
+                domain: runtime.profile_artifacts.domain.definition,
+                data_quality: runtime.recommendation.data_quality,
+                training: runtime.profile_artifacts.research_method.training,
+                selection: runtime.recommendation.selection,
                 labelers: default_labelers(),
                 bias_table,
             },
@@ -172,7 +175,7 @@ impl CoreTrainingDatasetPort {
             .into());
         }
         let manifest =
-            serde_json::from_slice::<SourceSliceManifestV2>(&bytes).map_err(|error| {
+            serde_json::from_slice::<SourceSliceManifestV1>(&bytes).map_err(|error| {
                 ResearchError::DatasetPlan {
                     detail: format!("source-slice manifest is not valid v2 JSON: {error}"),
                 }
@@ -221,7 +224,7 @@ impl CoreTrainingDatasetPort {
         &self,
         identity: SourceSliceIdentity,
         profile: &ResearchProfileArtifact,
-        runtime: &RuntimeConfig,
+        runtime: &DecisionPolicySnapshot,
         materialize: Option<&CancellationToken>,
     ) -> QuantResult<SourceSliceInfo> {
         let source_slice = self
@@ -241,8 +244,14 @@ impl CoreTrainingDatasetPort {
                         artifacts: Arc::clone(&self.artifact_store),
                         ledger: Arc::clone(&self.source_slice_repo),
                     },
-                    runtime.domain.clone(),
-                    StdDuration::from_millis(runtime.training.max_book_staleness_ms),
+                    runtime.profile_artifacts.domain.definition.clone(),
+                    StdDuration::from_millis(
+                        runtime
+                            .profile_artifacts
+                            .research_method
+                            .training
+                            .max_book_staleness_ms,
+                    ),
                 )
                 .materialize(identity, profile, cancel)
                 .await?
@@ -293,20 +302,20 @@ impl CoreTrainingDatasetPort {
             .map_err(|detail| ResearchError::DatasetPlan { detail })?;
         let runtime = self
             .runtime_config
-            .load_version(&body.runtime_config_version_id)
+            .load_snapshot(&body.decision_policy_snapshot_id)
             .await?
             .ok_or_else(|| StorageError::NotFound {
-                entity: "runtime_config_version",
-                id: body.runtime_config_version_id.to_string(),
+                entity: "decision_policy_snapshot",
+                id: body.decision_policy_snapshot_id.to_string(),
             })?;
-        let frozen_runtime = RuntimeConfig::from_json(&runtime.config_json)?;
+        let frozen_runtime = runtime.snapshot;
         let mut sample_sources = body.sample_sources.clone();
         sample_sources.sort_by_key(|source| sample_source_order(*source));
         sample_sources.dedup();
         let (identity, research_program_hash) = derive_dataset_source_identity(
             body,
             &profile,
-            &runtime.config_hash,
+            &runtime.snapshot_hash,
             policy_fit,
             &sample_sources,
         )?;
@@ -333,7 +342,7 @@ impl CoreTrainingDatasetPort {
                 profile_ref: body.profile_ref.clone(),
                 research_program_hash,
                 source_slice: source_slice_ref,
-                runtime_config_version_id: body.runtime_config_version_id.clone(),
+                decision_policy_snapshot_id: body.decision_policy_snapshot_id.clone(),
                 window_start: body.window_start,
                 window_end: body.window_end,
                 pit_cutoff: body.pit_cutoff,
@@ -370,7 +379,7 @@ fn derive_dataset_source_identity(
             &profile.profile_ref,
             &body.model_spec_id,
             body.purpose,
-            &body.runtime_config_version_id,
+            &body.decision_policy_snapshot_id,
             runtime_config_hash,
             body.window_start,
             body.window_end,
@@ -426,7 +435,7 @@ fn derive_dataset_source_identity(
             frozen.evaluation_track
         }),
         research_program_hash: research_program_hash.clone(),
-        runtime_config_version_id: body.runtime_config_version_id.clone(),
+        decision_policy_snapshot_id: body.decision_policy_snapshot_id.clone(),
         runtime_config_hash: runtime_config_hash.clone(),
         window_start: source_window_start,
         window_end: source_window_end,
@@ -467,7 +476,9 @@ impl TrainingDatasetPort for CoreTrainingDatasetPort {
         let frozen = SourceSliceReader::new(Arc::clone(&self.artifact_store))
             .read(&source_slice)
             .await?;
-        let service = self.service_for(&request.runtime_config_version_id).await?;
+        let service = self
+            .service_for(&request.decision_policy_snapshot_id)
+            .await?;
         let plan = service
             .plan_with_frozen_source(plan_request, &frozen)
             .await?;
@@ -475,7 +486,7 @@ impl TrainingDatasetPort for CoreTrainingDatasetPort {
         Ok(TrainingDatasetPlanView {
             training_dataset_id: plan.training_dataset_id,
             model_spec_id: request.model_spec_id,
-            runtime_config_version_id: request.runtime_config_version_id,
+            decision_policy_snapshot_id: request.decision_policy_snapshot_id,
             window_start: request.window_start,
             window_end: request.window_end,
             planned_samples,
@@ -529,7 +540,9 @@ impl TrainingDatasetPort for CoreTrainingDatasetPort {
                 TrainingDatasetStatus::Planned | TrainingDatasetStatus::Building => {}
             }
         }
-        let service = self.service_for(&request.runtime_config_version_id).await?;
+        let service = self
+            .service_for(&request.decision_policy_snapshot_id)
+            .await?;
         let plan = service
             .plan_with_frozen_source(plan_request, &frozen)
             .await?;
@@ -591,7 +604,7 @@ impl TrainingDatasetPort for CoreTrainingDatasetPort {
                 TrainingDatasetStatus::Planned | TrainingDatasetStatus::Building => {}
             }
         }
-        let service = self.service_for(&body.runtime_config_version_id).await?;
+        let service = self.service_for(&body.decision_policy_snapshot_id).await?;
         let plan = service
             .plan_with_frozen_source(plan_request, &frozen_source)
             .await?;

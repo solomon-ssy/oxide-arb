@@ -15,21 +15,21 @@ use quant_pivot_repository::postgres::{
     PgKillSwitchStateRepository, PgMarketLinkageRepository, PgMarketRepository,
     PgMarketSelectionRepository, PgMenuRepository, PgModelComparisonReportRepository,
     PgModelGovernanceAuditRepository, PgModelRegistryRepository, PgModelRunRepository,
-    PgOperationLogRepository, PgOrderIntentRepository, PgPositionRepository,
+    PgOperationLogRepository, PgOrderIntentRepository, PgPolicyRepository, PgPositionRepository,
     PgRecommendationReportRepository, PgRecommendationRepository, PgReconciliationRepository,
     PgReportRunRepository, PgResearchJobRepository, PgResearchReadinessEvidenceRepository,
     PgReservedCapitalRepository, PgRoleMenuRepository, PgRolePermissionRepository,
-    PgRoleRepository, PgRuntimeConfigVersionRepository, PgSettlementRedeemRepository,
-    PgShadowComparisonRepository, PgSourceSliceRepository, PgSystemRuntimeStateRepository,
-    PgTradePolicyRepository, PgTradeTapeBlockCursorRepository, PgTrainingDatasetRepository,
-    PgUserRepository, PgUserRoleRepository, arc_repo,
+    PgRoleRepository, PgSettlementRedeemRepository, PgShadowComparisonRepository,
+    PgSourceSliceRepository, PgSystemRuntimeStateRepository, PgTradePolicyRepository,
+    PgTradeTapeBlockCursorRepository, PgTrainingDatasetRepository, PgUserRepository,
+    PgUserRoleRepository, arc_repo,
 };
 use quant_pivot_storage::postgres::PostgresPool;
 use std::sync::Arc;
 
 /// All Postgres OLTP repositories shared across runtime bundles.
 pub struct PgRepositories {
-    pub runtime_config: Arc<PgRuntimeConfigVersionRepository>,
+    pub runtime_config: Arc<PgPolicyRepository>,
     pub system_runtime_state: Arc<PgSystemRuntimeStateRepository>,
     pub kill_switch_state: Arc<PgKillSwitchStateRepository>,
     pub operation_log: Arc<PgOperationLogRepository>,
@@ -89,7 +89,7 @@ impl PgRepositories {
     pub fn wire(pg: &PostgresPool) -> Self {
         let db = pg.connection().clone();
         Self {
-            runtime_config: arc_repo(&db, PgRuntimeConfigVersionRepository::new),
+            runtime_config: arc_repo(&db, PgPolicyRepository::new),
             system_runtime_state: arc_repo(&db, PgSystemRuntimeStateRepository::new),
             kill_switch_state: arc_repo(&db, PgKillSwitchStateRepository::new),
             operation_log: arc_repo(&db, PgOperationLogRepository::new),

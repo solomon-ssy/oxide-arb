@@ -5,7 +5,7 @@ use sea_orm::entity::prelude::*;
 
 use crate::{
     enums::quant::ReportScheduleGapReason,
-    types::{ReportScheduleGapId, RuntimeConfigVersionId},
+    types::{DecisionPolicySnapshotId, ReportScheduleGapId},
 };
 
 #[sea_orm::model]
@@ -15,7 +15,7 @@ pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub gap_id: ReportScheduleGapId,
     pub schedule_id: String,
-    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub reason: ReportScheduleGapReason,
     pub first_scheduled_for: DateTime<Utc>,
     pub last_scheduled_for: DateTime<Utc>,
@@ -26,11 +26,11 @@ pub struct Model {
 
     #[sea_orm(
         belongs_to,
-        relation_enum = "RuntimeConfigVersion",
-        from = "runtime_config_version_id",
-        to = "runtime_config_version_id"
+        relation_enum = "DecisionPolicySnapshot",
+        from = "decision_policy_snapshot_id",
+        to = "decision_policy_snapshot_id"
     )]
-    pub runtime_config_version: BelongsTo<super::runtime_config_version::Entity>,
+    pub decision_policy_snapshot: BelongsTo<super::decision_policy_snapshot::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

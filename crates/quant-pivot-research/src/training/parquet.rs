@@ -355,7 +355,7 @@ mod tests {
         enums::quant::DatasetPurpose,
         types::{
             ArtifactUri, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION, DatasetManifest,
-            ModelSpecId, RuntimeConfigVersionId, SourceSliceManifestRef, TrainingDatasetId,
+            DecisionPolicySnapshotId, ModelSpecId, SourceSliceManifestRef, TrainingDatasetId,
             builtin_research_profiles,
         },
     };
@@ -402,7 +402,7 @@ mod tests {
             model_spec_id,
             trade_policy_artifact_id: None,
             trade_policy_hash: None,
-            runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
+            decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
             window_start,
             window_end,
             purpose: DatasetPurpose::Training,
@@ -481,7 +481,7 @@ mod tests {
 
     #[test]
     fn dataset_artifact_version_is_four() {
-        assert_eq!(DATASET_ARTIFACT_FORMAT_VERSION, 5);
+        assert_eq!(DATASET_ARTIFACT_FORMAT_VERSION, 1);
     }
 
     #[tokio::test(flavor = "multi_thread")]

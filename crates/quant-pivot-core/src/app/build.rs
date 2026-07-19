@@ -8,7 +8,10 @@ use super::{
         ReportBundleDeps, ResearchBundle, ResearchBundleDeps, RuntimeSnapshot,
     },
 };
-use crate::{execution::IntentLifecyclePublisher, observability::metrics_hub::MetricsHub};
+use crate::{
+    execution::IntentLifecyclePublisher, governance::project_lifecycle::verify_project_lifecycle,
+    observability::metrics_hub::MetricsHub,
+};
 use parking_lot::Mutex;
 use quant_pivot_api::{
     clob::ClobClient,
@@ -28,7 +31,14 @@ impl AppContext {
     ) -> QuantResult<Self> {
         let metrics = Arc::new(MetricsHub::new());
         let infra = InfraBundle::assemble(&deploy, Arc::clone(&metrics)).await?;
-        let runtime = RuntimeSnapshot::bootstrap(&infra.repos).await?;
+        let runtime = RuntimeSnapshot::bootstrap(&infra.repos, &deploy).await?;
+        verify_project_lifecycle(
+            &deploy,
+            &infra,
+            infra.repos.runtime_config.as_ref(),
+            &runtime.config,
+        )
+        .await?;
         let (events, event_rx) = CoreEventPublisher::bounded(4096);
         let intent_lifecycle = Arc::new(IntentLifecyclePublisher::new(events.clone()));
         let data = DataBundle::assemble(&DataBundleDeps {

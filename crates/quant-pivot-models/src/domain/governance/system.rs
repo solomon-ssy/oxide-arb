@@ -7,18 +7,26 @@ use crate::{
         lifecycle::{MarketDataConnectivity, OperationalPhase, WsShardConnectivity},
         ports::runtime_control::CatalogState,
     },
-    entities::{runtime_config_activation, runtime_config_approval, system_runtime_state},
+    entities::{
+        policy_activation, policy_approval, policy_revision, system_production_baseline,
+        system_runtime_state,
+    },
     enums::{
         execution::KillSwitchState,
         quant::QuantRuntimeMode,
         runtime_config::{
-            RuntimeConfigActivationKind, RuntimeConfigApprovalDecision, RuntimeConfigVersionSource,
+            ConfigResourceKind, DecisionPolicySnapshotSource, PolicyActivationKind,
+            PolicyActorKind, PolicyApprovalDecision, PolicyRevisionStatus,
         },
         system::{BootstrapPhase, ShutdownStage},
     },
+    runtime_config::{
+        DecisionPolicySnapshot, PolicyDocument, PolicyValidationEvidence, ProductionSealEvidence,
+    },
     types::{
-        AuditEventId, BootstrapTransitionId, ContentHash, RuntimeConfigActivationId,
-        RuntimeConfigApprovalId, RuntimeConfigVersionId, SchemaVersion,
+        AuditEventId, BootstrapTransitionId, BuildCommitHash, ContentHash,
+        DecisionPolicySnapshotId, DeploymentEnvironment, PolicyActivationId, PolicyApprovalId,
+        PolicyIdempotencyKey, PolicyRevisionId, ProductionBaselineId, SchemaVersion, UserId,
     },
 };
 use chrono::{DateTime, Utc};
@@ -189,137 +197,267 @@ pub struct ShutdownProgress {
     pub started_at: DateTime<Utc>,
 }
 
-// ── Runtime config ───────────────────────────────────────────────────
-//
-// The typed schema for `config_json` is `RuntimeConfig`
-// (`schema_version` — see `RUNTIME_CONFIG_SCHEMA_VERSION`). This module only
-// carries the persistence DTOs.
+// ── Governed configuration resources ─────────────────────────────────
 
-/// DB row projection for the immutable `runtime_config_version` table.
 #[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
-#[sea_orm(entity = "crate::entities::runtime_config_version::Entity")]
-pub struct RuntimeConfigVersionInfo {
-    pub runtime_config_version_id: RuntimeConfigVersionId,
-    pub config_hash: ContentHash,
+#[sea_orm(entity = "crate::entities::policy_revision::Entity")]
+pub struct PolicyRevisionInfo {
+    pub policy_revision_id: PolicyRevisionId,
+    pub resource_kind: ConfigResourceKind,
     pub schema_version: SchemaVersion,
-    pub config_json: serde_json::Value,
-    pub source: RuntimeConfigVersionSource,
-    pub created_by: String,
+    pub revision_hash: ContentHash,
+    pub document: PolicyDocument,
+    pub status: PolicyRevisionStatus,
+    pub validation_evidence: Option<PolicyValidationEvidence>,
+    pub validated_at: Option<DateTime<Utc>>,
+    pub preflight_token_hash: Option<ContentHash>,
+    pub preflight_expires_at: Option<DateTime<Utc>>,
+    pub created_by_kind: PolicyActorKind,
+    pub created_by_user_id: Option<UserId>,
+    pub created_by_label: String,
     pub reason: String,
     pub created_at: DateTime<Utc>,
 }
 
-/// Append-only approval decision bound to one exact config version and hash.
-#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
-#[sea_orm(entity = "crate::entities::runtime_config_approval::Entity")]
-pub struct RuntimeConfigApprovalInfo {
-    pub runtime_config_approval_id: RuntimeConfigApprovalId,
-    pub runtime_config_version_id: RuntimeConfigVersionId,
-    pub config_hash: ContentHash,
-    pub decision: RuntimeConfigApprovalDecision,
-    pub decided_by: String,
-    pub reason: String,
-    pub decided_at: DateTime<Utc>,
-    pub expires_at: Option<DateTime<Utc>>,
-    pub created_at: DateTime<Utc>,
-}
-
-info_from_model!(
-    RuntimeConfigApprovalInfo,
-    runtime_config_approval::Model,
-    {
-        runtime_config_approval_id,
-        runtime_config_version_id,
-        config_hash,
-        decision,
-        decided_by,
-        reason,
-        decided_at,
-        expires_at,
-        created_at,
-    }
-);
-
-/// Insert payload for a WORM runtime-config approval decision.
-#[derive(Debug, Clone, DeriveIntoActiveModel)]
-#[sea_orm(active_model = "crate::entities::runtime_config_approval::ActiveModel")]
-pub struct NewRuntimeConfigApproval {
-    pub runtime_config_approval_id: RuntimeConfigApprovalId,
-    pub runtime_config_version_id: RuntimeConfigVersionId,
-    pub config_hash: ContentHash,
-    pub decision: RuntimeConfigApprovalDecision,
-    pub decided_by: String,
-    pub reason: String,
-    pub decided_at: DateTime<Utc>,
-    pub expires_at: Option<DateTime<Utc>>,
-}
-
-info_from_model!(RuntimeConfigVersionInfo, crate::entities::runtime_config_version::Model, {
-    runtime_config_version_id, config_hash, schema_version, config_json, source,
-    created_by, reason, created_at,
+info_from_model!(PolicyRevisionInfo, policy_revision::Model, {
+    policy_revision_id, resource_kind, schema_version, revision_hash, document, status,
+    validation_evidence, validated_at, preflight_token_hash, preflight_expires_at,
+    created_by_kind, created_by_user_id, created_by_label, reason, created_at,
 });
 
-/// Insert payload for `runtime_config_version`.
 #[derive(Debug, Clone, DeriveIntoActiveModel)]
-#[sea_orm(active_model = "crate::entities::runtime_config_version::ActiveModel")]
-pub struct NewRuntimeConfigVersion {
-    pub runtime_config_version_id: RuntimeConfigVersionId,
-    pub config_hash: ContentHash,
+#[sea_orm(active_model = "crate::entities::policy_revision::ActiveModel")]
+pub struct NewPolicyRevision {
+    pub policy_revision_id: PolicyRevisionId,
+    pub resource_kind: ConfigResourceKind,
     pub schema_version: SchemaVersion,
-    pub config_json: serde_json::Value,
-    pub source: RuntimeConfigVersionSource,
-    pub created_by: String,
+    pub revision_hash: ContentHash,
+    pub document: PolicyDocument,
+    pub status: PolicyRevisionStatus,
+    pub validation_evidence: Option<PolicyValidationEvidence>,
+    pub validated_at: Option<DateTime<Utc>>,
+    pub preflight_token_hash: Option<ContentHash>,
+    pub preflight_expires_at: Option<DateTime<Utc>>,
+    pub created_by_kind: PolicyActorKind,
+    pub created_by_user_id: Option<UserId>,
+    pub created_by_label: String,
     pub reason: String,
 }
 
-/// DB row projection for append-only runtime config activation history.
 #[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
-#[sea_orm(entity = "crate::entities::runtime_config_activation::Entity")]
-pub struct RuntimeConfigActivationInfo {
-    pub runtime_config_activation_id: RuntimeConfigActivationId,
-    pub runtime_config_version_id: RuntimeConfigVersionId,
-    pub runtime_config_approval_id: Option<RuntimeConfigApprovalId>,
-    pub activated_at: DateTime<Utc>,
-    pub activated_by: String,
+#[sea_orm(entity = "crate::entities::policy_approval::Entity")]
+pub struct PolicyApprovalInfo {
+    pub policy_approval_id: PolicyApprovalId,
+    pub policy_revision_id: PolicyRevisionId,
+    pub resource_kind: ConfigResourceKind,
+    pub revision_hash: ContentHash,
+    pub decision: PolicyApprovalDecision,
+    pub decided_by_kind: PolicyActorKind,
+    pub decided_by_user_id: Option<UserId>,
+    pub decided_by_label: String,
     pub reason: String,
-    pub activation_kind: RuntimeConfigActivationKind,
-    pub previous_runtime_config_version_id: Option<RuntimeConfigVersionId>,
-    pub rollback_target_version_id: Option<RuntimeConfigVersionId>,
+    pub decided_at: DateTime<Utc>,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+}
+
+info_from_model!(PolicyApprovalInfo, policy_approval::Model, {
+    policy_approval_id, policy_revision_id, resource_kind, revision_hash, decision,
+    decided_by_kind, decided_by_user_id, decided_by_label, reason, decided_at, expires_at,
+    created_at,
+});
+
+#[derive(Debug, Clone, DeriveIntoActiveModel)]
+#[sea_orm(active_model = "crate::entities::policy_approval::ActiveModel")]
+pub struct NewPolicyApproval {
+    pub policy_approval_id: PolicyApprovalId,
+    pub policy_revision_id: PolicyRevisionId,
+    pub resource_kind: ConfigResourceKind,
+    pub revision_hash: ContentHash,
+    pub decision: PolicyApprovalDecision,
+    pub decided_by_kind: PolicyActorKind,
+    pub decided_by_user_id: Option<UserId>,
+    pub decided_by_label: String,
+    pub reason: String,
+    pub decided_at: DateTime<Utc>,
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+/// Governed approval command. The repository resolves and freezes the exact
+/// revision hash in the same transaction instead of trusting a caller copy.
+#[derive(Debug, Clone)]
+pub struct RecordPolicyApproval {
+    pub policy_approval_id: PolicyApprovalId,
+    pub policy_revision_id: PolicyRevisionId,
+    pub resource_kind: ConfigResourceKind,
+    pub decision: PolicyApprovalDecision,
+    pub decided_by_kind: PolicyActorKind,
+    pub decided_by_user_id: Option<UserId>,
+    pub decided_by_label: String,
+    pub reason: String,
+    pub decided_at: DateTime<Utc>,
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
+#[sea_orm(entity = "crate::entities::decision_policy_snapshot::Entity")]
+pub struct DecisionPolicySnapshotInfo {
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
+    pub snapshot_hash: ContentHash,
+    pub snapshot: DecisionPolicySnapshot,
+    pub recommendation_policy_revision_id: PolicyRevisionId,
+    pub execution_risk_policy_revision_id: PolicyRevisionId,
+    pub model_routing_revision_id: PolicyRevisionId,
+    pub report_schedule_revision_id: PolicyRevisionId,
+    pub operational_control_revision_id: PolicyRevisionId,
+    pub execution_authorization_revision_id: PolicyRevisionId,
+    pub source: DecisionPolicySnapshotSource,
+    pub created_by_kind: PolicyActorKind,
+    pub created_by_user_id: Option<UserId>,
+    pub created_by_label: String,
+    pub reason: String,
+    pub created_at: DateTime<Utc>,
+}
+
+info_from_model!(DecisionPolicySnapshotInfo, crate::entities::decision_policy_snapshot::Model, {
+    decision_policy_snapshot_id, snapshot_hash, snapshot,
+    recommendation_policy_revision_id, execution_risk_policy_revision_id,
+    model_routing_revision_id, report_schedule_revision_id,
+    operational_control_revision_id, execution_authorization_revision_id,
+    source, created_by_kind, created_by_user_id, created_by_label, reason, created_at,
+});
+
+#[derive(Debug, Clone, DeriveIntoActiveModel)]
+#[sea_orm(active_model = "crate::entities::decision_policy_snapshot::ActiveModel")]
+pub struct NewDecisionPolicySnapshot {
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
+    pub snapshot_hash: ContentHash,
+    pub snapshot: DecisionPolicySnapshot,
+    pub recommendation_policy_revision_id: PolicyRevisionId,
+    pub execution_risk_policy_revision_id: PolicyRevisionId,
+    pub model_routing_revision_id: PolicyRevisionId,
+    pub report_schedule_revision_id: PolicyRevisionId,
+    pub operational_control_revision_id: PolicyRevisionId,
+    pub execution_authorization_revision_id: PolicyRevisionId,
+    pub source: DecisionPolicySnapshotSource,
+    pub created_by_kind: PolicyActorKind,
+    pub created_by_user_id: Option<UserId>,
+    pub created_by_label: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
+#[sea_orm(entity = "crate::entities::policy_activation::Entity")]
+pub struct PolicyActivationInfo {
+    pub policy_activation_id: PolicyActivationId,
+    pub resource_kind: ConfigResourceKind,
+    pub policy_revision_id: PolicyRevisionId,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
+    pub policy_approval_id: PolicyApprovalId,
+    pub activated_at: DateTime<Utc>,
+    pub activated_by_kind: PolicyActorKind,
+    pub activated_by_user_id: Option<UserId>,
+    pub activated_by_label: String,
+    pub reason: String,
+    pub activation_kind: PolicyActivationKind,
+    pub expected_active_revision_id: Option<PolicyRevisionId>,
+    pub previous_policy_revision_id: Option<PolicyRevisionId>,
+    pub rollback_target_revision_id: Option<PolicyRevisionId>,
+    pub preflight_token_hash: ContentHash,
+    pub idempotency_key: PolicyIdempotencyKey,
     pub audit_event_id: Option<AuditEventId>,
     pub created_at: DateTime<Utc>,
 }
 
+info_from_model!(PolicyActivationInfo, policy_activation::Model, {
+    policy_activation_id, resource_kind, policy_revision_id, decision_policy_snapshot_id,
+    policy_approval_id, activated_at, activated_by_kind, activated_by_user_id,
+    activated_by_label, reason, activation_kind,
+    expected_active_revision_id, previous_policy_revision_id, rollback_target_revision_id,
+    preflight_token_hash, idempotency_key, audit_event_id, created_at,
+});
+
+/// Latest activation and exact immutable revision for one policy resource.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActivePolicyResourceInfo {
+    pub activation: PolicyActivationInfo,
+    pub revision: PolicyRevisionInfo,
+}
+
+#[derive(Debug, Clone, DeriveIntoActiveModel)]
+#[sea_orm(active_model = "crate::entities::policy_activation::ActiveModel")]
+pub struct NewPolicyActivation {
+    pub policy_activation_id: PolicyActivationId,
+    pub resource_kind: ConfigResourceKind,
+    pub policy_revision_id: PolicyRevisionId,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
+    pub policy_approval_id: PolicyApprovalId,
+    pub activated_by_kind: PolicyActorKind,
+    pub activated_by_user_id: Option<UserId>,
+    pub activated_by_label: String,
+    pub reason: String,
+    pub activation_kind: PolicyActivationKind,
+    pub expected_active_revision_id: Option<PolicyRevisionId>,
+    pub previous_policy_revision_id: Option<PolicyRevisionId>,
+    pub rollback_target_revision_id: Option<PolicyRevisionId>,
+    pub preflight_token_hash: ContentHash,
+    pub idempotency_key: PolicyIdempotencyKey,
+    pub audit_event_id: Option<AuditEventId>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
+#[sea_orm(entity = "crate::entities::system_production_baseline::Entity")]
+pub struct ProductionBaselineInfo {
+    pub production_baseline_id: ProductionBaselineId,
+    pub environment: DeploymentEnvironment,
+    pub sealed_at: DateTime<Utc>,
+    pub sealed_by_kind: PolicyActorKind,
+    pub sealed_by_user_id: Option<UserId>,
+    pub sealed_by_label: String,
+    pub build_commit: BuildCommitHash,
+    pub postgres_schema_fingerprint: ContentHash,
+    pub clickhouse_schema_fingerprint: ContentHash,
+    pub policy_bundle_hash: ContentHash,
+    pub lifecycle_policy_hash: ContentHash,
+    pub evidence: ProductionSealEvidence,
+    pub created_at: DateTime<Utc>,
+}
+
 info_from_model!(
-    RuntimeConfigActivationInfo,
-    runtime_config_activation::Model,
+    ProductionBaselineInfo,
+    system_production_baseline::Model,
     {
-        runtime_config_activation_id,
-        runtime_config_version_id,
-        runtime_config_approval_id,
-        activated_at,
-        activated_by,
-        reason,
-        activation_kind,
-        previous_runtime_config_version_id,
-        rollback_target_version_id,
-        audit_event_id,
+        production_baseline_id,
+        environment,
+        sealed_at,
+        sealed_by_kind,
+        sealed_by_user_id,
+        sealed_by_label,
+        build_commit,
+        postgres_schema_fingerprint,
+        clickhouse_schema_fingerprint,
+        policy_bundle_hash,
+        lifecycle_policy_hash,
+        evidence,
         created_at,
     }
 );
 
-/// Insert payload for `runtime_config_activation`.
 #[derive(Debug, Clone, DeriveIntoActiveModel)]
-#[sea_orm(active_model = "crate::entities::runtime_config_activation::ActiveModel")]
-pub struct NewRuntimeConfigActivation {
-    pub runtime_config_activation_id: RuntimeConfigActivationId,
-    pub runtime_config_version_id: RuntimeConfigVersionId,
-    pub runtime_config_approval_id: Option<RuntimeConfigApprovalId>,
-    pub activated_by: String,
-    pub reason: String,
-    pub activation_kind: RuntimeConfigActivationKind,
-    pub previous_runtime_config_version_id: Option<RuntimeConfigVersionId>,
-    pub rollback_target_version_id: Option<RuntimeConfigVersionId>,
-    pub audit_event_id: Option<AuditEventId>,
+#[sea_orm(active_model = "crate::entities::system_production_baseline::ActiveModel")]
+pub struct NewProductionBaseline {
+    pub production_baseline_id: ProductionBaselineId,
+    pub environment: DeploymentEnvironment,
+    pub sealed_at: DateTime<Utc>,
+    pub sealed_by_kind: PolicyActorKind,
+    pub sealed_by_user_id: Option<UserId>,
+    pub sealed_by_label: String,
+    pub build_commit: BuildCommitHash,
+    pub postgres_schema_fingerprint: ContentHash,
+    pub clickhouse_schema_fingerprint: ContentHash,
+    pub policy_bundle_hash: ContentHash,
+    pub lifecycle_policy_hash: ContentHash,
+    pub evidence: ProductionSealEvidence,
 }
 
 // ── System runtime state (operational control singleton) ─────────────
@@ -381,8 +519,6 @@ pub struct NewSystemBootstrapTransition {
     pub state_revision: i64,
     pub from_phase: BootstrapPhase,
     pub to_phase: BootstrapPhase,
-    pub runtime_config_version_id: Option<RuntimeConfigVersionId>,
-    pub runtime_config_approval_id: Option<RuntimeConfigApprovalId>,
     pub actor: String,
     pub acting_role: Option<String>,
     pub reason: String,
@@ -393,21 +529,15 @@ pub struct NewSystemBootstrapTransition {
 /// Repository command for the one permitted operator activation transition.
 #[derive(Debug, Clone)]
 pub struct ActivateBootstrapState {
-    pub runtime_config_version_id: RuntimeConfigVersionId,
-    pub runtime_config_approval_id: RuntimeConfigApprovalId,
     pub bootstrap_contract_version: i32,
     pub expected_state_revision: i64,
     pub actor: String,
     pub acting_role: String,
     pub reason: String,
     pub report_only_forced_ack: bool,
-    pub require_approver_activator_separation: bool,
 }
 
 #[derive(Debug, Clone)]
 pub struct BootstrapActivationInfo {
     pub state: SystemRuntimeStateInfo,
-    pub runtime_config: RuntimeConfigVersionInfo,
-    pub runtime_config_activation_id: RuntimeConfigActivationId,
-    pub activated_at: DateTime<Utc>,
 }

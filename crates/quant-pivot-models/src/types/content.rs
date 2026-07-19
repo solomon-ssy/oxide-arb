@@ -23,7 +23,7 @@
 //! via [`validated_text_seaorm!`] — `DeriveValueType` on a `String` tuple struct
 //! would skip validation when loading corrupt rows from Postgres.
 
-use std::{fmt, str::FromStr};
+use std::{borrow::Cow, fmt, str::FromStr};
 
 use quant_pivot_error::hashing::CanonicalDigestError;
 use schemars::JsonSchema;
@@ -115,6 +115,23 @@ macro_rules! validated_text_seaorm {
 /// [`crate::hashing::CanonicalDigest::content_hash_json`] to hash a value.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ContentHash(String);
+
+impl JsonSchema for ContentHash {
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> Cow<'static, str> {
+        Cow::Borrowed("ContentHash")
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "pattern": "^blake3:[0-9a-f]{64}$"
+        })
+    }
+}
 
 impl ContentHash {
     /// Validate and wrap a canonical `blake3:<64-hex>` string.

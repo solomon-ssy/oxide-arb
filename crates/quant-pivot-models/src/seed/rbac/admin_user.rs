@@ -26,12 +26,12 @@ const PRODUCES: &[SeedArtifact] = &[SeedArtifact::new(ADMIN_USER_ARTIFACT, SEED_
 
 pub const ADMIN_USER_SEED: SeedSpec = SeedSpec {
     id: SEED_ID,
-    version: 2,
+    version: 1,
     target_table: "user",
     depends_on: DEPENDS_ON,
     produces: PRODUCES,
     conflict_policy: SeedConflictPolicy::GraphOrdered,
-    checksum: "rbac.admin_user.bootstrap.v2.deploy-secret",
+    checksum: "rbac.admin_user.bootstrap.v1.boot-deploy-secret",
     apply: load_boxed,
     hydrate: hydrate_boxed,
 };

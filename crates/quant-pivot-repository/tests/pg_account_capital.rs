@@ -15,8 +15,8 @@ use quant_pivot_models::{
         NewFeatureParityState, NewMarketSelection, NewModelRun, NewModelSpec, NewModelVersion,
         NewOperationLog, NewOrderIntent, NewPortfolioPlan, NewRecommendation,
         NewRecommendationAttribution, NewRecommendationReport, NewReconciliation,
-        NewReportDataQualitySnapshot, NewReportTransaction, NewRuntimeConfigVersion, NullablePatch,
-        OperationLogQuery, Patch, ReconciliationPatch, UpsertKillSwitchState,
+        NewReportDataQualitySnapshot, NewReportTransaction, NullablePatch, OperationLogQuery,
+        Patch, ReconciliationPatch, UpsertKillSwitchState,
     },
     entities::quant_report_fact_delivery,
     enums::{
@@ -38,27 +38,26 @@ use quant_pivot_models::{
             ReportFactDeliveryStatus, ReportKind, SizingModelKind,
         },
         rbac::ResourceType,
-        runtime_config::RuntimeConfigVersionSource,
     },
     types::{
         AccountPositions, AccountSnapshotId, AttributionDetail, BookSnapshotRef, Bps,
         CapitalAllocationId, ConditionTruth, ConfidenceSummary, ContentHash, DataQualitySummary,
-        EligibilitySummary, EntryConditionFoldState, EntryConditionInstanceId, EntryConditionPlan,
-        EntryOrderPolicy, EntryOrderSpec, EntryOutcome, EntryPlan, EquitySnapshotId, EventId,
-        EvidenceRefs, ExecutionEligibility, ExecutionOrderId, ExitOutcome, ExitPlan,
-        ExitPolicySpec, ExposureBreakdown, FactorBreakdownEntry, FeatureParityStateId,
-        FeatureVectorId, MarketContext, MarketId, MarketSelectionId, ModelInputContract,
-        ModelRunId, ModelSpecId, ModelTrainingContract, ModelVersionId, OperationLogId,
-        OpportunisticExitPolicy, OrderAmount, OrderId, OrderIntentId, PortfolioConstraintsSnapshot,
-        PortfolioOptimizerMeta, PortfolioPlanId, PortfolioRejectedSummary, PortfolioRiskBudget,
-        PositionSnapshot, Price, Probability, RecommendationFactorBreakdown, RecommendationId,
-        RecommendationIdentity, RecommendationReportId, RecommendationTradePlan,
-        ReconciliationEvidence, ReconciliationEvidenceChain, ReconciliationId,
-        ReportDataQualitySnapshotId, ReportDataQualityTokens, ReportSummary, RiskEnvelope,
-        RuntimeConfigVersionId, SchemaVersion, SelectionExclusionSummary, Shares,
-        SignalCandidateId, SizingPlan, ThesisInvalidationPolicy, TokenId, TradePolicyArtifactId,
-        TradePolicyCohortDimension, TradePolicyCohortKey, TradePolicyCohortProvenance, Usd,
-        builtin_research_profiles,
+        DecisionPolicySnapshotId, EligibilitySummary, EntryConditionFoldState,
+        EntryConditionInstanceId, EntryConditionPlan, EntryOrderPolicy, EntryOrderSpec,
+        EntryOutcome, EntryPlan, EquitySnapshotId, EventId, EvidenceRefs, ExecutionEligibility,
+        ExecutionOrderId, ExitOutcome, ExitPlan, ExitPolicySpec, ExposureBreakdown,
+        FactorBreakdownEntry, FeatureParityStateId, FeatureVectorId, MarketContext, MarketId,
+        MarketSelectionId, ModelInputContract, ModelRunId, ModelSpecId, ModelTrainingContract,
+        ModelVersionId, OperationLogId, OpportunisticExitPolicy, OrderAmount, OrderId,
+        OrderIntentId, PortfolioConstraintsSnapshot, PortfolioOptimizerMeta, PortfolioPlanId,
+        PortfolioRejectedSummary, PortfolioRiskBudget, PositionSnapshot, Price, Probability,
+        RecommendationFactorBreakdown, RecommendationId, RecommendationIdentity,
+        RecommendationReportId, RecommendationTradePlan, ReconciliationEvidence,
+        ReconciliationEvidenceChain, ReconciliationId, ReportDataQualitySnapshotId,
+        ReportDataQualityTokens, ReportSummary, RiskEnvelope, SchemaVersion,
+        SelectionExclusionSummary, Shares, SignalCandidateId, SizingPlan, ThesisInvalidationPolicy,
+        TokenId, TradePolicyArtifactId, TradePolicyCohortDimension, TradePolicyCohortKey,
+        TradePolicyCohortProvenance, Usd, builtin_research_profiles,
     },
 };
 use quant_pivot_repository::{
@@ -68,7 +67,7 @@ use quant_pivot_repository::{
         PgMarketRepository, PgMarketSelectionRepository, PgModelRegistryRepository,
         PgModelRunRepository, PgOperationLogRepository, PgOrderIntentRepository,
         PgRecommendationReportRepository, PgRecommendationRepository, PgReconciliationRepository,
-        PgReportRunRepository, PgReservedCapitalRepository, PgRuntimeConfigVersionRepository,
+        PgReportRunRepository, PgReservedCapitalRepository,
     },
     traits::{
         AccountSnapshotRepository, AttributionRepository, CapitalAllocationRepository,
@@ -76,13 +75,14 @@ use quant_pivot_repository::{
         MarketSelectionRepository, ModelRegistryRepository, ModelRunRepository,
         OperationLogRepository, OrderIntentRepository, RecommendationReportRepository,
         RecommendationRepository, ReconciliationRepository, ReportRunRepository,
-        ReservedCapitalRepository, RuntimeConfigVersionRepository,
+        ReservedCapitalRepository,
     },
 };
 use quant_pivot_test_support::{
     catalog_fixtures::{make_event, make_market},
     execution_pg_seed::{fixture_profile_ref, prepared_order},
     pg::setup_pg,
+    policy_fixtures::bootstrap_default_policy_bundle,
     report_fixtures,
     report_lifecycle_seed::{persist_and_publish_report, persist_prepared_report},
 };
@@ -187,7 +187,7 @@ async fn report_transaction_persists_chain_and_reserved_capital_sums_pending_int
         model_version: model_version_id.clone(),
         model_run: model_run_id.clone(),
         market_selection: market_selection_id.clone(),
-        runtime_config_version: rc_id.clone(),
+        decision_policy_snapshot: rc_id.clone(),
         market: market_id.to_owned(),
         event: event_id.to_owned(),
     };
@@ -198,7 +198,7 @@ async fn report_transaction_persists_chain_and_reserved_capital_sums_pending_int
         &db,
         &ids.recommendation,
         &ids.condition_instance,
-        &ids.runtime_config_version,
+        &ids.decision_policy_snapshot,
         &ids.model_version,
     )
     .await;
@@ -228,7 +228,7 @@ async fn find_expirable_returns_published_reports_before_cutoff_only() {
         model_version: model_version_id,
         model_run: model_run_id,
         market_selection: market_selection_id,
-        runtime_config_version: rc_id,
+        decision_policy_snapshot: rc_id,
         market: market_id.to_owned(),
         event: event_id.to_owned(),
     };
@@ -356,7 +356,7 @@ async fn report_fact_delivery_recovers_retry_and_expired_lease_without_early_cla
         model_version: model_version_id,
         model_run: model_run_id,
         market_selection: market_selection_id,
-        runtime_config_version: rc_id,
+        decision_policy_snapshot: rc_id,
         market: market_id.to_owned(),
         event: event_id.to_owned(),
     };
@@ -528,7 +528,7 @@ async fn assert_reserved_capital_tracks_pending_intent(
     db: &sea_orm::DatabaseConnection,
     recommendation_id: &RecommendationId,
     condition_instance_id: &EntryConditionInstanceId,
-    runtime_config_version_id: &RuntimeConfigVersionId,
+    decision_policy_snapshot_id: &DecisionPolicySnapshotId,
     model_version_id: &ModelVersionId,
 ) {
     let reserved_repo = PgReservedCapitalRepository::new(db.clone());
@@ -545,7 +545,7 @@ async fn assert_reserved_capital_tracks_pending_intent(
                 order_intent_id: order_intent_id.clone(),
                 recommendation_id: recommendation_id.clone(),
                 runtime_mode: QuantRuntimeMode::SemiAuto,
-                runtime_config_version_id: runtime_config_version_id.clone(),
+                decision_policy_snapshot_id: decision_policy_snapshot_id.clone(),
                 model_version_id: model_version_id.clone(),
                 profile_ref: fixture_profile_ref(),
                 intent_kind: OrderIntentKind::Buy,
@@ -893,7 +893,7 @@ async fn seed_report_fixture(db: &sea_orm::DatabaseConnection) -> TxnIds {
         model_version: model_version_id,
         model_run: model_run_id,
         market_selection: market_selection_id,
-        runtime_config_version: rc_id,
+        decision_policy_snapshot: rc_id,
         market: market_id.to_owned(),
         event: event_id.to_owned(),
     };
@@ -939,7 +939,7 @@ async fn create_pending_intent(db: &sea_orm::DatabaseConnection, ids: &TxnIds) -
                 order_intent_id: order_intent_id.clone(),
                 recommendation_id: ids.recommendation.clone(),
                 runtime_mode: QuantRuntimeMode::SemiAuto,
-                runtime_config_version_id: ids.runtime_config_version.clone(),
+                decision_policy_snapshot_id: ids.decision_policy_snapshot.clone(),
                 model_version_id: ids.model_version.clone(),
                 profile_ref: fixture_profile_ref(),
                 intent_kind: OrderIntentKind::Buy,
@@ -1023,26 +1023,13 @@ async fn explicitly_enable_entry_for_test(db: &sea_orm::DatabaseConnection) {
 
 // ── Seed helpers ────────────────────────────────────────────────────────────
 
-async fn seed_runtime_config(db: &sea_orm::DatabaseConnection) -> RuntimeConfigVersionId {
-    let id = RuntimeConfigVersionId::from_v7();
-    PgRuntimeConfigVersionRepository::new(db.clone())
-        .create_version(NewRuntimeConfigVersion {
-            runtime_config_version_id: id.clone(),
-            config_hash: content_hash('c'),
-            schema_version: SchemaVersion::FIRST,
-            config_json: serde_json::json!({}),
-            source: RuntimeConfigVersionSource::Bootstrap,
-            created_by: "pg-account-it".to_owned(),
-            reason: "integration test".to_owned(),
-        })
-        .await
-        .expect("runtime config");
-    id
+async fn seed_runtime_config(db: &sea_orm::DatabaseConnection) -> DecisionPolicySnapshotId {
+    bootstrap_default_policy_bundle(db, "pg-account-it", "integration test").await
 }
 
 async fn seed_model_version(
     db: &sea_orm::DatabaseConnection,
-    rc_id: &RuntimeConfigVersionId,
+    rc_id: &DecisionPolicySnapshotId,
 ) -> (ModelVersionId, ModelRunId) {
     let registry = PgModelRegistryRepository::new(db.clone());
     let model_spec_id = ModelSpecId::from_v7();
@@ -1069,6 +1056,7 @@ async fn seed_model_version(
             model_spec_id,
             version: 1,
             artifact_hash: content_hash('a'),
+            category_scope: None,
             profile_ref: quant_pivot_test_support::execution_pg_seed::fixture_profile_ref(),
             training_dataset_id: None,
             trade_policy_artifact_id: None,
@@ -1090,7 +1078,7 @@ async fn seed_model_version(
             model_run_id: model_run_id.clone(),
             run_kind: ModelRunKind::LiveInference,
             model_version_id: Some(model_version_id.clone()),
-            runtime_config_version_id: rc_id.clone(),
+            decision_policy_snapshot_id: rc_id.clone(),
             market_selection_id: None,
             window_start: Utc::now(),
             window_end: Utc::now(),
@@ -1111,7 +1099,7 @@ async fn seed_model_version(
 
 async fn seed_market_selection(
     db: &sea_orm::DatabaseConnection,
-    rc_id: &RuntimeConfigVersionId,
+    rc_id: &DecisionPolicySnapshotId,
     _market_id: &str,
     _event_id: &str,
 ) -> MarketSelectionId {
@@ -1121,7 +1109,7 @@ async fn seed_market_selection(
             NewMarketSelection {
                 market_selection_id: id.clone(),
                 decision_at: Utc::now(),
-                runtime_config_version_id: rc_id.clone(),
+                decision_policy_snapshot_id: rc_id.clone(),
                 selector_hash: content_hash('b'),
                 market_count: 1,
                 exclusion_summary: SelectionExclusionSummary::default(),
@@ -1146,7 +1134,7 @@ struct TxnIds {
     model_version: ModelVersionId,
     model_run: ModelRunId,
     market_selection: MarketSelectionId,
-    runtime_config_version: RuntimeConfigVersionId,
+    decision_policy_snapshot: DecisionPolicySnapshotId,
     market: String,
     event: String,
 }
@@ -1190,7 +1178,7 @@ fn build_report_transaction(ids: &TxnIds) -> NewReportTransaction {
         data_quality_snapshot: NewReportDataQualitySnapshot {
             report_data_quality_snapshot_id: ids.data_quality_snapshot.clone(),
             decision_at,
-            runtime_config_version_id: ids.runtime_config_version.clone(),
+            decision_policy_snapshot_id: ids.decision_policy_snapshot.clone(),
             tokens_json: ReportDataQualityTokens(Vec::new()),
         },
         portfolio_plan: report_portfolio_plan(ids, decision_at),
@@ -1253,7 +1241,7 @@ fn report_row(
         decision_at,
         horizon_secs: 86_400,
         runtime_mode: QuantRuntimeMode::ReportOnly,
-        runtime_config_version_id: ids.runtime_config_version.clone(),
+        decision_policy_snapshot_id: ids.decision_policy_snapshot.clone(),
         model_run_id: None,
         model_version_id: ids.model_version.clone(),
         market_selection_id: ids.market_selection.clone(),
@@ -1551,7 +1539,7 @@ fn evidence_refs() -> EvidenceRefs {
         model_run_id: ModelRunId::from_v7(),
         market_selection_id: MarketSelectionId::from_v7(),
         book_snapshot_ref: book_snapshot_ref(),
-        runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
+        decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
         model_version_id: ModelVersionId::from_v7(),
         factor_definition_versions: Vec::new(),
         data_quality_snapshot_ref: ReportDataQualitySnapshotId::from_v7(),

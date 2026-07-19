@@ -56,6 +56,7 @@ async fn seed_two_versions(db: &sea_orm::DatabaseConnection) -> (ModelVersionId,
                 model_spec_id: model_spec_id.clone(),
                 version: i32::try_from(index + 1).unwrap_or(1),
                 artifact_hash: content_hash(seed.0),
+                category_scope: None,
                 profile_ref: quant_pivot_test_support::execution_pg_seed::fixture_profile_ref(),
                 training_dataset_id: None,
                 trade_policy_artifact_id: None,
@@ -120,7 +121,7 @@ async fn quant_shadow_comparison_migration_and_crud() {
 async fn quant_model_governance_audit_migration_and_crud() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
-    let (active, predecessor) = seed_two_versions(&db).await;
+    let (active, _predecessor) = seed_two_versions(&db).await;
     let repo = PgModelGovernanceAuditRepository::new(db.clone());
 
     let audit_id = ModelGovernanceAuditId::from_v7();
@@ -138,7 +139,6 @@ async fn quant_model_governance_audit_migration_and_crud() {
             before_hash: Some(content_hash('b').as_str().to_owned()),
             after_hash: Some(content_hash('a').as_str().to_owned()),
             quality_gate_passed: true,
-            rollback_target_version_id: Some(predecessor.clone()),
             shadow_window_secs: Some(86_400),
             detail_json: serde_json::json!({ "shadow_samples": 5 }),
             audit_event_id: Some(AuditEventId::from_v7()),
@@ -151,6 +151,5 @@ async fn quant_model_governance_audit_migration_and_crud() {
 
     let listed = repo.list_by_version(&active).await.expect("list");
     assert_eq!(listed.len(), 1);
-    assert_eq!(listed[0].rollback_target_version_id, Some(predecessor));
     assert_eq!(listed[0].actor_role.as_deref(), Some("risk_manager"));
 }

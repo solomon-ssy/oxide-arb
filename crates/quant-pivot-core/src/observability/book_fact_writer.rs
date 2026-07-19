@@ -28,7 +28,7 @@ use std::{mem, sync::Arc, time::Duration};
 use uuid::Uuid;
 
 const CANONICAL_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
-const L2_SCHEMA_VERSION: ChSchemaVersion = ChSchemaVersion(2);
+const L2_SCHEMA_VERSION: ChSchemaVersion = ChSchemaVersion(1);
 
 pub struct BookFactWriter {
     l2: Arc<DurableWriter<BookL2EventRow>>,

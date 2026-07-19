@@ -1,5 +1,13 @@
 # Phase 04 — Report Plane 子phase索引
 
+<!-- quant-pivot-lifecycle-contract:v1 -->
+> **Lifecycle contract**
+> - `lifecycle_assumption`: 项目尚未正式生产上线，当前状态为 `pre_production_resettable`，系统自有基线统一为 `boot` / schema version `1`。
+> - `schema_data_version_impact`: 本文中的历史版本号与递增路径不再具有实施效力；当前实现不迁移测试数据、旧结构或旧版本。
+> - `pre_production_behavior`: 允许 clean-break、migration squash 与全新基础设施 bootstrap，但任何数据销毁仍需操作者单独授权。
+> - `production_frozen_behavior`: 一旦完成不可逆 production seal，后续变更必须提供前向 migration、兼容性评估、回滚方案与数据验证。
+> - `rollback_and_data_verification`: 封存前通过清空后的 fresh-install 验证；封存后不得回退到 boot reset。
+
 > **Phase 11.7 覆盖说明**：本 Phase 历史章节中的 `EntryTriggerKind`、`PartialExitNode`、
 > `SignalInvalidationRule` 和 `ExitTriggerKind` 已被强类型入场/退出策略替换；新实现以
 > [`../phase-11/11.7-labeling-entry-exit-closed-loop.md`](../phase-11/11.7-labeling-entry-exit-closed-loop.md)
@@ -101,9 +109,9 @@ flowchart LR
   流动性 caps）
   （[`research/src/backtest/allocator.rs`](../../../crates/quant-pivot-research/src/backtest/allocator.rs)）——
   父文档 §21 明确 Phase 04 受治理 planner **复用同一 trait**。
-- runtime-config v3 `selection` / `data_quality` / `features` / `factors` / `model` /
-  `quality_gate` / `training` / `reports` / `portfolio` / `execution` / `notification`
-  齐全；`RuntimeConfigStore`（热快照）+ `RuntimeConfigVersionRepository`（`load_version`）。
+- boot policy resources 已收敛为六类强类型资源；Feature/Scoring/Research 方法已冻结为
+  immutable profile artifact，报告决策绑定 `DecisionPolicySnapshot`；
+  `DecisionPolicyStore` 提供热读，`PolicyRepository` 持久化 revision/approval/activation。
 
 **Phase 04 已交付（2026-06 闭环）**
 
@@ -202,7 +210,7 @@ flowchart LR
 6. **零兼容、零 re-export**；`f64` 仅允许出现在 Kelly/曲线的中间数值边界，禁止泄漏到
    money domain（`Usd` / `Price` / `Shares` / `Probability`）。
 7. **报告调度硬规则**：`as_of` 永不裸 `Utc::now()`（= trigger − knowledge_lag）；整轮
-   pipeline 使用**同一** `runtime_config_version_id` 冻结快照；报告失败不得 panic 或
+   pipeline 使用**同一** `decision_policy_snapshot_id` 冻结快照；报告失败不得 panic 或
    拖垮 ingest；报告成功不得直接下单（仍走 Phase 5 mode gate）。
 
 ### 5.1 持仓：报告生产是否依赖 position？（credential-gated 定稿）

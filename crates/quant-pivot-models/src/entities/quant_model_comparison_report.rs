@@ -36,6 +36,34 @@ pub struct Model {
         to = "model_run_id"
     )]
     pub model_run: BelongsTo<super::quant_model_run::Entity>,
+    #[sea_orm(
+        belongs_to,
+        relation_enum = "BaselineModelVersion",
+        from = "baseline_model_version_id",
+        to = "model_version_id"
+    )]
+    pub baseline_model_version: BelongsTo<super::quant_model_version::Entity>,
+    #[sea_orm(
+        belongs_to,
+        relation_enum = "CandidateModelVersion",
+        from = "candidate_model_version_id",
+        to = "model_version_id"
+    )]
+    pub candidate_model_version: BelongsTo<super::quant_model_version::Entity>,
+    #[sea_orm(
+        belongs_to,
+        relation_enum = "BaselineReport",
+        from = "baseline_report_id",
+        to = "backtest_report_id"
+    )]
+    pub baseline_report: BelongsTo<super::quant_backtest_report::Entity>,
+    #[sea_orm(
+        belongs_to,
+        relation_enum = "CandidateReport",
+        from = "candidate_report_id",
+        to = "backtest_report_id"
+    )]
+    pub candidate_report: BelongsTo<super::quant_backtest_report::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

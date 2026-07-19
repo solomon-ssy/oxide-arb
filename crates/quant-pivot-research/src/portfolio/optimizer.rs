@@ -10,7 +10,7 @@
 
 use std::sync::Arc;
 
-use quant_pivot_error::{QuantError, QuantResult};
+use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     enums::quant::{
         CorrelationSource, OptimizerSolverStatus, PortfolioSolveMode, PortfolioSolverKind,
@@ -39,17 +39,7 @@ impl OptimizerConfig {
     /// Returns [`QuantError::config`] when `objective_return_weight` is malformed
     /// (runtime-config validation rejects this upstream, so this is a hard guard).
     pub fn from_wire(config: &PortfolioOptimizerConfig) -> QuantResult<Self> {
-        let lambda = config
-            .objective_return_weight
-            .value
-            .trim()
-            .parse::<Decimal>()
-            .map_err(|error| {
-                QuantError::config(format!(
-                    "portfolio.optimizer.objective_return_weight is not a valid decimal: {error}"
-                ))
-            })?
-            .max(Decimal::ZERO);
+        let lambda = config.objective_return_weight.value.max(Decimal::ZERO);
         Ok(Self {
             solver: config.solver,
             integer_inclusion: config.integer_inclusion,

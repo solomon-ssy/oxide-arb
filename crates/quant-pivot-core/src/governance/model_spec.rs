@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use crate::runtime_config::RuntimeConfigStore;
+use crate::runtime_config::DecisionPolicyStore;
 use async_trait::async_trait;
 use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
@@ -29,7 +29,7 @@ pub struct ModelSpecDeps {
     /// Model registry persistence port.
     pub model_registry: Arc<dyn ModelRegistryRepository>,
     /// Active governed feature catalog used to validate raw input membership.
-    pub runtime_config: Arc<RuntimeConfigStore>,
+    pub runtime_config: Arc<DecisionPolicyStore>,
 }
 
 /// Authoring orchestration for governed model specifications.
@@ -181,7 +181,7 @@ fn build_feature_contract(features: &FeaturesConfig) -> QuantResult<FeatureContr
 impl ModelSpecPort for ModelSpecService {
     async fn feature_contract(&self) -> QuantResult<FeatureContractView> {
         let runtime = self.deps.runtime_config.current();
-        build_feature_contract(&runtime.features)
+        build_feature_contract(&runtime.profile_artifacts.features.definition)
     }
 
     async fn create(
@@ -194,7 +194,7 @@ impl ModelSpecPort for ModelSpecService {
         validate_input_contract(
             &command.input_contract,
             command.feature_schema_version,
-            &runtime.features,
+            &runtime.profile_artifacts.features.definition,
         )?;
         command
             .training_contract

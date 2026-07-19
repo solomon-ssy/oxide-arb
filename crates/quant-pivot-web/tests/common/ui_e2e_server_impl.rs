@@ -49,7 +49,7 @@ use quant_pivot_models::{
         TradePolicyValidationStatus, TrainingDatasetStatus,
     },
     hashing::CanonicalDigest,
-    runtime_config::{DecimalString, RuntimeConfig},
+    runtime_config::{DecimalValue, DecisionPolicySnapshot},
     types::{
         ArtifactUri, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION, DatasetCoverage,
         DatasetManifest, EventId, FactorDefinitionId, FeatureVectorId, MarketId, MarketSelectionId,
@@ -246,7 +246,7 @@ impl TradePolicyPort for E2eTradePolicyPort {
             source_slice_verified: fail,
             fit_window_contained: pass,
             profile_quality_gate_available: pass,
-            runtime_config_version_id: None,
+            decision_policy_snapshot_id: None,
             methodology_hash: Some(methodology_hash),
             latency_profile_present: fail,
             latency_evidence: None,
@@ -380,7 +380,7 @@ impl TradePolicyPort for E2eTradePolicyPort {
                 row_count,
             ))?;
             let schema_hash =
-                ResearchHasher::canonical(&("source_slice_parquet_envelope_v2", kind))?;
+                ResearchHasher::canonical(&("source_slice_parquet_envelope_v1", kind))?;
             Ok(TradePolicySourceSliceObjectView {
                 kind,
                 uri: e2e_artifact_uri(artifact_id, &format!("{kind:?}.parquet"))?,
@@ -662,9 +662,26 @@ impl ResearchCatalogPort for E2eResearchCatalogPort {
 
     async fn list_published_model_options(
         &self,
-        _query: ModelPublishedCatalogQuery,
+        query: ModelPublishedCatalogQuery,
     ) -> QuantResult<Vec<PublishedModelOptionView>> {
-        Ok(Vec::new())
+        self.models
+            .list_published_catalog(query.side, query.category)
+            .await
+            .map_err(Into::into)
+            .map(|rows| {
+                rows.into_iter()
+                    .map(|row| PublishedModelOptionView {
+                        model_version_id: row.model_version_id,
+                        model_spec_id: row.model_spec_id,
+                        spec_name: row.spec_name,
+                        version: row.version,
+                        artifact_hash: row.artifact_hash,
+                        model_family: row.model_family,
+                        category_scope: row.category_scope,
+                        published_at: row.published_at,
+                    })
+                    .collect()
+            })
     }
 
     async fn list_backtest_reports(
@@ -823,7 +840,7 @@ fn e2e_published_funnel_row(
         profile_id: report.profile_ref.id.clone(),
         profile_version: report.profile_ref.version,
         profile_content_hash: report.profile_ref.content_hash.to_string(),
-        runtime_config_version_id: report.runtime_config_version_id.clone(),
+        decision_policy_snapshot_id: report.decision_policy_snapshot_id.clone(),
         model_version_id: report.model_version_id.clone(),
         model_run_id: report.model_run_id.clone(),
         market_id: recommendation.market_id.clone(),
@@ -1183,7 +1200,7 @@ async fn seed_policy_validation_dataset(
         model_spec_id: version.model_spec_id.clone(),
         trade_policy_artifact_id: None,
         trade_policy_hash: None,
-        runtime_config_version_id: contract.runtime_config_version_id.clone(),
+        decision_policy_snapshot_id: contract.decision_policy_snapshot_id.clone(),
         window_start: contract.fit_window_start,
         window_end: contract.fit_window_end,
         purpose: DatasetPurpose::PolicyFit,
@@ -1212,7 +1229,7 @@ async fn seed_policy_validation_dataset(
             horizons_secs: TrainingHorizonsSecs(vec![contract.target_horizon_secs]),
             feature_schema_version: Some(spec.feature_schema_version),
             sample_sources: Some(TrainingSampleSources(default_sample_sources())),
-            runtime_config_version_id: contract.runtime_config_version_id.clone(),
+            decision_policy_snapshot_id: contract.decision_policy_snapshot_id.clone(),
         })
         .await
         .expect("create policy validation dataset");
@@ -1505,28 +1522,42 @@ async fn serve_protected_ui_e2e() {
         &env.quant_facts,
     ))
     .await;
-    let mut runtime_config = RuntimeConfig::default();
-    runtime_config.execution.semi_auto.canary.enabled = true;
-    runtime_config.execution.semi_auto.canary.policy_artifact_id =
-        Some(fixtures.trade_policy_artifact_id.to_string());
+    let mut runtime_config = DecisionPolicySnapshot::default();
     runtime_config
-        .execution
+        .execution_authorization
+        .semi_auto
+        .canary
+        .enabled = true;
+    runtime_config
+        .execution_authorization
+        .semi_auto
+        .canary
+        .policy_artifact_id = Some(fixtures.trade_policy_artifact_id.to_string());
+    runtime_config
+        .execution_authorization
         .semi_auto
         .canary
         .policy_content_hash = Some(fixtures.trade_policy_content_hash.to_string());
     runtime_config
-        .execution
+        .execution_authorization
         .semi_auto
         .canary
-        .allowed_cash_budget_tiers_usd = vec![DecimalString::new("25")];
-    runtime_config.execution.semi_auto.canary.max_open_intents = 1;
+        .allowed_cash_budget_tiers_usd = vec![DecimalValue::new(rust_decimal_macros::dec!(25))];
     runtime_config
-        .execution
+        .execution_authorization
         .semi_auto
         .canary
-        .max_total_cash_per_report = DecimalString::new("25");
-    runtime_config.execution.semi_auto.canary.expires_at =
-        Some((Utc::now() + Duration::hours(1)).to_rfc3339());
+        .max_open_intents = 1;
+    runtime_config
+        .execution_authorization
+        .semi_auto
+        .canary
+        .max_total_cash_per_report = DecimalValue::new(rust_decimal_macros::dec!(25));
+    runtime_config
+        .execution_authorization
+        .semi_auto
+        .canary
+        .expires_at = Some((Utc::now() + Duration::hours(1)).to_rfc3339());
     env.order_intent_runtime_config.replace(runtime_config);
     env.state.market_data = Arc::new(E2eMarketData {
         books: Arc::clone(&books),

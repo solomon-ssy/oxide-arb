@@ -9,12 +9,15 @@
 #
 # Operator tunables (detection, risk, execution operations, settlement
 # operations, market-data staleness, notification channels) are NOT here.
-# They live in the versioned runtime configuration (schema_version = 18),
+# They live in independently revisioned boot-schema policy resources,
 # stored in Postgres and managed exclusively through the governed API:
 #
-#   GET  /api/runtime-config              — active config (secrets masked)
-#   POST /api/runtime-config/versions     — create an immutable version
-#   POST /api/runtime-config/versions/{id}/activate — audited hot activation
+# API versioning is header-driven (`Accept-Api-Version: v1`):
+#   GET  /api/config/resources                    — resource overview
+#   POST /api/config/{kind}/drafts               — create a draft
+#   POST /api/config/{kind}/drafts/{id}/validate — validate/preflight
+#   POST /api/config/{kind}/drafts/{id}/approve  — record approval
+#   POST /api/config/{kind}/drafts/{id}/activate — audited activation
 #
 # All values shown below are the compiled-in defaults. The file is optional:
 # if absent, all defaults apply.
@@ -30,6 +33,16 @@
 #
 # Unknown keys are FATAL at startup (deny_unknown_fields): a typo or a stale
 # runtime section aborts boot instead of being silently ignored.
+
+# ── Deployment lifecycle ─────────────────────────────────────────────────────
+
+[lifecycle]
+environment = "local-development"
+expected_state = "pre_production_resettable"
+# Populated by the immutable deployment artifact before production sealing.
+# build_commit = "0123456789abcdef0123456789abcdef01234567"
+# backup_evidence_hash = "blake3:<64 lowercase hex>"
+# config_e2e_evidence_hash = "blake3:<64 lowercase hex>"
 
 # ── Polymarket Platform ───────────────────────────────────────────────────────
 
@@ -68,17 +81,15 @@ rpc_timeout_ms = 10000
 [polymarket.relayer]
 # Purpose: relayer submit/status base URL. Default: "https://relayer-v2.polymarket.com".
 base_url = "https://relayer-v2.polymarket.com"
-# Purpose: Relayer API key (secret). Create one from Settings > API Keys on
-# polymarket.com. Override: QUANT_PIVOT__POLYMARKET__RELAYER__API_KEY
-# api_key = "...."
+# Purpose: systemd credential reference for the Relayer API key.
+api_key = { name = "" }
 # Purpose: address that owns the relayer API key (the signer EOA address).
-# Override: QUANT_PIVOT__POLYMARKET__RELAYER__API_KEY_ADDRESS
 # api_key_address = "0x...."
 # Purpose: relayer HTTP request timeout (ms). Default: 15000.
 request_timeout_ms = 15000
 
 # ── Market Data Connections ───────────────────────────────────────────────────
-# (Staleness thresholds are runtime config: market_data.staleness_*.)
+# Decision thresholds are governed policy fields, not Deploy Config.
 
 # Heartbeats: polymarket_client_sdk_v2 (`heartbeats` feature), not app-level ping.
 [market_data.websocket]
@@ -202,11 +213,12 @@ keepalive_secs = 5
 max_clock_skew_ms = 30000
 
 [domain_sources.chainlink_data_streams]
-# Credentials are intentionally absent from this file. Inject them through
-# QUANT_PIVOT__DOMAIN_SOURCES__CHAINLINK_DATA_STREAMS__API_KEY and API_SECRET.
+# Optional systemd credential references; plaintext is never a Deploy Config value.
 enabled = false
 rest_url = "https://api.dataengine.chain.link"
 websocket_url = "wss://ws.dataengine.chain.link"
+api_key = { name = "" }
+api_secret = { name = "" }
 max_clock_skew_ms = 2000
 rest_page_limit = 1000
 
@@ -386,10 +398,6 @@ execution_breaker_tick_secs = 5
 # Default: 300.
 equity_snapshot_secs = 300
 
-[quant.governance]
-# Local single-user development keeps audit but does not require two operators.
-require_approver_activator_separation = false
-
 [quant.research_jobs]
 # Async research-job engine (dataset build / model train / backtest). These are
 # operational/infra knobs, distinct from the frozen per-dataset runtime config
@@ -465,7 +473,7 @@ require_versioning = false
 [research.evidence_attestation]
 # Active keyed-BLAKE3 key: exactly 32 bytes encoded as 64 lowercase hex chars.
 # Historical verification-only keys are retained explicitly during rotation.
-signing_key = ""
+signing_key = { name = "" }
 previous_signing_keys = []
 
 # ── Keys / Credentials ───────────────────────────────────────────────────────
@@ -473,10 +481,8 @@ previous_signing_keys = []
 # Only `private_key` is configured. Polymarket CLOB L2 credentials are derived
 # automatically by the SDK at connect time (`ClobClient::connect`).
 #
-# Supply private_key via (env overrides file when both are set):
-#   A. QUANT_PIVOT__KEYS__PRIVATE_KEY
-#   B. config/quant-pivot.local.toml  (gitignored — recommended on dev laptops)
-#   C. Uncomment `private_key` below (not recommended)
+# Supply only a systemd credential reference. The value is read once from
+# `$CREDENTIALS_DIRECTORY/<name>` during bootstrap.
 #
 # All modes require private_key + quant.account.funder: report_only is not
 # dry-run — report sizing reads the real venue account. In report_only the key is
@@ -486,12 +492,12 @@ previous_signing_keys = []
 [keys]
 # Bot wallet private key (hex, 0x prefix optional). Rabby bot sub-account export.
 # The single signing credential; CLOB L2 read/write credentials are derived from
-# it by the SDK at connect time. Override: QUANT_PIVOT__KEYS__PRIVATE_KEY
-# private_key = "0x..............................................................."
+# it by the SDK at connect time.
+private_key = { name = "" }
 
 # ── Observability (logging only) ─────────────────────────────────────────────
 # Metrics are always-on via the web server's GET /metrics; operator alerting
-# (Telegram / webhook) is runtime config under `notification`.
+# Telegram/webhook bindings are Deploy Config; event routing is OperationalControl.
 
 [observability]
 # Purpose: default tracing filter directive (e.g. "info",
@@ -504,6 +510,14 @@ log_level = "info"
 # Default: false.
 log_json = false
 
+[notifications.telegram]
+bot_token_credential = { name = "" }
+chat_id = ""
+
+[notifications.webhook]
+url = ""
+authorization_credential = { name = "" }
+
 # ── Database ─────────────────────────────────────────────────────────────────
 
 [db.postgres]
@@ -514,9 +528,8 @@ host = "localhost"
 port = 5432
 # Purpose: least-privilege runtime role. Default: "quant_pivot_runtime".
 user = "quant_pivot_runtime"
-# Purpose: role password. Caution: set via QUANT_PIVOT__DB__POSTGRES__PASSWORD
-# or quant-pivot.local.toml — never commit real values here. Default: "".
-password = ""
+# Purpose: systemd credential reference for the runtime role password.
+password = { name = "" }
 # Purpose: database name. Default: "quant_pivot".
 database = "quant_pivot"
 # Purpose: schema search path. Default: "public".
@@ -558,9 +571,8 @@ application_name = "quant-pivot"
 [db.postgres.migration]
 # PostgreSQL DDL is deploy-only: run `quant-pivot-xtask postgres-schema apply`.
 user = "quant_pivot_migrator"
-# Local development may set this in quant-pivot.local.toml or via
-# QUANT_PIVOT__DB__POSTGRES__MIGRATION__PASSWORD.
-password = ""
+# Deploy-only systemd credential reference; runtime strips this field.
+password = { name = "" }
 
 [db.clickhouse]
 # Stable evidence scope identity. Never reuse this value across deployments.
@@ -574,9 +586,8 @@ url = "http://localhost:8123"
 database = "quant_pivot"
 # Purpose: user name. Default: "default".
 user = "default"
-# Purpose: password. Caution: set via QUANT_PIVOT__DB__CLICKHOUSE__PASSWORD or
-# quant-pivot.local.toml — never commit real values here. Default: "".
-password = ""
+# Purpose: systemd credential reference for the runtime password.
+password = { name = "" }
 # Purpose: max age (s) of a partial batch before flush. Impact: analytics
 # freshness vs insert request volume. Default: 5.
 flush_interval_secs = 5
@@ -592,9 +603,8 @@ max_concurrent_inserts = 8
 # Schema deployment is explicit through `quant-pivot-xtask`; runtime startup
 # only verifies the immutable ClickHouse contract.
 user = "quant_pivot_migrator"
-# Local development may set this in quant-pivot.local.toml or via
-# QUANT_PIVOT__DB__CLICKHOUSE__MIGRATION__PASSWORD.
-password = ""
+# Deploy-only systemd credential reference; runtime strips this field.
+password = { name = "" }
 
 # ── Cache ────────────────────────────────────────────────────────────────────
 
@@ -618,9 +628,8 @@ port = 6379
 # Purpose: ACL username. Leave empty for password-only auth (`requirepass`).
 # Default: "".
 user = ""
-# Purpose: password. Caution: set via QUANT_PIVOT__CACHE__REDIS__PASSWORD in
-# production — never here. Default: "".
-password = ""
+# Purpose: systemd credential reference for Redis authentication.
+password = { name = "" }
 # Purpose: logical database index (`SELECT`). Default: 0.
 database = 0
 # Purpose: connection pool size. Default: 8.
@@ -658,9 +667,8 @@ serve_static_ui = false
 static_ui_dir = "static/ui"
 
 [web.jwt]
-# Purpose: Base64URL-no-pad encoded 32-byte HS256 key. Set in the gitignored
-# local TOML or QUANT_PIVOT__WEB__JWT__SIGNING_KEY.
-signing_key = ""
+# Purpose: systemd credential reference to a Base64URL-no-pad 32-byte HS256 key.
+signing_key = { name = "" }
 # Purpose: token issuer claim. Default: "quant-pivot".
 issuer = "quant-pivot"
 # Purpose: token audience claim. Default: "quant-pivot-web".

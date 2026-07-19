@@ -11,7 +11,7 @@ use std::sync::Arc;
 use quant_pivot_core::governance::{
     FactorGovernanceDeps, FactorGovernanceService, ModelSpecDeps, ModelSpecService,
 };
-use quant_pivot_core::runtime_config::RuntimeConfigStore;
+use quant_pivot_core::runtime_config::DecisionPolicyStore;
 use quant_pivot_models::types::{ModelInputContract, ModelTrainingContract};
 use quant_pivot_models::{
     domain::{
@@ -19,7 +19,7 @@ use quant_pivot_models::{
         PublishFactorsBatchCommand, RegisterFactorDefinitionsCommand,
     },
     enums::{model::ModelFamily, quant::PublicationStatus},
-    runtime_config::{DomainConfig, FactorsConfig, FeaturesConfig, RuntimeConfig},
+    runtime_config::{DecisionPolicySnapshot, DomainConfig, FactorsConfig, FeaturesConfig},
     types::SchemaVersion,
 };
 use quant_pivot_repository::{
@@ -43,7 +43,7 @@ async fn model_spec_service_authors_draft_spec() {
         Arc::new(PgModelRegistryRepository::new(pool.connection().clone()));
     let service = ModelSpecService::new(ModelSpecDeps {
         model_registry: Arc::clone(&registry),
-        runtime_config: Arc::new(RuntimeConfigStore::new(RuntimeConfig::default())),
+        runtime_config: Arc::new(DecisionPolicyStore::new(DecisionPolicySnapshot::default())),
     });
 
     let created = service

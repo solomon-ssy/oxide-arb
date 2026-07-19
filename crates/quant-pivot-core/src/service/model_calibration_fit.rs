@@ -23,11 +23,10 @@ use quant_pivot_models::{
     enums::quant::{
         CalibrationKind, CalibrationMethod, DatasetPurpose, OutcomeSide, TrainingDatasetStatus,
     },
-    runtime_config::RuntimeConfig,
-    types::{CalibrationArtifactId, ModelVersionId, RuntimeConfigVersionId, TrainingDatasetId},
+    types::{CalibrationArtifactId, DecisionPolicySnapshotId, ModelVersionId, TrainingDatasetId},
 };
 use quant_pivot_repository::traits::{
-    CalibrationArtifactRepository, ModelRegistryRepository, RuntimeConfigVersionRepository,
+    CalibrationArtifactRepository, ModelRegistryRepository, PolicyRepository,
     TrainingDatasetRepository,
 };
 use quant_pivot_research::{
@@ -70,7 +69,7 @@ pub struct ModelCalibrationFitService {
     model_registry_repo: Arc<dyn ModelRegistryRepository>,
     training_dataset_repo: Arc<dyn TrainingDatasetRepository>,
     calibration_repo: Arc<dyn CalibrationArtifactRepository>,
-    runtime_config_repo: Arc<dyn RuntimeConfigVersionRepository>,
+    runtime_config_repo: Arc<dyn PolicyRepository>,
 }
 
 impl ModelCalibrationFitService {
@@ -80,7 +79,7 @@ impl ModelCalibrationFitService {
         model_registry_repo: Arc<dyn ModelRegistryRepository>,
         training_dataset_repo: Arc<dyn TrainingDatasetRepository>,
         calibration_repo: Arc<dyn CalibrationArtifactRepository>,
-        runtime_config_repo: Arc<dyn RuntimeConfigVersionRepository>,
+        runtime_config_repo: Arc<dyn PolicyRepository>,
     ) -> Self {
         Self {
             backtest_port,
@@ -95,11 +94,11 @@ impl ModelCalibrationFitService {
     /// config version (frozen at enqueue).
     async fn frozen_policy(
         &self,
-        runtime_config_version_id: &RuntimeConfigVersionId,
+        decision_policy_snapshot_id: &DecisionPolicySnapshotId,
     ) -> QuantResult<CalibrationFitPolicy> {
         let version = self
             .runtime_config_repo
-            .load_version(runtime_config_version_id)
+            .load_snapshot(decision_policy_snapshot_id)
             .await
             .map_err(QuantError::from)?
             .ok_or_else(|| {
@@ -107,20 +106,9 @@ impl ModelCalibrationFitService {
                     detail: "runtime config version for model calibration fit not found".to_owned(),
                 })
             })?;
-        let config = RuntimeConfig::from_json(&version.config_json).map_err(|error| {
-            QuantError::from(ResearchError::DatasetBuild {
-                detail: format!("frozen runtime config parse failed: {error}"),
-            })
-        })?;
-        let calibration = config.model.calibration;
-        let ci_confidence = calibration.ci_confidence.value.trim().parse().map_err(|error| {
-            QuantError::from(ResearchError::DatasetBuild {
-                detail: format!(
-                    "model.calibration.ci_confidence `{}` invalid despite config validation: {error}",
-                    calibration.ci_confidence.value
-                ),
-            })
-        })?;
+        let config = version.snapshot;
+        let calibration = config.model_routing.model.calibration;
+        let ci_confidence = calibration.ci_confidence.value;
         Ok(CalibrationFitPolicy {
             min_samples_isotonic: usize::try_from(calibration.min_samples_isotonic).map_err(
                 |error| ResearchError::DatasetBuild {
@@ -142,7 +130,7 @@ impl ModelCalibrationFitService {
 
     /// Governed embargo gap from the *current* runtime-config version — used
     /// by the read-only preflight check, which (unlike `fit`) has no pinned
-    /// `runtime_config_version_id` to freeze against yet (no job has been
+    /// `decision_policy_snapshot_id` to freeze against yet (no job has been
     /// enqueued). The actual fit still freezes whatever version is current at
     /// enqueue time, so this is a consistent, good-enough preflight estimate.
     async fn current_embargo_secs(&self) -> QuantResult<i64> {
@@ -156,12 +144,8 @@ impl ModelCalibrationFitService {
                     detail: "no current runtime config version".to_owned(),
                 })
             })?;
-        let config = RuntimeConfig::from_json(&version.config_json).map_err(|error| {
-            QuantError::from(ResearchError::DatasetBuild {
-                detail: format!("current runtime config parse failed: {error}"),
-            })
-        })?;
-        i64::try_from(config.model.calibration.embargo_secs).map_err(|error| {
+        let config = version.snapshot;
+        i64::try_from(config.model_routing.model.calibration.embargo_secs).map_err(|error| {
             ResearchError::DatasetBuild {
                 detail: format!(
                     "model.calibration.embargo_secs does not fit chrono seconds: {error}"
@@ -288,16 +272,16 @@ impl ModelCalibrationFitPort for ModelCalibrationFitService {
     ) -> QuantResult<ModelCalibrationFitOutcome> {
         let ModelCalibrationFitJobParams {
             request,
-            runtime_config_version_id,
+            decision_policy_snapshot_id,
         } = params;
-        let policy = self.frozen_policy(&runtime_config_version_id).await?;
+        let policy = self.frozen_policy(&decision_policy_snapshot_id).await?;
         let fit_window = self
             .validate_split(&request.model_version_id, &request, &policy)
             .await?;
         let samples = self
             .harvest_calibration_samples(
                 &request,
-                &runtime_config_version_id,
+                &decision_policy_snapshot_id,
                 Arc::clone(&progress),
                 cancel,
             )
@@ -416,7 +400,7 @@ impl ModelCalibrationFitService {
     async fn harvest_calibration_samples(
         &self,
         request: &FitModelCalibratorRequest,
-        runtime_config_version_id: &RuntimeConfigVersionId,
+        decision_policy_snapshot_id: &DecisionPolicySnapshotId,
         progress: Arc<dyn JobProgressSink>,
         cancel: CancellationToken,
     ) -> QuantResult<Vec<SampleOutcome>> {
@@ -425,14 +409,14 @@ impl ModelCalibrationFitService {
         // bespoke re-derivation.
         let backtest = self
             .backtest_port
-            .backtest_service_for(runtime_config_version_id)
+            .backtest_service_for(decision_policy_snapshot_id)
             .await?;
         let (_report, samples) = backtest
             .run_for_calibration(
                 BacktestInput {
                     model_version_id: request.model_version_id.clone(),
                     training_dataset_id: request.calibration_dataset_id.clone(),
-                    runtime_config_version_id: runtime_config_version_id.clone(),
+                    decision_policy_snapshot_id: decision_policy_snapshot_id.clone(),
                     calibrate: false,
                     backtest_report_id: None,
                 },

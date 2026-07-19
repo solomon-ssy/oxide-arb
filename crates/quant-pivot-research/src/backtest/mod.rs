@@ -31,7 +31,7 @@ pub use runner::PortfolioReplayBacktester;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
+use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
     domain::market::book::BookLevel,
     enums::{
@@ -40,8 +40,8 @@ use quant_pivot_models::{
     },
     runtime_config::PortfolioConfig,
     types::{
-        BacktestReportId, ContentHash, EventId, MarketId, ModelVersionId, Price, Probability,
-        RuntimeConfigVersionId, Shares, TokenId, Usd,
+        BacktestReportId, ContentHash, DecisionPolicySnapshotId, EventId, MarketId, ModelVersionId,
+        Price, Probability, Shares, TokenId, Usd,
     },
 };
 use rust_decimal::Decimal;
@@ -78,7 +78,7 @@ pub struct BacktestRequest {
     /// Model version under test.
     pub model_version_id: ModelVersionId,
     /// Frozen runtime-config version governing the replay.
-    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     /// Inclusive window start.
     pub window_start: DateTime<Utc>,
     /// Exclusive window end.
@@ -170,47 +170,17 @@ impl TryFrom<&PortfolioConfig> for PortfolioCaps {
     /// report-builder concerns and are intentionally not part of the
     /// allocator's caps.
     fn try_from(config: &PortfolioConfig) -> Result<Self, Self::Error> {
-        let decimal = |field: &'static str, value: &str| {
-            value.parse::<Decimal>().map_err(|error| {
-                QuantError::from(ResearchError::ValidationMethodology {
-                    detail: format!(
-                        "portfolio cap `{field}` value `{value}` is not a valid Decimal: {error}"
-                    ),
-                })
-            })
-        };
         let budget = &config.budget;
         let constraints = &config.constraints;
         Ok(Self {
-            total_budget_usd: decimal("total_budget_usd", &budget.total_budget_usd.value)?,
-            max_single_recommendation_usd: decimal(
-                "max_single_recommendation_usd",
-                &budget.max_single_recommendation_usd.value,
-            )?,
-            min_recommendation_usd: decimal(
-                "min_recommendation_usd",
-                &budget.min_recommendation_usd.value,
-            )?,
-            max_market_exposure_usd: decimal(
-                "max_market_exposure_usd",
-                &constraints.max_market_exposure_usd.value,
-            )?,
-            max_event_exposure_usd: decimal(
-                "max_event_exposure_usd",
-                &constraints.max_event_exposure_usd.value,
-            )?,
-            max_category_exposure_usd: decimal(
-                "max_category_exposure_usd",
-                &constraints.max_category_exposure_usd.value,
-            )?,
-            liquidity_usage_cap_pct: decimal(
-                "liquidity_usage_cap_pct",
-                &constraints.liquidity_usage_cap_pct.value,
-            )?,
-            max_aggregate_exposure_pct: decimal(
-                "max_aggregate_exposure_pct",
-                &config.kelly_safety.max_aggregate_exposure_pct.value,
-            )?,
+            total_budget_usd: budget.total_budget_usd.value,
+            max_single_recommendation_usd: budget.max_single_recommendation_usd.value,
+            min_recommendation_usd: budget.min_recommendation_usd.value,
+            max_market_exposure_usd: constraints.max_market_exposure_usd.value,
+            max_event_exposure_usd: constraints.max_event_exposure_usd.value,
+            max_category_exposure_usd: constraints.max_category_exposure_usd.value,
+            liquidity_usage_cap_pct: constraints.liquidity_usage_cap_pct.value,
+            max_aggregate_exposure_pct: config.kelly_safety.max_aggregate_exposure_pct.value,
         })
     }
 }
@@ -285,8 +255,8 @@ pub struct BacktestReport {
     pub backtest_report_id: BacktestReportId,
     /// Model version under test.
     pub model_version_id: ModelVersionId,
-    /// Runtime-config version governing the replay.
-    pub runtime_config_version_id: RuntimeConfigVersionId,
+    /// Frozen decision-policy snapshot governing the replay.
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     /// Inclusive window start.
     pub window_start: DateTime<Utc>,
     /// Exclusive window end.
@@ -398,18 +368,11 @@ pub trait Backtester: Send + Sync {
 
 #[cfg(test)]
 mod tests {
-    use super::PortfolioCaps;
-    use quant_pivot_models::runtime_config::{DecimalString, PortfolioConfig};
+    use quant_pivot_models::runtime_config::DecimalValue;
 
     #[test]
-    fn malformed_portfolio_cap_is_rejected_instead_of_becoming_zero() {
-        let mut config = PortfolioConfig::default();
-        config.budget.total_budget_usd = DecimalString::new("not-a-decimal");
-
-        let error = PortfolioCaps::try_from(&config).expect_err("malformed cap must fail");
-        assert!(
-            error.to_string().contains("total_budget_usd"),
-            "error must identify the invalid cap: {error}"
-        );
+    fn malformed_portfolio_cap_is_rejected_at_the_wire_boundary() {
+        serde_json::from_value::<DecimalValue>(serde_json::json!("not-a-decimal"))
+            .expect_err("malformed cap must fail DTO deserialization");
     }
 }

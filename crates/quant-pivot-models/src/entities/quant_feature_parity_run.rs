@@ -44,6 +44,27 @@ pub struct Model {
 
     #[sea_orm(has_many, relation_enum = "Subject")]
     pub subject: HasMany<super::quant_feature_parity_subject::Entity>,
+    #[sea_orm(
+        belongs_to,
+        relation_enum = "Report",
+        from = "report_id",
+        to = "recommendation_report_id"
+    )]
+    pub report: BelongsTo<Option<super::quant_recommendation_report::Entity>>,
+    #[sea_orm(
+        belongs_to,
+        relation_enum = "ModelVersion",
+        from = "model_version_id",
+        to = "model_version_id"
+    )]
+    pub model_version: BelongsTo<Option<super::quant_model_version::Entity>>,
+    #[sea_orm(
+        belongs_to,
+        relation_enum = "TrainingDataset",
+        from = "training_dataset_id",
+        to = "training_dataset_id"
+    )]
+    pub training_dataset: BelongsTo<Option<super::quant_training_dataset::Entity>>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

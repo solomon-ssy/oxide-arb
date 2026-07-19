@@ -12,7 +12,7 @@ use quant_pivot_error::{QuantError, QuantResult, control::ControlError, storage:
 use quant_pivot_models::{
     domain::{
         ActivateBootstrapRequest, ActivateBootstrapState, BootstrapPort, BootstrapView,
-        CapabilityView, CoreEvent, CoreEventPublisher, RuntimeConfigPort, SystemCapabilities,
+        CapabilityView, CoreEvent, CoreEventPublisher, PolicySnapshotPort, SystemCapabilities,
         SystemRuntimeStateInfo, SystemStatus,
     },
     enums::{
@@ -20,18 +20,18 @@ use quant_pivot_models::{
         quant::QuantRuntimeMode,
         system::{BootstrapPhase, CapabilityReason},
     },
-    runtime_config::{RuntimeConfig, validate_runtime_config},
+    runtime_config::validate_runtime_config,
 };
 use quant_pivot_repository::traits::{
-    ModelRunRepository, RecommendationReportRepository, RuntimeConfigVersionRepository,
+    ModelRunRepository, PolicyRepository, RecommendationReportRepository,
     SystemRuntimeStateRepository,
 };
 
 pub struct BootstrapService {
     state: ArcSwap<BootstrapView>,
     state_repo: Arc<dyn SystemRuntimeStateRepository>,
-    runtime_configs: Arc<dyn RuntimeConfigVersionRepository>,
-    runtime_config_apply: Arc<dyn RuntimeConfigPort>,
+    runtime_configs: Arc<dyn PolicyRepository>,
+    runtime_config_apply: Arc<dyn PolicySnapshotPort>,
     model_runs: Arc<dyn ModelRunRepository>,
     reports: Arc<dyn RecommendationReportRepository>,
     events: CoreEventPublisher,
@@ -39,18 +39,16 @@ pub struct BootstrapService {
     capability_tx: tokio::sync::watch::Sender<SystemCapabilities>,
     last_status: ArcSwap<SystemStatus>,
     serving_evidence_present: AtomicBool,
-    require_approver_activator_separation: bool,
 }
 
 impl BootstrapService {
     pub async fn initialize(
         state_repo: Arc<dyn SystemRuntimeStateRepository>,
-        runtime_configs: Arc<dyn RuntimeConfigVersionRepository>,
-        runtime_config_apply: Arc<dyn RuntimeConfigPort>,
+        runtime_configs: Arc<dyn PolicyRepository>,
+        runtime_config_apply: Arc<dyn PolicySnapshotPort>,
         model_runs: Arc<dyn ModelRunRepository>,
         reports: Arc<dyn RecommendationReportRepository>,
         events: CoreEventPublisher,
-        require_approver_activator_separation: bool,
     ) -> QuantResult<Self> {
         let state = state_repo.begin_baseline_collection().await?;
         let initial_view = bootstrap_view(&state);
@@ -72,7 +70,6 @@ impl BootstrapService {
                 QuantRuntimeMode::ReportOnly,
             )),
             serving_evidence_present: AtomicBool::new(false),
-            require_approver_activator_separation,
         })
     }
 
@@ -144,8 +141,16 @@ impl BootstrapService {
             &mut report_reasons,
         );
         let runtime_config = self.runtime_config_apply.current();
-        let has_active_model_pointer = runtime_config.model.active_model_version_id.is_some()
-            || !runtime_config.model.category_model_pointers.is_empty();
+        let has_active_model_pointer = runtime_config
+            .model_routing
+            .model
+            .active_model_version_id
+            .is_some()
+            || !runtime_config
+                .model_routing
+                .model
+                .category_model_pointers
+                .is_empty();
         require(
             has_active_model_pointer,
             CapabilityReason::NoServingEvidence,
@@ -290,17 +295,10 @@ impl BootstrapPort for BootstrapService {
                 "ReportOnlyForced acknowledgement is required".to_owned(),
             )));
         }
-        let version = self
-            .runtime_configs
-            .load_version(&request.runtime_config_version_id)
-            .await?
-            .ok_or_else(|| {
-                StorageError::not_found(
-                    "runtime_config_version",
-                    &request.runtime_config_version_id,
-                )
-            })?;
-        let candidate = RuntimeConfig::from_json(&version.config_json)?;
+        let version = self.runtime_configs.load_current().await?.ok_or_else(|| {
+            StorageError::not_found("decision_policy_snapshot", "active policy bundle")
+        })?;
+        let candidate = version.snapshot.clone();
         let validation = validate_runtime_config(&candidate);
         if validation.has_errors() {
             return Err(QuantError::config(validation.to_string()));
@@ -309,23 +307,17 @@ impl BootstrapPort for BootstrapService {
         let activated = self
             .state_repo
             .activate_bootstrap(ActivateBootstrapState {
-                runtime_config_version_id: request.runtime_config_version_id,
-                runtime_config_approval_id: request.runtime_config_approval_id,
                 bootstrap_contract_version: request.bootstrap_contract_version,
                 expected_state_revision: request.expected_state_revision,
                 actor: actor.to_owned(),
                 acting_role: acting_role.to_owned(),
                 reason: request.reason,
                 report_only_forced_ack: true,
-                require_approver_activator_separation: self.require_approver_activator_separation,
             })
             .await?;
         prepared.publish();
         self.events.publish(CoreEvent::ConfigActivated {
-            version_id: activated
-                .runtime_config
-                .runtime_config_version_id
-                .to_string(),
+            version_id: version.decision_policy_snapshot_id.to_string(),
         });
         Ok(self.store(&activated.state))
     }

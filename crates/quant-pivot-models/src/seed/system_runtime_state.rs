@@ -20,12 +20,12 @@ const SINGLETON_ID: i32 = 1;
 
 pub const SYSTEM_RUNTIME_STATE_SEED: SeedSpec = SeedSpec {
     id: "operational.system_runtime_state.bootstrap",
-    version: 4,
+    version: 1,
     target_table: "system_runtime_state",
     depends_on: DEPENDS_ON,
     produces: PRODUCES,
     conflict_policy: SeedConflictPolicy::InsertIfAbsent,
-    checksum: "system_runtime_state.bootstrap.v4.contract-and-state-revision",
+    checksum: "system_runtime_state.bootstrap.v1.boot",
     apply: load_boxed,
     hydrate: hydrate_boxed,
 };

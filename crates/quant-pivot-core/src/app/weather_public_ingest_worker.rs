@@ -1237,7 +1237,7 @@ impl WeatherPublicIngestWorker {
                 instrument_key,
                 checkpoint_json: checkpoint,
                 checkpoint_hash,
-                status: status.as_str().to_owned(),
+                status,
                 last_error: None,
                 updated_at: Utc::now(),
             })
@@ -1258,7 +1258,7 @@ impl WeatherPublicIngestWorker {
                 instrument_key: instrument_key.clone(),
                 checkpoint_json: current.checkpoint_json,
                 checkpoint_hash: current.checkpoint_hash,
-                status: DomainCursorStatus::Error.as_str().to_owned(),
+                status: DomainCursorStatus::Failed,
                 last_error: Some(reason.clone()),
                 updated_at: Utc::now(),
             };

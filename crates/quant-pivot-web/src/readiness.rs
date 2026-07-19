@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use quant_pivot_models::domain::{
     CatalogState, CatalogStatusPort, DependencyCheck, ReadinessPort, ReadinessReport,
 };
-use sea_orm::{ConnectionTrait, DatabaseConnection, Statement};
+use sea_orm::DatabaseConnection;
 use tracing::warn;
 
 use crate::jwt::TokenBlacklist;
@@ -45,15 +45,9 @@ impl PgRedisReadiness {
 
     async fn check_postgres(&self) -> DependencyCheck {
         let start = Instant::now();
-        let result = self
-            .db
-            .execute_raw(Statement::from_string(
-                self.db.get_database_backend(),
-                "SELECT 1".to_owned(),
-            ))
-            .await;
+        let result = self.db.ping().await;
         match result {
-            Ok(_) => DependencyCheck {
+            Ok(()) => DependencyCheck {
                 name: "postgresql".to_owned(),
                 ok: true,
                 detail: None,

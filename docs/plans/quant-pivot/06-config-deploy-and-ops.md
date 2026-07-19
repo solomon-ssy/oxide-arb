@@ -1,325 +1,194 @@
-# 06 — 配置、部署与运维设计
+# 06 — Config、Deploy 与 Lifecycle 治理
 
-> 状态：生产级目标设计（与实现对齐）
->
-> 目标：用 deploy-config + runtime-config **v17** 支撑 quant-pivot，删除旧 Endgame trading 配置面。
+<!-- quant-pivot-lifecycle-contract:v1 -->
+> **Lifecycle contract**
+> - `lifecycle_assumption`: 项目尚未正式生产上线，当前状态为 `pre_production_resettable`，系统自有基线统一为 `boot` / schema version `1`。
+> - `schema_data_version_impact`: 本文中的历史版本号与递增路径不再具有实施效力；当前实现不迁移测试数据、旧结构或旧版本。
+> - `pre_production_behavior`: 允许 clean-break、migration squash 与全新基础设施 bootstrap，但任何数据销毁仍需操作者单独授权。
+> - `production_frozen_behavior`: 一旦完成不可逆 production seal，后续变更必须提供前向 migration、兼容性评估、回滚方案与数据验证。
+> - `rollback_and_data_verification`: 封存前通过清空后的 fresh-install 验证；封存后不得回退到 boot reset。
 
-本文件描述**当前实现态**：deploy config 树见 [`crates/quant-pivot-models/src/config/`](../../../crates/quant-pivot-models/src/config/mod.rs)，runtime config v17 见 [`crates/quant-pivot-models/src/runtime_config/`](../../../crates/quant-pivot-models/src/runtime_config/mod.rs)。
+> 状态：boot baseline 的权威目标设计。旧 `RuntimeConfig` 大文档、旧版本表、旧 JSON 编辑器和兼容解析路径均已被本设计取代。
 
-## 0. 配置分层
+## 0. 权威来源与不变量
 
-两层配置模型：
+- 生命周期源码：[`project-lifecycle.toml`](../../../project-lifecycle.toml)。
+- Deploy 类型：[`crates/quant-pivot-models/src/config/`](../../../crates/quant-pivot-models/src/config/mod.rs)。
+- 六类 policy 类型：[`crates/quant-pivot-models/src/runtime_config/`](../../../crates/quant-pivot-models/src/runtime_config/mod.rs)。
+- 逐叶处置：[`inventory/config-leaf-inventory.tsv`](inventory/config-leaf-inventory.tsv)。
+- 常量处置：[`inventory/code-constant-inventory.tsv`](inventory/code-constant-inventory.tsv)。
 
-- **Deploy config**（`config/quant-pivot.toml`）：进程启动绑定，改动需要重启。连接、池、shard/channel、worker cadence、credential source、web server、logging。
-- **Runtime config v17**：受治理、版本化（`runtime_config_version` WORM）、显式审批、
-  热激活（`ArcSwap` + applicator push），存 PostgreSQL，只经治理 API 修改。
+系统只允许以下四种配置所有权：
 
-禁止：
+1. **Runtime Policy**：必须热更新、必须审计、会改变后续业务决策的参数。
+2. **Immutable Artifact / Job Spec**：会改变研究、训练、回放或 lineage 的方法定义。
+3. **Deploy Config**：进程构造、外部绑定、主机容量与 credential reference；重启后生效。
+4. **Code Constant**：协议事实、数学不变量和防御性上限，不允许操作员修改。
 
-- 把可热更新策略参数放进 TOML。
-- 把连接池、worker 并发、credential source 放进 runtime config。
-- 保留旧 runtime-config parser 或兼容 shim；任何非 v17 文档一律拒绝。
-- 允许未知 key 静默通过（deploy + runtime 全部 `deny_unknown_fields`）。
+一个字段不能同时属于两类；没有 validator、consumer、apply boundary 或 rollback test 的字段不得成为 Runtime Policy。
 
-## 1. Deploy Config
+## 1. 旧 Runtime Config 处置清单
 
-根类型 [`DeployConfig`](../../../crates/quant-pivot-models/src/config/mod.rs)。每个 section 与 `[section]` 1:1。加载优先级（后者覆盖前者）：编译内默认 → `quant-pivot.toml` → `quant-pivot.local.toml` → `QUANT_PIVOT__*` env。
+| 旧顶层字段 | 最终处置 | 新 owner | 原因 |
+|---|---|---|---|
+| `schema_version` | 删除统一大文档版本 | 各 policy/artifact 独立 `schema_version = 1` | 系统不再存在一个可整体替换的配置文档 |
+| `selection` | 合并 | `RecommendationPolicy.selection` | 决定 report eligibility，随新 `ReportRun` 冻结 |
+| `data_quality` | 合并 | `RecommendationPolicy.data_quality` | 是推荐准入语义，不是基础设施参数 |
+| `features` | 迁移 | `FeatureProfileArtifact` | 特征定义影响训练、服务和回放，必须内容寻址 |
+| `factors` | 迁移 | `ScoringProfileArtifact` | 因子构造、归一化和研究权重必须可复现 |
+| `domain` | 拆分 | provider binding → Deploy；语义 → `DomainProfileArtifact` | 外部连接与研究语义具有不同变更边界 |
+| `model` | 收敛 | `ModelRouting` | Runtime 只治理 active/shadow/exit artifact 指针 |
+| `quality_gate` | 迁移 | `ResearchMethodProfileArtifact.model_promotion` | promotion workflow 完整落地前不得保留 no-op runtime gate |
+| `training` | 迁移 | `ResearchMethodProfileArtifact.training` / job spec | 训练输入在 enqueue 时冻结，不应全局热改 |
+| `reports` | 拆分 | cadence/timezone → `ReportSchedule`；内容语义 → `RecommendationPolicy` | 调度 reconcile 与报告内容的生效边界不同 |
+| `portfolio` | 合并 | `ExecutionRiskPolicy` | 使用真实账户进行 sizing，属于资金风险策略 |
+| `execution` | 拆分 | risk → `ExecutionRiskPolicy`；mode authority → `ExecutionAuthorization`；pause/halt → `OperationalControl` | 风险、授权与即时操作不能共享一次 activation |
+| `notification` | 拆分 | secret/endpoint → Deploy credential/binding；event routing → `OperationalControl` | secret 不进入 Runtime Policy |
+| `research` | 迁移 | `ResearchMethodProfileArtifact` / job spec | CPCV、PBO、purge、trial 等是可复现方法 |
+| `feedback` | 删除 | 无 | 旧字段没有完整消费者；能力落地后再新增独立资源 |
+| `hold_to_resolution*` | 删除 | 无 | 旧路径为 no-op，不能伪装成治理能力 |
 
-### 1.1 Section 清单（真实结构）
+逐叶路径、消费者、生效边界、validator、secret classification 与删除原因必须以 inventory 为准；CI 对生成结果做双向一致性检查。
 
-| Section | 字段 | 说明 |
-|---|---|---|
-| `[polymarket]` | `clob_base_url`, `clob_ws_url`, `order_post_timeout_ms`, `chain_id` | CLOB/WS endpoint、单次订单 POST 硬超时、链 id（必须 137） |
-| `[polymarket.onchain]` | `rpc_url`, `rpc_timeout_ms` | Polygon JSON-RPC；`rpc_timeout_ms` 是 CTF oracle/redeem 的硬超时（reqwest 默认无超时） |
-| `[polymarket.relayer]` | `base_url`, `api_key`, `api_key_address`, `request_timeout_ms` | proxy/gnosis_safe 的 gasless money-moving；EOA 忽略 |
-| `[polymarket.fees]` | `exponent`, `unknown_category_rate`, `category_rates{}` | fee = C×feeRate×p×(1−p)^exponent |
-| `[market_data.websocket]` | `reconnect_delay_ms`, `max_reconnect_delay_ms`, `max_subscriptions_per_connection`, `engine_max_subscription_tokens`, `engine_subscription_window_hours` | WS transport + 引擎订阅 hotset cap/窗口 |
-| `[market_data.gamma]` | `base_url`, `reconcile_interval_secs`, `page_size`, `max_keyset_pages`, `max_keyset_requests` | Gamma keyset 全量 reconcile；只持久化内容变化 |
-| `[market_data.data_api]` | `base_url`, `page_size`, `size_threshold` | keyless 持仓读取（report capital base） |
-| `[observability]` | `log_level`, `log_json` | logging（metrics 常开于 `GET /metrics`） |
-| `[db.postgres]` | 连接/池/GUC + `[db.postgres.migration]` 独立 deploy identity | 权威状态；runtime identity 无 DDL 权限 |
-| `[db.clickhouse]` | 连接/批量写 + `[db.clickhouse.migration]` 独立 deploy identity | facts/analytics；runtime 不执行 DDL |
-| `[cache]` / `[cache.redis]` / `[cache.moka]` | 见 struct | Redis L2 + Moka L1 |
-| `[keys]` | `private_key` | **唯一签名凭证**；CLOB L2 由 SDK 在 connect 时派生 |
-| `[web]` / `[web.jwt]` | `signing_key`, `issuer`, `audience`, access/refresh/absolute TTL | 单 active HS256 key、内存 access token、HttpOnly refresh cookie、一次性 WS ticket；轮换立即使旧 JWT 失效 |
-| `[quant.workers]` | `report_expire_sweep_secs`, `intent_expire_sweep_secs`, `execution_dispatch_secs`, `execution_breaker_tick_secs`, `equity_snapshot_secs` | 后台 worker cadence（restart-bound） |
-| `[quant.account]` | `funder`, `wallet_kind` | Data API 持仓读取地址 + 钱包形态 |
-| `[research.artifact_store]` | `kind`, `bucket`, `prefix`, `region`, `endpoint`, `path_style`, `require_object_lock`, `require_versioning` | Local 开发存储或生产 S3/WORM evidence store；生产发布要求 versioning + Object Lock |
+## 2. 六类 Runtime Policy
 
-### 1.2 相对旧设计删除的 deploy 字段
+| Resource | 内容 | Consumer | 原子生效边界 |
+|---|---|---|---|
+| `RecommendationPolicy` | selection、data quality、TopN、horizon、report TTL | market selector、data-quality gate、report coordinator | 新 claim 的 `ReportRun`；已 claim run 继续使用旧 snapshot |
+| `ExecutionRiskPolicy` | sizing、exposure、entry/exit、capital、reconciliation、breaker | planner、`OrderIntent` builder、admission、execution workers | 新 `OrderIntent` 或新 admission；已提交订单不被隐式改写 |
+| `ModelRouting` | category 对应 active/shadow/exit artifact ref | model router、category pointer guard | 新 report / evaluation run |
+| `ReportSchedule` | timezone、calendar、cadence、enabled | durable report scheduler | 立即 reconcile 未 claim 的 future runs；已 claim run 不变 |
+| `OperationalControl` | report pause、execution halt、notification routing、worker admission | admission gates、notification router、worker supervisors | 下一次 admission 原子读取；不自动撤销已签名或已提交订单 |
+| `ExecutionAuthorization` | `ReportOnly` / `SemiAuto` / `AutoExecution` 权限与约束 | runtime-mode gate、execution preflight | mode preflight 成功后的后续 admission |
 
-| Path | 删除原因 |
-|---|---|
-| `[keys].source` / `[keys].keystore_path` / `KeySource` | keystore 未实现；只用 `private_key`。凭证来源不再有枚举，删除死设计 |
-| `[execution.book_apply]` / `[settlement.lifecycle]` | 旧 execution/settlement worker 面 |
-| 旧 `[keys]` mode-aware required policy / `load_credentials_in_report_only` | 私钥不再 mode-gated——**所有 mode 都加载私钥用于读真实账户**（report_only ≠ dry-run）；仅签名/下单为 semi_auto/auto |
+每个 resource 都是强类型 `PolicyDocument` enum variant；API、repository 与数据库 `resource_kind` 使用 SeaORM `ActiveEnum`，不得以自由字符串分派。Decimal、ID、hash、URI、timezone、cadence 与 mode 均使用经过验证的 newtype/enum。
 
-### 1.3 关键语义
+### 2.1 Immutable profile artifacts
 
-- **私钥所有 mode 都需要**（读真实抵押余额 + 派生 L2 读凭证）；**签名/下单**用途仅 `semi_auto`/`auto_execution` preflight 才要求。
-- `quant.account.funder`：`eoa` 必须等于 signer EOA 派生地址；`proxy`/`gnosis_safe` 必须等于 CREATE2 推导地址（启动校验）。
-- `proxy`/`gnosis_safe` 在升级到 order-submitting mode 时 preflight 硬要求 `[polymarket.relayer].api_key` + `api_key_address`。
-- `polymarket.onchain.rpc_timeout_ms` 已接线进 alloy provider 的 reqwest client：redeem/oracle 调用超时即失败，绝不无限挂起。
-- `polymarket.order_post_timeout_ms` 只约束单次资金订单 POST：超时归类为 Ambiguous 并进入 reconciliation，绝不自动重试。
+`DecisionPolicySnapshot` 同时冻结六类 revision identity 与以下不可变方法 artifact：
 
-## 2. Runtime Config v17
+- `FeatureProfileArtifact`
+- `ScoringProfileArtifact`
+- `DomainProfileArtifact`
+- `ResearchMethodProfileArtifact`
 
-根类型 [`RuntimeConfig`](../../../crates/quant-pivot-models/src/runtime_config/mod.rs)，`RUNTIME_CONFIG_SCHEMA_VERSION = 17`（以代码为准）。
+每个 artifact 独立使用 boot schema，并可计算 `ContentHash`。修改 policy resource 不得改写这些 artifacts；研究/训练流程必须把实际消费的 artifact/hash 写入 lineage。
 
-> **schema 版本历史**：v7 基线 → … → v9（Phase 06.1）→ **v10**（Phase 10.7：移除线上死配置 `model.prediction_horizon_secs`→训练 API；`data_quality.min_book_depth_usd` 迁移正名为 `execution.entry_order_policy.min_entry_book_depth_usd`）。
+## 3. Revision、Approval、Activation 与回滚
+
+编辑总是创建 immutable revision，不允许原地更新：
 
 ```text
-RuntimeConfig {
-  schema_version: 17,
-  selection,
-  data_quality,
-  features,
-  factors,
-  model,
-  quality_gate,
-  training,
-  reports,
-  portfolio,
-  execution,
-  notification
-}
+Draft -> Typed Validation -> Dependency Preflight -> Approval
+      -> Consumer Prepare -> DB CAS Activation -> ArcSwap Publish -> Audit
 ```
 
-### 2.1 `selection`
+Activation request 必须携带：
 
-`enabled_categories`, `min_liquidity_usd`, `min_volume_24h_usd`, `max_spread_bps`, `allow_near_resolution`, `min_time_to_resolution_secs`, `max_time_to_resolution_secs`, `max_selection_size`。
+- `approval_id`
+- `expected_active_revision_id`
+- `reason`
+- `preflight_token`
+- `idempotency_key`
 
-人工禁用不属于 runtime-config；唯一权威是 catalog `MarketStatus::ManuallyBlocked`，经 governed block/unblock API 修改，由 selection/admission fail-closed 消费。
+约束：
 
-### 2.2 `data_quality`
+- approval 绑定 exact `resource_kind + revision_id + revision_hash`。
+- preflight token 有明确过期时间，且只适用于该 revision。
+- repository 通过 activation guard row 加锁，并在同一事务中校验 idempotency、evidence、CAS、snapshot 与 activation。
+- active resource 通过一条 `DISTINCT ON (resource_kind)` 查询批量读取，禁止逐 resource N+1。
+- snapshot insert 使用 SeaORM `TryInsert` 与 typed conflict target；正常路径一次往返，冲突时才补查并核对内容。
+- consumer prepare 任一失败时不写 active state；已成功 activation 的反向操作只能创建显式 rollback activation。
+- rollback 仍需要 review、approval、preflight、CAS 与 reason；不存在一键自动回滚。
 
-`max_book_age_ms`, `max_ingest_lag_ms`, `max_feature_bucket_age_secs`, `reject_crossed_books`, `reject_empty_books`, `feature_staleness_policy`, `max_stale_book_ratio_bps`。
+权限分别为 `config.view/create/approve/activate/rollback`；lifecycle seal 使用独立 `config_lifecycle.seal`。
 
-> **v10 迁移**：`min_book_depth_usd` 语义错位（不参与 live 订单簿质量，仅经冻结 `entry_plan.min_depth_usd` 在准入 `LiquidityDepthCheck` 生效），已迁移正名为 `execution.entry_order_policy.min_entry_book_depth_usd`（见 §2.10）。
+## 4. Deploy Config
 
-`max_ingest_lag_ms` 衡量入库管道 enqueue→ClickHouse flush-ack 背压（实时数据质量 / 执行准入 / 选市）；`max_feature_bucket_age_secs` 衡量物化特征桶陈旧度（训练 / 回测 / 在线特征）。二者语义独立，不可混用。
+Deploy Config 只保留启动时才能决定的内容：
 
-> **v7 删除**：`allow_degraded_domain_features`、`knowledge_lag_secs`（前者从未消费；后者只作 ad-hoc 报告 source-delay 回退，已合并——见 §2.8）。exit 再推断的 as-of 回退改用 `max_feature_bucket_age_secs`。
-> **拆分**：旧 `max_fact_lag_secs` 拆为 `max_ingest_lag_ms`（管道背压）与 `max_feature_bucket_age_secs`（特征桶陈旧度）。
+- service endpoint、bind address、allowed origin、deployment identity；
+- PostgreSQL、ClickHouse、Redis 与 artifact store 的连接位置；
+- Gamma/CLOB/Data API、on-chain、relayer 与 domain provider binding；
+- wallet kind、funder、secret provider 与 credential name；
+- TLS、JWT issuer/audience、日志格式/级别；
+- lifecycle expectation 与 production build identity；
+- 七组 host resource budgets。
 
-### 2.3 `features`
+七组 resource budget：
 
-`feature_schema_version`, `enabled_feature_families`, `required_features`, `bar_windows_secs`, `momentum_windows_secs`, `volatility_windows_secs`, `depth_levels`, `max_concurrent_market_resolves`。
+1. `database`
+2. `clickhouse_writer`
+3. `market_data_ingest`
+4. `cache`
+5. `research_jobs`
+6. `report_execution`
+7. `web`
 
-> **v7 删除**：`domain_feature_policy`（从未消费）。
+worker 的 lease、heartbeat、poll、queue 与 concurrency 只能由对应 budget/typed deploy section 声明并校验合法比例；不得用多个互相独立的 magic duration 形成矛盾状态。
 
-### 2.4 `factors`
+### 4.1 Secret 与 credential
 
-`enabled_factor_families`（仅 generic 家族；domain 因子由 category 路由）、`factor_weights`、`min_factor_confidence`、`missing_factor_policy`。因子集合身份经 `factor_schema_hash` 绑定模型 artifact。
+private key、DB password、JWT signing key、bot token、relayer key、webhook secret 和 evidence signing key 不得作为可打印 TOML/env value。标准部署只保存 systemd credential reference，进程从受限 credential file 读取；deployment API 只返回 `available/missing`，不返回 secret 或文件内容。
 
-### 2.5 `model`
+runtime identity 不持有 DDL 凭据。PostgreSQL/ClickHouse schema credential 仅由 deploy CLI 使用。
 
-`active_model_version_id`, `shadow_model_version_id`, `active_exit_model_version_id`, `min_model_confidence`, `min_quality_gate_age_secs`, `candidate_score_floor`, `shadow_diff_threshold`。
+### 4.2 来源优先级
 
-> **v10 移除**：`prediction_horizon_secs` 是线上死配置（仅训练产物 authoring 用，在线推断读冻结 artifact 的 horizon），已从 runtime-config 移除并迁到训练 API `TrainModelRequest.prediction_horizon_secs`（校验 + 默认 86400），由 trainer 写入 artifact。
+1. source-controlled non-secret TOML；
+2. environment-specific immutable override；
+3. systemd Credentials；
+4. 禁止任意环境变量覆盖业务 policy。
 
-### 2.6 `quality_gate`
+## 5. SeaORM / PostgreSQL 规则
 
-`min_sample_count`, `min_label_coverage`, `min_critical_feature_coverage`, `max_drawdown`, `min_liquidity_exit_feasibility`, `min_shadow_overlap_stability`, `min_rank_ic`, `max_category_concentration`, `required_shadow_window_secs`。模型发布/回滚/数据集晋升门禁消费。
+- 表、列、FK、index 与 native enum 以 boot snapshot entities 为源，通过 SeaORM entity-first `SchemaBuilder::apply` 建表。
+- 有限状态、resource kind、actor kind、lifecycle state 与 operation 使用 `DeriveActiveEnum`；ID、hash、URI、金额和配置 JSON 使用 newtype/`FromJsonQueryResult` typed struct。
+- 业务查询优先 `Entity::find`、typed `Column`、`Condition`、`Relation`、partial model 与 `find_also_related`；禁止手拼列名和 enum literal。
+- 一对一读取使用 join；一对多在结果规模较小时使用 eager join，在父行会大量重复时使用 Model/Entity Loader 的批量 `IN` 查询。禁止循环内 lazy load。
+- 只读取 UI 摘要所需列时使用 partial model，避免为列表页传输完整 JSONB document。
+- 多行写使用 `insert_many`/batch upsert；状态转换与审计写入同一 transaction。
+- raw SQL 仅允许用于 SeaQuery 无法表示的 PostgreSQL ordered-set aggregate、catalog introspection、DDL gap 与健康探针，并集中在受 lint 约束的 adapter/support 文件。
+- unprepared SQL 不得接受外部输入；动态值必须绑定。
 
-### 2.7 `training`
+## 6. Lifecycle 与 production seal
 
-`max_book_staleness_ms`, `min_exit_depth_usd`。离线数据集构建参数（PIT 回看窗口远宽于在线 gate）。
+`project-lifecycle.toml` 只有两种 typed state：
 
-### 2.8 `reports`
+- `pre_production_resettable`
+- `production_frozen`
 
-`schedules`, `max_top_n`, `ad_hoc_default_top_n`, `ad_hoc_default_knowledge_lag_secs`,
-`fallback_horizon_secs`, `entry_window_ratio`, `ad_hoc_report_enabled`, `delivery_policy`。
+seal 是不可逆治理动作，不是普通 switch。后端重新验证 environment、build commit、备份证据、Config E2E 证据、PostgreSQL/ClickHouse fingerprint、active policy bundle 与目标 lifecycle hash，然后写唯一 `system_production_baseline` WORM row。
 
-ad-hoc 默认值是 claim 时冻结的纯构建参数，禁止从 schedule 数组位置推导；请求 override 优先，
-且有效 `top_n` 仍须满足 `1..=max_top_n`。
+source policy、Deploy expectation 与数据库 baseline 三者不一致时应用拒绝启动。`BootstrapPhase::Active` 只表示冷启动运行阶段，绝不代表正式上线。
 
-> **Phase 11.8**：有效 empty report 始终 Prepared→Published 并取代旧 current；该行为是资金安全不变量，
-> 不再由 runtime config 开关控制。schedule occurrence、run、gap 与 lease 的权威在 PostgreSQL，runtime config
-> 只定义 schedule spec。
+## 7. Config 控制台
 
-Schedule（`ReportScheduleConfig`）：`schedule_id`, `cadence`（`interval_secs` 或 `cron{expr, timezone?}`）, `top_n`, `knowledge_lag_secs`, `enabled`。
+路由：
 
-Deploy-only `[quant.workers]` 增加：`report_schedule_poll_secs=1`、`report_run_lease_secs=120`、
-`report_run_heartbeat_secs=30`、`report_ad_hoc_queue_capacity=64`、`report_ad_hoc_queue_ttl_secs=300`。
-这些 process/DB 参数不进入 WORM runtime wire；heartbeat 必须 ≤ lease/3，TTL > poll，capacity ∈ [1,1024]。
-
-> **v7 破坏式合并**：`schedule` 层是 `top_n` / `knowledge_lag` 的**唯一权威**。删除 `reports.default_top_n` 与 `data_quality.knowledge_lag_secs`。**ad-hoc 报告必须在请求中显式携带 `top_n` + `knowledge_lag_secs`**，缺失即 fail closed（无配置回退）。schedule 上删除死占位符 `market_filter_ref` / `model_version_ref`。
-
-### 2.9 `portfolio`
-
-三段（政策 ≠ 状态；真实资金来自账户快照，`total_budget_usd` 仅治理护栏）：
-
-- `budget`：`total_budget_usd`（治理护栏；`equity = min(真实净清算, total_budget_usd)`）、`min_recommendation_usd`、`max_single_recommendation_usd`。
-- `constraints`：`max_market_exposure_usd`、`max_event_exposure_usd`、`max_category_exposure_usd`、`max_correlated_exposure_usd`、`liquidity_usage_cap_pct`、`correlation{enabled, lookback_days, min_observations, cluster_threshold}`。
-- `sizing`（Kelly 唯一）：`kelly_fraction`、`max_position_pct`、`target_reward_multiple`、`confidence_weighting`、`drawdown_scaling`。
-- `optimizer`：`solver`（`microlp` 默认 / `highs` 可选 native）、`integer_inclusion`、`objective_return_weight`。求解阶梯 MILP → relaxation → 空 plan，无 wall-clock 超时（确定性重放）。
-
-### 2.10 `execution`
-
-`semi_auto`, `auto_execution`, `entry_order_policy`, `exit_monitor`, `kill_switch`, `capital`, `reconciliation`, `settlement_redeem`, `attribution`, `breaker`。
-
-- `semi_auto`：只保留 `approval_ttl_secs`。审批 downscale 是单位安全的领域动作，不是可漂移策略开关。
-- `auto_execution`：`enabled`、`max_orders_per_report`、`max_total_usd_per_report`、`min_score`、`min_confidence`。
-- `entry_order_policy`：`max_slippage_bps`、`allow_market_orders`、`min_entry_book_depth_usd`（**v10 从 `data_quality.min_book_depth_usd` 迁移正名**；冻结进 `entry_plan.min_depth_usd`，准入 `LiquidityDepthCheck` 消费）。
-- `exit_monitor`：`enabled`、`monitor_secs`、`signal_recheck_secs`、`signal_reinference{enabled, shadow_mode}`。
-  thesis invalidation、barrier、trailing 和 scale-out 阈值来自 intent 冻结的 `TradePolicyArtifact`，不允许
-  runtime 覆盖。11.5.1 遗留 opportunistic Sell 策略字段在 11.7.2 完成冻结迁移前只允许 shadow，
-  不属于可激活的生产策略来源。
-- `capital`：`max_reserved_usd`、`max_open_intents`（**v7 起真正生效**，见 §3.3）。
-- `reconciliation`：`enabled`、`interval_secs`、`stale_open_secs`。
-- `settlement_redeem`：`enabled`、`interval_secs`、`batch_size`、`max_attempts`、`retry_backoff_secs`、`confirmation_blocks`、`allow_during_emergency`、`hold_to_resolution_enabled`、`hold_to_resolution_within_secs`。
-- `attribution`：`enabled`、`sweep_secs`、`batch_size`。
-- `breaker`（`ExecutionBreakerConfig`）：`venue_consecutive_failures_to_degrade`、`venue_consecutive_failures_to_halt`、`venue_error_rate_bps_to_halt`、`venue_min_window_samples`、`venue_window_secs`、`cooldown_secs`、`daily_realized_loss_cap_usd`。**v7 起真正热更新**（见 §3.4）。
-
-> **v7 删除**：`exit_order_policy` 整块（退出滑点由 Kelly exit ladder / emergency_exit 决定）、`admission{min_score, min_confidence, require_fresh_features}`（分数/置信度门槛由 `auto_execution.*` + 结构化 freshness 承担）、`auto_execution.require_shadow_passed`、`entry_order_policy.confirmation_window_secs`（从未在 admission 校验，连同 `EntryPlan.confirmation_window_secs` 一并删除）、`execution.runtime_mode`（运营 mode 权威在 `system_runtime_state` / `RuntimeModeHandle`，非 runtime config）。
-
-### 2.11 `notification`
-
-`telegram{bot_token, chat_id}`、`webhook{url}`、`policies{report_published}`。
-
-> **v7 删除**：`policies.execution_halted`、`policies.config_activated`（从未消费；执行停止/配置激活通过其它路径通知）。
-
-## 3. Config Validation 与热更新闭环
-
-### 3.1 Common validation（[`validation.rs`](../../../crates/quant-pivot-models/src/runtime_config/validation.rs)）
-
-- `schema_version` 必须为 17；unknown fields reject；Decimal string parse；USD ≥ 0；比例在合法区间；schedule id 非空；cadence 结构合法。
-
-### 3.2 Mode-aware validation（deploy + preflight）
-
-- `report_only`：要求 private key + `quant.account.funder`（读真实抵押 + 持仓）；不要求下单 readiness；要求 data ingest ready、report schedule valid。
-- `semi_auto`：要求 credentials source、approval role、order client、exit monitor。
-- `auto_execution`：semi_auto 全部 + active model published + auto policy budget > 0 + kill switch closed + quality gates fresh + no blocking reconciliation。
-
-### 3.3 Capital 风控门（admission #21 / #22）
-
-`execution.capital.{max_open_intents, max_reserved_usd}` 由 admission engine 消费（[`checks.rs`](../../../crates/quant-pivot-core/src/execution/admission/checks.rs)）：
-
-- **#21 `MaxOpenIntents`**：`0` 禁用；否则 `open_intent_count > max_open_intents` → `Deny`（`open_intent_count` 由 `OrderIntentRepository::count_open()` 在 build 时读取，含 `OrderIntentStatus::OPEN` 全集，被审 intent 已计入，无 off-by-one）。
-- **#22 `MaxReservedCapital`**：`0` 禁用；否则 `account.reserved_usd > max_reserved_usd` → `Deny`。
-
-admission 由 20 条增至 **22 条固定顺序检查**，两门紧邻 `CapitalBudget`（#10）之后。
-
-### 3.4 Breaker 热更新
-
-`execution.breaker.*` 是运行时配置，须**真正热更新**：[`ExecutionBreaker`](../../../crates/quant-pivot-core/src/execution/breaker.rs) 将阈值置于 `ArcSwap<BreakerThresholds>`，applicator 激活时 push `reload(&config.execution.breaker)`，**只换阈值**，保留滚动失败窗口与日内亏损累加器状态。latched `execution_halted` 仍须 operator ack 解除。
-
-### 3.5 热更新机制
-
-`RuntimeConfigStore`（`ArcSwap<RuntimeConfig>`）承载 live active 快照。候选配置先完成纯函数解析、校验并构造不可变 snapshot；审批必须绑定 exact `version + hash`。激活事务锁定 bootstrap singleton，校验 approval 与 `expected_state_revision`，原子写 activation、bootstrap transition 和 WORM audit；事务提交后再一次发布 `ArcSwap`。进程若在 commit 后崩溃，重启从 PostgreSQL active revision 重建同一 snapshot，不运行补偿 rollback。worker 每轮读取已发布 snapshot；报告构建按 `trigger_time` 从 PostgreSQL 取 point-in-time 版本。
-
-## 4. Runtime Config UI
-
-UI groups 由 [`preferences_schema.rs`](../../../crates/quant-pivot-models/src/runtime_config/preferences_schema.rs) 生成并校验与 struct 1:1：Selection、Data Quality、Features、Factors、Model、Quality Gate、Training、Reports、Portfolio、Execution、Notifications。
-
-money-critical 字段（`money` 语义 + 确认）：portfolio budget、max recommendation size、capital caps、auto execution enable、breaker 亏损上限、mode switch、model publish。
-
-## 5. Deployment
-
-### 5.1 Docker
-
-目标：`docker-compose.dev.yml`、`docker-compose.quant.yml`（Postgres、Redis、ClickHouse、quant-pivot service、optional UI）。
-
-### 5.2 Secrets
-
-report_only 必需：Postgres/ClickHouse/Redis 密码、JWT signing key、**Polymarket private key**（读真实抵押 + 派生 L2 读凭证）、**`quant.account.funder`**。
-
-本地 migration 可以直接在主配置的 `[db.postgres.migration].password` 与
-`[db.clickhouse.migration].password` 配置；标准环境变量分别为
-`QUANT_PIVOT__DB__POSTGRES__MIGRATION__PASSWORD` 与
-`QUANT_PIVOT__DB__CLICKHOUSE__MIGRATION__PASSWORD`。部署工具按 base TOML → local TOML → env
-覆盖读取；production runtime profile 一旦发现 DDL password 会拒绝启动，且 runtime 投影永不保留它。
-
-`research.evidence_attestation.signing_key` 是 64 个小写 hex 字符；旧 active key 轮换进
-`previous_signing_keys` 后只参与历史证据验证。`attestation_key_id` 从 domain-separated key
-fingerprint 派生，不接受操作员配置；JWT key 与 evidence key 禁止复用。
-
-semi_auto / auto_execution 额外（签名/下单）：同一 private key 用于 EIP-712 签名 + L2 写；proxy/gnosis_safe 需 relayer 凭证；Polygon RPC（attribution/redeem）。
-
-禁止在 production example 写真实 secrets。
-
-### 5.3 Process roles
-
-第一版单进程，内部 worker 分组：web、ingest、research、report、execution。后续可拆进程，但数据库 schema 与 runtime config 不应依赖拆分。
-
-### 5.3.1 Offline research jobs（3.5+）
-
-Dataset plan/build 经 Admin HTTP API（非 xtask CLI）：`POST /api/research/training-datasets/{plan,build}`。契约见 [`phase-03/03.5.1-training-dataset-admin-api.md`](phase-03/03.5.1-training-dataset-admin-api.md)。
-
-## 6. CI 与质量门禁
-
-保留：`cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace`、architecture lint、MSRV。
-
-新增/维护：no old Endgame symbols gate、no old `ExecutionMode` gate、no prior-schema runtime config gate、no compatibility re-export gate、PostgreSQL semantic manifest、migration artifact checksum、**runtime config schema snapshot（schema_version=17）**、report payload snapshot、ClickHouse semantic manifest/row snapshot。
-
-## 7. Benchmark
-
-以 quant report path 为中心：`feature_build_market`、`factor_compute_market`、`model_score_market`、`topn_select_1000`、`report_build_topn`、`portfolio_plan_1000`、`order_intent_admission`、`clickhouse_quant_fact_encode`。删除旧 endgame/paper benchmark。
-
-## 8. Observability
-
-### 8.1 Metrics
-
-`quant_report_runs_total`、`quant_report_run_duration_seconds`、`quant_reports_published_total`、`quant_reports_empty_total`、`quant_feature_vectors_built_total`、`quant_factor_values_built_total`、`quant_model_runs_total`、`quant_model_quality_gate_failures_total`、`quant_recommendations_published_total`、`quant_order_intents_total`、`quant_execution_halted`、`quant_fact_writer_lag_seconds`、`quant_execution_breaker_trip`（venue/daily_loss）、admission_denied（按 check id，含 `max_open_intents`/`max_reserved_capital`）。
-
-### 8.2 Logs
-
-关键 structured fields：`report_id`、`recommendation_id`、`model_version_id`、`runtime_config_version_id`、`market_selection_id`、`order_intent_id`、`market_id`、`token_id`、`mode`。
-
-### 8.3 Alerts
-
-Critical：report schedule missed、model quality gate failed、fact writer lag、execution halted、reconciliation unresolvable。Warning：empty report、data quality degraded、feature coverage low、shadow/live divergence high。
-
-## 9. Runbooks
-
-新增：启动 report_only、标准二元 CTF auto-redeem、发布模型、运行 ad-hoc report（**须显式提供 top_n + knowledge_lag_secs**）、切换 auto_execution、Auto-execution 恢复（unresolvable / latched kill-switch）、审批 OrderIntent、kill switch、处理 stale report / fact lag / unresolvable execution。
-
-## 10. Bootstrap 与 schema 变更
-
-- PostgreSQL DDL 的唯一所有者是 deploy-only [`quant-pivot-migration`](../../../crates/quant-pivot-migration/src/lib.rs)。每个 `SeaORM` migration 是只追加、不可修改的编译 artifact；`seaql_migrations` 记录原生版本，`schema_migration_audit` 记录 BLAKE3 checksum、artifact length 与 migration engine。部署用独立 identity 执行 `quant-pivot-xtask postgres-schema plan|apply|verify`，runtime 只读验证 migration ledger 与规范化 schema manifest，禁止启动时 apply DDL。新增未应用 migration 后必须执行 `cargo run -p quant-pivot-xtask -- postgres-schema migration-manifest`，人工复核并提交 `schema/postgres/migrations.json`；该命令不连接数据库、不执行 DDL。
-- ClickHouse DDL 同样只允许 deploy identity 通过 `quant-pivot-xtask clickhouse-schema` 执行；runtime 只验证规范化 `SHOW CREATE` manifest。
-- 冷启动 FSM 固定为 `initializing -> collecting_baseline -> awaiting_activation -> active`，每次 transition 在锁定 singleton 的 PostgreSQL 事务内递增 `state_revision` 并写 WORM audit。等待激活时允许没有 active runtime config；active 系统的关键 singleton 缺失或非法必须启动失败，禁止自动 reseed/self-heal。
-- 首次激活必须选择 exact approved runtime revision，并显式确认 `ReportOnlyForced`。生产 profile 要求 approver 与 activator 分离；local profile 可显式关闭双人审批，但不能关闭 approval/audit/capability gate。
-- env var 旧 key（如 `QUANT_PIVOT__KEYS__SOURCE`）会因 `deny_unknown_fields` 导致启动失败，必须同步清理。
-- UI/runtime schema snapshot 必须固定为 schema_version 17。
-
-## 11. 验收标准
-
-- `config/quant-pivot.toml` / `production.example.toml` 与 `DeployConfig` struct **1:1**，无 old execution/settlement/endgame hotset、无 `[keys].source`。
-- `RuntimeConfig::schema_version == 17`；runtime schema 不含 `detection`、old `risk`、old `settlement`、`exit_order_policy`、`admission`、`domain_feature_policy`、`default_top_n`。
-- 空 PostgreSQL 由 deploy identity 迁移后 manifest 字节级语义一致；runtime identity 无 `CREATE`/DDL 权限；migration checksum、enum、约束、索引、trigger、grant 任一漂移都确定失败。
-- 冷库先进入 `collecting_baseline`，完成 Gamma baseline 后进入 `awaiting_activation`；没有 serving subject 时不创建 parity run、不打开 latch。
-- report_only 启动要求 private key + `quant.account.funder`；缺失则报告生成 fail closed。
-- semi_auto/auto_execution preflight 额外覆盖签名/下单 credentials 与 order client readiness。
-- admission 为 22 条；`capital.{max_open_intents, max_reserved_usd}` 生效（0=禁用）。
-- `execution.breaker.*` 激活即热更新，无需重启。
-- ad-hoc 报告缺 `top_n` / `knowledge_lag_secs` 时 fail closed。
-- CI gate 能阻止旧 Endgame 符号回流。
-
-## 12. 第三方依赖治理
-
-详细选型见 [`08-third-party-crates-and-ml-stack.md`](08-third-party-crates-and-ml-stack.md)。配置和运维层必须为重依赖提供 feature gate 和 rollout 策略。
-
-### 12.1 Dependency Gate
-
-每个新 crate 引入前记录：crate 名、使用模块、引入 Phase、是否默认 feature、MSRV、native dependency、binary size impact、license、fallback。
-
-### 12.2 Feature Gate
-
-```toml
-[features]
-default = []
-quant-dataframe = ["polars"]
-quant-ml-classical = ["smartcore"]
-quant-ml-baseline = ["linfa"]
-quant-ml-onnx = ["ort"]
-quant-ml-deep = ["burn", "candle-core", "candle-nn"]
-quant-lp-solver = ["good_lp"]
+```text
+/system/config
+/system/config/:resource
+/system/config/deployment
+/system/config/activity
+/system/config/lifecycle
 ```
 
-`report_only` 基础服务默认不启用 `quant-ml-onnx` 和 `quant-ml-deep`。
+- Overview 展示 environment、lifecycle、active bundle、pending approval、restart required 与最近 activation。
+- Resource workspace 使用 typed field editor、before/after diff、consumer impact、validator/preflight 与 exact apply boundary；raw JSON 只读。
+- `Edit Draft -> Review & Validate -> Approve -> Activate` 为四个独立审计动作；编辑页不得直接 Activate。
+- `OperationalControl` 使用具名动作按钮和确认 Dialog，不使用易误触 switch。
+- `ModelRouting` 只能选择经过兼容性检查的 artifact，不接受自由文本 model ID。
+- `ReportSchedule` 展示 timezone 与 next-run preview，cron 只放技术详情。
+- Deployment 完全脱敏并明确标注 restart boundary。
+- Lifecycle seal 展示证据清单、精确确认短语与不可逆结果。
 
-### 12.3 MSRV / Native / Spike Gate
+## 8. 验收
 
-MSRV 变化作为独立 Phase 决策；`ort`/`good_lp`/`polars`/`burn`/`candle` 的 native 依赖须审查；生产 Docker 必须明确安装或复制 native runtime。相关 spike（Polars/SmartCore/Argmin/GoodLP/Ort/Burn）通过前不得进入主路径。
+- 空 PostgreSQL 只应用 `m00000000_000001_bootstrap`；空 ClickHouse 只应用 `version = 1` bootstrap。
+- 旧 migration、旧 RuntimeConfig entity/parser/API、旧版本 alias 与 compatibility re-export 均不存在。
+- 六类 policy 的每个 leaf 都有 typed validator、consumer、prepare/apply handler、effective boundary 与 rollback test。
+- Config DTO 从后端契约生成，activation body 不可能漏掉 approval/CAS/preflight/idempotency 字段。
+- deterministic Playwright fixture 覆盖 Overview、edit、validation error、review、approval、preflight、success、CAS conflict、rollback、deployment、lifecycle、permission 与 error recovery。
+- desktop/mobile、light/dark、reduced-motion、axe 与 keyboard-only flow 全部通过；截图只在动画 settle、无 console error、无 failed request 后采集。
+- `production_frozen` 后 boot reset、migration squash 与版本重新基线在 API、CLI、启动校验和文档 lint 四处 fail closed。

@@ -1,6 +1,6 @@
 //! Runtime-mode execution gate: published recommendation → intent policy.
 
-use crate::runtime_config::RuntimeConfigStore;
+use crate::runtime_config::DecisionPolicyStore;
 use async_trait::async_trait;
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
@@ -45,13 +45,13 @@ pub trait RuntimeModeGate: Send + Sync {
 /// approval TTL and the auto-execution switch, then maps
 /// `(mode, recommendation)` to one of the five [`IntentPolicyDecision`] arms.
 pub struct DefaultRuntimeModeGate {
-    config: Arc<RuntimeConfigStore>,
+    config: Arc<DecisionPolicyStore>,
 }
 
 impl DefaultRuntimeModeGate {
     /// Build the gate over the shared runtime-config snapshot.
     #[must_use]
-    pub const fn new(config: Arc<RuntimeConfigStore>) -> Self {
+    pub const fn new(config: Arc<DecisionPolicyStore>) -> Self {
         Self { config }
     }
 }
@@ -89,7 +89,7 @@ impl RuntimeModeGate for DefaultRuntimeModeGate {
         }
 
         let config = self.config.current();
-        let semi_auto = &config.execution.semi_auto;
+        let semi_auto = &config.execution_authorization.semi_auto;
 
         match mode {
             QuantRuntimeMode::ReportOnly => Ok(IntentPolicyDecision::ReportOnly),
@@ -106,14 +106,14 @@ impl RuntimeModeGate for DefaultRuntimeModeGate {
 #[cfg(test)]
 mod tests {
     use super::{DefaultRuntimeModeGate, IntentPolicyDecision, RuntimeModeGate};
-    use crate::runtime_config::RuntimeConfigStore;
+    use crate::runtime_config::DecisionPolicyStore;
     use quant_pivot_models::{
         domain::RecommendationInfo,
         enums::{
             execution::ModeDenialReason,
             quant::{OutcomeSide, QuantRuntimeMode},
         },
-        runtime_config::RuntimeConfig,
+        runtime_config::DecisionPolicySnapshot,
         types::{
             RecommendationId, RecommendationReportId, RecommendationTradePlan, RiskEnvelope, Usd,
         },
@@ -133,8 +133,8 @@ mod tests {
         )
     }
 
-    fn gate(config: RuntimeConfig) -> DefaultRuntimeModeGate {
-        DefaultRuntimeModeGate::new(Arc::new(RuntimeConfigStore::new(config)))
+    fn gate(config: DecisionPolicySnapshot) -> DefaultRuntimeModeGate {
+        DefaultRuntimeModeGate::new(Arc::new(DecisionPolicyStore::new(config)))
     }
 
     fn risk_envelope(rec: &mut RecommendationInfo) -> &mut RiskEnvelope {
@@ -146,7 +146,7 @@ mod tests {
 
     #[tokio::test]
     async fn report_only_never_creates_intent() {
-        let gate = gate(RuntimeConfig::default());
+        let gate = gate(DecisionPolicySnapshot::default());
         let mut rec = rec();
         rec.execution_eligibility.eligible_modes =
             vec![QuantRuntimeMode::ReportOnly, QuantRuntimeMode::SemiAuto];
@@ -159,7 +159,7 @@ mod tests {
 
     #[tokio::test]
     async fn semi_auto_eligible_requires_approval() {
-        let gate = gate(RuntimeConfig::default());
+        let gate = gate(DecisionPolicySnapshot::default());
         let mut rec = rec();
         rec.execution_eligibility.eligible_modes = vec![QuantRuntimeMode::SemiAuto];
         let decision = gate
@@ -176,7 +176,7 @@ mod tests {
 
     #[tokio::test]
     async fn semi_auto_ineligible_is_denied() {
-        let gate = gate(RuntimeConfig::default());
+        let gate = gate(DecisionPolicySnapshot::default());
         let mut rec = rec();
         rec.execution_eligibility.eligible_modes = vec![QuantRuntimeMode::ReportOnly];
         let decision = gate
@@ -193,8 +193,8 @@ mod tests {
 
     #[tokio::test]
     async fn runtime_v13_blocks_auto_execution_even_when_legacy_flags_allow_it() {
-        let mut config = RuntimeConfig::default();
-        config.execution.auto_execution.enabled = true;
+        let mut config = DecisionPolicySnapshot::default();
+        config.execution_authorization.auto_execution.enabled = true;
         let gate = gate(config);
         let mut rec = rec();
         rec.execution_eligibility.eligible_modes = vec![QuantRuntimeMode::AutoExecution];
@@ -215,8 +215,8 @@ mod tests {
 
     #[tokio::test]
     async fn auto_execution_denied_when_envelope_disallows() {
-        let mut config = RuntimeConfig::default();
-        config.execution.auto_execution.enabled = true;
+        let mut config = DecisionPolicySnapshot::default();
+        config.execution_authorization.auto_execution.enabled = true;
         let gate = gate(config);
         let mut rec = rec();
         rec.execution_eligibility.eligible_modes = vec![QuantRuntimeMode::AutoExecution];
@@ -237,7 +237,7 @@ mod tests {
 
     #[tokio::test]
     async fn degenerate_envelope_is_denied() {
-        let gate = gate(RuntimeConfig::default());
+        let gate = gate(DecisionPolicySnapshot::default());
         let mut rec = rec();
         rec.execution_eligibility.eligible_modes = vec![QuantRuntimeMode::SemiAuto];
         risk_envelope(&mut rec).max_position_usd = Usd::ZERO;

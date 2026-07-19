@@ -2,7 +2,7 @@
 
 use crate::{
     enums::quant::{ModelRunErrorCode, ModelRunKind, ModelRunStatus},
-    types::{ContentHash, MarketSelectionId, ModelRunId, ModelVersionId, RuntimeConfigVersionId},
+    types::{ContentHash, DecisionPolicySnapshotId, MarketSelectionId, ModelRunId, ModelVersionId},
 };
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
@@ -15,7 +15,7 @@ pub struct Model {
     pub model_run_id: ModelRunId,
     pub run_kind: ModelRunKind,
     pub model_version_id: Option<ModelVersionId>,
-    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub market_selection_id: Option<MarketSelectionId>,
     pub window_start: DateTime<Utc>,
     pub window_end: DateTime<Utc>,

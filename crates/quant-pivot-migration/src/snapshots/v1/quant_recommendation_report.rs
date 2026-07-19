@@ -3,25 +3,22 @@
 use super::sea_orm_active_enums::{
     QpAccountSource, QpQuantRuntimeMode, QpRecommendationReportStatus, QpReportKind,
 };
-use sea_orm::{entity::prelude::*, sea_query::Expr};
+use sea_orm::entity::prelude::*;
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
-#[sea_orm(schema_name = "public", table_name = "quant_recommendation_report")]
+#[sea_orm(table_name = "quant_recommendation_report")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub recommendation_report_id: Uuid,
-    #[sea_orm(column_type = "Text")]
     pub profile_id: String,
     #[sea_orm(column_type = "JsonBinary")]
     pub profile_ref: Json,
     pub report_kind: QpReportKind,
-    #[sea_orm(default_expr = "Expr::cust(\"statement_timestamp()\")")]
-    pub created_at: DateTimeWithTimeZone,
     pub decision_at: DateTimeWithTimeZone,
     pub horizon_secs: i64,
     pub runtime_mode: QpQuantRuntimeMode,
-    pub runtime_config_version_id: Uuid,
+    pub decision_policy_snapshot_id: Uuid,
     pub model_run_id: Option<Uuid>,
     pub model_version_id: Uuid,
     pub market_selection_id: Uuid,
@@ -29,7 +26,6 @@ pub struct Model {
     pub top_n: i32,
     pub status: QpRecommendationReportStatus,
     pub account_source: QpAccountSource,
-    #[sea_orm(column_type = "Decimal(Some((28, 8)))")]
     pub capital_base_usd: Decimal,
     pub account_snapshot_ref: Uuid,
     pub equity_snapshot_ref: Uuid,
@@ -43,8 +39,84 @@ pub struct Model {
     pub valid_until: Option<DateTimeWithTimeZone>,
     pub revoked_at: Option<DateTimeWithTimeZone>,
     pub expired_at: Option<DateTimeWithTimeZone>,
-    #[sea_orm(column_type = "Text", nullable)]
     pub status_reason: Option<String>,
+    pub created_at: DateTimeWithTimeZone,
+    #[sea_orm(
+        belongs_to,
+        from = "account_snapshot_ref",
+        to = "account_snapshot_id",
+        on_update = "NoAction",
+        on_delete = "NoAction"
+    )]
+    pub quant_account_snapshot: BelongsTo<super::quant_account_snapshot::Entity>,
+    #[sea_orm(
+        belongs_to,
+        from = "equity_snapshot_ref",
+        to = "equity_snapshot_id",
+        on_update = "NoAction",
+        on_delete = "NoAction"
+    )]
+    pub quant_equity_snapshot: BelongsTo<super::quant_equity_snapshot::Entity>,
+    #[sea_orm(has_many)]
+    pub quant_feature_parity_runs: HasMany<super::quant_feature_parity_run::Entity>,
+    #[sea_orm(has_many)]
+    pub quant_feature_parity_subjects: HasMany<super::quant_feature_parity_subject::Entity>,
+    #[sea_orm(
+        belongs_to,
+        from = "market_selection_id",
+        to = "market_selection_id",
+        on_update = "NoAction",
+        on_delete = "NoAction"
+    )]
+    pub quant_market_selection: BelongsTo<super::quant_market_selection::Entity>,
+    #[sea_orm(
+        belongs_to,
+        from = "model_run_id",
+        to = "model_run_id",
+        on_update = "NoAction",
+        on_delete = "NoAction"
+    )]
+    pub quant_model_run: BelongsTo<Option<super::quant_model_run::Entity>>,
+    #[sea_orm(
+        belongs_to,
+        from = "model_version_id",
+        to = "model_version_id",
+        on_update = "NoAction",
+        on_delete = "NoAction"
+    )]
+    pub quant_model_version: BelongsTo<super::quant_model_version::Entity>,
+    #[sea_orm(
+        belongs_to,
+        from = "portfolio_plan_id",
+        to = "portfolio_plan_id",
+        on_update = "NoAction",
+        on_delete = "NoAction"
+    )]
+    pub quant_portfolio_plan: BelongsTo<super::quant_portfolio_plan::Entity>,
+    #[sea_orm(has_many)]
+    pub quant_recommendations: HasMany<super::quant_recommendation::Entity>,
+    #[sea_orm(
+        self_ref,
+        relation_enum = "SelfRef",
+        from = "successor_report_id",
+        to = "recommendation_report_id",
+        on_update = "NoAction",
+        on_delete = "NoAction"
+    )]
+    pub quant_recommendation_report: BelongsTo<Option<Entity>>,
+    #[sea_orm(
+        belongs_to,
+        from = "data_quality_snapshot_ref",
+        to = "report_data_quality_snapshot_id",
+        on_update = "NoAction",
+        on_delete = "NoAction"
+    )]
+    pub quant_report_data_quality_snapshot:
+        BelongsTo<super::quant_report_data_quality_snapshot::Entity>,
+    #[sea_orm(has_one)]
+    pub quant_report_fact_delivery: HasOne<super::quant_report_fact_delivery::Entity>,
+    #[sea_orm(has_many)]
+    pub quant_report_runs: HasMany<super::quant_report_run::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

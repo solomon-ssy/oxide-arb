@@ -27,7 +27,8 @@ use quant_pivot_models::{
     },
     runtime_config::{DataQualityConfig, DomainConfig, FeaturesConfig, SelectionConfig},
     types::{
-        DomainInstrumentKey, EventId, MarketId, Price, RuntimeConfigVersionId, Shares, TokenId, Usd,
+        DecisionPolicySnapshotId, DomainInstrumentKey, EventId, MarketId, Price, Shares, TokenId,
+        Usd,
     },
 };
 use quant_pivot_repository::{
@@ -333,7 +334,7 @@ async fn provider_selector_mapper_persist_round_trip() {
 
     let request = MarketSelectionBuildRequest {
         decision_at: as_of,
-        runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
+        decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
         selection: SelectionConfig {
             enabled_categories: vec![MarketCategory::Sports],
             ..SelectionConfig::default()

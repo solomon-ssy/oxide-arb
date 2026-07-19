@@ -1,20 +1,19 @@
 //! Core implementation of [`AccountReadPort`] for the Admin API.
 
-use std::{str::FromStr, sync::Arc};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::Utc;
-use quant_pivot_error::{QuantError, QuantResult};
+use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     domain::{
         AccountReadPort, AccountSnapshotInfo, EquitySnapshotInfo, EquitySnapshotQuery,
-        LiveAccountInfo, LiveAccountSnapshot, Paginated, RuntimeConfigPort,
+        LiveAccountInfo, LiveAccountSnapshot, Paginated, PolicySnapshotPort,
     },
     types::{AccountSnapshotId, EquitySnapshotId, Usd},
 };
 use quant_pivot_repository::traits::{AccountSnapshotRepository, EquitySnapshotRepository};
 use quant_pivot_research::portfolio::AccountSnapshot;
-use rust_decimal::Decimal;
 
 use crate::service::account::AccountProviderFactory;
 
@@ -22,7 +21,7 @@ pub struct CoreAccountReadPort {
     snapshots: Arc<dyn AccountSnapshotRepository>,
     equity_snapshots: Arc<dyn EquitySnapshotRepository>,
     account_factory: Arc<AccountProviderFactory>,
-    runtime_config: Arc<dyn RuntimeConfigPort>,
+    runtime_config: Arc<dyn PolicySnapshotPort>,
 }
 
 impl CoreAccountReadPort {
@@ -31,7 +30,7 @@ impl CoreAccountReadPort {
         snapshots: Arc<dyn AccountSnapshotRepository>,
         equity_snapshots: Arc<dyn EquitySnapshotRepository>,
         account_factory: Arc<AccountProviderFactory>,
-        runtime_config: Arc<dyn RuntimeConfigPort>,
+        runtime_config: Arc<dyn PolicySnapshotPort>,
     ) -> Self {
         Self {
             snapshots,
@@ -54,7 +53,14 @@ impl AccountReadPort for CoreAccountReadPort {
     async fn live_account(&self) -> QuantResult<LiveAccountInfo> {
         let fetched_at = Utc::now();
         let config = self.runtime_config.current();
-        let budget_cap = parse_budget_cap(&config.portfolio.budget.total_budget_usd.value)?;
+        let budget_cap = Usd::new(
+            config
+                .execution_risk
+                .portfolio
+                .budget
+                .total_budget_usd
+                .value,
+        );
         let provider = self.account_factory.create(budget_cap)?;
         let snapshot = provider.snapshot(fetched_at).await?;
         Ok(LiveAccountInfo {
@@ -96,13 +102,4 @@ fn live_account_snapshot(snapshot: AccountSnapshot) -> LiveAccountSnapshot {
         snapshot.reserved_usd,
         snapshot.positions,
     )
-}
-
-fn parse_budget_cap(raw: &str) -> QuantResult<Usd> {
-    let value = Decimal::from_str(raw.trim()).map_err(|error| {
-        QuantError::config(format!(
-            "invalid portfolio.budget.total_budget_usd `{raw}`: {error}"
-        ))
-    })?;
-    Ok(Usd::new(value))
 }

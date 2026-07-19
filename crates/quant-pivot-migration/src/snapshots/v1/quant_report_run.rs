@@ -7,16 +7,13 @@ use sea_orm::entity::prelude::*;
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
-#[sea_orm(schema_name = "public", table_name = "quant_report_run")]
+#[sea_orm(table_name = "quant_report_run")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub report_run_id: Uuid,
     pub trigger_kind: QpReportTriggerKind,
-    #[sea_orm(column_type = "Text")]
     pub trigger_key: String,
-    #[sea_orm(column_type = "Text", nullable)]
     pub schedule_id: Option<String>,
-    #[sea_orm(column_type = "Text", nullable)]
     pub request_id: Option<String>,
     pub retry_of_run_id: Option<Uuid>,
     pub scheduled_for: Option<DateTimeWithTimeZone>,
@@ -28,15 +25,39 @@ pub struct Model {
     pub lease_expires_at: Option<DateTimeWithTimeZone>,
     pub finished_at: Option<DateTimeWithTimeZone>,
     pub lease_owner: Option<Uuid>,
-    pub runtime_config_version_id: Option<Uuid>,
+    pub decision_policy_snapshot_id: Option<Uuid>,
     pub top_n: Option<i32>,
     pub knowledge_lag_secs: Option<i64>,
     pub output_report_id: Option<Uuid>,
     pub terminal_reason: Option<QpReportRunTerminalReason>,
-    #[sea_orm(column_type = "Text", nullable)]
     pub error_code: Option<String>,
     #[sea_orm(column_type = "Text", nullable)]
     pub error_summary: Option<String>,
+    #[sea_orm(
+        belongs_to,
+        from = "decision_policy_snapshot_id",
+        to = "decision_policy_snapshot_id",
+        on_update = "NoAction",
+        on_delete = "NoAction"
+    )]
+    pub decision_policy_snapshot: BelongsTo<Option<super::decision_policy_snapshot::Entity>>,
+    #[sea_orm(
+        belongs_to,
+        from = "output_report_id",
+        to = "recommendation_report_id",
+        on_update = "NoAction",
+        on_delete = "NoAction"
+    )]
+    pub quant_recommendation_report: BelongsTo<Option<super::quant_recommendation_report::Entity>>,
+    #[sea_orm(
+        self_ref,
+        relation_enum = "SelfRef",
+        from = "retry_of_run_id",
+        to = "report_run_id",
+        on_update = "NoAction",
+        on_delete = "NoAction"
+    )]
+    pub quant_report_run: BelongsTo<Option<Entity>>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

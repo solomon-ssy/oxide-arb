@@ -1,5 +1,13 @@
 # 04 — TopN 报告与 Recommendation 设计
 
+<!-- quant-pivot-lifecycle-contract:v1 -->
+> **Lifecycle contract**
+> - `lifecycle_assumption`: 项目尚未正式生产上线，当前状态为 `pre_production_resettable`，系统自有基线统一为 `boot` / schema version `1`。
+> - `schema_data_version_impact`: 本文中的历史版本号与递增路径不再具有实施效力；当前实现不迁移测试数据、旧结构或旧版本。
+> - `pre_production_behavior`: 允许 clean-break、migration squash 与全新基础设施 bootstrap，但任何数据销毁仍需操作者单独授权。
+> - `production_frozen_behavior`: 一旦完成不可逆 production seal，后续变更必须提供前向 migration、兼容性评估、回滚方案与数据验证。
+> - `rollback_and_data_verification`: 封存前通过清空后的 fresh-install 验证；封存后不得回退到 boot reset。
+
 > 状态：生产级目标设计
 >
 > 目标：把 TopN 报告定义为 quant-pivot 主产物，而不是旧 PnL report 的扩展。
@@ -64,7 +72,7 @@ flowchart TD
 | `as_of` | 报告决策时间 |
 | `horizon` | 建议持有/评估时间窗 |
 | `runtime_mode` | `report_only`, `semi_auto`, `auto_execution` |
-| `runtime_config_version_id` | 配置版本 |
+| `decision_policy_snapshot_id` | 配置版本 |
 | `model_version_id` | 模型版本 |
 | `market_selection_id` | 输入 market selection |
 | `portfolio_plan_id` | 组合规划 |
@@ -375,7 +383,7 @@ Sizing 不是展示值。执行模式启用时，`OrderIntent` 只能在 sizing 
 - `model_run_id`
 - `market_selection_id`
 - `book_snapshot_ref`
-- `runtime_config_version_id`
+- `decision_policy_snapshot_id`
 - `model_version_id`
 - `factor_definition_versions`
 - `data_quality_report_ref`
@@ -537,7 +545,7 @@ pub async fn build_report(
     request: BuildReportRequest,
     deps: &ReportPipelineDeps,
 ) -> QuantResult<RecommendationReport> {
-    let config = deps.runtime_config.load_version(request.runtime_config_version_id)?;
+    let config = deps.runtime_config.load_version(request.decision_policy_snapshot_id)?;
     let model = deps.model_registry.active_model(config.model.active_model_version_id).await?;
 
     let selection = deps.market_selector

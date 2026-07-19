@@ -399,6 +399,7 @@ mod tests {
             model_family: ModelFamily::WeightedFactor,
             version: 1,
             artifact_hash,
+            category_scope: None,
             profile_ref: builtin_research_profiles()
                 .expect("built-in profiles")
                 .remove(0)

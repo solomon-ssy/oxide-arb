@@ -47,13 +47,7 @@ impl CategoryPointerGuard {
     /// `category_scope` mismatch with the pointer's own category key.
     pub async fn validate(&self, model: &ModelConfig) -> Result<(), ControlError> {
         for (category, reference) in &model.category_model_pointers {
-            let version_id = ModelVersionId::try_from(reference).map_err(|error| {
-                ControlError::Precondition(format!(
-                    "model.category_model_pointers[{category}] = `{}` is not a valid model \
-                     version id: {error}",
-                    reference.id
-                ))
-            })?;
+            let version_id = reference.id.clone();
             let version = self
                 .model_registry
                 .find_model_version_by_id(&version_id)
@@ -117,8 +111,9 @@ mod tests {
     use quant_pivot_error::storage::StorageError;
     use quant_pivot_models::{
         domain::{
-            ModelSpecInfo, ModelSpecListQuery, ModelVersionInfo, ModelVersionListQuery,
-            NewModelSpec, NewModelVersion, Paginated,
+            ModelPickerSide, ModelSpecInfo, ModelSpecListQuery, ModelVersionInfo,
+            ModelVersionListQuery, NewModelSpec, NewModelVersion, Paginated,
+            PublishedModelCatalogInfo,
         },
         enums::{common::MarketCategory, model::ModelFamily, quant::PublicationStatus},
         runtime_config::{FactorCrossSectionConfig, ModelConfig, ModelVersionRef},
@@ -128,8 +123,7 @@ mod tests {
         },
     };
     use quant_pivot_repository::traits::{
-        ModelRegistryRepository, PublishModelVersionCommit, PublishModelVersionOutcome,
-        RollbackModelVersionCommit,
+        ModelRegistryRepository, PublishModelVersionCommit, PublishModelVersionResult,
     };
     use quant_pivot_research::{
         artifact::{ArtifactStore, LocalArtifactStore},
@@ -200,6 +194,13 @@ mod tests {
         ) -> Result<Paginated<ModelVersionInfo>, StorageError> {
             unimplemented!()
         }
+        async fn list_published_catalog(
+            &self,
+            _side: ModelPickerSide,
+            _category: Option<MarketCategory>,
+        ) -> Result<Vec<PublishedModelCatalogInfo>, StorageError> {
+            unimplemented!()
+        }
         async fn list_published_for_spec(
             &self,
             _model_spec_id: &ModelSpecId,
@@ -212,22 +213,16 @@ mod tests {
         ) -> Result<ModelVersionInfo, StorageError> {
             unimplemented!()
         }
-        async fn publish_replacing_predecessors(
+        async fn publish_model_version(
             &self,
             _commit: PublishModelVersionCommit<'_>,
-        ) -> Result<PublishModelVersionOutcome, StorageError> {
+        ) -> Result<PublishModelVersionResult, StorageError> {
             unimplemented!()
         }
         async fn promote_model_to_shadow(
             &self,
             _model_version_id: &ModelVersionId,
         ) -> Result<ModelVersionInfo, StorageError> {
-            unimplemented!()
-        }
-        async fn rollback_to_retired_predecessor(
-            &self,
-            _commit: RollbackModelVersionCommit<'_>,
-        ) -> Result<(ModelVersionInfo, ModelVersionInfo), StorageError> {
             unimplemented!()
         }
         async fn set_quality_gate_report(
@@ -274,6 +269,7 @@ mod tests {
             model_family: ModelFamily::WeightedFactor,
             version: 1,
             artifact_hash,
+            category_scope: None,
             profile_ref: fixture_profile_ref(),
             training_dataset_id: None,
             trade_policy_artifact_id: None,
@@ -362,12 +358,7 @@ mod tests {
 
     fn config_with(category: MarketCategory, version_id: &ModelVersionId) -> ModelConfig {
         let mut category_model_pointers = BTreeMap::new();
-        category_model_pointers.insert(
-            category,
-            ModelVersionRef {
-                id: version_id.to_string(),
-            },
-        );
+        category_model_pointers.insert(category, ModelVersionRef::new(version_id.clone()));
         ModelConfig {
             category_model_pointers,
             ..ModelConfig::default()

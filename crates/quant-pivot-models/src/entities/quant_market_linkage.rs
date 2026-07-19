@@ -28,6 +28,14 @@ pub struct Model {
     pub override_reason: Option<String>,
     pub override_actor: Option<String>,
     pub created_at: DateTime<Utc>,
+
+    #[sea_orm(
+        belongs_to,
+        relation_enum = "Market",
+        from = "market_id",
+        to = "market_id"
+    )]
+    pub market: BelongsTo<super::market::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

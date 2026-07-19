@@ -40,5 +40,5 @@ pub struct TradeTapeRow {
 }
 
 impl TradeTapeRow {
-    pub const SCHEMA_VERSION: ChSchemaVersion = ChSchemaVersion(2);
+    pub const SCHEMA_VERSION: ChSchemaVersion = ChSchemaVersion(1);
 }

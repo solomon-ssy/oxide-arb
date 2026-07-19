@@ -16,7 +16,7 @@ use quant_pivot_models::{
 };
 use quant_pivot_research::hashing::ResearchHasher;
 use serde::Serialize;
-pub const SERVING_EVIDENCE_FORMAT_VERSION: u32 = 2;
+pub const SERVING_EVIDENCE_FORMAT_VERSION: u32 = 1;
 
 /// Producer-side commitment for the complete feature evidence batch used by a
 /// later model run.
@@ -114,7 +114,7 @@ pub fn feature_commitment(rows: &[QuantFeatureEventRow]) -> QuantResult<FeatureE
         if row.decision_at != first.decision_at
             || row.knowledge_cutoff != first.knowledge_cutoff
             || row.event_time != first.event_time
-            || row.runtime_config_version_id != first.runtime_config_version_id
+            || row.decision_policy_snapshot_id != first.decision_policy_snapshot_id
             || row.per_source_cutoffs_json != first.per_source_cutoffs_json
             || row.feature_schema_version != first.feature_schema_version
             || row.feature_schema_hash != first.feature_schema_hash
@@ -448,7 +448,7 @@ mod tests {
         clickhouse::{QuantFeatureEventRow, QuantModelInputEventRow},
         domain::DecisionClock,
         enums::clickhouse::{ChFeatureCellState, ChFeatureSourceKind, ChFeatureValueKind},
-        types::{FeatureVectorId, MarketId, ModelRunId, ModelVersionId, RuntimeConfigVersionId},
+        types::{DecisionPolicySnapshotId, FeatureVectorId, MarketId, ModelRunId, ModelVersionId},
     };
     use quant_pivot_repository::traits::FactWriter;
     use std::{
@@ -501,13 +501,13 @@ mod tests {
         QuantFeatureEventRow {
             event_time: decision_at,
             feature_vector_id: vector_id.clone(),
-            runtime_config_version_id: RuntimeConfigVersionId::new(Uuid::from_u128(1)),
+            decision_policy_snapshot_id: DecisionPolicySnapshotId::new(Uuid::from_u128(1)),
             decision_at,
             knowledge_cutoff: decision_at,
             per_source_cutoffs_json: "{}".to_owned(),
             market_id: market_id.clone(),
             token_id: None,
-            feature_schema_version: 7,
+            feature_schema_version: 1,
             feature_schema_hash: "schema".to_owned(),
             feature_hash: "feature".to_owned(),
             decision_capture_hash: "capture".to_owned(),

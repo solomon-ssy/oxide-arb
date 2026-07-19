@@ -15,7 +15,7 @@ use quant_pivot_models::{
         quant::DataQualityStatus,
     },
     runtime_config::{
-        DecimalString, DomainConfig, FactorsConfig, FeaturesConfig, MissingFactorPolicy,
+        DecimalValue, DomainConfig, FactorsConfig, FeaturesConfig, MissingFactorPolicy,
         SmallCrossSectionPolicy,
     },
     types::{CalibrationArtifactId, MarketId, Price, Probability, SchemaVersion, TokenId, Usd},
@@ -52,7 +52,11 @@ fn factors_config(
 ) -> FactorsConfig {
     let mut config = FactorsConfig {
         enabled_factor_families: families.to_vec(),
-        min_factor_confidence: DecimalString::new(floor),
+        min_factor_confidence: DecimalValue::new(
+            floor
+                .parse()
+                .expect("fixture confidence floor must be a decimal"),
+        ),
         missing_factor_policy: policy,
         ..FactorsConfig::default()
     };
@@ -901,12 +905,7 @@ fn default_momentum_estimators_not_mutually_collinear() {
         rows,
     };
     // The default orthogonalize tolerance (0.90).
-    let threshold = FactorsConfig::default()
-        .orthogonalize
-        .max_correlation
-        .value
-        .parse::<Decimal>()
-        .expect("default max_correlation parses");
+    let threshold = FactorsConfig::default().orthogonalize.max_correlation.value;
     let report = FactorCollinearityAnalyzer::analyze(&panel, threshold)
         .expect("momentum collinearity report");
 
@@ -975,12 +974,7 @@ fn normalizer_has_no_hardcoded_constants() {
 fn reversal_after_shock_orthogonal_to_mean_reversion() {
     let factors_config = FactorsConfig::default();
     let features_config = FeaturesConfig::default();
-    let threshold = factors_config
-        .orthogonalize
-        .max_correlation
-        .value
-        .parse::<Decimal>()
-        .expect("default max_correlation parses");
+    let threshold = factors_config.orthogonalize.max_correlation.value;
 
     let mean_rev = generic_factors(&features_config)
         .into_iter()

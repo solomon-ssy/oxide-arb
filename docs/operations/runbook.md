@@ -10,7 +10,7 @@
 2. **主产物是 `RecommendationReport`。** 系统先给出 Top-N 推荐，推荐里包含买什么、什么时候买、买多少、什么时候卖、卖多少、依据什么。
 3. **`report_only` 不是模拟。** `report_only` 不签名、不下单，但报告 sizing 基于真实 venue 账户：CLOB collateral 加 Data API positions。因此启动和生成报告也需要真实 `private_key`、`quant.account.funder` 和可读账户。
 4. **私钥只在可执行模式签名。** `semi_auto` / `auto_execution` 下提交订单时才会用私钥签 CLOB order；`report_only` 只用认证客户端读取账户和 CLOB L2 凭证。
-5. **所有执行默认 fail-closed。** 缺私钥、缺 funder、账户不一致、runtime-config 无效、数据质量不足、book 过期、kill switch 非 `closed`、capital/reconciliation 异常，都会拒绝或延后执行。
+5. **所有执行默认 fail-closed。** 缺私钥 credential、缺 funder、账户不一致、active policy/preflight 无效、数据质量不足、book 过期、kill switch 非 `closed`、capital/reconciliation 异常，都会拒绝或延后执行。
 6. **人工只能收紧订单。** `approve` 允许降低 shares、降低 limit price、降低 max notional；不能放大报告给出的风险包络。
 7. **资金真相来自 venue。** `AccountSnapshot` 使用 CLOB collateral 和 Data API positions，runtime budget 只是上限，不是凭空可花资金。
 8. **先治理，后执行。** 生产订单优先走 `semi_auto` 或 `auto_execution` 的 `OrderIntent` 链路；直接在 Polymarket UI 手动交易只适合作为人工 `report_only` 操作或事故处置，审计和 attribution 会弱于系统内订单。
@@ -40,7 +40,7 @@
 | Operator | 启停进程、健康检查、运行 ad-hoc report、切 mode、设置 kill switch、处理事故 | 不修改策略参数除非有量化/负责人授权 |
 | Quant | 配置 selection、features、factors、model、portfolio、reports、execution 策略；解释推荐 | 不直接绕过治理提交订单 |
 | Approver | 在 `semi_auto` 审批或拒绝 `OrderIntent` | 不扩大 shares、price、notional |
-| Admin | 管理用户、角色、JWT、部署凭证、runtime-config 激活/回滚 | 不把私钥、JWT signing key、relayer key 写入仓库 |
+| Admin | 管理用户、角色、JWT、credential reference、policy 激活/回滚 | 不把私钥、JWT signing key、relayer key 写入仓库、环境变量或命令行 |
 
 新部署会 seed `admin`，但不存在默认口令。执行 `postgres-schema apply` 前，secret manager 必须把
 16–256 字符的强随机初始口令挂载为权限 `0400` 或 `0600` 的普通文件，并通过
@@ -116,7 +116,7 @@ curl -sS -X POST "$BASE/api/system/kill-switch" \
 | Gasless relayer key/address | proxy/safe 且会提交链上交易时必须 | gasless approval/redeem/settlement | `QUANT_PIVOT__POLYMARKET__RELAYER__API_KEY`, `...__API_KEY_ADDRESS` | EOA 可直接付 gas；relayer key 不得暴露到前端 |
 | JWT signing key | Web API 必须 | HS256 登录和 API 认证 | `QUANT_PIVOT__WEB__JWT__SIGNING_KEY` 或 `[web.jwt].signing_key` | Base64URL-no-pad 编码的恰好 32 个随机字节；轮换立即使所有旧 JWT 失效 |
 | Evidence signing key | 研究证据生产必须 | BLAKE3 keyed attestation | `QUANT_PIVOT__RESEARCH__EVIDENCE_ATTESTATION__SIGNING_KEY` | 64 个小写 hex；旧 key 仅放入 `previous_signing_keys` 验证历史证据，禁止与 JWT key 复用 |
-| Telegram / webhook secrets | 可选 | 通知 | runtime-config `notification.*` | runtime-config 里会 mask 敏感路径 |
+| Telegram / webhook secrets | 可选 | 通知 | systemd Credentials；`operational_control.notifications` 只管事件路由 | Config API 永不返回 secret value |
 
 注意：Polymarket 官方文档列出 Deposit Wallet / `POLY_1271` 等签名类型，但当前代码只建模 `eoa`、`proxy`、`gnosis_safe`。如果要接入 Deposit Wallet，需要先扩展 wallet topology、配置校验、CLOB client 和 relayer 路径。
 
@@ -124,79 +124,42 @@ curl -sS -X POST "$BASE/api/system/kill-switch" \
 
 | 组件 | 用途 | 运行前检查 |
 |------|------|------------|
-| Postgres | 系统主库、runtime-config、reports、intents、orders、positions、operation log | 空库可由 canonical initializer 完整创建，连接池账号有读写权限 |
+| Postgres | 系统主库、policy revisions/approvals/activations、reports、intents、orders、positions、operation log | 空库只执行单一 boot migration；runtime 连接池账号无 DDL 权限 |
 | ClickHouse | market facts、features、数据质量、研究分析 | database 存在，批量写入权限正常 |
 | Redis | JWT revocation、缓存、运行时辅助状态 | 连接、认证、DB、key prefix 正确 |
 | Web server | API、UI、WS、metrics | listen host/port、CORS、JWT 配置正确 |
 | Metrics backend | `/metrics` scrape | Prometheus 或同等采集已配置 |
 | Log backend | 结构化日志 | production 建议 `log_json=true` |
 
-### 4.3 Deploy config 与 runtime-config 分工
+### 4.3 Deploy Config 与 governed policy 分工
 
-**Deploy config** 来自：
+Deploy Config 只包含启动时才能决定的内容：服务 endpoint、bind/CORS、deployment identity、PostgreSQL/ClickHouse/Redis/artifact store 连接位置、Polymarket/provider binding、日志/TLS/JWT metadata 与七组主机资源预算。来源固定为：
 
-1. 默认值；
-2. `config/quant-pivot.toml`；
-3. `config/quant-pivot.local.toml`；
-4. `QUANT_PIVOT__...` 环境变量；
-5. CLI `--config-dir` 或 `QUANT_PIVOT_CONFIG_DIR` 指定配置目录。
+1. source-controlled non-secret TOML；
+2. 环境级不可变 override；
+3. systemd Credentials 注入 secret；
+4. 环境变量只允许选择 config directory、deployment identity 等极少数部署元数据，禁止覆盖业务策略或直接承载 secret。
 
-Deploy config 只放连接、凭证、基础设施、Polymarket endpoints、账户 topology。不要把策略、风控、报告调度写进 TOML。
+Runtime 热更新由六个强类型 policy resource 负责：`recommendation_policy`、`execution_risk_policy`、`model_routing`、`report_schedule`、`operational_control`、`execution_authorization`。每个资源独立 revision、固定 boot `schema_version = 1`，必须经过 Draft → Validate/Preflight → Approve → Activate；不存在旧巨型 Runtime Config parser 或自动回滚。
 
-**Runtime config** 是版本化 JSON；当前唯一可用版本是 **v17**。v17 已删除旧的 empty
-suppression 开关；空结果始终发布为正式报告。它包含：
+Feature、factor、domain 语义和 research/training methodology 属于 content-addressed immutable profile/job artifact，不从 Deploy Config 或热配置读取。详细操作见 §7。
 
-`selection`、`data_quality`、`features`、`factors`、`domain`、`model`、`quality_gate`、`training`、`reports`、`portfolio`、`execution`、`notification`、`research`、`feedback`。
+### 4.4 systemd Credentials 最小示例
 
-v9 不存在运行时 parser，不得回滚或手工激活 v9 JSON。Phase 11.6 的生产切换见 §7.5。
+不要把 private key、数据库/缓存口令、JWT signing key、webhook/Telegram token、evidence key 或 relayer key 写入 TOML、环境变量、命令行或日志。TOML 只保存 credential name；systemd unit 使用 `LoadCredential=` 将值挂载到只读 `$CREDENTIALS_DIRECTORY`。
 
-runtime-config 必须通过 API 新建版本并激活；激活失败会自动回滚到上一版。
-
-### 4.4 最小生产环境变量示例
-
-不要把真实值写入仓库。以下只展示 key 形状：
-
-```bash
-export QUANT_PIVOT_CONFIG_DIR=/etc/quant-pivot
-
-export QUANT_PIVOT__KEYS__PRIVATE_KEY="0x..."
-export QUANT_PIVOT__QUANT__ACCOUNT__FUNDER="0x..."
-export QUANT_PIVOT__QUANT__ACCOUNT__WALLET_KIND="eoa"
-
-export QUANT_PIVOT__POLYMARKET__CLOB_BASE_URL="https://clob.polymarket.com"
-export QUANT_PIVOT__POLYMARKET__CLOB_WS_URL="wss://ws-subscriptions-clob.polymarket.com/ws/"
-export QUANT_PIVOT__POLYMARKET__CHAIN_ID="137"
-export QUANT_PIVOT__POLYMARKET__ONCHAIN__RPC_URL="https://polygon-rpc.example"
-
-export QUANT_PIVOT__MARKET_DATA__GAMMA__BASE_URL="https://gamma-api.polymarket.com"
-export QUANT_PIVOT__MARKET_DATA__DATA_API__BASE_URL="https://data-api.polymarket.com"
-
-export QUANT_PIVOT__DB__POSTGRES__HOST="postgres.internal"
-export QUANT_PIVOT__DB__POSTGRES__USER="quant_pivot"
-export QUANT_PIVOT__DB__POSTGRES__PASSWORD="..."
-export QUANT_PIVOT__DB__POSTGRES__MIGRATION__PASSWORD="..." # deploy/xtask only
-export QUANT_PIVOT__DB__POSTGRES__DATABASE="quant_pivot"
-
-export QUANT_PIVOT__DB__CLICKHOUSE__URL="http://clickhouse.internal:8123"
-export QUANT_PIVOT__DB__CLICKHOUSE__USER="quant_pivot"
-export QUANT_PIVOT__DB__CLICKHOUSE__PASSWORD="..."
-export QUANT_PIVOT__DB__CLICKHOUSE__MIGRATION__PASSWORD="..." # deploy/xtask only
-export QUANT_PIVOT__DB__CLICKHOUSE__DATABASE="quant_pivot"
-
-export QUANT_PIVOT__CACHE__REDIS__HOST="redis.internal"
-export QUANT_PIVOT__CACHE__REDIS__PASSWORD="..."
-
-export QUANT_PIVOT__WEB__JWT__SIGNING_KEY="base64url-no-pad-encoded-32-random-bytes"
-export QUANT_PIVOT__RESEARCH__EVIDENCE_ATTESTATION__SIGNING_KEY="64-lowercase-hex-characters"
+```ini
+[Service]
+LoadCredential=polymarket-private-key:/etc/quant-pivot/credentials/polymarket-private-key
+LoadCredential=postgres-runtime-password:/etc/quant-pivot/credentials/postgres-runtime-password
+LoadCredential=clickhouse-runtime-password:/etc/quant-pivot/credentials/clickhouse-runtime-password
+LoadCredential=redis-runtime-password:/etc/quant-pivot/credentials/redis-runtime-password
+LoadCredential=jwt-signing-key:/etc/quant-pivot/credentials/jwt-signing-key
+LoadCredential=evidence-attestation-key:/etc/quant-pivot/credentials/evidence-attestation-key
+Environment=QUANT_PIVOT_CONFIG_DIR=/etc/quant-pivot
 ```
 
-proxy/safe 且需要 relayer 时增加：
-
-```bash
-export QUANT_PIVOT__POLYMARKET__RELAYER__API_KEY="..."
-export QUANT_PIVOT__POLYMARKET__RELAYER__API_KEY_ADDRESS="0x..."
-```
-
+DDL 身份与 runtime 身份分离。PostgreSQL/ClickHouse migration 只由 schema CLI 使用独立 migrator credential；应用进程若检测到 DDL credential 或 migration state/fingerprint 不匹配必须 fail closed。credential 文件必须是普通文件、权限受限、非空且不超过服务端上限；Config 控制台只显示 credential health，不返回值。
 ## 5. 钱包、充值、allowance 与提现
 
 ### 5.1 选择 wallet topology
@@ -302,7 +265,7 @@ Polymarket 当前文档描述 taker fee 与成交额、fee rate 和价格相关�
    - 大额提现拆分；如果流动性池不足，等待或分批；
    - pUSD 直接提现需要目标地址能识别 pUSD，否则可能需要 swap/bridge 成更通用资产。
 
-5. **系统侧复核。** 提现完成后再次读取 `GET /api/quant/account/live`。如 capital base 下降，必须同步降低 runtime-config 中 budget/caps，否则后续 report 会被 budget exhausted 或 admission 拒绝。
+5. **系统侧复核。** 提现完成后再次读取 `GET /api/quant/account/live`。如 capital base 下降，必须治理并降低 `execution_risk_policy` 中的 budget/caps，否则后续 report 会被 budget exhausted 或 admission 拒绝。
 
 6. **解除冻结。** 只有当 account snapshot、reconciliation、positions 都一致后，才把 kill switch 恢复为 `closed` 或切回目标 mode。
 
@@ -330,7 +293,7 @@ cargo build --release -p quant-pivot-bin
 | deploy config validation failed | 缺 private key、funder、JWT signing key、relayer config，或 production runtime 配置混入 migration DDL password | 补齐环境变量/TOML；DDL password 只挂载给 deploy/xtask profile |
 | authenticated CLOB client failed | private key 无效、wallet topology 不匹配、CLOB endpoint 不通 | 校验 signer/funder，检查网络和 CLOB auth |
 | account provider unavailable | `funder` 缺失或 Data API/CLOB collateral 读取失败 | 修复账户配置，不能降级为模拟资金 |
-| runtime-config rejected | schema version/字段错误或 unknown field | 通过 schema API 重新生成 patch |
+| policy revision rejected | typed schema、semantic constraint、dependency preflight 或 CAS 失败 | 读取 resource schema/validation evidence，修正 typed draft 后重新 review |
 
 ### 6.2 登录与 header
 
@@ -512,7 +475,7 @@ Postgres、ClickHouse、Redis 探针应为 `healthy`。
 |------|----------|
 | `gamma_markets_total` | > 0，full sync 后稳定 |
 | `gamma_last_sync_success` | 1（最近一次 sync 成功） |
-| `ingest_pipeline_lag_worst_ms` | 低于 runtime-config `data_quality.max_ingest_lag_ms` |
+| `ingest_pipeline_lag_worst_ms` | 低于 `recommendation_policy.data_quality.max_ingest_lag_ms` |
 | `ingest_pipeline_lag_seconds`（按 writer） | 无持续增大 |
 
 #### 6.4.5 用 ClickHouse 确认 L2 历史（训练前）
@@ -540,14 +503,14 @@ LIMIT 10;
 #### 6.4.6 训练集需要累积多久（数量级）
 
 没有固定「日历天数」，取决于 **窗口长度、采样间隔、订阅市场数、ModelSpec 标签/预测 horizon** 和
-**quality gate 阈值**。以下是冷启动示例契约与当前 runtime-config 门禁，不是同一配置段：
+**model evaluation profile 阈值**。以下是冷启动示例契约与当前 immutable research profile，不是同一个 hot policy resource：
 
 | 参数 | 默认值 | 影响 |
 |------|--------|------|
 | `ModelSpec.prediction_horizon_secs` / `training_contract.target_label_horizon_secs` | 示例 `86400`（24h） | 冻结进 ModelSpec；训练标签需样本 `decision_at` 之后 24h 内有 forward truth |
-| `quality_gate.min_sample_count` | `500` | publish 门禁：回测/数据集样本数 |
-| `quality_gate.min_label_coverage` | `0.70` | 标签覆盖率 |
-| `reports.schedules[default_interval].cadence` | 每 `300`s | 与训练无关；冷启动无模型时会 ERROR |
+| `ModelEvaluationSpec.min_sample_count` | `500` | publish 门禁：回测/数据集样本数 |
+| `ModelEvaluationSpec.min_label_coverage` | `0.70` | 标签覆盖率 |
+| `report_schedule.schedules[default_interval].cadence` | 每 `300`s | 与训练无关；冷启动无模型时会 ERROR |
 
 **实操估算**（默认 24h horizon、`sample_interval_secs=300`、tier1 ~1600 token）：
 
@@ -567,13 +530,13 @@ curl -sS -X POST "$BASE/api/research/training-datasets/plan" \
   -H "Content-Type: application/json" \
   -d '{
     "model_spec_id": "<已有 model spec UUID>",
-    "runtime_config_version_id": "<active runtime config version UUID>",
+    "decision_policy_snapshot_id": "<active decision policy snapshot UUID>",
     "window_start": "2026-06-25T00:00:00Z",
     "window_end": "2026-07-01T00:00:00Z",
     "sample_interval_secs": 300,
     "horizons_secs": [86400],
     "knowledge_lag_secs": 10,
-    "feature_schema_version": 6,
+    "feature_schema_version": 1,
     "reason": "cold-start dry plan"
   }' | jq '{planned_samples: .data.planned_samples, training_dataset_id: .data.training_dataset_id}'
 ```
@@ -591,13 +554,13 @@ curl -sS -X POST "$BASE/api/research/training-datasets/build" \
   -d '{
     "training_dataset_id": "<plan 返回的 UUID>",
     "model_spec_id": "<model spec UUID>",
-    "runtime_config_version_id": "<runtime config version UUID>",
+    "decision_policy_snapshot_id": "<decision policy snapshot UUID>",
     "window_start": "2026-06-25T00:00:00Z",
     "window_end": "2026-07-01T00:00:00Z",
     "sample_interval_secs": 300,
     "horizons_secs": [86400],
     "knowledge_lag_secs": 10,
-    "feature_schema_version": 6,
+    "feature_schema_version": 1,
     "reason": "cold-start first dataset build"
   }' | jq '{job_id: .data.job_id, status: .data.status}'
 ```
@@ -605,362 +568,168 @@ curl -sS -X POST "$BASE/api/research/training-datasets/build" \
 Poll `GET /api/research/jobs/{job_id}` 到 `succeeded | failed | cancelled`；作业成功后再 poll
 `GET /api/research/training-datasets/{training_dataset_id}`，只有 `ready` 可以进入训练/CPCV/回测。
 
-## 7. Runtime-config 操作
+## 7. Config policy 操作
 
-### 7.1 查看当前配置和 schema
+Config 控制台（`/system/config`）是首选入口。CLI 仅用于自动化和事故恢复；请求/响应 DTO 与 UI 类型均由 Rust schema 单一来源生成。权限分为 view、create、approve、activate、rollback 与 lifecycle seal，同一操作者可以执行多步，但每一步必须独立留痕。
+
+### 7.1 查看资源、当前 revision 与 schema
 
 ```bash
-curl -sS "$BASE/api/runtime-config" \
+curl -sS "$BASE/api/config/resources" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Accept-Api-Version: v1" | jq .
 
-curl -sS "$BASE/api/runtime-config/schema" \
+KIND=recommendation_policy
+curl -sS "$BASE/api/config/$KIND/current" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Accept-Api-Version: v1" | jq .
+
+curl -sS "$BASE/api/config/$KIND/schema" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Accept-Api-Version: v1" | jq .
 ```
 
-### 7.2 新建并激活版本
+合法 `KIND` 只有：`recommendation_policy`、`execution_risk_policy`、`model_routing`、`report_schedule`、`operational_control`、`execution_authorization`。不要拼接自由字符串或旧 section path。
 
-`config_patch` 是 dotted path 到 leaf value 的稀疏 patch；`config_json` 是完整 JSON。二者只能选一个。
+### 7.2 Draft → Validate/Preflight → Approve → Activate
+
+每次修改创建一个完整、强类型且不可变的 resource document；没有 dotted-path patch、editable raw JSON 或“一键创建并激活”。以下命令演示治理协议，实际编辑优先使用 Config 控制台的字段表单、影响摘要和 diff review。
 
 ```bash
-VERSION_ID=$(
-  curl -sS -X POST "$BASE/api/runtime-config/versions" \
+CURRENT=$(
+  curl -sS "$BASE/api/config/$KIND/current" \
     -H "Authorization: Bearer $TOKEN" \
-    -H "Accept-Api-Version: v1" \
-    -H "X-Acting-Role: risk_owner" \
-    -H "Content-Type: application/json" \
-    -d '{
-      "reason": "set conservative report and portfolio envelope for initial production",
-      "config_patch": {
-        "reports.ad_hoc_report_enabled": true,
-        "reports.max_top_n": 20,
-        "portfolio.budget.total_budget_usd": "1000",
-        "portfolio.budget.min_recommendation_usd": "5",
-        "portfolio.budget.max_single_recommendation_usd": "50",
-        "portfolio.constraints.max_market_exposure_usd": "50",
-        "portfolio.constraints.max_event_exposure_usd": "100",
-        "portfolio.sizing.kelly_fraction": "0.5",
-        "execution.auto_execution.enabled": false,
-        "execution.entry_order_policy.allow_market_orders": false,
-        "execution.entry_order_policy.max_slippage_bps": 50
-      }
-    }' \
-  | jq -r '.data.runtime_config_version_id'
+    -H "Accept-Api-Version: v1"
 )
+EXPECTED_ACTIVE_REVISION_ID=$(jq -r '.data.revision.policy_revision_id // empty' <<<"$CURRENT")
+DOCUMENT=$(jq -c '.data.revision.document' <<<"$CURRENT")
 
-curl -sS -X POST "$BASE/api/runtime-config/versions/$VERSION_ID/activate" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Accept-Api-Version: v1" \
-  -H "X-Acting-Role: risk_owner" \
-  -H "Content-Type: application/json" \
-  -d '{"reason":"activate initial conservative runtime config"}' | jq .
-```
+# 使用受评审的 typed document 生成 DRAFT_DOCUMENT；不要把 masked/secret 值写入此文档。
+# 示例仅展示 recommendation policy 的一个字段：
+DRAFT_DOCUMENT=$(jq -c '.document.reports.max_top_n = 20' <<<"$DOCUMENT")
 
-金额字段使用 decimal string，不要用浮点数。激活失败时查看错误详情，修 patch 后重新创建版本，不要手工改数据库。
-
-### 7.3 回滚
-
-```bash
-curl -sS "$BASE/api/runtime-config/versions?limit=20" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Accept-Api-Version: v1" | jq .
-
-curl -sS -X POST "$BASE/api/runtime-config/versions/$KNOWN_GOOD_VERSION_ID/rollback" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Accept-Api-Version: v1" \
-  -H "X-Acting-Role: risk_owner" \
-  -H "Content-Type: application/json" \
-  -d '{"reason":"rollback after execution admission regression"}' | jq .
-```
-
-回滚也是 governed mutation，会写 operation log。当前 target 必须仍是可验证的 v17，且只能引用当前
-契约生成的 v5 dataset/model artifact；parity 事故按 §7.5.6 前向恢复，不创建旧版本兼容路径。
-
-### 7.4 当前破坏式契约：Runtime v17 / Feature v6 / Dataset + Model Artifact v5
-
-- runtime-config 只接受 v17，feature schema 只使用 v6；不存在旧 runtime/feature schema 兼容路径。
-- 项目从未正式生产运行；首次激活从空 PostgreSQL、ClickHouse 和 artifact namespace 初始化，不维护旧
-  model/spec/dataset 的升级、退役或数据搬运 migration。
-- Parquet v5 中的 `DecisionBoundary`、`FeatureCell`、factor raw value 和 label 是训练真值。训练/CV/回测必须直接消费冻结行；rematerialization 只是 parity verification，绝不得替换 artifact 内容。
-- 任一 bytes/manifest/semantic/training-input hash 不一致都必须失败。完整 W5 首次激活步骤见 §7.5。
-
-### 7.5 Phase 11.6 W5 首次环境激活（clean slate）
-
-> **执行状态：待首次部署执行。** 本节按当前 API/schema 编写，不是执行记录。项目从未正式生产运行，
-> 因此明确采用删库重建，不保留旧 schema、旧数据或 legacy artifact，也不存在增量 migration。
-> 只有部署记录中留存了全量门禁、空库初始化、catalog coverage、重建 artifact、subject/runtime full parity、
-> governed acknowledge 与 canary 证据，才能把 W5 标为完成。
-
-W5 是一次需要 `operator` 与 `risk_owner` 共同确认的首次激活，不是旧版本滚动升级。目标状态是：
-
-- 启动时报告与新入场保持关闭，先让 ingest 和 durable catalog/fact coverage 建立；
-- 唯一 active runtime-config 为 v17 / feature v6，且初始不指向任何 model artifact；
-- model spec、factor revision、dataset 和 model 全部从当前契约在空库中首次创建；
-- 先通过 subject-bound frozen parity 和 runtime full parity，再恢复 schedule 与新入场。
-
-#### 7.5.1 进窗前提
-
-1. 对当次发布 commit 通过全量 Rust、PostgreSQL/ClickHouse Testcontainers 与 UI 门禁，保存结果。
-2. `operator` 与 `risk_owner` 共同确认该环境从未承载真实订单、仓位、资金、对账或结算数据；同时确认
-   venue account 没有由本系统管理的未平仓头寸。只要任一项不成立，本 clean-slate SOP 立即失效，必须另行设计迁移。
-3. 停止应用进程和所有 writer，删除该环境的 PostgreSQL database、ClickHouse database 与 Phase 11.6
-   artifact namespace。这里不做备份后回填，也不保留 legacy 表；目标是可证明的空状态。
-4. 重新创建空 database/volume，但不要手工建表。由 deploy identity 通过 `quant-pivot-xtask`
-   PostgreSQL/ClickHouse migration apply 创建权威 schema，runtime identity 只做 immutable verification；随后执行 seed lane。
-5. 首次启动前保持 report schedules、ad-hoc report 和全部 model pointers 关闭。空库不存在可恢复的
-   execution，因此无需先构造 `exit_only` 维护态；若将来环境出现真实 execution 数据，不得复用本节。
-
-#### 7.5.2 初始化并激活安全 v17 配置
-
-部署 v17 binary；先由 deploy identity 显式 apply PostgreSQL/ClickHouse migrations，再由 runtime identity
-验证 schema。空库只能产生 v17 bootstrap config，不存在旧 pointer 或旧 artifact；仍必须显式激活
-reports disabled 的 safe config，不能只依赖未初始化 latch。
-
-立即从当前 masked config 生成完整 `config_json`，一次性清空所有模型指针并关闭所有报告入口：
-
-```bash
-SAFE_CONFIG=$(
-  curl -sS "$BASE/api/runtime-config" \
-    -H "Authorization: Bearer $TOKEN" \
-    -H "Accept-Api-Version: v1" \
-  | jq -c '
-      .data.config
-      | .schema_version = 17
-      | .features.feature_schema_version = 6
-      | .model.active_model_version_id = null
-      | .model.shadow_model_version_id = null
-      | .model.active_exit_model_version_id = null
-      | .model.category_model_pointers = {}
-      | .reports.ad_hoc_report_enabled = false
-      | .reports.schedules |= map(.enabled = false)
-    '
-)
-
-SAFE_VERSION_ID=$(
-  jq -n \
-    --arg reason "cold-start safe v17 activation" \
-    --argjson config "$SAFE_CONFIG" \
-    '{reason: $reason, config_json: $config}' \
-  | curl -sS -X POST "$BASE/api/runtime-config/versions" \
+DRAFT=$(
+  jq -n --argjson document "$DRAFT_DOCUMENT" \
+    '{document: $document, reason: "raise report result cap after review"}' \
+  | curl -sS -X POST "$BASE/api/config/$KIND/drafts" \
       -H "Authorization: Bearer $TOKEN" \
       -H "Accept-Api-Version: v1" \
       -H "X-Acting-Role: risk_owner" \
       -H "Content-Type: application/json" \
-      --data-binary @- \
-  | jq -r '.data.runtime_config_version_id'
+      --data-binary @-
 )
+REVISION_ID=$(jq -r '.data.policy_revision_id' <<<"$DRAFT")
 
-curl -sS -X POST "$BASE/api/runtime-config/versions/$SAFE_VERSION_ID/activate" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Accept-Api-Version: v1" \
-  -H "X-Acting-Role: risk_owner" \
-  -H "Content-Type: application/json" \
-  -d '{"reason":"activate cold-start safe v17 config"}' | jq .
-```
-
-这里必须使用完整 `config_json`：`category_model_pointers` 是动态 map，不能靠一个不存在的 dotted leaf
-`model.category_model_pointers` 来清空。返回的 masked secret 会由服务端用当前值 unmask；不得把 config 输出写入仓库或持久日志。
-
-激活后立即验证：
-
-```bash
-curl -sS "$BASE/api/runtime-config" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Accept-Api-Version: v1" \
-| jq '.data.config | {
-    schema_version,
-    feature_schema_version: .features.feature_schema_version,
-    active: .model.active_model_version_id,
-    shadow: .model.shadow_model_version_id,
-    active_exit: .model.active_exit_model_version_id,
-    category: .model.category_model_pointers,
-    ad_hoc: .reports.ad_hoc_report_enabled,
-    schedules: [.reports.schedules[] | {schedule_id, enabled}]
-  }'
-```
-
-验收值必须是 `10 / 6 / null / null / null / {} / false`，且每个 schedule 的 `enabled=false`。
-
-#### 7.5.3 验证空库与 durable PIT coverage
-
-canonical initializer 完成后，在创建任何 spec/dataset 之前执行只读核对；四个 count 必须全部为 `0`：
-
-```bash
-psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -P pager=off -c "
-SELECT
-  (SELECT count(*) FROM quant_model_version) AS model_versions,
-  (SELECT count(*) FROM quant_model_spec) AS model_specs,
-  (SELECT count(*) FROM quant_factor_definition) AS factor_definitions,
-  (SELECT count(*) FROM quant_training_dataset) AS training_datasets;
-"
-```
-
-若任一 count 非零，说明清理目标、连接串或 database 选错，必须停止；不得用 `UPDATE` 把旧行伪装成空库。
-
-等 Gamma 产生首个成功 catalog batch，然后检查：
-
-```bash
-curl -sS "$BASE/api/research/feature-integrity/summary" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Accept-Api-Version: v1" \
-| jq '.data | {
-    catalog_coverage_start,
-    catalog_watermark,
-    parity_age_secs,
-    latch,
-    last_full_run,
-    last_sampled_run
-  }'
-```
-
-`catalog_coverage_start` 和 `catalog_watermark` 必须非空且 watermark 持续前进。任何早于 coverage start 的 replay 都必须失败，不得把切换时的当前 market/event 回填成历史。初次状态中 `latch.open=true` 且 `blocking_run_id=null` 表示 **uninitialized**，不是 parity mismatch，也绝不是 clear。
-
-#### 7.5.4 重建、subject-bound parity 与首次清闸
-
-1. 读取 `GET /api/research/feature-contract`，创建含 typed `input_contract` 和 `training_contract` 的新 model spec。
-2. 按 §8.1 Step 0.6 首次注册并发布当前 v6 feature contract 绑定的 immutable factor revisions。
-3. 只在 catalog coverage 内重建 Parquet v5 dataset，等完整性门自动进入 `ready`。
-4. 从该 frozen dataset 异步训练新 candidate，完成 calibration、backtest、CPCV/DSR/PBO，并显式 bind publish path set。详细请求见 §8.1。
-5. 保持 schedule/ad-hoc disabled，首次调用 `POST /api/research/models/{id}/publish`。
-
-首次 publish 的顺序是服务端冻结契约：先为该 candidate + training dataset 运行并持久化 **subject-bound full parity**，再检查全局 latch。在 bootstrap latch 尚未初始化时，该 publish 会因 latch 返回失败，但 Passed proof 已持久化。这不是把模型已 publish 的成功信号。
-
-查找与 candidate/dataset 精确绑定的最新 full run：
-
-```bash
-curl -sS \
-  "$BASE/api/research/feature-integrity/runs?kind=full&model_version_id=$MODEL_VERSION_ID&training_dataset_id=$TRAINING_DATASET_ID&page=1&size=20" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Accept-Api-Version: v1" \
-| jq '.data.items[] | {
-    parity_run_id,
-    status,
-    total_count,
-    matched_count,
-    mismatched_count,
-    pending_materialization_count,
-    feature_contract_hash,
-    transform_hash,
-    finished_at
-  }'
-```
-
-只有最新精确 subject run 同时满足 `status=passed`、`total_count>0`、`matched_count=total_count`、mismatch/pending 为 0，且 contract/transform hash 非空时，`risk_owner` 才可用其 ID 初始化 latch：
-
-```bash
-curl -sS -X POST "$BASE/api/research/feature-integrity/latch/acknowledge" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Accept-Api-Version: v1" \
-  -H "X-Acting-Role: risk_owner" \
-  -H "Content-Type: application/json" \
-  -d "{
-    \"parity_run_id\": \"$PARITY_RUN_ID\",
-    \"reason\": \"initialize Phase 11.6 latch from exact candidate/dataset full proof\"
-  }" | jq .
-```
-
-确认 summary 中 `latch.open=false`后，**重试同一 candidate 的 publish**。服务端会复用精确绑定的 Passed proof，仍然必须通过质量门和其他发布门禁才会变为 `published`。
-
-`POST /api/research/feature-integrity/runs/full` 是对已存在 serving evidence 的时间窗口做 runtime replay，它的请求没有 model/dataset subject。在 reports disabled 的冷启动阶段不得假定该通用 full run 一定有非空证据，也不得用它伪装上述 subject-bound proof。
-
-#### 7.5.5 Ad-hoc canary、runtime full parity 与恢复
-
-1. `operator` 先把 kill switch 收紧到 `exit_only`，保持所有 schedule disabled，仅用 v17 sparse patch
-   开启 `reports.ad_hoc_report_enabled=true`。这一步在首次可能产生 recommendation 前建立显式执行围栏。
-2. 由 `analyst` 或 `operator` 运行一份小 Top-N ad-hoc report。等其 report-bound sampled parity 终态；必须 `passed`，报告不得处于 `revoked`。
-3. 对包含该 canary evidence 的窗口运行 runtime full parity（窗口省略时默认最近 24 小时）：
-
-```bash
-FULL_JOB_ID=$(
-  curl -sS -X POST "$BASE/api/research/feature-integrity/runs/full" \
+VALIDATION=$(
+  curl -sS -X POST "$BASE/api/config/$KIND/drafts/$REVISION_ID/validate" \
     -H "Authorization: Bearer $TOKEN" \
     -H "Accept-Api-Version: v1" \
     -H "X-Acting-Role: risk_owner" \
     -H "Content-Type: application/json" \
-    -d '{"reason":"Phase 11.6 W5 post-canary runtime full replay"}' \
-  | jq -r '.data.job_id'
+    -d '{"reason":"typed validation and dependency preflight"}'
 )
+test "$(jq -r '.data.valid' <<<"$VALIDATION")" = "true"
+PREFLIGHT_TOKEN=$(jq -r '.data.preflight_token' <<<"$VALIDATION")
 
-curl -sS "$BASE/api/research/jobs/$FULL_JOB_ID" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Accept-Api-Version: v1" | jq '.data | {status, result_ref, error}'
+APPROVAL=$(
+  curl -sS -X POST "$BASE/api/config/$KIND/drafts/$REVISION_ID/approve" \
+    -H "Authorization: Bearer $TOKEN" \
+    -H "Accept-Api-Version: v1" \
+    -H "X-Acting-Role: risk_owner" \
+    -H "Content-Type: application/json" \
+    -d '{"decision":"approved","reason":"reviewed diff and impact","expires_at":null}'
+)
+APPROVAL_ID=$(jq -r '.data.policy_approval_id' <<<"$APPROVAL")
+
+jq -n \
+  --arg approval_id "$APPROVAL_ID" \
+  --arg expected "$EXPECTED_ACTIVE_REVISION_ID" \
+  --arg reason "activate reviewed policy revision" \
+  --arg preflight_token "$PREFLIGHT_TOKEN" \
+  --arg idempotency_key "$(uuidgen)" \
+  '{
+    approval_id: $approval_id,
+    expected_active_revision_id: (if $expected == "" then null else $expected end),
+    reason: $reason,
+    preflight_token: $preflight_token,
+    idempotency_key: $idempotency_key
+  }' \
+| curl -sS -X POST "$BASE/api/config/$KIND/drafts/$REVISION_ID/activate" \
+    -H "Authorization: Bearer $TOKEN" \
+    -H "Accept-Api-Version: v1" \
+    -H "X-Acting-Role: risk_owner" \
+    -H "Content-Type: application/json" \
+    --data-binary @- | jq .
 ```
 
-4. 作业必须 `succeeded`，对应 full run 必须非空 `passed`、mismatch/pending 为 0、latch 仍 clear。任一 mismatch/timeout 都会自动 revoke 受影响 report、cascade intent 并重新打开 latch；不得继续恢复。
-5. 按 §7.2 创建/激活新的完整 v17 config：启用预期 schedule，是否继续保留 ad-hoc 按生产策略决定；仍保持 `exit_only`，观察至少一个完整 report + sampled parity 周期。
-6. 只有 summary 仍 healthy，`operator` 才可把 kill switch 恢复为 `closed`：
+关键失败语义：
+
+- validation/preflight 失败：revision 保持 draft/validated 可修订状态，active snapshot 不变；
+- `preflight_token` 过期或与 revision 不匹配：重新 validate，不复用旧 token；
+- `expected_active_revision_id` stale：返回 CAS conflict，重新加载 current、review diff，再创建或激活；
+- consumer prepare 失败：数据库 activation 与内存 snapshot 都不切换；
+- activation 成功：只影响该 resource 的精确 effective boundary；运行中的 report/job 和已提交订单继续使用冻结 snapshot；
+- 不存在自动回滚。
+
+### 7.3 显式回滚
+
+回滚不是切换一个数据库指针。选择历史 revision 后必须重新执行 Validate/Preflight、Approve 与 Review，并向下列 endpoint 提交与 §7.2 相同的 activation body：
 
 ```bash
-curl -sS -X POST "$BASE/api/system/kill-switch" \
+curl -sS "$BASE/api/config/$KIND/revisions?limit=50" \
   -H "Authorization: Bearer $TOKEN" \
-  -H "Accept-Api-Version: v1" \
-  -H "X-Acting-Role: operator" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "state": "closed",
-    "reason": "Phase 11.6 W5 passed canary, sampled/full parity and one scheduled cycle",
-    "ack": true
-  }' | jq .
-```
+  -H "Accept-Api-Version: v1" | jq .
 
-恢复后立即重新读取 kill switch、active v17 config 与 Feature Integrity summary 并附到变更单；任一项不是预期值
-都按 §7.5.6 回到 safe state。
-
-#### 7.5.6 失败回退与已打开 latch 的恢复
-
-冷启动后的“回退”是回到 **v17 safe state**，不是返回旧 binary/schema/artifact：
-
-- 保持 `exit_only`、schedule/ad-hoc disabled，且三个模型指针为 `null`、category map 为 `{}`；
-- 已 open/uninitialized 的 latch 保持原样；若此前已合法 clear 且本次失败不是 parity mismatch，不得用 SQL
-  伪造 latch 状态，`exit_only` + safe config 仍负责阻断；确定性 mismatch 会由系统自动重新开闸；
-- 保持 ingest、exit、reconciliation 和 settlement，针对根因做前向修复；
-- 绝不创建或激活 v9 runtime-config，绝不引入 v1 dataset/model artifact，也不手工改库绕过 gate；
-- 若失败发生在产生首个业务 artifact 之前，允许再次停止进程并清空三类存储重新初始化；一旦产生 canary
-  evidence，只能按 durable latch/containment 语义前向修复，不得选择性删除失败证据。
-
-`SAFE_VERSION_ID` 必须写入变更单。任一步失败先执行以下收紧与回滚；两个 mutation 都必须成功，随后验证
-当前配置仍是 v17/v6 且所有 report/pointer 均关闭：
-
-```bash
-curl -sS -X POST "$BASE/api/system/kill-switch" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Accept-Api-Version: v1" \
-  -H "X-Acting-Role: operator" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "state": "exit_only",
-    "reason": "Phase 11.6 W5 rollback to safe state",
-    "ack": false
-  }' | jq .
-
-curl -sS -X POST "$BASE/api/runtime-config/versions/$SAFE_VERSION_ID/rollback" \
+curl -sS -X POST \
+  "$BASE/api/config/$KIND/revisions/$TARGET_REVISION_ID/rollback" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Accept-Api-Version: v1" \
   -H "X-Acting-Role: risk_owner" \
   -H "Content-Type: application/json" \
-  -d '{"reason":"cold-start forward rollback to safe v17 state"}' | jq .
-
-curl -sS "$BASE/api/runtime-config" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Accept-Api-Version: v1" \
-| jq -e '
-    .data.config
-    | (.schema_version == 17)
-      and (.features.feature_schema_version == 6)
-      and (.model.active_model_version_id == null)
-      and (.model.shadow_model_version_id == null)
-      and (.model.active_exit_model_version_id == null)
-      and (.model.category_model_pointers == {})
-      and (.reports.ad_hoc_report_enabled == false)
-      and ([.reports.schedules[].enabled] | all(. == false))
-  '
+  --data-binary @rollback-activation.json | jq .
 ```
 
-`jq -e` 必须退出 0；否则维护窗口保持失败态并升级事故，不得恢复 schedule 或新入场。
+`rollback-activation.json` 必须包含对目标 revision 有效的 `approval_id`、最新 `expected_active_revision_id`、`reason`、未过期 `preflight_token` 与新的 `idempotency_key`。回滚结果写入 append-only approval、activation 和 operation audit。
 
-对由确定性 mismatch 打开的 latch，先从 summary 取 `blocking_run_id`，修复根因后运行一个完成时间晚于 latch opened_at、窗口覆盖 causal run 且 subject scope 相同的新 full parity。只有它非空通过且 containment 已完成时，`risk_owner` 才可调用 latch acknowledge。服务端会重复校验因果时间、窗口、subject、transform commitment 和计数；不要用手工 SQL 绕过。
+### 7.4 生效边界与操作选择
 
+| 变更意图 | Resource | 生效边界 |
+|----------|----------|----------|
+| selection、data quality、Top-N、report TTL | `recommendation_policy` | 新 claim 的 ReportRun |
+| budget、Kelly、exposure、entry/exit、breaker | `execution_risk_policy` | 新 OrderIntent / admission |
+| active/shadow/exit model artifact | `model_routing` | 新 model evaluation claim |
+| timezone、cadence、enabled | `report_schedule` | reconcile 未 claim future runs |
+| pause/halt、worker admission、notification routing | `operational_control` | operational admission gate |
+| SemiAuto/AutoExecution capability | `execution_authorization` | mode preflight 后的新 admission |
+
+立即停止新执行使用 `operational_control` 的 halt 动作；不要靠缩小 risk threshold 模拟紧急停机。切换 mode 使用 `execution_authorization`；不要把 mode 当 Deploy Config。
+
+### 7.5 Boot baseline 与正式投产封存
+
+当前 `project-lifecycle.toml` 为 `pre_production_resettable / boot`。系统自有 policy、feature、dataset、model、manifest、evaluator 与 ClickHouse row schema 均从版本 1 开始；HTTP namespace `/api/v1` 和外部协议编号不重置。
+
+空 PostgreSQL 只应用 `m00000000_000001_bootstrap`，空 ClickHouse 只应用 version 1 bootstrap。若检测到旧 migration history、未知非空 schema 或 manifest fingerprint 不一致，工具必须 fail closed，并提示清空该未投产环境后重新 bootstrap。Runbook 不自动删除数据库、缓存或 artifact；执行任何销毁前必须重新确认精确环境和授权。
+
+正式上线前进入 `/system/config/lifecycle`，核对环境、build commit、PostgreSQL/ClickHouse fingerprint、migration、backup、Config E2E 与 active policy bundle。封存请求必须使用服务端返回的确认短语：
+
+```bash
+curl -sS "$BASE/api/config/lifecycle" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Accept-Api-Version: v1" | jq .
+
+curl -sS -X POST "$BASE/api/config/lifecycle/seal-production" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Accept-Api-Version: v1" \
+  -H "X-Acting-Role: operator" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "environment":"production",
+    "confirmation_phrase":"<exact phrase from lifecycle response>",
+    "reason":"seal verified first production baseline"
+  }' | jq .
+```
+
+`production_frozen` 不可逆。封存后 boot squash/reset 被 API、CLI 与 migration 工具拒绝；任何 schema/data/version 演进都必须恢复标准 forward migration、兼容性评估、回滚方案与数据验证。
 ## 8. 生成与阅读报告
 
 ### 8.0 前置条件（冷启动必读）
@@ -968,20 +737,20 @@ curl -sS "$BASE/api/runtime-config" \
 **出报告 ≠ 只要进程跑起来。** 当前实现中，每次报告构建（定时或 ad-hoc）在选市之前会 **fail-closed** 检查：
 
 1. **feature parity latch 已 clear** — 未初始化也是 open，新报告在任何模型/选市逻辑前就会被拒绝。
-2. **`model.active_model_version_id` 已配置** — 指向 registry 中 **`PublicationStatus::Published`** 的 v2 模型版本，且 artifact 可加载。
+2. **`model_routing.model.active_model_version_id` 已配置** — 指向 registry 中 **`PublicationStatus::Published`** 的 boot v1 模型 artifact，且 artifact 可加载。
 3. **启用因子已注册且 Published** — 因子平面 fail-closed 要求每个启用因子在 `quant_factor_definition` 中 **存在且为 `Published`**；**未注册**（从未 register）或仍为 `Draft` 都会阻断（报错 `enabled definitions must be Published … must first be registered via POST /research/factors/register`）。因子定义**不再由报告热路径隐式注册**，必须显式走 register。
 4. **数据 ingest 就绪** — `operational_phase` 为 `operational`（或仅收紧型 degrade 仍允许报告）；实时 book 满足 data-quality 阈值。
 5. **账户可读** — 所有 mode 下 CLOB collateral + Data API positions 可用（ReportOnly 不是 dry-run）。
 
 因此 **第一次运行、库里没有任何模型时，报告必然失败** — 这是设计行为，不是 ingest 坏了。  
-默认 bootstrap runtime-config 可能 **启用** `default_interval` 定时 schedule（每 300s），但初次 parity latch 是 uninitialized/open，所以日志首先出现：
+默认 boot `report_schedule` 可能 **启用** `default_interval` 定时 schedule（每 300s），但初次 parity latch 是 uninitialized/open，所以日志首先出现：
 
 `feature parity latch is uninitialized; new report generation is blocked`
 
 **冷启动推荐做法**（详见 §8.1）：
 
 1. 先确认 §6.4 数据采集正常。
-2. 用 runtime-config **关闭** `default_interval` schedule，避免无意义 ERROR 刷屏。
+2. 在 Config 控制台编辑 `report_schedule`，经完整治理流程关闭 `default_interval`，避免无意义 ERROR 刷屏。
 3. **创建 model_spec**（`POST /api/research/model-specs`）—— 离线研究生命周期的根，dataset/train 都要引用它。
 4. **注册并发布启用因子**（`POST /api/research/factors/register` → `POST /api/research/factors/publish-batch`）—— 满足报告因子平面的 fail-closed 门。
 5. 连续 ingest 直至 training-dataset **plan** 的 `planned_samples` 足够。
@@ -996,24 +765,20 @@ curl -sS "$BASE/api/runtime-config" \
 | 那模型从哪来？ | 标准路径是 **model_spec → 训练集 build → train → backtest → publish**。没有 publish 就没有 active model。 |
 | model_spec 从哪来？ | **`POST /api/research/model-specs`**（`materialization:create`，UI: 研究 → 模型 → 新建模型规格）。这是唯一的生产创建入口——**没有 seed、没有 DBA 预置**。 |
 | 因子定义从哪来？ | **`POST /api/research/factors/register`** 幂等把启用因子集登记为 `Draft`，再 `publish-batch` 发布。dataset build 只要求因子**启用**（不要求 Published），但**报告**要求 Published。 |
-| 能否跳过训练手动指模型？ | 只能指向当前契约下从 frozen v2 dataset 训练、并已通过 artifact/full-parity/质量门的 **Published** 版本；空库首次激活不存在可复用旧版本。 |
+| 能否跳过训练手动指模型？ | 只能在 `model_routing` picker 中选择当前 boot 契约下从 frozen v1 dataset 训练、并已通过 artifact/full-parity/质量门的 **Published** artifact；空库首次激活不存在可复用旧版本。 |
 
-### 8.0.1 Phase 11.8 ClickHouse clean-slate 门禁
+### 8.0.1 ClickHouse boot schema 门禁
 
-当前 ClickHouse migration 2 `report_lifecycle_v2` 是破坏式、WORM 且 `OfflineRequired`：删除旧
-`quant_recommendation_event`，创建不含 live status 的 `quant_report_recommendation_fact`，并扩展 attribution
-outcome 闭集。在任何 report writer 启动前执行：
+当前 ClickHouse 只有 version 1 bootstrap。首次启动任何 writer 前，由 deploy identity apply，再由 runtime identity 只读 verify：
 
 ```bash
 cargo run -p quant-pivot-xtask -- \
-  clickhouse-schema apply-offline --config-dir config
+  clickhouse-schema apply --config-dir config
 cargo run -p quant-pivot-xtask -- \
   clickhouse-schema verify --config-dir config
 ```
 
-命令会先证明旧 recommendation/attribution 两表均为空；任一非空立即 fail closed，不搬运或删除现有数据。
-禁止修改 migration 1 checksum、手工 ALTER、搬运旧 rows、创建兼容 view 或让 runtime startup 自动执行该
-offline migration。完成后 migration ledger 的 current version 必须为 2，且旧表必须不存在。
+若发现旧 migration history、未知非空 schema、manifest checksum 或 schema fingerprint 不一致，命令立即 fail closed；不会搬运旧 rows、创建兼容 view 或让 runtime startup 自动 DDL。项目未投产时应在获得精确销毁授权后清空该环境并重新 bootstrap；`production_frozen` 后必须改用正式 forward migration。
 
 ### 8.1 从冷启动到第一份报告（完整流程）
 
@@ -1039,37 +804,7 @@ flowchart TD
 
 **Step 0 — 关闭默认定时报告（避免 ERROR 刷屏）**
 
-```bash
-VERSION_ID=$(
-  curl -sS -X POST "$BASE/api/runtime-config/versions" \
-    -H "Authorization: Bearer $TOKEN" \
-    -H "Accept-Api-Version: v1" \
-    -H "X-Acting-Role: risk_owner" \
-    -H "Content-Type: application/json" \
-    -d '{
-      "reason": "cold start: disable scheduled reports until model published",
-      "config_patch": {
-        "reports.schedules": [{
-          "schedule_id": "default_interval",
-          "cadence": {"kind": "interval", "interval_secs": 300},
-          "top_n": 20,
-          "knowledge_lag_secs": 10,
-          "enabled": false
-        }]
-      }
-    }' | jq -r '.data.runtime_config_version_id'
-)
-
-curl -sS -X POST "$BASE/api/runtime-config/versions/$VERSION_ID/activate" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Accept-Api-Version: v1" \
-  -H "X-Acting-Role: risk_owner" \
-  -H "Content-Type: application/json" \
-  -d '{"reason":"activate cold-start schedule disable"}' | jq .
-```
-
-> **注意**：`reports.schedules` 是 **整数组替换**，patch 时必须带上完整 schedule 对象，不能只改 `enabled` 字段。
-
+进入 `/system/config/report_schedule`，编辑 `default_interval.enabled = false`，完整执行 Draft → Review & Validate → Approve → Activate。Review 必须确认生效边界是“reconcile 尚未 claim 的 future runs”，已 claim run 不会被隐式取消。CLI 自动化按 §7.2 使用 `KIND=report_schedule` 的完整 typed document；禁止调用已删除的 `/api/runtime-config/versions` 或 dotted-path patch。
 **Step 0.5 — 创建 model_spec（离线研究生命周期的根）**
 
 全新系统 `quant_model_spec` 为空，dataset/train 都要引用一个 `model_spec_id`。用治理写接口创建（**没有 seed / DBA 预置**）：
@@ -1108,7 +843,7 @@ SPEC_ID=$(
 报告因子平面 fail-closed 要求启用因子**已注册且 Published**；因子定义**不再由报告热路径隐式注册**。先幂等注册为 `Draft`，再批量发布：
 
 ```bash
-# 注册当前 runtime-config 启用的因子集为 Draft（幂等）
+# 注册当前 immutable scoring profile 启用的因子集为 Draft（幂等）
 curl -sS -X POST "$BASE/api/research/factors/register" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Accept-Api-Version: v1" \
@@ -1139,12 +874,15 @@ curl -sS -X POST "$BASE/api/research/factors/publish-batch" \
 前提：
 
 - 已有目标 `model_spec_id`（Step 0.5 创建）；
-- `runtime_config_version_id` 用当前 active 版本：
+- `decision_policy_snapshot_id` 使用当前 active policy bundle 生成的冻结 snapshot：
 
 ```bash
-curl -sS "$BASE/api/runtime-config" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Accept-Api-Version: v1" | jq '.data.version.runtime_config_version_id'
+DECISION_POLICY_SNAPSHOT_ID=$(
+  curl -sS "$BASE/api/config/recommendation_policy/current" \
+    -H "Authorization: Bearer $TOKEN" \
+    -H "Accept-Api-Version: v1" \
+  | jq -r '.data.activation.decision_policy_snapshot_id'
+)
 ```
 
 1. **Plan**（不写 ledger，只看 `planned_samples`）— 见 §6.4.6 示例。
@@ -1153,7 +891,7 @@ curl -sS "$BASE/api/runtime-config" \
 
 **Step 2 — Train → Backtest/Calibration → CPCV → Bind → Parity → Publish**
 
-Train 只接受 frozen dataset ID + reason；model family、target、horizon、runtime config 和 input contract 全部从 dataset/model spec 冻结推导。返回是 `202 Accepted` 的 research job，不是已训练模型：
+Train 只接受 frozen dataset ID + reason；model family、target、horizon、decision policy snapshot 和 input contract 全部从 dataset/model spec 冻结推导。返回是 `202 Accepted` 的 research job，不是已训练模型：
 
 ```bash
 TRAIN_JOB_ID=$(
@@ -1164,7 +902,7 @@ TRAIN_JOB_ID=$(
     -H "Content-Type: application/json" \
     -d "{
       \"training_dataset_id\": \"$TRAINING_DATASET_ID\",
-      \"reason\": \"cold-start first model from frozen v2 dataset\"
+      \"reason\": \"cold-start first model from frozen boot dataset\"
     }" \
   | jq -r '.data.job_id'
 )
@@ -1186,7 +924,7 @@ curl -sS -X POST "$BASE/api/research/models/$MODEL_VERSION_ID/backtest" \
   -H "Content-Type: application/json" \
   -d "{
     \"training_dataset_id\": \"$TRAINING_DATASET_ID\",
-    \"runtime_config_version_id\": \"$RUNTIME_CONFIG_VERSION_ID\",
+    \"decision_policy_snapshot_id\": \"$DECISION_POLICY_SNAPSHOT_ID\",
     \"calibrate\": false,
     \"reason\": \"cold-start frozen backtest before publish\"
   }" | jq '{job_id: .data.job_id, status: .data.status}'
@@ -1202,7 +940,7 @@ CPCV_JOB_ID=$(
     -H "Content-Type: application/json" \
     -d "{
       \"training_dataset_id\": \"$TRAINING_DATASET_ID\",
-      \"runtime_config_version_id\": \"$RUNTIME_CONFIG_VERSION_ID\",
+      \"decision_policy_snapshot_id\": \"$DECISION_POLICY_SNAPSHOT_ID\",
       \"reason\": \"cold-start CPCV publish evidence\"
     }" \
   | jq -r '.data.job_id'
@@ -1220,7 +958,7 @@ curl -sS -X POST "$BASE/api/research/models/$MODEL_VERSION_ID/bind-publish-path-
   -H "Content-Type: application/json" \
   -d "{
     \"path_set_id\": \"$PATH_SET_ID\",
-    \"reason\": \"bind exact CPCV evidence for first v2 publish\"
+    \"reason\": \"bind exact CPCV evidence for first boot publish\"
   }" | jq .
 ```
 
@@ -1232,9 +970,9 @@ curl -sS -X POST "$BASE/api/research/models/$MODEL_VERSION_ID/bind-publish-path-
 确认指针已写入：
 
 ```bash
-curl -sS "$BASE/api/runtime-config" \
+curl -sS "$BASE/api/config/model_routing/current" \
   -H "Authorization: Bearer $TOKEN" \
-  -H "Accept-Api-Version: v1" | jq '.data.config.model.active_model_version_id'
+  -H "Accept-Api-Version: v1" | jq '.data.revision.document.document.model.active_model_version_id'
 ```
 
 **Step 3 — Canary 后开启报告**
@@ -1245,7 +983,7 @@ curl -sS "$BASE/api/runtime-config" \
 
 | 维度 | 定时报告（Scheduled） | Ad-hoc 报告 |
 |------|----------------------|-------------|
-| 触发 | runtime-config `reports.schedules[]` + cron/interval worker | 人工 `POST /api/quant/reports/run` 或 UI「立即生成」 |
+| 触发 | `report_schedule.schedules[]` + cron/interval worker | 人工 `POST /api/quant/reports/run` 或 UI「立即生成」 |
 | 默认 | bootstrap **enabled**（`default_interval`，300s） | bootstrap **disabled**（`ad_hoc_report_enabled=false`） |
 | `top_n` | 取自 schedule 配置 | **请求体必填**（无配置回退） |
 | `knowledge_lag_secs` | 取自 schedule 配置 | **请求体必填** |
@@ -1257,11 +995,11 @@ curl -sS "$BASE/api/runtime-config" \
 
 ### 8.3 定时报告
 
-默认 runtime-config 包含一个 interval schedule（`schedule_id=default_interval`，`interval_secs=300`，`top_n=20`，`knowledge_lag_secs=10`）。
+默认 boot `report_schedule` 包含一个 interval schedule（`schedule_id=default_interval`，`interval_secs=300`，`top_n=20`，`knowledge_lag_secs=10`）。
 
 报告生成流程：
 
-1. 读取 trigger-time 的 point-in-time runtime-config；
+1. 在 claim 边界冻结 `DecisionPolicySnapshot` 与参与决策的 revision IDs；
 2. 构造唯一 `DecisionBoundary`：`decision_at = trigger_time`，`knowledge_cutoff = decision_at - knowledge_lag_secs`；每个 source cutoff 只在这里推导一次；
 3. 从 catalog ledger + facts 在 boundary 上解析 immutable snapshot；selection/feature/capture 共用它；
 4. **`active_requirements`** — 加载 Published active model；
@@ -1281,7 +1019,7 @@ Schedule 被 **disabled** 时，worker 不会触发；若误配为 enabled 且�
 
 - 由 analyst / operator **主动发起**（API 或 Admin UI）；
 - **必须**在请求中指定 `top_n` 和 `knowledge_lag_secs`（代码 fail-closed，无默认值）；
-- 受 `reports.ad_hoc_report_enabled` 治理（默认 `false`）；
+- 受 `recommendation_policy.reports.ad_hoc_report_enabled` 治理（默认 `false`）；
 - **异步执行**：HTTP 只负责入队，不阻塞到报告写完。
 
 **何时使用**：
@@ -1289,25 +1027,11 @@ Schedule 被 **disabled** 时，worker 不会触发；若误配为 enabled 且�
 - 冷启动完成 publish 后，**第一次验证**报告流水线；
 - 数据质量事故恢复后（§16.1），确认新 report 正常再恢复交易；
 - `semi_auto` 审批窗口前需要 **最新** Top-N（runbook §11 场景）；
-- 策略/runtime-config 变更后，不想等到下一个 300s tick。
+- governed policy 变更后，不想等到下一个 300s tick。
 
-**启用 ad-hoc**（一次性 patch）：
+**启用 ad-hoc**：
 
-```bash
-curl -sS -X POST "$BASE/api/runtime-config/versions" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Accept-Api-Version: v1" \
-  -H "X-Acting-Role: risk_owner" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "reason": "enable manual report runs for operators",
-    "config_patch": {
-      "reports.ad_hoc_report_enabled": true
-    }
-  }' | jq -r '.data.runtime_config_version_id'
-# 然后 activate（同 §7.2）
-```
-
+进入 `/system/config/recommendation_policy`，将 `reports.ad_hoc_report_enabled` 设为 `true`，Review 业务影响与 ReportRun claim 生效边界后，按 §7.2 完成独立 Validate、Approve、Activate。CLI 使用 `KIND=recommendation_policy` 的完整 typed document。
 **触发 ad-hoc**（`quant_report:enqueue` 权限；内置 `analyst` 或 `operator` 角色）：
 
 ```bash
@@ -1346,7 +1070,7 @@ curl -sS -X POST "$BASE/api/quant/reports/run" \
 
 **Empty outcome**：
 
-- Runtime v17 不再存在 `publish_empty_reports`。
+- Boot `recommendation_policy` 不存在 `publish_empty_reports`；空 selection 以正式 empty report 表达。
 - 完整评估得到零 recommendations 时仍写 Prepared report，事实验证后正式 Published，并取代旧 current。
 - 没有 active model、账户读取失败或系统 readiness 不满足是 ReportRun Failed，不产生 report。
 
@@ -1406,11 +1130,11 @@ curl -sS -X POST "$BASE/api/quant/reports/run" \
 2. order book age 必须不超过 `max_book_age_ms`；
 3. 可成交深度必须达到 `min_depth_usd`；
 4. 当前价格不能突破 limit cap / slippage cap；
-5. recommendation、report、runtime-config、model、data-quality 在提交前都不能失效；
+5. recommendation、report、frozen decision-policy snapshot、model、data-quality 在提交前都不能失效；
 6. kill switch 必须允许 new entry；
 7. admission 必须返回 `allow`。
 
-默认策略是限价单：`allow_market_orders=false` 时，entry plan 使用 `limit_price`，并带 `cancel_if_not_triggered=true`。只有 runtime-config 明确打开 `execution.entry_order_policy.allow_market_orders=true` 时，才允许 immediate entry，但仍必须带 limit cap。
+默认策略是限价单：`allow_market_orders=false` 时，entry plan 使用 `limit_price`，并带 `cancel_if_not_triggered=true`。只有已激活的 `execution_risk_policy.entry_order_policy.allow_market_orders=true` 时，才允许 immediate entry，但仍必须带 limit cap。
 
 ### 9.3 买多少
 
@@ -1436,7 +1160,7 @@ flowchart LR
 Shares override 按最终 `shares × price` 原子重算资本预留。审批即 Arm，条件满足且重新准入通过后系统可
 自动提交真实订单；审批弹窗必须明确确认该授权。
 
-不能因为主观看好而放大仓位。若要改变 sizing 逻辑，必须新建 runtime-config 版本并重新生成报告。
+不能因为主观看好而放大仓位。若要改变 sizing/risk 逻辑，必须治理并激活新的 `execution_risk_policy` revision，再重新生成报告。
 
 ### 9.4 依据什么
 
@@ -1589,11 +1313,11 @@ curl -sS "$BASE/api/quant/positions?order_intent_id=$INTENT_ID" \
 
 - JWT signing key 已换成 Base64URL-no-pad 编码的 32 字节随机 key，旧 session 已按单-key语义全部失效；
 - private key、funder、wallet topology、relayer 配置通过 preflight；
-- active runtime-config schema v17 / feature schema v6 有效；
+- 六类 active policy resource 与 immutable profile/model/dataset boot schema 1 有效；
 - feature parity latch clear，最近 sampled/full run 均为 `passed`，`parity_age_secs` 未超出运维时效；
-- `execution.auto_execution.enabled=true`；
-- `execution.auto_execution.max_orders_per_report`、`max_total_usd_per_report`、`min_score`、`min_confidence` 保守；
-- `portfolio.budget.total_budget_usd > 0` 且 account live snapshot 可用；
+- `execution_authorization.auto_execution.enabled=true`；
+- `execution_authorization.auto_execution.max_orders_per_report`、`max_total_usd_per_report`、`min_score`、`min_confidence` 保守；
+- `execution_risk_policy.portfolio.budget.total_budget_usd > 0` 且 account live snapshot 可用；
 - 已有 published model，且 shadow period / quality gate 通过；
 - data quality healthy；
 - no pending/unresolvable reconciliation；
@@ -1604,25 +1328,17 @@ curl -sS "$BASE/api/quant/positions?order_intent_id=$INTENT_ID" \
 
 ### 12.2 启用策略批准
 
-先通过 runtime-config 打开 auto policy，建议使用极小上限：
+先在 Config 控制台编辑 `execution_authorization`，建议使用极小上限并完整执行 Review、preflight、approval 与 activation：
 
-```bash
-curl -sS -X POST "$BASE/api/runtime-config/versions" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Accept-Api-Version: v1" \
-  -H "X-Acting-Role: risk_owner" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "reason": "enable conservative auto execution policy",
-    "config_patch": {
-      "execution.auto_execution.enabled": true,
-      "execution.auto_execution.max_orders_per_report": 1,
-      "execution.auto_execution.max_total_usd_per_report": "20",
-      "execution.auto_execution.min_score": "0.75",
-      "execution.auto_execution.min_confidence": "0.70"
-    }
-  }' | jq .
-```
+在 `/system/config/execution_authorization` 设置：
+
+- `auto_execution.enabled = true`；
+- `max_orders_per_report = 1`；
+- `max_total_usd_per_report = "20"`；
+- `min_score = "0.75"`；
+- `min_confidence = "0.70"`。
+
+资金与入场风险上限属于 `execution_risk_policy`，不要混入这次 authorization revision。CLI 自动化按 §7.2 使用 `KIND=execution_authorization` 的完整 typed document，并保留 activation CAS expectation。
 
 激活后再切 mode：
 
@@ -1772,7 +1488,7 @@ curl -sS -X POST "$BASE/api/quant/reconciliations/$RECON_ID/resolve" \
 - `catalog_coverage_start` 已建立、`catalog_watermark` 持续前进，`parity_age_secs` 在运维时效内；
 - latest sampled/full parity 为 `passed`，无 mismatch，无超过 materialization deadline 的 pending；
 - latest model/factor publication 是预期版本；
-- runtime-config active version 是预期版本；
+- 六类 active policy revision、bundle hash 与 decision snapshot 是预期值；
 - allowance 足够；
 - Polymarket status / RPC / bridge 无已知事故。
 
@@ -1873,7 +1589,7 @@ curl -sS -X POST "$BASE/api/quant/reconciliations/$RECON_ID/resolve" \
 处理：
 
 1. revoke 异常 report；
-2. 回到不引用异常 artifact 的已验证 v17 safe config；不得回滚旧 runtime schema 或旧 artifact pointer；
+2. 对 `model_routing` 创建显式 rollback activation，回到不引用异常 artifact 的已验证 boot revision；不得加载 boot baseline 之前的旧 schema 或 pointer；
 3. rollback/retire model 或 factor publication；
 4. 重新跑 backtest / shadow report；
 5. 用小 budget 在 `semi_auto` 验证后再恢复 auto。
@@ -1900,11 +1616,16 @@ curl -sS -X POST "$BASE/api/quant/reconciliations/$RECON_ID/resolve" \
 | 切 mode | `POST /api/system/quant-mode` |
 | kill switch | `GET/POST /api/system/kill-switch` |
 | masked deploy config | `GET /api/system/deploy-config` |
-| 当前 runtime-config | `GET /api/runtime-config` |
-| runtime schema | `GET /api/runtime-config/schema` |
-| 新建 runtime-config 版本 | `POST /api/runtime-config/versions` |
-| 激活版本 | `POST /api/runtime-config/versions/{id}/activate` |
-| 回滚版本 | `POST /api/runtime-config/versions/{id}/rollback` |
+| Config 资源总览 | `GET /api/config/resources` |
+| 当前 policy resource | `GET /api/config/{kind}/current` |
+| policy resource schema | `GET /api/config/{kind}/schema` |
+| 新建 typed draft | `POST /api/config/{kind}/drafts` |
+| Validate / Preflight | `POST /api/config/{kind}/drafts/{id}/validate` |
+| Approve | `POST /api/config/{kind}/drafts/{id}/approve` |
+| Activate | `POST /api/config/{kind}/drafts/{id}/activate` |
+| 显式回滚 | `POST /api/config/{kind}/revisions/{id}/rollback` |
+| Deployment 只读快照 | `GET /api/config/deployment` |
+| Lifecycle / production seal | `GET /api/config/lifecycle`, `POST /api/config/lifecycle/seal-production` |
 | Feature Integrity 概览 / latch | `GET /api/research/feature-integrity/summary` |
 | Parity run 列表 | `GET /api/research/feature-integrity/runs` |
 | Parity 逐阶段证据 | `GET /api/research/feature-integrity/events` |

@@ -3,9 +3,9 @@
 use crate::{
     enums::quant::{AccountSource, QuantRuntimeMode, RecommendationReportStatus, ReportKind},
     types::{
-        AccountSnapshotId, EquitySnapshotId, MarketSelectionId, ModelRunId, ModelVersionId,
-        PortfolioPlanId, RecommendationReportId, ReportDataQualitySnapshotId, ReportSummary,
-        ResearchProfileRef, RuntimeConfigVersionId, Usd,
+        AccountSnapshotId, DecisionPolicySnapshotId, EquitySnapshotId, MarketSelectionId,
+        ModelRunId, ModelVersionId, PortfolioPlanId, RecommendationReportId,
+        ReportDataQualitySnapshotId, ReportSummary, ResearchProfileRef, Usd,
     },
 };
 use chrono::{DateTime, Utc};
@@ -24,7 +24,7 @@ pub struct Model {
     pub decision_at: DateTime<Utc>,
     pub horizon_secs: i64,
     pub runtime_mode: QuantRuntimeMode,
-    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub model_run_id: Option<ModelRunId>,
     pub model_version_id: ModelVersionId,
     pub market_selection_id: MarketSelectionId,

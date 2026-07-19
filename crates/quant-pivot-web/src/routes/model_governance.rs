@@ -1,4 +1,4 @@
-//! Model publish / rollback admin endpoints (Phase 3.7).
+//! Model publication lifecycle admin endpoints (Phase 3.7).
 //!
 //! Money-critical lifecycle transitions are gated by quality gates + shadow
 //! stability in core; these routes add Casbin role enforcement and HTTP audit.
@@ -8,8 +8,7 @@ use quant_pivot_models::{
     domain::{
         BindCalibrationRequest, BindPublishPathSetRequest, GovernanceActor,
         ModelCalibrationFitPreflightQuery, ModelCalibrationFitPreflightView, PublishModelCommand,
-        PublishModelRequest, RetireModelCommand, RetireModelRequest, RollbackModelCommand,
-        RollbackModelRequest, TrainedModelView,
+        PublishModelRequest, RetireModelCommand, RetireModelRequest, TrainedModelView,
     },
     enums::{
         operation_log::OperationCategory,
@@ -30,7 +29,7 @@ use crate::{
     state::AppState,
 };
 
-/// Model-governance routes (publish / rollback).
+/// Model-governance routes.
 pub(crate) fn route_specs() -> Vec<RouteSpec> {
     vec![
         spec(
@@ -38,12 +37,6 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
             "/research/models/{id}/publish",
             Rule::ActingRoleGoverned(ResourceType::Publication, Operation::Publish),
             publish,
-        ),
-        spec(
-            Method::POST,
-            "/research/models/{id}/rollback",
-            Rule::ActingRoleGoverned(ResourceType::Publication, Operation::Rollback),
-            rollback,
         ),
         spec(
             Method::POST,
@@ -109,51 +102,6 @@ pub async fn publish(
     op_ctx.set_state_hashes(Some(before_hash), Some(after_hash));
     op_ctx.set_detail(serde_json::json!({
         "model_version_id": view.model_version_id.to_string(),
-        "publication_status": view.publication_status,
-        "acting_role": acting_role.0,
-        "request_id": request_id.0,
-        "reason": request.reason,
-    }));
-    Ok(WebResponse::ok(view))
-}
-
-/// `POST /api/research/models/{id}/rollback` — re-gate and atomically restore the audited predecessor.
-pub async fn rollback(
-    state: web::Data<AppState>,
-    id: web::Path<ModelVersionId>,
-    actor: AuthedActor,
-    acting_role: ActingRole,
-    request_id: RequestId,
-    op_ctx: OperationCtx,
-    body: ValidatedJson<RollbackModelRequest>,
-) -> Result<WebResponse<TrainedModelView>, WebError> {
-    let request = body.into_inner();
-    let model_version_id = id.into_inner();
-    let before = state
-        .model_training
-        .find_version(&model_version_id)
-        .await?
-        .ok_or_else(|| {
-            WebError::NotFound(format!("model_version not found: {model_version_id}"))
-        })?;
-    let restored = state
-        .model_governance
-        .rollback(
-            RollbackModelCommand {
-                model_version_id: model_version_id.clone(),
-                reason: request.reason.clone(),
-            },
-            governance_actor(&actor, &acting_role),
-        )
-        .await?;
-    let before_hash = canonical_state_hash(&before)?;
-    let after_hash = canonical_state_hash(&restored)?;
-    let view = TrainedModelView::from(restored);
-    op_ctx.set_action(OperationCategory::Governance, "model.rollback");
-    op_ctx.set_resource(ResourceType::Publication, model_version_id.to_string());
-    op_ctx.set_state_hashes(Some(before_hash), Some(after_hash));
-    op_ctx.set_detail(serde_json::json!({
-        "restored_model_version_id": view.model_version_id.to_string(),
         "publication_status": view.publication_status,
         "acting_role": acting_role.0,
         "request_id": request_id.0,

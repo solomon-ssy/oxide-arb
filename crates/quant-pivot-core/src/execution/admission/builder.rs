@@ -16,8 +16,8 @@ use quant_pivot_error::{
 };
 use quant_pivot_models::{
     domain::{
-        CapitalAllocationInfo, DataQualityPort, ModelVersionInfo, OrderIntentInfo,
-        RecommendationInfo, RecommendationReportInfo, RuntimeConfigVersionInfo,
+        CapitalAllocationInfo, DataQualityPort, DecisionPolicySnapshotInfo, ModelVersionInfo,
+        OrderIntentInfo, RecommendationInfo, RecommendationReportInfo,
     },
     enums::{market::MarketStatus, quant::PublicationStatus},
     types::{ClobMarketInfoVersion, Usd},
@@ -25,8 +25,8 @@ use quant_pivot_models::{
 use quant_pivot_repository::traits::{
     CapitalAllocationRepository, ClobMarketInfoRepository, EntryConditionRepository,
     ExecutionOrderRepository, MarketRepository, ModelRegistryRepository, OrderIntentRepository,
-    RecommendationReportRepository, RecommendationRepository, ReconciliationRepository,
-    RuntimeConfigVersionRepository, TradePolicyRepository,
+    PolicyRepository, RecommendationReportRepository, RecommendationRepository,
+    ReconciliationRepository, TradePolicyRepository,
 };
 use quant_pivot_research::{
     artifact::ArtifactStore,
@@ -34,7 +34,6 @@ use quant_pivot_research::{
     model::{CalibrationArtifactLoader, load_hash_verified_artifact},
     portfolio::AccountSnapshot,
 };
-use rust_decimal::Decimal;
 
 use super::{
     AdmissionExposureState, AdmissionInput, AdmissionModelState, AdmissionSeams,
@@ -47,7 +46,7 @@ use crate::{
     },
     governance::{KillSwitchHandle, RuntimeModeHandle, resolve_return_model_calibration},
     ingest::book_store::BookStore,
-    runtime_config::RuntimeConfigStore,
+    runtime_config::DecisionPolicyStore,
     service::account::AccountProviderFactory,
 };
 
@@ -70,12 +69,12 @@ pub struct AdmissionInputBuilderDeps {
     pub capital: Arc<dyn CapitalAllocationRepository>,
     pub markets: Arc<dyn MarketRepository>,
     pub clob_market_info: Arc<dyn ClobMarketInfoRepository>,
-    pub config_versions: Arc<dyn RuntimeConfigVersionRepository>,
+    pub config_versions: Arc<dyn PolicyRepository>,
     pub account_factory: Arc<AccountProviderFactory>,
     pub book_store: Arc<BookStore>,
     pub clob: Arc<ClobClient>,
     pub data_quality: Arc<dyn DataQualityPort>,
-    pub config: Arc<RuntimeConfigStore>,
+    pub config: Arc<DecisionPolicyStore>,
     pub runtime_mode: RuntimeModeHandle,
     pub kill_switch: KillSwitchHandle,
     /// Venue-health hot read published by the 05.4 execution breaker (seam #18).
@@ -128,10 +127,17 @@ impl AdmissionInputBuilder {
             })?;
 
         let config = deps.config.current();
-        let budget_total_usd = parse_budget_usd(&config.portfolio.budget.total_budget_usd.value)?;
-        let max_stale_book_ratio_bps = config.data_quality.max_stale_book_ratio_bps;
-        let max_open_intents = config.execution.capital.max_open_intents;
-        let max_reserved_usd = parse_capital_usd(&config.execution.capital.max_reserved_usd.value)?;
+        let budget_total_usd = Usd::new(
+            config
+                .execution_risk
+                .portfolio
+                .budget
+                .total_budget_usd
+                .value,
+        );
+        let max_stale_book_ratio_bps = config.recommendation.data_quality.max_stale_book_ratio_bps;
+        let max_open_intents = config.execution_risk.capital.max_open_intents;
+        let max_reserved_usd = Usd::new(config.execution_risk.capital.max_reserved_usd.value);
 
         let fetched = self
             .fetch_parallel_sources(&recommendation, intent, budget_total_usd, now)
@@ -167,7 +173,7 @@ impl AdmissionInputBuilder {
             }
         })?;
         let state_version = StateVersion {
-            config_version_id: fetched.active_version.runtime_config_version_id,
+            config_version_id: fetched.active_version.decision_policy_snapshot_id,
             account_as_of: fetched.account.as_of,
             book_version: book.as_ref().map(|snapshot| snapshot.version),
             book_as_of_ms: book.as_ref().map(|snapshot| snapshot.timestamp_ms),
@@ -267,7 +273,7 @@ impl AdmissionInputBuilder {
         let venue_metadata = venue_metadata_result?;
         let clob_market_info_hash = clob_market_info.payload_hash.clone();
         let active_version = active_version_result?
-            .ok_or_else(|| not_found("runtime_config_version", "current".to_owned()))?;
+            .ok_or_else(|| not_found("decision_policy_snapshot", "current".to_owned()))?;
 
         Ok(ParallelAdmissionFetch {
             report,
@@ -328,7 +334,7 @@ struct ParallelAdmissionFetch {
     account: AccountSnapshot,
     manual_block: bool,
     clob_market_info: ClobMarketInfoVersion,
-    active_version: RuntimeConfigVersionInfo,
+    active_version: DecisionPolicySnapshotInfo,
     open_intent_count: u64,
     venue_metadata: AdmissionVenueMetadata,
 }
@@ -353,30 +359,4 @@ pub fn pit_fee_schedule(
 
 fn not_found(entity: &'static str, id: String) -> QuantError {
     StorageError::NotFound { entity, id }.into()
-}
-
-/// Parse the governed total budget, failing closed on a malformed value.
-fn parse_budget_usd(value: &str) -> QuantResult<Usd> {
-    value
-        .trim()
-        .parse::<Decimal>()
-        .map(Usd::new)
-        .map_err(|error| {
-            QuantError::config(format!(
-                "portfolio.budget.total_budget_usd is not a valid decimal: {error}"
-            ))
-        })
-}
-
-/// Parse the governed reserved-capital cap, failing closed on a malformed value.
-fn parse_capital_usd(value: &str) -> QuantResult<Usd> {
-    value
-        .trim()
-        .parse::<Decimal>()
-        .map(Usd::new)
-        .map_err(|error| {
-            QuantError::config(format!(
-                "execution.capital.max_reserved_usd is not a valid decimal: {error}"
-            ))
-        })
 }

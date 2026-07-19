@@ -16,8 +16,8 @@ use validator::Validate;
 use crate::{
     domain::{BacktestReportInfo, pagination::PageRequest},
     types::{
-        BacktestReportId, ContentHash, ModelComparisonReportId, ModelRunId, ModelVersionId,
-        Probability, RuntimeConfigVersionId, TrainingDatasetId,
+        BacktestReportId, ContentHash, DecisionPolicySnapshotId, ModelComparisonReportId,
+        ModelRunId, ModelVersionId, Probability, TrainingDatasetId,
     },
 };
 
@@ -34,7 +34,7 @@ pub struct RunBacktestRequest {
     /// Frozen, PIT-materialized dataset to replay the model over.
     pub training_dataset_id: TrainingDatasetId,
     /// Frozen runtime-config version governing portfolio caps + provenance.
-    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     /// Whether to tighten the governed score multipliers (data-quality /
     /// liquidity / horizon / substitution penalties) from this backtest's
     /// realized stratified outcomes and register a tightened child candidate
@@ -65,7 +65,7 @@ pub struct BacktestReportView {
     pub backtest_report_id: BacktestReportId,
     pub model_version_id: ModelVersionId,
     pub model_run_id: ModelRunId,
-    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub window_start: DateTime<Utc>,
     pub window_end: DateTime<Utc>,
     pub coverage: Decimal,
@@ -123,7 +123,7 @@ impl BacktestReportView {
             backtest_report_id: info.backtest_report_id,
             model_version_id: info.model_version_id,
             model_run_id: info.model_run_id,
-            runtime_config_version_id: info.runtime_config_version_id,
+            decision_policy_snapshot_id: info.decision_policy_snapshot_id,
             window_start: info.window_start,
             window_end: info.window_end,
             coverage: info.coverage,

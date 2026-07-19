@@ -85,7 +85,8 @@ pg_enum! {
     pub enum ResourceType {
         System => "system",
         Market => "market",
-        RuntimeConfig => "runtime_config",
+        DecisionPolicySnapshot => "config",
+        ConfigLifecycle => "config_lifecycle",
         Publication => "publication",
         Materialization => "materialization",
         Replay => "replay",
@@ -133,6 +134,7 @@ pub enum Operation {
     Retire,
     Emergency,
     Resolve,
+    Seal,
 }
 
 impl Operation {
@@ -159,6 +161,7 @@ impl Operation {
             Self::Retire => "retire",
             Self::Emergency => "emergency",
             Self::Resolve => "resolve",
+            Self::Seal => "seal",
         }
     }
 }
@@ -282,7 +285,7 @@ pub static RESOURCE_OPERATIONS: &[(ResourceType, &[Operation])] = &[
     ),
     (ResourceType::Replay, &[Operation::Read, Operation::Create]),
     (
-        ResourceType::RuntimeConfig,
+        ResourceType::DecisionPolicySnapshot,
         &[
             Operation::Read,
             Operation::Create,
@@ -290,6 +293,10 @@ pub static RESOURCE_OPERATIONS: &[(ResourceType, &[Operation])] = &[
             Operation::Activate,
             Operation::Rollback,
         ],
+    ),
+    (
+        ResourceType::ConfigLifecycle,
+        &[Operation::Read, Operation::Seal],
     ),
     (ResourceType::OperationLog, &[Operation::Read]),
     (

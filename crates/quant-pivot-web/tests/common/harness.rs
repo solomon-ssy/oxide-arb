@@ -13,7 +13,7 @@ use actix_web::{
 use async_trait::async_trait;
 use quant_pivot_core::{
     app::ports::execution_read::CoreExecutionReadPort, execution::IntentLifecyclePublisher,
-    runtime_config::RuntimeConfigStore,
+    runtime_config::DecisionPolicyStore,
 };
 use quant_pivot_error::{
     QuantError, QuantResult, control::ControlError, execution::ExecutionError,
@@ -25,7 +25,7 @@ use quant_pivot_models::{
         EntryConditionEvaluationEventRow, MarketResolutionRow, MidPriceBucketRow,
         ReportMarketFunnelCountRow, ReportMarketFunnelRow, TradeTapeRow,
     },
-    config::{CacheConfig, DeployConfig, JwtConfig, RedisConfig, WebConfig},
+    config::{CacheConfig, DeployConfig, JwtConfig, LifecycleDeployConfig, RedisConfig, WebConfig},
     domain::{
         AcknowledgeFeatureParityLatchRequest, ActivateBootstrapRequest, BacktestPathSetInfo,
         BacktestPathSetListQuery, BacktestPathSetView, BacktestPort, BacktestReportInfo,
@@ -53,14 +53,14 @@ use quant_pivot_models::{
         ModelTrainingPort, ModelVersionInfo, ModelVersionListQuery, NegRiskEventDriftView,
         NewBasisAlert, NewMarketLinkage, OverrideLinkageRequest, Paginated,
         ParticipantConcentrationDetailView, ParticipantConcentrationSummaryView,
-        PreparedRuntimeConfig, PublishFactorCommand, PublishFactorsBatchCommand,
-        PublishModelCommand, PublishedModelOptionView, QualityGateReportView,
-        QuantModeTransitionReport, ReconciliationPort, RegisterFactorDefinitionsCommand,
-        ResearchCatalogPort, ResearchJobListQuery, ResearchJobPort, ResearchJobView,
-        ResearchReadinessPort, ResearchReadinessSnapshot, ResolveReconciliationCommand,
-        ResolveReconciliationOutcome, RetireFactorCommand, RetireModelCommand,
-        RollbackModelCommand, RunBacktestRequest, RunCpcvBacktestRequest,
-        RunFullFeatureParityRequest, RuntimeConfigPort, RuntimeControlPort, SetKillSwitchCommand,
+        PolicySnapshotPort, PreparedPolicySnapshot, PublishFactorCommand,
+        PublishFactorsBatchCommand, PublishModelCommand, PublishedModelOptionView,
+        QualityGateReportView, QuantModeTransitionReport, ReconciliationPort,
+        RegisterFactorDefinitionsCommand, ResearchCatalogPort, ResearchJobListQuery,
+        ResearchJobPort, ResearchJobView, ResearchReadinessPort, ResearchReadinessSnapshot,
+        ResolveReconciliationCommand, ResolveReconciliationOutcome, RetireFactorCommand,
+        RetireModelCommand, RunBacktestRequest, RunCpcvBacktestRequest,
+        RunFullFeatureParityRequest, RuntimeControlPort, SetKillSwitchCommand,
         StructuralMonitorPort, SystemCapabilities, SystemStatus, TradePolicyArtifactInfo,
         TradePolicyAuditListQuery, TradePolicyFitPreflightView, TradePolicyGovernanceAuditInfo,
         TradePolicyListQuery, TradePolicyPort, TradePolicyValidationListQuery,
@@ -72,13 +72,13 @@ use quant_pivot_models::{
     },
     entities::quant_entry_condition_evaluation_outbox,
     enums::{execution::KillSwitchState, quant::QuantRuntimeMode, system::BootstrapPhase},
-    runtime_config::{FeatureFamily, RuntimeConfig},
+    runtime_config::{DecisionPolicySnapshot, FeatureFamily},
     types::{
         BacktestPathSetId, BacktestReportId, BasisAlertId, CalibrationArtifactId, ContentHash,
-        DomainInstrumentKey, DomainSourceExpectationId, DomainSourceId, EntryConditionInstanceId,
-        FactorDefinitionId, MarketId, MarketLinkageId, ModelComparisonReportId, ModelSpecId,
-        ModelVersionId, RecommendationReportId, ResearchJobId, RuntimeConfigVersionId,
-        SchemaVersion, TokenId, TrainingDatasetId,
+        DecisionPolicySnapshotId, DomainInstrumentKey, DomainSourceExpectationId, DomainSourceId,
+        EntryConditionInstanceId, FactorDefinitionId, MarketId, MarketLinkageId,
+        ModelComparisonReportId, ModelSpecId, ModelVersionId, RecommendationReportId,
+        ResearchJobId, SchemaVersion, TokenId, TrainingDatasetId,
     },
 };
 use quant_pivot_repository::{
@@ -143,7 +143,7 @@ struct WebHarnessAppStateInput<'a> {
     operation_log: OperationLogBuffer,
     events: CoreEventPublisher,
     ws_sessions: SessionRegistry,
-    runtime_config_apply: Arc<MockRuntimeConfigApply>,
+    runtime_config_apply: Arc<MockPolicySnapshotApply>,
     catalog: Arc<MockCatalogStatus>,
     data_quality: Arc<MockDataQuality>,
     core_report: &'a CoreReportTestHandle,
@@ -151,9 +151,21 @@ struct WebHarnessAppStateInput<'a> {
 }
 
 fn web_harness_app_state(input: WebHarnessAppStateInput<'_>) -> AppState {
+    let kill_switch = Arc::new(MockKillSwitch::default());
     AppState {
         deploy: Arc::new(test_deploy_config()),
-        runtime_config_apply: Arc::clone(&input.runtime_config_apply) as Arc<dyn RuntimeConfigPort>,
+        postgres_schema_fingerprint: ContentHash::parse(concat!(
+            "blake3:",
+            "1111111111111111111111111111111111111111111111111111111111111111"
+        ))
+        .expect("static PostgreSQL schema fingerprint"),
+        clickhouse_schema_fingerprint: ContentHash::parse(concat!(
+            "blake3:",
+            "2222222222222222222222222222222222222222222222222222222222222222"
+        ))
+        .expect("static ClickHouse schema fingerprint"),
+        runtime_config_apply: Arc::clone(&input.runtime_config_apply)
+            as Arc<dyn PolicySnapshotPort>,
         jwt: input.jwt,
         jwt_blacklist: input.jwt_blacklist,
         users: Arc::clone(&input.repos.users),
@@ -167,9 +179,9 @@ fn web_harness_app_state(input: WebHarnessAppStateInput<'_>) -> AppState {
         runtime_config: Arc::clone(&input.repos.runtime_config),
         operation_logs: Arc::clone(&input.repos.operation_logs),
         operation_log: input.operation_log,
-        control: Arc::new(MockRuntimeControl::default()),
+        control: Arc::new(MockRuntimeControl::new(Arc::clone(&kill_switch))),
         bootstrap: Arc::new(MockBootstrap),
-        kill_switch: Arc::new(MockKillSwitch::default()),
+        kill_switch,
         market_data: Arc::new(MockMarketData),
         catalog: Arc::clone(&input.catalog) as Arc<dyn CatalogStatusPort>,
         data_quality: Arc::clone(&input.data_quality) as Arc<dyn DataQualityPort>,
@@ -206,7 +218,7 @@ fn web_harness_app_state(input: WebHarnessAppStateInput<'_>) -> AppState {
         quant_reports: input.core_report.port.clone(),
         account_read: core_account_read_port(
             input.db,
-            Arc::clone(&input.runtime_config_apply) as Arc<dyn RuntimeConfigPort>,
+            Arc::clone(&input.runtime_config_apply) as Arc<dyn PolicySnapshotPort>,
         ),
         order_intents: input.order_intents,
         entry_conditions: Arc::new(PgEntryConditionRepository::new(input.db.clone())),
@@ -233,7 +245,7 @@ pub struct TestEnv {
     /// Content-addressed model store shared by the real order-intent service and fixtures.
     pub model_artifact_store: Arc<dyn ArtifactStore>,
     /// Active runtime configuration read by the real order-intent service.
-    pub order_intent_runtime_config: Arc<RuntimeConfigStore>,
+    pub order_intent_runtime_config: Arc<DecisionPolicyStore>,
     /// Mutable report-funnel facts shared by the real report port and web state.
     pub quant_facts: Arc<MockQuantFactRead>,
     core_report: CoreReportTestHandle,
@@ -287,10 +299,17 @@ impl TestEnv {
             ws_shutdown.clone(),
         ));
 
-        let runtime_config_apply = Arc::new(MockRuntimeConfigApply::default());
         let catalog = Arc::new(MockCatalogStatus);
         let data_quality = Arc::new(MockDataQuality);
         let core_report = core_report_port::build_core_report_stack(&db, events.clone()).await;
+        let persisted_policy = repos
+            .runtime_config
+            .load_current()
+            .await
+            .expect("load boot policy bundle")
+            .expect("core report harness bootstraps all six policy resources");
+        let runtime_config_apply =
+            Arc::new(MockPolicySnapshotApply::new(persisted_policy.snapshot));
         let (order_intents, model_artifact_store, order_intent_runtime_config) =
             build_order_intent_service(&db, Arc::clone(&intent_lifecycle));
         let state = web_harness_app_state(WebHarnessAppStateInput {
@@ -355,6 +374,17 @@ fn jwt_config() -> JwtConfig {
 
 fn test_deploy_config() -> DeployConfig {
     DeployConfig {
+        lifecycle: LifecycleDeployConfig {
+            backup_evidence_hash: Some(
+                ContentHash::parse(format!("blake3:{}", "33".repeat(32)))
+                    .expect("test backup evidence hash"),
+            ),
+            config_e2e_evidence_hash: Some(
+                ContentHash::parse(format!("blake3:{}", "44".repeat(32)))
+                    .expect("test Config E2E evidence hash"),
+            ),
+            ..LifecycleDeployConfig::default()
+        },
         web: WebConfig {
             cors_allowed_origins: vec!["http://127.0.0.1:6099".to_owned()],
             ..WebConfig::default()
@@ -788,37 +818,55 @@ impl MarketDataPort for MockMarketData {
     }
 }
 
-pub struct MockRuntimeConfigApply {
-    current: Arc<Mutex<Arc<RuntimeConfig>>>,
+pub struct MockPolicySnapshotApply {
+    current: Arc<Mutex<Arc<DecisionPolicySnapshot>>>,
 }
 
-impl Default for MockRuntimeConfigApply {
+impl Default for MockPolicySnapshotApply {
     fn default() -> Self {
+        Self::new(DecisionPolicySnapshot::default())
+    }
+}
+
+impl MockPolicySnapshotApply {
+    fn new(config: DecisionPolicySnapshot) -> Self {
         Self {
-            current: Arc::new(Mutex::new(Arc::new(RuntimeConfig::default()))),
+            current: Arc::new(Mutex::new(Arc::new(config))),
         }
     }
 }
 
 #[async_trait]
-impl RuntimeConfigPort for MockRuntimeConfigApply {
-    fn current(&self) -> Arc<RuntimeConfig> {
+impl PolicySnapshotPort for MockPolicySnapshotApply {
+    fn current(&self) -> Arc<DecisionPolicySnapshot> {
         Arc::clone(&self.current.lock().unwrap())
     }
 
-    async fn prepare(&self, config: RuntimeConfig) -> Result<PreparedRuntimeConfig, ControlError> {
+    async fn prepare(
+        &self,
+        config: DecisionPolicySnapshot,
+    ) -> Result<PreparedPolicySnapshot, ControlError> {
         let config = Arc::new(config);
         let current = Arc::clone(&self.current);
         let published = Arc::clone(&config);
-        Ok(PreparedRuntimeConfig::new(config, move || {
+        Ok(PreparedPolicySnapshot::new(config, move || {
             *current.lock().unwrap() = published;
         }))
     }
 }
 
-#[derive(Default)]
 pub struct MockRuntimeControl {
+    kill_switch: Arc<MockKillSwitch>,
     mode: Mutex<QuantRuntimeMode>,
+}
+
+impl MockRuntimeControl {
+    fn new(kill_switch: Arc<MockKillSwitch>) -> Self {
+        Self {
+            kill_switch,
+            mode: Mutex::new(QuantRuntimeMode::default()),
+        }
+    }
 }
 
 pub struct MockTradePolicyPort;
@@ -1266,14 +1314,6 @@ impl ModelGovernancePort for MockModelGovernancePort {
         Err(QuantError::NotImplemented("model publish".into()))
     }
 
-    async fn rollback(
-        &self,
-        _command: RollbackModelCommand,
-        _actor: GovernanceActor,
-    ) -> QuantResult<ModelVersionInfo> {
-        Err(QuantError::NotImplemented("model rollback".into()))
-    }
-
     async fn retire(
         &self,
         _command: RetireModelCommand,
@@ -1484,7 +1524,7 @@ impl ResearchJobPort for MockResearchJobPort {
     async fn enqueue_bias_table_fit(
         &self,
         _request: FitBiasTableRequest,
-        _runtime_config_version_id: RuntimeConfigVersionId,
+        _decision_policy_snapshot_id: DecisionPolicySnapshotId,
         _ctx: JobSubmitContext,
     ) -> QuantResult<ResearchJobView> {
         Err(QuantError::NotImplemented("enqueue bias table fit".into()))
@@ -1493,7 +1533,7 @@ impl ResearchJobPort for MockResearchJobPort {
     async fn enqueue_model_calibration_fit(
         &self,
         _request: FitModelCalibratorRequest,
-        _runtime_config_version_id: RuntimeConfigVersionId,
+        _decision_policy_snapshot_id: DecisionPolicySnapshotId,
         _ctx: JobSubmitContext,
     ) -> QuantResult<ResearchJobView> {
         Err(QuantError::NotImplemented(
@@ -1735,7 +1775,12 @@ impl RuntimeControlPort for MockRuntimeControl {
     }
 
     fn system_status(&self) -> SystemStatus {
-        SystemStatus::bootstrap(self.quant_runtime_mode())
+        let mut status = SystemStatus::bootstrap(self.quant_runtime_mode());
+        let kill_switch = self.kill_switch.view();
+        status.execution_recovery.kill_switch_requires_ack = kill_switch.requires_operator_ack;
+        status.execution_recovery.kill_switch_state = kill_switch.state;
+        status.kill_switch = kill_switch;
+        status
     }
 
     async fn health(&self) -> HealthReport {

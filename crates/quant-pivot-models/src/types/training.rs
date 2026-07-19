@@ -7,13 +7,13 @@ use serde::{Deserialize, Serialize};
 use crate::{
     enums::quant::DatasetPurpose,
     types::{
-        ContentHash, ModelSpecId, ResearchProfileRef, RuntimeConfigVersionId,
+        ContentHash, DecisionPolicySnapshotId, ModelSpecId, ResearchProfileRef,
         SourceSliceManifestRef, TradePolicyArtifactId, TrainingDatasetId,
     },
 };
 
 /// Breaking dataset artifact and manifest wire version.
-pub const DATASET_ARTIFACT_FORMAT_VERSION: u32 = 6;
+pub const DATASET_ARTIFACT_FORMAT_VERSION: u32 = 1;
 
 /// Immutable manifest embedded in a frozen dataset artifact and ledger.
 ///
@@ -29,7 +29,7 @@ pub struct DatasetManifest {
     pub model_spec_id: ModelSpecId,
     pub trade_policy_artifact_id: Option<TradePolicyArtifactId>,
     pub trade_policy_hash: Option<ContentHash>,
-    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub window_start: DateTime<Utc>,
     pub window_end: DateTime<Utc>,
     pub purpose: DatasetPurpose,

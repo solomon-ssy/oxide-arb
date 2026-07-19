@@ -32,12 +32,12 @@ const PRODUCES: &[SeedArtifact] = &[];
 pub const ROLE_MENU_SEED: SeedSpec = SeedSpec {
     id: SEED_ID,
     // v4 binds grants to the hierarchical menu identity contract.
-    version: 5,
+    version: 1,
     target_table: "role_menu",
     depends_on: DEPENDS_ON,
     produces: PRODUCES,
     conflict_policy: SeedConflictPolicy::GraphOrdered,
-    checksum: "rbac.role_menu.bootstrap.v5.governed-bootstrap-and-approval",
+    checksum: "rbac.role_menu.bootstrap.v1.boot-config-control-plane",
     apply: load_boxed,
     hydrate: hydrate_boxed,
 };

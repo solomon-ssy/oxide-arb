@@ -6,6 +6,7 @@ mod manifest;
 use std::collections::BTreeMap;
 
 use quant_pivot_error::storage::StorageError;
+use quant_pivot_models::{hashing::CanonicalDigest, types::ContentHash};
 use sea_orm::DatabaseConnection;
 use serde::Deserialize;
 use sqlx::Row;
@@ -37,7 +38,7 @@ pub struct PostgresSchemaStatus {
     pub migration_count: usize,
     pub required_table_count: usize,
     pub required_index_count: usize,
-    pub manifest_checksum: String,
+    pub schema_fingerprint: ContentHash,
 }
 
 /// Apply transactional catalog seeds and least-privilege grants after migration.
@@ -167,7 +168,12 @@ async fn verify_contract(db: &DatabaseConnection) -> Result<PostgresSchemaStatus
         migration_count: migration_manifest.migrations.len(),
         required_table_count,
         required_index_count,
-        manifest_checksum: blake3::hash(manifest_bytes.as_bytes()).to_hex().to_string(),
+        schema_fingerprint: ContentHash::parse(CanonicalDigest::prefixed_bytes(
+            manifest_bytes.as_bytes(),
+        ))
+        .map_err(|error| {
+            StorageError::Migration(format!("construct PostgreSQL schema fingerprint: {error}"))
+        })?,
     })
 }
 

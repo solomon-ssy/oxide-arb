@@ -44,8 +44,8 @@ use quant_pivot_models::{
     },
     hashing::CanonicalDigest,
     types::{
-        ContentHash, OrderAmount, PreparedFeeSchedule, PreparedVenueOrder, ResearchProfileRef,
-        RuntimeConfigVersionId, Usd, VenueOrderAmount,
+        ContentHash, DecisionPolicySnapshotId, OrderAmount, PreparedFeeSchedule,
+        PreparedVenueOrder, ResearchProfileRef, Usd, VenueOrderAmount,
     },
 };
 use quant_pivot_research::{
@@ -93,7 +93,7 @@ pub struct AdmissionSeams {
 /// was allowed / denied and the verdict can be replayed against the same state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StateVersion {
-    pub config_version_id: RuntimeConfigVersionId,
+    pub config_version_id: DecisionPolicySnapshotId,
     pub account_as_of: DateTime<Utc>,
     pub book_version: Option<u64>,
     pub book_as_of_ms: Option<u64>,

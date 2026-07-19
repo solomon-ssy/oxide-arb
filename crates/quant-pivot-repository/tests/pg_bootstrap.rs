@@ -1,73 +1,24 @@
-//! Durable cold-start FSM and governed activation integration tests.
+//! Durable cold-start FSM integration tests for the typed policy boot bundle.
 
-use chrono::{Duration, Utc};
+use chrono::Duration;
 use quant_pivot_models::{
-    domain::{
-        ActivateBootstrapState, BootstrapActivationInfo, NewRuntimeConfigApproval,
-        NewRuntimeConfigVersion,
-    },
-    entities::system_bootstrap_transition,
-    enums::{
-        runtime_config::{RuntimeConfigApprovalDecision, RuntimeConfigVersionSource},
-        system::BootstrapPhase,
-    },
-    hashing::CanonicalDigest,
-    runtime_config::{RUNTIME_CONFIG_SCHEMA_VERSION, RuntimeConfig},
-    types::{RuntimeConfigApprovalId, RuntimeConfigVersionId},
+    domain::ActivateBootstrapState, entities::system_bootstrap_transition,
+    enums::system::BootstrapPhase,
 };
 use quant_pivot_repository::{
-    postgres::{PgRuntimeConfigVersionRepository, PgSystemRuntimeStateRepository},
-    traits::{RuntimeConfigVersionRepository, SystemRuntimeStateRepository},
+    postgres::{PgPolicyRepository, PgSystemRuntimeStateRepository},
+    traits::{PolicyRepository, SystemRuntimeStateRepository},
 };
-use quant_pivot_test_support::pg::setup_pg;
+use quant_pivot_test_support::{pg::setup_pg, policy_fixtures::bootstrap_default_policy_bundle};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
-
-async fn assert_activation_visibility(
-    configs: &PgRuntimeConfigVersionRepository,
-    activated: &BootstrapActivationInfo,
-    expected_version_id: &RuntimeConfigVersionId,
-) {
-    let current_config = configs
-        .load_current()
-        .await
-        .expect("load current config after activation commit")
-        .expect("current config must be visible after commit");
-    assert_eq!(
-        &current_config.runtime_config_version_id,
-        expected_version_id
-    );
-    let before_activation = configs
-        .load_active_at(activated.activated_at - Duration::microseconds(1))
-        .await
-        .expect("load config immediately before activation");
-    assert!(before_activation.is_none());
-    let active_at_boundary = configs
-        .load_active_at(activated.activated_at)
-        .await
-        .expect("load config at database activation boundary")
-        .expect("config must be visible at activation boundary");
-    assert_eq!(
-        &active_at_boundary.runtime_config_version_id,
-        expected_version_id
-    );
-    let current_activation = configs
-        .load_current_activation()
-        .await
-        .expect("load current activation")
-        .expect("current activation must be visible");
-    assert_eq!(
-        current_activation.runtime_config_activation_id,
-        activated.runtime_config_activation_id
-    );
-}
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn bootstrap_transitions_are_monotonic_restart_safe_and_approval_bound() {
+async fn bootstrap_transitions_are_monotonic_restart_safe_and_policy_bundle_bound() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let state = PgSystemRuntimeStateRepository::new(db.clone());
-    let configs = PgRuntimeConfigVersionRepository::new(db.clone());
+    let policies = PgPolicyRepository::new(db.clone());
 
     let collecting = state
         .begin_baseline_collection()
@@ -100,47 +51,34 @@ async fn bootstrap_transitions_are_monotonic_restart_safe_and_approval_bound() {
     );
     assert_eq!(awaiting_restart.state_revision, 2);
 
-    let config_json = RuntimeConfig::default().to_json();
-    let config_hash = CanonicalDigest::content_hash_json(&config_json).expect("config hash");
-    let version_id = RuntimeConfigVersionId::from_v7();
-    configs
-        .create_version(NewRuntimeConfigVersion {
-            runtime_config_version_id: version_id.clone(),
-            config_hash: config_hash.clone(),
-            schema_version: RUNTIME_CONFIG_SCHEMA_VERSION,
-            config_json,
-            source: RuntimeConfigVersionSource::Operator,
-            created_by: "config-author".to_owned(),
-            reason: "bootstrap integration fixture".to_owned(),
-        })
+    let snapshot_id = bootstrap_default_policy_bundle(
+        &db,
+        "bootstrap-policy-author",
+        "typed boot policy fixture",
+    )
+    .await;
+    let latest_activation = policies
+        .load_current_activation(None)
         .await
-        .expect("create runtime config");
-    let approval_id = RuntimeConfigApprovalId::from_v7();
-    configs
-        .record_approval(NewRuntimeConfigApproval {
-            runtime_config_approval_id: approval_id.clone(),
-            runtime_config_version_id: version_id.clone(),
-            config_hash,
-            decision: RuntimeConfigApprovalDecision::Approved,
-            decided_by: "approver".to_owned(),
-            reason: "reviewed exact bootstrap config".to_owned(),
-            decided_at: Utc::now(),
-            expires_at: None,
-        })
+        .expect("load latest policy activation")
+        .expect("six-resource bundle has activations");
+    let first_activation_at = policies
+        .list_activations(None, 10)
         .await
-        .expect("record config approval");
+        .expect("list policy activations")
+        .into_iter()
+        .map(|activation| activation.activated_at)
+        .min()
+        .expect("six-resource bundle has activations");
 
     let stale_revision = state
         .activate_bootstrap(ActivateBootstrapState {
-            runtime_config_version_id: version_id.clone(),
-            runtime_config_approval_id: approval_id.clone(),
             bootstrap_contract_version: awaiting.bootstrap_contract_version,
             expected_state_revision: awaiting.state_revision - 1,
-            actor: "activator".to_owned(),
+            actor: "bootstrap-operator".to_owned(),
             acting_role: "system-operator".to_owned(),
             reason: "stale activation attempt".to_owned(),
             report_only_forced_ack: true,
-            require_approver_activator_separation: true,
         })
         .await;
     assert!(stale_revision.is_err());
@@ -154,39 +92,42 @@ async fn bootstrap_transitions_are_monotonic_restart_safe_and_approval_bound() {
         2
     );
 
-    let same_operator = state
-        .activate_bootstrap(ActivateBootstrapState {
-            runtime_config_version_id: version_id.clone(),
-            runtime_config_approval_id: approval_id.clone(),
-            bootstrap_contract_version: awaiting.bootstrap_contract_version,
-            expected_state_revision: awaiting.state_revision,
-            actor: "approver".to_owned(),
-            acting_role: "system-operator".to_owned(),
-            reason: "separation violation".to_owned(),
-            report_only_forced_ack: true,
-            require_approver_activator_separation: true,
-        })
-        .await;
-    assert!(same_operator.is_err());
-
-    let expected_version_id = version_id.clone();
     let activated = state
         .activate_bootstrap(ActivateBootstrapState {
-            runtime_config_version_id: version_id,
-            runtime_config_approval_id: approval_id.clone(),
             bootstrap_contract_version: awaiting.bootstrap_contract_version,
             expected_state_revision: awaiting.state_revision,
-            actor: "activator".to_owned(),
+            actor: "bootstrap-operator".to_owned(),
             acting_role: "system-operator".to_owned(),
             reason: "explicit cold-start activation".to_owned(),
             report_only_forced_ack: true,
-            require_approver_activator_separation: true,
         })
         .await
         .expect("activate bootstrap");
     assert_eq!(activated.state.bootstrap_phase, BootstrapPhase::Active);
     assert_eq!(activated.state.state_revision, 3);
-    assert_activation_visibility(&configs, &activated, &expected_version_id).await;
+
+    let current = policies
+        .load_current()
+        .await
+        .expect("load active policy bundle")
+        .expect("active policy bundle");
+    assert_eq!(current.decision_policy_snapshot_id, snapshot_id);
+    assert!(
+        policies
+            .load_active_at(first_activation_at - Duration::microseconds(1))
+            .await
+            .expect("load policy before final resource activation")
+            .is_none()
+    );
+    assert_eq!(
+        policies
+            .load_active_at(latest_activation.activated_at)
+            .await
+            .expect("load policy at activation boundary")
+            .expect("policy is active at boundary")
+            .decision_policy_snapshot_id,
+        snapshot_id
+    );
 
     let active_restart = state
         .begin_baseline_collection()
@@ -211,8 +152,5 @@ async fn bootstrap_transitions_are_monotonic_restart_safe_and_approval_bound() {
             .collect::<Vec<_>>(),
         vec![1, 2, 3]
     );
-    assert_eq!(
-        transitions[2].runtime_config_approval_id.as_ref(),
-        Some(&approval_id)
-    );
+    assert!(transitions[2].report_only_forced_ack);
 }

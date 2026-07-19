@@ -14,7 +14,7 @@ use crate::{
         CalibrationArtifactInfo, CalibrationArtifactListQuery, FitBiasTableRequest,
         FitModelCalibratorRequest, JobProgressSink, ModelCalibrationFitPreflightView, Paginated,
     },
-    types::{CalibrationArtifactId, ModelVersionId, RuntimeConfigVersionId, TrainingDatasetId},
+    types::{CalibrationArtifactId, DecisionPolicySnapshotId, ModelVersionId, TrainingDatasetId},
 };
 use quant_pivot_error::QuantResult;
 
@@ -28,7 +28,7 @@ pub struct BiasTableFitJobParams {
     /// The operator's fit request (window + reason).
     pub request: FitBiasTableRequest,
     /// Frozen runtime-config version governing the fit parameters.
-    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
 }
 
 /// Terminal outcome of a bias-table fit.
@@ -92,7 +92,7 @@ pub struct ModelCalibrationFitJobParams {
     /// Frozen runtime-config version the backtest-replay harness runs under
     /// (feature/factor recomputation + portfolio caps) — deterministic on
     /// replay, mirrors `BiasTableFitJobParams`.
-    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
 }
 
 /// Terminal outcome of a model-score calibrator fit.

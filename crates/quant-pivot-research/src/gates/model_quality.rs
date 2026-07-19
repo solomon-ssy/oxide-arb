@@ -1171,8 +1171,8 @@ mod tests {
     use quant_pivot_models::{
         enums::model::ModelFamily,
         types::{
-            BacktestReportId, ContentHash, MarketId, ModelVersionId, Probability,
-            RuntimeConfigVersionId, TokenId,
+            BacktestReportId, ContentHash, DecisionPolicySnapshotId, MarketId, ModelVersionId,
+            Probability, TokenId,
         },
     };
     use rust_decimal_macros::dec;
@@ -1192,7 +1192,7 @@ mod tests {
         BacktestReport {
             backtest_report_id: BacktestReportId::from_v7(),
             model_version_id: ModelVersionId::from_v7(),
-            runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
+            decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
             window_start: Utc::now(),
             window_end: Utc::now(),
             coverage: dec!(0.99),

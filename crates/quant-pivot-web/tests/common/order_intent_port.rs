@@ -9,13 +9,13 @@ use quant_pivot_core::{
     },
     governance::{CoreCalibrationArtifactLoader, KillSwitchHandle, RuntimeModeHandle},
     observability::metrics_hub::MetricsHub,
-    runtime_config::RuntimeConfigStore,
+    runtime_config::DecisionPolicyStore,
     service::feature_integrity::FeatureParityGatePort,
 };
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     enums::{execution::KillSwitchState, quant::QuantRuntimeMode},
-    runtime_config::RuntimeConfig,
+    runtime_config::DecisionPolicySnapshot,
 };
 use quant_pivot_repository::{
     postgres::{
@@ -55,11 +55,11 @@ pub fn build_order_intent_service(
 ) -> (
     Arc<CoreOrderIntentService>,
     Arc<dyn ArtifactStore>,
-    Arc<RuntimeConfigStore>,
+    Arc<DecisionPolicyStore>,
 ) {
     let runtime_mode = RuntimeModeHandle::new(QuantRuntimeMode::SemiAuto);
     let kill_switch = KillSwitchHandle::new(KillSwitchState::Closed);
-    let config = Arc::new(RuntimeConfigStore::new(RuntimeConfig::default()));
+    let config = Arc::new(DecisionPolicyStore::new(DecisionPolicySnapshot::default()));
     let mode_gate: Arc<dyn RuntimeModeGate> =
         Arc::new(DefaultRuntimeModeGate::new(Arc::clone(&config)));
     let artifact_store = Arc::new(LocalArtifactStore::new(std::env::temp_dir().join(format!(

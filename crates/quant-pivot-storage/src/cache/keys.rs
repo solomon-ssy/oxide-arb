@@ -4,7 +4,7 @@
 //! (Redis), and a domain label for metrics partitioning. L1 (Moka) TTL is
 //! derived as `ttl / 4` by the [`TieredCache`] layer.
 
-use quant_pivot_models::types::{EventId, MarketId, RuntimeConfigVersionId};
+use quant_pivot_models::types::{EventId, MarketId};
 use std::time::Duration;
 
 /// Strongly-typed cache key encompassing all cacheable domains.
@@ -21,13 +21,6 @@ pub enum CacheKey {
 
     /// Market metadata used by detection and scoring (category, deadline).
     MarketMetadata { market_id: MarketId },
-
-    // ── Configuration ───────────────────────────────────────────────────
-    /// Active runtime configuration version document.
-    ActiveRuntimeConfig,
-
-    /// Immutable runtime configuration version document by ID.
-    RuntimeConfigVersion { version_id: RuntimeConfigVersionId },
 }
 
 impl CacheKey {
@@ -37,8 +30,6 @@ impl CacheKey {
             Self::MarketInfo { market_id } => format!("mkt:{market_id}"),
             Self::EventInfo { event_id } => format!("evt:{event_id}"),
             Self::MarketMetadata { market_id } => format!("mkt_meta:{market_id}"),
-            Self::ActiveRuntimeConfig => "cfg:active".to_owned(),
-            Self::RuntimeConfigVersion { version_id } => format!("cfg:version:{version_id}"),
         }
     }
 
@@ -49,7 +40,6 @@ impl CacheKey {
         match self {
             Self::MarketInfo { .. } | Self::EventInfo { .. } => Duration::from_mins(5),
             Self::MarketMetadata { .. } => Duration::from_mins(30),
-            Self::ActiveRuntimeConfig | Self::RuntimeConfigVersion { .. } => Duration::from_mins(1),
         }
     }
 
@@ -59,7 +49,6 @@ impl CacheKey {
             Self::MarketInfo { .. } => "market",
             Self::EventInfo { .. } => "event",
             Self::MarketMetadata { .. } => "market_metadata",
-            Self::ActiveRuntimeConfig | Self::RuntimeConfigVersion { .. } => "config",
         }
     }
 }

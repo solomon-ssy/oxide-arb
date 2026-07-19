@@ -18,10 +18,10 @@ use quant_pivot_models::{
         BacktestPathSetInfo, BacktestPathSetListQuery, BacktestReportInfo, BacktestReportListQuery,
         CollinearPairView, ComparisonReportListQuery, FactorCollinearitySource,
         FactorCollinearityView, FactorDefinitionInfo, FactorDefinitionListQuery,
-        ModelComparisonReportInfo, ModelPickerSide, ModelPublishedCatalogQuery, ModelSpecInfo,
-        ModelSpecListQuery, ModelVersionInfo, ModelVersionListQuery, Paginated,
-        PublishedModelOptionView, ResearchCatalogPort, TrainingDatasetInfo,
-        TrainingDatasetListQuery, pagination::PageRequest,
+        ModelComparisonReportInfo, ModelPublishedCatalogQuery, ModelSpecInfo, ModelSpecListQuery,
+        ModelVersionInfo, ModelVersionListQuery, Paginated, PublishedModelOptionView,
+        ResearchCatalogPort, TrainingDatasetInfo, TrainingDatasetListQuery,
+        pagination::PageRequest,
     },
     enums::{common::MarketCategory, quant::PublicationStatus},
     types::{FactorDefinitionId, MarketId, Probability},
@@ -30,12 +30,8 @@ use quant_pivot_repository::traits::{
     BacktestPathSetRepository, BacktestReportRepository, FactorRepository, MarketRepository,
     ModelComparisonReportRepository, ModelRegistryRepository, TrainingDatasetRepository,
 };
-use quant_pivot_research::{
-    artifact::ArtifactStore,
-    factors::{
-        FactorCollinearityAnalyzer, FactorName, FactorObservationMatrix, neutralize_by_group,
-    },
-    model::load_hash_verified_artifact,
+use quant_pivot_research::factors::{
+    FactorCollinearityAnalyzer, FactorName, FactorObservationMatrix, neutralize_by_group,
 };
 use rust_decimal::Decimal;
 
@@ -44,12 +40,6 @@ use crate::app::bundles::ResearchBundle;
 /// Ceiling on how many published factor definitions the collinearity analysis
 /// pulls in one page (the generic factor set is a dozen; this is generous).
 const COLLINEARITY_DEFINITION_LIMIT: u64 = 500;
-
-/// Ceiling on how many `Published` model versions the picker catalog loads in
-/// one pass. The governed registry is a human-curated handful of models, not
-/// a market-scale collection; generous enough that a real deployment never
-/// truncates silently.
-const PUBLISHED_CATALOG_LIMIT: u64 = 500;
 
 /// Read-only research catalog port wired from the research bundle repositories.
 pub struct CoreResearchCatalogPort {
@@ -60,7 +50,6 @@ pub struct CoreResearchCatalogPort {
     comparisons: Arc<dyn ModelComparisonReportRepository>,
     factors: Arc<dyn FactorRepository>,
     markets: Arc<dyn MarketRepository>,
-    artifact_store: Arc<dyn ArtifactStore>,
 }
 
 impl CoreResearchCatalogPort {
@@ -75,7 +64,6 @@ impl CoreResearchCatalogPort {
             comparisons: Arc::clone(&research.comparison_report_repo),
             factors: Arc::clone(&research.factor_repo),
             markets: Arc::clone(&research.market_repo),
-            artifact_store: Arc::clone(&research.artifact_store),
         }
     }
 
@@ -147,87 +135,24 @@ impl ResearchCatalogPort for CoreResearchCatalogPort {
         &self,
         query: ModelPublishedCatalogQuery,
     ) -> QuantResult<Vec<PublishedModelOptionView>> {
-        let versions = self
-            .models
-            .page_versions(ModelVersionListQuery {
-                model_spec_id: None,
-                publication_status: Some(PublicationStatus::Published),
-                from: None,
-                to: None,
-                page: PageRequest {
-                    page: 1,
-                    size: PUBLISHED_CATALOG_LIMIT,
-                },
-            })
+        self.models
+            .list_published_catalog(query.side, query.category)
             .await
-            .map_err(QuantError::from)?
-            .items;
-
-        let mut unique_spec_ids = HashSet::new();
-        for version in &versions {
-            unique_spec_ids.insert(version.model_spec_id.clone());
-        }
-        let mut specs_by_id = HashMap::with_capacity(unique_spec_ids.len());
-        for model_spec_id in unique_spec_ids {
-            if let Some(spec) = self
-                .models
-                .find_model_spec_by_id(&model_spec_id)
-                .await
-                .map_err(QuantError::from)?
-            {
-                specs_by_id.insert(model_spec_id, spec);
-            }
-        }
-
-        let mut options = Vec::with_capacity(versions.len());
-        for version in versions {
-            let matches_side = match query.side {
-                ModelPickerSide::Buy => !version.model_family.is_exit_scorer(),
-                ModelPickerSide::Sell => version.model_family.is_exit_scorer(),
-            };
-            if !matches_side {
-                continue;
-            }
-            let Some(spec) = specs_by_id.get(&version.model_spec_id) else {
-                tracing::warn!(
-                    model_version_id = %version.model_version_id,
-                    "published version's spec not found; excluded from the picker catalog"
-                );
-                continue;
-            };
-            let category_scope = match load_hash_verified_artifact(&self.artifact_store, &version)
-                .await
-            {
-                Ok(artifact) => artifact.category_scope(),
-                Err(error) => {
-                    tracing::warn!(
-                        model_version_id = %version.model_version_id, %error,
-                        "published version's artifact failed to load; excluded from the picker catalog"
-                    );
-                    continue;
-                }
-            };
-            if let Some(category) = query.category
-                && category_scope.is_some_and(|scope| scope != category)
-            {
-                continue;
-            }
-            options.push(PublishedModelOptionView {
-                model_version_id: version.model_version_id,
-                model_spec_id: version.model_spec_id,
-                spec_name: spec.name.clone(),
-                version: version.version,
-                model_family: version.model_family.as_str().to_owned(),
-                category_scope,
-                published_at: version.published_at,
-            });
-        }
-        options.sort_by(|left, right| {
-            left.spec_name
-                .cmp(&right.spec_name)
-                .then_with(|| right.version.cmp(&left.version))
-        });
-        Ok(options)
+            .map_err(QuantError::from)
+            .map(|rows| {
+                rows.into_iter()
+                    .map(|row| PublishedModelOptionView {
+                        model_version_id: row.model_version_id,
+                        model_spec_id: row.model_spec_id,
+                        spec_name: row.spec_name,
+                        version: row.version,
+                        artifact_hash: row.artifact_hash,
+                        model_family: row.model_family,
+                        category_scope: row.category_scope,
+                        published_at: row.published_at,
+                    })
+                    .collect()
+            })
     }
 
     async fn list_backtest_reports(

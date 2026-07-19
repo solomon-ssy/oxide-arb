@@ -8,9 +8,9 @@ use crate::{
     },
     hashing::CanonicalDigest,
     types::{
-        ContentHash, FeatureParityRunId, FeatureParityStateId, MarketId, MarketSelectionId,
-        ModelRunId, ModelSpecId, ModelVersionId, PortfolioPlanId, RecommendationReportId,
-        ReportDataQualitySnapshotId, RuntimeConfigVersionId, TrainingDatasetId,
+        ContentHash, DecisionPolicySnapshotId, FeatureParityRunId, FeatureParityStateId, MarketId,
+        MarketSelectionId, ModelRunId, ModelSpecId, ModelVersionId, PortfolioPlanId,
+        RecommendationReportId, ReportDataQualitySnapshotId, TrainingDatasetId,
     },
 };
 use chrono::{DateTime, Utc};
@@ -199,7 +199,7 @@ pub fn model_run_parity_evidence_hash(
     input_hash: &ContentHash,
     output_hash: &ContentHash,
     model_version_id: &Option<ModelVersionId>,
-    runtime_config_version_id: &RuntimeConfigVersionId,
+    decision_policy_snapshot_id: &DecisionPolicySnapshotId,
 ) -> Result<ContentHash, CanonicalDigestError> {
     #[derive(Serialize)]
     struct Evidence<'a> {
@@ -207,7 +207,7 @@ pub fn model_run_parity_evidence_hash(
         input_hash: &'a ContentHash,
         output_hash: &'a ContentHash,
         model_version_id: &'a Option<ModelVersionId>,
-        runtime_config_version_id: &'a RuntimeConfigVersionId,
+        decision_policy_snapshot_id: &'a DecisionPolicySnapshotId,
     }
 
     CanonicalDigest::content_hash_typed(
@@ -218,7 +218,7 @@ pub fn model_run_parity_evidence_hash(
             input_hash,
             output_hash,
             model_version_id,
-            runtime_config_version_id,
+            decision_policy_snapshot_id,
         },
     )
 }
@@ -251,7 +251,7 @@ pub fn report_parity_generation_hash(
 pub fn report_parity_evidence_hash(
     generation: &ContentHash,
     model_version_id: &ModelVersionId,
-    runtime_config_version_id: &RuntimeConfigVersionId,
+    decision_policy_snapshot_id: &DecisionPolicySnapshotId,
     market_selection_id: &MarketSelectionId,
     data_quality_snapshot_id: &ReportDataQualitySnapshotId,
     portfolio_plan_id: &PortfolioPlanId,
@@ -260,7 +260,7 @@ pub fn report_parity_evidence_hash(
     struct Evidence<'a> {
         generation: &'a ContentHash,
         model_version_id: &'a ModelVersionId,
-        runtime_config_version_id: &'a RuntimeConfigVersionId,
+        decision_policy_snapshot_id: &'a DecisionPolicySnapshotId,
         market_selection_id: &'a MarketSelectionId,
         data_quality_snapshot_id: &'a ReportDataQualitySnapshotId,
         portfolio_plan_id: &'a PortfolioPlanId,
@@ -272,7 +272,7 @@ pub fn report_parity_evidence_hash(
         &Evidence {
             generation,
             model_version_id,
-            runtime_config_version_id,
+            decision_policy_snapshot_id,
             market_selection_id,
             data_quality_snapshot_id,
             portfolio_plan_id,

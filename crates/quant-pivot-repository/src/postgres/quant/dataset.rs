@@ -277,7 +277,7 @@ fn validate_manifest_binding(
     let bound = manifest.format_version == DATASET_ARTIFACT_FORMAT_VERSION
         && manifest.training_dataset_id == row.training_dataset_id
         && manifest.model_spec_id == row.model_spec_id
-        && manifest.runtime_config_version_id == row.runtime_config_version_id
+        && manifest.decision_policy_snapshot_id == row.decision_policy_snapshot_id
         && manifest.window_start == row.window_start
         && manifest.window_end == row.window_end
         && manifest.purpose == row.purpose

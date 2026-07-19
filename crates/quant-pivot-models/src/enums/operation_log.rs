@@ -6,7 +6,7 @@ pg_enum! {
         Auth => "auth",
         Rbac => "rbac",
         Governance => "governance",
-        RuntimeConfig => "runtime_config",
+        DecisionPolicySnapshot => "config",
         System => "system",
         Risk => "risk",
         QuantReport => "quant_report",

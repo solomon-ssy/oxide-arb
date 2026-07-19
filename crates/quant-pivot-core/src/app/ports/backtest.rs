@@ -11,15 +11,14 @@ use quant_pivot_models::{
         BacktestPort, BacktestReportView, JobProgressSink, ModelComparisonReportInfo,
         RunBacktestRequest,
     },
-    runtime_config::RuntimeConfig,
+    runtime_config::DecisionPolicySnapshot,
     types::{
-        BacktestReportId, Bps, ModelComparisonReportId, ModelVersionId, RuntimeConfigVersionId,
+        BacktestReportId, Bps, DecisionPolicySnapshotId, ModelComparisonReportId, ModelVersionId,
     },
 };
 use quant_pivot_repository::traits::{
     BacktestReportRepository, CalibrationArtifactRepository, ModelComparisonReportRepository,
-    ModelRegistryRepository, ModelRunRepository, RuntimeConfigVersionRepository,
-    TrainingDatasetRepository,
+    ModelRegistryRepository, ModelRunRepository, PolicyRepository, TrainingDatasetRepository,
 };
 use quant_pivot_research::{artifact::ArtifactStore, model::ModelRuntimeFactoryBuilder};
 use rust_decimal::Decimal;
@@ -41,7 +40,7 @@ pub struct CoreBacktestPort {
     backtest_report_repo: Arc<dyn BacktestReportRepository>,
     comparison_report_repo: Arc<dyn ModelComparisonReportRepository>,
     factory_builder: Arc<dyn ModelRuntimeFactoryBuilder>,
-    runtime_config: Arc<dyn RuntimeConfigVersionRepository>,
+    runtime_config: Arc<dyn PolicyRepository>,
     bias_table_repo: Arc<dyn CalibrationArtifactRepository>,
 }
 
@@ -50,7 +49,7 @@ impl CoreBacktestPort {
     #[must_use]
     pub fn from_research(
         research: &ResearchBundle,
-        runtime_config: Arc<dyn RuntimeConfigVersionRepository>,
+        runtime_config: Arc<dyn PolicyRepository>,
         bias_table_repo: Arc<dyn CalibrationArtifactRepository>,
     ) -> Self {
         Self {
@@ -73,11 +72,16 @@ impl CoreBacktestPort {
     /// (Phase 11.3 §4) — one construction path, never duplicated.
     pub async fn backtest_service_for(
         &self,
-        runtime_config_version_id: &RuntimeConfigVersionId,
+        decision_policy_snapshot_id: &DecisionPolicySnapshotId,
     ) -> QuantResult<BacktestService> {
-        let runtime = self.load_runtime_config(runtime_config_version_id).await?;
-        let bias_table =
-            resolve_frozen_bias_table(self.bias_table_repo.as_ref(), &runtime.factors).await?;
+        let runtime = self
+            .load_runtime_config(decision_policy_snapshot_id)
+            .await?;
+        let bias_table = resolve_frozen_bias_table(
+            self.bias_table_repo.as_ref(),
+            &runtime.profile_artifacts.scoring.definition,
+        )
+        .await?;
         BacktestService::new(
             BacktestServiceDeps {
                 dataset_repo: Arc::clone(&self.dataset_repo),
@@ -88,27 +92,27 @@ impl CoreBacktestPort {
                 comparison_report_repo: Arc::clone(&self.comparison_report_repo),
                 factory_builder: Arc::clone(&self.factory_builder),
             },
-            &runtime.portfolio,
+            &runtime.execution_risk.portfolio,
             bias_table.map(|table| table.content_hash.clone()),
             Bps::new(Decimal::from(
-                runtime.execution.entry_order_policy.max_slippage_bps,
+                runtime.execution_risk.entry_order_policy.max_slippage_bps,
             )),
         )
     }
 
     async fn load_runtime_config(
         &self,
-        runtime_config_version_id: &RuntimeConfigVersionId,
-    ) -> QuantResult<RuntimeConfig> {
+        decision_policy_snapshot_id: &DecisionPolicySnapshotId,
+    ) -> QuantResult<DecisionPolicySnapshot> {
         let version = self
             .runtime_config
-            .load_version(runtime_config_version_id)
+            .load_snapshot(decision_policy_snapshot_id)
             .await?
             .ok_or_else(|| StorageError::NotFound {
-                entity: "runtime_config_version",
-                id: runtime_config_version_id.to_string(),
+                entity: "decision_policy_snapshot",
+                id: decision_policy_snapshot_id.to_string(),
             })?;
-        RuntimeConfig::from_json(&version.config_json).map_err(Into::into)
+        Ok(version.snapshot)
     }
 }
 
@@ -127,12 +131,12 @@ impl BacktestPort for CoreBacktestPort {
             return Ok(view);
         }
         let service = self
-            .backtest_service_for(&request.runtime_config_version_id)
+            .backtest_service_for(&request.decision_policy_snapshot_id)
             .await?;
         let input = BacktestInput {
             model_version_id,
             training_dataset_id: request.training_dataset_id,
-            runtime_config_version_id: request.runtime_config_version_id,
+            decision_policy_snapshot_id: request.decision_policy_snapshot_id,
             calibrate: request.calibrate,
             backtest_report_id: request.backtest_report_id,
         };

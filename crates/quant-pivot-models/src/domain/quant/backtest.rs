@@ -3,8 +3,8 @@
 use crate::{
     entities::quant_backtest_report,
     types::{
-        BacktestReportId, ContentHash, ModelRunId, ModelVersionId, Probability,
-        RuntimeConfigVersionId,
+        BacktestReportId, ContentHash, DecisionPolicySnapshotId, ModelRunId, ModelVersionId,
+        Probability,
     },
 };
 use chrono::{DateTime, Utc};
@@ -19,7 +19,7 @@ pub struct BacktestReportInfo {
     pub backtest_report_id: BacktestReportId,
     pub model_version_id: ModelVersionId,
     pub model_run_id: ModelRunId,
-    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub window_start: DateTime<Utc>,
     pub window_end: DateTime<Utc>,
     pub coverage: Decimal,
@@ -47,7 +47,7 @@ info_from_model!(
         backtest_report_id,
         model_version_id,
         model_run_id,
-        runtime_config_version_id,
+        decision_policy_snapshot_id,
         window_start,
         window_end,
         coverage,
@@ -78,7 +78,7 @@ pub struct NewBacktestReport {
     pub backtest_report_id: BacktestReportId,
     pub model_version_id: ModelVersionId,
     pub model_run_id: ModelRunId,
-    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub window_start: DateTime<Utc>,
     pub window_end: DateTime<Utc>,
     pub coverage: Decimal,

@@ -1,16 +1,24 @@
 //! Quant model registry HTTP contract types.
 
 use crate::{
-    domain::{ModelPickerSide, ModelSpecInfo, pagination::PageRequest},
+    domain::{ModelSpecInfo, pagination::PageRequest},
     enums::{common::MarketCategory, model::ModelFamily, quant::PublicationStatus},
     types::{
-        ModelInputContract, ModelSpecId, ModelTrainingContract, ModelVersionId, SchemaVersion,
+        ContentHash, ModelInputContract, ModelSpecId, ModelTrainingContract, ModelVersionId,
+        SchemaVersion,
     },
 };
 use chrono::{DateTime, Utc};
 use quant_pivot_macros::NormalizePageQuery;
 use serde::{Deserialize, Serialize};
 use validator::Validate;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelPickerSide {
+    Buy,
+    Sell,
+}
 
 /// Inbound body for `POST /research/model-specs`.
 ///
@@ -58,7 +66,7 @@ const fn default_schema_version() -> SchemaVersion {
 }
 
 const fn default_feature_schema_version() -> SchemaVersion {
-    SchemaVersion::new(7)
+    SchemaVersion::FIRST
 }
 
 /// Outbound projection for a model specification row (the training entry point:
@@ -130,7 +138,8 @@ pub struct PublishedModelOptionView {
     pub model_spec_id: ModelSpecId,
     pub spec_name: String,
     pub version: i32,
-    pub model_family: String,
+    pub artifact_hash: ContentHash,
+    pub model_family: ModelFamily,
     /// The artifact's own declared scope (`None` = generic cross-category).
     pub category_scope: Option<MarketCategory>,
     pub published_at: Option<DateTime<Utc>>,
@@ -139,6 +148,7 @@ pub struct PublishedModelOptionView {
 #[cfg(test)]
 mod tests {
     use super::CreateModelSpecRequest;
+    use crate::types::SchemaVersion;
 
     fn base_request() -> serde_json::Value {
         serde_json::json!({
@@ -160,7 +170,7 @@ mod tests {
     }
 
     #[test]
-    fn request_decodes_typed_contract_and_v6_feature_default() {
+    fn request_decodes_typed_contract_and_boot_feature_default() {
         let mut request = base_request();
         request["input_contract"] = serde_json::json!({
             "inputs": [{
@@ -170,7 +180,7 @@ mod tests {
         });
         let decoded = serde_json::from_value::<CreateModelSpecRequest>(request)
             .expect("typed model spec request");
-        assert_eq!(decoded.feature_schema_version.get(), 7);
+        assert_eq!(decoded.feature_schema_version, SchemaVersion::FIRST);
         assert_eq!(decoded.label_schema_version.get(), 1);
         assert_eq!(decoded.input_contract.inputs[0].feature_name, "book.mid");
     }

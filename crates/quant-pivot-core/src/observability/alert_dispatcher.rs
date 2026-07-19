@@ -3,10 +3,15 @@
 use arc_swap::{ArcSwap, ArcSwapOption};
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
+use quant_pivot_error::{QuantResult, config::ConfigError};
 use quant_pivot_models::{
+    config::{NotificationChannelsConfig, secret::SecretText},
     domain::{CoreEvent, CoreEventPublisher, SystemAlertEvent},
     enums::common::{AlertCategory, AlertLevel, AlertSource},
-    runtime_config::NotificationConfig,
+};
+use reqwest::{
+    Url,
+    header::{AUTHORIZATION, HeaderValue},
 };
 use std::{
     sync::{Arc, Mutex},
@@ -94,10 +99,11 @@ struct TelegramChannel {
 
 struct WebhookChannel {
     client: reqwest::Client,
-    url: String,
+    url: Url,
+    authorization: Option<HeaderValue>,
 }
 
-/// Hot-swappable channel set + cooldown derived from [`NotificationConfig`].
+/// Process-bound channel set resolved from deploy configuration.
 struct Channels {
     telegram: Option<TelegramChannel>,
     webhook: Option<WebhookChannel>,
@@ -105,34 +111,78 @@ struct Channels {
 }
 
 impl Channels {
-    fn from_config(config: &NotificationConfig) -> Self {
-        let token = config.telegram.bot_token.trim();
+    fn from_config(config: &NotificationChannelsConfig) -> QuantResult<Self> {
+        let token = config
+            .telegram
+            .bot_token_credential
+            .resolve_optional("notifications.telegram.bot_token_credential")?;
         let chat = config.telegram.chat_id.trim();
-        let telegram = if token.is_empty() {
-            None
-        } else {
-            chat.parse().ok().map(|chat_id: i64| TelegramChannel {
-                bot: Bot::new(token),
-                chat_id: ChatId(chat_id),
+        let telegram = token
+            .as_ref()
+            .map(|token| {
+                let chat_id = chat
+                    .parse::<i64>()
+                    .map_err(|error| ConfigError::InvalidValue {
+                        field: "notifications.telegram.chat_id".to_owned(),
+                        reason: error.to_string(),
+                    })?;
+                Ok::<_, ConfigError>(TelegramChannel {
+                    bot: Bot::new(token.expose_secret()),
+                    chat_id: ChatId(chat_id),
+                })
             })
-        };
+            .transpose()?;
 
         let url = config.webhook.url.trim();
+        let authorization = config
+            .webhook
+            .authorization_credential
+            .resolve_optional("notifications.webhook.authorization_credential")?;
+        if url.is_empty() && authorization.is_some() {
+            return Err(ConfigError::MissingField {
+                section: "notifications.webhook".to_owned(),
+                field: "url".to_owned(),
+            }
+            .into());
+        }
         let webhook = if url.is_empty() {
             None
         } else {
+            let parsed = Url::parse(url).map_err(|error| ConfigError::InvalidValue {
+                field: "notifications.webhook.url".to_owned(),
+                reason: error.to_string(),
+            })?;
+            if parsed.scheme() != "https" {
+                return Err(ConfigError::InvalidValue {
+                    field: "notifications.webhook.url".to_owned(),
+                    reason: "operator webhooks require HTTPS".to_owned(),
+                }
+                .into());
+            }
             Some(WebhookChannel {
                 client: reqwest::Client::new(),
-                url: url.to_owned(),
+                url: parsed,
+                authorization: authorization.as_ref().map(secret_header).transpose()?,
             })
         };
 
-        Self {
+        Ok(Self {
             telegram,
             webhook,
             cooldown_duration: Duration::from_mins(1),
-        }
+        })
     }
+}
+
+fn secret_header(secret: &SecretText) -> QuantResult<HeaderValue> {
+    let mut value = HeaderValue::from_str(secret.expose_secret()).map_err(|error| {
+        ConfigError::InvalidValue {
+            field: "notifications.webhook.authorization_credential".to_owned(),
+            reason: error.to_string(),
+        }
+    })?;
+    value.set_sensitive(true);
+    Ok(value)
 }
 
 pub struct AlertDispatcher {
@@ -143,21 +193,14 @@ pub struct AlertDispatcher {
 }
 
 impl AlertDispatcher {
-    /// Build the dispatcher from the runtime notification config.
-    #[must_use]
-    pub fn new(config: &NotificationConfig) -> Self {
-        Self {
-            channels: ArcSwap::from_pointee(Channels::from_config(config)),
+    /// Resolve process-bound notification channels from deploy configuration.
+    pub fn new(config: &NotificationChannelsConfig) -> QuantResult<Self> {
+        Ok(Self {
+            channels: ArcSwap::from_pointee(Channels::from_config(config)?),
             events: ArcSwapOption::empty(),
             cooldown: DashMap::new(),
             recordings: None,
-        }
-    }
-
-    /// Hot-reload channels + cooldown (runtime-config activation). Rebuilds
-    /// the Telegram bot / webhook client; in-flight cooldown stamps persist.
-    pub fn reload(&self, config: &NotificationConfig) {
-        self.channels.store(Arc::new(Channels::from_config(config)));
+        })
     }
 
     #[must_use]
@@ -298,9 +341,11 @@ async fn send_webhook(channels: &Channels, alert: &Alert) {
         "affects_trading": alert.affects_trading,
         "timestamp": alert.timestamp.to_rfc3339(),
     });
-    let result = wh
-        .client
-        .post(&wh.url)
+    let mut request = wh.client.post(wh.url.clone());
+    if let Some(authorization) = &wh.authorization {
+        request = request.header(AUTHORIZATION, authorization.clone());
+    }
+    let result = request
         .json(&payload)
         .timeout(Duration::from_secs(5))
         .send()
@@ -314,10 +359,7 @@ async fn send_webhook(channels: &Channels, alert: &Alert) {
 mod tests {
     use super::{Alert, AlertDispatcher};
     use chrono::Utc;
-    use quant_pivot_models::{
-        enums::common::{AlertCategory, AlertLevel, AlertSource},
-        runtime_config::NotificationConfig,
-    };
+    use quant_pivot_models::enums::common::{AlertCategory, AlertLevel, AlertSource};
     use std::{
         sync::{Arc, Mutex},
         time::Duration,
@@ -356,35 +398,5 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(recorded_titles, ["same", "different"]);
-    }
-
-    /// `reload` must rebuild channel state while preserving cooldown stamps.
-    #[tokio::test]
-    async fn reload_applies_new_cooldown_from_config() {
-        let recordings = Arc::new(Mutex::new(Vec::new()));
-        let dispatcher = AlertDispatcher::with_recordings(Arc::clone(&recordings));
-
-        dispatcher.dispatch(alert("same")).await;
-        dispatcher.dispatch(alert("same")).await;
-        assert_eq!(recordings.lock().expect("lock").len(), 2);
-
-        let config = NotificationConfig::default();
-        dispatcher.reload(&config);
-
-        dispatcher.dispatch(alert("same")).await;
-        dispatcher.dispatch(alert("other")).await;
-
-        let recorded_titles = {
-            let guard = recordings.lock().expect("recordings lock");
-            guard
-                .iter()
-                .map(|alert| alert.title.clone())
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(
-            recorded_titles,
-            ["same", "same", "other"],
-            "post-reload duplicate must be suppressed by the new cooldown"
-        );
     }
 }

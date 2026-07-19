@@ -7,8 +7,8 @@ expression: empty_report()
   "profile_id": "weather_forecast_24h",
   "profile_ref": {
     "id": "weather_forecast_24h",
-    "version": 1,
-    "content_hash": "blake3:b3633262b9924ca589c5fd3fdbed564ffcbaf0a30933b03ae65e35bf941ee515"
+    "version": 2,
+    "content_hash": "blake3:664a9d825f72b61f2e2a22ff97aea9604f6bc5841ee88e233f64c851eb3abc04"
   },
   "report_kind": "top_n",
   "decision_at": "2023-11-14T22:11:20Z",
@@ -19,7 +19,7 @@ expression: empty_report()
   "account_source": "polymarket",
   "capital_base_usd": "10000",
   "account_snapshot_ref": "6412901d-5f81-5835-8ada-63231d3ffc4f",
-  "runtime_config_version_id": "731ac405-b5b5-5dee-96b2-67c8d184c177",
+  "decision_policy_snapshot_id": "731ac405-b5b5-5dee-96b2-67c8d184c177",
   "model_run_id": null,
   "model_version_id": "45641765-a964-5c43-b586-8330968f4c8c",
   "market_selection_id": "5c8ad0ca-ddea-5da4-9b57-8bd80bd64365",

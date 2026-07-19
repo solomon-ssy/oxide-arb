@@ -25,9 +25,9 @@ use quant_pivot_models::{
     },
     types::{
         ArtifactUri, BacktestReportId, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION,
-        DatasetCoverage, DatasetManifest, FactorDefinitionId, ModelComparisonReportId,
-        ModelInputContract, ModelRunId, ModelSpecId, ModelTrainingContract, ModelVersionId,
-        Probability, RuntimeConfigVersionId, SchemaVersion, TrainingDatasetId,
+        DatasetCoverage, DatasetManifest, DecisionPolicySnapshotId, FactorDefinitionId,
+        ModelComparisonReportId, ModelInputContract, ModelRunId, ModelSpecId,
+        ModelTrainingContract, ModelVersionId, Probability, SchemaVersion, TrainingDatasetId,
         TrainingHorizonsSecs, TrainingSampleSources, default_sample_sources,
     },
 };
@@ -106,7 +106,7 @@ pub async fn seed_research_ui_demo_pg(
     summary.datasets = seed_training_datasets(
         &datasets,
         &primary_spec_id,
-        &infra.runtime_config_version_id,
+        &infra.decision_policy_snapshot_id,
         &mut summary,
     )
     .await;
@@ -301,7 +301,7 @@ async fn seed_secondary_model_spec(registry: &PgModelRegistryRepository) -> usiz
 async fn seed_training_datasets(
     repo: &PgTrainingDatasetRepository,
     model_spec_id: &ModelSpecId,
-    runtime_config_version_id: &RuntimeConfigVersionId,
+    decision_policy_snapshot_id: &DecisionPolicySnapshotId,
     summary: &mut ResearchUiSeedSummary,
 ) -> usize {
     let scenarios: [(&str, TrainingDatasetStatus, i64); 6] = [
@@ -321,7 +321,7 @@ async fn seed_training_datasets(
         let dataset_id = seed_training_dataset_scenario(
             repo,
             model_spec_id,
-            runtime_config_version_id,
+            decision_policy_snapshot_id,
             slug,
             status,
             built_samples,
@@ -337,7 +337,7 @@ async fn seed_training_datasets(
     seed_training_dataset_scenario(
         repo,
         model_spec_id,
-        runtime_config_version_id,
+        decision_policy_snapshot_id,
         "policy-fit-blocked",
         TrainingDatasetStatus::Ready,
         11_200,
@@ -351,7 +351,7 @@ async fn seed_training_datasets(
 async fn seed_training_dataset_scenario(
     repo: &PgTrainingDatasetRepository,
     model_spec_id: &ModelSpecId,
-    runtime_config_version_id: &RuntimeConfigVersionId,
+    decision_policy_snapshot_id: &DecisionPolicySnapshotId,
     slug: &str,
     status: TrainingDatasetStatus,
     built_samples: i64,
@@ -393,7 +393,7 @@ async fn seed_training_dataset_scenario(
         horizons_secs: TrainingHorizonsSecs(horizons_secs.clone()),
         feature_schema_version: Some(SchemaVersion::new(7)),
         sample_sources: Some(TrainingSampleSources(default_sample_sources())),
-        runtime_config_version_id: runtime_config_version_id.clone(),
+        decision_policy_snapshot_id: decision_policy_snapshot_id.clone(),
     })
     .await
     .expect("create training dataset");
@@ -416,7 +416,7 @@ async fn seed_training_dataset_scenario(
                 model_spec_id: model_spec_id.clone(),
                 trade_policy_artifact_id: None,
                 trade_policy_hash: None,
-                runtime_config_version_id: runtime_config_version_id.clone(),
+                decision_policy_snapshot_id: decision_policy_snapshot_id.clone(),
                 window_start,
                 window_end,
                 purpose,
@@ -543,6 +543,7 @@ async fn create_model_version(
             model_spec_id: model_spec_id.clone(),
             version,
             artifact_hash: content_hash(&format!("artifact-research-{artifact_seed}")),
+            category_scope: None,
             profile_ref: fixture_profile_ref(),
             training_dataset_id,
             trade_policy_artifact_id: None,
@@ -592,7 +593,7 @@ async fn seed_backtest_reports(
         backtests,
         model_runs,
         &baseline_id,
-        &infra.runtime_config_version_id,
+        &infra.decision_policy_snapshot_id,
         BacktestSeedConfig {
             seed: "baseline",
             rank_ic: dec!(0.24),
@@ -607,7 +608,7 @@ async fn seed_backtest_reports(
         backtests,
         model_runs,
         &candidate_id,
-        &infra.runtime_config_version_id,
+        &infra.decision_policy_snapshot_id,
         BacktestSeedConfig {
             seed: "candidate",
             rank_ic: dec!(0.33),
@@ -626,7 +627,7 @@ async fn seed_backtest_reports(
             .shadow_model_version_id
             .as_ref()
             .expect("shadow version"),
-        &infra.runtime_config_version_id,
+        &infra.decision_policy_snapshot_id,
         BacktestSeedConfig {
             seed: "shadow",
             rank_ic: dec!(0.29),
@@ -652,11 +653,11 @@ async fn seed_one_backtest(
     backtests: &PgBacktestReportRepository,
     model_runs: &PgModelRunRepository,
     model_version_id: &ModelVersionId,
-    runtime_config_version_id: &RuntimeConfigVersionId,
+    decision_policy_snapshot_id: &DecisionPolicySnapshotId,
     config: BacktestSeedConfig,
 ) -> BacktestReportId {
     let model_run_id =
-        seed_backtest_run(model_runs, model_version_id, runtime_config_version_id).await;
+        seed_backtest_run(model_runs, model_version_id, decision_policy_snapshot_id).await;
     let backtest_report_id = BacktestReportId::from_v7();
     let window_start = Utc::now() - ChronoDuration::days(7);
     backtests
@@ -664,7 +665,7 @@ async fn seed_one_backtest(
             backtest_report_id: backtest_report_id.clone(),
             model_version_id: model_version_id.clone(),
             model_run_id,
-            runtime_config_version_id: runtime_config_version_id.clone(),
+            decision_policy_snapshot_id: decision_policy_snapshot_id.clone(),
             window_start,
             window_end: window_start + ChronoDuration::days(7),
             coverage: dec!(0.94),
@@ -694,7 +695,7 @@ async fn seed_one_backtest(
 async fn seed_backtest_run(
     model_runs: &PgModelRunRepository,
     model_version_id: &ModelVersionId,
-    runtime_config_version_id: &RuntimeConfigVersionId,
+    decision_policy_snapshot_id: &DecisionPolicySnapshotId,
 ) -> ModelRunId {
     let model_run_id = ModelRunId::from_v7();
     let window_start = Utc::now() - ChronoDuration::days(7);
@@ -703,7 +704,7 @@ async fn seed_backtest_run(
             model_run_id: model_run_id.clone(),
             run_kind: ModelRunKind::Backtest,
             model_version_id: Some(model_version_id.clone()),
-            runtime_config_version_id: runtime_config_version_id.clone(),
+            decision_policy_snapshot_id: decision_policy_snapshot_id.clone(),
             market_selection_id: None,
             window_start,
             window_end: window_start + ChronoDuration::days(7),
@@ -746,7 +747,7 @@ async fn seed_comparison_report(
     let model_run_id = seed_backtest_run(
         model_runs,
         &candidate_version,
-        &infra.runtime_config_version_id,
+        &infra.decision_policy_snapshot_id,
     )
     .await;
 

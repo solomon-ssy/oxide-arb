@@ -18,7 +18,7 @@ use quant_pivot_models::{
 use rust_decimal::{Decimal, MathematicalOps};
 
 /// Semantic identity of the sealed Weather proxy methodology.
-pub const WEATHER_PROXY_VALIDATION_VERSION: &str = "awc_ghcnh_daily_temperature_proxy_v2";
+pub const WEATHER_PROXY_VALIDATION_VERSION: &str = "awc_ghcnh_daily_temperature_proxy_v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct ProxySubject {

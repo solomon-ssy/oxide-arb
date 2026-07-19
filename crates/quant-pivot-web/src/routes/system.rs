@@ -285,8 +285,6 @@ pub async fn activate_bootstrap(
     let request = body.into_inner();
     op_ctx.set_action(OperationCategory::System, "system.bootstrap.activate");
     op_ctx.set_detail(serde_json::json!({
-        "runtime_config_version_id": &request.runtime_config_version_id,
-        "runtime_config_approval_id": &request.runtime_config_approval_id,
         "bootstrap_contract_version": request.bootstrap_contract_version,
         "expected_state_revision": request.expected_state_revision,
         "reason": &request.reason,

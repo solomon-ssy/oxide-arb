@@ -11,16 +11,17 @@ use quant_pivot_models::{
         KillSwitchPort, MarketDataPort, MarketLinkageGovernancePort, MaterializationRunEvent,
         MaterializationRunKind, MaterializationRunStatus, MetricsScrapePort,
         ModelCalibrationFitPort, ModelGovernancePort, ModelSpecPort, ModelTrainingPort,
-        OrderIntentPort, QuantReportPort, ReadinessPort, ReconciliationPort, ResearchCatalogPort,
-        ResearchJobPort, ResearchReadinessPort, RuntimeConfigPort, RuntimeControlPort,
+        OrderIntentPort, PolicySnapshotPort, QuantReportPort, ReadinessPort, ReconciliationPort,
+        ResearchCatalogPort, ResearchJobPort, ResearchReadinessPort, RuntimeControlPort,
         StructuralMonitorPort, TradePolicyPort, TrainingDatasetPort,
     },
+    types::ContentHash,
 };
 use quant_pivot_repository::traits::{
     BasisAlertRepository, DomainSourceCursorRepository, DomainSourceExpectationRepository,
     EntryConditionRepository, MarketLinkageRepository, MarketRepository, MenuRepository,
-    OperationLogRepository, QuantFactReadRepository, RoleMenuRepository, RolePermissionRepository,
-    RoleRepository, RuntimeConfigVersionRepository, UserRepository, UserRoleRepository,
+    OperationLogRepository, PolicyRepository, QuantFactReadRepository, RoleMenuRepository,
+    RolePermissionRepository, RoleRepository, UserRepository, UserRoleRepository,
 };
 
 use crate::{
@@ -34,7 +35,9 @@ use crate::{
 #[derive(Clone)]
 pub struct AppState {
     pub deploy: Arc<DeployConfig>,
-    pub runtime_config_apply: Arc<dyn RuntimeConfigPort>,
+    pub postgres_schema_fingerprint: ContentHash,
+    pub clickhouse_schema_fingerprint: ContentHash,
+    pub runtime_config_apply: Arc<dyn PolicySnapshotPort>,
     pub jwt: Arc<JwtService>,
     pub jwt_blacklist: Arc<RedisTokenBlacklist>,
     pub users: Arc<dyn UserRepository>,
@@ -45,7 +48,7 @@ pub struct AppState {
     pub role_permissions: Arc<dyn RolePermissionRepository>,
     pub casbin: Arc<CasbinService>,
     pub perm_checker: Arc<PermChecker>,
-    pub runtime_config: Arc<dyn RuntimeConfigVersionRepository>,
+    pub runtime_config: Arc<dyn PolicyRepository>,
     pub operation_logs: Arc<dyn OperationLogRepository>,
     pub operation_log: OperationLogBuffer,
     pub control: Arc<dyn RuntimeControlPort>,

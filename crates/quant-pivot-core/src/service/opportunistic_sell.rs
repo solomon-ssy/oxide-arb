@@ -46,7 +46,7 @@ use crate::{
         exit_signal_fact_writer::ExitSignalEvaluationEventWriter, metrics_hub::MetricsHub,
     },
     prefetch::feature_window::FeatureWindowProvider,
-    runtime_config::RuntimeConfigStore,
+    runtime_config::DecisionPolicyStore,
     service::model_backed_reinferer::{
         LiveFeatureBuildRequest, build_live_feature_vector, exit_model_load_ok, fresh_exit_outcome,
         liquidity_score_cap, runtime_decision_boundary, schema_binding, selected_market_for_lot,
@@ -76,7 +76,7 @@ pub trait OpportunisticSellScorer: Send + Sync {
 pub struct ModelBackedOpportunisticSellScorerDeps {
     pub model_registry: Arc<dyn ModelRegistryRepository>,
     pub factory_builder: Arc<dyn ModelRuntimeFactoryBuilder>,
-    pub config: Arc<RuntimeConfigStore>,
+    pub config: Arc<DecisionPolicyStore>,
     /// Source of the recommendation's governed factor-definition set.
     pub recommendations: Arc<dyn RecommendationRepository>,
     pub factors: Arc<dyn FactorRepository>,
@@ -110,10 +110,15 @@ impl OpportunisticSellScorer for ModelBackedOpportunisticSellScorer {
         now: DateTime<Utc>,
     ) -> QuantResult<Option<SellScore>> {
         let config = self.deps.config.current();
-        let Some(reference) = config.model.active_exit_model_version_id.as_ref() else {
+        let Some(reference) = config
+            .model_routing
+            .model
+            .active_exit_model_version_id
+            .as_ref()
+        else {
             return Ok(None);
         };
-        let version_id = ModelVersionId::try_from(reference)?;
+        let version_id = reference.id.clone();
         let Some(version) = self
             .deps
             .model_registry
@@ -129,7 +134,12 @@ impl OpportunisticSellScorer for ModelBackedOpportunisticSellScorer {
             return Ok(None);
         }
 
-        let binding = schema_binding(&config.features, &config.factors, &config.domain, None)?;
+        let binding = schema_binding(
+            &config.profile_artifacts.features.definition,
+            &config.profile_artifacts.scoring.definition,
+            &config.profile_artifacts.domain.definition,
+            None,
+        )?;
         let factory = self.deps.factory_builder.build(binding);
         let runtime = match factory.load_sell_scorer(&version).await {
             Ok(runtime) => runtime,
@@ -154,16 +164,16 @@ impl OpportunisticSellScorer for ModelBackedOpportunisticSellScorer {
         };
         let market = selected_market_for_lot(&snapshot, lot)?;
         let requirements = ModelFeatureRequirements::generic_only(runtime.required_features());
-        let Some(liquidity_cap_usd) = liquidity_score_cap(config.as_ref())? else {
+        let Some(liquidity_cap_usd) = liquidity_score_cap(config.as_ref()) else {
             return Ok(None);
         };
         let request = LiveFeatureBuildRequest {
             pit: self.deps.pit_source.as_ref(),
             window_provider: &self.deps.window_provider,
             market: &market,
-            features: &config.features,
-            domain: &config.domain,
-            data_quality: &config.data_quality,
+            features: &config.profile_artifacts.features.definition,
+            domain: &config.profile_artifacts.domain.definition,
+            data_quality: &config.recommendation.data_quality,
             requirements: &requirements,
             boundary: &boundary,
             liquidity_cap_usd,
@@ -177,8 +187,11 @@ impl OpportunisticSellScorer for ModelBackedOpportunisticSellScorer {
             intent,
             vector.market_id.clone(),
             boundary.decision_at(),
-            config.data_quality.max_feature_bucket_age_secs,
-            &config.factors,
+            config
+                .recommendation
+                .data_quality
+                .max_feature_bucket_age_secs,
+            &config.profile_artifacts.scoring.definition,
         )
         .await?
         else {
@@ -212,7 +225,7 @@ impl OpportunisticSellScorer for ModelBackedOpportunisticSellScorer {
 /// Dependencies for [`OpportunisticSellSignalEvaluator`].
 pub struct OpportunisticSellSignalEvaluatorDeps<S> {
     pub scorer: S,
-    pub config: Arc<RuntimeConfigStore>,
+    pub config: Arc<DecisionPolicyStore>,
     pub metrics: Arc<MetricsHub>,
     pub audit: Arc<ExitSignalEvaluationEventWriter>,
 }
@@ -220,7 +233,7 @@ pub struct OpportunisticSellSignalEvaluatorDeps<S> {
 /// The opportunistic-Sell branch of the [`ExitSignalEvaluator`] seam.
 pub struct OpportunisticSellSignalEvaluator<S> {
     scorer: S,
-    config: Arc<RuntimeConfigStore>,
+    config: Arc<DecisionPolicyStore>,
     metrics: Arc<MetricsHub>,
     audit: Arc<ExitSignalEvaluationEventWriter>,
 }
@@ -286,7 +299,11 @@ impl<S: OpportunisticSellScorer> OpportunisticSellSignalEvaluator<S> {
 impl<S: OpportunisticSellScorer> ExitSignalEvaluator for OpportunisticSellSignalEvaluator<S> {
     async fn evaluate(&self, ctx: ExitSignalContext<'_>) -> ExitSignalEvaluation {
         let snapshot = self.config.current();
-        let policy = snapshot.execution.exit_monitor.opportunistic_sell.clone();
+        let policy = snapshot
+            .execution_risk
+            .exit_monitor
+            .opportunistic_sell
+            .clone();
         if !policy.enabled {
             self.metrics.inc_opportunistic_sell_eval("disabled");
             return ExitSignalEvaluation::verdict(ExitSignalVerdict::Holds);
@@ -301,10 +318,11 @@ impl<S: OpportunisticSellScorer> ExitSignalEvaluator for OpportunisticSellSignal
         // Resolve the active exit-model version up front so the enabled-path
         // audit rows (including the couldn't-score paths below) carry it.
         let model_version_id = snapshot
+            .model_routing
             .model
             .active_exit_model_version_id
             .as_ref()
-            .and_then(|reference| ModelVersionId::try_from(reference).ok());
+            .map(|reference| reference.id.clone());
 
         let Some(score) = self
             .fetch_score(&ctx, policy.shadow_mode, model_version_id.as_ref())

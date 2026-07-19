@@ -47,8 +47,8 @@ expression: recommendation_limit_entry()
       "cohort_key": {
         "profile_ref": {
           "id": "pooled_1h_control",
-          "version": 1,
-          "content_hash": "blake3:b7a9f98601a0a619a77716c42b464d40258a747a120636b285ba1285fa81283a"
+          "version": 2,
+          "content_hash": "blake3:d3c71a5ac39fb3047559218c1ca8ea5e2d62e092a3eed98eb8ce9154e7cc4543"
         },
         "category": "politics",
         "horizon_secs": 86400,

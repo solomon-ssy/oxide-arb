@@ -20,9 +20,9 @@ use quant_pivot_repository::traits::{
     AttributionRepository, CapitalAllocationRepository, ClobMarketInfoRepository,
     EntryConditionRepository, ExecutionOrderRepository, ExecutionSubmissionRepository,
     FactorRepository, FeatureParityRepository, MarketRepository, ModelRegistryRepository,
-    OperationLogRepository, OrderIntentRepository, PositionRepository,
+    OperationLogRepository, OrderIntentRepository, PolicyRepository, PositionRepository,
     RecommendationReportRepository, RecommendationRepository, ReconciliationRepository,
-    RuntimeConfigVersionRepository, SettlementRedeemRepository, TradePolicyRepository,
+    SettlementRedeemRepository, TradePolicyRepository,
 };
 
 use super::{AccountBundle, DataBundle, GovernanceBundle, InfraBundle, ResearchBundle};
@@ -208,7 +208,7 @@ fn build_execution_breaker(deps: &ExecutionBundleDeps<'_>) -> QuantResult<Arc<Ex
         .governance
         .runtime_config
         .current()
-        .execution
+        .execution_risk
         .breaker
         .clone();
     let operation_log =
@@ -319,8 +319,7 @@ fn build_admission_builder(
         capital: Arc::clone(&repos.capital_allocation) as Arc<dyn CapitalAllocationRepository>,
         markets: Arc::clone(&deps.data.market_repo),
         clob_market_info: Arc::clone(&repos.clob_market_info) as Arc<dyn ClobMarketInfoRepository>,
-        config_versions: Arc::clone(&repos.runtime_config)
-            as Arc<dyn RuntimeConfigVersionRepository>,
+        config_versions: Arc::clone(&repos.runtime_config) as Arc<dyn PolicyRepository>,
         account_factory: Arc::clone(&deps.account.provider_factory),
         book_store: Arc::clone(&deps.data.book_store),
         clob: Arc::clone(&deps.clob),
@@ -359,8 +358,7 @@ fn build_exit_monitor(
         model_registry: Arc::clone(&wiring.research.model_registry_repo),
         factory_builder: Arc::clone(&wiring.research.model_runtime_factory_builder),
         weight_overlay: Arc::clone(&wiring.governance.weight_overlay),
-        config_versions: Arc::clone(&repos.runtime_config)
-            as Arc<dyn RuntimeConfigVersionRepository>,
+        config_versions: Arc::clone(&repos.runtime_config) as Arc<dyn PolicyRepository>,
         recommendations: Arc::clone(&repos.recommendation) as Arc<dyn RecommendationRepository>,
         factors: Arc::clone(&wiring.research.factor_repo) as Arc<dyn FactorRepository>,
         pit_source: Arc::clone(&wiring.data.pit_source),

@@ -14,7 +14,7 @@ use crate::{
     },
     infra::health_checker::{HealthChecker, HealthCheckerDeps},
     observability::{alert_dispatcher::AlertDispatcher, metrics_hub::MetricsHub},
-    runtime_config::{RuntimeConfigApplicator, RuntimeConfigStore, RuntimeConfigSubscribers},
+    runtime_config::{DecisionPolicyStore, PolicySnapshotApplicator, PolicySnapshotSubscribers},
 };
 use quant_pivot_api::ws::WsShardHealthPort;
 use quant_pivot_error::{QuantError, QuantResult, storage::StorageError};
@@ -22,18 +22,18 @@ use quant_pivot_models::{
     config::DeployConfig,
     domain::{
         BootstrapPort, CoreEventPublisher, DataQualityPort, KillSwitchPort, KillSwitchStateInfo,
-        KillSwitchView, RuntimeConfigPort, RuntimeControlPort, SystemRuntimeStateInfo,
+        KillSwitchView, PolicySnapshotPort, RuntimeControlPort, SystemRuntimeStateInfo,
         SystemStatus,
     },
     enums::system::BootstrapPhase,
-    runtime_config::RuntimeConfig,
+    runtime_config::DecisionPolicySnapshot,
 };
 use quant_pivot_repository::{
     postgres::{PgKillSwitchStateRepository, PgSystemRuntimeStateRepository},
     traits::{
         CalibrationArtifactRepository, CapitalAllocationRepository, KillSwitchStateRepository,
-        ModelRegistryRepository, ModelRunRepository, RecommendationReportRepository,
-        ReconciliationRepository, RuntimeConfigVersionRepository, ShadowComparisonRepository,
+        ModelRegistryRepository, ModelRunRepository, PolicyRepository,
+        RecommendationReportRepository, ReconciliationRepository, ShadowComparisonRepository,
         SystemRuntimeStateRepository,
     },
 };
@@ -41,8 +41,8 @@ use quant_pivot_research::artifact::{ArtifactStore, build_artifact_store};
 
 /// Active runtime config, mode, kill-switch, and notification wiring loaded from Postgres.
 pub struct RuntimeSnapshot {
-    pub config: RuntimeConfig,
-    pub store: Arc<RuntimeConfigStore>,
+    pub config: DecisionPolicySnapshot,
+    pub store: Arc<DecisionPolicyStore>,
     pub mode: RuntimeModeHandle,
     pub kill_switch_handle: KillSwitchHandle,
     pub kill_switch_view: KillSwitchView,
@@ -52,16 +52,14 @@ pub struct RuntimeSnapshot {
 impl RuntimeSnapshot {
     /// Bootstrap or restore the active runtime config, quant runtime mode, and
     /// operational kill-switch (both operational singletons fail closed if missing).
-    pub async fn bootstrap(repos: &PgRepositories) -> QuantResult<Self> {
+    pub async fn bootstrap(repos: &PgRepositories, deploy: &DeployConfig) -> QuantResult<Self> {
         let runtime_state =
             restore_system_runtime_state(repos.system_runtime_state.as_ref()).await?;
-        let config = ensure_runtime_config_activation(
-            repos.runtime_config.as_ref(),
-            runtime_state.bootstrap_phase,
-        )
-        .await?;
-        let alerts = Arc::new(AlertDispatcher::new(&config.notification));
-        let store = Arc::new(RuntimeConfigStore::new(config.clone()));
+        let config =
+            ensure_policy_activation(repos.runtime_config.as_ref(), runtime_state.bootstrap_phase)
+                .await?;
+        let alerts = Arc::new(AlertDispatcher::new(&deploy.notifications)?);
+        let store = Arc::new(DecisionPolicyStore::new(config.clone()));
         let mode = RuntimeModeHandle::new(runtime_state.quant_runtime_mode);
         let kill_switch_info = restore_kill_switch(repos.kill_switch_state.as_ref()).await?;
         let kill_switch_handle = KillSwitchHandle::new(kill_switch_info.state);
@@ -89,8 +87,8 @@ pub struct GovernanceBundleDeps<'a> {
 
 /// Governance: runtime config propagation, mode control, kill switch, health, alerts.
 pub struct GovernanceBundle {
-    pub runtime_config: Arc<RuntimeConfigStore>,
-    pub applicator: Arc<RuntimeConfigApplicator>,
+    pub runtime_config: Arc<DecisionPolicyStore>,
+    pub applicator: Arc<PolicySnapshotApplicator>,
     pub runtime_mode: RuntimeModeHandle,
     /// Lock-free kill-switch hot read (admission / exit paths; mirrors `runtime_mode`).
     pub kill_switch_handle: KillSwitchHandle,
@@ -147,9 +145,8 @@ impl GovernanceBundle {
             Arc::clone(&infra.repos.model_registry) as Arc<dyn ModelRegistryRepository>,
             artifact_store,
         ));
-        let applicator = build_runtime_config_applicator(RuntimeConfigApplicatorDeps {
+        let applicator = build_runtime_config_applicator(PolicySnapshotApplicatorDeps {
             runtime_config: &runtime_config,
-            alerts: &alerts,
             weight_overlay: &weight_overlay,
             bias_table: &bias_table,
             category_pointer_guard: &category_pointer_guard,
@@ -159,16 +156,12 @@ impl GovernanceBundle {
             BootstrapService::initialize(
                 Arc::clone(&infra.repos.system_runtime_state)
                     as Arc<dyn SystemRuntimeStateRepository>,
-                Arc::clone(&infra.repos.runtime_config) as Arc<dyn RuntimeConfigVersionRepository>,
-                Arc::clone(&applicator) as Arc<dyn RuntimeConfigPort>,
+                Arc::clone(&infra.repos.runtime_config) as Arc<dyn PolicyRepository>,
+                Arc::clone(&applicator) as Arc<dyn PolicySnapshotPort>,
                 Arc::clone(&infra.repos.model_run) as Arc<dyn ModelRunRepository>,
                 Arc::clone(&infra.repos.recommendation_report)
                     as Arc<dyn RecommendationReportRepository>,
                 events.clone(),
-                deploy
-                    .quant
-                    .governance
-                    .require_approver_activator_separation,
             )
             .await?,
         );
@@ -230,7 +223,9 @@ impl GovernanceBundle {
                 &self
                     .runtime_config
                     .current()
-                    .factors
+                    .profile_artifacts
+                    .scoring
+                    .definition
                     .structural
                     .favorite_longshot,
             )
@@ -241,22 +236,25 @@ impl GovernanceBundle {
     }
 }
 
-fn seed_weight_overlay(runtime_config: &Arc<RuntimeConfigStore>) -> Arc<WeightOverlayApplicator> {
+fn seed_weight_overlay(runtime_config: &Arc<DecisionPolicyStore>) -> Arc<WeightOverlayApplicator> {
     let weight_overlay = Arc::new(WeightOverlayApplicator::new());
     // Seed the overlay from the active config so a non-published candidate /
     // shadow runs under its configured weights before the first re-activation.
     weight_overlay.reload(
-        &runtime_config.current().factors,
-        &runtime_config.current().model,
+        &runtime_config
+            .current()
+            .profile_artifacts
+            .scoring
+            .definition,
+        &runtime_config.current().model_routing.model,
     );
     weight_overlay
 }
 
 /// Dependencies for [`build_runtime_config_applicator`].
 #[derive(Clone, Copy)]
-struct RuntimeConfigApplicatorDeps<'a> {
-    runtime_config: &'a Arc<RuntimeConfigStore>,
-    alerts: &'a Arc<AlertDispatcher>,
+struct PolicySnapshotApplicatorDeps<'a> {
+    runtime_config: &'a Arc<DecisionPolicyStore>,
     weight_overlay: &'a Arc<WeightOverlayApplicator>,
     bias_table: &'a Arc<BiasTableApplicator>,
     category_pointer_guard: &'a Arc<CategoryPointerGuard>,
@@ -264,23 +262,21 @@ struct RuntimeConfigApplicatorDeps<'a> {
 }
 
 fn build_runtime_config_applicator(
-    deps: RuntimeConfigApplicatorDeps<'_>,
-) -> Arc<RuntimeConfigApplicator> {
-    let RuntimeConfigApplicatorDeps {
+    deps: PolicySnapshotApplicatorDeps<'_>,
+) -> Arc<PolicySnapshotApplicator> {
+    let PolicySnapshotApplicatorDeps {
         runtime_config,
-        alerts,
         weight_overlay,
         bias_table,
         category_pointer_guard,
         data,
     } = deps;
-    Arc::new(RuntimeConfigApplicator::new(
+    Arc::new(PolicySnapshotApplicator::new(
         Arc::clone(runtime_config),
-        RuntimeConfigSubscribers {
+        PolicySnapshotSubscribers {
             market_filter: Arc::clone(&data.market_filter),
             market_cache: Arc::clone(&data.market_cache),
             data_quality: Arc::clone(&data.data_quality),
-            alerts: Arc::clone(alerts),
             weight_overlay: Arc::clone(weight_overlay),
             bias_table: Arc::clone(bias_table),
             category_pointer_guard: Arc::clone(category_pointer_guard),
@@ -314,7 +310,7 @@ struct OperationalControlsDeps<'a> {
     metrics: &'a Arc<MetricsHub>,
     data: &'a DataBundle,
     infra: &'a InfraBundle,
-    runtime_config: &'a Arc<RuntimeConfigStore>,
+    runtime_config: &'a Arc<DecisionPolicyStore>,
     runtime_mode: &'a RuntimeModeHandle,
     kill_switch_handle: KillSwitchHandle,
     kill_switch_view: KillSwitchView,
@@ -409,24 +405,21 @@ async fn restore_kill_switch(
     Err(StorageError::not_found("system_kill_switch", "1").into())
 }
 
-async fn ensure_runtime_config_activation(
-    repo: &dyn RuntimeConfigVersionRepository,
+async fn ensure_policy_activation(
+    repo: &dyn PolicyRepository,
     bootstrap_phase: BootstrapPhase,
-) -> QuantResult<RuntimeConfig> {
+) -> QuantResult<DecisionPolicySnapshot> {
     let current = repo.load_current().await?;
-    // Fast path: the active config already parses under the current schema.
-    if let Some(version) = &current
-        && let Ok(config) = RuntimeConfig::from_json(&version.config_json)
-    {
-        return Ok(config);
+    if let Some(version) = current {
+        return Ok(version.snapshot);
     }
 
-    if current.is_none() && bootstrap_phase != BootstrapPhase::Active {
+    if bootstrap_phase != BootstrapPhase::Active {
         tracing::info!("runtime config awaits explicit bootstrap activation");
-        return Ok(RuntimeConfig::default());
+        return Ok(DecisionPolicySnapshot::default());
     }
     Err(StorageError::InvariantViolation {
-        entity: Some("runtime_config_version"),
+        entity: Some("decision_policy_snapshot"),
         detail: "active runtime config is invalid for the current schema".to_owned(),
     }
     .into())

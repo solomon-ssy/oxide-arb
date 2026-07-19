@@ -5,7 +5,7 @@
 
 use serde::Deserialize;
 
-use super::secret::SecretText;
+use super::secret::SystemdCredentialRef;
 
 /// Polymarket platform configuration. Mounted at `[polymarket]` in TOML.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -90,9 +90,8 @@ const fn default_rpc_timeout() -> u64 {
 ///
 /// The relayer submits money-moving transactions (e.g. CTF `redeemPositions`)
 /// from a user's Proxy / Gnosis Safe wallet on the operator's behalf and pays
-/// the gas. Authentication uses Relayer API keys (`RELAYER_API_KEY` +
-/// `RELAYER_API_KEY_ADDRESS`). The key is a secret: supply it via
-/// `QUANT_PIVOT__POLYMARKET__RELAYER__API_KEY` or the gitignored local TOML.
+/// the gas. Authentication uses a typed systemd credential reference plus the
+/// non-secret key-owner address. Plaintext credentials are never deploy values.
 /// Only required when `quant.account.wallet_kind` is `proxy` or `gnosis_safe`;
 /// EOA settlement signs and pays gas directly and ignores these fields.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -101,7 +100,7 @@ pub struct RelayerConfig {
     /// Relayer submit/status base URL. Default: `https://relayer-v2.polymarket.com`.
     pub base_url: String,
     /// Relayer API key (secret).
-    pub api_key: Option<SecretText>,
+    pub api_key: Option<SystemdCredentialRef>,
     /// Ethereum address that owns the relayer API key (the signer EOA address).
     pub api_key_address: Option<String>,
     /// HTTP request timeout (ms). Default: `15000`.
@@ -120,9 +119,13 @@ impl Default for RelayerConfig {
 }
 
 impl RelayerConfig {
-    /// Normalize credential fields: empty strings (`api_key = ""`) become unset.
+    /// Normalize empty credential references and address strings to unset.
     pub fn normalize(&mut self) {
-        if self.api_key.as_ref().is_some_and(SecretText::is_empty) {
+        if self
+            .api_key
+            .as_ref()
+            .is_some_and(|credential| !credential.is_configured())
+        {
             self.api_key = None;
         }
         if self.api_key_address.as_deref().is_some_and(str::is_empty) {
@@ -135,7 +138,7 @@ impl RelayerConfig {
     pub fn api_key(&self) -> Option<&str> {
         self.api_key
             .as_ref()
-            .map(SecretText::expose_secret)
+            .map(|credential| credential.secret().expose_secret())
             .map(str::trim)
             .filter(|v| !v.is_empty())
     }

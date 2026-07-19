@@ -3,11 +3,11 @@
 use super::sea_orm_active_enums::{
     QpCatalogSyncFailureStage, QpCatalogSyncKind, QpCatalogSyncStatus,
 };
-use sea_orm::{entity::prelude::*, sea_query::Expr};
+use sea_orm::entity::prelude::*;
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
-#[sea_orm(schema_name = "public", table_name = "catalog_sync_batch")]
+#[sea_orm(table_name = "catalog_sync_batch")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub catalog_sync_batch_id: Uuid,
@@ -22,12 +22,15 @@ pub struct Model {
     #[sea_orm(column_type = "Text", nullable)]
     pub batch_hash: Option<String>,
     pub failure_stage: Option<QpCatalogSyncFailureStage>,
-    #[sea_orm(column_type = "Text", nullable)]
     pub failure_detail: Option<String>,
-    #[sea_orm(default_expr = "Expr::cust(\"statement_timestamp()\")")]
     pub created_at: DateTimeWithTimeZone,
-    #[sea_orm(default_expr = "Expr::cust(\"statement_timestamp()\")")]
     pub updated_at: DateTimeWithTimeZone,
+    #[sea_orm(has_many)]
+    pub catalog_event_changes: HasMany<super::catalog_event_change::Entity>,
+    #[sea_orm(has_many)]
+    pub catalog_market_changes: HasMany<super::catalog_market_change::Entity>,
+    #[sea_orm(has_many)]
+    pub catalog_sync_rejections: HasMany<super::catalog_sync_rejection::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

@@ -3,32 +3,31 @@
 use crate::{
     postgres::{
         error,
-        governance::runtime_config,
         quant::feature_parity,
         query::{paginate_into_model, paginate_mapped},
     },
-    traits::{
-        ModelRegistryRepository, PublishModelVersionCommit, PublishModelVersionOutcome,
-        RollbackModelVersionCommit,
-    },
+    traits::{ModelRegistryRepository, PublishModelVersionCommit, PublishModelVersionResult},
 };
 use chrono::Utc;
 use quant_pivot_error::storage::{StorageError, entity};
 use quant_pivot_models::{
     domain::{
-        ModelSpecInfo, ModelSpecListQuery, ModelVersionInfo, ModelVersionListQuery,
-        ModelVersionParityEvidence, NewModelSpec, NewModelVersion, PageWindow, Paginated,
-        model_version_parity_evidence_hash,
+        ModelPickerSide, ModelSpecInfo, ModelSpecListQuery, ModelVersionInfo,
+        ModelVersionListQuery, ModelVersionParityEvidence, NewModelSpec, NewModelVersion,
+        PageWindow, Paginated, PublishedModelCatalogInfo, model_version_parity_evidence_hash,
     },
     entities::{
         quant_feature_parity_run, quant_feature_parity_subject, quant_model_spec,
         quant_model_version, quant_training_dataset,
     },
-    enums::quant::{
-        FeatureParityRunKind, FeatureParityRunStatus, ParitySubjectKind, PublicationStatus,
+    enums::{
+        common::MarketCategory,
+        model::ModelFamily,
+        quant::{
+            FeatureParityRunKind, FeatureParityRunStatus, ParitySubjectKind, PublicationStatus,
+        },
     },
-    hashing::CanonicalDigest,
-    types::{BacktestPathSetId, ContentHash, FeatureParityRunId, ModelSpecId, ModelVersionId},
+    types::{BacktestPathSetId, FeatureParityRunId, ModelSpecId, ModelVersionId},
 };
 use sea_orm::{
     ActiveModelTrait, ActiveValue, ColumnTrait, Condition, ConnectionTrait, DatabaseConnection,
@@ -242,6 +241,50 @@ impl ModelRegistryRepository for PgModelRegistryRepository {
         .await
     }
 
+    async fn list_published_catalog(
+        &self,
+        side: ModelPickerSide,
+        category: Option<MarketCategory>,
+    ) -> Result<Vec<PublishedModelCatalogInfo>, StorageError> {
+        let family = match side {
+            ModelPickerSide::Buy => {
+                quant_model_spec::Column::ModelFamily.ne(ModelFamily::HoldVsExitWeighted)
+            }
+            ModelPickerSide::Sell => {
+                quant_model_spec::Column::ModelFamily.eq(ModelFamily::HoldVsExitWeighted)
+            }
+        };
+        let category = category.map(|category| {
+            Condition::any()
+                .add(quant_model_version::Column::CategoryScope.is_null())
+                .add(quant_model_version::Column::CategoryScope.eq(category))
+        });
+
+        quant_model_version::Entity::find()
+            .select_only()
+            .column(quant_model_version::Column::ModelVersionId)
+            .column(quant_model_version::Column::ModelSpecId)
+            .column_as(quant_model_spec::Column::Name, "spec_name")
+            .column(quant_model_version::Column::Version)
+            .column(quant_model_version::Column::ArtifactHash)
+            .column_as(quant_model_spec::Column::ModelFamily, "model_family")
+            .column(quant_model_version::Column::CategoryScope)
+            .column(quant_model_version::Column::PublishedAt)
+            .join(
+                JoinType::InnerJoin,
+                quant_model_version::Relation::ModelSpec.def(),
+            )
+            .filter(quant_model_version::Column::PublicationStatus.eq(PublicationStatus::Published))
+            .filter(family)
+            .filter(Condition::all().add_option(category))
+            .order_by_asc(quant_model_spec::Column::Name)
+            .order_by_desc(quant_model_version::Column::Version)
+            .into_model::<PublishedModelCatalogInfo>()
+            .all(&self.db)
+            .await
+            .map_err(StorageError::from)
+    }
+
     async fn list_published_for_spec(
         &self,
         model_spec_id: &ModelSpecId,
@@ -267,17 +310,15 @@ impl ModelRegistryRepository for PgModelRegistryRepository {
         Ok(info)
     }
 
-    async fn publish_replacing_predecessors(
+    async fn publish_model_version(
         &self,
         commit: PublishModelVersionCommit<'_>,
-    ) -> Result<PublishModelVersionOutcome, StorageError> {
+    ) -> Result<PublishModelVersionResult, StorageError> {
         let PublishModelVersionCommit {
             model_spec_id,
             model_version_id,
             feature_parity_permit,
             feature_parity_run_id,
-            expected_runtime_config_activation_id,
-            runtime_config_activation,
         } = commit;
         let txn = self.db.begin().await.map_err(StorageError::from)?;
         let feature_parity_state_id = feature_parity::resolve_publish_latch_generation(
@@ -315,44 +356,12 @@ impl ModelRegistryRepository for PgModelRegistryRepository {
         }
         verify_frozen_model_parity_permit(&txn, feature_parity_run_id, &target).await?;
 
-        let predecessors = select_version_with_family()
-            .filter(quant_model_version::Column::ModelSpecId.eq(model_spec_id.clone()))
-            .filter(quant_model_version::Column::PublicationStatus.eq(PublicationStatus::Published))
-            .order_by_desc(quant_model_version::Column::PublishedAt)
-            .into_model::<ModelVersionInfo>()
-            .all(&txn)
-            .await
-            .map_err(StorageError::from)?;
-        let rollback_target = predecessors.first().cloned();
-
-        let mut retired = Vec::new();
-        for predecessor in &predecessors {
-            if predecessor.model_version_id == *model_version_id {
-                continue;
-            }
-            update_model_version_status(
-                &txn,
-                &predecessor.model_version_id,
-                PublicationStatus::Retired,
-            )
-            .await?;
-            retired.push(predecessor.model_version_id.clone());
-        }
-
         let published =
             update_model_version_status(&txn, model_version_id, PublicationStatus::Published)
                 .await?;
-        runtime_config::append_activation_if_current(
-            &txn,
-            expected_runtime_config_activation_id,
-            Some(runtime_config_activation),
-        )
-        .await?;
         txn.commit().await.map_err(StorageError::from)?;
-        Ok(PublishModelVersionOutcome {
+        Ok(PublishModelVersionResult {
             published,
-            retired_predecessors: retired,
-            rollback_target,
             feature_parity_state_id,
         })
     }
@@ -366,45 +375,6 @@ impl ModelRegistryRepository for PgModelRegistryRepository {
             update_model_version_status(&txn, model_version_id, PublicationStatus::Shadow).await?;
         txn.commit().await.map_err(StorageError::from)?;
         Ok(info)
-    }
-
-    async fn rollback_to_retired_predecessor(
-        &self,
-        commit: RollbackModelVersionCommit<'_>,
-    ) -> Result<(ModelVersionInfo, ModelVersionInfo), StorageError> {
-        let txn = self.db.begin().await.map_err(StorageError::from)?;
-        feature_parity::verify_clear_latch_generation(&txn, commit.feature_parity_state_id).await?;
-        let (current, target) = lock_model_switch_subject(
-            &txn,
-            ModelSwitchSubject {
-                spec: commit.model_spec_id,
-                current: commit.expected_current_model_version_id,
-                target: commit.target_model_version_id,
-            },
-        )
-        .await?;
-        verify_locked_rollback_subject(&txn, &commit, &current, &target).await?;
-
-        let retired = update_model_version_status(
-            &txn,
-            commit.expected_current_model_version_id,
-            PublicationStatus::Retired,
-        )
-        .await?;
-        let restored = update_model_version_status(
-            &txn,
-            commit.target_model_version_id,
-            PublicationStatus::Published,
-        )
-        .await?;
-        runtime_config::append_activation_if_current(
-            &txn,
-            commit.expected_runtime_config_activation_id,
-            Some(commit.runtime_config_activation),
-        )
-        .await?;
-        txn.commit().await.map_err(StorageError::from)?;
-        Ok((retired, restored))
     }
 
     async fn set_quality_gate_report(
@@ -465,148 +435,6 @@ fn next_model_version(current: Option<i32>) -> Result<i32, StorageError> {
             "model version sequence exhausted i32 capacity",
         )
     })
-}
-
-#[derive(Clone, Copy)]
-struct ModelSwitchSubject<'a> {
-    spec: &'a ModelSpecId,
-    current: &'a ModelVersionId,
-    target: &'a ModelVersionId,
-}
-
-async fn lock_model_switch_subject(
-    txn: &sea_orm::DatabaseTransaction,
-    subject: ModelSwitchSubject<'_>,
-) -> Result<(quant_model_version::Model, quant_model_version::Model), StorageError> {
-    let Some(_spec) = quant_model_spec::Entity::find_by_id(subject.spec.clone())
-        .lock_exclusive()
-        .one(txn)
-        .await
-        .map_err(StorageError::from)?
-    else {
-        return Err(error::not_found(entity::QUANT_MODEL_SPEC, subject.spec));
-    };
-
-    // The spec lock serializes every publish/rollback for this scope. Lock both
-    // concrete versions before validating either status so a stale request can
-    // never expose one half of the switch.
-    let Some(current) = quant_model_version::Entity::find_by_id(subject.current.clone())
-        .lock_exclusive()
-        .one(txn)
-        .await
-        .map_err(StorageError::from)?
-    else {
-        return Err(error::not_found(
-            entity::QUANT_MODEL_VERSION,
-            subject.current,
-        ));
-    };
-    let Some(target) = quant_model_version::Entity::find_by_id(subject.target.clone())
-        .lock_exclusive()
-        .one(txn)
-        .await
-        .map_err(StorageError::from)?
-    else {
-        return Err(error::not_found(
-            entity::QUANT_MODEL_VERSION,
-            subject.target,
-        ));
-    };
-    Ok((current, target))
-}
-
-async fn verify_locked_rollback_subject(
-    txn: &sea_orm::DatabaseTransaction,
-    commit: &RollbackModelVersionCommit<'_>,
-    current: &quant_model_version::Model,
-    target: &quant_model_version::Model,
-) -> Result<(), StorageError> {
-    let published_ids = quant_model_version::Entity::find()
-        .filter(quant_model_version::Column::ModelSpecId.eq(commit.model_spec_id.clone()))
-        .filter(quant_model_version::Column::PublicationStatus.eq(PublicationStatus::Published))
-        .select_only()
-        .column(quant_model_version::Column::ModelVersionId)
-        .into_tuple::<ModelVersionId>()
-        .all(txn)
-        .await
-        .map_err(StorageError::from)?;
-    validate_rollback_transition(RollbackTransitionState {
-        expected_spec_id: commit.model_spec_id,
-        expected_current_id: commit.expected_current_model_version_id,
-        current_spec_id: &current.model_spec_id,
-        current_status: current.publication_status,
-        target_id: commit.target_model_version_id,
-        target_spec_id: &target.model_spec_id,
-        target_status: target.publication_status,
-        published_ids: &published_ids,
-    })?;
-    verify_locked_rollback_artifact(commit, target)?;
-    verify_frozen_model_parity_permit(txn, commit.feature_parity_run_id, target).await
-}
-
-fn verify_locked_rollback_artifact(
-    commit: &RollbackModelVersionCommit<'_>,
-    target: &quant_model_version::Model,
-) -> Result<(), StorageError> {
-    if &target.artifact_hash != commit.expected_target_artifact_hash {
-        return Err(StorageError::state_conflict(
-            entity::QUANT_MODEL_VERSION,
-            Some(commit.target_model_version_id),
-            format!(
-                "rollback artifact changed after validation: expected {}, found {}",
-                commit.expected_target_artifact_hash, target.artifact_hash
-            ),
-        ));
-    }
-    if target.publish_path_set_id.as_ref() != commit.expected_target_publish_path_set_id {
-        return Err(StorageError::state_conflict(
-            entity::QUANT_MODEL_VERSION,
-            Some(commit.target_model_version_id),
-            "rollback publish path-set binding changed after quality-gate evaluation",
-        ));
-    }
-    verify_persisted_rollback_gate_report(
-        commit.target_model_version_id,
-        &target.quality_gate_report,
-        commit.quality_gate_payload_hash,
-    )
-}
-
-fn verify_persisted_rollback_gate_report(
-    target_id: &ModelVersionId,
-    report: &serde_json::Value,
-    expected_payload_hash: &ContentHash,
-) -> Result<(), StorageError> {
-    let passed = report.get("passed").and_then(serde_json::Value::as_bool);
-    let intent = report.get("intent").and_then(serde_json::Value::as_str);
-    let subject_kind = report
-        .pointer("/subject/kind")
-        .and_then(serde_json::Value::as_str);
-    let subject_id = report
-        .pointer("/subject/id")
-        .and_then(serde_json::Value::as_str);
-    let persisted_payload_hash = CanonicalDigest::content_hash_json(report).map_err(|error| {
-        StorageError::invariant_violation(
-            Some(entity::QUANT_MODEL_VERSION),
-            format!("persisted rollback gate report is not canonical-hashable: {error}"),
-        )
-    })?;
-    let expected_subject_id = target_id.to_string();
-    if passed != Some(true)
-        || intent != Some("publish")
-        || subject_kind != Some("model_version")
-        || subject_id != Some(expected_subject_id.as_str())
-        || &persisted_payload_hash != expected_payload_hash
-    {
-        return Err(StorageError::state_conflict(
-            entity::QUANT_MODEL_VERSION,
-            Some(target_id),
-            format!(
-                "rollback target has no exact canonical passed publish gate payload {expected_payload_hash}; persisted hash={persisted_payload_hash}, passed={passed:?}, intent={intent:?}, subject_kind={subject_kind:?}, subject_id={subject_id:?}"
-            ),
-        ));
-    }
-    Ok(())
 }
 
 async fn verify_frozen_model_parity_permit(
@@ -712,83 +540,6 @@ async fn verify_frozen_model_parity_permit(
     Ok(())
 }
 
-/// Validate the rollback compare-and-swap state before either status is
-/// mutated. Kept independent of `SeaORM` so stale-current, cross-spec and
-/// half-switched states have fast deterministic unit coverage.
-#[derive(Clone, Copy)]
-struct RollbackTransitionState<'a> {
-    expected_spec_id: &'a ModelSpecId,
-    expected_current_id: &'a ModelVersionId,
-    current_spec_id: &'a ModelSpecId,
-    current_status: PublicationStatus,
-    target_id: &'a ModelVersionId,
-    target_spec_id: &'a ModelSpecId,
-    target_status: PublicationStatus,
-    published_ids: &'a [ModelVersionId],
-}
-
-fn validate_rollback_transition(state: RollbackTransitionState<'_>) -> Result<(), StorageError> {
-    let RollbackTransitionState {
-        expected_spec_id,
-        expected_current_id,
-        current_spec_id,
-        current_status,
-        target_id,
-        target_spec_id,
-        target_status,
-        published_ids,
-    } = state;
-    if expected_current_id == target_id {
-        return Err(StorageError::state_conflict(
-            entity::QUANT_MODEL_VERSION,
-            Some(target_id),
-            "rollback current and target model versions must differ",
-        ));
-    }
-    if current_spec_id != expected_spec_id || target_spec_id != expected_spec_id {
-        return Err(StorageError::state_conflict(
-            entity::QUANT_MODEL_VERSION,
-            Some(target_id),
-            "rollback current and target must both belong to the locked model spec",
-        ));
-    }
-    if current_status != PublicationStatus::Published {
-        return Err(StorageError::state_conflict(
-            entity::QUANT_MODEL_VERSION,
-            Some(expected_current_id),
-            format!(
-                "expected rollback current to be published, found {}",
-                current_status.as_str()
-            ),
-        ));
-    }
-    if target_status != PublicationStatus::Retired {
-        return Err(StorageError::state_conflict(
-            entity::QUANT_MODEL_VERSION,
-            Some(target_id),
-            format!(
-                "expected rollback target to be retired, found {}",
-                target_status.as_str()
-            ),
-        ));
-    }
-    if published_ids != [expected_current_id.clone()] {
-        return Err(StorageError::state_conflict(
-            entity::QUANT_MODEL_SPEC,
-            Some(expected_spec_id),
-            format!(
-                "rollback compare-and-swap expected sole published version {expected_current_id}, found [{}]",
-                published_ids
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-        ));
-    }
-    Ok(())
-}
-
 /// Transition a version's publication status under an existing connection/txn.
 /// Always `SELECT … FOR UPDATE`s the version row before mutating.
 async fn update_model_version_status(
@@ -838,7 +589,6 @@ async fn update_model_version_status(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::slice;
 
     #[test]
     fn model_version_sequence_is_checked() {
@@ -846,129 +596,5 @@ mod tests {
         assert_eq!(next_model_version(Some(41)).expect("next version"), 42);
         let error = next_model_version(Some(i32::MAX)).expect_err("overflow must fail closed");
         assert!(error.to_string().contains("sequence exhausted"));
-    }
-
-    struct RollbackFixture {
-        spec: ModelSpecId,
-        current: ModelVersionId,
-        target: ModelVersionId,
-    }
-
-    impl RollbackFixture {
-        fn new() -> Self {
-            Self {
-                spec: ModelSpecId::from_v7(),
-                current: ModelVersionId::from_v7(),
-                target: ModelVersionId::from_v7(),
-            }
-        }
-
-        fn state<'a>(
-            &'a self,
-            current_spec_id: &'a ModelSpecId,
-            current_status: PublicationStatus,
-            target_spec_id: &'a ModelSpecId,
-            target_status: PublicationStatus,
-            published_ids: &'a [ModelVersionId],
-        ) -> RollbackTransitionState<'a> {
-            RollbackTransitionState {
-                expected_spec_id: &self.spec,
-                expected_current_id: &self.current,
-                current_spec_id,
-                current_status,
-                target_id: &self.target,
-                target_spec_id,
-                target_status,
-                published_ids,
-            }
-        }
-    }
-
-    #[test]
-    fn rollback_compare_and_swap_accepts_exact_published_current_and_retired_target() {
-        let fixture = RollbackFixture::new();
-        validate_rollback_transition(fixture.state(
-            &fixture.spec,
-            PublicationStatus::Published,
-            &fixture.spec,
-            PublicationStatus::Retired,
-            slice::from_ref(&fixture.current),
-        ))
-        .expect("exact rollback state is valid");
-    }
-
-    #[test]
-    fn rollback_compare_and_swap_rejects_stale_cross_spec_and_half_switched_states() {
-        let fixture = RollbackFixture::new();
-        let other_spec = ModelSpecId::from_v7();
-
-        let stale_current = validate_rollback_transition(fixture.state(
-            &fixture.spec,
-            PublicationStatus::Published,
-            &fixture.spec,
-            PublicationStatus::Retired,
-            slice::from_ref(&fixture.target),
-        ))
-        .expect_err("stale current must fail closed");
-        assert!(stale_current.to_string().contains("sole published version"));
-
-        let cross_spec = validate_rollback_transition(fixture.state(
-            &fixture.spec,
-            PublicationStatus::Published,
-            &other_spec,
-            PublicationStatus::Retired,
-            slice::from_ref(&fixture.current),
-        ))
-        .expect_err("cross-spec target must fail closed");
-        assert!(cross_spec.to_string().contains("locked model spec"));
-
-        let already_restored = validate_rollback_transition(fixture.state(
-            &fixture.spec,
-            PublicationStatus::Retired,
-            &fixture.spec,
-            PublicationStatus::Published,
-            slice::from_ref(&fixture.target),
-        ))
-        .expect_err("half-switched state must fail closed");
-        assert!(
-            already_restored
-                .to_string()
-                .contains("current to be published")
-        );
-    }
-
-    #[test]
-    fn rollback_commit_requires_exact_persisted_passed_gate_report() {
-        let target_id = ModelVersionId::from_v7();
-        let report = serde_json::json!({
-            "subject": {
-                "kind": "model_version",
-                "id": target_id.to_string(),
-            },
-            "intent": "publish",
-            "passed": true,
-            // This embedded decision hash is deliberately unrelated to the
-            // commit permit, which hashes the exact persisted JSON payload.
-            "report_hash": format!("blake3:{}", "a".repeat(64)),
-        });
-        let expected = CanonicalDigest::content_hash_json(&report).expect("payload hash");
-        verify_persisted_rollback_gate_report(&target_id, &report, &expected)
-            .expect("exact passed report is a valid commit permit");
-
-        let mut failed_report = report.clone();
-        failed_report["passed"] = serde_json::Value::Bool(false);
-        let failed_hash =
-            CanonicalDigest::content_hash_json(&failed_report).expect("failed payload hash");
-        let failed =
-            verify_persisted_rollback_gate_report(&target_id, &failed_report, &failed_hash)
-                .expect_err("failed quality report must block rollback commit");
-        assert!(failed.to_string().contains("canonical passed publish gate"));
-
-        let mut stale_report = report;
-        stale_report["report_hash"] =
-            serde_json::Value::String(format!("blake3:{}", "b".repeat(64)));
-        let stale = verify_persisted_rollback_gate_report(&target_id, &stale_report, &expected)
-            .expect_err("stale gate report must block rollback commit");
-        assert!(stale.to_string().contains("canonical passed publish gate"));
     }
 }

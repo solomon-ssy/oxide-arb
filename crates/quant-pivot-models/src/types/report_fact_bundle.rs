@@ -10,7 +10,7 @@ use crate::{
     types::{ContentHash, Probability, RecommendationReportId, Usd},
 };
 
-pub const REPORT_FACT_BUNDLE_FORMAT_VERSION: u32 = 2;
+pub const REPORT_FACT_BUNDLE_FORMAT_VERSION: u32 = 1;
 
 /// Stable commitment for one `ClickHouse` table inside a report bundle.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -43,7 +43,7 @@ pub struct ReportFactNotificationV1 {
 /// Complete two-table fact payload for one report.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ReportFactBundleV2 {
+pub struct ReportFactBundleV1 {
     pub format_version: u32,
     pub recommendation_report_id: RecommendationReportId,
     pub created_at: DateTime<Utc>,

@@ -70,13 +70,13 @@ use crate::{
         weather_public_ingest_worker::{WeatherPublicIngestDeps, WeatherPublicIngestWorker},
     },
     observability::metrics_hub::MetricsHub,
-    runtime_config::RuntimeConfigStore,
+    runtime_config::DecisionPolicyStore,
     service::{
         crypto_kline_ingest::CryptoKlineIngestor, weather_fact_ingest::WeatherFactIngestService,
     },
 };
 
-const EVIDENCE_FORMAT_VERSION: u32 = 4;
+const EVIDENCE_FORMAT_VERSION: u32 = 1;
 const CRYPTO_WORKER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone)]
@@ -104,7 +104,7 @@ struct ScopedSourceLedgerEvidence {
     expectation_count: u64,
     expectation_statuses: BTreeMap<String, u64>,
     cursor_count: u64,
-    cursor_statuses: BTreeMap<String, u64>,
+    cursor_statuses: BTreeMap<DomainCursorStatus, u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -128,7 +128,7 @@ pub struct Phase119EvidenceManifest {
     pub source_expectation_count: u64,
     pub source_expectation_statuses: BTreeMap<String, u64>,
     pub source_cursor_count: u64,
-    pub source_cursor_statuses: BTreeMap<String, u64>,
+    pub source_cursor_statuses: BTreeMap<DomainCursorStatus, u64>,
     pub crypto_observation_rows: u64,
     pub crypto_price_report_rows: u64,
     pub weather_observation_rows: u64,
@@ -163,7 +163,7 @@ pub async fn run_phase_11_9_evidence_bootstrap(
     let shutdown = CancellationToken::new();
     let metrics = Arc::new(MetricsHub::new());
     let infra = InfraBundle::assemble(&deploy, Arc::clone(&metrics)).await?;
-    let runtime = RuntimeSnapshot::bootstrap(&infra.repos).await?;
+    let runtime = RuntimeSnapshot::bootstrap(&infra.repos, &deploy).await?;
     let (events, _event_rx) = CoreEventPublisher::bounded(128);
     let data = DataBundle::assemble_metadata_only(&DataBundleDeps {
         deploy: &deploy,
@@ -307,7 +307,7 @@ fn connect_crypto_evidence_sources(deploy: &DeployConfig) -> QuantResult<CryptoE
 async fn run_crypto_evidence(
     deploy: &DeployConfig,
     infra: &InfraBundle,
-    runtime: Arc<RuntimeConfigStore>,
+    runtime: Arc<DecisionPolicyStore>,
     source_supervisor: Arc<DomainSourceSupervisor>,
     sources: CryptoEvidenceSources,
     max_cycles: u16,
@@ -470,7 +470,7 @@ fn crypto_source_blockers(
         .map(|cursor| {
             (
                 (cursor.source_id.clone(), cursor.instrument_key.clone()),
-                cursor.status.as_str(),
+                cursor.status,
             )
         })
         .collect::<BTreeMap<_, _>>();
@@ -492,12 +492,12 @@ fn crypto_source_blockers(
                 expectation.source_id.clone(),
                 expectation.instrument_key.clone(),
             ));
-            (cursor_status.copied() != Some(DomainCursorStatus::Live.as_str())).then(|| {
+            (cursor_status.copied() != Some(DomainCursorStatus::Live)).then(|| {
                 format!(
                     "{}/{} cursor={}",
                     expectation.source_id,
                     expectation.instrument_key,
-                    cursor_status.copied().unwrap_or("missing")
+                    cursor_status.map_or_else(|| "missing".to_owned(), ToString::to_string)
                 )
             })
         })
@@ -529,7 +529,7 @@ async fn stop_crypto_worker(name: &str, mut handle: JoinHandle<()>) -> QuantResu
 async fn run_weather_evidence(
     deploy: &DeployConfig,
     infra: &InfraBundle,
-    runtime: Arc<RuntimeConfigStore>,
+    runtime: Arc<DecisionPolicyStore>,
     source_supervisor: Arc<DomainSourceSupervisor>,
     weather_stations: &BTreeSet<String>,
     blockers: &mut Vec<String>,
@@ -789,9 +789,7 @@ async fn audit_scoped_source_ledger(
         .collect::<Vec<_>>();
     let mut cursor_statuses = BTreeMap::new();
     for cursor in &cursors {
-        *cursor_statuses
-            .entry(cursor.status.clone())
-            .or_insert(0_u64) += 1;
+        *cursor_statuses.entry(cursor.status).or_insert(0_u64) += 1;
     }
     audit_source_states(&expectations, &cursors, blockers);
     if expectations.is_empty() {
@@ -859,7 +857,7 @@ fn audit_source_states(
         .collect::<BTreeSet<_>>();
     for cursor in cursors {
         if required_bindings.contains(&(cursor.source_id.clone(), cursor.instrument_key.clone()))
-            && cursor.status != DomainCursorStatus::Live.as_str()
+            && cursor.status != DomainCursorStatus::Live
         {
             blockers.push(format!(
                 "source cursor is not live: {}/{} ({})",

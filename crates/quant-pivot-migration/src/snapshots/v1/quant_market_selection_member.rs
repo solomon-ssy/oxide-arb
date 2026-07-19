@@ -5,29 +5,46 @@ use sea_orm::entity::prelude::*;
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
-#[sea_orm(schema_name = "public", table_name = "quant_market_selection_member")]
+#[sea_orm(table_name = "quant_market_selection_member")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub market_selection_id: Uuid,
-    #[sea_orm(
-        primary_key,
-        auto_increment = false,
-        column_type = "String(StringLen::N(66))"
-    )]
+    #[sea_orm(primary_key, auto_increment = false, column_type = "Text")]
     pub market_id: String,
     #[sea_orm(column_type = "Text")]
     pub event_id: String,
-    #[sea_orm(column_type = "Custom(QpMarketCategory::name())")]
     pub category: QpMarketCategory,
     pub status: QpMarketStatus,
     #[sea_orm(column_type = "Text")]
     pub primary_token_id: String,
     #[sea_orm(column_type = "Text", nullable)]
     pub secondary_token_id: Option<String>,
-    #[sea_orm(column_type = "Decimal(Some((28, 8)))", nullable)]
     pub liquidity_usd: Option<Decimal>,
-    #[sea_orm(column_type = "Decimal(Some((28, 8)))", nullable)]
     pub volume_24h_usd: Option<Decimal>,
+    #[sea_orm(
+        belongs_to,
+        from = "event_id",
+        to = "event_id",
+        on_update = "NoAction",
+        on_delete = "NoAction"
+    )]
+    pub event: BelongsTo<super::event::Entity>,
+    #[sea_orm(
+        belongs_to,
+        from = "market_id",
+        to = "market_id",
+        on_update = "NoAction",
+        on_delete = "NoAction"
+    )]
+    pub market: BelongsTo<super::market::Entity>,
+    #[sea_orm(
+        belongs_to,
+        from = "market_selection_id",
+        to = "market_selection_id",
+        on_update = "NoAction",
+        on_delete = "NoAction"
+    )]
+    pub quant_market_selection: BelongsTo<super::quant_market_selection::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

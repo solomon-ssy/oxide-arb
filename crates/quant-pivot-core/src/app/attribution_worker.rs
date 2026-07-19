@@ -27,7 +27,7 @@ impl AppContext {
                 move || {
                     let secs = cadence_config
                         .current()
-                        .execution
+                        .operational_control
                         .attribution
                         .sweep_secs
                         .max(1);
@@ -40,11 +40,14 @@ impl AppContext {
                     let service = Arc::clone(&service);
                     let snapshot = pass_config.current();
                     async move {
-                        if !snapshot.execution.attribution.enabled {
+                        if !snapshot.operational_control.attribution.enabled {
                             return Ok(());
                         }
                         let summary = service
-                            .run_pass(Utc::now(), snapshot.execution.attribution.batch_size)
+                            .run_pass(
+                                Utc::now(),
+                                snapshot.operational_control.attribution.batch_size,
+                            )
                             .await?;
                         if summary.written > 0 || summary.skipped > 0 {
                             tracing::info!(

@@ -8,7 +8,7 @@ use quant_pivot_models::{
         ReportScheduleGapListQuery, ReportScheduleHealthInfo, ReportScheduleStateInfo,
     },
     enums::quant::ReportRunTerminalReason,
-    types::{RecommendationReportId, ReportRunId, RuntimeConfigVersionId},
+    types::{DecisionPolicySnapshotId, RecommendationReportId, ReportRunId},
 };
 use uuid::Uuid;
 
@@ -21,7 +21,7 @@ pub trait ReportRunRepository: Send + Sync {
     /// Reconcile the complete active schedule set and invalidate changed queued specs.
     async fn reconcile_schedules(
         &self,
-        runtime_config_version_id: &RuntimeConfigVersionId,
+        decision_policy_snapshot_id: &DecisionPolicySnapshotId,
         schedules: Vec<ReconcileReportSchedule>,
     ) -> Result<ReconcileReportSchedulesOutcome, StorageError>;
 

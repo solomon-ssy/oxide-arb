@@ -1,5 +1,6 @@
 //! Catalog-driven Postgres migration helpers.
 
+use chrono::Utc;
 use quant_pivot_error::seed::SeedError;
 use quant_pivot_models::{
     entities::seed_application,
@@ -194,8 +195,8 @@ async fn record_seed_application(
         seed_id: Set(seed.id.to_owned()),
         seed_version: Set(seed_version_i32(seed)?),
         checksum: Set(seed.checksum.to_owned()),
+        applied_at: Set(Utc::now()),
         rows_affected: Set(rows),
-        ..Default::default()
     })
     .exec_without_returning(db)
     .await?;

@@ -1,5 +1,13 @@
 # 00 — Quant Pivot 总体架构
 
+<!-- quant-pivot-lifecycle-contract:v1 -->
+> **Lifecycle contract**
+> - `lifecycle_assumption`: 项目尚未正式生产上线，当前状态为 `pre_production_resettable`，系统自有基线统一为 `boot` / schema version `1`。
+> - `schema_data_version_impact`: 本文中的历史版本号与递增路径不再具有实施效力；当前实现不迁移测试数据、旧结构或旧版本。
+> - `pre_production_behavior`: 允许 clean-break、migration squash 与全新基础设施 bootstrap，但任何数据销毁仍需操作者单独授权。
+> - `production_frozen_behavior`: 一旦完成不可逆 production seal，后续变更必须提供前向 migration、兼容性评估、回滚方案与数据验证。
+> - `rollback_and_data_verification`: 封存前通过清空后的 fresh-install 验证；封存后不得回退到 boot reset。
+
 > 状态：生产级目标架构
 >
 > 范围：Polymarket-only quant-pivot
@@ -78,7 +86,7 @@
 
 ### 2.2 模型不变量
 
-- 每个模型输出必须携带 `model_version`、`feature_schema_version`、`training_dataset_id`、`runtime_config_version_id`。
+- 每个模型输出必须携带 `model_version`、`feature_schema_version`、`training_dataset_id`、`decision_policy_snapshot_id`。
 - 每个 recommendation 必须携带 factor breakdown，不能只给一个 opaque score。
 - 模型未通过质量门禁时只能进入 `report_only_shadow`，不能进入半自动或自动执行。
 - 训练标签必须声明 `label_available_at`；未成熟标签不能用于监督评估。

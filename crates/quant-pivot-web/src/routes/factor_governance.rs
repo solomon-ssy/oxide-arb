@@ -116,23 +116,20 @@ pub async fn collinearity(
     } else {
         let config = state.runtime_config_apply.current();
         config
-            .factors
+            .profile_artifacts
+            .scoring
+            .definition
             .orthogonalize
             .max_correlation
             .value
-            .trim()
-            .parse::<rust_decimal::Decimal>()
-            .map_err(|error| {
-                WebError::BadRequest(format!(
-                    "runtime factors.orthogonalize.max_correlation is invalid: {error}"
-                ))
-            })?
     };
     // Honor the runtime `factors.orthogonalize.neutralize_by` operator.
     let neutralize_by_category = state
         .runtime_config_apply
         .current()
-        .factors
+        .profile_artifacts
+        .scoring
+        .definition
         .orthogonalize
         .neutralize_by
         .iter()
@@ -278,9 +275,9 @@ pub async fn register(
         .factor_governance
         .register_enabled_definitions(
             RegisterFactorDefinitionsCommand {
-                factors: config.factors.clone(),
-                features: config.features.clone(),
-                domain: config.domain.clone(),
+                factors: config.profile_artifacts.scoring.definition.clone(),
+                features: config.profile_artifacts.features.definition.clone(),
+                domain: config.profile_artifacts.domain.definition.clone(),
                 reason: request.reason.clone(),
             },
             governance_actor(&actor, &acting_role),

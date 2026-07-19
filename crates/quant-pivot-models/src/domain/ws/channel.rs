@@ -122,7 +122,7 @@ impl WsChannel {
             }
             Self::QuantIntent => ResourceType::OrderIntent,
             Self::MaterializationRunUpdate => ResourceType::Materialization,
-            Self::ConfigActivated => ResourceType::RuntimeConfig,
+            Self::ConfigActivated => ResourceType::DecisionPolicySnapshot,
             Self::QuantReconciliation => ResourceType::Reconciliation,
             Self::QuantSettlement => ResourceType::SettlementRedeem,
         }

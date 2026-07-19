@@ -35,8 +35,8 @@ use quant_pivot_models::{
     enums::{common::MarketCategory, quant::TrainingDatasetStatus},
     runtime_config::{FactorCrossSectionConfig, PortfolioConfig, sections::FactorsConfig},
     types::{
-        BacktestPathSetId, BacktestReportId, Bps, ContentHash, ModelInputContract, ModelRunId,
-        ModelVersionId, PositionId, RuntimeConfigVersionId, TrainingDatasetId,
+        BacktestPathSetId, BacktestReportId, Bps, ContentHash, DecisionPolicySnapshotId,
+        ModelInputContract, ModelRunId, ModelVersionId, PositionId, TrainingDatasetId,
         TrainingSampleSource,
     },
 };
@@ -148,7 +148,7 @@ pub struct CpcvBacktestInput {
     /// Real persisted CPCV run id carried into every runtime input.
     pub model_run_id: ModelRunId,
     pub training_dataset_id: TrainingDatasetId,
-    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub label: LabelSelector,
     /// The model family under validation. `WeightedFactor` trains via
     /// [`WeightedFactorTrainer`]; `HoldVsExitWeighted` trains via
@@ -1533,7 +1533,7 @@ fn evaluate_portfolio_groups(
     let request = BacktestRequest {
         backtest_report_id: BacktestReportId::from_v7(),
         model_version_id: model.model_version_id(),
-        runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
+        decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
         window_start: ticks.first().map_or_else(Utc::now, |tick| tick.decision_at),
         window_end: ticks.last().map_or_else(Utc::now, |tick| tick.decision_at),
     };

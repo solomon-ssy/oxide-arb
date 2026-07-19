@@ -46,7 +46,7 @@ use crate::{
     execution::{DispatchWake, IntentLifecyclePublisher},
     governance::{KillSwitchHandle, RuntimeModeHandle},
     report::{ReportCoordinator, ReportLifecycleService},
-    runtime_config::{RuntimeConfigApplicator, RuntimeConfigStore},
+    runtime_config::{DecisionPolicyStore, PolicySnapshotApplicator},
     service::{
         factor_pipeline::FactorPipelineService, feature_pipeline::FeaturePipelineService,
         model_runner::ModelRunner,
@@ -81,11 +81,11 @@ pub struct AppContext {
 }
 
 impl AppContext {
-    pub fn runtime_config(&self) -> Arc<RuntimeConfigStore> {
+    pub fn runtime_config(&self) -> Arc<DecisionPolicyStore> {
         Arc::clone(&self.governance.runtime_config)
     }
 
-    pub fn applicator(&self) -> Arc<RuntimeConfigApplicator> {
+    pub fn applicator(&self) -> Arc<PolicySnapshotApplicator> {
         Arc::clone(&self.governance.applicator)
     }
 

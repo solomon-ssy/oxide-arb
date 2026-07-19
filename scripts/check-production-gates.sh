@@ -16,6 +16,9 @@ rust_static() {
   bash scripts/lint-dead-semantics.sh
   bash scripts/lint-clickhouse-correctness.sh
   bash scripts/lint-training-serving-parity.sh
+  bash scripts/lint-phase-lifecycle.sh
+  bash scripts/lint-config-inventory.sh
+  bash scripts/lint-seaorm-persistence.sh
   cargo machete --with-metadata
   cargo +nightly udeps --workspace --all-targets
   cargo test --workspace

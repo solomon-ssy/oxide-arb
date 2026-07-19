@@ -317,21 +317,13 @@ mod tests {
     #[test]
     fn compiled_migration_artifacts_are_ordered_and_checksummed() {
         let migrations = expected_migrations();
-        assert_eq!(migrations.len(), 7);
+        assert_eq!(migrations.len(), 1);
         assert_eq!(
             migrations
                 .iter()
                 .map(|migration| migration.version.as_str())
                 .collect::<Vec<_>>(),
-            [
-                "m20260716_000001_schema_snapshot",
-                "m20260716_000002_relational_invariants",
-                "m20260716_000003_query_indexes",
-                "m20260716_000004_worm_and_update_triggers",
-                "m20260718_000005_phase_11_9_feedback_verticals",
-                "m20260718_000006_weather_daily_temperature_projection",
-                "m20260718_000007_airnow_pm25_operational_state",
-            ]
+            ["m00000000_000001_bootstrap"]
         );
         assert!(
             migrations

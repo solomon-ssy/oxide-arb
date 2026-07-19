@@ -5,13 +5,12 @@ use sea_orm::entity::prelude::*;
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
-#[sea_orm(schema_name = "public", table_name = "quant_report_schedule_gap")]
+#[sea_orm(table_name = "quant_report_schedule_gap")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub gap_id: Uuid,
-    #[sea_orm(column_type = "Text")]
     pub schedule_id: String,
-    pub runtime_config_version_id: Uuid,
+    pub decision_policy_snapshot_id: Uuid,
     pub reason: QpReportScheduleGapReason,
     pub first_scheduled_for: DateTimeWithTimeZone,
     pub last_scheduled_for: DateTimeWithTimeZone,
@@ -19,6 +18,14 @@ pub struct Model {
     pub detected_at: DateTimeWithTimeZone,
     #[sea_orm(column_type = "Text", nullable)]
     pub detail: Option<String>,
+    #[sea_orm(
+        belongs_to,
+        from = "decision_policy_snapshot_id",
+        to = "decision_policy_snapshot_id",
+        on_update = "NoAction",
+        on_delete = "NoAction"
+    )]
+    pub decision_policy_snapshot: BelongsTo<super::decision_policy_snapshot::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

@@ -33,6 +33,23 @@ pub struct Model {
     pub started_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
+
+    #[sea_orm(
+        belongs_to,
+        relation_enum = "Artifact",
+        from = "artifact_id",
+        to = "artifact_id"
+    )]
+    pub artifact: BelongsTo<super::quant_trade_policy_artifact::Entity>,
+    #[sea_orm(
+        belongs_to,
+        relation_enum = "SourceDataset",
+        from = "source_dataset_id",
+        to = "training_dataset_id"
+    )]
+    pub source_dataset: BelongsTo<super::quant_training_dataset::Entity>,
+    #[sea_orm(has_many, relation_enum = "ValidationRow")]
+    pub validation_row: HasMany<super::quant_trade_policy_validation_row::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

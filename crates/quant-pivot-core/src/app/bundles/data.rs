@@ -27,7 +27,7 @@ use quant_pivot_api::{
 };
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
-    config::DeployConfig, domain::CoreEventPublisher, runtime_config::RuntimeConfig,
+    config::DeployConfig, domain::CoreEventPublisher, runtime_config::DecisionPolicySnapshot,
 };
 use quant_pivot_repository::{
     cached::{CachedEventRepository, CachedMarketRepository},
@@ -47,7 +47,7 @@ pub struct DataBundleDeps<'a> {
     pub shutdown: &'a CancellationToken,
     pub metrics: &'a Arc<MetricsHub>,
     pub infra: &'a InfraBundle,
-    pub runtime: &'a RuntimeConfig,
+    pub runtime: &'a DecisionPolicySnapshot,
     pub events: &'a CoreEventPublisher,
 }
 
@@ -114,7 +114,7 @@ impl DataBundle {
         let book_store = Arc::new(BookStore::new(Arc::clone(deps.metrics)));
         let market_registry = Arc::new(MarketRegistry::new());
         let market_filter = Arc::new(MarketFilter::new(
-            &deps.runtime.selection.enabled_categories,
+            &deps.runtime.recommendation.selection.enabled_categories,
         ));
         let market_cache = Arc::new(MarketCache::new(
             Arc::clone(&market_registry),
@@ -162,7 +162,7 @@ impl DataBundle {
         let data_quality = Arc::new(BookDataQualityService::new(
             Arc::clone(&book_store),
             Arc::clone(&ws_manager) as Arc<dyn WsShardHealthPort>,
-            &deps.runtime.data_quality,
+            &deps.runtime.recommendation.data_quality,
             Arc::clone(&deps.infra.ingest_lag_tracker),
         ));
         let pit_source: Arc<dyn PointInTimeSnapshotSource> = Arc::new(DurablePitSource::new(

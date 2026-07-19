@@ -6,9 +6,9 @@ use crate::{
         quant::{ApprovalStatus, OrderIntentStatus, QuantRuntimeMode},
     },
     types::{
-        ContentHash, EntryConditionInstanceId, EntryOrderSpec, ExitPolicySpec,
-        ExitReinferenceObservation, ModelVersionId, OrderIntentId, Price, RecommendationId,
-        ResearchProfileRef, RuntimeConfigVersionId, ScaleOutState,
+        ContentHash, DecisionPolicySnapshotId, EntryConditionInstanceId, EntryOrderSpec,
+        ExitPolicySpec, ExitReinferenceObservation, ModelVersionId, OrderIntentId, Price,
+        RecommendationId, ResearchProfileRef, ScaleOutState,
     },
 };
 use chrono::{DateTime, Utc};
@@ -23,7 +23,7 @@ pub struct Model {
     pub order_intent_id: OrderIntentId,
     pub recommendation_id: RecommendationId,
     pub runtime_mode: QuantRuntimeMode,
-    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub model_version_id: ModelVersionId,
     #[sea_orm(column_type = "JsonBinary")]
     pub profile_ref: ResearchProfileRef,
@@ -74,6 +74,20 @@ pub struct Model {
         to = "condition_instance_id"
     )]
     pub condition_instance: BelongsTo<super::quant_entry_condition_instance::Entity>,
+    #[sea_orm(
+        belongs_to,
+        relation_enum = "DecisionPolicySnapshot",
+        from = "decision_policy_snapshot_id",
+        to = "decision_policy_snapshot_id"
+    )]
+    pub decision_policy_snapshot: BelongsTo<super::decision_policy_snapshot::Entity>,
+    #[sea_orm(
+        belongs_to,
+        relation_enum = "ModelVersion",
+        from = "model_version_id",
+        to = "model_version_id"
+    )]
+    pub model_version: BelongsTo<super::quant_model_version::Entity>,
     #[sea_orm(has_many, relation_enum = "ExecutionOrder")]
     pub execution_order: HasMany<super::quant_execution_order::Entity>,
     #[sea_orm(has_one, relation_enum = "CapitalAllocation")]

@@ -4,14 +4,10 @@
 //! Reuses the registry / backtest / shadow / dataset repositories and the
 //! research [`ModelQualityGate`] to enforce the money-critical lifecycle:
 //!
-//! - **`publish`** — retire every other `Published` version for the spec, promote
-//!   the candidate / shadow version, sync `model.active_model_version_id` (and
-//!   clear the shadow slot) through a durable runtime-config activation, then
-//!   audit.
-//! - **`rollback`** — re-run frozen full parity, the global latch, the current
-//!   publish quality/calibration gate, and artifact validation for the recorded
-//!   retired predecessor; then atomically swap current/target statuses, sync
-//!   runtime config, and audit the exact permits.
+//! - **`publish`** — gate and publish an immutable artifact without changing
+//!   any `ModelRouting` policy or another artifact's lifecycle.
+//! - **`retire`** — retire only an unrouted artifact; serving rollback is a
+//!   separately approved `ModelRouting` revision rollback.
 //!
 //! Leakage is enforced at dataset **build** time and **re-scanned** on
 //! publish: [`Self::rescan_leakage`] decodes the frozen Parquet and
@@ -31,25 +27,24 @@ use quant_pivot_models::{
         BacktestPathSetInfo, BacktestReportInfo, BindCalibrationRequest, BindPublishPathSetRequest,
         GateOutcomeView, GatePreviewIntent, GovernanceActor, ModelGovernancePort, ModelVersionInfo,
         NewModelGovernanceAudit, NewModelVersion, PublishModelCommand, QualityGateReportView,
-        RetireModelCommand, RollbackModelCommand, RuntimeConfigPort, ShadowStabilitySummary,
-        TrainingDatasetInfo,
+        RetireModelCommand, ShadowStabilitySummary, TrainingDatasetInfo,
     },
     enums::{
         model::ModelFamily,
         quant::{CalibrationKind, ModelGovernanceAction, PublicationStatus},
     },
-    hashing::CanonicalDigest,
-    runtime_config::{QualityGateConfig, sections::ResearchValidationGatesConfig},
+    runtime_config::{
+        DecisionPolicySnapshot, QualityGateConfig, sections::ResearchValidationGatesConfig,
+    },
     types::{
-        AuditEventId, BacktestReportId, CalibrationArtifactId, ContentHash, FeatureParityRunId,
+        AuditEventId, BacktestReportId, CalibrationArtifactId, FeatureParityRunId,
         ModelGovernanceAuditId, ModelVersionId, Probability,
     },
 };
 use quant_pivot_repository::traits::{
     BacktestPathSetRepository, BacktestReportRepository, CalibrationArtifactRepository,
     ModelGovernanceAuditRepository, ModelRegistryRepository, PublishFeatureParityPermit,
-    PublishModelVersionCommit, RollbackModelVersionCommit, RuntimeConfigVersionRepository,
-    ShadowComparisonRepository, TrainingDatasetRepository,
+    PublishModelVersionCommit, ShadowComparisonRepository, TrainingDatasetRepository,
 };
 use quant_pivot_research::{
     artifact::ArtifactStore,
@@ -69,15 +64,8 @@ use quant_pivot_research::{
 use rust_decimal::Decimal;
 
 use crate::{
-    governance::{
-        resolve_return_model_calibration,
-        runtime_model_pointers::{
-            PreparedProductionPointer, RollbackPointerPreflight, RuntimeModelPointerSync,
-            preflight_rollback_production_pointer, prepare_production_active,
-            sync_after_model_retire,
-        },
-    },
-    runtime_config::RuntimeConfigStore,
+    governance::resolve_return_model_calibration,
+    runtime_config::DecisionPolicyStore,
     service::{
         feature_integrity::FeatureParityGatePort, frozen_model_parity::FrozenModelParityService,
         training_dataset,
@@ -109,11 +97,7 @@ pub struct ModelGovernanceDeps {
     /// The model quality gate.
     pub gate: Arc<dyn ModelQualityGate>,
     /// Active runtime config (gate thresholds + shadow window).
-    pub runtime_config: Arc<RuntimeConfigStore>,
-    /// Live runtime-config apply (model pointer hot-reload).
-    pub runtime_config_apply: Arc<dyn RuntimeConfigPort>,
-    /// Durable runtime-config version ledger (pointer sync audit).
-    pub runtime_config_repo: Arc<dyn RuntimeConfigVersionRepository>,
+    pub runtime_config: Arc<DecisionPolicyStore>,
     /// Global deterministic parity latch. Publish is risk-increasing and is
     /// denied unless the governed state is explicitly clear.
     pub feature_parity_gate: Arc<dyn FeatureParityGatePort>,
@@ -215,14 +199,6 @@ impl ModelGovernanceService {
             .map_err(QuantError::from)
     }
 
-    fn pointer_sync(&self) -> RuntimeModelPointerSync {
-        RuntimeModelPointerSync {
-            runtime_config_apply: Arc::clone(&self.deps.runtime_config_apply),
-            runtime_config_repo: Arc::clone(&self.deps.runtime_config_repo),
-            model_registry_repo: Arc::clone(&self.deps.model_registry_repo),
-        }
-    }
-
     /// Optional publish guard (11.2.2): Crypto-scoped weighted artifacts must
     /// carry non-zero weight on at least one domain-crypto factor column.
     ///
@@ -283,7 +259,9 @@ impl ModelGovernancePort for ModelGovernanceService {
             .deps
             .runtime_config
             .current()
-            .quality_gate
+            .profile_artifacts
+            .research_method
+            .model_promotion
             .required_shadow_window_secs;
         let evaluation = self
             .evaluate_gate(&version, GateIntent::Publish, None)
@@ -320,120 +298,6 @@ impl ModelGovernancePort for ModelGovernanceService {
         .await
     }
 
-    async fn rollback(
-        &self,
-        command: RollbackModelCommand,
-        actor: GovernanceActor,
-    ) -> QuantResult<ModelVersionInfo> {
-        let version = self.find_version(&command.model_version_id).await?;
-        if version.publication_status != PublicationStatus::Published {
-            return Err(GovernanceError::IllegalTransition {
-                detail: format!(
-                    "cannot roll back version {} in status {}",
-                    version.model_version_id,
-                    version.publication_status.as_str()
-                ),
-            }
-            .into());
-        }
-
-        let target = self.resolve_rollback_target(&version).await?;
-        if target.model_spec_id != version.model_spec_id {
-            return Err(GovernanceError::IllegalTransition {
-                detail: format!(
-                    "rollback target {} belongs to spec {}, expected {}",
-                    target.model_version_id, target.model_spec_id, version.model_spec_id
-                ),
-            }
-            .into());
-        }
-        if target.publication_status != PublicationStatus::Retired {
-            return Err(GovernanceError::IllegalTransition {
-                detail: format!(
-                    "rollback target {} must be retired, found {}",
-                    target.model_version_id,
-                    target.publication_status.as_str()
-                ),
-            }
-            .into());
-        }
-
-        // Rollback activates production risk just like publish. Rebuild the
-        // immutable subject-bound proof first, then require the independently
-        // governed global latch and today's complete publish gate (including
-        // active calibration resolution) before any lifecycle mutation.
-        let parity_run = self
-            .deps
-            .frozen_model_parity
-            .verify_and_record(
-                &target,
-                "model_rollback",
-                "pre-rollback full frozen dataset/model parity",
-            )
-            .await?;
-        self.deps
-            .feature_parity_gate
-            .ensure_clear("model rollback")
-            .await?;
-
-        let required_window = self
-            .deps
-            .runtime_config
-            .current()
-            .quality_gate
-            .required_shadow_window_secs;
-        let evaluation = self
-            .evaluate_gate(&target, GateIntent::Publish, None)
-            .await?;
-        let report = evaluation.report;
-        let summary = evaluation.shadow_summary.ok_or_else(|| {
-            QuantError::from(GovernanceError::IllegalTransition {
-                detail: "rollback publish gate did not evaluate shadow stability".to_owned(),
-            })
-        })?;
-
-        let report_json = gate_report_json(&report)?;
-        let quality_gate_payload_hash = CanonicalDigest::content_hash_json(&report_json)?;
-        self.deps
-            .model_registry_repo
-            .set_quality_gate_report(&target.model_version_id, report_json)
-            .await?;
-        if !report.passed {
-            return Err(map_publish_gate_failure(
-                &report.hard_failures,
-                &target.model_version_id,
-            ));
-        }
-        Self::validate_publish_artifact(&evaluation.artifact)?;
-        let pointer_sync = self.pointer_sync();
-        let pointer_reason = format!(
-            "rollback from {} to {}",
-            version.model_version_id, target.model_version_id
-        );
-        let pointer_preflight = Box::pin(preflight_rollback_production_pointer(
-            &pointer_sync,
-            &version.model_version_id,
-            &target.model_version_id,
-            &pointer_reason,
-            &actor.username,
-        ))
-        .await?;
-
-        Box::pin(self.commit_rollback(RollbackCommit {
-            current: version,
-            target,
-            parity_run_id: parity_run.run_id,
-            quality_gate_payload_hash,
-            report,
-            summary,
-            required_window,
-            pointer_preflight,
-            command,
-            actor,
-        }))
-        .await
-    }
-
     async fn retire(
         &self,
         command: RetireModelCommand,
@@ -450,6 +314,18 @@ impl ModelGovernancePort for ModelGovernanceService {
             }
             .into());
         }
+        if model_is_routed(
+            &self.deps.runtime_config.current(),
+            &version.model_version_id,
+        ) {
+            return Err(GovernanceError::IllegalTransition {
+                detail: format!(
+                    "cannot retire routed model {}; activate a ModelRouting revision without this artifact first",
+                    version.model_version_id
+                ),
+            }
+            .into());
+        }
 
         let before_status = version.publication_status;
         let retired = self
@@ -457,14 +333,6 @@ impl ModelGovernancePort for ModelGovernanceService {
             .model_registry_repo
             .retire_model_version(&version.model_version_id)
             .await?;
-
-        sync_after_model_retire(
-            &self.pointer_sync(),
-            &retired.model_version_id,
-            &format!("retire model version {}", retired.model_version_id),
-            &actor.username,
-        )
-        .await?;
 
         self.write_audit(NewModelGovernanceAudit {
             audit_id: ModelGovernanceAuditId::from_v7(),
@@ -479,7 +347,6 @@ impl ModelGovernancePort for ModelGovernanceService {
             before_hash: Some(version.artifact_hash.as_str().to_owned()),
             after_hash: Some(retired.artifact_hash.as_str().to_owned()),
             quality_gate_passed: false,
-            rollback_target_version_id: None,
             shadow_window_secs: None,
             detail_json: serde_json::json!({
                 "retired_version": retired.model_version_id.to_string(),
@@ -598,7 +465,6 @@ impl ModelGovernancePort for ModelGovernanceService {
             before_hash: before.map(|id| id.to_string()),
             after_hash: Some(request.path_set_id.to_string()),
             quality_gate_passed: false,
-            rollback_target_version_id: None,
             shadow_window_secs: None,
             detail_json: serde_json::json!({
                 "path_set_id": request.path_set_id.to_string(),
@@ -621,17 +487,15 @@ struct PublishCommit {
     actor: GovernanceActor,
 }
 
-struct RollbackCommit {
-    current: ModelVersionInfo,
-    target: ModelVersionInfo,
-    parity_run_id: FeatureParityRunId,
-    quality_gate_payload_hash: ContentHash,
-    report: QualityGateReport,
-    summary: ShadowStabilitySummary,
-    required_window: u64,
-    pointer_preflight: RollbackPointerPreflight,
-    command: RollbackModelCommand,
-    actor: GovernanceActor,
+fn model_is_routed(snapshot: &DecisionPolicySnapshot, model_version_id: &ModelVersionId) -> bool {
+    let routing = &snapshot.model_routing.model;
+    routing
+        .active_model_version_id
+        .iter()
+        .chain(routing.shadow_model_version_id.iter())
+        .chain(routing.active_exit_model_version_id.iter())
+        .chain(routing.category_model_pointers.values())
+        .any(|reference| reference.id == *model_version_id)
 }
 
 impl ModelGovernanceService {
@@ -662,35 +526,17 @@ impl ModelGovernanceService {
                 ),
             },
         };
-        let pointer_reason = format!("publish model version {}", version.model_version_id);
-        let PreparedProductionPointer {
-            snapshot,
-            expected_activation_id,
-            activation,
-        } = prepare_production_active(
-            &self.pointer_sync(),
-            &version.model_version_id,
-            true,
-            &pointer_reason,
-            &actor.username,
-        )
-        .await?;
         let outcome = self
             .deps
             .model_registry_repo
-            .publish_replacing_predecessors(PublishModelVersionCommit {
+            .publish_model_version(PublishModelVersionCommit {
                 model_spec_id: &version.model_spec_id,
                 model_version_id: &version.model_version_id,
                 feature_parity_permit,
                 feature_parity_run_id: &parity_run_id,
-                expected_runtime_config_activation_id: Some(&expected_activation_id),
-                runtime_config_activation: activation,
             })
             .await?;
-        snapshot.publish();
         let published = outcome.published;
-        let retired_predecessors = outcome.retired_predecessors;
-        let rollback_target = outcome.rollback_target;
         let feature_parity_state_id = outcome.feature_parity_state_id;
 
         self.write_audit(NewModelGovernanceAudit {
@@ -703,12 +549,9 @@ impl ModelGovernanceService {
             reason: command.reason,
             before_status,
             after_status: published.publication_status,
-            before_hash: rollback_target
-                .as_ref()
-                .map(|predecessor| predecessor.artifact_hash.as_str().to_owned()),
+            before_hash: None,
             after_hash: Some(published.artifact_hash.as_str().to_owned()),
             quality_gate_passed: true,
-            rollback_target_version_id: rollback_target.map(|predecessor| predecessor.model_version_id),
             shadow_window_secs: Some(checked_seconds(
                 required_window,
                 "quality_gate.shadow_stability_window_secs",
@@ -717,7 +560,6 @@ impl ModelGovernanceService {
                 "gate_report_hash": report.report_hash.as_str(),
                 "shadow_samples": summary.sample_count,
                 "shadow_mean_overlap": summary.mean_topn_overlap.inner().to_string(),
-                "retired_predecessors": retired_predecessors.iter().map(ToString::to_string).collect::<Vec<_>>(),
                 "feature_parity_state_id": feature_parity_state_id.to_string(),
             }),
             audit_event_id: Some(AuditEventId::from_v7()),
@@ -725,82 +567,6 @@ impl ModelGovernanceService {
         .await?;
 
         Ok(published)
-    }
-
-    async fn commit_rollback(&self, input: RollbackCommit) -> QuantResult<ModelVersionInfo> {
-        let RollbackCommit {
-            current,
-            target,
-            parity_run_id,
-            quality_gate_payload_hash,
-            report,
-            summary,
-            required_window,
-            pointer_preflight,
-            command,
-            actor,
-        } = input;
-        let shadow_window_secs =
-            checked_seconds(required_window, "quality_gate.shadow_stability_window_secs")?;
-        let feature_parity_state_id = self
-            .deps
-            .feature_parity_gate
-            .commit_state_id("model rollback commit")
-            .await?;
-        let PreparedProductionPointer {
-            snapshot,
-            expected_activation_id,
-            activation,
-        } = pointer_preflight.prepared;
-        let (retired, restored) = self
-            .deps
-            .model_registry_repo
-            .rollback_to_retired_predecessor(RollbackModelVersionCommit {
-                model_spec_id: &current.model_spec_id,
-                expected_current_model_version_id: &current.model_version_id,
-                target_model_version_id: &target.model_version_id,
-                expected_target_artifact_hash: &target.artifact_hash,
-                expected_target_publish_path_set_id: target.publish_path_set_id.as_ref(),
-                quality_gate_payload_hash: &quality_gate_payload_hash,
-                feature_parity_state_id: &feature_parity_state_id,
-                feature_parity_run_id: &parity_run_id,
-                expected_runtime_config_activation_id: Some(&expected_activation_id),
-                runtime_config_activation: activation,
-            })
-            .await?;
-        snapshot.publish();
-
-        self.write_audit(NewModelGovernanceAudit {
-            audit_id: ModelGovernanceAuditId::from_v7(),
-            model_version_id: Some(retired.model_version_id.clone()),
-            training_dataset_id: target.training_dataset_id.clone(),
-            action: ModelGovernanceAction::Rollback,
-            actor_username: actor.username,
-            actor_role: actor.role,
-            reason: command.reason,
-            before_status: current.publication_status,
-            after_status: retired.publication_status,
-            before_hash: Some(current.artifact_hash.as_str().to_owned()),
-            after_hash: Some(restored.artifact_hash.as_str().to_owned()),
-            quality_gate_passed: true,
-            rollback_target_version_id: Some(restored.model_version_id.clone()),
-            shadow_window_secs: Some(shadow_window_secs),
-            detail_json: serde_json::json!({
-                "retired_version": retired.model_version_id.to_string(),
-                "restored_version": restored.model_version_id.to_string(),
-                "restored_from_status": target.publication_status.as_str(),
-                "gate_report_hash": report.report_hash.as_str(),
-                "quality_gate_payload_hash": quality_gate_payload_hash.as_str(),
-                "feature_parity_run_id": parity_run_id.to_string(),
-                "feature_parity_state_id": feature_parity_state_id.to_string(),
-                "shadow_samples": summary.sample_count,
-                "shadow_mean_overlap": summary.mean_topn_overlap.inner().to_string(),
-            }),
-            audit_event_id: Some(AuditEventId::from_v7()),
-        })
-        .await?;
-
-        Ok(restored)
     }
 
     async fn ensure_model_score_calibrator(
@@ -886,6 +652,7 @@ impl ModelGovernanceService {
                 model_spec_id: version.model_spec_id.clone(),
                 version: next,
                 artifact_hash,
+                category_scope: calibrated.category_scope(),
                 profile_ref: version.profile_ref.clone(),
                 training_dataset_id: version.training_dataset_id.clone(),
                 trade_policy_artifact_id: calibrated.header().trade_policy_artifact_id.clone(),
@@ -936,7 +703,6 @@ impl ModelGovernanceService {
             before_hash: Some(version.artifact_hash.as_str().to_owned()),
             after_hash: Some(created.artifact_hash.as_str().to_owned()),
             quality_gate_passed: false,
-            rollback_target_version_id: None,
             shadow_window_secs: None,
             detail_json: serde_json::json!({
                 "source_version": version.model_version_id.to_string(),
@@ -960,11 +726,23 @@ impl ModelGovernanceService {
         backtest_report_id: Option<&BacktestReportId>,
     ) -> QuantResult<GateEvaluation> {
         let config = self.deps.runtime_config.current();
-        let required_window = config.quality_gate.required_shadow_window_secs;
-        let thresholds = thresholds_from_config(&config.quality_gate)?;
-        let validation_thresholds =
-            validation_thresholds_from_config(&config.research.validation.gates)?;
-        let sell_thresholds = sell_thresholds_from_config(&config.quality_gate)?;
+        let required_window = config
+            .profile_artifacts
+            .research_method
+            .model_promotion
+            .required_shadow_window_secs;
+        let thresholds =
+            thresholds_from_config(&config.profile_artifacts.research_method.model_promotion);
+        let validation_thresholds = validation_thresholds_from_config(
+            &config
+                .profile_artifacts
+                .research_method
+                .research
+                .validation
+                .gates,
+        );
+        let sell_thresholds =
+            sell_thresholds_from_config(&config.profile_artifacts.research_method.model_promotion);
         let model_family = Self::model_family_for_version(version);
 
         let artifact = load_hash_verified_artifact(&self.deps.artifact_store, version).await?;
@@ -1132,31 +910,6 @@ impl ModelGovernanceService {
     const fn model_family_for_version(version: &ModelVersionInfo) -> ModelFamily {
         version.model_family
     }
-
-    /// Resolve the exact predecessor recorded by the successful publish audit.
-    /// Rollback never guesses from current registry state: doing so would let a
-    /// missing/corrupt audit select a different artifact under concurrency.
-    async fn resolve_rollback_target(
-        &self,
-        version: &ModelVersionInfo,
-    ) -> QuantResult<ModelVersionInfo> {
-        let audits = self
-            .deps
-            .governance_audit_repo
-            .list_by_version(&version.model_version_id)
-            .await?;
-        let recorded_target = audits
-            .iter()
-            .find(|audit| audit.action == ModelGovernanceAction::Publish)
-            .and_then(|audit| audit.rollback_target_version_id.clone());
-        let target_id = recorded_target.ok_or_else(|| GovernanceError::IllegalTransition {
-            detail: format!(
-                "published version {} has no audited rollback target",
-                version.model_version_id
-            ),
-        })?;
-        self.find_version(&target_id).await
-    }
 }
 
 /// Project a research [`QualityGateReport`] onto the read-only wire view. Lives
@@ -1252,11 +1005,8 @@ fn effective_stability(
     Some(summary.mean_topn_overlap)
 }
 
-/// Parse a `[0, 1]`-or-correlation governed threshold from its decimal string.
-fn parse_threshold(value: &str, field: &str) -> QuantResult<Decimal> {
-    value.parse::<Decimal>().map_err(|error| {
-        QuantError::config(format!("invalid quality_gate.{field} `{value}`: {error}"))
-    })
+const fn parse_threshold(value: &Decimal, _field: &str) -> Decimal {
+    *value
 }
 
 fn checked_seconds(value: u64, field: &'static str) -> QuantResult<i64> {
@@ -1281,56 +1031,53 @@ fn checked_shadow_stability_lookback(required_window_secs: u64) -> QuantResult<u
 }
 
 /// Assemble research [`QualityGateThresholds`] from the governed config section.
-fn thresholds_from_config(config: &QualityGateConfig) -> QuantResult<QualityGateThresholds> {
-    Ok(QualityGateThresholds {
+const fn thresholds_from_config(config: &QualityGateConfig) -> QualityGateThresholds {
+    QualityGateThresholds {
         min_sample_count: config.min_sample_count,
-        min_label_coverage: parse_threshold(
-            &config.min_label_coverage.value,
-            "min_label_coverage",
-        )?,
+        min_label_coverage: parse_threshold(&config.min_label_coverage.value, "min_label_coverage"),
         min_materialization_coverage: parse_threshold(
             &config.min_materialization_coverage.value,
             "min_materialization_coverage",
-        )?,
-        max_drawdown: parse_threshold(&config.max_drawdown.value, "max_drawdown")?,
+        ),
+        max_drawdown: parse_threshold(&config.max_drawdown.value, "max_drawdown"),
         min_liquidity_exit_feasibility: parse_threshold(
             &config.min_liquidity_exit_feasibility.value,
             "min_liquidity_exit_feasibility",
-        )?,
+        ),
         min_shadow_overlap_stability: parse_threshold(
             &config.min_shadow_overlap_stability.value,
             "min_shadow_overlap_stability",
-        )?,
+        ),
         max_category_concentration: parse_threshold(
             &config.max_category_concentration.value,
             "max_category_concentration",
-        )?,
-    })
+        ),
+    }
 }
 
 /// Assemble Phase 11.5 [`ValidationGateThresholds`] from `research.validation.gates`.
-fn validation_thresholds_from_config(
+const fn validation_thresholds_from_config(
     config: &ResearchValidationGatesConfig,
-) -> QuantResult<ValidationGateThresholds> {
-    Ok(ValidationGateThresholds {
+) -> ValidationGateThresholds {
+    ValidationGateThresholds {
         rank_ic_min: parse_threshold(
             &config.rank_ic_min.value,
             "research.validation.gates.rank_ic_min",
-        )?,
+        ),
         dsr_significance: parse_threshold(
             &config.dsr_significance.value,
             "research.validation.gates.dsr_significance",
-        )?,
-        max_pbo: parse_threshold(&config.max_pbo.value, "research.validation.gates.max_pbo")?,
+        ),
+        max_pbo: parse_threshold(&config.max_pbo.value, "research.validation.gates.max_pbo"),
         max_turnover: parse_threshold(
             &config.max_turnover.value,
             "research.validation.gates.max_turnover",
-        )?,
+        ),
         min_tail_loss_bps: parse_threshold(
             &config.min_tail_loss_bps.value,
             "research.validation.gates.min_tail_loss_bps",
-        )?,
-    })
+        ),
+    }
 }
 
 fn path_set_gate_input_from_info(info: &BacktestPathSetInfo) -> QuantResult<CpcvPathSetGateInput> {
@@ -1361,26 +1108,24 @@ fn path_set_gate_input_from_info(info: &BacktestPathSetInfo) -> QuantResult<Cpcv
 }
 
 /// Assemble sell-side [`SellQualityGateThresholds`] from the governed config section.
-fn sell_thresholds_from_config(
-    config: &QualityGateConfig,
-) -> QuantResult<SellQualityGateThresholds> {
-    Ok(SellQualityGateThresholds {
+const fn sell_thresholds_from_config(config: &QualityGateConfig) -> SellQualityGateThresholds {
+    SellQualityGateThresholds {
         min_sample_count: config.sell.min_sample_count,
         min_label_coverage: parse_threshold(
             &config.sell.min_label_coverage.value,
             "sell.min_label_coverage",
-        )?,
-        rank_ic_min: parse_threshold(&config.sell.rank_ic_min.value, "sell.rank_ic_min")?,
-        max_pbo: parse_threshold(&config.sell.max_pbo.value, "sell.max_pbo")?,
+        ),
+        rank_ic_min: parse_threshold(&config.sell.rank_ic_min.value, "sell.rank_ic_min"),
+        max_pbo: parse_threshold(&config.sell.max_pbo.value, "sell.max_pbo"),
         min_l2_book_fidelity_ratio: parse_threshold(
             &config.sell.min_l2_book_fidelity_ratio.value,
             "sell.min_l2_book_fidelity_ratio",
-        )?,
+        ),
         max_fallback_ratio: parse_threshold(
             &config.sell.max_fallback_ratio.value,
             "sell.max_fallback_ratio",
-        )?,
-    })
+        ),
+    }
 }
 
 /// Reconstruct a research [`BacktestReport`] from its persisted ledger row.
@@ -1407,7 +1152,7 @@ fn backtest_report_from_info(info: BacktestReportInfo) -> QuantResult<BacktestRe
     Ok(BacktestReport {
         backtest_report_id: info.backtest_report_id,
         model_version_id: info.model_version_id,
-        runtime_config_version_id: info.runtime_config_version_id,
+        decision_policy_snapshot_id: info.decision_policy_snapshot_id,
         window_start: info.window_start,
         window_end: info.window_end,
         coverage: info.coverage,
@@ -1442,7 +1187,7 @@ mod path_set_gate_input_tests {
     use quant_pivot_models::{
         domain::BacktestPathSetInfo,
         types::{
-            BacktestPathSetId, ContentHash, ModelRunId, ModelVersionId, RuntimeConfigVersionId,
+            BacktestPathSetId, ContentHash, DecisionPolicySnapshotId, ModelRunId, ModelVersionId,
             TrainingDatasetId,
         },
     };
@@ -1458,7 +1203,7 @@ mod path_set_gate_input_tests {
             model_version_id: ModelVersionId::from_v7(),
             model_run_id: ModelRunId::from_v7(),
             training_dataset_id: TrainingDatasetId::from_v7(),
-            runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
+            decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
             window_start: Utc::now(),
             window_end: Utc::now(),
             path_count: 3,

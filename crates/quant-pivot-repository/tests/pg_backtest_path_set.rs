@@ -4,59 +4,45 @@ use chrono::{Duration as ChronoDuration, Utc};
 use quant_pivot_models::{
     domain::{
         CompleteTrainingDatasetBuild, NewBacktestPathSet, NewModelRun, NewModelSpec,
-        NewModelVersion, NewRuntimeConfigVersion, NewTrainingDatasetPlan,
+        NewModelVersion, NewTrainingDatasetPlan,
     },
     enums::{
         model::ModelFamily,
         quant::{
             DatasetPurpose, ModelRunKind, ModelRunStatus, PublicationStatus, TrainingDatasetStatus,
         },
-        runtime_config::RuntimeConfigVersionSource,
     },
     types::{
         ArtifactUri, BacktestPathSetId, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION,
-        DatasetCoverage, DatasetManifest, ModelInputContract, ModelRunId, ModelSpecId,
-        ModelTrainingContract, ModelVersionId, RuntimeConfigVersionId, SchemaVersion,
-        TrainingDatasetId, TrainingHorizonsSecs, TrainingSampleSources, default_sample_sources,
+        DatasetCoverage, DatasetManifest, DecisionPolicySnapshotId, ModelInputContract, ModelRunId,
+        ModelSpecId, ModelTrainingContract, ModelVersionId, SchemaVersion, TrainingDatasetId,
+        TrainingHorizonsSecs, TrainingSampleSources, default_sample_sources,
     },
 };
 use quant_pivot_repository::{
     postgres::{
         PgBacktestPathSetRepository, PgModelRegistryRepository, PgModelRunRepository,
-        PgRuntimeConfigVersionRepository, PgTrainingDatasetRepository,
+        PgTrainingDatasetRepository,
     },
     traits::{
         BacktestPathSetRepository, ModelRegistryRepository, ModelRunRepository,
-        RuntimeConfigVersionRepository, TrainingDatasetRepository,
+        TrainingDatasetRepository,
     },
 };
-use quant_pivot_test_support::pg::setup_pg;
+use quant_pivot_test_support::{pg::setup_pg, policy_fixtures::bootstrap_default_policy_bundle};
 use rust_decimal_macros::dec;
 
 fn content_hash(seed: char) -> ContentHash {
     ContentHash::parse(format!("blake3:{}", seed.to_string().repeat(64))).expect("hash")
 }
 
-async fn seed_runtime_config(db: &sea_orm::DatabaseConnection) -> RuntimeConfigVersionId {
-    let id = RuntimeConfigVersionId::from_v7();
-    PgRuntimeConfigVersionRepository::new(db.clone())
-        .create_version(NewRuntimeConfigVersion {
-            runtime_config_version_id: id.clone(),
-            config_hash: content_hash('c'),
-            schema_version: SchemaVersion::FIRST,
-            config_json: serde_json::json!({}),
-            source: RuntimeConfigVersionSource::Bootstrap,
-            created_by: "pg-path-set-it".to_owned(),
-            reason: "integration test".to_owned(),
-        })
-        .await
-        .expect("runtime config");
-    id
+async fn seed_runtime_config(db: &sea_orm::DatabaseConnection) -> DecisionPolicySnapshotId {
+    bootstrap_default_policy_bundle(db, "pg-path-set-it", "integration test").await
 }
 
 async fn seed_model_and_dataset(
     db: &sea_orm::DatabaseConnection,
-    rc_id: &RuntimeConfigVersionId,
+    rc_id: &DecisionPolicySnapshotId,
 ) -> (ModelVersionId, ModelRunId, TrainingDatasetId) {
     let model_spec_id = seed_model_spec(db).await;
     let window_start = Utc::now() - ChronoDuration::hours(2);
@@ -91,7 +77,7 @@ async fn seed_model_spec(db: &sea_orm::DatabaseConnection) -> ModelSpecId {
 
 async fn seed_training_dataset(
     db: &sea_orm::DatabaseConnection,
-    rc_id: &RuntimeConfigVersionId,
+    rc_id: &DecisionPolicySnapshotId,
     model_spec_id: &ModelSpecId,
     window_start: chrono::DateTime<Utc>,
 ) -> TrainingDatasetId {
@@ -106,7 +92,7 @@ async fn seed_training_dataset(
         model_spec_id: model_spec_id.clone(),
         trade_policy_artifact_id: None,
         trade_policy_hash: None,
-        runtime_config_version_id: rc_id.clone(),
+        decision_policy_snapshot_id: rc_id.clone(),
         window_start,
         window_end,
         purpose: DatasetPurpose::Training,
@@ -133,7 +119,7 @@ async fn seed_training_dataset(
             horizons_secs: TrainingHorizonsSecs(vec![0]),
             feature_schema_version: Some(SchemaVersion::FIRST),
             sample_sources: Some(TrainingSampleSources(default_sample_sources())),
-            runtime_config_version_id: rc_id.clone(),
+            decision_policy_snapshot_id: rc_id.clone(),
         })
         .await
         .expect("dataset plan");
@@ -166,7 +152,7 @@ async fn seed_training_dataset(
 
 async fn seed_model_version_and_run(
     db: &sea_orm::DatabaseConnection,
-    rc_id: &RuntimeConfigVersionId,
+    rc_id: &DecisionPolicySnapshotId,
     model_spec_id: ModelSpecId,
     training_dataset_id: &TrainingDatasetId,
     window_start: chrono::DateTime<Utc>,
@@ -179,6 +165,7 @@ async fn seed_model_version_and_run(
             model_spec_id,
             version: 1,
             artifact_hash: content_hash('a'),
+            category_scope: None,
             profile_ref: quant_pivot_test_support::execution_pg_seed::fixture_profile_ref(),
             training_dataset_id: Some(training_dataset_id.clone()),
             trade_policy_artifact_id: None,
@@ -200,7 +187,7 @@ async fn seed_model_version_and_run(
             model_run_id: model_run_id.clone(),
             run_kind: ModelRunKind::Backtest,
             model_version_id: Some(model_version_id.clone()),
-            runtime_config_version_id: rc_id.clone(),
+            decision_policy_snapshot_id: rc_id.clone(),
             market_selection_id: None,
             window_start,
             window_end: window_start + ChronoDuration::hours(1),
@@ -237,7 +224,7 @@ async fn quant_backtest_path_set_migration_and_crud() {
             model_version_id: model_version_id.clone(),
             model_run_id,
             training_dataset_id,
-            runtime_config_version_id: rc_id,
+            decision_policy_snapshot_id: rc_id,
             window_start,
             window_end: window_start + ChronoDuration::hours(1),
             path_count: 7,

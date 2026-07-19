@@ -9,15 +9,15 @@ use chrono::{Duration, Utc};
 use quant_pivot_error::{QuantError, QuantResult, report::ReportError};
 use quant_pivot_models::{
     domain::{
-        DecisionBoundary, DecisionClock, MarketSubject, ModelVersionInfo, PriceComparator,
-        RuntimeConfigVersionInfo, TradePolicyArtifactInfo,
+        DecisionBoundary, DecisionClock, DecisionPolicySnapshotInfo, MarketSubject,
+        ModelVersionInfo, PriceComparator, TradePolicyArtifactInfo,
         quant::{NewPortfolioPlan, NewReportDataQualitySnapshot},
     },
     enums::{
         domain::LinkageSourceRole,
         quant::{EmptyReportReason, OptimizerSolverStatus, RejectionReason, TradePolicyStatus},
     },
-    runtime_config::RuntimeConfig,
+    runtime_config::DecisionPolicySnapshot,
     types::{
         Bps, ContentHash, EntryConditionTemplate, EntryConditionTemplateV1, FeatureVectorId,
         MarketEventTemplate, MarketId, MarketSelectionId, ModelRunId, PortfolioPlanId,
@@ -26,8 +26,7 @@ use quant_pivot_models::{
     },
 };
 use quant_pivot_repository::traits::{
-    MarketSelectionRepository, QuantFactReadRepository, RuntimeConfigVersionRepository,
-    TradePolicyRepository,
+    MarketSelectionRepository, PolicyRepository, QuantFactReadRepository, TradePolicyRepository,
 };
 use quant_pivot_research::{
     artifact::ArtifactStore,
@@ -82,7 +81,7 @@ pub trait ReportBuilder: Send + Sync {
 
 /// Dependencies for [`DefaultReportBuilder`].
 pub struct ReportBuilderDeps {
-    pub runtime_config_repo: Arc<dyn RuntimeConfigVersionRepository>,
+    pub runtime_config_repo: Arc<dyn PolicyRepository>,
     pub artifact_store: Arc<dyn ArtifactStore>,
     pub calibration_loader: Arc<dyn CalibrationArtifactLoader>,
     pub trade_policy_repo: Arc<dyn TradePolicyRepository>,
@@ -106,8 +105,8 @@ pub struct DefaultReportBuilder {
 }
 
 struct BuildContext {
-    version: RuntimeConfigVersionInfo,
-    config: RuntimeConfig,
+    version: DecisionPolicySnapshotInfo,
+    config: DecisionPolicySnapshot,
     boundary: DecisionBoundary,
     top_n: u32,
     active: ActiveModelRequirements,
@@ -562,18 +561,28 @@ impl DefaultReportBuilder {
         let knowledge_lag_secs = resolve_knowledge_lag(request, &config)?;
         let boundary = DecisionClock::new(knowledge_lag_secs).serving_boundary(
             request.trigger_time,
-            config.domain.crypto.availability_lag_secs,
-            config.domain.weather.availability_lag_secs,
+            config
+                .profile_artifacts
+                .domain
+                .definition
+                .crypto
+                .availability_lag_secs,
+            config
+                .profile_artifacts
+                .domain
+                .definition
+                .weather
+                .availability_lag_secs,
         )?;
         let top_n = resolve_top_n(request, &config)?;
         let active = self
             .deps
             .model_runner
             .active_requirements(ActiveModelRequirementsRequest {
-                features: &config.features,
-                factors: &config.factors,
-                domain: &config.domain,
-                model: &config.model,
+                features: &config.profile_artifacts.features.definition,
+                factors: &config.profile_artifacts.scoring.definition,
+                domain: &config.profile_artifacts.domain.definition,
+                model: &config.model_routing.model,
                 decision_at: boundary.decision_at(),
             })
             .await?;
@@ -661,11 +670,14 @@ impl DefaultReportBuilder {
         let batch = self
             .deps
             .candidate_provider
-            .candidates(&context.boundary, &context.config.domain)
+            .candidates(
+                &context.boundary,
+                &context.config.profile_artifacts.domain.definition,
+            )
             .await?;
         enforce_candidate_ceiling(
             batch.candidates.len(),
-            context.config.reports.hard_candidate_ceiling,
+            context.config.recommendation.reports.hard_candidate_ceiling,
         )?;
         let selection = self
             .deps
@@ -673,10 +685,13 @@ impl DefaultReportBuilder {
             .build_snapshot(
                 MarketSelectionBuildRequest {
                     decision_at: context.boundary.decision_at(),
-                    runtime_config_version_id: context.version.runtime_config_version_id.clone(),
-                    selection: context.config.selection.clone(),
-                    data_quality: context.config.data_quality.clone(),
-                    features: context.config.features.clone(),
+                    decision_policy_snapshot_id: context
+                        .version
+                        .decision_policy_snapshot_id
+                        .clone(),
+                    selection: context.config.recommendation.selection.clone(),
+                    data_quality: context.config.recommendation.data_quality.clone(),
+                    features: context.config.profile_artifacts.features.definition.clone(),
                     model_requirements: context.active.model_requirements.clone(),
                     knowledge_lag_secs: context.boundary.knowledge_lag_secs(),
                 },
@@ -702,13 +717,13 @@ impl DefaultReportBuilder {
             .run(FeaturePipelineRequest {
                 included: &selection.included,
                 boundary: context.boundary.clone(),
-                runtime_config_version_id: context.version.runtime_config_version_id.clone(),
-                features: &context.config.features,
-                domain: &context.config.domain,
-                data_quality: &context.config.data_quality,
+                decision_policy_snapshot_id: context.version.decision_policy_snapshot_id.clone(),
+                features: &context.config.profile_artifacts.features.definition,
+                domain: &context.config.profile_artifacts.domain.definition,
+                data_quality: &context.config.recommendation.data_quality,
                 model_requirements: &context.active.model_requirements,
                 pit: decision_snapshot,
-                liquidity_cap_usd: liquidity_score_cap(&context.config)?,
+                liquidity_cap_usd: liquidity_score_cap(&context.config),
             })
             .await
     }
@@ -735,16 +750,16 @@ impl DefaultReportBuilder {
         self.deps
             .model_runner
             .run(ModelRunRequest {
-                runtime_config_version_id: context.version.runtime_config_version_id.clone(),
+                decision_policy_snapshot_id: context.version.decision_policy_snapshot_id.clone(),
                 market_selection_id: Some(selection.market_selection_id.clone()),
                 selection: &selection.included,
                 feature_vectors: &features.accepted,
                 feature_vector_ids: &feature_vector_ids,
                 feature_evidence,
-                features: &context.config.features,
-                factors: &context.config.factors,
-                domain: &context.config.domain,
-                model: &context.config.model,
+                features: &context.config.profile_artifacts.features.definition,
+                factors: &context.config.profile_artifacts.scoring.definition,
+                domain: &context.config.profile_artifacts.domain.definition,
+                model: &context.config.model_routing.model,
                 top_n: bounded_usize(context.top_n)?,
                 boundary: context.boundary.clone(),
             })
@@ -760,14 +775,14 @@ impl DefaultReportBuilder {
         drawdown_state: DrawdownState,
         correlation: Option<&CorrelationConstraint>,
     ) -> QuantResult<PortfolioPlanOutput> {
-        let caps = portfolio_caps(&context.config)?;
+        let caps = portfolio_caps(&context.config);
         let sizing = sizing_model_from_config(
-            &context.config.portfolio.sizing,
-            &context.config.portfolio.kelly_safety,
+            &context.config.execution_risk.portfolio.sizing,
+            &context.config.execution_risk.portfolio.kelly_safety,
         )?;
         // The optimizer is built per report from the active (hot-reloadable)
         // runtime config, so a config change takes effect on the next run.
-        let allocator = optimizer_from_config(&context.config.portfolio.optimizer)?;
+        let allocator = optimizer_from_config(&context.config.execution_risk.portfolio.optimizer)?;
         let planner = DefaultPortfolioPlanner::new(allocator);
         let plan_candidates = plan_candidates(
             &model_outcome.accepted,
@@ -789,16 +804,21 @@ impl DefaultReportBuilder {
                 "portfolio.constraints.max_correlated_exposure_usd",
                 &context
                     .config
+                    .execution_risk
                     .portfolio
                     .constraints
                     .max_correlated_exposure_usd
                     .value,
-            )?),
+            )),
             correlation,
             calibration: context.resolved_calibration.as_ref(),
             sizing: sizing.as_ref(),
             entry_max_slippage_bps: Bps::new(Decimal::from(
-                context.config.execution.entry_order_policy.max_slippage_bps,
+                context
+                    .config
+                    .execution_risk
+                    .entry_order_policy
+                    .max_slippage_bps,
             )),
             top_n: bounded_usize(context.top_n)?,
         })
@@ -812,7 +832,7 @@ impl DefaultReportBuilder {
         context: &BuildContext,
         selection: &MarketSelectionSnapshot,
     ) -> QuantResult<Option<CorrelationConstraint>> {
-        let constraints = &context.config.portfolio.constraints;
+        let constraints = &context.config.execution_risk.portfolio.constraints;
         let correlation = &constraints.correlation;
         if !correlation.enabled {
             return Ok(None);
@@ -820,14 +840,14 @@ impl DefaultReportBuilder {
         let cap = parse_decimal(
             "portfolio.constraints.max_correlated_exposure_usd",
             &constraints.max_correlated_exposure_usd.value,
-        )?;
+        );
         if cap <= Decimal::ZERO {
             return Ok(None);
         }
         let cluster_threshold = parse_decimal(
             "portfolio.constraints.correlation.cluster_threshold",
             &correlation.cluster_threshold.value,
-        )?;
+        );
 
         let lookback_secs = i64::from(correlation.lookback_days)
             .checked_mul(86_400)
@@ -961,7 +981,7 @@ impl DefaultReportBuilder {
             knowledge_lag_secs: input.context.boundary.knowledge_lag_secs(),
             decision_at: input.context.boundary.decision_at(),
             published_at: Utc::now(),
-            runtime_config_version_id: input.context.version.runtime_config_version_id.clone(),
+            decision_policy_snapshot_id: input.context.version.decision_policy_snapshot_id.clone(),
             runtime_config: &input.context.config,
             runtime_mode: self.deps.runtime_mode.current(),
             model_version_id: input.context.active.model_version_id.clone(),
@@ -999,23 +1019,23 @@ impl DefaultReportBuilder {
     async fn load_config(
         &self,
         request: &BuildReportRequest,
-    ) -> QuantResult<(RuntimeConfigVersionInfo, RuntimeConfig)> {
+    ) -> QuantResult<(DecisionPolicySnapshotInfo, DecisionPolicySnapshot)> {
         let version = self
             .deps
             .runtime_config_repo
             .load_active_at(request.trigger_time)
             .await?
             .ok_or_else(|| QuantError::config("no active runtime config version"))?;
-        let config = RuntimeConfig::from_json(&version.config_json)?;
+        let config = version.snapshot.clone();
         Ok((version, config))
     }
 
     async fn account_snapshot(
         &self,
         as_of: chrono::DateTime<Utc>,
-        config: &RuntimeConfig,
+        config: &DecisionPolicySnapshot,
     ) -> QuantResult<AccountSnapshot> {
-        let caps = portfolio_caps(config)?;
+        let caps = portfolio_caps(config);
         let provider = self
             .deps
             .account_provider_factory
@@ -1034,7 +1054,7 @@ impl DefaultReportBuilder {
                 &input.context.config,
                 input.empty.reason,
                 input.empty.rejected_count,
-            )?,
+            ),
         };
         self.deps.composer.compose(ComposeReportInput {
             trigger: &input.request.trigger,
@@ -1043,7 +1063,7 @@ impl DefaultReportBuilder {
             knowledge_lag_secs: input.context.boundary.knowledge_lag_secs(),
             decision_at: input.context.boundary.decision_at(),
             published_at: Utc::now(),
-            runtime_config_version_id: input.context.version.runtime_config_version_id.clone(),
+            decision_policy_snapshot_id: input.context.version.decision_policy_snapshot_id.clone(),
             runtime_config: &input.context.config,
             runtime_mode: self.deps.runtime_mode.current(),
             model_version_id: input.context.active.model_version_id.clone(),
@@ -1128,11 +1148,14 @@ fn aligned_series(series: Option<&BTreeMap<i64, Decimal>>, grid: &[i64]) -> Vec<
     out
 }
 
-fn resolve_top_n(request: &BuildReportRequest, config: &RuntimeConfig) -> QuantResult<u32> {
+fn resolve_top_n(
+    request: &BuildReportRequest,
+    config: &DecisionPolicySnapshot,
+) -> QuantResult<u32> {
     let top_n = match &request.trigger {
         ReportTrigger::Scheduled { schedule_id } => {
             config
-                .reports
+                .report_schedule
                 .schedules
                 .iter()
                 .find(|schedule| schedule.schedule_id == *schedule_id)
@@ -1145,10 +1168,10 @@ fn resolve_top_n(request: &BuildReportRequest, config: &RuntimeConfig) -> QuantR
             QuantError::config("ad-hoc report requires an explicit top_n (no configured default)")
         })?,
     };
-    if top_n == 0 || top_n > config.reports.max_top_n {
+    if top_n == 0 || top_n > config.recommendation.reports.max_top_n {
         return Err(QuantError::config(format!(
             "report top_n {top_n} outside 1..={}",
-            config.reports.max_top_n
+            config.recommendation.reports.max_top_n
         )));
     }
     Ok(top_n)
@@ -1164,11 +1187,14 @@ fn bounded_usize(value: u32) -> QuantResult<usize> {
     })
 }
 
-fn resolve_knowledge_lag(request: &BuildReportRequest, config: &RuntimeConfig) -> QuantResult<u64> {
+fn resolve_knowledge_lag(
+    request: &BuildReportRequest,
+    config: &DecisionPolicySnapshot,
+) -> QuantResult<u64> {
     match &request.trigger {
         ReportTrigger::Scheduled { schedule_id } => {
             let schedule = config
-                .reports
+                .report_schedule
                 .schedules
                 .iter()
                 .find(|schedule| schedule.schedule_id == *schedule_id)
@@ -1183,7 +1209,7 @@ fn resolve_knowledge_lag(request: &BuildReportRequest, config: &RuntimeConfig) -
             Ok(schedule.knowledge_lag_secs)
         }
         ReportTrigger::AdHoc { .. } => {
-            if !config.reports.ad_hoc_report_enabled {
+            if !config.recommendation.reports.ad_hoc_report_enabled {
                 return Err(QuantError::config("ad-hoc report generation is disabled"));
             }
             request.knowledge_lag_secs_override.ok_or_else(|| {
@@ -1262,7 +1288,7 @@ fn empty_data_quality_snapshot(
     NewReportDataQualitySnapshot {
         report_data_quality_snapshot_id: ReportDataQualitySnapshotId::from_v7(),
         decision_at,
-        runtime_config_version_id: context.version.runtime_config_version_id.clone(),
+        decision_policy_snapshot_id: context.version.decision_policy_snapshot_id.clone(),
         tokens_json: ReportDataQualityTokens(Vec::new()),
     }
 }
@@ -1278,64 +1304,95 @@ fn feature_vector_by_market(
         .collect()
 }
 
-fn portfolio_caps(config: &RuntimeConfig) -> QuantResult<PortfolioCaps> {
-    Ok(PortfolioCaps {
+const fn portfolio_caps(config: &DecisionPolicySnapshot) -> PortfolioCaps {
+    PortfolioCaps {
         total_budget_usd: parse_decimal(
             "portfolio.budget.total_budget_usd",
-            &config.portfolio.budget.total_budget_usd.value,
-        )?,
+            &config
+                .execution_risk
+                .portfolio
+                .budget
+                .total_budget_usd
+                .value,
+        ),
         max_single_recommendation_usd: parse_decimal(
             "portfolio.budget.max_single_recommendation_usd",
-            &config.portfolio.budget.max_single_recommendation_usd.value,
-        )?,
+            &config
+                .execution_risk
+                .portfolio
+                .budget
+                .max_single_recommendation_usd
+                .value,
+        ),
         min_recommendation_usd: parse_decimal(
             "portfolio.budget.min_recommendation_usd",
-            &config.portfolio.budget.min_recommendation_usd.value,
-        )?,
+            &config
+                .execution_risk
+                .portfolio
+                .budget
+                .min_recommendation_usd
+                .value,
+        ),
         max_market_exposure_usd: parse_decimal(
             "portfolio.constraints.max_market_exposure_usd",
-            &config.portfolio.constraints.max_market_exposure_usd.value,
-        )?,
+            &config
+                .execution_risk
+                .portfolio
+                .constraints
+                .max_market_exposure_usd
+                .value,
+        ),
         max_event_exposure_usd: parse_decimal(
             "portfolio.constraints.max_event_exposure_usd",
-            &config.portfolio.constraints.max_event_exposure_usd.value,
-        )?,
+            &config
+                .execution_risk
+                .portfolio
+                .constraints
+                .max_event_exposure_usd
+                .value,
+        ),
         max_category_exposure_usd: parse_decimal(
             "portfolio.constraints.max_category_exposure_usd",
-            &config.portfolio.constraints.max_category_exposure_usd.value,
-        )?,
+            &config
+                .execution_risk
+                .portfolio
+                .constraints
+                .max_category_exposure_usd
+                .value,
+        ),
         liquidity_usage_cap_pct: parse_decimal(
             "portfolio.constraints.liquidity_usage_cap_pct",
-            &config.portfolio.constraints.liquidity_usage_cap_pct.value,
-        )?,
+            &config
+                .execution_risk
+                .portfolio
+                .constraints
+                .liquidity_usage_cap_pct
+                .value,
+        ),
         max_aggregate_exposure_pct: parse_decimal(
             "portfolio.kelly_safety.max_aggregate_exposure_pct",
             &config
+                .execution_risk
                 .portfolio
                 .kelly_safety
                 .max_aggregate_exposure_pct
                 .value,
-        )?,
-    })
+        ),
+    }
 }
 
-fn parse_decimal(field: &str, value: &str) -> QuantResult<Decimal> {
-    value
-        .trim()
-        .parse::<Decimal>()
-        .map_err(|error| QuantError::config(format!("{field} is not a valid decimal: {error}")))
+const fn parse_decimal(_field: &str, value: &Decimal) -> Decimal {
+    *value
 }
 
-fn liquidity_score_cap(config: &RuntimeConfig) -> QuantResult<Usd> {
-    let caps = portfolio_caps(config)?;
+fn liquidity_score_cap(config: &DecisionPolicySnapshot) -> Usd {
+    let caps = portfolio_caps(config);
     if caps.liquidity_usage_cap_pct > Decimal::ZERO
         && caps.max_single_recommendation_usd > Decimal::ZERO
     {
-        return Ok(Usd::new(
-            caps.max_single_recommendation_usd / caps.liquidity_usage_cap_pct,
-        ));
+        return Usd::new(caps.max_single_recommendation_usd / caps.liquidity_usage_cap_pct);
     }
-    Ok(Usd::new(Decimal::from(10_000)))
+    Usd::new(Decimal::from(10_000))
 }
 
 /// Map planner rejections + solver provenance to the report-level empty reason

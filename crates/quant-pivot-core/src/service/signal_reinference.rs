@@ -50,7 +50,7 @@ use crate::{
     observability::{
         exit_signal_fact_writer::ExitSignalEvaluationEventWriter, metrics_hub::MetricsHub,
     },
-    runtime_config::RuntimeConfigStore,
+    runtime_config::DecisionPolicyStore,
 };
 
 /// A freshly re-inferred signal for one market at exit-evaluation time.
@@ -85,7 +85,7 @@ pub trait ExitSignalReinferer: Send + Sync {
 /// Dependencies for [`ReinferenceSignalEvaluator`].
 pub struct ReinferenceSignalEvaluatorDeps<R> {
     pub reinferer: R,
-    pub config: Arc<RuntimeConfigStore>,
+    pub config: Arc<DecisionPolicyStore>,
     pub metrics: Arc<MetricsHub>,
     pub audit: Arc<ExitSignalEvaluationEventWriter>,
 }
@@ -93,7 +93,7 @@ pub struct ReinferenceSignalEvaluatorDeps<R> {
 /// Model-driven exit-signal evaluator using the score-degradation criterion.
 pub struct ReinferenceSignalEvaluator<R> {
     reinferer: R,
-    config: Arc<RuntimeConfigStore>,
+    config: Arc<DecisionPolicyStore>,
     metrics: Arc<MetricsHub>,
     audit: Arc<ExitSignalEvaluationEventWriter>,
 }
@@ -180,7 +180,7 @@ pub fn degradation_verdict(
 #[async_trait]
 impl<R: ExitSignalReinferer> ExitSignalEvaluator for ReinferenceSignalEvaluator<R> {
     async fn evaluate(&self, ctx: ExitSignalContext<'_>) -> ExitSignalEvaluation {
-        let policy = self.config.current().execution.exit_monitor.clone();
+        let policy = self.config.current().execution_risk.exit_monitor.clone();
         if !policy.signal_reinference.enabled {
             self.metrics.inc_exit_signal_reinference("disabled");
             return ExitSignalEvaluation::verdict(ExitSignalVerdict::Indeterminate {

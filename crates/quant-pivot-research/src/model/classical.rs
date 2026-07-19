@@ -58,7 +58,7 @@ use crate::{
 /// mismatch is rejected; §15.6).
 pub const CLASSICAL_CRATE_NAME: &str = "smartcore";
 /// Recorded crate version (major.minor of the workspace `smartcore` dependency).
-pub const CLASSICAL_CRATE_VERSION: &str = "0.5";
+pub const CLASSICAL_CRATE_VERSION: &str = "0.1";
 
 /// Concrete `smartcore` regressor type aliases (`f64` features + targets, dense
 /// matrix design, dense target vector).

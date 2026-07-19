@@ -46,7 +46,7 @@ use quant_pivot_core::{
 };
 use quant_pivot_error::{control::ControlError, storage::StorageError};
 use quant_pivot_models::domain::{
-    DecisionClock, PreparedRuntimeConfig, RuntimeConfigPort, StructuralMonitorPort,
+    DecisionClock, PolicySnapshotPort, PreparedPolicySnapshot, StructuralMonitorPort,
 };
 use quant_pivot_models::runtime_config::FeatureFamily;
 use quant_pivot_models::{
@@ -67,11 +67,11 @@ use quant_pivot_models::{
         quant::{ModelRunKind, ModelRunStatus},
     },
     runtime_config::{
-        DataQualityConfig, DomainConfig, FactorsConfig, FeaturesConfig, RuntimeConfig,
+        DataQualityConfig, DecisionPolicySnapshot, DomainConfig, FactorsConfig, FeaturesConfig,
     },
     types::{
-        ContentHash, DomainInstrumentKey, EventId, FeatureVectorId, MarketId, ModelRunId, Price,
-        RuntimeConfigVersionId, Shares, TokenId, Usd,
+        ContentHash, DecisionPolicySnapshotId, DomainInstrumentKey, EventId, FeatureVectorId,
+        MarketId, ModelRunId, Price, Shares, TokenId, Usd,
     },
 };
 use quant_pivot_repository::{
@@ -128,16 +128,19 @@ fn composite_weights() -> ConcentrationCompositeWeights {
     }
 }
 
-struct FixedRuntimeConfig(Arc<RuntimeConfig>);
+struct FixedRuntimeConfig(Arc<DecisionPolicySnapshot>);
 
 #[async_trait::async_trait]
-impl RuntimeConfigPort for FixedRuntimeConfig {
-    fn current(&self) -> Arc<RuntimeConfig> {
+impl PolicySnapshotPort for FixedRuntimeConfig {
+    fn current(&self) -> Arc<DecisionPolicySnapshot> {
         Arc::clone(&self.0)
     }
 
-    async fn prepare(&self, config: RuntimeConfig) -> Result<PreparedRuntimeConfig, ControlError> {
-        Ok(PreparedRuntimeConfig::new(Arc::new(config), || {}))
+    async fn prepare(
+        &self,
+        config: DecisionPolicySnapshot,
+    ) -> Result<PreparedPolicySnapshot, ControlError> {
+        Ok(PreparedPolicySnapshot::new(Arc::new(config), || {}))
     }
 }
 
@@ -483,7 +486,7 @@ async fn run_whale_feature_pipeline(harness: &WhaleTapeConcHarness) -> FeaturePi
             data_quality: &DataQualityConfig::default(),
             model_requirements: &ModelFeatureRequirements::default(),
             pit: &harness.live_pit,
-            runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
+            decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
             liquidity_cap_usd: Usd::new(Decimal::from(10_000)),
         })
         .await
@@ -543,7 +546,7 @@ async fn run_factor_round_and_assert_concentration(
             model_run_id: model_run_id.clone(),
             run_kind: ModelRunKind::LiveInference,
             model_version_id: None,
-            runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
+            decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
             market_selection_id: None,
             window_start: harness.as_of,
             window_end: harness.as_of,
@@ -628,7 +631,7 @@ async fn assert_monitor_concentration_matches_canonical(
     harness: &WhaleTapeConcHarness,
     expected_composite: Decimal,
 ) {
-    let runtime = Arc::new(RuntimeConfig::default());
+    let runtime = Arc::new(DecisionPolicySnapshot::default());
     let monitor = CoreStructuralMonitor::new(
         Arc::clone(&harness.registry),
         Arc::clone(&harness.book_store),

@@ -3,8 +3,8 @@
 use crate::{
     enums::quant::{ResearchJobKind, ResearchJobStatus},
     types::{
-        DatasetCoverage, ModelSpecId, ResearchJobError, ResearchJobId, ResearchJobProgress,
-        RuntimeConfigVersionId,
+        DatasetCoverage, DecisionPolicySnapshotId, ModelSpecId, ResearchJobError, ResearchJobId,
+        ResearchJobProgress,
     },
 };
 use chrono::{DateTime, Utc};
@@ -20,7 +20,7 @@ pub struct Model {
     pub kind: ResearchJobKind,
     pub status: ResearchJobStatus,
     pub model_spec_id: Option<ModelSpecId>,
-    pub runtime_config_version_id: Option<RuntimeConfigVersionId>,
+    pub decision_policy_snapshot_id: Option<DecisionPolicySnapshotId>,
     #[sea_orm(column_type = "JsonBinary")]
     pub params_json: Json,
     #[sea_orm(column_type = "JsonBinary", nullable)]
@@ -42,6 +42,21 @@ pub struct Model {
     pub heartbeat_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+
+    #[sea_orm(
+        belongs_to,
+        relation_enum = "ModelSpec",
+        from = "model_spec_id",
+        to = "model_spec_id"
+    )]
+    pub model_spec: BelongsTo<Option<super::quant_model_spec::Entity>>,
+    #[sea_orm(
+        belongs_to,
+        relation_enum = "DecisionPolicySnapshot",
+        from = "decision_policy_snapshot_id",
+        to = "decision_policy_snapshot_id"
+    )]
+    pub decision_policy_snapshot: BelongsTo<Option<super::decision_policy_snapshot::Entity>>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

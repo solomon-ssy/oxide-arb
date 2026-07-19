@@ -27,7 +27,7 @@ use quant_pivot_models::{
         ArtifactUri, ClobMarketInfoVersion, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION,
         IcaoStation, ResearchProfileArtifact, ResearchProfileDataSource,
         SOURCE_SLICE_MANIFEST_FORMAT_VERSION, SourceSliceCatalogProof, SourceSliceId,
-        SourceSliceInvalidSession, SourceSliceManifestRef, SourceSliceManifestV2,
+        SourceSliceInvalidSession, SourceSliceManifestRef, SourceSliceManifestV1,
         SourceSliceObjectKind, SourceSliceObjectRef, SourceSlicePitCutoffs,
         SourceSliceSessionInvalidationReason,
     },
@@ -120,7 +120,7 @@ impl SourceSliceReader {
     async fn read_manifest(
         &self,
         source_slice: &SourceSliceInfo,
-    ) -> QuantResult<SourceSliceManifestV2> {
+    ) -> QuantResult<SourceSliceManifestV1> {
         if source_slice.status != SourceSliceStatus::Ready {
             return Err(StorageError::state_conflict(
                 "quant_source_slice",
@@ -172,7 +172,7 @@ impl SourceSliceReader {
     async fn read_manifest_artifact(
         &self,
         source_slice: &SourceSliceManifestRef,
-    ) -> QuantResult<SourceSliceManifestV2> {
+    ) -> QuantResult<SourceSliceManifestV1> {
         let manifest_metadata = self.artifacts.metadata(&source_slice.manifest_uri).await?;
         if manifest_metadata.durability.remote
             && !manifest_metadata.durability.permits_production_publish()
@@ -193,7 +193,7 @@ impl SourceSliceReader {
             .into());
         }
         let manifest =
-            serde_json::from_slice::<SourceSliceManifestV2>(&manifest_bytes).map_err(|error| {
+            serde_json::from_slice::<SourceSliceManifestV1>(&manifest_bytes).map_err(|error| {
                 ResearchError::DatasetBuild {
                     detail: format!("Source Slice manifest JSON is invalid: {error}"),
                 }
@@ -216,12 +216,12 @@ impl SourceSliceReader {
 
     async fn read_objects(
         &self,
-        manifest: &SourceSliceManifestV2,
+        manifest: &SourceSliceManifestV1,
     ) -> QuantResult<SourceRecordsByKind> {
         let mut by_kind = SourceRecordsByKind::new();
         for object in &manifest.objects {
             let expected_schema = CanonicalDigest::content_hash_json(&(
-                "source_slice_parquet_envelope_v2",
+                "source_slice_parquet_envelope_v1",
                 object.kind,
             ))?;
             if object.schema_hash != expected_schema {
@@ -290,7 +290,7 @@ impl SourceSliceReader {
 type SourceRecordsByKind = BTreeMap<SourceSliceObjectKind, Vec<SourceSliceRecord>>;
 
 fn decode_frozen_source_slice(
-    manifest: &SourceSliceManifestV2,
+    manifest: &SourceSliceManifestV1,
     mut by_kind: SourceRecordsByKind,
 ) -> QuantResult<FrozenSourceSlice> {
     let catalog = CatalogWindowInfo {
@@ -781,7 +781,7 @@ impl SourceSliceMaterializer {
             || profile.required_sources_contains(ResearchProfileDataSource::GefsEnsemble);
         let calibration_required =
             profile.required_sources_contains(ResearchProfileDataSource::GhcnhCalibration);
-        let manifest = SourceSliceManifestV2 {
+        let manifest = SourceSliceManifestV1 {
             format_version: SOURCE_SLICE_MANIFEST_FORMAT_VERSION,
             profile_ref: identity.profile_ref.clone(),
             evaluation_track: identity.evaluation_track,
@@ -793,7 +793,7 @@ impl SourceSliceMaterializer {
             catalog_proof,
             reader_contract_version: identity.reader_contract_version.clone(),
             schema_contract_version: identity.schema_contract_version.clone(),
-            runtime_config_version_id: identity.runtime_config_version_id.clone(),
+            decision_policy_snapshot_id: identity.decision_policy_snapshot_id.clone(),
             runtime_config_hash: identity.runtime_config_hash.clone(),
             dataset_format_version: DATASET_ARTIFACT_FORMAT_VERSION,
             pit_cutoffs: SourceSlicePitCutoffs {
@@ -857,7 +857,7 @@ impl SourceSliceMaterializer {
             .into());
         }
         let schema_hash =
-            CanonicalDigest::content_hash_json(&("source_slice_parquet_envelope_v2", kind))?;
+            CanonicalDigest::content_hash_json(&("source_slice_parquet_envelope_v1", kind))?;
         Ok(SourceSliceObjectRef {
             kind,
             uri,

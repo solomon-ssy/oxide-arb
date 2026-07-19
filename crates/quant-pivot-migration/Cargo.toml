@@ -16,5 +16,10 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 sqlx = { workspace = true }
 
+[dev-dependencies]
+testcontainers = { workspace = true }
+testcontainers-modules = { workspace = true, features = ["postgres"] }
+tokio = { workspace = true }
+
 [lints]
 workspace = true

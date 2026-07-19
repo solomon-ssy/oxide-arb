@@ -7,26 +7,22 @@ use crate::{
         data_quality::BookDataQualityService, market_cache::MarketCache,
         market_filter::MarketFilter,
     },
-    observability::alert_dispatcher::AlertDispatcher,
-    runtime_config::RuntimeConfigStore,
+    runtime_config::DecisionPolicyStore,
 };
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use quant_pivot_error::control::ControlError;
 use quant_pivot_models::{
-    domain::{PreparedRuntimeConfig, RuntimeConfigPort},
-    runtime_config::{RUNTIME_CONFIG_SCHEMA_VERSION, RuntimeConfig},
+    domain::{PolicySnapshotPort, PreparedPolicySnapshot},
+    runtime_config::DecisionPolicySnapshot,
 };
 use std::sync::Arc;
 
 #[derive(Clone)]
-pub struct RuntimeConfigSubscribers {
+pub struct PolicySnapshotSubscribers {
     pub market_filter: Arc<MarketFilter>,
     pub market_cache: Arc<MarketCache>,
     pub data_quality: Arc<BookDataQualityService>,
-    /// Operator alert dispatcher; its notification channels are hot-swapped on
-    /// activation so a new Telegram/webhook config takes effect without restart.
-    pub alerts: Arc<AlertDispatcher>,
     /// Candidate / shadow factor-weight overlay snapshot (3.7 hot-update).
     pub weight_overlay: Arc<WeightOverlayApplicator>,
     /// Favorite-longshot bias-table snapshot bound to the factor plane (11.2.1).
@@ -39,9 +35,9 @@ pub struct RuntimeConfigSubscribers {
     pub category_pointer_guard: Arc<CategoryPointerGuard>,
 }
 
-pub struct RuntimeConfigApplicator {
-    store: Arc<RuntimeConfigStore>,
-    subscribers: RuntimeConfigSubscribers,
+pub struct PolicySnapshotApplicator {
+    store: Arc<DecisionPolicyStore>,
+    subscribers: PolicySnapshotSubscribers,
     /// Execution breaker, late-bound after the execution bundle is assembled
     /// (the breaker is built after governance). `None` until
     /// [`Self::attach_execution_breaker`] is called. Activations hot-swap its
@@ -49,11 +45,11 @@ pub struct RuntimeConfigApplicator {
     execution_breaker: Mutex<Option<Arc<ExecutionBreaker>>>,
 }
 
-impl RuntimeConfigApplicator {
+impl PolicySnapshotApplicator {
     #[must_use]
     pub const fn new(
-        store: Arc<RuntimeConfigStore>,
-        subscribers: RuntimeConfigSubscribers,
+        store: Arc<DecisionPolicyStore>,
+        subscribers: PolicySnapshotSubscribers,
     ) -> Self {
         Self {
             store,
@@ -67,8 +63,8 @@ impl RuntimeConfigApplicator {
         *self.execution_breaker.lock() = Some(breaker);
     }
 
-    fn preflight_internal(candidate: &RuntimeConfig) -> Result<(), ControlError> {
-        if candidate.schema_version != RUNTIME_CONFIG_SCHEMA_VERSION {
+    fn preflight_internal(candidate: &DecisionPolicySnapshot) -> Result<(), ControlError> {
+        if !candidate.uses_current_resource_schemas() {
             return Err(ControlError::Precondition(
                 "unsupported runtime config schema version".to_owned(),
             ));
@@ -76,29 +72,41 @@ impl RuntimeConfigApplicator {
         Ok(())
     }
 
-    fn propagate(subs: &RuntimeConfigSubscribers, config: &Arc<RuntimeConfig>) {
+    fn propagate(subs: &PolicySnapshotSubscribers, config: &Arc<DecisionPolicySnapshot>) {
         subs.market_filter
-            .reload(&config.selection.enabled_categories);
+            .reload(&config.recommendation.selection.enabled_categories);
         subs.market_cache.rebuild();
-        subs.data_quality.reload(&config.data_quality);
-        subs.alerts.reload(&config.notification);
-        subs.weight_overlay.reload(&config.factors, &config.model);
+        subs.data_quality
+            .reload(&config.recommendation.data_quality);
+        subs.weight_overlay.reload(
+            &config.profile_artifacts.scoring.definition,
+            &config.model_routing.model,
+        );
     }
 }
 
 #[async_trait]
-impl RuntimeConfigPort for RuntimeConfigApplicator {
-    fn current(&self) -> Arc<RuntimeConfig> {
+impl PolicySnapshotPort for PolicySnapshotApplicator {
+    fn current(&self) -> Arc<DecisionPolicySnapshot> {
         self.store.current()
     }
 
-    async fn prepare(&self, config: RuntimeConfig) -> Result<PreparedRuntimeConfig, ControlError> {
+    async fn prepare(
+        &self,
+        config: DecisionPolicySnapshot,
+    ) -> Result<PreparedPolicySnapshot, ControlError> {
         Self::preflight_internal(&config)?;
         let arc = Arc::new(config);
         let bias_table = self
             .subscribers
             .bias_table
-            .prepare(&arc.factors.structural.favorite_longshot)
+            .prepare(
+                &arc.profile_artifacts
+                    .scoring
+                    .definition
+                    .structural
+                    .favorite_longshot,
+            )
             .await?;
 
         // Validate every category pointer before mutating the live snapshot:
@@ -107,19 +115,19 @@ impl RuntimeConfigPort for RuntimeConfigApplicator {
         // remediation R7).
         self.subscribers
             .category_pointer_guard
-            .validate(&arc.model)
+            .validate(&arc.model_routing.model)
             .await?;
 
         let breaker = self.execution_breaker.lock().clone();
         let breaker_thresholds = breaker
             .as_ref()
-            .map(|_| ExecutionBreaker::prepare_reload(&arc.execution.breaker))
+            .map(|_| ExecutionBreaker::prepare_reload(&arc.execution_risk.breaker))
             .transpose()
             .map_err(ControlError::from)?;
         let store = Arc::clone(&self.store);
         let subscribers = self.subscribers.clone();
         let publish_config = Arc::clone(&arc);
-        Ok(PreparedRuntimeConfig::new(arc, move || {
+        Ok(PreparedPolicySnapshot::new(arc, move || {
             subscribers.bias_table.publish(bias_table);
             if let (Some(breaker), Some(thresholds)) = (breaker, breaker_thresholds) {
                 breaker.publish_reload(thresholds);

@@ -70,7 +70,7 @@ zip = { version = "7", default-features = false, features = ["deflate"] }
 
 # JSON Schema generation (runtime-config schema metadata; doc comments become
 # field descriptions — single source of truth for the UI form renderer)
-schemars = "1"
+schemars = { version = "1", features = ["chrono04"] }
 
 # Numeric trait conversions (ToPrimitive, FromPrimitive)
 num-traits = "0.2"

@@ -12,7 +12,7 @@ use crate::{
         market::book::BookSnapshot,
     },
     enums::{execution::KillSwitchState, quant::QuantRuntimeMode},
-    runtime_config::RuntimeConfig,
+    runtime_config::DecisionPolicySnapshot,
     types::TokenId,
 };
 use async_trait::async_trait;
@@ -129,24 +129,30 @@ pub trait KillSwitchPort: Send + Sync {
 }
 
 #[async_trait]
-pub trait RuntimeConfigPort: Send + Sync {
-    fn current(&self) -> Arc<RuntimeConfig>;
+pub trait PolicySnapshotPort: Send + Sync {
+    fn current(&self) -> Arc<DecisionPolicySnapshot>;
     /// Resolve and validate every fallible dependency without mutating live state.
-    async fn prepare(&self, config: RuntimeConfig) -> Result<PreparedRuntimeConfig, ControlError>;
+    async fn prepare(
+        &self,
+        config: DecisionPolicySnapshot,
+    ) -> Result<PreparedPolicySnapshot, ControlError>;
 }
 
 /// One-shot, fully validated runtime snapshot publication command.
 ///
 /// The callback contains only infallible in-memory swaps. Constructing this
 /// value is fallible; consuming it after the durable activation commits is not.
-pub struct PreparedRuntimeConfig {
-    config: Arc<RuntimeConfig>,
+pub struct PreparedPolicySnapshot {
+    config: Arc<DecisionPolicySnapshot>,
     publish: Box<dyn FnOnce() + Send + 'static>,
 }
 
-impl PreparedRuntimeConfig {
+impl PreparedPolicySnapshot {
     #[must_use]
-    pub fn new(config: Arc<RuntimeConfig>, publish: impl FnOnce() + Send + 'static) -> Self {
+    pub fn new(
+        config: Arc<DecisionPolicySnapshot>,
+        publish: impl FnOnce() + Send + 'static,
+    ) -> Self {
         Self {
             config,
             publish: Box::new(publish),
@@ -154,7 +160,7 @@ impl PreparedRuntimeConfig {
     }
 
     #[must_use]
-    pub const fn config(&self) -> &Arc<RuntimeConfig> {
+    pub const fn config(&self) -> &Arc<DecisionPolicySnapshot> {
         &self.config
     }
 

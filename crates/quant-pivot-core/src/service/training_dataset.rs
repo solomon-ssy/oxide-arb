@@ -387,7 +387,7 @@ pub fn verify_frozen_dataset_artifact(
     })?;
     let bindings_match = manifest.training_dataset_id == dataset.training_dataset_id
         && manifest.model_spec_id == dataset.model_spec_id
-        && manifest.runtime_config_version_id == dataset.runtime_config_version_id
+        && manifest.decision_policy_snapshot_id == dataset.decision_policy_snapshot_id
         && manifest.window_start == dataset.window_start
         && manifest.window_end == dataset.window_end
         && manifest.purpose == dataset.purpose
@@ -674,10 +674,7 @@ impl TrainingDatasetService {
         config: TrainingDatasetBuildConfig,
         max_spine_samples: u64,
     ) -> QuantResult<Self> {
-        let min_exit_depth_usd = config
-            .training
-            .min_exit_depth_usd_typed()
-            .map_err(QuantError::config)?;
+        let min_exit_depth_usd = config.training.min_exit_depth_usd_typed();
         let max_book_staleness = Duration::from_millis(config.training.max_book_staleness_ms);
         Ok(Self {
             fact_read: deps.fact_read,
@@ -1478,7 +1475,7 @@ impl TrainingDatasetService {
                     sample_sources: Some(TrainingSampleSources(
                         plan.request.sample_sources.clone(),
                     )),
-                    runtime_config_version_id: plan.request.runtime_config_version_id.clone(),
+                    decision_policy_snapshot_id: plan.request.decision_policy_snapshot_id.clone(),
                 })
                 .await;
             match create_result {
@@ -1498,7 +1495,7 @@ impl TrainingDatasetService {
             }
         };
         let binding_matches = row.model_spec_id == plan.request.model_spec_id
-            && row.runtime_config_version_id == plan.request.runtime_config_version_id
+            && row.decision_policy_snapshot_id == plan.request.decision_policy_snapshot_id
             && row.window_start == plan.request.window_start
             && row.window_end == plan.request.window_end
             && row.purpose == plan.request.purpose
@@ -1777,7 +1774,7 @@ impl TrainingDatasetService {
             &self.selection,
             &self.data_quality,
             &self.features,
-            request.runtime_config_version_id.clone(),
+            request.decision_policy_snapshot_id.clone(),
             request.knowledge_lag_secs,
             model_requirements,
         )
@@ -2298,7 +2295,7 @@ impl TrainingDatasetService {
             model_spec_id: plan.request.model_spec_id.clone(),
             trade_policy_artifact_id: plan.trade_policy_artifact_id.clone(),
             trade_policy_hash: plan.trade_policy_hash.clone(),
-            runtime_config_version_id: plan.request.runtime_config_version_id.clone(),
+            decision_policy_snapshot_id: plan.request.decision_policy_snapshot_id.clone(),
             window_start: plan.request.window_start,
             window_end: plan.request.window_end,
             purpose: plan.request.purpose,
@@ -2598,7 +2595,7 @@ async fn run_historical_spine(
         params.selection,
         params.data_quality,
         params.features,
-        params.request.runtime_config_version_id.clone(),
+        params.request.decision_policy_snapshot_id.clone(),
         params.request.knowledge_lag_secs,
         params.model_requirements.clone(),
     );
@@ -3552,7 +3549,7 @@ mod keep_rate_tests {
     use quant_pivot_models::{
         domain::DecisionSource,
         enums::quant::DatasetPurpose,
-        types::{ModelSpecId, RuntimeConfigVersionId, SchemaVersion, default_sample_sources},
+        types::{DecisionPolicySnapshotId, ModelSpecId, SchemaVersion, default_sample_sources},
     };
     use quant_pivot_test_support::execution_pg_seed::{
         content_hash, fixture_profile_ref, source_slice_ref,
@@ -3567,7 +3564,7 @@ mod keep_rate_tests {
             profile_ref: fixture_profile_ref(),
             research_program_hash: content_hash('4'),
             source_slice: source_slice_ref('5'),
-            runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
+            decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
             window_start,
             window_end: window_start + Duration::seconds(100),
             pit_cutoff: window_start + Duration::seconds(160),

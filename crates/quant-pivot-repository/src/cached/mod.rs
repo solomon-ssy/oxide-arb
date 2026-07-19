@@ -6,8 +6,6 @@
 
 pub mod event;
 pub mod market;
-pub mod runtime_config;
 
 pub use event::CachedEventRepository;
 pub use market::CachedMarketRepository;
-pub use runtime_config::CachedRuntimeConfigVersionRepository;

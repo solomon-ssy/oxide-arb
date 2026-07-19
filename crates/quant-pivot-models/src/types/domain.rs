@@ -282,32 +282,13 @@ pub enum TemperatureUnit {
     Fahrenheit,
 }
 
-/// Daily temperature statistic named by the Polymarket contract.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
-)]
-#[serde(rename_all = "snake_case")]
-pub enum WeatherTemperatureStatistic {
-    Maximum,
-    Minimum,
-}
-
-impl WeatherTemperatureStatistic {
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Maximum => "maximum",
-            Self::Minimum => "minimum",
-        }
-    }
-
-    #[must_use]
-    pub fn parse(value: &str) -> Option<Self> {
-        match value {
-            "maximum" => Some(Self::Maximum),
-            "minimum" => Some(Self::Minimum),
-            _ => None,
-        }
+crate::pg_enum! {
+    type_name = "qp_weather_temperature_statistic",
+    /// Daily temperature statistic named by the Polymarket contract.
+    @derive(JsonSchema, PartialOrd, Ord)
+    pub enum WeatherTemperatureStatistic {
+        Maximum => "maximum",
+        Minimum => "minimum",
     }
 }
 

@@ -16,9 +16,8 @@ use crate::{
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{config::QuantWorkersConfig, domain::CoreEventPublisher};
 use quant_pivot_repository::traits::{
-    EquitySnapshotRepository, FeatureParityRepository, PositionRepository,
+    EquitySnapshotRepository, FeatureParityRepository, PolicyRepository, PositionRepository,
     RecommendationReportRepository, RecommendationRepository, ReportRunRepository,
-    RuntimeConfigVersionRepository,
 };
 use quant_pivot_research::portfolio::HistoricalCorrelationEstimator;
 
@@ -54,8 +53,8 @@ impl ReportBundle {
             Arc::clone(&repos.equity_snapshot) as Arc<dyn EquitySnapshotRepository>;
         let position_repo: Arc<dyn PositionRepository> =
             Arc::clone(&repos.position) as Arc<dyn PositionRepository>;
-        let runtime_config_repo: Arc<dyn RuntimeConfigVersionRepository> =
-            Arc::clone(&repos.runtime_config) as Arc<dyn RuntimeConfigVersionRepository>;
+        let runtime_config_repo: Arc<dyn PolicyRepository> =
+            Arc::clone(&repos.runtime_config) as Arc<dyn PolicyRepository>;
         let run_repo: Arc<dyn ReportRunRepository> =
             Arc::clone(&repos.report_run) as Arc<dyn ReportRunRepository>;
         let feature_parity = Arc::new(FeatureParityRunCoordinator::new(

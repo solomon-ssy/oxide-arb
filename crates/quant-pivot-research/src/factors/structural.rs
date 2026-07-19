@@ -8,7 +8,7 @@
 //! inert (no raw value, zero confidence) unless a fitted bias table is bound and
 //! its category clears the IC gate.
 
-use std::{cmp::Ordering, str::FromStr, sync::Arc};
+use std::{cmp::Ordering, sync::Arc};
 
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
@@ -17,7 +17,7 @@ use quant_pivot_models::{
         factor::{FactorFamily, FactorIndeterminateReason, FactorNormalization},
         quant::FactorDirection,
     },
-    runtime_config::{DecimalString, FactorsConfig, FeaturesConfig, StructuralFactorsConfig},
+    runtime_config::{DecimalValue, FactorsConfig, FeaturesConfig, StructuralFactorsConfig},
     types::{FactorDefinitionId, Price, Probability},
 };
 use rust_decimal::{Decimal, prelude::ToPrimitive};
@@ -220,13 +220,8 @@ fn structural_spec(
 }
 
 /// Parse a config decimal string (must have passed runtime-config validation).
-fn parse_decimal(raw: &DecimalString, field: &'static str) -> Decimal {
-    Decimal::from_str(raw.value.trim()).unwrap_or_else(|error| {
-        panic!(
-            "{field} `{}` invalid despite config validation: {error}",
-            raw.value
-        )
-    })
+const fn parse_decimal(raw: &DecimalValue, _field: &'static str) -> Decimal {
+    raw.value
 }
 
 /// A raw factor with no usable value and zero confidence, carrying an explicit

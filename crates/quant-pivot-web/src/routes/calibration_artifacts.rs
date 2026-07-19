@@ -6,25 +6,21 @@
 //! | GET | `/research/calibration-artifacts/{id}` | `materialization:read` | Full detail |
 //! | POST | `/research/calibration-artifacts/fit-bias-table` | `materialization:create` | Enqueue bias-table fit |
 //! | POST | `/research/calibration-artifacts/fit-model-calibrator` | `materialization:create` | Enqueue calibrator fit |
-//! | POST | `/research/calibration-artifacts/{id}/activate` | `runtime_config:create` | Pin bias table ref |
+//! | POST | `/research/calibration-artifacts/{id}/activate` | `materialization:create` | Activate reviewed artifact |
 
 use actix_web::{http::Method, web};
 use quant_pivot_models::{
     domain::{
         ActivateCalibrationArtifactRequest, CalibrationArtifactDetailView,
         CalibrationArtifactListQuery, CalibrationArtifactSummaryView, FitBiasTableRequest,
-        FitModelCalibratorRequest, JobSubmitContext, NewRuntimeConfigVersion, Paginated,
-        ResearchJobView, RuntimeConfigVersionView,
+        FitModelCalibratorRequest, JobSubmitContext, Paginated, ResearchJobView,
     },
     enums::{
         operation_log::OperationCategory,
         quant::CalibrationKind,
         rbac::{Operation, ResourceType},
-        runtime_config::RuntimeConfigVersionSource,
     },
-    hashing::CanonicalDigest,
-    runtime_config::mask_config_json,
-    types::{CalibrationArtifactId, RuntimeConfigVersionId},
+    types::CalibrationArtifactId,
 };
 
 use crate::{
@@ -67,7 +63,7 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
         spec(
             Method::POST,
             "/research/calibration-artifacts/{id}/activate",
-            Rule::ActingRoleGoverned(ResourceType::RuntimeConfig, Operation::Create),
+            Rule::ActingRoleGoverned(ResourceType::Materialization, Operation::Create),
             activate,
         ),
     ]
@@ -109,19 +105,19 @@ pub async fn fit_bias_table(
 ) -> Result<WebResponse<ResearchJobView>, WebError> {
     let request = body.into_inner();
     let reason = request.reason.clone();
-    let runtime_config_version_id = state
+    let decision_policy_snapshot_id = state
         .runtime_config
         .load_current()
         .await?
         .ok_or_else(|| {
             WebError::Conflict("no active runtime-config version to fit against".to_owned())
         })?
-        .runtime_config_version_id;
+        .decision_policy_snapshot_id;
     let job = state
         .research_jobs
         .enqueue_bias_table_fit(
             request,
-            runtime_config_version_id,
+            decision_policy_snapshot_id,
             JobSubmitContext {
                 acting_role: acting_role.0.clone(),
                 requested_by: None,
@@ -153,19 +149,19 @@ pub async fn fit_model_calibrator(
 ) -> Result<WebResponse<ResearchJobView>, WebError> {
     let request = body.into_inner();
     let reason = request.reason.clone();
-    let runtime_config_version_id = state
+    let decision_policy_snapshot_id = state
         .runtime_config
         .load_current()
         .await?
         .ok_or_else(|| {
             WebError::Conflict("no active runtime-config version to fit against".to_owned())
         })?
-        .runtime_config_version_id;
+        .decision_policy_snapshot_id;
     let job = state
         .research_jobs
         .enqueue_model_calibration_fit(
             request,
-            runtime_config_version_id,
+            decision_policy_snapshot_id,
             JobSubmitContext {
                 acting_role: acting_role.0.clone(),
                 requested_by: None,
@@ -191,12 +187,12 @@ pub async fn fit_model_calibrator(
 pub async fn activate(
     state: web::Data<AppState>,
     id: web::Path<CalibrationArtifactId>,
-    actor: AuthedActor,
+    _actor: AuthedActor,
     acting_role: ActingRole,
     request_id: RequestId,
     op_ctx: OperationCtx,
     body: ValidatedJson<ActivateCalibrationArtifactRequest>,
-) -> Result<WebResponse<RuntimeConfigVersionView>, WebError> {
+) -> Result<WebResponse<CalibrationArtifactDetailView>, WebError> {
     let artifact_id = id.into_inner();
     let reason = body.into_inner().reason;
     let info = state
@@ -212,52 +208,31 @@ pub async fn activate(
             info.kind
         )));
     }
-    // Mark this bias table active (deactivating any previously-active one)
-    // before staging the runtime-config version that points at it — the
-    // operator-facing "activate" intent must be recorded on the artifact
-    // ledger itself, not only implied by a config field (Phase 11.3 §3.4
-    // `active` governance).
+    // Artifact activation is its own governed ledger transition. It never
+    // creates or activates a Config revision; the operator must explicitly
+    // select the artifact in the ModelRouting workflow afterwards.
     state
         .calibration_artifacts
         .mark_active(&artifact_id)
         .await?;
-    let mut config = state.runtime_config_apply.current().as_ref().clone();
-    config.factors.structural.favorite_longshot.bias_table_ref =
-        Some(artifact_id.as_uuid().to_string());
-
-    let config_json = config.to_json();
-    let config_hash = CanonicalDigest::content_hash_json(&config_json)
-        .map_err(|error| WebError::Internal(error.to_string()))?;
-    let version = NewRuntimeConfigVersion {
-        runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
-        config_hash: config_hash.clone(),
-        schema_version: config.schema_version,
-        config_json,
-        source: RuntimeConfigVersionSource::Operator,
-        created_by: actor.claims.username.clone(),
-        reason: reason.clone(),
-    };
-    let version = state.runtime_config.create_version(version).await?;
-
-    op_ctx.set_action(
-        OperationCategory::RuntimeConfig,
-        "calibration_artifact.activate",
-    );
-    op_ctx.set_resource(
-        ResourceType::RuntimeConfig,
-        version.runtime_config_version_id.to_string(),
-    );
-    op_ctx.set_state_hashes(None, Some(config_hash.as_str().to_owned()));
+    let activated = state
+        .calibration_artifacts
+        .find(&artifact_id)
+        .await?
+        .ok_or_else(|| {
+            WebError::Internal(format!(
+                "activated calibration artifact disappeared: {artifact_id}"
+            ))
+        })?;
+    op_ctx.set_action(OperationCategory::Other, "calibration_artifact.activate");
+    op_ctx.set_resource(ResourceType::Materialization, artifact_id.to_string());
     op_ctx.set_detail(serde_json::json!({
         "artifact_id": artifact_id.to_string(),
-        "runtime_config_version_id": version.runtime_config_version_id.to_string(),
-        "config_hash": config_hash,
         "acting_role": acting_role.0,
         "request_id": request_id.0,
         "reason": reason,
     }));
-    let masked = mask_config_json(&version.config_json);
-    Ok(WebResponse::ok(RuntimeConfigVersionView::from_info(
-        version, masked,
+    Ok(WebResponse::ok(CalibrationArtifactDetailView::from(
+        activated,
     )))
 }

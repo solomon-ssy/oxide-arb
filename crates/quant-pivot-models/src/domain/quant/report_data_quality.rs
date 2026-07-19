@@ -2,7 +2,7 @@
 
 use crate::{
     entities::quant_report_data_quality_snapshot,
-    types::{ReportDataQualitySnapshotId, ReportDataQualityTokens, RuntimeConfigVersionId},
+    types::{DecisionPolicySnapshotId, ReportDataQualitySnapshotId, ReportDataQualityTokens},
 };
 use chrono::{DateTime, Utc};
 use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 pub struct ReportDataQualitySnapshotInfo {
     pub report_data_quality_snapshot_id: ReportDataQualitySnapshotId,
     pub decision_at: DateTime<Utc>,
-    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub tokens_json: ReportDataQualityTokens,
     pub created_at: DateTime<Utc>,
 }
@@ -25,7 +25,7 @@ info_from_model!(
     {
         report_data_quality_snapshot_id,
         decision_at,
-        runtime_config_version_id,
+        decision_policy_snapshot_id,
         tokens_json,
         created_at,
     }
@@ -37,6 +37,6 @@ info_from_model!(
 pub struct NewReportDataQualitySnapshot {
     pub report_data_quality_snapshot_id: ReportDataQualitySnapshotId,
     pub decision_at: DateTime<Utc>,
-    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub tokens_json: ReportDataQualityTokens,
 }

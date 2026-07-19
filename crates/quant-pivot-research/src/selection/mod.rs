@@ -33,8 +33,8 @@ use quant_pivot_models::{
     enums::common::MarketCategory,
     runtime_config::{DataQualityConfig, FeaturesConfig, SelectionConfig},
     types::{
-        ContentHash, EventId, MarketId, MarketSelectionId, ModelInputContract,
-        ModelInputRequiredness, RuntimeConfigVersionId, SelectionExclusionSummary, TokenId, Usd,
+        ContentHash, DecisionPolicySnapshotId, EventId, MarketId, MarketSelectionId,
+        ModelInputContract, ModelInputRequiredness, SelectionExclusionSummary, TokenId, Usd,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -64,7 +64,7 @@ pub struct MarketSelectionBuildRequest {
     /// Decision time.
     pub decision_at: DateTime<Utc>,
     /// Config version governing this selection.
-    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     /// Frozen selection-policy snapshot.
     pub selection: SelectionConfig,
     /// Frozen data-quality snapshot.
@@ -180,7 +180,7 @@ pub struct MarketSelectionSnapshot {
     /// Decision time.
     pub decision_at: DateTime<Utc>,
     /// Governing config version.
-    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     /// Canonical selector hash (same inputs → same hash).
     pub selector_hash: ContentHash,
     /// Included markets.

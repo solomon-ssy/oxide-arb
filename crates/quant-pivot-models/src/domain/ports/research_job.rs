@@ -15,7 +15,7 @@ use crate::{
         RunBacktestRequest, RunCpcvBacktestRequest, TradePolicyValidationJobParams,
         TrainModelRequest,
     },
-    types::{ModelVersionId, ResearchJobId, RuntimeConfigVersionId},
+    types::{DecisionPolicySnapshotId, ModelVersionId, ResearchJobId},
 };
 
 /// Governance/attribution context captured when a job is submitted or mutated.
@@ -69,7 +69,7 @@ pub trait ResearchJobPort: Send + Sync {
     async fn enqueue_bias_table_fit(
         &self,
         request: FitBiasTableRequest,
-        runtime_config_version_id: RuntimeConfigVersionId,
+        decision_policy_snapshot_id: DecisionPolicySnapshotId,
         ctx: JobSubmitContext,
     ) -> QuantResult<ResearchJobView>;
 
@@ -81,7 +81,7 @@ pub trait ResearchJobPort: Send + Sync {
     async fn enqueue_model_calibration_fit(
         &self,
         request: FitModelCalibratorRequest,
-        runtime_config_version_id: RuntimeConfigVersionId,
+        decision_policy_snapshot_id: DecisionPolicySnapshotId,
         ctx: JobSubmitContext,
     ) -> QuantResult<ResearchJobView>;
 

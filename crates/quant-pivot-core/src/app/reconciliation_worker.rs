@@ -29,7 +29,7 @@ impl AppContext {
                 move || {
                     let secs = config
                         .current()
-                        .execution
+                        .execution_risk
                         .reconciliation
                         .interval_secs
                         .max(1);

@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// Versioned identity of the shared book-walk, queue, and fee semantics.
-pub const EXECUTION_SEMANTICS_VERSION: &str = "polymarket_execution_semantics_v2";
+pub const EXECUTION_SEMANTICS_VERSION: &str = "polymarket_execution_semantics_v1";
 
 /// Full-depth book evidence is the only publishable fidelity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -14,9 +14,9 @@ use crate::{
     enums::quant::{OutcomeSide, PriceComparison},
     hashing::CanonicalDigest,
     types::{
-        ContentHash, DomainInstrumentKey, DomainSourceId, EntryConditionArtifactId,
-        FactorDefinitionId, MarketId, MarketLinkageId, MarketSelectionId, ModelVersionId, Price,
-        RecommendationId, RuntimeConfigVersionId, TemperatureBand, TemperatureUnit, TokenId, Usd,
+        ContentHash, DecisionPolicySnapshotId, DomainInstrumentKey, DomainSourceId,
+        EntryConditionArtifactId, FactorDefinitionId, MarketId, MarketLinkageId, MarketSelectionId,
+        ModelVersionId, Price, RecommendationId, TemperatureBand, TemperatureUnit, TokenId, Usd,
         WeatherTemperatureStatistic,
     },
 };
@@ -70,7 +70,7 @@ pub struct EntryConditionBinding {
     pub catalog_snapshot_id: MarketSelectionId,
     pub catalog_snapshot_hash: ContentHash,
     pub model_version_id: ModelVersionId,
-    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub factor_bindings: Vec<EntryConditionFactorBinding>,
     pub source_bindings: Vec<EntryConditionSourceBinding>,
 }

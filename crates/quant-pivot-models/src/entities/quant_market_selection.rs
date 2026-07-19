@@ -1,7 +1,7 @@
 //! `quant_market_selection` table entity.
 
 use crate::types::{
-    ContentHash, MarketSelectionId, RuntimeConfigVersionId, SelectionExclusionSummary,
+    ContentHash, DecisionPolicySnapshotId, MarketSelectionId, SelectionExclusionSummary,
 };
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
@@ -13,7 +13,7 @@ pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub market_selection_id: MarketSelectionId,
     pub decision_at: DateTime<Utc>,
-    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub selector_hash: ContentHash,
     pub market_count: i32,
     #[sea_orm(column_type = "JsonBinary")]

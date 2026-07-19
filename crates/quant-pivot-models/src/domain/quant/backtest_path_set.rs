@@ -4,7 +4,7 @@
 use crate::{
     entities::quant_backtest_path_set,
     types::{
-        BacktestPathSetId, ContentHash, ModelRunId, ModelVersionId, RuntimeConfigVersionId,
+        BacktestPathSetId, ContentHash, DecisionPolicySnapshotId, ModelRunId, ModelVersionId,
         TrainingDatasetId,
     },
 };
@@ -21,7 +21,7 @@ pub struct BacktestPathSetInfo {
     pub model_version_id: ModelVersionId,
     pub model_run_id: ModelRunId,
     pub training_dataset_id: TrainingDatasetId,
-    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub window_start: DateTime<Utc>,
     pub window_end: DateTime<Utc>,
     /// `phi(N, k)` — the number of reconstructed complete paths.
@@ -68,7 +68,7 @@ info_from_model!(
         model_version_id,
         model_run_id,
         training_dataset_id,
-        runtime_config_version_id,
+        decision_policy_snapshot_id,
         window_start,
         window_end,
         path_count,
@@ -98,7 +98,7 @@ pub struct NewBacktestPathSet {
     pub model_version_id: ModelVersionId,
     pub model_run_id: ModelRunId,
     pub training_dataset_id: TrainingDatasetId,
-    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub window_start: DateTime<Utc>,
     pub window_end: DateTime<Utc>,
     pub path_count: i64,

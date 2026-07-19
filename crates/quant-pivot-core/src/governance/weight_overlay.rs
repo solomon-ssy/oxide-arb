@@ -14,11 +14,11 @@
 //! the snapshot falls back to "no overlay" — fail-closed to the published
 //! behavior rather than scoring on a broken weight table.
 
-use std::{collections::HashMap, str::FromStr, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 
 use arc_swap::ArcSwap;
 use quant_pivot_models::{
-    runtime_config::{FactorsConfig, ModelConfig, ModelVersionRef},
+    runtime_config::{FactorsConfig, ModelConfig},
     types::ModelVersionId,
 };
 use quant_pivot_research::model::WeightOverlay;
@@ -102,32 +102,26 @@ fn build_snapshot(factors: &FactorsConfig, model: &ModelConfig) -> WeightOverlay
     .into_iter()
     .flatten()
     {
-        if let Some(version_id) = parse_version(reference) {
-            by_version.insert(version_id, overlay.clone());
-        }
+        by_version.insert(reference.id.clone(), overlay.clone());
     }
     WeightOverlaySnapshot { by_version }
-}
-
-/// Parse a config model-version reference, ignoring malformed ids (the runner's
-/// own resolution surfaces the error on the inference path).
-fn parse_version(reference: &ModelVersionRef) -> Option<ModelVersionId> {
-    ModelVersionId::from_str(reference.id.trim()).ok()
 }
 
 #[cfg(test)]
 mod tests {
     use super::WeightOverlayApplicator;
     use quant_pivot_models::{
-        runtime_config::{DecimalString, FactorsConfig, ModelConfig, ModelVersionRef},
+        runtime_config::{DecimalValue, FactorsConfig, ModelConfig, ModelVersionRef},
         types::ModelVersionId,
     };
+    use rust_decimal::Decimal;
+    use rust_decimal_macros::dec;
 
-    fn factors_with(weights: &[(&str, &str)]) -> FactorsConfig {
+    fn factors_with(weights: &[(&str, Decimal)]) -> FactorsConfig {
         let mut config = FactorsConfig::default();
         config.factor_weights.weights = weights
             .iter()
-            .map(|(name, value)| ((*name).to_owned(), DecimalString::new(*value)))
+            .map(|(name, value)| ((*name).to_owned(), DecimalValue::new(*value)))
             .collect();
         config
     }
@@ -137,17 +131,13 @@ mod tests {
         let active = ModelVersionId::from_v7();
         let shadow = ModelVersionId::from_v7();
         let model = ModelConfig {
-            active_model_version_id: Some(ModelVersionRef {
-                id: active.to_string(),
-            }),
-            shadow_model_version_id: Some(ModelVersionRef {
-                id: shadow.to_string(),
-            }),
+            active_model_version_id: Some(ModelVersionRef::new(active.clone())),
+            shadow_model_version_id: Some(ModelVersionRef::new(shadow.clone())),
             ..ModelConfig::default()
         };
         let applicator = WeightOverlayApplicator::new();
         applicator.reload(
-            &factors_with(&[("liquidity_depth", "0.5"), ("momentum", "0.5")]),
+            &factors_with(&[("liquidity_depth", dec!(0.5)), ("momentum", dec!(0.5))]),
             &model,
         );
         assert!(applicator.overlay_for(&active).is_some());
@@ -159,15 +149,13 @@ mod tests {
     fn invalid_overlay_falls_back_to_none() {
         let active = ModelVersionId::from_v7();
         let model = ModelConfig {
-            active_model_version_id: Some(ModelVersionRef {
-                id: active.to_string(),
-            }),
+            active_model_version_id: Some(ModelVersionRef::new(active.clone())),
             ..ModelConfig::default()
         };
         let applicator = WeightOverlayApplicator::new();
         // Weights do not sum to 1 → invalid → dropped.
         applicator.reload(
-            &factors_with(&[("liquidity_depth", "0.5"), ("momentum", "0.9")]),
+            &factors_with(&[("liquidity_depth", dec!(0.5)), ("momentum", dec!(0.9))]),
             &model,
         );
         assert!(applicator.overlay_for(&active).is_none());

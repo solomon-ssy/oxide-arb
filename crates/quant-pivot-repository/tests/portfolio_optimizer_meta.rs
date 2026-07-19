@@ -2,10 +2,7 @@
 
 use chrono::Utc;
 use quant_pivot_models::{
-    domain::{
-        NewMarketSelection, NewModelRun, NewModelSpec, NewModelVersion, NewPortfolioPlan,
-        NewRuntimeConfigVersion,
-    },
+    domain::{NewMarketSelection, NewModelRun, NewModelSpec, NewModelVersion, NewPortfolioPlan},
     entities::quant_portfolio_plan,
     enums::{
         model::ModelFamily,
@@ -13,26 +10,25 @@ use quant_pivot_models::{
             CorrelationSource, ModelRunKind, ModelRunStatus, OptimizerSolverStatus,
             PortfolioSolveMode, PortfolioSolverKind, PublicationStatus,
         },
-        runtime_config::RuntimeConfigVersionSource,
     },
     types::{
-        ContentHash, MarketSelectionId, ModelInputContract, ModelRunId, ModelSpecId,
-        ModelTrainingContract, ModelVersionId, PortfolioConstraintsSnapshot,
+        ContentHash, DecisionPolicySnapshotId, MarketSelectionId, ModelInputContract, ModelRunId,
+        ModelSpecId, ModelTrainingContract, ModelVersionId, PortfolioConstraintsSnapshot,
         PortfolioOptimizerMeta, PortfolioPlanId, PortfolioRejectedSummary, PortfolioRiskBudget,
-        RuntimeConfigVersionId, SchemaVersion, SelectionExclusionSummary, Usd,
+        SchemaVersion, SelectionExclusionSummary, Usd,
     },
 };
 use quant_pivot_repository::{
     postgres::{
         PgMarketSelectionRepository, PgModelRegistryRepository, PgModelRunRepository,
-        PgPortfolioPlanRepository, PgRuntimeConfigVersionRepository,
+        PgPortfolioPlanRepository,
     },
     traits::{
         MarketSelectionRepository, ModelRegistryRepository, ModelRunRepository,
-        PortfolioPlanRepository, RuntimeConfigVersionRepository,
+        PortfolioPlanRepository,
     },
 };
-use quant_pivot_test_support::pg::setup_pg;
+use quant_pivot_test_support::{pg::setup_pg, policy_fixtures::bootstrap_default_policy_bundle};
 use rust_decimal_macros::dec;
 use sea_orm::{EntityTrait, IntoActiveModel};
 
@@ -40,26 +36,13 @@ fn content_hash(seed: char) -> ContentHash {
     ContentHash::parse(format!("blake3:{}", seed.to_string().repeat(64))).expect("hash")
 }
 
-async fn seed_runtime_config(db: &sea_orm::DatabaseConnection) -> RuntimeConfigVersionId {
-    let id = RuntimeConfigVersionId::from_v7();
-    PgRuntimeConfigVersionRepository::new(db.clone())
-        .create_version(NewRuntimeConfigVersion {
-            runtime_config_version_id: id.clone(),
-            config_hash: content_hash('c'),
-            schema_version: SchemaVersion::FIRST,
-            config_json: serde_json::json!({}),
-            source: RuntimeConfigVersionSource::Bootstrap,
-            created_by: "portfolio-optimizer-meta-it".to_owned(),
-            reason: "integration test".to_owned(),
-        })
-        .await
-        .expect("runtime config");
-    id
+async fn seed_runtime_config(db: &sea_orm::DatabaseConnection) -> DecisionPolicySnapshotId {
+    bootstrap_default_policy_bundle(db, "portfolio-optimizer-meta-it", "integration test").await
 }
 
 async fn seed_model_run(
     db: &sea_orm::DatabaseConnection,
-    rc_id: &RuntimeConfigVersionId,
+    rc_id: &DecisionPolicySnapshotId,
 ) -> ModelRunId {
     let registry = PgModelRegistryRepository::new(db.clone());
     let model_spec_id = ModelSpecId::from_v7();
@@ -87,6 +70,7 @@ async fn seed_model_run(
             version: 1,
             profile_ref: quant_pivot_test_support::execution_pg_seed::fixture_profile_ref(),
             artifact_hash: content_hash('a'),
+            category_scope: None,
             training_dataset_id: None,
             trade_policy_artifact_id: None,
             trade_policy_hash: None,
@@ -107,7 +91,7 @@ async fn seed_model_run(
             model_run_id: model_run_id.clone(),
             run_kind: ModelRunKind::LiveInference,
             model_version_id: Some(model_version_id),
-            runtime_config_version_id: rc_id.clone(),
+            decision_policy_snapshot_id: rc_id.clone(),
             market_selection_id: None,
             window_start: Utc::now(),
             window_end: Utc::now(),
@@ -127,7 +111,7 @@ async fn seed_model_run(
 
 async fn seed_market_selection(
     db: &sea_orm::DatabaseConnection,
-    rc_id: &RuntimeConfigVersionId,
+    rc_id: &DecisionPolicySnapshotId,
 ) -> MarketSelectionId {
     let id = MarketSelectionId::from_v7();
     PgMarketSelectionRepository::new(db.clone())
@@ -135,7 +119,7 @@ async fn seed_market_selection(
             NewMarketSelection {
                 market_selection_id: id.clone(),
                 decision_at: Utc::now(),
-                runtime_config_version_id: rc_id.clone(),
+                decision_policy_snapshot_id: rc_id.clone(),
                 selector_hash: content_hash('b'),
                 market_count: 1,
                 exclusion_summary: SelectionExclusionSummary::default(),

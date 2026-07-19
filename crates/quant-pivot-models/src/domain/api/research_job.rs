@@ -24,8 +24,8 @@ use crate::{
     },
     enums::quant::{ResearchJobKind, ResearchJobStatus},
     types::{
-        DatasetCoverage, FeatureParityRunId, ModelSpecId, ModelVersionId, ResearchJobError,
-        ResearchJobId, ResearchJobProgress, RuntimeConfigVersionId, TradePolicyArtifactId,
+        DatasetCoverage, DecisionPolicySnapshotId, FeatureParityRunId, ModelSpecId, ModelVersionId,
+        ResearchJobError, ResearchJobId, ResearchJobProgress, TradePolicyArtifactId,
         TradePolicyValidationRunId, TrainingDatasetId,
     },
 };
@@ -98,7 +98,7 @@ pub struct ResearchJobView {
     pub kind: ResearchJobKind,
     pub status: ResearchJobStatus,
     pub model_spec_id: Option<ModelSpecId>,
-    pub runtime_config_version_id: Option<RuntimeConfigVersionId>,
+    pub decision_policy_snapshot_id: Option<DecisionPolicySnapshotId>,
     /// Frozen request body (for the detail drawer / retry preview).
     pub params: Value,
     /// Live progress snapshot (phase + processed/total), when the run has ticked.
@@ -135,7 +135,7 @@ impl From<ResearchJobInfo> for ResearchJobView {
             kind: info.kind,
             status: info.status,
             model_spec_id: info.model_spec_id,
-            runtime_config_version_id: info.runtime_config_version_id,
+            decision_policy_snapshot_id: info.decision_policy_snapshot_id,
             params: info.params_json,
             progress,
             progress_pct,

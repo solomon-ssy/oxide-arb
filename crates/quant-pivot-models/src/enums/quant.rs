@@ -548,8 +548,6 @@ pg_enum! {
         Publish => "publish",
         /// A published version was retired.
         Retire => "retire",
-        /// A published version was rolled back to its predecessor.
-        Rollback => "rollback",
         /// A candidate model version bound a calibrated return model (Phase 11.3).
         BindCalibration => "bind_calibration",
         /// A candidate / shadow version bound the CPCV path set used by publish

@@ -1005,13 +1005,14 @@ mod tests {
         enums::quant::{EntryConditionState, OutcomeSide},
         types::{
             ClockAnchor, ClockCondition, ConditionTruth, ConditionUnavailableReason,
-            ConfirmationPolicy, ContentHash, CryptoSubjectPredicateEntered, DomainInstrumentKey,
-            DomainSourceId, ENTRY_CONDITION_EVALUATOR_VERSION, ENTRY_CONDITION_SCHEMA_VERSION,
+            ConfirmationPolicy, ContentHash, CryptoSubjectPredicateEntered,
+            DecisionPolicySnapshotId, DomainInstrumentKey, DomainSourceId,
+            ENTRY_CONDITION_EVALUATOR_VERSION, ENTRY_CONDITION_SCHEMA_VERSION,
             EntryConditionArtifactV1, EntryConditionBinding, EntryConditionFoldState,
             EntryConditionSourceBinding, EntryConditionV1, MarketEventCondition, MarketId,
-            MarketLinkageId, MarketSelectionId, ModelVersionId, RecommendationId,
-            RuntimeConfigVersionId, TemperatureBand, TemperatureCelsius, TemperatureUnit, TokenId,
-            Usd, WeatherDailyTemperatureCrossedTerminalBound, WeatherDailyTemperatureEnteredBand,
+            MarketLinkageId, MarketSelectionId, ModelVersionId, RecommendationId, TemperatureBand,
+            TemperatureCelsius, TemperatureUnit, TokenId, Usd,
+            WeatherDailyTemperatureCrossedTerminalBound, WeatherDailyTemperatureEnteredBand,
             WeatherObservationDayClosedOutsideBand, WeatherTemperatureStatistic,
         },
     };
@@ -1081,7 +1082,7 @@ mod tests {
             catalog_snapshot_id: MarketSelectionId::from_v7(),
             catalog_snapshot_hash: hash('a'),
             model_version_id: ModelVersionId::from_v7(),
-            runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
+            decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
             factor_bindings: Vec::new(),
             source_bindings: Vec::new(),
         }

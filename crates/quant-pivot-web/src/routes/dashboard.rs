@@ -12,11 +12,12 @@ use quant_pivot_models::{
         PageRequest, QuantReportListQuery, QuantReportView, ReconciliationListQuery,
         ReportRunListQuery, SystemStatusView,
         api::dashboard::{
-            DashboardAccountView, DashboardActionItemView, DashboardActionSeverity,
-            DashboardAuthorityView, DashboardExposureView, DashboardLifecycleView,
-            DashboardOverviewQuery, DashboardOverviewView, DashboardPrimaryAction,
-            DashboardReasonCode, DashboardReportView, DashboardResearchReadinessView,
-            DashboardSection, DashboardSubsystemHealthView,
+            DashboardAccountView, DashboardActionItemView, DashboardActionOwner,
+            DashboardActionReasonCode, DashboardActionSeverity, DashboardAuthorityView,
+            DashboardExposureView, DashboardLifecycleView, DashboardOverviewQuery,
+            DashboardOverviewView, DashboardPrimaryAction, DashboardReasonCode,
+            DashboardReportView, DashboardResearchReadinessView, DashboardSection,
+            DashboardSubsystemHealthView,
         },
     },
     enums::{
@@ -60,7 +61,7 @@ enum DashboardPermission {
     ReadReconciliation = 1 << 7,
     EnqueueReport = 1 << 8,
     ActivateBootstrap = 1 << 9,
-    ReadRuntimeConfig = 1 << 10,
+    ReadConfig = 1 << 10,
 }
 
 impl DashboardPermissions {
@@ -119,7 +120,7 @@ async fn overview(
         can_read_reconciliation,
         can_enqueue_report,
         can_activate_bootstrap,
-        can_read_runtime_config,
+        can_read_config,
     ) = tokio::try_join!(
         permission(&state, subject, ResourceType::System, Operation::Read),
         permission(
@@ -169,7 +170,7 @@ async fn overview(
         permission(
             &state,
             subject,
-            ResourceType::RuntimeConfig,
+            ResourceType::DecisionPolicySnapshot,
             Operation::Read
         ),
     )?;
@@ -193,10 +194,7 @@ async fn overview(
             DashboardPermission::ActivateBootstrap,
             can_activate_bootstrap,
         ),
-        (
-            DashboardPermission::ReadRuntimeConfig,
-            can_read_runtime_config,
-        ),
+        (DashboardPermission::ReadConfig, can_read_config),
     ]);
 
     let window_start = generated_at - ChronoDuration::seconds(query.window.seconds());
@@ -396,9 +394,7 @@ const fn primary_action(context: PrimaryActionContext) -> (DashboardPrimaryActio
             context
                 .permissions
                 .allows(DashboardPermission::ActivateBootstrap)
-                && context
-                    .permissions
-                    .allows(DashboardPermission::ReadRuntimeConfig),
+                && context.permissions.allows(DashboardPermission::ReadConfig),
         );
     }
     if context.has_unresolvable_reconciliation {
@@ -676,7 +672,7 @@ async fn load_action_inbox(
             || permissions.allows(DashboardPermission::ReadReports)
             || permissions.allows(DashboardPermission::ReadResearch)
             || permissions.allows(DashboardPermission::ReadReconciliation)
-            || permissions.allows(DashboardPermission::ReadRuntimeConfig),
+            || permissions.allows(DashboardPermission::ReadConfig),
         DashboardReasonCode::NoSamples,
         None,
         async {
@@ -688,8 +684,8 @@ async fn load_action_inbox(
                     items.push(DashboardActionItemView {
                         id: "kill-switch".to_owned(),
                         severity: DashboardActionSeverity::Warning,
-                        reason_code: "kill_switch_not_closed".to_owned(),
-                        owner: "risk".to_owned(),
+                        reason_code: DashboardActionReasonCode::KillSwitchNotClosed,
+                        owner: DashboardActionOwner::Risk,
                         observed_at: runtime.kill_switch.changed_at,
                         target_route: "/dashboard".to_owned(),
                     });
@@ -698,8 +694,8 @@ async fn load_action_inbox(
                     items.push(DashboardActionItemView {
                         id: "data-quality".to_owned(),
                         severity: DashboardActionSeverity::Warning,
-                        reason_code: "market_data_degraded".to_owned(),
-                        owner: "data".to_owned(),
+                        reason_code: DashboardActionReasonCode::MarketDataDegraded,
+                        owner: DashboardActionOwner::Data,
                         observed_at: quality.as_of,
                         target_route: "/markets".to_owned(),
                     });
@@ -721,8 +717,8 @@ async fn load_action_inbox(
                             reconciliation.reconciliation_id
                         ),
                         severity: DashboardActionSeverity::Critical,
-                        reason_code: "unresolved_reconciliation".to_owned(),
-                        owner: "operations".to_owned(),
+                        reason_code: DashboardActionReasonCode::UnresolvedReconciliation,
+                        owner: DashboardActionOwner::Operations,
                         observed_at: reconciliation.created_at,
                         target_route: "/quant/reconciliations".to_owned(),
                     });
@@ -741,8 +737,8 @@ async fn load_action_inbox(
                     items.push(DashboardActionItemView {
                         id: format!("basis-alert:{}", alert.alert_id),
                         severity: DashboardActionSeverity::Warning,
-                        reason_code: "basis_alert_unacknowledged".to_owned(),
-                        owner: "research".to_owned(),
+                        reason_code: DashboardActionReasonCode::BasisAlertUnacknowledged,
+                        owner: DashboardActionOwner::Research,
                         observed_at: alert.as_of,
                         target_route: "/research/basis-alerts".to_owned(),
                     });
@@ -761,33 +757,30 @@ async fn load_action_inbox(
                     items.push(DashboardActionItemView {
                         id: format!("failed-report-run:{}", run.report_run_id),
                         severity: DashboardActionSeverity::Warning,
-                        reason_code: "report_run_failed".to_owned(),
-                        owner: "research".to_owned(),
+                        reason_code: DashboardActionReasonCode::ReportRunFailed,
+                        owner: DashboardActionOwner::Research,
                         observed_at: run.finished_at.unwrap_or(run.requested_at),
                         target_route: "/quant/reports".to_owned(),
                     });
                 }
             }
-            if permissions.allows(DashboardPermission::ReadRuntimeConfig) {
+            if permissions.allows(DashboardPermission::ReadConfig) {
                 let (approvals, activation) = tokio::try_join!(
-                    state.runtime_config.list_valid_approvals(10),
-                    state.runtime_config.load_current_activation(),
+                    state.runtime_config.list_valid_approvals(None, 10),
+                    state.runtime_config.load_current_activation(None),
                 )?;
-                let active_approval =
-                    activation.and_then(|activation| activation.runtime_config_approval_id);
-                if let Some(approval) = approvals.into_iter().find(|approval| {
-                    active_approval.as_ref() != Some(&approval.runtime_config_approval_id)
-                }) {
+                let active_approval = activation.map(|activation| activation.policy_approval_id);
+                if let Some(approval) = approvals
+                    .into_iter()
+                    .find(|approval| active_approval.as_ref() != Some(&approval.policy_approval_id))
+                {
                     items.push(DashboardActionItemView {
-                        id: format!(
-                            "runtime-config-approval:{}",
-                            approval.runtime_config_approval_id
-                        ),
+                        id: format!("policy-approval:{}", approval.policy_approval_id),
                         severity: DashboardActionSeverity::Info,
-                        reason_code: "runtime_config_awaiting_activation".to_owned(),
-                        owner: "governance".to_owned(),
+                        reason_code: DashboardActionReasonCode::PolicyRevisionAwaitingActivation,
+                        owner: DashboardActionOwner::Governance,
                         observed_at: approval.decided_at,
-                        target_route: "/runtime-config".to_owned(),
+                        target_route: "/system/config".to_owned(),
                     });
                 }
             }
@@ -813,7 +806,7 @@ mod tests {
     fn primary_action_is_unique_and_safety_ordered() {
         let permissions = DashboardPermissions::from_decisions([
             (DashboardPermission::ActivateBootstrap, true),
-            (DashboardPermission::ReadRuntimeConfig, true),
+            (DashboardPermission::ReadConfig, true),
             (DashboardPermission::ReadReconciliation, true),
             (DashboardPermission::EnqueueReport, true),
         ]);

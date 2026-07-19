@@ -1,31 +1,24 @@
 //! Transactional `PostgreSQL` owner of runtime mode and cold-start bootstrap state.
 
-use crate::{
-    postgres::{
-        governance::runtime_config::{append_activation_if_current, validate_operator_approval},
-        primitives,
-    },
-    traits::SystemRuntimeStateRepository,
-};
+use std::collections::BTreeSet;
+
+use crate::{postgres::primitives, traits::SystemRuntimeStateRepository};
 use async_trait::async_trait;
 use chrono::Utc;
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{
-        ActivateBootstrapState, BootstrapActivationInfo, NewRuntimeConfigActivation,
-        NewSystemBootstrapTransition, SystemRuntimeStateInfo,
+        ActivateBootstrapState, BootstrapActivationInfo, NewSystemBootstrapTransition,
+        SystemRuntimeStateInfo,
     },
     entities::{
-        runtime_config_version::Model as RuntimeConfig,
+        policy_activation::Entity as PolicyActivationEntity,
         system_bootstrap_transition::Entity as BootstrapTransitionEntity,
         system_kill_switch::Entity as KillSwitchEntity,
         system_runtime_state::{ActiveModel, Column, Entity, Model},
     },
-    enums::{
-        execution::KillSwitchState, quant::QuantRuntimeMode,
-        runtime_config::RuntimeConfigActivationKind, system::BootstrapPhase,
-    },
-    types::{BootstrapTransitionId, RuntimeConfigActivationId, RuntimeConfigApprovalId},
+    enums::{execution::KillSwitchState, quant::QuantRuntimeMode, system::BootstrapPhase},
+    types::BootstrapTransitionId,
 };
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, DatabaseConnection, EntityTrait,
@@ -58,8 +51,6 @@ struct PhaseTransition<'a> {
     actor: &'a str,
     acting_role: Option<&'a str>,
     reason: &'a str,
-    runtime_config: Option<&'a RuntimeConfig>,
-    runtime_config_approval_id: Option<RuntimeConfigApprovalId>,
     report_only_forced_ack: bool,
 }
 
@@ -73,8 +64,6 @@ async fn persist_phase(
         actor,
         acting_role,
         reason,
-        runtime_config,
-        runtime_config_approval_id,
         report_only_forced_ack,
     } = transition;
     let from_phase = state.bootstrap_phase;
@@ -92,9 +81,6 @@ async fn persist_phase(
             state_revision: next_revision,
             from_phase,
             to_phase,
-            runtime_config_version_id: runtime_config
-                .map(|version| version.runtime_config_version_id.clone()),
-            runtime_config_approval_id,
             actor: actor.to_owned(),
             acting_role: acting_role.map(str::to_owned),
             reason: reason.to_owned(),
@@ -160,8 +146,6 @@ async fn idempotent_phase_transition(
             actor: "system",
             acting_role: None,
             reason,
-            runtime_config: None,
-            runtime_config_approval_id: None,
             report_only_forced_ack: false,
         },
     )
@@ -258,31 +242,23 @@ impl SystemRuntimeStateRepository for PgSystemRuntimeStateRepository {
             ));
         }
 
-        let activation = NewRuntimeConfigActivation {
-            runtime_config_activation_id: RuntimeConfigActivationId::from_v7(),
-            runtime_config_version_id: command.runtime_config_version_id,
-            runtime_config_approval_id: Some(command.runtime_config_approval_id),
-            activated_by: command.actor.clone(),
-            reason: command.reason.clone(),
-            activation_kind: RuntimeConfigActivationKind::Initial,
-            previous_runtime_config_version_id: None,
-            rollback_target_version_id: None,
-            audit_event_id: None,
-        };
-        let validated = validate_operator_approval(
-            &txn,
-            &activation,
-            command.require_approver_activator_separation,
-        )
-        .await?;
-        let activation = append_activation_if_current(&txn, None, Some(activation))
-            .await?
-            .ok_or_else(|| {
-                StorageError::invariant_violation(
-                    Some("runtime_config_activation"),
-                    "bootstrap activation CAS returned no inserted activation",
-                )
-            })?;
+        let active_resources = PolicyActivationEntity::find()
+            .all(&txn)
+            .await
+            .map_err(StorageError::from)?
+            .into_iter()
+            .map(|activation| activation.resource_kind)
+            .collect::<BTreeSet<_>>();
+        if active_resources.len() != 6 {
+            return Err(StorageError::state_conflict(
+                "policy_activation",
+                Option::<&str>::None,
+                format!(
+                    "bootstrap requires all six policy resources active; found {}",
+                    active_resources.len()
+                ),
+            ));
+        }
 
         let state = persist_phase(
             &txn,
@@ -292,19 +268,12 @@ impl SystemRuntimeStateRepository for PgSystemRuntimeStateRepository {
                 actor: &command.actor,
                 acting_role: Some(&command.acting_role),
                 reason: &command.reason,
-                runtime_config: Some(&validated.version),
-                runtime_config_approval_id: Some(validated.approval.runtime_config_approval_id),
                 report_only_forced_ack: true,
             },
         )
         .await?;
         txn.commit().await.map_err(StorageError::from)?;
-        Ok(BootstrapActivationInfo {
-            state,
-            runtime_config: validated.version.into(),
-            runtime_config_activation_id: activation.runtime_config_activation_id,
-            activated_at: activation.activated_at,
-        })
+        Ok(BootstrapActivationInfo { state })
     }
 
     async fn set_quant_runtime_mode(

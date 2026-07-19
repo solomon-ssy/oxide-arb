@@ -56,7 +56,7 @@ use crate::{
         metrics_hub::MetricsHub,
         position_fact_writer::PositionEventWriter,
     },
-    runtime_config::RuntimeConfigStore,
+    runtime_config::DecisionPolicyStore,
 };
 
 /// Max orders reconciled per sweep pass (bounds one sweep's venue + DB load).
@@ -104,7 +104,7 @@ pub struct ReconciliationServiceDeps {
     pub submission: Arc<dyn ExecutionSubmissionRepository>,
     pub breaker: Arc<ExecutionBreaker>,
     pub metrics: Arc<MetricsHub>,
-    pub config: Arc<RuntimeConfigStore>,
+    pub config: Arc<DecisionPolicyStore>,
     pub execution_events: Arc<ExecutionEventWriter>,
     pub capital_events: Arc<CapitalAllocationEventWriter>,
     pub position_events: Arc<PositionEventWriter>,
@@ -142,7 +142,13 @@ impl ReconciliationService {
 
     /// One sweep: reconcile every order whose venue truth is still unknown.
     pub async fn reconcile_pass(&self, now: DateTime<Utc>) -> QuantResult<()> {
-        let policy = self.deps.config.current().execution.reconciliation.clone();
+        let policy = self
+            .deps
+            .config
+            .current()
+            .execution_risk
+            .reconciliation
+            .clone();
         if !policy.enabled {
             return Ok(());
         }

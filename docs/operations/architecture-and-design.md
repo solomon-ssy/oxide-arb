@@ -1,8 +1,8 @@
 # quant-pivot 架构与详细设计
 
-> Last reviewed: 2026-07-17.
+> Last reviewed: 2026-07-19.
 >
-> This document describes the current quant-pivot architecture implemented in this repository. Historical Endgame-phase documents are background only. The only current contract is runtime-config **v17**, feature schema **v6**, and dataset/model artifact `format_version = 5`; non-current versions have no compatibility loader. Code-complete cold-start evidence is recorded in the [production closeout](../plans/quant-pivot/08-cold-start-production-closeout.md); the soak and external-environment promotion evidence remain outstanding.
+> This document describes the current quant-pivot architecture implemented in this repository. The project has not entered production: lifecycle is `pre_production_resettable`, the baseline is `boot`, and every system-owned policy/schema/manifest/artifact format starts at version `1`. Historical phase increments are audit context only and have no implementation authority. After the irreversible `production_frozen` seal, all evolution requires forward migrations, rollback and data verification.
 
 ## 1. 系统目标
 
@@ -75,7 +75,7 @@ flowchart TD
 - 训练/CV/backtest/serving 共用模型输入 transform，serving 证据写入完成前 model run 不得成功；
 - model runner 先验证全部 route 再按 family 分派；configured category route 失败整轮失败，不回退 generic；
 - 确定性 parity mismatch 会撤销报告、级联失效 intent 并打开 latch，报告、publish 和新入场 fail-closed，退出/结算继续；
-- runtime-config 是版本化治理对象，部署凭证不是策略配置。
+- 六类 policy resource 是独立 revision 的治理对象；部署凭证和 immutable research artifact 都不是 hot policy。
 
 ## 3. 外部上下文
 
@@ -135,7 +135,7 @@ flowchart LR
 | `quant-pivot-bin` | CLI entrypoint、加载 deploy config、bootstrap app | 不承载业务逻辑 |
 | `quant-pivot-core` | AppContext、data ingest、report builder、governance、execution、account、reconciliation | 不直接暴露 HTTP contract |
 | `quant-pivot-api` | Polymarket Gamma/CLOB/Data API/on-chain/relayer clients | 不做策略 sizing |
-| `quant-pivot-models` | DTO、domain structs、enums、runtime-config schema、entities/idens | 不访问外部服务 |
+| `quant-pivot-models` | DTO、domain structs、enums、typed policy schema、entities/idens | 不访问外部服务 |
 | `quant-pivot-storage` | DB pools、migrations、ClickHouse writer | 不编码交易策略 |
 | `quant-pivot-repository` | Postgres repository traits/impl、idempotent writes | 不写 HTTP handler |
 | `quant-pivot-web` | Actix routes、auth、RBAC、API envelope、WS | 不绕过 core 服务直接下单 |
@@ -147,67 +147,59 @@ flowchart LR
 
 ### 5.1 Deploy config
 
-Deploy config 管连接和凭证：
+Deploy config 只管理进程启动时才能决定的部署身份与基础设施边界：
 
 - Polymarket CLOB/Gamma/Data API/RPC/relayer endpoints；
 - DB/ClickHouse/Redis；
-- private key；
+- systemd credential reference（private key、数据库口令、JWT、通知凭据）；
 - `quant.account.funder`；
 - `quant.account.wallet_kind`；
 - Web listen/CORS/JWT；
 - observability。
 
-加载顺序：
+加载顺序收敛为 source-controlled non-secret TOML、环境级不可变 override 与 systemd Credentials。环境变量只用于选择配置目录和部署身份，不再允许覆盖业务策略或直接承载 secret：
 
 ```mermaid
 flowchart LR
-    Defaults["code defaults"] --> Base["config/quant-pivot.toml"]
-    Base --> Local["config/quant-pivot.local.toml"]
-    Local --> Env["QUANT_PIVOT__... env"]
-    Env --> Cli["--config-dir / QUANT_PIVOT_CONFIG_DIR"]
-    Cli --> Effective["DeployConfig"]
-    Effective --> Validation["validate_for_quant_mode"]
+    Base["source-controlled non-secret TOML"] --> Override["environment immutable override"]
+    Override --> References["typed credential references"]
+    References --> Credentials["systemd CREDENTIALS_DIRECTORY"]
+    Credentials --> Effective["typed DeployConfig"]
+    Effective --> Validation["startup validation + credential preflight"]
 ```
 
-Deploy config 拒绝 unknown fields。所有 mode 都要求 private key 和 funder；可执行 mode 下 proxy/safe 还要求 relayer credentials。
+Deploy config 拒绝 unknown fields。所有 mode 都要求 private key credential 和 funder；可执行 mode 下 proxy/safe 还要求 relayer credentials。生产 runtime identity 不持有 DDL credential；migration CLI 使用独立、最小权限的 credential reference。
 
-### 5.2 Runtime config v17
+### 5.2 Governed policy resources（boot schema 1）
 
-Runtime config 管策略和治理：
+原巨型 Runtime Config 已 clean-break 删除。运行时热更新由六类强类型、独立 revision 的 policy resource 承担：
 
 ```mermaid
 flowchart TD
-    UI["Admin UI / API"] --> Version["POST /api/runtime-config/versions"]
-    Version --> Validate["schema + semantic validation"]
-    Validate --> Store["immutable version in Postgres"]
-    Store --> Activate["POST /activate"]
-    Activate --> Apply["RuntimeConfigStore apply"]
-    Apply -->|"success"| Active["active config"]
-    Apply -->|"failure"| Rollback["automatic revert to previous active"]
+    UI["Config console / typed API"] --> Draft["immutable typed draft"]
+    Draft --> Validate["typed validation + dependency preflight"]
+    Validate --> Approval["append-only approval"]
+    Approval --> CAS["activation CAS"]
+    CAS --> Prepare["prepare every affected consumer"]
+    Prepare --> Swap["atomic PolicySnapshotApplicator swap"]
+    Swap --> Freeze["freeze DecisionPolicySnapshot at decision boundary"]
+    Freeze --> Audit["append-only activation + operation audit"]
 ```
 
-主要 section：
+六类资源与生效边界：
 
-| Section | 职责 |
-|---------|------|
-| `selection` | 市场选择、黑白名单、流动性/到期窗口 |
-| `data_quality` | book age、coverage、ingest lag、feature bucket age |
-| `features` | 特征窗口、snapshot、feature pipeline 参数 |
-| `factors` | 因子权重、方向、启用状态 |
-| `domain` | 外部垂直数据源、availability lag 与 PIT linkage |
-| `model` | active model、shadow/published requirement、inference policy |
-| `quality_gate` | 训练/发布质量门槛 |
-| `training` | dataset 和训练调度 |
-| `reports` | schedule、Top-N、ad-hoc、valid window |
-| `portfolio` | budget、Kelly sizing、constraints、optimizer |
-| `execution` | semi-auto/auto、entry policy、exit monitor、capital、reconciliation、redeem、breaker |
-| `notification` | Telegram/webhook delivery |
-| `research` | 训练目标、CPCV/purge/trial grid 与验证门禁 |
-| `feedback` | attribution feedback、质量门与 governed auto-retraining policy |
+| Resource | 职责 | 生效边界 |
+|----------|------|----------|
+| `recommendation_policy` | selection、data quality、Top-N 与报告有效期 | 新 claim 的 report run |
+| `execution_risk_policy` | sizing、exposure、entry/exit 与 breaker | 新 order intent / admission |
+| `model_routing` | category active/shadow/exit artifact 指针 | 新 model evaluation claim |
+| `report_schedule` | timezone、cadence、enabled、future run reconcile | 尚未 claim 的 future run |
+| `operational_control` | report pause、execution halt、notification routing、worker admission | operational admission gate |
+| `execution_authorization` | `ReportOnly` / `SemiAuto` / `AutoExecution` 授权约束 | mode preflight 后的新 admission |
 
-v17 只接受 `knowledge_lag_secs`，不接受旧 `source_delay_secs`；`features.feature_schema_version` 必须使用
-当前 v6 契约。非 v17 runtime JSON、非 v6 feature schema、非 v5 dataset/model artifact 只能保留审计，
-不能激活、训练、publish 或 replay。
+每个 resource 固定 `schema_version = 1`，但没有统一大文档版本。修改必须依次完成 Draft、Validate/Preflight、Approve、Activate；activation body 绑定 `approval_id`、`expected_active_revision_id`、`preflight_token` 和 `idempotency_key`。任一 prepare 或 CAS 失败都保持旧 snapshot；不存在自动回滚，回滚也是一次显式、可审计 activation。
+
+特征、因子、domain 语义与研究方法是 content-addressed immutable profile artifact，随 decision/job lineage 冻结，不通过热配置修改。凭据和 provider endpoint 属于 Deploy Config。
 
 ## 6. 数据面设计
 
@@ -257,9 +249,9 @@ Postgres 是业务系统 of record；ClickHouse 是事实/分析面。不能把 
 
 - `DecisionBoundary.decision_at = trigger_time`；`knowledge_cutoff = decision_at - knowledge_lag` 只在唯一构造器计算一次。
 - 所有事实同时满足 `source_effective_at <= source_cutoff` 与 `available_at/ingestion_time <= decision_at`。
-- Feature schema 当前仅 v6；缺失以 `Observed | Substituted | Missing | NotApplicable` 表达，禁止 stub、silent zero 或 future-time clamp。
+- Feature schema 以 boot version 1 为当前唯一契约；缺失以 `Observed | Substituted | Missing | NotApplicable` 表达，禁止 stub、silent zero 或 future-time clamp。
 - Dataset lifecycle 为 `Planned → Building → Ready | InsufficientLabels | Failed`、`Ready → Expired`；不存在人工 `Built → Ready`。
-- Parquet dataset 与 model artifact 都只接受 `format_version = 5`。训练、每个 CV fold、backtest 和 serving 共用 fit/apply transform；非 v5 loader fail-closed。
+- Parquet dataset 与 model artifact 都只接受 boot `format_version = 1`。训练、每个 CV fold、backtest 和 serving 共用 fit/apply transform；非 boot loader fail-closed。
 - 100% serving 证据在 run success 前通过 completion barrier；确定性抽样和 24h full replay 比较 selection、capture、FeatureCell/DQ、factor、encoded input 与 canonical prediction。
 - 任一确定性 mismatch 自动 revoke 报告、级联失效 intent 并打开 parity latch。后续报告、model publish、新入场阻断；exit、reconciliation、settlement 继续。
 
@@ -317,7 +309,7 @@ capital allocation 用于防止重复花同一笔现金，也用于 auto preflig
 sequenceDiagram
     participant Trigger as Schedule/AdHoc Trigger
     participant Builder as ReportBuilder
-    participant Config as RuntimeConfigStore
+    participant Config as DecisionPolicyStore
     participant Gate as FeatureParityGate
     participant PIT as Durable PIT Resolver
     participant Select as MarketSelector
@@ -334,8 +326,8 @@ sequenceDiagram
     Trigger->>Builder: build(trigger_kind, trigger_key)
     Builder->>Gate: ensure_clear(report generation)
     Gate-->>Builder: clear or fail closed
-    Builder->>Config: active config
-    Config-->>Builder: RuntimeConfig v17
+    Builder->>Config: active typed policy bundle
+    Config-->>Builder: DecisionPolicySnapshot + immutable profile hashes
     Builder->>Builder: DecisionBoundary(decision_at=trigger_time, knowledge_cutoff once)
     Builder->>PIT: resolve catalog + book/domain facts at boundary
     PIT-->>Builder: immutable decision snapshot
@@ -640,7 +632,7 @@ Protected `/api/...` routes require：
 | Area | Paths |
 |------|-------|
 | Auth | `/api/auth/login`, `/api/auth/refresh`, `/api/auth/logout`, `/api/auth/me` |
-| Runtime config | `/api/runtime-config`, `/api/runtime-config/schema`, `/api/runtime-config/versions` |
+| Config governance | `/api/config/resources`, `/api/config/{kind}/current|schema|revisions`, `/drafts/...`, `/api/config/activity`, `/deployment`, `/lifecycle` |
 | System | `/api/system/status`, `/api/system/health`, `/api/system/quant-mode`, `/api/system/kill-switch` |
 | Account | `/api/quant/account/live`, `/api/quant/account/equity-snapshots` |
 | Reports | `/api/quant/reports`, `/api/quant/reports/current`, `/api/quant/reports/run`, `/api/quant/report-runs`, `/api/quant/report-schedules/health` |
@@ -746,7 +738,7 @@ Redis 不存储不可恢复的交易真相。
 - capital reserved/spent/released/impaired；
 - exit monitor trigger count；
 - settlement redeem failures；
-- runtime-config activation failures；
+- policy validation/preflight/activation failures by resource kind；
 - kill switch state changes；
 - breaker trips；
 - account snapshot failures。
@@ -766,7 +758,7 @@ Redis 不存储不可恢复的交易真相。
 - `order_intent_id`；
 - `execution_order_id`；
 - `market_id` / `token_id`；
-- `runtime_config_version_id`；
+- `decision_policy_snapshot_id` 与参与决策的 policy revision ids；
 - `quant_runtime_mode`；
 - `kill_switch_state`；
 - `admission_check_id`；
@@ -788,11 +780,11 @@ Redis 不存储不可恢复的交易真相。
 | Allowance insufficient | venue submit/reconciliation | order failure/ambiguous | perform approval, reconcile |
 | Ambiguous venue response | submit result | capital held | wait for reconciliation |
 | Unresolvable recon | recon worker | blocks auto preflight/attribution | manually resolve with evidence |
-| Runtime config bad | activation validation | reject/revert | fix patch or rollback |
+| Policy revision bad | typed validation, dependency preflight or activation CAS | reject and retain previous snapshot | fix typed draft or explicitly roll back after review |
 | Catalog coverage/watermark missing | PIT resolver / integrity summary | block replay, dataset build, report | preserve ingest, repair Gamma ledger; never backdate |
 | Serving writer misses deadline | evidence completion / parity pending timeout | fail run, alert, open latch when terminal | repair writer/watermark, run covering full parity |
 | Deterministic parity mismatch | sampled/full replay | revoke report, cascade intent, open latch; block report/publish/entry | safe mode, fix forward, covering full parity, governed ack |
-| Legacy/corrupt dataset or model artifact | format/hash/deep loader validation | reject training/load/publish | rebuild v5 artifact; never activate legacy pointer |
+| Legacy/corrupt dataset or model artifact | format/hash/deep loader validation | reject training/load/publish | rebuild boot v1 artifact; never activate an unknown pointer |
 | Model degraded | quality gate/report | no positive signal/empty | rollback model/factor |
 | Breaker daily loss | breaker | trip kill switch | incident review |
 | Bridge deposit stuck | account mismatch | funds unavailable | check bridge status/support |
@@ -800,37 +792,29 @@ Redis 不存储不可恢复的交易真相。
 
 ## 19. Deployment lifecycle
 
-当前 v17/v6/v5 冷启动必须按 [runbook §7.5](./runbook.md) 留存变更单、全量门禁、migration、parity
-与 governed acknowledge 证据；下图是生产晋级顺序。代码闭环完成不代表 soak、真实云身份、WORM restore、
-retention/capacity 与 200-day readiness 已经完成。
+仓库、部署声明和数据库 baseline 共同实现两态生命周期：
+
+- `pre_production_resettable / boot`：允许在明确授权后清空测试基础设施、squash migration 与重建 version 1 artifact；应用自身从不自动删除数据。
+- `production_frozen / boot`：不可逆。任何 schema、数据或内部 format 演进必须使用 forward migration、兼容性评估、回滚方案与数据验证；boot reset 被 API、CLI 与 migration tool 拒绝。
+
+首次上线顺序：
 
 ```mermaid
 flowchart TD
-    A["Pre-cutover full CI + backup + change ticket"] --> B["Kill switch exit_only"]
-    B --> C["Deploy v17 binary + PG/CH migrations"]
-    C --> D["Activate safe v17/v6 config: reports off, all model pointers empty"]
-    D --> E["Verify legacy specs/models/factors retired and datasets expired/failed"]
-    E --> F["Wait for catalog coverage start + advancing watermark"]
-    F --> G["Build Ready Parquet v5 dataset"]
-    G --> H["Train/calibrate/backtest/CPCV new model artifact v5"]
-    H --> I["Subject-bound full parity passed"]
-    I --> J["Risk-owner governed latch acknowledge"]
-    J --> K["Publish model"]
-    K --> L["Ad-hoc canary + sampled/full runtime parity"]
-    L --> M["Enable schedules while still exit_only"]
-    M --> N["Observe full report/parity cycle"]
-    N --> O["Restore new entries"]
-    O --> P["semi_auto / auto_execution with tight caps"]
-    P --> Q["Scale caps only after execution/reconciliation/attribution evidence"]
+    A["Full CI + fresh-install evidence"] --> B["Verify exact environment and backups"]
+    B --> C["Apply one PostgreSQL boot migration"]
+    C --> D["Apply one ClickHouse version-1 bootstrap"]
+    D --> E["Verify schema fingerprints and empty unknown history"]
+    E --> F["Activate six safe boot policy resources"]
+    F --> G["Build version-1 dataset/model artifacts"]
+    G --> H["Subject-bound full parity passed"]
+    H --> I["Publish model and run ad-hoc canary"]
+    I --> J["Enable schedule with conservative execution controls"]
+    J --> K["Review lifecycle evidence checklist"]
+    K --> L["Irreversible production seal"]
 ```
 
-Scaling production is a governance decision, not a code toggle. Increase budget/caps only after reports, orders, reconciliation, exits and attribution have worked at smaller size.
-
-任一步失败都回到同一个 **v17 safe state**：`exit_only`、reports off、model pointers empty，并且绝不清除已
-open/uninitialized 的 latch；若 latch 此前已合法 clear，则由 safe controls 阻断，不能用 SQL 伪造状态。继续
-ingest/exit/reconciliation/settlement，修复后前向重建。不得回滚非 v17 runtime 或非 v5 artifact，
-也不得重新激活已退役 artifact。
-
+Activation failures retain the prior `DecisionPolicySnapshot`; they do not trigger automatic rollback. Operational incidents use explicit policy rollback or halt actions while ingest、exit、reconciliation 和 settlement continue. Scaling budget/caps remains a governed business decision after report/order/reconciliation/attribution evidence, not a deploy toggle.
 ## 20. 设计边界与当前限制
 
 1. 只支持 Polymarket，不存在 multi-venue abstraction。
@@ -838,7 +822,7 @@ ingest/exit/reconciliation/settlement，修复后前向重建。不得回滚非 
 3. Report sizing 使用真实账户；没有配置预算模拟 fallback。
 4. 当前 order intent kind 是 buy entry；exit order 由 execution/exit subsystem 管理。
 5. 手动在 Polymarket UI 下单不会自动生成系统内 `OrderIntent`。
-6. runtime-config 只接受 v17，feature schema 只接受当前 v6，dataset/model artifact loader 只接受 v5；旧 schema/format 不能激活或读取。
+6. 六类 policy resource、feature、dataset、model 和 internal format 只接受 boot version 1；未知 schema/format 不能激活、训练、publish 或 serving。
 7. `auto_execution` 仍受 admission、kill switch、capital 和 breaker 限制。
 8. ClickHouse 是 analytics plane，不是订单 truth。
 9. two-hour/twelve-reconciliation soak 与真实云身份、secret mount、WORM restore、retention/capacity、200-day readiness 仍待真实环境执行；代码与文档就绪不等于 production complete。
@@ -849,12 +833,12 @@ ingest/exit/reconciliation/settlement，修复后前向重建。不得回滚非 
 
 - report-first artifact；
 - account truth credential-gated；
-- deploy config 与 runtime-config 分离；
-- runtime-config versioned and auditable；
-- runtime v17 / feature v6 / dataset+model artifact v5 single-version contract；
+- Deploy Config、governed hot policy 与 immutable research artifact 三类 authority 分离；
+- policy resource independently revisioned, approved, activated and audited；
+- every system-owned schema/manifest/artifact format starts at boot version 1；
 - DecisionBoundary 双时间 PIT 与 frozen train/serve transform；
 - serving evidence completion barrier + deterministic parity latch；
-- 冷启动安全切换失败时只前向恢复到 v17 safe state；
+- activation prepare/CAS 失败时保持旧 snapshot；恢复或回滚必须显式治理；
 - mode transition preflight；
 - kill switch fail-closed；
 - admission before every venue submit；
@@ -862,4 +846,4 @@ ingest/exit/reconciliation/settlement，修复后前向重建。不得回滚非 
 - reconciliation before final attribution；
 - no `f64` money in production paths；
 - no untyped internal error bucket in production paths；
-- no private key or secret in logs, docs examples, tests or commits。
+- no private key or secret value in TOML、environment、process arguments、logs、docs examples、tests or commits；only typed systemd credential references。

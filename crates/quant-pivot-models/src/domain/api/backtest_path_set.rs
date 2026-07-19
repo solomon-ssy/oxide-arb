@@ -18,7 +18,7 @@ use validator::Validate;
 use crate::{
     domain::{BacktestPathSetInfo, pagination::PageRequest},
     types::{
-        BacktestPathSetId, ContentHash, ModelRunId, ModelVersionId, RuntimeConfigVersionId,
+        BacktestPathSetId, ContentHash, DecisionPolicySnapshotId, ModelRunId, ModelVersionId,
         TrainingDatasetId,
     },
 };
@@ -40,7 +40,7 @@ pub struct RunCpcvBacktestRequest {
     /// Frozen runtime-config version governing `research.validation.*` (CPCV
     /// partitions, purge/embargo, trial grid, PBO block count, gate
     /// thresholds) + portfolio caps + provenance.
-    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     /// Operator reason recorded on the operation log.
     #[validate(length(min = 1, max = 512))]
     pub reason: String,
@@ -58,7 +58,7 @@ mod request_tests {
     fn request() -> serde_json::Value {
         serde_json::json!({
             "training_dataset_id": uuid::Uuid::now_v7(),
-            "runtime_config_version_id": uuid::Uuid::now_v7(),
+            "decision_policy_snapshot_id": uuid::Uuid::now_v7(),
             "reason": "validate the frozen candidate"
         })
     }
@@ -98,7 +98,7 @@ pub struct BacktestPathSetView {
     pub model_version_id: ModelVersionId,
     pub model_run_id: ModelRunId,
     pub training_dataset_id: TrainingDatasetId,
-    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub window_start: DateTime<Utc>,
     pub window_end: DateTime<Utc>,
     pub path_count: i64,
@@ -135,7 +135,7 @@ impl From<BacktestPathSetInfo> for BacktestPathSetView {
             model_version_id: info.model_version_id,
             model_run_id: info.model_run_id,
             training_dataset_id: info.training_dataset_id,
-            runtime_config_version_id: info.runtime_config_version_id,
+            decision_policy_snapshot_id: info.decision_policy_snapshot_id,
             window_start: info.window_start,
             window_end: info.window_end,
             path_count: info.path_count,

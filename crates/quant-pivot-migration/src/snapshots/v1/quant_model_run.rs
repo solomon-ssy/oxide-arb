@@ -5,13 +5,13 @@ use sea_orm::entity::prelude::*;
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
-#[sea_orm(schema_name = "public", table_name = "quant_model_run")]
+#[sea_orm(table_name = "quant_model_run")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub model_run_id: Uuid,
     pub run_kind: QpModelRunKind,
     pub model_version_id: Option<Uuid>,
-    pub runtime_config_version_id: Uuid,
+    pub decision_policy_snapshot_id: Uuid,
     pub market_selection_id: Option<Uuid>,
     pub window_start: DateTimeWithTimeZone,
     pub window_end: DateTimeWithTimeZone,
@@ -27,6 +27,36 @@ pub struct Model {
     pub error_message: Option<String>,
     pub started_at: DateTimeWithTimeZone,
     pub finished_at: Option<DateTimeWithTimeZone>,
+    #[sea_orm(has_many)]
+    pub quant_backtest_path_sets: HasMany<super::quant_backtest_path_set::Entity>,
+    #[sea_orm(has_many)]
+    pub quant_backtest_reports: HasMany<super::quant_backtest_report::Entity>,
+    #[sea_orm(has_many)]
+    pub quant_factor_values: HasMany<super::quant_factor_value::Entity>,
+    #[sea_orm(has_many)]
+    pub quant_feature_parity_subjects: HasMany<super::quant_feature_parity_subject::Entity>,
+    #[sea_orm(
+        belongs_to,
+        from = "market_selection_id",
+        to = "market_selection_id",
+        on_update = "NoAction",
+        on_delete = "NoAction"
+    )]
+    pub quant_market_selection: BelongsTo<Option<super::quant_market_selection::Entity>>,
+    #[sea_orm(has_many)]
+    pub quant_model_comparison_reports: HasMany<super::quant_model_comparison_report::Entity>,
+    #[sea_orm(
+        belongs_to,
+        from = "model_version_id",
+        to = "model_version_id",
+        on_update = "NoAction",
+        on_delete = "NoAction"
+    )]
+    pub quant_model_version: BelongsTo<Option<super::quant_model_version::Entity>>,
+    #[sea_orm(has_many)]
+    pub quant_portfolio_plans: HasMany<super::quant_portfolio_plan::Entity>,
+    #[sea_orm(has_many)]
+    pub quant_recommendation_reports: HasMany<super::quant_recommendation_report::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

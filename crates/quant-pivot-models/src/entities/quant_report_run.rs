@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use crate::{
     enums::quant::{ReportRunStatus, ReportRunTerminalReason, ReportTriggerKind},
-    types::{RecommendationReportId, ReportRunId, RuntimeConfigVersionId},
+    types::{DecisionPolicySnapshotId, RecommendationReportId, ReportRunId},
 };
 
 #[sea_orm::model]
@@ -29,7 +29,7 @@ pub struct Model {
     pub lease_expires_at: Option<DateTime<Utc>>,
     pub finished_at: Option<DateTime<Utc>>,
     pub lease_owner: Option<Uuid>,
-    pub runtime_config_version_id: Option<RuntimeConfigVersionId>,
+    pub decision_policy_snapshot_id: Option<DecisionPolicySnapshotId>,
     pub top_n: Option<i32>,
     pub knowledge_lag_secs: Option<i64>,
     pub output_report_id: Option<RecommendationReportId>,
@@ -47,11 +47,11 @@ pub struct Model {
     pub retry_of: BelongsTo<Option<Entity>>,
     #[sea_orm(
         belongs_to,
-        relation_enum = "RuntimeConfigVersion",
-        from = "runtime_config_version_id",
-        to = "runtime_config_version_id"
+        relation_enum = "DecisionPolicySnapshot",
+        from = "decision_policy_snapshot_id",
+        to = "decision_policy_snapshot_id"
     )]
-    pub runtime_config_version: BelongsTo<Option<super::runtime_config_version::Entity>>,
+    pub decision_policy_snapshot: BelongsTo<Option<super::decision_policy_snapshot::Entity>>,
     #[sea_orm(
         belongs_to,
         relation_enum = "OutputReport",

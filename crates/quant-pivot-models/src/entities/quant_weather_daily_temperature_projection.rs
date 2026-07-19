@@ -4,7 +4,9 @@ use chrono::{DateTime, NaiveDate, Utc};
 use rust_decimal::Decimal;
 use sea_orm::entity::prelude::*;
 
-use crate::types::{ContentHash, DomainEventId, DomainInstrumentKey, DomainSourceId};
+use crate::types::{
+    ContentHash, DomainEventId, DomainInstrumentKey, DomainSourceId, WeatherTemperatureStatistic,
+};
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -17,7 +19,7 @@ pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub local_date: NaiveDate,
     #[sea_orm(primary_key, auto_increment = false)]
-    pub temperature_statistic: String,
+    pub temperature_statistic: WeatherTemperatureStatistic,
     pub station: String,
     pub timezone: String,
     pub current_extreme_celsius: Decimal,

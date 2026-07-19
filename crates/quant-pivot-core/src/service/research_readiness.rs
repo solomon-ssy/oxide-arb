@@ -18,7 +18,7 @@ use quant_pivot_models::{
     types::{
         ArtifactUri, ContentHash, HistoryCoverage, RETENTION_RUNWAY_EVIDENCE_FORMAT_VERSION,
         ResearchReadinessEvidencePayload, ResearchSourceBinding, ResearchSourceRegistry,
-        ResearchSourceStorageKind, RetentionRunwayEvidenceV3, RetentionSourceObservationV3,
+        ResearchSourceStorageKind, RetentionRunwayEvidenceV1, RetentionSourceObservationV1,
         SHADOW_LATENCY_PROFILE_FORMAT_VERSION, ShadowLatencyProfileV1, research_source_registry,
     },
 };
@@ -570,7 +570,7 @@ impl ResearchReadinessEvidenceProducer {
         &self,
         required_days: u32,
         observed_at: DateTime<Utc>,
-    ) -> QuantResult<RetentionRunwayEvidenceV3> {
+    ) -> QuantResult<RetentionRunwayEvidenceV1> {
         let catalog_coverage = self.catalog.research_history_coverage(observed_at).await?;
         let clob_coverage = self
             .clob_market_info
@@ -604,7 +604,7 @@ impl ResearchReadinessEvidenceProducer {
                     })
                 })
         })?;
-        Ok(RetentionRunwayEvidenceV3 {
+        Ok(RetentionRunwayEvidenceV1 {
             format_version: RETENTION_RUNWAY_EVIDENCE_FORMAT_VERSION,
             registry_hash: self.source_registry.contract_hash().map_err(methodology)?,
             required_sources: self.source_registry.required_sources.clone(),
@@ -622,14 +622,14 @@ impl ResearchReadinessEvidenceProducer {
         observed_at: DateTime<Utc>,
         catalog_coverage: &[HistoryCoverage],
         clob_coverage: &[HistoryCoverage],
-    ) -> QuantResult<RetentionSourceObservationV3> {
+    ) -> QuantResult<RetentionSourceObservationV1> {
         match binding.storage {
             ResearchSourceStorageKind::ClickHouseTable => {
                 let observation = self
                     .clickhouse
                     .observe_raw_history_table(binding, observed_at)
                     .await?;
-                Ok(RetentionSourceObservationV3 {
+                Ok(RetentionSourceObservationV1 {
                     source: binding.source,
                     storage: binding.storage,
                     object: binding.object.clone(),
@@ -687,7 +687,7 @@ impl ResearchReadinessEvidenceProducer {
 fn pg_retention_observation(
     binding: &ResearchSourceBinding,
     coverage: &[HistoryCoverage],
-) -> QuantResult<RetentionSourceObservationV3> {
+) -> QuantResult<RetentionSourceObservationV1> {
     let observed = coverage
         .iter()
         .find(|observed| observed.object == binding.object)
@@ -703,7 +703,7 @@ fn pg_retention_observation(
             binding.object, observed.time_column, binding.time_column
         )));
     }
-    Ok(RetentionSourceObservationV3 {
+    Ok(RetentionSourceObservationV1 {
         source: binding.source,
         storage: binding.storage,
         object: binding.object.clone(),

@@ -48,9 +48,9 @@ use quant_pivot_models::{
 use quant_pivot_repository::{
     clickhouse::{ChFactWriter, ChFeatureParityEventRepository},
     traits::{
-        CalibrationArtifactRepository, FactWriter, FeatureParityRepository,
+        CalibrationArtifactRepository, FactWriter, FeatureParityRepository, PolicyRepository,
         RecommendationReportRepository, ReportRunRepository, ResearchReadinessEvidenceRepository,
-        RuntimeConfigVersionRepository, ServingEvidenceRepository, TradePolicyRepository,
+        ServingEvidenceRepository, TradePolicyRepository,
     },
 };
 
@@ -289,7 +289,7 @@ impl AppContext {
         engine: ResearchJobEngine,
     ) -> QuantResult<()> {
         let runtime_config =
-            Arc::clone(&self.infra.repos.runtime_config) as Arc<dyn RuntimeConfigVersionRepository>;
+            Arc::clone(&self.infra.repos.runtime_config) as Arc<dyn PolicyRepository>;
         let bias_table_repo = Arc::clone(&self.infra.repos.calibration_artifact)
             as Arc<dyn CalibrationArtifactRepository>;
         let config = self.config.quant.research_jobs;
@@ -390,7 +390,7 @@ impl AppContext {
                     as Arc<dyn TradePolicyRepository>,
                 model_registry: Arc::clone(&self.research.model_registry_repo),
                 runtime_configs: Arc::clone(&self.infra.repos.runtime_config)
-                    as Arc<dyn RuntimeConfigVersionRepository>,
+                    as Arc<dyn PolicyRepository>,
                 source_slices: Arc::clone(&self.research.source_slice_repo),
                 readiness,
                 model_runtime_factory_builder: Arc::clone(

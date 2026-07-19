@@ -430,6 +430,7 @@ pub async fn run(
     if !state
         .runtime_config_apply
         .current()
+        .recommendation
         .reports
         .ad_hoc_report_enabled
     {

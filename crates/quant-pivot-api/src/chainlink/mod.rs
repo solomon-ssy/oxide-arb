@@ -25,7 +25,6 @@ use quant_pivot_models::{
     types::{ChainlinkFeedKey, ContentHash, DomainInstrumentKey, DomainSourceId, Usd},
 };
 use rust_decimal::Decimal;
-use secrecy::ExposeSecret;
 
 #[derive(Clone)]
 struct FeedBinding {
@@ -58,8 +57,8 @@ impl ChainlinkDataStreamsSource {
             RpcError::ConnectionFailed("Chainlink Data Streams API secret is missing".into())
         })?;
         let sdk_config = Config::new(
-            api_key.expose_secret().to_owned(),
-            api_secret.expose_secret().to_owned(),
+            api_key.secret().expose_secret().to_owned(),
+            api_secret.secret().expose_secret().to_owned(),
             config.rest_url.clone(),
             config.websocket_url.clone(),
         )

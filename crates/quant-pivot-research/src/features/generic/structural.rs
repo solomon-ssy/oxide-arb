@@ -16,12 +16,12 @@
 //! (structurally absent — not a data gap); a neg-risk market missing any leg
 //! book is `NullReason::LegBookMissing`. Neither is ever a fabricated zero.
 
-use std::{str::FromStr, time::Duration};
+use std::time::Duration;
 
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     domain::{TradeParticipantRole, TradeTapePrint},
-    runtime_config::{DecimalString, FeatureFamily},
+    runtime_config::{DecimalValue, FeatureFamily},
     types::{Price, Usd},
 };
 use rust_decimal::Decimal;
@@ -282,7 +282,7 @@ fn trade_tape_evidence(ctx: &FeatureComputeCtx<'_>) -> EvidenceSourceRef {
     }
 }
 
-fn concentration_gate(ctx: &FeatureComputeCtx<'_>) -> ParticipantConcentrationGate {
+const fn concentration_gate(ctx: &FeatureComputeCtx<'_>) -> ParticipantConcentrationGate {
     ParticipantConcentrationGate {
         min_unique_participants: ctx.config.structural.trade_tape_min_unique_participants,
         min_notional_usd: config_decimal(
@@ -319,13 +319,8 @@ fn role_metric_features(
     ]
 }
 
-fn config_decimal(raw: &DecimalString, field: &'static str) -> Decimal {
-    Decimal::from_str(raw.value.trim()).unwrap_or_else(|error| {
-        panic!(
-            "{field} `{}` invalid despite config validation: {error}",
-            raw.value
-        )
-    })
+const fn config_decimal(raw: &DecimalValue, _field: &'static str) -> Decimal {
+    raw.value
 }
 
 fn role_gini_feature(

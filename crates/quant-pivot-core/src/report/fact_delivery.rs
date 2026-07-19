@@ -14,7 +14,7 @@ use quant_pivot_models::{
     enums::quant::{RecommendationReportStatus, ReportFactDeliveryStatus},
     hashing::CanonicalDigest,
     types::{
-        ContentHash, REPORT_FACT_BUNDLE_FORMAT_VERSION, ReportFactBundleV2,
+        ContentHash, REPORT_FACT_BUNDLE_FORMAT_VERSION, ReportFactBundleV1,
         ReportFactTableCommitment,
     },
 };
@@ -244,7 +244,7 @@ impl ReportFactDeliveryWorker {
     async fn load_bundle(
         &self,
         delivery: &ReportFactDeliveryInfo,
-    ) -> QuantResult<ReportFactBundleV2> {
+    ) -> QuantResult<ReportFactBundleV1> {
         let bytes = self.deps.artifacts.get(&delivery.bundle_uri).await?;
         let byte_count =
             i64::try_from(bytes.len()).map_err(|error| ReportError::NumericOverflow {
@@ -259,7 +259,7 @@ impl ReportFactDeliveryWorker {
             }
             .into());
         }
-        let bundle: ReportFactBundleV2 =
+        let bundle: ReportFactBundleV1 =
             serde_json::from_slice(&bytes).map_err(|error| ReportError::InvariantViolation {
                 stage: "report_fact_delivery",
                 detail: format!("invalid report fact bundle: {error}"),
@@ -443,7 +443,7 @@ async fn run_poll_loop<Process, ProcessFuture, OnError>(
 
 fn validate_bundle(
     delivery: &ReportFactDeliveryInfo,
-    bundle: &ReportFactBundleV2,
+    bundle: &ReportFactBundleV1,
 ) -> QuantResult<()> {
     if bundle.format_version != REPORT_FACT_BUNDLE_FORMAT_VERSION
         || bundle.recommendation_report_id != delivery.recommendation_report_id
@@ -571,7 +571,7 @@ impl RowChainVerifier {
     }
 }
 
-fn notification_payload(bundle: &ReportFactBundleV2) -> ReportNotificationPayload {
+fn notification_payload(bundle: &ReportFactBundleV1) -> ReportNotificationPayload {
     ReportNotificationPayload {
         report_id: bundle.recommendation_report_id.clone(),
         kind: bundle.notification.kind,

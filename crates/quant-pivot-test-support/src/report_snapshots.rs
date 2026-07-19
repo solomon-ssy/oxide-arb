@@ -92,7 +92,7 @@ fn base_report(
     let id = report_id(seed);
     let mut info = report_fixtures::report(id, ReportKind::TopN, status);
     info.decision_at = at(1_699_999_880);
-    info.runtime_config_version_id = ref_id("snapshot-runtime-config");
+    info.decision_policy_snapshot_id = ref_id("snapshot-runtime-config");
     info.model_version_id = ref_id("snapshot-model-version");
     info.market_selection_id = ref_id("snapshot-market-selection");
     info.portfolio_plan_id = ref_id("snapshot-portfolio-plan");
@@ -131,7 +131,7 @@ fn evidence_refs() -> EvidenceRefs {
         model_run_id: ref_id("snapshot-model-run"),
         market_selection_id: ref_id("snapshot-market-selection"),
         book_snapshot_ref: book_snapshot_ref(),
-        runtime_config_version_id: ref_id("snapshot-runtime-config"),
+        decision_policy_snapshot_id: ref_id("snapshot-runtime-config"),
         model_version_id: ref_id("snapshot-model-version"),
         factor_definition_versions: Vec::new(),
         data_quality_snapshot_ref: ref_id("snapshot-data-quality"),

@@ -10,8 +10,8 @@ use quant_pivot_repository::{
     clickhouse::ChFactWriter,
     traits::{
         EntryConditionRepository, FactWriter, FactorRepository, MarketLinkageRepository,
-        MarketSelectionRepository, ModelRegistryRepository, RecommendationRepository,
-        RuntimeConfigVersionRepository,
+        MarketSelectionRepository, ModelRegistryRepository, PolicyRepository,
+        RecommendationRepository,
     },
 };
 
@@ -47,7 +47,7 @@ impl AppContext {
                 models: Arc::clone(&self.infra.repos.model_registry)
                     as Arc<dyn ModelRegistryRepository>,
                 runtime_configs: Arc::clone(&self.infra.repos.runtime_config)
-                    as Arc<dyn RuntimeConfigVersionRepository>,
+                    as Arc<dyn PolicyRepository>,
                 runtime_config: self.runtime_config(),
             },
         ));

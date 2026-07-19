@@ -15,8 +15,8 @@ use crate::{
         ReportTriggerKind,
     },
     types::{
-        ContentHash, RecommendationReportId, ReportRunId, ReportScheduleGapId,
-        RuntimeConfigVersionId,
+        ContentHash, DecisionPolicySnapshotId, RecommendationReportId, ReportRunId,
+        ReportScheduleGapId,
     },
 };
 
@@ -39,7 +39,7 @@ pub struct ReportRunInfo {
     pub lease_expires_at: Option<DateTime<Utc>>,
     pub finished_at: Option<DateTime<Utc>>,
     pub lease_owner: Option<Uuid>,
-    pub runtime_config_version_id: Option<RuntimeConfigVersionId>,
+    pub decision_policy_snapshot_id: Option<DecisionPolicySnapshotId>,
     pub top_n: Option<i32>,
     pub knowledge_lag_secs: Option<i64>,
     pub output_report_id: Option<RecommendationReportId>,
@@ -64,7 +64,7 @@ info_from_model!(ReportRunInfo, quant_report_run::Model, {
     lease_expires_at,
     finished_at,
     lease_owner,
-    runtime_config_version_id,
+    decision_policy_snapshot_id,
     top_n,
     knowledge_lag_secs,
     output_report_id,
@@ -124,7 +124,7 @@ impl EnqueueReportRunOutcome {
 #[sea_orm(entity = "crate::entities::quant_report_schedule_state::Entity")]
 pub struct ReportScheduleStateInfo {
     pub schedule_id: String,
-    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub spec_hash: ContentHash,
     pub next_scheduled_for: DateTime<Utc>,
     pub last_materialized_for: Option<DateTime<Utc>>,
@@ -135,7 +135,7 @@ pub struct ReportScheduleStateInfo {
 
 info_from_model!(ReportScheduleStateInfo, quant_report_schedule_state::Model, {
     schedule_id,
-    runtime_config_version_id,
+    decision_policy_snapshot_id,
     spec_hash,
     next_scheduled_for,
     last_materialized_for,
@@ -150,7 +150,7 @@ info_from_model!(ReportScheduleStateInfo, quant_report_schedule_state::Model, {
 pub struct ReportScheduleGapInfo {
     pub gap_id: ReportScheduleGapId,
     pub schedule_id: String,
-    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub reason: ReportScheduleGapReason,
     pub first_scheduled_for: DateTime<Utc>,
     pub last_scheduled_for: DateTime<Utc>,
@@ -196,7 +196,7 @@ info_from_model!(ReportCurrentHealthInfo, quant_recommendation_report::Model, {
 #[derive(Debug, Clone)]
 pub struct ReconcileReportSchedule {
     pub schedule_id: String,
-    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub spec_hash: ContentHash,
     pub next_scheduled_for: DateTime<Utc>,
     pub enabled: bool,
@@ -206,7 +206,7 @@ pub struct ReconcileReportSchedule {
 #[derive(Debug, Clone)]
 pub struct MaterializeReportSchedule {
     pub schedule_id: String,
-    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub spec_hash: ContentHash,
     pub expected_next_scheduled_for: DateTime<Utc>,
     pub latest_scheduled_for: DateTime<Utc>,
@@ -227,7 +227,7 @@ pub struct ClaimReportSchedule {
 /// Exact active-config defaults supplied to the claim transaction.
 #[derive(Debug, Clone)]
 pub struct ReportRunClaimConfig {
-    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub ad_hoc_default_top_n: i32,
     pub ad_hoc_default_knowledge_lag_secs: i64,
     pub schedules: Vec<ClaimReportSchedule>,
@@ -253,7 +253,7 @@ pub struct MaterializeReportScheduleOutcome {
 info_from_model!(ReportScheduleGapInfo, quant_report_schedule_gap::Model, {
     gap_id,
     schedule_id,
-    runtime_config_version_id,
+    decision_policy_snapshot_id,
     reason,
     first_scheduled_for,
     last_scheduled_for,

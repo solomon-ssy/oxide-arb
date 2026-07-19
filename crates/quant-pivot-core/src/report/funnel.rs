@@ -10,9 +10,9 @@ use quant_pivot_models::{
     enums::quant::RejectionReason,
     hashing::CanonicalDigest,
     types::{
-        EventId, FeatureVectorId, MarketId, MarketSelectionId, ModelRunId, ModelVersionId,
-        RecommendationId, RecommendationReportId, ReportFunnelReason, ReportFunnelStage,
-        ResearchProfileRef, RuntimeConfigVersionId, SignalCandidateId, TokenId,
+        DecisionPolicySnapshotId, EventId, FeatureVectorId, MarketId, MarketSelectionId,
+        ModelRunId, ModelVersionId, RecommendationId, RecommendationReportId, ReportFunnelReason,
+        ReportFunnelStage, ResearchProfileRef, SignalCandidateId, TokenId,
     },
 };
 use quant_pivot_research::{
@@ -27,7 +27,7 @@ use crate::service::{feature_pipeline::RejectedMarket, model_runner::ModelMarket
 pub struct ReportFunnelInput<'a> {
     pub report_id: &'a RecommendationReportId,
     pub profile_ref: &'a ResearchProfileRef,
-    pub runtime_config_version_id: &'a RuntimeConfigVersionId,
+    pub decision_policy_snapshot_id: &'a DecisionPolicySnapshotId,
     pub model_version_id: &'a ModelVersionId,
     pub model_run_id: Option<&'a ModelRunId>,
     pub selection: &'a MarketSelectionSnapshot,
@@ -327,7 +327,7 @@ fn row_from_decision(
         profile_id: input.profile_ref.id.clone(),
         profile_version: input.profile_ref.version,
         profile_content_hash: input.profile_ref.content_hash.to_string(),
-        runtime_config_version_id: input.runtime_config_version_id.clone(),
+        decision_policy_snapshot_id: input.decision_policy_snapshot_id.clone(),
         model_version_id: input.model_version_id.clone(),
         model_run_id: input.model_run_id.cloned(),
         market_id: market_id.clone(),
@@ -482,8 +482,8 @@ mod tests {
     use quant_pivot_models::{
         enums::common::MarketCategory,
         types::{
-            ContentHash, EventId, MarketId, MarketSelectionId, ModelVersionId,
-            RecommendationReportId, ReportFunnelReason, ReportFunnelStage, RuntimeConfigVersionId,
+            ContentHash, DecisionPolicySnapshotId, EventId, MarketId, MarketSelectionId,
+            ModelVersionId, RecommendationReportId, ReportFunnelReason, ReportFunnelStage,
             SelectionExclusionSummary, TokenId,
         },
     };
@@ -502,7 +502,7 @@ mod tests {
         MarketSelectionSnapshot {
             market_selection_id: MarketSelectionId::from_v7(),
             decision_at,
-            runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
+            decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
             selector_hash: ContentHash::parse(format!("blake3:{}", "1".repeat(64))).expect("hash"),
             included: vec![SelectedMarket {
                 market_id: MarketId::new("included"),
@@ -533,7 +533,7 @@ mod tests {
         let rows = build_report_market_funnel(ReportFunnelInput {
             report_id: &report_id,
             profile_ref: &profile,
-            runtime_config_version_id: &selection.runtime_config_version_id,
+            decision_policy_snapshot_id: &selection.decision_policy_snapshot_id,
             model_version_id: &model_version_id,
             model_run_id: None,
             selection: &selection,
@@ -567,7 +567,7 @@ mod tests {
         let result = build_report_market_funnel(ReportFunnelInput {
             report_id: &report_id,
             profile_ref: &profile,
-            runtime_config_version_id: &selection.runtime_config_version_id,
+            decision_policy_snapshot_id: &selection.decision_policy_snapshot_id,
             model_version_id: &model_version_id,
             model_run_id: None,
             selection: &selection,

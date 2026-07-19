@@ -173,7 +173,7 @@ mod tests {
         checker.register(
             Method::POST,
             "/api/runtime-config/{id}/activate",
-            Rule::ActingRoleGoverned(ResourceType::RuntimeConfig, Operation::Activate),
+            Rule::ActingRoleGoverned(ResourceType::DecisionPolicySnapshot, Operation::Activate),
         );
         let outcome = checker
             .check(
@@ -199,7 +199,7 @@ mod tests {
         checker.register(
             Method::POST,
             "/api/runtime-config/{id}/activate",
-            Rule::ActingRoleGoverned(ResourceType::RuntimeConfig, Operation::Activate),
+            Rule::ActingRoleGoverned(ResourceType::DecisionPolicySnapshot, Operation::Activate),
         );
         // No header at all → attributed to the literal super_admin.
         let bare = checker

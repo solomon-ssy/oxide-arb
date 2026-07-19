@@ -26,6 +26,7 @@ pub fn expand(input: TokenStream) -> Result<TokenStream> {
 
     let core = expand_core(name, vis, &impl_generics, &ty_generics, where_clause);
     let serde = expand_serde(name, &impl_generics, &ty_generics, where_clause);
+    let json_schema = expand_json_schema(name, &impl_generics, &ty_generics, where_clause);
     let seaorm = expand_seaorm(name, &impl_generics, &ty_generics, where_clause);
     let seaorm_try_getable =
         expand_seaorm_try_getable(name, &impl_generics, &ty_generics, where_clause);
@@ -33,9 +34,35 @@ pub fn expand(input: TokenStream) -> Result<TokenStream> {
     Ok(quote! {
         #core
         #serde
+        #json_schema
         #seaorm
         #seaorm_try_getable
     })
+}
+
+fn expand_json_schema(
+    name: &syn::Ident,
+    impl_generics: &ImplGenerics<'_>,
+    ty_generics: &TypeGenerics<'_>,
+    where_clause: Option<&WhereClause>,
+) -> TokenStream {
+    quote! {
+        impl #impl_generics ::schemars::JsonSchema for #name #ty_generics #where_clause {
+            fn inline_schema() -> bool {
+                true
+            }
+
+            fn schema_name() -> ::std::borrow::Cow<'static, str> {
+                ::std::borrow::Cow::Borrowed(stringify!(#name))
+            }
+
+            fn json_schema(
+                generator: &mut ::schemars::SchemaGenerator,
+            ) -> ::schemars::Schema {
+                <String as ::schemars::JsonSchema>::json_schema(generator)
+            }
+        }
+    }
 }
 
 fn expand_core(

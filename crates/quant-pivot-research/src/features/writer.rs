@@ -17,7 +17,7 @@ use quant_pivot_models::{
         clickhouse::{ChFeatureCellState, ChFeatureSourceKind, ChFeatureValueKind},
         feature::EvidenceSourceKind,
     },
-    types::{FeatureVectorId, MarketId, RuntimeConfigVersionId, TokenId},
+    types::{DecisionPolicySnapshotId, FeatureVectorId, MarketId, TokenId},
 };
 use serde::Serialize;
 
@@ -38,7 +38,7 @@ use crate::{
 struct FeatureEventAudit<'a> {
     event_time: i64,
     feature_vector_id: &'a FeatureVectorId,
-    runtime_config_version_id: &'a RuntimeConfigVersionId,
+    decision_policy_snapshot_id: &'a DecisionPolicySnapshotId,
     decision_at: i64,
     knowledge_cutoff: i64,
     per_source_cutoffs_json: &'a str,
@@ -64,7 +64,7 @@ struct FeatureEventAudit<'a> {
 
 struct FeatureProjectionContext<'a> {
     persisted: &'a FeatureVectorInfo,
-    runtime_config_version_id: &'a RuntimeConfigVersionId,
+    decision_policy_snapshot_id: &'a DecisionPolicySnapshotId,
     schema_version: u32,
     schema_hash: &'a str,
     per_source_cutoffs_json: &'a str,
@@ -101,7 +101,7 @@ pub fn feature_events(
     vector: &FeatureVector,
     persisted: &FeatureVectorInfo,
     boundary: &DecisionBoundary,
-    runtime_config_version_id: &RuntimeConfigVersionId,
+    decision_policy_snapshot_id: &DecisionPolicySnapshotId,
     schema: &FeatureSchema,
     ingestion_time: i64,
 ) -> QuantResult<Vec<QuantFeatureEventRow>> {
@@ -112,7 +112,7 @@ pub fn feature_events(
             "persisted feature vector id must not be nil".to_owned(),
         ));
     }
-    if runtime_config_version_id.as_uuid().is_nil() {
+    if decision_policy_snapshot_id.as_uuid().is_nil() {
         return Err(determinism(
             "runtime config version id must not be nil".to_owned(),
         ));
@@ -145,7 +145,7 @@ pub fn feature_events(
     let data_quality = vector.data_quality.as_str();
     let context = FeatureProjectionContext {
         persisted,
-        runtime_config_version_id,
+        decision_policy_snapshot_id,
         schema_version,
         schema_hash: schema_hash.as_str(),
         per_source_cutoffs_json: &per_source_cutoffs_json,
@@ -202,7 +202,7 @@ fn project_event(
     let audit = FeatureEventAudit {
         event_time: context.decision_at,
         feature_vector_id: &context.persisted.feature_vector_id,
-        runtime_config_version_id: context.runtime_config_version_id,
+        decision_policy_snapshot_id: context.decision_policy_snapshot_id,
         decision_at: context.decision_at,
         knowledge_cutoff: context.knowledge_cutoff,
         per_source_cutoffs_json: context.per_source_cutoffs_json,
@@ -232,7 +232,7 @@ fn project_event(
     Ok(QuantFeatureEventRow {
         event_time: context.decision_at,
         feature_vector_id: context.persisted.feature_vector_id.clone(),
-        runtime_config_version_id: context.runtime_config_version_id.clone(),
+        decision_policy_snapshot_id: context.decision_policy_snapshot_id.clone(),
         decision_at: context.decision_at,
         knowledge_cutoff: context.knowledge_cutoff,
         per_source_cutoffs_json: context.per_source_cutoffs_json.to_owned(),

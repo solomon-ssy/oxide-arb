@@ -24,6 +24,7 @@ use quant_pivot_models::{
         QuantSignalCandidateEventRow, TradeTapeRow,
     },
     config::DeployConfig,
+    types::ContentHash,
 };
 use quant_pivot_repository::{
     clickhouse::{ChFactWriter, ChQuantFactReadRepository},
@@ -54,6 +55,9 @@ pub struct InfraBundle {
     pub cache: Arc<CacheManager>,
     pub jwt_blacklist: Arc<RedisTokenBlacklist>,
     pub metrics: Arc<MetricsHub>,
+    /// Verified semantic schema fingerprints captured once at startup.
+    pub postgres_schema_fingerprint: ContentHash,
+    pub clickhouse_schema_fingerprint: ContentHash,
     /// Shared ingest-pipeline-lag tracker (enqueue→flush) for data-quality gates.
     pub ingest_lag_tracker: Arc<IngestPipelineLagTracker>,
     pub book_fact_writer: Arc<BookFactWriter>,
@@ -101,6 +105,8 @@ impl InfraBundle {
             cache: persistence.cache,
             jwt_blacklist: persistence.jwt_blacklist,
             metrics,
+            postgres_schema_fingerprint: persistence.postgres_schema_fingerprint,
+            clickhouse_schema_fingerprint: persistence.clickhouse_schema_fingerprint,
             ingest_lag_tracker: persistence.ingest_lag_tracker,
             quant_fact_read: persistence.quant_fact_read,
             book_fact_writer: analytics.book_fact_writer,
@@ -128,6 +134,8 @@ struct PersistenceConnections {
     ingest_lag_tracker: Arc<IngestPipelineLagTracker>,
     ch_write_manager: Arc<ChWriteManager>,
     quant_fact_read: Arc<dyn QuantFactReadRepository>,
+    postgres_schema_fingerprint: ContentHash,
+    clickhouse_schema_fingerprint: ContentHash,
 }
 
 async fn connect_persistence(
@@ -144,20 +152,27 @@ async fn connect_persistence(
         "PostgreSQL runtime schema verified"
     );
 
-    let schema = verify_clickhouse_schema(&deploy.db.clickhouse).await?;
+    let clickhouse_schema = verify_clickhouse_schema(&deploy.db.clickhouse).await?;
     tracing::info!(
-        schema_version = schema.current_version,
-        required_objects = schema.required_object_count,
+        schema_version = clickhouse_schema.current_version,
+        required_objects = clickhouse_schema.required_object_count,
         "ClickHouse runtime schema verified before pool initialization"
     );
 
     let ch = Arc::new(ClickHousePool::connect(&deploy.db.clickhouse).await?);
-    let schema = ch.verify_schema().await?;
+    let pooled_clickhouse_schema = ch.verify_schema().await?;
     tracing::info!(
-        schema_version = schema.current_version,
-        required_objects = schema.required_object_count,
+        schema_version = pooled_clickhouse_schema.current_version,
+        required_objects = pooled_clickhouse_schema.required_object_count,
         "ClickHouse runtime schema verified"
     );
+    if pooled_clickhouse_schema.schema_fingerprint != clickhouse_schema.schema_fingerprint {
+        return Err(InfraError::Misconfigured {
+            detail: "ClickHouse schema fingerprint changed while initializing the runtime pool"
+                .into(),
+        }
+        .into());
+    }
 
     let redis = connect_pool(&deploy.cache.redis).await?;
     let cache = Arc::new(CacheManager::new(
@@ -203,6 +218,8 @@ async fn connect_persistence(
         ingest_lag_tracker,
         ch_write_manager,
         quant_fact_read,
+        postgres_schema_fingerprint: pg_schema.schema_fingerprint,
+        clickhouse_schema_fingerprint: clickhouse_schema.schema_fingerprint,
     })
 }
 

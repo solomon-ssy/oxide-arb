@@ -10,13 +10,13 @@ use crate::{
     enums::quant::SourceSliceStatus,
     hashing::CanonicalDigest,
     types::{
-        ArtifactUri, ContentHash, ResearchEvaluationTrack, ResearchProfileRef,
-        RuntimeConfigVersionId, SourceSliceId, SourceSliceManifestRef, SourceSliceManifestV2,
+        ArtifactUri, ContentHash, DecisionPolicySnapshotId, ResearchEvaluationTrack,
+        ResearchProfileRef, SourceSliceId, SourceSliceManifestRef, SourceSliceManifestV1,
     },
 };
 
-pub const SOURCE_SLICE_READER_CONTRACT_V2: &str = "source_slice_reader_v2";
-pub const SOURCE_SLICE_SCHEMA_CONTRACT_V2: &str = "source_slice_schema_v2";
+pub const SOURCE_SLICE_READER_CONTRACT_V1: &str = "source_slice_reader_v1";
+pub const SOURCE_SLICE_SCHEMA_CONTRACT_V1: &str = "source_slice_schema_v1";
 
 /// Server-derived semantic fields that determine one Source Slice identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,7 +24,7 @@ pub struct SourceSliceIdentityInput {
     pub profile_ref: ResearchProfileRef,
     pub evaluation_track: ResearchEvaluationTrack,
     pub research_program_hash: ContentHash,
-    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub runtime_config_hash: ContentHash,
     pub window_start: DateTime<Utc>,
     pub window_end: DateTime<Utc>,
@@ -38,7 +38,7 @@ pub struct SourceSliceIdentity {
     pub profile_ref: ResearchProfileRef,
     pub evaluation_track: ResearchEvaluationTrack,
     pub research_program_hash: ContentHash,
-    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub runtime_config_hash: ContentHash,
     pub window_start: DateTime<Utc>,
     pub window_end: DateTime<Utc>,
@@ -53,19 +53,19 @@ impl SourceSliceIdentity {
             profile_ref,
             evaluation_track,
             research_program_hash,
-            runtime_config_version_id,
+            decision_policy_snapshot_id,
             runtime_config_hash,
             window_start,
             window_end,
             pit_cutoff,
         } = input;
-        let reader_contract_version = SOURCE_SLICE_READER_CONTRACT_V2.to_owned();
-        let schema_contract_version = SOURCE_SLICE_SCHEMA_CONTRACT_V2.to_owned();
+        let reader_contract_version = SOURCE_SLICE_READER_CONTRACT_V1.to_owned();
+        let schema_contract_version = SOURCE_SLICE_SCHEMA_CONTRACT_V1.to_owned();
         let identity_hash = CanonicalDigest::content_hash_json(&(
             &profile_ref,
             evaluation_track,
             &research_program_hash,
-            &runtime_config_version_id,
+            &decision_policy_snapshot_id,
             &runtime_config_hash,
             window_start,
             window_end,
@@ -78,7 +78,7 @@ impl SourceSliceIdentity {
             profile_ref,
             evaluation_track,
             research_program_hash,
-            runtime_config_version_id,
+            decision_policy_snapshot_id,
             runtime_config_hash,
             window_start,
             window_end,
@@ -98,7 +98,7 @@ pub struct NewSourceSlice {
     pub profile_ref: ResearchProfileRef,
     pub evaluation_track: String,
     pub research_program_hash: ContentHash,
-    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub runtime_config_hash: ContentHash,
     pub window_start: DateTime<Utc>,
     pub window_end: DateTime<Utc>,
@@ -116,7 +116,7 @@ impl NewSourceSlice {
             profile_ref: identity.profile_ref,
             evaluation_track: evaluation_track_name(identity.evaluation_track).to_owned(),
             research_program_hash: identity.research_program_hash,
-            runtime_config_version_id: identity.runtime_config_version_id,
+            decision_policy_snapshot_id: identity.decision_policy_snapshot_id,
             runtime_config_hash: identity.runtime_config_hash,
             window_start: identity.window_start,
             window_end: identity.window_end,
@@ -131,7 +131,7 @@ impl NewSourceSlice {
 #[derive(Debug, Clone)]
 pub struct CompleteSourceSlice {
     pub manifest_ref: SourceSliceManifestRef,
-    pub manifest: SourceSliceManifestV2,
+    pub manifest: SourceSliceManifestV1,
 }
 
 /// Operator/read-model projection for one source slice.
@@ -143,7 +143,7 @@ pub struct SourceSliceInfo {
     pub profile_ref: ResearchProfileRef,
     pub evaluation_track: String,
     pub research_program_hash: ContentHash,
-    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub runtime_config_hash: ContentHash,
     pub window_start: DateTime<Utc>,
     pub window_end: DateTime<Utc>,
@@ -153,7 +153,7 @@ pub struct SourceSliceInfo {
     pub status: SourceSliceStatus,
     pub manifest_uri: Option<ArtifactUri>,
     pub manifest_hash: Option<ContentHash>,
-    pub manifest_json: Option<SourceSliceManifestV2>,
+    pub manifest_json: Option<SourceSliceManifestV1>,
     pub failure_detail: Option<String>,
     pub completed_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
@@ -176,7 +176,7 @@ info_from_model!(
         profile_ref,
         evaluation_track,
         research_program_hash,
-        runtime_config_version_id,
+        decision_policy_snapshot_id,
         runtime_config_hash,
         window_start,
         window_end,

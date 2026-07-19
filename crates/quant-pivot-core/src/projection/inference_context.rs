@@ -121,7 +121,7 @@ mod tests {
             market_id: MarketId::new("market"),
             token_id: Some(TokenId::new("yes")),
             decision_at: Utc.with_ymd_and_hms(2026, 7, 12, 0, 0, 0).unwrap(),
-            generic_schema_version: SchemaVersion::new(7),
+            generic_schema_version: SchemaVersion::FIRST,
             generic,
             domain: None,
             data_quality: DataQualityStatus::Fresh,

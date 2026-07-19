@@ -9,7 +9,7 @@ use quant_pivot_models::{
     enums::quant::ReportFactDeliveryStatus,
     hashing::CanonicalDigest,
     types::{
-        ContentHash, REPORT_FACT_BUNDLE_FORMAT_VERSION, RecommendationReportId, ReportFactBundleV2,
+        ContentHash, REPORT_FACT_BUNDLE_FORMAT_VERSION, RecommendationReportId, ReportFactBundleV1,
         ReportFactNotificationRecommendationV1, ReportFactNotificationV1,
         ReportFactTableCommitment,
     },
@@ -41,7 +41,7 @@ pub async fn prepare_report_fact_bundle(
     ensure_report_binding(&report_id, &recommendation_rows, &funnel_rows)?;
     let recommendation_hash = CanonicalDigest::content_hash_json(&recommendation_rows)?;
     let funnel_hash = CanonicalDigest::content_hash_json(&funnel_rows)?;
-    let bundle = ReportFactBundleV2 {
+    let bundle = ReportFactBundleV1 {
         format_version: REPORT_FACT_BUNDLE_FORMAT_VERSION,
         recommendation_report_id: report_id.clone(),
         created_at: composed.transaction.report.decision_at,

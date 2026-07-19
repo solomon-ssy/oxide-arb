@@ -50,7 +50,6 @@ use quant_pivot_research::{
     artifact::ArtifactStore,
     model::{CalibrationArtifactLoader, load_hash_verified_artifact},
 };
-use rust_decimal::Decimal;
 
 use crate::{
     execution::{
@@ -61,7 +60,7 @@ use crate::{
     },
     governance::{KillSwitchHandle, RuntimeModeHandle, resolve_return_model_calibration},
     observability::metrics_hub::MetricsHub,
-    runtime_config::RuntimeConfigStore,
+    runtime_config::DecisionPolicyStore,
     service::feature_integrity::FeatureParityGatePort,
 };
 /// Post-commit event sink for terminally invalidated intents.
@@ -76,7 +75,7 @@ pub trait IntentTerminalEventSink: Send + Sync {
 pub struct OrderIntentServiceDeps {
     pub mode_gate: Arc<dyn RuntimeModeGate>,
     pub runtime_mode: RuntimeModeHandle,
-    pub runtime_config: Arc<RuntimeConfigStore>,
+    pub runtime_config: Arc<DecisionPolicyStore>,
     pub kill_switch: KillSwitchHandle,
     pub recommendations: Arc<dyn RecommendationRepository>,
     pub reports: Arc<dyn RecommendationReportRepository>,
@@ -107,7 +106,7 @@ pub struct OrderIntentServiceDeps {
 pub struct CoreOrderIntentService {
     mode_gate: Arc<dyn RuntimeModeGate>,
     runtime_mode: RuntimeModeHandle,
-    runtime_config: Arc<RuntimeConfigStore>,
+    runtime_config: Arc<DecisionPolicyStore>,
     kill_switch: KillSwitchHandle,
     recommendations: Arc<dyn RecommendationRepository>,
     reports: Arc<dyn RecommendationReportRepository>,
@@ -201,7 +200,7 @@ impl CoreOrderIntentService {
         now: DateTime<Utc>,
     ) -> QuantResult<SemiAutoCanaryAuthorization> {
         let config = self.runtime_config.current();
-        let canary = &config.execution.semi_auto.canary;
+        let canary = &config.execution_authorization.semi_auto.canary;
         if !canary.enabled {
             return Err(ExecutionError::IntentDenied {
                 reason: "SemiAuto canary is not enabled".to_owned(),
@@ -253,11 +252,7 @@ impl CoreOrderIntentService {
         let allowed_tier = canary
             .allowed_cash_budget_tiers_usd
             .iter()
-            .map(|tier| tier.value.parse::<Decimal>())
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| malformed_canary(format!("allowed tier is invalid: {error}")))?
-            .into_iter()
-            .any(|tier| Usd::new(tier) == sizing.suggested_usd);
+            .any(|tier| Usd::new(tier.value) == sizing.suggested_usd);
         if !allowed_tier {
             return Err(ExecutionError::IntentDenied {
                 reason: format!(
@@ -267,15 +262,7 @@ impl CoreOrderIntentService {
             }
             .into());
         }
-        let max_total_cash_per_report = Usd::new(
-            canary
-                .max_total_cash_per_report
-                .value
-                .parse::<Decimal>()
-                .map_err(|error| {
-                    malformed_canary(format!("max_total_cash_per_report is invalid: {error}"))
-                })?,
-        );
+        let max_total_cash_per_report = Usd::new(canary.max_total_cash_per_report.value);
         if canary.max_open_intents == 0 || !max_total_cash_per_report.is_positive() {
             return Err(malformed_canary(
                 "open-intent and report cash-budget limits must be positive",
@@ -749,7 +736,7 @@ fn compose_create_rows(
         order_intent_id: intent_id.clone(),
         recommendation_id: rec.recommendation_id.clone(),
         runtime_mode: mode,
-        runtime_config_version_id: report.runtime_config_version_id.clone(),
+        decision_policy_snapshot_id: report.decision_policy_snapshot_id.clone(),
         model_version_id: report.model_version_id.clone(),
         profile_ref,
         intent_kind: OrderIntentKind::Buy,
@@ -1087,9 +1074,9 @@ mod tests {
             },
         },
         types::{
-            Bps, ContentHash, EntryOrderPolicy, EntryOrderSpec, EntryPlan, ExitPlan, OrderAmount,
-            OrderIntentId, Price, RecommendationId, RecommendationReportId,
-            RecommendationTradePlan, RiskEnvelope, RuntimeConfigVersionId, Shares, SizingPlan,
+            Bps, ContentHash, DecisionPolicySnapshotId, EntryOrderPolicy, EntryOrderSpec,
+            EntryPlan, ExitPlan, OrderAmount, OrderIntentId, Price, RecommendationId,
+            RecommendationReportId, RecommendationTradePlan, RiskEnvelope, Shares, SizingPlan,
             TokenId, Usd,
         },
     };
@@ -1329,7 +1316,7 @@ mod tests {
             ReportKind::TopN,
             RecommendationReportStatus::Published,
         );
-        let version = RuntimeConfigVersionId::from_v7();
+        let version = DecisionPolicySnapshotId::from_v7();
         let hash = risk(&rec).envelope_hash.clone();
         assert!(
             evaluate_intent_approval_invalidation(
@@ -1476,7 +1463,7 @@ mod tests {
             ReportKind::TopN,
             RecommendationReportStatus::Published,
         );
-        let version = RuntimeConfigVersionId::from_v7();
+        let version = DecisionPolicySnapshotId::from_v7();
         let hash = risk(&rec).envelope_hash.clone();
 
         // recommendation expired
@@ -1511,7 +1498,7 @@ mod tests {
         );
 
         // runtime config version changed
-        let other_version = RuntimeConfigVersionId::from_v7();
+        let other_version = DecisionPolicySnapshotId::from_v7();
         assert_eq!(
             evaluate_intent_approval_invalidation(
                 &rec,
@@ -1565,10 +1552,14 @@ mod tests {
         };
         use quant_pivot_models::{
             domain::{
-                ModelSpecInfo, ModelSpecListQuery, ModelVersionInfo, ModelVersionListQuery,
-                NewModelSpec, NewModelVersion, Paginated,
+                ModelPickerSide, ModelSpecInfo, ModelSpecListQuery, ModelVersionInfo,
+                ModelVersionListQuery, NewModelSpec, NewModelVersion, Paginated,
+                PublishedModelCatalogInfo,
             },
-            enums::quant::{DownsideSource, PublicationStatus},
+            enums::{
+                common::MarketCategory,
+                quant::{DownsideSource, PublicationStatus},
+            },
             runtime_config::FactorCrossSectionConfig,
             types::{
                 BacktestPathSetId, CalibrationArtifactId, ContentHash, ModelInputContract,
@@ -1576,8 +1567,7 @@ mod tests {
             },
         };
         use quant_pivot_repository::traits::{
-            ModelRegistryRepository, PublishModelVersionCommit, PublishModelVersionOutcome,
-            RollbackModelVersionCommit,
+            ModelRegistryRepository, PublishModelVersionCommit, PublishModelVersionResult,
         };
         use quant_pivot_research::{
             artifact::{ArtifactStore, LocalArtifactStore},
@@ -1644,6 +1634,13 @@ mod tests {
             ) -> Result<Paginated<ModelVersionInfo>, StorageError> {
                 unimplemented!("not exercised by the calibration recheck tests")
             }
+            async fn list_published_catalog(
+                &self,
+                _side: ModelPickerSide,
+                _category: Option<MarketCategory>,
+            ) -> Result<Vec<PublishedModelCatalogInfo>, StorageError> {
+                unimplemented!("not exercised by the calibration recheck tests")
+            }
             async fn list_published_for_spec(
                 &self,
                 _model_spec_id: &ModelSpecId,
@@ -1656,22 +1653,16 @@ mod tests {
             ) -> Result<ModelVersionInfo, StorageError> {
                 unimplemented!("not exercised by the calibration recheck tests")
             }
-            async fn publish_replacing_predecessors(
+            async fn publish_model_version(
                 &self,
                 _commit: PublishModelVersionCommit<'_>,
-            ) -> Result<PublishModelVersionOutcome, StorageError> {
+            ) -> Result<PublishModelVersionResult, StorageError> {
                 unimplemented!("not exercised by the calibration recheck tests")
             }
             async fn promote_model_to_shadow(
                 &self,
                 _model_version_id: &ModelVersionId,
             ) -> Result<ModelVersionInfo, StorageError> {
-                unimplemented!("not exercised by the calibration recheck tests")
-            }
-            async fn rollback_to_retired_predecessor(
-                &self,
-                _commit: RollbackModelVersionCommit<'_>,
-            ) -> Result<(ModelVersionInfo, ModelVersionInfo), StorageError> {
                 unimplemented!("not exercised by the calibration recheck tests")
             }
             async fn set_quality_gate_report(
@@ -1799,6 +1790,7 @@ mod tests {
                 model_family: ModelFamily::WeightedFactor,
                 version: 1,
                 artifact_hash: digest,
+                category_scope: None,
                 profile_ref: fixture_profile_ref(),
                 training_dataset_id: None,
                 trade_policy_artifact_id: None,

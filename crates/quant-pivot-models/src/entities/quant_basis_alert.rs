@@ -20,6 +20,14 @@ pub struct Model {
     pub acknowledged_at: Option<DateTime<Utc>>,
     pub acknowledged_by: Option<String>,
     pub created_at: DateTime<Utc>,
+
+    #[sea_orm(
+        belongs_to,
+        relation_enum = "Market",
+        from = "market_id",
+        to = "market_id"
+    )]
+    pub market: BelongsTo<super::market::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

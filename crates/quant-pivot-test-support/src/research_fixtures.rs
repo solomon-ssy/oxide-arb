@@ -20,10 +20,10 @@ use quant_pivot_models::{
     types::{
         BookSnapshotRef, BookSnapshotSource, Bps, CatalogEventChangeId, CatalogMarketChangeId,
         CatalogSyncBatchId, ClobFeeDetails, ClobMarketInfoVersion, ClobMarketInfoVersionId,
-        ClobTokenDescriptor, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION, MarketContext, Price,
-        Probability, RecommendationIdentity, ResearchEvaluationTrack, ResearchProfileRef,
-        RuntimeConfigVersionId, SOURCE_SLICE_MANIFEST_FORMAT_VERSION, Shares,
-        SourceSliceCatalogProof, SourceSliceManifestRef, SourceSliceManifestV2,
+        ClobTokenDescriptor, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION,
+        DecisionPolicySnapshotId, MarketContext, Price, Probability, RecommendationIdentity,
+        ResearchEvaluationTrack, ResearchProfileRef, SOURCE_SLICE_MANIFEST_FORMAT_VERSION, Shares,
+        SourceSliceCatalogProof, SourceSliceManifestRef, SourceSliceManifestV1,
         SourceSliceObjectKind, SourceSliceObjectRef, SourceSlicePitCutoffs, Usd,
     },
 };
@@ -188,7 +188,7 @@ async fn persist_source_object(
         object_version,
         byte_hash,
         schema_hash: CanonicalDigest::content_hash_json(&(
-            "source_slice_parquet_envelope_v2",
+            "source_slice_parquet_envelope_v1",
             kind,
         ))?,
         row_count: u64::try_from(records.len()).map_err(|error| ResearchError::DatasetBuild {
@@ -206,7 +206,7 @@ async fn persist_source_object(
 pub struct ReplayableSourceSliceFixture {
     pub profile_ref: ResearchProfileRef,
     pub research_program_hash: ContentHash,
-    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub runtime_config_hash: ContentHash,
     pub window_start: DateTime<Utc>,
     pub window_end: DateTime<Utc>,
@@ -380,9 +380,9 @@ fn replayable_manifest(
     fixture: ReplayableSourceSliceFixture,
     market_count: usize,
     objects: Vec<SourceSliceObjectRef>,
-) -> QuantResult<SourceSliceManifestV2> {
+) -> QuantResult<SourceSliceManifestV1> {
     let pit_cutoff = fixture.window_end;
-    Ok(SourceSliceManifestV2 {
+    Ok(SourceSliceManifestV1 {
         format_version: SOURCE_SLICE_MANIFEST_FORMAT_VERSION,
         profile_ref: fixture.profile_ref,
         evaluation_track: ResearchEvaluationTrack::ResearchOnly,
@@ -418,7 +418,7 @@ fn replayable_manifest(
         },
         reader_contract_version: "source-slice-reader-v2".to_owned(),
         schema_contract_version: "source-slice-schema-v2".to_owned(),
-        runtime_config_version_id: fixture.runtime_config_version_id,
+        decision_policy_snapshot_id: fixture.decision_policy_snapshot_id,
         runtime_config_hash: fixture.runtime_config_hash,
         dataset_format_version: DATASET_ARTIFACT_FORMAT_VERSION,
         pit_cutoffs: SourceSlicePitCutoffs {
@@ -437,7 +437,7 @@ fn replayable_manifest(
 
 async fn persist_source_manifest(
     store: &Arc<dyn ArtifactStore>,
-    manifest: SourceSliceManifestV2,
+    manifest: SourceSliceManifestV1,
 ) -> QuantResult<SourceSliceManifestRef> {
     manifest
         .validate()

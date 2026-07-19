@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 
 use quant_pivot_models::{
     enums::quant::{RecommendationReportStatus, ReportFactDeliveryStatus, ReportRunTerminalReason},
-    runtime_config::{ReportsConfig, RuntimeConfig},
+    runtime_config::{DecisionPolicySnapshot, ReportsConfig},
     types::{POOLED_1H_CONTROL_PROFILE_ID, RecommendationReportId, builtin_research_profiles},
 };
 use quant_pivot_repository::{
@@ -131,12 +131,15 @@ async fn user_with_role(env: &TestEnv, admin: &str, username: &str, code: &str) 
 
 /// Activate a runtime config with ad-hoc report generation enabled.
 async fn enable_ad_hoc(env: &TestEnv) {
-    let cfg = RuntimeConfig {
-        reports: ReportsConfig {
-            ad_hoc_report_enabled: true,
-            ..ReportsConfig::default()
+    let cfg = DecisionPolicySnapshot {
+        recommendation: quant_pivot_models::runtime_config::RecommendationPolicy {
+            reports: ReportsConfig {
+                ad_hoc_report_enabled: true,
+                ..ReportsConfig::default()
+            },
+            ..quant_pivot_models::runtime_config::RecommendationPolicy::default()
         },
-        ..RuntimeConfig::default()
+        ..DecisionPolicySnapshot::default()
     };
     env.state
         .runtime_config_apply

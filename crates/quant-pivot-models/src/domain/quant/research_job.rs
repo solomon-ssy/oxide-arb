@@ -2,7 +2,7 @@
 
 use crate::{
     enums::quant::{ResearchJobKind, ResearchJobStatus},
-    types::{DatasetCoverage, ModelSpecId, ResearchJobId, RuntimeConfigVersionId},
+    types::{DatasetCoverage, DecisionPolicySnapshotId, ModelSpecId, ResearchJobId},
 };
 use chrono::{DateTime, Utc};
 use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
@@ -19,7 +19,7 @@ pub struct ResearchJobInfo {
     pub kind: ResearchJobKind,
     pub status: ResearchJobStatus,
     pub model_spec_id: Option<ModelSpecId>,
-    pub runtime_config_version_id: Option<RuntimeConfigVersionId>,
+    pub decision_policy_snapshot_id: Option<DecisionPolicySnapshotId>,
     /// Frozen request body (includes `reason` + pre-assigned result id).
     pub params_json: serde_json::Value,
     /// Live progress snapshot (phase + processed/total + pct); `None` until first tick.
@@ -50,7 +50,7 @@ info_from_model!(ResearchJobInfo, crate::entities::quant_research_job::Model, {
     kind,
     status,
     model_spec_id,
-    runtime_config_version_id,
+    decision_policy_snapshot_id,
     params_json,
     progress_json,
     result_ref,
@@ -82,7 +82,7 @@ pub struct NewResearchJob {
     pub kind: ResearchJobKind,
     pub status: ResearchJobStatus,
     pub model_spec_id: Option<ModelSpecId>,
-    pub runtime_config_version_id: Option<RuntimeConfigVersionId>,
+    pub decision_policy_snapshot_id: Option<DecisionPolicySnapshotId>,
     pub params_json: serde_json::Value,
     pub requested_by: Option<String>,
     pub acting_role: String,

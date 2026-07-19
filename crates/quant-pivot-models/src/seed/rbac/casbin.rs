@@ -31,12 +31,12 @@ const PRODUCES: &[SeedArtifact] = &[];
 
 pub const CASBIN_SEED: SeedSpec = SeedSpec {
     id: SEED_ID,
-    version: 15,
+    version: 1,
     target_table: "casbin_rule",
     depends_on: DEPENDS_ON,
     produces: PRODUCES,
     conflict_policy: SeedConflictPolicy::GraphOrdered,
-    checksum: "rbac.casbin.bootstrap.v15.bootstrap-activation-and-config-approval",
+    checksum: "rbac.casbin.bootstrap.v1.boot-config-governance",
     apply: load_boxed,
     hydrate: hydrate_boxed,
 };
@@ -55,7 +55,8 @@ const READ_RESOURCES: &[ResourceType] = &[
     ResourceType::Reconciliation,
     ResourceType::SettlementRedeem,
     ResourceType::FactorDefinition,
-    ResourceType::RuntimeConfig,
+    ResourceType::DecisionPolicySnapshot,
+    ResourceType::ConfigLifecycle,
     ResourceType::Materialization,
     // Read the backtest / comparison report ledgers (research catalog browse);
     // `Replay:Create` remains a risk-owner-only mutation.
@@ -161,10 +162,10 @@ fn risk_owner_policies() -> Vec<(ResourceType, Operation)> {
     let mut policies = read_only();
     policies.extend([
         (ResourceType::System, Operation::BootstrapActivate),
-        (ResourceType::RuntimeConfig, Operation::Create),
-        (ResourceType::RuntimeConfig, Operation::Approve),
-        (ResourceType::RuntimeConfig, Operation::Activate),
-        (ResourceType::RuntimeConfig, Operation::Rollback),
+        (ResourceType::DecisionPolicySnapshot, Operation::Create),
+        (ResourceType::DecisionPolicySnapshot, Operation::Approve),
+        (ResourceType::DecisionPolicySnapshot, Operation::Activate),
+        (ResourceType::DecisionPolicySnapshot, Operation::Rollback),
         // Offline research: train models (Materialization:Create) and run
         // PIT backtests (Replay:Create); read access is granted to all roles.
         (ResourceType::Materialization, Operation::Create),
@@ -206,6 +207,7 @@ fn admin_policies() -> Vec<(ResourceType, Operation)> {
         (ResourceType::System, Operation::Resume),
         (ResourceType::System, Operation::SwitchMode),
         (ResourceType::System, Operation::Emergency),
+        (ResourceType::ConfigLifecycle, Operation::Seal),
         (ResourceType::Reconciliation, Operation::Resolve),
     ]);
     policies

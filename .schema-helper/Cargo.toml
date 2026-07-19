@@ -1,0 +1,15 @@
+[package]
+name = "quant-pivot-schema-helper"
+version = "0.0.0"
+edition = "2024"
+
+[workspace]
+
+[dependencies]
+quant-pivot-models = { path = "../crates/quant-pivot-models", features = ["repository"] }
+quant-pivot-migration = { path = "../crates/quant-pivot-migration" }
+quant-pivot-storage = { path = "../crates/quant-pivot-storage" }
+sea-orm = { version = "=2.0.0-rc.43", features = ["sqlx-postgres", "runtime-tokio-rustls", "macros", "entity-registry", "with-chrono", "with-json", "with-rust_decimal", "with-uuid", "postgres-array"] }
+tokio = { version = "1", features = ["full"] }
+inventory = "0.3"
+serde_json = "1"

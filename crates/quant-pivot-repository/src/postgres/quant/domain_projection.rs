@@ -4,10 +4,11 @@ use chrono::{DateTime, NaiveDate, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{
-        CryptoPriceProjectionInfo, CryptoPriceReport, CryptoPriceTransition, DomainEventEnvelope,
-        DomainEventPayload, DomainEventType, DomainSourceCheckpoint, UpsertDomainSourceCursor,
-        WeatherDailyTemperatureExtremeChange, WeatherDailyTemperatureProjectionInfo,
-        WeatherObservationDayClosed, WeatherObservationReport, WeatherObservationReportKind,
+        CryptoPriceProjectionInfo, CryptoPriceReport, CryptoPriceTransition, DomainCursorStatus,
+        DomainEventEnvelope, DomainEventPayload, DomainEventType, DomainSourceCheckpoint,
+        UpsertDomainSourceCursor, WeatherDailyTemperatureExtremeChange,
+        WeatherDailyTemperatureProjectionInfo, WeatherObservationDayClosed,
+        WeatherObservationReport, WeatherObservationReportKind,
     },
     entities::{
         quant_crypto_price_projection, quant_domain_event_outbox, quant_domain_source_cursor,
@@ -174,10 +175,10 @@ impl DomainProjectionRepository for PgDomainProjectionRepository {
         .await?;
         notify_input_change(&txn, "weather").await?;
         txn.commit().await.map_err(StorageError::from)?;
-        projections
+        Ok(projections
             .into_iter()
             .map(|(model, _)| weather_info(model))
-            .collect()
+            .collect())
     }
 
     async fn close_weather_day(
@@ -226,7 +227,7 @@ impl DomainProjectionRepository for PgDomainProjectionRepository {
         let mut updated = Vec::with_capacity(rows.len());
         for row in rows {
             if row.day_closed {
-                updated.push(weather_info(row)?);
+                updated.push(weather_info(row));
                 continue;
             }
             let event = weather_close_event(
@@ -244,7 +245,7 @@ impl DomainProjectionRepository for PgDomainProjectionRepository {
             active.available_at = ActiveValue::Set(closed_at);
             let model = active.update(&txn).await.map_err(StorageError::from)?;
             insert_outbox(&txn, event).await?;
-            updated.push(weather_info(model)?);
+            updated.push(weather_info(model));
         }
         if !updated.iter().all(|row| row.day_closed) {
             return Err(invariant(
@@ -536,7 +537,7 @@ async fn upsert_weather_daily_temperature_projections(
             input.report.source_id.clone(),
             input.instrument_key.clone(),
             input.local_date,
-            statistic.as_str().to_owned(),
+            statistic,
         ))
         .lock_exclusive()
         .one(txn)
@@ -628,7 +629,7 @@ async fn insert_weather_daily_temperature_projection(
         instrument_key: ActiveValue::Set(input.instrument_key.clone()),
         station: ActiveValue::Set(input.station.as_str().to_owned()),
         local_date: ActiveValue::Set(input.local_date),
-        temperature_statistic: ActiveValue::Set(statistic.as_str().to_owned()),
+        temperature_statistic: ActiveValue::Set(statistic),
         timezone: ActiveValue::Set(input.timezone.to_owned()),
         current_extreme_celsius: ActiveValue::Set(current_extreme),
         previous_extreme_celsius: ActiveValue::Set(None),
@@ -764,7 +765,7 @@ fn weather_close_event(
         payload: DomainEventPayload::WeatherObservationDayClosed(WeatherObservationDayClosed {
             station: row.station.clone(),
             local_date: row.local_date,
-            temperature_statistic: parse_temperature_statistic(&row.temperature_statistic)?,
+            temperature_statistic: row.temperature_statistic,
             final_noaa_extreme: TemperatureCelsius::new(row.current_extreme_celsius),
             last_report_hash: row.last_report_hash.clone(),
             gap_generation: from_i64(row.gap_generation, "weather gap generation")?,
@@ -835,7 +836,7 @@ async fn upsert_cursor<C: sea_orm::ConnectionTrait>(
         instrument_key: instrument_key.clone(),
         checkpoint_json: checkpoint,
         checkpoint_hash,
-        status: "live".to_owned(),
+        status: DomainCursorStatus::Live,
         last_error: None,
         updated_at: Utc::now(),
     };
@@ -914,14 +915,14 @@ fn crypto_info(
 
 fn weather_info(
     row: quant_weather_daily_temperature_projection::Model,
-) -> Result<WeatherDailyTemperatureProjectionInfo, StorageError> {
-    Ok(WeatherDailyTemperatureProjectionInfo {
+) -> WeatherDailyTemperatureProjectionInfo {
+    WeatherDailyTemperatureProjectionInfo {
         source_id: row.source_id,
         instrument_key: row.instrument_key,
         station: row.station,
         local_date: row.local_date,
         timezone: row.timezone,
-        temperature_statistic: parse_temperature_statistic(&row.temperature_statistic)?,
+        temperature_statistic: row.temperature_statistic,
         current_extreme: TemperatureCelsius::new(row.current_extreme_celsius),
         last_observation_time: row.last_observation_time,
         last_report_hash: row.last_report_hash,
@@ -930,12 +931,7 @@ fn weather_info(
         gap_generation: row.gap_generation,
         source_healthy: row.source_healthy,
         available_at: row.available_at,
-    })
-}
-
-fn parse_temperature_statistic(value: &str) -> Result<WeatherTemperatureStatistic, StorageError> {
-    WeatherTemperatureStatistic::parse(value)
-        .ok_or_else(|| invariant(format!("unknown weather temperature statistic `{value}`")))
+    }
 }
 
 fn checked_add(value: i64, field: &'static str) -> Result<i64, StorageError> {

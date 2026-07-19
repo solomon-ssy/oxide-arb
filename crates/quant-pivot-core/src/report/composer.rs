@@ -24,27 +24,28 @@ use quant_pivot_models::{
         rbac::ResourceType,
     },
     hashing::canonical_state_hash,
-    runtime_config::RuntimeConfig,
+    runtime_config::DecisionPolicySnapshot,
     types::{
         Bps, ClockAnchor, ClockCondition, ConditionTruth, ConfidenceSummary, ConfirmationPolicy,
-        ContentHash, CryptoSubjectPredicateEntered, ENTRY_CONDITION_EVALUATOR_VERSION,
-        ENTRY_CONDITION_SCHEMA_VERSION, EligibilitySummary, EntryConditionArtifactId,
-        EntryConditionArtifactV1, EntryConditionBinding, EntryConditionFactorBinding,
-        EntryConditionFoldState, EntryConditionInstanceId, EntryConditionPlan,
-        EntryConditionSourceBinding, EntryConditionTemplate, EntryConditionTemplateV1,
-        EntryConditionV1, EntryOrderPolicy, EntryOrderTemplate, EntryPlan, EventId, EvidenceRefs,
-        EvidenceRefsInput, ExecutionEligibility, ExitPlan, FactorBreakdownEntry, FactorCondition,
-        FactorDefinitionId, FeatureVectorId, MarketEventCondition, MarketEventTemplate, MarketId,
-        MarketSelectionId, ModelRunId, ModelVersionId, OperationLogId, PassivePlacement,
-        PortfolioConstraintsSnapshot, PortfolioOptimizerMeta, PortfolioPlanId,
-        PortfolioRejectedSummary, PortfolioRiskBudget, Price, PriceCondition, Probability,
-        RecommendationFactorBreakdown, RecommendationId, RecommendationReportId,
-        RecommendationTradePlan, RejectionReasonCount, ReportDataQualitySnapshotId,
-        ReportFunnelReason, ReportFunnelStage, ReportSummary, ResearchProfileRef, RiskEnvelope,
-        RuntimeConfigVersionId, ScaleOutTarget, Shares, SizingPlan, ThesisInvalidationPolicy,
-        TradePlanBlocker, TradePolicyCohort, TradePolicyCohortProvenance, TrailingStopPolicy, Usd,
-        WeatherDailyTemperatureCrossedTerminalBound, WeatherDailyTemperatureEnteredBand,
-        WeatherObservationDayClosedOutsideBand, WeatherTemperatureStatistic,
+        ContentHash, CryptoSubjectPredicateEntered, DecisionPolicySnapshotId,
+        ENTRY_CONDITION_EVALUATOR_VERSION, ENTRY_CONDITION_SCHEMA_VERSION, EligibilitySummary,
+        EntryConditionArtifactId, EntryConditionArtifactV1, EntryConditionBinding,
+        EntryConditionFactorBinding, EntryConditionFoldState, EntryConditionInstanceId,
+        EntryConditionPlan, EntryConditionSourceBinding, EntryConditionTemplate,
+        EntryConditionTemplateV1, EntryConditionV1, EntryOrderPolicy, EntryOrderTemplate,
+        EntryPlan, EventId, EvidenceRefs, EvidenceRefsInput, ExecutionEligibility, ExitPlan,
+        FactorBreakdownEntry, FactorCondition, FactorDefinitionId, FeatureVectorId,
+        MarketEventCondition, MarketEventTemplate, MarketId, MarketSelectionId, ModelRunId,
+        ModelVersionId, OperationLogId, PassivePlacement, PortfolioConstraintsSnapshot,
+        PortfolioOptimizerMeta, PortfolioPlanId, PortfolioRejectedSummary, PortfolioRiskBudget,
+        Price, PriceCondition, Probability, RecommendationFactorBreakdown, RecommendationId,
+        RecommendationReportId, RecommendationTradePlan, RejectionReasonCount,
+        ReportDataQualitySnapshotId, ReportFunnelReason, ReportFunnelStage, ReportSummary,
+        ResearchProfileRef, RiskEnvelope, ScaleOutTarget, Shares, SizingPlan,
+        ThesisInvalidationPolicy, TradePlanBlocker, TradePolicyCohort, TradePolicyCohortProvenance,
+        TrailingStopPolicy, Usd, WeatherDailyTemperatureCrossedTerminalBound,
+        WeatherDailyTemperatureEnteredBand, WeatherObservationDayClosedOutsideBand,
+        WeatherTemperatureStatistic,
     },
 };
 use quant_pivot_research::{
@@ -76,8 +77,8 @@ pub struct ComposeReportInput<'a> {
     pub knowledge_lag_secs: u64,
     pub decision_at: DateTime<Utc>,
     pub published_at: DateTime<Utc>,
-    pub runtime_config_version_id: RuntimeConfigVersionId,
-    pub runtime_config: &'a RuntimeConfig,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
+    pub runtime_config: &'a DecisionPolicySnapshot,
     pub runtime_mode: QuantRuntimeMode,
     pub model_version_id: ModelVersionId,
     pub profile_ref: ResearchProfileRef,
@@ -130,11 +131,20 @@ impl DefaultRecommendationComposer {
 impl RecommendationComposer for DefaultRecommendationComposer {
     fn compose(&self, input: ComposeReportInput<'_>) -> QuantResult<ComposedReport> {
         let report_id = RecommendationReportId::from_v7();
-        let fallback_horizon_secs = input.runtime_config.reports.fallback_horizon_secs;
+        let fallback_horizon_secs = input
+            .runtime_config
+            .recommendation
+            .reports
+            .fallback_horizon_secs;
         let entry_window_ratio = parse_decimal(
             "reports.entry_window_ratio",
-            &input.runtime_config.reports.entry_window_ratio.value,
-        )?;
+            &input
+                .runtime_config
+                .recommendation
+                .reports
+                .entry_window_ratio
+                .value,
+        );
         let data_quality_snapshot_ref = input
             .data_quality_snapshot
             .report_data_quality_snapshot_id
@@ -199,7 +209,7 @@ impl RecommendationComposer for DefaultRecommendationComposer {
         let funnel_rows = build_report_market_funnel(ReportFunnelInput {
             report_id: &report_id,
             profile_ref: &input.profile_ref,
-            runtime_config_version_id: &input.runtime_config_version_id,
+            decision_policy_snapshot_id: &input.decision_policy_snapshot_id,
             model_version_id: &input.model_version_id,
             model_run_id: input.model_run_id.as_ref(),
             selection: input.selection,
@@ -230,8 +240,12 @@ impl RecommendationComposer for DefaultRecommendationComposer {
             ch_rows,
             funnel_rows,
             notification,
-            delivery_policy: input.runtime_config.reports.delivery_policy,
-            notify_operators: input.runtime_config.notification.policies.report_published,
+            delivery_policy: input.runtime_config.recommendation.reports.delivery_policy,
+            notify_operators: input
+                .runtime_config
+                .operational_control
+                .notifications
+                .report_published,
         })
     }
 }
@@ -244,7 +258,11 @@ fn build_report_header(
     data_quality_snapshot_ref: ReportDataQualitySnapshotId,
     summary: ReportSummary,
 ) -> QuantResult<NewRecommendationReport> {
-    let fallback_horizon_secs = input.runtime_config.reports.fallback_horizon_secs;
+    let fallback_horizon_secs = input
+        .runtime_config
+        .recommendation
+        .reports
+        .fallback_horizon_secs;
     Ok(NewRecommendationReport {
         recommendation_report_id: report_id.clone(),
         profile_id: input.profile_ref.id.clone(),
@@ -255,7 +273,7 @@ fn build_report_header(
             QuantError::config(format!("reports.fallback_horizon_secs too large: {error}"))
         })?,
         runtime_mode: input.runtime_mode,
-        runtime_config_version_id: input.runtime_config_version_id.clone(),
+        decision_policy_snapshot_id: input.decision_policy_snapshot_id.clone(),
         model_run_id: input.model_run_id.clone(),
         model_version_id: input.model_version_id.clone(),
         market_selection_id: input.market_selection_id.clone(),
@@ -423,7 +441,7 @@ fn compose_recommendation(
         &planned.sizing,
         input.runtime_config,
         input.return_model_calibrated,
-    )?;
+    );
     if policy.is_err() {
         auto_gate.allowed = false;
         if !auto_gate
@@ -888,7 +906,7 @@ fn materialize_condition_artifact(
             catalog_snapshot_id: input.market_selection_id.clone(),
             catalog_snapshot_hash: input.market_selection_hash.clone(),
             model_version_id: input.model_version_id.clone(),
-            runtime_config_version_id: input.runtime_config_version_id.clone(),
+            decision_policy_snapshot_id: input.decision_policy_snapshot_id.clone(),
             factor_bindings,
             source_bindings,
         },
@@ -1406,10 +1424,10 @@ fn calibrated_auto_execution_gate(
     candidate: &SignalCandidate,
     rank: u32,
     sizing: &SizingPlan,
-    runtime_config: &RuntimeConfig,
+    runtime_config: &DecisionPolicySnapshot,
     return_model_calibrated: bool,
-) -> QuantResult<AutoExecutionGate> {
-    let mut auto_gate = auto_execution_gate(candidate, rank, sizing, runtime_config)?;
+) -> AutoExecutionGate {
+    let mut auto_gate = auto_execution_gate(candidate, rank, sizing, runtime_config);
     if !return_model_calibrated {
         auto_gate.allowed = false;
         if !auto_gate
@@ -1421,7 +1439,7 @@ fn calibrated_auto_execution_gate(
                 .push(IneligibilityReason::ReturnModelUncalibrated);
         }
     }
-    Ok(auto_gate)
+    auto_gate
 }
 
 struct NewRecommendationAssembly<'a> {
@@ -1509,7 +1527,7 @@ fn build_new_recommendation(
             model_run_id: compose_context.model_run_id,
             market_selection_id: input.market_selection_id.clone(),
             book_snapshot_ref: capture.book_snapshot_ref.clone(),
-            runtime_config_version_id: input.runtime_config_version_id.clone(),
+            decision_policy_snapshot_id: input.decision_policy_snapshot_id.clone(),
             model_version_id: input.model_version_id.clone(),
             factor_definition_versions: factor_definition_versions(candidate),
             data_quality_snapshot_ref: data_quality_snapshot_ref.clone(),
@@ -1751,7 +1769,7 @@ fn execution_eligibility(
         ineligibility_reasons: reasons,
         approval_required: !gate.allowed || !return_model_calibrated || !trade_policy_available,
         auto_policy_id: (gate.allowed && return_model_calibrated && trade_policy_available)
-            .then(|| "runtime_config.execution.auto_execution".to_owned()),
+            .then(|| "runtime_config.execution_authorization.auto_execution".to_owned()),
     }
 }
 
@@ -1759,28 +1777,28 @@ fn auto_execution_gate(
     candidate: &SignalCandidate,
     rank: u32,
     sizing: &SizingPlan,
-    config: &RuntimeConfig,
-) -> QuantResult<AutoExecutionGate> {
-    let policy = &config.execution.auto_execution;
+    config: &DecisionPolicySnapshot,
+) -> AutoExecutionGate {
+    let policy = &config.execution_authorization.auto_execution;
     if !policy.enabled {
-        return Ok(AutoExecutionGate {
+        return AutoExecutionGate {
             allowed: false,
             reasons: Vec::new(),
-        });
+        };
     }
 
     let min_score = parse_decimal(
         "execution.auto_execution.min_score",
         &policy.min_score.value,
-    )?;
+    );
     let min_confidence = parse_decimal(
         "execution.auto_execution.min_confidence",
         &policy.min_confidence.value,
-    )?;
+    );
     let max_total = parse_decimal(
         "execution.auto_execution.max_total_usd_per_report",
         &policy.max_total_usd_per_report.value,
-    )?;
+    );
 
     let mut reasons = Vec::new();
     if candidate.composite_score.inner() < min_score {
@@ -1798,7 +1816,7 @@ fn auto_execution_gate(
         && sizing.suggested_usd.inner() <= max_total
         && reasons.is_empty();
 
-    Ok(AutoExecutionGate { allowed, reasons })
+    AutoExecutionGate { allowed, reasons }
 }
 
 /// The aggregate-exposure hard cap actually enforced by the LP for this
@@ -1811,15 +1829,13 @@ fn auto_execution_gate(
 /// must render "no cap", never a fabricated fallback value re-derived from a
 /// separately-fetched, possibly-mismatched runtime-config version.
 fn aggregate_exposure_cap_usd(input: &ComposeReportInput<'_>) -> Option<Usd> {
-    let pct: Decimal = input
+    let pct = input
         .runtime_config
+        .execution_risk
         .portfolio
         .kelly_safety
         .max_aggregate_exposure_pct
-        .value
-        .trim()
-        .parse()
-        .ok()?;
+        .value;
     compute_aggregate_exposure_cap_usd(input.account.capital_base_usd.inner(), pct)
 }
 
@@ -2080,48 +2096,84 @@ fn empty_portfolio_plan(
     market_selection_id: MarketSelectionId,
     as_of: DateTime<Utc>,
     account: &AccountSnapshot,
-    config: &RuntimeConfig,
+    config: &DecisionPolicySnapshot,
     rejected_summary: PortfolioRejectedSummary,
-) -> QuantResult<NewPortfolioPlan> {
+) -> NewPortfolioPlan {
     let total_budget = Usd::new(parse_decimal(
         "portfolio.budget.total_budget_usd",
-        &config.portfolio.budget.total_budget_usd.value,
-    )?);
+        &config
+            .execution_risk
+            .portfolio
+            .budget
+            .total_budget_usd
+            .value,
+    ));
     let constraints = PortfolioConstraintsSnapshot {
         max_market_exposure_usd: Usd::new(parse_decimal(
             "portfolio.constraints.max_market_exposure_usd",
-            &config.portfolio.constraints.max_market_exposure_usd.value,
-        )?),
+            &config
+                .execution_risk
+                .portfolio
+                .constraints
+                .max_market_exposure_usd
+                .value,
+        )),
         max_event_exposure_usd: Usd::new(parse_decimal(
             "portfolio.constraints.max_event_exposure_usd",
-            &config.portfolio.constraints.max_event_exposure_usd.value,
-        )?),
+            &config
+                .execution_risk
+                .portfolio
+                .constraints
+                .max_event_exposure_usd
+                .value,
+        )),
         max_category_exposure_usd: Usd::new(parse_decimal(
             "portfolio.constraints.max_category_exposure_usd",
-            &config.portfolio.constraints.max_category_exposure_usd.value,
-        )?),
+            &config
+                .execution_risk
+                .portfolio
+                .constraints
+                .max_category_exposure_usd
+                .value,
+        )),
         max_correlated_exposure_usd: Usd::new(parse_decimal(
             "portfolio.constraints.max_correlated_exposure_usd",
             &config
+                .execution_risk
                 .portfolio
                 .constraints
                 .max_correlated_exposure_usd
                 .value,
-        )?),
+        )),
         max_single_recommendation_usd: Usd::new(parse_decimal(
             "portfolio.budget.max_single_recommendation_usd",
-            &config.portfolio.budget.max_single_recommendation_usd.value,
-        )?),
+            &config
+                .execution_risk
+                .portfolio
+                .budget
+                .max_single_recommendation_usd
+                .value,
+        )),
         min_recommendation_usd: Usd::new(parse_decimal(
             "portfolio.budget.min_recommendation_usd",
-            &config.portfolio.budget.min_recommendation_usd.value,
-        )?),
+            &config
+                .execution_risk
+                .portfolio
+                .budget
+                .min_recommendation_usd
+                .value,
+        )),
         liquidity_usage_cap_pct: parse_decimal(
             "portfolio.constraints.liquidity_usage_cap_pct",
-            &config.portfolio.constraints.liquidity_usage_cap_pct.value,
-        )?,
+            &config
+                .execution_risk
+                .portfolio
+                .constraints
+                .liquidity_usage_cap_pct
+                .value,
+        ),
     };
-    Ok(NewPortfolioPlan {
+    NewPortfolioPlan {
         portfolio_plan_id,
         model_run_id,
         market_selection_id,
@@ -2138,7 +2190,7 @@ fn empty_portfolio_plan(
         constraints_json: constraints,
         rejected_summary,
         optimizer_meta_json: PortfolioOptimizerMeta::default(),
-    })
+    }
 }
 
 pub(super) fn empty_plan_for_report(
@@ -2146,10 +2198,10 @@ pub(super) fn empty_plan_for_report(
     market_selection_id: MarketSelectionId,
     as_of: DateTime<Utc>,
     account: &AccountSnapshot,
-    config: &RuntimeConfig,
+    config: &DecisionPolicySnapshot,
     reason: EmptyReportReason,
     rejected_count: u32,
-) -> QuantResult<NewPortfolioPlan> {
+) -> NewPortfolioPlan {
     empty_portfolio_plan(
         PortfolioPlanId::from_v7(),
         model_run_id,
@@ -2179,11 +2231,8 @@ fn average_probability(values: impl IntoIterator<Item = Decimal>) -> Probability
     Probability::new(sum / Decimal::from(count))
 }
 
-fn parse_decimal(field: &str, value: &str) -> QuantResult<Decimal> {
-    value
-        .trim()
-        .parse::<Decimal>()
-        .map_err(|error| QuantError::config(format!("{field} is not a valid decimal: {error}")))
+const fn parse_decimal(_field: &str, value: &Decimal) -> Decimal {
+    *value
 }
 
 #[cfg(test)]
@@ -2199,13 +2248,12 @@ mod tests {
                 OutcomeSide, QuantRuntimeMode, SizingModelKind,
             },
         },
-        runtime_config::RuntimeConfig,
+        runtime_config::DecisionPolicySnapshot,
         types::{
-            AccountPositions, AccountSnapshotId, Bps, ContentHash, EquitySnapshotId, EventId,
-            MarketId, MarketSelectionId, ModelRunId, ModelVersionId, Price, Probability,
-            ReportDataQualitySnapshotId, ReportDataQualityTokens, RiskEnvelope,
-            RuntimeConfigVersionId, SelectionExclusionSummary, Shares, SignalCandidateId,
-            SizingPlan, TokenId, Usd,
+            AccountPositions, AccountSnapshotId, Bps, ContentHash, DecisionPolicySnapshotId,
+            EquitySnapshotId, EventId, MarketId, MarketSelectionId, ModelRunId, ModelVersionId,
+            Price, Probability, ReportDataQualitySnapshotId, ReportDataQualityTokens, RiskEnvelope,
+            SelectionExclusionSummary, Shares, SignalCandidateId, SizingPlan, TokenId, Usd,
         },
     };
     use quant_pivot_research::{
@@ -2276,35 +2324,11 @@ mod tests {
     }
 
     #[test]
-    fn empty_plan_rejects_invalid_budget_instead_of_substituting_zero() {
-        let as_of = Utc
-            .with_ymd_and_hms(2026, 7, 10, 12, 0, 0)
-            .single()
-            .expect("valid time");
-        let account = AccountSnapshot::new(
-            as_of,
-            AccountSource::Polymarket,
-            Usd::new(dec!(10_000)),
-            Usd::new(dec!(10_000)),
-            Usd::new(dec!(10_000)),
-            Usd::ZERO,
-            Vec::new(),
-        );
-        let mut config = RuntimeConfig::default();
-        config.portfolio.budget.total_budget_usd.value = "not-a-decimal".to_owned();
-
-        assert!(
-            empty_plan_for_report(
-                None,
-                MarketSelectionId::from_v7(),
-                as_of,
-                &account,
-                &config,
-                EmptyReportReason::NoPositiveSignal,
-                0,
-            )
-            .is_err()
-        );
+    fn runtime_policy_rejects_invalid_decimal_at_the_wire_boundary() {
+        let mut value = serde_json::to_value(DecisionPolicySnapshot::default()).expect("policy");
+        value["execution_risk"]["portfolio"]["budget"]["total_budget_usd"] =
+            serde_json::json!({"value": "not-a-decimal"});
+        assert!(serde_json::from_value::<DecisionPolicySnapshot>(value).is_err());
     }
 
     #[test]
@@ -2431,14 +2455,24 @@ mod tests {
 
     #[test]
     fn execution_eligibility_keeps_semi_auto_when_auto_denied_for_low_confidence() {
-        let mut config = RuntimeConfig::default();
-        config.execution.auto_execution.enabled = true;
-        config.execution.auto_execution.max_orders_per_report = 5;
-        config.execution.auto_execution.min_score.value = "0.90".to_owned();
-        config.execution.auto_execution.min_confidence.value = "0.90".to_owned();
+        let mut config = DecisionPolicySnapshot::default();
+        config.execution_authorization.auto_execution.enabled = true;
+        config
+            .execution_authorization
+            .auto_execution
+            .max_orders_per_report = 5;
+        config
+            .execution_authorization
+            .auto_execution
+            .min_score
+            .value = dec!(0.90);
+        config
+            .execution_authorization
+            .auto_execution
+            .min_confidence
+            .value = dec!(0.90);
 
-        let gate = auto_execution_gate(&candidate(), 1, &sizing_plan(Usd::new(dec!(100))), &config)
-            .expect("gate");
+        let gate = auto_execution_gate(&candidate(), 1, &sizing_plan(Usd::new(dec!(100))), &config);
         assert!(!gate.allowed);
         assert_eq!(gate.reasons, vec![IneligibilityReason::LowConfidence]);
 
@@ -2455,19 +2489,29 @@ mod tests {
 
     #[test]
     fn execution_eligibility_allows_auto_when_policy_passes() {
-        let mut config = RuntimeConfig::default();
-        config.execution.auto_execution.enabled = true;
-        config.execution.auto_execution.max_orders_per_report = 5;
-        config.execution.auto_execution.min_score.value = "0.50".to_owned();
-        config.execution.auto_execution.min_confidence.value = "0.50".to_owned();
+        let mut config = DecisionPolicySnapshot::default();
+        config.execution_authorization.auto_execution.enabled = true;
         config
-            .execution
+            .execution_authorization
+            .auto_execution
+            .max_orders_per_report = 5;
+        config
+            .execution_authorization
+            .auto_execution
+            .min_score
+            .value = dec!(0.50);
+        config
+            .execution_authorization
+            .auto_execution
+            .min_confidence
+            .value = dec!(0.50);
+        config
+            .execution_authorization
             .auto_execution
             .max_total_usd_per_report
-            .value = "1000".to_owned();
+            .value = dec!(1000);
 
-        let gate = auto_execution_gate(&candidate(), 1, &sizing_plan(Usd::new(dec!(100))), &config)
-            .expect("gate");
+        let gate = auto_execution_gate(&candidate(), 1, &sizing_plan(Usd::new(dec!(100))), &config);
         assert!(gate.allowed);
         assert!(gate.reasons.is_empty());
 
@@ -2523,7 +2567,7 @@ mod tests {
     fn compose_rejects_missing_decision_capture() {
         let as_of = Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 0).unwrap();
         let trigger_time = as_of + Duration::seconds(120);
-        let config = RuntimeConfig::default();
+        let config = DecisionPolicySnapshot::default();
         let account = AccountSnapshot::new(
             as_of,
             AccountSource::Polymarket,
@@ -2539,7 +2583,7 @@ mod tests {
         let selection = MarketSelectionSnapshot {
             market_selection_id: market_selection_id.clone(),
             decision_at: as_of,
-            runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
+            decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
             selector_hash: market_selection_hash.clone(),
             included: vec![SelectedMarket {
                 market_id: MarketId::new("market-1"),
@@ -2564,12 +2608,11 @@ mod tests {
             &config,
             EmptyReportReason::NoPositiveSignal,
             0,
-        )
-        .expect("valid empty portfolio plan");
+        );
         let data_quality_snapshot = NewReportDataQualitySnapshot {
             report_data_quality_snapshot_id: ReportDataQualitySnapshotId::from_v7(),
             decision_at: as_of,
-            runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
+            decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
             tokens_json: ReportDataQualityTokens(Vec::new()),
         };
         let account_snapshot_id = AccountSnapshotId::from_v7();
@@ -2608,7 +2651,7 @@ mod tests {
             knowledge_lag_secs: 0,
             decision_at: as_of,
             published_at: trigger_time,
-            runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
+            decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
             runtime_config: &config,
             runtime_mode: QuantRuntimeMode::ReportOnly,
             model_version_id: ModelVersionId::from_v7(),

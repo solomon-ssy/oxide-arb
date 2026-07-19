@@ -40,7 +40,6 @@ use quant_pivot_models::{
         quant::{EmptyReportReason, FeatureParityStage, RecommendationReportStatus, ReportKind},
         rbac::ResourceType,
     },
-    runtime_config::RuntimeConfig,
     types::{
         ContentHash, FeatureVectorId, ModelRunId, OrderIntentId, RecommendationId,
         RecommendationReportId, ReportFunnelReason, ReportFunnelStage, ReportRunId,
@@ -48,9 +47,9 @@ use quant_pivot_models::{
     },
 };
 use quant_pivot_repository::traits::{
-    FeatureRepository, OperationLogRepository, OrderIntentRepository, QuantFactReadRepository,
-    RecommendationReportRepository, RecommendationRepository, ReportRunRepository,
-    RuntimeConfigVersionRepository, ServingEvidenceRepository,
+    FeatureRepository, OperationLogRepository, OrderIntentRepository, PolicyRepository,
+    QuantFactReadRepository, RecommendationReportRepository, RecommendationRepository,
+    ReportRunRepository, ServingEvidenceRepository,
 };
 
 use crate::{
@@ -68,7 +67,7 @@ pub struct CoreQuantReportPort {
     lifecycle: Arc<ReportLifecycleService>,
     serving_evidence: Arc<dyn ServingEvidenceRepository>,
     feature_repo: Arc<dyn FeatureRepository>,
-    runtime_config_repo: Arc<dyn RuntimeConfigVersionRepository>,
+    runtime_config_repo: Arc<dyn PolicyRepository>,
     quant_fact_read: Arc<dyn QuantFactReadRepository>,
     operation_logs: Arc<dyn OperationLogRepository>,
 }
@@ -85,7 +84,7 @@ pub struct CoreQuantReportPortDeps {
     pub lifecycle: Arc<ReportLifecycleService>,
     pub serving_evidence: Arc<dyn ServingEvidenceRepository>,
     pub feature_repo: Arc<dyn FeatureRepository>,
-    pub runtime_config_repo: Arc<dyn RuntimeConfigVersionRepository>,
+    pub runtime_config_repo: Arc<dyn PolicyRepository>,
     pub quant_fact_read: Arc<dyn QuantFactReadRepository>,
     pub operation_logs: Arc<dyn OperationLogRepository>,
 }
@@ -158,15 +157,15 @@ impl CoreQuantReportPort {
     ) -> QuantResult<DecisionBoundary> {
         let version = self
             .runtime_config_repo
-            .load_version(&report.runtime_config_version_id)
+            .load_snapshot(&report.decision_policy_snapshot_id)
             .await?
             .ok_or_else(|| ResearchError::Determinism {
                 detail: format!(
                     "report {} references missing runtime config {}",
-                    report.recommendation_report_id, report.runtime_config_version_id
+                    report.recommendation_report_id, report.decision_policy_snapshot_id
                 ),
             })?;
-        let config = RuntimeConfig::from_json(&version.config_json)?;
+        let config = version.snapshot;
         let run = self
             .report_run_repo
             .find_by_output_report(&report.recommendation_report_id)
@@ -197,7 +196,8 @@ impl CoreQuantReportPort {
         let snapshot_matches =
             snapshot.report_data_quality_snapshot_id == report.data_quality_snapshot_ref;
         let decision_matches = snapshot.decision_at == report.decision_at;
-        let config_matches = snapshot.runtime_config_version_id == report.runtime_config_version_id;
+        let config_matches =
+            snapshot.decision_policy_snapshot_id == report.decision_policy_snapshot_id;
         if !snapshot_matches || !decision_matches || !config_matches {
             return Err(ResearchError::Determinism {
                 detail: format!(
@@ -863,7 +863,7 @@ fn funnel_market_view(
     };
     if row.recommendation_report_id != report.recommendation_report_id
         || row.market_selection_id != report.market_selection_id
-        || row.runtime_config_version_id != report.runtime_config_version_id
+        || row.decision_policy_snapshot_id != report.decision_policy_snapshot_id
         || row.model_version_id != report.model_version_id
         || profile_ref != report.profile_ref
     {
@@ -903,7 +903,7 @@ fn funnel_market_view(
         recommendation_report_id: row.recommendation_report_id,
         market_selection_id: row.market_selection_id,
         profile_ref,
-        runtime_config_version_id: row.runtime_config_version_id,
+        decision_policy_snapshot_id: row.decision_policy_snapshot_id,
         model_version_id: row.model_version_id,
         model_run_id: row.model_run_id,
         market_id: row.market_id,
@@ -1136,7 +1136,7 @@ fn validate_pre_inference_vector(
     }
     if rows.iter().any(|row| {
         row.feature_vector_id != info.feature_vector_id
-            || row.runtime_config_version_id != report.runtime_config_version_id
+            || row.decision_policy_snapshot_id != report.decision_policy_snapshot_id
             || row.market_id != info.market_id
             || row.token_id != info.token_id
             || row.decision_at != report.decision_at.timestamp_millis()

@@ -16,9 +16,9 @@ use quant_pivot_models::{
     hashing::CanonicalDigest,
     types::{
         BookSnapshotRef, BookSnapshotSource, Bps, CatalogEventChangeId, CatalogMarketChangeId,
-        CatalogSyncBatchId, ContentHash, EventId, MarketContext, MarketId, MarketLinkageId,
-        Probability, RecommendationIdentity, ReportDataQualitySnapshotId, ReportDataQualityTokens,
-        RuntimeConfigVersionId, TokenDataQualityRecord, TokenId, Usd,
+        CatalogSyncBatchId, ContentHash, DecisionPolicySnapshotId, EventId, MarketContext,
+        MarketId, MarketLinkageId, Probability, RecommendationIdentity,
+        ReportDataQualitySnapshotId, ReportDataQualityTokens, TokenDataQualityRecord, TokenId, Usd,
     },
 };
 use rust_decimal::Decimal;
@@ -376,7 +376,7 @@ pub fn market_decision_capture_from_resolved(
 /// Draft the report-level DQ snapshot covering every market in the round.
 pub fn draft_data_quality_snapshot(
     as_of: DateTime<Utc>,
-    runtime_config_version_id: RuntimeConfigVersionId,
+    decision_policy_snapshot_id: DecisionPolicySnapshotId,
     bundles: &[ResolvedMarketBundle<'_>],
     vectors: &[FeatureVector],
     persisted: &[FeatureVectorInfo],
@@ -443,7 +443,7 @@ pub fn draft_data_quality_snapshot(
     Ok(NewReportDataQualitySnapshot {
         report_data_quality_snapshot_id: ReportDataQualitySnapshotId::from_v7(),
         decision_at: as_of,
-        runtime_config_version_id,
+        decision_policy_snapshot_id,
         tokens_json: ReportDataQualityTokens(records),
     })
 }

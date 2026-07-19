@@ -559,17 +559,42 @@ pub struct PositionId(Arc<Uuid>);
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ReconciliationId(Arc<Uuid>);
 
-/// Runtime-config version identifier used by governed config activation.
+/// Immutable revision of one governed configuration resource.
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
-pub struct RuntimeConfigVersionId(Arc<Uuid>);
+pub struct PolicyRevisionId(Arc<Uuid>);
 
-/// Runtime-config activation identifier.
+/// Frozen bundle of policy revisions captured at a decision boundary.
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
-pub struct RuntimeConfigActivationId(Arc<Uuid>);
+pub struct DecisionPolicySnapshotId(Arc<Uuid>);
 
-/// Append-only runtime-config approval decision identifier.
+impl DecisionPolicySnapshotId {
+    /// Deterministic identity for a content-addressed policy bundle.
+    #[must_use]
+    pub fn from_content_hash(content_hash: &ContentHash) -> Self {
+        const NAMESPACE: Uuid = Uuid::from_u128(0x9ce1_c2e4_f455_4d54_97b1_49bc_9e26_72a1);
+        Self::new(Uuid::new_v5(&NAMESPACE, content_hash.as_str().as_bytes()))
+    }
+}
+
+/// Governed policy-resource activation identifier.
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
-pub struct RuntimeConfigApprovalId(Arc<Uuid>);
+pub struct PolicyActivationId(Arc<Uuid>);
+
+/// Append-only policy-resource approval decision identifier.
+#[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PolicyApprovalId(Arc<Uuid>);
+
+/// Irreversible production-baseline seal identifier.
+#[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ProductionBaselineId(Arc<Uuid>);
+
+impl ProductionBaselineId {
+    /// Singleton identity for the irreversible boot production baseline.
+    #[must_use]
+    pub fn boot() -> Self {
+        Self::new(Uuid::from_u128(0x1f0e_1c5e_0000_5000_8000_0000_0000_0001))
+    }
+}
 
 /// Append-only operation-log row identifier.
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]

@@ -1,6 +1,6 @@
 //! Database configuration (`[db]`, deploy): Postgres OLTP + `ClickHouse` OLAP.
 
-use super::secret::SecretText;
+use super::secret::{SecretText, SystemdCredentialRef};
 use serde::Deserialize;
 use url::Url;
 
@@ -24,9 +24,8 @@ pub struct PostgresConfig {
     pub port: u16,
     /// Role name. Default: `quant_pivot_runtime`.
     pub user: String,
-    /// Role password. Set via `QUANT_PIVOT__DB__POSTGRES__PASSWORD` in
-    /// production — never in the TOML. Default: empty.
-    pub password: SecretText,
+    /// systemd credential reference for the runtime role password.
+    pub password: SystemdCredentialRef,
     /// Database name. Default: `quant_pivot`.
     pub database: String,
     /// Schema search path. Default: `public`.
@@ -135,7 +134,8 @@ impl PostgresConfig {
     pub fn migration_connection(&self, migration_password: &SecretText) -> Self {
         let mut config = self.clone();
         config.user.clone_from(&self.migration.user);
-        config.password.clone_from(migration_password);
+        config.password =
+            SystemdCredentialRef::from_resolved(migration_password.expose_secret().to_owned());
         config.max_connections = 2;
         config.min_connections = 1;
         "quant-pivot-migration".clone_into(&mut config.application_name);
@@ -155,7 +155,7 @@ impl Default for PostgresConfig {
             host: default_host(),
             port: default_port(),
             user: default_user(),
-            password: SecretText::default(),
+            password: SystemdCredentialRef::default(),
             database: default_database(),
             schema: default_schema(),
             migration: SchemaMigrationConfig::default(),
@@ -183,7 +183,7 @@ pub struct SchemaMigrationConfig {
     /// Independently provisioned DDL role.
     pub user: String,
     /// Optional DDL credential used only by migration/plan/apply commands.
-    pub password: Option<SecretText>,
+    pub password: Option<SystemdCredentialRef>,
 }
 
 impl Default for SchemaMigrationConfig {
@@ -264,9 +264,8 @@ pub struct ClickHouseConfig {
     pub database: String,
     /// User name. Default: `default`.
     pub user: String,
-    /// Password. Set via `QUANT_PIVOT__DB__CLICKHOUSE__PASSWORD` in production —
-    /// never in the TOML. Default: empty.
-    pub password: SecretText,
+    /// systemd credential reference for the runtime role password.
+    pub password: SystemdCredentialRef,
     /// Versioned schema migration policy and optional elevated identity.
     pub migration: SchemaMigrationConfig,
     /// Max age (seconds) of a partial batch before it is flushed. Lower =
@@ -289,7 +288,7 @@ impl Default for ClickHouseConfig {
             url: default_ch_url(),
             database: default_ch_database(),
             user: default_ch_user(),
-            password: SecretText::default(),
+            password: SystemdCredentialRef::default(),
             migration: SchemaMigrationConfig::default(),
             flush_interval_secs: default_ch_flush_interval(),
             batch_size: default_ch_batch_size(),
@@ -308,7 +307,8 @@ impl ClickHouseConfig {
     pub fn migration_connection(&self, migration_password: &SecretText) -> Self {
         let mut config = self.clone();
         config.user.clone_from(&self.migration.user);
-        config.password.clone_from(migration_password);
+        config.password =
+            SystemdCredentialRef::from_resolved(migration_password.expose_secret().to_owned());
         config
     }
 }

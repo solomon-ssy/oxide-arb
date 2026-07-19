@@ -10,11 +10,11 @@ use crate::{
         RecommendationStatus, ReportKind,
     },
     types::{
-        AccountSnapshotId, Bps, EquitySnapshotId, EventId, EvidenceRefs, ExecutionEligibility,
-        MarketContext, MarketId, MarketSelectionId, ModelRunId, ModelVersionId, PortfolioPlanId,
-        Probability, RecommendationFactorBreakdown, RecommendationId, RecommendationIdentity,
-        RecommendationReportId, RecommendationTradePlan, ReportDataQualitySnapshotId,
-        ReportSummary, ResearchProfileRef, RuntimeConfigVersionId, TokenId, Usd,
+        AccountSnapshotId, Bps, DecisionPolicySnapshotId, EquitySnapshotId, EventId, EvidenceRefs,
+        ExecutionEligibility, MarketContext, MarketId, MarketSelectionId, ModelRunId,
+        ModelVersionId, PortfolioPlanId, Probability, RecommendationFactorBreakdown,
+        RecommendationId, RecommendationIdentity, RecommendationReportId, RecommendationTradePlan,
+        ReportDataQualitySnapshotId, ReportSummary, ResearchProfileRef, TokenId, Usd,
     },
 };
 use chrono::{DateTime, Utc};
@@ -32,7 +32,7 @@ pub struct RecommendationReportInfo {
     pub decision_at: DateTime<Utc>,
     pub horizon_secs: i64,
     pub runtime_mode: QuantRuntimeMode,
-    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     /// Exact serving run that produced this report. Empty reports that stop
     /// before model inference carry `None`.
     pub model_run_id: Option<ModelRunId>,
@@ -69,7 +69,7 @@ info_from_model!(
         decision_at,
         horizon_secs,
         runtime_mode,
-        runtime_config_version_id,
+        decision_policy_snapshot_id,
         model_run_id,
         model_version_id,
         market_selection_id,
@@ -105,7 +105,7 @@ pub struct NewRecommendationReport {
     pub decision_at: DateTime<Utc>,
     pub horizon_secs: i64,
     pub runtime_mode: QuantRuntimeMode,
-    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub model_run_id: Option<ModelRunId>,
     pub model_version_id: ModelVersionId,
     pub market_selection_id: MarketSelectionId,

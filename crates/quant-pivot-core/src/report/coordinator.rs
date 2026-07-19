@@ -11,11 +11,12 @@ use quant_pivot_models::{
     },
     hashing::CanonicalDigest,
     runtime_config::{
-        ReportScheduleConfig, ReportsConfig, RuntimeConfig, due_schedule_window, preview_fire_times,
+        DecisionPolicySnapshot, ReportScheduleConfig, ReportsConfig, due_schedule_window,
+        preview_fire_times,
     },
-    types::RuntimeConfigVersionId,
+    types::DecisionPolicySnapshotId,
 };
-use quant_pivot_repository::traits::{ReportRunRepository, RuntimeConfigVersionRepository};
+use quant_pivot_repository::traits::{PolicyRepository, ReportRunRepository};
 use tokio::time::{Instant, interval_at};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -34,7 +35,7 @@ pub struct ReportCoordinatorConfig {
 /// Multi-replica-safe coordinator. `PostgreSQL` owns every cursor, queue row, and lease.
 pub struct ReportCoordinator {
     runs: Arc<dyn ReportRunRepository>,
-    runtime_configs: Arc<dyn RuntimeConfigVersionRepository>,
+    runtime_configs: Arc<dyn PolicyRepository>,
     lifecycle: Arc<ReportLifecycleService>,
     publisher: Arc<ReportPublisher>,
     config: ReportCoordinatorConfig,
@@ -45,7 +46,7 @@ impl ReportCoordinator {
     #[must_use]
     pub fn new(
         runs: Arc<dyn ReportRunRepository>,
-        runtime_configs: Arc<dyn RuntimeConfigVersionRepository>,
+        runtime_configs: Arc<dyn PolicyRepository>,
         lifecycle: Arc<ReportLifecycleService>,
         publisher: Arc<ReportPublisher>,
         config: ReportCoordinatorConfig,
@@ -108,7 +109,7 @@ impl ReportCoordinator {
     async fn reconcile_active(
         &self,
         expected: Option<&ReportsConfig>,
-    ) -> QuantResult<(RuntimeConfigVersionId, RuntimeConfig)> {
+    ) -> QuantResult<(DecisionPolicySnapshotId, DecisionPolicySnapshot)> {
         let version = self.runtime_configs.load_current().await?.ok_or_else(|| {
             ReportError::InvariantViolation {
                 stage: "report_schedule_reconcile",
@@ -117,21 +118,21 @@ impl ReportCoordinator {
         })?;
         let activation = self
             .runtime_configs
-            .load_current_activation()
+            .load_current_activation(None)
             .await?
             .ok_or_else(|| ReportError::InvariantViolation {
                 stage: "report_schedule_reconcile",
                 detail: "active runtime config has no activation row".to_owned(),
             })?;
-        if activation.runtime_config_version_id != version.runtime_config_version_id {
+        if activation.decision_policy_snapshot_id != version.decision_policy_snapshot_id {
             return Err(ReportError::InvariantViolation {
                 stage: "report_schedule_reconcile",
                 detail: "runtime config version and activation disagree".to_owned(),
             }
             .into());
         }
-        let config = RuntimeConfig::from_json(&version.config_json)?;
-        if expected.is_some_and(|reports| reports != &config.reports) {
+        let config = version.snapshot;
+        if expected.is_some_and(|reports| reports != &config.recommendation.reports) {
             return Err(ReportError::ContractViolation {
                 detail: "runtime apply payload differs from the already-active durable config"
                     .to_owned(),
@@ -139,13 +140,13 @@ impl ReportCoordinator {
             .into());
         }
         let schedules = reconcile_commands(
-            &version.runtime_config_version_id,
+            &version.decision_policy_snapshot_id,
             activation.activated_at,
-            &config.reports.schedules,
+            &config.report_schedule.schedules,
         )?;
         let outcome = self
             .runs
-            .reconcile_schedules(&version.runtime_config_version_id, schedules)
+            .reconcile_schedules(&version.decision_policy_snapshot_id, schedules)
             .await?;
         for gap in &outcome.gaps {
             self.publisher.record_schedule_gap(gap)?;
@@ -153,23 +154,23 @@ impl ReportCoordinator {
         for skipped in outcome.skipped_runs {
             self.publisher.publish_run(&skipped, Utc::now());
         }
-        Ok((version.runtime_config_version_id, config))
+        Ok((version.decision_policy_snapshot_id, config))
     }
 
     async fn materialize_due(
         &self,
-        version_id: &RuntimeConfigVersionId,
-        config: &RuntimeConfig,
+        version_id: &DecisionPolicySnapshotId,
+        config: &DecisionPolicySnapshot,
         through: DateTime<Utc>,
     ) -> QuantResult<()> {
         let schedule_by_id = config
-            .reports
+            .report_schedule
             .schedules
             .iter()
             .map(|schedule| (schedule.schedule_id.as_str(), schedule))
             .collect::<HashMap<_, _>>();
         for state in self.runs.list_schedule_states().await? {
-            if !state.enabled || state.runtime_config_version_id != *version_id {
+            if !state.enabled || state.decision_policy_snapshot_id != *version_id {
                 continue;
             }
             let schedule = schedule_by_id
@@ -193,7 +194,7 @@ impl ReportCoordinator {
                 })?;
             let command = MaterializeReportSchedule {
                 schedule_id: state.schedule_id,
-                runtime_config_version_id: version_id.clone(),
+                decision_policy_snapshot_id: version_id.clone(),
                 spec_hash: state.spec_hash,
                 expected_next_scheduled_for: window.first,
                 latest_scheduled_for: window.latest,
@@ -253,7 +254,7 @@ impl ReportCoordinator {
 }
 
 fn reconcile_commands(
-    version_id: &RuntimeConfigVersionId,
+    version_id: &DecisionPolicySnapshotId,
     activated_at: DateTime<Utc>,
     schedules: &[ReportScheduleConfig],
 ) -> QuantResult<Vec<ReconcileReportSchedule>> {
@@ -269,7 +270,7 @@ fn reconcile_commands(
                 })?;
             Ok(ReconcileReportSchedule {
                 schedule_id: schedule.schedule_id.clone(),
-                runtime_config_version_id: version_id.clone(),
+                decision_policy_snapshot_id: version_id.clone(),
                 spec_hash: CanonicalDigest::content_hash_json(schedule)?,
                 next_scheduled_for,
                 enabled: schedule.enabled,
@@ -279,25 +280,26 @@ fn reconcile_commands(
 }
 
 fn claim_config(
-    version_id: &RuntimeConfigVersionId,
-    config: &RuntimeConfig,
+    version_id: &DecisionPolicySnapshotId,
+    config: &DecisionPolicySnapshot,
 ) -> QuantResult<ReportRunClaimConfig> {
-    let ad_hoc_default_top_n =
-        i32::try_from(config.reports.ad_hoc_default_top_n).map_err(|error| {
-            ReportError::NumericOverflow {
-                field: "reports.ad_hoc_default_top_n",
-                detail: error.to_string(),
-            }
+    let ad_hoc_default_top_n = i32::try_from(config.recommendation.reports.ad_hoc_default_top_n)
+        .map_err(|error| ReportError::NumericOverflow {
+            field: "reports.ad_hoc_default_top_n",
+            detail: error.to_string(),
         })?;
-    let ad_hoc_default_knowledge_lag_secs =
-        i64::try_from(config.reports.ad_hoc_default_knowledge_lag_secs).map_err(|error| {
-            ReportError::NumericOverflow {
-                field: "reports.ad_hoc_default_knowledge_lag_secs",
-                detail: error.to_string(),
-            }
-        })?;
+    let ad_hoc_default_knowledge_lag_secs = i64::try_from(
+        config
+            .recommendation
+            .reports
+            .ad_hoc_default_knowledge_lag_secs,
+    )
+    .map_err(|error| ReportError::NumericOverflow {
+        field: "reports.ad_hoc_default_knowledge_lag_secs",
+        detail: error.to_string(),
+    })?;
     let schedules = config
-        .reports
+        .report_schedule
         .schedules
         .iter()
         .filter(|schedule| schedule.enabled)
@@ -320,7 +322,7 @@ fn claim_config(
         })
         .collect::<Result<Vec<_>, ReportError>>()?;
     Ok(ReportRunClaimConfig {
-        runtime_config_version_id: version_id.clone(),
+        decision_policy_snapshot_id: version_id.clone(),
         ad_hoc_default_top_n,
         ad_hoc_default_knowledge_lag_secs,
         schedules,

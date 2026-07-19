@@ -1,10 +1,12 @@
-//! Logging configuration (`[observability]`, deploy).
+//! Logging and operator-channel configuration (deploy, restart to apply).
 //!
-//! Logging only: Prometheus metrics are always-on and scraped through the web
-//! server's `GET /metrics` (no separate port), and operator alerting is owned
-//! by the runtime `notification` section.
+//! Prometheus metrics are always-on and scraped through the web server's
+//! `GET /metrics` (no separate port). Channel bindings live here while
+//! hot-reloadable event routing lives in `OperationalControl.notifications`.
 
 use serde::Deserialize;
+
+use super::secret::SystemdCredentialRef;
 
 /// Logging level and output format.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -30,4 +32,31 @@ impl Default for ObservabilityConfig {
 
 fn default_log_level() -> String {
     "info".into()
+}
+
+/// External operator notification channels. Bindings and credential names are
+/// deployment concerns and therefore require a restart to apply.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct NotificationChannelsConfig {
+    pub telegram: TelegramChannelConfig,
+    pub webhook: WebhookChannelConfig,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TelegramChannelConfig {
+    /// systemd credential containing the Telegram bot token.
+    pub bot_token_credential: SystemdCredentialRef,
+    /// Telegram chat identifier; this is a destination binding, not a secret.
+    pub chat_id: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct WebhookChannelConfig {
+    /// HTTPS endpoint. Authentication material must not be embedded in the URL.
+    pub url: String,
+    /// Optional systemd credential containing the complete Authorization value.
+    pub authorization_credential: SystemdCredentialRef,
 }

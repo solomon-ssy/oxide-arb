@@ -18,18 +18,18 @@ use crate::{
     },
     hashing::CanonicalDigest,
     types::{
-        ArtifactUri, Bps, ClockAnchor, ContentHash, ENTRY_CONDITION_MAX_DEPTH,
-        ENTRY_CONDITION_MAX_GROUP_CHILDREN, ENTRY_CONDITION_MAX_NODES,
+        ArtifactUri, Bps, ClockAnchor, ContentHash, DecisionPolicySnapshotId,
+        ENTRY_CONDITION_MAX_DEPTH, ENTRY_CONDITION_MAX_GROUP_CHILDREN, ENTRY_CONDITION_MAX_NODES,
         ENTRY_CONDITION_MIN_GROUP_CHILDREN, FactorDefinitionId, FactorMeasure, ModelVersionId,
         OpportunisticExitPolicy, Price, ResearchEvaluationTrack, ResearchJobId, ResearchProfileRef,
-        RuntimeConfigVersionId, StructuralVolatilityOosEvidence, TradePolicyArtifactId,
-        TrainingDatasetId, Usd, resolve_builtin_research_profile,
+        StructuralVolatilityOosEvidence, TradePolicyArtifactId, TrainingDatasetId, Usd,
+        resolve_builtin_research_profile,
     },
 };
 
 /// Breaking wire version for the standalone policy artifact family.
-pub const TRADE_POLICY_ARTIFACT_FORMAT_VERSION: u32 = 6;
-pub const TRADE_POLICY_EVIDENCE_BUNDLE_FORMAT_VERSION: u32 = 3;
+pub const TRADE_POLICY_ARTIFACT_FORMAT_VERSION: u32 = 1;
+pub const TRADE_POLICY_EVIDENCE_BUNDLE_FORMAT_VERSION: u32 = 1;
 pub const TRADE_POLICY_MAX_CANDIDATES: usize = 32;
 
 /// Immutable statistical and execution-quality thresholds used for publication.
@@ -149,7 +149,7 @@ pub struct TradePolicyFitContract {
     pub research_program_hash: ContentHash,
     pub source_dataset_id: TrainingDatasetId,
     pub model_version_id: ModelVersionId,
-    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub fit_window_start: DateTime<Utc>,
     pub fit_window_end: DateTime<Utc>,
     /// Latest point-in-time instant from which any fit evidence may be consumed.
@@ -1458,7 +1458,7 @@ mod tests {
         TradePolicyValidationEvidence, VerticalActivationTarget,
     };
     use crate::types::{
-        ContentHash, ModelVersionId, ResearchEvaluationTrack, RuntimeConfigVersionId,
+        ContentHash, DecisionPolicySnapshotId, ModelVersionId, ResearchEvaluationTrack,
         StructuralVolatilityOosEvidence, TrainingDatasetId, builtin_research_profiles,
     };
 
@@ -1480,7 +1480,7 @@ mod tests {
             research_program_hash: hash('7'),
             source_dataset_id: TrainingDatasetId::from_v7(),
             model_version_id: ModelVersionId::from_v7(),
-            runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
+            decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
             fit_window_start: fit_window_end - chrono::Duration::days(30),
             fit_window_end,
             pit_cutoff: fit_window_end,

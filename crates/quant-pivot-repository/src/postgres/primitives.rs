@@ -6,7 +6,7 @@ use sea_orm::{
     ConnectionTrait, DatabaseBackend, ExprTrait, FromQueryResult, Statement,
     entity::ActiveEnum,
     sea_query::{
-        Alias, Expr, Func, IntoColumnRef, IntoIden, SimpleExpr, extension::postgres::PgFunc,
+        Alias, Expr, Func, IntoColumnRef, IntoIden, Query, SimpleExpr, extension::postgres::PgFunc,
     },
 };
 
@@ -29,17 +29,20 @@ pub(super) struct ShadowLatencyAggregate {
 pub(super) async fn statement_timestamp(
     db: &impl ConnectionTrait,
 ) -> Result<DateTime<Utc>, StorageError> {
-    DatabaseClock::find_by_statement(Statement::from_string(
-        DatabaseBackend::Postgres,
-        "SELECT statement_timestamp() AS now".to_owned(),
-    ))
-    .one(db)
-    .await
-    .map_err(StorageError::from)?
-    .map(|clock| clock.now)
-    .ok_or_else(|| {
-        StorageError::invariant_violation(None, "database did not return statement_timestamp")
-    })
+    let query = Query::select()
+        .expr_as(
+            Func::cust(Alias::new("STATEMENT_TIMESTAMP")),
+            Alias::new("now"),
+        )
+        .to_owned();
+    DatabaseClock::find_by_statement(db.get_database_backend().build(&query))
+        .one(db)
+        .await
+        .map_err(StorageError::from)?
+        .map(|clock| clock.now)
+        .ok_or_else(|| {
+            StorageError::invariant_violation(None, "database did not return statement_timestamp")
+        })
 }
 
 /// Acquire a transaction-scoped `PostgreSQL` advisory lock.
@@ -47,13 +50,10 @@ pub(super) async fn advisory_xact_lock(
     db: &impl ConnectionTrait,
     key: i64,
 ) -> Result<(), StorageError> {
-    db.execute_raw(Statement::from_sql_and_values(
-        DatabaseBackend::Postgres,
-        "SELECT pg_advisory_xact_lock($1)",
-        [key.into()],
-    ))
-    .await
-    .map_err(StorageError::from)?;
+    let query = Query::select()
+        .expr(Func::cust(Alias::new("PG_ADVISORY_XACT_LOCK")).arg(Expr::value(key)))
+        .to_owned();
+    db.query_one(&query).await.map_err(StorageError::from)?;
     Ok(())
 }
 
@@ -64,13 +64,13 @@ pub(super) async fn advisory_text_xact_lock(
     scope: &str,
     namespace: i64,
 ) -> Result<(), StorageError> {
-    db.execute_raw(Statement::from_sql_and_values(
-        DatabaseBackend::Postgres,
-        "SELECT pg_advisory_xact_lock(hashtextextended($1, $2))",
-        [scope.into(), namespace.into()],
-    ))
-    .await
-    .map_err(StorageError::from)?;
+    let lock_key = Func::cust(Alias::new("HASHTEXTEXTENDED"))
+        .arg(Expr::value(scope))
+        .arg(Expr::value(namespace));
+    let query = Query::select()
+        .expr(Func::cust(Alias::new("PG_ADVISORY_XACT_LOCK")).arg(lock_key))
+        .to_owned();
+    db.query_one(&query).await.map_err(StorageError::from)?;
     Ok(())
 }
 
@@ -81,13 +81,14 @@ pub(super) async fn notify(
     channel: &str,
     payload: &str,
 ) -> Result<(), StorageError> {
-    db.execute_raw(Statement::from_sql_and_values(
-        DatabaseBackend::Postgres,
-        "SELECT pg_notify($1, $2)",
-        [channel.into(), payload.into()],
-    ))
-    .await
-    .map_err(StorageError::from)?;
+    let query = Query::select()
+        .expr(
+            Func::cust(Alias::new("PG_NOTIFY"))
+                .arg(Expr::value(channel))
+                .arg(Expr::value(payload)),
+        )
+        .to_owned();
+    db.query_one(&query).await.map_err(StorageError::from)?;
     Ok(())
 }
 

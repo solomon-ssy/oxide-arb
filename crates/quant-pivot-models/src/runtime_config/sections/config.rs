@@ -8,7 +8,7 @@ use crate::{
         quant::CalibrationMethod,
     },
     runtime_config::wire::{
-        AttributionPolicy, CapitalPolicy, CorrelationConfig, DecimalString, EntryOrderPolicy,
+        AttributionPolicy, CapitalPolicy, CorrelationConfig, DecimalValue, EntryOrderPolicy,
         ExecutionBreakerConfig, ExitMonitorPolicy, FactorWeights, FeatureFamily,
         FeatureStalenessPolicy, KillSwitchPolicy, MissingFactorPolicy, ModelVersionRef,
         NeutralizeDimension, NotificationPolicies, PortfolioOptimizerConfig, RankLossKind,
@@ -17,7 +17,6 @@ use crate::{
     },
     types::{SchemaVersion, Usd},
 };
-use rust_decimal::Decimal;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, iter};
@@ -29,9 +28,9 @@ pub struct SelectionConfig {
     /// Category slugs eligible for quant reports.
     pub enabled_categories: Vec<MarketCategory>,
     /// Minimum displayed liquidity in USD.
-    pub min_liquidity_usd: DecimalString,
+    pub min_liquidity_usd: DecimalValue,
     /// Minimum 24h volume in USD.
-    pub min_volume_24h_usd: DecimalString,
+    pub min_volume_24h_usd: DecimalValue,
     /// Maximum allowed top-of-book spread in basis points.
     pub max_spread_bps: u32,
     /// Whether near-resolution markets may enter the selection.
@@ -46,8 +45,8 @@ impl Default for SelectionConfig {
     fn default() -> Self {
         Self {
             enabled_categories: Vec::new(),
-            min_liquidity_usd: DecimalString::new("0"),
-            min_volume_24h_usd: DecimalString::new("0"),
+            min_liquidity_usd: DecimalValue::new(rust_decimal_macros::dec!(0)),
+            min_volume_24h_usd: DecimalValue::new(rust_decimal_macros::dec!(0)),
             max_spread_bps: 2_500,
             allow_near_resolution: false,
             min_time_to_resolution_secs: 3_600,
@@ -164,9 +163,9 @@ pub struct StructuralFeaturesConfig {
     /// Minimum distinct fill-participant addresses before concentration features are scored.
     pub trade_tape_min_unique_participants: u64,
     /// Minimum notional USD required before concentration features are scored.
-    pub trade_tape_min_notional_usd: DecimalString,
+    pub trade_tape_min_notional_usd: DecimalValue,
     /// Minimum participant-address coverage ratio in `[0, 1]`.
-    pub trade_tape_min_coverage_ratio: DecimalString,
+    pub trade_tape_min_coverage_ratio: DecimalValue,
 }
 
 impl Default for StructuralFeaturesConfig {
@@ -176,8 +175,8 @@ impl Default for StructuralFeaturesConfig {
             book_churn_window_secs: 900,
             trade_tape_window_secs: 86_400,
             trade_tape_min_unique_participants: 20,
-            trade_tape_min_notional_usd: DecimalString::new("100.00"),
-            trade_tape_min_coverage_ratio: DecimalString::new("0.95"),
+            trade_tape_min_notional_usd: DecimalValue::new(rust_decimal_macros::dec!(100.00)),
+            trade_tape_min_coverage_ratio: DecimalValue::new(rust_decimal_macros::dec!(0.95)),
         }
     }
 }
@@ -232,7 +231,7 @@ impl FeaturesConfig {
 impl Default for FeaturesConfig {
     fn default() -> Self {
         Self {
-            feature_schema_version: SchemaVersion::new(7),
+            feature_schema_version: SchemaVersion::new(1),
             enabled_feature_families: vec![
                 FeatureFamily::MarketMetadata,
                 FeatureFamily::PriceBook,
@@ -263,16 +262,16 @@ pub struct PerFactorNormalization {
     pub method: FactorNormalization,
     /// Winsorize percentile in `(0, 0.5)` (`WinsorizedZScore` only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub winsor_p: Option<DecimalString>,
+    pub winsor_p: Option<DecimalValue>,
     /// Sigma clamp bound (`WinsorizedZScore` only), `> 0`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub clamp_sigma: Option<DecimalString>,
+    pub clamp_sigma: Option<DecimalValue>,
     /// Lower semantic bound mapped to 0 (`MinMax` only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub min: Option<DecimalString>,
+    pub min: Option<DecimalValue>,
     /// Upper semantic bound mapped to 1 (`MinMax` only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max: Option<DecimalString>,
+    pub max: Option<DecimalValue>,
 }
 
 /// Cross-sectional normalization parameters (no magic constants in code).
@@ -280,9 +279,9 @@ pub struct PerFactorNormalization {
 #[serde(default, deny_unknown_fields)]
 pub struct FactorNormalizationConfig {
     /// Default winsorize percentile in `(0, 0.5)` for `WinsorizedZScore` factors.
-    pub default_winsor_p: DecimalString,
+    pub default_winsor_p: DecimalValue,
     /// Default sigma clamp bound for `WinsorizedZScore` factors, `> 0`.
-    pub default_clamp_sigma: DecimalString,
+    pub default_clamp_sigma: DecimalValue,
     /// Per-factor overrides keyed by stable factor name.
     pub per_factor: BTreeMap<String, PerFactorNormalization>,
 }
@@ -297,13 +296,13 @@ impl Default for FactorNormalizationConfig {
                 method: FactorNormalization::MinMax,
                 winsor_p: None,
                 clamp_sigma: None,
-                min: Some(DecimalString::new("0")),
-                max: Some(DecimalString::new("1")),
+                min: Some(DecimalValue::new(rust_decimal_macros::dec!(0))),
+                max: Some(DecimalValue::new(rust_decimal_macros::dec!(1))),
             },
         );
         Self {
-            default_winsor_p: DecimalString::new("0.01"),
-            default_clamp_sigma: DecimalString::new("3"),
+            default_winsor_p: DecimalValue::new(rust_decimal_macros::dec!(0.01)),
+            default_clamp_sigma: DecimalValue::new(rust_decimal_macros::dec!(3)),
             per_factor,
         }
     }
@@ -333,7 +332,7 @@ impl Default for FactorCrossSectionConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct FactorOrthogonalizeConfig {
     /// Maximum tolerated absolute pairwise Spearman correlation between factors.
-    pub max_correlation: DecimalString,
+    pub max_correlation: DecimalValue,
     /// Dimensions to neutralize each factor against before normalization.
     pub neutralize_by: Vec<NeutralizeDimension>,
 }
@@ -341,7 +340,7 @@ pub struct FactorOrthogonalizeConfig {
 impl Default for FactorOrthogonalizeConfig {
     fn default() -> Self {
         Self {
-            max_correlation: DecimalString::new("0.90"),
+            max_correlation: DecimalValue::new(rust_decimal_macros::dec!(0.90)),
             neutralize_by: Vec::new(),
         }
     }
@@ -352,16 +351,16 @@ impl Default for FactorOrthogonalizeConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct ReversalAfterShockConfig {
     /// Shock threshold `k`: reversal only fires when `|ret| / realized_vol > k`.
-    pub shock_k: DecimalString,
+    pub shock_k: DecimalValue,
     /// Cap on the reported shock magnitude (bounds an extreme normalized signal).
-    pub shock_cap: DecimalString,
+    pub shock_cap: DecimalValue,
 }
 
 impl Default for ReversalAfterShockConfig {
     fn default() -> Self {
         Self {
-            shock_k: DecimalString::new("2.5"),
-            shock_cap: DecimalString::new("6"),
+            shock_k: DecimalValue::new(rust_decimal_macros::dec!(2.5)),
+            shock_cap: DecimalValue::new(rust_decimal_macros::dec!(6)),
         }
     }
 }
@@ -407,11 +406,11 @@ pub struct FavoriteLongshotConfig {
     pub min_curve_samples: u64,
     /// Two-sided confidence level for the Wilson interval and the IC
     /// significance test (e.g. `0.95`).
-    pub ci_confidence: DecimalString,
+    pub ci_confidence: DecimalValue,
     /// Absolute `|IC|` floor a curve must additionally clear (the significance
     /// test is a Student-t on the correlation; this is a belt-and-suspenders
     /// magnitude floor).
-    pub ic_significance_min: DecimalString,
+    pub ic_significance_min: DecimalValue,
     /// Spacing between the point-in-time sample instants the fit draws over each
     /// market's lifecycle (seconds). The fit samples the entry mid across the
     /// whole life (not a single pre-resolution lead), so the empirical bias is
@@ -428,8 +427,8 @@ impl Default for FavoriteLongshotConfig {
             ttr_bucket_bounds_secs: vec![3_600, 86_400, 604_800],
             min_bin_samples: 200,
             min_curve_samples: 1_000,
-            ci_confidence: DecimalString::new("0.95"),
-            ic_significance_min: DecimalString::new("0.02"),
+            ci_confidence: DecimalValue::new(rust_decimal_macros::dec!(0.95)),
+            ic_significance_min: DecimalValue::new(rust_decimal_macros::dec!(0.02)),
             fit_sample_stride_secs: 21_600,
         }
     }
@@ -469,19 +468,19 @@ impl Default for StructuralFactorsConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct ParticipantConcentrationConfig {
     /// Weight on participant notional Gini.
-    pub gini_weight: DecimalString,
+    pub gini_weight: DecimalValue,
     /// Weight on largest single-participant notional share (CR1).
-    pub cr1_share_weight: DecimalString,
+    pub cr1_share_weight: DecimalValue,
     /// Weight on participant notional HHI.
-    pub hhi_weight: DecimalString,
+    pub hhi_weight: DecimalValue,
 }
 
 impl Default for ParticipantConcentrationConfig {
     fn default() -> Self {
         Self {
-            gini_weight: DecimalString::new("0.50"),
-            cr1_share_weight: DecimalString::new("0.30"),
-            hhi_weight: DecimalString::new("0.20"),
+            gini_weight: DecimalValue::new(rust_decimal_macros::dec!(0.50)),
+            cr1_share_weight: DecimalValue::new(rust_decimal_macros::dec!(0.30)),
+            hhi_weight: DecimalValue::new(rust_decimal_macros::dec!(0.20)),
         }
     }
 }
@@ -499,7 +498,7 @@ pub struct FactorsConfig {
     /// Factor weights keyed by factor name.
     pub factor_weights: FactorWeights,
     /// Minimum confidence for a factor to contribute to scoring.
-    pub min_factor_confidence: DecimalString,
+    pub min_factor_confidence: DecimalValue,
     /// Missing factor handling policy.
     pub missing_factor_policy: MissingFactorPolicy,
     /// Cross-sectional normalization parameters.
@@ -522,7 +521,7 @@ impl Default for FactorsConfig {
         Self {
             enabled_factor_families,
             factor_weights: FactorWeights::default(),
-            min_factor_confidence: DecimalString::new("0.50"),
+            min_factor_confidence: DecimalValue::new(rust_decimal_macros::dec!(0.50)),
             missing_factor_policy: MissingFactorPolicy::ZeroWeight,
             normalization: FactorNormalizationConfig::default(),
             cross_section: FactorCrossSectionConfig::default(),
@@ -696,7 +695,7 @@ pub struct ModelCalibrationConfig {
     /// and its calibration-dataset window.
     pub embargo_secs: u64,
     /// Two-sided confidence level for reliability-bin Wilson intervals.
-    pub ci_confidence: DecimalString,
+    pub ci_confidence: DecimalValue,
 }
 
 impl Default for ModelCalibrationConfig {
@@ -705,7 +704,7 @@ impl Default for ModelCalibrationConfig {
             method: CalibrationMethod::Isotonic,
             min_samples_isotonic: 1_000,
             embargo_secs: 86_400,
-            ci_confidence: DecimalString::new("0.95"),
+            ci_confidence: DecimalValue::new(rust_decimal_macros::dec!(0.95)),
         }
     }
 }
@@ -731,15 +730,15 @@ pub struct ModelConfig {
     /// report round. Governed exactly like the active/shadow pointers.
     pub category_model_pointers: BTreeMap<MarketCategory, ModelVersionRef>,
     /// Minimum model confidence.
-    pub min_model_confidence: DecimalString,
+    pub min_model_confidence: DecimalValue,
     /// Maximum age of a quality-gate report before model load is denied.
     /// Consumed by Phase 3.7 governance (`ModelQualityGate` / load-time deny), not by
     /// the 3.4 `ModelRunner` inference path.
     pub min_quality_gate_age_secs: u64,
     /// Minimum candidate score to enter portfolio pruning.
-    pub candidate_score_floor: DecimalString,
+    pub candidate_score_floor: DecimalValue,
     /// Shadow/live diff threshold.
-    pub shadow_diff_threshold: DecimalString,
+    pub shadow_diff_threshold: DecimalValue,
     /// Model-score probability-calibrator fit policy (Phase 11.3).
     pub calibration: ModelCalibrationConfig,
 }
@@ -751,10 +750,10 @@ impl Default for ModelConfig {
             shadow_model_version_id: None,
             active_exit_model_version_id: None,
             category_model_pointers: BTreeMap::new(),
-            min_model_confidence: DecimalString::new("0.50"),
+            min_model_confidence: DecimalValue::new(rust_decimal_macros::dec!(0.50)),
             min_quality_gate_age_secs: 86_400,
-            candidate_score_floor: DecimalString::new("0.00"),
-            shadow_diff_threshold: DecimalString::new("0.10"),
+            candidate_score_floor: DecimalValue::new(rust_decimal_macros::dec!(0.00)),
+            shadow_diff_threshold: DecimalValue::new(rust_decimal_macros::dec!(0.10)),
             calibration: ModelCalibrationConfig::default(),
         }
     }
@@ -771,31 +770,31 @@ pub struct SellQualityGateConfig {
     /// Minimum `ExitDecision` sample count for a sell scorer to clear the gate.
     pub min_sample_count: u64,
     /// Minimum sell-side label coverage in `[0, 1]`.
-    pub min_label_coverage: DecimalString,
+    pub min_label_coverage: DecimalValue,
     /// Minimum CPCV path-set median rank IC in `[-1, 1]` (hard gate; Phase
     /// 11.5.1 — renamed and upgraded from the deleted single-path soft
     /// `min_exit_alpha_rank_ic`, mirroring the Buy-side
     /// `research.validation.gates.rank_ic_min` upgrade Phase 11.5 already
     /// made).
-    pub rank_ic_min: DecimalString,
+    pub rank_ic_min: DecimalValue,
     /// Maximum tolerated Probability of Backtest Overfitting (hard gate;
     /// Phase 11.5.1).
-    pub max_pbo: DecimalString,
+    pub max_pbo: DecimalValue,
     /// Minimum fraction of `ExitDecision` rows simulated from full L2 books.
-    pub min_l2_book_fidelity_ratio: DecimalString,
+    pub min_l2_book_fidelity_ratio: DecimalValue,
     /// Maximum fraction of `ExitDecision` rows using microstructure fallback.
-    pub max_fallback_ratio: DecimalString,
+    pub max_fallback_ratio: DecimalValue,
 }
 
 impl Default for SellQualityGateConfig {
     fn default() -> Self {
         Self {
             min_sample_count: 200,
-            min_label_coverage: DecimalString::new("0.60"),
-            rank_ic_min: DecimalString::new("0.02"),
-            max_pbo: DecimalString::new("0.5"),
-            min_l2_book_fidelity_ratio: DecimalString::new("0.50"),
-            max_fallback_ratio: DecimalString::new("0.50"),
+            min_label_coverage: DecimalValue::new(rust_decimal_macros::dec!(0.60)),
+            rank_ic_min: DecimalValue::new(rust_decimal_macros::dec!(0.02)),
+            max_pbo: DecimalValue::new(rust_decimal_macros::dec!(0.5)),
+            min_l2_book_fidelity_ratio: DecimalValue::new(rust_decimal_macros::dec!(0.50)),
+            max_fallback_ratio: DecimalValue::new(rust_decimal_macros::dec!(0.50)),
         }
     }
 }
@@ -804,7 +803,7 @@ impl Default for SellQualityGateConfig {
 ///
 /// Hot-reloadable knobs consumed by the model quality gate and the publish /
 /// rollback / dataset-promotion governance. Decimal-valued thresholds are
-/// stored as [`DecimalString`] (lossless), matching every other money /
+/// stored as [`DecimalValue`] (lossless), matching every other money /
 /// probability config field; the core governance layer parses them into the
 /// research `QualityGateThresholds`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -813,17 +812,17 @@ pub struct QualityGateConfig {
     /// Minimum resolved sample count for a model / dataset to clear the gate.
     pub min_sample_count: u64,
     /// Minimum label coverage in `[0, 1]`.
-    pub min_label_coverage: DecimalString,
+    pub min_label_coverage: DecimalValue,
     /// Minimum planned-sample materialization coverage in `[0, 1]`.
-    pub min_materialization_coverage: DecimalString,
+    pub min_materialization_coverage: DecimalValue,
     /// Maximum tolerated backtest drawdown in `[0, 1]`.
-    pub max_drawdown: DecimalString,
+    pub max_drawdown: DecimalValue,
     /// Minimum liquidity-exit feasibility in `[0, 1]` (auto-execution gate).
-    pub min_liquidity_exit_feasibility: DecimalString,
+    pub min_liquidity_exit_feasibility: DecimalValue,
     /// Minimum shadow overlap stability in `[0, 1]` (publish gate).
-    pub min_shadow_overlap_stability: DecimalString,
+    pub min_shadow_overlap_stability: DecimalValue,
     /// Maximum (soft) per-category sample concentration in `[0, 1]`.
-    pub max_category_concentration: DecimalString,
+    pub max_category_concentration: DecimalValue,
     /// Minimum shadow comparison window (seconds) required before publish.
     pub required_shadow_window_secs: u64,
     /// Sell-side hold-vs-exit scorer thresholds (Phase 06.1).
@@ -834,12 +833,12 @@ impl Default for QualityGateConfig {
     fn default() -> Self {
         Self {
             min_sample_count: 500,
-            min_label_coverage: DecimalString::new("0.70"),
-            min_materialization_coverage: DecimalString::new("0.95"),
-            max_drawdown: DecimalString::new("0.30"),
-            min_liquidity_exit_feasibility: DecimalString::new("0.90"),
-            min_shadow_overlap_stability: DecimalString::new("0.60"),
-            max_category_concentration: DecimalString::new("0.60"),
+            min_label_coverage: DecimalValue::new(rust_decimal_macros::dec!(0.70)),
+            min_materialization_coverage: DecimalValue::new(rust_decimal_macros::dec!(0.95)),
+            max_drawdown: DecimalValue::new(rust_decimal_macros::dec!(0.30)),
+            min_liquidity_exit_feasibility: DecimalValue::new(rust_decimal_macros::dec!(0.90)),
+            min_shadow_overlap_stability: DecimalValue::new(rust_decimal_macros::dec!(0.60)),
+            max_category_concentration: DecimalValue::new(rust_decimal_macros::dec!(0.60)),
             required_shadow_window_secs: 86_400,
             sell: SellQualityGateConfig::default(),
         }
@@ -859,26 +858,22 @@ pub struct TrainingConfig {
     /// Snapshots older than `as_of - max_book_staleness_ms` are treated as missing.
     pub max_book_staleness_ms: u64,
     /// Minimum forward top-1 depth (USD) for the `liquidity_exit_possible` label.
-    pub min_exit_depth_usd: DecimalString,
+    pub min_exit_depth_usd: DecimalValue,
 }
 
 impl Default for TrainingConfig {
     fn default() -> Self {
         Self {
             max_book_staleness_ms: 300_000,
-            min_exit_depth_usd: DecimalString::new("100"),
+            min_exit_depth_usd: DecimalValue::new(rust_decimal_macros::dec!(100)),
         }
     }
 }
 
 impl TrainingConfig {
     /// Resolve [`TrainingConfig::min_exit_depth_usd`] into a typed [`Usd`] value.
-    pub fn min_exit_depth_usd_typed(&self) -> Result<Usd, String> {
-        self.min_exit_depth_usd
-            .value
-            .parse::<Decimal>()
-            .map(Usd::new)
-            .map_err(|error| format!("training.min_exit_depth_usd is not a valid decimal: {error}"))
+    pub const fn min_exit_depth_usd_typed(&self) -> Usd {
+        Usd::new(self.min_exit_depth_usd.value)
     }
 }
 
@@ -886,8 +881,6 @@ impl TrainingConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct ReportsConfig {
-    /// Configured report schedules.
-    pub schedules: Vec<ReportScheduleConfig>,
     /// Deployment-proven upper bound for one complete catalog-visible report.
     /// Exceeding it fails the report; it never truncates market candidates.
     pub hard_candidate_ceiling: u32,
@@ -907,7 +900,7 @@ pub struct ReportsConfig {
     /// `as_of + effective_horizon * entry_window_ratio`. `0.5` enters only while
     /// at least half the signal's edge remains (the half-life point); the
     /// time-stop / exit still uses the full effective horizon.
-    pub entry_window_ratio: DecimalString,
+    pub entry_window_ratio: DecimalValue,
     /// Whether ad-hoc report generation is enabled.
     pub ad_hoc_report_enabled: bool,
     /// Delivery policy name.
@@ -917,13 +910,12 @@ pub struct ReportsConfig {
 impl Default for ReportsConfig {
     fn default() -> Self {
         Self {
-            schedules: vec![ReportScheduleConfig::default()],
             hard_candidate_ceiling: 100_000,
             max_top_n: 100,
             ad_hoc_default_top_n: 20,
             ad_hoc_default_knowledge_lag_secs: 10,
             fallback_horizon_secs: 86_400,
-            entry_window_ratio: DecimalString::new("0.5"),
+            entry_window_ratio: DecimalValue::new(rust_decimal_macros::dec!(0.5)),
             ad_hoc_report_enabled: false,
             delivery_policy: ReportDeliveryPolicy::StoreAndNotify,
         }
@@ -963,22 +955,22 @@ impl Default for ReportScheduleConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct KellySafetyConfig {
     /// Edge-uncertainty shrink coefficient `k` in `shrink = clamp(1 − k·edge_std, floor, 1)`.
-    pub edge_uncertainty_k: DecimalString,
+    pub edge_uncertainty_k: DecimalValue,
     /// Floor on the edge-uncertainty shrink multiplier.
-    pub edge_uncertainty_floor: DecimalString,
+    pub edge_uncertainty_floor: DecimalValue,
     /// Hard cap on total simultaneous portfolio exposure as a fraction of bankroll.
-    pub max_aggregate_exposure_pct: DecimalString,
+    pub max_aggregate_exposure_pct: DecimalValue,
     /// Kelly-stage binding is emitted when the dominant shrink falls below this threshold.
-    pub binding_materiality_threshold: DecimalString,
+    pub binding_materiality_threshold: DecimalValue,
 }
 
 impl Default for KellySafetyConfig {
     fn default() -> Self {
         Self {
-            edge_uncertainty_k: DecimalString::new("1.0"),
-            edge_uncertainty_floor: DecimalString::new("0.5"),
-            max_aggregate_exposure_pct: DecimalString::new("0.25"),
-            binding_materiality_threshold: DecimalString::new("0.90"),
+            edge_uncertainty_k: DecimalValue::new(rust_decimal_macros::dec!(1.0)),
+            edge_uncertainty_floor: DecimalValue::new(rust_decimal_macros::dec!(0.5)),
+            max_aggregate_exposure_pct: DecimalValue::new(rust_decimal_macros::dec!(0.25)),
+            binding_materiality_threshold: DecimalValue::new(rust_decimal_macros::dec!(0.90)),
         }
     }
 }
@@ -1010,19 +1002,19 @@ pub struct PortfolioBudget {
     ///
     /// `equity = min(real net-liquidation value, total_budget_usd)`; this value
     /// **never** stands in for equity itself.
-    pub total_budget_usd: DecimalString,
+    pub total_budget_usd: DecimalValue,
     /// Minimum useful recommendation size in USD.
-    pub min_recommendation_usd: DecimalString,
+    pub min_recommendation_usd: DecimalValue,
     /// Maximum USD allocated to one recommendation.
-    pub max_single_recommendation_usd: DecimalString,
+    pub max_single_recommendation_usd: DecimalValue,
 }
 
 impl Default for PortfolioBudget {
     fn default() -> Self {
         Self {
-            total_budget_usd: DecimalString::new("0"),
-            min_recommendation_usd: DecimalString::new("0"),
-            max_single_recommendation_usd: DecimalString::new("0"),
+            total_budget_usd: DecimalValue::new(rust_decimal_macros::dec!(0)),
+            min_recommendation_usd: DecimalValue::new(rust_decimal_macros::dec!(0)),
+            max_single_recommendation_usd: DecimalValue::new(rust_decimal_macros::dec!(0)),
         }
     }
 }
@@ -1032,15 +1024,15 @@ impl Default for PortfolioBudget {
 #[serde(default, deny_unknown_fields)]
 pub struct PortfolioConstraints {
     /// Maximum USD exposure per market.
-    pub max_market_exposure_usd: DecimalString,
+    pub max_market_exposure_usd: DecimalValue,
     /// Maximum USD exposure per event.
-    pub max_event_exposure_usd: DecimalString,
+    pub max_event_exposure_usd: DecimalValue,
     /// Maximum USD exposure per category.
-    pub max_category_exposure_usd: DecimalString,
+    pub max_category_exposure_usd: DecimalValue,
     /// Maximum correlated exposure in USD.
-    pub max_correlated_exposure_usd: DecimalString,
+    pub max_correlated_exposure_usd: DecimalValue,
     /// Maximum fraction of visible liquidity an allocation may consume.
-    pub liquidity_usage_cap_pct: DecimalString,
+    pub liquidity_usage_cap_pct: DecimalValue,
     /// Correlation-cluster estimation policy gating `max_correlated_exposure_usd`.
     pub correlation: CorrelationConfig,
 }
@@ -1048,11 +1040,11 @@ pub struct PortfolioConstraints {
 impl Default for PortfolioConstraints {
     fn default() -> Self {
         Self {
-            max_market_exposure_usd: DecimalString::new("0"),
-            max_event_exposure_usd: DecimalString::new("0"),
-            max_category_exposure_usd: DecimalString::new("0"),
-            max_correlated_exposure_usd: DecimalString::new("0"),
-            liquidity_usage_cap_pct: DecimalString::new("0.05"),
+            max_market_exposure_usd: DecimalValue::new(rust_decimal_macros::dec!(0)),
+            max_event_exposure_usd: DecimalValue::new(rust_decimal_macros::dec!(0)),
+            max_category_exposure_usd: DecimalValue::new(rust_decimal_macros::dec!(0)),
+            max_correlated_exposure_usd: DecimalValue::new(rust_decimal_macros::dec!(0)),
+            liquidity_usage_cap_pct: DecimalValue::new(rust_decimal_macros::dec!(0.05)),
             correlation: CorrelationConfig::default(),
         }
     }
@@ -1154,11 +1146,11 @@ pub struct SemiAutoCanaryConfig {
     /// Canonical content hash that must match the authorized policy artifact.
     pub policy_content_hash: Option<String>,
     /// Exact validated total cash-budget tiers admitted by this canary (v14: only `$25`).
-    pub allowed_cash_budget_tiers_usd: Vec<DecimalString>,
+    pub allowed_cash_budget_tiers_usd: Vec<DecimalValue>,
     /// Transactional global cap on capital-holding or in-flight intents.
     pub max_open_intents: u32,
     /// Transactional cumulative cash-budget cap for one report.
-    pub max_total_cash_per_report: DecimalString,
+    pub max_total_cash_per_report: DecimalValue,
     /// RFC3339 authorization deadline; intents may not outlive this instant.
     pub expires_at: Option<String>,
 }
@@ -1171,7 +1163,7 @@ impl Default for SemiAutoCanaryConfig {
             policy_content_hash: None,
             allowed_cash_budget_tiers_usd: Vec::new(),
             max_open_intents: 0,
-            max_total_cash_per_report: DecimalString::new("0"),
+            max_total_cash_per_report: DecimalValue::new(rust_decimal_macros::dec!(0)),
             expires_at: None,
         }
     }
@@ -1186,11 +1178,11 @@ pub struct AutoExecutionConfig {
     /// Maximum orders auto-created per report.
     pub max_orders_per_report: u32,
     /// Maximum total USD auto-executed per report.
-    pub max_total_usd_per_report: DecimalString,
+    pub max_total_usd_per_report: DecimalValue,
     /// Minimum score for auto-execution.
-    pub min_score: DecimalString,
+    pub min_score: DecimalValue,
     /// Minimum confidence for auto-execution.
-    pub min_confidence: DecimalString,
+    pub min_confidence: DecimalValue,
 }
 
 impl Default for AutoExecutionConfig {
@@ -1198,9 +1190,9 @@ impl Default for AutoExecutionConfig {
         Self {
             enabled: false,
             max_orders_per_report: 0,
-            max_total_usd_per_report: DecimalString::new("0"),
-            min_score: DecimalString::new("0.00"),
-            min_confidence: DecimalString::new("1.00"),
+            max_total_usd_per_report: DecimalValue::new(rust_decimal_macros::dec!(0)),
+            min_score: DecimalValue::new(rust_decimal_macros::dec!(0.00)),
+            min_confidence: DecimalValue::new(rust_decimal_macros::dec!(1.00)),
         }
     }
 }
@@ -1246,13 +1238,13 @@ pub struct ResearchTrainingConfig {
     /// Simplex optimizer policy.
     pub optimizer: TrainingOptimizerKind,
     /// Weight on lower-tail portfolio-return penalty.
-    pub lambda_tail: DecimalString,
+    pub lambda_tail: DecimalValue,
     /// Lower-tail fraction for tail penalty (e.g. `0.10` = worst decile).
-    pub tail_fraction: DecimalString,
+    pub tail_fraction: DecimalValue,
     /// Weight on mean per-tick allocation turnover.
-    pub lambda_turnover: DecimalString,
+    pub lambda_turnover: DecimalValue,
     /// L2 coefficient on `Σ weightᵢ²`.
-    pub lambda_l2: DecimalString,
+    pub lambda_l2: DecimalValue,
     /// Truncation `k` for diagnostic NDCG@k (not part of the training loss).
     pub ndcg_k: u32,
     /// Truncation for score-derived `TopN` pseudo-portfolio used by tail/turnover.
@@ -1264,10 +1256,10 @@ impl Default for ResearchTrainingConfig {
         Self {
             rank_loss: RankLossKind::default(),
             optimizer: TrainingOptimizerKind::default(),
-            lambda_tail: DecimalString::new("0.5"),
-            tail_fraction: DecimalString::new("0.10"),
-            lambda_turnover: DecimalString::new("0.2"),
-            lambda_l2: DecimalString::new("0.01"),
+            lambda_tail: DecimalValue::new(rust_decimal_macros::dec!(0.5)),
+            tail_fraction: DecimalValue::new(rust_decimal_macros::dec!(0.10)),
+            lambda_turnover: DecimalValue::new(rust_decimal_macros::dec!(0.2)),
+            lambda_l2: DecimalValue::new(rust_decimal_macros::dec!(0.01)),
             ndcg_k: 20,
             pseudo_top_n: 20,
         }
@@ -1282,13 +1274,13 @@ impl Default for ResearchTrainingConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct ResearchValidationPurgeConfig {
     /// Embargo window as a fraction of the full timeline span.
-    pub embargo_pct: DecimalString,
+    pub embargo_pct: DecimalValue,
 }
 
 impl Default for ResearchValidationPurgeConfig {
     fn default() -> Self {
         Self {
-            embargo_pct: DecimalString::new("0.02"),
+            embargo_pct: DecimalValue::new(rust_decimal_macros::dec!(0.02)),
         }
     }
 }
@@ -1323,13 +1315,13 @@ impl Default for ResearchValidationCpcvConfig {
 pub struct ResearchValidationTrialsConfig {
     /// Multipliers applied to the base `lambda_tail`/`lambda_turnover`/`lambda_l2`
     /// (`WeightedFactor` trial grid).
-    pub lambda_multipliers: Vec<DecimalString>,
+    pub lambda_multipliers: Vec<DecimalValue>,
     /// Rank-loss variants to cross with each lambda multiplier (`WeightedFactor`).
     pub rank_loss_kinds: Vec<RankLossKind>,
     /// Multipliers applied to base `ForestParams.n_trees` (classical trial grid).
-    pub forest_n_trees_multipliers: Vec<DecimalString>,
+    pub forest_n_trees_multipliers: Vec<DecimalValue>,
     /// Multipliers applied to base `LinearParams.alpha` (classical trial grid).
-    pub linear_alpha_multipliers: Vec<DecimalString>,
+    pub linear_alpha_multipliers: Vec<DecimalValue>,
     /// Hard cap on the number of trials the selected family grid may expand to.
     pub max_trials: u32,
 }
@@ -1338,23 +1330,23 @@ impl Default for ResearchValidationTrialsConfig {
     fn default() -> Self {
         Self {
             lambda_multipliers: vec![
-                DecimalString::new("0.5"),
-                DecimalString::new("1"),
-                DecimalString::new("2"),
+                DecimalValue::new(rust_decimal_macros::dec!(0.5)),
+                DecimalValue::new(rust_decimal_macros::dec!(1)),
+                DecimalValue::new(rust_decimal_macros::dec!(2)),
             ],
             rank_loss_kinds: vec![
                 RankLossKind::RankIcWeightedRanknet,
                 RankLossKind::PairwiseRanknet,
             ],
             forest_n_trees_multipliers: vec![
-                DecimalString::new("0.5"),
-                DecimalString::new("1"),
-                DecimalString::new("2"),
+                DecimalValue::new(rust_decimal_macros::dec!(0.5)),
+                DecimalValue::new(rust_decimal_macros::dec!(1)),
+                DecimalValue::new(rust_decimal_macros::dec!(2)),
             ],
             linear_alpha_multipliers: vec![
-                DecimalString::new("0.5"),
-                DecimalString::new("1"),
-                DecimalString::new("2"),
+                DecimalValue::new(rust_decimal_macros::dec!(0.5)),
+                DecimalValue::new(rust_decimal_macros::dec!(1)),
+                DecimalValue::new(rust_decimal_macros::dec!(2)),
             ],
             max_trials: 32,
         }
@@ -1387,31 +1379,31 @@ impl Default for ResearchValidationPboConfig {
 pub struct ResearchValidationGatesConfig {
     /// Minimum CPCV path-set median rank IC (hard gate; replaces the deleted
     /// single-path `quality_gate.min_rank_ic` soft threshold).
-    pub rank_ic_min: DecimalString,
+    pub rank_ic_min: DecimalValue,
     /// Target significance (`α`) the Deflated Sharpe Ratio must clear:
     /// `deflated_sharpe >= 1 - dsr_significance` (hard gate).
-    pub dsr_significance: DecimalString,
+    pub dsr_significance: DecimalValue,
     /// Maximum tolerated Probability of Backtest Overfitting (hard gate).
-    pub max_pbo: DecimalString,
+    pub max_pbo: DecimalValue,
     /// Maximum tolerated single-path turnover (hard gate; risk/execution
     /// realism, reads the debug-view single-path `BacktestReport`, not the
     /// CPCV path set).
-    pub max_turnover: DecimalString,
+    pub max_turnover: DecimalValue,
     /// Minimum tolerated single-path tail loss, in bps (hard gate; `tail_loss`
     /// is typically negative, so this is a **floor**, not a ceiling — named
     /// accordingly, correcting the original design draft's ambiguous
     /// `max_tail_loss`).
-    pub min_tail_loss_bps: DecimalString,
+    pub min_tail_loss_bps: DecimalValue,
 }
 
 impl Default for ResearchValidationGatesConfig {
     fn default() -> Self {
         Self {
-            rank_ic_min: DecimalString::new("0.02"),
-            dsr_significance: DecimalString::new("0.05"),
-            max_pbo: DecimalString::new("0.5"),
-            max_turnover: DecimalString::new("0.5"),
-            min_tail_loss_bps: DecimalString::new("-500"),
+            rank_ic_min: DecimalValue::new(rust_decimal_macros::dec!(0.02)),
+            dsr_significance: DecimalValue::new(rust_decimal_macros::dec!(0.05)),
+            max_pbo: DecimalValue::new(rust_decimal_macros::dec!(0.5)),
+            max_turnover: DecimalValue::new(rust_decimal_macros::dec!(0.5)),
+            min_tail_loss_bps: DecimalValue::new(rust_decimal_macros::dec!(-500)),
         }
     }
 }
@@ -1477,42 +1469,4 @@ pub struct ResearchConfig {
     pub validation: ResearchValidationConfig,
     /// Executable L2 policy-fit operational limits.
     pub policy_validation: PolicyValidationConfig,
-}
-
-/// Runtime-only controls for durable attribution feedback cycles.
-///
-/// Model methodology, evaluation windows, and publish thresholds deliberately
-/// do not live here: they are immutable members of the selected research
-/// profile. These fields only control scheduling and bounded worker resources.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(default, deny_unknown_fields)]
-pub struct FeedbackConfig {
-    /// Whether scheduled and label-maturity triggers may enqueue cycles.
-    pub enabled: bool,
-    /// Cadence for the scheduled trigger.
-    pub cadence_secs: u64,
-    /// Maximum feedback cycles that may execute concurrently.
-    pub max_concurrency: u32,
-    /// Hard wall-clock deadline for one cycle.
-    pub run_timeout_secs: u64,
-    /// Initial retry backoff for retryable stage failures.
-    pub retry_backoff_secs: u64,
-    /// Whether a passing cycle may atomically publish a model + factor bundle.
-    pub auto_publish_enabled: bool,
-    /// Closed category allowlist for automatic model + factor publication.
-    pub auto_publish_categories: Vec<MarketCategory>,
-}
-
-impl Default for FeedbackConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            cadence_secs: 86_400,
-            max_concurrency: 1,
-            run_timeout_secs: 14_400,
-            retry_backoff_secs: 60,
-            auto_publish_enabled: false,
-            auto_publish_categories: vec![MarketCategory::Crypto, MarketCategory::Weather],
-        }
-    }
 }

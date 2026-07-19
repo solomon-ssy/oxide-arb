@@ -1,5 +1,13 @@
 # Quant Pivot 重构设计索引
 
+<!-- quant-pivot-lifecycle-contract:v1 -->
+> **Lifecycle contract**
+> - `lifecycle_assumption`: 项目尚未正式生产上线，当前状态为 `pre_production_resettable`，系统自有基线统一为 `boot` / schema version `1`。
+> - `schema_data_version_impact`: 本文中的历史版本号与递增路径不再具有实施效力；当前实现不迁移测试数据、旧结构或旧版本。
+> - `pre_production_behavior`: 允许 clean-break、migration squash 与全新基础设施 bootstrap，但任何数据销毁仍需操作者单独授权。
+> - `production_frozen_behavior`: 一旦完成不可逆 production seal，后续变更必须提供前向 migration、兼容性评估、回滚方案与数据验证。
+> - `rollback_and_data_verification`: 封存前通过清空后的 fresh-install 验证；封存后不得回退到 boot reset。
+
 > 状态：生产级破坏式重构设计
 >
 > 范围：仅限 Polymarket 的 quant-pivot，彻底替换当前 Endgame arbitrage 系统
@@ -33,7 +41,7 @@ Polymarket facts -> features -> factors/models -> portfolio plan
 4. [`03-data-factor-model-pipeline.md`](03-data-factor-model-pipeline.md)：数据、特征、因子、模型、训练、point-in-time 验证平面（概念规格）。可执行的子phase实施契约（3.0–3.7）见 [`phase-03/README.md`](phase-03/README.md)。
 5. [`04-topn-report-and-recommendation.md`](04-topn-report-and-recommendation.md)：TopN 报告 payload，明确买什么、什么时候买、买多少、什么时候卖、卖多少、入场触发、止盈、止损、出场节点。
 6. [`05-execution-risk-and-governance.md`](05-execution-risk-and-governance.md)：`report_only`、`semi_auto`、`auto_execution` 的语义、审批、OrderIntent、组合风险、审计规则。
-7. [`06-config-deploy-and-ops.md`](06-config-deploy-and-ops.md)：deploy-config、runtime-config v17、CI、migration、Docker、observability、runbook 调整。
+7. [`06-config-deploy-and-ops.md`](06-config-deploy-and-ops.md)：Deploy Config、六类 boot typed policy、CI、migration、Docker、observability、runbook 调整。
 8. [`08-third-party-crates-and-ml-stack.md`](08-third-party-crates-and-ml-stack.md)：第三方 crate、模型训练、推理、优化、依赖引入顺序和 MSRV/native 风险。
 9. [`09-account-capital-position-reconciliation.md`](09-account-capital-position-reconciliation.md)：账户/资本/持仓/对账平面——`AccountSnapshot`、planner 资金感知签名、资金状态机、对账证据链、Polymarket 余额/持仓数据源（设计先行，实现分相位到 Phase 4/5/6）。
 10. [`08-cold-start-production-closeout.md`](08-cold-start-production-closeout.md)：冷启动、schema、catalog、bootstrap、parity、认证和 UI 的生产收尾契约与验收矩阵。
@@ -103,7 +111,7 @@ Polymarket facts -> features -> factors/models -> portfolio plan
 
 - 添加替代代码前必须删除哪些 crate、模块、类型和配置；
 - 新领域类型名、新表名、新 ClickHouse fact 名；
-- deploy-config key 与 runtime-config v17 path；
+- Deploy Config key、typed policy resource 或 immutable artifact owner，以及精确生效边界；
 - 生产不变量和失败语义；
 - Phase 完成前必须更新的测试、benchmark、architecture lint。
 - 第三方 crate 选型、feature gate、MSRV/native 依赖风险和替代方案。

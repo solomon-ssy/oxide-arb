@@ -13,7 +13,7 @@
 //! too-small or degenerate cross-section yields
 //! [`NormalizedFactor::Indeterminate`](crate::factors::normalize::NormalizedFactor).
 
-use std::{collections::BTreeMap, slice, str::FromStr, sync::Arc};
+use std::{collections::BTreeMap, slice, sync::Arc};
 
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
@@ -310,7 +310,7 @@ impl FactorEngine {
         references: &FrozenReferenceQuantiles,
         parallel: bool,
     ) -> QuantResult<Vec<MarketFactorOutcome>> {
-        let floor = parse_floor(config)?;
+        let floor = config.min_factor_confidence.value;
         let policy = config.missing_factor_policy;
         let factors = self.registry.factors();
         let definition_ids: Vec<FactorDefinitionId> = factors
@@ -619,11 +619,4 @@ fn reject_verdict(scored: &ScoredFactor, floor: Decimal) -> FactorEligibility {
             ),
         },
     }
-}
-
-/// Parse the runtime confidence floor, failing closed on a malformed value.
-fn parse_floor(config: &FactorsConfig) -> QuantResult<Decimal> {
-    let raw = config.min_factor_confidence.value.trim();
-    Decimal::from_str(raw)
-        .map_err(|err| QuantError::config(format!("invalid min_factor_confidence `{raw}`: {err}")))
 }

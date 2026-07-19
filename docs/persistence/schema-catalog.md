@@ -106,17 +106,18 @@ seed metadata 必须通过相关表的 schema module 暴露。
 静态 seed：
 
 - 定义稳定的 `SeedSpec`，包含 `id`、`version`、`checksum`、`conflict_policy`。
-- operator-owned 数据，例如 `runtime_config`，必须使用 no-clobber 策略。
+- operator-owned 数据，例如 governed policy revision，必须使用 no-clobber 策略。
 - loader SQL 必须确定、幂等。
 
-`runtime_config_version.config_json` 的类型化 schema 是
-`quant_pivot_models::runtime_config::RuntimeConfig`（固定 `schema_version = 1`，
-`deny_unknown_fields`）。bootstrap 在无活动版本（或活动版本无法通过类型化解析）时
-以 `RuntimeConfig::default()` 重新播种（`source = Bootstrap`）；之后所有变更只
-通过治理 API（create → preflight → activate）写入，TOML 永不覆盖该表。激活后
-由 `RuntimeConfigApplicator` 按 push 模型传播到 `RuntimeConfigSubscribers` 的
-全部类型化订阅者字段（可失败 reload 先 stage、全部成功才 commit），最后 swap
-进程内 `RuntimeConfigStore`。
+六类 policy revision 的持久化类型是
+`quant_pivot_models::runtime_config::PolicyDocument`：闭集 enum 承载六个强类型 struct，
+每个资源固定 `schema_version = 1` 并拒绝 unknown fields。`JSONB` 只作为不可变聚合的
+物理存储，不以 `serde_json::Value` 穿越 repository/domain 边界，且任何可查询字段都
+必须拆为原生列或 PostgreSQL enum。bootstrap 只播种首个 boot revision bundle；之后
+所有变更只通过 Draft → Validate/Preflight → Approve → Activate 写入，TOML 永不覆盖
+policy 表。激活时 `PolicySnapshotApplicator` 先 prepare 全部强类型 consumer snapshot，
+数据库 CAS 成功后再原子 publish 到 `DecisionPolicyStore`；任一 prepare/CAS 失败均保持
+旧 snapshot，不做隐式自动回滚。
 
 依赖型 graph seed：
 

@@ -3,7 +3,7 @@
 //! The dependency-inversion boundary between an operator-facing caller (HTTP
 //! routes, jobs, tests) and the core governance service. The [`GovernanceActor`]
 //! is recorded in the audit trail; Casbin role enforcement is applied at the HTTP
-//! layer via `publication:publish` / `publication:rollback` policies.
+//! layer via governed publication policies.
 
 use async_trait::async_trait;
 use quant_pivot_error::QuantResult;
@@ -45,15 +45,6 @@ pub struct PublishModelCommand {
     pub reason: String,
 }
 
-/// Service input to roll back a published model version to its predecessor.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RollbackModelCommand {
-    /// The currently published version to retire.
-    pub model_version_id: ModelVersionId,
-    /// Operator reason (audited).
-    pub reason: String,
-}
-
 /// Service input to retire a published model version without restoring a predecessor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RetireModelCommand {
@@ -63,7 +54,7 @@ pub struct RetireModelCommand {
     pub reason: String,
 }
 
-/// Governance orchestration boundary (publish / rollback),
+/// Governance orchestration boundary for artifact publication lifecycle,
 /// implemented in `quant-pivot-core` and injected into `AppContext`.
 #[async_trait]
 pub trait ModelGovernancePort: Send + Sync {
@@ -76,18 +67,8 @@ pub trait ModelGovernancePort: Send + Sync {
         actor: GovernanceActor,
     ) -> QuantResult<ModelVersionInfo>;
 
-    /// Roll back a published version only after fresh full frozen parity,
-    /// clear-latch generation, current publish-quality/calibration gates, and
-    /// artifact validation. Atomically retires the exact current and restores
-    /// its audited retired predecessor, then writes the permit-bound audit.
-    async fn rollback(
-        &self,
-        command: RollbackModelCommand,
-        actor: GovernanceActor,
-    ) -> QuantResult<ModelVersionInfo>;
-
-    /// Retire a published version without restoring a predecessor. Clears runtime
-    /// config pointers when they reference the retired version.
+    /// Retire a published version only after all `ModelRouting` references have
+    /// moved away from it.
     async fn retire(
         &self,
         command: RetireModelCommand,

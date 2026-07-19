@@ -66,14 +66,7 @@ impl WeightOverlay {
         let mut weights = BTreeMap::new();
         let mut sum = Decimal::ZERO;
         for (name, value) in &factor_weights.weights {
-            let weight = value.value.parse::<Decimal>().map_err(|error| {
-                ResearchError::InvalidModelArtifact {
-                    detail: format!(
-                        "factor `{name}` overlay weight `{}` is not a decimal: {error}",
-                        value.value
-                    ),
-                }
-            })?;
+            let weight = value.value;
             if weight < Decimal::ZERO {
                 return Err(ResearchError::InvalidModelArtifact {
                     detail: format!("factor `{name}` overlay weight {weight} is negative"),
@@ -143,7 +136,7 @@ impl WeightOverlay {
 #[cfg(test)]
 mod tests {
     use super::WeightOverlay;
-    use quant_pivot_models::runtime_config::{DecimalString, FactorWeights};
+    use quant_pivot_models::runtime_config::{DecimalValue, FactorWeights};
     use rust_decimal_macros::dec;
     use std::collections::BTreeMap;
 
@@ -156,7 +149,12 @@ mod tests {
         FactorWeights {
             weights: pairs
                 .iter()
-                .map(|(name, value)| ((*name).to_owned(), DecimalString::new(*value)))
+                .map(|(name, value)| {
+                    (
+                        (*name).to_owned(),
+                        DecimalValue::new(value.parse().expect("fixture weight must be decimal")),
+                    )
+                })
                 .collect(),
         }
     }

@@ -5,17 +5,15 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError, storage::StorageError};
-#[cfg(test)]
-use quant_pivot_models::runtime_config::RUNTIME_CONFIG_SCHEMA_VERSION;
 use quant_pivot_models::{
     domain::{
-        AcknowledgeFeatureParityLatchRequest, FeatureIntegrityActionContext,
-        FeatureIntegrityLatchView, FeatureIntegrityPort, FeatureIntegritySummaryView,
-        FeatureParityEventListQuery, FeatureParityEventView, FeatureParityJobParams,
-        FeatureParityRunInfo, FeatureParityRunListQuery, FeatureParityRunView, NewFeatureParityRun,
-        NewRecommendationReport, NewReportFeatureParity, NewResearchJob, Paginated,
-        RecommendationReportInfo, ReportRunInfo, ResearchJobView, RunFullFeatureParityRequest,
-        RuntimeConfigVersionInfo,
+        AcknowledgeFeatureParityLatchRequest, DecisionPolicySnapshotInfo,
+        FeatureIntegrityActionContext, FeatureIntegrityLatchView, FeatureIntegrityPort,
+        FeatureIntegritySummaryView, FeatureParityEventListQuery, FeatureParityEventView,
+        FeatureParityJobParams, FeatureParityRunInfo, FeatureParityRunListQuery,
+        FeatureParityRunView, NewFeatureParityRun, NewRecommendationReport, NewReportFeatureParity,
+        NewResearchJob, Paginated, RecommendationReportInfo, ReportRunInfo, ResearchJobView,
+        RunFullFeatureParityRequest,
     },
     enums::{
         quant::{
@@ -24,15 +22,15 @@ use quant_pivot_models::{
         },
         system::CapabilityReason,
     },
-    runtime_config::{RuntimeConfig, ScheduleCadence, preview_fire_times},
+    runtime_config::{DecisionPolicySnapshot, ScheduleCadence, preview_fire_times},
     types::{
-        ContentHash, FeatureParityRunId, FeatureParityStateId, RecommendationReportId,
-        ResearchJobId, RuntimeConfigVersionId,
+        ContentHash, DecisionPolicySnapshotId, FeatureParityRunId, FeatureParityStateId,
+        RecommendationReportId, ResearchJobId,
     },
 };
 use quant_pivot_repository::traits::{
     CatalogLedgerRepository, EnqueueFrozenFeatureParityOutcome, FeatureParityEventRepository,
-    FeatureParityLatchActor, FeatureParityRepository, RuntimeConfigVersionRepository,
+    FeatureParityLatchActor, FeatureParityRepository, PolicyRepository,
 };
 use quant_pivot_research::{features::FeatureSchema, hashing::ResearchHasher};
 
@@ -64,7 +62,7 @@ pub enum AutomaticFullParityOutcome {
 /// parity. It freezes the exact runtime/feature contract in every durable job.
 pub struct FeatureParityRunCoordinator {
     parity: Arc<dyn FeatureParityRepository>,
-    runtime_config: Arc<dyn RuntimeConfigVersionRepository>,
+    runtime_config: Arc<dyn PolicyRepository>,
     max_recovery_attempts: i32,
 }
 
@@ -72,7 +70,7 @@ impl FeatureParityRunCoordinator {
     #[must_use]
     pub const fn new(
         parity: Arc<dyn FeatureParityRepository>,
-        runtime_config: Arc<dyn RuntimeConfigVersionRepository>,
+        runtime_config: Arc<dyn PolicyRepository>,
         max_recovery_attempts: i32,
     ) -> Self {
         Self {
@@ -93,7 +91,7 @@ impl FeatureParityRunCoordinator {
         report_run: &ReportRunInfo,
     ) -> QuantResult<NewReportFeatureParity> {
         let (feature_contract_hash, materialization_timeout_secs) = self
-            .feature_contract_for_report(&report.runtime_config_version_id, report, report_run)
+            .feature_contract_for_report(&report.decision_policy_snapshot_id, report, report_run)
             .await?;
         let window_end = report
             .decision_at
@@ -146,7 +144,7 @@ impl FeatureParityRunCoordinator {
         let job = self.build_job(
             run_id,
             request,
-            report.runtime_config_version_id.clone(),
+            report.decision_policy_snapshot_id.clone(),
             None,
             SYSTEM_ACTING_ROLE.to_owned(),
             materialization_timeout_secs,
@@ -198,7 +196,7 @@ impl FeatureParityRunCoordinator {
         let (window_start, window_end) = resolve_full_window(&request)?;
         let current = self.current_config().await?;
         let (feature_contract_hash, materialization_timeout_secs) =
-            contract_and_full_timeout(&current.config_json)?;
+            contract_and_full_timeout(&current.snapshot)?;
         let parity_run_id = FeatureParityRunId::from_v7();
         let triggered_by = ctx.actor.clone().unwrap_or_else(|| ctx.acting_role.clone());
         let resolved_request = RunFullFeatureParityRequest {
@@ -219,7 +217,7 @@ impl FeatureParityRunCoordinator {
         let job = self.build_job(
             parity_run_id,
             resolved_request,
-            current.runtime_config_version_id,
+            current.decision_policy_snapshot_id,
             ctx.actor,
             ctx.acting_role,
             materialization_timeout_secs,
@@ -274,7 +272,7 @@ impl FeatureParityRunCoordinator {
 
         let current = self.current_config().await?;
         let (feature_contract_hash, materialization_timeout_secs) =
-            contract_and_full_timeout(&current.config_json)?;
+            contract_and_full_timeout(&current.snapshot)?;
         let run_id = FeatureParityRunId::from_v7();
         let reason = format!(
             "automatic 24-hour full replay ending {}",
@@ -298,7 +296,7 @@ impl FeatureParityRunCoordinator {
         let job = self.build_job(
             run_id.clone(),
             request,
-            current.runtime_config_version_id,
+            current.decision_policy_snapshot_id,
             None,
             SYSTEM_ACTING_ROLE.to_owned(),
             materialization_timeout_secs,
@@ -330,36 +328,39 @@ impl FeatureParityRunCoordinator {
         }
     }
 
-    async fn current_config(&self) -> QuantResult<RuntimeConfigVersionInfo> {
+    async fn current_config(&self) -> QuantResult<DecisionPolicySnapshotInfo> {
         self.runtime_config
             .load_current()
             .await
             .map_err(QuantError::from)?
             .ok_or_else(|| {
-                QuantError::from(StorageError::not_found("runtime_config_version", "current"))
+                QuantError::from(StorageError::not_found(
+                    "decision_policy_snapshot",
+                    "current",
+                ))
             })
     }
 
     async fn feature_contract_for_report(
         &self,
-        version_id: &RuntimeConfigVersionId,
+        version_id: &DecisionPolicySnapshotId,
         report: &NewRecommendationReport,
         report_run: &ReportRunInfo,
     ) -> QuantResult<(ContentHash, u64)> {
         let version = self
             .runtime_config
-            .load_version(version_id)
+            .load_snapshot(version_id)
             .await
             .map_err(QuantError::from)?
-            .ok_or_else(|| StorageError::not_found("runtime_config_version", version_id))?;
-        contract_and_report_timeout(&version.config_json, report, report_run)
+            .ok_or_else(|| StorageError::not_found("decision_policy_snapshot", version_id))?;
+        contract_and_report_timeout(&version.snapshot, report, report_run)
     }
 
     fn build_job(
         &self,
         parity_run_id: FeatureParityRunId,
         request: RunFullFeatureParityRequest,
-        runtime_config_version_id: RuntimeConfigVersionId,
+        decision_policy_snapshot_id: DecisionPolicySnapshotId,
         requested_by: Option<String>,
         acting_role: String,
         materialization_timeout_secs: u64,
@@ -379,7 +380,7 @@ impl FeatureParityRunCoordinator {
             kind: ResearchJobKind::FeatureParity,
             status: ResearchJobStatus::Queued,
             model_spec_id: None,
-            runtime_config_version_id: Some(runtime_config_version_id),
+            decision_policy_snapshot_id: Some(decision_policy_snapshot_id),
             params_json: params,
             requested_by,
             acting_role,
@@ -746,18 +747,17 @@ impl FeatureIntegrityPort for FeatureIntegrityService {
     }
 }
 
-fn feature_contract(config_json: &serde_json::Value) -> QuantResult<(RuntimeConfig, ContentHash)> {
-    let config = RuntimeConfig::from_json(config_json)?;
-    let feature_contract_hash =
-        ResearchHasher::feature_schema(&FeatureSchema::build(&config.features)?)?;
-    Ok((config, feature_contract_hash))
+fn feature_contract(config: &DecisionPolicySnapshot) -> QuantResult<ContentHash> {
+    ResearchHasher::feature_schema(&FeatureSchema::build(
+        &config.profile_artifacts.features.definition,
+    )?)
 }
 
 /// A full replay inspects evidence that should already be durable. It has no
 /// single report cadence, so it receives only the fixed writer-lag grace rather
 /// than borrowing an unrelated schedule's (possibly day-long) interval.
-fn contract_and_full_timeout(config_json: &serde_json::Value) -> QuantResult<(ContentHash, u64)> {
-    let (_, feature_contract_hash) = feature_contract(config_json)?;
+fn contract_and_full_timeout(config: &DecisionPolicySnapshot) -> QuantResult<(ContentHash, u64)> {
+    let feature_contract_hash = feature_contract(config)?;
     Ok((feature_contract_hash, MIN_MATERIALIZATION_TIMEOUT_SECS))
 }
 
@@ -765,13 +765,13 @@ fn contract_and_full_timeout(config_json: &serde_json::Value) -> QuantResult<(Co
 /// Scheduled reports use exactly their own frozen schedule; ad-hoc reports have
 /// no cadence and therefore use the fixed ten-minute writer-lag grace.
 fn contract_and_report_timeout(
-    config_json: &serde_json::Value,
+    config: &DecisionPolicySnapshot,
     report: &NewRecommendationReport,
     report_run: &ReportRunInfo,
 ) -> QuantResult<(ContentHash, u64)> {
-    let (config, feature_contract_hash) = feature_contract(config_json)?;
+    let feature_contract_hash = feature_contract(config)?;
     let timeout = report_materialization_timeout(
-        &config,
+        config,
         report_run.trigger_kind,
         report_run.schedule_id.as_deref(),
         report_run.scheduled_for.unwrap_or(report.decision_at),
@@ -781,7 +781,7 @@ fn contract_and_report_timeout(
 }
 
 fn report_materialization_timeout(
-    config: &RuntimeConfig,
+    config: &DecisionPolicySnapshot,
     trigger_kind: ReportTriggerKind,
     schedule_id: Option<&str>,
     trigger_time: DateTime<Utc>,
@@ -793,9 +793,7 @@ fn report_materialization_timeout(
             let schedule_id = schedule_id.ok_or_else(|| ResearchError::Determinism {
                 detail: format!("scheduled report {report_id} has no schedule id"),
             })?;
-            let schedule = config
-                .reports
-                .schedules
+            let schedule = config.report_schedule.schedules
                 .iter()
                 .find(|schedule| schedule.schedule_id == schedule_id)
                 .ok_or_else(|| {
@@ -928,21 +926,23 @@ mod tests {
 
     use quant_pivot_models::{
         domain::{
-            CompleteFeatureParityRun, FeatureParityRunInfo, FeatureParityStateInfo,
-            FrozenFeatureParitySubject, NewFrozenModelParitySubject, NewRuntimeConfigActivation,
-            NewRuntimeConfigApproval, NewRuntimeConfigVersion, ResearchJobInfo,
-            RuntimeConfigActivationInfo, RuntimeConfigApprovalInfo, RuntimeConfigVersionInfo,
+            CompleteFeatureParityRun, DecisionPolicySnapshotInfo, FeatureParityRunInfo,
+            FeatureParityStateInfo, FrozenFeatureParitySubject, NewDecisionPolicySnapshot,
+            NewFrozenModelParitySubject, NewPolicyActivation, NewPolicyRevision,
+            NewProductionBaseline, PolicyActivationInfo, PolicyApprovalInfo, PolicyRevisionInfo,
+            ProductionBaselineInfo, RecordPolicyApproval, ResearchJobInfo,
         },
         enums::{
             quant::{
                 EmptyReportReason, FeatureParityStateTransition, RecommendationReportStatus,
                 ReportKind, ReportRunStatus,
             },
-            runtime_config::RuntimeConfigVersionSource,
+            runtime_config::{ConfigResourceKind, DecisionPolicySnapshotSource, PolicyActorKind},
         },
+        runtime_config::PolicyValidationEvidence,
         types::{
-            ModelVersionId, RecommendationReportId, ReportRunId, RuntimeConfigActivationId,
-            RuntimeConfigApprovalId, TrainingDatasetId,
+            ModelVersionId, PolicyApprovalId, PolicyRevisionId, RecommendationReportId,
+            ReportRunId, TrainingDatasetId,
         },
     };
     use quant_pivot_repository::traits::FeatureParityLatchActor;
@@ -1003,7 +1003,7 @@ mod tests {
             kind: job.kind,
             status: job.status,
             model_spec_id: job.model_spec_id,
-            runtime_config_version_id: job.runtime_config_version_id,
+            decision_policy_snapshot_id: job.decision_policy_snapshot_id,
             params_json: job.params_json,
             progress_json: None,
             result_ref: None,
@@ -1177,119 +1177,166 @@ mod tests {
     }
 
     struct FixedRuntimeConfigRepository {
-        current: RuntimeConfigVersionInfo,
+        current: DecisionPolicySnapshotInfo,
     }
 
     #[async_trait]
-    impl RuntimeConfigVersionRepository for FixedRuntimeConfigRepository {
+    impl PolicyRepository for FixedRuntimeConfigRepository {
+        async fn create_revision(
+            &self,
+            _revision: NewPolicyRevision,
+        ) -> Result<PolicyRevisionInfo, StorageError> {
+            Err(unexpected("create_revision"))
+        }
+
+        async fn mark_revision_validated(
+            &self,
+            _revision_id: &PolicyRevisionId,
+            _validation_evidence: PolicyValidationEvidence,
+            _preflight_token_hash: ContentHash,
+            _preflight_expires_at: DateTime<Utc>,
+        ) -> Result<PolicyRevisionInfo, StorageError> {
+            Err(unexpected("mark_revision_validated"))
+        }
+
+        async fn load_revision(
+            &self,
+            _revision_id: &PolicyRevisionId,
+        ) -> Result<Option<PolicyRevisionInfo>, StorageError> {
+            Err(unexpected("load_revision"))
+        }
+
+        async fn list_revisions(
+            &self,
+            _kind: ConfigResourceKind,
+            _limit: u64,
+        ) -> Result<Vec<PolicyRevisionInfo>, StorageError> {
+            Err(unexpected("list_revisions"))
+        }
+
+        async fn list_all_revisions(
+            &self,
+            _limit: u64,
+        ) -> Result<Vec<PolicyRevisionInfo>, StorageError> {
+            Err(unexpected("list_all_revisions"))
+        }
+
         async fn record_approval(
             &self,
-            _approval: NewRuntimeConfigApproval,
-        ) -> Result<RuntimeConfigApprovalInfo, StorageError> {
+            _approval: RecordPolicyApproval,
+        ) -> Result<PolicyApprovalInfo, StorageError> {
             Err(unexpected("record_approval"))
         }
 
         async fn load_approval(
             &self,
-            _approval_id: &RuntimeConfigApprovalId,
-        ) -> Result<Option<RuntimeConfigApprovalInfo>, StorageError> {
+            _approval_id: &PolicyApprovalId,
+        ) -> Result<Option<PolicyApprovalInfo>, StorageError> {
             Err(unexpected("load_approval"))
         }
 
         async fn list_valid_approvals(
             &self,
+            _kind: Option<ConfigResourceKind>,
             _limit: u64,
-        ) -> Result<Vec<RuntimeConfigApprovalInfo>, StorageError> {
+        ) -> Result<Vec<PolicyApprovalInfo>, StorageError> {
             Err(unexpected("list_valid_approvals"))
         }
 
-        async fn create_version(
+        async fn activate_resource(
             &self,
-            _version: NewRuntimeConfigVersion,
-        ) -> Result<RuntimeConfigVersionInfo, StorageError> {
-            Err(unexpected("create_version"))
-        }
-
-        async fn activate_version(
-            &self,
-            _activation: NewRuntimeConfigActivation,
-        ) -> Result<RuntimeConfigActivationInfo, StorageError> {
-            Err(unexpected("activate_version"))
-        }
-
-        async fn activate_approved_version(
-            &self,
-            _activation: NewRuntimeConfigActivation,
-            _require_approver_activator_separation: bool,
-        ) -> Result<RuntimeConfigActivationInfo, StorageError> {
-            Err(unexpected("activate_approved_version"))
-        }
-
-        async fn activate_version_if_current(
-            &self,
-            _expected_current_activation_id: Option<&RuntimeConfigActivationId>,
-            _activation: NewRuntimeConfigActivation,
-        ) -> Result<RuntimeConfigActivationInfo, StorageError> {
-            Err(unexpected("activate_version_if_current"))
+            _activation: NewPolicyActivation,
+            _snapshot: NewDecisionPolicySnapshot,
+        ) -> Result<PolicyActivationInfo, StorageError> {
+            Err(unexpected("activate_resource"))
         }
 
         async fn load_current_activation(
             &self,
-        ) -> Result<Option<RuntimeConfigActivationInfo>, StorageError> {
+            _kind: Option<ConfigResourceKind>,
+        ) -> Result<Option<PolicyActivationInfo>, StorageError> {
             Err(unexpected("load_current_activation"))
         }
 
-        async fn load_version(
+        async fn load_current_revision(
             &self,
-            version_id: &RuntimeConfigVersionId,
-        ) -> Result<Option<RuntimeConfigVersionInfo>, StorageError> {
-            Ok((&self.current.runtime_config_version_id == version_id)
+            _kind: ConfigResourceKind,
+        ) -> Result<Option<PolicyRevisionInfo>, StorageError> {
+            Err(unexpected("load_current_revision"))
+        }
+
+        async fn load_snapshot(
+            &self,
+            version_id: &DecisionPolicySnapshotId,
+        ) -> Result<Option<DecisionPolicySnapshotInfo>, StorageError> {
+            Ok((&self.current.decision_policy_snapshot_id == version_id)
                 .then(|| self.current.clone()))
         }
 
         async fn load_by_hash(
             &self,
             _config_hash: &ContentHash,
-        ) -> Result<Option<RuntimeConfigVersionInfo>, StorageError> {
+        ) -> Result<Option<DecisionPolicySnapshotInfo>, StorageError> {
             Err(unexpected("load_by_hash"))
         }
 
-        async fn load_current(&self) -> Result<Option<RuntimeConfigVersionInfo>, StorageError> {
+        async fn load_current(&self) -> Result<Option<DecisionPolicySnapshotInfo>, StorageError> {
             Ok(Some(self.current.clone()))
         }
 
         async fn load_active_at(
             &self,
             _at: DateTime<Utc>,
-        ) -> Result<Option<RuntimeConfigVersionInfo>, StorageError> {
+        ) -> Result<Option<DecisionPolicySnapshotInfo>, StorageError> {
             Err(unexpected("load_active_at"))
         }
 
-        async fn list_versions(
+        async fn list_snapshots(
             &self,
             _limit: u64,
-        ) -> Result<Vec<RuntimeConfigVersionInfo>, StorageError> {
-            Err(unexpected("list_versions"))
+        ) -> Result<Vec<DecisionPolicySnapshotInfo>, StorageError> {
+            Err(unexpected("list_snapshots"))
         }
 
         async fn list_activations(
             &self,
+            _kind: Option<ConfigResourceKind>,
             _limit: u64,
-        ) -> Result<Vec<RuntimeConfigActivationInfo>, StorageError> {
+        ) -> Result<Vec<PolicyActivationInfo>, StorageError> {
             Err(unexpected("list_activations"))
+        }
+
+        async fn load_production_baseline(
+            &self,
+        ) -> Result<Option<ProductionBaselineInfo>, StorageError> {
+            Err(unexpected("load_production_baseline"))
+        }
+
+        async fn seal_production_baseline(
+            &self,
+            _baseline: NewProductionBaseline,
+        ) -> Result<ProductionBaselineInfo, StorageError> {
+            Err(unexpected("seal_production_baseline"))
         }
     }
 
     fn runtime_repo(now: DateTime<Utc>) -> FixedRuntimeConfigRepository {
-        let config = RuntimeConfig::default();
+        let config = DecisionPolicySnapshot::default();
         FixedRuntimeConfigRepository {
-            current: RuntimeConfigVersionInfo {
-                runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
-                config_hash: hash(),
-                schema_version: RUNTIME_CONFIG_SCHEMA_VERSION,
-                config_json: serde_json::to_value(config).expect("runtime config json"),
-                source: RuntimeConfigVersionSource::Bootstrap,
-                created_by: "test".to_owned(),
+            current: DecisionPolicySnapshotInfo {
+                decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
+                snapshot_hash: hash(),
+                snapshot: config,
+                recommendation_policy_revision_id: PolicyRevisionId::from_v7(),
+                execution_risk_policy_revision_id: PolicyRevisionId::from_v7(),
+                model_routing_revision_id: PolicyRevisionId::from_v7(),
+                report_schedule_revision_id: PolicyRevisionId::from_v7(),
+                operational_control_revision_id: PolicyRevisionId::from_v7(),
+                execution_authorization_revision_id: PolicyRevisionId::from_v7(),
+                source: DecisionPolicySnapshotSource::Bootstrap,
+                created_by_kind: PolicyActorKind::System,
+                created_by_user_id: None,
+                created_by_label: "test".to_owned(),
                 reason: "test".to_owned(),
                 created_at: now,
             },
@@ -1325,7 +1372,7 @@ mod tests {
             decision_at: info.decision_at,
             horizon_secs: info.horizon_secs,
             runtime_mode: info.runtime_mode,
-            runtime_config_version_id: info.runtime_config_version_id,
+            decision_policy_snapshot_id: info.decision_policy_snapshot_id,
             model_run_id: info.model_run_id,
             model_version_id: info.model_version_id,
             market_selection_id: info.market_selection_id,
@@ -1372,7 +1419,7 @@ mod tests {
             lease_expires_at: None,
             finished_at: Some(report.decision_at),
             lease_owner: None,
-            runtime_config_version_id: Some(report.runtime_config_version_id.clone()),
+            decision_policy_snapshot_id: Some(report.decision_policy_snapshot_id.clone()),
             top_n: Some(report.top_n),
             knowledge_lag_secs: Some(10),
             output_report_id: Some(report.recommendation_report_id.clone()),
@@ -1386,7 +1433,7 @@ mod tests {
     async fn pre_inference_report_still_gets_atomic_sampled_parity() {
         let now = Utc::now();
         let runtime = runtime_repo(now);
-        let runtime_config_version_id = runtime.current.runtime_config_version_id.clone();
+        let decision_policy_snapshot_id = runtime.current.decision_policy_snapshot_id.clone();
         let coordinator = FeatureParityRunCoordinator::new(
             Arc::new(CoordinatorParityRepository::default()),
             Arc::new(runtime),
@@ -1397,7 +1444,7 @@ mod tests {
             ReportKind::TopN,
             RecommendationReportStatus::Published,
         );
-        info.runtime_config_version_id = runtime_config_version_id.clone();
+        info.decision_policy_snapshot_id = decision_policy_snapshot_id.clone();
         info.model_run_id = None;
         info.summary_json.empty_reason = Some(EmptyReportReason::EmptySelection);
         let report = new_report(info);
@@ -1424,8 +1471,8 @@ mod tests {
         );
         assert_eq!(parity.job.kind, ResearchJobKind::FeatureParity);
         assert_eq!(
-            parity.job.runtime_config_version_id.as_ref(),
-            Some(&runtime_config_version_id)
+            parity.job.decision_policy_snapshot_id.as_ref(),
+            Some(&decision_policy_snapshot_id)
         );
     }
 
@@ -1501,8 +1548,8 @@ mod tests {
             .expect("timestamp")
             .with_timezone(&Utc);
         let report_id = RecommendationReportId::from_v7();
-        let mut config = RuntimeConfig::default();
-        let mut exact = config.reports.schedules[0].clone();
+        let mut config = DecisionPolicySnapshot::default();
+        let mut exact = config.report_schedule.schedules[0].clone();
         exact.schedule_id = "desk:fast".to_owned();
         exact.cadence = ScheduleCadence::Interval { interval_secs: 900 };
         let mut unrelated = exact.clone();
@@ -1510,7 +1557,7 @@ mod tests {
         unrelated.cadence = ScheduleCadence::Interval {
             interval_secs: 86_400,
         };
-        config.reports.schedules = vec![exact, unrelated];
+        config.report_schedule.schedules = vec![exact, unrelated];
 
         let scheduled = report_materialization_timeout(
             &config,
@@ -1537,7 +1584,7 @@ mod tests {
     fn sampled_timeout_rejects_missing_or_unknown_schedule_binding() {
         let trigger_time = Utc::now();
         let report_id = RecommendationReportId::from_v7();
-        let config = RuntimeConfig::default();
+        let config = DecisionPolicySnapshot::default();
 
         let missing = report_materialization_timeout(
             &config,
@@ -1562,12 +1609,11 @@ mod tests {
 
     #[test]
     fn full_replay_timeout_never_borrows_report_schedule_cadence() {
-        let mut config = RuntimeConfig::default();
-        config.reports.schedules[0].cadence = ScheduleCadence::Interval {
+        let mut config = DecisionPolicySnapshot::default();
+        config.report_schedule.schedules[0].cadence = ScheduleCadence::Interval {
             interval_secs: 86_400,
         };
-        let config_json = serde_json::to_value(config).expect("runtime config json");
-        let (_, timeout) = contract_and_full_timeout(&config_json).expect("full timeout");
+        let (_, timeout) = contract_and_full_timeout(&config).expect("full timeout");
         assert_eq!(timeout, MIN_MATERIALIZATION_TIMEOUT_SECS);
     }
 }

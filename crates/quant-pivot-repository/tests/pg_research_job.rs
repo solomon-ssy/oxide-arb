@@ -16,7 +16,7 @@ fn new_job(job_id: ResearchJobId) -> NewResearchJob {
         kind: ResearchJobKind::DatasetBuild,
         status: ResearchJobStatus::Queued,
         model_spec_id: None,
-        runtime_config_version_id: None,
+        decision_policy_snapshot_id: None,
         params_json: serde_json::json!({"reason": "pg-research-job-it"}),
         requested_by: None,
         acting_role: "system".to_owned(),

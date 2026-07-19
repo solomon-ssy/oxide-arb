@@ -4,9 +4,8 @@ use crate::{
     entities::quant_training_dataset,
     enums::quant::{DatasetPurpose, TrainingDatasetStatus},
     types::{
-        ArtifactUri, ContentHash, DatasetCoverage, DatasetManifest, ModelSpecId,
-        RuntimeConfigVersionId, SchemaVersion, TrainingDatasetId, TrainingHorizonsSecs,
-        TrainingSampleSources,
+        ArtifactUri, ContentHash, DatasetCoverage, DatasetManifest, DecisionPolicySnapshotId,
+        ModelSpecId, SchemaVersion, TrainingDatasetId, TrainingHorizonsSecs, TrainingSampleSources,
     },
 };
 use chrono::{DateTime, Utc};
@@ -50,7 +49,7 @@ pub struct TrainingDatasetInfo {
     pub feature_schema_version: Option<SchemaVersion>,
     pub sample_sources: Option<TrainingSampleSources>,
     pub coverage_json: Option<DatasetCoverage>,
-    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub failure_detail: Option<String>,
     pub completed_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
@@ -81,7 +80,7 @@ info_from_model!(
         feature_schema_version,
         sample_sources,
         coverage_json,
-        runtime_config_version_id,
+        decision_policy_snapshot_id,
         failure_detail,
         completed_at,
         created_at,
@@ -102,7 +101,7 @@ pub struct NewTrainingDatasetPlan {
     pub horizons_secs: TrainingHorizonsSecs,
     pub feature_schema_version: Option<SchemaVersion>,
     pub sample_sources: Option<TrainingSampleSources>,
-    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
 }
 
 /// Artifact bindings committed atomically with the build's terminal status.

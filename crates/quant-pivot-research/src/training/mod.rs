@@ -53,11 +53,11 @@ use quant_pivot_models::{
     },
     enums::{feature::EvidenceSourceKind, quant::DatasetPurpose},
     types::{
-        ArtifactUri, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION, DatasetManifest, MarketId,
-        ModelSpecId, OrderIntentId, PositionId, Price, ResearchProfileRef, RuntimeConfigVersionId,
-        SchemaVersion, Shares, SourceSliceManifestRef, TokenId, TradePolicyArtifactId,
-        TradePolicyArtifactPayload, TrainingDatasetId, TrainingExampleId, TrainingSampleSource,
-        Usd, default_sample_sources,
+        ArtifactUri, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION, DatasetManifest,
+        DecisionPolicySnapshotId, MarketId, ModelSpecId, OrderIntentId, PositionId, Price,
+        ResearchProfileRef, SchemaVersion, Shares, SourceSliceManifestRef, TokenId,
+        TradePolicyArtifactId, TradePolicyArtifactPayload, TrainingDatasetId, TrainingExampleId,
+        TrainingSampleSource, Usd, default_sample_sources,
     },
 };
 use rust_decimal::Decimal;
@@ -92,7 +92,7 @@ pub struct DatasetPlanRequest {
     /// Immutable PIT source slice consumed by this build.
     pub source_slice: SourceSliceManifestRef,
     /// Config version governing selection / feature / factor / label schemas.
-    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     /// Inclusive window start (first sample `as_of`).
     pub window_start: DateTime<Utc>,
     /// Exclusive window end (samples are strictly before this).

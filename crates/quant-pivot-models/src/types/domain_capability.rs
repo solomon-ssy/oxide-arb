@@ -11,7 +11,7 @@ use crate::{
 };
 
 /// Current immutable capability-registry envelope version.
-pub const DOMAIN_CAPABILITY_REGISTRY_FORMAT_VERSION: u32 = 2;
+pub const DOMAIN_CAPABILITY_REGISTRY_FORMAT_VERSION: u32 = 1;
 
 /// Closed contract families supported or explicitly classified by Phase 11.9.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

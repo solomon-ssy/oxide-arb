@@ -29,7 +29,12 @@ impl AppContext {
             let _ = PeriodicTask::run(
                 "exit-monitor-worker",
                 move || {
-                    let secs = config.current().execution.exit_monitor.monitor_secs.max(1);
+                    let secs = config
+                        .current()
+                        .execution_risk
+                        .exit_monitor
+                        .monitor_secs
+                        .max(1);
                     Duration::from_secs(secs)
                 },
                 0.0,

@@ -5,17 +5,16 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
-use quant_pivot_error::{QuantError, QuantResult, research::ResearchError, storage::StorageError};
+use quant_pivot_error::{QuantError, QuantResult, storage::StorageError};
 use quant_pivot_models::{
     domain::{
         JobProgressSink, ModelTrainingPort, ModelVersionInfo, TrainModelRequest, TrainedModelView,
     },
-    runtime_config::RuntimeConfig,
-    types::{ModelVersionId, RuntimeConfigVersionId},
+    runtime_config::DecisionPolicySnapshot,
+    types::{DecisionPolicySnapshotId, ModelVersionId},
 };
 use quant_pivot_repository::traits::{
-    ModelRegistryRepository, ModelRunRepository, RuntimeConfigVersionRepository,
-    TrainingDatasetRepository,
+    ModelRegistryRepository, ModelRunRepository, PolicyRepository, TrainingDatasetRepository,
 };
 use quant_pivot_research::{
     artifact::ArtifactStore,
@@ -42,7 +41,7 @@ pub struct CoreModelTrainingPort {
     model_registry_repo: Arc<dyn ModelRegistryRepository>,
     model_run_repo: Arc<dyn ModelRunRepository>,
     frozen_model_parity: Arc<FrozenModelParityService>,
-    runtime_config: Arc<dyn RuntimeConfigVersionRepository>,
+    runtime_config: Arc<dyn PolicyRepository>,
 }
 
 impl CoreModelTrainingPort {
@@ -50,7 +49,7 @@ impl CoreModelTrainingPort {
     #[must_use]
     pub fn from_research(
         research: &ResearchBundle,
-        runtime_config: Arc<dyn RuntimeConfigVersionRepository>,
+        runtime_config: Arc<dyn PolicyRepository>,
     ) -> Self {
         Self {
             dataset_repo: Arc::clone(&research.training_dataset_repo),
@@ -64,9 +63,11 @@ impl CoreModelTrainingPort {
 
     async fn service_for(
         &self,
-        runtime_config_version_id: &RuntimeConfigVersionId,
+        decision_policy_snapshot_id: &DecisionPolicySnapshotId,
     ) -> QuantResult<ModelTrainerService> {
-        let runtime = self.load_runtime_config(runtime_config_version_id).await?;
+        let runtime = self
+            .load_runtime_config(decision_policy_snapshot_id)
+            .await?;
         Ok(ModelTrainerService::new(
             ModelTrainerServiceDeps {
                 dataset_repo: Arc::clone(&self.dataset_repo),
@@ -75,33 +76,31 @@ impl CoreModelTrainingPort {
                 model_run_repo: Arc::clone(&self.model_run_repo),
             },
             ModelTrainerConfig {
-                factors: runtime.factors.clone(),
-                objective: TrainingObjectiveSpec::from_runtime_config(&runtime.research.training)?,
+                factors: runtime.profile_artifacts.scoring.definition.clone(),
+                objective: TrainingObjectiveSpec::from_runtime_config(
+                    &runtime.profile_artifacts.research_method.research.training,
+                )?,
                 validation_purge: PurgeConfig {
                     embargo_pct: runtime
+                        .profile_artifacts
+                        .research_method
                         .research
                         .validation
                         .purge
                         .embargo_pct
-                        .value
-                        .parse()
-                        .map_err(|error| {
-                            QuantError::from(
-                                ResearchError::ValidationMethodology {
-                                    detail: format!(
-                                        "`research.validation.purge.embargo_pct` is not a valid decimal: {error}"
-                                    ),
-                                },
-                            )
-                        })?,
-                    min_embargo_secs: runtime.features.max_lookback_secs(),
+                        .value,
+                    min_embargo_secs: runtime
+                        .profile_artifacts
+                        .features
+                        .definition
+                        .max_lookback_secs(),
                 },
             },
             ReplayConfig {
-                features: runtime.features,
-                factors: runtime.factors,
-                domain: runtime.domain,
-                data_quality: runtime.data_quality,
+                features: runtime.profile_artifacts.features.definition,
+                factors: runtime.profile_artifacts.scoring.definition,
+                domain: runtime.profile_artifacts.domain.definition,
+                data_quality: runtime.recommendation.data_quality,
                 bias_table: None,
             },
         ))
@@ -109,17 +108,17 @@ impl CoreModelTrainingPort {
 
     async fn load_runtime_config(
         &self,
-        runtime_config_version_id: &RuntimeConfigVersionId,
-    ) -> QuantResult<RuntimeConfig> {
+        decision_policy_snapshot_id: &DecisionPolicySnapshotId,
+    ) -> QuantResult<DecisionPolicySnapshot> {
         let version = self
             .runtime_config
-            .load_version(runtime_config_version_id)
+            .load_snapshot(decision_policy_snapshot_id)
             .await?
             .ok_or_else(|| StorageError::NotFound {
-                entity: "runtime_config_version",
-                id: runtime_config_version_id.to_string(),
+                entity: "decision_policy_snapshot",
+                id: decision_policy_snapshot_id.to_string(),
             })?;
-        RuntimeConfig::from_json(&version.config_json).map_err(Into::into)
+        Ok(version.snapshot)
     }
 }
 
@@ -190,16 +189,18 @@ impl ModelTrainingPort for CoreModelTrainingPort {
             ));
         }
         let runtime = self
-            .load_runtime_config(&dataset.runtime_config_version_id)
+            .load_runtime_config(&dataset.decision_policy_snapshot_id)
             .await?;
-        let service = self.service_for(&dataset.runtime_config_version_id).await?;
+        let service = self
+            .service_for(&dataset.decision_policy_snapshot_id)
+            .await?;
         let outcome = service
             .train(
                 TrainModelInput {
                     model_version_id,
                     model_spec_id: dataset.model_spec_id,
                     training_dataset_id: dataset.training_dataset_id,
-                    runtime_config_version_id: dataset.runtime_config_version_id,
+                    decision_policy_snapshot_id: dataset.decision_policy_snapshot_id,
                     model_family: model_spec.model_family,
                     input_contract: model_spec.input_contract.clone(),
                     label: LabelSelector {
@@ -208,7 +209,11 @@ impl ModelTrainingPort for CoreModelTrainingPort {
                     },
                     prediction_horizon_secs,
                     validation_folds: model_spec.training_contract.validation_folds,
-                    selection_enabled_categories: runtime.selection.enabled_categories.clone(),
+                    selection_enabled_categories: runtime
+                        .recommendation
+                        .selection
+                        .enabled_categories
+                        .clone(),
                     category_scope: None,
                 },
                 &*progress,

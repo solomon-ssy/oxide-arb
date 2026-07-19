@@ -5,31 +5,23 @@ use quant_pivot_core::app::phase_11_9_evidence_bootstrap::{
 };
 use quant_pivot_migration::{apply as apply_postgres_migrations, plan as plan_postgres_migrations};
 use quant_pivot_models::{
-    config::{DeployConfig, secret::SecretText},
-    domain::{NewRuntimeConfigActivation, NewRuntimeConfigVersion},
-    enums::{
-        common::MarketCategory,
-        domain::DomainFamily,
-        runtime_config::{RuntimeConfigActivationKind, RuntimeConfigVersionSource},
+    config::{
+        DeployConfig,
+        secret::{SecretText, SystemdCredentialRef},
     },
+    domain::ConfigApiContractSchema,
+    enums::{common::MarketCategory, domain::DomainFamily},
     hashing::CanonicalDigest,
-    runtime_config::{FeedbackConfig, RuntimeConfig, validate_runtime_config},
+    runtime_config::DecisionPolicySnapshot,
     security::hash_password,
     types::{
-        EventId, RuntimeConfigActivationId, RuntimeConfigVersionId, SchemaVersion,
-        domain_capability::DomainContractFamily,
+        EventId, domain_capability::DomainContractFamily,
         domain_classification::DomainMarketClassificationOutcome,
     },
 };
 use quant_pivot_repository::{
-    postgres::{
-        PgRuntimeConfigVersionRepository,
-        catalog::{event::PgEventRepository, market::PgMarketRepository},
-    },
-    traits::{
-        RuntimeConfigVersionRepository, governance::event::EventRepository,
-        market::MarketRepository,
-    },
+    postgres::catalog::{event::PgEventRepository, market::PgMarketRepository},
+    traits::{governance::event::EventRepository, market::MarketRepository},
 };
 use quant_pivot_research::{
     artifact::{ArtifactKey, ArtifactNamespace, build_artifact_store},
@@ -159,9 +151,15 @@ enum Commands {
     /// Bootstrap durable Crypto/Weather evidence and emit a gap-audited manifest.
     #[command(name = "phase-11-9-evidence-bootstrap")]
     Phase119EvidenceBootstrap(Phase119EvidenceBootstrapArgs),
-    /// One-shot audited activation of an active Runtime v17 document as v18.
-    #[command(name = "phase-11-9-activate-runtime-v18")]
-    Phase119ActivateRuntimeV18(ConfigDirArgs),
+    /// Render the canonical boot policy bundle for schema and inventory tooling.
+    #[command(name = "render-boot-policy")]
+    RenderBootPolicy,
+    /// Generate the Rust-owned Config API JSON Schema used for TypeScript codegen.
+    #[command(name = "config-api-schema")]
+    ConfigApiSchema {
+        #[arg(long, default_value = "schema/api/config-v1.schema.json")]
+        output: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -260,138 +258,32 @@ async fn run() -> Result<()> {
         Commands::Phase119EvidenceBootstrap(args) => {
             Box::pin(phase_11_9_evidence_bootstrap(args)).await
         }
-        Commands::Phase119ActivateRuntimeV18(args) => activate_phase_11_9_runtime_v18(args).await,
+        Commands::RenderBootPolicy => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&DecisionPolicySnapshot::default())
+                    .context("render boot policy bundle")?
+            );
+            Ok(())
+        }
+        Commands::ConfigApiSchema { output } => write_config_api_schema(&output),
     }
 }
 
-async fn activate_phase_11_9_runtime_v18(args: ConfigDirArgs) -> Result<()> {
-    const ACTOR: &str = "phase_11_9_runtime_v18_migration";
-    const REASON: &str = "one-shot Runtime v17 to v18 schema activation for Phase 11.9";
-
-    let config_dir = args
-        .config_dir
-        .to_str()
-        .context("runtime migration config directory is not valid UTF-8")?;
-    let deploy = DeployConfig::load(config_dir).context("load deploy config")?;
-    let pool = PostgresPool::connect_existing(&deploy.db.postgres)
-        .await
-        .context("connect PostgreSQL for Runtime v18 activation")?;
-    let repo = PgRuntimeConfigVersionRepository::new(pool.connection().clone());
-    let current_activation = repo
-        .load_current_activation()
-        .await
-        .context("load current runtime activation")?
-        .context("Runtime v18 activation requires an existing current activation")?;
-    let current = repo
-        .load_current()
-        .await
-        .context("load current runtime config")?
-        .context("Runtime v18 activation requires an existing current config")?;
-    if current.schema_version == SchemaVersion::new(18) {
-        RuntimeConfig::from_json(&current.config_json)
-            .context("current Runtime v18 document is invalid")?;
-        println!("status=already_active");
-        println!(
-            "runtime_config_version_id={}",
-            current.runtime_config_version_id
-        );
-        println!("config_hash={}", current.config_hash);
-        pool.close().await;
-        return Ok(());
-    }
-
-    let config = migrate_runtime_v17_json(&current.config_json)?;
-    let validation = validate_runtime_config(&config);
-    if validation.has_errors() {
-        bail!("migrated Runtime v18 document failed validation: {validation:?}");
-    }
-    let config_json = config.to_json();
-    let config_hash = CanonicalDigest::content_hash_json(&config_json)
-        .context("hash migrated Runtime v18 document")?;
-    let version = match repo
-        .load_by_hash(&config_hash)
-        .await
-        .context("lookup existing Runtime v18 migration candidate")?
-    {
-        Some(version) => version,
-        None => repo
-            .create_version(NewRuntimeConfigVersion {
-                runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
-                config_hash: config_hash.clone(),
-                schema_version: config.schema_version,
-                config_json,
-                source: RuntimeConfigVersionSource::Import,
-                created_by: ACTOR.to_owned(),
-                reason: REASON.to_owned(),
-            })
-            .await
-            .context("create immutable Runtime v18 migration candidate")?,
-    };
-    let activation = repo
-        .activate_version_if_current(
-            Some(&current_activation.runtime_config_activation_id),
-            NewRuntimeConfigActivation {
-                runtime_config_activation_id: RuntimeConfigActivationId::from_v7(),
-                runtime_config_version_id: version.runtime_config_version_id.clone(),
-                runtime_config_approval_id: None,
-                activated_by: ACTOR.to_owned(),
-                reason: REASON.to_owned(),
-                activation_kind: RuntimeConfigActivationKind::Promote,
-                previous_runtime_config_version_id: Some(current.runtime_config_version_id),
-                rollback_target_version_id: None,
-                audit_event_id: None,
-            },
-        )
-        .await
-        .context("CAS-activate Runtime v18 migration candidate")?;
-    let active = repo
-        .load_current()
-        .await
-        .context("read Runtime v18 activation back")?
-        .context("Runtime v18 activation read-back is absent")?;
-    if active.runtime_config_version_id != version.runtime_config_version_id
-        || active.config_hash != config_hash
-    {
-        bail!("Runtime v18 activation read-after-write mismatch");
-    }
-    RuntimeConfig::from_json(&active.config_json)
-        .context("activated Runtime v18 document failed typed read-back")?;
-    println!("status=activated");
-    println!(
-        "runtime_config_activation_id={}",
-        activation.runtime_config_activation_id
-    );
-    println!(
-        "runtime_config_version_id={}",
-        active.runtime_config_version_id
-    );
-    println!("config_hash={}", active.config_hash);
-    pool.close().await;
+fn write_config_api_schema(output: &PathBuf) -> Result<()> {
+    let schema = schemars::schema_for!(ConfigApiContractSchema);
+    let mut rendered =
+        serde_json::to_string_pretty(&schema).context("render Config API contract schema")?;
+    rendered.push('\n');
+    fs::create_dir_all(
+        output
+            .parent()
+            .context("Config API schema path has no parent")?,
+    )
+    .with_context(|| format!("create {}", output.display()))?;
+    fs::write(output, rendered).with_context(|| format!("write {}", output.display()))?;
+    println!("generated {}", output.display());
     Ok(())
-}
-
-fn migrate_runtime_v17_json(config_json: &serde_json::Value) -> Result<RuntimeConfig> {
-    let mut migrated = config_json.clone();
-    let document = migrated
-        .as_object_mut()
-        .context("Runtime v17 document must be a JSON object")?;
-    let schema_version = document
-        .get("schema_version")
-        .and_then(serde_json::Value::as_u64)
-        .context("Runtime v17 document has no integer schema_version")?;
-    if schema_version != 17 {
-        bail!("one-shot Runtime migration only accepts schema_version 17, found {schema_version}");
-    }
-    if document.contains_key("feedback") {
-        bail!("Runtime v17 document unexpectedly contains feedback; refusing ambiguous migration");
-    }
-    document.insert("schema_version".to_owned(), serde_json::json!(18));
-    document.insert(
-        "feedback".to_owned(),
-        serde_json::to_value(FeedbackConfig::default())
-            .context("encode Runtime v18 feedback defaults")?,
-    );
-    RuntimeConfig::from_json(&migrated).context("typed parse of migrated Runtime v18 document")
 }
 
 async fn phase_11_9_evidence_bootstrap(args: Phase119EvidenceBootstrapArgs) -> Result<()> {
@@ -428,7 +320,7 @@ async fn phase_11_9_evidence_bootstrap(args: Phase119EvidenceBootstrapArgs) -> R
     .await
     .context("run Phase 11.9 evidence bootstrap")?;
     let manifest_hash =
-        CanonicalDigest::content_hash_json(&("phase_11_9_evidence_manifest_v4", &manifest))
+        CanonicalDigest::content_hash_json(&("boot_evidence_manifest_v1", &manifest))
             .context("hash Phase 11.9 evidence manifest")?;
     let bytes = serde_json::to_vec_pretty(&manifest).context("encode evidence manifest")?;
     fs::create_dir_all(&args.manifest_dir).with_context(|| {
@@ -832,10 +724,11 @@ async fn clickhouse_schema(command: ClickHouseSchemaCommand) -> Result<()> {
 }
 
 fn migration_password<'a>(
-    password: Option<&'a SecretText>,
+    password: Option<&'a SystemdCredentialRef>,
     field: &'static str,
 ) -> Result<&'a SecretText> {
     password
+        .map(SystemdCredentialRef::secret)
         .filter(|secret| !secret.is_empty())
         .with_context(|| format!("configuration secret `{field}` is required for this command"))
 }
@@ -990,9 +883,7 @@ fn run_ignored_suites(suites: &[(&str, &str)], label: &str) -> Result<()> {
 mod tests {
     use std::{collections::BTreeSet, fs, path::Path};
 
-    use quant_pivot_models::runtime_config::{FeedbackConfig, RuntimeConfig};
-
-    use super::{DOCKER_SUITES, migrate_runtime_v17_json, report_capacity_ceiling, workspace_root};
+    use super::{DOCKER_SUITES, report_capacity_ceiling, workspace_root};
 
     const DOCKER_IGNORE_MARKER: &str = "#[ignore = \"requires Docker\"]";
 
@@ -1001,37 +892,6 @@ mod tests {
         assert_eq!(report_capacity_ceiling(1).expect("ceiling"), 100_000);
         assert_eq!(report_capacity_ceiling(50_001).expect("ceiling"), 101_000);
         assert_eq!(report_capacity_ceiling(120_000).expect("ceiling"), 240_000);
-    }
-
-    #[test]
-    fn runtime_v17_migration_is_exact_and_preserves_existing_policy() {
-        let mut legacy = RuntimeConfig::default().to_json();
-        let document = legacy.as_object_mut().expect("runtime object");
-        document.insert("schema_version".to_owned(), serde_json::json!(17));
-        document.remove("feedback");
-        document
-            .get_mut("selection")
-            .and_then(serde_json::Value::as_object_mut)
-            .expect("selection")
-            .insert("max_spread_bps".to_owned(), serde_json::json!(4321));
-
-        let migrated = migrate_runtime_v17_json(&legacy).expect("v17 to v18 migration");
-        assert_eq!(migrated.schema_version.get(), 18);
-        assert_eq!(migrated.selection.max_spread_bps, 4321);
-        assert_eq!(migrated.feedback, FeedbackConfig::default());
-    }
-
-    #[test]
-    fn runtime_v17_migration_rejects_every_other_document_shape() {
-        let current = RuntimeConfig::default().to_json();
-        assert!(migrate_runtime_v17_json(&current).is_err());
-
-        let mut ambiguous = current;
-        ambiguous
-            .as_object_mut()
-            .expect("runtime object")
-            .insert("schema_version".to_owned(), serde_json::json!(17));
-        assert!(migrate_runtime_v17_json(&ambiguous).is_err());
     }
 
     #[test]

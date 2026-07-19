@@ -4,51 +4,36 @@ use chrono::{Duration as ChronoDuration, Utc};
 use quant_pivot_models::{
     domain::{
         NewBacktestReport, NewModelComparisonReport, NewModelRun, NewModelSpec, NewModelVersion,
-        NewRuntimeConfigVersion,
     },
     enums::{
         model::ModelFamily,
         quant::{ModelRunKind, ModelRunStatus, PublicationStatus},
-        runtime_config::RuntimeConfigVersionSource,
     },
     types::{
-        BacktestReportId, ContentHash, ModelComparisonReportId, ModelInputContract, ModelRunId,
-        ModelSpecId, ModelTrainingContract, ModelVersionId, Probability, RuntimeConfigVersionId,
-        SchemaVersion,
+        BacktestReportId, ContentHash, DecisionPolicySnapshotId, ModelComparisonReportId,
+        ModelInputContract, ModelRunId, ModelSpecId, ModelTrainingContract, ModelVersionId,
+        Probability, SchemaVersion,
     },
 };
 use quant_pivot_repository::{
     postgres::{
         PgBacktestReportRepository, PgModelComparisonReportRepository, PgModelRegistryRepository,
-        PgModelRunRepository, PgRuntimeConfigVersionRepository,
+        PgModelRunRepository,
     },
     traits::{
         BacktestReportRepository, ModelComparisonReportRepository, ModelRegistryRepository,
-        ModelRunRepository, RuntimeConfigVersionRepository,
+        ModelRunRepository,
     },
 };
-use quant_pivot_test_support::pg::setup_pg;
+use quant_pivot_test_support::{pg::setup_pg, policy_fixtures::bootstrap_default_policy_bundle};
 use rust_decimal_macros::dec;
 
 fn content_hash(seed: &str) -> ContentHash {
     ContentHash::parse(format!("blake3:{seed:0>64}")).expect("hash")
 }
 
-async fn seed_runtime_config(db: &sea_orm::DatabaseConnection) -> RuntimeConfigVersionId {
-    let id = RuntimeConfigVersionId::from_v7();
-    PgRuntimeConfigVersionRepository::new(db.clone())
-        .create_version(NewRuntimeConfigVersion {
-            runtime_config_version_id: id.clone(),
-            config_hash: content_hash("c"),
-            schema_version: SchemaVersion::FIRST,
-            config_json: serde_json::json!({}),
-            source: RuntimeConfigVersionSource::Bootstrap,
-            created_by: "pg-comparison-it".to_owned(),
-            reason: "integration test".to_owned(),
-        })
-        .await
-        .expect("runtime config");
-    id
+async fn seed_runtime_config(db: &sea_orm::DatabaseConnection) -> DecisionPolicySnapshotId {
+    bootstrap_default_policy_bundle(db, "pg-comparison-it", "integration test").await
 }
 
 async fn seed_model_version(
@@ -64,6 +49,7 @@ async fn seed_model_version(
             model_spec_id: model_spec_id.clone(),
             version,
             artifact_hash: content_hash(artifact_seed),
+            category_scope: None,
             profile_ref: quant_pivot_test_support::execution_pg_seed::fixture_profile_ref(),
             training_dataset_id: None,
             trade_policy_artifact_id: None,
@@ -85,7 +71,7 @@ async fn seed_backtest_report(
     db: &sea_orm::DatabaseConnection,
     model_version_id: &ModelVersionId,
     model_run_id: &ModelRunId,
-    rc_id: &RuntimeConfigVersionId,
+    rc_id: &DecisionPolicySnapshotId,
     report_seed: &str,
 ) -> BacktestReportId {
     let id = BacktestReportId::from_v7();
@@ -95,7 +81,7 @@ async fn seed_backtest_report(
             backtest_report_id: id.clone(),
             model_version_id: model_version_id.clone(),
             model_run_id: model_run_id.clone(),
-            runtime_config_version_id: rc_id.clone(),
+            decision_policy_snapshot_id: rc_id.clone(),
             window_start,
             window_end: window_start + ChronoDuration::hours(1),
             coverage: dec!(1),
@@ -122,7 +108,7 @@ async fn seed_backtest_report(
 async fn seed_run(
     db: &sea_orm::DatabaseConnection,
     model_version_id: &ModelVersionId,
-    rc_id: &RuntimeConfigVersionId,
+    rc_id: &DecisionPolicySnapshotId,
 ) -> ModelRunId {
     let model_run_id = ModelRunId::from_v7();
     let window_start = Utc::now() - ChronoDuration::hours(2);
@@ -131,7 +117,7 @@ async fn seed_run(
             model_run_id: model_run_id.clone(),
             run_kind: ModelRunKind::Backtest,
             model_version_id: Some(model_version_id.clone()),
-            runtime_config_version_id: rc_id.clone(),
+            decision_policy_snapshot_id: rc_id.clone(),
             market_selection_id: None,
             window_start,
             window_end: window_start + ChronoDuration::hours(1),

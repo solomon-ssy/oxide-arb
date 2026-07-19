@@ -223,7 +223,7 @@ impl EntryConditionRepository for PgEntryConditionRepository {
             source_id.clone(),
             instrument_key.clone(),
             local_date,
-            temperature_statistic.as_str().to_owned(),
+            temperature_statistic,
         ))
         .filter(quant_weather_daily_temperature_projection::Column::Station.eq(station))
         .one(&self.db)

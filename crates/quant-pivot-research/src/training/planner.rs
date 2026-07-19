@@ -146,9 +146,9 @@ mod tests {
     use quant_pivot_models::{
         enums::quant::DatasetPurpose,
         types::{
-            ArtifactUri, ContentHash, MarketId, ModelSpecId, OrderIntentId, PositionId, Price,
-            RuntimeConfigVersionId, SchemaVersion, Shares, SourceSliceManifestRef, TokenId, Usd,
-            builtin_research_profiles, default_sample_sources,
+            ArtifactUri, ContentHash, DecisionPolicySnapshotId, MarketId, ModelSpecId,
+            OrderIntentId, PositionId, Price, SchemaVersion, Shares, SourceSliceManifestRef,
+            TokenId, Usd, builtin_research_profiles, default_sample_sources,
         },
     };
     use rust_decimal::Decimal;
@@ -168,7 +168,7 @@ mod tests {
                 manifest_hash: ContentHash::parse(format!("blake3:{}", "5".repeat(64)))
                     .expect("hash"),
             },
-            runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
+            decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
             window_start: start,
             window_end: start + Duration::seconds(300),
             pit_cutoff: start + Duration::seconds(360),

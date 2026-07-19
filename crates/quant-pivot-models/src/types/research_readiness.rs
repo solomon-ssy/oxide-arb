@@ -12,7 +12,7 @@ use crate::{
     wire_enum,
 };
 
-pub const RETENTION_RUNWAY_EVIDENCE_FORMAT_VERSION: u32 = 3;
+pub const RETENTION_RUNWAY_EVIDENCE_FORMAT_VERSION: u32 = 1;
 pub const SHADOW_LATENCY_PROFILE_FORMAT_VERSION: u32 = 1;
 
 wire_enum! {
@@ -287,7 +287,7 @@ fn ch_binding(
 /// Per-object observation from the cross-storage research source registry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RetentionSourceObservationV3 {
+pub struct RetentionSourceObservationV1 {
     pub source: ResearchReadinessSource,
     pub storage: ResearchSourceStorageKind,
     pub object: String,
@@ -308,7 +308,7 @@ pub struct RetentionSourceObservationV3 {
 /// free of destructive table TTL until governed retention is implemented.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RetentionRunwayEvidenceV3 {
+pub struct RetentionRunwayEvidenceV1 {
     pub format_version: u32,
     pub registry_hash: ContentHash,
     pub required_sources: Vec<ResearchReadinessSource>,
@@ -316,10 +316,10 @@ pub struct RetentionRunwayEvidenceV3 {
     pub required_days: u32,
     pub measured_history_days: Option<u32>,
     pub active_raw_bytes: u64,
-    pub observations: Vec<RetentionSourceObservationV3>,
+    pub observations: Vec<RetentionSourceObservationV1>,
 }
 
-impl RetentionRunwayEvidenceV3 {
+impl RetentionRunwayEvidenceV1 {
     #[must_use]
     pub fn proven(&self) -> bool {
         self.format_version == RETENTION_RUNWAY_EVIDENCE_FORMAT_VERSION
@@ -430,7 +430,7 @@ impl ShadowLatencyProfileV1 {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
 #[serde(tag = "kind", content = "evidence", rename_all = "snake_case")]
 pub enum ResearchReadinessEvidencePayload {
-    RetentionRunway(RetentionRunwayEvidenceV3),
+    RetentionRunway(RetentionRunwayEvidenceV1),
     ShadowLatencyProfile(ShadowLatencyProfileV1),
 }
 
@@ -441,7 +441,7 @@ mod tests {
     use super::{
         ContentHash, RETENTION_RUNWAY_EVIDENCE_FORMAT_VERSION, ResearchReadinessSource,
         ResearchSourceBinding, ResearchSourceRegistry, ResearchSourceStorageKind,
-        RetentionRunwayEvidenceV3, RetentionSourceObservationV3,
+        RetentionRunwayEvidenceV1, RetentionSourceObservationV1,
         SHADOW_LATENCY_PROFILE_FORMAT_VERSION, ShadowLatencyProfileV1,
     };
 
@@ -451,9 +451,9 @@ mod tests {
             .expect("valid timestamp")
     }
 
-    fn retention() -> RetentionRunwayEvidenceV3 {
+    fn retention() -> RetentionRunwayEvidenceV1 {
         let observed_at = observed_at();
-        RetentionRunwayEvidenceV3 {
+        RetentionRunwayEvidenceV1 {
             format_version: RETENTION_RUNWAY_EVIDENCE_FORMAT_VERSION,
             registry_hash: hash(1),
             required_sources: vec![ResearchReadinessSource::ClobL2],
@@ -461,7 +461,7 @@ mod tests {
             required_days: 200,
             measured_history_days: Some(220),
             active_raw_bytes: 5_000,
-            observations: vec![RetentionSourceObservationV3 {
+            observations: vec![RetentionSourceObservationV1 {
                 source: ResearchReadinessSource::ClobL2,
                 storage: ResearchSourceStorageKind::ClickHouseTable,
                 object: "quant_book_l2_event".to_owned(),

@@ -2,22 +2,15 @@
 
 use quant_pivot_error::storage::{StorageError, entity};
 use quant_pivot_models::{
-    domain::{
-        ModelVersionListQuery, NewModelSpec, NewModelVersion, NewRuntimeConfigActivation,
-        PageRequest,
-    },
-    enums::{
-        model::ModelFamily, quant::PublicationStatus, runtime_config::RuntimeConfigActivationKind,
-    },
+    domain::{ModelPickerSide, ModelVersionListQuery, NewModelSpec, NewModelVersion, PageRequest},
+    enums::{common::MarketCategory, model::ModelFamily, quant::PublicationStatus},
     types::{
-        ContentHash, FeatureParityRunId, FeatureParityStateId, ModelInputContract, ModelSpecId,
-        ModelTrainingContract, ModelVersionId, RuntimeConfigActivationId, RuntimeConfigVersionId,
+        ContentHash, ModelInputContract, ModelSpecId, ModelTrainingContract, ModelVersionId,
         SchemaVersion,
     },
 };
 use quant_pivot_repository::{
-    postgres::PgModelRegistryRepository,
-    traits::{ModelRegistryRepository, RollbackModelVersionCommit},
+    postgres::PgModelRegistryRepository, traits::ModelRegistryRepository,
 };
 use quant_pivot_test_support::{execution_pg_seed::fixture_profile_ref, pg::setup_pg};
 
@@ -49,6 +42,7 @@ fn new_version(model_spec_id: ModelSpecId, seed: char) -> NewModelVersion {
         // Preview only — `create_model_version` re-allocates under lock.
         version: 0,
         artifact_hash: content_hash(seed),
+        category_scope: None,
         profile_ref: fixture_profile_ref(),
         training_dataset_id: None,
         trade_policy_artifact_id: None,
@@ -177,70 +171,101 @@ async fn find_and_page_versions_join_model_family_from_spec() {
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn rollback_without_durable_latch_and_subject_permit_leaves_both_statuses_unchanged() {
+async fn published_artifacts_coexist_until_model_routing_moves_and_retirement_is_explicit() {
     let (pool, _container) = setup_pg().await;
     let repo = PgModelRegistryRepository::new(pool.connection().clone());
     let spec = repo
         .create_model_spec(new_spec(
-            "rollback-fail-closed-spec",
+            "multiple-published-artifacts-spec",
             ModelFamily::WeightedFactor,
         ))
         .await
         .expect("model spec");
 
-    let mut current_new = new_version(spec.model_spec_id.clone(), 'e');
-    current_new.publication_status = PublicationStatus::Published;
-    let current = repo
-        .create_model_version(current_new)
+    let mut first = new_version(spec.model_spec_id.clone(), 'e');
+    first.publication_status = PublicationStatus::Published;
+    repo.create_model_version(first)
         .await
-        .expect("current version");
-    let mut target_new = new_version(spec.model_spec_id.clone(), 'f');
-    target_new.publication_status = PublicationStatus::Retired;
-    let target = repo
-        .create_model_version(target_new)
+        .expect("first published artifact");
+    let mut second = new_version(spec.model_spec_id.clone(), 'f');
+    second.publication_status = PublicationStatus::Published;
+    repo.create_model_version(second)
         .await
-        .expect("rollback target");
+        .expect("second published artifact");
 
-    let error = repo
-        .rollback_to_retired_predecessor(RollbackModelVersionCommit {
-            model_spec_id: &spec.model_spec_id,
-            expected_current_model_version_id: &current.model_version_id,
-            target_model_version_id: &target.model_version_id,
-            expected_target_artifact_hash: &target.artifact_hash,
-            expected_target_publish_path_set_id: None,
-            quality_gate_payload_hash: &content_hash('g'),
-            feature_parity_state_id: &FeatureParityStateId::from_v7(),
-            feature_parity_run_id: &FeatureParityRunId::from_v7(),
-            expected_runtime_config_activation_id: None,
-            runtime_config_activation: NewRuntimeConfigActivation {
-                runtime_config_activation_id: RuntimeConfigActivationId::from_v7(),
-                runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
-                runtime_config_approval_id: None,
-                activated_by: "test".to_owned(),
-                reason: "test rollback".to_owned(),
-                activation_kind: RuntimeConfigActivationKind::Promote,
-                previous_runtime_config_version_id: None,
-                rollback_target_version_id: None,
-                audit_event_id: None,
-            },
-        })
-        .await
-        .expect_err("missing durable permits must block rollback");
-    assert!(error.to_string().contains("feature parity latch"));
-
-    let current_after = repo
-        .find_model_version_by_id(&current.model_version_id)
-        .await
-        .expect("current lookup")
-        .expect("current row");
-    let target_after = repo
-        .find_model_version_by_id(&target.model_version_id)
-        .await
-        .expect("target lookup")
-        .expect("target row");
     assert_eq!(
-        current_after.publication_status,
-        PublicationStatus::Published
+        repo.list_published_for_spec(&spec.model_spec_id)
+            .await
+            .expect("published artifacts")
+            .len(),
+        2
     );
-    assert_eq!(target_after.publication_status, PublicationStatus::Retired);
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn published_picker_catalog_is_one_typed_join_with_side_and_scope_filters() {
+    let (pool, _container) = setup_pg().await;
+    let repo = PgModelRegistryRepository::new(pool.connection().clone());
+    let buy_spec = repo
+        .create_model_spec(new_spec("picker-buy", ModelFamily::WeightedFactor))
+        .await
+        .expect("buy spec");
+    let sell_spec = repo
+        .create_model_spec(new_spec("picker-sell", ModelFamily::HoldVsExitWeighted))
+        .await
+        .expect("sell spec");
+
+    let mut generic_buy = new_version(buy_spec.model_spec_id.clone(), 'g');
+    generic_buy.publication_status = PublicationStatus::Published;
+    let generic_buy = repo
+        .create_model_version(generic_buy)
+        .await
+        .expect("generic buy");
+
+    let mut crypto_buy = new_version(buy_spec.model_spec_id.clone(), 'h');
+    crypto_buy.category_scope = Some(MarketCategory::Crypto);
+    crypto_buy.publication_status = PublicationStatus::Published;
+    let crypto_buy = repo
+        .create_model_version(crypto_buy)
+        .await
+        .expect("crypto buy");
+
+    let mut weather_buy = new_version(buy_spec.model_spec_id.clone(), 'i');
+    weather_buy.category_scope = Some(MarketCategory::Weather);
+    weather_buy.publication_status = PublicationStatus::Published;
+    repo.create_model_version(weather_buy)
+        .await
+        .expect("weather buy");
+
+    let mut sell = new_version(sell_spec.model_spec_id.clone(), 'j');
+    sell.publication_status = PublicationStatus::Published;
+    let sell = repo.create_model_version(sell).await.expect("sell");
+
+    let crypto_catalog = repo
+        .list_published_catalog(ModelPickerSide::Buy, Some(MarketCategory::Crypto))
+        .await
+        .expect("crypto catalog");
+    assert_eq!(crypto_catalog.len(), 2);
+    assert!(crypto_catalog.iter().any(|row| {
+        row.model_version_id == generic_buy.model_version_id
+            && row.spec_name == "picker-buy"
+            && row.category_scope.is_none()
+    }));
+    assert!(crypto_catalog.iter().any(|row| {
+        row.model_version_id == crypto_buy.model_version_id
+            && row.category_scope == Some(MarketCategory::Crypto)
+            && row.artifact_hash == crypto_buy.artifact_hash
+    }));
+
+    let sell_catalog = repo
+        .list_published_catalog(ModelPickerSide::Sell, None)
+        .await
+        .expect("sell catalog");
+    assert_eq!(sell_catalog.len(), 1);
+    assert_eq!(sell_catalog[0].model_version_id, sell.model_version_id);
+    assert_eq!(
+        sell_catalog[0].model_family,
+        ModelFamily::HoldVsExitWeighted
+    );
 }

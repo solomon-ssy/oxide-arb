@@ -3,34 +3,62 @@
 use super::sea_orm_active_enums::{
     QpFactorDirection, QpFactorIndeterminateReason, QpFactorValueState, QpNormalizationSource,
 };
-use sea_orm::{entity::prelude::*, sea_query::Expr};
+use sea_orm::entity::prelude::*;
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
-#[sea_orm(schema_name = "public", table_name = "quant_factor_value")]
+#[sea_orm(table_name = "quant_factor_value")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub factor_value_id: Uuid,
     pub factor_definition_id: Uuid,
     pub feature_vector_id: Uuid,
     pub model_run_id: Uuid,
-    #[sea_orm(column_type = "String(StringLen::N(66))")]
+    #[sea_orm(column_type = "Text")]
     pub market_id: String,
     pub decision_at: DateTimeWithTimeZone,
     pub value_state: QpFactorValueState,
-    #[sea_orm(column_type = "Decimal(Some((28, 12)))", nullable)]
     pub raw_value: Option<Decimal>,
-    #[sea_orm(column_type = "Decimal(Some((20, 18)))", nullable)]
     pub normalized_score: Option<Decimal>,
     pub normalization_source: Option<QpNormalizationSource>,
     pub indeterminate_reason: Option<QpFactorIndeterminateReason>,
     pub direction: QpFactorDirection,
-    #[sea_orm(column_type = "Decimal(Some((20, 18)))")]
     pub confidence: Decimal,
     #[sea_orm(column_type = "JsonBinary")]
     pub explanation: Json,
-    #[sea_orm(default_expr = "Expr::cust(\"statement_timestamp()\")")]
     pub created_at: DateTimeWithTimeZone,
+    #[sea_orm(
+        belongs_to,
+        from = "market_id",
+        to = "market_id",
+        on_update = "NoAction",
+        on_delete = "NoAction"
+    )]
+    pub market: BelongsTo<super::market::Entity>,
+    #[sea_orm(
+        belongs_to,
+        from = "factor_definition_id",
+        to = "factor_definition_id",
+        on_update = "NoAction",
+        on_delete = "NoAction"
+    )]
+    pub quant_factor_definition: BelongsTo<super::quant_factor_definition::Entity>,
+    #[sea_orm(
+        belongs_to,
+        from = "feature_vector_id",
+        to = "feature_vector_id",
+        on_update = "NoAction",
+        on_delete = "NoAction"
+    )]
+    pub quant_feature_vector: BelongsTo<super::quant_feature_vector::Entity>,
+    #[sea_orm(
+        belongs_to,
+        from = "model_run_id",
+        to = "model_run_id",
+        on_update = "NoAction",
+        on_delete = "NoAction"
+    )]
+    pub quant_model_run: BelongsTo<super::quant_model_run::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

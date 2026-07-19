@@ -42,7 +42,7 @@ use crate::{
     governance::KillSwitchHandle,
     ingest::book_store::BookStore,
     observability::metrics_hub::MetricsHub,
-    runtime_config::RuntimeConfigStore,
+    runtime_config::DecisionPolicyStore,
 };
 
 /// Max lots evaluated per sweep (bounds one pass's book + DB load).
@@ -56,7 +56,7 @@ pub struct ExitMonitorServiceDeps {
     pub submission: Arc<dyn ExecutionSubmissionRepository>,
     pub book_store: Arc<BookStore>,
     pub kill_switch: KillSwitchHandle,
-    pub config: Arc<RuntimeConfigStore>,
+    pub config: Arc<DecisionPolicyStore>,
     pub signal: Arc<dyn ExitSignalEvaluator>,
     pub dispatcher: Arc<CoreExitDispatcher>,
     pub health: ExitMonitorHealthHandle,
@@ -79,7 +79,13 @@ impl ExitMonitorService {
     /// When the monitor is disabled in config the heartbeat is **not** published,
     /// so admission `#20` fails closed (no new entries without live monitoring).
     pub async fn run_pass(&self, now: DateTime<Utc>) -> QuantResult<()> {
-        let policy = self.deps.config.current().execution.exit_monitor.clone();
+        let policy = self
+            .deps
+            .config
+            .current()
+            .execution_risk
+            .exit_monitor
+            .clone();
         if !policy.enabled {
             return Ok(());
         }
@@ -273,7 +279,7 @@ impl ExitMonitorService {
         self.deps
             .config
             .current()
-            .execution
+            .operational_control
             .kill_switch
             .emergency_exit
             .clone()

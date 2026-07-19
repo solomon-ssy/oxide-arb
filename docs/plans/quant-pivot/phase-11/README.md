@@ -1,12 +1,20 @@
 # Phase 11 — Alpha Quality & Closed-Loop Hardening 子phase索引
 
+<!-- quant-pivot-lifecycle-contract:v1 -->
+> **Lifecycle contract**
+> - `lifecycle_assumption`: 项目尚未正式生产上线，当前状态为 `pre_production_resettable`，系统自有基线统一为 `boot` / schema version `1`。
+> - `schema_data_version_impact`: 本文中的历史版本号与递增路径不再具有实施效力；当前实现不迁移测试数据、旧结构或旧版本。
+> - `pre_production_behavior`: 允许 clean-break、migration squash 与全新基础设施 bootstrap，但任何数据销毁仍需操作者单独授权。
+> - `production_frozen_behavior`: 一旦完成不可逆 production seal，后续变更必须提供前向 migration、兼容性评估、回滚方案与数据验证。
+> - `rollback_and_data_verification`: 封存前通过清空后的 fresh-install 验证；封存后不得回退到 boot reset。
+
 > 状态：生产级破坏式重构。**11.1 已落地并完成收尾闭环加固**（时间原生 EMA/MACD、
 > 退出/卖出复用入场冻结因子面、共线默认 raw 面板 + 类别中性化、Indeterminate 置零 confidence、
 > 小截面只允许截面统计或模型 artifact 内冻结的 `FrozenReferenceQuantile`）；**11.2.2 已落地**（crypto 外部垂直：两层向量、
 > Tier 0/1 linkage、Binance 特征源、domain PIT、category 路由）；**11.4 已落地并完成生产级语义加固**
 >（`as_of` 横截面 LTR、`rank_ic_weighted_ranknet` 诚实命名、TopN **rank-equal** token 伪组合、
 > singleton 可观测丢弃、`rank_loss_group_count`、NDCG@k/Rank IC 诊断、argmin/Decimal→f64
-> fail-closed；全局 runtime schema 的当前版本统一见下方权威版本账本）；
+> fail-closed；全部系统自有 contract 已由下方 boot 基线取代）；
 > **11.5 已落地**（Buy 侧 CPCV/DSR/PBO/purge/trial-grid，见其文档头部"闭环加固"）；
 > **11.5.1 已落地**（Sell/Hold-vs-Exit lot 级 CPCV：`FoldRuntime`/`RankObservation` 泛化、
 > residual-shares 状态机 + 路径分叉停止、activity-only lot-native Sharpe/DSR/PBO、null baseline uplift、
@@ -20,7 +28,7 @@
 > 11.7 的基础执行/control contract 已收口；11.7.1 正在破坏式落地 Recommendation-owned typed
 > condition 与 Crypto/Weather source/event/shadow 闭环；真实登录/RBAC/BookStore 状态驱动的受保护 UI/E2E
 > 与当前 golden 已通过，不以静态页面替代；仓库中不存在改造前历史截图，不伪造 before evidence。
-> 11.7.2 的 Runtime v15 / Dataset v5 / Model v5 / Policy v6 / Evidence v3、PIT CLOB market-info、
+> 11.7.2 原实施波次留下的业务能力、PIT CLOB market-info、
 > Source Slice producer/ledger/strict replay、signed latency/retention readiness、cash-budget/fee provenance、
 > Weather candidate state-machine fitter、56-fold/21-path CPCV/DSR/PBO/ESS、2× latency、typed Evidence
 > sealing、独立 async Validate 和 PG→ClickHouse verified fact-delivery outbox 已落地；真实 Published
@@ -44,21 +52,22 @@
 > 删除旧启发式常量、删除"写了但从不 emit"的枚举值、删除静默填零路径。不追求最小变更/最小侵入/
 > 最小工作量;优先正确领域模型、语义精准、生产可维护性,必要时破坏式重构。
 
-## 权威版本账本（当前）
+## 权威 boot 版本账本（当前）
 
-本表是 Phase 11 唯一“当前版本”真相；11.0–11.6 文档中的版本只描述各子阶段完成时的历史波次。
+历史 phase 中出现的版本数字只用于解释当时为何产生某项业务能力，不再是可执行 contract。当前唯一基线：
 
-| Contract | 当前版本 | 下一位 owner |
+| Contract | 当前基线 | 后续 owner |
 |---|---:|---|
-| Runtime config | **v18（11.9 数据闭环已落地，后续 PAUSED）** | v17 已删除空 feedback 占位；11.9 加入真实运维字段并显式 bump v18 |
-| Feature schema | **v7（11.9 部分落地，后续 PAUSED）** | 通用 Weather contract 已落地；factor-bundle binding 尚未完成；旧 schema audit-only |
-| Dataset artifact | **v6（11.9 部分落地，后续 PAUSED）** | factor bundle / capability / cohort coverage lineage 尚未完成验收；旧 artifact audit-only |
-| Model artifact | **v6（11.9 部分落地，后续 PAUSED）** | factor bundle / evaluation-window / feedback policy lineage 尚未完成验收；旧 artifact audit-only |
-| Trade policy artifact | **v6** | activation target + structural OOS + Evidence v3 ref |
-| Evidence bundle | **v3** | 九类 WORM source/trial/replay/gate/validation identity |
+| 六类 Runtime Policy | `schema_version = 1`，各自独立 revision | 对应 policy resource；不再存在统一 Runtime Config 版本 |
+| Feature / Scoring / Domain / Research Method profile | `schema_version = 1` | immutable content-addressed artifact |
+| Dataset / Model / Trade Policy / Evidence | `schema_version = 1` | 对应 artifact contract |
+| evaluator / manifest / internal format | `version = 1` | 对应 typed contract module |
+| PostgreSQL migration | `m00000000_000001_bootstrap` | deploy-only migration CLI |
+| ClickHouse migration | `version = 1` bootstrap | deploy-only schema CLI |
+| Rust workspace packages | `0.1.0` | 首个未正式发布的 production candidate |
 
-11.11 只能引用本账本在实施当时的值，不得复制一份“当前版本”。项目未生产部署，schema、ClickHouse
-表和 artifacts 从空基线重建；不提供旧 runtime parser、artifact loader、JSONB 双读、alias 或 re-export。
+项目未生产部署，schema、ClickHouse 表和 artifacts 从空基线重建；不提供旧 runtime parser、artifact
+loader、JSONB 双读、alias、版本映射或 re-export。`production_frozen` 后才恢复单调版本与正式 migration discipline。
 
 ## 0. 为什么单独开 Phase 11
 
@@ -124,7 +133,7 @@ Phase 11 的唯一目标:**把阿尔法层与研究反馈闭环拉到与执行�
 | 11.7 | Executable Labeling, Entry & Exit Closed-Loop | TradePolicyArtifact + 可执行标签 + 审批即 Arm + 冻结退出策略 — **执行/control/operational closeout 与受保护 UI/E2E 已完成；真实 Published policy 激活受 11.7.2 阻断** | 14, 15, 16, 18 | [11.7](11.7-labeling-entry-exit-closed-loop.md) |
 | 11.7.1 | Composable Entry Conditions + Crypto/Weather Events | typed AST + PIT facts/events + Recommendation shadow + vertical gates — **实施中** | — | [11.7.1](11.7.1-composable-entry-event-triggers.md) |
 | 11.7.2 | Executable L2 Policy Validation & Research Activation | 完整冻结路径模拟 + structural volatility baseline + cash-budget + PIT fee + purged CPCV/uniqueness/DSR/PBO/ESS，交付至 ReportOnly shadow — **仓库契约已闭环：Weather/structural producers、56/21 CPCV、2× latency、Evidence v3、独立 Validate、分页 drilldown 与 fact outbox 已接通；物理迁移/真实数据验收与 24h shadow 待目标环境完成；真实 canary 已移交 11.11** | — (11.7 research activation gate) | [11.7.2](11.7.2-executable-l2-policy-validation.md) |
-| 11.8 | Report Lifecycle, Durable Scheduling & Operator Workflow | **已完成（含 P0 收尾复核）**：CH decision-fact、delivery claim-loss、censor accounting 与 Runtime v16 闭环 | 17 | [11.8](11.8-report-lifecycle-fsm-completion.md) |
+| 11.8 | Report Lifecycle, Durable Scheduling & Operator Workflow | **已完成（含 P0 收尾复核）**：CH decision-fact、delivery claim-loss 与 censor accounting 闭环；历史版本已被 boot 基线取代 | 17 | [11.8](11.8-report-lifecycle-fsm-completion.md) |
 | 11.9 | Crypto / Weather Verticals, Attribution Feedback & Auto-Retraining | 双垂直真实数据与 serving、研究反馈闭环、model+factor 原子晋升、WS/UI 实时验收 — **Vertical Data Closure 已完成；其余 PAUSED；Phase 尚未完成；唯一进度真相见 11.9 Implementation Ledger** | 19, 21 | [11.9](11.9-attribution-feedback-and-auto-retraining.md) |
 | 11.10 | Counterfactual Factor Attribution | 反事实归因 + MAE 回填 | 20 | [11.10](11.10-counterfactual-factor-attribution.md) |
 | 11.11 | Execution Governance Hardening | 执行治理探针硬化 | 22 | [11.11](11.11-execution-governance-hardening.md) |
@@ -179,9 +188,8 @@ flowchart TD
 
 执行原则:
 
-- **11.0** 是设计冻结点:锁定新枚举、删除清单、feature-gate 策略;后续子phase 按实际落地逐步 bump runtime schema。
-  11.4 实施当时的历史 bump 是 `v8 → v9`（诚实命名 + TopN 伪组合 + 诊断 knobs）；它不是当前
-  active contract，当前唯一版本见下方 11.6 基线。
+- **11.0** 是设计冻结点：锁定新枚举、删除清单与 feature-gate 策略。历史版本递增记录已失去实施效力；
+  所有后续子phase 从 boot contract 读取 schema，而不是复制或预占版本号。
 - **11.1 / 11.6** 是数据地基：11.6 的 frozen input transform、immutable factor revision 和 parity
   facts 是后续模型 publish、11.9 drift/challenger 的硬前提；确定性 mismatch 不得由 drift 逻辑吞并。
 - **11.4 → 11.5 → 11.3** 是模型可信链:先有正确目标,再有防过拟合验证,最后才有校准喂 Kelly。
@@ -200,15 +208,12 @@ flowchart TD
   **接管并取代 [`../phase-03/03.8-vertical-domain-closed-loop.md`](../phase-03/03.8-vertical-domain-closed-loop.md)**
   的垂直闭环设计(确定性优先 linkage 取代 LLM 优先;`ResolutionOracle` + basis 取代"特征源=结算源=Binance")。
   11.2.1 **提前**落地 11.3 的 `FavoriteLongshotBiasTable`(favorite-longshot 因子所需),11.3 正式落地时统一收敛
-  治理(见 [11.3 §3.4](11.3-probabilistic-calibration-and-kelly.md))。runtime-config 由 11.2.1 bump 至 v4、
-  11.2.2 再 bump 至 **v5**（历史里程碑）；`feature_schema_version` 由 11.2.1 bump 至 4、11.2.2
-  再 bump 至 **5**（两层向量重构在 11.2.2）。文档冻结时实际 runtime config 是
-  **v15**，11.8 的历史里程碑为 **v16**；随后 v17 删除无执行语义的空 feedback 占位。11.9 已以
-  Runtime **v18**、Feature **v7**、Dataset/Model **v6** 完成双垂直数据闭环，反馈/serving/UI 后续范围
-  PAUSED；完整字段、迁移、测试和逐项状态只见
+  治理(见 [11.3 §3.4](11.3-probabilistic-calibration-and-kelly.md))。11.2.1/11.2.2 的历史版本波次已被
+  boot baseline 取代，但两层向量等业务决策保留。11.9 已完成双垂直数据闭环，反馈/serving/UI
+  后续范围 PAUSED；完整字段、测试和逐项状态只见
   [11.9 Implementation Ledger](11.9-attribution-feedback-and-auto-retraining.md#11-implementation-ledger)。
-  Tier 2 LLM linkage 若新增 runtime wire 字段，仍须从届时当前版本显式 bump，不得静默改写。TradePolicy
-  artifact 继续只接受 v6，Evidence bundle 继续只接受 v3。
+  Tier 2 LLM linkage 若在封存前落地，直接修改 boot contract 并 fresh-install 验证；封存后必须正式 bump
+  和 migration，任何状态都不得静默改写既有 persisted artifact。
 
 ## 4. 全局设计基线(贯穿全部子phase)
 
@@ -237,6 +242,10 @@ flowchart TD
 ## 6. 文档契约模板(每篇子phase固定 10 节顺序)
 
 与 [`phase-03/README.md`](../phase-03/README.md) §7 / [`phase-05/README.md`](../phase-05/README.md) §7 一致:
+
+每篇文档标题后必须先声明 `lifecycle_assumption`、`schema_data_version_impact`、
+`pre_production_behavior`、`production_frozen_behavior` 与 `rollback_and_data_verification`；缺一项由
+`scripts/lint-phase-lifecycle.sh` 拒绝。
 
 1. **目标与闭环定位**(含回指 §1 关闭的审计点)
 2. **删除 / 合并 / 重构清单**(加替代代码前必须删的 crate/模块/类型/config/enum;无则显式写"无")

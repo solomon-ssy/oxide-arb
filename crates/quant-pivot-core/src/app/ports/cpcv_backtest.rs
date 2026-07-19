@@ -17,15 +17,15 @@ use quant_pivot_models::{
         quant::{ModelRunErrorCode, ModelRunKind, ModelRunStatus},
     },
     hashing::CanonicalDigest,
-    runtime_config::{DecimalString, RuntimeConfig},
+    runtime_config::{DecimalValue, DecisionPolicySnapshot},
     types::{
-        BacktestPathSetId, Bps, ContentHash, ModelInputContract, ModelRunId, ModelVersionId,
-        RuntimeConfigVersionId, TrainingDatasetId,
+        BacktestPathSetId, Bps, ContentHash, DecisionPolicySnapshotId, ModelInputContract,
+        ModelRunId, ModelVersionId, TrainingDatasetId,
     },
 };
 use quant_pivot_repository::traits::{
     BacktestPathSetRepository, CalibrationArtifactRepository, ModelRegistryRepository,
-    ModelRunRepository, RuntimeConfigVersionRepository, TrainingDatasetRepository,
+    ModelRunRepository, PolicyRepository, TrainingDatasetRepository,
 };
 use quant_pivot_research::{
     artifact::ArtifactStore,
@@ -62,7 +62,7 @@ pub struct CoreCpcvBacktestPortDeps {
     pub path_set_repo: Arc<dyn BacktestPathSetRepository>,
     pub model_registry_repo: Arc<dyn ModelRegistryRepository>,
     pub model_run_repo: Arc<dyn ModelRunRepository>,
-    pub runtime_config: Arc<dyn RuntimeConfigVersionRepository>,
+    pub runtime_config: Arc<dyn PolicyRepository>,
     pub bias_table_repo: Arc<dyn CalibrationArtifactRepository>,
 }
 
@@ -73,7 +73,7 @@ pub struct CoreCpcvBacktestPort {
     path_set_repo: Arc<dyn BacktestPathSetRepository>,
     model_registry_repo: Arc<dyn ModelRegistryRepository>,
     model_run_repo: Arc<dyn ModelRunRepository>,
-    runtime_config: Arc<dyn RuntimeConfigVersionRepository>,
+    runtime_config: Arc<dyn PolicyRepository>,
     bias_table_repo: Arc<dyn CalibrationArtifactRepository>,
 }
 
@@ -107,7 +107,7 @@ impl CoreCpcvBacktestPort {
     #[must_use]
     pub fn from_research(
         research: &ResearchBundle,
-        runtime_config: Arc<dyn RuntimeConfigVersionRepository>,
+        runtime_config: Arc<dyn PolicyRepository>,
         bias_table_repo: Arc<dyn CalibrationArtifactRepository>,
     ) -> Self {
         Self::new(CoreCpcvBacktestPortDeps {
@@ -123,23 +123,26 @@ impl CoreCpcvBacktestPort {
 
     async fn service_for(
         &self,
-        runtime: &RuntimeConfig,
+        runtime: &DecisionPolicySnapshot,
         model_family: ModelFamily,
     ) -> QuantResult<CpcvBacktestService> {
-        let bias_table =
-            resolve_frozen_bias_table(self.bias_table_repo.as_ref(), &runtime.factors).await?;
+        let bias_table = resolve_frozen_bias_table(
+            self.bias_table_repo.as_ref(),
+            &runtime.profile_artifacts.scoring.definition,
+        )
+        .await?;
         CpcvBacktestService::new(
             CpcvBacktestServiceDeps {
                 dataset_repo: Arc::clone(&self.dataset_repo),
                 artifact_store: Arc::clone(&self.artifact_store),
             },
             cpcv_config_from_runtime(runtime, model_family)?,
-            &runtime.portfolio,
+            &runtime.execution_risk.portfolio,
             ReplayConfig {
-                features: runtime.features.clone(),
-                factors: runtime.factors.clone(),
-                domain: runtime.domain.clone(),
-                data_quality: runtime.data_quality.clone(),
+                features: runtime.profile_artifacts.features.definition.clone(),
+                factors: runtime.profile_artifacts.scoring.definition.clone(),
+                domain: runtime.profile_artifacts.domain.definition.clone(),
+                data_quality: runtime.recommendation.data_quality.clone(),
                 bias_table,
             },
         )
@@ -147,17 +150,17 @@ impl CoreCpcvBacktestPort {
 
     async fn load_runtime_config(
         &self,
-        runtime_config_version_id: &RuntimeConfigVersionId,
-    ) -> QuantResult<RuntimeConfig> {
+        decision_policy_snapshot_id: &DecisionPolicySnapshotId,
+    ) -> QuantResult<DecisionPolicySnapshot> {
         let version = self
             .runtime_config
-            .load_version(runtime_config_version_id)
+            .load_snapshot(decision_policy_snapshot_id)
             .await?
             .ok_or_else(|| StorageError::NotFound {
-                entity: "runtime_config_version",
-                id: runtime_config_version_id.to_string(),
+                entity: "decision_policy_snapshot",
+                id: decision_policy_snapshot_id.to_string(),
             })?;
-        RuntimeConfig::from_json(&version.config_json).map_err(Into::into)
+        Ok(version.snapshot)
     }
 
     /// Read `metrics_json.validation.coord_search_effective_n` from the
@@ -233,7 +236,7 @@ impl CoreCpcvBacktestPort {
                 model_run_id: model_run_id.clone(),
                 run_kind: ModelRunKind::Cpcv,
                 model_version_id: Some(model_version_id.clone()),
-                runtime_config_version_id: request.runtime_config_version_id.clone(),
+                decision_policy_snapshot_id: request.decision_policy_snapshot_id.clone(),
                 market_selection_id: None,
                 window_start: dataset.window_start,
                 window_end: dataset.window_end,
@@ -286,7 +289,7 @@ impl CoreCpcvBacktestPort {
                 model_version_id: model_version_id.clone(),
                 model_run_id,
                 training_dataset_id: request.training_dataset_id.clone(),
-                runtime_config_version_id: request.runtime_config_version_id.clone(),
+                decision_policy_snapshot_id: request.decision_policy_snapshot_id.clone(),
                 window_start: outcome.window_start,
                 window_end: outcome.window_end,
                 path_count: i64::try_from(outcome.path_set.paths.len()).unwrap_or(i64::MAX),
@@ -360,7 +363,7 @@ impl CoreCpcvBacktestPort {
         let model_version_id = contract.version.model_version_id.clone();
         let model_family = contract.version.model_family;
         let runtime = self
-            .load_runtime_config(&request.runtime_config_version_id)
+            .load_runtime_config(&request.decision_policy_snapshot_id)
             .await?;
         let service = self.service_for(&runtime, model_family).await?;
 
@@ -385,7 +388,7 @@ impl CoreCpcvBacktestPort {
                 CpcvBacktestInput {
                     model_run_id: model_run_id.clone(),
                     training_dataset_id: request.training_dataset_id.clone(),
-                    runtime_config_version_id: request.runtime_config_version_id.clone(),
+                    decision_policy_snapshot_id: request.decision_policy_snapshot_id.clone(),
                     label: contract.label,
                     model_family,
                     prediction_horizon_secs: contract.prediction_horizon_secs,
@@ -478,15 +481,15 @@ impl CoreCpcvBacktestPort {
             .into());
         }
         if view.training_dataset_id != request.training_dataset_id
-            || view.runtime_config_version_id != request.runtime_config_version_id
+            || view.decision_policy_snapshot_id != request.decision_policy_snapshot_id
         {
             return Err(ResearchError::ValidationMethodology {
                 detail: format!(
                     "path set {path_set_id} retry binding differs: stored dataset/runtime = {}/{}, requested = {}/{}",
                     view.training_dataset_id,
-                    view.runtime_config_version_id,
+                    view.decision_policy_snapshot_id,
                     request.training_dataset_id,
-                    request.runtime_config_version_id
+                    request.decision_policy_snapshot_id
                 ),
             }
             .into());
@@ -521,71 +524,55 @@ fn path_set_content_hash(input: &PathSetHashInput<'_>) -> QuantResult<ContentHas
 /// the pure research-side config types. The trial grid is family-specific:
 /// `WeightedFactor` uses λ × rank-loss; classical uses forest/linear multipliers.
 fn cpcv_config_from_runtime(
-    runtime: &RuntimeConfig,
+    runtime: &DecisionPolicySnapshot,
     model_family: ModelFamily,
 ) -> QuantResult<CpcvBacktestConfig> {
-    let validation = &runtime.research.validation;
-    let decimal = |field: &'static str, value: &str| -> QuantResult<Decimal> {
-        value.parse::<Decimal>().map_err(|error| {
-            QuantError::from(ResearchError::ValidationMethodology {
-                detail: format!("`{field}` = `{value}` is not a valid decimal: {error}"),
-            })
-        })
-    };
-    let parse_multipliers = |field: &'static str, values: &[DecimalString]| {
-        values
-            .iter()
-            .map(|value| decimal(field, &value.value))
-            .collect::<QuantResult<Vec<_>>>()
-    };
+    let validation = &runtime
+        .profile_artifacts
+        .research_method
+        .research
+        .validation;
+    let multipliers =
+        |values: &[DecimalValue]| values.iter().map(|value| value.value).collect::<Vec<_>>();
 
     let trials = if model_family.is_classical() {
         TrialGridSpec::Classical(ClassicalTrialGrid {
-            forest_n_trees_multipliers: parse_multipliers(
-                "research.validation.trials.forest_n_trees_multipliers",
-                &validation.trials.forest_n_trees_multipliers,
-            )?,
-            linear_alpha_multipliers: parse_multipliers(
-                "research.validation.trials.linear_alpha_multipliers",
-                &validation.trials.linear_alpha_multipliers,
-            )?,
+            forest_n_trees_multipliers: multipliers(&validation.trials.forest_n_trees_multipliers),
+            linear_alpha_multipliers: multipliers(&validation.trials.linear_alpha_multipliers),
             max_trials: validation.trials.max_trials,
         })
     } else {
         TrialGridSpec::WeightedFactor(WeightedFactorTrialGrid {
-            lambda_multipliers: parse_multipliers(
-                "research.validation.trials.lambda_multipliers",
-                &validation.trials.lambda_multipliers,
-            )?,
+            lambda_multipliers: multipliers(&validation.trials.lambda_multipliers),
             rank_loss_kinds: validation.trials.rank_loss_kinds.clone(),
             max_trials: validation.trials.max_trials,
         })
     };
 
     Ok(CpcvBacktestConfig {
-        factors: runtime.factors.clone(),
-        objective: TrainingObjectiveSpec::from_runtime_config(&runtime.research.training)?,
+        factors: runtime.profile_artifacts.scoring.definition.clone(),
+        objective: TrainingObjectiveSpec::from_runtime_config(
+            &runtime.profile_artifacts.research_method.research.training,
+        )?,
         cpcv: CpcvConfig {
             n_groups: validation.cpcv.n_groups,
             k_test: validation.cpcv.k_test,
         },
         purge: PurgeConfig {
-            embargo_pct: decimal(
-                "research.validation.purge.embargo_pct",
-                &validation.purge.embargo_pct.value,
-            )?,
-            min_embargo_secs: runtime.features.max_lookback_secs(),
+            embargo_pct: validation.purge.embargo_pct.value,
+            min_embargo_secs: runtime
+                .profile_artifacts
+                .features
+                .definition
+                .max_lookback_secs(),
         },
         trials,
         pbo: PboInput {
             block_count: validation.pbo.block_count,
         },
-        dsr_significance: decimal(
-            "research.validation.gates.dsr_significance",
-            &validation.gates.dsr_significance.value,
-        )?,
+        dsr_significance: validation.gates.dsr_significance.value,
         entry_max_slippage_bps: Bps::new(Decimal::from(
-            runtime.execution.entry_order_policy.max_slippage_bps,
+            runtime.execution_risk.entry_order_policy.max_slippage_bps,
         )),
         // Validate the scorer without policy thresholds. Executable policy
         // fitting selects and validates the live thresholds later.

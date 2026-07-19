@@ -4,7 +4,7 @@ use crate::{
     entities::quant_market_selection,
     enums::{common::MarketCategory, market::MarketStatus},
     types::{
-        ContentHash, EventId, MarketId, MarketSelectionId, RuntimeConfigVersionId,
+        ContentHash, DecisionPolicySnapshotId, EventId, MarketId, MarketSelectionId,
         SelectionExclusionSummary, TokenId, Usd,
     },
 };
@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 pub struct MarketSelectionInfo {
     pub market_selection_id: MarketSelectionId,
     pub decision_at: DateTime<Utc>,
-    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub selector_hash: ContentHash,
     pub market_count: i32,
     pub exclusion_summary: SelectionExclusionSummary,
@@ -31,7 +31,7 @@ info_from_model!(
     {
         market_selection_id,
         decision_at,
-        runtime_config_version_id,
+        decision_policy_snapshot_id,
         selector_hash,
         market_count,
         exclusion_summary,
@@ -45,7 +45,7 @@ info_from_model!(
 pub struct NewMarketSelection {
     pub market_selection_id: MarketSelectionId,
     pub decision_at: DateTime<Utc>,
-    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub selector_hash: ContentHash,
     pub market_count: i32,
     pub exclusion_summary: SelectionExclusionSummary,

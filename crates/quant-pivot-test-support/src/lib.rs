@@ -13,6 +13,7 @@ pub mod governance;
 pub mod mocks;
 pub mod pg;
 pub mod pit;
+pub mod policy_fixtures;
 pub mod report_fixtures;
 pub mod report_lifecycle_seed;
 pub mod report_pipeline_harness;

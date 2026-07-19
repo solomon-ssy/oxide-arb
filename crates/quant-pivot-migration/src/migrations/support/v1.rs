@@ -78,20 +78,6 @@ pub(in crate::migrations) async fn create_constraint(
     .await
 }
 
-pub(in crate::migrations) async fn drop_constraint(
-    manager: &SchemaManager<'_>,
-    spec: ConstraintSpec,
-) -> Result<(), DbErr> {
-    manager
-        .alter_table(
-            Table::alter()
-                .table((Alias::new("public"), Alias::new(spec.table)))
-                .drop_constraint(Alias::new(spec.name))
-                .to_owned(),
-        )
-        .await
-}
-
 pub(in crate::migrations) async fn create_trigger_programs(
     manager: &SchemaManager<'_>,
 ) -> Result<(), DbErr> {
@@ -100,8 +86,9 @@ pub(in crate::migrations) async fn create_trigger_programs(
          $function$ BEGIN RAISE EXCEPTION 'table % is append-only (WORM); % is not permitted', \
          TG_TABLE_NAME, TG_OP; END; $function$",
         "CREATE FUNCTION public.trigger_set_updated_at() RETURNS trigger LANGUAGE plpgsql AS \
-         $function$ BEGIN IF ROW(NEW.*) IS DISTINCT FROM ROW(OLD.*) THEN \
-         NEW.updated_at = statement_timestamp(); END IF; RETURN NEW; END; $function$",
+         $function$ BEGIN IF (to_jsonb(NEW) - 'updated_at') IS DISTINCT FROM \
+         (to_jsonb(OLD) - 'updated_at') THEN NEW.updated_at = statement_timestamp(); ELSE \
+         NEW.updated_at = OLD.updated_at; END IF; RETURN NEW; END; $function$",
     ] {
         execute(manager, statement.to_owned()).await?;
     }
@@ -133,21 +120,6 @@ pub(in crate::migrations) async fn create_trigger(
             spec.events.sql(),
             qualified_table(spec.table),
             quote_identifier(spec.program.function_name())
-        ),
-    )
-    .await
-}
-
-pub(in crate::migrations) async fn drop_trigger(
-    manager: &SchemaManager<'_>,
-    spec: TriggerSpec,
-) -> Result<(), DbErr> {
-    execute(
-        manager,
-        format!(
-            "DROP TRIGGER {} ON {}",
-            quote_identifier(spec.name),
-            qualified_table(spec.table)
         ),
     )
     .await
