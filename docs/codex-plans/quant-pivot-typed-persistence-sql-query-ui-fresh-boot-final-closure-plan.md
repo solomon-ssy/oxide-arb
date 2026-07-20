@@ -69,7 +69,7 @@
 | BASE-09 | persistence 文档 | 83 个 runtime JSONB 字段已进入双向 machine registry；owned/external/controlled-open 边界、serde 闭合和 DB corruption 均有机器证明 | Verified by W3 |
 | BASE-10 | SeaORM 版本 | workspace 已精确锁定单一 stable `2.0.0`；migration artifact checksum/length 未漂移，并有 `count(limit/offset)` SQL 语义回归 | Verified by W1 |
 | BASE-11 | Fresh Boot 工具 | `preproduction-reset plan|apply|verify`、operation-bound v2 journal、canonical lifecycle lease、PG/CH exact DB 和 Redis duplicate-safe `SCAN+UNLINK` | Verified：W7 实现/分系统证明 `d7eb81882c2f4633cc8aca5861db1885ea641615b4b4a0d08951e2510a35aab2`；W9 跨系统恢复/备份/seal `41b504fd0cf9a137d9af0bfbd46cb5024b6d05826626e6248d5a1497140d1beb` |
-| BASE-12 | 现场 Fresh Boot | 因人工 destructive gate 未满足，尚未执行本地 reset、真实启动/重启和 live smoke | Blocked by operator confirmation |
+| BASE-12 | 现场 Fresh Boot | W10 已完成本机限定范围 credential rotation、plan/apply/verify、PG/CH manifest 与 fresh seed 审计；runtime 完成基础设施 verify 后因缺少 private key/funder fail closed，restart/Config/cold-start/live smoke 尚未执行 | Partial；blocked on live-account identity/provider credential (`10908d653e1c62c6f3f09964adf9ffd02647f814a28bdcddb13740e7c9d782e1`) |
 | BASE-13 | deploy secret source | 配置字段直接使用零化、脱敏的 `SecretText`；TOML 只接受明文 string，不支持 credential file/source union | Verified (`d7eb81882c2f4633cc8aca5861db1885ea641615b4b4a0d08951e2510a35aab2`) |
 
 ## 4. Requirement 追踪矩阵
@@ -90,14 +90,14 @@
 | UI-01 | 24 状态可执行 E2E registry | 每个 state 都有 setup/assert/evidence，无 orphan name | Verified (`b7e5ca09d9ffab243988f39c4ec073bf8dc3b946e36963fbe18fd59b3a27c235`) |
 | UI-02 | responsive/theme/motion/a11y/keyboard | 固定 CI snapshots、axe、focus trap/order、keyboard-only | Verified (`b7e5ca09d9ffab243988f39c4ec073bf8dc3b946e36963fbe18fd59b3a27c235`) |
 | DOC-01 | 范式与规则机器闭环 | docs/rule/registry/lint 一致性检查 | Verified (`14bb76c67d6c38cd9b2d7a52e674bffa9c193719ebd33a663c3321149b553b1a`) |
-| RESET-01 | 凭证轮换与 secret boundary | 用户确认、credential preflight、无 secret evidence | Blocked |
+| RESET-01 | 凭证轮换与 secret boundary | 用户确认、credential preflight、无 secret evidence | Partial：PG/CH 已轮换为独立随机 credential，旧双身份已删除，local TOML=0600；Redis 按 loopback local-dev 决策保持无密码；wallet/funder 缺失且已观察到的 authenticated RPC credential 必须由 provider owner 轮换后才能封板 |
 | SECRET-01 | 单一明文 secret 契约 | 删除 `DeploySecret`/`SystemdCredentialRef`，所有 secret 字段直接使用 `SecretText`，覆盖零化、Debug 脱敏、无 Serialize、tracked-file 扫描和 adapter 使用测试 | Verified (`d7eb81882c2f4633cc8aca5861db1885ea641615b4b4a0d08951e2510a35aab2`) |
 | DBID-01 | 单一数据库身份 | PostgreSQL、ClickHouse 各保留一套 `user + password`；删除 migration identity/password、双身份校验与专用 credential 装载 | Verified (`d7eb81882c2f4633cc8aca5861db1885ea641615b4b4a0d08951e2510a35aab2`) |
 | RESET-02 | 可恢复的限定范围 destructive reset | plan/apply/failure-journal/verify tests 和现场记录 | Verified：W7 分系统边界 + W9 PG/CH/Redis 三阶段真实故障、新 operation 全清理恢复和 foreign namespace 保留（`d7eb81882c2f4633cc8aca5861db1885ea641615b4b4a0d08951e2510a35aab2` + `41b504fd0cf9a137d9af0bfbd46cb5024b6d05826626e6248d5a1497140d1beb`） |
 | BOOT-01 | 真空环境 PG/CH/Redis boot | PG=1、CH=1、Redis target empty、无 unknown objects | Verified：W9 在 disposable 三系统连续完成初始 cycle 与三次 recovery cycle，逐次验证 exact target 和 foreign Redis marker（`41b504fd0cf9a137d9af0bfbd46cb5024b6d05826626e6248d5a1497140d1beb`） |
-| ACCEPT-01 | 单实例启动/重启与 Config 恢复 | readiness、workflow、commit/publish crash recovery、无 duplicate seed | Partial：W8 已闭合真实 Config/CAS/RBAC/recovery 自动化，W9 已闭合基础设施重新清理/boot；systemd 启动、优雅重启及同一实例 crash recovery 保留给 W10 现场验收 |
+| ACCEPT-01 | 单实例启动/重启与 Config 恢复 | readiness、workflow、commit/publish crash recovery、无 duplicate seed | Partial：W8 已闭合真实 Config/CAS/RBAC/recovery 自动化；W10 fresh local runtime 的 PG/CH schema verify 通过，但因 signing key 缺失在 web/worker 启动前 fail closed，优雅重启及同一实例 crash recovery 尚未执行 |
 | ACCEPT-02 | 完整研究到报告闭环 | spec→dataset→train→validate→publish→report lineage | Partial：W9 的 Docker model train/backtest/calibration/CPCV、governance、report pipeline 全部通过；fresh local 数据上的单条端到端 lineage 与 live-account report 保留给 W10，不把分项集成测试冒领为现场单链证明 |
-| ACCEPT-03 | live-account ReportOnly 安全 | account truth/report 成功，零 signing/order/intent | Blocked |
+| ACCEPT-03 | live-account ReportOnly 安全 | account truth/report 成功，零 signing/order/intent | Blocked：缺少 private key、匹配 funder/wallet topology 与可封板的 rotated authenticated RPC；Fresh Boot 后已记录 order intent/execution order/report 三表零基线，但尚无 live account/report delta |
 | SEAL-01 | disposable seal/frozen denial | live evidence、mutation denial、restore test | Verified：真实 PG/CH backup/restore、live fingerprint/policy/evidence 绑定、一次 seal、二次 seal 与 PG/CH/reset frozen denial（`41b504fd0cf9a137d9af0bfbd46cb5024b6d05826626e6248d5a1497140d1beb`） |
 
 ### 4.1 Execution Ledger
@@ -115,7 +115,7 @@
 | W7 | SECRET-01, DBID-01, RESET-01, RESET-02, BOOT-01, SEAL-01 | Verified | `9d9701e5a87865abab6ed0065a251b08193bbafa` | direct `SecretText`、PG/CH single identity、canonical PG lease/cancellation、v2 atomic reset journal、PG/CH active-owner denial、Redis duplicate-safe cleanup、future-incompat dependency fix | config 75/75；migration unit 6/6；Docker PG lifecycle/reset 3/3、CH active-query/reset 1/1、Redis reset 2/2；xtask journal 2/2；clean PG16 manifest；57/57 SQL AST；full fmt/clippy/lints/workspace tests passed | `.local/acceptance/w7-lifecycle-fresh-boot-20260720/manifest.md` / `d7eb81882c2f4633cc8aca5861db1885ea641615b4b4a0d08951e2510a35aab2` | 实现与分系统证明闭合；跨系统恢复/seal 已由 W9 补证；W10 destructive local apply 仍受人工门禁 | 2026-07-20T14:10:56Z |
 | W8 | DOC-01, ACCEPT-01, ACCEPT-02 | Verified | `9d9701e5a87865abab6ed0065a251b08193bbafa` | canonical docs、dead placeholder/admin UI、active-doc/CI lint、37 Linux visual baselines、schedule/trade-policy deterministic layout | full Rust/static/UI gates；fresh Config 24/24；independent protected 8/8；37 Linux/0 Darwin；final eslint/typecheck/build/diff checks passed | `.local/acceptance/w8-doc-ci-closeout-20260720/manifest.md` / `14bb76c67d6c38cd9b2d7a52e674bffa9c193719ebd33a663c3321149b553b1a` | UI/docs 实现与证明闭合；W9 已补 disposable runtime/model 分项证明，现场单实例/单链仍归 W10 | 2026-07-20T15:35:01Z |
 | W9 | RESET-02, BOOT-01, ACCEPT-01, ACCEPT-02, SEAL-01 | Verified | `9d9701e5a87865abab6ed0065a251b08193bbafa` | single-owner disposable PG16/CH26.5/Redis7 harness、四次 full reset cycle、三阶段真实故障恢复、PG/CH backup/restore、dump-stable PG constraints、live evidence seal/frozen denial | Docker W9 1/1；model/cold-start 24/24；governance 12/12；migration 6/6；SQL 57/57；full fmt/clippy/static lints/workspace tests passed；无 Testcontainers leak | `.local/acceptance/w9-disposable-closeout-20260720/manifest.md` / `41b504fd0cf9a137d9af0bfbd46cb5024b6d05826626e6248d5a1497140d1beb` | disposable scope closed；未读取本机 secret 配置；ACCEPT-01 的 systemd restart、ACCEPT-02 的 fresh local 单链与 ACCEPT-03 仍由 W10 人工门禁后恢复 | 2026-07-20T16:58:01Z |
-| W10 | RESET-01, RESET-02, BOOT-01, ACCEPT-01..03 | Blocked | — | local preproduction + live account | destructive boot + ReportOnly no-mutation proof | pending | 用户确认目标与凭证后恢复；本地禁止 seal | 2026-07-20T11:53:00Z |
+| W10 | RESET-01, RESET-02, BOOT-01, ACCEPT-01..03 | Blocked | `9d9701e5a87865abab6ed0065a251b08193bbafa` | local PG/CH credential rotation、legacy dual-identity deletion、exact destructive boot、manifest/seed/runtime preflight | plan/apply/verify passed；PG 1 migration/93 tables/274 indexes；CH v1/27 required objects；Redis 32→0；fresh policy 6 resources at intentional generation 2；runtime infra verify passed then signing fail-closed | `.local/acceptance/w10-local-preproduction-20260721/checkpoint-1.md` / `10908d653e1c62c6f3f09964adf9ffd02647f814a28bdcddb13740e7c9d782e1` | 安装 fresh private key、匹配 funder/wallet topology 与 rotated authenticated RPC 后恢复；不得把 secret 发到聊天/evidence；随后继续 restart、Config crash recovery、local single-lineage 与 ReportOnly no-mutation；本地禁止 seal | 2026-07-20T17:35:02Z |
 
 ## 5. Workstream A：字符串魔法值与全仓强类型
 
@@ -518,7 +518,7 @@ Planned -> Applying -> PostgresReset -> ClickhouseReset -> RedisCleared
 7. 应用唯一 CH boot migration，期望 version=1、object manifest 精确相等；
 8. finalize catalog seeds 与 PUBLIC privilege hardening；不再制造 runtime/migration 双角色 grants；
 9. seed bootstrap admin、immutable research profiles、policy profile artifacts 和六类 Config resource boot bundle；
-10. 校验 generation=1、snapshot/hash/revision vector 完整、无 pending approval/outbox；
+10. 校验空 CAS 基线为 generation 1、首次 committed 六资源 bundle 为 generation 2，snapshot/hash/revision vector 完整且 outbox facts 与六次 initial activation 一一对应；
 11. verify PG/CH schema fingerprint、ledger/audit checksum、Redis target empty；
 12. journal 标记 Completed 并生成脱敏 evidence manifest。
 
