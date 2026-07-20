@@ -486,6 +486,7 @@ impl TrainingDatasetPort for CoreTrainingDatasetPort {
         Ok(TrainingDatasetPlanView {
             training_dataset_id: plan.training_dataset_id,
             model_spec_id: request.model_spec_id,
+            model_spec_definition_hash: plan.model_spec_definition_hash,
             decision_policy_snapshot_id: request.decision_policy_snapshot_id,
             window_start: request.window_start,
             window_end: request.window_end,

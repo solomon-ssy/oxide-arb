@@ -1,13 +1,65 @@
 //! Sealed `PostgreSQL` DDL primitives not currently modeled by `SeaQuery`.
 
+use sea_orm::{DbBackend, Statement};
 use sea_orm_migration::prelude::*;
 
 pub(in crate::migrations) const SOURCE: &[u8] = include_bytes!("v1.rs");
+
+const EMPTY_BOOT_TARGET_SQL: &str = "WITH target_objects AS (\
+    SELECT 'relation:' || c.relname AS object_name \
+    FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+    WHERE n.nspname = 'public' \
+      AND c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f') \
+      AND c.relname <> 'seaql_migrations' \
+    UNION ALL \
+    SELECT 'type:' || t.typname FROM pg_type t \
+    JOIN pg_namespace n ON n.oid = t.typnamespace \
+    WHERE n.nspname = 'public' AND t.typtype IN ('e', 'd', 'r') \
+    UNION ALL \
+    SELECT 'function:' || p.proname FROM pg_proc p \
+    JOIN pg_namespace n ON n.oid = p.pronamespace \
+    WHERE n.nspname = 'public' \
+    UNION ALL \
+    SELECT 'trigger:' || g.tgname FROM pg_trigger g \
+    JOIN pg_class c ON c.oid = g.tgrelid \
+    JOIN pg_namespace n ON n.oid = c.relnamespace \
+    WHERE n.nspname = 'public' AND NOT g.tgisinternal \
+) SELECT COUNT(*)::bigint AS object_count, \
+    COALESCE((SELECT string_agg(object_name, ', ') FROM (\
+        SELECT object_name FROM target_objects ORDER BY object_name LIMIT 20\
+    ) sample), '') AS object_summary FROM target_objects";
+
+/// Fail closed unless `public` contains only the migration infrastructure.
+/// `PostgreSQL`'s heterogeneous catalog cannot be expressed by `SeaQuery`, so the
+/// complete static statement is sealed inside this versioned dialect module.
+pub(in crate::migrations) async fn assert_empty_boot_target(
+    manager: &SchemaManager<'_>,
+) -> Result<(), DbErr> {
+    let row = manager
+        .get_connection()
+        .query_one_raw(Statement::from_string(
+            DbBackend::Postgres,
+            EMPTY_BOOT_TARGET_SQL,
+        ))
+        .await?
+        .ok_or_else(|| {
+            DbErr::Custom("PostgreSQL catalog returned no boot preflight row".to_owned())
+        })?;
+    let object_count = row.try_get::<i64>("", "object_count")?;
+    if object_count == 0 {
+        return Ok(());
+    }
+    let object_summary = row.try_get::<String>("", "object_summary")?;
+    Err(DbErr::Custom(format!(
+        "boot migration requires an empty public schema; found {object_count} tables, views, materialized views, sequences, types, functions, or triggers ({object_summary}). Clear PostgreSQL and bootstrap again"
+    )))
+}
 
 /// Table constraint kinds supported by the audited `PostgreSQL` extension.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::migrations) enum ConstraintKind {
     Check,
+    ForeignKey,
     Unique,
 }
 
@@ -135,6 +187,7 @@ pub(in crate::migrations) fn index_predicate(predicate: &'static str) -> Result<
 fn validate_constraint_definition(spec: ConstraintSpec) -> Result<(), DbErr> {
     let valid = match spec.kind {
         ConstraintKind::Check => spec.definition.starts_with("CHECK ("),
+        ConstraintKind::ForeignKey => spec.definition.starts_with("FOREIGN KEY ("),
         ConstraintKind::Unique => spec.definition.starts_with("UNIQUE ("),
     };
     if !valid || spec.definition.contains(';') {

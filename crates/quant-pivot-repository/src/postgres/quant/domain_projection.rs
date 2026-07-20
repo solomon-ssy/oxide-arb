@@ -18,6 +18,7 @@ use quant_pivot_models::{
     types::{
         ContentHash, DomainEventId, DomainInstrumentKey, DomainMeasurementUnit, DomainSourceId,
         IcaoStation, TemperatureCelsius, Usd, WeatherTemperatureStatistic, WeatherVariable,
+        WorkerId,
     },
 };
 use sea_orm::{
@@ -25,7 +26,6 @@ use sea_orm::{
     EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
     sea_query::{Expr, LockBehavior, LockType, OnConflict},
 };
-use uuid::Uuid;
 
 use crate::{
     postgres::quant::condition_wake::notify_input_change, traits::DomainProjectionRepository,
@@ -336,7 +336,7 @@ impl DomainProjectionRepository for PgDomainProjectionRepository {
 
     async fn claim_pending_events(
         &self,
-        worker_id: Uuid,
+        worker_id: WorkerId,
         now: DateTime<Utc>,
         lease_expires_at: DateTime<Utc>,
         limit: u64,
@@ -362,7 +362,7 @@ impl DomainProjectionRepository for PgDomainProjectionRepository {
                 .checked_add(1)
                 .ok_or_else(|| invariant("domain event publish attempt overflow"))?;
             let mut active = row.into_active_model();
-            active.claim_owner = ActiveValue::Set(Some(worker_id));
+            active.claim_owner = ActiveValue::Set(Some(worker_id.clone()));
             active.lease_expires_at = ActiveValue::Set(Some(lease_expires_at));
             active.publish_attempts = ActiveValue::Set(attempts);
             let claimed = active.update(&txn).await.map_err(StorageError::from)?;
@@ -375,7 +375,7 @@ impl DomainProjectionRepository for PgDomainProjectionRepository {
     async fn mark_event_published(
         &self,
         event_id: &DomainEventId,
-        worker_id: Uuid,
+        worker_id: WorkerId,
         published_at: DateTime<Utc>,
     ) -> Result<(), StorageError> {
         quant_domain_event_outbox::Entity::update_many()
@@ -389,7 +389,7 @@ impl DomainProjectionRepository for PgDomainProjectionRepository {
             )
             .col_expr(
                 quant_domain_event_outbox::Column::ClaimOwner,
-                Expr::value(Option::<Uuid>::None),
+                Expr::value(Option::<WorkerId>::None),
             )
             .col_expr(
                 quant_domain_event_outbox::Column::LeaseExpiresAt,
@@ -406,7 +406,7 @@ impl DomainProjectionRepository for PgDomainProjectionRepository {
     async fn mark_event_failed(
         &self,
         event_id: &DomainEventId,
-        worker_id: Uuid,
+        worker_id: WorkerId,
         detail: String,
     ) -> Result<(), StorageError> {
         quant_domain_event_outbox::Entity::update_many()
@@ -416,7 +416,7 @@ impl DomainProjectionRepository for PgDomainProjectionRepository {
             )
             .col_expr(
                 quant_domain_event_outbox::Column::ClaimOwner,
-                Expr::value(Option::<Uuid>::None),
+                Expr::value(Option::<WorkerId>::None),
             )
             .col_expr(
                 quant_domain_event_outbox::Column::LeaseExpiresAt,

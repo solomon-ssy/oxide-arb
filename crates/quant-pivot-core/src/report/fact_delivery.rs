@@ -15,7 +15,7 @@ use quant_pivot_models::{
     hashing::CanonicalDigest,
     types::{
         ContentHash, REPORT_FACT_BUNDLE_FORMAT_VERSION, ReportFactBundleV1,
-        ReportFactTableCommitment,
+        ReportFactTableCommitment, WorkerId,
     },
 };
 use quant_pivot_repository::traits::RecommendationReportRepository;
@@ -23,7 +23,6 @@ use quant_pivot_research::artifact::ArtifactStore;
 use quant_pivot_storage::clickhouse::{ChWriteManager, ClickHousePool};
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
-use uuid::Uuid;
 
 use crate::observability::metrics_hub::MetricsHub;
 
@@ -52,7 +51,7 @@ pub struct ReportFactDeliveryDeps {
 /// exact two-table verification.
 pub struct ReportFactDeliveryWorker {
     deps: ReportFactDeliveryDeps,
-    worker_id: Uuid,
+    worker_id: WorkerId,
 }
 
 impl ReportFactDeliveryWorker {
@@ -60,7 +59,7 @@ impl ReportFactDeliveryWorker {
     pub fn new(deps: ReportFactDeliveryDeps) -> Self {
         Self {
             deps,
-            worker_id: Uuid::new_v4(),
+            worker_id: WorkerId::from_v7(),
         }
     }
 
@@ -112,7 +111,7 @@ impl ReportFactDeliveryWorker {
             .reports
             .verify_and_publish_report(
                 &delivery.recommendation_report_id,
-                self.worker_id,
+                self.worker_id.clone(),
                 Utc::now(),
             )
             .await?
@@ -134,7 +133,7 @@ impl ReportFactDeliveryWorker {
         let delivery = self
             .deps
             .reports
-            .claim_fact_delivery(self.worker_id, LEASE_DURATION.as_secs())
+            .claim_fact_delivery(self.worker_id.clone(), LEASE_DURATION.as_secs())
             .await?;
         let Some(delivery) = delivery else {
             return self.announce_one().await;
@@ -156,7 +155,7 @@ impl ReportFactDeliveryWorker {
                     .reports
                     .fail_fact_delivery(
                         &delivery.recommendation_report_id,
-                        self.worker_id,
+                        self.worker_id.clone(),
                         status,
                         &summary,
                     )
@@ -195,7 +194,7 @@ impl ReportFactDeliveryWorker {
         let Some(delivery) = self
             .deps
             .reports
-            .claim_fact_announcement(self.worker_id, LEASE_DURATION.as_secs())
+            .claim_fact_announcement(self.worker_id.clone(), LEASE_DURATION.as_secs())
             .await?
         else {
             return Ok(false);
@@ -214,7 +213,10 @@ impl ReportFactDeliveryWorker {
                 .await;
             self.deps
                 .reports
-                .acknowledge_fact_announcement(&delivery.recommendation_report_id, self.worker_id)
+                .acknowledge_fact_announcement(
+                    &delivery.recommendation_report_id,
+                    self.worker_id.clone(),
+                )
                 .await?;
             QuantResult::Ok(())
         }

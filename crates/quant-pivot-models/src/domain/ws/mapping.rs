@@ -101,7 +101,7 @@ mod tests {
             },
             system::{BootstrapPhase, CapabilityReason},
         },
-        types::{MarketId, RecommendationReportId, ReportRunId},
+        types::{MarketId, RecommendationReportId, ReportRunId, ResearchProfileId},
     };
     use chrono::Utc;
 
@@ -144,7 +144,7 @@ mod tests {
         let event = CoreEvent::Report(ReportLifecycleEvent {
             event: ReportEventKind::Prepared,
             recommendation_report_id: "report-1".to_owned(),
-            profile_id: "weather_forecast_24h".to_owned(),
+            profile_id: ResearchProfileId::new("weather_forecast_24h"),
             report_kind: ReportKind::TopN,
             runtime_mode: QuantRuntimeMode::ReportOnly,
             status: RecommendationReportStatus::Prepared,
@@ -184,7 +184,7 @@ mod tests {
         let report = CoreEvent::Report(ReportLifecycleEvent {
             event: ReportEventKind::Published,
             recommendation_report_id: "durable-report-id".to_owned(),
-            profile_id: "weather_forecast_24h".to_owned(),
+            profile_id: ResearchProfileId::new("weather_forecast_24h"),
             report_kind: ReportKind::TopN,
             runtime_mode: QuantRuntimeMode::ReportOnly,
             status: RecommendationReportStatus::Published,

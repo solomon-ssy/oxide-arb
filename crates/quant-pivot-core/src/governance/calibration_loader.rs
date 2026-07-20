@@ -14,15 +14,14 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
-    domain::query::TimeWindow,
+    domain::{CalibrationArtifactPayload, query::TimeWindow},
     enums::quant::CalibrationKind,
     hashing::CanonicalDigest,
-    types::{CalibrationArtifactId, ContentHash, ModelVersionId, TrainingDatasetId},
+    types::{CalibrationArtifactId, ContentHash, calibration::ModelScoreCalibrationPayload},
 };
 use quant_pivot_repository::traits::CalibrationArtifactRepository;
 use quant_pivot_research::model::{
-    CalibrationArtifactLoader, ModelArtifact, MonotoneMapping, ReliabilityReport,
-    ResolvedCalibration, validate_mapping,
+    CalibrationArtifactLoader, ModelArtifact, ResolvedCalibration, validate_mapping,
 };
 use rust_decimal::Decimal;
 use serde::Serialize;
@@ -60,23 +59,6 @@ pub async fn resolve_return_model_calibration(
     };
     let resolved = loader.load(calibrator_ref).await?;
     Ok(Some(resolved))
-}
-
-/// Payload shape stored in `quant_calibration_artifact.payload_json` for
-/// `kind = model_score` rows.
-///
-/// Carries its own fit provenance (`model_version_id` /
-/// `calibration_dataset_id`) so the content hash — and an operator inspecting
-/// the artifact — never need external context to verify or explain it,
-/// mirroring `market_price_bias`'s self-contained `by_category` payload.
-/// Mirrors [`crate::service::model_calibration_fit`]'s persist step — the single
-/// source of truth for this JSON shape.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct ModelScoreCalibrationPayload {
-    pub model_version_id: ModelVersionId,
-    pub calibration_dataset_id: TrainingDatasetId,
-    pub mapping: MonotoneMapping,
-    pub reliability: ReliabilityReport,
 }
 
 /// Canonical projection for the `model_score` content hash — recomputable
@@ -166,22 +148,19 @@ impl CalibrationArtifactLoader for CoreCalibrationArtifactLoader {
             }));
         }
         let fit_window = TimeWindow::new(info.fit_window_start, info.fit_window_end);
-        let payload: ModelScoreCalibrationPayload = serde_json::from_value(
-            info.payload_json.clone(),
-        )
-        .map_err(|error| {
-            QuantError::from(ResearchError::DatasetBuild {
+        let CalibrationArtifactPayload::ModelScore(payload) = &info.payload else {
+            return Err(QuantError::from(ResearchError::DatasetBuild {
                 detail: format!(
-                    "calibration artifact `{artifact_id}` payload deserialization failed: {error}"
+                    "calibration artifact `{artifact_id}` kind/payload discriminator mismatch"
                 ),
-            })
-        })?;
+            }));
+        };
         // Fail-closed integrity: recompute the content hash from the
         // persisted, self-contained fields and verify it against the stored
         // hash — symmetric with `FavoriteLongshotBiasTable::from_persisted`.
         // A tampered or corrupted payload must never silently bind.
         let recomputed =
-            model_score_content_hash(&fit_window, &info.calibration_split_hash, &payload)?;
+            model_score_content_hash(&fit_window, &info.calibration_split_hash, payload)?;
         if recomputed != info.content_hash {
             return Err(QuantError::from(ResearchError::DatasetBuild {
                 detail: format!(
@@ -191,11 +170,11 @@ impl CalibrationArtifactLoader for CoreCalibrationArtifactLoader {
                 ),
             }));
         }
-        validate_model_score_payload(&payload, info.sample_count)?;
+        validate_model_score_payload(payload, info.sample_count)?;
         Ok(ResolvedCalibration {
             artifact_id: artifact_id.clone(),
-            mapping: payload.mapping,
-            reliability: payload.reliability,
+            mapping: payload.mapping.clone(),
+            reliability: payload.reliability.clone(),
         })
     }
 }
@@ -286,19 +265,22 @@ mod tests {
     use quant_pivot_models::{
         domain::{
             CalibrationArtifactInfo, CalibrationArtifactListQuery, NewCalibrationArtifact,
-            Paginated, PublishedWeatherStationLeadBias,
+            Paginated,
         },
-        types::Probability,
-    };
-    use quant_pivot_research::model::{
-        IsotonicKnot, MonotoneMapping, ReliabilityBin, ReliabilityReport,
+        types::{
+            ModelVersionId, Probability, TrainingDatasetId,
+            calibration::{
+                IsotonicKnot, ModelScoreCalibrationPayload, MonotoneMapping,
+                PublishedWeatherStationLeadBias, ReliabilityBin, ReliabilityReport,
+            },
+        },
     };
     use rust_decimal_macros::dec;
 
     use super::{
-        CalibrationArtifactId, CalibrationArtifactLoader, CalibrationArtifactRepository,
-        CalibrationKind, ContentHash, CoreCalibrationArtifactLoader, ModelScoreCalibrationPayload,
-        ModelVersionId, TimeWindow, TrainingDatasetId, model_score_content_hash,
+        CalibrationArtifactId, CalibrationArtifactLoader, CalibrationArtifactPayload,
+        CalibrationArtifactRepository, CalibrationKind, ContentHash, CoreCalibrationArtifactLoader,
+        TimeWindow, model_score_content_hash,
     };
 
     /// In-memory fake repository — the loader's fail-closed branches (not
@@ -376,7 +358,7 @@ mod tests {
             fit_window_end: fit_window.to,
             calibration_split_hash,
             sample_count: 1_000,
-            payload_json: serde_json::to_value(&payload).expect("payload json"),
+            payload: CalibrationArtifactPayload::ModelScore(payload),
             active,
             created_at: Utc::now(),
         }
@@ -427,7 +409,6 @@ mod tests {
     async fn load_fails_closed_on_wrong_kind() {
         let mut row = valid_row(true);
         row.kind = CalibrationKind::MarketPriceBias;
-        row.payload_json = serde_json::json!({});
         let artifact_id = row.artifact_id.clone();
         let loader = loader(Some(row));
         let result = loader.load(&artifact_id).await;
@@ -449,10 +430,11 @@ mod tests {
     #[tokio::test]
     async fn load_rejects_hash_valid_but_empty_mapping() {
         let mut row = valid_row(true);
-        let mut payload: ModelScoreCalibrationPayload =
-            serde_json::from_value(row.payload_json.clone()).expect("payload");
+        let CalibrationArtifactPayload::ModelScore(mut payload) = row.payload else {
+            panic!("model-score payload")
+        };
         payload.mapping = MonotoneMapping::Isotonic { knots: Vec::new() };
-        row.payload_json = serde_json::to_value(&payload).expect("payload json");
+        row.payload = CalibrationArtifactPayload::ModelScore(payload.clone());
         row.content_hash = model_score_content_hash(
             &TimeWindow::new(row.fit_window_start, row.fit_window_end),
             &row.calibration_split_hash,
@@ -467,10 +449,11 @@ mod tests {
     async fn load_rejects_content_hash_mismatch() {
         let mut row = valid_row(true);
         // Tamper with the payload after the hash was computed.
-        let mut payload: ModelScoreCalibrationPayload =
-            serde_json::from_value(row.payload_json.clone()).expect("payload");
+        let CalibrationArtifactPayload::ModelScore(mut payload) = row.payload else {
+            panic!("model-score payload")
+        };
         payload.reliability.ece = dec!(0.99);
-        row.payload_json = serde_json::to_value(&payload).expect("payload json");
+        row.payload = CalibrationArtifactPayload::ModelScore(payload);
         let artifact_id = row.artifact_id.clone();
         let loader = loader(Some(row));
         let result = loader.load(&artifact_id).await;

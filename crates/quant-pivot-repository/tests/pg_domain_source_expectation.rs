@@ -8,7 +8,7 @@ use quant_pivot_models::{
         UpsertDomainSourceExpectation,
     },
     enums::domain::{DomainFamily, DomainSourceExpectationStatus},
-    types::{ContentHash, DomainInstrumentKey, DomainSourceId},
+    types::{ContentHash, DomainInstrumentKey, DomainSourceId, ResearchProfileId},
 };
 use quant_pivot_repository::{
     postgres::PgDomainSourceExpectationRepository, traits::DomainSourceExpectationRepository,
@@ -20,17 +20,21 @@ fn hash(fill: char) -> ContentHash {
 }
 
 fn expectation() -> UpsertDomainSourceExpectation {
+    expectation_with_required(true)
+}
+
+fn expectation_with_required(required: bool) -> UpsertDomainSourceExpectation {
     UpsertDomainSourceExpectation::new(
         DomainSourceExpectationDefinition {
             family: DomainFamily::Weather,
             source_id: DomainSourceId::aviation_weather(),
             instrument_key: DomainInstrumentKey::new("METAR:KLGA"),
             capability_registry_hash: hash('a'),
-            required: true,
+            required,
             credential_required: false,
             freshness_secs: 900,
             affected_market_ids: Vec::new(),
-            affected_profile_ids: vec!["weather_forecast_24h".to_owned()],
+            affected_profile_ids: vec![ResearchProfileId::new("weather_forecast_24h")],
         },
         DomainSourceExpectationStatus::NotStarted,
         None,
@@ -75,4 +79,24 @@ async fn expected_source_exists_before_cursor_and_transitions_optimistically() {
         stale_writer,
         StorageError::IllegalTransition { .. }
     ));
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn natural_key_upsert_updates_one_stable_expectation() {
+    let (pool, _container) = setup_pg().await;
+    let repo = PgDomainSourceExpectationRepository::new(pool.connection().clone());
+    let initial = repo
+        .upsert(expectation())
+        .await
+        .expect("insert expectation");
+    let replacement = expectation_with_required(false);
+    let replaced = repo
+        .upsert(replacement)
+        .await
+        .expect("upsert expectation by natural key");
+
+    assert_eq!(replaced.expectation_id, initial.expectation_id);
+    assert!(!replaced.required);
+    assert_eq!(repo.list_all().await.expect("list").len(), 1);
 }

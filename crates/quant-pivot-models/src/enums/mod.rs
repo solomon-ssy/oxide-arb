@@ -163,7 +163,10 @@ macro_rules! pg_enum {
             sea_orm::EnumIter,
             sea_orm::DeriveActiveEnum,
         )]
-        #[sea_orm(rs_type = "String", db_type = "Enum", enum_name = $type_name)]
+        // Preserve the PostgreSQL type identity in `sea_query::Value`. This is
+        // required for prepared enum-array writes: `Vec<T>` must become
+        // `ArrayType::Enum`, never an incompatible `text[]` parameter.
+        #[sea_orm(rs_type = "Enum", db_type = "Enum", enum_name = $type_name)]
         pub enum $name {
             $(
                 #[sea_orm(string_value = $value)]

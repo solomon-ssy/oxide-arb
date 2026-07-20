@@ -41,7 +41,7 @@ use quant_pivot_models::{
     runtime_config::{DataQualityConfig, DomainConfig, FactorsConfig, FeaturesConfig},
     types::{
         ContentHash, DecisionPolicySnapshotId, DomainInstrumentKey, EventId, FeatureVectorId,
-        MarketId, ModelRunId, Price, Shares, TokenId, Usd,
+        MarketId, ModelRunId, Price, Shares, TokenId, Usd, stable_name::FactorName,
     },
 };
 use quant_pivot_repository::{
@@ -55,7 +55,7 @@ use quant_pivot_repository::{
     },
 };
 use quant_pivot_research::{
-    factors::{FactorEngine, FactorName, factor_events},
+    factors::{FactorEngine, factor_events},
     features::FeatureVector,
     selection::{ModelFeatureRequirements, SelectedMarket},
 };
@@ -429,7 +429,6 @@ async fn create_definition_and_values_then_list_for_run() {
             input_hash: ContentHash::parse(format!("blake3:{}", "0".repeat(64)))
                 .expect("zero hash"),
             output_hash: None,
-            metrics_json: serde_json::json!({}),
             error_code: None,
             error_message: None,
             started_at: Utc::now(),
@@ -531,7 +530,6 @@ async fn unpublished_factor_definitions_block_pipeline() {
             status: ModelRunStatus::Running,
             input_hash: ContentHash::parse(format!("blake3:{}", "1".repeat(64))).expect("hash"),
             output_hash: None,
-            metrics_json: serde_json::json!({}),
             error_code: None,
             error_message: None,
             started_at: Utc::now(),
@@ -647,9 +645,12 @@ fn sample_vector(
 ) -> FeatureVector {
     use std::collections::BTreeMap;
 
-    use quant_pivot_models::{enums::quant::DataQualityStatus, types::SchemaVersion};
+    use quant_pivot_models::{
+        enums::quant::DataQualityStatus,
+        types::{SchemaVersion, stable_name::FeatureName},
+    };
     use quant_pivot_research::features::{
-        FeatureCell, FeatureName, FeatureStaleness, FeatureValue,
+        FeatureCell, FeatureStaleness, FeatureValue,
         names::{book, market},
     };
 

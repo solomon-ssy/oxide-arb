@@ -119,7 +119,8 @@ mod tests {
         runtime_config::{FactorCrossSectionConfig, ModelConfig, ModelVersionRef},
         types::{
             BacktestPathSetId, ContentHash, ModelInputContract, ModelSpecId, ModelTrainingContract,
-            ModelVersionId, SchemaVersion,
+            ModelVersionId, model_metrics::ModelVersionMetrics, model_quality::QualityGateReport,
+            model_training::ModelTrainingObjective,
         },
     };
     use quant_pivot_repository::traits::{
@@ -134,7 +135,10 @@ mod tests {
             WeightedFactorModelArtifact, model_input_contract_hash,
         },
     };
-    use quant_pivot_test_support::execution_pg_seed::fixture_profile_ref;
+    use quant_pivot_test_support::{
+        execution_pg_seed::fixture_profile_ref,
+        model_spec_fixtures::{model_spec_lineage_fixture, new_model_spec_fixture},
+    };
     use rust_decimal_macros::dec;
     use std::{
         collections::BTreeMap,
@@ -228,7 +232,7 @@ mod tests {
         async fn set_quality_gate_report(
             &self,
             _model_version_id: &ModelVersionId,
-            _quality_gate_report: serde_json::Value,
+            _quality_gate_report: QualityGateReport,
         ) -> Result<ModelVersionInfo, StorageError> {
             unimplemented!()
         }
@@ -242,19 +246,30 @@ mod tests {
     }
 
     fn spec() -> ModelSpecInfo {
+        let authored = new_model_spec_fixture(
+            ModelSpecId::from_v7(),
+            "crypto-spec",
+            ModelFamily::WeightedFactor,
+            86_400,
+            ModelInputContract::single_required("book.mid"),
+            ModelTrainingContract::settlement_default(),
+        );
         ModelSpecInfo {
-            model_spec_id: ModelSpecId::from_v7(),
-            name: "crypto-spec".to_owned(),
-            model_family: ModelFamily::WeightedFactor,
-            prediction_horizon_secs: 86_400,
-            feature_schema_version: SchemaVersion::FIRST,
-            label_schema_version: SchemaVersion::FIRST,
-            spec_json: serde_json::json!({}),
-            input_contract: ModelInputContract::single_required("book.mid"),
-            training_contract: ModelTrainingContract::settlement_default(),
-            status: PublicationStatus::Published,
+            model_spec_id: authored.model_spec_id,
+            name: authored.name,
+            model_family: authored.model_family,
+            prediction_horizon_secs: authored.prediction_horizon_secs,
+            feature_schema_version: authored.feature_schema_version,
+            label_schema_version: authored.label_schema_version,
+            thesis: authored.thesis,
+            input_contract: authored.input_contract,
+            training_contract: authored.training_contract,
+            definition_hash: authored.definition_hash,
+            created_by_user_id: authored.created_by_user_id,
+            created_by_label: authored.created_by_label,
+            created_by_role: authored.created_by_role,
+            reason: authored.reason,
             created_at: Utc::now(),
-            updated_at: Utc::now(),
         }
     }
 
@@ -263,10 +278,15 @@ mod tests {
         artifact_hash: ContentHash,
         status: PublicationStatus,
     ) -> ModelVersionInfo {
+        let (model_spec_thesis, model_spec_definition_hash) =
+            model_spec_lineage_fixture("category-pointer-test-spec");
         ModelVersionInfo {
             model_version_id: ModelVersionId::from_v7(),
             model_spec_id,
+            model_spec_name: "category-pointer-test-spec".to_owned(),
             model_family: ModelFamily::WeightedFactor,
+            model_spec_thesis,
+            model_spec_definition_hash,
             version: 1,
             artifact_hash,
             category_scope: None,
@@ -275,9 +295,15 @@ mod tests {
             trade_policy_artifact_id: None,
             trade_policy_hash: None,
             publish_path_set_id: None,
-            metrics_json: serde_json::json!({}),
-            training_objective_json: serde_json::json!({"kind": "not_trained"}),
-            quality_gate_report: serde_json::json!({}),
+            derivation_kind: ModelVersionInfo::training_derivation_kind(),
+            parent_model_version_id: None,
+            source_backtest_report_id: None,
+            calibration_artifact_id: None,
+            score_multiplier_calibration_report: None,
+            derivation_evidence_hash: None,
+            metrics: ModelVersionMetrics::not_measured("test fixture"),
+            training_objective: ModelTrainingObjective::hand_authored("test fixture"),
+            quality_gate_report: None,
             publication_status: status,
             published_at: Some(Utc::now()),
             retired_at: None,
@@ -295,6 +321,7 @@ mod tests {
         ModelArtifact::WeightedFactor(Box::new(WeightedFactorModelArtifact {
             header: ModelArtifactHeader {
                 model_version_id,
+                model_spec_definition_hash: spec().definition_hash,
                 profile_ref: fixture_profile_ref(),
                 model_family: ResearchModelFamily::WeightedFactor,
                 feature_schema_hash: ContentHash::parse(format!("blake3:{}", "1".repeat(64)))

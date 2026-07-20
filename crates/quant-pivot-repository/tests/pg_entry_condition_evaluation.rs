@@ -6,7 +6,9 @@ use quant_pivot_models::{
     domain::ApplyEntryConditionEvaluation,
     entities::{quant_execution_order, quant_order_intent},
     enums::quant::{EntryConditionState, QuantRuntimeMode},
-    types::{ConditionTruth, ContentHash, EntryConditionFoldState, EntryConditionInstanceId},
+    types::{
+        ConditionTruth, ContentHash, EntryConditionFoldState, EntryConditionInstanceId, WorkerId,
+    },
 };
 use quant_pivot_repository::{
     postgres::{PgEntryConditionRepository, PgRecommendationReportRepository},
@@ -20,7 +22,6 @@ use quant_pivot_test_support::{
     pg::setup_pg,
 };
 use sea_orm::{DatabaseConnection, EntityTrait, PaginatorTrait};
-use uuid::Uuid;
 
 fn hash(seed: char) -> ContentHash {
     ContentHash::parse(format!("blake3:{}", seed.to_string().repeat(64))).expect("hash")
@@ -52,9 +53,9 @@ async fn semantic_revision_and_outbox_claims_are_atomic_and_deduplicated() {
         .expect("report");
     assert_eq!(report.runtime_mode, QuantRuntimeMode::ReportOnly);
     let repo = PgEntryConditionRepository::new(db.clone());
-    let worker = Uuid::now_v7();
+    let worker = WorkerId::from_v7();
     let now = Utc::now();
-    assert_initial_transition(&repo, &ids.condition_instance, worker, now).await;
+    assert_initial_transition(&repo, &ids.condition_instance, worker.clone(), now).await;
     let second_time = now + Duration::seconds(2);
     assert_unchanged_evaluation_race(&db, &repo, &ids.condition_instance, worker, second_time)
         .await;
@@ -65,11 +66,11 @@ async fn semantic_revision_and_outbox_claims_are_atomic_and_deduplicated() {
 async fn assert_initial_transition(
     repo: &PgEntryConditionRepository,
     instance_id: &EntryConditionInstanceId,
-    worker: Uuid,
+    worker: WorkerId,
     now: chrono::DateTime<Utc>,
 ) {
     let leased = repo
-        .lease_next(worker, now, now + Duration::minutes(1))
+        .lease_next(worker.clone(), now, now + Duration::minutes(1))
         .await
         .expect("lease initial condition")
         .expect("condition due");
@@ -103,11 +104,15 @@ async fn assert_unchanged_evaluation_race(
     db: &DatabaseConnection,
     repo: &PgEntryConditionRepository,
     instance_id: &EntryConditionInstanceId,
-    worker: Uuid,
+    worker: WorkerId,
     second_time: chrono::DateTime<Utc>,
 ) {
     let leased_again = repo
-        .lease_next(worker, second_time, second_time + Duration::minutes(1))
+        .lease_next(
+            worker.clone(),
+            second_time,
+            second_time + Duration::minutes(1),
+        )
         .await
         .expect("lease unchanged evaluation")
         .expect("condition due again");
@@ -129,7 +134,7 @@ async fn assert_unchanged_evaluation_race(
     let evaluator_left = PgEntryConditionRepository::new(db.clone());
     let evaluator_right = PgEntryConditionRepository::new(db.clone());
     let (left, right) = tokio::join!(
-        evaluator_left.apply_evaluation(instance_id, worker, unchanged.clone(),),
+        evaluator_left.apply_evaluation(instance_id, worker.clone(), unchanged.clone(),),
         evaluator_right.apply_evaluation(instance_id, worker, unchanged,),
     );
     assert_eq!(
@@ -148,18 +153,18 @@ async fn assert_outbox_claim_race(
     repo: &PgEntryConditionRepository,
     claim_time: chrono::DateTime<Utc>,
 ) {
-    let outbox_worker_a = Uuid::now_v7();
-    let outbox_worker_b = Uuid::now_v7();
+    let outbox_worker_a = WorkerId::from_v7();
+    let outbox_worker_b = WorkerId::from_v7();
     let outbox_repo_b = PgEntryConditionRepository::new(db.clone());
     let (claimed_a, claimed_b) = tokio::join!(
         repo.claim_pending_evaluations(
-            outbox_worker_a,
+            outbox_worker_a.clone(),
             claim_time,
             claim_time + Duration::minutes(1),
             10,
         ),
         outbox_repo_b.claim_pending_evaluations(
-            outbox_worker_b,
+            outbox_worker_b.clone(),
             claim_time,
             claim_time + Duration::minutes(1),
             10,
@@ -180,10 +185,10 @@ async fn assert_outbox_claim_race(
     assert!(ids_and_kinds.iter().any(|(_, kind)| kind == "observed"));
 
     let wrong_owner = if let Some(event) = claimed_a.first() {
-        repo.mark_evaluation_published(&event.evaluation_id, outbox_worker_b, claim_time)
+        repo.mark_evaluation_published(&event.evaluation_id, outbox_worker_b.clone(), claim_time)
             .await
     } else if let Some(event) = claimed_b.first() {
-        repo.mark_evaluation_published(&event.evaluation_id, outbox_worker_a, claim_time)
+        repo.mark_evaluation_published(&event.evaluation_id, outbox_worker_a.clone(), claim_time)
             .await
     } else {
         Err(StorageError::InvariantViolation {

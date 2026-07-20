@@ -1,6 +1,7 @@
 //! `quant_market_linkage` table entity.
 
 use crate::{
+    domain::LinkageOutcome,
     enums::domain::{DomainFamily, LinkageStatus, ResolverTier},
     types::{ContentHash, MarketId, MarketLinkageId, Probability, ResolverVersion},
 };
@@ -20,7 +21,7 @@ pub struct Model {
     pub resolver_version: ResolverVersion,
     pub confidence: Probability,
     #[sea_orm(column_type = "JsonBinary")]
-    pub outcome: Json,
+    pub outcome: LinkageOutcome,
     pub metadata_hash: ContentHash,
     pub capability_registry_hash: Option<ContentHash>,
     pub content_hash: ContentHash,

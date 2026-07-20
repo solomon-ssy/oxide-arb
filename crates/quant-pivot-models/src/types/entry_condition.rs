@@ -16,8 +16,8 @@ use crate::{
     types::{
         ContentHash, DecisionPolicySnapshotId, DomainInstrumentKey, DomainSourceId,
         EntryConditionArtifactId, FactorDefinitionId, MarketId, MarketLinkageId, MarketSelectionId,
-        ModelVersionId, Price, RecommendationId, TemperatureBand, TemperatureUnit, TokenId, Usd,
-        WeatherTemperatureStatistic,
+        ModelVersionId, Price, RecommendationId, TemperatureBand, TemperatureCelsius,
+        TemperatureUnit, TokenId, Usd, WeatherTemperatureStatistic,
     },
 };
 
@@ -566,6 +566,114 @@ pub enum ConditionTruth {
     Satisfied,
     Unsatisfied,
     Unavailable(ConditionUnavailableReason),
+}
+
+/// Executable-side book input visible at one PIT cutoff.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutablePriceInput {
+    pub token_id: TokenId,
+    pub price: Price,
+    pub observed_at: DateTime<Utc>,
+    pub available_at: DateTime<Utc>,
+    pub gap_generation: u64,
+}
+
+/// Latest persisted factor value; never the recommendation's frozen breakdown.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FactorSnapshotInput {
+    pub definition_id: FactorDefinitionId,
+    pub definition_hash: ContentHash,
+    pub model_version_id: ModelVersionId,
+    pub raw_value: Decimal,
+    pub normalized_value: Decimal,
+    pub confidence: Decimal,
+    pub observed_at: DateTime<Utc>,
+    pub available_at: DateTime<Utc>,
+    pub snapshot_hash: ContentHash,
+}
+
+/// One source-native crypto fact in deterministic fold order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CryptoPriceReportInput {
+    pub source_sequence: u64,
+    pub price: Usd,
+    pub event_at: DateTime<Utc>,
+    pub available_at: DateTime<Utc>,
+    pub report_hash: ContentHash,
+}
+
+/// Ordered same-source crypto facts and the source discontinuity generation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CryptoPriceInput {
+    pub source: EntryConditionSourceBinding,
+    pub reports: Vec<CryptoPriceReportInput>,
+    pub gap_generation: u64,
+    pub source_healthy: bool,
+}
+
+/// Current corrected NOAA proxy state for one station/local day.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WeatherDailyTemperatureInput {
+    pub source: EntryConditionSourceBinding,
+    pub station: String,
+    pub local_date: chrono::NaiveDate,
+    pub temperature_statistic: WeatherTemperatureStatistic,
+    pub current_extreme: TemperatureCelsius,
+    pub observation_time: DateTime<Utc>,
+    pub available_at: DateTime<Utc>,
+    pub revision: u64,
+    pub day_closed: bool,
+    pub report_hash: ContentHash,
+    pub gap_generation: u64,
+    pub source_healthy: bool,
+}
+
+/// Complete PIT input bundle shared by live and replay evaluation.
+#[derive(Debug, Clone)]
+pub struct EntryConditionInputSet {
+    pub binding: EntryConditionBinding,
+    pub binding_revision: ContentHash,
+    pub binding_unavailable_reason: Option<ConditionUnavailableReason>,
+    pub fold_state: EntryConditionFoldState,
+    pub evaluated_at: DateTime<Utc>,
+    pub prices: Vec<ExecutablePriceInput>,
+    pub factors: Vec<FactorSnapshotInput>,
+    pub crypto: Vec<CryptoPriceInput>,
+    pub weather: Vec<WeatherDailyTemperatureInput>,
+}
+
+/// Closed evidence family attached to a condition-evaluation leaf.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case", tag = "kind")]
+pub enum ConditionLeafEvidence {
+    Price(ExecutablePriceInput),
+    Clock {
+        deadline_at: DateTime<Utc>,
+        evaluated_at: DateTime<Utc>,
+    },
+    Factor(FactorSnapshotInput),
+    Crypto {
+        input: CryptoPriceInput,
+        state: CryptoEnteredFoldState,
+    },
+    Weather(WeatherDailyTemperatureInput),
+    Unavailable(ConditionUnavailableReason),
+}
+
+/// Compact complete tree persisted to the evaluation fact table.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConditionNodeEvaluation {
+    pub node_id: u16,
+    pub truth: ConditionTruth,
+    pub decisive_child_id: Option<u16>,
+    pub evidence: Option<ConditionLeafEvidence>,
+    pub children: Vec<Self>,
 }
 
 /// Durable ordered-fact fold state for one condition instance.

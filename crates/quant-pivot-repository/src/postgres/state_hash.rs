@@ -1,10 +1,12 @@
 //! Canonical state hashes for WORM operation-log rows written inside PG transactions.
 
 use quant_pivot_error::storage::StorageError;
-use quant_pivot_models::{domain::NewOperationLog, hashing::canonical_state_hash};
+use quant_pivot_models::{
+    domain::NewOperationLog, hashing::canonical_state_hash, types::ContentHash,
+};
 use serde::Serialize;
 
-pub fn hash_state<T: Serialize>(value: &T) -> Result<String, StorageError> {
+pub fn hash_state<T: Serialize>(value: &T) -> Result<ContentHash, StorageError> {
     canonical_state_hash(value)
         .map_err(|error| StorageError::Codec(format!("canonical state hash failed: {error}")))
 }
@@ -29,32 +31,32 @@ mod tests {
     use quant_pivot_models::{
         domain::NewOperationLog,
         enums::{
-            operation_log::{OperationCategory, OperationOutcome},
+            operation_log::{OperationCategory, OperationHttpMethod, OperationOutcome},
             rbac::ResourceType,
         },
-        types::OperationLogId,
+        types::{OperationDetailDocument, OperationLogId},
     };
 
     #[test]
     fn apply_transition_hashes_populates_before_and_after() {
         let log = NewOperationLog {
             id: OperationLogId::from_v7(),
-            request_id: "test".to_owned(),
+            request_id: "test".into(),
             actor_user_id: None,
             actor_username: Some("system".to_owned()),
             acting_role: None,
             category: OperationCategory::System,
-            action: "test.transition".to_owned(),
+            action: "test.transition".into(),
             resource_type: Some(ResourceType::System),
             resource_id: Some("system".to_owned()),
-            http_method: "SYSTEM".to_owned(),
+            http_method: OperationHttpMethod::System,
             http_path: "/system/test".to_owned(),
             http_status: 200,
             outcome: OperationOutcome::Success,
             client_ip: None,
             user_agent: None,
             latency_ms: 0,
-            detail: serde_json::json!({}),
+            detail: OperationDetailDocument::empty(),
             before_hash: None,
             after_hash: None,
             governance_audit_event_id: None,

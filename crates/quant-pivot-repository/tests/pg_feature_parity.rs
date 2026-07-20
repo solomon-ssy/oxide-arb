@@ -3,13 +3,16 @@
 use chrono::{DateTime, Duration, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    domain::{CompleteFeatureParityRun, NewFeatureParityRun, NewResearchJob},
+    domain::{
+        CompleteFeatureParityRun, FeatureParityJobParams, NewFeatureParityRun, NewResearchJob,
+        RunFullFeatureParityRequest,
+    },
     entities::quant_research_job,
     enums::quant::{
         FeatureParityLatchState, FeatureParityRunKind, FeatureParityRunStatus, ResearchJobKind,
         ResearchJobStatus,
     },
-    types::{ContentHash, FeatureParityRunId, ResearchJobId},
+    types::{ContentHash, FeatureParityRunId, ResearchJobId, ResearchJobParams},
 };
 use quant_pivot_repository::{
     postgres::PgFeatureParityRepository,
@@ -143,7 +146,15 @@ async fn cold_window_is_not_eligible_and_writes_no_run_or_job() {
         status: ResearchJobStatus::Queued,
         model_spec_id: None,
         decision_policy_snapshot_id: None,
-        params_json: serde_json::json!({ "parity_run_id": run_id }),
+        params_json: ResearchJobParams::FeatureParity(FeatureParityJobParams {
+            parity_run_id: run_id.clone(),
+            materialization_timeout_secs: 600,
+            request: RunFullFeatureParityRequest {
+                window_start: Some(run.window_start),
+                window_end: Some(run.window_end),
+                reason: "cold-window eligibility".to_owned(),
+            },
+        }),
         requested_by: None,
         acting_role: "system".to_owned(),
         parent_job_id: None,

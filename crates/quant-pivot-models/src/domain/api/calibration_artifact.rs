@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use validator::Validate;
 
 use crate::{
-    domain::{CalibrationArtifactInfo, pagination::PageRequest},
+    domain::{CalibrationArtifactInfo, CalibrationArtifactPayload, pagination::PageRequest},
     enums::quant::{CalibrationKind, CalibrationMethod, DownsideSource},
     half_open_window_request,
     types::{CalibrationArtifactId, ContentHash, ModelVersionId, TrainingDatasetId},
@@ -25,7 +25,7 @@ use crate::{
 /// The fit window bounds the settlement spine sampled from `ClickHouse`; the
 /// governed `reason` is recorded on the operation log. `Serialize` is derived so
 /// the request can be frozen into the durable research job's `params_json`.
-#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Validate)]
 #[validate(schema(function = "validate_fit_bias_table_request"))]
 pub struct FitBiasTableRequest {
     /// Inclusive lower bound of the fit sample window.
@@ -45,7 +45,7 @@ half_open_window_request!(FitBiasTableRequest);
 /// `purpose = calibration` `TrainingDataset` whose window is disjoint and
 /// embargoed relative to `model_version_id`'s own training-dataset window
 /// (enforced server-side, fail-closed — Phase 11.3 §4).
-#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Validate)]
 pub struct FitModelCalibratorRequest {
     /// The candidate model version to calibrate.
     pub model_version_id: ModelVersionId,
@@ -178,7 +178,7 @@ pub struct CalibrationArtifactDetailView {
     pub sample_count: i64,
     pub active: bool,
     pub created_at: DateTime<Utc>,
-    pub payload_json: serde_json::Value,
+    pub payload: CalibrationArtifactPayload,
 }
 
 impl From<CalibrationArtifactInfo> for CalibrationArtifactDetailView {
@@ -193,7 +193,7 @@ impl From<CalibrationArtifactInfo> for CalibrationArtifactDetailView {
             sample_count: info.sample_count,
             active: info.active,
             created_at: info.created_at,
-            payload_json: info.payload_json,
+            payload: info.payload,
         }
     }
 }

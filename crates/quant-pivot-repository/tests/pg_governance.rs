@@ -3,14 +3,20 @@
 
 use chrono::{Duration as ChronoDuration, Utc};
 use quant_pivot_models::{
-    domain::{NewModelGovernanceAudit, NewModelSpec, NewModelVersion, NewShadowComparison},
+    domain::{
+        ModelGovernanceAuditDetail, NewModelGovernanceAudit, NewModelVersion, NewShadowComparison,
+    },
     enums::{
         model::ModelFamily,
-        quant::{ModelGovernanceAction, PublicationStatus},
+        quant::{ModelGovernanceAction, ModelWeightSource, PublicationStatus},
     },
     types::{
-        AuditEventId, ContentHash, ModelGovernanceAuditId, ModelInputContract, ModelSpecId,
-        ModelTrainingContract, ModelVersionId, Probability, SchemaVersion, ShadowComparisonId,
+        AuditEventId, ContentHash, FeatureParityStateId, ModelGovernanceAuditId,
+        ModelInputContract, ModelSpecId, ModelTrainingContract, ModelVersionId, Probability,
+        RoleCode, ShadowComparisonId,
+        model_metrics::ModelVersionMetrics,
+        model_training::ModelTrainingObjective,
+        shadow::{ShadowRankDelta, ShadowScoreDelta},
     },
 };
 use quant_pivot_repository::{
@@ -32,18 +38,16 @@ async fn seed_two_versions(db: &sea_orm::DatabaseConnection) -> (ModelVersionId,
     let registry = PgModelRegistryRepository::new(db.clone());
     let model_spec_id = ModelSpecId::from_v7();
     registry
-        .create_model_spec(NewModelSpec {
-            model_spec_id: model_spec_id.clone(),
-            name: "pg-governance-it".to_owned(),
-            model_family: ModelFamily::WeightedFactor,
-            prediction_horizon_secs: 86_400,
-            feature_schema_version: SchemaVersion::FIRST,
-            label_schema_version: SchemaVersion::FIRST,
-            spec_json: serde_json::json!({}),
-            input_contract: ModelInputContract::single_required("book.mid"),
-            training_contract: ModelTrainingContract::settlement_default(),
-            status: PublicationStatus::Published,
-        })
+        .create_model_spec(
+            quant_pivot_test_support::model_spec_fixtures::new_model_spec_fixture(
+                model_spec_id.clone(),
+                "pg-governance-it",
+                ModelFamily::WeightedFactor,
+                86_400,
+                ModelInputContract::single_required("book.mid"),
+                ModelTrainingContract::settlement_default(),
+            ),
+        )
         .await
         .expect("model spec");
 
@@ -62,9 +66,10 @@ async fn seed_two_versions(db: &sea_orm::DatabaseConnection) -> (ModelVersionId,
                 trade_policy_artifact_id: None,
                 trade_policy_hash: None,
                 publish_path_set_id: None,
-                metrics_json: serde_json::json!({}),
-                training_objective_json: serde_json::json!({"kind": "not_trained"}),
-                quality_gate_report: serde_json::json!({}),
+                derivation: NewModelVersion::training_derivation(),
+                metrics: ModelVersionMetrics::not_measured("test fixture"),
+                training_objective: ModelTrainingObjective::hand_authored("test fixture"),
+                quality_gate_report: None,
                 publication_status: PublicationStatus::Candidate,
                 published_at: None,
                 retired_at: None,
@@ -85,18 +90,32 @@ async fn quant_shadow_comparison_migration_and_crud() {
     let repo = PgShadowComparisonRepository::new(db.clone());
 
     let now = Utc::now();
-    for (overlap, hard, hours_ago) in [(dec!(0.80), false, 23_i64), (dec!(0.60), true, 1)] {
+    for (overlap, hard, hours_ago, weight_source, hash_seed) in [
+        (dec!(0.80), false, 23_i64, ModelWeightSource::Artifact, 'g'),
+        (dec!(0.60), true, 1, ModelWeightSource::Artifact, 'h'),
+        (dec!(1), false, 0, ModelWeightSource::ConfigOverlay, 'i'),
+    ] {
         repo.create(NewShadowComparison {
             shadow_comparison_id: ShadowComparisonId::from_v7(),
             active_model_version_id: active.clone(),
             shadow_model_version_id: shadow.clone(),
+            weight_source,
             decision_at: now - ChronoDuration::hours(hours_ago),
             topn_overlap: Probability::new(overlap),
-            rank_delta_json: serde_json::json!({ "mean_abs_rank_delta": "1" }),
-            score_delta_json: serde_json::json!({ "mean_abs_score_delta": "0.05" }),
+            rank_delta_json: ShadowRankDelta {
+                mean_abs_rank_delta: dec!(1),
+                max_rank_delta: 2,
+                spearman: dec!(0.8),
+                common_markets: 10,
+            },
+            score_delta_json: ShadowScoreDelta {
+                mean_abs_score_delta: dec!(0.05),
+                max_score_delta: dec!(0.1),
+                side_disagreement_rate: dec!(0.2),
+            },
             matured_outcome_json: None,
             hard_divergence: hard,
-            comparison_hash: content_hash(if hard { 'h' } else { 'g' }),
+            comparison_hash: content_hash(hash_seed),
         })
         .await
         .expect("create comparison");
@@ -107,6 +126,8 @@ async fn quant_shadow_comparison_migration_and_crud() {
         .await
         .expect("summary");
     assert_eq!(summary.sample_count, 2);
+    // Config-overlay comparisons describe behavior that is not frozen in the
+    // artifact and therefore cannot count as publication stability evidence.
     assert!(
         summary.any_hard_divergence,
         "the window includes a divergence"
@@ -131,25 +152,38 @@ async fn quant_model_governance_audit_migration_and_crud() {
             model_version_id: Some(active.clone()),
             training_dataset_id: None,
             action: ModelGovernanceAction::Publish,
+            actor_user_id: None,
             actor_username: "operator".to_owned(),
-            actor_role: Some("risk_manager".to_owned()),
+            actor_role: Some(RoleCode::new("risk_manager")),
             reason: "publish after gate pass".to_owned(),
             before_status: PublicationStatus::Candidate,
             after_status: PublicationStatus::Published,
-            before_hash: Some(content_hash('b').as_str().to_owned()),
-            after_hash: Some(content_hash('a').as_str().to_owned()),
-            quality_gate_passed: true,
-            shadow_window_secs: Some(86_400),
-            detail_json: serde_json::json!({ "shadow_samples": 5 }),
-            audit_event_id: Some(AuditEventId::from_v7()),
+            detail: ModelGovernanceAuditDetail::Publish {
+                artifact_hash: content_hash('a'),
+                gate_report_hash: content_hash('g'),
+                shadow_samples: 5,
+                shadow_mean_overlap: Probability::new(dec!(0.75)),
+                feature_parity_state_id: FeatureParityStateId::from_v7(),
+                required_shadow_window_secs: 86_400,
+            },
+            audit_event_id: AuditEventId::from_v7(),
         })
         .await
         .expect("create audit");
     assert_eq!(created.audit_id, audit_id);
     assert_eq!(created.action, ModelGovernanceAction::Publish);
-    assert!(created.quality_gate_passed);
+    assert!(matches!(
+        created.detail,
+        ModelGovernanceAuditDetail::Publish {
+            shadow_samples: 5,
+            ..
+        }
+    ));
 
     let listed = repo.list_by_version(&active).await.expect("list");
     assert_eq!(listed.len(), 1);
-    assert_eq!(listed[0].actor_role.as_deref(), Some("risk_manager"));
+    assert_eq!(
+        listed[0].actor_role.as_ref().map(RoleCode::as_str),
+        Some("risk_manager")
+    );
 }

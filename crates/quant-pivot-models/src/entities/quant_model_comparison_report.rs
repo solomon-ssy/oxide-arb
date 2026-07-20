@@ -2,6 +2,7 @@
 
 use crate::types::{
     BacktestReportId, ContentHash, ModelComparisonReportId, ModelRunId, ModelVersionId,
+    backtest::CategoryRankIcDeltas,
 };
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
@@ -25,7 +26,7 @@ pub struct Model {
     pub side_disagreement_rate: Decimal,
     pub common_samples: i64,
     #[sea_orm(column_type = "JsonBinary")]
-    pub category_breakdown_diff: Json,
+    pub category_breakdown_diff: CategoryRankIcDeltas,
     pub comparison_hash: ContentHash,
     pub created_at: DateTime<Utc>,
 

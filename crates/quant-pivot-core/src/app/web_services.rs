@@ -32,11 +32,14 @@ use crate::{
     },
 };
 use quant_pivot_error::{QuantResult, infra::InfraError};
-use quant_pivot_models::domain::{
-    CatalogStatusPort, DataQualityPort, ExecutionReadPort, ExecutionRecoveryPort,
-    FeatureIntegrityPort, MarketLinkageGovernancePort, ModelCalibrationFitPort, NewOperationLog,
-    OrderIntentPort, PolicySnapshotPort, ReconciliationPort, ResearchJobPort,
-    ResearchReadinessPort, TradePolicyPort, TrainingDatasetPort,
+use quant_pivot_models::{
+    config::CompiledBuildIdentity,
+    domain::{
+        CatalogStatusPort, DataQualityPort, ExecutionReadPort, ExecutionRecoveryPort,
+        FeatureIntegrityPort, MarketLinkageGovernancePort, ModelCalibrationFitPort,
+        NewOperationLog, OrderIntentPort, PolicySnapshotPort, ReconciliationPort, ResearchJobPort,
+        ResearchReadinessPort, TradePolicyPort, TrainingDatasetPort,
+    },
 };
 use quant_pivot_repository::{
     clickhouse::ChFeatureParityEventRepository,
@@ -53,7 +56,10 @@ use quant_pivot_repository::{
         UserRepository, UserRoleRepository,
     },
 };
-use quant_pivot_storage::write::{AsyncWriter, AsyncWriterConfig, AsyncWriterWorker};
+use quant_pivot_storage::{
+    evidence::FileProductionEvidenceVerifier,
+    write::{AsyncWriter, AsyncWriterConfig, AsyncWriterWorker},
+};
 use quant_pivot_web::{
     AppState,
     audit::OperationLogBuffer,
@@ -61,6 +67,7 @@ use quant_pivot_web::{
     jwt::{JwtService, TokenBlacklist},
     readiness::PgRedisReadiness,
     routes, spawn_web_server,
+    state::LiveSchemaVerifier,
     ws::{SessionRegistry, spawn_ws_broadcaster},
 };
 use std::{sync::Arc, time::Duration};
@@ -131,6 +138,12 @@ async fn build_app_state(
         deploy: Arc::clone(&ctx.config),
         postgres_schema_fingerprint: ctx.infra.postgres_schema_fingerprint.clone(),
         clickhouse_schema_fingerprint: ctx.infra.clickhouse_schema_fingerprint.clone(),
+        build_identity: CompiledBuildIdentity::compiled()?,
+        schema_verification: Arc::new(LiveSchemaVerifier::new(
+            Arc::clone(&ctx.infra.pg),
+            Arc::clone(&ctx.infra.ch),
+        )),
+        production_evidence_verification: Arc::new(FileProductionEvidenceVerifier),
         runtime_config_apply: Arc::clone(&ctx.governance.applicator) as Arc<dyn PolicySnapshotPort>,
         jwt: auth.jwt,
         jwt_blacklist: Arc::clone(&ctx.infra.jwt_blacklist),

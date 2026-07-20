@@ -3,7 +3,10 @@
 use crate::{
     domain::DecisionBoundary,
     enums::quant::DataQualityStatus,
-    types::{ContentHash, FeatureVectorId, MarketId, SchemaVersion, TokenId},
+    types::{
+        ContentHash, DecisionCaptureEvidence, FeatureSourceRefs, FeatureVectorId,
+        FeatureVectorPayload, MarketId, SchemaVersion, TokenId,
+    },
 };
 use chrono::{DateTime, Utc};
 use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
@@ -17,17 +20,16 @@ pub struct FeatureVectorInfo {
     pub market_id: MarketId,
     pub token_id: Option<TokenId>,
     pub decision_at: DateTime<Utc>,
-    /// Full source-visibility contract. `None` is reserved for pre-v10 audit rows.
-    pub decision_boundary: Option<DecisionBoundary>,
+    /// Full source-visibility contract committed by every clean-boot writer.
+    pub decision_boundary: DecisionBoundary,
     pub feature_schema_version: SchemaVersion,
     pub feature_hash: ContentHash,
     pub data_quality: DataQualityStatus,
     pub staleness_ms: i64,
-    pub payload: serde_json::Value,
-    pub source_refs: serde_json::Value,
-    /// Full v10 decision capture. `None` is reserved for retired legacy rows.
-    pub decision_capture: Option<serde_json::Value>,
-    pub decision_capture_hash: Option<ContentHash>,
+    pub payload: FeatureVectorPayload,
+    pub source_refs: FeatureSourceRefs,
+    pub decision_capture: DecisionCaptureEvidence,
+    pub decision_capture_hash: ContentHash,
     pub created_at: DateTime<Utc>,
 }
 
@@ -45,19 +47,15 @@ pub struct NewFeatureVector {
     pub market_id: MarketId,
     pub token_id: Option<TokenId>,
     pub decision_at: DateTime<Utc>,
-    /// Always populated by v10 writers; optional only at the persistence layer
-    /// so legacy audit rows are not given invented cutoffs.
-    pub decision_boundary: Option<DecisionBoundary>,
+    pub decision_boundary: DecisionBoundary,
     pub feature_schema_version: SchemaVersion,
     pub feature_hash: ContentHash,
     pub data_quality: DataQualityStatus,
     pub staleness_ms: i64,
-    pub payload: serde_json::Value,
-    pub source_refs: serde_json::Value,
-    /// Always populated by the online v10 writer; nullable only so pre-v10
-    /// audit rows are not assigned invented captures.
-    pub decision_capture: Option<serde_json::Value>,
-    pub decision_capture_hash: Option<ContentHash>,
+    pub payload: FeatureVectorPayload,
+    pub source_refs: FeatureSourceRefs,
+    pub decision_capture: DecisionCaptureEvidence,
+    pub decision_capture_hash: ContentHash,
 }
 
 /// Runtime feature payload before persistence assigns queryable metadata.

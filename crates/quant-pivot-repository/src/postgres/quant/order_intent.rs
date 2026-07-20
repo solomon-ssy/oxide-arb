@@ -40,8 +40,8 @@ use quant_pivot_models::{
         rbac::ResourceType,
     },
     types::{
-        DecisionPolicySnapshotId, EntryOrderSpec, OperationLogId, OrderIntentId, RecommendationId,
-        RecommendationReportId, ScaleOutState, Usd,
+        DecisionPolicySnapshotId, EntryOrderSpec, OperationDetailDocument, OperationLogId,
+        OrderIntentId, RecommendationId, RecommendationReportId, ScaleOutState, Usd,
     },
 };
 use sea_orm::{
@@ -90,6 +90,12 @@ impl OrderIntentRepository for PgOrderIntentRepository {
             .ok_or_else(|| {
                 error::not_found(entity::QUANT_RECOMMENDATION, &intent.recommendation_id)
             })?;
+        if rec_row.research_profile_artifact_id != intent.research_profile_artifact_id {
+            return Err(error::invariant_violation(
+                Some(entity::QUANT_ORDER_INTENT),
+                "order intent profile must equal its recommendation profile artifact",
+            ));
+        }
         if !rec_row.status.allows_new_intent() {
             return Err(error::state_conflict(
                 entity::QUANT_RECOMMENDATION,
@@ -914,7 +920,7 @@ pub async fn invalidate_pre_submission_for_recommendation(
 
         let after_info: OrderIntentInfo = model.clone().into();
         let intent_log = state_hash::apply_transition_hashes(
-            terminal_intent_operation_log(parent_log, &intent_id, reason),
+            terminal_intent_operation_log(parent_log, &intent_id, reason)?,
             &before_info,
             &after_info,
         )?;
@@ -931,34 +937,35 @@ fn terminal_intent_operation_log(
     parent: &NewOperationLog,
     intent_id: &OrderIntentId,
     reason: ApprovalInvalidation,
-) -> NewOperationLog {
-    NewOperationLog {
+) -> Result<NewOperationLog, StorageError> {
+    Ok(NewOperationLog {
         id: OperationLogId::from_v7(),
-        request_id: format!("{}:intent:{intent_id}", parent.request_id),
+        request_id: format!("{}:intent:{intent_id}", parent.request_id).into(),
         actor_user_id: parent.actor_user_id.clone(),
         actor_username: parent.actor_username.clone(),
         acting_role: parent.acting_role.clone(),
         category: OperationCategory::Governance,
-        action: "quant.intent.invalidate".to_owned(),
+        action: "quant.intent.invalidate".into(),
         resource_type: Some(ResourceType::OrderIntent),
         resource_id: Some(intent_id.to_string()),
-        http_method: parent.http_method.clone(),
+        http_method: parent.http_method,
         http_path: format!("/system/quant/intent/{intent_id}/invalidate"),
         http_status: parent.http_status,
         outcome: parent.outcome,
-        client_ip: parent.client_ip.clone(),
+        client_ip: parent.client_ip,
         user_agent: parent.user_agent.clone(),
         latency_ms: parent.latency_ms,
-        detail: serde_json::json!({
+        detail: OperationDetailDocument::from_serializable(&serde_json::json!({
             "reason": reason.as_str(),
             "parent_action": parent.action,
             "parent_resource_id": parent.resource_id,
-        }),
+        }))
+        .map_err(|error| StorageError::Codec(error.to_string()))?,
         before_hash: None,
         after_hash: None,
         governance_audit_event_id: parent.governance_audit_event_id.clone(),
         governance_audit_sequence: parent.governance_audit_sequence,
-    }
+    })
 }
 
 pub async fn lock_terminal_graph(

@@ -18,7 +18,7 @@ use quant_pivot_models::{domain::ModelVersionInfo, enums::quant::PublicationStat
 ///
 /// `Published` versions are exempt: production active models are gated at publish
 /// time, not on every inference tick. A `0` budget disables the check entirely.
-/// Versions without `evaluated_at` in the report are not subject to staleness.
+/// Versions without a gate report are not subject to staleness.
 pub fn quality_gate_staleness_ok(
     version: &ModelVersionInfo,
     min_age_secs: u64,
@@ -27,17 +27,10 @@ pub fn quality_gate_staleness_ok(
     if version.publication_status == PublicationStatus::Published || min_age_secs == 0 {
         return Ok(());
     }
-    let Some(timestamp) = version
-        .quality_gate_report
-        .get("evaluated_at")
-        .and_then(serde_json::Value::as_str)
-    else {
+    let Some(report) = &version.quality_gate_report else {
         return Ok(());
     };
-    let evaluated_at = DateTime::parse_from_rfc3339(timestamp)
-        .map_err(|error| format!("unparseable evaluated_at `{timestamp}`: {error}"))?
-        .with_timezone(&Utc);
-    let age_secs = now.signed_duration_since(evaluated_at).num_seconds();
+    let age_secs = now.signed_duration_since(report.evaluated_at).num_seconds();
     if age_secs > i64::try_from(min_age_secs).unwrap_or(i64::MAX) {
         return Err(format!(
             "quality gate report is {age_secs}s old (max {min_age_secs}s)"
@@ -48,15 +41,19 @@ pub fn quality_gate_staleness_ok(
 
 /// Whether the version is allowed to load on the shadow path.
 ///
-/// Rejects models whose persisted gate report explicitly recorded `passed = false`.
-/// An absent `passed` field (never gated) is allowed so fresh candidates can shadow.
+/// Rejects models whose persisted gate report recorded `passed = false`.
+/// An absent report is allowed so fresh candidates can shadow.
 pub fn quality_gate_passed_ok(version: &ModelVersionInfo) -> Result<(), String> {
-    match version.quality_gate_report.get("passed") {
-        Some(serde_json::Value::Bool(false)) => {
-            Err("quality gate report recorded passed=false; shadow inference blocked".to_owned())
-        }
-        _ => Ok(()),
+    if version
+        .quality_gate_report
+        .as_ref()
+        .is_some_and(|report| !report.passed)
+    {
+        return Err(
+            "quality gate report recorded passed=false; shadow inference blocked".to_owned(),
+        );
     }
+    Ok(())
 }
 
 /// Whether the config active pointer resolves to a production-published version.
@@ -114,15 +111,46 @@ mod tests {
     use quant_pivot_models::{
         domain::ModelVersionInfo,
         enums::{model::ModelFamily, quant::PublicationStatus},
-        types::{ContentHash, ModelSpecId, ModelVersionId},
+        types::{
+            ContentHash, ModelSpecId, ModelVersionId,
+            model_metrics::ModelVersionMetrics,
+            model_quality::{
+                GateIntent, GateSubject, QUALITY_GATE_REPORT_FORMAT_VERSION, QualityGateReport,
+            },
+            model_training::ModelTrainingObjective,
+        },
     };
-    use quant_pivot_test_support::execution_pg_seed::fixture_profile_ref;
+    use quant_pivot_test_support::{
+        execution_pg_seed::fixture_profile_ref, model_spec_fixtures::model_spec_lineage_fixture,
+    };
 
-    fn version(status: PublicationStatus, report: serde_json::Value) -> ModelVersionInfo {
+    fn report(evaluated_at: chrono::DateTime<Utc>, passed: bool) -> QualityGateReport {
+        QualityGateReport {
+            format_version: QUALITY_GATE_REPORT_FORMAT_VERSION,
+            subject: GateSubject::ModelVersion(ModelVersionId::from_v7()),
+            intent: GateIntent::Publish,
+            evaluated_at,
+            gates: Vec::new(),
+            hard_failures: Vec::new(),
+            soft_warnings: Vec::new(),
+            passed,
+            report_hash: ContentHash::parse(format!("blake3:{}", "1".repeat(64))).expect("hash"),
+        }
+    }
+
+    fn version(
+        status: PublicationStatus,
+        quality_gate_report: Option<QualityGateReport>,
+    ) -> ModelVersionInfo {
+        let (model_spec_thesis, model_spec_definition_hash) =
+            model_spec_lineage_fixture("quality-gate-load-test-spec");
         ModelVersionInfo {
             model_version_id: ModelVersionId::from_v7(),
             model_spec_id: ModelSpecId::from_v7(),
+            model_spec_name: "quality-gate-load-test-spec".to_owned(),
             model_family: ModelFamily::WeightedFactor,
+            model_spec_thesis,
+            model_spec_definition_hash,
             version: 1,
             artifact_hash: ContentHash::parse(format!("blake3:{}", "0".repeat(64))).expect("hash"),
             category_scope: None,
@@ -131,9 +159,15 @@ mod tests {
             trade_policy_artifact_id: None,
             trade_policy_hash: None,
             publish_path_set_id: None,
-            metrics_json: serde_json::json!({}),
-            training_objective_json: serde_json::json!({"kind": "not_trained"}),
-            quality_gate_report: report,
+            derivation_kind: ModelVersionInfo::training_derivation_kind(),
+            parent_model_version_id: None,
+            source_backtest_report_id: None,
+            calibration_artifact_id: None,
+            score_multiplier_calibration_report: None,
+            derivation_evidence_hash: None,
+            metrics: ModelVersionMetrics::not_measured("test fixture"),
+            training_objective: ModelTrainingObjective::hand_authored("test fixture"),
+            quality_gate_report,
             publication_status: status,
             published_at: None,
             retired_at: None,
@@ -145,10 +179,13 @@ mod tests {
     fn published_active_is_exempt_from_staleness() {
         let now = Utc::now();
         let stale = now - Duration::seconds(90_000);
-        let report = serde_json::json!({ "evaluated_at": stale.to_rfc3339() });
         assert!(
-            quality_gate_staleness_ok(&version(PublicationStatus::Published, report), 86_400, now,)
-                .is_ok()
+            quality_gate_staleness_ok(
+                &version(PublicationStatus::Published, Some(report(stale, true))),
+                86_400,
+                now,
+            )
+            .is_ok()
         );
     }
 
@@ -156,52 +193,44 @@ mod tests {
     fn candidate_staleness_is_enforced() {
         let now = Utc::now();
         let stale = now - Duration::seconds(90_000);
-        let report = serde_json::json!({ "evaluated_at": stale.to_rfc3339() });
         assert!(
-            quality_gate_staleness_ok(&version(PublicationStatus::Candidate, report), 86_400, now,)
-                .is_err()
+            quality_gate_staleness_ok(
+                &version(PublicationStatus::Candidate, Some(report(stale, true))),
+                86_400,
+                now,
+            )
+            .is_err()
         );
     }
 
     #[test]
     fn shadow_rejects_failed_gate_report() {
-        let report = serde_json::json!({ "passed": false });
-        assert!(quality_gate_passed_ok(&version(PublicationStatus::Candidate, report,),).is_err());
+        assert!(
+            quality_gate_passed_ok(&version(
+                PublicationStatus::Candidate,
+                Some(report(Utc::now(), false)),
+            ))
+            .is_err()
+        );
     }
 
     #[test]
     fn active_must_be_published() {
         assert!(
-            active_publication_status_ok(&version(
-                PublicationStatus::Retired,
-                serde_json::json!({}),
-            ),)
-            .is_err()
+            active_publication_status_ok(&version(PublicationStatus::Retired, None,),).is_err()
         );
         assert!(
-            active_publication_status_ok(&version(
-                PublicationStatus::Published,
-                serde_json::json!({}),
-            ),)
-            .is_ok()
+            active_publication_status_ok(&version(PublicationStatus::Published, None,),).is_ok()
         );
     }
 
     #[test]
     fn shadow_must_be_candidate_or_shadow() {
         assert!(
-            shadow_publication_status_ok(&version(
-                PublicationStatus::Published,
-                serde_json::json!({}),
-            ),)
-            .is_err()
+            shadow_publication_status_ok(&version(PublicationStatus::Published, None,),).is_err()
         );
         assert!(
-            shadow_publication_status_ok(&version(
-                PublicationStatus::Candidate,
-                serde_json::json!({}),
-            ),)
-            .is_ok()
+            shadow_publication_status_ok(&version(PublicationStatus::Candidate, None,),).is_ok()
         );
     }
 }

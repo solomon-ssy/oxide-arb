@@ -458,7 +458,9 @@ async fn object_payload_hash_drift_is_rejected_before_catalog_commit() {
     let repo = PgCatalogLedgerRepository::new(pool.connection().clone());
     let now = Utc::now();
     let mut invalid = commit(1, now, now, "original");
-    invalid.events[0].object.payload["revision"] = "tampered".into();
+    let mut tampered_payload = (*invalid.events[0].object.payload).clone();
+    tampered_payload["revision"] = "tampered".into();
+    invalid.events[0].object.payload = tampered_payload.into();
 
     let error = repo
         .commit(invalid)
@@ -612,8 +614,9 @@ fn set_market_disposition(
         .markets
         .first_mut()
         .expect("catalog fixture has one market");
-    let mut source = serde_json::from_value::<MarketRegistryInfo>(candidate.object.payload.clone())
-        .expect("decode typed market fixture");
+    let mut source =
+        serde_json::from_value::<MarketRegistryInfo>(candidate.object.payload.clone().into_inner())
+            .expect("decode typed market fixture");
     source.status = status;
     source.filter_reasons = filter_reasons;
     let payload = serde_json::to_value(&source).expect("encode typed market fixture");
@@ -622,7 +625,7 @@ fn set_market_disposition(
             .expect("hash typed market fixture");
     candidate.object.market_object_id = CatalogMarketObjectId::from_content_hash(&content_hash);
     candidate.object.content_hash = content_hash.clone();
-    candidate.object.payload = payload;
+    candidate.object.payload = payload.into();
     candidate.projection = UpsertMarket::from_registry(&source).expect("normalize market fixture");
     candidate.projection.content_hash = content_hash;
 }
@@ -673,7 +676,7 @@ fn event_object_fixture(
             event_object_id,
             content_hash,
             schema_version: CATALOG_OBJECT_SCHEMA_VERSION,
-            payload,
+            payload: payload.into(),
         },
     )
 }
@@ -741,7 +744,7 @@ fn market_object_fixture(
             market_object_id,
             content_hash,
             schema_version: CATALOG_OBJECT_SCHEMA_VERSION,
-            payload,
+            payload: payload.into(),
         },
     )
 }

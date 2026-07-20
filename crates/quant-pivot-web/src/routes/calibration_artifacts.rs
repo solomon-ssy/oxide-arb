@@ -135,7 +135,7 @@ pub async fn fit_bias_table(
         "acting_role": acting_role.0,
         "request_id": request_id.0,
         "reason": reason,
-    }));
+    }))?;
     Ok(WebResponse::accepted(job))
 }
 
@@ -179,7 +179,7 @@ pub async fn fit_model_calibrator(
         "acting_role": acting_role.0,
         "request_id": request_id.0,
         "reason": reason,
-    }));
+    }))?;
     Ok(WebResponse::accepted(job))
 }
 
@@ -231,7 +231,7 @@ pub async fn activate(
         "acting_role": acting_role.0,
         "request_id": request_id.0,
         "reason": reason,
-    }));
+    }))?;
     Ok(WebResponse::ok(CalibrationArtifactDetailView::from(
         activated,
     )))

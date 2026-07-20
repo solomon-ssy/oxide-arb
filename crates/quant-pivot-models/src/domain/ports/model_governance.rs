@@ -13,23 +13,35 @@ use crate::{
         BindCalibrationRequest, BindPublishPathSetRequest, GatePreviewIntent, ModelVersionInfo,
         QualityGateReportView,
     },
-    types::{BacktestReportId, ModelVersionId},
+    types::{BacktestReportId, ModelVersionId, RoleCode, UserId},
 };
 
 /// Who initiated a governance action. Recorded for audit provenance.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GovernanceActor {
+    /// Authenticated internal user identity; absent only for system automation.
+    pub user_id: Option<UserId>,
     /// Operator / service username.
     pub username: String,
     /// Acting role label, when known (recorded for audit provenance).
-    pub role: Option<String>,
+    pub role: Option<RoleCode>,
 }
 
 impl GovernanceActor {
+    #[must_use]
+    pub const fn authenticated(user_id: UserId, username: String, role: RoleCode) -> Self {
+        Self {
+            user_id: Some(user_id),
+            username,
+            role: Some(role),
+        }
+    }
+
     /// A system actor (background job / automation).
     #[must_use]
     pub fn system() -> Self {
         Self {
+            user_id: None,
             username: "system".to_owned(),
             role: None,
         }

@@ -10,6 +10,7 @@ pub struct Model {
     pub shadow_comparison_id: Uuid,
     pub active_model_version_id: Uuid,
     pub shadow_model_version_id: Uuid,
+    pub weight_source: super::sea_orm_active_enums::QpModelWeightSource,
     pub decision_at: DateTimeWithTimeZone,
     pub topn_overlap: Decimal,
     #[sea_orm(column_type = "JsonBinary")]

@@ -24,8 +24,7 @@ use quant_pivot_core::{
 use quant_pivot_models::{
     domain::{
         BacktestPathSetView, CompleteTrainingDatasetBuild, CpcvBacktestPort, DecisionClock,
-        ModelVersionInfo, NewModelSpec, NewTrainingDatasetPlan, NoopProgressSink,
-        RunCpcvBacktestRequest,
+        ModelVersionInfo, NewTrainingDatasetPlan, NoopProgressSink, RunCpcvBacktestRequest,
     },
     entities::{
         market::{Column as MarketColumn, Entity as MarketEntity},
@@ -54,6 +53,10 @@ use quant_pivot_models::{
         POOLED_1H_CONTROL_PROFILE_ID, Probability, SchemaVersion, TokenId, TrainingDatasetId,
         TrainingExampleId, TrainingHorizonsSecs, TrainingSampleSource, TrainingSampleSources, Usd,
         builtin_research_profiles, default_sample_sources,
+        factor::FactorExplanation,
+        model_metrics::{HeldOutMetricKind, ModelVersionMetricsDefinition},
+        model_training::ModelTrainingObjectiveDefinition,
+        stable_name::FeatureName,
     },
 };
 use quant_pivot_repository::{
@@ -70,17 +73,12 @@ use quant_pivot_repository::{
 };
 use quant_pivot_research::{
     artifact::{ArtifactKey, ArtifactNamespace, ArtifactStore, LocalArtifactStore},
-    factors::{
-        FactorEngine, FactorExplanation, FactorValue, NormalizedFactor, names::LIQUIDITY_DEPTH,
-    },
-    features::{
-        FeatureCell, FeatureName, FeatureSchema, FeatureStaleness, FeatureValue, FeatureVector,
-        names,
-    },
+    factors::{FactorEngine, FactorValue, NormalizedFactor, names::LIQUIDITY_DEPTH},
+    features::{FeatureCell, FeatureSchema, FeatureStaleness, FeatureValue, FeatureVector, names},
     hashing::ResearchHasher,
     model::{
         CalibrationArtifactLoader, DefaultModelRuntimeFactoryBuilder, LabelSelector, ModelArtifact,
-        ModelRuntimeFactoryBuilder, TrainingObjectiveSpec,
+        ModelRuntimeFactoryBuilder, objective::training_objective_from_runtime_config,
     },
     selection::SelectedMarket,
     training::{
@@ -409,18 +407,16 @@ async fn seed_runtime_config(db: &DatabaseConnection) -> DecisionPolicySnapshotI
 async fn seed_model_spec(db: &DatabaseConnection) -> ModelSpecId {
     let id = ModelSpecId::from_v7();
     PgModelRegistryRepository::new(db.clone())
-        .create_model_spec(NewModelSpec {
-            model_spec_id: id.clone(),
-            name: "train-backtest-e2e".to_owned(),
-            model_family: ModelFamily::WeightedFactor,
-            prediction_horizon_secs: 86_400,
-            feature_schema_version: SchemaVersion::FIRST,
-            label_schema_version: SchemaVersion::FIRST,
-            spec_json: serde_json::json!({}),
-            input_contract: ModelInputContract::single_required("book.mid"),
-            training_contract: ModelTrainingContract::settlement_default(),
-            status: PublicationStatus::Published,
-        })
+        .create_model_spec(
+            quant_pivot_test_support::model_spec_fixtures::new_model_spec_fixture(
+                id.clone(),
+                "train-backtest-e2e",
+                ModelFamily::WeightedFactor,
+                86_400,
+                ModelInputContract::single_required("book.mid"),
+                ModelTrainingContract::settlement_default(),
+            ),
+        )
         .await
         .expect("model spec");
     id
@@ -502,7 +498,7 @@ async fn seed_dataset(
     let profile_ref = builtin_research_profiles()
         .expect("built-in research profiles")
         .into_iter()
-        .find(|profile| profile.profile_ref.id == POOLED_1H_CONTROL_PROFILE_ID)
+        .find(|profile| profile.profile_ref.id.as_str() == POOLED_1H_CONTROL_PROFILE_ID)
         .expect("pooled research profile")
         .profile_ref;
     let research_program_hash = content_hash('p');
@@ -520,6 +516,12 @@ async fn seed_dataset(
     )
     .await
     .expect("persist replayable Source Slice");
+    let model_spec_definition_hash = PgModelRegistryRepository::new(db.clone())
+        .find_model_spec_by_id(model_spec_id)
+        .await
+        .expect("model spec lookup")
+        .expect("model spec")
+        .definition_hash;
     let manifest = DatasetManifest {
         format_version: DATASET_ARTIFACT_FORMAT_VERSION,
         training_dataset_id: dataset_id.clone(),
@@ -527,6 +529,7 @@ async fn seed_dataset(
         research_program_hash,
         source_slice,
         model_spec_id: model_spec_id.clone(),
+        model_spec_definition_hash: model_spec_definition_hash.clone(),
         trade_policy_artifact_id: None,
         trade_policy_hash: None,
         decision_policy_snapshot_id: rc_id.clone(),
@@ -556,6 +559,7 @@ async fn seed_dataset(
         .create_plan(NewTrainingDatasetPlan {
             training_dataset_id: dataset_id.clone(),
             model_spec_id: model_spec_id.clone(),
+            model_spec_definition_hash,
             window_start,
             window_end,
             purpose: DatasetPurpose::Training,
@@ -601,7 +605,7 @@ fn trainer_config() -> ModelTrainerConfig {
     ModelTrainerConfig {
         factors: replay.factors,
         // Same path as the production port: parse frozen `research.training`.
-        objective: TrainingObjectiveSpec::from_runtime_config(
+        objective: training_objective_from_runtime_config(
             &runtime.profile_artifacts.research_method.research.training,
         )
         .expect("parse research.training"),
@@ -695,55 +699,38 @@ fn weighted_train_input(
 
 fn assert_weighted_train_metrics(version: &ModelVersionInfo) {
     assert_eq!(version.publication_status, PublicationStatus::Candidate);
+    let ModelTrainingObjectiveDefinition::LearningToRank { spec } =
+        &version.training_objective.definition
+    else {
+        panic!("weighted training must persist a learning-to-rank objective");
+    };
+    assert_eq!(spec.rank_loss, RankLossKind::RankIcWeightedRanknet);
+    assert_eq!(spec.optimizer, TrainingOptimizerKind::CoordinateSearch);
+    assert_eq!(spec.ndcg_k, 5);
+    assert_eq!(spec.pseudo_top_n, 3);
+    let ModelVersionMetricsDefinition::LearningToRank {
+        in_sample,
+        validation,
+        ..
+    } = &version.metrics.definition
+    else {
+        panic!("weighted training must persist learning-to-rank metrics");
+    };
     assert_eq!(
-        version.training_objective_json["rank_loss"],
-        serde_json::json!("rank_ic_weighted_ranknet")
+        validation.held_out_metric,
+        HeldOutMetricKind::NegativeTotalLearningToRankLoss
     );
-    assert_eq!(
-        version.training_objective_json["optimizer"],
-        serde_json::json!("coordinate_search")
-    );
-    assert_eq!(
-        version.training_objective_json["ndcg_k"],
-        serde_json::json!(5)
-    );
-    assert_eq!(
-        version.training_objective_json["pseudo_top_n"],
-        serde_json::json!(3)
-    );
-    assert_eq!(
-        version.metrics_json["validation"]["held_out_metric"],
-        serde_json::json!("neg_total_ltr_loss")
-    );
-    assert!(
-        version.metrics_json["validation"]["dropped_singleton_groups"].is_number(),
-        "dropped_singleton_groups must be present: {}",
-        version.metrics_json
-    );
-    assert!(
-        version.metrics_json["in_sample"]["diagnostics"]["mean_rank_ic"].is_string()
-            || version.metrics_json["in_sample"]["diagnostics"]["mean_rank_ic"].is_number(),
-        "in-sample Rank IC diagnostic must be present: {}",
-        version.metrics_json
-    );
-    assert_eq!(
-        version.metrics_json["in_sample"]["diagnostics"]["ndcg_k"],
-        serde_json::json!(5),
-        "diagnostics must honor runtime-config ndcg_k"
-    );
-    assert!(
-        version.metrics_json["validation"]["held_out_diagnostics"]["mean_ndcg_at_k"].is_string()
-            || version.metrics_json["validation"]["held_out_diagnostics"]["mean_ndcg_at_k"]
-                .is_number(),
-        "held-out NDCG diagnostic must be present: {}",
-        version.metrics_json
-    );
-    assert!(
-        version.metrics_json["validation"]["held_out_objective"].is_string()
-            || version.metrics_json["validation"]["held_out_objective"].is_number(),
-        "held_out_objective must be present: {}",
-        version.metrics_json
-    );
+    assert!(validation.dropped_singleton_groups <= validation.sample_count);
+    let in_sample_diagnostics = in_sample
+        .diagnostics
+        .as_ref()
+        .expect("weighted training must persist in-sample ranking diagnostics");
+    assert_eq!(in_sample_diagnostics.ndcg_k, 5);
+    let held_out_diagnostics = validation
+        .held_out_diagnostics
+        .as_ref()
+        .expect("weighted training must persist held-out ranking diagnostics");
+    assert_eq!(held_out_diagnostics.ndcg_k, 5);
 }
 
 async fn assert_artifact_politics_scope(
@@ -898,11 +885,12 @@ async fn train_then_cpcv_persists_path_set_with_dsr_n_decomposition() {
         .await
         .expect("train");
     let version = outcome.version;
-    let coord_n = version
-        .metrics_json
-        .pointer("/validation/coord_search_effective_n")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(0);
+    let ModelVersionMetricsDefinition::LearningToRank { validation, .. } =
+        &version.metrics.definition
+    else {
+        panic!("weighted training must persist learning-to-rank metrics");
+    };
+    let coord_n = validation.coordinate_search_effective_trials;
     assert!(
         coord_n >= 1,
         "trainer must persist coord_search_effective_n ≥ 1, got {coord_n}"
@@ -942,7 +930,7 @@ async fn assert_cpcv_view_and_bind(
     version: &ModelVersionInfo,
     view: &BacktestPathSetView,
     path_set_id: &BacktestPathSetId,
-    coord_n: u64,
+    coord_n: u32,
 ) {
     assert_eq!(view.path_set_id, *path_set_id);
     assert_eq!(
@@ -951,7 +939,7 @@ async fn assert_cpcv_view_and_bind(
     );
     assert_eq!(
         view.coord_search_effective_n,
-        i64::try_from(coord_n).unwrap_or(0),
+        i64::from(coord_n),
         "coord_search_effective_n is audit-only and must still be persisted"
     );
     assert_eq!(view.path_count, 3);

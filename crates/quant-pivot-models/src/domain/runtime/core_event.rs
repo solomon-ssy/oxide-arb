@@ -15,7 +15,7 @@ use crate::{
     },
     types::{
         ConditionTruth, ContentHash, EntryConditionInstanceId, MarketId, RecommendationReportId,
-        ReportRunId,
+        ReportRunId, ResearchProfileId,
     },
 };
 use chrono::{DateTime, Utc};
@@ -75,7 +75,7 @@ impl ReportEventKind {
 pub struct ReportLifecycleEvent {
     pub event: ReportEventKind,
     pub recommendation_report_id: String,
-    pub profile_id: String,
+    pub profile_id: ResearchProfileId,
     pub report_kind: ReportKind,
     pub runtime_mode: QuantRuntimeMode,
     pub status: RecommendationReportStatus,

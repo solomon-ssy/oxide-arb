@@ -12,6 +12,7 @@ use crate::{
     },
     fact_sink::DiscardFactWriter,
     factor_governance::publish_all_factor_definitions,
+    model_spec_fixtures::new_model_spec_fixture,
     pit::InMemoryDecisionSnapshotSource,
     policy_fixtures::bootstrap_policy_bundle,
     report_fixtures,
@@ -62,10 +63,10 @@ use quant_pivot_models::{
         BasisAlertInfo, BasisAlertListQuery, ClaimReportSchedule, CoreEventPublisher,
         DecisionBoundary, MarketLinkageInfo, MarketLinkageListQuery, NewAccountSnapshot,
         NewBasisAlert, NewEntryConditionInstance, NewEquitySnapshot, NewFeatureParityState,
-        NewMarketLinkage, NewMarketSelection, NewModelRun, NewModelSpec, NewModelVersion,
-        NewOperationLog, NewPortfolioPlan, NewRecommendation, NewRecommendationReport,
-        NewReportDataQualitySnapshot, NewReportTransaction, Paginated, RecommendationInfo,
-        RecommendationReportInfo, ReportRunClaimConfig,
+        NewMarketLinkage, NewMarketSelection, NewModelRun, NewModelVersion, NewOperationLog,
+        NewPortfolioPlan, NewRecommendation, NewRecommendationReport, NewReportDataQualitySnapshot,
+        NewReportTransaction, Paginated, RecommendationInfo, RecommendationReportInfo,
+        ReportRunClaimConfig,
         governance::lifecycle::OperationalPhase,
         market::{EventRegistryInfo, MarketRegistryInfo, TokenInfo, book::BookLevel},
     },
@@ -76,7 +77,7 @@ use quant_pivot_models::{
         factor::FactorFamily,
         market::{EventStatus, MarketStatus},
         model::ModelFamily,
-        operation_log::{OperationCategory, OperationOutcome},
+        operation_log::{OperationCategory, OperationHttpMethod, OperationOutcome},
         quant::{
             DownsideSource, EntryConditionState, FeatureParityLatchState,
             FeatureParityStateTransition, ModelRunKind, ModelRunStatus, OutcomeSide,
@@ -94,10 +95,11 @@ use quant_pivot_models::{
         DomainInstrumentKey, EntryConditionFoldState, EntryConditionInstanceId, EntryConditionPlan,
         EventId, ExposureBreakdown, FeatureParityStateId, MarketId, MarketLinkageId,
         MarketSelectionId, ModelInputContract, ModelRunId, ModelSpecId, ModelTrainingContract,
-        ModelVersionId, OperationLogId, PortfolioConstraintsSnapshot, PortfolioOptimizerMeta,
-        PortfolioRejectedSummary, PortfolioRiskBudget, Price, RecommendationId,
-        RecommendationReportId, RecommendationTradePlan, ReportDataQualityTokens,
-        ResearchProfileRef, SchemaVersion, SelectionExclusionSummary, Shares, TokenId, Usd,
+        ModelVersionId, OperationDetailDocument, OperationLogId, PortfolioConstraintsSnapshot,
+        PortfolioOptimizerMeta, PortfolioRejectedSummary, PortfolioRiskBudget, Price,
+        RecommendationId, RecommendationReportId, RecommendationTradePlan, ReportDataQualityTokens,
+        ResearchProfileRef, SelectionExclusionSummary, Shares, TokenId, Usd, WorkerId,
+        model_metrics::ModelVersionMetrics, model_training::ModelTrainingObjective,
     },
 };
 use quant_pivot_repository::{
@@ -242,7 +244,7 @@ impl ReportPipelineHarness {
                     StorageError::not_found("quant_recommendation_report", report_id).into()
                 });
         }
-        let worker_id = uuid::Uuid::now_v7();
+        let worker_id = WorkerId::from_v7();
         let run = self
             .report_run_repo
             .claim_next_run(
@@ -265,11 +267,11 @@ impl ReportPipelineHarness {
                 )
             })?;
         let prepared = self.lifecycle.execute_claimed(run).await?;
-        let delivery_worker = uuid::Uuid::now_v7();
+        let delivery_worker = WorkerId::from_v7();
         let now = Utc::now();
         let claimed = self
             .report_repo
-            .claim_fact_delivery(delivery_worker, 60)
+            .claim_fact_delivery(delivery_worker.clone(), 60)
             .await?
             .ok_or_else(|| {
                 StorageError::state_conflict(
@@ -815,7 +817,6 @@ async fn seed_fixture_model_run(
             status: ModelRunStatus::Succeeded,
             input_hash,
             output_hash: Some(output_hash),
-            metrics_json: serde_json::json!({"fixture": "web_report"}),
             error_code: None,
             error_message: None,
             started_at: decision_at,
@@ -1019,8 +1020,7 @@ fn fixture_portfolio_plan(report: &RecommendationReportInfo) -> NewPortfolioPlan
 fn fixture_new_report(report: &RecommendationReportInfo) -> NewRecommendationReport {
     NewRecommendationReport {
         recommendation_report_id: report.recommendation_report_id.clone(),
-        profile_id: report.profile_id.clone(),
-        profile_ref: report.profile_ref.clone(),
+        research_profile_artifact_id: report.profile_ref.artifact_id(),
         report_kind: report.report_kind,
         decision_at: report.decision_at,
         horizon_secs: report.horizon_secs,
@@ -1052,7 +1052,7 @@ fn fixture_new_report(report: &RecommendationReportInfo) -> NewRecommendationRep
 fn fixture_new_recommendation(rec: RecommendationInfo) -> NewRecommendation {
     NewRecommendation {
         recommendation_id: rec.recommendation_id,
-        profile_ref: rec.profile_ref,
+        research_profile_artifact_id: rec.profile_ref.artifact_id(),
         recommendation_report_id: rec.recommendation_report_id,
         rank: rec.rank,
         market_id: rec.market_id,
@@ -1083,22 +1083,23 @@ fn fixture_new_recommendation(rec: RecommendationInfo) -> NewRecommendation {
 fn fixture_publish_operation_log(report: &RecommendationReportInfo) -> NewOperationLog {
     NewOperationLog {
         id: OperationLogId::from_v7(),
-        request_id: format!("fixture:{}", report.recommendation_report_id),
+        request_id: format!("fixture:{}", report.recommendation_report_id).into(),
         actor_user_id: None,
         actor_username: Some("fixture".to_owned()),
-        acting_role: Some("test".to_owned()),
+        acting_role: Some("test".into()),
         category: OperationCategory::QuantReport,
-        action: "publish".to_owned(),
+        action: "publish".into(),
         resource_type: Some(ResourceType::QuantReport),
         resource_id: Some(report.recommendation_report_id.to_string()),
-        http_method: "SYSTEM".to_owned(),
+        http_method: OperationHttpMethod::System,
         http_path: "/test/quant/report".to_owned(),
         http_status: 201,
         outcome: OperationOutcome::Success,
         client_ip: None,
         user_agent: None,
         latency_ms: 0,
-        detail: serde_json::json!({ "fixture": true }),
+        detail: OperationDetailDocument::try_from(serde_json::json!({ "fixture": true }))
+            .expect("static operation detail"),
         before_hash: None,
         after_hash: None,
         governance_audit_event_id: None,
@@ -1565,10 +1566,21 @@ async fn publish_weighted_model(input: &WeightedModelFixture<'_>) {
     let input_contract = ModelInputContract::single_required("book.mid");
     let input_contract_hash =
         model_input_contract_hash(&input_contract).expect("input contract hash");
+    let model_spec_id = ModelSpecId::from_v7();
+    let spec = new_model_spec_fixture(
+        model_spec_id.clone(),
+        "report-pipeline-e2e",
+        ModelFamily::WeightedFactor,
+        86_400,
+        input_contract.clone(),
+        ModelTrainingContract::settlement_default(),
+    );
+    let model_spec_definition_hash = spec.definition_hash.clone();
 
     let artifact = ModelArtifact::WeightedFactor(Box::new(WeightedFactorModelArtifact {
         header: ModelArtifactHeader {
             model_version_id: input.model_version_id.clone(),
+            model_spec_definition_hash,
             profile_ref: fixture_profile_ref(),
             model_family: ModelFamily::WeightedFactor,
             feature_schema_hash,
@@ -1607,22 +1619,7 @@ async fn publish_weighted_model(input: &WeightedModelFixture<'_>) {
         .expect("store artifact");
 
     let registry = PgModelRegistryRepository::new(input.db.clone());
-    let model_spec_id = ModelSpecId::from_v7();
-    registry
-        .create_model_spec(NewModelSpec {
-            model_spec_id: model_spec_id.clone(),
-            name: "report-pipeline-e2e".to_owned(),
-            model_family: ModelFamily::WeightedFactor,
-            prediction_horizon_secs: 86_400,
-            feature_schema_version: SchemaVersion::FIRST,
-            label_schema_version: SchemaVersion::FIRST,
-            spec_json: serde_json::json!({}),
-            input_contract,
-            training_contract: ModelTrainingContract::settlement_default(),
-            status: PublicationStatus::Published,
-        })
-        .await
-        .expect("create spec");
+    registry.create_model_spec(spec).await.expect("create spec");
     registry
         .create_model_version(NewModelVersion {
             model_version_id: input.model_version_id.clone(),
@@ -1637,9 +1634,10 @@ async fn publish_weighted_model(input: &WeightedModelFixture<'_>) {
                 .map(|policy| policy.artifact_id.clone()),
             trade_policy_hash: trade_policy.map(|policy| policy.artifact_hash),
             publish_path_set_id: None,
-            metrics_json: serde_json::json!({}),
-            training_objective_json: serde_json::json!({"kind": "not_trained"}),
-            quality_gate_report: serde_json::json!({}),
+            derivation: NewModelVersion::training_derivation(),
+            metrics: ModelVersionMetrics::not_measured("test fixture"),
+            training_objective: ModelTrainingObjective::hand_authored("test fixture"),
+            quality_gate_report: None,
             publication_status: PublicationStatus::Published,
             published_at: Some(Utc::now()),
             retired_at: None,

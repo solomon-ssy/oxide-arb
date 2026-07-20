@@ -20,7 +20,13 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     enums::model::ModelFamily,
-    types::{ContentHash, ModelVersionId, Probability},
+    types::{
+        Probability,
+        model_quality::{
+            GateClass, GateId, GateIntent, GateOutcome, GateStatus, GateSubject,
+            QUALITY_GATE_REPORT_FORMAT_VERSION, QualityGateFailure, QualityGateReport,
+        },
+    },
 };
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -32,249 +38,6 @@ use crate::{
     precision::RESEARCH_DECIMAL_SCALE,
     training::{DatasetCoverage, LeakageFindings},
 };
-
-/// What a gate evaluation is gating. Dataset integrity is evaluated
-/// deterministically during materialization and is not a governance action.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "kind", content = "id")]
-pub enum GateSubject {
-    /// A model version under candidate / publish / auto evaluation.
-    ModelVersion(ModelVersionId),
-}
-
-impl GateSubject {
-    /// The subject id rendered as a string (for error / audit context).
-    #[must_use]
-    pub fn id_string(&self) -> String {
-        match self {
-            Self::ModelVersion(id) => id.to_string(),
-        }
-    }
-
-    /// The subject kind label (for error / audit context).
-    #[must_use]
-    pub const fn kind(&self) -> &'static str {
-        match self {
-            Self::ModelVersion(_) => "model_version",
-        }
-    }
-}
-
-/// What a gate evaluation is gating: each intent selects the applicable hard gates.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum GateIntent {
-    /// Register a trained model as a candidate (coverage + leakage + backtest).
-    Candidate,
-    /// Publish a model version (adds shadow overlap stability).
-    Publish,
-    /// Evaluate readiness for auto-execution (adds liquidity-exit feasibility).
-    AutoExecution,
-}
-
-impl GateIntent {
-    /// Whether this intent requires shadow overlap stability (publish / auto).
-    #[must_use]
-    pub const fn requires_shadow_stability(self) -> bool {
-        matches!(self, Self::Publish | Self::AutoExecution)
-    }
-
-    /// Whether this intent requires liquidity-exit feasibility (auto only).
-    #[must_use]
-    pub const fn requires_liquidity_feasibility(self) -> bool {
-        matches!(self, Self::AutoExecution)
-    }
-
-    /// Whether this intent requires a persisted backtest report.
-    #[must_use]
-    pub const fn requires_backtest(self) -> bool {
-        matches!(self, Self::Candidate | Self::Publish | Self::AutoExecution)
-    }
-
-    /// Stable `snake_case` wire name (matches the serde representation).
-    #[must_use]
-    pub const fn wire_name(self) -> &'static str {
-        match self {
-            Self::Candidate => "candidate",
-            Self::Publish => "publish",
-            Self::AutoExecution => "auto_execution",
-        }
-    }
-}
-
-/// Stable, queryable identity of one gate. Append-only wire labels.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum GateId {
-    /// Resolved sample count (hard).
-    SampleCount,
-    /// Fraction of labels resolved (hard).
-    LabelCoverage,
-    /// Fraction of planned samples materialized (hard).
-    MaterializationCoverage,
-    /// No point-in-time leakage (hard).
-    NoPitLeakage,
-    /// Maximum drawdown within budget (hard, backtest intents).
-    MaxDrawdown,
-    /// Liquidity-exit feasibility (hard, auto-execution only).
-    LiquidityExitFeasible,
-    /// Shadow overlap stability (hard, publish / auto).
-    ShadowOverlapStability,
-    /// A frozen backtest report must exist (hard, model intents with backtest metrics).
-    BacktestRequired,
-    /// A persisted CPCV path set must exist (hard, model intents with backtest metrics).
-    CpcvRequired,
-    /// Rank information coefficient from the CPCV path-set median (hard).
-    RankIc,
-    /// Deflated Sharpe Ratio significance (hard).
-    DeflatedSharpe,
-    /// Probability of Backtest Overfitting (hard).
-    Pbo,
-    /// Minimum track record length advisory (soft).
-    MinTrackRecordLength,
-    /// Single-path turnover budget (hard, risk/execution realism).
-    TurnoverBudget,
-    /// Single-path tail-loss floor in bps (hard, risk/execution realism).
-    TailLossBudget,
-    /// Sell CPCV model median calendar return must beat exit-at-first baseline.
-    SellBaselineUplift,
-    /// Directional hit rate (soft).
-    HitRate,
-    /// Per-category concentration within budget (soft).
-    CategoryConcentration,
-    /// `ExitDecision` L2 book fidelity ratio (hard, sell family).
-    SellL2BookFidelity,
-    /// `ExitDecision` microstructure fallback ratio (hard, sell family).
-    SellFallbackRatio,
-    /// The return model must be `Calibrated` (hard, Buy family, publish/auto;
-    /// Phase 11.3 #5/#13 fail-closed).
-    CalibrationRequired,
-}
-
-impl GateId {
-    /// Stable `snake_case` wire name (matches the serde representation).
-    #[must_use]
-    pub const fn wire_name(self) -> &'static str {
-        match self {
-            Self::SampleCount => "sample_count",
-            Self::LabelCoverage => "label_coverage",
-            Self::MaterializationCoverage => "materialization_coverage",
-            Self::NoPitLeakage => "no_pit_leakage",
-            Self::MaxDrawdown => "max_drawdown",
-            Self::LiquidityExitFeasible => "liquidity_exit_feasible",
-            Self::ShadowOverlapStability => "shadow_overlap_stability",
-            Self::BacktestRequired => "backtest_required",
-            Self::CpcvRequired => "cpcv_required",
-            Self::RankIc => "rank_ic",
-            Self::DeflatedSharpe => "deflated_sharpe",
-            Self::Pbo => "pbo",
-            Self::MinTrackRecordLength => "min_track_record_length",
-            Self::TurnoverBudget => "turnover_budget",
-            Self::TailLossBudget => "tail_loss_budget",
-            Self::SellBaselineUplift => "sell_baseline_uplift",
-            Self::HitRate => "hit_rate",
-            Self::CategoryConcentration => "category_concentration",
-            Self::SellL2BookFidelity => "sell_l2_book_fidelity",
-            Self::SellFallbackRatio => "sell_fallback_ratio",
-            Self::CalibrationRequired => "calibration_required",
-        }
-    }
-}
-
-/// One failed gate, carrying the observed value and the threshold it missed.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct QualityGateFailure {
-    /// Which gate failed.
-    pub gate: GateId,
-    /// The observed value (rendered).
-    pub observed: String,
-    /// The threshold the observed value missed (rendered).
-    pub threshold: String,
-    /// Human-readable failure detail.
-    pub detail: String,
-}
-
-/// Whether a gate blocks the advance (`Hard`) or is advisory only (`Soft`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum GateClass {
-    /// A blocking gate — any failure denies the advance.
-    Hard,
-    /// An advisory gate — a miss is recorded as a warning, never blocking.
-    Soft,
-}
-
-impl GateClass {
-    /// Stable `snake_case` wire name (matches the serde representation).
-    #[must_use]
-    pub const fn wire_name(self) -> &'static str {
-        match self {
-            Self::Hard => "hard",
-            Self::Soft => "soft",
-        }
-    }
-}
-
-/// The evaluated state of one gate against its threshold.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum GateStatus {
-    /// The gate cleared its threshold.
-    Pass,
-    /// A hard gate missed its threshold (blocking).
-    Fail,
-    /// A soft gate missed its threshold (advisory).
-    Warn,
-    /// The gate does not apply to the evaluated intent (e.g. shadow stability
-    /// under a `Candidate` evaluation).
-    NotApplicable,
-}
-
-impl GateStatus {
-    /// Stable `snake_case` wire name (matches the serde representation).
-    #[must_use]
-    pub const fn wire_name(self) -> &'static str {
-        match self {
-            Self::Pass => "pass",
-            Self::Fail => "fail",
-            Self::Warn => "warn",
-            Self::NotApplicable => "not_applicable",
-        }
-    }
-}
-
-/// One evaluated gate — the complete, self-describing scorecard row.
-///
-/// Unlike [`QualityGateFailure`] (only failures / warnings), this records
-/// *every* gate the evaluation touched, including passing and not-applicable
-/// ones, so a UI can render the full readiness picture.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GateOutcome {
-    /// Which gate this row describes.
-    pub gate: GateId,
-    /// Whether the gate is blocking (`Hard`) or advisory (`Soft`).
-    pub class: GateClass,
-    /// The evaluated state.
-    pub status: GateStatus,
-    /// The observed value (rendered).
-    pub observed: String,
-    /// The threshold compared against (rendered).
-    pub threshold: String,
-    /// Human-readable description of the failing/advisory condition.
-    pub detail: String,
-}
-
-impl GateOutcome {
-    /// Project a failing / warning outcome onto the legacy failure shape.
-    fn as_failure(&self) -> QualityGateFailure {
-        QualityGateFailure {
-            gate: self.gate,
-            observed: self.observed.clone(),
-            threshold: self.threshold.clone(),
-            detail: self.detail.clone(),
-        }
-    }
-}
 
 /// Accumulator that records every evaluated gate as a [`GateOutcome`].
 ///
@@ -524,28 +287,6 @@ pub struct QualityGateInput {
     pub return_model_calibrated: bool,
 }
 
-/// A content-addressed, persisted quality-gate evaluation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct QualityGateReport {
-    /// Subject evaluated (model version or training dataset).
-    pub subject: GateSubject,
-    /// Intent the evaluation gated.
-    pub intent: GateIntent,
-    /// When the gate ran (drives the load-time staleness deny).
-    pub evaluated_at: DateTime<Utc>,
-    /// Every evaluated gate (pass / fail / warn / not-applicable) — the complete
-    /// scorecard. `hard_failures` / `soft_warnings` are derived projections.
-    pub gates: Vec<GateOutcome>,
-    /// Hard gate failures (any ⇒ `passed = false`).
-    pub hard_failures: Vec<QualityGateFailure>,
-    /// Soft gate warnings (never blocking).
-    pub soft_warnings: Vec<QualityGateFailure>,
-    /// Whether every hard gate cleared.
-    pub passed: bool,
-    /// Content hash over the decision (excludes `evaluated_at`).
-    pub report_hash: ContentHash,
-}
-
 /// Canonical, time-free projection of a report for content addressing.
 #[derive(Serialize)]
 struct ReportHashInput<'a> {
@@ -622,6 +363,7 @@ impl ModelQualityGate for DefaultModelQualityGate {
             passed,
         })?;
         let report = QualityGateReport {
+            format_version: QUALITY_GATE_REPORT_FORMAT_VERSION,
             subject: input.subject,
             intent: input.intent,
             evaluated_at: Utc::now(),
@@ -1173,12 +915,13 @@ mod tests {
         types::{
             BacktestReportId, ContentHash, DecisionPolicySnapshotId, MarketId, ModelVersionId,
             Probability, TokenId,
+            backtest::{ExpectedVsRealized, PnlSimulation},
         },
     };
     use rust_decimal_macros::dec;
 
     use crate::{
-        backtest::{BacktestReport, ExpectedVsRealized, PnlSimulation},
+        backtest::BacktestReport,
         gates::ModelQualityGate,
         training::{DatasetCoverage, LeakageFindings, LeakageViolation},
     };

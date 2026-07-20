@@ -177,7 +177,7 @@ impl CoreExecutionDispatcher {
         intent: &OrderIntentInfo,
         now: DateTime<Utc>,
     ) -> QuantResult<(RecommendationInfo, EntryConditionClaim, PreparedVenueOrder)> {
-        let input = match self.deps.admission_builder.build(intent, now).await {
+        let input = match Box::pin(self.deps.admission_builder.build(intent, now)).await {
             Ok(input) => input,
             Err(error) => return Err(error),
         };

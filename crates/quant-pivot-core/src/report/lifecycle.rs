@@ -5,6 +5,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use quant_pivot_error::{
     QuantError, QuantResult,
+    infra::InfraError,
     report::ReportError,
     storage::{StorageError, entity},
 };
@@ -14,11 +15,14 @@ use quant_pivot_models::{
         ReportFactDeliveryInfo, ReportRunClaim, ReportRunInfo,
     },
     enums::{
-        operation_log::{OperationCategory, OperationOutcome},
+        operation_log::{OperationCategory, OperationHttpMethod, OperationOutcome},
         quant::{RecommendationReportStatus, ReportRunStatus, ReportTriggerKind},
         rbac::ResourceType,
     },
-    types::{OperationLogId, RecommendationId, RecommendationReportId, ReportRunId},
+    types::{
+        OperationDetailDocument, OperationLogId, RecommendationId, RecommendationReportId,
+        ReportRunId,
+    },
 };
 use quant_pivot_repository::traits::{
     RecommendationReportRepository, RecommendationRepository, ReportRunRepository,
@@ -128,7 +132,7 @@ impl ReportLifecycleService {
             trigger_kind: ReportTriggerKind::AdHoc,
             trigger_key: format!("ad_hoc:{request_id}"),
             schedule_id: None,
-            request_id: Some(request_id),
+            request_id: Some(request_id.into()),
             retry_of_run_id: None,
             scheduled_for: None,
             requested_at: request.trigger_time,
@@ -180,7 +184,7 @@ impl ReportLifecycleService {
                 request.source_run_id, request.request_id
             ),
             schedule_id: None,
-            request_id: Some(request.request_id),
+            request_id: Some(request.request_id.into()),
             retry_of_run_id: Some(request.source_run_id),
             scheduled_for: None,
             requested_at: request.requested_at,
@@ -233,7 +237,7 @@ impl ReportLifecycleService {
                 report_id,
                 reason,
                 revoked_at,
-                lifecycle_operation_log("revoke", report_id, reason),
+                lifecycle_operation_log("revoke", report_id, reason)?,
             )
             .await?;
         self.publisher.publish_revoked(&report);
@@ -270,7 +274,7 @@ impl ReportLifecycleService {
                     report_id,
                     reason,
                     occurred_at,
-                    lifecycle_operation_log("parity_containment", report_id, reason),
+                    lifecycle_operation_log("parity_containment", report_id, reason)?,
                 )
                 .await
             {
@@ -316,7 +320,7 @@ impl ReportLifecycleService {
 
         let mut expired = 0_u32;
         for recommendation_id in due {
-            let log = recommendation_operation_log(&recommendation_id, "ttl_expired");
+            let log = recommendation_operation_log(&recommendation_id, "ttl_expired")?;
             match self
                 .recommendation_repo
                 .expire(&recommendation_id, now, log)
@@ -374,13 +378,16 @@ impl ReportLifecycleService {
         report_id: &RecommendationReportId,
         now: DateTime<Utc>,
     ) -> bool {
+        let log = match lifecycle_operation_log("expire", report_id, "ttl_expired") {
+            Ok(log) => log,
+            Err(error) => {
+                tracing::error!(%error, %report_id, "report expiry audit detail is invalid");
+                return false;
+            }
+        };
         match self
             .report_repo
-            .roll_up_to_expired(
-                report_id,
-                now,
-                lifecycle_operation_log("expire", report_id, "ttl_expired"),
-            )
+            .roll_up_to_expired(report_id, now, log)
             .await
         {
             Ok(Some(report)) => {
@@ -455,7 +462,7 @@ impl ReportLifecycleService {
     }
 
     pub(crate) async fn fail_claimed_run(&self, run: &ReportRunInfo, error: &QuantError) {
-        let Some(worker_id) = run.lease_owner else {
+        let Some(worker_id) = run.lease_owner.clone() else {
             return;
         };
         let summary = durable_report_error_summary(error);
@@ -491,6 +498,7 @@ fn build_request_from_claimed_run(
         })?;
     let lease_owner = run
         .lease_owner
+        .clone()
         .ok_or_else(|| ReportError::InvariantViolation {
             stage: "report_run_claim",
             detail: "Running report run has no lease_owner".to_owned(),
@@ -559,60 +567,71 @@ fn build_request_from_claimed_run(
 fn recommendation_operation_log(
     recommendation_id: &RecommendationId,
     reason: &str,
-) -> NewOperationLog {
-    NewOperationLog {
+) -> QuantResult<NewOperationLog> {
+    Ok(NewOperationLog {
         id: OperationLogId::from_v7(),
-        request_id: format!("quant-recommendation:expire:{recommendation_id}"),
+        request_id: format!("quant-recommendation:expire:{recommendation_id}").into(),
         actor_user_id: None,
         actor_username: Some("system".to_owned()),
-        acting_role: Some("report_lifecycle".to_owned()),
+        acting_role: Some("report_lifecycle".into()),
         category: OperationCategory::QuantReport,
-        action: "recommendation.expire".to_owned(),
+        action: "recommendation.expire".into(),
         resource_type: Some(ResourceType::QuantReport),
         resource_id: Some(recommendation_id.to_string()),
-        http_method: "SYSTEM".to_owned(),
+        http_method: OperationHttpMethod::System,
         http_path: format!("/system/quant/recommendation/{recommendation_id}/expire"),
         http_status: 200,
         outcome: OperationOutcome::Success,
         client_ip: None,
         user_agent: None,
         latency_ms: 0,
-        detail: serde_json::json!({ "reason": reason }),
+        detail: operation_detail(reason)?,
         before_hash: None,
         after_hash: None,
         governance_audit_event_id: None,
         governance_audit_sequence: None,
-    }
+    })
 }
 
 fn lifecycle_operation_log(
     action: &str,
     report_id: &RecommendationReportId,
     reason: &str,
-) -> NewOperationLog {
-    NewOperationLog {
+) -> QuantResult<NewOperationLog> {
+    Ok(NewOperationLog {
         id: OperationLogId::from_v7(),
-        request_id: format!("quant-report:{action}:{report_id}"),
+        request_id: format!("quant-report:{action}:{report_id}").into(),
         actor_user_id: None,
         actor_username: Some("system".to_owned()),
-        acting_role: Some("report_lifecycle".to_owned()),
+        acting_role: Some("report_lifecycle".into()),
         category: OperationCategory::QuantReport,
-        action: action.to_owned(),
+        action: action.into(),
         resource_type: Some(ResourceType::QuantReport),
         resource_id: Some(report_id.to_string()),
-        http_method: "SYSTEM".to_owned(),
+        http_method: OperationHttpMethod::System,
         http_path: format!("/system/quant/report/{report_id}/{action}"),
         http_status: 200,
         outcome: OperationOutcome::Success,
         client_ip: None,
         user_agent: None,
         latency_ms: 0,
-        detail: serde_json::json!({ "reason": reason }),
+        detail: operation_detail(reason)?,
         before_hash: None,
         after_hash: None,
         governance_audit_event_id: None,
         governance_audit_sequence: None,
-    }
+    })
+}
+
+fn operation_detail(reason: &str) -> QuantResult<OperationDetailDocument> {
+    OperationDetailDocument::from_serializable(&serde_json::json!({ "reason": reason })).map_err(
+        |error| {
+            InfraError::AuditDetailInvalid {
+                detail: error.to_string(),
+            }
+            .into()
+        },
+    )
 }
 
 const fn is_parity_contained_report_status(status: RecommendationReportStatus) -> bool {

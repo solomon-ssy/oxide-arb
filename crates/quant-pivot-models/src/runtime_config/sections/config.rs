@@ -15,7 +15,7 @@ use crate::{
         ReconciliationPolicy, ReportDeliveryPolicy, ScheduleCadence, SettlementRedeemPolicy,
         SizingModelConfig, SmallCrossSectionPolicy, TrainingOptimizerKind,
     },
-    types::{SchemaVersion, Usd},
+    types::{ReportScheduleId, SchemaVersion, Usd},
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -927,7 +927,7 @@ impl Default for ReportsConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct ReportScheduleConfig {
     /// Stable schedule id.
-    pub schedule_id: String,
+    pub schedule_id: ReportScheduleId,
     /// How often this schedule fires (fixed interval or cron).
     pub cadence: ScheduleCadence,
     /// `TopN` size for this schedule.
@@ -941,7 +941,7 @@ pub struct ReportScheduleConfig {
 impl Default for ReportScheduleConfig {
     fn default() -> Self {
         Self {
-            schedule_id: "default_interval".to_owned(),
+            schedule_id: "default_interval".into(),
             cadence: ScheduleCadence::default(),
             top_n: 20,
             knowledge_lag_secs: 10,
@@ -1131,7 +1131,7 @@ impl Default for SemiAutoConfig {
     }
 }
 
-/// Runtime v18 policy-bound `SemiAuto` canary.
+/// Runtime v1 policy-bound `SemiAuto` canary.
 ///
 /// An enabled canary is intentionally narrower than a published policy. It
 /// authorizes only an exact policy identity and explicit cash-budget tiers; it
@@ -1419,7 +1419,7 @@ pub struct ResearchValidationConfig {
     pub gates: ResearchValidationGatesConfig,
 }
 
-/// Runtime v18 operational limits for policy fitting.
+/// Runtime v1 operational limits for policy fitting.
 ///
 /// Statistical methodology is versioned code and publication thresholds belong
 /// exclusively to the immutable research profile. Keeping only resource and

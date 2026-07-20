@@ -13,7 +13,7 @@ use quant_pivot_models::{
     },
     entities::quant_research_job,
     enums::quant::{ResearchJobErrorCode, ResearchJobKind, ResearchJobStatus},
-    types::{DatasetCoverage, ResearchJobId, ResearchJobProgress},
+    types::{DatasetCoverage, ResearchJobId, ResearchJobProgress, WorkerId},
 };
 use sea_orm::{
     ActiveValue::Set,
@@ -99,7 +99,7 @@ impl ResearchJobRepository for PgResearchJobRepository {
     async fn lease_next(
         &self,
         eligible: &[ResearchJobKind],
-        owner: &str,
+        owner: &WorkerId,
         lease_expires_at: DateTime<Utc>,
     ) -> Result<Option<ResearchJobInfo>, StorageError> {
         if eligible.is_empty() {
@@ -122,7 +122,7 @@ impl ResearchJobRepository for PgResearchJobRepository {
         let now = Utc::now();
         let mut active = model.into_active_model();
         active.status = Set(ResearchJobStatus::Running);
-        active.lease_owner = Set(Some(owner.to_owned()));
+        active.lease_owner = Set(Some(owner.clone()));
         active.lease_expires_at = Set(Some(lease_expires_at));
         active.started_at = Set(Some(now));
         active.heartbeat_at = Set(Some(now));
@@ -137,7 +137,7 @@ impl ResearchJobRepository for PgResearchJobRepository {
     async fn heartbeat(
         &self,
         job_id: &ResearchJobId,
-        owner: &str,
+        owner: &WorkerId,
         lease_expires_at: DateTime<Utc>,
         progress: Option<ResearchJobProgress>,
     ) -> Result<bool, StorageError> {
@@ -150,8 +150,7 @@ impl ResearchJobRepository for PgResearchJobRepository {
         };
         // Cooperative stop signal: a job that is no longer running under this
         // owner was cancelled, reclaimed, or already finalized.
-        if model.status != ResearchJobStatus::Running || model.lease_owner.as_deref() != Some(owner)
-        {
+        if model.status != ResearchJobStatus::Running || model.lease_owner.as_ref() != Some(owner) {
             return Ok(false);
         }
         let mut active = model.into_active_model();
@@ -170,7 +169,7 @@ impl ResearchJobRepository for PgResearchJobRepository {
     async fn finalize(
         &self,
         job_id: &ResearchJobId,
-        owner: &str,
+        owner: &WorkerId,
         status: ResearchJobStatus,
         result_ref: Option<Uuid>,
         error: Option<ResearchJobError>,
@@ -198,7 +197,7 @@ impl ResearchJobRepository for PgResearchJobRepository {
             )
             .col_expr(
                 quant_research_job::Column::LeaseOwner,
-                Expr::value(None::<String>),
+                Expr::value(None::<WorkerId>),
             )
             .col_expr(
                 quant_research_job::Column::LeaseExpiresAt,
@@ -249,14 +248,14 @@ impl ResearchJobRepository for PgResearchJobRepository {
 
     async fn reclaim_orphaned(
         &self,
-        owner: &str,
+        owner: &WorkerId,
         now: DateTime<Utc>,
     ) -> Result<ReclaimOutcome, StorageError> {
         // Boot recovery: reclaim rows whose lease is expired / dead-epoch.
         reclaim_by_condition(&self.db, orphaned_condition(owner, now)).await
     }
 
-    async fn requeue_inflight(&self, owner: &str) -> Result<ReclaimOutcome, StorageError> {
+    async fn requeue_inflight(&self, owner: &WorkerId) -> Result<ReclaimOutcome, StorageError> {
         // Graceful drain: reclaim this owner's own still-`running` rows (lease may
         // still be valid) so a new epoch re-leases them without a lease-expiry wait.
         reclaim_by_condition(&self.db, owned_running_condition(owner)).await
@@ -280,7 +279,7 @@ async fn reclaim_by_condition(
         )
         .col_expr(
             quant_research_job::Column::LeaseOwner,
-            Expr::value(None::<String>),
+            Expr::value(None::<WorkerId>),
         )
         .col_expr(
             quant_research_job::Column::LeaseExpiresAt,
@@ -318,7 +317,7 @@ async fn reclaim_by_condition(
         )
         .col_expr(
             quant_research_job::Column::LeaseOwner,
-            Expr::value(None::<String>),
+            Expr::value(None::<WorkerId>),
         )
         .col_expr(
             quant_research_job::Column::LeaseExpiresAt,
@@ -386,7 +385,7 @@ async fn finalize_guard_failure(db: &DatabaseConnection, job_id: &ResearchJobId)
 
 /// A `running` row is orphaned when it is owned by a different (dead) lease
 /// epoch, has no owner, or its lease has expired past `now`.
-fn orphaned_condition(owner: &str, now: DateTime<Utc>) -> Condition {
+fn orphaned_condition(owner: &WorkerId, now: DateTime<Utc>) -> Condition {
     Condition::all()
         .add(quant_research_job::Column::Status.eq(ResearchJobStatus::Running))
         .add(
@@ -400,7 +399,7 @@ fn orphaned_condition(owner: &str, now: DateTime<Utc>) -> Condition {
 /// This owner's own still-`running` rows (lease validity irrelevant): the
 /// graceful-drain set, requeued so a new epoch re-leases without waiting for
 /// lease expiry.
-fn owned_running_condition(owner: &str) -> Condition {
+fn owned_running_condition(owner: &WorkerId) -> Condition {
     Condition::all()
         .add(quant_research_job::Column::Status.eq(ResearchJobStatus::Running))
         .add(quant_research_job::Column::LeaseOwner.eq(owner))

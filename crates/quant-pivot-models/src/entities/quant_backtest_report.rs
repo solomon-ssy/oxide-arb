@@ -3,6 +3,7 @@
 use crate::types::{
     BacktestReportId, ContentHash, DecisionPolicySnapshotId, ModelRunId, ModelVersionId,
     Probability,
+    backtest::{CategoryMetrics, ExpectedVsRealized, PnlSimulation},
 };
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
@@ -26,15 +27,15 @@ pub struct Model {
     pub sharpe: Decimal,
     pub hit_rate: Probability,
     #[sea_orm(column_type = "JsonBinary")]
-    pub expected_vs_realized: Json,
+    pub expected_vs_realized: ExpectedVsRealized,
     pub max_drawdown: Decimal,
     pub turnover: Decimal,
     pub liquidity_feasibility: Probability,
     #[sea_orm(column_type = "JsonBinary")]
-    pub category_breakdown: Json,
+    pub category_breakdown: CategoryMetrics,
     pub tail_loss: Decimal,
     #[sea_orm(column_type = "JsonBinary")]
-    pub report_pnl_simulation: Json,
+    pub report_pnl_simulation: PnlSimulation,
     pub report_hash: ContentHash,
     pub parquet_uri: Option<String>,
     pub created_at: DateTime<Utc>,

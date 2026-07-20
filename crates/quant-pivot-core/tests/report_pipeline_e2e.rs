@@ -61,7 +61,7 @@ async fn ad_hoc_publishes_report_with_recommendations() {
         .await
         .expect("prepare operation log");
     assert_eq!(prepare_logs.total, 1);
-    assert_eq!(prepare_logs.items[0].action, "prepare");
+    assert_eq!(prepare_logs.items[0].action.as_str(), "prepare");
     assert!(
         prepare_logs.items[0].after_hash.is_some(),
         "prepare must record after_hash"
@@ -78,7 +78,7 @@ async fn ad_hoc_publishes_report_with_recommendations() {
         .await
         .expect("publish operation log");
     assert_eq!(publish_logs.total, 1);
-    assert_eq!(publish_logs.items[0].action, "report.publish");
+    assert_eq!(publish_logs.items[0].action.as_str(), "report.publish");
     assert!(publish_logs.items[0].before_hash.is_some());
     assert!(publish_logs.items[0].after_hash.is_some());
 

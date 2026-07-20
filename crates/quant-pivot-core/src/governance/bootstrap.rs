@@ -315,7 +315,7 @@ impl BootstrapPort for BootstrapService {
                 report_only_forced_ack: true,
             })
             .await?;
-        prepared.publish();
+        prepared.publish()?;
         self.events.publish(CoreEvent::ConfigActivated {
             version_id: version.decision_policy_snapshot_id.to_string(),
         });

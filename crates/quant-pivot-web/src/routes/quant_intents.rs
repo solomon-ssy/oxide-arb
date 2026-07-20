@@ -31,10 +31,9 @@ use quant_pivot_models::{
         rbac::{Operation, ResourceType},
     },
     hashing::CanonicalDigest,
-    types::OrderIntentId,
+    types::{ContentHash, OrderIntentId, RoleCode, UserId},
 };
 use serde::Serialize;
-use uuid::Uuid;
 
 use crate::{
     audit::OperationCtx,
@@ -191,14 +190,14 @@ pub async fn create(
     op_ctx: OperationCtx,
     body: ValidatedJson<CreateIntentRequest>,
 ) -> Result<WebResponse<OrderIntentView>, WebError> {
-    let operator_id = actor_uuid(&actor)?;
+    let operator_id = actor_user_id(&actor)?;
     let request = body.into_inner();
     let intent = state
         .order_intents
         .create(CreateIntentCommand {
             recommendation_id: request.recommendation_id.clone(),
             operator_id,
-            acting_role: acting_role.0.clone(),
+            acting_role: RoleCode::new(acting_role.0.clone()),
             reason: request.reason.clone(),
         })
         .await?;
@@ -216,7 +215,7 @@ pub async fn create(
         "acting_role": acting_role.0,
         "request_id": request_id.0,
         "reason": request.reason,
-    }));
+    }))?;
     Ok(WebResponse::ok(OrderIntentView::from(intent)))
 }
 
@@ -230,7 +229,7 @@ pub async fn approve(
     op_ctx: OperationCtx,
     body: ValidatedJson<ApproveIntentRequest>,
 ) -> Result<WebResponse<OrderIntentView>, WebError> {
-    let operator_id = actor_uuid(&actor)?;
+    let operator_id = actor_user_id(&actor)?;
     let request = body.into_inner();
     let intent_id = id.into_inner();
     let before = state
@@ -243,7 +242,7 @@ pub async fn approve(
         .approve(ApproveIntentCommand {
             order_intent_id: intent_id,
             operator_id,
-            acting_role: acting_role.0.clone(),
+            acting_role: RoleCode::new(acting_role.0.clone()),
             reason: request.reason.clone(),
             override_amount: request.override_amount,
             override_price: request.override_price,
@@ -264,7 +263,7 @@ pub async fn approve(
         "reason": request.reason,
         "override_amount": request.override_amount,
         "override_price": request.override_price,
-    }));
+    }))?;
     Ok(WebResponse::ok(OrderIntentView::from(intent)))
 }
 
@@ -278,7 +277,7 @@ pub async fn reject(
     op_ctx: OperationCtx,
     body: ValidatedJson<RejectIntentRequest>,
 ) -> Result<WebResponse<OrderIntentView>, WebError> {
-    let operator_id = actor_uuid(&actor)?;
+    let operator_id = actor_user_id(&actor)?;
     let request = body.into_inner();
     let intent_id = id.into_inner();
     let before = state
@@ -291,7 +290,7 @@ pub async fn reject(
         .reject(RejectIntentCommand {
             order_intent_id: intent_id,
             operator_id,
-            acting_role: acting_role.0.clone(),
+            acting_role: RoleCode::new(acting_role.0.clone()),
             reason: request.reason.clone(),
         })
         .await?;
@@ -308,7 +307,7 @@ pub async fn reject(
         "acting_role": acting_role.0,
         "request_id": request_id.0,
         "reason": request.reason,
-    }));
+    }))?;
     Ok(WebResponse::ok(OrderIntentView::from(intent)))
 }
 
@@ -322,7 +321,7 @@ pub async fn cancel(
     op_ctx: OperationCtx,
     body: ValidatedJson<CancelIntentRequest>,
 ) -> Result<WebResponse<OrderIntentView>, WebError> {
-    let operator_id = actor_uuid(&actor)?;
+    let operator_id = actor_user_id(&actor)?;
     let request = body.into_inner();
     let intent_id = id.into_inner();
     let before = state
@@ -335,7 +334,7 @@ pub async fn cancel(
         .cancel(CancelIntentCommand {
             order_intent_id: intent_id,
             operator_id,
-            acting_role: acting_role.0.clone(),
+            acting_role: RoleCode::new(acting_role.0.clone()),
             reason: request.reason.clone(),
         })
         .await?;
@@ -352,18 +351,20 @@ pub async fn cancel(
         "acting_role": acting_role.0,
         "request_id": request_id.0,
         "reason": request.reason,
-    }));
+    }))?;
     Ok(WebResponse::ok(OrderIntentView::from(intent)))
 }
 
-/// Parse the authenticated actor's stable user id into a UUID for `approved_by`.
-fn actor_uuid(actor: &AuthedActor) -> Result<Uuid, WebError> {
-    Uuid::parse_str(&actor.claims.sub)
+/// Parse the authenticated subject into the canonical user-id namespace.
+fn actor_user_id(actor: &AuthedActor) -> Result<UserId, WebError> {
+    actor
+        .claims
+        .sub
+        .parse()
         .map_err(|_| WebError::Unauthorized("invalid actor id".to_owned()))
 }
 
-fn canonical_state_hash<T: Serialize>(state: &T) -> Result<String, WebError> {
+fn canonical_state_hash<T: Serialize>(state: &T) -> Result<ContentHash, WebError> {
     CanonicalDigest::content_hash_json(state)
-        .map(|hash| hash.as_str().to_owned())
         .map_err(|error| WebError::Internal(format!("canonical state hash failed: {error}")))
 }

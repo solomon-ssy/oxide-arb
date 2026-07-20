@@ -90,6 +90,6 @@ pub async fn acknowledge(
         "acting_role": acting_role.0,
         "actor": actor.claims.username,
         "request_id": request_id.0,
-    }));
+    }))?;
     Ok(WebResponse::ok(BasisAlertView::from(row)))
 }

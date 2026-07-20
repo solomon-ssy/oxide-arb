@@ -249,7 +249,7 @@ fn crypto_binance_futures_contract(
 fn profile_for(profiles: &[ResearchProfileArtifact], id: &str) -> QuantResult<ResearchProfileRef> {
     profiles
         .iter()
-        .find(|profile| profile.profile_ref.id == id)
+        .find(|profile| profile.profile_ref.id.as_str() == id)
         .map(|profile| profile.profile_ref.clone())
         .ok_or_else(|| QuantError::config(format!("missing built-in research profile `{id}`")))
 }

@@ -18,6 +18,7 @@ use crate::{
     types::{
         BacktestReportId, ContentHash, DecisionPolicySnapshotId, ModelComparisonReportId,
         ModelRunId, ModelVersionId, Probability, TrainingDatasetId,
+        backtest::{CategoryMetrics, ExpectedVsRealized, PnlSimulation},
     },
 };
 
@@ -29,7 +30,7 @@ use crate::{
 ///
 /// `Serialize` is derived so the request can be frozen into a durable research
 /// job's `params_json` and replayed on execute.
-#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Validate)]
 pub struct RunBacktestRequest {
     /// Frozen, PIT-materialized dataset to replay the model over.
     pub training_dataset_id: TrainingDatasetId,
@@ -77,13 +78,13 @@ pub struct BacktestReportView {
     /// Sharpe distribution, never the alpha-significance gate's data source.
     pub sharpe: Decimal,
     pub hit_rate: Probability,
-    pub expected_vs_realized: serde_json::Value,
+    pub expected_vs_realized: ExpectedVsRealized,
     pub max_drawdown: Decimal,
     pub turnover: Decimal,
     pub liquidity_feasibility: Probability,
-    pub category_breakdown: serde_json::Value,
+    pub category_breakdown: CategoryMetrics,
     pub tail_loss: Decimal,
-    pub report_pnl_simulation: serde_json::Value,
+    pub report_pnl_simulation: PnlSimulation,
     pub report_hash: ContentHash,
     pub parquet_uri: Option<String>,
     pub created_at: DateTime<Utc>,

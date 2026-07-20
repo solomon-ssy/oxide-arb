@@ -190,7 +190,7 @@ impl ResearchHasher {
 
     /// Order-independent hash of a governed factor set (`factor_schema_hash`).
     ///
-    /// Definitions are sorted by stable [`FactorDefinitionSpec::name`] before
+    /// Definitions are sorted by stable [`FactorDefinitionDocument::name`] before
     /// serialization so registry insertion order never perturbs the digest.
     pub fn factor_schema(set: &FactorSet) -> QuantResult<ContentHash> {
         let mut definitions = set.definitions.clone();
@@ -256,7 +256,7 @@ impl ResearchHasher {
 mod tests {
     use super::ResearchHasher;
     use crate::{
-        factors::{FactorDefinitionSpec, FactorName, FactorOutputKind, FactorSet},
+        factors::{FactorDefinitionDocument, FactorName, FactorOutputKind, FactorSet},
         features::{
             DomainFeatureSlice, EvidenceSourceRef, FeatureCell, FeatureName, FeatureSchema,
             FeatureSpec, FeatureStaleness, FeatureUnit, FeatureValue, FeatureValueKind,
@@ -276,8 +276,8 @@ mod tests {
         types::{MarketId, Probability, SchemaVersion, TokenId},
     };
 
-    fn sample_factor(name: &'static str) -> FactorDefinitionSpec {
-        FactorDefinitionSpec {
+    fn sample_factor(name: &'static str) -> FactorDefinitionDocument {
+        FactorDefinitionDocument {
             name: FactorName::from_static(name),
             family: FactorFamily::Liquidity,
             input_features: Vec::new(),

@@ -20,11 +20,9 @@ pub use slice::{
 
 use chrono::{DateTime, Utc};
 use quant_pivot_models::{
-    domain::{
-        CryptoPriceReport, DomainObservation, PublishedWeatherStationLeadBias,
-        WeatherForecastPoint, WeatherObservationFact,
-    },
+    domain::{CryptoPriceReport, DomainObservation, WeatherForecastPoint, WeatherObservationFact},
     enums::domain::DomainMetric,
+    types::calibration::PublishedWeatherStationLeadBias,
 };
 use rust_decimal::Decimal;
 

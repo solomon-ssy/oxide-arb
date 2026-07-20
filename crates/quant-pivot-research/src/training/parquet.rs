@@ -328,7 +328,7 @@ impl DatasetParquetCodec {
         Ok(Self::decode_with_manifest(bytes)?.examples)
     }
 
-    /// Decode and validate the complete v2 envelope, including its manifest.
+    /// Decode and validate the complete V1 envelope, including its manifest.
     pub fn decode_with_manifest(bytes: &[u8]) -> QuantResult<DecodedDatasetParquet> {
         let frame = ParquetReader::new(Cursor::new(bytes))
             .finish()
@@ -400,6 +400,7 @@ mod tests {
                 manifest_hash: hash('5'),
             },
             model_spec_id,
+            model_spec_definition_hash: hash('6'),
             trade_policy_artifact_id: None,
             trade_policy_hash: None,
             decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
@@ -480,7 +481,7 @@ mod tests {
     }
 
     #[test]
-    fn dataset_artifact_version_is_four() {
+    fn dataset_artifact_version_is_one() {
         assert_eq!(DATASET_ARTIFACT_FORMAT_VERSION, 1);
     }
 

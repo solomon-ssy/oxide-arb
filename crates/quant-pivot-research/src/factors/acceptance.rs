@@ -18,7 +18,10 @@ use quant_pivot_models::{
         DecimalValue, DomainConfig, FactorsConfig, FeaturesConfig, MissingFactorPolicy,
         SmallCrossSectionPolicy,
     },
-    types::{CalibrationArtifactId, MarketId, Price, Probability, SchemaVersion, TokenId, Usd},
+    types::{
+        CalibrationArtifactId, MarketId, Price, Probability, SchemaVersion, TokenId, Usd,
+        calibration::{CategoryBiasCurve, PriceBiasBin, TtrBucketCurve},
+    },
 };
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 
@@ -36,10 +39,7 @@ use crate::{
         generic::stats,
     },
     hashing::ResearchHasher,
-    model::favorite_longshot::{
-        BiasFitConfig, BiasSample, CategoryBiasCurve, FavoriteLongshotBiasTable, PriceBiasBin,
-        TtrBucketCurve,
-    },
+    model::favorite_longshot::{BiasFitConfig, BiasSample, FavoriteLongshotBiasTable},
 };
 // ── Fixtures ────────────────────────────────────────────────────────────────
 

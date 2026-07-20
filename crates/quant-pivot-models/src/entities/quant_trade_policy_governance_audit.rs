@@ -5,7 +5,7 @@ use sea_orm::entity::prelude::*;
 
 use crate::{
     enums::quant::{TradePolicyGovernanceAction, TradePolicyStatus},
-    types::{ContentHash, TradePolicyArtifactId, TradePolicyGovernanceAuditId},
+    types::{ContentHash, TradePolicyArtifactId, TradePolicyGovernanceAuditId, UserId},
 };
 
 #[sea_orm::model]
@@ -19,7 +19,7 @@ pub struct Model {
     pub from_status: TradePolicyStatus,
     pub to_status: TradePolicyStatus,
     pub content_hash: ContentHash,
-    pub actor_id: Uuid,
+    pub actor_id: UserId,
     #[sea_orm(column_type = "Text")]
     pub reason: String,
     pub created_at: DateTime<Utc>,

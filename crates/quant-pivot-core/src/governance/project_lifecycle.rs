@@ -3,7 +3,7 @@
 use crate::app::InfraBundle;
 use quant_pivot_error::{QuantResult, storage::StorageError};
 use quant_pivot_models::{
-    config::{DeployConfig, ProjectLifecyclePolicy},
+    config::{CompiledBuildIdentity, DeployConfig, ProjectLifecyclePolicy},
     enums::runtime_config::ProjectLifecycleState,
     hashing::CanonicalDigest,
     runtime_config::DecisionPolicySnapshot,
@@ -33,6 +33,7 @@ pub async fn verify_project_lifecycle(
             }
         }
         Some(baseline) => {
+            let build_identity = CompiledBuildIdentity::compiled()?;
             if source.state != ProjectLifecycleState::ProductionFrozen
                 || deploy.lifecycle.expected_state != ProjectLifecycleState::ProductionFrozen
             {
@@ -47,7 +48,13 @@ pub async fn verify_project_lifecycle(
                 )
                 .into());
             }
-            if deploy.lifecycle.build_commit.as_ref() != Some(&baseline.build_commit) {
+            if !build_identity.clean {
+                return Err(lifecycle_conflict(
+                    "production-frozen startup requires a clean compiled Git identity",
+                )
+                .into());
+            }
+            if build_identity.build_commit != baseline.build_commit {
                 return Err(lifecycle_conflict(
                     "sealed build commit differs from the deployment artifact",
                 )

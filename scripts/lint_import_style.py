@@ -8,7 +8,8 @@ Enforces `.cursor/rules/quant-pivot-rust-style.mdc`:
   3. One non-`pub` `use` tree per (root, leading-attrs) in each module scope
      — merge siblings into a single brace tree (e.g. `use std::{a, b::{self, C}}`).
 
-`pub use` re-exports are intentionally left alone (barrel modules).
+Canonical barrel `pub use` declarations are intentionally left alone.
+Compatibility re-exports are rejected by architecture/domain lints.
 
 Usage:
   python3 scripts/lint_import_style.py           # check

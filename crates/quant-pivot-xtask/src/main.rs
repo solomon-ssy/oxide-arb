@@ -1,27 +1,45 @@
 use anyhow::{Context, Result, bail};
+use async_trait::async_trait;
+use chrono::{DateTime, Duration, Utc};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use quant_pivot_core::app::phase_11_9_evidence_bootstrap::{
     Phase119EvidenceBootstrapOptions, run_phase_11_9_evidence_bootstrap,
 };
-use quant_pivot_migration::{apply as apply_postgres_migrations, plan as plan_postgres_migrations};
+use quant_pivot_migration::{
+    acquire_lifecycle_lease, apply as apply_postgres_migrations, apply_under_lifecycle_lease,
+    inspect_preproduction_postgres, plan as plan_postgres_migrations, release_lifecycle_lease,
+    reset_preproduction_postgres,
+};
 use quant_pivot_models::{
     config::{
-        DeployConfig,
+        CompiledBuildIdentity, DeployConfig, PostgresConfig,
         secret::{SecretText, SystemdCredentialRef},
     },
-    domain::ConfigApiContractSchema,
-    enums::{common::MarketCategory, domain::DomainFamily},
+    domain::{
+        ConfigApiContractSchema, LifecycleSchemaVerificationPort, NewProductionEvidence,
+        VerifiedSchemaFingerprints,
+    },
+    enums::{
+        common::MarketCategory,
+        domain::DomainFamily,
+        runtime_config::{PolicyActorKind, ProductionEvidenceKind},
+    },
     hashing::CanonicalDigest,
     runtime_config::DecisionPolicySnapshot,
     security::hash_password,
     types::{
-        EventId, domain_capability::DomainContractFamily,
+        ArtifactUri, ContentHash, EventId, PreproductionResetNonce, ProductionEvidenceId,
+        domain_capability::DomainContractFamily,
         domain_classification::DomainMarketClassificationOutcome,
     },
 };
 use quant_pivot_repository::{
-    postgres::catalog::{event::PgEventRepository, market::PgMarketRepository},
-    traits::{governance::event::EventRepository, market::MarketRepository},
+    postgres::{
+        PgModelRegistryRepository, PgPolicyRepository,
+        catalog::{event::PgEventRepository, market::PgMarketRepository},
+        governance::policy_bootstrap::ensure_default_policy_bundle,
+    },
+    traits::{PolicyRepository, governance::event::EventRepository, market::MarketRepository},
 };
 use quant_pivot_research::{
     artifact::{ArtifactKey, ArtifactNamespace, build_artifact_store},
@@ -31,28 +49,39 @@ use quant_pivot_research::{
     },
 };
 use quant_pivot_storage::{
+    cache::{count_preproduction_namespace, unlink_preproduction_namespace},
     clickhouse::{
-        apply_offline_schema_migrations, apply_online_schema_migrations, plan_schema,
-        render_schema_manifest as render_clickhouse_schema_manifest, verify_schema,
+        ClickHousePool, apply_offline_schema_migrations, apply_online_schema_migrations,
+        database_object_count, plan_schema,
+        render_schema_manifest as render_clickhouse_schema_manifest,
+        reset_preproduction_database as reset_clickhouse_preproduction_database, verify_schema,
     },
+    evidence::FileProductionEvidenceVerifier,
     postgres::{
         PostgresPool,
         migration::{
-            finalize_schema_deployment, inspect_schema_manifest, render_schema_manifest,
+            finalize_schema_deployment, generate_disposable_schema_manifest,
+            inspect_schema_manifest, render_schema_manifest,
             verify_schema as verify_postgres_schema,
         },
     },
 };
 use rustls::crypto::aws_lc_rs;
+use sea_orm::ConnectionTrait;
+use serde::{Deserialize, Serialize};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::{
     collections::{BTreeMap, BTreeSet},
     env, fs,
-    path::PathBuf,
+    io::{BufReader, Read},
+    path::{Path, PathBuf},
     process::{Command, ExitCode, Stdio},
     sync::Arc,
 };
+use testcontainers::{ImageExt, runners::AsyncRunner};
+use testcontainers_modules::postgres::Postgres;
+use uuid::Uuid;
 use zeroize::Zeroizing;
 
 const BOOTSTRAP_ADMIN_PASSWORD_FILE_ENV: &str = "QUANT_PIVOT_BOOTSTRAP__ADMIN_PASSWORD_FILE";
@@ -84,7 +113,14 @@ const DOCKER_SUITES: &[(&str, &str)] = &[
     ("quant-pivot-repository", "pg_backtest_report"),
     ("quant-pivot-repository", "pg_comparison_report"),
     ("quant-pivot-repository", "pg_domain_projection"),
+    ("quant-pivot-repository", "pg_domain_source_expectation"),
     ("quant-pivot-repository", "pg_execution_submission"),
+    ("quant-pivot-repository", "pg_policy_governance"),
+    ("quant-pivot-repository", "pg_production_lifecycle"),
+    (
+        "quant-pivot-repository",
+        "pg_weather_daily_temperature_projection",
+    ),
     ("quant-pivot-repository", "portfolio_optimizer_meta"),
     ("quant-pivot-repository", "ch_fact_read_pit"),
     ("quant-pivot-storage", "redis_integration"),
@@ -98,6 +134,7 @@ const DOCKER_SUITES: &[(&str, &str)] = &[
     ("quant-pivot-core", "governance_e2e"),
     ("quant-pivot-core", "model_train_backtest_e2e"),
     ("quant-pivot-core", "report_pipeline_e2e"),
+    ("quant-pivot-core", "weather_linkage_group_e2e"),
     ("quant-pivot-web", "web"),
 ];
 
@@ -160,6 +197,76 @@ enum Commands {
         #[arg(long, default_value = "schema/api/config-v1.schema.json")]
         output: PathBuf,
     },
+    /// Record content-addressed WORM evidence for the irreversible production seal.
+    #[command(name = "production-evidence")]
+    ProductionEvidence(ProductionEvidenceArgs),
+    /// Plan, apply, or verify the exact preproduction clean-boot reset scope.
+    #[command(name = "preproduction-reset")]
+    PreproductionReset {
+        #[command(subcommand)]
+        command: PreproductionResetCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum PreproductionResetCommand {
+    /// Inspect targets and create a short-lived one-time confirmation nonce.
+    Plan(PreproductionResetPlanArgs),
+    /// Apply the planned reset under the cross-system lifecycle lease.
+    Apply(PreproductionResetApplyArgs),
+    /// Verify boot manifests and prove the Redis namespace is empty.
+    Verify(ConfigDirArgs),
+}
+
+#[derive(Args)]
+struct PreproductionResetPlanArgs {
+    #[command(flatten)]
+    config: ConfigDirArgs,
+    #[arg(long, default_value = ".local/preproduction-reset/active-plan.json")]
+    plan_file: PathBuf,
+}
+
+#[derive(Args)]
+struct PreproductionResetApplyArgs {
+    #[command(flatten)]
+    config: ConfigDirArgs,
+    #[arg(long, default_value = ".local/preproduction-reset/active-plan.json")]
+    plan_file: PathBuf,
+    #[arg(long)]
+    confirm_nonce: PreproductionResetNonce,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum ProductionEvidenceKindArg {
+    BackupRestore,
+    ProtectedConfigEndToEnd,
+}
+
+impl From<ProductionEvidenceKindArg> for ProductionEvidenceKind {
+    fn from(value: ProductionEvidenceKindArg) -> Self {
+        match value {
+            ProductionEvidenceKindArg::BackupRestore => Self::BackupRestore,
+            ProductionEvidenceKindArg::ProtectedConfigEndToEnd => Self::ProtectedConfigEndToEnd,
+        }
+    }
+}
+
+#[derive(Args)]
+struct ProductionEvidenceArgs {
+    #[command(flatten)]
+    config: ConfigDirArgs,
+    #[arg(long, value_enum)]
+    kind: ProductionEvidenceKindArg,
+    /// Completed backup/restore or protected-E2E evidence bundle to content-address.
+    #[arg(long)]
+    artifact_file: PathBuf,
+    /// Immutable evidence store directory shared with the sealed deployment.
+    #[arg(long, default_value = ".local/production-evidence")]
+    evidence_dir: PathBuf,
+    #[arg(long)]
+    reason: String,
+    #[arg(long)]
+    actor_label: String,
 }
 
 #[derive(Subcommand)]
@@ -186,6 +293,8 @@ enum PostgresSchemaCommand {
     Verify(ConfigDirArgs),
     /// Generate the normalized `pg_catalog` manifest after applying migrations.
     Manifest(ConfigDirArgs),
+    /// Generate both manifests from a clean, owned disposable `PostgreSQL` 16 container.
+    ManifestClean,
     /// Regenerate only the immutable compiled migration-artifact manifest.
     MigrationManifest,
 }
@@ -267,6 +376,8 @@ async fn run() -> Result<()> {
             Ok(())
         }
         Commands::ConfigApiSchema { output } => write_config_api_schema(&output),
+        Commands::ProductionEvidence(args) => record_production_evidence(args).await,
+        Commands::PreproductionReset { command } => Box::pin(preproduction_reset(command)).await,
     }
 }
 
@@ -498,17 +609,601 @@ const fn outcome_label(outcome: DomainMarketClassificationOutcome) -> &'static s
     }
 }
 
+struct XtaskLiveSchemaVerification<'a> {
+    postgres: &'a PostgresPool,
+    clickhouse: &'a ClickHousePool,
+}
+
+#[async_trait]
+impl LifecycleSchemaVerificationPort for XtaskLiveSchemaVerification<'_> {
+    async fn verify_live(&self) -> quant_pivot_error::QuantResult<VerifiedSchemaFingerprints> {
+        let (postgres, clickhouse) = tokio::try_join!(
+            verify_postgres_schema(self.postgres.connection()),
+            self.clickhouse.verify_schema(),
+        )?;
+        Ok(VerifiedSchemaFingerprints {
+            postgres_schema_fingerprint: postgres.schema_fingerprint,
+            clickhouse_schema_fingerprint: clickhouse.schema_fingerprint,
+        })
+    }
+}
+
+async fn record_production_evidence(args: ProductionEvidenceArgs) -> Result<()> {
+    if args.reason.trim().is_empty() || args.actor_label.trim().is_empty() {
+        bail!("production evidence requires non-empty --reason and --actor-label");
+    }
+    let config_dir = args
+        .config
+        .config_dir
+        .to_str()
+        .context("production evidence config directory is not valid UTF-8")?;
+    let deploy = DeployConfig::load(config_dir).context("load runtime deploy config")?;
+    let build_identity =
+        CompiledBuildIdentity::compiled().context("load compiled build identity")?;
+    if !build_identity.clean {
+        bail!("production evidence can only be recorded by a clean compiled Git artifact");
+    }
+
+    let postgres = PostgresPool::connect_existing(&deploy.db.postgres)
+        .await
+        .context("connect PostgreSQL runtime identity")?;
+    let clickhouse = ClickHousePool::connect(&deploy.db.clickhouse)
+        .await
+        .context("connect ClickHouse runtime identity")?;
+    let schema_verification = XtaskLiveSchemaVerification {
+        postgres: &postgres,
+        clickhouse: &clickhouse,
+    };
+    let live_schema = schema_verification
+        .verify_live()
+        .await
+        .context("verify live PG/CH schema")?;
+    let repository = PgPolicyRepository::new(postgres.connection().clone());
+    let bundle = repository
+        .load_current_bundle()
+        .await
+        .context("load DB-authoritative active policy bundle")?
+        .context("cannot record production evidence without an active policy bundle")?;
+    let (artifact_uri, evidence_hash) =
+        persist_evidence_artifact(&args.artifact_file, &args.evidence_dir)?;
+    let recorded = repository
+        .record_production_evidence(
+            NewProductionEvidence {
+                production_evidence_id: ProductionEvidenceId::from_v7(),
+                kind: args.kind.into(),
+                artifact_uri,
+                evidence_hash,
+                build_commit: build_identity.build_commit,
+                postgres_schema_fingerprint: live_schema.postgres_schema_fingerprint,
+                clickhouse_schema_fingerprint: live_schema.clickhouse_schema_fingerprint,
+                policy_bundle_generation: bundle.generation,
+                decision_policy_snapshot_id: bundle.decision_policy_snapshot_id,
+                policy_bundle_hash: bundle.snapshot_hash,
+                recorded_by_kind: PolicyActorKind::Operator,
+                recorded_by_user_id: None,
+                recorded_by_label: args.actor_label,
+                reason: args.reason,
+                observed_at: Utc::now(),
+            },
+            &schema_verification,
+            &FileProductionEvidenceVerifier,
+        )
+        .await
+        .context("record exact production evidence under lifecycle lease")?;
+    println!(
+        "production evidence recorded: id={} kind={} hash={} artifact={}",
+        recorded.production_evidence_id,
+        recorded.kind.as_str(),
+        recorded.evidence_hash,
+        recorded.artifact_uri,
+    );
+    postgres.close().await;
+    Ok(())
+}
+
+fn persist_evidence_artifact(
+    source: &Path,
+    evidence_dir: &Path,
+) -> Result<(ArtifactUri, ContentHash)> {
+    let source_metadata = fs::symlink_metadata(source)
+        .with_context(|| format!("inspect evidence source {}", source.display()))?;
+    if !source_metadata.is_file() || source_metadata.file_type().is_symlink() {
+        bail!("evidence source must be a regular non-symlink file");
+    }
+    let source_hash = hash_file(source)?;
+    fs::create_dir_all(evidence_dir)
+        .with_context(|| format!("create evidence directory {}", evidence_dir.display()))?;
+    let destination = evidence_dir.join(format!(
+        "{}.evidence",
+        source_hash
+            .as_str()
+            .strip_prefix("blake3:")
+            .context("content hash has no blake3 prefix")?
+    ));
+    if destination.exists() {
+        if hash_file(&destination)? != source_hash {
+            bail!(
+                "existing content-addressed evidence artifact {} has the wrong hash",
+                destination.display()
+            );
+        }
+    } else {
+        fs::copy(source, &destination).with_context(|| {
+            format!(
+                "copy evidence {} to {}",
+                source.display(),
+                destination.display()
+            )
+        })?;
+        if hash_file(&destination)? != source_hash {
+            fs::remove_file(&destination)
+                .with_context(|| format!("remove torn evidence copy {}", destination.display()))?;
+            bail!("evidence source changed while it was being content-addressed");
+        }
+    }
+    fs::set_permissions(&destination, fs::Permissions::from_mode(0o444))
+        .with_context(|| format!("seal evidence artifact {} read-only", destination.display()))?;
+    let canonical = fs::canonicalize(&destination)
+        .with_context(|| format!("canonicalize evidence artifact {}", destination.display()))?;
+    let uri = url::Url::from_file_path(&canonical)
+        .map_err(|()| anyhow::anyhow!("evidence artifact path cannot be represented as file://"))?;
+    let artifact_uri = ArtifactUri::parse(uri.to_string()).context("validate evidence URI")?;
+    Ok((artifact_uri, source_hash))
+}
+
+fn hash_file(path: &Path) -> Result<ContentHash> {
+    let file = fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
+    let mut reader = BufReader::new(file);
+    let mut hasher = blake3::Hasher::new();
+    let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
+    loop {
+        let read = reader
+            .read(&mut buffer)
+            .with_context(|| format!("read {}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    ContentHash::parse(format!("blake3:{}", hasher.finalize().to_hex()))
+        .context("validate computed evidence content hash")
+}
+
+const RESET_PLAN_FORMAT_VERSION: u32 = 1;
+const RESET_PLAN_TTL_MINUTES: i64 = 15;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct ResetTargetFingerprints {
+    postgres: ContentHash,
+    clickhouse: ContentHash,
+    redis: ContentHash,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct ResetObjectInventory {
+    postgres_database_exists: bool,
+    postgres_object_count: i64,
+    postgres_connection_count: i64,
+    clickhouse_object_count: u64,
+    redis_namespace_key_count: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct PreproductionResetPlan {
+    format_version: u32,
+    nonce: PreproductionResetNonce,
+    created_at: DateTime<Utc>,
+    expires_at: DateTime<Utc>,
+    targets: ResetTargetFingerprints,
+    inventory: ResetObjectInventory,
+    plan_hash: ContentHash,
+}
+
+#[derive(Serialize)]
+struct ResetPlanDigest<'a> {
+    format_version: u32,
+    nonce: &'a PreproductionResetNonce,
+    created_at: DateTime<Utc>,
+    expires_at: DateTime<Utc>,
+    targets: &'a ResetTargetFingerprints,
+    inventory: &'a ResetObjectInventory,
+}
+
+async fn preproduction_reset(command: PreproductionResetCommand) -> Result<()> {
+    match command {
+        PreproductionResetCommand::Plan(args) => Box::pin(preproduction_reset_plan(args)).await,
+        PreproductionResetCommand::Apply(args) => Box::pin(preproduction_reset_apply(args)).await,
+        PreproductionResetCommand::Verify(args) => preproduction_reset_verify(args).await,
+    }
+}
+
+async fn preproduction_reset_plan(args: PreproductionResetPlanArgs) -> Result<()> {
+    let deploy = load_reset_deploy(&args.config)?;
+    let inventory = reset_inventory(&deploy).await?;
+    if inventory.postgres_connection_count != 0 {
+        bail!(
+            "{} PostgreSQL target connections remain; stop project-owned processes before planning reset",
+            inventory.postgres_connection_count
+        );
+    }
+    if args.plan_file.exists() {
+        let existing = read_reset_plan(&args.plan_file)?;
+        if existing.expires_at > Utc::now() {
+            bail!(
+                "an unexpired reset plan already exists at {}; use its nonce or wait for expiry",
+                args.plan_file.display()
+            );
+        }
+        let expired = args
+            .plan_file
+            .with_file_name(format!("expired-{}.json", existing.nonce));
+        fs::rename(&args.plan_file, &expired).with_context(|| {
+            format!(
+                "archive expired reset plan {} to {}",
+                args.plan_file.display(),
+                expired.display()
+            )
+        })?;
+    }
+    let now = Utc::now();
+    let mut plan = PreproductionResetPlan {
+        format_version: RESET_PLAN_FORMAT_VERSION,
+        nonce: PreproductionResetNonce::from_v7(),
+        created_at: now,
+        expires_at: now + Duration::minutes(RESET_PLAN_TTL_MINUTES),
+        targets: reset_target_fingerprints(&deploy)?,
+        inventory,
+        plan_hash: CanonicalDigest::content_hash_json(&"pending")?,
+    };
+    plan.plan_hash = reset_plan_hash(&plan)?;
+    write_private_json(&args.plan_file, &plan)?;
+    println!("preproduction reset plan created");
+    println!("plan_file={}", args.plan_file.display());
+    println!("confirmation_nonce={}", plan.nonce);
+    println!("expires_at={}", plan.expires_at.to_rfc3339());
+    println!("postgres_endpoint_fingerprint={}", plan.targets.postgres);
+    println!(
+        "clickhouse_endpoint_fingerprint={}",
+        plan.targets.clickhouse
+    );
+    println!("redis_endpoint_fingerprint={}", plan.targets.redis);
+    println!("postgres_objects={}", plan.inventory.postgres_object_count);
+    println!(
+        "clickhouse_objects={}",
+        plan.inventory.clickhouse_object_count
+    );
+    println!(
+        "redis_qp_namespace_keys={}",
+        plan.inventory.redis_namespace_key_count
+    );
+    Ok(())
+}
+
+async fn preproduction_reset_apply(args: PreproductionResetApplyArgs) -> Result<()> {
+    let deploy = load_reset_deploy(&args.config)?;
+    let plan = read_reset_plan(&args.plan_file)?;
+    validate_reset_plan(&plan, &deploy, &args.confirm_nonce)?;
+    let current_inventory = reset_inventory(&deploy).await?;
+    if current_inventory != plan.inventory {
+        bail!("reset target inventory changed after planning; create a new reset plan");
+    }
+    if current_inventory.postgres_connection_count != 0 {
+        bail!("PostgreSQL target still has active connections");
+    }
+
+    let postgres_password = migration_password(
+        deploy.db.postgres.migration.password.as_ref(),
+        "db.postgres.migration.password",
+    )?;
+    let mut maintenance_config = deploy.db.postgres.migration_connection(postgres_password);
+    "postgres".clone_into(&mut maintenance_config.database);
+    let maintenance = PostgresPool::connect_existing(&maintenance_config)
+        .await
+        .context("connect PostgreSQL maintenance database for reset lease")?;
+    let lease = acquire_lifecycle_lease(maintenance.connection())
+        .await
+        .context("acquire reset lifecycle lease")?;
+    let locked_inventory = reset_inventory(&deploy).await?;
+    if locked_inventory != plan.inventory || locked_inventory.postgres_connection_count != 0 {
+        release_lifecycle_lease(lease)
+            .await
+            .context("release reset lifecycle lease after stale plan")?;
+        bail!("reset target changed while acquiring the lifecycle lease; create a new plan");
+    }
+
+    let in_progress_path = args
+        .plan_file
+        .with_file_name(format!("in-progress-{}.json", plan.nonce));
+    fs::rename(&args.plan_file, &in_progress_path).with_context(|| {
+        format!(
+            "consume one-time reset plan {} as {}",
+            args.plan_file.display(),
+            in_progress_path.display()
+        )
+    })?;
+    let consumed_plan = read_reset_plan(&in_progress_path)?;
+    if consumed_plan != plan {
+        release_lifecycle_lease(lease)
+            .await
+            .context("release reset lifecycle lease after plan mismatch")?;
+        bail!("reset plan changed before one-time consumption");
+    }
+
+    let mutation_result = async {
+        reset_preproduction_postgres(&deploy.db.postgres, postgres_password)
+            .await
+            .context("recreate exact PostgreSQL quant_pivot database")?;
+        let clickhouse_password = migration_password(
+            deploy.db.clickhouse.migration.password.as_ref(),
+            "db.clickhouse.migration.password",
+        )?;
+        let clickhouse_config = deploy
+            .db
+            .clickhouse
+            .migration_connection(clickhouse_password);
+        reset_clickhouse_preproduction_database(&clickhouse_config)
+            .await
+            .context("recreate exact ClickHouse quant_pivot database")?;
+        let deleted = unlink_preproduction_namespace(&deploy.cache.redis)
+            .await
+            .context("unlink exact Redis qp:* namespace")?;
+
+        let postgres = PostgresPool::connect_migration(&deploy.db.postgres, postgres_password)
+            .await
+            .context("connect recreated PostgreSQL database")?;
+        apply_under_lifecycle_lease(postgres.connection(), &lease)
+            .await
+            .context("apply unique PostgreSQL boot migration")?;
+        let bootstrap_admin_password_hash = bootstrap_admin_password_hash()?;
+        finalize_schema_deployment(
+            postgres.connection(),
+            &deploy.db.postgres.user,
+            &bootstrap_admin_password_hash,
+        )
+        .await
+        .context("finalize recreated PostgreSQL schema")?;
+        PgModelRegistryRepository::new(postgres.connection().clone())
+            .ensure_builtin_research_profiles()
+            .await
+            .context("seed immutable research profile artifacts")?;
+        let policy_repository = PgPolicyRepository::new(postgres.connection().clone());
+        let policy_bundle = ensure_default_policy_bundle(
+            &policy_repository,
+            "quant-pivot-xtask",
+            "guarded preproduction clean boot",
+        )
+        .await
+        .context("seed canonical six-resource policy bundle")?;
+        let postgres_status = verify_postgres_schema(postgres.connection())
+            .await
+            .context("verify recreated PostgreSQL schema")?;
+        let clickhouse_status = apply_online_schema_migrations(&clickhouse_config)
+            .await
+            .context("apply unique ClickHouse boot migration")?;
+        let redis_remaining = count_preproduction_namespace(&deploy.cache.redis)
+            .await
+            .context("verify Redis qp:* namespace")?;
+        if redis_remaining != 0 {
+            bail!("Redis qp:* namespace is not empty after reset");
+        }
+        postgres.close().await;
+        println!("redis_unlinked={deleted}");
+        println!(
+            "postgres_boot_version={} postgres_migrations={}",
+            postgres_status.current_version, postgres_status.migration_count
+        );
+        println!(
+            "clickhouse_boot_version={} clickhouse_objects={}",
+            clickhouse_status.current_version, clickhouse_status.required_object_count
+        );
+        println!(
+            "policy_bundle_generation={} policy_snapshot_id={} policy_snapshot_hash={}",
+            policy_bundle.generation,
+            policy_bundle.decision_policy_snapshot_id,
+            policy_bundle.snapshot_hash
+        );
+        Ok::<(), anyhow::Error>(())
+    }
+    .await;
+    let release_result = release_lifecycle_lease(lease)
+        .await
+        .context("release reset lifecycle lease");
+    match (mutation_result, release_result) {
+        (Err(error), _) | (Ok(()), Err(error)) => Err(error),
+        (Ok(()), Ok(())) => {
+            let completed_path =
+                in_progress_path.with_file_name(format!("completed-{}.json", plan.nonce));
+            fs::rename(&in_progress_path, &completed_path).with_context(|| {
+                format!(
+                    "archive completed reset plan {} to {}",
+                    in_progress_path.display(),
+                    completed_path.display()
+                )
+            })?;
+            println!("preproduction reset completed and verified");
+            println!("completed_plan={}", completed_path.display());
+            Ok(())
+        }
+    }
+}
+
+async fn preproduction_reset_verify(args: ConfigDirArgs) -> Result<()> {
+    let deploy = load_reset_deploy(&args)?;
+    let postgres_password = migration_password(
+        deploy.db.postgres.migration.password.as_ref(),
+        "db.postgres.migration.password",
+    )?;
+    let inventory = inspect_preproduction_postgres(&deploy.db.postgres, postgres_password)
+        .await
+        .context("inspect PostgreSQL reset target")?;
+    if inventory.production_baseline_exists {
+        bail!("production baseline exists; this environment is not resettable");
+    }
+    let postgres = PostgresPool::connect_existing(&deploy.db.postgres)
+        .await
+        .context("connect PostgreSQL runtime identity")?;
+    let postgres_status = verify_postgres_schema(postgres.connection())
+        .await
+        .context("verify PostgreSQL boot manifest")?;
+    let clickhouse_status = verify_schema(&deploy.db.clickhouse)
+        .await
+        .context("verify ClickHouse boot manifest")?;
+    let redis_keys = count_preproduction_namespace(&deploy.cache.redis)
+        .await
+        .context("count Redis qp:* namespace")?;
+    if redis_keys != 0 {
+        bail!("Redis qp:* namespace contains {redis_keys} keys");
+    }
+    let repository = PgPolicyRepository::new(postgres.connection().clone());
+    if repository.load_current_bundle().await?.is_none() {
+        bail!("PostgreSQL boot schema has no active six-resource policy bundle");
+    }
+    println!(
+        "preproduction reset verified: pg_version={} ch_version={} redis_qp_keys=0",
+        postgres_status.current_version, clickhouse_status.current_version
+    );
+    postgres.close().await;
+    Ok(())
+}
+
+fn load_reset_deploy(args: &ConfigDirArgs) -> Result<DeployConfig> {
+    let config_dir = args
+        .config_dir
+        .to_str()
+        .context("preproduction reset config directory is not valid UTF-8")?;
+    DeployConfig::load_for_migration(config_dir).context("load reset deploy config")
+}
+
+async fn reset_inventory(deploy: &DeployConfig) -> Result<ResetObjectInventory> {
+    let postgres_password = migration_password(
+        deploy.db.postgres.migration.password.as_ref(),
+        "db.postgres.migration.password",
+    )?;
+    let clickhouse_password = migration_password(
+        deploy.db.clickhouse.migration.password.as_ref(),
+        "db.clickhouse.migration.password",
+    )?;
+    let clickhouse_config = deploy
+        .db
+        .clickhouse
+        .migration_connection(clickhouse_password);
+    let (postgres, clickhouse_object_count, redis_namespace_key_count) = tokio::try_join!(
+        async {
+            inspect_preproduction_postgres(&deploy.db.postgres, postgres_password)
+                .await
+                .map_err(anyhow::Error::from)
+        },
+        async {
+            database_object_count(&clickhouse_config)
+                .await
+                .map_err(anyhow::Error::from)
+        },
+        async {
+            count_preproduction_namespace(&deploy.cache.redis)
+                .await
+                .map_err(anyhow::Error::from)
+        },
+    )?;
+    if postgres.production_baseline_exists {
+        bail!("production baseline exists; preproduction reset is forbidden");
+    }
+    Ok(ResetObjectInventory {
+        postgres_database_exists: postgres.database_exists,
+        postgres_object_count: postgres.object_count,
+        postgres_connection_count: postgres.connection_count,
+        clickhouse_object_count,
+        redis_namespace_key_count,
+    })
+}
+
+fn reset_target_fingerprints(deploy: &DeployConfig) -> Result<ResetTargetFingerprints> {
+    Ok(ResetTargetFingerprints {
+        postgres: CanonicalDigest::content_hash_json(&(
+            deploy.db.postgres.host.as_str(),
+            deploy.db.postgres.port,
+            deploy.db.postgres.database.as_str(),
+            deploy.db.postgres.schema.as_str(),
+            deploy.db.postgres.user.as_str(),
+            deploy.db.postgres.migration.user.as_str(),
+        ))?,
+        clickhouse: CanonicalDigest::content_hash_json(&(
+            deploy.db.clickhouse.url.as_str(),
+            deploy.db.clickhouse.database.as_str(),
+            deploy.db.clickhouse.user.as_str(),
+            deploy.db.clickhouse.migration.user.as_str(),
+            deploy.db.clickhouse.deployment_id.as_str(),
+        ))?,
+        redis: CanonicalDigest::content_hash_json(&(
+            deploy.cache.redis.host.as_str(),
+            deploy.cache.redis.port,
+            deploy.cache.redis.database,
+            deploy.cache.redis.user.as_str(),
+            deploy.cache.redis.key_prefix.as_str(),
+        ))?,
+    })
+}
+
+fn reset_plan_hash(plan: &PreproductionResetPlan) -> Result<ContentHash> {
+    CanonicalDigest::content_hash_json(&ResetPlanDigest {
+        format_version: plan.format_version,
+        nonce: &plan.nonce,
+        created_at: plan.created_at,
+        expires_at: plan.expires_at,
+        targets: &plan.targets,
+        inventory: &plan.inventory,
+    })
+    .context("hash preproduction reset plan")
+}
+
+fn validate_reset_plan(
+    plan: &PreproductionResetPlan,
+    deploy: &DeployConfig,
+    confirm_nonce: &PreproductionResetNonce,
+) -> Result<()> {
+    if plan.format_version != RESET_PLAN_FORMAT_VERSION
+        || &plan.nonce != confirm_nonce
+        || plan.expires_at <= Utc::now()
+        || plan.targets != reset_target_fingerprints(deploy)?
+        || plan.plan_hash != reset_plan_hash(plan)?
+    {
+        bail!("reset plan is expired, tampered, targets another endpoint, or nonce mismatched");
+    }
+    Ok(())
+}
+
+fn read_reset_plan(path: &Path) -> Result<PreproductionResetPlan> {
+    let bytes = fs::read(path).with_context(|| format!("read reset plan {}", path.display()))?;
+    serde_json::from_slice(&bytes).with_context(|| format!("parse reset plan {}", path.display()))
+}
+
+fn write_private_json(path: &Path, value: &impl Serialize) -> Result<()> {
+    fs::create_dir_all(path.parent().context("reset plan path has no parent")?)
+        .context("create reset plan directory")?;
+    let mut rendered = serde_json::to_vec_pretty(value).context("render reset plan")?;
+    rendered.push(b'\n');
+    fs::write(path, rendered).with_context(|| format!("write reset plan {}", path.display()))?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+        .with_context(|| format!("restrict reset plan {}", path.display()))?;
+    Ok(())
+}
+
 async fn postgres_schema(command: PostgresSchemaCommand) -> Result<()> {
     let args = match &command {
         PostgresSchemaCommand::Plan(args)
         | PostgresSchemaCommand::Apply(args)
         | PostgresSchemaCommand::Verify(args)
         | PostgresSchemaCommand::Manifest(args) => Some(args),
-        PostgresSchemaCommand::MigrationManifest => None,
+        PostgresSchemaCommand::ManifestClean | PostgresSchemaCommand::MigrationManifest => None,
     };
     let Some(args) = args else {
-        write_postgres_migration_manifest()?;
-        return Ok(());
+        return match command {
+            PostgresSchemaCommand::ManifestClean => generate_clean_postgres_manifest().await,
+            PostgresSchemaCommand::MigrationManifest => {
+                write_postgres_migration_manifest()?;
+                Ok(())
+            }
+            _ => unreachable!("commands carrying config arguments were handled above"),
+        };
     };
     let config_dir = args
         .config_dir
@@ -607,8 +1302,71 @@ async fn postgres_schema(command: PostgresSchemaCommand) -> Result<()> {
             pool.close().await;
             Ok(())
         }
-        PostgresSchemaCommand::MigrationManifest => Ok(()),
+        PostgresSchemaCommand::ManifestClean | PostgresSchemaCommand::MigrationManifest => Ok(()),
     }
+}
+
+async fn generate_clean_postgres_manifest() -> Result<()> {
+    const DATABASE: &str = "quant_pivot_manifest_codegen";
+    const RUNTIME_ROLE: &str = "quant_pivot_manifest_runtime";
+
+    let password = Zeroizing::new(Uuid::now_v7().to_string());
+    let container = Postgres::default()
+        .with_db_name(DATABASE)
+        .with_user("postgres")
+        .with_password(password.as_str())
+        .with_tag("16")
+        .start()
+        .await
+        .context("start disposable PostgreSQL manifest container")?;
+    let port = container
+        .get_host_port_ipv4(5432)
+        .await
+        .context("resolve disposable PostgreSQL manifest port")?;
+    let config = PostgresConfig {
+        port,
+        user: "postgres".to_owned(),
+        password: SystemdCredentialRef::from_resolved(password.as_str().to_owned()),
+        database: DATABASE.to_owned(),
+        min_connections: 1,
+        max_connections: 2,
+        verify_session_params: false,
+        application_name: "quant-pivot-manifest-codegen".to_owned(),
+        ..PostgresConfig::default()
+    };
+
+    let pool = PostgresPool::connect(&config)
+        .await
+        .context("connect disposable PostgreSQL manifest database")?;
+    pool.connection()
+        .execute_unprepared("CREATE ROLE quant_pivot_manifest_runtime NOLOGIN")
+        .await
+        .context("create disposable PostgreSQL runtime role")?;
+    apply_postgres_migrations(pool.connection())
+        .await
+        .context("apply migrations to disposable PostgreSQL manifest database")?;
+    let bootstrap_password = Zeroizing::new(Uuid::now_v7().to_string());
+    let bootstrap_password_hash =
+        hash_password(bootstrap_password.as_str()).context("hash disposable bootstrap password")?;
+    let manifest = generate_disposable_schema_manifest(
+        pool.connection(),
+        RUNTIME_ROLE,
+        &bootstrap_password_hash,
+    )
+    .await
+    .context("generate disposable PostgreSQL semantic manifest")?;
+    let rendered = render_schema_manifest(&manifest).context("render PostgreSQL manifest")?;
+    let path = workspace_root()?
+        .join("schema")
+        .join("postgres")
+        .join("manifest.json");
+    fs::write(&path, rendered).with_context(|| format!("write {}", path.display()))?;
+    let migration_path = write_postgres_migration_manifest()?;
+    pool.close().await;
+    drop(container);
+    println!("generated {} from disposable PostgreSQL 16", path.display());
+    println!("generated {}", migration_path.display());
+    Ok(())
 }
 
 fn write_postgres_migration_manifest() -> Result<PathBuf> {
@@ -641,7 +1399,26 @@ async fn clickhouse_schema(command: ClickHouseSchemaCommand) -> Result<()> {
         .context("ClickHouse schema config directory is not valid UTF-8")?;
     let deploy = DeployConfig::load_for_migration(config_dir).context("load deploy config")?;
     let config = &deploy.db.clickhouse;
-    match command {
+    let lifecycle_lease = if matches!(
+        &command,
+        ClickHouseSchemaCommand::ApplyOnline(_) | ClickHouseSchemaCommand::ApplyOffline(_)
+    ) {
+        let password = migration_password(
+            deploy.db.postgres.migration.password.as_ref(),
+            "db.postgres.migration.password",
+        )?;
+        let postgres = PostgresPool::connect_migration(&deploy.db.postgres, password)
+            .await
+            .context("connect PostgreSQL for cross-system lifecycle lease")?;
+        Some(
+            acquire_lifecycle_lease(postgres.connection())
+                .await
+                .context("acquire cross-system lifecycle lease")?,
+        )
+    } else {
+        None
+    };
+    let result = match command {
         ClickHouseSchemaCommand::Plan(_) => {
             let password = migration_password(
                 config.migration.password.as_ref(),
@@ -720,6 +1497,16 @@ async fn clickhouse_schema(command: ClickHouseSchemaCommand) -> Result<()> {
             println!("generated {}", path.display());
             Ok(())
         }
+    };
+    let release_result = match lifecycle_lease {
+        Some(lease) => release_lifecycle_lease(lease)
+            .await
+            .context("release cross-system lifecycle lease"),
+        None => Ok(()),
+    };
+    match (result, release_result) {
+        (Err(error), _) | (Ok(()), Err(error)) => Err(error),
+        (Ok(()), Ok(())) => Ok(()),
     }
 }
 

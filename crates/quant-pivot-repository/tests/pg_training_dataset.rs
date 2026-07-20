@@ -3,7 +3,7 @@
 use chrono::{Duration as ChronoDuration, Utc};
 use quant_pivot_error::storage::{StorageError, entity};
 use quant_pivot_models::{
-    domain::{CompleteTrainingDatasetBuild, NewModelSpec, NewModelVersion, NewTrainingDatasetPlan},
+    domain::{CompleteTrainingDatasetBuild, NewModelVersion, NewTrainingDatasetPlan},
     enums::{
         model::ModelFamily,
         quant::{DatasetPurpose, PublicationStatus, TrainingDatasetStatus},
@@ -14,6 +14,7 @@ use quant_pivot_models::{
         DatasetManifest, DecisionPolicySnapshotId, ModelInputContract, ModelSpecId,
         ModelTrainingContract, ModelVersionId, SchemaVersion, TrainingDatasetId,
         TrainingHorizonsSecs, TrainingSampleSources, default_sample_sources,
+        model_metrics::ModelVersionMetrics, model_training::ModelTrainingObjective,
     },
 };
 use quant_pivot_repository::{
@@ -33,18 +34,16 @@ async fn seed_runtime_config(db: &sea_orm::DatabaseConnection) -> DecisionPolicy
 async fn seed_model_spec(db: &sea_orm::DatabaseConnection) -> ModelSpecId {
     let model_spec_id = ModelSpecId::from_v7();
     PgModelRegistryRepository::new(db.clone())
-        .create_model_spec(NewModelSpec {
-            model_spec_id: model_spec_id.clone(),
-            name: "pg-dataset-it".to_owned(),
-            model_family: ModelFamily::WeightedFactor,
-            prediction_horizon_secs: 86_400,
-            feature_schema_version: SchemaVersion::FIRST,
-            label_schema_version: SchemaVersion::FIRST,
-            spec_json: serde_json::json!({}),
-            input_contract: ModelInputContract::single_required("book.mid"),
-            training_contract: ModelTrainingContract::settlement_default(),
-            status: PublicationStatus::Published,
-        })
+        .create_model_spec(
+            quant_pivot_test_support::model_spec_fixtures::new_model_spec_fixture(
+                model_spec_id.clone(),
+                "pg-dataset-it",
+                ModelFamily::WeightedFactor,
+                86_400,
+                ModelInputContract::single_required("book.mid"),
+                ModelTrainingContract::settlement_default(),
+            ),
+        )
         .await
         .expect("model spec");
     model_spec_id
@@ -63,9 +62,20 @@ fn new_plan(
     decision_policy_snapshot_id: DecisionPolicySnapshotId,
 ) -> NewTrainingDatasetPlan {
     let window_start = Utc::now() - ChronoDuration::hours(2);
+    let model_spec_definition_hash =
+        quant_pivot_test_support::model_spec_fixtures::new_model_spec_fixture(
+            model_spec_id.clone(),
+            "pg-dataset-it",
+            ModelFamily::WeightedFactor,
+            86_400,
+            ModelInputContract::single_required("book.mid"),
+            ModelTrainingContract::settlement_default(),
+        )
+        .definition_hash;
     NewTrainingDatasetPlan {
         training_dataset_id: dataset_id,
         model_spec_id,
+        model_spec_definition_hash,
         window_start,
         window_end: window_start + ChronoDuration::hours(1),
         purpose: DatasetPurpose::Training,
@@ -90,6 +100,7 @@ fn completion(
         research_program_hash: content_hash('4'),
         source_slice: quant_pivot_test_support::execution_pg_seed::source_slice_ref('5'),
         model_spec_id: plan.model_spec_id.clone(),
+        model_spec_definition_hash: plan.model_spec_definition_hash.clone(),
         trade_policy_artifact_id: None,
         trade_policy_hash: None,
         decision_policy_snapshot_id: plan.decision_policy_snapshot_id.clone(),
@@ -173,6 +184,26 @@ async fn quant_training_dataset_migration_and_crud() {
         .expect("find")
         .expect("row");
     assert_eq!(found.dataset_hash, created.dataset_hash);
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn training_dataset_plan_rejects_model_spec_definition_drift() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let rc_id = seed_runtime_config(&db).await;
+    let model_spec_id = seed_model_spec(&db).await;
+    let repo = PgTrainingDatasetRepository::new(db);
+    let mut plan = new_plan(TrainingDatasetId::from_v7(), model_spec_id, rc_id);
+    plan.model_spec_definition_hash = content_hash('f');
+
+    assert!(matches!(
+        repo.create_plan(plan).await,
+        Err(StorageError::InvariantViolation {
+            entity: Some(entity::QUANT_TRAINING_DATASET),
+            ..
+        })
+    ));
 }
 
 #[tokio::test]
@@ -264,9 +295,10 @@ async fn model_version_training_dataset_foreign_key() {
             trade_policy_artifact_id: None,
             trade_policy_hash: None,
             publish_path_set_id: None,
-            metrics_json: serde_json::json!({}),
-            training_objective_json: serde_json::json!({"kind": "not_trained"}),
-            quality_gate_report: serde_json::json!({}),
+            derivation: NewModelVersion::training_derivation(),
+            metrics: ModelVersionMetrics::not_measured("test fixture"),
+            training_objective: ModelTrainingObjective::hand_authored("test fixture"),
+            quality_gate_report: None,
             publication_status: PublicationStatus::Candidate,
             published_at: None,
             retired_at: None,
@@ -287,9 +319,10 @@ async fn model_version_training_dataset_foreign_key() {
             trade_policy_artifact_id: None,
             trade_policy_hash: None,
             publish_path_set_id: None,
-            metrics_json: serde_json::json!({}),
-            training_objective_json: serde_json::json!({"kind": "not_trained"}),
-            quality_gate_report: serde_json::json!({}),
+            derivation: NewModelVersion::training_derivation(),
+            metrics: ModelVersionMetrics::not_measured("test fixture"),
+            training_objective: ModelTrainingObjective::hand_authored("test fixture"),
+            quality_gate_report: None,
             publication_status: PublicationStatus::Candidate,
             published_at: None,
             retired_at: None,

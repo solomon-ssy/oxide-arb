@@ -244,6 +244,22 @@ pub enum QpDecisionPolicySnapshotSource {
 #[sea_orm(
     rs_type = "Enum",
     db_type = "Enum",
+    enum_name = "qp_profile_artifact_kind"
+)]
+pub enum QpProfileArtifactKind {
+    #[sea_orm(string_value = "feature")]
+    Feature,
+    #[sea_orm(string_value = "scoring")]
+    Scoring,
+    #[sea_orm(string_value = "domain")]
+    Domain,
+    #[sea_orm(string_value = "research_method")]
+    ResearchMethod,
+}
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(
+    rs_type = "Enum",
+    db_type = "Enum",
     enum_name = "qp_domain_cursor_status"
 )]
 pub enum QpDomainCursorStatus {
@@ -724,6 +740,20 @@ pub enum QpModelGovernanceAction {
 #[sea_orm(
     rs_type = "Enum",
     db_type = "Enum",
+    enum_name = "qp_model_version_derivation_kind"
+)]
+pub enum QpModelVersionDerivationKind {
+    #[sea_orm(string_value = "training")]
+    Training,
+    #[sea_orm(string_value = "score_multiplier_calibration")]
+    ScoreMultiplierCalibration,
+    #[sea_orm(string_value = "return_calibration")]
+    ReturnCalibration,
+}
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(
+    rs_type = "Enum",
+    db_type = "Enum",
     enum_name = "qp_model_run_error_code"
 )]
 pub enum QpModelRunErrorCode {
@@ -745,6 +775,18 @@ pub enum QpModelRunErrorCode {
     TrainingFailed,
     #[sea_orm(string_value = "cancelled_by_operator")]
     CancelledByOperator,
+}
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(
+    rs_type = "Enum",
+    db_type = "Enum",
+    enum_name = "qp_model_weight_source"
+)]
+pub enum QpModelWeightSource {
+    #[sea_orm(string_value = "artifact")]
+    Artifact,
+    #[sea_orm(string_value = "config_overlay")]
+    ConfigOverlay,
 }
 #[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(rs_type = "Enum", db_type = "Enum", enum_name = "qp_model_run_kind")]
@@ -815,6 +857,26 @@ pub enum QpOperationCategory {
     Replay,
     #[sea_orm(string_value = "other")]
     Other,
+}
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(
+    rs_type = "Enum",
+    db_type = "Enum",
+    enum_name = "qp_operation_http_method"
+)]
+pub enum QpOperationHttpMethod {
+    #[sea_orm(string_value = "GET")]
+    Get,
+    #[sea_orm(string_value = "POST")]
+    Post,
+    #[sea_orm(string_value = "PUT")]
+    Put,
+    #[sea_orm(string_value = "PATCH")]
+    Patch,
+    #[sea_orm(string_value = "DELETE")]
+    Delete,
+    #[sea_orm(string_value = "SYSTEM")]
+    System,
 }
 #[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(rs_type = "Enum", db_type = "Enum", enum_name = "qp_operation_outcome")]
@@ -1225,6 +1287,18 @@ pub enum QpResearchReadinessEvidenceKind {
     RetentionRunway,
     #[sea_orm(string_value = "shadow_latency_profile")]
     ShadowLatencyProfile,
+}
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(
+    rs_type = "Enum",
+    db_type = "Enum",
+    enum_name = "qp_production_evidence_kind"
+)]
+pub enum QpProductionEvidenceKind {
+    #[sea_orm(string_value = "backup_restore")]
+    BackupRestore,
+    #[sea_orm(string_value = "protected_config_end_to_end")]
+    ProtectedConfigEndToEnd,
 }
 #[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(rs_type = "Enum", db_type = "Enum", enum_name = "qp_resolver_tier")]

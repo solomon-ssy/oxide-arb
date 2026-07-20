@@ -7,9 +7,11 @@ use sea_orm::entity::prelude::*;
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "decision_policy_snapshot")]
 pub struct Model {
+    #[sea_orm(unique)]
+    pub bundle_generation: i64,
     #[sea_orm(primary_key, auto_increment = false)]
     pub decision_policy_snapshot_id: Uuid,
-    #[sea_orm(column_type = "Text", unique)]
+    #[sea_orm(column_type = "Text")]
     pub snapshot_hash: String,
     #[sea_orm(column_type = "JsonBinary")]
     pub snapshot: Json,

@@ -6,6 +6,7 @@ use crate::{
         RecommendationReportInfo,
         patch::{NullablePatch, Patch},
     },
+    entities::quant_order_intent,
     enums::{
         common::Side,
         execution::{
@@ -21,17 +22,16 @@ use crate::{
         ContentHash, DecisionPolicySnapshotId, EntryConditionInstanceId, EntryOrderSpec,
         ExecutionOrderId, ExitPolicySpec, ExitReinferenceObservation, MarketId, ModelVersionId,
         OrderId, OrderIntentId, PreparedVenueOrder, Price, RecommendationId,
-        RecommendationReportId, ResearchProfileRef, ScaleOutState, Shares, TokenId, Usd,
+        RecommendationReportId, ResearchProfileArtifactId, ResearchProfileRef, ScaleOutState,
+        Shares, TokenId, Usd, UserId,
     },
 };
 use chrono::{DateTime, Utc};
 use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 /// Governed bridge from a recommendation to execution.
-#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
-#[sea_orm(entity = "crate::entities::quant_order_intent::Entity")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrderIntentInfo {
     pub order_intent_id: OrderIntentId,
     pub recommendation_id: RecommendationId,
@@ -42,7 +42,7 @@ pub struct OrderIntentInfo {
     pub intent_kind: OrderIntentKind,
     pub status: OrderIntentStatus,
     pub approval_status: ApprovalStatus,
-    pub approved_by: Option<Uuid>,
+    pub approved_by: Option<UserId>,
     pub approval_reason: Option<String>,
     pub approved_at: Option<DateTime<Utc>>,
     pub policy_id: Option<String>,
@@ -65,29 +65,57 @@ pub struct OrderIntentInfo {
     pub updated_at: DateTime<Utc>,
 }
 
-info_from_model!(OrderIntentInfo, crate::entities::quant_order_intent::Model, {
-    order_intent_id, recommendation_id, runtime_mode, decision_policy_snapshot_id,
-    model_version_id, profile_ref, intent_kind, status, approval_status, approved_by,
-    approval_reason, approved_at, policy_id, policy_hash, status_reason,
-    admission_trace_ref, condition_instance_id, entry_order_json, exit_policy_json, risk_envelope_hash,
-    expires_at, exit_state, exit_reason, next_check_at, peak_mark_price,
-    last_signal_recheck_at, latest_reinference_json, scale_out_state, created_at, updated_at,
-});
+impl From<quant_order_intent::Model> for OrderIntentInfo {
+    fn from(model: quant_order_intent::Model) -> Self {
+        Self {
+            order_intent_id: model.order_intent_id,
+            recommendation_id: model.recommendation_id,
+            runtime_mode: model.runtime_mode,
+            decision_policy_snapshot_id: model.decision_policy_snapshot_id,
+            model_version_id: model.model_version_id,
+            profile_ref: model.research_profile_artifact_id.profile_ref(),
+            intent_kind: model.intent_kind,
+            status: model.status,
+            approval_status: model.approval_status,
+            approved_by: model.approved_by,
+            approval_reason: model.approval_reason,
+            approved_at: model.approved_at,
+            policy_id: model.policy_id,
+            policy_hash: model.policy_hash,
+            status_reason: model.status_reason,
+            admission_trace_ref: model.admission_trace_ref,
+            condition_instance_id: model.condition_instance_id,
+            entry_order_json: model.entry_order_json,
+            exit_policy_json: model.exit_policy_json,
+            risk_envelope_hash: model.risk_envelope_hash,
+            expires_at: model.expires_at,
+            exit_state: model.exit_state,
+            exit_reason: model.exit_reason,
+            next_check_at: model.next_check_at,
+            peak_mark_price: model.peak_mark_price,
+            last_signal_recheck_at: model.last_signal_recheck_at,
+            latest_reinference_json: model.latest_reinference_json,
+            scale_out_state: model.scale_out_state,
+            created_at: model.created_at,
+            updated_at: model.updated_at,
+        }
+    }
+}
 
 /// Insert payload for `quant_order_intent`.
 #[derive(Debug, Clone, Serialize, Deserialize, DeriveIntoActiveModel)]
-#[sea_orm(active_model = "crate::entities::quant_order_intent::ActiveModel")]
+#[sea_orm(active_model = "quant_order_intent::ActiveModel")]
 pub struct NewOrderIntent {
     pub order_intent_id: OrderIntentId,
     pub recommendation_id: RecommendationId,
     pub runtime_mode: QuantRuntimeMode,
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub model_version_id: ModelVersionId,
-    pub profile_ref: ResearchProfileRef,
+    pub research_profile_artifact_id: ResearchProfileArtifactId,
     pub intent_kind: OrderIntentKind,
     pub status: OrderIntentStatus,
     pub approval_status: ApprovalStatus,
-    pub approved_by: Option<Uuid>,
+    pub approved_by: Option<UserId>,
     pub approval_reason: Option<String>,
     pub approved_at: Option<DateTime<Utc>>,
     pub policy_id: Option<String>,
@@ -116,7 +144,7 @@ pub struct IntentCreationLimits {
 /// Approval transition payload for an order intent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApproveOrderIntent {
-    pub approved_by: Uuid,
+    pub approved_by: UserId,
     pub approval_reason: String,
     pub approved_at: DateTime<Utc>,
 }

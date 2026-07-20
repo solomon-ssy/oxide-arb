@@ -71,10 +71,12 @@ fn validate_and_normalize_candidates(
         )
         .map_err(|error| catalog_candidate_error(format!("hash catalog event object: {error}")))?;
         let object_id = CatalogEventObjectId::from_content_hash(&content_hash);
-        let source = serde_json::from_value::<EventRegistryInfo>(candidate.object.payload.clone())
-            .map_err(|error| {
-                catalog_candidate_error(format!("decode typed catalog event payload: {error}"))
-            })?;
+        let source = serde_json::from_value::<EventRegistryInfo>(
+            candidate.object.payload.clone().into_inner(),
+        )
+        .map_err(|error| {
+            catalog_candidate_error(format!("decode typed catalog event payload: {error}"))
+        })?;
         if candidate.object.content_hash != content_hash
             || candidate.object.event_object_id != object_id
             || candidate.change.event_object_id != object_id
@@ -126,10 +128,12 @@ fn validate_and_normalize_candidates(
         )
         .map_err(|error| catalog_candidate_error(format!("hash catalog market object: {error}")))?;
         let object_id = CatalogMarketObjectId::from_content_hash(&content_hash);
-        let source = serde_json::from_value::<MarketRegistryInfo>(candidate.object.payload.clone())
-            .map_err(|error| {
-                catalog_candidate_error(format!("decode typed catalog market payload: {error}"))
-            })?;
+        let source = serde_json::from_value::<MarketRegistryInfo>(
+            candidate.object.payload.clone().into_inner(),
+        )
+        .map_err(|error| {
+            catalog_candidate_error(format!("decode typed catalog market payload: {error}"))
+        })?;
         let expected_event_object = event_objects.get(&source.event_id).ok_or_else(|| {
             catalog_candidate_error(format!(
                 "market {} references event {} absent from the same full scan",

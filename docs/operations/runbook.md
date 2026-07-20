@@ -108,14 +108,14 @@ curl -sS -X POST "$BASE/api/system/kill-switch" \
 
 | 项 | 是否必须 | 用于 | 配置位置 | 说明 |
 |----|----------|------|----------|------|
-| Polygon / Polymarket signer private key | 所有 mode 必须 | CLOB auth、账户读取、可执行模式签订单 | `QUANT_PIVOT__KEYS__PRIVATE_KEY` 或 `[keys].private_key` | 不要提交到 git；生产用 secret manager 注入 |
+| Polygon / Polymarket signer private key | 所有 mode 必须 | CLOB auth、账户读取、可执行模式签订单 | `[keys].private_key = { name = "polymarket-private-key" }` | 仅保存 typed credential name；值由 systemd `LoadCredential=` 以 0400/0600 文件挂载 |
 | `quant.account.funder` | 所有 mode 必须 | 读取 collateral、positions、计算 capital base | `QUANT_PIVOT__QUANT__ACCOUNT__FUNDER` | EOA 必须等于 signer 地址；proxy/safe 必须是 signer 控制的钱包地址 |
 | `quant.account.wallet_kind` | 所有 mode 必须 | 决定签名类型和 funder 校验 | `QUANT_PIVOT__QUANT__ACCOUNT__WALLET_KIND` | 当前代码支持 `eoa`、`proxy`、`gnosis_safe` |
 | CLOB L2 credentials | 不单独配置 | CLOB trading endpoints | 自动派生 | SDK connect 时由 private key 和 wallet topology 派生 |
 | Polygon RPC URL | 所有 mode 必须 | on-chain 读写、结算、赎回 | `QUANT_PIVOT__POLYMARKET__ONCHAIN__RPC_URL` | 生产必须使用可靠 RPC，配置超时 |
-| Gasless relayer key/address | proxy/safe 且会提交链上交易时必须 | gasless approval/redeem/settlement | `QUANT_PIVOT__POLYMARKET__RELAYER__API_KEY`, `...__API_KEY_ADDRESS` | EOA 可直接付 gas；relayer key 不得暴露到前端 |
-| JWT signing key | Web API 必须 | HS256 登录和 API 认证 | `QUANT_PIVOT__WEB__JWT__SIGNING_KEY` 或 `[web.jwt].signing_key` | Base64URL-no-pad 编码的恰好 32 个随机字节；轮换立即使所有旧 JWT 失效 |
-| Evidence signing key | 研究证据生产必须 | BLAKE3 keyed attestation | `QUANT_PIVOT__RESEARCH__EVIDENCE_ATTESTATION__SIGNING_KEY` | 64 个小写 hex；旧 key 仅放入 `previous_signing_keys` 验证历史证据，禁止与 JWT key 复用 |
+| Gasless relayer key/address | proxy/safe 且会提交链上交易时必须 | gasless approval/redeem/settlement | `[polymarket.relayer].api_key = { name = "polymarket-relayer-api-key" }`；address 为非敏感配置 | EOA 可直接付 gas；relayer key 不得暴露到前端 |
+| JWT signing key | Web API 必须 | HS256 登录和 API 认证 | `[web.jwt].signing_key = { name = "jwt-signing-key" }` | credential file 内容为 Base64URL-no-pad 编码的恰好 32 个随机字节；轮换立即使所有旧 JWT 失效 |
+| Evidence signing key | 研究证据生产必须 | BLAKE3 keyed attestation | `[research.evidence_attestation].signing_key = { name = "evidence-attestation-key" }` | credential file 内容为 64 个小写 hex；历史 key 也只使用 typed credential reference，禁止与 JWT key 复用 |
 | Telegram / webhook secrets | 可选 | 通知 | systemd Credentials；`operational_control.notifications` 只管事件路由 | Config API 永不返回 secret value |
 
 注意：Polymarket 官方文档列出 Deposit Wallet / `POLY_1271` 等签名类型，但当前代码只建模 `eoa`、`proxy`、`gnosis_safe`。如果要接入 Deposit Wallet，需要先扩展 wallet topology、配置校验、CLOB client 和 relayer 路径。
@@ -820,7 +820,7 @@ SPEC_ID=$(
       "name": "buy-weighted-baseline",
       "model_family": "weighted_factor",
       "prediction_horizon_secs": 86400,
-      "feature_schema_version": 6,
+      "feature_schema_version": 1,
       "label_schema_version": 1,
       "input_contract": {"inputs": [
         {"feature_name": "book.spread_bps", "requiredness": "required"}
@@ -830,13 +830,17 @@ SPEC_ID=$(
         "target_label_horizon_secs": 86400,
         "validation_folds": 5
       },
-      "spec_json": {"tier": "bootstrap", "intent": "day-1 generic buy ranker"},
+      "thesis": {
+        "summary": "Polymarket buy-side weighted-factor baseline",
+        "hypothesis": "Governed factor ranks predict positive 24h forward net returns",
+        "limitations": ["Use only for markets covered by the frozen research profile"]
+      },
       "reason": "bootstrap first model spec"
     }' | jq -r '.data.model_spec_id'
 )
 ```
 
-> `model_family` 取 `qp_model_family` 的 wire 值：`weighted_factor`（买方排序器，冷启动首选）、`hold_vs_exit_weighted`（卖方/退出，需先有平仓样本才可训练）、`classical_*`（需成熟 settlement label）。新建规格恒为 `draft`。UI 入口：研究 → 模型 → **新建模型规格**。要建几个 spec、同一 WeightedFactor 何时拆线，见 [model-spec-catalog-guide.md](./model-spec-catalog-guide.md)。
+> `model_family` 取 `qp_model_family` 的 wire 值：`weighted_factor`（买方排序器，冷启动首选）、`hold_vs_exit_weighted`（卖方/退出，需先有平仓样本才可训练）、`classical_*`（需成熟 settlement label）。ModelSpec 创建后即为 append-only、内容寻址的研究定义；发布状态仅属于训练后的 ModelVersion。UI 入口：研究 → 模型 → **新建模型规格**。要建几个 spec、同一 WeightedFactor 何时拆线，见 [model-spec-catalog-guide.md](./model-spec-catalog-guide.md)。
 
 **Step 0.6 — 注册并发布启用因子**
 

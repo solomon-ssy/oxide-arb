@@ -11,7 +11,11 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = { workspace = true }
+async-trait = { workspace = true }
+blake3 = { workspace = true }
+chrono = { workspace = true }
 clap = { workspace = true, features = ["derive", "env"] }
+quant-pivot-error = { workspace = true, features = ["storage"] }
 quant-pivot-models = { workspace = true }
 quant-pivot-core = { workspace = true }
 quant-pivot-migration = { path = "../quant-pivot-migration" }
@@ -20,9 +24,15 @@ quant-pivot-research = { workspace = true }
 quant-pivot-storage = { workspace = true }
 rustls = { workspace = true }
 schemars = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
+sea-orm = { workspace = true }
+testcontainers = { workspace = true }
+testcontainers-modules = { workspace = true, features = ["postgres"] }
 tokio = { workspace = true }
+uuid = { workspace = true }
 zeroize = { workspace = true }
+url = { workspace = true }
 
 [lints]
 workspace = true

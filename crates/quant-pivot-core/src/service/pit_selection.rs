@@ -283,11 +283,11 @@ mod tests {
             BinanceSymbol, CatalogEventChangeId, CatalogMarketChangeId, CatalogSyncBatchId,
             ContentHash, CryptoAsset, CryptoQuote, DecisionPolicySnapshotId, DomainInstrumentKey,
             DomainSourceId, EventId, MarketId, MarketLinkageId, Price, Probability,
-            ResolverVersion, Shares, TokenId, Usd,
+            ResolverVersion, Shares, TokenId, Usd, stable_name::FeatureName,
         },
     };
     use quant_pivot_research::{
-        features::{FeatureName, ResolvedBook},
+        features::ResolvedBook,
         pit::{BookSnapshotAt, MarketContextAt, PointInTimeSnapshotSource, ResolvedMarketSnapshot},
         selection::{ExclusionReason, ModelFeatureRequirements},
     };

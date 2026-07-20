@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use chrono::{DateTime, Duration, Utc};
-use quant_pivot_error::{QuantError, QuantResult, report::ReportError};
+use quant_pivot_error::{QuantError, QuantResult, infra::InfraError, report::ReportError};
 use quant_pivot_models::{
     clickhouse::{ChProbability, ChUsd, QuantReportRecommendationFactRow},
     domain::{
@@ -15,7 +15,7 @@ use quant_pivot_models::{
     enums::{
         common::{MarketCategory, TickSize},
         domain::LinkageSourceRole,
-        operation_log::{OperationCategory, OperationOutcome},
+        operation_log::{OperationCategory, OperationHttpMethod, OperationOutcome},
         quant::{
             EmptyReportReason, EntryConditionState, FillRequirement, IneligibilityReason,
             OutcomeSide, PriceComparison, QuantRuntimeMode, RecommendationReportStatus,
@@ -36,16 +36,16 @@ use quant_pivot_models::{
         EntryPlan, EventId, EvidenceRefs, EvidenceRefsInput, ExecutionEligibility, ExitPlan,
         FactorBreakdownEntry, FactorCondition, FactorDefinitionId, FeatureVectorId,
         MarketEventCondition, MarketEventTemplate, MarketId, MarketSelectionId, ModelRunId,
-        ModelVersionId, OperationLogId, PassivePlacement, PortfolioConstraintsSnapshot,
-        PortfolioOptimizerMeta, PortfolioPlanId, PortfolioRejectedSummary, PortfolioRiskBudget,
-        Price, PriceCondition, Probability, RecommendationFactorBreakdown, RecommendationId,
-        RecommendationReportId, RecommendationTradePlan, RejectionReasonCount,
-        ReportDataQualitySnapshotId, ReportFunnelReason, ReportFunnelStage, ReportSummary,
-        ResearchProfileRef, RiskEnvelope, ScaleOutTarget, Shares, SizingPlan,
-        ThesisInvalidationPolicy, TradePlanBlocker, TradePolicyCohort, TradePolicyCohortProvenance,
-        TrailingStopPolicy, Usd, WeatherDailyTemperatureCrossedTerminalBound,
-        WeatherDailyTemperatureEnteredBand, WeatherObservationDayClosedOutsideBand,
-        WeatherTemperatureStatistic,
+        ModelVersionId, OperationDetailDocument, OperationLogId, PassivePlacement,
+        PortfolioConstraintsSnapshot, PortfolioOptimizerMeta, PortfolioPlanId,
+        PortfolioRejectedSummary, PortfolioRiskBudget, Price, PriceCondition, Probability,
+        RecommendationFactorBreakdown, RecommendationId, RecommendationReportId,
+        RecommendationTradePlan, RejectionReasonCount, ReportDataQualitySnapshotId,
+        ReportFunnelReason, ReportFunnelStage, ReportSummary, ResearchProfileRef, RiskEnvelope,
+        ScaleOutTarget, Shares, SizingPlan, ThesisInvalidationPolicy, TradePlanBlocker,
+        TradePolicyCohort, TradePolicyCohortProvenance, TrailingStopPolicy, Usd,
+        WeatherDailyTemperatureCrossedTerminalBound, WeatherDailyTemperatureEnteredBand,
+        WeatherObservationDayClosedOutsideBand, WeatherTemperatureStatistic,
     },
 };
 use quant_pivot_research::{
@@ -265,8 +265,7 @@ fn build_report_header(
         .fallback_horizon_secs;
     Ok(NewRecommendationReport {
         recommendation_report_id: report_id.clone(),
-        profile_id: input.profile_ref.id.clone(),
-        profile_ref: input.profile_ref.clone(),
+        research_profile_artifact_id: input.profile_ref.artifact_id(),
         report_kind: ReportKind::TopN,
         decision_at: input.decision_at,
         horizon_secs: i64::try_from(fallback_horizon_secs).map_err(|error| {
@@ -1493,7 +1492,7 @@ fn build_new_recommendation(
     let condition = condition_instance_projection(&trade_plan, input.published_at);
     let recommendation = NewRecommendation {
         recommendation_id: recommendation_id.clone(),
-        profile_ref: input.profile_ref.clone(),
+        research_profile_artifact_id: input.profile_ref.artifact_id(),
         recommendation_report_id: report_id.clone(),
         rank: i32::try_from(planned.rank).map_err(|error| ReportError::NumericOverflow {
             field: "recommendation.rank",
@@ -2056,22 +2055,22 @@ fn operation_log(
 ) -> QuantResult<NewOperationLog> {
     Ok(NewOperationLog {
         id: OperationLogId::from_v7(),
-        request_id: input.trigger_key.clone(),
+        request_id: input.trigger_key.clone().into(),
         actor_user_id: None,
         actor_username: Some("system".to_owned()),
-        acting_role: Some("report_lifecycle".to_owned()),
+        acting_role: Some("report_lifecycle".into()),
         category: OperationCategory::QuantReport,
-        action: "prepare".to_owned(),
+        action: "prepare".into(),
         resource_type: Some(ResourceType::QuantReport),
         resource_id: Some(report_id.to_string()),
-        http_method: "SYSTEM".to_owned(),
+        http_method: OperationHttpMethod::System,
         http_path: "/system/quant/report".to_owned(),
         http_status: 201,
         outcome: OperationOutcome::Success,
         client_ip: None,
         user_agent: None,
         latency_ms: 0,
-        detail: serde_json::json!({
+        detail: OperationDetailDocument::from_serializable(&serde_json::json!({
             "trigger_key": input.trigger_key,
             "trigger_kind": input.trigger.kind().as_str(),
             "status": status.as_str(),
@@ -2080,7 +2079,10 @@ fn operation_log(
             "candidate_count": input.candidate_count,
             "published_count": input.planned.len(),
             "empty_reason": input.empty.as_ref().map(|empty| empty.reason.as_str()),
-        }),
+        }))
+        .map_err(|error| InfraError::AuditDetailInvalid {
+            detail: error.to_string(),
+        })?,
         before_hash: None,
         after_hash: Some(canonical_state_hash(report).map_err(|error| {
             QuantError::config(format!("canonical state hash failed: {error}"))
@@ -2644,7 +2646,7 @@ mod tests {
 
         let result = DefaultRecommendationComposer.compose(ComposeReportInput {
             trigger: &ReportTrigger::AdHoc {
-                request_id: "compose-test".to_owned(),
+                request_id: "compose-test".into(),
             },
             trigger_key: "ad_hoc:compose-test".to_owned(),
             trigger_time,

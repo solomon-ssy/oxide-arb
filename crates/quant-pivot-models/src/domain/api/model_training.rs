@@ -21,7 +21,8 @@ use crate::{
     enums::quant::PublicationStatus,
     types::{
         BacktestPathSetId, ContentHash, ModelRunId, ModelSpecId, ModelVersionId,
-        TradePolicyArtifactId, TrainingDatasetId,
+        TradePolicyArtifactId, TrainingDatasetId, model_metrics::ModelVersionMetrics,
+        model_spec::ModelSpecThesis, model_training::ModelTrainingObjective,
     },
 };
 
@@ -29,7 +30,7 @@ use crate::{
 ///
 /// `Serialize` is derived so the request can be frozen into a durable research
 /// job's `params_json` and replayed on execute.
-#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Validate)]
 #[serde(deny_unknown_fields)]
 pub struct TrainModelRequest {
     /// Frozen training dataset to train on (must be `ready`).
@@ -73,6 +74,9 @@ mod request_tests {
 pub struct TrainedModelView {
     pub model_version_id: ModelVersionId,
     pub model_spec_id: ModelSpecId,
+    pub model_spec_name: String,
+    pub model_spec_thesis: ModelSpecThesis,
+    pub model_spec_definition_hash: ContentHash,
     pub version: i32,
     pub artifact_hash: ContentHash,
     pub training_dataset_id: Option<TrainingDatasetId>,
@@ -84,9 +88,9 @@ pub struct TrainedModelView {
     /// Lifecycle status — a freshly trained version is `candidate`.
     pub publication_status: String,
     /// Trainer metrics (in-sample + validation objective report).
-    pub metrics: serde_json::Value,
+    pub metrics: ModelVersionMetrics,
     /// Frozen training objective provenance used for this model version.
-    pub training_objective: serde_json::Value,
+    pub training_objective: ModelTrainingObjective,
     pub created_at: DateTime<Utc>,
     /// Materialization run id — populated on `POST .../train` only (absent on poll).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -118,6 +122,9 @@ impl From<ModelVersionInfo> for TrainedModelView {
         Self {
             model_version_id: info.model_version_id,
             model_spec_id: info.model_spec_id,
+            model_spec_name: info.model_spec_name,
+            model_spec_thesis: info.model_spec_thesis,
+            model_spec_definition_hash: info.model_spec_definition_hash,
             version: info.version,
             artifact_hash: info.artifact_hash,
             training_dataset_id: info.training_dataset_id,
@@ -125,8 +132,8 @@ impl From<ModelVersionInfo> for TrainedModelView {
             trade_policy_hash: info.trade_policy_hash,
             publish_path_set_id: info.publish_path_set_id,
             publication_status: info.publication_status.as_str().to_owned(),
-            metrics: info.metrics_json,
-            training_objective: info.training_objective_json,
+            metrics: info.metrics,
+            training_objective: info.training_objective,
             created_at: info.created_at,
             model_run_id: None,
             model_family: info.model_family.as_str().to_owned(),

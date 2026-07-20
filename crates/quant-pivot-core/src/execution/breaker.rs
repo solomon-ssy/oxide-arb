@@ -39,12 +39,12 @@ use quant_pivot_models::{
     domain::{KillSwitchPort, KillSwitchView, NewOperationLog, SetKillSwitchCommand},
     enums::{
         execution::KillSwitchState,
-        operation_log::{OperationCategory, OperationOutcome},
+        operation_log::{OperationCategory, OperationHttpMethod, OperationOutcome},
         rbac::ResourceType,
     },
     hashing,
     runtime_config::ExecutionBreakerConfig,
-    types::{OperationLogId, Usd},
+    types::{OperationDetailDocument, OperationLogId, Usd},
 };
 use quant_pivot_repository::traits::OperationLogRepository;
 use rust_decimal::Decimal;
@@ -486,24 +486,34 @@ impl ExecutionBreaker {
                 None
             }
         };
+        let detail = match OperationDetailDocument::from_serializable(&serde_json::json!({
+            "dimension": dimension,
+            "reason": reason,
+        })) {
+            Ok(detail) => detail,
+            Err(error) => {
+                tracing::error!(%error, "execution breaker rejected unsafe audit detail");
+                return;
+            }
+        };
         let log = NewOperationLog {
             id: OperationLogId::from_v7(),
-            request_id: format!("execution-breaker:{dimension}"),
+            request_id: format!("execution-breaker:{dimension}").into(),
             actor_user_id: None,
             actor_username: Some(BREAKER_ACTOR.to_owned()),
-            acting_role: Some("execution_breaker".to_owned()),
+            acting_role: Some("execution_breaker".into()),
             category: OperationCategory::Governance,
-            action: "system.kill_switch.breaker_trip".to_owned(),
+            action: "system.kill_switch.breaker_trip".into(),
             resource_type: Some(ResourceType::System),
             resource_id: Some("kill_switch".to_owned()),
-            http_method: "SYSTEM".to_owned(),
+            http_method: OperationHttpMethod::System,
             http_path: "/system/execution-breaker/trip".to_owned(),
             http_status: 200,
             outcome: OperationOutcome::Success,
             client_ip: None,
             user_agent: None,
             latency_ms: 0,
-            detail: serde_json::json!({ "dimension": dimension, "reason": reason }),
+            detail,
             before_hash,
             after_hash,
             governance_audit_event_id: None,

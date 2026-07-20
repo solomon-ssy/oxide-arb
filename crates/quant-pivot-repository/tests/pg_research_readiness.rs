@@ -45,7 +45,7 @@ fn new_evidence(
     let payload_hash =
         CanonicalDigest::content_hash_json(&payload_json).expect("canonical payload content hash");
     NewResearchReadinessEvidence {
-        evidence_id: Uuid::now_v7(),
+        evidence_id: Uuid::now_v7().into(),
         kind: ResearchReadinessEvidenceKind::ShadowLatencyProfile,
         scope_hash,
         window_start: observed_at - Duration::hours(24),
@@ -76,7 +76,7 @@ async fn readiness_evidence_is_scoped_expiring_idempotent_and_append_only() {
         .await
         .expect("append evidence");
     let mut duplicate = evidence;
-    duplicate.evidence_id = Uuid::now_v7();
+    duplicate.evidence_id = Uuid::now_v7().into();
     let deduplicated = repo.append(duplicate).await.expect("deduplicate evidence");
     assert_eq!(deduplicated.evidence_id, inserted.evidence_id);
 

@@ -25,18 +25,18 @@ use crate::{
         },
     },
     types::{
-        AttributionDetail, ConditionTruth, ConditionUnavailableReason, ContentHash,
-        DecisionPolicySnapshotId, EntryConditionArtifactId, EntryConditionArtifactV1,
-        EntryConditionAuditId, EntryConditionInstanceId, EntryConditionNode, EntryOrderSpec,
-        EntryOutcome, ExecutionOrderId, ExitOutcome, ExitPolicySpec, ExitReinferenceObservation,
-        MarketId, ModelVersionId, NextScaleOutProjection, OrderAmount, OrderId, OrderIntentId,
-        PositionId, Price, RecommendationId, ScaleOutState, Shares, TokenId, Usd,
+        AttributionDetail, ConditionLeafEvidence, ConditionNodeEvaluation, ConditionTruth,
+        ConditionUnavailableReason, ContentHash, DecisionPolicySnapshotId,
+        EntryConditionArtifactId, EntryConditionArtifactV1, EntryConditionAuditId,
+        EntryConditionInstanceId, EntryConditionNode, EntryOrderSpec, EntryOutcome,
+        ExecutionOrderId, ExitOutcome, ExitPolicySpec, ExitReinferenceObservation, MarketId,
+        ModelVersionId, NextScaleOutProjection, OrderAmount, OrderId, OrderIntentId, PositionId,
+        Price, RecommendationId, ScaleOutState, Shares, TokenId, Usd, UserId,
     },
 };
 use chrono::{DateTime, Utc};
 use quant_pivot_macros::NormalizePageQuery;
 use serde::{Deserialize, Serialize, de::Error as _};
-use uuid::Uuid;
 use validator::Validate;
 
 /// Outbound projection of a governed order intent (full operator transparency).
@@ -50,7 +50,7 @@ pub struct OrderIntentView {
     pub intent_kind: OrderIntentKind,
     pub status: OrderIntentStatus,
     pub approval_status: ApprovalStatus,
-    pub approved_by: Option<Uuid>,
+    pub approved_by: Option<UserId>,
     pub approval_reason: Option<String>,
     pub approved_at: Option<DateTime<Utc>>,
     pub policy_id: Option<String>,
@@ -202,12 +202,12 @@ pub struct EntryConditionEvaluationView {
     pub applied_revision: i64,
     pub evaluator_version: u32,
     pub evaluated_at: DateTime<Utc>,
-    pub state: String,
-    pub truth: String,
+    pub state: EntryConditionState,
+    pub truth: ConditionTruth,
     pub evaluation_hash: ContentHash,
     pub input_fingerprint: ContentHash,
     pub continuity_hash: ContentHash,
-    pub tree: serde_json::Value,
+    pub tree: ConditionNodeEvaluation,
     pub leaf_evidence: Vec<EntryConditionLeafEvidenceView>,
 }
 
@@ -215,13 +215,42 @@ pub struct EntryConditionEvaluationView {
 #[derive(Debug, Clone, Serialize)]
 pub struct EntryConditionLeafEvidenceView {
     pub node_id: u16,
-    pub truth: serde_json::Value,
-    pub evidence: serde_json::Value,
+    pub truth: ConditionTruth,
+    pub evidence: ConditionLeafEvidence,
     pub observed_at: Option<DateTime<Utc>>,
     pub available_at: Option<DateTime<Utc>>,
     pub freshness_ms: Option<i64>,
-    pub source_checkpoint: Option<serde_json::Value>,
+    pub source_checkpoint: Option<EntryConditionSourceCheckpointView>,
     pub unavailable_reason: Option<ConditionUnavailableReason>,
+}
+
+/// Typed compact checkpoint projected from one closed leaf-evidence variant.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum EntryConditionSourceCheckpointView {
+    Price {
+        token_id: TokenId,
+        observed_at: DateTime<Utc>,
+        available_at: DateTime<Utc>,
+        gap_generation: u64,
+    },
+    Factor {
+        definition_hash: ContentHash,
+        model_version_id: ModelVersionId,
+        snapshot_hash: ContentHash,
+    },
+    Weather {
+        revision: u64,
+        report_hash: ContentHash,
+        gap_generation: u64,
+    },
+    Crypto {
+        source_sequence: Option<u64>,
+        report_hash: Option<ContentHash>,
+        gap_generation: u64,
+        discontinuity_epoch: u64,
+        latched: bool,
+    },
 }
 
 /// One immutable condition lifecycle audit event.

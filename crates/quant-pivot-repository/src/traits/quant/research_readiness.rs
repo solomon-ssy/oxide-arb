@@ -5,9 +5,8 @@ use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{NewResearchReadinessEvidence, ResearchReadinessEvidenceInfo},
     enums::quant::ResearchReadinessEvidenceKind,
-    types::ContentHash,
+    types::{ContentHash, ResearchReadinessEvidenceId},
 };
-use uuid::Uuid;
 
 /// Real 24-hour shadow-plane latency observations derived from durable PG
 /// ledgers. A missing percentile is distinct from a measured zero.
@@ -40,7 +39,7 @@ pub trait ResearchReadinessEvidenceRepository: Send + Sync {
     /// Exact immutable evidence row used by an already frozen research plan.
     async fn find_by_id(
         &self,
-        evidence_id: Uuid,
+        evidence_id: &ResearchReadinessEvidenceId,
     ) -> Result<Option<ResearchReadinessEvidenceInfo>, StorageError>;
 
     /// Aggregate the three non-book shadow latency dimensions over one exact

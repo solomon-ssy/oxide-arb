@@ -29,7 +29,7 @@ use quant_pivot_models::{
     types::{
         ContentHash, FeatureParityCandidateId, FeatureParityRunId, FeatureParityStateId,
         FeatureParitySubjectId, MarketSelectionId, ModelRunId, ModelVersionId,
-        RecommendationReportId, TrainingDatasetId,
+        RecommendationReportId, ResearchJobParams, TrainingDatasetId,
     },
 };
 use sea_orm::{
@@ -460,12 +460,13 @@ impl FeatureParityRepository for PgFeatureParityRepository {
             ));
         }
         let expected_run_id = run.run_id.to_string();
-        if job
-            .params_json
-            .get("parity_run_id")
-            .and_then(serde_json::Value::as_str)
-            != Some(expected_run_id.as_str())
-        {
+        let ResearchJobParams::FeatureParity(params) = &job.params_json else {
+            return Err(StorageError::invariant_violation(
+                Some(entity::QUANT_RESEARCH_JOB),
+                "feature_parity job requires typed feature parity params",
+            ));
+        };
+        if params.parity_run_id != run.run_id {
             return Err(StorageError::invariant_violation(
                 Some(entity::QUANT_RESEARCH_JOB),
                 "feature_parity job params must reference the same parity_run_id",
@@ -499,12 +500,13 @@ impl FeatureParityRepository for PgFeatureParityRepository {
             ));
         }
         let expected_run_id = run.run_id.to_string();
-        if job
-            .params_json
-            .get("parity_run_id")
-            .and_then(serde_json::Value::as_str)
-            != Some(expected_run_id.as_str())
-        {
+        let ResearchJobParams::FeatureParity(params) = &job.params_json else {
+            return Err(StorageError::invariant_violation(
+                Some(entity::QUANT_RESEARCH_JOB),
+                "feature_parity job requires typed feature parity params",
+            ));
+        };
+        if params.parity_run_id != run.run_id {
             return Err(StorageError::invariant_violation(
                 Some(entity::QUANT_RESEARCH_JOB),
                 "feature_parity job params must reference the same parity_run_id",

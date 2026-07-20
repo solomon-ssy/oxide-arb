@@ -17,32 +17,14 @@ use async_trait::async_trait;
 use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{
     enums::quant::CalibrationMethod,
-    types::{CalibrationArtifactId, Price, Probability},
+    types::{
+        CalibrationArtifactId, Price, Probability,
+        calibration::{IsotonicKnot, MonotoneMapping, ReliabilityReport},
+    },
 };
 use rust_decimal::Decimal;
-use serde::{Deserialize, Serialize};
 
-use crate::{
-    model::{artifact::ReturnEstimate, reliability::ReliabilityReport},
-    precision::RESEARCH_DECIMAL_SCALE,
-};
-
-/// The fitted monotone mapping a `ProbabilityCalibrator` produces.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "method")]
-pub enum MonotoneMapping {
-    /// Isotonic step function: ascending `(score, probability)` knots.
-    Isotonic { knots: Vec<IsotonicKnot> },
-    /// Platt sigmoid: `P(win) = 1 / (1 + exp(a * score + b))`.
-    Platt { a: Decimal, b: Decimal },
-}
-
-/// One isotonic-regression knot (score → calibrated probability, non-decreasing).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct IsotonicKnot {
-    pub score: Decimal,
-    pub probability: Decimal,
-}
+use crate::{model::artifact::ReturnEstimate, precision::RESEARCH_DECIMAL_SCALE};
 
 /// Maps raw model scores to empirically calibrated win probabilities.
 ///
@@ -228,9 +210,11 @@ pub trait CalibrationArtifactLoader: Send + Sync {
 
 #[cfg(test)]
 mod tests {
-    use super::{IsotonicKnot, MonotoneMapping, ResolvedCalibration};
-    use crate::model::reliability::{ReliabilityBin, ReliabilityReport};
-    use quant_pivot_models::types::{CalibrationArtifactId, Price, Probability};
+    use super::ResolvedCalibration;
+    use quant_pivot_models::types::{
+        CalibrationArtifactId, Price, Probability,
+        calibration::{IsotonicKnot, MonotoneMapping, ReliabilityBin, ReliabilityReport},
+    };
     use rust_decimal_macros::dec;
 
     fn resolved() -> ResolvedCalibration {

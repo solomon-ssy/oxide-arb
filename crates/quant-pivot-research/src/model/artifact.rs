@@ -27,7 +27,7 @@ use quant_pivot_models::{
     types::{
         ArtifactUri, CalibrationArtifactId, ContentHash, ModelArtifactId, ModelInputContract,
         ModelInputRequiredness, ModelVersionId, Price, Probability, ResearchProfileRef,
-        TradePolicyArtifactId,
+        TradePolicyArtifactId, model_training::TrainingObjectiveSpec,
     },
 };
 use rust_decimal::Decimal;
@@ -40,7 +40,7 @@ use crate::{
     hashing::ResearchHasher,
     model::{
         calibrator::ResolvedCalibration,
-        objective::{ObjectiveComponentReport, RankingDiagnostics, TrainingObjectiveSpec},
+        objective::{ObjectiveComponentReport, RankingDiagnostics},
         runtime::{ClassicalKind, ModelFamily},
     },
     naming::stable_name,
@@ -112,6 +112,8 @@ fn input_features_from_contract(contract: &ModelInputContract) -> Vec<FeatureNam
 pub struct ModelArtifactHeader {
     /// The published model version this artifact realizes.
     pub model_version_id: ModelVersionId,
+    /// Immutable owning model-spec definition hash copied from the dataset.
+    pub model_spec_definition_hash: ContentHash,
     /// Immutable research profile shared by the source slice and dataset.
     pub profile_ref: ResearchProfileRef,
     /// Model family.
@@ -1619,6 +1621,7 @@ mod tests {
         types::{
             CalibrationArtifactId, ContentHash, ModelInputContract, ModelInputRequiredness,
             ModelInputSpec, ModelVersionId, Price, Probability, builtin_research_profiles,
+            calibration::{IsotonicKnot, MonotoneMapping, ReliabilityBin, ReliabilityReport},
         },
     };
     use rust_decimal::Decimal;
@@ -1632,16 +1635,11 @@ mod tests {
         features::FeatureName,
         model::{
             artifact::{CalibratedReturnModel, FactorWeight, HeuristicReturnModel},
-            calibrator::{IsotonicKnot, MonotoneMapping, ResolvedCalibration},
-            reliability::{ReliabilityBin, ReliabilityReport},
+            calibrator::ResolvedCalibration,
             runtime::ModelFamily,
         },
+        test_support::content_hash as hash,
     };
-
-    fn hash(seed: &str) -> ContentHash {
-        let hex = format!("{seed:0>64}").replace(|c: char| !c.is_ascii_hexdigit(), "0");
-        ContentHash::parse(format!("blake3:{hex}")).expect("valid hash")
-    }
 
     fn input_contract() -> (ModelInputContract, ContentHash) {
         let contract = ModelInputContract::single_required("book.mid");
@@ -1654,6 +1652,7 @@ mod tests {
         WeightedFactorModelArtifact {
             header: ModelArtifactHeader {
                 model_version_id: ModelVersionId::from_v7(),
+                model_spec_definition_hash: hash("spec"),
                 profile_ref: builtin_research_profiles()
                     .expect("built-in profiles")
                     .remove(0)
@@ -1758,6 +1757,7 @@ mod tests {
         SellScorerArtifact {
             header: ModelArtifactHeader {
                 model_version_id: ModelVersionId::from_v7(),
+                model_spec_definition_hash: hash("spec"),
                 profile_ref: builtin_research_profiles()
                     .expect("built-in profiles")
                     .remove(0)

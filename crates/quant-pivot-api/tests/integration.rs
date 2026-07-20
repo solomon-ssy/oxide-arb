@@ -6,6 +6,7 @@
 mod binance_klines;
 #[path = "integration/clob_auth.rs"]
 mod clob_auth;
+mod credential_file;
 #[path = "integration/gamma_sync.rs"]
 mod gamma_sync;
 #[path = "integration/rtds_live.rs"]

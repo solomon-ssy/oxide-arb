@@ -9,10 +9,7 @@ use actix_web::{App, HttpResponse, HttpServer, middleware::from_fn, web};
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use quant_pivot_core::{
-    execution::{
-        EntryConditionInputSet, ExecutablePriceInput, decide_entry_condition_state,
-        evaluate_entry_condition,
-    },
+    execution::{decide_entry_condition_state, evaluate_entry_condition},
     ingest::book_store::BookStore,
     observability::metrics_hub::MetricsHub,
 };
@@ -36,7 +33,7 @@ use quant_pivot_models::{
         TradePolicyEvidenceDownloadView, TradePolicyEvidenceRowListQuery,
         TradePolicyEvidenceRowView, TradePolicyFitPreflightRequest, TradePolicyFitPreflightView,
         TradePolicyFitReadiness, TradePolicyGovernanceAuditInfo, TradePolicyListQuery,
-        TradePolicyPort, TradePolicyPreflightBlockerKind, TradePolicyPreflightBlockerView,
+        TradePolicyPort, TradePolicyPreflightBlockerDetail, TradePolicyPreflightBlockerView,
         TradePolicyPreflightCheckStatus, TradePolicySourceSliceObjectListQuery,
         TradePolicySourceSliceObjectView, TradePolicySourceSliceView,
         TradePolicyValidationListQuery, TradePolicyValidationRowInfo,
@@ -52,13 +49,14 @@ use quant_pivot_models::{
     runtime_config::{DecimalValue, DecisionPolicySnapshot},
     types::{
         ArtifactUri, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION, DatasetCoverage,
-        DatasetManifest, EventId, FactorDefinitionId, FeatureVectorId, MarketId, MarketSelectionId,
-        ModelVersionId, OrderIntentId, Price, RecommendationId, RecommendationReportId,
-        RecommendationTradePlan, ReportFunnelReason, ReportFunnelStage, ReportRunId,
-        ResearchProfileRef, Shares, SignalCandidateId, SourceSliceManifestRef,
-        SourceSliceObjectKind, TokenId, TradePlanBlocker, TradePolicyArtifactId,
-        TradePolicyEvidenceObjectKind, TradePolicyGovernanceAuditId, TradePolicyValidationRunId,
-        TrainingExampleId, TrainingHorizonsSecs, TrainingSampleSources, default_sample_sources,
+        DatasetManifest, EntryConditionInputSet, EventId, ExecutablePriceInput, FactorDefinitionId,
+        FeatureVectorId, MarketId, MarketSelectionId, ModelVersionId, OrderIntentId, Price,
+        RecommendationId, RecommendationReportId, RecommendationTradePlan, ReportFunnelDiagnostics,
+        ReportFunnelReason, ReportFunnelStage, ReportRunId, ResearchProfileId, ResearchProfileRef,
+        Shares, SignalCandidateId, SourceSliceManifestRef, SourceSliceObjectKind, TokenId,
+        TradePlanBlocker, TradePolicyArtifactId, TradePolicyEvidenceObjectKind,
+        TradePolicyGovernanceAuditId, TradePolicyValidationRunId, TrainingExampleId,
+        TrainingHorizonsSecs, TrainingSampleSources, UserId, WorkerId, default_sample_sources,
     },
 };
 use quant_pivot_repository::{
@@ -170,13 +168,12 @@ impl TradePolicyPort for E2eTradePolicyPort {
 
     fn find_profile(
         &self,
-        id: &str,
+        id: &ResearchProfileId,
         version: u32,
     ) -> QuantResult<Option<quant_pivot_models::types::ResearchProfileArtifact>> {
-        Ok(self
-            .list_profiles()?
-            .into_iter()
-            .find(|profile| profile.profile_ref.id == id && profile.profile_ref.version == version))
+        Ok(self.list_profiles()?.into_iter().find(|profile| {
+            profile.profile_ref.id == *id && profile.profile_ref.version == version
+        }))
     }
 
     async fn preflight(
@@ -203,7 +200,7 @@ impl TradePolicyPort for E2eTradePolicyPort {
             fit_window_end - Duration::days(i64::from(profile.spec.fit_span_days));
         let candidate_set_hash = ResearchHasher::canonical(&request.candidates)?;
         let methodology_hash =
-            ResearchHasher::canonical(&("ui-e2e-methodology-v14", &profile.profile_ref))?;
+            ResearchHasher::canonical(&("ui-e2e-methodology-v1", &profile.profile_ref))?;
         let research_program_hash = ResearchHasher::canonical(&(
             &request.selection,
             request.evaluation_track,
@@ -261,41 +258,38 @@ impl TradePolicyPort for E2eTradePolicyPort {
             candidate_set_hash: Some(candidate_set_hash),
             blockers: vec![
                 TradePolicyPreflightBlockerView {
-                    kind: TradePolicyPreflightBlockerKind::SourceSliceUnverified,
-                    actual: serde_json::json!({ "verified": false }),
-                    required: serde_json::json!({ "source_slice_format": 2, "byte_hash_verified": true }),
-                    remediation: "Materialize and hash-verify every required Source Slice v2 object."
+                    detail: TradePolicyPreflightBlockerDetail::SourceSliceUnverified {
+                        diagnostics: vec!["fixture source slice is intentionally unverified".to_owned()],
+                    },
+                    remediation: "Materialize and hash-verify every required Source Slice v1 object."
                         .to_owned(),
                     evidence_link: None,
                 },
                 TradePolicyPreflightBlockerView {
-                    kind: TradePolicyPreflightBlockerKind::FullL2TrajectoryMissing,
-                    actual: serde_json::json!(false),
-                    required: serde_json::json!(["l2_event", "l2_checkpoint", "l2_session", "l2_gap", "trade_tape"]),
+                    detail: TradePolicyPreflightBlockerDetail::FullL2TrajectoryMissing,
                     remediation: "Materialize continuous snapshot-rooted L2 sessions and reconciled trade tape."
                         .to_owned(),
                     evidence_link: None,
                 },
                 TradePolicyPreflightBlockerView {
-                    kind: TradePolicyPreflightBlockerKind::PitFeeFactsMissing,
-                    actual: serde_json::json!(false),
-                    required: serde_json::json!({ "clob_market_info": "complete at match time" }),
+                    detail: TradePolicyPreflightBlockerDetail::PitFeeFactsMissing,
                     remediation: "Backfill append-only CLOB market-info versions for every sample."
                         .to_owned(),
                     evidence_link: None,
                 },
                 TradePolicyPreflightBlockerView {
-                    kind: TradePolicyPreflightBlockerKind::ProductionLatencyProfileMissing,
-                    actual: serde_json::Value::Null,
-                    required: serde_json::json!({ "signed_window_hours": 24, "latency_injection": "2x_recent_p95" }),
+                    detail: TradePolicyPreflightBlockerDetail::ProductionLatencyProfileMissing {
+                        observed_profile: None,
+                    },
                     remediation: "Capture, sign, and bind the latest complete 24-hour production latency profile."
                         .to_owned(),
                     evidence_link: None,
                 },
                 TradePolicyPreflightBlockerView {
-                    kind: TradePolicyPreflightBlockerKind::RetentionRunwayUnproven,
-                    actual: serde_json::json!({ "retention_runway_days": null }),
-                    required: serde_json::json!({ "minimum_days": required_raw_retention_days }),
+                    detail: TradePolicyPreflightBlockerDetail::RetentionRunwayUnproven {
+                        actual_runway_days: None,
+                        required_minimum_days: required_raw_retention_days,
+                    },
                     remediation: "Bind a signed retention plan and current ClickHouse runway measurement."
                         .to_owned(),
                     evidence_link: None,
@@ -321,7 +315,7 @@ impl TradePolicyPort for E2eTradePolicyPort {
         &self,
         _validation_run_id: &quant_pivot_models::types::TradePolicyValidationRunId,
         artifact_id: &TradePolicyArtifactId,
-        actor_id: Uuid,
+        actor_id: UserId,
         reason: String,
         _progress: &dyn JobProgressSink,
         _cancel: &CancellationToken,
@@ -540,7 +534,7 @@ impl TradePolicyPort for E2eTradePolicyPort {
         &self,
         artifact_id: &TradePolicyArtifactId,
         target: TradePolicyStatus,
-        actor_id: Uuid,
+        actor_id: UserId,
         reason: String,
     ) -> QuantResult<TradePolicyArtifactInfo> {
         let current =
@@ -798,7 +792,7 @@ struct E2eFunnelRowHashInput<'a> {
     token_id: &'a TokenId,
     terminal_stage: ReportFunnelStage,
     primary_reason: ReportFunnelReason,
-    secondary_diagnostics_json: &'a str,
+    secondary_diagnostics: &'a ReportFunnelDiagnostics,
     feature_vector_id: Option<&'a FeatureVectorId>,
     signal_candidate_id: Option<&'a SignalCandidateId>,
     recommendation_id: Option<&'a RecommendationId>,
@@ -815,8 +809,9 @@ fn e2e_published_funnel_row(
     );
     let terminal_stage = ReportFunnelStage::Published;
     let primary_reason = ReportFunnelReason::Published;
+    let secondary_diagnostics = ReportFunnelDiagnostics::None {};
     let secondary_diagnostics_json =
-        serde_json::json!({"fixture": "verified protected UI E2E funnel"}).to_string();
+        serde_json::to_string(&secondary_diagnostics).expect("serialize E2E funnel diagnostics");
     let hash_input = E2eFunnelRowHashInput {
         report_id: &report.recommendation_report_id,
         market_selection_id: &report.market_selection_id,
@@ -826,7 +821,7 @@ fn e2e_published_funnel_row(
         token_id: &recommendation.token_id,
         terminal_stage,
         primary_reason,
-        secondary_diagnostics_json: &secondary_diagnostics_json,
+        secondary_diagnostics: &secondary_diagnostics,
         feature_vector_id: Some(&recommendation.evidence_refs.feature_vector_id),
         signal_candidate_id: Some(&recommendation.evidence_refs.signal_candidate_id),
         recommendation_id: Some(&recommendation.recommendation_id),
@@ -837,7 +832,7 @@ fn e2e_published_funnel_row(
         event_time: report.decision_at.timestamp_millis(),
         recommendation_report_id: report.recommendation_report_id.clone(),
         market_selection_id: report.market_selection_id.clone(),
-        profile_id: report.profile_ref.id.clone(),
+        profile_id: report.profile_ref.id.to_string(),
         profile_version: report.profile_ref.version,
         profile_content_hash: report.profile_ref.content_hash.to_string(),
         decision_policy_snapshot_id: report.decision_policy_snapshot_id.clone(),
@@ -970,14 +965,19 @@ async fn observe_book_inner(
         &evaluation,
         request.observed_at,
     );
-    let worker_id = Uuid::now_v7();
-    instance =
-        lease_condition_instance(&control.db, &instance, worker_id, request.observed_at).await?;
+    let worker_id = WorkerId::from_v7();
+    instance = lease_condition_instance(
+        &control.db,
+        &instance,
+        worker_id.clone(),
+        request.observed_at,
+    )
+    .await?;
     let conditions = PgEntryConditionRepository::new(control.db.clone());
     let updated = conditions
         .apply_evaluation(
             &instance.condition_instance_id,
-            worker_id,
+            worker_id.clone(),
             ApplyEntryConditionEvaluation {
                 expected_revision: instance.revision,
                 expected_lease_epoch: instance.lease_epoch,
@@ -1054,7 +1054,7 @@ async fn load_condition_fixture(
 async fn lease_condition_instance(
     db: &DatabaseConnection,
     instance: &EntryConditionInstanceInfo,
-    worker_id: Uuid,
+    worker_id: WorkerId,
     observed_at: DateTime<Utc>,
 ) -> QuantResult<EntryConditionInstanceInfo> {
     let row =
@@ -1198,6 +1198,7 @@ async fn seed_policy_validation_dataset(
         research_program_hash: contract.research_program_hash.clone(),
         source_slice,
         model_spec_id: version.model_spec_id.clone(),
+        model_spec_definition_hash: spec.definition_hash.clone(),
         trade_policy_artifact_id: None,
         trade_policy_hash: None,
         decision_policy_snapshot_id: contract.decision_policy_snapshot_id.clone(),
@@ -1219,6 +1220,7 @@ async fn seed_policy_validation_dataset(
         .create_plan(NewTrainingDatasetPlan {
             training_dataset_id: artifact.source_dataset_id.clone(),
             model_spec_id: version.model_spec_id,
+            model_spec_definition_hash: spec.definition_hash.clone(),
             window_start: contract.fit_window_start,
             window_end: contract.fit_window_end,
             purpose: DatasetPurpose::PolicyFit,
@@ -1300,7 +1302,7 @@ async fn seed_policy_validation_diagnostic(
             source_slice_manifest_hash: bundle.source_slice_manifest_hash.clone(),
             evidence_manifest_hash: bundle.manifest_hash.clone(),
             status: TradePolicyValidationStatus::Running,
-            actor_id: Uuid::nil(),
+            actor_id: UserId::new(Uuid::nil()),
             reason: "test-only independent row diagnostic".to_owned(),
         })
         .await
@@ -1489,17 +1491,21 @@ async fn verify_seeded_report_fact_deliveries(db: &DatabaseConnection) {
     // the same verified-report visibility rule without a second ClickHouse
     // container in this web-layer suite.
     let reports = PgRecommendationReportRepository::new(db.clone());
-    let worker_id = Uuid::now_v7();
+    let worker_id = WorkerId::from_v7();
     loop {
         let delivery = reports
-            .claim_fact_delivery(worker_id, 30)
+            .claim_fact_delivery(worker_id.clone(), 30)
             .await
             .expect("claim seeded report fact delivery");
         let Some(delivery) = delivery else {
             break;
         };
         reports
-            .verify_and_publish_report(&delivery.recommendation_report_id, worker_id, Utc::now())
+            .verify_and_publish_report(
+                &delivery.recommendation_report_id,
+                worker_id.clone(),
+                Utc::now(),
+            )
             .await
             .expect("verify seeded report fact delivery")
             .into_applied()

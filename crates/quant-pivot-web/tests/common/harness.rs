@@ -25,7 +25,10 @@ use quant_pivot_models::{
         EntryConditionEvaluationEventRow, MarketResolutionRow, MidPriceBucketRow,
         ReportMarketFunnelCountRow, ReportMarketFunnelRow, TradeTapeRow,
     },
-    config::{CacheConfig, DeployConfig, JwtConfig, LifecycleDeployConfig, RedisConfig, WebConfig},
+    config::{
+        CacheConfig, CompiledBuildIdentity, DeployConfig, JwtConfig, LifecycleDeployConfig,
+        RedisConfig, WebConfig,
+    },
     domain::{
         AcknowledgeFeatureParityLatchRequest, ActivateBootstrapRequest, BacktestPathSetInfo,
         BacktestPathSetListQuery, BacktestPathSetView, BacktestPort, BacktestReportInfo,
@@ -45,21 +48,21 @@ use quant_pivot_models::{
         FeatureParityEventView, FeatureParityRunListQuery, FeatureParityRunView,
         FitBiasTableRequest, FitModelCalibratorRequest, GatePreviewIntent, GovernanceActor,
         HealthReport, JobProgressSink, JobSubmitContext, KillSwitchPort, KillSwitchView,
-        LinkageResolveSummaryView, MarketDataPort, MarketLinkageGovernancePort, MarketLinkageInfo,
-        MarketLinkageListQuery, MetricsScrapePort, MissingReasonCountView,
-        ModelCalibrationFitJobParams, ModelCalibrationFitOutcome, ModelCalibrationFitPort,
-        ModelCalibrationFitPreflightView, ModelComparisonReportInfo, ModelGovernancePort,
-        ModelPublishedCatalogQuery, ModelSpecInfo, ModelSpecListQuery, ModelSpecPort,
-        ModelTrainingPort, ModelVersionInfo, ModelVersionListQuery, NegRiskEventDriftView,
-        NewBasisAlert, NewMarketLinkage, OverrideLinkageRequest, Paginated,
+        LifecycleSchemaVerificationPort, LinkageResolveSummaryView, MarketDataPort,
+        MarketLinkageGovernancePort, MarketLinkageInfo, MarketLinkageListQuery, MetricsScrapePort,
+        MissingReasonCountView, ModelCalibrationFitJobParams, ModelCalibrationFitOutcome,
+        ModelCalibrationFitPort, ModelCalibrationFitPreflightView, ModelComparisonReportInfo,
+        ModelGovernancePort, ModelPublishedCatalogQuery, ModelSpecInfo, ModelSpecListQuery,
+        ModelSpecPort, ModelTrainingPort, ModelVersionInfo, ModelVersionListQuery,
+        NegRiskEventDriftView, NewBasisAlert, NewMarketLinkage, OverrideLinkageRequest, Paginated,
         ParticipantConcentrationDetailView, ParticipantConcentrationSummaryView,
-        PolicySnapshotPort, PreparedPolicySnapshot, PublishFactorCommand,
-        PublishFactorsBatchCommand, PublishModelCommand, PublishedModelOptionView,
-        QualityGateReportView, QuantModeTransitionReport, ReconciliationPort,
-        RegisterFactorDefinitionsCommand, ResearchCatalogPort, ResearchJobListQuery,
-        ResearchJobPort, ResearchJobView, ResearchReadinessPort, ResearchReadinessSnapshot,
-        ResolveReconciliationCommand, ResolveReconciliationOutcome, RetireFactorCommand,
-        RetireModelCommand, RunBacktestRequest, RunCpcvBacktestRequest,
+        PolicySnapshotPort, PreparedPolicySnapshot, ProductionEvidenceArtifactVerificationPort,
+        PublishFactorCommand, PublishFactorsBatchCommand, PublishModelCommand,
+        PublishedModelOptionView, QualityGateReportView, QuantModeTransitionReport,
+        ReconciliationPort, RegisterFactorDefinitionsCommand, ResearchCatalogPort,
+        ResearchJobListQuery, ResearchJobPort, ResearchJobView, ResearchReadinessPort,
+        ResearchReadinessSnapshot, ResolveReconciliationCommand, ResolveReconciliationOutcome,
+        RetireFactorCommand, RetireModelCommand, RunBacktestRequest, RunCpcvBacktestRequest,
         RunFullFeatureParityRequest, RuntimeControlPort, SetKillSwitchCommand,
         StructuralMonitorPort, SystemCapabilities, SystemStatus, TradePolicyArtifactInfo,
         TradePolicyAuditListQuery, TradePolicyFitPreflightView, TradePolicyGovernanceAuditInfo,
@@ -68,17 +71,19 @@ use quant_pivot_models::{
         TradePolicyValidationRunInfo, TradeTapeCoverageView, TradeTapeSourceHealthView,
         TrainModelRequest, TrainedModelView, TrainingDatasetInfo, TrainingDatasetListQuery,
         TrainingDatasetPlanView, TrainingDatasetPort, TrainingDatasetView,
-        UpsertDomainSourceCursor, UpsertDomainSourceExpectation, empty_catalog_page,
+        UpsertDomainSourceCursor, UpsertDomainSourceExpectation, VerifiedSchemaFingerprints,
+        empty_catalog_page,
     },
     entities::quant_entry_condition_evaluation_outbox,
     enums::{execution::KillSwitchState, quant::QuantRuntimeMode, system::BootstrapPhase},
     runtime_config::{DecisionPolicySnapshot, FeatureFamily},
     types::{
-        BacktestPathSetId, BacktestReportId, BasisAlertId, CalibrationArtifactId, ContentHash,
-        DecisionPolicySnapshotId, DomainInstrumentKey, DomainSourceExpectationId, DomainSourceId,
-        EntryConditionInstanceId, FactorDefinitionId, MarketId, MarketLinkageId,
-        ModelComparisonReportId, ModelSpecId, ModelVersionId, RecommendationReportId,
-        ResearchJobId, SchemaVersion, TokenId, TrainingDatasetId,
+        ArtifactUri, BacktestPathSetId, BacktestReportId, BasisAlertId, BuildCommitHash,
+        CalibrationArtifactId, ContentHash, DecisionPolicySnapshotId, DomainInstrumentKey,
+        DomainSourceExpectationId, DomainSourceId, EntryConditionInstanceId, FactorDefinitionId,
+        MarketId, MarketLinkageId, ModelComparisonReportId, ModelSpecId, ModelVersionId,
+        RecommendationReportId, ResearchJobId, ResearchProfileId, SchemaVersion, TokenId,
+        TrainingDatasetId, UserId,
     },
 };
 use quant_pivot_repository::{
@@ -150,20 +155,60 @@ struct WebHarnessAppStateInput<'a> {
     order_intents: Arc<dyn OrderIntentPort>,
 }
 
+struct StaticSchemaVerifier {
+    postgres_schema_fingerprint: ContentHash,
+    clickhouse_schema_fingerprint: ContentHash,
+}
+
+#[async_trait]
+impl LifecycleSchemaVerificationPort for StaticSchemaVerifier {
+    async fn verify_live(&self) -> QuantResult<VerifiedSchemaFingerprints> {
+        Ok(VerifiedSchemaFingerprints {
+            postgres_schema_fingerprint: self.postgres_schema_fingerprint.clone(),
+            clickhouse_schema_fingerprint: self.clickhouse_schema_fingerprint.clone(),
+        })
+    }
+}
+
+struct StaticProductionEvidenceVerifier;
+
+#[async_trait]
+impl ProductionEvidenceArtifactVerificationPort for StaticProductionEvidenceVerifier {
+    async fn verify_artifact(
+        &self,
+        _artifact_uri: &ArtifactUri,
+        _expected_hash: &ContentHash,
+    ) -> QuantResult<()> {
+        Ok(())
+    }
+}
+
 fn web_harness_app_state(input: WebHarnessAppStateInput<'_>) -> AppState {
     let kill_switch = Arc::new(MockKillSwitch::default());
+    let postgres_schema_fingerprint = ContentHash::parse(concat!(
+        "blake3:",
+        "1111111111111111111111111111111111111111111111111111111111111111"
+    ))
+    .expect("static PostgreSQL schema fingerprint");
+    let clickhouse_schema_fingerprint = ContentHash::parse(concat!(
+        "blake3:",
+        "2222222222222222222222222222222222222222222222222222222222222222"
+    ))
+    .expect("static ClickHouse schema fingerprint");
     AppState {
         deploy: Arc::new(test_deploy_config()),
-        postgres_schema_fingerprint: ContentHash::parse(concat!(
-            "blake3:",
-            "1111111111111111111111111111111111111111111111111111111111111111"
-        ))
-        .expect("static PostgreSQL schema fingerprint"),
-        clickhouse_schema_fingerprint: ContentHash::parse(concat!(
-            "blake3:",
-            "2222222222222222222222222222222222222222222222222222222222222222"
-        ))
-        .expect("static ClickHouse schema fingerprint"),
+        postgres_schema_fingerprint: postgres_schema_fingerprint.clone(),
+        clickhouse_schema_fingerprint: clickhouse_schema_fingerprint.clone(),
+        build_identity: CompiledBuildIdentity {
+            build_commit: BuildCommitHash::parse("1".repeat(40))
+                .expect("static clean build commit"),
+            clean: true,
+        },
+        schema_verification: Arc::new(StaticSchemaVerifier {
+            postgres_schema_fingerprint,
+            clickhouse_schema_fingerprint,
+        }),
+        production_evidence_verification: Arc::new(StaticProductionEvidenceVerifier),
         runtime_config_apply: Arc::clone(&input.runtime_config_apply)
             as Arc<dyn PolicySnapshotPort>,
         jwt: input.jwt,
@@ -374,17 +419,7 @@ fn jwt_config() -> JwtConfig {
 
 fn test_deploy_config() -> DeployConfig {
     DeployConfig {
-        lifecycle: LifecycleDeployConfig {
-            backup_evidence_hash: Some(
-                ContentHash::parse(format!("blake3:{}", "33".repeat(32)))
-                    .expect("test backup evidence hash"),
-            ),
-            config_e2e_evidence_hash: Some(
-                ContentHash::parse(format!("blake3:{}", "44".repeat(32)))
-                    .expect("test Config E2E evidence hash"),
-            ),
-            ..LifecycleDeployConfig::default()
-        },
+        lifecycle: LifecycleDeployConfig::default(),
         web: WebConfig {
             cors_allowed_origins: vec!["http://127.0.0.1:6099".to_owned()],
             ..WebConfig::default()
@@ -883,13 +918,12 @@ impl TradePolicyPort for MockTradePolicyPort {
 
     fn find_profile(
         &self,
-        id: &str,
+        id: &ResearchProfileId,
         version: u32,
     ) -> QuantResult<Option<quant_pivot_models::types::ResearchProfileArtifact>> {
-        Ok(self
-            .list_profiles()?
-            .into_iter()
-            .find(|profile| profile.profile_ref.id == id && profile.profile_ref.version == version))
+        Ok(self.list_profiles()?.into_iter().find(|profile| {
+            profile.profile_ref.id == *id && profile.profile_ref.version == version
+        }))
     }
 
     async fn preflight(
@@ -922,7 +956,7 @@ impl TradePolicyPort for MockTradePolicyPort {
         &self,
         _: &quant_pivot_models::types::TradePolicyValidationRunId,
         _: &quant_pivot_models::types::TradePolicyArtifactId,
-        _: uuid::Uuid,
+        _: UserId,
         _: String,
         _: &dyn JobProgressSink,
         _: &CancellationToken,
@@ -1025,7 +1059,7 @@ impl TradePolicyPort for MockTradePolicyPort {
         &self,
         _: &quant_pivot_models::types::TradePolicyArtifactId,
         _: quant_pivot_models::enums::quant::TradePolicyStatus,
-        _: uuid::Uuid,
+        _: UserId,
         _: String,
     ) -> QuantResult<TradePolicyArtifactInfo> {
         Err(StorageError::NotFound {
@@ -1411,7 +1445,7 @@ impl ModelSpecPort for MockModelSpecPort {
                 "0000000000000000000000000000000000000000000000000000000000000000"
             ))
             .expect("canonical feature schema hash fixture"),
-            feature_schema_version: SchemaVersion::new(7),
+            feature_schema_version: SchemaVersion::FIRST,
             features: vec![FeatureContractEntryView {
                 name: "book.mid".to_owned(),
                 compute_revision: 1,

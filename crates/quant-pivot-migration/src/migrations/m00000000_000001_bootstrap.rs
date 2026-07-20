@@ -2,7 +2,7 @@
 
 use sea_orm::{
     ActiveValue::{NotSet, Set},
-    ConnectionTrait, DbBackend, EntityTrait, Schema,
+    DbBackend, EntityTrait, Schema,
     sea_query::Expr,
 };
 use sea_orm_migration::{prelude::*, sea_query::extension::postgres::Type};
@@ -31,13 +31,6 @@ enum SchemaMigrationAudit {
     AppliedAt,
 }
 
-#[derive(DeriveIden)]
-enum PgTables {
-    Table,
-    Schemaname,
-    Tablename,
-}
-
 pub struct Migration;
 
 impl MigrationName for Migration {
@@ -49,7 +42,7 @@ impl MigrationName for Migration {
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        assert_empty_boot_target(manager).await?;
+        v1::assert_empty_boot_target(manager).await?;
         let db = manager.get_connection();
         let schema = Schema::new(DbBackend::Postgres);
         for enum_statement in [
@@ -62,17 +55,37 @@ impl MigrationTrait for Migration {
                 })?)
                 .await?;
         }
-        // SeaORM rc.43 does not discover an enum nested in a PostgreSQL array
-        // column, so the two array element types are created explicitly above.
-        // `sync` then recognizes and reuses them while creating the empty boot schema.
-        db.get_schema_registry(MODULE_PREFIX).sync(db).await?;
-        column_defaults::apply(manager).await?;
-        seed_boot_rows(manager).await?;
-        create_migration_audit(manager).await?;
-        relational_invariants::apply(manager).await?;
-        query_indexes::apply(manager).await?;
-        worm_triggers::apply(manager).await?;
-        audit::record(manager, spec()).await
+        // SeaORM rc.43 does not discover an enum nested only in a PostgreSQL
+        // array column. All columns that share those types use an explicit
+        // custom column type so Entity First has one deterministic enum owner.
+        // The target is proven empty, therefore Entity First `apply` is the
+        // deterministic boot primitive; experimental non-destructive `sync`
+        // must never hide a schema mismatch.
+        db.get_schema_registry(MODULE_PREFIX)
+            .apply(db)
+            .await
+            .map_err(|error| DbErr::Custom(format!("Entity First schema apply failed: {error}")))?;
+        column_defaults::apply(manager)
+            .await
+            .map_err(|error| DbErr::Custom(format!("column defaults failed: {error}")))?;
+        seed_boot_rows(manager)
+            .await
+            .map_err(|error| DbErr::Custom(format!("boot row seed failed: {error}")))?;
+        create_migration_audit(manager)
+            .await
+            .map_err(|error| DbErr::Custom(format!("migration audit schema failed: {error}")))?;
+        relational_invariants::apply(manager)
+            .await
+            .map_err(|error| DbErr::Custom(format!("relational invariants failed: {error}")))?;
+        query_indexes::apply(manager)
+            .await
+            .map_err(|error| DbErr::Custom(format!("query indexes failed: {error}")))?;
+        worm_triggers::apply(manager)
+            .await
+            .map_err(|error| DbErr::Custom(format!("WORM triggers failed: {error}")))?;
+        audit::record(manager, spec())
+            .await
+            .map_err(|error| DbErr::Custom(format!("migration artifact audit failed: {error}")))
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
@@ -110,34 +123,14 @@ impl MigrationTrait for Migration {
 async fn seed_boot_rows(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
     policy_activation_guard::Entity::insert(policy_activation_guard::ActiveModel {
         id: Set(1),
-        generation: Set(0),
+        generation: Set(1),
+        current_snapshot_id: Set(None),
+        current_snapshot_hash: Set(None),
         created_at: NotSet,
+        updated_at: NotSet,
     })
     .exec_without_returning(manager.get_connection())
     .await?;
-    Ok(())
-}
-
-async fn assert_empty_boot_target(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
-    let query = Query::select()
-        .expr_as(Expr::col(Asterisk).count(), Alias::new("table_count"))
-        .from((Alias::new("pg_catalog"), PgTables::Table))
-        .and_where(Expr::col(PgTables::Schemaname).eq("public"))
-        .and_where(Expr::col(PgTables::Tablename).ne("seaql_migrations"))
-        .to_owned();
-    let row = manager
-        .get_connection()
-        .query_one(&query)
-        .await?
-        .ok_or_else(|| {
-            DbErr::Custom("PostgreSQL catalog returned no boot preflight row".to_owned())
-        })?;
-    let table_count = row.try_get::<i64>("", "table_count")?;
-    if table_count != 0 {
-        return Err(DbErr::Custom(format!(
-            "boot migration requires an empty public schema; found {table_count} tables. Clear PostgreSQL and bootstrap again"
-        )));
-    }
     Ok(())
 }
 

@@ -1,8 +1,11 @@
 //! `quant_model_spec` table entity.
 
 use crate::{
-    enums::{model::ModelFamily, quant::PublicationStatus},
-    types::{ModelInputContract, ModelSpecId, ModelTrainingContract, SchemaVersion},
+    enums::model::ModelFamily,
+    types::{
+        ContentHash, ModelInputContract, ModelSpecId, ModelTrainingContract, RoleCode,
+        SchemaVersion, UserId, model_spec::ModelSpecThesis,
+    },
 };
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
@@ -19,8 +22,10 @@ pub struct Model {
     pub prediction_horizon_secs: i64,
     pub feature_schema_version: SchemaVersion,
     pub label_schema_version: SchemaVersion,
+    /// Fixed human-authored research thesis. Executable contracts remain in
+    /// dedicated typed fields below.
     #[sea_orm(column_type = "JsonBinary")]
-    pub spec_json: Json,
+    pub thesis: ModelSpecThesis,
     /// Ordered raw features consumed by this model. Encoded columns are derived
     /// exclusively by the fitted input transform and cannot be persisted here.
     #[sea_orm(column_type = "JsonBinary")]
@@ -28,9 +33,16 @@ pub struct Model {
     /// Frozen target and validation policy; train requests cannot override it.
     #[sea_orm(column_type = "JsonBinary")]
     pub training_contract: ModelTrainingContract,
-    pub status: PublicationStatus,
+    /// Domain-separated digest of every semantic field on this immutable row.
+    pub definition_hash: ContentHash,
+    /// Authenticated author identity; `NULL` is reserved for system bootstrapping.
+    pub created_by_user_id: Option<UserId>,
+    /// Human-readable actor snapshot retained even if the account is later renamed.
+    pub created_by_label: String,
+    pub created_by_role: Option<RoleCode>,
+    /// Mandatory authoring rationale frozen with this WORM specification.
+    pub reason: String,
     pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
 
     #[sea_orm(has_many, relation_enum = "ModelVersion")]
     pub model_version: HasMany<super::quant_model_version::Entity>,

@@ -15,7 +15,7 @@ use uuid::Uuid;
 use quant_pivot_models::{
     domain::{CoreEvent, CoreEventPublisher, MaterializationRunEvent, ResearchJobInfo},
     enums::quant::{ResearchJobKind, ResearchJobStatus},
-    types::ResearchJobId,
+    types::{ResearchJobId, WorkerId},
 };
 use quant_pivot_repository::traits::ResearchJobRepository;
 
@@ -26,7 +26,7 @@ pub struct ResearchJobEngine {
     repo: Arc<dyn ResearchJobRepository>,
     events: CoreEventPublisher,
     cancels: Arc<DashMap<ResearchJobId, CancellationToken>>,
-    instance_id: Arc<str>,
+    instance_id: WorkerId,
 }
 
 impl ResearchJobEngine {
@@ -37,7 +37,7 @@ impl ResearchJobEngine {
             repo,
             events,
             cancels: Arc::new(DashMap::new()),
-            instance_id: Arc::from(Uuid::now_v7().to_string().as_str()),
+            instance_id: WorkerId::from_v7(),
         }
     }
 
@@ -49,7 +49,7 @@ impl ResearchJobEngine {
 
     /// This process's lease-owner id (boot epoch).
     #[must_use]
-    pub fn instance_id(&self) -> &str {
+    pub const fn instance_id(&self) -> &WorkerId {
         &self.instance_id
     }
 

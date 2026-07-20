@@ -2,6 +2,7 @@
 
 pg_enum! {
     type_name = "qp_decision_policy_snapshot_source",
+    @derive(schemars::JsonSchema)
     pub enum DecisionPolicySnapshotSource {
         Bootstrap => "bootstrap",
         Activation => "activation",
@@ -15,6 +16,26 @@ pg_enum! {
     pub enum PolicyActorKind {
         Operator => "operator",
         System => "system",
+    }
+}
+
+pg_enum! {
+    type_name = "qp_production_evidence_kind",
+    @derive(schemars::JsonSchema, PartialOrd, Ord)
+    pub enum ProductionEvidenceKind {
+        BackupRestore => "backup_restore",
+        ProtectedConfigEndToEnd => "protected_config_end_to_end",
+    }
+}
+
+pg_enum! {
+    type_name = "qp_profile_artifact_kind",
+    @derive(schemars::JsonSchema, PartialOrd, Ord)
+    pub enum ProfileArtifactKind {
+        Feature => "feature",
+        Scoring => "scoring",
+        Domain => "domain",
+        ResearchMethod => "research_method",
     }
 }
 
@@ -125,6 +146,7 @@ wire_enum! {
         PostgresSchemaFingerprint => "postgres_schema_fingerprint",
         ClickhouseSchemaFingerprint => "clickhouse_schema_fingerprint",
         MigrationState => "migration_state",
+        CompiledBuildIdentity => "compiled_build_identity",
         BackupEvidence => "backup_evidence",
         ConfigEndToEnd => "config_end_to_end",
         ActivePolicyBundle => "active_policy_bundle",

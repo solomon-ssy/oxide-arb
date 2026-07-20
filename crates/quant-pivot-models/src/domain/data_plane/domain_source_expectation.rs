@@ -1,7 +1,7 @@
 //! Capability-declared domain-source expectations and lifecycle rules.
 
 use chrono::{DateTime, Utc};
-use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromJsonQueryResult};
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, DeriveValueType};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -10,11 +10,12 @@ use crate::{
     hashing::CanonicalDigest,
     types::{
         ContentHash, DomainInstrumentKey, DomainSourceExpectationId, DomainSourceId, MarketId,
+        ResearchProfileId,
     },
 };
 
-/// Canonically ordered markets affected by one expected source binding.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
+/// Canonically ordered market IDs stored as a native `PostgreSQL` `text[]`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, DeriveValueType)]
 #[serde(transparent)]
 pub struct AffectedMarketIds(pub Vec<MarketId>);
 
@@ -27,14 +28,14 @@ impl AffectedMarketIds {
     }
 }
 
-/// Canonically ordered immutable research profiles affected by a binding.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
+/// Canonically ordered logical research-profile IDs stored as `text[]`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, DeriveValueType)]
 #[serde(transparent)]
-pub struct AffectedProfileIds(pub Vec<String>);
+pub struct AffectedProfileIds(pub Vec<ResearchProfileId>);
 
 impl AffectedProfileIds {
     #[must_use]
-    pub fn new(mut profile_ids: Vec<String>) -> Self {
+    pub fn new(mut profile_ids: Vec<ResearchProfileId>) -> Self {
         profile_ids.sort();
         profile_ids.dedup();
         Self(profile_ids)
@@ -115,7 +116,7 @@ pub struct DomainSourceExpectationDefinition {
     pub credential_required: bool,
     pub freshness_secs: i64,
     pub affected_market_ids: Vec<MarketId>,
-    pub affected_profile_ids: Vec<String>,
+    pub affected_profile_ids: Vec<ResearchProfileId>,
 }
 
 impl UpsertDomainSourceExpectation {
@@ -154,28 +155,19 @@ impl UpsertDomainSourceExpectation {
         } = definition;
         let affected_market_ids = AffectedMarketIds::new(affected_market_ids);
         let affected_profile_ids = AffectedProfileIds::new(affected_profile_ids);
-        if affected_profile_ids.0.is_empty() {
-            return Err("domain source expectation must affect at least one profile".to_owned());
-        }
-        if freshness_secs <= 0 {
-            return Err("domain source expectation freshness must be positive".to_owned());
-        }
-        validate_status_reason(status, status_reason.as_deref())?;
         let expectation_id = Self::identity_id(&source_id, &instrument_key)?;
-        let binding_hash = CanonicalDigest::content_hash_json(&(
-            "domain_source_expectation_v1",
+        let binding_hash = calculate_binding_hash(DomainSourceExpectationHashInput {
             family,
-            &source_id,
-            &instrument_key,
-            &capability_registry_hash,
+            source_id: &source_id,
+            instrument_key: &instrument_key,
+            capability_registry_hash: &capability_registry_hash,
             required,
             credential_required,
             freshness_secs,
-            &affected_market_ids,
-            &affected_profile_ids,
-        ))
-        .map_err(|error| format!("domain source expectation hash failed: {error}"))?;
-        Ok(Self {
+            affected_market_ids: &affected_market_ids,
+            affected_profile_ids: &affected_profile_ids,
+        })?;
+        let expectation = Self {
             expectation_id,
             family,
             source_id,
@@ -190,8 +182,71 @@ impl UpsertDomainSourceExpectation {
             status,
             status_reason,
             updated_at,
-        })
+        };
+        expectation.validate()?;
+        Ok(expectation)
     }
+
+    /// Revalidate the complete content-addressed persistence payload.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.affected_profile_ids.0.is_empty() {
+            return Err("domain source expectation must affect at least one profile".to_owned());
+        }
+        if self.freshness_secs <= 0 {
+            return Err("domain source expectation freshness must be positive".to_owned());
+        }
+        if self.affected_market_ids != AffectedMarketIds::new(self.affected_market_ids.0.clone()) {
+            return Err("affected market IDs must be canonically ordered and unique".to_owned());
+        }
+        if self.affected_profile_ids != AffectedProfileIds::new(self.affected_profile_ids.0.clone())
+        {
+            return Err("affected profile IDs must be canonically ordered and unique".to_owned());
+        }
+        validate_status_reason(self.status, self.status_reason.as_deref())?;
+        let expected_id = Self::identity_id(&self.source_id, &self.instrument_key)?;
+        if self.expectation_id != expected_id {
+            return Err(
+                "domain source expectation identity does not match its natural key".to_owned(),
+            );
+        }
+        let expected_hash = calculate_binding_hash(DomainSourceExpectationHashInput {
+            family: self.family,
+            source_id: &self.source_id,
+            instrument_key: &self.instrument_key,
+            capability_registry_hash: &self.capability_registry_hash,
+            required: self.required,
+            credential_required: self.credential_required,
+            freshness_secs: self.freshness_secs,
+            affected_market_ids: &self.affected_market_ids,
+            affected_profile_ids: &self.affected_profile_ids,
+        })?;
+        if self.binding_hash != expected_hash {
+            return Err(
+                "domain source expectation binding hash does not match its definition".to_owned(),
+            );
+        }
+        Ok(())
+    }
+}
+
+#[derive(Serialize)]
+struct DomainSourceExpectationHashInput<'a> {
+    family: DomainFamily,
+    source_id: &'a DomainSourceId,
+    instrument_key: &'a DomainInstrumentKey,
+    capability_registry_hash: &'a ContentHash,
+    required: bool,
+    credential_required: bool,
+    freshness_secs: i64,
+    affected_market_ids: &'a AffectedMarketIds,
+    affected_profile_ids: &'a AffectedProfileIds,
+}
+
+fn calculate_binding_hash(
+    input: DomainSourceExpectationHashInput<'_>,
+) -> Result<ContentHash, String> {
+    CanonicalDigest::content_hash_json(&("domain_source_expectation_v1", input))
+        .map_err(|error| format!("domain source expectation hash failed: {error}"))
 }
 
 /// Optimistic lifecycle transition for one expectation.
@@ -278,7 +333,10 @@ mod tests {
     };
     use crate::{
         enums::domain::{DomainFamily, DomainSourceExpectationStatus},
-        types::{ContentHash, DomainInstrumentKey, DomainSourceExpectationId, DomainSourceId},
+        types::{
+            ContentHash, DomainInstrumentKey, DomainSourceExpectationId, DomainSourceId,
+            ResearchProfileId,
+        },
     };
 
     fn hash(fill: char) -> ContentHash {
@@ -287,7 +345,7 @@ mod tests {
 
     #[test]
     fn definition_hash_is_canonical_and_identity_is_stable() {
-        let build = |profiles: Vec<String>| {
+        let build = |profiles: Vec<&str>| {
             UpsertDomainSourceExpectation::new(
                 DomainSourceExpectationDefinition {
                     family: DomainFamily::Crypto,
@@ -298,7 +356,10 @@ mod tests {
                     credential_required: false,
                     freshness_secs: 120,
                     affected_market_ids: Vec::new(),
-                    affected_profile_ids: profiles,
+                    affected_profile_ids: profiles
+                        .into_iter()
+                        .map(ResearchProfileId::new)
+                        .collect(),
                 },
                 DomainSourceExpectationStatus::NotStarted,
                 None,
@@ -306,15 +367,15 @@ mod tests {
             )
             .expect("expectation")
         };
-        let left = build(vec!["weather".to_owned(), "crypto".to_owned()]);
-        let right = build(vec!["crypto".to_owned(), "weather".to_owned()]);
+        let left = build(vec!["weather", "crypto"]);
+        let right = build(vec!["crypto", "weather"]);
         assert_eq!(left.binding_hash, right.binding_hash);
         assert_eq!(left.expectation_id, right.expectation_id);
     }
 
     #[test]
     fn coverage_changes_binding_without_changing_source_identity() {
-        let build = |profiles: Vec<String>| {
+        let build = |profiles: Vec<&str>| {
             UpsertDomainSourceExpectation::new(
                 DomainSourceExpectationDefinition {
                     family: DomainFamily::Crypto,
@@ -325,7 +386,10 @@ mod tests {
                     credential_required: false,
                     freshness_secs: 120,
                     affected_market_ids: Vec::new(),
-                    affected_profile_ids: profiles,
+                    affected_profile_ids: profiles
+                        .into_iter()
+                        .map(ResearchProfileId::new)
+                        .collect(),
                 },
                 DomainSourceExpectationStatus::NotStarted,
                 None,
@@ -333,11 +397,8 @@ mod tests {
             )
             .expect("expectation")
         };
-        let before = build(vec!["crypto_price_15m".to_owned()]);
-        let after = build(vec![
-            "crypto_price_15m".to_owned(),
-            "crypto_price_hourly".to_owned(),
-        ]);
+        let before = build(vec!["crypto_price_15m"]);
+        let after = build(vec!["crypto_price_15m", "crypto_price_hourly"]);
         assert_eq!(before.expectation_id, after.expectation_id);
         assert_ne!(before.binding_hash, after.binding_hash);
     }

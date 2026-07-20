@@ -4,7 +4,7 @@ use crate::{
     enums::quant::{ResearchJobKind, ResearchJobStatus},
     types::{
         DatasetCoverage, DecisionPolicySnapshotId, ModelSpecId, ResearchJobError, ResearchJobId,
-        ResearchJobProgress,
+        ResearchJobParams, ResearchJobProgress, WorkerId,
     },
 };
 use chrono::{DateTime, Utc};
@@ -12,7 +12,7 @@ use sea_orm::entity::prelude::*;
 use uuid::Uuid;
 
 #[sea_orm::model]
-#[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+#[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
 #[sea_orm(table_name = "quant_research_job")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
@@ -22,7 +22,7 @@ pub struct Model {
     pub model_spec_id: Option<ModelSpecId>,
     pub decision_policy_snapshot_id: Option<DecisionPolicySnapshotId>,
     #[sea_orm(column_type = "JsonBinary")]
-    pub params_json: Json,
+    pub params_json: ResearchJobParams,
     #[sea_orm(column_type = "JsonBinary", nullable)]
     pub progress_json: Option<ResearchJobProgress>,
     pub result_ref: Option<Uuid>,
@@ -35,7 +35,7 @@ pub struct Model {
     pub parent_job_id: Option<ResearchJobId>,
     pub recovery_attempt: i32,
     pub max_recovery_attempts: i32,
-    pub lease_owner: Option<String>,
+    pub lease_owner: Option<WorkerId>,
     pub lease_expires_at: Option<DateTime<Utc>>,
     pub started_at: Option<DateTime<Utc>>,
     pub finished_at: Option<DateTime<Utc>>,

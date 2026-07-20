@@ -15,8 +15,8 @@ use validator::Validate;
 use crate::{
     domain::{FactorDefinitionInfo, pagination::PageRequest},
     enums::{
-        factor::{FactorDefinitionScope, FactorFamily, FactorNormalization},
-        quant::{FactorDirection, PublicationStatus},
+        factor::{FactorDefinitionScope, FactorFamily},
+        quant::PublicationStatus,
     },
     types::FactorDefinitionId,
 };
@@ -62,7 +62,7 @@ pub struct PublishFactorsBatchRequest {
 /// Outbound projection of a governed factor definition.
 ///
 /// The normalization method, direction, input features, and quality gates are
-/// projected out of the governed `definition_json` so the catalog surfaces the
+/// projected out of the governed typed definition so the catalog surfaces the
 /// factor's contract without shipping the raw blob.
 #[derive(Debug, Clone, Serialize)]
 pub struct FactorDefinitionView {
@@ -76,9 +76,9 @@ pub struct FactorDefinitionView {
     pub output_schema_version: String,
     pub status: String,
     /// Normalization method (`winsorized_zscore` / `rank` / `min_max`).
-    pub normalization: Option<String>,
+    pub normalization: String,
     /// Default contribution direction (`positive` / `negative` / `neutral`).
-    pub direction: Option<String>,
+    pub direction: String,
     /// Stable feature names this factor consumes.
     pub input_features: Vec<String>,
     /// Whether the factor is required (declares at least one quality gate).
@@ -87,22 +87,6 @@ pub struct FactorDefinitionView {
     pub quality_gates: Vec<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
-}
-
-/// The subset of the governed `definition_json` surfaced in the catalog view.
-#[derive(Debug, Clone, Deserialize)]
-struct DefinitionSpecProjection {
-    normalization: FactorNormalization,
-    default_direction: FactorDirection,
-    #[serde(default)]
-    input_features: Vec<String>,
-    #[serde(default)]
-    quality_gates: Vec<QualityGateProjection>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct QualityGateProjection {
-    name: String,
 }
 
 /// Which factor value plane the collinearity matrix is computed over.
@@ -177,22 +161,19 @@ pub struct FactorDefinitionListQuery {
 
 impl From<FactorDefinitionInfo> for FactorDefinitionView {
     fn from(info: FactorDefinitionInfo) -> Self {
-        let spec: Option<DefinitionSpecProjection> =
-            serde_json::from_value(info.definition_json.clone()).ok();
-        let (normalization, direction, input_features, quality_gates) = spec.map_or_else(
-            || (None, None, Vec::new(), Vec::new()),
-            |spec| {
-                (
-                    Some(spec.normalization.as_str().to_owned()),
-                    Some(spec.default_direction.as_str().to_owned()),
-                    spec.input_features,
-                    spec.quality_gates
-                        .into_iter()
-                        .map(|gate| gate.name)
-                        .collect(),
-                )
-            },
-        );
+        let definition = info.definition;
+        let normalization = definition.normalization.as_str().to_owned();
+        let direction = definition.default_direction.as_str().to_owned();
+        let input_features = definition
+            .input_features
+            .into_iter()
+            .map(|feature| feature.as_str().to_owned())
+            .collect();
+        let quality_gates: Vec<_> = definition
+            .quality_gates
+            .into_iter()
+            .map(|gate| gate.name)
+            .collect();
         Self {
             factor_definition_id: info.factor_definition_id.to_string(),
             definition_hash: info.definition_hash.to_string(),

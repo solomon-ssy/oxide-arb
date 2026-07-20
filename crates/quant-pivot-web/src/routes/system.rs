@@ -2,7 +2,6 @@
 
 use actix_web::{http::Method, web};
 use quant_pivot_models::{
-    config::{DeployConfig, secret::SecretText},
     domain::{
         ActionEligibilityDecision, ActionEligibilityView, ActivateBootstrapRequest, BootstrapView,
         CapabilityView, ExecutionRecoveryView, HealthReport, KillSwitchView,
@@ -15,6 +14,7 @@ use quant_pivot_models::{
         rbac::{Operation, ResourceType},
     },
     hashing::CanonicalDigest,
+    types::ContentHash,
 };
 use serde::Serialize;
 
@@ -86,130 +86,7 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
             Rule::ResourceOp(ResourceType::System, Operation::Read),
             execution_recovery,
         ),
-        spec(
-            Method::GET,
-            "/system/deploy-config",
-            Rule::ResourceOp(ResourceType::System, Operation::Read),
-            deploy_config,
-        ),
     ]
-}
-
-pub async fn deploy_config(
-    state: web::Data<AppState>,
-) -> Result<WebResponse<serde_json::Value>, WebError> {
-    Ok(WebResponse::ok(masked_deploy_view(&state.deploy)))
-}
-
-fn masked_deploy_view(deploy: &DeployConfig) -> serde_json::Value {
-    serde_json::json!({
-        "polymarket": {
-            "clob_base_url": deploy.polymarket.clob_base_url,
-            "clob_ws_url": deploy.polymarket.clob_ws_url,
-            "clob_market_info_refresh_secs": deploy.polymarket.clob_market_info_refresh_secs,
-            "chain_id": deploy.polymarket.chain_id,
-            "onchain": {
-                "rpc_url": deploy.polymarket.onchain.rpc_url,
-                "rpc_timeout_ms": deploy.polymarket.onchain.rpc_timeout_ms,
-            },
-        },
-        "market_data": {
-            "websocket": {
-                "reconnect_delay_ms": deploy.market_data.websocket.reconnect_delay_ms,
-                "max_reconnect_delay_ms": deploy.market_data.websocket.max_reconnect_delay_ms,
-                "max_subscriptions_per_connection":
-                    deploy.market_data.websocket.max_subscriptions_per_connection,
-            },
-            "gamma": {
-                "base_url": deploy.market_data.gamma.base_url,
-                "reconcile_interval_secs": deploy.market_data.gamma.reconcile_interval_secs,
-                "page_size": deploy.market_data.gamma.page_size,
-            },
-        },
-        "observability": {
-            "log_level": deploy.observability.log_level,
-            "log_json": deploy.observability.log_json,
-        },
-        "db": masked_db_view(deploy),
-        "cache": masked_cache_view(deploy),
-        "keys": {
-            "private_key_present": deploy.keys.private_key_present(),
-        },
-        "web": masked_web_view(deploy),
-    })
-}
-
-fn mask_secret(value: &SecretText) -> &'static str {
-    if value.is_empty() { "" } else { "***" }
-}
-
-fn mask_url_credentials(url: &str) -> &str {
-    let authority = url.split_once("://").map_or(url, |(_, rest)| rest);
-    let authority = authority.split(['/', '?', '#']).next().unwrap_or(authority);
-    if authority.contains('@') { "***" } else { url }
-}
-
-fn masked_db_view(deploy: &DeployConfig) -> serde_json::Value {
-    serde_json::json!({
-        "postgres": {
-            "host": deploy.db.postgres.host,
-            "port": deploy.db.postgres.port,
-            "user": deploy.db.postgres.user,
-            "password": mask_secret(&deploy.db.postgres.password),
-            "database": deploy.db.postgres.database,
-            "schema": deploy.db.postgres.schema,
-            "max_connections": deploy.db.postgres.max_connections,
-            "min_connections": deploy.db.postgres.min_connections,
-        },
-        "clickhouse": {
-            "deployment_id": deploy.db.clickhouse.deployment_id,
-            "cluster_id": deploy.db.clickhouse.cluster_id,
-            "url": mask_url_credentials(&deploy.db.clickhouse.url),
-            "database": deploy.db.clickhouse.database,
-            "user": deploy.db.clickhouse.user,
-            "password": mask_secret(&deploy.db.clickhouse.password),
-            "flush_interval_secs": deploy.db.clickhouse.flush_interval_secs,
-            "batch_size": deploy.db.clickhouse.batch_size,
-            "max_concurrent_inserts": deploy.db.clickhouse.max_concurrent_inserts,
-        },
-    })
-}
-
-fn masked_cache_view(deploy: &DeployConfig) -> serde_json::Value {
-    serde_json::json!({
-        "redis": {
-            "host": deploy.cache.redis.host,
-            "port": deploy.cache.redis.port,
-            "user": deploy.cache.redis.user,
-            "password": mask_secret(&deploy.cache.redis.password),
-            "database": deploy.cache.redis.database,
-            "pool_size": deploy.cache.redis.pool_size,
-            "timeout_ms": deploy.cache.redis.timeout_ms,
-            "key_prefix": deploy.cache.redis.key_prefix,
-        },
-        "moka": { "max_capacity": deploy.cache.moka.max_capacity },
-        "operation_timeout_ms": deploy.cache.operation_timeout_ms,
-        "fail_open": deploy.cache.fail_open,
-        "disabled": deploy.cache.disabled,
-    })
-}
-
-fn masked_web_view(deploy: &DeployConfig) -> serde_json::Value {
-    serde_json::json!({
-        "listen_host": deploy.web.listen_host,
-        "listen_port": deploy.web.listen_port,
-        "cors_allowed_origins": deploy.web.cors_allowed_origins,
-        "serve_static_ui": deploy.web.serve_static_ui,
-        "static_ui_dir": deploy.web.static_ui_dir,
-        "jwt": {
-            "signing_key": mask_secret(&deploy.web.jwt.signing_key),
-            "issuer": deploy.web.jwt.issuer,
-            "audience": deploy.web.jwt.audience,
-            "access_ttl_secs": deploy.web.jwt.access_ttl_secs,
-            "refresh_ttl_secs": deploy.web.jwt.refresh_ttl_secs,
-            "absolute_session_ttl_secs": deploy.web.jwt.absolute_session_ttl_secs,
-        },
-    })
 }
 
 pub async fn status(state: web::Data<AppState>) -> Result<WebResponse<SystemStatusView>, WebError> {
@@ -289,7 +166,7 @@ pub async fn activate_bootstrap(
         "expected_state_revision": request.expected_state_revision,
         "reason": &request.reason,
         "report_only_forced_ack": request.report_only_forced_ack,
-    }));
+    }))?;
     let view = state
         .bootstrap
         .activate(request, &actor.claims.username, &acting_role)
@@ -330,7 +207,7 @@ pub async fn switch_quant_mode(
     op_ctx.set_detail(serde_json::json!({
         "target_mode": body.mode.as_str(),
         "reason": body.reason,
-    }));
+    }))?;
     let report = state
         .control
         .switch_quant_mode(body.mode, &actor.claims.username, &body.reason)
@@ -397,7 +274,7 @@ pub async fn set_kill_switch(
         "target_state": body.state.as_str(),
         "reason": body.reason,
         "ack": body.ack,
-    }));
+    }))?;
     let view = state
         .kill_switch
         .set(SetKillSwitchCommand {
@@ -415,8 +292,7 @@ pub async fn set_kill_switch(
     Ok(WebResponse::ok(view))
 }
 
-fn canonical_state_hash<T: Serialize>(state: &T) -> Result<String, WebError> {
+fn canonical_state_hash<T: Serialize>(state: &T) -> Result<ContentHash, WebError> {
     CanonicalDigest::content_hash_json(state)
-        .map(|hash| hash.as_str().to_owned())
         .map_err(|error| WebError::Internal(format!("canonical state hash failed: {error}")))
 }

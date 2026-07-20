@@ -6,6 +6,7 @@ use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{NewShadowComparison, ShadowComparisonInfo, ShadowStabilitySummary},
     entities::quant_shadow_comparison,
+    enums::quant::ModelWeightSource,
     types::{ModelVersionId, Probability},
 };
 use rust_decimal::Decimal;
@@ -58,6 +59,7 @@ impl ShadowComparisonRepository for PgShadowComparisonRepository {
                 quant_shadow_comparison::Column::ShadowModelVersionId
                     .eq(shadow_model_version_id.clone()),
             )
+            .filter(quant_shadow_comparison::Column::WeightSource.eq(ModelWeightSource::Artifact))
             .filter(quant_shadow_comparison::Column::DecisionAt.gte(since))
             .select_only()
             .column_as(

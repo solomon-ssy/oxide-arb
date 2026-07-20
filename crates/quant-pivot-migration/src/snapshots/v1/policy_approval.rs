@@ -15,6 +15,8 @@ pub struct Model {
     pub resource_kind: QpConfigResourceKind,
     #[sea_orm(column_type = "Text")]
     pub revision_hash: String,
+    #[sea_orm(column_type = "JsonBinary", nullable)]
+    pub validation_subject: Option<Json>,
     pub decision: QpPolicyApprovalDecision,
     pub decided_by_kind: QpPolicyActorKind,
     pub decided_by_user_id: Option<Uuid>,

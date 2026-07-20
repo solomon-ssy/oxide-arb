@@ -14,7 +14,7 @@ use rust_decimal_macros::dec;
 use std::env::var;
 
 fn test_keystore() -> Option<Keystore> {
-    let key = var("QUANT_PIVOT_TEST_PRIVATE_KEY").ok()?;
+    let key = crate::credential_file::required_private_key().ok()?;
     Keystore::from_config(&KeysConfig {
         private_key: Some(key.into()),
     })
@@ -24,7 +24,7 @@ fn test_keystore() -> Option<Keystore> {
 #[tokio::test]
 #[ignore = "requires credentials; posts FOK far from market (expect miss/reject, not auth error)"]
 async fn fok_order_sign_and_submit() {
-    let ks = test_keystore().expect("QUANT_PIVOT_TEST_PRIVATE_KEY");
+    let ks = test_keystore().expect("permission-checked private-key credential file");
     let token_id =
         var("QUANT_PIVOT_TEST_TOKEN_ID").expect("QUANT_PIVOT_TEST_TOKEN_ID decimal token id");
     let market_id = var("QUANT_PIVOT_TEST_MARKET_ID").unwrap_or_else(|_| "0x0".into());

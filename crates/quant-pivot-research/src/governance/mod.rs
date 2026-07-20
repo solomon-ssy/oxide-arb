@@ -7,7 +7,3 @@
 //! The quality gate proper lives in [`crate::gates`].
 
 pub mod shadow;
-
-pub use shadow::{
-    OutcomeDelta, RankDelta, ScoreDelta, ShadowComparison, compute_shadow_comparison,
-};

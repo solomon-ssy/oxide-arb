@@ -15,7 +15,7 @@ use quant_pivot_models::{
     },
     hashing::CanonicalDigest,
     runtime_config::NeutralizeDimension,
-    types::FactorDefinitionId,
+    types::{ContentHash, FactorDefinitionId, RoleCode, UserId},
 };
 use serde::Serialize;
 
@@ -183,7 +183,7 @@ pub async fn publish(
                 factor_definition_id: factor_definition_id.clone(),
                 reason: request.reason.clone(),
             },
-            governance_actor(&actor, &acting_role),
+            governance_actor(&actor, &acting_role)?,
         )
         .await?;
     let before_hash = canonical_state_hash(&before)?;
@@ -201,7 +201,7 @@ pub async fn publish(
         "acting_role": acting_role.0,
         "request_id": request_id.0,
         "reason": request.reason,
-    }));
+    }))?;
     Ok(WebResponse::ok(view))
 }
 
@@ -233,7 +233,7 @@ pub async fn retire(
                 factor_definition_id: factor_definition_id.clone(),
                 reason: request.reason.clone(),
             },
-            governance_actor(&actor, &acting_role),
+            governance_actor(&actor, &acting_role)?,
         )
         .await?;
     let before_hash = canonical_state_hash(&before)?;
@@ -251,7 +251,7 @@ pub async fn retire(
         "acting_role": acting_role.0,
         "request_id": request_id.0,
         "reason": request.reason,
-    }));
+    }))?;
     Ok(WebResponse::ok(view))
 }
 
@@ -280,7 +280,7 @@ pub async fn register(
                 domain: config.profile_artifacts.domain.definition.clone(),
                 reason: request.reason.clone(),
             },
-            governance_actor(&actor, &acting_role),
+            governance_actor(&actor, &acting_role)?,
         )
         .await?;
     let views: Vec<FactorDefinitionView> = registered
@@ -294,7 +294,7 @@ pub async fn register(
         "acting_role": acting_role.0,
         "request_id": request_id.0,
         "reason": request.reason,
-    }));
+    }))?;
     Ok(WebResponse::ok(views))
 }
 
@@ -315,7 +315,7 @@ pub async fn publish_batch(
                 factor_definition_ids: request.factor_definition_ids.clone(),
                 reason: request.reason.clone(),
             },
-            governance_actor(&actor, &acting_role),
+            governance_actor(&actor, &acting_role)?,
         )
         .await?;
     let views: Vec<FactorDefinitionView> = published
@@ -330,19 +330,25 @@ pub async fn publish_batch(
         "acting_role": acting_role.0,
         "request_id": request_id.0,
         "reason": request.reason,
-    }));
+    }))?;
     Ok(WebResponse::ok(views))
 }
 
-fn governance_actor(actor: &AuthedActor, acting_role: &ActingRole) -> GovernanceActor {
-    GovernanceActor {
-        username: actor.claims.username.clone(),
-        role: Some(acting_role.0.clone()),
-    }
+fn governance_actor(
+    actor: &AuthedActor,
+    acting_role: &ActingRole,
+) -> Result<GovernanceActor, WebError> {
+    let user_id = actor.claims.sub.parse::<UserId>().map_err(|error| {
+        WebError::Internal(format!("authenticated subject is invalid: {error}"))
+    })?;
+    Ok(GovernanceActor::authenticated(
+        user_id,
+        actor.claims.username.clone(),
+        RoleCode::new(acting_role.0.clone()),
+    ))
 }
 
-fn canonical_state_hash<T: Serialize>(state: &T) -> Result<String, WebError> {
+fn canonical_state_hash<T: Serialize>(state: &T) -> Result<ContentHash, WebError> {
     CanonicalDigest::content_hash_json(state)
-        .map(|hash| hash.as_str().to_owned())
         .map_err(|error| WebError::Internal(format!("canonical state hash failed: {error}")))
 }

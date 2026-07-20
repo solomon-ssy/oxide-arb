@@ -33,7 +33,7 @@ use quant_pivot_models::{
     domain::{DecisionBoundary, ModelVersionInfo, NewModelRun, NewShadowComparison},
     enums::{
         common::{AlertCategory, AlertLevel, AlertSource, MarketCategory},
-        quant::{ModelRunKind, ModelRunStatus, OutcomeSide, PublicationStatus},
+        quant::{ModelRunKind, ModelRunStatus, ModelWeightSource, OutcomeSide, PublicationStatus},
     },
     runtime_config::{
         DomainConfig, FactorCrossSectionConfig, FactorsConfig, FeaturesConfig, ModelConfig,
@@ -42,6 +42,7 @@ use quant_pivot_models::{
     types::{
         ContentHash, DecisionPolicySnapshotId, FeatureVectorId, MarketId, MarketSelectionId,
         ModelRunId, ModelVersionId, Probability, SignalCandidateId, TokenId,
+        shadow::ShadowComparison, stable_name::FeatureName,
     },
 };
 use quant_pivot_repository::traits::{
@@ -49,8 +50,8 @@ use quant_pivot_repository::traits::{
 };
 use quant_pivot_research::{
     factors::{FactorEngine, FrozenReferenceQuantiles, MarketFactorOutcome},
-    features::{FeatureName, FeatureSchema, FeatureVector},
-    governance::{ShadowComparison, compute_shadow_comparison},
+    features::{FeatureSchema, FeatureVector},
+    governance::shadow::{ShadowComparisonRequest, compute_shadow_comparison},
     hashing::ResearchHasher,
     model::{
         ActiveSchemaBinding, InferenceStage, ModelFamily, ModelInputAuditRow, ModelRuntimeFactory,
@@ -223,7 +224,6 @@ pub struct ModelMarketDecision {
 /// The successful active-path result threaded back to [`ModelRunner::run`].
 struct ActiveResult {
     output_hash: ContentHash,
-    metrics: serde_json::Value,
     accepted: Vec<SignalCandidate>,
     emitted: u32,
     decisions: Vec<ModelMarketDecision>,
@@ -394,7 +394,6 @@ impl ModelRunner {
                     .succeed(
                         &model_run_id,
                         active.output_hash.clone(),
-                        active.metrics.clone(),
                         Utc::now(),
                         active_version_id.clone(),
                     )
@@ -608,18 +607,8 @@ impl ModelRunner {
         let active_candidates = output.candidates.clone();
         let (rows, accepted, decisions) =
             partition_candidates(output.candidates, floor, min_confidence, event_time);
-        let metrics = serde_json::json!({
-            "markets_scored": output.runtime_metrics.markets_scored,
-            "candidates_emitted": output.runtime_metrics.candidates_emitted,
-            "accepted": accepted.len(),
-            "inference_duration_ms": output.runtime_metrics.inference_duration_ms,
-            "route_count": routes.runtimes.len(),
-            "families": routes.runtimes.values().map(|runtime| runtime.model_family().to_string()).collect::<BTreeSet<_>>(),
-        });
-
         Ok(ActiveResult {
             output_hash,
-            metrics,
             accepted,
             emitted,
             decisions,
@@ -741,14 +730,8 @@ impl ModelRunner {
             .iter()
             .map(|candidate| signal_candidate_event(candidate, "", event_time))
             .collect();
+        let weight_source = runtime.weight_source();
 
-        let metrics = serde_json::json!({
-            "candidates_emitted": emitted,
-            "diff_mean_score": diff.mean_score_diff.to_string(),
-            "side_disagreement_rate": diff.side_disagreement_rate.to_string(),
-            "exceeds_threshold": diff.exceeds_threshold,
-            "weight_source": runtime.weight_source().as_str(),
-        });
         self.model_input_writer
             .commit_run(
                 model_run_id,
@@ -762,7 +745,6 @@ impl ModelRunner {
             .succeed(
                 model_run_id,
                 output_hash,
-                metrics,
                 Utc::now(),
                 Some(shadow_version_id.clone()),
             )
@@ -774,8 +756,14 @@ impl ModelRunner {
         // score deltas) and raise a critical alert on a hard divergence. This is
         // governance evidence and best-effort: a persistence hiccup must not fail
         // the isolated shadow path.
-        self.persist_shadow_comparison(request, active, shadow_version_id, &output.candidates)
-            .await;
+        self.persist_shadow_comparison(
+            request,
+            active,
+            shadow_version_id,
+            weight_source,
+            &output.candidates,
+        )
+        .await;
         self.maybe_promote_shadow_status(shadow_version_id).await;
 
         Ok(ShadowRunOutcome {
@@ -1110,18 +1098,20 @@ impl ModelRunner {
         request: &ModelRunRequest<'_>,
         active: &ActiveResult,
         shadow_version_id: &ModelVersionId,
+        weight_source: ModelWeightSource,
         shadow_candidates: &[SignalCandidate],
     ) {
         let threshold = request.model.shadow_diff_threshold.value;
-        let comparison = match compute_shadow_comparison(
-            active.active_version_id.clone(),
-            shadow_version_id.clone(),
-            request.boundary.decision_at(),
-            &active.active_candidates,
-            shadow_candidates,
-            request.top_n,
-            threshold,
-        ) {
+        let comparison = match compute_shadow_comparison(ShadowComparisonRequest {
+            active_model_version_id: active.active_version_id.clone(),
+            shadow_model_version_id: shadow_version_id.clone(),
+            weight_source,
+            decision_at: request.boundary.decision_at(),
+            active: &active.active_candidates,
+            shadow: shadow_candidates,
+            top_n: request.top_n,
+            score_divergence_threshold: threshold,
+        }) {
             Ok(comparison) => comparison,
             Err(error) => {
                 tracing::warn!(%error, "skipping shadow comparison: computation failed");
@@ -1144,13 +1134,7 @@ impl ModelRunner {
             );
         }
 
-        let row = match new_shadow_comparison(&comparison) {
-            Ok(row) => row,
-            Err(error) => {
-                tracing::warn!(%error, "failed to project shadow comparison persistence row");
-                return;
-            }
-        };
+        let row = new_shadow_comparison(&comparison);
         if let Err(error) = self.shadow_comparison_repo.create(row).await {
             tracing::warn!(%error, "failed to persist shadow comparison");
         }
@@ -1203,7 +1187,6 @@ impl ModelRunner {
             status: ModelRunStatus::Running,
             input_hash,
             output_hash: None,
-            metrics_json: serde_json::json!({}),
             error_code: None,
             error_message: None,
             started_at: now,
@@ -1724,38 +1707,20 @@ fn shadow_diff(
 }
 
 /// Project a computed [`ShadowComparison`] into its persistence insert payload.
-fn new_shadow_comparison(comparison: &ShadowComparison) -> QuantResult<NewShadowComparison> {
-    let rank_delta_json = serde_json::to_value(&comparison.rank_delta).map_err(|error| {
-        ResearchError::Serialization {
-            detail: format!("serialize shadow rank delta: {error}"),
-        }
-    })?;
-    let score_delta_json = serde_json::to_value(&comparison.score_delta).map_err(|error| {
-        ResearchError::Serialization {
-            detail: format!("serialize shadow score delta: {error}"),
-        }
-    })?;
-    let matured_outcome_json = comparison
-        .matured_outcome_delta
-        .as_ref()
-        .map(|delta| {
-            serde_json::to_value(delta).map_err(|error| ResearchError::Serialization {
-                detail: format!("serialize shadow matured-outcome delta: {error}"),
-            })
-        })
-        .transpose()?;
-    Ok(NewShadowComparison {
+fn new_shadow_comparison(comparison: &ShadowComparison) -> NewShadowComparison {
+    NewShadowComparison {
         shadow_comparison_id: comparison.shadow_comparison_id.clone(),
         active_model_version_id: comparison.active_model_version_id.clone(),
         shadow_model_version_id: comparison.shadow_model_version_id.clone(),
+        weight_source: comparison.weight_source,
         decision_at: comparison.decision_at,
         topn_overlap: comparison.topn_overlap,
-        rank_delta_json,
-        score_delta_json,
-        matured_outcome_json,
+        rank_delta_json: comparison.rank_delta,
+        score_delta_json: comparison.score_delta,
+        matured_outcome_json: comparison.matured_outcome_delta,
         hard_divergence: comparison.hard_divergence,
         comparison_hash: comparison.comparison_hash.clone(),
-    })
+    }
 }
 
 /// Canonical input hash for a run.
@@ -1801,20 +1766,49 @@ mod tests {
         types::{
             ContentHash, FeatureVectorId, MarketId, ModelRunId, ModelSpecId, ModelVersionId,
             SchemaVersion,
+            model_metrics::ModelVersionMetrics,
+            model_quality::{
+                GateIntent, GateSubject, QUALITY_GATE_REPORT_FORMAT_VERSION, QualityGateReport,
+            },
+            model_training::ModelTrainingObjective,
         },
     };
     use quant_pivot_research::{
         features::FeatureVector,
         model::{ModelInputAuditRow, ModelInputAuditState},
     };
-    use quant_pivot_test_support::execution_pg_seed::fixture_profile_ref;
+    use quant_pivot_test_support::{
+        execution_pg_seed::fixture_profile_ref, model_spec_fixtures::model_spec_lineage_fixture,
+    };
     use std::collections::BTreeMap;
 
-    fn version(status: PublicationStatus, report: serde_json::Value) -> ModelVersionInfo {
+    fn gate_report(evaluated_at: chrono::DateTime<Utc>) -> QualityGateReport {
+        QualityGateReport {
+            format_version: QUALITY_GATE_REPORT_FORMAT_VERSION,
+            subject: GateSubject::ModelVersion(ModelVersionId::from_v7()),
+            intent: GateIntent::Candidate,
+            evaluated_at,
+            gates: Vec::new(),
+            hard_failures: Vec::new(),
+            soft_warnings: Vec::new(),
+            passed: true,
+            report_hash: ContentHash::parse(format!("blake3:{}", "1".repeat(64))).expect("hash"),
+        }
+    }
+
+    fn version(
+        status: PublicationStatus,
+        quality_gate_report: Option<QualityGateReport>,
+    ) -> ModelVersionInfo {
+        let (model_spec_thesis, model_spec_definition_hash) =
+            model_spec_lineage_fixture("model-runner-test-spec");
         ModelVersionInfo {
             model_version_id: ModelVersionId::from_v7(),
             model_spec_id: ModelSpecId::from_v7(),
+            model_spec_name: "model-runner-test-spec".to_owned(),
             model_family: ModelFamily::WeightedFactor,
+            model_spec_thesis,
+            model_spec_definition_hash,
             version: 1,
             artifact_hash: ContentHash::parse(format!("blake3:{}", "0".repeat(64))).expect("hash"),
             category_scope: None,
@@ -1823,9 +1817,15 @@ mod tests {
             trade_policy_artifact_id: None,
             trade_policy_hash: None,
             publish_path_set_id: None,
-            metrics_json: serde_json::json!({}),
-            training_objective_json: serde_json::json!({"kind": "not_trained"}),
-            quality_gate_report: report,
+            derivation_kind: ModelVersionInfo::training_derivation_kind(),
+            parent_model_version_id: None,
+            source_backtest_report_id: None,
+            calibration_artifact_id: None,
+            score_multiplier_calibration_report: None,
+            derivation_evidence_hash: None,
+            metrics: ModelVersionMetrics::not_measured("test fixture"),
+            training_objective: ModelTrainingObjective::hand_authored("test fixture"),
+            quality_gate_report,
             publication_status: status,
             published_at: None,
             retired_at: None,
@@ -1907,10 +1907,13 @@ mod tests {
     #[test]
     fn fresh_gate_report_is_accepted_for_candidate() {
         let now = Utc::now();
-        let report = serde_json::json!({ "evaluated_at": now.to_rfc3339() });
         assert!(
-            quality_gate_staleness_ok(&version(PublicationStatus::Candidate, report), 86_400, now,)
-                .is_ok()
+            quality_gate_staleness_ok(
+                &version(PublicationStatus::Candidate, Some(gate_report(now))),
+                86_400,
+                now,
+            )
+            .is_ok()
         );
     }
 
@@ -1918,10 +1921,13 @@ mod tests {
     fn stale_quality_gate_report_is_denied_for_candidate() {
         let now = Utc::now();
         let stale = now - Duration::seconds(90_000);
-        let report = serde_json::json!({ "evaluated_at": stale.to_rfc3339() });
         assert!(
-            quality_gate_staleness_ok(&version(PublicationStatus::Candidate, report), 86_400, now,)
-                .is_err()
+            quality_gate_staleness_ok(
+                &version(PublicationStatus::Candidate, Some(gate_report(stale))),
+                86_400,
+                now,
+            )
+            .is_err()
         );
     }
 
@@ -1929,10 +1935,13 @@ mod tests {
     fn published_active_is_exempt_from_staleness_deny() {
         let now = Utc::now();
         let stale = now - Duration::seconds(90_000);
-        let report = serde_json::json!({ "evaluated_at": stale.to_rfc3339() });
         assert!(
-            quality_gate_staleness_ok(&version(PublicationStatus::Published, report), 86_400, now,)
-                .is_ok()
+            quality_gate_staleness_ok(
+                &version(PublicationStatus::Published, Some(gate_report(stale))),
+                86_400,
+                now,
+            )
+            .is_ok()
         );
     }
 
@@ -1940,10 +1949,13 @@ mod tests {
     fn zero_budget_disables_the_check() {
         let now = Utc::now();
         let stale = now - Duration::days(365);
-        let report = serde_json::json!({ "evaluated_at": stale.to_rfc3339() });
         assert!(
-            quality_gate_staleness_ok(&version(PublicationStatus::Candidate, report), 0, now,)
-                .is_ok()
+            quality_gate_staleness_ok(
+                &version(PublicationStatus::Candidate, Some(gate_report(stale))),
+                0,
+                now,
+            )
+            .is_ok()
         );
     }
 
@@ -1951,12 +1963,8 @@ mod tests {
     fn absent_report_is_not_subject_to_staleness() {
         let now = Utc::now();
         assert!(
-            quality_gate_staleness_ok(
-                &version(PublicationStatus::Candidate, serde_json::json!({})),
-                86_400,
-                now,
-            )
-            .is_ok()
+            quality_gate_staleness_ok(&version(PublicationStatus::Candidate, None), 86_400, now,)
+                .is_ok()
         );
     }
 }

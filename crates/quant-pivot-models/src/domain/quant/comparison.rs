@@ -2,7 +2,10 @@
 
 use crate::{
     entities::quant_model_comparison_report,
-    types::{BacktestReportId, ContentHash, ModelComparisonReportId, ModelRunId, ModelVersionId},
+    types::{
+        BacktestReportId, ContentHash, ModelComparisonReportId, ModelRunId, ModelVersionId,
+        backtest::CategoryRankIcDeltas,
+    },
 };
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
@@ -25,7 +28,7 @@ pub struct ModelComparisonReportInfo {
     pub score_correlation: Decimal,
     pub side_disagreement_rate: Decimal,
     pub common_samples: i64,
-    pub category_breakdown_diff: serde_json::Value,
+    pub category_breakdown_diff: CategoryRankIcDeltas,
     pub comparison_hash: ContentHash,
     pub created_at: DateTime<Utc>,
 }
@@ -70,6 +73,6 @@ pub struct NewModelComparisonReport {
     pub score_correlation: Decimal,
     pub side_disagreement_rate: Decimal,
     pub common_samples: i64,
-    pub category_breakdown_diff: serde_json::Value,
+    pub category_breakdown_diff: CategoryRankIcDeltas,
     pub comparison_hash: ContentHash,
 }

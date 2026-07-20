@@ -22,8 +22,6 @@ pub struct Model {
     pub status: ModelRunStatus,
     pub input_hash: ContentHash,
     pub output_hash: Option<ContentHash>,
-    #[sea_orm(column_type = "JsonBinary")]
-    pub metrics_json: Json,
     pub error_code: Option<ModelRunErrorCode>,
     #[sea_orm(column_type = "Text", nullable)]
     pub error_message: Option<String>,

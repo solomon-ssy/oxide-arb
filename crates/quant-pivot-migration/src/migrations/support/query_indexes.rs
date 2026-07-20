@@ -37,6 +37,89 @@ struct IndexSpec {
 
 const INDEXES: &[IndexSpec] = &[
     IndexSpec {
+        name: "uq_research_profile_artifact_name_version",
+        table: "research_profile_artifact",
+        method: IndexMethod::BTree,
+        unique: true,
+        columns: &[
+            IndexColumnSpec {
+                name: "research_profile_id",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "version",
+                direction: IndexDirection::Asc,
+            },
+        ],
+        predicate: None,
+    },
+    IndexSpec {
+        name: "uq_research_profile_artifact_content_hash",
+        table: "research_profile_artifact",
+        method: IndexMethod::BTree,
+        unique: true,
+        columns: &[IndexColumnSpec {
+            name: "content_hash",
+            direction: IndexDirection::Asc,
+        }],
+        predicate: None,
+    },
+    IndexSpec {
+        name: "idx_policy_profile_artifact_kind_created",
+        table: "policy_profile_artifact",
+        method: IndexMethod::BTree,
+        unique: false,
+        columns: &[
+            IndexColumnSpec {
+                name: "kind",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "created_at",
+                direction: IndexDirection::Desc,
+            },
+        ],
+        predicate: None,
+    },
+    IndexSpec {
+        name: "uq_policy_profile_artifact_kind_hash",
+        table: "policy_profile_artifact",
+        method: IndexMethod::BTree,
+        unique: true,
+        columns: &[
+            IndexColumnSpec {
+                name: "kind",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "content_hash",
+                direction: IndexDirection::Asc,
+            },
+        ],
+        predicate: None,
+    },
+    IndexSpec {
+        name: "idx_system_production_evidence_kind_latest",
+        table: "system_production_evidence",
+        method: IndexMethod::BTree,
+        unique: false,
+        columns: &[
+            IndexColumnSpec {
+                name: "kind",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "observed_at",
+                direction: IndexDirection::Desc,
+            },
+            IndexColumnSpec {
+                name: "production_evidence_id",
+                direction: IndexDirection::Desc,
+            },
+        ],
+        predicate: None,
+    },
+    IndexSpec {
         name: "idx_policy_activation_resource_latest",
         table: "policy_activation",
         method: IndexMethod::BTree,
@@ -1437,20 +1520,14 @@ const INDEXES: &[IndexSpec] = &[
         predicate: None,
     },
     IndexSpec {
-        name: "idx_quant_model_spec_family_status",
+        name: "idx_quant_model_spec_family",
         table: "quant_model_spec",
         method: IndexMethod::BTree,
         unique: false,
-        columns: &[
-            IndexColumnSpec {
-                name: "model_family",
-                direction: IndexDirection::Asc,
-            },
-            IndexColumnSpec {
-                name: "status",
-                direction: IndexDirection::Asc,
-            },
-        ],
+        columns: &[IndexColumnSpec {
+            name: "model_family",
+            direction: IndexDirection::Asc,
+        }],
         predicate: None,
     },
     IndexSpec {
@@ -1480,6 +1557,39 @@ const INDEXES: &[IndexSpec] = &[
             direction: IndexDirection::Asc,
         }],
         predicate: None,
+    },
+    IndexSpec {
+        name: "idx_quant_model_version_parent",
+        table: "quant_model_version",
+        method: IndexMethod::BTree,
+        unique: false,
+        columns: &[IndexColumnSpec {
+            name: "parent_model_version_id",
+            direction: IndexDirection::Asc,
+        }],
+        predicate: Some("(parent_model_version_id IS NOT NULL)"),
+    },
+    IndexSpec {
+        name: "idx_quant_model_version_source_backtest",
+        table: "quant_model_version",
+        method: IndexMethod::BTree,
+        unique: false,
+        columns: &[IndexColumnSpec {
+            name: "source_backtest_report_id",
+            direction: IndexDirection::Asc,
+        }],
+        predicate: Some("(source_backtest_report_id IS NOT NULL)"),
+    },
+    IndexSpec {
+        name: "idx_quant_model_version_calibration_artifact",
+        table: "quant_model_version",
+        method: IndexMethod::BTree,
+        unique: false,
+        columns: &[IndexColumnSpec {
+            name: "calibration_artifact_id",
+            direction: IndexDirection::Asc,
+        }],
+        predicate: Some("(calibration_artifact_id IS NOT NULL)"),
     },
     IndexSpec {
         name: "uq_quant_model_version_spec_version",
@@ -1671,13 +1781,13 @@ const INDEXES: &[IndexSpec] = &[
         predicate: None,
     },
     IndexSpec {
-        name: "idx_quant_recommendation_report_kind_decision_at",
+        name: "idx_quant_recommendation_report_profile_artifact_kind_decision_at",
         table: "quant_recommendation_report",
         method: IndexMethod::BTree,
         unique: false,
         columns: &[
             IndexColumnSpec {
-                name: "profile_id",
+                name: "research_profile_artifact_id",
                 direction: IndexDirection::Asc,
             },
             IndexColumnSpec {
@@ -1743,13 +1853,13 @@ const INDEXES: &[IndexSpec] = &[
         predicate: None,
     },
     IndexSpec {
-        name: "uq_quant_recommendation_report_current_scope",
+        name: "uq_quant_recommendation_report_current_artifact_scope",
         table: "quant_recommendation_report",
         method: IndexMethod::BTree,
         unique: true,
         columns: &[
             IndexColumnSpec {
-                name: "profile_id",
+                name: "research_profile_artifact_id",
                 direction: IndexDirection::Asc,
             },
             IndexColumnSpec {

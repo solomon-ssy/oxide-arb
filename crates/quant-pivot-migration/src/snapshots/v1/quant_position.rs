@@ -18,6 +18,7 @@ pub struct Model {
     pub market_id: String,
     #[sea_orm(column_type = "Text", nullable)]
     pub event_id: Option<String>,
+    #[sea_orm(column_type = r#"custom("qp_market_category")"#)]
     pub category: QpMarketCategory,
     pub side: QpOutcomeSide,
     pub state: QpPositionLedgerState,

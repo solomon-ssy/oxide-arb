@@ -142,7 +142,7 @@ pub async fn resolve(
         "appended": summary.appended,
         "resolved": summary.resolved,
         "unresolved": summary.unresolved,
-    }));
+    }))?;
     Ok(WebResponse::ok(summary))
 }
 
@@ -172,6 +172,6 @@ pub async fn r#override(
         "acting_role": acting_role.0,
         "actor": actor.claims.username,
         "request_id": request_id.0,
-    }));
+    }))?;
     Ok(WebResponse::ok(MarketLinkageDetailView::from(row)))
 }

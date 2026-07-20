@@ -45,9 +45,9 @@ pub mod signing;
 pub mod storage;
 pub mod ws;
 
-pub use config_validation::{ConfigValidationError, ConfigValidationReport, ConfigWarning};
-
 use thiserror::Error;
+
+pub use config_validation::{ConfigValidationError, ConfigValidationReport, ConfigWarning};
 
 /// Convenience alias used throughout the workspace.
 pub type QuantResult<T> = Result<T, QuantError>;

@@ -98,14 +98,12 @@ impl ModelRunRepository for PgModelRunRepository {
         &self,
         model_run_id: &ModelRunId,
         output_hash: ContentHash,
-        metrics_json: serde_json::Value,
         finished_at: DateTime<Utc>,
         model_version_id: Option<ModelVersionId>,
     ) -> Result<ModelRunInfo, StorageError> {
         let mut active = self.load_running(model_run_id).await?.into_active_model();
         active.status = ActiveValue::Set(ModelRunStatus::Succeeded);
         active.output_hash = ActiveValue::Set(Some(output_hash));
-        active.metrics_json = ActiveValue::Set(metrics_json);
         active.finished_at = ActiveValue::Set(Some(finished_at));
         if let Some(version_id) = model_version_id {
             active.model_version_id = ActiveValue::Set(Some(version_id));

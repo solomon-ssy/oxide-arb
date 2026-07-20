@@ -11,7 +11,10 @@ use quant_pivot_models::{
         DecisionBoundary, DecisionClock, DecisionSource, LinkageOutcome, MarketLinkageDerivation,
         NewMarketLinkage,
     },
-    enums::{common::MarketCategory, domain::ResolverTier},
+    enums::{
+        common::MarketCategory,
+        domain::{LinkageStatus, ResolverTier},
+    },
     types::{ContentHash, MarketId, Probability, ResolverVersion},
 };
 use quant_pivot_repository::{
@@ -301,7 +304,7 @@ async fn append_batch_rolls_back_the_entire_group_when_any_member_is_invalid() {
         effective_at,
         7,
     );
-    invalid.outcome = serde_json::json!({ "invalid": "linkage outcome" });
+    invalid.status = LinkageStatus::Resolved;
 
     assert!(
         repo.append_batch(vec![first.clone(), invalid])

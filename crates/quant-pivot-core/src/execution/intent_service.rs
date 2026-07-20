@@ -16,7 +16,7 @@ use std::{fmt::Display, sync::Arc};
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, FixedOffset, Utc};
 use quant_pivot_error::{
-    QuantError, QuantResult, execution::ExecutionError, storage::StorageError,
+    QuantError, QuantResult, execution::ExecutionError, infra::InfraError, storage::StorageError,
 };
 use quant_pivot_models::{
     domain::{
@@ -28,7 +28,7 @@ use quant_pivot_models::{
     enums::{
         common::{OrderType, Side},
         execution::{CapitalAllocationState, OrderIntentKind},
-        operation_log::{OperationCategory, OperationOutcome},
+        operation_log::{OperationCategory, OperationHttpMethod, OperationOutcome},
         quant::{
             ApprovalStatus, FillRequirement, OrderIntentStatus, QuantRuntimeMode,
             RecommendationReportStatus, ReportFactDeliveryStatus,
@@ -37,9 +37,9 @@ use quant_pivot_models::{
     },
     types::{
         CapitalAllocationId, ContentHash, EntryConditionInstanceId, EntryOrderPolicy,
-        EntryOrderSpec, ExitPolicySpec, ModelVersionId, OperationLogId, OrderAmount, OrderIntentId,
-        Price, RecommendationId, RecommendationReportId, RecommendationTradePlan,
-        ResearchProfileRef, TradePolicyArtifactId, Usd,
+        EntryOrderSpec, ExitPolicySpec, ModelVersionId, OperationDetailDocument, OperationLogId,
+        OrderAmount, OrderIntentId, Price, RecommendationId, RecommendationReportId,
+        RecommendationTradePlan, ResearchProfileRef, TradePolicyArtifactId, Usd,
     },
 };
 use quant_pivot_repository::traits::{
@@ -466,7 +466,7 @@ impl CoreOrderIntentService {
         let (entry_override, allocated_override) =
             resolve_downscale(&command, &intent.entry_order_json)?;
         let approval = ApproveOrderIntent {
-            approved_by: command.operator_id,
+            approved_by: command.operator_id.clone(),
             approval_reason: approval_reason(&command),
             approved_at: now,
         };
@@ -509,7 +509,7 @@ impl CoreOrderIntentService {
         now: DateTime<Utc>,
     ) -> QuantResult<OrderIntentInfo> {
         let current = self.load_intent(&command.order_intent_id).await?;
-        let log = intent_operation_log("quant.intent.reject", &current, &command.reason);
+        let log = intent_operation_log("quant.intent.reject", &current, &command.reason)?;
         let rejected = self
             .intents
             .reject(&command.order_intent_id, command.reason, now, log)
@@ -529,7 +529,7 @@ impl CoreOrderIntentService {
         now: DateTime<Utc>,
     ) -> QuantResult<OrderIntentInfo> {
         let current = self.load_intent(&command.order_intent_id).await?;
-        let log = intent_operation_log("quant.intent.cancel", &current, &command.reason);
+        let log = intent_operation_log("quant.intent.cancel", &current, &command.reason)?;
         let cancelled = self
             .intents
             .cancel(&command.order_intent_id, command.reason, now, log)
@@ -545,7 +545,7 @@ impl CoreOrderIntentService {
         let due = self.intents.find_expired(now).await?;
         let mut expired = 0_u32;
         for intent in due.into_iter().take(limit) {
-            let log = intent_operation_log("quant.intent.expire", &intent, "ttl_expired");
+            let log = intent_operation_log("quant.intent.expire", &intent, "ttl_expired")?;
             match self.intents.expire(&intent.order_intent_id, now, log).await {
                 Ok(updated) => {
                     self.publish(&updated, IntentEventKind::Expired, now);
@@ -738,7 +738,7 @@ fn compose_create_rows(
         runtime_mode: mode,
         decision_policy_snapshot_id: report.decision_policy_snapshot_id.clone(),
         model_version_id: report.model_version_id.clone(),
-        profile_ref,
+        research_profile_artifact_id: profile_ref.artifact_id(),
         intent_kind: OrderIntentKind::Buy,
         status: resolved.status,
         approval_status: resolved.approval_status,
@@ -1029,30 +1029,39 @@ fn approval_reason(command: &ApproveIntentCommand) -> String {
 
 /// Build the WORM operation-log row written inside a background-origin intent
 /// transition transaction (sweep expiry / report-cascade invalidation).
-fn intent_operation_log(action: &str, intent: &OrderIntentInfo, reason: &str) -> NewOperationLog {
-    NewOperationLog {
+fn intent_operation_log(
+    action: &str,
+    intent: &OrderIntentInfo,
+    reason: &str,
+) -> QuantResult<NewOperationLog> {
+    Ok(NewOperationLog {
         id: OperationLogId::from_v7(),
-        request_id: format!("quant-intent:{action}:{}", intent.order_intent_id),
+        request_id: format!("quant-intent:{action}:{}", intent.order_intent_id).into(),
         actor_user_id: None,
         actor_username: Some("system".to_owned()),
-        acting_role: Some("intent_lifecycle".to_owned()),
+        acting_role: Some("intent_lifecycle".into()),
         category: OperationCategory::Governance,
-        action: action.to_owned(),
+        action: action.into(),
         resource_type: Some(ResourceType::OrderIntent),
         resource_id: Some(intent.order_intent_id.to_string()),
-        http_method: "SYSTEM".to_owned(),
+        http_method: OperationHttpMethod::System,
         http_path: format!("/system/quant/intent/{}/{action}", intent.order_intent_id),
         http_status: 200,
         outcome: OperationOutcome::Success,
         client_ip: None,
         user_agent: None,
         latency_ms: 0,
-        detail: serde_json::json!({ "reason": reason }),
+        detail: OperationDetailDocument::from_serializable(&serde_json::json!({
+            "reason": reason,
+        }))
+        .map_err(|error| InfraError::AuditDetailInvalid {
+            detail: error.to_string(),
+        })?,
         before_hash: None,
         after_hash: None,
         governance_audit_event_id: None,
         governance_audit_sequence: None,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -1076,14 +1085,13 @@ mod tests {
         types::{
             Bps, ContentHash, DecisionPolicySnapshotId, EntryOrderPolicy, EntryOrderSpec,
             EntryPlan, ExitPlan, OrderAmount, OrderIntentId, Price, RecommendationId,
-            RecommendationReportId, RecommendationTradePlan, RiskEnvelope, Shares, SizingPlan,
-            TokenId, Usd,
+            RecommendationReportId, RecommendationTradePlan, RiskEnvelope, RoleCode, Shares,
+            SizingPlan, TokenId, Usd, UserId,
         },
     };
     use quant_pivot_test_support::report_fixtures;
     use rust_decimal_macros::dec;
     use std::time::Duration as StdDuration;
-    use uuid::Uuid;
 
     fn rec() -> RecommendationInfo {
         report_fixtures::recommendation(
@@ -1144,8 +1152,8 @@ mod tests {
     fn approve_command() -> ApproveIntentCommand {
         ApproveIntentCommand {
             order_intent_id: OrderIntentId::from_v7(),
-            operator_id: Uuid::nil(),
-            acting_role: "operator".to_owned(),
+            operator_id: UserId::new(uuid::Uuid::nil()),
+            acting_role: RoleCode::new("operator"),
             reason: "ok".to_owned(),
             override_amount: None,
             override_price: None,
@@ -1564,6 +1572,10 @@ mod tests {
             types::{
                 BacktestPathSetId, CalibrationArtifactId, ContentHash, ModelInputContract,
                 ModelSpecId, ModelVersionId,
+                calibration::{MonotoneMapping, ReliabilityReport},
+                model_metrics::ModelVersionMetrics,
+                model_quality::QualityGateReport,
+                model_training::ModelTrainingObjective,
             },
         };
         use quant_pivot_repository::traits::{
@@ -1574,13 +1586,14 @@ mod tests {
             factors::{FrozenReferenceQuantiles, names::LIQUIDITY_DEPTH},
             model::{
                 CalibratedReturnModel, CalibrationArtifactLoader, FactorWeight, ModelArtifact,
-                ModelArtifactHeader, ModelFamily, MonotoneMapping, ReliabilityReport,
-                ResolvedCalibration, ReturnModelSpec, ScoreMultiplierSpec,
-                SubstitutionConfidenceRules, WeightedFactorModelArtifact,
+                ModelArtifactHeader, ModelFamily, ResolvedCalibration, ReturnModelSpec,
+                ScoreMultiplierSpec, SubstitutionConfidenceRules, WeightedFactorModelArtifact,
                 model_input_contract_hash,
             },
         };
-        use quant_pivot_test_support::execution_pg_seed::fixture_profile_ref;
+        use quant_pivot_test_support::{
+            execution_pg_seed::fixture_profile_ref, model_spec_fixtures::model_spec_lineage_fixture,
+        };
 
         struct FakeRegistry {
             version: Option<ModelVersionInfo>,
@@ -1668,7 +1681,7 @@ mod tests {
             async fn set_quality_gate_report(
                 &self,
                 _model_version_id: &ModelVersionId,
-                _quality_gate_report: serde_json::Value,
+                _quality_gate_report: QualityGateReport,
             ) -> Result<ModelVersionInfo, StorageError> {
                 unimplemented!("not exercised by the calibration recheck tests")
             }
@@ -1728,6 +1741,11 @@ mod tests {
         fn header(model_version_id: ModelVersionId) -> ModelArtifactHeader {
             ModelArtifactHeader {
                 model_version_id,
+                model_spec_definition_hash: ContentHash::parse(format!(
+                    "blake3:{}",
+                    "0".repeat(64)
+                ))
+                .expect("hash"),
                 profile_ref: fixture_profile_ref(),
                 model_family: ModelFamily::WeightedFactor,
                 feature_schema_hash: ContentHash::parse(format!("blake3:{}", "1".repeat(64)))
@@ -1784,10 +1802,15 @@ mod tests {
                 .put(key, &artifact.to_bytes().expect("bytes"))
                 .await
                 .expect("put");
+            let (model_spec_thesis, model_spec_definition_hash) =
+                model_spec_lineage_fixture("intent-service-test-spec");
             let version = ModelVersionInfo {
                 model_version_id,
                 model_spec_id: ModelSpecId::from_v7(),
+                model_spec_name: "intent-service-test-spec".to_owned(),
                 model_family: ModelFamily::WeightedFactor,
+                model_spec_thesis,
+                model_spec_definition_hash,
                 version: 1,
                 artifact_hash: digest,
                 category_scope: None,
@@ -1796,9 +1819,15 @@ mod tests {
                 trade_policy_artifact_id: None,
                 trade_policy_hash: None,
                 publish_path_set_id: None,
-                metrics_json: serde_json::json!({}),
-                training_objective_json: serde_json::json!({"kind": "not_trained"}),
-                quality_gate_report: serde_json::json!({}),
+                derivation_kind: ModelVersionInfo::training_derivation_kind(),
+                parent_model_version_id: None,
+                source_backtest_report_id: None,
+                calibration_artifact_id: None,
+                score_multiplier_calibration_report: None,
+                derivation_evidence_hash: None,
+                metrics: ModelVersionMetrics::not_measured("test fixture"),
+                training_objective: ModelTrainingObjective::hand_authored("test fixture"),
+                quality_gate_report: None,
                 publication_status: PublicationStatus::Published,
                 published_at: Some(Utc::now()),
                 retired_at: None,

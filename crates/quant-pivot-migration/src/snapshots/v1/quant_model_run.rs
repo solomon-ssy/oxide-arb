@@ -20,8 +20,6 @@ pub struct Model {
     pub input_hash: String,
     #[sea_orm(column_type = "Text", nullable)]
     pub output_hash: Option<String>,
-    #[sea_orm(column_type = "JsonBinary")]
-    pub metrics_json: Json,
     pub error_code: Option<QpModelRunErrorCode>,
     #[sea_orm(column_type = "Text", nullable)]
     pub error_message: Option<String>,

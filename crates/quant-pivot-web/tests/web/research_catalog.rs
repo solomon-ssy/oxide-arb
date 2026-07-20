@@ -185,7 +185,7 @@ async fn feature_contract_returns_hash_bound_active_catalog() {
     let res = harness::call(&env.state, req).await;
 
     assert_eq!(res.status, StatusCode::OK);
-    assert_eq!(res.json()["data"]["feature_schema_version"], json!(6));
+    assert_eq!(res.json()["data"]["feature_schema_version"], json!(1));
     assert_eq!(res.json()["data"]["features"][0]["name"], json!("book.mid"));
     assert_eq!(
         res.json()["data"]["features"][0]["value_kind"],

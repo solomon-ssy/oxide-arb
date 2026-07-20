@@ -17,9 +17,10 @@ use quant_pivot_models::{
     hashing::CanonicalDigest,
     types::{
         ArtifactUri, ContentHash, HistoryCoverage, RETENTION_RUNWAY_EVIDENCE_FORMAT_VERSION,
-        ResearchReadinessEvidencePayload, ResearchSourceBinding, ResearchSourceRegistry,
-        ResearchSourceStorageKind, RetentionRunwayEvidenceV1, RetentionSourceObservationV1,
-        SHADOW_LATENCY_PROFILE_FORMAT_VERSION, ShadowLatencyProfileV1, research_source_registry,
+        ResearchReadinessEvidenceId, ResearchReadinessEvidencePayload, ResearchSourceBinding,
+        ResearchSourceRegistry, ResearchSourceStorageKind, RetentionRunwayEvidenceV1,
+        RetentionSourceObservationV1, SHADOW_LATENCY_PROFILE_FORMAT_VERSION,
+        ShadowLatencyProfileV1, research_source_registry,
     },
 };
 use quant_pivot_repository::traits::{
@@ -28,7 +29,6 @@ use quant_pivot_repository::traits::{
 use quant_pivot_research::artifact::{ArtifactKey, ArtifactNamespace, ArtifactStore};
 use quant_pivot_storage::clickhouse::{ClickHousePool, extract_table_ttl, schema_contract_hash};
 use serde::Serialize;
-use uuid::Uuid;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 const EVIDENCE_VALID_FOR: Duration = Duration::hours(6);
@@ -267,7 +267,7 @@ impl ResearchReadinessEvidenceService {
     /// whether the evidence would still satisfy a new preflight freshness gate.
     pub async fn verified_by_id(
         &self,
-        evidence_id: Uuid,
+        evidence_id: &ResearchReadinessEvidenceId,
     ) -> QuantResult<ResearchReadinessEvidenceInfo> {
         let info = self.repo.find_by_id(evidence_id).await?.ok_or_else(|| {
             ResearchError::ValidationMethodology {
@@ -548,7 +548,7 @@ impl ResearchReadinessEvidenceProducer {
         let attestation_mac = attestor.mac(&attestor.active_key_id, &input)?;
         self.repo
             .append(NewResearchReadinessEvidence {
-                evidence_id: Uuid::now_v7(),
+                evidence_id: ResearchReadinessEvidenceId::from_v7(),
                 kind,
                 scope_hash,
                 window_start,

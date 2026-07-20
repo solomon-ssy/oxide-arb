@@ -32,21 +32,22 @@ use quant_pivot_models::{
         ConditionUnavailableReason, ConfirmationPolicy, ContentHash, DecisionPolicySnapshotId,
         ENTRY_CONDITION_EVALUATOR_VERSION, ENTRY_CONDITION_SCHEMA_VERSION,
         EntryConditionArtifactV1, EntryConditionBinding, EntryConditionFactorBinding,
-        EntryConditionFoldState, EntryConditionSourceBinding, EntryConditionTemplate,
-        EntryConditionTemplateV1, EntryConditionV1, EntryOrderTemplate, FactorCondition,
-        MarketEventCondition, MarketEventTemplate, MarketId, MarketSelectionId, ModelRunId,
-        ModelVersionId, Price, PriceCondition, RecommendationId, ResearchProfileArtifact,
-        ShadowLatencyProfileV1, StructuralVolatilityOosEvidence, StructuralVolatilityOosFoldRow,
-        TemperatureCelsius, TokenId, TradePolicyCandidateSpec, TradePolicyCandidateTrialRow,
-        TradePolicyCohort, TradePolicyCohortDimension, TradePolicyCohortKey,
-        TradePolicyCohortTrialRow, TradePolicyCoverageGapRow, TradePolicyCpcvPathRow,
-        TradePolicyEvidenceFillOutcome, TradePolicyEvidenceLiquidityRole,
-        TradePolicyEvidenceObjectKind, TradePolicyFillEvidenceRow, TradePolicyLatencyScenario,
-        TradePolicyObservationCapability, TradePolicyObservationEligibilityRow,
-        TradePolicyParameterSource, TradePolicyQualityGate, TradePolicyReplayGap,
-        TradePolicyStatisticalSummaryRow, Usd, VerticalGateEvidence,
+        EntryConditionFoldState, EntryConditionInputSet, EntryConditionSourceBinding,
+        EntryConditionTemplate, EntryConditionTemplateV1, EntryConditionV1, EntryOrderTemplate,
+        ExecutablePriceInput, FactorCondition, FactorSnapshotInput, MarketEventCondition,
+        MarketEventTemplate, MarketId, MarketSelectionId, ModelRunId, ModelVersionId, Price,
+        PriceCondition, RecommendationId, ResearchProfileArtifact, ShadowLatencyProfileV1,
+        StructuralVolatilityOosEvidence, StructuralVolatilityOosFoldRow, TemperatureCelsius,
+        TokenId, TradePolicyCandidateSpec, TradePolicyCandidateTrialRow, TradePolicyCohort,
+        TradePolicyCohortDimension, TradePolicyCohortKey, TradePolicyCohortTrialRow,
+        TradePolicyCoverageGapRow, TradePolicyCpcvPathRow, TradePolicyEvidenceFillOutcome,
+        TradePolicyEvidenceLiquidityRole, TradePolicyEvidenceObjectKind,
+        TradePolicyFillEvidenceRow, TradePolicyLatencyScenario, TradePolicyObservationCapability,
+        TradePolicyObservationEligibilityRow, TradePolicyParameterSource, TradePolicyQualityGate,
+        TradePolicyReplayGap, TradePolicyStatisticalSummaryRow, Usd, VerticalGateEvidence,
         WeatherDailyTemperatureCrossedTerminalBound, WeatherDailyTemperatureEnteredBand,
-        WeatherObservationDayClosedOutsideBand, WeatherTemperatureStatistic,
+        WeatherDailyTemperatureInput, WeatherObservationDayClosedOutsideBand,
+        WeatherTemperatureStatistic,
     },
 };
 use quant_pivot_research::{
@@ -68,11 +69,7 @@ use rust_decimal::Decimal;
 use uuid::Uuid;
 
 use crate::{
-    execution::entry_condition::{
-        EntryConditionInputSet, ExecutablePriceInput, FactorSnapshotInput,
-        WeatherDailyTemperatureInput, evaluate_entry_condition,
-    },
-    prefetch::replay_page::ReplayPage,
+    execution::entry_condition::evaluate_entry_condition, prefetch::replay_page::ReplayPage,
     projection::inference_batch::build_frozen_runtime_input,
 };
 
@@ -2048,7 +2045,7 @@ fn catalog_market_at(
                 example.market_id
             ))
         })?;
-    serde_json::from_value(version.payload.clone()).map_err(|error| {
+    serde_json::from_value(version.payload.clone().into_inner()).map_err(|error| {
         methodology(format!(
             "market {} catalog payload is invalid: {error}",
             version.market_id

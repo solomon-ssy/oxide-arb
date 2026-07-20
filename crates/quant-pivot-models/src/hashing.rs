@@ -97,9 +97,9 @@ impl CanonicalDigest {
     }
 }
 
-/// Canonical governance state hash (prefixed BLAKE3 JSON digest).
-pub fn canonical_state_hash<T: Serialize>(value: &T) -> Result<String, CanonicalDigestError> {
-    CanonicalDigest::blake3_json(value)
+/// Canonical governance state hash (validated, prefixed BLAKE3 JSON digest).
+pub fn canonical_state_hash<T: Serialize>(value: &T) -> Result<ContentHash, CanonicalDigestError> {
+    CanonicalDigest::content_hash_json(value)
 }
 
 #[cfg(test)]
@@ -138,7 +138,7 @@ mod tests {
         let value = Sample { a: 1, b: "x" };
         assert_eq!(
             canonical_state_hash(&value).expect("hash"),
-            CanonicalDigest::blake3_json(&value).expect("digest")
+            CanonicalDigest::content_hash_json(&value).expect("digest")
         );
     }
 

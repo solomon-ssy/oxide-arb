@@ -828,7 +828,7 @@ fn validate_reports(config: &DecisionPolicySnapshot, report: &mut ConfigValidati
         report,
     );
     for schedule in &config.report_schedule.schedules {
-        if schedule.schedule_id.trim().is_empty() {
+        if schedule.schedule_id.as_str().trim().is_empty() {
             report.errors.push(ConfigValidationError::InvalidValue {
                 field: "reports.schedules.schedule_id",
                 detail: "must not be empty".to_owned(),
@@ -846,7 +846,7 @@ fn validate_reports(config: &DecisionPolicySnapshot, report: &mut ConfigValidati
     }
     let mut seen_schedule_ids = HashSet::new();
     for schedule in &config.report_schedule.schedules {
-        let id = schedule.schedule_id.trim();
+        let id = schedule.schedule_id.as_str().trim();
         if id.is_empty() {
             continue;
         }
@@ -1004,8 +1004,9 @@ fn validate_execution(config: &DecisionPolicySnapshot, report: &mut ConfigValida
     if config.execution_authorization.auto_execution.enabled {
         report.errors.push(ConfigValidationError::InvalidValue {
             field: "execution.auto_execution.enabled",
-            detail: "Runtime v18 keeps AutoExecution blocked; Phase 11.11 owns its final governance gate"
-                .to_owned(),
+            detail:
+                "Runtime v1 keeps AutoExecution blocked; Phase 11.11 owns its final governance gate"
+                    .to_owned(),
         });
     }
     non_negative_decimal(
@@ -1088,19 +1089,19 @@ fn validate_semi_auto_canary(config: &DecisionPolicySnapshot, report: &mut Confi
     if !only_first_tier {
         report.errors.push(ConfigValidationError::InvalidValue {
             field: "execution.semi_auto.canary.allowed_cash_budget_tiers_usd",
-            detail: "runtime v18 canary must contain exactly the $25 cash-budget tier".to_owned(),
+            detail: "runtime v1 canary must contain exactly the $25 cash-budget tier".to_owned(),
         });
     }
     if canary.max_open_intents != 1 {
         report.errors.push(ConfigValidationError::InvalidValue {
             field: "execution.semi_auto.canary.max_open_intents",
-            detail: "runtime v18 canary must allow exactly one open intent".to_owned(),
+            detail: "runtime v1 canary must allow exactly one open intent".to_owned(),
         });
     }
     if canary.max_total_cash_per_report.value != Decimal::new(25, 0) {
         report.errors.push(ConfigValidationError::InvalidValue {
             field: "execution.semi_auto.canary.max_total_cash_per_report",
-            detail: "runtime v18 canary must cap each report at exactly $25 total cash".to_owned(),
+            detail: "runtime v1 canary must cap each report at exactly $25 total cash".to_owned(),
         });
     }
     if canary
@@ -1830,7 +1831,7 @@ mod tests {
     fn invalid_enabled_cron_schedule_is_rejected() {
         let mut config = DecisionPolicySnapshot::default();
         config.report_schedule.schedules = vec![ReportScheduleConfig {
-            schedule_id: "bad".to_owned(),
+            schedule_id: "bad".into(),
             enabled: true,
             top_n: 10,
             knowledge_lag_secs: 0,

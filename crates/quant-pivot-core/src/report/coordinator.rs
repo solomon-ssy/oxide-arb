@@ -14,12 +14,11 @@ use quant_pivot_models::{
         DecisionPolicySnapshot, ReportScheduleConfig, ReportsConfig, due_schedule_window,
         preview_fire_times,
     },
-    types::DecisionPolicySnapshotId,
+    types::{DecisionPolicySnapshotId, WorkerId},
 };
 use quant_pivot_repository::traits::{PolicyRepository, ReportRunRepository};
 use tokio::time::{Instant, interval_at};
 use tokio_util::sync::CancellationToken;
-use uuid::Uuid;
 
 use super::{ReportLifecycleService, publisher::ReportPublisher};
 
@@ -39,7 +38,7 @@ pub struct ReportCoordinator {
     lifecycle: Arc<ReportLifecycleService>,
     publisher: Arc<ReportPublisher>,
     config: ReportCoordinatorConfig,
-    worker_id: Uuid,
+    worker_id: WorkerId,
 }
 
 impl ReportCoordinator {
@@ -57,7 +56,7 @@ impl ReportCoordinator {
             lifecycle,
             publisher,
             config,
-            worker_id: Uuid::now_v7(),
+            worker_id: WorkerId::from_v7(),
         }
     }
 
@@ -91,7 +90,7 @@ impl ReportCoordinator {
         if let Some(run) = self
             .runs
             .claim_next_run(
-                self.worker_id,
+                self.worker_id.clone(),
                 self.config.lease_secs,
                 self.config.ad_hoc_ttl_secs,
                 claim_config,
@@ -230,7 +229,7 @@ impl ReportCoordinator {
                     _ = timer.tick() => {
                         run = self.runs.heartbeat_run(
                             &run.report_run_id,
-                            self.worker_id,
+                            self.worker_id.clone(),
                             self.config.lease_secs,
                         ).await.map_err(QuantError::from)?;
                         self.publisher.publish_run(&run, Utc::now());

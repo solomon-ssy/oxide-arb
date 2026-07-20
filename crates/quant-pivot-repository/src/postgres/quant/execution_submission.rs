@@ -53,6 +53,7 @@ use quant_pivot_models::{
     types::{
         ExecutionOrderId, ExitReinferenceObservation, FeatureParityStateId, OrderIntentId,
         PendingScaleOut, Price, RecommendationId, RecommendationReportId, ReconciliationId,
+        ResearchProfileArtifactId, ResearchProfileId,
     },
 };
 use sea_orm::{
@@ -86,7 +87,8 @@ impl PgExecutionSubmissionRepository {
 struct SubmissionReportScope {
     report_id: RecommendationReportId,
     recommendation_id: RecommendationId,
-    profile_id: String,
+    profile_id: ResearchProfileId,
+    research_profile_artifact_id: ResearchProfileArtifactId,
     report_kind: ReportKind,
 }
 
@@ -115,7 +117,8 @@ async fn probe_submission_scope(
     Ok(SubmissionReportScope {
         report_id: report.recommendation_report_id,
         recommendation_id: recommendation.recommendation_id,
-        profile_id: report.profile_id,
+        profile_id: report.research_profile_artifact_id.profile_ref().id,
+        research_profile_artifact_id: report.research_profile_artifact_id,
         report_kind: report.report_kind,
     })
 }
@@ -131,7 +134,7 @@ async fn lock_submission_graph(
         .await
         .map_err(StorageError::from)?
         .ok_or_else(|| error::not_found(entity::QUANT_RECOMMENDATION_REPORT, &scope.report_id))?;
-    if report.profile_id != scope.profile_id
+    if report.research_profile_artifact_id != scope.research_profile_artifact_id
         || report.report_kind != scope.report_kind
         || report.status != RecommendationReportStatus::Published
     {

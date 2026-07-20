@@ -10,9 +10,9 @@ pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub expectation_id: Uuid,
     pub family: QpDomainFamily,
-    #[sea_orm(column_type = "Text")]
+    #[sea_orm(column_type = "Text", unique_key = "source_instrument")]
     pub source_id: String,
-    #[sea_orm(column_type = "Text")]
+    #[sea_orm(column_type = "Text", unique_key = "source_instrument")]
     pub instrument_key: String,
     #[sea_orm(column_type = "Text")]
     pub capability_registry_hash: String,
@@ -21,10 +21,8 @@ pub struct Model {
     pub required: bool,
     pub credential_required: bool,
     pub freshness_secs: i64,
-    #[sea_orm(column_type = "JsonBinary")]
-    pub affected_market_ids: Json,
-    #[sea_orm(column_type = "JsonBinary")]
-    pub affected_profile_ids: Json,
+    pub affected_market_ids: Vec<String>,
+    pub affected_profile_ids: Vec<String>,
     pub status: QpDomainSourceExpectationStatus,
     pub status_reason: Option<String>,
     pub created_at: DateTimeWithTimeZone,

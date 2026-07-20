@@ -12,7 +12,8 @@ use crate::{
     },
     types::{
         CatalogEventChangeId, CatalogEventObjectId, CatalogMarketChangeId, CatalogMarketObjectId,
-        CatalogSyncBatchId, CatalogSyncRejectionId, ContentHash, EventId, MarketId,
+        CatalogSyncBatchId, CatalogSyncRejectionId, ContentHash, EventId, ExternalJsonDocument,
+        MarketId,
     },
 };
 use chrono::{DateTime, Utc};
@@ -87,7 +88,7 @@ pub struct NewCatalogEventObject {
     pub event_object_id: CatalogEventObjectId,
     pub content_hash: ContentHash,
     pub schema_version: i32,
-    pub payload: serde_json::Value,
+    pub payload: ExternalJsonDocument,
 }
 
 #[derive(Debug, Clone, DeriveIntoActiveModel)]
@@ -108,7 +109,7 @@ pub struct NewCatalogMarketObject {
     pub market_object_id: CatalogMarketObjectId,
     pub content_hash: ContentHash,
     pub schema_version: i32,
-    pub payload: serde_json::Value,
+    pub payload: ExternalJsonDocument,
 }
 
 #[derive(Debug, Clone, DeriveIntoActiveModel)]
@@ -135,7 +136,7 @@ pub struct NewCatalogSyncRejection {
     pub source_id: Option<String>,
     pub reason_code: CatalogRejectionReason,
     pub detail: String,
-    pub raw_payload: Option<serde_json::Value>,
+    pub raw_payload: Option<ExternalJsonDocument>,
 }
 
 /// Candidate event object/change/projection evaluated against the current hash in the writer transaction.
@@ -180,7 +181,7 @@ pub struct CatalogEventChangeInfo {
     pub change_type: CatalogChangeType,
     pub content_hash: ContentHash,
     pub schema_version: i32,
-    pub payload: serde_json::Value,
+    pub payload: ExternalJsonDocument,
     pub created_at: DateTime<Utc>,
 }
 
@@ -200,7 +201,7 @@ pub struct CatalogMarketChangeInfo {
     pub change_type: CatalogChangeType,
     pub content_hash: ContentHash,
     pub schema_version: i32,
-    pub payload: serde_json::Value,
+    pub payload: ExternalJsonDocument,
     pub created_at: DateTime<Utc>,
 }
 

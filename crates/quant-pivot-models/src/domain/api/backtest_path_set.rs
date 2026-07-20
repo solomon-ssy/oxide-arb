@@ -20,6 +20,7 @@ use crate::{
     types::{
         BacktestPathSetId, ContentHash, DecisionPolicySnapshotId, ModelRunId, ModelVersionId,
         TrainingDatasetId,
+        backtest::{BacktestPaths, SharpeDistribution},
     },
 };
 
@@ -32,7 +33,7 @@ use crate::{
 /// Model family, input contract, supervised target, and prediction horizon are
 /// deliberately absent: the server resolves them from the model version's
 /// linked dataset and immutable model specification.
-#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Validate)]
 #[serde(deny_unknown_fields)]
 pub struct RunCpcvBacktestRequest {
     /// Frozen, PIT-materialized dataset the model version was trained on.
@@ -104,8 +105,8 @@ pub struct BacktestPathSetView {
     pub path_count: i64,
     pub combination_count: i64,
     pub median_rank_ic: Decimal,
-    pub sharpe_distribution: serde_json::Value,
-    pub paths: serde_json::Value,
+    pub sharpe_distribution: SharpeDistribution,
+    pub paths: BacktestPaths,
     pub deflated_sharpe: Decimal,
     pub dsr_benchmark_sharpe: Decimal,
     pub pbo: Decimal,

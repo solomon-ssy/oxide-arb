@@ -3,18 +3,47 @@
 //! One append-only table backs every empirical calibration artifact: `kind =
 //! model_score` (`ProbabilityCalibrator`), `kind = market_price_bias`
 //! (`FavoriteLongshotBiasTable`), and `kind = weather_station_lead_bias`
-//! (frozen station × forecast-lead correction). The kind-specific shape lives
-//! in `payload_json`; callers branch on `kind` to deserialize it.
+//! (frozen station × forecast-lead correction). The kind-specific shape is a
+//! closed tagged document whose tag must match the relational `kind` column.
 
 use crate::{
     entities::quant_calibration_artifact,
     enums::quant::CalibrationKind,
-    types::{CalibrationArtifactId, ContentHash, IcaoStation, WeatherTemperatureStatistic},
+    types::{
+        CalibrationArtifactId, ContentHash,
+        calibration::{
+            MarketPriceBiasPayload, ModelScoreCalibrationPayload, WeatherStationLeadBiasArtifactV1,
+        },
+    },
 };
 use chrono::{DateTime, Utc};
-use rust_decimal::Decimal;
-use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromJsonQueryResult};
 use serde::{Deserialize, Serialize};
+
+/// Closed payload family persisted in `quant_calibration_artifact.payload`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
+#[serde(
+    deny_unknown_fields,
+    tag = "kind",
+    content = "payload",
+    rename_all = "snake_case"
+)]
+pub enum CalibrationArtifactPayload {
+    ModelScore(ModelScoreCalibrationPayload),
+    MarketPriceBias(MarketPriceBiasPayload),
+    WeatherStationLeadBias(WeatherStationLeadBiasArtifactV1),
+}
+
+impl CalibrationArtifactPayload {
+    #[must_use]
+    pub const fn kind(&self) -> CalibrationKind {
+        match self {
+            Self::ModelScore(_) => CalibrationKind::ModelScore,
+            Self::MarketPriceBias(_) => CalibrationKind::MarketPriceBias,
+            Self::WeatherStationLeadBias(_) => CalibrationKind::WeatherStationLeadBias,
+        }
+    }
+}
 
 /// Frozen, content-addressed calibration-artifact row.
 #[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
@@ -27,7 +56,7 @@ pub struct CalibrationArtifactInfo {
     pub fit_window_end: DateTime<Utc>,
     pub calibration_split_hash: ContentHash,
     pub sample_count: i64,
-    pub payload_json: serde_json::Value,
+    pub payload: CalibrationArtifactPayload,
     pub active: bool,
     pub created_at: DateTime<Utc>,
 }
@@ -43,7 +72,7 @@ info_from_model!(
         fit_window_end,
         calibration_split_hash,
         sample_count,
-        payload_json,
+        payload,
         active,
         created_at,
     }
@@ -62,45 +91,26 @@ pub struct NewCalibrationArtifact {
     pub fit_window_end: DateTime<Utc>,
     pub calibration_split_hash: ContentHash,
     pub sample_count: i64,
-    pub payload_json: serde_json::Value,
+    pub payload: CalibrationArtifactPayload,
     pub active: bool,
 }
 
-/// Frozen mean GEFS forecast-minus-observation bias for one exact lead.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WeatherLeadBiasV1 {
-    pub lead_hours: u16,
-    pub sample_count: u32,
-    pub bias_celsius: Decimal,
-}
+#[cfg(test)]
+mod tests {
+    use super::CalibrationArtifactPayload;
 
-/// Frozen lead-bias table for one station.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WeatherStationBiasV1 {
-    pub station: IcaoStation,
-    pub temperature_statistic: WeatherTemperatureStatistic,
-    pub leads: Vec<WeatherLeadBiasV1>,
-}
+    #[test]
+    fn persisted_calibration_payload_rejects_unknown_kind_and_fields() {
+        let unknown_kind = serde_json::json!({
+            "kind": "custom_calibrator",
+            "payload": {}
+        });
+        assert!(serde_json::from_value::<CalibrationArtifactPayload>(unknown_kind).is_err());
 
-/// Versioned, content-addressed Weather calibration payload.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WeatherStationLeadBiasArtifactV1 {
-    pub schema_version: u32,
-    pub methodology: String,
-    pub methodology_hash: ContentHash,
-    pub grid_hashes: Vec<ContentHash>,
-    pub source_hashes: Vec<ContentHash>,
-    pub stations: Vec<WeatherStationBiasV1>,
-}
-
-/// One immutable Weather calibration publication visible on the PIT timeline.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PublishedWeatherStationLeadBias {
-    pub artifact_id: CalibrationArtifactId,
-    pub content_hash: ContentHash,
-    pub fit_window_start: DateTime<Utc>,
-    pub fit_window_end: DateTime<Utc>,
-    pub sample_count: i64,
-    pub published_at: DateTime<Utc>,
-    pub payload: WeatherStationLeadBiasArtifactV1,
+        let unknown_field = serde_json::json!({
+            "kind": "market_price_bias",
+            "payload": { "by_category": {}, "unexpected": true }
+        });
+        assert!(serde_json::from_value::<CalibrationArtifactPayload>(unknown_field).is_err());
+    }
 }

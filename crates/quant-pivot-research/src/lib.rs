@@ -63,6 +63,16 @@ pub mod validation;
 pub mod weather_proxy_validation;
 
 #[cfg(test)]
+pub(crate) mod test_support {
+    use quant_pivot_models::{hashing::CanonicalDigest, types::ContentHash};
+
+    /// Deterministic, syntactically valid content hash for semantic test seeds.
+    pub fn content_hash(seed: &str) -> ContentHash {
+        CanonicalDigest::content_hash_json(&seed).expect("canonical fixture content hash")
+    }
+}
+
+#[cfg(test)]
 mod acceptance_tests {
     use std::{
         fs,

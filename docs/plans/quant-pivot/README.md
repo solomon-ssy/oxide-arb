@@ -62,7 +62,7 @@ Polymarket facts -> features -> factors/models -> portfolio plan
 - 运行模式重建为 `report_only`、`semi_auto`、`auto_execution`。
 - `report_only` 是默认、最安全、最先上线的模式。
 - 旧 `ExecutionMode::DryRun`、`ExecutionMode::Paper`、`ExecutionMode::Live` 必须删除，不做 alias。
-- 旧 runtime-config schema v2 被 schema v17 替换，不做迁就旧 JSON 的 shim。
+- runtime-config 只有 system-owned schema v1；删除或迁移后的旧 JSON 路径不提供 parser、alias 或 shim。
 - 旧 Endgame 文档只能作为删除盘点资料，不能作为活跃实现依据。
 - 禁止 compatibility re-export。公开 API 必须显式、收敛、语义精准。
 - 不追求最小变更、最小侵入、最小工作量；优先追求正确领域模型、清晰边界和生产可维护性。

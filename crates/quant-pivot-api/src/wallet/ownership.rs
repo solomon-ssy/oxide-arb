@@ -64,10 +64,9 @@ impl WalletOwnershipClient {
     /// No network I/O happens here; the first request is issued lazily when a
     /// verification actually runs (i.e. only when CREATE2 derivation missed).
     pub fn connect(config: &PolymarketConfig) -> Result<Self, RpcError> {
-        let rpc_url = Url::parse(&config.onchain.rpc_url).map_err(|e| {
+        let rpc_url = Url::parse(config.onchain.rpc_url()).map_err(|error| {
             RpcError::ConnectionFailed(format!(
-                "invalid Polygon RPC URL '{}': {e}",
-                config.onchain.rpc_url
+                "configured Polygon RPC endpoint is invalid: {error}"
             ))
         })?;
         // reqwest defaults to *no* timeout; bound each ownership read so a stalled

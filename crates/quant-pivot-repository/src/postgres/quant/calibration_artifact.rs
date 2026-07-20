@@ -8,13 +8,16 @@ use crate::{
 use quant_pivot_error::storage::{StorageError, entity};
 use quant_pivot_models::{
     domain::{
-        CalibrationArtifactInfo, CalibrationArtifactListQuery, NewCalibrationArtifact, PageWindow,
-        Paginated, PublishedWeatherStationLeadBias, WeatherStationLeadBiasArtifactV1,
+        CalibrationArtifactInfo, CalibrationArtifactListQuery, CalibrationArtifactPayload,
+        NewCalibrationArtifact, PageWindow, Paginated,
     },
     entities::{quant_calibration_artifact, quant_calibration_artifact_publication},
     enums::quant::CalibrationKind,
     hashing::CanonicalDigest,
-    types::{CalibrationArtifactId, ContentHash},
+    types::{
+        CalibrationArtifactId, CalibrationArtifactPublicationId, ContentHash,
+        calibration::PublishedWeatherStationLeadBias,
+    },
 };
 use sea_orm::{
     ActiveModelTrait, ActiveValue, ColumnTrait, Condition, DatabaseConnection, EntityTrait,
@@ -38,6 +41,11 @@ impl CalibrationArtifactRepository for PgCalibrationArtifactRepository {
         &self,
         artifact: NewCalibrationArtifact,
     ) -> Result<CalibrationArtifactInfo, StorageError> {
+        if artifact.payload.kind() != artifact.kind {
+            return Err(invariant(
+                "calibration relational kind and payload discriminator differ",
+            ));
+        }
         if artifact.kind == CalibrationKind::WeatherStationLeadBias {
             validate_weather_artifact(&artifact)?;
         }
@@ -131,13 +139,14 @@ impl CalibrationArtifactRepository for PgCalibrationArtifactRepository {
                     entity: Some(entity::QUANT_CALIBRATION_ARTIFACT),
                     detail: "calibration publication has no artifact".to_owned(),
                 })?;
-                let payload = serde_json::from_value::<WeatherStationLeadBiasArtifactV1>(
-                    artifact.payload_json,
-                )
-                .map_err(|error| StorageError::InvariantViolation {
-                    entity: Some(entity::QUANT_CALIBRATION_ARTIFACT),
-                    detail: format!("invalid published Weather calibration payload: {error}"),
-                })?;
+                let CalibrationArtifactPayload::WeatherStationLeadBias(payload) = artifact.payload
+                else {
+                    return Err(StorageError::InvariantViolation {
+                        entity: Some(entity::QUANT_CALIBRATION_ARTIFACT),
+                        detail: "published Weather calibration has mismatched payload kind"
+                            .to_owned(),
+                    });
+                };
                 Ok(PublishedWeatherStationLeadBias {
                     artifact_id: artifact.artifact_id,
                     content_hash: artifact.content_hash,
@@ -195,7 +204,7 @@ impl CalibrationArtifactRepository for PgCalibrationArtifactRepository {
         let updated = active.update(&txn).await.map_err(StorageError::from)?;
         if updated.kind == CalibrationKind::WeatherStationLeadBias && !was_active {
             quant_calibration_artifact_publication::ActiveModel {
-                publication_id: ActiveValue::Set(uuid::Uuid::now_v7()),
+                publication_id: ActiveValue::Set(CalibrationArtifactPublicationId::from_v7()),
                 artifact_id: ActiveValue::Set(updated.artifact_id.clone()),
                 kind: ActiveValue::Set(updated.kind),
                 published_at: ActiveValue::Set(chrono::Utc::now()),
@@ -216,9 +225,9 @@ fn validate_weather_artifact(artifact: &NewCalibrationArtifact) -> Result<(), St
             "Weather calibration must be published through mark_active",
         ));
     }
-    let payload =
-        serde_json::from_value::<WeatherStationLeadBiasArtifactV1>(artifact.payload_json.clone())
-            .map_err(|error| invariant(format!("invalid Weather calibration payload: {error}")))?;
+    let CalibrationArtifactPayload::WeatherStationLeadBias(payload) = &artifact.payload else {
+        return Err(invariant("invalid Weather calibration payload kind"));
+    };
     if payload.schema_version != 1
         || payload.methodology.trim().is_empty()
         || payload.grid_hashes.is_empty()

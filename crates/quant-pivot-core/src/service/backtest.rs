@@ -1,6 +1,6 @@
 //! Offline backtest orchestration (Phase 3.6).
 //!
-//! Replays a registered model over exact immutable v5 Parquet rows plus their
+//! Replays a registered model over exact immutable v1 Parquet rows plus their
 //! Dataset-bound Source Slice execution facts. Frozen
 //! selection context, `FeatureCell`s, factor values, and labels are the sole
 //! evaluation input. Historical rematerialization is a separate parity job and
@@ -34,6 +34,7 @@ use quant_pivot_models::{
     types::{
         BacktestReportId, Bps, ContentHash, DecisionPolicySnapshotId, MarketId,
         ModelComparisonReportId, ModelRunId, ModelVersionId, TokenId, TrainingDatasetId, Usd,
+        model_lineage::ModelVersionDerivation,
     },
 };
 use quant_pivot_repository::traits::{
@@ -261,7 +262,6 @@ impl BacktestService {
                     .succeed(
                         &model_run_id,
                         info.report_hash.clone(),
-                        serde_json::json!({ "backtest_report_id": info.backtest_report_id.to_string() }),
                         Utc::now(),
                         Some(version.model_version_id.clone()),
                     )
@@ -310,8 +310,7 @@ impl BacktestService {
                 score_correlation: comparison.score_correlation,
                 side_disagreement_rate: comparison.side_disagreement_rate,
                 common_samples: i64::try_from(comparison.common_samples).unwrap_or(i64::MAX),
-                category_breakdown_diff: serde_json::to_value(&comparison.category_breakdown_diff)
-                    .unwrap_or_default(),
+                category_breakdown_diff: comparison.category_breakdown_diff.clone().into(),
                 comparison_hash: comparison.comparison_hash.clone(),
             })
             .await
@@ -355,7 +354,7 @@ impl BacktestService {
             .manifest_json
             .as_ref()
             .ok_or_else(|| ResearchError::DatasetBuild {
-                detail: "backtest dataset has no immutable v5 manifest".to_owned(),
+                detail: "backtest dataset has no immutable v1 manifest".to_owned(),
             })?
             .source_slice
             .clone();
@@ -403,7 +402,7 @@ impl BacktestService {
         let info = self.persist_report(model_run_id, &result.report).await?;
 
         if input.calibrate {
-            self.maybe_calibrate(version, dataset, &result.sample_outcomes)
+            self.maybe_calibrate(version, &info, &result.sample_outcomes)
                 .await?;
         }
         Ok((info, result))
@@ -432,16 +431,13 @@ impl BacktestService {
                 rank_ic: report.rank_ic,
                 sharpe: report.sharpe,
                 hit_rate: report.hit_rate,
-                expected_vs_realized: serde_json::to_value(&report.expected_vs_realized)
-                    .unwrap_or_default(),
+                expected_vs_realized: report.expected_vs_realized.clone(),
                 max_drawdown: report.max_drawdown,
                 turnover: report.turnover,
                 liquidity_feasibility: report.liquidity_feasibility,
-                category_breakdown: serde_json::to_value(&report.category_breakdown)
-                    .unwrap_or_default(),
+                category_breakdown: report.category_breakdown.clone().into(),
                 tail_loss: report.tail_loss,
-                report_pnl_simulation: serde_json::to_value(&report.report_pnl_simulation)
-                    .unwrap_or_default(),
+                report_pnl_simulation: report.report_pnl_simulation.clone(),
                 report_hash: report.report_hash.clone(),
                 parquet_uri: None,
             })
@@ -461,7 +457,7 @@ impl BacktestService {
     async fn maybe_calibrate(
         &self,
         version: &ModelVersionInfo,
-        dataset: &TrainingDatasetInfo,
+        source_backtest: &BacktestReportInfo,
         samples: &[SampleOutcome],
     ) -> QuantResult<()> {
         let calibration: Vec<CalibrationSample> = samples.iter().map(calibration_sample).collect();
@@ -510,16 +506,18 @@ impl BacktestService {
                 artifact_hash,
                 category_scope: calibrated.category_scope(),
                 profile_ref: version.profile_ref.clone(),
-                training_dataset_id: Some(dataset.training_dataset_id.clone()),
+                training_dataset_id: version.training_dataset_id.clone(),
                 trade_policy_artifact_id: calibrated.header().trade_policy_artifact_id.clone(),
                 trade_policy_hash: calibrated.header().trade_policy_hash.clone(),
                 publish_path_set_id: None,
-                metrics_json: serde_json::json!({
-                    "calibrated_from": version.model_version_id.to_string(),
-                    "calibration": serde_json::to_value(&result.report).unwrap_or_default(),
-                }),
-                training_objective_json: version.training_objective_json.clone(),
-                quality_gate_report: serde_json::json!({}),
+                derivation: ModelVersionDerivation::ScoreMultiplierCalibration {
+                    parent_model_version_id: version.model_version_id.clone(),
+                    source_backtest_report_id: source_backtest.backtest_report_id.clone(),
+                    report: result.report,
+                },
+                metrics: version.metrics.clone(),
+                training_objective: version.training_objective.clone(),
+                quality_gate_report: None,
                 publication_status: PublicationStatus::Candidate,
                 published_at: None,
                 retired_at: None,
@@ -573,7 +571,6 @@ impl BacktestService {
                 status: ModelRunStatus::Running,
                 input_hash: materialization.dataset_hash.clone(),
                 output_hash: None,
-                metrics_json: serde_json::json!({}),
                 error_code: None,
                 error_message: None,
                 started_at: Utc::now(),
@@ -658,7 +655,7 @@ async fn run_backtest_replay(
     Ok(Some(result))
 }
 
-/// Assemble replay ticks from immutable v5 Parquet examples and Source Slice.
+/// Assemble replay ticks from immutable v1 Parquet examples and Source Slice.
 ///
 /// Shared by single-path backtest and CPCV. No database, current config, or
 /// rematerialized feature/factor value participates in the scored input.

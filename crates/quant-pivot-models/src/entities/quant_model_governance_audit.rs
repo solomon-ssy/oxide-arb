@@ -1,8 +1,11 @@
 //! `quant_model_governance_audit` table entity.
 
 use crate::{
+    domain::ModelGovernanceAuditDetail,
     enums::quant::{ModelGovernanceAction, PublicationStatus},
-    types::{AuditEventId, ModelGovernanceAuditId, ModelVersionId, TrainingDatasetId},
+    types::{
+        AuditEventId, ModelGovernanceAuditId, ModelVersionId, RoleCode, TrainingDatasetId, UserId,
+    },
 };
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
@@ -16,18 +19,15 @@ pub struct Model {
     pub model_version_id: Option<ModelVersionId>,
     pub training_dataset_id: Option<TrainingDatasetId>,
     pub action: ModelGovernanceAction,
+    pub actor_user_id: Option<UserId>,
     pub actor_username: String,
-    pub actor_role: Option<String>,
+    pub actor_role: Option<RoleCode>,
     pub reason: String,
     pub before_status: PublicationStatus,
     pub after_status: PublicationStatus,
-    pub before_hash: Option<String>,
-    pub after_hash: Option<String>,
-    pub quality_gate_passed: bool,
-    pub shadow_window_secs: Option<i64>,
     #[sea_orm(column_type = "JsonBinary")]
-    pub detail_json: Json,
-    pub audit_event_id: Option<AuditEventId>,
+    pub detail: ModelGovernanceAuditDetail,
+    pub audit_event_id: AuditEventId,
     pub created_at: DateTime<Utc>,
 
     #[sea_orm(

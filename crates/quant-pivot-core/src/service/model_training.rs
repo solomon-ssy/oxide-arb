@@ -31,27 +31,43 @@ use quant_pivot_models::{
     runtime_config::sections::FactorsConfig,
     types::{
         DecisionPolicySnapshotId, ModelInputContract, ModelRunId, ModelSpecId, ModelVersionId,
-        TrainingDatasetId, training::TrainingSampleSource,
+        TrainingDatasetId,
+        model_lineage::ModelVersionDerivation,
+        model_metrics::{
+            HeldOutMetricKind, LearningToRankInSampleMetrics, ModelArtifactTrainingLineage,
+            ModelValidationMetrics, ModelVersionMetrics, ObjectiveComponentMetrics,
+            RankingDiagnosticsMetrics,
+        },
+        model_training::{ModelTrainingObjective, TrainingObjectiveSpec},
+        stable_name::FactorName,
+        training::TrainingSampleSource,
     },
 };
 #[cfg(feature = "ml-classical")]
 use quant_pivot_models::{
-    enums::quant::ModelSerializationFormat, hashing::CanonicalDigest, types::ModelArtifactId,
+    enums::quant::ModelSerializationFormat,
+    hashing::CanonicalDigest,
+    types::{
+        ModelArtifactId,
+        model_metrics::{ClassicalInSampleMetrics, ModelFeatureImportance},
+        stable_name::ModelMetricName,
+    },
 };
 use quant_pivot_repository::traits::{
     ModelRegistryRepository, ModelRunRepository, TrainingDatasetRepository,
 };
 use quant_pivot_research::{
     artifact::ArtifactStore,
-    factors::{FactorEngine, FactorName, names as factor_names},
+    factors::{FactorEngine, names as factor_names},
     features::FeatureSchema,
     hashing::ResearchHasher,
     model::{
         ClassicalKind, FactorWeight, LabelSelector, ModelArtifact, ModelArtifactHeader,
         ModelFamily, ModelTrainer, ReturnModelSpec, ScoreMultiplierSpec, SellScorerOutputSpec,
         SellScorerTrainer, SubstitutionConfidenceRules, TrainModelRequest, TrainSellScorerRequest,
-        TrainedModelArtifact, TrainingObjectiveSpec, ValidationSpec, WeightedFactorTrainer,
-        artifact::MODEL_ARTIFACT_FORMAT_VERSION, infer_training_category_scope,
+        TrainedModelArtifact, TrainingObjectiveReport, ValidationReport, ValidationSpec,
+        WeightedFactorTrainer, infer_training_category_scope,
+        objective::{ObjectiveComponentReport, RankingDiagnostics},
     },
     selection::ModelFeatureRequirements,
     training::TrainingExample,
@@ -60,10 +76,7 @@ use quant_pivot_research::{
 #[cfg(feature = "ml-classical")]
 use quant_pivot_research::{
     artifact::{ArtifactKey, ArtifactNamespace},
-    model::{
-        ClassicalAdapterRegistry, ClassicalOutputSemantics, ClassicalTrainOutput, ValidationReport,
-        artifact::ClassicalModelArtifact,
-    },
+    model::{ClassicalAdapterRegistry, ClassicalOutputSemantics, artifact::ClassicalModelArtifact},
     training::{
         RETURN_TO_HORIZON, SETTLEMENT_OUTCOME, TrainingMatrix, build_training_matrix,
         matrix_spec_from_contract,
@@ -246,7 +259,6 @@ impl ModelTrainerService {
                     .succeed(
                         &model_run_id,
                         version.artifact_hash.clone(),
-                        version.metrics_json.clone(),
                         Utc::now(),
                         Some(model_version_id.clone()),
                     )
@@ -358,10 +370,11 @@ impl ModelTrainerService {
                 .manifest_json
                 .as_ref()
                 .ok_or_else(|| ResearchError::DatasetBuild {
-                    detail: "v5 dataset is missing its immutable manifest".to_owned(),
+                    detail: "v1 dataset is missing its immutable manifest".to_owned(),
                 })?;
         let header = ModelArtifactHeader {
             model_version_id: model_version_id.clone(),
+            model_spec_definition_hash: manifest.model_spec_definition_hash.clone(),
             profile_ref: manifest.profile_ref.clone(),
             model_family: input.model_family,
             feature_schema_hash: materialization.feature_schema_hash.clone(),
@@ -370,25 +383,23 @@ impl ModelTrainerService {
             trade_policy_hash: manifest.trade_policy_hash.clone(),
         };
 
-        let (artifact, metrics_json, training_objective_json) =
-            if input.model_family.is_exit_scorer() {
-                self.train_sell_scorer(header, input, dataset, examples)
-                    .await?
-            } else {
-                match input.model_family.classical_kind() {
-                    None => {
-                        self.train_weighted(header, input, dataset, examples)
-                            .await?
-                    }
-                    Some(kind) => {
-                        self.train_classical(header, input, dataset, examples, kind)
-                            .await?
-                    }
+        let (artifact, metrics, training_objective) = if input.model_family.is_exit_scorer() {
+            self.train_sell_scorer(header, input, dataset, examples)
+                .await?
+        } else {
+            match input.model_family.classical_kind() {
+                None => {
+                    self.train_weighted(header, input, dataset, examples)
+                        .await?
                 }
-            };
+                Some(kind) => {
+                    self.train_classical(header, input, dataset, examples, kind)
+                        .await?
+                }
+            }
+        };
 
         let category_scope = artifact.category_scope();
-        let metrics_json = attach_artifact_diagnostics(metrics_json, &artifact)?;
         let trade_policy_artifact_id = artifact.header().trade_policy_artifact_id.clone();
         let trade_policy_hash = artifact.header().trade_policy_hash.clone();
         let artifact_hash = artifact.content_hash()?;
@@ -417,9 +428,10 @@ impl ModelTrainerService {
                 trade_policy_artifact_id,
                 trade_policy_hash,
                 publish_path_set_id: None,
-                metrics_json,
-                training_objective_json,
-                quality_gate_report: serde_json::json!({}),
+                derivation: ModelVersionDerivation::Training,
+                metrics,
+                training_objective,
+                quality_gate_report: None,
                 publication_status: PublicationStatus::Candidate,
                 published_at: None,
                 retired_at: None,
@@ -435,7 +447,7 @@ impl ModelTrainerService {
         input: &TrainModelInput,
         dataset: &TrainingDatasetInfo,
         examples: &[TrainingExample],
-    ) -> QuantResult<(ModelArtifact, serde_json::Value, serde_json::Value)> {
+    ) -> QuantResult<(ModelArtifact, ModelVersionMetrics, ModelTrainingObjective)> {
         let materialization = require_dataset_materialization(dataset)?;
         let requirements = ModelFeatureRequirements::from_input_contract(&input.input_contract);
         let category_scope = input.category_scope.or_else(|| {
@@ -477,33 +489,13 @@ impl ModelTrainerService {
                 detail: format!("weighted-factor trainer task join failed: {error}"),
             })
         })??;
-        let objective_json = serde_json::to_value(&self.config.objective).map_err(|error| {
-            QuantError::from(ResearchError::Serialization {
-                detail: format!("training objective serialization failed: {error}"),
-            })
-        })?;
-        let metrics_json = serde_json::json!({
-            "objective": objective_json,
-            "in_sample": {
-                "objective_value": trained.in_sample_metrics.objective_value,
-                "components": trained.in_sample_metrics.components,
-                "diagnostics": trained.in_sample_metrics.diagnostics,
-                "summary": trained.in_sample_metrics.summary,
-            },
-            "validation": {
-                "held_out_objective": trained.validation_metrics.held_out_objective,
-                "held_out_components": trained.validation_metrics.held_out_components,
-                "held_out_diagnostics": trained.validation_metrics.held_out_diagnostics,
-                "fold_objectives": trained.validation_metrics.fold_objectives,
-                "fold_components": trained.validation_metrics.fold_components,
-                "sample_count": trained.validation_metrics.sample_count,
-                "dropped_singleton_groups": trained.validation_metrics.dropped_singleton_groups,
-                "dropped_singleton_rows": trained.validation_metrics.dropped_singleton_rows,
-                "coord_search_effective_n": trained.validation_metrics.coord_search_effective_n,
-                "held_out_metric": "neg_total_ltr_loss",
-            },
-        });
-        Ok((trained.artifact, metrics_json, objective_json))
+        let objective = ModelTrainingObjective::learning_to_rank(self.config.objective.clone());
+        let metrics = learning_to_rank_metrics(
+            &trained.in_sample_metrics,
+            &trained.validation_metrics,
+            &trained.artifact,
+        )?;
+        Ok((trained.artifact, metrics, objective))
     }
 
     /// Sell-side hold-vs-exit training path (Phase 06.1). Seeds over the market
@@ -515,7 +507,7 @@ impl ModelTrainerService {
         input: &TrainModelInput,
         dataset: &TrainingDatasetInfo,
         examples: &[TrainingExample],
-    ) -> QuantResult<(ModelArtifact, serde_json::Value, serde_json::Value)> {
+    ) -> QuantResult<(ModelArtifact, ModelVersionMetrics, ModelTrainingObjective)> {
         let materialization = require_dataset_materialization(dataset)?;
         if !examples
             .iter()
@@ -553,32 +545,13 @@ impl ModelTrainerService {
                         detail: format!("sell-scorer trainer task join failed: {error}"),
                     })
                 })??;
-        let objective_json = serde_json::to_value(&self.config.objective).map_err(|error| {
-            QuantError::from(ResearchError::Serialization {
-                detail: format!("training objective serialization failed: {error}"),
-            })
-        })?;
-        let metrics_json = serde_json::json!({
-            "objective": objective_json,
-            "in_sample": {
-                "objective_value": trained.in_sample_metrics.objective_value,
-                "components": trained.in_sample_metrics.components,
-                "diagnostics": trained.in_sample_metrics.diagnostics,
-                "summary": trained.in_sample_metrics.summary,
-            },
-            "validation": {
-                "held_out_objective": trained.validation_metrics.held_out_objective,
-                "held_out_components": trained.validation_metrics.held_out_components,
-                "held_out_diagnostics": trained.validation_metrics.held_out_diagnostics,
-                "fold_objectives": trained.validation_metrics.fold_objectives,
-                "fold_components": trained.validation_metrics.fold_components,
-                "sample_count": trained.validation_metrics.sample_count,
-                "dropped_singleton_groups": trained.validation_metrics.dropped_singleton_groups,
-                "dropped_singleton_rows": trained.validation_metrics.dropped_singleton_rows,
-                "held_out_metric": "neg_total_ltr_loss",
-            },
-        });
-        Ok((trained.artifact, metrics_json, objective_json))
+        let objective = ModelTrainingObjective::learning_to_rank(self.config.objective.clone());
+        let metrics = learning_to_rank_metrics(
+            &trained.in_sample_metrics,
+            &trained.validation_metrics,
+            &trained.artifact,
+        )?;
+        Ok((trained.artifact, metrics, objective))
     }
 
     /// Seed the Sell scorer over the observed market factors plus the three
@@ -635,7 +608,6 @@ impl ModelTrainerService {
                 status: ModelRunStatus::Running,
                 input_hash: materialization.dataset_hash.clone(),
                 output_hash: None,
-                metrics_json: serde_json::json!({}),
                 error_code: None,
                 error_message: None,
                 started_at: Utc::now(),
@@ -646,56 +618,119 @@ impl ModelTrainerService {
     }
 }
 
-fn attach_artifact_diagnostics(
-    mut metrics: serde_json::Value,
+const fn objective_component_metrics(
+    value: &ObjectiveComponentReport,
+) -> ObjectiveComponentMetrics {
+    ObjectiveComponentMetrics {
+        rank_loss: value.rank_loss,
+        tail_penalty: value.tail_penalty,
+        turnover_penalty: value.turnover_penalty,
+        l2_penalty: value.l2_penalty,
+        total_loss: value.total_loss,
+        group_count: value.group_count,
+        rank_loss_group_count: value.rank_loss_group_count,
+        pair_count: value.pair_count,
+    }
+}
+
+const fn ranking_diagnostics_metrics(value: &RankingDiagnostics) -> RankingDiagnosticsMetrics {
+    RankingDiagnosticsMetrics {
+        mean_rank_ic: value.mean_rank_ic,
+        mean_ndcg_at_k: value.mean_ndcg_at_k,
+        ndcg_k: value.ndcg_k,
+        group_count: value.group_count,
+    }
+}
+
+fn validation_metrics(
+    value: &ValidationReport,
+    held_out_metric: HeldOutMetricKind,
+) -> ModelValidationMetrics {
+    ModelValidationMetrics {
+        held_out_objective: value.held_out_objective,
+        held_out_components: value
+            .held_out_components
+            .as_ref()
+            .map(objective_component_metrics),
+        held_out_diagnostics: value
+            .held_out_diagnostics
+            .as_ref()
+            .map(ranking_diagnostics_metrics),
+        fold_objectives: value.fold_objectives.clone(),
+        fold_components: value
+            .fold_components
+            .iter()
+            .map(objective_component_metrics)
+            .collect(),
+        sample_count: value.sample_count,
+        dropped_singleton_groups: value.dropped_singleton_groups,
+        dropped_singleton_rows: value.dropped_singleton_rows,
+        coordinate_search_effective_trials: value.coord_search_effective_n,
+        held_out_metric,
+    }
+}
+
+fn artifact_training_lineage(
     artifact: &ModelArtifact,
-) -> QuantResult<serde_json::Value> {
-    let object = metrics
-        .as_object_mut()
-        .ok_or_else(|| ResearchError::Serialization {
-            detail: "model metrics must be a JSON object".to_owned(),
-        })?;
-    let diagnostics = match artifact {
-        ModelArtifact::WeightedFactor(weighted) => serde_json::json!({
-            "format_version": MODEL_ARTIFACT_FORMAT_VERSION,
-            "transform_kind": "factor_native",
-            "training_dataset_hash": weighted.training_dataset_hash,
-            "training_input_hash": weighted.training_input_hash,
-            "input_contract_hash": weighted.input_contract_hash,
-            "input_transform_hash": weighted.input_transform_hash()?,
-            "input_contract": weighted.input_contract,
-            "factor_inputs": weighted.weights.iter().map(|weight| weight.factor.as_str()).collect::<Vec<_>>(),
+) -> QuantResult<ModelArtifactTrainingLineage> {
+    match artifact {
+        ModelArtifact::WeightedFactor(weighted) => Ok(ModelArtifactTrainingLineage::FactorNative {
+            training_dataset_hash: weighted.training_dataset_hash.clone(),
+            training_input_hash: weighted.training_input_hash.clone(),
+            input_contract_hash: weighted.input_contract_hash.clone(),
+            input_transform_hash: weighted.input_transform_hash()?,
+            factor_inputs: weighted
+                .weights
+                .iter()
+                .map(|weight| weight.factor.clone())
+                .collect(),
         }),
-        ModelArtifact::Classical(classical) => serde_json::json!({
-            "format_version": MODEL_ARTIFACT_FORMAT_VERSION,
-            "transform_kind": "fitted_feature_matrix",
-            "training_dataset_hash": classical.training_dataset_hash,
-            "training_input_hash": classical.training_input_hash,
-            "input_contract_hash": classical.input_contract_hash,
-            "input_transform_hash": classical.input_transform_hash,
-            "input_contract": classical.input_contract,
-            "prediction_horizon_secs": classical.prediction_horizon_secs,
-            "output_semantics": classical.output_semantics,
-            "multipliers": classical.multipliers,
-            "substitution_confidence_rules": classical.substitution_confidence_rules,
-            "serialized_model_hash": classical.serialized_model_hash,
-            "serialized_model_uri": classical.serialized_model_uri,
-            "serialization_format": classical.serialization_format,
-            "input_transform": classical.input_transform,
+        ModelArtifact::Classical(classical) => {
+            Ok(ModelArtifactTrainingLineage::FittedFeatureMatrix {
+                model_kind: classical.kind,
+                training_dataset_hash: classical.training_dataset_hash.clone(),
+                training_input_hash: classical.training_input_hash.clone(),
+                input_contract_hash: classical.input_contract_hash.clone(),
+                input_transform_hash: classical.input_transform_hash.clone(),
+                serialized_model_hash: classical.serialized_model_hash.clone(),
+                serialization_format: classical.serialization_format,
+            })
+        }
+        ModelArtifact::SellScorer(sell) => Ok(ModelArtifactTrainingLineage::FactorNative {
+            training_dataset_hash: sell.training_dataset_hash.clone(),
+            training_input_hash: sell.training_input_hash.clone(),
+            input_contract_hash: sell.input_contract_hash.clone(),
+            input_transform_hash: sell.input_transform_hash()?,
+            factor_inputs: sell
+                .weights
+                .iter()
+                .map(|weight| weight.factor.clone())
+                .collect(),
         }),
-        ModelArtifact::SellScorer(sell) => serde_json::json!({
-            "format_version": MODEL_ARTIFACT_FORMAT_VERSION,
-            "transform_kind": "factor_native",
-            "training_dataset_hash": sell.training_dataset_hash,
-            "training_input_hash": sell.training_input_hash,
-            "input_contract_hash": sell.input_contract_hash,
-            "input_transform_hash": sell.input_transform_hash()?,
-            "input_contract": sell.input_contract,
-            "factor_inputs": sell.weights.iter().map(|weight| weight.factor.as_str()).collect::<Vec<_>>(),
-        }),
-    };
-    object.insert("artifact_diagnostics".to_owned(), diagnostics);
-    Ok(metrics)
+    }
+}
+
+fn learning_to_rank_metrics(
+    in_sample: &TrainingObjectiveReport,
+    validation: &ValidationReport,
+    artifact: &ModelArtifact,
+) -> QuantResult<ModelVersionMetrics> {
+    Ok(ModelVersionMetrics::learning_to_rank(
+        LearningToRankInSampleMetrics {
+            objective_value: in_sample.objective_value,
+            components: objective_component_metrics(&in_sample.components),
+            diagnostics: in_sample
+                .diagnostics
+                .as_ref()
+                .map(ranking_diagnostics_metrics),
+            summary: in_sample.summary.clone(),
+        },
+        validation_metrics(
+            validation,
+            HeldOutMetricKind::NegativeTotalLearningToRankLoss,
+        ),
+        artifact_training_lineage(artifact)?,
+    ))
 }
 
 /// Classical training path — only linked under `ml-classical`.
@@ -708,7 +743,7 @@ impl ModelTrainerService {
         dataset: &TrainingDatasetInfo,
         examples: &[TrainingExample],
         kind: ClassicalKind,
-    ) -> QuantResult<(ModelArtifact, serde_json::Value, serde_json::Value)> {
+    ) -> QuantResult<(ModelArtifact, ModelVersionMetrics, ModelTrainingObjective)> {
         let materialization = require_dataset_materialization(dataset)?;
         let output_semantics =
             classical_output_semantics(kind, &input.label, input.prediction_horizon_secs)?;
@@ -764,8 +799,23 @@ impl ModelTrainerService {
             .put(model_key, &output.model_bytes)
             .await?;
 
-        let objective_json = classical_objective_json(kind);
-        let metrics_json = classical_metrics_json(kind, &output, &validation, &objective_json);
+        let objective = ModelTrainingObjective::classical(kind);
+        let in_sample_metrics = ClassicalInSampleMetrics {
+            validation_objective: output.metrics.validation_objective,
+            train_samples: output.metrics.train_samples,
+            feature_count: output.metrics.feature_count,
+        };
+        let validation_metrics =
+            validation_metrics(&validation, HeldOutMetricKind::MeanRollingFoldRankIc);
+        let feature_importances = output
+            .metrics
+            .feature_importances
+            .iter()
+            .map(|importance| ModelFeatureImportance {
+                feature: ModelMetricName::new(importance.feature.as_str()),
+                importance: importance.importance,
+            })
+            .collect();
         let artifact = ModelArtifact::Classical(Box::new(ClassicalModelArtifact {
             header,
             artifact_id: ModelArtifactId::from_v7(),
@@ -788,7 +838,14 @@ impl ModelTrainerService {
             input_transform: output.input_transform,
             metrics: output.metrics,
         }));
-        Ok((artifact, metrics_json, objective_json))
+        let metrics = ModelVersionMetrics::classical_pointwise(
+            kind,
+            in_sample_metrics,
+            validation_metrics,
+            feature_importances,
+            artifact_training_lineage(&artifact)?,
+        );
+        Ok((artifact, metrics, objective))
     }
 }
 
@@ -870,52 +927,6 @@ pub(crate) fn build_classical_matrix(
     build_training_matrix(&sorted, &spec)
 }
 
-/// Assemble the classical run's `metrics_json`: in-sample fit, the out-of-sample
-/// rolling validation, the kind, and the global feature importances.
-#[cfg(feature = "ml-classical")]
-fn classical_metrics_json(
-    kind: ClassicalKind,
-    output: &ClassicalTrainOutput,
-    validation: &ValidationReport,
-    objective_json: &serde_json::Value,
-) -> serde_json::Value {
-    serde_json::json!({
-        "kind": kind.as_str(),
-        "objective": objective_json,
-        "in_sample": {
-            "validation_objective": output.metrics.validation_objective,
-            "train_samples": output.metrics.train_samples,
-            "feature_count": output.metrics.feature_count,
-        },
-        "validation": {
-            "held_out_objective": validation.held_out_objective,
-            "fold_objectives": validation.fold_objectives,
-            "sample_count": validation.sample_count,
-            "dropped_singleton_groups": validation.dropped_singleton_groups,
-            "dropped_singleton_rows": validation.dropped_singleton_rows,
-            "held_out_metric": "mean_rolling_fold_rank_ic",
-        },
-        "feature_importances": output.metrics.feature_importances
-            .iter()
-            .map(|fi| serde_json::json!({
-                "feature": fi.feature.as_str(),
-                "importance": fi.importance,
-            }))
-            .collect::<Vec<_>>(),
-    })
-}
-
-#[cfg(feature = "ml-classical")]
-fn classical_objective_json(kind: ClassicalKind) -> serde_json::Value {
-    serde_json::json!({
-        "family": "classical_pointwise_baseline",
-        "kind": kind.as_str(),
-        "rank_loss": serde_json::Value::Null,
-        "optimizer": serde_json::Value::Null,
-        "note": "classical smartcore adapters train pointwise supervised models and validate by rank_ic; they are not LTR rankers",
-    })
-}
-
 /// Classical training is not linked in this build.
 #[cfg(not(feature = "ml-classical"))]
 impl ModelTrainerService {
@@ -927,7 +938,7 @@ impl ModelTrainerService {
         _dataset: &TrainingDatasetInfo,
         _examples: &[TrainingExample],
         kind: ClassicalKind,
-    ) -> QuantResult<(ModelArtifact, serde_json::Value, serde_json::Value)> {
+    ) -> QuantResult<(ModelArtifact, ModelVersionMetrics, ModelTrainingObjective)> {
         Err(ResearchError::RuntimeUnavailable {
             family: kind.to_string(),
             detail: "classical training requires the `ml-classical` build".to_owned(),

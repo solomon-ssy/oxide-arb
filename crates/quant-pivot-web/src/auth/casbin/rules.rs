@@ -262,7 +262,11 @@ mod tests {
     async fn acting_role_not_held_is_forbidden() {
         let casbin = CasbinService::in_memory().await;
         casbin
-            .add_test_policy("risk_owner", "runtime_config", "activate")
+            .add_test_policy(
+                "risk_owner",
+                ResourceType::DecisionPolicySnapshot.as_str(),
+                Operation::Activate.as_str(),
+            )
             .await;
         let result =
             Rule::ActingRoleGoverned(ResourceType::DecisionPolicySnapshot, Operation::Activate)
@@ -280,7 +284,11 @@ mod tests {
     async fn acting_role_held_but_disabled_is_forbidden() {
         let casbin = CasbinService::in_memory().await;
         casbin
-            .add_test_policy("risk_owner", "runtime_config", "activate")
+            .add_test_policy(
+                "risk_owner",
+                ResourceType::DecisionPolicySnapshot.as_str(),
+                Operation::Activate.as_str(),
+            )
             .await;
         let result =
             Rule::ActingRoleGoverned(ResourceType::DecisionPolicySnapshot, Operation::Activate)
@@ -313,7 +321,11 @@ mod tests {
     async fn acting_role_held_with_policy_is_allowed_and_returns_role() {
         let casbin = CasbinService::in_memory().await;
         casbin
-            .add_test_policy("risk_owner", "runtime_config", "activate")
+            .add_test_policy(
+                "risk_owner",
+                ResourceType::DecisionPolicySnapshot.as_str(),
+                Operation::Activate.as_str(),
+            )
             .await;
         let outcome =
             Rule::ActingRoleGoverned(ResourceType::DecisionPolicySnapshot, Operation::Activate)

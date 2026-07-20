@@ -34,9 +34,10 @@ use actix_web::{
 };
 use quant_pivot_models::{
     domain::NewOperationLog,
-    enums::operation_log::{OperationCategory, OperationOutcome},
-    types::{OperationLogId, UserId},
+    enums::operation_log::{OperationCategory, OperationHttpMethod, OperationOutcome},
+    types::{OperationAction, OperationDetailDocument, OperationLogId, UserId},
 };
+use sea_orm::entity::prelude::IpNetwork;
 
 /// Capture every mutating request / auth event into the operation log.
 pub async fn operation_audit<B: MessageBody>(
@@ -52,7 +53,7 @@ pub async fn operation_audit<B: MessageBody>(
     let started = Instant::now();
     let method = req.method().clone();
     let http_path = req.path().to_owned();
-    let client_ip = req.peer_addr().map(|addr| addr.ip().to_string());
+    let client_ip = req.peer_addr().map(|addr| IpNetwork::from(addr.ip()));
     let user_agent = header_value(&req, "user-agent");
     // The buffer is cheap to clone; capturing it avoids borrowing the response.
     let buffer = req
@@ -61,7 +62,7 @@ pub async fn operation_audit<B: MessageBody>(
 
     let res = next.call(req).await?;
 
-    if should_record(&method)
+    if let Some(http_method) = operation_http_method(&method)
         && let Some(buffer) = buffer
     {
         let request = res.request();
@@ -78,16 +79,20 @@ pub async fn operation_audit<B: MessageBody>(
         let category = enrichment
             .category
             .unwrap_or_else(|| fallback_category(matched.as_deref().unwrap_or(&http_path)));
-        let action = enrichment
-            .action
-            .unwrap_or_else(|| fallback_action(&method, matched.as_deref().unwrap_or(&http_path)));
+        let action = enrichment.action.unwrap_or_else(|| {
+            OperationAction::new(fallback_action(
+                &method,
+                matched.as_deref().unwrap_or(&http_path),
+            ))
+        });
 
         let log = NewOperationLog {
             id: OperationLogId::from_v7(),
             request_id: extensions
                 .get::<RequestId>()
                 .map(|id| id.0.clone())
-                .unwrap_or_default(),
+                .unwrap_or_default()
+                .into(),
             // Handler enrichment wins (login attributes the actor before any
             // `Claims` exist); otherwise fall back to the authenticated identity.
             actor_user_id: enrichment
@@ -96,19 +101,23 @@ pub async fn operation_audit<B: MessageBody>(
             actor_username: enrichment
                 .actor_username
                 .or_else(|| claims.map(|claims| claims.username.clone())),
-            acting_role: extensions.get::<ActingRole>().map(|role| role.0.clone()),
+            acting_role: extensions
+                .get::<ActingRole>()
+                .map(|role| role.0.clone().into()),
             category,
             action,
             resource_type: enrichment.resource_type,
             resource_id: enrichment.resource_id,
-            http_method: method.as_str().to_owned(),
+            http_method,
             http_path,
             http_status: i16::try_from(status.as_u16()).unwrap_or(i16::MAX),
             outcome,
             client_ip,
             user_agent,
             latency_ms: i32::try_from(started.elapsed().as_millis()).unwrap_or(i32::MAX),
-            detail: enrichment.detail.unwrap_or_else(|| serde_json::json!({})),
+            detail: enrichment
+                .detail
+                .unwrap_or_else(OperationDetailDocument::empty),
             before_hash: enrichment.before_hash,
             after_hash: enrichment.after_hash,
             governance_audit_event_id: enrichment.governance_audit_event_id,
@@ -128,12 +137,16 @@ fn header_value(req: &ServiceRequest, name: &str) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
-/// Only state-changing methods are audited; reads and probes are skipped.
-const fn should_record(method: &Method) -> bool {
-    matches!(
-        *method,
-        Method::POST | Method::PUT | Method::DELETE | Method::PATCH
-    )
+/// Convert only audited transport methods. Returning `None` for reads and
+/// unsupported extension methods keeps the persisted enum semantically exact.
+const fn operation_http_method(method: &Method) -> Option<OperationHttpMethod> {
+    match *method {
+        Method::POST => Some(OperationHttpMethod::Post),
+        Method::PUT => Some(OperationHttpMethod::Put),
+        Method::PATCH => Some(OperationHttpMethod::Patch),
+        Method::DELETE => Some(OperationHttpMethod::Delete),
+        _ => None,
+    }
 }
 
 /// Derive the outcome from the final HTTP status when the handler did not set

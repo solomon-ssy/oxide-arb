@@ -13,10 +13,10 @@
 //! caller (`quant-pivot-core`'s CPCV/trial orchestration), never a resample.
 
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
-use quant_pivot_models::runtime_config::RankLossKind;
+use quant_pivot_models::{
+    runtime_config::RankLossKind, types::model_training::TrainingObjectiveSpec,
+};
 use rust_decimal::Decimal;
-
-use crate::model::TrainingObjectiveSpec;
 
 #[cfg(feature = "ml-classical")]
 use crate::model::classical::{ClassicalParams, ForestParams, LinearParams};
@@ -256,8 +256,9 @@ mod tests {
     #[cfg(feature = "ml-classical")]
     use super::ClassicalTrialGrid;
     use super::{Trial, TrialGridSpec, WeightedFactorTrialGrid};
-    use crate::model::TrainingObjectiveSpec;
-    use quant_pivot_models::runtime_config::RankLossKind;
+    use quant_pivot_models::{
+        runtime_config::RankLossKind, types::model_training::TrainingObjectiveSpec,
+    };
     use rust_decimal_macros::dec;
 
     #[test]

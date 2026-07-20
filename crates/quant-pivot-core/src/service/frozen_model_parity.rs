@@ -21,7 +21,10 @@ use quant_pivot_models::{
         FeatureParityEventStatus, FeatureParityRunKind, FeatureParityRunStatus, FeatureParityStage,
         FeatureParityStateTransition, PublicationStatus, TrainingDatasetStatus,
     },
-    types::{ContentHash, FeatureParityEventId, FeatureParityRunId, ModelInputContract},
+    types::{
+        ContentHash, FeatureParityDetail, FeatureParityDetailSource, FeatureParityEventId,
+        FeatureParityRunId, ModelInputContract,
+    },
 };
 use quant_pivot_repository::traits::{
     FactWriter, FeatureParityRepository, ModelRegistryRepository, TrainingDatasetRepository,
@@ -290,6 +293,20 @@ impl FrozenModelParityService {
                 detail: format!("invalid model training contract: {detail}"),
             })
         })?;
+        let recomputed_spec_hash = spec.definition().content_hash().map_err(|error| {
+            QuantError::from(ResearchError::Determinism {
+                detail: format!("model spec definition hash failed: {error}"),
+            })
+        })?;
+        if recomputed_spec_hash != spec.definition_hash {
+            return Err(ResearchError::Determinism {
+                detail: format!(
+                    "model spec {} definition hash does not match its immutable fields",
+                    spec.model_spec_id
+                ),
+            }
+            .into());
+        }
         Ok((dataset, spec))
     }
 
@@ -316,7 +333,20 @@ impl FrozenModelParityService {
         }
         let artifact = load_hash_verified_artifact(&self.deps.artifact_store, version).await?;
         let header = artifact.header();
+        let manifest =
+            dataset
+                .manifest_json
+                .as_ref()
+                .ok_or_else(|| ResearchError::Determinism {
+                    detail: format!(
+                        "dataset {} is missing its immutable manifest",
+                        dataset.training_dataset_id
+                    ),
+                })?;
+        let model_spec_definition_hash = &spec.definition_hash;
         if header.model_version_id != version.model_version_id
+            || &manifest.model_spec_definition_hash != model_spec_definition_hash
+            || &header.model_spec_definition_hash != model_spec_definition_hash
             || header.model_family != spec.model_family
             || version.model_family != spec.model_family
             || header.feature_schema_hash != *materialization.feature_schema_hash
@@ -727,23 +757,29 @@ fn frozen_model_evidence_rows(
                 fingerprint.as_str(),
                 FeatureParityEventStatus::Matched.as_str(),
             ))?;
-            let detail_json = serde_json::to_string(&serde_json::json!({
-                "scope": commitment.scope,
-                "assertion": "artifact commitment equals the canonical commitment recomputed from the complete frozen dataset",
-                "comparison_granularity": "global_commitment_anchored_to_example",
-                "per_row_encoded_values_compared": false,
-                "online_source": "frozen_model_artifact",
-                "replay_source": "verified_parquet_v2",
-                "example_id": commitment.example_id,
-                "decision_boundary": commitment.decision_boundary,
-                "feature_contract_hash": commitment.feature_contract_hash,
-                "transform_hash": commitment.transform_hash,
-                "dataset_hash": commitment.dataset_hash,
-                "training_input_hash": commitment.training_input_hash,
-            }))
-            .map_err(|error| ResearchError::Serialization {
-                detail: format!("serialize frozen parity evidence: {error}"),
-            })?;
+            let detail = FeatureParityDetail::Compared {
+                sampling_key: format!("{}/{}", request.run_id, example.example_id),
+                source: Box::new(FeatureParityDetailSource::FrozenModelCommitment {
+                    example_id: example.example_id.clone(),
+                    decision_boundary: example.decision_boundary.clone(),
+                    feature_contract_hash: request.feature_contract_hash.clone(),
+                    transform_hash: request.transform_hash.clone(),
+                    dataset_hash: request.dataset_hash.clone(),
+                    training_input_hash: request.training_input_hash.clone(),
+                }),
+            };
+            detail
+                .validate_for(
+                    FeatureParityStage::ModelInput,
+                    FeatureParityEventStatus::Matched,
+                )
+                .map_err(|detail| ResearchError::Determinism {
+                    detail: detail.to_owned(),
+                })?;
+            let detail_json =
+                serde_json::to_string(&detail).map_err(|error| ResearchError::Serialization {
+                    detail: format!("serialize frozen parity evidence: {error}"),
+                })?;
             Ok(QuantFeatureParityEventRow {
                 event_time: example.decision_at().timestamp_millis(),
                 parity_event_id: FeatureParityEventId::from_evidence_hash(&event_identity),
@@ -764,10 +800,20 @@ fn frozen_model_evidence_rows(
                 replay_value: None,
                 online_effective_at: None,
                 online_available_at: None,
-                online_cutoff: Some(example.decision_boundary.knowledge_cutoff().timestamp_millis()),
+                online_cutoff: Some(
+                    example
+                        .decision_boundary
+                        .knowledge_cutoff()
+                        .timestamp_millis(),
+                ),
                 replay_effective_at: None,
                 replay_available_at: None,
-                replay_cutoff: Some(example.decision_boundary.knowledge_cutoff().timestamp_millis()),
+                replay_cutoff: Some(
+                    example
+                        .decision_boundary
+                        .knowledge_cutoff()
+                        .timestamp_millis(),
+                ),
                 feature_contract_hash: request.feature_contract_hash.as_str().to_owned(),
                 transform_hash: request.transform_hash.as_str().to_owned(),
                 online_fingerprint: fingerprint.as_str().to_owned(),
@@ -833,17 +879,20 @@ mod tests {
             },
         },
         types::{
-            ContentHash, DecisionPolicySnapshotId, EventId, FeatureParityRunId, MarketId,
-            ModelInputContract, ModelInputSpec, ModelSpecId, ModelVersionId, SchemaVersion,
-            TokenId, TrainingDatasetId, TrainingExampleId, TrainingHorizonsSecs,
-            TrainingSampleSource,
+            ContentHash, DecisionPolicySnapshotId, EventId, FeatureParityDetail,
+            FeatureParityDetailSource, FeatureParityRunId, MarketId, ModelInputContract,
+            ModelInputSpec, ModelSpecId, ModelVersionId, SchemaVersion, TokenId, TrainingDatasetId,
+            TrainingExampleId, TrainingHorizonsSecs, TrainingSampleSource,
+            model_metrics::ModelVersionMetrics, model_training::ModelTrainingObjective,
         },
     };
     use quant_pivot_research::{
         features::FeatureVector, model::model_input_contract_hash, selection::SelectedMarket,
         training::TrainingExample,
     };
-    use quant_pivot_test_support::execution_pg_seed::fixture_profile_ref;
+    use quant_pivot_test_support::{
+        execution_pg_seed::fixture_profile_ref, model_spec_fixtures::model_spec_lineage_fixture,
+    };
 
     use super::{
         FrozenEvidenceRequest, frozen_model_evidence_rows, validate_passed_model_parity_run,
@@ -861,10 +910,15 @@ mod tests {
         let model_spec_id = ModelSpecId::from_v7();
         let training_dataset_id = TrainingDatasetId::from_v7();
         let feature_hash = hash('a');
+        let (model_spec_thesis, model_spec_definition_hash) =
+            model_spec_lineage_fixture("frozen-parity-test-spec");
         let version = ModelVersionInfo {
             model_version_id: model_version_id.clone(),
             model_spec_id: model_spec_id.clone(),
+            model_spec_name: "frozen-parity-test-spec".to_owned(),
             model_family: ModelFamily::WeightedFactor,
+            model_spec_thesis,
+            model_spec_definition_hash,
             version: 1,
             artifact_hash: hash('b'),
             category_scope: None,
@@ -873,9 +927,15 @@ mod tests {
             trade_policy_artifact_id: None,
             trade_policy_hash: None,
             publish_path_set_id: None,
-            metrics_json: serde_json::json!({}),
-            training_objective_json: serde_json::json!({}),
-            quality_gate_report: serde_json::json!({}),
+            derivation_kind: ModelVersionInfo::training_derivation_kind(),
+            parent_model_version_id: None,
+            source_backtest_report_id: None,
+            calibration_artifact_id: None,
+            score_multiplier_calibration_report: None,
+            derivation_evidence_hash: None,
+            metrics: ModelVersionMetrics::not_measured("test fixture"),
+            training_objective: ModelTrainingObjective::hand_authored("test fixture"),
+            quality_gate_report: None,
             publication_status: PublicationStatus::Candidate,
             published_at: None,
             retired_at: None,
@@ -884,6 +944,7 @@ mod tests {
         let dataset = TrainingDatasetInfo {
             training_dataset_id: training_dataset_id.clone(),
             model_spec_id,
+            model_spec_definition_hash: hash('d'),
             window_start: now - Duration::hours(2),
             window_end: now - Duration::hours(1),
             status: TrainingDatasetStatus::Ready,
@@ -1064,15 +1125,21 @@ mod tests {
             assert!(row.online_state.is_none() && row.replay_state.is_none());
             assert_eq!(row.feature_contract_hash, feature_contract_hash.as_str());
             assert_eq!(row.transform_hash, transform_hash.as_str());
-            let detail: serde_json::Value =
+            let detail: FeatureParityDetail =
                 serde_json::from_str(&row.detail_json).expect("structured evidence");
-            assert_eq!(
-                detail["scope"],
-                "global_canonical_training_input_commitment"
-            );
-            assert_eq!(detail["per_row_encoded_values_compared"], false);
-            assert_eq!(detail["dataset_hash"], dataset_hash.as_str());
-            assert_eq!(detail["training_input_hash"], training_input_hash.as_str());
+            let FeatureParityDetail::Compared { source, .. } = detail else {
+                panic!("expected frozen model commitment detail");
+            };
+            let FeatureParityDetailSource::FrozenModelCommitment {
+                dataset_hash: actual_dataset_hash,
+                training_input_hash: actual_training_input_hash,
+                ..
+            } = source.as_ref()
+            else {
+                panic!("expected frozen model commitment source");
+            };
+            assert_eq!(actual_dataset_hash, &dataset_hash);
+            assert_eq!(actual_training_input_hash, &training_input_hash);
         }
     }
 }

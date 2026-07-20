@@ -85,7 +85,7 @@ struct SourceSliceInputs {
     invalid_sessions: Vec<SourceSliceInvalidSession>,
 }
 
-/// Strict reader for the V2 Parquet envelope and immutable object bindings.
+/// Strict reader for the V1 Parquet envelope and immutable object bindings.
 pub struct SourceSliceReader {
     artifacts: Arc<dyn ArtifactStore>,
 }
@@ -948,10 +948,11 @@ fn source_boundary(identity: &SourceSliceIdentity) -> QuantResult<DecisionBounda
 fn replay_samples(versions: &[CatalogMarketChangeInfo]) -> QuantResult<Vec<ReplaySample>> {
     let mut samples = Vec::with_capacity(versions.len().saturating_mul(2));
     for version in versions {
-        let market = serde_json::from_value::<MarketRegistryInfo>(version.payload.clone())
-            .map_err(|error| ResearchError::DatasetBuild {
-                detail: format!("catalog market {} is invalid: {error}", version.market_id),
-            })?;
+        let market =
+            serde_json::from_value::<MarketRegistryInfo>(version.payload.clone().into_inner())
+                .map_err(|error| ResearchError::DatasetBuild {
+                    detail: format!("catalog market {} is invalid: {error}", version.market_id),
+                })?;
         let market_id = market.market_id;
         for token_id in [market.token_yes, market.token_no] {
             samples.push(ReplaySample {

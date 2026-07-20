@@ -1,6 +1,9 @@
 //! Governance bundle: runtime config, mode control, health, notifications.
 
-use std::sync::{Arc, OnceLock};
+use std::{
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
 
 use super::{DataBundle, InfraBundle, PgRepositories};
 use crate::{
@@ -26,7 +29,7 @@ use quant_pivot_models::{
         SystemStatus,
     },
     enums::system::BootstrapPhase,
-    runtime_config::DecisionPolicySnapshot,
+    runtime_config::{ActivePolicyBundle, DecisionPolicySnapshot},
 };
 use quant_pivot_repository::{
     postgres::{PgKillSwitchStateRepository, PgSystemRuntimeStateRepository},
@@ -55,11 +58,19 @@ impl RuntimeSnapshot {
     pub async fn bootstrap(repos: &PgRepositories, deploy: &DeployConfig) -> QuantResult<Self> {
         let runtime_state =
             restore_system_runtime_state(repos.system_runtime_state.as_ref()).await?;
-        let config =
+        let active_bundle =
             ensure_policy_activation(repos.runtime_config.as_ref(), runtime_state.bootstrap_phase)
                 .await?;
+        let config = active_bundle
+            .as_ref()
+            .map_or_else(DecisionPolicySnapshot::default, |bundle| {
+                bundle.snapshot.clone()
+            });
         let alerts = Arc::new(AlertDispatcher::new(&deploy.notifications)?);
-        let store = Arc::new(DecisionPolicyStore::new(config.clone()));
+        let store = Arc::new(active_bundle.map_or_else(
+            || DecisionPolicyStore::new(config.clone()),
+            DecisionPolicyStore::new_active,
+        ));
         let mode = RuntimeModeHandle::new(runtime_state.quant_runtime_mode);
         let kill_switch_info = restore_kill_switch(repos.kill_switch_state.as_ref()).await?;
         let kill_switch_handle = KillSwitchHandle::new(kill_switch_info.state);
@@ -111,6 +122,8 @@ pub struct GovernanceBundle {
     pub execution_recovery: Arc<ExecutionRecoveryCoordinator>,
     /// Shared WS fan-out helper for mode / kill-switch and lifecycle broadcasts.
     pub status_publisher: Arc<SystemStatusPublisher>,
+    /// Durable DB → `ArcSwap` convergence loop for activations committed by any instance.
+    pub policy_bundle_reconciler: tokio::task::JoinHandle<()>,
 }
 
 impl GovernanceBundle {
@@ -152,6 +165,10 @@ impl GovernanceBundle {
             category_pointer_guard: &category_pointer_guard,
             data,
         });
+        let policy_bundle_reconciler = spawn_policy_bundle_reconciler(
+            Arc::clone(&infra.repos.runtime_config) as Arc<dyn PolicyRepository>,
+            Arc::clone(&applicator),
+        );
         let bootstrap: Arc<dyn BootstrapPort> = Arc::new(
             BootstrapService::initialize(
                 Arc::clone(&infra.repos.system_runtime_state)
@@ -205,6 +222,7 @@ impl GovernanceBundle {
             exit_monitor_health,
             execution_recovery,
             status_publisher,
+            policy_bundle_reconciler,
         })
     }
 
@@ -234,6 +252,56 @@ impl GovernanceBundle {
         self.bias_table.publish(table);
         Ok(())
     }
+}
+
+fn spawn_policy_bundle_reconciler(
+    repository: Arc<dyn PolicyRepository>,
+    applicator: Arc<PolicySnapshotApplicator>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(2));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            let bundle = match repository.load_current_bundle().await {
+                Ok(Some(bundle)) => bundle,
+                Ok(None) => continue,
+                Err(error) => {
+                    tracing::error!(error = %error, "policy bundle reconciliation read failed");
+                    continue;
+                }
+            };
+            let local = applicator.current_bundle();
+            if local.as_ref().is_some_and(|published| {
+                published.generation == bundle.generation
+                    && published.decision_policy_snapshot_id == bundle.decision_policy_snapshot_id
+                    && published.snapshot_hash == bundle.snapshot_hash
+            }) {
+                continue;
+            }
+            if local
+                .as_ref()
+                .is_some_and(|published| published.generation > bundle.generation)
+            {
+                tracing::error!(
+                    local_generation = %local.as_ref().map_or(bundle.generation, |value| value.generation),
+                    durable_generation = %bundle.generation,
+                    "local policy bundle is newer than the database guard; refusing rollback"
+                );
+                continue;
+            }
+            match applicator.prepare(bundle.snapshot.clone()).await {
+                Ok(prepared) => {
+                    if let Err(error) = prepared.publish_bundle(bundle) {
+                        tracing::error!(error = %error, "policy bundle reconciliation publish failed");
+                    }
+                }
+                Err(error) => {
+                    tracing::error!(error = %error, "durable policy bundle failed consumer preparation");
+                }
+            }
+        }
+    })
 }
 
 fn seed_weight_overlay(runtime_config: &Arc<DecisionPolicyStore>) -> Arc<WeightOverlayApplicator> {
@@ -408,15 +476,15 @@ async fn restore_kill_switch(
 async fn ensure_policy_activation(
     repo: &dyn PolicyRepository,
     bootstrap_phase: BootstrapPhase,
-) -> QuantResult<DecisionPolicySnapshot> {
-    let current = repo.load_current().await?;
-    if let Some(version) = current {
-        return Ok(version.snapshot);
+) -> QuantResult<Option<ActivePolicyBundle>> {
+    let current = repo.load_current_bundle().await?;
+    if current.is_some() {
+        return Ok(current);
     }
 
     if bootstrap_phase != BootstrapPhase::Active {
         tracing::info!("runtime config awaits explicit bootstrap activation");
-        return Ok(DecisionPolicySnapshot::default());
+        return Ok(None);
     }
     Err(StorageError::InvariantViolation {
         entity: Some("decision_policy_snapshot"),

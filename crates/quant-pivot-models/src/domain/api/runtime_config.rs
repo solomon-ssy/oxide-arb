@@ -2,23 +2,24 @@
 
 use crate::{
     domain::{
-        PolicyActivationInfo, PolicyApprovalInfo, PolicyRevisionInfo, ProductionBaselineInfo,
+        ConfigActivityInfo, DecisionPolicySnapshotOptionInfo, PolicyActivationInfo,
+        PolicyActivationOutcome, PolicyApprovalInfo, PolicyRevisionInfo, ProductionBaselineInfo,
     },
     enums::runtime_config::{
         CheckOutcome, ConfigResourceKind, CredentialHealthStatus, CredentialKind,
-        DeploymentEndpointKind, LifecycleBaseline, LifecycleCheckKind, PolicyActivationKind,
-        PolicyActorKind, PolicyApplyBoundary, PolicyApprovalDecision, PolicyConsumer,
-        PolicyRevisionStatus, ProjectLifecycleState, ResourceBudgetKind, ResourceBudgetMetric,
-        ResourceBudgetUnit,
+        DecisionPolicySnapshotSource, DeploymentEndpointKind, LifecycleBaseline,
+        LifecycleCheckKind, PolicyActivationKind, PolicyActorKind, PolicyApplyBoundary,
+        PolicyApprovalDecision, PolicyConsumer, PolicyRevisionStatus, ProjectLifecycleState,
+        ResourceBudgetKind, ResourceBudgetMetric, ResourceBudgetUnit,
     },
     runtime_config::{
-        LifecycleCheckDetail, PolicyDocument, PolicyValidationEvidence, ProductionSealEvidence,
-        ScheduleCadence,
+        LifecycleCheckDetail, PolicyDocument, PolicyRevisionBundle, PolicyValidationEvidence,
+        PolicyValidationSubject, ProductionSealEvidence, ScheduleCadence,
     },
     types::{
         AuditEventId, BuildCommitHash, ContentHash, DecisionPolicySnapshotId,
-        DeploymentEnvironment, PolicyActivationId, PolicyApprovalId, PolicyIdempotencyKey,
-        PolicyPreflightToken, PolicyRevisionId, ProductionBaselineId,
+        DeploymentEnvironment, PolicyActivationId, PolicyApprovalId, PolicyBundleGeneration,
+        PolicyIdempotencyKey, PolicyPreflightToken, PolicyRevisionId, ProductionBaselineId,
         ProductionSealConfirmationPhrase, SchemaVersion, UserId,
     },
 };
@@ -42,6 +43,8 @@ pub struct ConfigResourceSummaryView {
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ConfigResourcesView {
     pub resources: Vec<ConfigResourceSummaryView>,
+    pub active_bundle_generation: PolicyBundleGeneration,
+    pub active_snapshot_id: Option<DecisionPolicySnapshotId>,
     pub active_policy_bundle_hash: Option<ContentHash>,
 }
 
@@ -108,6 +111,7 @@ pub struct PolicyApprovalView {
     pub policy_revision_id: PolicyRevisionId,
     pub resource_kind: ConfigResourceKind,
     pub revision_hash: ContentHash,
+    pub validation_subject: Option<PolicyValidationSubject>,
     pub decision: PolicyApprovalDecision,
     pub decided_by: PolicyActorView,
     pub reason: String,
@@ -123,6 +127,7 @@ impl From<PolicyApprovalInfo> for PolicyApprovalView {
             policy_revision_id: info.policy_revision_id,
             resource_kind: info.resource_kind,
             revision_hash: info.revision_hash,
+            validation_subject: info.validation_subject,
             decision: info.decision,
             decided_by: PolicyActorView {
                 kind: info.decided_by_kind,
@@ -140,6 +145,8 @@ impl From<PolicyApprovalInfo> for PolicyApprovalView {
 /// Immutable activation record exposed by the Config API.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct PolicyActivationView {
+    pub bundle_generation: PolicyBundleGeneration,
+    pub expected_bundle_generation: PolicyBundleGeneration,
     pub policy_activation_id: PolicyActivationId,
     pub resource_kind: ConfigResourceKind,
     pub policy_revision_id: PolicyRevisionId,
@@ -153,13 +160,16 @@ pub struct PolicyActivationView {
     pub previous_policy_revision_id: Option<PolicyRevisionId>,
     pub rollback_target_revision_id: Option<PolicyRevisionId>,
     pub idempotency_key: PolicyIdempotencyKey,
-    pub audit_event_id: Option<AuditEventId>,
+    pub activation_request_hash: ContentHash,
+    pub audit_event_id: AuditEventId,
     pub created_at: DateTime<Utc>,
 }
 
 impl From<PolicyActivationInfo> for PolicyActivationView {
     fn from(info: PolicyActivationInfo) -> Self {
         Self {
+            bundle_generation: info.bundle_generation,
+            expected_bundle_generation: info.expected_bundle_generation,
             policy_activation_id: info.policy_activation_id,
             resource_kind: info.resource_kind,
             policy_revision_id: info.policy_revision_id,
@@ -177,6 +187,7 @@ impl From<PolicyActivationInfo> for PolicyActivationView {
             previous_policy_revision_id: info.previous_policy_revision_id,
             rollback_target_revision_id: info.rollback_target_revision_id,
             idempotency_key: info.idempotency_key,
+            activation_request_hash: info.activation_request_hash,
             audit_event_id: info.audit_event_id,
             created_at: info.created_at,
         }
@@ -218,6 +229,8 @@ pub struct ApprovePolicyDraftRequest {
 #[serde(deny_unknown_fields)]
 pub struct ActivatePolicyDraftRequest {
     pub approval_id: PolicyApprovalId,
+    pub expected_bundle_generation: PolicyBundleGeneration,
+    pub candidate_bundle_hash: ContentHash,
     pub expected_active_revision_id: Option<PolicyRevisionId>,
     #[validate(length(min = 1, max = 1024))]
     pub reason: String,
@@ -249,12 +262,30 @@ pub struct ConfigActivityQuery {
     pub limit: Option<u64>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigSnapshotOptionsQuery {
+    pub limit: Option<u64>,
+}
+
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(tag = "event_type", content = "event", rename_all = "snake_case")]
 pub enum ConfigActivityView {
     Revision(Box<PolicyRevisionView>),
     Approval(PolicyApprovalView),
     Activation(PolicyActivationView),
+}
+
+impl From<ConfigActivityInfo> for ConfigActivityView {
+    fn from(info: ConfigActivityInfo) -> Self {
+        match info {
+            ConfigActivityInfo::Revision(revision) => {
+                Self::Revision(Box::new(PolicyRevisionView::from(*revision)))
+            }
+            ConfigActivityInfo::Approval(approval) => Self::Approval(approval.into()),
+            ConfigActivityInfo::Activation(activation) => Self::Activation(activation.into()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -314,6 +345,8 @@ pub struct ProductionBaselineView {
     pub build_commit: BuildCommitHash,
     pub postgres_schema_fingerprint: ContentHash,
     pub clickhouse_schema_fingerprint: ContentHash,
+    pub policy_bundle_generation: PolicyBundleGeneration,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub policy_bundle_hash: ContentHash,
     pub lifecycle_policy_hash: ContentHash,
     pub evidence: ProductionSealEvidence,
@@ -334,6 +367,8 @@ impl From<ProductionBaselineInfo> for ProductionBaselineView {
             build_commit: info.build_commit,
             postgres_schema_fingerprint: info.postgres_schema_fingerprint,
             clickhouse_schema_fingerprint: info.clickhouse_schema_fingerprint,
+            policy_bundle_generation: info.policy_bundle_generation,
+            decision_policy_snapshot_id: info.decision_policy_snapshot_id,
             policy_bundle_hash: info.policy_bundle_hash,
             lifecycle_policy_hash: info.lifecycle_policy_hash,
             evidence: info.evidence,
@@ -361,11 +396,6 @@ pub struct LifecycleCheckView {
     pub kind: LifecycleCheckKind,
     pub outcome: CheckOutcome,
     pub detail: LifecycleCheckDetail,
-}
-
-#[derive(Debug, Clone, Serialize, JsonSchema)]
-pub struct ProductionSealEvidenceView {
-    pub evidence: ProductionSealEvidence,
 }
 
 #[derive(Debug, Deserialize, Validate, JsonSchema)]
@@ -400,6 +430,41 @@ pub struct PolicyActivationResultView {
     pub activation: PolicyActivationView,
     pub applied_revision: PolicyRevisionView,
     pub activation_kind: PolicyActivationKind,
+    pub outcome: PolicyActivationOutcome,
+    pub committed_generation: PolicyBundleGeneration,
+    pub committed_snapshot_id: DecisionPolicySnapshotId,
+    pub committed_snapshot_hash: ContentHash,
+    pub committed_revision_vector: PolicyRevisionBundle,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct DecisionPolicySnapshotOptionView {
+    pub bundle_generation: PolicyBundleGeneration,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
+    pub snapshot_hash: ContentHash,
+    pub revision_vector: PolicyRevisionBundle,
+    pub source: DecisionPolicySnapshotSource,
+    pub created_at: DateTime<Utc>,
+}
+
+impl From<DecisionPolicySnapshotOptionInfo> for DecisionPolicySnapshotOptionView {
+    fn from(info: DecisionPolicySnapshotOptionInfo) -> Self {
+        Self {
+            bundle_generation: info.bundle_generation,
+            decision_policy_snapshot_id: info.decision_policy_snapshot_id,
+            snapshot_hash: info.snapshot_hash,
+            revision_vector: PolicyRevisionBundle {
+                recommendation_policy: Some(info.recommendation_policy_revision_id),
+                execution_risk_policy: Some(info.execution_risk_policy_revision_id),
+                model_routing: Some(info.model_routing_revision_id),
+                report_schedule: Some(info.report_schedule_revision_id),
+                operational_control: Some(info.operational_control_revision_id),
+                execution_authorization: Some(info.execution_authorization_revision_id),
+            },
+            source: info.source,
+            created_at: info.created_at,
+        }
+    }
 }
 
 /// Schema-only envelope used to generate the frontend Config API contract.
@@ -422,10 +487,12 @@ pub struct ConfigApiContractSchema {
     pub activate_request: ActivatePolicyDraftRequest,
     pub activate_response: PolicyActivationResultView,
     pub activity_response: Vec<ConfigActivityView>,
+    pub snapshot_options_query: ConfigSnapshotOptionsQuery,
+    pub snapshot_options_response: Vec<DecisionPolicySnapshotOptionView>,
     pub deployment_response: DeploymentConfigView,
     pub lifecycle_response: LifecycleView,
     pub seal_production_request: SealProductionRequest,
-    pub seal_production_response: ProductionSealEvidenceView,
+    pub seal_production_response: LifecycleView,
     pub schedule_preview_request: SchedulePreviewRequest,
     pub schedule_preview_response: SchedulePreviewView,
 }

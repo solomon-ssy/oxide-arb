@@ -53,10 +53,28 @@ const CONSTRAINTS: &[v1::ConstraintSpec] = &[
         definition: "CHECK ((feature_contract_hash ~ '^blake3:[0-9a-f]{64}$'::text))",
     },
     v1::ConstraintSpec {
+        name: "ck_quant_factor_definition_document",
+        table: "quant_factor_definition",
+        kind: v1::ConstraintKind::Check,
+        definition: "CHECK (((jsonb_typeof(definition) = 'object'::text) AND ((definition ->> 'name'::text) = name) AND ((definition ->> 'family'::text) = (factor_family)::text) AND (jsonb_typeof((definition -> 'input_features'::text)) = 'array'::text) AND (jsonb_typeof((definition -> 'quality_gates'::text)) = 'array'::text) AND (jsonb_typeof((definition -> 'owner'::text)) = 'string'::text) AND (char_length(btrim((definition ->> 'owner'::text))) >= 1)))",
+    },
+    v1::ConstraintSpec {
+        name: "ck_quant_factor_value_explanation",
+        table: "quant_factor_value",
+        kind: v1::ConstraintKind::Check,
+        definition: "CHECK (((jsonb_typeof(explanation) = 'object'::text) AND (jsonb_typeof((explanation -> 'headline'::text)) = 'string'::text) AND (char_length(btrim((explanation ->> 'headline'::text))) >= 1) AND (jsonb_typeof((explanation -> 'drivers'::text)) = 'array'::text)))",
+    },
+    v1::ConstraintSpec {
         name: "ck_quant_feature_parity_candidate_ordinal",
         table: "quant_feature_parity_candidate",
         kind: v1::ConstraintKind::Check,
         definition: "CHECK ((ordinal >= 0))",
+    },
+    v1::ConstraintSpec {
+        name: "ck_quant_calibration_artifact_payload_kind",
+        table: "quant_calibration_artifact",
+        kind: v1::ConstraintKind::Check,
+        definition: "CHECK (((jsonb_typeof(payload) = 'object'::text) AND ((payload ->> 'kind'::text) = (kind)::text) AND (jsonb_typeof((payload -> 'payload'::text)) = 'object'::text)))",
     },
     v1::ConstraintSpec {
         name: "uq_quant_feature_parity_candidate_subject_market",
@@ -71,28 +89,82 @@ const CONSTRAINTS: &[v1::ConstraintSpec] = &[
         definition: "CHECK ((((subject_kind = 'model_run'::qp_parity_subject_kind) AND (model_run_id IS NOT NULL) AND (recommendation_report_id IS NULL) AND (model_version_id IS NULL) AND (training_dataset_id IS NULL) AND (market_selection_id IS NOT NULL) AND (decision_at IS NOT NULL) AND (selection_hash IS NOT NULL)) OR ((subject_kind = 'recommendation_report'::qp_parity_subject_kind) AND (model_run_id IS NULL) AND (recommendation_report_id IS NOT NULL) AND (model_version_id IS NULL) AND (training_dataset_id IS NULL) AND (market_selection_id IS NOT NULL) AND (decision_at IS NOT NULL) AND (selection_hash IS NOT NULL)) OR ((subject_kind = 'model_version'::qp_parity_subject_kind) AND (model_run_id IS NULL) AND (recommendation_report_id IS NULL) AND (model_version_id IS NOT NULL) AND (training_dataset_id IS NOT NULL) AND (market_selection_id IS NULL) AND (decision_at IS NULL) AND (selection_hash IS NULL))))",
     },
     v1::ConstraintSpec {
-        name: "quant_feature_vector_check",
+        name: "ck_quant_feature_vector_documents",
         table: "quant_feature_vector",
         kind: v1::ConstraintKind::Check,
-        definition: "CHECK (((decision_capture IS NULL) = (decision_capture_hash IS NULL)))",
+        definition: "CHECK (((jsonb_typeof(decision_boundary) = 'object'::text) AND (jsonb_typeof(payload) = 'object'::text) AND (payload ? 'generic'::text) AND (payload ? 'domain'::text) AND (jsonb_typeof((payload -> 'generic'::text)) = 'object'::text) AND (jsonb_typeof((payload -> 'domain'::text)) = ANY (ARRAY['object'::text, 'null'::text])) AND (jsonb_typeof(source_refs) = 'array'::text) AND (jsonb_typeof(decision_capture) = 'object'::text) AND (jsonb_typeof((decision_capture -> 'snapshot'::text)) = 'object'::text) AND (decision_capture_hash ~ '^blake3:[0-9a-f]{64}$'::text)))",
+    },
+    v1::ConstraintSpec {
+        name: "ck_quant_market_linkage_outcome",
+        table: "quant_market_linkage",
+        kind: v1::ConstraintKind::Check,
+        definition: "CHECK (((jsonb_typeof(outcome) = 'object'::text) AND ((((status = 'unresolved'::qp_linkage_status) AND ((outcome ->> 'status'::text) = 'unresolved'::text) AND (jsonb_typeof((outcome -> 'reason'::text)) = 'string'::text) AND (char_length(btrim((outcome ->> 'reason'::text))) >= 1) AND (char_length((outcome ->> 'reason'::text)) <= 2048)) OR ((status = ANY (ARRAY['resolved'::qp_linkage_status, 'overridden'::qp_linkage_status])) AND ((outcome ->> 'status'::text) = 'resolved'::text) AND (jsonb_typeof((outcome -> 'subject'::text)) = 'object'::text) AND (jsonb_typeof((outcome -> 'source_bindings'::text)) = 'array'::text) AND (jsonb_typeof((outcome -> 'grounding'::text)) = 'object'::text))))))",
+    },
+    v1::ConstraintSpec {
+        name: "ck_operation_log_detail_document",
+        table: "operation_log",
+        kind: v1::ConstraintKind::Check,
+        definition: "CHECK (((jsonb_typeof(detail) = 'object'::text) AND (pg_column_size(detail) <= 65536)))",
+    },
+    v1::ConstraintSpec {
+        name: "ck_quant_model_governance_audit_detail_action",
+        table: "quant_model_governance_audit",
+        kind: v1::ConstraintKind::Check,
+        definition: "CHECK (((jsonb_typeof(detail) = 'object'::text) AND ((detail ->> 'action'::text) = (action)::text)))",
     },
     v1::ConstraintSpec {
         name: "quant_model_spec_check",
         table: "quant_model_spec",
         kind: v1::ConstraintKind::Check,
-        definition: "CHECK (((status = 'retired'::qp_publication_status) OR ((jsonb_typeof(input_contract) = 'object'::text) AND (jsonb_typeof((input_contract -> 'inputs'::text)) = 'array'::text) AND (jsonb_array_length((input_contract -> 'inputs'::text)) > 0) AND (jsonb_typeof(training_contract) = 'object'::text) AND (jsonb_typeof((training_contract -> 'target_label_name'::text)) = 'string'::text) AND ((length((training_contract ->> 'target_label_name'::text)) >= 1) AND (length((training_contract ->> 'target_label_name'::text)) <= 128)) AND ((((training_contract ->> 'validation_folds'::text))::integer >= 2) AND (((training_contract ->> 'validation_folds'::text))::integer <= 20)))))",
+        definition: "CHECK (((jsonb_typeof(input_contract) = 'object'::text) AND (jsonb_typeof((input_contract -> 'inputs'::text)) = 'array'::text) AND (jsonb_array_length((input_contract -> 'inputs'::text)) > 0) AND (jsonb_typeof(training_contract) = 'object'::text) AND (jsonb_typeof((training_contract -> 'target_label_name'::text)) = 'string'::text) AND ((length((training_contract ->> 'target_label_name'::text)) >= 1) AND (length((training_contract ->> 'target_label_name'::text)) <= 128)) AND ((((training_contract ->> 'validation_folds'::text))::integer >= 2) AND (((training_contract ->> 'validation_folds'::text))::integer <= 20)) AND (definition_hash ~ '^blake3:[0-9a-f]{64}$'::text)))",
+    },
+    v1::ConstraintSpec {
+        name: "ck_quant_model_spec_thesis",
+        table: "quant_model_spec",
+        kind: v1::ConstraintKind::Check,
+        definition: "CHECK (((jsonb_typeof(thesis) = 'object'::text) AND (jsonb_typeof((thesis -> 'summary'::text)) = 'string'::text) AND (char_length(btrim((thesis ->> 'summary'::text))) BETWEEN 1 AND 512) AND ((thesis ->> 'summary'::text) = btrim((thesis ->> 'summary'::text))) AND (jsonb_typeof((thesis -> 'hypothesis'::text)) = 'string'::text) AND (char_length(btrim((thesis ->> 'hypothesis'::text))) BETWEEN 1 AND 2048) AND ((thesis ->> 'hypothesis'::text) = btrim((thesis ->> 'hypothesis'::text))) AND (jsonb_typeof((thesis -> 'limitations'::text)) = 'array'::text) AND (jsonb_array_length((thesis -> 'limitations'::text)) BETWEEN 1 AND 16)))",
+    },
+    v1::ConstraintSpec {
+        name: "ck_quant_model_spec_authoring_provenance",
+        table: "quant_model_spec",
+        kind: v1::ConstraintKind::Check,
+        definition: "CHECK (((char_length(btrim(created_by_label)) BETWEEN 1 AND 256) AND ((created_by_role IS NULL) OR (char_length(btrim(created_by_role)) BETWEEN 1 AND 128)) AND (char_length(btrim(reason)) BETWEEN 1 AND 2048)))",
+    },
+    v1::ConstraintSpec {
+        name: "ck_quant_model_version_quality_gate_report",
+        table: "quant_model_version",
+        kind: v1::ConstraintKind::Check,
+        definition: "CHECK (((quality_gate_report IS NULL) OR ((jsonb_typeof(quality_gate_report) = 'object'::text) AND (((quality_gate_report ->> 'format_version'::text))::integer = 1) AND ((quality_gate_report -> 'subject'::text) ->> 'kind'::text) = 'model_version'::text AND ((((quality_gate_report -> 'subject'::text) ->> 'id'::text))::uuid = model_version_id) AND (jsonb_typeof((quality_gate_report -> 'gates'::text)) = 'array'::text) AND (jsonb_typeof((quality_gate_report -> 'hard_failures'::text)) = 'array'::text) AND (jsonb_typeof((quality_gate_report -> 'soft_warnings'::text)) = 'array'::text) AND (jsonb_typeof((quality_gate_report -> 'passed'::text)) = 'boolean'::text) AND ((quality_gate_report ->> 'report_hash'::text) ~ '^blake3:[0-9a-f]{64}$'::text))))",
+    },
+    v1::ConstraintSpec {
+        name: "ck_quant_model_version_training_objective",
+        table: "quant_model_version",
+        kind: v1::ConstraintKind::Check,
+        definition: "CHECK (((jsonb_typeof(training_objective) = 'object'::text) AND (((training_objective ->> 'format_version'::text))::integer = 1) AND (jsonb_typeof((training_objective -> 'definition'::text)) = 'object'::text) AND (((training_objective -> 'definition'::text) ->> 'kind'::text) = ANY (ARRAY['learning_to_rank'::text, 'classical_pointwise'::text, 'hand_authored'::text]))))",
+    },
+    v1::ConstraintSpec {
+        name: "ck_quant_model_version_metrics",
+        table: "quant_model_version",
+        kind: v1::ConstraintKind::Check,
+        definition: "CHECK (((jsonb_typeof(metrics) = 'object'::text) AND ((metrics ->> 'format_version'::text) = '1'::text) AND (jsonb_typeof((metrics -> 'definition'::text)) = 'object'::text) AND ((((metrics -> 'definition'::text) ->> 'kind'::text) = 'learning_to_rank'::text AND ((training_objective -> 'definition'::text) ->> 'kind'::text) = 'learning_to_rank'::text AND (jsonb_typeof(((metrics -> 'definition'::text) -> 'in_sample'::text)) = 'object'::text) AND (jsonb_typeof(((metrics -> 'definition'::text) -> 'validation'::text)) = 'object'::text) AND (jsonb_typeof(((metrics -> 'definition'::text) -> 'artifact_lineage'::text)) = 'object'::text) AND ((((metrics -> 'definition'::text) -> 'artifact_lineage'::text) ->> 'kind'::text) = ANY (ARRAY['factor_native'::text, 'fitted_feature_matrix'::text]))) OR (((metrics -> 'definition'::text) ->> 'kind'::text) = 'classical_pointwise'::text AND ((training_objective -> 'definition'::text) ->> 'kind'::text) = 'classical_pointwise'::text AND (jsonb_typeof(((metrics -> 'definition'::text) -> 'in_sample'::text)) = 'object'::text) AND (jsonb_typeof(((metrics -> 'definition'::text) -> 'validation'::text)) = 'object'::text) AND (jsonb_typeof(((metrics -> 'definition'::text) -> 'feature_importances'::text)) = 'array'::text) AND (jsonb_typeof(((metrics -> 'definition'::text) -> 'artifact_lineage'::text)) = 'object'::text) AND ((((metrics -> 'definition'::text) -> 'artifact_lineage'::text) ->> 'kind'::text) = 'fitted_feature_matrix'::text)) OR (((metrics -> 'definition'::text) ->> 'kind'::text) = 'not_measured'::text AND ((training_objective -> 'definition'::text) ->> 'kind'::text) = 'hand_authored'::text AND (jsonb_typeof(((metrics -> 'definition'::text) -> 'rationale'::text)) = 'string'::text) AND (char_length(btrim(((metrics -> 'definition'::text) ->> 'rationale'::text))) BETWEEN 1 AND 2048)))))",
+    },
+    v1::ConstraintSpec {
+        name: "ck_quant_model_version_derivation",
+        table: "quant_model_version",
+        kind: v1::ConstraintKind::Check,
+        definition: "CHECK ((((derivation_kind = 'training'::qp_model_version_derivation_kind) AND (parent_model_version_id IS NULL) AND (source_backtest_report_id IS NULL) AND (calibration_artifact_id IS NULL) AND (score_multiplier_calibration_report IS NULL) AND (derivation_evidence_hash IS NULL)) OR ((derivation_kind = 'score_multiplier_calibration'::qp_model_version_derivation_kind) AND (parent_model_version_id IS NOT NULL) AND (parent_model_version_id <> model_version_id) AND (source_backtest_report_id IS NOT NULL) AND (calibration_artifact_id IS NULL) AND (jsonb_typeof(score_multiplier_calibration_report) = 'object'::text) AND (((score_multiplier_calibration_report ->> 'methodology_version'::text))::integer = 1) AND (((score_multiplier_calibration_report ->> 'minimum_stratum_samples'::text))::bigint > 0) AND (((score_multiplier_calibration_report ->> 'total_samples'::text))::bigint > 0) AND (derivation_evidence_hash ~ '^blake3:[0-9a-f]{64}$'::text)) OR ((derivation_kind = 'return_calibration'::qp_model_version_derivation_kind) AND (parent_model_version_id IS NOT NULL) AND (parent_model_version_id <> model_version_id) AND (source_backtest_report_id IS NULL) AND (calibration_artifact_id IS NOT NULL) AND (score_multiplier_calibration_report IS NULL) AND (derivation_evidence_hash ~ '^blake3:[0-9a-f]{64}$'::text))))",
+    },
+    v1::ConstraintSpec {
+        name: "fk-quant_model_version-source_backtest_report_id",
+        table: "quant_model_version",
+        kind: v1::ConstraintKind::ForeignKey,
+        definition: "FOREIGN KEY (source_backtest_report_id) REFERENCES public.quant_backtest_report(backtest_report_id) ON UPDATE NO ACTION ON DELETE NO ACTION",
     },
     v1::ConstraintSpec {
         name: "quant_recommendation_report_capital_base_usd_check",
         table: "quant_recommendation_report",
         kind: v1::ConstraintKind::Check,
         definition: "CHECK ((capital_base_usd >= (0)::numeric))",
-    },
-    v1::ConstraintSpec {
-        name: "quant_recommendation_report_check",
-        table: "quant_recommendation_report",
-        kind: v1::ConstraintKind::Check,
-        definition: "CHECK ((profile_id = (profile_ref ->> 'id'::text)))",
     },
     v1::ConstraintSpec {
         name: "quant_recommendation_report_check1",
@@ -183,12 +255,6 @@ const CONSTRAINTS: &[v1::ConstraintSpec] = &[
         table: "quant_recommendation_report",
         kind: v1::ConstraintKind::Check,
         definition: "CHECK ((horizon_secs > 0))",
-    },
-    v1::ConstraintSpec {
-        name: "quant_recommendation_report_profile_id_check",
-        table: "quant_recommendation_report",
-        kind: v1::ConstraintKind::Check,
-        definition: "CHECK (((char_length(profile_id) >= 1) AND (char_length(profile_id) <= 128)))",
     },
     v1::ConstraintSpec {
         name: "quant_recommendation_report_status_reason_check",
@@ -419,6 +485,12 @@ const CONSTRAINTS: &[v1::ConstraintSpec] = &[
         definition: "CHECK (((window_start < window_end) AND (window_end <= observed_at) AND (observed_at < expires_at) AND (artifact_version <> ''::text) AND (attestation_key_id <> ''::text)))",
     },
     v1::ConstraintSpec {
+        name: "ck_quant_research_job_params_kind",
+        table: "quant_research_job",
+        kind: v1::ConstraintKind::Check,
+        definition: "CHECK (((jsonb_typeof(params_json) = 'object'::text) AND (jsonb_typeof((params_json -> 'params'::text)) = 'object'::text) AND ((params_json ->> 'kind'::text) = (kind)::text)))",
+    },
+    v1::ConstraintSpec {
         name: "quant_source_slice_check",
         table: "quant_source_slice",
         kind: v1::ConstraintKind::Check,
@@ -479,6 +551,12 @@ const CONSTRAINTS: &[v1::ConstraintSpec] = &[
         definition: "CHECK (((length(reason) >= 1) AND (length(reason) <= 2048)))",
     },
     v1::ConstraintSpec {
+        name: "ck_policy_approval_validation_subject",
+        table: "policy_approval",
+        kind: v1::ConstraintKind::Check,
+        definition: "CHECK ((((decision <> 'approved'::qp_policy_approval_decision) OR (validation_subject IS NOT NULL)) AND ((validation_subject IS NULL) OR ((jsonb_typeof(validation_subject) = 'object'::text) AND (validation_subject ?& ARRAY['base_generation'::text, 'base_revision_vector'::text, 'candidate_bundle_hash'::text])))))",
+    },
+    v1::ConstraintSpec {
         name: "ck_schema_migration_audit_algorithm",
         table: "schema_migration_audit",
         kind: v1::ConstraintKind::Check,
@@ -509,6 +587,18 @@ const CONSTRAINTS: &[v1::ConstraintSpec] = &[
         definition: "CHECK ((state_revision > 0))",
     },
     v1::ConstraintSpec {
+        name: "ck_policy_profile_artifact_identity",
+        table: "policy_profile_artifact",
+        kind: v1::ConstraintKind::Check,
+        definition: "CHECK (((schema_version = 1) AND (content_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND ((document ->> 'profile_kind'::text) = (kind)::text)))",
+    },
+    v1::ConstraintSpec {
+        name: "ck_research_profile_artifact_identity",
+        table: "research_profile_artifact",
+        kind: v1::ConstraintKind::Check,
+        definition: "CHECK (((version > 0) AND (research_profile_id ~ '^[a-z0-9_]+$'::text) AND (content_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (research_profile_artifact_id = (((('rpa:'::text || research_profile_id) || ':'::text) || version::text) || ':'::text) || content_hash)))",
+    },
+    v1::ConstraintSpec {
         name: "ck_system_production_baseline_singleton",
         table: "system_production_baseline",
         kind: v1::ConstraintKind::Check,
@@ -519,6 +609,18 @@ const CONSTRAINTS: &[v1::ConstraintSpec] = &[
         table: "system_production_baseline",
         kind: v1::ConstraintKind::Check,
         definition: "CHECK (((postgres_schema_fingerprint ~ '^blake3:[0-9a-f]{64}$'::text) AND (clickhouse_schema_fingerprint ~ '^blake3:[0-9a-f]{64}$'::text) AND (policy_bundle_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (lifecycle_policy_hash ~ '^blake3:[0-9a-f]{64}$'::text)))",
+    },
+    v1::ConstraintSpec {
+        name: "ck_system_production_baseline_generation",
+        table: "system_production_baseline",
+        kind: v1::ConstraintKind::Check,
+        definition: "CHECK ((policy_bundle_generation > 0))",
+    },
+    v1::ConstraintSpec {
+        name: "ck_system_production_evidence_identity",
+        table: "system_production_evidence",
+        kind: v1::ConstraintKind::Check,
+        definition: "CHECK (((policy_bundle_generation > 0) AND (evidence_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (postgres_schema_fingerprint ~ '^blake3:[0-9a-f]{64}$'::text) AND (clickhouse_schema_fingerprint ~ '^blake3:[0-9a-f]{64}$'::text) AND (policy_bundle_hash ~ '^blake3:[0-9a-f]{64}$'::text)))",
     },
     v1::ConstraintSpec {
         name: "ck_system_runtime_state_contract_version",
@@ -536,7 +638,14 @@ const CONSTRAINTS: &[v1::ConstraintSpec] = &[
 
 pub async fn apply(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
     for spec in CONSTRAINTS {
-        v1::create_constraint(manager, *spec).await?;
+        v1::create_constraint(manager, *spec)
+            .await
+            .map_err(|error| {
+                DbErr::Custom(format!(
+                    "constraint `{}` on `{}` failed: {error}",
+                    spec.name, spec.table
+                ))
+            })?;
     }
     Ok(())
 }

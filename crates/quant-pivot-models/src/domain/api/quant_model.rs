@@ -2,10 +2,10 @@
 
 use crate::{
     domain::{ModelSpecInfo, pagination::PageRequest},
-    enums::{common::MarketCategory, model::ModelFamily, quant::PublicationStatus},
+    enums::{common::MarketCategory, model::ModelFamily},
     types::{
         ContentHash, ModelInputContract, ModelSpecId, ModelTrainingContract, ModelVersionId,
-        SchemaVersion,
+        RoleCode, SchemaVersion, UserId, model_spec::ModelSpecThesis,
     },
 };
 use chrono::{DateTime, Utc};
@@ -25,8 +25,8 @@ pub enum ModelPickerSide {
 /// A model spec is the **authoring root** of the offline research lifecycle:
 /// the operator declares the model family, prediction horizon, and feature /
 /// label schema versions the downstream dataset build and training runs bind
-/// to. Specs are minted in `draft`; a trained version is what later gets
-/// published (see `TrainModelRequest` / model-governance).
+/// to. A spec is immutable once created; publication lifecycle belongs only to
+/// trained model versions (see `TrainModelRequest` / model-governance).
 ///
 /// `model_family` deserializes from its canonical wire label (`"weighted_factor"`,
 /// `"classical_random_forest"`, `"hold_vs_exit_weighted"`, …); an unknown label
@@ -48,9 +48,9 @@ pub struct CreateModelSpecRequest {
     /// Label schema version the spec targets (defaults to the first version).
     #[serde(default = "default_schema_version")]
     pub label_schema_version: SchemaVersion,
-    /// Free-form authoring metadata (notes, tuning intent). Defaults to `{}`.
-    #[serde(default)]
-    pub spec_json: serde_json::Value,
+    /// Closed, human-authored research thesis. This cannot carry executable
+    /// parameters or arbitrary metadata keys.
+    pub thesis: ModelSpecThesis,
     /// Ordered raw-input contract. This field is mandatory: an empty contract,
     /// unknown feature, duplicate, or encoded/synthetic name is rejected.
     pub input_contract: ModelInputContract,
@@ -73,35 +73,41 @@ const fn default_feature_schema_version() -> SchemaVersion {
 /// the operator picks a spec before planning a dataset or training a version).
 #[derive(Debug, Clone, Serialize)]
 pub struct QuantModelSpecView {
-    pub model_spec_id: String,
+    pub model_spec_id: ModelSpecId,
     pub name: String,
-    pub model_family: String,
+    pub model_family: ModelFamily,
     pub prediction_horizon_secs: i64,
     pub feature_schema_version: SchemaVersion,
     pub label_schema_version: SchemaVersion,
-    pub spec_json: serde_json::Value,
+    pub thesis: ModelSpecThesis,
     pub input_contract: ModelInputContract,
     pub training_contract: ModelTrainingContract,
-    pub status: String,
+    pub definition_hash: ContentHash,
+    pub created_by_user_id: Option<UserId>,
+    pub created_by_label: String,
+    pub created_by_role: Option<RoleCode>,
+    pub reason: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
-    pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
 impl From<ModelSpecInfo> for QuantModelSpecView {
     fn from(info: ModelSpecInfo) -> Self {
         Self {
-            model_spec_id: info.model_spec_id.to_string(),
+            model_spec_id: info.model_spec_id,
             name: info.name,
-            model_family: info.model_family.as_str().to_owned(),
+            model_family: info.model_family,
             prediction_horizon_secs: info.prediction_horizon_secs,
             feature_schema_version: info.feature_schema_version,
             label_schema_version: info.label_schema_version,
-            spec_json: info.spec_json,
+            thesis: info.thesis,
             input_contract: info.input_contract,
             training_contract: info.training_contract,
-            status: info.status.as_str().to_owned(),
+            definition_hash: info.definition_hash,
+            created_by_user_id: info.created_by_user_id,
+            created_by_label: info.created_by_label,
+            created_by_role: info.created_by_role,
+            reason: info.reason,
             created_at: info.created_at,
-            updated_at: info.updated_at,
         }
     }
 }
@@ -111,8 +117,6 @@ impl From<ModelSpecInfo> for QuantModelSpecView {
 pub struct ModelSpecListQuery {
     /// Narrow by model family (Buy ranker, exit scorer, classical, …).
     pub model_family: Option<ModelFamily>,
-    /// Narrow by publication lifecycle (`draft`/`published`/`retired`/…).
-    pub status: Option<PublicationStatus>,
     #[normalize_page]
     #[serde(flatten)]
     pub page: PageRequest,
@@ -159,6 +163,11 @@ mod tests {
                 "target_label_name": "settlement_outcome",
                 "target_label_horizon_secs": 0,
                 "validation_folds": 3
+            },
+            "thesis": {
+                "summary": "Typed input model",
+                "hypothesis": "Governed raw inputs predict the declared target",
+                "limitations": ["Only valid for the frozen Polymarket research contract"]
             },
             "reason": "author governed spec"
         })

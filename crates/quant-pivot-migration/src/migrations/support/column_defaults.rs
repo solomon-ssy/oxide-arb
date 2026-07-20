@@ -305,16 +305,6 @@ const COLUMN_DEFAULTS: &[ColumnDefaultSpec] = &[
     },
     ColumnDefaultSpec {
         table: "quant_domain_source_expectation",
-        column: "affected_market_ids",
-        value: DefaultValue::PostgresLiteral("'[]'::jsonb"),
-    },
-    ColumnDefaultSpec {
-        table: "quant_domain_source_expectation",
-        column: "affected_profile_ids",
-        value: DefaultValue::PostgresLiteral("'[]'::jsonb"),
-    },
-    ColumnDefaultSpec {
-        table: "quant_domain_source_expectation",
         column: "created_at",
         value: DefaultValue::CurrentTimestamp,
     },
@@ -491,11 +481,6 @@ const COLUMN_DEFAULTS: &[ColumnDefaultSpec] = &[
     ColumnDefaultSpec {
         table: "quant_model_spec",
         column: "created_at",
-        value: DefaultValue::StatementTimestamp,
-    },
-    ColumnDefaultSpec {
-        table: "quant_model_spec",
-        column: "updated_at",
         value: DefaultValue::StatementTimestamp,
     },
     ColumnDefaultSpec {

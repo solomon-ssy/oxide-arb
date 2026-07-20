@@ -16,9 +16,16 @@
 //! the harshest multiplier, and a calibrated multiplier is **never** more
 //! optimistic than the governed baseline it refines.
 
-use quant_pivot_models::enums::quant::DataQualityStatus;
+use quant_pivot_models::{
+    enums::quant::DataQualityStatus,
+    types::calibration::{
+        DataQualityStratumFit, HorizonCalibrationBucket, HorizonStratumFit,
+        LiquidityCalibrationBucket, LiquidityStratumFit,
+        SCORE_MULTIPLIER_CALIBRATION_METHODOLOGY_VERSION, ScoreMultiplierCalibrationReport,
+        SubstitutionCalibrationBucket, SubstitutionStratumFit,
+    },
+};
 use rust_decimal::Decimal;
-use serde::{Deserialize, Serialize};
 
 use crate::{
     features::NullReason,
@@ -55,35 +62,6 @@ pub struct CalibrationSample {
 /// Minimum samples in a bucket / stratum for it to inform calibration.
 const MIN_BUCKET_SAMPLES: usize = 3;
 
-/// One calibrated stratum's provenance (sample count + mean realized return),
-/// emitted into the run's `metrics_json` for auditability.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct StratumFit {
-    /// Human-readable stratum label (e.g. `"fresh"`, `"liquidity>=10000"`).
-    pub label: String,
-    /// Samples in the stratum.
-    pub sample_count: u64,
-    /// Mean realized return (bps) in the stratum.
-    /// Mean realized return when the stratum had samples. `None` is an explicit
-    /// absence, never a fabricated zero-return observation.
-    pub mean_realized_bps: Option<Decimal>,
-}
-
-/// Stratified calibration provenance report (serialized into `metrics_json`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CalibrationReport {
-    /// Total realized samples the calibration consumed.
-    pub total_samples: u64,
-    /// Per data-quality stratum fit.
-    pub data_quality_strata: Vec<StratumFit>,
-    /// Per liquidity-tier stratum fit.
-    pub liquidity_strata: Vec<StratumFit>,
-    /// Per horizon-bucket stratum fit.
-    pub horizon_strata: Vec<StratumFit>,
-    /// Per substitution-reason stratum fit (plus the clean baseline).
-    pub substitution_strata: Vec<StratumFit>,
-}
-
 /// Multiplier calibration of a weighted artifact (score multipliers + substitution rules).
 ///
 /// Does **not** touch `return_model` (Phase 11.3 §5 — that is a separate,
@@ -95,8 +73,8 @@ pub struct CalibrationResult {
     pub multipliers: ScoreMultiplierSpec,
     /// Tightened governed substitution confidence penalties.
     pub substitution_rules: SubstitutionConfidenceRules,
-    /// Stratified provenance for the run's `metrics_json`.
-    pub report: CalibrationReport,
+    /// Immutable stratified provenance persisted on the derived model version.
+    pub report: ScoreMultiplierCalibrationReport,
 }
 
 /// Tighten a weighted artifact's governed score multipliers + substitution
@@ -129,7 +107,9 @@ pub fn calibrate_weighted_artifact(
             horizon,
         },
         substitution_rules,
-        report: CalibrationReport {
+        report: ScoreMultiplierCalibrationReport {
+            methodology_version: SCORE_MULTIPLIER_CALIBRATION_METHODOLOGY_VERSION,
+            minimum_stratum_samples: MIN_BUCKET_SAMPLES as u64,
             total_samples: samples.len() as u64,
             data_quality_strata,
             liquidity_strata,
@@ -155,7 +135,7 @@ pub fn calibrate_score_multipliers(
 fn calibrate_data_quality(
     samples: &[CalibrationSample],
     baseline: &DataQualityMultipliers,
-) -> (DataQualityMultipliers, Vec<StratumFit>) {
+) -> (DataQualityMultipliers, Vec<DataQualityStratumFit>) {
     let strata = [
         DataQualityStatus::Fresh,
         DataQualityStatus::Acceptable,
@@ -171,8 +151,8 @@ fn calibrate_data_quality(
     let fits = strata
         .iter()
         .zip(&means)
-        .map(|(status, mean)| StratumFit {
-            label: status.as_str().to_owned(),
+        .map(|(status, mean)| DataQualityStratumFit {
+            status: *status,
             sample_count: count_in(samples.iter().filter(|s| s.data_quality == *status)),
             mean_realized_bps: *mean,
         })
@@ -193,7 +173,7 @@ fn calibrate_data_quality(
 pub fn calibrate_liquidity_multipliers(
     samples: &[CalibrationSample],
     baseline: &LiquidityMultipliers,
-) -> (LiquidityMultipliers, Vec<StratumFit>) {
+) -> (LiquidityMultipliers, Vec<LiquidityStratumFit>) {
     // Tier means (index-aligned with `baseline.tiers`) plus the floor stratum
     // (unknown / below-lowest-tier liquidity).
     let tier_means: Vec<Option<Decimal>> =
@@ -228,22 +208,24 @@ pub fn calibrate_liquidity_multipliers(
         floor: fail_closed(baseline.floor, floor_mean, best),
     };
 
-    let mut fits: Vec<StratumFit> =
+    let mut fits: Vec<LiquidityStratumFit> =
         baseline
             .tiers
             .iter()
             .zip(&tier_means)
             .enumerate()
-            .map(|(idx, (tier, mean))| StratumFit {
-                label: format!("liquidity>={}", tier.min_liquidity_usd),
+            .map(|(idx, (tier, mean))| LiquidityStratumFit {
+                bucket: LiquidityCalibrationBucket::Tier {
+                    min_liquidity_usd: tier.min_liquidity_usd,
+                },
                 sample_count: count_in(samples.iter().filter(|s| {
                     liquidity_tier_index(&baseline.tiers, s.liquidity_usd) == Some(idx)
                 })),
                 mean_realized_bps: *mean,
             })
             .collect();
-    fits.push(StratumFit {
-        label: "liquidity_floor".to_owned(),
+    fits.push(LiquidityStratumFit {
+        bucket: LiquidityCalibrationBucket::Floor,
         sample_count: count_in(
             samples
                 .iter()
@@ -260,22 +242,22 @@ pub fn calibrate_liquidity_multipliers(
 pub fn calibrate_horizon_multipliers(
     samples: &[CalibrationSample],
     baseline: &HorizonMultipliers,
-) -> (HorizonMultipliers, Vec<StratumFit>) {
+) -> (HorizonMultipliers, Vec<HorizonStratumFit>) {
     let bucket_of = |s: &CalibrationSample| horizon_bucket(s, baseline);
     let too_soon = stratum_mean(
         samples
             .iter()
-            .filter(|s| bucket_of(s) == HorizonBucket::TooSoon),
+            .filter(|s| bucket_of(s) == HorizonCalibrationBucket::TooSoon),
     );
     let in_window = stratum_mean(
         samples
             .iter()
-            .filter(|s| bucket_of(s) == HorizonBucket::InWindow),
+            .filter(|s| bucket_of(s) == HorizonCalibrationBucket::InWindow),
     );
     let too_late = stratum_mean(
         samples
             .iter()
-            .filter(|s| bucket_of(s) == HorizonBucket::TooLate),
+            .filter(|s| bucket_of(s) == HorizonCalibrationBucket::TooLate),
     );
 
     let best = best_of(&[too_soon, in_window, too_late]);
@@ -287,24 +269,9 @@ pub fn calibrate_horizon_multipliers(
         max_ratio: baseline.max_ratio,
     };
     let fits = vec![
-        horizon_fit(
-            "horizon_too_soon",
-            samples,
-            baseline,
-            HorizonBucket::TooSoon,
-        ),
-        horizon_fit(
-            "horizon_in_window",
-            samples,
-            baseline,
-            HorizonBucket::InWindow,
-        ),
-        horizon_fit(
-            "horizon_too_late",
-            samples,
-            baseline,
-            HorizonBucket::TooLate,
-        ),
+        horizon_fit(samples, baseline, HorizonCalibrationBucket::TooSoon),
+        horizon_fit(samples, baseline, HorizonCalibrationBucket::InWindow),
+        horizon_fit(samples, baseline, HorizonCalibrationBucket::TooLate),
     ];
     (calibrated, fits)
 }
@@ -318,7 +285,7 @@ pub fn calibrate_horizon_multipliers(
 pub fn calibrate_substitution_rules(
     samples: &[CalibrationSample],
     baseline: &SubstitutionConfidenceRules,
-) -> (SubstitutionConfidenceRules, Vec<StratumFit>) {
+) -> (SubstitutionConfidenceRules, Vec<SubstitutionStratumFit>) {
     let reasons = [
         NullReason::SourceUnavailable,
         NullReason::StaleBeyondPolicy,
@@ -367,17 +334,17 @@ pub fn calibrate_substitution_rules(
         ),
         linkage_unresolved: fail_closed(baseline.linkage_unresolved, reason_means[10], best),
     };
-    let mut fits: Vec<StratumFit> = reasons
+    let mut fits: Vec<SubstitutionStratumFit> = reasons
         .iter()
         .zip(&reason_means)
-        .map(|(reason, mean)| StratumFit {
-            label: format!("substitution_{}", reason_label(*reason)),
+        .map(|(reason, mean)| SubstitutionStratumFit {
+            bucket: SubstitutionCalibrationBucket::Reason { reason: *reason },
             sample_count: count_in(samples.iter().filter(|s| has_reason(s, *reason))),
             mean_realized_bps: *mean,
         })
         .collect();
-    fits.push(StratumFit {
-        label: "substitution_none".to_owned(),
+    fits.push(SubstitutionStratumFit {
+        bucket: SubstitutionCalibrationBucket::Clean,
         sample_count: count_in(samples.iter().filter(|s| s.substitution_reasons.is_empty())),
         mean_realized_bps: clean,
     });
@@ -385,47 +352,39 @@ pub fn calibrate_substitution_rules(
 }
 
 /// A market's horizon stratum relative to the model's prediction horizon.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum HorizonBucket {
-    /// Resolves sooner than `min_ratio × prediction_horizon`.
-    TooSoon,
-    /// Resolves within `[min_ratio, max_ratio] × prediction_horizon` (or unknown).
-    InWindow,
-    /// Resolves later than `max_ratio × prediction_horizon`.
-    TooLate,
-}
-
 /// Classify a sample into its horizon bucket (unknown horizon ⇒ in-window, the
 /// same rule [`HorizonMultipliers::multiplier_for`] applies online).
-fn horizon_bucket(sample: &CalibrationSample, baseline: &HorizonMultipliers) -> HorizonBucket {
+fn horizon_bucket(
+    sample: &CalibrationSample,
+    baseline: &HorizonMultipliers,
+) -> HorizonCalibrationBucket {
     let (Some(ttr), true) = (
         sample.time_to_resolution_secs,
         sample.prediction_horizon_secs > 0,
     ) else {
-        return HorizonBucket::InWindow;
+        return HorizonCalibrationBucket::InWindow;
     };
     let ratio = Decimal::from(ttr) / Decimal::from(sample.prediction_horizon_secs);
     if ratio < baseline.min_ratio {
-        HorizonBucket::TooSoon
+        HorizonCalibrationBucket::TooSoon
     } else if ratio > baseline.max_ratio {
-        HorizonBucket::TooLate
+        HorizonCalibrationBucket::TooLate
     } else {
-        HorizonBucket::InWindow
+        HorizonCalibrationBucket::InWindow
     }
 }
 
 /// One horizon-bucket provenance fit.
 fn horizon_fit(
-    label: &str,
     samples: &[CalibrationSample],
     baseline: &HorizonMultipliers,
-    bucket: HorizonBucket,
-) -> StratumFit {
+    bucket: HorizonCalibrationBucket,
+) -> HorizonStratumFit {
     let subset = samples
         .iter()
         .filter(|s| horizon_bucket(s, baseline) == bucket);
-    StratumFit {
-        label: label.to_owned(),
+    HorizonStratumFit {
+        bucket,
         sample_count: count_in(
             samples
                 .iter()
@@ -450,23 +409,6 @@ fn liquidity_tier_index(tiers: &[LiquidityTier], liquidity: Option<Decimal>) -> 
 /// Whether a sample carried a given substitution reason.
 fn has_reason(sample: &CalibrationSample, reason: NullReason) -> bool {
     sample.substitution_reasons.contains(&reason)
-}
-
-/// Stable wire label for a substitution reason (provenance only).
-const fn reason_label(reason: NullReason) -> &'static str {
-    match reason {
-        NullReason::SourceUnavailable => "source_unavailable",
-        NullReason::StaleBeyondPolicy => "stale_beyond_policy",
-        NullReason::OutOfValidRange => "out_of_valid_range",
-        NullReason::InsufficientHistory => "insufficient_history",
-        NullReason::NotApplicable => "not_applicable",
-        NullReason::LegBookMissing => "leg_book_missing",
-        NullReason::TradeTapeUnavailable => "trade_tape_unavailable",
-        NullReason::InsufficientTradeTape => "insufficient_trade_tape",
-        NullReason::InsufficientRoleCoverage => "insufficient_role_coverage",
-        NullReason::DomainSourceUnavailable => "domain_source_unavailable",
-        NullReason::LinkageUnresolved => "linkage_unresolved",
-    }
 }
 
 /// Fail-closed multiplier: the calibrated value is the baseline tightened toward
@@ -512,7 +454,9 @@ mod tests {
         CalibrationSample, calibrate_liquidity_multipliers, calibrate_score_multipliers,
         calibrate_substitution_rules,
     };
-    use quant_pivot_models::enums::quant::DataQualityStatus;
+    use quant_pivot_models::{
+        enums::quant::DataQualityStatus, types::calibration::SubstitutionCalibrationBucket,
+    };
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
 
@@ -606,7 +550,10 @@ mod tests {
         );
         // Unobserved reasons keep the conservative baseline.
         assert_eq!(calibrated.leg_book_missing, baseline.leg_book_missing);
-        assert!(fits.iter().any(|f| f.label == "substitution_none"));
+        assert!(
+            fits.iter()
+                .any(|fit| fit.bucket == SubstitutionCalibrationBucket::Clean)
+        );
     }
 
     /// The liquidity tiers are stratified by realized performance; deeper books

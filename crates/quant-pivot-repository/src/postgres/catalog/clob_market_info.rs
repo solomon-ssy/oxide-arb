@@ -98,7 +98,7 @@ impl ClobMarketInfoRepository for PgClobMarketInfoRepository {
             effective_at: Set(observation.effective_at),
             available_at: Set(observation.available_at),
             payload_hash: Set(observation.payload_hash),
-            raw_payload: Set(observation.raw_payload),
+            raw_payload: Set(observation.raw_payload.into()),
             created_at: sea_orm::ActiveValue::NotSet,
         };
         clob_market_info_version::Entity::insert(active)
@@ -297,7 +297,7 @@ fn model_to_domain(
         effective_at: model.effective_at,
         available_at: model.available_at,
         payload_hash: model.payload_hash,
-        raw_payload: model.raw_payload,
+        raw_payload: model.raw_payload.into_inner(),
     })
 }
 

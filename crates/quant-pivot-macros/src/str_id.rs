@@ -208,6 +208,20 @@ fn expand_seaorm(
             }
         }
 
+        impl #impl_generics sea_orm::sea_query::postgres_array::NotU8 for #name #ty_generics #where_clause {}
+
+        impl #impl_generics sea_orm::TryGetableArray for #name #ty_generics #where_clause {
+            fn try_get_by<I: sea_orm::ColIdx>(
+                res: &sea_orm::QueryResult,
+                index: I,
+            ) -> ::std::result::Result<Vec<Self>, sea_orm::TryGetError> {
+                Ok(<Vec<String> as sea_orm::TryGetable>::try_get_by(res, index)?
+                    .into_iter()
+                    .map(Self::from)
+                    .collect())
+            }
+        }
+
         impl #impl_generics sea_orm::IntoActiveValue<#name #ty_generics> for #name #ty_generics #where_clause {
             #[inline]
             fn into_active_value(self) -> sea_orm::ActiveValue<#name #ty_generics> {

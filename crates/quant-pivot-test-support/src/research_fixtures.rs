@@ -52,7 +52,7 @@ fn source_hash(example: &TrainingExample, role: &str) -> ContentHash {
     .expect("canonical decision-capture source hash")
 }
 
-/// Bind a complete v2 capture to an already frozen training example.
+/// Bind a complete V1 capture to an already frozen training example.
 ///
 /// All source clocks are derived from the example's `DecisionBoundary`; the
 /// fixture never subtracts knowledge lag independently or invents a second
@@ -202,7 +202,7 @@ async fn persist_source_object(
 }
 
 /// Persist the immutable market-info and canonical-L2 inputs consumed by
-/// backtest/CPCV integration tests, then seal a canonical V2 manifest.
+/// backtest/CPCV integration tests, then seal a canonical V1 manifest.
 pub struct ReplayableSourceSliceFixture {
     pub profile_ref: ResearchProfileRef,
     pub research_program_hash: ContentHash,
@@ -417,7 +417,7 @@ fn replayable_manifest(
             ))?,
         },
         reader_contract_version: "source-slice-reader-v2".to_owned(),
-        schema_contract_version: "source-slice-schema-v2".to_owned(),
+        schema_contract_version: "source-slice-schema-v1".to_owned(),
         decision_policy_snapshot_id: fixture.decision_policy_snapshot_id,
         runtime_config_hash: fixture.runtime_config_hash,
         dataset_format_version: DATASET_ARTIFACT_FORMAT_VERSION,

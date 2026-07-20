@@ -44,7 +44,7 @@ use crate::{
             DOMAIN_WEATHER_NOAA_RESOLUTION_BASIS_RISK, DOMAIN_WEATHER_OBSERVED_EXTREME_HEADROOM,
         },
         value::{
-            FactorDefinitionSpec, FactorDriver, FactorName, FactorOutputKind, RawFactor,
+            FactorDefinitionDocument, FactorDriver, FactorName, FactorOutputKind, RawFactor,
             RawFactorEligibility,
         },
     },
@@ -65,15 +65,22 @@ const SECS_PER_DAY: f64 = 86_400.0;
 /// by governance/introspection; the engine merges [`Self::all`] into its
 /// column set (per-market applicability is enforced inside the computers).
 pub struct DomainFactorRegistry {
-    factors: Vec<(DomainFamily, FactorDefinitionSpec, Arc<dyn FactorComputer>)>,
+    factors: Vec<(
+        DomainFamily,
+        FactorDefinitionDocument,
+        Arc<dyn FactorComputer>,
+    )>,
 }
 
 impl DomainFactorRegistry {
     /// Register every enabled vertical's factors.
     #[must_use]
     pub fn build(domain: &DomainConfig) -> Self {
-        let mut factors: Vec<(DomainFamily, FactorDefinitionSpec, Arc<dyn FactorComputer>)> =
-            Vec::new();
+        let mut factors: Vec<(
+            DomainFamily,
+            FactorDefinitionDocument,
+            Arc<dyn FactorComputer>,
+        )> = Vec::new();
         if domain.family_enabled(DomainFamily::Crypto) {
             for (spec, computer) in crypto_domain_factors() {
                 factors.push((DomainFamily::Crypto, spec, computer));
@@ -93,7 +100,11 @@ impl DomainFactorRegistry {
     pub fn for_category(
         &self,
         category: MarketCategory,
-    ) -> Vec<&(DomainFamily, FactorDefinitionSpec, Arc<dyn FactorComputer>)> {
+    ) -> Vec<&(
+        DomainFamily,
+        FactorDefinitionDocument,
+        Arc<dyn FactorComputer>,
+    )> {
         let Some(family) = DomainFamily::for_category(category) else {
             return Vec::new();
         };
@@ -105,7 +116,7 @@ impl DomainFactorRegistry {
 
     /// Every registered `(spec, computer)` pair (engine column merge).
     #[must_use]
-    pub fn all(&self) -> Vec<(FactorDefinitionSpec, Arc<dyn FactorComputer>)> {
+    pub fn all(&self) -> Vec<(FactorDefinitionDocument, Arc<dyn FactorComputer>)> {
         self.factors
             .iter()
             .map(|(_, spec, computer)| (spec.clone(), Arc::clone(computer)))
@@ -121,7 +132,7 @@ impl DomainFactorRegistry {
 
 /// The crypto vertical's `(spec, computer)` pairs.
 #[must_use]
-pub fn crypto_domain_factors() -> Vec<(FactorDefinitionSpec, Arc<dyn FactorComputer>)> {
+pub fn crypto_domain_factors() -> Vec<(FactorDefinitionDocument, Arc<dyn FactorComputer>)> {
     vec![strike_pressure_factor(), beta_regime_factor()]
 }
 
@@ -129,7 +140,7 @@ pub fn crypto_domain_factors() -> Vec<(FactorDefinitionSpec, Arc<dyn FactorCompu
 /// feature with the same stable semantic name; category routing prevents
 /// cross-vertical normalization inputs.
 #[must_use]
-pub fn weather_domain_factors() -> Vec<(FactorDefinitionSpec, Arc<dyn FactorComputer>)> {
+pub fn weather_domain_factors() -> Vec<(FactorDefinitionDocument, Arc<dyn FactorComputer>)> {
     [
         (
             DOMAIN_WEATHER_ENSEMBLE_BIN_PROBABILITY,
@@ -154,7 +165,7 @@ pub fn weather_domain_factors() -> Vec<(FactorDefinitionSpec, Arc<dyn FactorComp
     ]
     .into_iter()
     .map(|(name, feature, direction)| {
-        let spec = FactorDefinitionSpec {
+        let spec = FactorDefinitionDocument {
             name,
             family: FactorFamily::DomainWeather,
             input_features: vec![feature.clone()],
@@ -178,8 +189,8 @@ fn crypto_spec(
     name: &FactorName,
     input_features: Vec<FeatureName>,
     direction: FactorDirection,
-) -> FactorDefinitionSpec {
-    FactorDefinitionSpec {
+) -> FactorDefinitionDocument {
+    FactorDefinitionDocument {
         name: name.clone(),
         family: FactorFamily::DomainCrypto,
         input_features,
@@ -194,7 +205,7 @@ fn crypto_spec(
 /// `domain_crypto_strike_pressure`: the strike distance scaled by settlement
 /// urgency — the same signed distance is a stronger YES/NO statement the
 /// closer the observation instant is.
-fn strike_pressure_factor() -> (FactorDefinitionSpec, Arc<dyn FactorComputer>) {
+fn strike_pressure_factor() -> (FactorDefinitionDocument, Arc<dyn FactorComputer>) {
     let spec = crypto_spec(
         &DOMAIN_CRYPTO_STRIKE_PRESSURE,
         vec![
@@ -210,7 +221,7 @@ fn strike_pressure_factor() -> (FactorDefinitionSpec, Arc<dyn FactorComputer>) {
 /// `domain_crypto_beta_regime`: the underlying's volatility-normalized trend
 /// (momentum per unit realized vol) — the regime the market's crypto subject
 /// is currently trading in.
-fn beta_regime_factor() -> (FactorDefinitionSpec, Arc<dyn FactorComputer>) {
+fn beta_regime_factor() -> (FactorDefinitionDocument, Arc<dyn FactorComputer>) {
     let spec = crypto_spec(
         &DOMAIN_CRYPTO_BETA_REGIME,
         vec![
@@ -272,7 +283,7 @@ fn read_input(features: &FeatureVector, name: &FeatureName) -> InputState {
 
 /// Assemble a raw domain factor (shared by both computers).
 fn raw(
-    spec: &FactorDefinitionSpec,
+    spec: &FactorDefinitionDocument,
     raw_value: Option<Decimal>,
     eligibility: RawFactorEligibility,
     headline: String,
@@ -298,7 +309,7 @@ fn raw(
 }
 
 /// The structurally-not-applicable cell for markets outside the vertical.
-fn not_applicable(spec: &FactorDefinitionSpec) -> RawFactor {
+fn not_applicable(spec: &FactorDefinitionDocument) -> RawFactor {
     raw(
         spec,
         None,
@@ -310,7 +321,7 @@ fn not_applicable(spec: &FactorDefinitionSpec) -> RawFactor {
 
 /// The domain-missing cell: category-mapped but inputs absent (unresolved
 /// linkage / source gap). Never a silent zero.
-fn domain_missing(spec: &FactorDefinitionSpec) -> RawFactor {
+fn domain_missing(spec: &FactorDefinitionDocument) -> RawFactor {
     raw(
         spec,
         None,
@@ -321,7 +332,7 @@ fn domain_missing(spec: &FactorDefinitionSpec) -> RawFactor {
 }
 
 struct WeatherIdentityFactor {
-    spec: FactorDefinitionSpec,
+    spec: FactorDefinitionDocument,
     feature: FeatureName,
 }
 
@@ -330,7 +341,7 @@ impl FactorComputer for WeatherIdentityFactor {
         provisional_factor_definition_id(self.spec.name.as_str())
     }
 
-    fn spec(&self) -> &FactorDefinitionSpec {
+    fn spec(&self) -> &FactorDefinitionDocument {
         &self.spec
     }
 
@@ -356,7 +367,7 @@ impl FactorComputer for WeatherIdentityFactor {
 }
 
 struct StrikePressureFactor {
-    spec: FactorDefinitionSpec,
+    spec: FactorDefinitionDocument,
 }
 
 impl FactorComputer for StrikePressureFactor {
@@ -364,7 +375,7 @@ impl FactorComputer for StrikePressureFactor {
         provisional_factor_definition_id(self.spec.name.as_str())
     }
 
-    fn spec(&self) -> &FactorDefinitionSpec {
+    fn spec(&self) -> &FactorDefinitionDocument {
         &self.spec
     }
 
@@ -420,7 +431,7 @@ impl FactorComputer for StrikePressureFactor {
 }
 
 struct BetaRegimeFactor {
-    spec: FactorDefinitionSpec,
+    spec: FactorDefinitionDocument,
 }
 
 impl FactorComputer for BetaRegimeFactor {
@@ -428,7 +439,7 @@ impl FactorComputer for BetaRegimeFactor {
         provisional_factor_definition_id(self.spec.name.as_str())
     }
 
-    fn spec(&self) -> &FactorDefinitionSpec {
+    fn spec(&self) -> &FactorDefinitionDocument {
         &self.spec
     }
 

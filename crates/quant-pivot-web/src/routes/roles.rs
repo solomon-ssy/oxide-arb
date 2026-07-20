@@ -119,7 +119,7 @@ pub async fn create(
     let role = state.roles.create(new).await?;
     op_ctx.set_action(OperationCategory::Rbac, "role.create");
     op_ctx.set_resource(ResourceType::Role, role.id.to_string());
-    op_ctx.set_detail(serde_json::json!({ "code": role.code }));
+    op_ctx.set_detail(serde_json::json!({ "code": role.code }))?;
     Ok(WebResponse::ok(role))
 }
 
@@ -176,7 +176,7 @@ pub async fn change_status(
     state.casbin.reload().await?;
     op_ctx.set_action(OperationCategory::Rbac, "role.change_status");
     op_ctx.set_resource(ResourceType::Role, id.to_string());
-    op_ctx.set_detail(serde_json::json!({ "status": status }));
+    op_ctx.set_detail(serde_json::json!({ "status": status }))?;
     Ok(WebResponse::ok(()))
 }
 
@@ -202,7 +202,7 @@ pub async fn set_permissions(
     let permissions = body.into_inner().permissions;
     op_ctx.set_action(OperationCategory::Rbac, "role.assign_permissions");
     op_ctx.set_resource(ResourceType::Role, role_id.to_string());
-    op_ctx.set_detail(serde_json::json!({ "permission_count": permissions.len() }));
+    op_ctx.set_detail(serde_json::json!({ "permission_count": permissions.len() }))?;
     state
         .role_permissions
         .set_permissions_for_role(AssignPermissions {
@@ -237,7 +237,7 @@ pub async fn set_menus(
     let menu_ids = body.into_inner().menu_ids;
     op_ctx.set_action(OperationCategory::Rbac, "role.assign_menus");
     op_ctx.set_resource(ResourceType::Role, role_id.to_string());
-    op_ctx.set_detail(serde_json::json!({ "menu_count": menu_ids.len() }));
+    op_ctx.set_detail(serde_json::json!({ "menu_count": menu_ids.len() }))?;
     state
         .role_menus
         .set_menus_for_role(AssignMenus { role_id, menu_ids })

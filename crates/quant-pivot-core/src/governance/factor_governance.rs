@@ -14,7 +14,7 @@ use quant_pivot_models::{
     types::FactorDefinitionId,
 };
 use quant_pivot_repository::traits::FactorRepository;
-use quant_pivot_research::factors::FactorEngine;
+use quant_pivot_research::factors::{FactorEngine, persistence::factor_definition_to_new};
 
 /// Dependencies for factor-definition governance.
 pub struct FactorGovernanceDeps {
@@ -126,7 +126,8 @@ impl FactorGovernancePort for FactorGovernanceService {
         let mut registered = Vec::new();
         for spec in &engine.factor_set().definitions {
             let identity = engine.definition_identity(&spec.name)?;
-            let definition = spec.try_to_new(command.features.feature_schema_version, &identity)?;
+            let definition =
+                factor_definition_to_new(spec, command.features.feature_schema_version, &identity)?;
             let row = self
                 .deps
                 .factor_repo

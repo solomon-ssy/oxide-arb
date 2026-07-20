@@ -13,7 +13,6 @@
 use chrono::{DateTime, Utc};
 use quant_pivot_macros::NormalizePageQuery;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use uuid::Uuid;
 use validator::Validate;
 
@@ -25,8 +24,8 @@ use crate::{
     enums::quant::{ResearchJobKind, ResearchJobStatus},
     types::{
         DatasetCoverage, DecisionPolicySnapshotId, FeatureParityRunId, ModelSpecId, ModelVersionId,
-        ResearchJobError, ResearchJobId, ResearchJobProgress, TradePolicyArtifactId,
-        TradePolicyValidationRunId, TrainingDatasetId,
+        ResearchJobError, ResearchJobId, ResearchJobParams, ResearchJobProgress,
+        TradePolicyArtifactId, TradePolicyValidationRunId, TrainingDatasetId, UserId,
     },
 };
 
@@ -34,40 +33,41 @@ use crate::{
 ///
 /// The Dataset id is assigned once at enqueue and survives lease recovery and
 /// explicit job retry. It is not accepted from the HTTP fit request.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TradePolicyFitJobParams {
     pub training_dataset_id: TrainingDatasetId,
-    #[serde(flatten)]
     pub request: FitTradePolicyRequest,
 }
 
 /// Frozen governance identity for an independently executed policy validation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TradePolicyValidationJobParams {
     pub validation_run_id: TradePolicyValidationRunId,
     pub artifact_id: TradePolicyArtifactId,
-    pub actor_id: Uuid,
+    pub actor_id: UserId,
     pub reason: String,
 }
 
 /// Frozen params for a deterministic feature-parity replay job.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FeatureParityJobParams {
     pub parity_run_id: FeatureParityRunId,
     /// Frozen writer grace period. It is `max(10 minutes, 2 × the longest
     /// enabled report cadence)` at enqueue time and starts at first pending
     /// observation, never at queue creation.
     pub materialization_timeout_secs: u64,
-    #[serde(flatten)]
     pub request: RunFullFeatureParityRequest,
 }
 
 /// Internal durable envelope for model training. The public request contains
 /// only dataset id + reason; the worker-owned result id is assigned at enqueue.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ModelTrainJobParams {
     pub model_version_id: ModelVersionId,
-    #[serde(flatten)]
     pub request: TrainModelRequest,
 }
 
@@ -75,19 +75,19 @@ pub struct ModelTrainJobParams {
 ///
 /// Dataset-build and model-train jobs freeze their request bodies directly;
 /// backtest additionally needs the model version taken from the route path.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BacktestJobParams {
     pub model_version_id: ModelVersionId,
-    #[serde(flatten)]
     pub request: RunBacktestRequest,
 }
 
 /// Frozen params for a `cpcv_backtest` job (Phase 11.5): the path model
 /// version + the CPCV/trial-grid request body.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CpcvBacktestJobParams {
     pub model_version_id: ModelVersionId,
-    #[serde(flatten)]
     pub request: RunCpcvBacktestRequest,
 }
 
@@ -100,7 +100,7 @@ pub struct ResearchJobView {
     pub model_spec_id: Option<ModelSpecId>,
     pub decision_policy_snapshot_id: Option<DecisionPolicySnapshotId>,
     /// Frozen request body (for the detail drawer / retry preview).
-    pub params: Value,
+    pub params: ResearchJobParams,
     /// Live progress snapshot (phase + processed/total), when the run has ticked.
     pub progress: Option<ResearchJobProgress>,
     /// Completion fraction in `[0, 1]`, when a positive total is known.

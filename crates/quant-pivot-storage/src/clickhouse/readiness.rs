@@ -6,7 +6,7 @@ use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::types::{ResearchSourceBinding, ResearchSourceStorageKind};
 use serde::Deserialize;
 
-use crate::clickhouse::ClickHousePool;
+use crate::clickhouse::pool::ClickHousePool;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawHistoryObservation {

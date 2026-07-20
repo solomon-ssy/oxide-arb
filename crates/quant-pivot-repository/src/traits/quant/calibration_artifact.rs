@@ -4,9 +4,8 @@ use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{
         CalibrationArtifactInfo, CalibrationArtifactListQuery, NewCalibrationArtifact, Paginated,
-        PublishedWeatherStationLeadBias,
     },
-    types::{CalibrationArtifactId, ContentHash},
+    types::{CalibrationArtifactId, ContentHash, calibration::PublishedWeatherStationLeadBias},
 };
 
 /// Persistence port for the append-only, content-addressed calibration-

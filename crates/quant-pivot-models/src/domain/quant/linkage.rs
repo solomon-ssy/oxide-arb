@@ -23,8 +23,8 @@
 //! axis.
 
 use chrono::{DateTime, Utc};
-use quant_pivot_error::{QuantResult, governance::GovernanceError, hashing::CanonicalDigestError};
-use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
+use quant_pivot_error::{QuantResult, hashing::CanonicalDigestError};
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromJsonQueryResult};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -91,7 +91,7 @@ pub enum PriceBoundaryInclusion {
 
 /// How a crypto market's question compares the underlying price to its strike.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(deny_unknown_fields, tag = "kind", rename_all = "snake_case")]
 pub enum PriceComparator {
     /// Resolves YES when the underlying settles strictly above the strike.
     GreaterThan,
@@ -122,7 +122,7 @@ pub enum PriceComparator {
 /// (`domain.crypto.basis_vs_resolution_source`). Label truth is **always** the
 /// persisted `market_resolution_event` — never any oracle quote.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(deny_unknown_fields, tag = "kind", rename_all = "snake_case")]
 pub enum ResolutionOracle {
     /// Chainlink Data Streams feed (short-period up/down markets; the rules
     /// text carries a literal `data.chain.link/streams/{feed}` anchor).
@@ -145,6 +145,7 @@ pub enum ResolutionOracle {
 /// The extracted subject of a crypto market: which underlying, compared how,
 /// against what, observed when, settled by which oracle.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CryptoSubject {
     /// Base asset ticker (e.g. `BTC`).
     pub asset: CryptoAsset,
@@ -166,6 +167,7 @@ pub struct CryptoSubject {
 /// daily-temperature event. The outcome band is deliberately absent so all
 /// siblings hash to the same decision-group id.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WeatherDecisionGroupKey {
     /// Whether the contract settles against the local-day maximum or minimum.
     pub temperature_statistic: WeatherTemperatureStatistic,
@@ -202,6 +204,7 @@ impl WeatherDecisionGroupKey {
 
 /// Frozen airport daily-temperature contract subject.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WeatherSubject {
     /// Stable group identity shared by all sibling markets.
     pub decision_group_id: ContentHash,
@@ -223,6 +226,7 @@ impl WeatherSubject {
 
 /// One exact source/instrument binding frozen into a linkage revision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ResolvedSourceBinding {
     pub role: LinkageSourceRole,
     pub source_id: DomainSourceId,
@@ -238,7 +242,7 @@ pub struct ResolvedSourceBinding {
 /// Additive: sports / politics / weather / geopolitics verticals extend this
 /// enum without touching the crypto path.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "family", rename_all = "snake_case")]
+#[serde(deny_unknown_fields, tag = "family", rename_all = "snake_case")]
 pub enum MarketSubject {
     /// Crypto underlying-price subject.
     Crypto(CryptoSubject),
@@ -332,6 +336,7 @@ pub struct ManualEvidenceInput {
 /// The anti-hallucination contract: a candidate whose field cannot be anchored to
 /// a literal span is rejected, regardless of which tier produced it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GroundingSpan {
     /// Dotted subject field path (e.g. `asset`, `strike`, `resolution_oracle`).
     pub subject_field: String,
@@ -349,6 +354,7 @@ pub struct GroundingSpan {
 
 /// The full field → source-span mapping for one accepted subject.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GroundingProof {
     /// One span per grounded subject field.
     pub spans: Vec<GroundingSpan>,
@@ -361,6 +367,7 @@ pub struct GroundingProof {
 /// audit trail (never discarded, unlike the pre-remediation stub that dropped
 /// the operator's stated reason and never recorded who acted).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OverrideContext {
     /// Operator-supplied justification (validated non-empty on the wire).
     pub reason: String,
@@ -371,6 +378,7 @@ pub struct OverrideContext {
 /// A validated subject binding: the subject, the feature-source instrument it
 /// joins to, and the grounding proof that anchored every extracted field.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ResolvedBinding {
     /// The extracted, validated subject.
     pub subject: MarketSubject,
@@ -390,8 +398,8 @@ pub struct ResolvedBinding {
 /// Structurally enforces the fail-closed invariant: a binding exists **iff**
 /// the record is resolved — there is no state where a subject floats without
 /// grounding, or an unresolved record carries a half-built subject.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "status", rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
+#[serde(deny_unknown_fields, tag = "status", rename_all = "snake_case")]
 pub enum LinkageOutcome {
     /// A validated binding exists.
     Resolved(Box<ResolvedBinding>),
@@ -423,7 +431,7 @@ pub struct MarketLinkage {
     /// from (immutable provenance, distinct from the two time axes).
     pub metadata_hash: ContentHash,
     /// Capability registry that governed classification and source bindings.
-    /// Historical rows created before Runtime v18 remain readable as `None`
+    /// Rows without an explicit override remain readable as `None`
     /// but are never considered current by the resolver.
     pub capability_registry_hash: Option<ContentHash>,
     /// Content address over the full outcome (idempotent-write key).
@@ -516,7 +524,7 @@ pub struct MarketLinkageInfo {
     pub resolver_tier: ResolverTier,
     pub resolver_version: ResolverVersion,
     pub confidence: Probability,
-    pub outcome: serde_json::Value,
+    pub outcome: LinkageOutcome,
     pub metadata_hash: ContentHash,
     pub capability_registry_hash: Option<ContentHash>,
     pub content_hash: ContentHash,
@@ -564,7 +572,7 @@ pub struct NewMarketLinkage {
     pub resolver_tier: ResolverTier,
     pub resolver_version: ResolverVersion,
     pub confidence: Probability,
-    pub outcome: serde_json::Value,
+    pub outcome: LinkageOutcome,
     pub metadata_hash: ContentHash,
     pub capability_registry_hash: Option<ContentHash>,
     pub content_hash: ContentHash,
@@ -644,12 +652,6 @@ impl NewMarketLinkage {
         let override_context = binding.and_then(|binding| binding.override_context.as_ref());
         let override_reason = override_context.map(|context| context.reason.clone());
         let override_actor = override_context.map(|context| context.actor.clone());
-        let outcome = serde_json::to_value(outcome).map_err(|error| {
-            GovernanceError::LinkagePayloadSerialization {
-                detail: error.to_string(),
-            }
-        })?;
-
         Ok(Self {
             linkage_id: MarketLinkageId::from_v7(),
             market_id,
@@ -682,17 +684,14 @@ impl MarketLinkageInfo {
         self.created_at
     }
 
-    /// Decode the ledger row back into the domain record.
-    ///
-    /// # Errors
-    ///
-    /// Propagates outcome-payload deserialization failures.
-    pub fn into_domain(self) -> Result<MarketLinkage, serde_json::Error> {
-        Ok(MarketLinkage {
+    /// Convert the already-decoded ledger row into the domain record.
+    #[must_use]
+    pub fn into_domain(self) -> MarketLinkage {
+        MarketLinkage {
             linkage_id: self.linkage_id,
             market_id: self.market_id,
             domain_family: self.domain_family,
-            outcome: serde_json::from_value(self.outcome)?,
+            outcome: self.outcome,
             confidence: self.confidence,
             resolver_tier: self.resolver_tier,
             resolver_version: self.resolver_version,
@@ -701,7 +700,7 @@ impl MarketLinkageInfo {
             content_hash: self.content_hash,
             effective_at: self.derived_at,
             available_at: self.created_at,
-        })
+        }
     }
 }
 
@@ -931,5 +930,21 @@ mod tests {
         )
         .expect("hash");
         assert_ne!(a, d, "capability registry must perturb the digest");
+    }
+
+    #[test]
+    fn persisted_linkage_outcome_rejects_unknown_fields_and_tags() {
+        let unknown_field = serde_json::json!({
+            "status": "unresolved",
+            "reason": "no template matched",
+            "unexpected": true
+        });
+        assert!(serde_json::from_value::<LinkageOutcome>(unknown_field).is_err());
+
+        let unknown_tag = serde_json::json!({
+            "status": "partially_resolved",
+            "reason": "unsupported transitional state"
+        });
+        assert!(serde_json::from_value::<LinkageOutcome>(unknown_tag).is_err());
     }
 }

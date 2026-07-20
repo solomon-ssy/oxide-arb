@@ -21,12 +21,24 @@ mod generic;
 mod identity;
 pub mod names;
 mod normalize;
-mod persistence;
+pub mod persistence;
 mod reference;
 mod registry;
 mod structural;
 mod value;
 mod writer;
+
+#[cfg(test)]
+mod test_types {
+    use quant_pivot_models::types;
+
+    pub use types::factor::{FactorExplanation, FactorOutputKind, FactorQualityGate};
+}
+pub(crate) use quant_pivot_models::types::{
+    factor::FactorDefinitionDocument, stable_name::FactorName,
+};
+#[cfg(test)]
+pub(crate) use test_types::{FactorExplanation, FactorOutputKind, FactorQualityGate};
 
 #[cfg(test)]
 mod acceptance;
@@ -50,8 +62,7 @@ pub use reference::{FrozenReferenceCdf, FrozenReferenceQuantiles};
 pub use registry::FactorRegistry;
 pub use structural::structural_factors;
 pub use value::{
-    FactorDefinitionSpec, FactorDriver, FactorEligibility, FactorExplanation, FactorName,
-    FactorOutputKind, FactorQualityGate, FactorSet, FactorValue, MarketFactorOutcome, RawFactor,
+    FactorEligibility, FactorSet, FactorValue, MarketFactorOutcome, RawFactor,
     RawFactorEligibility, ScoredFactor,
 };
 pub use writer::factor_events;

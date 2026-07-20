@@ -12,8 +12,7 @@ use chrono_tz::Tz;
 use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
     domain::{
-        MarketSubject, WeatherForecastPoint, WeatherLeadBiasV1, WeatherObservationFact,
-        WeatherObservationReportKind, WeatherStationBiasV1, WeatherStationLeadBiasArtifactV1,
+        MarketSubject, WeatherForecastPoint, WeatherObservationFact, WeatherObservationReportKind,
         WeatherSubject,
     },
     enums::{domain::DomainFamily, feature::EvidenceSourceKind},
@@ -22,6 +21,7 @@ use quant_pivot_models::{
     types::{
         ContentHash, DomainMeasurementUnit, IcaoStation, Probability, TemperatureCelsius,
         WeatherTemperatureStatistic, WeatherVariable,
+        calibration::{WeatherLeadBiasV1, WeatherStationBiasV1, WeatherStationLeadBiasArtifactV1},
     },
 };
 use rust_decimal::Decimal;

@@ -20,6 +20,7 @@ pub const DATASET_ARTIFACT_FORMAT_VERSION: u32 = 1;
 /// This is the single data contract shared by research, persistence, and the
 /// admin API; integrity algorithms remain in research.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
+#[serde(deny_unknown_fields)]
 pub struct DatasetManifest {
     pub format_version: u32,
     pub training_dataset_id: TrainingDatasetId,
@@ -27,6 +28,8 @@ pub struct DatasetManifest {
     pub research_program_hash: ContentHash,
     pub source_slice: SourceSliceManifestRef,
     pub model_spec_id: ModelSpecId,
+    /// Immutable semantic definition bound before dataset materialization.
+    pub model_spec_definition_hash: ContentHash,
     pub trade_policy_artifact_id: Option<TradePolicyArtifactId>,
     pub trade_policy_hash: Option<ContentHash>,
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,

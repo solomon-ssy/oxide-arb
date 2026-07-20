@@ -139,10 +139,9 @@ impl CtfClient {
             )));
         }
 
-        let rpc_url = Url::parse(&config.onchain.rpc_url).map_err(|e| {
+        let rpc_url = Url::parse(config.onchain.rpc_url()).map_err(|error| {
             RpcError::ConnectionFailed(format!(
-                "invalid Polygon RPC URL '{}': {e}",
-                config.onchain.rpc_url
+                "configured Polygon RPC endpoint is invalid: {error}"
             ))
         })?;
 

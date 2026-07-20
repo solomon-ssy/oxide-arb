@@ -9,8 +9,21 @@ pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub id: i16,
     pub generation: i64,
+    pub current_snapshot_id: Option<Uuid>,
+    #[sea_orm(column_type = "Text")]
+    pub current_snapshot_hash: Option<String>,
     #[sea_orm(default_expr = "Expr::current_timestamp()")]
     pub created_at: DateTimeWithTimeZone,
+    #[sea_orm(default_expr = "Expr::current_timestamp()")]
+    pub updated_at: DateTimeWithTimeZone,
+    #[sea_orm(
+        belongs_to,
+        from = "current_snapshot_id",
+        to = "decision_policy_snapshot_id",
+        on_update = "NoAction",
+        on_delete = "NoAction"
+    )]
+    pub decision_policy_snapshot: BelongsTo<Option<super::decision_policy_snapshot::Entity>>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

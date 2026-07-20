@@ -15,7 +15,10 @@ use serde_json::{Value, json};
 use quant_pivot_models::{
     enums::quant::{RecommendationReportStatus, ReportFactDeliveryStatus, ReportRunTerminalReason},
     runtime_config::{DecisionPolicySnapshot, ReportsConfig},
-    types::{POOLED_1H_CONTROL_PROFILE_ID, RecommendationReportId, builtin_research_profiles},
+    types::{
+        CorrelationId, POOLED_1H_CONTROL_PROFILE_ID, RecommendationReportId, WorkerId,
+        builtin_research_profiles,
+    },
 };
 use quant_pivot_repository::{
     postgres::PgRecommendationReportRepository,
@@ -25,7 +28,6 @@ use quant_pivot_test_support::report_pipeline_harness::{
     seed_fixture_prepared_report, seed_fixture_published_report,
     seed_fixture_published_report_with_profile,
 };
-use uuid::Uuid;
 
 use crate::{
     client,
@@ -131,10 +133,18 @@ async fn user_with_role(env: &TestEnv, admin: &str, username: &str, code: &str) 
 
 /// Activate a runtime config with ad-hoc report generation enabled.
 async fn enable_ad_hoc(env: &TestEnv) {
+    set_ad_hoc(env, true).await;
+}
+
+async fn disable_ad_hoc(env: &TestEnv) {
+    set_ad_hoc(env, false).await;
+}
+
+async fn set_ad_hoc(env: &TestEnv, enabled: bool) {
     let cfg = DecisionPolicySnapshot {
         recommendation: quant_pivot_models::runtime_config::RecommendationPolicy {
             reports: ReportsConfig {
-                ad_hoc_report_enabled: true,
+                ad_hoc_report_enabled: enabled,
                 ..ReportsConfig::default()
             },
             ..quant_pivot_models::runtime_config::RecommendationPolicy::default()
@@ -146,7 +156,8 @@ async fn enable_ad_hoc(env: &TestEnv) {
         .prepare(cfg)
         .await
         .expect("prepare runtime config")
-        .publish();
+        .publish()
+        .expect("publish runtime config");
 }
 
 #[actix_web::test]
@@ -373,7 +384,7 @@ async fn cross_scope_report_diff_is_bad_request() {
     let other_profile = builtin_research_profiles()
         .expect("built-in profiles")
         .into_iter()
-        .find(|profile| profile.profile_ref.id == POOLED_1H_CONTROL_PROFILE_ID)
+        .find(|profile| profile.profile_ref.id.as_str() == POOLED_1H_CONTROL_PROFILE_ID)
         .expect("pooled control profile")
         .profile_ref;
     let other_scope = RecommendationReportId::from_v7();
@@ -399,7 +410,9 @@ async fn report_run_routes_enforce_rbac_idempotency_and_conflicts() {
     let env = TestEnv::start().await;
     let admin = login(&env, "admin", "admin").await;
 
-    // Disabled by default → 409 even for super_admin.
+    // The report-pipeline harness enables ad-hoc execution; explicitly prove
+    // that a governed disabled snapshot fails closed even for super_admin.
+    disable_ad_hoc(&env).await;
     let disabled = post(
         &env,
         "/api/quant/reports/run",
@@ -434,7 +447,10 @@ async fn report_run_routes_enforce_rbac_idempotency_and_conflicts() {
         .await
         .expect("load durable report run")
         .expect("ad-hoc run row");
-    assert_eq!(run.request_id.as_deref(), Some("adhoc-2"));
+    assert_eq!(
+        run.request_id.as_ref().map(CorrelationId::as_str),
+        Some("adhoc-2")
+    );
 
     // Exact replay is an HTTP 200 and returns the same durable identity.
     let replay = post(
@@ -450,6 +466,19 @@ async fn report_run_routes_enforce_rbac_idempotency_and_conflicts() {
         replay.json()["data"]["report_run_id"],
         json!(run.report_run_id.to_string())
     );
+    let conflicting_replay = post(
+        &env,
+        "/api/quant/reports/run",
+        &analyst,
+        &[("X-Acting-Role", "analyst"), ("X-Request-Id", "req-run-2c")],
+        json!({
+            "request_id": "adhoc-2",
+            "reason": "same key with different report semantics",
+            "top_n": 7
+        }),
+    )
+    .await;
+    assert_eq!(conflicting_replay.status, StatusCode::CONFLICT);
 
     let list = get(
         &env,
@@ -606,9 +635,9 @@ async fn publication_retry_reuses_bundle_and_obsoletes_when_stale() {
     seed_fixture_prepared_report(&env.db, failed_report_id.clone(), &env.fixture_report_ctx())
         .await;
     let repository = PgRecommendationReportRepository::new(env.db.clone());
-    let delivery_worker = Uuid::now_v7();
+    let delivery_worker = WorkerId::from_v7();
     repository
-        .claim_fact_delivery(delivery_worker, 60)
+        .claim_fact_delivery(delivery_worker.clone(), 60)
         .await
         .expect("claim prepared delivery")
         .expect("prepared delivery is pending");
@@ -639,9 +668,9 @@ async fn publication_retry_reuses_bundle_and_obsoletes_when_stale() {
     assert_eq!(retried.json()["data"]["status"], json!("retrying"));
     assert!(retried.json()["data"]["last_error"].is_string());
 
-    let retry_worker = Uuid::now_v7();
+    let retry_worker = WorkerId::from_v7();
     let retry_claim = repository
-        .claim_fact_delivery(retry_worker, 60)
+        .claim_fact_delivery(retry_worker.clone(), 60)
         .await
         .expect("claim governed publication retry")
         .expect("retry became immediately due");

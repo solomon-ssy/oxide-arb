@@ -42,7 +42,6 @@ pub trait ModelRunRepository: Send + Sync {
         &self,
         model_run_id: &ModelRunId,
         output_hash: ContentHash,
-        metrics_json: serde_json::Value,
         finished_at: DateTime<Utc>,
         model_version_id: Option<ModelVersionId>,
     ) -> Result<ModelRunInfo, StorageError>;

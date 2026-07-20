@@ -7,14 +7,13 @@ use quant_pivot_models::{
     enums::quant::{
         RecommendationReportStatus, RecommendationStatus, ReportRunStatus, ReportTriggerKind,
     },
-    types::ReportRunId,
+    types::{ReportRunId, WorkerId},
 };
 use quant_pivot_repository::{
     postgres::{PgRecommendationReportRepository, PgReportRunRepository},
     traits::{RecommendationReportRepository, ReportRunRepository},
 };
 use sea_orm::{ActiveModelTrait, ActiveValue, DatabaseConnection};
-use uuid::Uuid;
 
 /// Persist a complete Prepared artifact, verify its delivery, and atomically
 /// publish it. Fixtures must not bypass the durable run/publication FSM.
@@ -28,9 +27,9 @@ pub async fn persist_and_publish_report(
     let now = Utc::now();
     let report_id = prepared.recommendation_report_id;
     let repository = PgRecommendationReportRepository::new(db.clone());
-    let delivery_worker = Uuid::now_v7();
+    let delivery_worker = WorkerId::from_v7();
     let claimed = repository
-        .claim_fact_delivery(delivery_worker, 600)
+        .claim_fact_delivery(delivery_worker.clone(), 600)
         .await
         .expect("claim report delivery")
         .expect("seeded report delivery is claimable");
@@ -65,10 +64,9 @@ pub async fn persist_prepared_report(
             .expect("positive database clock wait");
         tokio::time::sleep(wait).await;
     };
-    let worker_id = Uuid::now_v7();
+    let worker_id = WorkerId::from_v7();
     let lease_expires_at = now + Duration::minutes(10);
     let report_run_id = ReportRunId::from_v7();
-    transaction.report.profile_id = transaction.report.profile_ref.id.clone();
     transaction.report.status = RecommendationReportStatus::Prepared;
     transaction.report.published_at = None;
     transaction.report.successor_report_id = None;
@@ -85,7 +83,7 @@ pub async fn persist_prepared_report(
         report_run_id: ActiveValue::Set(report_run_id.clone()),
         trigger_kind: ActiveValue::Set(ReportTriggerKind::Scheduled),
         trigger_key: ActiveValue::Set(trigger_key.to_owned()),
-        schedule_id: ActiveValue::Set(Some("test_fixture".to_owned())),
+        schedule_id: ActiveValue::Set(Some("test_fixture".into())),
         request_id: ActiveValue::Set(None),
         retry_of_run_id: ActiveValue::Set(None),
         scheduled_for: ActiveValue::Set(Some(transaction.report.decision_at)),
@@ -96,7 +94,7 @@ pub async fn persist_prepared_report(
         heartbeat_at: ActiveValue::Set(Some(now)),
         lease_expires_at: ActiveValue::Set(Some(lease_expires_at)),
         finished_at: ActiveValue::Set(None),
-        lease_owner: ActiveValue::Set(Some(worker_id)),
+        lease_owner: ActiveValue::Set(Some(worker_id.clone())),
         decision_policy_snapshot_id: ActiveValue::Set(Some(
             transaction.report.decision_policy_snapshot_id.clone(),
         )),

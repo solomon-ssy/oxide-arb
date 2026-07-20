@@ -15,7 +15,7 @@ use quant_pivot_models::{
         rbac::{Operation, ResourceType},
     },
     hashing::CanonicalDigest,
-    types::ModelVersionId,
+    types::{ContentHash, ModelVersionId, RoleCode, UserId},
 };
 use serde::Serialize;
 
@@ -91,7 +91,7 @@ pub async fn publish(
                 model_version_id: model_version_id.clone(),
                 reason: request.reason.clone(),
             },
-            governance_actor(&actor, &acting_role),
+            governance_actor(&actor, &acting_role)?,
         )
         .await?;
     let before_hash = canonical_state_hash(&before)?;
@@ -106,7 +106,7 @@ pub async fn publish(
         "acting_role": acting_role.0,
         "request_id": request_id.0,
         "reason": request.reason,
-    }));
+    }))?;
     Ok(WebResponse::ok(view))
 }
 
@@ -136,7 +136,7 @@ pub async fn retire(
                 model_version_id: model_version_id.clone(),
                 reason: request.reason.clone(),
             },
-            governance_actor(&actor, &acting_role),
+            governance_actor(&actor, &acting_role)?,
         )
         .await?;
     let before_hash = canonical_state_hash(&before)?;
@@ -151,7 +151,7 @@ pub async fn retire(
         "acting_role": acting_role.0,
         "request_id": request_id.0,
         "reason": request.reason,
-    }));
+    }))?;
     Ok(WebResponse::ok(view))
 }
 
@@ -179,7 +179,7 @@ pub async fn bind_publish_path_set(
         .bind_publish_path_set(
             &model_version_id,
             request.clone(),
-            governance_actor(&actor, &acting_role),
+            governance_actor(&actor, &acting_role)?,
         )
         .await?;
     let before_hash = canonical_state_hash(&before)?;
@@ -194,7 +194,7 @@ pub async fn bind_publish_path_set(
         "acting_role": acting_role.0,
         "request_id": request_id.0,
         "reason": request.reason,
-    }));
+    }))?;
     Ok(WebResponse::ok(view))
 }
 
@@ -222,7 +222,7 @@ pub async fn bind_calibration(
         .bind_calibration(
             &model_version_id,
             request.clone(),
-            governance_actor(&actor, &acting_role),
+            governance_actor(&actor, &acting_role)?,
         )
         .await?;
     let before_hash = canonical_state_hash(&before)?;
@@ -238,7 +238,7 @@ pub async fn bind_calibration(
         "acting_role": acting_role.0,
         "request_id": request_id.0,
         "reason": request.reason,
-    }));
+    }))?;
     Ok(WebResponse::ok(view))
 }
 
@@ -259,15 +259,21 @@ pub async fn calibration_fit_preflight(
     Ok(WebResponse::ok(view))
 }
 
-fn governance_actor(actor: &AuthedActor, acting_role: &ActingRole) -> GovernanceActor {
-    GovernanceActor {
-        username: actor.claims.username.clone(),
-        role: Some(acting_role.0.clone()),
-    }
+fn governance_actor(
+    actor: &AuthedActor,
+    acting_role: &ActingRole,
+) -> Result<GovernanceActor, WebError> {
+    let user_id = actor.claims.sub.parse::<UserId>().map_err(|error| {
+        WebError::Internal(format!("authenticated subject is invalid: {error}"))
+    })?;
+    Ok(GovernanceActor::authenticated(
+        user_id,
+        actor.claims.username.clone(),
+        RoleCode::new(acting_role.0.clone()),
+    ))
 }
 
-fn canonical_state_hash<T: Serialize>(state: &T) -> Result<String, WebError> {
+fn canonical_state_hash<T: Serialize>(state: &T) -> Result<ContentHash, WebError> {
     CanonicalDigest::content_hash_json(state)
-        .map(|hash| hash.as_str().to_owned())
         .map_err(|error| WebError::Internal(format!("canonical state hash failed: {error}")))
 }

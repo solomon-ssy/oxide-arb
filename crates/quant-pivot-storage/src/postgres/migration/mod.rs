@@ -138,6 +138,32 @@ pub fn render_schema_manifest(value: &serde_json::Value) -> Result<String, Stora
     manifest::render(value)
 }
 
+/// Apply post-migration seeds and grants in an owned disposable database, then
+/// inspect the semantic manifest used for source-controlled schema generation.
+///
+/// This deliberately refuses ordinary database names so manifest generation
+/// cannot become an unchecked production deployment path.
+pub async fn generate_disposable_schema_manifest(
+    db: &DatabaseConnection,
+    runtime_role: &str,
+    bootstrap_admin_password_hash: &str,
+) -> Result<serde_json::Value, StorageError> {
+    let database = sqlx::query_scalar::<_, String>("SELECT current_database()")
+        .fetch_one(db.get_postgres_connection_pool())
+        .await
+        .map_err(migration_error("read disposable manifest database name"))?;
+    if !database.starts_with("quant_pivot_manifest_") {
+        return Err(StorageError::Migration(format!(
+            "refusing unchecked manifest generation outside an owned disposable database: {database}"
+        )));
+    }
+    run_catalog_seeds(db, bootstrap_admin_password_hash)
+        .await
+        .map_err(|error| StorageError::Migration(format!("apply catalog seeds: {error}")))?;
+    apply_runtime_privileges(db.get_postgres_connection_pool(), runtime_role).await?;
+    manifest::inspect(db.get_postgres_connection_pool()).await
+}
+
 async fn verify_contract(db: &DatabaseConnection) -> Result<PostgresSchemaStatus, StorageError> {
     let pool = db.get_postgres_connection_pool();
     let migration_manifest = expected_migration_manifest()?;
@@ -326,7 +352,7 @@ mod tests {
     #[test]
     fn migration_manifest_is_valid() {
         let manifest = expected_migration_manifest().expect("valid migration manifest");
-        assert_eq!(manifest.migrations.len(), 4);
+        assert_eq!(manifest.migrations.len(), 1);
         assert_eq!(manifest.migrations[0].checksum.len(), 64);
     }
 }

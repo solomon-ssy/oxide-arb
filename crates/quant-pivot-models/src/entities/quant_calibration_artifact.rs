@@ -1,6 +1,7 @@
 //! `quant_calibration_artifact` table entity.
 
 use crate::{
+    domain::CalibrationArtifactPayload,
     enums::quant::CalibrationKind,
     types::{CalibrationArtifactId, ContentHash},
 };
@@ -20,7 +21,7 @@ pub struct Model {
     pub calibration_split_hash: ContentHash,
     pub sample_count: i64,
     #[sea_orm(column_type = "JsonBinary")]
-    pub payload_json: Json,
+    pub payload: CalibrationArtifactPayload,
     pub active: bool,
     pub created_at: DateTime<Utc>,
 }

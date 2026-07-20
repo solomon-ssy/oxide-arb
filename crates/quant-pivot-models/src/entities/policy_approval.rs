@@ -2,6 +2,7 @@
 
 use crate::{
     enums::runtime_config::{ConfigResourceKind, PolicyActorKind, PolicyApprovalDecision},
+    runtime_config::PolicyValidationSubject,
     types::{ContentHash, PolicyApprovalId, PolicyRevisionId, UserId},
 };
 use chrono::{DateTime, Utc};
@@ -16,6 +17,8 @@ pub struct Model {
     pub policy_revision_id: PolicyRevisionId,
     pub resource_kind: ConfigResourceKind,
     pub revision_hash: ContentHash,
+    #[sea_orm(column_type = "JsonBinary")]
+    pub validation_subject: Option<PolicyValidationSubject>,
     pub decision: PolicyApprovalDecision,
     pub decided_by_kind: PolicyActorKind,
     pub decided_by_user_id: Option<UserId>,

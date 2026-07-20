@@ -3,7 +3,7 @@
 use crate::{
     postgres::{
         error,
-        quant::feature_parity,
+        quant::{feature_parity, research_profile},
         query::{paginate_into_model, paginate_mapped},
     },
     traits::{ModelRegistryRepository, PublishModelVersionCommit, PublishModelVersionResult},
@@ -12,22 +12,29 @@ use chrono::Utc;
 use quant_pivot_error::storage::{StorageError, entity};
 use quant_pivot_models::{
     domain::{
-        ModelPickerSide, ModelSpecInfo, ModelSpecListQuery, ModelVersionInfo,
-        ModelVersionListQuery, ModelVersionParityEvidence, NewModelSpec, NewModelVersion,
-        PageWindow, Paginated, PublishedModelCatalogInfo, model_version_parity_evidence_hash,
+        CalibrationArtifactPayload, ModelPickerSide, ModelSpecInfo, ModelSpecListQuery,
+        ModelVersionInfo, ModelVersionListQuery, ModelVersionParityEvidence, NewModelSpec,
+        NewModelVersion, PageWindow, Paginated, PublishedModelCatalogInfo,
+        model_version_parity_evidence_hash,
     },
     entities::{
-        quant_feature_parity_run, quant_feature_parity_subject, quant_model_spec,
-        quant_model_version, quant_training_dataset,
+        quant_backtest_report, quant_calibration_artifact, quant_feature_parity_run,
+        quant_feature_parity_subject, quant_model_spec, quant_model_version,
+        quant_training_dataset, research_profile_artifact,
     },
     enums::{
         common::MarketCategory,
         model::ModelFamily,
         quant::{
-            FeatureParityRunKind, FeatureParityRunStatus, ParitySubjectKind, PublicationStatus,
+            CalibrationKind, FeatureParityRunKind, FeatureParityRunStatus, ParitySubjectKind,
+            PublicationStatus,
         },
     },
-    types::{BacktestPathSetId, FeatureParityRunId, ModelSpecId, ModelVersionId},
+    types::{
+        BacktestPathSetId, FeatureParityRunId, ModelSpecId, ModelVersionId,
+        model_lineage::ModelVersionDerivation, model_quality::QualityGateReport,
+        model_spec::ModelSpecDefinition,
+    },
 };
 use sea_orm::{
     ActiveModelTrait, ActiveValue, ColumnTrait, Condition, ConnectionTrait, DatabaseConnection,
@@ -43,6 +50,11 @@ impl PgModelRegistryRepository {
     pub const fn new(db: DatabaseConnection) -> Self {
         Self { db }
     }
+
+    /// Seed or verify the complete immutable built-in research-profile registry.
+    pub async fn ensure_builtin_research_profiles(&self) -> Result<(), StorageError> {
+        research_profile::ensure_builtins(&self.db).await.map(drop)
+    }
 }
 
 /// Version row + owning-spec `model_family` (N:1 INNER JOIN).
@@ -53,18 +65,41 @@ fn select_version_with_family() -> Select<quant_model_version::Entity> {
             quant_model_version::Relation::ModelSpec.def(),
         )
         .column_as(quant_model_spec::Column::ModelFamily, "model_family")
+        .column_as(quant_model_spec::Column::Name, "model_spec_name")
+        .column_as(quant_model_spec::Column::Thesis, "model_spec_thesis")
+        .column_as(
+            quant_model_spec::Column::DefinitionHash,
+            "model_spec_definition_hash",
+        )
+        .join(
+            JoinType::InnerJoin,
+            quant_model_version::Relation::ResearchProfileArtifact.def(),
+        )
+        .column_as(
+            research_profile_artifact::Column::ResearchProfileId,
+            "profile_ref_id",
+        )
+        .column_as(
+            research_profile_artifact::Column::Version,
+            "profile_ref_version",
+        )
+        .column_as(
+            research_profile_artifact::Column::ContentHash,
+            "profile_ref_content_hash",
+        )
 }
 
 async fn find_version_info(
     db: &impl ConnectionTrait,
     model_version_id: &ModelVersionId,
 ) -> Result<Option<ModelVersionInfo>, StorageError> {
-    select_version_with_family()
+    let info = select_version_with_family()
         .filter(quant_model_version::Column::ModelVersionId.eq(model_version_id.clone()))
         .into_model::<ModelVersionInfo>()
         .one(db)
         .await
-        .map_err(StorageError::from)
+        .map_err(StorageError::from)?;
+    info.map(verify_model_version_info).transpose()
 }
 
 async fn require_version_info(
@@ -76,27 +111,189 @@ async fn require_version_info(
         .ok_or_else(|| error::not_found(entity::QUANT_MODEL_VERSION, model_version_id))
 }
 
+fn verify_model_spec_info(info: ModelSpecInfo) -> Result<ModelSpecInfo, StorageError> {
+    let definition = info.definition();
+    definition
+        .validate()
+        .map_err(|detail| StorageError::InvariantViolation {
+            entity: Some(entity::QUANT_MODEL_SPEC),
+            detail: format!("invalid stored model spec definition: {detail}"),
+        })?;
+    let expected_hash =
+        definition
+            .content_hash()
+            .map_err(|error| StorageError::InvariantViolation {
+                entity: Some(entity::QUANT_MODEL_SPEC),
+                detail: format!("stored model spec hash failed: {error}"),
+            })?;
+    if expected_hash != info.definition_hash {
+        return Err(StorageError::InvariantViolation {
+            entity: Some(entity::QUANT_MODEL_SPEC),
+            detail: format!(
+                "stored model spec {} definition hash mismatch: expected {expected_hash}, got {}",
+                info.model_spec_id, info.definition_hash
+            ),
+        });
+    }
+    Ok(info)
+}
+
+fn verify_model_version_info(info: ModelVersionInfo) -> Result<ModelVersionInfo, StorageError> {
+    info.verified_derivation()
+        .map_err(|error| StorageError::InvariantViolation {
+            entity: Some(entity::QUANT_MODEL_VERSION),
+            detail: format!(
+                "stored model version {} has invalid derivation lineage: {error}",
+                info.model_version_id
+            ),
+        })?;
+    Ok(info)
+}
+
+async fn validate_version_derivation(
+    db: &impl ConnectionTrait,
+    version: &NewModelVersion,
+) -> Result<(), StorageError> {
+    version
+        .derivation
+        .validate()
+        .map_err(|error| StorageError::InvariantViolation {
+            entity: Some(entity::QUANT_MODEL_VERSION),
+            detail: error.to_string(),
+        })?;
+
+    let Some(parent_id) = version.derivation.parent_model_version_id() else {
+        return Ok(());
+    };
+    if parent_id == &version.model_version_id {
+        return Err(StorageError::InvariantViolation {
+            entity: Some(entity::QUANT_MODEL_VERSION),
+            detail: "a model version cannot derive from itself".to_owned(),
+        });
+    }
+    let parent = quant_model_version::Entity::find_by_id(parent_id.clone())
+        .one(db)
+        .await
+        .map_err(StorageError::from)?
+        .ok_or_else(|| error::not_found(entity::QUANT_MODEL_VERSION, parent_id))?;
+    let metadata_matches = parent.model_spec_id == version.model_spec_id
+        && parent.category_scope == version.category_scope
+        && parent.research_profile_artifact_id == version.profile_ref.artifact_id()
+        && parent.training_dataset_id == version.training_dataset_id
+        && parent.trade_policy_artifact_id == version.trade_policy_artifact_id
+        && parent.trade_policy_hash == version.trade_policy_hash;
+    if !metadata_matches {
+        return Err(StorageError::InvariantViolation {
+            entity: Some(entity::QUANT_MODEL_VERSION),
+            detail: format!("derived version metadata must match parent model version {parent_id}"),
+        });
+    }
+    if version.publication_status != PublicationStatus::Candidate
+        || version.publish_path_set_id.is_some()
+        || version.quality_gate_report.is_some()
+        || version.published_at.is_some()
+        || version.retired_at.is_some()
+    {
+        return Err(StorageError::InvariantViolation {
+            entity: Some(entity::QUANT_MODEL_VERSION),
+            detail: "a derived model version must start as an ungated Candidate".to_owned(),
+        });
+    }
+
+    match &version.derivation {
+        ModelVersionDerivation::Training => {}
+        ModelVersionDerivation::ScoreMultiplierCalibration {
+            source_backtest_report_id,
+            ..
+        } => {
+            let source =
+                quant_backtest_report::Entity::find_by_id(source_backtest_report_id.clone())
+                    .one(db)
+                    .await
+                    .map_err(StorageError::from)?
+                    .ok_or_else(|| {
+                        error::not_found("quant_backtest_report", source_backtest_report_id)
+                    })?;
+            if source.model_version_id != *parent_id {
+                return Err(StorageError::InvariantViolation {
+                    entity: Some(entity::QUANT_MODEL_VERSION),
+                    detail: format!(
+                        "source backtest report {source_backtest_report_id} belongs to model version {}, not parent {parent_id}",
+                        source.model_version_id
+                    ),
+                });
+            }
+        }
+        ModelVersionDerivation::ReturnCalibration {
+            calibration_artifact_id,
+            ..
+        } => {
+            let artifact =
+                quant_calibration_artifact::Entity::find_by_id(calibration_artifact_id.clone())
+                    .one(db)
+                    .await
+                    .map_err(StorageError::from)?
+                    .ok_or_else(|| {
+                        error::not_found("quant_calibration_artifact", calibration_artifact_id)
+                    })?;
+            let CalibrationArtifactPayload::ModelScore(payload) = artifact.payload else {
+                return Err(StorageError::InvariantViolation {
+                    entity: Some(entity::QUANT_MODEL_VERSION),
+                    detail: format!(
+                        "calibration artifact {calibration_artifact_id} is not a model_score artifact"
+                    ),
+                });
+            };
+            if artifact.kind != CalibrationKind::ModelScore
+                || payload.model_version_id != *parent_id
+            {
+                return Err(StorageError::InvariantViolation {
+                    entity: Some(entity::QUANT_MODEL_VERSION),
+                    detail: format!(
+                        "calibration artifact {calibration_artifact_id} was not fitted for parent model version {parent_id}"
+                    ),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 #[async_trait::async_trait]
 impl ModelRegistryRepository for PgModelRegistryRepository {
     async fn create_model_spec(&self, spec: NewModelSpec) -> Result<ModelSpecInfo, StorageError> {
-        spec.input_contract
+        let definition = ModelSpecDefinition {
+            name: &spec.name,
+            model_family: spec.model_family,
+            prediction_horizon_secs: spec.prediction_horizon_secs,
+            feature_schema_version: spec.feature_schema_version,
+            label_schema_version: spec.label_schema_version,
+            thesis: &spec.thesis,
+            input_contract: &spec.input_contract,
+            training_contract: &spec.training_contract,
+        };
+        definition
             .validate()
             .map_err(|detail| StorageError::InvariantViolation {
                 entity: Some(entity::QUANT_MODEL_SPEC),
-                detail: format!("invalid input_contract: {detail}"),
+                detail: format!("invalid model spec definition: {detail}"),
             })?;
-        if spec.input_contract.inputs.is_empty() {
+        let expected_hash =
+            definition
+                .content_hash()
+                .map_err(|error| StorageError::InvariantViolation {
+                    entity: Some(entity::QUANT_MODEL_SPEC),
+                    detail: format!("model spec definition hash failed: {error}"),
+                })?;
+        if spec.definition_hash != expected_hash {
             return Err(StorageError::InvariantViolation {
                 entity: Some(entity::QUANT_MODEL_SPEC),
-                detail: "input_contract must contain at least one raw feature".to_owned(),
+                detail: format!(
+                    "definition_hash mismatch: expected {expected_hash}, got {}",
+                    spec.definition_hash
+                ),
             });
         }
-        spec.training_contract
-            .validate()
-            .map_err(|detail| StorageError::InvariantViolation {
-                entity: Some(entity::QUANT_MODEL_SPEC),
-                detail: format!("invalid training_contract: {detail}"),
-            })?;
         let name = spec.name.clone();
         quant_model_spec::Entity::insert(spec.into_active_model())
             .exec_with_returning(&self.db)
@@ -109,11 +306,11 @@ impl ModelRegistryRepository for PgModelRegistryRepository {
         &self,
         model_spec_id: &ModelSpecId,
     ) -> Result<Option<ModelSpecInfo>, StorageError> {
-        quant_model_spec::Entity::find_by_id(model_spec_id.clone())
+        let row = quant_model_spec::Entity::find_by_id(model_spec_id.clone())
             .one(&self.db)
             .await
-            .map_err(StorageError::from)
-            .map(|row| row.map(Into::into))
+            .map_err(StorageError::from)?;
+        row.map(Into::into).map(verify_model_spec_info).transpose()
     }
 
     async fn create_model_version(
@@ -125,6 +322,7 @@ impl ModelRegistryRepository for PgModelRegistryRepository {
         // Callers may pass a preview from `next_version_for_spec`; the locked
         // MAX+1 here is authoritative.
         let txn = self.db.begin().await.map_err(StorageError::from)?;
+        research_profile::ensure(&txn, &version.profile_ref).await?;
         let Some(_spec) = quant_model_spec::Entity::find_by_id(version.model_spec_id.clone())
             .lock_exclusive()
             .one(&txn)
@@ -136,6 +334,7 @@ impl ModelRegistryRepository for PgModelRegistryRepository {
                 &version.model_spec_id,
             ));
         };
+        validate_version_derivation(&txn, &version).await?;
         let max_version = quant_model_version::Entity::find()
             .filter(quant_model_version::Column::ModelSpecId.eq(version.model_spec_id.clone()))
             .select_only()
@@ -147,7 +346,14 @@ impl ModelRegistryRepository for PgModelRegistryRepository {
         version.version = next_model_version(max_version.flatten())?;
         let duplicate_key = format!("{}:v{}", version.model_spec_id, version.version);
         let model_version_id = version.model_version_id.clone();
-        quant_model_version::Entity::insert(version.into_active_model())
+        let active =
+            version
+                .try_into_active_model()
+                .map_err(|error| StorageError::InvariantViolation {
+                    entity: Some(entity::QUANT_MODEL_VERSION),
+                    detail: error.to_string(),
+                })?;
+        quant_model_version::Entity::insert(active)
             .exec_with_returning(&txn)
             .await
             .map_err(|err| error::map_unique(err, entity::QUANT_MODEL_VERSION, &duplicate_key))?;
@@ -183,18 +389,12 @@ impl ModelRegistryRepository for PgModelRegistryRepository {
         &self,
         query: ModelSpecListQuery,
     ) -> Result<Paginated<ModelSpecInfo>, StorageError> {
-        let condition = Condition::all()
-            .add_option(
-                query
-                    .model_family
-                    .map(|family| quant_model_spec::Column::ModelFamily.eq(family)),
-            )
-            .add_option(
-                query
-                    .status
-                    .map(|status| quant_model_spec::Column::Status.eq(status)),
-            );
-        paginate_mapped(
+        let condition = Condition::all().add_option(
+            query
+                .model_family
+                .map(|family| quant_model_spec::Column::ModelFamily.eq(family)),
+        );
+        let page = paginate_mapped(
             quant_model_spec::Entity::find()
                 .filter(condition)
                 .order_by_desc(quant_model_spec::Column::CreatedAt),
@@ -202,7 +402,13 @@ impl ModelRegistryRepository for PgModelRegistryRepository {
             PageWindow::from_query(&query),
             Into::into,
         )
-        .await
+        .await?;
+        let items = page
+            .items
+            .into_iter()
+            .map(verify_model_spec_info)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Paginated::new(items, page.total, page.page, page.size))
     }
 
     async fn page_versions(
@@ -231,14 +437,20 @@ impl ModelRegistryRepository for PgModelRegistryRepository {
                     .to
                     .map(|to| quant_model_version::Column::CreatedAt.lt(to)),
             );
-        paginate_into_model(
+        let page = paginate_into_model(
             select_version_with_family()
                 .filter(condition)
                 .order_by_desc(quant_model_version::Column::CreatedAt),
             &self.db,
             PageWindow::from_query(&query),
         )
-        .await
+        .await?;
+        let items = page
+            .items
+            .into_iter()
+            .map(verify_model_version_info)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Paginated::new(items, page.total, page.page, page.size))
     }
 
     async fn list_published_catalog(
@@ -289,14 +501,15 @@ impl ModelRegistryRepository for PgModelRegistryRepository {
         &self,
         model_spec_id: &ModelSpecId,
     ) -> Result<Vec<ModelVersionInfo>, StorageError> {
-        select_version_with_family()
+        let rows = select_version_with_family()
             .filter(quant_model_version::Column::ModelSpecId.eq(model_spec_id.clone()))
             .filter(quant_model_version::Column::PublicationStatus.eq(PublicationStatus::Published))
             .order_by_desc(quant_model_version::Column::PublishedAt)
             .into_model::<ModelVersionInfo>()
             .all(&self.db)
             .await
-            .map_err(StorageError::from)
+            .map_err(StorageError::from)?;
+        rows.into_iter().map(verify_model_version_info).collect()
     }
 
     async fn retire_model_version(
@@ -380,7 +593,7 @@ impl ModelRegistryRepository for PgModelRegistryRepository {
     async fn set_quality_gate_report(
         &self,
         model_version_id: &ModelVersionId,
-        quality_gate_report: serde_json::Value,
+        quality_gate_report: QualityGateReport,
     ) -> Result<ModelVersionInfo, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
         let Some(row) = quant_model_version::Entity::find_by_id(model_version_id.clone())
@@ -395,7 +608,7 @@ impl ModelRegistryRepository for PgModelRegistryRepository {
             ));
         };
         let mut active = row.into_active_model();
-        active.quality_gate_report = ActiveValue::Set(quality_gate_report);
+        active.quality_gate_report = ActiveValue::Set(Some(quality_gate_report));
         active.update(&txn).await.map_err(StorageError::from)?;
         let info = require_version_info(&txn, model_version_id).await?;
         txn.commit().await.map_err(StorageError::from)?;

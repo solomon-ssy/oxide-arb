@@ -297,7 +297,7 @@ mod tests {
     use quant_pivot_models::{
         enums::{factor::FactorFamily, quant::FactorDirection},
         types::{
-            ContentHash, FactorDefinitionId, ModelInputContract, ModelVersionId, Probability,
+            FactorDefinitionId, ModelInputContract, ModelVersionId, Probability,
             builtin_research_profiles,
         },
     };
@@ -312,12 +312,8 @@ mod tests {
             },
             runtime::ModelFamily,
         },
+        test_support::content_hash as hash,
     };
-
-    fn hash(seed: &str) -> ContentHash {
-        let hex = format!("{seed:0>64}");
-        ContentHash::parse(format!("blake3:{hex}")).expect("hash")
-    }
 
     fn artifact() -> SellScorerArtifact {
         let input_contract = ModelInputContract::single_required("book.mid");
@@ -326,6 +322,7 @@ mod tests {
         SellScorerArtifact {
             header: ModelArtifactHeader {
                 model_version_id: ModelVersionId::from_v7(),
+                model_spec_definition_hash: hash("spec"),
                 profile_ref: builtin_research_profiles()
                     .expect("built-in profiles")
                     .remove(0)

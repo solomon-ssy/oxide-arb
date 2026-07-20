@@ -2,7 +2,10 @@
 
 use crate::{
     enums::quant::{ResearchJobKind, ResearchJobStatus},
-    types::{DatasetCoverage, DecisionPolicySnapshotId, ModelSpecId, ResearchJobId},
+    types::{
+        DatasetCoverage, DecisionPolicySnapshotId, ModelSpecId, ResearchJobId, ResearchJobParams,
+        WorkerId,
+    },
 };
 use chrono::{DateTime, Utc};
 use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
@@ -21,7 +24,7 @@ pub struct ResearchJobInfo {
     pub model_spec_id: Option<ModelSpecId>,
     pub decision_policy_snapshot_id: Option<DecisionPolicySnapshotId>,
     /// Frozen request body (includes `reason` + pre-assigned result id).
-    pub params_json: serde_json::Value,
+    pub params_json: ResearchJobParams,
     /// Live progress snapshot (phase + processed/total + pct); `None` until first tick.
     pub progress_json: Option<ResearchJobProgress>,
     /// Terminal result id (dataset / model version / backtest report), once produced.
@@ -36,7 +39,7 @@ pub struct ResearchJobInfo {
     pub parent_job_id: Option<ResearchJobId>,
     pub recovery_attempt: i32,
     pub max_recovery_attempts: i32,
-    pub lease_owner: Option<String>,
+    pub lease_owner: Option<WorkerId>,
     pub lease_expires_at: Option<DateTime<Utc>>,
     pub started_at: Option<DateTime<Utc>>,
     pub finished_at: Option<DateTime<Utc>>,
@@ -83,7 +86,7 @@ pub struct NewResearchJob {
     pub status: ResearchJobStatus,
     pub model_spec_id: Option<ModelSpecId>,
     pub decision_policy_snapshot_id: Option<DecisionPolicySnapshotId>,
-    pub params_json: serde_json::Value,
+    pub params_json: ResearchJobParams,
     pub requested_by: Option<String>,
     pub acting_role: String,
     pub parent_job_id: Option<ResearchJobId>,

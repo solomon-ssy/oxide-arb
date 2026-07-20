@@ -553,7 +553,6 @@ async fn run_factor_round_and_assert_concentration(
             status: ModelRunStatus::Running,
             input_hash: ContentHash::parse(format!("blake3:{}", "1".repeat(64))).expect("hash"),
             output_hash: None,
-            metrics_json: serde_json::json!({}),
             error_code: None,
             error_message: None,
             started_at: harness.as_of,

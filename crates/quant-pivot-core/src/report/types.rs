@@ -9,16 +9,16 @@ use quant_pivot_models::{
         EmptyReportReason, OutcomeSide, QuantRuntimeMode, ReportKind, ReportTriggerKind,
     },
     runtime_config::ReportDeliveryPolicy,
-    types::{Probability, RecommendationReportId, Usd},
+    types::{CorrelationId, Probability, RecommendationReportId, ReportScheduleId, Usd},
 };
 
 /// Source that triggered one report build.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReportTrigger {
     /// Scheduled generation by schedule id.
-    Scheduled { schedule_id: String },
+    Scheduled { schedule_id: ReportScheduleId },
     /// Operator/API requested ad-hoc generation by stable request id.
-    AdHoc { request_id: String },
+    AdHoc { request_id: CorrelationId },
 }
 
 impl ReportTrigger {

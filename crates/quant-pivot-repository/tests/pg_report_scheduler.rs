@@ -31,7 +31,7 @@ fn ad_hoc(request_id: &str) -> NewReportRun {
         trigger_kind: ReportTriggerKind::AdHoc,
         trigger_key: format!("ad_hoc:{request_id}"),
         schedule_id: None,
-        request_id: Some(request_id.to_owned()),
+        request_id: Some(request_id.into()),
         retry_of_run_id: None,
         scheduled_for: None,
         requested_at: Utc::now(),
@@ -47,7 +47,7 @@ fn claim_config(version_id: &DecisionPolicySnapshotId) -> ReportRunClaimConfig {
         ad_hoc_default_top_n: 20,
         ad_hoc_default_knowledge_lag_secs: 10,
         schedules: vec![ClaimReportSchedule {
-            schedule_id: "primary".to_owned(),
+            schedule_id: "primary".into(),
             top_n: 20,
             knowledge_lag_secs: 10,
         }],
@@ -72,8 +72,8 @@ async fn two_coordinators_claim_one_global_run() {
         .expect("enqueue second");
 
     let (left, right) = tokio::join!(
-        first.claim_next_run(Uuid::now_v7(), 120, 300, claim_config(&version_id)),
-        second.claim_next_run(Uuid::now_v7(), 120, 300, claim_config(&version_id)),
+        first.claim_next_run(Uuid::now_v7().into(), 120, 300, claim_config(&version_id)),
+        second.claim_next_run(Uuid::now_v7().into(), 120, 300, claim_config(&version_id)),
     );
     let claimed = [left.expect("first replica"), right.expect("second replica")]
         .into_iter()
@@ -95,7 +95,7 @@ async fn restart_coalesces_latest_and_records_aggregate_gap() {
         .reconcile_schedules(
             &version_id,
             vec![ReconcileReportSchedule {
-                schedule_id: "primary".to_owned(),
+                schedule_id: "primary".into(),
                 decision_policy_snapshot_id: version_id.clone(),
                 spec_hash: hash('b'),
                 next_scheduled_for: first_due,
@@ -109,7 +109,7 @@ async fn restart_coalesces_latest_and_records_aggregate_gap() {
     let next = latest + Duration::minutes(1);
     let materialized = repository
         .materialize_schedule(MaterializeReportSchedule {
-            schedule_id: "primary".to_owned(),
+            schedule_id: "primary".into(),
             decision_policy_snapshot_id: version_id.clone(),
             spec_hash: hash('b'),
             expected_next_scheduled_for: first_due,
@@ -132,7 +132,7 @@ async fn restart_coalesces_latest_and_records_aggregate_gap() {
     let newer = next + Duration::minutes(1);
     let coalesced = repository
         .materialize_schedule(MaterializeReportSchedule {
-            schedule_id: "primary".to_owned(),
+            schedule_id: "primary".into(),
             decision_policy_snapshot_id: version_id,
             spec_hash: hash('b'),
             expected_next_scheduled_for: next,
@@ -180,7 +180,7 @@ async fn config_change_skips_old_queued_occurrence() {
         .reconcile_schedules(
             &version_id,
             vec![ReconcileReportSchedule {
-                schedule_id: "primary".to_owned(),
+                schedule_id: "primary".into(),
                 decision_policy_snapshot_id: version_id.clone(),
                 spec_hash: hash('b'),
                 next_scheduled_for: due,
@@ -191,7 +191,7 @@ async fn config_change_skips_old_queued_occurrence() {
         .expect("reconcile initial schedule");
     repository
         .materialize_schedule(MaterializeReportSchedule {
-            schedule_id: "primary".to_owned(),
+            schedule_id: "primary".into(),
             decision_policy_snapshot_id: version_id.clone(),
             spec_hash: hash('b'),
             expected_next_scheduled_for: due,
@@ -208,7 +208,7 @@ async fn config_change_skips_old_queued_occurrence() {
         .reconcile_schedules(
             &version_id,
             vec![ReconcileReportSchedule {
-                schedule_id: "primary".to_owned(),
+                schedule_id: "primary".into(),
                 decision_policy_snapshot_id: version_id.clone(),
                 spec_hash: hash('c'),
                 next_scheduled_for: due + Duration::minutes(2),

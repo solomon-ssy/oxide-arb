@@ -1,16 +1,19 @@
 //! Live CLOB connect probe: `private_key` only (no configured L2 trio).
 //!
 //! Run once to verify SDK `authenticate()` derives credentials at connect time:
-//! `QUANT_PIVOT_TEST_PRIVATE_KEY=0x... cargo test -p quant-pivot-api --test clob_connect_private_key_only -- --ignored --nocapture`
+//! `QUANT_PIVOT_TEST_PRIVATE_KEY_FILE=/run/credentials/polymarket-private-key cargo test -p quant-pivot-api --test clob_connect_private_key_only -- --ignored --nocapture`
 
 use quant_pivot_api::{clob::ClobClient, keystore::Keystore, wallet::WalletTopology};
 use quant_pivot_models::config::{KeysConfig, PolymarketConfig};
-use std::env::var;
+
+#[path = "credential_file.rs"]
+mod credential_file;
 
 #[tokio::test]
-#[ignore = "requires QUANT_PIVOT_TEST_PRIVATE_KEY and outbound network"]
+#[ignore = "requires permission-checked private-key credential file and outbound network"]
 async fn clob_connect_succeeds_with_private_key_only() {
-    let private_key = var("QUANT_PIVOT_TEST_PRIVATE_KEY").expect("QUANT_PIVOT_TEST_PRIVATE_KEY");
+    let private_key = credential_file::required_private_key()
+        .expect("permission-checked private-key credential file");
     let ks = Keystore::from_config(&KeysConfig {
         private_key: Some(private_key.into()),
     })

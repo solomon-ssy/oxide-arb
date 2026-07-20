@@ -144,117 +144,53 @@ snapshots when `SchemaBuilder` is embedded in a migration. References:
 [running migration](https://www.sea-ql.org/SeaORM/docs/migration/running-migration/),
 and [entity-first schema](https://www.sea-ql.org/SeaORM/docs/generate-entity/entity-first/).
 
-## Implementation Record (2026-07-17)
+## Implementation Record (2026-07-19)
 
 ### Delivered contracts
 
 - The workspace is pinned to Rust 1.97.1, SeaORM 2.0.0-rc.43, and SQLx 0.9.0.
   The dependency graph contains one SeaORM/SQLx generation.
-- `quant-pivot-migration` owns four audited SeaORM migrations. Runtime schema
-  verification reports 84 tables and 246 indexes; ClickHouse schema version 4
-  verifies 27 required objects. Runtime identities have no DDL path.
-- Runtime persistence uses SeaORM 2 dense entities, typed columns/relations,
-  PostgreSQL native enums/enum arrays, and typed repository commands. The old
-  `idens` and catalog-version dual models were deleted.
-- Catalog object/change ledgers, deterministic content hashes, baseline-bound
-  PIT reads, bounded keyset pagination, ID rechecks, typed rejection records,
-  and ambiguous-commit recovery are active. Projection and ledger commit in one
-  writer transaction; no post-commit visibility sleep or `committed -> failed`
-  transition remains.
-- Bootstrap uses the four-phase durable FSM with monotonic `state_revision`,
-  WORM transition audit, explicit approval-bound activation, typed capability
-  watches, and fail-closed singleton restore. Governed configuration is now six
-  independently revisioned boot-schema-1 policy resources; the former v17
-  aggregate is historical evidence only and has no parser or activation path.
-- Automatic parity freezes run subjects/candidates transactionally. A cold
-  store with no serving subject creates no run and opens no latch.
-- Research source registration, typed JCS attestations, deployment-scoped
-  deterministic key IDs, ClickHouse offline-safety classes, schema manifests,
-  and ReplacingMergeTree correctness lint are implemented. Evidence uses one
-  32-byte active BLAKE3 keyed-hash key plus optional historical verification
-  keys. Duplicate, malformed, and active-in-history configurations fail
-  closed. The 200-day gate was not reduced and fixtures cannot satisfy
-  production readiness.
-- Access JWTs are memory-only HS256 tokens signed by one Base64URL-no-pad
-  encoded 32-byte random key. Encode and decode fix the algorithm and validate
-  issuer, audience, subject, expiry, session family, typed `token_use`, and
-  media-type `typ`. Refresh families rotate through one Redis CAS script with
-  absolute session expiry; `expires_in` reflects absolute-session clipping.
-  WebSocket authentication uses a 30-second single-use session-bound ticket
-  rather than a query JWT. Replacing the active key immediately invalidates all
-  previously issued JWTs. Deploy validation also decodes both key materials and
-  rejects reuse of the JWT key as the evidence-attestation key.
-- PostgreSQL and ClickHouse migration credentials are optional redacted
-  secrets under their canonical `[db.*.migration]` sections. Deploy/xtask
-  profiles may resolve them through base TOML, local TOML, or the canonical
-  nested environment variables; migration commands require them. Production
-  runtime validation rejects configurations containing DDL passwords. Runtime
-  projections do not retain the passwords, and PostgreSQL URLs are assembled
-  through structured URL mutation with reserved-character coverage.
-- The protected operator UI now exposes one snapshot-driven Quant Command
-  Center: authoritative status and CTA, account KPIs, equity/drawdown, a polar
-  recommendation orbit, execution lifecycle, exposure, data quality, research
-  readiness, subsystem health, and a severity-ordered action inbox. Sections
-  are independently ready/stale/unavailable/forbidden, permissions are clipped
-  server-side, account data stays memory-only, and dynamic-route restoration
-  precedes catch-all 404 resolution.
-- Dashboard charts use the existing ECharts stack with ARIA/decal output and
-  equivalent keyboard-readable lists. Motion pauses when hidden or interacted
-  with and disables rotation, stagger, count-up, and material interpolation
-  under `prefers-reduced-motion`. The dashboard chart code is asynchronously
-  loaded and enforced against a 300 KiB gzip budget.
-- The WebSocket ingest pipeline uses bounded canonical batches, supervised
-  workers, explicit backpressure invalidation, and shutdown drain. ClickHouse
-  Rust rows use `u32` for schema columns declared `UInt32`; schema migration 4
-  converts the prior `UInt16` columns.
-- RPC errors redact URL userinfo/path/query/fragment in both `Display` and
-  `Debug`. Gamma keyset bodies are read with a 64 MiB hard bound; invalid
-  payload diagnostics persist only content type, byte length, and BLAKE3 hash.
-  JSON syntax/EOF failures retry inside the Gamma budget while structural data
-  drift remains a permanent reconcile rejection.
-- PostgreSQL deployment no longer seeds a known `admin/admin` credential. The
-  bootstrap administrator password is supplied through a permission-checked
-  secret file, hashed with Argon2id before the seed transaction, and never read
-  by the application runtime. The RBAC seed ledger records
-  `rbac.admin_user.bootstrap` version 2.
-- Dependency cleanup removed 33 unused Rust manifest entries. `cargo machete`,
-  nightly `cargo udeps`, UI Knip, circular-dependency checks, and production
-  bundle forbidden-pattern scans are part of the closeout gates.
-- PostgreSQL Docker test containers are bounded by an RAII-owned per-process
-  semaphore. This prevents an unconstrained parallel integration-test binary
-  from starving Docker Desktop's maintenance connections while guaranteeing
-  permit release on early return or panic.
+- `quant-pivot-migration` owns exactly one PostgreSQL boot migration. A
+  disposable PostgreSQL 16 clean boot reports 93 tables, 1,213 columns, 273
+  indexes, and 340 constraints. ClickHouse likewise owns one boot manifest at
+  system schema version 1. Runtime identities have no DDL path.
+- Governed configuration consists of six independently revisioned schema-1
+  resources. Activation is guarded by a database-authoritative bundle
+  generation, full revision vector, candidate hash, approval, preflight token,
+  and exact idempotency digest. Audit, outbox, activation, and snapshot commit
+  atomically; the reconciler publishes only committed bundles.
+- Policy and research profiles are immutable content-addressed artifacts.
+  Model specifications bind a typed thesis, input contract, training contract,
+  research profile artifact, schema version, and definition hash; training and
+  inference verify this lineage rather than carrying an unused JSON object.
+- Persistence uses entity-first SeaORM/SeaQuery, ActiveEnum/newtypes, native
+  PostgreSQL types, and closed typed JSON documents where the system owns a
+  stable key set. Only audited external payload boundaries remain open JSON.
+  Raw SQL is restricted to typed dialect modules for catalog/admin behavior or
+  expressions the ORM cannot represent.
+- Production seal acquires the shared lifecycle lease and rechecks live
+  PostgreSQL, ClickHouse, active policy bundle, clean compile-time build
+  identity, and content-addressed WORM evidence. Migration and reset mutations
+  fail closed after a frozen baseline.
+- The Config API, generated TypeScript contract, and UI share the same resource
+  registry. The UI covers validation, approval, activation, rollback, stale
+  generation, frozen/read-only, recovery, authorization, responsive,
+  accessibility, and reduced-motion states.
 
-### Clean-start evidence
+### Fresh-boot acceptance status
 
-The local target was confirmed from deploy config before destructive work.
-Only PostgreSQL database `quant_pivot`, ClickHouse database `quant_pivot`,
-Redis keys matching `qp:*`, and `var/artifacts` contents were reset. Audit files
-were retained and provider URLs in them were redacted.
+The repository schema has been booted from zero in a disposable PostgreSQL 16
+container and its semantic manifest regenerated from the resulting catalog.
+The guarded local preproduction reset remains intentionally pending until the
+operator confirms all previously exposed wallet, relayer, JWT/RPC, PostgreSQL,
+and ClickHouse credentials have been rotated and installed as permission-0600
+credential files. No old secret value may be read, copied, or reused.
 
-The final clean start produced one committed baseline with zero rejections:
-
-- 10,179 `catalog_event_object` rows and 79,136 `catalog_market_object` rows;
-- the same event/market counts in append-only change rows;
-- `initializing -> collecting_baseline -> awaiting_activation` with state
-  revision 2;
-- zero parity runs, parity latch rows, and recommendation reports.
-
-Historical pre-baseline evidence: a schema-v17 runtime config was once created, approved, and activated through
-`POST /api/system/bootstrap/activate` with the ReportOnlyForced
-acknowledgement. The durable state became `active`, revision 3,
-`report_only`; one version, approval, activation, and three FSM transitions are
-present. This ledger was superseded by the boot clean-break and is not a migration source. A subsequent process restart restored `active|3|report_only` without
-creating a parity run or latch row. The short-run log is
-`var/audit/2026-07-17/cold-start-closeout/runtime-post-fix.log`.
-
-The original reported signatures are absent from the post-fix log:
-
-- `failed to enqueue stream gap`;
-- `UInt16 as u32` / ClickHouse schema mismatch;
-- the deleted `mkt:__active__` registry path;
-- deterministic parity failure or latch-open containment.
-
+The eventual destructive scope is limited to PostgreSQL database
+`quant_pivot`, ClickHouse database `quant_pivot`, and Redis keys matching the
+validated non-empty `qp:` namespace. The local environment remains
+`pre_production_resettable`; irreversible production freeze is validated only
+in a disposable environment.
 ### Automated verification
 
 CI and local closeout use the same command inventory through

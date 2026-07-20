@@ -23,7 +23,8 @@ use quant_pivot_error::QuantResult;
 /// The runtime-config version is frozen at enqueue so the fit reads the exact
 /// `factors.structural.favorite_longshot` parameters (bins, gates, lead) that
 /// were active when the operator requested it — deterministic on replay.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BiasTableFitJobParams {
     /// The operator's fit request (window + reason).
     pub request: FitBiasTableRequest,
@@ -85,7 +86,8 @@ pub trait CalibrationArtifactFitPort: Send + Sync {
 }
 
 /// Frozen params for a durable `ModelCalibrationFit` research job (Phase 11.3 §4).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ModelCalibrationFitJobParams {
     /// The operator's fit request (target model + calibration dataset + method).
     pub request: FitModelCalibratorRequest,

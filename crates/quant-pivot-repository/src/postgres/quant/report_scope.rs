@@ -2,7 +2,7 @@
 
 use crate::postgres::primitives;
 use quant_pivot_error::storage::StorageError;
-use quant_pivot_models::enums::quant::ReportKind;
+use quant_pivot_models::{enums::quant::ReportKind, types::ResearchProfileId};
 use sea_orm::ConnectionTrait;
 
 /// Serialize every authority-changing mutation for one report scope.
@@ -12,7 +12,7 @@ use sea_orm::ConnectionTrait;
 /// may precede it only to discover the scope and must be revalidated afterward.
 pub(super) async fn acquire_report_scope_lock(
     db: &impl ConnectionTrait,
-    profile_id: &str,
+    profile_id: &ResearchProfileId,
     kind: ReportKind,
 ) -> Result<(), StorageError> {
     let scope = format!("{profile_id}:{}", kind.as_str());

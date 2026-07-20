@@ -446,7 +446,18 @@ impl TryFrom<Decimal> for TickSize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sea_orm::sea_query::{ArrayType, Value};
     use std::str::FromStr;
+
+    #[test]
+    fn postgres_enum_array_value_preserves_native_type_identity() {
+        let value = Value::from(vec![MarketCategory::Sports, MarketCategory::Crypto]);
+        let Value::Array(ArrayType::Enum(type_name), Some(values)) = value else {
+            panic!("MarketCategory array must bind as a PostgreSQL enum array");
+        };
+        assert_eq!(type_name.as_ref().as_ref(), "qp_market_category");
+        assert!(values.iter().all(|value| matches!(value, Value::Enum(_))));
+    }
 
     #[test]
     fn category_set_from_slugs_collects_every_match_and_ignores_unknowns() {

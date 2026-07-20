@@ -539,8 +539,11 @@ impl GammaService {
                             id: market_id.to_string(),
                             reason: "active projection has no immutable catalog object".to_owned(),
                         })?;
-                    let mut tombstone: MarketRegistryInfo =
-                        decode_catalog_payload("market", market_id.as_str(), prior.payload)?;
+                    let mut tombstone: MarketRegistryInfo = decode_catalog_payload(
+                        "market",
+                        market_id.as_str(),
+                        prior.payload.into_inner(),
+                    )?;
                     tombstone.status = MarketStatus::Delisted;
                     let event_id = tombstone.event_id.clone();
                     batch.registry_markets.push(tombstone);
@@ -555,7 +558,7 @@ impl GammaService {
                     batch.registry_events.push(decode_catalog_payload(
                         "event",
                         event_id.as_str(),
-                        prior_event.payload,
+                        prior_event.payload.into_inner(),
                     )?);
                     market_mutations.insert(market_id, CatalogMutation::tombstone());
                     tombstoned += 1;
@@ -854,7 +857,7 @@ fn build_event_candidates(
                 event_object_id: event_object_id.clone(),
                 content_hash,
                 schema_version: CATALOG_OBJECT_SCHEMA_VERSION,
-                payload,
+                payload: payload.into(),
             },
             change: NewCatalogEventChange {
                 event_change_id: CatalogEventChangeId::from_v7(),
@@ -933,7 +936,7 @@ fn build_market_candidates(
                 market_object_id,
                 content_hash,
                 schema_version: CATALOG_OBJECT_SCHEMA_VERSION,
-                payload,
+                payload: payload.into(),
             },
             market_change_id: CatalogMarketChangeId::from_v7(),
             catalog_sync_batch_id: batch_id.clone(),
@@ -1027,7 +1030,7 @@ fn build_catalog_rejections(
             source_id: (!rejection.condition_id.is_empty()).then(|| rejection.condition_id.clone()),
             reason_code: rejection_reason(&rejection.reject),
             detail: rejection.reject.to_string(),
-            raw_payload: rejection.raw_payload.clone(),
+            raw_payload: rejection.raw_payload.clone().map(Into::into),
         })
         .collect()
 }

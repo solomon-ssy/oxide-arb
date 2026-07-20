@@ -2,7 +2,7 @@
 
 use chrono::Utc;
 use quant_pivot_models::{
-    domain::{NewMarketSelection, NewModelRun, NewModelSpec, NewModelVersion, NewPortfolioPlan},
+    domain::{NewMarketSelection, NewModelRun, NewModelVersion, NewPortfolioPlan},
     entities::quant_portfolio_plan,
     enums::{
         model::ModelFamily,
@@ -15,7 +15,8 @@ use quant_pivot_models::{
         ContentHash, DecisionPolicySnapshotId, MarketSelectionId, ModelInputContract, ModelRunId,
         ModelSpecId, ModelTrainingContract, ModelVersionId, PortfolioConstraintsSnapshot,
         PortfolioOptimizerMeta, PortfolioPlanId, PortfolioRejectedSummary, PortfolioRiskBudget,
-        SchemaVersion, SelectionExclusionSummary, Usd,
+        SelectionExclusionSummary, Usd, model_metrics::ModelVersionMetrics,
+        model_training::ModelTrainingObjective,
     },
 };
 use quant_pivot_repository::{
@@ -47,18 +48,16 @@ async fn seed_model_run(
     let registry = PgModelRegistryRepository::new(db.clone());
     let model_spec_id = ModelSpecId::from_v7();
     registry
-        .create_model_spec(NewModelSpec {
-            model_spec_id: model_spec_id.clone(),
-            name: "portfolio-optimizer-meta-it".to_owned(),
-            model_family: ModelFamily::WeightedFactor,
-            prediction_horizon_secs: 86_400,
-            feature_schema_version: SchemaVersion::FIRST,
-            label_schema_version: SchemaVersion::FIRST,
-            spec_json: serde_json::json!({}),
-            input_contract: ModelInputContract::single_required("book.mid"),
-            training_contract: ModelTrainingContract::settlement_default(),
-            status: PublicationStatus::Published,
-        })
+        .create_model_spec(
+            quant_pivot_test_support::model_spec_fixtures::new_model_spec_fixture(
+                model_spec_id.clone(),
+                "portfolio-optimizer-meta-it",
+                ModelFamily::WeightedFactor,
+                86_400,
+                ModelInputContract::single_required("book.mid"),
+                ModelTrainingContract::settlement_default(),
+            ),
+        )
         .await
         .expect("model spec");
 
@@ -75,9 +74,10 @@ async fn seed_model_run(
             trade_policy_artifact_id: None,
             trade_policy_hash: None,
             publish_path_set_id: None,
-            metrics_json: serde_json::json!({}),
-            training_objective_json: serde_json::json!({"kind": "not_trained"}),
-            quality_gate_report: serde_json::json!({}),
+            derivation: NewModelVersion::training_derivation(),
+            metrics: ModelVersionMetrics::not_measured("test fixture"),
+            training_objective: ModelTrainingObjective::hand_authored("test fixture"),
+            quality_gate_report: None,
             publication_status: PublicationStatus::Candidate,
             published_at: None,
             retired_at: None,
@@ -98,7 +98,6 @@ async fn seed_model_run(
             status: ModelRunStatus::Succeeded,
             input_hash: content_hash('d'),
             output_hash: None,
-            metrics_json: serde_json::json!({}),
             error_code: None,
             error_message: None,
             started_at: Utc::now(),

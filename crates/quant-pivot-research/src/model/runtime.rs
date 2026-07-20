@@ -9,7 +9,10 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     domain::ModelVersionInfo,
-    enums::{common::MarketCategory, quant::DataQualityStatus},
+    enums::{
+        common::MarketCategory,
+        quant::{DataQualityStatus, ModelWeightSource},
+    },
     runtime_config::FactorCrossSectionConfig,
     types::{ContentHash, MarketId, ModelRunId, ModelVersionId, Price, TokenId, Usd},
 };
@@ -20,11 +23,7 @@ pub use quant_pivot_models::enums::model::{ClassicalKind, ModelFamily, ModelFami
 use crate::{
     factors::{FactorValue, FrozenReferenceQuantiles},
     features::{FeatureCell, FeatureName, NullReason},
-    model::{
-        overlay::{WeightOverlay, WeightSource},
-        sell_scorer::SellScorerRuntime,
-        signal::SignalCandidate,
-    },
+    model::{overlay::WeightOverlay, sell_scorer::SellScorerRuntime, signal::SignalCandidate},
 };
 
 /// Per-market context the scorer needs beyond the factor vector.
@@ -259,11 +258,11 @@ pub trait QuantModelRuntime: Send + Sync {
     }
 
     /// Whether this runtime is scoring on its frozen artifact weights or on a
-    /// runtime-config weight overlay. Defaults to [`WeightSource::Artifact`];
+    /// runtime-config weight overlay. Defaults to [`ModelWeightSource::Artifact`];
     /// only the weighted-factor runtime overrides it. Surfaced into the run
     /// metrics for governance audit (3.7).
-    fn weight_source(&self) -> WeightSource {
-        WeightSource::Artifact
+    fn weight_source(&self) -> ModelWeightSource {
+        ModelWeightSource::Artifact
     }
 
     /// Weighted-only normalization policy frozen in the artifact.

@@ -19,8 +19,10 @@ pub struct Model {
     pub slug: String,
     #[sea_orm(column_type = "Text", nullable)]
     pub description: Option<String>,
+    #[sea_orm(column_type = r#"custom("qp_market_category[]")"#)]
     pub categories: Vec<QpMarketCategory>,
     pub status: QpMarketStatus,
+    #[sea_orm(column_type = r#"custom("qp_catalog_filter_reason[]")"#)]
     pub filter_reasons: Vec<QpCatalogFilterReason>,
     #[sea_orm(column_type = "Text", nullable)]
     pub outcome: Option<String>,

@@ -35,10 +35,10 @@ use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
     domain::{
         BiasTableFitJobParams, BiasTableFitOutcome, CalibrationArtifactFitPort,
-        CalibrationArtifactInfo, CalibrationArtifactListQuery, DecisionClock, JobProgressSink,
-        Paginated, WeatherStationLeadBiasArtifactV1, WindowBoundsError, query::TimeWindow,
+        CalibrationArtifactInfo, CalibrationArtifactListQuery, CalibrationArtifactPayload,
+        DecisionClock, JobProgressSink, Paginated, WindowBoundsError, query::TimeWindow,
     },
-    enums::{common::MarketCategory, quant::CalibrationKind},
+    enums::common::MarketCategory,
     runtime_config::{DataQualityConfig, DomainConfig, FactorsConfig, FavoriteLongshotConfig},
     types::{CalibrationArtifactId, MarketId, ResearchJobProgress, TokenId},
 };
@@ -48,77 +48,35 @@ use quant_pivot_repository::traits::{
 };
 use quant_pivot_research::{
     features::ResolvedBook,
-    model::favorite_longshot::{
-        BiasFitConfig, BiasSample, CategoryBiasCurve, FavoriteLongshotBiasTable,
-    },
+    model::favorite_longshot::{BiasFitConfig, BiasSample, FavoriteLongshotBiasTable},
     pit::PointInTimeSnapshotSource,
 };
 use rust_decimal::Decimal;
 
 use crate::{
-    governance::ModelScoreCalibrationPayload,
     prefetch::historical_window::{HistoricalWindowLoader, ReplaySample, WindowSpec},
     service::calibration_shared::{
         assert_disjoint_from_all_training_datasets, calibration_split_hash,
     },
 };
 
-/// Validate that `info.payload_json` actually deserializes into the shape its
-/// declared `kind` promises, **before** serving it to a read-only detail view
-/// (Phase 11.3 closed-loop hardening — closes the "kind says X, payload is
-/// shaped like Y" drift that a raw `payload_json` pass-through could
-/// otherwise surface as a broken frontend render rather than a clear server
-/// error). Deliberately **does not** re-verify content hash or `active`: an
-/// operator must still be able to inspect a superseded / historical artifact's
-/// full detail — those two invariants are enforced at the *consumption* points
-/// (`CoreCalibrationArtifactLoader::load`, `BiasTableApplicator::reload`), not
-/// at read-only display.
+/// Validate the relational discriminator against the already-decoded payload.
 ///
 /// # Errors
 ///
 /// Returns an error when the payload cannot deserialize into the shape its
 /// `kind` promises.
 fn validate_payload_shape(info: &CalibrationArtifactInfo) -> QuantResult<()> {
-    match info.kind {
-        CalibrationKind::ModelScore => {
-            serde_json::from_value::<ModelScoreCalibrationPayload>(info.payload_json.clone())
-                .map_err(|error| {
-                    QuantError::from(ResearchError::DatasetBuild {
-                        detail: format!(
-                            "calibration artifact `{}` declares kind `model_score` but its \
-                             payload does not deserialize as one: {error}",
-                            info.artifact_id
-                        ),
-                    })
-                })?;
+    if info.payload.kind() != info.kind {
+        return Err(ResearchError::DatasetBuild {
+            detail: format!(
+                "calibration artifact `{}` relational kind `{}` disagrees with payload kind `{}`",
+                info.artifact_id,
+                info.kind.as_str(),
+                info.payload.kind().as_str()
+            ),
         }
-        CalibrationKind::MarketPriceBias => {
-            serde_json::from_value::<BTreeMap<MarketCategory, CategoryBiasCurve>>(
-                info.payload_json.clone(),
-            )
-            .map_err(|error| {
-                QuantError::from(ResearchError::DatasetBuild {
-                    detail: format!(
-                        "calibration artifact `{}` declares kind `market_price_bias` but its \
-                         payload does not deserialize as one: {error}",
-                        info.artifact_id
-                    ),
-                })
-            })?;
-        }
-        CalibrationKind::WeatherStationLeadBias => {
-            serde_json::from_value::<WeatherStationLeadBiasArtifactV1>(info.payload_json.clone())
-                .map_err(|error| {
-                QuantError::from(ResearchError::DatasetBuild {
-                    detail: format!(
-                        "calibration artifact `{}` declares kind \
-                             `weather_station_lead_bias` but its payload does not deserialize as \
-                             one: {error}",
-                        info.artifact_id
-                    ),
-                })
-            })?;
-        }
+        .into());
     }
     Ok(())
 }
@@ -510,20 +468,19 @@ impl CalibrationArtifactFitPort for BiasTableFitService {
 
         progress.report(ResearchJobProgress::with_total("persist", 0, 1));
         let persisted = self.persist(table).await?;
-        let category_count = u64::try_from(
-            persisted
-                .payload_json
-                .as_object()
-                .ok_or_else(|| ResearchError::Serialization {
-                    detail: format!(
-                        "persisted bias-table artifact {} payload is not an object",
-                        persisted.artifact_id
-                    ),
-                })?
-                .len(),
-        )
-        .map_err(|error| ResearchError::Serialization {
-            detail: format!("bias-table category count exceeds u64: {error}"),
+        let CalibrationArtifactPayload::MarketPriceBias(payload) = &persisted.payload else {
+            return Err(ResearchError::Serialization {
+                detail: format!(
+                    "persisted bias-table artifact {} has the wrong payload kind",
+                    persisted.artifact_id
+                ),
+            }
+            .into());
+        };
+        let category_count = u64::try_from(payload.by_category.len()).map_err(|error| {
+            ResearchError::Serialization {
+                detail: format!("bias-table category count exceeds u64: {error}"),
+            }
         })?;
         Ok(BiasTableFitOutcome {
             artifact_id: Some(persisted.artifact_id),
@@ -589,17 +546,19 @@ const fn book_staleness(data_quality: &DataQualityConfig) -> StdDuration {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::validate_payload_shape;
     use chrono::Utc;
     use quant_pivot_models::{
-        domain::CalibrationArtifactInfo,
+        domain::{CalibrationArtifactInfo, CalibrationArtifactPayload},
         enums::quant::CalibrationKind,
-        types::{CalibrationArtifactId, ContentHash},
+        types::{CalibrationArtifactId, ContentHash, calibration::MarketPriceBiasPayload},
     };
 
     fn base_info(
         kind: CalibrationKind,
-        payload_json: serde_json::Value,
+        payload: CalibrationArtifactPayload,
     ) -> CalibrationArtifactInfo {
         let hash = ContentHash::parse(format!("blake3:{}", "0".repeat(64))).expect("hash");
         CalibrationArtifactInfo {
@@ -610,7 +569,7 @@ mod tests {
             fit_window_end: Utc::now(),
             calibration_split_hash: hash,
             sample_count: 100,
-            payload_json,
+            payload,
             active: true,
             created_at: Utc::now(),
         }
@@ -620,29 +579,26 @@ mod tests {
     fn rejects_model_score_kind_with_market_price_bias_shaped_payload() {
         // The exact "kind says X, payload is shaped like Y" drift this guard
         // exists to catch before serving a broken payload to the detail view.
-        let info = base_info(CalibrationKind::ModelScore, serde_json::json!({}));
-        assert!(
-            validate_payload_shape(&info).is_err(),
-            "an empty object is not a valid ModelScoreCalibrationPayload"
-        );
-    }
-
-    #[test]
-    fn rejects_market_price_bias_kind_with_non_map_payload() {
         let info = base_info(
-            CalibrationKind::MarketPriceBias,
-            serde_json::json!("not-a-map"),
+            CalibrationKind::ModelScore,
+            CalibrationArtifactPayload::MarketPriceBias(MarketPriceBiasPayload {
+                by_category: BTreeMap::new(),
+            }),
         );
         assert!(
             validate_payload_shape(&info).is_err(),
-            "a bare string is not a valid by-category bias curve map"
+            "the relational kind must match the typed payload discriminator"
         );
     }
 
     #[test]
     fn accepts_well_formed_market_price_bias_payload() {
-        // An empty map is a structurally valid (if practically inert) payload.
-        let info = base_info(CalibrationKind::MarketPriceBias, serde_json::json!({}));
+        let info = base_info(
+            CalibrationKind::MarketPriceBias,
+            CalibrationArtifactPayload::MarketPriceBias(MarketPriceBiasPayload {
+                by_category: BTreeMap::new(),
+            }),
+        );
         assert!(validate_payload_shape(&info).is_ok());
     }
 }

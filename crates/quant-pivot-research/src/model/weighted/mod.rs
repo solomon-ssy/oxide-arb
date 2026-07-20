@@ -29,7 +29,7 @@ use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{
     enums::{
         common::MarketCategory,
-        quant::{DataQualityStatus, OutcomeSide},
+        quant::{DataQualityStatus, ModelWeightSource, OutcomeSide},
     },
     runtime_config::FactorCrossSectionConfig,
     types::{
@@ -45,7 +45,7 @@ use crate::{
     model::{
         artifact::WeightedFactorModelArtifact,
         calibrator::ResolvedCalibration,
-        overlay::{WeightOverlay, WeightSource},
+        overlay::WeightOverlay,
         runtime::{
             FactorInferenceRow, FactorInferenceTable, MarketInferenceContext, ModelFamily,
             ModelInputAuditRow, ModelInputAuditState, ModelRuntimeInput, ModelRuntimeMetrics,
@@ -66,7 +66,7 @@ pub struct WeightedFactorRuntime {
     artifact: WeightedFactorModelArtifact,
     weights: BTreeMap<FactorName, Decimal>,
     batch_layout: ScoringBatchLayout,
-    weight_source: WeightSource,
+    weight_source: ModelWeightSource,
     /// Resolved `ProbabilityCalibrator` data when `artifact.return_model` is
     /// `Calibrated` (Phase 11.3 §5) — bound once at load time by the factory,
     /// never re-fetched per candidate. `None` for `Heuristic`.
@@ -84,9 +84,9 @@ impl WeightedFactorRuntime {
     ///
     /// When `overlay` is `Some`, it **replaces** the artifact's weight table
     /// (fail-closed: it must cover exactly the artifact's factor set) and the
-    /// runtime records [`WeightSource::ConfigOverlay`]. The overlay never alters
+    /// runtime records [`ModelWeightSource::ConfigOverlay`]. The overlay never alters
     /// the artifact bytes or its content hash. When `None`, the frozen artifact
-    /// weights are used ([`WeightSource::Artifact`]).
+    /// weights are used ([`ModelWeightSource::Artifact`]).
     ///
     /// # Errors
     ///
@@ -103,9 +103,9 @@ impl WeightedFactorRuntime {
         let (weights, weight_source) = match overlay {
             Some(overlay) => (
                 overlay.resolve_against(&artifact_weights)?,
-                WeightSource::ConfigOverlay,
+                ModelWeightSource::ConfigOverlay,
             ),
-            None => (artifact_weights, WeightSource::Artifact),
+            None => (artifact_weights, ModelWeightSource::Artifact),
         };
         let batch_layout = ScoringBatchLayout::from_weights(&weights)?;
         Ok(Self {
@@ -398,7 +398,7 @@ impl QuantModelRuntime for WeightedFactorRuntime {
         self.artifact.category_scope
     }
 
-    fn weight_source(&self) -> WeightSource {
+    fn weight_source(&self) -> ModelWeightSource {
         self.weight_source
     }
 
@@ -543,8 +543,8 @@ mod tests {
         },
         runtime_config::FactorCrossSectionConfig,
         types::{
-            ContentHash, FactorDefinitionId, MarketId, ModelInputContract, ModelRunId,
-            ModelVersionId, Price, Probability, TokenId, Usd, builtin_research_profiles,
+            FactorDefinitionId, MarketId, ModelInputContract, ModelRunId, ModelVersionId, Price,
+            Probability, TokenId, Usd, builtin_research_profiles,
         },
     };
     use rust_decimal_macros::dec;
@@ -566,12 +566,8 @@ mod tests {
                 ModelInputAuditState, ModelRuntimeInput, QuantModelRuntime,
             },
         },
+        test_support::content_hash as hash,
     };
-
-    fn hash(seed: &str) -> ContentHash {
-        let hex = format!("{seed:0>64}");
-        ContentHash::parse(format!("blake3:{hex}")).expect("hash")
-    }
 
     fn factor(
         name: FactorName,
@@ -601,6 +597,7 @@ mod tests {
         WeightedFactorModelArtifact {
             header: ModelArtifactHeader {
                 model_version_id: ModelVersionId::from_v7(),
+                model_spec_definition_hash: hash("spec"),
                 profile_ref: builtin_research_profiles()
                     .expect("built-in profiles")
                     .remove(0)

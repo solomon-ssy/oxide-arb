@@ -21,7 +21,7 @@ mod simulator;
 pub use calendarize::{
     CalendarReturn, active_observation_count, calendarize_lot_returns, mean_calendar_return,
 };
-pub use comparison::{CategoryRankIcDelta, ModelComparisonReport, compare_reports};
+pub use comparison::{ModelComparisonReport, compare_reports};
 pub use lot_replay::{
     LotBacktestInputs, LotBacktestRunResult, LotBacktester, LotDecisionSequence, LotOutcome,
     LotReplayBacktester, SellNullBaseline, replay_lot_null_baseline,
@@ -42,6 +42,7 @@ use quant_pivot_models::{
     types::{
         BacktestReportId, ContentHash, DecisionPolicySnapshotId, EventId, MarketId, ModelVersionId,
         Price, Probability, Shares, TokenId, Usd,
+        backtest::{CategoryMetric, ExpectedVsRealized, PnlSimulation},
     },
 };
 use rust_decimal::Decimal;
@@ -196,56 +197,6 @@ pub struct BacktestInputs<'a> {
     pub ticks: Vec<BacktestTick>,
     /// Portfolio caps for the greedy allocator.
     pub caps: PortfolioCaps,
-}
-
-/// The expected-vs-realized agreement summary.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ExpectedVsRealized {
-    /// Mean predicted expected return (bps).
-    pub mean_expected_bps: Decimal,
-    /// Mean realized return (bps).
-    pub mean_realized_bps: Decimal,
-    /// Pearson correlation between predicted and realized return.
-    pub correlation: Decimal,
-    /// Mean prediction bias (`expected - realized`, bps).
-    pub bias_bps: Decimal,
-}
-
-/// Per-category performance breakdown (domain slice diagnostics).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CategoryMetric {
-    /// Market category.
-    pub category: MarketCategory,
-    /// Resolved samples in this category.
-    pub sample_count: u64,
-    /// Rank IC within the category.
-    pub rank_ic: Decimal,
-    /// Hit rate within the category.
-    pub hit_rate: Probability,
-    /// Mean realized return (bps) within the category.
-    pub mean_realized_bps: Decimal,
-}
-
-/// One point of the cumulative realized-PnL curve after a tick.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PnlCurvePoint {
-    /// Tick decision time.
-    pub decision_at: DateTime<Utc>,
-    /// Cumulative realized `PnL` (USD) through this tick.
-    pub cumulative_realized_pnl_usd: Decimal,
-}
-
-/// Portfolio-level `PnL` simulation summary.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PnlSimulation {
-    /// Total capital allocated across all ticks.
-    pub total_allocated_usd: Decimal,
-    /// Total realized `PnL` (USD).
-    pub realized_pnl_usd: Decimal,
-    /// Realized `PnL` as a fraction of total allocated capital.
-    pub gross_return: Decimal,
-    /// Cumulative realized-PnL curve.
-    pub pnl_curve: Vec<PnlCurvePoint>,
 }
 
 /// A point-in-time backtest report (the persisted, content-addressed summary).

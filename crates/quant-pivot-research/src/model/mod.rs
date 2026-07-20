@@ -40,14 +40,13 @@ pub use artifact::{
     model_input_contract_hash,
 };
 pub use calibration::{
-    CalibrationReport, CalibrationResult, CalibrationSample, StratumFit,
-    calibrate_horizon_multipliers, calibrate_liquidity_multipliers, calibrate_score_multipliers,
-    calibrate_substitution_rules, calibrate_weighted_artifact,
+    CalibrationResult, CalibrationSample, calibrate_horizon_multipliers,
+    calibrate_liquidity_multipliers, calibrate_score_multipliers, calibrate_substitution_rules,
+    calibrate_weighted_artifact,
 };
 pub use calibrator::{
-    CalibrationArtifactLoader, IsotonicKnot, MonotoneMapping, ProbabilityCalibrator,
-    ResolvedCalibration, apply_mapping, isotonic::IsotonicCalibrator, platt::PlattCalibrator,
-    validate_mapping,
+    CalibrationArtifactLoader, ProbabilityCalibrator, ResolvedCalibration, apply_mapping,
+    isotonic::IsotonicCalibrator, platt::PlattCalibrator, validate_mapping,
 };
 pub use category_scope::{infer_training_category_scope, validate_category_scope_weights};
 #[cfg(feature = "ml-classical")]
@@ -62,12 +61,10 @@ pub use factory::{
     ActiveSchemaBinding, DefaultModelRuntimeFactory, DefaultModelRuntimeFactoryBuilder,
     ModelRuntimeFactoryBuilder, load_hash_verified_artifact,
 };
-pub use favorite_longshot::{
-    BiasFitConfig, BiasSample, CategoryBiasCurve, FavoriteLongshotBiasTable, PriceBiasBin,
-};
-pub use objective::{ObjectiveComponentReport, RankingDiagnostics, TrainingObjectiveSpec};
-pub use overlay::{WeightOverlay, WeightSource};
-pub use reliability::{ReliabilityBin, ReliabilityReport, ReliabilitySample, compute_reliability};
+pub use favorite_longshot::{BiasFitConfig, BiasSample, FavoriteLongshotBiasTable};
+pub use objective::{ObjectiveComponentReport, RankingDiagnostics};
+pub use overlay::WeightOverlay;
+pub use reliability::{ReliabilitySample, compute_reliability};
 pub use routing::{
     ModelRouting, generic_model_version_id, resolve_model_route, version_id_for_category,
 };

@@ -3,7 +3,6 @@
 use chrono::{DateTime, Utc};
 use quant_pivot_macros::NormalizePageQuery;
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 use validator::Validate;
 
 use crate::{
@@ -12,23 +11,25 @@ use crate::{
         TradePolicyValidationRowInfo, TradePolicyValidationRunInfo, pagination::PageRequest,
     },
     enums::quant::{
-        ResearchReadinessEvidenceKind, TradePolicyGovernanceAction, TradePolicyStatus,
-        TradePolicyTrialScope, TradePolicyTrialStatus, TradePolicyValidationStatus,
+        DatasetPurpose, ResearchReadinessEvidenceKind, TradePolicyGovernanceAction,
+        TradePolicyStatus, TradePolicyTrialScope, TradePolicyTrialStatus,
+        TradePolicyValidationStatus, TrainingDatasetStatus,
     },
     types::{
         ArtifactUri, ContentHash, DecisionPolicySnapshotId, MarketId, ResearchEvaluationTrack,
-        ResearchJobId, ResearchProfileArtifact, ResearchProfileRef, SourceSliceId,
-        SourceSliceManifestRef, SourceSliceObjectKind, SourceSliceObjectRef, TokenId,
-        TradePolicyArtifactId, TradePolicyArtifactPayload, TradePolicyCandidateSpec,
-        TradePolicyEvidenceObjectKind, TradePolicyGovernanceAuditId, TradePolicyPublicationBlocker,
-        TradePolicyTrialAttemptId, TradePolicyTrialMetrics, TradePolicyValidationRunId,
-        TrainingDatasetId, TrainingExampleId, resolve_builtin_research_profile,
+        ResearchJobId, ResearchPolicyFitter, ResearchProfileArtifact, ResearchProfileRef,
+        ResearchReadinessEvidenceId, ShadowLatencyProfileV1, SourceSliceId, SourceSliceManifestRef,
+        SourceSliceObjectKind, SourceSliceObjectRef, TokenId, TradePolicyArtifactId,
+        TradePolicyArtifactPayload, TradePolicyCandidateSpec, TradePolicyEvidenceObjectKind,
+        TradePolicyGovernanceAuditId, TradePolicyPublicationBlocker, TradePolicyTrialAttemptId,
+        TradePolicyTrialMetrics, TradePolicyValidationRunId, TrainingDatasetId, TrainingExampleId,
+        UserId, resolve_builtin_research_profile,
     },
 };
 
 /// Caller-owned fit selection. Window, horizon, cash budget, methodology,
 /// latency profile, and publication floors are resolved by the server.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TradePolicyFitSelection {
     pub profile_ref: ResearchProfileRef,
@@ -41,7 +42,7 @@ impl TradePolicyFitSelection {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Validate)]
 pub struct FitTradePolicyRequest {
     pub selection: TradePolicyFitSelection,
     pub evaluation_track: ResearchEvaluationTrack,
@@ -181,7 +182,7 @@ pub struct TradePolicyGovernanceAuditView {
     pub from_status: TradePolicyStatus,
     pub to_status: TradePolicyStatus,
     pub content_hash: ContentHash,
-    pub actor_id: Uuid,
+    pub actor_id: UserId,
     pub reason: String,
     pub created_at: DateTime<Utc>,
 }
@@ -217,7 +218,7 @@ pub struct TradePolicyValidationRunView {
     pub failed_rows: i64,
     pub validation_hash: Option<ContentHash>,
     pub failure_detail: Option<String>,
-    pub actor_id: Uuid,
+    pub actor_id: UserId,
     pub reason: String,
     pub started_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
@@ -478,7 +479,7 @@ pub struct TradePolicyFitPreflightView {
 /// remain server-side; operators use the stable hash/version identity.
 #[derive(Debug, Clone, Serialize)]
 pub struct TradePolicyOperationalEvidenceView {
-    pub evidence_id: Uuid,
+    pub evidence_id: ResearchReadinessEvidenceId,
     pub kind: ResearchReadinessEvidenceKind,
     pub payload_hash: ContentHash,
     pub artifact_version: String,
@@ -497,32 +498,64 @@ pub enum TradePolicyFitReadiness {
     Reusable,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TradePolicyPreflightBlockerKind {
-    ContractInvalid,
-    ProfileFitterUnavailable,
-    DatasetNotReady,
-    DatasetPurposeMismatch,
-    RawTrajectoryLabelsMissing,
-    ProfileLineageMismatch,
-    SourceSliceUnverified,
-    FitWindowNotContained,
+/// Closed, server-owned facts for one actionable policy-fit denial.
+///
+/// Static requirements are represented by the discriminator and localized UI
+/// copy; only observed or request-dependent facts travel on the wire.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TradePolicyPreflightBlockerDetail {
+    ContractInvalid {
+        diagnostics: Vec<String>,
+    },
+    ProfileFitterUnavailable {
+        configured_fitter: Option<ResearchPolicyFitter>,
+    },
+    DatasetNotReady {
+        actual_status: Option<TrainingDatasetStatus>,
+    },
+    DatasetPurposeMismatch {
+        actual_purpose: Option<DatasetPurpose>,
+    },
+    RawTrajectoryLabelsMissing {
+        labels_matured_by_cutoff: u64,
+        labels_excluded_after_cutoff: u64,
+    },
+    ProfileLineageMismatch {
+        actual_profile_ref: Option<ResearchProfileRef>,
+        required_profile_ref: ResearchProfileRef,
+    },
+    SourceSliceUnverified {
+        diagnostics: Vec<String>,
+    },
+    FitWindowNotContained {
+        dataset_window_start: Option<DateTime<Utc>>,
+        dataset_window_end: Option<DateTime<Utc>>,
+        required_window_start: Option<DateTime<Utc>>,
+        required_window_end: Option<DateTime<Utc>>,
+    },
     QualityGateUnavailable,
-    PitCutoffInvalid,
+    PitCutoffInvalid {
+        pit_cutoff: DateTime<Utc>,
+        fit_window_end: Option<DateTime<Utc>>,
+        not_future: bool,
+    },
     FullL2TrajectoryMissing,
     PitFeeFactsMissing,
-    ProductionLatencyProfileMissing,
-    RetentionRunwayUnproven,
+    ProductionLatencyProfileMissing {
+        observed_profile: Option<ShadowLatencyProfileV1>,
+    },
+    RetentionRunwayUnproven {
+        actual_runway_days: Option<u32>,
+        required_minimum_days: Option<u32>,
+    },
 }
 
-/// Actionable, server-derived denial. `actual` and `required` retain their
-/// native JSON scalar/object shapes; callers never parse prose to recover facts.
+/// Actionable, server-derived denial with a closed discriminated fact shape.
 #[derive(Debug, Clone, Serialize)]
 pub struct TradePolicyPreflightBlockerView {
-    pub kind: TradePolicyPreflightBlockerKind,
-    pub actual: serde_json::Value,
-    pub required: serde_json::Value,
+    #[serde(flatten)]
+    pub detail: TradePolicyPreflightBlockerDetail,
     pub remediation: String,
     pub evidence_link: Option<String>,
 }

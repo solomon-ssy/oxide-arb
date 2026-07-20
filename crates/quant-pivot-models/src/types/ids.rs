@@ -72,6 +72,30 @@ pub struct OrderId(Arc<str>);
 #[derive(StrId, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DomainSourceId(Arc<str>);
 
+/// Stable project-owned research-profile name.
+#[derive(StrId, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ResearchProfileId(Arc<str>);
+
+/// End-to-end request/correlation identity across HTTP and internal actions.
+#[derive(StrId, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CorrelationId(Arc<str>);
+
+/// Stable RBAC role code used in governed audit context.
+#[derive(StrId, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RoleCode(Arc<str>);
+
+/// Stable semantic operation name recorded in the append-only audit log.
+#[derive(StrId, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct OperationAction(Arc<str>);
+
+/// Stable configured report-schedule identity.
+#[derive(StrId, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ReportScheduleId(Arc<str>);
+
+/// Machine-readable diagnostic code; human detail is stored separately.
+#[derive(StrId, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DiagnosticCode(Arc<str>);
+
 impl DomainSourceId {
     /// The Binance spot kline source.
     #[must_use]
@@ -576,6 +600,20 @@ impl DecisionPolicySnapshotId {
     }
 }
 
+/// Content-addressed immutable policy-profile artifact identifier.
+#[derive(UuidId, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ProfileArtifactId(Arc<Uuid>);
+
+impl ProfileArtifactId {
+    /// Derive a stable row identity from the profile kind and canonical content hash.
+    #[must_use]
+    pub fn from_content_address(kind: &str, content_hash: &ContentHash) -> Self {
+        const NAMESPACE: Uuid = Uuid::from_u128(0x8fe9_fea3_9f92_51d7_a432_3bcf_59f5_d6dd);
+        let address = format!("{kind}:{}", content_hash.as_str());
+        Self::new(Uuid::new_v5(&NAMESPACE, address.as_bytes()))
+    }
+}
+
 /// Governed policy-resource activation identifier.
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PolicyActivationId(Arc<Uuid>);
@@ -595,6 +633,14 @@ impl ProductionBaselineId {
         Self::new(Uuid::from_u128(0x1f0e_1c5e_0000_5000_8000_0000_0000_0001))
     }
 }
+
+/// Immutable backup/restore or protected-E2E production-seal evidence row.
+#[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ProductionEvidenceId(Arc<Uuid>);
+
+/// One-time guarded preproduction-reset plan and confirmation nonce.
+#[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PreproductionResetNonce(Arc<Uuid>);
 
 /// Append-only operation-log row identifier.
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
@@ -632,6 +678,22 @@ pub struct MenuId(Arc<Uuid>);
 /// Append-only operation-log row identifier.
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct OperationLogId(Arc<Uuid>);
+
+/// Process/lease/claim owner identity used by durable workers.
+#[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct WorkerId(Arc<Uuid>);
+
+/// Immutable research-readiness evidence row identifier.
+#[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ResearchReadinessEvidenceId(Arc<Uuid>);
+
+/// Calibration artifact publication ledger identifier.
+#[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CalibrationArtifactPublicationId(Arc<Uuid>);
+
+/// Entry-condition evaluation outbox row identifier.
+#[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct EntryConditionEvaluationOutboxId(Arc<Uuid>);
 
 #[cfg(test)]
 mod tests {

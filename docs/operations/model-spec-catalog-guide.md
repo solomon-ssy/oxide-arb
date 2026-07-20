@@ -2,7 +2,7 @@
 
 面向**量化 / 运维 / 研发**：回答「要不要为不同 `model_family` 或不同业务场景创建多个 model spec？」以及生产级闭环下的推荐做法。
 
-> 当前唯一契约是 runtime **v10** / feature **v6** / dataset+model artifact **v2**。
+> 当前 system-owned 契约统一从 **v1** 起步；API `/api/v1` 与外部协议版本不属于该版本域。
 > category pointer **缺席**时可使用 generic default；pointer 一旦已配置，load/scope/inference 任一失败
 > 必须使整轮报告失败，不得回退 generic 或 `ZeroWeight`。
 
@@ -33,16 +33,24 @@ RuntimeConfig.model（同时在线的「插槽」，各 1 个）
 
 | 层级 | 存什么 | 创建入口 | 典型数量 |
 |------|--------|----------|----------|
-| **ModelSpec** | 名称、`model_family`、声明性 `prediction_horizon_secs`、schema 版本、typed `input_contract` / `training_contract`、`spec_json` | `POST /research/model-specs` | 按**研究线**规划，不是按每次实验 |
+| **ModelSpec** | 名称、`model_family`、`prediction_horizon_secs`、schema 版本、typed `thesis` / `input_contract` / `training_contract`、`definition_hash` | `POST /research/model-specs` | 按**研究线**规划，不是按每次实验 |
 | **ModelVersion** | 冻结 artifact（权重、乘子、horizon 等） | `POST /research/models/train` 或治理导入 | 同一 spec 下可有很多版本 |
 | **ModelRouting 指针** | 当前线上用哪个 published artifact | Config 控制台选择 artifact，经 validate/approve/activate | Buy 1 + Shadow 0–1 + Exit 0–1 |
 
 **硬规则（已实现）**：
 
-- 同一 `model_spec_id` 下，publish 时会 **retire 该 spec 的其他 Published 版本**（单 spec 单 active published 不变量）。
-- publish 会把对应 version 写入 **全局** `active_model_version_id` 或 `active_exit_model_version_id`（按 family 路由）；**整个系统同一时刻只有 1 个 Buy active、1 个 Exit active**。
+- 同一 spec 可以保留多个不可变 Published 版本；实际生效者只由受治理的 ModelRouting 指针决定，retire 必须显式执行。
+- 激活对应 version 时写入 `active_model_version_id`、`active_exit_model_version_id` 或 category pointer；**每个路由槽位只有一个 active artifact**。
 - `Published` artifact **不可变**；修正必须 train 新版本 → backtest → publish。
-- Draft spec **不能**线上推理；必须至少有一个 Published version 且指针已配置。
+- ModelSpec 创建后即为 append-only research definition，没有 Draft/Published/Retired 状态；Candidate/Shadow/Published/Retired 只属于训练后的 ModelVersion。
+
+### 1.1 ModelSpec 与版本级 Model Card 的边界
+
+`ModelSpec` 不是“未来可能会用到的任意 JSON”，也不是训练结果容器。它冻结一条研究线在训练前即可确定的内容：可证伪假设、已知局限、family、输入/目标合同和 schema 绑定。任何一项语义变化都会得到新的 `definition_hash`，该 hash 必须跟随 Dataset manifest 和 model artifact header。
+
+具体训练后才知道的内容属于 `ModelVersion`：artifact/dataset lineage、实际 metrics、training objective、quality-gate scorecard、publication lifecycle、校准和 backtest/CPCV evidence。`GET /research/models/{id}` 通过一次 N:1 join 同时返回 `model_spec_name`、`model_spec_thesis`、`model_spec_definition_hash` 与版本结果，UI 据此渲染版本级模型卡；不复制可漂移的 spec 字段到 version 表。
+
+这与主流 registry 的职责分层一致：模型签名和审批生命周期绑定具体 model version，model card 记录 intended use/limitations 以及实际训练评估信息。参考 [MLflow Model Signatures](https://mlflow.org/docs/latest/ml/model/signatures/)、[MLflow Model Registry](https://www.mlflow.org/docs/latest/ml/model-registry/workflow/)、[SageMaker Model Cards](https://docs.aws.amazon.com/sagemaker/latest/dg/model-cards.html) 和 [Model Cards for Model Reporting](https://arxiv.org/abs/1810.03993)。
 
 ---
 
@@ -362,15 +370,15 @@ buy-weighted-intraday     prediction_horizon_secs=3600   label_horizon=3600
 | P1 可选预建 | `sell-hold-vs-exit-baseline` | `hold_vs_exit_weighted` | `86400` | 可先建 spec，等平仓样本再 train |
 | 暂不建 | `classical-*` | `classical_*` | — | 无 settlement 标签，train 会 insufficient_labels |
 
-#### 5.1.1 第一次冷启动：UI「模型输入契约」与「规格元数据」填什么？
+#### 5.1.1 第一次冷启动：UI「研究论题」与可执行契约填什么？
 
 这是 Day 0 在 **研究 → 模型规格 → 新建** 创建 `buy-weighted-baseline` 时，最容易填错的区域。
 
 | UI 区域 | 冷启动第一次怎么填 | 为什么 |
 |---------|-------------------|--------|
+| **研究论题** | 填写简洁摘要、可证伪假设和至少一条已知局限 | 固定键、强类型、不可变并参与 `definition_hash`；它定义研究意图，不承载训练参数或任意 metadata。 |
 | **模型输入契约** | 至少选择一个原始 feature；冷启动可用 `book.spread_bps`（Required） | 契约不能为空。Required 在缺失时直接拒绝样本；Optional 由 fold 内拟合的插补器及 Missing / NotApplicable / Substituted 指示列处理。顺序就是 artifact 的原始输入顺序。 |
 | **训练契约** | `settlement_outcome` / `0` 秒 / `3` folds（仅作为首次显式输入） | target、horizon 与 CV folds 随 spec 冻结；train 请求不能覆盖，每个 fold 独立拟合 transform。若训练 forward-return 模型，应显式选择匹配的 label/horizon。 |
-| **规格元数据（JSON）** | **`{}`** 或下方备注 JSON | **后端训练/推理不读**；仅人工审计。权重与因子 enablement 冻结在 ScoringProfile/train artifact，category route 属于 `ModelRouting`，不要写进 `spec_json`。 |
 
 **完整 UI/API 示例（Day 1 推荐值）**：
 
@@ -379,7 +387,7 @@ buy-weighted-intraday     prediction_horizon_secs=3600   label_horizon=3600
   "name": "buy-weighted-baseline",
   "model_family": "weighted_factor",
   "prediction_horizon_secs": 86400,
-  "feature_schema_version": 6,
+  "feature_schema_version": 1,
   "label_schema_version": 1,
   "input_contract": {
     "inputs": [
@@ -391,10 +399,12 @@ buy-weighted-intraday     prediction_horizon_secs=3600   label_horizon=3600
     "target_label_horizon_secs": 0,
     "validation_folds": 3
   },
-  "spec_json": {
-    "tier": "bootstrap",
-    "intent": "day-1 generic buy ranker; no category routing yet",
-    "owner": "quant-team"
+  "thesis": {
+    "summary": "Polymarket buy-side weighted-factor baseline",
+    "hypothesis": "Governed factor ranks predict positive 24h forward net returns",
+    "limitations": [
+      "Use only for markets covered by the frozen research profile"
+    ]
   },
   "reason": "bootstrap first model spec"
 }
@@ -402,23 +412,15 @@ buy-weighted-intraday     prediction_horizon_secs=3600   label_horizon=3600
 
 > **UI 操作对照**：编辑器只从 `GET /research/feature-contract` 读取 active `FeatureSchema`，自动绑定返回的 schema version/hash；按模型实际消费顺序选择 raw feature 并逐项指定 Required / Optional。不得填写 `.__missing`、one-hot 等合成列，也不得手填或猜测 schema version。
 
-**三个字段的职责边界（避免混用）**：
+**三个强类型字段的职责边界（避免混用）**：
 
 | 字段 | 谁消费 | 冷启动 |
 |------|--------|--------|
+| `thesis` | 人工评审、审计、模型卡派生与 definition hash lineage | 摘要 + 可证伪假设 + 1–16 条局限 |
 | `input_contract` | Dataset PIT selection、fold transform fit、训练与 serving；Required 输入参与候选拒绝 | 至少一个 raw input |
 | `training_contract` | Dataset label 绑定、CV fold 数和最终训练；train 请求只能引用 dataset | 显式 target/horizon/folds |
-| `spec_json` | **无人**（元数据） | `{}` 或备注 |
 
-`spec_json` 冷启动备注示例（与 `input_contract` 无关，二选一即可）：
-
-```json
-{
-  "tier": "bootstrap",
-  "intent": "day-1 buy ranker until first trained v1 publishes",
-  "owner": "quant-team"
-}
-```
+`thesis` 不得存权重、超参、category route、训练指标或任意扩展键。权重/路由进入专用 typed contract；实际指标、评估结果、适用范围和审批状态属于具体 ModelVersion 的派生模型卡。
 
 ### 5.2 阶段 B — 第一份 Published 之后
 
@@ -453,7 +455,7 @@ buy-weighted-intraday     prediction_horizon_secs=3600   label_horizon=3600
 | 仅改训练数据窗口？ | **否** — 新 dataset + 新 version |
 | 仅改因子权重 / 超参？ | **否** — 新 version |
 | prediction_horizon 从 24h 改 1h？ | **是** — 新 spec（或明确废弃旧 spec 重建） |
-| feature_schema_version 2？ | **是** — 新 spec |
+| feature schema 合同发生 breaking change？ | **是** — 新 spec，并绑定对应 schema version |
 | 做 shadow A/B？ | **否** — 新 version + shadow 指针 |
 | 同一 horizon 的「实验性」副本？ | **否** — 用 Candidate/Shadow，不要复制 spec |
 
@@ -476,13 +478,13 @@ buy-weighted-intraday     prediction_horizon_secs=3600   label_horizon=3600
 | `label_schema_version` | `1` | boot label contract；与 model/dataset lineage 一致 |
 | `input_contract.inputs` | 至少 `book.spread_bps`（Required） | ordered raw inputs；Optional 才允许插补 |
 | `training_contract` | 显式 label / horizon / 2–20 folds | 训练请求不可覆盖 |
-| `spec_json` | `{}` 或 §5.1.1 备注 JSON | **后端不消费**；勿存权重/因子配置 |
+| `thesis` | §5.1.1 的固定三字段 | 不承载权重/因子配置；任何变化都创建新 spec |
 
 **UI 速查（第一次新建）**：
 
 ```text
 模型输入契约       → book.spread_bps / Required（再按模型实际输入扩展）
-规格元数据 JSON   → {} 或 {"tier":"bootstrap",...}
+研究论题           → 摘要 + 可证伪假设 + 已知局限
 ```
 
 ### 6.4 常见反模式
@@ -493,7 +495,7 @@ buy-weighted-intraday     prediction_horizon_secs=3600   label_horizon=3600
 | 10 个 WeightedFactor spec 对应 10 个 category | 当前只有 1 个 Buy active 插槽，其余 spec 无法同时在线 | 等 ModelRouting；现在用 **1 个 generic + 因子/selector 配置** |
 | spec 填 horizon=3600，train 用默认 86400 | 治理声明与 artifact 不一致，推荐持仓周期「货不对板」 | train 时显式传 `prediction_horizon_secs`，与 spec 一致 |
 | 只建 classical spec 指望冷启动出报告 | 标签未成熟，train/publish 长期 blocked | 先 `weighted_factor` publish |
-| 用 `spec_json` 存权重 | 后端不读；权重在 immutable ScoringProfile + train artifact | 权重走 typed profile / train artifact |
+| 用 `thesis` 存权重或超参 | 破坏研究意图与可执行契约的边界 | 权重/超参走专用 typed profile / training artifact |
 | 把 Crypto domain 输入混入 generic baseline | 非 Crypto 样本大量 NotApplicable/拒绝，契约语义错误 | Crypto specialist 使用独立 spec 和独立 `input_contract`（§8.4） |
 
 ---
@@ -510,7 +512,7 @@ buy-weighted-intraday     prediction_horizon_secs=3600   label_horizon=3600
 | `ModelSpec.training_contract` | ✅ 已落地 | 冻结 target/horizon/CV folds；train API 仅接收 dataset id + reason |
 | `FeatureAvailabilityOracle` domain 感知 | ⚠️ 部分落地 | Chainlink oracle 可用性检查仍在推进；Crypto domain 特征已可物化 |
 | ModelSpec.prediction_horizon → train 自动继承 | ✅ 已落地 | train 从 dataset/spec 冻结合同推导，不接受调用方覆盖 |
-| spec_json 强类型 / 驱动训练超参 | ❌ 故意不做 | spec_json 仅元数据 |
+| `ModelSpec.thesis` | ✅ 已落地 | typed JSONB 固定键、`deny_unknown_fields`、WORM、参与 definition hash；不驱动训练超参 |
 
 **现状下的最佳实践**：用 **少量 spec（按 family + horizon + schema + input contract）** + **同 spec 多 version** + **shadow** 完成迭代；仅对有可信增益的 category 建独立 specialist spec。
 
@@ -554,7 +556,7 @@ Publish 时对 `category_scope = Crypto` 的 weighted artifact 额外校验：�
   "name": "buy-weighted-crypto",
   "model_family": "weighted_factor",
   "prediction_horizon_secs": 86400,
-  "feature_schema_version": 6,
+  "feature_schema_version": 1,
   "input_contract": {
     "inputs": [
       {"feature_name": "book.spread_bps", "requiredness": "required"},
@@ -643,7 +645,7 @@ pub enum ModelRouting {
 
 ### 8.1 冷启动第一天
 
-1. 创建 **1 个** `buy-weighted-baseline` spec（`weighted_factor`, horizon=86400）— **特征需求两项留空**，`spec_json` 用 `{}` 或备注（§5.1.1）  
+1. 创建 **1 个** `buy-weighted-baseline` spec（`weighted_factor`, horizon=86400）— 明确填写 typed thesis、input contract 和 training contract（§5.1.1）
 2. 注册并 publish 启用因子（[runbook §8.1 Step 0.6](./runbook.md)）  
 3. ingest → plan → build → train → backtest → publish  
 4. 确认 `model.active_model_version_id` 非空  

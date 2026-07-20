@@ -1,0 +1,793 @@
+//! Single-statement projection of the Config governance activity ledger.
+
+use crate::postgres::primitives::enum_null;
+use chrono::{DateTime, Utc};
+use quant_pivot_error::storage::StorageError;
+use quant_pivot_models::{
+    domain::{ConfigActivityInfo, PolicyActivationInfo, PolicyApprovalInfo, PolicyRevisionInfo},
+    entities::{policy_activation, policy_approval, policy_revision},
+    enums::runtime_config::{
+        ConfigResourceKind, PolicyActivationKind, PolicyActorKind, PolicyApprovalDecision,
+        PolicyRevisionStatus,
+    },
+    runtime_config::{PolicyDocument, PolicyValidationEvidence, PolicyValidationSubject},
+    types::{
+        AuditEventId, ContentHash, DecisionPolicySnapshotId, PolicyActivationId, PolicyApprovalId,
+        PolicyBundleGeneration, PolicyIdempotencyKey, PolicyRevisionId, SchemaVersion, UserId,
+    },
+};
+use sea_orm::{
+    ConnectionTrait, FromQueryResult, Order,
+    sea_query::{Expr, Iden, Query, SelectStatement, UnionType},
+};
+
+#[derive(Debug, Clone, Copy)]
+enum ActivityRecordKind {
+    Revision,
+    Approval,
+    Activation,
+}
+
+impl ActivityRecordKind {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Revision => "revision",
+            Self::Approval => "approval",
+            Self::Activation => "activation",
+        }
+    }
+
+    const fn lifecycle_rank(self) -> i32 {
+        match self {
+            Self::Revision => 1,
+            Self::Approval => 2,
+            Self::Activation => 3,
+        }
+    }
+
+    fn rank_expr(self) -> Expr {
+        Expr::value(self.lifecycle_rank())
+    }
+
+    fn parse(value: &str) -> Result<Self, StorageError> {
+        match value {
+            "revision" => Ok(Self::Revision),
+            "approval" => Ok(Self::Approval),
+            "activation" => Ok(Self::Activation),
+            _ => Err(StorageError::invariant_violation(
+                Some("config_activity"),
+                format!("unknown activity record kind `{value}`"),
+            )),
+        }
+    }
+}
+
+#[derive(Iden)]
+enum ActivityColumn {
+    EventType,
+    EventAt,
+    EventRank,
+    SortId,
+    PolicyRevisionId,
+    ResourceKind,
+    RevisionHash,
+    Reason,
+    ActorKind,
+    ActorUserId,
+    ActorLabel,
+    CreatedAt,
+    SchemaVersion,
+    Document,
+    RevisionStatus,
+    ValidationEvidence,
+    ValidatedAt,
+    PreflightTokenHash,
+    PreflightExpiresAt,
+    PolicyApprovalId,
+    ApprovalValidationSubject,
+    ApprovalDecision,
+    DecidedAt,
+    ApprovalExpiresAt,
+    BundleGeneration,
+    ExpectedBundleGeneration,
+    PolicyActivationId,
+    DecisionPolicySnapshotId,
+    ActivatedAt,
+    ActivationKind,
+    ExpectedActiveRevisionId,
+    PreviousPolicyRevisionId,
+    RollbackTargetRevisionId,
+    IdempotencyKey,
+    ActivationRequestHash,
+    AuditEventId,
+}
+
+#[derive(Debug, FromQueryResult)]
+struct ActivityRow {
+    event_type: String,
+    policy_revision_id: PolicyRevisionId,
+    resource_kind: ConfigResourceKind,
+    revision_hash: Option<ContentHash>,
+    reason: String,
+    actor_kind: PolicyActorKind,
+    actor_user_id: Option<UserId>,
+    actor_label: String,
+    created_at: DateTime<Utc>,
+    schema_version: Option<SchemaVersion>,
+    document: Option<PolicyDocument>,
+    revision_status: Option<PolicyRevisionStatus>,
+    validation_evidence: Option<PolicyValidationEvidence>,
+    validated_at: Option<DateTime<Utc>>,
+    preflight_token_hash: Option<ContentHash>,
+    preflight_expires_at: Option<DateTime<Utc>>,
+    policy_approval_id: Option<PolicyApprovalId>,
+    approval_validation_subject: Option<PolicyValidationSubject>,
+    approval_decision: Option<PolicyApprovalDecision>,
+    decided_at: Option<DateTime<Utc>>,
+    approval_expires_at: Option<DateTime<Utc>>,
+    bundle_generation: Option<PolicyBundleGeneration>,
+    expected_bundle_generation: Option<PolicyBundleGeneration>,
+    policy_activation_id: Option<PolicyActivationId>,
+    decision_policy_snapshot_id: Option<DecisionPolicySnapshotId>,
+    activated_at: Option<DateTime<Utc>>,
+    activation_kind: Option<PolicyActivationKind>,
+    expected_active_revision_id: Option<PolicyRevisionId>,
+    previous_policy_revision_id: Option<PolicyRevisionId>,
+    rollback_target_revision_id: Option<PolicyRevisionId>,
+    idempotency_key: Option<PolicyIdempotencyKey>,
+    activation_request_hash: Option<ContentHash>,
+    audit_event_id: Option<AuditEventId>,
+}
+
+impl ActivityRow {
+    fn into_info(self) -> Result<ConfigActivityInfo, StorageError> {
+        let kind = ActivityRecordKind::parse(&self.event_type)?;
+        match kind {
+            ActivityRecordKind::Revision => {
+                Ok(ConfigActivityInfo::Revision(Box::new(PolicyRevisionInfo {
+                    policy_revision_id: self.policy_revision_id,
+                    resource_kind: self.resource_kind,
+                    schema_version: required(self.schema_version, kind, "schema_version")?,
+                    revision_hash: required(self.revision_hash, kind, "revision_hash")?,
+                    document: required(self.document, kind, "document")?,
+                    status: required(self.revision_status, kind, "revision_status")?,
+                    validation_evidence: self.validation_evidence,
+                    validated_at: self.validated_at,
+                    preflight_token_hash: self.preflight_token_hash,
+                    preflight_expires_at: self.preflight_expires_at,
+                    created_by_kind: self.actor_kind,
+                    created_by_user_id: self.actor_user_id,
+                    created_by_label: self.actor_label,
+                    reason: self.reason,
+                    created_at: self.created_at,
+                })))
+            }
+            ActivityRecordKind::Approval => Ok(ConfigActivityInfo::Approval(PolicyApprovalInfo {
+                policy_approval_id: required(self.policy_approval_id, kind, "policy_approval_id")?,
+                policy_revision_id: self.policy_revision_id,
+                resource_kind: self.resource_kind,
+                revision_hash: required(self.revision_hash, kind, "revision_hash")?,
+                validation_subject: self.approval_validation_subject,
+                decision: required(self.approval_decision, kind, "approval_decision")?,
+                decided_by_kind: self.actor_kind,
+                decided_by_user_id: self.actor_user_id,
+                decided_by_label: self.actor_label,
+                reason: self.reason,
+                decided_at: required(self.decided_at, kind, "decided_at")?,
+                expires_at: self.approval_expires_at,
+                created_at: self.created_at,
+            })),
+            ActivityRecordKind::Activation => {
+                Ok(ConfigActivityInfo::Activation(PolicyActivationInfo {
+                    bundle_generation: required(self.bundle_generation, kind, "bundle_generation")?,
+                    expected_bundle_generation: required(
+                        self.expected_bundle_generation,
+                        kind,
+                        "expected_bundle_generation",
+                    )?,
+                    policy_activation_id: required(
+                        self.policy_activation_id,
+                        kind,
+                        "policy_activation_id",
+                    )?,
+                    resource_kind: self.resource_kind,
+                    policy_revision_id: self.policy_revision_id,
+                    decision_policy_snapshot_id: required(
+                        self.decision_policy_snapshot_id,
+                        kind,
+                        "decision_policy_snapshot_id",
+                    )?,
+                    policy_approval_id: required(
+                        self.policy_approval_id,
+                        kind,
+                        "policy_approval_id",
+                    )?,
+                    activated_at: required(self.activated_at, kind, "activated_at")?,
+                    activated_by_kind: self.actor_kind,
+                    activated_by_user_id: self.actor_user_id,
+                    activated_by_label: self.actor_label,
+                    reason: self.reason,
+                    activation_kind: required(self.activation_kind, kind, "activation_kind")?,
+                    expected_active_revision_id: self.expected_active_revision_id,
+                    previous_policy_revision_id: self.previous_policy_revision_id,
+                    rollback_target_revision_id: self.rollback_target_revision_id,
+                    preflight_token_hash: required(
+                        self.preflight_token_hash,
+                        kind,
+                        "preflight_token_hash",
+                    )?,
+                    idempotency_key: required(self.idempotency_key, kind, "idempotency_key")?,
+                    activation_request_hash: required(
+                        self.activation_request_hash,
+                        kind,
+                        "activation_request_hash",
+                    )?,
+                    audit_event_id: required(self.audit_event_id, kind, "audit_event_id")?,
+                    created_at: self.created_at,
+                }))
+            }
+        }
+    }
+}
+
+fn required<T>(
+    value: Option<T>,
+    kind: ActivityRecordKind,
+    field: &'static str,
+) -> Result<T, StorageError> {
+    value.ok_or_else(|| {
+        StorageError::invariant_violation(
+            Some("config_activity"),
+            format!("{} activity row is missing `{field}`", kind.as_str()),
+        )
+    })
+}
+
+fn revision_query_head() -> SelectStatement {
+    Query::select()
+        .expr_as(
+            Expr::value(ActivityRecordKind::Revision.as_str()),
+            ActivityColumn::EventType,
+        )
+        .expr_as(
+            Expr::col((policy_revision::Entity, policy_revision::Column::CreatedAt)),
+            ActivityColumn::EventAt,
+        )
+        .expr_as(
+            ActivityRecordKind::Revision.rank_expr(),
+            ActivityColumn::EventRank,
+        )
+        .expr_as(
+            Expr::col((
+                policy_revision::Entity,
+                policy_revision::Column::PolicyRevisionId,
+            )),
+            ActivityColumn::SortId,
+        )
+        .expr_as(
+            Expr::col((
+                policy_revision::Entity,
+                policy_revision::Column::PolicyRevisionId,
+            )),
+            ActivityColumn::PolicyRevisionId,
+        )
+        .expr_as(
+            Expr::col((
+                policy_revision::Entity,
+                policy_revision::Column::ResourceKind,
+            )),
+            ActivityColumn::ResourceKind,
+        )
+        .expr_as(
+            Expr::col((
+                policy_revision::Entity,
+                policy_revision::Column::RevisionHash,
+            )),
+            ActivityColumn::RevisionHash,
+        )
+        .expr_as(
+            Expr::col((policy_revision::Entity, policy_revision::Column::Reason)),
+            ActivityColumn::Reason,
+        )
+        .expr_as(
+            Expr::col((
+                policy_revision::Entity,
+                policy_revision::Column::CreatedByKind,
+            )),
+            ActivityColumn::ActorKind,
+        )
+        .expr_as(
+            Expr::col((
+                policy_revision::Entity,
+                policy_revision::Column::CreatedByUserId,
+            )),
+            ActivityColumn::ActorUserId,
+        )
+        .expr_as(
+            Expr::col((
+                policy_revision::Entity,
+                policy_revision::Column::CreatedByLabel,
+            )),
+            ActivityColumn::ActorLabel,
+        )
+        .expr_as(
+            Expr::col((policy_revision::Entity, policy_revision::Column::CreatedAt)),
+            ActivityColumn::CreatedAt,
+        )
+        .to_owned()
+}
+
+fn revision_query() -> SelectStatement {
+    let null_generation = || Expr::value(Option::<PolicyBundleGeneration>::None);
+    let null_activation_id = || Expr::value(Option::<PolicyActivationId>::None);
+    let null_snapshot_id = || Expr::value(Option::<DecisionPolicySnapshotId>::None);
+    let null_timestamp = || Expr::value(Option::<DateTime<Utc>>::None);
+    let null_revision_id = || Expr::value(Option::<PolicyRevisionId>::None);
+    let null_approval_id = || Expr::value(Option::<PolicyApprovalId>::None);
+    let null_audit_id = || Expr::value(Option::<AuditEventId>::None);
+    let null_content_hash = || Expr::value(Option::<ContentHash>::None);
+    let null_idempotency_key = || Expr::value(Option::<PolicyIdempotencyKey>::None);
+    let null_validation_subject = || Expr::value(Option::<PolicyValidationSubject>::None);
+    let mut query = revision_query_head();
+    query
+        .expr_as(
+            Expr::col((
+                policy_revision::Entity,
+                policy_revision::Column::SchemaVersion,
+            )),
+            ActivityColumn::SchemaVersion,
+        )
+        .expr_as(
+            Expr::col((policy_revision::Entity, policy_revision::Column::Document)),
+            ActivityColumn::Document,
+        )
+        .expr_as(
+            Expr::col((policy_revision::Entity, policy_revision::Column::Status)),
+            ActivityColumn::RevisionStatus,
+        )
+        .expr_as(
+            Expr::col((
+                policy_revision::Entity,
+                policy_revision::Column::ValidationEvidence,
+            )),
+            ActivityColumn::ValidationEvidence,
+        )
+        .expr_as(
+            Expr::col((
+                policy_revision::Entity,
+                policy_revision::Column::ValidatedAt,
+            )),
+            ActivityColumn::ValidatedAt,
+        )
+        .expr_as(
+            Expr::col((
+                policy_revision::Entity,
+                policy_revision::Column::PreflightTokenHash,
+            )),
+            ActivityColumn::PreflightTokenHash,
+        )
+        .expr_as(
+            Expr::col((
+                policy_revision::Entity,
+                policy_revision::Column::PreflightExpiresAt,
+            )),
+            ActivityColumn::PreflightExpiresAt,
+        )
+        .expr_as(null_approval_id(), ActivityColumn::PolicyApprovalId)
+        .expr_as(
+            null_validation_subject(),
+            ActivityColumn::ApprovalValidationSubject,
+        )
+        .expr_as(
+            enum_null::<PolicyApprovalDecision>(),
+            ActivityColumn::ApprovalDecision,
+        )
+        .expr_as(null_timestamp(), ActivityColumn::DecidedAt)
+        .expr_as(null_timestamp(), ActivityColumn::ApprovalExpiresAt)
+        .expr_as(null_generation(), ActivityColumn::BundleGeneration)
+        .expr_as(null_generation(), ActivityColumn::ExpectedBundleGeneration)
+        .expr_as(null_activation_id(), ActivityColumn::PolicyActivationId)
+        .expr_as(null_snapshot_id(), ActivityColumn::DecisionPolicySnapshotId)
+        .expr_as(null_timestamp(), ActivityColumn::ActivatedAt)
+        .expr_as(
+            enum_null::<PolicyActivationKind>(),
+            ActivityColumn::ActivationKind,
+        )
+        .expr_as(null_revision_id(), ActivityColumn::ExpectedActiveRevisionId)
+        .expr_as(null_revision_id(), ActivityColumn::PreviousPolicyRevisionId)
+        .expr_as(null_revision_id(), ActivityColumn::RollbackTargetRevisionId)
+        .expr_as(null_idempotency_key(), ActivityColumn::IdempotencyKey)
+        .expr_as(null_content_hash(), ActivityColumn::ActivationRequestHash)
+        .expr_as(null_audit_id(), ActivityColumn::AuditEventId)
+        .from(policy_revision::Entity)
+        .to_owned()
+}
+
+fn approval_query() -> SelectStatement {
+    let null_generation = || Expr::value(Option::<PolicyBundleGeneration>::None);
+    let null_activation_id = || Expr::value(Option::<PolicyActivationId>::None);
+    let null_snapshot_id = || Expr::value(Option::<DecisionPolicySnapshotId>::None);
+    let null_timestamp = || Expr::value(Option::<DateTime<Utc>>::None);
+    let null_revision_id = || Expr::value(Option::<PolicyRevisionId>::None);
+    let null_audit_id = || Expr::value(Option::<AuditEventId>::None);
+    let null_schema_version = || Expr::value(Option::<SchemaVersion>::None);
+    let null_document = || Expr::value(Option::<PolicyDocument>::None);
+    let null_validation_evidence = || Expr::value(Option::<PolicyValidationEvidence>::None);
+    let null_content_hash = || Expr::value(Option::<ContentHash>::None);
+    let null_idempotency_key = || Expr::value(Option::<PolicyIdempotencyKey>::None);
+    Query::select()
+        .expr_as(
+            Expr::value(ActivityRecordKind::Approval.as_str()),
+            ActivityColumn::EventType,
+        )
+        .expr_as(
+            Expr::col((policy_approval::Entity, policy_approval::Column::DecidedAt)),
+            ActivityColumn::EventAt,
+        )
+        .expr_as(
+            ActivityRecordKind::Approval.rank_expr(),
+            ActivityColumn::EventRank,
+        )
+        .expr_as(
+            Expr::col((
+                policy_approval::Entity,
+                policy_approval::Column::PolicyApprovalId,
+            )),
+            ActivityColumn::SortId,
+        )
+        .expr_as(
+            Expr::col((
+                policy_approval::Entity,
+                policy_approval::Column::PolicyRevisionId,
+            )),
+            ActivityColumn::PolicyRevisionId,
+        )
+        .expr_as(
+            Expr::col((
+                policy_approval::Entity,
+                policy_approval::Column::ResourceKind,
+            )),
+            ActivityColumn::ResourceKind,
+        )
+        .expr_as(
+            Expr::col((
+                policy_approval::Entity,
+                policy_approval::Column::RevisionHash,
+            )),
+            ActivityColumn::RevisionHash,
+        )
+        .expr_as(
+            Expr::col((policy_approval::Entity, policy_approval::Column::Reason)),
+            ActivityColumn::Reason,
+        )
+        .expr_as(
+            Expr::col((
+                policy_approval::Entity,
+                policy_approval::Column::DecidedByKind,
+            )),
+            ActivityColumn::ActorKind,
+        )
+        .expr_as(
+            Expr::col((
+                policy_approval::Entity,
+                policy_approval::Column::DecidedByUserId,
+            )),
+            ActivityColumn::ActorUserId,
+        )
+        .expr_as(
+            Expr::col((
+                policy_approval::Entity,
+                policy_approval::Column::DecidedByLabel,
+            )),
+            ActivityColumn::ActorLabel,
+        )
+        .expr_as(
+            Expr::col((policy_approval::Entity, policy_approval::Column::CreatedAt)),
+            ActivityColumn::CreatedAt,
+        )
+        .expr_as(null_schema_version(), ActivityColumn::SchemaVersion)
+        .expr_as(null_document(), ActivityColumn::Document)
+        .expr_as(
+            enum_null::<PolicyRevisionStatus>(),
+            ActivityColumn::RevisionStatus,
+        )
+        .expr_as(
+            null_validation_evidence(),
+            ActivityColumn::ValidationEvidence,
+        )
+        .expr_as(null_timestamp(), ActivityColumn::ValidatedAt)
+        .expr_as(null_content_hash(), ActivityColumn::PreflightTokenHash)
+        .expr_as(null_timestamp(), ActivityColumn::PreflightExpiresAt)
+        .expr_as(
+            Expr::col((
+                policy_approval::Entity,
+                policy_approval::Column::PolicyApprovalId,
+            )),
+            ActivityColumn::PolicyApprovalId,
+        )
+        .expr_as(
+            Expr::col((
+                policy_approval::Entity,
+                policy_approval::Column::ValidationSubject,
+            )),
+            ActivityColumn::ApprovalValidationSubject,
+        )
+        .expr_as(
+            Expr::col((policy_approval::Entity, policy_approval::Column::Decision)),
+            ActivityColumn::ApprovalDecision,
+        )
+        .expr_as(
+            Expr::col((policy_approval::Entity, policy_approval::Column::DecidedAt)),
+            ActivityColumn::DecidedAt,
+        )
+        .expr_as(
+            Expr::col((policy_approval::Entity, policy_approval::Column::ExpiresAt)),
+            ActivityColumn::ApprovalExpiresAt,
+        )
+        .expr_as(null_generation(), ActivityColumn::BundleGeneration)
+        .expr_as(null_generation(), ActivityColumn::ExpectedBundleGeneration)
+        .expr_as(null_activation_id(), ActivityColumn::PolicyActivationId)
+        .expr_as(null_snapshot_id(), ActivityColumn::DecisionPolicySnapshotId)
+        .expr_as(null_timestamp(), ActivityColumn::ActivatedAt)
+        .expr_as(
+            enum_null::<PolicyActivationKind>(),
+            ActivityColumn::ActivationKind,
+        )
+        .expr_as(null_revision_id(), ActivityColumn::ExpectedActiveRevisionId)
+        .expr_as(null_revision_id(), ActivityColumn::PreviousPolicyRevisionId)
+        .expr_as(null_revision_id(), ActivityColumn::RollbackTargetRevisionId)
+        .expr_as(null_idempotency_key(), ActivityColumn::IdempotencyKey)
+        .expr_as(null_content_hash(), ActivityColumn::ActivationRequestHash)
+        .expr_as(null_audit_id(), ActivityColumn::AuditEventId)
+        .from(policy_approval::Entity)
+        .to_owned()
+}
+
+fn activation_query_head() -> SelectStatement {
+    let null_timestamp = || Expr::value(Option::<DateTime<Utc>>::None);
+    let null_schema_version = || Expr::value(Option::<SchemaVersion>::None);
+    let null_document = || Expr::value(Option::<PolicyDocument>::None);
+    let null_validation_evidence = || Expr::value(Option::<PolicyValidationEvidence>::None);
+    let null_content_hash = || Expr::value(Option::<ContentHash>::None);
+    Query::select()
+        .expr_as(
+            Expr::value(ActivityRecordKind::Activation.as_str()),
+            ActivityColumn::EventType,
+        )
+        .expr_as(
+            Expr::col((
+                policy_activation::Entity,
+                policy_activation::Column::ActivatedAt,
+            )),
+            ActivityColumn::EventAt,
+        )
+        .expr_as(
+            ActivityRecordKind::Activation.rank_expr(),
+            ActivityColumn::EventRank,
+        )
+        .expr_as(
+            Expr::col((
+                policy_activation::Entity,
+                policy_activation::Column::PolicyActivationId,
+            )),
+            ActivityColumn::SortId,
+        )
+        .expr_as(
+            Expr::col((
+                policy_activation::Entity,
+                policy_activation::Column::PolicyRevisionId,
+            )),
+            ActivityColumn::PolicyRevisionId,
+        )
+        .expr_as(
+            Expr::col((
+                policy_activation::Entity,
+                policy_activation::Column::ResourceKind,
+            )),
+            ActivityColumn::ResourceKind,
+        )
+        .expr_as(null_content_hash(), ActivityColumn::RevisionHash)
+        .expr_as(
+            Expr::col((policy_activation::Entity, policy_activation::Column::Reason)),
+            ActivityColumn::Reason,
+        )
+        .expr_as(
+            Expr::col((
+                policy_activation::Entity,
+                policy_activation::Column::ActivatedByKind,
+            )),
+            ActivityColumn::ActorKind,
+        )
+        .expr_as(
+            Expr::col((
+                policy_activation::Entity,
+                policy_activation::Column::ActivatedByUserId,
+            )),
+            ActivityColumn::ActorUserId,
+        )
+        .expr_as(
+            Expr::col((
+                policy_activation::Entity,
+                policy_activation::Column::ActivatedByLabel,
+            )),
+            ActivityColumn::ActorLabel,
+        )
+        .expr_as(
+            Expr::col((
+                policy_activation::Entity,
+                policy_activation::Column::CreatedAt,
+            )),
+            ActivityColumn::CreatedAt,
+        )
+        .expr_as(null_schema_version(), ActivityColumn::SchemaVersion)
+        .expr_as(null_document(), ActivityColumn::Document)
+        .expr_as(
+            enum_null::<PolicyRevisionStatus>(),
+            ActivityColumn::RevisionStatus,
+        )
+        .expr_as(
+            null_validation_evidence(),
+            ActivityColumn::ValidationEvidence,
+        )
+        .expr_as(null_timestamp(), ActivityColumn::ValidatedAt)
+        .expr_as(
+            Expr::col((
+                policy_activation::Entity,
+                policy_activation::Column::PreflightTokenHash,
+            )),
+            ActivityColumn::PreflightTokenHash,
+        )
+        .expr_as(null_timestamp(), ActivityColumn::PreflightExpiresAt)
+        .to_owned()
+}
+
+fn activation_query() -> SelectStatement {
+    let null_validation_subject = || Expr::value(Option::<PolicyValidationSubject>::None);
+    let null_timestamp = || Expr::value(Option::<DateTime<Utc>>::None);
+    let mut query = activation_query_head();
+    query
+        .expr_as(
+            Expr::col((
+                policy_activation::Entity,
+                policy_activation::Column::PolicyApprovalId,
+            )),
+            ActivityColumn::PolicyApprovalId,
+        )
+        .expr_as(
+            null_validation_subject(),
+            ActivityColumn::ApprovalValidationSubject,
+        )
+        .expr_as(
+            enum_null::<PolicyApprovalDecision>(),
+            ActivityColumn::ApprovalDecision,
+        )
+        .expr_as(null_timestamp(), ActivityColumn::DecidedAt)
+        .expr_as(null_timestamp(), ActivityColumn::ApprovalExpiresAt)
+        .expr_as(
+            Expr::col((
+                policy_activation::Entity,
+                policy_activation::Column::BundleGeneration,
+            )),
+            ActivityColumn::BundleGeneration,
+        )
+        .expr_as(
+            Expr::col((
+                policy_activation::Entity,
+                policy_activation::Column::ExpectedBundleGeneration,
+            )),
+            ActivityColumn::ExpectedBundleGeneration,
+        )
+        .expr_as(
+            Expr::col((
+                policy_activation::Entity,
+                policy_activation::Column::PolicyActivationId,
+            )),
+            ActivityColumn::PolicyActivationId,
+        )
+        .expr_as(
+            Expr::col((
+                policy_activation::Entity,
+                policy_activation::Column::DecisionPolicySnapshotId,
+            )),
+            ActivityColumn::DecisionPolicySnapshotId,
+        )
+        .expr_as(
+            Expr::col((
+                policy_activation::Entity,
+                policy_activation::Column::ActivatedAt,
+            )),
+            ActivityColumn::ActivatedAt,
+        )
+        .expr_as(
+            Expr::col((
+                policy_activation::Entity,
+                policy_activation::Column::ActivationKind,
+            )),
+            ActivityColumn::ActivationKind,
+        )
+        .expr_as(
+            Expr::col((
+                policy_activation::Entity,
+                policy_activation::Column::ExpectedActiveRevisionId,
+            )),
+            ActivityColumn::ExpectedActiveRevisionId,
+        )
+        .expr_as(
+            Expr::col((
+                policy_activation::Entity,
+                policy_activation::Column::PreviousPolicyRevisionId,
+            )),
+            ActivityColumn::PreviousPolicyRevisionId,
+        )
+        .expr_as(
+            Expr::col((
+                policy_activation::Entity,
+                policy_activation::Column::RollbackTargetRevisionId,
+            )),
+            ActivityColumn::RollbackTargetRevisionId,
+        )
+        .expr_as(
+            Expr::col((
+                policy_activation::Entity,
+                policy_activation::Column::IdempotencyKey,
+            )),
+            ActivityColumn::IdempotencyKey,
+        )
+        .expr_as(
+            Expr::col((
+                policy_activation::Entity,
+                policy_activation::Column::ActivationRequestHash,
+            )),
+            ActivityColumn::ActivationRequestHash,
+        )
+        .expr_as(
+            Expr::col((
+                policy_activation::Entity,
+                policy_activation::Column::AuditEventId,
+            )),
+            ActivityColumn::AuditEventId,
+        )
+        .from(policy_activation::Entity)
+        .to_owned()
+}
+
+pub(super) async fn list(
+    db: &impl ConnectionTrait,
+    limit: u64,
+) -> Result<Vec<ConfigActivityInfo>, StorageError> {
+    let mut query = revision_query();
+    query
+        .union(UnionType::All, approval_query())
+        .union(UnionType::All, activation_query())
+        .order_by(ActivityColumn::EventAt, Order::Desc)
+        .order_by(ActivityColumn::EventRank, Order::Desc)
+        .order_by(ActivityColumn::SortId, Order::Desc)
+        .limit(limit);
+    let rows = ActivityRow::find_by_statement(db.get_database_backend().build(&query))
+        .all(db)
+        .await
+        .map_err(StorageError::from)?;
+    rows.into_iter().map(ActivityRow::into_info).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::list;
+    use std::collections::BTreeMap;
+
+    use quant_pivot_error::storage::StorageError;
+    use sea_orm::{DbBackend, MockDatabase, Value};
+
+    #[tokio::test]
+    async fn list_executes_one_global_activity_statement() -> Result<(), StorageError> {
+        let db = MockDatabase::new(DbBackend::Postgres)
+            .append_query_results([Vec::<BTreeMap<String, Value>>::new()])
+            .into_connection();
+
+        let activity = list(&db, 50).await?;
+
+        assert!(activity.is_empty());
+        assert_eq!(db.into_transaction_log().len(), 1);
+        Ok(())
+    }
+}

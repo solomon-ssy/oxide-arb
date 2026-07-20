@@ -15,10 +15,9 @@ use async_trait::async_trait;
 
 use crate::{
     domain::{ExecutionOrderInfo, OrderIntentInfo, OrderIntentListQuery, Paginated},
-    types::{OrderAmount, OrderIntentId, Price, RecommendationId},
+    types::{OrderAmount, OrderIntentId, Price, RecommendationId, RoleCode, UserId},
 };
 use quant_pivot_error::QuantResult;
-use uuid::Uuid;
 
 /// Create an order intent from a published recommendation.
 ///
@@ -29,8 +28,8 @@ use uuid::Uuid;
 #[derive(Debug, Clone)]
 pub struct CreateIntentCommand {
     pub recommendation_id: RecommendationId,
-    pub operator_id: Uuid,
-    pub acting_role: String,
+    pub operator_id: UserId,
+    pub acting_role: RoleCode,
     pub reason: String,
 }
 
@@ -41,8 +40,8 @@ pub struct CreateIntentCommand {
 #[derive(Debug, Clone)]
 pub struct ApproveIntentCommand {
     pub order_intent_id: OrderIntentId,
-    pub operator_id: Uuid,
-    pub acting_role: String,
+    pub operator_id: UserId,
+    pub acting_role: RoleCode,
     pub reason: String,
     pub override_amount: Option<OrderAmount>,
     pub override_price: Option<Price>,
@@ -54,8 +53,8 @@ pub struct ApproveIntentCommand {
 #[derive(Debug, Clone)]
 pub struct RejectIntentCommand {
     pub order_intent_id: OrderIntentId,
-    pub operator_id: Uuid,
-    pub acting_role: String,
+    pub operator_id: UserId,
+    pub acting_role: RoleCode,
     pub reason: String,
 }
 
@@ -64,8 +63,8 @@ pub struct RejectIntentCommand {
 #[derive(Debug, Clone)]
 pub struct CancelIntentCommand {
     pub order_intent_id: OrderIntentId,
-    pub operator_id: Uuid,
-    pub acting_role: String,
+    pub operator_id: UserId,
+    pub acting_role: RoleCode,
     pub reason: String,
 }
 

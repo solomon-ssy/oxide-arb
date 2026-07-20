@@ -18,6 +18,7 @@ use quant_pivot_models::{
     types::{
         BacktestReportId, ContentHash, DecisionPolicySnapshotId, ExposureBreakdown, ModelVersionId,
         Probability, Usd,
+        backtest::{CategoryMetric, ExpectedVsRealized, PnlCurvePoint, PnlSimulation},
     },
 };
 use rust_decimal::Decimal;
@@ -26,8 +27,7 @@ use serde::Serialize;
 use crate::{
     backtest::{
         BacktestExecutionSnapshot, BacktestInputs, BacktestMarketMeta, BacktestReport,
-        BacktestRequest, BacktestRunResult, BacktestTick, Backtester, CategoryMetric,
-        ExpectedVsRealized, MarketOutcome, PnlCurvePoint, PnlSimulation, PortfolioCaps,
+        BacktestRequest, BacktestRunResult, BacktestTick, Backtester, MarketOutcome, PortfolioCaps,
         SampleOutcome, metrics, simulator,
     },
     execution_semantics::{BookWalkOutcome, LiquidityRole, walk_buy_cash_budget},
@@ -497,9 +497,9 @@ mod tests {
         },
         runtime_config::FactorCrossSectionConfig,
         types::{
-            BacktestReportId, Bps, ContentHash, DecisionPolicySnapshotId, FactorDefinitionId,
-            MarketId, ModelInputContract, ModelRunId, ModelVersionId, Price, Probability, Shares,
-            TokenId, Usd, builtin_research_profiles,
+            BacktestReportId, Bps, DecisionPolicySnapshotId, FactorDefinitionId, MarketId,
+            ModelInputContract, ModelRunId, ModelVersionId, Price, Probability, Shares, TokenId,
+            Usd, builtin_research_profiles,
         },
     };
     use rust_decimal::Decimal;
@@ -528,11 +528,8 @@ mod tests {
             },
             weighted::WeightedFactorRuntime,
         },
+        test_support::content_hash as hash,
     };
-
-    fn hash(seed: &str) -> ContentHash {
-        ContentHash::parse(format!("blake3:{seed:0>64}")).expect("hash")
-    }
 
     fn runtime() -> WeightedFactorRuntime {
         let input_contract = ModelInputContract::single_required("book.mid");
@@ -542,6 +539,7 @@ mod tests {
             WeightedFactorModelArtifact {
                 header: ModelArtifactHeader {
                     model_version_id: ModelVersionId::from_v7(),
+                    model_spec_definition_hash: hash("spec"),
                     profile_ref: builtin_research_profiles()
                         .expect("built-in profiles")
                         .remove(0)

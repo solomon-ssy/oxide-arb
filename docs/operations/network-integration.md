@@ -5,7 +5,7 @@ Live tests for `quant-pivot-api` require outbound HTTPS/WSS to Polymarket and (o
 ## Run all live tests
 
 ```bash
-export QUANT_PIVOT__POLYMARKET__ONCHAIN__RPC_URL="https://polygon-mainnet.g.alchemy.com/v2/YOUR_KEY"
+export QUANT_PIVOT_TEST_POLYGON_RPC_URL="https://polygon-rpc.com"
 export QUANT_PIVOT_TEST_RESOLVED_CONDITION_ID="0x..."   # see CTF section below
 
 cargo test -p quant-pivot-api -- --ignored --test-threads=1
@@ -17,7 +17,7 @@ Optional overrides:
 |----------|---------|
 | `QUANT_PIVOT_TEST_TOKEN_ID` | CLOB decimal token id for WS book test (skips Gamma discovery) |
 | `QUANT_PIVOT_TEST_POLYGON_RPC_URL` | Alias for Polygon RPC if you prefer not to use `QUANT_PIVOT__*` |
-| `QUANT_PIVOT_TEST_PRIVATE_KEY` | CLOB auth / FOK probe (`integration/clob_auth.rs`) |
+| `QUANT_PIVOT_TEST_PRIVATE_KEY_FILE` | 0400/0600 non-symlink credential file for the ignored CLOB auth/FOK probe |
 
 ## Polygon RPC (Alchemy)
 
@@ -28,11 +28,15 @@ https://polygon-mainnet.g.alchemy.com/v2/<API_KEY>
 ```
 
 1. [Alchemy Dashboard](https://dashboard.alchemy.com/) → Create app → Chain: **Polygon** → Network: **Mainnet**
-2. Copy **HTTPS** URL into config or env:
+2. Provision the full authenticated URL as a protected credential when exercising
+   account-dependent flows. Public deterministic CTF reads may use the public endpoint:
 
 ```bash
-export QUANT_PIVOT__POLYMARKET__ONCHAIN__RPC_URL="https://polygon-mainnet.g.alchemy.com/v2/xxxx"
+export QUANT_PIVOT_TEST_POLYGON_RPC_URL="https://polygon-rpc.com"
 ```
+
+Do not place an Alchemy/API key in shell history, TOML, documentation, or a process
+environment. Live-account acceptance uses the deployment credential-file path.
 
 No contract allowlisting is required for the view calls used by `CtfOracleSource` (`payoutNumerators`, `payoutDenominator` on `CTF_ADDRESS`).
 

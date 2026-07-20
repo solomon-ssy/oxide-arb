@@ -23,8 +23,9 @@ use quant_pivot_models::{
         },
     },
     types::{
-        ContentHash, FeatureParityEventId, MarketId, ModelRunId, ModelVersionId,
-        RecommendationReportId, ResearchJobProgress, TrainingDatasetId,
+        ContentHash, FeatureParityDetail, FeatureParityDetailSource, FeatureParityEventId,
+        MarketId, ModelRunId, ModelVersionId, RecommendationReportId, ResearchJobProgress,
+        TrainingDatasetId,
     },
 };
 use quant_pivot_repository::traits::{
@@ -32,7 +33,6 @@ use quant_pivot_repository::traits::{
 };
 use quant_pivot_research::hashing::ResearchHasher;
 use serde::Serialize;
-use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 
@@ -101,7 +101,7 @@ pub struct FeatureParityComparison {
     pub online: FeatureParityEvidence,
     pub replay: FeatureParityEvidence,
     pub transform_hash: Option<ContentHash>,
-    pub detail: Value,
+    pub detail: FeatureParityDetailSource,
 }
 
 /// Evidence whose source writer has not reached the required watermark yet.
@@ -1146,15 +1146,16 @@ fn comparison_row(
     status: FeatureParityEventStatus,
     ingestion_time: i64,
 ) -> QuantResult<QuantFeatureParityEventRow> {
-    #[derive(Serialize)]
-    struct Detail<'a> {
-        sampling_key: &'a str,
-        source: &'a Value,
-    }
-    let detail_json = canonical_detail(&Detail {
-        sampling_key: &comparison.sampling_key,
-        source: &comparison.detail,
-    })?;
+    let detail = FeatureParityDetail::Compared {
+        sampling_key: comparison.sampling_key.clone(),
+        source: Box::new(comparison.detail),
+    };
+    detail
+        .validate_for(comparison.stage, status)
+        .map_err(|detail| ResearchError::Determinism {
+            detail: detail.to_owned(),
+        })?;
+    let detail_json = canonical_detail(&detail)?;
     let parity_event_id = stable_parity_event_id(
         run,
         &comparison.sampling_key,
@@ -1232,12 +1233,19 @@ fn pending_row(
     pending: PendingFeatureParityComparison,
     ingestion_time: i64,
 ) -> QuantResult<QuantFeatureParityEventRow> {
-    #[derive(Serialize)]
-    struct Detail<'a> {
-        sampling_key: &'a str,
-        required_watermark: DateTime<Utc>,
-        observed_watermark: Option<DateTime<Utc>>,
-    }
+    let detail = FeatureParityDetail::PendingMaterialization {
+        sampling_key: pending.sampling_key.clone(),
+        required_watermark: pending.required_watermark,
+        observed_watermark: pending.observed_watermark,
+    };
+    detail
+        .validate_for(
+            pending.stage,
+            FeatureParityEventStatus::PendingMaterialization,
+        )
+        .map_err(|detail| ResearchError::Determinism {
+            detail: detail.to_owned(),
+        })?;
     let status = FeatureParityEventStatus::PendingMaterialization;
     let parity_event_id = stable_parity_event_id(
         run,
@@ -1299,11 +1307,7 @@ fn pending_row(
             .online
             .map_or_else(String::new, |online| online.fingerprint),
         replay_fingerprint: "pending_materialization".to_owned(),
-        detail_json: canonical_detail(&Detail {
-            sampling_key: &pending.sampling_key,
-            required_watermark: pending.required_watermark,
-            observed_watermark: pending.observed_watermark,
-        })?,
+        detail_json: canonical_detail(&detail)?,
         ingestion_time,
     })
 }
@@ -1342,7 +1346,7 @@ mod tests {
             Paginated, ResearchJobInfo, RunFullFeatureParityRequest,
         },
         enums::quant::FeatureParityLatchState,
-        types::{FeatureParityRunId, FeatureParityStateId},
+        types::{FeatureParityRunId, FeatureParityStateId, FeatureVectorId},
     };
     use quant_pivot_repository::traits::{
         EnqueueFrozenFeatureParityOutcome, FeatureParityLatchActor,
@@ -1766,7 +1770,9 @@ mod tests {
             online,
             replay,
             transform_hash: None,
-            detail: serde_json::json!({}),
+            detail: FeatureParityDetailSource::FeatureCell {
+                feature_vector_id: FeatureVectorId::from_v7(),
+            },
         }
     }
 

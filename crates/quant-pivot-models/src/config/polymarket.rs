@@ -3,6 +3,7 @@
 //! This is the sole venue. There is no abstraction layer for "multiple venues" —
 //! quant-pivot operates exclusively on Polymarket (Polygon chain).
 
+use quant_pivot_error::config::ConfigError;
 use serde::Deserialize;
 
 use super::secret::SystemdCredentialRef;
@@ -63,9 +64,8 @@ const fn default_clob_market_info_refresh_secs() -> u64 {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct OnchainConfig {
-    /// Polygon JSON-RPC endpoint (CTF oracle + redeem transactions).
-    /// Default: `https://polygon-rpc.com`.
-    pub rpc_url: String,
+    /// Typed Polygon JSON-RPC endpoint source.
+    pub rpc_endpoint: PolygonRpcEndpoint,
     /// RPC request timeout (ms). Default: `10000`.
     pub rpc_timeout_ms: u64,
 }
@@ -73,14 +73,60 @@ pub struct OnchainConfig {
 impl Default for OnchainConfig {
     fn default() -> Self {
         Self {
-            rpc_url: default_rpc_url(),
+            rpc_endpoint: PolygonRpcEndpoint::default(),
             rpc_timeout_ms: default_rpc_timeout(),
         }
     }
 }
 
-fn default_rpc_url() -> String {
-    "https://polygon-rpc.com".into()
+impl OnchainConfig {
+    /// Resolve a protected authenticated endpoint during deploy bootstrap.
+    pub fn resolve_credentials(&mut self) -> Result<(), ConfigError> {
+        self.rpc_endpoint.resolve()
+    }
+
+    /// Return the resolved URL at the Polygon adapter boundary.
+    #[must_use]
+    pub fn rpc_url(&self) -> &str {
+        self.rpc_endpoint.resolved_url()
+    }
+}
+
+/// Source of the Polygon JSON-RPC URL.
+///
+/// Public, non-secret endpoints may remain in source TOML. Authenticated URLs
+/// (including provider keys embedded in path/query/user-info) are accepted only
+/// through a protected systemd credential file and never rendered by `Debug`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(tag = "source", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PolygonRpcEndpoint {
+    Public { url: String },
+    SystemdCredential { credential: SystemdCredentialRef },
+}
+
+impl Default for PolygonRpcEndpoint {
+    fn default() -> Self {
+        Self::Public {
+            url: "https://polygon-rpc.com".to_owned(),
+        }
+    }
+}
+
+impl PolygonRpcEndpoint {
+    fn resolve(&mut self) -> Result<(), ConfigError> {
+        if let Self::SystemdCredential { credential } = self {
+            credential.resolve("polymarket.onchain.rpc_endpoint.credential")?;
+        }
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn resolved_url(&self) -> &str {
+        match self {
+            Self::Public { url } => url,
+            Self::SystemdCredential { credential } => credential.secret().expose_secret(),
+        }
+    }
 }
 const fn default_rpc_timeout() -> u64 {
     10_000
@@ -164,4 +210,48 @@ fn default_relayer_url() -> String {
 }
 const fn default_relayer_timeout() -> u64 {
     15_000
+}
+
+#[cfg(test)]
+mod rpc_endpoint_tests {
+    use super::{OnchainConfig, PolygonRpcEndpoint};
+    use crate::config::secret::SystemdCredentialRef;
+
+    #[test]
+    fn endpoint_source_is_explicitly_tagged() {
+        let public: OnchainConfig = toml::from_str(
+            r#"
+rpc_timeout_ms = 5000
+rpc_endpoint = { source = "public", url = "https://polygon-rpc.com" }
+"#,
+        )
+        .expect("deserialize public Polygon RPC endpoint");
+        assert!(matches!(
+            public.rpc_endpoint,
+            PolygonRpcEndpoint::Public { .. }
+        ));
+
+        let protected: OnchainConfig = toml::from_str(
+            r#"
+rpc_endpoint = { source = "systemd_credential", credential = { name = "polygon-rpc-url" } }
+"#,
+        )
+        .expect("deserialize protected Polygon RPC endpoint");
+        assert!(matches!(
+            protected.rpc_endpoint,
+            PolygonRpcEndpoint::SystemdCredential { .. }
+        ));
+    }
+
+    #[test]
+    fn authenticated_endpoint_debug_is_redacted() {
+        let endpoint = PolygonRpcEndpoint::SystemdCredential {
+            credential: SystemdCredentialRef::from_resolved(
+                "https://provider.invalid/v2/private-provider-key",
+            ),
+        };
+        let debug = format!("{endpoint:?}");
+        assert!(!debug.contains("private-provider-key"));
+        assert!(debug.contains("<secret:redacted>"));
+    }
 }

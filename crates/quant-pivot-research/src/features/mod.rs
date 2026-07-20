@@ -29,8 +29,7 @@ pub use builder::{
     RawFeature, ResolvedInputs,
 };
 pub use decision_capture::{
-    CatalogDecisionRef, DecisionCaptureEvidence, DecisionSnapshotEvidence, MarketDecisionCapture,
-    MarketDecisionCaptureInput, RejectedMarketDraft, ResolvedMarketBundle,
+    MarketDecisionCapture, MarketDecisionCaptureInput, RejectedMarketDraft, ResolvedMarketBundle,
     draft_data_quality_snapshot, market_decision_capture_from_resolved,
 };
 pub use domain::{
@@ -38,6 +37,15 @@ pub use domain::{
     DomainSliceDataRef, DomainSliceInputs, WeatherDomainFeatureBuilder,
 };
 pub use null_policy::{NullDecision, NullPolicyEngine};
+pub use quant_pivot_models::{
+    enums::feature::{EvidenceSourceKind, FeatureValueKind},
+    types::stable_name::FeatureName,
+    types::{
+        CatalogDecisionRef, DecisionCaptureEvidence, DecisionSnapshotEvidence, DomainFeatureSlice,
+        EvidenceSourceRef, FeatureCell, FeatureCellState, FeatureStaleness, FeatureValue,
+        NullReason,
+    },
+};
 pub use resolved::{
     MarketWindowSnapshot, MicrostructureBucket, ResolvedBook, ResolvedMarketContext,
     TradeTapeWindowSnapshot,
@@ -46,10 +54,7 @@ pub use scalar::{feature_scalar, finite_f64};
 pub use schema::{
     FeatureSchema, FeatureSpec, FeatureUnit, NullPolicy, PitRule, SourceRequirement, StalenessRule,
 };
-pub use value::{
-    DomainFeatureSlice, EvidenceSourceKind, EvidenceSourceRef, FeatureCell, FeatureCellState,
-    FeatureName, FeatureStaleness, FeatureValue, FeatureValueKind, FeatureVector, NullReason,
-};
+pub use value::FeatureVector;
 pub use writer::feature_events;
 
 use async_trait::async_trait;

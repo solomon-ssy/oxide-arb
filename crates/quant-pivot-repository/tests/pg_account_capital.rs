@@ -12,11 +12,11 @@ use quant_pivot_models::{
     domain::{
         AppendReconciliationEvidence, ExecutionOrderPatch, InsertFinalOutcome, NewAccountSnapshot,
         NewCapitalAllocation, NewEntryConditionInstance, NewEquitySnapshot, NewExecutionOrder,
-        NewFeatureParityState, NewMarketSelection, NewModelRun, NewModelSpec, NewModelVersion,
-        NewOperationLog, NewOrderIntent, NewPortfolioPlan, NewRecommendation,
-        NewRecommendationAttribution, NewRecommendationReport, NewReconciliation,
-        NewReportDataQualitySnapshot, NewReportTransaction, NullablePatch, OperationLogQuery,
-        Patch, ReconciliationPatch, UpsertKillSwitchState,
+        NewFeatureParityState, NewMarketSelection, NewModelRun, NewModelVersion, NewOperationLog,
+        NewOrderIntent, NewPortfolioPlan, NewRecommendation, NewRecommendationAttribution,
+        NewRecommendationReport, NewReconciliation, NewReportDataQualitySnapshot,
+        NewReportTransaction, NullablePatch, OperationLogQuery, Patch, ReconciliationPatch,
+        UpsertKillSwitchState,
     },
     entities::quant_report_fact_delivery,
     enums::{
@@ -28,7 +28,7 @@ use quant_pivot_models::{
         factor::{FactorFamily, FactorValueState, NormalizationSource},
         market::MarketStatus,
         model::ModelFamily,
-        operation_log::{OperationCategory, OperationOutcome},
+        operation_log::{OperationCategory, OperationHttpMethod, OperationOutcome},
         quant::{
             AccountSource, ApprovalStatus, BindingConstraint, EntryConditionState,
             ExecutionOrderState, ExitSettlementMode, FactorDirection, FeatureParityLatchState,
@@ -48,16 +48,17 @@ use quant_pivot_models::{
         ExecutionOrderId, ExitOutcome, ExitPlan, ExitPolicySpec, ExposureBreakdown,
         FactorBreakdownEntry, FeatureParityStateId, FeatureVectorId, MarketContext, MarketId,
         MarketSelectionId, ModelInputContract, ModelRunId, ModelSpecId, ModelTrainingContract,
-        ModelVersionId, OperationLogId, OpportunisticExitPolicy, OrderAmount, OrderId,
-        OrderIntentId, PortfolioConstraintsSnapshot, PortfolioOptimizerMeta, PortfolioPlanId,
-        PortfolioRejectedSummary, PortfolioRiskBudget, PositionSnapshot, Price, Probability,
-        RecommendationFactorBreakdown, RecommendationId, RecommendationIdentity,
+        ModelVersionId, OperationDetailDocument, OperationLogId, OpportunisticExitPolicy,
+        OrderAmount, OrderId, OrderIntentId, PortfolioConstraintsSnapshot, PortfolioOptimizerMeta,
+        PortfolioPlanId, PortfolioRejectedSummary, PortfolioRiskBudget, PositionSnapshot, Price,
+        Probability, RecommendationFactorBreakdown, RecommendationId, RecommendationIdentity,
         RecommendationReportId, RecommendationTradePlan, ReconciliationEvidence,
         ReconciliationEvidenceChain, ReconciliationId, ReportDataQualitySnapshotId,
-        ReportDataQualityTokens, ReportSummary, RiskEnvelope, SchemaVersion,
-        SelectionExclusionSummary, Shares, SignalCandidateId, SizingPlan, ThesisInvalidationPolicy,
-        TokenId, TradePolicyArtifactId, TradePolicyCohortDimension, TradePolicyCohortKey,
-        TradePolicyCohortProvenance, Usd, builtin_research_profiles,
+        ReportDataQualityTokens, ReportSummary, RiskEnvelope, SelectionExclusionSummary, Shares,
+        SignalCandidateId, SizingPlan, ThesisInvalidationPolicy, TokenId, TradePolicyArtifactId,
+        TradePolicyCohortDimension, TradePolicyCohortKey, TradePolicyCohortProvenance, Usd,
+        WorkerId, builtin_research_profiles, model_metrics::ModelVersionMetrics,
+        model_training::ModelTrainingObjective,
     },
 };
 use quant_pivot_repository::{
@@ -89,7 +90,6 @@ use quant_pivot_test_support::{
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use sea_orm::{ActiveModelTrait, ActiveValue, EntityTrait, IntoActiveModel};
-use uuid::Uuid;
 
 fn content_hash(seed: char) -> ContentHash {
     ContentHash::parse(format!("blake3:{}", seed.to_string().repeat(64))).expect("hash")
@@ -250,9 +250,9 @@ async fn find_expirable_returns_published_reports_before_cutoff_only() {
         pending_due.is_empty(),
         "a report with unverified facts must not enter actionable lifecycle queries"
     );
-    let worker_id = Uuid::new_v4();
+    let worker_id = WorkerId::from_v7();
     let claimed = report_repo
-        .claim_fact_delivery(worker_id, 60)
+        .claim_fact_delivery(worker_id.clone(), 60)
         .await
         .expect("claim report facts")
         .expect("pending report facts");
@@ -369,8 +369,8 @@ async fn report_fact_delivery_recovers_retry_and_expired_lease_without_early_cla
     )
     .await;
 
-    let worker_one = Uuid::new_v4();
-    repo.claim_fact_delivery(worker_one, 60)
+    let worker_one = WorkerId::from_v7();
+    repo.claim_fact_delivery(worker_one.clone(), 60)
         .await
         .expect("claim initial delivery")
         .expect("pending delivery");
@@ -390,7 +390,7 @@ async fn report_fact_delivery_recovers_retry_and_expired_lease_without_early_cla
         "retrying delivery must persist its retry deadline"
     );
     assert!(
-        repo.claim_fact_delivery(Uuid::new_v4(), 60)
+        repo.claim_fact_delivery(WorkerId::from_v7(), 60)
             .await
             .expect("poll before retry deadline")
             .is_none(),
@@ -406,7 +406,7 @@ async fn report_fact_delivery_recovers_retry_and_expired_lease_without_early_cla
     due.next_attempt_at = ActiveValue::Set(Some(DateTime::<Utc>::UNIX_EPOCH));
     due.update(&db).await.expect("make retry deadline due");
 
-    let worker_two = Uuid::new_v4();
+    let worker_two = WorkerId::from_v7();
     let second = repo
         .claim_fact_delivery(worker_two, 60)
         .await
@@ -414,7 +414,7 @@ async fn report_fact_delivery_recovers_retry_and_expired_lease_without_early_cla
         .expect("retry became claimable");
     assert_eq!(second.attempt_count, 2);
     assert!(
-        repo.claim_fact_delivery(Uuid::new_v4(), 60)
+        repo.claim_fact_delivery(WorkerId::from_v7(), 60)
             .await
             .expect("poll live lease")
             .is_none(),
@@ -430,9 +430,9 @@ async fn report_fact_delivery_recovers_retry_and_expired_lease_without_early_cla
     expired.lease_expires_at = ActiveValue::Set(Some(DateTime::<Utc>::UNIX_EPOCH));
     expired.update(&db).await.expect("expire delivery lease");
 
-    let worker_three = Uuid::new_v4();
+    let worker_three = WorkerId::from_v7();
     let recovered = repo
-        .claim_fact_delivery(worker_three, 60)
+        .claim_fact_delivery(worker_three.clone(), 60)
         .await
         .expect("recover expired lease")
         .expect("expired delivery lease");
@@ -450,7 +450,7 @@ async fn report_fact_delivery_recovers_retry_and_expired_lease_without_early_cla
         .expect("failure settlement must retain its claim");
     assert!(failed.next_attempt_at.is_none());
     assert!(
-        repo.claim_fact_delivery(Uuid::new_v4(), 60)
+        repo.claim_fact_delivery(WorkerId::from_v7(), 60)
             .await
             .expect("poll terminal failure")
             .is_none(),
@@ -547,7 +547,7 @@ async fn assert_reserved_capital_tracks_pending_intent(
                 runtime_mode: QuantRuntimeMode::SemiAuto,
                 decision_policy_snapshot_id: decision_policy_snapshot_id.clone(),
                 model_version_id: model_version_id.clone(),
-                profile_ref: fixture_profile_ref(),
+                research_profile_artifact_id: fixture_profile_ref().artifact_id(),
                 intent_kind: OrderIntentKind::Buy,
                 status: OrderIntentStatus::PendingApproval,
                 approval_status: ApprovalStatus::Pending,
@@ -941,7 +941,7 @@ async fn create_pending_intent(db: &sea_orm::DatabaseConnection, ids: &TxnIds) -
                 runtime_mode: QuantRuntimeMode::SemiAuto,
                 decision_policy_snapshot_id: ids.decision_policy_snapshot.clone(),
                 model_version_id: ids.model_version.clone(),
-                profile_ref: fixture_profile_ref(),
+                research_profile_artifact_id: fixture_profile_ref().artifact_id(),
                 intent_kind: OrderIntentKind::Buy,
                 status: OrderIntentStatus::PendingApproval,
                 approval_status: ApprovalStatus::Pending,
@@ -1034,18 +1034,16 @@ async fn seed_model_version(
     let registry = PgModelRegistryRepository::new(db.clone());
     let model_spec_id = ModelSpecId::from_v7();
     registry
-        .create_model_spec(NewModelSpec {
-            model_spec_id: model_spec_id.clone(),
-            name: "pg-account-it".to_owned(),
-            model_family: ModelFamily::WeightedFactor,
-            prediction_horizon_secs: 86_400,
-            feature_schema_version: SchemaVersion::FIRST,
-            label_schema_version: SchemaVersion::FIRST,
-            spec_json: serde_json::json!({}),
-            input_contract: ModelInputContract::single_required("book.mid"),
-            training_contract: ModelTrainingContract::settlement_default(),
-            status: PublicationStatus::Published,
-        })
+        .create_model_spec(
+            quant_pivot_test_support::model_spec_fixtures::new_model_spec_fixture(
+                model_spec_id.clone(),
+                "pg-account-it",
+                ModelFamily::WeightedFactor,
+                86_400,
+                ModelInputContract::single_required("book.mid"),
+                ModelTrainingContract::settlement_default(),
+            ),
+        )
         .await
         .expect("model spec");
 
@@ -1062,9 +1060,10 @@ async fn seed_model_version(
             trade_policy_artifact_id: None,
             trade_policy_hash: None,
             publish_path_set_id: None,
-            metrics_json: serde_json::json!({}),
-            training_objective_json: serde_json::json!({"kind": "not_trained"}),
-            quality_gate_report: serde_json::json!({}),
+            derivation: NewModelVersion::training_derivation(),
+            metrics: ModelVersionMetrics::not_measured("test fixture"),
+            training_objective: ModelTrainingObjective::hand_authored("test fixture"),
+            quality_gate_report: None,
             publication_status: PublicationStatus::Published,
             published_at: Some(Utc::now()),
             retired_at: None,
@@ -1085,7 +1084,6 @@ async fn seed_model_version(
             status: ModelRunStatus::Succeeded,
             input_hash: content_hash('d'),
             output_hash: None,
-            metrics_json: serde_json::json!({}),
             error_code: None,
             error_message: None,
             started_at: Utc::now(),
@@ -1235,8 +1233,8 @@ fn report_row(
 ) -> NewRecommendationReport {
     NewRecommendationReport {
         recommendation_report_id: ids.report.clone(),
-        profile_id: quant_pivot_test_support::execution_pg_seed::fixture_profile_ref().id,
-        profile_ref: quant_pivot_test_support::execution_pg_seed::fixture_profile_ref(),
+        research_profile_artifact_id:
+            quant_pivot_test_support::execution_pg_seed::fixture_profile_ref().artifact_id(),
         report_kind: ReportKind::TopN,
         decision_at,
         horizon_secs: 86_400,
@@ -1268,7 +1266,8 @@ fn report_row(
 fn report_recommendation(ids: &TxnIds, decision_at: chrono::DateTime<Utc>) -> NewRecommendation {
     NewRecommendation {
         recommendation_id: ids.recommendation.clone(),
-        profile_ref: quant_pivot_test_support::execution_pg_seed::fixture_profile_ref(),
+        research_profile_artifact_id:
+            quant_pivot_test_support::execution_pg_seed::fixture_profile_ref().artifact_id(),
         recommendation_report_id: ids.report.clone(),
         rank: 1,
         market_id: MarketId::new(&ids.market),
@@ -1299,22 +1298,23 @@ fn report_recommendation(ids: &TxnIds, decision_at: chrono::DateTime<Utc>) -> Ne
 fn report_operation_log(ids: &TxnIds) -> NewOperationLog {
     NewOperationLog {
         id: OperationLogId::from_v7(),
-        request_id: report_trigger_key(ids),
+        request_id: report_trigger_key(ids).into(),
         actor_user_id: None,
         actor_username: Some("system".to_owned()),
-        acting_role: Some("test".to_owned()),
+        acting_role: Some("test".into()),
         category: OperationCategory::QuantReport,
-        action: "publish".to_owned(),
+        action: "publish".into(),
         resource_type: Some(ResourceType::QuantReport),
         resource_id: Some(ids.report.to_string()),
-        http_method: "SYSTEM".to_owned(),
+        http_method: OperationHttpMethod::System,
         http_path: "/test/quant/report".to_owned(),
         http_status: 201,
         outcome: OperationOutcome::Success,
         client_ip: None,
         user_agent: None,
         latency_ms: 0,
-        detail: serde_json::json!({ "test": true }),
+        detail: OperationDetailDocument::try_from(serde_json::json!({ "test": true }))
+            .expect("static operation detail"),
         before_hash: None,
         after_hash: None,
         governance_audit_event_id: None,
@@ -1325,22 +1325,23 @@ fn report_operation_log(ids: &TxnIds) -> NewOperationLog {
 fn intent_operation_log(intent_id: &OrderIntentId, action: &str) -> NewOperationLog {
     NewOperationLog {
         id: OperationLogId::from_v7(),
-        request_id: format!("account-capital:{action}:{intent_id}"),
+        request_id: format!("account-capital:{action}:{intent_id}").into(),
         actor_user_id: None,
         actor_username: Some("test".to_owned()),
-        acting_role: Some("test".to_owned()),
+        acting_role: Some("test".into()),
         category: OperationCategory::Governance,
-        action: action.to_owned(),
+        action: action.into(),
         resource_type: Some(ResourceType::OrderIntent),
         resource_id: Some(intent_id.to_string()),
-        http_method: "SYSTEM".to_owned(),
+        http_method: OperationHttpMethod::System,
         http_path: format!("/test/quant/intents/{intent_id}/reject"),
         http_status: 200,
         outcome: OperationOutcome::Success,
         client_ip: None,
         user_agent: None,
         latency_ms: 0,
-        detail: serde_json::json!({ "test": true }),
+        detail: OperationDetailDocument::try_from(serde_json::json!({ "test": true }))
+            .expect("static operation detail"),
         before_hash: None,
         after_hash: None,
         governance_audit_event_id: None,

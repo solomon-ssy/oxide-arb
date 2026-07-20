@@ -14,7 +14,7 @@ use quant_pivot_models::{
         FeatureParityEvidenceView, PageWindow, Paginated,
     },
     enums::quant::{FeatureCellState, FeatureParityEventStatus, FeatureParityStage},
-    types::{FeatureVectorId, ModelRunId},
+    types::{FeatureParityDetail, FeatureVectorId, ModelRunId},
 };
 use quant_pivot_storage::clickhouse::ClickHousePool;
 
@@ -311,9 +311,19 @@ fn row_to_view(row: QuantFeatureParityEventRow) -> Result<FeatureParityEventView
                 row.transform_hash, row.parity_event_id
             ))
         })?;
-    let detail = serde_json::from_str(&row.detail_json).map_err(|error| {
+    let detail =
+        serde_json::from_str::<FeatureParityDetail>(&row.detail_json).map_err(|error| {
+            StorageError::Codec(format!(
+                "invalid detail_json in parity event {}: {error}",
+                row.parity_event_id
+            ))
+        })?;
+    let stage = FeatureParityStage::from_str(&row.stage).map_err(|error| {
+        StorageError::Codec(format!("invalid parity stage `{}`: {error}", row.stage))
+    })?;
+    detail.validate_for(stage, status).map_err(|detail| {
         StorageError::Codec(format!(
-            "invalid detail_json in parity event {}: {error}",
+            "invalid typed detail in parity event {}: {detail}",
             row.parity_event_id
         ))
     })?;
@@ -321,9 +331,7 @@ fn row_to_view(row: QuantFeatureParityEventRow) -> Result<FeatureParityEventView
         parity_event_id: row.parity_event_id,
         parity_run_id: row.parity_run_id,
         status,
-        stage: FeatureParityStage::from_str(&row.stage).map_err(|error| {
-            StorageError::Codec(format!("invalid parity stage `{}`: {error}", row.stage))
-        })?,
+        stage,
         decision_at: required_time(row.decision_at, "decision_at")?,
         report_id: row.report_id,
         model_run_id: row.model_run_id,
@@ -378,7 +386,10 @@ mod tests {
     use quant_pivot_models::{
         clickhouse::QuantFeatureParityEventRow,
         enums::quant::FeatureParityStage,
-        types::{ContentHash, FeatureParityEventId, FeatureParityRunId},
+        types::{
+            ContentHash, FeatureParityDetail, FeatureParityDetailSource, FeatureParityEventId,
+            FeatureParityRunId,
+        },
     };
 
     use super::row_to_view;
@@ -414,8 +425,7 @@ mod tests {
             transform_hash: HASH.to_owned(),
             online_fingerprint: HASH.to_owned(),
             replay_fingerprint: HASH.to_owned(),
-            detail_json: r#"{"sampling_key":"report:market","source":{"column":"spread_bps"}}"#
-                .to_owned(),
+            detail_json: r#"{"kind":"compared","sampling_key":"report:market","source":{"kind":"model_input","raw_input_name":"spread_bps","feature_vector_id":"01900000-0000-7000-8000-000000000001"}}"#.to_owned(),
             ingestion_time: 1_750_000_000_001,
         }
     }
@@ -428,8 +438,18 @@ mod tests {
             view.transform_hash.as_ref().map(ContentHash::as_str),
             Some(HASH)
         );
-        assert_eq!(view.detail["sampling_key"], "report:market");
-        assert_eq!(view.detail["source"]["column"], "spread_bps");
+        let FeatureParityDetail::Compared {
+            sampling_key,
+            source,
+        } = view.detail
+        else {
+            panic!("expected typed model-input detail");
+        };
+        let FeatureParityDetailSource::ModelInput { raw_input_name, .. } = source.as_ref() else {
+            panic!("expected typed model-input source");
+        };
+        assert_eq!(sampling_key, "report:market");
+        assert_eq!(raw_input_name.as_str(), "spread_bps");
     }
 
     #[test]
@@ -445,12 +465,23 @@ mod tests {
 
     #[test]
     fn parity_event_view_decodes_capture_and_data_quality_stages() {
-        for (wire, expected) in [
-            ("capture", FeatureParityStage::Capture),
-            ("data_quality", FeatureParityStage::DataQuality),
+        for (wire, expected, detail_json) in [
+            (
+                "capture",
+                FeatureParityStage::Capture,
+                format!(
+                    r#"{{"kind":"compared","sampling_key":"report:market","source":{{"kind":"capture","feature_vector_id":"01900000-0000-7000-8000-000000000001","online_capture_hash":"{HASH}","replay_capture_hash":"{HASH}"}}}}"#,
+                ),
+            ),
+            (
+                "data_quality",
+                FeatureParityStage::DataQuality,
+                r#"{"kind":"compared","sampling_key":"report:market","source":{"kind":"data_quality","online_count":1,"replay_count":1,"online_admitted_count":1,"replay_admitted_count":1}}"#.to_owned(),
+            ),
         ] {
             let mut event = row();
             event.stage = wire.to_owned();
+            event.detail_json = detail_json;
             assert_eq!(
                 row_to_view(event).expect("valid parity event").stage,
                 expected

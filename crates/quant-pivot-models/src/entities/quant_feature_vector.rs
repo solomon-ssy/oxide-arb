@@ -3,7 +3,10 @@
 use crate::{
     domain::DecisionBoundary,
     enums::quant::DataQualityStatus,
-    types::{ContentHash, FeatureVectorId, MarketId, SchemaVersion, TokenId},
+    types::{
+        ContentHash, DecisionCaptureEvidence, FeatureSourceRefs, FeatureVectorId,
+        FeatureVectorPayload, MarketId, SchemaVersion, TokenId,
+    },
 };
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
@@ -18,18 +21,18 @@ pub struct Model {
     pub token_id: Option<TokenId>,
     pub decision_at: DateTime<Utc>,
     #[sea_orm(column_type = "JsonBinary")]
-    pub decision_boundary: Option<DecisionBoundary>,
+    pub decision_boundary: DecisionBoundary,
     pub feature_schema_version: SchemaVersion,
     pub feature_hash: ContentHash,
     pub data_quality: DataQualityStatus,
     pub staleness_ms: i64,
     #[sea_orm(column_type = "JsonBinary")]
-    pub payload: Json,
+    pub payload: FeatureVectorPayload,
     #[sea_orm(column_type = "JsonBinary")]
-    pub source_refs: Json,
+    pub source_refs: FeatureSourceRefs,
     #[sea_orm(column_type = "JsonBinary")]
-    pub decision_capture: Option<Json>,
-    pub decision_capture_hash: Option<ContentHash>,
+    pub decision_capture: DecisionCaptureEvidence,
+    pub decision_capture_hash: ContentHash,
     pub created_at: DateTime<Utc>,
 
     #[sea_orm(

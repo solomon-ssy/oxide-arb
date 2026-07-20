@@ -2,17 +2,26 @@
 //! (Postgres + testcontainers). Covers Phase 11.3 `active` governance
 //! semantics (`mark_active`) and duplicate-`content_hash` error mapping.
 
+use std::collections::BTreeMap;
+
 use chrono::Utc;
 use quant_pivot_error::storage::{StorageError, entity};
 use quant_pivot_models::{
-    domain::NewCalibrationArtifact,
+    domain::{CalibrationArtifactPayload, NewCalibrationArtifact},
     enums::quant::CalibrationKind,
-    types::{CalibrationArtifactId, ContentHash},
+    types::{
+        CalibrationArtifactId, ContentHash, ModelVersionId, Probability, TrainingDatasetId,
+        calibration::{
+            IsotonicKnot, MarketPriceBiasPayload, ModelScoreCalibrationPayload, MonotoneMapping,
+            ReliabilityBin, ReliabilityReport,
+        },
+    },
 };
 use quant_pivot_repository::{
     postgres::PgCalibrationArtifactRepository, traits::CalibrationArtifactRepository,
 };
 use quant_pivot_test_support::pg::setup_pg;
+use rust_decimal::Decimal;
 
 fn content_hash(seed: u8) -> ContentHash {
     let hex: String = format!("{seed:02x}").chars().cycle().take(64).collect();
@@ -21,6 +30,43 @@ fn content_hash(seed: u8) -> ContentHash {
 
 fn new_artifact(kind: CalibrationKind, seed: u8) -> NewCalibrationArtifact {
     let now = Utc::now();
+    let payload = match kind {
+        CalibrationKind::ModelScore => {
+            CalibrationArtifactPayload::ModelScore(ModelScoreCalibrationPayload {
+                model_version_id: ModelVersionId::from_v7(),
+                calibration_dataset_id: TrainingDatasetId::from_v7(),
+                mapping: MonotoneMapping::Isotonic {
+                    knots: vec![IsotonicKnot {
+                        score: Decimal::ZERO,
+                        probability: Decimal::ONE,
+                    }],
+                },
+                reliability: ReliabilityReport {
+                    bins: vec![ReliabilityBin {
+                        predicted_lo: Decimal::ZERO,
+                        predicted_hi: Decimal::ONE,
+                        sample_count: 1_000,
+                        mean_predicted: Probability::ONE,
+                        empirical_frequency: Probability::ONE,
+                        wilson_ci: (Probability::ONE, Probability::ONE),
+                        mean_adverse_excursion_bps: None,
+                    }],
+                    brier_score: Decimal::ZERO,
+                    log_loss: Decimal::ZERO,
+                    ece: Decimal::ZERO,
+                    n_samples: 1_000,
+                },
+            })
+        }
+        CalibrationKind::MarketPriceBias => {
+            CalibrationArtifactPayload::MarketPriceBias(MarketPriceBiasPayload {
+                by_category: BTreeMap::new(),
+            })
+        }
+        CalibrationKind::WeatherStationLeadBias => {
+            panic!("weather artifacts use the dedicated fixture")
+        }
+    };
     NewCalibrationArtifact {
         artifact_id: CalibrationArtifactId::from_v7(),
         kind,
@@ -29,7 +75,7 @@ fn new_artifact(kind: CalibrationKind, seed: u8) -> NewCalibrationArtifact {
         fit_window_end: now,
         calibration_split_hash: content_hash(seed.wrapping_add(100)),
         sample_count: 1_000,
-        payload_json: serde_json::json!({}),
+        payload,
         active: false,
     }
 }

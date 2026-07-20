@@ -994,9 +994,22 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "decision_policy_snapshot_id",
+      "name": "bundle_generation",
       "nullable": false,
       "ordinal": 1,
+      "storage": "p",
+      "table": "decision_policy_snapshot",
+      "type": "bigint"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "decision_policy_snapshot_id",
+      "nullable": false,
+      "ordinal": 2,
       "storage": "p",
       "table": "decision_policy_snapshot",
       "type": "uuid"
@@ -1009,7 +1022,7 @@
       "identity": "",
       "name": "snapshot_hash",
       "nullable": false,
-      "ordinal": 2,
+      "ordinal": 3,
       "storage": "x",
       "table": "decision_policy_snapshot",
       "type": "text"
@@ -1022,7 +1035,7 @@
       "identity": "",
       "name": "snapshot",
       "nullable": false,
-      "ordinal": 3,
+      "ordinal": 4,
       "storage": "x",
       "table": "decision_policy_snapshot",
       "type": "jsonb"
@@ -1035,7 +1048,7 @@
       "identity": "",
       "name": "recommendation_policy_revision_id",
       "nullable": false,
-      "ordinal": 4,
+      "ordinal": 5,
       "storage": "p",
       "table": "decision_policy_snapshot",
       "type": "uuid"
@@ -1048,7 +1061,7 @@
       "identity": "",
       "name": "execution_risk_policy_revision_id",
       "nullable": false,
-      "ordinal": 5,
+      "ordinal": 6,
       "storage": "p",
       "table": "decision_policy_snapshot",
       "type": "uuid"
@@ -1061,7 +1074,7 @@
       "identity": "",
       "name": "model_routing_revision_id",
       "nullable": false,
-      "ordinal": 6,
+      "ordinal": 7,
       "storage": "p",
       "table": "decision_policy_snapshot",
       "type": "uuid"
@@ -1074,7 +1087,7 @@
       "identity": "",
       "name": "report_schedule_revision_id",
       "nullable": false,
-      "ordinal": 7,
+      "ordinal": 8,
       "storage": "p",
       "table": "decision_policy_snapshot",
       "type": "uuid"
@@ -1087,7 +1100,7 @@
       "identity": "",
       "name": "operational_control_revision_id",
       "nullable": false,
-      "ordinal": 8,
+      "ordinal": 9,
       "storage": "p",
       "table": "decision_policy_snapshot",
       "type": "uuid"
@@ -1100,7 +1113,7 @@
       "identity": "",
       "name": "execution_authorization_revision_id",
       "nullable": false,
-      "ordinal": 9,
+      "ordinal": 10,
       "storage": "p",
       "table": "decision_policy_snapshot",
       "type": "uuid"
@@ -1113,7 +1126,7 @@
       "identity": "",
       "name": "source",
       "nullable": false,
-      "ordinal": 10,
+      "ordinal": 11,
       "storage": "p",
       "table": "decision_policy_snapshot",
       "type": "qp_decision_policy_snapshot_source"
@@ -1126,7 +1139,7 @@
       "identity": "",
       "name": "created_by_kind",
       "nullable": false,
-      "ordinal": 11,
+      "ordinal": 12,
       "storage": "p",
       "table": "decision_policy_snapshot",
       "type": "qp_policy_actor_kind"
@@ -1139,7 +1152,7 @@
       "identity": "",
       "name": "created_by_user_id",
       "nullable": true,
-      "ordinal": 12,
+      "ordinal": 13,
       "storage": "p",
       "table": "decision_policy_snapshot",
       "type": "uuid"
@@ -1152,7 +1165,7 @@
       "identity": "",
       "name": "created_by_label",
       "nullable": false,
-      "ordinal": 13,
+      "ordinal": 14,
       "storage": "x",
       "table": "decision_policy_snapshot",
       "type": "text"
@@ -1165,7 +1178,7 @@
       "identity": "",
       "name": "reason",
       "nullable": false,
-      "ordinal": 14,
+      "ordinal": 15,
       "storage": "x",
       "table": "decision_policy_snapshot",
       "type": "text"
@@ -1178,7 +1191,7 @@
       "identity": "",
       "name": "created_at",
       "nullable": false,
-      "ordinal": 15,
+      "ordinal": 16,
       "storage": "p",
       "table": "decision_policy_snapshot",
       "type": "timestamp with time zone"
@@ -1925,7 +1938,7 @@
       "type": "text"
     },
     {
-      "collation": "default",
+      "collation": null,
       "compression": "",
       "default": null,
       "generated": "",
@@ -1933,9 +1946,9 @@
       "name": "http_method",
       "nullable": false,
       "ordinal": 11,
-      "storage": "x",
+      "storage": "p",
       "table": "operation_log",
-      "type": "text"
+      "type": "qp_operation_http_method"
     },
     {
       "collation": "default",
@@ -1977,7 +1990,7 @@
       "type": "qp_operation_outcome"
     },
     {
-      "collation": "default",
+      "collation": null,
       "compression": "",
       "default": null,
       "generated": "",
@@ -1985,9 +1998,9 @@
       "name": "client_ip",
       "nullable": true,
       "ordinal": 15,
-      "storage": "x",
+      "storage": "m",
       "table": "operation_log",
-      "type": "text"
+      "type": "inet"
     },
     {
       "collation": "default",
@@ -2086,12 +2099,12 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "policy_activation_id",
+      "name": "bundle_generation",
       "nullable": false,
       "ordinal": 1,
       "storage": "p",
       "table": "policy_activation",
-      "type": "uuid"
+      "type": "bigint"
     },
     {
       "collation": null,
@@ -2099,12 +2112,12 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "resource_kind",
+      "name": "expected_bundle_generation",
       "nullable": false,
       "ordinal": 2,
       "storage": "p",
       "table": "policy_activation",
-      "type": "qp_config_resource_kind"
+      "type": "bigint"
     },
     {
       "collation": null,
@@ -2112,7 +2125,7 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "policy_revision_id",
+      "name": "policy_activation_id",
       "nullable": false,
       "ordinal": 3,
       "storage": "p",
@@ -2125,9 +2138,35 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "decision_policy_snapshot_id",
+      "name": "resource_kind",
       "nullable": false,
       "ordinal": 4,
+      "storage": "p",
+      "table": "policy_activation",
+      "type": "qp_config_resource_kind"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "policy_revision_id",
+      "nullable": false,
+      "ordinal": 5,
+      "storage": "p",
+      "table": "policy_activation",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "decision_policy_snapshot_id",
+      "nullable": false,
+      "ordinal": 6,
       "storage": "p",
       "table": "policy_activation",
       "type": "uuid"
@@ -2140,7 +2179,7 @@
       "identity": "",
       "name": "policy_approval_id",
       "nullable": false,
-      "ordinal": 5,
+      "ordinal": 7,
       "storage": "p",
       "table": "policy_activation",
       "type": "uuid"
@@ -2153,7 +2192,7 @@
       "identity": "",
       "name": "activated_at",
       "nullable": false,
-      "ordinal": 6,
+      "ordinal": 8,
       "storage": "p",
       "table": "policy_activation",
       "type": "timestamp with time zone"
@@ -2166,7 +2205,7 @@
       "identity": "",
       "name": "activated_by_kind",
       "nullable": false,
-      "ordinal": 7,
+      "ordinal": 9,
       "storage": "p",
       "table": "policy_activation",
       "type": "qp_policy_actor_kind"
@@ -2179,7 +2218,7 @@
       "identity": "",
       "name": "activated_by_user_id",
       "nullable": true,
-      "ordinal": 8,
+      "ordinal": 10,
       "storage": "p",
       "table": "policy_activation",
       "type": "uuid"
@@ -2192,7 +2231,7 @@
       "identity": "",
       "name": "activated_by_label",
       "nullable": false,
-      "ordinal": 9,
+      "ordinal": 11,
       "storage": "x",
       "table": "policy_activation",
       "type": "text"
@@ -2205,7 +2244,7 @@
       "identity": "",
       "name": "reason",
       "nullable": false,
-      "ordinal": 10,
+      "ordinal": 12,
       "storage": "x",
       "table": "policy_activation",
       "type": "text"
@@ -2218,7 +2257,7 @@
       "identity": "",
       "name": "activation_kind",
       "nullable": false,
-      "ordinal": 11,
+      "ordinal": 13,
       "storage": "p",
       "table": "policy_activation",
       "type": "qp_policy_activation_kind"
@@ -2231,7 +2270,7 @@
       "identity": "",
       "name": "expected_active_revision_id",
       "nullable": true,
-      "ordinal": 12,
+      "ordinal": 14,
       "storage": "p",
       "table": "policy_activation",
       "type": "uuid"
@@ -2244,7 +2283,7 @@
       "identity": "",
       "name": "previous_policy_revision_id",
       "nullable": true,
-      "ordinal": 13,
+      "ordinal": 15,
       "storage": "p",
       "table": "policy_activation",
       "type": "uuid"
@@ -2257,7 +2296,7 @@
       "identity": "",
       "name": "rollback_target_revision_id",
       "nullable": true,
-      "ordinal": 14,
+      "ordinal": 16,
       "storage": "p",
       "table": "policy_activation",
       "type": "uuid"
@@ -2270,7 +2309,7 @@
       "identity": "",
       "name": "preflight_token_hash",
       "nullable": false,
-      "ordinal": 15,
+      "ordinal": 17,
       "storage": "x",
       "table": "policy_activation",
       "type": "text"
@@ -2283,7 +2322,20 @@
       "identity": "",
       "name": "idempotency_key",
       "nullable": false,
-      "ordinal": 16,
+      "ordinal": 18,
+      "storage": "x",
+      "table": "policy_activation",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "activation_request_hash",
+      "nullable": false,
+      "ordinal": 19,
       "storage": "x",
       "table": "policy_activation",
       "type": "text"
@@ -2295,8 +2347,8 @@
       "generated": "",
       "identity": "",
       "name": "audit_event_id",
-      "nullable": true,
-      "ordinal": 17,
+      "nullable": false,
+      "ordinal": 20,
       "storage": "p",
       "table": "policy_activation",
       "type": "uuid"
@@ -2309,9 +2361,269 @@
       "identity": "",
       "name": "created_at",
       "nullable": false,
-      "ordinal": 18,
+      "ordinal": 21,
       "storage": "p",
       "table": "policy_activation",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "audit_event_id",
+      "nullable": false,
+      "ordinal": 1,
+      "storage": "p",
+      "table": "policy_activation_audit",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "policy_activation_id",
+      "nullable": false,
+      "ordinal": 2,
+      "storage": "p",
+      "table": "policy_activation_audit",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "bundle_generation",
+      "nullable": false,
+      "ordinal": 3,
+      "storage": "p",
+      "table": "policy_activation_audit",
+      "type": "bigint"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "resource_kind",
+      "nullable": false,
+      "ordinal": 4,
+      "storage": "p",
+      "table": "policy_activation_audit",
+      "type": "qp_config_resource_kind"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "policy_revision_id",
+      "nullable": false,
+      "ordinal": 5,
+      "storage": "p",
+      "table": "policy_activation_audit",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "decision_policy_snapshot_id",
+      "nullable": false,
+      "ordinal": 6,
+      "storage": "p",
+      "table": "policy_activation_audit",
+      "type": "uuid"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "snapshot_hash",
+      "nullable": false,
+      "ordinal": 7,
+      "storage": "x",
+      "table": "policy_activation_audit",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "activation_request_hash",
+      "nullable": false,
+      "ordinal": 8,
+      "storage": "x",
+      "table": "policy_activation_audit",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "actor_kind",
+      "nullable": false,
+      "ordinal": 9,
+      "storage": "p",
+      "table": "policy_activation_audit",
+      "type": "qp_policy_actor_kind"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "actor_user_id",
+      "nullable": true,
+      "ordinal": 10,
+      "storage": "p",
+      "table": "policy_activation_audit",
+      "type": "uuid"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "actor_label",
+      "nullable": false,
+      "ordinal": 11,
+      "storage": "x",
+      "table": "policy_activation_audit",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "reason",
+      "nullable": false,
+      "ordinal": 12,
+      "storage": "x",
+      "table": "policy_activation_audit",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "occurred_at",
+      "nullable": false,
+      "ordinal": 13,
+      "storage": "p",
+      "table": "policy_activation_audit",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": "CURRENT_TIMESTAMP",
+      "generated": "",
+      "identity": "",
+      "name": "created_at",
+      "nullable": false,
+      "ordinal": 14,
+      "storage": "p",
+      "table": "policy_activation_audit",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "audit_event_id",
+      "nullable": false,
+      "ordinal": 1,
+      "storage": "p",
+      "table": "policy_activation_event_outbox",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "policy_activation_id",
+      "nullable": false,
+      "ordinal": 2,
+      "storage": "p",
+      "table": "policy_activation_event_outbox",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "bundle_generation",
+      "nullable": false,
+      "ordinal": 3,
+      "storage": "p",
+      "table": "policy_activation_event_outbox",
+      "type": "bigint"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "decision_policy_snapshot_id",
+      "nullable": false,
+      "ordinal": 4,
+      "storage": "p",
+      "table": "policy_activation_event_outbox",
+      "type": "uuid"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "snapshot_hash",
+      "nullable": false,
+      "ordinal": 5,
+      "storage": "x",
+      "table": "policy_activation_event_outbox",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": "CURRENT_TIMESTAMP",
+      "generated": "",
+      "identity": "",
+      "name": "created_at",
+      "nullable": false,
+      "ordinal": 6,
+      "storage": "p",
+      "table": "policy_activation_event_outbox",
       "type": "timestamp with time zone"
     },
     {
@@ -2343,12 +2655,51 @@
     {
       "collation": null,
       "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "current_snapshot_id",
+      "nullable": true,
+      "ordinal": 3,
+      "storage": "p",
+      "table": "policy_activation_guard",
+      "type": "uuid"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "current_snapshot_hash",
+      "nullable": true,
+      "ordinal": 4,
+      "storage": "x",
+      "table": "policy_activation_guard",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
       "default": "CURRENT_TIMESTAMP",
       "generated": "",
       "identity": "",
       "name": "created_at",
       "nullable": false,
-      "ordinal": 3,
+      "ordinal": 5,
+      "storage": "p",
+      "table": "policy_activation_guard",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": "CURRENT_TIMESTAMP",
+      "generated": "",
+      "identity": "",
+      "name": "updated_at",
+      "nullable": false,
+      "ordinal": 6,
       "storage": "p",
       "table": "policy_activation_guard",
       "type": "timestamp with time zone"
@@ -2411,9 +2762,22 @@
       "default": null,
       "generated": "",
       "identity": "",
+      "name": "validation_subject",
+      "nullable": true,
+      "ordinal": 5,
+      "storage": "x",
+      "table": "policy_approval",
+      "type": "jsonb"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
       "name": "decision",
       "nullable": false,
-      "ordinal": 5,
+      "ordinal": 6,
       "storage": "p",
       "table": "policy_approval",
       "type": "qp_policy_approval_decision"
@@ -2426,7 +2790,7 @@
       "identity": "",
       "name": "decided_by_kind",
       "nullable": false,
-      "ordinal": 6,
+      "ordinal": 7,
       "storage": "p",
       "table": "policy_approval",
       "type": "qp_policy_actor_kind"
@@ -2439,7 +2803,7 @@
       "identity": "",
       "name": "decided_by_user_id",
       "nullable": true,
-      "ordinal": 7,
+      "ordinal": 8,
       "storage": "p",
       "table": "policy_approval",
       "type": "uuid"
@@ -2452,7 +2816,7 @@
       "identity": "",
       "name": "decided_by_label",
       "nullable": false,
-      "ordinal": 8,
+      "ordinal": 9,
       "storage": "x",
       "table": "policy_approval",
       "type": "text"
@@ -2465,7 +2829,7 @@
       "identity": "",
       "name": "reason",
       "nullable": false,
-      "ordinal": 9,
+      "ordinal": 10,
       "storage": "x",
       "table": "policy_approval",
       "type": "text"
@@ -2478,7 +2842,7 @@
       "identity": "",
       "name": "decided_at",
       "nullable": false,
-      "ordinal": 10,
+      "ordinal": 11,
       "storage": "p",
       "table": "policy_approval",
       "type": "timestamp with time zone"
@@ -2491,7 +2855,7 @@
       "identity": "",
       "name": "expires_at",
       "nullable": true,
-      "ordinal": 11,
+      "ordinal": 12,
       "storage": "p",
       "table": "policy_approval",
       "type": "timestamp with time zone"
@@ -2504,9 +2868,139 @@
       "identity": "",
       "name": "created_at",
       "nullable": false,
-      "ordinal": 12,
+      "ordinal": 13,
       "storage": "p",
       "table": "policy_approval",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "profile_artifact_id",
+      "nullable": false,
+      "ordinal": 1,
+      "storage": "p",
+      "table": "policy_profile_artifact",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "kind",
+      "nullable": false,
+      "ordinal": 2,
+      "storage": "p",
+      "table": "policy_profile_artifact",
+      "type": "qp_profile_artifact_kind"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "schema_version",
+      "nullable": false,
+      "ordinal": 3,
+      "storage": "p",
+      "table": "policy_profile_artifact",
+      "type": "integer"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "document",
+      "nullable": false,
+      "ordinal": 4,
+      "storage": "x",
+      "table": "policy_profile_artifact",
+      "type": "jsonb"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "content_hash",
+      "nullable": false,
+      "ordinal": 5,
+      "storage": "x",
+      "table": "policy_profile_artifact",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "created_by_kind",
+      "nullable": false,
+      "ordinal": 6,
+      "storage": "p",
+      "table": "policy_profile_artifact",
+      "type": "qp_policy_actor_kind"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "created_by_user_id",
+      "nullable": true,
+      "ordinal": 7,
+      "storage": "p",
+      "table": "policy_profile_artifact",
+      "type": "uuid"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "created_by_label",
+      "nullable": false,
+      "ordinal": 8,
+      "storage": "x",
+      "table": "policy_profile_artifact",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "reason",
+      "nullable": false,
+      "ordinal": 9,
+      "storage": "x",
+      "table": "policy_profile_artifact",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": "CURRENT_TIMESTAMP",
+      "generated": "",
+      "identity": "",
+      "name": "created_at",
+      "nullable": false,
+      "ordinal": 10,
+      "storage": "p",
+      "table": "policy_profile_artifact",
       "type": "timestamp with time zone"
     },
     {
@@ -3633,7 +4127,7 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "payload_json",
+      "name": "payload",
       "nullable": false,
       "ordinal": 8,
       "storage": "x",
@@ -4369,9 +4863,9 @@
       "type": "bigint"
     },
     {
-      "collation": null,
+      "collation": "default",
       "compression": "",
-      "default": "'[]'::jsonb",
+      "default": null,
       "generated": "",
       "identity": "",
       "name": "affected_market_ids",
@@ -4379,12 +4873,12 @@
       "ordinal": 10,
       "storage": "x",
       "table": "quant_domain_source_expectation",
-      "type": "jsonb"
+      "type": "character varying[]"
     },
     {
-      "collation": null,
+      "collation": "default",
       "compression": "",
-      "default": "'[]'::jsonb",
+      "default": null,
       "generated": "",
       "identity": "",
       "name": "affected_profile_ids",
@@ -4392,7 +4886,7 @@
       "ordinal": 11,
       "storage": "x",
       "table": "quant_domain_source_expectation",
-      "type": "jsonb"
+      "type": "character varying[]"
     },
     {
       "collation": null,
@@ -5687,7 +6181,7 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "definition_json",
+      "name": "definition",
       "nullable": false,
       "ordinal": 9,
       "storage": "x",
@@ -6728,7 +7222,7 @@
       "generated": "",
       "identity": "",
       "name": "decision_boundary",
-      "nullable": true,
+      "nullable": false,
       "ordinal": 5,
       "storage": "x",
       "table": "quant_feature_vector",
@@ -6819,7 +7313,7 @@
       "generated": "",
       "identity": "",
       "name": "decision_capture",
-      "nullable": true,
+      "nullable": false,
       "ordinal": 12,
       "storage": "x",
       "table": "quant_feature_vector",
@@ -6832,7 +7326,7 @@
       "generated": "",
       "identity": "",
       "name": "decision_capture_hash",
-      "nullable": true,
+      "nullable": false,
       "ordinal": 13,
       "storage": "x",
       "table": "quant_feature_vector",
@@ -7593,6 +8087,19 @@
       "type": "qp_model_governance_action"
     },
     {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "actor_user_id",
+      "nullable": true,
+      "ordinal": 5,
+      "storage": "p",
+      "table": "quant_model_governance_audit",
+      "type": "uuid"
+    },
+    {
       "collation": "default",
       "compression": "",
       "default": null,
@@ -7600,7 +8107,7 @@
       "identity": "",
       "name": "actor_username",
       "nullable": false,
-      "ordinal": 5,
+      "ordinal": 6,
       "storage": "x",
       "table": "quant_model_governance_audit",
       "type": "character varying"
@@ -7613,7 +8120,7 @@
       "identity": "",
       "name": "actor_role",
       "nullable": true,
-      "ordinal": 6,
+      "ordinal": 7,
       "storage": "x",
       "table": "quant_model_governance_audit",
       "type": "character varying"
@@ -7626,7 +8133,7 @@
       "identity": "",
       "name": "reason",
       "nullable": false,
-      "ordinal": 7,
+      "ordinal": 8,
       "storage": "x",
       "table": "quant_model_governance_audit",
       "type": "character varying"
@@ -7639,7 +8146,7 @@
       "identity": "",
       "name": "before_status",
       "nullable": false,
-      "ordinal": 8,
+      "ordinal": 9,
       "storage": "p",
       "table": "quant_model_governance_audit",
       "type": "qp_publication_status"
@@ -7652,72 +8159,20 @@
       "identity": "",
       "name": "after_status",
       "nullable": false,
-      "ordinal": 9,
+      "ordinal": 10,
       "storage": "p",
       "table": "quant_model_governance_audit",
       "type": "qp_publication_status"
     },
     {
-      "collation": "default",
+      "collation": null,
       "compression": "",
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "before_hash",
-      "nullable": true,
-      "ordinal": 10,
-      "storage": "x",
-      "table": "quant_model_governance_audit",
-      "type": "character varying"
-    },
-    {
-      "collation": "default",
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "after_hash",
-      "nullable": true,
+      "name": "detail",
+      "nullable": false,
       "ordinal": 11,
-      "storage": "x",
-      "table": "quant_model_governance_audit",
-      "type": "character varying"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "quality_gate_passed",
-      "nullable": false,
-      "ordinal": 12,
-      "storage": "p",
-      "table": "quant_model_governance_audit",
-      "type": "boolean"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "shadow_window_secs",
-      "nullable": true,
-      "ordinal": 13,
-      "storage": "p",
-      "table": "quant_model_governance_audit",
-      "type": "bigint"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "detail_json",
-      "nullable": false,
-      "ordinal": 14,
       "storage": "x",
       "table": "quant_model_governance_audit",
       "type": "jsonb"
@@ -7729,8 +8184,8 @@
       "generated": "",
       "identity": "",
       "name": "audit_event_id",
-      "nullable": true,
-      "ordinal": 15,
+      "nullable": false,
+      "ordinal": 12,
       "storage": "p",
       "table": "quant_model_governance_audit",
       "type": "uuid"
@@ -7743,7 +8198,7 @@
       "identity": "",
       "name": "created_at",
       "nullable": false,
-      "ordinal": 16,
+      "ordinal": 13,
       "storage": "p",
       "table": "quant_model_governance_audit",
       "type": "timestamp with time zone"
@@ -7884,22 +8339,9 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "metrics_json",
-      "nullable": false,
-      "ordinal": 11,
-      "storage": "x",
-      "table": "quant_model_run",
-      "type": "jsonb"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
       "name": "error_code",
       "nullable": true,
-      "ordinal": 12,
+      "ordinal": 11,
       "storage": "p",
       "table": "quant_model_run",
       "type": "qp_model_run_error_code"
@@ -7912,7 +8354,7 @@
       "identity": "",
       "name": "error_message",
       "nullable": true,
-      "ordinal": 13,
+      "ordinal": 12,
       "storage": "x",
       "table": "quant_model_run",
       "type": "text"
@@ -7925,7 +8367,7 @@
       "identity": "",
       "name": "started_at",
       "nullable": false,
-      "ordinal": 14,
+      "ordinal": 13,
       "storage": "p",
       "table": "quant_model_run",
       "type": "timestamp with time zone"
@@ -7938,7 +8380,7 @@
       "identity": "",
       "name": "finished_at",
       "nullable": true,
-      "ordinal": 15,
+      "ordinal": 14,
       "storage": "p",
       "table": "quant_model_run",
       "type": "timestamp with time zone"
@@ -8027,7 +8469,7 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "spec_json",
+      "name": "thesis",
       "nullable": false,
       "ordinal": 7,
       "storage": "x",
@@ -8061,17 +8503,69 @@
       "type": "jsonb"
     },
     {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "definition_hash",
+      "nullable": false,
+      "ordinal": 10,
+      "storage": "x",
+      "table": "quant_model_spec",
+      "type": "character varying"
+    },
+    {
       "collation": null,
       "compression": "",
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "status",
-      "nullable": false,
-      "ordinal": 10,
+      "name": "created_by_user_id",
+      "nullable": true,
+      "ordinal": 11,
       "storage": "p",
       "table": "quant_model_spec",
-      "type": "qp_publication_status"
+      "type": "uuid"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "created_by_label",
+      "nullable": false,
+      "ordinal": 12,
+      "storage": "x",
+      "table": "quant_model_spec",
+      "type": "character varying"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "created_by_role",
+      "nullable": true,
+      "ordinal": 13,
+      "storage": "x",
+      "table": "quant_model_spec",
+      "type": "character varying"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "reason",
+      "nullable": false,
+      "ordinal": 14,
+      "storage": "x",
+      "table": "quant_model_spec",
+      "type": "character varying"
     },
     {
       "collation": null,
@@ -8081,20 +8575,7 @@
       "identity": "",
       "name": "created_at",
       "nullable": false,
-      "ordinal": 11,
-      "storage": "p",
-      "table": "quant_model_spec",
-      "type": "timestamp with time zone"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": "statement_timestamp()",
-      "generated": "",
-      "identity": "",
-      "name": "updated_at",
-      "nullable": false,
-      "ordinal": 12,
+      "ordinal": 15,
       "storage": "p",
       "table": "quant_model_spec",
       "type": "timestamp with time zone"
@@ -8165,17 +8646,17 @@
       "type": "qp_market_category"
     },
     {
-      "collation": null,
+      "collation": "default",
       "compression": "",
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "profile_ref",
+      "name": "research_profile_artifact_id",
       "nullable": false,
       "ordinal": 6,
       "storage": "x",
       "table": "quant_model_version",
-      "type": "jsonb"
+      "type": "text"
     },
     {
       "collation": null,
@@ -8235,9 +8716,87 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "metrics_json",
+      "name": "derivation_kind",
       "nullable": false,
       "ordinal": 11,
+      "storage": "p",
+      "table": "quant_model_version",
+      "type": "qp_model_version_derivation_kind"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "parent_model_version_id",
+      "nullable": true,
+      "ordinal": 12,
+      "storage": "p",
+      "table": "quant_model_version",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "source_backtest_report_id",
+      "nullable": true,
+      "ordinal": 13,
+      "storage": "p",
+      "table": "quant_model_version",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "calibration_artifact_id",
+      "nullable": true,
+      "ordinal": 14,
+      "storage": "p",
+      "table": "quant_model_version",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "score_multiplier_calibration_report",
+      "nullable": true,
+      "ordinal": 15,
+      "storage": "x",
+      "table": "quant_model_version",
+      "type": "jsonb"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "derivation_evidence_hash",
+      "nullable": true,
+      "ordinal": 16,
+      "storage": "x",
+      "table": "quant_model_version",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "metrics",
+      "nullable": false,
+      "ordinal": 17,
       "storage": "x",
       "table": "quant_model_version",
       "type": "jsonb"
@@ -8248,9 +8807,9 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "training_objective_json",
+      "name": "training_objective",
       "nullable": false,
-      "ordinal": 12,
+      "ordinal": 18,
       "storage": "x",
       "table": "quant_model_version",
       "type": "jsonb"
@@ -8262,8 +8821,8 @@
       "generated": "",
       "identity": "",
       "name": "quality_gate_report",
-      "nullable": false,
-      "ordinal": 13,
+      "nullable": true,
+      "ordinal": 19,
       "storage": "x",
       "table": "quant_model_version",
       "type": "jsonb"
@@ -8276,7 +8835,7 @@
       "identity": "",
       "name": "publication_status",
       "nullable": false,
-      "ordinal": 14,
+      "ordinal": 20,
       "storage": "p",
       "table": "quant_model_version",
       "type": "qp_publication_status"
@@ -8289,7 +8848,7 @@
       "identity": "",
       "name": "published_at",
       "nullable": true,
-      "ordinal": 15,
+      "ordinal": 21,
       "storage": "p",
       "table": "quant_model_version",
       "type": "timestamp with time zone"
@@ -8302,7 +8861,7 @@
       "identity": "",
       "name": "retired_at",
       "nullable": true,
-      "ordinal": 16,
+      "ordinal": 22,
       "storage": "p",
       "table": "quant_model_version",
       "type": "timestamp with time zone"
@@ -8315,7 +8874,7 @@
       "identity": "",
       "name": "created_at",
       "nullable": false,
-      "ordinal": 17,
+      "ordinal": 23,
       "storage": "p",
       "table": "quant_model_version",
       "type": "timestamp with time zone"
@@ -8386,17 +8945,17 @@
       "type": "uuid"
     },
     {
-      "collation": null,
+      "collation": "default",
       "compression": "",
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "profile_ref",
+      "name": "research_profile_artifact_id",
       "nullable": false,
       "ordinal": 6,
       "storage": "x",
       "table": "quant_order_intent",
-      "type": "jsonb"
+      "type": "text"
     },
     {
       "collation": null,
@@ -9075,17 +9634,17 @@
       "type": "uuid"
     },
     {
-      "collation": null,
+      "collation": "default",
       "compression": "",
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "profile_ref",
+      "name": "research_profile_artifact_id",
       "nullable": false,
       "ordinal": 2,
       "storage": "x",
       "table": "quant_recommendation",
-      "type": "jsonb"
+      "type": "text"
     },
     {
       "collation": null,
@@ -9561,25 +10120,12 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "profile_id",
+      "name": "research_profile_artifact_id",
       "nullable": false,
       "ordinal": 2,
       "storage": "x",
       "table": "quant_recommendation_report",
-      "type": "character varying"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "profile_ref",
-      "nullable": false,
-      "ordinal": 3,
-      "storage": "x",
-      "table": "quant_recommendation_report",
-      "type": "jsonb"
+      "type": "text"
     },
     {
       "collation": null,
@@ -9589,7 +10135,7 @@
       "identity": "",
       "name": "report_kind",
       "nullable": false,
-      "ordinal": 4,
+      "ordinal": 3,
       "storage": "p",
       "table": "quant_recommendation_report",
       "type": "qp_report_kind"
@@ -9602,7 +10148,7 @@
       "identity": "",
       "name": "decision_at",
       "nullable": false,
-      "ordinal": 5,
+      "ordinal": 4,
       "storage": "p",
       "table": "quant_recommendation_report",
       "type": "timestamp with time zone"
@@ -9615,7 +10161,7 @@
       "identity": "",
       "name": "horizon_secs",
       "nullable": false,
-      "ordinal": 6,
+      "ordinal": 5,
       "storage": "p",
       "table": "quant_recommendation_report",
       "type": "bigint"
@@ -9628,7 +10174,7 @@
       "identity": "",
       "name": "runtime_mode",
       "nullable": false,
-      "ordinal": 7,
+      "ordinal": 6,
       "storage": "p",
       "table": "quant_recommendation_report",
       "type": "qp_quant_runtime_mode"
@@ -9641,7 +10187,7 @@
       "identity": "",
       "name": "decision_policy_snapshot_id",
       "nullable": false,
-      "ordinal": 8,
+      "ordinal": 7,
       "storage": "p",
       "table": "quant_recommendation_report",
       "type": "uuid"
@@ -9654,7 +10200,7 @@
       "identity": "",
       "name": "model_run_id",
       "nullable": true,
-      "ordinal": 9,
+      "ordinal": 8,
       "storage": "p",
       "table": "quant_recommendation_report",
       "type": "uuid"
@@ -9667,7 +10213,7 @@
       "identity": "",
       "name": "model_version_id",
       "nullable": false,
-      "ordinal": 10,
+      "ordinal": 9,
       "storage": "p",
       "table": "quant_recommendation_report",
       "type": "uuid"
@@ -9680,7 +10226,7 @@
       "identity": "",
       "name": "market_selection_id",
       "nullable": false,
-      "ordinal": 11,
+      "ordinal": 10,
       "storage": "p",
       "table": "quant_recommendation_report",
       "type": "uuid"
@@ -9693,7 +10239,7 @@
       "identity": "",
       "name": "portfolio_plan_id",
       "nullable": false,
-      "ordinal": 12,
+      "ordinal": 11,
       "storage": "p",
       "table": "quant_recommendation_report",
       "type": "uuid"
@@ -9706,7 +10252,7 @@
       "identity": "",
       "name": "top_n",
       "nullable": false,
-      "ordinal": 13,
+      "ordinal": 12,
       "storage": "p",
       "table": "quant_recommendation_report",
       "type": "integer"
@@ -9719,7 +10265,7 @@
       "identity": "",
       "name": "status",
       "nullable": false,
-      "ordinal": 14,
+      "ordinal": 13,
       "storage": "p",
       "table": "quant_recommendation_report",
       "type": "qp_recommendation_report_status"
@@ -9732,7 +10278,7 @@
       "identity": "",
       "name": "account_source",
       "nullable": false,
-      "ordinal": 15,
+      "ordinal": 14,
       "storage": "p",
       "table": "quant_recommendation_report",
       "type": "qp_account_source"
@@ -9745,7 +10291,7 @@
       "identity": "",
       "name": "capital_base_usd",
       "nullable": false,
-      "ordinal": 16,
+      "ordinal": 15,
       "storage": "m",
       "table": "quant_recommendation_report",
       "type": "numeric"
@@ -9758,7 +10304,7 @@
       "identity": "",
       "name": "account_snapshot_ref",
       "nullable": false,
-      "ordinal": 17,
+      "ordinal": 16,
       "storage": "p",
       "table": "quant_recommendation_report",
       "type": "uuid"
@@ -9771,7 +10317,7 @@
       "identity": "",
       "name": "equity_snapshot_ref",
       "nullable": false,
-      "ordinal": 18,
+      "ordinal": 17,
       "storage": "p",
       "table": "quant_recommendation_report",
       "type": "uuid"
@@ -9784,7 +10330,7 @@
       "identity": "",
       "name": "data_quality_snapshot_ref",
       "nullable": false,
-      "ordinal": 19,
+      "ordinal": 18,
       "storage": "p",
       "table": "quant_recommendation_report",
       "type": "uuid"
@@ -9797,7 +10343,7 @@
       "identity": "",
       "name": "summary_json",
       "nullable": false,
-      "ordinal": 20,
+      "ordinal": 19,
       "storage": "x",
       "table": "quant_recommendation_report",
       "type": "jsonb"
@@ -9810,7 +10356,7 @@
       "identity": "",
       "name": "published_at",
       "nullable": true,
-      "ordinal": 21,
+      "ordinal": 20,
       "storage": "p",
       "table": "quant_recommendation_report",
       "type": "timestamp with time zone"
@@ -9823,7 +10369,7 @@
       "identity": "",
       "name": "successor_report_id",
       "nullable": true,
-      "ordinal": 22,
+      "ordinal": 21,
       "storage": "p",
       "table": "quant_recommendation_report",
       "type": "uuid"
@@ -9836,7 +10382,7 @@
       "identity": "",
       "name": "superseded_at",
       "nullable": true,
-      "ordinal": 23,
+      "ordinal": 22,
       "storage": "p",
       "table": "quant_recommendation_report",
       "type": "timestamp with time zone"
@@ -9849,7 +10395,7 @@
       "identity": "",
       "name": "obsoleted_at",
       "nullable": true,
-      "ordinal": 24,
+      "ordinal": 23,
       "storage": "p",
       "table": "quant_recommendation_report",
       "type": "timestamp with time zone"
@@ -9862,7 +10408,7 @@
       "identity": "",
       "name": "valid_until",
       "nullable": true,
-      "ordinal": 25,
+      "ordinal": 24,
       "storage": "p",
       "table": "quant_recommendation_report",
       "type": "timestamp with time zone"
@@ -9875,7 +10421,7 @@
       "identity": "",
       "name": "revoked_at",
       "nullable": true,
-      "ordinal": 26,
+      "ordinal": 25,
       "storage": "p",
       "table": "quant_recommendation_report",
       "type": "timestamp with time zone"
@@ -9888,7 +10434,7 @@
       "identity": "",
       "name": "expired_at",
       "nullable": true,
-      "ordinal": 27,
+      "ordinal": 26,
       "storage": "p",
       "table": "quant_recommendation_report",
       "type": "timestamp with time zone"
@@ -9901,7 +10447,7 @@
       "identity": "",
       "name": "status_reason",
       "nullable": true,
-      "ordinal": 28,
+      "ordinal": 27,
       "storage": "x",
       "table": "quant_recommendation_report",
       "type": "character varying"
@@ -9914,7 +10460,7 @@
       "identity": "",
       "name": "created_at",
       "nullable": false,
-      "ordinal": 29,
+      "ordinal": 28,
       "storage": "p",
       "table": "quant_recommendation_report",
       "type": "timestamp with time zone"
@@ -11142,7 +11688,7 @@
       "type": "integer"
     },
     {
-      "collation": "default",
+      "collation": null,
       "compression": "",
       "default": null,
       "generated": "",
@@ -11150,9 +11696,9 @@
       "name": "lease_owner",
       "nullable": true,
       "ordinal": 16,
-      "storage": "x",
+      "storage": "p",
       "table": "quant_research_job",
-      "type": "character varying"
+      "type": "uuid"
     },
     {
       "collation": null,
@@ -11862,9 +12408,22 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "decision_at",
+      "name": "weight_source",
       "nullable": false,
       "ordinal": 4,
+      "storage": "p",
+      "table": "quant_shadow_comparison",
+      "type": "qp_model_weight_source"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "decision_at",
+      "nullable": false,
+      "ordinal": 5,
       "storage": "p",
       "table": "quant_shadow_comparison",
       "type": "timestamp with time zone"
@@ -11877,7 +12436,7 @@
       "identity": "",
       "name": "topn_overlap",
       "nullable": false,
-      "ordinal": 5,
+      "ordinal": 6,
       "storage": "m",
       "table": "quant_shadow_comparison",
       "type": "numeric"
@@ -11890,7 +12449,7 @@
       "identity": "",
       "name": "rank_delta_json",
       "nullable": false,
-      "ordinal": 6,
+      "ordinal": 7,
       "storage": "x",
       "table": "quant_shadow_comparison",
       "type": "jsonb"
@@ -11903,7 +12462,7 @@
       "identity": "",
       "name": "score_delta_json",
       "nullable": false,
-      "ordinal": 7,
+      "ordinal": 8,
       "storage": "x",
       "table": "quant_shadow_comparison",
       "type": "jsonb"
@@ -11916,7 +12475,7 @@
       "identity": "",
       "name": "matured_outcome_json",
       "nullable": true,
-      "ordinal": 8,
+      "ordinal": 9,
       "storage": "x",
       "table": "quant_shadow_comparison",
       "type": "jsonb"
@@ -11929,7 +12488,7 @@
       "identity": "",
       "name": "hard_divergence",
       "nullable": false,
-      "ordinal": 9,
+      "ordinal": 10,
       "storage": "p",
       "table": "quant_shadow_comparison",
       "type": "boolean"
@@ -11942,7 +12501,7 @@
       "identity": "",
       "name": "comparison_hash",
       "nullable": false,
-      "ordinal": 10,
+      "ordinal": 11,
       "storage": "x",
       "table": "quant_shadow_comparison",
       "type": "text"
@@ -11955,7 +12514,7 @@
       "identity": "",
       "name": "created_at",
       "nullable": false,
-      "ordinal": 11,
+      "ordinal": 12,
       "storage": "p",
       "table": "quant_shadow_comparison",
       "type": "timestamp with time zone"
@@ -13209,17 +13768,17 @@
       "type": "uuid"
     },
     {
-      "collation": null,
+      "collation": "default",
       "compression": "",
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "window_start",
+      "name": "model_spec_definition_hash",
       "nullable": false,
       "ordinal": 3,
-      "storage": "p",
+      "storage": "x",
       "table": "quant_training_dataset",
-      "type": "timestamp with time zone"
+      "type": "character varying"
     },
     {
       "collation": null,
@@ -13227,7 +13786,7 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "window_end",
+      "name": "window_start",
       "nullable": false,
       "ordinal": 4,
       "storage": "p",
@@ -13240,9 +13799,22 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "status",
+      "name": "window_end",
       "nullable": false,
       "ordinal": 5,
+      "storage": "p",
+      "table": "quant_training_dataset",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "status",
+      "nullable": false,
+      "ordinal": 6,
       "storage": "p",
       "table": "quant_training_dataset",
       "type": "qp_training_dataset_status"
@@ -13255,7 +13827,7 @@
       "identity": "",
       "name": "purpose",
       "nullable": false,
-      "ordinal": 6,
+      "ordinal": 7,
       "storage": "p",
       "table": "quant_training_dataset",
       "type": "qp_dataset_purpose"
@@ -13268,7 +13840,7 @@
       "identity": "",
       "name": "feature_schema_hash",
       "nullable": true,
-      "ordinal": 7,
+      "ordinal": 8,
       "storage": "x",
       "table": "quant_training_dataset",
       "type": "text"
@@ -13281,7 +13853,7 @@
       "identity": "",
       "name": "factor_schema_hash",
       "nullable": true,
-      "ordinal": 8,
+      "ordinal": 9,
       "storage": "x",
       "table": "quant_training_dataset",
       "type": "text"
@@ -13294,7 +13866,7 @@
       "identity": "",
       "name": "label_schema_hash",
       "nullable": true,
-      "ordinal": 9,
+      "ordinal": 10,
       "storage": "x",
       "table": "quant_training_dataset",
       "type": "text"
@@ -13307,7 +13879,7 @@
       "identity": "",
       "name": "dataset_hash",
       "nullable": true,
-      "ordinal": 10,
+      "ordinal": 11,
       "storage": "x",
       "table": "quant_training_dataset",
       "type": "text"
@@ -13320,7 +13892,7 @@
       "identity": "",
       "name": "manifest_hash",
       "nullable": true,
-      "ordinal": 11,
+      "ordinal": 12,
       "storage": "x",
       "table": "quant_training_dataset",
       "type": "text"
@@ -13333,7 +13905,7 @@
       "identity": "",
       "name": "manifest_json",
       "nullable": true,
-      "ordinal": 12,
+      "ordinal": 13,
       "storage": "x",
       "table": "quant_training_dataset",
       "type": "jsonb"
@@ -13346,7 +13918,7 @@
       "identity": "",
       "name": "artifact_bytes_hash",
       "nullable": true,
-      "ordinal": 13,
+      "ordinal": 14,
       "storage": "x",
       "table": "quant_training_dataset",
       "type": "text"
@@ -13359,7 +13931,7 @@
       "identity": "",
       "name": "parquet_uri",
       "nullable": true,
-      "ordinal": 14,
+      "ordinal": 15,
       "storage": "x",
       "table": "quant_training_dataset",
       "type": "text"
@@ -13372,7 +13944,7 @@
       "identity": "",
       "name": "sample_count",
       "nullable": true,
-      "ordinal": 15,
+      "ordinal": 16,
       "storage": "p",
       "table": "quant_training_dataset",
       "type": "bigint"
@@ -13385,7 +13957,7 @@
       "identity": "",
       "name": "knowledge_lag_secs",
       "nullable": false,
-      "ordinal": 16,
+      "ordinal": 17,
       "storage": "p",
       "table": "quant_training_dataset",
       "type": "bigint"
@@ -13398,7 +13970,7 @@
       "identity": "",
       "name": "sample_interval_secs",
       "nullable": false,
-      "ordinal": 17,
+      "ordinal": 18,
       "storage": "p",
       "table": "quant_training_dataset",
       "type": "bigint"
@@ -13411,7 +13983,7 @@
       "identity": "",
       "name": "horizons_secs",
       "nullable": false,
-      "ordinal": 18,
+      "ordinal": 19,
       "storage": "x",
       "table": "quant_training_dataset",
       "type": "jsonb"
@@ -13424,7 +13996,7 @@
       "identity": "",
       "name": "feature_schema_version",
       "nullable": true,
-      "ordinal": 19,
+      "ordinal": 20,
       "storage": "p",
       "table": "quant_training_dataset",
       "type": "integer"
@@ -13437,7 +14009,7 @@
       "identity": "",
       "name": "sample_sources",
       "nullable": true,
-      "ordinal": 20,
+      "ordinal": 21,
       "storage": "x",
       "table": "quant_training_dataset",
       "type": "jsonb"
@@ -13450,7 +14022,7 @@
       "identity": "",
       "name": "coverage_json",
       "nullable": true,
-      "ordinal": 21,
+      "ordinal": 22,
       "storage": "x",
       "table": "quant_training_dataset",
       "type": "jsonb"
@@ -13463,7 +14035,7 @@
       "identity": "",
       "name": "decision_policy_snapshot_id",
       "nullable": false,
-      "ordinal": 22,
+      "ordinal": 23,
       "storage": "p",
       "table": "quant_training_dataset",
       "type": "uuid"
@@ -13476,7 +14048,7 @@
       "identity": "",
       "name": "failure_detail",
       "nullable": true,
-      "ordinal": 23,
+      "ordinal": 24,
       "storage": "x",
       "table": "quant_training_dataset",
       "type": "character varying"
@@ -13489,7 +14061,7 @@
       "identity": "",
       "name": "completed_at",
       "nullable": true,
-      "ordinal": 24,
+      "ordinal": 25,
       "storage": "p",
       "table": "quant_training_dataset",
       "type": "timestamp with time zone"
@@ -13502,7 +14074,7 @@
       "identity": "",
       "name": "created_at",
       "nullable": false,
-      "ordinal": 25,
+      "ordinal": 26,
       "storage": "p",
       "table": "quant_training_dataset",
       "type": "timestamp with time zone"
@@ -13843,6 +14415,123 @@
       "ordinal": 9,
       "storage": "p",
       "table": "quant_weather_observation_current",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "research_profile_artifact_id",
+      "nullable": false,
+      "ordinal": 1,
+      "storage": "x",
+      "table": "research_profile_artifact",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "research_profile_id",
+      "nullable": false,
+      "ordinal": 2,
+      "storage": "x",
+      "table": "research_profile_artifact",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "version",
+      "nullable": false,
+      "ordinal": 3,
+      "storage": "p",
+      "table": "research_profile_artifact",
+      "type": "integer"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "content_hash",
+      "nullable": false,
+      "ordinal": 4,
+      "storage": "x",
+      "table": "research_profile_artifact",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "spec",
+      "nullable": false,
+      "ordinal": 5,
+      "storage": "x",
+      "table": "research_profile_artifact",
+      "type": "jsonb"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "published_by",
+      "nullable": false,
+      "ordinal": 6,
+      "storage": "x",
+      "table": "research_profile_artifact",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "published_at",
+      "nullable": false,
+      "ordinal": 7,
+      "storage": "p",
+      "table": "research_profile_artifact",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "governance_reason",
+      "nullable": false,
+      "ordinal": 8,
+      "storage": "x",
+      "table": "research_profile_artifact",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": "CURRENT_TIMESTAMP",
+      "generated": "",
+      "identity": "",
+      "name": "created_at",
+      "nullable": false,
+      "ordinal": 9,
+      "storage": "p",
+      "table": "research_profile_artifact",
       "type": "timestamp with time zone"
     },
     {
@@ -14509,6 +15198,32 @@
       "type": "text"
     },
     {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "policy_bundle_generation",
+      "nullable": false,
+      "ordinal": 10,
+      "storage": "p",
+      "table": "system_production_baseline",
+      "type": "bigint"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "decision_policy_snapshot_id",
+      "nullable": false,
+      "ordinal": 11,
+      "storage": "p",
+      "table": "system_production_baseline",
+      "type": "uuid"
+    },
+    {
       "collation": "default",
       "compression": "",
       "default": null,
@@ -14516,7 +15231,7 @@
       "identity": "",
       "name": "policy_bundle_hash",
       "nullable": false,
-      "ordinal": 10,
+      "ordinal": 12,
       "storage": "x",
       "table": "system_production_baseline",
       "type": "text"
@@ -14529,7 +15244,7 @@
       "identity": "",
       "name": "lifecycle_policy_hash",
       "nullable": false,
-      "ordinal": 11,
+      "ordinal": 13,
       "storage": "x",
       "table": "system_production_baseline",
       "type": "text"
@@ -14542,7 +15257,7 @@
       "identity": "",
       "name": "evidence",
       "nullable": false,
-      "ordinal": 12,
+      "ordinal": 14,
       "storage": "x",
       "table": "system_production_baseline",
       "type": "jsonb"
@@ -14555,9 +15270,217 @@
       "identity": "",
       "name": "created_at",
       "nullable": false,
-      "ordinal": 13,
+      "ordinal": 15,
       "storage": "p",
       "table": "system_production_baseline",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "production_evidence_id",
+      "nullable": false,
+      "ordinal": 1,
+      "storage": "p",
+      "table": "system_production_evidence",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "kind",
+      "nullable": false,
+      "ordinal": 2,
+      "storage": "p",
+      "table": "system_production_evidence",
+      "type": "qp_production_evidence_kind"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "artifact_uri",
+      "nullable": false,
+      "ordinal": 3,
+      "storage": "x",
+      "table": "system_production_evidence",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "evidence_hash",
+      "nullable": false,
+      "ordinal": 4,
+      "storage": "x",
+      "table": "system_production_evidence",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "build_commit",
+      "nullable": false,
+      "ordinal": 5,
+      "storage": "x",
+      "table": "system_production_evidence",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "postgres_schema_fingerprint",
+      "nullable": false,
+      "ordinal": 6,
+      "storage": "x",
+      "table": "system_production_evidence",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "clickhouse_schema_fingerprint",
+      "nullable": false,
+      "ordinal": 7,
+      "storage": "x",
+      "table": "system_production_evidence",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "policy_bundle_generation",
+      "nullable": false,
+      "ordinal": 8,
+      "storage": "p",
+      "table": "system_production_evidence",
+      "type": "bigint"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "decision_policy_snapshot_id",
+      "nullable": false,
+      "ordinal": 9,
+      "storage": "p",
+      "table": "system_production_evidence",
+      "type": "uuid"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "policy_bundle_hash",
+      "nullable": false,
+      "ordinal": 10,
+      "storage": "x",
+      "table": "system_production_evidence",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "recorded_by_kind",
+      "nullable": false,
+      "ordinal": 11,
+      "storage": "p",
+      "table": "system_production_evidence",
+      "type": "qp_policy_actor_kind"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "recorded_by_user_id",
+      "nullable": true,
+      "ordinal": 12,
+      "storage": "p",
+      "table": "system_production_evidence",
+      "type": "uuid"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "recorded_by_label",
+      "nullable": false,
+      "ordinal": 13,
+      "storage": "x",
+      "table": "system_production_evidence",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "reason",
+      "nullable": false,
+      "ordinal": 14,
+      "storage": "x",
+      "table": "system_production_evidence",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "observed_at",
+      "nullable": false,
+      "ordinal": 15,
+      "storage": "p",
+      "table": "system_production_evidence",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": "CURRENT_TIMESTAMP",
+      "generated": "",
+      "identity": "",
+      "name": "created_at",
+      "nullable": false,
+      "ordinal": 16,
+      "storage": "p",
+      "table": "system_production_evidence",
       "type": "timestamp with time zone"
     },
     {
@@ -15021,20 +15944,20 @@
     },
     {
       "deferrable": false,
+      "definition": "UNIQUE (bundle_generation)",
+      "initially_deferred": false,
+      "name": "decision_policy_snapshot_bundle_generation_key",
+      "table": "decision_policy_snapshot",
+      "type": "u",
+      "validated": true
+    },
+    {
+      "deferrable": false,
       "definition": "PRIMARY KEY (decision_policy_snapshot_id)",
       "initially_deferred": false,
       "name": "decision_policy_snapshot_pkey",
       "table": "decision_policy_snapshot",
       "type": "p",
-      "validated": true
-    },
-    {
-      "deferrable": false,
-      "definition": "UNIQUE (snapshot_hash)",
-      "initially_deferred": false,
-      "name": "decision_policy_snapshot_snapshot_hash_key",
-      "table": "decision_policy_snapshot",
-      "type": "u",
       "validated": true
     },
     {
@@ -15098,6 +16021,15 @@
       "name": "menu_pkey",
       "table": "menu",
       "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK (((jsonb_typeof(detail) = 'object'::text) AND (pg_column_size(detail) <= 65536)))",
+      "initially_deferred": false,
+      "name": "ck_operation_log_detail_document",
+      "table": "operation_log",
+      "type": "c",
       "validated": true
     },
     {
@@ -15174,6 +16106,105 @@
     },
     {
       "deferrable": false,
+      "definition": "FOREIGN KEY (actor_user_id) REFERENCES \"user\"(id)",
+      "initially_deferred": false,
+      "name": "fk-policy_activation_audit-actor_user_id",
+      "table": "policy_activation_audit",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (decision_policy_snapshot_id) REFERENCES decision_policy_snapshot(decision_policy_snapshot_id)",
+      "initially_deferred": false,
+      "name": "fk-policy_activation_audit-decision_policy_snapshot_id",
+      "table": "policy_activation_audit",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (policy_activation_id) REFERENCES policy_activation(policy_activation_id)",
+      "initially_deferred": false,
+      "name": "fk-policy_activation_audit-policy_activation_id",
+      "table": "policy_activation_audit",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "PRIMARY KEY (audit_event_id)",
+      "initially_deferred": false,
+      "name": "policy_activation_audit_pkey",
+      "table": "policy_activation_audit",
+      "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "UNIQUE (policy_activation_id)",
+      "initially_deferred": false,
+      "name": "policy_activation_audit_policy_activation_id_key",
+      "table": "policy_activation_audit",
+      "type": "u",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (audit_event_id) REFERENCES policy_activation_audit(audit_event_id)",
+      "initially_deferred": false,
+      "name": "fk-policy_activation_event_outbox-audit_event_id",
+      "table": "policy_activation_event_outbox",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (decision_policy_snapshot_id) REFERENCES decision_policy_snapshot(decision_policy_snapshot_id)",
+      "initially_deferred": false,
+      "name": "fk-policy_activation_event_outbox-decision_policy_snapshot_id",
+      "table": "policy_activation_event_outbox",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (policy_activation_id) REFERENCES policy_activation(policy_activation_id)",
+      "initially_deferred": false,
+      "name": "fk-policy_activation_event_outbox-policy_activation_id",
+      "table": "policy_activation_event_outbox",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "PRIMARY KEY (audit_event_id)",
+      "initially_deferred": false,
+      "name": "policy_activation_event_outbox_pkey",
+      "table": "policy_activation_event_outbox",
+      "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "UNIQUE (policy_activation_id)",
+      "initially_deferred": false,
+      "name": "policy_activation_event_outbox_policy_activation_id_key",
+      "table": "policy_activation_event_outbox",
+      "type": "u",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (current_snapshot_id) REFERENCES decision_policy_snapshot(decision_policy_snapshot_id)",
+      "initially_deferred": false,
+      "name": "fk-policy_activation_guard-current_snapshot_id",
+      "table": "policy_activation_guard",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
       "definition": "PRIMARY KEY (id)",
       "initially_deferred": false,
       "name": "policy_activation_guard_pkey",
@@ -15195,6 +16226,15 @@
       "definition": "CHECK (((length(reason) >= 1) AND (length(reason) <= 2048)))",
       "initially_deferred": false,
       "name": "ck_policy_approval_reason",
+      "table": "policy_approval",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK ((((decision <> 'approved'::qp_policy_approval_decision) OR (validation_subject IS NOT NULL)) AND ((validation_subject IS NULL) OR ((jsonb_typeof(validation_subject) = 'object'::text) AND (validation_subject ?& ARRAY['base_generation'::text, 'base_revision_vector'::text, 'candidate_bundle_hash'::text])))))",
+      "initially_deferred": false,
+      "name": "ck_policy_approval_validation_subject",
       "table": "policy_approval",
       "type": "c",
       "validated": true
@@ -15223,6 +16263,33 @@
       "initially_deferred": false,
       "name": "policy_approval_pkey",
       "table": "policy_approval",
+      "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK (((schema_version = 1) AND (content_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND ((document ->> 'profile_kind'::text) = (kind)::text)))",
+      "initially_deferred": false,
+      "name": "ck_policy_profile_artifact_identity",
+      "table": "policy_profile_artifact",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (created_by_user_id) REFERENCES \"user\"(id)",
+      "initially_deferred": false,
+      "name": "fk-policy_profile_artifact-created_by_user_id",
+      "table": "policy_profile_artifact",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "PRIMARY KEY (profile_artifact_id)",
+      "initially_deferred": false,
+      "name": "policy_profile_artifact_pkey",
+      "table": "policy_profile_artifact",
       "type": "p",
       "validated": true
     },
@@ -15359,6 +16426,15 @@
       "name": "quant_basis_alert_pkey",
       "table": "quant_basis_alert",
       "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK (((jsonb_typeof(payload) = 'object'::text) AND ((payload ->> 'kind'::text) = (kind)::text) AND (jsonb_typeof((payload -> 'payload'::text)) = 'object'::text)))",
+      "initially_deferred": false,
+      "name": "ck_quant_calibration_artifact_payload_kind",
+      "table": "quant_calibration_artifact",
+      "type": "c",
       "validated": true
     },
     {
@@ -15561,6 +16637,15 @@
     },
     {
       "deferrable": false,
+      "definition": "CHECK (((jsonb_typeof(definition) = 'object'::text) AND ((definition ->> 'name'::text) = name) AND ((definition ->> 'family'::text) = (factor_family)::text) AND (jsonb_typeof((definition -> 'input_features'::text)) = 'array'::text) AND (jsonb_typeof((definition -> 'quality_gates'::text)) = 'array'::text) AND (jsonb_typeof((definition -> 'owner'::text)) = 'string'::text) AND (char_length(btrim((definition ->> 'owner'::text))) >= 1)))",
+      "initially_deferred": false,
+      "name": "ck_quant_factor_definition_document",
+      "table": "quant_factor_definition",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
       "definition": "CHECK ((definition_hash ~ '^blake3:[0-9a-f]{64}$'::text))",
       "initially_deferred": false,
       "name": "quant_factor_definition_definition_hash_check",
@@ -15593,6 +16678,15 @@
       "name": "quant_factor_definition_pkey",
       "table": "quant_factor_definition",
       "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK (((jsonb_typeof(explanation) = 'object'::text) AND (jsonb_typeof((explanation -> 'headline'::text)) = 'string'::text) AND (char_length(btrim((explanation ->> 'headline'::text))) >= 1) AND (jsonb_typeof((explanation -> 'drivers'::text)) = 'array'::text)))",
+      "initially_deferred": false,
+      "name": "ck_quant_factor_value_explanation",
+      "table": "quant_factor_value",
+      "type": "c",
       "validated": true
     },
     {
@@ -15822,6 +16916,15 @@
     },
     {
       "deferrable": false,
+      "definition": "CHECK (((jsonb_typeof(decision_boundary) = 'object'::text) AND (jsonb_typeof(payload) = 'object'::text) AND (payload ? 'generic'::text) AND (payload ? 'domain'::text) AND (jsonb_typeof((payload -> 'generic'::text)) = 'object'::text) AND (jsonb_typeof((payload -> 'domain'::text)) = ANY (ARRAY['object'::text, 'null'::text])) AND (jsonb_typeof(source_refs) = 'array'::text) AND (jsonb_typeof(decision_capture) = 'object'::text) AND (jsonb_typeof((decision_capture -> 'snapshot'::text)) = 'object'::text) AND (decision_capture_hash ~ '^blake3:[0-9a-f]{64}$'::text)))",
+      "initially_deferred": false,
+      "name": "ck_quant_feature_vector_documents",
+      "table": "quant_feature_vector",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
       "definition": "FOREIGN KEY (market_id) REFERENCES market(market_id)",
       "initially_deferred": false,
       "name": "fk-quant_feature_vector-market_id",
@@ -15831,20 +16934,20 @@
     },
     {
       "deferrable": false,
-      "definition": "CHECK (((decision_capture IS NULL) = (decision_capture_hash IS NULL)))",
-      "initially_deferred": false,
-      "name": "quant_feature_vector_check",
-      "table": "quant_feature_vector",
-      "type": "c",
-      "validated": true
-    },
-    {
-      "deferrable": false,
       "definition": "PRIMARY KEY (feature_vector_id)",
       "initially_deferred": false,
       "name": "quant_feature_vector_pkey",
       "table": "quant_feature_vector",
       "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK (((jsonb_typeof(outcome) = 'object'::text) AND (((status = 'unresolved'::qp_linkage_status) AND ((outcome ->> 'status'::text) = 'unresolved'::text) AND (jsonb_typeof((outcome -> 'reason'::text)) = 'string'::text) AND (char_length(btrim((outcome ->> 'reason'::text))) >= 1) AND (char_length((outcome ->> 'reason'::text)) <= 2048)) OR ((status = ANY (ARRAY['resolved'::qp_linkage_status, 'overridden'::qp_linkage_status])) AND ((outcome ->> 'status'::text) = 'resolved'::text) AND (jsonb_typeof((outcome -> 'subject'::text)) = 'object'::text) AND (jsonb_typeof((outcome -> 'source_bindings'::text)) = 'array'::text) AND (jsonb_typeof((outcome -> 'grounding'::text)) = 'object'::text)))))",
+      "initially_deferred": false,
+      "name": "ck_quant_market_linkage_outcome",
+      "table": "quant_market_linkage",
+      "type": "c",
       "validated": true
     },
     {
@@ -15984,6 +17087,15 @@
     },
     {
       "deferrable": false,
+      "definition": "CHECK (((jsonb_typeof(detail) = 'object'::text) AND ((detail ->> 'action'::text) = (action)::text)))",
+      "initially_deferred": false,
+      "name": "ck_quant_model_governance_audit_detail_action",
+      "table": "quant_model_governance_audit",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
       "definition": "FOREIGN KEY (model_version_id) REFERENCES quant_model_version(model_version_id)",
       "initially_deferred": false,
       "name": "fk-quant_model_governance_audit-model_version_id",
@@ -16038,7 +17150,25 @@
     },
     {
       "deferrable": false,
-      "definition": "CHECK (((status = 'retired'::qp_publication_status) OR ((jsonb_typeof(input_contract) = 'object'::text) AND (jsonb_typeof((input_contract -> 'inputs'::text)) = 'array'::text) AND (jsonb_array_length((input_contract -> 'inputs'::text)) > 0) AND (jsonb_typeof(training_contract) = 'object'::text) AND (jsonb_typeof((training_contract -> 'target_label_name'::text)) = 'string'::text) AND ((length((training_contract ->> 'target_label_name'::text)) >= 1) AND (length((training_contract ->> 'target_label_name'::text)) <= 128)) AND ((((training_contract ->> 'validation_folds'::text))::integer >= 2) AND (((training_contract ->> 'validation_folds'::text))::integer <= 20)))))",
+      "definition": "CHECK ((((char_length(btrim((created_by_label)::text)) >= 1) AND (char_length(btrim((created_by_label)::text)) <= 256)) AND ((created_by_role IS NULL) OR ((char_length(btrim((created_by_role)::text)) >= 1) AND (char_length(btrim((created_by_role)::text)) <= 128))) AND ((char_length(btrim((reason)::text)) >= 1) AND (char_length(btrim((reason)::text)) <= 2048))))",
+      "initially_deferred": false,
+      "name": "ck_quant_model_spec_authoring_provenance",
+      "table": "quant_model_spec",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK (((jsonb_typeof(thesis) = 'object'::text) AND (jsonb_typeof((thesis -> 'summary'::text)) = 'string'::text) AND ((char_length(btrim((thesis ->> 'summary'::text))) >= 1) AND (char_length(btrim((thesis ->> 'summary'::text))) <= 512)) AND ((thesis ->> 'summary'::text) = btrim((thesis ->> 'summary'::text))) AND (jsonb_typeof((thesis -> 'hypothesis'::text)) = 'string'::text) AND ((char_length(btrim((thesis ->> 'hypothesis'::text))) >= 1) AND (char_length(btrim((thesis ->> 'hypothesis'::text))) <= 2048)) AND ((thesis ->> 'hypothesis'::text) = btrim((thesis ->> 'hypothesis'::text))) AND (jsonb_typeof((thesis -> 'limitations'::text)) = 'array'::text) AND ((jsonb_array_length((thesis -> 'limitations'::text)) >= 1) AND (jsonb_array_length((thesis -> 'limitations'::text)) <= 16))))",
+      "initially_deferred": false,
+      "name": "ck_quant_model_spec_thesis",
+      "table": "quant_model_spec",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK (((jsonb_typeof(input_contract) = 'object'::text) AND (jsonb_typeof((input_contract -> 'inputs'::text)) = 'array'::text) AND (jsonb_array_length((input_contract -> 'inputs'::text)) > 0) AND (jsonb_typeof(training_contract) = 'object'::text) AND (jsonb_typeof((training_contract -> 'target_label_name'::text)) = 'string'::text) AND ((length((training_contract ->> 'target_label_name'::text)) >= 1) AND (length((training_contract ->> 'target_label_name'::text)) <= 128)) AND ((((training_contract ->> 'validation_folds'::text))::integer >= 2) AND (((training_contract ->> 'validation_folds'::text))::integer <= 20)) AND ((definition_hash)::text ~ '^blake3:[0-9a-f]{64}$'::text)))",
       "initially_deferred": false,
       "name": "quant_model_spec_check",
       "table": "quant_model_spec",
@@ -16065,9 +17195,81 @@
     },
     {
       "deferrable": false,
+      "definition": "CHECK ((((derivation_kind = 'training'::qp_model_version_derivation_kind) AND (parent_model_version_id IS NULL) AND (source_backtest_report_id IS NULL) AND (calibration_artifact_id IS NULL) AND (score_multiplier_calibration_report IS NULL) AND (derivation_evidence_hash IS NULL)) OR ((derivation_kind = 'score_multiplier_calibration'::qp_model_version_derivation_kind) AND (parent_model_version_id IS NOT NULL) AND (parent_model_version_id <> model_version_id) AND (source_backtest_report_id IS NOT NULL) AND (calibration_artifact_id IS NULL) AND (jsonb_typeof(score_multiplier_calibration_report) = 'object'::text) AND (((score_multiplier_calibration_report ->> 'methodology_version'::text))::integer = 1) AND (((score_multiplier_calibration_report ->> 'minimum_stratum_samples'::text))::bigint > 0) AND (((score_multiplier_calibration_report ->> 'total_samples'::text))::bigint > 0) AND (derivation_evidence_hash ~ '^blake3:[0-9a-f]{64}$'::text)) OR ((derivation_kind = 'return_calibration'::qp_model_version_derivation_kind) AND (parent_model_version_id IS NOT NULL) AND (parent_model_version_id <> model_version_id) AND (source_backtest_report_id IS NULL) AND (calibration_artifact_id IS NOT NULL) AND (score_multiplier_calibration_report IS NULL) AND (derivation_evidence_hash ~ '^blake3:[0-9a-f]{64}$'::text))))",
+      "initially_deferred": false,
+      "name": "ck_quant_model_version_derivation",
+      "table": "quant_model_version",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK (((jsonb_typeof(metrics) = 'object'::text) AND ((metrics ->> 'format_version'::text) = '1'::text) AND (jsonb_typeof((metrics -> 'definition'::text)) = 'object'::text) AND (((((metrics -> 'definition'::text) ->> 'kind'::text) = 'learning_to_rank'::text) AND (((training_objective -> 'definition'::text) ->> 'kind'::text) = 'learning_to_rank'::text) AND (jsonb_typeof(((metrics -> 'definition'::text) -> 'in_sample'::text)) = 'object'::text) AND (jsonb_typeof(((metrics -> 'definition'::text) -> 'validation'::text)) = 'object'::text) AND (jsonb_typeof(((metrics -> 'definition'::text) -> 'artifact_lineage'::text)) = 'object'::text) AND ((((metrics -> 'definition'::text) -> 'artifact_lineage'::text) ->> 'kind'::text) = ANY (ARRAY['factor_native'::text, 'fitted_feature_matrix'::text]))) OR ((((metrics -> 'definition'::text) ->> 'kind'::text) = 'classical_pointwise'::text) AND (((training_objective -> 'definition'::text) ->> 'kind'::text) = 'classical_pointwise'::text) AND (jsonb_typeof(((metrics -> 'definition'::text) -> 'in_sample'::text)) = 'object'::text) AND (jsonb_typeof(((metrics -> 'definition'::text) -> 'validation'::text)) = 'object'::text) AND (jsonb_typeof(((metrics -> 'definition'::text) -> 'feature_importances'::text)) = 'array'::text) AND (jsonb_typeof(((metrics -> 'definition'::text) -> 'artifact_lineage'::text)) = 'object'::text) AND ((((metrics -> 'definition'::text) -> 'artifact_lineage'::text) ->> 'kind'::text) = 'fitted_feature_matrix'::text)) OR ((((metrics -> 'definition'::text) ->> 'kind'::text) = 'not_measured'::text) AND (((training_objective -> 'definition'::text) ->> 'kind'::text) = 'hand_authored'::text) AND (jsonb_typeof(((metrics -> 'definition'::text) -> 'rationale'::text)) = 'string'::text) AND ((char_length(btrim(((metrics -> 'definition'::text) ->> 'rationale'::text))) >= 1) AND (char_length(btrim(((metrics -> 'definition'::text) ->> 'rationale'::text))) <= 2048))))))",
+      "initially_deferred": false,
+      "name": "ck_quant_model_version_metrics",
+      "table": "quant_model_version",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK (((quality_gate_report IS NULL) OR ((jsonb_typeof(quality_gate_report) = 'object'::text) AND (((quality_gate_report ->> 'format_version'::text))::integer = 1) AND (((quality_gate_report -> 'subject'::text) ->> 'kind'::text) = 'model_version'::text) AND ((((quality_gate_report -> 'subject'::text) ->> 'id'::text))::uuid = model_version_id) AND (jsonb_typeof((quality_gate_report -> 'gates'::text)) = 'array'::text) AND (jsonb_typeof((quality_gate_report -> 'hard_failures'::text)) = 'array'::text) AND (jsonb_typeof((quality_gate_report -> 'soft_warnings'::text)) = 'array'::text) AND (jsonb_typeof((quality_gate_report -> 'passed'::text)) = 'boolean'::text) AND ((quality_gate_report ->> 'report_hash'::text) ~ '^blake3:[0-9a-f]{64}$'::text))))",
+      "initially_deferred": false,
+      "name": "ck_quant_model_version_quality_gate_report",
+      "table": "quant_model_version",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK (((jsonb_typeof(training_objective) = 'object'::text) AND (((training_objective ->> 'format_version'::text))::integer = 1) AND (jsonb_typeof((training_objective -> 'definition'::text)) = 'object'::text) AND (((training_objective -> 'definition'::text) ->> 'kind'::text) = ANY (ARRAY['learning_to_rank'::text, 'classical_pointwise'::text, 'hand_authored'::text]))))",
+      "initially_deferred": false,
+      "name": "ck_quant_model_version_training_objective",
+      "table": "quant_model_version",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (calibration_artifact_id) REFERENCES quant_calibration_artifact(artifact_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_model_version-calibration_artifact_id",
+      "table": "quant_model_version",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
       "definition": "FOREIGN KEY (model_spec_id) REFERENCES quant_model_spec(model_spec_id)",
       "initially_deferred": false,
       "name": "fk-quant_model_version-model_spec_id",
+      "table": "quant_model_version",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (parent_model_version_id) REFERENCES quant_model_version(model_version_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_model_version-parent_model_version_id",
+      "table": "quant_model_version",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (research_profile_artifact_id) REFERENCES research_profile_artifact(research_profile_artifact_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_model_version-research_profile_artifact_id",
+      "table": "quant_model_version",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (source_backtest_report_id) REFERENCES quant_backtest_report(backtest_report_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_model_version-source_backtest_report_id",
       "table": "quant_model_version",
       "type": "f",
       "validated": true
@@ -16131,6 +17333,15 @@
       "definition": "FOREIGN KEY (recommendation_id) REFERENCES quant_recommendation(recommendation_id)",
       "initially_deferred": false,
       "name": "fk-quant_order_intent-recommendation_id",
+      "table": "quant_order_intent",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (research_profile_artifact_id) REFERENCES research_profile_artifact(research_profile_artifact_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_order_intent-research_profile_artifact_id",
       "table": "quant_order_intent",
       "type": "f",
       "validated": true
@@ -16236,6 +17447,15 @@
     },
     {
       "deferrable": false,
+      "definition": "FOREIGN KEY (research_profile_artifact_id) REFERENCES research_profile_artifact(research_profile_artifact_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_recommendation-research_profile_artifact_id",
+      "table": "quant_recommendation",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
       "definition": "PRIMARY KEY (recommendation_id)",
       "initially_deferred": false,
       "name": "quant_recommendation_pkey",
@@ -16326,6 +17546,15 @@
     },
     {
       "deferrable": false,
+      "definition": "FOREIGN KEY (research_profile_artifact_id) REFERENCES research_profile_artifact(research_profile_artifact_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_recommendation_report-research_profile_artifact_id",
+      "table": "quant_recommendation_report",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
       "definition": "FOREIGN KEY (successor_report_id) REFERENCES quant_recommendation_report(recommendation_report_id)",
       "initially_deferred": false,
       "name": "fk-quant_recommendation_report-successor_report_id",
@@ -16338,15 +17567,6 @@
       "definition": "CHECK ((capital_base_usd >= (0)::numeric))",
       "initially_deferred": false,
       "name": "quant_recommendation_report_capital_base_usd_check",
-      "table": "quant_recommendation_report",
-      "type": "c",
-      "validated": true
-    },
-    {
-      "deferrable": false,
-      "definition": "CHECK (((profile_id)::text = (profile_ref ->> 'id'::text)))",
-      "initially_deferred": false,
-      "name": "quant_recommendation_report_check",
       "table": "quant_recommendation_report",
       "type": "c",
       "validated": true
@@ -16493,15 +17713,6 @@
       "name": "quant_recommendation_report_pkey",
       "table": "quant_recommendation_report",
       "type": "p",
-      "validated": true
-    },
-    {
-      "deferrable": false,
-      "definition": "CHECK (((char_length((profile_id)::text) >= 1) AND (char_length((profile_id)::text) <= 128)))",
-      "initially_deferred": false,
-      "name": "quant_recommendation_report_profile_id_check",
-      "table": "quant_recommendation_report",
-      "type": "c",
       "validated": true
     },
     {
@@ -16974,6 +18185,15 @@
     },
     {
       "deferrable": false,
+      "definition": "CHECK (((jsonb_typeof(params_json) = 'object'::text) AND (jsonb_typeof((params_json -> 'params'::text)) = 'object'::text) AND ((params_json ->> 'kind'::text) = (kind)::text)))",
+      "initially_deferred": false,
+      "name": "ck_quant_research_job_params_kind",
+      "table": "quant_research_job",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
       "definition": "FOREIGN KEY (decision_policy_snapshot_id) REFERENCES decision_policy_snapshot(decision_policy_snapshot_id)",
       "initially_deferred": false,
       "name": "fk-quant_research_job-decision_policy_snapshot_id",
@@ -17325,6 +18545,24 @@
     },
     {
       "deferrable": false,
+      "definition": "CHECK (((version > 0) AND (research_profile_id ~ '^[a-z0-9_]+$'::text) AND (content_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (research_profile_artifact_id = ((((('rpa:'::text || research_profile_id) || ':'::text) || (version)::text) || ':'::text) || content_hash))))",
+      "initially_deferred": false,
+      "name": "ck_research_profile_artifact_identity",
+      "table": "research_profile_artifact",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "PRIMARY KEY (research_profile_artifact_id)",
+      "initially_deferred": false,
+      "name": "research_profile_artifact_pkey",
+      "table": "research_profile_artifact",
+      "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
       "definition": "PRIMARY KEY (id)",
       "initially_deferred": false,
       "name": "role_pkey",
@@ -17451,6 +18689,15 @@
     },
     {
       "deferrable": false,
+      "definition": "CHECK ((policy_bundle_generation > 0))",
+      "initially_deferred": false,
+      "name": "ck_system_production_baseline_generation",
+      "table": "system_production_baseline",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
       "definition": "CHECK (((postgres_schema_fingerprint ~ '^blake3:[0-9a-f]{64}$'::text) AND (clickhouse_schema_fingerprint ~ '^blake3:[0-9a-f]{64}$'::text) AND (policy_bundle_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (lifecycle_policy_hash ~ '^blake3:[0-9a-f]{64}$'::text)))",
       "initially_deferred": false,
       "name": "ck_system_production_baseline_hashes",
@@ -17482,6 +18729,42 @@
       "initially_deferred": false,
       "name": "system_production_baseline_pkey",
       "table": "system_production_baseline",
+      "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK (((policy_bundle_generation > 0) AND (evidence_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (postgres_schema_fingerprint ~ '^blake3:[0-9a-f]{64}$'::text) AND (clickhouse_schema_fingerprint ~ '^blake3:[0-9a-f]{64}$'::text) AND (policy_bundle_hash ~ '^blake3:[0-9a-f]{64}$'::text)))",
+      "initially_deferred": false,
+      "name": "ck_system_production_evidence_identity",
+      "table": "system_production_evidence",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (decision_policy_snapshot_id) REFERENCES decision_policy_snapshot(decision_policy_snapshot_id)",
+      "initially_deferred": false,
+      "name": "fk-system_production_evidence-decision_policy_snapshot_id",
+      "table": "system_production_evidence",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (recorded_by_user_id) REFERENCES \"user\"(id)",
+      "initially_deferred": false,
+      "name": "fk-system_production_evidence-recorded_by_user_id",
+      "table": "system_production_evidence",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "PRIMARY KEY (production_evidence_id)",
+      "initially_deferred": false,
+      "name": "system_production_evidence_pkey",
+      "table": "system_production_evidence",
       "type": "p",
       "validated": true
     },
@@ -18025,6 +19308,21 @@
     },
     {
       "labels": [
+        "training",
+        "score_multiplier_calibration",
+        "return_calibration"
+      ],
+      "name": "qp_model_version_derivation_kind"
+    },
+    {
+      "labels": [
+        "artifact",
+        "config_overlay"
+      ],
+      "name": "qp_model_weight_source"
+    },
+    {
+      "labels": [
         "cross_section",
         "per_market",
         "frozen_reference_quantile"
@@ -18046,6 +19344,17 @@
         "other"
       ],
       "name": "qp_operation_category"
+    },
+    {
+      "labels": [
+        "GET",
+        "POST",
+        "PUT",
+        "PATCH",
+        "DELETE",
+        "SYSTEM"
+      ],
+      "name": "qp_operation_http_method"
     },
     {
       "labels": [
@@ -18141,6 +19450,22 @@
         "settled"
       ],
       "name": "qp_position_ledger_state"
+    },
+    {
+      "labels": [
+        "backup_restore",
+        "protected_config_end_to_end"
+      ],
+      "name": "qp_production_evidence_kind"
+    },
+    {
+      "labels": [
+        "feature",
+        "scoring",
+        "domain",
+        "research_method"
+      ],
+      "name": "qp_profile_artifact_kind"
     },
     {
       "labels": [
@@ -19649,6 +20974,160 @@
       "grantable": "NO",
       "grantee": "$schema_owner",
       "object_kind": "table",
+      "object_name": "policy_activation_audit",
+      "privilege": "DELETE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "policy_activation_audit",
+      "privilege": "INSERT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "policy_activation_audit",
+      "privilege": "REFERENCES"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "policy_activation_audit",
+      "privilege": "SELECT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "policy_activation_audit",
+      "privilege": "TRIGGER"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "policy_activation_audit",
+      "privilege": "TRUNCATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "policy_activation_audit",
+      "privilege": "UPDATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$runtime_grantee",
+      "object_kind": "table",
+      "object_name": "policy_activation_audit",
+      "privilege": "DELETE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$runtime_grantee",
+      "object_kind": "table",
+      "object_name": "policy_activation_audit",
+      "privilege": "INSERT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$runtime_grantee",
+      "object_kind": "table",
+      "object_name": "policy_activation_audit",
+      "privilege": "SELECT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$runtime_grantee",
+      "object_kind": "table",
+      "object_name": "policy_activation_audit",
+      "privilege": "UPDATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "policy_activation_event_outbox",
+      "privilege": "DELETE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "policy_activation_event_outbox",
+      "privilege": "INSERT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "policy_activation_event_outbox",
+      "privilege": "REFERENCES"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "policy_activation_event_outbox",
+      "privilege": "SELECT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "policy_activation_event_outbox",
+      "privilege": "TRIGGER"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "policy_activation_event_outbox",
+      "privilege": "TRUNCATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "policy_activation_event_outbox",
+      "privilege": "UPDATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$runtime_grantee",
+      "object_kind": "table",
+      "object_name": "policy_activation_event_outbox",
+      "privilege": "DELETE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$runtime_grantee",
+      "object_kind": "table",
+      "object_name": "policy_activation_event_outbox",
+      "privilege": "INSERT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$runtime_grantee",
+      "object_kind": "table",
+      "object_name": "policy_activation_event_outbox",
+      "privilege": "SELECT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$runtime_grantee",
+      "object_kind": "table",
+      "object_name": "policy_activation_event_outbox",
+      "privilege": "UPDATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
       "object_name": "policy_activation_guard",
       "privilege": "DELETE"
     },
@@ -19797,6 +21276,83 @@
       "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "policy_approval",
+      "privilege": "UPDATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "policy_profile_artifact",
+      "privilege": "DELETE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "policy_profile_artifact",
+      "privilege": "INSERT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "policy_profile_artifact",
+      "privilege": "REFERENCES"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "policy_profile_artifact",
+      "privilege": "SELECT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "policy_profile_artifact",
+      "privilege": "TRIGGER"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "policy_profile_artifact",
+      "privilege": "TRUNCATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "policy_profile_artifact",
+      "privilege": "UPDATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$runtime_grantee",
+      "object_kind": "table",
+      "object_name": "policy_profile_artifact",
+      "privilege": "DELETE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$runtime_grantee",
+      "object_kind": "table",
+      "object_name": "policy_profile_artifact",
+      "privilege": "INSERT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$runtime_grantee",
+      "object_kind": "table",
+      "object_name": "policy_profile_artifact",
+      "privilege": "SELECT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$runtime_grantee",
+      "object_kind": "table",
+      "object_name": "policy_profile_artifact",
       "privilege": "UPDATE"
     },
     {
@@ -24494,6 +26050,83 @@
       "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "quant_weather_observation_current",
+      "privilege": "UPDATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "research_profile_artifact",
+      "privilege": "DELETE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "research_profile_artifact",
+      "privilege": "INSERT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "research_profile_artifact",
+      "privilege": "REFERENCES"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "research_profile_artifact",
+      "privilege": "SELECT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "research_profile_artifact",
+      "privilege": "TRIGGER"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "research_profile_artifact",
+      "privilege": "TRUNCATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "research_profile_artifact",
+      "privilege": "UPDATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$runtime_grantee",
+      "object_kind": "table",
+      "object_name": "research_profile_artifact",
+      "privilege": "DELETE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$runtime_grantee",
+      "object_kind": "table",
+      "object_name": "research_profile_artifact",
+      "privilege": "INSERT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$runtime_grantee",
+      "object_kind": "table",
+      "object_name": "research_profile_artifact",
+      "privilege": "SELECT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$runtime_grantee",
+      "object_kind": "table",
+      "object_name": "research_profile_artifact",
       "privilege": "UPDATE"
     },
     {
@@ -25068,6 +26701,83 @@
       "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "system_production_baseline",
+      "privilege": "UPDATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "system_production_evidence",
+      "privilege": "DELETE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "system_production_evidence",
+      "privilege": "INSERT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "system_production_evidence",
+      "privilege": "REFERENCES"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "system_production_evidence",
+      "privilege": "SELECT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "system_production_evidence",
+      "privilege": "TRIGGER"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "system_production_evidence",
+      "privilege": "TRUNCATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "system_production_evidence",
+      "privilege": "UPDATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$runtime_grantee",
+      "object_kind": "table",
+      "object_name": "system_production_evidence",
+      "privilege": "DELETE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$runtime_grantee",
+      "object_kind": "table",
+      "object_name": "system_production_evidence",
+      "privilege": "INSERT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$runtime_grantee",
+      "object_kind": "table",
+      "object_name": "system_production_evidence",
+      "privilege": "SELECT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$runtime_grantee",
+      "object_kind": "table",
+      "object_name": "system_production_evidence",
       "privilege": "UPDATE"
     },
     {
@@ -25534,20 +27244,20 @@
       "valid": true
     },
     {
-      "definition": "CREATE UNIQUE INDEX decision_policy_snapshot_pkey ON public.decision_policy_snapshot USING btree (decision_policy_snapshot_id)",
+      "definition": "CREATE UNIQUE INDEX decision_policy_snapshot_bundle_generation_key ON public.decision_policy_snapshot USING btree (bundle_generation)",
       "method": "btree",
-      "name": "decision_policy_snapshot_pkey",
-      "primary": true,
+      "name": "decision_policy_snapshot_bundle_generation_key",
+      "primary": false,
       "ready": true,
       "table": "decision_policy_snapshot",
       "unique": true,
       "valid": true
     },
     {
-      "definition": "CREATE UNIQUE INDEX decision_policy_snapshot_snapshot_hash_key ON public.decision_policy_snapshot USING btree (snapshot_hash)",
+      "definition": "CREATE UNIQUE INDEX decision_policy_snapshot_pkey ON public.decision_policy_snapshot USING btree (decision_policy_snapshot_id)",
       "method": "btree",
-      "name": "decision_policy_snapshot_snapshot_hash_key",
-      "primary": false,
+      "name": "decision_policy_snapshot_pkey",
+      "primary": true,
       "ready": true,
       "table": "decision_policy_snapshot",
       "unique": true,
@@ -25804,6 +27514,46 @@
       "valid": true
     },
     {
+      "definition": "CREATE UNIQUE INDEX policy_activation_audit_pkey ON public.policy_activation_audit USING btree (audit_event_id)",
+      "method": "btree",
+      "name": "policy_activation_audit_pkey",
+      "primary": true,
+      "ready": true,
+      "table": "policy_activation_audit",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX policy_activation_audit_policy_activation_id_key ON public.policy_activation_audit USING btree (policy_activation_id)",
+      "method": "btree",
+      "name": "policy_activation_audit_policy_activation_id_key",
+      "primary": false,
+      "ready": true,
+      "table": "policy_activation_audit",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX policy_activation_event_outbox_pkey ON public.policy_activation_event_outbox USING btree (audit_event_id)",
+      "method": "btree",
+      "name": "policy_activation_event_outbox_pkey",
+      "primary": true,
+      "ready": true,
+      "table": "policy_activation_event_outbox",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX policy_activation_event_outbox_policy_activation_id_key ON public.policy_activation_event_outbox USING btree (policy_activation_id)",
+      "method": "btree",
+      "name": "policy_activation_event_outbox_policy_activation_id_key",
+      "primary": false,
+      "ready": true,
+      "table": "policy_activation_event_outbox",
+      "unique": true,
+      "valid": true
+    },
+    {
       "definition": "CREATE UNIQUE INDEX policy_activation_guard_pkey ON public.policy_activation_guard USING btree (id)",
       "method": "btree",
       "name": "policy_activation_guard_pkey",
@@ -25840,6 +27590,36 @@
       "primary": true,
       "ready": true,
       "table": "policy_approval",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE INDEX idx_policy_profile_artifact_kind_created ON public.policy_profile_artifact USING btree (kind, created_at DESC)",
+      "method": "btree",
+      "name": "idx_policy_profile_artifact_kind_created",
+      "primary": false,
+      "ready": true,
+      "table": "policy_profile_artifact",
+      "unique": false,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX policy_profile_artifact_pkey ON public.policy_profile_artifact USING btree (profile_artifact_id)",
+      "method": "btree",
+      "name": "policy_profile_artifact_pkey",
+      "primary": true,
+      "ready": true,
+      "table": "policy_profile_artifact",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX uq_policy_profile_artifact_kind_hash ON public.policy_profile_artifact USING btree (kind, content_hash)",
+      "method": "btree",
+      "name": "uq_policy_profile_artifact_kind_hash",
+      "primary": false,
+      "ready": true,
+      "table": "policy_profile_artifact",
       "unique": true,
       "valid": true
     },
@@ -26120,6 +27900,16 @@
       "primary": true,
       "ready": true,
       "table": "quant_domain_source_cursor",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX \"idx-quant_domain_source_expectation-source_instrument\" ON public.quant_domain_source_expectation USING btree (source_id, instrument_key)",
+      "method": "btree",
+      "name": "idx-quant_domain_source_expectation-source_instrument",
+      "primary": false,
+      "ready": true,
+      "table": "quant_domain_source_expectation",
       "unique": true,
       "valid": true
     },
@@ -26804,9 +28594,9 @@
       "valid": true
     },
     {
-      "definition": "CREATE INDEX idx_quant_model_spec_family_status ON public.quant_model_spec USING btree (model_family, status)",
+      "definition": "CREATE INDEX idx_quant_model_spec_family ON public.quant_model_spec USING btree (model_family)",
       "method": "btree",
-      "name": "idx_quant_model_spec_family_status",
+      "name": "idx_quant_model_spec_family",
       "primary": false,
       "ready": true,
       "table": "quant_model_spec",
@@ -26831,6 +28621,36 @@
       "ready": true,
       "table": "quant_model_spec",
       "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE INDEX idx_quant_model_version_calibration_artifact ON public.quant_model_version USING btree (calibration_artifact_id) WHERE (calibration_artifact_id IS NOT NULL)",
+      "method": "btree",
+      "name": "idx_quant_model_version_calibration_artifact",
+      "primary": false,
+      "ready": true,
+      "table": "quant_model_version",
+      "unique": false,
+      "valid": true
+    },
+    {
+      "definition": "CREATE INDEX idx_quant_model_version_parent ON public.quant_model_version USING btree (parent_model_version_id) WHERE (parent_model_version_id IS NOT NULL)",
+      "method": "btree",
+      "name": "idx_quant_model_version_parent",
+      "primary": false,
+      "ready": true,
+      "table": "quant_model_version",
+      "unique": false,
+      "valid": true
+    },
+    {
+      "definition": "CREATE INDEX idx_quant_model_version_source_backtest ON public.quant_model_version USING btree (source_backtest_report_id) WHERE (source_backtest_report_id IS NOT NULL)",
+      "method": "btree",
+      "name": "idx_quant_model_version_source_backtest",
+      "primary": false,
+      "ready": true,
+      "table": "quant_model_version",
+      "unique": false,
       "valid": true
     },
     {
@@ -27044,9 +28864,9 @@
       "valid": true
     },
     {
-      "definition": "CREATE INDEX idx_quant_recommendation_report_kind_decision_at ON public.quant_recommendation_report USING btree (profile_id, report_kind, decision_at DESC)",
+      "definition": "CREATE INDEX idx_quant_recommendation_report_model_decision_at ON public.quant_recommendation_report USING btree (model_version_id, decision_at DESC)",
       "method": "btree",
-      "name": "idx_quant_recommendation_report_kind_decision_at",
+      "name": "idx_quant_recommendation_report_model_decision_at",
       "primary": false,
       "ready": true,
       "table": "quant_recommendation_report",
@@ -27054,9 +28874,9 @@
       "valid": true
     },
     {
-      "definition": "CREATE INDEX idx_quant_recommendation_report_model_decision_at ON public.quant_recommendation_report USING btree (model_version_id, decision_at DESC)",
+      "definition": "CREATE INDEX idx_quant_recommendation_report_profile_artifact_kind_decision_ ON public.quant_recommendation_report USING btree (research_profile_artifact_id, report_kind, decision_at DESC)",
       "method": "btree",
-      "name": "idx_quant_recommendation_report_model_decision_at",
+      "name": "idx_quant_recommendation_report_profile_artifact_kind_decision_",
       "primary": false,
       "ready": true,
       "table": "quant_recommendation_report",
@@ -27094,9 +28914,9 @@
       "valid": true
     },
     {
-      "definition": "CREATE UNIQUE INDEX uq_quant_recommendation_report_current_scope ON public.quant_recommendation_report USING btree (profile_id, report_kind) WHERE (status = 'published'::qp_recommendation_report_status)",
+      "definition": "CREATE UNIQUE INDEX uq_quant_recommendation_report_current_artifact_scope ON public.quant_recommendation_report USING btree (research_profile_artifact_id, report_kind) WHERE (status = 'published'::qp_recommendation_report_status)",
       "method": "btree",
-      "name": "uq_quant_recommendation_report_current_scope",
+      "name": "uq_quant_recommendation_report_current_artifact_scope",
       "primary": false,
       "ready": true,
       "table": "quant_recommendation_report",
@@ -27724,6 +29544,36 @@
       "valid": true
     },
     {
+      "definition": "CREATE UNIQUE INDEX research_profile_artifact_pkey ON public.research_profile_artifact USING btree (research_profile_artifact_id)",
+      "method": "btree",
+      "name": "research_profile_artifact_pkey",
+      "primary": true,
+      "ready": true,
+      "table": "research_profile_artifact",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX uq_research_profile_artifact_content_hash ON public.research_profile_artifact USING btree (content_hash)",
+      "method": "btree",
+      "name": "uq_research_profile_artifact_content_hash",
+      "primary": false,
+      "ready": true,
+      "table": "research_profile_artifact",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX uq_research_profile_artifact_name_version ON public.research_profile_artifact USING btree (research_profile_id, version)",
+      "method": "btree",
+      "name": "uq_research_profile_artifact_name_version",
+      "primary": false,
+      "ready": true,
+      "table": "research_profile_artifact",
+      "unique": true,
+      "valid": true
+    },
+    {
       "definition": "CREATE UNIQUE INDEX role_pkey ON public.role USING btree (id)",
       "method": "btree",
       "name": "role_pkey",
@@ -27830,6 +29680,26 @@
       "primary": true,
       "ready": true,
       "table": "system_production_baseline",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE INDEX idx_system_production_evidence_kind_latest ON public.system_production_evidence USING btree (kind, observed_at DESC, production_evidence_id DESC)",
+      "method": "btree",
+      "name": "idx_system_production_evidence_kind_latest",
+      "primary": false,
+      "ready": true,
+      "table": "system_production_evidence",
+      "unique": false,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX system_production_evidence_pkey ON public.system_production_evidence USING btree (production_evidence_id)",
+      "method": "btree",
+      "name": "system_production_evidence_pkey",
+      "primary": true,
+      "ready": true,
+      "table": "system_production_evidence",
       "unique": true,
       "valid": true
     },
@@ -27999,6 +29869,20 @@
     },
     {
       "kind": "r",
+      "name": "policy_activation_audit",
+      "owner": "$schema_owner",
+      "rls_enabled": false,
+      "rls_forced": false
+    },
+    {
+      "kind": "r",
+      "name": "policy_activation_event_outbox",
+      "owner": "$schema_owner",
+      "rls_enabled": false,
+      "rls_forced": false
+    },
+    {
+      "kind": "r",
       "name": "policy_activation_guard",
       "owner": "$schema_owner",
       "rls_enabled": false,
@@ -28007,6 +29891,13 @@
     {
       "kind": "r",
       "name": "policy_approval",
+      "owner": "$schema_owner",
+      "rls_enabled": false,
+      "rls_forced": false
+    },
+    {
+      "kind": "r",
+      "name": "policy_profile_artifact",
       "owner": "$schema_owner",
       "rls_enabled": false,
       "rls_forced": false
@@ -28440,6 +30331,13 @@
     },
     {
       "kind": "r",
+      "name": "research_profile_artifact",
+      "owner": "$schema_owner",
+      "rls_enabled": false,
+      "rls_forced": false
+    },
+    {
+      "kind": "r",
       "name": "role",
       "owner": "$schema_owner",
       "rls_enabled": false,
@@ -28490,6 +30388,13 @@
     {
       "kind": "r",
       "name": "system_production_baseline",
+      "owner": "$schema_owner",
+      "rls_enabled": false,
+      "rls_forced": false
+    },
+    {
+      "kind": "r",
+      "name": "system_production_evidence",
       "owner": "$schema_owner",
       "rls_enabled": false,
       "rls_forced": false
@@ -28590,10 +30495,28 @@
       "table": "policy_activation"
     },
     {
+      "definition": "CREATE TRIGGER trg_policy_activation_audit_append_only BEFORE DELETE OR UPDATE ON public.policy_activation_audit FOR EACH ROW EXECUTE FUNCTION trigger_deny_write()",
+      "enabled": "O",
+      "name": "trg_policy_activation_audit_append_only",
+      "table": "policy_activation_audit"
+    },
+    {
+      "definition": "CREATE TRIGGER trg_policy_activation_event_outbox_append_only BEFORE DELETE OR UPDATE ON public.policy_activation_event_outbox FOR EACH ROW EXECUTE FUNCTION trigger_deny_write()",
+      "enabled": "O",
+      "name": "trg_policy_activation_event_outbox_append_only",
+      "table": "policy_activation_event_outbox"
+    },
+    {
       "definition": "CREATE TRIGGER trg_policy_approval_append_only BEFORE DELETE OR UPDATE ON public.policy_approval FOR EACH ROW EXECUTE FUNCTION trigger_deny_write()",
       "enabled": "O",
       "name": "trg_policy_approval_append_only",
       "table": "policy_approval"
+    },
+    {
+      "definition": "CREATE TRIGGER trg_policy_profile_artifact_append_only BEFORE DELETE OR UPDATE ON public.policy_profile_artifact FOR EACH ROW EXECUTE FUNCTION trigger_deny_write()",
+      "enabled": "O",
+      "name": "trg_policy_profile_artifact_append_only",
+      "table": "policy_profile_artifact"
     },
     {
       "definition": "CREATE TRIGGER trg_quant_calibration_artifact_publication_append_only BEFORE DELETE OR UPDATE ON public.quant_calibration_artifact_publication FOR EACH ROW EXECUTE FUNCTION trigger_deny_write()",
@@ -28698,9 +30621,9 @@
       "table": "quant_model_governance_audit"
     },
     {
-      "definition": "CREATE TRIGGER trg_quant_model_spec_updated_at BEFORE UPDATE ON public.quant_model_spec FOR EACH ROW EXECUTE FUNCTION trigger_set_updated_at()",
+      "definition": "CREATE TRIGGER trg_quant_model_spec_append_only BEFORE DELETE OR UPDATE ON public.quant_model_spec FOR EACH ROW EXECUTE FUNCTION trigger_deny_write()",
       "enabled": "O",
-      "name": "trg_quant_model_spec_updated_at",
+      "name": "trg_quant_model_spec_append_only",
       "table": "quant_model_spec"
     },
     {
@@ -28806,6 +30729,12 @@
       "table": "quant_weather_observation_current"
     },
     {
+      "definition": "CREATE TRIGGER trg_research_profile_artifact_append_only BEFORE DELETE OR UPDATE ON public.research_profile_artifact FOR EACH ROW EXECUTE FUNCTION trigger_deny_write()",
+      "enabled": "O",
+      "name": "trg_research_profile_artifact_append_only",
+      "table": "research_profile_artifact"
+    },
+    {
       "definition": "CREATE TRIGGER trg_role_updated_at BEFORE UPDATE ON public.role FOR EACH ROW EXECUTE FUNCTION trigger_set_updated_at()",
       "enabled": "O",
       "name": "trg_role_updated_at",
@@ -28828,6 +30757,12 @@
       "enabled": "O",
       "name": "trg_system_production_baseline_append_only",
       "table": "system_production_baseline"
+    },
+    {
+      "definition": "CREATE TRIGGER trg_system_production_evidence_append_only BEFORE DELETE OR UPDATE ON public.system_production_evidence FOR EACH ROW EXECUTE FUNCTION trigger_deny_write()",
+      "enabled": "O",
+      "name": "trg_system_production_evidence_append_only",
+      "table": "system_production_evidence"
     },
     {
       "definition": "CREATE TRIGGER trg_system_runtime_state_updated_at BEFORE UPDATE ON public.system_runtime_state FOR EACH ROW EXECUTE FUNCTION trigger_set_updated_at()",

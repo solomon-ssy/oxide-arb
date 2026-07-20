@@ -12,6 +12,11 @@ pub fn test_redis_config(port: u16) -> RedisConfig {
         port,
         pool_size: 16,
         timeout_ms: 5_000,
+        // Docker Desktop can expose the mapped port before Redis accepts
+        // connections, especially when the web integration suite starts many
+        // isolated containers concurrently. Keep the steady-state pool wait
+        // separate from a deliberately larger startup-readiness budget.
+        connect_timeout_ms: 30_000,
         key_prefix: "qp:test:".to_owned(),
         ..RedisConfig::default()
     }

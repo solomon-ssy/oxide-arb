@@ -20,11 +20,10 @@ use quant_pivot_models::{
         rbac::{Operation, ResourceType},
     },
     types::{
-        ResearchJobId, ResearchProfileArtifact, TradePolicyArtifactId, TradePolicyCohort,
-        TradePolicyEvidenceObjectKind, TradePolicyValidationRunId,
+        ResearchJobId, ResearchProfileArtifact, ResearchProfileId, TradePolicyArtifactId,
+        TradePolicyCohort, TradePolicyEvidenceObjectKind, TradePolicyValidationRunId, UserId,
     },
 };
-use uuid::Uuid;
 
 use crate::{
     audit::OperationCtx,
@@ -174,7 +173,7 @@ pub async fn profile(
     let (id, version) = path.into_inner();
     let profile = state
         .trade_policies
-        .find_profile(&id, version)?
+        .find_profile(&ResearchProfileId::new(&id), version)?
         .ok_or_else(|| WebError::NotFound(format!("research profile not found: {id}@{version}")))?;
     Ok(WebResponse::ok(profile))
 }
@@ -345,7 +344,7 @@ pub async fn fit(
             preflight
                 .blockers
                 .iter()
-                .map(|blocker| blocker.kind)
+                .map(|blocker| &blocker.detail)
                 .collect::<Vec<_>>()
         )));
     }
@@ -368,7 +367,7 @@ pub async fn fit(
         "acting_role": acting_role.0,
         "request_id": request_id.0,
         "reason": reason,
-    }));
+    }))?;
     Ok(WebResponse::accepted(job))
 }
 
@@ -382,7 +381,10 @@ pub async fn validate(
     body: ValidatedJson<TradePolicyGovernanceRequest>,
 ) -> Result<WebResponse<ResearchJobView>, WebError> {
     let artifact_id = id.into_inner();
-    let actor_id = Uuid::parse_str(&actor.claims.sub)
+    let actor_id = actor
+        .claims
+        .sub
+        .parse::<UserId>()
         .map_err(|_| WebError::Unauthorized("invalid actor id".to_owned()))?;
     let request = body.into_inner();
     let reason = request.reason.clone();
@@ -409,7 +411,7 @@ pub async fn validate(
         "acting_role": role.0,
         "request_id": request_id.0,
         "reason": reason,
-    }));
+    }))?;
     Ok(WebResponse::accepted(job))
 }
 
@@ -527,7 +529,10 @@ async fn transition(
         op_ctx,
         request,
     } = context;
-    let actor_id = Uuid::parse_str(&actor.claims.sub)
+    let actor_id = actor
+        .claims
+        .sub
+        .parse::<UserId>()
         .map_err(|_| WebError::Unauthorized("invalid actor id".to_owned()))?;
     let info = state
         .trade_policies
@@ -541,6 +546,6 @@ async fn transition(
         "acting_role": role.0,
         "request_id": request_id.0,
         "reason": request.reason,
-    }));
+    }))?;
     Ok(WebResponse::ok(TradePolicyDetailView::from(info)))
 }

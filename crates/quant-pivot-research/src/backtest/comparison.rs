@@ -9,7 +9,7 @@
 
 use quant_pivot_models::{
     enums::common::MarketCategory,
-    types::{ContentHash, ModelVersionId},
+    types::{ContentHash, ModelVersionId, backtest::CategoryRankIcDelta},
 };
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -22,19 +22,6 @@ use crate::{
     stats,
 };
 use quant_pivot_error::QuantResult;
-
-/// Per-category rank-IC divergence between the candidate and the baseline.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CategoryRankIcDelta {
-    /// Market category.
-    pub category: MarketCategory,
-    /// Baseline rank IC in this category.
-    pub baseline_rank_ic: Decimal,
-    /// Candidate rank IC in this category.
-    pub candidate_rank_ic: Decimal,
-    /// `candidate − baseline` rank-IC delta.
-    pub rank_ic_delta: Decimal,
-}
 
 /// Head-to-head comparison of a candidate against a baseline over one window.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -233,21 +220,18 @@ mod tests {
             quant::{DataQualityStatus, OutcomeSide},
         },
         types::{
-            BacktestReportId, ContentHash, DecisionPolicySnapshotId, MarketId, ModelVersionId,
-            Probability, Shares, TokenId, Usd,
+            BacktestReportId, DecisionPolicySnapshotId, MarketId, ModelVersionId, Probability,
+            Shares, TokenId, Usd,
+            backtest::{CategoryMetric, ExpectedVsRealized, PnlCurvePoint, PnlSimulation},
         },
     };
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
 
-    use crate::backtest::{
-        BacktestReport, BacktestRunResult, CategoryMetric, ExpectedVsRealized, PnlCurvePoint,
-        PnlSimulation, SampleOutcome,
+    use crate::{
+        backtest::{BacktestReport, BacktestRunResult, SampleOutcome},
+        test_support::content_hash as hash,
     };
-
-    fn hash(seed: &str) -> ContentHash {
-        ContentHash::parse(format!("blake3:{seed:0>64}")).expect("hash")
-    }
 
     fn sample(
         idx: i64,

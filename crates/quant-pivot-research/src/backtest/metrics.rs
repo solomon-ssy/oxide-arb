@@ -3,14 +3,16 @@
 use std::collections::BTreeMap;
 
 use quant_pivot_error::{QuantResult, research::ResearchError};
-use quant_pivot_models::{enums::common::MarketCategory, types::Probability};
+use quant_pivot_models::{
+    enums::common::MarketCategory,
+    types::{
+        Probability,
+        backtest::{CategoryMetric, ExpectedVsRealized, PnlCurvePoint},
+    },
+};
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 
-use crate::{
-    backtest::{CategoryMetric, ExpectedVsRealized, PnlCurvePoint, SampleOutcome},
-    precision::RESEARCH_DECIMAL_SCALE,
-    stats,
-};
+use crate::{backtest::SampleOutcome, precision::RESEARCH_DECIMAL_SCALE, stats};
 
 /// Clamp a decimal into `[0, 1]` and wrap as a [`Probability`].
 fn probability(value: Decimal) -> Probability {

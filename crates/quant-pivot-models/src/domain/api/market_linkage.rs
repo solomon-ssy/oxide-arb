@@ -16,14 +16,14 @@ use crate::{
     domain::{
         BasisAlertInfo, DomainCursorStatus, DomainSourceCheckpoint, DomainSourceCursorInfo,
         DomainSourceExpectationInfo, LinkageOutcome, ManualEvidenceInput, MarketLinkageInfo,
-        ResolvedSourceBinding, pagination::PageRequest,
+        MarketSubject, ResolvedSourceBinding, pagination::PageRequest,
     },
     enums::domain::{
         DomainFamily, DomainSourceExpectationStatus, LinkageSourceRole, LinkageStatus, ResolverTier,
     },
     types::{
         BasisAlertId, Bps, ContentHash, DomainInstrumentKey, DomainSourceExpectationId,
-        DomainSourceId, MarketId, MarketLinkageId, Probability, ResolverVersion,
+        DomainSourceId, MarketId, MarketLinkageId, Probability, ResearchProfileId, ResolverVersion,
     },
 };
 
@@ -63,7 +63,7 @@ pub struct MarketLinkageListQuery {
 
 /// Inbound body for `POST /research/market-linkages/{market_id}/override`.
 ///
-/// The operator supplies a full subject JSON plus literal-text citations for
+/// The operator supplies a full typed subject plus literal-text citations for
 /// every load-bearing identity field (11.2.2 remediation R4) — an override is
 /// a human decision, never text-extracted, but it must still cite real
 /// source text for `asset` / `resolution_oracle` / `strike` (when present),
@@ -71,7 +71,7 @@ pub struct MarketLinkageListQuery {
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
 pub struct OverrideLinkageRequest {
     /// The full `MarketSubject` document to bind.
-    pub subject: serde_json::Value,
+    pub subject: MarketSubject,
     /// Exact source/role/instrument bindings. A single generic instrument is invalid.
     #[validate(length(min = 1, max = 8))]
     pub source_bindings: Vec<OverrideSourceBindingInput>,
@@ -150,7 +150,7 @@ pub struct MarketLinkageDetailView {
     pub resolver_version: ResolverVersion,
     pub confidence: Probability,
     /// The full `LinkageOutcome` document (subject + grounding, or reason).
-    pub outcome: serde_json::Value,
+    pub outcome: LinkageOutcome,
     pub source_bindings: Vec<ResolvedSourceBinding>,
     pub metadata_hash: ContentHash,
     pub content_hash: ContentHash,
@@ -197,7 +197,7 @@ pub struct MarketLinkageHistoryEntryView {
     pub confidence: Probability,
     /// The full `LinkageOutcome` document (subject + grounding, or reason;
     /// carries `override_context` when `resolver_tier = override`).
-    pub outcome: serde_json::Value,
+    pub outcome: LinkageOutcome,
     pub source_bindings: Vec<ResolvedSourceBinding>,
     pub content_hash: ContentHash,
     pub derived_at: DateTime<Utc>,
@@ -226,10 +226,10 @@ impl From<MarketLinkageInfo> for MarketLinkageHistoryEntryView {
     }
 }
 
-fn source_bindings_from_outcome(outcome: &serde_json::Value) -> Vec<ResolvedSourceBinding> {
-    match serde_json::from_value::<LinkageOutcome>(outcome.clone()) {
-        Ok(LinkageOutcome::Resolved(binding)) => binding.source_bindings,
-        Ok(LinkageOutcome::Unresolved { .. }) | Err(_) => Vec::new(),
+fn source_bindings_from_outcome(outcome: &LinkageOutcome) -> Vec<ResolvedSourceBinding> {
+    match outcome {
+        LinkageOutcome::Resolved(binding) => binding.source_bindings.clone(),
+        LinkageOutcome::Unresolved { .. } => Vec::new(),
     }
 }
 
@@ -262,7 +262,7 @@ pub struct DomainSourceExpectationView {
     pub credential_required: bool,
     pub freshness_secs: i64,
     pub affected_market_ids: Vec<MarketId>,
-    pub affected_profile_ids: Vec<String>,
+    pub affected_profile_ids: Vec<ResearchProfileId>,
     pub status: DomainSourceExpectationStatus,
     pub status_reason: Option<String>,
     pub cursor_status: Option<DomainCursorStatus>,
@@ -454,7 +454,10 @@ mod tests {
             DomainSourceCursorInfo, DomainSourceExpectationInfo,
         },
         enums::domain::{DomainFamily, DomainSourceExpectationStatus},
-        types::{ContentHash, DomainInstrumentKey, DomainSourceExpectationId, DomainSourceId},
+        types::{
+            ContentHash, DomainInstrumentKey, DomainSourceExpectationId, DomainSourceId,
+            ResearchProfileId,
+        },
     };
 
     fn hash(fill: char) -> ContentHash {
@@ -477,7 +480,9 @@ mod tests {
             credential_required: false,
             freshness_secs: 900,
             affected_market_ids: AffectedMarketIds::default(),
-            affected_profile_ids: AffectedProfileIds::new(vec!["weather_forecast_24h".to_owned()]),
+            affected_profile_ids: AffectedProfileIds::new(vec![ResearchProfileId::new(
+                "weather_forecast_24h",
+            )]),
             status,
             status_reason: status_reason.map(str::to_owned),
             created_at: now,

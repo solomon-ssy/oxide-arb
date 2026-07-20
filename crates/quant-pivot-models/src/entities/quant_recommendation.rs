@@ -5,7 +5,7 @@ use crate::{
     types::{
         Bps, EventId, EvidenceRefs, ExecutionEligibility, MarketContext, MarketId, Probability,
         RecommendationFactorBreakdown, RecommendationId, RecommendationIdentity,
-        RecommendationReportId, RecommendationTradePlan, ResearchProfileRef, TokenId,
+        RecommendationReportId, RecommendationTradePlan, ResearchProfileArtifactId, TokenId,
     },
 };
 use chrono::{DateTime, Utc};
@@ -17,8 +17,7 @@ use sea_orm::entity::prelude::*;
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub recommendation_id: RecommendationId,
-    #[sea_orm(column_type = "JsonBinary")]
-    pub profile_ref: ResearchProfileRef,
+    pub research_profile_artifact_id: ResearchProfileArtifactId,
     pub recommendation_report_id: RecommendationReportId,
     pub rank: i32,
     pub market_id: MarketId,
@@ -50,6 +49,14 @@ pub struct Model {
     pub valid_until: DateTime<Utc>,
     pub status: RecommendationStatus,
     pub created_at: DateTime<Utc>,
+
+    #[sea_orm(
+        belongs_to,
+        relation_enum = "ResearchProfileArtifact",
+        from = "research_profile_artifact_id",
+        to = "research_profile_artifact_id"
+    )]
+    pub research_profile_artifact: BelongsTo<super::research_profile_artifact::Entity>,
 
     #[sea_orm(
         belongs_to,

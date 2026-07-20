@@ -2,13 +2,16 @@
 
 use crate::{
     enums::{
-        operation_log::{OperationCategory, OperationOutcome},
+        operation_log::{OperationCategory, OperationHttpMethod, OperationOutcome},
         rbac::ResourceType,
     },
-    types::{AuditEventId, OperationLogId, UserId},
+    types::{
+        AuditEventId, ContentHash, CorrelationId, OperationAction, OperationDetailDocument,
+        OperationLogId, RoleCode, UserId,
+    },
 };
 use chrono::{DateTime, Utc};
-use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, entity::prelude::IpNetwork};
 use serde::{Deserialize, Serialize};
 
 /// Insert payload for one operation-log row.
@@ -20,24 +23,24 @@ use serde::{Deserialize, Serialize};
 #[sea_orm(active_model = "crate::entities::operation_log::ActiveModel")]
 pub struct NewOperationLog {
     pub id: OperationLogId,
-    pub request_id: String,
+    pub request_id: CorrelationId,
     pub actor_user_id: Option<UserId>,
     pub actor_username: Option<String>,
-    pub acting_role: Option<String>,
+    pub acting_role: Option<RoleCode>,
     pub category: OperationCategory,
-    pub action: String,
+    pub action: OperationAction,
     pub resource_type: Option<ResourceType>,
     pub resource_id: Option<String>,
-    pub http_method: String,
+    pub http_method: OperationHttpMethod,
     pub http_path: String,
     pub http_status: i16,
     pub outcome: OperationOutcome,
-    pub client_ip: Option<String>,
+    pub client_ip: Option<IpNetwork>,
     pub user_agent: Option<String>,
     pub latency_ms: i32,
-    pub detail: serde_json::Value,
-    pub before_hash: Option<String>,
-    pub after_hash: Option<String>,
+    pub detail: OperationDetailDocument,
+    pub before_hash: Option<ContentHash>,
+    pub after_hash: Option<ContentHash>,
     pub governance_audit_event_id: Option<AuditEventId>,
     pub governance_audit_sequence: Option<i64>,
 }
@@ -46,24 +49,24 @@ pub struct NewOperationLog {
 pub struct OperationLogInfo {
     pub id: OperationLogId,
     pub occurred_at: DateTime<Utc>,
-    pub request_id: String,
+    pub request_id: CorrelationId,
     pub actor_user_id: Option<UserId>,
     pub actor_username: Option<String>,
-    pub acting_role: Option<String>,
+    pub acting_role: Option<RoleCode>,
     pub category: OperationCategory,
-    pub action: String,
+    pub action: OperationAction,
     pub resource_type: Option<ResourceType>,
     pub resource_id: Option<String>,
-    pub http_method: String,
+    pub http_method: OperationHttpMethod,
     pub http_path: String,
     pub http_status: i16,
     pub outcome: OperationOutcome,
-    pub client_ip: Option<String>,
+    pub client_ip: Option<IpNetwork>,
     pub user_agent: Option<String>,
     pub latency_ms: i32,
-    pub detail: serde_json::Value,
-    pub before_hash: Option<String>,
-    pub after_hash: Option<String>,
+    pub detail: OperationDetailDocument,
+    pub before_hash: Option<ContentHash>,
+    pub after_hash: Option<ContentHash>,
     pub governance_audit_event_id: Option<AuditEventId>,
     pub governance_audit_sequence: Option<i64>,
 }

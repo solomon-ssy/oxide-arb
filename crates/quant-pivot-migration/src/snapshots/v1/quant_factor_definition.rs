@@ -20,7 +20,7 @@ pub struct Model {
     pub input_schema_version: i32,
     pub output_schema_version: i32,
     #[sea_orm(column_type = "JsonBinary")]
-    pub definition_json: Json,
+    pub definition: Json,
     pub status: QpPublicationStatus,
     pub created_by: Option<Uuid>,
     pub created_at: DateTimeWithTimeZone,

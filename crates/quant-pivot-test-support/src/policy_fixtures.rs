@@ -11,11 +11,12 @@ use quant_pivot_models::{
     },
     hashing::CanonicalDigest,
     runtime_config::{
-        DecisionPolicySnapshot, POLICY_RESOURCE_SCHEMA_VERSION, PolicyValidationEvidence,
+        DecisionPolicySnapshot, POLICY_RESOURCE_SCHEMA_VERSION, PolicyRevisionBundle,
+        PolicyValidationEvidence, PolicyValidationSubject,
     },
     types::{
-        ContentHash, DecisionPolicySnapshotId, PolicyActivationId, PolicyApprovalId,
-        PolicyIdempotencyKey, PolicyRevisionId,
+        AuditEventId, ContentHash, DecisionPolicySnapshotId, PolicyActivationId, PolicyApprovalId,
+        PolicyBundleGeneration, PolicyIdempotencyKey, PolicyRevisionId,
     },
 };
 use quant_pivot_repository::{postgres::PgPolicyRepository, traits::PolicyRepository};
@@ -27,6 +28,65 @@ struct PreparedResource {
     revision_id: PolicyRevisionId,
     approval_id: PolicyApprovalId,
     preflight_token_hash: ContentHash,
+}
+
+struct FixtureActivationContext<'a> {
+    snapshot_id: &'a DecisionPolicySnapshotId,
+    snapshot_hash: &'a ContentHash,
+    persisted_snapshot: &'a NewDecisionPolicySnapshot,
+    actor: &'a str,
+    reason: &'a str,
+}
+
+async fn activate_prepared_resources(
+    repo: &dyn PolicyRepository,
+    prepared: Vec<PreparedResource>,
+    context: FixtureActivationContext<'_>,
+) {
+    let committed_generation = PolicyBundleGeneration::FIRST
+        .checked_next()
+        .expect("boot generation has a successor");
+    for (index, resource) in prepared.into_iter().enumerate() {
+        let expected_bundle_generation = if index == 0 {
+            PolicyBundleGeneration::FIRST
+        } else {
+            committed_generation
+        };
+        let idempotency_key = format!("test-boot-{}-{}", resource.kind, context.snapshot_id)
+            .parse::<PolicyIdempotencyKey>()
+            .expect("valid test policy idempotency key");
+        repo.activate_resource(
+            NewPolicyActivation {
+                bundle_generation: committed_generation,
+                expected_bundle_generation,
+                policy_activation_id: PolicyActivationId::from_v7(),
+                resource_kind: resource.kind,
+                policy_revision_id: resource.revision_id,
+                decision_policy_snapshot_id: context.snapshot_id.clone(),
+                policy_approval_id: resource.approval_id,
+                activated_by_kind: PolicyActorKind::System,
+                activated_by_user_id: None,
+                activated_by_label: context.actor.to_owned(),
+                reason: context.reason.to_owned(),
+                activation_kind: PolicyActivationKind::Initial,
+                expected_active_revision_id: None,
+                previous_policy_revision_id: None,
+                rollback_target_revision_id: None,
+                preflight_token_hash: resource.preflight_token_hash,
+                activation_request_hash: CanonicalDigest::content_hash_json(&(
+                    "test-policy-activation",
+                    idempotency_key.as_str(),
+                    context.snapshot_hash.as_str(),
+                ))
+                .expect("hash test activation request"),
+                idempotency_key,
+                audit_event_id: AuditEventId::from_v7(),
+            },
+            context.persisted_snapshot.clone(),
+        )
+        .await
+        .expect("activate typed policy revision");
+    }
 }
 
 /// Persist a complete six-resource boot bundle through the production
@@ -46,6 +106,9 @@ pub async fn bootstrap_policy_bundle(
     }
 
     let mut snapshot = config.clone();
+    repo.ensure_policy_profile_artifacts(&snapshot.profile_artifacts, actor, reason)
+        .await
+        .expect("persist typed policy profile artifacts");
     let mut prepared = Vec::with_capacity(ConfigResourceKind::ALL.len());
     for kind in ConfigResourceKind::ALL {
         let revision_id = PolicyRevisionId::from_v7();
@@ -77,29 +140,7 @@ pub async fn bootstrap_policy_bundle(
         })
         .await
         .expect("create typed policy revision");
-        repo.mark_revision_validated(
-            &revision_id,
-            PolicyValidationEvidence::default(),
-            preflight_token_hash.clone(),
-            Utc::now() + Duration::days(1),
-        )
-        .await
-        .expect("validate typed policy revision");
         let approval_id = PolicyApprovalId::from_v7();
-        repo.record_approval(RecordPolicyApproval {
-            policy_approval_id: approval_id.clone(),
-            policy_revision_id: revision_id.clone(),
-            resource_kind: kind,
-            decision: PolicyApprovalDecision::Approved,
-            decided_by_kind: PolicyActorKind::System,
-            decided_by_user_id: None,
-            decided_by_label: actor.to_owned(),
-            reason: reason.to_owned(),
-            decided_at: Utc::now(),
-            expires_at: None,
-        })
-        .await
-        .expect("approve typed policy revision");
         prepared.push(PreparedResource {
             kind,
             revision_id,
@@ -109,12 +150,49 @@ pub async fn bootstrap_policy_bundle(
     }
 
     let snapshot_id = DecisionPolicySnapshotId::from_v7();
-    let snapshot_hash =
-        CanonicalDigest::content_hash_json(&snapshot).expect("hash decision policy snapshot");
+    let snapshot_hash = snapshot
+        .persistence_hash()
+        .expect("hash decision policy persistence document");
+    for resource in &prepared {
+        repo.mark_revision_validated(
+            &resource.revision_id,
+            PolicyValidationEvidence {
+                subject: Some(PolicyValidationSubject {
+                    base_generation: PolicyBundleGeneration::FIRST,
+                    base_revision_vector: PolicyRevisionBundle::default(),
+                    candidate_bundle_hash: snapshot_hash.clone(),
+                }),
+                ..PolicyValidationEvidence::default()
+            },
+            resource.preflight_token_hash.clone(),
+            Utc::now() + Duration::days(1),
+        )
+        .await
+        .expect("bind policy validation to the complete boot bundle");
+        repo.record_approval(RecordPolicyApproval {
+            policy_approval_id: resource.approval_id.clone(),
+            policy_revision_id: resource.revision_id.clone(),
+            resource_kind: resource.kind,
+            decision: PolicyApprovalDecision::Approved,
+            decided_by_kind: PolicyActorKind::System,
+            decided_by_user_id: None,
+            decided_by_label: actor.to_owned(),
+            reason: reason.to_owned(),
+            decided_at: Utc::now(),
+            expires_at: None,
+        })
+        .await
+        .expect("approve complete boot validation subject");
+    }
     let persisted_snapshot = NewDecisionPolicySnapshot {
+        bundle_generation: PolicyBundleGeneration::FIRST
+            .checked_next()
+            .expect("boot generation has a successor"),
         decision_policy_snapshot_id: snapshot_id.clone(),
-        snapshot_hash,
-        snapshot: snapshot.clone(),
+        snapshot_hash: snapshot_hash.clone(),
+        snapshot: snapshot
+            .persistence_document()
+            .expect("build typed persistence policy document"),
         recommendation_policy_revision_id: required_revision(
             &snapshot,
             ConfigResourceKind::RecommendationPolicy,
@@ -143,33 +221,18 @@ pub async fn bootstrap_policy_bundle(
         reason: reason.to_owned(),
     };
 
-    for resource in prepared {
-        repo.activate_resource(
-            NewPolicyActivation {
-                policy_activation_id: PolicyActivationId::from_v7(),
-                resource_kind: resource.kind,
-                policy_revision_id: resource.revision_id,
-                decision_policy_snapshot_id: snapshot_id.clone(),
-                policy_approval_id: resource.approval_id,
-                activated_by_kind: PolicyActorKind::System,
-                activated_by_user_id: None,
-                activated_by_label: actor.to_owned(),
-                reason: reason.to_owned(),
-                activation_kind: PolicyActivationKind::Initial,
-                expected_active_revision_id: None,
-                previous_policy_revision_id: None,
-                rollback_target_revision_id: None,
-                preflight_token_hash: resource.preflight_token_hash,
-                idempotency_key: format!("test-boot-{}-{snapshot_id}", resource.kind)
-                    .parse::<PolicyIdempotencyKey>()
-                    .expect("valid test policy idempotency key"),
-                audit_event_id: None,
-            },
-            persisted_snapshot.clone(),
-        )
-        .await
-        .expect("activate typed policy revision");
-    }
+    activate_prepared_resources(
+        repo,
+        prepared,
+        FixtureActivationContext {
+            snapshot_id: &snapshot_id,
+            snapshot_hash: &snapshot_hash,
+            persisted_snapshot: &persisted_snapshot,
+            actor,
+            reason,
+        },
+    )
+    .await;
     snapshot_id
 }
 

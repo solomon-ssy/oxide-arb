@@ -35,8 +35,9 @@ use quant_pivot_models::{
     },
     runtime_config::DecisionPolicySnapshot,
     types::{
-        ContentHash, DecisionPolicySnapshotId, FeatureVectorId, MarketId, MarketSelectionId,
-        ModelRunId, ModelVersionId, RecommendationReportId, SelectionExclusionSummary,
+        ContentHash, DecisionPolicySnapshotId, FeatureParityDetailSource, FeatureVectorId,
+        MarketId, MarketSelectionId, ModelRunId, ModelVersionId, RecommendationReportId,
+        SelectionExclusionSummary, stable_name::FeatureName,
     },
 };
 use quant_pivot_repository::traits::{
@@ -1608,7 +1609,7 @@ impl DurableFeatureParitySource {
                 online: canonical_evidence(&"classical_factor_bypass", None, boundary)?,
                 replay: canonical_evidence(&"classical_factor_bypass", None, boundary)?,
                 transform_hash: None,
-                detail: serde_json::json!({"family_dispatch": "classical"}),
+                detail: FeatureParityDetailSource::FactorClassicalBypass,
             })]);
         }
         let mut online_projection = online
@@ -1638,7 +1639,10 @@ impl DurableFeatureParitySource {
             online: canonical_evidence(&online_projection, None, boundary)?,
             replay: canonical_evidence(&replay_projection, None, boundary)?,
             transform_hash: None,
-            detail: serde_json::json!({"online_count": online_projection.len(), "replay_count": replay_projection.len()}),
+            detail: FeatureParityDetailSource::FactorCounts {
+                online_count: count(online_projection.len(), "factor online count")?,
+                replay_count: count(replay_projection.len(), "factor replay count")?,
+            },
         })])
     }
 }
@@ -1872,13 +1876,13 @@ fn selection_comparisons(
         online: canonical_evidence(&online_projection, None, boundary)?,
         replay: canonical_evidence(&replay_projection, None, boundary)?,
         transform_hash: None,
-        detail: serde_json::json!({
-            "online_count": online_projection_members.len(),
-            "replay_count": replay_members.len(),
-            "online_selector_hash": online_selection.selector_hash.to_string(),
-            "replay_selector_hash": replay.selector_hash.to_string(),
-            "replay_excluded_count": replay.excluded.len(),
-        }),
+        detail: FeatureParityDetailSource::Selection {
+            online_count: count(online_projection_members.len(), "selection online count")?,
+            replay_count: count(replay_members.len(), "selection replay count")?,
+            online_selector_hash: online_selection.selector_hash.clone(),
+            replay_selector_hash: replay.selector_hash.clone(),
+            replay_excluded_count: count(replay.excluded.len(), "selection replay excluded count")?,
+        },
     })])
 }
 
@@ -1939,12 +1943,18 @@ fn data_quality_comparison(
         online: canonical_evidence(&online, None, boundary)?,
         replay: canonical_evidence(&replay, None, boundary)?,
         transform_hash: None,
-        detail: serde_json::json!({
-            "online_count": online.len(),
-            "replay_count": replay.len(),
-            "online_admitted_count": online.iter().filter(|row| row.admitted).count(),
-            "replay_admitted_count": replay.iter().filter(|row| row.admitted).count(),
-        }),
+        detail: FeatureParityDetailSource::DataQuality {
+            online_count: count(online.len(), "data-quality online count")?,
+            replay_count: count(replay.len(), "data-quality replay count")?,
+            online_admitted_count: count(
+                online.iter().filter(|row| row.admitted).count(),
+                "data-quality online admitted count",
+            )?,
+            replay_admitted_count: count(
+                replay.iter().filter(|row| row.admitted).count(),
+                "data-quality replay admitted count",
+            )?,
+        },
     }))
 }
 
@@ -1986,11 +1996,7 @@ fn validate_replay_feature_population(
         .collect::<BTreeSet<_>>();
     let mut vector_markets = BTreeSet::new();
     for (vector_id, persisted) in feature_infos {
-        let persisted_boundary = persisted.decision_boundary.as_ref().ok_or_else(|| {
-            determinism(format!(
-                "Postgres feature vector {vector_id} is a pre-v10 row without a decision boundary"
-            ))
-        })?;
+        let persisted_boundary = &persisted.decision_boundary;
         persisted_boundary.validate()?;
         if persisted_boundary != boundary {
             return Err(determinism(format!(
@@ -2068,19 +2074,19 @@ fn snapshot_and_feature_comparisons(
             market_id: Some(market_id.clone()),
             feature_name: None,
             online: canonical_evidence(&online_capture.snapshot, None, inputs.boundary)?,
-            replay: canonical_evidence(
-                &replay_capture_evidence.snapshot,
-                None,
-                inputs.boundary,
-            )?,
+            replay: canonical_evidence(&replay_capture_evidence.snapshot, None, inputs.boundary)?,
             transform_hash: None,
-            detail: serde_json::json!({
-                "feature_vector_id": vector_id.to_string(),
-                "online_catalog_change_id": online_capture.snapshot.catalog.market_change_id.to_string(),
-                "replay_catalog_change_id": replay_capture_evidence.snapshot.catalog.market_change_id.to_string(),
-                "online_book_ref": online_capture.snapshot.book_snapshot_ref.to_string(),
-                "replay_book_ref": replay_capture_evidence.snapshot.book_snapshot_ref.to_string(),
-            }),
+            detail: FeatureParityDetailSource::Snapshot {
+                feature_vector_id: vector_id.clone(),
+                online_catalog_change_id: online_capture.snapshot.catalog.market_change_id.clone(),
+                replay_catalog_change_id: replay_capture_evidence
+                    .snapshot
+                    .catalog
+                    .market_change_id
+                    .clone(),
+                online_book_ref: online_capture.snapshot.book_snapshot_ref.clone(),
+                replay_book_ref: replay_capture_evidence.snapshot.book_snapshot_ref.clone(),
+            },
         }));
         comparisons.push(comparison(ComparisonInput {
             candidate,
@@ -2093,11 +2099,11 @@ fn snapshot_and_feature_comparisons(
             online: canonical_evidence(&online_capture, None, inputs.boundary)?,
             replay: canonical_evidence(&replay_capture_evidence, None, inputs.boundary)?,
             transform_hash: None,
-            detail: serde_json::json!({
-                "feature_vector_id": vector_id.to_string(),
-                "online_capture_hash": online_info.decision_capture_hash.as_ref().map(ToString::to_string),
-                "replay_capture_hash": replay_capture_hash.to_string(),
-            }),
+            detail: FeatureParityDetailSource::Capture {
+                feature_vector_id: vector_id.clone(),
+                online_capture_hash: online_info.decision_capture_hash.clone(),
+                replay_capture_hash: replay_capture_hash.clone(),
+            },
         }));
         let replay_rows = feature_events(
             replay_vector,
@@ -2150,7 +2156,9 @@ fn feature_cell_comparisons(
             online: feature_row_evidence(online)?,
             replay: feature_row_evidence(replay)?,
             transform_hash: None,
-            detail: serde_json::json!({"feature_vector_id": vector_id.to_string()}),
+            detail: FeatureParityDetailSource::FeatureCell {
+                feature_vector_id: vector_id.clone(),
+            },
         }));
     }
     Ok(comparisons)
@@ -2164,7 +2172,12 @@ fn replay_feature_info(
     capture_hash: &ContentHash,
     created_at: DateTime<Utc>,
 ) -> QuantResult<FeatureVectorInfo> {
-    let replay_new = replay_vector.try_to_new(boundary)?;
+    let replay_new = replay_vector.try_to_new(boundary, capture)?;
+    if &replay_new.decision_capture_hash != capture_hash {
+        return Err(determinism(format!(
+            "replay capture hash changed for feature vector {vector_id}"
+        )));
+    }
     Ok(FeatureVectorInfo {
         feature_vector_id: vector_id.clone(),
         market_id: replay_new.market_id,
@@ -2177,15 +2190,8 @@ fn replay_feature_info(
         staleness_ms: replay_new.staleness_ms,
         payload: replay_new.payload,
         source_refs: replay_new.source_refs,
-        decision_capture: Some(serde_json::to_value(capture).map_err(|error| {
-            ResearchError::Serialization {
-                detail: format!(
-                    "serialize replay decision capture for market {}: {error}",
-                    replay_vector.market_id
-                ),
-            }
-        })?),
-        decision_capture_hash: Some(capture_hash.clone()),
+        decision_capture: replay_new.decision_capture,
+        decision_capture_hash: replay_new.decision_capture_hash,
         created_at,
     })
 }
@@ -2195,27 +2201,10 @@ pub(crate) fn persisted_capture(
     rows: &[QuantFeatureEventRow],
     boundary: &DecisionBoundary,
 ) -> QuantResult<DecisionCaptureEvidence> {
-    let payload = info.decision_capture.clone().ok_or_else(|| {
-        determinism(format!(
-            "feature vector {} is a pre-v10 row without decision capture",
-            info.feature_vector_id
-        ))
-    })?;
-    let expected_hash = info.decision_capture_hash.as_ref().ok_or_else(|| {
-        determinism(format!(
-            "feature vector {} has decision capture without hash",
-            info.feature_vector_id
-        ))
-    })?;
-    let capture: DecisionCaptureEvidence =
-        serde_json::from_value(payload).map_err(|error| ResearchError::Serialization {
-            detail: format!(
-                "decode decision capture for vector {}: {error}",
-                info.feature_vector_id
-            ),
-        })?;
+    let capture = info.decision_capture.clone();
+    let expected_hash = &info.decision_capture_hash;
     let actual_hash = ResearchHasher::canonical(&capture)?;
-    if &actual_hash != expected_hash
+    if actual_hash != *expected_hash
         || capture.snapshot.boundary != *boundary
         || capture.snapshot.market_id != info.market_id
         || Some(&capture.snapshot.token_id) != info.token_id.as_ref()
@@ -2260,10 +2249,10 @@ fn model_input_comparisons(
             online: model_input_evidence(row)?,
             replay: model_input_evidence(replay_row)?,
             transform_hash,
-            detail: serde_json::json!({
-                "raw_input_name": row.raw_input_name,
-                "feature_vector_id": row.feature_vector_id.to_string(),
-            }),
+            detail: FeatureParityDetailSource::ModelInput {
+                raw_input_name: FeatureName::new(row.raw_input_name.clone()),
+                feature_vector_id: row.feature_vector_id.clone(),
+            },
         }));
     }
     if replay_by_key.len() != online.len() {
@@ -2301,7 +2290,9 @@ fn prediction_comparison(
         online: canonical_evidence(&online_hash, None, boundary)?,
         replay: canonical_evidence(&replay_hash, None, boundary)?,
         transform_hash: None,
-        detail: serde_json::json!({"candidate_count": replay.candidates.len()}),
+        detail: FeatureParityDetailSource::Prediction {
+            candidate_count: count(replay.candidates.len(), "prediction candidate count")?,
+        },
     }))
 }
 
@@ -2316,7 +2307,7 @@ struct ComparisonInput<'a> {
     online: FeatureParityEvidence,
     replay: FeatureParityEvidence,
     transform_hash: Option<ContentHash>,
-    detail: serde_json::Value,
+    detail: FeatureParityDetailSource,
 }
 
 fn comparison(input: ComparisonInput<'_>) -> FeatureParityComparison {
@@ -2336,6 +2327,11 @@ fn comparison(input: ComparisonInput<'_>) -> FeatureParityComparison {
         transform_hash: input.transform_hash,
         detail: input.detail,
     }
+}
+
+fn count(value: usize, field: &str) -> QuantResult<u64> {
+    u64::try_from(value)
+        .map_err(|error| determinism(format!("feature parity {field} does not fit u64: {error}")))
 }
 
 fn canonical_evidence<T: Serialize>(
@@ -2515,12 +2511,7 @@ fn boundary_from_report_features(
         )));
     }
     for (vector_id, info) in infos {
-        let boundary = info.decision_boundary.as_ref().ok_or_else(|| {
-            determinism(format!(
-                "report {} vector {} has no v10 decision boundary",
-                report.recommendation_report_id, vector_id
-            ))
-        })?;
+        let boundary = &info.decision_boundary;
         boundary.validate()?;
         if boundary != expected || info.decision_at != report.decision_at {
             return Err(determinism(format!(
@@ -3180,7 +3171,8 @@ mod tests {
             quant::{RecommendationReportStatus, ReportKind},
         },
         types::{
-            EventId, FeatureVectorId, ReportDataQualityTokens, TokenDataQualityRecord, TokenId, Usd,
+            EventId, FeatureParityDetailSource, FeatureVectorId, ReportDataQualityTokens,
+            TokenDataQualityRecord, TokenId, Usd,
         },
     };
     use quant_pivot_test_support::report_fixtures;
@@ -3228,7 +3220,9 @@ mod tests {
             online: evidence.clone(),
             replay: evidence,
             transform_hash: None,
-            detail: serde_json::Value::Null,
+            detail: FeatureParityDetailSource::FeatureCell {
+                feature_vector_id: FeatureVectorId::from_v7(),
+            },
         }
     }
 

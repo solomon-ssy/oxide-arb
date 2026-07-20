@@ -13,7 +13,14 @@ mod snapshots;
 use std::collections::BTreeMap;
 
 use quant_pivot_error::storage::StorageError;
-use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, FromQueryResult, Statement};
+use quant_pivot_models::{
+    config::{PostgresConfig, secret::SecretText},
+    types::LIFECYCLE_ADVISORY_LOCK_KEY,
+};
+use sea_orm::{
+    ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbBackend, FromQueryResult,
+    Statement, TransactionTrait,
+};
 use sea_orm_migration::MigratorTrait;
 use serde::Serialize;
 
@@ -22,7 +29,9 @@ use migrations::Migrator;
 const CHECKSUM_DOMAIN: &str = "quant-pivot/postgres-migration/v1";
 const CHECKSUM_ALGORITHM: &str = "blake3-256";
 const MIGRATION_ENGINE: &str = "sea-orm-migration/2.0.0-rc.43";
-const DEPLOYMENT_LOCK_KEY: i64 = 7_293_770_821_154_641_591;
+const PREPRODUCTION_DATABASE: &str = "quant_pivot";
+const PREPRODUCTION_MIGRATION_ROLE: &str = "quant_pivot_migrator";
+const PREPRODUCTION_RUNTIME_ROLE: &str = "quant_pivot_runtime";
 #[cfg(test)]
 const CHECKED_MIGRATION_MANIFEST: &str = include_str!("../../../schema/postgres/migrations.json");
 
@@ -48,6 +57,175 @@ pub struct MigrationPlan {
     pub migration_ledger_exists: bool,
     pub applied_versions: Vec<String>,
     pub pending_migrations: Vec<MigrationSpec>,
+}
+
+/// Read-only inventory used by the guarded preproduction reset plan.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PreproductionPostgresInventory {
+    pub database_exists: bool,
+    pub object_count: i64,
+    pub connection_count: i64,
+    pub production_baseline_exists: bool,
+}
+
+/// Inspect only the exact project-owned preproduction database.
+pub async fn inspect_preproduction_postgres(
+    config: &PostgresConfig,
+    migration_password: &SecretText,
+) -> Result<PreproductionPostgresInventory, StorageError> {
+    validate_preproduction_postgres_target(config)?;
+    let migration = config.migration_connection(migration_password);
+    let maintenance_url = migration
+        .try_connection_url_with_database("postgres")
+        .map_err(|error| StorageError::Migration(format!("build PG maintenance URL: {error}")))?;
+    let maintenance = sqlx::PgPool::connect(&maintenance_url)
+        .await
+        .map_err(migration_error("connect PostgreSQL maintenance database"))?;
+    let database_exists = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)",
+    )
+    .bind(PREPRODUCTION_DATABASE)
+    .fetch_one(&maintenance)
+    .await
+    .map_err(migration_error("inspect PostgreSQL target database"))?;
+    if !database_exists {
+        maintenance.close().await;
+        return Ok(PreproductionPostgresInventory {
+            database_exists: false,
+            object_count: 0,
+            connection_count: 0,
+            production_baseline_exists: false,
+        });
+    }
+    let connection_count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::bigint FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()",
+    )
+    .bind(PREPRODUCTION_DATABASE)
+    .fetch_one(&maintenance)
+    .await
+    .map_err(migration_error("count PostgreSQL target connections"))?;
+    let target_url = migration
+        .try_connection_url()
+        .map_err(|error| StorageError::Migration(format!("build PG target URL: {error}")))?;
+    let target = sqlx::PgPool::connect(&target_url)
+        .await
+        .map_err(migration_error("connect PostgreSQL target database"))?;
+    let object_count = sqlx::query_scalar::<_, i64>(
+        "WITH objects AS (\
+         SELECT c.oid FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+         WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f') \
+         UNION ALL SELECT t.oid FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace \
+         WHERE n.nspname = 'public' AND t.typtype IN ('e', 'd', 'r') \
+         UNION ALL SELECT p.oid FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace \
+         WHERE n.nspname = 'public' \
+         UNION ALL SELECT g.oid FROM pg_trigger g JOIN pg_class c ON c.oid = g.tgrelid \
+         JOIN pg_namespace n ON n.oid = c.relnamespace \
+         WHERE n.nspname = 'public' AND NOT g.tgisinternal) \
+         SELECT COUNT(*)::bigint FROM objects",
+    )
+    .fetch_one(&target)
+    .await
+    .map_err(migration_error("count PostgreSQL target objects"))?;
+    let baseline_relation_exists = sqlx::query_scalar::<_, bool>(
+        "SELECT to_regclass('public.system_production_baseline') IS NOT NULL",
+    )
+    .fetch_one(&target)
+    .await
+    .map_err(migration_error(
+        "inspect PostgreSQL production baseline relation",
+    ))?;
+    let production_baseline_exists = if baseline_relation_exists {
+        sqlx::query_scalar::<_, bool>("SELECT EXISTS (SELECT 1 FROM system_production_baseline)")
+            .fetch_one(&target)
+            .await
+            .map_err(migration_error("inspect PostgreSQL production baseline"))?
+    } else {
+        false
+    };
+    target.close().await;
+    maintenance.close().await;
+    Ok(PreproductionPostgresInventory {
+        database_exists,
+        object_count,
+        connection_count,
+        production_baseline_exists,
+    })
+}
+
+/// Destructively recreate only the exact project-owned preproduction database.
+pub async fn reset_preproduction_postgres(
+    config: &PostgresConfig,
+    migration_password: &SecretText,
+) -> Result<(), StorageError> {
+    let inventory = inspect_preproduction_postgres(config, migration_password).await?;
+    if inventory.production_baseline_exists {
+        return Err(StorageError::Migration(
+            "production baseline exists; PostgreSQL reset is forbidden".to_owned(),
+        ));
+    }
+    let migration = config.migration_connection(migration_password);
+    let maintenance_url = migration
+        .try_connection_url_with_database("postgres")
+        .map_err(|error| StorageError::Migration(format!("build PG maintenance URL: {error}")))?;
+    let maintenance = sqlx::PgPool::connect(&maintenance_url)
+        .await
+        .map_err(migration_error("connect PostgreSQL maintenance database"))?;
+    sqlx::query("DROP DATABASE IF EXISTS quant_pivot WITH (FORCE)")
+        .execute(&maintenance)
+        .await
+        .map_err(migration_error("drop PostgreSQL preproduction database"))?;
+    sqlx::query("CREATE DATABASE quant_pivot OWNER quant_pivot_migrator")
+        .execute(&maintenance)
+        .await
+        .map_err(migration_error("create PostgreSQL preproduction database"))?;
+    maintenance.close().await;
+    Ok(())
+}
+
+fn validate_preproduction_postgres_target(config: &PostgresConfig) -> Result<(), StorageError> {
+    if config.database != PREPRODUCTION_DATABASE
+        || config.migration.user != PREPRODUCTION_MIGRATION_ROLE
+        || config.user != PREPRODUCTION_RUNTIME_ROLE
+        || config.schema != "public"
+    {
+        return Err(StorageError::Migration(format!(
+            "preproduction reset only permits database `{PREPRODUCTION_DATABASE}`, migration role `{PREPRODUCTION_MIGRATION_ROLE}`, runtime role `{PREPRODUCTION_RUNTIME_ROLE}`, schema `public`"
+        )));
+    }
+    Ok(())
+}
+
+/// Acquire the cross-system lifecycle lease used by ClickHouse/reset mutations.
+pub async fn acquire_lifecycle_lease(
+    db: &DatabaseConnection,
+) -> Result<DatabaseTransaction, StorageError> {
+    let transaction = db.begin().await.map_err(StorageError::from)?;
+    let row = transaction
+        .query_one_raw(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT pg_try_advisory_xact_lock($1) AS acquired",
+            [LIFECYCLE_ADVISORY_LOCK_KEY.into()],
+        ))
+        .await
+        .map_err(StorageError::from)?
+        .ok_or_else(|| {
+            StorageError::Migration("PostgreSQL returned no lifecycle lease row".to_owned())
+        })?;
+    let acquired = row
+        .try_get::<bool>("", "acquired")
+        .map_err(StorageError::from)?;
+    if !acquired {
+        return Err(StorageError::Migration(
+            "schema/reset/seal mutation already holds the lifecycle lease".to_owned(),
+        ));
+    }
+    reject_frozen_production_baseline(&transaction).await?;
+    Ok(transaction)
+}
+
+/// Release a lifecycle lease after the cross-system mutation is complete.
+pub async fn release_lifecycle_lease(transaction: DatabaseTransaction) -> Result<(), StorageError> {
+    transaction.commit().await.map_err(StorageError::from)
 }
 
 #[derive(Debug, FromQueryResult)]
@@ -92,7 +270,7 @@ pub async fn apply(db: &DatabaseConnection) -> Result<(), StorageError> {
         "acquire PostgreSQL deployment lock connection",
     ))?;
     let acquired = sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_lock($1)")
-        .bind(DEPLOYMENT_LOCK_KEY)
+        .bind(LIFECYCLE_ADVISORY_LOCK_KEY)
         .fetch_one(&mut *lock_connection)
         .await
         .map_err(migration_error("acquire PostgreSQL deployment lock"))?;
@@ -104,7 +282,7 @@ pub async fn apply(db: &DatabaseConnection) -> Result<(), StorageError> {
 
     let apply_result = apply_locked(db).await;
     let unlock_result = sqlx::query_scalar::<_, bool>("SELECT pg_advisory_unlock($1)")
-        .bind(DEPLOYMENT_LOCK_KEY)
+        .bind(LIFECYCLE_ADVISORY_LOCK_KEY)
         .fetch_one(&mut *lock_connection)
         .await
         .map_err(migration_error("release PostgreSQL deployment lock"));
@@ -117,7 +295,35 @@ pub async fn apply(db: &DatabaseConnection) -> Result<(), StorageError> {
     }
 }
 
+/// Apply `PostgreSQL` migrations while a caller-owned cross-system lease is held.
+pub async fn apply_under_lifecycle_lease(
+    db: &DatabaseConnection,
+    lease: &DatabaseTransaction,
+) -> Result<(), StorageError> {
+    let row = lease
+        .query_one_raw(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT pg_try_advisory_xact_lock($1) AS acquired",
+            [LIFECYCLE_ADVISORY_LOCK_KEY.into()],
+        ))
+        .await
+        .map_err(StorageError::from)?
+        .ok_or_else(|| {
+            StorageError::Migration("lifecycle lease check returned no row".to_owned())
+        })?;
+    if !row
+        .try_get::<bool>("", "acquired")
+        .map_err(StorageError::from)?
+    {
+        return Err(StorageError::Migration(
+            "caller does not hold the lifecycle lease".to_owned(),
+        ));
+    }
+    apply_locked(db).await
+}
+
 async fn apply_locked(db: &DatabaseConnection) -> Result<(), StorageError> {
+    reject_frozen_production_baseline(db).await?;
     if relation_exists(db, "seaql_migrations").await? {
         let applied_versions = read_native_versions(db).await?;
         validate_known_versions(&applied_versions)?;
@@ -130,6 +336,33 @@ async fn apply_locked(db: &DatabaseConnection) -> Result<(), StorageError> {
         .await
         .map_err(|error| StorageError::Migration(error.to_string()))?;
     verify(db).await
+}
+
+async fn reject_frozen_production_baseline(db: &impl ConnectionTrait) -> Result<(), StorageError> {
+    if !relation_exists(db, "system_production_baseline").await? {
+        return Ok(());
+    }
+    let row = db
+        .query_one_raw(Statement::from_string(
+            DbBackend::Postgres,
+            "SELECT COUNT(*)::bigint AS baseline_count FROM system_production_baseline".to_owned(),
+        ))
+        .await
+        .map_err(StorageError::from)?
+        .ok_or_else(|| {
+            StorageError::Migration(
+                "PostgreSQL returned no production baseline preflight row".to_owned(),
+            )
+        })?;
+    let baseline_count = row
+        .try_get::<i64>("", "baseline_count")
+        .map_err(StorageError::from)?;
+    if baseline_count != 0 {
+        return Err(StorageError::Migration(
+            "production baseline is frozen; schema mutation is forbidden".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 /// Verify exact `SeaORM` ledger membership and project checksum audit rows.
@@ -190,7 +423,7 @@ fn migration_spec(version: &str, artifacts: &[&[u8]]) -> MigrationSpec {
     }
 }
 
-async fn relation_exists(db: &DatabaseConnection, relation: &str) -> Result<bool, StorageError> {
+async fn relation_exists(db: &impl ConnectionTrait, relation: &str) -> Result<bool, StorageError> {
     let row = db
         .query_one_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,

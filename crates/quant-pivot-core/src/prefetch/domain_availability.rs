@@ -166,11 +166,7 @@ fn resolve_availability_bindings(
             continue;
         }
         let market_id = info.market_id.clone();
-        let outcome: LinkageOutcome = serde_json::from_value(info.outcome).map_err(|error| {
-            QuantError::config(format!(
-                "linkage ledger row for market {market_id} has an undecodable outcome: {error}"
-            ))
-        })?;
+        let outcome = info.outcome;
         let LinkageOutcome::Resolved(binding) = outcome else {
             continue;
         };
@@ -1000,7 +996,7 @@ mod tests {
             resolver_tier: linkage.resolver_tier,
             resolver_version: linkage.resolver_version,
             confidence: linkage.confidence,
-            outcome: serde_json::to_value(&linkage.outcome).expect("serialize outcome"),
+            outcome: linkage.outcome,
             metadata_hash: linkage.metadata_hash,
             capability_registry_hash: linkage.capability_registry_hash,
             content_hash: linkage.content_hash,

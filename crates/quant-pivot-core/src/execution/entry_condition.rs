@@ -7,118 +7,18 @@ use quant_pivot_models::{
     enums::quant::{EntryConditionState, OutcomeSide, PriceComparison},
     hashing::CanonicalDigest,
     types::{
-        ConditionTruth, ConditionUnavailableReason, ContentHash, CryptoEnteredFoldState,
-        CryptoSubjectPredicateEntered, EntryConditionArtifactV1, EntryConditionBinding,
-        EntryConditionFoldState, EntryConditionSourceBinding, EntryConditionV1, FactorCondition,
-        FactorDefinitionId, FactorMeasure, MarketEventCondition, ModelVersionId, Price,
-        PriceCondition, TemperatureCelsius, TokenId, Usd,
+        ConditionLeafEvidence, ConditionNodeEvaluation, ConditionTruth, ConditionUnavailableReason,
+        ContentHash, CryptoEnteredFoldState, CryptoPriceInput, CryptoSubjectPredicateEntered,
+        EntryConditionArtifactV1, EntryConditionBinding, EntryConditionFoldState,
+        EntryConditionInputSet, EntryConditionSourceBinding, EntryConditionV1, FactorCondition,
+        FactorMeasure, MarketEventCondition, PriceCondition, Usd,
         WeatherDailyTemperatureCrossedTerminalBound, WeatherDailyTemperatureEnteredBand,
-        WeatherObservationDayClosedOutsideBand, WeatherTemperatureStatistic,
+        WeatherDailyTemperatureInput, WeatherObservationDayClosedOutsideBand,
+        WeatherTemperatureStatistic,
     },
 };
 use rust_decimal::Decimal;
 use serde::Serialize;
-
-/// Executable-side book input visible at one PIT cutoff.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct ExecutablePriceInput {
-    pub token_id: TokenId,
-    pub price: Price,
-    pub observed_at: DateTime<Utc>,
-    pub available_at: DateTime<Utc>,
-    pub gap_generation: u64,
-}
-
-/// Latest persisted factor value; never the recommendation's frozen breakdown.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct FactorSnapshotInput {
-    pub definition_id: FactorDefinitionId,
-    pub definition_hash: ContentHash,
-    pub model_version_id: ModelVersionId,
-    pub raw_value: Decimal,
-    pub normalized_value: Decimal,
-    pub confidence: Decimal,
-    pub observed_at: DateTime<Utc>,
-    pub available_at: DateTime<Utc>,
-    pub snapshot_hash: ContentHash,
-}
-
-/// One source-native crypto fact in deterministic fold order.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct CryptoPriceReportInput {
-    pub source_sequence: u64,
-    pub price: Usd,
-    pub event_at: DateTime<Utc>,
-    pub available_at: DateTime<Utc>,
-    pub report_hash: ContentHash,
-}
-
-/// Ordered same-source crypto facts and the source discontinuity generation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct CryptoPriceInput {
-    pub source: EntryConditionSourceBinding,
-    pub reports: Vec<CryptoPriceReportInput>,
-    pub gap_generation: u64,
-    pub source_healthy: bool,
-}
-
-/// Current corrected NOAA proxy state for one station/local day.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct WeatherDailyTemperatureInput {
-    pub source: EntryConditionSourceBinding,
-    pub station: String,
-    pub local_date: chrono::NaiveDate,
-    pub temperature_statistic: WeatherTemperatureStatistic,
-    pub current_extreme: TemperatureCelsius,
-    pub observation_time: DateTime<Utc>,
-    pub available_at: DateTime<Utc>,
-    pub revision: u64,
-    pub day_closed: bool,
-    pub report_hash: ContentHash,
-    pub gap_generation: u64,
-    pub source_healthy: bool,
-}
-
-/// Complete PIT input bundle shared by live and replay evaluation.
-#[derive(Debug, Clone)]
-pub struct EntryConditionInputSet {
-    pub binding: EntryConditionBinding,
-    pub binding_revision: ContentHash,
-    pub binding_unavailable_reason: Option<ConditionUnavailableReason>,
-    pub fold_state: EntryConditionFoldState,
-    pub evaluated_at: DateTime<Utc>,
-    pub prices: Vec<ExecutablePriceInput>,
-    pub factors: Vec<FactorSnapshotInput>,
-    pub crypto: Vec<CryptoPriceInput>,
-    pub weather: Vec<WeatherDailyTemperatureInput>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case", tag = "kind")]
-pub enum ConditionLeafEvidence {
-    Price(ExecutablePriceInput),
-    Clock {
-        deadline_at: DateTime<Utc>,
-        evaluated_at: DateTime<Utc>,
-    },
-    Factor(FactorSnapshotInput),
-    Crypto {
-        input: CryptoPriceInput,
-        state: CryptoEnteredFoldState,
-    },
-    Weather(WeatherDailyTemperatureInput),
-    Unavailable(ConditionUnavailableReason),
-}
-
-/// Compact complete tree persisted to the evaluation fact table.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct ConditionNodeEvaluation {
-    pub node_id: u16,
-    pub truth: ConditionTruth,
-    pub decisive_child_id: Option<u16>,
-    pub evidence: Option<ConditionLeafEvidence>,
-    pub children: Vec<Self>,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EntryConditionEvaluation {
@@ -1005,13 +905,13 @@ mod tests {
         enums::quant::{EntryConditionState, OutcomeSide},
         types::{
             ClockAnchor, ClockCondition, ConditionTruth, ConditionUnavailableReason,
-            ConfirmationPolicy, ContentHash, CryptoSubjectPredicateEntered,
+            ConfirmationPolicy, ContentHash, CryptoPriceReportInput, CryptoSubjectPredicateEntered,
             DecisionPolicySnapshotId, DomainInstrumentKey, DomainSourceId,
             ENTRY_CONDITION_EVALUATOR_VERSION, ENTRY_CONDITION_SCHEMA_VERSION,
             EntryConditionArtifactV1, EntryConditionBinding, EntryConditionFoldState,
-            EntryConditionSourceBinding, EntryConditionV1, MarketEventCondition, MarketId,
-            MarketLinkageId, MarketSelectionId, ModelVersionId, RecommendationId, TemperatureBand,
-            TemperatureCelsius, TemperatureUnit, TokenId, Usd,
+            EntryConditionInputSet, EntryConditionSourceBinding, EntryConditionV1,
+            MarketEventCondition, MarketId, MarketLinkageId, MarketSelectionId, ModelVersionId,
+            RecommendationId, TemperatureBand, TemperatureCelsius, TemperatureUnit, TokenId, Usd,
             WeatherDailyTemperatureCrossedTerminalBound, WeatherDailyTemperatureEnteredBand,
             WeatherObservationDayClosedOutsideBand, WeatherTemperatureStatistic,
         },
@@ -1020,9 +920,8 @@ mod tests {
     use rust_decimal_macros::dec;
 
     use super::{
-        CompositeKind, ConditionNodeEvaluation, CryptoPriceInput, CryptoPriceReportInput,
-        EntryConditionInputSet, WeatherDailyTemperatureInput, composite_truth, crypto_outcome,
-        decide_entry_condition_state, evaluate_entry_condition,
+        CompositeKind, ConditionNodeEvaluation, CryptoPriceInput, WeatherDailyTemperatureInput,
+        composite_truth, crypto_outcome, decide_entry_condition_state, evaluate_entry_condition,
     };
 
     fn node(node_id: u16, truth: ConditionTruth) -> ConditionNodeEvaluation {

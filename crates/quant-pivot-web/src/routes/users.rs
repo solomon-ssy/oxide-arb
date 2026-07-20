@@ -119,7 +119,7 @@ pub async fn create(
     op_ctx.set_action(OperationCategory::Rbac, "user.create");
     op_ctx.set_resource(ResourceType::User, user.id.to_string());
     // Redacted: the username identifies the row; the password never appears.
-    op_ctx.set_detail(serde_json::json!({ "username": user.username }));
+    op_ctx.set_detail(serde_json::json!({ "username": user.username }))?;
     Ok(WebResponse::ok(UserView::from(user)))
 }
 
@@ -178,7 +178,7 @@ pub async fn change_status(
     }
     op_ctx.set_action(OperationCategory::Rbac, "user.change_status");
     op_ctx.set_resource(ResourceType::User, id.to_string());
-    op_ctx.set_detail(serde_json::json!({ "status": status }));
+    op_ctx.set_detail(serde_json::json!({ "status": status }))?;
     Ok(WebResponse::ok(()))
 }
 
@@ -215,7 +215,7 @@ pub async fn set_roles(
     let role_ids = body.into_inner().role_ids;
     op_ctx.set_action(OperationCategory::Rbac, "user.assign_roles");
     op_ctx.set_resource(ResourceType::User, user_id.to_string());
-    op_ctx.set_detail(serde_json::json!({ "role_count": role_ids.len() }));
+    op_ctx.set_detail(serde_json::json!({ "role_count": role_ids.len() }))?;
     state
         .user_roles
         .set_roles_for_user(AssignRoles {

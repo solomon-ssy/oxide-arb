@@ -123,9 +123,7 @@ impl CryptoLiveIngestWorker {
             }
         }
         for row in rows {
-            let linkage = row
-                .into_domain()
-                .map_err(|error| QuantError::config(format!("invalid linkage payload: {error}")))?;
+            let linkage = row.into_domain();
             Self::add_discovered_linkage(&mut bindings, linkage)?;
         }
         Ok(bindings)

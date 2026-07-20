@@ -19,6 +19,7 @@ rust_static() {
   bash scripts/lint-phase-lifecycle.sh
   bash scripts/lint-config-inventory.sh
   bash scripts/lint-seaorm-persistence.sh
+  bash scripts/lint-secret-boundaries.sh
   cargo machete --with-metadata
   cargo +nightly udeps --workspace --all-targets
   cargo test --workspace
@@ -36,6 +37,7 @@ ui_gate() {
   bash scripts/lint-ui-semantic-colors.sh
   (
     cd ui
+    pnpm check:config-api
     pnpm lint
     pnpm check:circular
     pnpm check:dep

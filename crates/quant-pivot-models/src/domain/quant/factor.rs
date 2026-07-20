@@ -11,14 +11,14 @@ use crate::{
     },
     types::{
         ContentHash, FactorDefinitionId, FactorValueId, FeatureVectorId, MarketId, ModelRunId,
-        ModelVersionId, Probability, SchemaVersion,
+        ModelVersionId, Probability, SchemaVersion, UserId,
+        factor::{FactorDefinitionDocument, FactorExplanation},
     },
 };
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 /// Governed factor definition row.
 #[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
@@ -34,9 +34,9 @@ pub struct FactorDefinitionInfo {
     pub scope: FactorDefinitionScope,
     pub input_schema_version: SchemaVersion,
     pub output_schema_version: SchemaVersion,
-    pub definition_json: serde_json::Value,
+    pub definition: FactorDefinitionDocument,
     pub status: PublicationStatus,
-    pub created_by: Option<Uuid>,
+    pub created_by: Option<UserId>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -53,7 +53,7 @@ info_from_model!(
         scope,
         input_schema_version,
         output_schema_version,
-        definition_json,
+        definition,
         status,
         created_by,
         created_at,
@@ -73,9 +73,9 @@ pub struct NewFactorDefinition {
     pub scope: FactorDefinitionScope,
     pub input_schema_version: SchemaVersion,
     pub output_schema_version: SchemaVersion,
-    pub definition_json: serde_json::Value,
+    pub definition: FactorDefinitionDocument,
     pub status: PublicationStatus,
-    pub created_by: Option<Uuid>,
+    pub created_by: Option<UserId>,
 }
 
 /// Persisted factor value row.
@@ -101,7 +101,7 @@ pub struct FactorValueInfo {
     pub indeterminate_reason: Option<FactorIndeterminateReason>,
     pub direction: FactorDirection,
     pub confidence: Probability,
-    pub explanation: serde_json::Value,
+    pub explanation: FactorExplanation,
     pub created_at: DateTime<Utc>,
 }
 
@@ -134,7 +134,7 @@ pub struct NewFactorValue {
     pub indeterminate_reason: Option<FactorIndeterminateReason>,
     pub direction: FactorDirection,
     pub confidence: Probability,
-    pub explanation: serde_json::Value,
+    pub explanation: FactorExplanation,
 }
 
 /// Runtime factor bundle generated from one feature vector.
@@ -182,7 +182,7 @@ pub struct LatestFactorSnapshotValueInfo {
     pub indeterminate_reason: Option<FactorIndeterminateReason>,
     pub direction: FactorDirection,
     pub confidence: Probability,
-    pub explanation: serde_json::Value,
+    pub explanation: FactorExplanation,
 }
 
 /// Latest complete factor plane from one exact serving run.

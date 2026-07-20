@@ -5274,6 +5274,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d98f6fed1fde3f8c21bc40a1abb88dd75e67924f9cffc3ef95607bad8017f8e2"
 
 [[package]]
+name = "ipnetwork"
+version = "0.21.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf370abdafd54d13e54a620e8c3e1145f28e46cc9d704bc6d94414559df41763"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "is_terminal_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7945,6 +7954,7 @@ dependencies = [
  "async-trait",
  "blake3",
  "quant-pivot-error",
+ "quant-pivot-models",
  "sea-orm",
  "sea-orm-migration",
  "serde",
@@ -8014,6 +8024,7 @@ dependencies = [
  "rust_decimal",
  "rust_decimal_macros",
  "sea-orm",
+ "sea-query",
  "serde",
  "serde_json",
  "testcontainers",
@@ -8089,6 +8100,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "url",
  "uuid",
 ]
 
@@ -8172,8 +8184,12 @@ name = "quant-pivot-xtask"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
+ "blake3",
+ "chrono",
  "clap",
  "quant-pivot-core",
+ "quant-pivot-error",
  "quant-pivot-migration",
  "quant-pivot-models",
  "quant-pivot-repository",
@@ -8181,8 +8197,14 @@ dependencies = [
  "quant-pivot-storage",
  "rustls 0.23.40",
  "schemars 1.2.1",
+ "sea-orm",
+ "serde",
  "serde_json",
+ "testcontainers",
+ "testcontainers-modules",
  "tokio",
+ "url",
+ "uuid",
  "zeroize",
 ]
 
@@ -9265,6 +9287,7 @@ dependencies = [
  "derive_more 2.1.1",
  "futures-util",
  "inventory",
+ "ipnetwork",
  "itertools 0.14.0",
  "log",
  "mac_address",
@@ -9355,6 +9378,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8d190cfb3bcceb8a8d7d04dee5a0c77f60c7627979cdcb47fdcb8934f009badf"
 dependencies = [
  "chrono",
+ "ipnetwork",
+ "itoa",
  "ordered-float 4.6.0",
  "rust_decimal",
  "sea-query-derive",
@@ -10094,6 +10119,7 @@ dependencies = [
  "hashbrown 0.16.1",
  "hashlink 0.11.0",
  "indexmap 2.14.0",
+ "ipnetwork",
  "log",
  "memchr",
  "percent-encoding",
@@ -10202,6 +10228,7 @@ dependencies = [
  "hex",
  "hkdf 0.13.0",
  "hmac 0.13.0",
+ "ipnetwork",
  "itoa",
  "log",
  "md-5 0.11.0",

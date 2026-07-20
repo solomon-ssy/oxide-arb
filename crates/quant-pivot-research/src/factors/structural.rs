@@ -33,7 +33,7 @@ use crate::{
             STRUCT_RESOLUTION_PROXIMITY_REGIME, STRUCT_REVERSAL_AFTER_SHOCK,
         },
         value::{
-            FactorDefinitionSpec, FactorDriver, FactorName, FactorOutputKind, RawFactor,
+            FactorDefinitionDocument, FactorDriver, FactorName, FactorOutputKind, RawFactor,
             RawFactorEligibility,
         },
     },
@@ -53,7 +53,7 @@ pub fn structural_factors(
     factors: &FactorsConfig,
     _features: &FeaturesConfig,
     bias_table: Option<Arc<FavoriteLongshotBiasTable>>,
-) -> Vec<(FactorDefinitionSpec, Arc<dyn FactorComputer>)> {
+) -> Vec<(FactorDefinitionDocument, Arc<dyn FactorComputer>)> {
     let structural = &factors.structural;
     let shock_k = parse_decimal(
         &structural.reversal_after_shock.shock_k,
@@ -161,14 +161,14 @@ pub fn structural_factors(
 /// Box a computer into the `(spec, Arc<dyn FactorComputer>)` registry entry.
 fn computer<C: FactorComputer + 'static>(
     factor: C,
-) -> (FactorDefinitionSpec, Arc<dyn FactorComputer>) {
+) -> (FactorDefinitionDocument, Arc<dyn FactorComputer>) {
     let spec = factor.spec().clone();
     (spec, Arc::new(factor) as Arc<dyn FactorComputer>)
 }
 
 fn participant_concentration_factor(
     structural: &StructuralFactorsConfig,
-) -> (FactorDefinitionSpec, Arc<dyn FactorComputer>) {
+) -> (FactorDefinitionDocument, Arc<dyn FactorComputer>) {
     let participant = &structural.participant_concentration;
     computer(ParticipantConcentrationFactor {
         definition_id: provisional_factor_definition_id(STRUCT_PARTICIPANT_CONCENTRATION.as_str()),
@@ -206,8 +206,8 @@ fn structural_spec(
     direction: FactorDirection,
     normalization: FactorNormalization,
     output_kind: FactorOutputKind,
-) -> FactorDefinitionSpec {
-    FactorDefinitionSpec {
+) -> FactorDefinitionDocument {
+    FactorDefinitionDocument {
         name,
         family: FactorFamily::Structural,
         input_features,
@@ -228,7 +228,7 @@ const fn parse_decimal(raw: &DecimalValue, _field: &'static str) -> Decimal {
 /// engine eligibility (structurally absent or indeterminate).
 fn inert(
     definition_id: FactorDefinitionId,
-    spec: &FactorDefinitionSpec,
+    spec: &FactorDefinitionDocument,
     eligibility: RawFactorEligibility,
     headline: String,
 ) -> RawFactor {
@@ -249,7 +249,7 @@ fn inert(
 /// A scored raw factor from a computed raw value.
 fn scored(
     definition_id: FactorDefinitionId,
-    spec: &FactorDefinitionSpec,
+    spec: &FactorDefinitionDocument,
     raw_value: Decimal,
     features: &FeatureVector,
     headline: String,
@@ -278,7 +278,7 @@ fn read(features: &FeatureVector, name: &FeatureName) -> Option<Decimal> {
 
 struct ReversalAfterShockFactor {
     definition_id: FactorDefinitionId,
-    spec: FactorDefinitionSpec,
+    spec: FactorDefinitionDocument,
     shock_k: Decimal,
     shock_cap: Decimal,
 }
@@ -287,7 +287,7 @@ impl FactorComputer for ReversalAfterShockFactor {
     fn definition_id(&self) -> FactorDefinitionId {
         self.definition_id.clone()
     }
-    fn spec(&self) -> &FactorDefinitionSpec {
+    fn spec(&self) -> &FactorDefinitionDocument {
         &self.spec
     }
     fn compute_raw(&self, features: &FeatureVector) -> QuantResult<RawFactor> {
@@ -347,14 +347,14 @@ fn sign(value: Decimal) -> Decimal {
 
 struct ResolutionProximityRegimeFactor {
     definition_id: FactorDefinitionId,
-    spec: FactorDefinitionSpec,
+    spec: FactorDefinitionDocument,
 }
 
 impl FactorComputer for ResolutionProximityRegimeFactor {
     fn definition_id(&self) -> FactorDefinitionId {
         self.definition_id.clone()
     }
-    fn spec(&self) -> &FactorDefinitionSpec {
+    fn spec(&self) -> &FactorDefinitionDocument {
         &self.spec
     }
     fn compute_raw(&self, features: &FeatureVector) -> QuantResult<RawFactor> {
@@ -399,7 +399,7 @@ impl FactorComputer for ResolutionProximityRegimeFactor {
 
 struct SingleFeatureStructuralFactor {
     definition_id: FactorDefinitionId,
-    spec: FactorDefinitionSpec,
+    spec: FactorDefinitionDocument,
     input: FeatureName,
     headline_label: &'static str,
 }
@@ -408,7 +408,7 @@ impl FactorComputer for SingleFeatureStructuralFactor {
     fn definition_id(&self) -> FactorDefinitionId {
         self.definition_id.clone()
     }
-    fn spec(&self) -> &FactorDefinitionSpec {
+    fn spec(&self) -> &FactorDefinitionDocument {
         &self.spec
     }
     fn compute_raw(&self, features: &FeatureVector) -> QuantResult<RawFactor> {
@@ -442,7 +442,7 @@ impl FactorComputer for SingleFeatureStructuralFactor {
 
 struct ParticipantConcentrationFactor {
     definition_id: FactorDefinitionId,
-    spec: FactorDefinitionSpec,
+    spec: FactorDefinitionDocument,
     gini_weight: Decimal,
     cr1_weight: Decimal,
     hhi_weight: Decimal,
@@ -453,7 +453,7 @@ impl FactorComputer for ParticipantConcentrationFactor {
         self.definition_id.clone()
     }
 
-    fn spec(&self) -> &FactorDefinitionSpec {
+    fn spec(&self) -> &FactorDefinitionDocument {
         &self.spec
     }
 
@@ -550,7 +550,7 @@ fn negrisk_outcome(
 /// Build the raw factor for a neg-risk value transformed by `to_raw`.
 fn negrisk_raw(
     definition_id: &FactorDefinitionId,
-    spec: &FactorDefinitionSpec,
+    spec: &FactorDefinitionDocument,
     features: &FeatureVector,
     value_name: FeatureName,
     min_legs: u32,
@@ -589,7 +589,7 @@ fn negrisk_raw(
 
 struct NegRiskLegSumDriftFactor {
     definition_id: FactorDefinitionId,
-    spec: FactorDefinitionSpec,
+    spec: FactorDefinitionDocument,
     min_legs: u32,
 }
 
@@ -597,7 +597,7 @@ impl FactorComputer for NegRiskLegSumDriftFactor {
     fn definition_id(&self) -> FactorDefinitionId {
         self.definition_id.clone()
     }
-    fn spec(&self) -> &FactorDefinitionSpec {
+    fn spec(&self) -> &FactorDefinitionDocument {
         &self.spec
     }
     fn compute_raw(&self, features: &FeatureVector) -> QuantResult<RawFactor> {
@@ -640,7 +640,7 @@ fn leg_tightness(features: &FeatureVector) -> Option<Decimal> {
 
 struct NegRiskConvertEdgeFactor {
     definition_id: FactorDefinitionId,
-    spec: FactorDefinitionSpec,
+    spec: FactorDefinitionDocument,
     min_legs: u32,
 }
 
@@ -648,7 +648,7 @@ impl FactorComputer for NegRiskConvertEdgeFactor {
     fn definition_id(&self) -> FactorDefinitionId {
         self.definition_id.clone()
     }
-    fn spec(&self) -> &FactorDefinitionSpec {
+    fn spec(&self) -> &FactorDefinitionDocument {
         &self.spec
     }
     fn compute_raw(&self, features: &FeatureVector) -> QuantResult<RawFactor> {
@@ -668,7 +668,7 @@ impl FactorComputer for NegRiskConvertEdgeFactor {
 
 struct FavoriteLongshotFactor {
     definition_id: FactorDefinitionId,
-    spec: FactorDefinitionSpec,
+    spec: FactorDefinitionDocument,
     bias_table: Option<Arc<FavoriteLongshotBiasTable>>,
     ic_gate: bool,
 }
@@ -677,7 +677,7 @@ impl FactorComputer for FavoriteLongshotFactor {
     fn definition_id(&self) -> FactorDefinitionId {
         self.definition_id.clone()
     }
-    fn spec(&self) -> &FactorDefinitionSpec {
+    fn spec(&self) -> &FactorDefinitionDocument {
         &self.spec
     }
     fn compute_raw(&self, features: &FeatureVector) -> QuantResult<RawFactor> {

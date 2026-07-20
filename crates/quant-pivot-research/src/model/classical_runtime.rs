@@ -820,8 +820,6 @@ fn f64_to_decimal(value: f64) -> QuantResult<Decimal> {
 
 #[cfg(test)]
 mod tests {
-    use std::fmt::Write;
-
     use super::{ClassicalRuntime, project_settlement_probability};
     use crate::{
         features::{
@@ -842,6 +840,7 @@ mod tests {
                 ModelFamily, ModelRuntimeInput, QuantModelRuntime,
             },
         },
+        test_support::content_hash as hash,
         training::{FeatureColumnSpec, ModelInputCell, TrainingMatrix},
     };
     use chrono::{DateTime, TimeZone, Utc};
@@ -849,21 +848,12 @@ mod tests {
     use quant_pivot_models::{
         enums::quant::{DataQualityStatus, OutcomeSide},
         types::{
-            ArtifactUri, ContentHash, MarketId, ModelArtifactId, ModelInputRequiredness,
-            ModelInputSpec, ModelRunId, ModelVersionId, Price, TokenId, builtin_research_profiles,
+            ArtifactUri, MarketId, ModelArtifactId, ModelInputRequiredness, ModelInputSpec,
+            ModelRunId, ModelVersionId, Price, TokenId, builtin_research_profiles,
         },
     };
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
-
-    fn hash(seed: &str) -> ContentHash {
-        let hex = seed.bytes().fold(String::new(), |mut acc, byte| {
-            let _ = write!(acc, "{byte:02x}");
-            acc
-        });
-        let padded = format!("{hex:0<64}");
-        ContentHash::parse(format!("blake3:{}", &padded[..64])).expect("hash")
-    }
 
     fn fixture_row_secs(i: usize) -> i64 {
         i64::try_from(i).expect("fixture row index fits i64")
@@ -920,6 +910,7 @@ mod tests {
         ClassicalModelArtifact {
             header: ModelArtifactHeader {
                 model_version_id: ModelVersionId::from_v7(),
+                model_spec_definition_hash: hash("spec"),
                 profile_ref: builtin_research_profiles()
                     .expect("built-in profiles")
                     .remove(0)

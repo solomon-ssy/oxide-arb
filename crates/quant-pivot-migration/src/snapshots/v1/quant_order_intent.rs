@@ -16,8 +16,8 @@ pub struct Model {
     pub runtime_mode: QpQuantRuntimeMode,
     pub decision_policy_snapshot_id: Uuid,
     pub model_version_id: Uuid,
-    #[sea_orm(column_type = "JsonBinary")]
-    pub profile_ref: Json,
+    #[sea_orm(column_type = "Text")]
+    pub research_profile_artifact_id: String,
     pub intent_kind: QpOrderIntentKind,
     pub status: QpOrderIntentStatus,
     pub approval_status: QpApprovalStatus,
@@ -52,6 +52,14 @@ pub struct Model {
     pub scale_out_state: Json,
     pub created_at: DateTimeWithTimeZone,
     pub updated_at: DateTimeWithTimeZone,
+    #[sea_orm(
+        belongs_to,
+        from = "research_profile_artifact_id",
+        to = "research_profile_artifact_id",
+        on_update = "NoAction",
+        on_delete = "NoAction"
+    )]
+    pub research_profile_artifact: BelongsTo<super::research_profile_artifact::Entity>,
     #[sea_orm(
         belongs_to,
         from = "decision_policy_snapshot_id",

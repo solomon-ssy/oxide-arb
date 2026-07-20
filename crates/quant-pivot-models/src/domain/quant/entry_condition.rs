@@ -1,10 +1,5 @@
 //! Durable entry-condition artifact, instance, lease, and audit DTOs.
 
-use chrono::{DateTime, Utc};
-use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
-use serde::{Deserialize, Serialize};
-use uuid::Uuid;
-
 use crate::{
     entities::{
         quant_entry_condition_artifact, quant_entry_condition_audit, quant_entry_condition_instance,
@@ -14,9 +9,12 @@ use crate::{
         ConditionTruth, ContentHash, DomainInstrumentKey, DomainSourceId, EntryConditionArtifactId,
         EntryConditionArtifactV1, EntryConditionAuditId, EntryConditionFoldState,
         EntryConditionInstanceId, OrderIntentId, RecommendationId, TemperatureCelsius, Usd,
-        WeatherTemperatureStatistic,
+        WeatherTemperatureStatistic, WorkerId,
     },
 };
+use chrono::{DateTime, Utc};
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
 #[sea_orm(entity = "quant_entry_condition_artifact::Entity")]
@@ -70,7 +68,7 @@ pub struct EntryConditionInstanceInfo {
     pub last_evaluated_at: Option<DateTime<Utc>>,
     pub next_evaluation_at: Option<DateTime<Utc>>,
     pub expires_at: DateTime<Utc>,
-    pub lease_owner: Option<Uuid>,
+    pub lease_owner: Option<WorkerId>,
     pub lease_expires_at: Option<DateTime<Utc>>,
     pub lease_epoch: i64,
     pub claimed_by_intent_id: Option<OrderIntentId>,
@@ -128,7 +126,7 @@ pub struct NewEntryConditionInstance {
     pub last_evaluated_at: Option<DateTime<Utc>>,
     pub next_evaluation_at: Option<DateTime<Utc>>,
     pub expires_at: DateTime<Utc>,
-    pub lease_owner: Option<Uuid>,
+    pub lease_owner: Option<WorkerId>,
     pub lease_expires_at: Option<DateTime<Utc>>,
     pub lease_epoch: i64,
     pub claimed_by_intent_id: Option<OrderIntentId>,

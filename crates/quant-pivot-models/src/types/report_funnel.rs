@@ -1,7 +1,10 @@
 //! Row-level conserved report-market funnel semantics.
 
-use serde::{Deserialize, Serialize};
 use std::str::FromStr;
+
+use serde::{Deserialize, Serialize};
+
+use crate::types::{NullReason, stable_name::FeatureName};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -172,5 +175,117 @@ impl FromStr for ReportFunnelReason {
         .into_iter()
         .find(|reason| reason.as_str() == value)
         .ok_or_else(|| format!("unknown report funnel reason `{value}`"))
+    }
+}
+
+/// Closed, reason-specific diagnostics for one terminal report-funnel row.
+///
+/// This document crosses the `ClickHouse` boundary as canonical JSON text, but
+/// its schema is fully owned by this system. `None` is explicit so callers do
+/// not overload `{}` with several incompatible meanings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case", tag = "kind")]
+pub enum ReportFunnelDiagnostics {
+    None {},
+    MissingModelFeatures {
+        features: Vec<FeatureName>,
+    },
+    FeatureDataQuality {
+        missing: Vec<MissingFeatureDiagnostic>,
+    },
+    PlannerRejection {
+        detail: String,
+    },
+}
+
+impl ReportFunnelDiagnostics {
+    /// Reject a diagnostics payload whose shape disagrees with the row's
+    /// authoritative primary reason.
+    pub fn validate_for(&self, reason: ReportFunnelReason) -> Result<(), &'static str> {
+        let valid = match self {
+            Self::None {} => !matches!(
+                reason,
+                ReportFunnelReason::ModelFeatureUnavailable
+                    | ReportFunnelReason::FeatureDataQualityRejected
+                    | ReportFunnelReason::BelowMinSize
+                    | ReportFunnelReason::LiquidityInfeasible
+                    | ReportFunnelReason::BudgetExhausted
+                    | ReportFunnelReason::MarketCapExhausted
+                    | ReportFunnelReason::EventCapExhausted
+                    | ReportFunnelReason::CategoryCapExhausted
+                    | ReportFunnelReason::CorrelationCapExhausted
+                    | ReportFunnelReason::AvailableCashExhausted
+                    | ReportFunnelReason::AggregateExposureCapExhausted
+                    | ReportFunnelReason::BeyondTopN
+            ),
+            Self::MissingModelFeatures { features } => {
+                reason == ReportFunnelReason::ModelFeatureUnavailable && !features.is_empty()
+            }
+            Self::FeatureDataQuality { missing } => {
+                reason == ReportFunnelReason::FeatureDataQualityRejected && !missing.is_empty()
+            }
+            Self::PlannerRejection { detail } => {
+                matches!(
+                    reason,
+                    ReportFunnelReason::BelowMinSize
+                        | ReportFunnelReason::LiquidityInfeasible
+                        | ReportFunnelReason::BudgetExhausted
+                        | ReportFunnelReason::MarketCapExhausted
+                        | ReportFunnelReason::EventCapExhausted
+                        | ReportFunnelReason::CategoryCapExhausted
+                        | ReportFunnelReason::CorrelationCapExhausted
+                        | ReportFunnelReason::AvailableCashExhausted
+                        | ReportFunnelReason::AggregateExposureCapExhausted
+                        | ReportFunnelReason::BeyondTopN
+                ) && !detail.trim().is_empty()
+            }
+        };
+        valid
+            .then_some(())
+            .ok_or("report funnel diagnostics do not match primary reason")
+    }
+}
+
+/// One required feature rejected by the governed data-quality policy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MissingFeatureDiagnostic {
+    pub feature_name: FeatureName,
+    pub reason: NullReason,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ReportFunnelDiagnostics, ReportFunnelReason};
+
+    #[test]
+    fn diagnostics_are_bound_to_the_primary_reason() {
+        let diagnostics = ReportFunnelDiagnostics::PlannerRejection {
+            detail: "portfolio cap reached".to_owned(),
+        };
+        assert!(
+            diagnostics
+                .validate_for(ReportFunnelReason::BudgetExhausted)
+                .is_ok()
+        );
+        assert!(
+            diagnostics
+                .validate_for(ReportFunnelReason::Published)
+                .is_err()
+        );
+        assert!(
+            ReportFunnelDiagnostics::None {}
+                .validate_for(ReportFunnelReason::FeatureDataQualityRejected)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn diagnostics_reject_unknown_fields() {
+        let result = serde_json::from_value::<ReportFunnelDiagnostics>(serde_json::json!({
+            "kind": "none",
+            "legacy_detail": "must not be ignored"
+        }));
+        assert!(result.is_err());
     }
 }

@@ -18,14 +18,44 @@ const TRIGGERS: &[v1::TriggerSpec] = &[
         program: v1::TriggerProgram::DenyWrite,
     },
     v1::TriggerSpec {
+        name: "trg_policy_activation_audit_append_only",
+        table: "policy_activation_audit",
+        events: v1::TriggerEvents::DeleteOrUpdate,
+        program: v1::TriggerProgram::DenyWrite,
+    },
+    v1::TriggerSpec {
+        name: "trg_policy_activation_event_outbox_append_only",
+        table: "policy_activation_event_outbox",
+        events: v1::TriggerEvents::DeleteOrUpdate,
+        program: v1::TriggerProgram::DenyWrite,
+    },
+    v1::TriggerSpec {
         name: "trg_policy_approval_append_only",
         table: "policy_approval",
         events: v1::TriggerEvents::DeleteOrUpdate,
         program: v1::TriggerProgram::DenyWrite,
     },
     v1::TriggerSpec {
+        name: "trg_policy_profile_artifact_append_only",
+        table: "policy_profile_artifact",
+        events: v1::TriggerEvents::DeleteOrUpdate,
+        program: v1::TriggerProgram::DenyWrite,
+    },
+    v1::TriggerSpec {
+        name: "trg_research_profile_artifact_append_only",
+        table: "research_profile_artifact",
+        events: v1::TriggerEvents::DeleteOrUpdate,
+        program: v1::TriggerProgram::DenyWrite,
+    },
+    v1::TriggerSpec {
         name: "trg_system_production_baseline_append_only",
         table: "system_production_baseline",
+        events: v1::TriggerEvents::DeleteOrUpdate,
+        program: v1::TriggerProgram::DenyWrite,
+    },
+    v1::TriggerSpec {
+        name: "trg_system_production_evidence_append_only",
+        table: "system_production_evidence",
         events: v1::TriggerEvents::DeleteOrUpdate,
         program: v1::TriggerProgram::DenyWrite,
     },
@@ -192,10 +222,10 @@ const TRIGGERS: &[v1::TriggerSpec] = &[
         program: v1::TriggerProgram::DenyWrite,
     },
     v1::TriggerSpec {
-        name: "trg_quant_model_spec_updated_at",
+        name: "trg_quant_model_spec_append_only",
         table: "quant_model_spec",
-        events: v1::TriggerEvents::Update,
-        program: v1::TriggerProgram::SetUpdatedAt,
+        events: v1::TriggerEvents::DeleteOrUpdate,
+        program: v1::TriggerProgram::DenyWrite,
     },
     v1::TriggerSpec {
         name: "trg_quant_order_intent_updated_at",

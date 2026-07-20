@@ -19,12 +19,12 @@ use quant_pivot_models::{
     config::{WeatherStationProfileConfig, WeatherVerticalBindingsConfig},
     domain::{
         DomainSourceExpectationDefinition, DomainSourceExpectationTransition, LinkageOutcome,
-        MarketLinkage, MarketSubject, UpsertDomainSourceExpectation,
+        MarketLinkage, MarketLinkageInfo, MarketSubject, UpsertDomainSourceExpectation,
     },
     enums::domain::{DomainFamily, DomainSourceExpectationStatus},
     types::{
         DomainCapabilityRegistryArtifact, DomainContractCapability, DomainContractFamily,
-        DomainInstrumentKey, DomainSourceId, MarketId, SourceCredentialPolicy,
+        DomainInstrumentKey, DomainSourceId, MarketId, ResearchProfileId, SourceCredentialPolicy,
     },
 };
 use quant_pivot_repository::traits::{DomainSourceExpectationRepository, MarketLinkageRepository};
@@ -101,12 +101,8 @@ impl DomainSourceSupervisor {
             .latest_for_active_markets()
             .await?
             .into_iter()
-            .map(|row| {
-                row.into_domain().map_err(|error| {
-                    QuantError::config(format!("invalid active linkage payload: {error}"))
-                })
-            })
-            .collect::<QuantResult<Vec<_>>>()?;
+            .map(MarketLinkageInfo::into_domain)
+            .collect::<Vec<_>>();
         let desired = compile_expectations(
             &self.registry,
             &self.weather_stations,
@@ -283,7 +279,7 @@ struct CompiledExpectation {
     credential_required: bool,
     freshness_secs: i64,
     market_ids: BTreeSet<MarketId>,
-    profile_ids: BTreeSet<String>,
+    profile_ids: BTreeSet<ResearchProfileId>,
 }
 
 impl CompiledExpectation {
@@ -574,7 +570,7 @@ struct BindingCandidate {
     credential_required: bool,
     freshness_secs: i64,
     market_id: Option<MarketId>,
-    profile_id: String,
+    profile_id: ResearchProfileId,
 }
 
 fn merge_binding(
@@ -615,7 +611,7 @@ fn merge_binding(
 fn profile_for_family(
     registry: &DomainCapabilityRegistryArtifact,
     family: DomainFamily,
-) -> QuantResult<String> {
+) -> QuantResult<ResearchProfileId> {
     let profiles = registry
         .contracts
         .iter()

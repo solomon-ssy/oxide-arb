@@ -3,7 +3,10 @@
 use crate::{
     enums::runtime_config::PolicyActorKind,
     runtime_config::ProductionSealEvidence,
-    types::{BuildCommitHash, ContentHash, DeploymentEnvironment, ProductionBaselineId, UserId},
+    types::{
+        BuildCommitHash, ContentHash, DecisionPolicySnapshotId, DeploymentEnvironment,
+        PolicyBundleGeneration, ProductionBaselineId, UserId,
+    },
 };
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
@@ -25,6 +28,8 @@ pub struct Model {
     pub build_commit: BuildCommitHash,
     pub postgres_schema_fingerprint: ContentHash,
     pub clickhouse_schema_fingerprint: ContentHash,
+    pub policy_bundle_generation: PolicyBundleGeneration,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub policy_bundle_hash: ContentHash,
     pub lifecycle_policy_hash: ContentHash,
     #[sea_orm(column_type = "JsonBinary")]

@@ -9,8 +9,8 @@ use sea_orm::entity::prelude::*;
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub recommendation_id: Uuid,
-    #[sea_orm(column_type = "JsonBinary")]
-    pub profile_ref: Json,
+    #[sea_orm(column_type = "Text")]
+    pub research_profile_artifact_id: String,
     pub recommendation_report_id: Uuid,
     pub rank: i32,
     #[sea_orm(column_type = "Text")]
@@ -45,6 +45,14 @@ pub struct Model {
     pub valid_until: DateTimeWithTimeZone,
     pub status: QpRecommendationStatus,
     pub created_at: DateTimeWithTimeZone,
+    #[sea_orm(
+        belongs_to,
+        from = "research_profile_artifact_id",
+        to = "research_profile_artifact_id",
+        on_update = "NoAction",
+        on_delete = "NoAction"
+    )]
+    pub research_profile_artifact: BelongsTo<super::research_profile_artifact::Entity>,
     #[sea_orm(
         belongs_to,
         from = "event_id",

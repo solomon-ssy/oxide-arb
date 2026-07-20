@@ -2,14 +2,17 @@
 
 use chrono::{Duration as ChronoDuration, Utc};
 use quant_pivot_models::{
-    domain::{NewBacktestReport, NewModelRun, NewModelSpec, NewModelVersion},
+    domain::{NewBacktestReport, NewModelRun, NewModelVersion},
     enums::{
         model::ModelFamily,
         quant::{ModelRunKind, ModelRunStatus, PublicationStatus},
     },
     types::{
         BacktestReportId, ContentHash, DecisionPolicySnapshotId, ModelInputContract, ModelRunId,
-        ModelSpecId, ModelTrainingContract, ModelVersionId, Probability, SchemaVersion,
+        ModelSpecId, ModelTrainingContract, ModelVersionId, Probability,
+        backtest::{CategoryMetrics, ExpectedVsRealized, PnlSimulation},
+        model_metrics::ModelVersionMetrics,
+        model_training::ModelTrainingObjective,
     },
 };
 use quant_pivot_repository::{
@@ -34,18 +37,16 @@ async fn seed_model_version(
     let registry = PgModelRegistryRepository::new(db.clone());
     let model_spec_id = ModelSpecId::from_v7();
     registry
-        .create_model_spec(NewModelSpec {
-            model_spec_id: model_spec_id.clone(),
-            name: "pg-backtest-it".to_owned(),
-            model_family: ModelFamily::WeightedFactor,
-            prediction_horizon_secs: 86_400,
-            feature_schema_version: SchemaVersion::FIRST,
-            label_schema_version: SchemaVersion::FIRST,
-            spec_json: serde_json::json!({}),
-            input_contract: ModelInputContract::single_required("book.mid"),
-            training_contract: ModelTrainingContract::settlement_default(),
-            status: PublicationStatus::Published,
-        })
+        .create_model_spec(
+            quant_pivot_test_support::model_spec_fixtures::new_model_spec_fixture(
+                model_spec_id.clone(),
+                "pg-backtest-it",
+                ModelFamily::WeightedFactor,
+                86_400,
+                ModelInputContract::single_required("book.mid"),
+                ModelTrainingContract::settlement_default(),
+            ),
+        )
         .await
         .expect("model spec");
 
@@ -62,9 +63,10 @@ async fn seed_model_version(
             trade_policy_artifact_id: None,
             trade_policy_hash: None,
             publish_path_set_id: None,
-            metrics_json: serde_json::json!({}),
-            training_objective_json: serde_json::json!({"kind": "not_trained"}),
-            quality_gate_report: serde_json::json!({}),
+            derivation: NewModelVersion::training_derivation(),
+            metrics: ModelVersionMetrics::not_measured("test fixture"),
+            training_objective: ModelTrainingObjective::hand_authored("test fixture"),
+            quality_gate_report: None,
             publication_status: PublicationStatus::Candidate,
             published_at: None,
             retired_at: None,
@@ -86,7 +88,6 @@ async fn seed_model_version(
             status: ModelRunStatus::Running,
             input_hash: content_hash('d'),
             output_hash: None,
-            metrics_json: serde_json::json!({}),
             error_code: None,
             error_message: None,
             started_at: Utc::now(),
@@ -118,13 +119,23 @@ fn new_report(
         rank_ic: dec!(0.42),
         sharpe: dec!(0.9),
         hit_rate: Probability::new(dec!(0.6)),
-        expected_vs_realized: serde_json::json!({ "bias_bps": "5" }),
+        expected_vs_realized: ExpectedVsRealized {
+            mean_expected_bps: dec!(50),
+            mean_realized_bps: dec!(45),
+            correlation: dec!(0.8),
+            bias_bps: dec!(5),
+        },
         max_drawdown: dec!(0.1),
         turnover: dec!(0.2),
         liquidity_feasibility: Probability::new(dec!(1)),
-        category_breakdown: serde_json::json!([]),
+        category_breakdown: CategoryMetrics::default(),
         tail_loss: dec!(-50),
-        report_pnl_simulation: serde_json::json!({ "realized_pnl_usd": "12.5" }),
+        report_pnl_simulation: PnlSimulation {
+            total_allocated_usd: dec!(100),
+            realized_pnl_usd: dec!(12.5),
+            gross_return: dec!(0.125),
+            pnl_curve: Vec::new(),
+        },
         report_hash: content_hash('e'),
         parquet_uri: None,
     }

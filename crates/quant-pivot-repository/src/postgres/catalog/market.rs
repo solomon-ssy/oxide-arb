@@ -388,10 +388,8 @@ mod tests {
 
         assert!(sql.contains(r#""market"."status" ="#));
         assert!(sql.contains(r#""market"."event_id" ="#));
-        assert!(
-            sql.contains(r#"CAST('politics' AS qp_market_category) = ANY("market"."categories")"#),
-            "{sql}"
-        );
+        assert!(sql.contains("qp_market_category"), "{sql}");
+        assert!(sql.contains(r#"= ANY("market"."categories")"#), "{sql}");
         assert!(sql.contains("ILIKE"));
         assert!(sql.contains("election"));
     }

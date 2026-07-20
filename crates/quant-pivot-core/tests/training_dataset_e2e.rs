@@ -27,7 +27,7 @@ use quant_pivot_models::{
         DecisionSource, EventRegistryInfo, GroundingProof, JobProgressSink, LinkageOutcome,
         MarketLinkageDerivation, MarketRegistryInfo, MarketSubject, NewCatalogEventChange,
         NewCatalogEventObject, NewCatalogMarketObject, NewCatalogSyncBatch, NewMarketLinkage,
-        NewModelSpec, NewModelVersion, NewTrainingDatasetPlan, NoopProgressSink, PriceComparator,
+        NewModelVersion, NewTrainingDatasetPlan, NoopProgressSink, PriceComparator,
         ResolutionOracle, ResolvedBinding, ResolvedSourceBinding, UpsertEvent, UpsertMarket,
         market::{book::BookLevel, registry::TokenInfo},
     },
@@ -65,6 +65,8 @@ use quant_pivot_models::{
         ModelInputContract, ModelSpecId, ModelTrainingContract, ModelVersionId, Price, Probability,
         ResolverVersion, SchemaVersion, Shares, TokenId, TrainingDatasetId, TrainingHorizonsSecs,
         TrainingSampleSource, TrainingSampleSources, Usd, default_sample_sources,
+        model_metrics::ModelVersionMetrics, model_training::ModelTrainingObjective,
+        stable_name::FeatureName,
     },
 };
 use quant_pivot_repository::{
@@ -82,7 +84,7 @@ use quant_pivot_repository::{
 };
 use quant_pivot_research::{
     artifact::{ArtifactStore, LocalArtifactStore},
-    features::{EvidenceSourceKind, FeatureName},
+    features::EvidenceSourceKind,
     pit::{
         BookSnapshotAt, CanonicalBookEventRef, PointInTimeSnapshotSource, ResolvedMarketSnapshot,
     },
@@ -130,15 +132,29 @@ const fn sample_as_of(window_start: chrono::DateTime<Utc>) -> chrono::DateTime<U
     window_start
 }
 
-fn ledger_manifest(
-    training_dataset_id: &TrainingDatasetId,
-    model_spec_id: &ModelSpecId,
-    decision_policy_snapshot_id: &DecisionPolicySnapshotId,
+#[derive(Clone, Copy)]
+struct LedgerManifestInput<'a> {
+    training_dataset_id: &'a TrainingDatasetId,
+    model_spec_id: &'a ModelSpecId,
+    model_spec_definition_hash: &'a ContentHash,
+    decision_policy_snapshot_id: &'a DecisionPolicySnapshotId,
     window_start: DateTime<Utc>,
     window_end: DateTime<Utc>,
-    hash: &ContentHash,
+    hash: &'a ContentHash,
     sample_count: u64,
-) -> DatasetManifest {
+}
+
+fn ledger_manifest(input: LedgerManifestInput<'_>) -> DatasetManifest {
+    let LedgerManifestInput {
+        training_dataset_id,
+        model_spec_id,
+        model_spec_definition_hash,
+        decision_policy_snapshot_id,
+        window_start,
+        window_end,
+        hash,
+        sample_count,
+    } = input;
     DatasetManifest {
         format_version: DATASET_ARTIFACT_FORMAT_VERSION,
         training_dataset_id: training_dataset_id.clone(),
@@ -146,6 +162,7 @@ fn ledger_manifest(
         research_program_hash: fixture_hash('4'),
         source_slice: quant_pivot_test_support::execution_pg_seed::source_slice_ref('5'),
         model_spec_id: model_spec_id.clone(),
+        model_spec_definition_hash: model_spec_definition_hash.clone(),
         trade_policy_artifact_id: None,
         trade_policy_hash: None,
         decision_policy_snapshot_id: decision_policy_snapshot_id.clone(),
@@ -822,7 +839,7 @@ fn durable_catalog_commit(
                 event_object_id: event_object_id.clone(),
                 content_hash: event_hash,
                 schema_version: CATALOG_OBJECT_SCHEMA_VERSION,
-                payload: event_payload,
+                payload: event_payload.into(),
             },
             change: NewCatalogEventChange {
                 event_change_id: context.event_version_id.clone(),
@@ -840,7 +857,7 @@ fn durable_catalog_commit(
                 market_object_id: CatalogMarketObjectId::from_content_hash(&market_hash),
                 content_hash: market_hash,
                 schema_version: CATALOG_OBJECT_SCHEMA_VERSION,
-                payload: market_payload,
+                payload: market_payload.into(),
             },
             market_change_id: CatalogMarketChangeId::from_v7(),
             catalog_sync_batch_id: context.batch_id.clone(),
@@ -885,21 +902,31 @@ async fn seed_model_spec_with_contract(
 ) -> ModelSpecId {
     let model_spec_id = ModelSpecId::from_v7();
     PgModelRegistryRepository::new(db.clone())
-        .create_model_spec(NewModelSpec {
-            model_spec_id: model_spec_id.clone(),
-            name: "dataset-e2e".to_owned(),
-            model_family: ModelFamily::WeightedFactor,
-            prediction_horizon_secs: 86_400,
-            feature_schema_version: SchemaVersion::FIRST,
-            label_schema_version: SchemaVersion::FIRST,
-            spec_json: serde_json::json!({}),
-            input_contract,
-            training_contract: ModelTrainingContract::settlement_default(),
-            status: PublicationStatus::Published,
-        })
+        .create_model_spec(
+            quant_pivot_test_support::model_spec_fixtures::new_model_spec_fixture(
+                model_spec_id.clone(),
+                "dataset-e2e",
+                ModelFamily::WeightedFactor,
+                86_400,
+                input_contract,
+                ModelTrainingContract::settlement_default(),
+            ),
+        )
         .await
         .expect("create spec");
     model_spec_id
+}
+
+async fn model_spec_definition_hash(
+    db: &DatabaseConnection,
+    model_spec_id: &ModelSpecId,
+) -> ContentHash {
+    PgModelRegistryRepository::new(db.clone())
+        .find_model_spec_by_id(model_spec_id)
+        .await
+        .expect("load model spec")
+        .expect("model spec exists")
+        .definition_hash
 }
 
 fn service(
@@ -1076,7 +1103,6 @@ async fn historical_pit_no_look_ahead_via_dataset_build() {
     let (window_start, window_end) = dataset_window();
     seed_catalog(&db, window_start).await;
     let model_spec_id = seed_model_spec(&db).await;
-
     let as_of = sample_as_of(window_start);
     let as_of_ms = as_of.timestamp_millis();
     let scenario = Arc::new(Mutex::new(pit_scenario(as_of_ms)));
@@ -1117,24 +1143,27 @@ async fn calibration_dataset_build_fails_closed_on_purge_overlap() {
     let (window_start, window_end) = dataset_window();
     seed_catalog(&db, window_start).await;
     let model_spec_id = seed_model_spec(&db).await;
+    let model_spec_definition_hash = model_spec_definition_hash(&db, &model_spec_id).await;
 
     let hash = ContentHash::parse(format!("blake3:{}", "a".repeat(64))).expect("hash");
     let dataset_id = TrainingDatasetId::from_v7();
-    let manifest = ledger_manifest(
-        &dataset_id,
-        &model_spec_id,
-        &rc_id,
+    let manifest = ledger_manifest(LedgerManifestInput {
+        training_dataset_id: &dataset_id,
+        model_spec_id: &model_spec_id,
+        model_spec_definition_hash: &model_spec_definition_hash,
+        decision_policy_snapshot_id: &rc_id,
         window_start,
         window_end,
-        &hash,
-        10,
-    );
+        hash: &hash,
+        sample_count: 10,
+    });
     let manifest_hash = dataset_manifest_hash(&manifest).expect("manifest hash");
     let dataset_repo = PgTrainingDatasetRepository::new(db.clone());
     dataset_repo
         .create_plan(NewTrainingDatasetPlan {
             training_dataset_id: dataset_id.clone(),
             model_spec_id: model_spec_id.clone(),
+            model_spec_definition_hash,
             window_start,
             window_end,
             purpose: DatasetPurpose::Training,
@@ -1785,6 +1814,7 @@ async fn plan_build_reuses_training_dataset_id() {
         .build(DatasetPlan {
             request: build_request,
             training_dataset_id: plan_a.training_dataset_id.clone(),
+            model_spec_definition_hash: plan_a.model_spec_definition_hash.clone(),
             samples: plan_a.samples.clone(),
             lot_samples: plan_a.lot_samples.clone(),
             exit_training_lots: plan_a.exit_training_lots.clone(),
@@ -1809,7 +1839,6 @@ async fn build_status_insufficient_labels_when_no_labels_mature() {
     let (window_start, window_end) = dataset_window();
     seed_catalog(&db, window_start).await;
     let model_spec_id = seed_model_spec(&db).await;
-
     let as_of_ms = sample_as_of(window_start).timestamp_millis();
     let scenario = Arc::new(Mutex::new(pit_scenario(as_of_ms)));
     let store = temp_artifact_store();
@@ -1963,18 +1992,20 @@ async fn model_version_training_dataset_id_is_typed() {
     let db = pool.connection().clone();
     let rc_id = seed_runtime_config(&db).await;
     let model_spec_id = seed_model_spec(&db).await;
+    let model_spec_definition_hash = model_spec_definition_hash(&db, &model_spec_id).await;
     let dataset_id = TrainingDatasetId::from_v7();
     let (window_start, window_end) = dataset_window();
     let hash = ContentHash::parse(format!("blake3:{}", "b".repeat(64))).expect("hash");
-    let manifest = ledger_manifest(
-        &dataset_id,
-        &model_spec_id,
-        &rc_id,
+    let manifest = ledger_manifest(LedgerManifestInput {
+        training_dataset_id: &dataset_id,
+        model_spec_id: &model_spec_id,
+        model_spec_definition_hash: &model_spec_definition_hash,
+        decision_policy_snapshot_id: &rc_id,
         window_start,
         window_end,
-        &hash,
-        10,
-    );
+        hash: &hash,
+        sample_count: 10,
+    });
     let manifest_hash = dataset_manifest_hash(&manifest).expect("manifest hash");
 
     let dataset_repo = PgTrainingDatasetRepository::new(db.clone());
@@ -1982,6 +2013,7 @@ async fn model_version_training_dataset_id_is_typed() {
         .create_plan(NewTrainingDatasetPlan {
             training_dataset_id: dataset_id.clone(),
             model_spec_id: model_spec_id.clone(),
+            model_spec_definition_hash,
             window_start,
             window_end,
             purpose: DatasetPurpose::Training,
@@ -2032,9 +2064,10 @@ async fn model_version_training_dataset_id_is_typed() {
             trade_policy_artifact_id: None,
             trade_policy_hash: None,
             publish_path_set_id: None,
-            metrics_json: serde_json::json!({}),
-            training_objective_json: serde_json::json!({"kind": "not_trained"}),
-            quality_gate_report: serde_json::json!({}),
+            derivation: NewModelVersion::training_derivation(),
+            metrics: ModelVersionMetrics::not_measured("test fixture"),
+            training_objective: ModelTrainingObjective::hand_authored("test fixture"),
+            quality_gate_report: None,
             publication_status: PublicationStatus::Candidate,
             published_at: None,
             retired_at: None,

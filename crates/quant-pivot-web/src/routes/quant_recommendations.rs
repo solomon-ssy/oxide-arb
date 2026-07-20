@@ -21,11 +21,14 @@ use quant_pivot_models::{
     domain::{
         EntryConditionArtifactView, EntryConditionAuditView, EntryConditionDetailView,
         EntryConditionEvaluationView, EntryConditionInstanceSummaryView,
-        EntryConditionLeafEvidenceView, QuantEvidenceView, QuantRecommendationView,
-        RecommendationAttributionView,
+        EntryConditionLeafEvidenceView, EntryConditionSourceCheckpointView, QuantEvidenceView,
+        QuantRecommendationView, RecommendationAttributionView,
     },
-    enums::rbac::{Operation, ResourceType},
-    types::{ConditionUnavailableReason, RecommendationId},
+    enums::{
+        quant::EntryConditionState,
+        rbac::{Operation, ResourceType},
+    },
+    types::{ConditionLeafEvidence, ConditionNodeEvaluation, ConditionTruth, RecommendationId},
 };
 
 use crate::{
@@ -131,18 +134,28 @@ fn evaluation_view(
     let evaluated_at = DateTime::from_timestamp_millis(row.evaluated_at).ok_or_else(|| {
         WebError::Internal("condition trace evaluated_at is outside chrono range".to_owned())
     })?;
-    let tree = serde_json::from_str::<serde_json::Value>(&row.tree_json).map_err(|error| {
-        WebError::Internal(format!("condition trace tree is invalid JSON: {error}"))
+    let tree =
+        serde_json::from_str::<ConditionNodeEvaluation>(&row.tree_json).map_err(|error| {
+            WebError::Internal(format!("condition trace tree is invalid JSON: {error}"))
+        })?;
+    let state = row.state.parse::<EntryConditionState>().map_err(|error| {
+        WebError::Internal(format!("condition trace state is invalid: {error}"))
     })?;
+    if row.truth != condition_truth_label(&tree.truth) {
+        return Err(WebError::Internal(format!(
+            "condition trace truth label {} disagrees with typed tree root",
+            row.truth
+        )));
+    }
     let mut leaf_evidence = Vec::new();
-    collect_leaf_evidence(&tree, evaluated_at, &mut leaf_evidence)?;
+    collect_leaf_evidence(&tree, evaluated_at, &mut leaf_evidence);
     Ok(EntryConditionEvaluationView {
         evaluation_id: row.evaluation_id,
         applied_revision,
         evaluator_version: row.evaluator_version,
         evaluated_at,
-        state: row.state,
-        truth: row.truth,
+        state,
+        truth: tree.truth.clone(),
         evaluation_hash: row.evaluation_hash,
         input_fingerprint: row.input_fingerprint,
         continuity_hash: row.continuity_hash,
@@ -152,34 +165,24 @@ fn evaluation_view(
 }
 
 fn collect_leaf_evidence(
-    node: &serde_json::Value,
+    node: &ConditionNodeEvaluation,
     evaluated_at: DateTime<Utc>,
     output: &mut Vec<EntryConditionLeafEvidenceView>,
-) -> Result<(), WebError> {
-    if let (Some(node_id), Some(truth), Some(evidence)) = (
-        node.get("node_id").and_then(serde_json::Value::as_u64),
-        node.get("truth"),
-        node.get("evidence").filter(|value| !value.is_null()),
-    ) {
-        let node_id = u16::try_from(node_id)
-            .map_err(|_| WebError::Internal("condition trace node_id overflow".to_owned()))?;
-        let (observed_at, available_at, source_checkpoint) = evidence_metadata(evidence)?;
+) {
+    if let Some(evidence) = &node.evidence {
+        let (observed_at, available_at, source_checkpoint) = evidence_metadata(evidence);
         let freshness_ms = observed_at.map(|observed_at| {
             evaluated_at
                 .signed_duration_since(observed_at)
                 .num_milliseconds()
         });
-        let unavailable_reason = truth
-            .get("reason")
-            .cloned()
-            .map(serde_json::from_value::<ConditionUnavailableReason>)
-            .transpose()
-            .map_err(|error| {
-                WebError::Internal(format!("condition unavailable reason is invalid: {error}"))
-            })?;
+        let unavailable_reason = match &node.truth {
+            ConditionTruth::Unavailable(reason) => Some(reason.clone()),
+            ConditionTruth::Satisfied | ConditionTruth::Unsatisfied => None,
+        };
         output.push(EntryConditionLeafEvidenceView {
-            node_id,
-            truth: truth.clone(),
+            node_id: node.node_id,
+            truth: node.truth.clone(),
             evidence: evidence.clone(),
             observed_at,
             available_at,
@@ -188,92 +191,73 @@ fn collect_leaf_evidence(
             unavailable_reason,
         });
     }
-    if let Some(children) = node.get("children").and_then(serde_json::Value::as_array) {
-        for child in children {
-            collect_leaf_evidence(child, evaluated_at, output)?;
-        }
+    for child in &node.children {
+        collect_leaf_evidence(child, evaluated_at, output);
     }
-    Ok(())
 }
 
 type EvidenceMetadata = (
     Option<DateTime<Utc>>,
     Option<DateTime<Utc>>,
-    Option<serde_json::Value>,
+    Option<EntryConditionSourceCheckpointView>,
 );
 
-fn evidence_metadata(evidence: &serde_json::Value) -> Result<EvidenceMetadata, WebError> {
-    let kind = evidence
-        .get("kind")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default();
-    let (observed, available, checkpoint) = match kind {
-        "price" => (
-            evidence.get("observed_at"),
-            evidence.get("available_at"),
-            Some(serde_json::json!({
-                "token_id": evidence.get("token_id"),
-                "observed_at": evidence.get("observed_at"),
-                "available_at": evidence.get("available_at"),
-                "gap_generation": evidence.get("gap_generation"),
-            })),
+fn evidence_metadata(evidence: &ConditionLeafEvidence) -> EvidenceMetadata {
+    match evidence {
+        ConditionLeafEvidence::Price(input) => (
+            Some(input.observed_at),
+            Some(input.available_at),
+            Some(EntryConditionSourceCheckpointView::Price {
+                token_id: input.token_id.clone(),
+                observed_at: input.observed_at,
+                available_at: input.available_at,
+                gap_generation: input.gap_generation,
+            }),
         ),
-        "factor" => (
-            evidence.get("observed_at"),
-            evidence.get("available_at"),
-            Some(serde_json::json!({
-                "definition_hash": evidence.get("definition_hash"),
-                "model_version_id": evidence.get("model_version_id"),
-                "snapshot_hash": evidence.get("snapshot_hash"),
-            })),
+        ConditionLeafEvidence::Factor(input) => (
+            Some(input.observed_at),
+            Some(input.available_at),
+            Some(EntryConditionSourceCheckpointView::Factor {
+                definition_hash: input.definition_hash.clone(),
+                model_version_id: input.model_version_id.clone(),
+                snapshot_hash: input.snapshot_hash.clone(),
+            }),
         ),
-        "weather" => (
-            evidence.get("observation_time"),
-            evidence.get("available_at"),
-            Some(serde_json::json!({
-                "revision": evidence.get("revision"),
-                "report_hash": evidence.get("report_hash"),
-                "gap_generation": evidence.get("gap_generation"),
-            })),
+        ConditionLeafEvidence::Weather(input) => (
+            Some(input.observation_time),
+            Some(input.available_at),
+            Some(EntryConditionSourceCheckpointView::Weather {
+                revision: input.revision,
+                report_hash: input.report_hash.clone(),
+                gap_generation: input.gap_generation,
+            }),
         ),
-        "crypto" => {
-            let input = evidence.get("input");
-            let latest = input
-                .and_then(|value| value.get("reports"))
-                .and_then(serde_json::Value::as_array)
-                .and_then(|reports| reports.last());
+        ConditionLeafEvidence::Crypto { input, state } => {
+            let latest = input.reports.last();
             (
-                latest.and_then(|value| value.get("event_at")),
-                latest.and_then(|value| value.get("available_at")),
-                Some(serde_json::json!({
-                    "source_sequence": latest.and_then(|value| value.get("source_sequence")),
-                    "report_hash": latest.and_then(|value| value.get("report_hash")),
-                    "gap_generation": input.and_then(|value| value.get("gap_generation")),
-                    "discontinuity_epoch": evidence.pointer("/state/discontinuity_epoch"),
-                    "latched": evidence.pointer("/state/latched"),
-                })),
+                latest.map(|report| report.event_at),
+                latest.map(|report| report.available_at),
+                Some(EntryConditionSourceCheckpointView::Crypto {
+                    source_sequence: latest.map(|report| report.source_sequence),
+                    report_hash: latest.map(|report| report.report_hash.clone()),
+                    gap_generation: input.gap_generation,
+                    discontinuity_epoch: state.discontinuity_epoch,
+                    latched: state.latched,
+                }),
             )
         }
-        _ => (None, None, None),
-    };
-    Ok((
-        parse_optional_datetime(observed)?,
-        parse_optional_datetime(available)?,
-        checkpoint,
-    ))
+        ConditionLeafEvidence::Clock { .. } | ConditionLeafEvidence::Unavailable(_) => {
+            (None, None, None)
+        }
+    }
 }
 
-fn parse_optional_datetime(
-    value: Option<&serde_json::Value>,
-) -> Result<Option<DateTime<Utc>>, WebError> {
-    value
-        .and_then(serde_json::Value::as_str)
-        .map(|value| {
-            value.parse::<DateTime<Utc>>().map_err(|error| {
-                WebError::Internal(format!("condition evidence timestamp is invalid: {error}"))
-            })
-        })
-        .transpose()
+const fn condition_truth_label(truth: &ConditionTruth) -> &'static str {
+    match truth {
+        ConditionTruth::Satisfied => "satisfied",
+        ConditionTruth::Unsatisfied => "unsatisfied",
+        ConditionTruth::Unavailable(_) => "unavailable",
+    }
 }
 
 /// WORM condition lifecycle timeline ordered by revision.
@@ -337,6 +321,9 @@ pub async fn attribution(
 
 #[cfg(test)]
 mod tests {
+    use quant_pivot_models::{
+        domain::EntryConditionSourceCheckpointView, types::ConditionLeafEvidence,
+    };
     use serde_json::json;
 
     use super::evidence_metadata;
@@ -344,19 +331,32 @@ mod tests {
     #[test]
     fn price_evidence_exposes_a_structured_source_checkpoint() {
         let observed_at = "2026-07-14T04:29:45.570Z";
-        let evidence = json!({
+        let evidence = serde_json::from_value::<ConditionLeafEvidence>(json!({
             "kind": "price",
             "token_id": "token-1",
             "observed_at": observed_at,
             "available_at": observed_at,
             "gap_generation": 0,
             "price": "0.62",
-        });
+        }))
+        .expect("typed price evidence");
 
-        let (_, _, checkpoint) = evidence_metadata(&evidence).expect("price evidence metadata");
+        let (_, _, checkpoint) = evidence_metadata(&evidence);
         let checkpoint = checkpoint.expect("price source checkpoint");
-        assert_eq!(checkpoint["token_id"], "token-1");
-        assert_eq!(checkpoint["gap_generation"], 0);
-        assert_eq!(checkpoint["observed_at"], observed_at);
+        let EntryConditionSourceCheckpointView::Price {
+            token_id,
+            observed_at: actual_observed_at,
+            gap_generation,
+            ..
+        } = checkpoint
+        else {
+            panic!("expected price source checkpoint");
+        };
+        assert_eq!(token_id.as_str(), "token-1");
+        assert_eq!(gap_generation, 0);
+        assert_eq!(
+            actual_observed_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            observed_at
+        );
     }
 }

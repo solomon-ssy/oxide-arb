@@ -3,7 +3,6 @@
 use chrono::{DateTime, Utc};
 use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 use crate::{
     entities::{
@@ -14,7 +13,7 @@ use crate::{
     types::{
         ContentHash, MarketId, TokenId, TradePolicyArtifactId, TradePolicyArtifactPayload,
         TradePolicyGovernanceAuditId, TradePolicyValidationRunId, TrainingDatasetId,
-        TrainingExampleId,
+        TrainingExampleId, UserId,
     },
 };
 
@@ -63,7 +62,7 @@ pub struct NewTradePolicyGovernanceAudit {
     pub from_status: TradePolicyStatus,
     pub to_status: TradePolicyStatus,
     pub content_hash: ContentHash,
-    pub actor_id: Uuid,
+    pub actor_id: UserId,
     pub reason: String,
 }
 
@@ -78,7 +77,7 @@ pub struct NewTradePolicyValidationRun {
     pub source_slice_manifest_hash: ContentHash,
     pub evidence_manifest_hash: ContentHash,
     pub status: TradePolicyValidationStatus,
-    pub actor_id: Uuid,
+    pub actor_id: UserId,
     pub reason: String,
 }
 
@@ -117,7 +116,7 @@ pub struct TradePolicyValidationRunInfo {
     pub failed_rows: i64,
     pub validation_hash: Option<ContentHash>,
     pub failure_detail: Option<String>,
-    pub actor_id: Uuid,
+    pub actor_id: UserId,
     pub reason: String,
     pub started_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
@@ -215,7 +214,7 @@ pub struct TradePolicyGovernanceAuditInfo {
     pub from_status: TradePolicyStatus,
     pub to_status: TradePolicyStatus,
     pub content_hash: ContentHash,
-    pub actor_id: Uuid,
+    pub actor_id: UserId,
     pub reason: String,
     pub created_at: DateTime<Utc>,
 }

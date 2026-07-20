@@ -9,7 +9,9 @@
 //! output_spec, header)` yields a byte-identical artifact hash.
 
 use quant_pivot_error::{QuantResult, research::ResearchError};
-use quant_pivot_models::types::{ContentHash, ModelInputContract};
+use quant_pivot_models::types::{
+    ContentHash, ModelInputContract, model_training::TrainingObjectiveSpec,
+};
 use rust_decimal::{
     Decimal,
     prelude::{FromPrimitive, ToPrimitive},
@@ -17,7 +19,6 @@ use rust_decimal::{
 
 use crate::{
     model::{
-        TrainingObjectiveSpec,
         artifact::{
             FactorWeight, ModelArtifact, ModelArtifactHeader, SellScorerArtifact,
             SellScorerOutputSpec, model_input_contract_hash,

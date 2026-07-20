@@ -38,6 +38,7 @@ use quant_pivot_models::{
     },
     types::{
         BacktestPathSetId, BacktestReportId, ModelComparisonReportId, ModelSpecId, ModelVersionId,
+        RoleCode, UserId,
     },
 };
 
@@ -195,7 +196,7 @@ pub async fn list_model_specs(
     Ok(WebResponse::ok(page))
 }
 
-/// `POST /api/research/model-specs` — author a new `draft` model specification.
+/// `POST /api/research/model-specs` — author a new immutable model specification.
 ///
 /// The spec is the authoring root of the offline research lifecycle: an operator
 /// mints it before planning a training dataset or training a version. Returns
@@ -219,20 +220,26 @@ pub async fn create_model_spec(
                 prediction_horizon_secs: request.prediction_horizon_secs,
                 feature_schema_version: request.feature_schema_version,
                 label_schema_version: request.label_schema_version,
-                spec_json: request.spec_json,
+                thesis: request.thesis,
                 input_contract: request.input_contract,
                 training_contract: request.training_contract,
                 reason: reason.clone(),
             },
-            GovernanceActor {
-                username: actor.claims.username.clone(),
-                role: Some(acting_role.0.clone()),
-            },
+            GovernanceActor::authenticated(
+                actor.claims.sub.parse::<UserId>().map_err(|error| {
+                    WebError::Internal(format!("authenticated subject is invalid: {error}"))
+                })?,
+                actor.claims.username.clone(),
+                RoleCode::new(acting_role.0.clone()),
+            ),
         )
         .await?;
     let view = QuantModelSpecView::from(created);
     op_ctx.set_action(OperationCategory::Governance, "model_spec.create");
-    op_ctx.set_resource(ResourceType::Materialization, view.model_spec_id.clone());
+    op_ctx.set_resource(
+        ResourceType::Materialization,
+        view.model_spec_id.to_string(),
+    );
     op_ctx.set_detail(serde_json::json!({
         "model_spec_id": view.model_spec_id,
         "name": view.name,
@@ -241,7 +248,7 @@ pub async fn create_model_spec(
         "acting_role": acting_role.0,
         "request_id": request_id.0,
         "reason": reason,
-    }));
+    }))?;
     Ok(WebResponse::ok(view))
 }
 
@@ -364,7 +371,7 @@ pub async fn train(
         "acting_role": acting_role.0,
         "request_id": request_id.0,
         "reason": reason,
-    }));
+    }))?;
     Ok(WebResponse::accepted(job))
 }
 
@@ -432,7 +439,7 @@ pub async fn backtest(
         "acting_role": acting_role.0,
         "request_id": request_id.0,
         "reason": reason,
-    }));
+    }))?;
     Ok(WebResponse::accepted(job))
 }
 
@@ -519,6 +526,6 @@ pub async fn cpcv_backtest(
         "acting_role": acting_role.0,
         "request_id": request_id.0,
         "reason": reason,
-    }));
+    }))?;
     Ok(WebResponse::accepted(job))
 }

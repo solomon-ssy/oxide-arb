@@ -11,6 +11,7 @@ pub mod fact_sink;
 pub mod factor_governance;
 pub mod governance;
 pub mod mocks;
+pub mod model_spec_fixtures;
 pub mod pg;
 pub mod pit;
 pub mod policy_fixtures;

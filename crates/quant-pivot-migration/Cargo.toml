@@ -10,6 +10,7 @@ publish = false
 async-trait = { workspace = true }
 blake3 = { workspace = true }
 quant-pivot-error = { workspace = true, features = ["storage"] }
+quant-pivot-models = { workspace = true }
 sea-orm = { workspace = true }
 sea-orm-migration = { workspace = true }
 serde = { workspace = true }

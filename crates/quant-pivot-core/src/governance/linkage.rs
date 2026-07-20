@@ -147,10 +147,7 @@ impl LinkageResolverService {
                         id: market.market_id.to_string(),
                     }
                 })?;
-                outcomes_by_market.insert(
-                    market.market_id.clone(),
-                    typed_linkage_outcome(row.outcome.clone())?,
-                );
+                outcomes_by_market.insert(market.market_id.clone(), row.outcome.clone());
                 continue;
             }
             let result = self.resolver.resolve(&metadata, cycle_at)?;
@@ -246,8 +243,7 @@ impl LinkageResolverService {
             })?;
         let metadata = metadata_from_market(&market, &event);
         let metadata_hash = metadata.metadata_hash()?;
-        let subject: MarketSubject = serde_json::from_value(request.subject)
-            .map_err(|error| QuantError::config(error.to_string()))?;
+        let subject = request.subject;
         let MarketSubject::Crypto(crypto_subject) = &subject else {
             return Err(QuantError::config(
                 "manual Weather linkage overrides are not supported by the crypto validator",
@@ -435,16 +431,6 @@ fn metadata_from_market(market: &MarketInfo, event: &EventInfo) -> LinkageSource
         },
         end_date: market.end_date,
     }
-}
-
-fn typed_linkage_outcome(value: serde_json::Value) -> QuantResult<LinkageOutcome> {
-    serde_json::from_value(value).map_err(|error| {
-        StorageError::invariant_violation(
-            Some("quant_market_linkage"),
-            format!("invalid typed linkage outcome: {error}"),
-        )
-        .into()
-    })
 }
 
 fn validate_weather_groups(

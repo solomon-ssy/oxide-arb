@@ -96,11 +96,7 @@ async fn append_in_transaction(
     linkage: NewMarketLinkage,
 ) -> Result<MarketLinkageInfo, StorageError> {
     let content_hash = linkage.content_hash.clone();
-    let source_bindings = match serde_json::from_value::<LinkageOutcome>(linkage.outcome.clone())
-        .map_err(|error| StorageError::InvariantViolation {
-            entity: Some("quant_market_linkage"),
-            detail: format!("invalid typed linkage outcome: {error}"),
-        })? {
+    let source_bindings = match linkage.outcome.clone() {
         LinkageOutcome::Resolved(binding) => binding.source_bindings,
         LinkageOutcome::Unresolved { .. } => Vec::new(),
     };

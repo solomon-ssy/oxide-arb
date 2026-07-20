@@ -22,8 +22,11 @@ pub mod market;
 pub mod menu;
 pub mod operation_log;
 pub mod policy_activation;
+pub mod policy_activation_audit;
+pub mod policy_activation_event_outbox;
 pub mod policy_activation_guard;
 pub mod policy_approval;
+pub mod policy_profile_artifact;
 pub mod policy_revision;
 pub mod quant_account_snapshot;
 pub mod quant_backtest_path_set;
@@ -92,6 +95,7 @@ pub mod quant_training_dataset;
 pub mod quant_weather_daily_temperature_projection;
 #[cfg_attr(not(feature = "repository"), allow(dead_code))]
 pub mod quant_weather_observation_current;
+pub mod research_profile_artifact;
 pub mod role;
 pub mod role_menu;
 #[cfg(feature = "repository")]
@@ -99,6 +103,7 @@ pub mod seed_application;
 pub mod system_bootstrap_transition;
 pub mod system_kill_switch;
 pub mod system_production_baseline;
+pub mod system_production_evidence;
 pub mod system_runtime_state;
 pub mod user;
 pub mod user_role;

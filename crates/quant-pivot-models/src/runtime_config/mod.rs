@@ -13,6 +13,8 @@ pub use sections::*;
 pub use validation::validate_runtime_config;
 pub use wire::*;
 
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, Utc};
 use schemars::{JsonSchema, Schema, SchemaGenerator, generate::SchemaSettings};
 use sea_orm::FromJsonQueryResult;
@@ -28,10 +30,13 @@ use crate::{
     enums::runtime_config::{
         CheckOutcome, ConfigResourceKind, LifecycleCheckKind, PolicyApplyBoundary, PolicyConsumer,
         PolicyPreflightCheckKind, PolicyPreflightDetailCode, PolicyValidationCode,
-        PolicyValidationSeverity,
+        PolicyValidationSeverity, ProfileArtifactKind,
     },
     hashing::CanonicalDigest,
-    types::{ContentHash, PolicyRevisionId, SchemaVersion},
+    types::{
+        BuildCommitHash, ContentHash, DecisionPolicySnapshotId, PolicyBundleGeneration,
+        PolicyRevisionId, ProfileArtifactId, SchemaVersion,
+    },
 };
 
 /// Boot schema shared by the six independent governed policy resources.
@@ -242,8 +247,20 @@ pub struct PolicyPreflightResult {
 )]
 #[serde(default, deny_unknown_fields)]
 pub struct PolicyValidationEvidence {
+    /// Exact active bundle against which this revision was validated.
+    pub subject: Option<PolicyValidationSubject>,
     pub issues: Vec<PolicyValidationIssue>,
     pub preflight: Vec<PolicyPreflightResult>,
+}
+
+/// Immutable subject bound to typed validation, preflight and approval.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, FromJsonQueryResult)]
+#[serde(deny_unknown_fields)]
+pub struct PolicyValidationSubject {
+    pub base_generation: PolicyBundleGeneration,
+    pub base_revision_vector: PolicyRevisionBundle,
+    #[schemars(with = "String", extend("x-format" = "content-hash"))]
+    pub candidate_bundle_hash: ContentHash,
 }
 
 impl PolicyValidationEvidence {
@@ -281,6 +298,11 @@ pub enum LifecycleCheckDetail {
         fingerprint: ContentHash,
     },
     MigrationLedgersVerified,
+    CompiledBuildIdentity {
+        build_commit: BuildCommitHash,
+        clean: bool,
+    },
+    MissingActivePolicyBundle,
     PolicyBundle {
         #[schemars(with = "String", extend("x-format" = "content-hash"))]
         policy_bundle_hash: ContentHash,
@@ -471,6 +493,117 @@ pub struct ImmutableProfileArtifactHashes {
     pub research_method_profile: ContentHash,
 }
 
+/// Closed tagged payload stored in the WORM policy-profile artifact table.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, FromJsonQueryResult)]
+#[serde(tag = "profile_kind", content = "document", rename_all = "snake_case")]
+pub enum PolicyProfileDocument {
+    Feature(FeatureProfileArtifact),
+    Scoring(ScoringProfileArtifact),
+    Domain(DomainProfileArtifact),
+    ResearchMethod(Box<ResearchMethodProfileArtifact>),
+}
+
+impl PolicyProfileDocument {
+    #[must_use]
+    pub const fn kind(&self) -> ProfileArtifactKind {
+        match self {
+            Self::Feature(_) => ProfileArtifactKind::Feature,
+            Self::Scoring(_) => ProfileArtifactKind::Scoring,
+            Self::Domain(_) => ProfileArtifactKind::Domain,
+            Self::ResearchMethod(_) => ProfileArtifactKind::ResearchMethod,
+        }
+    }
+
+    #[must_use]
+    pub const fn schema_version(&self) -> SchemaVersion {
+        match self {
+            Self::Feature(document) => document.schema_version,
+            Self::Scoring(document) => document.schema_version,
+            Self::Domain(document) => document.schema_version,
+            Self::ResearchMethod(document) => document.schema_version,
+        }
+    }
+
+    pub fn content_hash(&self) -> Result<ContentHash, PolicySnapshotError> {
+        match self {
+            Self::Feature(document) => CanonicalDigest::content_hash_json(document),
+            Self::Scoring(document) => CanonicalDigest::content_hash_json(document),
+            Self::Domain(document) => CanonicalDigest::content_hash_json(document),
+            Self::ResearchMethod(document) => CanonicalDigest::content_hash_json(document),
+        }
+        .map_err(PolicySnapshotError::ArtifactHash)
+    }
+}
+
+/// Exact content-addressed reference frozen into a decision-policy snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PolicyProfileArtifactReference {
+    pub profile_artifact_id: ProfileArtifactId,
+    pub kind: ProfileArtifactKind,
+    #[schemars(with = "String", extend("x-format" = "content-hash"))]
+    pub content_hash: ContentHash,
+}
+
+impl PolicyProfileArtifactReference {
+    pub fn from_document(document: &PolicyProfileDocument) -> Result<Self, PolicySnapshotError> {
+        let kind = document.kind();
+        let content_hash = document.content_hash()?;
+        Ok(Self {
+            profile_artifact_id: ProfileArtifactId::from_content_address(
+                kind.as_str(),
+                &content_hash,
+            ),
+            kind,
+            content_hash,
+        })
+    }
+}
+
+/// Four immutable policy-profile references persisted in every snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ImmutableProfileArtifactReferences {
+    pub features: PolicyProfileArtifactReference,
+    pub scoring: PolicyProfileArtifactReference,
+    pub domain: PolicyProfileArtifactReference,
+    pub research_method: PolicyProfileArtifactReference,
+}
+
+impl ImmutableProfileArtifactReferences {
+    #[must_use]
+    pub const fn all(&self) -> [&PolicyProfileArtifactReference; 4] {
+        [
+            &self.features,
+            &self.scoring,
+            &self.domain,
+            &self.research_method,
+        ]
+    }
+}
+
+impl ImmutableProfileArtifacts {
+    #[must_use]
+    pub fn documents(&self) -> [PolicyProfileDocument; 4] {
+        [
+            PolicyProfileDocument::Feature(self.features.clone()),
+            PolicyProfileDocument::Scoring(self.scoring.clone()),
+            PolicyProfileDocument::Domain(self.domain.clone()),
+            PolicyProfileDocument::ResearchMethod(Box::new(self.research_method.clone())),
+        ]
+    }
+
+    pub fn references(&self) -> Result<ImmutableProfileArtifactReferences, PolicySnapshotError> {
+        let [features, scoring, domain, research_method] = self.documents();
+        Ok(ImmutableProfileArtifactReferences {
+            features: PolicyProfileArtifactReference::from_document(&features)?,
+            scoring: PolicyProfileArtifactReference::from_document(&scoring)?,
+            domain: PolicyProfileArtifactReference::from_document(&domain)?,
+            research_method: PolicyProfileArtifactReference::from_document(&research_method)?,
+        })
+    }
+}
+
 /// Revision identities frozen at a decision boundary.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
@@ -506,7 +639,214 @@ pub struct DecisionPolicySnapshot {
     pub profile_artifacts: ImmutableProfileArtifacts,
 }
 
+/// Canonical database document. Profile definitions are never embedded here;
+/// only exact WORM artifact references participate in the snapshot hash.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, FromJsonQueryResult)]
+#[serde(deny_unknown_fields)]
+pub struct DecisionPolicySnapshotDocument {
+    pub revisions: PolicyRevisionBundle,
+    pub recommendation: RecommendationPolicy,
+    pub execution_risk: ExecutionRiskPolicy,
+    pub model_routing: ModelRouting,
+    pub report_schedule: ReportSchedule,
+    pub operational_control: OperationalControl,
+    pub execution_authorization: ExecutionAuthorization,
+    pub profile_artifact_refs: ImmutableProfileArtifactReferences,
+}
+
+impl DecisionPolicySnapshotDocument {
+    #[must_use]
+    pub const fn resource_revision_id(
+        &self,
+        kind: ConfigResourceKind,
+    ) -> Option<&PolicyRevisionId> {
+        match kind {
+            ConfigResourceKind::RecommendationPolicy => {
+                self.revisions.recommendation_policy.as_ref()
+            }
+            ConfigResourceKind::ExecutionRiskPolicy => {
+                self.revisions.execution_risk_policy.as_ref()
+            }
+            ConfigResourceKind::ModelRouting => self.revisions.model_routing.as_ref(),
+            ConfigResourceKind::ReportSchedule => self.revisions.report_schedule.as_ref(),
+            ConfigResourceKind::OperationalControl => self.revisions.operational_control.as_ref(),
+            ConfigResourceKind::ExecutionAuthorization => {
+                self.revisions.execution_authorization.as_ref()
+            }
+        }
+    }
+
+    #[must_use]
+    pub fn resource_document(&self, kind: ConfigResourceKind) -> PolicyDocument {
+        match kind {
+            ConfigResourceKind::RecommendationPolicy => {
+                PolicyDocument::RecommendationPolicy(self.recommendation.clone())
+            }
+            ConfigResourceKind::ExecutionRiskPolicy => {
+                PolicyDocument::ExecutionRiskPolicy(Box::new(self.execution_risk.clone()))
+            }
+            ConfigResourceKind::ModelRouting => {
+                PolicyDocument::ModelRouting(self.model_routing.clone())
+            }
+            ConfigResourceKind::ReportSchedule => {
+                PolicyDocument::ReportSchedule(self.report_schedule.clone())
+            }
+            ConfigResourceKind::OperationalControl => {
+                PolicyDocument::OperationalControl(self.operational_control.clone())
+            }
+            ConfigResourceKind::ExecutionAuthorization => {
+                PolicyDocument::ExecutionAuthorization(self.execution_authorization.clone())
+            }
+        }
+    }
+
+    pub fn resolve(
+        self,
+        documents: Vec<(ProfileArtifactId, PolicyProfileDocument)>,
+    ) -> Result<DecisionPolicySnapshot, PolicySnapshotError> {
+        let mut by_id = BTreeMap::new();
+        for (id, document) in documents {
+            if by_id.insert(id.clone(), document).is_some() {
+                return Err(PolicySnapshotError::DuplicateArtifact { id });
+            }
+        }
+        let resolve = |reference: &PolicyProfileArtifactReference| {
+            let document = by_id.get(&reference.profile_artifact_id).ok_or_else(|| {
+                PolicySnapshotError::MissingArtifact {
+                    id: reference.profile_artifact_id.clone(),
+                }
+            })?;
+            if document.kind() != reference.kind {
+                return Err(PolicySnapshotError::ArtifactKindMismatch {
+                    id: reference.profile_artifact_id.clone(),
+                    expected: reference.kind,
+                    actual: document.kind(),
+                });
+            }
+            let actual_hash = document.content_hash()?;
+            if actual_hash != reference.content_hash
+                || ProfileArtifactId::from_content_address(reference.kind.as_str(), &actual_hash)
+                    != reference.profile_artifact_id
+            {
+                return Err(PolicySnapshotError::ArtifactIdentityMismatch {
+                    id: reference.profile_artifact_id.clone(),
+                });
+            }
+            Ok(document.clone())
+        };
+        let features = match resolve(&self.profile_artifact_refs.features)? {
+            PolicyProfileDocument::Feature(document) => document,
+            document => {
+                return Err(PolicySnapshotError::ArtifactKindMismatch {
+                    id: self.profile_artifact_refs.features.profile_artifact_id,
+                    expected: ProfileArtifactKind::Feature,
+                    actual: document.kind(),
+                });
+            }
+        };
+        let scoring = match resolve(&self.profile_artifact_refs.scoring)? {
+            PolicyProfileDocument::Scoring(document) => document,
+            document => {
+                return Err(PolicySnapshotError::ArtifactKindMismatch {
+                    id: self.profile_artifact_refs.scoring.profile_artifact_id,
+                    expected: ProfileArtifactKind::Scoring,
+                    actual: document.kind(),
+                });
+            }
+        };
+        let domain = match resolve(&self.profile_artifact_refs.domain)? {
+            PolicyProfileDocument::Domain(document) => document,
+            document => {
+                return Err(PolicySnapshotError::ArtifactKindMismatch {
+                    id: self.profile_artifact_refs.domain.profile_artifact_id,
+                    expected: ProfileArtifactKind::Domain,
+                    actual: document.kind(),
+                });
+            }
+        };
+        let research_method = match resolve(&self.profile_artifact_refs.research_method)? {
+            PolicyProfileDocument::ResearchMethod(document) => *document,
+            document => {
+                return Err(PolicySnapshotError::ArtifactKindMismatch {
+                    id: self
+                        .profile_artifact_refs
+                        .research_method
+                        .profile_artifact_id,
+                    expected: ProfileArtifactKind::ResearchMethod,
+                    actual: document.kind(),
+                });
+            }
+        };
+        Ok(DecisionPolicySnapshot {
+            revisions: self.revisions,
+            recommendation: self.recommendation,
+            execution_risk: self.execution_risk,
+            model_routing: self.model_routing,
+            report_schedule: self.report_schedule,
+            operational_control: self.operational_control,
+            execution_authorization: self.execution_authorization,
+            profile_artifacts: ImmutableProfileArtifacts {
+                features,
+                scoring,
+                domain,
+                research_method,
+            },
+        })
+    }
+}
+
+/// Database-authoritative identity and contents of one committed policy bundle.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ActivePolicyBundle {
+    pub generation: PolicyBundleGeneration,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
+    #[schemars(with = "String", extend("x-format" = "content-hash"))]
+    pub snapshot_hash: ContentHash,
+    pub revision_vector: PolicyRevisionBundle,
+    pub snapshot: DecisionPolicySnapshot,
+}
+
+impl ActivePolicyBundle {
+    #[must_use]
+    pub fn from_parts(
+        generation: PolicyBundleGeneration,
+        decision_policy_snapshot_id: DecisionPolicySnapshotId,
+        snapshot_hash: ContentHash,
+        snapshot: DecisionPolicySnapshot,
+    ) -> Self {
+        let revision_vector = snapshot.revisions.clone();
+        Self {
+            generation,
+            decision_policy_snapshot_id,
+            snapshot_hash,
+            revision_vector,
+            snapshot,
+        }
+    }
+}
+
 impl DecisionPolicySnapshot {
+    pub fn persistence_document(
+        &self,
+    ) -> Result<DecisionPolicySnapshotDocument, PolicySnapshotError> {
+        Ok(DecisionPolicySnapshotDocument {
+            revisions: self.revisions.clone(),
+            recommendation: self.recommendation.clone(),
+            execution_risk: self.execution_risk.clone(),
+            model_routing: self.model_routing.clone(),
+            report_schedule: self.report_schedule.clone(),
+            operational_control: self.operational_control.clone(),
+            execution_authorization: self.execution_authorization.clone(),
+            profile_artifact_refs: self.profile_artifacts.references()?,
+        })
+    }
+
+    pub fn persistence_hash(&self) -> Result<ContentHash, PolicySnapshotError> {
+        CanonicalDigest::content_hash_json(&self.persistence_document()?)
+            .map_err(PolicySnapshotError::ArtifactHash)
+    }
+
     #[must_use]
     pub fn uses_current_resource_schemas(&self) -> bool {
         [
@@ -653,6 +993,18 @@ pub enum PolicySnapshotError {
     UnsupportedSchemaVersion,
     #[error("immutable profile artifact hashing failed: {0}")]
     ArtifactHash(CanonicalDigestError),
+    #[error("policy profile artifact {id} is missing")]
+    MissingArtifact { id: ProfileArtifactId },
+    #[error("policy profile artifact {id} was loaded more than once")]
+    DuplicateArtifact { id: ProfileArtifactId },
+    #[error("policy profile artifact {id} kind mismatch: expected {expected}, found {actual}")]
+    ArtifactKindMismatch {
+        id: ProfileArtifactId,
+        expected: ProfileArtifactKind,
+        actual: ProfileArtifactKind,
+    },
+    #[error("policy profile artifact {id} content address does not match its payload")]
+    ArtifactIdentityMismatch { id: ProfileArtifactId },
 }
 
 impl From<PolicySnapshotError> for ConfigError {
@@ -679,6 +1031,24 @@ impl From<PolicySnapshotError> for ConfigError {
             PolicySnapshotError::ArtifactHash(error) => ConfigValidationReport::single_error(
                 ConfigValidationError::invalid_value("profile_artifacts", error.to_string()),
             )
+            .into(),
+            PolicySnapshotError::MissingArtifact { id }
+            | PolicySnapshotError::DuplicateArtifact { id }
+            | PolicySnapshotError::ArtifactIdentityMismatch { id } => {
+                ConfigValidationReport::single_error(ConfigValidationError::invalid_value(
+                    "profile_artifacts",
+                    format!("profile artifact {id} failed persistence validation"),
+                ))
+                .into()
+            }
+            PolicySnapshotError::ArtifactKindMismatch {
+                id,
+                expected,
+                actual,
+            } => ConfigValidationReport::single_error(ConfigValidationError::invalid_value(
+                "profile_artifacts",
+                format!("profile artifact {id} kind mismatch: expected {expected}, found {actual}"),
+            ))
             .into(),
         }
     }

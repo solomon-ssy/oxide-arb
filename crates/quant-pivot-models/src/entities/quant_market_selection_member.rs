@@ -15,6 +15,7 @@ pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub market_id: MarketId,
     pub event_id: EventId,
+    #[sea_orm(column_type = r#"custom("qp_market_category")"#)]
     pub category: MarketCategory,
     pub status: MarketStatus,
     pub primary_token_id: TokenId,

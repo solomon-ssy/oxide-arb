@@ -298,15 +298,16 @@ mod tests {
     use chrono::Utc;
     use quant_pivot_models::{
         domain::ModelVersionInfo,
-        enums::quant::PublicationStatus,
+        enums::quant::{ModelVersionDerivationKind, PublicationStatus},
         runtime_config::FactorCrossSectionConfig,
         types::{
             CalibrationArtifactId, ContentHash, ModelInputContract, ModelSpecId, ModelVersionId,
-            builtin_research_profiles,
+            builtin_research_profiles, model_metrics::ModelVersionMetrics,
+            model_spec::ModelSpecThesis, model_training::ModelTrainingObjective,
         },
     };
     use rust_decimal_macros::dec;
-    use std::{env, fmt::Write, process, sync::Arc};
+    use std::{env, process, sync::Arc};
 
     use crate::{
         artifact::{ArtifactStore, LocalArtifactStore},
@@ -320,6 +321,7 @@ mod tests {
             calibrator::{CalibrationArtifactLoader, ResolvedCalibration},
             runtime::{ModelFamily, ModelRuntimeFactory},
         },
+        test_support::content_hash as hash,
     };
 
     use async_trait::async_trait;
@@ -345,17 +347,6 @@ mod tests {
         Arc::new(UnreachableCalibrationLoader)
     }
 
-    fn hash(seed: &str) -> ContentHash {
-        let hex = seed
-            .bytes()
-            .fold(String::with_capacity(seed.len() * 2), |mut acc, byte| {
-                let _ = write!(acc, "{byte:02x}");
-                acc
-            });
-        let padded = format!("{hex:0<64}");
-        ContentHash::parse(format!("blake3:{}", &padded[..64])).expect("hash")
-    }
-
     fn artifact(version: &ModelVersionId, feature_hash: ContentHash) -> ModelArtifact {
         let input_contract = ModelInputContract::single_required("book.mid");
         let input_contract_hash =
@@ -363,6 +354,7 @@ mod tests {
         ModelArtifact::WeightedFactor(Box::new(WeightedFactorModelArtifact {
             header: ModelArtifactHeader {
                 model_version_id: version.clone(),
+                model_spec_definition_hash: hash("spec"),
                 profile_ref: builtin_research_profiles()
                     .expect("built-in profiles")
                     .remove(0)
@@ -396,7 +388,14 @@ mod tests {
         ModelVersionInfo {
             model_version_id: id.clone(),
             model_spec_id: ModelSpecId::from_v7(),
+            model_spec_name: "factory-test-spec".to_owned(),
             model_family: ModelFamily::WeightedFactor,
+            model_spec_thesis: ModelSpecThesis {
+                summary: "Factory test spec".to_owned(),
+                hypothesis: "The fixture model loads deterministically".to_owned(),
+                limitations: vec!["Test-only artifact".to_owned()],
+            },
+            model_spec_definition_hash: hash("spec"),
             version: 1,
             artifact_hash,
             category_scope: None,
@@ -408,9 +407,15 @@ mod tests {
             trade_policy_artifact_id: None,
             trade_policy_hash: None,
             publish_path_set_id: None,
-            metrics_json: serde_json::json!({}),
-            training_objective_json: serde_json::json!({"kind": "not_trained"}),
-            quality_gate_report: serde_json::json!({}),
+            derivation_kind: ModelVersionDerivationKind::Training,
+            parent_model_version_id: None,
+            source_backtest_report_id: None,
+            calibration_artifact_id: None,
+            score_multiplier_calibration_report: None,
+            derivation_evidence_hash: None,
+            metrics: ModelVersionMetrics::not_measured("test fixture"),
+            training_objective: ModelTrainingObjective::hand_authored("test fixture"),
+            quality_gate_report: None,
             publication_status: PublicationStatus::Published,
             published_at: Some(Utc::now()),
             retired_at: None,

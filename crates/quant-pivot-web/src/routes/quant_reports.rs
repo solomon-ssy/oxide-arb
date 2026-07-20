@@ -42,7 +42,7 @@ use quant_pivot_models::{
         rbac::{Operation, ResourceType},
     },
     hashing::CanonicalDigest,
-    types::{RecommendationReportId, ReportRunId},
+    types::{ContentHash, RecommendationReportId, ReportRunId},
 };
 use serde::Serialize;
 
@@ -180,7 +180,7 @@ pub async fn current(
     query: web::Query<CurrentReportQuery>,
 ) -> Result<WebResponse<QuantReportDetailView>, WebError> {
     let query = query.into_inner();
-    if query.profile_id.trim().is_empty() || query.profile_id.len() > 128 {
+    if query.profile_id.as_str().trim().is_empty() || query.profile_id.as_str().len() > 128 {
         return Err(WebError::BadRequest(
             "profile_id must contain 1..=128 characters".to_owned(),
         ));
@@ -281,7 +281,7 @@ pub async fn retry_run(
         "request_id": request_id.0,
         "retry_request_id": request.request_id,
         "reason": request.reason,
-    }));
+    }))?;
     let view = ReportRunView::from(outcome.run().clone());
     Ok(if outcome.created() {
         WebResponse::accepted(view)
@@ -398,7 +398,7 @@ pub async fn retry_publication(
         "request_id": request_id.0,
         "retry_request_id": request.request_id,
         "reason": request.reason,
-    }));
+    }))?;
     Ok(WebResponse::accepted(delivery.into()))
 }
 
@@ -461,7 +461,7 @@ pub async fn run(
         "acting_role": acting_role.0,
         "correlation_request_id": request_id.0,
         "reason": reason,
-    }));
+    }))?;
     let created = outcome.created();
     let view = ReportRunView::from(outcome.run().clone());
     Ok(if created {
@@ -504,12 +504,11 @@ pub async fn revoke(
         "acting_role": acting_role.0,
         "request_id": request_id.0,
         "reason": request.reason,
-    }));
+    }))?;
     Ok(WebResponse::ok(QuantReportDetailView::from(report)))
 }
 
-fn canonical_state_hash<T: Serialize>(state: &T) -> Result<String, WebError> {
+fn canonical_state_hash<T: Serialize>(state: &T) -> Result<ContentHash, WebError> {
     CanonicalDigest::content_hash_json(state)
-        .map(|hash| hash.as_str().to_owned())
         .map_err(|error| WebError::Internal(format!("canonical state hash failed: {error}")))
 }

@@ -25,6 +25,23 @@ pub struct PostgresPool {
     config: PostgresConfig,
 }
 
+#[derive(Clone, Copy)]
+enum TimeoutGuc {
+    Statement,
+    Lock,
+    IdleInTransactionSession,
+}
+
+impl TimeoutGuc {
+    const fn as_sql_identifier(self) -> &'static str {
+        match self {
+            Self::Statement => "statement_timeout",
+            Self::Lock => "lock_timeout",
+            Self::IdleInTransactionSession => "idle_in_transaction_session_timeout",
+        }
+    }
+}
+
 /// Dedicated `PostgreSQL` LISTEN connection with a storage-layer error facade.
 pub struct PostgresNotificationListener {
     inner: PgListener,
@@ -175,7 +192,7 @@ impl PostgresPool {
         let mut mismatches: Vec<String> = Vec::new();
 
         if self.config.statement_timeout_ms > 0 {
-            let actual = self.show_guc("statement_timeout").await?;
+            let actual = self.show_guc(TimeoutGuc::Statement).await?;
             let expected_ms = self.config.statement_timeout_ms;
             if !duration_matches_ms(&actual, expected_ms) {
                 mismatches.push(format!(
@@ -185,7 +202,7 @@ impl PostgresPool {
         }
 
         if self.config.lock_timeout_ms > 0 {
-            let actual = self.show_guc("lock_timeout").await?;
+            let actual = self.show_guc(TimeoutGuc::Lock).await?;
             let expected_ms = self.config.lock_timeout_ms;
             if !duration_matches_ms(&actual, expected_ms) {
                 mismatches.push(format!(
@@ -195,7 +212,7 @@ impl PostgresPool {
         }
 
         if self.config.idle_in_transaction_timeout_ms > 0 {
-            let actual = self.show_guc("idle_in_transaction_session_timeout").await?;
+            let actual = self.show_guc(TimeoutGuc::IdleInTransactionSession).await?;
             let expected_ms = self.config.idle_in_transaction_timeout_ms;
             if !duration_matches_ms(&actual, expected_ms) {
                 mismatches.push(format!(
@@ -221,7 +238,8 @@ impl PostgresPool {
     }
 
     /// Execute `SHOW <param>` and return the result as a string.
-    async fn show_guc(&self, param: &str) -> Result<String, StorageError> {
+    async fn show_guc(&self, guc: TimeoutGuc) -> Result<String, StorageError> {
+        let param = guc.as_sql_identifier();
         let sql = format!("SHOW {param}");
         let result = self
             .db

@@ -21,6 +21,7 @@ pub struct Model {
     pub token_id: TokenId,
     pub market_id: MarketId,
     pub event_id: Option<EventId>,
+    #[sea_orm(column_type = r#"custom("qp_market_category")"#)]
     pub category: MarketCategory,
     pub side: OutcomeSide,
     pub state: PositionLedgerState,

@@ -14,10 +14,12 @@ use quant_pivot_models::{
     hashing::CanonicalDigest,
     runtime_config::EntryConditionWorkerConfig,
     types::{
-        ConditionUnavailableReason, ContentHash, CryptoSubjectPredicateEntered,
-        EntryConditionArtifactV1, EntryConditionBinding, EntryConditionSourceBinding,
-        EntryConditionV1, FactorCondition, MarketEventCondition, MarketId, ModelVersionId, TokenId,
-        Usd, WeatherTemperatureStatistic,
+        ConditionUnavailableReason, ContentHash, CryptoPriceInput, CryptoPriceReportInput,
+        CryptoSubjectPredicateEntered, EntryConditionArtifactV1, EntryConditionBinding,
+        EntryConditionInputSet, EntryConditionSourceBinding, EntryConditionV1,
+        ExecutablePriceInput, FactorCondition, FactorSnapshotInput, MarketEventCondition, MarketId,
+        ModelVersionId, TokenId, Usd, WeatherDailyTemperatureInput, WeatherTemperatureStatistic,
+        WorkerId,
     },
 };
 use quant_pivot_repository::traits::{
@@ -26,12 +28,10 @@ use quant_pivot_repository::traits::{
 };
 use quant_pivot_storage::postgres::PostgresNotificationListener;
 use tokio_util::sync::CancellationToken;
-use uuid::Uuid;
 
 use super::{
-    CryptoPriceInput, CryptoPriceReportInput, EntryConditionEvaluation, EntryConditionInputSet,
-    EntryConditionStateDecision, ExecutablePriceInput, FactorSnapshotInput,
-    WeatherDailyTemperatureInput, decide_entry_condition_state, evaluate_entry_condition,
+    EntryConditionEvaluation, EntryConditionStateDecision, decide_entry_condition_state,
+    evaluate_entry_condition,
 };
 use crate::{ingest::book_store::BookStore, runtime_config::DecisionPolicyStore};
 
@@ -569,7 +569,7 @@ fn push_unique<T: PartialEq>(values: &mut Vec<T>, value: T) {
 /// Multi-replica-safe durable worker. Postgres lease/CAS is authoritative; all
 /// process-local wakes are latency hints only.
 pub struct EntryConditionWorker {
-    worker_id: Uuid,
+    worker_id: WorkerId,
     conditions: Arc<dyn EntryConditionRepository>,
     inputs: Arc<dyn EntryConditionInputProvider>,
     books: Arc<BookStore>,
@@ -587,7 +587,7 @@ impl EntryConditionWorker {
         events: CoreEventPublisher,
     ) -> Self {
         Self {
-            worker_id: Uuid::now_v7(),
+            worker_id: WorkerId::from_v7(),
             conditions,
             inputs,
             books,
@@ -668,7 +668,11 @@ impl EntryConditionWorker {
             let evaluated_at = Utc::now();
             let leased = self
                 .conditions
-                .lease_next(self.worker_id, evaluated_at, evaluated_at + lease_duration)
+                .lease_next(
+                    self.worker_id.clone(),
+                    evaluated_at,
+                    evaluated_at + lease_duration,
+                )
                 .await?;
             let Some(instance) = leased else {
                 break;
@@ -807,7 +811,7 @@ impl EntryConditionWorker {
             .conditions
             .apply_evaluation(
                 &instance.condition_instance_id,
-                self.worker_id,
+                self.worker_id.clone(),
                 ApplyEntryConditionEvaluation {
                     expected_revision: instance.revision,
                     expected_lease_epoch: instance.lease_epoch,
@@ -837,7 +841,7 @@ impl EntryConditionWorker {
     ) -> QuantResult<tokio::task::JoinHandle<()>> {
         let conditions = Arc::clone(&self.conditions);
         let instance_id = instance.condition_instance_id.clone();
-        let worker_id = self.worker_id;
+        let worker_id = self.worker_id.clone();
         let lease_epoch = instance.lease_epoch;
         let renew_interval = StdDuration::from_secs(policy.lease_renew_interval_secs);
         let lease_duration = chrono_duration_secs(policy.lease_duration_secs, "lease duration")?;
@@ -850,7 +854,12 @@ impl EntryConditionWorker {
                 }
                 let now = Utc::now();
                 match conditions
-                    .renew_lease(&instance_id, worker_id, lease_epoch, now + lease_duration)
+                    .renew_lease(
+                        &instance_id,
+                        worker_id.clone(),
+                        lease_epoch,
+                        now + lease_duration,
+                    )
                     .await
                 {
                     Ok(true) => {}
@@ -873,7 +882,7 @@ impl EntryConditionWorker {
         self.conditions
             .invalidate(
                 &instance.condition_instance_id,
-                self.worker_id,
+                self.worker_id.clone(),
                 instance.revision,
                 instance.lease_epoch,
                 detail.into(),

@@ -25,7 +25,7 @@ use quant_pivot_models::{
     runtime_config::{DecisionPolicySnapshot, ScheduleCadence, preview_fire_times},
     types::{
         ContentHash, DecisionPolicySnapshotId, FeatureParityRunId, FeatureParityStateId,
-        RecommendationReportId, ResearchJobId,
+        RecommendationReportId, ReportScheduleId, ResearchJobId, ResearchJobParams,
     },
 };
 use quant_pivot_repository::traits::{
@@ -148,7 +148,7 @@ impl FeatureParityRunCoordinator {
             None,
             SYSTEM_ACTING_ROLE.to_owned(),
             materialization_timeout_secs,
-        )?;
+        );
         Ok(NewReportFeatureParity { run, job })
     }
 
@@ -221,7 +221,7 @@ impl FeatureParityRunCoordinator {
             ctx.actor,
             ctx.acting_role,
             materialization_timeout_secs,
-        )?;
+        );
         let outcome = self
             .parity
             .enqueue_frozen_full(run, job)
@@ -300,7 +300,7 @@ impl FeatureParityRunCoordinator {
             None,
             SYSTEM_ACTING_ROLE.to_owned(),
             materialization_timeout_secs,
-        )?;
+        );
         let job_id = job.job_id.clone();
         match self.parity.enqueue_frozen_full(run, job).await {
             Ok(EnqueueFrozenFeatureParityOutcome::NotEligible) => {
@@ -364,18 +364,13 @@ impl FeatureParityRunCoordinator {
         requested_by: Option<String>,
         acting_role: String,
         materialization_timeout_secs: u64,
-    ) -> QuantResult<NewResearchJob> {
-        let params = serde_json::to_value(FeatureParityJobParams {
+    ) -> NewResearchJob {
+        let params = ResearchJobParams::FeatureParity(FeatureParityJobParams {
             parity_run_id,
             materialization_timeout_secs,
             request,
-        })
-        .map_err(|error| {
-            QuantError::from(ResearchError::Serialization {
-                detail: format!("feature parity job params serialization failed: {error}"),
-            })
-        })?;
-        Ok(NewResearchJob {
+        });
+        NewResearchJob {
             job_id: ResearchJobId::from_v7(),
             kind: ResearchJobKind::FeatureParity,
             status: ResearchJobStatus::Queued,
@@ -387,7 +382,7 @@ impl FeatureParityRunCoordinator {
             parent_job_id: None,
             recovery_attempt: 0,
             max_recovery_attempts: self.max_recovery_attempts,
-        })
+        }
     }
 }
 
@@ -773,7 +768,7 @@ fn contract_and_report_timeout(
     let timeout = report_materialization_timeout(
         config,
         report_run.trigger_kind,
-        report_run.schedule_id.as_deref(),
+        report_run.schedule_id.as_ref(),
         report_run.scheduled_for.unwrap_or(report.decision_at),
         &report.recommendation_report_id,
     )?;
@@ -783,7 +778,7 @@ fn contract_and_report_timeout(
 fn report_materialization_timeout(
     config: &DecisionPolicySnapshot,
     trigger_kind: ReportTriggerKind,
-    schedule_id: Option<&str>,
+    schedule_id: Option<&ReportScheduleId>,
     trigger_time: DateTime<Utc>,
     report_id: &RecommendationReportId,
 ) -> QuantResult<u64> {
@@ -795,7 +790,7 @@ fn report_materialization_timeout(
             })?;
             let schedule = config.report_schedule.schedules
                 .iter()
-                .find(|schedule| schedule.schedule_id == schedule_id)
+                .find(|schedule| schedule.schedule_id == *schedule_id)
                 .ok_or_else(|| {
                     QuantError::from(ResearchError::Determinism {
                         detail: format!(
@@ -926,23 +921,29 @@ mod tests {
 
     use quant_pivot_models::{
         domain::{
-            CompleteFeatureParityRun, DecisionPolicySnapshotInfo, FeatureParityRunInfo,
-            FeatureParityStateInfo, FrozenFeatureParitySubject, NewDecisionPolicySnapshot,
-            NewFrozenModelParitySubject, NewPolicyActivation, NewPolicyRevision,
-            NewProductionBaseline, PolicyActivationInfo, PolicyApprovalInfo, PolicyRevisionInfo,
-            ProductionBaselineInfo, RecordPolicyApproval, ResearchJobInfo,
+            CompleteFeatureParityRun, ConfigActivityInfo, ConfigResourceInventoryInfo,
+            DecisionPolicySnapshotInfo, DecisionPolicySnapshotOptionInfo, FeatureParityRunInfo,
+            FeatureParityStateInfo, FrozenFeatureParitySubject, LifecycleSchemaVerificationPort,
+            NewDecisionPolicySnapshot, NewFrozenModelParitySubject, NewPolicyActivation,
+            NewPolicyRevision, NewProductionBaseline, NewProductionEvidence,
+            PolicyActivationCommit, PolicyActivationInfo, PolicyApprovalInfo, PolicyRevisionInfo,
+            ProductionBaselineInfo, ProductionEvidenceArtifactVerificationPort,
+            ProductionEvidenceInfo, RecordPolicyApproval, ResearchJobInfo,
         },
         enums::{
             quant::{
                 EmptyReportReason, FeatureParityStateTransition, RecommendationReportStatus,
                 ReportKind, ReportRunStatus,
             },
-            runtime_config::{ConfigResourceKind, DecisionPolicySnapshotSource, PolicyActorKind},
+            runtime_config::{
+                ConfigResourceKind, DecisionPolicySnapshotSource, PolicyActorKind,
+                ProductionEvidenceKind,
+            },
         },
         runtime_config::PolicyValidationEvidence,
         types::{
-            ModelVersionId, PolicyApprovalId, PolicyRevisionId, RecommendationReportId,
-            ReportRunId, TrainingDatasetId,
+            ModelVersionId, PolicyApprovalId, PolicyBundleGeneration, PolicyRevisionId,
+            RecommendationReportId, ReportRunId, TrainingDatasetId,
         },
     };
     use quant_pivot_repository::traits::FeatureParityLatchActor;
@@ -1221,6 +1222,19 @@ mod tests {
             Err(unexpected("list_all_revisions"))
         }
 
+        async fn list_activity(
+            &self,
+            _limit: u64,
+        ) -> Result<Vec<ConfigActivityInfo>, StorageError> {
+            Err(unexpected("list_activity"))
+        }
+
+        async fn load_resource_inventory(
+            &self,
+        ) -> Result<ConfigResourceInventoryInfo, StorageError> {
+            Err(unexpected("load_resource_inventory"))
+        }
+
         async fn record_approval(
             &self,
             _approval: RecordPolicyApproval,
@@ -1247,7 +1261,7 @@ mod tests {
             &self,
             _activation: NewPolicyActivation,
             _snapshot: NewDecisionPolicySnapshot,
-        ) -> Result<PolicyActivationInfo, StorageError> {
+        ) -> Result<PolicyActivationCommit, StorageError> {
             Err(unexpected("activate_resource"))
         }
 
@@ -1273,13 +1287,6 @@ mod tests {
                 .then(|| self.current.clone()))
         }
 
-        async fn load_by_hash(
-            &self,
-            _config_hash: &ContentHash,
-        ) -> Result<Option<DecisionPolicySnapshotInfo>, StorageError> {
-            Err(unexpected("load_by_hash"))
-        }
-
         async fn load_current(&self) -> Result<Option<DecisionPolicySnapshotInfo>, StorageError> {
             Ok(Some(self.current.clone()))
         }
@@ -1298,6 +1305,13 @@ mod tests {
             Err(unexpected("list_snapshots"))
         }
 
+        async fn list_snapshot_options(
+            &self,
+            _limit: u64,
+        ) -> Result<Vec<DecisionPolicySnapshotOptionInfo>, StorageError> {
+            Err(unexpected("list_snapshot_options"))
+        }
+
         async fn list_activations(
             &self,
             _kind: Option<ConfigResourceKind>,
@@ -1312,9 +1326,27 @@ mod tests {
             Err(unexpected("load_production_baseline"))
         }
 
+        async fn record_production_evidence(
+            &self,
+            _evidence: NewProductionEvidence,
+            _schema_verification: &dyn LifecycleSchemaVerificationPort,
+            _artifact_verification: &dyn ProductionEvidenceArtifactVerificationPort,
+        ) -> Result<ProductionEvidenceInfo, StorageError> {
+            Err(unexpected("record_production_evidence"))
+        }
+
+        async fn load_latest_production_evidence(
+            &self,
+            _kind: ProductionEvidenceKind,
+        ) -> Result<Option<ProductionEvidenceInfo>, StorageError> {
+            Err(unexpected("load_latest_production_evidence"))
+        }
+
         async fn seal_production_baseline(
             &self,
             _baseline: NewProductionBaseline,
+            _schema_verification: &dyn LifecycleSchemaVerificationPort,
+            _artifact_verification: &dyn ProductionEvidenceArtifactVerificationPort,
         ) -> Result<ProductionBaselineInfo, StorageError> {
             Err(unexpected("seal_production_baseline"))
         }
@@ -1324,6 +1356,7 @@ mod tests {
         let config = DecisionPolicySnapshot::default();
         FixedRuntimeConfigRepository {
             current: DecisionPolicySnapshotInfo {
+                bundle_generation: PolicyBundleGeneration::FIRST,
                 decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
                 snapshot_hash: hash(),
                 snapshot: config,
@@ -1366,8 +1399,7 @@ mod tests {
     fn new_report(info: RecommendationReportInfo) -> NewRecommendationReport {
         NewRecommendationReport {
             recommendation_report_id: info.recommendation_report_id,
-            profile_id: info.profile_id,
-            profile_ref: info.profile_ref,
+            research_profile_artifact_id: info.profile_ref.artifact_id(),
             report_kind: info.report_kind,
             decision_at: info.decision_at,
             horizon_secs: info.horizon_secs,
@@ -1406,9 +1438,8 @@ mod tests {
             report_run_id: ReportRunId::from_v7(),
             trigger_kind,
             trigger_key: format!("test:{}", report.recommendation_report_id),
-            schedule_id: schedule_id.map(str::to_owned),
-            request_id: (trigger_kind == ReportTriggerKind::AdHoc)
-                .then(|| "test-request".to_owned()),
+            schedule_id: schedule_id.map(Into::into),
+            request_id: (trigger_kind == ReportTriggerKind::AdHoc).then(|| "test-request".into()),
             retry_of_run_id: None,
             scheduled_for,
             requested_at: report.decision_at,
@@ -1503,8 +1534,9 @@ mod tests {
             .with_timezone(&Utc);
         assert_eq!(run.window_end, expected_end);
         assert_eq!(run.window_start, expected_end - Duration::hours(24));
-        let params: FeatureParityJobParams =
-            serde_json::from_value(job.params_json).expect("job params");
+        let ResearchJobParams::FeatureParity(params) = job.params_json else {
+            panic!("feature parity job params");
+        };
         assert_eq!(params.request.window_start, Some(run.window_start));
         assert_eq!(params.request.window_end, Some(run.window_end));
         assert!(params.materialization_timeout_secs >= MIN_MATERIALIZATION_TIMEOUT_SECS);
@@ -1550,19 +1582,20 @@ mod tests {
         let report_id = RecommendationReportId::from_v7();
         let mut config = DecisionPolicySnapshot::default();
         let mut exact = config.report_schedule.schedules[0].clone();
-        exact.schedule_id = "desk:fast".to_owned();
+        exact.schedule_id = "desk:fast".into();
         exact.cadence = ScheduleCadence::Interval { interval_secs: 900 };
         let mut unrelated = exact.clone();
-        unrelated.schedule_id = "unrelated_daily".to_owned();
+        unrelated.schedule_id = "unrelated_daily".into();
         unrelated.cadence = ScheduleCadence::Interval {
             interval_secs: 86_400,
         };
         config.report_schedule.schedules = vec![exact, unrelated];
 
+        let exact_schedule_id = ReportScheduleId::new("desk:fast");
         let scheduled = report_materialization_timeout(
             &config,
             ReportTriggerKind::Scheduled,
-            Some("desk:fast"),
+            Some(&exact_schedule_id),
             trigger_time,
             &report_id,
         )
@@ -1596,10 +1629,11 @@ mod tests {
         .expect_err("missing schedule id must fail closed");
         assert!(missing.to_string().contains("has no schedule id"));
 
+        let unknown_schedule_id = ReportScheduleId::new("unknown");
         let unknown = report_materialization_timeout(
             &config,
             ReportTriggerKind::Scheduled,
-            Some("unknown"),
+            Some(&unknown_schedule_id),
             trigger_time,
             &report_id,
         )

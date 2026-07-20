@@ -176,7 +176,7 @@ impl DefaultReportBuilder {
 #[async_trait::async_trait]
 impl ReportBuilder for DefaultReportBuilder {
     async fn build(&self, request: BuildReportRequest) -> QuantResult<ComposedReport> {
-        self.build_report(request).await
+        Box::pin(self.build_report(request)).await
     }
 }
 

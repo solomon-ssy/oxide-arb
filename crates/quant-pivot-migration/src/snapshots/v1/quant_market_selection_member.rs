@@ -13,6 +13,7 @@ pub struct Model {
     pub market_id: String,
     #[sea_orm(column_type = "Text")]
     pub event_id: String,
+    #[sea_orm(column_type = r#"custom("qp_market_category")"#)]
     pub category: QpMarketCategory,
     pub status: QpMarketStatus,
     #[sea_orm(column_type = "Text")]

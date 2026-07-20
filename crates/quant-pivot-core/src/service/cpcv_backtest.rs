@@ -38,6 +38,9 @@ use quant_pivot_models::{
         BacktestPathSetId, BacktestReportId, Bps, ContentHash, DecisionPolicySnapshotId,
         ModelInputContract, ModelRunId, ModelVersionId, PositionId, TrainingDatasetId,
         TrainingSampleSource,
+        backtest::{BacktestPath, SharpeDistribution},
+        model_training::TrainingObjectiveSpec,
+        stable_name::{FactorName, FeatureName},
     },
 };
 use quant_pivot_repository::traits::TrainingDatasetRepository;
@@ -49,27 +52,26 @@ use quant_pivot_research::{
         PortfolioCaps, PortfolioReplayBacktester, SellNullBaseline, active_observation_count,
         calendarize_lot_returns, mean_calendar_return, replay_lot_null_baseline, sharpe_ratio,
     },
-    factors::{FactorName, names as factor_names},
-    features::{FeatureName, FeatureSchema},
+    factors::names as factor_names,
+    features::FeatureSchema,
     hashing::ResearchHasher,
     model::{
         FactorWeight, LabelSelector, ModelArtifact, ModelArtifactHeader, ModelFamily,
         ModelRuntimeInput, ModelRuntimeOutput, ModelTrainer, QuantModelRuntime, ReturnModelSpec,
         ScoreMultiplierSpec, SellScorerOutputSpec, SellScorerRuntime, SellScorerTrainer,
         SellSignalPolicy, SubstitutionConfidenceRules, TrainModelRequest, TrainSellScorerRequest,
-        TrainingObjectiveSpec, ValidationSpec, WeightedFactorRuntime, WeightedFactorTrainer,
-        WeightedSellScorerRuntime,
+        ValidationSpec, WeightedFactorRuntime, WeightedFactorTrainer, WeightedSellScorerRuntime,
     },
     precision::RESEARCH_DECIMAL_SCALE,
     selection::ModelFeatureRequirements,
     stats,
     training::{TrainingExample, TrainingLabel},
     validation::{
-        BacktestPath, BacktestPathSet, CombinatorialPurgedBacktester, CpcvConfig, CpcvRequest,
+        BacktestPathSet, CombinatorialPurgedBacktester, CpcvConfig, CpcvRequest,
         DefaultCombinatorialPurgedBacktester, DsrInput, DsrReport, FoldModelSource, FoldRuntime,
         GroupEvaluation, GroupRowFilter, PboInput, PurgeConfig, RankObservation, ReplayEngine,
-        SharpeDistribution, TimelineGroup, Trial, TrialGridSpec, TrialPerformanceMatrix,
-        deflated_sharpe_ratio, min_track_record_length, probability_of_backtest_overfitting,
+        TimelineGroup, Trial, TrialGridSpec, TrialPerformanceMatrix, deflated_sharpe_ratio,
+        min_track_record_length, probability_of_backtest_overfitting,
     },
 };
 use rust_decimal::{Decimal, prelude::ToPrimitive};
@@ -350,6 +352,14 @@ impl CpcvBacktestService {
         }
         let header_template = ModelArtifactHeader {
             model_version_id: ModelVersionId::from_v7(),
+            model_spec_definition_hash: dataset
+                .manifest_json
+                .as_ref()
+                .ok_or_else(|| ResearchError::ValidationMethodology {
+                    detail: "v5 CPCV dataset is missing its manifest".to_owned(),
+                })?
+                .model_spec_definition_hash
+                .clone(),
             profile_ref: dataset
                 .manifest_json
                 .as_ref()
@@ -384,7 +394,7 @@ impl CpcvBacktestService {
             .manifest_json
             .as_ref()
             .ok_or_else(|| ResearchError::DatasetBuild {
-                detail: "CPCV dataset has no immutable v5 manifest".to_owned(),
+                detail: "CPCV dataset has no immutable v1 manifest".to_owned(),
             })?
             .source_slice
             .clone();
@@ -621,6 +631,14 @@ impl CpcvBacktestService {
         let seed_weights = sell_seed_weights(&examples)?;
         let header_template = ModelArtifactHeader {
             model_version_id: ModelVersionId::from_v7(),
+            model_spec_definition_hash: dataset
+                .manifest_json
+                .as_ref()
+                .ok_or_else(|| ResearchError::ValidationMethodology {
+                    detail: "v5 sell CPCV dataset is missing its manifest".to_owned(),
+                })?
+                .model_spec_definition_hash
+                .clone(),
             profile_ref: dataset
                 .manifest_json
                 .as_ref()
@@ -2057,19 +2075,22 @@ mod tests {
             BacktestPathSetId, ContentHash, EventId, FactorDefinitionId, MarketId,
             ModelInputContract, ModelVersionId, OrderIntentId, PositionId, Price, Probability,
             SchemaVersion, Shares, TokenId, TrainingExampleId, TrainingSampleSource,
+            backtest::{BacktestPath, SharpeDistribution},
+            factor::FactorExplanation,
+            model_quality::{GateId, GateIntent, GateStatus, GateSubject},
+            model_training::TrainingObjectiveSpec,
         },
     };
     use quant_pivot_research::{
-        factors::{FactorExplanation, FactorValue, NormalizedFactor, names},
+        factors::{FactorValue, NormalizedFactor, names},
         features::FeatureVector,
         gates::{
-            CpcvPathSetGateInput, DefaultModelQualityGate, GateId, GateIntent, GateStatus,
-            GateSubject, ModelQualityGate, QualityGateInput, QualityGateThresholds,
-            SellQualityGateThresholds, ValidationGateThresholds,
+            CpcvPathSetGateInput, DefaultModelQualityGate, ModelQualityGate, QualityGateInput,
+            QualityGateThresholds, SellQualityGateThresholds, ValidationGateThresholds,
         },
         model::{
             LabelSelector, ModelArtifactHeader, ModelFamily, PositionStateFeatures,
-            SellSignalPolicy, TrainingObjectiveSpec,
+            SellSignalPolicy,
         },
         selection::SelectedMarket,
         training::{
@@ -2077,8 +2098,8 @@ mod tests {
             LotTrainingContext, TrainingExample, TrainingLabel,
         },
         validation::{
-            BacktestPath, BacktestPathSet, CombinatorialPurgedBacktester, CpcvConfig, CpcvRequest,
-            DefaultCombinatorialPurgedBacktester, PurgeConfig, SharpeDistribution,
+            BacktestPathSet, CombinatorialPurgedBacktester, CpcvConfig, CpcvRequest,
+            DefaultCombinatorialPurgedBacktester, PurgeConfig,
         },
     };
     use quant_pivot_test_support::execution_pg_seed::fixture_profile_ref;
@@ -2457,6 +2478,7 @@ mod tests {
             seed_weights,
             header_template: ModelArtifactHeader {
                 model_version_id: ModelVersionId::from_v7(),
+                model_spec_definition_hash: content_hash_seed(0),
                 profile_ref: fixture_profile_ref(),
                 model_family: ModelFamily::HoldVsExitWeighted,
                 feature_schema_hash: content_hash_seed(1),

@@ -106,11 +106,11 @@ async fn first_deployment_creates_missing_database_and_schema() {
     assert!(missing.to_string().contains("does not exist"));
 
     assert_eq!(
-        apply_offline_schema_migrations(&config)
+        apply_online_schema_migrations(&config)
             .await
             .expect("first schema migration")
             .current_version,
-        5
+        1
     );
     let pool = ClickHousePool::connect(&config).await.expect("connect");
     pool.verify_schema().await.expect("verify schema");
@@ -151,7 +151,7 @@ async fn deployment_and_runtime_fail_closed_while_schema_lock_is_held() {
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn offline_report_lifecycle_migration_rejects_non_empty_legacy_facts() {
+async fn clean_boot_rejects_nonempty_unmanaged_database() {
     let container = testcontainers::GenericImage::new("clickhouse/clickhouse-server", "26.5")
         .with_exposed_port(8123.into())
         .with_wait_for(WaitFor::http(
@@ -167,45 +167,48 @@ async fn offline_report_lifecycle_migration_rejects_non_empty_legacy_facts() {
     let port = container.get_host_port_ipv4(8123).await.expect("port");
     let config = test_ch_config(port);
 
-    let online_error = apply_online_schema_migrations(&config)
-        .await
-        .expect_err("destructive report lifecycle migration requires offline rollout");
-    assert!(online_error.to_string().contains("explicit offline"));
-
     let client = ClickHousePool::from_config(&config).client().clone();
     client
         .query(
-            "INSERT INTO quant_recommendation_event VALUES \
-             (now64(3), 'legacy-report', 'legacy-recommendation', 1, 'market', 'token', \
-              'yes', 0.7, 0.6, true, 10, now64(3) + INTERVAL 1 HOUR, 'published')",
+            "CREATE TABLE legacy_quant_recommendation_event \
+             (event_time DateTime64(3), payload String) \
+             ENGINE = MergeTree ORDER BY event_time",
         )
         .execute()
         .await
-        .expect("insert legacy recommendation fact");
-
-    let offline_error = apply_offline_schema_migrations(&config)
+        .expect("create unmanaged legacy object");
+    client
+        .query(
+            "INSERT INTO legacy_quant_recommendation_event VALUES \
+             (now64(3), 'must-not-be-adopted-or-deleted')",
+        )
+        .execute()
         .await
-        .expect_err("non-empty legacy table must block destructive migration");
+        .expect("insert unmanaged legacy fact");
+
+    let boot_error = apply_offline_schema_migrations(&config)
+        .await
+        .expect_err("nonempty unmanaged database must block clean boot");
     assert!(
-        offline_error
+        boot_error
             .to_string()
-            .contains("requires empty table `quant_recommendation_event`")
+            .contains("contains unmanaged pre-baseline objects")
     );
     let legacy_count: u64 = client
-        .query("SELECT count() FROM quant_recommendation_event")
+        .query("SELECT count() FROM legacy_quant_recommendation_event")
         .fetch_one()
         .await
         .expect("legacy rows remain intact");
-    let new_table_count: u64 = client
+    let migration_ledger_count: u64 = client
         .query(
             "SELECT count() FROM system.tables \
-             WHERE database = currentDatabase() AND name = 'quant_report_recommendation_fact'",
+             WHERE database = currentDatabase() AND name = 'quant_pivot_schema_migration'",
         )
         .fetch_one()
         .await
-        .expect("new table absence probe");
+        .expect("migration-ledger absence probe");
     assert_eq!(legacy_count, 1);
-    assert_eq!(new_table_count, 0);
+    assert_eq!(migration_ledger_count, 0);
 }
 
 #[tokio::test]

@@ -8,9 +8,8 @@ use quant_pivot_models::{
         ReportScheduleGapListQuery, ReportScheduleHealthInfo, ReportScheduleStateInfo,
     },
     enums::quant::ReportRunTerminalReason,
-    types::{DecisionPolicySnapshotId, RecommendationReportId, ReportRunId},
+    types::{DecisionPolicySnapshotId, RecommendationReportId, ReportRunId, WorkerId},
 };
-use uuid::Uuid;
 
 /// Durable report build queue and lease ledger.
 #[async_trait::async_trait]
@@ -72,7 +71,7 @@ pub trait ReportRunRepository: Send + Sync {
     /// Claim the oldest queued run while freezing decision time and config.
     async fn claim_next_run(
         &self,
-        worker_id: Uuid,
+        worker_id: WorkerId,
         lease_secs: u64,
         ad_hoc_ttl_secs: u64,
         config: ReportRunClaimConfig,
@@ -82,7 +81,7 @@ pub trait ReportRunRepository: Send + Sync {
     async fn heartbeat_run(
         &self,
         run_id: &ReportRunId,
-        worker_id: Uuid,
+        worker_id: WorkerId,
         lease_secs: u64,
     ) -> Result<ReportRunInfo, StorageError>;
 
@@ -90,7 +89,7 @@ pub trait ReportRunRepository: Send + Sync {
     async fn fail_run(
         &self,
         run_id: &ReportRunId,
-        worker_id: Uuid,
+        worker_id: WorkerId,
         error_code: &str,
         error_summary: &str,
     ) -> Result<ReportRunInfo, StorageError>;

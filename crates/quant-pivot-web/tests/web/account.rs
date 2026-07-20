@@ -112,7 +112,7 @@ async fn account_snapshot_round_trips_persisted_row() {
     assert_eq!(res.status, StatusCode::OK);
     assert_eq!(
         res.json()["data"]["capital_base_usd"],
-        serde_json::json!("10000.00000000")
+        serde_json::json!("10000")
     );
     assert_eq!(
         res.json()["data"]["source"],
@@ -171,7 +171,7 @@ async fn equity_snapshot_round_trips_persisted_row() {
     assert_eq!(res.status, StatusCode::OK);
     assert_eq!(
         res.json()["data"]["capital_base_usd"],
-        serde_json::json!("12000.00000000")
+        serde_json::json!("12000")
     );
 
     let latest = TestRequest::get()

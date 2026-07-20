@@ -693,6 +693,28 @@ async fn verify_structure(client: &clickhouse::Client) -> Result<(), StorageErro
         .into_iter()
         .map(|row| (row.name.clone(), row))
         .collect::<BTreeMap<_, _>>();
+    let mut allowed = schema::REQUIRED_SCHEMA_OBJECTS
+        .iter()
+        .map(|name| (*name).to_owned())
+        .collect::<BTreeSet<_>>();
+    allowed.insert(MIGRATION_TABLE.to_owned());
+    allowed.insert(DEPLOYMENT_LOCK_TABLE.to_owned());
+    allowed.extend(
+        migrations()
+            .iter()
+            .map(|migration| format!("{MIGRATION_CLAIM_PREFIX}{:06}", migration.version)),
+    );
+    let unknown = by_name
+        .keys()
+        .filter(|name| !allowed.contains(*name))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !unknown.is_empty() {
+        return Err(StorageError::Migration(format!(
+            "ClickHouse database contains objects outside the boot manifest: {}",
+            unknown.join(", ")
+        )));
+    }
 
     let missing = schema::REQUIRED_SCHEMA_OBJECTS
         .iter()
@@ -897,18 +919,17 @@ fn normalize_create_table_query(database: &str, query: &str) -> String {
 }
 
 fn reject_unmanaged_schema(names: &BTreeSet<String>) -> Result<(), StorageError> {
-    let managed = schema::REQUIRED_SCHEMA_OBJECTS
+    let unmanaged = names
         .iter()
-        .chain(schema::FORBIDDEN_SCHEMA_OBJECTS.iter())
-        .filter(|name| names.contains(**name))
-        .copied()
+        .filter(|name| name.as_str() != DEPLOYMENT_LOCK_TABLE)
+        .cloned()
         .collect::<Vec<_>>();
-    if managed.is_empty() {
+    if unmanaged.is_empty() {
         return Ok(());
     }
     Err(StorageError::Migration(format!(
         "ClickHouse database contains unmanaged pre-baseline objects ({}); automatic adoption is intentionally unsupported, so recreate this pre-production database once and restart the application",
-        managed.join(", ")
+        unmanaged.join(", ")
     )))
 }
 

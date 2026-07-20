@@ -4,17 +4,36 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{
-        ActivePolicyResourceInfo, DecisionPolicySnapshotInfo, NewDecisionPolicySnapshot,
-        NewPolicyActivation, NewPolicyRevision, NewProductionBaseline, PolicyActivationInfo,
-        PolicyApprovalInfo, PolicyRevisionInfo, ProductionBaselineInfo, RecordPolicyApproval,
+        ActivePolicyResourceInfo, ConfigActivityInfo, ConfigResourceInventoryInfo,
+        DecisionPolicySnapshotInfo, DecisionPolicySnapshotOptionInfo,
+        LifecycleSchemaVerificationPort, NewDecisionPolicySnapshot, NewPolicyActivation,
+        NewPolicyRevision, NewProductionBaseline, NewProductionEvidence, PolicyActivationCommit,
+        PolicyActivationInfo, PolicyApprovalInfo, PolicyRevisionInfo, ProductionBaselineInfo,
+        ProductionEvidenceArtifactVerificationPort, ProductionEvidenceInfo, RecordPolicyApproval,
     },
-    enums::runtime_config::ConfigResourceKind,
-    runtime_config::PolicyValidationEvidence,
+    enums::runtime_config::{ConfigResourceKind, ProductionEvidenceKind},
+    runtime_config::{
+        ActivePolicyBundle, ImmutableProfileArtifactReferences, ImmutableProfileArtifacts,
+        PolicyValidationEvidence,
+    },
     types::{ContentHash, DecisionPolicySnapshotId, PolicyApprovalId, PolicyRevisionId},
 };
 
 #[async_trait::async_trait]
 pub trait PolicyRepository: Send + Sync {
+    /// Persist or verify the four content-addressed WORM profile artifacts.
+    async fn ensure_policy_profile_artifacts(
+        &self,
+        _artifacts: &ImmutableProfileArtifacts,
+        _actor_label: &str,
+        _reason: &str,
+    ) -> Result<ImmutableProfileArtifactReferences, StorageError> {
+        Err(StorageError::invariant_violation(
+            Some("policy_profile_artifact"),
+            "repository does not implement policy profile artifact persistence",
+        ))
+    }
+
     async fn create_revision(
         &self,
         revision: NewPolicyRevision,
@@ -42,6 +61,12 @@ pub trait PolicyRepository: Send + Sync {
     /// Load the cross-resource activity feed in one persistence query.
     async fn list_all_revisions(&self, limit: u64)
     -> Result<Vec<PolicyRevisionInfo>, StorageError>;
+
+    /// Load the globally ordered cross-resource activity feed in one statement.
+    async fn list_activity(&self, limit: u64) -> Result<Vec<ConfigActivityInfo>, StorageError>;
+
+    /// Load the DB-authoritative Config inventory in one statement.
+    async fn load_resource_inventory(&self) -> Result<ConfigResourceInventoryInfo, StorageError>;
 
     async fn record_approval(
         &self,
@@ -73,7 +98,19 @@ pub trait PolicyRepository: Send + Sync {
         &self,
         activation: NewPolicyActivation,
         snapshot: NewDecisionPolicySnapshot,
-    ) -> Result<PolicyActivationInfo, StorageError>;
+    ) -> Result<PolicyActivationCommit, StorageError>;
+
+    /// Load the singleton generation and exact committed snapshot together.
+    async fn load_current_bundle(&self) -> Result<Option<ActivePolicyBundle>, StorageError> {
+        Ok(self.load_current().await?.map(|info| {
+            ActivePolicyBundle::from_parts(
+                info.bundle_generation,
+                info.decision_policy_snapshot_id,
+                info.snapshot_hash,
+                info.snapshot,
+            )
+        }))
+    }
 
     async fn load_current_activation(
         &self,
@@ -135,11 +172,6 @@ pub trait PolicyRepository: Send + Sync {
         snapshot_id: &DecisionPolicySnapshotId,
     ) -> Result<Option<DecisionPolicySnapshotInfo>, StorageError>;
 
-    async fn load_by_hash(
-        &self,
-        snapshot_hash: &ContentHash,
-    ) -> Result<Option<DecisionPolicySnapshotInfo>, StorageError>;
-
     async fn load_current(&self) -> Result<Option<DecisionPolicySnapshotInfo>, StorageError>;
 
     async fn load_active_at(
@@ -152,6 +184,12 @@ pub trait PolicyRepository: Send + Sync {
         limit: u64,
     ) -> Result<Vec<DecisionPolicySnapshotInfo>, StorageError>;
 
+    /// Load immutable snapshot identities in one statement without artifact documents.
+    async fn list_snapshot_options(
+        &self,
+        limit: u64,
+    ) -> Result<Vec<DecisionPolicySnapshotOptionInfo>, StorageError>;
+
     async fn list_activations(
         &self,
         kind: Option<ConfigResourceKind>,
@@ -162,9 +200,23 @@ pub trait PolicyRepository: Send + Sync {
         &self,
     ) -> Result<Option<ProductionBaselineInfo>, StorageError>;
 
+    async fn record_production_evidence(
+        &self,
+        evidence: NewProductionEvidence,
+        schema_verification: &dyn LifecycleSchemaVerificationPort,
+        artifact_verification: &dyn ProductionEvidenceArtifactVerificationPort,
+    ) -> Result<ProductionEvidenceInfo, StorageError>;
+
+    async fn load_latest_production_evidence(
+        &self,
+        kind: ProductionEvidenceKind,
+    ) -> Result<Option<ProductionEvidenceInfo>, StorageError>;
+
     /// Append the singleton boot production baseline. A second seal is rejected.
     async fn seal_production_baseline(
         &self,
         baseline: NewProductionBaseline,
+        schema_verification: &dyn LifecycleSchemaVerificationPort,
+        artifact_verification: &dyn ProductionEvidenceArtifactVerificationPort,
     ) -> Result<ProductionBaselineInfo, StorageError>;
 }

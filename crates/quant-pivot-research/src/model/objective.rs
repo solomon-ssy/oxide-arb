@@ -13,8 +13,9 @@
 use std::collections::BTreeMap;
 
 use quant_pivot_error::{QuantResult, research::ResearchError};
-use quant_pivot_models::runtime_config::{
-    RankLossKind, ResearchTrainingConfig, TrainingOptimizerKind,
+use quant_pivot_models::{
+    runtime_config::{RankLossKind, ResearchTrainingConfig},
+    types::model_training::TrainingObjectiveSpec,
 };
 use rust_decimal::{
     Decimal,
@@ -25,65 +26,29 @@ use serde::{Deserialize, Serialize};
 use crate::{backtest::metrics, precision::RESEARCH_DECIMAL_SCALE, stats};
 const BPS_PER_UNIT_RETURN: i64 = 10_000;
 
-/// Full governed objective snapshot frozen into model versions and artifacts.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TrainingObjectiveSpec {
-    /// Ranking loss optimized within each `as_of` query group.
-    pub rank_loss: RankLossKind,
-    /// Simplex optimizer policy.
-    pub optimizer: TrainingOptimizerKind,
-    /// Weight on lower-tail portfolio-return penalty.
-    pub lambda_tail: Decimal,
-    /// Lower-tail fraction used by tail penalty.
-    pub tail_fraction: Decimal,
-    /// Weight on mean allocation turnover penalty.
-    pub lambda_turnover: Decimal,
-    /// L2 coefficient on `Σ weightᵢ²`.
-    pub lambda_l2: Decimal,
-    /// Truncation `k` for diagnostic NDCG@k (not part of the training loss).
-    pub ndcg_k: u32,
-    /// Truncation for `TopN` pseudo-portfolio used by tail/turnover penalties.
-    pub pseudo_top_n: u32,
-}
-
-impl Default for TrainingObjectiveSpec {
-    fn default() -> Self {
-        Self {
-            rank_loss: RankLossKind::default(),
-            optimizer: TrainingOptimizerKind::default(),
-            lambda_tail: Decimal::new(5, 1),
-            tail_fraction: Decimal::new(10, 2),
-            lambda_turnover: Decimal::new(2, 1),
-            lambda_l2: Decimal::new(1, 2),
-            ndcg_k: 20,
-            pseudo_top_n: 20,
-        }
-    }
-}
-
-impl TrainingObjectiveSpec {
-    /// Parse the governed runtime-config section into exact `Decimal` weights.
-    pub fn from_runtime_config(config: &ResearchTrainingConfig) -> QuantResult<Self> {
-        Ok(Self {
-            rank_loss: config.rank_loss,
-            optimizer: config.optimizer,
-            lambda_tail: parse_non_negative_decimal(
-                "research.training.lambda_tail",
-                config.lambda_tail.value,
-            )?,
-            tail_fraction: parse_tail_fraction(config.tail_fraction.value)?,
-            lambda_turnover: parse_non_negative_decimal(
-                "research.training.lambda_turnover",
-                config.lambda_turnover.value,
-            )?,
-            lambda_l2: parse_non_negative_decimal(
-                "research.training.lambda_l2",
-                config.lambda_l2.value,
-            )?,
-            ndcg_k: config.ndcg_k,
-            pseudo_top_n: config.pseudo_top_n,
-        })
-    }
+/// Parse the governed runtime-config section into exact `Decimal` weights.
+pub fn training_objective_from_runtime_config(
+    config: &ResearchTrainingConfig,
+) -> QuantResult<TrainingObjectiveSpec> {
+    Ok(TrainingObjectiveSpec {
+        rank_loss: config.rank_loss,
+        optimizer: config.optimizer,
+        lambda_tail: parse_non_negative_decimal(
+            "research.training.lambda_tail",
+            config.lambda_tail.value,
+        )?,
+        tail_fraction: parse_tail_fraction(config.tail_fraction.value)?,
+        lambda_turnover: parse_non_negative_decimal(
+            "research.training.lambda_turnover",
+            config.lambda_turnover.value,
+        )?,
+        lambda_l2: parse_non_negative_decimal(
+            "research.training.lambda_l2",
+            config.lambda_l2.value,
+        )?,
+        ndcg_k: config.ndcg_k,
+        pseudo_top_n: config.pseudo_top_n,
+    })
 }
 
 /// Component-level objective report stored in metrics/artifacts.
@@ -609,16 +574,19 @@ fn parse_tail_fraction(value: Decimal) -> QuantResult<Decimal> {
 #[cfg(test)]
 mod tests {
     use chrono::{TimeZone, Utc};
-    use quant_pivot_models::runtime_config::{
-        RankLossKind, ResearchTrainingConfig, TrainingOptimizerKind, wire::DecimalValue,
+    use quant_pivot_models::{
+        runtime_config::{
+            RankLossKind, ResearchTrainingConfig, TrainingOptimizerKind, wire::DecimalValue,
+        },
+        types::model_training::TrainingObjectiveSpec,
     };
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
     use std::slice;
 
     use super::{
-        CrossSectionGroup, ObjectiveEvaluator, SampleRow, TrainingObjectiveSpec, ndcg_at_k,
-        rank_ic_weighted_pair_weight, topn_pseudo_allocations,
+        CrossSectionGroup, ObjectiveEvaluator, SampleRow, ndcg_at_k, rank_ic_weighted_pair_weight,
+        topn_pseudo_allocations, training_objective_from_runtime_config,
     };
 
     fn row(key: &str, signed: Decimal, label: Decimal) -> SampleRow {
@@ -827,7 +795,7 @@ mod tests {
             ndcg_k: 7,
             pseudo_top_n: 4,
         };
-        let spec = TrainingObjectiveSpec::from_runtime_config(&config).expect("parse");
+        let spec = training_objective_from_runtime_config(&config).expect("parse");
         assert_eq!(spec.rank_loss, RankLossKind::PairwiseRanknet);
         assert_eq!(spec.ndcg_k, 7);
         assert_eq!(spec.pseudo_top_n, 4);

@@ -36,8 +36,8 @@ use crate::{
             SPREAD_EFFICIENCY, TIME_TO_RESOLUTION, VOLATILITY_REGIME,
         },
         value::{
-            FactorDefinitionSpec, FactorDriver, FactorName, FactorOutputKind, FactorQualityGate,
-            RawFactor, RawFactorEligibility,
+            FactorDefinitionDocument, FactorDriver, FactorName, FactorOutputKind,
+            FactorQualityGate, RawFactor, RawFactorEligibility,
         },
     },
     features::{
@@ -52,7 +52,7 @@ use crate::{
 #[must_use]
 pub fn generic_factors(
     features: &FeaturesConfig,
-) -> Vec<(FactorDefinitionSpec, Arc<dyn FactorComputer>)> {
+) -> Vec<(FactorDefinitionDocument, Arc<dyn FactorComputer>)> {
     let mut factors = vec![
         feature_factor(
             &LIQUIDITY_DEPTH,
@@ -142,7 +142,7 @@ pub fn generic_factors(
 /// window elides the factor (fail-closed) rather than fabricating a `_0s` name.
 fn momentum_factors(
     features: &FeaturesConfig,
-) -> Vec<(FactorDefinitionSpec, Arc<dyn FactorComputer>)> {
+) -> Vec<(FactorDefinitionDocument, Arc<dyn FactorComputer>)> {
     let mut factors = Vec::with_capacity(4);
     if let Some(input) = momentum_roc_feature(features) {
         factors.push(feature_factor(
@@ -200,7 +200,7 @@ fn feature_factor(
     normalization: FactorNormalization,
     required: bool,
     headline_label: &'static str,
-) -> (FactorDefinitionSpec, Arc<dyn FactorComputer>) {
+) -> (FactorDefinitionDocument, Arc<dyn FactorComputer>) {
     let name_str = name.as_str();
     let definition_id = provisional_factor_definition_id(name_str);
     let quality_gates = if required {
@@ -211,7 +211,7 @@ fn feature_factor(
     } else {
         Vec::new()
     };
-    let spec = FactorDefinitionSpec {
+    let spec = FactorDefinitionDocument {
         name: name.clone(),
         family,
         input_features: vec![input.clone()],
@@ -231,9 +231,9 @@ fn feature_factor(
 }
 
 /// Build the data-quality `(spec, computer)` pair (`MinMax` bounds from config).
-fn data_quality_factor() -> (FactorDefinitionSpec, Arc<dyn FactorComputer>) {
+fn data_quality_factor() -> (FactorDefinitionDocument, Arc<dyn FactorComputer>) {
     let definition_id = provisional_factor_definition_id(DATA_QUALITY.as_str());
-    let spec = FactorDefinitionSpec {
+    let spec = FactorDefinitionDocument {
         name: DATA_QUALITY,
         family: FactorFamily::DataQuality,
         input_features: Vec::new(),
@@ -295,7 +295,7 @@ fn windowed_realized_vol(features: &FeaturesConfig) -> Option<FeatureName> {
 /// decimal projection.
 struct FeatureBackedFactor {
     definition_id: FactorDefinitionId,
-    spec: FactorDefinitionSpec,
+    spec: FactorDefinitionDocument,
     input: FeatureName,
     headline_label: &'static str,
 }
@@ -305,7 +305,7 @@ impl FactorComputer for FeatureBackedFactor {
         self.definition_id.clone()
     }
 
-    fn spec(&self) -> &FactorDefinitionSpec {
+    fn spec(&self) -> &FactorDefinitionDocument {
         &self.spec
     }
 
@@ -349,7 +349,7 @@ impl FactorComputer for FeatureBackedFactor {
 /// quality minus missing-feature and staleness penalties).
 struct DataQualityFactor {
     definition_id: FactorDefinitionId,
-    spec: FactorDefinitionSpec,
+    spec: FactorDefinitionDocument,
 }
 
 impl FactorComputer for DataQualityFactor {
@@ -357,7 +357,7 @@ impl FactorComputer for DataQualityFactor {
         self.definition_id.clone()
     }
 
-    fn spec(&self) -> &FactorDefinitionSpec {
+    fn spec(&self) -> &FactorDefinitionDocument {
         &self.spec
     }
 

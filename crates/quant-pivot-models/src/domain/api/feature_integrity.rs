@@ -14,8 +14,8 @@ use crate::{
         FeatureParityRunStatus, FeatureParityStage,
     },
     types::{
-        ContentHash, FeatureParityEventId, FeatureParityRunId, MarketId, ModelRunId,
-        ModelVersionId, RecommendationReportId, TrainingDatasetId,
+        ContentHash, FeatureParityDetail, FeatureParityEventId, FeatureParityRunId, MarketId,
+        ModelRunId, ModelVersionId, RecommendationReportId, TrainingDatasetId,
     },
 };
 
@@ -53,7 +53,7 @@ pub struct FeatureParityEventListQuery {
 }
 
 /// Governed request for a full replay. Missing bounds mean the latest 24 hours.
-#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Validate)]
 pub struct RunFullFeatureParityRequest {
     pub window_start: Option<DateTime<Utc>>,
     pub window_end: Option<DateTime<Utc>>,
@@ -218,7 +218,7 @@ pub struct FeatureParityEventView {
     pub transform_hash: Option<ContentHash>,
     pub online: FeatureParityEvidenceView,
     pub replay: FeatureParityEvidenceView,
-    pub detail: serde_json::Value,
+    pub detail: FeatureParityDetail,
     pub created_at: DateTime<Utc>,
 }
 

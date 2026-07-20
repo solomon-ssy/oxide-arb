@@ -5,7 +5,9 @@ use sea_orm::entity::prelude::*;
 
 use crate::{
     enums::quant::TradePolicyValidationStatus,
-    types::{ContentHash, TradePolicyArtifactId, TradePolicyValidationRunId, TrainingDatasetId},
+    types::{
+        ContentHash, TradePolicyArtifactId, TradePolicyValidationRunId, TrainingDatasetId, UserId,
+    },
 };
 
 #[sea_orm::model]
@@ -27,7 +29,7 @@ pub struct Model {
     pub validation_hash: Option<ContentHash>,
     #[sea_orm(column_type = "Text", nullable)]
     pub failure_detail: Option<String>,
-    pub actor_id: Uuid,
+    pub actor_id: UserId,
     #[sea_orm(column_type = "Text")]
     pub reason: String,
     pub started_at: DateTime<Utc>,

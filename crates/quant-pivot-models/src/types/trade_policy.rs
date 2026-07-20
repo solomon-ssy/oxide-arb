@@ -22,8 +22,8 @@ use crate::{
         ENTRY_CONDITION_MAX_DEPTH, ENTRY_CONDITION_MAX_GROUP_CHILDREN, ENTRY_CONDITION_MAX_NODES,
         ENTRY_CONDITION_MIN_GROUP_CHILDREN, FactorDefinitionId, FactorMeasure, ModelVersionId,
         OpportunisticExitPolicy, Price, ResearchEvaluationTrack, ResearchJobId, ResearchProfileRef,
-        StructuralVolatilityOosEvidence, TradePolicyArtifactId, TrainingDatasetId, Usd,
-        resolve_builtin_research_profile,
+        ResearchReadinessEvidenceId, StructuralVolatilityOosEvidence, TradePolicyArtifactId,
+        TrainingDatasetId, Usd, resolve_builtin_research_profile,
     },
 };
 
@@ -157,7 +157,7 @@ pub struct TradePolicyFitContract {
     pub target_horizon_secs: u64,
     pub cash_budget_tiers: Vec<Usd>,
     pub methodology_hash: ContentHash,
-    pub latency_evidence_id: uuid::Uuid,
+    pub latency_evidence_id: ResearchReadinessEvidenceId,
     pub latency_profile_hash: ContentHash,
     pub quality_gate: TradePolicyQualityGate,
 }
@@ -170,7 +170,7 @@ impl TradePolicyFitContract {
         if self.fit_window_end > self.pit_cutoff {
             return Err("trade-policy fit window must end at or before pit_cutoff".to_owned());
         }
-        if self.latency_evidence_id.is_nil() {
+        if self.latency_evidence_id.as_uuid().is_nil() {
             return Err("trade-policy latency evidence identity cannot be nil".to_owned());
         }
         let profile = resolve_builtin_research_profile(&self.profile_ref)?;
@@ -612,7 +612,7 @@ pub struct TradePolicyEvidenceBundleRef {
     pub simulator_hash: ContentHash,
     pub replay_kernel_hash: ContentHash,
     pub methodology_hash: ContentHash,
-    pub latency_evidence_id: uuid::Uuid,
+    pub latency_evidence_id: ResearchReadinessEvidenceId,
     pub latency_profile_hash: ContentHash,
     pub catalog_ledger_hash: ContentHash,
     pub source_slice_manifest_hash: ContentHash,
@@ -670,7 +670,7 @@ pub struct TradePolicyEvidenceBundleManifest {
     pub simulator_hash: ContentHash,
     pub replay_kernel_hash: ContentHash,
     pub methodology_hash: ContentHash,
-    pub latency_evidence_id: uuid::Uuid,
+    pub latency_evidence_id: ResearchReadinessEvidenceId,
     pub latency_profile_hash: ContentHash,
     pub catalog_ledger_hash: ContentHash,
     pub source_slice_manifest_hash: ContentHash,
@@ -693,7 +693,7 @@ impl TradePolicyEvidenceBundleManifest {
                 "policy evidence bundle must contain every required object once".to_owned(),
             );
         }
-        if self.latency_evidence_id.is_nil() {
+        if self.latency_evidence_id.as_uuid().is_nil() {
             return Err(
                 "policy evidence manifest has no signed latency evidence identity".to_owned(),
             );
@@ -1459,7 +1459,8 @@ mod tests {
     };
     use crate::types::{
         ContentHash, DecisionPolicySnapshotId, ModelVersionId, ResearchEvaluationTrack,
-        StructuralVolatilityOosEvidence, TrainingDatasetId, builtin_research_profiles,
+        ResearchReadinessEvidenceId, StructuralVolatilityOosEvidence, TrainingDatasetId,
+        builtin_research_profiles,
     };
 
     fn hash(digit: char) -> ContentHash {
@@ -1487,7 +1488,7 @@ mod tests {
             target_horizon_secs: profile.spec.target_horizon_secs,
             cash_budget_tiers: profile.spec.allowed_cash_budget_tiers,
             methodology_hash: hash('8'),
-            latency_evidence_id: uuid::Uuid::now_v7(),
+            latency_evidence_id: ResearchReadinessEvidenceId::from_v7(),
             latency_profile_hash: hash('9'),
             quality_gate: profile.spec.quality_gate,
         }

@@ -1,16 +1,11 @@
 //! Content-addressed identity for immutable factor-definition revisions.
 
-use crate::{factors::FactorDefinitionSpec, hashing::ResearchHasher};
+use crate::factors::FactorDefinitionDocument;
 use quant_pivot_error::QuantResult;
-use quant_pivot_models::types::{ContentHash, FactorDefinitionId};
-use serde::Serialize;
+use quant_pivot_models::types::{
+    ContentHash, FactorDefinitionId, factor::factor_definition_content_hash,
+};
 use uuid::Uuid;
-
-#[derive(Serialize)]
-struct CanonicalFactorDefinition<'a> {
-    definition: &'a FactorDefinitionSpec,
-    feature_contract_hash: &'a ContentHash,
-}
 
 /// Immutable identity of one logical factor revision.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,13 +24,10 @@ pub struct FactorDefinitionIdentity {
 ///
 /// Propagates canonical serialization/hash failures.
 pub fn factor_definition_identity(
-    definition: &FactorDefinitionSpec,
+    definition: &FactorDefinitionDocument,
     feature_contract_hash: &ContentHash,
 ) -> QuantResult<FactorDefinitionIdentity> {
-    let definition_hash = ResearchHasher::canonical(&CanonicalFactorDefinition {
-        definition,
-        feature_contract_hash,
-    })?;
+    let definition_hash = factor_definition_content_hash(definition, feature_contract_hash)?;
     let factor_definition_id = FactorDefinitionId::from_definition_hash(&definition_hash);
     Ok(FactorDefinitionIdentity {
         factor_definition_id,
@@ -64,14 +56,16 @@ mod tests {
     };
 
     use super::factor_definition_identity;
-    use crate::factors::{FactorDefinitionSpec, FactorName, FactorOutputKind, FactorQualityGate};
+    use crate::factors::{
+        FactorDefinitionDocument, FactorName, FactorOutputKind, FactorQualityGate,
+    };
 
     fn hash(seed: char) -> ContentHash {
         ContentHash::parse(format!("blake3:{}", seed.to_string().repeat(64))).expect("hash")
     }
 
-    fn definition() -> FactorDefinitionSpec {
-        FactorDefinitionSpec {
+    fn definition() -> FactorDefinitionDocument {
+        FactorDefinitionDocument {
             name: FactorName::new("momentum"),
             family: FactorFamily::Momentum,
             input_features: Vec::new(),

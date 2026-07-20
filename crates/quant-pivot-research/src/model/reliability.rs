@@ -10,12 +10,14 @@
 //! on, never re-derived from training data.
 
 use quant_pivot_error::{QuantResult, research::ResearchError};
-use quant_pivot_models::types::Probability;
+use quant_pivot_models::types::{
+    Probability,
+    calibration::{MonotoneMapping, ReliabilityBin, ReliabilityReport},
+};
 use rust_decimal::{Decimal, prelude::FromPrimitive, prelude::ToPrimitive};
-use serde::{Deserialize, Serialize};
 
 use crate::{
-    model::calibrator::{MonotoneMapping, apply_mapping},
+    model::calibrator::apply_mapping,
     precision::RESEARCH_DECIMAL_SCALE,
     stats::{count_f64, wilson_interval, wilson_z},
 };
@@ -25,59 +27,6 @@ use crate::{
 const RELIABILITY_BINS: usize = 10;
 /// `f64` floor/ceiling probabilities never touched exactly (avoids `ln(0)`).
 const LOG_LOSS_EPS: f64 = 1e-12;
-
-/// One calibrated-probability-bucket reliability-diagram row.
-///
-/// Buckets partition the **calibrated probability** axis (`[0, 1]`), matching
-/// the standard ECE definition (Naeini et al.; sklearn `calibration_curve`) —
-/// not the raw, pre-calibration model score, which would make bucket edges
-/// (and any downstream MAE-by-bucket lookup) incomparable across calibration
-/// methods with different score→probability curvature.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReliabilityBin {
-    /// Inclusive lower calibrated-probability edge.
-    pub predicted_lo: Decimal,
-    /// Exclusive upper calibrated-probability edge (inclusive for the top bin).
-    pub predicted_hi: Decimal,
-    /// Samples in the bucket.
-    pub sample_count: u64,
-    /// Mean calibrated probability in the bucket (reliability-diagram x-axis).
-    pub mean_predicted: Probability,
-    /// Empirical win frequency in the bucket (reliability-diagram y-axis).
-    pub empirical_frequency: Probability,
-    /// Wilson score interval for `empirical_frequency`.
-    pub wilson_ci: (Probability, Probability),
-    /// Mean `max_adverse_excursion_bps` in the bucket, when any sample carried
-    /// a resolved MAE label (`DownsideSource::MfeMae` serving-time lookup).
-    pub mean_adverse_excursion_bps: Option<Decimal>,
-}
-
-/// A calibration artifact's reliability evaluation (Brier / log-loss / ECE +
-/// per-bin diagnostics), computed on the fit's own held-out split.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReliabilityReport {
-    pub bins: Vec<ReliabilityBin>,
-    pub brier_score: Decimal,
-    pub log_loss: Decimal,
-    pub ece: Decimal,
-    pub n_samples: u64,
-}
-
-impl ReliabilityReport {
-    /// The bucket containing a **calibrated probability** (never a raw model
-    /// score — callers must calibrate first), or `None` when no bucket was
-    /// retained (empty report) — callers must treat this as "no downside
-    /// data", never fabricate a value.
-    #[must_use]
-    pub fn bin_for(&self, calibrated_probability: Decimal) -> Option<&ReliabilityBin> {
-        let top = Decimal::ONE;
-        self.bins.iter().find(|bin| {
-            calibrated_probability >= bin.predicted_lo
-                && (calibrated_probability < bin.predicted_hi
-                    || (bin.predicted_hi == top && calibrated_probability <= top))
-        })
-    }
-}
 
 /// One calibration-split observation feeding a [`ReliabilityReport`].
 pub struct ReliabilitySample {
@@ -271,9 +220,8 @@ fn mean_decimal(values: &[Decimal]) -> Decimal {
 #[cfg(test)]
 mod tests {
     use super::{ReliabilitySample, compute_reliability, mean_decimal};
-    use crate::model::calibrator::{
-        IsotonicKnot, MonotoneMapping, ProbabilityCalibrator, isotonic::IsotonicCalibrator,
-    };
+    use crate::model::calibrator::{ProbabilityCalibrator, isotonic::IsotonicCalibrator};
+    use quant_pivot_models::types::calibration::{IsotonicKnot, MonotoneMapping};
     use rust_decimal::{Decimal, prelude::ToPrimitive};
     use rust_decimal_macros::dec;
 

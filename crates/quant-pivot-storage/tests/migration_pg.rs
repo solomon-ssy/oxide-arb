@@ -103,6 +103,28 @@ async fn immutable_baseline_is_idempotent_and_drift_is_rejected() {
     assert!(relation_exists(&db, "schema_migration_audit").await);
     assert!(!relation_exists(&db, "_sqlx_migrations").await);
 
+    let lease_owner_type = db
+        .query_one_raw(Statement::from_string(
+            DbBackend::Postgres,
+            "SELECT pg_catalog.format_type(a.atttypid, a.atttypmod) AS column_type \
+             FROM pg_catalog.pg_attribute AS a \
+             JOIN pg_catalog.pg_class AS c ON c.oid = a.attrelid \
+             JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace \
+             WHERE n.nspname = 'public' \
+               AND c.relname = 'quant_research_job' \
+               AND a.attname = 'lease_owner' \
+               AND NOT a.attisdropped",
+        ))
+        .await
+        .expect("inspect research-job lease owner type")
+        .expect("research-job lease owner column");
+    assert_eq!(
+        lease_owner_type
+            .try_get::<String>("", "column_type")
+            .expect("research-job lease owner type"),
+        "uuid"
+    );
+
     apply_postgres_migrations(&db)
         .await
         .expect("reapply migrations");

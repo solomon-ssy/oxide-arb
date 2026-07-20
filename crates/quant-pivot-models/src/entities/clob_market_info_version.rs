@@ -6,7 +6,10 @@ use sea_orm::entity::prelude::*;
 
 use crate::{
     enums::common::TickSize,
-    types::{ClobFeeDetails, ClobMarketInfoVersionId, ClobTokenSet, ContentHash, MarketId},
+    types::{
+        ClobFeeDetails, ClobMarketInfoVersionId, ClobTokenSet, ContentHash, ExternalJsonDocument,
+        MarketId,
+    },
 };
 
 #[sea_orm::model]
@@ -32,7 +35,7 @@ pub struct Model {
     pub available_at: DateTime<Utc>,
     pub payload_hash: ContentHash,
     #[sea_orm(column_type = "JsonBinary")]
-    pub raw_payload: Json,
+    pub raw_payload: ExternalJsonDocument,
     pub created_at: DateTime<Utc>,
 
     #[sea_orm(

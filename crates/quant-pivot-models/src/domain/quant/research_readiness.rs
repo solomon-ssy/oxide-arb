@@ -1,20 +1,20 @@
 //! Persistence DTOs for append-only operational readiness evidence.
 
-use chrono::{DateTime, Utc};
-use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
-use serde::{Deserialize, Serialize};
-use uuid::Uuid;
-
 use crate::{
     entities::quant_research_readiness_evidence,
     enums::quant::ResearchReadinessEvidenceKind,
-    types::{ArtifactUri, ContentHash, ResearchReadinessEvidencePayload},
+    types::{
+        ArtifactUri, ContentHash, ResearchReadinessEvidenceId, ResearchReadinessEvidencePayload,
+    },
 };
+use chrono::{DateTime, Utc};
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, DeriveIntoActiveModel)]
 #[sea_orm(active_model = "crate::entities::quant_research_readiness_evidence::ActiveModel")]
 pub struct NewResearchReadinessEvidence {
-    pub evidence_id: Uuid,
+    pub evidence_id: ResearchReadinessEvidenceId,
     pub kind: ResearchReadinessEvidenceKind,
     pub scope_hash: ContentHash,
     pub window_start: DateTime<Utc>,
@@ -32,7 +32,7 @@ pub struct NewResearchReadinessEvidence {
 #[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
 #[sea_orm(entity = "crate::entities::quant_research_readiness_evidence::Entity")]
 pub struct ResearchReadinessEvidenceInfo {
-    pub evidence_id: Uuid,
+    pub evidence_id: ResearchReadinessEvidenceId,
     pub kind: ResearchReadinessEvidenceKind,
     pub scope_hash: ContentHash,
     pub window_start: DateTime<Utc>,

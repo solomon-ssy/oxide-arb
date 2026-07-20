@@ -11,8 +11,9 @@ use quant_pivot_models::{
     hashing::CanonicalDigest,
     types::{
         DecisionPolicySnapshotId, EventId, FeatureVectorId, MarketId, MarketSelectionId,
-        ModelRunId, ModelVersionId, RecommendationId, RecommendationReportId, ReportFunnelReason,
-        ReportFunnelStage, ResearchProfileRef, SignalCandidateId, TokenId,
+        MissingFeatureDiagnostic, ModelRunId, ModelVersionId, RecommendationId,
+        RecommendationReportId, ReportFunnelDiagnostics, ReportFunnelReason, ReportFunnelStage,
+        ResearchProfileRef, SignalCandidateId, TokenId, stable_name::FeatureName,
     },
 };
 use quant_pivot_research::{
@@ -45,7 +46,7 @@ struct DraftDecision {
     token_id: TokenId,
     terminal_stage: Option<ReportFunnelStage>,
     primary_reason: Option<ReportFunnelReason>,
-    secondary_diagnostics_json: String,
+    secondary_diagnostics: ReportFunnelDiagnostics,
     feature_vector_id: Option<FeatureVectorId>,
     signal_candidate_id: Option<SignalCandidateId>,
     recommendation_id: Option<RecommendationId>,
@@ -58,39 +59,50 @@ impl DraftDecision {
             token_id: market.primary_token_id.clone(),
             terminal_stage: None,
             primary_reason: None,
-            secondary_diagnostics_json: "{}".to_owned(),
+            secondary_diagnostics: ReportFunnelDiagnostics::None {},
             feature_vector_id: None,
             signal_candidate_id: None,
             recommendation_id: None,
         }
     }
 
-    fn excluded(market: &ExcludedMarket) -> QuantResult<Self> {
+    fn excluded(market: &ExcludedMarket) -> Self {
         let (terminal_stage, primary_reason) = selection_terminal(&market.reason);
-        let secondary_diagnostics_json =
-            serde_json::to_string(&market.reason).map_err(|error| {
-                ReportError::InvariantViolation {
-                    stage: "report_funnel",
-                    detail: format!("selection diagnostic serialization failed: {error}"),
+        let secondary_diagnostics = match &market.reason {
+            ExclusionReason::ModelFeatureUnavailable { missing } => {
+                ReportFunnelDiagnostics::MissingModelFeatures {
+                    features: missing
+                        .iter()
+                        .map(|name| FeatureName::new(name.as_str()))
+                        .collect(),
                 }
-            })?;
-        Ok(Self {
+            }
+            ExclusionReason::NotOpen
+            | ExclusionReason::CategoryDisabled
+            | ExclusionReason::InsufficientLiquidity
+            | ExclusionReason::SpreadTooWide
+            | ExclusionReason::StaleBook
+            | ExclusionReason::IngestLagExceeded
+            | ExclusionReason::ResolutionAmbiguous
+            | ExclusionReason::ManuallyBlocked => ReportFunnelDiagnostics::None {},
+        };
+        Self {
             event_id: market.event_id.clone(),
             token_id: market.primary_token_id.clone(),
             terminal_stage: Some(terminal_stage),
             primary_reason: Some(primary_reason),
-            secondary_diagnostics_json,
+            secondary_diagnostics,
             feature_vector_id: None,
             signal_candidate_id: None,
             recommendation_id: None,
-        })
+        }
     }
 
     fn terminate(
         &mut self,
         stage: ReportFunnelStage,
         reason: ReportFunnelReason,
-        diagnostics: String,
+        diagnostics: ReportFunnelDiagnostics,
     ) -> QuantResult<()> {
         if self.terminal_stage.is_some() {
             return Err(ReportError::InvariantViolation {
@@ -101,7 +113,7 @@ impl DraftDecision {
         }
         self.terminal_stage = Some(stage);
         self.primary_reason = Some(reason);
-        self.secondary_diagnostics_json = diagnostics;
+        self.secondary_diagnostics = diagnostics;
         Ok(())
     }
 }
@@ -121,7 +133,7 @@ pub fn build_report_market_funnel(
         insert_unique(
             &mut decisions,
             &market.market_id,
-            DraftDecision::excluded(market)?,
+            DraftDecision::excluded(market),
         )?;
     }
 
@@ -130,17 +142,16 @@ pub fn build_report_market_funnel(
         decision.terminate(
             ReportFunnelStage::FeatureReady,
             ReportFunnelReason::FeatureDataQualityRejected,
-            serde_json::to_string(
-                &rejected
+            ReportFunnelDiagnostics::FeatureDataQuality {
+                missing: rejected
                     .missing_required
                     .iter()
-                    .map(|(name, reason)| (name.as_str(), format!("{reason:?}")))
-                    .collect::<Vec<_>>(),
-            )
-            .map_err(|error| ReportError::InvariantViolation {
-                stage: "report_funnel",
-                detail: format!("feature diagnostic serialization failed: {error}"),
-            })?,
+                    .map(|(name, reason)| MissingFeatureDiagnostic {
+                        feature_name: FeatureName::new(name.as_str()),
+                        reason: *reason,
+                    })
+                    .collect(),
+            },
         )?;
     }
     for (market_id, feature_vector_id) in input.feature_vector_by_market {
@@ -164,7 +175,7 @@ pub fn build_report_market_funnel(
             decision.terminate(
                 ReportFunnelStage::ModelGatePassed,
                 model_gate_reason(model.primary_reason.as_deref())?,
-                "{}".to_owned(),
+                ReportFunnelDiagnostics::None {},
             )?;
         }
     }
@@ -174,12 +185,9 @@ pub fn build_report_market_funnel(
         decision.terminate(
             stage,
             reason,
-            serde_json::to_string(&serde_json::json!({ "detail": rejected.detail })).map_err(
-                |error| ReportError::InvariantViolation {
-                    stage: "report_funnel",
-                    detail: format!("planner diagnostic serialization failed: {error}"),
-                },
-            )?,
+            ReportFunnelDiagnostics::PlannerRejection {
+                detail: rejected.detail.clone(),
+            },
         )?;
     }
     for recommendation in input.recommendations {
@@ -188,7 +196,7 @@ pub fn build_report_market_funnel(
         decision.terminate(
             ReportFunnelStage::Published,
             ReportFunnelReason::Published,
-            "{}".to_owned(),
+            ReportFunnelDiagnostics::None {},
         )?;
     }
 
@@ -197,7 +205,7 @@ pub fn build_report_market_funnel(
             continue;
         }
         if let Some((stage, reason)) = input.early_terminal {
-            decision.terminate(stage, reason, "{}".to_owned())?;
+            decision.terminate(stage, reason, ReportFunnelDiagnostics::None {})?;
         } else if decision.feature_vector_id.is_some()
             && input.model_run_id.is_some()
             && decision.signal_candidate_id.is_none()
@@ -205,7 +213,7 @@ pub fn build_report_market_funnel(
             decision.terminate(
                 ReportFunnelStage::ModelScored,
                 ReportFunnelReason::MissingModelOutput,
-                "{}".to_owned(),
+                ReportFunnelDiagnostics::None {},
             )?;
         } else {
             return Err(ReportError::InvariantViolation {
@@ -314,17 +322,29 @@ fn row_from_decision(
         token_id: &decision.token_id,
         terminal_stage,
         primary_reason,
-        secondary_diagnostics_json: &decision.secondary_diagnostics_json,
+        secondary_diagnostics: &decision.secondary_diagnostics,
         feature_vector_id: decision.feature_vector_id.as_ref(),
         signal_candidate_id: decision.signal_candidate_id.as_ref(),
         recommendation_id: decision.recommendation_id.as_ref(),
     };
+    decision
+        .secondary_diagnostics
+        .validate_for(primary_reason)
+        .map_err(|detail| ReportError::InvariantViolation {
+            stage: "report_funnel",
+            detail: detail.to_owned(),
+        })?;
     let row_hash = CanonicalDigest::content_hash_json(&hash_input)?;
+    let secondary_diagnostics_json = serde_json::to_string(&decision.secondary_diagnostics)
+        .map_err(|error| ReportError::InvariantViolation {
+            stage: "report_funnel",
+            detail: format!("funnel diagnostics serialization failed: {error}"),
+        })?;
     Ok(ReportMarketFunnelRow {
         event_time: input.event_time.timestamp_millis(),
         recommendation_report_id: input.report_id.clone(),
         market_selection_id: input.selection.market_selection_id.clone(),
-        profile_id: input.profile_ref.id.clone(),
+        profile_id: input.profile_ref.id.to_string(),
         profile_version: input.profile_ref.version,
         profile_content_hash: input.profile_ref.content_hash.to_string(),
         decision_policy_snapshot_id: input.decision_policy_snapshot_id.clone(),
@@ -335,7 +355,7 @@ fn row_from_decision(
         token_id: decision.token_id,
         terminal_stage: terminal_stage.as_str().to_owned(),
         primary_reason: primary_reason.as_str().to_owned(),
-        secondary_diagnostics_json: decision.secondary_diagnostics_json,
+        secondary_diagnostics_json,
         feature_vector_id: decision.feature_vector_id,
         signal_candidate_id: decision.signal_candidate_id,
         recommendation_id: decision.recommendation_id,
@@ -354,7 +374,7 @@ struct FunnelRowHashInput<'a> {
     token_id: &'a TokenId,
     terminal_stage: ReportFunnelStage,
     primary_reason: ReportFunnelReason,
-    secondary_diagnostics_json: &'a str,
+    secondary_diagnostics: &'a ReportFunnelDiagnostics,
     feature_vector_id: Option<&'a FeatureVectorId>,
     signal_candidate_id: Option<&'a SignalCandidateId>,
     recommendation_id: Option<&'a RecommendationId>,

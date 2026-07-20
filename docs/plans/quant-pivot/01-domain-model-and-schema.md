@@ -147,7 +147,7 @@
 - `scope qp_factor_definition_scope not null`
 - `input_schema_version int not null`
 - `output_schema_version int not null`
-- `definition_json jsonb not null`
+- `definition jsonb not null`（`FactorDefinitionDocument`，SeaORM `FromJsonQueryResult`；`name`/`family` 与关系列由 CHECK 绑定）
 - `status qp_publication_status not null`
 - `created_by uuid null`
 - `created_at timestamptz not null`
@@ -189,7 +189,7 @@
 
 #### `quant_model_spec`
 
-用途：模型定义。第一版可为 factor-weighted scorer，但仍必须作为 model spec 管理。
+用途：内容寻址、append-only 的模型研究定义。人类研究论题与可执行输入/训练契约共同参与 `definition_hash`；它不是可覆写的描述字段。
 
 关键列：
 
@@ -199,10 +199,11 @@
 - `prediction_horizon_secs bigint not null`
 - `feature_schema_version int not null`
 - `label_schema_version int not null`
-- `spec_json jsonb not null`
-- `status qp_publication_status not null`
+- `thesis jsonb not null`（typed `ModelSpecThesis`）
+- `input_contract jsonb not null`（typed `ModelInputContract`）
+- `training_contract jsonb not null`（typed `ModelTrainingContract`）
+- `definition_hash text not null`
 - `created_at timestamptz not null`
-- `updated_at timestamptz not null`
 
 #### `quant_model_version`
 
@@ -214,9 +215,11 @@
 - `model_spec_id uuid not null`
 - `version int not null`
 - `artifact_hash text not null`
+- `research_profile_artifact_id uuid not null`
 - `training_dataset_id uuid null`
-- `metrics_json jsonb not null`
-- `quality_gate_report jsonb not null`
+- `metrics jsonb not null`（format v1 typed `ModelVersionMetrics`）
+- `training_objective jsonb not null`（format v1 typed `ModelTrainingObjective`）
+- `quality_gate_report jsonb null`（`NULL` 表示尚未评估）
 - `publication_status qp_publication_status not null`
 - `published_at timestamptz null`
 - `retired_at timestamptz null`
@@ -239,10 +242,9 @@
 - `market_selection_id uuid null`
 - `window_start timestamptz not null`
 - `window_end timestamptz not null`
-- `status qp_publication_status not null`
+- `status qp_model_run_status not null`
 - `input_hash text not null`
 - `output_hash text null`
-- `metrics_json jsonb not null`
 - `error_code text null`
 - `error_message text null`
 - `started_at timestamptz not null`
@@ -580,8 +582,8 @@
 | `market` | `market` 保留 | Polymarket catalog 权威，字段去 Endgame 假设 |
 | `event` | `event` 保留 | Polymarket event metadata |
 | `report` | 删除或迁移为 `quant_recommendation_report` | 旧 daily/weekly JSON report 不再作为主表 |
-| `decision_policy_snapshot` | 保留 | config_json schema v3 |
-| `policy_activation` | 保留 | activation 审计保留 |
+| `decision_policy_snapshot` | 重建 | system-owned format v1；只引用四类 immutable profile artifact ID/hash |
+| `policy_activation` | 重建 | bundle generation、完整 revision vector、audit/outbox 原子闭环 |
 | `operation_log` | 保留 | 扩展 quant actions |
 | `system_runtime_state` | 重建字段 | 删除 `execution_mode`，新增 `quant_runtime_mode` |
 | `control_factor_*` | 大部分重命名为 `quant_factor_*` / `quant_model_*` | 不保留旧 control factor 语义 |

@@ -22,7 +22,10 @@ use quant_pivot_models::{
     entities::{quant_factor_definition, quant_factor_value, quant_model_run},
     enums::{factor::FactorValueState, quant::PublicationStatus},
     hashing::CanonicalDigest,
-    types::{FactorDefinitionId, MarketId, ModelRunId, ModelVersionId},
+    types::{
+        FactorDefinitionId, MarketId, ModelRunId, ModelVersionId,
+        factor::factor_definition_content_hash,
+    },
 };
 use sea_orm::{
     ActiveModelTrait, ActiveValue, ColumnTrait, Condition, DatabaseConnection, DatabaseTransaction,
@@ -49,22 +52,7 @@ impl FactorRepository for PgFactorRepository {
         &self,
         definition: NewFactorDefinition,
     ) -> Result<FactorDefinitionInfo, StorageError> {
-        let expected_id = FactorDefinitionId::from_definition_hash(&definition.definition_hash);
-        if definition.factor_definition_id != expected_id {
-            return Err(error::invariant_violation(
-                Some(entity::QUANT_FACTOR),
-                format!(
-                    "factor definition id {} does not match definition hash {} (expected {})",
-                    definition.factor_definition_id, definition.definition_hash, expected_id
-                ),
-            ));
-        }
-        if definition.status != PublicationStatus::Draft {
-            return Err(error::invariant_violation(
-                Some(entity::QUANT_FACTOR),
-                "new factor-definition revisions must be registered as Draft",
-            ));
-        }
+        validate_new_definition(&definition)?;
 
         match quant_factor_definition::Entity::insert(definition.clone().into_active_model())
             .exec_with_returning(&self.db)
@@ -444,6 +432,67 @@ impl FactorRepository for PgFactorRepository {
     }
 }
 
+fn validate_new_definition(definition: &NewFactorDefinition) -> Result<(), StorageError> {
+    if definition.name != definition.definition.name.as_str() {
+        return Err(error::invariant_violation(
+            Some(entity::QUANT_FACTOR),
+            "factor definition name projection does not match the typed document",
+        ));
+    }
+    if definition.factor_family != definition.definition.family {
+        return Err(error::invariant_violation(
+            Some(entity::QUANT_FACTOR),
+            "factor family projection does not match the typed document",
+        ));
+    }
+    if definition.scope != definition.factor_family.definition_scope() {
+        return Err(error::invariant_violation(
+            Some(entity::QUANT_FACTOR),
+            "factor scope does not match the factor family",
+        ));
+    }
+    if definition.definition.owner.trim().is_empty() {
+        return Err(error::invariant_violation(
+            Some(entity::QUANT_FACTOR),
+            "factor definition owner must be non-empty",
+        ));
+    }
+    let expected_hash =
+        factor_definition_content_hash(&definition.definition, &definition.feature_contract_hash)
+            .map_err(|hash_error| {
+            error::invariant_violation(
+                Some(entity::QUANT_FACTOR),
+                format!("factor definition cannot be canonically hashed: {hash_error}"),
+            )
+        })?;
+    if definition.definition_hash != expected_hash {
+        return Err(error::invariant_violation(
+            Some(entity::QUANT_FACTOR),
+            format!(
+                "factor definition hash {} does not match canonical content hash {}",
+                definition.definition_hash, expected_hash
+            ),
+        ));
+    }
+    let expected_id = FactorDefinitionId::from_definition_hash(&expected_hash);
+    if definition.factor_definition_id != expected_id {
+        return Err(error::invariant_violation(
+            Some(entity::QUANT_FACTOR),
+            format!(
+                "factor definition id {} does not match definition hash {} (expected {})",
+                definition.factor_definition_id, definition.definition_hash, expected_id
+            ),
+        ));
+    }
+    if definition.status != PublicationStatus::Draft {
+        return Err(error::invariant_violation(
+            Some(entity::QUANT_FACTOR),
+            "new factor-definition revisions must be registered as Draft",
+        ));
+    }
+    Ok(())
+}
+
 async fn project_snapshot_values(
     db: &DatabaseConnection,
     factor_definition_ids: &[FactorDefinitionId],
@@ -509,7 +558,7 @@ fn ensure_identical_definition(
         && existing.scope == requested.scope
         && existing.input_schema_version == requested.input_schema_version
         && existing.output_schema_version == requested.output_schema_version
-        && existing.definition_json == requested.definition_json;
+        && existing.definition == requested.definition;
     if identical {
         return Ok(());
     }

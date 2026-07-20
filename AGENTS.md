@@ -72,6 +72,13 @@ Three DTO families unchanged in pattern:
 
 Authoritative: [`docs/models/dto-paradigm.md`](docs/models/dto-paradigm.md).
 
+SeaORM schema, JSONB/newtype/enum, query loading and transaction rules are mandatory in
+[`docs/persistence/seaorm-and-typed-persistence.md`](docs/persistence/seaorm-and-typed-persistence.md)
+and [`.cursor/rules/quant-pivot-persistence.mdc`](.cursor/rules/quant-pivot-persistence.mdc).
+In particular, domain-owned JSONB uses a canonical typed struct/tagged enum with
+`FromJsonQueryResult`; values requiring SQL query/constraint/lifecycle semantics are
+normalized into columns/tables instead of JSONB.
+
 ## 7. Quality Gates
 
 ```bash
@@ -97,7 +104,7 @@ Enforced by [`scripts/lint-import-style.sh`](scripts/lint-import-style.sh)
 | Short paths in bodies | After imports, ≤1 `::` (`HashMap::new`, `module::item`) — no `crate::a::B` / `std::a::B` in bodies |
 | One tree per root | In each module scope, one non-`pub` `use` per root (`std`, `crate`, `quant_pivot_*`, …) — merge siblings into a brace tree |
 | Attr exception | Distinct leading `#[cfg(…)]` (etc.) may keep a separate `use` of the same root — attrs cannot sit inside use braces on stable |
-| `pub use` | Barrel re-exports stay separate from ordinary `use` trees |
+| `pub use` | Canonical public barrels are allowed; migration/deletion compatibility shims are forbidden |
 
 ```rust
 // Good — one tree per root
@@ -154,6 +161,7 @@ Idempotent writes (e.g. attribution final insert) return repository **outcome en
 | `EndgameDetector`, `ScoredOpportunity`, `OpportunityPipeline` | quant report pipeline types |
 | `ExecutionMode::DryRun/Paper/Live` | `QuantRuntimeMode` |
 | `pub use` compatibility re-exports | explicit module paths |
+| bare `Json` / `serde_json::Value` persistence | relation/typed columns, or canonical `FromJsonQueryResult` document |
 | Split `use std::…` / `use crate::…` (same root, same attrs) | one tree: `use std::{…}` / `use crate::{…}` |
 | `unwrap()` in `src/` | `?` / structured errors |
 | `QuantError::Internal(` in production `src/` | typed `quant-pivot-error` sub-variant |

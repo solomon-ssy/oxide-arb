@@ -16,6 +16,11 @@ struct DatabaseClock {
 }
 
 #[derive(Debug, FromQueryResult)]
+struct AdvisoryLockAttempt {
+    acquired: bool,
+}
+
+#[derive(Debug, FromQueryResult)]
 pub(super) struct ShadowLatencyAggregate {
     pub decision_prepared_count: i64,
     pub decision_prepared_p95_ms: Option<i64>,
@@ -55,6 +60,29 @@ pub(super) async fn advisory_xact_lock(
         .to_owned();
     db.query_one(&query).await.map_err(StorageError::from)?;
     Ok(())
+}
+
+/// Try to acquire a transaction-scoped `PostgreSQL` advisory lock without
+/// blocking. The dialect function and result alias stay fixed in this module;
+/// callers provide only the typed integer lock namespace.
+pub(super) async fn try_advisory_xact_lock(
+    db: &impl ConnectionTrait,
+    key: i64,
+) -> Result<bool, StorageError> {
+    let query = Query::select()
+        .expr_as(
+            Func::cust(Alias::new("PG_TRY_ADVISORY_XACT_LOCK")).arg(Expr::value(key)),
+            Alias::new("acquired"),
+        )
+        .to_owned();
+    AdvisoryLockAttempt::find_by_statement(db.get_database_backend().build(&query))
+        .one(db)
+        .await
+        .map_err(StorageError::from)?
+        .map(|attempt| attempt.acquired)
+        .ok_or_else(|| {
+            StorageError::invariant_violation(None, "database returned no advisory-lock result")
+        })
 }
 
 /// Acquire a transaction-scoped advisory lock derived by `PostgreSQL` from a
@@ -183,6 +211,13 @@ pub(super) fn bool_or(column: impl IntoColumnRef) -> SimpleExpr {
 /// Cast a bound Rust enum value to its `PostgreSQL` native enum type.
 pub(super) fn enum_value<E: ActiveEnum>(value: &E) -> SimpleExpr {
     Expr::value(value.to_value()).cast_as(Alias::new(E::name().to_string()))
+}
+
+/// Produce a typed SQL `NULL` for a `PostgreSQL` native enum. This is required
+/// when an enum column participates in a `UNION` branch that has no value;
+/// leaving the null untyped lets `PostgreSQL` resolve an inner union as `text`.
+pub(super) fn enum_null<E: ActiveEnum>() -> SimpleExpr {
+    Expr::cust("NULL").cast_as(Alias::new(E::name().to_string()))
 }
 
 /// Cast `EXCLUDED.column` to its `PostgreSQL` native enum type.

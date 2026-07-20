@@ -356,7 +356,7 @@ const fn invalid_session_key(session: &SourceSliceInvalidSession) -> (&str, &str
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::builtin_research_profiles;
+    use crate::types::{ResearchProfileId, builtin_research_profiles};
 
     fn hash(index: u8) -> ContentHash {
         ContentHash::parse(format!("blake3:{index:064x}")).expect("hash")
@@ -370,7 +370,7 @@ mod tests {
         let profile = builtin_research_profiles()
             .expect("profiles")
             .into_iter()
-            .find(|profile| profile.profile_ref.id == "weather_forecast_24h")
+            .find(|profile| profile.profile_ref.id.as_str() == "weather_forecast_24h")
             .expect("weather profile");
         let program_hash = hash(200);
         let kinds = [
@@ -466,7 +466,7 @@ mod tests {
         let manifest = SourceSliceManifestV1 {
             format_version: SOURCE_SLICE_MANIFEST_FORMAT_VERSION,
             profile_ref: ResearchProfileRef {
-                id: "test".to_owned(),
+                id: ResearchProfileId::new("test"),
                 version: 1,
                 content_hash: hash.clone(),
             },

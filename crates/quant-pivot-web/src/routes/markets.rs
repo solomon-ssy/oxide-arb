@@ -18,7 +18,7 @@ use quant_pivot_models::{
         rbac::{Operation, ResourceType},
     },
     hashing::CanonicalDigest,
-    types::{MarketId, TokenId},
+    types::{ContentHash, MarketId, TokenId},
 };
 use serde::Serialize;
 use std::collections::HashSet;
@@ -291,7 +291,7 @@ pub async fn block(
     let request = body.into_inner();
     op_ctx.set_action(OperationCategory::Governance, "market.block");
     op_ctx.set_resource(ResourceType::Market, market_id.to_string());
-    op_ctx.set_detail(serde_json::json!({ "reason": request.reason }));
+    op_ctx.set_detail(serde_json::json!({ "reason": request.reason }))?;
     let before = state
         .markets
         .find_by_id(&market_id)
@@ -346,7 +346,7 @@ pub async fn unblock(
     op_ctx.set_detail(serde_json::json!({
         "reason": request.reason,
         "restore_status": request.restore_status.as_str(),
-    }));
+    }))?;
     let before = state
         .markets
         .find_by_id(&market_id)
@@ -378,8 +378,7 @@ pub async fn unblock(
     )))
 }
 
-fn canonical_state_hash<T: Serialize>(state: &T) -> Result<String, WebError> {
+fn canonical_state_hash<T: Serialize>(state: &T) -> Result<ContentHash, WebError> {
     CanonicalDigest::content_hash_json(state)
-        .map(|hash| hash.as_str().to_owned())
         .map_err(|error| WebError::Internal(format!("canonical state hash failed: {error}")))
 }

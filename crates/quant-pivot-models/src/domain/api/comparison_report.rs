@@ -11,7 +11,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     domain::{ModelComparisonReportInfo, pagination::PageRequest},
-    types::{BacktestReportId, ContentHash, ModelComparisonReportId, ModelRunId, ModelVersionId},
+    types::{
+        BacktestReportId, ContentHash, ModelComparisonReportId, ModelRunId, ModelVersionId,
+        backtest::CategoryRankIcDeltas,
+    },
 };
 
 /// Stored pairwise comparison of a candidate model against a baseline.
@@ -29,7 +32,7 @@ pub struct ModelComparisonReportView {
     pub score_correlation: Decimal,
     pub side_disagreement_rate: Decimal,
     pub common_samples: i64,
-    pub category_breakdown_diff: serde_json::Value,
+    pub category_breakdown_diff: CategoryRankIcDeltas,
     pub comparison_hash: ContentHash,
     pub created_at: DateTime<Utc>,
 }

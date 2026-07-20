@@ -8,7 +8,8 @@
 #      scope — merge siblings into a single brace tree:
 #        use std::{cmp::Ordering, panic::{self, AssertUnwindSafe}};
 #
-#   `pub use` re-exports are left alone (barrel modules).
+#   Canonical barrel `pub use` declarations are left alone. Compatibility
+#   re-exports are rejected by architecture/domain lints.
 #   Distinct `#[cfg(...)]` (or other attrs) on a `use` keep a separate tree —
 #   attrs cannot appear inside use-tree braces on stable Rust.
 #

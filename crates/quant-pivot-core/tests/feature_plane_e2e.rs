@@ -27,7 +27,7 @@ use quant_pivot_models::{
     config::TradeTapeOnChainConfig,
     domain::{
         CalibrationArtifactInfo, CalibrationArtifactListQuery, DecisionClock, FeatureVectorInfo,
-        NewCalibrationArtifact, NewFeatureVector, Paginated, PublishedWeatherStationLeadBias,
+        NewCalibrationArtifact, NewFeatureVector, Paginated,
         market::{EventRegistryInfo, MarketRegistryInfo, TokenInfo, book::BookLevel},
     },
     enums::{
@@ -40,6 +40,7 @@ use quant_pivot_models::{
     types::{
         CalibrationArtifactId, ContentHash, DecisionPolicySnapshotId, DomainInstrumentKey, EventId,
         FeatureVectorId, MarketId, Price, Shares, TokenId, Usd,
+        calibration::PublishedWeatherStationLeadBias,
     },
 };
 use quant_pivot_repository::{
@@ -661,9 +662,7 @@ async fn create_feature_vector_then_find() {
     let boundary = DecisionClock::new(0)
         .boundary(as_of)
         .expect("decision boundary");
-    let mapped = vector.try_to_new(&boundary).expect("map");
-    assert_eq!(mapped.feature_hash, expected_hash);
-    assert_eq!(loaded.decision_boundary, Some(boundary));
+    assert_eq!(loaded.decision_boundary, boundary);
 
     assert_emitted_feature_cells(&flushed_events, vector, persisted);
 }

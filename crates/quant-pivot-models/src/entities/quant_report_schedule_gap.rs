@@ -5,7 +5,7 @@ use sea_orm::entity::prelude::*;
 
 use crate::{
     enums::quant::ReportScheduleGapReason,
-    types::{DecisionPolicySnapshotId, ReportScheduleGapId},
+    types::{DecisionPolicySnapshotId, ReportScheduleGapId, ReportScheduleId},
 };
 
 #[sea_orm::model]
@@ -14,7 +14,7 @@ use crate::{
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub gap_id: ReportScheduleGapId,
-    pub schedule_id: String,
+    pub schedule_id: ReportScheduleId,
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub reason: ReportScheduleGapReason,
     pub first_scheduled_for: DateTime<Utc>,

@@ -27,8 +27,10 @@ pub struct Model {
     #[sea_orm(column_type = "Text", nullable)]
     pub description: Option<String>,
     /// Category memberships inherited from the parent event's Gamma tags.
+    #[sea_orm(column_type = r#"custom("qp_market_category[]")"#)]
     pub categories: Vec<MarketCategory>,
     pub status: MarketStatus,
+    #[sea_orm(column_type = r#"custom("qp_catalog_filter_reason[]")"#)]
     pub filter_reasons: Vec<CatalogFilterReason>,
     #[sea_orm(column_type = "Text", nullable)]
     pub outcome: Option<String>,

@@ -2,7 +2,11 @@
 
 use crate::{
     entities::quant_shadow_comparison,
-    types::{ContentHash, ModelVersionId, Probability, ShadowComparisonId},
+    enums::quant::ModelWeightSource,
+    types::{
+        ContentHash, ModelVersionId, Probability, ShadowComparisonId,
+        shadow::{ShadowMaturedOutcomeDelta, ShadowRankDelta, ShadowScoreDelta},
+    },
 };
 use chrono::{DateTime, Utc};
 use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
@@ -15,11 +19,12 @@ pub struct ShadowComparisonInfo {
     pub shadow_comparison_id: ShadowComparisonId,
     pub active_model_version_id: ModelVersionId,
     pub shadow_model_version_id: ModelVersionId,
+    pub weight_source: ModelWeightSource,
     pub decision_at: DateTime<Utc>,
     pub topn_overlap: Probability,
-    pub rank_delta_json: serde_json::Value,
-    pub score_delta_json: serde_json::Value,
-    pub matured_outcome_json: Option<serde_json::Value>,
+    pub rank_delta_json: ShadowRankDelta,
+    pub score_delta_json: ShadowScoreDelta,
+    pub matured_outcome_json: Option<ShadowMaturedOutcomeDelta>,
     pub hard_divergence: bool,
     pub comparison_hash: ContentHash,
     pub created_at: DateTime<Utc>,
@@ -32,6 +37,7 @@ info_from_model!(
         shadow_comparison_id,
         active_model_version_id,
         shadow_model_version_id,
+        weight_source,
         decision_at,
         topn_overlap,
         rank_delta_json,
@@ -50,11 +56,12 @@ pub struct NewShadowComparison {
     pub shadow_comparison_id: ShadowComparisonId,
     pub active_model_version_id: ModelVersionId,
     pub shadow_model_version_id: ModelVersionId,
+    pub weight_source: ModelWeightSource,
     pub decision_at: DateTime<Utc>,
     pub topn_overlap: Probability,
-    pub rank_delta_json: serde_json::Value,
-    pub score_delta_json: serde_json::Value,
-    pub matured_outcome_json: Option<serde_json::Value>,
+    pub rank_delta_json: ShadowRankDelta,
+    pub score_delta_json: ShadowScoreDelta,
+    pub matured_outcome_json: Option<ShadowMaturedOutcomeDelta>,
     pub hard_divergence: bool,
     pub comparison_hash: ContentHash,
 }

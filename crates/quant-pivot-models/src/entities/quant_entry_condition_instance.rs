@@ -1,16 +1,14 @@
 //! Recommendation-level durable entry-condition state.
 
-use chrono::{DateTime, Utc};
-use sea_orm::entity::prelude::*;
-use uuid::Uuid;
-
 use crate::{
     enums::quant::EntryConditionState,
     types::{
         ConditionTruth, ContentHash, EntryConditionArtifactId, EntryConditionFoldState,
-        EntryConditionInstanceId, OrderIntentId, RecommendationId,
+        EntryConditionInstanceId, OrderIntentId, RecommendationId, WorkerId,
     },
 };
+use chrono::{DateTime, Utc};
+use sea_orm::entity::prelude::*;
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -34,7 +32,7 @@ pub struct Model {
     pub last_evaluated_at: Option<DateTime<Utc>>,
     pub next_evaluation_at: Option<DateTime<Utc>>,
     pub expires_at: DateTime<Utc>,
-    pub lease_owner: Option<Uuid>,
+    pub lease_owner: Option<WorkerId>,
     pub lease_expires_at: Option<DateTime<Utc>>,
     pub lease_epoch: i64,
     pub claimed_by_intent_id: Option<OrderIntentId>,

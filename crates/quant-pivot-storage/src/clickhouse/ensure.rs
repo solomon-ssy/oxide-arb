@@ -10,6 +10,7 @@ use tracing::info;
 
 /// Maintenance catalog used for `CREATE DATABASE` bootstrap.
 const MAINTENANCE_DATABASE: &str = "default";
+const PREPRODUCTION_DATABASE: &str = "quant_pivot";
 
 /// Ensure the configured application database exists, creating it when absent.
 pub(super) async fn ensure_database(config: &ClickHouseConfig) -> Result<(), StorageError> {
@@ -67,6 +68,55 @@ pub(super) async fn database_exists(config: &ClickHouseConfig) -> Result<bool, S
                 "ClickHouse maintenance connection failed ({MAINTENANCE_DATABASE}): {error}"
             ))
         })
+}
+
+pub async fn database_object_count(config: &ClickHouseConfig) -> Result<u64, StorageError> {
+    validate_preproduction_target(config)?;
+    let client = maintenance_client(config);
+    client
+        .query("SELECT count() FROM system.tables WHERE database = ?")
+        .bind(&config.database)
+        .fetch_one::<u64>()
+        .await
+        .map_err(Into::into)
+}
+
+pub async fn reset_preproduction_database(config: &ClickHouseConfig) -> Result<(), StorageError> {
+    validate_preproduction_target(config)?;
+    let client = maintenance_client(config);
+    client
+        .query("DROP DATABASE IF EXISTS `quant_pivot` SYNC")
+        .execute()
+        .await
+        .map_err(|error| {
+            StorageError::Migration(format!("drop ClickHouse preproduction database: {error}"))
+        })?;
+    client
+        .query("CREATE DATABASE `quant_pivot`")
+        .execute()
+        .await
+        .map_err(|error| {
+            StorageError::Migration(format!("create ClickHouse preproduction database: {error}"))
+        })?;
+    Ok(())
+}
+
+fn validate_preproduction_target(config: &ClickHouseConfig) -> Result<(), StorageError> {
+    if config.database != PREPRODUCTION_DATABASE {
+        return Err(StorageError::Migration(format!(
+            "preproduction reset only permits ClickHouse database `{PREPRODUCTION_DATABASE}`; configured `{}`",
+            config.database
+        )));
+    }
+    validate_ch_identifier(&config.database, "database")
+}
+
+fn maintenance_client(config: &ClickHouseConfig) -> clickhouse::Client {
+    clickhouse::Client::default()
+        .with_url(&config.url)
+        .with_database(MAINTENANCE_DATABASE)
+        .with_user(&config.user)
+        .with_password(config.password.expose_secret())
 }
 
 /// Validate a `ClickHouse` unquoted identifier before embedding in DDL.

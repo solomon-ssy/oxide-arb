@@ -17,6 +17,7 @@ pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub training_dataset_id: TrainingDatasetId,
     pub model_spec_id: ModelSpecId,
+    pub model_spec_definition_hash: ContentHash,
     pub window_start: DateTime<Utc>,
     pub window_end: DateTime<Utc>,
     pub status: TrainingDatasetStatus,

@@ -249,7 +249,7 @@ impl ReportPublisher {
             if let Some(published_at) = current.published_at {
                 self.metrics
                     .report_current_age_seconds
-                    .with_label_values(&[&current.profile_id, current.report_kind.as_str()])
+                    .with_label_values(&[current.profile_id.as_str(), current.report_kind.as_str()])
                     .set((health.observed_at - published_at).num_seconds().max(0));
             }
         }

@@ -32,9 +32,15 @@ use std::collections::BTreeMap;
 use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
-    domain::{CalibrationArtifactInfo, NewCalibrationArtifact, query::TimeWindow},
+    domain::{
+        CalibrationArtifactInfo, CalibrationArtifactPayload, NewCalibrationArtifact,
+        query::TimeWindow,
+    },
     enums::{common::MarketCategory, quant::CalibrationKind},
-    types::{CalibrationArtifactId, ContentHash, MarketId, Price, Probability},
+    types::{
+        CalibrationArtifactId, ContentHash, MarketId, Price, Probability,
+        calibration::{CategoryBiasCurve, MarketPriceBiasPayload, PriceBiasBin, TtrBucketCurve},
+    },
 };
 use rust_decimal::{Decimal, prelude::FromPrimitive, prelude::ToPrimitive};
 use serde::{Deserialize, Serialize};
@@ -49,95 +55,30 @@ use crate::{
 /// CI, IC), matching the crate-wide `STAT_SCALE` so hashes are platform-stable.
 const STAT_SCALE: u32 = 12;
 
-/// One `(price_bucket)` empirical-bias record within a `(category, ttr_bucket)` curve.
-///
-/// A retained bin has enough samples **and** a bias whose Wilson interval excludes
-/// the implied mid (statistically distinct mispricing).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PriceBiasBin {
-    /// Inclusive lower price edge of the bin.
-    pub price_lo: Price,
-    /// Exclusive upper price edge (inclusive only for the top bin, `price_hi==1`).
-    pub price_hi: Price,
-    /// Bin mid (the representative implied probability).
-    pub implied_mid: Price,
-    /// Empirical settle-as-YES frequency across the bin's samples.
-    pub realized_frequency: Probability,
-    /// Signed bias `realized_frequency − implied_mid` (the correction).
-    pub bias: Decimal,
-    /// Wilson score interval `(lo, hi)` for `realized_frequency`.
-    pub bias_ci: (Decimal, Decimal),
-    /// Number of samples in the bin.
-    pub sample_count: u64,
+fn price_bin_contains(bin: &PriceBiasBin, mid: Decimal) -> bool {
+    let lo = bin.price_lo.inner();
+    let hi = bin.price_hi.inner();
+    mid >= lo && (mid < hi || (hi == Decimal::ONE && mid <= hi))
 }
 
-impl PriceBiasBin {
-    /// Whether `mid` falls in this bin under the shared half-open convention
-    /// `[lo, hi)`, with the top bin (`price_hi == 1`) closed on the right.
-    #[must_use]
-    fn contains(&self, mid: Decimal) -> bool {
-        let lo = self.price_lo.inner();
-        let hi = self.price_hi.inner();
-        mid >= lo && (mid < hi || (hi == Decimal::ONE && mid <= hi))
+fn category_bias_for(
+    category: &CategoryBiasCurve,
+    ttr_secs: u64,
+    mid: Price,
+    ic_gate: bool,
+) -> Option<Decimal> {
+    let curve = category.by_ttr.iter().find(|curve| {
+        ttr_secs >= curve.ttr_lo_secs && curve.ttr_hi_secs.is_none_or(|hi| ttr_secs < hi)
+    })?;
+    if ic_gate && !curve.ic_significant {
+        return None;
     }
-}
-
-/// A per-`(category, ttr_bucket)` empirical-bias curve over price buckets.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TtrBucketCurve {
-    /// Inclusive lower time-to-resolution edge, in seconds.
-    pub ttr_lo_secs: u64,
-    /// Exclusive upper time-to-resolution edge, in seconds (`None` = unbounded
-    /// top bucket).
-    pub ttr_hi_secs: Option<u64>,
-    /// Price-ordered bins (only bins clearing `min_bin_samples` and the Wilson
-    /// significance gate are retained).
-    pub bins: Vec<PriceBiasBin>,
-    /// In-sample information coefficient of the bias signal for this curve.
-    pub ic: Decimal,
-    /// Whether the curve's IC cleared the significance gate (Student-t).
-    pub ic_significant: bool,
-    /// Total samples used to fit the curve.
-    pub sample_count: u64,
-}
-
-impl TtrBucketCurve {
-    /// Whether `ttr_secs` falls in this bucket under `[lo, hi)` (top unbounded).
-    #[must_use]
-    fn contains_ttr(&self, ttr_secs: u64) -> bool {
-        ttr_secs >= self.ttr_lo_secs && self.ttr_hi_secs.is_none_or(|hi| ttr_secs < hi)
-    }
-
-    /// The bias for a mid price, or `None` when no retained bin contains it.
-    #[must_use]
-    fn bias_for(&self, mid: Price) -> Option<Decimal> {
-        let mid = mid.inner();
-        self.bins
-            .iter()
-            .find(|bin| bin.contains(mid))
-            .map(|bin| bin.bias)
-    }
-}
-
-/// A per-category empirical-bias curve, conditioned on time to resolution.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CategoryBiasCurve {
-    /// Time-to-resolution-ordered bucket curves (ascending `ttr_lo_secs`).
-    pub by_ttr: Vec<TtrBucketCurve>,
-    /// Total samples across all retained ttr buckets.
-    pub sample_count: u64,
-}
-
-impl CategoryBiasCurve {
-    /// The bias for `(ttr_secs, mid)`, honoring the IC gate.
-    #[must_use]
-    fn bias_for(&self, ttr_secs: u64, mid: Price, ic_gate: bool) -> Option<Decimal> {
-        let curve = self.by_ttr.iter().find(|c| c.contains_ttr(ttr_secs))?;
-        if ic_gate && !curve.ic_significant {
-            return None;
-        }
-        curve.bias_for(mid)
-    }
+    let mid = mid.inner();
+    curve
+        .bins
+        .iter()
+        .find(|bin| price_bin_contains(bin, mid))
+        .map(|bin| bin.bias)
 }
 
 /// A content-addressed favorite-longshot bias table — the `MarketPriceBias`
@@ -172,8 +113,8 @@ impl FavoriteLongshotBiasTable {
         ic_gate: bool,
     ) -> Option<Decimal> {
         self.by_category
-            .get(&category)?
-            .bias_for(ttr_secs, mid, ic_gate)
+            .get(&category)
+            .and_then(|curve| category_bias_for(curve, ttr_secs, mid, ic_gate))
     }
 
     /// Rehydrate a persisted `MarketPriceBias` artifact into the compute-domain
@@ -212,12 +153,15 @@ impl FavoriteLongshotBiasTable {
                 ),
             }));
         }
-        let by_category: BTreeMap<MarketCategory, CategoryBiasCurve> =
-            serde_json::from_value(info.payload_json.clone()).map_err(|error| {
-                QuantError::from(ResearchError::DatasetBuild {
-                    detail: format!("bias-table payload deserialization failed: {error}"),
-                })
-            })?;
+        let CalibrationArtifactPayload::MarketPriceBias(payload) = &info.payload else {
+            return Err(QuantError::from(ResearchError::DatasetBuild {
+                detail: format!(
+                    "calibration artifact `{}` kind/payload discriminator mismatch",
+                    info.artifact_id
+                ),
+            }));
+        };
+        let by_category = payload.by_category.clone();
         let fit_window = TimeWindow::new(info.fit_window_start, info.fit_window_end);
         let recomputed = ResearchHasher::canonical(&BiasTableCanonical {
             fit_window: &fit_window,
@@ -257,11 +201,6 @@ impl TryFrom<FavoriteLongshotBiasTable> for NewCalibrationArtifact {
             i64::try_from(total_samples).map_err(|error| ResearchError::DatasetBuild {
                 detail: format!("bias-table sample count exceeds Postgres bigint: {error}"),
             })?;
-        let payload_json = serde_json::to_value(&table.by_category).map_err(|error| {
-            ResearchError::DatasetBuild {
-                detail: format!("bias-table payload serialization failed: {error}"),
-            }
-        })?;
         Ok(Self {
             artifact_id: table.table_id,
             kind: CalibrationKind::MarketPriceBias,
@@ -270,7 +209,9 @@ impl TryFrom<FavoriteLongshotBiasTable> for NewCalibrationArtifact {
             fit_window_start: table.fit_window.from,
             fit_window_end: table.fit_window.to,
             sample_count,
-            payload_json,
+            payload: CalibrationArtifactPayload::MarketPriceBias(MarketPriceBiasPayload {
+                by_category: table.by_category,
+            }),
             active: false,
         })
     }
@@ -502,7 +443,7 @@ fn curve_ic(samples: &[&BiasSample], curve: &[PriceBiasBin]) -> Decimal {
         let mid = sample.entry_mid.inner();
         let Some(bias) = curve
             .iter()
-            .find(|bucket| bucket.contains(mid))
+            .find(|bucket| price_bin_contains(bucket, mid))
             .map(|bucket| bucket.bias)
         else {
             continue;
@@ -566,14 +507,17 @@ fn ic_is_significant(
 
 #[cfg(test)]
 mod tests {
-    use crate::{hashing::ResearchHasher, model::CategoryBiasCurve};
+    use crate::hashing::ResearchHasher;
 
     use super::{BiasFitConfig, BiasSample, BiasTableCanonical, FavoriteLongshotBiasTable};
     use chrono::{TimeZone, Utc};
     use quant_pivot_models::{
-        domain::{CalibrationArtifactInfo, query::TimeWindow},
+        domain::{CalibrationArtifactInfo, CalibrationArtifactPayload, query::TimeWindow},
         enums::{common::MarketCategory, quant::CalibrationKind},
-        types::{CalibrationArtifactId, ContentHash, MarketId, Price},
+        types::{
+            CalibrationArtifactId, ContentHash, MarketId, Price,
+            calibration::{CategoryBiasCurve, MarketPriceBiasPayload},
+        },
     };
     use rust_decimal::Decimal;
     use std::collections::BTreeMap;
@@ -743,7 +687,9 @@ mod tests {
             fit_window_end: fit_window.to,
             calibration_split_hash,
             sample_count: 1_000,
-            payload_json: serde_json::to_value(&by_category).expect("payload json"),
+            payload: CalibrationArtifactPayload::MarketPriceBias(MarketPriceBiasPayload {
+                by_category,
+            }),
             active,
             created_at: Utc::now(),
         }

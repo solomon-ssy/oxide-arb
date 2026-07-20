@@ -1,7 +1,7 @@
 //! Admin port for authoring governed model specifications.
 //!
 //! A model spec is the root of the offline research lifecycle
-//! (`Draft ModelSpec → Dataset Plan → … → Published ModelVersion`). This port
+//! (`immutable ModelSpec → Dataset Plan → … → Published ModelVersion`). This port
 //! is the production write path an operator uses to mint a spec before planning
 //! a training dataset or training a version.
 
@@ -11,10 +11,13 @@ use quant_pivot_error::QuantResult;
 use crate::{
     domain::{FeatureContractView, GovernanceActor, ModelSpecInfo},
     enums::model::ModelFamily,
-    types::{ModelInputContract, ModelSpecId, ModelTrainingContract, SchemaVersion},
+    types::{
+        ModelInputContract, ModelSpecId, ModelTrainingContract, SchemaVersion,
+        model_spec::ModelSpecThesis,
+    },
 };
 
-/// Service input to author a new `draft` model specification.
+/// Service input to author a new immutable model specification.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateModelSpecCommand {
     /// Human-facing spec name shown in the catalog picker.
@@ -27,14 +30,14 @@ pub struct CreateModelSpecCommand {
     pub feature_schema_version: SchemaVersion,
     /// Label schema version the spec targets.
     pub label_schema_version: SchemaVersion,
-    /// Free-form authoring metadata.
-    pub spec_json: serde_json::Value,
+    /// Closed research thesis; executable parameters cannot be stored here.
+    pub thesis: ModelSpecThesis,
     /// Ordered raw-input contract. It is validated against the governed feature
     /// schema before persistence and never accepts transform-generated columns.
     pub input_contract: ModelInputContract,
     /// Frozen supervised target and CV policy.
     pub training_contract: ModelTrainingContract,
-    /// Operator reason (HTTP op-log only).
+    /// Mandatory authoring rationale frozen atomically with the WORM spec.
     pub reason: String,
 }
 

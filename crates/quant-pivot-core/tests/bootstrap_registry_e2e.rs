@@ -12,7 +12,9 @@ use quant_pivot_core::governance::{
     FactorGovernanceDeps, FactorGovernanceService, ModelSpecDeps, ModelSpecService,
 };
 use quant_pivot_core::runtime_config::DecisionPolicyStore;
-use quant_pivot_models::types::{ModelInputContract, ModelTrainingContract};
+use quant_pivot_models::types::{
+    ModelInputContract, ModelTrainingContract, model_spec::ModelSpecThesis,
+};
 use quant_pivot_models::{
     domain::{
         CreateModelSpecCommand, FactorGovernancePort, GovernanceActor, ModelSpecPort,
@@ -20,7 +22,7 @@ use quant_pivot_models::{
     },
     enums::{model::ModelFamily, quant::PublicationStatus},
     runtime_config::{DecisionPolicySnapshot, DomainConfig, FactorsConfig, FeaturesConfig},
-    types::SchemaVersion,
+    types::{RoleCode, SchemaVersion},
 };
 use quant_pivot_repository::{
     postgres::{PgFactorRepository, PgModelRegistryRepository},
@@ -30,8 +32,9 @@ use quant_pivot_test_support::pg::setup_pg;
 
 fn actor() -> GovernanceActor {
     GovernanceActor {
+        user_id: None,
         username: "bootstrap-it".to_owned(),
-        role: Some("risk_owner".to_owned()),
+        role: Some(RoleCode::new("risk_owner")),
     }
 }
 
@@ -52,9 +55,15 @@ async fn model_spec_service_authors_draft_spec() {
                 name: "buy-weighted-baseline".to_owned(),
                 model_family: ModelFamily::WeightedFactor,
                 prediction_horizon_secs: 86_400,
-                feature_schema_version: SchemaVersion::new(7),
+                feature_schema_version: SchemaVersion::FIRST,
                 label_schema_version: SchemaVersion::FIRST,
-                spec_json: serde_json::json!({ "notes": "day-1 cold-start ranker" }),
+                thesis: ModelSpecThesis {
+                    summary: "Day-1 cold-start ranker".to_owned(),
+                    hypothesis: "Governed factors predict positive forward net returns".to_owned(),
+                    limitations: vec![
+                        "Valid only under the frozen Polymarket research contract".to_owned(),
+                    ],
+                },
                 input_contract: ModelInputContract::single_required("book.mid"),
                 training_contract: ModelTrainingContract::settlement_default(),
                 reason: "bootstrap the first model spec".to_owned(),
@@ -68,9 +77,12 @@ async fn model_spec_service_authors_draft_spec() {
     assert_eq!(created.model_family, ModelFamily::WeightedFactor);
     assert_eq!(created.prediction_horizon_secs, 86_400);
     assert_eq!(
-        created.status,
-        PublicationStatus::Draft,
-        "a freshly authored spec must be a draft"
+        created
+            .definition()
+            .content_hash()
+            .expect("definition hash"),
+        created.definition_hash,
+        "the persisted immutable definition must verify"
     );
 
     let found = service

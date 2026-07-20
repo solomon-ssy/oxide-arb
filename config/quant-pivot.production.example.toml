@@ -18,15 +18,12 @@
 # Loading precedence (later wins):
 #   1. compiled-in defaults
 #   2. quant-pivot.toml
-#   3. quant-pivot.local.toml  (optional, gitignored — see quant-pivot.local.toml.example)
-#   4. QUANT_PIVOT__* environment variables
+#   3. quant-pivot.local.toml (optional, gitignored; non-secret overrides only)
+#   4. QUANT_PIVOT__* environment variables (non-secret overrides only)
 #
-# Sensitive fields — set via env OR quant-pivot.local.toml (never commit real values):
-#
-#   QUANT_PIVOT__KEYS__PRIVATE_KEY=0x...   # bot wallet; L2 creds auto-derived at connect
-#   QUANT_PIVOT__DB__POSTGRES__PASSWORD=...
-#   QUANT_PIVOT__DB__CLICKHOUSE__PASSWORD=...
-#   QUANT_PIVOT__WEB__JWT__SIGNING_KEY=... # Base64URL-no-pad 32-byte HS256 key
+# Secret values never belong in TOML or environment variables. TOML stores only
+# typed systemd credential names; systemd `LoadCredential=` mounts the 0400/0600
+# files below `$CREDENTIALS_DIRECTORY` for one-time startup resolution.
 #
 # Unknown keys are FATAL at startup (deny_unknown_fields): stale sections from
 # older layouts ([detection], [risk], [sizing], [treasury], [analytics], ...)
@@ -40,11 +37,8 @@ environment = "production"
 # sealing, change both this declaration and project-lifecycle.toml to
 # production_frozen before the next deployment; startup rejects any mismatch.
 expected_state = "pre_production_resettable"
-# Required by the production-seal preflight. Replace with the deployed commit.
-# build_commit = "0123456789abcdef0123456789abcdef01234567"
-# Required hashes of immutable deployment-pipeline evidence bundles.
-# backup_evidence_hash = "blake3:<64 lowercase hex>"
-# config_e2e_evidence_hash = "blake3:<64 lowercase hex>"
+# Git commit and clean/dirty state are embedded by the compiled artifact.
+# Backup/restore and protected Config E2E evidence are WORM database artifacts.
 
 # ── Polymarket Platform ───────────────────────────────────────────────────────
 
@@ -68,10 +62,9 @@ chain_id = 137
 # CTF oracle / on-chain reads + governed redeem transactions.
 [polymarket.onchain]
 # Purpose: Polygon JSON-RPC endpoint. Impact: CTF resolution oracle and
-# on-chain redemption. Caution: public RPCs rate-limit — use a dedicated
-# provider in production. Override via QUANT_PIVOT__POLYMARKET__ONCHAIN__RPC_URL.
-# Default: "https://polygon-rpc.com".
-rpc_url = "https://polygon-mainnet.g.alchemy.com/v2/REPLACE_WITH_ALCHEMY_KEY"
+# on-chain redemption. Production uses an authenticated full URL from a
+# protected systemd credential; the value never appears in TOML, logs, or UI.
+rpc_endpoint = { source = "systemd_credential", credential = { name = "polygon-rpc-url" } }
 # Purpose: RPC request timeout (ms). Impact: hard per-call bound on the Polygon
 # JSON-RPC client — a money-moving redeem/oracle call fails after this instead
 # of hanging (reqwest has no default timeout). Default: 10000.
@@ -270,12 +263,9 @@ application_name = "quant-pivot"
 
 [db.postgres.migration]
 # Runtime credentials never execute DDL or catalog seeds in production.
-# The role name is non-secret; inject only its credential through the secret manager.
+# The role name is non-secret; the password is a typed credential reference.
 user = "quant_pivot_migrator"
-# Secret-manager binding:
-# QUANT_PIVOT__DB__POSTGRES__MIGRATION__PASSWORD
-# Do not place `password` in the production runtime configuration; xtask may
-# consume a deployment-only overlay containing this field.
+password = { name = "postgres-migration-password" }
 # PostgreSQL apply also requires a one-time bootstrap administrator password
 # mounted as a 0400/0600 regular file and referenced by:
 # QUANT_PIVOT_BOOTSTRAP__ADMIN_PASSWORD_FILE
@@ -312,9 +302,9 @@ max_concurrent_inserts = 8
 # Phase 11.8 migration 2 is clean-slate/offline and must be applied explicitly
 # before runtime writers start; non-empty legacy fact tables fail closed.
 user = "quant_pivot_migrator"
-# Caution: production should use a dedicated DDL identity. Supply these only
-# through the secret manager/environment, never in this file:
-# QUANT_PIVOT__DB__CLICKHOUSE__MIGRATION__PASSWORD
+# Caution: production must use a dedicated DDL identity. The value is resolved
+# from this systemd credential only in the deployment command.
+password = { name = "clickhouse-migration-password" }
 # The runtime role still needs metadata visibility plus SELECT on the migration
 # ledger/claim tables so post-migration verification can fail closed.
 

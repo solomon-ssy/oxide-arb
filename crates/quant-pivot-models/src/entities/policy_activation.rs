@@ -4,7 +4,7 @@ use crate::{
     enums::runtime_config::{ConfigResourceKind, PolicyActivationKind, PolicyActorKind},
     types::{
         AuditEventId, ContentHash, DecisionPolicySnapshotId, PolicyActivationId, PolicyApprovalId,
-        PolicyIdempotencyKey, PolicyRevisionId, UserId,
+        PolicyBundleGeneration, PolicyIdempotencyKey, PolicyRevisionId, UserId,
     },
 };
 use chrono::{DateTime, Utc};
@@ -14,6 +14,8 @@ use sea_orm::entity::prelude::*;
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "policy_activation")]
 pub struct Model {
+    pub bundle_generation: PolicyBundleGeneration,
+    pub expected_bundle_generation: PolicyBundleGeneration,
     #[sea_orm(primary_key, auto_increment = false)]
     pub policy_activation_id: PolicyActivationId,
     pub resource_kind: ConfigResourceKind,
@@ -37,7 +39,8 @@ pub struct Model {
     #[sea_orm(unique)]
     #[sea_orm(column_type = "Text")]
     pub idempotency_key: PolicyIdempotencyKey,
-    pub audit_event_id: Option<AuditEventId>,
+    pub activation_request_hash: ContentHash,
+    pub audit_event_id: AuditEventId,
     #[sea_orm(default_expr = "Expr::current_timestamp()")]
     pub created_at: DateTime<Utc>,
 

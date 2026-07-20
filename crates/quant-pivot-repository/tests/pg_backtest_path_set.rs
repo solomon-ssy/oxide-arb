@@ -3,8 +3,8 @@
 use chrono::{Duration as ChronoDuration, Utc};
 use quant_pivot_models::{
     domain::{
-        CompleteTrainingDatasetBuild, NewBacktestPathSet, NewModelRun, NewModelSpec,
-        NewModelVersion, NewTrainingDatasetPlan,
+        CompleteTrainingDatasetBuild, NewBacktestPathSet, NewModelRun, NewModelVersion,
+        NewTrainingDatasetPlan,
     },
     enums::{
         model::ModelFamily,
@@ -16,7 +16,11 @@ use quant_pivot_models::{
         ArtifactUri, BacktestPathSetId, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION,
         DatasetCoverage, DatasetManifest, DecisionPolicySnapshotId, ModelInputContract, ModelRunId,
         ModelSpecId, ModelTrainingContract, ModelVersionId, SchemaVersion, TrainingDatasetId,
-        TrainingHorizonsSecs, TrainingSampleSources, default_sample_sources,
+        TrainingHorizonsSecs, TrainingSampleSources,
+        backtest::{BacktestPaths, SharpeDistribution},
+        default_sample_sources,
+        model_metrics::ModelVersionMetrics,
+        model_training::ModelTrainingObjective,
     },
 };
 use quant_pivot_repository::{
@@ -58,18 +62,16 @@ async fn seed_model_spec(db: &sea_orm::DatabaseConnection) -> ModelSpecId {
     let registry = PgModelRegistryRepository::new(db.clone());
     let model_spec_id = ModelSpecId::from_v7();
     registry
-        .create_model_spec(NewModelSpec {
-            model_spec_id: model_spec_id.clone(),
-            name: "pg-path-set-it".to_owned(),
-            model_family: ModelFamily::WeightedFactor,
-            prediction_horizon_secs: 86_400,
-            feature_schema_version: SchemaVersion::FIRST,
-            label_schema_version: SchemaVersion::FIRST,
-            spec_json: serde_json::json!({}),
-            input_contract: ModelInputContract::single_required("book.mid"),
-            training_contract: ModelTrainingContract::settlement_default(),
-            status: PublicationStatus::Published,
-        })
+        .create_model_spec(
+            quant_pivot_test_support::model_spec_fixtures::new_model_spec_fixture(
+                model_spec_id.clone(),
+                "pg-path-set-it",
+                ModelFamily::WeightedFactor,
+                86_400,
+                ModelInputContract::single_required("book.mid"),
+                ModelTrainingContract::settlement_default(),
+            ),
+        )
         .await
         .expect("model spec");
     model_spec_id
@@ -83,6 +85,16 @@ async fn seed_training_dataset(
 ) -> TrainingDatasetId {
     let training_dataset_id = TrainingDatasetId::from_v7();
     let window_end = window_start + ChronoDuration::hours(1);
+    let model_spec_definition_hash =
+        quant_pivot_test_support::model_spec_fixtures::new_model_spec_fixture(
+            model_spec_id.clone(),
+            "pg-path-set-it",
+            ModelFamily::WeightedFactor,
+            86_400,
+            ModelInputContract::single_required("book.mid"),
+            ModelTrainingContract::settlement_default(),
+        )
+        .definition_hash;
     let manifest = DatasetManifest {
         format_version: DATASET_ARTIFACT_FORMAT_VERSION,
         training_dataset_id: training_dataset_id.clone(),
@@ -90,6 +102,7 @@ async fn seed_training_dataset(
         research_program_hash: content_hash('4'),
         source_slice: quant_pivot_test_support::execution_pg_seed::source_slice_ref('5'),
         model_spec_id: model_spec_id.clone(),
+        model_spec_definition_hash: model_spec_definition_hash.clone(),
         trade_policy_artifact_id: None,
         trade_policy_hash: None,
         decision_policy_snapshot_id: rc_id.clone(),
@@ -111,6 +124,7 @@ async fn seed_training_dataset(
         .create_plan(NewTrainingDatasetPlan {
             training_dataset_id: training_dataset_id.clone(),
             model_spec_id: model_spec_id.clone(),
+            model_spec_definition_hash,
             window_start,
             window_end,
             purpose: DatasetPurpose::Training,
@@ -171,9 +185,10 @@ async fn seed_model_version_and_run(
             trade_policy_artifact_id: None,
             trade_policy_hash: None,
             publish_path_set_id: None,
-            metrics_json: serde_json::json!({}),
-            training_objective_json: serde_json::json!({"kind": "not_trained"}),
-            quality_gate_report: serde_json::json!({}),
+            derivation: NewModelVersion::training_derivation(),
+            metrics: ModelVersionMetrics::not_measured("test fixture"),
+            training_objective: ModelTrainingObjective::hand_authored("test fixture"),
+            quality_gate_report: None,
             publication_status: PublicationStatus::Candidate,
             published_at: None,
             retired_at: None,
@@ -194,7 +209,6 @@ async fn seed_model_version_and_run(
             status: ModelRunStatus::Succeeded,
             input_hash: content_hash('b'),
             output_hash: Some(content_hash('d')),
-            metrics_json: serde_json::json!({}),
             error_code: None,
             error_message: None,
             started_at: Utc::now(),
@@ -230,14 +244,17 @@ async fn quant_backtest_path_set_migration_and_crud() {
             path_count: 7,
             combination_count: 28,
             median_rank_ic: dec!(0.12),
-            sharpe_distribution: serde_json::json!({
-                "min": "0.1",
-                "p25": "0.4",
-                "median": "0.8",
-                "p75": "1.1",
-                "max": "1.5"
-            }),
-            paths: serde_json::json!([]),
+            sharpe_distribution: SharpeDistribution {
+                min: dec!(0.1),
+                p25: dec!(0.4),
+                median: dec!(0.8),
+                p75: dec!(1.1),
+                max: dec!(1.5),
+                median_max_drawdown: None,
+                median_tail_loss: None,
+                baseline_uplift: None,
+            },
+            paths: BacktestPaths::default(),
             deflated_sharpe: dec!(0.96),
             dsr_benchmark_sharpe: dec!(0.4),
             pbo: dec!(0.25),

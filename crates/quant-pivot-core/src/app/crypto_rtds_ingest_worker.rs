@@ -124,9 +124,7 @@ impl CryptoRtdsIngestWorker {
     ) -> QuantResult<BTreeSet<DomainInstrumentKey>> {
         let mut desired = static_rtds_instruments(source_kind);
         for row in self.linkages.latest_for_active_markets().await? {
-            let linkage = row.into_domain().map_err(|error| {
-                QuantError::config(format!("invalid active linkage payload: {error}"))
-            })?;
+            let linkage = row.into_domain();
             let LinkageOutcome::Resolved(resolved) = linkage.outcome else {
                 continue;
             };

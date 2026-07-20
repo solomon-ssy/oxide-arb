@@ -5,7 +5,9 @@ use sea_orm::entity::prelude::*;
 
 use crate::{
     enums::quant::ResearchReadinessEvidenceKind,
-    types::{ArtifactUri, ContentHash, ResearchReadinessEvidencePayload},
+    types::{
+        ArtifactUri, ContentHash, ResearchReadinessEvidenceId, ResearchReadinessEvidencePayload,
+    },
 };
 
 #[sea_orm::model]
@@ -13,7 +15,7 @@ use crate::{
 #[sea_orm(table_name = "quant_research_readiness_evidence")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
-    pub evidence_id: Uuid,
+    pub evidence_id: ResearchReadinessEvidenceId,
     pub kind: ResearchReadinessEvidenceKind,
     pub scope_hash: ContentHash,
     pub window_start: DateTime<Utc>,

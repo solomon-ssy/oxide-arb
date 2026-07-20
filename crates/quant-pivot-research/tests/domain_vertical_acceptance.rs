@@ -31,7 +31,7 @@ use quant_pivot_models::{
         BinanceSymbol, CatalogEventChangeId, CatalogMarketChangeId, CatalogSyncBatchId,
         ChainlinkFeedKey, ContentHash, CryptoAsset, CryptoQuote, DomainInstrumentKey,
         DomainSourceId, EventId, MarketId, MarketLinkageId, Price, Probability, ResolverVersion,
-        SchemaVersion, Shares, TokenId, Usd,
+        SchemaVersion, Shares, TokenId, Usd, stable_name::FactorName,
     },
 };
 use quant_pivot_research::{
@@ -40,7 +40,7 @@ use quant_pivot_research::{
         build_domain_slice_inputs, linkage_valid_at,
     },
     factors::{
-        DomainFactorRegistry, FactorEngine, FactorName, MarketFactorOutcome, ScoredFactor,
+        DomainFactorRegistry, FactorEngine, MarketFactorOutcome, ScoredFactor,
         names::{DOMAIN_CRYPTO_BETA_REGIME, DOMAIN_CRYPTO_STRIKE_PRESSURE},
     },
     features::{

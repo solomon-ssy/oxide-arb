@@ -41,7 +41,7 @@ use crate::{
 ///
 /// `Serialize` is derived so the request can be frozen verbatim into a durable
 /// research-job's `params_json` (the async job ledger replays it on execute).
-#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Validate)]
 #[validate(schema(function = "validate_build_training_dataset_request"))]
 #[serde(deny_unknown_fields)]
 pub struct BuildTrainingDatasetRequest {
@@ -99,6 +99,7 @@ pub struct TrainingDatasetPlanView {
     /// Pre-assigned id that the subsequent build will use (stable across plan → build).
     pub training_dataset_id: TrainingDatasetId,
     pub model_spec_id: ModelSpecId,
+    pub model_spec_definition_hash: ContentHash,
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub window_start: DateTime<Utc>,
     pub window_end: DateTime<Utc>,
@@ -129,6 +130,7 @@ pub struct TrainingDatasetPlanView {
 pub struct TrainingDatasetView {
     pub training_dataset_id: TrainingDatasetId,
     pub model_spec_id: ModelSpecId,
+    pub model_spec_definition_hash: ContentHash,
     pub window_start: DateTime<Utc>,
     pub window_end: DateTime<Utc>,
     /// Lifecycle state — UI should map to badges and gate trainer actions on `ready`.
@@ -188,6 +190,7 @@ impl From<TrainingDatasetInfo> for TrainingDatasetView {
         Self {
             training_dataset_id: info.training_dataset_id,
             model_spec_id: info.model_spec_id,
+            model_spec_definition_hash: info.model_spec_definition_hash,
             window_start: info.window_start,
             window_end: info.window_end,
             status: info.status,

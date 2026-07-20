@@ -9,18 +9,19 @@ use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use quant_pivot_models::{
     domain::{
         CompleteTrainingDatasetBuild, NewBacktestReport, NewFactorDefinition,
-        NewModelComparisonReport, NewModelRun, NewModelSpec, NewModelVersion,
-        NewTrainingDatasetPlan,
+        NewModelComparisonReport, NewModelRun, NewModelVersion, NewTrainingDatasetPlan,
     },
     entities::{
         quant_backtest_report, quant_factor_definition, quant_model_comparison_report,
         quant_model_spec, quant_model_version, quant_training_dataset,
     },
     enums::{
-        factor::{FactorDefinitionScope, FactorFamily},
+        common::MarketCategory,
+        factor::{FactorDefinitionScope, FactorFamily, FactorNormalization},
         model::ModelFamily,
         quant::{
-            DatasetPurpose, ModelRunKind, ModelRunStatus, PublicationStatus, TrainingDatasetStatus,
+            DatasetPurpose, FactorDirection, ModelRunKind, ModelRunStatus, PublicationStatus,
+            TrainingDatasetStatus,
         },
     },
     types::{
@@ -28,7 +29,20 @@ use quant_pivot_models::{
         DatasetCoverage, DatasetManifest, DecisionPolicySnapshotId, FactorDefinitionId,
         ModelComparisonReportId, ModelInputContract, ModelRunId, ModelSpecId,
         ModelTrainingContract, ModelVersionId, Probability, SchemaVersion, TrainingDatasetId,
-        TrainingHorizonsSecs, TrainingSampleSources, default_sample_sources,
+        TrainingHorizonsSecs, TrainingSampleSources,
+        backtest::{
+            CategoryMetric, CategoryMetrics, CategoryRankIcDelta, CategoryRankIcDeltas,
+            ExpectedVsRealized, PnlCurvePoint, PnlSimulation,
+        },
+        default_sample_sources,
+        factor::{FactorDefinitionDocument, FactorOutputKind, factor_definition_content_hash},
+        model_metrics::{
+            HeldOutMetricKind, LearningToRankInSampleMetrics, ModelArtifactTrainingLineage,
+            ModelValidationMetrics, ModelVersionMetrics, ObjectiveComponentMetrics,
+            RankingDiagnosticsMetrics,
+        },
+        model_training::{ModelTrainingObjective, TrainingObjectiveSpec},
+        stable_name::FactorName,
     },
 };
 use quant_pivot_repository::{
@@ -49,6 +63,7 @@ use sea_orm::{
 
 use crate::{
     execution_pg_seed::{SharedDemoInfra, fixture_profile_ref, source_slice_ref},
+    model_spec_fixtures::new_model_spec_fixture,
     seeded_uuid,
 };
 
@@ -96,6 +111,12 @@ pub async fn seed_research_ui_demo_pg(
     let factors = PgFactorRepository::new(db.clone());
 
     let primary_spec_id = primary_model_spec_id(db).await;
+    let primary_spec_definition_hash = registry
+        .find_model_spec_by_id(&primary_spec_id)
+        .await
+        .expect("load primary model spec")
+        .expect("primary model spec")
+        .definition_hash;
     let mut summary = ResearchUiSeedSummary {
         primary_model_spec_id: Some(primary_spec_id.clone()),
         baseline_model_version_id: Some(infra.model_version_id.clone()),
@@ -106,6 +127,7 @@ pub async fn seed_research_ui_demo_pg(
     summary.datasets = seed_training_datasets(
         &datasets,
         &primary_spec_id,
+        &primary_spec_definition_hash,
         &infra.decision_policy_snapshot_id,
         &mut summary,
     )
@@ -277,33 +299,41 @@ fn row_count(count: u64) -> usize {
 }
 
 async fn seed_secondary_model_spec(registry: &PgModelRegistryRepository) -> usize {
+    let spec = new_model_spec_fixture(
+        ModelSpecId::from_v7(),
+        RESEARCH_MARKER_SPEC,
+        ModelFamily::ClassicalLogisticRegression,
+        43_200,
+        ModelInputContract::single_required("book.mid"),
+        ModelTrainingContract::settlement_default(),
+    );
     registry
-        .create_model_spec(NewModelSpec {
-            model_spec_id: ModelSpecId::from_v7(),
-            name: RESEARCH_MARKER_SPEC.to_owned(),
-            model_family: ModelFamily::ClassicalLogisticRegression,
-            prediction_horizon_secs: 43_200,
-            feature_schema_version: SchemaVersion::FIRST,
-            label_schema_version: SchemaVersion::FIRST,
-            spec_json: serde_json::json!({
-                "ui_demo": true,
-                "notes": "secondary spec for model-spec catalog filters"
-            }),
-            input_contract: ModelInputContract::single_required("book.mid"),
-            training_contract: ModelTrainingContract::settlement_default(),
-            status: PublicationStatus::Draft,
-        })
+        .create_model_spec(spec)
         .await
         .expect("secondary model spec");
     1
 }
 
+struct TrainingDatasetSeedContext<'a> {
+    repo: &'a PgTrainingDatasetRepository,
+    model_spec_id: &'a ModelSpecId,
+    model_spec_definition_hash: &'a ContentHash,
+    decision_policy_snapshot_id: &'a DecisionPolicySnapshotId,
+}
+
 async fn seed_training_datasets(
     repo: &PgTrainingDatasetRepository,
     model_spec_id: &ModelSpecId,
+    model_spec_definition_hash: &ContentHash,
     decision_policy_snapshot_id: &DecisionPolicySnapshotId,
     summary: &mut ResearchUiSeedSummary,
 ) -> usize {
+    let context = TrainingDatasetSeedContext {
+        repo,
+        model_spec_id,
+        model_spec_definition_hash,
+        decision_policy_snapshot_id,
+    };
     let scenarios: [(&str, TrainingDatasetStatus, i64); 6] = [
         ("planned", TrainingDatasetStatus::Planned, 0),
         ("building", TrainingDatasetStatus::Building, 0),
@@ -319,9 +349,7 @@ async fn seed_training_datasets(
 
     for (slug, status, built_samples) in scenarios {
         let dataset_id = seed_training_dataset_scenario(
-            repo,
-            model_spec_id,
-            decision_policy_snapshot_id,
+            &context,
             slug,
             status,
             built_samples,
@@ -335,9 +363,7 @@ async fn seed_training_datasets(
     }
 
     seed_training_dataset_scenario(
-        repo,
-        model_spec_id,
-        decision_policy_snapshot_id,
+        &context,
         "policy-fit-blocked",
         TrainingDatasetStatus::Ready,
         11_200,
@@ -349,9 +375,7 @@ async fn seed_training_datasets(
 }
 
 async fn seed_training_dataset_scenario(
-    repo: &PgTrainingDatasetRepository,
-    model_spec_id: &ModelSpecId,
-    decision_policy_snapshot_id: &DecisionPolicySnapshotId,
+    context: &TrainingDatasetSeedContext<'_>,
     slug: &str,
     status: TrainingDatasetStatus,
     built_samples: i64,
@@ -382,24 +406,29 @@ async fn seed_training_dataset_scenario(
         vec![3_600, 86_400]
     };
     let hash = content_hash(&format!("dataset-{slug}"));
-    repo.create_plan(NewTrainingDatasetPlan {
-        training_dataset_id: dataset_id.clone(),
-        model_spec_id: model_spec_id.clone(),
-        window_start,
-        window_end,
-        purpose,
-        knowledge_lag_secs: 10,
-        sample_interval_secs: 3_600,
-        horizons_secs: TrainingHorizonsSecs(horizons_secs.clone()),
-        feature_schema_version: Some(SchemaVersion::new(7)),
-        sample_sources: Some(TrainingSampleSources(default_sample_sources())),
-        decision_policy_snapshot_id: decision_policy_snapshot_id.clone(),
-    })
-    .await
-    .expect("create training dataset");
+    context
+        .repo
+        .create_plan(NewTrainingDatasetPlan {
+            training_dataset_id: dataset_id.clone(),
+            model_spec_id: context.model_spec_id.clone(),
+            model_spec_definition_hash: context.model_spec_definition_hash.clone(),
+            window_start,
+            window_end,
+            purpose,
+            knowledge_lag_secs: 10,
+            sample_interval_secs: 3_600,
+            horizons_secs: TrainingHorizonsSecs(horizons_secs.clone()),
+            feature_schema_version: Some(SchemaVersion::new(7)),
+            sample_sources: Some(TrainingSampleSources(default_sample_sources())),
+            decision_policy_snapshot_id: context.decision_policy_snapshot_id.clone(),
+        })
+        .await
+        .expect("create training dataset");
 
     if status != TrainingDatasetStatus::Planned {
-        repo.start_build(&dataset_id)
+        context
+            .repo
+            .start_build(&dataset_id)
             .await
             .expect("start training dataset build");
     }
@@ -413,10 +442,11 @@ async fn seed_training_dataset_scenario(
                 profile_ref: fixture_profile_ref(),
                 research_program_hash: content_hash(&format!("dataset-program-{slug}")),
                 source_slice: source_slice_ref('5'),
-                model_spec_id: model_spec_id.clone(),
+                model_spec_id: context.model_spec_id.clone(),
+                model_spec_definition_hash: context.model_spec_definition_hash.clone(),
                 trade_policy_artifact_id: None,
                 trade_policy_hash: None,
-                decision_policy_snapshot_id: decision_policy_snapshot_id.clone(),
+                decision_policy_snapshot_id: context.decision_policy_snapshot_id.clone(),
                 window_start,
                 window_end,
                 purpose,
@@ -431,40 +461,46 @@ async fn seed_training_dataset_scenario(
                 sample_count: u64::try_from(built_samples).expect("non-negative sample count"),
             };
             let manifest_hash = dataset_manifest_hash(&manifest).expect("manifest hash");
-            repo.complete_build(
-                &dataset_id,
-                CompleteTrainingDatasetBuild {
-                    status: if status == TrainingDatasetStatus::Expired {
-                        TrainingDatasetStatus::Ready
-                    } else {
-                        status
+            context
+                .repo
+                .complete_build(
+                    &dataset_id,
+                    CompleteTrainingDatasetBuild {
+                        status: if status == TrainingDatasetStatus::Expired {
+                            TrainingDatasetStatus::Ready
+                        } else {
+                            status
+                        },
+                        feature_schema_hash: hash.clone(),
+                        factor_schema_hash: hash.clone(),
+                        label_schema_hash: hash.clone(),
+                        dataset_hash: hash,
+                        manifest_hash,
+                        manifest_json: manifest,
+                        artifact_bytes_hash: content_hash(&format!("dataset-bytes-{slug}")),
+                        parquet_uri: ArtifactUri::parse(format!(
+                            "file:///tmp/ui-demo-research-{slug}.parquet"
+                        ))
+                        .expect("parquet uri"),
+                        sample_count: built_samples,
+                        coverage_json: dataset_coverage(slug, built_samples),
+                        failure_detail: None,
                     },
-                    feature_schema_hash: hash.clone(),
-                    factor_schema_hash: hash.clone(),
-                    label_schema_hash: hash.clone(),
-                    dataset_hash: hash,
-                    manifest_hash,
-                    manifest_json: manifest,
-                    artifact_bytes_hash: content_hash(&format!("dataset-bytes-{slug}")),
-                    parquet_uri: ArtifactUri::parse(format!(
-                        "file:///tmp/ui-demo-research-{slug}.parquet"
-                    ))
-                    .expect("parquet uri"),
-                    sample_count: built_samples,
-                    coverage_json: dataset_coverage(slug, built_samples),
-                    failure_detail: None,
-                },
-            )
-            .await
-            .expect("complete training dataset build");
+                )
+                .await
+                .expect("complete training dataset build");
             if status == TrainingDatasetStatus::Expired {
-                repo.expire(&dataset_id)
+                context
+                    .repo
+                    .expire(&dataset_id)
                     .await
                     .expect("expire training dataset");
             }
         }
         TrainingDatasetStatus::Failed => {
-            repo.fail_build(&dataset_id, "seeded build failure".to_owned())
+            context
+                .repo
+                .fail_build(&dataset_id, "seeded build failure".to_owned())
                 .await
                 .expect("fail training dataset build");
         }
@@ -530,7 +566,7 @@ async fn create_model_version(
     publication_status: PublicationStatus,
     training_dataset_id: Option<TrainingDatasetId>,
     artifact_seed: &str,
-    metrics_json: serde_json::Value,
+    metrics: ModelVersionMetrics,
 ) -> ModelVersionId {
     let version = registry
         .next_version_for_spec(model_spec_id)
@@ -549,22 +585,12 @@ async fn create_model_version(
             trade_policy_artifact_id: None,
             trade_policy_hash: None,
             publish_path_set_id: None,
-            metrics_json,
-            training_objective_json: serde_json::json!({
-                "rank_loss": "rank_ic_weighted_ranknet",
-                "optimizer": "coordinate_search",
-                "lambda_tail": "0.5",
-                "tail_fraction": "0.10",
-                "lambda_turnover": "0.2",
-                "lambda_l2": "0.01",
-                "ndcg_k": 20,
-                "pseudo_top_n": 20,
-            }),
-            quality_gate_report: serde_json::json!({
-                "passed": true,
-                "ui_demo": true,
-                "artifact_seed": artifact_seed,
-            }),
+            derivation: NewModelVersion::training_derivation(),
+            metrics,
+            training_objective: ModelTrainingObjective::learning_to_rank(
+                TrainingObjectiveSpec::default(),
+            ),
+            quality_gate_report: None,
             publication_status,
             published_at: None,
             retired_at: None,
@@ -674,13 +700,13 @@ async fn seed_one_backtest(
             rank_ic: config.rank_ic,
             sharpe: config.sharpe,
             hit_rate: Probability::new(config.hit_rate),
-            expected_vs_realized: expected_vs_realized_json(config.seed),
+            expected_vs_realized: expected_vs_realized(),
             max_drawdown: dec!(0.11),
             turnover: dec!(0.18),
             liquidity_feasibility: Probability::new(dec!(0.97)),
-            category_breakdown: category_breakdown_json(),
+            category_breakdown: category_breakdown(),
             tail_loss: dec!(-125),
-            report_pnl_simulation: pnl_simulation_json(config.seed),
+            report_pnl_simulation: pnl_simulation(window_start + ChronoDuration::days(7)),
             report_hash: content_hash(&format!("backtest-research-{}", config.seed)),
             parquet_uri: Some(format!(
                 "file:///tmp/ui-demo-research-backtest-{}.parquet",
@@ -711,7 +737,6 @@ async fn seed_backtest_run(
             status: ModelRunStatus::Succeeded,
             input_hash: content_hash("backtest-run-input"),
             output_hash: Some(content_hash("backtest-run-output")),
-            metrics_json: serde_json::json!({ "ui_demo": true }),
             error_code: None,
             error_message: None,
             started_at: Utc::now() - ChronoDuration::hours(1),
@@ -766,7 +791,7 @@ async fn seed_comparison_report(
             score_correlation: dec!(0.91),
             side_disagreement_rate: dec!(0.12),
             common_samples: 9_800,
-            category_breakdown_diff: category_breakdown_diff_json(),
+            category_breakdown_diff: category_breakdown_diff(),
             comparison_hash: content_hash("comparison-research-pair"),
         })
         .await
@@ -845,23 +870,31 @@ async fn seed_factor(
     scope: FactorDefinitionScope,
     status: PublicationStatus,
 ) -> FactorDefinitionId {
-    let definition_hash = content_hash(&format!("factor-definition-{name}"));
+    let feature_contract_hash = content_hash("ui-demo-feature-contract");
+    let definition = FactorDefinitionDocument {
+        name: FactorName::new(name),
+        family: factor_family,
+        input_features: Vec::new(),
+        output_kind: FactorOutputKind::NormalizedScore,
+        default_direction: FactorDirection::Positive,
+        normalization: FactorNormalization::Rank,
+        owner: "ui-demo-research-seed".to_owned(),
+        quality_gates: Vec::new(),
+    };
+    let definition_hash = factor_definition_content_hash(&definition, &feature_contract_hash)
+        .expect("canonical demo factor definition hash");
     let factor_definition_id = FactorDefinitionId::from_definition_hash(&definition_hash);
     let row = factors
         .create_definition(NewFactorDefinition {
             factor_definition_id: factor_definition_id.clone(),
             definition_hash,
-            feature_contract_hash: content_hash("ui-demo-feature-contract"),
+            feature_contract_hash,
             name: name.to_owned(),
             factor_family,
             scope,
             input_schema_version: SchemaVersion::FIRST,
             output_schema_version: SchemaVersion::FIRST,
-            definition_json: serde_json::json!({
-                "ui_demo": true,
-                "name": name,
-                "description": format!("UI demo factor `{name}` for catalog validation"),
-            }),
+            definition,
             status,
             created_by: None,
         })
@@ -877,13 +910,50 @@ fn content_hash(seed: &str) -> ContentHash {
 fn demo_metrics(
     rank_ic: rust_decimal::Decimal,
     hit_rate: rust_decimal::Decimal,
-) -> serde_json::Value {
-    serde_json::json!({
-        "rank_ic": rank_ic,
-        "hit_rate": hit_rate,
-        "validation_loss": 0.024,
-        "ui_demo": true,
-    })
+) -> ModelVersionMetrics {
+    let components = ObjectiveComponentMetrics {
+        rank_loss: dec!(0.024),
+        tail_penalty: dec!(0.01),
+        turnover_penalty: dec!(0.01),
+        l2_penalty: dec!(0.004),
+        total_loss: dec!(0.024),
+        group_count: 42,
+        rank_loss_group_count: 42,
+        pair_count: 1_024,
+    };
+    let diagnostics = RankingDiagnosticsMetrics {
+        mean_rank_ic: rank_ic,
+        mean_ndcg_at_k: hit_rate,
+        ndcg_k: 20,
+        group_count: 42,
+    };
+    ModelVersionMetrics::learning_to_rank(
+        LearningToRankInSampleMetrics {
+            objective_value: -components.total_loss,
+            components: components.clone(),
+            diagnostics: Some(diagnostics.clone()),
+            summary: "seeded UI demonstration metrics".to_owned(),
+        },
+        ModelValidationMetrics {
+            held_out_objective: rank_ic,
+            held_out_components: Some(components.clone()),
+            held_out_diagnostics: Some(diagnostics),
+            fold_objectives: vec![rank_ic],
+            fold_components: vec![components],
+            sample_count: 10_000,
+            dropped_singleton_groups: 0,
+            dropped_singleton_rows: 0,
+            coordinate_search_effective_trials: 1,
+            held_out_metric: HeldOutMetricKind::NegativeTotalLearningToRankLoss,
+        },
+        ModelArtifactTrainingLineage::FactorNative {
+            training_dataset_hash: content_hash("ui-demo-metrics-dataset"),
+            training_input_hash: content_hash("ui-demo-metrics-input"),
+            input_contract_hash: content_hash("ui-demo-metrics-contract"),
+            input_transform_hash: content_hash("ui-demo-metrics-transform"),
+            factor_inputs: vec![FactorName::from_static("liquidity_depth")],
+        },
+    )
 }
 
 fn dataset_coverage(_slug: &str, built_samples: i64) -> DatasetCoverage {
@@ -897,65 +967,68 @@ fn dataset_coverage(_slug: &str, built_samples: i64) -> DatasetCoverage {
     }
 }
 
-fn expected_vs_realized_json(seed: &str) -> serde_json::Value {
-    serde_json::json!({
-        "ui_demo_seed": seed,
-        "correlation": 0.72,
-        "buckets": [
-            {"decile": 1, "expected_return_bps": 45, "realized_return_bps": 38, "samples": 980},
-            {"decile": 5, "expected_return_bps": 120, "realized_return_bps": 112, "samples": 1020},
-            {"decile": 10, "expected_return_bps": 210, "realized_return_bps": 198, "samples": 990},
-        ],
-    })
+const fn expected_vs_realized() -> ExpectedVsRealized {
+    ExpectedVsRealized {
+        mean_expected_bps: dec!(125),
+        mean_realized_bps: dec!(116),
+        correlation: dec!(0.72),
+        bias_bps: dec!(9),
+    }
 }
 
-fn category_breakdown_json() -> serde_json::Value {
-    serde_json::json!([
-        {
-            "category": "politics",
-            "rank_ic": 0.35,
-            "hit_rate": 0.62,
-            "sample_count": 4500,
+fn category_breakdown() -> CategoryMetrics {
+    vec![
+        CategoryMetric {
+            category: MarketCategory::Politics,
+            rank_ic: dec!(0.35),
+            hit_rate: Probability::new(dec!(0.62)),
+            sample_count: 4_500,
+            mean_realized_bps: dec!(132),
         },
-        {
-            "category": "sports",
-            "rank_ic": 0.28,
-            "hit_rate": 0.58,
-            "sample_count": 3200,
+        CategoryMetric {
+            category: MarketCategory::Sports,
+            rank_ic: dec!(0.28),
+            hit_rate: Probability::new(dec!(0.58)),
+            sample_count: 3_200,
+            mean_realized_bps: dec!(104),
         },
-        {
-            "category": "crypto",
-            "rank_ic": 0.21,
-            "hit_rate": 0.51,
-            "sample_count": 2100,
+        CategoryMetric {
+            category: MarketCategory::Crypto,
+            rank_ic: dec!(0.21),
+            hit_rate: Probability::new(dec!(0.51)),
+            sample_count: 2_100,
+            mean_realized_bps: dec!(75),
         },
-    ])
+    ]
+    .into()
 }
 
-fn category_breakdown_diff_json() -> serde_json::Value {
-    serde_json::json!([
-        {
-            "category": "politics",
-            "rank_ic_delta": 0.08,
-            "hit_rate_delta": 0.05,
-            "sample_count": 4500,
+fn category_breakdown_diff() -> CategoryRankIcDeltas {
+    vec![
+        CategoryRankIcDelta {
+            category: MarketCategory::Politics,
+            baseline_rank_ic: dec!(0.27),
+            candidate_rank_ic: dec!(0.35),
+            rank_ic_delta: dec!(0.08),
         },
-        {
-            "category": "sports",
-            "rank_ic_delta": 0.03,
-            "hit_rate_delta": 0.02,
-            "sample_count": 3200,
+        CategoryRankIcDelta {
+            category: MarketCategory::Sports,
+            baseline_rank_ic: dec!(0.25),
+            candidate_rank_ic: dec!(0.28),
+            rank_ic_delta: dec!(0.03),
         },
-    ])
+    ]
+    .into()
 }
 
-fn pnl_simulation_json(seed: &str) -> serde_json::Value {
-    serde_json::json!({
-        "ui_demo_seed": seed,
-        "cumulative_pnl_usd": 1250.50,
-        "max_drawdown_pct": 0.08,
-        "sharpe": 1.42,
-        "win_rate": 0.59,
-        "trade_count": 842,
-    })
+fn pnl_simulation(decision_at: DateTime<Utc>) -> PnlSimulation {
+    PnlSimulation {
+        total_allocated_usd: dec!(10_000),
+        realized_pnl_usd: dec!(1250.50),
+        gross_return: dec!(0.12505),
+        pnl_curve: vec![PnlCurvePoint {
+            decision_at,
+            cumulative_realized_pnl_usd: dec!(1250.50),
+        }],
+    }
 }

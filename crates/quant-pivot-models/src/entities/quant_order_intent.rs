@@ -8,12 +8,11 @@ use crate::{
     types::{
         ContentHash, DecisionPolicySnapshotId, EntryConditionInstanceId, EntryOrderSpec,
         ExitPolicySpec, ExitReinferenceObservation, ModelVersionId, OrderIntentId, Price,
-        RecommendationId, ResearchProfileRef, ScaleOutState,
+        RecommendationId, ResearchProfileArtifactId, ScaleOutState, UserId,
     },
 };
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
-use uuid::Uuid;
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -25,12 +24,11 @@ pub struct Model {
     pub runtime_mode: QuantRuntimeMode,
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub model_version_id: ModelVersionId,
-    #[sea_orm(column_type = "JsonBinary")]
-    pub profile_ref: ResearchProfileRef,
+    pub research_profile_artifact_id: ResearchProfileArtifactId,
     pub intent_kind: OrderIntentKind,
     pub status: OrderIntentStatus,
     pub approval_status: ApprovalStatus,
-    pub approved_by: Option<Uuid>,
+    pub approved_by: Option<UserId>,
     #[sea_orm(column_type = "Text", nullable)]
     pub approval_reason: Option<String>,
     pub approved_at: Option<DateTime<Utc>>,
@@ -59,6 +57,14 @@ pub struct Model {
     pub scale_out_state: ScaleOutState,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+
+    #[sea_orm(
+        belongs_to,
+        relation_enum = "ResearchProfileArtifact",
+        from = "research_profile_artifact_id",
+        to = "research_profile_artifact_id"
+    )]
+    pub research_profile_artifact: BelongsTo<super::research_profile_artifact::Entity>,
 
     #[sea_orm(
         belongs_to,

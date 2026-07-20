@@ -19,9 +19,9 @@ use quant_pivot_models::{
     hashing::CanonicalDigest,
     types::{
         ConditionTruth, ContentHash, CryptoEnteredFoldState, DomainInstrumentKey, DomainSourceId,
-        EntryConditionArtifactId, EntryConditionAuditId, EntryConditionFoldState,
-        EntryConditionInstanceId, OrderIntentId, RecommendationId, TemperatureCelsius,
-        WeatherTemperatureStatistic,
+        EntryConditionArtifactId, EntryConditionAuditId, EntryConditionEvaluationOutboxId,
+        EntryConditionFoldState, EntryConditionInstanceId, OrderIntentId, RecommendationId,
+        TemperatureCelsius, WeatherTemperatureStatistic, WorkerId,
     },
 };
 use sea_orm::{
@@ -29,7 +29,6 @@ use sea_orm::{
     IntoActiveModel, QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
     sea_query::{Expr, LockBehavior, LockType},
 };
-use uuid::Uuid;
 
 use crate::traits::EntryConditionRepository;
 
@@ -335,7 +334,7 @@ impl EntryConditionRepository for PgEntryConditionRepository {
 
     async fn lease_next(
         &self,
-        worker_id: Uuid,
+        worker_id: WorkerId,
         now: DateTime<Utc>,
         lease_expires_at: DateTime<Utc>,
     ) -> Result<Option<EntryConditionInstanceInfo>, StorageError> {
@@ -426,7 +425,7 @@ impl EntryConditionRepository for PgEntryConditionRepository {
     async fn renew_lease(
         &self,
         instance_id: &EntryConditionInstanceId,
-        worker_id: Uuid,
+        worker_id: WorkerId,
         lease_epoch: i64,
         lease_expires_at: DateTime<Utc>,
     ) -> Result<bool, StorageError> {
@@ -449,7 +448,7 @@ impl EntryConditionRepository for PgEntryConditionRepository {
     async fn apply_evaluation(
         &self,
         instance_id: &EntryConditionInstanceId,
-        worker_id: Uuid,
+        worker_id: WorkerId,
         evaluation: ApplyEntryConditionEvaluation,
     ) -> Result<ApplyEntryConditionEvaluationOutcome, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
@@ -533,7 +532,7 @@ impl EntryConditionRepository for PgEntryConditionRepository {
 
     async fn claim_pending_evaluations(
         &self,
-        worker_id: Uuid,
+        worker_id: WorkerId,
         now: DateTime<Utc>,
         lease_expires_at: DateTime<Utc>,
         limit: u64,
@@ -559,7 +558,7 @@ impl EntryConditionRepository for PgEntryConditionRepository {
                 .checked_add(1)
                 .ok_or_else(|| invariant(ENTITY_INSTANCE, "evaluation publish attempt overflow"))?;
             let mut active = row.into_active_model();
-            active.claim_owner = ActiveValue::Set(Some(worker_id));
+            active.claim_owner = ActiveValue::Set(Some(worker_id.clone()));
             active.lease_expires_at = ActiveValue::Set(Some(lease_expires_at));
             active.publish_attempts = ActiveValue::Set(attempts);
             let claimed = active.update(&txn).await.map_err(StorageError::from)?;
@@ -572,7 +571,7 @@ impl EntryConditionRepository for PgEntryConditionRepository {
     async fn mark_evaluation_published(
         &self,
         evaluation_id: &ContentHash,
-        worker_id: Uuid,
+        worker_id: WorkerId,
         published_at: DateTime<Utc>,
     ) -> Result<(), StorageError> {
         let result = quant_entry_condition_evaluation_outbox::Entity::update_many()
@@ -586,7 +585,7 @@ impl EntryConditionRepository for PgEntryConditionRepository {
             )
             .col_expr(
                 quant_entry_condition_evaluation_outbox::Column::ClaimOwner,
-                Expr::value(Option::<Uuid>::None),
+                Expr::value(Option::<WorkerId>::None),
             )
             .col_expr(
                 quant_entry_condition_evaluation_outbox::Column::LeaseExpiresAt,
@@ -606,7 +605,7 @@ impl EntryConditionRepository for PgEntryConditionRepository {
     async fn mark_evaluation_failed(
         &self,
         evaluation_id: &ContentHash,
-        worker_id: Uuid,
+        worker_id: WorkerId,
         detail: String,
     ) -> Result<(), StorageError> {
         let result = quant_entry_condition_evaluation_outbox::Entity::update_many()
@@ -616,7 +615,7 @@ impl EntryConditionRepository for PgEntryConditionRepository {
             )
             .col_expr(
                 quant_entry_condition_evaluation_outbox::Column::ClaimOwner,
-                Expr::value(Option::<Uuid>::None),
+                Expr::value(Option::<WorkerId>::None),
             )
             .col_expr(
                 quant_entry_condition_evaluation_outbox::Column::LeaseExpiresAt,
@@ -636,7 +635,7 @@ impl EntryConditionRepository for PgEntryConditionRepository {
     async fn invalidate(
         &self,
         instance_id: &EntryConditionInstanceId,
-        worker_id: Uuid,
+        worker_id: WorkerId,
         expected_revision: i64,
         expected_lease_epoch: i64,
         detail: String,
@@ -743,7 +742,7 @@ async fn insert_evaluation_outbox<C: sea_orm::ConnectionTrait>(
         schema_version: ChSchemaVersion::FIRST,
     };
     quant_entry_condition_evaluation_outbox::ActiveModel {
-        outbox_id: ActiveValue::Set(Uuid::now_v7()),
+        outbox_id: ActiveValue::Set(EntryConditionEvaluationOutboxId::from_v7()),
         evaluation_id: ActiveValue::Set(evaluation_id),
         event_json: ActiveValue::Set(event),
         published_at: ActiveValue::Set(None),

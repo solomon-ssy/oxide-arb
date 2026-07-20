@@ -32,9 +32,10 @@ use quant_pivot_models::{
         SelectionConfig,
     },
     types::{
-        Bps, CatalogEventChangeId, CatalogMarketChangeId, CatalogSyncBatchId, ContentHash,
-        DecisionPolicySnapshotId, EventId, MarketId, Price, Probability, SchemaVersion, Shares,
-        TokenId, Usd,
+        BookSnapshotRef, BookSnapshotSource, Bps, CatalogDecisionRef, CatalogEventChangeId,
+        CatalogMarketChangeId, CatalogSyncBatchId, ContentHash, DecisionCaptureEvidence,
+        DecisionPolicySnapshotId, DecisionSnapshotEvidence, EventId, MarketContext, MarketId,
+        Price, Probability, RecommendationIdentity, SchemaVersion, Shares, TokenId, Usd,
     },
 };
 use rust_decimal::Decimal;
@@ -619,8 +620,9 @@ fn persisted_feature(vector: &FeatureVector) -> FeatureVectorInfo {
 }
 
 fn persisted_feature_at(vector: &FeatureVector, boundary: &DecisionBoundary) -> FeatureVectorInfo {
+    let capture = test_decision_capture(vector, boundary);
     let row = vector
-        .try_to_new(boundary)
+        .try_to_new(boundary, &capture)
         .expect("feature persistence projection");
     FeatureVectorInfo {
         feature_vector_id: row.feature_vector_id,
@@ -634,11 +636,73 @@ fn persisted_feature_at(vector: &FeatureVector, boundary: &DecisionBoundary) -> 
         staleness_ms: row.staleness_ms,
         payload: row.payload,
         source_refs: row.source_refs,
-        decision_capture: Some(serde_json::json!({"test": true})),
-        decision_capture_hash: Some(
-            ContentHash::parse(format!("blake3:{}", "d".repeat(64))).expect("capture hash"),
-        ),
+        decision_capture: row.decision_capture,
+        decision_capture_hash: row.decision_capture_hash,
         created_at: vector.decision_at,
+    }
+}
+
+fn test_decision_capture(
+    vector: &FeatureVector,
+    boundary: &DecisionBoundary,
+) -> DecisionCaptureEvidence {
+    let token_id = vector.token_id.clone().expect("test vector token");
+    let hash = ContentHash::parse(format!("blake3:{}", "d".repeat(64))).expect("test hash");
+    DecisionCaptureEvidence {
+        snapshot: DecisionSnapshotEvidence {
+            boundary: boundary.clone(),
+            market_id: vector.market_id.clone(),
+            event_id: EventId::new("test-event"),
+            token_id: token_id.clone(),
+            catalog: CatalogDecisionRef {
+                catalog_sync_batch_id: CatalogSyncBatchId::from_v7(),
+                market_change_id: CatalogMarketChangeId::from_v7(),
+                event_change_id: CatalogEventChangeId::from_v7(),
+                market_content_hash: hash.clone(),
+                event_content_hash: hash.clone(),
+                membership_hash: hash.clone(),
+                market_effective_at: vector.decision_at,
+                market_available_at: vector.decision_at,
+                event_effective_at: vector.decision_at,
+                event_available_at: vector.decision_at,
+                market_timestamp_quality: CatalogTimestampQuality::Source,
+                event_timestamp_quality: CatalogTimestampQuality::Source,
+            },
+            book_snapshot_ref: BookSnapshotRef {
+                token_id,
+                source: BookSnapshotSource::CanonicalL2 {
+                    stream_session_id: uuid::Uuid::nil(),
+                    token_sequence: 1,
+                    source_event_hash: hash.clone(),
+                    event_time_ms: vector.decision_at.timestamp_millis(),
+                    ingestion_time_ms: vector.decision_at.timestamp_millis(),
+                },
+                content_hash: hash,
+            },
+            book_effective_at: vector.decision_at,
+            book_available_at: vector.decision_at,
+        },
+        identity: RecommendationIdentity {
+            category: MarketCategory::Other,
+            question: "test question".to_owned(),
+            outcome_name: "yes".to_owned(),
+        },
+        market_context: MarketContext {
+            best_bid: None,
+            best_ask: None,
+            mid_price: None,
+            spread_bps: None,
+            depth_usd: Usd::ZERO,
+            volume_24h_usd: None,
+            book_age_ms: 0,
+            time_to_resolution_secs: None,
+            market_status: MarketStatus::Active,
+            neg_risk: false,
+            tick_size: TickSize::Hundredth,
+            fee_rate: None,
+        },
+        data_quality: vector.data_quality,
+        liquidity_score: Probability::ZERO,
     }
 }
 

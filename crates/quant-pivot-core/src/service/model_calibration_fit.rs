@@ -16,14 +16,18 @@ use tokio_util::sync::CancellationToken;
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
     domain::{
-        CalibrationArtifactInfo, FitModelCalibratorRequest, JobProgressSink,
-        ModelCalibrationFitJobParams, ModelCalibrationFitOutcome, ModelCalibrationFitPort,
-        ModelCalibrationFitPreflightView, NewCalibrationArtifact, query::TimeWindow,
+        CalibrationArtifactInfo, CalibrationArtifactPayload, FitModelCalibratorRequest,
+        JobProgressSink, ModelCalibrationFitJobParams, ModelCalibrationFitOutcome,
+        ModelCalibrationFitPort, ModelCalibrationFitPreflightView, NewCalibrationArtifact,
+        query::TimeWindow,
     },
     enums::quant::{
         CalibrationKind, CalibrationMethod, DatasetPurpose, OutcomeSide, TrainingDatasetStatus,
     },
-    types::{CalibrationArtifactId, DecisionPolicySnapshotId, ModelVersionId, TrainingDatasetId},
+    types::{
+        CalibrationArtifactId, DecisionPolicySnapshotId, ModelVersionId, TrainingDatasetId,
+        calibration::ModelScoreCalibrationPayload,
+    },
 };
 use quant_pivot_repository::traits::{
     CalibrationArtifactRepository, ModelRegistryRepository, PolicyRepository,
@@ -40,7 +44,7 @@ use rust_decimal::Decimal;
 
 use crate::{
     app::ports::backtest::CoreBacktestPort,
-    governance::{ModelScoreCalibrationPayload, model_score_content_hash},
+    governance::model_score_content_hash,
     service::{
         backtest::BacktestInput,
         calibration_shared::{
@@ -484,11 +488,6 @@ impl ModelCalibrationFitService {
             mapping,
             reliability,
         };
-        let payload_json = serde_json::to_value(&payload).map_err(|error| {
-            QuantError::from(ResearchError::DatasetBuild {
-                detail: format!("calibration payload serialization failed: {error}"),
-            })
-        })?;
         // Self-contained hash (fit_window + split_hash + the full,
         // provenance-carrying payload) — recomputable by the loader from the
         // persisted row alone, symmetric with `market_price_bias`.
@@ -513,7 +512,7 @@ impl ModelCalibrationFitService {
                 fit_window_start: fit_window.from,
                 fit_window_end: fit_window.to,
                 sample_count,
-                payload_json,
+                payload: CalibrationArtifactPayload::ModelScore(payload),
                 active: false,
             })
             .await

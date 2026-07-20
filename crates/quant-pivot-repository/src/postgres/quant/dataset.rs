@@ -10,9 +10,9 @@ use quant_pivot_models::{
         CompleteTrainingDatasetBuild, NewTrainingDatasetPlan, PageWindow, Paginated,
         TrainingDatasetInfo, TrainingDatasetListQuery,
     },
-    entities::quant_training_dataset,
+    entities::{quant_model_spec, quant_training_dataset},
     enums::quant::TrainingDatasetStatus,
-    types::{DATASET_ARTIFACT_FORMAT_VERSION, TrainingDatasetId},
+    types::{ContentHash, DATASET_ARTIFACT_FORMAT_VERSION, TrainingDatasetId},
 };
 use sea_orm::{
     ActiveModelTrait, ActiveValue, ColumnTrait, Condition, DatabaseConnection, EntityTrait,
@@ -36,6 +36,24 @@ impl TrainingDatasetRepository for PgTrainingDatasetRepository {
         &self,
         plan: NewTrainingDatasetPlan,
     ) -> Result<TrainingDatasetInfo, StorageError> {
+        let stored_definition_hash =
+            quant_model_spec::Entity::find_by_id(plan.model_spec_id.clone())
+                .select_only()
+                .column(quant_model_spec::Column::DefinitionHash)
+                .into_tuple::<ContentHash>()
+                .one(&self.db)
+                .await
+                .map_err(StorageError::from)?
+                .ok_or_else(|| error::not_found(entity::QUANT_MODEL_SPEC, &plan.model_spec_id))?;
+        if plan.model_spec_definition_hash != stored_definition_hash {
+            return Err(error::invariant_violation(
+                Some(entity::QUANT_TRAINING_DATASET),
+                format!(
+                    "model_spec_definition_hash mismatch for {}: expected {stored_definition_hash}, got {}",
+                    plan.model_spec_id, plan.model_spec_definition_hash
+                ),
+            ));
+        }
         let key = plan.training_dataset_id.to_string();
         let mut active = plan.into_active_model();
         active.status = ActiveValue::Set(TrainingDatasetStatus::Planned);
@@ -277,6 +295,7 @@ fn validate_manifest_binding(
     let bound = manifest.format_version == DATASET_ARTIFACT_FORMAT_VERSION
         && manifest.training_dataset_id == row.training_dataset_id
         && manifest.model_spec_id == row.model_spec_id
+        && manifest.model_spec_definition_hash == row.model_spec_definition_hash
         && manifest.decision_policy_snapshot_id == row.decision_policy_snapshot_id
         && manifest.window_start == row.window_start
         && manifest.window_end == row.window_end

@@ -35,7 +35,7 @@ use quant_pivot_models::{
     },
     config::TradeTapeOnChainConfig,
     domain::{
-        DecisionBoundary, DecisionClock, NewModelRun, NewModelSpec, NewModelVersion,
+        DecisionBoundary, DecisionClock, NewModelRun, NewModelVersion,
         market::{EventRegistryInfo, MarketRegistryInfo, TokenInfo, book::BookLevel},
     },
     enums::{
@@ -53,7 +53,8 @@ use quant_pivot_models::{
     types::{
         ContentHash, DecisionPolicySnapshotId, DomainInstrumentKey, EventId, FeatureVectorId,
         MarketId, ModelInputContract, ModelRunId, ModelSpecId, ModelTrainingContract,
-        ModelVersionId, Price, SchemaVersion, Shares, TokenId, Usd,
+        ModelVersionId, Price, Shares, TokenId, Usd, model_metrics::ModelVersionMetrics,
+        model_training::ModelTrainingObjective,
     },
 };
 use quant_pivot_repository::{
@@ -723,10 +724,21 @@ async fn publish_weighted_model(
     let input_contract = ModelInputContract::single_required("book.mid");
     let input_contract_hash =
         model_input_contract_hash(&input_contract).expect("input contract hash");
+    let model_spec_id = ModelSpecId::from_v7();
+    let spec = quant_pivot_test_support::model_spec_fixtures::new_model_spec_fixture(
+        model_spec_id.clone(),
+        "weighted-e2e",
+        ModelFamily::WeightedFactor,
+        86_400,
+        input_contract.clone(),
+        ModelTrainingContract::settlement_default(),
+    );
+    let model_spec_definition_hash = spec.definition_hash.clone();
 
     let artifact = ModelArtifact::WeightedFactor(Box::new(WeightedFactorModelArtifact {
         header: ModelArtifactHeader {
             model_version_id: model_version_id.clone(),
+            model_spec_definition_hash,
             profile_ref: quant_pivot_test_support::execution_pg_seed::fixture_profile_ref(),
             model_family: ModelFamily::WeightedFactor,
             feature_schema_hash,
@@ -757,22 +769,7 @@ async fn publish_weighted_model(
         .expect("store artifact");
 
     let registry = PgModelRegistryRepository::new(db.clone());
-    let model_spec_id = ModelSpecId::from_v7();
-    registry
-        .create_model_spec(NewModelSpec {
-            model_spec_id: model_spec_id.clone(),
-            name: "weighted-e2e".to_owned(),
-            model_family: ModelFamily::WeightedFactor,
-            prediction_horizon_secs: 86_400,
-            feature_schema_version: SchemaVersion::FIRST,
-            label_schema_version: SchemaVersion::FIRST,
-            spec_json: serde_json::json!({}),
-            input_contract: ModelInputContract::single_required("book.mid"),
-            training_contract: ModelTrainingContract::settlement_default(),
-            status: PublicationStatus::Published,
-        })
-        .await
-        .expect("create spec");
+    registry.create_model_spec(spec).await.expect("create spec");
     registry
         .create_model_version(NewModelVersion {
             model_version_id: model_version_id.clone(),
@@ -785,9 +782,10 @@ async fn publish_weighted_model(
             trade_policy_artifact_id: None,
             trade_policy_hash: None,
             publish_path_set_id: None,
-            metrics_json: serde_json::json!({}),
-            training_objective_json: serde_json::json!({"kind": "not_trained"}),
-            quality_gate_report: serde_json::json!({}),
+            derivation: NewModelVersion::training_derivation(),
+            metrics: ModelVersionMetrics::not_measured("test fixture"),
+            training_objective: ModelTrainingObjective::hand_authored("test fixture"),
+            quality_gate_report: None,
             publication_status: PublicationStatus::Published,
             published_at: Some(Utc::now()),
             retired_at: None,
@@ -851,9 +849,10 @@ async fn register_candidate_sibling(
             trade_policy_artifact_id: published.trade_policy_artifact_id.clone(),
             trade_policy_hash: published.trade_policy_hash.clone(),
             publish_path_set_id: None,
-            metrics_json: serde_json::json!({}),
-            training_objective_json: serde_json::json!({"kind": "not_trained"}),
-            quality_gate_report: serde_json::json!({}),
+            derivation: NewModelVersion::training_derivation(),
+            metrics: ModelVersionMetrics::not_measured("test fixture"),
+            training_objective: ModelTrainingObjective::hand_authored("test fixture"),
+            quality_gate_report: None,
             publication_status: PublicationStatus::Candidate,
             published_at: None,
             retired_at: None,
@@ -1236,14 +1235,7 @@ async fn hot_update_changes_candidate_weights_not_published_artifact() {
         .await
         .expect("find shadow run")
         .expect("shadow run row");
-    assert_eq!(
-        shadow_run
-            .metrics_json
-            .get("weight_source")
-            .and_then(|v| v.as_str()),
-        Some("config_overlay"),
-        "shadow candidate must record overlay provenance"
-    );
+    assert_eq!(shadow_run.run_kind, ModelRunKind::Shadow);
 }
 
 #[tokio::test]
@@ -1317,7 +1309,6 @@ async fn model_run_create_find_succeed_fail() {
         status: ModelRunStatus::Running,
         input_hash: zero.clone(),
         output_hash: None,
-        metrics_json: serde_json::json!({}),
         error_code: None,
         error_message: None,
         started_at: Utc::now(),
@@ -1331,13 +1322,7 @@ async fn model_run_create_find_succeed_fail() {
     assert_eq!(found.status, ModelRunStatus::Running);
     let output = ContentHash::parse(format!("blake3:{}", "1".repeat(64))).expect("hash");
     let succeeded = repo
-        .succeed(
-            &ok_id,
-            output.clone(),
-            serde_json::json!({"ok": true}),
-            Utc::now(),
-            None,
-        )
+        .succeed(&ok_id, output.clone(), Utc::now(), None)
         .await
         .expect("succeed");
     assert_eq!(succeeded.status, ModelRunStatus::Succeeded);

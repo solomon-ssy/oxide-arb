@@ -4,10 +4,14 @@ use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::NewFactorDefinition,
     enums::{
-        factor::{FactorDefinitionScope, FactorFamily},
-        quant::PublicationStatus,
+        factor::{FactorDefinitionScope, FactorFamily, FactorNormalization},
+        quant::{FactorDirection, PublicationStatus},
     },
-    types::{ContentHash, FactorDefinitionId, SchemaVersion},
+    types::{
+        ContentHash, FactorDefinitionId, SchemaVersion,
+        factor::{FactorDefinitionDocument, FactorOutputKind, factor_definition_content_hash},
+        stable_name::FactorName,
+    },
 };
 use quant_pivot_repository::{postgres::PgFactorRepository, traits::FactorRepository};
 use quant_pivot_test_support::pg::setup_pg;
@@ -17,17 +21,29 @@ fn content_hash(seed: char) -> ContentHash {
 }
 
 fn revision(name: &str, seed: char) -> NewFactorDefinition {
-    let definition_hash = content_hash(seed);
+    let feature_contract_hash = content_hash(seed);
+    let definition = FactorDefinitionDocument {
+        name: FactorName::new(name),
+        family: FactorFamily::Momentum,
+        input_features: Vec::new(),
+        output_kind: FactorOutputKind::Directional,
+        default_direction: FactorDirection::Positive,
+        normalization: FactorNormalization::Rank,
+        owner: format!("test-revision-{seed}"),
+        quality_gates: Vec::new(),
+    };
+    let definition_hash = factor_definition_content_hash(&definition, &feature_contract_hash)
+        .expect("canonical factor definition hash");
     NewFactorDefinition {
         factor_definition_id: FactorDefinitionId::from_definition_hash(&definition_hash),
         definition_hash,
-        feature_contract_hash: content_hash('f'),
+        feature_contract_hash,
         name: name.to_owned(),
         factor_family: FactorFamily::Momentum,
         scope: FactorDefinitionScope::Generic,
         input_schema_version: SchemaVersion::FIRST,
         output_schema_version: SchemaVersion::FIRST,
-        definition_json: serde_json::json!({"name": name, "revision": seed}),
+        definition,
         status: PublicationStatus::Draft,
         created_by: None,
     }
@@ -117,7 +133,8 @@ async fn batch_publication_is_atomic_and_rejects_content_address_collisions() {
 
     let mut collision = left;
     collision.name = "tampered-logical-name".to_owned();
-    collision.definition_json = serde_json::json!({"tampered": true});
+    collision.definition.name = FactorName::new("tampered-logical-name");
+    collision.definition.owner = "tampered-owner".to_owned();
     assert!(matches!(
         repo.create_definition(collision).await,
         Err(StorageError::InvariantViolation { .. })

@@ -219,9 +219,9 @@ impl From<&str> for SecretText {
 
 #[cfg(test)]
 mod tests {
-    use std::{env, fs};
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+    use std::{env, fs};
 
     use uuid::Uuid;
 
@@ -250,8 +250,7 @@ mod tests {
         let path = directory.join("jwt-signing-key");
         fs::write(&path, "credential-value\n").expect("write credential");
         #[cfg(unix)]
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
-            .expect("restrict credential");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("restrict credential");
 
         let mut reference = SystemdCredentialRef {
             name: "jwt-signing-key".to_owned(),

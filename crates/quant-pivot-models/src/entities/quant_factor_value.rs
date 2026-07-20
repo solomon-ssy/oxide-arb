@@ -7,6 +7,7 @@ use crate::{
     },
     types::{
         FactorDefinitionId, FactorValueId, FeatureVectorId, MarketId, ModelRunId, Probability,
+        factor::FactorExplanation,
     },
 };
 use chrono::{DateTime, Utc};
@@ -38,7 +39,7 @@ pub struct Model {
     pub direction: FactorDirection,
     pub confidence: Probability,
     #[sea_orm(column_type = "JsonBinary")]
-    pub explanation: Json,
+    pub explanation: FactorExplanation,
     pub created_at: DateTime<Utc>,
 
     #[sea_orm(

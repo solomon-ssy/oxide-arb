@@ -9,10 +9,10 @@
 
 use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantResult, research::ResearchError};
-use quant_pivot_models::types::ModelRunId;
+use quant_pivot_models::types::{ModelRunId, stable_name::FeatureName};
 use quant_pivot_research::{
     factors::MarketFactorOutcome,
-    features::{FeatureCell, FeatureName, FeatureStaleness, FeatureVector, NullReason},
+    features::{FeatureCell, FeatureStaleness, FeatureVector, NullReason},
     model::{
         FactorInferenceRow, FactorInferenceTable, InferenceMatrix, InferenceMatrixRow, ModelFamily,
         ModelRuntimeInput, QuantModelRuntime,
@@ -281,13 +281,14 @@ mod tests {
         types::{
             ContentHash, EventId, FactorDefinitionId, MarketId, ModelRunId, ModelVersionId, Price,
             Probability, SchemaVersion, TokenId, TrainingExampleId, TrainingSampleSource,
+            factor::FactorExplanation, stable_name::FeatureName,
         },
     };
     use quant_pivot_research::{
-        factors::{FactorExplanation, FactorValue, NormalizedFactor, names::LIQUIDITY_DEPTH},
+        factors::{FactorValue, NormalizedFactor, names::LIQUIDITY_DEPTH},
         features::{
-            DomainFeatureSlice, FeatureCell, FeatureCellState, FeatureName, FeatureStaleness,
-            FeatureValue, FeatureVector, NullReason, names::book,
+            DomainFeatureSlice, FeatureCell, FeatureCellState, FeatureStaleness, FeatureValue,
+            FeatureVector, NullReason, names::book,
         },
         model::{ModelFamily, ModelRuntimeInput, ModelRuntimeOutput, QuantModelRuntime},
         selection::SelectedMarket,

@@ -20,12 +20,13 @@ use crate::{
         ReportRunTerminalReason, ReportScheduleGapReason, ReportTriggerKind,
     },
     types::{
-        AccountSnapshotId, Bps, ContentHash, DecisionPolicySnapshotId, EligibilitySummary, EventId,
-        ExecutionEligibility, FeatureVectorId, MarketId, MarketSelectionId, ModelRunId,
-        ModelVersionId, Probability, RecommendationFactorBreakdown, RecommendationId,
-        RecommendationReportId, RecommendationTradePlan, ReportFunnelReason, ReportFunnelStage,
-        ReportRunId, ReportScheduleGapId, ReportSummary, ResearchProfileRef, SignalCandidateId,
-        TokenId, Usd,
+        AccountSnapshotId, Bps, ContentHash, CorrelationId, DecisionPolicySnapshotId,
+        DiagnosticCode, EligibilitySummary, EventId, ExecutionEligibility, FeatureVectorId,
+        MarketId, MarketSelectionId, ModelRunId, ModelVersionId, Probability,
+        RecommendationFactorBreakdown, RecommendationId, RecommendationReportId,
+        RecommendationTradePlan, ReportFunnelDiagnostics, ReportFunnelReason, ReportFunnelStage,
+        ReportRunId, ReportScheduleGapId, ReportScheduleId, ReportSummary, ResearchProfileId,
+        ResearchProfileRef, SignalCandidateId, TokenId, Usd, WorkerId,
     },
 };
 use chrono::{DateTime, Utc};
@@ -38,7 +39,7 @@ use validator::Validate;
 #[derive(Debug, Clone, Serialize)]
 pub struct QuantReportView {
     pub recommendation_report_id: RecommendationReportId,
-    pub profile_id: String,
+    pub profile_id: ResearchProfileId,
     pub profile_ref: ResearchProfileRef,
     pub report_kind: ReportKind,
     pub status: RecommendationReportStatus,
@@ -95,7 +96,7 @@ impl From<RecommendationReportInfo> for QuantReportView {
 #[derive(Debug, Clone, Serialize)]
 pub struct QuantReportDetailView {
     pub recommendation_report_id: RecommendationReportId,
-    pub profile_id: String,
+    pub profile_id: ResearchProfileId,
     pub profile_ref: ResearchProfileRef,
     pub report_kind: ReportKind,
     pub decision_at: DateTime<Utc>,
@@ -240,7 +241,7 @@ pub struct ReportFunnelMarketView {
     pub token_id: TokenId,
     pub terminal_stage: ReportFunnelStage,
     pub primary_reason: ReportFunnelReason,
-    pub secondary_diagnostics: serde_json::Value,
+    pub secondary_diagnostics: ReportFunnelDiagnostics,
     pub feature_vector_id: Option<FeatureVectorId>,
     pub signal_candidate_id: Option<SignalCandidateId>,
     pub recommendation_id: Option<RecommendationId>,
@@ -294,7 +295,7 @@ pub struct QuantReportDiagnosticsView {
 /// [`PageRequest`], flattened so the query string stays flat.
 #[derive(Debug, Clone, Default, Deserialize, NormalizePageQuery)]
 pub struct QuantReportListQuery {
-    pub profile_id: Option<String>,
+    pub profile_id: Option<ResearchProfileId>,
     pub kind: Option<ReportKind>,
     pub status: Option<RecommendationReportStatus>,
     pub runtime_mode: Option<QuantRuntimeMode>,
@@ -308,7 +309,7 @@ pub struct QuantReportListQuery {
 /// Required scope of the unique current-report authority.
 #[derive(Debug, Clone, Deserialize)]
 pub struct CurrentReportQuery {
-    pub profile_id: String,
+    pub profile_id: ResearchProfileId,
     pub kind: ReportKind,
 }
 
@@ -349,8 +350,8 @@ pub struct ReportRunView {
     pub report_run_id: ReportRunId,
     pub trigger_kind: ReportTriggerKind,
     pub trigger_key: String,
-    pub schedule_id: Option<String>,
-    pub request_id: Option<String>,
+    pub schedule_id: Option<ReportScheduleId>,
+    pub request_id: Option<CorrelationId>,
     pub retry_of_run_id: Option<ReportRunId>,
     pub scheduled_for: Option<DateTime<Utc>>,
     pub requested_at: DateTime<Utc>,
@@ -359,14 +360,14 @@ pub struct ReportRunView {
     pub decision_at: Option<DateTime<Utc>>,
     pub heartbeat_at: Option<DateTime<Utc>>,
     pub lease_expires_at: Option<DateTime<Utc>>,
-    pub lease_owner: Option<uuid::Uuid>,
+    pub lease_owner: Option<WorkerId>,
     pub finished_at: Option<DateTime<Utc>>,
     pub decision_policy_snapshot_id: Option<DecisionPolicySnapshotId>,
     pub top_n: Option<i32>,
     pub knowledge_lag_secs: Option<i64>,
     pub output_report_id: Option<RecommendationReportId>,
     pub terminal_reason: Option<ReportRunTerminalReason>,
-    pub error_code: Option<String>,
+    pub error_code: Option<DiagnosticCode>,
     pub error_summary: Option<String>,
 }
 
@@ -404,7 +405,7 @@ impl From<ReportRunInfo> for ReportRunView {
 pub struct ReportRunListQuery {
     pub status: Option<ReportRunStatus>,
     pub trigger_kind: Option<ReportTriggerKind>,
-    pub schedule_id: Option<String>,
+    pub schedule_id: Option<ReportScheduleId>,
     pub from: Option<DateTime<Utc>>,
     pub to: Option<DateTime<Utc>>,
     #[normalize_page]
@@ -415,7 +416,7 @@ pub struct ReportRunListQuery {
 /// Paginated append-only schedule-gap filters.
 #[derive(Debug, Clone, Default, Deserialize, NormalizePageQuery)]
 pub struct ReportScheduleGapListQuery {
-    pub schedule_id: Option<String>,
+    pub schedule_id: Option<ReportScheduleId>,
     pub reason: Option<ReportScheduleGapReason>,
     pub from: Option<DateTime<Utc>>,
     pub to: Option<DateTime<Utc>>,
@@ -438,7 +439,7 @@ pub struct ReportTimelineQuery {
 #[derive(Debug, Clone, Serialize)]
 pub struct ReportScheduleGapView {
     pub gap_id: ReportScheduleGapId,
-    pub schedule_id: String,
+    pub schedule_id: ReportScheduleId,
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub reason: ReportScheduleGapReason,
     pub first_scheduled_for: DateTime<Utc>,
@@ -467,7 +468,7 @@ impl From<ReportScheduleGapInfo> for ReportScheduleGapView {
 /// Durable schedule cursor exposed in the scheduler-health projection.
 #[derive(Debug, Clone, Serialize)]
 pub struct ReportScheduleStateView {
-    pub schedule_id: String,
+    pub schedule_id: ReportScheduleId,
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub spec_hash: ContentHash,
     pub next_scheduled_for: DateTime<Utc>,
@@ -508,7 +509,7 @@ pub struct ReportScheduleHealthView {
 #[derive(Debug, Clone, Serialize)]
 pub struct ReportCurrentHealthView {
     pub recommendation_report_id: RecommendationReportId,
-    pub profile_id: String,
+    pub profile_id: ResearchProfileId,
     pub report_kind: ReportKind,
     pub published_at: Option<DateTime<Utc>>,
     pub valid_until: Option<DateTime<Utc>>,

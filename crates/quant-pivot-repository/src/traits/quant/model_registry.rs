@@ -7,6 +7,7 @@ use quant_pivot_models::{
     enums::common::MarketCategory,
     types::{
         BacktestPathSetId, FeatureParityRunId, FeatureParityStateId, ModelSpecId, ModelVersionId,
+        model_quality::QualityGateReport,
     },
 };
 
@@ -117,13 +118,13 @@ pub trait ModelRegistryRepository: Send + Sync {
         model_version_id: &ModelVersionId,
     ) -> Result<ModelVersionInfo, StorageError>;
 
-    /// Persist a model version's quality-gate report JSON (the governance layer
+    /// Persist a model version's typed quality-gate report (the governance layer
     /// writes the gate decision into `quant_model_version.quality_gate_report`
     /// before publishing). Does not change the publication status.
     async fn set_quality_gate_report(
         &self,
         model_version_id: &ModelVersionId,
-        quality_gate_report: serde_json::Value,
+        quality_gate_report: QualityGateReport,
     ) -> Result<ModelVersionInfo, StorageError>;
 
     /// Bind (or clear) the CPCV path set that publish/promote quality gates

@@ -323,7 +323,7 @@ mod tests {
             change_type: CatalogChangeType::GammaScanUpsert,
             content_hash: event_hash,
             schema_version: CATALOG_OBJECT_SCHEMA_VERSION,
-            payload: serde_json::to_value(event).expect("event payload"),
+            payload: serde_json::to_value(event).expect("event payload").into(),
             created_at: event_time,
         };
         let market_changes = revisions
@@ -375,7 +375,7 @@ mod tests {
                     change_type: CatalogChangeType::GammaScanUpsert,
                     content_hash: market_hash,
                     schema_version: CATALOG_OBJECT_SCHEMA_VERSION,
-                    payload: serde_json::to_value(market).expect("market payload"),
+                    payload: serde_json::to_value(market).expect("market payload").into(),
                     created_at: *at,
                 }
             })

@@ -124,7 +124,7 @@ pub async fn run_full(
         "acting_role": acting_role.0,
         "request_id": request_id.0,
         "reason": reason,
-    }));
+    }))?;
     Ok(WebResponse::accepted(job))
 }
 
@@ -159,7 +159,7 @@ pub async fn acknowledge_latch(
         "acting_role": acting_role.0,
         "request_id": request_id.0,
         "reason": reason,
-    }));
+    }))?;
     Ok(WebResponse::ok(latch))
 }
 

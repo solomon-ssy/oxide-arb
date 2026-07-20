@@ -161,12 +161,12 @@ pub fn resolve_catalog_snapshot(
     let market: MarketRegistryInfo = decode_catalog_payload(
         "market",
         &snapshot.market.market_change_id,
-        snapshot.market.payload.clone(),
+        snapshot.market.payload.clone().into_inner(),
     )?;
     let event: EventRegistryInfo = decode_catalog_payload(
         "event",
         &snapshot.event.event_change_id,
-        snapshot.event.payload.clone(),
+        snapshot.event.payload.clone().into_inner(),
     )?;
     if snapshot.market.event_change_id != snapshot.event.event_change_id
         || market.event_id != event.event_id
@@ -335,7 +335,7 @@ fn decode_event_members(
             decode_catalog_payload::<MarketRegistryInfo>(
                 "market",
                 &change.market_change_id,
-                change.payload.clone(),
+                change.payload.clone().into_inner(),
             )
             .map(|market| (market.market_id.clone(), market))
         })

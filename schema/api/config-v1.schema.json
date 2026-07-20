@@ -59,7 +59,16 @@
       "$ref": "#/$defs/SealProductionRequest"
     },
     "seal_production_response": {
-      "$ref": "#/$defs/ProductionSealEvidenceView"
+      "$ref": "#/$defs/LifecycleView"
+    },
+    "snapshot_options_query": {
+      "$ref": "#/$defs/ConfigSnapshotOptionsQuery"
+    },
+    "snapshot_options_response": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/DecisionPolicySnapshotOptionView"
+      }
     },
     "validate_draft_request": {
       "$ref": "#/$defs/ValidatePolicyDraftRequest"
@@ -82,6 +91,8 @@
     "activate_request",
     "activate_response",
     "activity_response",
+    "snapshot_options_query",
+    "snapshot_options_response",
     "deployment_response",
     "lifecycle_response",
     "seal_production_request",
@@ -97,12 +108,21 @@
           "type": "string",
           "format": "uuid"
         },
+        "candidate_bundle_hash": {
+          "type": "string",
+          "pattern": "^blake3:[0-9a-f]{64}$"
+        },
         "expected_active_revision_id": {
           "type": [
             "string",
             "null"
           ],
           "format": "uuid"
+        },
+        "expected_bundle_generation": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 1
         },
         "idempotency_key": {
           "type": "string"
@@ -119,6 +139,8 @@
       "additionalProperties": false,
       "required": [
         "approval_id",
+        "expected_bundle_generation",
+        "candidate_bundle_hash",
         "reason",
         "preflight_token",
         "idempotency_key"
@@ -374,12 +396,24 @@
     "ConfigResourcesView": {
       "type": "object",
       "properties": {
+        "active_bundle_generation": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 1
+        },
         "active_policy_bundle_hash": {
           "type": [
             "string",
             "null"
           ],
           "pattern": "^blake3:[0-9a-f]{64}$"
+        },
+        "active_snapshot_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
         },
         "resources": {
           "type": "array",
@@ -389,8 +423,23 @@
         }
       },
       "required": [
-        "resources"
+        "resources",
+        "active_bundle_generation"
       ]
+    },
+    "ConfigSnapshotOptionsQuery": {
+      "type": "object",
+      "properties": {
+        "limit": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
     },
     "CorrelationConfig": {
       "description": "Correlation-cluster estimation configuration for the correlated-exposure cap.\n\nDrives whether `portfolio.constraints.max_correlated_exposure_usd` actually\nbinds. When disabled, the cap is snapshot-only (Phase 4 behavior).",
@@ -579,6 +628,50 @@
       "description": "Validated decimal value serialized as a JSON string without losing precision.",
       "type": "string",
       "x-format": "decimal"
+    },
+    "DecisionPolicySnapshotOptionView": {
+      "type": "object",
+      "properties": {
+        "bundle_generation": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 1
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "decision_policy_snapshot_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "revision_vector": {
+          "$ref": "#/$defs/PolicyRevisionBundle"
+        },
+        "snapshot_hash": {
+          "type": "string",
+          "pattern": "^blake3:[0-9a-f]{64}$"
+        },
+        "source": {
+          "$ref": "#/$defs/DecisionPolicySnapshotSource"
+        }
+      },
+      "required": [
+        "bundle_generation",
+        "decision_policy_snapshot_id",
+        "snapshot_hash",
+        "revision_vector",
+        "source",
+        "created_at"
+      ]
+    },
+    "DecisionPolicySnapshotSource": {
+      "type": "string",
+      "enum": [
+        "bootstrap",
+        "activation",
+        "rollback"
+      ]
     },
     "DeploymentConfigSnapshotView": {
       "type": "object",
@@ -1197,6 +1290,40 @@
         {
           "type": "object",
           "properties": {
+            "build_commit": {
+              "type": "string"
+            },
+            "clean": {
+              "type": "boolean"
+            },
+            "detail_kind": {
+              "type": "string",
+              "const": "compiled_build_identity"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "detail_kind",
+            "build_commit",
+            "clean"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "detail_kind": {
+              "type": "string",
+              "const": "missing_active_policy_bundle"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "detail_kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
             "detail_kind": {
               "type": "string",
               "const": "policy_bundle"
@@ -1241,6 +1368,7 @@
         "postgres_schema_fingerprint",
         "clickhouse_schema_fingerprint",
         "migration_state",
+        "compiled_build_identity",
         "backup_evidence",
         "config_end_to_end",
         "active_policy_bundle"
@@ -1615,6 +1743,14 @@
         "rollback"
       ]
     },
+    "PolicyActivationOutcome": {
+      "description": "Outcome of an atomic policy activation transaction.",
+      "type": "string",
+      "enum": [
+        "committed",
+        "exact_replay"
+      ]
+    },
     "PolicyActivationResultView": {
       "type": "object",
       "properties": {
@@ -1626,12 +1762,36 @@
         },
         "applied_revision": {
           "$ref": "#/$defs/PolicyRevisionView"
+        },
+        "committed_generation": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 1
+        },
+        "committed_revision_vector": {
+          "$ref": "#/$defs/PolicyRevisionBundle"
+        },
+        "committed_snapshot_hash": {
+          "type": "string",
+          "pattern": "^blake3:[0-9a-f]{64}$"
+        },
+        "committed_snapshot_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "outcome": {
+          "$ref": "#/$defs/PolicyActivationOutcome"
         }
       },
       "required": [
         "activation",
         "applied_revision",
-        "activation_kind"
+        "activation_kind",
+        "outcome",
+        "committed_generation",
+        "committed_snapshot_id",
+        "committed_snapshot_hash",
+        "committed_revision_vector"
       ]
     },
     "PolicyActivationView": {
@@ -1648,12 +1808,18 @@
         "activation_kind": {
           "$ref": "#/$defs/PolicyActivationKind"
         },
+        "activation_request_hash": {
+          "type": "string",
+          "pattern": "^blake3:[0-9a-f]{64}$"
+        },
         "audit_event_id": {
-          "type": [
-            "string",
-            "null"
-          ],
+          "type": "string",
           "format": "uuid"
+        },
+        "bundle_generation": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 1
         },
         "created_at": {
           "type": "string",
@@ -1669,6 +1835,11 @@
             "null"
           ],
           "format": "uuid"
+        },
+        "expected_bundle_generation": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 1
         },
         "idempotency_key": {
           "type": "string"
@@ -1707,6 +1878,8 @@
         }
       },
       "required": [
+        "bundle_generation",
+        "expected_bundle_generation",
         "policy_activation_id",
         "resource_kind",
         "policy_revision_id",
@@ -1717,6 +1890,8 @@
         "reason",
         "activation_kind",
         "idempotency_key",
+        "activation_request_hash",
+        "audit_event_id",
         "created_at"
       ]
     },
@@ -1809,6 +1984,16 @@
         "revision_hash": {
           "type": "string",
           "pattern": "^blake3:[0-9a-f]{64}$"
+        },
+        "validation_subject": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PolicyValidationSubject"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -2022,6 +2207,55 @@
         "consumers"
       ]
     },
+    "PolicyRevisionBundle": {
+      "description": "Revision identities frozen at a decision boundary.",
+      "type": "object",
+      "properties": {
+        "execution_authorization": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "execution_risk_policy": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "model_routing": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "operational_control": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "recommendation_policy": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "report_schedule": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false
+    },
     "PolicyRevisionStatus": {
       "type": "string",
       "enum": [
@@ -2129,6 +2363,18 @@
           "items": {
             "$ref": "#/$defs/PolicyPreflightResult"
           }
+        },
+        "subject": {
+          "description": "Exact active bundle against which this revision was validated.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PolicyValidationSubject"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "additionalProperties": false
@@ -2164,6 +2410,30 @@
       "enum": [
         "error",
         "warning"
+      ]
+    },
+    "PolicyValidationSubject": {
+      "description": "Immutable subject bound to typed validation, preflight and approval.",
+      "type": "object",
+      "properties": {
+        "base_generation": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 1
+        },
+        "base_revision_vector": {
+          "$ref": "#/$defs/PolicyRevisionBundle"
+        },
+        "candidate_bundle_hash": {
+          "type": "string",
+          "x-format": "content-hash"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "base_generation",
+        "base_revision_vector",
+        "candidate_bundle_hash"
       ]
     },
     "PolicyValidationView": {
@@ -2392,6 +2662,10 @@
           "type": "string",
           "format": "date-time"
         },
+        "decision_policy_snapshot_id": {
+          "type": "string",
+          "format": "uuid"
+        },
         "environment": {
           "type": "string"
         },
@@ -2401,6 +2675,11 @@
         "lifecycle_policy_hash": {
           "type": "string",
           "pattern": "^blake3:[0-9a-f]{64}$"
+        },
+        "policy_bundle_generation": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 1
         },
         "policy_bundle_hash": {
           "type": "string",
@@ -2430,6 +2709,8 @@
         "build_commit",
         "postgres_schema_fingerprint",
         "clickhouse_schema_fingerprint",
+        "policy_bundle_generation",
+        "decision_policy_snapshot_id",
         "policy_bundle_hash",
         "lifecycle_policy_hash",
         "evidence",
@@ -2490,17 +2771,6 @@
         }
       },
       "additionalProperties": false
-    },
-    "ProductionSealEvidenceView": {
-      "type": "object",
-      "properties": {
-        "evidence": {
-          "$ref": "#/$defs/ProductionSealEvidence"
-        }
-      },
-      "required": [
-        "evidence"
-      ]
     },
     "ProjectLifecycleState": {
       "type": "string",
@@ -2923,7 +3193,7 @@
       "additionalProperties": false
     },
     "SemiAutoCanaryConfig": {
-      "description": "Runtime v18 policy-bound `SemiAuto` canary.\n\nAn enabled canary is intentionally narrower than a published policy. It\nauthorizes only an exact policy identity and explicit cash-budget tiers; it\nnever acts as an implicit active-policy pointer.",
+      "description": "Runtime v1 policy-bound `SemiAuto` canary.\n\nAn enabled canary is intentionally narrower than a published policy. It\nauthorizes only an exact policy identity and explicit cash-budget tiers; it\nnever acts as an implicit active-policy pointer.",
       "type": "object",
       "properties": {
         "allowed_cash_budget_tiers_usd": {

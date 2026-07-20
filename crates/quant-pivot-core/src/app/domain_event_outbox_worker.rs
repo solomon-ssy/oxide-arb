@@ -9,11 +9,10 @@ use quant_pivot_error::{
 use quant_pivot_models::{
     clickhouse::{ChSchemaVersion, DomainEventRow},
     domain::{DomainEventEnvelope, DomainEventType},
-    types::DomainEventId,
+    types::{DomainEventId, WorkerId},
 };
 use quant_pivot_repository::traits::{DomainProjectionRepository, FactWriter};
 use tokio_util::sync::CancellationToken;
-use uuid::Uuid;
 
 use crate::infra::periodic_task::PeriodicTask;
 
@@ -25,7 +24,7 @@ const LEASE_DURATION: Duration = Duration::from_secs(30);
 /// The typed `PostgreSQL` projection commits before publication. `ClickHouse`
 /// writes are idempotent on `event_id`, so a crash safely replays the envelope.
 pub struct DomainEventOutboxWorker {
-    worker_id: Uuid,
+    worker_id: WorkerId,
     projections: Arc<dyn DomainProjectionRepository>,
     writer: Arc<dyn FactWriter<DomainEventRow>>,
 }
@@ -37,7 +36,7 @@ impl DomainEventOutboxWorker {
         writer: Arc<dyn FactWriter<DomainEventRow>>,
     ) -> Self {
         Self {
-            worker_id: Uuid::now_v7(),
+            worker_id: WorkerId::from_v7(),
             projections,
             writer,
         }
@@ -66,7 +65,12 @@ impl DomainEventOutboxWorker {
         })?;
         let events = self
             .projections
-            .claim_pending_events(self.worker_id, now, now + lease_duration, BATCH_SIZE)
+            .claim_pending_events(
+                self.worker_id.clone(),
+                now,
+                now + lease_duration,
+                BATCH_SIZE,
+            )
             .await?;
         if events.is_empty() {
             return Ok(());
@@ -79,7 +83,7 @@ impl DomainEventOutboxWorker {
             for event in &events {
                 if let Err(mark_error) = self
                     .projections
-                    .mark_event_failed(&event.id, self.worker_id, error.to_string())
+                    .mark_event_failed(&event.id, self.worker_id.clone(), error.to_string())
                     .await
                 {
                     tracing::error!(
@@ -94,7 +98,7 @@ impl DomainEventOutboxWorker {
         let published_at = chrono::Utc::now();
         for event in events {
             self.projections
-                .mark_event_published(&event.id, self.worker_id, published_at)
+                .mark_event_published(&event.id, self.worker_id.clone(), published_at)
                 .await?;
         }
         Ok(())

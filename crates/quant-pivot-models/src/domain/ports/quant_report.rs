@@ -18,7 +18,7 @@ use crate::{
         ReportTimelineQuery,
     },
     enums::quant::ReportKind,
-    types::{RecommendationId, RecommendationReportId, ReportRunId},
+    types::{RecommendationId, RecommendationReportId, ReportRunId, ResearchProfileId},
 };
 use quant_pivot_error::QuantResult;
 
@@ -122,7 +122,7 @@ pub trait QuantReportPort: Send + Sync {
     /// Load the unique current authority for one profile and report kind.
     async fn current_report(
         &self,
-        profile_id: &str,
+        profile_id: &ResearchProfileId,
         kind: ReportKind,
     ) -> QuantResult<Option<RecommendationReportInfo>>;
 

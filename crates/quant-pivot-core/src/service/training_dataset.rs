@@ -60,6 +60,7 @@ use quant_pivot_models::{
         ModelInputContract, ModelSpecId, Price, RecommendationId, Shares, TokenId,
         TradePolicyArtifactId, TradePolicyArtifactPayload, TrainingDatasetId, TrainingExampleId,
         TrainingHorizonsSecs, TrainingSampleSource, TrainingSampleSources, Usd,
+        factor::FactorExplanation, stable_name::FactorName,
     },
 };
 use quant_pivot_repository::traits::{
@@ -73,12 +74,10 @@ use quant_pivot_research::{
     artifact::{ArtifactKey, ArtifactNamespace, ArtifactStore},
     execution_semantics::BookFidelity,
     factors::{
-        FactorEligibility, FactorEngine, FactorExplanation, FactorName, FactorValue,
-        MarketFactorOutcome, NormalizedFactor,
+        FactorEligibility, FactorEngine, FactorValue, MarketFactorOutcome, NormalizedFactor,
     },
     features::{
-        ConfiguredFeatureBuilder, DecisionCaptureEvidence, DomainFeatureSlice, FeatureCell,
-        FeatureCellState, FeatureName, FeatureVector,
+        ConfiguredFeatureBuilder, DecisionCaptureEvidence, FeatureCellState, FeatureVector,
     },
     hashing::ResearchHasher,
     model::{
@@ -387,6 +386,7 @@ pub fn verify_frozen_dataset_artifact(
     })?;
     let bindings_match = manifest.training_dataset_id == dataset.training_dataset_id
         && manifest.model_spec_id == dataset.model_spec_id
+        && manifest.model_spec_definition_hash == dataset.model_spec_definition_hash
         && manifest.decision_policy_snapshot_id == dataset.decision_policy_snapshot_id
         && manifest.window_start == dataset.window_start
         && manifest.window_end == dataset.window_end
@@ -562,12 +562,12 @@ impl TrainingDatasetService {
             .any(|source| !matches!(source, TrainingSampleSource::HistoricalPit))
         {
             return Err(ResearchError::DatasetPlan {
-                detail: "Source Slice V2 Dataset builds currently accept only historical_pit; live_attribution and exit_decision require their complete immutable evidence graphs"
+                detail: "Source Slice V1 Dataset builds currently accept only historical_pit; live_attribution and exit_decision require their complete immutable evidence graphs"
                     .to_owned(),
             }
             .into());
         }
-        let (trade_policy_artifact_id, trade_policy_hash, trade_policy) =
+        let (model_spec_definition_hash, trade_policy_artifact_id, trade_policy_hash, trade_policy) =
             self.resolve_trade_policy_binding(&request).await?;
         let plan_markets = self.frozen_plan_markets(&request, &source.prefetched)?;
         let samples = plan_samples(&request, &plan_markets)?;
@@ -580,6 +580,7 @@ impl TrainingDatasetService {
         Ok(DatasetPlan {
             request,
             training_dataset_id,
+            model_spec_definition_hash,
             samples,
             lot_samples: Vec::new(),
             exit_training_lots: Vec::new(),
@@ -619,8 +620,9 @@ impl TrainingDatasetService {
             let Some(latest) = history.last() else {
                 continue;
             };
-            let info = serde_json::from_value::<MarketRegistryInfo>(latest.payload.clone())
-                .map_err(|error| ResearchError::DatasetPlan {
+            let info =
+                serde_json::from_value::<MarketRegistryInfo>(latest.payload.clone().into_inner())
+                    .map_err(|error| ResearchError::DatasetPlan {
                     detail: format!("Source Slice catalog market {market_id} is invalid: {error}"),
                 })?;
             let observed = [&info.token_yes, &info.token_no].iter().any(|token| {
@@ -739,13 +741,11 @@ impl TrainingDatasetService {
         &self,
         request: &DatasetPlanRequest,
     ) -> QuantResult<(
+        ContentHash,
         Option<TradePolicyArtifactId>,
         Option<ContentHash>,
         Option<TradePolicyArtifactPayload>,
     )> {
-        if request.purpose == DatasetPurpose::PolicyFit {
-            return Ok((None, None, None));
-        }
         let spec = self
             .model_registry
             .find_model_spec_by_id(&request.model_spec_id)
@@ -755,11 +755,14 @@ impl TrainingDatasetService {
                 entity: "quant_model_spec",
                 id: request.model_spec_id.to_string(),
             })?;
+        if request.purpose == DatasetPurpose::PolicyFit {
+            return Ok((spec.definition_hash, None, None, None));
+        }
         spec.training_contract
             .validate()
             .map_err(|detail| ResearchError::DatasetPlan { detail })?;
         let Some(artifact_id) = spec.training_contract.trade_policy_artifact_id else {
-            return Ok((None, None, None));
+            return Ok((spec.definition_hash, None, None, None));
         };
         let artifact = self
             .trade_policy_repo
@@ -816,6 +819,7 @@ impl TrainingDatasetService {
             .into());
         }
         Ok((
+            spec.definition_hash,
             Some(artifact.artifact_id),
             Some(artifact.content_hash),
             Some(artifact.payload_json),
@@ -1170,7 +1174,7 @@ fn stride_sample<'a>(candidates: &[&'a MarketInfo], limit: usize) -> Vec<&'a Mar
 impl TrainingDatasetPlanner for TrainingDatasetService {
     async fn plan(&self, request: DatasetPlanRequest) -> QuantResult<DatasetPlan> {
         require_half_open_dataset_window(request.window_start, request.window_end)?;
-        let (trade_policy_artifact_id, trade_policy_hash, trade_policy) =
+        let (model_spec_definition_hash, trade_policy_artifact_id, trade_policy_hash, trade_policy) =
             self.resolve_trade_policy_binding(&request).await?;
         // Point-in-time candidate selection: markets observed (had a book) in the
         // window whose fee-dominant category is in the enabled set (mirrors the
@@ -1210,6 +1214,7 @@ impl TrainingDatasetPlanner for TrainingDatasetService {
         Ok(DatasetPlan {
             request,
             training_dataset_id,
+            model_spec_definition_hash,
             samples,
             lot_samples,
             exit_training_lots,
@@ -1465,6 +1470,7 @@ impl TrainingDatasetService {
                 .create_plan(NewTrainingDatasetPlan {
                     training_dataset_id: plan.training_dataset_id.clone(),
                     model_spec_id: plan.request.model_spec_id.clone(),
+                    model_spec_definition_hash: plan.model_spec_definition_hash.clone(),
                     window_start: plan.request.window_start,
                     window_end: plan.request.window_end,
                     purpose: plan.request.purpose,
@@ -1495,6 +1501,7 @@ impl TrainingDatasetService {
             }
         };
         let binding_matches = row.model_spec_id == plan.request.model_spec_id
+            && row.model_spec_definition_hash == plan.model_spec_definition_hash
             && row.decision_policy_snapshot_id == plan.request.decision_policy_snapshot_id
             && row.window_start == plan.request.window_start
             && row.window_end == plan.request.window_end
@@ -2293,6 +2300,7 @@ impl TrainingDatasetService {
             research_program_hash: plan.request.research_program_hash.clone(),
             source_slice: plan.request.source_slice.clone(),
             model_spec_id: plan.request.model_spec_id.clone(),
+            model_spec_definition_hash: plan.model_spec_definition_hash.clone(),
             trade_policy_artifact_id: plan.trade_policy_artifact_id.clone(),
             trade_policy_hash: plan.trade_policy_hash.clone(),
             decision_policy_snapshot_id: plan.request.decision_policy_snapshot_id.clone(),
@@ -2987,32 +2995,8 @@ fn frozen_live_feature_evidence(
         );
         None
     })?;
-    let decision_boundary = feature_info.decision_boundary.clone().or_else(|| {
-        tracing::warn!(
-            recommendation_id = %recommendation.recommendation_id,
-            feature_vector_id = %recommendation.evidence_refs.feature_vector_id,
-            "live attribution sample dropped: pre-v10 feature vector has no decision boundary",
-        );
-        None
-    })?;
-    let decision_capture_json = feature_info.decision_capture.clone().or_else(|| {
-        tracing::warn!(
-            recommendation_id = %recommendation.recommendation_id,
-            feature_vector_id = %recommendation.evidence_refs.feature_vector_id,
-            "live attribution sample dropped: pre-v10 feature vector has no decision capture",
-        );
-        None
-    })?;
-    let decision_capture = serde_json::from_value::<DecisionCaptureEvidence>(decision_capture_json)
-        .map_err(|error| {
-            tracing::warn!(
-                recommendation_id = %recommendation.recommendation_id,
-                feature_vector_id = %recommendation.evidence_refs.feature_vector_id,
-                %error,
-                "live attribution sample dropped: decision capture payload is invalid",
-            );
-        })
-        .ok()?;
+    let decision_boundary = feature_info.decision_boundary.clone();
+    let decision_capture = feature_info.decision_capture.clone();
     if !valid_live_feature_evidence(feature_info, &decision_boundary, &decision_capture) {
         tracing::warn!(
             recommendation_id = %recommendation.recommendation_id,
@@ -3033,10 +3017,9 @@ fn valid_live_feature_evidence(
     boundary: &DecisionBoundary,
     capture: &DecisionCaptureEvidence,
 ) -> bool {
-    let capture_hash_matches = feature_info
-        .decision_capture_hash
-        .as_ref()
-        .is_some_and(|expected| ResearchHasher::canonical(capture).ok().as_ref() == Some(expected));
+    let capture_hash_matches = ResearchHasher::canonical(capture)
+        .ok()
+        .is_some_and(|actual| actual == feature_info.decision_capture_hash);
     capture_hash_matches
         && boundary.validate().is_ok()
         && boundary.decision_at() == feature_info.decision_at
@@ -3056,19 +3039,14 @@ fn selected_market_from_member(member: &MarketSelectionMemberInfo) -> SelectedMa
 }
 
 fn frozen_feature_vector(info: &FeatureVectorInfo) -> Option<FeatureVector> {
-    let generic = info.payload.get("generic")?.clone();
-    let domain = info
-        .payload
-        .get("domain")
-        .cloned()
-        .unwrap_or(serde_json::Value::Null);
+    info.payload.validate().ok()?;
     Some(FeatureVector {
         market_id: info.market_id.clone(),
         token_id: info.token_id.clone(),
         decision_at: info.decision_at,
         generic_schema_version: info.feature_schema_version,
-        generic: serde_json::from_value::<BTreeMap<FeatureName, FeatureCell>>(generic).ok()?,
-        domain: serde_json::from_value::<Option<DomainFeatureSlice>>(domain).ok()?,
+        generic: info.payload.generic.clone(),
+        domain: info.payload.domain.clone(),
         data_quality: info.data_quality,
     })
 }

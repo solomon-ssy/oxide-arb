@@ -56,10 +56,9 @@ pub struct ExchangeLogClient {
 impl ExchangeLogClient {
     /// Connect a read-only client from deploy on-chain config.
     pub fn connect(config: &OnchainConfig) -> Result<Self, RpcError> {
-        let rpc_url = Url::parse(&config.rpc_url).map_err(|error| {
+        let rpc_url = Url::parse(config.rpc_url()).map_err(|error| {
             RpcError::ConnectionFailed(format!(
-                "invalid Polygon RPC URL '{}': {error}",
-                config.rpc_url
+                "configured Polygon RPC endpoint is invalid: {error}"
             ))
         })?;
         let http_client = ReqwestClient::builder()

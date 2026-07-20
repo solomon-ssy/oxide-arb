@@ -43,6 +43,13 @@ if ! rg -q 'type_name = "qp_config_resource_kind"' \
   echo "ERROR: Config finite states must use SeaORM ActiveEnum" >&2
   errors=$((errors + 1))
 fi
+if ! rg -q '#\[sea_orm\(rs_type = "Enum", db_type = "Enum", enum_name = \$type_name\)\]' \
+     crates/quant-pivot-models/src/enums/mod.rs ||
+   rg -n 'rs_type = "String", db_type = "Enum"' \
+     crates/quant-pivot-models/src crates/quant-pivot-migration/src/snapshots/v1; then
+  echo "ERROR: PostgreSQL ActiveEnum must preserve native type identity with rs_type = \"Enum\"" >&2
+  errors=$((errors + 1))
+fi
 
 echo "=== Checking governed queries stay batched ==="
 config_repo="crates/quant-pivot-repository/src/postgres/governance/runtime_config.rs"

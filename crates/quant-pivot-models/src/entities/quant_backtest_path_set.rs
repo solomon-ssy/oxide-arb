@@ -3,6 +3,7 @@
 use crate::types::{
     BacktestPathSetId, ContentHash, DecisionPolicySnapshotId, ModelRunId, ModelVersionId,
     TrainingDatasetId,
+    backtest::{BacktestPaths, SharpeDistribution},
 };
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
@@ -24,9 +25,9 @@ pub struct Model {
     pub combination_count: i64,
     pub median_rank_ic: Decimal,
     #[sea_orm(column_type = "JsonBinary")]
-    pub sharpe_distribution: Json,
+    pub sharpe_distribution: SharpeDistribution,
     #[sea_orm(column_type = "JsonBinary")]
-    pub paths: Json,
+    pub paths: BacktestPaths,
     pub deflated_sharpe: Decimal,
     pub dsr_benchmark_sharpe: Decimal,
     pub pbo: Decimal,

@@ -14,8 +14,11 @@ pub mod market;
 pub mod menu;
 pub mod operation_log;
 pub mod policy_activation;
+pub mod policy_activation_audit;
+pub mod policy_activation_event_outbox;
 pub mod policy_activation_guard;
 pub mod policy_approval;
+pub mod policy_profile_artifact;
 pub mod policy_revision;
 pub mod quant_account_snapshot;
 pub mod quant_backtest_path_set;
@@ -77,6 +80,7 @@ pub mod quant_trade_tape_block_cursor;
 pub mod quant_training_dataset;
 pub mod quant_weather_daily_temperature_projection;
 pub mod quant_weather_observation_current;
+pub mod research_profile_artifact;
 pub mod role;
 pub mod role_menu;
 pub mod sea_orm_active_enums;
@@ -84,6 +88,7 @@ pub mod seed_application;
 pub mod system_bootstrap_transition;
 pub mod system_kill_switch;
 pub mod system_production_baseline;
+pub mod system_production_evidence;
 pub mod system_runtime_state;
 pub mod user;
 pub mod user_role;
@@ -105,8 +110,11 @@ pub const TABLES: &[&str] = &[
     "menu",
     "operation_log",
     "policy_activation",
+    "policy_activation_audit",
+    "policy_activation_event_outbox",
     "policy_activation_guard",
     "policy_approval",
+    "policy_profile_artifact",
     "policy_revision",
     "quant_account_snapshot",
     "quant_backtest_path_set",
@@ -168,12 +176,14 @@ pub const TABLES: &[&str] = &[
     "quant_training_dataset",
     "quant_weather_daily_temperature_projection",
     "quant_weather_observation_current",
+    "research_profile_artifact",
     "role",
     "role_menu",
     "seed_application",
     "system_bootstrap_transition",
     "system_kill_switch",
     "system_production_baseline",
+    "system_production_evidence",
     "system_runtime_state",
     "user",
     "user_role",
@@ -228,8 +238,11 @@ pub const ENUMS: &[&str] = &[
     "qp_model_run_error_code",
     "qp_model_run_kind",
     "qp_model_run_status",
+    "qp_model_version_derivation_kind",
+    "qp_model_weight_source",
     "qp_normalization_source",
     "qp_operation_category",
+    "qp_operation_http_method",
     "qp_operation_outcome",
     "qp_order_intent_kind",
     "qp_order_intent_status",
@@ -239,7 +252,9 @@ pub const ENUMS: &[&str] = &[
     "qp_policy_activation_kind",
     "qp_policy_actor_kind",
     "qp_policy_approval_decision",
+    "qp_profile_artifact_kind",
     "qp_policy_revision_status",
+    "qp_production_evidence_kind",
     "qp_position_ledger_state",
     "qp_publication_status",
     "qp_quant_runtime_mode",
@@ -291,8 +306,11 @@ pub const ARTIFACTS: &[&[u8]] = &[
     include_bytes!("mod.rs"),
     include_bytes!("operation_log.rs"),
     include_bytes!("policy_activation.rs"),
+    include_bytes!("policy_activation_audit.rs"),
+    include_bytes!("policy_activation_event_outbox.rs"),
     include_bytes!("policy_activation_guard.rs"),
     include_bytes!("policy_approval.rs"),
+    include_bytes!("policy_profile_artifact.rs"),
     include_bytes!("policy_revision.rs"),
     include_bytes!("quant_account_snapshot.rs"),
     include_bytes!("quant_backtest_path_set.rs"),
@@ -354,6 +372,7 @@ pub const ARTIFACTS: &[&[u8]] = &[
     include_bytes!("quant_training_dataset.rs"),
     include_bytes!("quant_weather_daily_temperature_projection.rs"),
     include_bytes!("quant_weather_observation_current.rs"),
+    include_bytes!("research_profile_artifact.rs"),
     include_bytes!("role.rs"),
     include_bytes!("role_menu.rs"),
     include_bytes!("sea_orm_active_enums.rs"),
@@ -361,6 +380,7 @@ pub const ARTIFACTS: &[&[u8]] = &[
     include_bytes!("system_bootstrap_transition.rs"),
     include_bytes!("system_kill_switch.rs"),
     include_bytes!("system_production_baseline.rs"),
+    include_bytes!("system_production_evidence.rs"),
     include_bytes!("system_runtime_state.rs"),
     include_bytes!("user.rs"),
     include_bytes!("user_role.rs"),

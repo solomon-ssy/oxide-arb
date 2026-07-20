@@ -1,11 +1,9 @@
 //! Core implementation of [`ResearchJobPort`] — the HTTP enqueue/cancel/retry surface.
 
 use async_trait::async_trait;
-use serde::Serialize;
 
 use quant_pivot_error::{
     QuantError, QuantResult,
-    research::ResearchError,
     storage::{StorageError, entity},
 };
 use quant_pivot_models::{
@@ -20,7 +18,7 @@ use quant_pivot_models::{
     enums::quant::{ResearchJobErrorCode, ResearchJobKind, ResearchJobStatus},
     types::{
         BacktestPathSetId, BacktestReportId, DecisionPolicySnapshotId, ModelSpecId, ModelVersionId,
-        ResearchJobId, TrainingDatasetId,
+        ResearchJobId, ResearchJobParams, TrainingDatasetId,
     },
 };
 
@@ -55,13 +53,13 @@ impl CoreResearchJobPort {
 
     fn new_job(
         &self,
-        kind: ResearchJobKind,
-        params: serde_json::Value,
+        params: ResearchJobParams,
         model_spec_id: Option<ModelSpecId>,
         decision_policy_snapshot_id: Option<DecisionPolicySnapshotId>,
         parent_job_id: Option<ResearchJobId>,
         ctx: &JobSubmitContext,
     ) -> NewResearchJob {
+        let kind = params.kind();
         NewResearchJob {
             job_id: ResearchJobId::from_v7(),
             kind,
@@ -89,14 +87,6 @@ impl CoreResearchJobPort {
     }
 }
 
-fn to_params<T: Serialize>(value: &T) -> QuantResult<serde_json::Value> {
-    serde_json::to_value(value).map_err(|error| {
-        QuantError::from(ResearchError::Serialization {
-            detail: format!("research job params serialization failed: {error}"),
-        })
-    })
-}
-
 #[async_trait]
 impl ResearchJobPort for CoreResearchJobPort {
     async fn enqueue_dataset_build(
@@ -111,10 +101,8 @@ impl ResearchJobPort for CoreResearchJobPort {
         }
         let model_spec_id = Some(request.model_spec_id.clone());
         let decision_policy_snapshot_id = Some(request.decision_policy_snapshot_id.clone());
-        let params = to_params(&request)?;
         let job = self.new_job(
-            ResearchJobKind::DatasetBuild,
-            params,
+            ResearchJobParams::DatasetBuild(request),
             model_spec_id,
             decision_policy_snapshot_id,
             None,
@@ -139,12 +127,11 @@ impl ResearchJobPort for CoreResearchJobPort {
             })?;
         let model_spec_id = Some(dataset.model_spec_id.clone());
         let decision_policy_snapshot_id = Some(dataset.decision_policy_snapshot_id.clone());
-        let params = to_params(&ModelTrainJobParams {
+        let params = ResearchJobParams::ModelTrain(ModelTrainJobParams {
             model_version_id: ModelVersionId::from_v7(),
             request,
-        })?;
+        });
         let job = self.new_job(
-            ResearchJobKind::ModelTrain,
             params,
             model_spec_id,
             decision_policy_snapshot_id,
@@ -164,18 +151,11 @@ impl ResearchJobPort for CoreResearchJobPort {
             request.backtest_report_id = Some(BacktestReportId::from_v7());
         }
         let decision_policy_snapshot_id = Some(request.decision_policy_snapshot_id.clone());
-        let params = to_params(&BacktestJobParams {
+        let params = ResearchJobParams::Backtest(BacktestJobParams {
             model_version_id,
             request,
-        })?;
-        let job = self.new_job(
-            ResearchJobKind::Backtest,
-            params,
-            None,
-            decision_policy_snapshot_id,
-            None,
-            &ctx,
-        );
+        });
+        let job = self.new_job(params, None, decision_policy_snapshot_id, None, &ctx);
         self.enqueue(job).await
     }
 
@@ -189,18 +169,11 @@ impl ResearchJobPort for CoreResearchJobPort {
             request.path_set_id = Some(BacktestPathSetId::from_v7());
         }
         let decision_policy_snapshot_id = Some(request.decision_policy_snapshot_id.clone());
-        let params = to_params(&CpcvBacktestJobParams {
+        let params = ResearchJobParams::CpcvBacktest(CpcvBacktestJobParams {
             model_version_id,
             request,
-        })?;
-        let job = self.new_job(
-            ResearchJobKind::CpcvBacktest,
-            params,
-            None,
-            decision_policy_snapshot_id,
-            None,
-            &ctx,
-        );
+        });
+        let job = self.new_job(params, None, decision_policy_snapshot_id, None, &ctx);
         self.enqueue(job).await
     }
 
@@ -210,18 +183,11 @@ impl ResearchJobPort for CoreResearchJobPort {
         decision_policy_snapshot_id: DecisionPolicySnapshotId,
         ctx: JobSubmitContext,
     ) -> QuantResult<ResearchJobView> {
-        let params = to_params(&BiasTableFitJobParams {
+        let params = ResearchJobParams::BiasTableFit(BiasTableFitJobParams {
             request,
             decision_policy_snapshot_id: decision_policy_snapshot_id.clone(),
-        })?;
-        let job = self.new_job(
-            ResearchJobKind::BiasTableFit,
-            params,
-            None,
-            Some(decision_policy_snapshot_id),
-            None,
-            &ctx,
-        );
+        });
+        let job = self.new_job(params, None, Some(decision_policy_snapshot_id), None, &ctx);
         self.enqueue(job).await
     }
 
@@ -231,18 +197,11 @@ impl ResearchJobPort for CoreResearchJobPort {
         decision_policy_snapshot_id: DecisionPolicySnapshotId,
         ctx: JobSubmitContext,
     ) -> QuantResult<ResearchJobView> {
-        let params = to_params(&ModelCalibrationFitJobParams {
+        let params = ResearchJobParams::ModelCalibrationFit(ModelCalibrationFitJobParams {
             request,
             decision_policy_snapshot_id: decision_policy_snapshot_id.clone(),
-        })?;
-        let job = self.new_job(
-            ResearchJobKind::ModelCalibrationFit,
-            params,
-            None,
-            Some(decision_policy_snapshot_id),
-            None,
-            &ctx,
-        );
+        });
+        let job = self.new_job(params, None, Some(decision_policy_snapshot_id), None, &ctx);
         self.enqueue(job).await
     }
 
@@ -261,18 +220,11 @@ impl ResearchJobPort for CoreResearchJobPort {
                 id: format!("active_at: {}", request.selection.pit_cutoff),
             })?;
         let decision_policy_snapshot_id = Some(runtime_config.decision_policy_snapshot_id);
-        let params = to_params(&TradePolicyFitJobParams {
+        let params = ResearchJobParams::TradePolicyFit(TradePolicyFitJobParams {
             training_dataset_id: TrainingDatasetId::from_v7(),
             request,
-        })?;
-        let job = self.new_job(
-            ResearchJobKind::TradePolicyFit,
-            params,
-            None,
-            decision_policy_snapshot_id,
-            None,
-            &ctx,
-        );
+        });
+        let job = self.new_job(params, None, decision_policy_snapshot_id, None, &ctx);
         self.enqueue(job).await
     }
 
@@ -281,10 +233,8 @@ impl ResearchJobPort for CoreResearchJobPort {
         request: TradePolicyValidationJobParams,
         ctx: JobSubmitContext,
     ) -> QuantResult<ResearchJobView> {
-        let params = to_params(&request)?;
         let job = self.new_job(
-            ResearchJobKind::TradePolicyValidation,
-            params,
+            ResearchJobParams::TradePolicyValidation(request),
             None,
             None,
             None,
@@ -381,7 +331,6 @@ impl ResearchJobPort for CoreResearchJobPort {
             )));
         }
         let job = self.new_job(
-            info.kind,
             info.params_json.clone(),
             info.model_spec_id.clone(),
             info.decision_policy_snapshot_id.clone(),

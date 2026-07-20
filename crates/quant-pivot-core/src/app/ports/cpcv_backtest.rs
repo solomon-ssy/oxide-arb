@@ -21,6 +21,8 @@ use quant_pivot_models::{
     types::{
         BacktestPathSetId, Bps, ContentHash, DecisionPolicySnapshotId, ModelInputContract,
         ModelRunId, ModelVersionId, TrainingDatasetId,
+        backtest::{BacktestPath, SharpeDistribution},
+        model_metrics::ModelVersionMetricsDefinition,
     },
 };
 use quant_pivot_repository::traits::{
@@ -30,8 +32,8 @@ use quant_pivot_repository::traits::{
 use quant_pivot_research::{
     artifact::ArtifactStore,
     model::{
-        LabelSelector, ModelFamily, SellSignalPolicy, TrainingObjectiveSpec,
-        load_hash_verified_artifact,
+        LabelSelector, ModelFamily, SellSignalPolicy, load_hash_verified_artifact,
+        objective::training_objective_from_runtime_config,
     },
     training::LabelName,
     validation::{
@@ -163,18 +165,18 @@ impl CoreCpcvBacktestPort {
         Ok(version.snapshot)
     }
 
-    /// Read `metrics_json.validation.coord_search_effective_n` from the
-    /// already-resolved production model version (`WeightedFactor`). Missing /
-    /// classical → 0.
+    /// Read the typed LTR validation trial count from the already-resolved
+    /// production model version. Non-LTR versions contribute zero.
     /// Persisted on the path set for audit only — **not** part of DSR N
     /// (Bailey N/V must describe the same trial-grid population).
-    fn coord_search_effective_n(version: &ModelVersionInfo) -> u32 {
-        version
-            .metrics_json
-            .pointer("/validation/coord_search_effective_n")
-            .and_then(serde_json::Value::as_u64)
-            .and_then(|n| u32::try_from(n).ok())
-            .unwrap_or(0)
+    const fn coord_search_effective_n(version: &ModelVersionInfo) -> u32 {
+        match &version.metrics.definition {
+            ModelVersionMetricsDefinition::LearningToRank { validation, .. } => {
+                validation.coordinate_search_effective_trials
+            }
+            ModelVersionMetricsDefinition::ClassicalPointwise { .. }
+            | ModelVersionMetricsDefinition::NotMeasured { .. } => 0,
+        }
     }
 
     /// Resolve the trained artifact's `category_scope` so CPCV folds evaluate
@@ -243,7 +245,6 @@ impl CoreCpcvBacktestPort {
                 status: ModelRunStatus::Running,
                 input_hash: materialization.dataset_hash.clone(),
                 output_hash: None,
-                metrics_json: serde_json::json!({}),
                 error_code: None,
                 error_message: None,
                 started_at: Utc::now(),
@@ -262,18 +263,9 @@ impl CoreCpcvBacktestPort {
         request: &RunCpcvBacktestRequest,
         outcome: &CpcvBacktestOutcome,
     ) -> QuantResult<BacktestPathSetView> {
-        let paths_json = serde_json::to_value(&outcome.path_set.paths).map_err(|error| {
-            ResearchError::ValidationMethodology {
-                detail: format!("failed to serialize CPCV paths JSON: {error}"),
-            }
-        })?;
-        let sharpe_distribution_json = serde_json::to_value(outcome.path_set.sharpe_distribution)
-            .map_err(|error| ResearchError::ValidationMethodology {
-            detail: format!("failed to serialize Sharpe distribution JSON: {error}"),
-        })?;
         let path_set_hash = path_set_content_hash(&PathSetHashInput {
-            paths: &paths_json,
-            sharpe_distribution: &sharpe_distribution_json,
+            paths: &outcome.path_set.paths,
+            sharpe_distribution: &outcome.path_set.sharpe_distribution,
             median_rank_ic: outcome.path_set.median_rank_ic,
             deflated_sharpe: outcome.dsr.deflated_sharpe,
             dsr_benchmark_sharpe: outcome.dsr.benchmark_sharpe,
@@ -296,8 +288,8 @@ impl CoreCpcvBacktestPort {
                 combination_count: i64::try_from(outcome.path_set.combination_count)
                     .unwrap_or(i64::MAX),
                 median_rank_ic: outcome.path_set.median_rank_ic,
-                sharpe_distribution: sharpe_distribution_json,
-                paths: paths_json,
+                sharpe_distribution: outcome.path_set.sharpe_distribution,
+                paths: outcome.path_set.paths.clone().into(),
                 deflated_sharpe: outcome.dsr.deflated_sharpe,
                 dsr_benchmark_sharpe: outcome.dsr.benchmark_sharpe,
                 pbo: outcome.pbo,
@@ -430,12 +422,6 @@ impl CoreCpcvBacktestPort {
             .succeed(
                 &model_run_id,
                 view.path_set_hash.clone(),
-                serde_json::json!({
-                    "path_set_id": view.path_set_id.to_string(),
-                    "trial_count": view.trial_count,
-                    "trial_grid_count": view.trial_grid_count,
-                    "coord_search_effective_n": view.coord_search_effective_n,
-                }),
                 Utc::now(),
                 Some(model_version_id),
             )
@@ -501,8 +487,8 @@ impl CoreCpcvBacktestPort {
 /// Canonical hash input for a persisted CPCV path set (audit / replay association).
 #[derive(Serialize)]
 struct PathSetHashInput<'a> {
-    paths: &'a serde_json::Value,
-    sharpe_distribution: &'a serde_json::Value,
+    paths: &'a [BacktestPath],
+    sharpe_distribution: &'a SharpeDistribution,
     median_rank_ic: Decimal,
     deflated_sharpe: Decimal,
     dsr_benchmark_sharpe: Decimal,
@@ -551,7 +537,7 @@ fn cpcv_config_from_runtime(
 
     Ok(CpcvBacktestConfig {
         factors: runtime.profile_artifacts.scoring.definition.clone(),
-        objective: TrainingObjectiveSpec::from_runtime_config(
+        objective: training_objective_from_runtime_config(
             &runtime.profile_artifacts.research_method.research.training,
         )?,
         cpcv: CpcvConfig {

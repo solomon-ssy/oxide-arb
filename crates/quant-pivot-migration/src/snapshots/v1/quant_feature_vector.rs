@@ -14,8 +14,8 @@ pub struct Model {
     #[sea_orm(column_type = "Text", nullable)]
     pub token_id: Option<String>,
     pub decision_at: DateTimeWithTimeZone,
-    #[sea_orm(column_type = "JsonBinary", nullable)]
-    pub decision_boundary: Option<Json>,
+    #[sea_orm(column_type = "JsonBinary")]
+    pub decision_boundary: Json,
     pub feature_schema_version: i32,
     #[sea_orm(column_type = "Text")]
     pub feature_hash: String,
@@ -25,10 +25,10 @@ pub struct Model {
     pub payload: Json,
     #[sea_orm(column_type = "JsonBinary")]
     pub source_refs: Json,
-    #[sea_orm(column_type = "JsonBinary", nullable)]
-    pub decision_capture: Option<Json>,
-    #[sea_orm(column_type = "Text", nullable)]
-    pub decision_capture_hash: Option<String>,
+    #[sea_orm(column_type = "JsonBinary")]
+    pub decision_capture: Json,
+    #[sea_orm(column_type = "Text")]
+    pub decision_capture_hash: String,
     pub created_at: DateTimeWithTimeZone,
     #[sea_orm(
         belongs_to,

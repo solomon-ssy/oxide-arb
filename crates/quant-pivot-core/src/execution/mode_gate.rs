@@ -192,7 +192,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn runtime_v13_blocks_auto_execution_even_when_legacy_flags_allow_it() {
+    async fn policy_blocks_auto_execution_when_authorization_envelope_denies_it() {
         let mut config = DecisionPolicySnapshot::default();
         config.execution_authorization.auto_execution.enabled = true;
         let gate = gate(config);

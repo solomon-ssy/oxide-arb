@@ -25,7 +25,7 @@ use crate::{
 use chrono::{Duration as ChronoDuration, TimeZone, Utc};
 use chrono_tz::Tz;
 use futures_util::future::join_all;
-use quant_pivot_error::{QuantError, QuantResult, report::ReportError, research::ResearchError};
+use quant_pivot_error::{QuantError, QuantResult, report::ReportError};
 use quant_pivot_models::{
     config::TradeTapeOnChainConfig,
     domain::{
@@ -34,7 +34,10 @@ use quant_pivot_models::{
     },
     enums::{domain::DomainFamily, quant::DataQualityStatus},
     runtime_config::{DataQualityConfig, DomainConfig, FeaturesConfig},
-    types::{DecisionPolicySnapshotId, DomainInstrumentKey, IcaoStation, MarketId, TokenId, Usd},
+    types::{
+        DecisionPolicySnapshotId, DomainInstrumentKey, IcaoStation, MarketId, TokenId, Usd,
+        stable_name::FeatureName,
+    },
 };
 use quant_pivot_repository::traits::{
     BasisAlertRepository, CalibrationArtifactRepository, FeatureRepository,
@@ -45,9 +48,9 @@ use quant_pivot_research::{
         DomainFactWindows, build_domain_slice_inputs, crypto_lookback_secs, oracle_instrument,
     },
     features::{
-        ConfiguredFeatureBuilder, DomainSliceInputs, FeatureName, FeatureSchema,
-        FeatureSourceWindows, FeatureVector, MarketDecisionCapture, MarketWindowSnapshot,
-        NullReason, RejectedMarketDraft, ResolvedMarketBundle, TradeTapeWindowSnapshot,
+        ConfiguredFeatureBuilder, DomainSliceInputs, FeatureSchema, FeatureSourceWindows,
+        FeatureVector, MarketDecisionCapture, MarketWindowSnapshot, NullReason,
+        RejectedMarketDraft, ResolvedMarketBundle, TradeTapeWindowSnapshot,
         draft_data_quality_snapshot, feature_events,
     },
     pit::PointInTimeSnapshotSource,
@@ -299,18 +302,7 @@ impl FeaturePipelineService {
                     }
                     .into());
                 }
-                let mut row = vector.try_to_new(&request.boundary)?;
-                row.decision_capture_hash = Some(capture.evidence_hash()?);
-                row.decision_capture =
-                    Some(serde_json::to_value(capture.evidence()).map_err(|error| {
-                        ResearchError::Serialization {
-                            detail: format!(
-                                "serialize decision capture for market {}: {error}",
-                                vector.market_id
-                            ),
-                        }
-                    })?);
-                Ok(row)
+                vector.try_to_new(&request.boundary, &capture.evidence())
             })
             .collect::<QuantResult<Vec<NewFeatureVector>>>()?;
         let all_persisted = self
@@ -629,11 +621,7 @@ fn collect_live_domain_linkages(
     };
     for info in rows {
         let market_id = info.market_id.clone();
-        let linkage = info.into_domain().map_err(|error| {
-            QuantError::config(format!(
-                "linkage ledger row for market {market_id} has an undecodable outcome: {error}"
-            ))
-        })?;
+        let linkage = info.into_domain();
         if let Some(binding) = linkage.binding() {
             collected.instruments.extend(
                 binding

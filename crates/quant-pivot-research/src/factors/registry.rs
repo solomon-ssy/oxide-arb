@@ -19,7 +19,7 @@ use crate::{
         domain::DomainFactorRegistry,
         generic::generic_factors,
         structural::structural_factors,
-        value::{FactorDefinitionSpec, FactorSet},
+        value::{FactorDefinitionDocument, FactorSet},
     },
     model::FavoriteLongshotBiasTable,
 };
@@ -27,7 +27,7 @@ use crate::{
 /// A frozen registry of enabled factors: their governed specs and the computers
 /// that produce them. Built once per round from frozen config.
 pub struct FactorRegistry {
-    factors: Vec<(FactorDefinitionSpec, Arc<dyn FactorComputer>)>,
+    factors: Vec<(FactorDefinitionDocument, Arc<dyn FactorComputer>)>,
 }
 
 impl FactorRegistry {
@@ -64,7 +64,7 @@ impl FactorRegistry {
 
     /// The enabled `(spec, computer)` pairs, in registry order.
     #[must_use]
-    pub fn factors(&self) -> &[(FactorDefinitionSpec, Arc<dyn FactorComputer>)] {
+    pub fn factors(&self) -> &[(FactorDefinitionDocument, Arc<dyn FactorComputer>)] {
         &self.factors
     }
 

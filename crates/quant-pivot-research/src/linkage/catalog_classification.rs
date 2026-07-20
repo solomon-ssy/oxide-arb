@@ -52,7 +52,7 @@ impl DomainCatalogClassifier {
         let minimum_mature_weather_groups = builtin_research_profiles()
             .map_err(QuantError::config)?
             .into_iter()
-            .find(|profile| profile.profile_ref.id == WEATHER_FORECAST_24H_PROFILE_ID)
+            .find(|profile| profile.profile_ref.id.as_str() == WEATHER_FORECAST_24H_PROFILE_ID)
             .map(|profile| profile.spec.feedback_policy.minimum_mature_labels)
             .ok_or_else(|| QuantError::config("Weather research profile is missing"))?;
         let capability_registry = domain_capability_registry(

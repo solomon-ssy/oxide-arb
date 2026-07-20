@@ -10,10 +10,9 @@ use quant_pivot_models::{
     },
     types::{
         ContentHash, DomainInstrumentKey, DomainSourceId, EntryConditionArtifactId,
-        EntryConditionInstanceId, RecommendationId, WeatherTemperatureStatistic,
+        EntryConditionInstanceId, RecommendationId, WeatherTemperatureStatistic, WorkerId,
     },
 };
-use uuid::Uuid;
 
 /// Persistence boundary for recommendation-level condition state.
 #[async_trait::async_trait]
@@ -81,7 +80,7 @@ pub trait EntryConditionRepository: Send + Sync {
     /// Lease one due instance using `FOR UPDATE SKIP LOCKED`.
     async fn lease_next(
         &self,
-        worker_id: Uuid,
+        worker_id: WorkerId,
         now: DateTime<Utc>,
         lease_expires_at: DateTime<Utc>,
     ) -> Result<Option<EntryConditionInstanceInfo>, StorageError>;
@@ -89,7 +88,7 @@ pub trait EntryConditionRepository: Send + Sync {
     async fn renew_lease(
         &self,
         instance_id: &EntryConditionInstanceId,
-        worker_id: Uuid,
+        worker_id: WorkerId,
         lease_epoch: i64,
         lease_expires_at: DateTime<Utc>,
     ) -> Result<bool, StorageError>;
@@ -97,13 +96,13 @@ pub trait EntryConditionRepository: Send + Sync {
     async fn apply_evaluation(
         &self,
         instance_id: &EntryConditionInstanceId,
-        worker_id: Uuid,
+        worker_id: WorkerId,
         evaluation: ApplyEntryConditionEvaluation,
     ) -> Result<ApplyEntryConditionEvaluationOutcome, StorageError>;
 
     async fn claim_pending_evaluations(
         &self,
-        worker_id: Uuid,
+        worker_id: WorkerId,
         now: DateTime<Utc>,
         lease_expires_at: DateTime<Utc>,
         limit: u64,
@@ -112,14 +111,14 @@ pub trait EntryConditionRepository: Send + Sync {
     async fn mark_evaluation_published(
         &self,
         evaluation_id: &ContentHash,
-        worker_id: Uuid,
+        worker_id: WorkerId,
         published_at: DateTime<Utc>,
     ) -> Result<(), StorageError>;
 
     async fn mark_evaluation_failed(
         &self,
         evaluation_id: &ContentHash,
-        worker_id: Uuid,
+        worker_id: WorkerId,
         detail: String,
     ) -> Result<(), StorageError>;
 
@@ -128,7 +127,7 @@ pub trait EntryConditionRepository: Send + Sync {
     async fn invalidate(
         &self,
         instance_id: &EntryConditionInstanceId,
-        worker_id: Uuid,
+        worker_id: WorkerId,
         expected_revision: i64,
         expected_lease_epoch: i64,
         detail: String,

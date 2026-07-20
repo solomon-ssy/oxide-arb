@@ -17,6 +17,20 @@ pg_enum! {
 }
 
 pg_enum! {
+    type_name = "qp_operation_http_method",
+    /// Finite transport origin for an audited action. `System` identifies
+    /// internal governed work with no HTTP request.
+    pub enum OperationHttpMethod {
+        Get => "GET",
+        Post => "POST",
+        Put => "PUT",
+        Patch => "PATCH",
+        Delete => "DELETE",
+        System => "SYSTEM",
+    }
+}
+
+pg_enum! {
     type_name = "qp_operation_outcome",
     pub enum OperationOutcome {
         Success => "success",

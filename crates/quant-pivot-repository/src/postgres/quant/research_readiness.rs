@@ -7,7 +7,7 @@ use quant_pivot_models::{
     entities::quant_research_readiness_evidence,
     enums::quant::ResearchReadinessEvidenceKind,
     hashing::CanonicalDigest,
-    types::{ContentHash, ResearchReadinessEvidencePayload},
+    types::{ContentHash, ResearchReadinessEvidenceId, ResearchReadinessEvidencePayload},
 };
 use sea_orm::{
     ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder,
@@ -88,9 +88,9 @@ impl ResearchReadinessEvidenceRepository for PgResearchReadinessEvidenceReposito
 
     async fn find_by_id(
         &self,
-        evidence_id: uuid::Uuid,
+        evidence_id: &ResearchReadinessEvidenceId,
     ) -> Result<Option<ResearchReadinessEvidenceInfo>, StorageError> {
-        quant_research_readiness_evidence::Entity::find_by_id(evidence_id)
+        quant_research_readiness_evidence::Entity::find_by_id(evidence_id.clone())
             .one(&self.db)
             .await
             .map_err(StorageError::from)

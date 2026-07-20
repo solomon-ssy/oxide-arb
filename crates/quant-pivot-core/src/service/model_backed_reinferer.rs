@@ -24,7 +24,7 @@ use quant_pivot_models::{
     },
     types::{
         Bps, ContentHash, DecisionPolicySnapshotId, MarketId, ModelRunId, ModelVersionId, Price,
-        Usd,
+        Usd, stable_name::FactorName,
     },
 };
 use quant_pivot_repository::traits::{
@@ -32,8 +32,8 @@ use quant_pivot_repository::traits::{
 };
 use quant_pivot_research::{
     factors::{
-        FactorEligibility, FactorEngine, FactorExplanation, FactorName, FactorValue,
-        MarketFactorOutcome, NormalizedFactor, ScoredFactor,
+        FactorEligibility, FactorEngine, FactorValue, MarketFactorOutcome, NormalizedFactor,
+        ScoredFactor,
     },
     features::{
         ConfiguredFeatureBuilder, FeatureSchema, FeatureSourceWindows, FeatureVector,
@@ -415,13 +415,7 @@ fn snapshot_bundle_outcome(
                 NormalizedFactor::Indeterminate { reason }
             }
         };
-        let explanation = serde_json::from_value::<FactorExplanation>(snapshot.explanation)
-            .map_err(|error| {
-                QuantError::config(format!(
-                    "factor {} explanation cannot be decoded: {error}",
-                    snapshot.factor_definition_id
-                ))
-            })?;
+        let explanation = snapshot.explanation;
         let contributes = matches!(normalization, NormalizedFactor::Scored { .. })
             && snapshot.confidence.inner() >= confidence_floor;
         projected.push(ScoredFactor {

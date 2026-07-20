@@ -7,10 +7,17 @@ use quant_pivot_models::{
 };
 use quant_pivot_storage::postgres::{PostgresPool, migration::finalize_schema_deployment};
 use sea_orm::ConnectionTrait;
-use std::sync::{Arc, LazyLock};
+use std::{
+    sync::{Arc, LazyLock},
+    time::Duration,
+};
 use testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner};
 use testcontainers_modules::postgres::Postgres;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::{
+    sync::{OwnedSemaphorePermit, Semaphore},
+    time::sleep,
+};
+use tracing::warn;
 
 pub const TEST_RUNTIME_ROLE: &str = "quant_pivot_test_runtime";
 
@@ -18,6 +25,8 @@ pub const TEST_RUNTIME_ROLE: &str = "quant_pivot_test_runtime";
 /// parallelism can starve Docker Desktop during container readiness and surface
 /// as an unrelated `SeaORM` maintenance-pool timeout.
 const POSTGRES_CONTAINER_CONCURRENCY: usize = 2;
+const POSTGRES_CONTAINER_START_ATTEMPTS: usize = 3;
+const POSTGRES_CONTAINER_RETRY_DELAY: Duration = Duration::from_millis(250);
 static POSTGRES_CONTAINER_SLOTS: LazyLock<Arc<Semaphore>> =
     LazyLock::new(|| Arc::new(Semaphore::new(POSTGRES_CONTAINER_CONCURRENCY)));
 
@@ -43,7 +52,9 @@ pub fn test_pg_config(port: u16) -> PostgresConfig {
         },
         max_connections: 15,
         min_connections: 1,
-        connect_timeout_secs: 10,
+        // A single disposable-container attempt is bounded independently from
+        // the outer whole-container retry in `setup_pg`.
+        connect_timeout_secs: 20,
         idle_timeout_secs: 300,
         acquire_timeout_secs: 30,
         max_lifetime_secs: 1800,
@@ -66,6 +77,39 @@ pub async fn setup_pg() -> (PostgresPool, TestPostgresContainer) {
         .acquire_owned()
         .await
         .expect("PostgreSQL testcontainer semaphore must remain open");
+
+    for attempt in 1..=POSTGRES_CONTAINER_START_ATTEMPTS {
+        match start_ready_postgres().await {
+            Ok((pool, container)) => {
+                return (
+                    pool,
+                    TestPostgresContainer {
+                        _container: container,
+                        _permit: permit,
+                    },
+                );
+            }
+            Err(error) if attempt < POSTGRES_CONTAINER_START_ATTEMPTS => {
+                warn!(
+                    attempt,
+                    max_attempts = POSTGRES_CONTAINER_START_ATTEMPTS,
+                    error = %error,
+                    "discarding failed PostgreSQL testcontainer startup"
+                );
+                sleep(POSTGRES_CONTAINER_RETRY_DELAY).await;
+            }
+            Err(error) => {
+                panic!(
+                    "PostgreSQL testcontainer failed after {POSTGRES_CONTAINER_START_ATTEMPTS} complete startup attempts: {error}"
+                );
+            }
+        }
+    }
+
+    unreachable!("positive PostgreSQL startup-attempt count exhausts through return or panic")
+}
+
+async fn start_ready_postgres() -> Result<(PostgresPool, ContainerAsync<Postgres>), String> {
     let container = Postgres::default()
         .with_db_name("test_quant_pivot")
         .with_user("postgres")
@@ -73,33 +117,32 @@ pub async fn setup_pg() -> (PostgresPool, TestPostgresContainer) {
         .with_tag("16")
         .start()
         .await
-        .expect("PG container");
+        .map_err(|error| format!("start container: {error}"))?;
 
-    let port = container.get_host_port_ipv4(5432).await.expect("port");
+    let port = container
+        .get_host_port_ipv4(5432)
+        .await
+        .map_err(|error| format!("resolve PostgreSQL host port: {error}"))?;
     let config = test_pg_config(port);
-    let pool = PostgresPool::connect(&config).await.expect("connect");
+    let pool = PostgresPool::connect(&config)
+        .await
+        .map_err(|error| format!("connect and ensure test database: {error}"))?;
     pool.connection()
         .execute_unprepared(&format!("CREATE ROLE {TEST_RUNTIME_ROLE} NOLOGIN"))
         .await
-        .expect("create runtime role");
+        .map_err(|error| format!("create test runtime role: {error}"))?;
     apply_postgres_migrations(pool.connection())
         .await
-        .expect("apply migrations");
-    let bootstrap_admin_password_hash =
-        hash_password("admin").expect("hash test bootstrap admin password");
+        .map_err(|error| format!("apply test migrations: {error}"))?;
+    let bootstrap_admin_password_hash = hash_password("admin")
+        .map_err(|error| format!("hash test bootstrap admin password: {error}"))?;
     finalize_schema_deployment(
         pool.connection(),
         TEST_RUNTIME_ROLE,
         &bootstrap_admin_password_hash,
     )
     .await
-    .expect("finalize schema deployment");
+    .map_err(|error| format!("finalize test schema deployment: {error}"))?;
 
-    (
-        pool,
-        TestPostgresContainer {
-            _container: container,
-            _permit: permit,
-        },
-    )
+    Ok((pool, container))
 }

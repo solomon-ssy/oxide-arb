@@ -489,6 +489,19 @@ pg_enum! {
 }
 
 pg_enum! {
+    type_name = "qp_model_version_derivation_kind",
+    /// Immutable provenance for how one model-version artifact was produced.
+    ///
+    /// Publication state is deliberately separate: derivation never changes
+    /// when a candidate advances through shadow/published/retired lifecycle.
+    pub enum ModelVersionDerivationKind {
+        Training => "training",
+        ScoreMultiplierCalibration => "score_multiplier_calibration",
+        ReturnCalibration => "return_calibration",
+    }
+}
+
+pg_enum! {
     type_name = "qp_trade_policy_status",
     /// Governance lifecycle of a content-addressed trade policy artifact.
     @derive(Default)
@@ -823,6 +836,17 @@ wire_enum! {
         InterruptedExceededAttempts => "interrupted_exceeded_attempts",
         /// The operator cancelled the run.
         Cancelled => "cancelled",
+    }
+}
+
+pg_enum! {
+    type_name = "qp_model_weight_source",
+    /// Governed source of weights used during a shadow-model comparison.
+    pub enum ModelWeightSource {
+        /// Frozen weights from the content-addressed model artifact.
+        Artifact => "artifact",
+        /// Runtime-config overlay for experimentation; never publish evidence.
+        ConfigOverlay => "config_overlay",
     }
 }
 

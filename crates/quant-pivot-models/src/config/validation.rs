@@ -4,7 +4,7 @@
 use std::collections::BTreeSet;
 
 use super::{
-    DeployConfig, DomainSourcesConfig, SchemaMigrationConfig,
+    DeployConfig, DomainSourcesConfig, PolygonRpcEndpoint, SchemaMigrationConfig,
     WEATHER_OBSERVATION_DAY_CLOSE_GRACE_SECS, WeatherHistoricalBindingKind,
 };
 use crate::{
@@ -41,6 +41,7 @@ pub fn validate_deploy_common(deploy: &DeployConfig) -> ConfigValidationReport {
             detail: "must be at least 60 seconds".to_owned(),
         });
     }
+    validate_polygon_rpc(deploy, &mut report);
 
     if deploy.quant.workers.report_expire_sweep_secs == 0 {
         report.errors.push(ConfigValidationError::InvalidValue {
@@ -103,6 +104,38 @@ pub fn validate_deploy_common(deploy: &DeployConfig) -> ConfigValidationReport {
     validate_domain_sources(deploy, &mut report);
 
     report
+}
+
+fn validate_polygon_rpc(deploy: &DeployConfig, report: &mut ConfigValidationReport) {
+    let endpoint = &deploy.polymarket.onchain.rpc_endpoint;
+    let parsed = Url::parse(endpoint.resolved_url()).ok();
+    let structurally_valid = parsed
+        .as_ref()
+        .is_some_and(|url| matches!(url.scheme(), "http" | "https") && url.host_str().is_some());
+    let public_endpoint_is_non_secret = match (endpoint, parsed.as_ref()) {
+        (PolygonRpcEndpoint::Public { .. }, Some(url)) => {
+            url.username().is_empty()
+                && url.password().is_none()
+                && url.query().is_none()
+                && url.fragment().is_none()
+                && matches!(url.path(), "" | "/")
+        }
+        (PolygonRpcEndpoint::Public { .. }, None) => false,
+        (PolygonRpcEndpoint::SystemdCredential { .. }, _) => true,
+    };
+    if !structurally_valid || !public_endpoint_is_non_secret {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "polymarket.onchain.rpc_endpoint",
+            detail: "must be an HTTP(S) URL; public endpoints cannot contain user-info, path credentials, query parameters, or fragments, and authenticated URLs must use a systemd credential reference".to_owned(),
+        });
+    }
+    if deploy.polymarket.onchain.rpc_timeout_ms == 0 {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "polymarket.onchain.rpc_timeout_ms",
+            detail: "must be > 0 so Polygon reads and transactions cannot hang indefinitely"
+                .to_owned(),
+        });
+    }
 }
 
 fn validate_web(deploy: &DeployConfig, report: &mut ConfigValidationReport) {

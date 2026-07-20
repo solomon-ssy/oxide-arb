@@ -1,13 +1,11 @@
 //! Durable report-fact bundle outbox and `ClickHouse` verification acknowledgement.
 
-use chrono::{DateTime, Utc};
-use sea_orm::entity::prelude::*;
-use uuid::Uuid;
-
 use crate::{
     enums::quant::ReportFactDeliveryStatus,
-    types::{ArtifactUri, ContentHash, RecommendationReportId},
+    types::{ArtifactUri, ContentHash, RecommendationReportId, WorkerId},
 };
+use chrono::{DateTime, Utc};
+use sea_orm::entity::prelude::*;
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -24,7 +22,7 @@ pub struct Model {
     pub funnel_row_count: i64,
     pub funnel_row_chain_hash: ContentHash,
     pub attempt_count: i32,
-    pub claim_owner: Option<Uuid>,
+    pub claim_owner: Option<WorkerId>,
     pub lease_expires_at: Option<DateTime<Utc>>,
     pub next_attempt_at: Option<DateTime<Utc>>,
     #[sea_orm(column_type = "Text", nullable)]

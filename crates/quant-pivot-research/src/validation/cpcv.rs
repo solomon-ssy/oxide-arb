@@ -23,10 +23,12 @@
 //! zero changes here.
 
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
-use quant_pivot_models::types::BacktestPathSetId;
+use quant_pivot_models::types::{
+    BacktestPathSetId,
+    backtest::{BacktestPath, SharpeDistribution},
+};
 use rayon::prelude::*;
 use rust_decimal::{Decimal, prelude::ToPrimitive};
-use serde::{Deserialize, Serialize};
 
 use crate::{
     backtest::metrics::sharpe_ratio,
@@ -246,43 +248,6 @@ pub trait ReplayEngine: Send + Sync {
         model: &FoldRuntime,
         filter: &GroupRowFilter,
     ) -> QuantResult<Vec<GroupEvaluation>>;
-}
-
-/// A distribution summary of the Sharpe ratio across the reconstructed φ paths.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SharpeDistribution {
-    pub min: Decimal,
-    pub p25: Decimal,
-    pub median: Decimal,
-    pub p75: Decimal,
-    pub max: Decimal,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub median_max_drawdown: Option<Decimal>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub median_tail_loss: Option<Decimal>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub baseline_uplift: Option<Decimal>,
-}
-
-/// One complete, full-timeline reconstructed backtest path.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BacktestPath {
-    /// Stable index (`0..phi`), deterministic across runs for the same input.
-    pub path_index: u32,
-    /// Per-group return series, in ascending `as_of` order, one entry per
-    /// original group — a genuinely complete walk across the whole window
-    /// (never a single combination's `k`-group fragment).
-    pub group_returns: Vec<Decimal>,
-    /// Sharpe ratio of [`Self::group_returns`] (unannualized; callers
-    /// annualize using their own period cadence when displaying).
-    pub sharpe: Decimal,
-    /// Spearman correlation over every `(score, realized)` pair pooled across
-    /// the whole path (`0` if no rank observations were reported).
-    pub rank_ic: Decimal,
-    /// Maximum peak-to-trough drawdown of the cumulative return curve.
-    pub max_drawdown: Decimal,
-    /// Mean of the worst 10% of per-group returns (tail loss).
-    pub tail_loss: Decimal,
 }
 
 /// A full Combinatorial Purged Cross-Validation result: the reconstructed

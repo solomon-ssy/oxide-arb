@@ -33,6 +33,7 @@ mod reconciliation;
 mod report_run;
 mod report_scope;
 mod research_job;
+pub(crate) mod research_profile;
 mod research_readiness;
 mod reserved_capital;
 mod settlement_redeem;

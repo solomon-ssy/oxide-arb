@@ -12,7 +12,7 @@ use quant_pivot_models::{
         rbac::{Operation, ResourceType},
     },
     hashing::CanonicalDigest,
-    types::ReconciliationId,
+    types::{ContentHash, ReconciliationId},
 };
 
 use crate::{
@@ -98,7 +98,7 @@ async fn resolve(
     op_ctx.set_detail(serde_json::json!({
         "result": body.result.as_str(),
         "reason": body.reason,
-    }));
+    }))?;
 
     let reconciliation_id_for_cmd = reconciliation_id.clone();
     let outcome = state
@@ -128,10 +128,8 @@ async fn resolve(
     }))
 }
 
-fn canonical_reconciliation_hash(info: &ReconciliationInfo) -> Result<String, WebError> {
-    CanonicalDigest::content_hash_json(&ReconciliationView::from(info.clone()))
-        .map(|hash| hash.as_str().to_owned())
-        .map_err(|error| {
-            WebError::Internal(format!("canonical reconciliation hash failed: {error}"))
-        })
+fn canonical_reconciliation_hash(info: &ReconciliationInfo) -> Result<ContentHash, WebError> {
+    CanonicalDigest::content_hash_json(&ReconciliationView::from(info.clone())).map_err(|error| {
+        WebError::Internal(format!("canonical reconciliation hash failed: {error}"))
+    })
 }

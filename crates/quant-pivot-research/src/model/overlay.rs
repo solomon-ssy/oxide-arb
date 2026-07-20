@@ -23,28 +23,6 @@ fn weight_sum_tolerance() -> Decimal {
     Decimal::new(1, 9)
 }
 
-/// Whether a runtime scored on its frozen artifact weights or a config overlay.
-///
-/// Recorded in `ModelRun.metrics_json` (`weight_source`) for governance audit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WeightSource {
-    /// The artifact's frozen, content-hashed weights (the published behavior).
-    Artifact,
-    /// A runtime-config overlay over a non-published candidate / shadow version.
-    ConfigOverlay,
-}
-
-impl WeightSource {
-    /// The stable wire label written to run metrics.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Artifact => "artifact",
-            Self::ConfigOverlay => "config_overlay",
-        }
-    }
-}
-
 /// A validated, non-persisted factor-weight override.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WeightOverlay {

@@ -6,6 +6,7 @@ use crate::{
     types::{
         BacktestPathSetId, ContentHash, DecisionPolicySnapshotId, ModelRunId, ModelVersionId,
         TrainingDatasetId,
+        backtest::{BacktestPaths, SharpeDistribution},
     },
 };
 use chrono::{DateTime, Utc};
@@ -32,10 +33,10 @@ pub struct BacktestPathSetInfo {
     /// data source.
     pub median_rank_ic: Decimal,
     /// `SharpeDistribution { min, p25, median, p75, max }`.
-    pub sharpe_distribution: serde_json::Value,
+    pub sharpe_distribution: SharpeDistribution,
     /// `Vec<BacktestPath>` (`path_index`, `group_returns`, `sharpe`, `rank_ic`,
     /// `max_drawdown`, `tail_loss`) — the full reconstructed path detail.
-    pub paths: serde_json::Value,
+    pub paths: BacktestPaths,
     /// The Deflated Sharpe Ratio (`PSR` evaluated at the trial-grid-corrected
     /// benchmark) — in `[0, 1]`, the Phase 11.5 hard `DeflatedSharpe` gate's
     /// data source.
@@ -104,8 +105,8 @@ pub struct NewBacktestPathSet {
     pub path_count: i64,
     pub combination_count: i64,
     pub median_rank_ic: Decimal,
-    pub sharpe_distribution: serde_json::Value,
-    pub paths: serde_json::Value,
+    pub sharpe_distribution: SharpeDistribution,
+    pub paths: BacktestPaths,
     pub deflated_sharpe: Decimal,
     pub dsr_benchmark_sharpe: Decimal,
     pub pbo: Decimal,

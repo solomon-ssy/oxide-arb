@@ -18,7 +18,7 @@ pub struct Model {
     pub calibration_split_hash: String,
     pub sample_count: i64,
     #[sea_orm(column_type = "JsonBinary")]
-    pub payload_json: Json,
+    pub payload: Json,
     pub active: bool,
     pub created_at: DateTimeWithTimeZone,
     #[sea_orm(has_many)]

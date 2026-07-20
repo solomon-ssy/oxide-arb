@@ -198,6 +198,8 @@ pub struct DatasetPlan {
     pub request: DatasetPlanRequest,
     /// Dataset identity (assigned by the planner).
     pub training_dataset_id: TrainingDatasetId,
+    /// Immutable definition of the owning model spec resolved before any work.
+    pub model_spec_definition_hash: ContentHash,
     /// Deterministic market-grid sample instants, ordered by `(market_id, as_of)`.
     pub samples: Vec<SamplePlan>,
     /// Lot-timeline hold-vs-exit samples (Phase 06.1).
@@ -1069,7 +1071,7 @@ pub(crate) mod fixtures {
         example
     }
 
-    /// Rebuild the fixture's complete v2 capture after a test changes its
+    /// Rebuild the fixture's complete V1 capture after a test changes its
     /// decision boundary. Every evidence clock is derived from the already
     /// frozen boundary; no lag is subtracted a second time.
     pub fn bind_capture_to_boundary(example: &mut TrainingExample) {

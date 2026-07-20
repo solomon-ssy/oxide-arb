@@ -5,11 +5,12 @@ use crate::{
         factor::{FactorDefinitionScope, FactorFamily},
         quant::PublicationStatus,
     },
-    types::{ContentHash, FactorDefinitionId, SchemaVersion},
+    types::{
+        ContentHash, FactorDefinitionId, SchemaVersion, UserId, factor::FactorDefinitionDocument,
+    },
 };
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
-use uuid::Uuid;
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -28,9 +29,9 @@ pub struct Model {
     pub input_schema_version: SchemaVersion,
     pub output_schema_version: SchemaVersion,
     #[sea_orm(column_type = "JsonBinary")]
-    pub definition_json: Json,
+    pub definition: FactorDefinitionDocument,
     pub status: PublicationStatus,
-    pub created_by: Option<Uuid>,
+    pub created_by: Option<UserId>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 

@@ -11,9 +11,8 @@ use sea_orm::entity::prelude::*;
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub recommendation_report_id: Uuid,
-    pub profile_id: String,
-    #[sea_orm(column_type = "JsonBinary")]
-    pub profile_ref: Json,
+    #[sea_orm(column_type = "Text")]
+    pub research_profile_artifact_id: String,
     pub report_kind: QpReportKind,
     pub decision_at: DateTimeWithTimeZone,
     pub horizon_secs: i64,
@@ -41,6 +40,14 @@ pub struct Model {
     pub expired_at: Option<DateTimeWithTimeZone>,
     pub status_reason: Option<String>,
     pub created_at: DateTimeWithTimeZone,
+    #[sea_orm(
+        belongs_to,
+        from = "research_profile_artifact_id",
+        to = "research_profile_artifact_id",
+        on_update = "NoAction",
+        on_delete = "NoAction"
+    )]
+    pub research_profile_artifact: BelongsTo<super::research_profile_artifact::Entity>,
     #[sea_orm(
         belongs_to,
         from = "account_snapshot_ref",

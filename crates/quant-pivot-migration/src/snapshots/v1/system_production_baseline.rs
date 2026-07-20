@@ -22,6 +22,8 @@ pub struct Model {
     pub postgres_schema_fingerprint: String,
     #[sea_orm(column_type = "Text")]
     pub clickhouse_schema_fingerprint: String,
+    pub policy_bundle_generation: i64,
+    pub decision_policy_snapshot_id: Uuid,
     #[sea_orm(column_type = "Text")]
     pub policy_bundle_hash: String,
     #[sea_orm(column_type = "Text")]

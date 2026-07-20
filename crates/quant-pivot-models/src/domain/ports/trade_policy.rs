@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
-use uuid::Uuid;
 
 use quant_pivot_error::QuantResult;
 
@@ -20,8 +19,8 @@ use crate::{
     },
     enums::quant::TradePolicyStatus,
     types::{
-        ResearchJobId, ResearchProfileArtifact, TradePolicyArtifactId,
-        TradePolicyEvidenceObjectKind, TradePolicyValidationRunId, TrainingDatasetId,
+        ResearchJobId, ResearchProfileArtifact, ResearchProfileId, TradePolicyArtifactId,
+        TradePolicyEvidenceObjectKind, TradePolicyValidationRunId, TrainingDatasetId, UserId,
     },
 };
 
@@ -29,7 +28,11 @@ use crate::{
 pub trait TradePolicyPort: Send + Sync {
     fn list_profiles(&self) -> QuantResult<Vec<ResearchProfileArtifact>>;
 
-    fn find_profile(&self, id: &str, version: u32) -> QuantResult<Option<ResearchProfileArtifact>>;
+    fn find_profile(
+        &self,
+        id: &ResearchProfileId,
+        version: u32,
+    ) -> QuantResult<Option<ResearchProfileArtifact>>;
 
     async fn preflight(
         &self,
@@ -51,7 +54,7 @@ pub trait TradePolicyPort: Send + Sync {
         &self,
         validation_run_id: &TradePolicyValidationRunId,
         artifact_id: &TradePolicyArtifactId,
-        actor_id: Uuid,
+        actor_id: UserId,
         reason: String,
         progress: &dyn JobProgressSink,
         cancel: &CancellationToken,
@@ -127,7 +130,7 @@ pub trait TradePolicyPort: Send + Sync {
         &self,
         artifact_id: &TradePolicyArtifactId,
         target: TradePolicyStatus,
-        actor_id: Uuid,
+        actor_id: UserId,
         reason: String,
     ) -> QuantResult<TradePolicyArtifactInfo>;
 }

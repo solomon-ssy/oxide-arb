@@ -15,10 +15,10 @@ use quant_pivot_models::{
     },
     entities::{casbin_rule, operation_log},
     enums::{
-        operation_log::{OperationCategory, OperationOutcome},
+        operation_log::{OperationCategory, OperationHttpMethod, OperationOutcome},
         rbac::{MenuKind, Operation, ResourceType, RoleKind, RoleStatus, UserStatus},
     },
-    types::{MenuId, OperationLogId, RoleId, UserId},
+    types::{ContentHash, MenuId, OperationDetailDocument, OperationLogId, RoleId, UserId},
 };
 use quant_pivot_repository::{
     postgres::{
@@ -821,24 +821,35 @@ async fn operation_log_appends_and_pages_and_is_worm() {
 
     let make = |action: &str, outcome: OperationOutcome| NewOperationLog {
         id: OperationLogId::from_v7(),
-        request_id: format!("req-{action}"),
+        request_id: format!("req-{action}").into(),
         actor_user_id: Some(UserId::from_v7()),
         actor_username: Some("admin".to_owned()),
-        acting_role: Some("super_admin".to_owned()),
+        acting_role: Some("super_admin".into()),
         category: OperationCategory::Rbac,
-        action: action.to_owned(),
+        action: action.into(),
         resource_type: Some(ResourceType::User),
         resource_id: Some(UserId::from_v7().to_string()),
-        http_method: "POST".to_owned(),
+        http_method: OperationHttpMethod::Post,
         http_path: "/api/v1/users".to_owned(),
         http_status: 200,
         outcome,
         client_ip: None,
         user_agent: None,
         latency_ms: 5,
-        detail: serde_json::json!({"k": "v"}),
-        before_hash: Some("blake3:before".to_owned()),
-        after_hash: Some("blake3:after".to_owned()),
+        detail: OperationDetailDocument::try_from(serde_json::json!({"k": "v"}))
+            .expect("static operation detail"),
+        before_hash: Some(
+            ContentHash::parse(
+                "blake3:0000000000000000000000000000000000000000000000000000000000000001",
+            )
+            .expect("canonical before hash"),
+        ),
+        after_hash: Some(
+            ContentHash::parse(
+                "blake3:0000000000000000000000000000000000000000000000000000000000000002",
+            )
+            .expect("canonical after hash"),
+        ),
         governance_audit_event_id: None,
         governance_audit_sequence: None,
     };
@@ -862,7 +873,7 @@ async fn operation_log_appends_and_pages_and_is_worm() {
         .expect("page denied");
     assert_eq!(denied.total, 1);
     assert_eq!(denied.items.len(), 1);
-    assert_eq!(denied.items[0].action, "batch-2");
+    assert_eq!(denied.items[0].action.as_str(), "batch-2");
 
     let all = repo
         .page(OperationLogQuery {

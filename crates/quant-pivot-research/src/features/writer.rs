@@ -189,16 +189,7 @@ fn project_event(
         boundary,
     )?;
     let projected = project_cell(cell, spec);
-    let decision_capture_hash = context
-        .persisted
-        .decision_capture_hash
-        .as_ref()
-        .ok_or_else(|| {
-            determinism(format!(
-                "feature vector {} has no v10 decision-capture hash",
-                context.persisted.feature_vector_id
-            ))
-        })?;
+    let decision_capture_hash = &context.persisted.decision_capture_hash;
     let audit = FeatureEventAudit {
         event_time: context.decision_at,
         feature_vector_id: &context.persisted.feature_vector_id,
@@ -307,7 +298,7 @@ fn validate_persisted_binding(
     persisted: &FeatureVectorInfo,
     boundary: &DecisionBoundary,
 ) -> QuantResult<()> {
-    let expected = vector.try_to_new(boundary)?;
+    let expected = vector.persistence_projection(boundary)?;
     let mismatch = if persisted.market_id != expected.market_id {
         Some("market_id")
     } else if persisted.token_id != expected.token_id {

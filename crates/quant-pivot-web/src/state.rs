@@ -2,18 +2,22 @@
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
+use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
-    config::DeployConfig,
+    config::{CompiledBuildIdentity, DeployConfig},
     domain::{
         AccountReadPort, BacktestPort, BootstrapPort, CalibrationArtifactFitPort,
         CatalogStatusPort, CoreEvent, CoreEventPublisher, CpcvBacktestPort, DataQualityPort,
         ExecutionReadPort, ExecutionRecoveryPort, FactorGovernancePort, FeatureIntegrityPort,
-        KillSwitchPort, MarketDataPort, MarketLinkageGovernancePort, MaterializationRunEvent,
-        MaterializationRunKind, MaterializationRunStatus, MetricsScrapePort,
-        ModelCalibrationFitPort, ModelGovernancePort, ModelSpecPort, ModelTrainingPort,
-        OrderIntentPort, PolicySnapshotPort, QuantReportPort, ReadinessPort, ReconciliationPort,
-        ResearchCatalogPort, ResearchJobPort, ResearchReadinessPort, RuntimeControlPort,
-        StructuralMonitorPort, TradePolicyPort, TrainingDatasetPort,
+        KillSwitchPort, LifecycleSchemaVerificationPort, MarketDataPort,
+        MarketLinkageGovernancePort, MaterializationRunEvent, MaterializationRunKind,
+        MaterializationRunStatus, MetricsScrapePort, ModelCalibrationFitPort, ModelGovernancePort,
+        ModelSpecPort, ModelTrainingPort, OrderIntentPort, PolicySnapshotPort,
+        ProductionEvidenceArtifactVerificationPort, QuantReportPort, ReadinessPort,
+        ReconciliationPort, ResearchCatalogPort, ResearchJobPort, ResearchReadinessPort,
+        RuntimeControlPort, StructuralMonitorPort, TradePolicyPort, TrainingDatasetPort,
+        VerifiedSchemaFingerprints,
     },
     types::ContentHash,
 };
@@ -22,6 +26,10 @@ use quant_pivot_repository::traits::{
     EntryConditionRepository, MarketLinkageRepository, MarketRepository, MenuRepository,
     OperationLogRepository, PolicyRepository, QuantFactReadRepository, RoleMenuRepository,
     RolePermissionRepository, RoleRepository, UserRepository, UserRoleRepository,
+};
+use quant_pivot_storage::{
+    clickhouse::ClickHousePool,
+    postgres::{PostgresPool, migration as postgres_migration},
 };
 
 use crate::{
@@ -37,6 +45,9 @@ pub struct AppState {
     pub deploy: Arc<DeployConfig>,
     pub postgres_schema_fingerprint: ContentHash,
     pub clickhouse_schema_fingerprint: ContentHash,
+    pub build_identity: CompiledBuildIdentity,
+    pub schema_verification: Arc<dyn LifecycleSchemaVerificationPort>,
+    pub production_evidence_verification: Arc<dyn ProductionEvidenceArtifactVerificationPort>,
     pub runtime_config_apply: Arc<dyn PolicySnapshotPort>,
     pub jwt: Arc<JwtService>,
     pub jwt_blacklist: Arc<RedisTokenBlacklist>,
@@ -123,6 +134,35 @@ pub struct AppState {
     pub reconciliation: Arc<dyn ReconciliationPort>,
     /// Execution recovery playbook detail (Phase 05.5 closeout).
     pub execution_recovery: Arc<dyn ExecutionRecoveryPort>,
+}
+
+pub struct LiveSchemaVerifier {
+    postgres: Arc<PostgresPool>,
+    clickhouse: Arc<ClickHousePool>,
+}
+
+impl LiveSchemaVerifier {
+    #[must_use]
+    pub const fn new(postgres: Arc<PostgresPool>, clickhouse: Arc<ClickHousePool>) -> Self {
+        Self {
+            postgres,
+            clickhouse,
+        }
+    }
+}
+
+#[async_trait]
+impl LifecycleSchemaVerificationPort for LiveSchemaVerifier {
+    async fn verify_live(&self) -> QuantResult<VerifiedSchemaFingerprints> {
+        let (postgres, clickhouse) = tokio::try_join!(
+            postgres_migration::verify_schema(self.postgres.connection()),
+            self.clickhouse.verify_schema(),
+        )?;
+        Ok(VerifiedSchemaFingerprints {
+            postgres_schema_fingerprint: postgres.schema_fingerprint,
+            clickhouse_schema_fingerprint: clickhouse.schema_fingerprint,
+        })
+    }
 }
 
 impl AppState {

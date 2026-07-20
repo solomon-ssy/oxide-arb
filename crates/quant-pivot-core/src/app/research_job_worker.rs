@@ -22,8 +22,6 @@ use std::{
 };
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
-use serde::de::DeserializeOwned;
-use serde_json::Value;
 use tokio::{sync::mpsc, task::JoinSet, time::interval};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
@@ -34,16 +32,12 @@ use quant_pivot_models::{
     clickhouse::QuantFeatureParityEventRow,
     config::ResearchJobsConfig,
     domain::{
-        BacktestJobParams, BacktestPort, BiasTableFitJobParams, BuildTrainingDatasetRequest,
-        CalibrationArtifactFitPort, CpcvBacktestJobParams, CpcvBacktestPort,
-        FeatureParityExecutionPort, FeatureParityJobParams, JobProgressSink,
-        ModelCalibrationFitJobParams, ModelCalibrationFitPort, ModelTrainJobParams,
-        ModelTrainingPort, ResearchJobError, ResearchJobInfo, ResearchJobProgress,
-        TradePolicyFitJobParams, TradePolicyPort, TradePolicyValidationJobParams,
-        TrainingDatasetPort,
+        BacktestPort, CalibrationArtifactFitPort, CpcvBacktestPort, FeatureParityExecutionPort,
+        JobProgressSink, ModelCalibrationFitPort, ModelTrainingPort, ResearchJobError,
+        ResearchJobInfo, ResearchJobProgress, TradePolicyPort, TrainingDatasetPort,
     },
     enums::quant::{ResearchJobErrorCode, ResearchJobKind, ResearchJobStatus},
-    types::{DatasetCoverage, ResearchJobId},
+    types::{DatasetCoverage, ResearchJobId, ResearchJobParams, WorkerId},
 };
 use quant_pivot_repository::{
     clickhouse::{ChFactWriter, ChFeatureParityEventRepository},
@@ -162,17 +156,25 @@ impl ResearchJobExecutor {
         progress: Arc<dyn JobProgressSink>,
         cancel: CancellationToken,
     ) -> QuantResult<JobOutcome> {
-        match job.kind {
-            ResearchJobKind::DatasetBuild => {
-                let request: BuildTrainingDatasetRequest = from_params(&job.params_json)?;
+        if job.kind != job.params_json.kind() {
+            return Err(ResearchError::Serialization {
+                detail: format!(
+                    "research job kind {} disagrees with typed params kind {}",
+                    job.kind.as_str(),
+                    job.params_json.kind().as_str()
+                ),
+            }
+            .into());
+        }
+        match job.params_json.clone() {
+            ResearchJobParams::DatasetBuild(request) => {
                 let view = self.datasets.build(request, progress, cancel).await?;
                 Ok(JobOutcome {
                     result_ref: Some(view.training_dataset_id.as_uuid()),
                     coverage: view.coverage_json,
                 })
             }
-            ResearchJobKind::ModelTrain => {
-                let params: ModelTrainJobParams = from_params(&job.params_json)?;
+            ResearchJobParams::ModelTrain(params) => {
                 let view = self
                     .training
                     .train(params.model_version_id, params.request, progress, cancel)
@@ -182,8 +184,7 @@ impl ResearchJobExecutor {
                     coverage: None,
                 })
             }
-            ResearchJobKind::Backtest => {
-                let params: BacktestJobParams = from_params(&job.params_json)?;
+            ResearchJobParams::Backtest(params) => {
                 let view = self
                     .backtests
                     .run(params.model_version_id, params.request, progress, cancel)
@@ -193,8 +194,7 @@ impl ResearchJobExecutor {
                     coverage: None,
                 })
             }
-            ResearchJobKind::CpcvBacktest => {
-                let params: CpcvBacktestJobParams = from_params(&job.params_json)?;
+            ResearchJobParams::CpcvBacktest(params) => {
                 let view = self
                     .cpcv_backtests
                     .run(params.model_version_id, params.request, progress, cancel)
@@ -204,8 +204,7 @@ impl ResearchJobExecutor {
                     coverage: None,
                 })
             }
-            ResearchJobKind::BiasTableFit => {
-                let params: BiasTableFitJobParams = from_params(&job.params_json)?;
+            ResearchJobParams::BiasTableFit(params) => {
                 let outcome = self.bias_tables.fit(params, progress, cancel).await?;
                 // Fail-closed fits succeed with no artifact (result_ref = None).
                 Ok(JobOutcome {
@@ -213,8 +212,7 @@ impl ResearchJobExecutor {
                     coverage: None,
                 })
             }
-            ResearchJobKind::ModelCalibrationFit => {
-                let params: ModelCalibrationFitJobParams = from_params(&job.params_json)?;
+            ResearchJobParams::ModelCalibrationFit(params) => {
                 let outcome = self
                     .model_calibration_fit
                     .fit(params, progress, cancel)
@@ -224,8 +222,7 @@ impl ResearchJobExecutor {
                     coverage: None,
                 })
             }
-            ResearchJobKind::FeatureParity => {
-                let params: FeatureParityJobParams = from_params(&job.params_json)?;
+            ResearchJobParams::FeatureParity(params) => {
                 let view = self
                     .feature_parity
                     .execute(params, progress, cancel)
@@ -235,8 +232,7 @@ impl ResearchJobExecutor {
                     coverage: None,
                 })
             }
-            ResearchJobKind::TradePolicyFit => {
-                let params: TradePolicyFitJobParams = from_params(&job.params_json)?;
+            ResearchJobParams::TradePolicyFit(params) => {
                 let view = self
                     .trade_policies
                     .fit(
@@ -252,8 +248,7 @@ impl ResearchJobExecutor {
                     coverage: None,
                 })
             }
-            ResearchJobKind::TradePolicyValidation => {
-                let params: TradePolicyValidationJobParams = from_params(&job.params_json)?;
+            ResearchJobParams::TradePolicyValidation(params) => {
                 self.trade_policies
                     .validate(
                         &params.validation_run_id,
@@ -271,14 +266,6 @@ impl ResearchJobExecutor {
             }
         }
     }
-}
-
-fn from_params<T: DeserializeOwned>(params: &Value) -> QuantResult<T> {
-    serde_json::from_value(params.clone()).map_err(|error| {
-        QuantError::from(ResearchError::Serialization {
-            detail: format!("research job params deserialization failed: {error}"),
-        })
-    })
 }
 
 impl AppContext {
@@ -666,7 +653,7 @@ impl Terminal {
 async fn finalize(
     engine: &ResearchJobEngine,
     job_id: &ResearchJobId,
-    owner: &str,
+    owner: &WorkerId,
     kind: ResearchJobKind,
     terminal: Terminal,
 ) {

@@ -3,10 +3,9 @@
 use std::{sync::Arc, time::Duration};
 
 use quant_pivot_error::{QuantError, QuantResult};
-use quant_pivot_models::clickhouse::EntryConditionEvaluationEventRow;
+use quant_pivot_models::{clickhouse::EntryConditionEvaluationEventRow, types::WorkerId};
 use quant_pivot_repository::traits::{EntryConditionRepository, FactWriter};
 use tokio_util::sync::CancellationToken;
-use uuid::Uuid;
 
 use crate::infra::periodic_task::PeriodicTask;
 
@@ -15,7 +14,7 @@ const LEASE_DURATION: Duration = Duration::from_secs(30);
 
 /// Delivers committed condition traces to `ClickHouse` with crash-safe replay.
 pub struct EntryConditionEvaluationOutboxWorker {
-    worker_id: Uuid,
+    worker_id: WorkerId,
     conditions: Arc<dyn EntryConditionRepository>,
     writer: Arc<dyn FactWriter<EntryConditionEvaluationEventRow>>,
 }
@@ -27,7 +26,7 @@ impl EntryConditionEvaluationOutboxWorker {
         writer: Arc<dyn FactWriter<EntryConditionEvaluationEventRow>>,
     ) -> Self {
         Self {
-            worker_id: Uuid::now_v7(),
+            worker_id: WorkerId::from_v7(),
             conditions,
             writer,
         }
@@ -56,7 +55,12 @@ impl EntryConditionEvaluationOutboxWorker {
         })?;
         let evaluations = self
             .conditions
-            .claim_pending_evaluations(self.worker_id, now, now + lease_duration, BATCH_SIZE)
+            .claim_pending_evaluations(
+                self.worker_id.clone(),
+                now,
+                now + lease_duration,
+                BATCH_SIZE,
+            )
             .await?;
         if evaluations.is_empty() {
             return Ok(());
@@ -67,7 +71,7 @@ impl EntryConditionEvaluationOutboxWorker {
                     .conditions
                     .mark_evaluation_failed(
                         &evaluation.evaluation_id,
-                        self.worker_id,
+                        self.worker_id.clone(),
                         error.to_string(),
                     )
                     .await
@@ -84,7 +88,11 @@ impl EntryConditionEvaluationOutboxWorker {
         let published_at = chrono::Utc::now();
         for evaluation in evaluations {
             self.conditions
-                .mark_evaluation_published(&evaluation.evaluation_id, self.worker_id, published_at)
+                .mark_evaluation_published(
+                    &evaluation.evaluation_id,
+                    self.worker_id.clone(),
+                    published_at,
+                )
                 .await?;
         }
         Ok(())

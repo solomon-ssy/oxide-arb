@@ -16,9 +16,9 @@ if rg 'fn persist_.*RegistryInfo|fn save_.*&.*Info[^r]' crates/quant-pivot-{core
     ERRORS=$((ERRORS + 1))
 fi
 
-echo "=== Checking for cross-crate re-exports ==="
+echo "=== Checking for cross-crate compatibility re-exports ==="
 if rg 'pub use quant_pivot_(models|error)::' crates/quant-pivot-{api,core,storage}/src/lib.rs crates/quant-pivot-{api,core,storage}/src/**/mod.rs 2>/dev/null; then
-    echo "WARNING: Cross-crate re-exports found"
+    echo "ERROR: cross-crate compatibility re-exports found"
     ERRORS=$((ERRORS + 1))
 fi
 

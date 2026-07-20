@@ -1,14 +1,21 @@
 //! Immutable research-profile contracts for policy fitting and serving lineage.
 
+use std::{borrow::Cow, fmt, str::FromStr, sync::Arc};
+
 use chrono::{DateTime, TimeZone, Utc};
 use rust_decimal::Decimal;
-use sea_orm::FromJsonQueryResult;
-use serde::{Deserialize, Serialize};
+use schemars::JsonSchema;
+use sea_orm::{
+    ActiveValue, ColIdx, DbErr, FromJsonQueryResult, FromQueryResult, IntoActiveValue, QueryResult,
+    TryFromU64, TryGetError, TryGetable,
+    sea_query::{ArrayType, ColumnType, Nullable, Value, ValueType, ValueTypeErr},
+};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
 use crate::{
     enums::common::MarketCategory,
     hashing::CanonicalDigest,
-    types::{Bps, ContentHash, TradePolicyQualityGate, Usd},
+    types::{Bps, ContentHash, ResearchProfileId, TradePolicyQualityGate, Usd},
 };
 
 pub const POOLED_1H_CONTROL_PROFILE_ID: &str = "pooled_1h_control";
@@ -20,13 +27,213 @@ pub const WEATHER_FORECAST_24H_HORIZON_SECS: u64 = 86_400;
 
 /// Stable immutable profile identity carried by every downstream artifact.
 #[derive(
-    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, FromJsonQueryResult,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    FromJsonQueryResult,
+    FromQueryResult,
 )]
 #[serde(deny_unknown_fields)]
 pub struct ResearchProfileRef {
-    pub id: String,
+    pub id: ResearchProfileId,
     pub version: u32,
     pub content_hash: ContentHash,
+}
+
+/// Canonical, reversible, content-addressed FK for one immutable profile.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ResearchProfileArtifactId(Arc<ResearchProfileRef>);
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("invalid research profile artifact id: {detail}")]
+pub struct ResearchProfileArtifactIdParseError {
+    detail: String,
+}
+
+impl ResearchProfileArtifactId {
+    #[must_use]
+    pub fn from_profile_ref(profile_ref: &ResearchProfileRef) -> Self {
+        Self(Arc::new(profile_ref.clone()))
+    }
+
+    #[must_use]
+    pub fn profile_ref(&self) -> ResearchProfileRef {
+        self.0.as_ref().clone()
+    }
+
+    fn parse_parts(value: &str) -> Result<ResearchProfileRef, ResearchProfileArtifactIdParseError> {
+        let mut parts = value.splitn(4, ':');
+        if parts.next() != Some("rpa") {
+            return Err(ResearchProfileArtifactIdParseError {
+                detail: "missing rpa prefix".to_owned(),
+            });
+        }
+        let id = parts
+            .next()
+            .ok_or_else(|| ResearchProfileArtifactIdParseError {
+                detail: "missing profile id".to_owned(),
+            })?;
+        if id.is_empty()
+            || !id
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        {
+            return Err(ResearchProfileArtifactIdParseError {
+                detail: "profile id must contain lowercase ASCII, digits, or underscore".to_owned(),
+            });
+        }
+        let version = parts
+            .next()
+            .ok_or_else(|| ResearchProfileArtifactIdParseError {
+                detail: "missing profile version".to_owned(),
+            })?
+            .parse::<u32>()
+            .map_err(|error| ResearchProfileArtifactIdParseError {
+                detail: format!("invalid profile version: {error}"),
+            })?;
+        if version == 0 {
+            return Err(ResearchProfileArtifactIdParseError {
+                detail: "profile version must be positive".to_owned(),
+            });
+        }
+        let content_hash = ContentHash::parse(parts.next().ok_or_else(|| {
+            ResearchProfileArtifactIdParseError {
+                detail: "missing profile content hash".to_owned(),
+            }
+        })?)
+        .map_err(|error| ResearchProfileArtifactIdParseError {
+            detail: error.to_string(),
+        })?;
+        Ok(ResearchProfileRef {
+            id: ResearchProfileId::new(id),
+            version,
+            content_hash,
+        })
+    }
+}
+
+impl fmt::Display for ResearchProfileArtifactId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "rpa:{}:{}:{}",
+            self.0.id, self.0.version, self.0.content_hash
+        )
+    }
+}
+
+impl FromStr for ResearchProfileArtifactId {
+    type Err = ResearchProfileArtifactIdParseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::parse_parts(value).map(|profile_ref| Self(Arc::new(profile_ref)))
+    }
+}
+
+impl Serialize for ResearchProfileArtifactId {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for ResearchProfileArtifactId {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        String::deserialize(deserializer)?
+            .parse()
+            .map_err(de::Error::custom)
+    }
+}
+
+impl JsonSchema for ResearchProfileArtifactId {
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> Cow<'static, str> {
+        Cow::Borrowed("ResearchProfileArtifactId")
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "pattern": "^rpa:[a-z0-9_]+:[1-9][0-9]*:blake3:[0-9a-f]{64}$"
+        })
+    }
+}
+
+impl From<ResearchProfileArtifactId> for Value {
+    fn from(id: ResearchProfileArtifactId) -> Self {
+        Self::String(Some(id.to_string()))
+    }
+}
+
+impl From<&ResearchProfileArtifactId> for Value {
+    fn from(id: &ResearchProfileArtifactId) -> Self {
+        Self::String(Some(id.to_string()))
+    }
+}
+
+impl ValueType for ResearchProfileArtifactId {
+    fn try_from(value: Value) -> Result<Self, ValueTypeErr> {
+        match value {
+            Value::String(Some(value)) => value.parse().map_err(|_| ValueTypeErr),
+            _ => Err(ValueTypeErr),
+        }
+    }
+
+    fn type_name() -> String {
+        "ResearchProfileArtifactId".to_owned()
+    }
+
+    fn array_type() -> ArrayType {
+        ArrayType::String
+    }
+
+    fn column_type() -> ColumnType {
+        ColumnType::Text
+    }
+}
+
+impl Nullable for ResearchProfileArtifactId {
+    fn null() -> Value {
+        Value::String(None)
+    }
+}
+
+impl IntoActiveValue<Self> for ResearchProfileArtifactId {
+    fn into_active_value(self) -> ActiveValue<Self> {
+        ActiveValue::Set(self)
+    }
+}
+
+impl TryFromU64 for ResearchProfileArtifactId {
+    fn try_from_u64(_value: u64) -> Result<Self, DbErr> {
+        Err(DbErr::ConvertFromU64("ResearchProfileArtifactId"))
+    }
+}
+
+impl TryGetable for ResearchProfileArtifactId {
+    fn try_get_by<I: ColIdx>(result: &QueryResult, index: I) -> Result<Self, TryGetError> {
+        let value = String::try_get_by(result, index)?;
+        value
+            .parse()
+            .map_err(|error: ResearchProfileArtifactIdParseError| {
+                TryGetError::DbErr(DbErr::Type(error.to_string()))
+            })
+    }
+}
+
+impl ResearchProfileRef {
+    #[must_use]
+    pub fn artifact_id(&self) -> ResearchProfileArtifactId {
+        ResearchProfileArtifactId::from_profile_ref(self)
+    }
 }
 
 /// Information set under which policy decisions are evaluated.
@@ -90,7 +297,7 @@ pub enum ResearchProfileDataSource {
 }
 
 /// Immutable feedback methodology and promotion thresholds owned by a profile.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
 #[serde(deny_unknown_fields)]
 pub struct ResearchFeedbackPolicy {
     pub evaluation_window_days: u32,
@@ -134,7 +341,7 @@ impl ResearchFeedbackPolicy {
 }
 
 /// Profile content. The content hash excludes publication metadata.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
 #[serde(deny_unknown_fields)]
 pub struct ResearchProfileSpec {
     pub information_regime: ResearchInformationRegime,
@@ -243,7 +450,7 @@ impl ResearchProfileSpec {
             .ok_or_else(|| "research profile required-days overflow".to_owned())?;
         u64::from(self.fit_span_days)
             .checked_add(variable_days)
-            .and_then(|days| u32::try_from(days).ok())
+            .and_then(|days| <u32 as TryFrom<u64>>::try_from(days).ok())
             .ok_or_else(|| "research profile required-days exceed u32".to_owned())
     }
 }
@@ -284,7 +491,7 @@ impl ResearchProfileArtifact {
             .map_err(|error| format!("research profile hash failed: {error}"))?;
         Ok(Self {
             profile_ref: ResearchProfileRef {
-                id: id.to_owned(),
+                id: ResearchProfileId::new(id),
                 version,
                 content_hash,
             },
@@ -297,7 +504,7 @@ impl ResearchProfileArtifact {
     }
 }
 
-/// Return the complete closed registry for Runtime v18.
+/// Return the complete closed registry for Runtime v1.
 pub fn builtin_research_profiles() -> Result<Vec<ResearchProfileArtifact>, String> {
     let published_at = Utc
         .with_ymd_and_hms(2026, 7, 14, 0, 0, 0)
@@ -401,7 +608,7 @@ pub fn builtin_research_profiles() -> Result<Vec<ResearchProfileArtifact>, Strin
     Ok(vec![pooled, crypto, weather])
 }
 
-/// Runtime v18 raw-retention floor:
+/// Runtime v1 raw-retention floor:
 /// `max(180, 2 × max(required_days(profile)))`.
 pub fn minimum_raw_retention_days() -> Result<u32, String> {
     let max_required = builtin_research_profiles()?

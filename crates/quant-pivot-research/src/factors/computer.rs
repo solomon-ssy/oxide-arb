@@ -36,7 +36,7 @@ use crate::{
         reference::FrozenReferenceQuantiles,
         registry::FactorRegistry,
         value::{
-            FactorDefinitionSpec, FactorEligibility, FactorExplanation, FactorName, FactorSet,
+            FactorDefinitionDocument, FactorEligibility, FactorExplanation, FactorName, FactorSet,
             FactorValue, MarketFactorOutcome, RawFactor, RawFactorEligibility, ScoredFactor,
         },
     },
@@ -53,7 +53,7 @@ const PARALLEL_MIN_MARKETS: usize = 16;
 
 /// One enabled factor: its governed spec paired with the computer that produces
 /// it. Built once per round by [`FactorRegistry`].
-type FactorEntry = (FactorDefinitionSpec, Arc<dyn FactorComputer>);
+type FactorEntry = (FactorDefinitionDocument, Arc<dyn FactorComputer>);
 
 /// Computes one factor's raw value from a feature vector.
 ///
@@ -65,7 +65,7 @@ pub trait FactorComputer: Send + Sync {
     fn definition_id(&self) -> FactorDefinitionId;
 
     /// The governed specification this computer implements.
-    fn spec(&self) -> &FactorDefinitionSpec;
+    fn spec(&self) -> &FactorDefinitionDocument;
 
     /// Compute the raw (un-normalized) factor for a single feature vector.
     ///

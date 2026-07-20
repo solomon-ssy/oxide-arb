@@ -1,6 +1,6 @@
 //! Content-addressed normalized Gamma event objects.
 
-use crate::types::{CatalogEventObjectId, ContentHash};
+use crate::types::{CatalogEventObjectId, ContentHash, ExternalJsonDocument};
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
@@ -13,7 +13,7 @@ pub struct Model {
     pub content_hash: ContentHash,
     pub schema_version: i32,
     #[sea_orm(column_type = "JsonBinary")]
-    pub payload: Json,
+    pub payload: ExternalJsonDocument,
     pub created_at: DateTime<Utc>,
     #[sea_orm(has_many, relation_enum = "EventChange")]
     pub event_changes: HasMany<super::catalog_event_change::Entity>,

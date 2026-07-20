@@ -2,13 +2,19 @@
 
 use std::time::Duration;
 
+use chrono::Utc;
+
 use quant_pivot_models::{
-    domain::{NewResearchJob, NewTradePolicyTrialAttempt},
+    domain::{
+        FitTradePolicyRequest, NewResearchJob, NewTradePolicyTrialAttempt, TradePolicyFitJobParams,
+        TradePolicyFitSelection,
+    },
     enums::quant::{
         ResearchJobKind, ResearchJobStatus, TradePolicyTrialScope, TradePolicyTrialStatus,
     },
     types::{
-        ArtifactUri, ContentHash, ResearchJobId, TradePolicyTrialAttemptId, TradePolicyTrialMetrics,
+        ArtifactUri, ContentHash, ResearchEvaluationTrack, ResearchJobId, ResearchJobParams,
+        TradePolicyTrialAttemptId, TradePolicyTrialMetrics, TrainingDatasetId,
     },
 };
 use quant_pivot_repository::{
@@ -30,7 +36,19 @@ fn job(job_id: ResearchJobId) -> NewResearchJob {
         status: ResearchJobStatus::Queued,
         model_spec_id: None,
         decision_policy_snapshot_id: None,
-        params_json: serde_json::json!({"reason": "trial-ledger-it"}),
+        params_json: ResearchJobParams::TradePolicyFit(TradePolicyFitJobParams {
+            training_dataset_id: TrainingDatasetId::from_v7(),
+            request: FitTradePolicyRequest {
+                selection: TradePolicyFitSelection {
+                    profile_ref: quant_pivot_test_support::execution_pg_seed::fixture_profile_ref(),
+                    pit_cutoff: Utc::now(),
+                },
+                evaluation_track: ResearchEvaluationTrack::ResearchOnly,
+                candidates: Vec::new(),
+                reason: "trial-ledger-it".to_owned(),
+                idempotency_key: "trial-ledger-it".to_owned(),
+            },
+        }),
         requested_by: None,
         acting_role: "admin".to_owned(),
         parent_job_id: None,

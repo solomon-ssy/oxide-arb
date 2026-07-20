@@ -124,10 +124,12 @@ sea-orm = { version = "=2.0.0-rc.43", features = [
   "entity-registry",
   "with-chrono",
   "with-json",
+  "with-ipnetwork",
   "with-rust_decimal",
   "with-uuid",
   "postgres-array",
 ] }
+sea-query = "=1.0.1"
 sea-orm-migration = { version = "=2.0.0-rc.43", default-features = false, features = [
   "sqlx-postgres",
   "runtime-tokio-rustls",

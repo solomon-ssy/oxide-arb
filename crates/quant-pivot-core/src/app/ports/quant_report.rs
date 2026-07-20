@@ -42,8 +42,8 @@ use quant_pivot_models::{
     },
     types::{
         ContentHash, FeatureVectorId, ModelRunId, OrderIntentId, RecommendationId,
-        RecommendationReportId, ReportFunnelReason, ReportFunnelStage, ReportRunId,
-        ResearchProfileRef, TokenDataQualityRecord,
+        RecommendationReportId, ReportFunnelDiagnostics, ReportFunnelReason, ReportFunnelStage,
+        ReportRunId, ResearchProfileId, ResearchProfileRef, TokenDataQualityRecord,
     },
 };
 use quant_pivot_repository::traits::{
@@ -582,7 +582,7 @@ impl QuantReportPort for CoreQuantReportPort {
 
     async fn current_report(
         &self,
-        profile_id: &str,
+        profile_id: &ResearchProfileId,
         kind: ReportKind,
     ) -> QuantResult<Option<RecommendationReportInfo>> {
         Ok(self.report_repo.current(profile_id, kind).await?)
@@ -857,7 +857,7 @@ fn funnel_market_view(
                 detail: format!("invalid funnel profile hash: {error}"),
             })?;
     let profile_ref = ResearchProfileRef {
-        id: row.profile_id,
+        id: ResearchProfileId::new(row.profile_id),
         version: row.profile_version,
         content_hash: profile_content_hash,
     };
@@ -887,11 +887,16 @@ fn funnel_market_view(
             .map_err(|detail| ResearchError::Determinism {
                 detail: format!("report funnel {detail}"),
             })?;
-    let secondary_diagnostics =
-        serde_json::from_str(&row.secondary_diagnostics_json).map_err(|error| {
-            ResearchError::Determinism {
-                detail: format!("invalid report funnel secondary diagnostics: {error}"),
-            }
+    let secondary_diagnostics = serde_json::from_str::<ReportFunnelDiagnostics>(
+        &row.secondary_diagnostics_json,
+    )
+    .map_err(|error| ResearchError::Determinism {
+        detail: format!("invalid report funnel secondary diagnostics: {error}"),
+    })?;
+    secondary_diagnostics
+        .validate_for(primary_reason)
+        .map_err(|detail| ResearchError::Determinism {
+            detail: detail.to_owned(),
         })?;
     let row_hash =
         row.row_hash
@@ -1124,7 +1129,7 @@ fn validate_pre_inference_vector(
         || info.token_id.as_ref() != Some(&token.token_id)
         || info.decision_at != report.decision_at
         || info.data_quality != token.status
-        || info.decision_boundary.as_ref() != Some(boundary);
+        || &info.decision_boundary != boundary;
     if identity_mismatch {
         return Err(ResearchError::Determinism {
             detail: format!(
@@ -1156,48 +1161,30 @@ fn validate_pre_inference_vector(
 }
 
 fn persisted_feature_names(info: &FeatureVectorInfo) -> QuantResult<BTreeSet<String>> {
-    let object = info
+    info.payload
+        .validate()
+        .map_err(|detail| ResearchError::Serialization {
+            detail: format!(
+                "feature vector {} payload is invalid: {detail}",
+                info.feature_vector_id
+            ),
+        })?;
+    let mut names = info
         .payload
-        .as_object()
-        .ok_or_else(|| ResearchError::Serialization {
-            detail: format!(
-                "feature vector {} payload is not an object",
-                info.feature_vector_id
-            ),
-        })?;
-    let generic = object
-        .get("generic")
-        .and_then(serde_json::Value::as_object)
-        .ok_or_else(|| ResearchError::Serialization {
-            detail: format!(
-                "feature vector {} payload has no generic feature map",
-                info.feature_vector_id
-            ),
-        })?;
-    let mut names = generic.keys().cloned().collect::<BTreeSet<_>>();
-    match object.get("domain") {
-        None | Some(serde_json::Value::Null) => {}
-        Some(domain) => {
-            let values = domain
-                .as_object()
-                .and_then(|value| value.get("values"))
-                .and_then(serde_json::Value::as_object)
-                .ok_or_else(|| ResearchError::Serialization {
+        .generic
+        .keys()
+        .map(ToString::to_string)
+        .collect::<BTreeSet<_>>();
+    if let Some(domain) = &info.payload.domain {
+        for name in domain.values.keys().map(ToString::to_string) {
+            if !names.insert(name.clone()) {
+                return Err(ResearchError::Determinism {
                     detail: format!(
-                        "feature vector {} domain payload has no feature map",
+                        "feature vector {} repeats feature name `{name}` across planes",
                         info.feature_vector_id
                     ),
-                })?;
-            for name in values.keys() {
-                if !names.insert(name.clone()) {
-                    return Err(ResearchError::Determinism {
-                        detail: format!(
-                            "feature vector {} repeats feature name `{name}` across planes",
-                            info.feature_vector_id
-                        ),
-                    }
-                    .into());
                 }
+                .into());
             }
         }
     }

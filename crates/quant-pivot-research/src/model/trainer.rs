@@ -26,7 +26,9 @@ use quant_pivot_models::{
     domain::DecisionBoundary,
     enums::{common::MarketCategory, factor::NormalizationSource},
     runtime_config::{FactorCrossSectionConfig, SmallCrossSectionPolicy, TrainingOptimizerKind},
-    types::{ContentHash, MarketId, ModelInputContract, TokenId},
+    types::{
+        ContentHash, MarketId, ModelInputContract, TokenId, model_training::TrainingObjectiveSpec,
+    },
 };
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -45,7 +47,7 @@ use crate::{
         category_scope::validate_category_scope_weights,
         objective::{
             CrossSectionGroup, ObjectiveComponentReport, ObjectiveEvaluator, RankingDiagnostics,
-            SampleRow, TrainingObjectiveSpec,
+            SampleRow,
         },
         runtime::ModelFamily,
         sell_scorer::position_state::{
@@ -1321,8 +1323,8 @@ mod tests {
         },
         runtime_config::{FactorCrossSectionConfig, SmallCrossSectionPolicy},
         types::{
-            ContentHash, FactorDefinitionId, MarketId, ModelInputContract, ModelVersionId,
-            Probability, SchemaVersion, TokenId, TrainingExampleId, TrainingSampleSource,
+            FactorDefinitionId, MarketId, ModelInputContract, ModelVersionId, Probability,
+            SchemaVersion, TokenId, TrainingExampleId, TrainingSampleSource,
             builtin_research_profiles,
         },
     };
@@ -1345,12 +1347,9 @@ mod tests {
             runtime::ModelFamily,
             trainer::train_weighted,
         },
+        test_support::content_hash as hash,
         training::{LabelName, TrainingExample, TrainingLabel, fixtures},
     };
-
-    fn hash(seed: &str) -> ContentHash {
-        ContentHash::parse(format!("blake3:{seed:0>64}")).expect("hash")
-    }
 
     fn label_name() -> LabelName {
         LabelName::new("settlement_outcome")
@@ -1445,6 +1444,7 @@ mod tests {
             },
             header: ModelArtifactHeader {
                 model_version_id: ModelVersionId::from_v7(),
+                model_spec_definition_hash: hash("spec"),
                 profile_ref: builtin_research_profiles()
                     .expect("built-in profiles")
                     .remove(0)
@@ -1894,10 +1894,11 @@ mod tests {
 mod optimize_tests {
     use super::{coordinate_search, refine};
     use crate::model::{
-        objective::{CrossSectionGroup, ObjectiveEvaluator, SampleRow, TrainingObjectiveSpec},
+        objective::{CrossSectionGroup, ObjectiveEvaluator, SampleRow},
         optimize::refine_weights,
     };
     use chrono::{TimeZone, Utc};
+    use quant_pivot_models::types::model_training::TrainingObjectiveSpec;
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
 

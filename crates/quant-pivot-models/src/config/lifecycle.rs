@@ -22,6 +22,41 @@ pub struct ProjectLifecyclePolicy {
     pub baseline: LifecycleBaseline,
 }
 
+/// Source-control identity embedded into the compiled artifact.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompiledBuildIdentity {
+    pub build_commit: BuildCommitHash,
+    pub clean: bool,
+}
+
+impl CompiledBuildIdentity {
+    /// Read and validate the Git identity injected by this crate's build script.
+    pub fn compiled() -> QuantResult<Self> {
+        let build_commit =
+            BuildCommitHash::parse(env!("QUANT_PIVOT_BUILD_GIT_SHA")).map_err(|error| {
+                ConfigError::InvalidValue {
+                    field: "compiled_build.git_sha".to_owned(),
+                    reason: error.to_string(),
+                }
+            })?;
+        let clean = match env!("QUANT_PIVOT_BUILD_GIT_STATE") {
+            "clean" => true,
+            "dirty" => false,
+            state => {
+                return Err(ConfigError::InvalidValue {
+                    field: "compiled_build.git_state".to_owned(),
+                    reason: format!("unsupported build Git state `{state}`"),
+                }
+                .into());
+            }
+        };
+        Ok(Self {
+            build_commit,
+            clean,
+        })
+    }
+}
+
 impl ProjectLifecyclePolicy {
     /// Parse the lifecycle contract embedded in this build.
     pub fn compiled() -> QuantResult<Self> {
@@ -48,11 +83,6 @@ impl ProjectLifecyclePolicy {
 pub struct LifecycleDeployConfig {
     pub environment: DeploymentEnvironment,
     pub expected_state: ProjectLifecycleState,
-    pub build_commit: Option<BuildCommitHash>,
-    /// Hash of the deploy pipeline's successful backup/restore evidence bundle.
-    pub backup_evidence_hash: Option<ContentHash>,
-    /// Hash of the deterministic Config E2E/visual/accessibility evidence bundle.
-    pub config_e2e_evidence_hash: Option<ContentHash>,
 }
 
 impl Default for LifecycleDeployConfig {
@@ -60,9 +90,6 @@ impl Default for LifecycleDeployConfig {
         Self {
             environment: DeploymentEnvironment::local_development(),
             expected_state: ProjectLifecycleState::PreProductionResettable,
-            build_commit: None,
-            backup_evidence_hash: None,
-            config_e2e_evidence_hash: None,
         }
     }
 }

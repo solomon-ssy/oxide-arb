@@ -5,7 +5,7 @@ use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{NewResearchJob, Paginated, ResearchJobInfo, ResearchJobListQuery},
     enums::quant::{ResearchJobKind, ResearchJobStatus},
-    types::{DatasetCoverage, ResearchJobError, ResearchJobId, ResearchJobProgress},
+    types::{DatasetCoverage, ResearchJobError, ResearchJobId, ResearchJobProgress, WorkerId},
 };
 use uuid::Uuid;
 
@@ -54,7 +54,7 @@ pub trait ResearchJobRepository: Send + Sync {
     async fn lease_next(
         &self,
         eligible: &[ResearchJobKind],
-        owner: &str,
+        owner: &WorkerId,
         lease_expires_at: DateTime<Utc>,
     ) -> Result<Option<ResearchJobInfo>, StorageError>;
 
@@ -66,7 +66,7 @@ pub trait ResearchJobRepository: Send + Sync {
     async fn heartbeat(
         &self,
         job_id: &ResearchJobId,
-        owner: &str,
+        owner: &WorkerId,
         lease_expires_at: DateTime<Utc>,
         progress: Option<ResearchJobProgress>,
     ) -> Result<bool, StorageError>;
@@ -81,7 +81,7 @@ pub trait ResearchJobRepository: Send + Sync {
     async fn finalize(
         &self,
         job_id: &ResearchJobId,
-        owner: &str,
+        owner: &WorkerId,
         status: ResearchJobStatus,
         result_ref: Option<Uuid>,
         error: Option<ResearchJobError>,
@@ -100,7 +100,7 @@ pub trait ResearchJobRepository: Send + Sync {
     /// re-queue those under the recovery cap, quarantine the rest to `failed`.
     async fn reclaim_orphaned(
         &self,
-        owner: &str,
+        owner: &WorkerId,
         now: DateTime<Utc>,
     ) -> Result<ReclaimOutcome, StorageError>;
 
@@ -110,5 +110,5 @@ pub trait ResearchJobRepository: Send + Sync {
     /// expired / dead-epoch lease). Rows under the recovery cap are re-queued
     /// with `recovery_attempt += 1`; rows at the cap are quarantined to `failed`
     /// (a job that keeps interrupting must not re-queue forever).
-    async fn requeue_inflight(&self, owner: &str) -> Result<ReclaimOutcome, StorageError>;
+    async fn requeue_inflight(&self, owner: &WorkerId) -> Result<ReclaimOutcome, StorageError>;
 }

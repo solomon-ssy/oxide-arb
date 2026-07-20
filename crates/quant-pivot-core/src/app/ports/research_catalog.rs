@@ -24,14 +24,14 @@ use quant_pivot_models::{
         pagination::PageRequest,
     },
     enums::{common::MarketCategory, quant::PublicationStatus},
-    types::{FactorDefinitionId, MarketId, Probability},
+    types::{FactorDefinitionId, MarketId, Probability, stable_name::FactorName},
 };
 use quant_pivot_repository::traits::{
     BacktestPathSetRepository, BacktestReportRepository, FactorRepository, MarketRepository,
     ModelComparisonReportRepository, ModelRegistryRepository, TrainingDatasetRepository,
 };
 use quant_pivot_research::factors::{
-    FactorCollinearityAnalyzer, FactorName, FactorObservationMatrix, neutralize_by_group,
+    FactorCollinearityAnalyzer, FactorObservationMatrix, neutralize_by_group,
 };
 use rust_decimal::Decimal;
 

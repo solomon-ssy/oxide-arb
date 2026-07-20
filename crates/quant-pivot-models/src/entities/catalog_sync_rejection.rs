@@ -2,7 +2,7 @@
 
 use crate::{
     enums::catalog::{CatalogEntityKind, CatalogRejectionReason},
-    types::{CatalogSyncBatchId, CatalogSyncRejectionId},
+    types::{CatalogSyncBatchId, CatalogSyncRejectionId, ExternalJsonDocument},
 };
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
@@ -19,7 +19,7 @@ pub struct Model {
     pub reason_code: CatalogRejectionReason,
     pub detail: String,
     #[sea_orm(column_type = "JsonBinary", nullable)]
-    pub raw_payload: Option<Json>,
+    pub raw_payload: Option<ExternalJsonDocument>,
     pub created_at: DateTime<Utc>,
 
     #[sea_orm(

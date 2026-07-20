@@ -45,6 +45,12 @@ impl DomainSourceExpectationRepository for PgDomainSourceExpectationRepository {
         &self,
         mut expectation: UpsertDomainSourceExpectation,
     ) -> Result<DomainSourceExpectationInfo, StorageError> {
+        expectation
+            .validate()
+            .map_err(|detail| StorageError::InvariantViolation {
+                entity: Some(entity::QUANT_DOMAIN_SOURCE_EXPECTATION),
+                detail,
+            })?;
         expectation.updated_at = Utc::now();
         quant_domain_source_expectation::Entity::insert(expectation.into_active_model())
             .on_conflict(

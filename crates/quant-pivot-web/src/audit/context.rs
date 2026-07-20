@@ -28,9 +28,10 @@ use quant_pivot_models::{
         operation_log::{OperationCategory, OperationOutcome},
         rbac::ResourceType,
     },
-    types::{AuditEventId, UserId},
+    types::{AuditEventId, ContentHash, OperationAction, OperationDetailDocument, UserId},
 };
-use serde_json::Value;
+
+use crate::error::WebError;
 
 /// Handler-supplied audit attributes captured for one request.
 #[derive(Debug, Default, Clone)]
@@ -38,17 +39,17 @@ pub struct OperationEnrichment {
     /// Coarse grouping of the operation (auth / rbac / governance / …).
     pub category: Option<OperationCategory>,
     /// Specific action verb, e.g. `runtime_config.activate`.
-    pub action: Option<String>,
+    pub action: Option<OperationAction>,
     /// The kind of resource the operation affected.
     pub resource_type: Option<ResourceType>,
     /// The affected resource's identifier (stringified).
     pub resource_id: Option<String>,
     /// Redacted detail summary / diff (never raw request bodies or secrets).
-    pub detail: Option<Value>,
+    pub detail: Option<OperationDetailDocument>,
     /// Canonical hash of the governed resource before a successful mutation.
-    pub before_hash: Option<String>,
+    pub before_hash: Option<ContentHash>,
     /// Canonical hash of the governed resource after a successful mutation.
-    pub after_hash: Option<String>,
+    pub after_hash: Option<ContentHash>,
     /// Linked governance hash-chain event (dual-track hard link).
     pub governance_audit_event_id: Option<AuditEventId>,
     /// Monotonic sequence of the linked governance audit event.
@@ -75,7 +76,7 @@ impl OperationContext {
     pub fn set_action(&self, category: OperationCategory, action: &str) {
         let mut inner = self.inner.borrow_mut();
         inner.category = Some(category);
-        inner.action = Some(action.to_owned());
+        inner.action = Some(OperationAction::new(action));
     }
 
     /// Record the affected resource type and identifier.
@@ -87,12 +88,19 @@ impl OperationContext {
 
     /// Attach a redacted detail summary / diff. The caller is responsible for
     /// ensuring no credentials, tokens, or PII are present.
-    pub fn set_detail(&self, detail: Value) {
+    pub fn set_detail<T: serde::Serialize>(&self, detail: T) -> Result<(), WebError> {
+        let detail = OperationDetailDocument::from_serializable(&detail)
+            .map_err(|error| WebError::Internal(error.to_string()))?;
         self.inner.borrow_mut().detail = Some(detail);
+        Ok(())
     }
 
     /// Record canonical before/after state hashes for a governed mutation.
-    pub fn set_state_hashes(&self, before_hash: Option<String>, after_hash: Option<String>) {
+    pub fn set_state_hashes(
+        &self,
+        before_hash: Option<ContentHash>,
+        after_hash: Option<ContentHash>,
+    ) {
         let mut inner = self.inner.borrow_mut();
         inner.before_hash = before_hash;
         inner.after_hash = after_hash;

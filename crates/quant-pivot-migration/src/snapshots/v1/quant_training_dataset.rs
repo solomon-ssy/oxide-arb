@@ -10,6 +10,7 @@ pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub training_dataset_id: Uuid,
     pub model_spec_id: Uuid,
+    pub model_spec_definition_hash: String,
     pub window_start: DateTimeWithTimeZone,
     pub window_end: DateTimeWithTimeZone,
     pub status: QpTrainingDatasetStatus,

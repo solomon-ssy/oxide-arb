@@ -8,7 +8,7 @@ use quant_pivot_models::{
     },
     types::{
         ContentHash, DomainInstrumentKey, DomainMeasurementUnit, DomainSourceId, IcaoStation,
-        WeatherTemperatureStatistic, WeatherVariable,
+        WeatherTemperatureStatistic, WeatherVariable, WorkerId,
     },
 };
 use quant_pivot_repository::{
@@ -18,7 +18,6 @@ use quant_pivot_repository::{
 use quant_pivot_test_support::pg::setup_pg;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
-use uuid::Uuid;
 
 fn hash(fill: char) -> ContentHash {
     ContentHash::parse(format!("blake3:{}", fill.to_string().repeat(64))).expect("hash")
@@ -200,7 +199,7 @@ async fn weather_projection_tracks_maximum_and_minimum_with_independent_events()
 
     let events = projections
         .claim_pending_events(
-            Uuid::new_v4(),
+            WorkerId::from_v7(),
             Utc::now(),
             Utc::now() + Duration::minutes(1),
             100,

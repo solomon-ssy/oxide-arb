@@ -1,6 +1,12 @@
 //! `quant_shadow_comparison` table entity.
 
-use crate::types::{ContentHash, ModelVersionId, Probability, ShadowComparisonId};
+use crate::{
+    enums::quant::ModelWeightSource,
+    types::{
+        ContentHash, ModelVersionId, Probability, ShadowComparisonId,
+        shadow::{ShadowMaturedOutcomeDelta, ShadowRankDelta, ShadowScoreDelta},
+    },
+};
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
@@ -12,14 +18,15 @@ pub struct Model {
     pub shadow_comparison_id: ShadowComparisonId,
     pub active_model_version_id: ModelVersionId,
     pub shadow_model_version_id: ModelVersionId,
+    pub weight_source: ModelWeightSource,
     pub decision_at: DateTime<Utc>,
     pub topn_overlap: Probability,
     #[sea_orm(column_type = "JsonBinary")]
-    pub rank_delta_json: Json,
+    pub rank_delta_json: ShadowRankDelta,
     #[sea_orm(column_type = "JsonBinary")]
-    pub score_delta_json: Json,
-    #[sea_orm(column_type = "JsonBinary")]
-    pub matured_outcome_json: Option<Json>,
+    pub score_delta_json: ShadowScoreDelta,
+    #[sea_orm(column_type = "JsonBinary", nullable)]
+    pub matured_outcome_json: Option<ShadowMaturedOutcomeDelta>,
     pub hard_divergence: bool,
     pub comparison_hash: ContentHash,
     pub created_at: DateTime<Utc>,

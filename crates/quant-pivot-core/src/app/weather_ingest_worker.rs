@@ -20,9 +20,10 @@ use quant_pivot_models::{
         WeatherStationProfileConfig,
     },
     domain::{
-        DomainCursorStatus, DomainSourceCheckpoint, DomainSourceCursorInfo, LinkageOutcome,
-        MarketLinkage, MarketSubject, NewCalibrationArtifact, UpsertDomainSourceCursor,
-        WeatherForecastPoint, WeatherObservationFact, WeatherObservationReport,
+        CalibrationArtifactPayload, DomainCursorStatus, DomainSourceCheckpoint,
+        DomainSourceCursorInfo, LinkageOutcome, MarketLinkage, MarketSubject,
+        NewCalibrationArtifact, UpsertDomainSourceCursor, WeatherForecastPoint,
+        WeatherObservationFact, WeatherObservationReport,
     },
     enums::{
         domain::{DomainFamily, LinkageSourceRole},
@@ -311,9 +312,7 @@ impl WeatherIngestWorker {
             weather: configured_weather_targets(&self.station_profiles, Utc::now())?,
         };
         for row in rows {
-            let linkage = row
-                .into_domain()
-                .map_err(|error| QuantError::config(format!("invalid linkage payload: {error}")))?;
+            let linkage = row.into_domain();
             self.add_discovered_linkage(&mut bindings, linkage)?;
         }
         Ok(bindings)
@@ -907,11 +906,7 @@ impl WeatherIngestWorker {
                 fit_window_end: fit_end,
                 calibration_split_hash: fit.calibration_split_hash,
                 sample_count: fit.sample_count,
-                payload_json: serde_json::to_value(&fit.payload).map_err(|error| {
-                    QuantError::config(format!(
-                        "Weather calibration payload serialization failed: {error}"
-                    ))
-                })?,
+                payload: CalibrationArtifactPayload::WeatherStationLeadBias(fit.payload),
                 active: false,
             };
             match self.calibrations.create(new_artifact).await {

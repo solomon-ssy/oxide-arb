@@ -36,10 +36,10 @@ use quant_pivot_models::{
         MarketId, MarketSelectionId, ModelRunId, ModelVersionId, OpportunisticExitPolicy,
         PortfolioPlanId, Price, Probability, RecommendationFactorBreakdown, RecommendationId,
         RecommendationIdentity, RecommendationReportId, RecommendationTradePlan,
-        ReportDataQualitySnapshotId, ReportSummary, ResearchJobId, RiskEnvelope, Shares,
-        SignalCandidateId, SizingPlan, ThesisInvalidationPolicy, TokenId, TradePolicyArtifactId,
-        TradePolicyCohortDimension, TradePolicyCohortKey, TradePolicyCohortProvenance, Usd,
-        builtin_research_profiles,
+        ReportDataQualitySnapshotId, ReportSummary, ResearchJobId, ResearchJobParams, RiskEnvelope,
+        Shares, SignalCandidateId, SizingPlan, ThesisInvalidationPolicy, TokenId,
+        TradePolicyArtifactId, TradePolicyCohortDimension, TradePolicyCohortKey,
+        TradePolicyCohortProvenance, Usd, builtin_research_profiles,
     },
 };
 
@@ -123,7 +123,7 @@ pub fn sampled_parity(report: &NewRecommendationReport) -> NewReportFeatureParit
         status: ResearchJobStatus::Queued,
         model_spec_id: None,
         decision_policy_snapshot_id: Some(report.decision_policy_snapshot_id.clone()),
-        params_json: serde_json::to_value(params).expect("fixture parity params"),
+        params_json: ResearchJobParams::FeatureParity(params),
         requested_by: None,
         acting_role: "test".to_owned(),
         parent_job_id: None,

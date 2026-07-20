@@ -1,5 +1,6 @@
 //! Runtime-config activation applicator — Phase 0 minimal propagation.
 
+use super::store::{DecisionPolicyStore, PublishedPolicyBundle};
 use crate::{
     execution::breaker::ExecutionBreaker,
     governance::{BiasTableApplicator, CategoryPointerGuard, WeightOverlayApplicator},
@@ -7,7 +8,6 @@ use crate::{
         data_quality::BookDataQualityService, market_cache::MarketCache,
         market_filter::MarketFilter,
     },
-    runtime_config::DecisionPolicyStore,
 };
 use async_trait::async_trait;
 use parking_lot::Mutex;
@@ -61,6 +61,11 @@ impl PolicySnapshotApplicator {
     /// Bind the execution breaker so activations hot-reload its thresholds.
     pub fn attach_execution_breaker(&self, breaker: Arc<ExecutionBreaker>) {
         *self.execution_breaker.lock() = Some(breaker);
+    }
+
+    #[must_use]
+    pub fn current_bundle(&self) -> Option<PublishedPolicyBundle> {
+        self.store.current_bundle()
     }
 
     fn preflight_internal(candidate: &DecisionPolicySnapshot) -> Result<(), ControlError> {
@@ -127,13 +132,26 @@ impl PolicySnapshotPort for PolicySnapshotApplicator {
         let store = Arc::clone(&self.store);
         let subscribers = self.subscribers.clone();
         let publish_config = Arc::clone(&arc);
-        Ok(PreparedPolicySnapshot::new(arc, move || {
-            subscribers.bias_table.publish(bias_table);
-            if let (Some(breaker), Some(thresholds)) = (breaker, breaker_thresholds) {
-                breaker.publish_reload(thresholds);
-            }
-            Self::propagate(&subscribers, &publish_config);
-            store.swap(publish_config);
-        }))
+        Ok(PreparedPolicySnapshot::new_governed(
+            arc,
+            move |committed_bundle| {
+                let publish_dependencies = |config: &Arc<DecisionPolicySnapshot>| {
+                    subscribers.bias_table.publish(bias_table);
+                    if let (Some(breaker), Some(thresholds)) = (breaker, breaker_thresholds) {
+                        breaker.publish_reload(thresholds);
+                    }
+                    Self::propagate(&subscribers, config);
+                };
+                if let Some(bundle) = committed_bundle {
+                    store
+                        .publish_committed(bundle, publish_dependencies)
+                        .map(|_outcome| ())
+                } else {
+                    publish_dependencies(&publish_config);
+                    store.swap(publish_config);
+                    Ok(())
+                }
+            },
+        ))
     }
 }

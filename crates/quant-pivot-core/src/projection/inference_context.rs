@@ -11,10 +11,10 @@
 //! classical runtimes both consume; a market with no executable reference price
 //! cannot be scored and yields `None` (it is dropped from the cross-section).
 
-use quant_pivot_models::types::{Price, Probability, Usd};
+use quant_pivot_models::types::{Price, Probability, Usd, stable_name::FeatureName};
 use quant_pivot_research::{
     features::{
-        FeatureName, FeatureValue, FeatureVector,
+        FeatureValue, FeatureVector,
         names::{book, market},
     },
     model::MarketInferenceContext,

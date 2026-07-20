@@ -12,17 +12,17 @@ use quant_pivot_models::{
         market::{book::BookLevel, registry::MarketRegistryInfo},
         quant::NewReportDataQualitySnapshot,
     },
-    enums::{catalog::CatalogTimestampQuality, quant::DataQualityStatus},
+    enums::quant::DataQualityStatus,
     hashing::CanonicalDigest,
     types::{
-        BookSnapshotRef, BookSnapshotSource, Bps, CatalogEventChangeId, CatalogMarketChangeId,
-        CatalogSyncBatchId, ContentHash, DecisionPolicySnapshotId, EventId, MarketContext,
-        MarketId, MarketLinkageId, Probability, RecommendationIdentity,
+        BookSnapshotRef, BookSnapshotSource, Bps, CatalogDecisionRef, ContentHash,
+        DecisionCaptureEvidence, DecisionPolicySnapshotId, DecisionSnapshotEvidence, EventId,
+        MarketContext, MarketId, MarketLinkageId, Probability, RecommendationIdentity,
         ReportDataQualitySnapshotId, ReportDataQualityTokens, TokenDataQualityRecord, TokenId, Usd,
     },
 };
 use rust_decimal::Decimal;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::{
     features::{
@@ -36,23 +36,6 @@ use crate::{
     selection::SelectedMarket,
 };
 use std::collections::HashMap;
-
-/// Exact immutable catalog revisions used for one decision.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CatalogDecisionRef {
-    pub catalog_sync_batch_id: CatalogSyncBatchId,
-    pub market_change_id: CatalogMarketChangeId,
-    pub event_change_id: CatalogEventChangeId,
-    pub market_content_hash: ContentHash,
-    pub event_content_hash: ContentHash,
-    pub membership_hash: ContentHash,
-    pub market_effective_at: DateTime<Utc>,
-    pub market_available_at: DateTime<Utc>,
-    pub event_effective_at: DateTime<Utc>,
-    pub event_available_at: DateTime<Utc>,
-    pub market_timestamp_quality: CatalogTimestampQuality,
-    pub event_timestamp_quality: CatalogTimestampQuality,
-}
 
 impl From<&ResolvedMarketSnapshot> for CatalogDecisionRef {
     fn from(snapshot: &ResolvedMarketSnapshot) -> Self {
@@ -71,29 +54,6 @@ impl From<&ResolvedMarketSnapshot> for CatalogDecisionRef {
             event_timestamp_quality: snapshot.event_timestamp_quality,
         }
     }
-}
-
-/// Source snapshot identity committed before feature computation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DecisionSnapshotEvidence {
-    pub boundary: DecisionBoundary,
-    pub market_id: MarketId,
-    pub event_id: EventId,
-    pub token_id: TokenId,
-    pub catalog: CatalogDecisionRef,
-    pub book_snapshot_ref: BookSnapshotRef,
-    pub book_effective_at: DateTime<Utc>,
-    pub book_available_at: DateTime<Utc>,
-}
-
-/// Full business capture consumed by report composition and parity replay.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DecisionCaptureEvidence {
-    pub snapshot: DecisionSnapshotEvidence,
-    pub identity: RecommendationIdentity,
-    pub market_context: MarketContext,
-    pub data_quality: DataQualityStatus,
-    pub liquidity_score: Probability,
 }
 
 /// Frozen decision-time bundle for one market: PIT inputs + capture payload.

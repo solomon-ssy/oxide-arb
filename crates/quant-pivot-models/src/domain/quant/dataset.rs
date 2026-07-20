@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 pub struct TrainingDatasetInfo {
     pub training_dataset_id: TrainingDatasetId,
     pub model_spec_id: ModelSpecId,
+    pub model_spec_definition_hash: ContentHash,
     pub window_start: DateTime<Utc>,
     pub window_end: DateTime<Utc>,
     pub status: TrainingDatasetStatus,
@@ -61,6 +62,7 @@ info_from_model!(
     {
         training_dataset_id,
         model_spec_id,
+        model_spec_definition_hash,
         window_start,
         window_end,
         status,
@@ -93,6 +95,7 @@ info_from_model!(
 pub struct NewTrainingDatasetPlan {
     pub training_dataset_id: TrainingDatasetId,
     pub model_spec_id: ModelSpecId,
+    pub model_spec_definition_hash: ContentHash,
     pub window_start: DateTime<Utc>,
     pub window_end: DateTime<Utc>,
     pub purpose: DatasetPurpose,

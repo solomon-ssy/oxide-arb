@@ -8,13 +8,17 @@
 use crate::{
     domain::{OperationLogInfo, pagination::PageRequest},
     enums::{
-        operation_log::{OperationCategory, OperationOutcome},
+        operation_log::{OperationCategory, OperationHttpMethod, OperationOutcome},
         rbac::ResourceType,
     },
-    types::{AuditEventId, OperationLogId, UserId},
+    types::{
+        AuditEventId, ContentHash, CorrelationId, OperationAction, OperationDetailDocument,
+        OperationLogId, RoleCode, UserId,
+    },
 };
 use chrono::{DateTime, Utc};
 use quant_pivot_macros::NormalizePageQuery;
+use sea_orm::entity::prelude::IpNetwork;
 use serde::{Deserialize, Serialize};
 
 /// Outbound view of one append-only operation-log row.
@@ -22,27 +26,27 @@ use serde::{Deserialize, Serialize};
 pub struct OperationLogView {
     pub id: OperationLogId,
     pub occurred_at: DateTime<Utc>,
-    pub request_id: String,
+    pub request_id: CorrelationId,
     pub actor_user_id: Option<UserId>,
     pub actor_username: Option<String>,
-    pub acting_role: Option<String>,
+    pub acting_role: Option<RoleCode>,
     pub category: OperationCategory,
-    pub action: String,
+    pub action: OperationAction,
     pub resource_type: Option<ResourceType>,
     pub resource_id: Option<String>,
-    pub http_method: String,
+    pub http_method: OperationHttpMethod,
     pub http_path: String,
     pub http_status: i16,
     pub outcome: OperationOutcome,
-    pub client_ip: Option<String>,
+    pub client_ip: Option<IpNetwork>,
     pub user_agent: Option<String>,
     pub latency_ms: i32,
     /// Redacted detail summary / diff stamped by the handler (never raw bodies).
-    pub detail: serde_json::Value,
+    pub detail: OperationDetailDocument,
     /// Canonical hash of the governed resource before a successful mutation.
-    pub before_hash: Option<String>,
+    pub before_hash: Option<ContentHash>,
     /// Canonical hash of the governed resource after a successful mutation.
-    pub after_hash: Option<String>,
+    pub after_hash: Option<ContentHash>,
     /// Hard link to the governance hash-chain event, when this row mirrors one.
     pub governance_audit_event_id: Option<AuditEventId>,
     /// Monotonic sequence of the linked governance audit event.

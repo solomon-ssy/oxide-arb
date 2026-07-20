@@ -25,7 +25,7 @@ use quant_pivot_models::{
         TradePolicyEvidenceRowView, TradePolicyFitPreflightRequest, TradePolicyFitPreflightView,
         TradePolicyFitReadiness, TradePolicyFitSelection, TradePolicyGovernanceAuditInfo,
         TradePolicyListQuery, TradePolicyOperationalEvidenceView, TradePolicyPort,
-        TradePolicyPreflightBlockerKind, TradePolicyPreflightBlockerView,
+        TradePolicyPreflightBlockerDetail, TradePolicyPreflightBlockerView,
         TradePolicySourceSliceObjectListQuery, TradePolicySourceSliceObjectView,
         TradePolicySourceSliceView, TradePolicyTrialAttemptInfo, TradePolicyTrialListQuery,
         TradePolicyValidationListQuery, TradePolicyValidationRowInfo,
@@ -44,9 +44,10 @@ use quant_pivot_models::{
         ArtifactUri, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION, DecisionPolicySnapshotId,
         ExecutablePriceBasis, MarketId, ModelSpecId, ModelVersionId,
         POLICY_EVIDENCE_OBJECT_FORMAT_VERSION, ResearchEvaluationTrack, ResearchJobId,
-        ResearchProfileArtifact, ResearchProfileRef, ResearchReadinessEvidencePayload,
-        RetentionRunwayEvidenceV1, SchemaVersion, ShadowLatencyProfileV1, SourceSliceManifestRef,
-        SourceSliceManifestV1, SourceSliceObjectKind, StructuralVolatilityOosFoldRow,
+        ResearchProfileArtifact, ResearchProfileId, ResearchProfileRef,
+        ResearchReadinessEvidenceId, ResearchReadinessEvidencePayload, SchemaVersion,
+        ShadowLatencyProfileV1, SourceSliceManifestRef, SourceSliceManifestV1,
+        SourceSliceObjectKind, StructuralVolatilityOosFoldRow,
         TRADE_POLICY_ARTIFACT_FORMAT_VERSION, TRADE_POLICY_EVIDENCE_BUNDLE_FORMAT_VERSION, TokenId,
         TradePolicyArtifactId, TradePolicyArtifactPayload, TradePolicyCandidateSpec,
         TradePolicyCandidateTrialRow, TradePolicyCohortTrialRow, TradePolicyCoverageGapRow,
@@ -56,8 +57,8 @@ use quant_pivot_models::{
         TradePolicyObservationEligibilityRow, TradePolicyPitCutoffEvidence,
         TradePolicyStatisticalSummaryRow, TradePolicyTrialAttemptId, TradePolicyTrialMetrics,
         TradePolicyValidationEvidence, TradePolicyValidationRunId, TrainingDatasetId,
-        TrainingExampleId, TrainingSampleSource, VerticalActivationTarget, VerticalGateEvidence,
-        builtin_research_profiles, canonicalize_policy_candidates,
+        TrainingExampleId, TrainingSampleSource, UserId, VerticalActivationTarget,
+        VerticalGateEvidence, builtin_research_profiles, canonicalize_policy_candidates,
         resolve_builtin_research_profile,
     },
 };
@@ -82,7 +83,6 @@ use quant_pivot_research::{
 };
 use rust_decimal::Decimal;
 use tokio_util::sync::CancellationToken;
-use uuid::Uuid;
 
 use crate::{
     prefetch::{
@@ -283,7 +283,7 @@ struct FitDatasetInputs {
     source_slice_ref: SourceSliceManifestRef,
     examples: Vec<TrainingExample>,
     frozen_source: FrozenSourceSlice,
-    latency_evidence_id: Uuid,
+    latency_evidence_id: ResearchReadinessEvidenceId,
     latency_profile_hash: ContentHash,
     latency_profile: ShadowLatencyProfileV1,
 }
@@ -321,7 +321,7 @@ struct PolicySourceSlice {
 struct ValidationCompletionInput<'a> {
     validation_run_id: &'a TradePolicyValidationRunId,
     artifact_id: &'a TradePolicyArtifactId,
-    actor_id: Uuid,
+    actor_id: UserId,
     reason: String,
     current: &'a TradePolicyArtifactInfo,
     source_slice_manifest_hash: &'a ContentHash,
@@ -444,7 +444,12 @@ impl TradePolicyService {
                 entity: "quant_model_spec",
                 id: model_version.model_spec_id.to_string(),
             })?;
-        if model_spec.status != PublicationStatus::Published
+        let model_spec_hash = model_spec.definition().content_hash().map_err(|error| {
+            ResearchError::ValidationMethodology {
+                detail: format!("fit model spec hash failed: {error}"),
+            }
+        })?;
+        if model_spec_hash != model_spec.definition_hash
             || model_spec.feature_schema_version
                 != config
                     .profile_artifacts
@@ -454,7 +459,7 @@ impl TradePolicyService {
         {
             return Err(ResearchError::ValidationMethodology {
                 detail: format!(
-                    "fit model spec {} is not Published on the frozen feature schema",
+                    "fit model spec {} is not an intact immutable definition on the frozen feature schema",
                     model_spec.model_spec_id
                 ),
             }
@@ -472,7 +477,7 @@ impl TradePolicyService {
             .policy_validation;
         let methodology_hash = CanonicalDigest::content_hash_json(&(
             (
-                "trade_policy_methodology_v2",
+                "trade_policy_methodology_v1",
                 POLICY_PERFORMANCE_METHODOLOGY_VERSION,
                 "common_executable_candidate_intersection",
                 "interval_uniqueness_weighted_groups",
@@ -542,7 +547,7 @@ impl TradePolicyService {
                     Ok(limits) => Some(limits),
                     Err(error) => {
                         messages.push(format!(
-                            "frozen runtime v18 fit contract is unavailable: {error}"
+                            "frozen runtime v1 fit contract is unavailable: {error}"
                         ));
                         None
                     }
@@ -735,7 +740,7 @@ impl TradePolicyService {
             });
         if !profile_lineage_valid {
             messages.push(
-                "dataset v5 profile/program lineage does not match the fit request".to_owned(),
+                "dataset v1 profile/program lineage does not match the fit request".to_owned(),
             );
         }
         let source_slice = self.evaluate_source_slice(&input).await;
@@ -798,7 +803,7 @@ impl TradePolicyService {
     ) -> SourceSlicePreflight {
         let Some(dataset_manifest) = input.dataset.and_then(|row| row.manifest_json.as_ref())
         else {
-            return SourceSlicePreflight::blocked("dataset v5 manifest is unavailable");
+            return SourceSlicePreflight::blocked("dataset v1 manifest is unavailable");
         };
         let Some(source_slice_info) = input.source_slice else {
             return SourceSlicePreflight::blocked(
@@ -920,7 +925,7 @@ impl TradePolicyService {
         }
         let latency_evidence = self
             .readiness
-            .verified_by_id(manifest.latency_evidence_id)
+            .verified_by_id(&manifest.latency_evidence_id)
             .await?;
         if latency_evidence.payload_hash != manifest.latency_profile_hash {
             return Err(ResearchError::ValidationMethodology {
@@ -1390,7 +1395,7 @@ impl TradePolicyService {
                     preflight
                         .blockers
                         .iter()
-                        .map(|blocker| blocker.kind)
+                        .map(|blocker| &blocker.detail)
                         .collect::<Vec<_>>()
                 ),
             }
@@ -1667,7 +1672,7 @@ impl TradePolicyService {
             simulator_hash: simulator_hash.clone(),
             replay_kernel_hash: replay_kernel_hash.clone(),
             methodology_hash: plan.runtime_limits.methodology_hash.clone(),
-            latency_evidence_id: data.latency_evidence_id,
+            latency_evidence_id: data.latency_evidence_id.clone(),
             latency_profile_hash: data.latency_profile_hash.clone(),
             catalog_ledger_hash: catalog_ledger_hash.clone(),
             source_slice_manifest_hash: data.source_slice_ref.manifest_hash.clone(),
@@ -1890,7 +1895,7 @@ impl TradePolicyService {
                 .manifest_json
                 .ok_or_else(|| ResearchError::ValidationMethodology {
                     detail: format!(
-                        "policy {artifact_id} source dataset has no Dataset v5 manifest"
+                        "policy {artifact_id} source dataset has no Dataset v1 manifest"
                     ),
                 })?;
         if dataset_manifest.profile_ref != policy.payload_json.fit_contract.profile_ref
@@ -2048,16 +2053,16 @@ impl TradePolicyService {
                 &source_manifest.manifest_hash,
             )
             .await?;
-        let source_manifest_v2 = serde_json::from_slice::<SourceSliceManifestV1>(
+        let source_manifest = serde_json::from_slice::<SourceSliceManifestV1>(
             &source_manifest_bytes,
         )
         .map_err(|error| ResearchError::Serialization {
             detail: format!("invalid Source Slice manifest during publish: {error}"),
         })?;
-        source_manifest_v2
+        source_manifest
             .validate()
             .map_err(|detail| ResearchError::ValidationMethodology { detail })?;
-        for object in &source_manifest_v2.objects {
+        for object in &source_manifest.objects {
             require_durable_artifact(&self.artifacts, &object.uri).await?;
         }
         self.read_validation_source_slice(&dataset).await?;
@@ -2731,7 +2736,7 @@ fn build_fit_artifact_payload(
             target_horizon_secs: plan.profile.spec.target_horizon_secs,
             cash_budget_tiers: plan.profile.spec.allowed_cash_budget_tiers.clone(),
             methodology_hash: plan.runtime_limits.methodology_hash.clone(),
-            latency_evidence_id: data.latency_evidence_id,
+            latency_evidence_id: data.latency_evidence_id.clone(),
             latency_profile_hash: data.latency_profile_hash.clone(),
             quality_gate: plan.profile.spec.quality_gate.clone(),
         },
@@ -2768,7 +2773,7 @@ fn build_fit_artifact_payload(
             simulator_hash,
             replay_kernel_hash,
             methodology_hash: plan.runtime_limits.methodology_hash.clone(),
-            latency_evidence_id: data.latency_evidence_id,
+            latency_evidence_id: data.latency_evidence_id.clone(),
             latency_profile_hash: data.latency_profile_hash.clone(),
             catalog_ledger_hash,
             source_slice_manifest_hash: data.source_slice_ref.manifest_hash.clone(),
@@ -3321,7 +3326,6 @@ struct PreflightBlockerContext<'a> {
     retention_runway_days: Option<u32>,
     required_raw_retention_days: Option<u32>,
     retention_runway_proven: bool,
-    retention_evidence: Option<&'a RetentionRunwayEvidenceV1>,
 }
 
 fn preflight_blockers(
@@ -3342,37 +3346,28 @@ fn append_contract_dataset_blockers(
     push_blocker(
         blockers,
         contract.valid.is_pass(),
-        TradePolicyPreflightBlockerKind::ContractInvalid,
-        serde_json::json!({ "diagnostics": contract.messages }),
-        serde_json::json!({ "profile_candidate_and_runtime_contract": "valid" }),
-        "Select a registered immutable profile and a canonical candidate family permitted by Runtime v18.",
+        TradePolicyPreflightBlockerDetail::ContractInvalid {
+            diagnostics: contract.messages.clone(),
+        },
+        "Select a registered immutable profile and a canonical candidate family permitted by Runtime v1.",
         None,
     );
     push_blocker(
         blockers,
         contract.profile_fitter_available,
-        TradePolicyPreflightBlockerKind::ProfileFitterUnavailable,
-        serde_json::json!(
-            contract
+        TradePolicyPreflightBlockerDetail::ProfileFitterUnavailable {
+            configured_fitter: contract
                 .profile
                 .as_ref()
-                .and_then(|profile| profile.spec.policy_fitter)
-        ),
-        serde_json::json!({ "policy_fitter": "implemented" }),
+                .and_then(|profile| profile.spec.policy_fitter),
+        },
         "Select a profile with an explicitly implemented policy fitter.",
         None,
     );
     push_blocker(
         blockers,
         contract.profile_quality_gate_available,
-        TradePolicyPreflightBlockerKind::QualityGateUnavailable,
-        serde_json::json!(
-            contract
-                .profile
-                .as_ref()
-                .map(|profile| &profile.spec.quality_gate)
-        ),
-        serde_json::json!({ "authority": "immutable_research_profile", "valid": true }),
+        TradePolicyPreflightBlockerDetail::QualityGateUnavailable,
         "Select a registered immutable profile with a valid publication quality gate.",
         None,
     );
@@ -3382,75 +3377,62 @@ fn append_contract_dataset_blockers(
     push_blocker(
         blockers,
         dataset.ready.is_pass(),
-        TradePolicyPreflightBlockerKind::DatasetNotReady,
-        serde_json::json!(context.dataset_info.map(|row| row.status.as_str())),
-        serde_json::json!("ready"),
-        "Build and integrity-verify the exact Dataset v5 source before fitting.",
+        TradePolicyPreflightBlockerDetail::DatasetNotReady {
+            actual_status: context.dataset_info.map(|row| row.status),
+        },
+        "Build and integrity-verify the exact Dataset v1 source before fitting.",
         blocker_dataset_link(context),
     );
     push_blocker(
         blockers,
         dataset.policy_fit.is_pass(),
-        TradePolicyPreflightBlockerKind::DatasetPurposeMismatch,
-        serde_json::json!(context.dataset_info.map(|row| row.purpose.as_str())),
-        serde_json::json!("policy_fit"),
-        "Select a Dataset v5 materialized specifically for PolicyFit.",
+        TradePolicyPreflightBlockerDetail::DatasetPurposeMismatch {
+            actual_purpose: context.dataset_info.map(|row| row.purpose),
+        },
+        "Select a Dataset v1 materialized specifically for PolicyFit.",
         blocker_dataset_link(context),
     );
     push_blocker(
         blockers,
         dataset.raw_trajectory_labels_present.is_pass(),
-        TradePolicyPreflightBlockerKind::RawTrajectoryLabelsMissing,
-        serde_json::json!({
-            "labels_matured": dataset.labels_matured_by_cutoff,
-            "labels_excluded_after_cutoff": dataset.labels_excluded_after_cutoff,
-        }),
-        serde_json::json!({
-            "complete_raw_trajectory_rows": "> 0",
-            "required_labels": [
-                "return_to_horizon",
-                "max_favorable_excursion_bps",
-                "max_adverse_excursion_bps",
-                "liquidity_exit_possible"
-            ],
-        }),
-        "Rebuild the source slice and Dataset v5 with mature row-level trajectory labels.",
+        TradePolicyPreflightBlockerDetail::RawTrajectoryLabelsMissing {
+            labels_matured_by_cutoff: dataset.labels_matured_by_cutoff,
+            labels_excluded_after_cutoff: dataset.labels_excluded_after_cutoff,
+        },
+        "Rebuild the source slice and Dataset v1 with mature row-level trajectory labels.",
         blocker_dataset_link(context),
     );
     push_blocker(
         blockers,
         dataset.profile_lineage_valid.is_pass(),
-        TradePolicyPreflightBlockerKind::ProfileLineageMismatch,
-        serde_json::json!(
-            context
+        TradePolicyPreflightBlockerDetail::ProfileLineageMismatch {
+            actual_profile_ref: context
                 .dataset_info
                 .and_then(|row| row.manifest_json.as_ref())
-                .map(|manifest| &manifest.profile_ref)
-        ),
-        serde_json::json!(&context.request.selection.profile_ref),
+                .map(|manifest| manifest.profile_ref.clone()),
+            required_profile_ref: context.request.selection.profile_ref.clone(),
+        },
         "Select or rebuild a dataset whose immutable profile reference matches exactly.",
         blocker_dataset_link(context),
     );
     push_blocker(
         blockers,
         dataset.source_slice_verified.is_pass(),
-        TradePolicyPreflightBlockerKind::SourceSliceUnverified,
-        serde_json::json!({ "diagnostics": context.source_slice_messages }),
-        serde_json::json!({ "source_slice_format": 2, "byte_hash_verified": true }),
-        "Materialize and hash-verify every required Source Slice v2 object.",
+        TradePolicyPreflightBlockerDetail::SourceSliceUnverified {
+            diagnostics: context.source_slice_messages.to_vec(),
+        },
+        "Materialize and hash-verify every required Source Slice v1 object.",
         blocker_dataset_link(context),
     );
     push_blocker(
         blockers,
         dataset.fit_window_contained.is_pass(),
-        TradePolicyPreflightBlockerKind::FitWindowNotContained,
-        serde_json::json!(context.dataset_info.map(|row| {
-            serde_json::json!({ "start": row.window_start, "end": row.window_end })
-        })),
-        serde_json::json!({
-            "start": contract.fit_window_start,
-            "end": contract.fit_window_end,
-        }),
+        TradePolicyPreflightBlockerDetail::FitWindowNotContained {
+            dataset_window_start: context.dataset_info.map(|row| row.window_start),
+            dataset_window_end: context.dataset_info.map(|row| row.window_end),
+            required_window_start: contract.fit_window_start,
+            required_window_end: contract.fit_window_end,
+        },
         "Build a dataset and source slice that contain the immutable profile fit span.",
         blocker_dataset_link(context),
     );
@@ -3465,16 +3447,11 @@ fn append_source_operations_blockers(
     push_blocker(
         blockers,
         contract.pit_cutoff_not_future && dataset.pit_cutoff_valid.is_pass(),
-        TradePolicyPreflightBlockerKind::PitCutoffInvalid,
-        serde_json::json!({
-            "pit_cutoff": context.request.selection.pit_cutoff,
-            "not_future": contract.pit_cutoff_not_future,
-        }),
-        serde_json::json!({
-            "fit_window_end": contract.fit_window_end,
-            "all_sources_available": true,
-            "not_future": true,
-        }),
+        TradePolicyPreflightBlockerDetail::PitCutoffInvalid {
+            pit_cutoff: context.request.selection.pit_cutoff,
+            fit_window_end: contract.fit_window_end,
+            not_future: contract.pit_cutoff_not_future,
+        },
         "Choose a non-future PIT cutoff only after every required source is durably available.",
         blocker_dataset_link(context),
     );
@@ -3482,24 +3459,14 @@ fn append_source_operations_blockers(
         push_blocker(
             blockers,
             dataset.full_l2_trajectory_present.is_pass(),
-            TradePolicyPreflightBlockerKind::FullL2TrajectoryMissing,
-            serde_json::json!(false),
-            serde_json::json!([
-                "l2_event",
-                "l2_checkpoint",
-                "l2_session",
-                "l2_gap",
-                "trade_tape"
-            ]),
+            TradePolicyPreflightBlockerDetail::FullL2TrajectoryMissing,
             "Materialize continuous snapshot-rooted L2 sessions and reconciled trade tape.",
             blocker_dataset_link(context),
         );
         push_blocker(
             blockers,
             dataset.fee_model_present.is_pass(),
-            TradePolicyPreflightBlockerKind::PitFeeFactsMissing,
-            serde_json::json!(false),
-            serde_json::json!({ "clob_market_info": "complete at match time" }),
+            TradePolicyPreflightBlockerDetail::PitFeeFactsMissing,
             "Backfill append-only CLOB market-info versions for every sample.",
             blocker_dataset_link(context),
         );
@@ -3507,21 +3474,19 @@ fn append_source_operations_blockers(
     push_blocker(
         blockers,
         context.latency_profile_present,
-        TradePolicyPreflightBlockerKind::ProductionLatencyProfileMissing,
-        serde_json::json!(context.latency_profile),
-        serde_json::json!({ "signed_window_hours": 24, "latency_injection": "2x_recent_p95" }),
+        TradePolicyPreflightBlockerDetail::ProductionLatencyProfileMissing {
+            observed_profile: context.latency_profile.cloned(),
+        },
         "Capture, sign, and bind the latest complete 24-hour production latency profile.",
         None,
     );
     push_blocker(
         blockers,
         context.retention_runway_proven,
-        TradePolicyPreflightBlockerKind::RetentionRunwayUnproven,
-        serde_json::json!({
-            "retention_runway_days": context.retention_runway_days,
-            "evidence": context.retention_evidence,
-        }),
-        serde_json::json!({ "minimum_days": context.required_raw_retention_days }),
+        TradePolicyPreflightBlockerDetail::RetentionRunwayUnproven {
+            actual_runway_days: context.retention_runway_days,
+            required_minimum_days: context.required_raw_retention_days,
+        },
         "Capture signed ClickHouse Cloud raw-history evidence with monthly partitions, no unmanaged table TTL, and the required coverage window.",
         None,
     );
@@ -3534,17 +3499,13 @@ fn blocker_dataset_link(context: &PreflightBlockerContext<'_>) -> Option<String>
 fn push_blocker(
     blockers: &mut Vec<TradePolicyPreflightBlockerView>,
     condition: bool,
-    kind: TradePolicyPreflightBlockerKind,
-    actual: serde_json::Value,
-    required: serde_json::Value,
+    detail: TradePolicyPreflightBlockerDetail,
     remediation: &str,
     evidence_link: Option<String>,
 ) {
     if !condition {
         blockers.push(TradePolicyPreflightBlockerView {
-            kind,
-            actual,
-            required,
+            detail,
             remediation: remediation.to_owned(),
             evidence_link,
         });
@@ -3555,7 +3516,7 @@ fn operational_evidence_view(
     info: &ResearchReadinessEvidenceInfo,
 ) -> TradePolicyOperationalEvidenceView {
     TradePolicyOperationalEvidenceView {
-        evidence_id: info.evidence_id,
+        evidence_id: info.evidence_id.clone(),
         kind: info.kind,
         payload_hash: info.payload_hash.clone(),
         artifact_version: info.artifact_version.clone(),
@@ -3774,15 +3735,6 @@ fn assemble_preflight_view(
                 ResearchReadinessEvidencePayload::ShadowLatencyProfile(profile) => Some(profile),
                 ResearchReadinessEvidencePayload::RetentionRunway(_) => None,
             });
-    let retention_evidence =
-        operational
-            .evidence
-            .retention
-            .as_ref()
-            .and_then(|item| match &item.payload_json {
-                ResearchReadinessEvidencePayload::RetentionRunway(retention) => Some(retention),
-                ResearchReadinessEvidencePayload::ShadowLatencyProfile(_) => None,
-            });
     let blocker_context = PreflightBlockerContext {
         request,
         dataset_info,
@@ -3795,7 +3747,6 @@ fn assemble_preflight_view(
         retention_runway_days: operational.retention_runway_days,
         required_raw_retention_days: operational.required_raw_retention_days,
         retention_runway_proven: operational.retention_runway_proven,
-        retention_evidence,
     };
     let blockers = preflight_blockers(&blocker_context);
     let insufficient_history = operational
@@ -3875,11 +3826,14 @@ impl TradePolicyPort for TradePolicyService {
             .map_err(|detail| ResearchError::ValidationMethodology { detail }.into())
     }
 
-    fn find_profile(&self, id: &str, version: u32) -> QuantResult<Option<ResearchProfileArtifact>> {
-        Ok(self
-            .list_profiles()?
-            .into_iter()
-            .find(|profile| profile.profile_ref.id == id && profile.profile_ref.version == version))
+    fn find_profile(
+        &self,
+        id: &ResearchProfileId,
+        version: u32,
+    ) -> QuantResult<Option<ResearchProfileArtifact>> {
+        Ok(self.list_profiles()?.into_iter().find(|profile| {
+            profile.profile_ref.id == *id && profile.profile_ref.version == version
+        }))
     }
 
     async fn preflight(
@@ -3927,7 +3881,7 @@ impl TradePolicyPort for TradePolicyService {
         &self,
         validation_run_id: &TradePolicyValidationRunId,
         artifact_id: &TradePolicyArtifactId,
-        actor_id: Uuid,
+        actor_id: UserId,
         reason: String,
         progress: &dyn JobProgressSink,
         cancel: &CancellationToken,
@@ -3946,7 +3900,7 @@ impl TradePolicyPort for TradePolicyService {
                 source_slice_manifest_hash: inputs.source_slice_manifest_hash.clone(),
                 evidence_manifest_hash: inputs.evidence_manifest_hash.clone(),
                 status: TradePolicyValidationStatus::Running,
-                actor_id,
+                actor_id: actor_id.clone(),
                 reason: reason.clone(),
             })
             .await?;
@@ -4245,7 +4199,7 @@ impl TradePolicyPort for TradePolicyService {
         &self,
         artifact_id: &TradePolicyArtifactId,
         target: TradePolicyStatus,
-        actor_id: Uuid,
+        actor_id: UserId,
         reason: String,
     ) -> QuantResult<TradePolicyArtifactInfo> {
         let current =

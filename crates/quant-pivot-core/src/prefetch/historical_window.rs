@@ -30,13 +30,15 @@ use quant_pivot_models::{
     },
     domain::{
         CatalogWindowInfo, CryptoPriceReport, DecisionBoundary, DecisionClock, DecisionSource,
-        DomainObservation, MarketLinkage, MarketRegistryInfo, MarketSubject,
-        PublishedWeatherStationLeadBias, TradeTapePrint, WeatherForecastPoint,
-        WeatherObservationFact, WeatherSubject,
+        DomainObservation, MarketLinkage, MarketRegistryInfo, MarketSubject, TradeTapePrint,
+        WeatherForecastPoint, WeatherObservationFact, WeatherSubject,
     },
     enums::domain::DomainFamily,
     runtime_config::DomainConfig,
-    types::{DomainInstrumentKey, IcaoStation, MarketId, TokenId},
+    types::{
+        DomainInstrumentKey, IcaoStation, MarketId, TokenId,
+        calibration::PublishedWeatherStationLeadBias,
+    },
 };
 use quant_pivot_repository::traits::{
     CalibrationArtifactRepository, CatalogLedgerRepository, MarketLinkageRepository,
@@ -444,11 +446,7 @@ async fn load_domain_linkages(
     };
     for info in rows {
         let market_id = info.market_id.clone();
-        let linkage = info.into_domain().map_err(|error| {
-            QuantError::config(format!(
-                "linkage ledger row for market {market_id} has an undecodable outcome: {error}"
-            ))
-        })?;
+        let linkage = info.into_domain();
         if let Some(binding) = linkage.binding() {
             window.instruments.extend(
                 binding
@@ -773,7 +771,7 @@ fn decode_catalog_markets(catalog: &CatalogWindowInfo) -> QuantResult<Vec<Market
         .market_changes
         .iter()
         .map(|version| {
-            serde_json::from_value(version.payload.clone()).map_err(|error| {
+            serde_json::from_value(version.payload.clone().into_inner()).map_err(|error| {
                 ResearchError::PitResolution {
                     detail: format!(
                         "market catalog change {} payload is invalid: {error}",

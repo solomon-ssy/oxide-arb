@@ -161,7 +161,7 @@ ml-classical = ["dep:smartcore"]
 | TopN 报告生成 / report scheduler / 定时 `live_report_inference` | 按需 `ModelRunner` + SignalCandidate | Phase 04 | 3.4 §10 |
 | `required_features` → 03.1 selection 全链路编排 | `QuantModelRuntime::required_features()` trait | Phase 04 | 3.4 §10 / 3.8 §6.5 |
 | report-level shadow 完整比较（capital/would-execute/risk envelope delta） | signal/rank 层 `shadow_diff` + metrics | Phase 04 | 3.7 §10 |
-| shadow `exceeds_threshold` operator alert + `quant_shadow_comparison` 表 | shadow run `metrics_json` | Phase 3.7 | 3.7 §4 / §10 |
+| shadow `exceeds_threshold` operator alert + `quant_shadow_comparison` 表 | normalized comparison + typed `weight_source` | **Phase 3.7 ✅ 已交付** | 3.7 §4 / §10 |
 | `ModelConfig.min_quality_gate_age_secs` load-time deny | schema 字段 + validation | Phase 3.7 | 3.4 §4.2 / 3.7 §4 |
 | `FactorsConfig.factor_weights` 在线 overlay（非 Published） | artifact 内冻结权重 | Phase 3.7 | 3.4 §4.2 / 3.7 §3.6 |
 | `ReturnModelSpec::Calibrated` 拟合 + `objective_report` | `Heuristic` + Calibrated 插值应用 | **Phase 3.6 ✅ 已交付** | 3.4 §10 / 3.6 §1.1 |

@@ -3,16 +3,25 @@
 use quant_pivot_error::storage::{StorageError, entity};
 use quant_pivot_models::{
     domain::{ModelPickerSide, ModelVersionListQuery, NewModelSpec, NewModelVersion, PageRequest},
+    entities::quant_model_spec,
     enums::{common::MarketCategory, model::ModelFamily, quant::PublicationStatus},
     types::{
         ContentHash, ModelInputContract, ModelSpecId, ModelTrainingContract, ModelVersionId,
-        SchemaVersion,
+        model_metrics::ModelVersionMetrics,
+        model_quality::{
+            GateIntent, GateSubject, QUALITY_GATE_REPORT_FORMAT_VERSION, QualityGateReport,
+        },
+        model_training::ModelTrainingObjective,
     },
 };
 use quant_pivot_repository::{
     postgres::PgModelRegistryRepository, traits::ModelRegistryRepository,
 };
 use quant_pivot_test_support::{execution_pg_seed::fixture_profile_ref, pg::setup_pg};
+use sea_orm::{
+    ActiveModelTrait, ActiveValue, ConnectionTrait, DatabaseBackend, EntityTrait, IntoActiveModel,
+    Statement,
+};
 
 fn content_hash(seed: char) -> ContentHash {
     let pair = format!("{:02x}", seed as u32);
@@ -21,18 +30,14 @@ fn content_hash(seed: char) -> ContentHash {
 }
 
 fn new_spec(name: &str, family: ModelFamily) -> NewModelSpec {
-    NewModelSpec {
-        model_spec_id: ModelSpecId::from_v7(),
-        name: name.to_owned(),
-        model_family: family,
-        prediction_horizon_secs: 86_400,
-        feature_schema_version: SchemaVersion::FIRST,
-        label_schema_version: SchemaVersion::FIRST,
-        spec_json: serde_json::json!({}),
-        input_contract: ModelInputContract::single_required("book.mid"),
-        training_contract: ModelTrainingContract::settlement_default(),
-        status: PublicationStatus::Draft,
-    }
+    quant_pivot_test_support::model_spec_fixtures::new_model_spec_fixture(
+        ModelSpecId::from_v7(),
+        name,
+        family,
+        86_400,
+        ModelInputContract::single_required("book.mid"),
+        ModelTrainingContract::settlement_default(),
+    )
 }
 
 fn new_version(model_spec_id: ModelSpecId, seed: char) -> NewModelVersion {
@@ -48,9 +53,10 @@ fn new_version(model_spec_id: ModelSpecId, seed: char) -> NewModelVersion {
         trade_policy_artifact_id: None,
         trade_policy_hash: None,
         publish_path_set_id: None,
-        metrics_json: serde_json::json!({}),
-        training_objective_json: serde_json::json!({"kind": "not_trained"}),
-        quality_gate_report: serde_json::json!({}),
+        derivation: NewModelVersion::training_derivation(),
+        metrics: ModelVersionMetrics::not_measured("test fixture"),
+        training_objective: ModelTrainingObjective::hand_authored("test fixture"),
+        quality_gate_report: None,
         publication_status: PublicationStatus::Candidate,
         published_at: None,
         retired_at: None,
@@ -81,22 +87,61 @@ async fn create_model_spec_duplicate_name_maps_to_storage_duplicate() {
 
 #[tokio::test]
 #[ignore = "requires Docker"]
+async fn model_spec_rejects_forged_hash_and_is_append_only() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let repo = PgModelRegistryRepository::new(db.clone());
+
+    let mut forged = new_spec("forged-spec-hash", ModelFamily::WeightedFactor);
+    forged.definition_hash = content_hash('z');
+    assert!(matches!(
+        repo.create_model_spec(forged).await,
+        Err(StorageError::InvariantViolation {
+            entity: Some(entity::QUANT_MODEL_SPEC),
+            ..
+        })
+    ));
+
+    let created = repo
+        .create_model_spec(new_spec("append-only-spec", ModelFamily::WeightedFactor))
+        .await
+        .expect("create immutable model spec");
+    let row = quant_model_spec::Entity::find_by_id(created.model_spec_id.clone())
+        .one(&db)
+        .await
+        .expect("load model spec")
+        .expect("model spec exists");
+    let mut active = row.into_active_model();
+    active.name = ActiveValue::Set("mutated-spec".to_owned());
+    assert!(
+        active.update(&db).await.is_err(),
+        "model spec update must be rejected by the database"
+    );
+    assert!(
+        quant_model_spec::Entity::delete_by_id(created.model_spec_id)
+            .exec(&db)
+            .await
+            .is_err(),
+        "model spec delete must be rejected by the database"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
 async fn create_model_version_allocates_monotonic_versions_under_lock() {
     let (pool, _container) = setup_pg().await;
     let repo = PgModelRegistryRepository::new(pool.connection().clone());
     let model_spec_id = ModelSpecId::from_v7();
-    repo.create_model_spec(NewModelSpec {
-        model_spec_id: model_spec_id.clone(),
-        name: "version-alloc-spec".to_owned(),
-        model_family: ModelFamily::HoldVsExitWeighted,
-        prediction_horizon_secs: 86_400,
-        feature_schema_version: SchemaVersion::FIRST,
-        label_schema_version: SchemaVersion::FIRST,
-        spec_json: serde_json::json!({}),
-        input_contract: ModelInputContract::single_required("book.mid"),
-        training_contract: ModelTrainingContract::settlement_default(),
-        status: PublicationStatus::Draft,
-    })
+    repo.create_model_spec(
+        quant_pivot_test_support::model_spec_fixtures::new_model_spec_fixture(
+            model_spec_id.clone(),
+            "version-alloc-spec",
+            ModelFamily::HoldVsExitWeighted,
+            86_400,
+            ModelInputContract::single_required("book.mid"),
+            ModelTrainingContract::settlement_default(),
+        ),
+    )
     .await
     .expect("model spec");
 
@@ -145,6 +190,17 @@ async fn find_and_page_versions_join_model_family_from_spec() {
         .expect("find")
         .expect("present");
     assert_eq!(found.model_family, ModelFamily::HoldVsExitWeighted);
+    assert_eq!(found.model_spec_name, sell_spec.name);
+    assert_eq!(found.model_spec_thesis, sell_spec.thesis);
+    assert_eq!(found.model_spec_definition_hash, sell_spec.definition_hash);
+    assert_eq!(
+        found.training_objective,
+        ModelTrainingObjective::hand_authored("test fixture")
+    );
+    assert_eq!(
+        found.metrics,
+        ModelVersionMetrics::not_measured("test fixture")
+    );
 
     let page = repo
         .page_versions(ModelVersionListQuery {
@@ -167,6 +223,91 @@ async fn find_and_page_versions_join_model_family_from_spec() {
         .collect();
     assert!(families.contains(&ModelFamily::WeightedFactor));
     assert!(families.contains(&ModelFamily::HoldVsExitWeighted));
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn model_version_typed_documents_fail_closed_at_database_boundary() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let repo = PgModelRegistryRepository::new(db.clone());
+    let spec = repo
+        .create_model_spec(new_spec(
+            "typed-version-documents",
+            ModelFamily::WeightedFactor,
+        ))
+        .await
+        .expect("model spec");
+    let version = repo
+        .create_model_version(new_version(spec.model_spec_id, 'k'))
+        .await
+        .expect("model version");
+
+    // Explicit test-only corruption boundary: an unknown discriminator cannot
+    // be represented by the Rust type, so bind malformed JSON as a value while
+    // keeping the SQL statement and identifier static.
+    let corrupt = Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        "UPDATE quant_model_version SET training_objective = $1::jsonb WHERE model_version_id = $2",
+        [
+            r#"{"format_version":1,"definition":{"kind":"future_algorithm"}}"#
+                .to_owned()
+                .into(),
+            version.model_version_id.clone().into(),
+        ],
+    );
+    assert!(
+        db.execute_raw(corrupt).await.is_err(),
+        "the DB constraint must reject unknown training-objective tags"
+    );
+
+    let corrupt_metrics = Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        "UPDATE quant_model_version SET metrics = $1::jsonb WHERE model_version_id = $2",
+        [
+            r#"{"format_version":1,"definition":{"kind":"future_metrics"}}"#
+                .to_owned()
+                .into(),
+            version.model_version_id.clone().into(),
+        ],
+    );
+    assert!(
+        db.execute_raw(corrupt_metrics).await.is_err(),
+        "the DB constraint must reject unknown model-metrics tags"
+    );
+
+    let mismatched_known_families = Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        "UPDATE quant_model_version SET metrics = $1::jsonb WHERE model_version_id = $2",
+        [
+            r#"{"format_version":1,"definition":{"kind":"learning_to_rank","in_sample":{},"validation":{},"artifact_lineage":{"kind":"factor_native"}}}"#
+                .to_owned()
+                .into(),
+            version.model_version_id.clone().into(),
+        ],
+    );
+    assert!(
+        db.execute_raw(mismatched_known_families).await.is_err(),
+        "the DB constraint must tie metrics and training-objective families together"
+    );
+
+    let wrong_subject = QualityGateReport {
+        format_version: QUALITY_GATE_REPORT_FORMAT_VERSION,
+        subject: GateSubject::ModelVersion(ModelVersionId::from_v7()),
+        intent: GateIntent::Publish,
+        evaluated_at: chrono::Utc::now(),
+        gates: Vec::new(),
+        hard_failures: Vec::new(),
+        soft_warnings: Vec::new(),
+        passed: true,
+        report_hash: content_hash('q'),
+    };
+    assert!(
+        repo.set_quality_gate_report(&version.model_version_id, wrong_subject)
+            .await
+            .is_err(),
+        "quality-gate subject id must match the owning model version"
+    );
 }
 
 #[tokio::test]

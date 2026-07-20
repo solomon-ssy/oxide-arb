@@ -25,9 +25,10 @@ use quant_pivot_error::{QuantError, QuantResult, governance::GovernanceError};
 use quant_pivot_models::{
     domain::{
         BacktestPathSetInfo, BacktestReportInfo, BindCalibrationRequest, BindPublishPathSetRequest,
-        GateOutcomeView, GatePreviewIntent, GovernanceActor, ModelGovernancePort, ModelVersionInfo,
-        NewModelGovernanceAudit, NewModelVersion, PublishModelCommand, QualityGateReportView,
-        RetireModelCommand, ShadowStabilitySummary, TrainingDatasetInfo,
+        CalibrationArtifactPayload, GateOutcomeView, GatePreviewIntent, GovernanceActor,
+        ModelGovernanceAuditDetail, ModelGovernancePort, ModelVersionInfo, NewModelGovernanceAudit,
+        NewModelVersion, PublishModelCommand, QualityGateReportView, RetireModelCommand,
+        ShadowStabilitySummary, TrainingDatasetInfo,
     },
     enums::{
         model::ModelFamily,
@@ -39,6 +40,10 @@ use quant_pivot_models::{
     types::{
         AuditEventId, BacktestReportId, CalibrationArtifactId, FeatureParityRunId,
         ModelGovernanceAuditId, ModelVersionId, Probability,
+        model_lineage::ModelVersionDerivation,
+        model_quality::{
+            GateId, GateIntent, GateOutcome, GateSubject, QualityGateFailure, QualityGateReport,
+        },
     },
 };
 use quant_pivot_repository::traits::{
@@ -50,8 +55,7 @@ use quant_pivot_research::{
     artifact::ArtifactStore,
     backtest::BacktestReport,
     gates::{
-        CpcvPathSetGateInput, GateId, GateIntent, GateOutcome, GateSubject, ModelQualityGate,
-        QualityGateFailure, QualityGateInput, QualityGateReport, QualityGateThresholds,
+        CpcvPathSetGateInput, ModelQualityGate, QualityGateInput, QualityGateThresholds,
         SellQualityGateThresholds, ValidationGateThresholds,
     },
     model::{
@@ -59,7 +63,6 @@ use quant_pivot_research::{
         load_hash_verified_artifact, validate_category_scope_weights,
     },
     training::{DatasetCoverage, LeakageFindings, scan_future_leakage},
-    validation::SharpeDistribution,
 };
 use rust_decimal::Decimal;
 
@@ -275,7 +278,7 @@ impl ModelGovernancePort for ModelGovernanceService {
 
         self.deps
             .model_registry_repo
-            .set_quality_gate_report(&version.model_version_id, gate_report_json(&report)?)
+            .set_quality_gate_report(&version.model_version_id, report.clone())
             .await?;
 
         if !report.passed {
@@ -339,19 +342,17 @@ impl ModelGovernancePort for ModelGovernanceService {
             model_version_id: Some(retired.model_version_id.clone()),
             training_dataset_id: None,
             action: ModelGovernanceAction::Retire,
+            actor_user_id: actor.user_id,
             actor_username: actor.username,
             actor_role: actor.role,
             reason: command.reason,
             before_status,
             after_status: retired.publication_status,
-            before_hash: Some(version.artifact_hash.as_str().to_owned()),
-            after_hash: Some(retired.artifact_hash.as_str().to_owned()),
-            quality_gate_passed: false,
-            shadow_window_secs: None,
-            detail_json: serde_json::json!({
-                "retired_version": retired.model_version_id.to_string(),
-            }),
-            audit_event_id: Some(AuditEventId::from_v7()),
+            detail: ModelGovernanceAuditDetail::Retire {
+                retired_version_id: retired.model_version_id.clone(),
+                artifact_hash: retired.artifact_hash.clone(),
+            },
+            audit_event_id: AuditEventId::from_v7(),
         })
         .await?;
 
@@ -397,7 +398,7 @@ impl ModelGovernancePort for ModelGovernanceService {
             .into());
         }
 
-        self.ensure_model_score_calibrator(&request.calibrator_ref)
+        self.ensure_model_score_calibrator(&request.calibrator_ref, &version.model_version_id)
             .await?;
         let calibrated = self
             .calibrated_artifact_from_version(&version, &request)
@@ -457,20 +458,18 @@ impl ModelGovernancePort for ModelGovernanceService {
             model_version_id: Some(version.model_version_id.clone()),
             training_dataset_id: version.training_dataset_id.clone(),
             action: ModelGovernanceAction::BindPublishPathSet,
+            actor_user_id: actor.user_id,
             actor_username: actor.username,
             actor_role: actor.role,
             reason: request.reason,
             before_status: version.publication_status,
             after_status: updated.publication_status,
-            before_hash: before.map(|id| id.to_string()),
-            after_hash: Some(request.path_set_id.to_string()),
-            quality_gate_passed: false,
-            shadow_window_secs: None,
-            detail_json: serde_json::json!({
-                "path_set_id": request.path_set_id.to_string(),
-                "path_set_hash": path_set.path_set_hash.as_str(),
-            }),
-            audit_event_id: Some(AuditEventId::from_v7()),
+            detail: ModelGovernanceAuditDetail::BindPublishPathSet {
+                previous_path_set_id: before,
+                path_set_id: request.path_set_id,
+                path_set_hash: path_set.path_set_hash,
+            },
+            audit_event_id: AuditEventId::from_v7(),
         })
         .await?;
         Ok(updated)
@@ -519,7 +518,7 @@ impl ModelGovernanceService {
             Some(state_id) => PublishFeatureParityPermit::ExistingGeneration(state_id),
             None => PublishFeatureParityPermit::InitializeFromProof {
                 actor: actor.username.clone(),
-                acting_role: actor.role.clone(),
+                acting_role: actor.role.as_ref().map(ToString::to_string),
                 reason: format!(
                     "initialize parity latch from pre-publication proof {}: {}",
                     parity_run_id, command.reason
@@ -544,25 +543,24 @@ impl ModelGovernanceService {
             model_version_id: Some(published.model_version_id.clone()),
             training_dataset_id: None,
             action: ModelGovernanceAction::Publish,
+            actor_user_id: actor.user_id,
             actor_username: actor.username,
             actor_role: actor.role,
             reason: command.reason,
             before_status,
             after_status: published.publication_status,
-            before_hash: None,
-            after_hash: Some(published.artifact_hash.as_str().to_owned()),
-            quality_gate_passed: true,
-            shadow_window_secs: Some(checked_seconds(
-                required_window,
-                "quality_gate.shadow_stability_window_secs",
-            )?),
-            detail_json: serde_json::json!({
-                "gate_report_hash": report.report_hash.as_str(),
-                "shadow_samples": summary.sample_count,
-                "shadow_mean_overlap": summary.mean_topn_overlap.inner().to_string(),
-                "feature_parity_state_id": feature_parity_state_id.to_string(),
-            }),
-            audit_event_id: Some(AuditEventId::from_v7()),
+            detail: ModelGovernanceAuditDetail::Publish {
+                artifact_hash: published.artifact_hash.clone(),
+                gate_report_hash: report.report_hash,
+                shadow_samples: summary.sample_count,
+                shadow_mean_overlap: summary.mean_topn_overlap,
+                feature_parity_state_id,
+                required_shadow_window_secs: checked_seconds(
+                    required_window,
+                    "quality_gate.shadow_stability_window_secs",
+                )?,
+            },
+            audit_event_id: AuditEventId::from_v7(),
         })
         .await?;
 
@@ -572,6 +570,7 @@ impl ModelGovernanceService {
     async fn ensure_model_score_calibrator(
         &self,
         calibrator_ref: &CalibrationArtifactId,
+        source_model_version_id: &ModelVersionId,
     ) -> QuantResult<()> {
         let calibrator = self
             .deps
@@ -587,6 +586,23 @@ impl ModelGovernanceService {
                 detail: format!(
                     "calibrator {calibrator_ref} has kind {:?}, expected model_score",
                     calibrator.kind
+                ),
+            }
+            .into());
+        }
+        let CalibrationArtifactPayload::ModelScore(payload) = calibrator.payload else {
+            return Err(GovernanceError::IllegalTransition {
+                detail: format!(
+                    "calibrator {calibrator_ref} payload does not match kind model_score"
+                ),
+            }
+            .into());
+        };
+        if payload.model_version_id != *source_model_version_id {
+            return Err(GovernanceError::IllegalTransition {
+                detail: format!(
+                    "calibrator {calibrator_ref} was fitted for model version {}, not source version {source_model_version_id}",
+                    payload.model_version_id
                 ),
             }
             .into());
@@ -658,13 +674,13 @@ impl ModelGovernanceService {
                 trade_policy_artifact_id: calibrated.header().trade_policy_artifact_id.clone(),
                 trade_policy_hash: calibrated.header().trade_policy_hash.clone(),
                 publish_path_set_id: None,
-                metrics_json: serde_json::json!({
-                    "calibrated_from": version.model_version_id.to_string(),
-                    "calibrator_ref": request.calibrator_ref.to_string(),
-                    "downside_source": request.downside_source.as_str(),
-                }),
-                training_objective_json: version.training_objective_json.clone(),
-                quality_gate_report: serde_json::json!({}),
+                derivation: ModelVersionDerivation::ReturnCalibration {
+                    parent_model_version_id: version.model_version_id.clone(),
+                    calibration_artifact_id: request.calibrator_ref.clone(),
+                },
+                metrics: version.metrics.clone(),
+                training_objective: version.training_objective.clone(),
+                quality_gate_report: None,
                 publication_status: PublicationStatus::Candidate,
                 published_at: None,
                 retired_at: None,
@@ -695,20 +711,20 @@ impl ModelGovernanceService {
             model_version_id: Some(created.model_version_id.clone()),
             training_dataset_id: None,
             action: ModelGovernanceAction::BindCalibration,
+            actor_user_id: actor.user_id,
             actor_username: actor.username,
             actor_role: actor.role,
             reason: request.reason.clone(),
             before_status: version.publication_status,
             after_status: created.publication_status,
-            before_hash: Some(version.artifact_hash.as_str().to_owned()),
-            after_hash: Some(created.artifact_hash.as_str().to_owned()),
-            quality_gate_passed: false,
-            shadow_window_secs: None,
-            detail_json: serde_json::json!({
-                "source_version": version.model_version_id.to_string(),
-                "calibrator_ref": request.calibrator_ref.to_string(),
-            }),
-            audit_event_id: Some(AuditEventId::from_v7()),
+            detail: ModelGovernanceAuditDetail::BindCalibration {
+                source_version_id: version.model_version_id.clone(),
+                source_artifact_hash: version.artifact_hash.clone(),
+                calibrated_version_id: created.model_version_id.clone(),
+                calibrated_artifact_hash: created.artifact_hash.clone(),
+                calibrator_id: request.calibrator_ref.clone(),
+            },
+            audit_event_id: AuditEventId::from_v7(),
         })
         .await?;
 
@@ -889,7 +905,7 @@ impl ModelGovernanceService {
             }
             .into());
         }
-        Ok(Some(path_set_gate_input_from_info(&info)?))
+        Ok(Some(path_set_gate_input_from_info(&info)))
     }
 
     /// Resolve the dataset coverage backing a model version (the gate's
@@ -971,16 +987,6 @@ fn map_publish_gate_failure(
         failures: render_failures(hard_failures),
     }
     .into()
-}
-
-/// Serialize a gate report into the JSON persisted on the model version.
-fn gate_report_json(report: &QualityGateReport) -> QuantResult<serde_json::Value> {
-    serde_json::to_value(report).map_err(|error| {
-        GovernanceError::IllegalTransition {
-            detail: format!("quality gate report is not serializable: {error}"),
-        }
-        .into()
-    })
 }
 
 /// The effective shadow stability the publish gate evaluates: `None` (fails the
@@ -1080,21 +1086,9 @@ const fn validation_thresholds_from_config(
     }
 }
 
-fn path_set_gate_input_from_info(info: &BacktestPathSetInfo) -> QuantResult<CpcvPathSetGateInput> {
-    // Fail closed on corrupt JSON — never silently drop Sell diagnostics
-    // (`median_max_drawdown` / `median_tail_loss` / `baseline_uplift`) into
-    // `None`, which would surface as opaque hard-gate failures without a
-    // readable persistence error.
-    let distribution = serde_json::from_value::<SharpeDistribution>(
-        info.sharpe_distribution.clone(),
-    )
-    .map_err(|error| GovernanceError::IllegalTransition {
-        detail: format!(
-            "backtest path set {} `sharpe_distribution` is not decodable: {error}",
-            info.path_set_id
-        ),
-    })?;
-    Ok(CpcvPathSetGateInput {
+const fn path_set_gate_input_from_info(info: &BacktestPathSetInfo) -> CpcvPathSetGateInput {
+    let distribution = info.sharpe_distribution;
+    CpcvPathSetGateInput {
         median_rank_ic: info.median_rank_ic,
         deflated_sharpe: info.deflated_sharpe,
         pbo: info.pbo,
@@ -1104,7 +1098,7 @@ fn path_set_gate_input_from_info(info: &BacktestPathSetInfo) -> QuantResult<Cpcv
         baseline_uplift: distribution.baseline_uplift,
         window_start: Some(info.window_start),
         window_end: Some(info.window_end),
-    })
+    }
 }
 
 /// Assemble sell-side [`SellQualityGateThresholds`] from the governed config section.
@@ -1130,25 +1124,9 @@ const fn sell_thresholds_from_config(config: &QualityGateConfig) -> SellQualityG
 
 /// Reconstruct a research [`BacktestReport`] from its persisted ledger row.
 fn backtest_report_from_info(info: BacktestReportInfo) -> QuantResult<BacktestReport> {
-    let expected_vs_realized =
-        serde_json::from_value(info.expected_vs_realized).map_err(|error| {
-            GovernanceError::IllegalTransition {
-                detail: format!("backtest report `expected_vs_realized` is not decodable: {error}"),
-            }
-        })?;
-    let category_breakdown = serde_json::from_value(info.category_breakdown).map_err(|error| {
-        GovernanceError::IllegalTransition {
-            detail: format!("backtest report `category_breakdown` is not decodable: {error}"),
-        }
-    })?;
-    let report_pnl_simulation =
-        serde_json::from_value(info.report_pnl_simulation).map_err(|error| {
-            GovernanceError::IllegalTransition {
-                detail: format!(
-                    "backtest report `report_pnl_simulation` is not decodable: {error}"
-                ),
-            }
-        })?;
+    let expected_vs_realized = info.expected_vs_realized;
+    let category_breakdown = info.category_breakdown.into_iter().collect();
+    let report_pnl_simulation = info.report_pnl_simulation;
     Ok(BacktestReport {
         backtest_report_id: info.backtest_report_id,
         model_version_id: info.model_version_id,
@@ -1189,6 +1167,7 @@ mod path_set_gate_input_tests {
         types::{
             BacktestPathSetId, ContentHash, DecisionPolicySnapshotId, ModelRunId, ModelVersionId,
             TrainingDatasetId,
+            backtest::{BacktestPaths, SharpeDistribution},
         },
     };
     use rust_decimal_macros::dec;
@@ -1197,7 +1176,7 @@ mod path_set_gate_input_tests {
         ContentHash::parse(format!("blake3:{}", "a".repeat(64))).expect("hash")
     }
 
-    fn info_with_distribution(sharpe_distribution: serde_json::Value) -> BacktestPathSetInfo {
+    fn info_with_distribution(sharpe_distribution: SharpeDistribution) -> BacktestPathSetInfo {
         BacktestPathSetInfo {
             path_set_id: BacktestPathSetId::from_v7(),
             model_version_id: ModelVersionId::from_v7(),
@@ -1208,7 +1187,7 @@ mod path_set_gate_input_tests {
             window_end: Utc::now(),
             path_count: 3,
             combination_count: 6,
-            paths: serde_json::json!([]),
+            paths: BacktestPaths::default(),
             sharpe_distribution,
             median_rank_ic: dec!(0.1),
             deflated_sharpe: dec!(0.95),
@@ -1225,31 +1204,20 @@ mod path_set_gate_input_tests {
 
     #[test]
     fn path_set_gate_input_decodes_sell_diagnostics() {
-        let info = info_with_distribution(serde_json::json!({
-            "min": "0",
-            "p25": "0",
-            "median": "0.5",
-            "p75": "1",
-            "max": "1",
-            "median_max_drawdown": "0.1",
-            "median_tail_loss": "-0.005",
-            "baseline_uplift": "0.001"
-        }));
-        let gate = path_set_gate_input_from_info(&info).expect("decode");
+        let info = info_with_distribution(SharpeDistribution {
+            min: dec!(0),
+            p25: dec!(0),
+            median: dec!(0.5),
+            p75: dec!(1),
+            max: dec!(1),
+            median_max_drawdown: Some(dec!(0.1)),
+            median_tail_loss: Some(dec!(-0.005)),
+            baseline_uplift: Some(dec!(0.001)),
+        });
+        let gate = path_set_gate_input_from_info(&info);
         assert_eq!(gate.median_max_drawdown, Some(dec!(0.1)));
         assert_eq!(gate.median_tail_loss, Some(dec!(-0.005)));
         assert_eq!(gate.baseline_uplift, Some(dec!(0.001)));
-    }
-
-    #[test]
-    fn path_set_gate_input_rejects_corrupt_sharpe_distribution() {
-        let info = info_with_distribution(serde_json::json!("not-an-object"));
-        let err = path_set_gate_input_from_info(&info).expect_err("corrupt JSON");
-        let detail = err.to_string();
-        assert!(
-            detail.contains("sharpe_distribution") || detail.contains("not decodable"),
-            "expected explicit decode error, got: {detail}"
-        );
     }
 
     #[test]

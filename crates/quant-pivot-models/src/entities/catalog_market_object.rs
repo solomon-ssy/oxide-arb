@@ -1,6 +1,6 @@
 //! Content-addressed normalized Gamma market objects.
 
-use crate::types::{CatalogMarketObjectId, ContentHash};
+use crate::types::{CatalogMarketObjectId, ContentHash, ExternalJsonDocument};
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
@@ -13,7 +13,7 @@ pub struct Model {
     pub content_hash: ContentHash,
     pub schema_version: i32,
     #[sea_orm(column_type = "JsonBinary")]
-    pub payload: Json,
+    pub payload: ExternalJsonDocument,
     pub created_at: DateTime<Utc>,
 
     #[sea_orm(has_many, relation_enum = "MarketChange")]

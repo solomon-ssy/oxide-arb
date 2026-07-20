@@ -8,25 +8,29 @@ use crate::{
         ports::runtime_control::CatalogState,
     },
     entities::{
-        policy_activation, policy_approval, policy_revision, system_production_baseline,
-        system_runtime_state,
+        policy_activation, policy_approval, policy_profile_artifact, policy_revision,
+        system_production_baseline, system_production_evidence, system_runtime_state,
     },
     enums::{
         execution::KillSwitchState,
         quant::QuantRuntimeMode,
         runtime_config::{
             ConfigResourceKind, DecisionPolicySnapshotSource, PolicyActivationKind,
-            PolicyActorKind, PolicyApprovalDecision, PolicyRevisionStatus,
+            PolicyActorKind, PolicyApprovalDecision, PolicyRevisionStatus, ProductionEvidenceKind,
+            ProfileArtifactKind,
         },
         system::{BootstrapPhase, ShutdownStage},
     },
     runtime_config::{
-        DecisionPolicySnapshot, PolicyDocument, PolicyValidationEvidence, ProductionSealEvidence,
+        ActivePolicyBundle, DecisionPolicySnapshot, DecisionPolicySnapshotDocument, PolicyDocument,
+        PolicyProfileDocument, PolicyValidationEvidence, PolicyValidationSubject,
+        ProductionSealEvidence,
     },
     types::{
-        AuditEventId, BootstrapTransitionId, BuildCommitHash, ContentHash,
+        ArtifactUri, AuditEventId, BootstrapTransitionId, BuildCommitHash, ContentHash,
         DecisionPolicySnapshotId, DeploymentEnvironment, PolicyActivationId, PolicyApprovalId,
-        PolicyIdempotencyKey, PolicyRevisionId, ProductionBaselineId, SchemaVersion, UserId,
+        PolicyBundleGeneration, PolicyIdempotencyKey, PolicyRevisionId, ProductionBaselineId,
+        ProductionEvidenceId, ProfileArtifactId, SchemaVersion, UserId,
     },
 };
 use chrono::{DateTime, Utc};
@@ -251,6 +255,7 @@ pub struct PolicyApprovalInfo {
     pub policy_revision_id: PolicyRevisionId,
     pub resource_kind: ConfigResourceKind,
     pub revision_hash: ContentHash,
+    pub validation_subject: Option<PolicyValidationSubject>,
     pub decision: PolicyApprovalDecision,
     pub decided_by_kind: PolicyActorKind,
     pub decided_by_user_id: Option<UserId>,
@@ -261,8 +266,16 @@ pub struct PolicyApprovalInfo {
     pub created_at: DateTime<Utc>,
 }
 
+/// One entry in the globally ordered Config governance activity ledger.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ConfigActivityInfo {
+    Revision(Box<PolicyRevisionInfo>),
+    Approval(PolicyApprovalInfo),
+    Activation(PolicyActivationInfo),
+}
+
 info_from_model!(PolicyApprovalInfo, policy_approval::Model, {
-    policy_approval_id, policy_revision_id, resource_kind, revision_hash, decision,
+    policy_approval_id, policy_revision_id, resource_kind, revision_hash, validation_subject, decision,
     decided_by_kind, decided_by_user_id, decided_by_label, reason, decided_at, expires_at,
     created_at,
 });
@@ -274,6 +287,7 @@ pub struct NewPolicyApproval {
     pub policy_revision_id: PolicyRevisionId,
     pub resource_kind: ConfigResourceKind,
     pub revision_hash: ContentHash,
+    pub validation_subject: Option<PolicyValidationSubject>,
     pub decision: PolicyApprovalDecision,
     pub decided_by_kind: PolicyActorKind,
     pub decided_by_user_id: Option<UserId>,
@@ -299,9 +313,9 @@ pub struct RecordPolicyApproval {
     pub expires_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
-#[sea_orm(entity = "crate::entities::decision_policy_snapshot::Entity")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DecisionPolicySnapshotInfo {
+    pub bundle_generation: PolicyBundleGeneration,
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub snapshot_hash: ContentHash,
     pub snapshot: DecisionPolicySnapshot,
@@ -319,20 +333,34 @@ pub struct DecisionPolicySnapshotInfo {
     pub created_at: DateTime<Utc>,
 }
 
-info_from_model!(DecisionPolicySnapshotInfo, crate::entities::decision_policy_snapshot::Model, {
-    decision_policy_snapshot_id, snapshot_hash, snapshot,
-    recommendation_policy_revision_id, execution_risk_policy_revision_id,
-    model_routing_revision_id, report_schedule_revision_id,
-    operational_control_revision_id, execution_authorization_revision_id,
-    source, created_by_kind, created_by_user_id, created_by_label, reason, created_at,
-});
+/// Lightweight, single-row projection for selecting an immutable policy bundle.
+///
+/// This deliberately excludes the profile documents: option lists need stable
+/// identity and lineage only, so loading or decoding the full snapshot would
+/// add work without changing the selection contract.
+#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
+#[sea_orm(entity = "crate::entities::decision_policy_snapshot::Entity")]
+pub struct DecisionPolicySnapshotOptionInfo {
+    pub bundle_generation: PolicyBundleGeneration,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
+    pub snapshot_hash: ContentHash,
+    pub recommendation_policy_revision_id: PolicyRevisionId,
+    pub execution_risk_policy_revision_id: PolicyRevisionId,
+    pub model_routing_revision_id: PolicyRevisionId,
+    pub report_schedule_revision_id: PolicyRevisionId,
+    pub operational_control_revision_id: PolicyRevisionId,
+    pub execution_authorization_revision_id: PolicyRevisionId,
+    pub source: DecisionPolicySnapshotSource,
+    pub created_at: DateTime<Utc>,
+}
 
 #[derive(Debug, Clone, DeriveIntoActiveModel)]
 #[sea_orm(active_model = "crate::entities::decision_policy_snapshot::ActiveModel")]
 pub struct NewDecisionPolicySnapshot {
+    pub bundle_generation: PolicyBundleGeneration,
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub snapshot_hash: ContentHash,
-    pub snapshot: DecisionPolicySnapshot,
+    pub snapshot: DecisionPolicySnapshotDocument,
     pub recommendation_policy_revision_id: PolicyRevisionId,
     pub execution_risk_policy_revision_id: PolicyRevisionId,
     pub model_routing_revision_id: PolicyRevisionId,
@@ -347,8 +375,56 @@ pub struct NewDecisionPolicySnapshot {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
+#[sea_orm(entity = "crate::entities::policy_profile_artifact::Entity")]
+pub struct PolicyProfileArtifactInfo {
+    pub profile_artifact_id: ProfileArtifactId,
+    pub kind: ProfileArtifactKind,
+    pub schema_version: SchemaVersion,
+    pub document: PolicyProfileDocument,
+    pub content_hash: ContentHash,
+    pub created_by_kind: PolicyActorKind,
+    pub created_by_user_id: Option<UserId>,
+    pub created_by_label: String,
+    pub reason: String,
+    pub created_at: DateTime<Utc>,
+}
+
+info_from_model!(
+    PolicyProfileArtifactInfo,
+    policy_profile_artifact::Model,
+    {
+        profile_artifact_id,
+        kind,
+        schema_version,
+        document,
+        content_hash,
+        created_by_kind,
+        created_by_user_id,
+        created_by_label,
+        reason,
+        created_at,
+    }
+);
+
+#[derive(Debug, Clone, DeriveIntoActiveModel)]
+#[sea_orm(active_model = "crate::entities::policy_profile_artifact::ActiveModel")]
+pub struct NewPolicyProfileArtifact {
+    pub profile_artifact_id: ProfileArtifactId,
+    pub kind: ProfileArtifactKind,
+    pub schema_version: SchemaVersion,
+    pub document: PolicyProfileDocument,
+    pub content_hash: ContentHash,
+    pub created_by_kind: PolicyActorKind,
+    pub created_by_user_id: Option<UserId>,
+    pub created_by_label: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
 #[sea_orm(entity = "crate::entities::policy_activation::Entity")]
 pub struct PolicyActivationInfo {
+    pub bundle_generation: PolicyBundleGeneration,
+    pub expected_bundle_generation: PolicyBundleGeneration,
     pub policy_activation_id: PolicyActivationId,
     pub resource_kind: ConfigResourceKind,
     pub policy_revision_id: PolicyRevisionId,
@@ -365,16 +441,19 @@ pub struct PolicyActivationInfo {
     pub rollback_target_revision_id: Option<PolicyRevisionId>,
     pub preflight_token_hash: ContentHash,
     pub idempotency_key: PolicyIdempotencyKey,
-    pub audit_event_id: Option<AuditEventId>,
+    pub activation_request_hash: ContentHash,
+    pub audit_event_id: AuditEventId,
     pub created_at: DateTime<Utc>,
 }
 
 info_from_model!(PolicyActivationInfo, policy_activation::Model, {
-    policy_activation_id, resource_kind, policy_revision_id, decision_policy_snapshot_id,
+    bundle_generation, expected_bundle_generation, policy_activation_id, resource_kind,
+    policy_revision_id,
+    decision_policy_snapshot_id,
     policy_approval_id, activated_at, activated_by_kind, activated_by_user_id,
     activated_by_label, reason, activation_kind,
     expected_active_revision_id, previous_policy_revision_id, rollback_target_revision_id,
-    preflight_token_hash, idempotency_key, audit_event_id, created_at,
+    preflight_token_hash, idempotency_key, activation_request_hash, audit_event_id, created_at,
 });
 
 /// Latest activation and exact immutable revision for one policy resource.
@@ -384,9 +463,30 @@ pub struct ActivePolicyResourceInfo {
     pub revision: PolicyRevisionInfo,
 }
 
+/// One resource row from the DB-authoritative Config inventory statement.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfigResourceInventoryRow {
+    pub resource_kind: ConfigResourceKind,
+    pub active_revision_id: Option<PolicyRevisionId>,
+    pub active_revision_hash: Option<ContentHash>,
+    pub last_activated_at: Option<DateTime<Utc>>,
+    pub pending_approval_count: u64,
+}
+
+/// Consistent Config inventory read from one `PostgreSQL` statement.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfigResourceInventoryInfo {
+    pub bundle_generation: PolicyBundleGeneration,
+    pub active_snapshot_id: Option<DecisionPolicySnapshotId>,
+    pub active_snapshot_hash: Option<ContentHash>,
+    pub resources: Vec<ConfigResourceInventoryRow>,
+}
+
 #[derive(Debug, Clone, DeriveIntoActiveModel)]
 #[sea_orm(active_model = "crate::entities::policy_activation::ActiveModel")]
 pub struct NewPolicyActivation {
+    pub bundle_generation: PolicyBundleGeneration,
+    pub expected_bundle_generation: PolicyBundleGeneration,
     pub policy_activation_id: PolicyActivationId,
     pub resource_kind: ConfigResourceKind,
     pub policy_revision_id: PolicyRevisionId,
@@ -402,7 +502,24 @@ pub struct NewPolicyActivation {
     pub rollback_target_revision_id: Option<PolicyRevisionId>,
     pub preflight_token_hash: ContentHash,
     pub idempotency_key: PolicyIdempotencyKey,
-    pub audit_event_id: Option<AuditEventId>,
+    pub activation_request_hash: ContentHash,
+    pub audit_event_id: AuditEventId,
+}
+
+/// Outcome of an atomic policy activation transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PolicyActivationOutcome {
+    Committed,
+    ExactReplay,
+}
+
+/// Exact durable result returned to the applicator after commit or replay.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PolicyActivationCommit {
+    pub activation: PolicyActivationInfo,
+    pub bundle: ActivePolicyBundle,
+    pub outcome: PolicyActivationOutcome,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
@@ -417,6 +534,8 @@ pub struct ProductionBaselineInfo {
     pub build_commit: BuildCommitHash,
     pub postgres_schema_fingerprint: ContentHash,
     pub clickhouse_schema_fingerprint: ContentHash,
+    pub policy_bundle_generation: PolicyBundleGeneration,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub policy_bundle_hash: ContentHash,
     pub lifecycle_policy_hash: ContentHash,
     pub evidence: ProductionSealEvidence,
@@ -436,6 +555,8 @@ info_from_model!(
         build_commit,
         postgres_schema_fingerprint,
         clickhouse_schema_fingerprint,
+        policy_bundle_generation,
+        decision_policy_snapshot_id,
         policy_bundle_hash,
         lifecycle_policy_hash,
         evidence,
@@ -455,9 +576,75 @@ pub struct NewProductionBaseline {
     pub build_commit: BuildCommitHash,
     pub postgres_schema_fingerprint: ContentHash,
     pub clickhouse_schema_fingerprint: ContentHash,
+    pub policy_bundle_generation: PolicyBundleGeneration,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub policy_bundle_hash: ContentHash,
     pub lifecycle_policy_hash: ContentHash,
     pub evidence: ProductionSealEvidence,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
+#[sea_orm(entity = "crate::entities::system_production_evidence::Entity")]
+pub struct ProductionEvidenceInfo {
+    pub production_evidence_id: ProductionEvidenceId,
+    pub kind: ProductionEvidenceKind,
+    pub artifact_uri: ArtifactUri,
+    pub evidence_hash: ContentHash,
+    pub build_commit: BuildCommitHash,
+    pub postgres_schema_fingerprint: ContentHash,
+    pub clickhouse_schema_fingerprint: ContentHash,
+    pub policy_bundle_generation: PolicyBundleGeneration,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
+    pub policy_bundle_hash: ContentHash,
+    pub recorded_by_kind: PolicyActorKind,
+    pub recorded_by_user_id: Option<UserId>,
+    pub recorded_by_label: String,
+    pub reason: String,
+    pub observed_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+}
+
+info_from_model!(
+    ProductionEvidenceInfo,
+    system_production_evidence::Model,
+    {
+        production_evidence_id,
+        kind,
+        artifact_uri,
+        evidence_hash,
+        build_commit,
+        postgres_schema_fingerprint,
+        clickhouse_schema_fingerprint,
+        policy_bundle_generation,
+        decision_policy_snapshot_id,
+        policy_bundle_hash,
+        recorded_by_kind,
+        recorded_by_user_id,
+        recorded_by_label,
+        reason,
+        observed_at,
+        created_at,
+    }
+);
+
+#[derive(Debug, Clone, DeriveIntoActiveModel)]
+#[sea_orm(active_model = "crate::entities::system_production_evidence::ActiveModel")]
+pub struct NewProductionEvidence {
+    pub production_evidence_id: ProductionEvidenceId,
+    pub kind: ProductionEvidenceKind,
+    pub artifact_uri: ArtifactUri,
+    pub evidence_hash: ContentHash,
+    pub build_commit: BuildCommitHash,
+    pub postgres_schema_fingerprint: ContentHash,
+    pub clickhouse_schema_fingerprint: ContentHash,
+    pub policy_bundle_generation: PolicyBundleGeneration,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
+    pub policy_bundle_hash: ContentHash,
+    pub recorded_by_kind: PolicyActorKind,
+    pub recorded_by_user_id: Option<UserId>,
+    pub recorded_by_label: String,
+    pub reason: String,
+    pub observed_at: DateTime<Utc>,
 }
 
 // ── System runtime state (operational control singleton) ─────────────

@@ -6,7 +6,7 @@ use quant_pivot_models::{
     runtime_config::{DomainConfig, FactorsConfig, FeaturesConfig},
 };
 use quant_pivot_repository::traits::FactorRepository;
-use quant_pivot_research::factors::FactorEngine;
+use quant_pivot_research::factors::{FactorEngine, persistence::factor_definition_to_new};
 
 /// Register every enabled factor-definition revision as `Draft` **without** publishing.
 ///
@@ -25,7 +25,8 @@ pub async fn register_all_factor_definitions(
     let engine = FactorEngine::new(factors, features, domain, None);
     for spec in &engine.factor_set().definitions {
         let identity = engine.definition_identity(&spec.name)?;
-        let definition = spec.try_to_new(features.feature_schema_version, &identity)?;
+        let definition =
+            factor_definition_to_new(spec, features.feature_schema_version, &identity)?;
         factor_repo
             .create_definition(definition)
             .await
@@ -50,7 +51,8 @@ pub async fn publish_all_factor_definitions(
     let engine = FactorEngine::new(factors, features, domain, None);
     for spec in &engine.factor_set().definitions {
         let identity = engine.definition_identity(&spec.name)?;
-        let definition = spec.try_to_new(features.feature_schema_version, &identity)?;
+        let definition =
+            factor_definition_to_new(spec, features.feature_schema_version, &identity)?;
         let row = factor_repo
             .create_definition(definition)
             .await

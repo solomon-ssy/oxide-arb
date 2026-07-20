@@ -5,9 +5,8 @@ use quant_pivot_models::{
         CryptoPriceProjectionInfo, CryptoPriceReport, DomainEventEnvelope, DomainSourceCheckpoint,
         WeatherDailyTemperatureProjectionInfo, WeatherObservationReport,
     },
-    types::{DomainEventId, DomainInstrumentKey, DomainSourceId, IcaoStation},
+    types::{DomainEventId, DomainInstrumentKey, DomainSourceId, IcaoStation, WorkerId},
 };
-use uuid::Uuid;
 
 /// Atomic typed projections + source cursor + durable domain-event outbox.
 #[async_trait::async_trait]
@@ -56,7 +55,7 @@ pub trait DomainProjectionRepository: Send + Sync {
 
     async fn claim_pending_events(
         &self,
-        worker_id: Uuid,
+        worker_id: WorkerId,
         now: DateTime<Utc>,
         lease_expires_at: DateTime<Utc>,
         limit: u64,
@@ -65,14 +64,14 @@ pub trait DomainProjectionRepository: Send + Sync {
     async fn mark_event_published(
         &self,
         event_id: &DomainEventId,
-        worker_id: Uuid,
+        worker_id: WorkerId,
         published_at: DateTime<Utc>,
     ) -> Result<(), StorageError>;
 
     async fn mark_event_failed(
         &self,
         event_id: &DomainEventId,
-        worker_id: Uuid,
+        worker_id: WorkerId,
         detail: String,
     ) -> Result<(), StorageError>;
 }

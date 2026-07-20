@@ -11,16 +11,15 @@ use quant_pivot_models::{
         CreateModelSpecCommand, FeatureContractEntryView, FeatureContractView,
         FeatureNullPolicyView, GovernanceActor, ModelSpecInfo, ModelSpecPort, NewModelSpec,
     },
-    enums::quant::PublicationStatus,
     runtime_config::FeaturesConfig,
-    types::{ModelInputContract, ModelSpecId, SchemaVersion},
+    types::{
+        ModelInputContract, ModelSpecId, SchemaVersion, model_spec::ModelSpecDefinition,
+        stable_name::FeatureName,
+    },
 };
 use quant_pivot_repository::traits::ModelRegistryRepository;
 use quant_pivot_research::{
-    features::{
-        FeatureName, FeatureSchema, FeatureUnit, NullPolicy, PitRule, SourceRequirement,
-        StalenessRule,
-    },
+    features::{FeatureSchema, FeatureUnit, NullPolicy, PitRule, SourceRequirement, StalenessRule},
     hashing::ResearchHasher,
 };
 
@@ -187,9 +186,8 @@ impl ModelSpecPort for ModelSpecService {
     async fn create(
         &self,
         command: CreateModelSpecCommand,
-        _actor: GovernanceActor,
+        actor: GovernanceActor,
     ) -> QuantResult<ModelSpecInfo> {
-        let _reason = command.reason;
         let runtime = self.deps.runtime_config.current();
         validate_input_contract(
             &command.input_contract,
@@ -200,6 +198,22 @@ impl ModelSpecPort for ModelSpecService {
             .training_contract
             .validate()
             .map_err(|detail| QuantError::config(format!("invalid training_contract: {detail}")))?;
+        let definition = ModelSpecDefinition {
+            name: &command.name,
+            model_family: command.model_family,
+            prediction_horizon_secs: command.prediction_horizon_secs,
+            feature_schema_version: command.feature_schema_version,
+            label_schema_version: command.label_schema_version,
+            thesis: &command.thesis,
+            input_contract: &command.input_contract,
+            training_contract: &command.training_contract,
+        };
+        definition
+            .validate()
+            .map_err(|detail| QuantError::config(format!("invalid model spec: {detail}")))?;
+        let definition_hash = definition
+            .content_hash()
+            .map_err(|error| QuantError::config(format!("model spec hash failed: {error}")))?;
         self.deps
             .model_registry
             .create_model_spec(NewModelSpec {
@@ -209,10 +223,14 @@ impl ModelSpecPort for ModelSpecService {
                 prediction_horizon_secs: command.prediction_horizon_secs,
                 feature_schema_version: command.feature_schema_version,
                 label_schema_version: command.label_schema_version,
-                spec_json: command.spec_json,
+                thesis: command.thesis,
                 input_contract: command.input_contract,
                 training_contract: command.training_contract,
-                status: PublicationStatus::Draft,
+                definition_hash,
+                created_by_user_id: actor.user_id,
+                created_by_label: actor.username,
+                created_by_role: actor.role,
+                reason: command.reason,
             })
             .await
             .map_err(Into::into)

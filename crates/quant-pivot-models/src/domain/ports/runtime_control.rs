@@ -12,7 +12,7 @@ use crate::{
         market::book::BookSnapshot,
     },
     enums::{execution::KillSwitchState, quant::QuantRuntimeMode},
-    runtime_config::DecisionPolicySnapshot,
+    runtime_config::{ActivePolicyBundle, DecisionPolicySnapshot},
     types::TokenId,
 };
 use async_trait::async_trait;
@@ -144,7 +144,8 @@ pub trait PolicySnapshotPort: Send + Sync {
 /// value is fallible; consuming it after the durable activation commits is not.
 pub struct PreparedPolicySnapshot {
     config: Arc<DecisionPolicySnapshot>,
-    publish: Box<dyn FnOnce() + Send + 'static>,
+    publish:
+        Box<dyn FnOnce(Option<ActivePolicyBundle>) -> Result<(), ControlError> + Send + 'static>,
 }
 
 impl PreparedPolicySnapshot {
@@ -152,6 +153,20 @@ impl PreparedPolicySnapshot {
     pub fn new(
         config: Arc<DecisionPolicySnapshot>,
         publish: impl FnOnce() + Send + 'static,
+    ) -> Self {
+        Self {
+            config,
+            publish: Box::new(move |_bundle| {
+                publish();
+                Ok(())
+            }),
+        }
+    }
+
+    #[must_use]
+    pub fn new_governed(
+        config: Arc<DecisionPolicySnapshot>,
+        publish: impl FnOnce(Option<ActivePolicyBundle>) -> Result<(), ControlError> + Send + 'static,
     ) -> Self {
         Self {
             config,
@@ -164,8 +179,12 @@ impl PreparedPolicySnapshot {
         &self.config
     }
 
-    pub fn publish(self) {
-        (self.publish)();
+    pub fn publish(self) -> Result<(), ControlError> {
+        (self.publish)(None)
+    }
+
+    pub fn publish_bundle(self, bundle: ActivePolicyBundle) -> Result<(), ControlError> {
+        (self.publish)(Some(bundle))
     }
 }
 

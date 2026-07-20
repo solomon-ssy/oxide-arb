@@ -157,6 +157,7 @@ fn normalize_migration_password(password: &mut Option<secret::SystemdCredentialR
 
 impl DeployConfig {
     fn resolve_runtime_credentials(&mut self) -> QuantResult<()> {
+        self.polymarket.onchain.resolve_credentials()?;
         if let Some(private_key) = self.keys.private_key.as_mut() {
             private_key.resolve("keys.private_key")?;
         }
@@ -287,6 +288,34 @@ mod tests {
         DeployConfig::default()
             .ensure_valid_common()
             .expect("defaults must validate");
+    }
+
+    #[test]
+    fn public_rpc_endpoint_rejects_secret_bearing_url_shapes() {
+        let mut deploy = DeployConfig::default();
+        deploy.polymarket.onchain.rpc_endpoint = PolygonRpcEndpoint::Public {
+            url: "https://provider.invalid/v2/provider-key".to_owned(),
+        };
+        let error = deploy
+            .ensure_valid_common()
+            .expect_err("a provider key in a public URL path must fail closed");
+        let message = error.to_string();
+        assert!(message.contains("polymarket.onchain.rpc_endpoint"));
+        assert!(!message.contains("provider-key"));
+    }
+
+    #[test]
+    fn protected_rpc_endpoint_accepts_authenticated_url_without_debug_leakage() {
+        let mut deploy = DeployConfig::default();
+        deploy.polymarket.onchain.rpc_endpoint = PolygonRpcEndpoint::SystemdCredential {
+            credential: secret::SystemdCredentialRef::from_resolved(
+                "https://provider.invalid/v2/provider-key?tenant=private",
+            ),
+        };
+        deploy
+            .ensure_valid_common()
+            .expect("resolved authenticated RPC endpoint must validate");
+        assert!(!format!("{deploy:?}").contains("provider-key"));
     }
 
     #[test]
@@ -494,10 +523,20 @@ mod tests {
             return;
         }
         let raw = fs::read_to_string(&template).expect("read production example");
-        let parsed: DeployConfig =
+        let mut parsed: DeployConfig =
             toml::from_str(&raw).expect("production example must deserialize");
         assert_eq!(parsed.db.postgres.migration.user, "quant_pivot_migrator");
         assert_eq!(parsed.db.clickhouse.migration.user, "quant_pivot_migrator");
+        assert!(matches!(
+            &parsed.polymarket.onchain.rpc_endpoint,
+            PolygonRpcEndpoint::SystemdCredential { credential }
+                if credential.name == "polygon-rpc-url"
+        ));
+        parsed.polymarket.onchain.rpc_endpoint = PolygonRpcEndpoint::SystemdCredential {
+            credential: secret::SystemdCredentialRef::from_resolved(
+                "https://provider.invalid/v2/test-provider-key",
+            ),
+        };
         parsed
             .ensure_valid_common()
             .expect("production example must validate after documented secret injection");

@@ -8,9 +8,8 @@ use quant_pivot_models::{
         ReportRunClaim,
     },
     enums::quant::{ReportFactDeliveryStatus, ReportKind},
-    types::{ModelRunId, RecommendationReportId},
+    types::{ModelRunId, RecommendationReportId, ResearchProfileId, WorkerId},
 };
-use uuid::Uuid;
 
 #[async_trait::async_trait]
 pub trait RecommendationReportRepository: Send + Sync {
@@ -42,7 +41,7 @@ pub trait RecommendationReportRepository: Send + Sync {
     /// Lease one claimable report fact bundle using `FOR UPDATE SKIP LOCKED`.
     async fn claim_fact_delivery(
         &self,
-        worker_id: Uuid,
+        worker_id: WorkerId,
         lease_secs: u64,
     ) -> Result<Option<ReportFactDeliveryInfo>, StorageError>;
 
@@ -50,7 +49,7 @@ pub trait RecommendationReportRepository: Send + Sync {
     async fn fail_fact_delivery(
         &self,
         report_id: &RecommendationReportId,
-        worker_id: Uuid,
+        worker_id: WorkerId,
         status: ReportFactDeliveryStatus,
         error: &str,
     ) -> Result<FactDeliverySettlement<ReportFactDeliveryInfo>, StorageError>;
@@ -66,7 +65,7 @@ pub trait RecommendationReportRepository: Send + Sync {
     async fn verify_and_publish_report(
         &self,
         report_id: &RecommendationReportId,
-        worker_id: Uuid,
+        worker_id: WorkerId,
         occurred_at: DateTime<Utc>,
     ) -> Result<FactDeliverySettlement<PublishReportOutcome>, StorageError>;
 
@@ -74,7 +73,7 @@ pub trait RecommendationReportRepository: Send + Sync {
     /// yet been acknowledged.
     async fn claim_fact_announcement(
         &self,
-        worker_id: Uuid,
+        worker_id: WorkerId,
         lease_secs: u64,
     ) -> Result<Option<ReportFactDeliveryInfo>, StorageError>;
 
@@ -82,7 +81,7 @@ pub trait RecommendationReportRepository: Send + Sync {
     async fn acknowledge_fact_announcement(
         &self,
         report_id: &RecommendationReportId,
-        worker_id: Uuid,
+        worker_id: WorkerId,
     ) -> Result<ReportFactDeliveryInfo, StorageError>;
 
     /// Report produced by an exact serving run. The schema enforces at most one
@@ -117,7 +116,7 @@ pub trait RecommendationReportRepository: Send + Sync {
 
     async fn current(
         &self,
-        profile_id: &str,
+        profile_id: &ResearchProfileId,
         kind: ReportKind,
     ) -> Result<Option<RecommendationReportInfo>, StorageError>;
 

@@ -1,5 +1,5 @@
 //! Factor compute-domain value types: [`FactorName`], [`FactorValue`],
-//! [`FactorDefinitionSpec`], explanation, and the engine's per-market
+//! [`FactorDefinitionDocument`], explanation, and the engine's per-market
 //! [`MarketFactorOutcome`].
 //!
 //! A factor score is **not** a recommendation score — it is a normalized,
@@ -14,12 +14,16 @@
 //! *parameters* are resolved from runtime config — never hardcoded here.
 
 use chrono::{DateTime, Utc};
+pub use quant_pivot_models::types::{
+    factor::{
+        FactorDefinitionDocument, FactorDriver, FactorExplanation, FactorOutputKind,
+        FactorQualityGate,
+    },
+    stable_name::{FactorName, FeatureName},
+};
 use quant_pivot_models::{
     enums::{
-        factor::{
-            FactorFamily, FactorIndeterminateReason, FactorNormalization, FactorValueState,
-            NormalizationSource,
-        },
+        factor::{FactorFamily, FactorIndeterminateReason, FactorValueState, NormalizationSource},
         quant::FactorDirection,
     },
     types::{FactorDefinitionId, MarketId, Probability},
@@ -27,87 +31,7 @@ use quant_pivot_models::{
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
-use crate::{factors::normalize::NormalizedFactor, features::FeatureName, naming::stable_name};
-
-stable_name! {
-    /// Stable, compile-time-known factor name (e.g. `"liquidity_depth"`).
-    FactorName
-}
-
-/// Output classification of a factor.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FactorOutputKind {
-    /// A normalized `[0, 1]` score.
-    NormalizedScore,
-    /// A directional score (sign carries meaning).
-    Directional,
-}
-
-/// A governance gate a factor definition must clear.
-///
-/// A non-empty `quality_gates` list marks a factor as **required**: when a
-/// required factor is missing or below the configured confidence floor and the
-/// runtime `missing_factor_policy` is `RejectCandidate`, the whole market is
-/// rejected (see [`FactorEligibility`]).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FactorQualityGate {
-    /// Human-readable gate name.
-    pub name: String,
-    /// Minimum confidence the factor must report to count.
-    pub min_confidence: Probability,
-}
-
-/// Governed factor definition: the stable contract for a factor's inputs,
-/// output, normalization method, and ownership.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FactorDefinitionSpec {
-    /// Stable factor name.
-    pub name: FactorName,
-    /// Factor family.
-    pub family: FactorFamily,
-    /// Features this factor consumes (schema dependency).
-    pub input_features: Vec<FeatureName>,
-    /// Output classification.
-    pub output_kind: FactorOutputKind,
-    /// Default contribution direction.
-    pub default_direction: FactorDirection,
-    /// Normalization **method** applied to the raw value (distributional
-    /// parameters are resolved from runtime config, never inline constants).
-    pub normalization: FactorNormalization,
-    /// Owning team / person.
-    pub owner: String,
-    /// Quality gates governing publication; a non-empty list marks the factor
-    /// **required** for `RejectCandidate` market eligibility.
-    pub quality_gates: Vec<FactorQualityGate>,
-}
-
-impl FactorDefinitionSpec {
-    /// Whether this factor is **required** for market eligibility (it declares at
-    /// least one quality gate).
-    #[must_use]
-    pub const fn is_required(&self) -> bool {
-        !self.quality_gates.is_empty()
-    }
-}
-
-/// A single explanation driver: a feature and its signed contribution.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FactorDriver {
-    /// The feature driving the factor.
-    pub feature_name: FeatureName,
-    /// Signed contribution of that feature to the factor.
-    pub contribution: Decimal,
-}
-
-/// Human- and machine-readable explanation of a factor value.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FactorExplanation {
-    /// One-line human summary.
-    pub headline: String,
-    /// Ranked drivers (feature → signed contribution).
-    pub drivers: Vec<FactorDriver>,
-}
+use crate::factors::normalize::NormalizedFactor;
 
 /// The computed output of a factor for one feature vector.
 ///
@@ -319,5 +243,5 @@ pub struct MarketFactorOutcome {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FactorSet {
     /// The factor definitions in this set.
-    pub definitions: Vec<FactorDefinitionSpec>,
+    pub definitions: Vec<FactorDefinitionDocument>,
 }

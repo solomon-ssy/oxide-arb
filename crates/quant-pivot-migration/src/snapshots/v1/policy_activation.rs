@@ -9,6 +9,8 @@ use sea_orm::entity::prelude::*;
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "policy_activation")]
 pub struct Model {
+    pub bundle_generation: i64,
+    pub expected_bundle_generation: i64,
     #[sea_orm(primary_key, auto_increment = false)]
     pub policy_activation_id: Uuid,
     pub resource_kind: QpConfigResourceKind,
@@ -32,7 +34,9 @@ pub struct Model {
     pub preflight_token_hash: String,
     #[sea_orm(column_type = "Text", unique)]
     pub idempotency_key: String,
-    pub audit_event_id: Option<Uuid>,
+    #[sea_orm(column_type = "Text")]
+    pub activation_request_hash: String,
+    pub audit_event_id: Uuid,
     #[sea_orm(default_expr = "Expr::current_timestamp()")]
     pub created_at: DateTimeWithTimeZone,
     #[sea_orm(
