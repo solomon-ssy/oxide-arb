@@ -1,5 +1,7 @@
 //! Exact namespace-only Redis cleanup for guarded preproduction reset.
 
+use std::collections::BTreeSet;
+
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::config::RedisConfig;
 
@@ -15,7 +17,7 @@ pub async fn count_preproduction_namespace(config: &RedisConfig) -> Result<u64, 
     let pool = connect_pool(config).await?;
     let mut connection = pool.get().await?;
     let mut cursor = 0_u64;
-    let mut count = 0_u64;
+    let mut unique_keys = BTreeSet::new();
     loop {
         let (next, keys) = ::redis::cmd("SCAN")
             .arg(cursor)
@@ -26,10 +28,10 @@ pub async fn count_preproduction_namespace(config: &RedisConfig) -> Result<u64, 
             .query_async::<(u64, Vec<Vec<u8>>)>(&mut connection)
             .await
             .map_err(StorageError::Redis)?;
-        count = count.saturating_add(key_count(keys.len())?);
+        unique_keys.extend(keys);
         cursor = next;
         if cursor == 0 {
-            return Ok(count);
+            return key_count(unique_keys.len());
         }
     }
 }
@@ -41,7 +43,7 @@ pub async fn unlink_preproduction_namespace(config: &RedisConfig) -> Result<u64,
     for _ in 0..MAX_UNLINK_PASSES {
         let mut connection = pool.get().await?;
         let mut cursor = 0_u64;
-        let mut observed = 0_u64;
+        let mut observed = BTreeSet::new();
         loop {
             let (next, keys) = ::redis::cmd("SCAN")
                 .arg(cursor)
@@ -52,10 +54,13 @@ pub async fn unlink_preproduction_namespace(config: &RedisConfig) -> Result<u64,
                 .query_async::<(u64, Vec<Vec<u8>>)>(&mut connection)
                 .await
                 .map_err(StorageError::Redis)?;
-            observed = observed.saturating_add(key_count(keys.len())?);
-            if !keys.is_empty() {
+            let unique_batch = keys
+                .into_iter()
+                .filter(|key| observed.insert(key.clone()))
+                .collect::<Vec<_>>();
+            if !unique_batch.is_empty() {
                 let unlinked = ::redis::cmd("UNLINK")
-                    .arg(keys)
+                    .arg(unique_batch)
                     .query_async::<u64>(&mut connection)
                     .await
                     .map_err(StorageError::Redis)?;
@@ -66,7 +71,7 @@ pub async fn unlink_preproduction_namespace(config: &RedisConfig) -> Result<u64,
                 break;
             }
         }
-        if observed == 0 {
+        if observed.is_empty() {
             return Ok(deleted);
         }
     }

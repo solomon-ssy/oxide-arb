@@ -3,10 +3,15 @@
 use chrono::{DateTime, Utc};
 use clickhouse::Row;
 use quant_pivot_error::storage::StorageError;
-use quant_pivot_models::types::{ResearchSourceBinding, ResearchSourceStorageKind};
+use quant_pivot_models::types::{
+    ResearchSourceBinding, ResearchSourceStorageKind, research_source_registry,
+};
 use serde::Deserialize;
 
-use crate::clickhouse::pool::ClickHousePool;
+use crate::{
+    clickhouse::pool::ClickHousePool,
+    sql_contract_registry::{CLICKHOUSE_BOOK_LATENCY_READINESS, CLICKHOUSE_RAW_HISTORY_READINESS},
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawHistoryObservation {
@@ -33,12 +38,7 @@ impl ClickHousePool {
         spec: &ResearchSourceBinding,
         as_of: DateTime<Utc>,
     ) -> Result<RawHistoryObservation, StorageError> {
-        if spec.storage != ResearchSourceStorageKind::ClickHouseTable {
-            return Err(StorageError::invariant_violation(
-                Some("research_source_registry"),
-                format!("{} is not a ClickHouse source binding", spec.object),
-            ));
-        }
+        validate_raw_history_binding(spec)?;
         let filter_sql = spec.filter.as_ref().map_or(String::new(), |filter| {
             format!(" AND {} = ?", filter.column)
         });
@@ -49,9 +49,8 @@ impl ClickHousePool {
             time = spec.time_column,
             table = spec.object,
         );
-        let range_query = self
-            .client()
-            .query(&range_sql)
+        let range_query = CLICKHOUSE_RAW_HISTORY_READINESS
+            .clickhouse_query(self.client(), &range_sql)
             .bind(as_of.timestamp_millis());
         let range = if let Some(filter) = &spec.filter {
             range_query
@@ -61,9 +60,9 @@ impl ClickHousePool {
         } else {
             range_query.fetch_one::<TimeRangeRow>().await?
         };
-        let parts = self
-            .client()
-            .query(
+        let parts = CLICKHOUSE_RAW_HISTORY_READINESS
+            .clickhouse_query(
+                self.client(),
                 "SELECT sum(bytes_on_disk) AS active_bytes, \
                  uniqExact(partition) AS active_partition_count FROM system.parts \
                  WHERE active AND database = currentDatabase() AND table = ?",
@@ -71,9 +70,9 @@ impl ClickHousePool {
             .bind(&spec.object)
             .fetch_one::<PartStatsRow>()
             .await?;
-        let metadata = self
-            .client()
-            .query(
+        let metadata = CLICKHOUSE_RAW_HISTORY_READINESS
+            .clickhouse_query(
+                self.client(),
                 "SELECT partition_key, create_table_query FROM system.tables \
                  WHERE database = currentDatabase() AND name = ?",
             )
@@ -96,9 +95,9 @@ impl ClickHousePool {
         window_start: DateTime<Utc>,
         window_end: DateTime<Utc>,
     ) -> Result<BookLatencyObservation, StorageError> {
-        let row = self
-            .client()
-            .query(
+        let row = CLICKHOUSE_BOOK_LATENCY_READINESS
+            .clickhouse_query(
+                self.client(),
                 "SELECT count() AS event_count, \
                  toUInt64(quantileExact(0.50)(greatest(0, dateDiff('millisecond', venue_event_time, ingress_time)))) AS age_p50_ms, \
                  toUInt64(quantileExact(0.95)(greatest(0, dateDiff('millisecond', venue_event_time, ingress_time)))) AS age_p95_ms, \
@@ -119,11 +118,53 @@ impl ClickHousePool {
     }
 }
 
+fn validate_raw_history_binding(spec: &ResearchSourceBinding) -> Result<(), StorageError> {
+    let registry = research_source_registry().map_err(|error| {
+        StorageError::invariant_violation(
+            Some("research_source_registry"),
+            format!("canonical registry is invalid: {error}"),
+        )
+    })?;
+    if !registry.bindings.contains(spec) {
+        return Err(StorageError::invariant_violation(
+            Some("research_source_registry"),
+            "ClickHouse readiness identifiers must come from the canonical source registry",
+        ));
+    }
+    if spec.storage != ResearchSourceStorageKind::ClickHouseTable {
+        return Err(StorageError::invariant_violation(
+            Some("research_source_registry"),
+            format!("{} is not a ClickHouse source binding", spec.object),
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Row, Deserialize)]
 struct TimeRangeRow {
     earliest_ms: Option<i64>,
     latest_ms: Option<i64>,
     row_count: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use quant_pivot_models::types::{ResearchSourceStorageKind, research_source_registry};
+
+    use super::validate_raw_history_binding;
+
+    #[test]
+    fn raw_history_identifiers_are_closed_by_the_canonical_registry() {
+        let registry = research_source_registry().expect("canonical registry");
+        let mut binding = registry
+            .bindings
+            .into_iter()
+            .find(|binding| binding.storage == ResearchSourceStorageKind::ClickHouseTable)
+            .expect("ClickHouse binding");
+        assert!(validate_raw_history_binding(&binding).is_ok());
+        binding.object = "system.query_log".to_owned();
+        assert!(validate_raw_history_binding(&binding).is_err());
+    }
 }
 
 #[derive(Row, Deserialize)]

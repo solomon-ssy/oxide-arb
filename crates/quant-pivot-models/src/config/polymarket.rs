@@ -3,10 +3,9 @@
 //! This is the sole venue. There is no abstraction layer for "multiple venues" —
 //! quant-pivot operates exclusively on Polymarket (Polygon chain).
 
-use quant_pivot_error::config::ConfigError;
 use serde::Deserialize;
 
-use super::secret::SystemdCredentialRef;
+use super::secret::SecretText;
 
 /// Polymarket platform configuration. Mounted at `[polymarket]` in TOML.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -80,11 +79,6 @@ impl Default for OnchainConfig {
 }
 
 impl OnchainConfig {
-    /// Resolve a protected authenticated endpoint during deploy bootstrap.
-    pub fn resolve_credentials(&mut self) -> Result<(), ConfigError> {
-        self.rpc_endpoint.resolve()
-    }
-
     /// Return the resolved URL at the Polygon adapter boundary.
     #[must_use]
     pub fn rpc_url(&self) -> &str {
@@ -95,13 +89,13 @@ impl OnchainConfig {
 /// Source of the Polygon JSON-RPC URL.
 ///
 /// Public, non-secret endpoints may remain in source TOML. Authenticated URLs
-/// (including provider keys embedded in path/query/user-info) are accepted only
-/// through a protected systemd credential file and never rendered by `Debug`.
+/// (including provider keys embedded in path/query/user-info) use a protected
+/// secret text and are never rendered by `Debug`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(tag = "source", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PolygonRpcEndpoint {
     Public { url: String },
-    SystemdCredential { credential: SystemdCredentialRef },
+    Protected { url: SecretText },
 }
 
 impl Default for PolygonRpcEndpoint {
@@ -113,18 +107,11 @@ impl Default for PolygonRpcEndpoint {
 }
 
 impl PolygonRpcEndpoint {
-    fn resolve(&mut self) -> Result<(), ConfigError> {
-        if let Self::SystemdCredential { credential } = self {
-            credential.resolve("polymarket.onchain.rpc_endpoint.credential")?;
-        }
-        Ok(())
-    }
-
     #[must_use]
     pub fn resolved_url(&self) -> &str {
         match self {
             Self::Public { url } => url,
-            Self::SystemdCredential { credential } => credential.secret().expose_secret(),
+            Self::Protected { url } => url.expose_secret(),
         }
     }
 }
@@ -136,8 +123,8 @@ const fn default_rpc_timeout() -> u64 {
 ///
 /// The relayer submits money-moving transactions (e.g. CTF `redeemPositions`)
 /// from a user's Proxy / Gnosis Safe wallet on the operator's behalf and pays
-/// the gas. Authentication uses a typed systemd credential reference plus the
-/// non-secret key-owner address. Plaintext credentials are never deploy values.
+/// the gas. Authentication uses a deploy secret plus the non-secret key-owner
+/// address.
 /// Only required when `quant.account.wallet_kind` is `proxy` or `gnosis_safe`;
 /// EOA settlement signs and pays gas directly and ignores these fields.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -146,7 +133,7 @@ pub struct RelayerConfig {
     /// Relayer submit/status base URL. Default: `https://relayer-v2.polymarket.com`.
     pub base_url: String,
     /// Relayer API key (secret).
-    pub api_key: Option<SystemdCredentialRef>,
+    pub api_key: Option<SecretText>,
     /// Ethereum address that owns the relayer API key (the signer EOA address).
     pub api_key_address: Option<String>,
     /// HTTP request timeout (ms). Default: `15000`.
@@ -165,13 +152,9 @@ impl Default for RelayerConfig {
 }
 
 impl RelayerConfig {
-    /// Normalize empty credential references and address strings to unset.
+    /// Normalize empty secrets and address strings to unset.
     pub fn normalize(&mut self) {
-        if self
-            .api_key
-            .as_ref()
-            .is_some_and(|credential| !credential.is_configured())
-        {
+        if self.api_key.as_ref().is_some_and(SecretText::is_empty) {
             self.api_key = None;
         }
         if self.api_key_address.as_deref().is_some_and(str::is_empty) {
@@ -184,7 +167,7 @@ impl RelayerConfig {
     pub fn api_key(&self) -> Option<&str> {
         self.api_key
             .as_ref()
-            .map(|credential| credential.secret().expose_secret())
+            .map(SecretText::expose_secret)
             .map(str::trim)
             .filter(|v| !v.is_empty())
     }
@@ -215,7 +198,7 @@ const fn default_relayer_timeout() -> u64 {
 #[cfg(test)]
 mod rpc_endpoint_tests {
     use super::{OnchainConfig, PolygonRpcEndpoint};
-    use crate::config::secret::SystemdCredentialRef;
+    use crate::config::secret::SecretText;
 
     #[test]
     fn endpoint_source_is_explicitly_tagged() {
@@ -233,22 +216,20 @@ rpc_endpoint = { source = "public", url = "https://polygon-rpc.com" }
 
         let protected: OnchainConfig = toml::from_str(
             r#"
-rpc_endpoint = { source = "systemd_credential", credential = { name = "polygon-rpc-url" } }
+rpc_endpoint = { source = "protected", url = "https://provider.invalid/v2/private-provider-key" }
 "#,
         )
         .expect("deserialize protected Polygon RPC endpoint");
         assert!(matches!(
             protected.rpc_endpoint,
-            PolygonRpcEndpoint::SystemdCredential { .. }
+            PolygonRpcEndpoint::Protected { .. }
         ));
     }
 
     #[test]
     fn authenticated_endpoint_debug_is_redacted() {
-        let endpoint = PolygonRpcEndpoint::SystemdCredential {
-            credential: SystemdCredentialRef::from_resolved(
-                "https://provider.invalid/v2/private-provider-key",
-            ),
+        let endpoint = PolygonRpcEndpoint::Protected {
+            url: SecretText::from("https://provider.invalid/v2/private-provider-key"),
         };
         let debug = format!("{endpoint:?}");
         assert!(!debug.contains("private-provider-key"));

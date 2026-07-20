@@ -1,12 +1,8 @@
 //! Testcontainers Postgres pool + migration bootstrap for integration tests.
 
 use quant_pivot_migration::apply as apply_postgres_migrations;
-use quant_pivot_models::{
-    config::{PostgresConfig, SchemaMigrationConfig},
-    security::hash_password,
-};
+use quant_pivot_models::{config::PostgresConfig, security::hash_password};
 use quant_pivot_storage::postgres::{PostgresPool, migration::finalize_schema_deployment};
-use sea_orm::ConnectionTrait;
 use std::{
     sync::{Arc, LazyLock},
     time::Duration,
@@ -18,8 +14,6 @@ use tokio::{
     time::sleep,
 };
 use tracing::warn;
-
-pub const TEST_RUNTIME_ROLE: &str = "quant_pivot_test_runtime";
 
 /// Bound active `PostgreSQL` testcontainers per test process. Unbounded libtest
 /// parallelism can starve Docker Desktop during container readiness and surface
@@ -46,10 +40,6 @@ pub fn test_pg_config(port: u16) -> PostgresConfig {
         password: "postgres".into(),
         database: "test_quant_pivot".into(),
         schema: "public".into(),
-        migration: SchemaMigrationConfig {
-            user: "quant_pivot_test_migrator".into(),
-            password: None,
-        },
         max_connections: 15,
         min_connections: 1,
         // A single disposable-container attempt is bounded independently from
@@ -127,22 +117,14 @@ async fn start_ready_postgres() -> Result<(PostgresPool, ContainerAsync<Postgres
     let pool = PostgresPool::connect(&config)
         .await
         .map_err(|error| format!("connect and ensure test database: {error}"))?;
-    pool.connection()
-        .execute_unprepared(&format!("CREATE ROLE {TEST_RUNTIME_ROLE} NOLOGIN"))
-        .await
-        .map_err(|error| format!("create test runtime role: {error}"))?;
-    apply_postgres_migrations(pool.connection())
+    apply_postgres_migrations(&config, pool.connection())
         .await
         .map_err(|error| format!("apply test migrations: {error}"))?;
     let bootstrap_admin_password_hash = hash_password("admin")
         .map_err(|error| format!("hash test bootstrap admin password: {error}"))?;
-    finalize_schema_deployment(
-        pool.connection(),
-        TEST_RUNTIME_ROLE,
-        &bootstrap_admin_password_hash,
-    )
-    .await
-    .map_err(|error| format!("finalize test schema deployment: {error}"))?;
+    finalize_schema_deployment(pool.connection(), &bootstrap_admin_password_hash)
+        .await
+        .map_err(|error| format!("finalize test schema deployment: {error}"))?;
 
     Ok((pool, container))
 }

@@ -3,7 +3,7 @@
 use crate::{
     domain::patch::{NullablePatch, Patch},
     enums::rbac::{RoleKind, RoleStatus},
-    types::RoleId,
+    types::{RoleCode, RoleId},
 };
 use chrono::{DateTime, Utc};
 use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 #[sea_orm(entity = "crate::entities::role::Entity")]
 pub struct RoleInfo {
     pub id: RoleId,
-    pub code: String,
+    pub code: RoleCode,
     pub name: String,
     pub description: Option<String>,
     pub kind: RoleKind,
@@ -33,7 +33,7 @@ info_from_model!(RoleInfo, crate::entities::role::Model, {
 #[sea_orm(active_model = "crate::entities::role::ActiveModel")]
 pub struct NewRole {
     pub id: RoleId,
-    pub code: String,
+    pub code: RoleCode,
     pub name: String,
     pub description: Option<String>,
     pub kind: RoleKind,

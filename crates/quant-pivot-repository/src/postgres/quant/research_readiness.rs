@@ -158,8 +158,6 @@ fn validate_new(evidence: &NewResearchReadinessEvidence) -> Result<(), StorageEr
     if evidence.window_start >= evidence.window_end
         || evidence.window_end > evidence.observed_at
         || evidence.observed_at >= evidence.expires_at
-        || evidence.artifact_version.trim().is_empty()
-        || evidence.attestation_key_id.trim().is_empty()
     {
         return Err(StorageError::invariant_violation(
             Some(entity::QUANT_RESEARCH_READINESS_EVIDENCE),

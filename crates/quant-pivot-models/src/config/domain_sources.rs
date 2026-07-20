@@ -1,6 +1,6 @@
 //! Deploy-time connections for typed external-domain sources.
 //!
-//! Provider secrets are typed systemd credential references. Runtime policy,
+//! Provider secrets are zeroizing plaintext deploy values. Runtime policy,
 //! source readiness, and vertical activation gates do not belong here.
 
 use std::collections::BTreeMap;
@@ -9,7 +9,7 @@ use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 
-use super::secret::SystemdCredentialRef;
+use super::secret::SecretText;
 
 use self::WeatherHistoricalBindingKind::{ExactStation as Exact, OfficialNearbyProxy as Proxy};
 
@@ -974,8 +974,8 @@ pub struct ChainlinkDataStreamsSourceConfig {
     pub enabled: bool,
     pub rest_url: String,
     pub websocket_url: String,
-    pub api_key: Option<SystemdCredentialRef>,
-    pub api_secret: Option<SystemdCredentialRef>,
+    pub api_key: Option<SecretText>,
+    pub api_secret: Option<SecretText>,
     /// Logical feed key (`BTC-USD`) to immutable V3 feed metadata.
     pub feeds: BTreeMap<String, ChainlinkDataStreamFeedConfig>,
     pub max_clock_skew_ms: u64,
@@ -1007,18 +1007,10 @@ impl Default for ChainlinkDataStreamsSourceConfig {
 
 impl ChainlinkDataStreamsSourceConfig {
     pub fn normalize_credentials(&mut self) {
-        if self
-            .api_key
-            .as_ref()
-            .is_some_and(|credential| !credential.is_configured())
-        {
+        if self.api_key.as_ref().is_some_and(SecretText::is_empty) {
             self.api_key = None;
         }
-        if self
-            .api_secret
-            .as_ref()
-            .is_some_and(|credential| !credential.is_configured())
-        {
+        if self.api_secret.as_ref().is_some_and(SecretText::is_empty) {
             self.api_secret = None;
         }
     }

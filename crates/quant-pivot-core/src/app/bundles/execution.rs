@@ -15,6 +15,7 @@ use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
     config::DeployConfig,
     domain::{DataQualityPort, ExecutionSubmitPort},
+    types::EvmAddress,
 };
 use quant_pivot_repository::traits::{
     AttributionRepository, CapitalAllocationRepository, ClobMarketInfoRepository,
@@ -232,6 +233,8 @@ fn build_settlement_redeem_service(
     // proxy/Safe) is validated at boot in `resolve_wallet_topology`; here it only
     // selects the on-chain settlement route.
     let ctf = build_settlement_ctf_client(deps, &funder_address)?;
+    let funder_address =
+        EvmAddress::parse(funder_address).map_err(|error| QuantError::config(error.to_string()))?;
 
     Ok(Arc::new(SettlementRedeemService::new(
         SettlementRedeemServiceDeps {

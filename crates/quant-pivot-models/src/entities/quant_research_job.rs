@@ -1,10 +1,10 @@
 //! `quant_research_job` table entity.
 
 use crate::{
-    enums::quant::{ResearchJobKind, ResearchJobStatus},
+    enums::quant::{ResearchJobKind, ResearchJobResultKind, ResearchJobStatus},
     types::{
         DatasetCoverage, DecisionPolicySnapshotId, ModelSpecId, ResearchJobError, ResearchJobId,
-        ResearchJobParams, ResearchJobProgress, WorkerId,
+        ResearchJobParams, ResearchJobProgress, RoleCode, WorkerId,
     },
 };
 use chrono::{DateTime, Utc};
@@ -25,13 +25,14 @@ pub struct Model {
     pub params_json: ResearchJobParams,
     #[sea_orm(column_type = "JsonBinary", nullable)]
     pub progress_json: Option<ResearchJobProgress>,
+    pub result_kind: Option<ResearchJobResultKind>,
     pub result_ref: Option<Uuid>,
     #[sea_orm(column_type = "JsonBinary", nullable)]
     pub error_json: Option<ResearchJobError>,
     #[sea_orm(column_type = "JsonBinary", nullable)]
     pub coverage_json: Option<DatasetCoverage>,
     pub requested_by: Option<String>,
-    pub acting_role: String,
+    pub acting_role: RoleCode,
     pub parent_job_id: Option<ResearchJobId>,
     pub recovery_attempt: i32,
     pub max_recovery_attempts: i32,

@@ -11,6 +11,7 @@ use crate::{
 
 /// Frozen top-of-book and metadata at recommendation decision time.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
+#[serde(deny_unknown_fields)]
 pub struct MarketContext {
     pub best_bid: Option<Price>,
     pub best_ask: Option<Price>,

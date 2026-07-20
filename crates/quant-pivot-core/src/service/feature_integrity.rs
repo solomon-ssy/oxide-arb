@@ -25,7 +25,7 @@ use quant_pivot_models::{
     runtime_config::{DecisionPolicySnapshot, ScheduleCadence, preview_fire_times},
     types::{
         ContentHash, DecisionPolicySnapshotId, FeatureParityRunId, FeatureParityStateId,
-        RecommendationReportId, ReportScheduleId, ResearchJobId, ResearchJobParams,
+        RecommendationReportId, ReportScheduleId, ResearchJobId, ResearchJobParams, RoleCode,
     },
 };
 use quant_pivot_repository::traits::{
@@ -125,7 +125,7 @@ impl FeatureParityRunCoordinator {
             training_dataset_id: None,
             triggered_by: SYSTEM_ACTOR.to_owned(),
             requested_by: None,
-            acting_role: SYSTEM_ACTING_ROLE.to_owned(),
+            acting_role: RoleCode::new(SYSTEM_ACTING_ROLE),
             reason,
             total_count: 0,
             compared_count: 0,
@@ -378,7 +378,7 @@ impl FeatureParityRunCoordinator {
             decision_policy_snapshot_id: Some(decision_policy_snapshot_id),
             params_json: params,
             requested_by,
-            acting_role,
+            acting_role: RoleCode::new(acting_role),
             parent_job_id: None,
             recovery_attempt: 0,
             max_recovery_attempts: self.max_recovery_attempts,
@@ -864,7 +864,7 @@ fn queued_full_run(args: QueuedFullRunArgs) -> NewFeatureParityRun {
         training_dataset_id: None,
         triggered_by: args.triggered_by,
         requested_by: args.requested_by,
-        acting_role: args.acting_role,
+        acting_role: RoleCode::new(args.acting_role),
         reason: args.reason,
         total_count: 0,
         compared_count: 0,
@@ -943,7 +943,7 @@ mod tests {
         runtime_config::PolicyValidationEvidence,
         types::{
             ModelVersionId, PolicyApprovalId, PolicyBundleGeneration, PolicyRevisionId,
-            RecommendationReportId, ReportRunId, TrainingDatasetId,
+            RecommendationReportId, ReportRunId, ReportTriggerKey, TrainingDatasetId,
         },
     };
     use quant_pivot_repository::traits::FeatureParityLatchActor;
@@ -1007,6 +1007,7 @@ mod tests {
             decision_policy_snapshot_id: job.decision_policy_snapshot_id,
             params_json: job.params_json,
             progress_json: None,
+            result_kind: None,
             result_ref: None,
             error_json: None,
             coverage_json: None,
@@ -1437,7 +1438,11 @@ mod tests {
         ReportRunInfo {
             report_run_id: ReportRunId::from_v7(),
             trigger_kind,
-            trigger_key: format!("test:{}", report.recommendation_report_id),
+            trigger_key: ReportTriggerKey::parse(format!(
+                "test:{}",
+                report.recommendation_report_id
+            ))
+            .expect("report trigger key"),
             schedule_id: schedule_id.map(Into::into),
             request_id: (trigger_kind == ReportTriggerKind::AdHoc).then(|| "test-request".into()),
             retry_of_run_id: None,

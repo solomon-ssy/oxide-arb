@@ -5,24 +5,14 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${repo_root}"
 errors=0
 
-echo "=== Checking handwritten SQL boundaries ==="
-if hits="$(rg -n 'Statement::from_|execute_unprepared|query_(one|all)_raw|execute_raw|raw_sql!' \
-  crates/quant-pivot-repository/src crates/quant-pivot-core/src crates/quant-pivot-web/src \
-  --glob '*.rs' --glob '!crates/quant-pivot-repository/src/postgres/primitives.rs' || true)" &&
-  [[ -n "${hits}" ]]; then
-  echo "ERROR: handwritten SQL escaped the audited PostgreSQL primitive boundary" >&2
-  echo "${hits}" >&2
-  errors=$((errors + 1))
-fi
+echo "=== Checking semantic persistence-field decisions ==="
+cargo run -q -p quant-pivot-xtask -- persistence-field-audit
 
-primitive_raw_count="$(rg -c 'Statement::from_' \
-  crates/quant-pivot-repository/src/postgres/primitives.rs || true)"
-if [[ "${primitive_raw_count}" != "1" ]] ||
-   ! rg -q 'percentile_cont\(0\.95\) WITHIN GROUP' \
-     crates/quant-pivot-repository/src/postgres/primitives.rs; then
-  echo "ERROR: repository raw SQL must be exactly the audited ordered-set aggregate" >&2
-  errors=$((errors + 1))
-fi
+echo "=== Checking JSONB field decisions ==="
+cargo run -q -p quant-pivot-xtask -- jsonb-field-audit
+
+echo "=== Checking handwritten SQL boundaries ==="
+cargo run -q -p quant-pivot-xtask -- sql-contract-audit
 
 echo "=== Checking Config persistence is strongly typed ==="
 config_entities=(
@@ -87,6 +77,15 @@ if loop_awaits="$(rg -n -U --pcre2 \
   crates/quant-pivot-repository/src --glob '*.rs' || true)" && [[ -n "${loop_awaits}" ]]; then
   echo "ERROR: possible repository N+1 query inside a loop; use eager join, Loader, IN query, or batch write" >&2
   echo "${loop_awaits}" >&2
+  errors=$((errors + 1))
+fi
+
+if direct_batch_writes="$(rg -l '::insert_many\(' \
+  crates/quant-pivot-repository/src --glob '*.rs' | \
+  rg -v 'postgres/(write|rbac/casbin/adapter)\.rs$' || true)" && \
+  [[ -n "${direct_batch_writes}" ]]; then
+  echo "ERROR: direct insert_many bypasses the bind-budgeted batch-write boundary" >&2
+  echo "${direct_batch_writes}" >&2
   errors=$((errors + 1))
 fi
 

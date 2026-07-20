@@ -23,12 +23,14 @@ use quant_pivot_models::{
 };
 use sea_orm::{
     ActiveModelTrait, ActiveValue, ColumnTrait, Condition, DatabaseConnection, DatabaseTransaction,
-    EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
+    EntityTrait, ExprTrait, IntoActiveModel, QueryFilter, QueryOrder, QuerySelect,
+    TransactionTrait,
     sea_query::{Expr, LockBehavior, LockType, OnConflict},
 };
 
 use crate::{
-    postgres::quant::condition_wake::notify_input_change, traits::DomainProjectionRepository,
+    postgres::{quant::condition_wake::notify_input_change, write::upsert_many_chunked},
+    traits::DomainProjectionRepository,
 };
 
 const ENTITY: &str = "quant_domain_projection";
@@ -160,11 +162,14 @@ impl DomainProjectionRepository for PgDomainProjectionRepository {
             },
         )
         .await?;
-        for (_, event) in &projections {
-            if let Some(event) = event {
-                insert_outbox(&txn, event.clone()).await?;
-            }
-        }
+        insert_outboxes(
+            &txn,
+            projections
+                .iter()
+                .filter_map(|(_, event)| event.clone())
+                .collect(),
+        )
+        .await?;
         upsert_cursor(
             &txn,
             &report.source_id,
@@ -196,7 +201,7 @@ impl DomainProjectionRepository for PgDomainProjectionRepository {
             )
             .filter(
                 quant_weather_daily_temperature_projection::Column::InstrumentKey
-                    .eq(instrument_key),
+                    .eq(instrument_key.clone()),
             )
             .filter(quant_weather_daily_temperature_projection::Column::LocalDate.eq(local_date))
             .order_by_asc(quant_weather_daily_temperature_projection::Column::TemperatureStatistic)
@@ -302,7 +307,7 @@ impl DomainProjectionRepository for PgDomainProjectionRepository {
             )
             .filter(
                 quant_weather_daily_temperature_projection::Column::InstrumentKey
-                    .eq(instrument_key),
+                    .eq(instrument_key.clone()),
             )
             .filter(quant_weather_daily_temperature_projection::Column::LocalDate.eq(local_date))
             .lock_exclusive()
@@ -322,12 +327,37 @@ impl DomainProjectionRepository for PgDomainProjectionRepository {
             ));
         }
         let generation = checked_add(first.gap_generation, "weather gap generation")?;
-        for row in rows {
-            let mut active = row.into_active_model();
-            active.gap_generation = ActiveValue::Set(generation);
-            active.source_healthy = ActiveValue::Set(false);
-            active.available_at = ActiveValue::Set(observed_at);
-            active.update(&txn).await.map_err(StorageError::from)?;
+        let row_count = u64::try_from(rows.len())
+            .map_err(|error| invariant(format!("weather projection count overflow: {error}")))?;
+        let updated = quant_weather_daily_temperature_projection::Entity::update_many()
+            .col_expr(
+                quant_weather_daily_temperature_projection::Column::GapGeneration,
+                Expr::value(generation),
+            )
+            .col_expr(
+                quant_weather_daily_temperature_projection::Column::SourceHealthy,
+                Expr::value(false),
+            )
+            .col_expr(
+                quant_weather_daily_temperature_projection::Column::AvailableAt,
+                Expr::value(observed_at),
+            )
+            .filter(
+                quant_weather_daily_temperature_projection::Column::SourceId
+                    .eq(DomainSourceId::aviation_weather()),
+            )
+            .filter(
+                quant_weather_daily_temperature_projection::Column::InstrumentKey
+                    .eq(instrument_key),
+            )
+            .filter(quant_weather_daily_temperature_projection::Column::LocalDate.eq(local_date))
+            .exec(&txn)
+            .await
+            .map_err(StorageError::from)?;
+        if updated.rows_affected != row_count {
+            return Err(conflict(
+                "weather projections changed while applying the locked gap transition",
+            ));
         }
         notify_input_change(&txn, "weather_gap").await?;
         txn.commit().await.map_err(StorageError::from)?;
@@ -355,19 +385,40 @@ impl DomainProjectionRepository for PgDomainProjectionRepository {
             .all(&txn)
             .await
             .map_err(StorageError::from)?;
-        let mut events = Vec::with_capacity(rows.len());
-        for row in rows {
-            let attempts = row
-                .publish_attempts
+        for row in &rows {
+            row.publish_attempts
                 .checked_add(1)
                 .ok_or_else(|| invariant("domain event publish attempt overflow"))?;
-            let mut active = row.into_active_model();
-            active.claim_owner = ActiveValue::Set(Some(worker_id.clone()));
-            active.lease_expires_at = ActiveValue::Set(Some(lease_expires_at));
-            active.publish_attempts = ActiveValue::Set(attempts);
-            let claimed = active.update(&txn).await.map_err(StorageError::from)?;
-            events.push(claimed.envelope_json);
         }
+        let row_count = u64::try_from(rows.len())
+            .map_err(|error| invariant(format!("domain event claim count overflow: {error}")))?;
+        let event_ids = rows
+            .iter()
+            .map(|row| row.event_id.clone())
+            .collect::<Vec<_>>();
+        let updated = quant_domain_event_outbox::Entity::update_many()
+            .col_expr(
+                quant_domain_event_outbox::Column::ClaimOwner,
+                Expr::value(Some(worker_id)),
+            )
+            .col_expr(
+                quant_domain_event_outbox::Column::LeaseExpiresAt,
+                Expr::value(Some(lease_expires_at)),
+            )
+            .col_expr(
+                quant_domain_event_outbox::Column::PublishAttempts,
+                Expr::col(quant_domain_event_outbox::Column::PublishAttempts).add(1),
+            )
+            .filter(quant_domain_event_outbox::Column::EventId.is_in(event_ids))
+            .exec(&txn)
+            .await
+            .map_err(StorageError::from)?;
+        if updated.rows_affected != row_count {
+            return Err(conflict(
+                "domain event claim set changed while rows were locked",
+            ));
+        }
+        let events = rows.into_iter().map(|row| row.envelope_json).collect();
         txn.commit().await.map_err(StorageError::from)?;
         Ok(events)
     }
@@ -807,20 +858,34 @@ async fn insert_outbox<C: sea_orm::ConnectionTrait>(
     db: &C,
     event: DomainEventEnvelope,
 ) -> Result<(), StorageError> {
-    quant_domain_event_outbox::Entity::insert(quant_domain_event_outbox::ActiveModel {
-        event_id: ActiveValue::Set(event.id.clone()),
-        envelope_json: ActiveValue::Set(event),
-        published_at: ActiveValue::Set(None),
-        publish_attempts: ActiveValue::Set(0),
-        claim_owner: ActiveValue::Set(None),
-        lease_expires_at: ActiveValue::Set(None),
-        last_error: ActiveValue::Set(None),
-        ..Default::default()
-    })
-    .on_conflict_do_nothing_on([quant_domain_event_outbox::Column::EventId])
-    .exec(db)
-    .await
-    .map_err(StorageError::from)?;
+    insert_outboxes(db, vec![event]).await
+}
+
+async fn insert_outboxes<C: sea_orm::ConnectionTrait>(
+    db: &C,
+    events: Vec<DomainEventEnvelope>,
+) -> Result<(), StorageError> {
+    let rows = events
+        .into_iter()
+        .map(|event| quant_domain_event_outbox::ActiveModel {
+            event_id: ActiveValue::Set(event.id.clone()),
+            envelope_json: ActiveValue::Set(event),
+            published_at: ActiveValue::Set(None),
+            publish_attempts: ActiveValue::Set(0),
+            claim_owner: ActiveValue::Set(None),
+            lease_expires_at: ActiveValue::Set(None),
+            last_error: ActiveValue::Set(None),
+            ..Default::default()
+        })
+        .collect();
+    upsert_many_chunked::<quant_domain_event_outbox::Entity, _>(
+        db,
+        rows,
+        OnConflict::column(quant_domain_event_outbox::Column::EventId)
+            .do_nothing()
+            .to_owned(),
+    )
+    .await?;
     Ok(())
 }
 

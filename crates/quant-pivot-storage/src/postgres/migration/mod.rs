@@ -13,6 +13,8 @@ use sqlx::Row;
 
 use helpers::{run_catalog_seeds, verify_catalog_seeds};
 
+use crate::sql_contract_registry::{POSTGRES_SCHEMA_DEPLOY, POSTGRES_SCHEMA_VERIFY};
+
 const MIGRATION_MANIFEST_JSON: &str =
     include_str!("../../../../../schema/postgres/migrations.json");
 
@@ -41,76 +43,42 @@ pub struct PostgresSchemaStatus {
     pub schema_fingerprint: ContentHash,
 }
 
-/// Apply transactional catalog seeds and least-privilege grants after migration.
+/// Apply transactional catalog seeds and public-surface hardening after migration.
 pub async fn finalize_schema_deployment(
     db: &DatabaseConnection,
-    runtime_role: &str,
     bootstrap_admin_password_hash: &str,
 ) -> Result<PostgresSchemaStatus, StorageError> {
     run_catalog_seeds(db, bootstrap_admin_password_hash)
         .await
         .map_err(|error| StorageError::Migration(format!("apply catalog seeds: {error}")))?;
-    apply_runtime_privileges(db.get_postgres_connection_pool(), runtime_role).await?;
+    apply_public_privilege_hardening(db.get_postgres_connection_pool()).await?;
     verify_contract(db).await
 }
 
-async fn apply_runtime_privileges(
-    pool: &sqlx::PgPool,
-    runtime_role: &str,
-) -> Result<(), StorageError> {
-    let current_role = sqlx::query_scalar::<_, String>("SELECT current_user")
-        .fetch_one(pool)
-        .await
-        .map_err(migration_error("read PostgreSQL migration identity"))?;
-    if current_role == runtime_role {
-        return Err(StorageError::Migration(
-            "PostgreSQL migration and runtime identities must be distinct".to_owned(),
-        ));
-    }
-    let role_exists =
-        sqlx::query_scalar::<_, bool>("SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $1)")
-            .bind(runtime_role)
-            .fetch_one(pool)
-            .await
-            .map_err(migration_error("verify PostgreSQL runtime role"))?;
-    if !role_exists {
-        return Err(StorageError::Migration(format!(
-            "PostgreSQL runtime role `{runtime_role}` must be provisioned before schema apply"
-        )));
-    }
-
-    let database = sqlx::query_scalar::<_, String>("SELECT current_database()")
-        .fetch_one(pool)
-        .await
-        .map_err(migration_error("read PostgreSQL database name"))?;
-    let role = quote_identifier(runtime_role);
+async fn apply_public_privilege_hardening(pool: &sqlx::PgPool) -> Result<(), StorageError> {
+    let database = sqlx::query_scalar::<_, String>(
+        POSTGRES_SCHEMA_DEPLOY.postgres_query("SELECT current_database()"),
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(migration_error("read PostgreSQL database name"))?;
     let database = quote_identifier(&database);
     let statements = [
         "REVOKE CREATE ON SCHEMA public FROM PUBLIC".to_owned(),
         format!("REVOKE TEMPORARY ON DATABASE {database} FROM PUBLIC"),
-        format!("GRANT CONNECT ON DATABASE {database} TO {role}"),
-        format!("GRANT USAGE ON SCHEMA public TO {role}"),
-        format!("GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO {role}"),
-        format!("GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO {role}"),
         "REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA public FROM PUBLIC".to_owned(),
-        format!(
-            "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO {role}"
-        ),
-        format!(
-            "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO {role}"
-        ),
         "ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC"
             .to_owned(),
-        format!(
-            "REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER \
-             ON TABLE seaql_migrations, schema_migration_audit FROM {role}"
-        ),
     ];
     for statement in statements {
-        sqlx::raw_sql(sqlx::AssertSqlSafe(statement))
-            .execute(pool)
-            .await
-            .map_err(migration_error("apply PostgreSQL runtime privileges"))?;
+        sqlx::raw_sql(sqlx::AssertSqlSafe(
+            POSTGRES_SCHEMA_DEPLOY.postgres_owned_query(statement),
+        ))
+        .execute(pool)
+        .await
+        .map_err(migration_error(
+            "apply PostgreSQL public privilege hardening",
+        ))?;
     }
     Ok(())
 }
@@ -119,11 +87,9 @@ fn quote_identifier(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))
 }
 
-/// Verify checksums, semantic schema, seed data, and runtime least privilege.
+/// Verify checksums, semantic schema, and seed data.
 pub async fn verify_schema(db: &DatabaseConnection) -> Result<PostgresSchemaStatus, StorageError> {
-    let status = verify_contract(db).await?;
-    verify_runtime_identity(db.get_postgres_connection_pool()).await?;
-    Ok(status)
+    verify_contract(db).await
 }
 
 /// Inspect the normalized semantic manifest for deploy tooling.
@@ -145,13 +111,14 @@ pub fn render_schema_manifest(value: &serde_json::Value) -> Result<String, Stora
 /// cannot become an unchecked production deployment path.
 pub async fn generate_disposable_schema_manifest(
     db: &DatabaseConnection,
-    runtime_role: &str,
     bootstrap_admin_password_hash: &str,
 ) -> Result<serde_json::Value, StorageError> {
-    let database = sqlx::query_scalar::<_, String>("SELECT current_database()")
-        .fetch_one(db.get_postgres_connection_pool())
-        .await
-        .map_err(migration_error("read disposable manifest database name"))?;
+    let database = sqlx::query_scalar::<_, String>(
+        POSTGRES_SCHEMA_DEPLOY.postgres_query("SELECT current_database()"),
+    )
+    .fetch_one(db.get_postgres_connection_pool())
+    .await
+    .map_err(migration_error("read disposable manifest database name"))?;
     if !database.starts_with("quant_pivot_manifest_") {
         return Err(StorageError::Migration(format!(
             "refusing unchecked manifest generation outside an owned disposable database: {database}"
@@ -160,7 +127,7 @@ pub async fn generate_disposable_schema_manifest(
     run_catalog_seeds(db, bootstrap_admin_password_hash)
         .await
         .map_err(|error| StorageError::Migration(format!("apply catalog seeds: {error}")))?;
-    apply_runtime_privileges(db.get_postgres_connection_pool(), runtime_role).await?;
+    apply_public_privilege_hardening(db.get_postgres_connection_pool()).await?;
     manifest::inspect(db.get_postgres_connection_pool()).await
 }
 
@@ -225,11 +192,11 @@ async fn verify_migration_ledger(
     expected: &MigrationManifest,
 ) -> Result<(), StorageError> {
     let (seaorm_exists, audit_exists, legacy_sqlx_exists) =
-        sqlx::query_as::<_, (bool, bool, bool)>(
+        sqlx::query_as::<_, (bool, bool, bool)>(POSTGRES_SCHEMA_VERIFY.postgres_query(
             "SELECT to_regclass('public.seaql_migrations') IS NOT NULL, \
                     to_regclass('public.schema_migration_audit') IS NOT NULL, \
                     to_regclass('public._sqlx_migrations') IS NOT NULL",
-        )
+        ))
         .fetch_one(pool)
         .await
         .map_err(migration_error("inspect PostgreSQL migration ledgers"))?;
@@ -245,11 +212,13 @@ async fn verify_migration_ledger(
         )));
     }
 
-    let applied =
-        sqlx::query_scalar::<_, String>("SELECT version FROM seaql_migrations ORDER BY version")
-            .fetch_all(pool)
-            .await
-            .map_err(migration_error("read SeaORM migration ledger"))?;
+    let applied = sqlx::query_scalar::<_, String>(
+        POSTGRES_SCHEMA_VERIFY
+            .postgres_query("SELECT version FROM seaql_migrations ORDER BY version"),
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(migration_error("read SeaORM migration ledger"))?;
     let expected_versions = expected
         .migrations
         .iter()
@@ -262,10 +231,10 @@ async fn verify_migration_ledger(
         )));
     }
 
-    let audit = sqlx::query(
+    let audit = sqlx::query(POSTGRES_SCHEMA_VERIFY.postgres_query(
         "SELECT version, checksum_algorithm, checksum, artifact_length, migration_engine \
          FROM schema_migration_audit ORDER BY version",
-    )
+    ))
     .fetch_all(pool)
     .await
     .map_err(migration_error("read migration checksum ledger"))?
@@ -309,34 +278,6 @@ async fn verify_migration_ledger(
                 migration.version
             )));
         }
-    }
-    Ok(())
-}
-
-async fn verify_runtime_identity(pool: &sqlx::PgPool) -> Result<(), StorageError> {
-    let (role, superuser, database_create, database_temp, schema_create, owned_objects) =
-        sqlx::query_as::<_, (String, bool, bool, bool, bool, i64)>(
-            "SELECT current_user, role.rolsuper, \
-                    has_database_privilege(current_user, current_database(), 'CREATE'), \
-                    has_database_privilege(current_user, current_database(), 'TEMPORARY'), \
-                    has_schema_privilege(current_user, 'public', 'CREATE'), \
-                    (SELECT count(*) FROM pg_class object \
-                     JOIN pg_namespace namespace ON namespace.oid = object.relnamespace \
-                     WHERE namespace.nspname = 'public' \
-                       AND object.relkind IN ('r', 'p', 'S', 'v', 'm') \
-                       AND object.relowner = role.oid) \
-             FROM pg_roles role WHERE role.rolname = current_user",
-        )
-        .fetch_one(pool)
-        .await
-        .map_err(migration_error("verify PostgreSQL runtime identity"))?;
-    if superuser || database_create || database_temp || schema_create || owned_objects != 0 {
-        return Err(StorageError::Migration(format!(
-            "PostgreSQL runtime identity `{role}` violates least privilege: \
-             superuser={superuser} database_create={database_create} \
-             database_temp={database_temp} schema_create={schema_create} \
-             owned_objects={owned_objects}"
-        )));
     }
     Ok(())
 }

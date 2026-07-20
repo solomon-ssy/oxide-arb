@@ -386,6 +386,7 @@ impl WeatherForecastPoint {
 
 /// CloudEvents-style immutable envelope with bitemporal/revision provenance.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
+#[serde(deny_unknown_fields)]
 pub struct DomainEventEnvelope {
     pub id: DomainEventId,
     pub source: DomainSourceId,

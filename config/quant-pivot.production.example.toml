@@ -18,12 +18,11 @@
 # Loading precedence (later wins):
 #   1. compiled-in defaults
 #   2. quant-pivot.toml
-#   3. quant-pivot.local.toml (optional, gitignored; non-secret overrides only)
-#   4. QUANT_PIVOT__* environment variables (non-secret overrides only)
+#   3. quant-pivot.local.toml (optional and gitignored)
 #
-# Secret values never belong in TOML or environment variables. TOML stores only
-# typed systemd credential names; systemd `LoadCredential=` mounts the 0400/0600
-# files below `$CREDENTIALS_DIRECTORY` for one-time startup resolution.
+# Secret values are plaintext TOML strings and are held in memory as zeroizing,
+# non-serializable `SecretText`. Restrict the deployed file to mode 0600 and
+# replace every explicit `REPLACE_WITH_...` value before startup.
 #
 # Unknown keys are FATAL at startup (deny_unknown_fields): stale sections from
 # older layouts ([detection], [risk], [sizing], [treasury], [analytics], ...)
@@ -62,9 +61,8 @@ chain_id = 137
 # CTF oracle / on-chain reads + governed redeem transactions.
 [polymarket.onchain]
 # Purpose: Polygon JSON-RPC endpoint. Impact: CTF resolution oracle and
-# on-chain redemption. Production uses an authenticated full URL from a
-# protected systemd credential; the value never appears in TOML, logs, or UI.
-rpc_endpoint = { source = "systemd_credential", credential = { name = "polygon-rpc-url" } }
+# on-chain redemption. The protected full URL is redacted from Debug/log/UI.
+rpc_endpoint = { source = "protected", url = "https://REPLACE_WITH_POLYGON_RPC_HOST/v2/REPLACE_WITH_PROVIDER_KEY" }
 # Purpose: RPC request timeout (ms). Impact: hard per-call bound on the Polygon
 # JSON-RPC client — a money-moving redeem/oracle call fails after this instead
 # of hanging (reqwest has no default timeout). Default: 10000.
@@ -76,8 +74,8 @@ rpc_timeout_ms = 10000
 [polymarket.relayer]
 # Purpose: relayer submit/status base URL. Default: "https://relayer-v2.polymarket.com".
 base_url = "https://relayer-v2.polymarket.com"
-# Purpose: systemd credential reference for the relayer API key.
-api_key = { name = "polymarket-relayer-api-key" }
+# Purpose: plaintext relayer API key.
+api_key = "REPLACE_WITH_POLYMARKET_RELAYER_API_KEY"
 # Purpose: address that owns the relayer API key (the signer EOA address).
 # api_key_address = "0x...."
 # Purpose: relayer HTTP request timeout (ms). Default: 15000.
@@ -170,19 +168,18 @@ require_versioning = true
 [research.evidence_attestation]
 # Exactly 32 secret bytes encoded as 64 lowercase hex characters. During
 # rotation, move the old active value into previous_signing_keys.
-signing_key = { name = "evidence-attestation-key" }
+signing_key = "REPLACE_WITH_EVIDENCE_SIGNING_KEY"
 previous_signing_keys = []
 
 # ── Keys / Credentials ───────────────────────────────────────────────────────
 #
-# Provision the private key with systemd `LoadCredential=` (runbook §4.4).
 # All modes require private_key + funder for real account reads; signing/submission
 # applies only in semi_auto / auto_execution. L2 credentials are SDK-derived at connect.
 
 [keys]
 # Bot wallet private key: the single signing credential; CLOB L2 credentials are
-# SDK-derived from it at connect time. TOML stores only the credential name.
-private_key = { name = "polymarket-private-key" }
+# SDK-derived from it at connect time.
+private_key = "REPLACE_WITH_POLYMARKET_PRIVATE_KEY"
 
 # ── Observability (logging only) ─────────────────────────────────────────────
 # Metrics are always-on via the web server's GET /metrics; operator alerting
@@ -200,12 +197,12 @@ log_level = "info"
 log_json = true
 
 [notifications.telegram]
-bot_token_credential = { name = "telegram-bot-token" }
+bot_token = "REPLACE_WITH_TELEGRAM_BOT_TOKEN"
 chat_id = "REPLACE_WITH_TELEGRAM_CHAT_ID"
 
 [notifications.webhook]
 url = "https://REPLACE_WITH_ALERT_WEBHOOK"
-authorization_credential = { name = "webhook-authorization" }
+authorization = "Bearer REPLACE_WITH_WEBHOOK_TOKEN"
 
 # ── Database ─────────────────────────────────────────────────────────────────
 
@@ -215,10 +212,11 @@ authorization_credential = { name = "webhook-authorization" }
 host = "REPLACE_WITH_PG_HOST"
 # Purpose: Postgres port. Default: 5432.
 port = 5432
-# Purpose: least-privilege runtime role. Default: "quant_pivot_runtime".
-user = "quant_pivot_runtime"
-# Purpose: systemd credential reference for the runtime role password.
-password = { name = "postgres-runtime-password" }
+# Purpose: single role used by runtime, schema commands, reset and lifecycle
+# coordination.
+user = "quant_pivot"
+# Purpose: plaintext database password. Restrict this file to mode 0600.
+password = "REPLACE_WITH_POSTGRES_PASSWORD"
 # Purpose: database name. Default: "quant_pivot".
 database = "quant_pivot"
 # Purpose: schema search path. Default: "public".
@@ -261,11 +259,6 @@ statement_cache_capacity = 256
 # Default: "quant-pivot".
 application_name = "quant-pivot"
 
-[db.postgres.migration]
-# Runtime credentials never execute DDL or catalog seeds in production.
-# The role name is non-secret; the password is a typed credential reference.
-user = "quant_pivot_migrator"
-password = { name = "postgres-migration-password" }
 # PostgreSQL apply also requires a one-time bootstrap administrator password
 # mounted as a 0400/0600 regular file and referenced by:
 # QUANT_PIVOT_BOOTSTRAP__ADMIN_PASSWORD_FILE
@@ -280,10 +273,10 @@ cluster_id = "REPLACE_WITH_CLICKHOUSE_CLOUD_SERVICE_ID"
 url = "https://REPLACE_WITH_CH_HOST:8443"
 # Purpose: database name. Default: "quant_pivot".
 database = "quant_pivot"
-# Purpose: least-privilege long-lived ingestion/query identity.
-user = "quant_pivot_runtime"
-# Purpose: systemd credential reference for the runtime role password.
-password = { name = "clickhouse-runtime-password" }
+# Purpose: single identity used by runtime and explicit schema commands.
+user = "quant_pivot"
+# Purpose: plaintext database password.
+password = "REPLACE_WITH_CLICKHOUSE_PASSWORD"
 # Purpose: max age (s) of a partial batch before flush. Impact: analytics
 # freshness vs insert request volume. Caution: production favors a smaller
 # flush interval + larger batches for high tick volume. Default: 5.
@@ -295,18 +288,6 @@ batch_size = 5000
 # Purpose: maximum concurrent insert operations (semaphore). Impact: caps
 # write pressure on the CH server under burst load. Default: 8.
 max_concurrent_inserts = 8
-
-[db.clickhouse.migration]
-# Runtime startup never executes DDL. Apply migrations only through the
-# deployment command, with offline classes requiring a maintenance window.
-# Phase 11.8 migration 2 is clean-slate/offline and must be applied explicitly
-# before runtime writers start; non-empty legacy fact tables fail closed.
-user = "quant_pivot_migrator"
-# Caution: production must use a dedicated DDL identity. The value is resolved
-# from this systemd credential only in the deployment command.
-password = { name = "clickhouse-migration-password" }
-# The runtime role still needs metadata visibility plus SELECT on the migration
-# ledger/claim tables so post-migration verification can fail closed.
 
 # ── Cache ────────────────────────────────────────────────────────────────────
 
@@ -331,8 +312,8 @@ host = "REPLACE_WITH_REDIS_HOST"
 port = 6379
 # Purpose: ACL username. Leave empty for password-only auth. Default: "".
 user = ""
-# Purpose: systemd credential reference for Redis authentication.
-password = { name = "redis-runtime-password" }
+# Purpose: plaintext Redis authentication secret.
+password = "REPLACE_WITH_REDIS_PASSWORD"
 # Purpose: logical database index. Default: 0.
 database = 0
 # Purpose: connection pool size. Impact: size against peak concurrent web +
@@ -371,8 +352,8 @@ serve_static_ui = false
 static_ui_dir = "static/ui"
 
 [web.jwt]
-# Purpose: systemd credential reference to a Base64URL-no-pad 32-byte HS256 key.
-signing_key = { name = "jwt-signing-key" }
+# Purpose: plaintext Base64URL-no-pad 32-byte HS256 key.
+signing_key = "REPLACE_WITH_JWT_SIGNING_KEY"
 # Purpose: token issuer claim. Caution: must match across restarts or all
 # sessions invalidate. Default: "quant-pivot".
 issuer = "quant-pivot"

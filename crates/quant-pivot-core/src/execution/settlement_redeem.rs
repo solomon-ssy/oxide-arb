@@ -15,7 +15,7 @@ use quant_pivot_api::{
     relayer::{RelayerClient, RelayerTxOutcome},
     wallet::WalletTopology,
 };
-use quant_pivot_error::{QuantResult, execution::ExecutionError, rpc::RpcError};
+use quant_pivot_error::{QuantError, QuantResult, execution::ExecutionError, rpc::RpcError};
 use quant_pivot_models::{
     config::RelayerConfig,
     constants::COLLATERAL_SCALE,
@@ -30,9 +30,9 @@ use quant_pivot_models::{
         quant::{ExecutionWalletKind, ExitSettlementMode, OutcomeSide, RedeemPolicy},
     },
     types::{
-        MarketId, SettlementBalanceEvidence, SettlementPayoutVector, SettlementRedeemId,
-        SettlementRedeemIndexSets, SettlementRedeemLotId, SettlementTokenBalance, Shares, TokenId,
-        Usd,
+        EvmAddress, EvmTransactionHash, MarketId, SettlementBalanceEvidence,
+        SettlementPayoutVector, SettlementRedeemId, SettlementRedeemIndexSets,
+        SettlementRedeemLotId, SettlementTokenBalance, Shares, TokenId, Usd,
     },
 };
 use quant_pivot_repository::traits::{
@@ -426,7 +426,7 @@ pub struct SettlementRedeemServiceDeps {
     pub runtime_mode: RuntimeModeHandle,
     pub kill_switch: KillSwitchHandle,
     pub config: Arc<DecisionPolicyStore>,
-    pub funder_address: String,
+    pub funder_address: EvmAddress,
     pub wallet_kind: ExecutionWalletKind,
     pub capital_events: Arc<CapitalAllocationEventWriter>,
     pub position_events: Arc<PositionEventWriter>,
@@ -562,7 +562,7 @@ impl SettlementRedeemService {
                 SettlementRedeemState::ManualRequired => Ok(MarketRedeemOutcome::ManualRequired),
                 SettlementRedeemState::Submitted => {
                     self.recover_submitted(
-                        existing.tx_hash.as_deref(),
+                        existing.tx_hash.as_ref().map(EvmTransactionHash::as_str),
                         &existing.settlement_redeem_id,
                         existing.attempt_count,
                         &market,
@@ -739,7 +739,12 @@ impl SettlementRedeemService {
                 return Ok(MarketRedeemOutcome::Failed);
             }
         };
-        let tx_hash = pending.tx_hash().to_owned();
+        let tx_hash = EvmTransactionHash::parse(pending.tx_hash()).map_err(|error| {
+            QuantError::Rpc(RpcError::CallFailed {
+                method: "settlement_redeem_tx_hash".to_owned(),
+                reason: error.to_string(),
+            })
+        })?;
         self.deps
             .settlement_redeems
             .mark_submitted(&redeem.settlement_redeem_id, tx_hash.clone(), now)
@@ -751,7 +756,7 @@ impl SettlementRedeemService {
         );
         tracing::info!(
             market_id = %market.market_id,
-            tx_hash,
+            tx_hash = %tx_hash,
             "submitted standard binary settlement redeem"
         );
 
@@ -767,7 +772,7 @@ impl SettlementRedeemService {
             Err(error) => {
                 tracing::warn!(
                     market_id = %market.market_id,
-                    tx_hash,
+                    tx_hash = %tx_hash,
                     %error,
                     "submitted settlement redeem receipt wait failed; keeping submitted row for recovery"
                 );
@@ -821,7 +826,7 @@ impl SettlementRedeemService {
             .deps
             .ctf
             .binary_balances(
-                &self.deps.funder_address,
+                self.deps.funder_address.as_str(),
                 &market.yes_token_id,
                 &market.no_token_id,
             )
@@ -904,7 +909,7 @@ impl SettlementRedeemService {
             .deps
             .ctf
             .binary_balances(
-                &self.deps.funder_address,
+                self.deps.funder_address.as_str(),
                 &market.yes_token_id,
                 &market.no_token_id,
             )

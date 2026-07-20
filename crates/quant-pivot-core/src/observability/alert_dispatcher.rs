@@ -112,13 +112,9 @@ struct Channels {
 
 impl Channels {
     fn from_config(config: &NotificationChannelsConfig) -> QuantResult<Self> {
-        let token = config
-            .telegram
-            .bot_token_credential
-            .resolve_optional("notifications.telegram.bot_token_credential")?;
+        let token = (!config.telegram.bot_token.is_empty()).then_some(&config.telegram.bot_token);
         let chat = config.telegram.chat_id.trim();
         let telegram = token
-            .as_ref()
             .map(|token| {
                 let chat_id = chat
                     .parse::<i64>()
@@ -134,10 +130,8 @@ impl Channels {
             .transpose()?;
 
         let url = config.webhook.url.trim();
-        let authorization = config
-            .webhook
-            .authorization_credential
-            .resolve_optional("notifications.webhook.authorization_credential")?;
+        let authorization =
+            (!config.webhook.authorization.is_empty()).then_some(&config.webhook.authorization);
         if url.is_empty() && authorization.is_some() {
             return Err(ConfigError::MissingField {
                 section: "notifications.webhook".to_owned(),
@@ -162,7 +156,7 @@ impl Channels {
             Some(WebhookChannel {
                 client: reqwest::Client::new(),
                 url: parsed,
-                authorization: authorization.as_ref().map(secret_header).transpose()?,
+                authorization: authorization.map(secret_header).transpose()?,
             })
         };
 
@@ -177,7 +171,7 @@ impl Channels {
 fn secret_header(secret: &SecretText) -> QuantResult<HeaderValue> {
     let mut value = HeaderValue::from_str(secret.expose_secret()).map_err(|error| {
         ConfigError::InvalidValue {
-            field: "notifications.webhook.authorization_credential".to_owned(),
+            field: "notifications.webhook.authorization".to_owned(),
             reason: error.to_string(),
         }
     })?;

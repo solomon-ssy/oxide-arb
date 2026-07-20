@@ -55,7 +55,7 @@ impl MigrationTrait for Migration {
                 })?)
                 .await?;
         }
-        // SeaORM rc.43 does not discover an enum nested only in a PostgreSQL
+        // SeaORM 2.0 does not discover an enum nested only in a PostgreSQL
         // array column. All columns that share those types use an explicit
         // custom column type so Entity First has one deterministic enum owner.
         // The target is proven empty, therefore Entity First `apply` is the

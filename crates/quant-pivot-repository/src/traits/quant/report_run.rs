@@ -8,7 +8,9 @@ use quant_pivot_models::{
         ReportScheduleGapListQuery, ReportScheduleHealthInfo, ReportScheduleStateInfo,
     },
     enums::quant::ReportRunTerminalReason,
-    types::{DecisionPolicySnapshotId, RecommendationReportId, ReportRunId, WorkerId},
+    types::{
+        DecisionPolicySnapshotId, RecommendationReportId, ReportRunId, ReportTriggerKey, WorkerId,
+    },
 };
 
 /// Durable report build queue and lease ledger.
@@ -55,7 +57,7 @@ pub trait ReportRunRepository: Send + Sync {
 
     async fn find_by_trigger_key(
         &self,
-        trigger_key: &str,
+        trigger_key: &ReportTriggerKey,
     ) -> Result<Option<ReportRunInfo>, StorageError>;
 
     async fn find_by_output_report(

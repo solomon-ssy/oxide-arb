@@ -54,11 +54,11 @@ use quant_pivot_models::{
         Probability, RecommendationFactorBreakdown, RecommendationId, RecommendationIdentity,
         RecommendationReportId, RecommendationTradePlan, ReconciliationEvidence,
         ReconciliationEvidenceChain, ReconciliationId, ReportDataQualitySnapshotId,
-        ReportDataQualityTokens, ReportSummary, RiskEnvelope, SelectionExclusionSummary, Shares,
-        SignalCandidateId, SizingPlan, ThesisInvalidationPolicy, TokenId, TradePolicyArtifactId,
-        TradePolicyCohortDimension, TradePolicyCohortKey, TradePolicyCohortProvenance, Usd,
-        WorkerId, builtin_research_profiles, model_metrics::ModelVersionMetrics,
-        model_training::ModelTrainingObjective,
+        ReportDataQualityTokens, ReportSummary, ReportTriggerKey, RiskEnvelope, RoleCode,
+        SelectionExclusionSummary, Shares, SignalCandidateId, SizingPlan, ThesisInvalidationPolicy,
+        TokenId, TradePolicyArtifactId, TradePolicyCohortDimension, TradePolicyCohortKey,
+        TradePolicyCohortProvenance, Usd, WorkerId, builtin_research_profiles,
+        model_metrics::ModelVersionMetrics, model_training::ModelTrainingObjective,
     },
 };
 use quant_pivot_repository::{
@@ -483,6 +483,8 @@ async fn seed_market_catalog(db: &sea_orm::DatabaseConnection, event_id: &str, m
 
 async fn create_and_assert_report_transaction(db: &sea_orm::DatabaseConnection, ids: &TxnIds) {
     let trigger_key = report_trigger_key(ids);
+    let typed_trigger_key =
+        ReportTriggerKey::parse(trigger_key.clone()).expect("report trigger key");
     let created =
         persist_and_publish_report(db, build_report_transaction(ids), &trigger_key, 10).await;
     assert_eq!(created.recommendation_report_id, ids.report);
@@ -490,7 +492,7 @@ async fn create_and_assert_report_transaction(db: &sea_orm::DatabaseConnection, 
     assert_eq!(created.account_snapshot_ref, ids.account_snapshot);
 
     let found_by_trigger = PgReportRunRepository::new(db.clone())
-        .find_by_trigger_key(&trigger_key)
+        .find_by_trigger_key(&typed_trigger_key)
         .await
         .expect("find by trigger key")
         .expect("trigger key row");
@@ -920,7 +922,7 @@ async fn seed_clear_feature_parity_state(db: &sea_orm::DatabaseConnection) -> Fe
             recovery_run_id: None,
             previous_state_id: None,
             actor: Some("pg-account-test".to_owned()),
-            acting_role: Some("risk_owner".to_owned()),
+            acting_role: Some(RoleCode::new("risk_owner")),
             reason: "test fixture clear generation".to_owned(),
         }
         .into_active_model(),

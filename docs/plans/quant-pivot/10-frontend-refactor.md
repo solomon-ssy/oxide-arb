@@ -8,13 +8,13 @@
 > - `production_frozen_behavior`: 一旦完成不可逆 production seal，后续变更必须提供前向 migration、兼容性评估、回滚方案与数据验证。
 > - `rollback_and_data_verification`: 封存前通过清空后的 fresh-install 验证；封存后不得回退到 boot reset。
 
-> 状态：设计计划，未进入代码落地
+> 状态：当前实现架构与 Phase 10 出口索引；实时 gate 结果只记录在 closure Execution Ledger。
 >
 > 范围：`ui/apps/web-antdv-next` 与前端共享类型包 `ui/packages/types`
 >
 > 目标：把旧 Endgame admin 破坏式重构为 quant-pivot 操作台。主产物是 `RecommendationReport`，执行桥梁是 `OrderIntent`，运行模式只允许 `report_only`、`semi_auto`、`auto_execution`。
 >
-> **可执行子phase实施契约（10.0–10.6）：** [`phase-10/README.md`](phase-10/README.md)
+> **可执行子phase实施契约（10.0–10.7）：** [`phase-10/README.md`](phase-10/README.md)
 
 ## 0. 兼容策略
 
@@ -30,7 +30,7 @@
 - `@vben/request` 接入层，以及已有 `Accept-Api-Version: v1` 请求头策略。
 - `useVbenVxeGrid`、Drawer 详情、Antdv 表单/弹窗/标签/描述列表等密集后台交互。
 - Pinia setup stores，但只保存跨页面、header、realtime、WS revision state；表格主数据由页面 query 拉取。
-- 统一 `governed-action-modal`，真实资金、运行模式、kill-switch、runtime-config 激活/回滚等 mutation 必须治理化。
+- 统一 `governed-action-modal`，真实资金、运行模式、kill-switch、Config resource 激活/回滚等 mutation 必须治理化。
 - WebSocket 单例连接、断线重连、订阅恢复、toast/notification 分发。
 - RBAC、operation log、users/roles/menus 管理入口。
 
@@ -63,6 +63,7 @@ Vue Router 动态路由必须在登录后菜单加载阶段完成，不能依赖
 | 10.4 | Execution Plane | [`phase-10/10.4-execution-plane.md`](phase-10/10.4-execution-plane.md) |
 | 10.5 | Research & Governance | [`phase-10/10.5-research-and-governance.md`](phase-10/10.5-research-and-governance.md) |
 | 10.6 | Hardening | [`phase-10/10.6-hardening.md`](phase-10/10.6-hardening.md) |
+| 10.7 | Config Console & Deploy Readiness | [`phase-10/10.7-deploy-config-and-preferences.md`](phase-10/10.7-deploy-config-and-preferences.md) |
 
 完整菜单树、API matrix、WS 契约、删除清单、API gap、各 phase 详细设计与推进计划见对应子文档。
 
@@ -76,6 +77,7 @@ flowchart TD
     F3["10.3 Report Plane"]
     F4["10.4 Execution Plane"]
     F5["10.5 Research & Governance"]
+    F7["10.7 Config Console & Deploy Readiness"]
     F6["10.6 Hardening"]
 
     F0 --> F1
@@ -84,7 +86,8 @@ flowchart TD
     F3 --> F4
     F2 --> F5
     F4 --> F6
-    F5 --> F6
+    F5 --> F7
+    F7 --> F6
 ```
 
 - **10.0** 设计冻结，不写业务代码。
@@ -93,7 +96,8 @@ flowchart TD
 - **10.3** report 主产物 UI。
 - **10.4** 执行 ledger 全链路。
 - **10.5** 研究与治理（可与 10.3/10.4 并行）。
-- **10.6** lint / test / 删除证明。
+- **10.7** 六类 Config resource、deployment readiness 与 lifecycle 页面。
+- **10.6** 作为最终出口执行 lint / unit / executable E2E / 删除证明。
 
 ## 5. 风险与控制
 

@@ -5,7 +5,7 @@ use quant_pivot_models::{
     domain::{BeginSourceSliceOutcome, CompleteSourceSlice, NewSourceSlice, SourceSliceInfo},
     entities::quant_source_slice,
     enums::quant::SourceSliceStatus,
-    types::{ContentHash, ResearchEvaluationTrack, SourceSliceId},
+    types::{ContentHash, SourceSliceId},
 };
 use sea_orm::{
     ActiveModelTrait, ActiveValue, ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel,
@@ -175,12 +175,6 @@ where
 fn validate_new(source_slice: &NewSourceSlice) -> Result<(), StorageError> {
     if source_slice.window_start >= source_slice.window_end
         || source_slice.window_end > source_slice.pit_cutoff
-        || source_slice.reader_contract_version.trim().is_empty()
-        || source_slice.schema_contract_version.trim().is_empty()
-        || !matches!(
-            source_slice.evaluation_track.as_str(),
-            "research_only" | "semi_auto_candidate"
-        )
     {
         return Err(error::invariant_violation(
             Some(entity::QUANT_SOURCE_SLICE),
@@ -196,7 +190,7 @@ fn ensure_manifest_binding(
 ) -> Result<(), StorageError> {
     let manifest = &completion.manifest;
     let bound = manifest.profile_ref == row.profile_ref
-        && track_name(manifest.evaluation_track) == row.evaluation_track
+        && manifest.evaluation_track == row.evaluation_track
         && manifest.research_program_hash == row.research_program_hash
         && manifest.decision_policy_snapshot_id == row.decision_policy_snapshot_id
         && manifest.runtime_config_hash == row.runtime_config_hash
@@ -229,11 +223,4 @@ fn ensure_idempotent_completion(
         ));
     }
     Ok(())
-}
-
-const fn track_name(track: ResearchEvaluationTrack) -> &'static str {
-    match track {
-        ResearchEvaluationTrack::ResearchOnly => "research_only",
-        ResearchEvaluationTrack::SemiAutoCandidate => "semi_auto_candidate",
-    }
 }

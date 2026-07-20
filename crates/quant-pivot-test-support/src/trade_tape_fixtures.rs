@@ -11,11 +11,14 @@ use quant_pivot_models::{
         BookL2CheckpointRow, BookMicrostructureRow, ChBps, ChPrice, ChSchemaVersion, ChShares,
         ChUsd, DomainObservationRow, MarketResolutionRow, MidPriceBucketRow, TradeTapeRow,
     },
-    domain::{TradeTapeBlockCursorInfo, UpsertTradeTapeBlockCursor},
+    domain::{
+        TradeTapeBlockCursorInfo, TradeTapeBlockCursorStatus, TradeTapeSourceKind,
+        UpsertTradeTapeBlockCursor,
+    },
     enums::clickhouse::{
         ChTradeParticipantRole, ChTradeReconciliationStatus, ChTradeSide, ChTradeTapeSource,
     },
-    types::{DomainInstrumentKey, MarketId, Price, Shares, TokenId, Usd},
+    types::{DomainInstrumentKey, EvmAddress, MarketId, Price, Shares, TokenId, Usd},
 };
 use quant_pivot_repository::traits::{QuantFactReadRepository, TradeTapeBlockCursorRepository};
 use rust_decimal::Decimal;
@@ -134,8 +137,8 @@ pub struct LiveTradeTapeBlockCursorRepo;
 impl TradeTapeBlockCursorRepository for LiveTradeTapeBlockCursorRepo {
     async fn find(
         &self,
-        _source: &str,
-        _contract_address: &str,
+        _source: TradeTapeSourceKind,
+        _contract_address: &EvmAddress,
     ) -> Result<Option<TradeTapeBlockCursorInfo>, StorageError> {
         Ok(None)
     }
@@ -152,19 +155,20 @@ impl TradeTapeBlockCursorRepository for LiveTradeTapeBlockCursorRepo {
 
     async fn list_by_source(
         &self,
-        source: &str,
+        source: TradeTapeSourceKind,
     ) -> Result<Vec<TradeTapeBlockCursorInfo>, StorageError> {
         let now = Utc::now();
         Ok(EXCHANGE_CONTRACTS
             .iter()
             .map(|contract| TradeTapeBlockCursorInfo {
-                source: source.to_owned(),
-                contract_address: format!("{:#x}", contract.address),
+                source,
+                contract_address: EvmAddress::parse(format!("{:#x}", contract.address))
+                    .expect("exchange fixture address is canonical"),
                 last_finalized_block: i64::try_from(contract.bootstrap_block)
                     .expect("fixture bootstrap block fits i64"),
                 last_log_index: 0,
                 head_lag_blocks: 0,
-                status: "live".to_owned(),
+                status: TradeTapeBlockCursorStatus::Live,
                 created_at: now,
                 updated_at: now,
             })

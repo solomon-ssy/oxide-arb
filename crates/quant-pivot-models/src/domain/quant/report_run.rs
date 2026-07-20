@@ -12,7 +12,7 @@ use crate::{
     types::{
         ContentHash, CorrelationId, DecisionPolicySnapshotId, DiagnosticCode,
         RecommendationReportId, ReportRunId, ReportScheduleGapId, ReportScheduleId,
-        ResearchProfileId, WorkerId,
+        ReportTriggerKey, ResearchProfileId, WorkerId,
     },
 };
 use chrono::{DateTime, Utc};
@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 pub struct ReportRunInfo {
     pub report_run_id: ReportRunId,
     pub trigger_kind: ReportTriggerKind,
-    pub trigger_key: String,
+    pub trigger_key: ReportTriggerKey,
     pub schedule_id: Option<ReportScheduleId>,
     pub request_id: Option<CorrelationId>,
     pub retry_of_run_id: Option<ReportRunId>,
@@ -78,7 +78,7 @@ info_from_model!(ReportRunInfo, quant_report_run::Model, {
 pub struct NewReportRun {
     pub report_run_id: ReportRunId,
     pub trigger_kind: ReportTriggerKind,
-    pub trigger_key: String,
+    pub trigger_key: ReportTriggerKey,
     pub schedule_id: Option<ReportScheduleId>,
     pub request_id: Option<CorrelationId>,
     pub retry_of_run_id: Option<ReportRunId>,

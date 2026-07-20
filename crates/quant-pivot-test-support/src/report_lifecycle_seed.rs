@@ -7,7 +7,7 @@ use quant_pivot_models::{
     enums::quant::{
         RecommendationReportStatus, RecommendationStatus, ReportRunStatus, ReportTriggerKind,
     },
-    types::{ReportRunId, WorkerId},
+    types::{ReportRunId, ReportTriggerKey, WorkerId},
 };
 use quant_pivot_repository::{
     postgres::{PgRecommendationReportRepository, PgReportRunRepository},
@@ -82,7 +82,9 @@ pub async fn persist_prepared_report(
     quant_report_run::ActiveModel {
         report_run_id: ActiveValue::Set(report_run_id.clone()),
         trigger_kind: ActiveValue::Set(ReportTriggerKind::Scheduled),
-        trigger_key: ActiveValue::Set(trigger_key.to_owned()),
+        trigger_key: ActiveValue::Set(
+            ReportTriggerKey::parse(trigger_key).expect("valid report fixture trigger key"),
+        ),
         schedule_id: ActiveValue::Set(Some("test_fixture".into())),
         request_id: ActiveValue::Set(None),
         retry_of_run_id: ActiveValue::Set(None),

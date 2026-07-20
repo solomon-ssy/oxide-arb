@@ -28,7 +28,7 @@ use quant_pivot_models::{
     },
     types::{
         DecisionPolicySnapshotId, RecommendationReportId, ReportRunId, ReportScheduleGapId,
-        ReportScheduleId, WorkerId,
+        ReportScheduleId, ReportTriggerKey, WorkerId,
     },
 };
 use sea_orm::{
@@ -508,11 +508,14 @@ impl ReportRunRepository for PgReportRunRepository {
         let new_run = NewReportRun {
             report_run_id: ReportRunId::from_v7(),
             trigger_kind: ReportTriggerKind::Scheduled,
-            trigger_key: format!(
+            trigger_key: ReportTriggerKey::parse(format!(
                 "scheduled:{}:{}",
                 command.schedule_id,
                 command.latest_scheduled_for.to_rfc3339()
-            ),
+            ))
+            .map_err(|error| {
+                StorageError::invariant_violation(Some(entity::QUANT_REPORT_RUN), error.to_string())
+            })?,
             schedule_id: Some(command.schedule_id.clone()),
             request_id: None,
             retry_of_run_id: None,
@@ -728,7 +731,7 @@ impl ReportRunRepository for PgReportRunRepository {
 
     async fn find_by_trigger_key(
         &self,
-        trigger_key: &str,
+        trigger_key: &ReportTriggerKey,
     ) -> Result<Option<ReportRunInfo>, StorageError> {
         quant_report_run::Entity::find()
             .filter(quant_report_run::Column::TriggerKey.eq(trigger_key))

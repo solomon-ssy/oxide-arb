@@ -14,7 +14,8 @@ use quant_pivot_models::{
     },
     types::{
         ArtifactUri, ContentHash, ResearchEvaluationTrack, ResearchJobId, ResearchJobParams,
-        TradePolicyTrialAttemptId, TradePolicyTrialMetrics, TrainingDatasetId,
+        RoleCode, TradePolicyCandidateId, TradePolicyTrialAttemptId, TradePolicyTrialMetrics,
+        TrainingDatasetId,
     },
 };
 use quant_pivot_repository::{
@@ -50,7 +51,7 @@ fn job(job_id: ResearchJobId) -> NewResearchJob {
             },
         }),
         requested_by: None,
-        acting_role: "admin".to_owned(),
+        acting_role: RoleCode::new("admin"),
         parent_job_id: None,
         recovery_attempt: 0,
         max_recovery_attempts: 3,
@@ -68,7 +69,7 @@ fn successful_attempt(
         attempt_ordinal,
         experiment_family_hash: hash('a'),
         research_program_hash: hash('b'),
-        candidate_id: candidate_id.to_owned(),
+        candidate_id: TradePolicyCandidateId::parse(candidate_id).expect("candidate id"),
         candidate_hash: hash('c'),
         scope: TradePolicyTrialScope::Fold,
         fold_index: Some(i32::try_from(attempt_ordinal).expect("ordinal fits i32")),

@@ -6,7 +6,8 @@ use sea_orm::entity::prelude::*;
 use crate::{
     enums::quant::SourceSliceStatus,
     types::{
-        ArtifactUri, ContentHash, DecisionPolicySnapshotId, ResearchProfileRef, SourceSliceId,
+        ArtifactUri, ContentHash, DecisionPolicySnapshotId, ReaderContractVersion,
+        ResearchEvaluationTrack, ResearchProfileRef, SchemaContractVersion, SourceSliceId,
         SourceSliceManifestV1,
     },
 };
@@ -20,15 +21,15 @@ pub struct Model {
     pub identity_hash: ContentHash,
     #[sea_orm(column_type = "JsonBinary")]
     pub profile_ref: ResearchProfileRef,
-    pub evaluation_track: String,
+    pub evaluation_track: ResearchEvaluationTrack,
     pub research_program_hash: ContentHash,
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub runtime_config_hash: ContentHash,
     pub window_start: DateTime<Utc>,
     pub window_end: DateTime<Utc>,
     pub pit_cutoff: DateTime<Utc>,
-    pub reader_contract_version: String,
-    pub schema_contract_version: String,
+    pub reader_contract_version: ReaderContractVersion,
+    pub schema_contract_version: SchemaContractVersion,
     pub status: SourceSliceStatus,
     pub manifest_uri: Option<ArtifactUri>,
     pub manifest_hash: Option<ContentHash>,

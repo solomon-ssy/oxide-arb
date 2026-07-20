@@ -10,12 +10,23 @@ use crate::{
 };
 use serde::Deserialize;
 use serde_with::rust::double_option;
-use validator::Validate;
+use validator::{Validate, ValidationError};
+
+fn validate_role_code(code: &str) -> Result<(), ValidationError> {
+    let mut bytes = code.bytes();
+    if bytes.next().is_some_and(|byte| byte.is_ascii_lowercase())
+        && bytes.all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+    {
+        Ok(())
+    } else {
+        Err(ValidationError::new("role_code"))
+    }
+}
 
 /// Create-role payload (`kind` is fixed to `Custom`, `status` to `Enabled`).
 #[derive(Debug, Deserialize, Validate)]
 pub struct CreateRoleRequest {
-    #[validate(length(min = 1, max = 64))]
+    #[validate(length(min = 1, max = 64), custom(function = "validate_role_code"))]
     pub code: String,
     #[validate(length(min = 1, max = 128))]
     pub name: String,
@@ -62,4 +73,29 @@ pub struct AssignPermissionsRequest {
 #[derive(Debug, Deserialize, Validate)]
 pub struct AssignMenusRequest {
     pub menu_ids: Vec<MenuId>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn create_request(code: &str) -> CreateRoleRequest {
+        CreateRoleRequest {
+            code: code.to_owned(),
+            name: "Risk reviewer".to_owned(),
+            description: None,
+            sort: 0,
+        }
+    }
+
+    #[test]
+    fn role_code_accepts_only_canonical_lower_snake_case() {
+        assert!(create_request("risk_owner_2").validate().is_ok());
+        for invalid in ["RiskOwner", "risk-owner", "risk owner", "_risk_owner", ""] {
+            assert!(
+                create_request(invalid).validate().is_err(),
+                "role code `{invalid}` must be rejected"
+            );
+        }
+    }
 }

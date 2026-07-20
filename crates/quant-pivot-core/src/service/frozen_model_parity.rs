@@ -22,8 +22,8 @@ use quant_pivot_models::{
         FeatureParityStateTransition, PublicationStatus, TrainingDatasetStatus,
     },
     types::{
-        ContentHash, FeatureParityDetail, FeatureParityDetailSource, FeatureParityEventId,
-        FeatureParityRunId, ModelInputContract,
+        ContentHash, DiagnosticCode, FeatureParityDetail, FeatureParityDetailSource,
+        FeatureParityEventId, FeatureParityRunId, ModelInputContract, RoleCode,
     },
 };
 use quant_pivot_repository::traits::{
@@ -131,7 +131,7 @@ impl FrozenModelParityService {
                     training_dataset_id: Some(dataset.training_dataset_id.clone()),
                     triggered_by: triggered_by.to_owned(),
                     requested_by: None,
-                    acting_role: "system".to_owned(),
+                    acting_role: RoleCode::new("system"),
                     reason: reason.to_owned(),
                     total_count: 0,
                     compared_count: 0,
@@ -482,7 +482,7 @@ impl FrozenModelParityService {
                     pending_materialization_count: 0,
                     feature_contract_hash: Some(feature_contract_hash.clone()),
                     transform_hash: None,
-                    failure_code: Some("frozen_model_integrity".to_owned()),
+                    failure_code: Some(DiagnosticCode::new("frozen_model_integrity")),
                     failure_detail: Some(error.to_string()),
                 },
             )
@@ -881,8 +881,8 @@ mod tests {
         types::{
             ContentHash, DecisionPolicySnapshotId, EventId, FeatureParityDetail,
             FeatureParityDetailSource, FeatureParityRunId, MarketId, ModelInputContract,
-            ModelInputSpec, ModelSpecId, ModelVersionId, SchemaVersion, TokenId, TrainingDatasetId,
-            TrainingExampleId, TrainingHorizonsSecs, TrainingSampleSource,
+            ModelInputSpec, ModelSpecId, ModelVersionId, RoleCode, SchemaVersion, TokenId,
+            TrainingDatasetId, TrainingExampleId, TrainingHorizonsSecs, TrainingSampleSource,
             model_metrics::ModelVersionMetrics, model_training::ModelTrainingObjective,
         },
     };
@@ -980,7 +980,7 @@ mod tests {
             training_dataset_id: Some(training_dataset_id),
             triggered_by: "test".to_owned(),
             requested_by: None,
-            acting_role: "system".to_owned(),
+            acting_role: RoleCode::new("system"),
             reason: "test".to_owned(),
             total_count: 4,
             compared_count: 4,

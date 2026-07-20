@@ -8,8 +8,9 @@ use crate::{
         quant::{ExecutionWalletKind, OutcomeSide},
     },
     types::{
-        MarketId, OrderIntentId, PositionId, SettlementBalanceEvidence, SettlementPayoutVector,
-        SettlementRedeemId, SettlementRedeemIndexSets, SettlementRedeemLotId, Shares, TokenId, Usd,
+        EvmAddress, EvmTransactionHash, MarketId, OrderIntentId, PositionId,
+        SettlementBalanceEvidence, SettlementPayoutVector, SettlementRedeemId,
+        SettlementRedeemIndexSets, SettlementRedeemLotId, Shares, TokenId, Usd,
     },
 };
 use chrono::{DateTime, Utc};
@@ -23,10 +24,10 @@ use serde::{Deserialize, Serialize};
 pub struct SettlementRedeemInfo {
     pub settlement_redeem_id: SettlementRedeemId,
     pub market_id: MarketId,
-    pub funder_address: String,
+    pub funder_address: EvmAddress,
     pub wallet_kind: ExecutionWalletKind,
     pub state: SettlementRedeemState,
-    pub tx_hash: Option<String>,
+    pub tx_hash: Option<EvmTransactionHash>,
     pub index_sets_json: SettlementRedeemIndexSets,
     pub payout_vector_json: SettlementPayoutVector,
     pub balance_before_json: SettlementBalanceEvidence,
@@ -61,10 +62,10 @@ info_from_model!(
 pub struct NewSettlementRedeem {
     pub settlement_redeem_id: SettlementRedeemId,
     pub market_id: MarketId,
-    pub funder_address: String,
+    pub funder_address: EvmAddress,
     pub wallet_kind: ExecutionWalletKind,
     pub state: SettlementRedeemState,
-    pub tx_hash: Option<String>,
+    pub tx_hash: Option<EvmTransactionHash>,
     pub index_sets_json: SettlementRedeemIndexSets,
     pub payout_vector_json: SettlementPayoutVector,
     pub balance_before_json: SettlementBalanceEvidence,

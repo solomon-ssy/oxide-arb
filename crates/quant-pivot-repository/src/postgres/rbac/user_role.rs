@@ -8,7 +8,7 @@ use quant_pivot_models::{
     domain::{AssignRoles, RoleInfo},
     entities::{role, user, user_role},
     enums::rbac::RoleStatus,
-    types::{RoleId, UserId},
+    types::{RoleCode, RoleId, UserId},
 };
 use sea_orm::{
     ActiveValue::Set, ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait, QueryFilter,
@@ -72,7 +72,7 @@ async fn do_set_roles(
     // Only *enabled* roles project a Casbin grouping (`g`): a disabled role keeps
     // its relational `user_role` membership but grants nothing until re-enabled,
     // at which point its groupings are rebuilt from that membership.
-    let enabled_code_of: HashMap<RoleId, String> = target_roles
+    let enabled_code_of: HashMap<RoleId, RoleCode> = target_roles
         .iter()
         .filter(|role| role.status == RoleStatus::Enabled)
         .map(|role| (role.id.clone(), role.code.clone()))
@@ -100,7 +100,7 @@ async fn do_set_roles(
             .map_err(StorageError::from)?
             .into_iter()
             .map(|role| (role.id, role.code))
-            .collect::<HashMap<RoleId, String>>()
+            .collect::<HashMap<RoleId, RoleCode>>()
     };
 
     if !added.is_empty() {
@@ -117,11 +117,12 @@ async fn do_set_roles(
                 .to_owned(),
         )
         .await?;
-        for role_id in &added {
-            if let Some(code) = enabled_code_of.get(role_id) {
-                sync::do_grant_role(&txn, &user_id, code).await?;
-            }
-        }
+        let codes = added
+            .iter()
+            .filter_map(|role_id| enabled_code_of.get(role_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        sync::do_grant_roles(&txn, &user_id, &codes).await?;
     }
 
     if !removed.is_empty() {
@@ -131,11 +132,12 @@ async fn do_set_roles(
             .exec(&txn)
             .await
             .map_err(StorageError::from)?;
-        for role_id in &removed {
-            if let Some(code) = removed_codes.get(role_id) {
-                sync::do_revoke_role(&txn, &user_id, code).await?;
-            }
-        }
+        let codes = removed
+            .iter()
+            .filter_map(|role_id| removed_codes.get(role_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        sync::do_revoke_roles(&txn, &user_id, &codes).await?;
     }
 
     txn.commit().await.map_err(StorageError::from)?;

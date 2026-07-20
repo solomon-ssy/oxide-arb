@@ -11,6 +11,9 @@ use quant_pivot_models::{
     domain::{TradeTapeBlockCursorInfo, TradeTapeBlockCursorStatus},
 };
 
+#[cfg(test)]
+use quant_pivot_models::{domain::TradeTapeSourceKind, types::EvmAddress};
+
 const ON_CHAIN_CONTRACT_COUNT: usize = EXCHANGE_CONTRACTS.len();
 
 /// Exchange contracts that may emit fills for a market, keyed by Gamma `neg_risk`.
@@ -26,7 +29,7 @@ pub const fn exchange_route(neg_risk: bool) -> &'static [ExchangeContract] {
 /// Whether one durable block cursor has made forward progress and is not in error.
 #[must_use]
 pub fn cursor_is_healthy(cursor: &TradeTapeBlockCursorInfo) -> bool {
-    cursor.status != TradeTapeBlockCursorStatus::Error.as_str() && cursor.last_finalized_block > 0
+    cursor.status != TradeTapeBlockCursorStatus::Faulted && cursor.last_finalized_block > 0
 }
 
 /// Index cursors by lowercase `0x`-prefixed contract address.
@@ -36,7 +39,7 @@ pub fn cursors_by_contract_address(
 ) -> HashMap<String, &TradeTapeBlockCursorInfo> {
     cursors
         .iter()
-        .map(|cursor| (cursor.contract_address.clone(), cursor))
+        .map(|cursor| (cursor.contract_address.to_string(), cursor))
         .collect()
 }
 
@@ -103,14 +106,19 @@ mod tests {
 
     use super::*;
 
-    fn cursor(contract: ExchangeContract, status: &str, block: i64) -> TradeTapeBlockCursorInfo {
+    fn cursor(
+        contract: ExchangeContract,
+        status: TradeTapeBlockCursorStatus,
+        block: i64,
+    ) -> TradeTapeBlockCursorInfo {
         TradeTapeBlockCursorInfo {
-            source: "on_chain".to_owned(),
-            contract_address: format!("{:#x}", contract.address),
+            source: TradeTapeSourceKind::OnChain,
+            contract_address: EvmAddress::parse(format!("{:#x}", contract.address))
+                .expect("exchange fixture address is canonical"),
             last_finalized_block: block,
             last_log_index: 0,
             head_lag_blocks: 0,
-            status: status.to_owned(),
+            status,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -126,9 +134,9 @@ mod tests {
     #[test]
     fn binary_market_available_when_ctf_route_has_one_healthy_cursor() {
         let cursors = vec![
-            cursor(CTF_EXCHANGE_V2, "live", 1),
-            cursor(NEG_RISK_EXCHANGE_V1, "error", 0),
-            cursor(NEG_RISK_EXCHANGE_V2, "error", 0),
+            cursor(CTF_EXCHANGE_V2, TradeTapeBlockCursorStatus::Live, 1),
+            cursor(NEG_RISK_EXCHANGE_V1, TradeTapeBlockCursorStatus::Faulted, 0),
+            cursor(NEG_RISK_EXCHANGE_V2, TradeTapeBlockCursorStatus::Faulted, 0),
         ];
         let by_address = cursors_by_contract_address(&cursors);
         assert!(trade_tape_market_ingest_available(
@@ -146,18 +154,18 @@ mod tests {
     #[test]
     fn plane_available_requires_both_exchange_families_healthy() {
         let cursors = vec![
-            cursor(CTF_EXCHANGE_V1, "live", 1),
-            cursor(CTF_EXCHANGE_V2, "live", 1),
-            cursor(NEG_RISK_EXCHANGE_V1, "live", 1),
-            cursor(NEG_RISK_EXCHANGE_V2, "live", 1),
+            cursor(CTF_EXCHANGE_V1, TradeTapeBlockCursorStatus::Live, 1),
+            cursor(CTF_EXCHANGE_V2, TradeTapeBlockCursorStatus::Live, 1),
+            cursor(NEG_RISK_EXCHANGE_V1, TradeTapeBlockCursorStatus::Live, 1),
+            cursor(NEG_RISK_EXCHANGE_V2, TradeTapeBlockCursorStatus::Live, 1),
         ];
         assert!(trade_tape_ingest_available(&enabled_config(), &cursors));
 
         let partial = vec![
-            cursor(CTF_EXCHANGE_V1, "live", 1),
-            cursor(CTF_EXCHANGE_V2, "live", 1),
-            cursor(NEG_RISK_EXCHANGE_V1, "error", 0),
-            cursor(NEG_RISK_EXCHANGE_V2, "error", 0),
+            cursor(CTF_EXCHANGE_V1, TradeTapeBlockCursorStatus::Live, 1),
+            cursor(CTF_EXCHANGE_V2, TradeTapeBlockCursorStatus::Live, 1),
+            cursor(NEG_RISK_EXCHANGE_V1, TradeTapeBlockCursorStatus::Faulted, 0),
+            cursor(NEG_RISK_EXCHANGE_V2, TradeTapeBlockCursorStatus::Faulted, 0),
         ];
         assert!(!trade_tape_ingest_available(&enabled_config(), &partial));
     }

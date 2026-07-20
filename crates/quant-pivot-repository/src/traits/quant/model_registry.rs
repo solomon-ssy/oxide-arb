@@ -7,7 +7,7 @@ use quant_pivot_models::{
     enums::common::MarketCategory,
     types::{
         BacktestPathSetId, FeatureParityRunId, FeatureParityStateId, ModelSpecId, ModelVersionId,
-        model_quality::QualityGateReport,
+        RoleCode, model_quality::QualityGateReport,
     },
 };
 
@@ -19,7 +19,7 @@ pub enum PublishFeatureParityPermit {
     /// Mint the first clear generation from the exact pre-publication proof.
     InitializeFromProof {
         actor: String,
-        acting_role: Option<String>,
+        acting_role: Option<RoleCode>,
         reason: String,
     },
 }

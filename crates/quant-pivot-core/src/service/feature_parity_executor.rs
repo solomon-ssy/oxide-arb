@@ -23,9 +23,9 @@ use quant_pivot_models::{
         },
     },
     types::{
-        ContentHash, FeatureParityDetail, FeatureParityDetailSource, FeatureParityEventId,
-        MarketId, ModelRunId, ModelVersionId, RecommendationReportId, ResearchJobProgress,
-        TrainingDatasetId,
+        ContentHash, DiagnosticCode, FeatureParityDetail, FeatureParityDetailSource,
+        FeatureParityEventId, MarketId, ModelRunId, ModelVersionId, RecommendationReportId,
+        ResearchJobProgress, TrainingDatasetId,
     },
 };
 use quant_pivot_repository::traits::{
@@ -646,7 +646,7 @@ impl FeatureParityExecutor {
                 pending_materialization_count: 0,
                 feature_contract_hash: run.feature_contract_hash.clone(),
                 transform_hash: run.transform_hash.clone(),
-                failure_code: Some(code.to_owned()),
+                failure_code: Some(DiagnosticCode::new(code)),
                 failure_detail: Some(detail.to_owned()),
             },
         )
@@ -661,7 +661,7 @@ impl FeatureParityExecutor {
         mut completion: CompleteFeatureParityRun,
     ) -> QuantResult<T> {
         completion.status = FeatureParityRunStatus::Failed;
-        completion.failure_code = Some(code.to_owned());
+        completion.failure_code = Some(DiagnosticCode::new(code));
         completion.failure_detail = Some(detail.to_owned());
         let failed = self.parity.complete_run(&run.run_id, completion).await?;
         self.metrics
@@ -1346,7 +1346,7 @@ mod tests {
             Paginated, ResearchJobInfo, RunFullFeatureParityRequest,
         },
         enums::quant::FeatureParityLatchState,
-        types::{FeatureParityRunId, FeatureParityStateId, FeatureVectorId},
+        types::{FeatureParityRunId, FeatureParityStateId, FeatureVectorId, RoleCode},
     };
     use quant_pivot_repository::traits::{
         EnqueueFrozenFeatureParityOutcome, FeatureParityLatchActor,
@@ -1718,7 +1718,7 @@ mod tests {
             training_dataset_id: None,
             triggered_by: "test".to_owned(),
             requested_by: Some("test".to_owned()),
-            acting_role: "risk_owner".to_owned(),
+            acting_role: RoleCode::new("risk_owner"),
             reason: "test".to_owned(),
             total_count: 0,
             compared_count: 0,
@@ -2118,7 +2118,7 @@ mod tests {
         let failed = parity.run();
         assert_eq!(failed.status, FeatureParityRunStatus::Failed);
         assert_eq!(
-            failed.failure_code.as_deref(),
+            failed.failure_code.as_ref().map(DiagnosticCode::as_str),
             Some("materialization_timeout")
         );
         assert!(failed.containment_completed_at.is_some());

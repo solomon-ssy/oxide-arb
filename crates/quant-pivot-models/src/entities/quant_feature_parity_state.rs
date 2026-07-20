@@ -2,7 +2,7 @@
 
 use crate::{
     enums::quant::{FeatureParityLatchState, FeatureParityStateTransition},
-    types::{FeatureParityRunId, FeatureParityStateId},
+    types::{FeatureParityRunId, FeatureParityStateId, RoleCode},
 };
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
@@ -19,7 +19,7 @@ pub struct Model {
     pub recovery_run_id: Option<FeatureParityRunId>,
     pub previous_state_id: Option<FeatureParityStateId>,
     pub actor: Option<String>,
-    pub acting_role: Option<String>,
+    pub acting_role: Option<RoleCode>,
     pub reason: String,
     pub created_at: DateTime<Utc>,
 

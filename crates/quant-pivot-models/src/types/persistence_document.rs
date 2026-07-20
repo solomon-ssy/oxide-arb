@@ -1,10 +1,11 @@
 //! Strongly typed JSONB documents at persistence boundaries.
 //!
-//! Internal documents are stored as a versioned, discriminated envelope. A
-//! mismatched discriminator or schema version is rejected while `SeaORM` decodes
-//! the row; callers never receive an unclassified `serde_json::Value` from an
-//! internal JSONB column. Only explicitly external payload boundaries use
-//! [`ExternalJsonDocument`].
+//! Internal documents use a closed struct or tagged enum; documents with an
+//! evolution contract additionally carry and validate an explicit version. A
+//! mismatched shape, discriminator, or governed version is rejected by database
+//! constraints and/or while `SeaORM` decodes the row. Callers never receive an
+//! unclassified `serde_json::Value` from an internal JSONB column. Only
+//! explicitly external payload boundaries use [`ExternalJsonDocument`].
 
 use std::{collections::BTreeMap, ops::Deref};
 

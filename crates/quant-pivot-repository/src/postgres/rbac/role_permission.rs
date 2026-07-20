@@ -8,7 +8,7 @@ use quant_pivot_error::storage::{StorageError, entity};
 use quant_pivot_models::{
     domain::{AssignPermissions, Permission},
     entities::role,
-    types::RoleId,
+    types::{RoleCode, RoleId},
 };
 use sea_orm::{ConnectionTrait, DatabaseConnection, EntityTrait, TransactionTrait};
 
@@ -30,7 +30,7 @@ impl PgRolePermissionRepository {
 }
 
 /// Resolve a role's immutable `code` by id, or `NotFound`.
-async fn role_code_of(conn: &impl ConnectionTrait, id: &RoleId) -> Result<String, StorageError> {
+async fn role_code_of(conn: &impl ConnectionTrait, id: &RoleId) -> Result<RoleCode, StorageError> {
     role::Entity::find_by_id(id.clone())
         .one(conn)
         .await

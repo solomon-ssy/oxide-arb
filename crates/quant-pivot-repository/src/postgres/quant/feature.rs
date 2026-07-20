@@ -1,13 +1,16 @@
 //! Postgres-backed feature-vector repository.
 
-use crate::{postgres::query::find_models_by_id_chunks, traits::FeatureRepository};
+use crate::{
+    postgres::{query::find_models_by_id_chunks, write::insert_many_returning_chunked},
+    traits::FeatureRepository,
+};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{FeatureVectorInfo, NewFeatureVector},
     entities::quant_feature_vector,
     types::FeatureVectorId,
 };
-use sea_orm::{DatabaseConnection, EntityTrait, IntoActiveModel};
+use sea_orm::{DatabaseConnection, EntityTrait, IntoActiveModel, TransactionTrait};
 
 /// Postgres-backed feature-vector repository (insert-only ledger).
 pub struct PgFeatureRepository {
@@ -39,15 +42,10 @@ impl FeatureRepository for PgFeatureRepository {
         if vectors.is_empty() {
             return Ok(Vec::new());
         }
-        // One `INSERT ... RETURNING` statement — atomic by itself and a single
-        // round-trip. Postgres returns rows in insertion (VALUES) order, so the
-        // result aligns with the input.
-        let models = quant_feature_vector::Entity::insert_many(
-            vectors.into_iter().map(IntoActiveModel::into_active_model),
-        )
-        .exec_with_returning(&self.db)
-        .await
-        .map_err(StorageError::from)?;
+        let txn = self.db.begin().await.map_err(StorageError::from)?;
+        let models =
+            insert_many_returning_chunked::<quant_feature_vector::Entity, _>(&txn, vectors).await?;
+        txn.commit().await.map_err(StorageError::from)?;
         Ok(models.into_iter().map(Into::into).collect())
     }
 

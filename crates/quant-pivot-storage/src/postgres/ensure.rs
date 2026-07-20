@@ -10,6 +10,8 @@ use sea_orm::{ConnectOptions, ConnectionTrait, Database, DbBackend, DbErr, State
 use std::time::Duration;
 use tracing::info;
 
+use crate::sql_contract_registry::POSTGRES_DATABASE_BOOTSTRAP;
+
 /// Maintenance catalog used for `CREATE DATABASE` bootstrap.
 const MAINTENANCE_DATABASE: &str = "postgres";
 
@@ -42,10 +44,12 @@ pub async fn ensure_database(
     })?;
 
     let exists = db
-        .query_one_raw(Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            "SELECT 1 FROM pg_database WHERE datname = $1",
-            [Value::from(config.database.clone())],
+        .query_one_raw(POSTGRES_DATABASE_BOOTSTRAP.postgres_statement(
+            Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "SELECT 1 FROM pg_database WHERE datname = $1",
+                [Value::from(config.database.clone())],
+            ),
         ))
         .await?;
 
@@ -62,7 +66,10 @@ pub async fn ensure_database(
     );
 
     match db
-        .execute_raw(Statement::from_string(DbBackend::Postgres, create_sql))
+        .execute_raw(
+            POSTGRES_DATABASE_BOOTSTRAP
+                .postgres_statement(Statement::from_string(DbBackend::Postgres, create_sql)),
+        )
         .await
     {
         Ok(_) => {

@@ -8,7 +8,7 @@ use quant_pivot_models::{
         CryptoPriceReportRow, DomainEventRow, QuantRecommendationAttributionEventRow,
         QuantReportRecommendationFactRow, TradeTapeRow,
     },
-    config::{ClickHouseConfig, SchemaMigrationConfig},
+    config::ClickHouseConfig,
     enums::clickhouse::{
         ChOutcomeSide, ChRecommendationAttributionOutcome, ChTradeParticipantRole,
         ChTradeReconciliationStatus, ChTradeSide, ChTradeTapeSource,
@@ -21,8 +21,9 @@ use quant_pivot_models::{
 };
 use quant_pivot_storage::{
     clickhouse::{
-        ChWriteManager, ClickHousePool, apply_offline_schema_migrations,
-        apply_online_schema_migrations, verify_schema,
+        ChWriteManager, ClickHousePool, active_preproduction_query_count,
+        apply_offline_schema_migrations, apply_online_schema_migrations,
+        reset_preproduction_database, verify_schema,
     },
     write::{AsyncWriter, AsyncWriterConfig, AsyncWriterObservability, AsyncWriterWorker},
 };
@@ -43,7 +44,6 @@ fn test_ch_config(port: u16) -> ClickHouseConfig {
         database: "default".into(),
         user: "default".into(),
         password: "".into(),
-        migration: SchemaMigrationConfig::default(),
         batch_size: 100,
         flush_interval_secs: 5,
         max_concurrent_inserts: 4,
@@ -209,6 +209,100 @@ async fn clean_boot_rejects_nonempty_unmanaged_database() {
         .expect("migration-ledger absence probe");
     assert_eq!(legacy_count, 1);
     assert_eq!(migration_ledger_count, 0);
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn preproduction_reset_rejects_active_clickhouse_queries_without_dropping() {
+    let container = testcontainers::GenericImage::new("clickhouse/clickhouse-server", "26.5")
+        .with_exposed_port(8123.into())
+        .with_wait_for(WaitFor::http(
+            HttpWaitStrategy::new("/ping")
+                .with_port(8123.into())
+                .with_expected_status_code(200u16),
+        ))
+        .with_env_var("CLICKHOUSE_SKIP_USER_SETUP", "1")
+        .with_startup_timeout(Duration::from_mins(2))
+        .start()
+        .await
+        .expect("ClickHouse container");
+    let port = container.get_host_port_ipv4(8123).await.expect("port");
+    let maintenance = ClickHousePool::from_config(&test_ch_config(port))
+        .client()
+        .clone();
+    maintenance
+        .query("CREATE DATABASE quant_pivot")
+        .execute()
+        .await
+        .expect("create reset target");
+    let config = ClickHouseConfig {
+        database: "quant_pivot".into(),
+        ..test_ch_config(port)
+    };
+    let target = ClickHousePool::from_config(&config).client().clone();
+    target
+        .query("CREATE TABLE reset_marker (value UInt8) ENGINE = TinyLog")
+        .execute()
+        .await
+        .expect("create reset marker");
+    let active_client = target.clone();
+    let active_query = tokio::spawn(async move {
+        active_client
+            .query("SELECT sleep(2)")
+            .fetch_one::<u8>()
+            .await
+    });
+
+    let mut observed = false;
+    for _ in 0..100 {
+        if active_preproduction_query_count(&config)
+            .await
+            .expect("inspect active ClickHouse queries")
+            != 0
+        {
+            observed = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(observed, "the active target query must become observable");
+
+    let error = reset_preproduction_database(&config)
+        .await
+        .expect_err("an active target query must deny reset");
+    assert!(error.to_string().contains("active project queries"));
+    let marker_count: u64 = maintenance
+        .query(
+            "SELECT count() FROM system.tables \
+             WHERE database = 'quant_pivot' AND name = 'reset_marker'",
+        )
+        .fetch_one()
+        .await
+        .expect("inspect preserved reset marker");
+    assert_eq!(marker_count, 1);
+    active_query
+        .await
+        .expect("join active query")
+        .expect("active query completes");
+
+    reset_preproduction_database(&config)
+        .await
+        .expect("reset succeeds after the active owner stops");
+    let database_count: u64 = maintenance
+        .query("SELECT count() FROM system.databases WHERE name = 'quant_pivot'")
+        .fetch_one()
+        .await
+        .expect("inspect recreated reset target");
+    let marker_count: u64 = maintenance
+        .query(
+            "SELECT count() FROM system.tables \
+             WHERE database = 'quant_pivot' AND name = 'reset_marker'",
+        )
+        .fetch_one()
+        .await
+        .expect("inspect removed reset marker");
+    assert_eq!(database_count, 1);
+    assert_eq!(marker_count, 0);
 }
 
 #[tokio::test]

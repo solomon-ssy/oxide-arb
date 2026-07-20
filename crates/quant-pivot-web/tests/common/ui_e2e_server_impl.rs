@@ -17,23 +17,24 @@ use quant_pivot_error::{QuantError, QuantResult, control::ControlError, storage:
 use quant_pivot_models::{
     clickhouse::ReportMarketFunnelRow,
     domain::{
-        AcknowledgeFeatureParityLatchRequest, ApplyEntryConditionEvaluation, BacktestPathSetInfo,
-        BacktestPathSetListQuery, BacktestReportInfo, BacktestReportListQuery, BookLevel,
-        CompleteTrainingDatasetBuild, EntryConditionArtifactInfo, EntryConditionInstanceInfo,
-        FactorCollinearitySource, FactorCollinearityView, FactorDefinitionInfo,
-        FactorDefinitionListQuery, FailTradePolicyValidation, FeatureIntegrityActionContext,
-        FeatureIntegrityLatchView, FeatureIntegrityPort, FeatureIntegritySummaryView,
-        FeatureParityEventListQuery, FeatureParityEventView, FeatureParityRunListQuery,
-        FeatureParityRunView, JobProgressSink, MarketDataPort, ModelComparisonReportInfo,
-        ModelPublishedCatalogQuery, ModelSpecInfo, ModelSpecListQuery, ModelTrainingPort,
-        ModelVersionInfo, ModelVersionListQuery, NewTradePolicyValidationRow,
-        NewTradePolicyValidationRun, NewTrainingDatasetPlan, Paginated, PublishedModelOptionView,
-        RecommendationInfo, RecommendationReportInfo, ResearchCatalogPort, ResearchJobView,
-        RunFullFeatureParityRequest, TradePolicyArtifactInfo, TradePolicyAuditListQuery,
-        TradePolicyEvidenceDownloadView, TradePolicyEvidenceRowListQuery,
-        TradePolicyEvidenceRowView, TradePolicyFitPreflightRequest, TradePolicyFitPreflightView,
-        TradePolicyFitReadiness, TradePolicyGovernanceAuditInfo, TradePolicyListQuery,
-        TradePolicyPort, TradePolicyPreflightBlockerDetail, TradePolicyPreflightBlockerView,
+        AcknowledgeFeatureParityLatchRequest, ApplyEntryConditionEvaluation, AssignRoles,
+        BacktestPathSetInfo, BacktestPathSetListQuery, BacktestReportInfo, BacktestReportListQuery,
+        BookLevel, CompleteTrainingDatasetBuild, EntryConditionArtifactInfo,
+        EntryConditionInstanceInfo, FactorCollinearitySource, FactorCollinearityView,
+        FactorDefinitionInfo, FactorDefinitionListQuery, FailTradePolicyValidation,
+        FeatureIntegrityActionContext, FeatureIntegrityLatchView, FeatureIntegrityPort,
+        FeatureIntegritySummaryView, FeatureParityEventListQuery, FeatureParityEventView,
+        FeatureParityRunListQuery, FeatureParityRunView, JobProgressSink, MarketDataPort,
+        ModelComparisonReportInfo, ModelPublishedCatalogQuery, ModelSpecInfo, ModelSpecListQuery,
+        ModelTrainingPort, ModelVersionInfo, ModelVersionListQuery, NewTradePolicyValidationRow,
+        NewTradePolicyValidationRun, NewTrainingDatasetPlan, NewUser, Paginated,
+        PublishedModelOptionView, RecommendationInfo, RecommendationReportInfo,
+        ResearchCatalogPort, ResearchJobView, RunFullFeatureParityRequest, TradePolicyArtifactInfo,
+        TradePolicyAuditListQuery, TradePolicyEvidenceDownloadView,
+        TradePolicyEvidenceRowListQuery, TradePolicyEvidenceRowView,
+        TradePolicyFitPreflightRequest, TradePolicyFitPreflightView, TradePolicyFitReadiness,
+        TradePolicyGovernanceAuditInfo, TradePolicyListQuery, TradePolicyPort,
+        TradePolicyPreflightBlockerDetail, TradePolicyPreflightBlockerView,
         TradePolicyPreflightCheckStatus, TradePolicySourceSliceObjectListQuery,
         TradePolicySourceSliceObjectView, TradePolicySourceSliceView,
         TradePolicyValidationListQuery, TradePolicyValidationRowInfo,
@@ -41,12 +42,17 @@ use quant_pivot_models::{
         TrainedModelView, TrainingDatasetInfo, TrainingDatasetListQuery, empty_catalog_page,
     },
     entities::{quant_entry_condition_instance, quant_recommendation},
-    enums::quant::{
-        DatasetPurpose, EntryConditionState, TradePolicyGovernanceAction, TradePolicyStatus,
-        TradePolicyValidationStatus, TrainingDatasetStatus,
+    enums::{
+        quant::{
+            DatasetPurpose, EntryConditionState, TradePolicyGovernanceAction, TradePolicyStatus,
+            TradePolicyValidationStatus, TrainingDatasetStatus,
+        },
+        rbac::UserStatus,
     },
     hashing::CanonicalDigest,
     runtime_config::{DecimalValue, DecisionPolicySnapshot},
+    security::password::hash_password,
+    seed::rbac::ROLE_VIEWER,
     types::{
         ArtifactUri, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION, DatasetCoverage,
         DatasetManifest, EntryConditionInputSet, EventId, ExecutablePriceInput, FactorDefinitionId,
@@ -63,12 +69,14 @@ use quant_pivot_repository::{
     postgres::{
         PgEntryConditionRepository, PgExecutionSubmissionRepository, PgModelRegistryRepository,
         PgOrderIntentRepository, PgRecommendationReportRepository, PgRecommendationRepository,
-        PgReportRunRepository, PgTradePolicyRepository, PgTrainingDatasetRepository,
+        PgReportRunRepository, PgRoleRepository, PgTradePolicyRepository,
+        PgTrainingDatasetRepository, PgUserRepository, PgUserRoleRepository,
     },
     traits::{
         EntryConditionRepository, ExecutionSubmissionRepository, ModelRegistryRepository,
         OrderIntentRepository, RecommendationReportRepository, RecommendationRepository,
-        ReportRunRepository, TradePolicyRepository, TrainingDatasetRepository,
+        ReportRunRepository, RoleRepository, TradePolicyRepository, TrainingDatasetRepository,
+        UserRepository, UserRoleRepository,
     },
 };
 use quant_pivot_research::{
@@ -88,6 +96,8 @@ use crate::harness;
 
 const LISTEN_HOST: &str = "127.0.0.1";
 const LISTEN_PORT: u16 = 8088;
+const VIEWER_USERNAME: &str = "config-viewer";
+const VIEWER_PASSWORD: &str = "config-viewer-password";
 
 struct E2eTradePolicyPort {
     policies: PgTradePolicyRepository,
@@ -778,6 +788,7 @@ struct E2eFixtures {
     waiting_intent_id: OrderIntentId,
     position_id: quant_pivot_models::types::PositionId,
     model_version_id: quant_pivot_models::types::ModelVersionId,
+    research_profile_ref: ResearchProfileRef,
     trade_policy_artifact_id: TradePolicyArtifactId,
     trade_policy_content_hash: ContentHash,
 }
@@ -1341,7 +1352,7 @@ async fn seed_policy_validation_diagnostic(
             expected_row_hash: Some(expected_row_hash),
             actual_row_hash: Some(actual_row_hash),
             passed: false,
-            diagnostic_kind: Some(diagnostic_kind),
+            diagnostic_kind: Some(diagnostic_kind.into()),
             detail: Some(detail),
             row_hash,
         }])
@@ -1470,7 +1481,7 @@ async fn prepare_e2e_fixtures(
         .report_run_id;
 
     E2eFixtures {
-        fixture_format_version: 3,
+        fixture_format_version: 4,
         unavailable_recommendation_id,
         frozen_recommendation_id: frozen_record.recommendation_id.clone(),
         report_id: frozen_record.report_id.clone(),
@@ -1480,6 +1491,7 @@ async fn prepare_e2e_fixtures(
         waiting_intent_id,
         position_id,
         model_version_id: frozen.evidence_refs.model_version_id,
+        research_profile_ref: frozen.profile_ref,
         trade_policy_artifact_id: policy.artifact_id.clone(),
         trade_policy_content_hash: policy.artifact_hash.clone(),
     }
@@ -1513,6 +1525,43 @@ async fn verify_seeded_report_fact_deliveries(db: &DatabaseConnection) {
     }
 }
 
+async fn seed_config_viewer(env: &harness::TestEnv) {
+    let users = PgUserRepository::new(env.db.clone());
+    let roles = PgRoleRepository::new(env.db.clone());
+    let user_roles = PgUserRoleRepository::new(env.db.clone());
+    let password_hash = hash_password(VIEWER_PASSWORD).expect("hash UI E2E viewer password");
+    let viewer = users
+        .create(NewUser {
+            id: UserId::from_v7(),
+            username: VIEWER_USERNAME.to_owned(),
+            password_hash,
+            nickname: "Config Viewer".to_owned(),
+            avatar: None,
+            email: None,
+            phone: None,
+            status: UserStatus::Active,
+        })
+        .await
+        .expect("create UI E2E viewer");
+    let viewer_role = roles
+        .find_by_code(ROLE_VIEWER)
+        .await
+        .expect("load UI E2E viewer role")
+        .expect("seeded viewer role");
+    user_roles
+        .set_roles_for_user(AssignRoles {
+            user_id: viewer.id,
+            role_ids: vec![viewer_role.id],
+        })
+        .await
+        .expect("assign UI E2E viewer role");
+    env.state
+        .casbin
+        .reload()
+        .await
+        .expect("reload UI E2E Casbin policies");
+}
+
 #[actix_web::test]
 #[ignore = "long-running Playwright backend; requires Docker"]
 async fn serve_protected_ui_e2e() {
@@ -1520,6 +1569,7 @@ async fn serve_protected_ui_e2e() {
         .with_env_filter(EnvFilter::from_default_env())
         .try_init();
     let mut env = harness::TestEnv::start_with_core_report_port().await;
+    seed_config_viewer(&env).await;
     let books = Arc::new(BookStore::new(Arc::new(MetricsHub::new())));
     let fixtures = Box::pin(prepare_e2e_fixtures(
         &env.db,

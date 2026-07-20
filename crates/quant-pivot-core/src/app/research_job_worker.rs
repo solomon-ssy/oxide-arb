@@ -22,11 +22,6 @@ use std::{
 };
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
-use tokio::{sync::mpsc, task::JoinSet, time::interval};
-use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
-use uuid::Uuid;
-
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError, storage::StorageError};
 use quant_pivot_models::{
     clickhouse::QuantFeatureParityEventRow,
@@ -34,9 +29,12 @@ use quant_pivot_models::{
     domain::{
         BacktestPort, CalibrationArtifactFitPort, CpcvBacktestPort, FeatureParityExecutionPort,
         JobProgressSink, ModelCalibrationFitPort, ModelTrainingPort, ResearchJobError,
-        ResearchJobInfo, ResearchJobProgress, TradePolicyPort, TrainingDatasetPort,
+        ResearchJobInfo, ResearchJobProgress, ResearchJobResultRef, TradePolicyPort,
+        TrainingDatasetPort,
     },
-    enums::quant::{ResearchJobErrorCode, ResearchJobKind, ResearchJobStatus},
+    enums::quant::{
+        ResearchJobErrorCode, ResearchJobKind, ResearchJobResultKind, ResearchJobStatus,
+    },
     types::{DatasetCoverage, ResearchJobId, ResearchJobParams, WorkerId},
 };
 use quant_pivot_repository::{
@@ -47,6 +45,9 @@ use quant_pivot_repository::{
         ServingEvidenceRepository, TradePolicyRepository,
     },
 };
+use tokio::{sync::mpsc, task::JoinSet, time::interval};
+use tokio_util::sync::CancellationToken;
+use tracing::{error, info, warn};
 
 use super::{
     AppContext,
@@ -86,7 +87,7 @@ fn lease_deadline(lease_ttl_secs: i64) -> DateTime<Utc> {
 
 /// Terminal outcome of one job execution.
 struct JobOutcome {
-    result_ref: Option<Uuid>,
+    result: Option<ResearchJobResultRef>,
     coverage: Option<DatasetCoverage>,
 }
 
@@ -170,7 +171,10 @@ impl ResearchJobExecutor {
             ResearchJobParams::DatasetBuild(request) => {
                 let view = self.datasets.build(request, progress, cancel).await?;
                 Ok(JobOutcome {
-                    result_ref: Some(view.training_dataset_id.as_uuid()),
+                    result: Some(ResearchJobResultRef {
+                        kind: ResearchJobResultKind::TrainingDataset,
+                        id: view.training_dataset_id.as_uuid(),
+                    }),
                     coverage: view.coverage_json,
                 })
             }
@@ -180,7 +184,10 @@ impl ResearchJobExecutor {
                     .train(params.model_version_id, params.request, progress, cancel)
                     .await?;
                 Ok(JobOutcome {
-                    result_ref: Some(view.model_version_id.as_uuid()),
+                    result: Some(ResearchJobResultRef {
+                        kind: ResearchJobResultKind::ModelVersion,
+                        id: view.model_version_id.as_uuid(),
+                    }),
                     coverage: None,
                 })
             }
@@ -190,7 +197,10 @@ impl ResearchJobExecutor {
                     .run(params.model_version_id, params.request, progress, cancel)
                     .await?;
                 Ok(JobOutcome {
-                    result_ref: Some(view.backtest_report_id.as_uuid()),
+                    result: Some(ResearchJobResultRef {
+                        kind: ResearchJobResultKind::BacktestReport,
+                        id: view.backtest_report_id.as_uuid(),
+                    }),
                     coverage: None,
                 })
             }
@@ -200,7 +210,10 @@ impl ResearchJobExecutor {
                     .run(params.model_version_id, params.request, progress, cancel)
                     .await?;
                 Ok(JobOutcome {
-                    result_ref: Some(view.path_set_id.as_uuid()),
+                    result: Some(ResearchJobResultRef {
+                        kind: ResearchJobResultKind::BacktestPathSet,
+                        id: view.path_set_id.as_uuid(),
+                    }),
                     coverage: None,
                 })
             }
@@ -208,7 +221,10 @@ impl ResearchJobExecutor {
                 let outcome = self.bias_tables.fit(params, progress, cancel).await?;
                 // Fail-closed fits succeed with no artifact (result_ref = None).
                 Ok(JobOutcome {
-                    result_ref: outcome.artifact_id.map(|id| id.as_uuid()),
+                    result: outcome.artifact_id.map(|id| ResearchJobResultRef {
+                        kind: ResearchJobResultKind::CalibrationArtifact,
+                        id: id.as_uuid(),
+                    }),
                     coverage: None,
                 })
             }
@@ -218,7 +234,10 @@ impl ResearchJobExecutor {
                     .fit(params, progress, cancel)
                     .await?;
                 Ok(JobOutcome {
-                    result_ref: outcome.artifact_id.map(|id| id.as_uuid()),
+                    result: outcome.artifact_id.map(|id| ResearchJobResultRef {
+                        kind: ResearchJobResultKind::CalibrationArtifact,
+                        id: id.as_uuid(),
+                    }),
                     coverage: None,
                 })
             }
@@ -228,7 +247,10 @@ impl ResearchJobExecutor {
                     .execute(params, progress, cancel)
                     .await?;
                 Ok(JobOutcome {
-                    result_ref: Some(view.parity_run_id.as_uuid()),
+                    result: Some(ResearchJobResultRef {
+                        kind: ResearchJobResultKind::FeatureParityRun,
+                        id: view.parity_run_id.as_uuid(),
+                    }),
                     coverage: None,
                 })
             }
@@ -244,7 +266,10 @@ impl ResearchJobExecutor {
                     )
                     .await?;
                 Ok(JobOutcome {
-                    result_ref: Some(view.artifact_id.as_uuid()),
+                    result: Some(ResearchJobResultRef {
+                        kind: ResearchJobResultKind::TradePolicyArtifact,
+                        id: view.artifact_id.as_uuid(),
+                    }),
                     coverage: None,
                 })
             }
@@ -260,7 +285,10 @@ impl ResearchJobExecutor {
                     )
                     .await?;
                 Ok(JobOutcome {
-                    result_ref: Some(params.validation_run_id.as_uuid()),
+                    result: Some(ResearchJobResultRef {
+                        kind: ResearchJobResultKind::TradePolicyValidationRun,
+                        id: params.validation_run_id.as_uuid(),
+                    }),
                     coverage: None,
                 })
             }
@@ -657,10 +685,10 @@ async fn finalize(
     kind: ResearchJobKind,
     terminal: Terminal,
 ) {
-    let (status, result_ref, error, coverage) = match terminal {
+    let (status, result, error, coverage) = match terminal {
         Terminal::Succeeded(outcome) => (
             ResearchJobStatus::Succeeded,
-            outcome.result_ref,
+            outcome.result,
             None,
             outcome.coverage,
         ),
@@ -685,7 +713,7 @@ async fn finalize(
     };
     match engine
         .repo()
-        .finalize(job_id, owner, status, result_ref, error, coverage)
+        .finalize(job_id, owner, status, result, error, coverage)
         .await
     {
         Ok(info) => {

@@ -18,7 +18,7 @@ use quant_pivot_models::{
     enums::quant::{ResearchJobErrorCode, ResearchJobKind, ResearchJobStatus},
     types::{
         BacktestPathSetId, BacktestReportId, DecisionPolicySnapshotId, ModelSpecId, ModelVersionId,
-        ResearchJobId, ResearchJobParams, TrainingDatasetId,
+        ResearchJobId, ResearchJobParams, RoleCode, TrainingDatasetId,
     },
 };
 
@@ -68,7 +68,7 @@ impl CoreResearchJobPort {
             decision_policy_snapshot_id,
             params_json: params,
             requested_by: ctx.requested_by.clone(),
-            acting_role: ctx.acting_role.clone(),
+            acting_role: RoleCode::new(&ctx.acting_role),
             parent_job_id,
             recovery_attempt: 0,
             max_recovery_attempts: self.max_recovery_attempts,

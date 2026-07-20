@@ -1,12 +1,12 @@
 {
   "format_version": 1,
   "checksum_algorithm": "blake3-256",
-  "migration_engine": "sea-orm-migration/2.0.0-rc.43",
+  "migration_engine": "sea-orm-migration/2.0.0",
   "migrations": [
     {
       "version": "m00000000_000001_bootstrap",
-      "checksum": "ebe25008ebfeb39fc1501960008318de4bd984dd1f9e3d1cd1a9ca51cc74b027",
-      "artifact_length": 383996
+      "checksum": "ed9d99123635a2ec1b2468a143ea798297a524d510006ab6f002ddf74726fef8",
+      "artifact_length": 390874
     }
   ]
 }

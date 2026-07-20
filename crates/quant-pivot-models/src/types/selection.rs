@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 #[derive(
     Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult,
 )]
+#[serde(deny_unknown_fields)]
 pub struct SelectionExclusionSummary {
     /// Count excluded for a stale book.
     pub stale_book_count: u32,

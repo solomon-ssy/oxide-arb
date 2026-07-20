@@ -10,7 +10,8 @@ use crate::{
     enums::quant::{TradePolicyTrialScope, TradePolicyTrialStatus},
     hashing::CanonicalDigest,
     types::{
-        ArtifactUri, ContentHash, ResearchJobId, TradePolicyTrialAttemptId, TradePolicyTrialMetrics,
+        ArtifactUri, ContentHash, ResearchJobId, TradePolicyCandidateId, TradePolicyTrialAttemptId,
+        TradePolicyTrialMetrics,
     },
 };
 
@@ -22,7 +23,7 @@ pub struct NewTradePolicyTrialAttempt {
     pub attempt_ordinal: i64,
     pub experiment_family_hash: ContentHash,
     pub research_program_hash: ContentHash,
-    pub candidate_id: String,
+    pub candidate_id: TradePolicyCandidateId,
     pub candidate_hash: ContentHash,
     pub scope: TradePolicyTrialScope,
     pub fold_index: Option<i32>,
@@ -70,7 +71,7 @@ struct TradePolicyTrialAttemptHashInput<'a> {
     attempt_ordinal: i64,
     experiment_family_hash: &'a ContentHash,
     research_program_hash: &'a ContentHash,
-    candidate_id: &'a str,
+    candidate_id: &'a TradePolicyCandidateId,
     candidate_hash: &'a ContentHash,
     scope: TradePolicyTrialScope,
     fold_index: Option<i32>,
@@ -91,7 +92,7 @@ pub struct TradePolicyTrialAttemptInfo {
     pub attempt_ordinal: i64,
     pub experiment_family_hash: ContentHash,
     pub research_program_hash: ContentHash,
-    pub candidate_id: String,
+    pub candidate_id: TradePolicyCandidateId,
     pub candidate_hash: ContentHash,
     pub scope: TradePolicyTrialScope,
     pub fold_index: Option<i32>,

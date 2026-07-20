@@ -18,13 +18,14 @@ use validator::Validate;
 
 use crate::{
     domain::{
-        FitTradePolicyRequest, ResearchJobInfo, RunBacktestRequest, RunCpcvBacktestRequest,
-        RunFullFeatureParityRequest, TrainModelRequest, pagination::PageRequest,
+        FitTradePolicyRequest, ResearchJobInfo, ResearchJobResultRef, RunBacktestRequest,
+        RunCpcvBacktestRequest, RunFullFeatureParityRequest, TrainModelRequest,
+        pagination::PageRequest,
     },
-    enums::quant::{ResearchJobKind, ResearchJobStatus},
+    enums::quant::{ResearchJobKind, ResearchJobResultKind, ResearchJobStatus},
     types::{
         DatasetCoverage, DecisionPolicySnapshotId, FeatureParityRunId, ModelSpecId, ModelVersionId,
-        ResearchJobError, ResearchJobId, ResearchJobParams, ResearchJobProgress,
+        ResearchJobError, ResearchJobId, ResearchJobParams, ResearchJobProgress, RoleCode,
         TradePolicyArtifactId, TradePolicyValidationRunId, TrainingDatasetId, UserId,
     },
 };
@@ -105,14 +106,14 @@ pub struct ResearchJobView {
     pub progress: Option<ResearchJobProgress>,
     /// Completion fraction in `[0, 1]`, when a positive total is known.
     pub progress_pct: Option<f64>,
-    /// Terminal result id (dataset / model version / backtest report).
-    pub result_ref: Option<Uuid>,
+    /// Namespace-tagged terminal artifact reference.
+    pub result: Option<ResearchJobResultRef>,
     /// Structured failure payload on terminal `failed`.
     pub error: Option<ResearchJobError>,
     /// Build/backtest coverage diagnostics.
     pub coverage_json: Option<DatasetCoverage>,
     pub requested_by: Option<String>,
-    pub acting_role: String,
+    pub acting_role: RoleCode,
     pub parent_job_id: Option<ResearchJobId>,
     /// Number of automatic crash-recovery re-queues so far.
     pub recovery_attempt: i32,
@@ -130,6 +131,7 @@ impl From<ResearchJobInfo> for ResearchJobView {
         let progress = info.progress_json.clone();
         let progress_pct = progress.as_ref().and_then(ResearchJobProgress::pct);
         let error = info.error_json.clone();
+        let result = info.result();
         Self {
             job_id: info.job_id,
             kind: info.kind,
@@ -139,7 +141,7 @@ impl From<ResearchJobInfo> for ResearchJobView {
             params: info.params_json,
             progress,
             progress_pct,
-            result_ref: info.result_ref,
+            result,
             error,
             coverage_json: info.coverage_json,
             requested_by: info.requested_by,
@@ -163,6 +165,7 @@ pub struct ResearchJobListQuery {
     pub kind: Option<ResearchJobKind>,
     pub status: Option<ResearchJobStatus>,
     pub model_spec_id: Option<ModelSpecId>,
+    pub result_kind: Option<ResearchJobResultKind>,
     /// Exact terminal result artifact. For feature-parity jobs this is the
     /// `parity_run_id`, enabling a durable run → job audit deep-link.
     pub result_ref: Option<Uuid>,

@@ -31,7 +31,7 @@ use sea_orm::{
 };
 
 use crate::{
-    postgres::{error, query::paginate_mapped},
+    postgres::{error, query::paginate_mapped, write::upsert_many_chunked},
     traits::TradePolicyRepository,
 };
 
@@ -273,10 +273,9 @@ impl TradePolicyRepository for PgTradePolicyRepository {
         validate_validation_rows(&rows)?;
         let validation_run_id = rows[0].validation_run_id.clone();
         let ordinals = rows.iter().map(|row| row.row_ordinal).collect::<Vec<_>>();
-        quant_trade_policy_validation_row::Entity::insert_many(
-            rows.iter().cloned().map(IntoActiveModel::into_active_model),
-        )
-        .on_conflict(
+        upsert_many_chunked::<quant_trade_policy_validation_row::Entity, _>(
+            &self.db,
+            rows.clone(),
             OnConflict::columns([
                 quant_trade_policy_validation_row::Column::ValidationRunId,
                 quant_trade_policy_validation_row::Column::RowOrdinal,
@@ -284,9 +283,7 @@ impl TradePolicyRepository for PgTradePolicyRepository {
             .do_nothing()
             .to_owned(),
         )
-        .exec_without_returning(&self.db)
-        .await
-        .map_err(StorageError::from)?;
+        .await?;
         let stored = quant_trade_policy_validation_row::Entity::find()
             .filter(
                 quant_trade_policy_validation_row::Column::ValidationRunId.eq(validation_run_id),
@@ -575,8 +572,7 @@ fn validate_trial_attempt(attempt: &NewTradePolicyTrialAttempt) -> Result<(), St
         )
     })?;
     if attempt.attempt_ordinal < 0
-        || attempt.candidate_id.trim().is_empty()
-        || attempt.candidate_id.chars().count() > 128
+        || attempt.candidate_id.as_str().chars().count() > 128
         || !scope_shape_valid
         || !evidence_shape_valid
         || !terminal_shape_valid

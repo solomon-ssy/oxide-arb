@@ -44,13 +44,14 @@ use quant_pivot_models::{
     },
     types::{
         AccountSnapshotId, AttributionDetail, CapitalAllocationId, ContentHash,
-        DecisionPolicySnapshotId, EntryConditionInstanceId, EntryOutcome, ExecutionOrderId,
-        ExitOutcome, MarketId, MarketSelectionId, OrderId, OrderIntentId, PortfolioPlanId,
-        PositionId, Price, RecommendationId, RecommendationReportId, ReconciliationEvidence,
-        ReconciliationEvidenceChain, ReconciliationId, ReportDataQualitySnapshotId,
-        SelectionExclusionSummary, SettlementBalanceEvidence, SettlementPayoutVector,
-        SettlementRedeemId, SettlementRedeemIndexSets, SettlementRedeemLotId,
-        SettlementTokenBalance, Shares, TokenId, Usd,
+        DecisionPolicySnapshotId, EntryConditionInstanceId, EntryOutcome, EvmAddress,
+        EvmTransactionHash, ExecutionOrderId, ExitOutcome, MarketId, MarketSelectionId, OrderId,
+        OrderIntentId, PortfolioPlanId, PositionId, Price, RecommendationId,
+        RecommendationReportId, ReconciliationEvidence, ReconciliationEvidenceChain,
+        ReconciliationId, ReportDataQualitySnapshotId, SelectionExclusionSummary,
+        SettlementBalanceEvidence, SettlementPayoutVector, SettlementRedeemId,
+        SettlementRedeemIndexSets, SettlementRedeemLotId, SettlementTokenBalance, Shares, TokenId,
+        Usd,
     },
 };
 use quant_pivot_repository::{
@@ -696,14 +697,15 @@ async fn seed_settlement_redeems(
     funder: &str,
     summary: &mut UiDemoSeedSummary,
 ) {
+    let funder = EvmAddress::parse(funder).expect("UI demo funder must be a canonical EVM address");
     let hold_intents = seed_settlement_hold_lots(db, infra, submission, summary).await;
     seed_settlement_isolated_markets(db, infra, summary).await;
 
     let redeem_repo = PgSettlementRedeemRepository::new(db.clone());
-    seed_settlement_pending_redeem(&redeem_repo, funder, summary).await;
-    seed_settlement_submitted_redeem(&redeem_repo, funder, summary).await;
-    seed_settlement_failed_redeem(&redeem_repo, funder, summary).await;
-    seed_confirmed_settlement_batch(db, &redeem_repo, funder, &hold_intents, summary).await;
+    seed_settlement_pending_redeem(&redeem_repo, &funder, summary).await;
+    seed_settlement_submitted_redeem(&redeem_repo, &funder, summary).await;
+    seed_settlement_failed_redeem(&redeem_repo, &funder, summary).await;
+    seed_confirmed_settlement_batch(db, &redeem_repo, &funder, &hold_intents, summary).await;
 }
 
 async fn seed_settlement_hold_lots(
@@ -767,7 +769,7 @@ async fn seed_settlement_isolated_markets(
 
 async fn seed_settlement_pending_redeem(
     redeem_repo: &PgSettlementRedeemRepository,
-    funder: &str,
+    funder: &EvmAddress,
     summary: &mut UiDemoSeedSummary,
 ) {
     redeem_repo
@@ -784,7 +786,7 @@ async fn seed_settlement_pending_redeem(
 
 async fn seed_settlement_submitted_redeem(
     redeem_repo: &PgSettlementRedeemRepository,
-    funder: &str,
+    funder: &EvmAddress,
     summary: &mut UiDemoSeedSummary,
 ) {
     let submitted_id = SettlementRedeemId::from_v7();
@@ -806,7 +808,8 @@ async fn seed_settlement_submitted_redeem(
     redeem_repo
         .mark_submitted(
             &submitted_row.settlement_redeem_id,
-            "0xuidemo1111111111111111111111111111111111111111111111111111111111".to_owned(),
+            EvmTransactionHash::parse(format!("0x{}", "1".repeat(64)))
+                .expect("valid UI demo transaction hash"),
             Utc::now(),
         )
         .await
@@ -816,7 +819,7 @@ async fn seed_settlement_submitted_redeem(
 
 async fn seed_settlement_failed_redeem(
     redeem_repo: &PgSettlementRedeemRepository,
-    funder: &str,
+    funder: &EvmAddress,
     summary: &mut UiDemoSeedSummary,
 ) {
     let failed_market = MarketId::new("ui-demo-settle-failed");
@@ -850,7 +853,7 @@ async fn seed_settlement_failed_redeem(
 async fn seed_confirmed_settlement_batch(
     db: &DatabaseConnection,
     redeem_repo: &PgSettlementRedeemRepository,
-    funder: &str,
+    funder: &EvmAddress,
     hold_intents: &[(ExecutionTxnIds, OrderIntentId)],
     summary: &mut UiDemoSeedSummary,
 ) {
@@ -1123,13 +1126,13 @@ fn filled_reconciliation_write(
 fn new_settlement_redeem(
     settlement_redeem_id: SettlementRedeemId,
     market_id: &MarketId,
-    funder: &str,
+    funder: &EvmAddress,
     state: SettlementRedeemState,
 ) -> NewSettlementRedeem {
     NewSettlementRedeem {
         settlement_redeem_id,
         market_id: market_id.clone(),
-        funder_address: funder.to_owned(),
+        funder_address: funder.clone(),
         wallet_kind: ExecutionWalletKind::Proxy,
         state,
         tx_hash: None,

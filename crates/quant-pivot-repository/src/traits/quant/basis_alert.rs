@@ -22,6 +22,16 @@ pub trait BasisAlertRepository: Send + Sync {
         market_id: &MarketId,
     ) -> Result<Option<BasisAlertInfo>, StorageError>;
 
+    /// Latest alert for every requested market. Implementations must batch the
+    /// lookup rather than delegating to `latest_for_market` in a loop.
+    async fn latest_for_markets(
+        &self,
+        market_ids: &[MarketId],
+    ) -> Result<Vec<BasisAlertInfo>, StorageError>;
+
+    /// Persist a bounded alert batch using bind-safe statements.
+    async fn record_many(&self, alerts: Vec<NewBasisAlert>) -> Result<(), StorageError>;
+
     /// Page the alert feed, newest first.
     async fn page(
         &self,

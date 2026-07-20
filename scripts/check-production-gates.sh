@@ -14,6 +14,7 @@ rust_static() {
   bash scripts/lint-quant-pivot-boundary.sh
   bash scripts/lint-quant-pivot-errors.sh
   bash scripts/lint-dead-semantics.sh
+  bash scripts/lint-active-doc-contracts.sh
   bash scripts/lint-clickhouse-correctness.sh
   bash scripts/lint-training-serving-parity.sh
   bash scripts/lint-phase-lifecycle.sh
@@ -60,6 +61,9 @@ docker_gate() {
 protected_e2e() {
   (
     cd ui
+    # Config activation intentionally invalidates frozen execution artifacts.
+    # Separate Playwright invocations give each suite its own fresh backend.
+    pnpm exec playwright test apps/web-antdv-next/tests/e2e/config-governance.spec.ts
     pnpm exec playwright test apps/web-antdv-next/tests/e2e/phase-11-7-protected-flow.spec.ts
   )
 }

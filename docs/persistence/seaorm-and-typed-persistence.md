@@ -80,11 +80,11 @@ Rust struct 与 PostgreSQL 列布局是两个不同层次的决策：
 
 `operation_log.detail` 是一个有意保留的开放文档边界：它是跨领域、非权威、只整体展示的脱敏取证摘要，内部 key 不参与 SQL 查询、业务决策或状态重建。禁止为它制造覆盖全仓 action 的巨大 tagged enum；写入边界必须保证 object shape、大小/深度上限和敏感 key 拒绝规则。各 action 的权威状态仍由 typed domain table / governance audit 保存。
 
-`quant_feature_vector` 的三份文档必须分别建模：`payload` 是固定 envelope + registry 驱动的 feature-name map，`source_refs` 是 `Vec<EvidenceSourceRef>`，`decision_capture` 是内容哈希承诺的 `DecisionCaptureEvidence`。三者都由系统解释，因此使用 canonical typed JSONB；动态 feature key 不等于允许裸 `Value`。这些类型由 compute/persistence 共享，repository 不做二次 JSON 解码。
+`quant_feature_vector` 的四份文档必须分别建模：`decision_boundary` 是统一 PIT 时间边界，`payload` 是固定 envelope + registry 驱动的 feature-name map，`source_refs` 是 `Vec<EvidenceSourceRef>`，`decision_capture` 是内容哈希承诺的 `DecisionCaptureEvidence`。四者都由系统解释，因此使用 canonical typed JSONB；动态 feature key 不等于允许裸 `Value`。这些类型由 compute/persistence 共享，repository 不做二次 JSON 解码。
 
 ### 3.2 当前 JSONB 逐域决策账本
 
-下表记录当前 runtime entity 的全部 JSONB 字段族。这里的“保留”不是因为已经 derive `FromJsonQueryResult`，而是因为生产者、消费者、查询、更新、约束和生命周期共同证明其为原子文档。任何调用方开始按内部字段过滤、局部 patch 或建立 FK 时，必须重新打开该决策。
+下表记录当前 runtime entity 的全部 JSONB 字段族。机器可校验的逐字段事实源是 `schema/jsonb-field-decisions.toml`：`jsonb-field-audit` 以 Rust AST 双向核对 runtime entity、persistence DTO、fresh-boot v1 snapshot、顶层闭合 serde shape 和登记项，新增、删除、类型漂移、裸 `Json`/`Value`、external boundary 扩张或未知字段 fail-open 都会阻断 CI。这里的“保留”不是因为已经 derive `FromJsonQueryResult`，而是因为生产者、消费者、查询、更新、约束和生命周期共同证明其为原子文档。任何调用方开始按内部字段过滤、局部 patch 或建立 FK 时，必须重新打开该决策。
 
 | 字段族 | 上下文与访问模式 | 决策与取舍 |
 |---|---|---|
@@ -141,7 +141,7 @@ Rust struct 与 PostgreSQL 列布局是两个不同层次的决策：
 
 - `UserId` 只表示已认证用户主体；system automation 使用 `Option<UserId>::None`，同时保留非空 actor label 快照。不得以 username `String` 替代主体 identity。
 - `RoleCode` 是可由 RBAC 数据扩展的稳定 code，因此使用 validated newtype，而不是把当前角色列表冻结成 Rust/PG enum。
-- `research_job.result_ref` 是跨多个结果实体 namespace 的多态引用。当前保留 UUID 载体是有意的暂态决策；在建立 `result_kind + tagged result identity + kind/FK` 完整模型前，禁止把它包装成任一具体 result ID 来制造虚假类型安全。
+- `research_job.result_ref` 是跨多个结果实体 namespace 的多态引用。持久化使用受 lifecycle CHECK 约束的 `result_kind + result_ref` 成对列，domain/API/UI 使用 `{ kind, id }` tagged reference；禁止把 UUID 包装成任一具体结果 ID 来制造虚假单一 identity，也禁止恢复无 discriminator 的 response 字段。
 - `SHOW`、catalog、ClickHouse identifier 等 SQL identifier 必须来自封闭 enum/manifest。即使 SQL 是静态管理语句，也不得让 `&str` 从调用方流入格式化位置。
 
 ## 6. Entity First 与 boot migration
@@ -165,6 +165,24 @@ Rust struct 与 PostgreSQL 列布局是两个不同层次的决策：
 - 一个 API response 的一致性边界由同一 transaction/snapshot 或单条 statement 保证；禁止混合 DB row、ArcSwap cache 和多个时点的独立查询。
 - 关键 repository 必须有 statement-count test/tracing budget。查询次数是契约，而不仅是性能建议。
 
+循环 I/O 必须在评审中归入下列唯一类别：
+
+| 类别 | 允许条件 | 确定性预算 |
+|---|---|---|
+| `TrueNPlusOne` | 不允许 | 改为 join/Loader/`IN`/batch write 后为固定 statement 数 |
+| `BindLimitedBatch` | 仅数据库 bind/packet 上限要求分块 | PostgreSQL 写入为 `ceil(rows / floor(65535 / entity_column_count))`；读取为 `ceil(ids / 65535)` |
+| `PerAggregateTransaction` | 每项必须独立持锁、校验所有权、释放资本或留下独立审计 | 调用方必须有 hard batch cap、timeout 和 metrics；不能用该分类掩盖普通 CRUD N+1 |
+
+当前闭环边界：
+
+- Config resources、activity、snapshot options 和 model picker 均由单条 DB-authoritative projection 返回，并有 statement-count 回归测试。
+- Casbin policy/role 同步、weather projection/outbox 和 basis-alert cooldown 已从逐行查询/写入改为集合查询与 bind-safe batch write。
+- 所有普通多行 insert/upsert/returning 进入 `postgres::write`；唯一直接 `insert_many` 例外是 Casbin `add_policies`，因为其“任一重复则整批回滚”语义依赖单语句 affected-row count，并在调用边界硬性拒绝超过 bind budget 的输入。
+- report recommendation 的无副作用状态迁移使用集合 update；intent 终止仍逐 aggregate 执行，因为每个 intent 必须在同一事务中独立更新 condition、capital 和 audit。`reports.max_top_n` 另受绝对 1,000 行 cascade ceiling 约束。
+- domain-event 外部投递后的 publish/failure 回写保留逐 event 所有权校验；worker batch 固定为 500。这里的单项失败隔离属于 `PerAggregateTransaction`，不是加载关联的 N+1。
+
+CI 只用 deterministic statement/row/byte budget 判定。p50/p95/p99 通过 tracing 与数据库 query log 留作运行验收证据，不作为易波动的静态失败门槛。
+
 参考官方 [Nested PartialModel](https://www.sea-ql.org/SeaORM/docs/relation/nested-selects/)、[Model Loader](https://www.sea-ql.org/SeaORM/docs/relation/model-loader/) 与 [Entity Loader](https://www.sea-ql.org/SeaORM/docs/relation/entity-loader/)。
 
 ## 8. Transaction、CAS 与 idempotency
@@ -180,14 +198,25 @@ Rust struct 与 PostgreSQL 列布局是两个不同层次的决策：
 
 ## 9. Raw SQL 例外
 
-允许的 raw SQL 只存在于集中 typed dialect module：
+允许的 native SQL 只存在于集中 typed dialect module，并必须绑定 compiled `SqlContract`：
 
 - PostgreSQL catalog/admin/advisory lock；
 - SeaORM/SeaQuery 无法表达的 ordered-set percentile；
 - ClickHouse typed schema/query renderer；
 - 明确标注的 test-only corruption case。
 
-每个例外必须登记用途、输入类型、identifier 来源和测试。identifier 必须来自封闭 enum/manifest，不得格式化用户字符串。普通 CRUD、join、aggregate、upsert、DDL 不得以“更方便”为由写 raw SQL。
+`SqlContract` 是唯一 native-SQL registry，至少包含稳定 ID、dialect、owner、typed input/output、statement/result-row/result-byte budget 和 safety class。ClickHouse wrapper 将 contract ID 写入 `log_comment`，并以 `max_result_rows`、`max_result_bytes`、`result_overflow_mode=throw` 在服务端拒绝越界结果；PostgreSQL raw result 由固定 shape 和 typed decode 约束。identifier 必须来自封闭 enum/manifest，不得格式化用户字符串。
+
+动态 renderer 的 identifier 来源同样是契约：runtime research-readiness 在插值前要求整个 `ResearchSourceBinding` 与 canonical built-in registry 精确相等；PG/CH lifecycle 只接受通过长度/字符校验并被 dialect quote 的配置标识，或 compiled migration manifest 中的封闭对象名。仅“做了转义”但来源仍开放的字符串不满足该边界。
+
+`cargo run -q -p quant-pivot-xtask -- sql-contract-audit` 使用 Rust AST 双向核对 declaration、compiled registry 和 usage，并拒绝：
+
+- 未登记的 ClickHouse `.query`、`sqlx::query*` 或 SeaORM raw `Statement`；
+- Core/Web/Bin 直接持有 native SQL；
+- 非 lifecycle native SQL 在循环中执行；
+- registry 陈旧项、未使用项和重复 contract ID。
+
+普通 CRUD、join、aggregate、upsert 和 SeaQuery 可表达的 DDL 不得以“更方便”为由进入 registry。test-only corruption SQL只允许留在 `cfg(test)` 隔离模块，不计入 production registry。
 
 ## 10. Review checklist
 

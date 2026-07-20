@@ -1,6 +1,6 @@
 //! Integration-test harness (Phase 0).
 
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, future::pending, sync::Arc};
 
 use actix_test::TestRequest;
 use actix_web::{
@@ -48,13 +48,14 @@ use quant_pivot_models::{
         FeatureParityEventView, FeatureParityRunListQuery, FeatureParityRunView,
         FitBiasTableRequest, FitModelCalibratorRequest, GatePreviewIntent, GovernanceActor,
         HealthReport, JobProgressSink, JobSubmitContext, KillSwitchPort, KillSwitchView,
-        LifecycleSchemaVerificationPort, LinkageResolveSummaryView, MarketDataPort,
-        MarketLinkageGovernancePort, MarketLinkageInfo, MarketLinkageListQuery, MetricsScrapePort,
-        MissingReasonCountView, ModelCalibrationFitJobParams, ModelCalibrationFitOutcome,
-        ModelCalibrationFitPort, ModelCalibrationFitPreflightView, ModelComparisonReportInfo,
-        ModelGovernancePort, ModelPublishedCatalogQuery, ModelSpecInfo, ModelSpecListQuery,
-        ModelSpecPort, ModelTrainingPort, ModelVersionInfo, ModelVersionListQuery,
-        NegRiskEventDriftView, NewBasisAlert, NewMarketLinkage, OverrideLinkageRequest, Paginated,
+        LifecycleLeaseGuardPort, LifecycleLeaseProviderPort, LifecycleSchemaVerificationPort,
+        LinkageResolveSummaryView, MarketDataPort, MarketLinkageGovernancePort, MarketLinkageInfo,
+        MarketLinkageListQuery, MetricsScrapePort, MissingReasonCountView,
+        ModelCalibrationFitJobParams, ModelCalibrationFitOutcome, ModelCalibrationFitPort,
+        ModelCalibrationFitPreflightView, ModelComparisonReportInfo, ModelGovernancePort,
+        ModelPublishedCatalogQuery, ModelSpecInfo, ModelSpecListQuery, ModelSpecPort,
+        ModelTrainingPort, ModelVersionInfo, ModelVersionListQuery, NegRiskEventDriftView,
+        NewBasisAlert, NewMarketLinkage, OverrideLinkageRequest, Paginated,
         ParticipantConcentrationDetailView, ParticipantConcentrationSummaryView,
         PolicySnapshotPort, PreparedPolicySnapshot, ProductionEvidenceArtifactVerificationPort,
         PublishFactorCommand, PublishFactorsBatchCommand, PublishModelCommand,
@@ -170,6 +171,32 @@ impl LifecycleSchemaVerificationPort for StaticSchemaVerifier {
     }
 }
 
+struct StaticLifecycleLeaseProvider;
+
+struct StaticLifecycleLease;
+
+#[async_trait]
+impl LifecycleLeaseProviderPort for StaticLifecycleLeaseProvider {
+    async fn acquire(&self) -> QuantResult<Box<dyn LifecycleLeaseGuardPort>> {
+        Ok(Box::new(StaticLifecycleLease))
+    }
+}
+
+#[async_trait]
+impl LifecycleLeaseGuardPort for StaticLifecycleLease {
+    async fn cancelled(&self) {
+        pending::<()>().await;
+    }
+
+    fn ensure_active(&self) -> QuantResult<()> {
+        Ok(())
+    }
+
+    async fn release(self: Box<Self>) -> QuantResult<()> {
+        Ok(())
+    }
+}
+
 struct StaticProductionEvidenceVerifier;
 
 #[async_trait]
@@ -208,6 +235,7 @@ fn web_harness_app_state(input: WebHarnessAppStateInput<'_>) -> AppState {
             postgres_schema_fingerprint,
             clickhouse_schema_fingerprint,
         }),
+        lifecycle_leases: Arc::new(StaticLifecycleLeaseProvider),
         production_evidence_verification: Arc::new(StaticProductionEvidenceVerifier),
         runtime_config_apply: Arc::clone(&input.runtime_config_apply)
             as Arc<dyn PolicySnapshotPort>,
@@ -2007,6 +2035,24 @@ impl BasisAlertRepository for MockBasisAlertRepository {
         _market_id: &MarketId,
     ) -> Result<Option<BasisAlertInfo>, StorageError> {
         Ok(None)
+    }
+
+    async fn latest_for_markets(
+        &self,
+        _market_ids: &[MarketId],
+    ) -> Result<Vec<BasisAlertInfo>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn record_many(&self, alerts: Vec<NewBasisAlert>) -> Result<(), StorageError> {
+        if alerts.is_empty() {
+            Ok(())
+        } else {
+            Err(StorageError::InvariantViolation {
+                entity: Some("quant_basis_alert"),
+                detail: "mock".to_owned(),
+            })
+        }
     }
 
     async fn page(

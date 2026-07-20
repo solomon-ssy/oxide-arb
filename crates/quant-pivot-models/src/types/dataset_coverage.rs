@@ -42,6 +42,7 @@ pub struct DatasetFeatureStateCounts {
 
 /// Per-sample coverage accounting for a built dataset.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
+#[serde(deny_unknown_fields)]
 pub struct DatasetCoverage {
     /// Sample instants the plan produced.
     pub planned_samples: u64,
@@ -149,4 +150,5 @@ impl DatasetCoverage {
 
 /// Forward label horizons (seconds) persisted on a training-dataset ledger row.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
+#[serde(transparent)]
 pub struct TrainingHorizonsSecs(pub Vec<u64>);

@@ -6,6 +6,10 @@
 
 use serde::Deserialize;
 
+/// Absolute reconciliation input cap enforced at config validation and the
+/// native-SQL repository boundary.
+pub const MAX_TRADE_TAPE_RECONCILIATION_ROWS: usize = 1_000_000;
+
 /// Market-data connections (CLOB WebSocket + Gamma catalog + Data API).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]

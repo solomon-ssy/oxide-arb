@@ -136,7 +136,7 @@ impl ActorRoles {
     pub fn contains_enabled(&self, code: &str) -> bool {
         self.0
             .iter()
-            .any(|role| role.code == code && role.status == RoleStatus::Enabled)
+            .any(|role| role.code.as_str() == code && role.status == RoleStatus::Enabled)
     }
 }
 

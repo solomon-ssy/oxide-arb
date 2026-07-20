@@ -2,7 +2,7 @@
 //!
 //! [`DeployConfig`] owns everything that is structurally bound to a process
 //! start: connection endpoints and pools, channel capacities and shard counts,
-//! credential sources, the web server, and logging. Operator tunables that must
+//! plaintext secrets, the web server, and logging. Operator tunables that must
 //! change **without** a restart live in independently revisioned
 //! [`DecisionPolicySnapshot`](crate::runtime_config::DecisionPolicySnapshot) instead and are
 //! managed through the governed Config API — never by editing TOML.
@@ -11,10 +11,9 @@
 //!
 //! The `config` crate merges sources in registration order; **later wins**:
 //!
-//! 1. Environment-specific immutable non-secret TOML override
+//! 1. Optional gitignored machine-local TOML override
 //! 2. `config/quant-pivot.toml`
 //! 3. Hard-coded defaults (`serde` `default` on each struct field)
-//! 4. systemd Credentials resolved from typed references at bootstrap
 //!
 //! Every section rejects unknown keys (`deny_unknown_fields`): a typo or a
 //! leftover runtime section in the TOML aborts startup instead of being
@@ -51,9 +50,7 @@ use crate::{
     enums::quant::QuantRuntimeMode,
 };
 use quant_pivot_error::{
-    QuantResult,
-    config::ConfigError,
-    config_validation::{ConfigValidationError, ConfigValidationReport},
+    QuantResult, config::ConfigError, config_validation::ConfigValidationReport,
 };
 use serde::Deserialize;
 
@@ -74,17 +71,17 @@ pub struct DeployConfig {
     pub domain_sources: DomainSourcesConfig,
     /// Logging (level + format).
     pub observability: ObservabilityConfig,
-    /// Telegram/webhook bindings and systemd credential references.
+    /// Telegram/webhook bindings and secrets.
     pub notifications: NotificationChannelsConfig,
     /// Postgres + `ClickHouse` connections and write batching.
     pub db: DatabaseConfig,
     /// Redis + in-process cache layer.
     pub cache: CacheConfig,
-    /// Wallet credential reference.
+    /// Wallet secret and identity binding.
     pub keys: KeysConfig,
     /// HTTP/WebSocket server + JWT.
     pub web: WebConfig,
-    /// Quant pivot structural parameters (workers, credential load policy).
+    /// Quant pivot structural parameters and worker budgets.
     pub quant: QuantDeployConfig,
     /// Research plane settings (artifact-store root).
     pub research: ResearchDeployConfig,
@@ -94,36 +91,17 @@ impl DeployConfig {
     /// Load configuration from the given directory.
     ///
     /// Loads `{dir}/quant-pivot.toml` and an optional immutable environment
-    /// override, resolves typed systemd credential references, and runs
-    /// mode-agnostic semantic validation before returning.
+    /// override, then runs mode-agnostic semantic validation.
     pub fn load(config_dir: &str) -> QuantResult<Self> {
-        let mut deploy = Self::load_internal(config_dir, false)?;
-        let has_migration_password = deploy.db.postgres.migration.password.is_some()
-            || deploy.db.clickhouse.migration.password.is_some();
-        let production_profile = deploy.db.clickhouse.deployment_id != "local-development"
-            || deploy.research.artifact_store.kind == ArtifactStoreKind::S3;
-        if production_profile && has_migration_password {
-            return Err(ConfigError::from(ConfigValidationReport::single_error(
-                ConfigValidationError::invalid_value(
-                    "db.*.migration.password",
-                    "production runtime configuration must not contain DDL credentials",
-                ),
-            ))
-            .into());
-        }
-        deploy.db.postgres.migration.password = None;
-        deploy.db.clickhouse.migration.password = None;
-        Ok(deploy)
+        Self::load_internal(config_dir)
     }
 
-    /// Load deploy configuration for schema plan/apply/manifest commands.
-    ///
-    /// Unlike the runtime projection, this retains migration-only passwords.
+    /// Load the same deploy configuration for explicit schema commands.
     pub fn load_for_migration(config_dir: &str) -> QuantResult<Self> {
-        Self::load_internal(config_dir, true)
+        Self::load_internal(config_dir)
     }
 
-    fn load_internal(config_dir: &str, include_migration_credentials: bool) -> QuantResult<Self> {
+    fn load_internal(config_dir: &str) -> QuantResult<Self> {
         let mut deploy: Self = build_config(config_dir)
             .map_err(ConfigError::Load)?
             .try_deserialize()
@@ -134,88 +112,9 @@ impl DeployConfig {
             .domain_sources
             .chainlink_data_streams
             .normalize_credentials();
-        normalize_migration_password(&mut deploy.db.postgres.migration.password);
-        normalize_migration_password(&mut deploy.db.clickhouse.migration.password);
-        deploy.resolve_runtime_credentials()?;
-        if include_migration_credentials {
-            deploy.resolve_migration_credentials()?;
-        }
         deploy.ensure_valid_common()?;
         deploy.lifecycle.validate_source_contract()?;
         Ok(deploy)
-    }
-}
-
-fn normalize_migration_password(password: &mut Option<secret::SystemdCredentialRef>) {
-    if password
-        .as_ref()
-        .is_some_and(|credential| !credential.is_configured())
-    {
-        *password = None;
-    }
-}
-
-impl DeployConfig {
-    fn resolve_runtime_credentials(&mut self) -> QuantResult<()> {
-        self.polymarket.onchain.resolve_credentials()?;
-        if let Some(private_key) = self.keys.private_key.as_mut() {
-            private_key.resolve("keys.private_key")?;
-        }
-        self.db.postgres.password.resolve("db.postgres.password")?;
-        self.db
-            .clickhouse
-            .password
-            .resolve("db.clickhouse.password")?;
-        self.cache.redis.password.resolve("cache.redis.password")?;
-        self.web.jwt.signing_key.resolve("web.jwt.signing_key")?;
-        self.research
-            .evidence_attestation
-            .signing_key
-            .resolve("research.evidence_attestation.signing_key")?;
-        for (index, credential) in self
-            .research
-            .evidence_attestation
-            .previous_signing_keys
-            .iter_mut()
-            .enumerate()
-        {
-            credential.resolve(&format!(
-                "research.evidence_attestation.previous_signing_keys[{index}]"
-            ))?;
-        }
-        if let Some(api_key) = self.polymarket.relayer.api_key.as_mut() {
-            api_key.resolve("polymarket.relayer.api_key")?;
-        }
-        if let Some(api_key) = self.domain_sources.chainlink_data_streams.api_key.as_mut() {
-            api_key.resolve("domain_sources.chainlink_data_streams.api_key")?;
-        }
-        if let Some(api_secret) = self
-            .domain_sources
-            .chainlink_data_streams
-            .api_secret
-            .as_mut()
-        {
-            api_secret.resolve("domain_sources.chainlink_data_streams.api_secret")?;
-        }
-        self.notifications
-            .telegram
-            .bot_token_credential
-            .resolve("notifications.telegram.bot_token_credential")?;
-        self.notifications
-            .webhook
-            .authorization_credential
-            .resolve("notifications.webhook.authorization_credential")?;
-        Ok(())
-    }
-
-    fn resolve_migration_credentials(&mut self) -> QuantResult<()> {
-        if let Some(password) = self.db.postgres.migration.password.as_mut() {
-            password.resolve("db.postgres.migration.password")?;
-        }
-        if let Some(password) = self.db.clickhouse.migration.password.as_mut() {
-            password.resolve("db.clickhouse.migration.password")?;
-        }
-        Ok(())
     }
 }
 
@@ -307,8 +206,8 @@ mod tests {
     #[test]
     fn protected_rpc_endpoint_accepts_authenticated_url_without_debug_leakage() {
         let mut deploy = DeployConfig::default();
-        deploy.polymarket.onchain.rpc_endpoint = PolygonRpcEndpoint::SystemdCredential {
-            credential: secret::SystemdCredentialRef::from_resolved(
+        deploy.polymarket.onchain.rpc_endpoint = PolygonRpcEndpoint::Protected {
+            url: secret::SecretText::from(
                 "https://provider.invalid/v2/provider-key?tenant=private",
             ),
         };
@@ -399,29 +298,15 @@ mod tests {
     }
 
     #[test]
-    fn typed_credential_reference_deserializes_and_plaintext_is_rejected() {
-        let typed: DeployConfig =
-            toml::from_str("[keys]\nprivate_key = { name = \"polymarket-private-key\" }\n")
-                .expect("typed credential reference");
-        assert_eq!(
-            typed
-                .keys
-                .private_key
-                .as_ref()
-                .map(|value| value.name.as_str()),
-            Some("polymarket-private-key")
-        );
-
-        let plaintext: Result<DeployConfig, _> =
-            toml::from_str("[keys]\nprivate_key = \"0xplaintext\"\n");
-        assert!(
-            plaintext.is_err(),
-            "deploy config must never accept a plaintext credential"
-        );
+    fn secret_text_deserializes_plaintext_and_stays_redacted() {
+        let plaintext: DeployConfig =
+            toml::from_str("[keys]\nprivate_key = \"0xplaintext\"\n").expect("plaintext secret");
+        assert_eq!(plaintext.keys.private_key(), Some("0xplaintext"));
+        assert!(!format!("{plaintext:?}").contains("0xplaintext"));
     }
 
     #[test]
-    fn immutable_local_toml_overrides_non_secret_base_values() {
+    fn local_toml_overrides_base_values() {
         let dir = env::temp_dir().join(format!("quant_pivot_local_cfg_test_{}", process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).expect("temp config dir");
@@ -435,7 +320,7 @@ mod tests {
             dir.join("quant-pivot.local.toml"),
             "[db.postgres]\nhost = \"staging.internal\"\n",
         )
-        .expect("write immutable environment override");
+        .expect("write machine-local override");
 
         let deploy = DeployConfig::load(dir.to_str().expect("utf-8")).expect("load");
         assert_eq!(deploy.db.postgres.host, "staging.internal");
@@ -444,101 +329,55 @@ mod tests {
     }
 
     #[test]
-    fn migration_credential_reference_uses_local_override_without_plaintext() {
-        let dir = env::temp_dir().join(format!("quant_pivot_migration_cfg_{}", process::id()));
+    fn local_plaintext_overlay_reaches_postgres_adapter_and_stays_redacted() {
+        let dir = env::temp_dir().join(format!("quant_pivot_local_secret_{}", process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).expect("temp config dir");
-        fs::write(
-            dir.join("quant-pivot.toml"),
-            "[db.postgres.migration]\npassword = { name = \"pg-migration-base\" }\n",
-        )
-        .expect("write base config");
+        fs::write(dir.join("quant-pivot.toml"), "").expect("write base config");
         fs::write(
             dir.join("quant-pivot.local.toml"),
-            "[db.postgres.migration]\npassword = { name = \"pg-migration-staging\" }\n",
+            "[db.postgres]\npassword = \"local-postgres-password\"\n",
         )
-        .expect("write environment override");
+        .expect("write local secret override");
 
-        let deploy: DeployConfig = build_config(dir.to_str().expect("utf-8"))
-            .expect("build config")
-            .try_deserialize()
-            .expect("deserialize typed reference");
-        assert_eq!(
-            deploy
-                .db
-                .postgres
-                .migration
-                .password
-                .as_ref()
-                .map(|credential| credential.name.as_str()),
-            Some("pg-migration-staging")
-        );
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn production_runtime_rejects_migration_password() {
-        let dir = env::temp_dir().join(format!("quant_pivot_runtime_secret_{}", process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).expect("temp config dir");
-        fs::write(
-            dir.join("quant-pivot.toml"),
-            "[db.clickhouse]\ndeployment_id = \"production\"\n\
-             [db.postgres.migration]\npassword = { name = \"postgres-migration-password\" }\n",
-        )
-        .expect("write production config");
-        let error = DeployConfig::load(dir.to_str().expect("utf-8"))
-            .expect_err("runtime must reject DDL credentials");
-        assert!(
-            error
-                .to_string()
-                .contains("must not contain DDL credentials")
-        );
-        assert!(!error.to_string().contains("postgres-migration-password"));
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn production_runtime_treats_empty_migration_password_as_absent() {
-        let dir = env::temp_dir().join(format!("quant_pivot_empty_ddl_secret_{}", process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).expect("temp config dir");
-        fs::write(
-            dir.join("quant-pivot.toml"),
-            "[db.clickhouse]\ndeployment_id = \"production\"\n\
-             [db.postgres.migration]\npassword = { name = \"\" }\n",
-        )
-        .expect("write production config");
         let deploy = DeployConfig::load(dir.to_str().expect("utf-8"))
-            .expect("empty DDL password is not a credential");
-        assert!(deploy.db.postgres.migration.password.is_none());
+            .expect("load exact local-development plaintext");
+        let url = deploy
+            .db
+            .postgres
+            .try_connection_url()
+            .expect("build PostgreSQL adapter URL");
+        assert_eq!(
+            url::Url::parse(&url)
+                .expect("parse PostgreSQL URL")
+                .password(),
+            Some("local-postgres-password")
+        );
+        assert!(!format!("{deploy:?}").contains("local-postgres-password"));
+
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn production_example_toml_deserializes_and_validates() {
+    fn production_example_deserializes_and_placeholders_fail_validation() {
         let template = workspace_config_dir().join("quant-pivot.production.example.toml");
         if !template.exists() {
             eprintln!("skipping production_example_toml_deserializes: {template:?} missing");
             return;
         }
         let raw = fs::read_to_string(&template).expect("read production example");
-        let mut parsed: DeployConfig =
+        let parsed: DeployConfig =
             toml::from_str(&raw).expect("production example must deserialize");
-        assert_eq!(parsed.db.postgres.migration.user, "quant_pivot_migrator");
-        assert_eq!(parsed.db.clickhouse.migration.user, "quant_pivot_migrator");
         assert!(matches!(
             &parsed.polymarket.onchain.rpc_endpoint,
-            PolygonRpcEndpoint::SystemdCredential { credential }
-                if credential.name == "polygon-rpc-url"
+            PolygonRpcEndpoint::Protected { url }
+                if url.expose_secret().contains("REPLACE_WITH_")
         ));
-        parsed.polymarket.onchain.rpc_endpoint = PolygonRpcEndpoint::SystemdCredential {
-            credential: secret::SystemdCredentialRef::from_resolved(
-                "https://provider.invalid/v2/test-provider-key",
-            ),
-        };
-        parsed
-            .ensure_valid_common()
-            .expect("production example must validate after documented secret injection");
+        assert!(
+            parsed
+                .ensure_valid_for_quant_mode(QuantRuntimeMode::ReportOnly)
+                .is_err(),
+            "production placeholders must be replaced before startup"
+        );
     }
 }

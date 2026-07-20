@@ -7,6 +7,7 @@ use crate::enums::common::MarketCategory;
 
 /// Display identity frozen at decision time.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
+#[serde(deny_unknown_fields)]
 pub struct RecommendationIdentity {
     pub category: MarketCategory,
     pub question: String,

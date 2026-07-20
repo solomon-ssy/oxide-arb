@@ -22,12 +22,16 @@ use quant_pivot_models::{
     enums::rbac::casbin::SECTIONS,
 };
 use sea_orm::{
-    ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter, TransactionTrait,
+    ColumnTrait, DatabaseConnection, EntityTrait, Iterable, QueryFilter, TransactionTrait,
     sea_query::Condition,
 };
 
-use crate::postgres::rbac::casbin::row;
 use std::error::Error;
+
+use crate::{
+    batch::max_rows_per_insert,
+    postgres::{rbac::casbin::row, write::insert_many_chunked},
+};
 
 /// Persists Casbin policies into the `casbin_rule` table.
 pub struct PgCasbinAdapter {
@@ -130,8 +134,7 @@ impl Adapter for PgCasbinAdapter {
             .await
             .map_err(adapter_error)?;
         if !rows.is_empty() {
-            Entity::insert_many(rows)
-                .exec_without_returning(&txn)
+            insert_many_chunked::<Entity, _>(&txn, rows)
                 .await
                 .map_err(adapter_error)?;
         }
@@ -175,31 +178,30 @@ impl Adapter for PgCasbinAdapter {
         if rules.is_empty() {
             return Ok(false);
         }
-
-        let txn = self.db.begin().await.map_err(adapter_error)?;
-        // All-or-nothing, matching `MemoryAdapter`: if any rule already exists,
-        // add none and report that storage was not modified.
-        for rule in &rules {
-            let existing = Entity::find()
-                .filter(row::exact_match(ptype, rule))
-                .count(&txn)
-                .await
-                .map_err(adapter_error)?;
-            if existing > 0 {
-                txn.rollback().await.map_err(adapter_error)?;
-                return Ok(false);
-            }
+        if rules.len() > max_rows_per_insert(Column::iter().count()) {
+            return Err(adapter_reason(
+                "add_policies exceeds the one-statement atomic bind budget",
+            ));
         }
 
+        let txn = self.db.begin().await.map_err(adapter_error)?;
+        let expected = u64::try_from(rules.len()).map_err(adapter_error)?;
         let rows = rules
             .iter()
             .map(|rule| row::policy_to_row(ptype, rule))
             .collect::<Vec<_>>();
-        Entity::insert_many(rows)
+        let inserted = Entity::insert_many(rows)
             .on_conflict(row::full_tuple_conflict().do_nothing().to_owned())
             .exec_without_returning(&txn)
             .await
             .map_err(adapter_error)?;
+        // Preserve Casbin's all-or-nothing contract without a read-per-rule:
+        // any existing or input-duplicate tuple makes the affected count short,
+        // so the transaction is rolled back in full.
+        if inserted != expected {
+            txn.rollback().await.map_err(adapter_error)?;
+            return Ok(false);
+        }
         txn.commit().await.map_err(adapter_error)?;
         Ok(true)
     }
@@ -224,18 +226,25 @@ impl Adapter for PgCasbinAdapter {
         ptype: &str,
         rules: Vec<Vec<String>>,
     ) -> casbin::Result<bool> {
-        let mut removed_any = false;
-        let txn = self.db.begin().await.map_err(adapter_error)?;
-        for rule in rules {
-            let result = Entity::delete_many()
-                .filter(row::exact_match(ptype, &rule))
-                .exec(&txn)
-                .await
-                .map_err(adapter_error)?;
-            removed_any |= result.rows_affected > 0;
+        if rules.is_empty() {
+            return Ok(false);
         }
+        if rules.len() > max_rows_per_insert(Column::iter().count()) {
+            return Err(adapter_reason(
+                "remove_policies exceeds the one-statement atomic bind budget",
+            ));
+        }
+        let condition = rules.iter().fold(Condition::any(), |condition, rule| {
+            condition.add(row::exact_match(ptype, rule))
+        });
+        let txn = self.db.begin().await.map_err(adapter_error)?;
+        let result = Entity::delete_many()
+            .filter(condition)
+            .exec(&txn)
+            .await
+            .map_err(adapter_error)?;
         txn.commit().await.map_err(adapter_error)?;
-        Ok(removed_any)
+        Ok(result.rows_affected > 0)
     }
 
     async fn remove_filtered_policy(

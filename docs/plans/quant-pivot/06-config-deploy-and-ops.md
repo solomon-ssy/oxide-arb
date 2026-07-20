@@ -16,13 +16,13 @@
 - Deploy 类型：[`crates/quant-pivot-models/src/config/`](../../../crates/quant-pivot-models/src/config/mod.rs)。
 - 六类 policy 类型：[`crates/quant-pivot-models/src/runtime_config/`](../../../crates/quant-pivot-models/src/runtime_config/mod.rs)。
 - 逐叶处置：[`inventory/config-leaf-inventory.tsv`](inventory/config-leaf-inventory.tsv)。
-- 常量处置：[`inventory/code-constant-inventory.tsv`](inventory/code-constant-inventory.tsv)。
+- 持久化语义字段处置：[`schema/persistence-field-decisions.toml`](../../../schema/persistence-field-decisions.toml)，由 AST 审计器同时核对 runtime entity、persistence DTO 与 fresh-boot v1 snapshot。
 
 系统只允许以下四种配置所有权：
 
 1. **Runtime Policy**：必须热更新、必须审计、会改变后续业务决策的参数。
 2. **Immutable Artifact / Job Spec**：会改变研究、训练、回放或 lineage 的方法定义。
-3. **Deploy Config**：进程构造、外部绑定、主机容量与 credential reference；重启后生效。
+3. **Deploy Config**：进程构造、外部绑定、主机容量与 secret；重启后生效。
 4. **Code Constant**：协议事实、数学不变量和防御性上限，不允许操作员修改。
 
 一个字段不能同时属于两类；没有 validator、consumer、apply boundary 或 rollback test 的字段不得成为 Runtime Policy。
@@ -48,7 +48,7 @@
 | `feedback` | 删除 | 无 | 旧字段没有完整消费者；能力落地后再新增独立资源 |
 | `hold_to_resolution*` | 删除 | 无 | 旧路径为 no-op，不能伪装成治理能力 |
 
-逐叶路径、消费者、生效边界、validator、secret classification 与删除原因必须以 inventory 为准；CI 对生成结果做双向一致性检查。
+Deploy Config 的逐叶路径、消费者、生效边界、validator、secret classification 与删除原因必须以 config leaf inventory 为准；持久化语义字段以独立 TOML 决策表为准。两者均由 CI 对源码做双向一致性检查。
 
 ## 2. 六类 Runtime Policy
 
@@ -110,7 +110,7 @@ Deploy Config 只保留启动时才能决定的内容：
 - service endpoint、bind address、allowed origin、deployment identity；
 - PostgreSQL、ClickHouse、Redis 与 artifact store 的连接位置；
 - Gamma/CLOB/Data API、on-chain、relayer 与 domain provider binding；
-- wallet kind、funder、secret provider 与 credential name；
+- wallet kind、funder 与 secret；
 - TLS、JWT issuer/audience、日志格式/级别；
 - lifecycle expectation 与 production build identity；
 - 七组 host resource budgets。
@@ -127,18 +127,19 @@ Deploy Config 只保留启动时才能决定的内容：
 
 worker 的 lease、heartbeat、poll、queue 与 concurrency 只能由对应 budget/typed deploy section 声明并校验合法比例；不得用多个互相独立的 magic duration 形成矛盾状态。
 
-### 4.1 Secret 与 credential
+### 4.1 Secret
 
-private key、DB password、JWT signing key、bot token、relayer key、webhook secret 和 evidence signing key 不得作为可打印 TOML/env value。标准部署只保存 systemd credential reference，进程从受限 credential file 读取；deployment API 只返回 `available/missing`，不返回 secret 或文件内容。
+private key、DB password、JWT signing key、bot token、relayer key、webhook secret 和 evidence signing key 在 TOML 中使用非空明文 string，反序列化后统一由 `SecretText` 持有。`SecretText` 使用 zeroizing storage，`Debug` 固定脱敏，且不实现 `Serialize` 或 `Display`；调用方只能在外部 client 构造边界显式借用其值。
 
-runtime identity 不持有 DDL 凭据。PostgreSQL/ClickHouse schema credential 仅由 deploy CLI 使用。
+tracked `quant-pivot.toml` 只允许空值，tracked production example 只允许显式 `REPLACE_WITH_*` 占位符。local-development 的真实值写入 gitignored `quant-pivot.local.toml`；preproduction/production 使用权限 `0600`、不进入版本控制的 deploy TOML。secret 不允许通过环境变量或进程参数传入；任何 `Debug`、错误、日志和 deployment API 只允许返回 `available/missing/invalid`，不得返回值。
+
+PostgreSQL 与 ClickHouse 各自只有一组 `user + password`，runtime、schema CLI 与 Fresh Boot 复用同一身份。应用启动路径只执行 schema verify；migration/reset/seal mutation 只能由显式 CLI/治理入口执行，并统一持有 canonical PostgreSQL lifecycle lease。这里不维护第二组 migrator credential，也不提供 identity fallback。
 
 ### 4.2 来源优先级
 
-1. source-controlled non-secret TOML；
-2. environment-specific immutable override；
-3. systemd Credentials；
-4. 禁止任意环境变量覆盖业务 policy。
+1. source-controlled non-secret `quant-pivot.toml`；
+2. gitignored `quant-pivot.local.toml`（仅 exact local-development 可含明文 secret）；
+3. 禁止任意环境变量覆盖 Deploy Config、secret 或业务 policy。
 
 ## 5. SeaORM / PostgreSQL 规则
 

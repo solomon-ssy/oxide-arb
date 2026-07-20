@@ -1,9 +1,10 @@
 //! `ClickHouse` client wrapper.
 
-use crate::clickhouse::migration;
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::config::ClickHouseConfig;
 use tracing::info;
+
+use crate::{clickhouse::migration, sql_contract_registry::CLICKHOUSE_HEALTH};
 
 pub struct ClickHousePool {
     client: clickhouse::Client,
@@ -42,8 +43,8 @@ impl ClickHousePool {
     }
 
     pub async fn health_check(&self) -> Result<(), StorageError> {
-        self.client
-            .query("SELECT 1")
+        CLICKHOUSE_HEALTH
+            .clickhouse_query(&self.client, "SELECT 1")
             .fetch_one::<u8>()
             .await
             .map_err(|e| {

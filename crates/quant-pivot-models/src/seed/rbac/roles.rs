@@ -10,7 +10,7 @@ use crate::{
             ROLE_SUPER_ADMIN, ROLE_VIEWER, ROLES_ARTIFACT, RoleIdMap,
         },
     },
-    types::RoleId,
+    types::{RoleCode, RoleId},
 };
 use sea_orm::{
     ActiveValue::Set, ColumnTrait, DbErr, EntityTrait, QueryFilter, sea_query::OnConflict,
@@ -82,7 +82,7 @@ pub async fn load(db: &sea_orm::DatabaseTransaction, ctx: &mut SeedContext) -> R
         let id = RoleId::from_v7();
         models.push(role::ActiveModel {
             id: Set(id),
-            code: Set((*code).to_owned()),
+            code: Set(RoleCode::new(*code)),
             name: Set((*name).to_owned()),
             description: Set(Some((*description).to_owned())),
             kind: Set(RoleKind::Builtin),
@@ -126,7 +126,7 @@ async fn hydrate(db: &sea_orm::DatabaseTransaction, ctx: &mut SeedContext) -> Re
     for (code, name, description, sort) in BUILTIN_ROLES {
         let row = rows
             .iter()
-            .find(|row| row.code == *code)
+            .find(|row| row.code.as_str() == *code)
             .ok_or_else(|| DbErr::Custom(format!("built-in role `{code}` is missing")))?;
         if row.name != *name
             || row.description.as_deref() != Some(*description)

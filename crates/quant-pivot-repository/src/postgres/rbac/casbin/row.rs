@@ -114,14 +114,20 @@ pub fn full_tuple_conflict() -> OnConflict {
     ])
 }
 
-/// Build an exact-match condition for `ptype` plus every provided token,
-/// leaving unprovided value columns unconstrained.
+/// Build an exact full-tuple match, padding unused value columns exactly as
+/// [`policy_to_row`] does. A shorter rule must never match a longer rule that
+/// merely shares its prefix.
 pub fn exact_match(ptype: &str, rule: &[String]) -> Condition {
-    let mut condition = Condition::all().add(Column::Ptype.eq(ptype));
-    for (index, token) in rule.iter().enumerate() {
-        if let Some(column) = value_column(index) {
-            condition = condition.add(column.eq(token.as_str()));
-        }
+    let mut values: [String; VALUE_COLUMNS] = Default::default();
+    for (slot, token) in values.iter_mut().zip(rule.iter()) {
+        slot.clone_from(token);
     }
-    condition
+    Condition::all()
+        .add(Column::Ptype.eq(ptype))
+        .add(Column::V0.eq(values[0].as_str()))
+        .add(Column::V1.eq(values[1].as_str()))
+        .add(Column::V2.eq(values[2].as_str()))
+        .add(Column::V3.eq(values[3].as_str()))
+        .add(Column::V4.eq(values[4].as_str()))
+        .add(Column::V5.eq(values[5].as_str()))
 }

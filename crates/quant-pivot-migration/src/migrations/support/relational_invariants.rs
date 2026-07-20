@@ -89,6 +89,18 @@ const CONSTRAINTS: &[v1::ConstraintSpec] = &[
         definition: "CHECK ((((subject_kind = 'model_run'::qp_parity_subject_kind) AND (model_run_id IS NOT NULL) AND (recommendation_report_id IS NULL) AND (model_version_id IS NULL) AND (training_dataset_id IS NULL) AND (market_selection_id IS NOT NULL) AND (decision_at IS NOT NULL) AND (selection_hash IS NOT NULL)) OR ((subject_kind = 'recommendation_report'::qp_parity_subject_kind) AND (model_run_id IS NULL) AND (recommendation_report_id IS NOT NULL) AND (model_version_id IS NULL) AND (training_dataset_id IS NULL) AND (market_selection_id IS NOT NULL) AND (decision_at IS NOT NULL) AND (selection_hash IS NOT NULL)) OR ((subject_kind = 'model_version'::qp_parity_subject_kind) AND (model_run_id IS NULL) AND (recommendation_report_id IS NULL) AND (model_version_id IS NOT NULL) AND (training_dataset_id IS NOT NULL) AND (market_selection_id IS NULL) AND (decision_at IS NULL) AND (selection_hash IS NULL))))",
     },
     v1::ConstraintSpec {
+        name: "ck_quant_feature_parity_run_semantic_codes",
+        table: "quant_feature_parity_run",
+        kind: v1::ConstraintKind::Check,
+        definition: "CHECK ((((acting_role)::text ~ '^[a-z][a-z0-9_]{0,63}$'::text) AND ((failure_code IS NULL) OR ((failure_code)::text ~ '^[a-z][a-z0-9_]{0,127}$'::text))))",
+    },
+    v1::ConstraintSpec {
+        name: "ck_quant_feature_parity_state_acting_role",
+        table: "quant_feature_parity_state",
+        kind: v1::ConstraintKind::Check,
+        definition: "CHECK (((acting_role IS NULL) OR ((acting_role)::text ~ '^[a-z][a-z0-9_]{0,63}$'::text)))",
+    },
+    v1::ConstraintSpec {
         name: "ck_quant_feature_vector_documents",
         table: "quant_feature_vector",
         kind: v1::ConstraintKind::Check,
@@ -128,7 +140,7 @@ const CONSTRAINTS: &[v1::ConstraintSpec] = &[
         name: "ck_quant_model_spec_authoring_provenance",
         table: "quant_model_spec",
         kind: v1::ConstraintKind::Check,
-        definition: "CHECK (((char_length(btrim(created_by_label)) BETWEEN 1 AND 256) AND ((created_by_role IS NULL) OR (char_length(btrim(created_by_role)) BETWEEN 1 AND 128)) AND (char_length(btrim(reason)) BETWEEN 1 AND 2048)))",
+        definition: "CHECK (((char_length(btrim(created_by_label)) >= 1) AND (char_length(btrim(created_by_label)) <= 256) AND ((created_by_role IS NULL) OR ((char_length(btrim(created_by_role)) >= 1) AND (char_length(btrim(created_by_role)) <= 128))) AND (char_length(btrim(reason)) >= 1) AND (char_length(btrim(reason)) <= 2048)))",
     },
     v1::ConstraintSpec {
         name: "ck_quant_model_version_quality_gate_report",
@@ -266,7 +278,7 @@ const CONSTRAINTS: &[v1::ConstraintSpec] = &[
         name: "quant_recommendation_report_top_n_check",
         table: "quant_recommendation_report",
         kind: v1::ConstraintKind::Check,
-        definition: "CHECK ((top_n > 0))",
+        definition: "CHECK (((top_n > 0) AND (top_n <= 1000)))",
     },
     v1::ConstraintSpec {
         name: "quant_report_fact_delivery_check",
@@ -440,13 +452,31 @@ const CONSTRAINTS: &[v1::ConstraintSpec] = &[
         name: "quant_report_run_error_code_check",
         table: "quant_report_run",
         kind: v1::ConstraintKind::Check,
-        definition: "CHECK (((error_code IS NULL) OR ((char_length(error_code) >= 1) AND (char_length(error_code) <= 128))))",
+        definition: "CHECK (((error_code IS NULL) OR ((error_code)::text ~ '^[a-z][a-z0-9_]{0,127}$'::text)))",
     },
     v1::ConstraintSpec {
         name: "quant_report_run_error_summary_check",
         table: "quant_report_run",
         kind: v1::ConstraintKind::Check,
         definition: "CHECK (((error_summary IS NULL) OR ((char_length(error_summary) >= 1) AND (char_length(error_summary) <= 4096))))",
+    },
+    v1::ConstraintSpec {
+        name: "ck_role_code_canonical",
+        table: "role",
+        kind: v1::ConstraintKind::Check,
+        definition: "CHECK (((code)::text ~ '^[a-z][a-z0-9_]{0,63}$'::text))",
+    },
+    v1::ConstraintSpec {
+        name: "ck_system_bootstrap_transition_acting_role",
+        table: "system_bootstrap_transition",
+        kind: v1::ConstraintKind::Check,
+        definition: "CHECK (((acting_role IS NULL) OR ((acting_role)::text ~ '^[a-z][a-z0-9_]{0,63}$'::text)))",
+    },
+    v1::ConstraintSpec {
+        name: "ck_quant_report_run_trigger_key",
+        table: "quant_report_run",
+        kind: v1::ConstraintKind::Check,
+        definition: "CHECK (((length((trigger_key)::text) >= 1) AND (length((trigger_key)::text) <= 256) AND (octet_length((trigger_key)::text) = length((trigger_key)::text)) AND ((trigger_key)::text ~ '^[[:graph:]]+$'::text) AND (position(chr(92) in (trigger_key)::text) = 0) AND (position(chr(34) in (trigger_key)::text) = 0)))",
     },
     v1::ConstraintSpec {
         name: "quant_report_run_knowledge_lag_secs_check",
@@ -458,7 +488,7 @@ const CONSTRAINTS: &[v1::ConstraintSpec] = &[
         name: "quant_report_run_top_n_check",
         table: "quant_report_run",
         kind: v1::ConstraintKind::Check,
-        definition: "CHECK (((top_n IS NULL) OR (top_n > 0)))",
+        definition: "CHECK (((top_n IS NULL) OR ((top_n > 0) AND (top_n <= 1000))))",
     },
     v1::ConstraintSpec {
         name: "quant_report_schedule_gap_check",
@@ -482,7 +512,7 @@ const CONSTRAINTS: &[v1::ConstraintSpec] = &[
         name: "quant_research_readiness_evidence_check",
         table: "quant_research_readiness_evidence",
         kind: v1::ConstraintKind::Check,
-        definition: "CHECK (((window_start < window_end) AND (window_end <= observed_at) AND (observed_at < expires_at) AND (artifact_version <> ''::text) AND (attestation_key_id <> ''::text)))",
+        definition: "CHECK (((window_start < window_end) AND (window_end <= observed_at) AND (observed_at < expires_at) AND (length((artifact_version)::text) BETWEEN 1 AND 256) AND (octet_length((artifact_version)::text) = length((artifact_version)::text)) AND ((artifact_version)::text ~ '^[[:graph:]]+$'::text) AND (position(chr(92) in (artifact_version)::text) = 0) AND (position(chr(34) in (artifact_version)::text) = 0) AND (length((attestation_key_id)::text) BETWEEN 1 AND 256) AND (octet_length((attestation_key_id)::text) = length((attestation_key_id)::text)) AND ((attestation_key_id)::text ~ '^[[:graph:]]+$'::text) AND (position(chr(92) in (attestation_key_id)::text) = 0) AND (position(chr(34) in (attestation_key_id)::text) = 0)))",
     },
     v1::ConstraintSpec {
         name: "ck_quant_research_job_params_kind",
@@ -491,16 +521,40 @@ const CONSTRAINTS: &[v1::ConstraintSpec] = &[
         definition: "CHECK (((jsonb_typeof(params_json) = 'object'::text) AND (jsonb_typeof((params_json -> 'params'::text)) = 'object'::text) AND ((params_json ->> 'kind'::text) = (kind)::text)))",
     },
     v1::ConstraintSpec {
+        name: "ck_quant_research_job_result_reference",
+        table: "quant_research_job",
+        kind: v1::ConstraintKind::Check,
+        definition: "CHECK ((((result_kind IS NULL) = (result_ref IS NULL)) AND ((status = 'succeeded'::qp_research_job_status) OR ((result_kind IS NULL) AND (result_ref IS NULL))) AND ((result_kind IS NULL) OR ((kind = 'dataset_build'::qp_research_job_kind) AND (result_kind = 'training_dataset'::qp_research_job_result_kind)) OR ((kind = 'model_train'::qp_research_job_kind) AND (result_kind = 'model_version'::qp_research_job_result_kind)) OR ((kind = 'backtest'::qp_research_job_kind) AND (result_kind = 'backtest_report'::qp_research_job_result_kind)) OR ((kind = 'cpcv_backtest'::qp_research_job_kind) AND (result_kind = 'backtest_path_set'::qp_research_job_result_kind)) OR ((kind = ANY (ARRAY['bias_table_fit'::qp_research_job_kind, 'model_calibration_fit'::qp_research_job_kind])) AND (result_kind = 'calibration_artifact'::qp_research_job_result_kind)) OR ((kind = 'feature_parity'::qp_research_job_kind) AND (result_kind = 'feature_parity_run'::qp_research_job_result_kind)) OR ((kind = 'trade_policy_fit'::qp_research_job_kind) AND (result_kind = 'trade_policy_artifact'::qp_research_job_result_kind)) OR ((kind = 'trade_policy_validation'::qp_research_job_kind) AND (result_kind = 'trade_policy_validation_run'::qp_research_job_result_kind)))))",
+    },
+    v1::ConstraintSpec {
+        name: "ck_quant_research_job_acting_role",
+        table: "quant_research_job",
+        kind: v1::ConstraintKind::Check,
+        definition: "CHECK (((acting_role)::text ~ '^[a-z][a-z0-9_]{0,63}$'::text))",
+    },
+    v1::ConstraintSpec {
         name: "quant_source_slice_check",
         table: "quant_source_slice",
         kind: v1::ConstraintKind::Check,
-        definition: "CHECK (((window_start < window_end) AND (window_end <= pit_cutoff) AND (evaluation_track = ANY (ARRAY['research_only'::text, 'semi_auto_candidate'::text])) AND (((status = 'materializing'::qp_source_slice_status) AND (manifest_uri IS NULL) AND (manifest_hash IS NULL) AND (manifest_json IS NULL) AND (failure_detail IS NULL) AND (completed_at IS NULL)) OR ((status = 'ready'::qp_source_slice_status) AND (manifest_uri IS NOT NULL) AND (manifest_hash IS NOT NULL) AND (manifest_json IS NOT NULL) AND (failure_detail IS NULL) AND (completed_at IS NOT NULL)) OR ((status = 'failed'::qp_source_slice_status) AND (manifest_uri IS NULL) AND (manifest_hash IS NULL) AND (manifest_json IS NULL) AND (failure_detail IS NOT NULL) AND (completed_at IS NOT NULL)))))",
+        definition: "CHECK (((window_start < window_end) AND (window_end <= pit_cutoff) AND ((reader_contract_version)::text ~ '^[A-Za-z0-9_.@-]{1,64}$'::text) AND ((schema_contract_version)::text ~ '^[A-Za-z0-9_.@-]{1,64}$'::text) AND (((status = 'materializing'::qp_source_slice_status) AND (manifest_uri IS NULL) AND (manifest_hash IS NULL) AND (manifest_json IS NULL) AND (failure_detail IS NULL) AND (completed_at IS NULL)) OR ((status = 'ready'::qp_source_slice_status) AND (manifest_uri IS NOT NULL) AND (manifest_hash IS NOT NULL) AND (manifest_json IS NOT NULL) AND (failure_detail IS NULL) AND (completed_at IS NOT NULL)) OR ((status = 'failed'::qp_source_slice_status) AND (manifest_uri IS NULL) AND (manifest_hash IS NULL) AND (manifest_json IS NULL) AND (failure_detail IS NOT NULL) AND (completed_at IS NOT NULL)))))",
+    },
+    v1::ConstraintSpec {
+        name: "ck_quant_settlement_redeem_evm_identity",
+        table: "quant_settlement_redeem",
+        kind: v1::ConstraintKind::Check,
+        definition: "CHECK ((((funder_address)::text ~ '^0x[0-9a-f]{40}$'::text) AND ((tx_hash IS NULL) OR ((tx_hash)::text ~ '^0x[0-9a-f]{64}$'::text))))",
+    },
+    v1::ConstraintSpec {
+        name: "ck_quant_trade_tape_block_cursor_contract_address",
+        table: "quant_trade_tape_block_cursor",
+        kind: v1::ConstraintKind::Check,
+        definition: "CHECK (((contract_address)::text ~ '^0x[0-9a-f]{40}$'::text))",
     },
     v1::ConstraintSpec {
         name: "quant_trade_policy_trial_attempt_check",
         table: "quant_trade_policy_trial_attempt",
         kind: v1::ConstraintKind::Check,
-        definition: "CHECK (((attempt_ordinal >= 0) AND ((length(btrim((candidate_id)::text)) >= 1) AND (length(btrim((candidate_id)::text)) <= 128)) AND ((fold_index IS NULL) OR (fold_index >= 0)) AND ((path_index IS NULL) OR (path_index >= 0)) AND ((evidence_row_count IS NULL) OR (evidence_row_count >= 0))))",
+        definition: "CHECK (((attempt_ordinal >= 0) AND (length((candidate_id)::text) BETWEEN 1 AND 128) AND (octet_length((candidate_id)::text) = length((candidate_id)::text)) AND ((candidate_id)::text ~ '^[[:graph:]]+$'::text) AND (position(chr(92) in (candidate_id)::text) = 0) AND (position(chr(34) in (candidate_id)::text) = 0) AND ((fold_index IS NULL) OR (fold_index >= 0)) AND ((path_index IS NULL) OR (path_index >= 0)) AND ((evidence_row_count IS NULL) OR (evidence_row_count >= 0))))",
     },
     v1::ConstraintSpec {
         name: "quant_trade_policy_trial_attempt_check1",
@@ -530,7 +584,7 @@ const CONSTRAINTS: &[v1::ConstraintSpec] = &[
         name: "quant_trade_policy_validation_row_check",
         table: "quant_trade_policy_validation_row",
         kind: v1::ConstraintKind::Check,
-        definition: "CHECK (((row_ordinal >= 0) AND (record_key <> ''::text) AND ((evidence_kind)::text = ANY (ARRAY[('observation_eligibility'::character varying)::text, ('fills'::character varying)::text, ('candidate_trials'::character varying)::text, ('cohort_trials'::character varying)::text, ('cpcv_paths'::character varying)::text, ('coverage_gaps'::character varying)::text, ('statistical_summaries'::character varying)::text])) AND ((expected_row_hash IS NOT NULL) OR (actual_row_hash IS NOT NULL)) AND ((passed AND (expected_row_hash = actual_row_hash) AND (diagnostic_kind IS NULL) AND (detail IS NULL)) OR ((NOT passed) AND (diagnostic_kind IS NOT NULL) AND (detail IS NOT NULL)))))",
+        definition: "CHECK (((row_ordinal >= 0) AND (record_key <> ''::text) AND ((evidence_kind)::text = ANY (ARRAY[('observation_eligibility'::character varying)::text, ('fills'::character varying)::text, ('candidate_trials'::character varying)::text, ('cohort_trials'::character varying)::text, ('cpcv_paths'::character varying)::text, ('coverage_gaps'::character varying)::text, ('statistical_summaries'::character varying)::text])) AND ((expected_row_hash IS NOT NULL) OR (actual_row_hash IS NOT NULL)) AND ((diagnostic_kind IS NULL) OR ((diagnostic_kind)::text ~ '^[a-z][a-z0-9_]{0,127}$'::text)) AND ((passed AND (expected_row_hash = actual_row_hash) AND (diagnostic_kind IS NULL) AND (detail IS NULL)) OR ((NOT passed) AND (diagnostic_kind IS NOT NULL) AND (detail IS NOT NULL)))))",
     },
     v1::ConstraintSpec {
         name: "quant_training_dataset_check",

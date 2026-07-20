@@ -33,6 +33,7 @@ pub struct TokenDataQualityRecord {
 
 /// JSONB column wrapper for `quant_report_data_quality_snapshot.tokens_json`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
+#[serde(transparent)]
 pub struct ReportDataQualityTokens(pub Vec<TokenDataQualityRecord>);
 
 impl ReportDataQualityTokens {

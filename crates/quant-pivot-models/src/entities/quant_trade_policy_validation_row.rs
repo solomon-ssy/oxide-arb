@@ -3,7 +3,9 @@
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
-use crate::types::{ContentHash, MarketId, TokenId, TradePolicyValidationRunId, TrainingExampleId};
+use crate::types::{
+    ContentHash, DiagnosticCode, MarketId, TokenId, TradePolicyValidationRunId, TrainingExampleId,
+};
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -22,7 +24,7 @@ pub struct Model {
     pub expected_row_hash: Option<ContentHash>,
     pub actual_row_hash: Option<ContentHash>,
     pub passed: bool,
-    pub diagnostic_kind: Option<String>,
+    pub diagnostic_kind: Option<DiagnosticCode>,
     #[sea_orm(column_type = "Text", nullable)]
     pub detail: Option<String>,
     pub row_hash: ContentHash,

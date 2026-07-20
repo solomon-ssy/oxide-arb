@@ -6,7 +6,7 @@ use quant_pivot_models::{
         BookL2CheckpointRow, BookMicrostructureRow, ChDecimal64, ChPrice, ChSchemaVersion,
         WeatherForecastFactRow, WeatherObservationFactRow,
     },
-    config::{ClickHouseConfig, SchemaMigrationConfig},
+    config::ClickHouseConfig,
     enums::clickhouse::ChFactSource,
     types::{
         ContentHash, DomainInstrumentKey, DomainSourceId, MarketId, Price, Shares, TokenId, Usd,
@@ -33,7 +33,6 @@ fn test_ch_config(port: u16) -> ClickHouseConfig {
         database: "default".into(),
         user: "default".into(),
         password: "".into(),
-        migration: SchemaMigrationConfig::default(),
         batch_size: 100,
         flush_interval_secs: 5,
         max_concurrent_inserts: 4,

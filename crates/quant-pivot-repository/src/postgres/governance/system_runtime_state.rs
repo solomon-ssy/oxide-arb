@@ -18,7 +18,7 @@ use quant_pivot_models::{
         system_runtime_state::{ActiveModel, Column, Entity, Model},
     },
     enums::{execution::KillSwitchState, quant::QuantRuntimeMode, system::BootstrapPhase},
-    types::BootstrapTransitionId,
+    types::{BootstrapTransitionId, RoleCode},
 };
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, DatabaseConnection, EntityTrait,
@@ -49,7 +49,7 @@ async fn locked_state(txn: &sea_orm::DatabaseTransaction) -> Result<Model, Stora
 struct PhaseTransition<'a> {
     to_phase: BootstrapPhase,
     actor: &'a str,
-    acting_role: Option<&'a str>,
+    acting_role: Option<&'a RoleCode>,
     reason: &'a str,
     report_only_forced_ack: bool,
 }
@@ -82,7 +82,7 @@ async fn persist_phase(
             from_phase,
             to_phase,
             actor: actor.to_owned(),
-            acting_role: acting_role.map(str::to_owned),
+            acting_role: acting_role.cloned(),
             reason: reason.to_owned(),
             report_only_forced_ack,
             occurred_at: now,

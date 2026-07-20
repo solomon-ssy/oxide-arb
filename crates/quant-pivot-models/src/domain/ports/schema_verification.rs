@@ -18,6 +18,21 @@ pub trait LifecycleSchemaVerificationPort: Send + Sync {
     async fn verify_live(&self) -> QuantResult<VerifiedSchemaFingerprints>;
 }
 
+/// Held deployment-wide lifecycle lease. Mutation callers must race their
+/// write future against [`Self::cancelled`] and release explicitly.
+#[async_trait]
+pub trait LifecycleLeaseGuardPort: Send {
+    async fn cancelled(&self);
+    fn ensure_active(&self) -> QuantResult<()>;
+    async fn release(self: Box<Self>) -> QuantResult<()>;
+}
+
+/// Acquire the canonical lifecycle lease used by schema/reset/seal mutations.
+#[async_trait]
+pub trait LifecycleLeaseProviderPort: Send + Sync {
+    async fn acquire(&self) -> QuantResult<Box<dyn LifecycleLeaseGuardPort>>;
+}
+
 /// Re-hash a referenced immutable evidence artifact at the final persistence boundary.
 #[async_trait]
 pub trait ProductionEvidenceArtifactVerificationPort: Send + Sync {

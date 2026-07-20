@@ -66,7 +66,7 @@ async fn do_create(db: &impl ConnectionTrait, new: NewRole) -> Result<RoleInfo, 
     let model = role::Entity::insert(new.into_active_model())
         .exec_with_returning(db)
         .await
-        .map_err(|error| error::map_unique(error, entity::ROLE, &code))?;
+        .map_err(|error| error::map_unique(error, entity::ROLE, code.as_str()))?;
     Ok(model.into())
 }
 

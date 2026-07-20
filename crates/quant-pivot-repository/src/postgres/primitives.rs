@@ -10,14 +10,11 @@ use sea_orm::{
     },
 };
 
+use crate::sql_contract_registry::POSTGRES_SHADOW_LATENCY;
+
 #[derive(Debug, FromQueryResult)]
 struct DatabaseClock {
     now: DateTime<Utc>,
-}
-
-#[derive(Debug, FromQueryResult)]
-struct AdvisoryLockAttempt {
-    acquired: bool,
 }
 
 #[derive(Debug, FromQueryResult)]
@@ -60,29 +57,6 @@ pub(super) async fn advisory_xact_lock(
         .to_owned();
     db.query_one(&query).await.map_err(StorageError::from)?;
     Ok(())
-}
-
-/// Try to acquire a transaction-scoped `PostgreSQL` advisory lock without
-/// blocking. The dialect function and result alias stay fixed in this module;
-/// callers provide only the typed integer lock namespace.
-pub(super) async fn try_advisory_xact_lock(
-    db: &impl ConnectionTrait,
-    key: i64,
-) -> Result<bool, StorageError> {
-    let query = Query::select()
-        .expr_as(
-            Func::cust(Alias::new("PG_TRY_ADVISORY_XACT_LOCK")).arg(Expr::value(key)),
-            Alias::new("acquired"),
-        )
-        .to_owned();
-    AdvisoryLockAttempt::find_by_statement(db.get_database_backend().build(&query))
-        .one(db)
-        .await
-        .map_err(StorageError::from)?
-        .map(|attempt| attempt.acquired)
-        .ok_or_else(|| {
-            StorageError::invariant_violation(None, "database returned no advisory-lock result")
-        })
 }
 
 /// Acquire a transaction-scoped advisory lock derived by `PostgreSQL` from a
@@ -129,9 +103,10 @@ pub(super) async fn shadow_latency_aggregate(
     window_start: DateTime<Utc>,
     window_end: DateTime<Utc>,
 ) -> Result<ShadowLatencyAggregate, StorageError> {
-    ShadowLatencyAggregate::find_by_statement(Statement::from_sql_and_values(
-        DatabaseBackend::Postgres,
-        r"
+    ShadowLatencyAggregate::find_by_statement(POSTGRES_SHADOW_LATENCY.postgres_statement(
+        Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            r"
 WITH decision_prepared AS (
     SELECT
         COUNT(*)::bigint AS sample_count,
@@ -170,7 +145,8 @@ SELECT
     market_delay.p95_ms AS market_delay_p95_ms
 FROM decision_prepared, endpoint_rtt, market_delay
 ",
-        [window_start.into(), window_end.into()],
+            [window_start.into(), window_end.into()],
+        ),
     ))
     .one(db)
     .await

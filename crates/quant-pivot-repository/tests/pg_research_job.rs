@@ -6,8 +6,8 @@ use quant_pivot_models::{
     domain::{BuildTrainingDatasetRequest, NewResearchJob},
     enums::quant::{DatasetPurpose, ResearchJobKind, ResearchJobStatus},
     types::{
-        DecisionPolicySnapshotId, ModelSpecId, ResearchJobId, ResearchJobParams, SchemaVersion,
-        TrainingDatasetId, WorkerId, default_sample_sources,
+        DecisionPolicySnapshotId, ModelSpecId, ResearchJobId, ResearchJobParams, RoleCode,
+        SchemaVersion, TrainingDatasetId, WorkerId, default_sample_sources,
     },
 };
 use quant_pivot_repository::{postgres::PgResearchJobRepository, traits::ResearchJobRepository};
@@ -39,7 +39,7 @@ fn new_job(job_id: ResearchJobId) -> NewResearchJob {
             training_dataset_id: Some(TrainingDatasetId::from_v7()),
         }),
         requested_by: None,
-        acting_role: "system".to_owned(),
+        acting_role: RoleCode::new("system"),
         parent_job_id: None,
         recovery_attempt: 0,
         max_recovery_attempts: 3,

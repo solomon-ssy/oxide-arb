@@ -94,6 +94,7 @@ pub struct DomainEventRow {
 #[derive(
     Debug, Clone, PartialEq, Eq, clickhouse::Row, Serialize, Deserialize, FromJsonQueryResult,
 )]
+#[serde(deny_unknown_fields)]
 pub struct EntryConditionEvaluationEventRow {
     pub evaluation_id: ContentHash,
     pub condition_instance_id: EntryConditionInstanceId,

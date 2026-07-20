@@ -4,7 +4,8 @@ use crate::{
     entities::quant_research_readiness_evidence,
     enums::quant::ResearchReadinessEvidenceKind,
     types::{
-        ArtifactUri, ContentHash, ResearchReadinessEvidenceId, ResearchReadinessEvidencePayload,
+        ArtifactUri, ArtifactVersion, AttestationKeyId, ContentHash, ResearchReadinessEvidenceId,
+        ResearchReadinessEvidencePayload,
     },
 };
 use chrono::{DateTime, Utc};
@@ -24,8 +25,8 @@ pub struct NewResearchReadinessEvidence {
     pub payload_json: ResearchReadinessEvidencePayload,
     pub payload_hash: ContentHash,
     pub artifact_uri: ArtifactUri,
-    pub artifact_version: String,
-    pub attestation_key_id: String,
+    pub artifact_version: ArtifactVersion,
+    pub attestation_key_id: AttestationKeyId,
     pub attestation_mac: ContentHash,
 }
 
@@ -42,8 +43,8 @@ pub struct ResearchReadinessEvidenceInfo {
     pub payload_json: ResearchReadinessEvidencePayload,
     pub payload_hash: ContentHash,
     pub artifact_uri: ArtifactUri,
-    pub artifact_version: String,
-    pub attestation_key_id: String,
+    pub artifact_version: ArtifactVersion,
+    pub attestation_key_id: AttestationKeyId,
     pub attestation_mac: ContentHash,
     pub created_at: DateTime<Utc>,
 }

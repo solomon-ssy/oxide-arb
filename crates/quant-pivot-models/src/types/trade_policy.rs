@@ -1093,6 +1093,7 @@ fn unit_interval(value: Decimal) -> bool {
 
 /// Immutable content hashed and stored for a governed entry/exit policy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
+#[serde(deny_unknown_fields)]
 pub struct TradePolicyArtifactPayload {
     pub format_version: u32,
     pub activation_target: VerticalActivationTarget,

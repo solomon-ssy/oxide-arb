@@ -64,6 +64,7 @@ pub struct PreparedFeeSchedule {
 
 /// Atomic, hash-linked venue order prepared by final admission.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
+#[serde(deny_unknown_fields)]
 pub struct PreparedVenueOrder {
     pub profile_ref: ResearchProfileRef,
     pub token_id: TokenId,
@@ -94,6 +95,7 @@ pub enum ExitReinferenceVerdictKind {
 
 /// Latest re-inference evidence persisted on the intent at the governed cadence.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
+#[serde(deny_unknown_fields)]
 pub struct ExitReinferenceObservation {
     pub observed_at: DateTime<Utc>,
     pub model_version_id: ModelVersionId,
@@ -160,6 +162,7 @@ pub struct NextScaleOutProjection {
 /// chosen by `token_id`); the type stays general so a future closing intent can
 /// reuse it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
+#[serde(deny_unknown_fields)]
 pub struct EntryOrderSpec {
     /// Outcome token to trade.
     pub token_id: TokenId,
@@ -211,6 +214,7 @@ impl EntryOrderSpec {
 /// `entry_composite_score` are the frozen entry-thesis baselines used for
 /// percentage-based stops/targets and signal-degradation re-inference.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
+#[serde(deny_unknown_fields)]
 pub struct ExitPolicySpec {
     /// Take-profit price target.
     pub take_profit_price: Option<Price>,
@@ -309,6 +313,7 @@ pub struct PendingScaleOut {
 
 /// Unified scale-out state for deterministic and opportunistic partial exits.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
+#[serde(deny_unknown_fields)]
 pub struct ScaleOutState {
     /// Frozen entry-filled denominator shared by every scale-out source.
     pub denominator_shares: Option<Shares>,

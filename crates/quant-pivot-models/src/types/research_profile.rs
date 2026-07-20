@@ -272,12 +272,13 @@ pub enum ResearchPolicyFitter {
     WeatherForecast,
 }
 
-/// Evaluation track requested by a fit. It never activates execution by itself.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ResearchEvaluationTrack {
-    ResearchOnly,
-    SemiAutoCandidate,
+crate::pg_enum! {
+    type_name = "qp_research_evaluation_track",
+    /// Evaluation track requested by a fit. It never activates execution by itself.
+    pub enum ResearchEvaluationTrack {
+        ResearchOnly => "research_only",
+        SemiAutoCandidate => "semi_auto_candidate",
+    }
 }
 
 /// Strongly typed source requirements sealed into the source-slice manifest.

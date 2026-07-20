@@ -7,7 +7,9 @@ mod readiness;
 mod schema;
 pub mod write_manager;
 
-pub use ensure::{database_object_count, reset_preproduction_database};
+pub use ensure::{
+    active_preproduction_query_count, database_object_count, reset_preproduction_database,
+};
 pub use migration::{
     ClickHouseMigrationSafety, ClickHouseSchemaMigrationInfo, ClickHouseSchemaPlan,
     ClickHouseSchemaStatus, apply_offline_schema_migrations, apply_online_schema_migrations,

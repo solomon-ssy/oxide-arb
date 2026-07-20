@@ -42,6 +42,7 @@ impl DecisionSource {
 /// globally visible source instant. Keeping both in one value prevents callers
 /// from subtracting the configured lag a second time.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
+#[serde(deny_unknown_fields)]
 pub struct DecisionBoundary {
     decision_at: DateTime<Utc>,
     knowledge_cutoff: DateTime<Utc>,

@@ -2,7 +2,10 @@
 
 use std::{
     env, process,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use crate::{
@@ -98,7 +101,7 @@ use quant_pivot_models::{
         ModelVersionId, OperationDetailDocument, OperationLogId, PortfolioConstraintsSnapshot,
         PortfolioOptimizerMeta, PortfolioRejectedSummary, PortfolioRiskBudget, Price,
         RecommendationId, RecommendationReportId, RecommendationTradePlan, ReportDataQualityTokens,
-        ResearchProfileRef, SelectionExclusionSummary, Shares, TokenId, Usd, WorkerId,
+        ResearchProfileRef, RoleCode, SelectionExclusionSummary, Shares, TokenId, Usd, WorkerId,
         model_metrics::ModelVersionMetrics, model_training::ModelTrainingObjective,
     },
 };
@@ -435,6 +438,24 @@ impl BasisAlertRepository for EmptyBasisAlertRepo {
         _market_id: &MarketId,
     ) -> Result<Option<BasisAlertInfo>, StorageError> {
         Ok(None)
+    }
+
+    async fn latest_for_markets(
+        &self,
+        _market_ids: &[MarketId],
+    ) -> Result<Vec<BasisAlertInfo>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn record_many(&self, alerts: Vec<NewBasisAlert>) -> Result<(), StorageError> {
+        if alerts.is_empty() {
+            Ok(())
+        } else {
+            Err(StorageError::InvariantViolation {
+                entity: Some("quant_basis_alert"),
+                detail: "EmptyBasisAlertRepo is read-only".to_owned(),
+            })
+        }
     }
 
     async fn page(
@@ -1276,7 +1297,7 @@ async fn seed_clear_feature_parity_state(db: &DatabaseConnection) -> FeaturePari
             recovery_run_id: None,
             previous_state_id: None,
             actor: Some("report-pipeline-test".to_owned()),
-            acting_role: Some("risk_owner".to_owned()),
+            acting_role: Some(RoleCode::new("risk_owner")),
             reason: "test fixture clear generation".to_owned(),
         }
         .into_active_model(),
@@ -1647,10 +1668,13 @@ async fn publish_weighted_model(input: &WeightedModelFixture<'_>) {
 }
 
 fn artifact_store() -> Arc<dyn ArtifactStore> {
+    static STORE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
     let root = env::temp_dir().join(format!(
-        "qp_report_pipeline_e2e_{}_{}",
+        "qp_report_pipeline_e2e_{}_{}_{}",
         process::id(),
-        Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        Utc::now().timestamp_nanos_opt().unwrap_or_default(),
+        STORE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
     ));
     Arc::new(LocalArtifactStore::new(root))
 }

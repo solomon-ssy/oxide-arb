@@ -1,6 +1,9 @@
 //! Append-only bootstrap lifecycle transition audit.
 
-use crate::{enums::system::BootstrapPhase, types::BootstrapTransitionId};
+use crate::{
+    enums::system::BootstrapPhase,
+    types::{BootstrapTransitionId, RoleCode},
+};
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
@@ -17,7 +20,7 @@ pub struct Model {
     #[sea_orm(column_type = "Text")]
     pub actor: String,
     #[sea_orm(column_type = "Text", nullable)]
-    pub acting_role: Option<String>,
+    pub acting_role: Option<RoleCode>,
     #[sea_orm(column_type = "Text")]
     pub reason: String,
     pub report_only_forced_ack: bool,

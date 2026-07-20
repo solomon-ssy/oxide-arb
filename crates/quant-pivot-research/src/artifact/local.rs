@@ -4,6 +4,7 @@ use std::{
     io::{Error, ErrorKind},
     path::{self, Path, PathBuf},
     process,
+    sync::atomic::{AtomicU64, Ordering},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -216,13 +217,16 @@ fn io_error(path: &Path, error: &Error) -> ResearchError {
     }
 }
 
-/// Process- and time-unique temp file name for an atomic write.
+/// Process-, time-, and invocation-unique temp file name for an atomic write.
 fn temp_file_name(key: &ArtifactKey) -> String {
+    static WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
+    let sequence = WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     format!(
-        ".{}.{}.{nanos}.tmp",
+        ".{}.{}.{nanos}.{sequence}.tmp",
         key.namespace().as_str(),
         process::id()
     )
@@ -230,7 +234,7 @@ fn temp_file_name(key: &ArtifactKey) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{ArtifactKey, ArtifactStore, LocalArtifactStore};
+    use super::{ArtifactKey, ArtifactStore, LocalArtifactStore, temp_file_name};
     use quant_pivot_models::types::ArtifactUri;
 
     use crate::artifact::ArtifactNamespace;
@@ -252,6 +256,12 @@ mod tests {
                 .map_or(0, |d| d.as_nanos()),
             COUNTER.fetch_add(1, Ordering::Relaxed)
         ))
+    }
+
+    #[test]
+    fn atomic_write_temp_names_are_unique_within_one_process() {
+        let key = ArtifactKey::new(ArtifactNamespace::Model, "abc123", "json").expect("valid key");
+        assert_ne!(temp_file_name(&key), temp_file_name(&key));
     }
 
     #[tokio::test]

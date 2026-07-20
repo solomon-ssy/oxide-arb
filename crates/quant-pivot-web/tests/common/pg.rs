@@ -3,16 +3,10 @@
 //! built-in roles, and the `g(admin, super_admin)` grant).
 
 use quant_pivot_migration::apply as apply_postgres_migrations;
-use quant_pivot_models::{
-    config::{PostgresConfig, SchemaMigrationConfig},
-    security::hash_password,
-};
+use quant_pivot_models::{config::PostgresConfig, security::hash_password};
 use quant_pivot_storage::postgres::{PostgresPool, migration::finalize_schema_deployment};
-use sea_orm::ConnectionTrait;
 use testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner};
 use testcontainers_modules::postgres::Postgres;
-
-const TEST_RUNTIME_ROLE: &str = "quant_pivot_web_test_runtime";
 
 fn test_pg_config(port: u16) -> PostgresConfig {
     PostgresConfig {
@@ -22,10 +16,6 @@ fn test_pg_config(port: u16) -> PostgresConfig {
         password: "postgres".into(),
         database: "test_quant_pivot".into(),
         schema: "public".into(),
-        migration: SchemaMigrationConfig {
-            user: "quant_pivot_web_test_migrator".into(),
-            password: None,
-        },
         max_connections: 5,
         min_connections: 1,
         connect_timeout_secs: 10,
@@ -62,22 +52,14 @@ pub async fn setup_pg() -> (PostgresPool, ContainerAsync<Postgres>) {
     let pool = PostgresPool::connect(&config)
         .await
         .expect("connect PG pool");
-    pool.connection()
-        .execute_unprepared(&format!("CREATE ROLE {TEST_RUNTIME_ROLE} NOLOGIN"))
-        .await
-        .expect("create runtime role");
-    apply_postgres_migrations(pool.connection())
+    apply_postgres_migrations(&config, pool.connection())
         .await
         .expect("apply migrations");
     let bootstrap_admin_password_hash =
         hash_password("admin").expect("hash test bootstrap admin password");
-    finalize_schema_deployment(
-        pool.connection(),
-        TEST_RUNTIME_ROLE,
-        &bootstrap_admin_password_hash,
-    )
-    .await
-    .expect("finalize schema deployment");
+    finalize_schema_deployment(pool.connection(), &bootstrap_admin_password_hash)
+        .await
+        .expect("finalize schema deployment");
 
     (pool, container)
 }

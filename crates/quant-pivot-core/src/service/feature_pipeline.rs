@@ -377,21 +377,31 @@ impl FeaturePipelineService {
                 }
             })?;
         let cooldown = ChronoDuration::seconds(cooldown_secs);
-        for alert in detect_basis_alerts(accepted, domain_inputs, domain) {
-            let recent = self
-                .basis_alert_repo
-                .latest_for_market(&alert.market_id)
-                .await
-                .map_err(QuantError::from)?;
-            let cooled_down =
-                recent.is_none_or(|previous| alert.as_of - previous.as_of >= cooldown);
-            if cooled_down {
-                self.basis_alert_repo
-                    .record(alert)
-                    .await
-                    .map_err(QuantError::from)?;
-            }
-        }
+        let alerts = detect_basis_alerts(accepted, domain_inputs, domain);
+        let market_ids = alerts
+            .iter()
+            .map(|alert| alert.market_id.clone())
+            .collect::<Vec<_>>();
+        let recent = self
+            .basis_alert_repo
+            .latest_for_markets(&market_ids)
+            .await
+            .map_err(QuantError::from)?
+            .into_iter()
+            .map(|alert| (alert.market_id.clone(), alert))
+            .collect::<HashMap<_, _>>();
+        let ready = alerts
+            .into_iter()
+            .filter(|alert| {
+                recent
+                    .get(&alert.market_id)
+                    .is_none_or(|previous| alert.as_of - previous.as_of >= cooldown)
+            })
+            .collect();
+        self.basis_alert_repo
+            .record_many(ready)
+            .await
+            .map_err(QuantError::from)?;
         Ok(())
     }
 
@@ -413,7 +423,7 @@ impl FeaturePipelineService {
         let trade_tape = if builder.needs_trade_tape() && self.trade_tape_on_chain.enabled {
             let cursors = self
                 .block_cursor_repo
-                .list_by_source(TradeTapeSourceKind::OnChain.as_str())
+                .list_by_source(TradeTapeSourceKind::OnChain)
                 .await?;
             let cursors_by_address = cursors_by_contract_address(&cursors);
             let trade_lookback =

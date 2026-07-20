@@ -5,21 +5,23 @@ use quant_pivot_migration::{
     apply as apply_postgres_migrations, migrations::Migrator as PostgresMigrator,
     plan as plan_postgres_migrations,
 };
-use quant_pivot_models::security::hash_password;
+use quant_pivot_models::{config::PostgresConfig, security::hash_password};
 use quant_pivot_storage::postgres::migration::{
     PostgresSchemaStatus, finalize_schema_deployment as finalize_schema_deployment_with_hash,
     verify_schema,
 };
-use quant_pivot_test_support::pg::{TEST_RUNTIME_ROLE, test_pg_config};
+use quant_pivot_test_support::pg::test_pg_config;
 use sea_orm::{ConnectionTrait, Database, DbBackend, Statement};
 use sea_orm_migration::MigratorTrait;
 use testcontainers::{ImageExt, runners::AsyncRunner};
 use testcontainers_modules::postgres::Postgres;
 
+const GRANT_DRIFT_ROLE: &str = "quant_pivot_grant_drift";
+
 async fn setup_empty_pg() -> (
     sea_orm::DatabaseConnection,
     testcontainers::ContainerAsync<Postgres>,
-    u16,
+    PostgresConfig,
 ) {
     let container = Postgres::default()
         .with_db_name("test_quant_pivot")
@@ -33,12 +35,10 @@ async fn setup_empty_pg() -> (
     let config = test_pg_config(port);
     let url = config.try_connection_url().expect("PostgreSQL URL");
     let db = Database::connect(url).await.expect("connect");
-    db.execute_unprepared(&format!(
-        "CREATE ROLE {TEST_RUNTIME_ROLE} LOGIN PASSWORD 'quant-pivot-test-runtime'"
-    ))
-    .await
-    .expect("create runtime role");
-    (db, container, port)
+    db.execute_unprepared(&format!("CREATE ROLE {GRANT_DRIFT_ROLE} NOLOGIN"))
+        .await
+        .expect("create runtime role");
+    (db, container, config)
 }
 
 async fn relation_exists(db: &sea_orm::DatabaseConnection, relation_name: &str) -> bool {
@@ -54,11 +54,10 @@ async fn relation_exists(db: &sea_orm::DatabaseConnection, relation_name: &str) 
 
 async fn finalize_schema_deployment(
     db: &sea_orm::DatabaseConnection,
-    runtime_role: &str,
 ) -> Result<PostgresSchemaStatus, StorageError> {
     let bootstrap_admin_password_hash =
         hash_password("admin").expect("hash test bootstrap admin password");
-    finalize_schema_deployment_with_hash(db, runtime_role, &bootstrap_admin_password_hash).await
+    finalize_schema_deployment_with_hash(db, &bootstrap_admin_password_hash).await
 }
 
 async fn assert_manifest_drift(db: &sea_orm::DatabaseConnection, section: &str) {
@@ -72,7 +71,7 @@ async fn assert_manifest_drift(db: &sea_orm::DatabaseConnection, section: &str) 
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn migration_plan_is_read_only_on_empty_database() {
-    let (db, _container, _port) = setup_empty_pg().await;
+    let (db, _container, _config) = setup_empty_pg().await;
 
     let plan = plan_postgres_migrations(&db)
         .await
@@ -88,12 +87,12 @@ async fn migration_plan_is_read_only_on_empty_database() {
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn immutable_baseline_is_idempotent_and_drift_is_rejected() {
-    let (db, _container, _port) = setup_empty_pg().await;
+    let (db, _container, config) = setup_empty_pg().await;
 
-    apply_postgres_migrations(&db)
+    apply_postgres_migrations(&config, &db)
         .await
         .expect("apply baseline");
-    let status = finalize_schema_deployment(&db, TEST_RUNTIME_ROLE)
+    let status = finalize_schema_deployment(&db)
         .await
         .expect("finalize baseline");
     assert_eq!(status.current_version, "m00000000_000001_bootstrap");
@@ -125,10 +124,10 @@ async fn immutable_baseline_is_idempotent_and_drift_is_rejected() {
         "uuid"
     );
 
-    apply_postgres_migrations(&db)
+    apply_postgres_migrations(&config, &db)
         .await
         .expect("reapply migrations");
-    let repeated = finalize_schema_deployment(&db, TEST_RUNTIME_ROLE)
+    let repeated = finalize_schema_deployment(&db)
         .await
         .expect("refinalize baseline");
     assert_eq!(repeated, status);
@@ -145,12 +144,12 @@ async fn immutable_baseline_is_idempotent_and_drift_is_rejected() {
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn boot_baseline_rejects_a_nonempty_unknown_schema() {
-    let (db, _container, _port) = setup_empty_pg().await;
+    let (db, _container, config) = setup_empty_pg().await;
     db.execute_unprepared("CREATE TABLE legacy_schema_marker (id bigint PRIMARY KEY)")
         .await
         .expect("seed unknown legacy schema");
 
-    let error = apply_postgres_migrations(&db)
+    let error = apply_postgres_migrations(&config, &db)
         .await
         .expect_err("boot migration must reject a nonempty target");
     assert!(
@@ -163,8 +162,8 @@ async fn boot_baseline_rejects_a_nonempty_unknown_schema() {
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn immutable_migrations_round_trip_on_empty_database() {
-    let (db, _container, _port) = setup_empty_pg().await;
-    apply_postgres_migrations(&db)
+    let (db, _container, config) = setup_empty_pg().await;
+    apply_postgres_migrations(&config, &db)
         .await
         .expect("apply migrations");
 
@@ -176,7 +175,7 @@ async fn immutable_migrations_round_trip_on_empty_database() {
     PostgresMigrator::up(&db, None)
         .await
         .expect("reapply all migrations");
-    finalize_schema_deployment(&db, TEST_RUNTIME_ROLE)
+    finalize_schema_deployment(&db)
         .await
         .expect("finalize reapplied schema");
     assert!(relation_exists(&db, "quant_report_schedule_state").await);
@@ -185,11 +184,11 @@ async fn immutable_migrations_round_trip_on_empty_database() {
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn legacy_sqlx_ledger_is_forbidden() {
-    let (db, _container, _port) = setup_empty_pg().await;
-    apply_postgres_migrations(&db)
+    let (db, _container, config) = setup_empty_pg().await;
+    apply_postgres_migrations(&config, &db)
         .await
         .expect("apply baseline");
-    finalize_schema_deployment(&db, TEST_RUNTIME_ROLE)
+    finalize_schema_deployment(&db)
         .await
         .expect("finalize baseline");
     db.execute_raw(Statement::from_string(
@@ -207,11 +206,11 @@ async fn legacy_sqlx_ledger_is_forbidden() {
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn migration_artifact_checksum_tamper_is_rejected() {
-    let (db, _container, _port) = setup_empty_pg().await;
-    apply_postgres_migrations(&db)
+    let (db, _container, config) = setup_empty_pg().await;
+    apply_postgres_migrations(&config, &db)
         .await
         .expect("apply baseline");
-    finalize_schema_deployment(&db, TEST_RUNTIME_ROLE)
+    finalize_schema_deployment(&db)
         .await
         .expect("finalize baseline");
 
@@ -230,11 +229,11 @@ async fn migration_artifact_checksum_tamper_is_rejected() {
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn unknown_future_native_migration_is_rejected() {
-    let (db, _container, _port) = setup_empty_pg().await;
-    apply_postgres_migrations(&db)
+    let (db, _container, config) = setup_empty_pg().await;
+    apply_postgres_migrations(&config, &db)
         .await
         .expect("apply baseline");
-    finalize_schema_deployment(&db, TEST_RUNTIME_ROLE)
+    finalize_schema_deployment(&db)
         .await
         .expect("finalize baseline");
 
@@ -257,11 +256,11 @@ async fn unknown_future_native_migration_is_rejected() {
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn native_enum_drift_is_rejected() {
-    let (db, _container, _port) = setup_empty_pg().await;
-    apply_postgres_migrations(&db)
+    let (db, _container, config) = setup_empty_pg().await;
+    apply_postgres_migrations(&config, &db)
         .await
         .expect("apply baseline");
-    finalize_schema_deployment(&db, TEST_RUNTIME_ROLE)
+    finalize_schema_deployment(&db)
         .await
         .expect("finalize baseline");
 
@@ -274,11 +273,11 @@ async fn native_enum_drift_is_rejected() {
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn column_definition_drift_is_rejected() {
-    let (db, _container, _port) = setup_empty_pg().await;
-    apply_postgres_migrations(&db)
+    let (db, _container, config) = setup_empty_pg().await;
+    apply_postgres_migrations(&config, &db)
         .await
         .expect("apply baseline");
-    finalize_schema_deployment(&db, TEST_RUNTIME_ROLE)
+    finalize_schema_deployment(&db)
         .await
         .expect("finalize baseline");
 
@@ -293,11 +292,11 @@ async fn column_definition_drift_is_rejected() {
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn index_definition_drift_is_rejected() {
-    let (db, _container, _port) = setup_empty_pg().await;
-    apply_postgres_migrations(&db)
+    let (db, _container, config) = setup_empty_pg().await;
+    apply_postgres_migrations(&config, &db)
         .await
         .expect("apply baseline");
-    finalize_schema_deployment(&db, TEST_RUNTIME_ROLE)
+    finalize_schema_deployment(&db)
         .await
         .expect("finalize baseline");
 
@@ -310,11 +309,11 @@ async fn index_definition_drift_is_rejected() {
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn constraint_definition_drift_is_rejected() {
-    let (db, _container, _port) = setup_empty_pg().await;
-    apply_postgres_migrations(&db)
+    let (db, _container, config) = setup_empty_pg().await;
+    apply_postgres_migrations(&config, &db)
         .await
         .expect("apply baseline");
-    finalize_schema_deployment(&db, TEST_RUNTIME_ROLE)
+    finalize_schema_deployment(&db)
         .await
         .expect("finalize baseline");
 
@@ -330,11 +329,11 @@ async fn constraint_definition_drift_is_rejected() {
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn trigger_definition_drift_is_rejected() {
-    let (db, _container, _port) = setup_empty_pg().await;
-    apply_postgres_migrations(&db)
+    let (db, _container, config) = setup_empty_pg().await;
+    apply_postgres_migrations(&config, &db)
         .await
         .expect("apply baseline");
-    finalize_schema_deployment(&db, TEST_RUNTIME_ROLE)
+    finalize_schema_deployment(&db)
         .await
         .expect("finalize baseline");
 
@@ -350,51 +349,18 @@ async fn trigger_definition_drift_is_rejected() {
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn grant_drift_is_rejected() {
-    let (db, _container, _port) = setup_empty_pg().await;
-    apply_postgres_migrations(&db)
+    let (db, _container, config) = setup_empty_pg().await;
+    apply_postgres_migrations(&config, &db)
         .await
         .expect("apply baseline");
-    finalize_schema_deployment(&db, TEST_RUNTIME_ROLE)
+    finalize_schema_deployment(&db)
         .await
         .expect("finalize baseline");
 
     db.execute_unprepared(&format!(
-        "GRANT TRUNCATE ON quant_report_schedule_state TO {TEST_RUNTIME_ROLE}"
+        "GRANT TRUNCATE ON quant_report_schedule_state TO {GRANT_DRIFT_ROLE}"
     ))
     .await
     .expect("inject grant drift");
     assert_manifest_drift(&db, "grants").await;
-}
-
-#[tokio::test]
-#[ignore = "requires Docker"]
-async fn runtime_identity_verifies_but_cannot_execute_ddl() {
-    let (db, _container, port) = setup_empty_pg().await;
-    apply_postgres_migrations(&db)
-        .await
-        .expect("apply baseline");
-    finalize_schema_deployment(&db, TEST_RUNTIME_ROLE)
-        .await
-        .expect("finalize baseline");
-
-    let runtime_url = format!(
-        "postgres://{TEST_RUNTIME_ROLE}:quant-pivot-test-runtime@localhost:{port}/test_quant_pivot"
-    );
-    let runtime = Database::connect(runtime_url)
-        .await
-        .expect("connect runtime identity");
-    verify_schema(&runtime)
-        .await
-        .expect("runtime identity verifies exact schema");
-
-    let ddl_error = runtime
-        .execute_unprepared("CREATE TABLE forbidden_runtime_ddl (id bigint PRIMARY KEY)")
-        .await
-        .expect_err("runtime DDL must be denied");
-    assert!(ddl_error.to_string().contains("permission denied"));
-    let ledger_error = runtime
-        .execute_unprepared("DELETE FROM schema_migration_audit")
-        .await
-        .expect_err("runtime migration-ledger mutation must be denied");
-    assert!(ledger_error.to_string().contains("permission denied"));
 }

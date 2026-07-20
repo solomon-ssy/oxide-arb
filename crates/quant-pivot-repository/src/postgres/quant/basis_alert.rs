@@ -1,9 +1,15 @@
 //! Postgres-backed basis-cross-check exceedance ledger (append-only, plus the
 //! single governed `acknowledge` mutation).
 
+use std::collections::HashSet;
+
 use chrono::Utc;
 
-use crate::{postgres::query::paginate_mapped, traits::BasisAlertRepository};
+use crate::{
+    batch::chunk_for_in_clause,
+    postgres::{query::paginate_mapped, write::insert_many_chunked},
+    traits::BasisAlertRepository,
+};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{BasisAlertInfo, BasisAlertListQuery, NewBasisAlert, PageWindow, Paginated},
@@ -12,7 +18,7 @@ use quant_pivot_models::{
 };
 use sea_orm::{
     ActiveModelTrait, ActiveValue, ColumnTrait, Condition, DatabaseConnection, EntityTrait,
-    IntoActiveModel, QueryFilter, QueryOrder,
+    IntoActiveModel, QueryFilter, QueryOrder, QuerySelect,
 };
 
 /// Postgres-backed append-only basis-alert ledger.
@@ -30,19 +36,11 @@ impl PgBasisAlertRepository {
 #[async_trait::async_trait]
 impl BasisAlertRepository for PgBasisAlertRepository {
     async fn record(&self, alert: NewBasisAlert) -> Result<BasisAlertInfo, StorageError> {
-        let alert_id = alert.alert_id.clone();
         quant_basis_alert::Entity::insert(alert.into_active_model())
-            .exec(&self.db)
+            .exec_with_returning(&self.db)
             .await
-            .map_err(StorageError::from)?;
-        let row = quant_basis_alert::Entity::find_by_id(alert_id.clone())
-            .one(&self.db)
-            .await
-            .map_err(StorageError::from)?;
-        row.map(Into::into).ok_or(StorageError::NotFound {
-            entity: "quant_basis_alert",
-            id: alert_id.to_string(),
-        })
+            .map(Into::into)
+            .map_err(StorageError::from)
     }
 
     async fn latest_for_market(
@@ -57,6 +55,41 @@ impl BasisAlertRepository for PgBasisAlertRepository {
             .await
             .map_err(StorageError::from)
             .map(|row| row.map(Into::into))
+    }
+
+    async fn latest_for_markets(
+        &self,
+        market_ids: &[MarketId],
+    ) -> Result<Vec<BasisAlertInfo>, StorageError> {
+        let mut seen = HashSet::with_capacity(market_ids.len());
+        let unique_market_ids = market_ids
+            .iter()
+            .filter(|market_id| seen.insert((*market_id).clone()))
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut alerts = Vec::with_capacity(unique_market_ids.len());
+        for chunk in chunk_for_in_clause(&unique_market_ids) {
+            let rows = quant_basis_alert::Entity::find()
+                .filter(quant_basis_alert::Column::MarketId.is_in(chunk.iter().cloned()))
+                .distinct_on([(
+                    quant_basis_alert::Entity,
+                    quant_basis_alert::Column::MarketId,
+                )])
+                .order_by_asc(quant_basis_alert::Column::MarketId)
+                .order_by_desc(quant_basis_alert::Column::AsOf)
+                .order_by_desc(quant_basis_alert::Column::AlertId)
+                .all(&self.db)
+                .await
+                .map_err(StorageError::from)?;
+            alerts.extend(rows.into_iter().map(Into::into));
+        }
+        Ok(alerts)
+    }
+
+    async fn record_many(&self, alerts: Vec<NewBasisAlert>) -> Result<(), StorageError> {
+        insert_many_chunked::<quant_basis_alert::Entity, _>(&self.db, alerts)
+            .await
+            .map(drop)
     }
 
     async fn page(

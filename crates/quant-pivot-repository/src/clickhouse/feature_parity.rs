@@ -18,7 +18,13 @@ use quant_pivot_models::{
 };
 use quant_pivot_storage::clickhouse::ClickHousePool;
 
-use crate::traits::{FeatureParityEventRepository, ServingEvidenceRepository};
+use crate::{
+    sql_contract_registry::{
+        FEATURE_CELLS_FOR_VECTORS, FEATURE_PARITY_PAGE, FEATURE_PARITY_SUMMARY,
+        MODEL_INPUTS_FOR_RUNS, SERVING_COMPLETIONS_FOR_RUNS,
+    },
+    traits::{FeatureParityEventRepository, ServingEvidenceRepository},
+};
 
 /// ClickHouse-backed row-level parity evidence repository.
 pub struct ChFeatureParityEventRepository {
@@ -41,7 +47,8 @@ impl FeatureParityEventRepository for ChFeatureParityEventRepository {
         let window = PageWindow::from_query(&query);
         let filters = EventFilters::from_query(&query);
         let count = bind_filters(
-            self.pool.client().query(
+            FEATURE_PARITY_PAGE.clickhouse_query(
+                self.pool.client(),
                 "SELECT count() FROM quant_feature_parity_event FINAL \
                  WHERE (? = '' OR parity_run_id = ?) \
                  AND (? = '' OR status = ?) \
@@ -60,7 +67,8 @@ impl FeatureParityEventRepository for ChFeatureParityEventRepository {
         .await?;
 
         let rows = bind_filters(
-            self.pool.client().query(
+            FEATURE_PARITY_PAGE.clickhouse_query(
+                self.pool.client(),
                 "SELECT ?fields FROM quant_feature_parity_event FINAL \
                  WHERE (? = '' OR parity_run_id = ?) \
                  AND (? = '' OR status = ?) \
@@ -95,10 +103,9 @@ impl FeatureParityEventRepository for ChFeatureParityEventRepository {
             count: u64,
         }
 
-        let states = self
-            .pool
-            .client()
-            .query(
+        let states = FEATURE_PARITY_SUMMARY
+            .clickhouse_query(
+                self.pool.client(),
                 "SELECT toString(cell_state) AS key, count() AS count \
                  FROM quant_feature_event \
                  WHERE event_time >= now64(3) - INTERVAL 24 HOUR \
@@ -106,10 +113,9 @@ impl FeatureParityEventRepository for ChFeatureParityEventRepository {
             )
             .fetch_all::<CountRow>()
             .await?;
-        let reasons = self
-            .pool
-            .client()
-            .query(
+        let reasons = FEATURE_PARITY_SUMMARY
+            .clickhouse_query(
+                self.pool.client(),
                 "SELECT assumeNotNull(reason) AS key, count() AS count \
                  FROM quant_feature_event \
                  WHERE event_time >= now64(3) - INTERVAL 24 HOUR \
@@ -152,9 +158,9 @@ impl ServingEvidenceRepository for ChFeatureParityEventRepository {
         if model_run_ids.is_empty() {
             return Ok(Vec::new());
         }
-        self.pool
-            .client()
-            .query(
+        SERVING_COMPLETIONS_FOR_RUNS
+            .clickhouse_query(
+                self.pool.client(),
                 "SELECT ?fields FROM quant_serving_evidence_completion \
                  WHERE model_run_id IN ? \
                  ORDER BY model_run_id, ingestion_time",
@@ -172,9 +178,9 @@ impl ServingEvidenceRepository for ChFeatureParityEventRepository {
         if model_run_ids.is_empty() {
             return Ok(Vec::new());
         }
-        self.pool
-            .client()
-            .query(
+        MODEL_INPUTS_FOR_RUNS
+            .clickhouse_query(
+                self.pool.client(),
                 "SELECT ?fields FROM quant_model_input_event \
                  WHERE model_run_id IN ? \
                  ORDER BY model_run_id, market_id, encoded_column, raw_input_name, ingestion_time",
@@ -192,9 +198,9 @@ impl ServingEvidenceRepository for ChFeatureParityEventRepository {
         if feature_vector_ids.is_empty() {
             return Ok(Vec::new());
         }
-        self.pool
-            .client()
-            .query(
+        FEATURE_CELLS_FOR_VECTORS
+            .clickhouse_query(
+                self.pool.client(),
                 "SELECT ?fields FROM quant_feature_event \
                  WHERE feature_vector_id IN ? \
                  ORDER BY feature_vector_id, feature_name, ingestion_time",

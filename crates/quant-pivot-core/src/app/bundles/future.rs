@@ -15,9 +15,12 @@ use crate::{
 };
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{config::QuantWorkersConfig, domain::CoreEventPublisher};
-use quant_pivot_repository::traits::{
-    EquitySnapshotRepository, FeatureParityRepository, PolicyRepository, PositionRepository,
-    RecommendationReportRepository, RecommendationRepository, ReportRunRepository,
+use quant_pivot_repository::{
+    clickhouse::ChNativeReadRepository,
+    traits::{
+        EquitySnapshotRepository, FeatureParityRepository, PolicyRepository, PositionRepository,
+        RecommendationReportRepository, RecommendationRepository, ReportRunRepository,
+    },
 };
 use quant_pivot_research::portfolio::HistoricalCorrelationEstimator;
 
@@ -112,6 +115,7 @@ impl ReportBundle {
                 as Arc<dyn RecommendationReportRepository>,
             artifacts: Arc::clone(&deps.research.artifact_store),
             clickhouse: Arc::clone(&deps.infra.ch),
+            native_reads: Arc::new(ChNativeReadRepository::new(Arc::clone(&deps.infra.ch))),
             write_manager: Arc::clone(&deps.infra.ch_write_manager),
             publisher: Arc::clone(&publisher),
             metrics: Arc::clone(&deps.infra.metrics),

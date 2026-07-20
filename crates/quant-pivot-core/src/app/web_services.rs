@@ -32,6 +32,7 @@ use crate::{
     },
 };
 use quant_pivot_error::{QuantResult, infra::InfraError};
+use quant_pivot_migration::PostgresLifecycleLeaseProvider;
 use quant_pivot_models::{
     config::CompiledBuildIdentity,
     domain::{
@@ -142,6 +143,9 @@ async fn build_app_state(
         schema_verification: Arc::new(LiveSchemaVerifier::new(
             Arc::clone(&ctx.infra.pg),
             Arc::clone(&ctx.infra.ch),
+        )),
+        lifecycle_leases: Arc::new(PostgresLifecycleLeaseProvider::new(
+            ctx.config.db.postgres.clone(),
         )),
         production_evidence_verification: Arc::new(FileProductionEvidenceVerifier),
         runtime_config_apply: Arc::clone(&ctx.governance.applicator) as Arc<dyn PolicySnapshotPort>,

@@ -16,7 +16,7 @@ use quant_pivot_models::{
         operation_log::OperationCategory,
         rbac::{Operation, ResourceType, RoleKind, RoleStatus},
     },
-    types::RoleId,
+    types::{RoleCode, RoleId},
 };
 
 use crate::{
@@ -109,7 +109,7 @@ pub async fn create(
     let request = body.into_inner();
     let new = NewRole {
         id: RoleId::from_v7(),
-        code: request.code,
+        code: RoleCode::new(request.code),
         name: request.name,
         description: request.description,
         kind: RoleKind::Custom,

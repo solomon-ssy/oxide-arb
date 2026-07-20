@@ -1,0 +1,193 @@
+schema_version = 1
+
+# This registry is audited bidirectionally against runtime SeaORM entities,
+# persistence DTOs, and the fresh-boot v1 snapshot by `persistence-field-audit`.
+# It records semantic decisions only; SQL storage representations remain owned
+# by the entity and migration schema.
+
+[[group]]
+disposition = "active_enum"
+owner = "research-data-plane"
+validation = "SeaORM ActiveEnum decoding rejects unknown database values."
+rationale = "These values form closed application-owned state or source vocabularies."
+members = [
+  "quant_research_job.result_kind=Option<ResearchJobResultKind>",
+  "quant_source_slice.evaluation_track=ResearchEvaluationTrack",
+  "quant_trade_tape_block_cursor.source=TradeTapeSourceKind",
+  "quant_trade_tape_block_cursor.status=TradeTapeBlockCursorStatus",
+]
+
+[[group]]
+disposition = "validated_newtype"
+owner = "governance-and-research"
+validation = "Typed DTO/entity fields plus canonical database constraints; validated semantic text types also reject malformed wire and database values."
+rationale = "Project-owned semantic codes, versions, identities, and EVM values must not be interchangeable with free text."
+members = [
+  "quant_feature_parity_run.acting_role=RoleCode",
+  "quant_feature_parity_run.failure_code=Option<DiagnosticCode>",
+  "quant_feature_parity_state.acting_role=Option<RoleCode>",
+  "quant_report_run.error_code=Option<DiagnosticCode>",
+  "quant_report_run.trigger_key=ReportTriggerKey",
+  "quant_research_job.acting_role=RoleCode",
+  "quant_research_readiness_evidence.artifact_version=ArtifactVersion",
+  "quant_research_readiness_evidence.attestation_key_id=AttestationKeyId",
+  "quant_settlement_redeem.funder_address=EvmAddress",
+  "quant_settlement_redeem.tx_hash=Option<EvmTransactionHash>",
+  "quant_source_slice.reader_contract_version=ReaderContractVersion",
+  "quant_source_slice.schema_contract_version=SchemaContractVersion",
+  "quant_trade_policy_trial_attempt.candidate_id=TradePolicyCandidateId",
+  "quant_trade_policy_validation_row.diagnostic_kind=Option<DiagnosticCode>",
+  "quant_trade_tape_block_cursor.contract_address=EvmAddress",
+  "role.code=RoleCode",
+  "system_bootstrap_transition.acting_role=Option<RoleCode>",
+]
+
+[[group]]
+disposition = "tagged_reference"
+owner = "research-orchestration"
+validation = "A paired result_kind discriminator, status/kind CHECK constraints, and domain constructor define the target namespace."
+rationale = "A research job can produce one of several governed artifact identifiers; a bare UUID is meaningful only with its mandatory discriminator."
+members = [
+  "quant_research_job.result_ref=Option<Uuid>",
+]
+
+[[group]]
+disposition = "free_text"
+owner = "domain-operations"
+validation = "Request-specific length bounds apply at wire boundaries; database text columns preserve operator/upstream diagnostic detail without enumerating prose."
+rationale = "These fields are human-readable prose or diagnostic detail and have no closed machine vocabulary."
+members = [
+  "catalog_sync_batch.failure_detail=Option<String>",
+  "catalog_sync_rejection.detail=String",
+  "decision_policy_snapshot.reason=String",
+  "event.title=String",
+  "market.description=Option<String>",
+  "market.question=String",
+  "menu.name=String",
+  "menu.title=String",
+  "policy_activation.reason=String",
+  "policy_activation_audit.reason=String",
+  "policy_approval.reason=String",
+  "policy_profile_artifact.reason=String",
+  "policy_revision.reason=String",
+  "quant_capital_allocation.reason=String",
+  "quant_domain_event_outbox.last_error=Option<String>",
+  "quant_domain_source_cursor.last_error=Option<String>",
+  "quant_domain_source_expectation.status_reason=Option<String>",
+  "quant_entry_condition_audit.detail=Option<String>",
+  "quant_entry_condition_evaluation_outbox.last_error=Option<String>",
+  "quant_execution_order.error_message=Option<String>",
+  "quant_factor_definition.name=String",
+  "quant_feature_parity_run.failure_detail=Option<String>",
+  "quant_feature_parity_run.reason=String",
+  "quant_feature_parity_state.reason=String",
+  "quant_market_linkage.override_reason=Option<String>",
+  "quant_model_governance_audit.reason=String",
+  "quant_model_run.error_message=Option<String>",
+  "quant_model_spec.name=String",
+  "quant_model_spec.reason=String",
+  "quant_order_intent.approval_reason=Option<String>",
+  "quant_order_intent.status_reason=Option<String>",
+  "quant_recommendation_report.status_reason=Option<String>",
+  "quant_report_fact_delivery.last_error=Option<String>",
+  "quant_report_run.error_summary=Option<String>",
+  "quant_report_schedule_gap.detail=Option<String>",
+  "quant_settlement_redeem.last_error=Option<String>",
+  "quant_source_slice.failure_detail=Option<String>",
+  "quant_trade_policy_governance_audit.reason=String",
+  "quant_trade_policy_trial_attempt.failure_detail=Option<String>",
+  "quant_trade_policy_validation.failure_detail=Option<String>",
+  "quant_trade_policy_validation.reason=String",
+  "quant_trade_policy_validation_row.detail=Option<String>",
+  "quant_training_dataset.failure_detail=Option<String>",
+  "research_profile_artifact.governance_reason=String",
+  "role.description=Option<String>",
+  "role.name=String",
+  "system_bootstrap_transition.reason=String",
+  "system_kill_switch.reason=String",
+  "system_production_evidence.reason=String",
+  "system_runtime_state.reason=String",
+  "user.nickname=String",
+]
+
+[[group]]
+disposition = "opaque_snapshot_label"
+owner = "audit-and-governance"
+validation = "The authenticated or subsystem actor boundary supplies a bounded display snapshot; labels intentionally survive principal deletion or rename."
+rationale = "These are immutable audit labels, not foreign keys and not a closed role or user vocabulary."
+members = [
+  "decision_policy_snapshot.created_by_label=String",
+  "operation_log.actor_username=Option<String>",
+  "policy_activation.activated_by_label=String",
+  "policy_activation_audit.actor_label=String",
+  "policy_approval.decided_by_label=String",
+  "policy_profile_artifact.created_by_label=String",
+  "policy_revision.created_by_label=String",
+  "quant_basis_alert.acknowledged_by=Option<String>",
+  "quant_feature_parity_run.requested_by=Option<String>",
+  "quant_feature_parity_state.actor=Option<String>",
+  "quant_market_linkage.override_actor=Option<String>",
+  "quant_model_governance_audit.actor_username=String",
+  "quant_model_spec.created_by_label=String",
+  "quant_reconciliation.resolved_by=Option<String>",
+  "quant_research_job.requested_by=Option<String>",
+  "research_profile_artifact.published_by=String",
+  "system_bootstrap_transition.actor=String",
+  "system_kill_switch.changed_by=String",
+  "system_production_baseline.sealed_by_label=String",
+  "system_production_evidence.recorded_by_label=String",
+  "system_runtime_state.changed_by=String",
+]
+
+[[group]]
+disposition = "external_protocol_value"
+owner = "rbac-and-http"
+validation = "Casbin, router, menu, and authentication boundaries validate their own open protocol syntax and length constraints."
+rationale = "These values belong to extensible external/application protocols; converting them to closed enums would reject valid future values."
+members = [
+  "casbin_rule.ptype=String",
+  "casbin_rule.v0=String",
+  "casbin_rule.v1=String",
+  "casbin_rule.v2=String",
+  "casbin_rule.v3=String",
+  "casbin_rule.v4=String",
+  "casbin_rule.v5=String",
+  "menu.component=Option<String>",
+  "menu.icon=Option<String>",
+  "menu.path=Option<String>",
+  "menu.permission_code=Option<String>",
+  "operation_log.http_path=String",
+  "operation_log.resource_id=Option<String>",
+  "operation_log.user_agent=Option<String>",
+  "user.avatar=Option<String>",
+  "user.email=Option<String>",
+  "user.password_hash=String",
+  "user.phone=Option<String>",
+  "user.username=String",
+]
+
+[[group]]
+disposition = "external_protocol_value"
+owner = "market-and-research-ingest"
+validation = "Gamma, artifact-store, market-data, weather, and evidence codecs validate values when entering their respective domain boundaries."
+rationale = "These are upstream identifiers, URIs, IANA/ICAO values, heterogeneous artifact keys, or deployment-manifest identities with intentionally open namespaces."
+members = [
+  "catalog_sync_rejection.source_id=Option<String>",
+  "event.series_slug=Option<String>",
+  "event.slug=String",
+  "market.outcome=Option<String>",
+  "market.slug=String",
+  "quant_backtest_report.parquet_uri=Option<String>",
+  "quant_basis_alert.instrument_key=String",
+  "quant_basis_alert.oracle_instrument_key=String",
+  "quant_feature_parity_run.triggered_by=String",
+  "quant_order_intent.admission_trace_ref=Option<String>",
+  "quant_order_intent.policy_id=Option<String>",
+  "quant_trade_policy_validation_row.evidence_kind=String",
+  "quant_trade_policy_validation_row.record_key=String",
+  "quant_weather_daily_temperature_projection.station=String",
+  "quant_weather_daily_temperature_projection.timezone=String",
+  "quant_weather_observation_current.station=String",
+  "seed_application.checksum=String",
+  "seed_application.seed_id=String",
+]

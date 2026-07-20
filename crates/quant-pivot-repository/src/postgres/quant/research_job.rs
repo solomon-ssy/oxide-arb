@@ -9,7 +9,7 @@ use quant_pivot_error::storage::{StorageError, entity};
 use quant_pivot_models::{
     domain::{
         NewResearchJob, PageWindow, Paginated, ResearchJobError, ResearchJobInfo,
-        ResearchJobListQuery,
+        ResearchJobListQuery, ResearchJobResultRef,
     },
     entities::quant_research_job,
     enums::quant::{ResearchJobErrorCode, ResearchJobKind, ResearchJobStatus},
@@ -21,7 +21,6 @@ use sea_orm::{
     IntoActiveModel, QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
     sea_query::{Expr, LockBehavior, LockType},
 };
-use uuid::Uuid;
 
 /// Postgres-backed durable research-job ledger repository.
 pub struct PgResearchJobRepository {
@@ -171,16 +170,22 @@ impl ResearchJobRepository for PgResearchJobRepository {
         job_id: &ResearchJobId,
         owner: &WorkerId,
         status: ResearchJobStatus,
-        result_ref: Option<Uuid>,
+        result: Option<ResearchJobResultRef>,
         error: Option<ResearchJobError>,
         coverage: Option<DatasetCoverage>,
     ) -> Result<ResearchJobInfo, StorageError> {
         debug_assert!(status.is_terminal(), "finalize requires a terminal status");
         // Single conditional UPDATE: only the lease holder may terminalize.
+        let (result_kind, result_ref) =
+            result.map_or((None, None), |result| (Some(result.kind), Some(result.id)));
         let result = quant_research_job::Entity::update_many()
             .col_expr(
                 quant_research_job::Column::Status,
                 primitives::enum_value(&status),
+            )
+            .col_expr(
+                quant_research_job::Column::ResultKind,
+                Expr::value(result_kind),
             )
             .col_expr(
                 quant_research_job::Column::ResultRef,
@@ -407,6 +412,11 @@ fn owned_running_condition(owner: &WorkerId) -> Condition {
 
 fn page_condition(query: &ResearchJobListQuery) -> Condition {
     Condition::all()
+        .add_option(
+            query
+                .result_kind
+                .map(|kind| quant_research_job::Column::ResultKind.eq(kind)),
+        )
         .add_option(
             query
                 .kind

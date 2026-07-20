@@ -4,7 +4,7 @@ use crate::{
     enums::quant::{ReportRunStatus, ReportRunTerminalReason, ReportTriggerKind},
     types::{
         CorrelationId, DecisionPolicySnapshotId, DiagnosticCode, RecommendationReportId,
-        ReportRunId, ReportScheduleId, WorkerId,
+        ReportRunId, ReportScheduleId, ReportTriggerKey, WorkerId,
     },
 };
 use chrono::{DateTime, Utc};
@@ -17,7 +17,7 @@ pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub report_run_id: ReportRunId,
     pub trigger_kind: ReportTriggerKind,
-    pub trigger_key: String,
+    pub trigger_key: ReportTriggerKey,
     pub schedule_id: Option<ReportScheduleId>,
     pub request_id: Option<CorrelationId>,
     pub retry_of_run_id: Option<ReportRunId>,

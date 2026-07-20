@@ -11589,9 +11589,22 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "result_ref",
+      "name": "result_kind",
       "nullable": true,
       "ordinal": 8,
+      "storage": "p",
+      "table": "quant_research_job",
+      "type": "qp_research_job_result_kind"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "result_ref",
+      "nullable": true,
+      "ordinal": 9,
       "storage": "p",
       "table": "quant_research_job",
       "type": "uuid"
@@ -11604,7 +11617,7 @@
       "identity": "",
       "name": "error_json",
       "nullable": true,
-      "ordinal": 9,
+      "ordinal": 10,
       "storage": "x",
       "table": "quant_research_job",
       "type": "jsonb"
@@ -11617,7 +11630,7 @@
       "identity": "",
       "name": "coverage_json",
       "nullable": true,
-      "ordinal": 10,
+      "ordinal": 11,
       "storage": "x",
       "table": "quant_research_job",
       "type": "jsonb"
@@ -11630,7 +11643,7 @@
       "identity": "",
       "name": "requested_by",
       "nullable": true,
-      "ordinal": 11,
+      "ordinal": 12,
       "storage": "x",
       "table": "quant_research_job",
       "type": "character varying"
@@ -11643,7 +11656,7 @@
       "identity": "",
       "name": "acting_role",
       "nullable": false,
-      "ordinal": 12,
+      "ordinal": 13,
       "storage": "x",
       "table": "quant_research_job",
       "type": "character varying"
@@ -11656,7 +11669,7 @@
       "identity": "",
       "name": "parent_job_id",
       "nullable": true,
-      "ordinal": 13,
+      "ordinal": 14,
       "storage": "p",
       "table": "quant_research_job",
       "type": "uuid"
@@ -11669,7 +11682,7 @@
       "identity": "",
       "name": "recovery_attempt",
       "nullable": false,
-      "ordinal": 14,
+      "ordinal": 15,
       "storage": "p",
       "table": "quant_research_job",
       "type": "integer"
@@ -11682,7 +11695,7 @@
       "identity": "",
       "name": "max_recovery_attempts",
       "nullable": false,
-      "ordinal": 15,
+      "ordinal": 16,
       "storage": "p",
       "table": "quant_research_job",
       "type": "integer"
@@ -11695,7 +11708,7 @@
       "identity": "",
       "name": "lease_owner",
       "nullable": true,
-      "ordinal": 16,
+      "ordinal": 17,
       "storage": "p",
       "table": "quant_research_job",
       "type": "uuid"
@@ -11708,7 +11721,7 @@
       "identity": "",
       "name": "lease_expires_at",
       "nullable": true,
-      "ordinal": 17,
+      "ordinal": 18,
       "storage": "p",
       "table": "quant_research_job",
       "type": "timestamp with time zone"
@@ -11721,7 +11734,7 @@
       "identity": "",
       "name": "started_at",
       "nullable": true,
-      "ordinal": 18,
+      "ordinal": 19,
       "storage": "p",
       "table": "quant_research_job",
       "type": "timestamp with time zone"
@@ -11734,7 +11747,7 @@
       "identity": "",
       "name": "finished_at",
       "nullable": true,
-      "ordinal": 19,
+      "ordinal": 20,
       "storage": "p",
       "table": "quant_research_job",
       "type": "timestamp with time zone"
@@ -11747,7 +11760,7 @@
       "identity": "",
       "name": "heartbeat_at",
       "nullable": true,
-      "ordinal": 20,
+      "ordinal": 21,
       "storage": "p",
       "table": "quant_research_job",
       "type": "timestamp with time zone"
@@ -11760,7 +11773,7 @@
       "identity": "",
       "name": "created_at",
       "nullable": false,
-      "ordinal": 21,
+      "ordinal": 22,
       "storage": "p",
       "table": "quant_research_job",
       "type": "timestamp with time zone"
@@ -11773,7 +11786,7 @@
       "identity": "",
       "name": "updated_at",
       "nullable": false,
-      "ordinal": 22,
+      "ordinal": 23,
       "storage": "p",
       "table": "quant_research_job",
       "type": "timestamp with time zone"
@@ -12559,7 +12572,7 @@
       "type": "jsonb"
     },
     {
-      "collation": "default",
+      "collation": null,
       "compression": "",
       "default": null,
       "generated": "",
@@ -12567,9 +12580,9 @@
       "name": "evaluation_track",
       "nullable": false,
       "ordinal": 4,
-      "storage": "x",
+      "storage": "p",
       "table": "quant_source_slice",
-      "type": "character varying"
+      "type": "qp_research_evaluation_track"
     },
     {
       "collation": "default",
@@ -13638,7 +13651,7 @@
       "type": "timestamp with time zone"
     },
     {
-      "collation": "default",
+      "collation": null,
       "compression": "",
       "default": null,
       "generated": "",
@@ -13646,9 +13659,9 @@
       "name": "source",
       "nullable": false,
       "ordinal": 1,
-      "storage": "x",
+      "storage": "p",
       "table": "quant_trade_tape_block_cursor",
-      "type": "character varying"
+      "type": "qp_trade_tape_source_kind"
     },
     {
       "collation": "default",
@@ -13703,7 +13716,7 @@
       "type": "bigint"
     },
     {
-      "collation": "default",
+      "collation": null,
       "compression": "",
       "default": null,
       "generated": "",
@@ -13711,9 +13724,9 @@
       "name": "status",
       "nullable": false,
       "ordinal": 6,
-      "storage": "x",
+      "storage": "p",
       "table": "quant_trade_tape_block_cursor",
-      "type": "character varying"
+      "type": "qp_trade_tape_block_cursor_status"
     },
     {
       "collation": null,
@@ -16772,6 +16785,15 @@
     },
     {
       "deferrable": false,
+      "definition": "CHECK ((((acting_role)::text ~ '^[a-z][a-z0-9_]{0,63}$'::text) AND ((failure_code IS NULL) OR ((failure_code)::text ~ '^[a-z][a-z0-9_]{0,127}$'::text))))",
+      "initially_deferred": false,
+      "name": "ck_quant_feature_parity_run_semantic_codes",
+      "table": "quant_feature_parity_run",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
       "definition": "FOREIGN KEY (model_version_id) REFERENCES quant_model_version(model_version_id)",
       "initially_deferred": false,
       "name": "fk-quant_feature_parity_run-model_version_id",
@@ -16804,6 +16826,15 @@
       "name": "quant_feature_parity_run_pkey",
       "table": "quant_feature_parity_run",
       "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK (((acting_role IS NULL) OR ((acting_role)::text ~ '^[a-z][a-z0-9_]{0,63}$'::text)))",
+      "initially_deferred": false,
+      "name": "ck_quant_feature_parity_state_acting_role",
+      "table": "quant_feature_parity_state",
+      "type": "c",
       "validated": true
     },
     {
@@ -17150,7 +17181,7 @@
     },
     {
       "deferrable": false,
-      "definition": "CHECK ((((char_length(btrim((created_by_label)::text)) >= 1) AND (char_length(btrim((created_by_label)::text)) <= 256)) AND ((created_by_role IS NULL) OR ((char_length(btrim((created_by_role)::text)) >= 1) AND (char_length(btrim((created_by_role)::text)) <= 128))) AND ((char_length(btrim((reason)::text)) >= 1) AND (char_length(btrim((reason)::text)) <= 2048))))",
+      "definition": "CHECK (((char_length(btrim((created_by_label)::text)) >= 1) AND (char_length(btrim((created_by_label)::text)) <= 256) AND ((created_by_role IS NULL) OR ((char_length(btrim((created_by_role)::text)) >= 1) AND (char_length(btrim((created_by_role)::text)) <= 128))) AND (char_length(btrim((reason)::text)) >= 1) AND (char_length(btrim((reason)::text)) <= 2048)))",
       "initially_deferred": false,
       "name": "ck_quant_model_spec_authoring_provenance",
       "table": "quant_model_spec",
@@ -17726,7 +17757,7 @@
     },
     {
       "deferrable": false,
-      "definition": "CHECK ((top_n > 0))",
+      "definition": "CHECK (((top_n > 0) AND (top_n <= 1000)))",
       "initially_deferred": false,
       "name": "quant_recommendation_report_top_n_check",
       "table": "quant_recommendation_report",
@@ -17884,6 +17915,15 @@
       "name": "quant_report_fact_delivery_pkey",
       "table": "quant_report_fact_delivery",
       "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK (((length((trigger_key)::text) >= 1) AND (length((trigger_key)::text) <= 256) AND (octet_length((trigger_key)::text) = length((trigger_key)::text)) AND ((trigger_key)::text ~ '^[[:graph:]]+$'::text) AND (POSITION((chr(92)) IN ((trigger_key)::text)) = 0) AND (POSITION((chr(34)) IN ((trigger_key)::text)) = 0)))",
+      "initially_deferred": false,
+      "name": "ck_quant_report_run_trigger_key",
+      "table": "quant_report_run",
+      "type": "c",
       "validated": true
     },
     {
@@ -18077,7 +18117,7 @@
     },
     {
       "deferrable": false,
-      "definition": "CHECK (((error_code IS NULL) OR ((char_length((error_code)::text) >= 1) AND (char_length((error_code)::text) <= 128))))",
+      "definition": "CHECK (((error_code IS NULL) OR ((error_code)::text ~ '^[a-z][a-z0-9_]{0,127}$'::text)))",
       "initially_deferred": false,
       "name": "quant_report_run_error_code_check",
       "table": "quant_report_run",
@@ -18113,7 +18153,7 @@
     },
     {
       "deferrable": false,
-      "definition": "CHECK (((top_n IS NULL) OR (top_n > 0)))",
+      "definition": "CHECK (((top_n IS NULL) OR ((top_n > 0) AND (top_n <= 1000))))",
       "initially_deferred": false,
       "name": "quant_report_run_top_n_check",
       "table": "quant_report_run",
@@ -18185,9 +18225,27 @@
     },
     {
       "deferrable": false,
+      "definition": "CHECK (((acting_role)::text ~ '^[a-z][a-z0-9_]{0,63}$'::text))",
+      "initially_deferred": false,
+      "name": "ck_quant_research_job_acting_role",
+      "table": "quant_research_job",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
       "definition": "CHECK (((jsonb_typeof(params_json) = 'object'::text) AND (jsonb_typeof((params_json -> 'params'::text)) = 'object'::text) AND ((params_json ->> 'kind'::text) = (kind)::text)))",
       "initially_deferred": false,
       "name": "ck_quant_research_job_params_kind",
+      "table": "quant_research_job",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK ((((result_kind IS NULL) = (result_ref IS NULL)) AND ((status = 'succeeded'::qp_research_job_status) OR ((result_kind IS NULL) AND (result_ref IS NULL))) AND ((result_kind IS NULL) OR ((kind = 'dataset_build'::qp_research_job_kind) AND (result_kind = 'training_dataset'::qp_research_job_result_kind)) OR ((kind = 'model_train'::qp_research_job_kind) AND (result_kind = 'model_version'::qp_research_job_result_kind)) OR ((kind = 'backtest'::qp_research_job_kind) AND (result_kind = 'backtest_report'::qp_research_job_result_kind)) OR ((kind = 'cpcv_backtest'::qp_research_job_kind) AND (result_kind = 'backtest_path_set'::qp_research_job_result_kind)) OR ((kind = ANY (ARRAY['bias_table_fit'::qp_research_job_kind, 'model_calibration_fit'::qp_research_job_kind])) AND (result_kind = 'calibration_artifact'::qp_research_job_result_kind)) OR ((kind = 'feature_parity'::qp_research_job_kind) AND (result_kind = 'feature_parity_run'::qp_research_job_result_kind)) OR ((kind = 'trade_policy_fit'::qp_research_job_kind) AND (result_kind = 'trade_policy_artifact'::qp_research_job_result_kind)) OR ((kind = 'trade_policy_validation'::qp_research_job_kind) AND (result_kind = 'trade_policy_validation_run'::qp_research_job_result_kind)))))",
+      "initially_deferred": false,
+      "name": "ck_quant_research_job_result_reference",
       "table": "quant_research_job",
       "type": "c",
       "validated": true
@@ -18221,7 +18279,7 @@
     },
     {
       "deferrable": false,
-      "definition": "CHECK (((window_start < window_end) AND (window_end <= observed_at) AND (observed_at < expires_at) AND ((artifact_version)::text <> ''::text) AND ((attestation_key_id)::text <> ''::text)))",
+      "definition": "CHECK (((window_start < window_end) AND (window_end <= observed_at) AND (observed_at < expires_at) AND ((length((artifact_version)::text) >= 1) AND (length((artifact_version)::text) <= 256)) AND (octet_length((artifact_version)::text) = length((artifact_version)::text)) AND ((artifact_version)::text ~ '^[[:graph:]]+$'::text) AND (POSITION((chr(92)) IN ((artifact_version)::text)) = 0) AND (POSITION((chr(34)) IN ((artifact_version)::text)) = 0) AND ((length((attestation_key_id)::text) >= 1) AND (length((attestation_key_id)::text) <= 256)) AND (octet_length((attestation_key_id)::text) = length((attestation_key_id)::text)) AND ((attestation_key_id)::text ~ '^[[:graph:]]+$'::text) AND (POSITION((chr(92)) IN ((attestation_key_id)::text)) = 0) AND (POSITION((chr(34)) IN ((attestation_key_id)::text)) = 0)))",
       "initially_deferred": false,
       "name": "quant_research_readiness_evidence_check",
       "table": "quant_research_readiness_evidence",
@@ -18235,6 +18293,15 @@
       "name": "quant_research_readiness_evidence_pkey",
       "table": "quant_research_readiness_evidence",
       "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK ((((funder_address)::text ~ '^0x[0-9a-f]{40}$'::text) AND ((tx_hash IS NULL) OR ((tx_hash)::text ~ '^0x[0-9a-f]{64}$'::text))))",
+      "initially_deferred": false,
+      "name": "ck_quant_settlement_redeem_evm_identity",
+      "table": "quant_settlement_redeem",
+      "type": "c",
       "validated": true
     },
     {
@@ -18329,7 +18396,7 @@
     },
     {
       "deferrable": false,
-      "definition": "CHECK (((window_start < window_end) AND (window_end <= pit_cutoff) AND ((evaluation_track)::text = ANY (ARRAY['research_only'::text, 'semi_auto_candidate'::text])) AND (((status = 'materializing'::qp_source_slice_status) AND (manifest_uri IS NULL) AND (manifest_hash IS NULL) AND (manifest_json IS NULL) AND (failure_detail IS NULL) AND (completed_at IS NULL)) OR ((status = 'ready'::qp_source_slice_status) AND (manifest_uri IS NOT NULL) AND (manifest_hash IS NOT NULL) AND (manifest_json IS NOT NULL) AND (failure_detail IS NULL) AND (completed_at IS NOT NULL)) OR ((status = 'failed'::qp_source_slice_status) AND (manifest_uri IS NULL) AND (manifest_hash IS NULL) AND (manifest_json IS NULL) AND (failure_detail IS NOT NULL) AND (completed_at IS NOT NULL)))))",
+      "definition": "CHECK (((window_start < window_end) AND (window_end <= pit_cutoff) AND ((reader_contract_version)::text ~ '^[A-Za-z0-9_.@-]{1,64}$'::text) AND ((schema_contract_version)::text ~ '^[A-Za-z0-9_.@-]{1,64}$'::text) AND (((status = 'materializing'::qp_source_slice_status) AND (manifest_uri IS NULL) AND (manifest_hash IS NULL) AND (manifest_json IS NULL) AND (failure_detail IS NULL) AND (completed_at IS NULL)) OR ((status = 'ready'::qp_source_slice_status) AND (manifest_uri IS NOT NULL) AND (manifest_hash IS NOT NULL) AND (manifest_json IS NOT NULL) AND (failure_detail IS NULL) AND (completed_at IS NOT NULL)) OR ((status = 'failed'::qp_source_slice_status) AND (manifest_uri IS NULL) AND (manifest_hash IS NULL) AND (manifest_json IS NULL) AND (failure_detail IS NOT NULL) AND (completed_at IS NOT NULL)))))",
       "initially_deferred": false,
       "name": "quant_source_slice_check",
       "table": "quant_source_slice",
@@ -18374,7 +18441,7 @@
     },
     {
       "deferrable": false,
-      "definition": "CHECK (((attempt_ordinal >= 0) AND ((length(btrim((candidate_id)::text)) >= 1) AND (length(btrim((candidate_id)::text)) <= 128)) AND ((fold_index IS NULL) OR (fold_index >= 0)) AND ((path_index IS NULL) OR (path_index >= 0)) AND ((evidence_row_count IS NULL) OR (evidence_row_count >= 0))))",
+      "definition": "CHECK (((attempt_ordinal >= 0) AND ((length((candidate_id)::text) >= 1) AND (length((candidate_id)::text) <= 128)) AND (octet_length((candidate_id)::text) = length((candidate_id)::text)) AND ((candidate_id)::text ~ '^[[:graph:]]+$'::text) AND (POSITION((chr(92)) IN ((candidate_id)::text)) = 0) AND (POSITION((chr(34)) IN ((candidate_id)::text)) = 0) AND ((fold_index IS NULL) OR (fold_index >= 0)) AND ((path_index IS NULL) OR (path_index >= 0)) AND ((evidence_row_count IS NULL) OR (evidence_row_count >= 0))))",
       "initially_deferred": false,
       "name": "quant_trade_policy_trial_attempt_check",
       "table": "quant_trade_policy_trial_attempt",
@@ -18473,10 +18540,19 @@
     },
     {
       "deferrable": false,
-      "definition": "CHECK (((row_ordinal >= 0) AND ((record_key)::text <> ''::text) AND ((evidence_kind)::text = ANY (ARRAY[('observation_eligibility'::character varying)::text, ('fills'::character varying)::text, ('candidate_trials'::character varying)::text, ('cohort_trials'::character varying)::text, ('cpcv_paths'::character varying)::text, ('coverage_gaps'::character varying)::text, ('statistical_summaries'::character varying)::text])) AND ((expected_row_hash IS NOT NULL) OR (actual_row_hash IS NOT NULL)) AND ((passed AND (expected_row_hash = actual_row_hash) AND (diagnostic_kind IS NULL) AND (detail IS NULL)) OR ((NOT passed) AND (diagnostic_kind IS NOT NULL) AND (detail IS NOT NULL)))))",
+      "definition": "CHECK (((row_ordinal >= 0) AND ((record_key)::text <> ''::text) AND ((evidence_kind)::text = ANY (ARRAY[('observation_eligibility'::character varying)::text, ('fills'::character varying)::text, ('candidate_trials'::character varying)::text, ('cohort_trials'::character varying)::text, ('cpcv_paths'::character varying)::text, ('coverage_gaps'::character varying)::text, ('statistical_summaries'::character varying)::text])) AND ((expected_row_hash IS NOT NULL) OR (actual_row_hash IS NOT NULL)) AND ((diagnostic_kind IS NULL) OR ((diagnostic_kind)::text ~ '^[a-z][a-z0-9_]{0,127}$'::text)) AND ((passed AND (expected_row_hash = actual_row_hash) AND (diagnostic_kind IS NULL) AND (detail IS NULL)) OR ((NOT passed) AND (diagnostic_kind IS NOT NULL) AND (detail IS NOT NULL)))))",
       "initially_deferred": false,
       "name": "quant_trade_policy_validation_row_check",
       "table": "quant_trade_policy_validation_row",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK (((contract_address)::text ~ '^0x[0-9a-f]{40}$'::text))",
+      "initially_deferred": false,
+      "name": "ck_quant_trade_tape_block_cursor_contract_address",
+      "table": "quant_trade_tape_block_cursor",
       "type": "c",
       "validated": true
     },
@@ -18559,6 +18635,15 @@
       "name": "research_profile_artifact_pkey",
       "table": "research_profile_artifact",
       "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK ((code ~ '^[a-z][a-z0-9_]{0,63}$'::text))",
+      "initially_deferred": false,
+      "name": "ck_role_code_canonical",
+      "table": "role",
+      "type": "c",
       "validated": true
     },
     {
@@ -18649,6 +18734,15 @@
       "name": "pk-seed_application",
       "table": "seed_application",
       "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK (((acting_role IS NULL) OR (acting_role ~ '^[a-z][a-z0-9_]{0,63}$'::text)))",
+      "initially_deferred": false,
+      "name": "ck_system_bootstrap_transition_acting_role",
+      "table": "system_bootstrap_transition",
+      "type": "c",
       "validated": true
     },
     {
@@ -19590,6 +19684,13 @@
     },
     {
       "labels": [
+        "research_only",
+        "semi_auto_candidate"
+      ],
+      "name": "qp_research_evaluation_track"
+    },
+    {
+      "labels": [
         "dataset_build",
         "model_train",
         "backtest",
@@ -19601,6 +19702,19 @@
         "trade_policy_validation"
       ],
       "name": "qp_research_job_kind"
+    },
+    {
+      "labels": [
+        "training_dataset",
+        "model_version",
+        "backtest_report",
+        "backtest_path_set",
+        "calibration_artifact",
+        "feature_parity_run",
+        "trade_policy_artifact",
+        "trade_policy_validation_run"
+      ],
+      "name": "qp_research_job_result_kind"
     },
     {
       "labels": [
@@ -19749,6 +19863,22 @@
     },
     {
       "labels": [
+        "bootstrap",
+        "catching_up",
+        "live",
+        "error"
+      ],
+      "name": "qp_trade_tape_block_cursor_status"
+    },
+    {
+      "labels": [
+        "market_ws",
+        "on_chain"
+      ],
+      "name": "qp_trade_tape_source_kind"
+    },
+    {
+      "labels": [
         "planned",
         "building",
         "insufficient_labels",
@@ -19838,21 +19968,14 @@
     },
     {
       "grantable": "NO",
-      "grantee": "$runtime_grantee",
+      "grantee": "$schema_owner",
       "object_kind": "schema",
       "object_name": "public",
       "privilege": "CREATE"
     },
     {
       "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "schema",
-      "object_name": "public",
-      "privilege": "USAGE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
+      "grantee": "$schema_owner",
       "object_kind": "schema",
       "object_name": "public",
       "privilege": "USAGE"
@@ -19862,34 +19985,6 @@
       "grantee": "$schema_owner",
       "object_kind": "sequence",
       "object_name": "casbin_rule_id_seq",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$schema_owner",
-      "object_kind": "sequence",
-      "object_name": "casbin_rule_id_seq",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$schema_owner",
-      "object_kind": "sequence",
-      "object_name": "casbin_rule_id_seq",
-      "privilege": "USAGE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "sequence",
-      "object_name": "casbin_rule_id_seq",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "sequence",
-      "object_name": "casbin_rule_id_seq",
       "privilege": "USAGE"
     },
     {
@@ -19943,34 +20038,6 @@
     },
     {
       "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "casbin_rule",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "casbin_rule",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "casbin_rule",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "casbin_rule",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
       "grantee": "$schema_owner",
       "object_kind": "table",
       "object_name": "catalog_event_change",
@@ -20014,34 +20081,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "catalog_event_change",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "catalog_event_change",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "catalog_event_change",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "catalog_event_change",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "catalog_event_change",
       "privilege": "UPDATE"
@@ -20097,34 +20136,6 @@
     },
     {
       "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "catalog_event_object",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "catalog_event_object",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "catalog_event_object",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "catalog_event_object",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
       "grantee": "$schema_owner",
       "object_kind": "table",
       "object_name": "catalog_market_change",
@@ -20168,34 +20179,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "catalog_market_change",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "catalog_market_change",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "catalog_market_change",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "catalog_market_change",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "catalog_market_change",
       "privilege": "UPDATE"
@@ -20251,34 +20234,6 @@
     },
     {
       "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "catalog_market_object",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "catalog_market_object",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "catalog_market_object",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "catalog_market_object",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
       "grantee": "$schema_owner",
       "object_kind": "table",
       "object_name": "catalog_sync_batch",
@@ -20322,34 +20277,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "catalog_sync_batch",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "catalog_sync_batch",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "catalog_sync_batch",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "catalog_sync_batch",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "catalog_sync_batch",
       "privilege": "UPDATE"
@@ -20405,34 +20332,6 @@
     },
     {
       "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "catalog_sync_rejection",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "catalog_sync_rejection",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "catalog_sync_rejection",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "catalog_sync_rejection",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
       "grantee": "$schema_owner",
       "object_kind": "table",
       "object_name": "clob_market_info_version",
@@ -20476,34 +20375,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "clob_market_info_version",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "clob_market_info_version",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "clob_market_info_version",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "clob_market_info_version",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "clob_market_info_version",
       "privilege": "UPDATE"
@@ -20559,34 +20430,6 @@
     },
     {
       "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "decision_policy_snapshot",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "decision_policy_snapshot",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "decision_policy_snapshot",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "decision_policy_snapshot",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
       "grantee": "$schema_owner",
       "object_kind": "table",
       "object_name": "event",
@@ -20636,34 +20479,6 @@
     },
     {
       "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "event",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "event",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "event",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "event",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
       "grantee": "$schema_owner",
       "object_kind": "table",
       "object_name": "market",
@@ -20707,34 +20522,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "market",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "market",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "market",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "market",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "market",
       "privilege": "UPDATE"
@@ -20784,34 +20571,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "menu",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "menu",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "menu",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "menu",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "menu",
       "privilege": "UPDATE"
@@ -20861,34 +20620,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "operation_log",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "operation_log",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "operation_log",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "operation_log",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "operation_log",
       "privilege": "UPDATE"
@@ -20938,34 +20669,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "policy_activation",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "policy_activation",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "policy_activation",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "policy_activation",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "policy_activation",
       "privilege": "UPDATE"
@@ -21015,34 +20718,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "policy_activation_audit",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "policy_activation_audit",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "policy_activation_audit",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "policy_activation_audit",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "policy_activation_audit",
       "privilege": "UPDATE"
@@ -21092,34 +20767,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "policy_activation_event_outbox",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "policy_activation_event_outbox",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "policy_activation_event_outbox",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "policy_activation_event_outbox",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "policy_activation_event_outbox",
       "privilege": "UPDATE"
@@ -21169,34 +20816,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "policy_activation_guard",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "policy_activation_guard",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "policy_activation_guard",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "policy_activation_guard",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "policy_activation_guard",
       "privilege": "UPDATE"
@@ -21246,34 +20865,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "policy_approval",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "policy_approval",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "policy_approval",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "policy_approval",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "policy_approval",
       "privilege": "UPDATE"
@@ -21323,34 +20914,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "policy_profile_artifact",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "policy_profile_artifact",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "policy_profile_artifact",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "policy_profile_artifact",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "policy_profile_artifact",
       "privilege": "UPDATE"
@@ -21400,34 +20963,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "policy_revision",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "policy_revision",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "policy_revision",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "policy_revision",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "policy_revision",
       "privilege": "UPDATE"
@@ -21477,34 +21012,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_account_snapshot",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_account_snapshot",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_account_snapshot",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_account_snapshot",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "quant_account_snapshot",
       "privilege": "UPDATE"
@@ -21554,34 +21061,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_backtest_path_set",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_backtest_path_set",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_backtest_path_set",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_backtest_path_set",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "quant_backtest_path_set",
       "privilege": "UPDATE"
@@ -21631,34 +21110,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_backtest_report",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_backtest_report",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_backtest_report",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_backtest_report",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "quant_backtest_report",
       "privilege": "UPDATE"
@@ -21708,34 +21159,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_basis_alert",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_basis_alert",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_basis_alert",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_basis_alert",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "quant_basis_alert",
       "privilege": "UPDATE"
@@ -21785,34 +21208,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_calibration_artifact",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_calibration_artifact",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_calibration_artifact",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_calibration_artifact",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "quant_calibration_artifact",
       "privilege": "UPDATE"
@@ -21862,34 +21257,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_calibration_artifact_publication",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_calibration_artifact_publication",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_calibration_artifact_publication",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_calibration_artifact_publication",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "quant_calibration_artifact_publication",
       "privilege": "UPDATE"
@@ -21939,34 +21306,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_capital_allocation",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_capital_allocation",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_capital_allocation",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_capital_allocation",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "quant_capital_allocation",
       "privilege": "UPDATE"
@@ -22016,34 +21355,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_crypto_price_projection",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_crypto_price_projection",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_crypto_price_projection",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_crypto_price_projection",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "quant_crypto_price_projection",
       "privilege": "UPDATE"
@@ -22093,34 +21404,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_domain_event_outbox",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_domain_event_outbox",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_domain_event_outbox",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_domain_event_outbox",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "quant_domain_event_outbox",
       "privilege": "UPDATE"
@@ -22170,34 +21453,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_domain_source_cursor",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_domain_source_cursor",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_domain_source_cursor",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_domain_source_cursor",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "quant_domain_source_cursor",
       "privilege": "UPDATE"
@@ -22247,34 +21502,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_domain_source_expectation",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_domain_source_expectation",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_domain_source_expectation",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_domain_source_expectation",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "quant_domain_source_expectation",
       "privilege": "UPDATE"
@@ -22324,34 +21551,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_entry_condition_artifact",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_entry_condition_artifact",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_entry_condition_artifact",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_entry_condition_artifact",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "quant_entry_condition_artifact",
       "privilege": "UPDATE"
@@ -22401,34 +21600,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_entry_condition_audit",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_entry_condition_audit",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_entry_condition_audit",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_entry_condition_audit",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "quant_entry_condition_audit",
       "privilege": "UPDATE"
@@ -22478,34 +21649,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_entry_condition_evaluation_outbox",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_entry_condition_evaluation_outbox",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_entry_condition_evaluation_outbox",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_entry_condition_evaluation_outbox",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "quant_entry_condition_evaluation_outbox",
       "privilege": "UPDATE"
@@ -22555,34 +21698,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_entry_condition_instance",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_entry_condition_instance",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_entry_condition_instance",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_entry_condition_instance",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "quant_entry_condition_instance",
       "privilege": "UPDATE"
@@ -22632,34 +21747,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_equity_snapshot",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_equity_snapshot",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_equity_snapshot",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_equity_snapshot",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "quant_equity_snapshot",
       "privilege": "UPDATE"
@@ -22709,34 +21796,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_execution_order",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_execution_order",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_execution_order",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_execution_order",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "quant_execution_order",
       "privilege": "UPDATE"
@@ -22786,34 +21845,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_factor_definition",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_factor_definition",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_factor_definition",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_factor_definition",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "quant_factor_definition",
       "privilege": "UPDATE"
@@ -22863,34 +21894,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_factor_value",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_factor_value",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_factor_value",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_factor_value",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "quant_factor_value",
       "privilege": "UPDATE"
@@ -22940,34 +21943,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_feature_parity_candidate",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_feature_parity_candidate",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_feature_parity_candidate",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_feature_parity_candidate",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "quant_feature_parity_candidate",
       "privilege": "UPDATE"
@@ -23017,34 +21992,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_feature_parity_run",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_feature_parity_run",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_feature_parity_run",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_feature_parity_run",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "quant_feature_parity_run",
       "privilege": "UPDATE"
@@ -23094,34 +22041,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_feature_parity_state",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_feature_parity_state",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_feature_parity_state",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_feature_parity_state",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "quant_feature_parity_state",
       "privilege": "UPDATE"
@@ -23171,34 +22090,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_feature_parity_subject",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_feature_parity_subject",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_feature_parity_subject",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_feature_parity_subject",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "quant_feature_parity_subject",
       "privilege": "UPDATE"
@@ -23248,34 +22139,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_feature_vector",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_feature_vector",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_feature_vector",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_feature_vector",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "quant_feature_vector",
       "privilege": "UPDATE"
@@ -23325,34 +22188,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_market_linkage",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_market_linkage",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_market_linkage",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_market_linkage",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "quant_market_linkage",
       "privilege": "UPDATE"
@@ -23402,34 +22237,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_market_linkage_source",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_market_linkage_source",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_market_linkage_source",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_market_linkage_source",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "quant_market_linkage_source",
       "privilege": "UPDATE"
@@ -23479,34 +22286,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_market_selection",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_market_selection",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_market_selection",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_market_selection",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "quant_market_selection",
       "privilege": "UPDATE"
@@ -23556,34 +22335,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_market_selection_member",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_market_selection_member",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_market_selection_member",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_market_selection_member",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "quant_market_selection_member",
       "privilege": "UPDATE"
@@ -23633,34 +22384,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_model_comparison_report",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_model_comparison_report",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_model_comparison_report",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_model_comparison_report",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "quant_model_comparison_report",
       "privilege": "UPDATE"
@@ -23710,34 +22433,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_model_governance_audit",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_model_governance_audit",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_model_governance_audit",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_model_governance_audit",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "quant_model_governance_audit",
       "privilege": "UPDATE"
@@ -23787,34 +22482,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_model_run",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_model_run",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_model_run",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_model_run",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "quant_model_run",
       "privilege": "UPDATE"
@@ -23864,34 +22531,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_model_spec",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_model_spec",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_model_spec",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_model_spec",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "quant_model_spec",
       "privilege": "UPDATE"
@@ -23941,34 +22580,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_model_version",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_model_version",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_model_version",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_model_version",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "quant_model_version",
       "privilege": "UPDATE"
@@ -24018,34 +22629,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_order_intent",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_order_intent",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_order_intent",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_order_intent",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "quant_order_intent",
       "privilege": "UPDATE"
@@ -24095,34 +22678,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_portfolio_plan",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_portfolio_plan",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_portfolio_plan",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_portfolio_plan",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "quant_portfolio_plan",
       "privilege": "UPDATE"
@@ -24172,34 +22727,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_position",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_position",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_position",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_position",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "quant_position",
       "privilege": "UPDATE"
@@ -24249,34 +22776,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_recommendation",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_recommendation",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_recommendation",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_recommendation",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "quant_recommendation",
       "privilege": "UPDATE"
@@ -24326,34 +22825,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_recommendation_attribution",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_recommendation_attribution",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_recommendation_attribution",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_recommendation_attribution",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "quant_recommendation_attribution",
       "privilege": "UPDATE"
@@ -24403,34 +22874,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_recommendation_report",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_recommendation_report",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_recommendation_report",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_recommendation_report",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "quant_recommendation_report",
       "privilege": "UPDATE"
@@ -24480,34 +22923,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_reconciliation",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_reconciliation",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_reconciliation",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_reconciliation",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "quant_reconciliation",
       "privilege": "UPDATE"
@@ -24557,34 +22972,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_report_data_quality_snapshot",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_report_data_quality_snapshot",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_report_data_quality_snapshot",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_report_data_quality_snapshot",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "quant_report_data_quality_snapshot",
       "privilege": "UPDATE"
@@ -24634,34 +23021,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_report_fact_delivery",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_report_fact_delivery",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_report_fact_delivery",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_report_fact_delivery",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "quant_report_fact_delivery",
       "privilege": "UPDATE"
@@ -24711,34 +23070,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_report_run",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_report_run",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_report_run",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_report_run",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "quant_report_run",
       "privilege": "UPDATE"
@@ -24788,34 +23119,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_report_schedule_gap",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_report_schedule_gap",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_report_schedule_gap",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_report_schedule_gap",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "quant_report_schedule_gap",
       "privilege": "UPDATE"
@@ -24865,34 +23168,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_report_schedule_state",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_report_schedule_state",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_report_schedule_state",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_report_schedule_state",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "quant_report_schedule_state",
       "privilege": "UPDATE"
@@ -24942,34 +23217,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_research_job",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_research_job",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_research_job",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_research_job",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "quant_research_job",
       "privilege": "UPDATE"
@@ -25019,34 +23266,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_research_readiness_evidence",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_research_readiness_evidence",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_research_readiness_evidence",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_research_readiness_evidence",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "quant_research_readiness_evidence",
       "privilege": "UPDATE"
@@ -25096,34 +23315,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_settlement_redeem",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_settlement_redeem",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_settlement_redeem",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_settlement_redeem",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "quant_settlement_redeem",
       "privilege": "UPDATE"
@@ -25173,34 +23364,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_settlement_redeem_lot",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_settlement_redeem_lot",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_settlement_redeem_lot",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_settlement_redeem_lot",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "quant_settlement_redeem_lot",
       "privilege": "UPDATE"
@@ -25250,34 +23413,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_shadow_comparison",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_shadow_comparison",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_shadow_comparison",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_shadow_comparison",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "quant_shadow_comparison",
       "privilege": "UPDATE"
@@ -25327,34 +23462,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_source_slice",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_source_slice",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_source_slice",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_source_slice",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "quant_source_slice",
       "privilege": "UPDATE"
@@ -25404,34 +23511,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_trade_policy_artifact",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_trade_policy_artifact",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_trade_policy_artifact",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_trade_policy_artifact",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "quant_trade_policy_artifact",
       "privilege": "UPDATE"
@@ -25481,34 +23560,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_trade_policy_governance_audit",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_trade_policy_governance_audit",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_trade_policy_governance_audit",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_trade_policy_governance_audit",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "quant_trade_policy_governance_audit",
       "privilege": "UPDATE"
@@ -25558,34 +23609,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_trade_policy_trial_attempt",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_trade_policy_trial_attempt",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_trade_policy_trial_attempt",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_trade_policy_trial_attempt",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "quant_trade_policy_trial_attempt",
       "privilege": "UPDATE"
@@ -25635,34 +23658,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_trade_policy_validation",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_trade_policy_validation",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_trade_policy_validation",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_trade_policy_validation",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "quant_trade_policy_validation",
       "privilege": "UPDATE"
@@ -25712,34 +23707,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_trade_policy_validation_row",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_trade_policy_validation_row",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_trade_policy_validation_row",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_trade_policy_validation_row",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "quant_trade_policy_validation_row",
       "privilege": "UPDATE"
@@ -25789,34 +23756,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_trade_tape_block_cursor",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_trade_tape_block_cursor",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_trade_tape_block_cursor",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_trade_tape_block_cursor",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "quant_trade_tape_block_cursor",
       "privilege": "UPDATE"
@@ -25866,34 +23805,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_training_dataset",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_training_dataset",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_training_dataset",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_training_dataset",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "quant_training_dataset",
       "privilege": "UPDATE"
@@ -25943,34 +23854,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_weather_daily_temperature_projection",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_weather_daily_temperature_projection",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_weather_daily_temperature_projection",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_weather_daily_temperature_projection",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "quant_weather_daily_temperature_projection",
       "privilege": "UPDATE"
@@ -26020,34 +23903,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_weather_observation_current",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_weather_observation_current",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_weather_observation_current",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "quant_weather_observation_current",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "quant_weather_observation_current",
       "privilege": "UPDATE"
@@ -26097,34 +23952,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "research_profile_artifact",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "research_profile_artifact",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "research_profile_artifact",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "research_profile_artifact",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "research_profile_artifact",
       "privilege": "UPDATE"
@@ -26174,34 +24001,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "role",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "role",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "role",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "role",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "role",
       "privilege": "UPDATE"
@@ -26251,34 +24050,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "role_menu",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "role_menu",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "role_menu",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "role_menu",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "role_menu",
       "privilege": "UPDATE"
@@ -26334,13 +24105,6 @@
     },
     {
       "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "schema_migration_audit",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
       "grantee": "$schema_owner",
       "object_kind": "table",
       "object_name": "seaql_migrations",
@@ -26390,13 +24154,6 @@
     },
     {
       "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "seaql_migrations",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
       "grantee": "$schema_owner",
       "object_kind": "table",
       "object_name": "seed_application",
@@ -26440,34 +24197,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "seed_application",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "seed_application",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "seed_application",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "seed_application",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "seed_application",
       "privilege": "UPDATE"
@@ -26523,34 +24252,6 @@
     },
     {
       "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "system_bootstrap_transition",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "system_bootstrap_transition",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "system_bootstrap_transition",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "system_bootstrap_transition",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
       "grantee": "$schema_owner",
       "object_kind": "table",
       "object_name": "system_kill_switch",
@@ -26594,34 +24295,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "system_kill_switch",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "system_kill_switch",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "system_kill_switch",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "system_kill_switch",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "system_kill_switch",
       "privilege": "UPDATE"
@@ -26677,34 +24350,6 @@
     },
     {
       "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "system_production_baseline",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "system_production_baseline",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "system_production_baseline",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "system_production_baseline",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
       "grantee": "$schema_owner",
       "object_kind": "table",
       "object_name": "system_production_evidence",
@@ -26748,34 +24393,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "system_production_evidence",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "system_production_evidence",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "system_production_evidence",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "system_production_evidence",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "system_production_evidence",
       "privilege": "UPDATE"
@@ -26831,34 +24448,6 @@
     },
     {
       "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "system_runtime_state",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "system_runtime_state",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "system_runtime_state",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "system_runtime_state",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
       "grantee": "$schema_owner",
       "object_kind": "table",
       "object_name": "user",
@@ -26908,34 +24497,6 @@
     },
     {
       "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "user",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "user",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "user",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "user",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
       "grantee": "$schema_owner",
       "object_kind": "table",
       "object_name": "user_role",
@@ -26979,34 +24540,6 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "user_role",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "user_role",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "user_role",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
-      "object_kind": "table",
-      "object_name": "user_role",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$runtime_grantee",
       "object_kind": "table",
       "object_name": "user_role",
       "privilege": "UPDATE"

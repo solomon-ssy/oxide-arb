@@ -27,9 +27,9 @@ use quant_pivot_models::{
         ResearchJobKind,
     },
     types::{
-        ContentHash, FeatureParityCandidateId, FeatureParityRunId, FeatureParityStateId,
-        FeatureParitySubjectId, MarketSelectionId, ModelRunId, ModelVersionId,
-        RecommendationReportId, ResearchJobParams, TrainingDatasetId,
+        ContentHash, DiagnosticCode, FeatureParityCandidateId, FeatureParityRunId,
+        FeatureParityStateId, FeatureParitySubjectId, MarketSelectionId, ModelRunId,
+        ModelVersionId, RecommendationReportId, ResearchJobParams, RoleCode, TrainingDatasetId,
     },
 };
 use sea_orm::{
@@ -985,7 +985,7 @@ impl FeatureParityRepository for PgFeatureParityRepository {
             training_dataset_id: source.training_dataset_id,
             triggered_by: "system:model_governance".to_owned(),
             requested_by: None,
-            acting_role: "system".to_owned(),
+            acting_role: RoleCode::new("system"),
             reason: reason.clone(),
             total_count: 0,
             compared_count: 0,
@@ -994,7 +994,7 @@ impl FeatureParityRepository for PgFeatureParityRepository {
             pending_materialization_count: 0,
             feature_contract_hash: source.feature_contract_hash,
             transform_hash: source.transform_hash,
-            failure_code: Some("rollback_pointer_recovery_failed".to_owned()),
+            failure_code: Some(DiagnosticCode::new("rollback_pointer_recovery_failed")),
             failure_detail: Some(reason.clone()),
             started_at: Some(now),
             pending_since: None,
@@ -1065,7 +1065,7 @@ impl FeatureParityRepository for PgFeatureParityRepository {
             recovery_run_id: Some(recovery_run_id.clone()),
             previous_state_id: current.as_ref().map(|row| row.state_id.clone()),
             actor: actor.actor,
-            acting_role: Some(actor.acting_role),
+            acting_role: Some(RoleCode::new(actor.acting_role)),
             reason: actor.reason,
         };
         let inserted = quant_feature_parity_state::Entity::insert(next.into_active_model())
@@ -1091,7 +1091,7 @@ fn validate_new_run(run: &NewFeatureParityRun) -> Result<(), StorageError> {
         ));
     }
     if run.reason.trim().is_empty()
-        || run.acting_role.trim().is_empty()
+        || run.acting_role.as_str().trim().is_empty()
         || run.triggered_by.trim().is_empty()
         || run.feature_contract_hash.is_none()
     {
@@ -1171,8 +1171,8 @@ fn validate_completion(result: &CompleteFeatureParityRun) -> Result<(), StorageE
         FeatureParityRunStatus::Failed
             if result
                 .failure_code
-                .as_deref()
-                .is_some_and(|code| !code.is_empty())
+                .as_ref()
+                .is_some_and(|code| !code.as_str().is_empty())
                 && result
                     .failure_detail
                     .as_deref()
@@ -1483,8 +1483,8 @@ pub(super) async fn resolve_publish_latch_generation(
             }
             if actor.trim().is_empty()
                 || acting_role
-                    .as_deref()
-                    .is_some_and(|role| role.trim().is_empty())
+                    .as_ref()
+                    .is_some_and(|role| role.as_str().trim().is_empty())
                 || reason.trim().is_empty()
             {
                 return Err(StorageError::invariant_violation(
@@ -1692,7 +1692,8 @@ where
 mod tests {
     use chrono::{Duration, TimeZone};
     use quant_pivot_models::types::{
-        ContentHash, ModelVersionId, RecommendationReportId, TrainingDatasetId,
+        ContentHash, DiagnosticCode, ModelVersionId, RecommendationReportId, RoleCode,
+        TrainingDatasetId,
     };
 
     use super::*;
@@ -1719,7 +1720,7 @@ mod tests {
             training_dataset_id: None,
             triggered_by: "test".to_owned(),
             requested_by: Some("risk-owner".to_owned()),
-            acting_role: "risk_owner".to_owned(),
+            acting_role: RoleCode::new("risk_owner"),
             reason: "test".to_owned(),
             total_count: 2,
             compared_count: 2,
@@ -1729,7 +1730,7 @@ mod tests {
             feature_contract_hash: Some(hash()),
             transform_hash: (status == FeatureParityRunStatus::Passed).then(hash),
             failure_code: (status == FeatureParityRunStatus::Failed)
-                .then(|| "integrity_failure".to_owned()),
+                .then(|| DiagnosticCode::new("integrity_failure")),
             failure_detail: (status == FeatureParityRunStatus::Failed).then(|| "failed".to_owned()),
             started_at: Some(now - Duration::minutes(1)),
             pending_since: None,
@@ -1767,7 +1768,7 @@ mod tests {
             recovery_run_id: Some(recovery_run_id.clone()),
             previous_state_id: None,
             actor: Some("risk-owner".to_owned()),
-            acting_role: Some("risk_owner".to_owned()),
+            acting_role: Some(RoleCode::new("risk_owner")),
             reason: "bootstrap parity verified".to_owned(),
             created_at: Utc.with_ymd_and_hms(2026, 7, 11, 12, 1, 0).unwrap(),
         }

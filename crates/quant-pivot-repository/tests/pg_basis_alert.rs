@@ -120,6 +120,40 @@ async fn latest_for_market_picks_the_newest_as_of() {
 
 #[tokio::test]
 #[ignore = "requires Docker"]
+async fn batched_latest_returns_one_newest_alert_per_market() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    seed_market(&db, "0xbasis-batch-a").await;
+    seed_market(&db, "0xbasis-batch-b").await;
+
+    let repo = PgBasisAlertRepository::new(db.clone());
+    let t0 = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
+    repo.record_many(vec![
+        alert("0xbasis-batch-a", 60, t0),
+        alert("0xbasis-batch-a", 80, t0 + ChronoDuration::minutes(2)),
+        alert("0xbasis-batch-b", 70, t0 + ChronoDuration::minutes(1)),
+    ])
+    .await
+    .expect("record batch");
+
+    let rows = repo
+        .latest_for_markets(&[
+            MarketId::new("0xbasis-batch-a"),
+            MarketId::new("0xbasis-batch-b"),
+            MarketId::new("0xbasis-batch-a"),
+        ])
+        .await
+        .expect("query batch");
+    assert_eq!(rows.len(), 2, "exactly one row per requested market");
+    let a = rows
+        .iter()
+        .find(|row| row.market_id == MarketId::new("0xbasis-batch-a"))
+        .expect("market a");
+    assert_eq!(a.basis_bps.inner(), dec!(80));
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
 async fn page_filters_by_market_and_time_range() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();

@@ -12,7 +12,7 @@ use quant_pivot_models::{
         FeatureParityLatchState, FeatureParityRunKind, FeatureParityRunStatus, ResearchJobKind,
         ResearchJobStatus,
     },
-    types::{ContentHash, FeatureParityRunId, ResearchJobId, ResearchJobParams},
+    types::{ContentHash, FeatureParityRunId, ResearchJobId, ResearchJobParams, RoleCode},
 };
 use quant_pivot_repository::{
     postgres::PgFeatureParityRepository,
@@ -38,7 +38,7 @@ fn queued_run(window_start: DateTime<Utc>, window_end: DateTime<Utc>) -> NewFeat
         training_dataset_id: None,
         triggered_by: "pg_feature_parity_test".to_owned(),
         requested_by: Some("risk-owner".to_owned()),
-        acting_role: "risk_owner".to_owned(),
+        acting_role: RoleCode::new("risk_owner"),
         reason: "incident-ledger integration".to_owned(),
         total_count: 0,
         compared_count: 0,
@@ -156,7 +156,7 @@ async fn cold_window_is_not_eligible_and_writes_no_run_or_job() {
             },
         }),
         requested_by: None,
-        acting_role: "system".to_owned(),
+        acting_role: RoleCode::new("system"),
         parent_job_id: None,
         recovery_attempt: 0,
         max_recovery_attempts: 3,

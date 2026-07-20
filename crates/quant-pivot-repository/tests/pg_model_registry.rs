@@ -261,6 +261,34 @@ async fn model_version_typed_documents_fail_closed_at_database_boundary() {
         "the DB constraint must reject unknown training-objective tags"
     );
 
+    let wrong_shape = Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        "UPDATE quant_model_version SET training_objective = $1::jsonb WHERE model_version_id = $2",
+        [
+            "[]".to_owned().into(),
+            version.model_version_id.clone().into(),
+        ],
+    );
+    assert!(
+        db.execute_raw(wrong_shape).await.is_err(),
+        "the DB constraint must reject a non-object training objective"
+    );
+
+    let wrong_version = Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        "UPDATE quant_model_version SET training_objective = $1::jsonb WHERE model_version_id = $2",
+        [
+            r#"{"format_version":2,"definition":{"kind":"hand_authored","rationale":"wrong version"}}"#
+                .to_owned()
+                .into(),
+            version.model_version_id.clone().into(),
+        ],
+    );
+    assert!(
+        db.execute_raw(wrong_version).await.is_err(),
+        "the DB constraint must reject an unsupported document version"
+    );
+
     let corrupt_metrics = Statement::from_sql_and_values(
         DatabaseBackend::Postgres,
         "UPDATE quant_model_version SET metrics = $1::jsonb WHERE model_version_id = $2",
@@ -307,6 +335,24 @@ async fn model_version_typed_documents_fail_closed_at_database_boundary() {
             .await
             .is_err(),
         "quality-gate subject id must match the owning model version"
+    );
+
+    let unknown_field = Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        "UPDATE quant_model_version SET training_objective = training_objective || $1::jsonb WHERE model_version_id = $2",
+        [
+            r#"{"future_field":true}"#.to_owned().into(),
+            version.model_version_id.clone().into(),
+        ],
+    );
+    db.execute_raw(unknown_field)
+        .await
+        .expect("test-only corruption may cross the relational shape constraint");
+    assert!(
+        repo.find_model_version_by_id(&version.model_version_id)
+            .await
+            .is_err(),
+        "typed repository decode must reject unknown fields without fallback"
     );
 }
 

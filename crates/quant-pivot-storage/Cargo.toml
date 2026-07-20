@@ -12,6 +12,7 @@ test-util = ["dep:testcontainers", "dep:testcontainers-modules"]
 [dependencies]
 quant-pivot-error = { workspace = true, features = ["storage"] }
 quant-pivot-models = { workspace = true, features = ["repository"] }
+quant-pivot-sql-contract = { workspace = true }
 num-traits = { workspace = true }
 sea-orm = { workspace = true }
 sqlx = { workspace = true }

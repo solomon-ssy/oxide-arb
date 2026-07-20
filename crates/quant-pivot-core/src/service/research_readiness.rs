@@ -16,11 +16,11 @@ use quant_pivot_models::{
     enums::quant::ResearchReadinessEvidenceKind,
     hashing::CanonicalDigest,
     types::{
-        ArtifactUri, ContentHash, HistoryCoverage, RETENTION_RUNWAY_EVIDENCE_FORMAT_VERSION,
-        ResearchReadinessEvidenceId, ResearchReadinessEvidencePayload, ResearchSourceBinding,
-        ResearchSourceRegistry, ResearchSourceStorageKind, RetentionRunwayEvidenceV1,
-        RetentionSourceObservationV1, SHADOW_LATENCY_PROFILE_FORMAT_VERSION,
-        ShadowLatencyProfileV1, research_source_registry,
+        ArtifactUri, ArtifactVersion, AttestationKeyId, ContentHash, HistoryCoverage,
+        RETENTION_RUNWAY_EVIDENCE_FORMAT_VERSION, ResearchReadinessEvidenceId,
+        ResearchReadinessEvidencePayload, ResearchSourceBinding, ResearchSourceRegistry,
+        ResearchSourceStorageKind, RetentionRunwayEvidenceV1, RetentionSourceObservationV1,
+        SHADOW_LATENCY_PROFILE_FORMAT_VERSION, ShadowLatencyProfileV1, research_source_registry,
     },
 };
 use quant_pivot_repository::traits::{
@@ -39,8 +39,8 @@ struct AttestationKey([u8; 32]);
 
 #[derive(Clone)]
 pub struct EvidenceAttestor {
-    active_key_id: String,
-    keys: BTreeMap<String, AttestationKey>,
+    active_key_id: AttestationKeyId,
+    keys: BTreeMap<AttestationKeyId, AttestationKey>,
 }
 
 impl EvidenceAttestor {
@@ -55,12 +55,12 @@ impl EvidenceAttestor {
             ));
         }
         let active_key = decode_key(active)?;
-        let active_key_id = attestation_key_id(&active_key);
+        let active_key_id = attestation_key_id(&active_key)?;
         let mut keys = BTreeMap::new();
         keys.insert(active_key_id.clone(), active_key);
         for previous in &config.previous_signing_keys {
             let key = decode_key(previous.expose_secret())?;
-            let key_id = attestation_key_id(&key);
+            let key_id = attestation_key_id(&key)?;
             if key_id == active_key_id {
                 return Err(methodology(
                     "research evidence active signing_key must not appear in previous_signing_keys",
@@ -78,7 +78,11 @@ impl EvidenceAttestor {
         }))
     }
 
-    fn mac<T: Serialize + ?Sized>(&self, key_id: &str, value: &T) -> QuantResult<ContentHash> {
+    fn mac<T: Serialize + ?Sized>(
+        &self,
+        key_id: &AttestationKeyId,
+        value: &T,
+    ) -> QuantResult<ContentHash> {
         let key = self.keys.get(key_id).ok_or_else(|| {
             methodology(format!(
                 "research evidence attestation key `{key_id}` is not present in the configured active/previous key set"
@@ -107,7 +111,7 @@ struct AttestationInput<'a> {
     expires_at: DateTime<Utc>,
     payload_hash: &'a ContentHash,
     artifact_uri: &'a ArtifactUri,
-    artifact_version: &'a str,
+    artifact_version: &'a ArtifactVersion,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -380,7 +384,7 @@ impl ResearchReadinessPort for ResearchReadinessEvidenceService {
     }
 }
 
-fn attestation_input(info: &ResearchReadinessEvidenceInfo) -> AttestationInput<'_> {
+const fn attestation_input(info: &ResearchReadinessEvidenceInfo) -> AttestationInput<'_> {
     AttestationInput {
         kind: info.kind,
         scope_hash: &info.scope_hash,
@@ -534,6 +538,8 @@ impl ResearchReadinessEvidenceProducer {
         let artifact_version = metadata
             .version_id
             .unwrap_or_else(|| LOCAL_ARTIFACT_VERSION.to_owned());
+        let artifact_version = ArtifactVersion::parse(artifact_version)
+            .map_err(|error| methodology(error.to_string()))?;
         let input = AttestationInput {
             kind,
             scope_hash: &scope_hash,
@@ -757,12 +763,13 @@ fn decode_key(value: &str) -> QuantResult<AttestationKey> {
     Ok(key)
 }
 
-fn attestation_key_id(key: &AttestationKey) -> String {
+fn attestation_key_id(key: &AttestationKey) -> QuantResult<AttestationKeyId> {
     let mut hasher = blake3::Hasher::new_derive_key(
         "quant-pivot/research-evidence-attestation-key-fingerprint/v1",
     );
     hasher.update(&key.0);
-    format!("b3k1:{}", hasher.finalize().to_hex())
+    AttestationKeyId::parse(format!("b3k1:{}", hasher.finalize().to_hex()))
+        .map_err(|error| methodology(error.to_string()))
 }
 
 fn methodology(detail: impl Into<String>) -> QuantError {
@@ -778,7 +785,7 @@ mod tests {
     use quant_pivot_models::{
         config::EvidenceAttestationConfig,
         enums::quant::ResearchReadinessEvidenceKind,
-        types::{ResearchReadinessEvidencePayload, ShadowLatencyProfileV1},
+        types::{AttestationKeyId, ResearchReadinessEvidencePayload, ShadowLatencyProfileV1},
     };
 
     use super::{EvidenceAttestor, verify_kind_binding};
@@ -830,7 +837,8 @@ mod tests {
             .expect("tampered MAC");
         assert_ne!(original, tampered);
         assert!(attestor.mac(&historical_key_id, &("scope", 1_u32)).is_ok());
-        assert!(attestor.mac("b3k1:unknown", &("scope", 1_u32)).is_err());
+        let unknown_key = AttestationKeyId::parse("b3k1:unknown").expect("attestation key id");
+        assert!(attestor.mac(&unknown_key, &("scope", 1_u32)).is_err());
     }
 
     #[test]

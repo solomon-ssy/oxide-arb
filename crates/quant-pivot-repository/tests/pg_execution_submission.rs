@@ -62,11 +62,12 @@ use quant_pivot_models::{
         RecommendationFactorBreakdown, RecommendationId, RecommendationIdentity,
         RecommendationReportId, RecommendationTradePlan, ReconciliationEvidence,
         ReconciliationEvidenceChain, ReconciliationId, ReportDataQualitySnapshotId,
-        ReportDataQualityTokens, ReportRunId, ReportSummary, RiskEnvelope,
-        SelectionExclusionSummary, Shares, SignalCandidateId, SizingPlan, ThesisInvalidationPolicy,
-        TokenId, TradePolicyArtifactId, TradePolicyCohortDimension, TradePolicyCohortKey,
-        TradePolicyCohortProvenance, Usd, UserId, WorkerId, builtin_research_profiles,
-        model_metrics::ModelVersionMetrics, model_training::ModelTrainingObjective,
+        ReportDataQualityTokens, ReportRunId, ReportSummary, ReportTriggerKey, RiskEnvelope,
+        RoleCode, SelectionExclusionSummary, Shares, SignalCandidateId, SizingPlan,
+        ThesisInvalidationPolicy, TokenId, TradePolicyArtifactId, TradePolicyCohortDimension,
+        TradePolicyCohortKey, TradePolicyCohortProvenance, Usd, UserId, WorkerId,
+        builtin_research_profiles, model_metrics::ModelVersionMetrics,
+        model_training::ModelTrainingObjective,
     },
 };
 use quant_pivot_repository::{
@@ -947,7 +948,10 @@ async fn lost_lease_prevents_report_commit_and_marks_abandoned() {
     quant_report_run::ActiveModel {
         report_run_id: ActiveValue::Set(run_id.clone()),
         trigger_kind: ActiveValue::Set(ReportTriggerKind::Scheduled),
-        trigger_key: ActiveValue::Set(format!("scheduled:expired:{}", ids.report)),
+        trigger_key: ActiveValue::Set(
+            ReportTriggerKey::parse(format!("scheduled:expired:{}", ids.report))
+                .expect("report trigger key"),
+        ),
         schedule_id: ActiveValue::Set(Some("expired_fixture".into())),
         request_id: ActiveValue::Set(None),
         retry_of_run_id: ActiveValue::Set(None),
@@ -2235,7 +2239,7 @@ async fn seed_clear_feature_parity_state(db: &sea_orm::DatabaseConnection) -> Fe
             recovery_run_id: None,
             previous_state_id: None,
             actor: Some("pg-execution-test".to_owned()),
-            acting_role: Some("risk_owner".to_owned()),
+            acting_role: Some(RoleCode::new("risk_owner")),
             reason: "test fixture clear generation".to_owned(),
         }
         .into_active_model(),

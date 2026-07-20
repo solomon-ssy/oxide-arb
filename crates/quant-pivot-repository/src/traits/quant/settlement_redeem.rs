@@ -5,7 +5,7 @@ use quant_pivot_models::{
         ConfirmSettlementRedeem, NewSettlementRedeem, Paginated, SettlementRedeemInfo,
         SettlementRedeemListQuery, SettlementRedeemLotInfo, SettlementRedeemSummary,
     },
-    types::{MarketId, SettlementRedeemId},
+    types::{EvmAddress, EvmTransactionHash, MarketId, SettlementRedeemId},
 };
 
 #[async_trait::async_trait]
@@ -18,7 +18,7 @@ pub trait SettlementRedeemRepository: Send + Sync {
     async fn find_by_market_funder(
         &self,
         market_id: &MarketId,
-        funder_address: &str,
+        funder_address: &EvmAddress,
     ) -> Result<Option<SettlementRedeemInfo>, StorageError>;
 
     /// Page redeem batches, each carrying its joined `lot_count`.
@@ -40,7 +40,7 @@ pub trait SettlementRedeemRepository: Send + Sync {
     async fn mark_submitted(
         &self,
         settlement_redeem_id: &SettlementRedeemId,
-        tx_hash: String,
+        tx_hash: EvmTransactionHash,
         submitted_at: DateTime<Utc>,
     ) -> Result<SettlementRedeemInfo, StorageError>;
 

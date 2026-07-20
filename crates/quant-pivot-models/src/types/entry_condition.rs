@@ -94,6 +94,7 @@ impl ConfirmationPolicy {
 
 /// Immutable V1 condition artifact.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
+#[serde(deny_unknown_fields)]
 pub struct EntryConditionArtifactV1 {
     pub schema_version: u32,
     pub evaluator_version: u32,
@@ -682,6 +683,7 @@ pub struct ConditionNodeEvaluation {
 /// ticks are represented by the cursor fields but do not advance the condition
 /// revision or change the continuity epoch.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
+#[serde(deny_unknown_fields)]
 pub struct EntryConditionFoldState {
     pub crypto: Vec<CryptoEnteredFoldState>,
 }

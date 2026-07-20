@@ -16,8 +16,8 @@ use quant_pivot_models::{
     enums::quant::{RecommendationReportStatus, ReportFactDeliveryStatus, ReportRunTerminalReason},
     runtime_config::{DecisionPolicySnapshot, ReportsConfig},
     types::{
-        CorrelationId, POOLED_1H_CONTROL_PROFILE_ID, RecommendationReportId, WorkerId,
-        builtin_research_profiles,
+        CorrelationId, POOLED_1H_CONTROL_PROFILE_ID, RecommendationReportId, ReportTriggerKey,
+        WorkerId, builtin_research_profiles,
     },
 };
 use quant_pivot_repository::{
@@ -441,9 +441,10 @@ async fn report_run_routes_enforce_rbac_idempotency_and_conflicts() {
         accepted.json()["data"]["trigger_key"],
         json!("ad_hoc:adhoc-2")
     );
+    let trigger_key = ReportTriggerKey::parse("ad_hoc:adhoc-2").expect("report trigger key");
     let run = env
         .report_runs
-        .find_by_trigger_key("ad_hoc:adhoc-2")
+        .find_by_trigger_key(&trigger_key)
         .await
         .expect("load durable report run")
         .expect("ad-hoc run row");

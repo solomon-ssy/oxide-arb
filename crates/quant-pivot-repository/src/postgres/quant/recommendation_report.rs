@@ -12,6 +12,7 @@ use crate::{
         },
         query::paginate_mapped,
         state_hash,
+        write::insert_many_chunked,
     },
     traits::RecommendationReportRepository,
 };
@@ -44,6 +45,7 @@ use quant_pivot_models::{
         },
         rbac::ResourceType,
     },
+    runtime_config::MAX_REPORT_TOP_N,
     types::{
         EntryConditionArtifactId, EntryConditionAuditId, EntryConditionPlan, FeatureParityStateId,
         ModelRunId, OperationDetailDocument, OperationLogId, RecommendationReportId,
@@ -52,10 +54,10 @@ use quant_pivot_models::{
     },
 };
 use sea_orm::{
-    ActiveModelTrait, ActiveValue, ColumnTrait, Condition, DatabaseConnection, DatabaseTransaction,
-    EntityTrait, IntoActiveModel, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect,
-    TransactionTrait,
-    sea_query::{LockBehavior, LockType},
+    ActiveModelTrait, ActiveValue, ColumnTrait, Condition, ConnectionTrait, DatabaseConnection,
+    DatabaseTransaction, EntityTrait, IntoActiveModel, PaginatorTrait, QueryFilter, QueryOrder,
+    QuerySelect, TransactionTrait,
+    sea_query::{Expr, LockBehavior, LockType},
 };
 
 const REPORT_FACT_RETRY_MAX_SECS: i64 = 300;
@@ -445,6 +447,21 @@ async fn insert_sampled_feature_parity(
 fn validate_report_transaction(
     transaction: &NewReportTransaction,
 ) -> Result<DateTime<Utc>, StorageError> {
+    let max_top_n = usize::try_from(MAX_REPORT_TOP_N).map_err(|error| {
+        StorageError::invariant_violation(
+            Some(entity::QUANT_RECOMMENDATION_REPORT),
+            format!("report cascade budget does not fit this platform: {error}"),
+        )
+    })?;
+    if transaction.report.top_n <= 0
+        || i64::from(transaction.report.top_n) > i64::from(MAX_REPORT_TOP_N)
+        || transaction.recommendations.len() > max_top_n
+    {
+        return Err(StorageError::invariant_violation(
+            Some(entity::QUANT_RECOMMENDATION_REPORT),
+            format!("report recommendation set exceeds the {MAX_REPORT_TOP_N}-row cascade budget"),
+        ));
+    }
     if transaction.report.status != RecommendationReportStatus::Prepared
         || transaction.report.published_at.is_some()
         || transaction.report.successor_report_id.is_some()
@@ -507,6 +524,25 @@ fn validate_fact_delivery(
     Ok(())
 }
 
+async fn transition_recommendations_for_report(
+    db: &impl ConnectionTrait,
+    report_id: &RecommendationReportId,
+    from: &[RecommendationStatus],
+    to: RecommendationStatus,
+) -> Result<u64, StorageError> {
+    if from.is_empty() {
+        return Ok(0);
+    }
+    quant_recommendation::Entity::update_many()
+        .col_expr(quant_recommendation::Column::Status, Expr::value(to))
+        .filter(quant_recommendation::Column::RecommendationReportId.eq(report_id.clone()))
+        .filter(quant_recommendation::Column::Status.is_in(from.iter().copied()))
+        .exec(db)
+        .await
+        .map(|result| result.rows_affected)
+        .map_err(StorageError::from)
+}
+
 async fn obsolete_stale_candidate(
     txn: &DatabaseTransaction,
     candidate: quant_recommendation_report::Model,
@@ -514,22 +550,13 @@ async fn obsolete_stale_candidate(
     current: &quant_recommendation_report::Model,
     now: DateTime<Utc>,
 ) -> Result<PublishReportOutcome, StorageError> {
-    let recommendations = quant_recommendation::Entity::find()
-        .filter(
-            quant_recommendation::Column::RecommendationReportId
-                .eq(candidate.recommendation_report_id.clone()),
-        )
-        .filter(quant_recommendation::Column::Status.eq(RecommendationStatus::Prepared))
-        .order_by_asc(quant_recommendation::Column::RecommendationId)
-        .lock_exclusive()
-        .all(txn)
-        .await
-        .map_err(StorageError::from)?;
-    for recommendation in recommendations {
-        let mut active = recommendation.into_active_model();
-        active.status = ActiveValue::Set(RecommendationStatus::Obsolete);
-        active.update(txn).await.map_err(StorageError::from)?;
-    }
+    transition_recommendations_for_report(
+        txn,
+        &candidate.recommendation_report_id,
+        &[RecommendationStatus::Prepared],
+        RecommendationStatus::Obsolete,
+    )
+    .await?;
 
     let mut report_active = candidate.clone().into_active_model();
     report_active.status = ActiveValue::Set(RecommendationReportStatus::Obsolete);
@@ -575,19 +602,13 @@ async fn publish_candidate_recommendations(
     txn: &DatabaseTransaction,
     report_id: &RecommendationReportId,
 ) -> Result<(), StorageError> {
-    let recommendations = quant_recommendation::Entity::find()
-        .filter(quant_recommendation::Column::RecommendationReportId.eq(report_id.clone()))
-        .filter(quant_recommendation::Column::Status.eq(RecommendationStatus::Prepared))
-        .order_by_asc(quant_recommendation::Column::RecommendationId)
-        .lock_exclusive()
-        .all(txn)
-        .await
-        .map_err(StorageError::from)?;
-    for recommendation in recommendations {
-        let mut active = recommendation.into_active_model();
-        active.status = ActiveValue::Set(RecommendationStatus::Published);
-        active.update(txn).await.map_err(StorageError::from)?;
-    }
+    transition_recommendations_for_report(
+        txn,
+        report_id,
+        &[RecommendationStatus::Prepared],
+        RecommendationStatus::Published,
+    )
+    .await?;
     Ok(())
 }
 
@@ -617,7 +638,7 @@ async fn supersede_current_report(
         .await
         .map_err(StorageError::from)?;
     let mut invalidated_intents = Vec::new();
-    for recommendation in recommendations {
+    for recommendation in &recommendations {
         invalidated_intents.extend(
             invalidate_pre_submission_for_recommendation(
                 txn,
@@ -628,10 +649,17 @@ async fn supersede_current_report(
             )
             .await?,
         );
-        let mut active = recommendation.into_active_model();
-        active.status = ActiveValue::Set(RecommendationStatus::Superseded);
-        active.update(txn).await.map_err(StorageError::from)?;
     }
+    transition_recommendations_for_report(
+        txn,
+        &current.recommendation_report_id,
+        &[
+            RecommendationStatus::Published,
+            RecommendationStatus::IntentCreated,
+        ],
+        RecommendationStatus::Superseded,
+    )
+    .await?;
 
     let mut current_active = current.clone().into_active_model();
     current_active.status = ActiveValue::Set(RecommendationReportStatus::Superseded);
@@ -693,22 +721,13 @@ async fn obsolete_prepared_report(
     successor_report_id: &RecommendationReportId,
     now: DateTime<Utc>,
 ) -> Result<RecommendationReportInfo, StorageError> {
-    let recommendations = quant_recommendation::Entity::find()
-        .filter(
-            quant_recommendation::Column::RecommendationReportId
-                .eq(older.recommendation_report_id.clone()),
-        )
-        .filter(quant_recommendation::Column::Status.eq(RecommendationStatus::Prepared))
-        .order_by_asc(quant_recommendation::Column::RecommendationId)
-        .lock_exclusive()
-        .all(txn)
-        .await
-        .map_err(StorageError::from)?;
-    for recommendation in recommendations {
-        let mut active = recommendation.into_active_model();
-        active.status = ActiveValue::Set(RecommendationStatus::Obsolete);
-        active.update(txn).await.map_err(StorageError::from)?;
-    }
+    transition_recommendations_for_report(
+        txn,
+        &older.recommendation_report_id,
+        &[RecommendationStatus::Prepared],
+        RecommendationStatus::Obsolete,
+    )
+    .await?;
     if let Some(older_delivery) =
         quant_report_fact_delivery::Entity::find_by_id(older.recommendation_report_id.clone())
             .lock_exclusive()
@@ -860,46 +879,27 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
             .exec(&txn)
             .await
             .map_err(StorageError::from)?;
-        if !entry_condition_artifacts.is_empty() {
-            quant_entry_condition_artifact::Entity::insert_many(
-                entry_condition_artifacts
-                    .into_iter()
-                    .map(IntoActiveModel::into_active_model),
-            )
-            .exec(&txn)
-            .await
-            .map_err(StorageError::from)?;
-        }
+        insert_many_chunked::<quant_entry_condition_artifact::Entity, _>(
+            &txn,
+            entry_condition_artifacts,
+        )
+        .await?;
         insert_sampled_feature_parity(&txn, sampled_feature_parity, &report_model).await?;
-        if !recommendations.is_empty() {
-            quant_recommendation::Entity::insert_many(
-                recommendations
-                    .into_iter()
-                    .map(IntoActiveModel::into_active_model),
-            )
-            .exec(&txn)
-            .await
-            .map_err(StorageError::from)?;
-        }
+        insert_many_chunked::<quant_recommendation::Entity, _>(&txn, recommendations).await?;
         if !entry_condition_instances.is_empty() {
-            quant_entry_condition_instance::Entity::insert_many(
-                entry_condition_instances
-                    .iter()
-                    .cloned()
-                    .map(IntoActiveModel::into_active_model),
+            insert_many_chunked::<quant_entry_condition_instance::Entity, _>(
+                &txn,
+                entry_condition_instances.clone(),
             )
-            .exec(&txn)
-            .await
-            .map_err(StorageError::from)?;
-            quant_entry_condition_audit::Entity::insert_many(
+            .await?;
+            insert_many_chunked::<quant_entry_condition_audit::Entity, _>(
+                &txn,
                 entry_condition_instances
                     .iter()
                     .map(|instance| new_condition_audit(instance, condition_created_at))
-                    .map(IntoActiveModel::into_active_model),
+                    .collect(),
             )
-            .exec(&txn)
-            .await
-            .map_err(StorageError::from)?;
+            .await?;
         }
         operation_log::Entity::insert(operation_log.into_active_model())
             .exec(&txn)
@@ -1725,7 +1725,7 @@ async fn transition_report_status(
         }
     };
     let mut invalidated_intents = Vec::new();
-    for recommendation in recommendations {
+    for recommendation in &recommendations {
         invalidated_intents.extend(
             invalidate_pre_submission_for_recommendation(
                 &txn,
@@ -1736,10 +1736,18 @@ async fn transition_report_status(
             )
             .await?,
         );
-        let mut active = recommendation.into_active_model();
-        active.status = ActiveValue::Set(recommendation_status);
-        active.update(&txn).await.map_err(StorageError::from)?;
     }
+    transition_recommendations_for_report(
+        &txn,
+        report_id,
+        &[
+            RecommendationStatus::Prepared,
+            RecommendationStatus::Published,
+            RecommendationStatus::IntentCreated,
+        ],
+        recommendation_status,
+    )
+    .await?;
 
     if idempotent {
         let info = row.into();

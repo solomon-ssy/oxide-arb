@@ -13,7 +13,9 @@ use sea_orm::{
     sea_query::{OnConflict, Value},
 };
 
-use crate::batch::{chunk_for_insert, max_rows_per_insert};
+use crate::batch::chunk_for_insert;
+#[cfg(test)]
+use crate::batch::max_rows_per_insert;
 
 /// Multi-row INSERT split into bind-safe chunks (no `ON CONFLICT`).
 pub async fn insert_many_chunked<E, A>(
@@ -30,14 +32,46 @@ where
     if models.is_empty() {
         return Ok(0);
     }
-    let rows_per_insert = max_rows_per_insert(E::Column::iter().count());
-    for chunk in chunk_for_insert(&models, rows_per_insert) {
+    let columns_per_row = E::Column::iter().count();
+    for chunk in chunk_for_insert(&models, columns_per_row) {
         E::insert_many(chunk.to_vec())
             .exec_without_returning(db)
             .await
             .map_err(StorageError::from)?;
     }
     Ok(count)
+}
+
+/// Multi-row `INSERT ... RETURNING` split into bind-safe chunks.
+///
+/// Callers that require the entire batch to commit atomically must pass an
+/// explicit transaction as `db`; this helper deliberately does not invent a
+/// transaction boundary for its caller.
+pub async fn insert_many_returning_chunked<E, A>(
+    db: &impl ConnectionTrait,
+    dtos: Vec<A>,
+) -> Result<Vec<E::Model>, StorageError>
+where
+    E: EntityTrait,
+    E::Model: IntoActiveModel<E::ActiveModel>,
+    A: IntoActiveModel<E::ActiveModel>,
+    E::Column: Iterable,
+{
+    let (_, models) = prepare_batch::<E, A>(dtos);
+    if models.is_empty() {
+        return Ok(Vec::new());
+    }
+    let columns_per_row = E::Column::iter().count();
+    let mut inserted = Vec::with_capacity(models.len());
+    for chunk in chunk_for_insert(&models, columns_per_row) {
+        inserted.extend(
+            E::insert_many(chunk.to_vec())
+                .exec_with_returning(db)
+                .await
+                .map_err(StorageError::from)?,
+        );
+    }
+    Ok(inserted)
 }
 
 /// Multi-row UPSERT (`ON CONFLICT DO …`) split into bind-safe chunks.
@@ -55,8 +89,8 @@ where
     if models.is_empty() {
         return Ok(0);
     }
-    let rows_per_insert = max_rows_per_insert(E::Column::iter().count());
-    for chunk in chunk_for_insert(&models, rows_per_insert) {
+    let columns_per_row = E::Column::iter().count();
+    for chunk in chunk_for_insert(&models, columns_per_row) {
         E::insert_many(chunk.to_vec())
             .on_conflict(on_conflict.clone())
             .exec_without_returning(db)
@@ -64,6 +98,19 @@ where
             .map_err(StorageError::from)?;
     }
     Ok(count)
+}
+
+/// Deterministic upper bound on statements emitted by the shared batch-write
+/// helpers for `row_count` rows of entity `E`.
+#[cfg(test)]
+#[must_use]
+fn batch_statement_budget<E>(row_count: usize) -> usize
+where
+    E: EntityTrait,
+    E::Column: Iterable,
+{
+    let rows_per_statement = max_rows_per_insert(E::Column::iter().count());
+    row_count.div_ceil(rows_per_statement)
 }
 
 /// Lower DTOs to active models and align partially-set columns across the batch.
@@ -116,5 +163,20 @@ where
                 model.set(col, typed_null.clone());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use quant_pivot_models::entities::casbin_rule;
+
+    use super::batch_statement_budget;
+
+    #[test]
+    fn batch_statement_budget_uses_columns_once() {
+        assert_eq!(batch_statement_budget::<casbin_rule::Entity>(0), 0);
+        assert_eq!(batch_statement_budget::<casbin_rule::Entity>(8_191), 1);
+        assert_eq!(batch_statement_budget::<casbin_rule::Entity>(8_192), 2);
+        assert_eq!(batch_statement_budget::<casbin_rule::Entity>(16_382), 2);
     }
 }

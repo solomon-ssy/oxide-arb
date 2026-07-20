@@ -303,6 +303,40 @@ mod tests {
                 .cloned())
         }
 
+        async fn latest_for_markets(
+            &self,
+            market_ids: &[MarketId],
+        ) -> Result<Vec<BasisAlertInfo>, StorageError> {
+            let rows = self.rows.lock().expect("lock");
+            let mut latest = HashMap::<MarketId, &BasisAlertInfo>::new();
+            for row in rows.iter() {
+                if !market_ids.contains(&row.market_id) {
+                    continue;
+                }
+                match latest.get(&row.market_id) {
+                    Some(previous)
+                        if (previous.as_of, previous.alert_id.as_uuid())
+                            >= (row.as_of, row.alert_id.as_uuid()) => {}
+                    _ => {
+                        latest.insert(row.market_id.clone(), row);
+                    }
+                }
+            }
+            let result = market_ids
+                .iter()
+                .filter_map(|market_id| latest.get(market_id).map(|row| (*row).clone()))
+                .collect();
+            drop(rows);
+            Ok(result)
+        }
+
+        async fn record_many(&self, alerts: Vec<NewBasisAlert>) -> Result<(), StorageError> {
+            for alert in alerts {
+                self.record(alert).await?;
+            }
+            Ok(())
+        }
+
         async fn page(
             &self,
             query: BasisAlertListQuery,

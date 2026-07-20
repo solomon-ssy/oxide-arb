@@ -25,8 +25,8 @@ use crate::{
         MarketId, MarketSelectionId, ModelRunId, ModelVersionId, Probability,
         RecommendationFactorBreakdown, RecommendationId, RecommendationReportId,
         RecommendationTradePlan, ReportFunnelDiagnostics, ReportFunnelReason, ReportFunnelStage,
-        ReportRunId, ReportScheduleGapId, ReportScheduleId, ReportSummary, ResearchProfileId,
-        ResearchProfileRef, SignalCandidateId, TokenId, Usd, WorkerId,
+        ReportRunId, ReportScheduleGapId, ReportScheduleId, ReportSummary, ReportTriggerKey,
+        ResearchProfileId, ResearchProfileRef, SignalCandidateId, TokenId, Usd, WorkerId,
     },
 };
 use chrono::{DateTime, Utc};
@@ -349,7 +349,7 @@ pub struct RetryReportRequest {
 pub struct ReportRunView {
     pub report_run_id: ReportRunId,
     pub trigger_kind: ReportTriggerKind,
-    pub trigger_key: String,
+    pub trigger_key: ReportTriggerKey,
     pub schedule_id: Option<ReportScheduleId>,
     pub request_id: Option<CorrelationId>,
     pub retry_of_run_id: Option<ReportRunId>,

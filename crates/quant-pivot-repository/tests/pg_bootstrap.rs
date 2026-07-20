@@ -3,7 +3,7 @@
 use chrono::Duration;
 use quant_pivot_models::{
     domain::ActivateBootstrapState, entities::system_bootstrap_transition,
-    enums::system::BootstrapPhase,
+    enums::system::BootstrapPhase, types::RoleCode,
 };
 use quant_pivot_repository::{
     postgres::{PgPolicyRepository, PgSystemRuntimeStateRepository},
@@ -76,7 +76,7 @@ async fn bootstrap_transitions_are_monotonic_restart_safe_and_policy_bundle_boun
             bootstrap_contract_version: awaiting.bootstrap_contract_version,
             expected_state_revision: awaiting.state_revision - 1,
             actor: "bootstrap-operator".to_owned(),
-            acting_role: "system-operator".to_owned(),
+            acting_role: RoleCode::new("system_operator"),
             reason: "stale activation attempt".to_owned(),
             report_only_forced_ack: true,
         })
@@ -97,7 +97,7 @@ async fn bootstrap_transitions_are_monotonic_restart_safe_and_policy_bundle_boun
             bootstrap_contract_version: awaiting.bootstrap_contract_version,
             expected_state_revision: awaiting.state_revision,
             actor: "bootstrap-operator".to_owned(),
-            acting_role: "system-operator".to_owned(),
+            acting_role: RoleCode::new("system_operator"),
             reason: "explicit cold-start activation".to_owned(),
             report_only_forced_ack: true,
         })

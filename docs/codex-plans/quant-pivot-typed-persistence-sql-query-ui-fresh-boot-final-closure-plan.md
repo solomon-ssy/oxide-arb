@@ -17,7 +17,7 @@
 
 该授权不扩展到其他 PostgreSQL database/cluster role、其他 ClickHouse database/user、Redis DB0 的非 `qp:*` key、对象存储、宿主机目录、无 ownership 证明的容器或进程。不可逆 production seal 仍只在 disposable environment 自动化验证；本地验收环境保持 `pre_production_resettable`。
 
-Fresh Boot 的唯一人工 stop gate 是凭证轮换完成确认。实现和无真实账户依赖的 deterministic/disposable 验证可以先执行；在用户确认实际启用凭证已轮换并正确安装前，不执行本地 destructive `apply` 和 live-account `ReportOnly` smoke。
+2026-07-20 用户进一步收敛配置模型：生命周期互斥与安全 Fresh Boot 仍是必须完成的 W7 边界，但 runtime/migration 双身份以及 systemd credential source 属于当前部署的过度设计。数据库每个后端只使用一套身份，deploy secret 只接受明文 `SecretText`；生命周期参与者使用同一 PostgreSQL 身份连接固定的 `postgres` 协调库，不再增加第三套 credential 或 secret-bearing `lifecycle_url`。
 
 ## 2. 目标、非目标与不可妥协原则
 
@@ -27,8 +27,8 @@ Fresh Boot 的唯一人工 stop gate 是凭证轮换完成确认。实现和无�
 2. 项目拥有的闭合 JSONB 使用 canonical struct/tagged enum；需要关系约束、SQL 查询或独立生命周期的数据使用具名列/关系表；真实外部原始载荷保留受控开放 JSON。
 3. SeaORM/SeaQuery 成为 PostgreSQL 普通 CRUD、join、aggregate、upsert 和可表达 DDL 的默认路径；raw SQL 只存在于显式登记、类型约束、可测试的 dialect boundary。
 4. Config 和关键业务读取具有明确的一致性边界和 statement budget；消除真实 N+1，对不可避免的 bind-limit chunk 和逐聚合事务给出上限与理由。
-5. Config route、Rust request/response、JSON Schema、generated TypeScript、前端调用和错误契约来自同一 endpoint registry，无法静默漂移。
-6. Config Playwright 使用真实后端和数据库完成治理主链，并以可执行状态 registry 覆盖全部 24 个状态、viewport/theme/motion/accessibility/keyboard 证据。
+5. Config route/RBAC、Rust request/response、JSON Schema、generated TypeScript 和前端调用分别保持轻量事实源，并通过双向完整性、生成差异和行为测试阻止静默漂移；不建立 endpoint 元注册表。
+6. Config Playwright 使用真实后端和数据库完成治理主链，并以 24 个直接可执行场景覆盖业务状态、viewport/theme/motion/accessibility/keyboard 证据。
 7. 在轮换凭证后，安全删除限定范围内的 PG/CH/Redis 状态，从零 boot、启动、重启、完成 Config 全流程、单实例内存状态恢复、研究/模型冷启动和 live-account `ReportOnly` smoke。
 8. 所有静态、Rust、Docker、network、contract、UI、Playwright、fresh-boot 和 evidence gates 全部通过后，才允许把本阶段标记为 closed。
 
@@ -59,17 +59,18 @@ Fresh Boot 的唯一人工 stop gate 是凭证轮换完成确认。实现和无�
 | ID | 审计域 | 当前事实 | 状态 |
 |---|---|---|---|
 | BASE-01 | Config activation/seal/boot 主体 | 全局 bundle、事务 activation、outbox/reconciler、single boot migration 等主体已实现并通过既有测试 | Implemented，需随最终 schema 回归 |
-| BASE-02 | 字符串/UUID 强类型 | 已有大量 newtype/ActiveEnum，但 `role.code`、source-slice track、trade-tape cursor、acting role、diagnostic、trigger/result refs 等仍有裸语义 | Partial |
-| BASE-03 | constant inventory | 当前只扫描具名 `const/static`，并用文件/符号正则推断 disposition，不能证明字符串字面量和 entity 字段 | Not closed |
-| BASE-04 | raw SQL | PostgreSQL repository 普通查询基本收口，但 storage/migration/xtask 和 Core ClickHouse 查询未进入统一 exception registry | Partial |
-| BASE-05 | 查询预算 | Config resources/activity 已有单 statement 测试，snapshot options/model picker 已收敛；全仓循环内 I/O 和关键 API budget 未覆盖 | Partial |
-| BASE-06 | UI E2E | Config Playwright 主链确实穿透真实 Rust/PG/CH/Redis；异常态部分定向注入；此前当前树 7/7 通过 | Implemented but not gated |
-| BASE-07 | UI matrix/a11y | 24-state manifest 只是名称数组；axe 只覆盖 overview；focus trap/order 和完整 viewport/theme 矩阵未证明 | Not closed |
-| BASE-08 | API contract | Rust DTO → schemars → JSON Schema → TS regenerate-and-diff 已通过，但 schema root 手工枚举且不绑定 route/method/auth/error | Partial |
-| BASE-09 | persistence 文档 | canonical SeaORM/typed 文档、Cursor rule、AGENTS 引用已存在，JSONB 场景决策方向正确 | Implemented，机器约束不足 |
-| BASE-10 | SeaORM 版本 | workspace 仍精确锁定 `2.0.0-rc.43`；crates.io 和当前官方文档已经提供 `2.0.0` stable | Stale baseline |
-| BASE-11 | Fresh Boot 工具 | 已有 `preproduction-reset plan|apply|verify`、nonce、target fingerprint、PG/CH exact DB 和 Redis `SCAN+UNLINK` | Implemented，需安全/恢复补强 |
-| BASE-12 | 现场 Fresh Boot | 因凭证轮换前置条件未满足，尚未执行本地 destructive reset、真实启动/重启和 live smoke | Blocked by credential rotation |
+| BASE-02 | 字符串/UUID 强类型 | W2 已迁移首批高置信度语义并以 entity/DTO/fresh-boot 双向 AST 审计闭合；W3 已补真实 PG corruption/decode 与约束拒绝证明 | Verified by W2/W3 |
+| BASE-03 | constant inventory | 启发式 constant inventory 及生成器已删除；部署配置保留 `config-leaf-inventory.tsv`，持久化字段改由显式 decision registry 治理 | Verified by W2 |
+| BASE-04 | raw SQL | migration/storage/repository/xtask 共 57 个 PostgreSQL/ClickHouse 原生 SQL 已进入唯一 typed contract registry；双向 AST 审计证明 registered/compiled/used 集合一致，Core/Web 不再持有原生 statement | Verified by W4 |
+| BASE-05 | 查询预算 | Config 四类读取具备单 statement 断言；原生查询按 statement/row/byte budget fail closed；全仓循环 I/O 已按 TrueNPlusOne/BindLimitedBatch/PerAggregateTransaction 分类并回归 | Verified by W4 |
+| BASE-06 | UI E2E | W6 已将 7 个聚合测试替换为 24 个直接可执行 Config 场景；主链穿透真实 Rust/PG/CH/Redis，stale CAS 使用双浏览器上下文，viewer 使用真实种子身份 | Verified by W6 |
+| BASE-07 | UI matrix/a11y | W6 已按风险矩阵覆盖桌面明暗、关键移动端、1024 overflow、reduced motion、axe、键盘与焦点恢复；Linux Chromium 37 张审查基线、Darwin 基线为零 | Verified by W6 |
+| BASE-08 | API contract | Rust DTO → schemars → JSON Schema → TS regenerate-and-diff 已通过；`RouteSpec` 继续只统一 Actix/RBAC，DTO schema root 只负责 wire type 可达性，两者职责分离是本轮锁定设计 | Adequate，维持现有 gate |
+| BASE-09 | persistence 文档 | 83 个 runtime JSONB 字段已进入双向 machine registry；owned/external/controlled-open 边界、serde 闭合和 DB corruption 均有机器证明 | Verified by W3 |
+| BASE-10 | SeaORM 版本 | workspace 已精确锁定单一 stable `2.0.0`；migration artifact checksum/length 未漂移，并有 `count(limit/offset)` SQL 语义回归 | Verified by W1 |
+| BASE-11 | Fresh Boot 工具 | `preproduction-reset plan|apply|verify`、operation-bound v2 journal、canonical lifecycle lease、PG/CH exact DB 和 Redis duplicate-safe `SCAN+UNLINK` | Verified：W7 实现/分系统证明 `d7eb81882c2f4633cc8aca5861db1885ea641615b4b4a0d08951e2510a35aab2`；W9 跨系统恢复/备份/seal `41b504fd0cf9a137d9af0bfbd46cb5024b6d05826626e6248d5a1497140d1beb` |
+| BASE-12 | 现场 Fresh Boot | 因人工 destructive gate 未满足，尚未执行本地 reset、真实启动/重启和 live smoke | Blocked by operator confirmation |
+| BASE-13 | deploy secret source | 配置字段直接使用零化、脱敏的 `SecretText`；TOML 只接受明文 string，不支持 credential file/source union | Verified (`d7eb81882c2f4633cc8aca5861db1885ea641615b4b4a0d08951e2510a35aab2`) |
 
 ## 4. Requirement 追踪矩阵
 
@@ -77,26 +78,44 @@ Fresh Boot 的唯一人工 stop gate 是凭证轮换完成确认。实现和无�
 
 | ID | Requirement | 必须交付的证据 | 初始状态 |
 |---|---|---|---|
-| TYPE-01 | 全仓 primitive semantic field 显式决策 | 无启发式的 field inventory、双向 lint、逐字段 migration/test | Pending |
-| TYPE-02 | 高置信度 String/Uuid 迁移 | typed entity/DTO/API/UI、DB round-trip、非法值拒绝 | Pending |
-| JSON-01 | 每个 JSONB 的上下文决策 | producer/consumer/query/update/hash/evolution ledger | Partial |
-| JSON-02 | typed JSONB/normalized/external boundary 精确落地 | DB CHECK、corruption/tag/hash tests、无裸 Value 泄漏 | Partial |
-| ORM-01 | SeaORM stable 2.0.0 基线 | dependency/API/SQL/schema diff 和全套 gates | Pending |
-| SQL-01 | raw SQL typed exception registry | 全仓 inventory、唯一 exception ID、typed input、专项测试 | Pending |
-| SQL-02 | Core SQL 下沉 | Core/Web 不直接持有 PG/CH statement；通过 repository/port 调用 | Pending |
-| QUERY-01 | Config 查询一致性与 budget | resources/activity/snapshot options 单一致性边界和 statement count | Partial |
-| QUERY-02 | 全仓 N+1/重复查询审计 | query-classification ledger、budget tests、tracing report | Pending |
-| API-01 | endpoint/DTO/schema/TS 单一契约 | endpoint registry regenerate-and-diff、route coverage test | Pending |
-| UI-01 | 24 状态可执行 E2E registry | 每个 state 都有 setup/assert/evidence，无 orphan name | Pending |
-| UI-02 | responsive/theme/motion/a11y/keyboard | 固定 CI snapshots、axe、focus trap/order、keyboard-only | Pending |
-| DOC-01 | 范式与规则机器闭环 | docs/rule/registry/lint 一致性检查 | Partial |
+| TYPE-01 | 全仓 primitive semantic field 显式决策 | 无启发式的 field inventory、双向 lint、逐字段 migration/test | Verified (`124078914d50909328e32ccea879810a77a3a22e9ed46df3c04c2cf2b45b3fc9`) |
+| TYPE-02 | 高置信度 String/Uuid 迁移 | typed entity/DTO/API/UI、DB round-trip、非法值拒绝 | Verified (`124078914d50909328e32ccea879810a77a3a22e9ed46df3c04c2cf2b45b3fc9` + `e3d459d78c4728f2446735cbf94700a17df427a31c0baebca6edfb8e17d3cc10`) |
+| JSON-01 | 每个 JSONB 的上下文决策 | producer/consumer/query/update/hash/evolution ledger | Verified (`e3d459d78c4728f2446735cbf94700a17df427a31c0baebca6edfb8e17d3cc10`) |
+| JSON-02 | typed JSONB/normalized/external boundary 精确落地 | DB CHECK、corruption/tag/hash tests、无裸 Value 泄漏 | Verified (`e3d459d78c4728f2446735cbf94700a17df427a31c0baebca6edfb8e17d3cc10`) |
+| ORM-01 | SeaORM stable 2.0.0 基线 | dependency/API/SQL/schema diff 和全套 gates | Verified (`defdf0ffe7ec23fcaad6513128ef3835eb48b7d166b8bc1079cc8588a13d05d5`) |
+| SQL-01 | raw SQL typed exception registry | 全仓 inventory、唯一 exception ID、typed input、专项测试 | Verified (`f2a0a3f6d65efbffff41825c1f75ba72e95070a27165fbfe1e7f97f905a203f4`) |
+| SQL-02 | Core SQL 下沉 | Core/Web 不直接持有 PG/CH statement；通过 repository/port 调用 | Verified (`f2a0a3f6d65efbffff41825c1f75ba72e95070a27165fbfe1e7f97f905a203f4`) |
+| QUERY-01 | Config 查询一致性与 budget | resources/activity/snapshot options 单一致性边界和 statement count | Verified (`f2a0a3f6d65efbffff41825c1f75ba72e95070a27165fbfe1e7f97f905a203f4`) |
+| QUERY-02 | 全仓 N+1/重复查询审计 | query-classification ledger、budget tests、tracing report | Verified (`f2a0a3f6d65efbffff41825c1f75ba72e95070a27165fbfe1e7f97f905a203f4`) |
+| UI-01 | 24 状态可执行 E2E registry | 每个 state 都有 setup/assert/evidence，无 orphan name | Verified (`b7e5ca09d9ffab243988f39c4ec073bf8dc3b946e36963fbe18fd59b3a27c235`) |
+| UI-02 | responsive/theme/motion/a11y/keyboard | 固定 CI snapshots、axe、focus trap/order、keyboard-only | Verified (`b7e5ca09d9ffab243988f39c4ec073bf8dc3b946e36963fbe18fd59b3a27c235`) |
+| DOC-01 | 范式与规则机器闭环 | docs/rule/registry/lint 一致性检查 | Verified (`14bb76c67d6c38cd9b2d7a52e674bffa9c193719ebd33a663c3321149b553b1a`) |
 | RESET-01 | 凭证轮换与 secret boundary | 用户确认、credential preflight、无 secret evidence | Blocked |
-| RESET-02 | 可恢复的限定范围 destructive reset | plan/apply/failure-journal/verify tests 和现场记录 | Pending |
-| BOOT-01 | 真空环境 PG/CH/Redis boot | PG=1、CH=1、Redis target empty、无 unknown objects | Pending |
-| ACCEPT-01 | 单实例启动/重启与 Config 恢复 | readiness、workflow、commit/publish crash recovery、无 duplicate seed | Pending |
-| ACCEPT-02 | 完整研究到报告闭环 | spec→dataset→train→validate→publish→report lineage | Pending |
+| SECRET-01 | 单一明文 secret 契约 | 删除 `DeploySecret`/`SystemdCredentialRef`，所有 secret 字段直接使用 `SecretText`，覆盖零化、Debug 脱敏、无 Serialize、tracked-file 扫描和 adapter 使用测试 | Verified (`d7eb81882c2f4633cc8aca5861db1885ea641615b4b4a0d08951e2510a35aab2`) |
+| DBID-01 | 单一数据库身份 | PostgreSQL、ClickHouse 各保留一套 `user + password`；删除 migration identity/password、双身份校验与专用 credential 装载 | Verified (`d7eb81882c2f4633cc8aca5861db1885ea641615b4b4a0d08951e2510a35aab2`) |
+| RESET-02 | 可恢复的限定范围 destructive reset | plan/apply/failure-journal/verify tests 和现场记录 | Verified：W7 分系统边界 + W9 PG/CH/Redis 三阶段真实故障、新 operation 全清理恢复和 foreign namespace 保留（`d7eb81882c2f4633cc8aca5861db1885ea641615b4b4a0d08951e2510a35aab2` + `41b504fd0cf9a137d9af0bfbd46cb5024b6d05826626e6248d5a1497140d1beb`） |
+| BOOT-01 | 真空环境 PG/CH/Redis boot | PG=1、CH=1、Redis target empty、无 unknown objects | Verified：W9 在 disposable 三系统连续完成初始 cycle 与三次 recovery cycle，逐次验证 exact target 和 foreign Redis marker（`41b504fd0cf9a137d9af0bfbd46cb5024b6d05826626e6248d5a1497140d1beb`） |
+| ACCEPT-01 | 单实例启动/重启与 Config 恢复 | readiness、workflow、commit/publish crash recovery、无 duplicate seed | Partial：W8 已闭合真实 Config/CAS/RBAC/recovery 自动化，W9 已闭合基础设施重新清理/boot；systemd 启动、优雅重启及同一实例 crash recovery 保留给 W10 现场验收 |
+| ACCEPT-02 | 完整研究到报告闭环 | spec→dataset→train→validate→publish→report lineage | Partial：W9 的 Docker model train/backtest/calibration/CPCV、governance、report pipeline 全部通过；fresh local 数据上的单条端到端 lineage 与 live-account report 保留给 W10，不把分项集成测试冒领为现场单链证明 |
 | ACCEPT-03 | live-account ReportOnly 安全 | account truth/report 成功，零 signing/order/intent | Blocked |
-| SEAL-01 | disposable seal/frozen denial | live evidence、mutation denial、restore test | Pending |
+| SEAL-01 | disposable seal/frozen denial | live evidence、mutation denial、restore test | Verified：真实 PG/CH backup/restore、live fingerprint/policy/evidence 绑定、一次 seal、二次 seal 与 PG/CH/reset frozen denial（`41b504fd0cf9a137d9af0bfbd46cb5024b6d05826626e6248d5a1497140d1beb`） |
+
+### 4.1 Execution Ledger
+
+本表是本计划唯一执行账本；详细、可能包含环境信息的日志保存在 `.local/acceptance/<operation-id>/`，仓库只记录脱敏摘要与 BLAKE3。状态只允许 `Pending`、`In Progress`、`Verified`、`Blocked`，且任一时刻最多一个任务为 `In Progress`。
+
+| Task ID | Requirement IDs | Status | Last verified commit | Changed surfaces | Targeted / full gates | Evidence / BLAKE3 | Blocker / resume instruction | Updated at (UTC) |
+|---|---|---|---|---|---|---|---|---|
+| W0 | BASE-01..12, ORM-01, ACCEPT-01 | Verified | `9d9701e5a87865abab6ed0065a251b08193bbafa` | plan ledger、RC43 dependency/migration/query/contract baseline | baseline format/lints/migration/config-codegen passed；future-incompat owner graph recorded | `.local/acceptance/w0-baseline-20260720/manifest.md` / `1105074eb64774d32ac61fd501ac482f86e31e8bafbfaaf09ba0b4ddcca844cb` | owner dependency chain was removed and reverified in W7 | 2026-07-20T02:34:49Z |
+| W1 | ORM-01, BOOT-01 | Verified | `9d9701e5a87865abab6ed0065a251b08193bbafa` | stable Cargo graph、migration identity、count SQL regression | format；migration 5/5；repository 37/37；workspace clippy/lints/tests passed | `.local/acceptance/w1-seaorm-stable-20260720/manifest.md` / `defdf0ffe7ec23fcaad6513128ef3835eb48b7d166b8bc1079cc8588a13d05d5` | future-incompat dependency gate closed in W7 | 2026-07-20T03:09:48Z |
+| W2 | TYPE-01, TYPE-02, SQL-01 | Verified | `9d9701e5a87865abab6ed0065a251b08193bbafa` | decision registry/AST audit、semantic entity/DTO/schema/API/UI、relational checks | targeted semantic/migration/repository/UI；full fmt/clippy/lints/workspace tests/UI gates passed | `.local/acceptance/w2-semantic-fields-20260720/manifest.md` / `124078914d50909328e32ccea879810a77a3a22e9ed46df3c04c2cf2b45b3fc9` | — | 2026-07-20T05:07:51Z |
+| W3 | JSON-01, JSON-02, TYPE-02 | Verified | `9d9701e5a87865abab6ed0065a251b08193bbafa` | 83-field JSONB registry/AST audit、closed serde、PG corruption/decode、atomic artifact race fix | real PG 3/3；models/repository/migration/research/web targeted；full fmt/clippy/lints/workspace tests passed | `.local/acceptance/w3-jsonb-closure-20260720/manifest.md` / `e3d459d78c4728f2446735cbf94700a17df427a31c0baebca6edfb8e17d3cc10` | future-incompat dependency gate closed in W7 | 2026-07-20T05:51:11Z |
+| W4 | SQL-01, SQL-02, QUERY-01, QUERY-02 | Verified | `9d9701e5a87865abab6ed0065a251b08193bbafa` | 57-contract registry/AST audit、Core native reads 下沉、deterministic budgets、N+1 batch closure | targeted unit + real Docker PG；full fmt/clippy/lints/workspace tests passed | `.local/acceptance/w4-sql-contract-20260720/manifest.md` / `f2a0a3f6d65efbffff41825c1f75ba72e95070a27165fbfe1e7f97f905a203f4` | 记录并修复 PG ARE 256 上限、batch helper 二次除法与 CH immutable formatting drift；lifecycle 与 future-incompat 后续 gate 均已在 W7 闭合 | 2026-07-20T08:11:33Z |
+| W6 | UI-01, UI-02, ACCEPT-02 | Verified | `9d9701e5a87865abab6ed0065a251b08193bbafa` | 24 direct Playwright scenarios、real CAS/RBAC、a11y/focus、Linux visual CI、protected-suite isolation | Config 24/24 + protected 8/8；37 Linux/0 Darwin snapshots；UI lint/type/unit/build/bundle + Rust web targeted gates passed | `.local/acceptance/w6-ui-executable-20260720/manifest.md` / `b7e5ca09d9ffab243988f39c4ec073bf8dc3b946e36963fbe18fd59b3a27c235` | UI-01/UI-02 已闭合；ACCEPT-02 这里只提供 UI 侧证据，完整 lineage 仍由 W8/W9 验收；W5 endpoint 元注册表已确认过度设计并完整回退 | 2026-07-20T11:04:42Z |
+| W7 | SECRET-01, DBID-01, RESET-01, RESET-02, BOOT-01, SEAL-01 | Verified | `9d9701e5a87865abab6ed0065a251b08193bbafa` | direct `SecretText`、PG/CH single identity、canonical PG lease/cancellation、v2 atomic reset journal、PG/CH active-owner denial、Redis duplicate-safe cleanup、future-incompat dependency fix | config 75/75；migration unit 6/6；Docker PG lifecycle/reset 3/3、CH active-query/reset 1/1、Redis reset 2/2；xtask journal 2/2；clean PG16 manifest；57/57 SQL AST；full fmt/clippy/lints/workspace tests passed | `.local/acceptance/w7-lifecycle-fresh-boot-20260720/manifest.md` / `d7eb81882c2f4633cc8aca5861db1885ea641615b4b4a0d08951e2510a35aab2` | 实现与分系统证明闭合；跨系统恢复/seal 已由 W9 补证；W10 destructive local apply 仍受人工门禁 | 2026-07-20T14:10:56Z |
+| W8 | DOC-01, ACCEPT-01, ACCEPT-02 | Verified | `9d9701e5a87865abab6ed0065a251b08193bbafa` | canonical docs、dead placeholder/admin UI、active-doc/CI lint、37 Linux visual baselines、schedule/trade-policy deterministic layout | full Rust/static/UI gates；fresh Config 24/24；independent protected 8/8；37 Linux/0 Darwin；final eslint/typecheck/build/diff checks passed | `.local/acceptance/w8-doc-ci-closeout-20260720/manifest.md` / `14bb76c67d6c38cd9b2d7a52e674bffa9c193719ebd33a663c3321149b553b1a` | UI/docs 实现与证明闭合；W9 已补 disposable runtime/model 分项证明，现场单实例/单链仍归 W10 | 2026-07-20T15:35:01Z |
+| W9 | RESET-02, BOOT-01, ACCEPT-01, ACCEPT-02, SEAL-01 | Verified | `9d9701e5a87865abab6ed0065a251b08193bbafa` | single-owner disposable PG16/CH26.5/Redis7 harness、四次 full reset cycle、三阶段真实故障恢复、PG/CH backup/restore、dump-stable PG constraints、live evidence seal/frozen denial | Docker W9 1/1；model/cold-start 24/24；governance 12/12；migration 6/6；SQL 57/57；full fmt/clippy/static lints/workspace tests passed；无 Testcontainers leak | `.local/acceptance/w9-disposable-closeout-20260720/manifest.md` / `41b504fd0cf9a137d9af0bfbd46cb5024b6d05826626e6248d5a1497140d1beb` | disposable scope closed；未读取本机 secret 配置；ACCEPT-01 的 systemd restart、ACCEPT-02 的 fresh local 单链与 ACCEPT-03 仍由 W10 人工门禁后恢复 | 2026-07-20T16:58:01Z |
+| W10 | RESET-01, RESET-02, BOOT-01, ACCEPT-01..03 | Blocked | — | local preproduction + live account | destructive boot + ReportOnly no-mutation proof | pending | 用户确认目标与凭证后恢复；本地禁止 seal | 2026-07-20T11:53:00Z |
 
 ## 5. Workstream A：字符串魔法值与全仓强类型
 
@@ -278,41 +297,19 @@ DB CHECK 保证不同 actor kind 下合法字段组合，API/UI 不再根据字�
 - 输出 p50/p95/p99 statement count 和 wall time；超过预算 fail CI，而不是只打 warning。
 - 禁止通过预加载整表换取“一次查询”；同时记录 row/byte budget，防止 over-fetch。
 
-## 10. Workstream F：Config API 契约单一来源
+## 10. 已排除设计：Config API endpoint 元注册表（非 Workstream）
 
-### 10.1 Endpoint registry
+W5 曾尝试把 endpoint ID、method/path、RBAC、path/query/body/success/error schema、CAS/idempotency 和 UI path 全部并入 `RouteSpec`。实现审查确认该方案会引入类型擦除、庞大生成描述符、重复的 success envelope/schema 视图和更深的间接调用，对当前 15 个稳定 Config endpoint 没有相称收益，因此按用户决策完整回退，不进入交付范围。
 
-建立 `config_endpoint_contract!` 或等价 canonical registry。每个 endpoint 一次声明：
+锁定的简洁边界如下：
 
-- endpoint ID、method、path template、API version；
-- permission/auth requirement；
-- path/query/body request 类型；
-- success response 类型；
-- typed error variants/status code；
-- idempotency/CAS header/body requirement。
+- `RouteSpec` 只作为 Actix route 与服务端 RBAC 的唯一配对事实源；
+- `ConfigApiContractSchema` 只让真实 Rust request/response DTO 可被 schemars 到达，继续执行 JSON Schema/TypeScript regenerate-and-diff；
+- UI `ConfigApi` 集中维护少量 path builder，不生成 endpoint descriptor；
+- CAS/idempotency/error 语义由真实 handler/repository 行为测试和 W6 protected E2E 证明，而不是复制到声明式 metadata；
+- 不新增 endpoint registry、typed error status registry、route-to-schema 反射层或 UI path AST lint。
 
-同一 registry 生成或编译绑定：Actix route registration、schemars root、JSON contract、TypeScript endpoint descriptor 和 contract tests。删除只为 codegen 手工维护且不被 handler 使用的平行 DTO root。
-
-### 10.2 Config 激活公共契约
-
-Activation request/response 必须保留并验证：
-
-- `expected_bundle_generation`；
-- expected active resource revision；
-- candidate/request hash；
-- approval ID、preflight token、idempotency key；
-- committed generation、snapshot ID/hash、完整 revision vector；
-- exact replay/new commit 的 typed outcome。
-
-resources/current/activity/snapshot-options/lifecycle 均返回 DB-authoritative consistency metadata；UI 不混合 ArcSwap 与不同时点的独立查询。
-
-### 10.3 Drift gates
-
-- route registry 中每个 endpoint 必须被 Actix 注册且只注册一次；
-- 每个 UI Config API 调用只能引用 generated endpoint ID/path/method；
-- regenerate-and-diff 同时比较 route manifest、JSON Schema 和 TS；
-- request/response serialization golden tests；
-- permission、401/403、validation 400、CAS/idempotency 409、service 503 的 error envelope tests。
+保留门禁为 `pnpm check:config-api`、服务端 protected-route/RBAC tests、Config governance E2E。若未来 endpoint 数量或多客户端规模显著增长，必须以实际 drift 事故和维护成本为证据另立计划，不能在本轮预置抽象。
 
 ## 11. Workstream G：Config UI 与真实 E2E
 
@@ -376,7 +373,7 @@ CI 上传 HTML report、trace、failure screenshot、visual diff 和 state cover
 - semantic-field decision registry 格式；
 - raw SQL exception registry；
 - query classification/budget；
-- endpoint contract registry；
+- 既有 `RouteSpec`/RBAC 配对完整性与 DTO schema/TypeScript regenerate-and-diff 边界（不建立 endpoint 元注册表）；
 - Fresh Boot 证据和失败恢复；
 - canonical public barrel 与 compatibility re-export 的边界。
 
@@ -390,8 +387,8 @@ CI 验证：
 - 文档声称的 registry/gate 在代码和 CI 中真实存在；
 - requirement matrix 的 `Verified` 必须有可读取 evidence；
 - 无 Runtime v17/v18、schema v3、DryRun/Paper/Live、旧 Runtime Config endpoint/parser；
-- 无 secret env 示例、明文 TOML secret、旧 UI JSON editor 指引；
-- runbook 不再使用 `QUANT_PIVOT__*` 注入 funder/RPC/secret，与当前 typed TOML/credential-file 来源一致；
+- 无 secret env 示例、tracked TOML 真实 secret 或旧 UI JSON editor 指引；production example 只允许显式 `REPLACE_WITH_*` 占位符；
+- runbook 不再使用 `QUANT_PIVOT__*` 注入 funder/RPC/secret，与当前 permission-restricted TOML 单一来源一致；
 - SeaORM 版本说明与 workspace lock 一致。
 
 ## 13. 凭证轮换前置条件
@@ -399,7 +396,7 @@ CI 验证：
 ### 13.1 零复用原则
 
 - 不读取、打印、复制、hash、备份或复用旧配置中已暴露的 secret value。
-- 不把 secret 放入 Git、TOML、environment value、CLI argument、Docker `.env`、日志、截图、trace、reset plan 或 evidence manifest。
+- 不把 secret 放入 Git、tracked template、environment value、CLI argument、Docker `.env`、日志、截图、trace、reset journal 或 evidence manifest。部署实例使用未跟踪且 mode 0600 的 TOML；操作者本机使用已 gitignore 且 mode 0600 的 `quant-pivot.local.toml`。
 - secret hash 也不作为轮换证明，避免对低熵 secret 提供离线验证材料。
 
 ### 13.2 必须轮换的实际启用凭证
@@ -410,24 +407,32 @@ CI 验证：
 | Funder/wallet topology | EOA 必须与 signer 一致；proxy/safe 必须现场证明 signer 的控制/owner 关系和 relayer 路径 |
 | Polygon/RPC/provider | 轮换 JWT/API token/URL credential；只记录 provider/key ID 和健康结果 |
 | Relayer | 轮换 API key/secret，验证 address、wallet kind 和最小权限；ReportOnly 不调用提交接口 |
-| PostgreSQL | 分别轮换 runtime/migrator role credential；先在服务端生效，再安装 credential file；reset 不擅自删除 cluster role |
-| ClickHouse | 分别轮换 runtime/migration user credential；Docker 使用 secrets/file mount，删除 `.env` 明文依赖 |
+| PostgreSQL | 轮换唯一 `quant_pivot` credential；runtime、schema CLI 与 lifecycle coordination 使用同一身份；reset 不擅自删除 cluster role |
+| ClickHouse | 轮换唯一 `quant_pivot` credential；runtime 与 schema CLI 使用同一身份，不保留 migration user |
 | Redis | 轮换 runtime credential/ACL，确认只访问配置 DB 和 `qp:` namespace |
 | JWT signing | 使用符合长度/编码的新 key；确认旧 session/token 失效 |
-| Evidence signing | 与 JWT/wallet 分离；轮换 current key，previous key 只保留真实验证需求且使用独立 credential reference |
+| Evidence signing | 与 JWT/wallet 分离；轮换 current key，previous key 只保留真实历史验证需求 |
 | Notification/domain provider | 只轮换实际启用项；禁用项不得用假 secret 绕过 validation |
 
-### 13.3 Credential file 验收
+### 13.3 单一明文 SecretText 验收（W7 / `SECRET-01`）
 
-- 通过 systemd `CREDENTIALS_DIRECTORY` 或等价只读 file mount 注入；TOML 只保存 typed credential name。
-- 文件必须是 regular file、非 symlink、非 hard-link escape、非空、大小受限，mode 0400/0600，owner 为预期 service user，group/world 无读取权限。
-- credential directory 不可被非授权用户写入；启动前检查 owner/mode/mount source。
-- runtime config 不含 DDL credential；migration/reset command 才加载 migrator credential。
-- credential preflight 输出只包含字段名、configured/loaded/validated、public identity 和脱敏 endpoint fingerprint。
+W7 删除 `DeploySecret`、`SystemdCredentialRef` 及全部 credential resolution 生命周期。每个 secret 字段直接反序列化为 `SecretText`/`Option<SecretText>`，TOML wire contract 只接受 string：
+
+```toml
+# config/quant-pivot.local.toml；已 gitignore 且 mode 0600
+password = "local-password"
+```
+
+- `SecretText(Zeroizing<String>)` 不实现 `Serialize`/`Display`；自定义 `Debug` 只能输出 `unset/redacted`，validation/error/trace 不得拼接值。
+- 空值通过空 string 或省略 optional 字段表达；object `{ name = ... }`、unknown shape、secret env overlay 与旧 resolution API 均失败。
+- tracked `quant-pivot.toml` 不得有非空 secret；production example 只能有显式 `REPLACE_WITH_*`，这些占位符在 quant-mode validation 中必须 fail closed。
+- 实际 preproduction/production secret 写入未跟踪的部署 TOML，文件必须由部署层限制为 0600；代码不再假装能用类型系统保护磁盘明文。
+- UI/API readiness 只能显示 `available/missing/invalid`，不能返回值；adapter 仅在拥有该 credential 的调用边界使用 `expose_secret()`。
+- tests 覆盖 plaintext 反序列化、local overlay 到 adapter、reserved-character URL 编码、Debug 脱敏、无 Serialize/Display、tracked placeholder lint 和旧类型/旧 source shape 不可达。
 
 ### 13.4 人工完成声明
 
-用户需确认：所有实际启用凭证已轮换、新 wallet 与 funder 关系正确、credential files 已安装。确认后 destructive reset 无需再次扩大授权，但仍必须通过工具自身 plan fingerprint、短时 nonce 和 lifecycle lease。
+用户需确认：所有实际启用凭证已轮换、新 wallet 与 funder 关系正确、部署 TOML 已限制为 0600。确认后 destructive reset 无需再次扩大授权，但仍必须通过工具自身 target fingerprint、短时 nonce 和 lifecycle lease。
 
 ## 14. 破坏式 Fresh Boot 安全模型
 
@@ -443,28 +448,27 @@ CI 验证：
 
 ### 14.2 生命周期协调锁
 
-PG migration、CH migration、reset 和 seal 必须通过同一个 `LifecycleLeaseProvider`，连接同一个固定 coordination database/lock namespace。不能只复用相同整数 key，却在不同 PostgreSQL database connection 上假设必然互斥。
+PG migration、CH migration、reset、verify 和 seal 必须通过同一个 `LifecycleLeaseProvider`，使用已配置的唯一 PostgreSQL 身份连接固定 `postgres` coordination database 和同一 lock key。不能只复用相同整数 key，却在不同 PostgreSQL database connection 上假设必然互斥。
 
 实现要求：
 
-- coordination endpoint/DB 是 typed deploy contract；
-- least-privileged lifecycle credential 只能连接协调库并取得指定 lock；
+- coordination database 固定为 canonical `postgres`，由相同 host/port/user/password 派生，不增加 `lifecycle_url` 或第三套 credential；
 - 所有四类 mutation 先取 lease，再现场重读 baseline、target fingerprint、migration ledger 和 active bundle；
 - reset 在删除 target DB 期间 lease 仍存活；
 - lease 丢失/connection 断开立即停止后续 stage；
-- 集成测试真实并发 reset、PG migration、CH migration、seal，四者任意两项都只能一个成功进入 mutation。
+- Docker 集成测试终止持锁 session 后必须触发 cancellation；第二个任意 lifecycle participant 无法取得同一 session-scoped lease，因此 PG/CH/reset/verify/seal 的组合互斥由同一 provider 和 lock contract 证明。
 
 ### 14.3 Reset operation journal
 
 跨 PG/CH/Redis 不存在原子事务，因此 reset 必须使用 durable、0600、无 secret 的 stage journal：
 
 ```text
-Planned -> Armed -> Quiesced -> PgReset -> ChReset -> RedisReset
-        -> PgBoot -> ChBoot -> Seeded -> Verified -> Completed
-                                 \-> Failed(stage, evidence_hash)
+Planned -> Applying -> PostgresReset -> ClickhouseReset -> RedisCleared
+        -> SchemasApplied -> Verified -> Completed
+        \-> Failed(failed_stage, failed_at, summary)
 ```
 
-- plan 包含 format version、nonce、created/expires、Git/build identity、lifecycle state、脱敏 endpoint fingerprint、exact target、对象/连接/key 计数、plan hash。
+- journal 包含 format version、operation ID、nonce、stage、created/updated/expires/completed timestamps、脱敏 endpoint fingerprint、对象/连接/key 计数、failure 和 immutable journal hash。
 - apply 消费一次性 nonce，获取 lease 后重新采集并逐字段比较 inventory。
 - 每个 stage 完成后 fsync/atomic rename journal；进程崩溃不能被误报 Completed。
 - 失败后保持 `Failed`，输出无 secret 的恢复说明。新的 plan 必须基于当前 partial inventory 生成；下一次 apply 从重新清空三个允许目标开始，不在未知中间状态上“猜测续跑”。
@@ -490,6 +494,8 @@ Planned -> Armed -> Quiesced -> PgReset -> ChReset -> RedisReset
 4. 注入 expired/tampered nonce、target drift、lease conflict、unknown session、Redis concurrent writer、seed failure；
 5. 证明每种情况 fail closed，其他 DB/key/object 不变。
 
+执行状态：Verified。W7 分系统测试覆盖 nonce/target/lease/unknown-owner/concurrent-writer 等拒绝边界；W9 的 single-owner disposable harness 连续执行一次初始与三次恢复 `plan/apply/verify`，并分别在 PG、CH、Redis stage 注入真实失败。每次恢复均创建新 operation、重新清理全部授权目标并保留 foreign Redis namespace。证据：`d7eb81882c2f4633cc8aca5861db1885ea641615b4b4a0d08951e2510a35aab2`、`41b504fd0cf9a137d9af0bfbd46cb5024b6d05826626e6248d5a1497140d1beb`。
+
 ### 15.2 本地 plan
 
 凭证确认后：
@@ -504,13 +510,13 @@ Planned -> Armed -> Quiesced -> PgReset -> ChReset -> RedisReset
 在共享 lifecycle lease 和 stage journal 下：
 
 1. quiesce 当前 repo services/writers；
-2. 删除并重建 PG `quant_pivot`，owner 为 canonical migrator role；不删除/重建其他 role；
+2. 删除并重建 PG `quant_pivot`，owner 为唯一配置角色 `quant_pivot`；不删除/重建 cluster role；
 3. 删除并重建 CH `quant_pivot`；
 4. Redis `SCAN MATCH qp:*` + bounded `UNLINK`，禁止 `FLUSHDB`；
 5. 证明 PG/CH target 空、Redis `qp:* = 0`；
 6. 应用唯一 PG boot migration，期望 migration count=1、version=1；
 7. 应用唯一 CH boot migration，期望 version=1、object manifest 精确相等；
-8. finalize runtime grants，runtime identity 无 DDL privilege；
+8. finalize catalog seeds 与 PUBLIC privilege hardening；不再制造 runtime/migration 双角色 grants；
 9. seed bootstrap admin、immutable research profiles、policy profile artifacts 和六类 Config resource boot bundle；
 10. 校验 generation=1、snapshot/hash/revision vector 完整、无 pending approval/outbox；
 11. verify PG/CH schema fingerprint、ledger/audit checksum、Redis target empty；
@@ -518,8 +524,8 @@ Planned -> Armed -> Quiesced -> PgReset -> ChReset -> RedisReset
 
 ### 15.4 Reset 后启动与重启
 
-1. migration identity 完成 apply/verify 后退出；
-2. runtime 只用 runtime credentials 启动，必须只读 verify schema，禁止 startup DDL；
+1. schema CLI 使用配置中的唯一数据库身份完成 apply/verify 后退出；
+2. runtime 使用同一数据库身份启动，但启动路径只读 verify schema，禁止 startup DDL；
 3. 等待 PG/CH/Redis/web/WS/ingest/readiness；任何 component degraded 必须有预期原因和恢复动作；
 4. 检查结构化日志无 secret、panic、unknown schema、retry storm、failed migration；
 5. 记录初次 seed/worker/outbox 数量；
@@ -598,6 +604,8 @@ Fresh Boot 后没有已发布模型时，报告 fail closed 是正确状态，�
 
 本地验收不执行 seal；只验证 lifecycle view 显示 preproduction 和 seal readiness。
 
+Disposable 执行状态：Verified。W9 已完成 PG custom-format backup/restore、CH database backup/restore、live schema/policy/evidence 绑定、首次 seal、二次 seal 拒绝，以及 frozen 后 PG/CH schema mutation 与 reset 拒绝；现场本地环境未 seal。证据：`41b504fd0cf9a137d9af0bfbd46cb5024b6d05826626e6248d5a1497140d1beb`。
+
 ## 18. 自动化质量门
 
 ### 18.1 Rust/static
@@ -619,7 +627,7 @@ bash scripts/lint-secret-boundaries.sh
 cargo test --workspace
 ```
 
-并新增：semantic field registry、raw SQL registry、query budget、route contract、documentation claim 和 Fresh Boot journal lint/test。
+并新增：semantic field registry、raw SQL registry、query budget、既有 `RouteSpec`/RBAC completeness、DTO generation diff、documentation claim 和 Fresh Boot journal lint/test；不新增 endpoint 元注册表。
 
 ### 18.2 Feature/Docker/network
 
@@ -674,7 +682,7 @@ evidence 不包含 secret、完整 credential path、带认证 URL、private add
 | P3 | JSONB 逐字段复核和 DB constraint/test | 无未登记裸 JSON/Value |
 | P4 | raw SQL exception registry、Core SQL 下沉 | 全 production SQL 有唯一合法 owner |
 | P5 | N+1/重复查询重构和 budget | 关键 API/job statement/row budget 通过 |
-| P6 | endpoint registry 和 generated contract | route/schema/TS/UI 无漂移 |
+| P6 | 既有 Actix/RBAC route 边界与 DTO generated contract | route permission、Rust schema、TS/UI 无漂移；不引入 endpoint 元注册表 |
 | P7 | Config executable E2E registry和 a11y matrix | 两套 protected E2E 进入 CI并通过 |
 | P8 | 文档/rule/runbook/CI 收口 | 文档声明与机器 gate 一致 |
 | P9 | 全静态、feature、Docker、network 回归 | 无失败、skip 或未解释 warning |

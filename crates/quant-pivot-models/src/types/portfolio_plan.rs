@@ -17,6 +17,7 @@ use crate::{
 
 /// Resolved capital budget for one portfolio plan.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
+#[serde(deny_unknown_fields)]
 pub struct PortfolioRiskBudget {
     /// Total deployable budget (governance cap).
     pub total_budget_usd: Usd,
@@ -32,6 +33,7 @@ pub struct PortfolioRiskBudget {
 
 /// Resolved exposure constraints applied by one portfolio plan.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
+#[serde(deny_unknown_fields)]
 pub struct PortfolioConstraintsSnapshot {
     /// Max USD exposure per market.
     pub max_market_exposure_usd: Usd,
@@ -51,6 +53,7 @@ pub struct PortfolioConstraintsSnapshot {
 
 /// Summary of candidates rejected during portfolio allocation.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
+#[serde(deny_unknown_fields)]
 pub struct PortfolioRejectedSummary {
     /// Total rejected candidate count.
     pub rejected_count: u32,
@@ -67,6 +70,7 @@ pub struct PortfolioRejectedSummary {
 /// correlation-cluster provenance, and any human-readable conflicting
 /// constraints when the model was infeasible.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
+#[serde(deny_unknown_fields)]
 pub struct PortfolioOptimizerMeta {
     /// Configured solver backend.
     pub solver: PortfolioSolverKind,

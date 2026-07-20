@@ -30,7 +30,7 @@ use crate::{
         ArtifactUri, AuditEventId, BootstrapTransitionId, BuildCommitHash, ContentHash,
         DecisionPolicySnapshotId, DeploymentEnvironment, PolicyActivationId, PolicyApprovalId,
         PolicyBundleGeneration, PolicyIdempotencyKey, PolicyRevisionId, ProductionBaselineId,
-        ProductionEvidenceId, ProfileArtifactId, SchemaVersion, UserId,
+        ProductionEvidenceId, ProfileArtifactId, RoleCode, SchemaVersion, UserId,
     },
 };
 use chrono::{DateTime, Utc};
@@ -707,7 +707,7 @@ pub struct NewSystemBootstrapTransition {
     pub from_phase: BootstrapPhase,
     pub to_phase: BootstrapPhase,
     pub actor: String,
-    pub acting_role: Option<String>,
+    pub acting_role: Option<RoleCode>,
     pub reason: String,
     pub report_only_forced_ack: bool,
     pub occurred_at: DateTime<Utc>,
@@ -719,7 +719,7 @@ pub struct ActivateBootstrapState {
     pub bootstrap_contract_version: i32,
     pub expected_state_revision: i64,
     pub actor: String,
-    pub acting_role: String,
+    pub acting_role: RoleCode,
     pub reason: String,
     pub report_only_forced_ack: bool,
 }

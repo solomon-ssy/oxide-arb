@@ -8,7 +8,7 @@
 > - `production_frozen_behavior`: 一旦完成不可逆 production seal，后续变更必须提供前向 migration、兼容性评估、回滚方案与数据验证。
 > - `rollback_and_data_verification`: 封存前通过清空后的 fresh-install 验证；封存后不得回退到 boot reset。
 
-> 状态：10.0 契约冻结（含后端破坏式对齐）已完成；**10.1 types/API/WS/store 地基**、**10.2 导航/首屏/markets/account**、**10.3 Report Plane**、**10.4 Execution Plane**、**10.5 Research Catalog & Realtime**、**10.7 Deploy Config & Runtime Config**（单入口 `/runtime-config` 页：schema 编辑器迁出 preferences、UiText locale-map、`when` 联动、widget/semantics 分离 governance-critical、deploy 只读快照）已落地并通过质量门禁（前端 typecheck/build/unit/eslint 全绿；后端 fmt/clippy/boundary/errors/architecture + models/repository/web/core 单测全绿）；10.6 hardening、10.8 admin 为设计计划，未进入代码落地。
+> 状态：当前实现索引。10.1–10.5 的业务面与 10.7 Config Console 已进入代码；10.6 是统一出口契约。原 users/roles/menus placeholder backlog 已删除，后端 RBAC API 保留但不发布伪 UI。具体 gate 是否通过只以 closure Execution Ledger 的本轮命令和 evidence hash 为准。
 >
 > 父文档（概念规格）：[`../10-frontend-refactor.md`](../10-frontend-refactor.md)、
 > [`../04-topn-report-and-recommendation.md`](../04-topn-report-and-recommendation.md)、
@@ -17,7 +17,7 @@
 >
 > 范围：`ui/apps/web-antdv-next` 与前端共享类型包 `ui/packages/types`
 >
-> 本目录把前端破坏式重构拆成 7 个可独立推进、带验收契约的子phase（10.0–10.6）。父文档保持
+> 本目录把前端破坏式重构拆成 8 个带验收契约的子phase（10.0–10.7）。父文档保持
 > "概念真理"，本目录是"可执行实施契约"。任一子phase未满足其 Blocker / 验收，不允许进入
 > 下一子phase。
 
@@ -56,8 +56,7 @@
 | 10.4 | Execution Plane | **Intent -> ledger 执行闭环** | [`10.4-execution-plane.md`](10.4-execution-plane.md) |
 | 10.5 | Research Catalog & Realtime | **研究全闭环 catalog + 实时 WS + Recovery 收敛** | [`10.5-research-and-governance.md`](10.5-research-and-governance.md) |
 | 10.6 | Hardening | **防回流 + 测试 + 删除证明** | [`10.6-hardening.md`](10.6-hardening.md) |
-| 10.7 | Deploy Config & Preferences | **部署/运行配置 UI 分离**（含 runtime-config） | [`10.7-deploy-config-and-preferences.md`](10.7-deploy-config-and-preferences.md) |
-| 10.8 | Admin & Access Control | **users/roles/menus 管理台 + 防菜单漂移** | [`10.8-admin-and-access-control.md`](10.8-admin-and-access-control.md) |
+| 10.7 | Config Console & Deploy Readiness | **六类治理资源 + 只读 deployment/lifecycle evidence** | [`10.7-deploy-config-and-preferences.md`](10.7-deploy-config-and-preferences.md) |
 
 ## 2. 依赖图
 
@@ -78,10 +77,8 @@ flowchart TD
     P102 --> P105
     P104 --> P106
     P105 --> P106
-    P105 --> P107["10.7 Deploy Config & Preferences"]
-    P105 --> P108["10.8 Admin & Access Control"]
+    P105 --> P107["10.7 Config Console & Deploy Readiness"]
     P107 --> P106
-    P108 --> P106
 ```
 
 执行原则：
@@ -92,7 +89,8 @@ flowchart TD
 - **10.3** 让 report 成为前端主产物。
 - **10.4** 打通真实执行 ledger。
 - **10.5** 处理研究和治理，不阻塞 report/execution 主路径（可与 10.3/10.4 并行）。
-- **10.6** 阻止旧语义回流并补齐 E2E。
+- **10.7** 提供六类 Config resource workspace、deployment readiness 与 lifecycle evidence。
+- **10.6** 最后执行防回流、可执行 E2E、视觉/可访问性和删除证明。
 
 ## 3. 架构约束（贯穿全部子phase）
 
@@ -151,7 +149,7 @@ Pinia 仅承担状态协调职责。表格主数据由页面 query 拉取，**�
 |---|---|---|
 | ~~Research 无 model/dataset/comparison list~~ | **已补齐**：`GET /research/*` 分页 list + catalog 页 | 10.5 ✓ |
 | ~~Factor/model publication 无 catalog~~ | **已补齐**：factors/models catalog 页 + governed 行动作 | 10.5 ✓ |
-| Account snapshot 无 list | 只展示 live + equity snapshot list | 10.2（历史 list 延后 10.8） |
+| Account snapshot 无 list | 只展示 live + equity snapshot list；不发布无后端契约的历史页面 | 永久非目标，出现真实消费后重新立项 |
 | Data quality 仅当前快照 | dashboard snapshot，无趋势图 | 10.2 |
 
 补齐 list/catalog 后，必须先更新 10.0 契约与 API matrix，再进入页面实现。

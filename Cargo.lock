@@ -7623,8 +7623,7 @@ dependencies = [
 [[package]]
 name = "proc-macro-error-attr2"
 version = "2.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "96de42df36bb9bba5542fe9f1a054b8cc87e172759a1868aa05c1f3acc89dfc5"
+source = "git+https://github.com/fgardt/proc-macro-error-2.git?rev=53ff94b61c678593158db1a3d50269c6f0de0db7#53ff94b61c678593158db1a3d50269c6f0de0db7"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -7633,8 +7632,7 @@ dependencies = [
 [[package]]
 name = "proc-macro-error2"
 version = "2.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "11ec05c52be0a07b08061f7dd003e7d7092e0472bc731b4af7bb1ef876109802"
+source = "git+https://github.com/fgardt/proc-macro-error-2.git?rev=53ff94b61c678593158db1a3d50269c6f0de0db7#53ff94b61c678593158db1a3d50269c6f0de0db7"
 dependencies = [
  "proc-macro-error-attr2",
  "proc-macro2",
@@ -7898,6 +7896,7 @@ dependencies = [
  "prometheus",
  "quant-pivot-api",
  "quant-pivot-error",
+ "quant-pivot-migration",
  "quant-pivot-models",
  "quant-pivot-repository",
  "quant-pivot-research",
@@ -7955,6 +7954,7 @@ dependencies = [
  "blake3",
  "quant-pivot-error",
  "quant-pivot-models",
+ "quant-pivot-sql-contract",
  "sea-orm",
  "sea-orm-migration",
  "serde",
@@ -7963,6 +7963,7 @@ dependencies = [
  "testcontainers",
  "testcontainers-modules",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -7981,6 +7982,7 @@ dependencies = [
  "flume",
  "hex",
  "insta",
+ "libc",
  "linkme",
  "num-traits",
  "paste",
@@ -8019,6 +8021,7 @@ dependencies = [
  "num-traits",
  "quant-pivot-error",
  "quant-pivot-models",
+ "quant-pivot-sql-contract",
  "quant-pivot-storage",
  "quant-pivot-test-support",
  "rust_decimal",
@@ -8069,6 +8072,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "quant-pivot-sql-contract"
+version = "0.1.0"
+dependencies = [
+ "clickhouse",
+ "sea-orm",
+]
+
+[[package]]
 name = "quant-pivot-storage"
 version = "0.1.0"
 dependencies = [
@@ -8086,6 +8097,7 @@ dependencies = [
  "quant-pivot-error",
  "quant-pivot-migration",
  "quant-pivot-models",
+ "quant-pivot-sql-contract",
  "quant-pivot-test-support",
  "redis",
  "rust_decimal",
@@ -8194,15 +8206,18 @@ dependencies = [
  "quant-pivot-models",
  "quant-pivot-repository",
  "quant-pivot-research",
+ "quant-pivot-sql-contract",
  "quant-pivot-storage",
  "rustls 0.23.40",
  "schemars 1.2.1",
  "sea-orm",
  "serde",
  "serde_json",
+ "syn 2.0.117",
  "testcontainers",
  "testcontainers-modules",
  "tokio",
+ "toml",
  "url",
  "uuid",
  "zeroize",
@@ -9275,9 +9290,9 @@ dependencies = [
 
 [[package]]
 name = "sea-orm"
-version = "2.0.0-rc.43"
+version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "350a7b21fc90ff973ba45eb72d349192ee537dda2cecee8221c0e884bd547ba9"
+checksum = "549c6d29a2e7a84e35c5dfbc06370a62c4d35f2328c31005267bec586b34f682"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -9325,9 +9340,9 @@ dependencies = [
 
 [[package]]
 name = "sea-orm-cli"
-version = "2.0.0-rc.43"
+version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e1f4bc6be93c1636e844aa041449b186435c180a70ff89fffe9d8998e69090bf"
+checksum = "3ec4b7c39c90efa92b8bb0b91ac7159684b9fa0d6371ce39bfab0a9793ce7394"
 dependencies = [
  "chrono",
  "glob",
@@ -9343,9 +9358,9 @@ dependencies = [
 
 [[package]]
 name = "sea-orm-macros"
-version = "2.0.0-rc.43"
+version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "35aca99a640e4e3896104d1ba80201b4e555960b4776fd78874e1ef8142dd0b7"
+checksum = "b4cbb7ae053b9b37c919ea944a3bc52f7830a90c223f8a765c908293bca8f22d"
 dependencies = [
  "heck 0.5.0",
  "itertools 0.14.0",
@@ -9359,9 +9374,9 @@ dependencies = [
 
 [[package]]
 name = "sea-orm-migration"
-version = "2.0.0-rc.43"
+version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "497f49c482c298e278aa3a8bafdd66efb0c8e9e4be29d095a95ad51e96a1204a"
+checksum = "ef3576c5301b67ea7d2ce4515858d700066e51911c7d228a439c00ff258695c8"
 dependencies = [
  "async-trait",
  "sea-orm",

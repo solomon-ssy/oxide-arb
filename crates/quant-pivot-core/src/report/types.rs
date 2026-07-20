@@ -9,7 +9,10 @@ use quant_pivot_models::{
         EmptyReportReason, OutcomeSide, QuantRuntimeMode, ReportKind, ReportTriggerKind,
     },
     runtime_config::ReportDeliveryPolicy,
-    types::{CorrelationId, Probability, RecommendationReportId, ReportScheduleId, Usd},
+    types::{
+        CorrelationId, Probability, RecommendationReportId, ReportScheduleId, ReportTriggerKey,
+        SemanticTextError, Usd,
+    },
 };
 
 /// Source that triggered one report build.
@@ -32,14 +35,14 @@ impl ReportTrigger {
     }
 
     /// Fixed idempotency key contract.
-    #[must_use]
-    pub fn key(&self, trigger_time: DateTime<Utc>) -> String {
-        match self {
+    pub fn key(&self, trigger_time: DateTime<Utc>) -> Result<ReportTriggerKey, SemanticTextError> {
+        let value = match self {
             Self::Scheduled { schedule_id } => {
                 format!("scheduled:{schedule_id}:{}", trigger_time.to_rfc3339())
             }
             Self::AdHoc { request_id } => format!("ad_hoc:{request_id}"),
-        }
+        };
+        ReportTriggerKey::parse(value)
     }
 }
 

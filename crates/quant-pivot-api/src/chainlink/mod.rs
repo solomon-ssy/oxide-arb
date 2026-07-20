@@ -57,8 +57,8 @@ impl ChainlinkDataStreamsSource {
             RpcError::ConnectionFailed("Chainlink Data Streams API secret is missing".into())
         })?;
         let sdk_config = Config::new(
-            api_key.secret().expose_secret().to_owned(),
-            api_secret.secret().expose_secret().to_owned(),
+            api_key.expose_secret().to_owned(),
+            api_secret.expose_secret().to_owned(),
             config.rest_url.clone(),
             config.websocket_url.clone(),
         )

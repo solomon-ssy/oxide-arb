@@ -518,7 +518,7 @@ impl ModelGovernanceService {
             Some(state_id) => PublishFeatureParityPermit::ExistingGeneration(state_id),
             None => PublishFeatureParityPermit::InitializeFromProof {
                 actor: actor.username.clone(),
-                acting_role: actor.role.as_ref().map(ToString::to_string),
+                acting_role: actor.role.clone(),
                 reason: format!(
                     "initialize parity latch from pre-publication proof {}: {}",
                     parity_run_id, command.reason

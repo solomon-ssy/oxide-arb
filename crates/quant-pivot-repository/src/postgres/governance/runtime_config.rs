@@ -64,8 +64,8 @@ use quant_pivot_models::{
         PolicyProfileDocument, PolicySnapshotError, PolicyValidationEvidence,
     },
     types::{
-        ContentHash, DecisionPolicySnapshotId, LIFECYCLE_ADVISORY_LOCK_KEY, PolicyApprovalId,
-        PolicyRevisionId, ProfileArtifactId,
+        ContentHash, DecisionPolicySnapshotId, PolicyApprovalId, PolicyRevisionId,
+        ProfileArtifactId,
     },
 };
 use sea_orm::{
@@ -329,21 +329,6 @@ pub(crate) async fn acquire_activation_lock(
                 "boot seed row is missing",
             )
         })
-}
-
-async fn acquire_lifecycle_lock(
-    transaction: &sea_orm::DatabaseTransaction,
-) -> Result<(), StorageError> {
-    let acquired =
-        primitives::try_advisory_xact_lock(transaction, LIFECYCLE_ADVISORY_LOCK_KEY).await?;
-    if !acquired {
-        return Err(StorageError::state_conflict(
-            "system_production_baseline",
-            None::<&str>,
-            "schema deployment or another seal currently holds the lifecycle lease",
-        ));
-    }
-    Ok(())
 }
 
 async fn verify_production_evidence_refs(
@@ -1393,7 +1378,6 @@ impl PolicyRepository for PgPolicyRepository {
         artifact_verification: &dyn ProductionEvidenceArtifactVerificationPort,
     ) -> Result<ProductionEvidenceInfo, StorageError> {
         let transaction = self.db.begin().await.map_err(StorageError::from)?;
-        acquire_lifecycle_lock(&transaction).await?;
         if ProductionBaselineEntity::find()
             .one(&transaction)
             .await
@@ -1476,7 +1460,6 @@ impl PolicyRepository for PgPolicyRepository {
         artifact_verification: &dyn ProductionEvidenceArtifactVerificationPort,
     ) -> Result<ProductionBaselineInfo, StorageError> {
         let transaction = self.db.begin().await.map_err(StorageError::from)?;
-        acquire_lifecycle_lock(&transaction).await?;
         if ProductionBaselineEntity::find()
             .one(&transaction)
             .await
@@ -1533,5 +1516,29 @@ impl PolicyRepository for PgPolicyRepository {
             .map_err(|error| error::map_unique(error, "system_production_baseline", &key))?;
         transaction.commit().await.map_err(StorageError::from)?;
         Ok(inserted.into())
+    }
+}
+
+#[cfg(test)]
+mod query_budget_tests {
+    use std::collections::BTreeMap;
+
+    use quant_pivot_error::storage::StorageError;
+    use sea_orm::{DbBackend, MockDatabase, Value};
+
+    use super::{PgPolicyRepository, PolicyRepository};
+
+    #[tokio::test]
+    async fn snapshot_options_executes_one_bounded_projection() -> Result<(), StorageError> {
+        let db = MockDatabase::new(DbBackend::Postgres)
+            .append_query_results([Vec::<BTreeMap<String, Value>>::new()])
+            .into_connection();
+        let repository = PgPolicyRepository::new(db.clone());
+
+        let options = repository.list_snapshot_options(50).await?;
+
+        assert!(options.is_empty());
+        assert_eq!(db.into_transaction_log().len(), 1);
+        Ok(())
     }
 }

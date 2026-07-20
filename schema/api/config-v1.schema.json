@@ -2983,7 +2983,7 @@
           "minimum": 0
         },
         "max_top_n": {
-          "description": "Maximum `TopN` size (hard upper bound for every schedule and ad-hoc run).",
+          "description": "Maximum `TopN` size (hard upper bound for every schedule and ad-hoc run,\ncapped by [`MAX_REPORT_TOP_N`]).",
           "type": "integer",
           "format": "uint32",
           "default": 100,

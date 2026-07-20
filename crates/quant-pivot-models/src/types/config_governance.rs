@@ -9,8 +9,8 @@ use sea_orm::{
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
-/// Process-independent `PostgreSQL` advisory lock shared by schema mutation,
-/// preproduction reset and irreversible production sealing.
+/// Process-independent advisory lock shared by schema mutation, reset, and
+/// irreversible production sealing on the canonical `postgres` database.
 pub const LIFECYCLE_ADVISORY_LOCK_KEY: i64 = 7_293_770_821_154_641_591;
 
 /// Monotonic generation of the complete active policy bundle.

@@ -976,7 +976,12 @@ impl DefaultReportBuilder {
         } = input.plan;
         self.deps.composer.compose(ComposeReportInput {
             trigger: &input.request.trigger,
-            trigger_key: input.request.trigger.key(input.request.trigger_time),
+            trigger_key: input
+                .request
+                .trigger
+                .key(input.request.trigger_time)
+                .map_err(|error| QuantError::config(error.to_string()))?
+                .to_string(),
             trigger_time: input.request.trigger_time,
             knowledge_lag_secs: input.context.boundary.knowledge_lag_secs(),
             decision_at: input.context.boundary.decision_at(),
@@ -1058,7 +1063,12 @@ impl DefaultReportBuilder {
         };
         self.deps.composer.compose(ComposeReportInput {
             trigger: &input.request.trigger,
-            trigger_key: input.request.trigger.key(input.request.trigger_time),
+            trigger_key: input
+                .request
+                .trigger
+                .key(input.request.trigger_time)
+                .map_err(|error| QuantError::config(error.to_string()))?
+                .to_string(),
             trigger_time: input.request.trigger_time,
             knowledge_lag_secs: input.context.boundary.knowledge_lag_secs(),
             decision_at: input.context.boundary.decision_at(),

@@ -11,7 +11,7 @@ use quant_pivot_error::config_validation::{
     ConfigValidationError, ConfigValidationReport, ConfigWarning,
 };
 use quant_pivot_models::{
-    config::{DeployConfig, ProjectLifecyclePolicy, secret::SystemdCredentialRef},
+    config::{DeployConfig, ProjectLifecyclePolicy},
     domain::{
         ActivatePolicyDraftRequest, ApprovePolicyDraftRequest, ConfigActivityQuery,
         ConfigActivityView, ConfigResourceSummaryView, ConfigResourcesView,
@@ -813,15 +813,13 @@ fn deployment_credential_health(deploy: &DeployConfig) -> Vec<CredentialHealthVi
             CredentialKind::PolymarketPrivateKey,
             deploy.keys.private_key_present(),
         ),
-        systemd_credential_health(
+        credential_health(
             CredentialKind::TelegramBotToken,
-            &deploy.notifications.telegram.bot_token_credential,
-            "notifications.telegram.bot_token_credential",
+            !deploy.notifications.telegram.bot_token.is_empty(),
         ),
-        systemd_credential_health(
+        credential_health(
             CredentialKind::WebhookAuthorization,
-            &deploy.notifications.webhook.authorization_credential,
-            "notifications.webhook.authorization_credential",
+            !deploy.notifications.webhook.authorization.is_empty(),
         ),
         credential_health(
             CredentialKind::EvidenceAttestation,
@@ -866,21 +864,6 @@ const fn credential_health(credential: CredentialKind, configured: bool) -> Cred
             CredentialHealthStatus::NotConfigured
         },
     }
-}
-
-fn systemd_credential_health(
-    credential: CredentialKind,
-    reference: &SystemdCredentialRef,
-    field: &str,
-) -> CredentialHealthView {
-    let status = if reference.name.trim().is_empty() {
-        CredentialHealthStatus::NotConfigured
-    } else if reference.resolve_optional(field).is_ok() {
-        CredentialHealthStatus::Available
-    } else {
-        CredentialHealthStatus::Missing
-    };
-    CredentialHealthView { credential, status }
 }
 
 fn usize_to_u64(value: usize) -> u64 {
@@ -949,9 +932,9 @@ pub async fn seal_production(
     let lifecycle_policy_hash = frozen_policy.content_hash()?;
     let production_baseline_id = ProductionBaselineId::boot();
     let now = Utc::now();
-    let baseline = state
-        .runtime_config
-        .seal_production_baseline(
+    let lease = state.lifecycle_leases.acquire().await?;
+    let seal_result = tokio::select! {
+      result = state.runtime_config.seal_production_baseline(
             NewProductionBaseline {
                 production_baseline_id: production_baseline_id.clone(),
                 environment: body.environment.clone(),
@@ -970,8 +953,19 @@ pub async fn seal_production(
             },
             state.schema_verification.as_ref(),
             state.production_evidence_verification.as_ref(),
-        )
-        .await?;
+        ) => result.map_err(WebError::from),
+      () = lease.cancelled() => Err(WebError::Conflict(
+          "canonical PostgreSQL lifecycle lease was lost during production seal".to_owned(),
+      )),
+    };
+    let active_result = lease.ensure_active().map_err(WebError::from);
+    let release_result = lease.release().await.map_err(WebError::from);
+    let baseline = match (seal_result, active_result, release_result) {
+        (Err(error), _, _) | (Ok(_), Err(error), _) | (Ok(_), Ok(()), Err(error)) => {
+            return Err(error);
+        }
+        (Ok(baseline), Ok(()), Ok(())) => baseline,
+    };
 
     op_ctx.set_action(
         OperationCategory::Governance,

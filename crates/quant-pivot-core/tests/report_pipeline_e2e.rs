@@ -8,7 +8,7 @@ use quant_pivot_models::{
     enums::quant::{
         AccountSource, EmptyReportReason, RecommendationReportStatus, RecommendationStatus,
     },
-    types::{EquitySnapshotId, Usd},
+    types::{EquitySnapshotId, ReportTriggerKey, Usd},
 };
 use quant_pivot_repository::{
     postgres::{PgEquitySnapshotRepository, PgOperationLogRepository},
@@ -118,10 +118,11 @@ async fn ad_hoc_idempotent_on_trigger_key() {
         second.recommendation_report_id
     );
 
-    let trigger_key = "ad_hoc:idempotent-ad-hoc";
+    let trigger_key =
+        ReportTriggerKey::parse("ad_hoc:idempotent-ad-hoc").expect("report trigger key");
     let row = harness
         .report_run_repo
-        .find_by_trigger_key(trigger_key)
+        .find_by_trigger_key(&trigger_key)
         .await
         .expect("lookup trigger key")
         .expect("single committed row");
@@ -218,7 +219,8 @@ async fn account_unavailable_fails_without_report_row() {
         QuantError::Account(AccountError::CredentialsMissing)
     ));
 
-    let trigger_key = format!("ad_hoc:{request_id}");
+    let trigger_key =
+        ReportTriggerKey::parse(format!("ad_hoc:{request_id}")).expect("report trigger key");
     let existing = harness
         .report_run_repo
         .find_by_trigger_key(&trigger_key)

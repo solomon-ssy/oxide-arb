@@ -11,9 +11,9 @@ use crate::{
     },
     enums::quant::{TradePolicyGovernanceAction, TradePolicyStatus, TradePolicyValidationStatus},
     types::{
-        ContentHash, MarketId, TokenId, TradePolicyArtifactId, TradePolicyArtifactPayload,
-        TradePolicyGovernanceAuditId, TradePolicyValidationRunId, TrainingDatasetId,
-        TrainingExampleId, UserId,
+        ContentHash, DiagnosticCode, MarketId, TokenId, TradePolicyArtifactId,
+        TradePolicyArtifactPayload, TradePolicyGovernanceAuditId, TradePolicyValidationRunId,
+        TrainingDatasetId, TrainingExampleId, UserId,
     },
 };
 
@@ -95,7 +95,7 @@ pub struct NewTradePolicyValidationRow {
     pub expected_row_hash: Option<ContentHash>,
     pub actual_row_hash: Option<ContentHash>,
     pub passed: bool,
-    pub diagnostic_kind: Option<String>,
+    pub diagnostic_kind: Option<DiagnosticCode>,
     pub detail: Option<String>,
     pub row_hash: ContentHash,
 }
@@ -162,7 +162,7 @@ pub struct TradePolicyValidationRowInfo {
     pub expected_row_hash: Option<ContentHash>,
     pub actual_row_hash: Option<ContentHash>,
     pub passed: bool,
-    pub diagnostic_kind: Option<String>,
+    pub diagnostic_kind: Option<DiagnosticCode>,
     pub detail: Option<String>,
     pub row_hash: ContentHash,
     pub created_at: DateTime<Utc>,

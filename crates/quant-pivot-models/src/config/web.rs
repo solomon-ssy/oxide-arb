@@ -1,6 +1,6 @@
 //! Web server + JWT configuration (`[web]` / `[web.jwt]`).
 
-use super::secret::SystemdCredentialRef;
+use super::secret::SecretText;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::Deserialize;
 use zeroize::Zeroizing;
@@ -48,8 +48,8 @@ impl WebConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct JwtConfig {
-    /// systemd credential reference to a Base64URL-no-pad 32-byte HS256 key.
-    pub signing_key: SystemdCredentialRef,
+    /// Base64URL-no-pad 32-byte HS256 signing-key source.
+    pub signing_key: SecretText,
     /// Token issuer claim (default `quant-pivot`).
     pub issuer: String,
     /// Token audience claim (default `quant-pivot-web`).
@@ -65,7 +65,7 @@ pub struct JwtConfig {
 impl Default for JwtConfig {
     fn default() -> Self {
         Self {
-            signing_key: SystemdCredentialRef::default(),
+            signing_key: SecretText::default(),
             issuer: default_issuer(),
             audience: default_audience(),
             access_ttl_secs: default_access_ttl(),
@@ -140,14 +140,14 @@ mod tests {
     }
 
     #[test]
-    fn nested_jwt_credential_reference_deserializes() {
+    fn nested_jwt_plaintext_deserializes_and_is_redacted() {
         let cfg: WebConfig = serde_json::from_str(
-            r#"{ "listen_port": 9090, "jwt": { "signing_key": { "name": "jwt-signing-key" }, "access_ttl_secs": 60 } }"#,
+            r#"{ "listen_port": 9090, "jwt": { "signing_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "access_ttl_secs": 60 } }"#,
         )
         .expect("valid web config");
         assert_eq!(cfg.listen_port, 9090);
-        assert_eq!(cfg.jwt.signing_key.name, "jwt-signing-key");
-        assert!(!cfg.jwt_signing_key_is_configured());
+        assert!(cfg.jwt_signing_key_is_configured());
+        assert!(!format!("{cfg:?}").contains("AAAAAAAAAAAAAAAA"));
         assert_eq!(cfg.jwt.access_ttl_secs, 60);
         assert_eq!(cfg.jwt.refresh_ttl_secs, 604_800);
     }

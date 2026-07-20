@@ -8,9 +8,10 @@ use crate::{
     },
     hashing::CanonicalDigest,
     types::{
-        ContentHash, DecisionPolicySnapshotId, FeatureParityRunId, FeatureParityStateId, MarketId,
-        MarketSelectionId, ModelRunId, ModelSpecId, ModelVersionId, PortfolioPlanId,
-        RecommendationReportId, ReportDataQualitySnapshotId, TrainingDatasetId,
+        ContentHash, DecisionPolicySnapshotId, DiagnosticCode, FeatureParityRunId,
+        FeatureParityStateId, MarketId, MarketSelectionId, ModelRunId, ModelSpecId, ModelVersionId,
+        PortfolioPlanId, RecommendationReportId, ReportDataQualitySnapshotId, RoleCode,
+        TrainingDatasetId,
     },
 };
 use chrono::{DateTime, Utc};
@@ -32,7 +33,7 @@ pub struct FeatureParityRunInfo {
     pub training_dataset_id: Option<TrainingDatasetId>,
     pub triggered_by: String,
     pub requested_by: Option<String>,
-    pub acting_role: String,
+    pub acting_role: RoleCode,
     pub reason: String,
     pub total_count: i64,
     pub compared_count: i64,
@@ -41,7 +42,7 @@ pub struct FeatureParityRunInfo {
     pub pending_materialization_count: i64,
     pub feature_contract_hash: Option<ContentHash>,
     pub transform_hash: Option<ContentHash>,
-    pub failure_code: Option<String>,
+    pub failure_code: Option<DiagnosticCode>,
     pub failure_detail: Option<String>,
     pub started_at: Option<DateTime<Utc>>,
     pub pending_since: Option<DateTime<Utc>>,
@@ -99,7 +100,7 @@ pub struct NewFeatureParityRun {
     pub training_dataset_id: Option<TrainingDatasetId>,
     pub triggered_by: String,
     pub requested_by: Option<String>,
-    pub acting_role: String,
+    pub acting_role: RoleCode,
     pub reason: String,
     pub total_count: i64,
     pub compared_count: i64,
@@ -108,7 +109,7 @@ pub struct NewFeatureParityRun {
     pub pending_materialization_count: i64,
     pub feature_contract_hash: Option<ContentHash>,
     pub transform_hash: Option<ContentHash>,
-    pub failure_code: Option<String>,
+    pub failure_code: Option<DiagnosticCode>,
     pub failure_detail: Option<String>,
     pub started_at: Option<DateTime<Utc>>,
     pub pending_since: Option<DateTime<Utc>>,
@@ -127,7 +128,7 @@ pub struct CompleteFeatureParityRun {
     pub pending_materialization_count: i64,
     pub feature_contract_hash: Option<ContentHash>,
     pub transform_hash: Option<ContentHash>,
-    pub failure_code: Option<String>,
+    pub failure_code: Option<DiagnosticCode>,
     pub failure_detail: Option<String>,
 }
 
@@ -342,7 +343,7 @@ pub struct FeatureParityStateInfo {
     pub recovery_run_id: Option<FeatureParityRunId>,
     pub previous_state_id: Option<FeatureParityStateId>,
     pub actor: Option<String>,
-    pub acting_role: Option<String>,
+    pub acting_role: Option<RoleCode>,
     pub reason: String,
     pub created_at: DateTime<Utc>,
 }
@@ -375,6 +376,6 @@ pub struct NewFeatureParityState {
     pub recovery_run_id: Option<FeatureParityRunId>,
     pub previous_state_id: Option<FeatureParityStateId>,
     pub actor: Option<String>,
-    pub acting_role: Option<String>,
+    pub acting_role: Option<RoleCode>,
     pub reason: String,
 }

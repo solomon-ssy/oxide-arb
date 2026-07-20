@@ -722,6 +722,21 @@ pg_enum! {
     }
 }
 
+pg_enum! {
+    type_name = "qp_research_job_result_kind",
+    /// Concrete artifact namespace referenced by a terminal research job.
+    pub enum ResearchJobResultKind {
+        TrainingDataset => "training_dataset",
+        ModelVersion => "model_version",
+        BacktestReport => "backtest_report",
+        BacktestPathSet => "backtest_path_set",
+        CalibrationArtifact => "calibration_artifact",
+        FeatureParityRun => "feature_parity_run",
+        TradePolicyArtifact => "trade_policy_artifact",
+        TradePolicyValidationRun => "trade_policy_validation_run",
+    }
+}
+
 impl ResearchJobStatus {
     /// Whether the job has reached a terminal state (no further transitions).
     #[must_use]

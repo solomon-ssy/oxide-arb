@@ -3,6 +3,7 @@ resolver = "2"
 members = [
   "crates/quant-pivot-error",
   "crates/quant-pivot-macros",
+  "crates/quant-pivot-sql-contract",
   "crates/quant-pivot-models",
   "crates/quant-pivot-migration",
   "crates/quant-pivot-api",
@@ -117,7 +118,7 @@ validator = { version = "0.20", features = ["derive"] }
 bitcode = { version = "0.6", features = ["derive", "serde", "rust_decimal"] }
 
 # ORM + migrations (PostgreSQL only)
-sea-orm = { version = "=2.0.0-rc.43", features = [
+sea-orm = { version = "=2.0.0", features = [
   "sqlx-postgres",
   "runtime-tokio-rustls",
   "macros",
@@ -130,7 +131,7 @@ sea-orm = { version = "=2.0.0-rc.43", features = [
   "postgres-array",
 ] }
 sea-query = "=1.0.1"
-sea-orm-migration = { version = "=2.0.0-rc.43", default-features = false, features = [
+sea-orm-migration = { version = "=2.0.0", default-features = false, features = [
   "sqlx-postgres",
   "runtime-tokio-rustls",
 ] }
@@ -142,7 +143,7 @@ sqlx = { version = "=0.9.0", default-features = false, features = [
 ] }
 
 # Proc-macro infrastructure
-syn = { version = "2", features = ["full", "extra-traits"] }
+syn = { version = "2", features = ["full", "extra-traits", "visit"] }
 quote = "1"
 proc-macro2 = "1"
 linkme = "0.3"
@@ -193,6 +194,7 @@ governor = "0.10"
 
 # Security
 zeroize = { version = "1", features = ["derive"] }
+libc = "0.2"
 base64 = "0.22"
 hex = "0.4"
 blake3 = "1"
@@ -310,7 +312,9 @@ actix-test = "0.1"
 
 quant-pivot-error = { path = "crates/quant-pivot-error" }
 quant-pivot-macros = { path = "crates/quant-pivot-macros" }
+quant-pivot-sql-contract = { path = "crates/quant-pivot-sql-contract" }
 quant-pivot-models = { path = "crates/quant-pivot-models" }
+quant-pivot-migration = { path = "crates/quant-pivot-migration" }
 quant-pivot-api = { path = "crates/quant-pivot-api" }
 quant-pivot-storage = { path = "crates/quant-pivot-storage" }
 quant-pivot-repository = { path = "crates/quant-pivot-repository" }
@@ -319,6 +323,12 @@ quant-pivot-research = { path = "crates/quant-pivot-research" }
 quant-pivot-test-support = { path = "crates/quant-pivot-test-support" }
 quant-pivot-bench = { path = "crates/quant-pivot-bench" }
 quant-pivot-web = { path = "crates/quant-pivot-web" }
+
+# Upstream 2.0.1 is archived with an unmerged fix for Rust E0365 future
+# incompatibility. Pin that one-line upstream patch until all transitive owners
+# (Alloy, SeaORM, teloxide, validator) release a graph without this crate.
+[patch.crates-io]
+proc-macro-error2 = { git = "https://github.com/fgardt/proc-macro-error-2.git", rev = "53ff94b61c678593158db1a3d50269c6f0de0db7" }
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Cargo Profile Configuration

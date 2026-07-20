@@ -15,7 +15,7 @@ use quant_pivot_models::{
         TradeTapeBlockCursorInfo, TradeTapeBlockCursorStatus, TradeTapePrint, TradeTapeSourceKind,
         UpsertTradeTapeBlockCursor,
     },
-    types::TokenId,
+    types::{EvmAddress, TokenId},
 };
 use quant_pivot_repository::{
     clickhouse::ChFactWriter,
@@ -38,7 +38,7 @@ pub struct TradeTapeWorker {
 /// no-print block-range scan that made forward progress).
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ContractCheckpoint {
-    contract_address: String,
+    contract_address: EvmAddress,
     last_finalized_block: u64,
     last_log_index: i32,
     head_lag_blocks: u64,
@@ -134,8 +134,9 @@ impl TradeTapeWorker {
         contract: ExchangeContract,
         safe_head: u64,
     ) -> QuantResult<ContractScanOutcome> {
-        let source = TradeTapeSourceKind::OnChain.as_str();
-        let contract_address = format!("{:#x}", contract.address);
+        let source = TradeTapeSourceKind::OnChain;
+        let contract_address = EvmAddress::parse(format!("{:#x}", contract.address))
+            .map_err(|error| QuantError::config(error.to_string()))?;
         let cursor = self
             .block_cursor_repo
             .find(source, &contract_address)
@@ -236,16 +237,16 @@ impl TradeTapeWorker {
     }
 
     async fn commit_checkpoint(&self, checkpoint: ContractCheckpoint) -> QuantResult<()> {
-        let source = TradeTapeSourceKind::OnChain.as_str();
+        let source = TradeTapeSourceKind::OnChain;
         self.block_cursor_repo
             .upsert(UpsertTradeTapeBlockCursor {
-                source: source.to_owned(),
+                source,
                 contract_address: checkpoint.contract_address,
                 last_finalized_block: i64::try_from(checkpoint.last_finalized_block)
                     .unwrap_or(i64::MAX),
                 last_log_index: checkpoint.last_log_index,
                 head_lag_blocks: i64::try_from(checkpoint.head_lag_blocks).unwrap_or(i64::MAX),
-                status: checkpoint.status.as_str().to_owned(),
+                status: checkpoint.status,
                 updated_at: Utc::now(),
             })
             .await?;

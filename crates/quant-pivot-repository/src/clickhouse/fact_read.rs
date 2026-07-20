@@ -21,7 +21,19 @@ use quant_pivot_models::{
 use quant_pivot_storage::clickhouse::ClickHousePool;
 use uuid::Uuid;
 
-use crate::traits::QuantFactReadRepository;
+use crate::{
+    sql_contract_registry::{
+        BOOK_CHECKPOINT_AT, BOOK_CHECKPOINTS_AT, BOOK_CHECKPOINTS_BETWEEN, BOOK_EVENTS_BETWEEN,
+        BOOK_EVENTS_FROM, BOOK_STREAM_SESSION_AT, BOOK_STREAM_SESSIONS, CRYPTO_REPORT_AT,
+        CRYPTO_REPORTS_AVAILABLE, CRYPTO_REPORTS_BETWEEN, DOMAIN_OBSERVATION_AT,
+        DOMAIN_OBSERVATIONS_BETWEEN, ENTRY_EVALUATION_LATEST, LAST_TRADES, MARKET_WS_TRADES_FROM,
+        MICROSTRUCTURE_SERIES, MICROSTRUCTURE_WINDOW, MID_PRICE_SERIES, OBSERVED_MARKETS_BETWEEN,
+        REPORT_FUNNEL_COUNT, REPORT_FUNNEL_COUNTS, REPORT_FUNNEL_PAGE, RESOLUTION_AT,
+        RESOLUTIONS_BETWEEN, TRADE_TAPE_WINDOW, WEATHER_FORECASTS_BETWEEN,
+        WEATHER_OBSERVATIONS_BETWEEN,
+    },
+    traits::QuantFactReadRepository,
+};
 
 /// Quant fact source, queried straight from `ClickHouse`.
 pub struct ChQuantFactReadRepository {
@@ -42,9 +54,9 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
         &self,
         report_id: &RecommendationReportId,
     ) -> Result<Vec<ReportMarketFunnelCountRow>, StorageError> {
-        self.pool
-            .client()
-            .query(
+        REPORT_FUNNEL_COUNTS
+            .clickhouse_query(
+                self.pool.client(),
                 "SELECT terminal_stage, count() AS row_count \
                  FROM quant_report_market_funnel FINAL \
                  WHERE recommendation_report_id = ? \
@@ -71,7 +83,9 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
         if primary_reason.is_some() {
             sql.push_str(" AND primary_reason = ?");
         }
-        let mut query = self.pool.client().query(&sql).bind(report_id.clone());
+        let mut query = REPORT_FUNNEL_COUNT
+            .clickhouse_query(self.pool.client(), &sql)
+            .bind(report_id.clone());
         if let Some(stage) = terminal_stage {
             query = query.bind(stage);
         }
@@ -103,7 +117,9 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
             sql.push_str(" AND primary_reason = ?");
         }
         sql.push_str(" ORDER BY market_id LIMIT ? OFFSET ?");
-        let mut query = self.pool.client().query(&sql).bind(report_id.clone());
+        let mut query = REPORT_FUNNEL_PAGE
+            .clickhouse_query(self.pool.client(), &sql)
+            .bind(report_id.clone());
         if let Some(stage) = terminal_stage {
             query = query.bind(stage);
         }
@@ -122,9 +138,9 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
         &self,
         instance_id: &EntryConditionInstanceId,
     ) -> Result<Option<EntryConditionEvaluationEventRow>, StorageError> {
-        self.pool
-            .client()
-            .query(
+        ENTRY_EVALUATION_LATEST
+            .clickhouse_query(
+                self.pool.client(),
                 "SELECT ?fields FROM (\
                      SELECT *, row_number() OVER (\
                          PARTITION BY evaluation_id \
@@ -149,10 +165,9 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
         source_timestamp_ms: i64,
         decision_at_ms: i64,
     ) -> Result<Option<CryptoPriceReportRow>, StorageError> {
-        let row = self
-            .pool
-            .client()
-            .query(
+        let row = CRYPTO_REPORT_AT
+            .clickhouse_query(
+                self.pool.client(),
                 "SELECT ?fields FROM (\
                      SELECT *, row_number() OVER (\
                          PARTITION BY source_id, instrument_key, source_sequence, event_time, report_hash \
@@ -188,9 +203,9 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
         if instrument_keys.is_empty() {
             return Ok(Vec::new());
         }
-        self.pool
-            .client()
-            .query(
+        CRYPTO_REPORTS_BETWEEN
+            .clickhouse_query(
+                self.pool.client(),
                 "SELECT ?fields FROM (\
                      SELECT *, row_number() OVER (\
                          PARTITION BY source_id, instrument_key, source_sequence, event_time, report_hash \
@@ -225,9 +240,9 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
         if instrument_keys.is_empty() {
             return Ok(Vec::new());
         }
-        self.pool
-            .client()
-            .query(
+        CRYPTO_REPORTS_AVAILABLE
+            .clickhouse_query(
+                self.pool.client(),
                 "SELECT ?fields FROM (\
                      SELECT *, row_number() OVER (\
                          PARTITION BY source_id, instrument_key, source_sequence, event_time, report_hash \
@@ -261,9 +276,9 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
         if stations.is_empty() {
             return Ok(Vec::new());
         }
-        self.pool
-            .client()
-            .query(
+        WEATHER_OBSERVATIONS_BETWEEN
+            .clickhouse_query(
+                self.pool.client(),
                 "SELECT ?fields FROM (\
                      SELECT *, row_number() OVER (\
                          PARTITION BY instrument_key, variable, observed_at, revision, report_hash \
@@ -299,9 +314,9 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
         if stations.is_empty() {
             return Ok(Vec::new());
         }
-        self.pool
-            .client()
-            .query(
+        WEATHER_FORECASTS_BETWEEN
+            .clickhouse_query(
+                self.pool.client(),
                 "SELECT ?fields FROM (\
                      SELECT *, row_number() OVER (\
                          PARTITION BY instrument_key, variable, reference_time, valid_time, member, revision, report_hash \
@@ -336,10 +351,9 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
         if token_ids.is_empty() {
             return Ok(Vec::new());
         }
-        let rows = self
-            .pool
-            .client()
-            .query(
+        let rows = MICROSTRUCTURE_WINDOW
+            .clickhouse_query(
+                self.pool.client(),
                 "SELECT ?fields FROM book_microstructure_1s \
                  WHERE token_id IN ? \
                  AND bucket_time >= fromUnixTimestamp64Milli(?) \
@@ -384,10 +398,8 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
              AND available_at <= fromUnixTimestamp64Milli(?) \
              ORDER BY token_id, bucket_time"
         };
-        let rows = self
-            .pool
-            .client()
-            .query(sql)
+        let rows = MICROSTRUCTURE_SERIES
+            .clickhouse_query(self.pool.client(), sql)
             .bind(token_ids)
             .bind(from_ms)
             .bind(to_ms)
@@ -407,10 +419,9 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
         if token_ids.is_empty() {
             return Ok(Vec::new());
         }
-        let rows = self
-            .pool
-            .client()
-            .query(
+        let rows = LAST_TRADES
+            .clickhouse_query(
+                self.pool.client(),
                 "SELECT ?fields FROM quant_trade_tape \
                  WHERE token_id IN ? \
                  AND source = ? \
@@ -440,10 +451,9 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
         if market_ids.is_empty() {
             return Ok(Vec::new());
         }
-        let mut rows = self
-            .pool
-            .client()
-            .query(
+        let mut rows = TRADE_TAPE_WINDOW
+            .clickhouse_query(
+                self.pool.client(),
                 "SELECT ?fields FROM quant_trade_tape \
                  WHERE market_id IN ? \
                  AND source = ? \
@@ -502,10 +512,9 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
                 "mid-price bucket_secs must be greater than zero",
             ));
         }
-        let rows = self
-            .pool
-            .client()
-            .query(
+        let rows = MID_PRICE_SERIES
+            .clickhouse_query(
+                self.pool.client(),
                 "SELECT token_id, \
                  intDiv(toUnixTimestamp64Milli(bucket_time), toInt64(?) * 1000) \
                  * toInt64(?) * 1000 \
@@ -545,10 +554,9 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
         source_cutoff_ms: i64,
         decision_at_ms: i64,
     ) -> Result<Option<BookL2CheckpointRow>, StorageError> {
-        let rows = self
-            .pool
-            .client()
-            .query(
+        let rows = BOOK_CHECKPOINT_AT
+            .clickhouse_query(
+                self.pool.client(),
                 "SELECT ?fields FROM quant_book_l2_checkpoint \
                  WHERE token_id = ? \
                  AND event_time <= fromUnixTimestamp64Milli(?) \
@@ -572,9 +580,9 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
         source_cutoff_ms: i64,
         decision_at_ms: i64,
     ) -> Result<Vec<BookL2EventRow>, StorageError> {
-        self.pool
-            .client()
-            .query(
+        BOOK_EVENTS_FROM
+            .clickhouse_query(
+                self.pool.client(),
                 "SELECT ?fields FROM quant_book_l2_event \
                  WHERE token_id = ? \
                  AND stream_session_id = ? \
@@ -603,9 +611,9 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
         if token_ids.is_empty() {
             return Ok(Vec::new());
         }
-        self.pool
-            .client()
-            .query(
+        BOOK_EVENTS_BETWEEN
+            .clickhouse_query(
+                self.pool.client(),
                 "SELECT ?fields FROM quant_book_l2_event \
                  WHERE token_id IN ? \
                  AND venue_event_time >= fromUnixTimestamp64Milli(?) \
@@ -631,9 +639,9 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
         source_cutoff_ms: i64,
         decision_at_ms: i64,
     ) -> Result<Vec<TradeTapeRow>, StorageError> {
-        self.pool
-            .client()
-            .query(
+        MARKET_WS_TRADES_FROM
+            .clickhouse_query(
+                self.pool.client(),
                 "SELECT ?fields FROM quant_trade_tape \
                  WHERE token_id = ? \
                  AND stream_session_id = ? \
@@ -660,9 +668,9 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
         stream_session_id: Uuid,
         decision_at_ms: i64,
     ) -> Result<Option<BookStreamSessionRow>, StorageError> {
-        self.pool
-            .client()
-            .query(
+        BOOK_STREAM_SESSION_AT
+            .clickhouse_query(
+                self.pool.client(),
                 "SELECT ?fields FROM quant_book_stream_session \
                  WHERE stream_session_id = ? \
                  AND recorded_at <= fromUnixTimestamp64Milli(?) \
@@ -684,9 +692,9 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
         if stream_session_ids.is_empty() {
             return Ok(Vec::new());
         }
-        self.pool
-            .client()
-            .query(
+        BOOK_STREAM_SESSIONS
+            .clickhouse_query(
+                self.pool.client(),
                 "SELECT ?fields FROM quant_book_stream_session \
                  WHERE stream_session_id IN ? \
                  AND recorded_at <= fromUnixTimestamp64Milli(?) \
@@ -709,10 +717,9 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
         if token_ids.is_empty() {
             return Ok(Vec::new());
         }
-        let rows = self
-            .pool
-            .client()
-            .query(
+        let rows = BOOK_CHECKPOINTS_AT
+            .clickhouse_query(
+                self.pool.client(),
                 "SELECT ?fields FROM quant_book_l2_checkpoint \
                  WHERE token_id IN ? \
                  AND event_time <= fromUnixTimestamp64Milli(?) \
@@ -738,10 +745,9 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
         if token_ids.is_empty() {
             return Ok(Vec::new());
         }
-        let rows = self
-            .pool
-            .client()
-            .query(
+        let rows = BOOK_CHECKPOINTS_BETWEEN
+            .clickhouse_query(
+                self.pool.client(),
                 "SELECT ?fields FROM quant_book_l2_checkpoint \
                  WHERE token_id IN ? \
                  AND event_time >= fromUnixTimestamp64Milli(?) \
@@ -764,10 +770,9 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
         source_cutoff_ms: i64,
         decision_at_ms: i64,
     ) -> Result<Option<MarketResolutionRow>, StorageError> {
-        let rows = self
-            .pool
-            .client()
-            .query(
+        let rows = RESOLUTION_AT
+            .clickhouse_query(
+                self.pool.client(),
                 "SELECT ?fields FROM market_resolution_event \
                  WHERE market_id = ? \
                  AND resolved_at <= fromUnixTimestamp64Milli(?) \
@@ -793,10 +798,9 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
         if market_ids.is_empty() {
             return Ok(Vec::new());
         }
-        let rows = self
-            .pool
-            .client()
-            .query(
+        let rows = RESOLUTIONS_BETWEEN
+            .clickhouse_query(
+                self.pool.client(),
                 "SELECT ?fields FROM market_resolution_event \
                  WHERE market_id IN ? \
                  AND resolved_at >= fromUnixTimestamp64Milli(?) \
@@ -821,10 +825,9 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
     ) -> Result<Vec<MarketId>, StorageError> {
         // `market_id` is Nullable in the checkpoint; `assumeNotNull` after the
         // `IS NOT NULL` guard yields a non-nullable column the row can decode.
-        let rows = self
-            .pool
-            .client()
-            .query(
+        let rows = OBSERVED_MARKETS_BETWEEN
+            .clickhouse_query(
+                self.pool.client(),
                 "SELECT DISTINCT assumeNotNull(market_id) AS market_id FROM quant_book_l2_checkpoint \
                  WHERE market_id IS NOT NULL \
                  AND event_time >= fromUnixTimestamp64Milli(?) \
@@ -851,10 +854,9 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
         if instrument_keys.is_empty() {
             return Ok(Vec::new());
         }
-        let mut rows = self
-            .pool
-            .client()
-            .query(
+        let mut rows = DOMAIN_OBSERVATIONS_BETWEEN
+            .clickhouse_query(
+                self.pool.client(),
                 "SELECT ?fields FROM quant_domain_observation \
                  WHERE instrument_key IN ? \
                  AND event_time >= fromUnixTimestamp64Milli(?) \
@@ -896,10 +898,9 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
         source_cutoff_ms: i64,
         decision_at_ms: i64,
     ) -> Result<Option<DomainObservationRow>, StorageError> {
-        let row = self
-            .pool
-            .client()
-            .query(
+        let row = DOMAIN_OBSERVATION_AT
+            .clickhouse_query(
+                self.pool.client(),
                 "SELECT ?fields FROM quant_domain_observation \
                  WHERE instrument_key = ? \
                  AND metric = ? \

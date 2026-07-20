@@ -5,6 +5,8 @@ use std::collections::BTreeSet;
 use quant_pivot_error::storage::StorageError;
 use serde_json::Value;
 
+use crate::sql_contract_registry::POSTGRES_SCHEMA_VERIFY;
+
 const MANIFEST_JSON: &str = include_str!("../../../../../schema/postgres/manifest.json");
 
 const INSPECT_SQL: &str = r#"
@@ -219,12 +221,13 @@ pub(super) fn expected() -> Result<Value, StorageError> {
 }
 
 pub async fn inspect(pool: &sqlx::PgPool) -> Result<Value, StorageError> {
-    let mut value = sqlx::query_scalar::<_, Value>(INSPECT_SQL)
-        .fetch_one(pool)
-        .await
-        .map_err(|error| {
-            StorageError::Migration(format!("inspect PostgreSQL manifest: {error}"))
-        })?;
+    let mut value =
+        sqlx::query_scalar::<_, Value>(POSTGRES_SCHEMA_VERIFY.postgres_query(INSPECT_SQL))
+            .fetch_one(pool)
+            .await
+            .map_err(|error| {
+                StorageError::Migration(format!("inspect PostgreSQL manifest: {error}"))
+            })?;
     normalize_roles(&mut value);
     Ok(value)
 }
@@ -285,11 +288,42 @@ fn normalize_roles(value: &mut Value) {
             };
             let normalized = match grantee.as_str() {
                 Some("PUBLIC") => "$public",
+                Some("pg_database_owner") => "$schema_owner",
                 Some(role) if owners.contains(role) => "$schema_owner",
-                Some(_) => "$runtime_grantee",
+                Some(_) => "$unexpected_grantee",
                 None => continue,
             };
             *grantee = Value::String(normalized.to_owned());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::normalize_roles;
+
+    #[test]
+    fn normalizes_only_schema_owner_and_public_grantees() {
+        let mut manifest = json!({
+            "tables": [{ "owner": "quant_pivot" }],
+            "functions": [],
+            "sequences": [],
+            "grants": [
+                { "grantee": "PUBLIC" },
+                { "grantee": "pg_database_owner" },
+                { "grantee": "quant_pivot" },
+                { "grantee": "unmanaged_role" }
+            ]
+        });
+
+        normalize_roles(&mut manifest);
+
+        assert_eq!(manifest["tables"][0]["owner"], "$schema_owner");
+        assert_eq!(manifest["grants"][0]["grantee"], "$public");
+        assert_eq!(manifest["grants"][1]["grantee"], "$schema_owner");
+        assert_eq!(manifest["grants"][2]["grantee"], "$schema_owner");
+        assert_eq!(manifest["grants"][3]["grantee"], "$unexpected_grantee");
     }
 }

@@ -40,7 +40,7 @@
 | Operator | 启停进程、健康检查、运行 ad-hoc report、切 mode、设置 kill switch、处理事故 | 不修改策略参数除非有量化/负责人授权 |
 | Quant | 配置 selection、features、factors、model、portfolio、reports、execution 策略；解释推荐 | 不直接绕过治理提交订单 |
 | Approver | 在 `semi_auto` 审批或拒绝 `OrderIntent` | 不扩大 shares、price、notional |
-| Admin | 管理用户、角色、JWT、credential reference、policy 激活/回滚 | 不把私钥、JWT signing key、relayer key 写入仓库、环境变量或命令行 |
+| Admin | 管理用户、角色、JWT、secret readiness、policy 激活/回滚 | 不把私钥、JWT signing key、relayer key 写入仓库、环境变量或命令行 |
 
 新部署会 seed `admin`，但不存在默认口令。执行 `postgres-schema apply` 前，secret manager 必须把
 16–256 字符的强随机初始口令挂载为权限 `0400` 或 `0600` 的普通文件，并通过
@@ -108,15 +108,15 @@ curl -sS -X POST "$BASE/api/system/kill-switch" \
 
 | 项 | 是否必须 | 用于 | 配置位置 | 说明 |
 |----|----------|------|----------|------|
-| Polygon / Polymarket signer private key | 所有 mode 必须 | CLOB auth、账户读取、可执行模式签订单 | `[keys].private_key = { name = "polymarket-private-key" }` | 仅保存 typed credential name；值由 systemd `LoadCredential=` 以 0400/0600 文件挂载 |
+| Polygon / Polymarket signer private key | 所有 mode 必须 | CLOB auth、账户读取、可执行模式签订单 | `[keys].private_key = "REPLACE_WITH_PRIVATE_KEY"` | 明文仅写入 gitignored 或权限 `0600` 的 deploy TOML；解析后由 `SecretText` 持有 |
 | `quant.account.funder` | 所有 mode 必须 | 读取 collateral、positions、计算 capital base | `QUANT_PIVOT__QUANT__ACCOUNT__FUNDER` | EOA 必须等于 signer 地址；proxy/safe 必须是 signer 控制的钱包地址 |
 | `quant.account.wallet_kind` | 所有 mode 必须 | 决定签名类型和 funder 校验 | `QUANT_PIVOT__QUANT__ACCOUNT__WALLET_KIND` | 当前代码支持 `eoa`、`proxy`、`gnosis_safe` |
 | CLOB L2 credentials | 不单独配置 | CLOB trading endpoints | 自动派生 | SDK connect 时由 private key 和 wallet topology 派生 |
 | Polygon RPC URL | 所有 mode 必须 | on-chain 读写、结算、赎回 | `QUANT_PIVOT__POLYMARKET__ONCHAIN__RPC_URL` | 生产必须使用可靠 RPC，配置超时 |
-| Gasless relayer key/address | proxy/safe 且会提交链上交易时必须 | gasless approval/redeem/settlement | `[polymarket.relayer].api_key = { name = "polymarket-relayer-api-key" }`；address 为非敏感配置 | EOA 可直接付 gas；relayer key 不得暴露到前端 |
-| JWT signing key | Web API 必须 | HS256 登录和 API 认证 | `[web.jwt].signing_key = { name = "jwt-signing-key" }` | credential file 内容为 Base64URL-no-pad 编码的恰好 32 个随机字节；轮换立即使所有旧 JWT 失效 |
-| Evidence signing key | 研究证据生产必须 | BLAKE3 keyed attestation | `[research.evidence_attestation].signing_key = { name = "evidence-attestation-key" }` | credential file 内容为 64 个小写 hex；历史 key 也只使用 typed credential reference，禁止与 JWT key 复用 |
-| Telegram / webhook secrets | 可选 | 通知 | systemd Credentials；`operational_control.notifications` 只管事件路由 | Config API 永不返回 secret value |
+| Gasless relayer key/address | proxy/safe 且会提交链上交易时必须 | gasless approval/redeem/settlement | `[polymarket.relayer].api_key = "REPLACE_WITH_RELAYER_API_KEY"`；address 为非敏感配置 | EOA 可直接付 gas；relayer key 不得暴露到前端 |
+| JWT signing key | Web API 必须 | HS256 登录和 API 认证 | `[web.jwt].signing_key = "REPLACE_WITH_JWT_SIGNING_KEY"` | 值为 Base64URL-no-pad 编码的恰好 32 个随机字节；轮换立即使所有旧 JWT 失效 |
+| Evidence signing key | 研究证据生产必须 | BLAKE3 keyed attestation | `[research.evidence_attestation].signing_key = "REPLACE_WITH_EVIDENCE_SIGNING_KEY"` | 值为 64 个小写 hex；历史 key 同样由 `SecretText` 持有，禁止与 JWT key 复用 |
+| Telegram / webhook secrets | 可选 | 通知 | deploy TOML 的 `SecretText` 字段；`operational_control.notifications` 只管事件路由 | Config API 永不返回 secret value |
 
 注意：Polymarket 官方文档列出 Deposit Wallet / `POLY_1271` 等签名类型，但当前代码只建模 `eoa`、`proxy`、`gnosis_safe`。如果要接入 Deposit Wallet，需要先扩展 wallet topology、配置校验、CLOB client 和 relayer 路径。
 
@@ -135,31 +135,28 @@ curl -sS -X POST "$BASE/api/system/kill-switch" \
 
 Deploy Config 只包含启动时才能决定的内容：服务 endpoint、bind/CORS、deployment identity、PostgreSQL/ClickHouse/Redis/artifact store 连接位置、Polymarket/provider binding、日志/TLS/JWT metadata 与七组主机资源预算。来源固定为：
 
-1. source-controlled non-secret TOML；
-2. 环境级不可变 override；
-3. systemd Credentials 注入 secret；
+1. compiled defaults；
+2. source-controlled non-secret `quant-pivot.toml`；
+3. gitignored 或部署主机上的权限 `0600` TOML；
 4. 环境变量只允许选择 config directory、deployment identity 等极少数部署元数据，禁止覆盖业务策略或直接承载 secret。
 
 Runtime 热更新由六个强类型 policy resource 负责：`recommendation_policy`、`execution_risk_policy`、`model_routing`、`report_schedule`、`operational_control`、`execution_authorization`。每个资源独立 revision、固定 boot `schema_version = 1`，必须经过 Draft → Validate/Preflight → Approve → Activate；不存在旧巨型 Runtime Config parser 或自动回滚。
 
 Feature、factor、domain 语义和 research/training methodology 属于 content-addressed immutable profile/job artifact，不从 Deploy Config 或热配置读取。详细操作见 §7。
 
-### 4.4 systemd Credentials 最小示例
+### 4.4 Deploy TOML 最小安装示例
 
-不要把 private key、数据库/缓存口令、JWT signing key、webhook/Telegram token、evidence key 或 relayer key 写入 TOML、环境变量、命令行或日志。TOML 只保存 credential name；systemd unit 使用 `LoadCredential=` 将值挂载到只读 `$CREDENTIALS_DIRECTORY`。
+不要把 private key、数据库/缓存口令、JWT signing key、webhook/Telegram token、evidence key 或 relayer key 写入 tracked TOML、环境变量、命令行或日志。生产部署从 reviewed example 安装一份权限 `0600`、不进入版本控制的配置，再通过交互式编辑器填写 secret；不要用 shell argument 或重定向把值留在 history。
 
-```ini
-[Service]
-LoadCredential=polymarket-private-key:/etc/quant-pivot/credentials/polymarket-private-key
-LoadCredential=postgres-runtime-password:/etc/quant-pivot/credentials/postgres-runtime-password
-LoadCredential=clickhouse-runtime-password:/etc/quant-pivot/credentials/clickhouse-runtime-password
-LoadCredential=redis-runtime-password:/etc/quant-pivot/credentials/redis-runtime-password
-LoadCredential=jwt-signing-key:/etc/quant-pivot/credentials/jwt-signing-key
-LoadCredential=evidence-attestation-key:/etc/quant-pivot/credentials/evidence-attestation-key
-Environment=QUANT_PIVOT_CONFIG_DIR=/etc/quant-pivot
+```bash
+install -d -m 0700 /etc/quant-pivot
+install -m 0600 config/quant-pivot.production.example.toml /etc/quant-pivot/quant-pivot.toml
+${EDITOR:?set EDITOR} /etc/quant-pivot/quant-pivot.toml
 ```
 
-DDL 身份与 runtime 身份分离。PostgreSQL/ClickHouse migration 只由 schema CLI 使用独立 migrator credential；应用进程若检测到 DDL credential 或 migration state/fingerprint 不匹配必须 fail closed。credential 文件必须是普通文件、权限受限、非空且不超过服务端上限；Config 控制台只显示 credential health，不返回值。
+systemd unit 只设置 `Environment=QUANT_PIVOT_CONFIG_DIR=/etc/quant-pivot`，不设置 secret environment。启动前检查所有 `REPLACE_WITH_*` 已替换、文件 owner 是 service user、mode 精确为 `0600`。
+
+PostgreSQL 与 ClickHouse 各自只配置一组 `user + password`，由 runtime、schema CLI 与 Fresh Boot 复用。所有 schema/reset/seal mutation 必须持有 canonical lifecycle lease；应用启动仍只执行 verify，绝不自动 DDL。deploy TOML 必须是普通文件、权限 `0600`、不进入版本控制；Config 控制台只显示 secret readiness，不返回值。
 ## 5. 钱包、充值、allowance 与提现
 
 ### 5.1 选择 wallet topology
@@ -307,17 +304,22 @@ cargo build --release -p quant-pivot-bin
 
 ```bash
 BASE=http://127.0.0.1:8080
+read -r -p "Admin username: " ADMIN_USERNAME
+read -r -s -p "Admin password: " ADMIN_PASSWORD
 
 TOKEN=$(
-  curl -sS -X POST "$BASE/api/auth/login" \
+  jq -n --arg username "$ADMIN_USERNAME" --arg password "$ADMIN_PASSWORD" \
+    '{username: $username, password: $password}' \
+  | curl -sS -X POST "$BASE/api/auth/login" \
     -H "Accept-Api-Version: v1" \
     -H "Content-Type: application/json" \
-    -d '{"username":"admin","password":"admin"}' \
+    --data-binary @- \
   | jq -r '.data.access_token'
 )
+unset ADMIN_PASSWORD
 ```
 
-首次登录后立即改默认用户/密码，不要继续使用 seed 口令。
+首次登录后立即轮换 bootstrap 口令，或创建实名管理员并禁用 bootstrap 账户。
 
 ### 6.3 健康检查
 
@@ -769,7 +771,7 @@ curl -sS -X POST "$BASE/api/config/lifecycle/seal-production" \
 
 ### 8.0.1 ClickHouse boot schema 门禁
 
-当前 ClickHouse 只有 version 1 bootstrap。首次启动任何 writer 前，由 deploy identity apply，再由 runtime identity 只读 verify：
+当前 ClickHouse 只有 version 1 bootstrap。首次启动任何 writer 前，使用同一配置身份显式 apply，再执行只读 verify；两者与 PostgreSQL migration/reset/seal 竞争同一 lifecycle lease：
 
 ```bash
 cargo run -p quant-pivot-xtask -- \
@@ -804,7 +806,7 @@ flowchart TD
 
 **Step 0 — 关闭默认定时报告（避免 ERROR 刷屏）**
 
-进入 `/system/config/report_schedule`，编辑 `default_interval.enabled = false`，完整执行 Draft → Review & Validate → Approve → Activate。Review 必须确认生效边界是“reconcile 尚未 claim 的 future runs”，已 claim run 不会被隐式取消。CLI 自动化按 §7.2 使用 `KIND=report_schedule` 的完整 typed document；禁止调用已删除的 `/api/runtime-config/versions` 或 dotted-path patch。
+进入 `/system/config/report_schedule`，编辑 `default_interval.enabled = false`，完整执行 Draft → Review & Validate → Approve → Activate。Review 必须确认生效边界是“reconcile 尚未 claim 的 future runs”，已 claim run 不会被隐式取消。CLI 自动化按 §7.2 使用 `KIND=report_schedule` 的完整 typed document；禁止调用旧全局 version API 或 dotted-path patch。
 **Step 0.5 — 创建 model_spec（离线研究生命周期的根）**
 
 全新系统 `quant_model_spec` 为空，dataset/train 都要引用一个 `model_spec_id`。用治理写接口创建（**没有 seed / DBA 预置**）：

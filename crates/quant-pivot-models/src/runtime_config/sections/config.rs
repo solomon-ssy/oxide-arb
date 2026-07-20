@@ -877,6 +877,12 @@ impl TrainingConfig {
     }
 }
 
+/// Absolute operational ceiling for one report's recommendation set.
+///
+/// This bounds transactional publication/revocation cascades independently of
+/// a deployment's governed `max_top_n` choice.
+pub const MAX_REPORT_TOP_N: u32 = 1_000;
+
 /// Report schedules and payload sizing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
@@ -884,7 +890,8 @@ pub struct ReportsConfig {
     /// Deployment-proven upper bound for one complete catalog-visible report.
     /// Exceeding it fails the report; it never truncates market candidates.
     pub hard_candidate_ceiling: u32,
-    /// Maximum `TopN` size (hard upper bound for every schedule and ad-hoc run).
+    /// Maximum `TopN` size (hard upper bound for every schedule and ad-hoc run,
+    /// capped by [`MAX_REPORT_TOP_N`]).
     pub max_top_n: u32,
     /// Default `TopN` frozen when an ad-hoc request omits its override.
     pub ad_hoc_default_top_n: u32,

@@ -151,24 +151,23 @@ Deploy config 只管理进程启动时才能决定的部署身份与基础设施
 
 - Polymarket CLOB/Gamma/Data API/RPC/relayer endpoints；
 - DB/ClickHouse/Redis；
-- systemd credential reference（private key、数据库口令、JWT、通知凭据）；
+- secret 字段（TOML 明文解析为不可序列化、日志脱敏且内存清零的 `SecretText`）；
 - `quant.account.funder`；
 - `quant.account.wallet_kind`；
 - Web listen/CORS/JWT；
 - observability。
 
-加载顺序收敛为 source-controlled non-secret TOML、环境级不可变 override 与 systemd Credentials。环境变量只用于选择配置目录和部署身份，不再允许覆盖业务策略或直接承载 secret：
+加载顺序收敛为编译默认值、tracked 基础 TOML 与 gitignored/deployment-local TOML。环境变量只用于选择配置目录和部署身份，不允许覆盖业务策略或直接承载 secret：
 
 ```mermaid
 flowchart LR
-    Base["source-controlled non-secret TOML"] --> Override["environment immutable override"]
-    Override --> References["typed credential references"]
-    References --> Credentials["systemd CREDENTIALS_DIRECTORY"]
-    Credentials --> Effective["typed DeployConfig"]
+    Defaults["compiled defaults"] --> Base["tracked base TOML"]
+    Base --> Local["gitignored or permission-restricted deploy TOML"]
+    Local --> Effective["typed DeployConfig + SecretText"]
     Effective --> Validation["startup validation + credential preflight"]
 ```
 
-Deploy config 拒绝 unknown fields。所有 mode 都要求 private key credential 和 funder；可执行 mode 下 proxy/safe 还要求 relayer credentials。生产 runtime identity 不持有 DDL credential；migration CLI 使用独立、最小权限的 credential reference。
+Deploy config 拒绝 unknown fields。所有 mode 都要求 private key 和 funder；可执行 mode 下 proxy/safe 还要求 relayer secret。PostgreSQL 与 ClickHouse 各自只有一组配置身份，runtime、schema CLI 与 Fresh Boot 复用该身份；权限隔离由环境边界、生命周期租约和受控 CLI 承担，不维护平行 credential。
 
 ### 5.2 Governed policy resources（boot schema 1）
 
@@ -846,4 +845,4 @@ Activation failures retain the prior `DecisionPolicySnapshot`; they do not trigg
 - reconciliation before final attribution；
 - no `f64` money in production paths；
 - no untyped internal error bucket in production paths；
-- no private key or secret value in TOML、environment、process arguments、logs、docs examples、tests or commits；only typed systemd credential references。
+- no private key or secret value in tracked defaults、environment、process arguments、logs、docs examples、tests or commits；local-development 的明文 secret 只写入 gitignored `quant-pivot.local.toml`，部署环境的明文 secret 只写入权限 `0600`、不进入版本控制的 deploy TOML。

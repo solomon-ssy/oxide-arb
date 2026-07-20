@@ -88,7 +88,7 @@ impl From<&RoleInfo> for RoleView {
     fn from(role: &RoleInfo) -> Self {
         Self {
             id: role.id.clone(),
-            code: role.code.clone(),
+            code: role.code.to_string(),
             name: role.name.clone(),
             description: role.description.clone(),
         }

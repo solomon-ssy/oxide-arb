@@ -42,24 +42,24 @@ use quant_pivot_models::{
     runtime_config::PolicyValidationConfig,
     types::{
         ArtifactUri, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION, DecisionPolicySnapshotId,
-        ExecutablePriceBasis, MarketId, ModelSpecId, ModelVersionId,
+        DiagnosticCode, ExecutablePriceBasis, MarketId, ModelSpecId, ModelVersionId,
         POLICY_EVIDENCE_OBJECT_FORMAT_VERSION, ResearchEvaluationTrack, ResearchJobId,
         ResearchProfileArtifact, ResearchProfileId, ResearchProfileRef,
         ResearchReadinessEvidenceId, ResearchReadinessEvidencePayload, SchemaVersion,
         ShadowLatencyProfileV1, SourceSliceManifestRef, SourceSliceManifestV1,
         SourceSliceObjectKind, StructuralVolatilityOosFoldRow,
         TRADE_POLICY_ARTIFACT_FORMAT_VERSION, TRADE_POLICY_EVIDENCE_BUNDLE_FORMAT_VERSION, TokenId,
-        TradePolicyArtifactId, TradePolicyArtifactPayload, TradePolicyCandidateSpec,
-        TradePolicyCandidateTrialRow, TradePolicyCohortTrialRow, TradePolicyCoverageGapRow,
-        TradePolicyCpcvPathRow, TradePolicyEvidenceBundleManifest, TradePolicyEvidenceBundleRef,
-        TradePolicyEvidenceObjectKind, TradePolicyEvidenceObjectRef, TradePolicyExecutionEvidence,
-        TradePolicyFillEvidenceRow, TradePolicyFitContract, TradePolicyGovernanceAuditId,
-        TradePolicyObservationEligibilityRow, TradePolicyPitCutoffEvidence,
-        TradePolicyStatisticalSummaryRow, TradePolicyTrialAttemptId, TradePolicyTrialMetrics,
-        TradePolicyValidationEvidence, TradePolicyValidationRunId, TrainingDatasetId,
-        TrainingExampleId, TrainingSampleSource, UserId, VerticalActivationTarget,
-        VerticalGateEvidence, builtin_research_profiles, canonicalize_policy_candidates,
-        resolve_builtin_research_profile,
+        TradePolicyArtifactId, TradePolicyArtifactPayload, TradePolicyCandidateId,
+        TradePolicyCandidateSpec, TradePolicyCandidateTrialRow, TradePolicyCohortTrialRow,
+        TradePolicyCoverageGapRow, TradePolicyCpcvPathRow, TradePolicyEvidenceBundleManifest,
+        TradePolicyEvidenceBundleRef, TradePolicyEvidenceObjectKind, TradePolicyEvidenceObjectRef,
+        TradePolicyExecutionEvidence, TradePolicyFillEvidenceRow, TradePolicyFitContract,
+        TradePolicyGovernanceAuditId, TradePolicyObservationEligibilityRow,
+        TradePolicyPitCutoffEvidence, TradePolicyStatisticalSummaryRow, TradePolicyTrialAttemptId,
+        TradePolicyTrialMetrics, TradePolicyValidationEvidence, TradePolicyValidationRunId,
+        TrainingDatasetId, TrainingExampleId, TrainingSampleSource, UserId,
+        VerticalActivationTarget, VerticalGateEvidence, builtin_research_profiles,
+        canonicalize_policy_candidates, resolve_builtin_research_profile,
     },
 };
 use quant_pivot_repository::traits::{
@@ -1241,7 +1241,11 @@ impl TradePolicyService {
                 attempt_ordinal,
                 experiment_family_hash: experiment_family_hash.clone(),
                 research_program_hash: research_program_hash.clone(),
-                candidate_id: spec.candidate_id,
+                candidate_id: TradePolicyCandidateId::parse(spec.candidate_id).map_err(
+                    |error| ResearchError::ValidationMethodology {
+                        detail: error.to_string(),
+                    },
+                )?,
                 candidate_hash,
                 scope: spec.scope,
                 fold_index: spec.fold_index,
@@ -1304,7 +1308,11 @@ impl TradePolicyService {
                 attempt_ordinal,
                 experiment_family_hash: experiment_family_hash.clone(),
                 research_program_hash: research_program_hash.clone(),
-                candidate_id: candidate.candidate_id.clone(),
+                candidate_id: TradePolicyCandidateId::parse(&candidate.candidate_id).map_err(
+                    |error| ResearchError::ValidationMethodology {
+                        detail: error.to_string(),
+                    },
+                )?,
                 candidate_hash,
                 scope: TradePolicyTrialScope::Candidate,
                 fold_index: None,
@@ -2132,6 +2140,7 @@ impl TradePolicyService {
                     expected_record,
                     actual_record,
                 );
+                let diagnostic_kind = diagnostic_kind.map(DiagnosticCode::new);
                 let lineage_record = actual_record.or(expected_record).ok_or_else(|| {
                     ResearchError::ValidationMethodology {
                         detail: "validation evidence union produced an empty row".to_owned(),
@@ -4140,7 +4149,7 @@ impl TradePolicyPort for TradePolicyService {
                 query
                     .candidate_id
                     .as_ref()
-                    .is_none_or(|candidate_id| &row.candidate_id == candidate_id)
+                    .is_none_or(|candidate_id| row.candidate_id.as_str() == candidate_id)
                     && query.scope.is_none_or(|scope| row.scope == scope)
                     && query.status.is_none_or(|status| row.status == status)
             })

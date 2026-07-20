@@ -1,26 +1,22 @@
 //! Wallet credential configuration.
 //!
-//! The deploy document contains only a typed systemd credential reference.
-//! Plaintext in TOML, environment variables, or process arguments is rejected.
-//!
 //! Polymarket CLOB L2 credentials (`api_key` / `secret` / `passphrase`) are
 //! **not** configured here — `ClobClient::connect` derives them from
 //! `private_key` via the SDK at runtime.
 
 use serde::Deserialize;
 
-use super::secret::SystemdCredentialRef;
+use super::secret::SecretText;
 
 /// Wallet private key.
 ///
-/// `private_key` is a systemd credential name. It is the single credential the
-/// process signs with and derives Polymarket CLOB L2 read/write credentials
-/// from at connect time.
+/// This is the single credential the process signs with and derives Polymarket
+/// CLOB L2 read/write credentials from at connect time.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct KeysConfig {
     /// Wallet private key for signing, CLOB L1 auth, and runtime L2 derivation.
-    pub private_key: Option<SystemdCredentialRef>,
+    pub private_key: Option<SecretText>,
 }
 
 impl KeysConfig {
@@ -28,11 +24,7 @@ impl KeysConfig {
     ///
     /// Empty reference names are treated as unset.
     pub fn normalize(&mut self) {
-        if self
-            .private_key
-            .as_ref()
-            .is_some_and(|credential| !credential.is_configured())
-        {
+        if self.private_key.as_ref().is_some_and(SecretText::is_empty) {
             self.private_key = None;
         }
     }
@@ -40,9 +32,7 @@ impl KeysConfig {
     /// Expose the private key only at the signing boundary.
     #[must_use]
     pub fn private_key(&self) -> Option<&str> {
-        self.private_key
-            .as_ref()
-            .map(|credential| credential.secret().expose_secret())
+        self.private_key.as_ref().map(SecretText::expose_secret)
     }
 
     /// Whether the wallet private key is populated.

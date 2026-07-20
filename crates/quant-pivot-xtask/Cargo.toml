@@ -21,15 +21,18 @@ quant-pivot-core = { workspace = true }
 quant-pivot-migration = { path = "../quant-pivot-migration" }
 quant-pivot-repository = { workspace = true }
 quant-pivot-research = { workspace = true }
+quant-pivot-sql-contract = { workspace = true }
 quant-pivot-storage = { workspace = true }
 rustls = { workspace = true }
 schemars = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sea-orm = { workspace = true }
+syn = { workspace = true }
 testcontainers = { workspace = true }
 testcontainers-modules = { workspace = true, features = ["postgres"] }
 tokio = { workspace = true }
+toml = { workspace = true }
 uuid = { workspace = true }
 zeroize = { workspace = true }
 url = { workspace = true }

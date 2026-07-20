@@ -3,7 +3,8 @@
 use crate::{
     enums::quant::{FeatureParityRunKind, FeatureParityRunStatus},
     types::{
-        ContentHash, FeatureParityRunId, ModelVersionId, RecommendationReportId, TrainingDatasetId,
+        ContentHash, DiagnosticCode, FeatureParityRunId, ModelVersionId, RecommendationReportId,
+        RoleCode, TrainingDatasetId,
     },
 };
 use chrono::{DateTime, Utc};
@@ -24,7 +25,7 @@ pub struct Model {
     pub training_dataset_id: Option<TrainingDatasetId>,
     pub triggered_by: String,
     pub requested_by: Option<String>,
-    pub acting_role: String,
+    pub acting_role: RoleCode,
     pub reason: String,
     pub total_count: i64,
     pub compared_count: i64,
@@ -33,7 +34,7 @@ pub struct Model {
     pub pending_materialization_count: i64,
     pub feature_contract_hash: Option<ContentHash>,
     pub transform_hash: Option<ContentHash>,
-    pub failure_code: Option<String>,
+    pub failure_code: Option<DiagnosticCode>,
     pub failure_detail: Option<String>,
     pub started_at: Option<DateTime<Utc>>,
     pub pending_since: Option<DateTime<Utc>>,

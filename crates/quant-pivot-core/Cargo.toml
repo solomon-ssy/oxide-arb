@@ -10,6 +10,7 @@ publish = false
 # ── Workspace internal ─────────────────────────────────────────────
 quant-pivot-error      = { workspace = true, features = ["storage", "config", "serde"] }
 quant-pivot-models     = { workspace = true }
+quant-pivot-migration  = { workspace = true }
 quant-pivot-api        = { workspace = true }
 quant-pivot-storage    = { workspace = true }
 quant-pivot-repository = { workspace = true }

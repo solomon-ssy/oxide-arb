@@ -22,6 +22,7 @@ use crate::{
 
 /// How a recommendation's entry actually executed against the venue.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
+#[serde(deny_unknown_fields)]
 pub struct EntryOutcome {
     /// Whether the entry order filled at all.
     pub entry_filled: bool,
@@ -37,6 +38,7 @@ pub struct EntryOutcome {
 
 /// How a recommendation's exit actually resolved.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
+#[serde(deny_unknown_fields)]
 pub struct ExitOutcome {
     /// Realized average exit price, when exited on the book.
     pub exit_price: Option<Price>,
@@ -54,6 +56,7 @@ pub struct ExitOutcome {
 
 /// Post-hoc attribution detail comparing realized behaviour to the thesis.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
+#[serde(deny_unknown_fields)]
 pub struct AttributionDetail {
     /// Whether the stop-loss bound was reached.
     pub hit_stop_loss: bool,

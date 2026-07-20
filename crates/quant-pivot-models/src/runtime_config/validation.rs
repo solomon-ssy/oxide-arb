@@ -13,7 +13,7 @@ use crate::{
 use super::{
     DecimalValue, DecisionPolicySnapshot, PolicyValidationConfig, ResearchValidationConfig,
     ResearchValidationTrialsConfig, SizingModelConfig,
-    sections::{FeaturesConfig, KellySafetyConfig},
+    sections::{FeaturesConfig, KellySafetyConfig, MAX_REPORT_TOP_N},
     validate_schedule_cadence,
 };
 use linkme::distributed_slice;
@@ -801,10 +801,12 @@ fn validate_reports(config: &DecisionPolicySnapshot, report: &mut ConfigValidati
             detail: "must be at least 100000 and rounded up to a multiple of 1000".to_owned(),
         });
     }
-    if config.recommendation.reports.max_top_n == 0 {
+    if config.recommendation.reports.max_top_n == 0
+        || config.recommendation.reports.max_top_n > MAX_REPORT_TOP_N
+    {
         report.errors.push(ConfigValidationError::InvalidValue {
             field: "reports.max_top_n",
-            detail: "must be greater than zero".to_owned(),
+            detail: format!("must be in 1..={MAX_REPORT_TOP_N}"),
         });
     }
     if config.recommendation.reports.ad_hoc_default_top_n == 0
@@ -1522,8 +1524,8 @@ mod tests {
     use crate::{
         enums::factor::FactorFamily,
         runtime_config::{
-            DecimalValue, FeatureFamily, POLICY_RESOURCE_SCHEMA_VERSION, ReportScheduleConfig,
-            ScheduleCadence,
+            DecimalValue, FeatureFamily, MAX_REPORT_TOP_N, POLICY_RESOURCE_SCHEMA_VERSION,
+            ReportScheduleConfig, ScheduleCadence,
         },
         types::CalibrationArtifactId,
     };
@@ -1532,6 +1534,20 @@ mod tests {
     fn default_runtime_config_is_valid() {
         let report = validate_runtime_config(&DecisionPolicySnapshot::default());
         assert!(!report.has_errors());
+    }
+
+    #[test]
+    fn report_top_n_has_an_absolute_cascade_budget() {
+        let mut config = DecisionPolicySnapshot::default();
+        config.recommendation.reports.max_top_n = MAX_REPORT_TOP_N + 1;
+        let report = validate_runtime_config(&config);
+        assert!(report.errors.iter().any(|error| matches!(
+            error,
+            ConfigValidationError::InvalidValue {
+                field: "reports.max_top_n",
+                ..
+            }
+        )));
     }
 
     #[test]

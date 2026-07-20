@@ -8,6 +8,11 @@ use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::config::ClickHouseConfig;
 use tracing::info;
 
+use crate::sql_contract_registry::{
+    CLICKHOUSE_DATABASE_BOOTSTRAP, CLICKHOUSE_DATABASE_OBJECT_COUNT,
+    CLICKHOUSE_PREPRODUCTION_INSPECT, CLICKHOUSE_PREPRODUCTION_RESET,
+};
+
 /// Maintenance catalog used for `CREATE DATABASE` bootstrap.
 const MAINTENANCE_DATABASE: &str = "default";
 const PREPRODUCTION_DATABASE: &str = "quant_pivot";
@@ -36,12 +41,16 @@ pub(super) async fn ensure_database(config: &ClickHouseConfig) -> Result<(), Sto
         quote_ident(&config.database),
     );
 
-    client.query(&create_sql).execute().await.map_err(|e| {
-        StorageError::Connection(format!(
-            "Failed to CREATE DATABASE {}: {e}",
-            config.database
-        ))
-    })?;
+    CLICKHOUSE_DATABASE_BOOTSTRAP
+        .clickhouse_query(&client, &create_sql)
+        .execute()
+        .await
+        .map_err(|e| {
+            StorageError::Connection(format!(
+                "Failed to CREATE DATABASE {}: {e}",
+                config.database
+            ))
+        })?;
 
     info!(database = %config.database, "ClickHouse database created");
     Ok(())
@@ -57,8 +66,11 @@ pub(super) async fn database_exists(config: &ClickHouseConfig) -> Result<bool, S
         .with_database(MAINTENANCE_DATABASE)
         .with_user(&config.user)
         .with_password(config.password.expose_secret());
-    client
-        .query("SELECT count() FROM system.databases WHERE name = ?")
+    CLICKHOUSE_DATABASE_BOOTSTRAP
+        .clickhouse_query(
+            &client,
+            "SELECT count() FROM system.databases WHERE name = ?",
+        )
         .bind(&config.database)
         .fetch_one::<u64>()
         .await
@@ -73,8 +85,32 @@ pub(super) async fn database_exists(config: &ClickHouseConfig) -> Result<bool, S
 pub async fn database_object_count(config: &ClickHouseConfig) -> Result<u64, StorageError> {
     validate_preproduction_target(config)?;
     let client = maintenance_client(config);
-    client
-        .query("SELECT count() FROM system.tables WHERE database = ?")
+    CLICKHOUSE_DATABASE_OBJECT_COUNT
+        .clickhouse_query(
+            &client,
+            "SELECT count() FROM system.tables WHERE database = ?",
+        )
+        .bind(&config.database)
+        .fetch_one::<u64>()
+        .await
+        .map_err(Into::into)
+}
+
+/// Count active project queries and any server-wide mutation that makes a
+/// destructive preproduction reset unsafe.
+pub async fn active_preproduction_query_count(
+    config: &ClickHouseConfig,
+) -> Result<u64, StorageError> {
+    validate_preproduction_target(config)?;
+    let client = maintenance_client(config);
+    CLICKHOUSE_PREPRODUCTION_INSPECT
+        .clickhouse_query(
+            &client,
+            "SELECT count() FROM system.processes \
+             WHERE query_id != currentQueryID() AND is_initial_query = 1 \
+             AND (current_database = ? OR lower(query_kind) NOT IN \
+             ('select', 'show', 'describe', 'explain'))",
+        )
         .bind(&config.database)
         .fetch_one::<u64>()
         .await
@@ -83,16 +119,26 @@ pub async fn database_object_count(config: &ClickHouseConfig) -> Result<u64, Sto
 
 pub async fn reset_preproduction_database(config: &ClickHouseConfig) -> Result<(), StorageError> {
     validate_preproduction_target(config)?;
+    let active_queries = active_preproduction_query_count(config).await?;
+    if active_queries != 0 {
+        return Err(StorageError::state_conflict(
+            "clickhouse_preproduction_database",
+            Some(PREPRODUCTION_DATABASE),
+            format!(
+                "{active_queries} active project queries or server-wide mutations remain; stop their owners before reset"
+            ),
+        ));
+    }
     let client = maintenance_client(config);
-    client
-        .query("DROP DATABASE IF EXISTS `quant_pivot` SYNC")
+    CLICKHOUSE_PREPRODUCTION_RESET
+        .clickhouse_query(&client, "DROP DATABASE IF EXISTS `quant_pivot` SYNC")
         .execute()
         .await
         .map_err(|error| {
             StorageError::Migration(format!("drop ClickHouse preproduction database: {error}"))
         })?;
-    client
-        .query("CREATE DATABASE `quant_pivot`")
+    CLICKHOUSE_PREPRODUCTION_RESET
+        .clickhouse_query(&client, "CREATE DATABASE `quant_pivot`")
         .execute()
         .await
         .map_err(|error| {

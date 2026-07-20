@@ -6,7 +6,9 @@ use std::{
 };
 
 use quant_pivot_error::storage::StorageError;
-use sea_orm::{ConnectionTrait, EntityTrait, IntoActiveModel, sea_query::OnConflict};
+use sea_orm::{ConnectionTrait, EntityTrait, IntoActiveModel, Iterable, sea_query::OnConflict};
+
+use crate::postgres::write::upsert_many_chunked;
 
 /// Compute added and removed ids between a target set and the current junction rows.
 pub fn replace_set_diff<T, S>(target: &HashSet<T, S>, current: &HashSet<T, S>) -> (Vec<T>, Vec<T>)
@@ -29,15 +31,12 @@ pub async fn insert_junction_rows<E>(
 where
     E: EntityTrait,
     E::Model: IntoActiveModel<E::ActiveModel>,
+    E::Column: Iterable,
 {
     let rows: Vec<E::ActiveModel> = rows.into_iter().collect();
     if rows.is_empty() {
         return Ok(());
     }
-    E::insert_many(rows)
-        .on_conflict(on_conflict)
-        .exec_without_returning(db)
-        .await
-        .map_err(StorageError::from)?;
+    upsert_many_chunked::<E, _>(db, rows, on_conflict).await?;
     Ok(())
 }

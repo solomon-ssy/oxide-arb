@@ -18,8 +18,8 @@ use quant_pivot_models::{
         NegRiskEventDriftView, NegRiskLegView, ParticipantConcentrationDetailView,
         ParticipantConcentrationMarketView, ParticipantConcentrationParticipantView,
         ParticipantConcentrationSummaryView, PolicySnapshotPort, StructuralMonitorPort,
-        TradeParticipantRole, TradeTapeCoverageView, TradeTapePrint, TradeTapeSourceHealthView,
-        TradeTapeSourceKind,
+        TradeParticipantRole, TradeTapeBlockCursorStatus, TradeTapeCoverageView, TradeTapePrint,
+        TradeTapeSourceHealthView, TradeTapeSourceKind,
         market::{MarketRegistryInfo, registry::NegRiskLeg},
     },
     types::{EventId, MarketId, Price},
@@ -212,7 +212,7 @@ impl CoreStructuralMonitor {
             .await?;
         let cursors = self
             .block_cursor_repo
-            .list_by_source(TradeTapeSourceKind::OnChain.as_str())
+            .list_by_source(TradeTapeSourceKind::OnChain)
             .await?;
         let cursors_by_address = cursors_by_contract_address(&cursors);
 
@@ -295,7 +295,7 @@ impl StructuralMonitorPort for CoreStructuralMonitor {
         let active_market_count = u64::try_from(active_markets.len()).unwrap_or(u64::MAX);
         let cursors = self
             .block_cursor_repo
-            .list_by_source(TradeTapeSourceKind::OnChain.as_str())
+            .list_by_source(TradeTapeSourceKind::OnChain)
             .await?;
         let mut bootstrap_count = 0_u64;
         let mut catching_up_count = 0_u64;
@@ -304,12 +304,11 @@ impl StructuralMonitorPort for CoreStructuralMonitor {
         let mut worst_lag_blocks: Option<i64> = None;
         let mut last_updated_at: Option<DateTime<Utc>> = None;
         for cursor in &cursors {
-            match cursor.status.as_str() {
-                "bootstrap" => bootstrap_count += 1,
-                "catching_up" => catching_up_count += 1,
-                "live" => live_count += 1,
-                "error" => error_count += 1,
-                _ => {}
+            match cursor.status {
+                TradeTapeBlockCursorStatus::Bootstrap => bootstrap_count += 1,
+                TradeTapeBlockCursorStatus::CatchingUp => catching_up_count += 1,
+                TradeTapeBlockCursorStatus::Live => live_count += 1,
+                TradeTapeBlockCursorStatus::Faulted => error_count += 1,
             }
             worst_lag_blocks = Some(worst_lag_blocks.map_or(cursor.head_lag_blocks, |lag| {
                 lag.max(cursor.head_lag_blocks)

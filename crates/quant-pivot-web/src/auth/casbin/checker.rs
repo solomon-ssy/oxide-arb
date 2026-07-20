@@ -135,7 +135,7 @@ mod tests {
                 .iter()
                 .map(|(code, status)| RoleInfo {
                     id: RoleId::from_v7(),
-                    code: (*code).to_owned(),
+                    code: (*code).into(),
                     name: (*code).to_owned(),
                     description: None,
                     kind: RoleKind::Custom,

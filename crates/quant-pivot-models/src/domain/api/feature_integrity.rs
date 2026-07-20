@@ -14,8 +14,8 @@ use crate::{
         FeatureParityRunStatus, FeatureParityStage,
     },
     types::{
-        ContentHash, FeatureParityDetail, FeatureParityEventId, FeatureParityRunId, MarketId,
-        ModelRunId, ModelVersionId, RecommendationReportId, TrainingDatasetId,
+        ContentHash, DiagnosticCode, FeatureParityDetail, FeatureParityEventId, FeatureParityRunId,
+        MarketId, ModelRunId, ModelVersionId, RecommendationReportId, RoleCode, TrainingDatasetId,
     },
 };
 
@@ -89,9 +89,9 @@ pub struct FeatureParityRunView {
     pub transform_hash: Option<ContentHash>,
     pub triggered_by: String,
     pub requested_by: Option<String>,
-    pub acting_role: String,
+    pub acting_role: RoleCode,
     pub reason: String,
-    pub failure_code: Option<String>,
+    pub failure_code: Option<DiagnosticCode>,
     pub failure_detail: Option<String>,
     pub started_at: Option<DateTime<Utc>>,
     pub pending_since: Option<DateTime<Utc>>,
@@ -237,8 +237,8 @@ mod tests {
         domain::{FeatureParityRunInfo, FeatureParityRunView},
         enums::quant::{FeatureParityRunKind, FeatureParityRunStatus},
         types::{
-            ContentHash, FeatureParityRunId, ModelVersionId, RecommendationReportId,
-            TrainingDatasetId,
+            ContentHash, DiagnosticCode, FeatureParityRunId, ModelVersionId,
+            RecommendationReportId, RoleCode, TrainingDatasetId,
         },
     };
 
@@ -261,7 +261,7 @@ mod tests {
             training_dataset_id: Some(training_dataset_id.clone()),
             triggered_by: "manual".to_owned(),
             requested_by: Some("risk-owner".to_owned()),
-            acting_role: "risk_owner".to_owned(),
+            acting_role: RoleCode::new("risk_owner"),
             reason: "recovery proof".to_owned(),
             total_count: 1,
             compared_count: 0,
@@ -270,7 +270,7 @@ mod tests {
             pending_materialization_count: 0,
             feature_contract_hash: Some(ContentHash::parse(HASH).expect("canonical hash")),
             transform_hash: None,
-            failure_code: Some("replay_failed".to_owned()),
+            failure_code: Some(DiagnosticCode::new("replay_failed")),
             failure_detail: Some("durable evidence unavailable".to_owned()),
             started_at: Some(now),
             pending_since: Some(now),
@@ -288,9 +288,12 @@ mod tests {
             Some(&training_dataset_id)
         );
         assert_eq!(view.requested_by.as_deref(), Some("risk-owner"));
-        assert_eq!(view.acting_role, "risk_owner");
+        assert_eq!(view.acting_role.as_str(), "risk_owner");
         assert_eq!(view.reason, "recovery proof");
-        assert_eq!(view.failure_code.as_deref(), Some("replay_failed"));
+        assert_eq!(
+            view.failure_code.as_ref().map(DiagnosticCode::as_str),
+            Some("replay_failed")
+        );
         assert_eq!(
             view.failure_detail.as_deref(),
             Some("durable evidence unavailable")

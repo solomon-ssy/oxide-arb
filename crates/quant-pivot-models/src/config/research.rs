@@ -4,7 +4,7 @@
 //! artifact store is Local for development or S3-compatible WORM storage for
 //! production evidence and model artifacts.
 
-use super::secret::SystemdCredentialRef;
+use super::secret::SecretText;
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -57,7 +57,7 @@ pub struct ResearchDeployConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct EvidenceAttestationConfig {
     /// Active lowercase-hex encoded 32-byte keyed-BLAKE3 key.
-    pub signing_key: SystemdCredentialRef,
+    pub signing_key: SecretText,
     /// Historical verification-only keys, newest first.
-    pub previous_signing_keys: Vec<SystemdCredentialRef>,
+    pub previous_signing_keys: Vec<SecretText>,
 }

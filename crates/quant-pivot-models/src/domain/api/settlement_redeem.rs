@@ -7,8 +7,8 @@ use crate::{
         quant::{ExecutionWalletKind, OutcomeSide},
     },
     types::{
-        MarketId, OrderIntentId, PositionId, SettlementRedeemId, SettlementRedeemLotId, Shares,
-        TokenId, Usd,
+        EvmAddress, EvmTransactionHash, MarketId, OrderIntentId, PositionId, SettlementRedeemId,
+        SettlementRedeemLotId, Shares, TokenId, Usd,
     },
 };
 use chrono::{DateTime, Utc};
@@ -66,12 +66,12 @@ pub struct SettlementRedeemSummary {
 pub struct SettlementRedeemView {
     pub settlement_redeem_id: SettlementRedeemId,
     pub market_id: MarketId,
-    pub funder_address: String,
+    pub funder_address: EvmAddress,
     pub wallet_kind: ExecutionWalletKind,
     pub state: SettlementRedeemState,
     /// Number of redeemed lots in this single-market batch.
     pub lot_count: i64,
-    pub tx_hash: Option<String>,
+    pub tx_hash: Option<EvmTransactionHash>,
     pub payout_usd: Usd,
     pub gas_fee_pol: Option<Decimal>,
     pub attempt_count: i32,

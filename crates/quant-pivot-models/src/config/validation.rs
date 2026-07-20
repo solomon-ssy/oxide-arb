@@ -4,7 +4,7 @@
 use std::collections::BTreeSet;
 
 use super::{
-    DeployConfig, DomainSourcesConfig, PolygonRpcEndpoint, SchemaMigrationConfig,
+    DeployConfig, DomainSourcesConfig, MAX_TRADE_TAPE_RECONCILIATION_ROWS, PolygonRpcEndpoint,
     WEATHER_OBSERVATION_DAY_CLOSE_GRACE_SECS, WeatherHistoricalBindingKind,
 };
 use crate::{
@@ -121,12 +121,12 @@ fn validate_polygon_rpc(deploy: &DeployConfig, report: &mut ConfigValidationRepo
                 && matches!(url.path(), "" | "/")
         }
         (PolygonRpcEndpoint::Public { .. }, None) => false,
-        (PolygonRpcEndpoint::SystemdCredential { .. }, _) => true,
+        (PolygonRpcEndpoint::Protected { .. }, _) => true,
     };
     if !structurally_valid || !public_endpoint_is_non_secret {
         report.errors.push(ConfigValidationError::InvalidValue {
             field: "polymarket.onchain.rpc_endpoint",
-            detail: "must be an HTTP(S) URL; public endpoints cannot contain user-info, path credentials, query parameters, or fragments, and authenticated URLs must use a systemd credential reference".to_owned(),
+            detail: "must be an HTTP(S) URL; public endpoints cannot contain user-info, path credentials, query parameters, or fragments, and authenticated URLs must use a protected deploy-secret source".to_owned(),
         });
     }
     if deploy.polymarket.onchain.rpc_timeout_ms == 0 {
@@ -181,12 +181,6 @@ fn validate_databases(deploy: &DeployConfig, report: &mut ConfigValidationReport
             detail: "max_connections must be > 0 and >= min_connections".into(),
         });
     }
-    validate_migration_identity(
-        &postgres.migration,
-        &postgres.user,
-        "db.postgres.migration",
-        report,
-    );
 
     let clickhouse = &deploy.db.clickhouse;
     if clickhouse.batch_size == 0
@@ -198,25 +192,16 @@ fn validate_databases(deploy: &DeployConfig, report: &mut ConfigValidationReport
             detail: "batch_size, flush_interval_secs, max_concurrent_inserts must be > 0".into(),
         });
     }
-    validate_migration_identity(
-        &clickhouse.migration,
-        &clickhouse.user,
-        "db.clickhouse.migration",
-        report,
-    );
-}
-
-fn validate_migration_identity(
-    identity: &SchemaMigrationConfig,
-    runtime_user: &str,
-    field: &'static str,
-    report: &mut ConfigValidationReport,
-) {
-    if identity.user.trim().is_empty() || identity.user == runtime_user {
+    if postgres.user.trim().is_empty() {
         report.errors.push(ConfigValidationError::InvalidValue {
-            field,
-            detail: "dedicated migration user must be non-empty and differ from the runtime user"
-                .into(),
+            field: "db.postgres.user",
+            detail: "database user must not be empty".into(),
+        });
+    }
+    if clickhouse.user.trim().is_empty() {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "db.clickhouse.user",
+            detail: "database user must not be empty".into(),
         });
     }
 }
@@ -634,6 +619,14 @@ fn validate_market_data(deploy: &DeployConfig, report: &mut ConfigValidationRepo
             detail: "must exceed reconciliation_terminal_age_secs".into(),
         });
     }
+    if trade_tape.reconciliation_max_rows > MAX_TRADE_TAPE_RECONCILIATION_ROWS {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "market_data.trade_tape_on_chain.reconciliation_max_rows",
+            detail: format!(
+                "must be <= {MAX_TRADE_TAPE_RECONCILIATION_ROWS} (native SQL result budget)"
+            ),
+        });
+    }
 }
 
 fn validate_cache_redis(deploy: &DeployConfig, report: &mut ConfigValidationReport) {
@@ -851,14 +844,19 @@ mod tests {
     }
 
     #[test]
-    fn clickhouse_migration_requires_dedicated_identity_when_governed() {
+    fn trade_tape_reconciliation_respects_native_sql_row_budget() {
         let mut deploy = DeployConfig::default();
-        deploy.db.clickhouse.migration.user = deploy.db.clickhouse.user.clone();
-        assert!(validate_deploy_common(&deploy).has_errors());
-
-        deploy.db.clickhouse.migration.user = "quant_pivot_migrator".into();
+        deploy
+            .market_data
+            .trade_tape_on_chain
+            .reconciliation_max_rows = MAX_TRADE_TAPE_RECONCILIATION_ROWS + 1;
         let report = validate_deploy_common(&deploy);
-        assert!(!report.has_errors(), "errors: {:?}", report.errors);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| { error.to_string().contains("reconciliation_max_rows") })
+        );
     }
 
     #[test]

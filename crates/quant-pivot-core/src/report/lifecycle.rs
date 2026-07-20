@@ -21,7 +21,7 @@ use quant_pivot_models::{
     },
     types::{
         OperationDetailDocument, OperationLogId, RecommendationId, RecommendationReportId,
-        ReportRunId,
+        ReportRunId, ReportTriggerKey,
     },
 };
 use quant_pivot_repository::traits::{
@@ -130,7 +130,8 @@ impl ReportLifecycleService {
         let run = NewReportRun {
             report_run_id: ReportRunId::from_v7(),
             trigger_kind: ReportTriggerKind::AdHoc,
-            trigger_key: format!("ad_hoc:{request_id}"),
+            trigger_key: ReportTriggerKey::parse(format!("ad_hoc:{request_id}"))
+                .map_err(|error| QuantError::config(error.to_string()))?,
             schedule_id: None,
             request_id: Some(request_id.into()),
             retry_of_run_id: None,
@@ -179,10 +180,11 @@ impl ReportLifecycleService {
         let run = NewReportRun {
             report_run_id: ReportRunId::from_v7(),
             trigger_kind: ReportTriggerKind::AdHoc,
-            trigger_key: format!(
+            trigger_key: ReportTriggerKey::parse(format!(
                 "ad_hoc_retry:{}:{}",
                 request.source_run_id, request.request_id
-            ),
+            ))
+            .map_err(|error| QuantError::config(error.to_string()))?,
             schedule_id: None,
             request_id: Some(request.request_id.into()),
             retry_of_run_id: Some(request.source_run_id),

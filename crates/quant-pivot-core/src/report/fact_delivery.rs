@@ -18,7 +18,9 @@ use quant_pivot_models::{
         ReportFactTableCommitment, WorkerId,
     },
 };
-use quant_pivot_repository::traits::RecommendationReportRepository;
+use quant_pivot_repository::{
+    clickhouse::ChNativeReadRepository, traits::RecommendationReportRepository,
+};
 use quant_pivot_research::artifact::ArtifactStore;
 use quant_pivot_storage::clickhouse::{ChWriteManager, ClickHousePool};
 use serde::Serialize;
@@ -42,6 +44,7 @@ pub struct ReportFactDeliveryDeps {
     pub reports: Arc<dyn RecommendationReportRepository>,
     pub artifacts: Arc<dyn ArtifactStore>,
     pub clickhouse: Arc<ClickHousePool>,
+    pub native_reads: Arc<ChNativeReadRepository>,
     pub write_manager: Arc<ChWriteManager>,
     pub publisher: Arc<ReportPublisher>,
     pub metrics: Arc<MetricsHub>,
@@ -366,20 +369,13 @@ impl ReportFactDeliveryWorker {
     }
 
     async fn verify_recommendations(&self, delivery: &ReportFactDeliveryInfo) -> QuantResult<()> {
-        let mut cursor = self
+        let rows = self
             .deps
-            .clickhouse
-            .client()
-            .query(
-                "SELECT ?fields FROM quant_report_recommendation_fact FINAL \
-                 WHERE recommendation_report_id = ? \
-                 ORDER BY rank, recommendation_id",
-            )
-            .bind(delivery.recommendation_report_id.clone())
-            .fetch::<QuantReportRecommendationFactRow>()
-            .map_err(StorageError::from)?;
+            .native_reads
+            .report_recommendation_rows(&delivery.recommendation_report_id)
+            .await?;
         let mut verifier = RowChainVerifier::new();
-        while let Some(row) = cursor.next().await.map_err(StorageError::from)? {
+        for row in rows {
             verifier.push(&row)?;
         }
         verifier.finish(
@@ -390,19 +386,13 @@ impl ReportFactDeliveryWorker {
     }
 
     async fn verify_funnel(&self, delivery: &ReportFactDeliveryInfo) -> QuantResult<()> {
-        let mut cursor = self
+        let rows = self
             .deps
-            .clickhouse
-            .client()
-            .query(
-                "SELECT ?fields FROM quant_report_market_funnel FINAL \
-                 WHERE recommendation_report_id = ? ORDER BY market_id",
-            )
-            .bind(delivery.recommendation_report_id.clone())
-            .fetch::<ReportMarketFunnelRow>()
-            .map_err(StorageError::from)?;
+            .native_reads
+            .report_funnel_rows(&delivery.recommendation_report_id)
+            .await?;
         let mut verifier = RowChainVerifier::new();
-        while let Some(row) = cursor.next().await.map_err(StorageError::from)? {
+        for row in rows {
             verifier.push(&row)?;
         }
         verifier.finish(

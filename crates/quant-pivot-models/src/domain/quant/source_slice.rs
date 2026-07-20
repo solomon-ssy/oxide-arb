@@ -10,13 +10,11 @@ use crate::{
     enums::quant::SourceSliceStatus,
     hashing::CanonicalDigest,
     types::{
-        ArtifactUri, ContentHash, DecisionPolicySnapshotId, ResearchEvaluationTrack,
-        ResearchProfileRef, SourceSliceId, SourceSliceManifestRef, SourceSliceManifestV1,
+        ArtifactUri, ContentHash, DecisionPolicySnapshotId, ReaderContractVersion,
+        ResearchEvaluationTrack, ResearchProfileRef, SchemaContractVersion, SourceSliceId,
+        SourceSliceManifestRef, SourceSliceManifestV1,
     },
 };
-
-pub const SOURCE_SLICE_READER_CONTRACT_V1: &str = "source_slice_reader_v1";
-pub const SOURCE_SLICE_SCHEMA_CONTRACT_V1: &str = "source_slice_schema_v1";
 
 /// Server-derived semantic fields that determine one Source Slice identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,8 +41,8 @@ pub struct SourceSliceIdentity {
     pub window_start: DateTime<Utc>,
     pub window_end: DateTime<Utc>,
     pub pit_cutoff: DateTime<Utc>,
-    pub reader_contract_version: String,
-    pub schema_contract_version: String,
+    pub reader_contract_version: ReaderContractVersion,
+    pub schema_contract_version: SchemaContractVersion,
 }
 
 impl SourceSliceIdentity {
@@ -59,8 +57,8 @@ impl SourceSliceIdentity {
             window_end,
             pit_cutoff,
         } = input;
-        let reader_contract_version = SOURCE_SLICE_READER_CONTRACT_V1.to_owned();
-        let schema_contract_version = SOURCE_SLICE_SCHEMA_CONTRACT_V1.to_owned();
+        let reader_contract_version = ReaderContractVersion::v1();
+        let schema_contract_version = SchemaContractVersion::v1();
         let identity_hash = CanonicalDigest::content_hash_json(&(
             &profile_ref,
             evaluation_track,
@@ -96,15 +94,15 @@ pub struct NewSourceSlice {
     pub source_slice_id: SourceSliceId,
     pub identity_hash: ContentHash,
     pub profile_ref: ResearchProfileRef,
-    pub evaluation_track: String,
+    pub evaluation_track: ResearchEvaluationTrack,
     pub research_program_hash: ContentHash,
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub runtime_config_hash: ContentHash,
     pub window_start: DateTime<Utc>,
     pub window_end: DateTime<Utc>,
     pub pit_cutoff: DateTime<Utc>,
-    pub reader_contract_version: String,
-    pub schema_contract_version: String,
+    pub reader_contract_version: ReaderContractVersion,
+    pub schema_contract_version: SchemaContractVersion,
 }
 
 impl NewSourceSlice {
@@ -114,7 +112,7 @@ impl NewSourceSlice {
             source_slice_id,
             identity_hash: identity.identity_hash,
             profile_ref: identity.profile_ref,
-            evaluation_track: evaluation_track_name(identity.evaluation_track).to_owned(),
+            evaluation_track: identity.evaluation_track,
             research_program_hash: identity.research_program_hash,
             decision_policy_snapshot_id: identity.decision_policy_snapshot_id,
             runtime_config_hash: identity.runtime_config_hash,
@@ -141,15 +139,15 @@ pub struct SourceSliceInfo {
     pub source_slice_id: SourceSliceId,
     pub identity_hash: ContentHash,
     pub profile_ref: ResearchProfileRef,
-    pub evaluation_track: String,
+    pub evaluation_track: ResearchEvaluationTrack,
     pub research_program_hash: ContentHash,
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub runtime_config_hash: ContentHash,
     pub window_start: DateTime<Utc>,
     pub window_end: DateTime<Utc>,
     pub pit_cutoff: DateTime<Utc>,
-    pub reader_contract_version: String,
-    pub schema_contract_version: String,
+    pub reader_contract_version: ReaderContractVersion,
+    pub schema_contract_version: SchemaContractVersion,
     pub status: SourceSliceStatus,
     pub manifest_uri: Option<ArtifactUri>,
     pub manifest_hash: Option<ContentHash>,
@@ -192,11 +190,3 @@ info_from_model!(
         created_at,
     }
 );
-
-#[must_use]
-pub const fn evaluation_track_name(track: ResearchEvaluationTrack) -> &'static str {
-    match track {
-        ResearchEvaluationTrack::ResearchOnly => "research_only",
-        ResearchEvaluationTrack::SemiAutoCandidate => "semi_auto_candidate",
-    }
-}

@@ -3,11 +3,12 @@
 use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    domain::{NewResearchJob, Paginated, ResearchJobInfo, ResearchJobListQuery},
+    domain::{
+        NewResearchJob, Paginated, ResearchJobInfo, ResearchJobListQuery, ResearchJobResultRef,
+    },
     enums::quant::{ResearchJobKind, ResearchJobStatus},
     types::{DatasetCoverage, ResearchJobError, ResearchJobId, ResearchJobProgress, WorkerId},
 };
-use uuid::Uuid;
 
 /// Number of running jobs of one kind (concurrency-cap accounting).
 #[derive(Debug, Clone, Copy)]
@@ -83,7 +84,7 @@ pub trait ResearchJobRepository: Send + Sync {
         job_id: &ResearchJobId,
         owner: &WorkerId,
         status: ResearchJobStatus,
-        result_ref: Option<Uuid>,
+        result: Option<ResearchJobResultRef>,
         error: Option<ResearchJobError>,
         coverage: Option<DatasetCoverage>,
     ) -> Result<ResearchJobInfo, StorageError>;

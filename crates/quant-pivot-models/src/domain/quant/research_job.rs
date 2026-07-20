@@ -1,10 +1,10 @@
 //! Durable research-job persistence DTOs + progress sink.
 
 use crate::{
-    enums::quant::{ResearchJobKind, ResearchJobStatus},
+    enums::quant::{ResearchJobKind, ResearchJobResultKind, ResearchJobStatus},
     types::{
         DatasetCoverage, DecisionPolicySnapshotId, ModelSpecId, ResearchJobId, ResearchJobParams,
-        WorkerId,
+        RoleCode, WorkerId,
     },
 };
 use chrono::{DateTime, Utc};
@@ -13,6 +13,13 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 pub use crate::types::{ResearchJobError, ResearchJobProgress};
+
+/// Namespace-tagged terminal artifact reference produced by a research job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResearchJobResultRef {
+    pub kind: ResearchJobResultKind,
+    pub id: Uuid,
+}
 
 /// Durable research-job ledger row (full projection).
 #[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
@@ -27,14 +34,16 @@ pub struct ResearchJobInfo {
     pub params_json: ResearchJobParams,
     /// Live progress snapshot (phase + processed/total + pct); `None` until first tick.
     pub progress_json: Option<ResearchJobProgress>,
-    /// Terminal result id (dataset / model version / backtest report), once produced.
+    /// Namespace discriminator for `result_ref`.
+    pub result_kind: Option<ResearchJobResultKind>,
+    /// Terminal result id; valid only together with `result_kind`.
     pub result_ref: Option<Uuid>,
     /// Structured failure payload (`code` + `message`), on terminal `failed`.
     pub error_json: Option<ResearchJobError>,
     /// Build/backtest coverage diagnostics, mirrored for quick UI access.
     pub coverage_json: Option<DatasetCoverage>,
     pub requested_by: Option<String>,
-    pub acting_role: String,
+    pub acting_role: RoleCode,
     /// Parent job this row was retried from (retry lineage).
     pub parent_job_id: Option<ResearchJobId>,
     pub recovery_attempt: i32,
@@ -56,6 +65,7 @@ info_from_model!(ResearchJobInfo, crate::entities::quant_research_job::Model, {
     decision_policy_snapshot_id,
     params_json,
     progress_json,
+    result_kind,
     result_ref,
     error_json,
     coverage_json,
@@ -73,6 +83,16 @@ info_from_model!(ResearchJobInfo, crate::entities::quant_research_job::Model, {
     updated_at,
 });
 
+impl ResearchJobInfo {
+    /// Return the terminal reference only when both persisted columns are present.
+    #[must_use]
+    pub fn result(&self) -> Option<ResearchJobResultRef> {
+        self.result_kind
+            .zip(self.result_ref)
+            .map(|(kind, id)| ResearchJobResultRef { kind, id })
+    }
+}
+
 /// Insert payload for `quant_research_job` (enqueue).
 ///
 /// DB-managed `created_at` / `updated_at` are omitted. Lease / progress / result
@@ -88,7 +108,7 @@ pub struct NewResearchJob {
     pub decision_policy_snapshot_id: Option<DecisionPolicySnapshotId>,
     pub params_json: ResearchJobParams,
     pub requested_by: Option<String>,
-    pub acting_role: String,
+    pub acting_role: RoleCode,
     pub parent_job_id: Option<ResearchJobId>,
     pub recovery_attempt: i32,
     pub max_recovery_attempts: i32,

@@ -111,7 +111,9 @@ seed metadata 必须通过相关表的 schema module 暴露。
 
 六类 policy revision 的持久化类型是
 `quant_pivot_models::runtime_config::PolicyDocument`：闭集 enum 承载六个强类型 struct，
-每个资源固定 `schema_version = 1` 并拒绝 unknown fields。`JSONB` 只作为不可变聚合的
+每个资源固定 `schema_version = 1` 并拒绝 unknown fields。runtime JSONB 的逐字段决策由
+`schema/jsonb-field-decisions.toml` 登记，并由 `jsonb-field-audit` 双向核对 entity、DTO、
+fresh-boot snapshot 与闭合 serde shape。`JSONB` 只作为不可变聚合的
 物理存储，不以 `serde_json::Value` 穿越 repository/domain 边界，且任何可查询字段都
 必须拆为原生列或 PostgreSQL enum。bootstrap 只播种首个 boot revision bundle；之后
 所有变更只通过 Draft → Validate/Preflight → Approve → Activate 写入，TOML 永不覆盖

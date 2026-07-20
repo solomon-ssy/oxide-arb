@@ -60,6 +60,7 @@ pub enum TrainingSampleSource {
 
 /// Ordered sample-source contract frozen on a dataset plan.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
+#[serde(transparent)]
 pub struct TrainingSampleSources(pub Vec<TrainingSampleSource>);
 
 #[must_use]

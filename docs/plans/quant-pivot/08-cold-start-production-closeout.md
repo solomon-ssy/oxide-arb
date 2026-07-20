@@ -15,7 +15,7 @@ gaps discovered during the 2026-07-16 implementation audit.
 ## Required Outcomes
 
 - PostgreSQL uses an audited SeaORM migration crate, an exact normalized schema
-  manifest, a DDL-free runtime identity, and a separate migration identity.
+  manifest, one configured identity, and a runtime binary with no DDL entrypoint.
 - SeaORM 2 dense entities and PostgreSQL native enums own typed persistence;
   duplicate hand-maintained DDL models are removed.
 - Bootstrap is restart-safe and fail-closed. Runtime configuration approval,
@@ -41,7 +41,7 @@ gaps discovered during the 2026-07-16 implementation audit.
    toolchain. Rust 1.97.1 also contains the upstream LLVM miscompilation fix
    published on 2026-07-16.
 2. Establish immutable PostgreSQL and ClickHouse schema contracts.
-3. Complete bootstrap, runtime-config approval, and capability watches.
+3. Complete bootstrap, independently governed Config resources, and capability watches.
 4. Complete catalog reconciliation and frozen parity protocols.
 5. Complete research evidence, authentication, WebSocket, and UI behavior.
 6. Remove duplicate/dead code and update active architecture documentation.
@@ -105,13 +105,14 @@ state but cannot apply, roll back, or synchronize schema.
   domain-separated BLAKE3 checksum over length-prefixed migration source,
   frozen entity snapshot, and versioned support artifacts, their total byte
   length, and the pinned migration engine version.
-- Deploy apply holds a process-wide PostgreSQL advisory lock and invokes the
-  native `Migrator::up(..., None)` once. SeaORM rc.43's `exec_up_with` opens,
+- Deploy apply holds the canonical session-scoped lifecycle lease and invokes the
+  native `Migrator::up(..., None)` once. SeaORM 2.0's `exec_up_with` opens,
   records, and commits a separate PostgreSQL transaction for each pending
   migration, so enum-label additions and later uses remain separated without
   repeated ledger discovery or a custom migration loop.
-- `plan` is read-only and must not create `seaql_migrations`. `apply` runs only
-  through the dedicated migration identity. Runtime verification requires an
+- `plan` is read-only and must not create `seaql_migrations`. `apply` uses the
+  same configured PostgreSQL identity as runtime and Fresh Boot, but remains an
+  explicit CLI operation under the lifecycle lease. Runtime verification requires an
   exact native-ledger/checksum-ledger/manifest match and rejects the legacy
   `_sqlx_migrations` object.
 - After adding or intentionally changing an unapplied migration artifact,
@@ -119,9 +120,9 @@ state but cannot apply, roll back, or synchronize schema.
   `cargo run -p quant-pivot-xtask -- postgres-schema migration-manifest` and
   review `schema/postgres/migrations.json`. This command never connects to a
   database or applies DDL; CI rejects an unreviewed artifact checksum change.
-- Runtime has `SELECT` only on both migration ledgers. Schema ownership, DDL,
-  ledger mutation, `CREATE`, and database temporary-object privileges remain
-  exclusive to deploy infrastructure.
+- The application binary exposes only schema verification. Schema ownership,
+  DDL and ledger mutation remain reachable solely through migration/Fresh Boot
+  commands; those commands share the configured identity and canonical lease.
 - SeaORM `schema-sync` is disabled in production. The stable `SchemaBuilder`
   `apply` API is used only by the frozen initial snapshot. Its experimental
   discovery/sync API cannot own constraints, partial indexes, triggers,
@@ -148,12 +149,12 @@ and [entity-first schema](https://www.sea-ql.org/SeaORM/docs/generate-entity/ent
 
 ### Delivered contracts
 
-- The workspace is pinned to Rust 1.97.1, SeaORM 2.0.0-rc.43, and SQLx 0.9.0.
+- The workspace is pinned to Rust 1.97.1, SeaORM 2.0.0, and SQLx 0.9.0.
   The dependency graph contains one SeaORM/SQLx generation.
 - `quant-pivot-migration` owns exactly one PostgreSQL boot migration. A
   disposable PostgreSQL 16 clean boot reports 93 tables, 1,213 columns, 273
   indexes, and 340 constraints. ClickHouse likewise owns one boot manifest at
-  system schema version 1. Runtime identities have no DDL path.
+  system schema version 1. Application runtime code has no DDL path.
 - Governed configuration consists of six independently revisioned schema-1
   resources. Activation is guarded by a database-authoritative bundle
   generation, full revision vector, candidate hash, approval, preflight token,
@@ -183,8 +184,8 @@ The repository schema has been booted from zero in a disposable PostgreSQL 16
 container and its semantic manifest regenerated from the resulting catalog.
 The guarded local preproduction reset remains intentionally pending until the
 operator confirms all previously exposed wallet, relayer, JWT/RPC, PostgreSQL,
-and ClickHouse credentials have been rotated and installed as permission-0600
-credential files. No old secret value may be read, copied, or reused.
+and ClickHouse credentials have been rotated and installed in a permission-0600,
+untracked deploy TOML. No old secret value may be read, copied, or reused.
 
 The eventual destructive scope is limited to PostgreSQL database
 `quant_pivot`, ClickHouse database `quant_pivot`, and Redis keys matching the
@@ -214,36 +215,18 @@ may be treated as passing evidence:
   reduced-motion, keyboard/accessibility, and responsive light/dark visual
   behavior at desktop, tablet, and mobile viewports.
 
-The final local run on 2026-07-17 passed this inventory:
-
-- `rust-static` completed format, workspace clippy, every architecture and
-  semantic lint, `cargo machete`, nightly `cargo udeps`, workspace tests,
-  classical/optimizer/dataframe feature tests, benchmark release compilation,
-  and the executable hot-path benchmark.
-- `network` passed all 10 Gamma and all 5 Data API cases.
-- `docker` passed the complete registered suite twice consecutively after the
-  PostgreSQL container-concurrency and database-timestamp boundary fixes.
-- `ui` passed lint, typecheck, all 494 unit tests, production build, Knip,
-  circular-dependency checks, semantic-color and forbidden-pattern scans. The
-  dashboard-specific gzip chunk measured 37,883 bytes against the 300 KiB
-  budget.
-- `protected-e2e` passed all 8 scenarios. Desktop/mobile light and dark visual
-  snapshots and tablet layout checks passed; the Axe scan reported zero serious
-  or critical violations.
-- Targeted regression tests additionally proved decimal-string preservation in
-  dashboard monetary sections and byte-level independence of the JWT and
-  evidence signing keys.
-
-The workflow definitions invoke the same five group commands. No remote CI run
-or hosted CI artifact was produced in this local implementation session, so
-this record does not claim one.
+The current closeout is tracked only in the Execution Ledger and immutable local
+acceptance manifests referenced by it. A check is passing evidence only when its
+exact command, result, timestamp and evidence hash are recorded there. The CI
+workflow invokes the same five command groups; local evidence never implies a
+remote CI run or hosted artifact.
 
 ### Explicitly deferred or externally blocked
 
 - The two-hour/twelve-reconciliation soak has not run. This record does not
   claim that gate passed.
-- Production ClickHouse Cloud identity/DDL behavior, production secret-manager
-  mounts, WORM restore proof, and Cloud retention/capacity evidence require the
+- Production ClickHouse Cloud DDL behavior, deploy-file installation, WORM
+  restore proof, and Cloud retention/capacity evidence require the
   real deployment environment and remain promotion gates.
 - The pre-reset store had 1,944,000 rows spanning about 91 days. The required
   history remains 200 days; after the authorized clean reset the local evidence
@@ -252,13 +235,13 @@ this record does not claim one.
 - The local host intermittently could not reach Binance and Alchemy. These
   failures are bounded and capability-visible; the RPC provider URL is now
   redacted. Live provider reliability is not inferred from Wiremock tests.
-- `proc-macro-error2 2.0.1` is a transitive future-incompatibility warning in
-  upstream dependency trees. No local lint waiver or vendored fork was added.
-  The macOS debug linker can also warn that `__eh_frame` exceeds the compact
+- The `proc-macro-error2` future-incompatibility chain is pinned to the reviewed
+  upstream fix; the full workspace build emits no such warning. The macOS debug
+  linker can still warn that `__eh_frame` exceeds the compact
   unwind table limit; release artifacts are not affected by this debug-only
   evidence run.
 
-The implementation is therefore code-complete against the local production
-gate inventory but is **not production-complete** until the soak, real
-ClickHouse Cloud, secret-mount, WORM restore, retention/capacity, and 200-day
-readiness artifacts are archived.
+The implementation is **not production-complete** until the disposable W9
+rehearsal, operator-authorized W10 local acceptance, soak, real ClickHouse Cloud,
+deploy-file, WORM restore, retention/capacity, and 200-day readiness artifacts
+are archived.

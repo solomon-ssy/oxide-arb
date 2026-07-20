@@ -219,6 +219,7 @@ pub struct DomainFeatureSlice {
 
 /// Atomic JSONB body of one persisted feature vector.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, FromJsonQueryResult)]
+#[serde(deny_unknown_fields)]
 pub struct FeatureVectorPayload {
     pub generic: BTreeMap<FeatureName, FeatureCell>,
     pub domain: Option<DomainFeatureSlice>,

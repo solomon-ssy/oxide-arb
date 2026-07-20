@@ -5,7 +5,10 @@ use quant_pivot_models::{
     domain::NewResearchReadinessEvidence,
     enums::quant::ResearchReadinessEvidenceKind,
     hashing::CanonicalDigest,
-    types::{ArtifactUri, ContentHash, ResearchReadinessEvidencePayload, ShadowLatencyProfileV1},
+    types::{
+        ArtifactUri, ArtifactVersion, AttestationKeyId, ContentHash,
+        ResearchReadinessEvidencePayload, ShadowLatencyProfileV1,
+    },
 };
 use quant_pivot_repository::{
     postgres::PgResearchReadinessEvidenceRepository, traits::ResearchReadinessEvidenceRepository,
@@ -55,8 +58,9 @@ fn new_evidence(
         payload_json,
         payload_hash,
         artifact_uri: ArtifactUri::parse("s3://evidence/latency.json").expect("artifact URI"),
-        artifact_version: "version-1".to_owned(),
-        attestation_key_id: "operator-2026-07".to_owned(),
+        artifact_version: ArtifactVersion::parse("version-1").expect("artifact version"),
+        attestation_key_id: AttestationKeyId::parse("operator-2026-07")
+            .expect("attestation key id"),
         attestation_mac: hash('c'),
     }
 }

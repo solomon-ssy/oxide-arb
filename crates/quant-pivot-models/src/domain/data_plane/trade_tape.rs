@@ -17,7 +17,7 @@ use crate::{
         },
         common::Side,
     },
-    types::{MarketId, Price, Shares, TokenId, Usd},
+    types::{EvmAddress, MarketId, Price, Shares, TokenId, Usd},
 };
 
 /// The upstream role directly observed for a participant row.
@@ -49,12 +49,13 @@ impl From<ChTradeParticipantRole> for TradeParticipantRole {
     }
 }
 
-/// Source that produced a normalized trade-tape row.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TradeTapeSourceKind {
-    MarketWs,
-    OnChain,
+crate::pg_enum! {
+    type_name = "qp_trade_tape_source_kind",
+    /// Source that produced a normalized trade-tape row.
+    pub enum TradeTapeSourceKind {
+        MarketWs => "market_ws",
+        OnChain => "on_chain",
+    }
 }
 
 impl From<TradeTapeSourceKind> for ChTradeTapeSource {
@@ -71,16 +72,6 @@ impl From<ChTradeTapeSource> for TradeTapeSourceKind {
         match value {
             ChTradeTapeSource::MarketWs => Self::MarketWs,
             ChTradeTapeSource::OnChainOrderFilled => Self::OnChain,
-        }
-    }
-}
-
-impl TradeTapeSourceKind {
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::MarketWs => "market_ws",
-            Self::OnChain => "on_chain",
         }
     }
 }
@@ -121,36 +112,14 @@ pub struct TradeTapePrint {
     pub raw_payload_json: Option<String>,
 }
 
-/// Typed lifecycle status for an on-chain trade-tape block cursor.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TradeTapeBlockCursorStatus {
-    Bootstrap,
-    CatchingUp,
-    Live,
-    Error,
-}
-
-impl TradeTapeBlockCursorStatus {
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Bootstrap => "bootstrap",
-            Self::CatchingUp => "catching_up",
-            Self::Live => "live",
-            Self::Error => "error",
-        }
-    }
-
-    #[must_use]
-    pub fn parse(value: &str) -> Option<Self> {
-        match value {
-            "bootstrap" => Some(Self::Bootstrap),
-            "catching_up" => Some(Self::CatchingUp),
-            "live" => Some(Self::Live),
-            "error" => Some(Self::Error),
-            _ => None,
-        }
+crate::pg_enum! {
+    type_name = "qp_trade_tape_block_cursor_status",
+    /// Typed lifecycle status for an on-chain trade-tape block cursor.
+    pub enum TradeTapeBlockCursorStatus {
+        Bootstrap => "bootstrap",
+        CatchingUp => "catching_up",
+        Live => "live",
+        Faulted => "error",
     }
 }
 
@@ -158,12 +127,12 @@ impl TradeTapeBlockCursorStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, DerivePartialModel)]
 #[sea_orm(entity = "crate::entities::quant_trade_tape_block_cursor::Entity")]
 pub struct TradeTapeBlockCursorInfo {
-    pub source: String,
-    pub contract_address: String,
+    pub source: TradeTapeSourceKind,
+    pub contract_address: EvmAddress,
     pub last_finalized_block: i64,
     pub last_log_index: i32,
     pub head_lag_blocks: i64,
-    pub status: String,
+    pub status: TradeTapeBlockCursorStatus,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -187,12 +156,12 @@ info_from_model!(
 #[derive(Debug, Clone, Serialize, Deserialize, DeriveIntoActiveModel)]
 #[sea_orm(active_model = "crate::entities::quant_trade_tape_block_cursor::ActiveModel")]
 pub struct UpsertTradeTapeBlockCursor {
-    pub source: String,
-    pub contract_address: String,
+    pub source: TradeTapeSourceKind,
+    pub contract_address: EvmAddress,
     pub last_finalized_block: i64,
     pub last_log_index: i32,
     pub head_lag_blocks: i64,
-    pub status: String,
+    pub status: TradeTapeBlockCursorStatus,
     pub updated_at: DateTime<Utc>,
 }
 

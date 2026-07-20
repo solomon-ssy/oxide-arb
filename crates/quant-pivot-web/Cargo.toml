@@ -8,6 +8,7 @@ rust-version.workspace = true
 [dependencies]
 quant-pivot-error = { workspace = true, features = ["storage"] }
 quant-pivot-models = { workspace = true, features = ["repository"] }
+quant-pivot-migration = { workspace = true }
 quant-pivot-repository = { workspace = true }
 quant-pivot-storage = { workspace = true }
 
@@ -38,7 +39,6 @@ thiserror = { workspace = true }
 async-trait = { workspace = true }
 
 [dev-dependencies]
-quant-pivot-migration = { path = "../quant-pivot-migration" }
 actix-http = { workspace = true }
 actix-test = { workspace = true }
 quant-pivot-core = { workspace = true }

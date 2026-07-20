@@ -10,8 +10,9 @@ use crate::{
     hashing::CanonicalDigest,
     types::{
         ArtifactUri, CatalogSyncBatchId, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION,
-        DecisionPolicySnapshotId, ResearchEvaluationTrack, ResearchProfileArtifact,
-        ResearchProfileDataSource, ResearchProfileRef,
+        DecisionPolicySnapshotId, ReaderContractVersion, ResearchEvaluationTrack,
+        ResearchProfileArtifact, ResearchProfileDataSource, ResearchProfileRef,
+        SchemaContractVersion,
     },
 };
 
@@ -120,8 +121,8 @@ pub struct SourceSliceManifestV1 {
     pub pit_cutoff: DateTime<Utc>,
     pub materialized_at: DateTime<Utc>,
     pub catalog_proof: SourceSliceCatalogProof,
-    pub reader_contract_version: String,
-    pub schema_contract_version: String,
+    pub reader_contract_version: ReaderContractVersion,
+    pub schema_contract_version: SchemaContractVersion,
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub runtime_config_hash: ContentHash,
     pub dataset_format_version: u32,
@@ -143,11 +144,6 @@ impl SourceSliceManifestV1 {
             || self.catalog_proof.committed_through > self.pit_cutoff
         {
             return Err("source-slice time boundaries are invalid".to_owned());
-        }
-        if self.reader_contract_version.trim().is_empty()
-            || self.schema_contract_version.trim().is_empty()
-        {
-            return Err("source-slice reader and schema versions are required".to_owned());
         }
         if self.catalog_proof.market_count == 0 || self.catalog_proof.event_count == 0 {
             return Err("source-slice catalog proof must contain markets and events".to_owned());
@@ -427,8 +423,10 @@ mod tests {
                 event_count: 1,
                 snapshot_hash: hash(202),
             },
-            reader_contract_version: "reader@2".to_owned(),
-            schema_contract_version: "source-slice@2".to_owned(),
+            reader_contract_version: ReaderContractVersion::parse("reader@2")
+                .expect("reader contract version"),
+            schema_contract_version: SchemaContractVersion::parse("source-slice@2")
+                .expect("schema contract version"),
             decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
             runtime_config_hash: hash(203),
             dataset_format_version: DATASET_ARTIFACT_FORMAT_VERSION,
@@ -485,8 +483,10 @@ mod tests {
                 event_count: 1,
                 snapshot_hash: hash.clone(),
             },
-            reader_contract_version: "reader@1".to_owned(),
-            schema_contract_version: "schema@1".to_owned(),
+            reader_contract_version: ReaderContractVersion::parse("reader@1")
+                .expect("reader contract version"),
+            schema_contract_version: SchemaContractVersion::parse("schema@1")
+                .expect("schema contract version"),
             decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
             runtime_config_hash: hash,
             dataset_format_version: DATASET_ARTIFACT_FORMAT_VERSION,

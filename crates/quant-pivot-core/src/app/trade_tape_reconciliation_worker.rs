@@ -3,21 +3,23 @@
 use std::{collections::BTreeSet, sync::Arc, time::Duration};
 
 use chrono::Utc;
-use quant_pivot_error::{QuantError, QuantResult, storage::StorageError};
+use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
     clickhouse::TradeTapeRow,
     config::TradeTapeOnChainConfig,
     domain::trade_tape::trade_tape_coverage,
     enums::clickhouse::{ChTradeReconciliationStatus, ChTradeSide, ChTradeTapeSource},
 };
-use quant_pivot_repository::{clickhouse::ChFactWriter, traits::FactWriter};
-use quant_pivot_storage::clickhouse::ClickHousePool;
+use quant_pivot_repository::{
+    clickhouse::{ChFactWriter, ChNativeReadRepository},
+    traits::FactWriter,
+};
 use tokio_util::sync::CancellationToken;
 
 use crate::infra::periodic_task::PeriodicTask;
 
 pub struct TradeTapeReconciliationWorker {
-    clickhouse: Arc<ClickHousePool>,
+    reader: Arc<ChNativeReadRepository>,
     writer: Arc<ChFactWriter<TradeTapeRow>>,
     config: TradeTapeOnChainConfig,
 }
@@ -25,12 +27,12 @@ pub struct TradeTapeReconciliationWorker {
 impl TradeTapeReconciliationWorker {
     #[must_use]
     pub const fn new(
-        clickhouse: Arc<ClickHousePool>,
+        reader: Arc<ChNativeReadRepository>,
         writer: Arc<ChFactWriter<TradeTapeRow>>,
         config: TradeTapeOnChainConfig,
     ) -> Self {
         Self {
-            clickhouse,
+            reader,
             writer,
             config,
         }
@@ -57,7 +59,12 @@ impl TradeTapeReconciliationWorker {
         let now_ms = Utc::now().timestamp_millis();
         let lookback_ms = millis_from_secs(self.config.reconciliation_lookback_secs)?;
         let rows = self
-            .latest_rows(now_ms.saturating_sub(lookback_ms), now_ms)
+            .reader
+            .trade_tape_reconciliation_rows(
+                now_ms.saturating_sub(lookback_ms),
+                now_ms,
+                self.config.reconciliation_max_rows,
+            )
             .await?;
         let revisions = reconcile_rows(
             &rows,
@@ -69,39 +76,6 @@ impl TradeTapeReconciliationWorker {
             self.writer.write_batch(batch.to_vec()).await?;
         }
         Ok(())
-    }
-
-    async fn latest_rows(&self, from_ms: i64, to_ms: i64) -> QuantResult<Vec<TradeTapeRow>> {
-        let limit = self
-            .config
-            .reconciliation_max_rows
-            .checked_add(1)
-            .ok_or_else(|| QuantError::config("trade reconciliation row limit overflow"))?;
-        let rows = self
-            .clickhouse
-            .client()
-            .query(
-                "SELECT ?fields FROM quant_trade_tape \
-                 WHERE event_time >= fromUnixTimestamp64Milli(?) \
-                 AND event_time < fromUnixTimestamp64Milli(?) \
-                 AND ingestion_time <= fromUnixTimestamp64Milli(?) \
-                 ORDER BY ingestion_time DESC, revision DESC \
-                 LIMIT 1 BY market_id, token_id, participant_role, event_time, source_event_id, participant_address \
-                 LIMIT ?",
-            )
-            .bind(from_ms)
-            .bind(to_ms)
-            .bind(to_ms)
-            .bind(limit)
-            .fetch_all::<TradeTapeRow>()
-            .await
-            .map_err(StorageError::from)?;
-        if rows.len() > self.config.reconciliation_max_rows {
-            return Err(QuantError::config(
-                "trade reconciliation input exceeds the configured hard row limit",
-            ));
-        }
-        Ok(rows)
     }
 }
 

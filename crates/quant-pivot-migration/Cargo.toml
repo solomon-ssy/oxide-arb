@@ -11,16 +11,18 @@ async-trait = { workspace = true }
 blake3 = { workspace = true }
 quant-pivot-error = { workspace = true, features = ["storage"] }
 quant-pivot-models = { workspace = true }
+quant-pivot-sql-contract = { workspace = true }
 sea-orm = { workspace = true }
 sea-orm-migration = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sqlx = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
 
 [dev-dependencies]
 testcontainers = { workspace = true }
 testcontainers-modules = { workspace = true, features = ["postgres"] }
-tokio = { workspace = true }
 
 [lints]
 workspace = true

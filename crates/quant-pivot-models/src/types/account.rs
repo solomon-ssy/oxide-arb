@@ -51,6 +51,7 @@ pub struct PositionSnapshot {
 /// and cap-room checks. Built from [`PositionSnapshot`]s via
 /// [`ExposureBreakdown::from_positions`].
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
+#[serde(deny_unknown_fields)]
 pub struct ExposureBreakdown {
     /// Net USD exposure per market.
     pub per_market: BTreeMap<MarketId, Usd>,
@@ -87,4 +88,5 @@ impl ExposureBreakdown {
 
 /// JSONB column wrapper for the held positions of an account snapshot.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
+#[serde(transparent)]
 pub struct AccountPositions(pub Vec<PositionSnapshot>);

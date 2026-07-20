@@ -1,6 +1,6 @@
 //! Cache layer configuration (`[cache]`, deploy).
 
-use super::secret::SystemdCredentialRef;
+use super::secret::SecretText;
 use serde::Deserialize;
 use std::collections::HashMap;
 use url::Url;
@@ -75,8 +75,8 @@ pub struct RedisConfig {
     /// ACL username. Leave empty when the server uses password-only auth
     /// (`requirepass`). Default: empty.
     pub user: String,
-    /// systemd credential reference for Redis authentication.
-    pub password: SystemdCredentialRef,
+    /// Redis authentication secret source.
+    pub password: SecretText,
     /// Logical database index (`SELECT`). Default: `0`.
     pub database: u8,
     /// Connection pool size. Default: `8`.
@@ -102,7 +102,7 @@ impl Default for RedisConfig {
             host: default_redis_host(),
             port: default_redis_port(),
             user: String::new(),
-            password: SystemdCredentialRef::default(),
+            password: SecretText::default(),
             database: 0,
             pool_size: default_redis_pool(),
             timeout_ms: default_redis_timeout(),

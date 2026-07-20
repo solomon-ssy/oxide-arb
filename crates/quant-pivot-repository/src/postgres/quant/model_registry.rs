@@ -801,6 +801,10 @@ async fn update_model_version_status(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
+    use sea_orm::{DbBackend, MockDatabase, Value};
+
     use super::*;
 
     #[test]
@@ -809,5 +813,21 @@ mod tests {
         assert_eq!(next_model_version(Some(41)).expect("next version"), 42);
         let error = next_model_version(Some(i32::MAX)).expect_err("overflow must fail closed");
         assert!(error.to_string().contains("sequence exhausted"));
+    }
+
+    #[tokio::test]
+    async fn published_model_catalog_executes_one_bounded_projection() -> Result<(), StorageError> {
+        let db = MockDatabase::new(DbBackend::Postgres)
+            .append_query_results([Vec::<BTreeMap<String, Value>>::new()])
+            .into_connection();
+        let repository = PgModelRegistryRepository::new(db.clone());
+
+        let catalog = repository
+            .list_published_catalog(ModelPickerSide::Buy, Some(MarketCategory::Crypto))
+            .await?;
+
+        assert!(catalog.is_empty());
+        assert_eq!(db.into_transaction_log().len(), 1);
+        Ok(())
     }
 }

@@ -428,12 +428,14 @@ pub struct FactorBreakdownEntry {
 
 /// JSONB column wrapper for a recommendation's full factor breakdown.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
+#[serde(transparent)]
 pub struct RecommendationFactorBreakdown(pub Vec<FactorBreakdownEntry>);
 
 // ── Evidence refs (parent §13 — replay) ──────────────────────────────────────
 
 /// Replay handles for one recommendation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
+#[serde(deny_unknown_fields)]
 pub struct EvidenceRefs {
     pub signal_candidate_id: SignalCandidateId,
     pub feature_vector_id: FeatureVectorId,
@@ -486,6 +488,7 @@ impl EvidenceRefs {
 /// lands in Phase 5. `eligible_modes` always contains
 /// [`QuantRuntimeMode::ReportOnly`] (a report is the report-only artifact).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
+#[serde(deny_unknown_fields)]
 pub struct ExecutionEligibility {
     /// Runtime modes in which this recommendation is eligible for execution.
     pub eligible_modes: Vec<QuantRuntimeMode>,
@@ -524,6 +527,7 @@ impl ExecutionEligibility {
 
 /// Report-level summary persisted to `quant_recommendation_report.summary_json`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
+#[serde(deny_unknown_fields)]
 pub struct ReportSummary {
     /// Number of markets in the selection snapshot.
     pub market_selection_count: u32,

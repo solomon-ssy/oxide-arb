@@ -6,7 +6,7 @@
 
 use serde::Deserialize;
 
-use super::secret::SystemdCredentialRef;
+use super::secret::SecretText;
 
 /// Logging level and output format.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -46,8 +46,8 @@ pub struct NotificationChannelsConfig {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct TelegramChannelConfig {
-    /// systemd credential containing the Telegram bot token.
-    pub bot_token_credential: SystemdCredentialRef,
+    /// Telegram bot-token source.
+    pub bot_token: SecretText,
     /// Telegram chat identifier; this is a destination binding, not a secret.
     pub chat_id: String,
 }
@@ -57,6 +57,6 @@ pub struct TelegramChannelConfig {
 pub struct WebhookChannelConfig {
     /// HTTPS endpoint. Authentication material must not be embedded in the URL.
     pub url: String,
-    /// Optional systemd credential containing the complete Authorization value.
-    pub authorization_credential: SystemdCredentialRef,
+    /// Optional complete HTTP Authorization value.
+    pub authorization: SecretText,
 }

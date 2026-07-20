@@ -96,8 +96,8 @@ impl ResearchJobEngine {
     /// Publish a `materialization.run_update` lifecycle/progress event.
     pub fn publish(&self, info: &ResearchJobInfo, phase: Option<String>, pct: Option<f64>) {
         let run_id = info
-            .result_ref
-            .map_or_else(|| info.job_id.to_string(), |uuid| uuid.to_string());
+            .result()
+            .map_or_else(|| info.job_id.to_string(), |result| result.id.to_string());
         self.events
             .publish(CoreEvent::MaterializationRun(MaterializationRunEvent::job(
                 info.job_id.to_string(),

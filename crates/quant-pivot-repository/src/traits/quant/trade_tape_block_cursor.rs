@@ -1,13 +1,16 @@
 use quant_pivot_error::storage::StorageError;
-use quant_pivot_models::domain::{TradeTapeBlockCursorInfo, UpsertTradeTapeBlockCursor};
+use quant_pivot_models::{
+    domain::{TradeTapeBlockCursorInfo, TradeTapeSourceKind, UpsertTradeTapeBlockCursor},
+    types::EvmAddress,
+};
 
 /// Durable checkpoint repository for on-chain trade-tape block cursors.
 #[async_trait::async_trait]
 pub trait TradeTapeBlockCursorRepository: Send + Sync {
     async fn find(
         &self,
-        source: &str,
-        contract_address: &str,
+        source: TradeTapeSourceKind,
+        contract_address: &EvmAddress,
     ) -> Result<Option<TradeTapeBlockCursorInfo>, StorageError>;
 
     async fn upsert(
@@ -17,6 +20,6 @@ pub trait TradeTapeBlockCursorRepository: Send + Sync {
 
     async fn list_by_source(
         &self,
-        source: &str,
+        source: TradeTapeSourceKind,
     ) -> Result<Vec<TradeTapeBlockCursorInfo>, StorageError>;
 }

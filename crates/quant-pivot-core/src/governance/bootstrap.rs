@@ -21,6 +21,7 @@ use quant_pivot_models::{
         system::{BootstrapPhase, CapabilityReason},
     },
     runtime_config::validate_runtime_config,
+    types::RoleCode,
 };
 use quant_pivot_repository::traits::{
     ModelRunRepository, PolicyRepository, RecommendationReportRepository,
@@ -310,7 +311,7 @@ impl BootstrapPort for BootstrapService {
                 bootstrap_contract_version: request.bootstrap_contract_version,
                 expected_state_revision: request.expected_state_revision,
                 actor: actor.to_owned(),
-                acting_role: acting_role.to_owned(),
+                acting_role: RoleCode::new(acting_role),
                 reason: request.reason,
                 report_only_forced_ack: true,
             })

@@ -4,8 +4,9 @@ use crate::traits::TradeTapeBlockCursorRepository;
 use chrono::Utc;
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    domain::{TradeTapeBlockCursorInfo, UpsertTradeTapeBlockCursor},
+    domain::{TradeTapeBlockCursorInfo, TradeTapeSourceKind, UpsertTradeTapeBlockCursor},
     entities::quant_trade_tape_block_cursor,
+    types::EvmAddress,
 };
 use sea_orm::{
     ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder,
@@ -28,8 +29,8 @@ impl PgTradeTapeBlockCursorRepository {
 impl TradeTapeBlockCursorRepository for PgTradeTapeBlockCursorRepository {
     async fn find(
         &self,
-        source: &str,
-        contract_address: &str,
+        source: TradeTapeSourceKind,
+        contract_address: &EvmAddress,
     ) -> Result<Option<TradeTapeBlockCursorInfo>, StorageError> {
         quant_trade_tape_block_cursor::Entity::find()
             .filter(quant_trade_tape_block_cursor::Column::Source.eq(source))
@@ -68,7 +69,7 @@ impl TradeTapeBlockCursorRepository for PgTradeTapeBlockCursorRepository {
 
     async fn list_by_source(
         &self,
-        source: &str,
+        source: TradeTapeSourceKind,
     ) -> Result<Vec<TradeTapeBlockCursorInfo>, StorageError> {
         quant_trade_tape_block_cursor::Entity::find()
             .filter(quant_trade_tape_block_cursor::Column::Source.eq(source))

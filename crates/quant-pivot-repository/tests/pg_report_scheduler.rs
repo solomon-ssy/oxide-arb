@@ -9,7 +9,7 @@ use quant_pivot_models::{
     enums::quant::{
         ReportRunStatus, ReportRunTerminalReason, ReportScheduleGapReason, ReportTriggerKind,
     },
-    types::{ContentHash, DecisionPolicySnapshotId, ReportRunId},
+    types::{ContentHash, DecisionPolicySnapshotId, ReportRunId, ReportTriggerKey},
 };
 use quant_pivot_repository::{postgres::PgReportRunRepository, traits::ReportRunRepository};
 use quant_pivot_test_support::{pg::setup_pg, policy_fixtures::bootstrap_default_policy_bundle};
@@ -29,7 +29,8 @@ fn ad_hoc(request_id: &str) -> NewReportRun {
     NewReportRun {
         report_run_id: ReportRunId::from_v7(),
         trigger_kind: ReportTriggerKind::AdHoc,
-        trigger_key: format!("ad_hoc:{request_id}"),
+        trigger_key: ReportTriggerKey::parse(format!("ad_hoc:{request_id}"))
+            .expect("report trigger key"),
         schedule_id: None,
         request_id: Some(request_id.into()),
         retry_of_run_id: None,

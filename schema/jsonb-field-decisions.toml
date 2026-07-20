@@ -1,0 +1,306 @@
+schema_version = 1
+
+[[group]]
+disposition = "external_document"
+owner = "upstream Polymarket Gamma and CLOB APIs"
+access = "whole-document audit/replay only; business logic consumes normalized fields"
+lifecycle = "immutable source revision or rejection evidence"
+rationale = "The system does not own these four wire schemas and must preserve the exact upstream payload."
+members = [
+  "catalog_event_object.payload=ExternalJsonDocument",
+  "catalog_market_object.payload=ExternalJsonDocument",
+  "catalog_sync_rejection.raw_payload=Option<ExternalJsonDocument>",
+  "clob_market_info_version.raw_payload=ExternalJsonDocument",
+]
+
+[[group]]
+disposition = "typed_document"
+owner = "CLOB market-info normalizer"
+access = "whole market-info revision read/write; no child-field SQL predicates"
+lifecycle = "immutable versioned metadata snapshot"
+rationale = "Token and fee shapes are closed nested values whose atomic revision must match the normalized market-info row."
+members = [
+  "clob_market_info_version.tokens_json=ClobTokenSet",
+  "clob_market_info_version.fee_details_json=ClobFeeDetails",
+]
+
+[[group]]
+disposition = "typed_document"
+owner = "runtime Config governance"
+access = "whole-document validation, hashing, approval, activation, and replay"
+lifecycle = "WORM candidate/snapshot/profile artifact with relational CAS and lifecycle columns"
+rationale = "These are content-addressed governance aggregates; generation, revision, actor, kind, and lifecycle remain relational."
+members = [
+  "decision_policy_snapshot.snapshot=DecisionPolicySnapshotDocument",
+  "policy_revision.document=PolicyDocument",
+  "policy_revision.validation_evidence=Option<PolicyValidationEvidence>",
+  "policy_approval.validation_subject=Option<PolicyValidationSubject>",
+  "policy_profile_artifact.document=PolicyProfileDocument",
+]
+
+[[group]]
+disposition = "typed_document"
+owner = "research and trade-policy governance"
+access = "whole artifact/evidence hashing and verification"
+lifecycle = "immutable artifact or readiness evidence"
+rationale = "Variant-specific payloads are closed and hash-bound; identity and lifecycle are normalized columns."
+members = [
+  "research_profile_artifact.spec=ResearchProfileSpec",
+  "quant_trade_policy_artifact.payload_json=TradePolicyArtifactPayload",
+  "quant_research_readiness_evidence.payload_json=ResearchReadinessEvidencePayload",
+]
+
+[[group]]
+disposition = "typed_document"
+owner = "model specification governance"
+access = "whole-document authoring, definition hashing, training, and inference"
+lifecycle = "immutable model-spec definition"
+rationale = "Thesis, executable input contract, and training contract are separate closed aggregates without child-field SQL lifecycle."
+members = [
+  "quant_model_spec.thesis=ModelSpecThesis",
+  "quant_model_spec.input_contract=ModelInputContract",
+  "quant_model_spec.training_contract=ModelTrainingContract",
+]
+
+[[group]]
+disposition = "typed_document"
+owner = "model training and publication governance"
+access = "whole immutable provenance/result decode and verification"
+lifecycle = "append-only model version result"
+rationale = "Model-family variants are closed tagged documents; model, dataset, artifact, and profile lineage are normalized references."
+members = [
+  "quant_model_version.score_multiplier_calibration_report=Option<ScoreMultiplierCalibrationReport>",
+  "quant_model_version.metrics=ModelVersionMetrics",
+  "quant_model_version.training_objective=ModelTrainingObjective",
+  "quant_model_version.quality_gate_report=Option<QualityGateReport>",
+]
+
+[[group]]
+disposition = "typed_document"
+owner = "calibration pipeline"
+access = "whole payload hash/decode selected by relational calibration kind"
+lifecycle = "immutable content-addressed calibration artifact"
+rationale = "The calibration payload is a closed tagged aggregate; publication state has an independent relational lifecycle."
+members = ["quant_calibration_artifact.payload=CalibrationArtifactPayload"]
+
+[[group]]
+disposition = "typed_document"
+owner = "PIT source-slice and training-dataset builders"
+access = "whole frozen provenance, manifest, coverage, and scalar-set reads"
+lifecycle = "immutable source/dataset build result"
+rationale = "These documents are generated and verified atomically; no child currently has an independent query or update lifecycle."
+members = [
+  "quant_source_slice.profile_ref=ResearchProfileRef",
+  "quant_source_slice.manifest_json=Option<SourceSliceManifestV1>",
+  "quant_training_dataset.manifest_json=Option<DatasetManifest>",
+  "quant_training_dataset.horizons_secs=TrainingHorizonsSecs",
+  "quant_training_dataset.sample_sources=Option<TrainingSampleSources>",
+  "quant_training_dataset.coverage_json=Option<DatasetCoverage>",
+]
+
+[[group]]
+disposition = "typed_document"
+owner = "research job dispatcher"
+access = "whole tagged request decode and dispatch"
+lifecycle = "immutable replayable job input"
+rationale = "Job kinds have disjoint closed request shapes; nullable per-kind columns would admit invalid combinations."
+members = ["quant_research_job.params_json=ResearchJobParams"]
+
+[[group]]
+disposition = "typed_document"
+owner = "research job worker"
+access = "whole progress CAS and terminal result reads"
+lifecycle = "mutable progress followed by immutable terminal error/coverage"
+rationale = "SQL schedules by relational status/kind/lease; these bounded documents are never queried or patched by child path."
+members = [
+  "quant_research_job.progress_json=Option<ResearchJobProgress>",
+  "quant_research_job.error_json=Option<ResearchJobError>",
+  "quant_research_job.coverage_json=Option<DatasetCoverage>",
+]
+
+[[group]]
+disposition = "typed_document"
+owner = "research backtest and comparison pipelines"
+access = "whole immutable distribution/path/breakdown display and validation"
+lifecycle = "append-only research result"
+rationale = "Ordered paths and closed category maps have no independent row lifecycle; queryable headline metrics are normalized columns."
+members = [
+  "quant_backtest_path_set.sharpe_distribution=SharpeDistribution",
+  "quant_backtest_path_set.paths=BacktestPaths",
+  "quant_backtest_report.expected_vs_realized=ExpectedVsRealized",
+  "quant_backtest_report.category_breakdown=CategoryMetrics",
+  "quant_backtest_report.report_pnl_simulation=PnlSimulation",
+  "quant_model_comparison_report.category_breakdown_diff=CategoryRankIcDeltas",
+  "quant_shadow_comparison.rank_delta_json=ShadowRankDelta",
+  "quant_shadow_comparison.score_delta_json=ShadowScoreDelta",
+  "quant_shadow_comparison.matured_outcome_json=Option<ShadowMaturedOutcomeDelta>",
+  "quant_trade_policy_trial_attempt.metrics_json=Option<TradePolicyTrialMetrics>",
+]
+
+[[group]]
+disposition = "typed_document"
+owner = "factor registry and evaluator"
+access = "whole definition hashing and explanation display"
+lifecycle = "immutable factor revision or computed factor evidence"
+rationale = "Definition and explanation are closed aggregates; queryable identity, values, confidence, and timestamps are columns."
+members = [
+  "quant_factor_definition.definition=FactorDefinitionDocument",
+  "quant_factor_value.explanation=FactorExplanation",
+]
+
+[[group]]
+disposition = "typed_document"
+owner = "feature materialization pipeline"
+access = "whole PIT evidence hashing, persistence, and replay"
+lifecycle = "immutable feature-vector evidence"
+rationale = "The registry controls dynamic feature keys; PostgreSQL never performs JSON-path business queries over the evidence."
+members = [
+  "quant_feature_vector.decision_boundary=DecisionBoundary",
+  "quant_feature_vector.payload=FeatureVectorPayload",
+  "quant_feature_vector.source_refs=FeatureSourceRefs",
+  "quant_feature_vector.decision_capture=DecisionCaptureEvidence",
+]
+
+[[group]]
+disposition = "typed_document"
+owner = "market linkage and selection services"
+access = "whole tagged outcome or aggregate-exclusion explanation"
+lifecycle = "immutable linkage revision or selection snapshot"
+rationale = "Queryable market, family, tier, status, confidence, and revision semantics are normalized columns and relations."
+members = [
+  "quant_market_linkage.outcome=LinkageOutcome",
+  "quant_market_selection.exclusion_summary=SelectionExclusionSummary",
+]
+
+[[group]]
+disposition = "typed_document"
+owner = "venue account snapshot service"
+access = "whole point-in-time account-truth hashing and report consumption"
+lifecycle = "immutable account snapshot"
+rationale = "These are frozen aggregates rather than the mutable position ledger; a child table would add multi-row snapshot consistency cost."
+members = [
+  "quant_account_snapshot.positions_json=AccountPositions",
+  "quant_account_snapshot.exposures_json=ExposureBreakdown",
+]
+
+[[group]]
+disposition = "typed_document"
+owner = "portfolio optimizer"
+access = "whole frozen input/result explanation"
+lifecycle = "immutable portfolio-plan result"
+rationale = "Cross-field optimizer invariants are atomic; queryable allocations and lifecycle state are relational."
+members = [
+  "quant_portfolio_plan.risk_budget_json=PortfolioRiskBudget",
+  "quant_portfolio_plan.constraints_json=PortfolioConstraintsSnapshot",
+  "quant_portfolio_plan.rejected_summary=PortfolioRejectedSummary",
+  "quant_portfolio_plan.optimizer_meta_json=PortfolioOptimizerMeta",
+]
+
+[[group]]
+disposition = "typed_document"
+owner = "recommendation report publisher"
+access = "whole immutable report/recommendation publication and display"
+lifecycle = "published or revoked artifact snapshot; no child patch"
+rationale = "Publication freezes explainability documents while queryable market/report/profile identities and lifecycle remain typed relations."
+members = [
+  "quant_recommendation.identity=RecommendationIdentity",
+  "quant_recommendation.market_context=MarketContext",
+  "quant_recommendation.trade_plan=RecommendationTradePlan",
+  "quant_recommendation.factor_breakdown=RecommendationFactorBreakdown",
+  "quant_recommendation.evidence_refs=EvidenceRefs",
+  "quant_recommendation.execution_eligibility=ExecutionEligibility",
+  "quant_recommendation_report.summary_json=ReportSummary",
+]
+
+[[group]]
+disposition = "typed_document"
+owner = "recommendation attribution and report data-quality services"
+access = "whole closed outcome/snapshot calculation and display"
+lifecycle = "append-only terminal attribution or report snapshot"
+rationale = "Queryable PnL, return, status, and terminal-state scalars are normalized columns."
+members = [
+  "quant_recommendation_attribution.entry_outcome_json=EntryOutcome",
+  "quant_recommendation_attribution.exit_outcome_json=ExitOutcome",
+  "quant_recommendation_attribution.attribution_json=AttributionDetail",
+  "quant_report_data_quality_snapshot.tokens_json=ReportDataQualityTokens",
+]
+
+[[group]]
+disposition = "typed_document"
+owner = "execution intent service"
+access = "whole row-lock/CAS replacement and execution projection"
+lifecycle = "intent creation followed by governed reinference/scale-out transitions"
+rationale = "Cross-field order and exit-policy invariants are atomic; scheduling status, times, and prices are normalized columns."
+members = [
+  "quant_order_intent.entry_order_json=EntryOrderSpec",
+  "quant_order_intent.exit_policy_json=ExitPolicySpec",
+  "quant_order_intent.latest_reinference_json=Option<ExitReinferenceObservation>",
+  "quant_order_intent.scale_out_state=ScaleOutState",
+]
+
+[[group]]
+disposition = "typed_document"
+owner = "venue submission and reconciliation services"
+access = "whole exact submission image and evidence-chain replay"
+lifecycle = "immutable prepared order or append-only reconciliation evidence"
+rationale = "Exact replay requires atomic documents; venue/order identity, state, amounts, and timestamps are normalized columns."
+members = [
+  "quant_execution_order.prepared_order_json=PreparedVenueOrder",
+  "quant_reconciliation.evidence_json=ReconciliationEvidenceChain",
+]
+
+[[group]]
+disposition = "typed_document"
+owner = "entry-condition evaluator"
+access = "whole tagged tree/truth decode and fold-state row-lock replacement"
+lifecycle = "immutable artifact/audit plus CAS-managed instance state"
+rationale = "Tagged unavailable reasons and fold invariants cannot be represented safely as unrelated nullable columns."
+members = [
+  "quant_entry_condition_artifact.payload_json=EntryConditionArtifactV1",
+  "quant_entry_condition_instance.truth_json=Option<ConditionTruth>",
+  "quant_entry_condition_instance.fold_state_json=EntryConditionFoldState",
+  "quant_entry_condition_audit.truth_json=Option<ConditionTruth>",
+]
+
+[[group]]
+disposition = "typed_document"
+owner = "domain source ingest supervisor"
+access = "whole source-family checkpoint CAS"
+lifecycle = "monotonic durable source cursor"
+rationale = "Each source family owns a closed checkpoint shape; queryable event/freshness times are exposed through typed methods."
+members = ["quant_domain_source_cursor.checkpoint_json=DomainSourceCheckpoint"]
+
+[[group]]
+disposition = "typed_document"
+owner = "domain and entry-condition outbox publishers"
+access = "whole exact wire-image replay"
+lifecycle = "immutable payload with relational claim/retry/publish state"
+rationale = "Commit-time payloads must not be reconstructed from later mutable business rows."
+members = [
+  "quant_domain_event_outbox.envelope_json=DomainEventEnvelope",
+  "quant_entry_condition_evaluation_outbox.event_json=EntryConditionEvaluationEventRow",
+]
+
+[[group]]
+disposition = "typed_document"
+owner = "model governance audit"
+access = "whole action-tagged authoritative audit decode"
+lifecycle = "append-only WORM audit"
+rationale = "The action discriminator owns a closed detail shape and must remain bound to the relational action."
+members = ["quant_model_governance_audit.detail=ModelGovernanceAuditDetail"]
+
+[[group]]
+disposition = "controlled_open_document"
+owner = "cross-domain HTTP operation audit"
+access = "whole redacted forensic display only; forbidden for state reconstruction"
+lifecycle = "append-only non-authoritative audit summary"
+rationale = "Actions span open-ended domains, so a giant tagged union would be false closure; the boundary enforces object shape, size, depth, nodes, and sensitive-key rejection."
+members = ["operation_log.detail=OperationDetailDocument"]
+
+[[group]]
+disposition = "typed_document"
+owner = "production lifecycle seal"
+access = "whole hash-bound seal evidence verification"
+lifecycle = "single irreversible production baseline fact"
+rationale = "Seal evidence is written once and decoded as a closed document; independently comparable fingerprints remain relationally/operationally verified."
+members = ["system_production_baseline.evidence=ProductionSealEvidence"]

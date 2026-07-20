@@ -217,7 +217,6 @@ fn build_tree() -> MenuTree {
     build_execution(&mut t);
     build_research(&mut t);
     build_governance(&mut t);
-    build_access_control(&mut t);
     build_audit(&mut t);
     t
 }
@@ -816,125 +815,6 @@ fn build_audit(t: &mut MenuTree) {
     });
 }
 
-fn build_access_control(t: &mut MenuTree) {
-    let access = t.dir(
-        "access-control",
-        "page.menu.group.accessControl",
-        "lucide:lock",
-    );
-    build_access_control_users(t, &access);
-    build_access_control_roles(t, &access);
-    build_access_control_menus(t, &access);
-}
-
-fn build_access_control_users(t: &mut MenuTree, access: &MenuId) {
-    let users = t.page(PageSpec {
-        parent: access,
-        name: "users",
-        title: "page.menu.users",
-        path: "/users",
-        component: "users/index",
-        permission_code: Some(perm(ResourceType::User, Operation::Read)),
-        icon: "lucide:users",
-    });
-    t.button(
-        &users,
-        "user:create",
-        "Create User",
-        perm(ResourceType::User, Operation::Create),
-    );
-    t.button(
-        &users,
-        "user:update",
-        "Edit User",
-        perm(ResourceType::User, Operation::Update),
-    );
-    t.button(
-        &users,
-        "user:delete",
-        "Delete User",
-        perm(ResourceType::User, Operation::Delete),
-    );
-    t.button(
-        &users,
-        "user:assign",
-        "Assign Roles",
-        perm(ResourceType::User, Operation::Assign),
-    );
-}
-
-fn build_access_control_roles(t: &mut MenuTree, access: &MenuId) {
-    let roles_page = t.page(PageSpec {
-        parent: access,
-        name: "roles",
-        title: "page.menu.roles",
-        path: "/roles",
-        component: "roles/index",
-        permission_code: Some(perm(ResourceType::Role, Operation::Read)),
-        icon: "lucide:key-round",
-    });
-    t.button(
-        &roles_page,
-        "role:create",
-        "Create Role",
-        perm(ResourceType::Role, Operation::Create),
-    );
-    t.button(
-        &roles_page,
-        "role:update",
-        "Edit Role",
-        perm(ResourceType::Role, Operation::Update),
-    );
-    t.button(
-        &roles_page,
-        "role:delete",
-        "Delete Role",
-        perm(ResourceType::Role, Operation::Delete),
-    );
-    t.button(
-        &roles_page,
-        "role:assign",
-        "Assign Permissions / Menus",
-        perm(ResourceType::Role, Operation::Assign),
-    );
-    t.button(
-        &roles_page,
-        "permission:read",
-        "View Permission Catalog",
-        perm(ResourceType::Permission, Operation::Read),
-    );
-}
-
-fn build_access_control_menus(t: &mut MenuTree, access: &MenuId) {
-    let menus_page = t.page(PageSpec {
-        parent: access,
-        name: "menus",
-        title: "page.menu.menus",
-        path: "/menus",
-        component: "menus/index",
-        permission_code: Some(perm(ResourceType::Menu, Operation::Read)),
-        icon: "lucide:menu",
-    });
-    t.button(
-        &menus_page,
-        "menu:create",
-        "Create Menu",
-        perm(ResourceType::Menu, Operation::Create),
-    );
-    t.button(
-        &menus_page,
-        "menu:update",
-        "Edit Menu",
-        perm(ResourceType::Menu, Operation::Update),
-    );
-    t.button(
-        &menus_page,
-        "menu:delete",
-        "Delete Menu",
-        perm(ResourceType::Menu, Operation::Delete),
-    );
-}
-
 /// Insert the menu tree and publish all menu IDs to the context.
 pub async fn load(db: &sea_orm::DatabaseTransaction, ctx: &mut SeedContext) -> Result<u64, DbErr> {
     let tree = build_tree();
@@ -1054,6 +934,14 @@ mod tests {
         assert!(!names.contains("quant_model:reject"));
         // Phase 10.5: the single ID-driven workbench is replaced by real catalogs.
         assert!(!names.contains("research-workbench"));
+        // W8: never publish mock-only access-control pages. The RBAC APIs stay
+        // available, but a UI route requires a complete management workflow.
+        for placeholder in ["access-control", "users", "roles", "menus"] {
+            assert!(
+                !names.contains(placeholder),
+                "mock-only menu node `{placeholder}` must stay deleted"
+            );
+        }
     }
 
     #[test]

@@ -19,7 +19,7 @@ use quant_pivot_models::{
     },
     entities::{quant_order_intent, quant_settlement_redeem, quant_settlement_redeem_lot},
     enums::execution::{ExitReason, ExitState, SettlementRedeemState},
-    types::{MarketId, OrderIntentId, SettlementRedeemId},
+    types::{EvmAddress, EvmTransactionHash, MarketId, OrderIntentId, SettlementRedeemId},
 };
 use sea_orm::{
     ActiveModelTrait, ActiveValue, ColumnTrait, Condition, DatabaseConnection, EntityTrait,
@@ -98,7 +98,7 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
     async fn find_by_market_funder(
         &self,
         market_id: &MarketId,
-        funder_address: &str,
+        funder_address: &EvmAddress,
     ) -> Result<Option<SettlementRedeemInfo>, StorageError> {
         quant_settlement_redeem::Entity::find()
             .filter(quant_settlement_redeem::Column::MarketId.eq(market_id.clone()))
@@ -162,7 +162,7 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
     async fn mark_submitted(
         &self,
         settlement_redeem_id: &SettlementRedeemId,
-        tx_hash: String,
+        tx_hash: EvmTransactionHash,
         submitted_at: DateTime<Utc>,
     ) -> Result<SettlementRedeemInfo, StorageError> {
         let row = load_redeem(&self.db, settlement_redeem_id).await?;

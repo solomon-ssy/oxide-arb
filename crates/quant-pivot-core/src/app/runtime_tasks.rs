@@ -42,7 +42,7 @@ use quant_pivot_models::{
     types::DomainSourceId,
 };
 use quant_pivot_repository::{
-    clickhouse::ChFactWriter,
+    clickhouse::{ChFactWriter, ChNativeReadRepository},
     traits::{
         CalibrationArtifactRepository, ClobMarketInfoRepository, DomainProjectionRepository,
         DomainSourceCursorRepository, DomainSourceExpectationRepository, FactWriter,
@@ -561,7 +561,7 @@ impl AppContext {
         let config = &self.config.market_data.trade_tape_on_chain;
         config.enabled.then(|| {
             Arc::new(TradeTapeReconciliationWorker::new(
-                Arc::clone(&self.infra.ch),
+                Arc::new(ChNativeReadRepository::new(Arc::clone(&self.infra.ch))),
                 Arc::new(ChFactWriter::<TradeTapeRow>::new(
                     Arc::clone(&self.infra.ch),
                     Arc::clone(&self.infra.ch_write_manager),

@@ -6,7 +6,8 @@ use sea_orm::entity::prelude::*;
 use crate::{
     enums::quant::{TradePolicyTrialScope, TradePolicyTrialStatus},
     types::{
-        ArtifactUri, ContentHash, ResearchJobId, TradePolicyTrialAttemptId, TradePolicyTrialMetrics,
+        ArtifactUri, ContentHash, ResearchJobId, TradePolicyCandidateId, TradePolicyTrialAttemptId,
+        TradePolicyTrialMetrics,
     },
 };
 
@@ -20,7 +21,7 @@ pub struct Model {
     pub attempt_ordinal: i64,
     pub experiment_family_hash: ContentHash,
     pub research_program_hash: ContentHash,
-    pub candidate_id: String,
+    pub candidate_id: TradePolicyCandidateId,
     pub candidate_hash: ContentHash,
     pub scope: TradePolicyTrialScope,
     pub fold_index: Option<i32>,

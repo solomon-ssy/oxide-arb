@@ -1,6 +1,6 @@
 //! Database configuration (`[db]`, deploy): Postgres OLTP + `ClickHouse` OLAP.
 
-use super::secret::{SecretText, SystemdCredentialRef};
+use super::secret::SecretText;
 use serde::Deserialize;
 use url::Url;
 
@@ -22,16 +22,15 @@ pub struct PostgresConfig {
     pub host: String,
     /// Server port. Default: `5432`.
     pub port: u16,
-    /// Role name. Default: `quant_pivot_runtime`.
+    /// Database role used by both runtime and explicit schema commands.
+    /// Default: `quant_pivot`.
     pub user: String,
-    /// systemd credential reference for the runtime role password.
-    pub password: SystemdCredentialRef,
+    /// Database password.
+    pub password: SecretText,
     /// Database name. Default: `quant_pivot`.
     pub database: String,
     /// Schema search path. Default: `public`.
     pub schema: String,
-    /// Immutable schema migration policy and optional elevated identity.
-    pub migration: SchemaMigrationConfig,
     /// Pool upper bound. Size for worst-case concurrent repository access.
     /// Default: `10`.
     pub max_connections: u32,
@@ -128,19 +127,6 @@ impl PostgresConfig {
         }
         pairs
     }
-
-    /// Build the connection used by deploy-time `PostgreSQL` migrations.
-    #[must_use]
-    pub fn migration_connection(&self, migration_password: &SecretText) -> Self {
-        let mut config = self.clone();
-        config.user.clone_from(&self.migration.user);
-        config.password =
-            SystemdCredentialRef::from_resolved(migration_password.expose_secret().to_owned());
-        config.max_connections = 2;
-        config.min_connections = 1;
-        "quant-pivot-migration".clone_into(&mut config.application_name);
-        config
-    }
 }
 
 /// The `url` setters intentionally preserve percent-escape sequences. Escape a
@@ -155,10 +141,9 @@ impl Default for PostgresConfig {
             host: default_host(),
             port: default_port(),
             user: default_user(),
-            password: SystemdCredentialRef::default(),
+            password: SecretText::default(),
             database: default_database(),
             schema: default_schema(),
-            migration: SchemaMigrationConfig::default(),
             max_connections: default_max_conns(),
             min_connections: default_min_conns(),
             connect_timeout_secs: default_connect_timeout(),
@@ -176,25 +161,6 @@ impl Default for PostgresConfig {
     }
 }
 
-/// Deploy-only schema identity shared by `PostgreSQL` and `ClickHouse`.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct SchemaMigrationConfig {
-    /// Independently provisioned DDL role.
-    pub user: String,
-    /// Optional DDL credential used only by migration/plan/apply commands.
-    pub password: Option<SystemdCredentialRef>,
-}
-
-impl Default for SchemaMigrationConfig {
-    fn default() -> Self {
-        Self {
-            user: "quant_pivot_migrator".to_owned(),
-            password: None,
-        }
-    }
-}
-
 fn default_host() -> String {
     "localhost".into()
 }
@@ -202,7 +168,7 @@ const fn default_port() -> u16 {
     5432
 }
 fn default_user() -> String {
-    "quant_pivot_runtime".into()
+    "quant_pivot".into()
 }
 fn default_database() -> String {
     "quant_pivot".into()
@@ -264,10 +230,8 @@ pub struct ClickHouseConfig {
     pub database: String,
     /// User name. Default: `default`.
     pub user: String,
-    /// systemd credential reference for the runtime role password.
-    pub password: SystemdCredentialRef,
-    /// Versioned schema migration policy and optional elevated identity.
-    pub migration: SchemaMigrationConfig,
+    /// Database password.
+    pub password: SecretText,
     /// Max age (seconds) of a partial batch before it is flushed. Lower =
     /// fresher analytics, more insert requests. Default: `5`.
     pub flush_interval_secs: u64,
@@ -288,28 +252,11 @@ impl Default for ClickHouseConfig {
             url: default_ch_url(),
             database: default_ch_database(),
             user: default_ch_user(),
-            password: SystemdCredentialRef::default(),
-            migration: SchemaMigrationConfig::default(),
+            password: SecretText::default(),
             flush_interval_secs: default_ch_flush_interval(),
             batch_size: default_ch_batch_size(),
             max_concurrent_inserts: default_ch_max_concurrent_inserts(),
         }
-    }
-}
-
-impl ClickHouseConfig {
-    /// Build the connection used by the deploy-only schema migrator.
-    ///
-    /// Local development reuses the runtime identity by default. Production
-    /// can provide an independently scoped DDL identity without granting the
-    /// long-lived ingestion connection `CREATE`, `ALTER`, or `DROP`.
-    #[must_use]
-    pub fn migration_connection(&self, migration_password: &SecretText) -> Self {
-        let mut config = self.clone();
-        config.user.clone_from(&self.migration.user);
-        config.password =
-            SystemdCredentialRef::from_resolved(migration_password.expose_secret().to_owned());
-        config
     }
 }
 
@@ -353,15 +300,13 @@ mod tests {
     }
 
     #[test]
-    fn database_debug_redacts_runtime_and_migration_passwords() {
-        let mut config = PostgresConfig {
-            password: "runtime-secret".into(),
+    fn database_debug_redacts_password() {
+        let config = PostgresConfig {
+            password: "database-secret".into(),
             ..PostgresConfig::default()
         };
-        config.migration.password = Some("ddl-secret".into());
         let debug = format!("{config:?}");
-        assert!(!debug.contains("runtime-secret"));
-        assert!(!debug.contains("ddl-secret"));
+        assert!(!debug.contains("database-secret"));
         assert!(debug.contains("redacted"));
     }
 }

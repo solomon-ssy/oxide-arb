@@ -43,7 +43,7 @@ use quant_pivot_models::{
     },
 };
 use quant_pivot_repository::{
-    clickhouse::ChFactWriter,
+    clickhouse::{ChFactWriter, ChNativeReadRepository, FactEvidenceTable},
     traits::{
         CalibrationArtifactRepository, DomainProjectionRepository, DomainSourceCursorRepository,
         DomainSourceExpectationRepository, EventRepository, FactWriter, MarketLinkageRepository,
@@ -870,14 +870,12 @@ fn audit_source_states(
 async fn gistemp_historical_time_evidence(
     infra: &InfraBundle,
 ) -> QuantResult<GistempHistoricalTimeEvidence> {
-    let row_count = clickhouse_count(
-        infra,
-        "SELECT count() FROM quant_weather_observation_fact WHERE source_id = 'nasa_gistemp'",
-    )
-    .await?;
-    if row_count == 0 {
+    let raw = ChNativeReadRepository::new(Arc::clone(&infra.ch))
+        .gistemp_historical_time()
+        .await?;
+    if raw.row_count == 0 {
         return Ok(GistempHistoricalTimeEvidence {
-            row_count,
+            row_count: raw.row_count,
             earliest_local_date_epoch_days: None,
             earliest_observed_at_ms: None,
             earliest_valid_from_ms: None,
@@ -887,37 +885,6 @@ async fn gistemp_historical_time_evidence(
             verified: false,
         });
     }
-
-    let earliest_local_date_epoch_days = clickhouse_i32(
-        infra,
-        "SELECT min(local_date) FROM quant_weather_observation_fact WHERE source_id = 'nasa_gistemp'",
-    )
-    .await?;
-    let earliest_observed_at_ms = clickhouse_i64(
-        infra,
-        "SELECT min(observed_at) FROM quant_weather_observation_fact WHERE source_id = 'nasa_gistemp'",
-    )
-    .await?;
-    let earliest_valid_from_ms = clickhouse_i64(
-        infra,
-        "SELECT min(assumeNotNull(valid_from)) FROM quant_weather_observation_fact WHERE source_id = 'nasa_gistemp' AND valid_from IS NOT NULL",
-    )
-    .await?;
-    let earliest_valid_to_ms = clickhouse_i64(
-        infra,
-        "SELECT min(assumeNotNull(valid_to)) FROM quant_weather_observation_fact WHERE source_id = 'nasa_gistemp' AND valid_to IS NOT NULL",
-    )
-    .await?;
-    let null_valid_from_rows = clickhouse_count(
-        infra,
-        "SELECT count() FROM quant_weather_observation_fact WHERE source_id = 'nasa_gistemp' AND valid_from IS NULL",
-    )
-    .await?;
-    let null_valid_to_rows = clickhouse_count(
-        infra,
-        "SELECT count() FROM quant_weather_observation_fact WHERE source_id = 'nasa_gistemp' AND valid_to IS NULL",
-    )
-    .await?;
 
     let epoch = NaiveDate::from_ymd_opt(1970, 1, 1)
         .ok_or_else(|| QuantError::config("invalid Unix epoch date constant"))?;
@@ -938,21 +905,21 @@ async fn gistemp_historical_time_evidence(
         .ok_or_else(|| QuantError::config("invalid GISTEMP first-observation time constant"))?
         .and_utc()
         .timestamp_millis();
-    let verified = earliest_local_date_epoch_days == expected_local_date
-        && earliest_observed_at_ms == expected_observed_at
-        && earliest_valid_from_ms == expected_valid_from
-        && earliest_valid_to_ms == expected_observed_at
-        && null_valid_from_rows == 0
-        && null_valid_to_rows == 0;
+    let verified = raw.earliest_local_date_epoch_days == Some(expected_local_date)
+        && raw.earliest_observed_at_ms == Some(expected_observed_at)
+        && raw.earliest_valid_from_ms == Some(expected_valid_from)
+        && raw.earliest_valid_to_ms == Some(expected_observed_at)
+        && raw.null_valid_from_rows == 0
+        && raw.null_valid_to_rows == 0;
 
     Ok(GistempHistoricalTimeEvidence {
-        row_count,
-        earliest_local_date_epoch_days: Some(earliest_local_date_epoch_days),
-        earliest_observed_at_ms: Some(earliest_observed_at_ms),
-        earliest_valid_from_ms: Some(earliest_valid_from_ms),
-        earliest_valid_to_ms: Some(earliest_valid_to_ms),
-        null_valid_from_rows,
-        null_valid_to_rows,
+        row_count: raw.row_count,
+        earliest_local_date_epoch_days: raw.earliest_local_date_epoch_days,
+        earliest_observed_at_ms: raw.earliest_observed_at_ms,
+        earliest_valid_from_ms: raw.earliest_valid_from_ms,
+        earliest_valid_to_ms: raw.earliest_valid_to_ms,
+        null_valid_from_rows: raw.null_valid_from_rows,
+        null_valid_to_rows: raw.null_valid_to_rows,
         verified,
     })
 }
@@ -960,97 +927,32 @@ async fn gistemp_historical_time_evidence(
 async fn fact_idempotency_evidence(
     infra: &InfraBundle,
 ) -> QuantResult<BTreeMap<String, FactIdempotencyEvidence>> {
+    let repository = ChNativeReadRepository::new(Arc::clone(&infra.ch));
     let (domain, crypto_reports, weather_observations, weather_forecasts) = tokio::try_join!(
-        fact_table_idempotency(
-            infra,
-            "SELECT count() FROM quant_domain_observation WHERE family = 'crypto'",
-            "SELECT uniqExact(tuple(source_id, instrument_key, metric, event_time)) FROM quant_domain_observation WHERE family = 'crypto'",
-            "SELECT toUInt64(count() - uniqExact(tuple(source_id, instrument_key, metric, event_time))) FROM quant_domain_observation WHERE family = 'crypto'",
-            "SELECT toUInt64(0)",
-        ),
-        fact_table_idempotency(
-            infra,
-            "SELECT count() FROM quant_crypto_price_report",
-            "SELECT uniqExact(tuple(source_id, instrument_key, source_sequence, event_time, report_hash)) FROM quant_crypto_price_report",
-            "SELECT toUInt64(count() - uniqExact(tuple(source_id, instrument_key, source_sequence, event_time, report_hash))) FROM quant_crypto_price_report",
-            "SELECT toUInt64(0)",
-        ),
-        fact_table_idempotency(
-            infra,
-            "SELECT count() FROM quant_weather_observation_fact",
-            "SELECT uniqExact(tuple(source_id, instrument_key, variable, observed_at, report_hash)) FROM quant_weather_observation_fact",
-            "SELECT toUInt64(count() - uniqExact(tuple(source_id, instrument_key, variable, observed_at, report_hash))) FROM quant_weather_observation_fact",
-            "SELECT toUInt64(count() - uniqExact(tuple(source_id, instrument_key, variable, observed_at, revision))) FROM quant_weather_observation_fact",
-        ),
-        fact_table_idempotency(
-            infra,
-            "SELECT count() FROM quant_weather_forecast_fact",
-            "SELECT uniqExact(tuple(source_id, instrument_key, variable, reference_time, valid_time, ifNull(member, 65535), report_hash)) FROM quant_weather_forecast_fact",
-            "SELECT toUInt64(count() - uniqExact(tuple(source_id, instrument_key, variable, reference_time, valid_time, ifNull(member, 65535), report_hash))) FROM quant_weather_forecast_fact",
-            "SELECT toUInt64(count() - uniqExact(tuple(source_id, instrument_key, variable, reference_time, valid_time, ifNull(member, 65535), revision))) FROM quant_weather_forecast_fact",
-        ),
+        repository.fact_idempotency(FactEvidenceTable::DomainCrypto),
+        repository.fact_idempotency(FactEvidenceTable::CryptoPriceReport),
+        repository.fact_idempotency(FactEvidenceTable::WeatherObservation),
+        repository.fact_idempotency(FactEvidenceTable::WeatherForecast),
     )?;
-    let evidence = BTreeMap::from([
-        ("quant_domain_observation".to_owned(), domain),
-        ("quant_crypto_price_report".to_owned(), crypto_reports),
+    Ok([
+        (FactEvidenceTable::DomainCrypto, domain),
+        (FactEvidenceTable::CryptoPriceReport, crypto_reports),
+        (FactEvidenceTable::WeatherObservation, weather_observations),
+        (FactEvidenceTable::WeatherForecast, weather_forecasts),
+    ]
+    .into_iter()
+    .map(|(table, counts)| {
         (
-            "quant_weather_observation_fact".to_owned(),
-            weather_observations,
-        ),
-        ("quant_weather_forecast_fact".to_owned(), weather_forecasts),
-    ]);
-    Ok(evidence)
-}
-
-async fn fact_table_idempotency(
-    infra: &InfraBundle,
-    physical_rows_sql: &'static str,
-    logical_keys_sql: &'static str,
-    duplicate_rows_sql: &'static str,
-    revision_conflicts_sql: &'static str,
-) -> QuantResult<FactIdempotencyEvidence> {
-    let (physical_rows, logical_keys, duplicate_rows, revision_conflicts) = tokio::try_join!(
-        clickhouse_count(infra, physical_rows_sql),
-        clickhouse_count(infra, logical_keys_sql),
-        clickhouse_count(infra, duplicate_rows_sql),
-        clickhouse_count(infra, revision_conflicts_sql),
-    )?;
-    Ok(FactIdempotencyEvidence {
-        physical_rows,
-        logical_keys,
-        duplicate_rows,
-        revision_conflicts,
+            table.table_name().to_owned(),
+            FactIdempotencyEvidence {
+                physical_rows: counts.physical_rows,
+                logical_keys: counts.logical_keys,
+                duplicate_rows: counts.duplicate_rows,
+                revision_conflicts: counts.revision_conflicts,
+            },
+        )
     })
-}
-
-async fn clickhouse_count(infra: &InfraBundle, sql: &'static str) -> QuantResult<u64> {
-    infra
-        .ch
-        .client()
-        .query(sql)
-        .fetch_one::<u64>()
-        .await
-        .map_err(|error| QuantError::config(format!("ClickHouse evidence count failed: {error}")))
-}
-
-async fn clickhouse_i32(infra: &InfraBundle, sql: &'static str) -> QuantResult<i32> {
-    infra
-        .ch
-        .client()
-        .query(sql)
-        .fetch_one::<i32>()
-        .await
-        .map_err(|error| QuantError::config(format!("ClickHouse evidence query failed: {error}")))
-}
-
-async fn clickhouse_i64(infra: &InfraBundle, sql: &'static str) -> QuantResult<i64> {
-    infra
-        .ch
-        .client()
-        .query(sql)
-        .fetch_one::<i64>()
-        .await
-        .map_err(|error| QuantError::config(format!("ClickHouse evidence query failed: {error}")))
+    .collect())
 }
 
 const fn classification_outcome_label(outcome: DomainMarketClassificationOutcome) -> &'static str {

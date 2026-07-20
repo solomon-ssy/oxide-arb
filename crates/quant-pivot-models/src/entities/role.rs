@@ -2,7 +2,7 @@
 
 use crate::{
     enums::rbac::{RoleKind, RoleStatus},
-    types::RoleId,
+    types::{RoleCode, RoleId},
 };
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
@@ -15,7 +15,7 @@ pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub id: RoleId,
     #[sea_orm(column_type = "Text")]
-    pub code: String,
+    pub code: RoleCode,
     #[sea_orm(column_type = "Text")]
     pub name: String,
     #[sea_orm(column_type = "Text", nullable)]

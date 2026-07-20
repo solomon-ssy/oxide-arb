@@ -18,7 +18,9 @@ use quant_pivot_models::{
         operation_log::{OperationCategory, OperationHttpMethod, OperationOutcome},
         rbac::{MenuKind, Operation, ResourceType, RoleKind, RoleStatus, UserStatus},
     },
-    types::{ContentHash, MenuId, OperationDetailDocument, OperationLogId, RoleId, UserId},
+    types::{
+        ContentHash, MenuId, OperationDetailDocument, OperationLogId, RoleCode, RoleId, UserId,
+    },
 };
 use quant_pivot_repository::{
     postgres::{
@@ -63,7 +65,7 @@ fn new_user(username: &str) -> NewUser {
 fn new_role(code: &str) -> NewRole {
     NewRole {
         id: RoleId::from_v7(),
-        code: code.to_owned(),
+        code: RoleCode::new(code),
         name: code.to_owned(),
         description: None,
         kind: RoleKind::Custom,
@@ -252,8 +254,8 @@ async fn role_crud_and_builtin_protection() {
     );
 
     let all = repo.list().await.expect("list");
-    assert!(all.iter().any(|r| r.code == "custom_role_a"));
-    assert!(all.iter().any(|r| r.code == "super_admin"));
+    assert!(all.iter().any(|r| r.code.as_str() == "custom_role_a"));
+    assert!(all.iter().any(|r| r.code.as_str() == "super_admin"));
 
     // Built-in roles are protected from deletion; custom ones are deletable.
     let builtin = repo
@@ -391,7 +393,7 @@ async fn assign_roles_replaces_join_and_casbin_grouping() {
         .expect("assign a");
     let roles_now = user_role.list_roles_for_user(&user.id).await.expect("list");
     assert_eq!(roles_now.len(), 1);
-    assert_eq!(roles_now[0].code, "set_role_a");
+    assert_eq!(roles_now[0].code.as_str(), "set_role_a");
     assert_eq!(grouping_count("set_role_a").await, 1);
 
     // Replace set: B in, A out — relational and Casbin `g` both follow.
@@ -404,7 +406,7 @@ async fn assign_roles_replaces_join_and_casbin_grouping() {
         .expect("assign b");
     let roles_now = user_role.list_roles_for_user(&user.id).await.expect("list");
     assert_eq!(roles_now.len(), 1);
-    assert_eq!(roles_now[0].code, "set_role_b");
+    assert_eq!(roles_now[0].code.as_str(), "set_role_b");
     assert_eq!(grouping_count("set_role_a").await, 0);
     assert_eq!(grouping_count("set_role_b").await, 1);
 
@@ -597,9 +599,58 @@ async fn casbin_adapter_matches_full_tuple() {
     );
     assert_eq!(count_for("adapter_role").await, 4);
 
+    // A short tuple and a longer tuple with the same prefix are distinct. Exact
+    // deletion must pad the short tuple and preserve the longer one.
+    let short = vec!["adapter_role".to_owned(), "audit".to_owned()];
+    let long = vec![
+        "adapter_role".to_owned(),
+        "audit".to_owned(),
+        "read".to_owned(),
+    ];
+    assert!(
+        adapter
+            .add_policy("p", "p", short.clone())
+            .await
+            .expect("short")
+    );
+    assert!(adapter.add_policy("p", "p", long).await.expect("long"));
+    assert!(
+        adapter
+            .remove_policy("p", "p", short)
+            .await
+            .expect("remove short")
+    );
+    assert_eq!(
+        casbin_rule::Entity::find()
+            .filter(casbin_rule::Column::Ptype.eq("p"))
+            .filter(casbin_rule::Column::V0.eq("adapter_role"))
+            .filter(casbin_rule::Column::V1.eq("audit"))
+            .filter(casbin_rule::Column::V2.eq("read"))
+            .count(&db)
+            .await
+            .expect("count long tuple"),
+        1
+    );
+
+    // Batch removal is one atomic statement over the exact tuple set.
+    assert!(
+        adapter
+            .remove_policies(
+                "p",
+                "p",
+                vec![
+                    p_rule("adapter_role", "risk", "read"),
+                    p_rule("adapter_role", "pnl", "read"),
+                ],
+            )
+            .await
+            .expect("remove policies")
+    );
+    assert_eq!(count_for("adapter_role").await, 3);
+
     // Exact removal deletes only the matching tuple.
     assert!(adapter.remove_policy("p", "p", read).await.expect("remove"));
-    assert_eq!(count_for("adapter_role").await, 3);
+    assert_eq!(count_for("adapter_role").await, 2);
 
     // save_policy is a full snapshot: clear then bulk insert from the model.
     adapter.clear_policy().await.expect("clear");

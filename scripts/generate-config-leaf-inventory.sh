@@ -27,6 +27,12 @@ trap 'rm -rf "${inventory_tmp}"' EXIT
     >"${inventory_tmp}/runtime.json"
 )
 yq -p toml -o json '.' "${repo_root}/config/quant-pivot.toml" \
+  >"${inventory_tmp}/deploy-base.json"
+yq -p toml -o json '.' "${repo_root}/config/quant-pivot.production.example.toml" \
+  >"${inventory_tmp}/deploy-production.json"
+jq -s '.[0] * .[1]' \
+  "${inventory_tmp}/deploy-base.json" \
+  "${inventory_tmp}/deploy-production.json" \
   >"${inventory_tmp}/deploy.json"
 
 printf '%s\n' $'path\tcurrent_owner\tdisposition\tnew_owner\tconsumer\tapply_boundary\tvalidator\tsecret_classification\treason' \
@@ -114,20 +120,17 @@ jq -r '
     | join(".")
     | gsub("\\.\\[\\]"; "[]");
   def is_secret($path):
-    ($path | test("(^|\\.)(password|private_key|signing_key|token|secret|api_key|bot_token_credential|authorization_credential)(\\.name)?$"));
+    ($path | test("(^|\\.)(password|private_key|signing_key|previous_signing_keys\\[\\]|token|secret|api_key|api_secret|bot_token|authorization)$"))
+      or $path == "polymarket.onchain.rpc_endpoint.url";
   def metadata($path):
     if $path == "polymarket.chain_id" then
       ["migrate", "Polymarket protocol catalog constant", "EIP-712 and transaction signing",
        "application build", "compile-time protocol contract", "public_protocol_value",
        "The chain id is an external protocol invariant and must not be operator editable"]
-    elif ($path | test("^db\\.(postgres|clickhouse)\\.migration\\.(user|password(\\.name)?)$")) then
-      ["migrate", "schema CLI credential reference", "migration CLI only",
-       "schema command start", "DDL-scope credential preflight", "privileged_credential_reference",
-       "The runtime process must never hold DDL authority"]
     elif is_secret($path) then
-      ["migrate", "systemd Credential reference", "credential loader for the owning adapter",
-       "process start", "credential presence and file-permission preflight", "secret_reference",
-       "Secret values must not appear in TOML, environment dumps or process arguments"]
+      ["keep_deploy", "SecretText", "owning infrastructure or provider adapter",
+       "process start", "typed format validation, Debug redaction and tracked-placeholder lint", "plaintext_deploy_secret",
+       "The permission-restricted deploy TOML is the single secret source; values are zeroized and never serialized"]
     elif ($path | startswith("db.")) then
       ["keep_deploy", "database resource budget", "PostgreSQL or ClickHouse adapter",
        "process start", "typed DeployConfig validation and connectivity preflight", "none",

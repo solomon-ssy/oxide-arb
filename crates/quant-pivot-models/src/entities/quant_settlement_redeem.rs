@@ -3,8 +3,8 @@
 use crate::{
     enums::{execution::SettlementRedeemState, quant::ExecutionWalletKind},
     types::{
-        MarketId, SettlementBalanceEvidence, SettlementPayoutVector, SettlementRedeemId,
-        SettlementRedeemIndexSets, Usd,
+        EvmAddress, EvmTransactionHash, MarketId, SettlementBalanceEvidence,
+        SettlementPayoutVector, SettlementRedeemId, SettlementRedeemIndexSets, Usd,
     },
 };
 use chrono::{DateTime, Utc};
@@ -18,10 +18,10 @@ pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub settlement_redeem_id: SettlementRedeemId,
     pub market_id: MarketId,
-    pub funder_address: String,
+    pub funder_address: EvmAddress,
     pub wallet_kind: ExecutionWalletKind,
     pub state: SettlementRedeemState,
-    pub tx_hash: Option<String>,
+    pub tx_hash: Option<EvmTransactionHash>,
     pub index_sets_json: SettlementRedeemIndexSets,
     pub payout_vector_json: SettlementPayoutVector,
     pub balance_before_json: SettlementBalanceEvidence,
