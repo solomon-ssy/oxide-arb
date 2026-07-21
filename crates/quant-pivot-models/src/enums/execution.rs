@@ -81,7 +81,7 @@ pg_enum! {
         /// initial state for an in-flight order handed to reconciliation — boot
         /// recovery and `Ambiguous` venue outcomes land here. Distinct from
         /// `Unresolvable`, which is the recon worker's terminal "ran, could not
-        /// resolve" verdict (05.5).
+        /// resolve" verdict.
         Pending => "pending",
         Filled => "filled",
         NotFilled => "not_filled",
@@ -92,7 +92,7 @@ pg_enum! {
 }
 
 impl ReconciliationResult {
-    /// Whether this reconciliation verdict blocks final attribution (05.7).
+    /// Whether this reconciliation verdict blocks final attribution.
     ///
     /// Terminal filled/settled facts require reconciled truth; `Pending` and
     /// `Unresolvable` mean the ledger is still ambiguous and attribution must
@@ -129,7 +129,7 @@ impl KillSwitchState {
     /// [`EmergencyHalted`](Self::EmergencyHalted) deliberately returns `false`
     /// here: emergency liquidation does **not** flow through the normal auto-exit
     /// path but through [`Self::requires_emergency_exit`] governed by
-    /// `KillSwitchPolicy.emergency_exit` (05.6). [`ExecutionHalted`](Self::ExecutionHalted)
+    /// `KillSwitchPolicy.emergency_exit`. [`ExecutionHalted`](Self::ExecutionHalted)
     /// freezes all automated action (manual handling only).
     #[must_use]
     pub const fn allows_auto_exit(self) -> bool {
@@ -230,7 +230,7 @@ wire_enum! {
         VenueGuard => "venue_guard",
         CredentialReadiness => "credential_readiness",
         ExitMonitorReadiness => "exit_monitor_readiness",
-        /// Defense-in-depth re-check (Phase 11.3 §8): the frozen model artifact's
+        /// Defense-in-depth re-check: the frozen model artifact's
         /// return model must still be `Calibrated` at submission time, even
         /// though `report/composer.rs` already denied `SemiAuto`/`AutoExecution`
         /// eligibility for uncalibrated candidates at report-build time.
@@ -258,8 +258,7 @@ pg_enum! {
         TimeExit => "time_exit",
         PartialExit => "partial_exit",
         SignalInvalidated => "signal_invalidated",
-        /// Opportunistic model-driven Sell (Phase 6 Sell scorer); contract +
-        /// metric label land now so the exit loop is wired for it.
+        /// Opportunistic model-driven Sell emitted by the Sell scorer.
         Opportunistic => "opportunistic",
         Manual => "manual",
         SettlementHold => "settlement_hold",
@@ -300,7 +299,7 @@ wire_enum! {
 mod tests {
     use super::{KillSwitchState, ReconciliationResult};
 
-    /// Behavior table (父文档 §8 / 05.1 §6) encoded as a single source of truth.
+    /// Kill-switch behavior encoded as a single source of truth.
     /// Columns: state, new-entry, auto-exit, emergency-exit.
     const BEHAVIOR_TABLE: &[(KillSwitchState, bool, bool, bool)] = &[
         (KillSwitchState::Closed, true, true, false),

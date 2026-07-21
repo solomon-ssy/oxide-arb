@@ -11,7 +11,7 @@ use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
     clickhouse::TradeTapeRow,
     config::TradeTapeOnChainConfig,
-    domain::{
+    domain::data_plane::{
         TradeTapeBlockCursorInfo, TradeTapeBlockCursorStatus, TradeTapePrint, TradeTapeSourceKind,
         UpsertTradeTapeBlockCursor,
     },
@@ -21,9 +21,9 @@ use quant_pivot_repository::{
     clickhouse::ChFactWriter,
     traits::{FactWriter, TradeTapeBlockCursorRepository},
 };
+use tokio_util::sync::CancellationToken;
 
 use crate::{infra::periodic_task::PeriodicTask, ingest::market_registry::MarketRegistry};
-use tokio_util::sync::CancellationToken;
 
 /// Periodically ingests Polygon `OrderFilled` logs into `quant_trade_tape`.
 pub struct TradeTapeWorker {
@@ -351,12 +351,13 @@ fn dedup_prints(prints: Vec<TradeTapePrint>) -> Vec<TradeTapePrint> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use quant_pivot_models::{
-        domain::TradeParticipantRole,
+        domain::data_plane::TradeParticipantRole,
         types::{MarketId, Price, Shares, TokenId, Usd},
     };
     use rust_decimal_macros::dec;
+
+    use super::*;
 
     #[test]
     fn should_process_log_respects_checkpoint() {

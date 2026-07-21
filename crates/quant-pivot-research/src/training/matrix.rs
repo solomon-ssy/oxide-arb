@@ -990,21 +990,24 @@ pub fn probe_matrix_coverage(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::{
-        features::{FeatureCell, FeatureStaleness, FeatureValue, FeatureVector, NullReason},
-        training::fixtures,
-    };
+    use std::collections::BTreeMap;
+
     use chrono::{Duration, TimeZone};
+    use proptest::{collection::vec as strategy_vec, prop_assert_eq, proptest};
     use quant_pivot_models::{
-        domain::DecisionClock,
+        domain::data_plane::DecisionClock,
         enums::quant::DataQualityStatus,
         types::{
             MarketId, Probability, SchemaVersion, TokenId, TrainingExampleId, TrainingSampleSource,
         },
     };
     use rust_decimal_macros::dec;
-    use std::collections::BTreeMap;
+
+    use super::*;
+    use crate::{
+        features::{FeatureCell, FeatureStaleness, FeatureValue, FeatureVector, NullReason},
+        training::fixtures,
+    };
 
     fn example(value: FeatureValue, substitution: bool, offset: i64) -> TrainingExample {
         let cell = if substitution {
@@ -1104,6 +1107,54 @@ mod tests {
             }],
             label_name: LabelName::from_static("return"),
             label_horizon_secs: 60,
+        }
+    }
+
+    fn encoded_bits(rows: &[Vec<f64>]) -> Vec<Vec<u64>> {
+        rows.iter()
+            .map(|row| row.iter().map(|value| value.to_bits()).collect())
+            .collect()
+    }
+
+    proptest! {
+        #[test]
+        fn frozen_transform_is_bit_identical_for_fit_reload_and_serving_apply(
+            generated in strategy_vec((0_u8..4_u8, -10_000_i64..10_001_i64), 0..64),
+        ) {
+            let mut examples = vec![
+                example(FeatureValue::Bps(dec!(100)), false, 0),
+                example(FeatureValue::Bps(dec!(300)), false, 1),
+            ];
+            examples.extend(generated.into_iter().enumerate().map(|(index, (state, value))| {
+                let offset = i64::try_from(index).expect("generated case count fits i64") + 2;
+                match state {
+                    0 => example(FeatureValue::Bps(Decimal::from(value)), false, offset),
+                    1 => example(FeatureValue::Bps(Decimal::from(value)), true, offset),
+                    2 => missing_example(offset),
+                    _ => not_applicable_example(offset),
+                }
+            }));
+
+            let matrix = build_training_matrix(&examples, &spec(false))
+                .expect("generated optional-input matrix is valid");
+            let (fitted, training_rows) = FittedInputTransform::fit(&matrix)
+                .expect("anchored observations guarantee a non-zero fitted variance");
+            let serving_rows = fitted
+                .apply_rows(&matrix.cells)
+                .expect("serving applies the frozen training transform");
+            let serialized = serde_json::to_vec(&fitted).expect("serialize frozen transform");
+            let reloaded: FittedInputTransform =
+                serde_json::from_slice(&serialized).expect("reload frozen transform");
+            let replay_rows = reloaded
+                .apply_rows(&matrix.cells)
+                .expect("replay applies the reloaded frozen transform");
+
+            prop_assert_eq!(encoded_bits(&training_rows), encoded_bits(&serving_rows));
+            prop_assert_eq!(encoded_bits(&training_rows), encoded_bits(&replay_rows));
+            prop_assert_eq!(
+                fitted.transform_hash().expect("fitted transform hash"),
+                reloaded.transform_hash().expect("reloaded transform hash"),
+            );
         }
     }
 

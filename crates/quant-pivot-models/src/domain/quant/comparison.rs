@@ -1,5 +1,10 @@
 //! Pairwise model-comparison report persistence DTOs.
 
+use chrono::{DateTime, Utc};
+use rust_decimal::Decimal;
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
+use serde::{Deserialize, Serialize};
+
 use crate::{
     entities::quant_model_comparison_report,
     types::{
@@ -7,10 +12,6 @@ use crate::{
         backtest::CategoryRankIcDeltas,
     },
 };
-use chrono::{DateTime, Utc};
-use rust_decimal::Decimal;
-use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
-use serde::{Deserialize, Serialize};
 
 /// Frozen, content-addressed pairwise model-comparison report row.
 #[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]

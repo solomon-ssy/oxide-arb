@@ -13,6 +13,7 @@ wire_enum! {
 }
 pg_enum! {
     type_name = "qp_model_family",
+    @derive(schemars::JsonSchema)
     pub enum ModelFamily {
         WeightedFactor => "weighted_factor",
         ClassicalRandomForest => "classical_random_forest",
@@ -21,7 +22,7 @@ pg_enum! {
         ClassicalRidge => "classical_ridge",
         ClassicalLasso => "classical_lasso",
         ClassicalElasticNet => "classical_elastic_net",
-        /// Sell-side hold-vs-exit weighted scorer (Phase 06.1). Distinct family
+        /// Sell-side hold-vs-exit weighted scorer. Distinct family
         /// from the Buy-side `WeightedFactor` ranker so a Sell artifact can never
         /// be confused for a Buy artifact at the registry / runtime boundary.
         HoldVsExitWeighted => "hold_vs_exit_weighted",
@@ -35,7 +36,7 @@ impl ModelFamily {
         !matches!(self, Self::WeightedFactor | Self::HoldVsExitWeighted)
     }
 
-    /// Whether this family scores the Sell-side hold-vs-exit decision (06.1).
+    /// Whether this family scores the Sell-side hold-vs-exit decision.
     #[must_use]
     pub const fn is_exit_scorer(self) -> bool {
         matches!(self, Self::HoldVsExitWeighted)

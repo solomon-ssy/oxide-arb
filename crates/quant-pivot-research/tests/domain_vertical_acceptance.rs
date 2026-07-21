@@ -1,18 +1,24 @@
-//! Phase 11.2.2 §9 acceptance tests (research plane).
+//! acceptance tests (research plane).
 
-use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::{
+    collections::{BTreeMap, HashMap},
+    slice,
+    sync::Arc,
+};
 
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{
     domain::{
-        CryptoPriceReport, CryptoSubject, DecisionClock, DecisionSource, DomainObservation,
-        GroundingProof, LinkageOutcome, LinkageSourceMetadata, MarketLinkage, MarketSubject,
-        PriceComparator, ResolutionOracle, ResolvedBinding, ResolvedSourceBinding,
+        data_plane::{CryptoPriceReport, DecisionClock, DecisionSource, DomainObservation},
         market::{
             book::BookLevel,
             registry::{MarketRegistryInfo, TokenInfo},
+        },
+        quant::{
+            CryptoSubject, GroundingProof, LinkageOutcome, LinkageSourceMetadata, MarketLinkage,
+            MarketSubject, PriceComparator, ResolutionOracle, ResolvedBinding,
+            ResolvedSourceBinding,
         },
     },
     enums::{
@@ -26,12 +32,15 @@ use quant_pivot_models::{
         market::MarketStatus,
         quant::{DataQualityStatus, DatasetPurpose},
     },
+    hashing::CanonicalDigest,
     runtime_config::{DataQualityConfig, DomainConfig, FactorsConfig, FeaturesConfig},
     types::{
-        BinanceSymbol, CatalogEventChangeId, CatalogMarketChangeId, CatalogSyncBatchId,
-        ChainlinkFeedKey, ContentHash, CryptoAsset, CryptoQuote, DomainInstrumentKey,
-        DomainSourceId, EventId, MarketId, MarketLinkageId, Price, Probability, ResolverVersion,
-        SchemaVersion, Shares, TokenId, Usd, stable_name::FactorName,
+        BinanceSymbol, CatalogDecisionRef, CatalogEventChangeId, CatalogMarketChangeId,
+        CatalogSyncBatchId, ChainlinkFeedKey, ContentHash, CryptoAsset, CryptoQuote,
+        DomainFeatureSlice, DomainInstrumentKey, DomainSourceId, EventId, EvidenceSourceRef,
+        FeatureCell, FeatureStaleness, FeatureValue, MarketId, MarketLinkageId, ModelSpecId, Price,
+        Probability, ResolverVersion, SchemaVersion, Shares, TokenId, TrainingExampleId,
+        TrainingSampleSource, Usd, stable_name::FactorName,
     },
 };
 use quant_pivot_research::{
@@ -44,15 +53,14 @@ use quant_pivot_research::{
         names::{DOMAIN_CRYPTO_BETA_REGIME, DOMAIN_CRYPTO_STRIKE_PRESSURE},
     },
     features::{
-        CatalogDecisionRef, ConfiguredFeatureBuilder, CryptoDomainFeatureBuilder, DomainComputeCtx,
-        DomainFeatureBuilder, DomainFeatureSlice, DomainSliceData, DomainSliceDataRef,
-        DomainSliceInputs, EvidenceSourceRef, FeatureCell, FeatureStaleness, FeatureValue,
+        ConfiguredFeatureBuilder, CryptoDomainFeatureBuilder, DomainComputeCtx,
+        DomainFeatureBuilder, DomainSliceData, DomainSliceDataRef, DomainSliceInputs,
         FeatureVector, MarketDecisionCaptureInput, MarketWindowSnapshot, ResolvedBook,
         ResolvedInputs, ResolvedMarketBundle, ResolvedMarketContext, TradeTapeWindowSnapshot,
         market_decision_capture_from_resolved,
         names::{
-            domain_crypto::{self, BASIS_VS_RESOLUTION_SOURCE},
-            market as market_names,
+            domain_crypto::{BASIS_VS_RESOLUTION_SOURCE, DISTANCE_TO_STRIKE},
+            market::CATEGORY,
         },
     },
     hashing::ResearchHasher,
@@ -69,6 +77,7 @@ use quant_pivot_research::{
 };
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
+use uuid::Uuid;
 
 fn content_hash(seed: char) -> ContentHash {
     ContentHash::parse(format!("blake3:{}", seed.to_string().repeat(64))).expect("test hash")
@@ -78,7 +87,7 @@ fn source_binding(
     role: LinkageSourceRole,
     source_id: DomainSourceId,
     instrument_key: DomainInstrumentKey,
-    available_at: chrono::DateTime<Utc>,
+    available_at: DateTime<Utc>,
 ) -> ResolvedSourceBinding {
     ResolvedSourceBinding {
         role,
@@ -96,7 +105,7 @@ fn metadata(slug: &str) -> LinkageSourceMetadata {
         question: "Bitcoin Up or Down".to_owned(),
         // Every observed short-cycle up/down market carries this literal
         // Chainlink Data Streams anchor; Tier 0/1 now ground the oracle to it
-        // instead of assuming a ruleset default (11.2.2 remediation R4).
+        // instead of assuming a ruleset default.
         description: Some(
             "The resolution source for this market is the Chainlink BTC/USD data stream, \
              available at https://data.chain.link/streams/btc-usd."
@@ -111,7 +120,7 @@ fn metadata(slug: &str) -> LinkageSourceMetadata {
 fn crypto_slice() -> DomainFeatureSlice {
     let mut values = BTreeMap::new();
     values.insert(
-        domain_crypto::DISTANCE_TO_STRIKE,
+        DISTANCE_TO_STRIKE,
         FeatureCell::observed(
             FeatureValue::Decimal(dec!(0.02)),
             None,
@@ -139,7 +148,7 @@ fn find_factor<'a>(outcome: &'a MarketFactorOutcome, name: &FactorName) -> &'a S
 fn vector(category: MarketCategory, domain: Option<DomainFeatureSlice>) -> FeatureVector {
     let mut generic = BTreeMap::new();
     generic.insert(
-        market_names::CATEGORY,
+        CATEGORY,
         FeatureCell::observed(
             FeatureValue::Category(category),
             None,
@@ -170,7 +179,7 @@ fn domain_test_market(category: MarketCategory) -> SelectedMarket {
     }
 }
 
-fn domain_test_book(market: &SelectedMarket, cutoff: chrono::DateTime<Utc>) -> ResolvedBook {
+fn domain_test_book(market: &SelectedMarket, cutoff: DateTime<Utc>) -> ResolvedBook {
     ResolvedBook {
         token_id: market.primary_token_id.clone(),
         bids: Arc::from([BookLevel::from_decimal_unchecked(
@@ -185,7 +194,7 @@ fn domain_test_book(market: &SelectedMarket, cutoff: chrono::DateTime<Utc>) -> R
         version: 1,
         sequence: 1,
         source_event: Some(CanonicalBookEventRef {
-            stream_session_id: uuid::Uuid::from_u128(1),
+            stream_session_id: Uuid::from_u128(1),
             token_sequence: 1,
             source_event_hash: ContentHash::parse(format!("blake3:{}", "d".repeat(64)))
                 .expect("canonical event hash"),
@@ -198,7 +207,7 @@ fn domain_test_book(market: &SelectedMarket, cutoff: chrono::DateTime<Utc>) -> R
 fn domain_test_registry(
     market: &SelectedMarket,
     context: &ResolvedMarketContext,
-    cutoff: chrono::DateTime<Utc>,
+    cutoff: DateTime<Utc>,
 ) -> MarketRegistryInfo {
     MarketRegistryInfo {
         market_id: market.market_id.clone(),
@@ -236,8 +245,8 @@ fn domain_test_registry(
 fn build_domain_test_vector(
     builder: &ConfiguredFeatureBuilder,
     features: &FeaturesConfig,
-    as_of: chrono::DateTime<Utc>,
-    cutoff: chrono::DateTime<Utc>,
+    as_of: DateTime<Utc>,
+    cutoff: DateTime<Utc>,
     category: MarketCategory,
     domain: Option<&DomainSliceInputs>,
 ) -> QuantResult<FeatureVector> {
@@ -308,7 +317,7 @@ fn build_domain_test_vector(
     builder.compute_vector(&bundle, &[], features, &DataQualityConfig::default())
 }
 
-fn crypto_domain_inputs(as_of: chrono::DateTime<Utc>) -> DomainSliceInputs {
+fn crypto_domain_inputs(as_of: DateTime<Utc>) -> DomainSliceInputs {
     let observed_at = as_of - Duration::minutes(1);
     let instrument_key = DomainInstrumentKey::binance_kline(
         &BinanceSymbol::parse("BTCUSDT").expect("symbol"),
@@ -361,7 +370,7 @@ fn crypto_domain_inputs(as_of: chrono::DateTime<Utc>) -> DomainSliceInputs {
     }
 }
 
-fn linkage_evidence(as_of: chrono::DateTime<Utc>) -> EvidenceSourceRef {
+fn linkage_evidence(as_of: DateTime<Utc>) -> EvidenceSourceRef {
     EvidenceSourceRef {
         source_kind: EvidenceSourceKind::Linkage,
         reference: "linkage:test@blake3:test".to_owned(),
@@ -374,7 +383,7 @@ fn linkage_evidence(as_of: chrono::DateTime<Utc>) -> EvidenceSourceRef {
 fn feature_vector_domain_slice_only_for_mapped_category() {
     // Drives through the real `ConfiguredFeatureBuilder::compute_vector` — the
     // production domain-slice assembly path — rather than a hand-built
-    // `FeatureVector` literal (11.2.2 remediation R11).
+    // `FeatureVector` literal.
     let features = FeaturesConfig::default();
     let domain_config = DomainConfig::default();
     let builder =
@@ -433,7 +442,7 @@ fn feature_hash_composite_stable_and_distinguishes_domain_family() {
     // other field the algorithm packs alongside `domain_family` —
     // `domain_schema_version` — which is genuinely constructible with two
     // distinct values and must independently perturb the digest exactly as
-    // a second family value would (§3.3 composite: `generic_hash ⊕
+    // a second family value would (composite: `generic_hash ⊕
     // domain_family ⊕ domain_schema_version ⊕ domain_hash`).
     let mut slice_v6 = crypto_slice();
     slice_v6.schema_version = SchemaVersion::new(6);
@@ -454,7 +463,7 @@ fn domain_factor_registered_and_routed_by_category() {
     // Assert on the real `FactorEngine` batch output, not just registry
     // cardinality: a Crypto-category vector must have the domain factors
     // routed into its computed set; a Sports-category vector (same engine,
-    // same call) must never see them (11.2.2 remediation R11).
+    // same call) must never see them.
     let engine = FactorEngine::new(
         &FactorsConfig::default(),
         &FeaturesConfig::default(),
@@ -502,11 +511,6 @@ fn domain_factor_registered_and_routed_by_category() {
 
 #[test]
 fn dataset_hash_changes_when_domain_slice_added() {
-    use quant_pivot_models::{
-        hashing::CanonicalDigest,
-        types::{ModelSpecId, TrainingExampleId, TrainingSampleSource},
-    };
-
     let spec = ModelSpecId::from_v7();
     let as_of = Utc.timestamp_opt(1_000_000, 0).single().expect("ts");
     let (feature, factor, label) = (
@@ -584,8 +588,6 @@ fn dataset_hash_changes_when_domain_slice_added() {
 
 #[test]
 fn dataset_builder_domain_slice_no_future_leakage() {
-    use quant_pivot_models::types::{TrainingExampleId, TrainingSampleSource};
-
     let as_of = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
     let cutoff = as_of - Duration::seconds(5);
     let mut fv = vector(MarketCategory::Crypto, Some(crypto_slice()));
@@ -661,7 +663,7 @@ fn crypto_subject_parser_tier1_deterministic_fail_closed() {
         "tier1 extraction must be deterministic across repeated runs"
     );
 
-    // Genuine fail-closed case (11.2.2 remediation R4): the slug names
+    // Genuine fail-closed case: the slug names
     // January 7 with no explicit year, but `end_date` is six months away in
     // July — no candidate year (anchor ± 1) reconstructs an instant within
     // `MAX_PLAUSIBLE_YEAR_DRIFT` of `end_date`, so `infer_year` must return
@@ -689,9 +691,8 @@ fn linkage_tier0_slug_direct_read_matches_tier1() {
     // Tier 1 owns a disjoint, human-readable ET slug grammar
     // (`{alias}-up-or-down-{month}-{day}-{hour}{am|pm}-et`) and must
     // correctly abstain (`None`) rather than mis-parse or silently disagree
-    // with Tier 0 over the same board (11.2.2 remediation R11: tier
-    // boundaries never overlap in a way that could produce two conflicting
-    // subjects for one market).
+    // with Tier 0 over the same board. Tier boundaries never overlap in a way
+    // that could produce two conflicting subjects for one market.
     let slug = "btc-updown-5m-1780319100";
     let meta = metadata(slug);
 
@@ -732,7 +733,7 @@ fn linkage_grounding_rejects_field_absent_from_source() {
         .expect("resolve");
     assert!(matches!(bad.outcome, LinkageOutcome::Unresolved { .. }));
 
-    // The real anti-hallucination scenario (11.2.2 remediation R11): take a
+    // The real anti-hallucination scenario: take a
     // genuinely valid, grounded candidate and corrupt one span's literal
     // text so it no longer matches the source substring at its own
     // recorded offsets. The gate must reject it outright — it must never
@@ -771,8 +772,6 @@ fn linkage_grounding_rejects_field_absent_from_source() {
 
 #[test]
 fn crypto_domain_feature_present_with_domain_external_evidence() {
-    use quant_pivot_research::domain::DomainObservationWindow;
-
     let as_of = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
     let at = as_of - Duration::minutes(1);
     let primary = DomainObservationWindow {
@@ -829,7 +828,7 @@ fn crypto_domain_feature_present_with_domain_external_evidence() {
     let features = CryptoDomainFeatureBuilder.compute(&ctx);
     let distance = features
         .iter()
-        .find(|f| f.name == domain_crypto::DISTANCE_TO_STRIKE)
+        .find(|f| f.name == DISTANCE_TO_STRIKE)
         .expect("distance feature");
     assert!(distance.value.is_ok());
     assert!(distance.evidence.is_some());
@@ -885,7 +884,7 @@ fn domain_observation_pit_excludes_after_as_of_minus_delay() {
     // Exercises the **actual** production PIT assembly (`build_domain_slice_inputs`
     // over a prefetched `HashMap`) — the single path both the online and
     // offline planes call — rather than a deleted, never-wired dual-engine
-    // mirror (11.2.2 remediation R9).
+    // mirror.
     let as_of = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
     let knowledge_lag_secs = 5_u64;
     let cutoff = as_of - Duration::seconds(i64::try_from(knowledge_lag_secs).expect("small delay"));
@@ -906,7 +905,7 @@ fn domain_observation_pit_excludes_after_as_of_minus_delay() {
         publish_time: observed_at,
         available_at: Some(observed_at),
     };
-    let observations = std::collections::HashMap::from([(
+    let observations = HashMap::from([(
         instrument_key.clone(),
         vec![make_observation(visible_at), make_observation(invisible_at)],
     )]);
@@ -925,14 +924,14 @@ fn domain_observation_pit_excludes_after_as_of_minus_delay() {
         .expect("domain cutoff");
     let inputs = build_domain_slice_inputs(
         MarketCategory::Crypto,
-        std::slice::from_ref(&linkage),
+        slice::from_ref(&linkage),
         &boundary,
         &domain_config,
         DomainFactWindows {
             observations: &observations,
-            crypto_reports: &std::collections::HashMap::new(),
-            weather_observations: &std::collections::HashMap::new(),
-            weather_forecasts: &std::collections::HashMap::new(),
+            crypto_reports: &HashMap::new(),
+            weather_observations: &HashMap::new(),
+            weather_forecasts: &HashMap::new(),
             weather_calibrations: &[],
         },
     )
@@ -960,7 +959,7 @@ fn domain_observation_pit_excludes_after_as_of_minus_delay() {
 
 #[test]
 fn linkage_pit_uses_metadata_version_not_future_revision() {
-    // The bitemporal axis (11.2.2 remediation R5): a market's linkage can be
+    // The bitemporal axis: a market's linkage can be
     // re-derived after a metadata revision, appending a **new** ledger row
     // rather than mutating the old one. A PIT read at an `as_of` between two
     // revisions must see the version that was current at that instant —
@@ -1072,13 +1071,10 @@ fn linkage_pit_uses_metadata_version_not_future_revision() {
 /// `detect_basis_alerts` — see
 /// `crates/quant-pivot-core/src/service/basis_alert.rs`'s own unit tests and
 /// `crates/quant-pivot-repository/tests/pg_basis_alert.rs`'s
-/// `acknowledge_marks_the_alert_and_is_idempotent` for that closed loop
-/// (11.2.2 remediation R6 — this test was previously misnamed as asserting
-/// "flagging", which it never did).
+/// `acknowledge_marks_the_alert_and_is_idempotent` for that closed loop. This
+/// test deliberately asserts computation, not alert persistence.
 #[test]
 fn basis_vs_resolution_source_computes_bps_from_close_and_oracle() {
-    use quant_pivot_research::domain::DomainObservationWindow;
-
     let as_of = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
     let primary = DomainObservationWindow {
         cutoff: as_of,

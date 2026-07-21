@@ -6,7 +6,10 @@ use async_trait::async_trait;
 use quant_pivot_error::QuantResult;
 use tokio_util::sync::CancellationToken;
 
-use crate::domain::{FeatureParityJobParams, FeatureParityRunView, JobProgressSink};
+use crate::domain::{
+    api::{FeatureParityJobParams, FeatureParityRunView},
+    quant::JobProgressSink,
+};
 
 /// Executes the full comparison ladder (selection through business prediction).
 ///

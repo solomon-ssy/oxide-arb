@@ -3,15 +3,17 @@
 use std::{fmt::Display, str::FromStr, time::Duration};
 
 use chrono::{DateTime, NaiveDate, Utc};
+use csv::{ReaderBuilder, StringRecord};
 use quant_pivot_error::{QuantError, QuantResult, api::ApiError};
 use quant_pivot_models::{
     config::NsidcSeaIceSourceConfig,
-    domain::{WeatherObservationReport, WeatherObservationReportKind},
+    domain::data_plane::{WeatherObservationReport, WeatherObservationReportKind},
     hashing::CanonicalDigest,
     types::{
         ContentHash, DomainInstrumentKey, DomainMeasurementUnit, DomainSourceId, WeatherVariable,
     },
 };
+use reqwest::Client;
 use rust_decimal::Decimal;
 use serde::Serialize;
 
@@ -43,13 +45,13 @@ pub struct SeaIceDataset {
 /// Public NOAA@NSIDC file client.
 pub struct NsidcSeaIceSource {
     config: NsidcSeaIceSourceConfig,
-    http: reqwest::Client,
+    http: Client,
     retry_policy: RetryPolicy,
 }
 
 impl NsidcSeaIceSource {
     pub fn connect(config: NsidcSeaIceSourceConfig) -> QuantResult<Self> {
-        let http = reqwest::Client::builder()
+        let http = Client::builder()
             .timeout(Duration::from_millis(config.request_timeout_ms))
             .user_agent("quant-pivot/0.1 nsidc-sea-ice-ingest")
             .build()
@@ -62,7 +64,7 @@ impl NsidcSeaIceSource {
     }
 
     #[must_use]
-    pub fn with_http_client(mut self, http: reqwest::Client) -> Self {
+    pub fn with_http_client(mut self, http: Client) -> Self {
         self.http = http;
         self
     }
@@ -99,7 +101,7 @@ fn parse_extent(
     available_at: DateTime<Utc>,
 ) -> QuantResult<SeaIceDataset> {
     let file_hash = ContentHash::parse(CanonicalDigest::prefixed_bytes(body.as_bytes()))?;
-    let mut reader = csv::ReaderBuilder::new()
+    let mut reader = ReaderBuilder::new()
         .has_headers(false)
         .flexible(true)
         .from_reader(body.as_bytes());
@@ -190,7 +192,7 @@ fn parse_extent(
     Ok(SeaIceDataset { file_hash, reports })
 }
 
-fn parse_component<T>(row: &csv::StringRecord, index: usize, name: &str) -> QuantResult<T>
+fn parse_component<T>(row: &StringRecord, index: usize, name: &str) -> QuantResult<T>
 where
     T: FromStr,
     T::Err: Display,
@@ -202,7 +204,7 @@ where
         .map_err(|error| parse_error(format!("invalid {name}: {error}")).into())
 }
 
-fn parse_decimal(row: &csv::StringRecord, index: usize, name: &str) -> QuantResult<Decimal> {
+fn parse_decimal(row: &StringRecord, index: usize, name: &str) -> QuantResult<Decimal> {
     parse_component(row, index, name)
 }
 
@@ -217,7 +219,7 @@ fn parse_error(detail: impl Into<String>) -> ApiError {
 mod tests {
     use chrono::{TimeZone, Utc};
     use quant_pivot_models::{
-        config::NsidcSeaIceSourceConfig, domain::WeatherObservationReportKind,
+        config::NsidcSeaIceSourceConfig, domain::data_plane::WeatherObservationReportKind,
     };
     use rust_decimal_macros::dec;
     use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};

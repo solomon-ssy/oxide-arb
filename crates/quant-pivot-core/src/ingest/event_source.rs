@@ -1,9 +1,10 @@
 //! Injectable sources for the data pipeline event loop.
 
+use std::time::Instant;
+
 use flume::Receiver;
 use quant_pivot_api::ws::ClobWsManager;
-use quant_pivot_models::{domain::pipeline::PipelineEvent, types::TokenId};
-use std::time::Instant;
+use quant_pivot_models::{domain::data_plane::pipeline::PipelineEvent, types::TokenId};
 
 /// Unified read side for WS-normalized pipeline events.
 pub trait PipelineEventSource: Send + Sync {

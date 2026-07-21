@@ -1,5 +1,11 @@
 //! Data-plane event types for the WS → book-apply pipeline.
 
+use std::{sync::Arc, time::Instant};
+
+use chrono::Utc;
+use rust_decimal::Decimal;
+use uuid::Uuid;
+
 use crate::{
     domain::market::book::BookLevel,
     enums::{
@@ -8,10 +14,6 @@ use crate::{
     },
     types::{ContentHash, MarketId, Price, Shares, TokenId},
 };
-use chrono::Utc;
-use rust_decimal::Decimal;
-use std::{sync::Arc, time::Instant};
-use uuid::Uuid;
 
 /// Monotonic ingress trace for a WS payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

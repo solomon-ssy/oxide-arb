@@ -8,6 +8,22 @@
 //! and safe to run in parallel via [`build_batch`]. The same definition produces
 //! an identical vector online and offline.
 
+use std::collections::{BTreeMap, HashSet};
+
+use async_trait::async_trait;
+use chrono::{DateTime, Utc};
+use quant_pivot_error::{QuantResult, research::ResearchError};
+use quant_pivot_models::{
+    domain::{
+        data_plane::{DecisionBoundary, DecisionSource},
+        market::NegRiskLeg,
+    },
+    enums::{common::MarketCategory, domain::DomainFamily, quant::DataQualityStatus},
+    runtime_config::{DataQualityConfig, DomainConfig, FeatureFamily, FeaturesConfig},
+    types::{BookSnapshotRef, MarketId, SchemaVersion, TokenId, Usd},
+};
+use rayon::prelude::*;
+
 use crate::{
     features::{
         CatalogDecisionRef, FeatureBuildInput, FeatureBuilder, FeatureVector,
@@ -38,17 +54,6 @@ use crate::{
     pit::{PointInTimeSnapshotSource, ResolvedMarketSnapshot},
     selection::SelectedMarket,
 };
-use async_trait::async_trait;
-use chrono::{DateTime, Utc};
-use quant_pivot_error::{QuantResult, research::ResearchError};
-use quant_pivot_models::{
-    domain::{DecisionBoundary, DecisionSource, NegRiskLeg},
-    enums::{common::MarketCategory, domain::DomainFamily, quant::DataQualityStatus},
-    runtime_config::{DataQualityConfig, DomainConfig, FeatureFamily, FeaturesConfig},
-    types::{BookSnapshotRef, MarketId, SchemaVersion, TokenId, Usd},
-};
-use rayon::prelude::*;
-use std::collections::{BTreeMap, HashSet};
 
 /// A single raw feature produced by a group builder before null-policy resolution.
 pub struct RawFeature {
@@ -105,7 +110,7 @@ impl RawFeature {
 }
 
 /// One neg-risk sibling leg resolved point-in-time at the SAME `as_of` as the
-/// primary market (Phase 11.2.1). Online and offline both resolve through
+/// primary market. Online and offline both resolve through
 /// [`PointInTimeSnapshotSource::book_at_boundary`], so the structural full-leg aggregates are
 /// byte-identical across backends.
 pub struct ResolvedLeg {
@@ -137,7 +142,7 @@ pub struct FeatureComputeCtx<'a> {
     /// binary markets or when the schema declares no structural neg-risk aggregate).
     pub sibling_legs: &'a [ResolvedLeg],
     /// The number of event YES legs the resolver was asked to fetch — the
-    /// expected leg count. `sibling_legs.len() < sibling_leg_total` means at least
+    /// expected leg count. `sibling_legs.len < sibling_leg_total` means at least
     /// one leg's book was absent at `as_of` (fail-closed → `LegBookMissing`).
     pub sibling_leg_total: usize,
     /// Frozen feature config.

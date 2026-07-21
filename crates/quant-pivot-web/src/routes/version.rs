@@ -19,7 +19,7 @@ const V1: &[u8] = b"v1";
 
 /// Routing guard that admits requests targeting API **v1**.
 ///
-/// A request passes when [`ACCEPT_API_VERSION`] carries the value `v1`;
+/// A request passes when `ACCEPT_API_VERSION` carries the value `v1`;
 /// otherwise the guarded scope is skipped.
 pub struct ApiV1Guard;
 

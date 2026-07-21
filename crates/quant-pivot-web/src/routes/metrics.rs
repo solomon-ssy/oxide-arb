@@ -1,11 +1,11 @@
 //! Prometheus metrics scrape endpoint (`GET /metrics`).
 
-use actix_web::{HttpResponse, Responder, web};
+use actix_web::{HttpResponse, Responder, web::Data};
 
 use crate::state::AppState;
 
 /// `GET /metrics` — Prometheus text exposition format.
-pub async fn metrics(state: web::Data<AppState>) -> impl Responder {
+pub async fn metrics(state: Data<AppState>) -> impl Responder {
     let body = state.metrics.gather_prometheus();
     HttpResponse::Ok()
         .content_type("text/plain; version=0.0.4; charset=utf-8")

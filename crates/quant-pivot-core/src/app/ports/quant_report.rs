@@ -23,17 +23,24 @@ use quant_pivot_models::{
         ReportMarketFunnelCountRow, ReportMarketFunnelRow,
     },
     domain::{
-        AdHocReportCommand, DecisionBoundary, DecisionBoundaryEvidenceView,
-        EnqueueReportRunOutcome, FeatureCellEvidenceView, FeatureVectorInfo,
-        ModelInputEvidenceView, ModelRouteEvidenceView, OperationLogInfo, OperationLogQuery,
-        PageWindow, Paginated, QuantEvidenceView, QuantRecommendationView,
-        QuantReportDiagnosticsView, QuantReportFunnelView, QuantReportListQuery, QuantReportPort,
-        RecommendationInfo, RecommendationReportInfo, RecommendationViewContext,
-        ReportDataQualitySnapshotInfo, ReportDiagnosticsSubject, ReportDiff,
-        ReportFactDeliveryInfo, ReportFunnelMarketListQuery, ReportFunnelMarketView,
-        ReportFunnelStageView, ReportRunInfo, ReportRunListQuery, ReportScheduleGapInfo,
-        ReportScheduleGapListQuery, ReportScheduleHealthInfo, ReportTimelineQuery,
-        compute_report_diff,
+        api::{
+            DecisionBoundaryEvidenceView, FeatureCellEvidenceView, ModelInputEvidenceView,
+            ModelRouteEvidenceView, OperationLogQuery, QuantEvidenceView, QuantRecommendationView,
+            QuantReportDiagnosticsView, QuantReportFunnelView, QuantReportListQuery,
+            RecommendationViewContext, ReportDiagnosticsSubject, ReportFunnelMarketListQuery,
+            ReportFunnelMarketView, ReportFunnelStageView, ReportRunListQuery,
+            ReportScheduleGapListQuery, ReportTimelineQuery,
+        },
+        data_plane::DecisionBoundary,
+        governance::OperationLogInfo,
+        pagination::{PageWindow, Paginated},
+        ports::{AdHocReportCommand, QuantReportPort},
+        quant::{
+            EnqueueReportRunOutcome, FeatureVectorInfo, RecommendationInfo,
+            RecommendationReportInfo, ReportDataQualitySnapshotInfo, ReportDiff,
+            ReportFactDeliveryInfo, ReportRunInfo, ReportScheduleGapInfo, ReportScheduleHealthInfo,
+            compute_report_diff,
+        },
     },
     enums::{
         operation_log::OperationCategory,
@@ -1422,7 +1429,7 @@ fn non_empty_count<T>(rows: &[T], entity: &'static str) -> QuantResult<Option<u6
 mod diagnostics_tests {
     use chrono::{TimeZone, Utc};
     use quant_pivot_models::{
-        domain::{DecisionBoundary, DecisionClock},
+        domain::data_plane::{DecisionBoundary, DecisionClock},
         enums::quant::{EmptyReportReason, FeatureParityStage},
         types::ModelRunId,
     };

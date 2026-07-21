@@ -1,16 +1,17 @@
 //! Menu management API contract.
 
+use serde::Deserialize;
+use serde_with::rust::double_option;
+use validator::Validate;
+
 use crate::{
     domain::{
-        MenuPatch,
         patch::{NullablePatch, Patch},
+        rbac::MenuPatch,
     },
     enums::rbac::{MenuKind, RoleStatus},
     types::MenuId,
 };
-use serde::Deserialize;
-use serde_with::rust::double_option;
-use validator::Validate;
 
 /// Create-menu payload.
 #[derive(Debug, Deserialize, Validate)]

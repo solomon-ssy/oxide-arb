@@ -1,5 +1,10 @@
 //! Runtime-config section structs grouped by document area.
 
+use std::{collections::BTreeMap, iter};
+
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
 use crate::{
     enums::{
         common::MarketCategory,
@@ -11,15 +16,12 @@ use crate::{
         AttributionPolicy, CapitalPolicy, CorrelationConfig, DecimalValue, EntryOrderPolicy,
         ExecutionBreakerConfig, ExitMonitorPolicy, FactorWeights, FeatureFamily,
         FeatureStalenessPolicy, KillSwitchPolicy, MissingFactorPolicy, ModelVersionRef,
-        NeutralizeDimension, NotificationPolicies, PortfolioOptimizerConfig, RankLossKind,
-        ReconciliationPolicy, ReportDeliveryPolicy, ScheduleCadence, SettlementRedeemPolicy,
-        SizingModelConfig, SmallCrossSectionPolicy, TrainingOptimizerKind,
+        NeutralizeDimension, PortfolioOptimizerConfig, RankLossKind, ReconciliationPolicy,
+        ReportDeliveryPolicy, ScheduleCadence, SettlementRedeemPolicy, SizingModelConfig,
+        SmallCrossSectionPolicy, TrainingOptimizerKind,
     },
     types::{ReportScheduleId, SchemaVersion, Usd},
 };
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, iter};
 
 /// Market selection selection policy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -146,7 +148,7 @@ impl Default for MomentumFeaturesConfig {
     }
 }
 
-/// Structural feature-family windows (Phase 11.2.1).
+/// Structural feature-family windows.
 ///
 /// These windows drive the shock/realized-vol, book-churn proxy, and persisted
 /// trade-tape participant-concentration estimators.
@@ -197,7 +199,7 @@ pub struct FeaturesConfig {
     pub volatility_windows_secs: Vec<u64>,
     /// Order-book depth levels to inspect.
     pub depth_levels: Vec<u32>,
-    /// Structural feature-family windows (Phase 11.2.1).
+    /// Structural feature-family windows.
     pub structural: StructuralFeaturesConfig,
     /// Maximum concurrent per-market PIT resolves in the feature pipeline.
     pub max_concurrent_market_resolves: u32,
@@ -346,7 +348,7 @@ impl Default for FactorOrthogonalizeConfig {
     }
 }
 
-/// Shock-gated reversal factor parameters (Phase 11.2.1).
+/// Shock-gated reversal factor parameters.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct ReversalAfterShockConfig {
@@ -365,7 +367,7 @@ impl Default for ReversalAfterShockConfig {
     }
 }
 
-/// Neg-risk structural factor parameters (Phase 11.2.1).
+/// Neg-risk structural factor parameters.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct NegRiskStructuralConfig {
@@ -380,9 +382,9 @@ impl Default for NegRiskStructuralConfig {
     }
 }
 
-/// Favorite-longshot bias factor parameters (Phase 11.2.1).
+/// Favorite-longshot bias factor parameters.
 ///
-/// `bias_table_ref` points at a fitted [`CalibrationArtifactId`] artifact
+/// `bias_table_ref` points at a fitted `CalibrationArtifactId` artifact
 /// (as its UUID string); `None` disables the factor (it stays inert — never a
 /// silent heuristic fallback).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -434,7 +436,7 @@ impl Default for FavoriteLongshotConfig {
     }
 }
 
-/// Structural factor-plane configuration (Phase 11.2.1).
+/// Structural factor-plane configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct StructuralFactorsConfig {
@@ -447,7 +449,7 @@ pub struct StructuralFactorsConfig {
     /// Participant-concentration composite weights.
     pub participant_concentration: ParticipantConcentrationConfig,
     /// Soft per-category IC gate: disable a bias curve whose category IC is not
-    /// significant (the hard publish-gate is Phase 11.5).
+    /// statistically significant. Model publication has its own hard gate.
     pub per_category_ic_gate: bool,
 }
 
@@ -507,15 +509,15 @@ pub struct FactorsConfig {
     pub cross_section: FactorCrossSectionConfig,
     /// Orthogonalization / collinearity policy.
     pub orthogonalize: FactorOrthogonalizeConfig,
-    /// Structural factor-plane parameters (Phase 11.2.1).
+    /// Structural factor-plane parameters.
     pub structural: StructuralFactorsConfig,
 }
 
 impl Default for FactorsConfig {
     fn default() -> Self {
         // All generic families plus the platform-internal structural plane are
-        // enabled by default: diversity is the baseline, weighting is learned
-        // (11.4). Domain families are routed by category and never appear here.
+        // enabled by default: diversity is the baseline, weighting is learned.
+        // Domain families are routed by category and never appear here.
         let mut enabled_factor_families = FactorFamily::ALL_GENERIC.to_vec();
         enabled_factor_families.push(FactorFamily::Structural);
         Self {
@@ -532,7 +534,7 @@ impl Default for FactorsConfig {
 }
 
 /// Cross-check policy between the crypto feature source (Binance) and the
-/// settlement oracle (Chainlink) — Phase 11.2.2 §3.6.6.
+/// settlement oracle (Chainlink).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct CryptoCrossCheckConfig {
@@ -562,7 +564,7 @@ impl Default for CryptoCrossCheckConfig {
     }
 }
 
-/// Crypto external-vertical parameters (Phase 11.2.2).
+/// Crypto external-vertical parameters.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct CryptoDomainConfig {
@@ -596,7 +598,7 @@ impl Default for CryptoDomainConfig {
     }
 }
 
-/// External-vertical domain plane (category-routed; Phase 11.2.2).
+/// Category-routed external-vertical domain plane.
 ///
 /// Domain families are **never** part of `enabled_factor_families`: routing is
 /// by market category, and this section only gates which verticals may serve
@@ -717,11 +719,11 @@ pub struct ModelConfig {
     pub active_model_version_id: Option<ModelVersionRef>,
     /// Shadow model version id.
     pub shadow_model_version_id: Option<ModelVersionRef>,
-    /// Active published Sell-side hold-vs-exit scorer version (Phase 06.1). The
+    /// Active published Sell-side hold-vs-exit scorer version. The
     /// opportunistic-Sell exit evaluator loads this; a distinct pointer from
     /// `active_model_version_id` so Buy and Sell models are governed separately.
     pub active_exit_model_version_id: Option<ModelVersionRef>,
-    /// Category-specific Buy-side model pointers (Phase 11.2.2 `ModelRouting`).
+    /// Category-specific Buy-side model pointers (`ModelRouting`).
     ///
     /// A market whose category has a pointer here scores through that artifact
     /// (which may consume the category's domain slice); only categories without
@@ -732,14 +734,14 @@ pub struct ModelConfig {
     /// Minimum model confidence.
     pub min_model_confidence: DecimalValue,
     /// Maximum age of a quality-gate report before model load is denied.
-    /// Consumed by Phase 3.7 governance (`ModelQualityGate` / load-time deny), not by
-    /// the 3.4 `ModelRunner` inference path.
+    /// Consumed by governance (`ModelQualityGate` / load-time deny), not by
+    /// the `ModelRunner` inference path.
     pub min_quality_gate_age_secs: u64,
     /// Minimum candidate score to enter portfolio pruning.
     pub candidate_score_floor: DecimalValue,
     /// Shadow/live diff threshold.
     pub shadow_diff_threshold: DecimalValue,
-    /// Model-score probability-calibrator fit policy (Phase 11.3).
+    /// Model-score probability-calibrator fit policy.
     pub calibration: ModelCalibrationConfig,
 }
 
@@ -759,8 +761,8 @@ impl Default for ModelConfig {
     }
 }
 
-/// Sell-side hold-vs-exit quality-gate thresholds (Phase 06.1;
-/// alpha-significance fields upgraded to hard CPCV gates Phase 11.5.1).
+/// Sell-side hold-vs-exit quality-gate thresholds; alpha-significance fields
+/// are hard CPCV gates.
 ///
 /// DSR significance lives only under `research.validation.gates.dsr_significance`
 /// (shared with Buy CPCV compute + gate) — never duplicated here.
@@ -771,14 +773,11 @@ pub struct SellQualityGateConfig {
     pub min_sample_count: u64,
     /// Minimum sell-side label coverage in `[0, 1]`.
     pub min_label_coverage: DecimalValue,
-    /// Minimum CPCV path-set median rank IC in `[-1, 1]` (hard gate; Phase
-    /// 11.5.1 — renamed and upgraded from the deleted single-path soft
-    /// `min_exit_alpha_rank_ic`, mirroring the Buy-side
-    /// `research.validation.gates.rank_ic_min` upgrade Phase 11.5 already
-    /// made).
+    /// Minimum CPCV path-set median rank IC in `[-1, 1]`; this hard gate
+    /// replaces the deleted single-path soft `min_exit_alpha_rank_ic` and
+    /// mirrors the Buy-side `research.validation.gates.rank_ic_min`.
     pub rank_ic_min: DecimalValue,
-    /// Maximum tolerated Probability of Backtest Overfitting (hard gate;
-    /// Phase 11.5.1).
+    /// Maximum tolerated Probability of Backtest Overfitting (hard gate).
     pub max_pbo: DecimalValue,
     /// Minimum fraction of `ExitDecision` rows simulated from full L2 books.
     pub min_l2_book_fidelity_ratio: DecimalValue,
@@ -799,7 +798,7 @@ impl Default for SellQualityGateConfig {
     }
 }
 
-/// Governed quality-gate thresholds (Phase 3.7).
+/// Governed quality-gate thresholds.
 ///
 /// Hot-reloadable knobs consumed by the model quality gate and the publish /
 /// rollback / dataset-promotion governance. Decimal-valued thresholds are
@@ -825,7 +824,7 @@ pub struct QualityGateConfig {
     pub max_category_concentration: DecimalValue,
     /// Minimum shadow comparison window (seconds) required before publish.
     pub required_shadow_window_secs: u64,
-    /// Sell-side hold-vs-exit scorer thresholds (Phase 06.1).
+    /// Sell-side hold-vs-exit scorer thresholds.
     pub sell: SellQualityGateConfig,
 }
 
@@ -845,7 +844,7 @@ impl Default for QualityGateConfig {
     }
 }
 
-/// Offline training-dataset build parameters (Phase 3.5+).
+/// Offline training-dataset build parameters.
 ///
 /// Distinct from online [`DataQualityConfig`]: historical PIT book lookup uses a
 /// much wider staleness window than live feature gates, and label thresholds are
@@ -957,7 +956,7 @@ impl Default for ReportScheduleConfig {
     }
 }
 
-/// Kelly safety-layer parameters (Phase 11.3 §6).
+/// Kelly safety-layer parameters.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct KellySafetyConfig {
@@ -984,8 +983,8 @@ impl Default for KellySafetyConfig {
 
 /// Portfolio policy: budget governance, exposure constraints, and sizing model.
 ///
-/// Policy (limits) only — never account state. Real equity / positions come
-/// from the account snapshot, never from here (see 04.0 §6).
+/// Policy limits only — never account state. Real equity and positions come
+/// from the account snapshot, never from this configuration.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct PortfolioConfig {
@@ -1204,38 +1203,6 @@ impl Default for AutoExecutionConfig {
     }
 }
 
-/// Operator notification channels.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
-#[serde(default, deny_unknown_fields)]
-pub struct NotificationConfig {
-    /// Telegram notification configuration.
-    pub telegram: TelegramNotificationConfig,
-    /// Webhook notification configuration.
-    pub webhook: WebhookNotificationConfig,
-    /// Notification policy flags keyed by event name.
-    pub policies: NotificationPolicies,
-}
-
-/// Telegram notification configuration.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
-#[serde(default, deny_unknown_fields)]
-pub struct TelegramNotificationConfig {
-    /// Telegram bot token.
-    #[schemars(extend("x-sensitive" = true))]
-    pub bot_token: String,
-    /// Telegram chat id.
-    pub chat_id: String,
-}
-
-/// Webhook notification configuration.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
-#[serde(default, deny_unknown_fields)]
-pub struct WebhookNotificationConfig {
-    /// Webhook URL.
-    #[schemars(extend("x-sensitive" = true))]
-    pub url: String,
-}
-
 /// Learning-to-rank objective used by governed weighted-model training.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
@@ -1273,7 +1240,7 @@ impl Default for ResearchTrainingConfig {
     }
 }
 
-/// Label-horizon-aware purge + embargo (Phase 11.5 §3.1/§3.2).
+/// Label-horizon-aware purge + embargo.
 ///
 /// `embargo_pct` is the **only** knob — whether to purge by label horizon is
 /// deliberately not configurable (see `quant_pivot_research::validation::purge`).
@@ -1292,7 +1259,7 @@ impl Default for ResearchValidationPurgeConfig {
     }
 }
 
-/// Combinatorial Purged Cross-Validation partition config (Phase 11.5 §3.3).
+/// Combinatorial Purged Cross-Validation partition config.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct ResearchValidationCpcvConfig {
@@ -1312,7 +1279,7 @@ impl Default for ResearchValidationCpcvConfig {
 }
 
 /// Governed hyperparameter trial grid for the multi-testing-corrected
-/// Deflated Sharpe Ratio + CSCV/PBO (Phase 11.5 §3.5).
+/// Deflated Sharpe Ratio + CSCV/PBO.
 ///
 /// Weighted-factor and classical families share `max_trials` but expand
 /// different Cartesian dimensions — the CPCV port selects the matching
@@ -1360,8 +1327,8 @@ impl Default for ResearchValidationTrialsConfig {
     }
 }
 
-/// Combinatorially Symmetric Cross-Validation block config (Phase 11.5 §3.5,
-/// Bailey/Borwein/López de Prado/Zhu 2014/2017 Algorithm 2.3).
+/// Combinatorially Symmetric Cross-Validation block config following
+/// Bailey, Borwein, López de Prado, and Zhu (2014/2017), Algorithm 2.3.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct ResearchValidationPboConfig {
@@ -1373,12 +1340,12 @@ impl Default for ResearchValidationPboConfig {
     fn default() -> Self {
         // Match default `cpcv.n_groups` so short research windows fail at
         // config/orchestration time rather than after an expensive CPCV loop
-        // when T < S (Phase 11.5 audit P2).
+        // when T < S.
         Self { block_count: 8 }
     }
 }
 
-/// Phase 11.5 hard/soft alpha-significance gate thresholds
+/// hard/soft alpha-significance gate thresholds
 /// (`research.validation.gates.*`) — distinct from the single-path risk
 /// thresholds in `quality_gate.*` (`max_drawdown`/etc, unchanged).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1415,7 +1382,7 @@ impl Default for ResearchValidationGatesConfig {
     }
 }
 
-/// Leakage-aware validation & overfitting-control methodology (Phase 11.5).
+/// Leakage-aware validation & overfitting-control methodology.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(default, deny_unknown_fields)]
 pub struct ResearchValidationConfig {

@@ -2,13 +2,18 @@
 
 use chrono::{DateTime, Utc};
 use quant_pivot_macros::NormalizePageQuery;
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use validator::Validate;
 
 use crate::{
     domain::{
-        TradePolicyArtifactInfo, TradePolicyGovernanceAuditInfo, TradePolicyTrialAttemptInfo,
-        TradePolicyValidationRowInfo, TradePolicyValidationRunInfo, pagination::PageRequest,
+        pagination::PageRequest,
+        quant::{
+            TradePolicyArtifactInfo, TradePolicyGovernanceAuditInfo, TradePolicyTrialAttemptInfo,
+            TradePolicyValidationRowInfo, TradePolicyValidationRunInfo,
+        },
     },
     enums::quant::{
         DatasetPurpose, ResearchReadinessEvidenceKind, TradePolicyGovernanceAction,
@@ -299,7 +304,7 @@ pub struct TradePolicySummaryView {
     pub status: TradePolicyStatus,
     pub source_dataset_id: TrainingDatasetId,
     pub cohort_count: usize,
-    pub executable_coverage: Option<rust_decimal::Decimal>,
+    pub executable_coverage: Option<Decimal>,
     pub publishable: bool,
     pub publication_blocker_count: usize,
     pub created_at: DateTime<Utc>,
@@ -401,7 +406,7 @@ pub struct TradePolicyEvidenceRowView {
     pub kind: TradePolicyEvidenceObjectKind,
     pub record_key: String,
     pub event_at: Option<DateTime<Utc>>,
-    pub payload: serde_json::Value,
+    pub payload: Value,
     pub row_hash: ContentHash,
 }
 

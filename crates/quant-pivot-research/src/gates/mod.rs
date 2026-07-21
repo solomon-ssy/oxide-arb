@@ -1,6 +1,6 @@
 //! Quality-gate plane: the [`ModelQualityGate`] contract and its decision type.
 //!
-//! Offline governance closure (3.7). The trait + decision contract live here;
+//! Offline governance closure. The trait + decision contract live here;
 //! the concrete gate ([`DefaultModelQualityGate`]) and its inputs / report /
 //! thresholds live in [`model_quality`]. Evaluation is synchronous and pure — a
 //! gate is a deterministic function of a frozen backtest report, dataset
@@ -12,7 +12,6 @@ pub use model_quality::{
     CpcvPathSetGateInput, DefaultModelQualityGate, QualityGateInput, QualityGateThresholds,
     SellQualityGateThresholds, ValidationGateThresholds,
 };
-
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::types::model_quality::{QualityGateFailure, QualityGateReport};
 

@@ -6,8 +6,10 @@ use quant_pivot_error::QuantResult;
 
 use crate::{
     domain::{
-        AccountSnapshotInfo, EquitySnapshotInfo, EquitySnapshotQuery, LiveAccountSnapshot,
-        Paginated,
+        pagination::Paginated,
+        quant::{
+            AccountSnapshotInfo, EquitySnapshotInfo, EquitySnapshotQuery, LiveAccountSnapshot,
+        },
     },
     types::{AccountSnapshotId, EquitySnapshotId, Usd},
 };

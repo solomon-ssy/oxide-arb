@@ -1,8 +1,12 @@
 //! Durable report-run and schedule-coordinator contracts.
 
+use chrono::{DateTime, Utc};
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
+use serde::{Deserialize, Serialize};
+
 use crate::{
     entities::{
-        quant_recommendation_report, quant_report_run, quant_report_schedule_gap,
+        quant_recommendation_report::Model, quant_report_run, quant_report_schedule_gap,
         quant_report_schedule_state,
     },
     enums::quant::{
@@ -15,9 +19,6 @@ use crate::{
         ReportTriggerKey, ResearchProfileId, WorkerId,
     },
 };
-use chrono::{DateTime, Utc};
-use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
-use serde::{Deserialize, Serialize};
 
 /// Full durable projection of one report build attempt.
 #[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
@@ -182,8 +183,8 @@ pub struct ReportCurrentHealthInfo {
     pub valid_until: Option<DateTime<Utc>>,
 }
 
-impl From<quant_recommendation_report::Model> for ReportCurrentHealthInfo {
-    fn from(model: quant_recommendation_report::Model) -> Self {
+impl From<Model> for ReportCurrentHealthInfo {
+    fn from(model: Model) -> Self {
         Self {
             recommendation_report_id: model.recommendation_report_id,
             profile_id: model.research_profile_artifact_id.profile_ref().id,

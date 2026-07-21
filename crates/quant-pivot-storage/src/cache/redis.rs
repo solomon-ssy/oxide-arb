@@ -5,12 +5,14 @@
 //! process (cache L2, JWT revocation blacklist). This backend only adds the
 //! cache key namespace on top.
 
-use crate::cache::{backend::CacheBackend, redis_connect};
+use std::time::Duration;
+
 use async_trait::async_trait;
 use deadpool_redis::Pool;
 use quant_pivot_error::storage::StorageError;
 use redis::AsyncCommands;
-use std::time::Duration;
+
+use crate::cache::{backend::CacheBackend, redis_connect};
 
 pub struct RedisBackend {
     pool: Pool,

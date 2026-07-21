@@ -1,17 +1,13 @@
 //! Gamma market catalog sync — full and incremental refresh into registry, cache, and DB.
 
-use crate::{
-    governance::LinkageResolverService,
-    ingest::{
-        market_cache::MarketCache, market_filter::MarketFilter, market_registry::MarketRegistry,
-    },
-    observability::metrics_hub::MetricsHub,
-    service::{
-        catalog_lifecycle::apply_past_deadline_to_catalog, catalog_readiness::CatalogReadiness,
-        system_status_nudge::SystemStatusNudge, ws_subscription::WsSubscriptionCoordinator,
-    },
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    mem,
+    sync::Arc,
+    time::Instant,
 };
-use chrono::{DateTime, Utc};
+
+use chrono::{DateTime, Duration, Utc};
 use num_traits::ToPrimitive;
 use quant_pivot_api::{
     gamma::{
@@ -23,11 +19,16 @@ use quant_pivot_api::{
 use quant_pivot_error::{QuantError, api::ApiError, market::MarketError, storage::StorageError};
 use quant_pivot_models::{
     domain::{
-        CATALOG_OBJECT_SCHEMA_VERSION, CatalogBatchCommit, CatalogBatchFailure,
-        CatalogEventCandidate, CatalogMarketCandidate, CatalogStatusPort, CoreEvent,
-        CoreEventPublisher, DecisionClock, NewCatalogEventChange, NewCatalogEventObject,
-        NewCatalogMarketObject, NewCatalogSyncBatch, NewCatalogSyncRejection,
-        market::{EventRegistryInfo, EventTags, MarketRegistryInfo, UpsertEvent, UpsertMarket},
+        data_plane::DecisionClock,
+        market::{
+            CATALOG_OBJECT_SCHEMA_VERSION, CatalogBatchCommit, CatalogBatchFailure,
+            CatalogEventCandidate, CatalogMarketCandidate, EventRegistryInfo, EventTags,
+            MarketRegistryInfo, NewCatalogEventChange, NewCatalogEventObject,
+            NewCatalogMarketObject, NewCatalogSyncBatch, NewCatalogSyncRejection, UpsertEvent,
+            UpsertMarket,
+        },
+        ports::CatalogStatusPort,
+        runtime::{CoreEvent, CoreEventPublisher},
     },
     enums::{
         catalog::{
@@ -46,18 +47,25 @@ use quant_pivot_models::{
 use quant_pivot_repository::traits::{CatalogLedgerRepository, MarketRepository};
 use quant_pivot_storage::cache::{CacheKey, CacheManager};
 use serde::{Serialize, de::DeserializeOwned};
-use std::{
-    collections::{BTreeMap, HashMap, HashSet},
-    mem,
-    sync::Arc,
-    time::Instant,
-};
+use serde_json::Value;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
+use crate::{
+    governance::LinkageResolverService,
+    ingest::{
+        market_cache::MarketCache, market_filter::MarketFilter, market_registry::MarketRegistry,
+    },
+    observability::metrics_hub::MetricsHub,
+    service::{
+        catalog_lifecycle::apply_past_deadline_to_catalog, catalog_readiness::CatalogReadiness,
+        system_status_nudge::SystemStatusNudge, ws_subscription::WsSubscriptionCoordinator,
+    },
+};
+
 /// Only publish `market.resolved` for settlements whose `resolved_at` falls
 /// within this window — filters historical reconciliation during full sync.
-const LIVE_RESOLUTION_WINDOW: chrono::Duration = chrono::Duration::hours(48);
+const LIVE_RESOLUTION_WINDOW: Duration = Duration::hours(48);
 
 /// Dependencies injected into [`GammaService`].
 pub struct GammaServiceDeps {
@@ -78,7 +86,7 @@ pub struct GammaServiceDeps {
     pub status_nudge: SystemStatusNudge,
     /// WS subscription look-ahead window (hours) from deploy config.
     pub subscription_window_hours: u64,
-    /// Offline linkage resolver — runs after successful sync (Phase 11.2.2).
+    /// Offline linkage resolver — runs after successful sync.
     pub linkage_resolver: Option<Arc<LinkageResolverService>>,
 }
 
@@ -627,7 +635,7 @@ impl GammaService {
 fn decode_catalog_payload<T: DeserializeOwned>(
     entity: &'static str,
     id: &str,
-    payload: serde_json::Value,
+    payload: Value,
 ) -> Result<T, MarketError> {
     serde_json::from_value(payload).map_err(|error| MarketError::CatalogSerialization {
         entity,
@@ -1162,7 +1170,7 @@ fn prewarm_token_intern(markets: &[MarketRegistryInfo]) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use chrono::Duration;
     use quant_pivot_models::{
         domain::market::TokenInfo,
         enums::{
@@ -1172,6 +1180,8 @@ mod tests {
         types::{EventId, TokenId},
     };
     use rust_decimal::Decimal;
+
+    use super::*;
 
     fn registry_market(
         id: &str,
@@ -1304,7 +1314,7 @@ mod tests {
     #[test]
     fn settlement_transitions_resolves_custom_labels_by_token_identity() {
         let now = Utc::now();
-        let resolved_at = Some(now - chrono::Duration::hours(1));
+        let resolved_at = Some(now - Duration::hours(1));
         let batch = vec![
             registry_market_with_labels(
                 "m-over",

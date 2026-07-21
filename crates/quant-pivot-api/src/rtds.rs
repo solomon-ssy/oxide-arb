@@ -15,13 +15,16 @@ use futures_util::{SinkExt, StreamExt};
 use quant_pivot_error::{QuantError, QuantResult, api::ApiError, ws::WsError};
 use quant_pivot_models::{
     config::PolymarketRtdsSourceConfig,
-    domain::CryptoPriceReport,
+    domain::data_plane::CryptoPriceReport,
     hashing::CanonicalDigest,
     types::{ContentHash, DomainInstrumentKey, DomainSourceId, Usd},
 };
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use tokio::net::TcpStream;
+use tokio::{
+    net::TcpStream,
+    time::{Interval, MissedTickBehavior},
+};
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async,
     tungstenite::{Message, protocol::CloseFrame},
@@ -129,7 +132,7 @@ impl PolymarketRtdsSource {
                 reason: format!("Polymarket RTDS subscribe: {error}"),
             })?;
         let mut keepalive = tokio::time::interval(Duration::from_secs(self.config.keepalive_secs));
-        keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        keepalive.set_missed_tick_behavior(MissedTickBehavior::Skip);
         keepalive.tick().await;
         Ok(PolymarketRtdsStream {
             source,
@@ -146,7 +149,7 @@ pub struct PolymarketRtdsStream {
     source: RtdsCryptoSource,
     bindings: BTreeMap<String, DomainInstrumentKey>,
     inner: WebSocketStream<MaybeTlsStream<TcpStream>>,
-    keepalive: tokio::time::Interval,
+    keepalive: Interval,
     max_clock_skew_ms: u64,
 }
 
@@ -468,6 +471,7 @@ mod tests {
         BinanceSymbol, ChainlinkFeedKey, DomainInstrumentKey, DomainSourceId,
     };
     use rust_decimal_macros::dec;
+    use serde_json::Value;
 
     use super::{
         RtdsCryptoSource, compile_bindings, parse_price_report, should_skip_message,
@@ -526,7 +530,7 @@ mod tests {
         let binance_symbols = ["btcusdt".to_owned()];
         let binance = subscription_message(RtdsCryptoSource::Binance, binance_symbols.iter())
             .expect("Binance subscription");
-        let binance: serde_json::Value = serde_json::from_str(&binance).expect("JSON");
+        let binance: Value = serde_json::from_str(&binance).expect("JSON");
         assert_eq!(binance["subscriptions"].as_array().map(Vec::len), Some(1));
         assert_eq!(
             binance["subscriptions"][0]["filters"],
@@ -537,7 +541,7 @@ mod tests {
         let chainlink_symbols = ["btc/usd".to_owned()];
         let chainlink = subscription_message(RtdsCryptoSource::Chainlink, chainlink_symbols.iter())
             .expect("Chainlink subscription");
-        let first_chainlink: serde_json::Value = serde_json::from_str(&chainlink).expect("JSON");
+        let first_chainlink: Value = serde_json::from_str(&chainlink).expect("JSON");
         assert_eq!(
             first_chainlink["subscriptions"].as_array().map(Vec::len),
             Some(1)

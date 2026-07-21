@@ -1,8 +1,10 @@
 //! Frozen market membership for one parity subject.
 
-use crate::types::{ContentHash, FeatureParityCandidateId, FeatureParitySubjectId, MarketId};
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
+
+use super::quant_feature_parity_subject;
+use crate::types::{ContentHash, FeatureParityCandidateId, FeatureParitySubjectId, MarketId};
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -22,7 +24,7 @@ pub struct Model {
         from = "parity_subject_id",
         to = "parity_subject_id"
     )]
-    pub subject: BelongsTo<super::quant_feature_parity_subject::Entity>,
+    pub subject: BelongsTo<quant_feature_parity_subject::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

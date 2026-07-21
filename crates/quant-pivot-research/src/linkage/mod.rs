@@ -1,10 +1,10 @@
-//! Layered market-linkage resolution (Phase 11.2.2 §3.6).
+//! Layered market-linkage resolution.
 //!
 //! Deterministic-first: Tier 0 (series-slug direct read) covers the
 //! traded-volume bulk with zero parsing ambiguity; Tier 1 (template parser)
 //! covers the human-readable ET slugs and threshold questions; the Tier 2 LLM
-//! fallback exists behind the same [`SubjectExtractor`] trait but ships in a
-//! later phase (design frozen in `phase-11/11.2.3`). Every tier's candidate
+//! fallback remains unavailable until it has a deterministic, governed
+//! implementation behind the same [`SubjectExtractor`] trait. Every tier's candidate
 //! passes the **single** [`SubjectValidator`] grounding gate before it can
 //! become a frozen ledger record — precision ≫ recall, one bad link poisons
 //! every downstream join.
@@ -25,29 +25,28 @@ pub mod tier0_slug;
 pub mod tier1_template;
 pub mod weather_daily_temperature;
 
+use chrono::{DateTime, Utc};
 pub use extractor::{
     DefaultSubjectValidator, ExtractedCandidate, SubjectExtractor, SubjectValidator,
     ValidationOutcome, validate_structural_consistency,
 };
 pub use manual_evidence::validate_manual_override;
+use quant_pivot_error::{QuantError, QuantResult};
+use quant_pivot_models::{
+    domain::quant::{
+        LinkageOutcome, LinkageSourceMetadata, LinkageUnresolvedReason, MarketSubject,
+        ResolutionOracle, ResolvedBinding, ResolvedSourceBinding,
+    },
+    enums::domain::{LinkageSourceRole, ResolverTier},
+    hashing::CanonicalDigest,
+    types::{DomainInstrumentKey, DomainSourceId, Probability, ResolverVersion},
+};
 pub use ruleset::{AssetRule, DOMAIN_RESOLVER_VERSION, find_alias, rule_for_alias, rules};
 pub use tier0_slug::Tier0SlugExtractor;
 pub use tier1_template::CryptoSubjectParser;
 pub use weather_daily_temperature::{
     WeatherDailyTemperatureExtractor, WeatherDecisionGroupMember, WeatherDecisionGroupValidation,
     WeatherStationRegistry, validate_weather_decision_group, weather_station_profile_hash,
-};
-
-use chrono::{DateTime, Utc};
-use quant_pivot_error::{QuantError, QuantResult};
-use quant_pivot_models::{
-    domain::{
-        LinkageOutcome, LinkageSourceMetadata, MarketSubject, ResolutionOracle, ResolvedBinding,
-        ResolvedSourceBinding,
-    },
-    enums::domain::{LinkageSourceRole, ResolverTier},
-    hashing::CanonicalDigest,
-    types::{DomainInstrumentKey, DomainSourceId, Probability, ResolverVersion},
 };
 
 /// One resolver pass's verdict for a market, ready to freeze into the ledger.
@@ -71,7 +70,7 @@ pub struct LayeredResolver {
 }
 
 impl LayeredResolver {
-    /// The 11.2.2 production resolver: Tier 0 → Tier 1, default grounding gate.
+    /// The production resolver: Tier 0 → Tier 1, default grounding gate.
     #[must_use]
     pub fn deterministic(weather_stations: WeatherStationRegistry) -> Self {
         Self {
@@ -129,7 +128,10 @@ impl LayeredResolver {
                 },
                 ValidationOutcome::Rejected { reason } => ResolutionResult {
                     outcome: LinkageOutcome::Unresolved {
-                        reason: format!("{} candidate rejected: {reason}", tier.tier()),
+                        reason: LinkageUnresolvedReason::CandidateRejected {
+                            tier: tier.tier(),
+                            failure: reason,
+                        },
                     },
                     resolver_tier: tier.tier(),
                     resolver_version: self.resolver_version,
@@ -139,7 +141,7 @@ impl LayeredResolver {
         }
         Ok(ResolutionResult {
             outcome: LinkageOutcome::Unresolved {
-                reason: "no deterministic tier recognized the market".to_owned(),
+                reason: LinkageUnresolvedReason::NoDeterministicTemplate,
             },
             resolver_tier: last_tier,
             resolver_version: self.resolver_version,
@@ -259,15 +261,18 @@ pub fn source_bindings_for_subject(
 
 #[cfg(test)]
 mod tests {
+    use chrono::{TimeZone, Utc};
+    use quant_pivot_models::{
+        domain::quant::{
+            GroundingField, LinkageOutcome, LinkageSourceMetadata, ResolvedSourceBinding,
+        },
+        enums::domain::{LinkageSourceRole, ResolverTier},
+        types::{DomainSourceId, MarketId},
+    };
+
     use super::{
         DefaultSubjectValidator, LayeredResolver, SubjectExtractor, SubjectValidator,
         Tier0SlugExtractor, ValidationOutcome, WeatherStationRegistry,
-    };
-    use chrono::{TimeZone, Utc};
-    use quant_pivot_models::{
-        domain::{GroundingField, LinkageOutcome, LinkageSourceMetadata, ResolvedSourceBinding},
-        enums::domain::{LinkageSourceRole, ResolverTier},
-        types::{DomainSourceId, MarketId},
     };
 
     /// The literal Chainlink Data Streams rules-text anchor every observed

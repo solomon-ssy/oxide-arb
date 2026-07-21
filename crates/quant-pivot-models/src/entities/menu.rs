@@ -1,12 +1,13 @@
 //! `menu` table entity (navigation tree + permission points).
 
+use chrono::{DateTime, Utc};
+use sea_orm::entity::prelude::*;
+use serde::{Deserialize, Serialize};
+
 use crate::{
     enums::rbac::{MenuKind, RoleStatus},
     types::MenuId,
 };
-use chrono::{DateTime, Utc};
-use sea_orm::entity::prelude::*;
-use serde::{Deserialize, Serialize};
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]

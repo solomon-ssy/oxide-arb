@@ -1,11 +1,11 @@
 //! [`ReliabilityReport`]: Brier score, log-loss, and ECE diagnostics.
 //!
 //! Also per-bin reliability-diagram data for a fitted
-//! [`crate::model::calibrator::ProbabilityCalibrator`] (Phase 11.3 §3.2/§6.1).
+//! [`crate::model::calibrator::ProbabilityCalibrator`].
 //!
 //! Also the source of the per-calibrated-probability-bucket
 //! `mean_adverse_excursion_bps` the `Calibrated` return model's
-//! `DownsideSource::MfeMae` reads at serving time (§3.3) — computed on the
+//! `DownsideSource::MfeMae` reads at serving time — computed on the
 //! **same** independent calibration split the probability mapping was fit
 //! on, never re-derived from training data.
 
@@ -14,7 +14,10 @@ use quant_pivot_models::types::{
     Probability,
     calibration::{MonotoneMapping, ReliabilityBin, ReliabilityReport},
 };
-use rust_decimal::{Decimal, prelude::FromPrimitive, prelude::ToPrimitive};
+use rust_decimal::{
+    Decimal,
+    prelude::{FromPrimitive, ToPrimitive},
+};
 
 use crate::{
     model::calibrator::apply_mapping,
@@ -219,11 +222,12 @@ fn mean_decimal(values: &[Decimal]) -> Decimal {
 
 #[cfg(test)]
 mod tests {
-    use super::{ReliabilitySample, compute_reliability, mean_decimal};
-    use crate::model::calibrator::{ProbabilityCalibrator, isotonic::IsotonicCalibrator};
     use quant_pivot_models::types::calibration::{IsotonicKnot, MonotoneMapping};
     use rust_decimal::{Decimal, prelude::ToPrimitive};
     use rust_decimal_macros::dec;
+
+    use super::{ReliabilitySample, compute_reliability, mean_decimal};
+    use crate::model::calibrator::{ProbabilityCalibrator, isotonic::IsotonicCalibrator};
 
     #[test]
     fn truly_calibrated_isotonic_has_near_zero_ece() {

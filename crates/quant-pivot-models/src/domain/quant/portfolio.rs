@@ -3,13 +3,14 @@
 //! The JSONB columns are strong-typed (`types::portfolio_plan`) — never a bare
 //! `serde_json::Value`.
 
+use chrono::{DateTime, Utc};
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
+use serde::{Deserialize, Serialize};
+
 use crate::types::{
     MarketSelectionId, ModelRunId, PortfolioConstraintsSnapshot, PortfolioOptimizerMeta,
     PortfolioPlanId, PortfolioRejectedSummary, PortfolioRiskBudget, Usd,
 };
-use chrono::{DateTime, Utc};
-use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
-use serde::{Deserialize, Serialize};
 
 /// Persisted portfolio pruning and allocation result.
 #[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]

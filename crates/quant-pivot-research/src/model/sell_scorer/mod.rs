@@ -1,4 +1,4 @@
-//! Sell-side hold-vs-exit scorer runtime (Phase 06.1).
+//! Sell-side hold-vs-exit scorer runtime.
 //!
 //! Symmetric to the Buy-side [`WeightedFactorRuntime`](crate::model::weighted::WeightedFactorRuntime),
 //! but it scores the **exit** decision for one open lot instead of an entry
@@ -6,12 +6,12 @@
 //! lot's own position-state pseudo-factors:
 //!
 //! ```text
-//! signedᵢ    = dir_signᵢ · normalizedᵢ · confidenceᵢ            (∈ [-1, 1])
-//! net        = Σ weightᵢ · signedᵢ                              (∈ [-1, 1], +⇒ exit)
-//! alpha_bps  = output_spec.max_exit_alpha_bps · net            (may be < 0 ⇒ hold)
-//! p_exit     = 1 / (1 + e^{-gain·net})                         (∈ (0, 1))
-//! confidence = weighted_mean(confidenceᵢ)                      (∈ [0, 1])
-//! sell_pct   = clamp₀₁(default_sell_pct + (1-default)·net⁺)    (target cumulative)
+//! signedᵢ = dir_signᵢ · normalizedᵢ · confidenceᵢ (∈ [-1, 1])
+//! net = Σ weightᵢ · signedᵢ (∈ [-1, 1], +⇒ exit)
+//! alpha_bps = output_spec.max_exit_alpha_bps · net (may be < 0 ⇒ hold)
+//! p_exit = 1 / (1 + e^{-gain·net}) (∈ (0, 1))
+//! confidence = weighted_mean(confidenceᵢ) (∈ [0, 1])
+//! sell_pct = clamp₀₁(default_sell_pct + (1-default)·net⁺) (target cumulative)
 //! ```
 //!
 //! The scorer is a pure function; the opportunistic evaluator owns the
@@ -20,14 +20,12 @@
 pub mod position_state;
 pub mod trainer;
 
+use std::collections::BTreeMap;
+
 pub use position_state::{
     LotStateInput, PositionStateFeatures, is_position_state_factor, position_state_features,
     position_state_signed, position_state_signed_contribution,
 };
-pub use trainer::{SellScorerTrainer, TrainSellScorerRequest};
-
-use std::collections::BTreeMap;
-
 use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::types::{
     Bps, ContentHash, ModelVersionId, OpportunisticExitPolicy, Probability,
@@ -36,6 +34,7 @@ use rust_decimal::{
     Decimal,
     prelude::{FromPrimitive, ToPrimitive},
 };
+pub use trainer::{SellScorerTrainer, TrainSellScorerRequest};
 
 use crate::{
     factors::{FactorName, FactorValue},
@@ -204,7 +203,7 @@ impl SellScorerRuntime for WeightedSellScorerRuntime {
 ///
 /// The single source of truth for "should this score trigger an exit" —
 /// consumed identically by the live opportunistic-sell evaluator
-/// (`quant-pivot-core`) and by Phase 11.5.1's offline `LotReplayBacktester`,
+/// (`quant-pivot-core`) and by the offline `LotReplayBacktester`,
 /// so the live and CPCV-replayed decision rule can never drift apart.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SellSignalPolicy {
@@ -290,10 +289,6 @@ fn logistic_probability(z: Decimal) -> QuantResult<Probability> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        PositionStateFeatures, SellScoreInput, SellScorerRuntime, SellSignalPolicy,
-        WeightedSellScorerRuntime, logistic_probability,
-    };
     use quant_pivot_models::{
         enums::{factor::FactorFamily, quant::FactorDirection},
         types::{
@@ -303,6 +298,10 @@ mod tests {
     };
     use rust_decimal_macros::dec;
 
+    use super::{
+        PositionStateFeatures, SellScoreInput, SellScorerRuntime, SellSignalPolicy,
+        WeightedSellScorerRuntime, logistic_probability,
+    };
     use crate::{
         factors::{FactorExplanation, FactorName, FactorValue, NormalizedFactor, names},
         model::{

@@ -1,14 +1,19 @@
 //! Subsystem health probes for operator dashboards.
 
+use std::{sync::Arc, time::Instant};
+
+use chrono::Utc;
+use quant_pivot_api::ws::{ShardHealthSummary, WsShardHealthPort};
+use quant_pivot_models::domain::{
+    governance::{HealthReport, SubsystemHealth},
+    ports::CatalogStatusPort,
+};
+use quant_pivot_storage::{clickhouse::ClickHousePool, postgres::PostgresPool};
+
 use crate::{
     governance::RuntimeModeHandle, infra::health_alert_state::evaluate_ws_probe,
     service::catalog_readiness::CatalogReadiness,
 };
-use chrono::Utc;
-use quant_pivot_api::ws::{ShardHealthSummary, WsShardHealthPort};
-use quant_pivot_models::domain::{CatalogStatusPort, HealthReport, SubsystemHealth};
-use quant_pivot_storage::{clickhouse::ClickHousePool, postgres::PostgresPool};
-use std::{sync::Arc, time::Instant};
 
 /// Construction dependencies for [`HealthChecker`].
 pub struct HealthCheckerDeps {

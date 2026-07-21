@@ -1,4 +1,4 @@
-//! Quant-pivot persistence DTOs for Phase 1 schema-first repositories.
+//! Quant-pivot persistence DTOs for schema-first repositories.
 
 mod account;
 mod attribution;
@@ -32,7 +32,6 @@ mod linkage;
 mod model;
 mod portfolio;
 mod position;
-pub mod prelude;
 mod recommendation;
 mod reconciliation;
 mod report_data_quality;
@@ -58,39 +57,111 @@ mod source_slice;
 mod trade_policy;
 mod trade_policy_trial;
 
-pub use account::*;
-pub use attribution::*;
-pub use backtest::*;
-pub use backtest_path_set::*;
-pub use basis_alert::*;
-pub use calibration_artifact::*;
-pub use candidate::*;
-pub use capital::*;
-pub use comparison::*;
-pub use dataset::*;
-pub use entry_condition::*;
-pub use execution::*;
-pub use exit_training::*;
-pub use factor::*;
-pub use feature::*;
-pub use feature_parity::*;
-pub use governance_audit::*;
-pub use linkage::*;
-pub use model::*;
-pub use portfolio::*;
-pub use position::*;
-pub use recommendation::*;
-pub use reconciliation::*;
-pub use report_data_quality::*;
-pub use report_diff::*;
-pub use report_fact_delivery::*;
-pub use report_run::*;
-pub use report_txn::*;
-pub use research_job::*;
-pub use research_readiness::*;
-pub use selection::*;
-pub use settlement::*;
-pub use shadow::*;
-pub use source_slice::*;
-pub use trade_policy::*;
-pub use trade_policy_trial::*;
+pub use account::{
+    AccountSnapshotInfo, EquitySnapshotInfo, EquitySnapshotQuery, LiveAccountSnapshot,
+    NewAccountSnapshot, NewEquitySnapshot, capital_drawdown, capital_hwm, hwm_merge,
+};
+pub use attribution::{
+    InsertFinalOutcome, NewRecommendationAttribution, RecommendationAttributionInfo,
+};
+pub use backtest::{BacktestReportInfo, NewBacktestReport};
+pub use backtest_path_set::{BacktestPathSetInfo, NewBacktestPathSet};
+pub use basis_alert::{BasisAlertInfo, NewBasisAlert};
+pub use calibration_artifact::{
+    CalibrationArtifactInfo, CalibrationArtifactPayload, NewCalibrationArtifact,
+};
+pub use candidate::{DomainAvailability, MarketCandidate, MarketDataHealth};
+pub use capital::{CapitalAllocationInfo, CapitalAllocationPatch, NewCapitalAllocation};
+pub use comparison::{ModelComparisonReportInfo, NewModelComparisonReport};
+pub use dataset::{
+    CompleteTrainingDatasetBuild, NewTrainingDatasetPlan, TrainingDatasetInfo,
+    TrainingDatasetMaterialization,
+};
+pub use entry_condition::{
+    ApplyEntryConditionEvaluation, ApplyEntryConditionEvaluationOutcome, CryptoPriceProjectionInfo,
+    EntryConditionArtifactInfo, EntryConditionAuditInfo, EntryConditionClaim,
+    EntryConditionInstanceInfo, NewEntryConditionArtifact, NewEntryConditionAudit,
+    NewEntryConditionInstance, WeatherDailyTemperatureProjectionInfo,
+};
+pub use execution::{
+    ApproveOrderIntent, ApproveOrderIntentOutcome, CapitalSettlement, ExecutionOrderInfo,
+    ExecutionOrderPatch, ExitLedgerWrite, IntentCreationLimits, NewExecutionOrder, NewOrderIntent,
+    OrderIntentInfo, SubmissionLedgerWrite, evaluate_intent_approval_invalidation,
+};
+pub use exit_training::{ExitTrainingLotRow, LotExitEventRow};
+pub use factor::{
+    FactorDefinitionInfo, FactorValueInfo, FactorValueModel, LatestFactorSnapshotBundleInfo,
+    LatestFactorSnapshotInfo, LatestFactorSnapshotValueInfo, NewFactorDefinition, NewFactorValue,
+};
+pub use feature::{FeatureVectorInfo, FeatureVectorModel, NewFeatureVector};
+pub use feature_parity::{
+    CompleteFeatureParityRun, FeatureParityRunInfo, FeatureParityStateInfo,
+    FrozenFeatureParityCandidate, FrozenFeatureParitySubject, FrozenFeatureParitySubjectId,
+    ModelVersionParityEvidence, NewFeatureParityRun, NewFeatureParityState,
+    NewFrozenModelParitySubject, model_run_parity_evidence_hash,
+    model_version_parity_evidence_hash, parity_candidate_membership_hash, parity_selection_hash,
+    report_parity_evidence_hash, report_parity_generation_hash,
+};
+pub use governance_audit::{
+    ModelGovernanceAuditDetail, ModelGovernanceAuditInfo, NewModelGovernanceAudit,
+};
+pub use linkage::{
+    CryptoSubject, GroundingField, GroundingKind, GroundingProof, GroundingSpan, LinkageOutcome,
+    LinkageSourceMetadata, LinkageUnresolvedReason, LinkageValidationFailure, ManualEvidenceInput,
+    MarketLinkage, MarketLinkageDerivation, MarketLinkageInfo, MarketSubject, NewMarketLinkage,
+    OverrideContext, PriceBoundaryInclusion, PriceComparator, ResolutionOracle, ResolvedBinding,
+    ResolvedSourceBinding, WeatherDecisionGroupKey, WeatherSubject,
+};
+pub use model::{
+    ModelRunInfo, ModelSpecInfo, ModelVersionInfo, NewModelRun, NewModelSpec, NewModelVersion,
+    PublishedModelCatalogInfo, QuantModelRunModel,
+};
+pub use portfolio::{NewPortfolioPlan, PortfolioPlanInfo};
+pub use position::{NewPosition, PositionExit, PositionFill, PositionInfo};
+pub use recommendation::{
+    NewRecommendation, NewRecommendationReport, RecommendationInfo, RecommendationReportInfo,
+};
+pub use reconciliation::{
+    AppendReconciliationEvidence, CapitalReconcileSettlement, NewReconciliation,
+    ReconciliationInfo, ReconciliationLedgerWrite, ReconciliationPatch,
+};
+pub use report_data_quality::{NewReportDataQualitySnapshot, ReportDataQualitySnapshotInfo};
+pub use report_diff::{
+    EligibilityShift, RecommendationChangedField, RecommendationDelta, RecommendationDiffSnapshot,
+    ReportDiff, compute_report_diff,
+};
+pub use report_fact_delivery::{NewReportFactDelivery, ReportFactDeliveryInfo};
+pub use report_run::{
+    ClaimReportSchedule, EnqueueReportRunOutcome, MaterializeReportSchedule,
+    MaterializeReportScheduleOutcome, NewReportRun, ReconcileReportSchedule,
+    ReconcileReportSchedulesOutcome, ReportCurrentHealthInfo, ReportRunClaim, ReportRunClaimConfig,
+    ReportRunInfo, ReportScheduleGapInfo, ReportScheduleHealthInfo, ReportScheduleStateInfo,
+};
+pub use report_txn::{
+    CreatePreparedReport, FactDeliverySettlement, NewReportFeatureParity, NewReportTransaction,
+    PreparedReportOutcome, PublishReportOutcome,
+};
+pub use research_job::{
+    JobProgressSink, NewResearchJob, NoopProgressSink, ResearchJobInfo, ResearchJobResultRef,
+};
+pub use research_readiness::{NewResearchReadinessEvidence, ResearchReadinessEvidenceInfo};
+pub use selection::{
+    MarketSelectionInfo, MarketSelectionMemberInfo, MarketSelectionModel, NewMarketSelection,
+    NewMarketSelectionMember,
+};
+pub use settlement::{
+    ConfirmSettlementRedeem, NewSettlementRedeem, NewSettlementRedeemLot, SettlementRedeemInfo,
+    SettlementRedeemLotInfo, SettlementRedeemLotWrite,
+};
+pub use shadow::{NewShadowComparison, ShadowComparisonInfo, ShadowStabilitySummary};
+pub use source_slice::{
+    BeginSourceSliceOutcome, CompleteSourceSlice, NewSourceSlice, SourceSliceIdentity,
+    SourceSliceIdentityInput, SourceSliceInfo,
+};
+pub use trade_policy::{
+    CompleteTradePolicyValidation, FailTradePolicyValidation, NewTradePolicyArtifact,
+    NewTradePolicyGovernanceAudit, NewTradePolicyValidationRow, NewTradePolicyValidationRun,
+    TradePolicyArtifactInfo, TradePolicyGovernanceAuditInfo, TradePolicyValidationRowInfo,
+    TradePolicyValidationRunInfo,
+};
+pub use trade_policy_trial::{NewTradePolicyTrialAttempt, TradePolicyTrialAttemptInfo};

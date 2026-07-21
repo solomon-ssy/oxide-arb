@@ -3,14 +3,17 @@
 use std::collections::{HashMap, HashSet};
 
 use chrono::Utc;
-use quant_pivot_error::storage::{StorageError, entity};
+use quant_pivot_error::storage::{StorageError, entity::MENU};
 use quant_pivot_models::{
-    domain::{MenuInfo, MenuPatch, MenuTreeNode, NewMenu},
-    entities::{menu, role_menu},
+    domain::rbac::{MenuInfo, MenuPatch, MenuTreeNode, NewMenu},
+    entities::{
+        menu::{Column, Entity},
+        role_menu::{Column as RoleMenuColumn, Entity as RoleMenuEntity},
+    },
     types::{MenuId, RoleId},
 };
 use sea_orm::{
-    ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, DatabaseConnection,
+    ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, DatabaseConnection, DbErr,
     EntityTrait, IntoActiveModel, PaginatorTrait, QueryFilter, QueryOrder, TransactionTrait,
 };
 
@@ -30,9 +33,9 @@ impl PgMenuRepository {
 
 /// Fetch every menu row ordered by `(sort, id)`.
 async fn load_all(db: &impl ConnectionTrait) -> Result<Vec<MenuInfo>, StorageError> {
-    let models = menu::Entity::find()
-        .order_by_asc(menu::Column::Sort)
-        .order_by_asc(menu::Column::Id)
+    let models = Entity::find()
+        .order_by_asc(Column::Sort)
+        .order_by_asc(Column::Id)
         .all(db)
         .await
         .map_err(StorageError::from)?;
@@ -80,8 +83,8 @@ async fn do_accessible_for_roles(
         return Ok(Vec::new());
     }
 
-    let granted = role_menu::Entity::find()
-        .filter(role_menu::Column::RoleId.is_in(role_ids.iter().cloned()))
+    let granted = RoleMenuEntity::find()
+        .filter(RoleMenuColumn::RoleId.is_in(role_ids.iter().cloned()))
         .all(db)
         .await
         .map_err(StorageError::from)?;
@@ -116,16 +119,16 @@ async fn do_accessible_for_roles(
 }
 
 async fn do_find_by_id(db: &impl ConnectionTrait, id: &MenuId) -> Result<MenuInfo, StorageError> {
-    menu::Entity::find_by_id(id.clone())
+    Entity::find_by_id(id.clone())
         .one(db)
         .await
         .map_err(StorageError::from)?
         .map(Into::into)
-        .ok_or_else(|| error::not_found(entity::MENU, id))
+        .ok_or_else(|| error::not_found(MENU, id))
 }
 
 async fn do_create(db: &impl ConnectionTrait, new: NewMenu) -> Result<MenuInfo, StorageError> {
-    let model = menu::Entity::insert(new.into_active_model())
+    let model = Entity::insert(new.into_active_model())
         .exec_with_returning(db)
         .await
         .map_err(StorageError::from)?;
@@ -142,7 +145,7 @@ async fn do_update(
     active.updated_at = Set(Utc::now());
     match active.update(db).await {
         Ok(model) => Ok(model.into()),
-        Err(sea_orm::DbErr::RecordNotUpdated) => Err(error::not_found(entity::MENU, id)),
+        Err(DbErr::RecordNotUpdated) => Err(error::not_found(MENU, id)),
         Err(error) => Err(StorageError::from(error)),
     }
 }
@@ -150,32 +153,32 @@ async fn do_update(
 async fn do_delete(db: &DatabaseConnection, id: &MenuId) -> Result<(), StorageError> {
     let txn = db.begin().await.map_err(StorageError::from)?;
 
-    let child_count = menu::Entity::find()
-        .filter(menu::Column::ParentId.eq(id.clone()))
+    let child_count = Entity::find()
+        .filter(Column::ParentId.eq(id.clone()))
         .count(&txn)
         .await
         .map_err(StorageError::from)?;
     if child_count > 0 {
         txn.rollback().await.map_err(StorageError::from)?;
         return Err(error::state_conflict(
-            entity::MENU,
+            MENU,
             Some(id),
             format!("menu has {child_count} child node(s) and cannot be deleted"),
         ));
     }
 
-    role_menu::Entity::delete_many()
-        .filter(role_menu::Column::MenuId.eq(id.clone()))
+    RoleMenuEntity::delete_many()
+        .filter(RoleMenuColumn::MenuId.eq(id.clone()))
         .exec(&txn)
         .await
         .map_err(StorageError::from)?;
-    let result = menu::Entity::delete_by_id(id.clone())
+    let result = Entity::delete_by_id(id.clone())
         .exec(&txn)
         .await
         .map_err(StorageError::from)?;
     if result.rows_affected == 0 {
         txn.rollback().await.map_err(StorageError::from)?;
-        return Err(error::not_found(entity::MENU, id));
+        return Err(error::not_found(MENU, id));
     }
 
     txn.commit().await.map_err(StorageError::from)?;

@@ -4,23 +4,29 @@
 //! core report services (`ReportLifecycleService` + the durable coordinator +
 //! read repositories). Handlers depend only on this trait — never on a
 //! repository or a venue client directly. Implemented in `quant-pivot-core` and
-//! injected into `quant_pivot_web::AppState`.
+//! injected into `quant_pivot_web::state::AppState`.
 
 use async_trait::async_trait;
+use quant_pivot_error::QuantResult;
 
 use crate::{
     domain::{
-        EnqueueReportRunOutcome, OperationLogInfo, Paginated, QuantEvidenceView,
-        QuantRecommendationView, QuantReportDiagnosticsView, QuantReportFunnelView,
-        QuantReportListQuery, RecommendationReportInfo, ReportDiff, ReportFactDeliveryInfo,
-        ReportFunnelMarketListQuery, ReportFunnelMarketView, ReportRunInfo, ReportRunListQuery,
-        ReportScheduleGapInfo, ReportScheduleGapListQuery, ReportScheduleHealthInfo,
-        ReportTimelineQuery,
+        api::{
+            QuantEvidenceView, QuantRecommendationView, QuantReportDiagnosticsView,
+            QuantReportFunnelView, QuantReportListQuery, ReportFunnelMarketListQuery,
+            ReportFunnelMarketView, ReportRunListQuery, ReportScheduleGapListQuery,
+            ReportTimelineQuery,
+        },
+        governance::OperationLogInfo,
+        pagination::Paginated,
+        quant::{
+            EnqueueReportRunOutcome, RecommendationReportInfo, ReportDiff, ReportFactDeliveryInfo,
+            ReportRunInfo, ReportScheduleGapInfo, ReportScheduleHealthInfo,
+        },
     },
     enums::quant::ReportKind,
     types::{RecommendationId, RecommendationReportId, ReportRunId, ResearchProfileId},
 };
-use quant_pivot_error::QuantResult;
 
 /// Validated command to enqueue an ad-hoc report build.
 ///

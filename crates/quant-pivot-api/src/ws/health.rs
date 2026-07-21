@@ -4,14 +4,15 @@
 //! [`ShardHealthSummary`] so operators get one periodic aggregate line (via
 //! the core `HealthChecker`) instead of per-shard reconnect log spam.
 
+use std::{
+    collections::{HashMap, HashSet},
+    fmt::{Display, Formatter, Result as FmtResult},
+    time::Instant,
+};
+
 use parking_lot::RwLock;
 use quant_pivot_models::{
     domain::governance::lifecycle::WS_MARKET_DATA_STALE_THRESHOLD_MS, types::TokenId,
-};
-use std::{
-    collections::{HashMap, HashSet},
-    fmt::{self, Display, Formatter},
-    time::Instant,
 };
 
 /// Per-shard connection slots, indexed by `shard_id`.
@@ -140,7 +141,7 @@ pub struct ShardHealthSummary {
 }
 
 impl Display for ShardHealthSummary {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         if self.total == 0 {
             return write!(f, "no WS shards spawned");
         }

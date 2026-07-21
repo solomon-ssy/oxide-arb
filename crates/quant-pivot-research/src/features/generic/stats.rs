@@ -248,11 +248,12 @@ fn invalid_ema(detail: impl Into<String>) -> QuantError {
 
 #[cfg(test)]
 mod tests {
+    use rust_decimal::Decimal;
+
     use super::{
         ema_slope_time, ema_time_decayed, macd_time, mean_reversion, rate_of_change,
         realized_volatility, simple_return, vol_adjusted,
     };
-    use rust_decimal::Decimal;
 
     /// Build an ascending `(epoch_ms, value)` series on a fixed cadence.
     fn timed(values: &[i64], cadence_secs: i64) -> Vec<(i64, Decimal)> {

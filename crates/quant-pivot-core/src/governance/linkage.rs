@@ -1,35 +1,46 @@
-//! Offline market-linkage resolver orchestration (Phase 11.2.2).
+//! Continuous market-linkage reconciliation for the Gamma catalog.
 //!
-//! Loads frozen Gamma metadata, runs the deterministic layered resolver from
-//! `quant-pivot-research`, and appends outcomes to the bitemporal linkage ledger.
-//! The online / PIT hot path never calls this module.
+//! Every pass classifies the complete affected Crypto/Weather catalog before
+//! running the deterministic layered resolver and appending changed outcomes
+//! to the bitemporal linkage ledger. The online / PIT hot path never performs
+//! catalog classification or resolution.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     sync::Arc,
 };
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use quant_pivot_error::{
     QuantError, QuantResult, governance::GovernanceError, storage::StorageError,
 };
 use quant_pivot_models::{
     config::{WeatherStationProfileConfig, WeatherVerticalBindingsConfig},
     domain::{
-        EventInfo, LinkageOutcome, LinkageResolveSummaryView, LinkageSourceMetadata, MarketInfo,
-        MarketLinkageDerivation, MarketLinkageGovernancePort, MarketLinkageInfo, MarketSubject,
-        NewMarketLinkage, OverrideContext, OverrideLinkageRequest, ResolvedBinding,
+        api::{LinkageResolveSummaryView, OverrideLinkageRequest},
+        market::{EventInfo, MarketInfo},
+        ports::MarketLinkageGovernancePort,
+        quant::{
+            LinkageOutcome, LinkageSourceMetadata, MarketLinkageDerivation, MarketLinkageInfo,
+            MarketSubject, NewMarketLinkage, OverrideContext, ResolvedBinding,
+        },
     },
     enums::{
         common::MarketCategory,
-        domain::{LinkageSourceRole, LinkageStatus, ResolverTier},
+        domain::{DomainFamily, LinkageSourceRole, LinkageStatus, ResolverTier},
     },
-    types::{ContentHash, EventId, MarketId, Probability, ResolverVersion},
+    types::{
+        ContentHash, EventId, MarketId, Probability, ResolverVersion,
+        domain_classification::{
+            DomainCatalogClassificationArtifact, DomainMarketClassificationOutcome,
+        },
+    },
 };
 use quant_pivot_repository::traits::{EventRepository, MarketLinkageRepository, MarketRepository};
 use quant_pivot_research::linkage::{
     LayeredResolver, ResolutionResult, WeatherDecisionGroupMember, WeatherStationRegistry,
-    capability_registry::domain_capability_registry, source_bindings_for_subject,
+    capability_registry::domain_capability_registry,
+    catalog_classification::DomainCatalogClassifier, source_bindings_for_subject,
     validate_manual_override, validate_weather_decision_group,
 };
 
@@ -47,6 +58,7 @@ pub struct LinkageResolverDeps {
 pub struct LinkageResolverService {
     deps: LinkageResolverDeps,
     resolver: LayeredResolver,
+    classifier: DomainCatalogClassifier,
     capability_registry_hash: ContentHash,
 }
 
@@ -64,9 +76,14 @@ impl LinkageResolverService {
             weather_vertical_bindings,
         )?
         .registry_hash;
+        let classifier = DomainCatalogClassifier::new(
+            weather_station_registry.clone(),
+            weather_vertical_bindings,
+        )?;
         Ok(Self {
             deps,
             resolver: LayeredResolver::deterministic(weather_station_registry),
+            classifier,
             capability_registry_hash,
         })
     }
@@ -104,6 +121,14 @@ impl LinkageResolverService {
             });
         }
 
+        let classification = self.classifier.classify_catalog(&markets, &events_by_id)?;
+        log_catalog_classification(&classification);
+        let family_by_market: HashMap<_, _> = classification
+            .classifications
+            .iter()
+            .map(|row| (row.market_id.clone(), row.family))
+            .collect();
+
         let ids: Vec<MarketId> = markets.iter().map(|m| m.market_id.clone()).collect();
         let latest = self
             .deps
@@ -125,6 +150,14 @@ impl LinkageResolverService {
         let mut pending = Vec::new();
 
         for market in &markets {
+            let domain_family = family_by_market
+                .get(&market.market_id)
+                .copied()
+                .ok_or_else(|| GovernanceError::QualityGateFailed {
+                    entity: "domain_catalog_classification",
+                    id: market.market_id.to_string(),
+                    failures: "active domain market has no classification".to_owned(),
+                })?;
             let event =
                 events_by_id
                     .get(&market.event_id)
@@ -136,6 +169,7 @@ impl LinkageResolverService {
             let metadata_hash = metadata.metadata_hash()?;
             if is_current(
                 latest_by_market.get(&market.market_id),
+                domain_family,
                 &metadata_hash,
                 resolver_version,
                 &self.capability_registry_hash,
@@ -153,6 +187,7 @@ impl LinkageResolverService {
             let result = self.resolver.resolve(&metadata, cycle_at)?;
             outcomes_by_market.insert(market.market_id.clone(), result.outcome.clone());
             pending.push(resolution_to_new_linkage(
+                domain_family,
                 &metadata,
                 metadata_hash,
                 self.capability_registry_hash.clone(),
@@ -200,7 +235,7 @@ impl LinkageResolverService {
     /// grounded to a byte-exact literal citation from the market's real
     /// metadata via [`validate_manual_override`] — an override is a human
     /// decision, never text-extracted, but it is never accepted as an
-    /// unanchored assertion either (11.2.2 remediation R4).
+    /// unanchored assertion either.
     ///
     /// The real audit trail is [`ResolvedBinding::override_context`]
     /// (`reason` + `actor`), persisted both inside `outcome` and projected
@@ -283,6 +318,7 @@ impl LinkageResolverService {
                 "override source bindings do not match the subject's frozen source rules",
             ));
         }
+        let domain_family = subject.family();
         let outcome = LinkageOutcome::Resolved(Box::new(ResolvedBinding {
             subject,
             source_bindings,
@@ -295,6 +331,7 @@ impl LinkageResolverService {
         let resolver_version = self.resolver.resolver_version();
         let linkage = NewMarketLinkage::from_derivation(MarketLinkageDerivation {
             market_id: market_id.clone(),
+            domain_family,
             outcome,
             confidence: Probability::ONE,
             resolver_tier: ResolverTier::Override,
@@ -347,7 +384,7 @@ impl LinkageResolverService {
     async fn load_events(
         &self,
         markets: &[MarketInfo],
-    ) -> QuantResult<HashMap<EventId, EventInfo>> {
+    ) -> QuantResult<BTreeMap<EventId, EventInfo>> {
         let mut event_ids: Vec<_> = markets.iter().map(|m| m.event_id.clone()).collect();
         event_ids.sort_by(|a, b| a.as_str().cmp(b.as_str()));
         event_ids.dedup_by(|a, b| a.as_str() == b.as_str());
@@ -357,7 +394,7 @@ impl LinkageResolverService {
             .find_by_ids(&event_ids)
             .await
             .map_err(QuantError::from)?;
-        let events_by_id: HashMap<_, _> = events
+        let events_by_id: BTreeMap<_, _> = events
             .into_iter()
             .map(|event| (event.event_id.clone(), event))
             .collect();
@@ -376,7 +413,7 @@ impl LinkageResolverService {
     async fn expand_weather_decision_groups(
         &self,
         markets: Vec<MarketInfo>,
-        events_by_id: &HashMap<EventId, EventInfo>,
+        events_by_id: &BTreeMap<EventId, EventInfo>,
     ) -> QuantResult<Vec<MarketInfo>> {
         let mut ids: HashSet<MarketId> = markets
             .iter()
@@ -435,7 +472,7 @@ fn metadata_from_market(market: &MarketInfo, event: &EventInfo) -> LinkageSource
 
 fn validate_weather_groups(
     markets: &[MarketInfo],
-    events_by_id: &HashMap<EventId, EventInfo>,
+    events_by_id: &BTreeMap<EventId, EventInfo>,
     outcomes_by_market: &HashMap<MarketId, LinkageOutcome>,
 ) -> QuantResult<()> {
     let markets_by_id: HashMap<_, _> = markets
@@ -515,7 +552,7 @@ fn validate_weather_groups(
                     return Err(weather_group_failure(
                         &event_id,
                         format!(
-                            "catalog sibling `{market_id}` failed deterministic resolution: {reason}"
+                            "catalog sibling `{market_id}` failed deterministic resolution: {reason:?}"
                         ),
                     ));
                 }
@@ -532,6 +569,40 @@ fn validate_weather_groups(
             .map_err(|detail| weather_group_failure(&event_id, detail))?;
     }
     Ok(())
+}
+
+fn log_catalog_classification(classification: &DomainCatalogClassificationArtifact) {
+    let mut supported = 0_u64;
+    let mut credential_blocked = 0_u64;
+    let mut insufficient_evidence = 0_u64;
+    let mut excluded = 0_u64;
+    let mut unsupported_template = 0_u64;
+    for row in &classification.classifications {
+        match row.outcome {
+            DomainMarketClassificationOutcome::Supported => supported += 1,
+            DomainMarketClassificationOutcome::CredentialBlocked { .. } => {
+                credential_blocked += 1;
+            }
+            DomainMarketClassificationOutcome::InsufficientEvidence { .. } => {
+                insufficient_evidence += 1;
+            }
+            DomainMarketClassificationOutcome::Excluded { .. } => excluded += 1,
+            DomainMarketClassificationOutcome::UnsupportedTemplate { .. } => {
+                unsupported_template += 1;
+            }
+        }
+    }
+    tracing::info!(
+        artifact_hash = %classification.artifact_hash,
+        catalog_hash = %classification.catalog_hash,
+        capability_registry_hash = %classification.capability_registry_hash,
+        supported,
+        credential_blocked,
+        insufficient_evidence,
+        excluded,
+        unsupported_template,
+        "domain catalog classification complete before linkage reconciliation"
+    );
 }
 
 fn weather_yes_won(market: &MarketInfo) -> Result<Option<bool>, String> {
@@ -560,44 +631,54 @@ fn weather_group_failure(event_id: &EventId, detail: impl Into<String>) -> Quant
 
 fn is_current(
     latest: Option<&MarketLinkageInfo>,
+    domain_family: DomainFamily,
     metadata_hash: &ContentHash,
     resolver_version: ResolverVersion,
     capability_registry_hash: &ContentHash,
 ) -> bool {
-    latest.is_some_and(|row| {
-        currentness_matches(
-            &row.metadata_hash,
-            row.resolver_version,
-            row.capability_registry_hash.as_ref(),
-            metadata_hash,
-            resolver_version,
-            capability_registry_hash,
-        )
-    })
+    let expected = LinkageCurrentness {
+        domain_family,
+        metadata_hash,
+        resolver_version,
+        capability_registry_hash: Some(capability_registry_hash),
+    };
+    latest.is_some_and(|row| currentness_matches(LinkageCurrentness::from(row), expected))
 }
 
-fn currentness_matches(
-    latest_metadata_hash: &ContentHash,
-    latest_resolver_version: ResolverVersion,
-    latest_capability_registry_hash: Option<&ContentHash>,
-    metadata_hash: &ContentHash,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct LinkageCurrentness<'a> {
+    domain_family: DomainFamily,
+    metadata_hash: &'a ContentHash,
     resolver_version: ResolverVersion,
-    capability_registry_hash: &ContentHash,
-) -> bool {
-    latest_metadata_hash == metadata_hash
-        && latest_resolver_version == resolver_version
-        && latest_capability_registry_hash == Some(capability_registry_hash)
+    capability_registry_hash: Option<&'a ContentHash>,
+}
+
+impl<'a> From<&'a MarketLinkageInfo> for LinkageCurrentness<'a> {
+    fn from(linkage: &'a MarketLinkageInfo) -> Self {
+        Self {
+            domain_family: linkage.domain_family,
+            metadata_hash: &linkage.metadata_hash,
+            resolver_version: linkage.resolver_version,
+            capability_registry_hash: linkage.capability_registry_hash.as_ref(),
+        }
+    }
+}
+
+fn currentness_matches(latest: LinkageCurrentness<'_>, expected: LinkageCurrentness<'_>) -> bool {
+    latest == expected
 }
 
 fn resolution_to_new_linkage(
+    domain_family: DomainFamily,
     metadata: &LinkageSourceMetadata,
     metadata_hash: ContentHash,
     capability_registry_hash: ContentHash,
     result: ResolutionResult,
-    effective_at: chrono::DateTime<Utc>,
+    effective_at: DateTime<Utc>,
 ) -> QuantResult<NewMarketLinkage> {
     NewMarketLinkage::from_derivation(MarketLinkageDerivation {
         market_id: metadata.market_id.clone(),
+        domain_family,
         outcome: result.outcome,
         confidence: result.confidence,
         resolver_tier: result.resolver_tier,
@@ -629,11 +710,29 @@ impl MarketLinkageGovernancePort for LinkageResolverService {
 
 #[cfg(test)]
 mod tests {
-    use super::currentness_matches;
-    use quant_pivot_models::types::{ContentHash, ResolverVersion};
+    use quant_pivot_models::{
+        enums::domain::DomainFamily,
+        types::{ContentHash, ResolverVersion},
+    };
+
+    use super::{LinkageCurrentness, currentness_matches};
 
     fn hash(fill: char) -> ContentHash {
         ContentHash::parse(format!("blake3:{}", fill.to_string().repeat(64))).expect("hash")
+    }
+
+    fn currentness<'a>(
+        domain_family: DomainFamily,
+        metadata_hash: &'a ContentHash,
+        resolver_version: ResolverVersion,
+        capability_registry_hash: Option<&'a ContentHash>,
+    ) -> LinkageCurrentness<'a> {
+        LinkageCurrentness {
+            domain_family,
+            metadata_hash,
+            resolver_version,
+            capability_registry_hash,
+        }
     }
 
     #[test]
@@ -642,40 +741,36 @@ mod tests {
         let registry = hash('b');
         let resolver = ResolverVersion::new(3);
 
+        let expected = currentness(DomainFamily::Crypto, &metadata, resolver, Some(&registry));
+
         assert!(currentness_matches(
-            &metadata,
-            resolver,
-            Some(&registry),
-            &metadata,
-            resolver,
-            &registry,
+            currentness(DomainFamily::Crypto, &metadata, resolver, Some(&registry),),
+            expected,
         ));
         assert!(!currentness_matches(
-            &metadata, resolver, None, &metadata, resolver, &registry,
+            currentness(DomainFamily::Crypto, &metadata, resolver, None),
+            expected,
         ));
         assert!(!currentness_matches(
-            &metadata,
-            resolver,
-            Some(&hash('c')),
-            &metadata,
-            resolver,
-            &registry,
+            currentness(DomainFamily::Crypto, &metadata, resolver, Some(&hash('c')),),
+            expected,
         ));
         assert!(!currentness_matches(
-            &hash('c'),
-            resolver,
-            Some(&registry),
-            &metadata,
-            resolver,
-            &registry,
+            currentness(DomainFamily::Crypto, &hash('c'), resolver, Some(&registry),),
+            expected,
         ));
         assert!(!currentness_matches(
-            &metadata,
-            ResolverVersion::new(2),
-            Some(&registry),
-            &metadata,
-            resolver,
-            &registry,
+            currentness(
+                DomainFamily::Crypto,
+                &metadata,
+                ResolverVersion::new(2),
+                Some(&registry),
+            ),
+            expected,
+        ));
+        assert!(!currentness_matches(
+            currentness(DomainFamily::Crypto, &metadata, resolver, Some(&registry),),
+            currentness(DomainFamily::Weather, &metadata, resolver, Some(&registry),),
         ));
     }
 }

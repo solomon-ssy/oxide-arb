@@ -89,7 +89,7 @@ impl FactorEngine {
     /// `factors` selects the enabled families; `features` resolves windowed
     /// factor inputs (e.g. the momentum / volatility windows) against the active
     /// feature schema, so a factor's declared input always matches a real feature
-    /// name; `domain` gates the category-routed vertical factors (11.2.2).
+    /// name; `domain` gates the category-routed vertical factors.
     /// Normalizers are resolved per compute call from `factors.normalization`
     /// so parameter tuning never re-keys the registry.
     ///
@@ -367,7 +367,7 @@ fn resolve_normalizers(
         .collect()
 }
 
-/// Phase A — the raw factor grid, market-major (`raw[market][factor]`).
+/// Stage A — the raw factor grid, market-major (`raw[market][factor]`).
 fn build_raw_by_market(
     factors: &[FactorEntry],
     definition_ids: &[FactorDefinitionId],
@@ -392,7 +392,7 @@ fn build_raw_by_market(
     }
 }
 
-/// Phase B — normalize each factor's full column, factor-major
+/// Stage B — normalize each factor's full column, factor-major
 /// (`norm[factor][market]`), applying the small-cross-section policy per factor.
 fn build_norm_grid(
     factors: &[FactorEntry],
@@ -471,7 +471,7 @@ fn normalize_one_factor(
     })
 }
 
-/// Phase C — assemble one [`MarketFactorOutcome`] per market, preserving order.
+/// Stage C — assemble one [`MarketFactorOutcome`] per market, preserving order.
 fn assemble_outcomes(
     features: &[FeatureVector],
     factors: &[FactorEntry],

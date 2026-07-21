@@ -8,8 +8,12 @@
 //! (the stable economic key of a buy-to-open position), so the diff answers
 //! "what did this report add / drop / re-weight versus the other one".
 
+use std::collections::BTreeMap;
+
+use chrono::{DateTime, Utc};
+
 use crate::{
-    domain::{RecommendationInfo, RecommendationReportInfo},
+    domain::quant::{RecommendationInfo, RecommendationReportInfo},
     enums::quant::OutcomeSide,
     types::{
         Bps, EligibilitySummary, ExecutionEligibility, MarketId, Probability,
@@ -17,8 +21,6 @@ use crate::{
         RecommendationTradePlan, Usd,
     },
 };
-use chrono::{DateTime, Utc};
-use std::collections::BTreeMap;
 
 /// A typed field whose decision semantics changed between two snapshots.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

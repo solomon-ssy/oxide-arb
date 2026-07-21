@@ -1,4 +1,4 @@
-//! Phase 04.2 recommendation report generation closed loop.
+//! recommendation report generation closed loop.
 
 mod builder;
 mod composer;

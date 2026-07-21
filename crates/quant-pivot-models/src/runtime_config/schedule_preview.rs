@@ -4,13 +4,18 @@
 //! `PostgreSQL` coordinator, so the UI preview matches real scheduling. Pure and
 //! side-effect-free: it never touches a running scheduler.
 
-use super::ScheduleCadence;
+use std::str::FromStr;
+
 use chrono::{DateTime, Duration, TimeZone, Utc};
+use chrono_tz::Tz;
 use croner::{Cron, errors::CronError};
 use quant_pivot_error::{
-    ConfigValidationError, ConfigValidationReport, QuantError, QuantResult, config::ConfigError,
+    QuantError, QuantResult,
+    config::ConfigError,
+    config_validation::{ConfigValidationError, ConfigValidationReport},
 };
-use std::str::FromStr;
+
+use super::ScheduleCadence;
 
 /// Upper bound on previewed occurrences per request.
 pub const MAX_PREVIEW_OCCURRENCES: usize = 20;
@@ -97,7 +102,7 @@ pub fn due_schedule_window(
             expr,
             timezone: Some(timezone),
         } => {
-            let zone: chrono_tz::Tz = timezone.parse().map_err(|_| {
+            let zone: Tz = timezone.parse().map_err(|_| {
                 reject(
                     "reports.schedules.cadence.timezone",
                     format!("invalid IANA timezone {timezone:?}"),
@@ -197,7 +202,7 @@ pub fn preview_fire_times(
             timezone: Some(timezone),
         } => {
             let cron = parse_cron(expr)?;
-            let zone: chrono_tz::Tz = timezone.parse().map_err(|_| {
+            let zone: Tz = timezone.parse().map_err(|_| {
                 reject(
                     "reports.schedules.cadence.timezone",
                     format!("invalid IANA timezone {timezone:?}"),
@@ -275,8 +280,9 @@ pub fn validate_schedule_cadence(cadence: &ScheduleCadence, report: &mut ConfigV
 
 #[cfg(test)]
 mod tests {
-    use super::{ScheduleCadence, preview_fire_times};
     use chrono::{Duration, TimeZone, Utc};
+
+    use super::{ScheduleCadence, preview_fire_times};
 
     #[test]
     fn interval_preview_steps_by_interval() {

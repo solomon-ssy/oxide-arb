@@ -11,32 +11,30 @@
 //! model-input subset, so parity can replay rejections without treating them as
 //! inference inputs.
 
-use crate::{
-    ingest::{
-        market_registry::MarketRegistry,
-        trade_tape_health::{cursors_by_contract_address, trade_tape_market_ingest_available},
-    },
-    observability::{
-        feature_fact_writer::FeatureEventWriter, serving_evidence::FeatureEvidenceCommitment,
-    },
-    prefetch::feature_window::FeatureWindowProvider,
-    service::basis_alert::detect_basis_alerts,
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+    time::Duration,
 };
-use chrono::{Duration as ChronoDuration, TimeZone, Utc};
+
+use chrono::{DateTime, Duration as ChronoDuration, TimeZone, Utc};
 use chrono_tz::Tz;
 use futures_util::future::join_all;
 use quant_pivot_error::{QuantError, QuantResult, report::ReportError};
 use quant_pivot_models::{
     config::TradeTapeOnChainConfig,
     domain::{
-        DecisionBoundary, FeatureVectorInfo, MarketLinkage, MarketLinkageInfo, MarketSubject,
-        NewFeatureVector, TradeTapeSourceKind, WeatherSubject, quant::NewReportDataQualitySnapshot,
+        data_plane::{DecisionBoundary, TradeTapeSourceKind},
+        quant::{
+            FeatureVectorInfo, MarketLinkage, MarketLinkageInfo, MarketSubject, NewFeatureVector,
+            NewReportDataQualitySnapshot, WeatherSubject,
+        },
     },
     enums::{domain::DomainFamily, quant::DataQualityStatus},
     runtime_config::{DataQualityConfig, DomainConfig, FeaturesConfig},
     types::{
-        DecisionPolicySnapshotId, DomainInstrumentKey, IcaoStation, MarketId, TokenId, Usd,
-        stable_name::FeatureName,
+        DecisionPolicySnapshotId, DomainInstrumentKey, IcaoStation, MarketId, NullReason, TokenId,
+        Usd, stable_name::FeatureName,
     },
 };
 use quant_pivot_repository::traits::{
@@ -49,17 +47,23 @@ use quant_pivot_research::{
     },
     features::{
         ConfiguredFeatureBuilder, DomainSliceInputs, FeatureSchema, FeatureSourceWindows,
-        FeatureVector, MarketDecisionCapture, MarketWindowSnapshot, NullReason,
-        RejectedMarketDraft, ResolvedMarketBundle, TradeTapeWindowSnapshot,
-        draft_data_quality_snapshot, feature_events,
+        FeatureVector, MarketDecisionCapture, MarketWindowSnapshot, RejectedMarketDraft,
+        ResolvedMarketBundle, TradeTapeWindowSnapshot, draft_data_quality_snapshot, feature_events,
     },
     pit::PointInTimeSnapshotSource,
     selection::{ModelFeatureRequirements, SelectedMarket},
 };
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-    time::Duration,
+
+use crate::{
+    ingest::{
+        market_registry::MarketRegistry,
+        trade_tape_health::{cursors_by_contract_address, trade_tape_market_ingest_available},
+    },
+    observability::{
+        feature_fact_writer::FeatureEventWriter, serving_evidence::FeatureEvidenceCommitment,
+    },
+    prefetch::feature_window::FeatureWindowProvider,
+    service::basis_alert::detect_basis_alerts,
 };
 
 /// Frozen inputs for one feature-plane round.
@@ -70,7 +74,7 @@ pub struct FeaturePipelineRequest<'a> {
     pub boundary: DecisionBoundary,
     /// Frozen feature config.
     pub features: &'a FeaturesConfig,
-    /// Frozen domain-plane config (Phase 11.2.2).
+    /// Frozen domain-plane config.
     pub domain: &'a DomainConfig,
     /// Frozen data-quality config.
     pub data_quality: &'a DataQualityConfig,
@@ -357,7 +361,7 @@ impl FeaturePipelineService {
         })
     }
 
-    /// Basis cross-check closed loop (11.2.2 remediation R6): every accepted
+    /// Basis cross-check closed loop: every accepted
     /// vector whose `domain.crypto.basis_vs_resolution_source` exceeds the
     /// governed threshold is durably recorded — never a
     /// computed-but-unconsumed feature value. A per-market cooldown keeps a
@@ -615,12 +619,12 @@ struct LiveDomainLinkages {
     instruments: HashSet<DomainInstrumentKey>,
     oracle_instruments: HashSet<DomainInstrumentKey>,
     weather_stations: HashSet<IcaoStation>,
-    weather_valid_to: chrono::DateTime<Utc>,
+    weather_valid_to: DateTime<Utc>,
 }
 
 fn collect_live_domain_linkages(
     rows: Vec<MarketLinkageInfo>,
-    decision_at: chrono::DateTime<Utc>,
+    decision_at: DateTime<Utc>,
 ) -> QuantResult<LiveDomainLinkages> {
     let mut collected = LiveDomainLinkages {
         by_market: HashMap::new(),
@@ -661,7 +665,7 @@ fn collect_live_domain_linkages(
     Ok(collected)
 }
 
-fn weather_local_day_end(subject: &WeatherSubject) -> QuantResult<chrono::DateTime<Utc>> {
+fn weather_local_day_end(subject: &WeatherSubject) -> QuantResult<DateTime<Utc>> {
     let timezone = subject
         .decision_group
         .timezone

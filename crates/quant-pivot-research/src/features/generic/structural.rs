@@ -1,4 +1,4 @@
-//! Structural (prediction-market-aware) feature builder (Phase 11.2.1).
+//! Structural (prediction-market-aware) feature builder.
 //!
 //! Platform-computable from existing facts — no external data source. Produces:
 //!
@@ -7,7 +7,7 @@
 //! - `struct.price_extremity` — signed `mid − 0.5` (interacts with
 //!   time-to-resolution in the resolution-proximity factor).
 //! - `struct.book_churn_intensity` — a book-churn (delta/update) proxy over the
-//!   maker window. NOT true maker concentration (needs trade-tape; see 11.2.1.1).
+//!   maker window. It is distinct from trade-tape participant concentration.
 //! - `struct.negrisk_leg_ask_sum` / `struct.negrisk_leg_bid_sum` /
 //!   `struct.negrisk_leg_count` / `struct.negrisk_convert_edge` — same-`as_of`
 //!   full-leg aggregates over a neg-risk event's YES legs.
@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
-    domain::{TradeParticipantRole, TradeTapePrint},
+    domain::data_plane::{TradeParticipantRole, TradeTapePrint},
     runtime_config::{DecimalValue, FeatureFamily},
     types::{Price, Usd},
 };
@@ -30,7 +30,16 @@ use crate::{
     features::{
         builder::{FeatureComputeCtx, FeatureGroupBuilder, RawFeature, ResolvedLeg},
         generic::stats::{realized_volatility, simple_return},
-        names::structural as names,
+        names::{
+            structural as names,
+            structural::{
+                BOOK_CHURN_INTENSITY, MAKER_GINI, NEGRISK_CONVERT_EDGE, NEGRISK_LEG_ASK_SUM,
+                NEGRISK_LEG_BID_SUM, NEGRISK_LEG_COUNT, PARTICIPANT_COUNT,
+                PARTICIPANT_COVERAGE_RATIO, PARTICIPANT_CR1_SHARE, PARTICIPANT_GINI,
+                PARTICIPANT_HHI, PRICE_EXTREMITY, TAKER_GINI, TRADE_TAPE_COUNT,
+                TRADE_TAPE_NOTIONAL_USD,
+            },
+        },
         resolved::{MicrostructureBucket, ResolvedBook},
         value::{EvidenceSourceKind, EvidenceSourceRef, FeatureName, FeatureValue, NullReason},
     },
@@ -119,32 +128,31 @@ fn sqrt_decimal(n: usize) -> Option<Decimal> {
 /// favorite (mid > 0.5) reads positive and a longshot (mid < 0.5) negative.
 fn price_extremity_feature(ctx: &FeatureComputeCtx<'_>) -> RawFeature {
     let Some(book) = ctx.book else {
-        return RawFeature::missing(names::PRICE_EXTREMITY, NullReason::SourceUnavailable);
+        return RawFeature::missing(PRICE_EXTREMITY, NullReason::SourceUnavailable);
     };
     let Some(mid) = book.mid() else {
-        return RawFeature::missing(names::PRICE_EXTREMITY, NullReason::SourceUnavailable);
+        return RawFeature::missing(PRICE_EXTREMITY, NullReason::SourceUnavailable);
     };
     let extremity = mid.inner() - half();
     RawFeature::present(
-        names::PRICE_EXTREMITY,
+        PRICE_EXTREMITY,
         FeatureValue::Decimal(extremity),
         book_evidence(book),
     )
 }
 
 /// Book-churn intensity: delta-to-update ratio over the maker window — a
-/// book-derived liquidity-turnover proxy. This is NOT true maker participant
-/// concentration (Gini / top-1% share), which requires trade-tape the platform
-/// does not yet ingest; the honest concentration signal is designed in 11.2.1.1.
+/// book-derived liquidity-turnover proxy. This is not maker participant
+/// concentration (Gini / CR1 / HHI), which is computed from the trade tape.
 fn book_churn_intensity_feature(ctx: &FeatureComputeCtx<'_>) -> RawFeature {
     let window = ctx.window;
     let lookback = Duration::from_secs(ctx.config.structural.book_churn_window_secs);
     let buckets = window.buckets_in(lookback);
     book_churn(&buckets).map_or_else(
-        || RawFeature::missing(names::BOOK_CHURN_INTENSITY, NullReason::InsufficientHistory),
+        || RawFeature::missing(BOOK_CHURN_INTENSITY, NullReason::InsufficientHistory),
         |churn| {
             RawFeature::present(
-                names::BOOK_CHURN_INTENSITY,
+                BOOK_CHURN_INTENSITY,
                 FeatureValue::Decimal(churn),
                 EvidenceSourceRef {
                     source_kind: EvidenceSourceKind::ClickHouseFact,
@@ -199,38 +207,38 @@ fn trade_tape_features(ctx: &FeatureComputeCtx<'_>) -> Vec<RawFeature> {
     match concentration {
         Ok(snapshot) => {
             out.push(RawFeature::present(
-                names::TRADE_TAPE_COUNT,
+                TRADE_TAPE_COUNT,
                 FeatureValue::Count(snapshot.observed_print_count),
                 evidence.clone(),
             ));
             out.push(RawFeature::present(
-                names::PARTICIPANT_COUNT,
+                PARTICIPANT_COUNT,
                 FeatureValue::Count(snapshot.unique_participants),
                 evidence.clone(),
             ));
             out.push(RawFeature::present(
-                names::TRADE_TAPE_NOTIONAL_USD,
+                TRADE_TAPE_NOTIONAL_USD,
                 FeatureValue::Usd(Usd::new(snapshot.total_notional_usd)),
                 evidence.clone(),
             ));
             out.push(RawFeature::present(
-                names::PARTICIPANT_COVERAGE_RATIO,
+                PARTICIPANT_COVERAGE_RATIO,
                 FeatureValue::Decimal(snapshot.coverage_ratio),
                 evidence.clone(),
             ));
             out.extend([
                 RawFeature::present(
-                    names::PARTICIPANT_GINI,
+                    PARTICIPANT_GINI,
                     FeatureValue::Decimal(snapshot.gini),
                     evidence.clone(),
                 ),
                 RawFeature::present(
-                    names::PARTICIPANT_HHI,
+                    PARTICIPANT_HHI,
                     FeatureValue::Decimal(snapshot.hhi),
                     evidence.clone(),
                 ),
                 RawFeature::present(
-                    names::PARTICIPANT_CR1_SHARE,
+                    PARTICIPANT_CR1_SHARE,
                     FeatureValue::Decimal(snapshot.cr1_share),
                     evidence.clone(),
                 ),
@@ -258,15 +266,15 @@ fn trade_tape_features(ctx: &FeatureComputeCtx<'_>) -> Vec<RawFeature> {
 
 const fn trade_tape_feature_names() -> [FeatureName; 9] {
     [
-        names::TRADE_TAPE_COUNT,
-        names::PARTICIPANT_COUNT,
-        names::TRADE_TAPE_NOTIONAL_USD,
-        names::PARTICIPANT_COVERAGE_RATIO,
-        names::PARTICIPANT_GINI,
-        names::PARTICIPANT_HHI,
-        names::PARTICIPANT_CR1_SHARE,
-        names::MAKER_GINI,
-        names::TAKER_GINI,
+        TRADE_TAPE_COUNT,
+        PARTICIPANT_COUNT,
+        TRADE_TAPE_NOTIONAL_USD,
+        PARTICIPANT_COVERAGE_RATIO,
+        PARTICIPANT_GINI,
+        PARTICIPANT_HHI,
+        PARTICIPANT_CR1_SHARE,
+        MAKER_GINI,
+        TAKER_GINI,
     ]
 }
 
@@ -303,14 +311,14 @@ fn role_metric_features(
 ) -> [RawFeature; 2] {
     [
         role_gini_feature(
-            names::MAKER_GINI,
+            MAKER_GINI,
             prints,
             TradeParticipantRole::Maker,
             gate,
             evidence,
         ),
         role_gini_feature(
-            names::TAKER_GINI,
+            TAKER_GINI,
             prints,
             TradeParticipantRole::Taker,
             gate,
@@ -427,10 +435,10 @@ impl LegAggregate {
 /// The neg-risk features, all missing with one reason.
 fn negrisk_all_missing(reason: NullReason) -> Vec<RawFeature> {
     [
-        names::NEGRISK_LEG_ASK_SUM,
-        names::NEGRISK_LEG_BID_SUM,
-        names::NEGRISK_LEG_COUNT,
-        names::NEGRISK_CONVERT_EDGE,
+        NEGRISK_LEG_ASK_SUM,
+        NEGRISK_LEG_BID_SUM,
+        NEGRISK_LEG_COUNT,
+        NEGRISK_CONVERT_EDGE,
     ]
     .into_iter()
     .map(|name| RawFeature::missing(name, reason))
@@ -478,7 +486,7 @@ fn decimal_window(
 mod trade_tape_null_reason_tests {
     use chrono::Utc;
     use quant_pivot_models::{
-        domain::{TradeParticipantRole, TradeTapePrint, TradeTapeSourceKind},
+        domain::data_plane::{TradeParticipantRole, TradeTapePrint, TradeTapeSourceKind},
         enums::common::MarketCategory,
         runtime_config::{DataQualityConfig, FeaturesConfig},
         types::{MarketId, Price, Shares, TokenId, Usd},
@@ -488,7 +496,11 @@ mod trade_tape_null_reason_tests {
     use super::*;
     use crate::features::{
         builder::{FeatureComputeCtx, FeatureGroupBuilder},
-        names::structural as trade_tape_names,
+        names::structural::{
+            MAKER_GINI, PARTICIPANT_COUNT, PARTICIPANT_COVERAGE_RATIO, PARTICIPANT_CR1_SHARE,
+            PARTICIPANT_GINI, PARTICIPANT_HHI, TAKER_GINI, TRADE_TAPE_COUNT,
+            TRADE_TAPE_NOTIONAL_USD,
+        },
         resolved::{MarketWindowSnapshot, TradeTapeWindowSnapshot},
     };
 
@@ -506,15 +518,15 @@ mod trade_tape_null_reason_tests {
     }
 
     fn is_trade_tape_feature(name: &FeatureName) -> bool {
-        name == &trade_tape_names::TRADE_TAPE_COUNT
-            || name == &trade_tape_names::TRADE_TAPE_NOTIONAL_USD
-            || name == &trade_tape_names::PARTICIPANT_GINI
-            || name == &trade_tape_names::PARTICIPANT_HHI
-            || name == &trade_tape_names::PARTICIPANT_CR1_SHARE
-            || name == &trade_tape_names::PARTICIPANT_COVERAGE_RATIO
-            || name == &trade_tape_names::MAKER_GINI
-            || name == &trade_tape_names::TAKER_GINI
-            || name == &trade_tape_names::PARTICIPANT_COUNT
+        name == &TRADE_TAPE_COUNT
+            || name == &TRADE_TAPE_NOTIONAL_USD
+            || name == &PARTICIPANT_GINI
+            || name == &PARTICIPANT_HHI
+            || name == &PARTICIPANT_CR1_SHARE
+            || name == &PARTICIPANT_COVERAGE_RATIO
+            || name == &MAKER_GINI
+            || name == &TAKER_GINI
+            || name == &PARTICIPANT_COUNT
     }
 
     fn trade_tape_only(
@@ -600,7 +612,7 @@ mod trade_tape_null_reason_tests {
         let features = trade_tape_only(&trade_tape, &config);
         let gini = features
             .iter()
-            .find(|feature| feature.name == trade_tape_names::PARTICIPANT_GINI)
+            .find(|feature| feature.name == PARTICIPANT_GINI)
             .expect("gini");
         assert_eq!(gini.value, Err(NullReason::InsufficientTradeTape));
     }

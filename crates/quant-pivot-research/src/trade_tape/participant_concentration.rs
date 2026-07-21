@@ -1,11 +1,13 @@
 //! Canonical on-chain maker-side participant concentration metrics (Gini / HHI / CR1).
 //!
-//! Single source of truth for [`crate::features::structural`] and the structural
+//! Single source of truth for structural features and the structural
 //! monitor port — never duplicate formulas elsewhere.
 
 use std::collections::BTreeMap;
 
-use quant_pivot_models::domain::{TradeParticipantRole, TradeTapePrint, TradeTapeSourceKind};
+use quant_pivot_models::domain::data_plane::{
+    TradeParticipantRole, TradeTapePrint, TradeTapeSourceKind,
+};
 use rust_decimal::Decimal;
 
 /// Gate thresholds before concentration metrics are scored.
@@ -273,17 +275,18 @@ pub fn compute_role_gini(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        ConcentrationCompositeWeights, ParticipantConcentrationGate, composite_concentration,
-        compute_concentration, cr1_share, gini, hhi,
-    };
     use chrono::Utc;
     use quant_pivot_models::{
-        domain::{TradeParticipantRole, TradeTapePrint, TradeTapeSourceKind},
+        domain::data_plane::{TradeParticipantRole, TradeTapePrint, TradeTapeSourceKind},
         types::{MarketId, Price, Shares, TokenId, Usd},
     };
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
+
+    use super::{
+        ConcentrationCompositeWeights, ParticipantConcentrationGate, composite_concentration,
+        compute_concentration, cr1_share, gini, hhi,
+    };
 
     fn gate() -> ParticipantConcentrationGate {
         ParticipantConcentrationGate {

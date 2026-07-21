@@ -1,4 +1,4 @@
-//! The 23 admission checks (parent §4.2), each a pure function of the frozen
+//! The 23 admission checks, each a pure function of the frozen
 //! [`AdmissionInput`]. Every check is hard: a violation is `Deny`, a
 //! not-now-but-retryable condition is `Defer`, otherwise `Allow`.
 
@@ -733,7 +733,7 @@ impl AdmissionCheck for KillSwitchCheck {
 }
 
 // 18 ─────────────────────────────────────────────────────────────────────────
-/// Venue health permits submission. The 05.4 breaker drives this with at most a
+/// Venue health permits submission. The breaker drives this with at most a
 /// transient `Degraded` (defer); a sustained halt is authoritative via `#17`.
 pub(super) struct VenueGuardCheck;
 

@@ -6,17 +6,11 @@ mod resolution;
 mod sync;
 mod wire;
 
+use catalog::{CatalogEvent, CatalogMarket};
 pub use catalog::{CatalogMarketReject, FilteredPrelistingMarket, RejectedMarket};
+use futures_util::stream::{self, StreamExt};
 use mapper::{CatalogMarketMapCtx, CatalogMarketWithCtx};
 pub use mapper::{CatalogSourceTimestamps, GammaCatalogBatch};
-pub use resolution::GammaResolution;
-
-use crate::infra::{
-    http::retry_after_ms,
-    retry::{self, RetryPolicy},
-};
-use catalog::CatalogMarket;
-use futures_util::stream::{self, StreamExt};
 use quant_pivot_error::api::ApiError;
 use quant_pivot_models::{
     config::GammaConfig,
@@ -24,7 +18,14 @@ use quant_pivot_models::{
     enums::{common::CategorySet, market::MarketStatus},
     types::{EventId, MarketId, TokenId},
 };
+use reqwest::Client;
+pub use resolution::GammaResolution;
 use wire::WireMarket;
+
+use crate::infra::{
+    http::retry_after_ms,
+    retry::{self, RetryPolicy},
+};
 
 /// One individually fetched market together with unmodified upstream clocks.
 pub struct FetchedCatalogMarket {
@@ -39,7 +40,7 @@ pub struct FetchedCatalogMarket {
 /// All HTTP calls are wrapped with retry logic (exponential backoff).
 pub struct GammaClient {
     config: GammaConfig,
-    http: reqwest::Client,
+    http: Client,
     retry_policy: RetryPolicy,
 }
 
@@ -47,13 +48,13 @@ impl GammaClient {
     pub fn new(config: GammaConfig) -> Self {
         Self {
             config,
-            http: reqwest::Client::new(),
+            http: Client::new(),
             retry_policy: RetryPolicy::gamma_default(),
         }
     }
 
     #[must_use]
-    pub fn with_http_client(mut self, http: reqwest::Client) -> Self {
+    pub fn with_http_client(mut self, http: Client) -> Self {
         self.http = http;
         self
     }
@@ -154,7 +155,7 @@ impl GammaClient {
         let event_id = EventId::new(&parent.id);
         let tags = parent.tag_slugs();
         let categories = CategorySet::from_slugs(tags.iter().map(String::as_str));
-        let catalog_event = catalog::CatalogEvent::from(parent);
+        let catalog_event = CatalogEvent::from(parent);
         let event_source_timestamps = CatalogSourceTimestamps {
             created_at: catalog_event.created_at,
             updated_at: catalog_event.updated_at,

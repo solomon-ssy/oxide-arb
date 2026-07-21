@@ -1,12 +1,13 @@
 //! `quant_calibration_artifact` table entity.
 
+use chrono::{DateTime, Utc};
+use sea_orm::entity::prelude::*;
+
 use crate::{
-    domain::CalibrationArtifactPayload,
+    domain::quant::CalibrationArtifactPayload,
     enums::quant::CalibrationKind,
     types::{CalibrationArtifactId, ContentHash},
 };
-use chrono::{DateTime, Utc};
-use sea_orm::entity::prelude::*;
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]

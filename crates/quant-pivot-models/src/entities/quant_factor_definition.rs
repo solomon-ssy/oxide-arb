@@ -1,5 +1,9 @@
 //! `quant_factor_definition` table entity.
 
+use chrono::{DateTime, Utc};
+use sea_orm::entity::prelude::*;
+
+use super::quant_factor_value;
 use crate::{
     enums::{
         factor::{FactorDefinitionScope, FactorFamily},
@@ -9,8 +13,6 @@ use crate::{
         ContentHash, FactorDefinitionId, SchemaVersion, UserId, factor::FactorDefinitionDocument,
     },
 };
-use chrono::{DateTime, Utc};
-use sea_orm::entity::prelude::*;
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -36,7 +38,7 @@ pub struct Model {
     pub updated_at: DateTime<Utc>,
 
     #[sea_orm(has_many, relation_enum = "FactorValue")]
-    pub factor_value: HasMany<super::quant_factor_value::Entity>,
+    pub factor_value: HasMany<quant_factor_value::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

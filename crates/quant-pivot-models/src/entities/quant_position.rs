@@ -1,5 +1,9 @@
 //! `quant_position` table entity.
 
+use chrono::{DateTime, Utc};
+use sea_orm::entity::prelude::*;
+
+use super::{event, market, quant_order_intent};
 use crate::{
     enums::{
         common::MarketCategory,
@@ -8,8 +12,6 @@ use crate::{
     },
     types::{EventId, MarketId, OrderIntentId, PositionId, Price, Shares, TokenId, Usd},
 };
-use chrono::{DateTime, Utc};
-use sea_orm::entity::prelude::*;
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -40,21 +42,21 @@ pub struct Model {
         from = "order_intent_id",
         to = "order_intent_id"
     )]
-    pub order_intent: BelongsTo<super::quant_order_intent::Entity>,
+    pub order_intent: BelongsTo<quant_order_intent::Entity>,
     #[sea_orm(
         belongs_to,
         relation_enum = "Market",
         from = "market_id",
         to = "market_id"
     )]
-    pub market: BelongsTo<super::market::Entity>,
+    pub market: BelongsTo<market::Entity>,
     #[sea_orm(
         belongs_to,
         relation_enum = "Event",
         from = "event_id",
         to = "event_id"
     )]
-    pub event: BelongsTo<Option<super::event::Entity>>,
+    pub event: BelongsTo<Option<event::Entity>>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

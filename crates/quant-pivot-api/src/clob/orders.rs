@@ -1,12 +1,11 @@
 //! Order submission, cancellation, and query types.
 
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
-
 use quant_pivot_models::{
     enums::{common::Side, fee::FeeLiquidityRole},
     types::{Bps, MarketId, OrderId, Price, Shares, TokenId},
 };
+use serde::{Deserialize, Serialize};
 
 /// Result of cancelling a single order.
 #[derive(Debug, Clone, Serialize, Deserialize)]

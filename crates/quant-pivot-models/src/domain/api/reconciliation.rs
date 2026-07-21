@@ -1,9 +1,15 @@
 //! Reconciliation HTTP contract types.
 
+use chrono::{DateTime, Utc};
+use quant_pivot_macros::NormalizePageQuery;
+use serde::{Deserialize, Serialize};
+use validator::Validate;
+
 use crate::{
     domain::{
-        ExecutionOrderInfo, ExecutionOrderView, ExecutionRecoverySummary, ReconciliationInfo,
+        api::{ExecutionOrderView, ExecutionRecoverySummary},
         pagination::PageRequest,
+        quant::{ExecutionOrderInfo, ReconciliationInfo},
     },
     enums::execution::ReconciliationResult,
     types::{
@@ -11,10 +17,6 @@ use crate::{
         Shares, Usd,
     },
 };
-use chrono::{DateTime, Utc};
-use quant_pivot_macros::NormalizePageQuery;
-use serde::{Deserialize, Serialize};
-use validator::Validate;
 
 /// Outbound projection of one execution-order reconciliation row.
 #[derive(Debug, Clone, Serialize)]

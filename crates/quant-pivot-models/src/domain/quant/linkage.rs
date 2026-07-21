@@ -1,4 +1,4 @@
-//! Frozen market → external-subject linkage records (Phase 11.2.2).
+//! Frozen market → external-subject linkage records.
 //!
 //! A [`MarketLinkage`] is the content-addressed, bitemporal binding between a
 //! Polymarket market and the external subject it is about (today: a crypto
@@ -22,8 +22,10 @@
 //! revision; they are provenance dimensions, not substitutes for either time
 //! axis.
 
-use chrono::{DateTime, Utc};
-use quant_pivot_error::{QuantResult, hashing::CanonicalDigestError};
+use std::fmt::{Display, Formatter, Result as FmtResult};
+
+use chrono::{DateTime, NaiveDate, Utc};
+use quant_pivot_error::{QuantError, QuantResult, hashing::CanonicalDigestError};
 use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromJsonQueryResult};
 use serde::{Deserialize, Serialize};
 
@@ -176,7 +178,7 @@ pub struct WeatherDecisionGroupKey {
     /// IANA timezone used to derive the local calendar day.
     pub timezone: String,
     /// Local calendar date in `timezone`.
-    pub local_date: chrono::NaiveDate,
+    pub local_date: NaiveDate,
     /// Unit displayed by the market contract.
     pub market_unit: TemperatureUnit,
     /// Frozen settlement-rule URL. It is evidence only and is never scraped.
@@ -304,7 +306,7 @@ pub enum GroundingKind {
     /// of the template match.
     TemplateEntailed,
     /// A literal excerpt an operator cited as justification for a manual
-    /// override (11.2.2 remediation R4). Distinct from [`Self::LiteralSpan`]
+    /// override. Distinct from [`Self::LiteralSpan`]
     /// because the citation was never produced by a deterministic extractor
     /// pattern — it is still required to be a byte-exact substring of the
     /// cited source field (the anti-hallucination bar is never relaxed), but
@@ -315,7 +317,7 @@ pub enum GroundingKind {
 
 /// One operator-submitted literal-text justification for a manual override.
 ///
-/// (11.2.2 remediation R4). The operator names which subject field the text
+/// The operator names which subject field the text
 /// evidences and which metadata field the text was copied from; the
 /// resolver-side validator (never the wire layer) verifies the text is a
 /// real, byte-exact substring of that field before it becomes a
@@ -363,9 +365,8 @@ pub struct GroundingProof {
 /// The audited human justification for an operator override.
 ///
 /// Present **only** on a `resolver_tier = Override` binding — every
-/// automated-tier resolution carries `None`. This is the override's real
-/// audit trail (never discarded, unlike the pre-remediation stub that dropped
-/// the operator's stated reason and never recorded who acted).
+/// automated-tier resolution carries `None`. This is the override's durable
+/// audit trail, preserving both the operator's reason and actor identity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OverrideContext {
@@ -393,6 +394,158 @@ pub struct ResolvedBinding {
     pub override_context: Option<OverrideContext>,
 }
 
+/// Closed reason why a resolver candidate failed the grounding/consistency gate.
+///
+/// Variants carry only structured diagnostic values. Persisted linkage records
+/// never store an operator-facing prose message as their machine identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, tag = "code", rename_all = "snake_case")]
+pub enum LinkageValidationFailure {
+    GroundingSourceAbsent {
+        subject_field: String,
+        source: GroundingField,
+    },
+    GroundingSpanOutOfBounds {
+        subject_field: String,
+        start: usize,
+        end: usize,
+        source_length: usize,
+    },
+    GroundingTextMismatch {
+        subject_field: String,
+    },
+    MissingLiteralGrounding {
+        subject_field: String,
+    },
+    MissingGrounding {
+        subject_field: String,
+    },
+    UnsupportedSubject,
+    InvalidWeatherDecisionGroupId,
+    InvalidWeatherOutcomeBand,
+    FractionalWeatherOutcomeBand,
+    InvalidWeatherTimezone {
+        timezone: String,
+    },
+    WeatherInstrumentMismatch {
+        expected: DomainInstrumentKey,
+        actual: DomainInstrumentKey,
+    },
+    AssetNotInRuleset {
+        asset: CryptoAsset,
+    },
+    InstrumentRulesetMismatch {
+        expected: DomainInstrumentKey,
+        actual: DomainInstrumentKey,
+    },
+    ChainlinkFeedRulesetMismatch {
+        asset: CryptoAsset,
+        expected: ChainlinkFeedKey,
+        actual: ChainlinkFeedKey,
+    },
+    BinanceOracleRulesetMismatch {
+        asset: CryptoAsset,
+        expected_market: BinanceMarketSegment,
+        actual_market: BinanceMarketSegment,
+        expected_symbol: BinanceSymbol,
+        actual_symbol: BinanceSymbol,
+    },
+}
+
+impl Display for LinkageValidationFailure {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> FmtResult {
+        match self {
+            Self::GroundingSourceAbsent {
+                subject_field,
+                source,
+            } => write!(
+                formatter,
+                "grounding for `{subject_field}` references absent source field {source:?}"
+            ),
+            Self::GroundingSpanOutOfBounds {
+                subject_field,
+                start,
+                end,
+                source_length,
+            } => write!(
+                formatter,
+                "grounding for `{subject_field}` is out of bounds ({start}..{end} over {source_length} bytes)"
+            ),
+            Self::GroundingTextMismatch { subject_field } => write!(
+                formatter,
+                "grounding for `{subject_field}` does not match the source text"
+            ),
+            Self::MissingLiteralGrounding { subject_field } => write!(
+                formatter,
+                "candidate carries no literal grounding for `{subject_field}`"
+            ),
+            Self::MissingGrounding { subject_field } => {
+                write!(
+                    formatter,
+                    "candidate carries no grounding for `{subject_field}`"
+                )
+            }
+            Self::UnsupportedSubject => formatter.write_str("unsupported domain subject"),
+            Self::InvalidWeatherDecisionGroupId => {
+                formatter.write_str("weather decision-group id does not match its canonical key")
+            }
+            Self::InvalidWeatherOutcomeBand => {
+                formatter.write_str("weather outcome band is empty or inverted")
+            }
+            Self::FractionalWeatherOutcomeBand => {
+                formatter.write_str("weather outcome band must use whole-degree bounds")
+            }
+            Self::InvalidWeatherTimezone { timezone } => {
+                write!(
+                    formatter,
+                    "weather station timezone `{timezone}` is invalid"
+                )
+            }
+            Self::WeatherInstrumentMismatch { expected, actual }
+            | Self::InstrumentRulesetMismatch { expected, actual } => {
+                write!(
+                    formatter,
+                    "instrument `{actual}` does not match `{expected}`"
+                )
+            }
+            Self::AssetNotInRuleset { asset } => {
+                write!(formatter, "asset `{asset}` is not in the resolver ruleset")
+            }
+            Self::ChainlinkFeedRulesetMismatch {
+                asset,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "Chainlink feed `{actual}` does not match `{expected}` for asset `{asset}`"
+            ),
+            Self::BinanceOracleRulesetMismatch {
+                asset,
+                expected_market,
+                actual_market,
+                expected_symbol,
+                actual_symbol,
+            } => write!(
+                formatter,
+                "Binance oracle {actual_market:?}/{actual_symbol} does not match {expected_market:?}/{expected_symbol} for asset `{asset}`"
+            ),
+        }
+    }
+}
+
+/// Closed machine-readable reason for an unresolved market linkage.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, tag = "code", rename_all = "snake_case")]
+pub enum LinkageUnresolvedReason {
+    /// No deterministic extractor recognized the frozen market metadata.
+    NoDeterministicTemplate,
+    /// An extractor emitted a candidate which failed the single validation gate.
+    CandidateRejected {
+        tier: ResolverTier,
+        failure: LinkageValidationFailure,
+    },
+}
+
 /// The resolver's outcome for one `(market, metadata, ruleset)` triple.
 ///
 /// Structurally enforces the fail-closed invariant: a binding exists **iff**
@@ -405,8 +558,8 @@ pub enum LinkageOutcome {
     Resolved(Box<ResolvedBinding>),
     /// No tier produced a validated subject; the domain plane fails closed.
     Unresolved {
-        /// Why resolution failed (operator-facing, drives the review queue).
-        reason: String,
+        /// Machine-readable reason which drives the review queue and UI i18n.
+        reason: LinkageUnresolvedReason,
     },
 }
 
@@ -529,8 +682,8 @@ pub struct MarketLinkageInfo {
     pub capability_registry_hash: Option<ContentHash>,
     pub content_hash: ContentHash,
     pub derived_at: DateTime<Utc>,
-    /// First-class projection of `outcome.override_context.reason` (11.2.2
-    /// remediation R4) — `None` unless `resolver_tier = override`.
+    /// First-class projection of `outcome.override_context.reason`; `None`
+    /// unless `resolver_tier = override`.
     pub override_reason: Option<String>,
     /// First-class projection of `outcome.override_context.actor`.
     pub override_actor: Option<String>,
@@ -584,11 +737,13 @@ pub struct NewMarketLinkage {
 /// Complete resolver output before the database assigns system availability.
 ///
 /// Deliberately has no `available_at`/`created_at`: those clocks are facts of
-/// durable append, not values a resolver may guess. The domain family is also
-/// derived from the outcome, so it cannot disagree with a resolved subject.
+/// durable append, not values a resolver may guess. The catalog classifier
+/// supplies the family explicitly because an unresolved outcome has no subject
+/// from which a family could be inferred.
 #[derive(Debug, Clone)]
 pub struct MarketLinkageDerivation {
     pub market_id: MarketId,
+    pub domain_family: DomainFamily,
     pub outcome: LinkageOutcome,
     pub confidence: Probability,
     pub resolver_tier: ResolverTier,
@@ -617,6 +772,7 @@ impl NewMarketLinkage {
     pub fn from_derivation(derivation: MarketLinkageDerivation) -> QuantResult<Self> {
         let MarketLinkageDerivation {
             market_id,
+            domain_family,
             outcome,
             confidence,
             resolver_tier,
@@ -625,12 +781,15 @@ impl NewMarketLinkage {
             capability_registry_hash,
             effective_at,
         } = derivation;
-        let domain_family = match &outcome {
-            LinkageOutcome::Resolved(binding) => binding.subject.family(),
-            // The linkage resolver currently owns only the crypto vertical;
-            // unresolved outcomes have no subject from which to derive it.
-            LinkageOutcome::Unresolved { .. } => DomainFamily::Crypto,
-        };
+        if let LinkageOutcome::Resolved(binding) = &outcome
+            && binding.subject.family() != domain_family
+        {
+            return Err(QuantError::config(format!(
+                "linkage catalog family {} disagrees with resolved subject family {}",
+                domain_family,
+                binding.subject.family()
+            )));
+        }
         let status = match (&outcome, resolver_tier) {
             (LinkageOutcome::Unresolved { .. }, _) => LinkageStatus::Unresolved,
             (LinkageOutcome::Resolved(_), ResolverTier::Override) => LinkageStatus::Overridden,
@@ -706,13 +865,16 @@ impl MarketLinkageInfo {
 
 #[cfg(test)]
 mod tests {
+    use chrono::Utc;
+
     use super::{
         CryptoSubject, GroundingProof, GroundingSpan, LinkageOutcome, LinkageSourceMetadata,
-        MarketLinkage, MarketLinkageDerivation, MarketSubject, NewMarketLinkage, PriceComparator,
-        ResolutionOracle, ResolvedBinding, ResolvedSourceBinding,
+        LinkageUnresolvedReason, LinkageValidationFailure, MarketLinkage, MarketLinkageDerivation,
+        MarketSubject, NewMarketLinkage, PriceComparator, ResolutionOracle, ResolvedBinding,
+        ResolvedSourceBinding,
     };
     use crate::{
-        domain::{GroundingField, GroundingKind},
+        domain::quant::{GroundingField, GroundingKind},
         enums::domain::{
             BinanceMarketSegment, DomainFamily, KlineInterval, LinkageSourceRole, LinkageStatus,
             ResolverTier,
@@ -722,7 +884,6 @@ mod tests {
             DomainSourceId, MarketId, MarketLinkageId, Probability, ResolverVersion,
         },
     };
-    use chrono::Utc;
 
     fn sample_binding() -> ResolvedBinding {
         let symbol = BinanceSymbol::parse("BTCUSDT").expect("symbol");
@@ -813,7 +974,7 @@ mod tests {
 
         let unresolved = sample_linkage(
             LinkageOutcome::Unresolved {
-                reason: "no template matched".to_owned(),
+                reason: LinkageUnresolvedReason::NoDeterministicTemplate,
             },
             ResolverTier::Tier1Template,
         );
@@ -826,6 +987,7 @@ mod tests {
         let effective_at = Utc::now();
         let pending = NewMarketLinkage::from_derivation(MarketLinkageDerivation {
             market_id: MarketId::new("0xpending"),
+            domain_family: DomainFamily::Crypto,
             outcome: LinkageOutcome::Resolved(Box::new(sample_binding())),
             confidence: Probability::ONE,
             resolver_tier: ResolverTier::Tier0Slug,
@@ -844,6 +1006,40 @@ mod tests {
             payload.get("created_at").is_none(),
             "database-owned availability must not exist before append"
         );
+    }
+
+    #[test]
+    fn append_derivation_requires_explicit_consistent_domain_family() {
+        let unresolved = NewMarketLinkage::from_derivation(MarketLinkageDerivation {
+            market_id: MarketId::new("weather-unresolved"),
+            domain_family: DomainFamily::Weather,
+            outcome: LinkageOutcome::Unresolved {
+                reason: LinkageUnresolvedReason::NoDeterministicTemplate,
+            },
+            confidence: Probability::ZERO,
+            resolver_tier: ResolverTier::Tier1Template,
+            resolver_version: ResolverVersion::FIRST,
+            metadata_hash: ContentHash::parse(format!("blake3:{}", "1".repeat(64))).expect("hash"),
+            capability_registry_hash: ContentHash::parse(format!("blake3:{}", "f".repeat(64)))
+                .expect("hash"),
+            effective_at: Utc::now(),
+        })
+        .expect("weather unresolved linkage");
+        assert_eq!(unresolved.domain_family, DomainFamily::Weather);
+
+        let mismatch = NewMarketLinkage::from_derivation(MarketLinkageDerivation {
+            market_id: MarketId::new("mismatched-resolved"),
+            domain_family: DomainFamily::Weather,
+            outcome: LinkageOutcome::Resolved(Box::new(sample_binding())),
+            confidence: Probability::ONE,
+            resolver_tier: ResolverTier::Tier0Slug,
+            resolver_version: ResolverVersion::FIRST,
+            metadata_hash: ContentHash::parse(format!("blake3:{}", "2".repeat(64))).expect("hash"),
+            capability_registry_hash: ContentHash::parse(format!("blake3:{}", "e".repeat(64)))
+                .expect("hash"),
+            effective_at: Utc::now(),
+        });
+        assert!(mismatch.is_err());
     }
 
     #[test]
@@ -903,7 +1099,7 @@ mod tests {
         assert_eq!(a, b, "same inputs must be idempotent");
 
         let unresolved = LinkageOutcome::Unresolved {
-            reason: "miss".to_owned(),
+            reason: LinkageUnresolvedReason::NoDeterministicTemplate,
         };
         let c = MarketLinkage::compute_content_hash(
             &market_id,
@@ -934,16 +1130,41 @@ mod tests {
 
     #[test]
     fn persisted_linkage_outcome_rejects_unknown_fields_and_tags() {
+        let typed = LinkageOutcome::Unresolved {
+            reason: LinkageUnresolvedReason::CandidateRejected {
+                tier: ResolverTier::Tier1Template,
+                failure: LinkageValidationFailure::MissingLiteralGrounding {
+                    subject_field: "resolution_oracle".to_owned(),
+                },
+            },
+        };
+        let wire = serde_json::to_value(&typed).expect("serialize typed unresolved reason");
+        assert_eq!(wire["reason"]["code"], "candidate_rejected");
+        assert_eq!(
+            wire["reason"]["failure"]["code"],
+            "missing_literal_grounding"
+        );
+        assert_eq!(
+            serde_json::from_value::<LinkageOutcome>(wire).expect("typed outcome round trip"),
+            typed
+        );
+
+        let legacy_string_reason = serde_json::json!({
+            "status": "unresolved",
+            "reason": "no template matched"
+        });
+        assert!(serde_json::from_value::<LinkageOutcome>(legacy_string_reason).is_err());
+
         let unknown_field = serde_json::json!({
             "status": "unresolved",
-            "reason": "no template matched",
+            "reason": { "code": "no_deterministic_template" },
             "unexpected": true
         });
         assert!(serde_json::from_value::<LinkageOutcome>(unknown_field).is_err());
 
         let unknown_tag = serde_json::json!({
             "status": "partially_resolved",
-            "reason": "unsupported transitional state"
+            "reason": { "code": "no_deterministic_template" }
         });
         assert!(serde_json::from_value::<LinkageOutcome>(unknown_tag).is_err());
     }

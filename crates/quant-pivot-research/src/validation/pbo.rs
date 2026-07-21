@@ -1,13 +1,13 @@
 //! Probability of Backtest Overfitting via Combinatorially Symmetric CV.
 //!
-//! Cross-Validation (CSCV) — Phase 11.5 §3.5, Bailey, Borwein, López de Prado
-//! & Zhu (2014/2017), *The Probability of Backtest Overfitting*, Algorithm 2.3.
+//! Cross-Validation (CSCV), following Bailey, Borwein, López de Prado, and Zhu
+//! (2014/2017), *The Probability of Backtest Overfitting*, Algorithm 2.3.
 //!
 //! PBO answers: "if a researcher tried `N` independently governed strategy
 //! configurations and reported whichever looked best in-sample, how often
 //! would that champion actually underperform the out-of-sample median?" It
-//! needs a `T`-period × `N`-trial performance matrix (Phase 11.5 §3.5's
-//! trial grid supplies the columns — every governed hyperparameter
+//! needs a `T`-period × `N`-trial performance matrix. The governed trial grid
+//! supplies the columns — every hyperparameter
 //! configuration gets one full-window train+backtest, producing one column
 //! of per-period returns); the algorithm itself is a **pure, model-free**
 //! resampling procedure over that matrix, with no further training required.
@@ -30,7 +30,7 @@ use crate::{precision::RESEARCH_DECIMAL_SCALE, stats, validation::combinatorics:
 pub struct TrialPerformanceMatrix {
     /// Ascending period timestamps (`T` rows).
     pub periods: Vec<DateTime<Utc>>,
-    /// `T` rows × `N` columns; `returns[t].len()` must equal `N` for every `t`.
+    /// `T` rows × `N` columns; `returns[t].len` must equal `N` for every `t`.
     pub returns: Vec<Vec<Decimal>>,
 }
 
@@ -310,10 +310,11 @@ fn methodology(detail: String) -> QuantError {
 
 #[cfg(test)]
 mod tests {
-    use super::{PboInput, TrialPerformanceMatrix, probability_of_backtest_overfitting};
     use chrono::{TimeZone, Utc};
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
+
+    use super::{PboInput, TrialPerformanceMatrix, probability_of_backtest_overfitting};
 
     fn matrix(periods: usize, columns: Vec<Vec<Decimal>>) -> TrialPerformanceMatrix {
         let period_times: Vec<_> = (0..periods)

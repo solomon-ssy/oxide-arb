@@ -1,17 +1,19 @@
 //! Quant model registry HTTP contract types.
 
+use chrono::{DateTime, Utc};
+use quant_pivot_macros::NormalizePageQuery;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use validator::Validate;
+
 use crate::{
-    domain::{ModelSpecInfo, pagination::PageRequest},
+    domain::{pagination::PageRequest, quant::ModelSpecInfo},
     enums::{common::MarketCategory, model::ModelFamily},
     types::{
         ContentHash, ModelInputContract, ModelSpecId, ModelTrainingContract, ModelVersionId,
         RoleCode, SchemaVersion, UserId, model_spec::ModelSpecThesis,
     },
 };
-use chrono::{DateTime, Utc};
-use quant_pivot_macros::NormalizePageQuery;
-use serde::{Deserialize, Serialize};
-use validator::Validate;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -31,7 +33,7 @@ pub enum ModelPickerSide {
 /// `model_family` deserializes from its canonical wire label (`"weighted_factor"`,
 /// `"classical_random_forest"`, `"hold_vs_exit_weighted"`, …); an unknown label
 /// is rejected at the boundary with `400`.
-#[derive(Debug, Clone, Deserialize, Validate)]
+#[derive(Debug, Clone, Deserialize, Validate, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CreateModelSpecRequest {
     /// Human-facing spec name (unique-ish label shown in the catalog picker).
@@ -71,7 +73,8 @@ const fn default_feature_schema_version() -> SchemaVersion {
 
 /// Outbound projection for a model specification row (the training entry point:
 /// the operator picks a spec before planning a dataset or training a version).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[schemars(deny_unknown_fields)]
 pub struct QuantModelSpecView {
     pub model_spec_id: ModelSpecId,
     pub name: String,
@@ -87,7 +90,7 @@ pub struct QuantModelSpecView {
     pub created_by_label: String,
     pub created_by_role: Option<RoleCode>,
     pub reason: String,
-    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub created_at: DateTime<Utc>,
 }
 
 impl From<ModelSpecInfo> for QuantModelSpecView {
@@ -125,7 +128,7 @@ pub struct ModelSpecListQuery {
 /// Filter for `GET /research/models/published-catalog`.
 ///
 /// The category/side-aware picker source for every `FieldWidget::ModelVersionSelect`
-/// field (11.2.2 remediation R8).
+/// field.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ModelPublishedCatalogQuery {
     /// Restrict to versions whose artifact declares this category or `None`.
@@ -151,10 +154,12 @@ pub struct PublishedModelOptionView {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::Value;
+
     use super::CreateModelSpecRequest;
     use crate::types::SchemaVersion;
 
-    fn base_request() -> serde_json::Value {
+    fn base_request() -> Value {
         serde_json::json!({
             "name": "typed-input-model",
             "model_family": "weighted_factor",

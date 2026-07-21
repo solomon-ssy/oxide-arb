@@ -34,8 +34,6 @@ pub fn annotate(candidates: &mut [SignalCandidate]) {
 
 #[cfg(test)]
 mod tests {
-    use super::annotate;
-    use crate::model::{ModelExplanation, SignalCandidate};
     use chrono::Utc;
     use quant_pivot_models::{
         enums::quant::OutcomeSide,
@@ -43,6 +41,9 @@ mod tests {
     };
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
+
+    use super::annotate;
+    use crate::model::{ModelExplanation, SignalCandidate};
 
     fn candidate(market: &str, score: Decimal) -> SignalCandidate {
         SignalCandidate {

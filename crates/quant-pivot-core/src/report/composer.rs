@@ -7,10 +7,14 @@ use quant_pivot_error::{QuantError, QuantResult, infra::InfraError, report::Repo
 use quant_pivot_models::{
     clickhouse::{ChProbability, ChUsd, QuantReportRecommendationFactRow},
     domain::{
-        MarketSubject, NewAccountSnapshot, NewEntryConditionArtifact, NewEntryConditionInstance,
-        NewEquitySnapshot, NewOperationLog, NewPortfolioPlan, NewRecommendation,
-        NewRecommendationReport, NewReportDataQualitySnapshot, NewReportTransaction,
-        PriceComparator, TradePolicyArtifactInfo, market::book::BookLevel,
+        governance::NewOperationLog,
+        market::book::BookLevel,
+        quant::{
+            MarketSubject, NewAccountSnapshot, NewEntryConditionArtifact,
+            NewEntryConditionInstance, NewEquitySnapshot, NewPortfolioPlan, NewRecommendation,
+            NewRecommendationReport, NewReportDataQualitySnapshot, NewReportTransaction,
+            PriceComparator, TradePolicyArtifactInfo,
+        },
     },
     enums::{
         common::{MarketCategory, TickSize},
@@ -2239,6 +2243,8 @@ const fn parse_decimal(_field: &str, value: &Decimal) -> Decimal {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use chrono::{Duration, TimeZone, Utc};
     use quant_pivot_error::{QuantError, report::ReportError};
     use quant_pivot_models::{
@@ -2263,17 +2269,18 @@ mod tests {
         portfolio::{AccountSnapshot, PlannedRecommendation},
         selection::{MarketSelectionSnapshot, SelectedMarket},
     };
-    use quant_pivot_test_support::execution_pg_seed::fixture_profile_ref;
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
-    use std::collections::HashMap;
 
     use super::{
         ComposeReportInput, DefaultRecommendationComposer, RecommendationComposer, TickDirection,
         actionable_valid_until, auto_execution_gate, effective_horizon_from, empty_plan_for_report,
         entry_window_secs, execution_eligibility, tick_aligned_price,
     };
-    use crate::report::{composer::compute_aggregate_exposure_cap_usd, types::ReportTrigger};
+    use crate::{
+        report::{composer::compute_aggregate_exposure_cap_usd, types::ReportTrigger},
+        test_fixtures::execution_pg_seed::fixture_profile_ref,
+    };
 
     #[test]
     fn effective_horizon_uses_model_horizon_capped_by_resolution() {

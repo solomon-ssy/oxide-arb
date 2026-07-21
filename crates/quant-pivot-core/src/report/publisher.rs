@@ -5,13 +5,15 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
-use chrono::Utc;
+use chrono::{DateTime, Duration, Utc};
 use quant_pivot_error::{QuantResult, report::ReportError};
 use quant_pivot_models::{
     domain::{
-        CoreEvent, CoreEventPublisher, PublishReportOutcome, RecommendationReportInfo,
-        ReportFactDeliveryInfo, ReportLifecycleEvent, ReportRunInfo, ReportRunLifecycleEvent,
-        ReportScheduleGapInfo, ReportScheduleHealthInfo,
+        quant::{
+            OrderIntentInfo, PublishReportOutcome, RecommendationReportInfo,
+            ReportFactDeliveryInfo, ReportRunInfo, ReportScheduleGapInfo, ReportScheduleHealthInfo,
+        },
+        runtime::{CoreEvent, CoreEventPublisher, ReportLifecycleEvent, ReportRunLifecycleEvent},
     },
     enums::{
         common::{AlertCategory, AlertLevel, AlertSource},
@@ -20,6 +22,7 @@ use quant_pivot_models::{
     runtime_config::ReportDeliveryPolicy,
 };
 
+use super::types::ReportNotificationPayload;
 use crate::{
     execution::IntentTerminalEventSink,
     observability::{
@@ -27,8 +30,6 @@ use crate::{
         metrics_hub::MetricsHub,
     },
 };
-
-use super::types::ReportNotificationPayload;
 
 /// Dependencies for [`ReportPublisher`].
 pub struct ReportPublisherDeps {
@@ -45,7 +46,7 @@ pub struct ReportPublisher {
     intent_terminal_events: OnceLock<Arc<dyn IntentTerminalEventSink>>,
 }
 
-fn non_negative_seconds(duration: chrono::Duration) -> f64 {
+fn non_negative_seconds(duration: Duration) -> f64 {
     duration
         .to_std()
         .map_or(0.0, |duration| duration.as_secs_f64())
@@ -71,8 +72,8 @@ impl ReportPublisher {
     /// Publish post-commit invalidation hints for governed report mutations.
     pub fn publish_invalidated_intents(
         &self,
-        intents: &[quant_pivot_models::domain::OrderIntentInfo],
-        occurred_at: chrono::DateTime<Utc>,
+        intents: &[OrderIntentInfo],
+        occurred_at: DateTime<Utc>,
     ) {
         if let Some(sink) = self.intent_terminal_events.get() {
             sink.publish_invalidated(intents, occurred_at);
@@ -80,11 +81,7 @@ impl ReportPublisher {
     }
 
     /// Publish durable report/run-graph revision hints after publication commit.
-    pub fn publish_publication(
-        &self,
-        outcome: &PublishReportOutcome,
-        occurred_at: chrono::DateTime<Utc>,
-    ) {
+    pub fn publish_publication(&self, outcome: &PublishReportOutcome, occurred_at: DateTime<Utc>) {
         let primary = if outcome.published() {
             ReportLifecycleEvent::committed(&outcome.report)
         } else {
@@ -111,7 +108,7 @@ impl ReportPublisher {
     }
 
     /// Publish a durable report-run state revision hint.
-    pub fn publish_run(&self, run: &ReportRunInfo, occurred_at: chrono::DateTime<Utc>) {
+    pub fn publish_run(&self, run: &ReportRunInfo, occurred_at: DateTime<Utc>) {
         self.metrics
             .report_run_total
             .with_label_values(&[
@@ -548,15 +545,14 @@ fn notification_body(report: &RecommendationReportInfo, n: &ReportNotificationPa
 
 #[cfg(test)]
 mod tests {
-    use super::{ReportNotificationPayload, notification_body};
     use quant_pivot_models::{
         enums::quant::{OutcomeSide, QuantRuntimeMode, RecommendationReportStatus, ReportKind},
         types::{Probability, RecommendationReportId, Usd},
     };
-    use quant_pivot_test_support::report_fixtures;
     use rust_decimal_macros::dec;
 
-    use crate::report::NotificationRecommendation;
+    use super::{ReportNotificationPayload, notification_body};
+    use crate::{report::NotificationRecommendation, test_fixtures::report_fixtures};
 
     #[test]
     fn published_notification_contains_top3_total_mode() {

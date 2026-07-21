@@ -43,7 +43,7 @@ impl FactorRegistry {
     /// (config validation rejects them there): they join the batch column set
     /// here and self-route per market by category, so cross-sectional
     /// normalization sees an aligned column whose non-crypto cells are
-    /// structurally `NotApplicable` (Phase 11.2.2 §3.7).
+    /// structurally `NotApplicable`.
     #[must_use]
     pub fn build(
         factors: &FactorsConfig,

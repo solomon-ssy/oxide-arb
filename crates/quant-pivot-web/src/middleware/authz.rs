@@ -17,7 +17,7 @@ use actix_web::{
     body::MessageBody,
     dev::{ServiceRequest, ServiceResponse},
     middleware::Next,
-    web,
+    web::Data,
 };
 use quant_pivot_error::auth::AuthError;
 
@@ -37,7 +37,7 @@ pub async fn authz<B: MessageBody>(
     next: Next<B>,
 ) -> Result<ServiceResponse<B>, Error> {
     let state = req
-        .app_data::<web::Data<AppState>>()
+        .app_data::<Data<AppState>>()
         .cloned()
         .ok_or_else(|| WebError::Internal("application state missing".to_owned()))?;
 

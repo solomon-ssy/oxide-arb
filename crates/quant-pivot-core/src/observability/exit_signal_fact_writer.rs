@@ -1,5 +1,5 @@
 //! Fire-and-forget `ClickHouse` sink for exit-signal evaluation audit events
-//! (Phase 06.0 re-inference + 06.1 opportunistic Sell).
+//! (thesis-invalidation re-inference and opportunistic Sell).
 //!
 //! Postgres carries the authoritative exit ledger; this writer is a best-effort
 //! analytics mirror that records every model-driven exit-signal evaluation —

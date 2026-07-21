@@ -1,10 +1,10 @@
 //! Signed operational-readiness evidence payloads.
 
+use std::collections::BTreeSet;
+
 use chrono::{DateTime, Utc};
 use sea_orm::FromJsonQueryResult;
 use serde::{Deserialize, Serialize};
-
-use std::collections::BTreeSet;
 
 use crate::{
     hashing::CanonicalDigest,
@@ -436,7 +436,7 @@ pub enum ResearchReadinessEvidencePayload {
 
 #[cfg(test)]
 mod tests {
-    use chrono::{Duration, TimeZone, Utc};
+    use chrono::{DateTime, Duration, TimeZone, Utc};
 
     use super::{
         ContentHash, RETENTION_RUNWAY_EVIDENCE_FORMAT_VERSION, ResearchReadinessSource,
@@ -445,7 +445,7 @@ mod tests {
         SHADOW_LATENCY_PROFILE_FORMAT_VERSION, ShadowLatencyProfileV1,
     };
 
-    fn observed_at() -> chrono::DateTime<Utc> {
+    fn observed_at() -> DateTime<Utc> {
         Utc.timestamp_opt(1_720_000_000, 0)
             .single()
             .expect("valid timestamp")

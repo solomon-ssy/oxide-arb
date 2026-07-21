@@ -1,5 +1,10 @@
 //! Combinatorial Purged Cross-Validation (CPCV) path-set ledger persistence
-//! DTOs (Phase 11.5 §3.3/§6).
+//! DTOs.
+
+use chrono::{DateTime, Utc};
+use rust_decimal::Decimal;
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
+use serde::{Deserialize, Serialize};
 
 use crate::{
     entities::quant_backtest_path_set,
@@ -9,10 +14,6 @@ use crate::{
         backtest::{BacktestPaths, SharpeDistribution},
     },
 };
-use chrono::{DateTime, Utc};
-use rust_decimal::Decimal;
-use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
-use serde::{Deserialize, Serialize};
 
 /// Frozen CPCV + governed trial-grid validation result row.
 #[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
@@ -29,7 +30,7 @@ pub struct BacktestPathSetInfo {
     pub path_count: i64,
     /// `C(N, k)` — the number of purge/embargo/train/evaluate folds run.
     pub combination_count: i64,
-    /// Median of the paths' own rank IC — the Phase 11.5 hard `RankIc` gate's
+    /// Median of the paths' own rank IC — the hard `RankIc` gate's
     /// data source.
     pub median_rank_ic: Decimal,
     /// `SharpeDistribution { min, p25, median, p75, max }`.
@@ -38,13 +39,13 @@ pub struct BacktestPathSetInfo {
     /// `max_drawdown`, `tail_loss`) — the full reconstructed path detail.
     pub paths: BacktestPaths,
     /// The Deflated Sharpe Ratio (`PSR` evaluated at the trial-grid-corrected
-    /// benchmark) — in `[0, 1]`, the Phase 11.5 hard `DeflatedSharpe` gate's
+    /// benchmark) — in `[0, 1]`, the hard `DeflatedSharpe` gate's
     /// data source.
     pub deflated_sharpe: Decimal,
     /// The expected-maximum-Sharpe benchmark (`SR*`) `deflated_sharpe` was
     /// evaluated against (audit visibility).
     pub dsr_benchmark_sharpe: Decimal,
-    /// Probability of Backtest Overfitting — the Phase 11.5 hard `Pbo` gate's
+    /// Probability of Backtest Overfitting — the hard `Pbo` gate's
     /// data source.
     pub pbo: Decimal,
     /// Minimum Track Record Length, in seconds — `None` when the

@@ -1,8 +1,10 @@
 //! Liveness/readiness probes (public, unauthenticated).
 
-use actix_web::{HttpResponse, Responder, web};
-
-use quant_pivot_models::domain::{HealthStatus, ReadinessStatus};
+use actix_web::{
+    HttpResponse, Responder, web,
+    web::{Data, ServiceConfig},
+};
+use quant_pivot_models::domain::api::{HealthStatus, ReadinessStatus};
 
 use crate::{response::WebResponse, state::AppState};
 
@@ -18,7 +20,7 @@ pub async fn startup() -> impl Responder {
 }
 
 /// Readiness probe — `PostgreSQL` + Redis must be reachable before traffic is admitted.
-pub async fn ready(state: web::Data<AppState>) -> impl Responder {
+pub async fn ready(state: Data<AppState>) -> impl Responder {
     let report = state.readiness.check().await;
     let body = WebResponse::ok(ReadinessStatus {
         status: if report.ready { "ready" } else { "not_ready" },
@@ -32,7 +34,7 @@ pub async fn ready(state: web::Data<AppState>) -> impl Responder {
 }
 
 /// Mount public health probes and metrics at the HTTP root.
-pub fn configure(cfg: &mut web::ServiceConfig) {
+pub fn configure(cfg: &mut ServiceConfig) {
     cfg.route("/health", web::get().to(health))
         .route("/startup", web::get().to(startup))
         .route("/ready", web::get().to(ready));

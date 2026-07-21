@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    domain::{ModelRunInfo, NewModelRun},
+    domain::quant::{ModelRunInfo, NewModelRun},
     enums::quant::ModelRunErrorCode,
     types::{ContentHash, ModelRunId, ModelVersionId},
 };

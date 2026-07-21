@@ -1,4 +1,4 @@
-//! Shared `FeatureValue` → numeric scalar projection (11.2.2 remediation R2).
+//! Shared `FeatureValue` → numeric scalar projection.
 //!
 //! The training-matrix assembler ([`crate::training::matrix`]) and the
 //! classical-model runtime ([`crate::model::classical_runtime`]) both need to
@@ -39,13 +39,14 @@ pub fn finite_f64(decimal: Decimal) -> Option<f64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{feature_scalar, finite_f64};
-    use crate::features::value::FeatureValue;
     use quant_pivot_models::{
         enums::common::MarketCategory,
         types::{Probability, Usd},
     };
     use rust_decimal_macros::dec;
+
+    use super::{feature_scalar, finite_f64};
+    use crate::features::value::FeatureValue;
 
     #[test]
     fn numeric_variants_project_to_decimal() {

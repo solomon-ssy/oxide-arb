@@ -1,4 +1,4 @@
-//! SDK-free venue read façade for reconciliation evidence (Phase 05.5).
+//! SDK-free venue read façade for reconciliation evidence.
 //!
 //! Mirrors [`PolymarketOrderClient`](crate::execution::PolymarketOrderClient):
 //! it wraps [`ClobClient`] (rate limiting + retry + SDK mapping already inside)

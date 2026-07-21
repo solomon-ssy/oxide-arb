@@ -1,24 +1,23 @@
 //! Model runtime contract: [`QuantModelRuntime`], [`ModelRuntimeFactory`], and the
 //! runtime I/O types.
 //!
-//! [`ModelFamily`] / [`ClassicalKind`] are re-exported from `quant_pivot_models`
+//! [`ModelFamily`] / [`ClassicalKind`] are owned by `quant_pivot_models`
 //! (flat Postgres `qp_model_family` labels).
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use quant_pivot_error::QuantResult;
-use quant_pivot_models::{
-    domain::ModelVersionInfo,
+pub(crate) use quant_pivot_models::{
+    domain::quant::ModelVersionInfo,
     enums::{
         common::MarketCategory,
+        model::{ClassicalKind, ModelFamily},
         quant::{DataQualityStatus, ModelWeightSource},
     },
     runtime_config::FactorCrossSectionConfig,
     types::{ContentHash, MarketId, ModelRunId, ModelVersionId, Price, TokenId, Usd},
 };
 use serde::{Deserialize, Serialize};
-
-pub use quant_pivot_models::enums::model::{ClassicalKind, ModelFamily, ModelFamilyParseError};
 
 use crate::{
     factors::{FactorValue, FrozenReferenceQuantiles},
@@ -111,7 +110,8 @@ pub enum ModelRuntimeInput {
     FactorTable(FactorInferenceTable),
     /// Dense feature matrix (classical ML).
     FeatureMatrix(InferenceMatrix),
-    // Onnx(..) / DomainText(..) reserved — Phase 06 / 08.
+    // Additional runtime families are intentionally unsupported until they
+    // have complete artifact, validation, and serving contracts.
 }
 
 impl ModelRuntimeInput {
@@ -233,7 +233,7 @@ pub trait QuantModelRuntime: Send + Sync {
     /// the active schema must abort inference.
     fn feature_schema_hash(&self) -> ContentHash;
 
-    /// Features this model requires; surfaced to the 03.1 selector so a market
+    /// Features this model requires; surfaced to the selector so a market
     /// missing any of them is filtered before it reaches inference. Empty means
     /// the model imposes no extra selection requirement.
     fn required_features(&self) -> Vec<FeatureName>;
@@ -248,7 +248,7 @@ pub trait QuantModelRuntime: Send + Sync {
 
     /// The single market category this runtime's frozen artifact declares
     /// itself scoped to, or `None` for a generic cross-category scorer
-    /// (11.2.2 category routing). Enforced by the core `ModelRunner` and
+    /// for category routing. Enforced by the core `ModelRunner` and
     /// `CategoryPointerGuard` against `model.category_model_pointers`: a
     /// pointer's target must declare exactly the pointer's own category, or
     /// `None`. Defaults to `None`; only the weighted-factor artifact carries
@@ -260,7 +260,7 @@ pub trait QuantModelRuntime: Send + Sync {
     /// Whether this runtime is scoring on its frozen artifact weights or on a
     /// runtime-config weight overlay. Defaults to [`ModelWeightSource::Artifact`];
     /// only the weighted-factor runtime overrides it. Surfaced into the run
-    /// metrics for governance audit (3.7).
+    /// metrics for governance audit.
     fn weight_source(&self) -> ModelWeightSource {
         ModelWeightSource::Artifact
     }
@@ -286,7 +286,7 @@ pub trait QuantModelRuntime: Send + Sync {
 pub trait ModelRuntimeFactory: Send + Sync {
     /// Load and validate the runtime for a model version (hash + schema checks),
     /// optionally applying a non-persisted [`WeightOverlay`] for a non-published
-    /// candidate / shadow version (3.7). `overlay` is honoured only by the
+    /// candidate / shadow version. `overlay` is honoured only by the
     /// weighted-factor family; other families ignore it.
     async fn load(
         &self,
@@ -294,8 +294,8 @@ pub trait ModelRuntimeFactory: Send + Sync {
         overlay: Option<WeightOverlay>,
     ) -> QuantResult<Box<dyn QuantModelRuntime>>;
 
-    /// Load and validate a Sell-side hold-vs-exit scorer for a model version
-    /// (Phase 06.1). Same fail-closed hash + schema-binding checks as [`Self::load`],
+    /// Load and validate a Sell-side hold-vs-exit scorer for a model version.
+    /// Uses the same fail-closed hash and schema-binding checks as [`Self::load`],
     /// but returns the exit-scorer runtime family; rejects a non-Sell artifact.
     async fn load_sell_scorer(
         &self,

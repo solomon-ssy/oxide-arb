@@ -1,9 +1,11 @@
 //! Cache layer configuration (`[cache]`, deploy).
 
-use super::secret::SecretText;
-use serde::Deserialize;
 use std::collections::HashMap;
-use url::Url;
+
+use serde::Deserialize;
+use url::{ParseError, Url};
+
+use super::secret::SecretText;
 
 /// Tiered cache (in-process Moka L1 + Redis L2) policy.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -126,12 +128,12 @@ impl RedisConfig {
     /// Build the Redis connection URL consumed by deadpool-redis / redis-rs.
     ///
     /// Userinfo components are percent-encoded per RFC 3986.
-    pub fn try_connection_url(&self) -> Result<String, url::ParseError> {
+    pub fn try_connection_url(&self) -> Result<String, ParseError> {
         let mut url = Url::parse("redis://localhost/")?;
         url.set_host(Some(self.host.as_str()))?;
         url.set_port(Some(self.port)).ok();
         if !self.user.is_empty() && url.set_username(&self.user).is_err() {
-            return Err(url::ParseError::InvalidDomainCharacter);
+            return Err(ParseError::InvalidDomainCharacter);
         }
         if !self.password.is_empty() {
             url.set_password(Some(self.password.expose_secret())).ok();

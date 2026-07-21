@@ -1,11 +1,12 @@
 //! Append-only bootstrap lifecycle transition audit.
 
+use chrono::{DateTime, Utc};
+use sea_orm::entity::prelude::*;
+
 use crate::{
     enums::system::BootstrapPhase,
     types::{BootstrapTransitionId, RoleCode},
 };
-use chrono::{DateTime, Utc};
-use sea_orm::entity::prelude::*;
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]

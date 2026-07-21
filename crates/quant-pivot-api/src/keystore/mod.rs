@@ -2,12 +2,12 @@
 
 mod signer;
 
-pub use signer::OrderSigner;
+use std::sync::Arc;
 
 use alloy::primitives::Address;
 use quant_pivot_error::signing::SigningError;
 use quant_pivot_models::config::KeysConfig;
-use std::sync::Arc;
+pub use signer::OrderSigner;
 use zeroize::Zeroizing;
 
 /// Unified keystore for signing and CLOB authentication.

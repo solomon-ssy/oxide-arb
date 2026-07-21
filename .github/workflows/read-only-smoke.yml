@@ -1,0 +1,87 @@
+name: Read-only Smoke
+
+on:
+  release:
+    types: [published]
+  schedule:
+    - cron: "17 18 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: "1.97.1"
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  public-read-smoke:
+    name: public-read-smoke
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    concurrency:
+      group: public-read-smoke
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Probe credential-free public read paths
+        run: >-
+          cargo xtask smoke public-read --scope all
+          --stream-timeout-secs 120
+
+  account-read-smoke:
+    name: account-read-smoke
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'release'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: account-read
+    concurrency:
+      group: account-read-smoke
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Read venue account state without submitting transactions
+        env:
+          ACCOUNT_READ_CONFIG_BASE64: ${{ secrets.QUANT_PIVOT_ACCOUNT_READ_CONFIG_BASE64 }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$ACCOUNT_READ_CONFIG_BASE64" ]]; then
+            echo "account-read environment secret is not configured" >&2
+            exit 1
+          fi
+
+          smoke_config_dir="$(mktemp -d)"
+          smoke_base_config="$smoke_config_dir/quant-pivot.toml"
+          smoke_local_config="$smoke_config_dir/quant-pivot.local.toml"
+          cleanup_account_read_config() {
+            if [[ -f "$smoke_local_config" ]]; then
+              shred --remove "$smoke_local_config"
+            fi
+            if [[ -f "$smoke_base_config" ]]; then
+              rm --force "$smoke_base_config"
+            fi
+            rmdir "$smoke_config_dir"
+          }
+          trap cleanup_account_read_config EXIT
+
+          umask 077
+          cp config/quant-pivot.toml "$smoke_base_config"
+          printf '%s' "$ACCOUNT_READ_CONFIG_BASE64" \
+            | base64 --decode >"$smoke_local_config"
+          unset ACCOUNT_READ_CONFIG_BASE64
+          chmod 600 "$smoke_local_config"
+          cargo xtask smoke account-read --config-dir "$smoke_config_dir"

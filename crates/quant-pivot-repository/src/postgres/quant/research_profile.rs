@@ -2,18 +2,16 @@
 
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    entities::research_profile_artifact,
+    entities::research_profile_artifact::{ActiveModel, Column, Entity, Model},
     hashing::CanonicalDigest,
     types::{
         ResearchProfileArtifact, ResearchProfileArtifactId, ResearchProfileRef,
         builtin_research_profiles, resolve_builtin_research_profile,
     },
 };
-use sea_orm::{ActiveValue::Set, ConnectionTrait, EntityTrait, TryInsertResult};
+use sea_orm::{ActiveValue, ActiveValue::Set, ConnectionTrait, EntityTrait, TryInsertResult};
 
-fn validate_row(
-    row: &research_profile_artifact::Model,
-) -> Result<ResearchProfileRef, StorageError> {
+fn validate_row(row: &Model) -> Result<ResearchProfileRef, StorageError> {
     let version = u32::try_from(row.version).map_err(|error| {
         StorageError::invariant_violation(
             Some("research_profile_artifact"),
@@ -79,22 +77,21 @@ async fn insert_or_verify(
             format!("profile version exceeds i32: {error}"),
         )
     })?;
-    let outcome =
-        research_profile_artifact::Entity::insert(research_profile_artifact::ActiveModel {
-            research_profile_artifact_id: Set(artifact_id.clone()),
-            research_profile_id: Set(profile.profile_ref.id.clone()),
-            version: Set(version),
-            content_hash: Set(profile.profile_ref.content_hash.clone()),
-            spec: Set(profile.spec.clone()),
-            published_by: Set(profile.published_by.clone()),
-            published_at: Set(profile.published_at),
-            governance_reason: Set(profile.governance_reason.clone()),
-            created_at: sea_orm::ActiveValue::NotSet,
-        })
-        .on_conflict_do_nothing_on([research_profile_artifact::Column::ResearchProfileArtifactId])
-        .exec_without_returning(db)
-        .await
-        .map_err(StorageError::from)?;
+    let outcome = Entity::insert(ActiveModel {
+        research_profile_artifact_id: Set(artifact_id.clone()),
+        research_profile_id: Set(profile.profile_ref.id.clone()),
+        version: Set(version),
+        content_hash: Set(profile.profile_ref.content_hash.clone()),
+        spec: Set(profile.spec.clone()),
+        published_by: Set(profile.published_by.clone()),
+        published_at: Set(profile.published_at),
+        governance_reason: Set(profile.governance_reason.clone()),
+        created_at: ActiveValue::NotSet,
+    })
+    .on_conflict_do_nothing_on([Column::ResearchProfileArtifactId])
+    .exec_without_returning(db)
+    .await
+    .map_err(StorageError::from)?;
     if !matches!(
         outcome,
         TryInsertResult::Inserted(1 | 0) | TryInsertResult::Conflicted
@@ -104,7 +101,7 @@ async fn insert_or_verify(
             "single research profile insert returned an invalid row count",
         ));
     }
-    let row = research_profile_artifact::Entity::find_by_id(artifact_id.clone())
+    let row = Entity::find_by_id(artifact_id.clone())
         .one(db)
         .await
         .map_err(StorageError::from)?

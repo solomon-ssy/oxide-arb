@@ -4,14 +4,15 @@
 
 use std::{future::Future, pin::Pin};
 
+use chrono::Utc;
+use sea_orm::{DatabaseTransaction, DbErr, EntityTrait, IntoActiveModel, sea_query::OnConflict};
+
 use crate::{
-    domain::UpsertSystemRuntimeState,
-    entities::system_runtime_state,
+    domain::governance::UpsertSystemRuntimeState,
+    entities::system_runtime_state::{Column, Entity},
     enums::{quant::QuantRuntimeMode, system::BootstrapPhase},
     seed::{SeedArtifact, SeedConflictPolicy, SeedContext, SeedDependency, SeedSpec},
 };
-use chrono::Utc;
-use sea_orm::{DbErr, EntityTrait, IntoActiveModel, sea_query::OnConflict};
 
 const DEPENDS_ON: &[SeedDependency] = &[];
 const PRODUCES: &[SeedArtifact] = &[];
@@ -30,7 +31,7 @@ pub const SYSTEM_RUNTIME_STATE_SEED: SeedSpec = SeedSpec {
     hydrate: hydrate_boxed,
 };
 
-pub async fn load(db: &sea_orm::DatabaseTransaction, _ctx: &mut SeedContext) -> Result<u64, DbErr> {
+pub async fn load(db: &DatabaseTransaction, _ctx: &mut SeedContext) -> Result<u64, DbErr> {
     let am = UpsertSystemRuntimeState {
         id: SINGLETON_ID,
         quant_runtime_mode: QuantRuntimeMode::ReportOnly,
@@ -42,25 +43,21 @@ pub async fn load(db: &sea_orm::DatabaseTransaction, _ctx: &mut SeedContext) -> 
         changed_at: Utc::now(),
     }
     .into_active_model();
-    system_runtime_state::Entity::insert(am)
-        .on_conflict(
-            OnConflict::column(system_runtime_state::Column::Id)
-                .do_nothing()
-                .to_owned(),
-        )
+    Entity::insert(am)
+        .on_conflict(OnConflict::column(Column::Id).do_nothing().to_owned())
         .exec_without_returning(db)
         .await
 }
 
 fn load_boxed<'a>(
-    db: &'a sea_orm::DatabaseTransaction,
+    db: &'a DatabaseTransaction,
     ctx: &'a mut SeedContext,
 ) -> Pin<Box<dyn Future<Output = Result<u64, DbErr>> + Send + 'a>> {
     Box::pin(load(db, ctx))
 }
 
-async fn hydrate(db: &sea_orm::DatabaseTransaction, _ctx: &mut SeedContext) -> Result<(), DbErr> {
-    let rows = system_runtime_state::Entity::find().all(db).await?;
+async fn hydrate(db: &DatabaseTransaction, _ctx: &mut SeedContext) -> Result<(), DbErr> {
+    let rows = Entity::find().all(db).await?;
     let [state] = rows.as_slice() else {
         return Err(DbErr::Custom(format!(
             "system_runtime_state must contain exactly singleton id=1; found {} rows",
@@ -78,7 +75,7 @@ async fn hydrate(db: &sea_orm::DatabaseTransaction, _ctx: &mut SeedContext) -> R
 }
 
 fn hydrate_boxed<'a>(
-    db: &'a sea_orm::DatabaseTransaction,
+    db: &'a DatabaseTransaction,
     ctx: &'a mut SeedContext,
 ) -> Pin<Box<dyn Future<Output = Result<(), DbErr>> + Send + 'a>> {
     Box::pin(hydrate(db, ctx))

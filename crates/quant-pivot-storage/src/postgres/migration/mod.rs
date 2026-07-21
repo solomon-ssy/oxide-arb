@@ -5,15 +5,13 @@ mod manifest;
 
 use std::collections::BTreeMap;
 
+use helpers::{run_catalog_seeds, verify_catalog_seeds};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{hashing::CanonicalDigest, types::ContentHash};
 use sea_orm::DatabaseConnection;
 use serde::Deserialize;
-use sqlx::Row;
-
-use helpers::{run_catalog_seeds, verify_catalog_seeds};
-
-use crate::sql_contract_registry::{POSTGRES_SCHEMA_DEPLOY, POSTGRES_SCHEMA_VERIFY};
+use serde_json::Value;
+use sqlx::{AssertSqlSafe, Error, PgPool, Row};
 
 const MIGRATION_MANIFEST_JSON: &str =
     include_str!("../../../../../schema/postgres/migrations.json");
@@ -55,13 +53,11 @@ pub async fn finalize_schema_deployment(
     verify_contract(db).await
 }
 
-async fn apply_public_privilege_hardening(pool: &sqlx::PgPool) -> Result<(), StorageError> {
-    let database = sqlx::query_scalar::<_, String>(
-        POSTGRES_SCHEMA_DEPLOY.postgres_query("SELECT current_database()"),
-    )
-    .fetch_one(pool)
-    .await
-    .map_err(migration_error("read PostgreSQL database name"))?;
+async fn apply_public_privilege_hardening(pool: &PgPool) -> Result<(), StorageError> {
+    let database = sqlx::query_scalar::<_, String>("SELECT current_database()")
+        .fetch_one(pool)
+        .await
+        .map_err(migration_error("read PostgreSQL database name"))?;
     let database = quote_identifier(&database);
     let statements = [
         "REVOKE CREATE ON SCHEMA public FROM PUBLIC".to_owned(),
@@ -71,14 +67,12 @@ async fn apply_public_privilege_hardening(pool: &sqlx::PgPool) -> Result<(), Sto
             .to_owned(),
     ];
     for statement in statements {
-        sqlx::raw_sql(sqlx::AssertSqlSafe(
-            POSTGRES_SCHEMA_DEPLOY.postgres_owned_query(statement),
-        ))
-        .execute(pool)
-        .await
-        .map_err(migration_error(
-            "apply PostgreSQL public privilege hardening",
-        ))?;
+        sqlx::raw_sql(AssertSqlSafe(statement))
+            .execute(pool)
+            .await
+            .map_err(migration_error(
+                "apply PostgreSQL public privilege hardening",
+            ))?;
     }
     Ok(())
 }
@@ -93,14 +87,12 @@ pub async fn verify_schema(db: &DatabaseConnection) -> Result<PostgresSchemaStat
 }
 
 /// Inspect the normalized semantic manifest for deploy tooling.
-pub async fn inspect_schema_manifest(
-    db: &DatabaseConnection,
-) -> Result<serde_json::Value, StorageError> {
+pub async fn inspect_schema_manifest(db: &DatabaseConnection) -> Result<Value, StorageError> {
     manifest::inspect(db.get_postgres_connection_pool()).await
 }
 
 /// Render a normalized manifest deterministically for source control.
-pub fn render_schema_manifest(value: &serde_json::Value) -> Result<String, StorageError> {
+pub fn render_schema_manifest(value: &Value) -> Result<String, StorageError> {
     manifest::render(value)
 }
 
@@ -112,13 +104,11 @@ pub fn render_schema_manifest(value: &serde_json::Value) -> Result<String, Stora
 pub async fn generate_disposable_schema_manifest(
     db: &DatabaseConnection,
     bootstrap_admin_password_hash: &str,
-) -> Result<serde_json::Value, StorageError> {
-    let database = sqlx::query_scalar::<_, String>(
-        POSTGRES_SCHEMA_DEPLOY.postgres_query("SELECT current_database()"),
-    )
-    .fetch_one(db.get_postgres_connection_pool())
-    .await
-    .map_err(migration_error("read disposable manifest database name"))?;
+) -> Result<Value, StorageError> {
+    let database = sqlx::query_scalar::<_, String>("SELECT current_database()")
+        .fetch_one(db.get_postgres_connection_pool())
+        .await
+        .map_err(migration_error("read disposable manifest database name"))?;
     if !database.starts_with("quant_pivot_manifest_") {
         return Err(StorageError::Migration(format!(
             "refusing unchecked manifest generation outside an owned disposable database: {database}"
@@ -188,15 +178,15 @@ fn expected_migration_manifest() -> Result<MigrationManifest, StorageError> {
 }
 
 async fn verify_migration_ledger(
-    pool: &sqlx::PgPool,
+    pool: &PgPool,
     expected: &MigrationManifest,
 ) -> Result<(), StorageError> {
     let (seaorm_exists, audit_exists, legacy_sqlx_exists) =
-        sqlx::query_as::<_, (bool, bool, bool)>(POSTGRES_SCHEMA_VERIFY.postgres_query(
+        sqlx::query_as::<_, (bool, bool, bool)>(
             "SELECT to_regclass('public.seaql_migrations') IS NOT NULL, \
                     to_regclass('public.schema_migration_audit') IS NOT NULL, \
                     to_regclass('public._sqlx_migrations') IS NOT NULL",
-        ))
+        )
         .fetch_one(pool)
         .await
         .map_err(migration_error("inspect PostgreSQL migration ledgers"))?;
@@ -212,13 +202,11 @@ async fn verify_migration_ledger(
         )));
     }
 
-    let applied = sqlx::query_scalar::<_, String>(
-        POSTGRES_SCHEMA_VERIFY
-            .postgres_query("SELECT version FROM seaql_migrations ORDER BY version"),
-    )
-    .fetch_all(pool)
-    .await
-    .map_err(migration_error("read SeaORM migration ledger"))?;
+    let applied =
+        sqlx::query_scalar::<_, String>("SELECT version FROM seaql_migrations ORDER BY version")
+            .fetch_all(pool)
+            .await
+            .map_err(migration_error("read SeaORM migration ledger"))?;
     let expected_versions = expected
         .migrations
         .iter()
@@ -231,10 +219,10 @@ async fn verify_migration_ledger(
         )));
     }
 
-    let audit = sqlx::query(POSTGRES_SCHEMA_VERIFY.postgres_query(
+    let audit = sqlx::query(
         "SELECT version, checksum_algorithm, checksum, artifact_length, migration_engine \
          FROM schema_migration_audit ORDER BY version",
-    ))
+    )
     .fetch_all(pool)
     .await
     .map_err(migration_error("read migration checksum ledger"))?
@@ -251,7 +239,7 @@ async fn verify_migration_ledger(
             ),
         ))
     })
-    .collect::<Result<BTreeMap<_, _>, sqlx::Error>>()
+    .collect::<Result<BTreeMap<_, _>, Error>>()
     .map_err(migration_error("decode migration checksum ledger"))?;
     if audit.len() != expected.migrations.len() {
         return Err(StorageError::Migration(format!(
@@ -282,7 +270,7 @@ async fn verify_migration_ledger(
     Ok(())
 }
 
-fn migration_error(context: &'static str) -> impl FnOnce(sqlx::Error) -> StorageError {
+fn migration_error(context: &'static str) -> impl FnOnce(Error) -> StorageError {
     move |error| StorageError::Migration(format!("{context}: {error}"))
 }
 

@@ -2,12 +2,18 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{
-        CompleteTradePolicyValidation, FailTradePolicyValidation, NewTradePolicyArtifact,
-        NewTradePolicyGovernanceAudit, NewTradePolicyTrialAttempt, NewTradePolicyValidationRow,
-        NewTradePolicyValidationRun, Paginated, TradePolicyArtifactInfo, TradePolicyAuditListQuery,
-        TradePolicyGovernanceAuditInfo, TradePolicyListQuery, TradePolicyTrialAttemptInfo,
-        TradePolicyValidationListQuery, TradePolicyValidationRowInfo,
-        TradePolicyValidationRowListQuery, TradePolicyValidationRunInfo,
+        api::{
+            TradePolicyAuditListQuery, TradePolicyListQuery, TradePolicyValidationListQuery,
+            TradePolicyValidationRowListQuery,
+        },
+        pagination::Paginated,
+        quant::{
+            CompleteTradePolicyValidation, FailTradePolicyValidation, NewTradePolicyArtifact,
+            NewTradePolicyGovernanceAudit, NewTradePolicyTrialAttempt, NewTradePolicyValidationRow,
+            NewTradePolicyValidationRun, TradePolicyArtifactInfo, TradePolicyGovernanceAuditInfo,
+            TradePolicyTrialAttemptInfo, TradePolicyValidationRowInfo,
+            TradePolicyValidationRunInfo,
+        },
     },
     enums::quant::TradePolicyStatus,
     types::{ResearchJobId, TradePolicyArtifactId, TradePolicyValidationRunId},

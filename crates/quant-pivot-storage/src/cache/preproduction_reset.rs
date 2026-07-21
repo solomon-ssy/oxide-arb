@@ -40,6 +40,7 @@ pub async fn unlink_preproduction_namespace(config: &RedisConfig) -> Result<u64,
     validate_preproduction_target(config)?;
     let pool = connect_pool(config).await?;
     let mut deleted = 0_u64;
+    let mut consecutive_empty_passes = 0_u8;
     for _ in 0..MAX_UNLINK_PASSES {
         let mut connection = pool.get().await?;
         let mut cursor = 0_u64;
@@ -72,7 +73,13 @@ pub async fn unlink_preproduction_namespace(config: &RedisConfig) -> Result<u64,
             }
         }
         if observed.is_empty() {
-            return Ok(deleted);
+            consecutive_empty_passes = consecutive_empty_passes.saturating_add(1);
+            if consecutive_empty_passes == 2 {
+                return Ok(deleted);
+            }
+            tokio::task::yield_now().await;
+        } else {
+            consecutive_empty_passes = 0;
         }
     }
     Err(StorageError::state_conflict(

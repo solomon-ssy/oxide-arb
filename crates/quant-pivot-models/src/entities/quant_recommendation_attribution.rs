@@ -1,12 +1,14 @@
 //! `quant_recommendation_attribution` table entity.
 
+use chrono::{DateTime, Utc};
+use rust_decimal::Decimal;
+use sea_orm::entity::prelude::*;
+
+use super::quant_recommendation;
 use crate::{
     enums::quant::RecommendationAttributionOutcome,
     types::{AttributionDetail, EntryOutcome, ExitOutcome, RecommendationId, Usd},
 };
-use chrono::{DateTime, Utc};
-use rust_decimal::Decimal;
-use sea_orm::entity::prelude::*;
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -33,7 +35,7 @@ pub struct Model {
         from = "recommendation_id",
         to = "recommendation_id"
     )]
-    pub recommendation: BelongsTo<super::quant_recommendation::Entity>,
+    pub recommendation: BelongsTo<quant_recommendation::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

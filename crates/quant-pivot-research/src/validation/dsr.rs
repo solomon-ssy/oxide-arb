@@ -1,5 +1,5 @@
-//! Deflated / Probabilistic Sharpe Ratio + Minimum Track Record Length
-//! (Phase 11.5 §4, Bailey & López de Prado).
+//! Deflated / Probabilistic Sharpe Ratio + Minimum Track Record Length,
+//! following Bailey and López de Prado.
 //!
 //! A raw Sharpe ratio estimated from one backtest overstates significance
 //! whenever (a) the underlying return series is non-normal (skewed / fat
@@ -21,6 +21,8 @@
 //!   return observations needed for the observed Sharpe to be significant at
 //!   a target confidence, given the same skew/kurtosis correction.
 
+use std::f64::consts::E;
+
 use chrono::Duration;
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use rust_decimal::{
@@ -29,16 +31,15 @@ use rust_decimal::{
 };
 
 use crate::{precision::RESEARCH_DECIMAL_SCALE, stats};
-use std::f64::consts::E;
 
 /// Euler–Mascheroni constant, used by the expected-maximum-Sharpe benchmark.
 const EULER_MASCHERONI: f64 = 0.577_215_664_901_532_9;
 
 /// Inputs to a Deflated Sharpe Ratio / `MinTRL` evaluation.
 ///
-/// All pre-computed from a single representative return series (Phase 11.5
-/// §3.4 uses the CPCV φ-path whose Sharpe is the distribution's median) plus
-/// the governed trial grid's Sharpe distribution (Phase 11.5 §3.5).
+/// All pre-computed from a single representative return series (the CPCV
+/// φ-path whose Sharpe is the distribution's median) plus
+/// the governed trial grid's Sharpe distribution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DsrInput {
     /// The observed (estimated) Sharpe ratio `SR_hat` of the representative path.
@@ -55,13 +56,13 @@ pub struct DsrInput {
     /// per-period returns (a normal distribution has `γ4 = 3`).
     pub kurtosis: Decimal,
     /// Number of independent trials (`N`) in the governed hyperparameter grid
-    /// (Phase 11.5 §3.5) — the multiple-testing correction's sample size.
+    /// — the multiple-testing correction's sample size.
     pub trial_count: u32,
     /// Variance of the Sharpe ratio across those `N` trials (`V`) — the
     /// multiple-testing correction's dispersion estimate. This is
-    /// deliberately **not** the CPCV path-to-path Sharpe variance (that is a
-    /// data-split uncertainty, a different source of dispersion than
-    /// trial-selection uncertainty; see Phase 11.5 plan §3.4).
+    /// deliberately **not** the CPCV path-to-path Sharpe variance: data-split
+    /// uncertainty and trial-selection uncertainty are different sources of
+    /// dispersion.
     pub trial_sharpe_variance: Decimal,
 }
 
@@ -142,7 +143,7 @@ fn psr_denominator(
 /// Evaluate the Deflated Sharpe Ratio for `input`.
 ///
 /// Fails closed to `deflated_sharpe = 0` (never significant) when the
-/// moment-based variance correction is degenerate (see [`psr_denominator`])
+/// moment-based variance correction is degenerate (see `psr_denominator`)
 /// or when fewer than two return periods are available (a Sharpe ratio is
 /// not estimable from a single observation).
 ///
@@ -305,11 +306,13 @@ fn methodology(detail: String) -> QuantError {
 
 #[cfg(test)]
 mod tests {
-    use super::{DsrInput, deflated_sharpe_ratio, min_track_record_length};
     use chrono::Duration;
+    use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
 
-    fn normal_input(observed_sharpe: rust_decimal::Decimal, trial_count: u32) -> DsrInput {
+    use super::{DsrInput, deflated_sharpe_ratio, min_track_record_length};
+
+    fn normal_input(observed_sharpe: Decimal, trial_count: u32) -> DsrInput {
         DsrInput {
             observed_sharpe,
             returns_period_count: 252,

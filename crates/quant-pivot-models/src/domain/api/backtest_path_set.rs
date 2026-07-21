@@ -1,4 +1,4 @@
-//! CPCV validation admin HTTP contract (Phase 11.5).
+//! CPCV validation admin HTTP contract.
 //!
 //! UI surface for Combinatorial Purged Cross-Validation + governed trial-grid
 //! validation of a registered model version:
@@ -12,11 +12,12 @@
 use chrono::{DateTime, Utc};
 use quant_pivot_macros::NormalizePageQuery;
 use rust_decimal::Decimal;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use validator::Validate;
 
 use crate::{
-    domain::{BacktestPathSetInfo, pagination::PageRequest},
+    domain::{pagination::PageRequest, quant::BacktestPathSetInfo},
     types::{
         BacktestPathSetId, ContentHash, DecisionPolicySnapshotId, ModelRunId, ModelVersionId,
         TrainingDatasetId,
@@ -33,7 +34,7 @@ use crate::{
 /// Model family, input contract, supervised target, and prediction horizon are
 /// deliberately absent: the server resolves them from the model version's
 /// linked dataset and immutable model specification.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Validate)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Validate, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RunCpcvBacktestRequest {
     /// Frozen, PIT-materialized dataset the model version was trained on.
@@ -54,9 +55,11 @@ pub struct RunCpcvBacktestRequest {
 
 #[cfg(test)]
 mod request_tests {
+    use serde_json::Value;
+
     use super::RunCpcvBacktestRequest;
 
-    fn request() -> serde_json::Value {
+    fn request() -> Value {
         serde_json::json!({
             "training_dataset_id": uuid::Uuid::now_v7(),
             "decision_policy_snapshot_id": uuid::Uuid::now_v7(),

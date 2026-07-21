@@ -1,8 +1,10 @@
 //! `quant_basis_alert` table entity.
 
-use crate::types::{BasisAlertId, Bps, MarketId};
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
+
+use super::market;
+use crate::types::{BasisAlertId, Bps, MarketId};
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -27,7 +29,7 @@ pub struct Model {
         from = "market_id",
         to = "market_id"
     )]
-    pub market: BelongsTo<super::market::Entity>,
+    pub market: BelongsTo<market::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

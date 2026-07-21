@@ -1,19 +1,23 @@
 //! Price & book feature builder: top-of-book prices, spread, depth structure,
 //! imbalance, slope, and freshness flags from a resolved order book.
 
-use crate::features::{
-    builder::{FeatureComputeCtx, FeatureGroupBuilder, RawFeature},
-    decision_capture::book_evidence_ref,
-    names::book,
-    resolved::ResolvedBook,
-    value::{EvidenceSourceKind, EvidenceSourceRef, FeatureName, FeatureValue, NullReason},
-};
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     runtime_config::FeatureFamily,
     types::{Bps, Price, Probability},
 };
 use rust_decimal::Decimal;
+
+use crate::features::{
+    builder::{FeatureComputeCtx, FeatureGroupBuilder, RawFeature},
+    decision_capture::book_evidence_ref,
+    names::{
+        book,
+        book::{AGE_MS, SECONDARY_BEST_ASK, SPREAD_BPS},
+    },
+    resolved::ResolvedBook,
+    value::{EvidenceSourceKind, EvidenceSourceRef, FeatureName, FeatureValue, NullReason},
+};
 
 /// Builds the [`FeatureFamily::PriceBook`] features.
 pub struct PriceBookFeatureBuilder;
@@ -87,7 +91,7 @@ impl FeatureGroupBuilder for PriceBookFeatureBuilder {
 
 fn secondary_best_ask(ctx: &FeatureComputeCtx<'_>) -> RawFeature {
     let Some(secondary) = ctx.secondary_book else {
-        return RawFeature::missing(book::SECONDARY_BEST_ASK, NullReason::SourceUnavailable);
+        return RawFeature::missing(SECONDARY_BEST_ASK, NullReason::SourceUnavailable);
     };
     let evidence = ctx.secondary_book_snapshot_ref.map_or_else(
         || EvidenceSourceRef {
@@ -99,7 +103,7 @@ fn secondary_best_ask(ctx: &FeatureComputeCtx<'_>) -> RawFeature {
         |book_ref| book_evidence_ref(book_ref, secondary.effective_at, secondary.available_at),
     );
     price_feature(
-        book::SECONDARY_BEST_ASK,
+        SECONDARY_BEST_ASK,
         secondary.best_ask().map(Price::inner),
         &evidence,
     )
@@ -141,19 +145,15 @@ fn decimal_feature(
 /// Top-of-book spread in basis points, or missing when the book is one-sided.
 fn spread_bps(book: &ResolvedBook, evidence: &EvidenceSourceRef) -> RawFeature {
     match (book.best_bid(), book.best_ask(), book.mid()) {
-        (Some(bid), Some(ask), Some(mid)) if mid.inner() > Decimal::ZERO => {
-            Bps::relative(ask.inner() - bid.inner(), mid.inner()).map_or_else(
-                || RawFeature::missing(book::SPREAD_BPS, NullReason::OutOfValidRange),
-                |bps| {
-                    RawFeature::present(
-                        book::SPREAD_BPS,
-                        FeatureValue::Bps(bps.inner()),
-                        evidence.clone(),
-                    )
-                },
-            )
-        }
-        _ => RawFeature::missing(book::SPREAD_BPS, NullReason::SourceUnavailable),
+        (Some(bid), Some(ask), Some(mid)) if mid.inner() > Decimal::ZERO => Bps::relative(
+            ask.inner() - bid.inner(),
+            mid.inner(),
+        )
+        .map_or_else(
+            || RawFeature::missing(SPREAD_BPS, NullReason::OutOfValidRange),
+            |bps| RawFeature::present(SPREAD_BPS, FeatureValue::Bps(bps.inner()), evidence.clone()),
+        ),
+        _ => RawFeature::missing(SPREAD_BPS, NullReason::SourceUnavailable),
     }
 }
 
@@ -165,7 +165,7 @@ fn book_age(
 ) -> RawFeature {
     let age = (ctx.decision_at - book.effective_at).num_milliseconds();
     u64::try_from(age).map_or_else(
-        |_| RawFeature::missing(book::AGE_MS, NullReason::OutOfValidRange),
-        |age| RawFeature::present(book::AGE_MS, FeatureValue::Count(age), evidence.clone()),
+        |_| RawFeature::missing(AGE_MS, NullReason::OutOfValidRange),
+        |age| RawFeature::present(AGE_MS, FeatureValue::Count(age), evidence.clone()),
     )
 }

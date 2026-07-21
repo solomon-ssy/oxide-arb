@@ -1,16 +1,18 @@
 //! Application bootstrap — build subsystems and run the lifecycle.
 
+use std::sync::Arc;
+
+use quant_pivot_error::QuantResult;
+use quant_pivot_models::{config::DeployConfig, domain::ports::ResearchJobPort};
+use quant_pivot_repository::traits::{
+    PolicyRepository, ResearchJobRepository, TrainingDatasetRepository,
+};
+use tokio_util::sync::CancellationToken;
+
 use crate::app::{
     AppContext, ports::research_job::CoreResearchJobPort, research_job::ResearchJobEngine,
     task_registry::AppRunner,
 };
-use quant_pivot_error::QuantResult;
-use quant_pivot_models::{config::DeployConfig, domain::ResearchJobPort};
-use quant_pivot_repository::traits::{
-    PolicyRepository, ResearchJobRepository, TrainingDatasetRepository,
-};
-use std::sync::Arc;
-use tokio_util::sync::CancellationToken;
 
 pub async fn run(deploy: Arc<DeployConfig>) -> QuantResult<()> {
     let shutdown = CancellationToken::new();

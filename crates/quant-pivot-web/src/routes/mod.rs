@@ -8,22 +8,22 @@
 //!
 //! # Single-source authorization manifest
 //!
-//! [`protected_route_specs`] is the *one* declarative list of every protected
-//! route: its method, path pattern, authorization [`Rule`], and handler. Both
+//! `protected_route_specs` is the *one* declarative list of every protected
+//! route: its method, path pattern, authorization rule, and handler. Both
 //! [`configure`] (which registers the actix routes) and [`init_rbac_rules`]
 //! (which builds the [`PermChecker`]) derive from it, so every registered
 //! protected route is guaranteed to have a rule **by construction** — there is
 //! no way to add a route without also declaring how it is authorized.
 //!
-//! Each resource module owns its slice of the manifest via [`RouteSpec`] lists;
+//! Each resource module owns its slice of the manifest via `RouteSpec` lists;
 //! this module only aggregates them and wires the actix scopes.
 //!
 //! # Pipeline
 //!
 //! Public routes (`login`, `refresh`) and probes are registered outside the
 //! authorized scope and never reach the checker. Everything else is wrapped by
-//! [`authn`](crate::middleware::authn) (outer scope) then
-//! [`authz`](crate::middleware::authz) (inner scope), so identity is always
+//! [`authn`] (outer scope) then
+//! [`authz`] (inner scope), so identity is always
 //! established before authorization, and an unregistered protected route is
 //! denied (fail-closed).
 
@@ -121,7 +121,7 @@ fn protected_route_specs() -> Vec<RouteSpec> {
 /// Build the route-level [`PermChecker`] from the manifest.
 ///
 /// Keys are `(method, API_PREFIX + path)`, matching the pattern the authz
-/// middleware reads from `ServiceRequest::match_pattern()`.
+/// middleware reads from `ServiceRequest::match_pattern`.
 #[must_use]
 pub fn init_rbac_rules() -> PermChecker {
     let mut checker = PermChecker::new();

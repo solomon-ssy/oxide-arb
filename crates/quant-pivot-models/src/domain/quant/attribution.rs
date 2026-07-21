@@ -1,14 +1,15 @@
 //! Recommendation attribution persistence DTOs.
 
+use chrono::{DateTime, Utc};
+use rust_decimal::Decimal;
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
+use serde::{Deserialize, Serialize};
+
 use crate::{
     entities::quant_recommendation_attribution,
     enums::quant::RecommendationAttributionOutcome,
     types::{AttributionDetail, EntryOutcome, ExitOutcome, RecommendationId, Usd},
 };
-use chrono::{DateTime, Utc};
-use rust_decimal::Decimal;
-use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
-use serde::{Deserialize, Serialize};
 
 /// Recommendation outcome and label feedback row.
 #[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]

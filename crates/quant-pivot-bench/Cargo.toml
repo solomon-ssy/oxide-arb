@@ -9,7 +9,7 @@ publish = false
 [dependencies]
 quant-pivot-core = { workspace = true }
 quant-pivot-models = { workspace = true }
-quant-pivot-research = { workspace = true, features = ["lp-solver"] }
+quant-pivot-research = { workspace = true }
 rust_decimal = { workspace = true }
 rust_decimal_macros = { workspace = true }
 chrono = { workspace = true }

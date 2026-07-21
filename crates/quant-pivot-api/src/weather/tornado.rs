@@ -6,18 +6,22 @@ use std::{
     time::Duration,
 };
 
-use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, TimeZone, Utc};
+use chrono::{
+    DateTime, Datelike, Duration as ChronoDuration, NaiveDate, NaiveDateTime, TimeZone, Utc,
+};
 use chrono_tz::Tz;
+use csv::{ReaderBuilder, StringRecord};
 use flate2::read::GzDecoder;
 use quant_pivot_error::{QuantError, QuantResult, api::ApiError};
 use quant_pivot_models::{
     config::TornadoSourceConfig,
-    domain::{WeatherObservationReport, WeatherObservationReportKind},
+    domain::data_plane::{WeatherObservationReport, WeatherObservationReportKind},
     hashing::CanonicalDigest,
     types::{
         ContentHash, DomainInstrumentKey, DomainMeasurementUnit, DomainSourceId, WeatherVariable,
     },
 };
+use reqwest::Client;
 use rust_decimal::Decimal;
 
 use crate::infra::{
@@ -39,13 +43,13 @@ pub struct NceiTornadoDay {
 /// Paired preliminary/final NOAA tornado source.
 pub struct TornadoSource {
     config: TornadoSourceConfig,
-    http: reqwest::Client,
+    http: Client,
     retry_policy: RetryPolicy,
 }
 
 impl TornadoSource {
     pub fn connect(config: TornadoSourceConfig) -> QuantResult<Self> {
-        let http = reqwest::Client::builder()
+        let http = Client::builder()
             .timeout(Duration::from_millis(config.request_timeout_ms))
             .user_agent("quant-pivot/0.1 noaa-tornado-ingest")
             .build()
@@ -58,7 +62,7 @@ impl TornadoSource {
     }
 
     #[must_use]
-    pub fn with_http_client(mut self, http: reqwest::Client) -> Self {
+    pub fn with_http_client(mut self, http: Client) -> Self {
         self.http = http;
         self
     }
@@ -150,8 +154,8 @@ fn parse_spc_day(
         .and_hms_opt(12, 0, 0)
         .ok_or_else(|| parse_error("SPC tornado CSV", "invalid report date"))?
         .and_utc();
-    let window_end = window_start + chrono::Duration::days(1);
-    let mut reader = csv::ReaderBuilder::new().from_reader(body.as_bytes());
+    let window_end = window_start + ChronoDuration::days(1);
+    let mut reader = ReaderBuilder::new().from_reader(body.as_bytes());
     let headers = reader
         .headers()
         .map_err(|error| parse_error("SPC tornado CSV", error.to_string()))?
@@ -242,7 +246,7 @@ fn parse_ncei_reader<R: Read>(
     collection_date: NaiveDate,
     available_at: DateTime<Utc>,
 ) -> QuantResult<WeatherObservationReport> {
-    let mut reader = csv::ReaderBuilder::new().from_reader(reader);
+    let mut reader = ReaderBuilder::new().from_reader(reader);
     let headers = reader
         .headers()
         .map_err(|error| parse_error("NCEI Storm Events CSV", error.to_string()))?
@@ -383,7 +387,7 @@ fn local_midnight(date: NaiveDate, timezone: Tz) -> QuantResult<DateTime<Utc>> {
         .ok_or_else(|| parse_error("NCEI Storm Events CSV", "ambiguous local midnight").into())
 }
 
-fn column(headers: &csv::StringRecord, name: &str) -> QuantResult<usize> {
+fn column(headers: &StringRecord, name: &str) -> QuantResult<usize> {
     headers
         .iter()
         .position(|value| value == name)
@@ -424,12 +428,14 @@ fn parse_error(context: &str, detail: impl Into<String>) -> ApiError {
 mod tests {
     use std::io::Write;
 
-    use chrono::{TimeZone, Utc};
+    use chrono::{NaiveDate, TimeZone, Utc};
     use chrono_tz::America::Chicago;
     use flate2::{Compression, write::GzEncoder};
-    use quant_pivot_models::{config::TornadoSourceConfig, domain::WeatherObservationReportKind};
+    use quant_pivot_models::{
+        config::TornadoSourceConfig, domain::data_plane::WeatherObservationReportKind,
+    };
     use rust_decimal_macros::dec;
-    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers, matchers::method};
 
     use super::TornadoSource;
 
@@ -455,7 +461,7 @@ mod tests {
             .spc_preliminary_day(
                 "oklahoma",
                 "OK",
-                chrono::NaiveDate::from_ymd_opt(2026, 7, 17).expect("date"),
+                NaiveDate::from_ymd_opt(2026, 7, 17).expect("date"),
                 Utc.with_ymd_and_hms(2026, 7, 18, 2, 0, 0).unwrap(),
             )
             .await
@@ -486,12 +492,12 @@ mod tests {
         encoder.write_all(csv.as_bytes()).expect("gzip write");
         let gzip = encoder.finish().expect("gzip finish");
         Mock::given(method("GET"))
-            .and(wiremock::matchers::path("/"))
+            .and(matchers::path("/"))
             .respond_with(ResponseTemplate::new(200).set_body_string(index))
             .mount(&server)
             .await;
         Mock::given(method("GET"))
-            .and(wiremock::matchers::path(
+            .and(matchers::path(
                 "/StormEvents_details-ftp_v1.0_d2025_c20260323.csv.gz",
             ))
             .respond_with(ResponseTemplate::new(200).set_body_bytes(gzip))
@@ -507,7 +513,7 @@ mod tests {
                 "oklahoma",
                 "OKLAHOMA",
                 Chicago,
-                chrono::NaiveDate::from_ymd_opt(2025, 7, 1).expect("date"),
+                NaiveDate::from_ymd_opt(2025, 7, 1).expect("date"),
                 Utc.with_ymd_and_hms(2026, 7, 18, 0, 0, 0).unwrap(),
             )
             .await

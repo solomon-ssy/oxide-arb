@@ -1,10 +1,11 @@
 //! Execution recovery playbook views for operators.
 
+use serde::{Deserialize, Serialize};
+
 use crate::{
-    domain::{KillSwitchView, api::ReconciliationView},
+    domain::{api::ReconciliationView, governance::KillSwitchView},
     enums::{execution::KillSwitchState, quant::QuantRuntimeMode},
 };
-use serde::{Deserialize, Serialize};
 
 /// Ordered recovery step for unresolvable reconciliation / latched kill-switch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -15,7 +16,7 @@ pub enum ExecutionRecoveryStep {
     VerifyModePreflight,
 }
 
-/// Lightweight recovery summary embedded in [`SystemStatus`](crate::domain::SystemStatus).
+/// Lightweight recovery summary embedded in [`SystemStatus`](crate::domain::governance::SystemStatus).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionRecoverySummary {
     pub has_unresolvable_reconciliation: bool,

@@ -5,20 +5,39 @@ use std::{
     fmt::Display,
 };
 
+use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{
-        CATALOG_OBJECT_SCHEMA_VERSION, CatalogBatchChainInfo, CatalogBatchCommit,
-        CatalogBatchFailure, CatalogEventCandidate, CatalogEventChangeInfo, CatalogMarketCandidate,
-        CatalogMarketChangeInfo, CatalogSnapshotInfo, CatalogSyncBatchInfo, CatalogWindowInfo,
-        DecisionBoundary, DecisionSource, EventRegistryInfo, EventTags, MarketRegistryInfo,
-        NewCatalogEventChange, NewCatalogEventObject, NewCatalogMarketChange,
-        NewCatalogMarketObject, NewCatalogSyncBatch, NewCatalogSyncRejection, UpsertEvent,
-        UpsertMarket,
+        data_plane::{DecisionBoundary, DecisionSource},
+        market::{
+            CATALOG_OBJECT_SCHEMA_VERSION, CatalogBatchChainInfo, CatalogBatchCommit,
+            CatalogBatchFailure, CatalogEventCandidate, CatalogEventChangeInfo,
+            CatalogMarketCandidate, CatalogMarketChangeInfo, CatalogSnapshotInfo,
+            CatalogSyncBatchInfo, CatalogWindowInfo, EventRegistryInfo, EventTags,
+            MarketRegistryInfo, NewCatalogEventChange, NewCatalogEventObject,
+            NewCatalogMarketChange, NewCatalogMarketObject, NewCatalogSyncBatch,
+            NewCatalogSyncRejection, UpsertEvent, UpsertMarket,
+        },
     },
     entities::{
-        catalog_event_change, catalog_event_object, catalog_market_change, catalog_market_object,
-        catalog_sync_batch, catalog_sync_rejection,
+        catalog_event_change::{Column, Entity, Model as CatalogEventChangeModel},
+        catalog_event_object::{
+            Column as CatalogEventObjectColumn, Entity as CatalogEventObjectEntity,
+        },
+        catalog_market_change::{
+            Column as CatalogMarketChangeColumn, Entity as CatalogMarketChangeEntity,
+            Model as CatalogMarketChangeModel,
+        },
+        catalog_market_object::{
+            Column as CatalogMarketObjectColumn, Entity as CatalogMarketObjectEntity,
+        },
+        catalog_sync_batch::{
+            ActiveModel, Column as CatalogSyncBatchColumn, Entity as CatalogSyncBatchEntity, Model,
+        },
+        catalog_sync_rejection::{
+            Column as CatalogSyncRejectionColumn, Entity as CatalogSyncRejectionEntity,
+        },
     },
     enums::catalog::{CatalogSyncKind, CatalogSyncStatus, CatalogTimestampQuality},
     hashing::CanonicalDigest,
@@ -28,9 +47,9 @@ use quant_pivot_models::{
     },
 };
 use sea_orm::{
-    AccessMode, ActiveValue::Set, ColumnTrait, ConnectionTrait, DatabaseConnection,
-    DatabaseTransaction, EntityTrait, FromQueryResult, IsolationLevel, QueryFilter, QueryOrder,
-    QuerySelect, TransactionTrait, sea_query::OnConflict,
+    AccessMode, ActiveValue, ActiveValue::Set, ColumnTrait, ConnectionTrait, DatabaseConnection,
+    DatabaseTransaction, DbErr, EntityTrait, FromQueryResult, IsolationLevel, QueryFilter,
+    QueryOrder, QuerySelect, Select, TransactionTrait, sea_query::OnConflict,
 };
 
 use crate::{
@@ -190,43 +209,34 @@ impl PgCatalogLedgerRepository {
 impl CatalogLedgerRepository for PgCatalogLedgerRepository {
     async fn research_history_coverage(
         &self,
-        as_of: chrono::DateTime<chrono::Utc>,
+        as_of: DateTime<Utc>,
     ) -> Result<Vec<HistoryCoverage>, StorageError> {
-        let event = catalog_event_change::Entity::find()
+        let event = Entity::find()
             .select_only()
-            .column_as(
-                catalog_event_change::Column::SourceEffectiveAt.min(),
-                "earliest_event_time",
-            )
-            .column_as(
-                catalog_event_change::Column::SourceEffectiveAt.max(),
-                "latest_event_time",
-            )
-            .column_as(
-                catalog_event_change::Column::EventChangeId.count(),
-                "row_count",
-            )
-            .filter(catalog_event_change::Column::SourceEffectiveAt.lte(as_of))
+            .column_as(Column::SourceEffectiveAt.min(), "earliest_event_time")
+            .column_as(Column::SourceEffectiveAt.max(), "latest_event_time")
+            .column_as(Column::EventChangeId.count(), "row_count")
+            .filter(Column::SourceEffectiveAt.lte(as_of))
             .into_model::<HistoryRangeRow>()
             .one(&self.db)
             .await
             .map_err(StorageError::from)?
             .unwrap_or_default();
-        let market = catalog_market_change::Entity::find()
+        let market = CatalogMarketChangeEntity::find()
             .select_only()
             .column_as(
-                catalog_market_change::Column::SourceEffectiveAt.min(),
+                CatalogMarketChangeColumn::SourceEffectiveAt.min(),
                 "earliest_event_time",
             )
             .column_as(
-                catalog_market_change::Column::SourceEffectiveAt.max(),
+                CatalogMarketChangeColumn::SourceEffectiveAt.max(),
                 "latest_event_time",
             )
             .column_as(
-                catalog_market_change::Column::MarketChangeId.count(),
+                CatalogMarketChangeColumn::MarketChangeId.count(),
                 "row_count",
             )
-            .filter(catalog_market_change::Column::SourceEffectiveAt.lte(as_of))
+            .filter(CatalogMarketChangeColumn::SourceEffectiveAt.lte(as_of))
             .into_model::<HistoryRangeRow>()
             .one(&self.db)
             .await
@@ -258,9 +268,9 @@ impl CatalogLedgerRepository for PgCatalogLedgerRepository {
 
         let txn = self.db.begin().await.map_err(StorageError::from)?;
         acquire_catalog_writer_lock(&txn).await?;
-        let baseline_exists = catalog_sync_batch::Entity::find()
-            .filter(catalog_sync_batch::Column::SyncKind.eq(CatalogSyncKind::Baseline))
-            .filter(catalog_sync_batch::Column::Status.eq(CatalogSyncStatus::Committed))
+        let baseline_exists = CatalogSyncBatchEntity::find()
+            .filter(CatalogSyncBatchColumn::SyncKind.eq(CatalogSyncKind::Baseline))
+            .filter(CatalogSyncBatchColumn::Status.eq(CatalogSyncStatus::Committed))
             .one(&txn)
             .await
             .map_err(StorageError::from)?
@@ -404,7 +414,7 @@ impl CatalogLedgerRepository for PgCatalogLedgerRepository {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
         acquire_catalog_writer_lock(&txn).await?;
         if let Some(existing) =
-            catalog_sync_batch::Entity::find_by_id(failure.catalog_sync_batch_id.clone())
+            CatalogSyncBatchEntity::find_by_id(failure.catalog_sync_batch_id.clone())
                 .one(&txn)
                 .await
                 .map_err(StorageError::from)?
@@ -422,7 +432,7 @@ impl CatalogLedgerRepository for PgCatalogLedgerRepository {
         }
 
         let detail = bounded_failure_detail(&failure.failure_detail);
-        let model = catalog_sync_batch::Entity::insert(catalog_sync_batch::ActiveModel {
+        let model = CatalogSyncBatchEntity::insert(ActiveModel {
             catalog_sync_batch_id: Set(failure.catalog_sync_batch_id),
             sync_kind: Set(failure.sync_kind),
             status: Set(CatalogSyncStatus::Failed),
@@ -440,8 +450,8 @@ impl CatalogLedgerRepository for PgCatalogLedgerRepository {
             batch_hash: Set(None),
             failure_stage: Set(Some(failure.failure_stage)),
             failure_detail: Set(Some(detail)),
-            created_at: sea_orm::ActiveValue::NotSet,
-            updated_at: sea_orm::ActiveValue::NotSet,
+            created_at: ActiveValue::NotSet,
+            updated_at: ActiveValue::NotSet,
         })
         .exec_with_returning(&txn)
         .await
@@ -451,18 +461,18 @@ impl CatalogLedgerRepository for PgCatalogLedgerRepository {
         Ok(model.into())
     }
 
-    async fn coverage_start(&self) -> Result<Option<chrono::DateTime<chrono::Utc>>, StorageError> {
+    async fn coverage_start(&self) -> Result<Option<DateTime<Utc>>, StorageError> {
         catalog_coverage_start(&self.db).await
     }
 
-    async fn watermark(&self) -> Result<Option<chrono::DateTime<chrono::Utc>>, StorageError> {
+    async fn watermark(&self) -> Result<Option<DateTime<Utc>>, StorageError> {
         catalog_watermark(&self.db).await
     }
 
     async fn batch_chain(
         &self,
-        window_start: chrono::DateTime<chrono::Utc>,
-        pit_cutoff: chrono::DateTime<chrono::Utc>,
+        window_start: DateTime<Utc>,
+        pit_cutoff: DateTime<Utc>,
     ) -> Result<Option<CatalogBatchChainInfo>, StorageError> {
         if window_start > pit_cutoff {
             return Err(StorageError::InvariantViolation {
@@ -470,12 +480,12 @@ impl CatalogLedgerRepository for PgCatalogLedgerRepository {
                 detail: "catalog proof window_start cannot be after pit_cutoff".to_owned(),
             });
         }
-        let baseline = catalog_sync_batch::Entity::find()
-            .filter(catalog_sync_batch::Column::Status.eq(CatalogSyncStatus::Committed))
-            .filter(catalog_sync_batch::Column::SyncKind.eq(CatalogSyncKind::Baseline))
-            .filter(catalog_sync_batch::Column::CommittedAt.lte(window_start))
-            .order_by_desc(catalog_sync_batch::Column::CommittedAt)
-            .order_by_desc(catalog_sync_batch::Column::CatalogSyncBatchId)
+        let baseline = CatalogSyncBatchEntity::find()
+            .filter(CatalogSyncBatchColumn::Status.eq(CatalogSyncStatus::Committed))
+            .filter(CatalogSyncBatchColumn::SyncKind.eq(CatalogSyncKind::Baseline))
+            .filter(CatalogSyncBatchColumn::CommittedAt.lte(window_start))
+            .order_by_desc(CatalogSyncBatchColumn::CommittedAt)
+            .order_by_desc(CatalogSyncBatchColumn::CatalogSyncBatchId)
             .one(&self.db)
             .await
             .map_err(StorageError::from)?;
@@ -488,12 +498,12 @@ impl CatalogLedgerRepository for PgCatalogLedgerRepository {
                 "committed catalog baseline has no committed_at",
             )
         })?;
-        let rows = catalog_sync_batch::Entity::find()
-            .filter(catalog_sync_batch::Column::Status.eq(CatalogSyncStatus::Committed))
-            .filter(catalog_sync_batch::Column::CommittedAt.gte(baseline_at))
-            .filter(catalog_sync_batch::Column::CommittedAt.lte(pit_cutoff))
-            .order_by_asc(catalog_sync_batch::Column::CommittedAt)
-            .order_by_asc(catalog_sync_batch::Column::CatalogSyncBatchId)
+        let rows = CatalogSyncBatchEntity::find()
+            .filter(CatalogSyncBatchColumn::Status.eq(CatalogSyncStatus::Committed))
+            .filter(CatalogSyncBatchColumn::CommittedAt.gte(baseline_at))
+            .filter(CatalogSyncBatchColumn::CommittedAt.lte(pit_cutoff))
+            .order_by_asc(CatalogSyncBatchColumn::CommittedAt)
+            .order_by_asc(CatalogSyncBatchColumn::CatalogSyncBatchId)
             .all(&self.db)
             .await
             .map_err(StorageError::from)?;
@@ -660,8 +670,8 @@ impl CatalogLedgerRepository for PgCatalogLedgerRepository {
 
 #[derive(Debug, Default, FromQueryResult)]
 struct HistoryRangeRow {
-    earliest_event_time: Option<chrono::DateTime<chrono::Utc>>,
-    latest_event_time: Option<chrono::DateTime<chrono::Utc>>,
+    earliest_event_time: Option<DateTime<Utc>>,
+    latest_event_time: Option<DateTime<Utc>>,
     row_count: i64,
 }
 
@@ -687,10 +697,10 @@ async fn insert_event_objects(
     if objects.is_empty() {
         return Ok(());
     }
-    upsert_many_chunked::<catalog_event_object::Entity, NewCatalogEventObject>(
+    upsert_many_chunked::<CatalogEventObjectEntity, NewCatalogEventObject>(
         txn,
         objects,
-        OnConflict::column(catalog_event_object::Column::EventObjectId)
+        OnConflict::column(CatalogEventObjectColumn::EventObjectId)
             .do_nothing()
             .to_owned(),
     )
@@ -705,10 +715,10 @@ async fn insert_event_changes(
     if changes.is_empty() {
         return Ok(());
     }
-    upsert_many_chunked::<catalog_event_change::Entity, NewCatalogEventChange>(
+    upsert_many_chunked::<Entity, NewCatalogEventChange>(
         txn,
         changes,
-        OnConflict::column(catalog_event_change::Column::EventChangeId)
+        OnConflict::column(Column::EventChangeId)
             .do_nothing()
             .to_owned(),
     )
@@ -723,10 +733,10 @@ async fn insert_market_objects(
     if objects.is_empty() {
         return Ok(());
     }
-    upsert_many_chunked::<catalog_market_object::Entity, NewCatalogMarketObject>(
+    upsert_many_chunked::<CatalogMarketObjectEntity, NewCatalogMarketObject>(
         txn,
         objects,
-        OnConflict::column(catalog_market_object::Column::MarketObjectId)
+        OnConflict::column(CatalogMarketObjectColumn::MarketObjectId)
             .do_nothing()
             .to_owned(),
     )
@@ -741,10 +751,10 @@ async fn insert_market_changes(
     if changes.is_empty() {
         return Ok(());
     }
-    upsert_many_chunked::<catalog_market_change::Entity, NewCatalogMarketChange>(
+    upsert_many_chunked::<CatalogMarketChangeEntity, NewCatalogMarketChange>(
         txn,
         changes,
-        OnConflict::column(catalog_market_change::Column::MarketChangeId)
+        OnConflict::column(CatalogMarketChangeColumn::MarketChangeId)
             .do_nothing()
             .to_owned(),
     )
@@ -759,10 +769,10 @@ async fn insert_rejections(
     if rejections.is_empty() {
         return Ok(());
     }
-    upsert_many_chunked::<catalog_sync_rejection::Entity, NewCatalogSyncRejection>(
+    upsert_many_chunked::<CatalogSyncRejectionEntity, NewCatalogSyncRejection>(
         txn,
         rejections,
-        OnConflict::column(catalog_sync_rejection::Column::CatalogSyncRejectionId)
+        OnConflict::column(CatalogSyncRejectionColumn::CatalogSyncRejectionId)
             .do_nothing()
             .to_owned(),
     )
@@ -777,12 +787,12 @@ async fn latest_event_changes_by_object(
     if object_ids.is_empty() {
         return Ok(BTreeMap::new());
     }
-    let rows = catalog_event_change::Entity::find()
-        .filter(catalog_event_change::Column::EventObjectId.is_in(object_ids))
-        .distinct_on([catalog_event_change::Column::EventObjectId])
-        .order_by_asc(catalog_event_change::Column::EventObjectId)
-        .order_by_desc(catalog_event_change::Column::CreatedAt)
-        .order_by_desc(catalog_event_change::Column::EventChangeId)
+    let rows = Entity::find()
+        .filter(Column::EventObjectId.is_in(object_ids))
+        .distinct_on([Column::EventObjectId])
+        .order_by_asc(Column::EventObjectId)
+        .order_by_desc(Column::CreatedAt)
+        .order_by_desc(Column::EventChangeId)
         .all(txn)
         .await
         .map_err(StorageError::from)?;
@@ -792,10 +802,7 @@ async fn latest_event_changes_by_object(
         .collect())
 }
 
-fn normalize_event_fallback(
-    change: &mut NewCatalogEventChange,
-    committed_at: chrono::DateTime<chrono::Utc>,
-) {
+fn normalize_event_fallback(change: &mut NewCatalogEventChange, committed_at: DateTime<Utc>) {
     if change.source_timestamp_quality == CatalogTimestampQuality::CommitTimeFallback {
         change.source_effective_at = committed_at;
     }
@@ -804,9 +811,9 @@ fn normalize_event_fallback(
 async fn insert_committed_batch(
     txn: &DatabaseTransaction,
     batch: NewCatalogSyncBatch,
-    committed_at: chrono::DateTime<chrono::Utc>,
-) -> Result<catalog_sync_batch::Model, StorageError> {
-    catalog_sync_batch::Entity::insert(catalog_sync_batch::ActiveModel {
+    committed_at: DateTime<Utc>,
+) -> Result<Model, StorageError> {
+    CatalogSyncBatchEntity::insert(ActiveModel {
         catalog_sync_batch_id: Set(batch.catalog_sync_batch_id),
         sync_kind: Set(batch.sync_kind),
         status: Set(CatalogSyncStatus::Committed),
@@ -819,8 +826,8 @@ async fn insert_committed_batch(
         batch_hash: Set(Some(batch.batch_hash)),
         failure_stage: Set(None),
         failure_detail: Set(None),
-        created_at: sea_orm::ActiveValue::NotSet,
-        updated_at: sea_orm::ActiveValue::NotSet,
+        created_at: ActiveValue::NotSet,
+        updated_at: ActiveValue::NotSet,
     })
     .exec_with_returning(txn)
     .await
@@ -829,11 +836,11 @@ async fn insert_committed_batch(
 
 async fn catalog_coverage_start(
     db: &impl ConnectionTrait,
-) -> Result<Option<chrono::DateTime<chrono::Utc>>, StorageError> {
-    catalog_sync_batch::Entity::find()
-        .filter(catalog_sync_batch::Column::Status.eq(CatalogSyncStatus::Committed))
-        .filter(catalog_sync_batch::Column::SyncKind.eq(CatalogSyncKind::Baseline))
-        .order_by_asc(catalog_sync_batch::Column::CommittedAt)
+) -> Result<Option<DateTime<Utc>>, StorageError> {
+    CatalogSyncBatchEntity::find()
+        .filter(CatalogSyncBatchColumn::Status.eq(CatalogSyncStatus::Committed))
+        .filter(CatalogSyncBatchColumn::SyncKind.eq(CatalogSyncKind::Baseline))
+        .order_by_asc(CatalogSyncBatchColumn::CommittedAt)
         .one(db)
         .await
         .map_err(StorageError::from)
@@ -842,10 +849,10 @@ async fn catalog_coverage_start(
 
 async fn catalog_watermark(
     db: &impl ConnectionTrait,
-) -> Result<Option<chrono::DateTime<chrono::Utc>>, StorageError> {
-    catalog_sync_batch::Entity::find()
-        .filter(catalog_sync_batch::Column::Status.eq(CatalogSyncStatus::Committed))
-        .order_by_desc(catalog_sync_batch::Column::CommittedAt)
+) -> Result<Option<DateTime<Utc>>, StorageError> {
+    CatalogSyncBatchEntity::find()
+        .filter(CatalogSyncBatchColumn::Status.eq(CatalogSyncStatus::Committed))
+        .order_by_desc(CatalogSyncBatchColumn::CommittedAt)
         .one(db)
         .await
         .map_err(StorageError::from)
@@ -882,10 +889,10 @@ async fn market_at_txn(
     boundary: &DecisionBoundary,
 ) -> Result<Option<CatalogMarketChangeInfo>, StorageError> {
     let changes = visible_market_changes(boundary)
-        .filter(catalog_market_change::Column::MarketId.eq(market_id.clone()))
-        .order_by_desc(catalog_market_change::Column::SourceEffectiveAt)
-        .order_by_desc(catalog_sync_batch::Column::CommittedAt)
-        .order_by_desc(catalog_market_change::Column::MarketChangeId)
+        .filter(CatalogMarketChangeColumn::MarketId.eq(market_id.clone()))
+        .order_by_desc(CatalogMarketChangeColumn::SourceEffectiveAt)
+        .order_by_desc(CatalogSyncBatchColumn::CommittedAt)
+        .order_by_desc(CatalogMarketChangeColumn::MarketChangeId)
         .limit(1)
         .all(txn)
         .await
@@ -899,15 +906,15 @@ async fn markets_at_txn(
     boundary: &DecisionBoundary,
 ) -> Result<Vec<CatalogMarketChangeInfo>, StorageError> {
     let changes = visible_market_changes(boundary)
-        .filter(catalog_market_change::Column::MarketId.is_in(market_ids.iter().cloned()))
+        .filter(CatalogMarketChangeColumn::MarketId.is_in(market_ids.iter().cloned()))
         .distinct_on([(
-            catalog_market_change::Entity,
-            catalog_market_change::Column::MarketId,
+            CatalogMarketChangeEntity,
+            CatalogMarketChangeColumn::MarketId,
         )])
-        .order_by_asc(catalog_market_change::Column::MarketId)
-        .order_by_desc(catalog_market_change::Column::SourceEffectiveAt)
-        .order_by_desc(catalog_sync_batch::Column::CommittedAt)
-        .order_by_desc(catalog_market_change::Column::MarketChangeId)
+        .order_by_asc(CatalogMarketChangeColumn::MarketId)
+        .order_by_desc(CatalogMarketChangeColumn::SourceEffectiveAt)
+        .order_by_desc(CatalogSyncBatchColumn::CommittedAt)
+        .order_by_desc(CatalogMarketChangeColumn::MarketChangeId)
         .all(txn)
         .await
         .map_err(StorageError::from)?;
@@ -920,10 +927,10 @@ async fn event_at_txn(
     boundary: &DecisionBoundary,
 ) -> Result<Option<CatalogEventChangeInfo>, StorageError> {
     let changes = visible_event_changes(boundary)
-        .filter(catalog_event_change::Column::EventId.eq(event_id.clone()))
-        .order_by_desc(catalog_event_change::Column::SourceEffectiveAt)
-        .order_by_desc(catalog_sync_batch::Column::CommittedAt)
-        .order_by_desc(catalog_event_change::Column::EventChangeId)
+        .filter(Column::EventId.eq(event_id.clone()))
+        .order_by_desc(Column::SourceEffectiveAt)
+        .order_by_desc(CatalogSyncBatchColumn::CommittedAt)
+        .order_by_desc(Column::EventChangeId)
         .limit(1)
         .all(txn)
         .await
@@ -937,7 +944,7 @@ async fn event_by_change_id(
     boundary: &DecisionBoundary,
 ) -> Result<Option<CatalogEventChangeInfo>, StorageError> {
     let changes = visible_event_changes(boundary)
-        .filter(catalog_event_change::Column::EventChangeId.eq(event_change_id.clone()))
+        .filter(Column::EventChangeId.eq(event_change_id.clone()))
         .limit(1)
         .all(txn)
         .await
@@ -951,8 +958,8 @@ async fn exact_event_markets_at(
     boundary: &DecisionBoundary,
 ) -> Result<Vec<CatalogMarketChangeInfo>, StorageError> {
     let changes = visible_market_changes(boundary)
-        .filter(catalog_market_change::Column::EventChangeId.eq(event_change_id.clone()))
-        .order_by_asc(catalog_market_change::Column::MarketId)
+        .filter(CatalogMarketChangeColumn::EventChangeId.eq(event_change_id.clone()))
+        .order_by_asc(CatalogMarketChangeColumn::MarketId)
         .all(txn)
         .await
         .map_err(StorageError::from)?;
@@ -968,7 +975,7 @@ async fn events_by_change_ids(
         return Ok(Vec::new());
     }
     let changes = visible_event_changes(boundary)
-        .filter(catalog_event_change::Column::EventChangeId.is_in(event_change_ids.iter().cloned()))
+        .filter(Column::EventChangeId.is_in(event_change_ids.iter().cloned()))
         .all(txn)
         .await
         .map_err(StorageError::from)?;
@@ -984,11 +991,9 @@ async fn event_members_by_change_ids(
         return Ok(Vec::new());
     }
     let changes = visible_market_changes(boundary)
-        .filter(
-            catalog_market_change::Column::EventChangeId.is_in(event_change_ids.iter().cloned()),
-        )
-        .order_by_asc(catalog_market_change::Column::EventChangeId)
-        .order_by_asc(catalog_market_change::Column::MarketId)
+        .filter(CatalogMarketChangeColumn::EventChangeId.is_in(event_change_ids.iter().cloned()))
+        .order_by_asc(CatalogMarketChangeColumn::EventChangeId)
+        .order_by_asc(CatalogMarketChangeColumn::MarketId)
         .all(txn)
         .await
         .map_err(StorageError::from)?;
@@ -1001,13 +1006,13 @@ async fn all_markets_at(
 ) -> Result<Vec<CatalogMarketChangeInfo>, StorageError> {
     let changes = visible_market_changes(boundary)
         .distinct_on([(
-            catalog_market_change::Entity,
-            catalog_market_change::Column::MarketId,
+            CatalogMarketChangeEntity,
+            CatalogMarketChangeColumn::MarketId,
         )])
-        .order_by_asc(catalog_market_change::Column::MarketId)
-        .order_by_desc(catalog_market_change::Column::SourceEffectiveAt)
-        .order_by_desc(catalog_sync_batch::Column::CommittedAt)
-        .order_by_desc(catalog_market_change::Column::MarketChangeId)
+        .order_by_asc(CatalogMarketChangeColumn::MarketId)
+        .order_by_desc(CatalogMarketChangeColumn::SourceEffectiveAt)
+        .order_by_desc(CatalogSyncBatchColumn::CommittedAt)
+        .order_by_desc(CatalogMarketChangeColumn::MarketChangeId)
         .all(txn)
         .await
         .map_err(StorageError::from)?;
@@ -1020,46 +1025,39 @@ async fn market_history_through(
     boundary: &DecisionBoundary,
 ) -> Result<Vec<CatalogMarketChangeInfo>, StorageError> {
     let changes = visible_market_changes(boundary)
-        .filter(catalog_market_change::Column::MarketId.is_in(market_ids.iter().cloned()))
-        .order_by_asc(catalog_market_change::Column::MarketId)
-        .order_by_asc(catalog_market_change::Column::SourceEffectiveAt)
-        .order_by_asc(catalog_sync_batch::Column::CommittedAt)
-        .order_by_asc(catalog_market_change::Column::MarketChangeId)
+        .filter(CatalogMarketChangeColumn::MarketId.is_in(market_ids.iter().cloned()))
+        .order_by_asc(CatalogMarketChangeColumn::MarketId)
+        .order_by_asc(CatalogMarketChangeColumn::SourceEffectiveAt)
+        .order_by_asc(CatalogSyncBatchColumn::CommittedAt)
+        .order_by_asc(CatalogMarketChangeColumn::MarketChangeId)
         .all(txn)
         .await
         .map_err(StorageError::from)?;
     hydrate_market_changes(txn, changes).await
 }
 
-fn visible_event_changes(
-    boundary: &DecisionBoundary,
-) -> sea_orm::Select<catalog_event_change::Entity> {
-    catalog_event_change::Entity::find()
-        .inner_join(catalog_sync_batch::Entity)
-        .filter(catalog_sync_batch::Column::Status.eq(CatalogSyncStatus::Committed))
-        .filter(catalog_sync_batch::Column::CommittedAt.lte(boundary.decision_at()))
-        .filter(
-            catalog_event_change::Column::SourceEffectiveAt
-                .lte(boundary.cutoff_for(DecisionSource::Catalog)),
-        )
+fn visible_event_changes(boundary: &DecisionBoundary) -> Select<Entity> {
+    Entity::find()
+        .inner_join(CatalogSyncBatchEntity)
+        .filter(CatalogSyncBatchColumn::Status.eq(CatalogSyncStatus::Committed))
+        .filter(CatalogSyncBatchColumn::CommittedAt.lte(boundary.decision_at()))
+        .filter(Column::SourceEffectiveAt.lte(boundary.cutoff_for(DecisionSource::Catalog)))
 }
 
-fn visible_market_changes(
-    boundary: &DecisionBoundary,
-) -> sea_orm::Select<catalog_market_change::Entity> {
-    catalog_market_change::Entity::find()
-        .inner_join(catalog_sync_batch::Entity)
-        .filter(catalog_sync_batch::Column::Status.eq(CatalogSyncStatus::Committed))
-        .filter(catalog_sync_batch::Column::CommittedAt.lte(boundary.decision_at()))
+fn visible_market_changes(boundary: &DecisionBoundary) -> Select<CatalogMarketChangeEntity> {
+    CatalogMarketChangeEntity::find()
+        .inner_join(CatalogSyncBatchEntity)
+        .filter(CatalogSyncBatchColumn::Status.eq(CatalogSyncStatus::Committed))
+        .filter(CatalogSyncBatchColumn::CommittedAt.lte(boundary.decision_at()))
         .filter(
-            catalog_market_change::Column::SourceEffectiveAt
+            CatalogMarketChangeColumn::SourceEffectiveAt
                 .lte(boundary.cutoff_for(DecisionSource::Catalog)),
         )
 }
 
 async fn hydrate_event_changes(
     db: &impl ConnectionTrait,
-    changes: Vec<catalog_event_change::Model>,
+    changes: Vec<CatalogEventChangeModel>,
 ) -> Result<Vec<CatalogEventChangeInfo>, StorageError> {
     if changes.is_empty() {
         return Ok(Vec::new());
@@ -1072,8 +1070,8 @@ async fn hydrate_event_changes(
         .iter()
         .map(|change| change.catalog_sync_batch_id.clone())
         .collect::<BTreeSet<_>>();
-    let objects = catalog_event_object::Entity::find()
-        .filter(catalog_event_object::Column::EventObjectId.is_in(object_ids))
+    let objects = CatalogEventObjectEntity::find()
+        .filter(CatalogEventObjectColumn::EventObjectId.is_in(object_ids))
         .all(db)
         .await
         .map_err(StorageError::from)?
@@ -1114,7 +1112,7 @@ async fn hydrate_event_changes(
 
 async fn hydrate_market_changes(
     db: &impl ConnectionTrait,
-    changes: Vec<catalog_market_change::Model>,
+    changes: Vec<CatalogMarketChangeModel>,
 ) -> Result<Vec<CatalogMarketChangeInfo>, StorageError> {
     if changes.is_empty() {
         return Ok(Vec::new());
@@ -1127,8 +1125,8 @@ async fn hydrate_market_changes(
         .iter()
         .map(|change| change.catalog_sync_batch_id.clone())
         .collect::<BTreeSet<_>>();
-    let objects = catalog_market_object::Entity::find()
-        .filter(catalog_market_object::Column::MarketObjectId.is_in(object_ids))
+    let objects = CatalogMarketObjectEntity::find()
+        .filter(CatalogMarketObjectColumn::MarketObjectId.is_in(object_ids))
         .all(db)
         .await
         .map_err(StorageError::from)?
@@ -1173,9 +1171,9 @@ async fn hydrate_market_changes(
 async fn load_batches(
     db: &impl ConnectionTrait,
     batch_ids: BTreeSet<CatalogSyncBatchId>,
-) -> Result<BTreeMap<CatalogSyncBatchId, catalog_sync_batch::Model>, StorageError> {
-    catalog_sync_batch::Entity::find()
-        .filter(catalog_sync_batch::Column::CatalogSyncBatchId.is_in(batch_ids))
+) -> Result<BTreeMap<CatalogSyncBatchId, Model>, StorageError> {
+    CatalogSyncBatchEntity::find()
+        .filter(CatalogSyncBatchColumn::CatalogSyncBatchId.is_in(batch_ids))
         .all(db)
         .await
         .map_err(StorageError::from)
@@ -1188,9 +1186,9 @@ async fn load_batches(
 }
 
 fn committed_at_for(
-    batches: &BTreeMap<CatalogSyncBatchId, catalog_sync_batch::Model>,
+    batches: &BTreeMap<CatalogSyncBatchId, Model>,
     batch_id: &CatalogSyncBatchId,
-) -> Result<chrono::DateTime<chrono::Utc>, StorageError> {
+) -> Result<DateTime<Utc>, StorageError> {
     let batch = batches
         .get(batch_id)
         .ok_or_else(|| StorageError::InvariantViolation {
@@ -1218,9 +1216,9 @@ async fn acquire_catalog_writer_lock(txn: &DatabaseTransaction) -> Result<(), St
 async fn recover_commit_outcome(
     db: &DatabaseConnection,
     batch_id: &CatalogSyncBatchId,
-    commit_error: sea_orm::DbErr,
+    commit_error: DbErr,
 ) -> Result<CatalogSyncBatchInfo, StorageError> {
-    match catalog_sync_batch::Entity::find_by_id(batch_id.clone())
+    match CatalogSyncBatchEntity::find_by_id(batch_id.clone())
         .one(db)
         .await
     {

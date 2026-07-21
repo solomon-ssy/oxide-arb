@@ -1,9 +1,9 @@
-//! Market-linkage governance HTTP contract (Phase 11.2.2).
+//! Market-linkage governance HTTP contract.
 //!
 //! Read surface for the append-only, bitemporal `quant_market_linkage` ledger
 //! (catalog, unresolved review queue, per-market history) plus the governed
 //! mutations: an audited operator override and a manual re-resolution trigger.
-//! Also carries the basis-cross-check alert feed (11.2.2 remediation R6): the
+//! Also carries the basis-cross-check alert feed: the
 //! durable, queryable record of every feature-source-vs-settlement-oracle
 //! divergence that crossed the governed threshold.
 
@@ -14,9 +14,15 @@ use validator::Validate;
 
 use crate::{
     domain::{
-        BasisAlertInfo, DomainCursorStatus, DomainSourceCheckpoint, DomainSourceCursorInfo,
-        DomainSourceExpectationInfo, LinkageOutcome, ManualEvidenceInput, MarketLinkageInfo,
-        MarketSubject, ResolvedSourceBinding, pagination::PageRequest,
+        data_plane::{
+            DomainCursorStatus, DomainSourceCheckpoint, DomainSourceCursorInfo,
+            DomainSourceExpectationInfo,
+        },
+        pagination::PageRequest,
+        quant::{
+            BasisAlertInfo, LinkageOutcome, ManualEvidenceInput, MarketLinkageInfo, MarketSubject,
+            ResolvedSourceBinding,
+        },
     },
     enums::domain::{
         DomainFamily, DomainSourceExpectationStatus, LinkageSourceRole, LinkageStatus, ResolverTier,
@@ -64,10 +70,10 @@ pub struct MarketLinkageListQuery {
 /// Inbound body for `POST /research/market-linkages/{market_id}/override`.
 ///
 /// The operator supplies a full typed subject plus literal-text citations for
-/// every load-bearing identity field (11.2.2 remediation R4) — an override is
+/// every load-bearing identity field — an override is
 /// a human decision, never text-extracted, but it must still cite real
 /// source text for `asset` / `resolution_oracle` / `strike` (when present),
-/// verified byte-exact by [`quant_pivot_research::linkage::validate_manual_override`].
+/// verified byte-exact by the research linkage validator.
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
 pub struct OverrideLinkageRequest {
     /// The full `MarketSubject` document to bind.
@@ -112,7 +118,7 @@ pub struct MarketLinkageSummaryView {
     pub source_bindings: Vec<ResolvedSourceBinding>,
     pub content_hash: ContentHash,
     pub derived_at: DateTime<Utc>,
-    /// Populated only for `resolver_tier = override` rows (R4 audit columns).
+    /// Populated only for `resolver_tier = override` rows.
     pub override_reason: Option<String>,
     pub override_actor: Option<String>,
     pub created_at: DateTime<Utc>,
@@ -155,7 +161,7 @@ pub struct MarketLinkageDetailView {
     pub metadata_hash: ContentHash,
     pub content_hash: ContentHash,
     pub derived_at: DateTime<Utc>,
-    /// Populated only for `resolver_tier = override` rows (R4 audit columns).
+    /// Populated only for `resolver_tier = override` rows.
     pub override_reason: Option<String>,
     pub override_actor: Option<String>,
     pub created_at: DateTime<Utc>,
@@ -187,7 +193,7 @@ impl From<MarketLinkageInfo> for MarketLinkageDetailView {
 ///
 /// The detail drawer's "history" tab. Every append is a first-class,
 /// immutable audit entry — a resolve pass, or an operator override, in
-/// `derived_at` order (R8: UI/UX closed loop, override/resolve audit trail).
+/// `derived_at` order, preserving the override/resolve audit trail.
 #[derive(Debug, Clone, Serialize)]
 pub struct MarketLinkageHistoryEntryView {
     pub linkage_id: MarketLinkageId,
@@ -201,7 +207,7 @@ pub struct MarketLinkageHistoryEntryView {
     pub source_bindings: Vec<ResolvedSourceBinding>,
     pub content_hash: ContentHash,
     pub derived_at: DateTime<Utc>,
-    /// Populated only for `resolver_tier = override` rows (R4 audit columns).
+    /// Populated only for `resolver_tier = override` rows.
     pub override_reason: Option<String>,
     pub override_actor: Option<String>,
     pub created_at: DateTime<Utc>,
@@ -391,8 +397,7 @@ pub struct BasisAlertListQuery {
     pub from: Option<DateTime<Utc>>,
     /// Exclusive upper bound on `as_of`.
     pub to: Option<DateTime<Utc>>,
-    /// When true, return only unacknowledged alerts (the review-queue default
-    /// view; R6 remediation).
+    /// When true, return only unacknowledged alerts (the review-queue default).
     #[serde(default)]
     pub open_only: bool,
     #[normalize_page]
@@ -445,11 +450,11 @@ impl From<BasisAlertInfo> for BasisAlertView {
 
 #[cfg(test)]
 mod tests {
-    use chrono::{DateTime, Duration, TimeZone, Utc};
+    use chrono::{DateTime, Duration, NaiveDate, TimeZone, Utc};
 
     use super::DomainSourceExpectationView;
     use crate::{
-        domain::{
+        domain::data_plane::{
             AffectedMarketIds, AffectedProfileIds, DomainCursorStatus, DomainSourceCheckpoint,
             DomainSourceCursorInfo, DomainSourceExpectationInfo,
         },
@@ -558,7 +563,7 @@ mod tests {
         let mut archive_cursor = cursor(event_time);
         archive_cursor.checkpoint_json = DomainSourceCheckpoint::NhcHurdat2 {
             last_observation: event_time,
-            collection_date: chrono::NaiveDate::from_ymd_opt(2026, 4, 2).expect("date"),
+            collection_date: NaiveDate::from_ymd_opt(2026, 4, 2).expect("date"),
             file_hash: hash('e'),
         };
         archive_cursor.updated_at = observed_at - Duration::seconds(10);

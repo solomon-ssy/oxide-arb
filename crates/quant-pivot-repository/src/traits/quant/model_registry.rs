@@ -1,8 +1,12 @@
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{
-        ModelPickerSide, ModelSpecInfo, ModelSpecListQuery, ModelVersionInfo,
-        ModelVersionListQuery, NewModelSpec, NewModelVersion, Paginated, PublishedModelCatalogInfo,
+        api::{ModelPickerSide, ModelSpecListQuery, ModelVersionListQuery},
+        pagination::Paginated,
+        quant::{
+            ModelSpecInfo, ModelVersionInfo, NewModelSpec, NewModelVersion,
+            PublishedModelCatalogInfo,
+        },
     },
     enums::common::MarketCategory,
     types::{

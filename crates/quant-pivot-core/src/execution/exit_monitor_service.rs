@@ -1,4 +1,4 @@
-//! Exit-monitor service + sweep pass (Phase 05.6).
+//! Exit-monitor service + sweep pass.
 //!
 //! One sweep scans every open position lot, resolves its book mark / freshness /
 //! abnormality, rate-limits the model re-inference, runs the deterministic
@@ -20,7 +20,10 @@ use std::{
 use chrono::{DateTime, Duration, Utc};
 use quant_pivot_error::{QuantResult, execution::ExecutionError};
 use quant_pivot_models::{
-    domain::{OrderIntentInfo, PositionInfo, RecommendationInfo, market::book::BookSnapshot},
+    domain::{
+        market::book::BookSnapshot,
+        quant::{OrderIntentInfo, PositionInfo, RecommendationInfo},
+    },
     enums::execution::ExitState,
     runtime_config::EmergencyExitPolicy,
     types::{ExitReinferenceObservation, OrderIntentId, Price, RecommendationId},
@@ -63,7 +66,7 @@ pub struct ExitMonitorServiceDeps {
     pub metrics: Arc<MetricsHub>,
 }
 
-/// Scans open lots and drives the exit priority ladder (Phase 05.6).
+/// Scans open lots and drives the exit priority ladder.
 pub struct ExitMonitorService {
     deps: ExitMonitorServiceDeps,
 }

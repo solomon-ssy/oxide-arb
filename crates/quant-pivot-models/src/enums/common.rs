@@ -2,14 +2,15 @@
 //!
 //! Postgres column enums use [`pg_enum!`]; wire-only enums use [`wire_enum!`].
 
+use std::{
+    fmt::{Display, Formatter, Result as FmtResult},
+    str::FromStr,
+};
+
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use sea_orm::{ActiveValue, IntoActiveValue};
-use serde::{Deserialize, Serialize};
-use std::{
-    fmt::{self, Display, Formatter},
-    str::FromStr,
-};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
 pg_enum! {
@@ -152,7 +153,7 @@ pub enum AlertSource {
 }
 
 impl Display for AlertLevel {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         let label = match self {
             Self::Info => "INFO",
             Self::Warning => "WARNING",
@@ -364,13 +365,13 @@ impl FromIterator<MarketCategory> for CategorySet {
 }
 
 impl Serialize for CategorySet {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.collect_seq(self.iter())
     }
 }
 
 impl<'de> Deserialize<'de> for CategorySet {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let categories = Vec::<MarketCategory>::deserialize(deserializer)?;
         Ok(categories.into_iter().collect())
     }
@@ -445,9 +446,11 @@ impl TryFrom<Decimal> for TickSize {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use sea_orm::sea_query::{ArrayType, Value};
     use std::str::FromStr;
+
+    use sea_orm::sea_query::{ArrayType, Value};
+
+    use super::*;
 
     #[test]
     fn postgres_enum_array_value_preserves_native_type_identity() {

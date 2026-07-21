@@ -11,7 +11,7 @@ use quant_pivot_models::{
     clickhouse::{
         QuantFeatureEventRow, QuantModelInputEventRow, QuantServingEvidenceCompletionRow,
     },
-    domain::DecisionBoundary,
+    domain::data_plane::DecisionBoundary,
     types::{ContentHash, FeatureVectorId, MarketId, ModelRunId},
 };
 use quant_pivot_research::hashing::ResearchHasher;
@@ -437,26 +437,28 @@ fn determinism(detail: impl Into<String>) -> QuantError {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        SERVING_EVIDENCE_FORMAT_VERSION, completion_marker, feature_commitment, verify_completion,
-    };
-    use crate::observability::model_input_fact_writer::ModelInputEventWriter;
-    use async_trait::async_trait;
-    use chrono::Utc;
-    use quant_pivot_error::storage::StorageError;
-    use quant_pivot_models::{
-        clickhouse::{QuantFeatureEventRow, QuantModelInputEventRow},
-        domain::DecisionClock,
-        enums::clickhouse::{ChFeatureCellState, ChFeatureSourceKind, ChFeatureValueKind},
-        types::{DecisionPolicySnapshotId, FeatureVectorId, MarketId, ModelRunId, ModelVersionId},
-    };
-    use quant_pivot_repository::traits::FactWriter;
     use std::{
         marker::PhantomData,
         slice,
         sync::{Arc, Mutex},
     };
+
+    use async_trait::async_trait;
+    use chrono::Utc;
+    use quant_pivot_error::storage::StorageError;
+    use quant_pivot_models::{
+        clickhouse::{QuantFeatureEventRow, QuantModelInputEventRow},
+        domain::data_plane::DecisionClock,
+        enums::clickhouse::{ChFeatureCellState, ChFeatureSourceKind, ChFeatureValueKind},
+        types::{DecisionPolicySnapshotId, FeatureVectorId, MarketId, ModelRunId, ModelVersionId},
+    };
+    use quant_pivot_repository::traits::FactWriter;
     use uuid::Uuid;
+
+    use super::{
+        SERVING_EVIDENCE_FORMAT_VERSION, completion_marker, feature_commitment, verify_completion,
+    };
+    use crate::observability::model_input_fact_writer::ModelInputEventWriter;
 
     struct OrderedSink<T> {
         label: &'static str,

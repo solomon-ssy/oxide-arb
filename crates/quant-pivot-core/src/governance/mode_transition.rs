@@ -9,11 +9,11 @@
 //! Allowed edges (everything else forbidden):
 //!
 //! ```text
-//! report_only   -> semi_auto         (upgrade, preflight)
-//! semi_auto     -> report_only       (downgrade)
-//! semi_auto     -> auto_execution    (upgrade, preflight)
-//! auto_execution-> semi_auto         (downgrade)
-//! auto_execution-> report_only       (downgrade)
+//! report_only -> semi_auto (upgrade, preflight)
+//! semi_auto -> report_only (downgrade)
+//! semi_auto -> auto_execution (upgrade, preflight)
+//! auto_execution-> semi_auto (downgrade)
+//! auto_execution-> report_only (downgrade)
 //! ```
 //!
 //! `report_only -> auto_execution` is forbidden: an operator must pass through a
@@ -24,7 +24,7 @@ use quant_pivot_models::enums::quant::QuantRuntimeMode;
 
 /// Runtime-mode transition matrix.
 pub trait ModeTransitionGate: Send + Sync {
-    /// Returns `Ok(())` for an allowed edge, `ModeTransitionForbidden` otherwise.
+    /// Returns `Ok` for an allowed edge, `ModeTransitionForbidden` otherwise.
     ///
     /// `from == to` is treated as allowed (the caller short-circuits it as a
     /// no-op before invoking the gate).
@@ -76,8 +76,9 @@ impl ModeTransitionGate for DefaultModeTransitionGate {
 
 #[cfg(test)]
 mod tests {
-    use super::{DefaultModeTransitionGate, ModeTransitionGate};
     use quant_pivot_models::enums::quant::QuantRuntimeMode::{AutoExecution, ReportOnly, SemiAuto};
+
+    use super::{DefaultModeTransitionGate, ModeTransitionGate};
 
     #[test]
     fn matrix_allows_only_spec_edges() {

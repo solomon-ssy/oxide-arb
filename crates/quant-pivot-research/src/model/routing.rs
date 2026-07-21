@@ -1,4 +1,4 @@
-//! Category-aware model routing (Phase 11.2.2 §3.8).
+//! Category-aware model routing.
 //!
 //! Runtime config may pin a category-specific published model via
 //! `model.category_model_pointers`; markets whose category has no pointer use
@@ -63,15 +63,17 @@ pub fn version_id_for_category(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        ModelRouting, generic_model_version_id, resolve_model_route, version_id_for_category,
-    };
+    use std::iter;
+
     use quant_pivot_models::{
         enums::common::MarketCategory,
         runtime_config::{ModelConfig, ModelVersionRef},
         types::ModelVersionId,
     };
-    use std::iter;
+
+    use super::{
+        ModelRouting, generic_model_version_id, resolve_model_route, version_id_for_category,
+    };
 
     fn version_ref(id: ModelVersionId) -> ModelVersionRef {
         ModelVersionRef::new(id)

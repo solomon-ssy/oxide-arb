@@ -1,7 +1,7 @@
 //! Training-data plane: dataset planning, labeling, leakage checks, matrix and
 //! parquet materialization.
 //!
-//! Offline closure (3.5). This module owns the **pure** compute contracts and
+//! Offline closure. This module owns the **pure** compute contracts and
 //! algorithms; the impure orchestration (ClickHouse/Postgres reads, batch
 //! prefetch, persistence) lives in `quant-pivot-core`'s `TrainingDatasetService`.
 //! Every label and feature is point-in-time correct: features are bounded by
@@ -17,6 +17,10 @@ mod matrix;
 mod parquet;
 mod planner;
 
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use chrono::{DateTime, Duration, Utc};
 pub use labeler::{
     HOLD_VS_EXIT_ALPHA_BPS, HoldVsExitProceedsLabeler, LIQUIDITY_EXIT_POSSIBLE,
     LiquidityExitLabeler, MAX_ADVERSE_EXCURSION_BPS, MAX_FAVORABLE_EXCURSION_BPS,
@@ -39,25 +43,20 @@ pub use matrix::{
 #[cfg(feature = "dataframe")]
 pub use parquet::{DatasetParquetCodec, DecodedDatasetParquet};
 pub use planner::{count_samples, plan_lot_timeline_samples, plan_samples};
-pub use quant_pivot_models::types::{DatasetCoverage, MatrixCoverageProbe};
-
-use std::sync::Arc;
-
-use async_trait::async_trait;
-use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantResult, research::ResearchError};
-use quant_pivot_models::{
+pub(crate) use quant_pivot_models::{
     domain::{
-        DecisionBoundary, DecisionSource, ExitTrainingLotRow, LotExitEventRow,
+        data_plane::{DecisionBoundary, DecisionSource},
         market::{book::BookLevel, fee::MarketFeeSchedule},
+        quant::{ExitTrainingLotRow, LotExitEventRow},
     },
     enums::{feature::EvidenceSourceKind, quant::DatasetPurpose},
     types::{
-        ArtifactUri, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION, DatasetManifest,
-        DecisionPolicySnapshotId, MarketId, ModelSpecId, OrderIntentId, PositionId, Price,
-        ResearchProfileRef, SchemaVersion, Shares, SourceSliceManifestRef, TokenId,
-        TradePolicyArtifactId, TradePolicyArtifactPayload, TrainingDatasetId, TrainingExampleId,
-        TrainingSampleSource, Usd, default_sample_sources,
+        ArtifactUri, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION, DatasetCoverage,
+        DatasetManifest, DecisionPolicySnapshotId, MarketId, ModelSpecId, OrderIntentId,
+        PositionId, Price, ResearchProfileRef, SchemaVersion, Shares, SourceSliceManifestRef,
+        TokenId, TradePolicyArtifactId, TradePolicyArtifactPayload, TrainingDatasetId,
+        TrainingExampleId, TrainingSampleSource, Usd, default_sample_sources,
     },
 };
 use rust_decimal::Decimal;
@@ -113,7 +112,7 @@ pub struct DatasetPlanRequest {
     /// Pre-assigned dataset id (build path); minted by the planner when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub training_dataset_id: Option<TrainingDatasetId>,
-    /// Whether samples are for model training or independent calibration (Phase 11.3).
+    /// Whether samples are for model training or independent calibration.
     #[serde(default)]
     pub purpose: DatasetPurpose,
 }
@@ -142,7 +141,7 @@ pub struct SamplePlan {
     pub decision_at: DateTime<Utc>,
 }
 
-/// One hold-vs-exit decision instant along a closed lot's timeline (Phase 06.1).
+/// One hold-vs-exit decision instant along a closed lot's timeline.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LotSamplePlan {
     /// Entry intent owning the lot.
@@ -202,7 +201,7 @@ pub struct DatasetPlan {
     pub model_spec_definition_hash: ContentHash,
     /// Deterministic market-grid sample instants, ordered by `(market_id, as_of)`.
     pub samples: Vec<SamplePlan>,
-    /// Lot-timeline hold-vs-exit samples (Phase 06.1).
+    /// Lot-timeline hold-vs-exit samples.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lot_samples: Vec<LotSamplePlan>,
     /// Closed lots backing [`Self::lot_samples`] (not hashed; planner metadata).
@@ -233,7 +232,7 @@ pub struct TrainingLabel {
     /// Whether the outcome was fully realized (vs. censored / settlement-final).
     pub is_resolved: bool,
     /// The instant this label's forward-looking window closes and its value
-    /// becomes knowable (Phase 11.5 `label_horizon_end`): `as_of + horizon_secs`
+    /// becomes knowable (`label_horizon_end`): `as_of + horizon_secs`
     /// for horizon-dependent labels, the settlement `resolved_at` for
     /// `settlement_outcome`, or the owning lot's `closed_at` for
     /// `hold_vs_exit_alpha_bps`. This is the conservative upper bound
@@ -429,8 +428,7 @@ pub fn policy_simulation_labels(
             detail: "policy simulation horizon does not fit chrono seconds".to_owned(),
         };
     };
-    let Some(horizon_end) =
-        decision_at.checked_add_signed(chrono::Duration::seconds(horizon_seconds_i64))
+    let Some(horizon_end) = decision_at.checked_add_signed(Duration::seconds(horizon_seconds_i64))
     else {
         return PolicySimulationLabels::Invalid {
             detail: "policy simulation horizon overflows its decision time".to_owned(),
@@ -814,7 +812,7 @@ struct DatasetHashInput<'a> {
     /// Included so a `Training` dataset never collides with a `Calibration`
     /// dataset over identical content — `uq_quant_training_dataset_hash` is a
     /// single global unique index across every purpose, and the purge/embargo
-    /// invariant (Phase 11.3 §0) depends on the two ledgers never being
+    /// invariant depends on the two ledgers never being
     /// silently conflated by a shared hash.
     purpose: DatasetPurpose,
     feature_schema_hash: &'a ContentHash,
@@ -987,16 +985,11 @@ impl From<&ExitTrainingLotRow> for LotTerminalSnapshot {
 
 #[cfg(test)]
 pub(crate) mod fixtures {
-    use super::{LabelName, TrainingExample, TrainingLabel};
-    use crate::{
-        features::{
-            CatalogDecisionRef, DecisionCaptureEvidence, DecisionSnapshotEvidence, FeatureVector,
-        },
-        selection::SelectedMarket,
-    };
+    use std::collections::BTreeMap;
+
     use chrono::{DateTime, Duration, TimeZone, Utc};
     use quant_pivot_models::{
-        domain::{DecisionClock, DecisionSource},
+        domain::data_plane::{DecisionClock, DecisionSource},
         enums::{
             catalog::CatalogTimestampQuality,
             common::{MarketCategory, TickSize::Hundredth},
@@ -1012,8 +1005,15 @@ pub(crate) mod fixtures {
     };
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
-    use std::collections::BTreeMap;
     use uuid::Uuid;
+
+    use super::{LabelName, TrainingExample, TrainingLabel};
+    use crate::{
+        features::{
+            CatalogDecisionRef, DecisionCaptureEvidence, DecisionSnapshotEvidence, FeatureVector,
+        },
+        selection::SelectedMarket,
+    };
 
     pub fn selected_market(
         market_id: &MarketId,
@@ -1147,20 +1147,21 @@ pub(crate) mod fixtures {
 
 #[cfg(test)]
 mod tests {
+    use chrono::{TimeZone, Utc};
+    use quant_pivot_models::{
+        domain::data_plane::{DecisionClock, DecisionSource},
+        enums::quant::DatasetPurpose,
+        hashing::CanonicalDigest,
+        types::{ContentHash, ModelSpecId},
+    };
+    use rust_decimal::Decimal;
+
     use super::{
         DatasetHashContract, PolicySimulationLabels, PolicySimulationOutcome,
         TrainingDatasetArtifact, TrainingExample, dataset_source_fingerprint,
         fixtures::{bind_capture_to_boundary, example},
         policy_simulation_labels,
     };
-    use chrono::{TimeZone, Utc};
-    use quant_pivot_models::{
-        domain::{DecisionClock, DecisionSource},
-        enums::quant::DatasetPurpose,
-        hashing::CanonicalDigest,
-        types::{ContentHash, ModelSpecId},
-    };
-    use rust_decimal::Decimal;
 
     fn hashes() -> (ContentHash, ContentHash, ContentHash) {
         (
@@ -1259,7 +1260,7 @@ mod tests {
     fn dataset_hash_differs_by_purpose_for_identical_content() {
         // A `Training` and a `Calibration` dataset with byte-identical
         // examples/schemas must never collide on `uq_quant_training_dataset_hash`
-        // (Phase 11.3 P2 — the two ledgers must never be silently conflated).
+        // The two ledgers must never be silently conflated.
         let spec = ModelSpecId::from_v7();
         let examples = vec![example("aaa", 100)];
         let training = dataset_hash_with_purpose(&spec, &examples, DatasetPurpose::Training);

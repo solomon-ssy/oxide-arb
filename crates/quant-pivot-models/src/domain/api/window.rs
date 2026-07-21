@@ -5,13 +5,14 @@
 //! and over-wide rejection) and returns a domain [`QueryError`] — never a
 //! web error — so the web layer maps it via `From<QueryError> for WebError`.
 
-use crate::{
-    domain::{MarketFilter, TimeWindow},
-    types::MarketId,
-};
 use chrono::{DateTime, Duration, Utc};
 use quant_pivot_error::query::QueryError;
 use serde::Deserialize;
+
+use crate::{
+    domain::query::{MarketFilter, TimeWindow},
+    types::MarketId,
+};
 
 /// Optional time-window + market filter for windowed read endpoints.
 ///

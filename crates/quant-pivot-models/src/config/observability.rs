@@ -55,8 +55,10 @@ pub struct TelegramChannelConfig {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct WebhookChannelConfig {
-    /// HTTPS endpoint. Authentication material must not be embedded in the URL.
-    pub url: String,
+    /// HTTPS endpoint. Webhook paths commonly carry bearer material, so the
+    /// complete endpoint is treated as a deploy secret even when a separate
+    /// authorization header is configured.
+    pub url: SecretText,
     /// Optional complete HTTP Authorization value.
     pub authorization: SecretText,
 }

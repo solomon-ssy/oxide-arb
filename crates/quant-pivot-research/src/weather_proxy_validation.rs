@@ -6,8 +6,8 @@ use chrono::{DateTime, NaiveDate, Utc};
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
     domain::{
-        LinkageOutcome, MarketLinkage, MarketSubject, WeatherObservationFact,
-        WeatherObservationReportKind,
+        data_plane::{WeatherObservationFact, WeatherObservationReportKind},
+        quant::{LinkageOutcome, MarketLinkage, MarketSubject},
     },
     hashing::CanonicalDigest,
     types::{
@@ -268,8 +268,9 @@ fn methodology(detail: String) -> QuantError {
 
 #[cfg(test)]
 mod tests {
-    use super::wilson_lower_bound;
     use rust_decimal::Decimal;
+
+    use super::wilson_lower_bound;
 
     #[test]
     fn wilson_bound_is_fail_closed_for_empty_samples() {

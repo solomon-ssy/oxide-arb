@@ -1,14 +1,14 @@
 //! Future-leakage detection — the hard, money-critical dataset invariant.
 //!
 //! A training feature must never observe state newer than the source cutoff
-//! frozen in its [`DecisionBoundary`](quant_pivot_models::domain::DecisionBoundary).
+//! frozen in its [`DecisionBoundary`](quant_pivot_models::domain::data_plane::DecisionBoundary).
 //! (Labels look strictly forward of `decision_at` by design; their forward reads are
 //! validated by labeler maturity, not here — only feature provenance is checked.)
 //!
 //! Two surfaces over the same scan:
 //!
 //! - [`scan_future_leakage`] returns **structured** [`LeakageFindings`] (every
-//!   violation, with provenance), which the 3.7 quality gate consumes as a hard
+//!   violation, with provenance), which the quality gate consumes as a hard
 //!   gate input without aborting.
 //! - [`assert_no_future_leakage`] is the dataset-build / trainer hard guard: it
 //!   runs the same scan and turns any violation into
@@ -17,7 +17,7 @@
 use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{
-    domain::DecisionSource,
+    domain::data_plane::DecisionSource,
     enums::feature::EvidenceSourceKind,
     types::{MarketId, TokenId},
 };
@@ -102,7 +102,7 @@ pub fn scan_future_leakage(examples: &[TrainingExample]) -> QuantResult<LeakageF
                 });
             }
         }
-        // Label-horizon invariant (Phase 11.5 publish rescan): every label must
+        // Publish-time label-horizon rescan: every label must
         // mature at/after `decision_at`. A matured_at in the past of the decision time
         // means the labeler wrote a non-forward horizon — fail closed.
         for label in &example.labels {
@@ -176,6 +176,16 @@ const fn evidence_decision_source(source: EvidenceSourceKind) -> Option<Decision
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
+    use chrono::{Duration, TimeZone, Utc};
+    use quant_pivot_models::{
+        domain::data_plane::DecisionClock,
+        enums::{common::MarketCategory, quant::DataQualityStatus},
+        types::{MarketId, SchemaVersion, TokenId, TrainingExampleId, TrainingSampleSource},
+    };
+    use rust_decimal::Decimal;
+
     use super::{
         super::{LabelName, TrainingLabel},
         *,
@@ -184,14 +194,6 @@ mod tests {
         features::{EvidenceSourceKind, EvidenceSourceRef, FeatureVector},
         training::fixtures,
     };
-    use chrono::{Duration, TimeZone, Utc};
-    use quant_pivot_models::{
-        domain::DecisionClock,
-        enums::{common::MarketCategory, quant::DataQualityStatus},
-        types::{MarketId, SchemaVersion, TokenId, TrainingExampleId, TrainingSampleSource},
-    };
-    use rust_decimal::Decimal;
-    use std::collections::BTreeMap;
 
     fn example(source_offset_secs: i64) -> TrainingExample {
         let as_of = Utc.timestamp_opt(1_000_000, 0).single().expect("ts");

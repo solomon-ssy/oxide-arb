@@ -1,9 +1,11 @@
 //! `user_role` table entity (user→role assignments).
 
-use crate::types::{RoleId, UserId};
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
+
+use super::{role, user};
+use crate::types::{RoleId, UserId};
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]
@@ -16,9 +18,9 @@ pub struct Model {
     pub created_at: DateTime<Utc>,
 
     #[sea_orm(belongs_to, relation_enum = "User", from = "user_id", to = "id")]
-    pub user: BelongsTo<super::user::Entity>,
+    pub user: BelongsTo<user::Entity>,
     #[sea_orm(belongs_to, relation_enum = "Role", from = "role_id", to = "id")]
-    pub role: BelongsTo<super::role::Entity>,
+    pub role: BelongsTo<role::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

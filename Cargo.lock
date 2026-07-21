@@ -97,31 +97,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "actix-http-test"
-version = "3.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "061d27c2a6fea968fdaca0961ff429d23a4ec878c4f68f5d08626663ade69c80"
-dependencies = [
- "actix-codec",
- "actix-rt",
- "actix-server",
- "actix-service",
- "actix-tls",
- "actix-utils",
- "awc",
- "bytes",
- "futures-core",
- "http 0.2.12",
- "log",
- "serde",
- "serde_json",
- "serde_urlencoded",
- "slab",
- "socket2 0.5.10",
- "tokio",
-]
-
-[[package]]
 name = "actix-macros"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -152,7 +127,6 @@ version = "2.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92589714878ca59a7626ea19734f0e07a6a875197eec751bb5d3f99e64998c63"
 dependencies = [
- "actix-macros",
  "futures-core",
  "tokio",
 ]
@@ -182,48 +156,6 @@ checksum = "9e46f36bf0e5af44bdc4bdb36fbbd421aa98c79a9bce724e1edeb3894e10dc7f"
 dependencies = [
  "futures-core",
  "pin-project-lite",
-]
-
-[[package]]
-name = "actix-test"
-version = "0.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "439022b5a7b5dac10798465029a9566e8e0cca7a6014541ed277b695691fac5f"
-dependencies = [
- "actix-codec",
- "actix-http",
- "actix-http-test",
- "actix-rt",
- "actix-service",
- "actix-utils",
- "actix-web",
- "awc",
- "futures-core",
- "futures-util",
- "log",
- "serde",
- "serde_json",
- "serde_urlencoded",
- "tokio",
-]
-
-[[package]]
-name = "actix-tls"
-version = "3.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6176099de3f58fbddac916a7f8c6db297e021d706e7a6b99947785fee14abe9f"
-dependencies = [
- "actix-rt",
- "actix-service",
- "actix-utils",
- "futures-core",
- "http 0.2.12",
- "http 1.4.0",
- "impl-more",
- "pin-project-lite",
- "tokio",
- "tokio-util",
- "tracing",
 ]
 
 [[package]]
@@ -1747,39 +1679,6 @@ name = "autocfg"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
-
-[[package]]
-name = "awc"
-version = "3.8.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b7dc0207013c5059ddce268fe12045bd12b2e919318ee660c891bfe297a54f1f"
-dependencies = [
- "actix-codec",
- "actix-http",
- "actix-rt",
- "actix-service",
- "actix-tls",
- "actix-utils",
- "base64 0.22.1",
- "bytes",
- "cfg-if",
- "cookie",
- "derive_more 2.1.1",
- "futures-core",
- "futures-util",
- "h2 0.3.27",
- "http 0.2.12",
- "itoa",
- "log",
- "mime",
- "percent-encoding",
- "pin-project-lite",
- "rand 0.9.4",
- "serde",
- "serde_json",
- "serde_urlencoded",
- "tokio",
-]
 
 [[package]]
 name = "aws-config"
@@ -7835,8 +7734,6 @@ dependencies = [
  "reqwest 0.13.3",
  "rust_decimal",
  "rust_decimal_macros",
- "rustls 0.23.40",
- "secrecy",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -7901,14 +7798,12 @@ dependencies = [
  "quant-pivot-repository",
  "quant-pivot-research",
  "quant-pivot-storage",
- "quant-pivot-test-support",
  "quant-pivot-web",
  "rand 0.10.1",
  "rayon",
  "reqwest 0.13.3",
  "rust_decimal",
  "rust_decimal_macros",
- "sea-orm",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -7954,14 +7849,11 @@ dependencies = [
  "blake3",
  "quant-pivot-error",
  "quant-pivot-models",
- "quant-pivot-sql-contract",
  "sea-orm",
  "sea-orm-migration",
  "serde",
  "serde_json",
  "sqlx",
- "testcontainers",
- "testcontainers-modules",
  "tokio",
  "tokio-util",
 ]
@@ -7982,13 +7874,12 @@ dependencies = [
  "flume",
  "hex",
  "insta",
- "libc",
  "linkme",
  "num-traits",
  "paste",
+ "proptest",
  "quant-pivot-error",
  "quant-pivot-macros",
- "quant-pivot-test-support",
  "rand_core 0.6.4",
  "rust_decimal",
  "rust_decimal_macros",
@@ -8021,16 +7912,12 @@ dependencies = [
  "num-traits",
  "quant-pivot-error",
  "quant-pivot-models",
- "quant-pivot-sql-contract",
  "quant-pivot-storage",
- "quant-pivot-test-support",
  "rust_decimal",
- "rust_decimal_macros",
  "sea-orm",
  "sea-query",
  "serde",
  "serde_json",
- "testcontainers",
  "tokio",
  "tracing",
  "uuid",
@@ -8055,6 +7942,7 @@ dependencies = [
  "object_store 0.14.0",
  "parquet",
  "polars",
+ "proptest",
  "quant-pivot-error",
  "quant-pivot-models",
  "rayon",
@@ -8069,14 +7957,6 @@ dependencies = [
  "tokio-util",
  "url",
  "uuid",
-]
-
-[[package]]
-name = "quant-pivot-sql-contract"
-version = "0.1.0"
-dependencies = [
- "clickhouse",
- "sea-orm",
 ]
 
 [[package]]
@@ -8095,11 +7975,42 @@ dependencies = [
  "parking_lot",
  "prometheus",
  "quant-pivot-error",
+ "quant-pivot-models",
+ "redis",
+ "sea-orm",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "url",
+ "uuid",
+]
+
+[[package]]
+name = "quant-pivot-system-tests"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bitcode",
+ "blake3",
+ "casbin",
+ "chrono",
+ "clickhouse",
+ "futures-util",
+ "prometheus",
+ "quant-pivot-api",
+ "quant-pivot-core",
+ "quant-pivot-error",
  "quant-pivot-migration",
  "quant-pivot-models",
- "quant-pivot-sql-contract",
- "quant-pivot-test-support",
+ "quant-pivot-repository",
+ "quant-pivot-research",
+ "quant-pivot-storage",
  "redis",
+ "reqwest 0.13.3",
  "rust_decimal",
  "rust_decimal_macros",
  "sea-orm",
@@ -8110,41 +8021,12 @@ dependencies = [
  "testcontainers",
  "testcontainers-modules",
  "tokio",
+ "tokio-tungstenite 0.29.0",
  "tokio-util",
- "tracing",
+ "toml",
  "url",
  "uuid",
-]
-
-[[package]]
-name = "quant-pivot-test-support"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "chrono",
- "clap",
- "flume",
- "prometheus",
- "quant-pivot-api",
- "quant-pivot-core",
- "quant-pivot-error",
- "quant-pivot-migration",
- "quant-pivot-models",
- "quant-pivot-repository",
- "quant-pivot-research",
- "quant-pivot-storage",
- "rust_decimal",
- "rust_decimal_macros",
- "sea-orm",
- "serde",
- "serde_json",
- "testcontainers",
- "testcontainers-modules",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "uuid",
+ "wiremock",
 ]
 
 [[package]]
@@ -8153,8 +8035,6 @@ version = "0.1.0"
 dependencies = [
  "actix-cors",
  "actix-files",
- "actix-http",
- "actix-test",
  "actix-web",
  "actix-ws",
  "async-trait",
@@ -8165,28 +8045,20 @@ dependencies = [
  "flume",
  "futures-util",
  "jsonwebtoken",
- "quant-pivot-core",
  "quant-pivot-error",
- "quant-pivot-migration",
  "quant-pivot-models",
  "quant-pivot-repository",
- "quant-pivot-research",
  "quant-pivot-storage",
- "quant-pivot-test-support",
  "redis",
  "rust_decimal",
- "rust_decimal_macros",
  "sea-orm",
  "serde",
  "serde_json",
- "testcontainers",
- "testcontainers-modules",
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
  "tracing",
  "tracing-actix-web",
- "tracing-subscriber",
  "uuid",
  "validator",
 ]
@@ -8199,24 +8071,26 @@ dependencies = [
  "async-trait",
  "blake3",
  "chrono",
+ "chrono-tz",
  "clap",
- "quant-pivot-core",
+ "quant-pivot-api",
  "quant-pivot-error",
  "quant-pivot-migration",
  "quant-pivot-models",
  "quant-pivot-repository",
- "quant-pivot-research",
- "quant-pivot-sql-contract",
  "quant-pivot-storage",
+ "quant-pivot-system-tests",
+ "quote",
+ "rust_decimal",
  "rustls 0.23.40",
  "schemars 1.2.1",
- "sea-orm",
  "serde",
  "serde_json",
  "syn 2.0.117",
  "testcontainers",
  "testcontainers-modules",
  "tokio",
+ "tokio-util",
  "toml",
  "url",
  "uuid",

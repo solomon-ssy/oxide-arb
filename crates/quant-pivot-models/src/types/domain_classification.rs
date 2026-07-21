@@ -18,7 +18,7 @@ pub const DOMAIN_CATALOG_CLASSIFICATION_FORMAT_VERSION: u32 = 1;
 /// One market's explicit capability disposition.
 ///
 /// `UnsupportedTemplate` is deliberately not a completion terminal. It is a
-/// typed remediation blocker that replaces the old generic unresolved bucket.
+/// typed blocker that replaces the old generic unresolved bucket.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum DomainMarketClassificationOutcome {
@@ -136,7 +136,7 @@ impl DomainCatalogClassificationArtifact {
         Ok(())
     }
 
-    /// Count remediation blockers which must be zero before local completion.
+    /// Count blockers which must be zero before local completion.
     #[must_use]
     pub fn unsupported_template_count(&self) -> usize {
         self.classifications

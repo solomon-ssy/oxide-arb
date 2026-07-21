@@ -1,7 +1,16 @@
 //! Persistence layer errors — `PostgreSQL`, `ClickHouse`, and cache.
 
-use sea_orm::DbErr;
 use std::{fmt::Display, time::Duration};
+
+#[cfg(feature = "storage")]
+use bitcode::Error as BitcodeError;
+#[cfg(feature = "storage")]
+use clickhouse::error::Error as ClickhouseError;
+#[cfg(feature = "storage")]
+use deadpool_redis::PoolError;
+#[cfg(feature = "storage")]
+use redis::RedisError;
+use sea_orm::DbErr;
 use thiserror::Error;
 
 /// Logical persistence entity names for typed [`StorageError`] variants.
@@ -93,7 +102,7 @@ pub enum StorageError {
 
     #[cfg(feature = "storage")]
     #[error("ClickHouse error: {0}")]
-    ClickHouse(#[from] clickhouse::error::Error),
+    ClickHouse(#[from] ClickhouseError),
 
     #[cfg(not(feature = "storage"))]
     #[error("ClickHouse error: {0}")]
@@ -101,11 +110,11 @@ pub enum StorageError {
 
     #[cfg(feature = "storage")]
     #[error("Redis error: {0}")]
-    Redis(#[from] redis::RedisError),
+    Redis(#[from] RedisError),
 
     #[cfg(feature = "storage")]
     #[error("Redis pool error: {0}")]
-    RedisPool(#[from] deadpool_redis::PoolError),
+    RedisPool(#[from] PoolError),
 
     #[cfg(not(feature = "storage"))]
     #[error("Cache error: {0}")]
@@ -113,7 +122,7 @@ pub enum StorageError {
 
     #[cfg(feature = "storage")]
     #[error("Serialization error: {0}")]
-    Serialization(#[from] bitcode::Error),
+    Serialization(#[from] BitcodeError),
 
     #[error("Codec error: {0}")]
     Codec(String),
@@ -257,12 +266,14 @@ impl StorageError {
 
 #[cfg(test)]
 mod tests {
+    use entity::{QUANT_ORDER_INTENT, USER};
+
     use super::*;
 
     #[test]
-    fn duplicate_display_matches_legacy_format() {
+    fn duplicate_display_names_entity_and_key() {
         let error = StorageError::Duplicate {
-            entity: entity::USER,
+            entity: USER,
             key: "alice".to_owned(),
         };
         assert_eq!(error.to_string(), "user already exists: alice");
@@ -271,7 +282,7 @@ mod tests {
     #[test]
     fn illegal_transition_display_includes_states() {
         let error = StorageError::IllegalTransition {
-            entity: entity::QUANT_ORDER_INTENT,
+            entity: QUANT_ORDER_INTENT,
             id: Some("intent-1".to_owned()),
             from: "submitted".to_owned(),
             to: "draft".to_owned(),

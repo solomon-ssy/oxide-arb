@@ -1,4 +1,4 @@
-//! Backtest plane (Phase 3.6): deterministic point-in-time replay of a model
+//! Backtest plane: deterministic point-in-time replay of a model
 //! version into a [`BacktestReport`].
 //!
 //! The replay is split cleanly across the crate boundary (D7): `quant-pivot-core`
@@ -18,19 +18,17 @@ pub(crate) mod metrics;
 mod runner;
 mod simulator;
 
+use async_trait::async_trait;
 pub use calendarize::{
     CalendarReturn, active_observation_count, calendarize_lot_returns, mean_calendar_return,
 };
+use chrono::{DateTime, Utc};
 pub use comparison::{ModelComparisonReport, compare_reports};
 pub use lot_replay::{
     LotBacktestInputs, LotBacktestRunResult, LotBacktester, LotDecisionSequence, LotOutcome,
     LotReplayBacktester, SellNullBaseline, replay_lot_null_baseline,
 };
 pub use metrics::sharpe_ratio;
-pub use runner::PortfolioReplayBacktester;
-
-use async_trait::async_trait;
-use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
     domain::market::book::BookLevel,
@@ -45,6 +43,7 @@ use quant_pivot_models::{
         backtest::{CategoryMetric, ExpectedVsRealized, PnlSimulation},
     },
 };
+pub use runner::PortfolioReplayBacktester;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
@@ -99,8 +98,8 @@ pub struct BacktestMarketMeta {
     pub liquidity_usd: Option<Usd>,
 }
 
-/// The realized settlement outcome of a market, resolved from the 3.5
-/// `market_resolution_event` truth at/after the label horizon.
+/// The realized settlement outcome of a market, resolved from
+/// `market_resolution_event` truth at or after the label horizon.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MarketOutcome {
     /// Market id.
@@ -110,8 +109,8 @@ pub struct MarketOutcome {
     /// Whether the market had matured (resolved) by the resolution cutoff. An
     /// unmatured market contributes no realized sample (never zero-filled).
     pub matured: bool,
-    /// `max_adverse_excursion_bps` label value, when materialized (Phase 11.3
-    /// calibration downside source — the empirical worst intra-horizon
+    /// `max_adverse_excursion_bps` label value, when materialized: the
+    /// calibration downside source and empirical worst intra-horizon
     /// unfavorable move, distinct from the binary settlement outcome).
     pub max_adverse_excursion_bps: Option<Decimal>,
 }
@@ -221,9 +220,9 @@ pub struct BacktestReport {
     /// Spearman rank IC between composite score and realized return.
     pub rank_ic: Decimal,
     /// Unannualized Sharpe ratio of the per-tick portfolio return series
-    /// (Phase 11.5 §3.4; `0` for fewer than two ticks or a zero-variance
+    /// (`0` for fewer than two ticks or a zero-variance
     /// series). The single-path replay's own Sharpe — the debug-view sibling
-    /// of the CPCV path-set's [`crate::validation::SharpeDistribution`],
+    /// of the CPCV path-set's `SharpeDistribution`,
     /// never itself the alpha-significance gate's data source.
     pub sharpe: Decimal,
     /// Fraction of resolved samples with a positive realized return.
@@ -270,11 +269,11 @@ pub struct SampleOutcome {
     pub expected_return_bps: Decimal,
     /// Realized return (bps).
     pub realized_return_bps: Decimal,
-    /// Whether the YES token won (side-independent ground truth; Phase 11.3
+    /// Whether the YES token won (side-independent ground truth;
     /// `ProbabilityCalibrator` fits on this, not on realized-return sign).
     pub settled_yes: bool,
-    /// `max_adverse_excursion_bps` label value, when materialized (Phase 11.3
-    /// `DownsideSource::MfeMae` input).
+    /// `max_adverse_excursion_bps` label value, when materialized; this is the
+    /// `DownsideSource::MfeMae` input.
     pub max_adverse_excursion_bps: Option<Decimal>,
     /// Capital allocated to this candidate (USD).
     pub allocated_usd: Usd,

@@ -1,13 +1,14 @@
 //! Venue account HTTP contract types (live + persisted snapshots).
 
-use crate::{
-    domain::{AccountSnapshotInfo, EquitySnapshotInfo, LiveAccountSnapshot},
-    enums::{common::MarketCategory, quant::AccountSource},
-    types::{AccountSnapshotId, EquitySnapshotId, ExposureBreakdown, PositionSnapshot, Usd},
-};
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::Serialize;
+
+use crate::{
+    domain::quant::{AccountSnapshotInfo, EquitySnapshotInfo, LiveAccountSnapshot},
+    enums::{common::MarketCategory, quant::AccountSource},
+    types::{AccountSnapshotId, EquitySnapshotId, ExposureBreakdown, PositionSnapshot, Usd},
+};
 
 /// Outbound projection of one venue-held outcome position at decision time.
 #[derive(Debug, Clone, Serialize)]

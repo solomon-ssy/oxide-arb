@@ -4,7 +4,7 @@
 use std::{sync::Arc, time::Duration};
 
 use chrono::Utc;
-use quant_pivot_models::domain::OrderIntentPort;
+use quant_pivot_models::domain::ports::OrderIntentPort;
 use quant_pivot_repository::traits::{
     EntryConditionRepository, FeatureParityRepository, OrderIntentRepository,
     RecommendationReportRepository, RecommendationRepository, TradePolicyRepository,

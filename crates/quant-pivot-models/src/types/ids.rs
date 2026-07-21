@@ -12,12 +12,13 @@
 //!   inserts stay sequential and indexes stay compact; no `prefix_` string
 //!   scheme is used.
 //!
-//! All ids use an `Arc` internally so that `clone()` is a cheap atomic
+//! All ids use an `Arc` internally so that `clone` is a cheap atomic
 //! reference-count increment rather than a heap allocation, which matters on
 //! the hot path where ids flow through channels and live in many structures.
 
-use quant_pivot_macros::{StrId, UuidId};
 use std::sync::Arc;
+
+use quant_pivot_macros::{StrId, UuidId};
 use uuid::Uuid;
 
 use crate::types::ContentHash;
@@ -414,8 +415,8 @@ impl TradePolicyTrialAttemptId {
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct BacktestReportId(Arc<Uuid>);
 
-/// Combinatorial Purged Cross-Validation (CPCV) backtest path-set identifier
-/// (Phase 11.5): one row per `phi`-path-reconstruction run over a frozen
+/// Combinatorial Purged Cross-Validation (CPCV) backtest path-set identifier:
+/// one row per `phi`-path-reconstruction run over a frozen
 /// `(model_spec, training_dataset, runtime_config)` triple.
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct BacktestPathSetId(Arc<Uuid>);
@@ -424,13 +425,13 @@ pub struct BacktestPathSetId(Arc<Uuid>);
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ModelComparisonReportId(Arc<Uuid>);
 
-/// Unified, content-addressed calibration-artifact identifier (Phase 11.3).
+/// Unified, content-addressed calibration-artifact identifier.
 ///
 /// Shared by every empirical calibration artifact in the system:
 /// `kind = ModelScore` (a [`crate::enums::quant::CalibrationKind`]) — a
 /// `ProbabilityCalibrator` mapping model score → `P(win)`, fit on an
 /// independent held-out calibration split — and `kind = MarketPriceBias`
-/// (formerly the standalone Phase 11.2.1 `FavoriteLongshotBiasTableId`,
+/// (formerly the standalone `FavoriteLongshotBiasTableId`,
 /// deleted, no alias) — market-implied price → empirical settlement
 /// frequency, conditioned by `(category, ttr_bucket, price_bucket)` — plus
 /// `kind = WeatherStationLeadBias`, the frozen station × lead correction used
@@ -442,7 +443,7 @@ pub struct CalibrationArtifactId(Arc<Uuid>);
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ShadowComparisonId(Arc<Uuid>);
 
-/// Frozen market → external-subject linkage ledger row identifier (11.2.2).
+/// Frozen market → external-subject linkage ledger row identifier.
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct MarketLinkageId(Arc<Uuid>);
 
@@ -483,7 +484,7 @@ pub struct FactorGovernanceAuditId(Arc<Uuid>);
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ProfileAllocationId(Arc<Uuid>);
 
-/// Basis-cross-check exceedance alert row identifier (11.2.2 remediation R6).
+/// Basis-cross-check exceedance alert row identifier.
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct BasisAlertId(Arc<Uuid>);
 
@@ -697,8 +698,9 @@ pub struct EntryConditionEvaluationOutboxId(Arc<Uuid>);
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::{ptr, thread::sleep, time::Duration};
+
+    use super::*;
 
     #[test]
     fn recommendation_report_id_v7_sortable_by_time() {

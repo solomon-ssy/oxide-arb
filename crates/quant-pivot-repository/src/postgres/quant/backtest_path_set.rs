@@ -1,20 +1,23 @@
-//! Postgres-backed CPCV path-set ledger repository (append-only, Phase 11.5).
+//! Postgres-backed append-only CPCV path-set ledger repository.
 
-use crate::{
-    postgres::query::{list_by_fk_ordered_desc, paginate_mapped},
-    traits::BacktestPathSetRepository,
-};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{
-        BacktestPathSetInfo, BacktestPathSetListQuery, NewBacktestPathSet, PageWindow, Paginated,
+        api::BacktestPathSetListQuery,
+        pagination::{PageWindow, Paginated},
+        quant::{BacktestPathSetInfo, NewBacktestPathSet},
     },
-    entities::quant_backtest_path_set,
+    entities::quant_backtest_path_set::{Column, Entity},
     types::{BacktestPathSetId, ModelVersionId},
 };
 use sea_orm::{
     ColumnTrait, Condition, DatabaseConnection, EntityTrait, IntoActiveModel, QueryFilter,
     QueryOrder,
+};
+
+use crate::{
+    postgres::query::{list_by_fk_ordered_desc, paginate_mapped},
+    traits::BacktestPathSetRepository,
 };
 
 /// Postgres-backed CPCV path-set ledger repository.
@@ -34,7 +37,7 @@ impl BacktestPathSetRepository for PgBacktestPathSetRepository {
         &self,
         path_set: NewBacktestPathSet,
     ) -> Result<BacktestPathSetInfo, StorageError> {
-        quant_backtest_path_set::Entity::insert(path_set.into_active_model())
+        Entity::insert(path_set.into_active_model())
             .exec_with_returning(&self.db)
             .await
             .map_err(StorageError::from)
@@ -45,7 +48,7 @@ impl BacktestPathSetRepository for PgBacktestPathSetRepository {
         &self,
         path_set_id: &BacktestPathSetId,
     ) -> Result<Option<BacktestPathSetInfo>, StorageError> {
-        quant_backtest_path_set::Entity::find_by_id(path_set_id.clone())
+        Entity::find_by_id(path_set_id.clone())
             .one(&self.db)
             .await
             .map_err(StorageError::from)
@@ -56,11 +59,11 @@ impl BacktestPathSetRepository for PgBacktestPathSetRepository {
         &self,
         model_version_id: &ModelVersionId,
     ) -> Result<Vec<BacktestPathSetInfo>, StorageError> {
-        list_by_fk_ordered_desc::<quant_backtest_path_set::Entity, _, _, _>(
+        list_by_fk_ordered_desc::<Entity, _, _, _>(
             &self.db,
-            quant_backtest_path_set::Column::ModelVersionId,
+            Column::ModelVersionId,
             model_version_id.clone(),
-            quant_backtest_path_set::Column::CreatedAt,
+            Column::CreatedAt,
             Into::into,
         )
         .await
@@ -75,22 +78,14 @@ impl BacktestPathSetRepository for PgBacktestPathSetRepository {
                 query
                     .model_version_id
                     .clone()
-                    .map(|id| quant_backtest_path_set::Column::ModelVersionId.eq(id)),
+                    .map(|id| Column::ModelVersionId.eq(id)),
             )
-            .add_option(
-                query
-                    .from
-                    .map(|from| quant_backtest_path_set::Column::CreatedAt.gte(from)),
-            )
-            .add_option(
-                query
-                    .to
-                    .map(|to| quant_backtest_path_set::Column::CreatedAt.lt(to)),
-            );
+            .add_option(query.from.map(|from| Column::CreatedAt.gte(from)))
+            .add_option(query.to.map(|to| Column::CreatedAt.lt(to)));
         paginate_mapped(
-            quant_backtest_path_set::Entity::find()
+            Entity::find()
                 .filter(condition)
-                .order_by_desc(quant_backtest_path_set::Column::CreatedAt),
+                .order_by_desc(Column::CreatedAt),
             &self.db,
             PageWindow::from_query(&query),
             Into::into,

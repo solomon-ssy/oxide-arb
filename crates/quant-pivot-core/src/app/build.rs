@@ -1,4 +1,16 @@
-//! Application composition and bootstrap wiring (Phase 0).
+//! Application composition and bootstrap wiring.
+
+use std::sync::Arc;
+
+use parking_lot::Mutex;
+use quant_pivot_api::{
+    clob::ClobClient,
+    keystore::{Keystore, OrderSigner},
+    wallet::{WalletOwnershipClient, WalletTopology},
+};
+use quant_pivot_error::{QuantError, QuantResult};
+use quant_pivot_models::{config::DeployConfig, domain::runtime::CoreEventPublisher};
+use tokio_util::sync::CancellationToken;
 
 use super::{
     AppContext,
@@ -12,16 +24,6 @@ use crate::{
     execution::IntentLifecyclePublisher, governance::project_lifecycle::verify_project_lifecycle,
     observability::metrics_hub::MetricsHub,
 };
-use parking_lot::Mutex;
-use quant_pivot_api::{
-    clob::ClobClient,
-    keystore::{Keystore, OrderSigner},
-    wallet::{WalletOwnershipClient, WalletTopology},
-};
-use quant_pivot_error::{QuantError, QuantResult};
-use quant_pivot_models::{config::DeployConfig, domain::CoreEventPublisher};
-use std::sync::Arc;
-use tokio_util::sync::CancellationToken;
 
 impl AppContext {
     /// Build all subsystems from deploy config.

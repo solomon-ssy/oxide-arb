@@ -2,7 +2,7 @@
 
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    domain::NewOperationLog, hashing::canonical_state_hash, types::ContentHash,
+    domain::governance::NewOperationLog, hashing::canonical_state_hash, types::ContentHash,
 };
 use serde::Serialize;
 
@@ -27,15 +27,16 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::apply_transition_hashes;
     use quant_pivot_models::{
-        domain::NewOperationLog,
+        domain::governance::NewOperationLog,
         enums::{
             operation_log::{OperationCategory, OperationHttpMethod, OperationOutcome},
             rbac::ResourceType,
         },
         types::{OperationDetailDocument, OperationLogId},
     };
+
+    use super::apply_transition_hashes;
 
     #[test]
     fn apply_transition_hashes_populates_before_and_after() {

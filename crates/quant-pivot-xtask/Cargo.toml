@@ -14,24 +14,26 @@ anyhow = { workspace = true }
 async-trait = { workspace = true }
 blake3 = { workspace = true }
 chrono = { workspace = true }
+chrono-tz = { workspace = true }
 clap = { workspace = true, features = ["derive", "env"] }
+quant-pivot-api = { workspace = true }
 quant-pivot-error = { workspace = true, features = ["storage"] }
 quant-pivot-models = { workspace = true }
-quant-pivot-core = { workspace = true }
 quant-pivot-migration = { path = "../quant-pivot-migration" }
 quant-pivot-repository = { workspace = true }
-quant-pivot-research = { workspace = true }
-quant-pivot-sql-contract = { workspace = true }
 quant-pivot-storage = { workspace = true }
+quant-pivot-system-tests = { workspace = true }
+quote = { workspace = true }
 rustls = { workspace = true }
+rust_decimal = { workspace = true }
 schemars = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-sea-orm = { workspace = true }
 syn = { workspace = true }
 testcontainers = { workspace = true }
 testcontainers-modules = { workspace = true, features = ["postgres"] }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 toml = { workspace = true }
 uuid = { workspace = true }
 zeroize = { workspace = true }

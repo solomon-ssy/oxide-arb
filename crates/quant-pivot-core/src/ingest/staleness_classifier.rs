@@ -5,9 +5,10 @@
 //! snapshot, so a runtime-config activation updates all consumers atomically
 //! through [`StalenessClassifier::reload`].
 
+use std::sync::Arc;
+
 use arc_swap::ArcSwap;
 use quant_pivot_models::{enums::common::StalenessLevel, runtime_config::DataQualityConfig};
-use std::sync::Arc;
 
 /// Maps an age (in milliseconds) to a `StalenessLevel` using config thresholds.
 ///
@@ -64,7 +65,7 @@ impl StalenessClassifier {
         }
     }
 
-    /// Return the acceptable threshold (Fresh + Acceptable pass [`BookGate`]).
+    /// Return the acceptable threshold (Fresh + Acceptable pass the book gate).
     #[inline]
     pub fn acceptable_ms(&self) -> u64 {
         self.thresholds.load().acceptable

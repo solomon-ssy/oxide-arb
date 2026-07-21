@@ -97,6 +97,7 @@ pub struct DomainEventRow {
 #[serde(deny_unknown_fields)]
 pub struct EntryConditionEvaluationEventRow {
     pub evaluation_id: ContentHash,
+    #[serde(with = "super::serde::uuid_id")]
     pub condition_instance_id: EntryConditionInstanceId,
     pub base_revision: i64,
     pub applied_revision: Option<i64>,

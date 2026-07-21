@@ -1,10 +1,10 @@
-//! Admin port for factor-definition register / publish / retire (Phase 05.7).
+//! Admin port for factor-definition register / publish / retire.
 
 use async_trait::async_trait;
 use quant_pivot_error::QuantResult;
 
 use crate::{
-    domain::{FactorDefinitionInfo, GovernanceActor},
+    domain::{ports::GovernanceActor, quant::FactorDefinitionInfo},
     runtime_config::{DomainConfig, FactorsConfig, FeaturesConfig},
     types::FactorDefinitionId,
 };
@@ -14,7 +14,7 @@ use crate::{
 pub struct PublishFactorCommand {
     /// The factor definition to publish.
     pub factor_definition_id: FactorDefinitionId,
-    /// Operator reason (HTTP op-log only in 05.7).
+    /// Operator reason recorded in the HTTP operation log.
     pub reason: String,
 }
 
@@ -23,7 +23,7 @@ pub struct PublishFactorCommand {
 pub struct RetireFactorCommand {
     /// The published factor definition to retire.
     pub factor_definition_id: FactorDefinitionId,
-    /// Operator reason (HTTP op-log only in 05.7).
+    /// Operator reason recorded in the HTTP operation log.
     pub reason: String,
 }
 

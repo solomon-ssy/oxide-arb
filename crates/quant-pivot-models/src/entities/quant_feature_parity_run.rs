@@ -1,5 +1,12 @@
 //! `quant_feature_parity_run` lifecycle entity.
 
+use chrono::{DateTime, Utc};
+use sea_orm::entity::prelude::*;
+
+use super::{
+    quant_feature_parity_subject, quant_model_version, quant_recommendation_report,
+    quant_training_dataset,
+};
 use crate::{
     enums::quant::{FeatureParityRunKind, FeatureParityRunStatus},
     types::{
@@ -7,8 +14,6 @@ use crate::{
         RoleCode, TrainingDatasetId,
     },
 };
-use chrono::{DateTime, Utc};
-use sea_orm::entity::prelude::*;
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -44,28 +49,28 @@ pub struct Model {
     pub updated_at: DateTime<Utc>,
 
     #[sea_orm(has_many, relation_enum = "Subject")]
-    pub subject: HasMany<super::quant_feature_parity_subject::Entity>,
+    pub subject: HasMany<quant_feature_parity_subject::Entity>,
     #[sea_orm(
         belongs_to,
         relation_enum = "Report",
         from = "report_id",
         to = "recommendation_report_id"
     )]
-    pub report: BelongsTo<Option<super::quant_recommendation_report::Entity>>,
+    pub report: BelongsTo<Option<quant_recommendation_report::Entity>>,
     #[sea_orm(
         belongs_to,
         relation_enum = "ModelVersion",
         from = "model_version_id",
         to = "model_version_id"
     )]
-    pub model_version: BelongsTo<Option<super::quant_model_version::Entity>>,
+    pub model_version: BelongsTo<Option<quant_model_version::Entity>>,
     #[sea_orm(
         belongs_to,
         relation_enum = "TrainingDataset",
         from = "training_dataset_id",
         to = "training_dataset_id"
     )]
-    pub training_dataset: BelongsTo<Option<super::quant_training_dataset::Entity>>,
+    pub training_dataset: BelongsTo<Option<quant_training_dataset::Entity>>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

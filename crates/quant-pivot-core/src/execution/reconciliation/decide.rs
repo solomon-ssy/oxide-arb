@@ -1,4 +1,4 @@
-//! Deterministic reconciliation verdict (Phase 05.5).
+//! Deterministic reconciliation verdict.
 //!
 //! Pure function over structured venue facts — same facts, same verdict, no
 //! I/O. The decisive evidence is the CLOB order status (still resting?) and the
@@ -101,9 +101,10 @@ pub fn decide(facts: &ReconcileFacts) -> ReconciliationDecision {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
+
+    use super::*;
 
     fn facts(filled: Decimal, order: Decimal) -> ReconcileFacts {
         ReconcileFacts {

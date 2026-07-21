@@ -1,4 +1,4 @@
-//! Market-linkage governance endpoints (Phase 11.2.2).
+//! Market-linkage governance endpoints.
 //!
 //! | Method | Path | Permission | Purpose |
 //! |--------|------|------------|---------|
@@ -7,13 +7,20 @@
 //! | POST | `/research/market-linkages/resolve` | `materialization:create` | Trigger offline re-resolution |
 //! | POST | `/research/market-linkages/{market_id}/override` | `materialization:create` | Audited operator override |
 
-use actix_web::{http::Method, web};
+use actix_web::{
+    http::Method,
+    web::{Data, Path, Query},
+};
 use chrono::Utc;
 use quant_pivot_models::{
     domain::{
-        DecisionClock, LinkageResolveSummaryView, MarketLinkageDetailView,
-        MarketLinkageHistoryEntryView, MarketLinkageListQuery, MarketLinkageSummaryView,
-        OverrideLinkageRequest, Paginated, ResolveLinkagesRequest,
+        api::{
+            LinkageResolveSummaryView, MarketLinkageDetailView, MarketLinkageHistoryEntryView,
+            MarketLinkageListQuery, MarketLinkageSummaryView, OverrideLinkageRequest,
+            ResolveLinkagesRequest,
+        },
+        data_plane::DecisionClock,
+        pagination::Paginated,
     },
     enums::{
         operation_log::OperationCategory,
@@ -70,8 +77,8 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
 
 /// `GET /api/research/market-linkages` — paginated linkage ledger catalog.
 pub async fn list(
-    state: web::Data<AppState>,
-    query: web::Query<MarketLinkageListQuery>,
+    state: Data<AppState>,
+    query: Query<MarketLinkageListQuery>,
 ) -> Result<WebResponse<Paginated<MarketLinkageSummaryView>>, WebError> {
     let page = state
         .market_linkages
@@ -83,8 +90,8 @@ pub async fn list(
 
 /// `GET /api/research/market-linkages/{market_id}` — latest PIT-valid linkage.
 pub async fn get(
-    state: web::Data<AppState>,
-    market_id: web::Path<MarketId>,
+    state: Data<AppState>,
+    market_id: Path<MarketId>,
 ) -> Result<WebResponse<MarketLinkageDetailView>, WebError> {
     let market_id = market_id.into_inner();
     let boundary = DecisionClock::new(0).boundary(Utc::now())?;
@@ -100,10 +107,10 @@ pub async fn get(
 ///
 /// History for one market, oldest first: every resolve pass and operator
 /// override that ever produced a row, the audit trail the detail drawer
-/// renders (R8 UI/UX closed loop).
+/// renders, preserving the override/resolve audit trail.
 pub async fn history(
-    state: web::Data<AppState>,
-    market_id: web::Path<MarketId>,
+    state: Data<AppState>,
+    market_id: Path<MarketId>,
 ) -> Result<WebResponse<Vec<MarketLinkageHistoryEntryView>>, WebError> {
     let market_id = market_id.into_inner();
     let boundary = DecisionClock::new(0).boundary(Utc::now())?;
@@ -120,7 +127,7 @@ pub async fn history(
 
 /// `POST /api/research/market-linkages/resolve` — trigger offline re-resolution.
 pub async fn resolve(
-    state: web::Data<AppState>,
+    state: Data<AppState>,
     acting_role: ActingRole,
     request_id: RequestId,
     op_ctx: OperationCtx,
@@ -148,8 +155,8 @@ pub async fn resolve(
 
 /// `POST /api/research/market-linkages/{market_id}/override` — audited override.
 pub async fn r#override(
-    state: web::Data<AppState>,
-    market_id: web::Path<MarketId>,
+    state: Data<AppState>,
+    market_id: Path<MarketId>,
     actor: AuthedActor,
     acting_role: ActingRole,
     request_id: RequestId,

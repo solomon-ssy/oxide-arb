@@ -1,13 +1,9 @@
 //! Postgres-backed capital-allocation repository.
 
-use crate::{
-    postgres::error,
-    traits::{CapitalAllocationRepository, ReservedCapitalRepository},
-};
-use quant_pivot_error::storage::{StorageError, entity};
+use quant_pivot_error::storage::{StorageError, entity::QUANT_CAPITAL_ALLOCATION};
 use quant_pivot_models::{
-    domain::{CapitalAllocationInfo, CapitalReconcileSettlement, CapitalSettlement},
-    entities::quant_capital_allocation,
+    domain::quant::{CapitalAllocationInfo, CapitalReconcileSettlement, CapitalSettlement},
+    entities::quant_capital_allocation::{Column, Entity, Model},
     enums::execution::CapitalAllocationState,
     types::{OrderIntentId, Usd},
 };
@@ -16,6 +12,11 @@ use sea_orm::{
     ActiveModelTrait, ActiveValue, ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait,
     ExprTrait, FromQueryResult, IntoActiveModel, PaginatorTrait, QueryFilter, QuerySelect,
     sea_query::{Expr, Func},
+};
+
+use crate::{
+    postgres::error,
+    traits::{CapitalAllocationRepository, ReservedCapitalRepository},
 };
 
 /// Allocation rows included in the reserved-capital aggregate.
@@ -49,8 +50,8 @@ impl CapitalAllocationRepository for PgCapitalAllocationRepository {
         &self,
         order_intent_id: &OrderIntentId,
     ) -> Result<Option<CapitalAllocationInfo>, StorageError> {
-        quant_capital_allocation::Entity::find()
-            .filter(quant_capital_allocation::Column::OrderIntentId.eq(order_intent_id.clone()))
+        Entity::find()
+            .filter(Column::OrderIntentId.eq(order_intent_id.clone()))
             .one(&self.db)
             .await
             .map_err(StorageError::from)
@@ -62,8 +63,8 @@ impl CapitalAllocationRepository for PgCapitalAllocationRepository {
     }
 
     async fn has_impaired(&self) -> Result<bool, StorageError> {
-        quant_capital_allocation::Entity::find()
-            .filter(quant_capital_allocation::Column::State.eq(CapitalAllocationState::Impaired))
+        Entity::find()
+            .filter(Column::State.eq(CapitalAllocationState::Impaired))
             .count(&self.db)
             .await
             .map_err(StorageError::from)
@@ -92,15 +93,15 @@ impl ReservedCapitalRepository for PgCapitalAllocationRepository {
 /// - **`Spent` / `Released`**: excluded.
 pub async fn sum_reserved_usd(db: &DatabaseConnection) -> Result<Usd, StorageError> {
     let gross_reserved = Func::greatest([
-        Expr::col(quant_capital_allocation::Column::AllocatedUsd),
-        Expr::col(quant_capital_allocation::Column::LockedUsd),
+        Expr::col(Column::AllocatedUsd),
+        Expr::col(Column::LockedUsd),
     ]);
     let net_reserved = gross_reserved
-        .sub(Expr::col(quant_capital_allocation::Column::SpentUsd))
-        .sub(Expr::col(quant_capital_allocation::Column::ReleasedUsd));
+        .sub(Expr::col(Column::SpentUsd))
+        .sub(Expr::col(Column::ReleasedUsd));
     let non_negative = Func::greatest([net_reserved, Expr::value(Decimal::ZERO)]).sum();
-    let row = quant_capital_allocation::Entity::find()
-        .filter(quant_capital_allocation::Column::State.is_in(RESERVED_STATES))
+    let row = Entity::find()
+        .filter(Column::State.is_in(RESERVED_STATES))
         .select_only()
         .column_as(non_negative, "total")
         .into_model::<LockedCapitalSum>()
@@ -126,7 +127,7 @@ pub fn validate_non_negative(
         || released_usd.is_negative()
     {
         return Err(error::invariant_violation(
-            Some(entity::QUANT_CAPITAL_ALLOCATION),
+            Some(QUANT_CAPITAL_ALLOCATION),
             "capital allocation amounts must be non-negative",
         ));
     }
@@ -159,14 +160,14 @@ pub fn capital_invariant_ok(
 pub async fn load_capital(
     db: &impl ConnectionTrait,
     intent_id: &OrderIntentId,
-) -> Result<quant_capital_allocation::Model, StorageError> {
-    quant_capital_allocation::Entity::find()
-        .filter(quant_capital_allocation::Column::OrderIntentId.eq(intent_id.clone()))
+) -> Result<Model, StorageError> {
+    Entity::find()
+        .filter(Column::OrderIntentId.eq(intent_id.clone()))
         .lock_exclusive()
         .one(db)
         .await
         .map_err(StorageError::from)?
-        .ok_or_else(|| error::not_found(entity::QUANT_CAPITAL_ALLOCATION, intent_id))
+        .ok_or_else(|| error::not_found(QUANT_CAPITAL_ALLOCATION, intent_id))
 }
 
 /// Release an intent's still-reserved capital in full (`Allocated`/`Locked` →
@@ -219,7 +220,7 @@ pub async fn lock_capital(
     let cap = load_capital(db, intent_id).await?;
     if cap.state != CapitalAllocationState::Allocated {
         return Err(error::state_conflict(
-            entity::QUANT_CAPITAL_ALLOCATION,
+            QUANT_CAPITAL_ALLOCATION,
             Some(intent_id),
             format!(
                 "capital must be allocated to lock, got {}",
@@ -322,7 +323,7 @@ pub async fn settle_capital(
 }
 
 /// Complete a fully-exited lot's capital lifecycle (`Spent -> Released`,
-/// Phase 05.6).
+///).
 ///
 /// Called only when the position lot is fully exited. The persisted amounts are
 /// left intact (`spent_usd` stays the realized entry cost; `released_usd` keeps
@@ -347,7 +348,7 @@ pub async fn complete_exit_capital(
             Ok(())
         }
         other => Err(error::state_conflict(
-            entity::QUANT_CAPITAL_ALLOCATION,
+            QUANT_CAPITAL_ALLOCATION,
             Some(intent_id),
             format!("cannot complete exit capital from {}", other.as_str()),
         )),
@@ -355,7 +356,7 @@ pub async fn complete_exit_capital(
 }
 
 /// Apply a reconciliation verdict to an intent's capital allocation
-/// ([`CapitalReconcileSettlement`], Phase 05.5).
+/// ([`CapitalReconcileSettlement`]).
 ///
 /// State-guarded and **idempotent**: only a row still `Locked` (or `Impaired`,
 /// for an operator override of an unresolvable) is moved; a row already

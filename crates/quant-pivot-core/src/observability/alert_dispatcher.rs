@@ -1,23 +1,25 @@
 //! Operator alert dispatch (Telegram + webhook) with per-title cooldown.
 
+use std::{
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
+
 use arc_swap::{ArcSwap, ArcSwapOption};
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use quant_pivot_error::{QuantResult, config::ConfigError};
 use quant_pivot_models::{
     config::{NotificationChannelsConfig, secret::SecretText},
-    domain::{CoreEvent, CoreEventPublisher, SystemAlertEvent},
+    domain::runtime::{CoreEvent, CoreEventPublisher, SystemAlertEvent},
     enums::common::{AlertCategory, AlertLevel, AlertSource},
 };
 use reqwest::{
-    Url,
+    Client, Url,
     header::{AUTHORIZATION, HeaderValue},
 };
-use std::{
-    sync::{Arc, Mutex},
-    time::{Duration, Instant},
-};
 use teloxide::{prelude::*, types::ChatId};
+use tokio::runtime::Handle;
 
 #[derive(Clone)]
 pub struct Alert {
@@ -98,7 +100,7 @@ struct TelegramChannel {
 }
 
 struct WebhookChannel {
-    client: reqwest::Client,
+    client: Client,
     url: Url,
     authorization: Option<HeaderValue>,
 }
@@ -129,7 +131,7 @@ impl Channels {
             })
             .transpose()?;
 
-        let url = config.webhook.url.trim();
+        let url = config.webhook.url.expose_secret().trim();
         let authorization =
             (!config.webhook.authorization.is_empty()).then_some(&config.webhook.authorization);
         if url.is_empty() && authorization.is_some() {
@@ -154,7 +156,7 @@ impl Channels {
                 .into());
             }
             Some(WebhookChannel {
-                client: reqwest::Client::new(),
+                client: Client::new(),
                 url: parsed,
                 authorization: authorization.map(secret_header).transpose()?,
             })
@@ -303,7 +305,7 @@ impl AlertDispatcher {
 
     pub fn dispatch_background(self: &Arc<Self>, alert: Alert) {
         let dispatcher = Arc::clone(self);
-        match tokio::runtime::Handle::try_current() {
+        match Handle::try_current() {
             Ok(handle) => {
                 handle.spawn(async move {
                     dispatcher.dispatch(alert).await;
@@ -351,13 +353,15 @@ async fn send_webhook(channels: &Channels, alert: &Alert) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Alert, AlertDispatcher};
-    use chrono::Utc;
-    use quant_pivot_models::enums::common::{AlertCategory, AlertLevel, AlertSource};
     use std::{
         sync::{Arc, Mutex},
         time::Duration,
     };
+
+    use chrono::Utc;
+    use quant_pivot_models::enums::common::{AlertCategory, AlertLevel, AlertSource};
+
+    use super::{Alert, AlertDispatcher};
 
     fn alert(title: &str) -> Alert {
         Alert::new(

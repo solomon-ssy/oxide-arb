@@ -18,8 +18,11 @@ use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
     config::{WeatherStationProfileConfig, WeatherVerticalBindingsConfig},
     domain::{
-        DomainSourceExpectationDefinition, DomainSourceExpectationTransition, LinkageOutcome,
-        MarketLinkage, MarketLinkageInfo, MarketSubject, UpsertDomainSourceExpectation,
+        data_plane::{
+            DomainSourceExpectationDefinition, DomainSourceExpectationTransition,
+            UpsertDomainSourceExpectation,
+        },
+        quant::{LinkageOutcome, MarketLinkage, MarketLinkageInfo, MarketSubject},
     },
     enums::domain::{DomainFamily, DomainSourceExpectationStatus},
     types::{

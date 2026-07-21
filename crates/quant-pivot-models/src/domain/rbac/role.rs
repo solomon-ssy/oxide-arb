@@ -1,13 +1,14 @@
 //! Role DTOs (read model, insert, partial update).
 
+use chrono::{DateTime, Utc};
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
+use serde::{Deserialize, Serialize};
+
 use crate::{
     domain::patch::{NullablePatch, Patch},
     enums::rbac::{RoleKind, RoleStatus},
     types::{RoleCode, RoleId},
 };
-use chrono::{DateTime, Utc};
-use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
-use serde::{Deserialize, Serialize};
 
 /// DB row projection for the `role` table.
 #[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]

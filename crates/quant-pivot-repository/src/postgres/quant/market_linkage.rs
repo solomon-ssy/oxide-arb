@@ -1,13 +1,21 @@
 //! Postgres-backed market-linkage ledger repository (append-only, bitemporal).
 
-use crate::{postgres::query::paginate_mapped, traits::MarketLinkageRepository};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{
-        DecisionBoundary, DecisionSource, LinkageOutcome, MarketLinkageInfo,
-        MarketLinkageListQuery, NewMarketLinkage, PageWindow, Paginated,
+        api::MarketLinkageListQuery,
+        data_plane::{DecisionBoundary, DecisionSource},
+        pagination::{PageWindow, Paginated},
+        quant::{LinkageOutcome, MarketLinkageInfo, NewMarketLinkage},
     },
-    entities::{market, quant_market_linkage, quant_market_linkage_source},
+    entities::{
+        market::{Column as MarketColumn, Entity as MarketEntity},
+        quant_market_linkage::{Column, Entity, Model},
+        quant_market_linkage_source::{
+            ActiveModel, Column as QuantMarketLinkageSourceColumn,
+            Entity as QuantMarketLinkageSourceEntity,
+        },
+    },
     enums::market::MarketStatus,
     types::{MarketId, MarketLinkageId},
 };
@@ -17,9 +25,11 @@ use sea_orm::{
     sea_query::{Alias, Expr, Query},
 };
 
+use crate::{postgres::query::paginate_mapped, traits::MarketLinkageRepository};
+
 /// Reduce rows already ordered `(market_id ASC, derived_at DESC, created_at
 /// DESC, linkage_id DESC)` to the first (highest-ranked) row per market.
-fn reduce_to_first_per_market(rows: Vec<quant_market_linkage::Model>) -> Vec<MarketLinkageInfo> {
+fn reduce_to_first_per_market(rows: Vec<Model>) -> Vec<MarketLinkageInfo> {
     let mut kept: Vec<MarketLinkageInfo> = Vec::new();
     for row in rows {
         if kept
@@ -32,49 +42,28 @@ fn reduce_to_first_per_market(rows: Vec<quant_market_linkage::Model>) -> Vec<Mar
     kept
 }
 
-fn latest_linkage_condition() -> sea_orm::sea_query::Expr {
+fn latest_linkage_condition() -> Expr {
     let newer = Alias::new("newer");
     let newer_col = |column| Expr::col((newer.clone(), column));
-    let current_col = |column| Expr::col((quant_market_linkage::Entity, column));
+    let current_col = |column| Expr::col((Entity, column));
     let newer_rank = Condition::any()
+        .add(newer_col(Column::DerivedAt).gt(current_col(Column::DerivedAt)))
         .add(
-            newer_col(quant_market_linkage::Column::DerivedAt)
-                .gt(current_col(quant_market_linkage::Column::DerivedAt)),
+            Condition::all()
+                .add(newer_col(Column::DerivedAt).eq(current_col(Column::DerivedAt)))
+                .add(newer_col(Column::CreatedAt).gt(current_col(Column::CreatedAt))),
         )
         .add(
             Condition::all()
-                .add(
-                    newer_col(quant_market_linkage::Column::DerivedAt)
-                        .eq(current_col(quant_market_linkage::Column::DerivedAt)),
-                )
-                .add(
-                    newer_col(quant_market_linkage::Column::CreatedAt)
-                        .gt(current_col(quant_market_linkage::Column::CreatedAt)),
-                ),
-        )
-        .add(
-            Condition::all()
-                .add(
-                    newer_col(quant_market_linkage::Column::DerivedAt)
-                        .eq(current_col(quant_market_linkage::Column::DerivedAt)),
-                )
-                .add(
-                    newer_col(quant_market_linkage::Column::CreatedAt)
-                        .eq(current_col(quant_market_linkage::Column::CreatedAt)),
-                )
-                .add(
-                    newer_col(quant_market_linkage::Column::LinkageId)
-                        .gt(current_col(quant_market_linkage::Column::LinkageId)),
-                ),
+                .add(newer_col(Column::DerivedAt).eq(current_col(Column::DerivedAt)))
+                .add(newer_col(Column::CreatedAt).eq(current_col(Column::CreatedAt)))
+                .add(newer_col(Column::LinkageId).gt(current_col(Column::LinkageId))),
         );
     let mut query = Query::select();
     query
         .expr(Expr::value(1_i32))
-        .from_as(quant_market_linkage::Entity, newer.clone())
-        .and_where(
-            newer_col(quant_market_linkage::Column::MarketId)
-                .eq(current_col(quant_market_linkage::Column::MarketId)),
-        )
+        .from_as(Entity, newer.clone())
+        .and_where(newer_col(Column::MarketId).eq(current_col(Column::MarketId)))
         .cond_where(newer_rank);
     Expr::exists(query.take()).not()
 }
@@ -102,13 +91,13 @@ async fn append_in_transaction(
     };
     // Idempotent append: a duplicate content hash is a resolver no-op, not
     // an error — the ledger row for that outcome already exists.
-    quant_market_linkage::Entity::insert(linkage.into_active_model())
-        .on_conflict_do_nothing_on([quant_market_linkage::Column::ContentHash])
+    Entity::insert(linkage.into_active_model())
+        .on_conflict_do_nothing_on([Column::ContentHash])
         .exec(txn)
         .await
         .map_err(StorageError::from)?;
-    let row = quant_market_linkage::Entity::find()
-        .filter(quant_market_linkage::Column::ContentHash.eq(content_hash.clone()))
+    let row = Entity::find()
+        .filter(Column::ContentHash.eq(content_hash.clone()))
         .one(txn)
         .await
         .map_err(StorageError::from)?
@@ -117,7 +106,7 @@ async fn append_in_transaction(
             id: content_hash.to_string(),
         })?;
     for binding in source_bindings {
-        quant_market_linkage_source::Entity::insert(quant_market_linkage_source::ActiveModel {
+        QuantMarketLinkageSourceEntity::insert(ActiveModel {
             linkage_id: ActiveValue::Set(row.linkage_id.clone()),
             role: ActiveValue::Set(binding.role),
             source_id: ActiveValue::Set(binding.source_id),
@@ -127,10 +116,10 @@ async fn append_in_transaction(
             created_at: ActiveValue::NotSet,
         })
         .on_conflict_do_nothing_on([
-            quant_market_linkage_source::Column::LinkageId,
-            quant_market_linkage_source::Column::Role,
-            quant_market_linkage_source::Column::SourceId,
-            quant_market_linkage_source::Column::InstrumentKey,
+            QuantMarketLinkageSourceColumn::LinkageId,
+            QuantMarketLinkageSourceColumn::Role,
+            QuantMarketLinkageSourceColumn::SourceId,
+            QuantMarketLinkageSourceColumn::InstrumentKey,
         ])
         .exec(txn)
         .await
@@ -166,16 +155,13 @@ impl MarketLinkageRepository for PgMarketLinkageRepository {
         market_id: &MarketId,
         boundary: &DecisionBoundary,
     ) -> Result<Option<MarketLinkageInfo>, StorageError> {
-        quant_market_linkage::Entity::find()
-            .filter(quant_market_linkage::Column::MarketId.eq(market_id.clone()))
-            .filter(
-                quant_market_linkage::Column::DerivedAt
-                    .lte(boundary.cutoff_for(DecisionSource::Linkage)),
-            )
-            .filter(quant_market_linkage::Column::CreatedAt.lte(boundary.decision_at()))
-            .order_by_desc(quant_market_linkage::Column::DerivedAt)
-            .order_by_desc(quant_market_linkage::Column::CreatedAt)
-            .order_by_desc(quant_market_linkage::Column::LinkageId)
+        Entity::find()
+            .filter(Column::MarketId.eq(market_id.clone()))
+            .filter(Column::DerivedAt.lte(boundary.cutoff_for(DecisionSource::Linkage)))
+            .filter(Column::CreatedAt.lte(boundary.decision_at()))
+            .order_by_desc(Column::DerivedAt)
+            .order_by_desc(Column::CreatedAt)
+            .order_by_desc(Column::LinkageId)
             .one(&self.db)
             .await
             .map_err(StorageError::from)
@@ -193,17 +179,14 @@ impl MarketLinkageRepository for PgMarketLinkageRepository {
         // Apply the same effective <= source_cutoff and available <= decision_at
         // constraints as `valid_at`; this is its batch form, not a filtered
         // `latest_for_markets` read.
-        let rows = quant_market_linkage::Entity::find()
-            .filter(quant_market_linkage::Column::MarketId.is_in(market_ids.to_vec()))
-            .filter(
-                quant_market_linkage::Column::DerivedAt
-                    .lte(boundary.cutoff_for(DecisionSource::Linkage)),
-            )
-            .filter(quant_market_linkage::Column::CreatedAt.lte(boundary.decision_at()))
-            .order_by_asc(quant_market_linkage::Column::MarketId)
-            .order_by_desc(quant_market_linkage::Column::DerivedAt)
-            .order_by_desc(quant_market_linkage::Column::CreatedAt)
-            .order_by_desc(quant_market_linkage::Column::LinkageId)
+        let rows = Entity::find()
+            .filter(Column::MarketId.is_in(market_ids.to_vec()))
+            .filter(Column::DerivedAt.lte(boundary.cutoff_for(DecisionSource::Linkage)))
+            .filter(Column::CreatedAt.lte(boundary.decision_at()))
+            .order_by_asc(Column::MarketId)
+            .order_by_desc(Column::DerivedAt)
+            .order_by_desc(Column::CreatedAt)
+            .order_by_desc(Column::LinkageId)
             .all(&self.db)
             .await
             .map_err(StorageError::from)?;
@@ -220,12 +203,12 @@ impl MarketLinkageRepository for PgMarketLinkageRepository {
         // DISTINCT ON is not portable through sea_query; the window is small
         // (bounded by the caller's market set), so reduce in memory over the
         // same stable ordering `valid_at` uses.
-        let rows = quant_market_linkage::Entity::find()
-            .filter(quant_market_linkage::Column::MarketId.is_in(market_ids.to_vec()))
-            .order_by_asc(quant_market_linkage::Column::MarketId)
-            .order_by_desc(quant_market_linkage::Column::DerivedAt)
-            .order_by_desc(quant_market_linkage::Column::CreatedAt)
-            .order_by_desc(quant_market_linkage::Column::LinkageId)
+        let rows = Entity::find()
+            .filter(Column::MarketId.is_in(market_ids.to_vec()))
+            .order_by_asc(Column::MarketId)
+            .order_by_desc(Column::DerivedAt)
+            .order_by_desc(Column::CreatedAt)
+            .order_by_desc(Column::LinkageId)
             .all(&self.db)
             .await
             .map_err(StorageError::from)?;
@@ -233,10 +216,10 @@ impl MarketLinkageRepository for PgMarketLinkageRepository {
     }
 
     async fn latest_for_active_markets(&self) -> Result<Vec<MarketLinkageInfo>, StorageError> {
-        let market_ids = market::Entity::find()
+        let market_ids = MarketEntity::find()
             .select_only()
-            .column(market::Column::MarketId)
-            .filter(market::Column::Status.eq(MarketStatus::Active))
+            .column(MarketColumn::MarketId)
+            .filter(MarketColumn::Status.eq(MarketStatus::Active))
             .into_tuple::<MarketId>()
             .all(&self.db)
             .await
@@ -252,17 +235,14 @@ impl MarketLinkageRepository for PgMarketLinkageRepository {
         if market_ids.is_empty() {
             return Ok(Vec::new());
         }
-        quant_market_linkage::Entity::find()
-            .filter(quant_market_linkage::Column::MarketId.is_in(market_ids.to_vec()))
-            .filter(
-                quant_market_linkage::Column::DerivedAt
-                    .lte(end_boundary.cutoff_for(DecisionSource::Linkage)),
-            )
-            .filter(quant_market_linkage::Column::CreatedAt.lte(end_boundary.decision_at()))
-            .order_by_asc(quant_market_linkage::Column::MarketId)
-            .order_by_asc(quant_market_linkage::Column::DerivedAt)
-            .order_by_asc(quant_market_linkage::Column::CreatedAt)
-            .order_by_asc(quant_market_linkage::Column::LinkageId)
+        Entity::find()
+            .filter(Column::MarketId.is_in(market_ids.to_vec()))
+            .filter(Column::DerivedAt.lte(end_boundary.cutoff_for(DecisionSource::Linkage)))
+            .filter(Column::CreatedAt.lte(end_boundary.decision_at()))
+            .order_by_asc(Column::MarketId)
+            .order_by_asc(Column::DerivedAt)
+            .order_by_asc(Column::CreatedAt)
+            .order_by_asc(Column::LinkageId)
             .all(&self.db)
             .await
             .map_err(StorageError::from)
@@ -273,7 +253,7 @@ impl MarketLinkageRepository for PgMarketLinkageRepository {
         &self,
         linkage_id: &MarketLinkageId,
     ) -> Result<Option<MarketLinkageInfo>, StorageError> {
-        quant_market_linkage::Entity::find_by_id(linkage_id.clone())
+        Entity::find_by_id(linkage_id.clone())
             .one(&self.db)
             .await
             .map_err(StorageError::from)
@@ -285,40 +265,24 @@ impl MarketLinkageRepository for PgMarketLinkageRepository {
         query: MarketLinkageListQuery,
     ) -> Result<Paginated<MarketLinkageInfo>, StorageError> {
         let mut condition = Condition::all()
-            .add_option(
-                query
-                    .status
-                    .map(|status| quant_market_linkage::Column::Status.eq(status)),
-            )
-            .add_option(
-                query
-                    .family
-                    .map(|family| quant_market_linkage::Column::DomainFamily.eq(family)),
-            )
+            .add_option(query.status.map(|status| Column::Status.eq(status)))
+            .add_option(query.family.map(|family| Column::DomainFamily.eq(family)))
             .add_option(
                 query
                     .market_id
                     .clone()
-                    .map(|market_id| quant_market_linkage::Column::MarketId.eq(market_id)),
+                    .map(|market_id| Column::MarketId.eq(market_id)),
             )
-            .add_option(
-                query
-                    .from
-                    .map(|from| quant_market_linkage::Column::DerivedAt.gte(from)),
-            )
-            .add_option(
-                query
-                    .to
-                    .map(|to| quant_market_linkage::Column::DerivedAt.lt(to)),
-            );
+            .add_option(query.from.map(|from| Column::DerivedAt.gte(from)))
+            .add_option(query.to.map(|to| Column::DerivedAt.lt(to)));
         if query.latest_only {
             condition = condition.add(latest_linkage_condition());
         }
-        let select = quant_market_linkage::Entity::find()
+        let select = Entity::find()
             .filter(condition)
-            .order_by_desc(quant_market_linkage::Column::DerivedAt)
-            .order_by_desc(quant_market_linkage::Column::CreatedAt)
-            .order_by_desc(quant_market_linkage::Column::LinkageId);
+            .order_by_desc(Column::DerivedAt)
+            .order_by_desc(Column::CreatedAt)
+            .order_by_desc(Column::LinkageId);
         paginate_mapped(select, &self.db, PageWindow::from_query(&query), Into::into).await
     }
 }

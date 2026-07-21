@@ -20,9 +20,12 @@ use quant_pivot_models::{
     config::RelayerConfig,
     constants::COLLATERAL_SCALE,
     domain::{
-        ConfirmSettlementRedeem, CoreEvent, CoreEventPublisher, MarketInfo, NewSettlementRedeem,
-        NewSettlementRedeemLot, OrderIntentInfo, PositionExit, PositionInfo, SettlementRedeemInfo,
-        SettlementRedeemLifecycleEvent, SettlementRedeemLotWrite,
+        market::MarketInfo,
+        quant::{
+            ConfirmSettlementRedeem, NewSettlementRedeem, NewSettlementRedeemLot, OrderIntentInfo,
+            PositionExit, PositionInfo, SettlementRedeemInfo, SettlementRedeemLotWrite,
+        },
+        runtime::{CoreEvent, CoreEventPublisher, SettlementRedeemLifecycleEvent},
     },
     enums::{
         clickhouse::ChQuantLedgerEventKind,
@@ -1253,9 +1256,9 @@ fn decimal_from_str(field: &'static str, value: &str) -> QuantResult<Decimal> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use chrono::Duration;
     use quant_pivot_models::{
-        domain::OrderIntentInfo,
+        domain::quant::OrderIntentInfo,
         enums::{
             common::{MarketCategory, OrderType, Side, TickSize},
             execution::{ExitState, OrderIntentKind},
@@ -1272,8 +1275,10 @@ mod tests {
             ThesisInvalidationPolicy,
         },
     };
-    use quant_pivot_test_support::execution_pg_seed::fixture_profile_ref;
     use rust_decimal_macros::dec;
+
+    use super::*;
+    use crate::test_fixtures::execution_pg_seed::fixture_profile_ref;
 
     fn test_content_hash(seed: u8) -> ContentHash {
         let hex: String = format!("{seed:02x}").chars().cycle().take(64).collect();
@@ -1422,7 +1427,7 @@ mod tests {
                 limit_price: Price::new(dec!(0.5)),
                 amount: OrderAmount::Shares(Shares::new(dec!(1))),
                 max_slippage_bps: Bps::new(dec!(50)),
-                valid_until: now + chrono::Duration::hours(1),
+                valid_until: now + Duration::hours(1),
             },
             exit_policy_json: ExitPolicySpec {
                 take_profit_price: None,
@@ -1452,7 +1457,7 @@ mod tests {
                 entry_composite_score: Probability::new(dec!(0.7)),
             },
             risk_envelope_hash: test_content_hash(b'e'),
-            expires_at: now + chrono::Duration::hours(1),
+            expires_at: now + Duration::hours(1),
             exit_state: ExitState::Monitoring,
             exit_reason: None,
             next_check_at: None,

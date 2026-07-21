@@ -11,8 +11,8 @@
 //! ([`ResearchHasher::factor_schema`], [`ResearchHasher::model_feature_requirements`],
 //! [`ResearchHasher::feature_names`]) over raw [`ResearchHasher::ordered`] at
 //! call sites. Map-keyed compute types (e.g. [`crate::features::FeatureVector::generic`]
-//! / [`crate::features::DomainFeatureSlice::values`], both `BTreeMap`s) are already
-//! canonical by construction.
+//! / [`quant_pivot_models::types::DomainFeatureSlice::values`], both `BTreeMap`s)
+//! are already canonical by construction.
 
 use std::collections::BTreeMap;
 
@@ -190,7 +190,7 @@ impl ResearchHasher {
 
     /// Order-independent hash of a governed factor set (`factor_schema_hash`).
     ///
-    /// Definitions are sorted by stable [`FactorDefinitionDocument::name`] before
+    /// Definitions are sorted by stable `FactorDefinitionDocument::name` before
     /// serialization so registry insertion order never perturbs the digest.
     pub fn factor_schema(set: &FactorSet) -> QuantResult<ContentHash> {
         let mut definitions = set.definitions.clone();
@@ -207,7 +207,7 @@ impl ResearchHasher {
     /// are audit/context metadata, never content, and must never perturb the
     /// digest of an otherwise-identical feature computation (e.g. two ingest
     /// runs at different staleness for the same underlying values). Every
-    /// `Decimal` payload is quantized at [`HASH_STAT_SCALE`] before hashing
+    /// `Decimal` payload is quantized at `HASH_STAT_SCALE` before hashing
     /// (the stored vector itself is untouched) so cross-platform floating
     /// point noise can never flip the digest. `domain: None` (structurally
     /// absent) is byte-distinct from a present slice by construction (`Some`
@@ -254,16 +254,9 @@ impl ResearchHasher {
 
 #[cfg(test)]
 mod tests {
-    use super::ResearchHasher;
-    use crate::{
-        factors::{FactorDefinitionDocument, FactorName, FactorOutputKind, FactorSet},
-        features::{
-            DomainFeatureSlice, EvidenceSourceRef, FeatureCell, FeatureName, FeatureSchema,
-            FeatureSpec, FeatureStaleness, FeatureUnit, FeatureValue, FeatureValueKind,
-            FeatureVector, NullPolicy, PitRule, SourceRequirement, StalenessRule,
-        },
-        selection::ModelFeatureRequirements,
-    };
+    use std::collections::BTreeMap;
+
+    use chrono::{TimeZone, Utc};
     use quant_pivot_models::{
         enums::{
             common::MarketCategory,
@@ -274,6 +267,18 @@ mod tests {
         },
         runtime_config::FeatureFamily,
         types::{MarketId, Probability, SchemaVersion, TokenId},
+    };
+    use rust_decimal_macros::dec;
+
+    use super::ResearchHasher;
+    use crate::{
+        factors::{FactorDefinitionDocument, FactorName, FactorOutputKind, FactorSet},
+        features::{
+            DomainFeatureSlice, EvidenceSourceRef, FeatureCell, FeatureName, FeatureSchema,
+            FeatureSpec, FeatureStaleness, FeatureUnit, FeatureValue, FeatureValueKind,
+            FeatureVector, NullPolicy, PitRule, SourceRequirement, StalenessRule,
+        },
+        selection::ModelFeatureRequirements,
     };
 
     fn sample_factor(name: &'static str) -> FactorDefinitionDocument {
@@ -409,12 +414,7 @@ mod tests {
         );
     }
 
-    // ── R1: composite `feature_vector` hash ────────────────────────────────
-
-    use std::collections::BTreeMap;
-
-    use chrono::{TimeZone, Utc};
-    use rust_decimal_macros::dec;
+    // ── Composite `feature_vector` hash ───────────────────────────────────
 
     /// A minimal, self-contained two-layer vector for hash unit tests. Every
     /// context/audit field (`market_id`/`token_id`/`as_of`/`staleness_ms`/
@@ -568,8 +568,8 @@ mod tests {
     fn feature_vector_hash_distinguishes_domain_schema_version() {
         // `DomainFamily` has a single live variant today (`Crypto` — see
         // `enums::domain::DomainFamily::ALL`); fabricating a second variant
-        // solely to exercise this test would itself be dead semantics, which
-        // this remediation forbids. `domain_family` is nonetheless a
+        // solely to exercise this test would itself be dead semantics.
+        // `domain_family` is nonetheless a
         // first-class field of `FeatureHashComposite` (verified by
         // construction / the type checker), so discrimination across
         // families is automatic the moment a second family is registered.

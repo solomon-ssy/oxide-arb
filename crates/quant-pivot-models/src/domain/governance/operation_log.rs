@@ -1,5 +1,9 @@
 //! Operation-log DTOs (append-only activity trail).
 
+use chrono::{DateTime, Utc};
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, entity::prelude::IpNetwork};
+use serde::{Deserialize, Serialize};
+
 use crate::{
     enums::{
         operation_log::{OperationCategory, OperationHttpMethod, OperationOutcome},
@@ -10,9 +14,6 @@ use crate::{
         OperationLogId, RoleCode, UserId,
     },
 };
-use chrono::{DateTime, Utc};
-use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, entity::prelude::IpNetwork};
-use serde::{Deserialize, Serialize};
 
 /// Insert payload for one operation-log row.
 ///

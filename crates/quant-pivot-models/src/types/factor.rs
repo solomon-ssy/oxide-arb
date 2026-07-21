@@ -1,5 +1,10 @@
 //! Canonical governed factor definition and explanation documents.
 
+use quant_pivot_error::hashing::CanonicalDigestError;
+use rust_decimal::Decimal;
+use sea_orm::FromJsonQueryResult;
+use serde::{Deserialize, Serialize};
+
 use crate::{
     enums::{
         factor::{FactorFamily, FactorNormalization},
@@ -11,10 +16,6 @@ use crate::{
         stable_name::{FactorName, FeatureName},
     },
 };
-use quant_pivot_error::hashing::CanonicalDigestError;
-use rust_decimal::Decimal;
-use sea_orm::FromJsonQueryResult;
-use serde::{Deserialize, Serialize};
 
 /// Output classification of a governed factor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

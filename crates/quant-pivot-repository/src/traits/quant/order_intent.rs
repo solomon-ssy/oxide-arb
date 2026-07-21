@@ -2,8 +2,13 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{
-        ApproveOrderIntent, ApproveOrderIntentOutcome, IntentCreationLimits, NewCapitalAllocation,
-        NewOperationLog, NewOrderIntent, OrderIntentInfo, OrderIntentListQuery, Paginated,
+        api::OrderIntentListQuery,
+        governance::NewOperationLog,
+        pagination::Paginated,
+        quant::{
+            ApproveOrderIntent, ApproveOrderIntentOutcome, IntentCreationLimits,
+            NewCapitalAllocation, NewOrderIntent, OrderIntentInfo,
+        },
     },
     enums::{execution::ApprovalInvalidation, quant::OrderIntentStatus},
     types::{EntryOrderSpec, OrderIntentId, RecommendationId, RecommendationReportId, Usd},

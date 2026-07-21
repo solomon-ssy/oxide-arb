@@ -86,7 +86,7 @@ pub fn derive_into_active_value(input: TokenStream) -> TokenStream {
 ///
 /// Requires exactly one field annotated with `#[normalize_page]` whose type is
 /// `PageRequest`. The generated method delegates to
-/// [`PageRequest::normalized`].
+/// the target `PageRequest::normalized` method.
 ///
 /// # Usage
 ///

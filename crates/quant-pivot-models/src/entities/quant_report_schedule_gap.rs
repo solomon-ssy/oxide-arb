@@ -3,6 +3,7 @@
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
+use super::decision_policy_snapshot;
 use crate::{
     enums::quant::ReportScheduleGapReason,
     types::{DecisionPolicySnapshotId, ReportScheduleGapId, ReportScheduleId},
@@ -30,7 +31,7 @@ pub struct Model {
         from = "decision_policy_snapshot_id",
         to = "decision_policy_snapshot_id"
     )]
-    pub decision_policy_snapshot: BelongsTo<super::decision_policy_snapshot::Entity>,
+    pub decision_policy_snapshot: BelongsTo<decision_policy_snapshot::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

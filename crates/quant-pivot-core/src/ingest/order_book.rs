@@ -1,13 +1,14 @@
-use quant_pivot_models::{
-    domain::book::{BookLevel, BookSnapshot},
-    enums::common::Side,
-    types::{MicroPrice, Price, Shares, TokenId},
-};
-use rust_decimal::Decimal;
 use std::{
     cmp::{Ordering, Reverse},
     sync::Arc,
 };
+
+use quant_pivot_models::{
+    domain::market::book::{BookLevel, BookSnapshot},
+    enums::common::Side,
+    types::{MicroPrice, Price, Shares, TokenId},
+};
+use rust_decimal::Decimal;
 
 /// Single-token L2 orderbook (mutable writer-side state).
 ///
@@ -252,8 +253,9 @@ fn apply_level_delta(levels: &mut Vec<BookLevel>, level: BookLevel, descending: 
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use rust_decimal_macros::dec;
+
+    use super::*;
     fn lvl(p: Decimal, s: Decimal) -> BookLevel {
         BookLevel::from_decimal(Price::new(p), Shares::new(s)).unwrap()
     }

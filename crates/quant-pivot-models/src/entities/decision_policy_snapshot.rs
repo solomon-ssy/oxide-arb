@@ -1,5 +1,9 @@
 //! `decision_policy_snapshot` table entity.
 
+use chrono::{DateTime, Utc};
+use sea_orm::entity::prelude::*;
+
+use super::{policy_activation, user};
 use crate::{
     enums::runtime_config::{DecisionPolicySnapshotSource, PolicyActorKind},
     runtime_config::DecisionPolicySnapshotDocument,
@@ -7,8 +11,6 @@ use crate::{
         ContentHash, DecisionPolicySnapshotId, PolicyBundleGeneration, PolicyRevisionId, UserId,
     },
 };
-use chrono::{DateTime, Utc};
-use sea_orm::entity::prelude::*;
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -38,14 +40,14 @@ pub struct Model {
     pub created_at: DateTime<Utc>,
 
     #[sea_orm(has_many, relation_enum = "Activation")]
-    pub activation: HasMany<super::policy_activation::Entity>,
+    pub activation: HasMany<policy_activation::Entity>,
     #[sea_orm(
         belongs_to,
         relation_enum = "CreatedByUser",
         from = "created_by_user_id",
         to = "id"
     )]
-    pub created_by_user: BelongsTo<Option<super::user::Entity>>,
+    pub created_by_user: BelongsTo<Option<user::Entity>>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

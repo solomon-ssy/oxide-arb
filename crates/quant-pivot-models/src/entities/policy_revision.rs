@@ -1,12 +1,14 @@
 //! Immutable document revisions for independently governed policy resources.
 
+use chrono::{DateTime, Utc};
+use sea_orm::entity::prelude::*;
+
+use super::{policy_activation, policy_approval, user};
 use crate::{
     enums::runtime_config::{ConfigResourceKind, PolicyActorKind, PolicyRevisionStatus},
     runtime_config::{PolicyDocument, PolicyValidationEvidence},
     types::{ContentHash, PolicyRevisionId, SchemaVersion, UserId},
 };
-use chrono::{DateTime, Utc};
-use sea_orm::entity::prelude::*;
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -36,16 +38,16 @@ pub struct Model {
     pub created_at: DateTime<Utc>,
 
     #[sea_orm(has_many, relation_enum = "Approval")]
-    pub approval: HasMany<super::policy_approval::Entity>,
+    pub approval: HasMany<policy_approval::Entity>,
     #[sea_orm(has_many, relation_enum = "Activation")]
-    pub activation: HasMany<super::policy_activation::Entity>,
+    pub activation: HasMany<policy_activation::Entity>,
     #[sea_orm(
         belongs_to,
         relation_enum = "CreatedByUser",
         from = "created_by_user_id",
         to = "id"
     )]
-    pub created_by_user: BelongsTo<Option<super::user::Entity>>,
+    pub created_by_user: BelongsTo<Option<user::Entity>>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

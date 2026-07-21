@@ -1,4 +1,4 @@
-//! Phase 03.2 §8 acceptance tests for the feature plane.
+//! acceptance tests for the feature plane.
 
 use std::{
     collections::{BTreeMap, HashMap},
@@ -12,13 +12,13 @@ use chrono::{DateTime, Duration as ChronoDuration, TimeZone, Utc};
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     domain::{
-        DecisionBoundary, DecisionClock, DecisionSource, DomainAvailability, FeatureVectorInfo,
-        MarketCandidate, MarketDataHealth, MarketRegistryInfo, TokenInfo,
+        data_plane::{DecisionBoundary, DecisionClock, DecisionSource},
         market::{
-            MarketInfo,
+            MarketInfo, MarketRegistryInfo, TokenInfo,
             book::BookLevel,
             registry::{CatalogMarketLeg, EventRegistryInfo, NegRiskLeg, NegRiskLegSet},
         },
+        quant::{DomainAvailability, FeatureVectorInfo, MarketCandidate, MarketDataHealth},
     },
     enums::{
         catalog::{CatalogFilterReasonSet, CatalogTimestampQuality},
@@ -40,6 +40,7 @@ use quant_pivot_models::{
 };
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
+use uuid::Uuid;
 
 use crate::{
     features::{
@@ -48,7 +49,12 @@ use crate::{
         availability::FeatureAvailabilityOracle,
         builder::ConfiguredFeatureBuilder,
         names::{
-            book, domain_crypto, market,
+            book,
+            book::{
+                BEST_ASK, BEST_BID, CROSSED, DEPTH_IMBALANCE, MID, SECONDARY_BEST_ASK, SPREAD_BPS,
+            },
+            domain_crypto::DISTANCE_TO_STRIKE,
+            market::CATEGORY,
             structural::{NEGRISK_LEG_ASK_SUM, NEGRISK_LEG_COUNT},
         },
         null_policy::{NullDecision, NullPolicyEngine},
@@ -183,7 +189,7 @@ fn generic_event_id(market_id: &MarketId) -> EventId {
 
 fn canonical_book_event(sequence: u64) -> CanonicalBookEventRef {
     CanonicalBookEventRef {
-        stream_session_id: uuid::Uuid::from_u128(1),
+        stream_session_id: Uuid::from_u128(1),
         token_sequence: sequence,
         source_event_hash: ContentHash::parse(format!("blake3:{}", "d".repeat(64)))
             .expect("canonical event hash"),
@@ -251,7 +257,7 @@ fn book_at_times(
 fn feature_null_policy_rejects_required_missing() {
     let spec = FeatureSchema::build(&FeaturesConfig::default())
         .expect("schema")
-        .by_name(&book::BEST_BID)
+        .by_name(&BEST_BID)
         .expect("spec")
         .clone();
     let data_quality = DataQualityConfig::default();
@@ -268,7 +274,7 @@ fn feature_null_policy_rejects_required_missing() {
 fn feature_null_policy_no_silent_zero() {
     let spec = FeatureSchema::build(&FeaturesConfig::default())
         .expect("schema")
-        .by_name(&book::DEPTH_IMBALANCE)
+        .by_name(&DEPTH_IMBALANCE)
         .expect("spec")
         .clone();
     let data_quality = DataQualityConfig::default();
@@ -487,8 +493,8 @@ async fn primary_and_secondary_executable_asks_share_one_nonzero_lag_boundary() 
         .await
         .expect("feature build");
 
-    let yes = vector.cell(&book::BEST_ASK).expect("YES ask cell");
-    let no = vector.cell(&book::SECONDARY_BEST_ASK).expect("NO ask cell");
+    let yes = vector.cell(&BEST_ASK).expect("YES ask cell");
+    let no = vector.cell(&SECONDARY_BEST_ASK).expect("NO ask cell");
     assert_eq!(
         yes.value(),
         Some(&FeatureValue::Probability(Probability::new(dec!(0.61))))
@@ -570,7 +576,7 @@ async fn unquoted_secondary_ask_preserves_snapshot_evidence_without_a_value() {
         })
         .await
         .expect("feature build");
-    let no = vector.cell(&book::SECONDARY_BEST_ASK).expect("NO ask cell");
+    let no = vector.cell(&SECONDARY_BEST_ASK).expect("NO ask cell");
 
     assert_eq!(no.state, FeatureCellState::Missing);
     assert_eq!(no.reason, Some(NullReason::SourceUnavailable));
@@ -589,7 +595,7 @@ fn sample_vector() -> FeatureVector {
     let as_of = Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
     let mut values = BTreeMap::new();
     values.insert(
-        book::MID,
+        MID,
         FeatureCell::observed(
             FeatureValue::Probability(Probability::new(Decimal::new(50, 2))),
             Some(EvidenceSourceRef {
@@ -671,7 +677,7 @@ fn test_decision_capture(
             book_snapshot_ref: BookSnapshotRef {
                 token_id,
                 source: BookSnapshotSource::CanonicalL2 {
-                    stream_session_id: uuid::Uuid::nil(),
+                    stream_session_id: Uuid::nil(),
                     token_sequence: 1,
                     source_event_hash: hash.clone(),
                     event_time_ms: vector.decision_at.timestamp_millis(),
@@ -773,7 +779,7 @@ impl PointInTimeSnapshotSource for HealthyPit {
 
 #[tokio::test]
 async fn binary_market_negrisk_feature_is_not_applicable() {
-    // 11.2.1: a binary (non-neg-risk) market's neg-risk full-leg aggregate is
+    // A binary (non-neg-risk) market's neg-risk full-leg aggregate is
     // `NotApplicable` — structurally absent, never a fabricated zero and never a
     // data-missing reason.
     let config = FeaturesConfig {
@@ -865,7 +871,7 @@ async fn unresolved_mapped_domain_is_missing_not_not_applicable() {
         .expect("mapped category must carry domain cells");
     let distance = domain
         .values
-        .get(&domain_crypto::DISTANCE_TO_STRIKE)
+        .get(&DISTANCE_TO_STRIKE)
         .expect("distance-to-strike cell");
     assert_eq!(distance.state, FeatureCellState::Missing);
     assert_eq!(distance.reason, Some(NullReason::LinkageUnresolved));
@@ -977,7 +983,7 @@ fn feature_event_writer_emits_every_cell_state_with_full_audit_context() {
     let mut vector = sample_vector();
     vector.generic_schema_version = schema.version();
     vector.generic.insert(
-        book::CROSSED,
+        CROSSED,
         FeatureCell::substituted(
             FeatureValue::Bool(false),
             NullReason::SourceUnavailable,
@@ -986,7 +992,7 @@ fn feature_event_writer_emits_every_cell_state_with_full_audit_context() {
         ),
     );
     vector.generic.insert(
-        book::SPREAD_BPS,
+        SPREAD_BPS,
         FeatureCell::missing(
             NullReason::SourceUnavailable,
             None,
@@ -1696,7 +1702,7 @@ fn category_feature_projects_table_index() {
     let as_of = Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
     let mut values = BTreeMap::new();
     values.insert(
-        market::CATEGORY,
+        CATEGORY,
         FeatureCell::observed(
             FeatureValue::Category(MarketCategory::Sports),
             Some(EvidenceSourceRef {
@@ -1858,7 +1864,7 @@ async fn online_offline_parity_full_families_with_window() {
     );
 }
 
-// ── Phase 11.2.1 neg-risk sibling-leg parity ─────────────────────────────────
+// ── neg-risk sibling-leg parity ─────────────────────────────────
 
 /// Multi-token book fixture for neg-risk full-leg parity proofs.
 struct SiblingLegParityFixture {

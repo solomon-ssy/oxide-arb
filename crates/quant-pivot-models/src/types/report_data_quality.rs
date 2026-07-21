@@ -1,5 +1,6 @@
 //! Report-level data-quality snapshot payload types.
 
+use rust_decimal::Decimal;
 use sea_orm::FromJsonQueryResult;
 use serde::{Deserialize, Serialize};
 
@@ -7,7 +8,6 @@ use crate::{
     enums::quant::DataQualityStatus,
     types::{FeatureVectorId, MarketId, Probability, TokenId, report_payload::DataQualitySummary},
 };
-use rust_decimal::Decimal;
 
 /// Per-token DQ row inside one report fire snapshot.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

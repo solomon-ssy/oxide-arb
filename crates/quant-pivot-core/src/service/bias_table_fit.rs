@@ -1,8 +1,8 @@
-//! Bias-table fit orchestration (`kind = market_price_bias`, Phase 11.2.1).
+//! Bias-table fit orchestration (`kind = market_price_bias`).
 //!
 //! The fit reuses the **offline point-in-time spine**
-//!   (`HistoricalWindowLoader` + the in-memory `MaterializedPitEngine`) that the
-//!   training-dataset build and backtest replay share.
+//! (`HistoricalWindowLoader` + the in-memory `MaterializedPitEngine`) that the
+//! training-dataset build and backtest replay share.
 //!
 //! Entry mids are resolved through the *same* `resolve_book` semantics the online
 //! factor plane serves — no training-serving skew, no bespoke fact-read spine.
@@ -20,8 +20,8 @@
 //! 3. Batch-prefetch every settled market's YES-leg books into the PIT engine.
 //! 4. For each market, resolve the PIT YES-leg mid at each grid instant and pair
 //!    it with the realized `settled_yes` truth and residual ttr.
-//! 5. Fit the per-`(category, ttr_bucket)` empirical-bias curves (Wilson bucket
-//!    gate + IC significance).
+//! 5. Fit the per-`(category, ttr_bucket)` empirical-bias curves, enforcing the
+//!    Wilson bucket gate and IC significance threshold.
 //! 6. Persist the content-addressed artifact — **only** when a curve qualifies;
 //!    otherwise succeed with no artifact (fail-closed greenfield).
 
@@ -29,14 +29,15 @@ use std::{collections::BTreeMap, sync::Arc, time::Duration as StdDuration};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
-use tokio_util::sync::CancellationToken;
-
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
     domain::{
-        BiasTableFitJobParams, BiasTableFitOutcome, CalibrationArtifactFitPort,
-        CalibrationArtifactInfo, CalibrationArtifactListQuery, CalibrationArtifactPayload,
-        DecisionClock, JobProgressSink, Paginated, WindowBoundsError, query::TimeWindow,
+        api::CalibrationArtifactListQuery,
+        data_plane::DecisionClock,
+        pagination::Paginated,
+        ports::{BiasTableFitJobParams, BiasTableFitOutcome, CalibrationArtifactFitPort},
+        quant::{CalibrationArtifactInfo, CalibrationArtifactPayload, JobProgressSink},
+        query::{TimeWindow, WindowBoundsError},
     },
     enums::common::MarketCategory,
     runtime_config::{DataQualityConfig, DomainConfig, FactorsConfig, FavoriteLongshotConfig},
@@ -52,6 +53,7 @@ use quant_pivot_research::{
     pit::PointInTimeSnapshotSource,
 };
 use rust_decimal::Decimal;
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     prefetch::historical_window::{HistoricalWindowLoader, ReplaySample, WindowSpec},
@@ -446,7 +448,8 @@ impl CalibrationArtifactFitPort for BiasTableFitService {
         };
         // The split hash anchors the artifact to the *exact* fit sample set
         // (sorted market keys + window), not just a coarse window/count — a real
-        // provenance / leakage anchor (full purged/embargo CPCV is Phase 11.5).
+        // provenance and leakage anchor. Full purged/embargo CPCV remains a
+        // separate model-validation concern.
         let split_hash = calibration_split_hash(
             &window,
             samples
@@ -548,13 +551,14 @@ const fn book_staleness(data_quality: &DataQualityConfig) -> StdDuration {
 mod tests {
     use std::collections::BTreeMap;
 
-    use super::validate_payload_shape;
     use chrono::Utc;
     use quant_pivot_models::{
-        domain::{CalibrationArtifactInfo, CalibrationArtifactPayload},
+        domain::quant::{CalibrationArtifactInfo, CalibrationArtifactPayload},
         enums::quant::CalibrationKind,
         types::{CalibrationArtifactId, ContentHash, calibration::MarketPriceBiasPayload},
     };
+
+    use super::validate_payload_shape;
 
     fn base_info(
         kind: CalibrationKind,

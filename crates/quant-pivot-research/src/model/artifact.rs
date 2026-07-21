@@ -12,7 +12,7 @@
 //! Same-cross-section normalization remains a factor-engine concern. The
 //! small-cross-section training reference is artifact state, however: the
 //! weighted body freezes the empirical CDF so serving cannot drift with mutable
-//! online history. 3.6 fills [`ReturnModelSpec::Calibrated`] +
+//! online history. Training fills [`ReturnModelSpec::Calibrated`] and
 //! [`TrainingObjectiveReport`].
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -317,7 +317,7 @@ impl ScoreMultiplierSpec {
 
 /// Governed confidence penalty applied per imputed / kept-missing feature value.
 ///
-/// Fulfils the 3.4 governed-confidence-penalty contract deferred from 3.2: each
+/// Each
 /// audited substitution multiplies the candidate confidence by a declared
 /// `[0, 1]` factor (1.0 = no penalty). The mapping is exhaustive over
 /// [`NullReason`] so a new reason can never silently escape governance.
@@ -390,7 +390,7 @@ impl SubstitutionConfidenceRules {
 ///
 /// Auditable and explicitly flagged as a heuristic so candidates never present a
 /// silently fabricated return; fail-closed at publish / auto-execution / semi-auto
-/// (Phase 11.3 §6, `GateId::CalibrationRequired`).
+/// This is enforced by `GateId::CalibrationRequired`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HeuristicReturnModel {
     /// Expected return (bps) at `composite_score × confidence = 1`.
@@ -400,10 +400,10 @@ pub struct HeuristicReturnModel {
     pub max_downside_bps: Decimal,
 }
 
-/// A return model derived from a fitted `ProbabilityCalibrator` (Phase 11.3 §3.3/§5).
+/// A return model derived from a fitted `ProbabilityCalibrator`.
 ///
-/// Replaces the former hand-fit return-curve interpolation. `calibrator_ref` names
-/// the [`CalibrationArtifactId`] (`kind = ModelScore`) whose `P(win)` mapping +
+/// `calibrator_ref` names the [`CalibrationArtifactId`] (`kind = ModelScore`)
+/// whose `P(win)` mapping and
 /// reliability report the estimate is derived from; the artifact is resolved once
 /// at runtime-load time (never re-fetched per candidate) into a
 /// [`ResolvedCalibration`] passed to
@@ -441,7 +441,7 @@ pub struct ReturnEstimate {
     /// Whether the estimate came from a calibrated model (else heuristic).
     pub calibrated: bool,
     /// The calibrated `P(win)` (`Some` only for `Calibrated`; Kelly sizing
-    /// (Phase 11.3 §4 redesign) consumes this directly as its win probability
+    /// consumes this directly as its win probability
     /// — never re-derived from `expected_return_bps`/`downside_bps`, which
     /// would reintroduce the resolution-vs-TP/SL bet-structure mismatch this
     /// field exists to remove). `None` for `Heuristic`, whose sizing path is
@@ -555,17 +555,17 @@ pub struct WeightedFactorModelArtifact {
     pub multipliers: ScoreMultiplierSpec,
     /// Governed confidence penalty for imputed / kept-missing features.
     pub substitution_confidence_rules: SubstitutionConfidenceRules,
-    /// Return / downside mapping (heuristic now, calibrated by 3.6).
+    /// Return/downside mapping, either heuristic or calibrated.
     pub return_model: ReturnModelSpec,
     /// Small-cross-section transform frozen at training time. Serving uses this
     /// artifact contract, not a mutable history or unrelated active config.
     pub factor_cross_section: FactorCrossSectionConfig,
     /// Empirical raw-factor CDFs fitted from the final training partition.
     pub frozen_reference_quantiles: FrozenReferenceQuantiles,
-    /// Trainer objective report (filled by 3.6; `None` when hand-authored).
+    /// Trainer objective report (`None` when hand-authored).
     pub objective_report: Option<TrainingObjectiveReport>,
-    /// When set, this artifact is scoped to one market category (Phase 11.2.2
-    /// category routing). `None` means the generic cross-category scorer.
+    /// When set, this artifact is scoped to one market category for category
+    /// routing. `None` means the generic cross-category scorer.
     #[serde(default)]
     pub category_scope: Option<MarketCategory>,
 }
@@ -705,7 +705,7 @@ impl WeightedFactorModelArtifact {
     }
 }
 
-/// Sell-side hold-vs-exit output mapping (Phase 06.1).
+/// Sell-side hold-vs-exit output mapping.
 ///
 /// Converts the signed ranking `net = Σ weightᵢ·signedᵢ ∈ [-1, 1]` (positive ⇒
 /// exiting now beats holding) into the three business outputs the opportunistic
@@ -736,7 +736,7 @@ impl SellScorerOutputSpec {
     }
 }
 
-/// Sell-side hold-vs-exit weighted scorer artifact (Phase 06.1).
+/// Sell-side hold-vs-exit weighted scorer artifact.
 ///
 /// Symmetric to [`WeightedFactorModelArtifact`] but scores the *exit* decision
 /// for one open position lot rather than an entry ranking. Inputs are the
@@ -1023,7 +1023,7 @@ pub struct ClassicalModelArtifact {
     pub kind: ClassicalKind,
     /// ML crate that produced the estimator (`"smartcore"`).
     pub crate_name: String,
-    /// Exact crate version (load-time mismatch ⇒ reject; §15.6).
+    /// Exact crate version; a load-time mismatch is rejected.
     pub crate_version: String,
     /// Label-schema hash the model was trained against.
     pub label_schema_hash: ContentHash,
@@ -1457,9 +1457,10 @@ pub enum ModelArtifact {
     WeightedFactor(Box<WeightedFactorModelArtifact>),
     /// Classical ML model.
     Classical(Box<ClassicalModelArtifact>),
-    /// Sell-side hold-vs-exit scorer (Phase 06.1).
+    /// Sell-side hold-vs-exit scorer.
     SellScorer(Box<SellScorerArtifact>),
-    // Onnx(OnnxArtifactRef) reserved — Phase 06.
+    // Additional artifact families remain unsupported until their full
+    // persistence, validation, and serving contracts exist.
 }
 
 /// Breaking stored-model wire version. No legacy parser is provided.
@@ -1489,7 +1490,7 @@ impl ModelArtifact {
     }
 
     /// The single market category this artifact declares itself scoped to
-    /// (11.2.2 category routing), or `None` for a generic cross-category
+    /// for category routing, or `None` for a generic cross-category
     /// scorer. Only the weighted-factor family carries a declared scope
     /// today; every other family is unconditionally generic.
     #[must_use]
@@ -1609,12 +1610,6 @@ impl ModelArtifact {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        DataQualityMultipliers, HorizonMultipliers, LiquidityMultipliers,
-        MODEL_ARTIFACT_FORMAT_VERSION, ModelArtifact, ModelArtifactHeader, ReturnModelSpec,
-        ScoreMultiplierSpec, SellScorerArtifact, SellScorerOutputSpec, StoredModelArtifactRef,
-        SubstitutionConfidenceRules, WeightedFactorModelArtifact, model_input_contract_hash,
-    };
     use quant_pivot_models::{
         enums::quant::{DataQualityStatus, DownsideSource},
         runtime_config::FactorCrossSectionConfig,
@@ -1627,6 +1622,12 @@ mod tests {
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
 
+    use super::{
+        DataQualityMultipliers, HorizonMultipliers, LiquidityMultipliers,
+        MODEL_ARTIFACT_FORMAT_VERSION, ModelArtifact, ModelArtifactHeader, ReturnModelSpec,
+        ScoreMultiplierSpec, SellScorerArtifact, SellScorerOutputSpec, StoredModelArtifactRef,
+        SubstitutionConfidenceRules, WeightedFactorModelArtifact, model_input_contract_hash,
+    };
     use crate::{
         factors::{
             FrozenReferenceQuantiles,

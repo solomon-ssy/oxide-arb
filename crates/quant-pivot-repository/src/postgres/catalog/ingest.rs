@@ -1,7 +1,7 @@
 //! Shared chunked id-lookup helpers for Gamma catalog repositories.
 //!
 //! Batch write primitives (`insert_many_chunked` / `upsert_many_chunked`) live
-//! in [`crate::postgres::write`].
+//! in the shared Postgres write helpers.
 
 use std::collections::HashSet;
 

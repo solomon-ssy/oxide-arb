@@ -19,15 +19,20 @@ use actix_web::{
     HttpRequest, HttpResponse,
     cookie::{Cookie, SameSite, time::Duration as CookieDuration},
     http::Method,
-    web,
+    web::Data,
 };
+use chrono::Utc;
 use quant_pivot_error::{auth::AuthError, storage::StorageError};
 use quant_pivot_models::{
-    domain::{LoginRequest, MeResponse, RoleView, TokenResponse, UserInfo, UserView},
+    domain::{
+        api::{LoginRequest, MeResponse, RoleView, TokenResponse, UserView},
+        rbac::UserInfo,
+    },
     enums::{operation_log::OperationCategory, rbac::UserStatus},
     security::{hash_password, verify_password},
     types::UserId,
 };
+use uuid::Uuid;
 
 use crate::{
     audit::OperationCtx,
@@ -56,7 +61,7 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
 
 /// `POST /api/auth/login` (`v1`) — verify credentials and issue a token pair.
 pub async fn login(
-    state: web::Data<AppState>,
+    state: Data<AppState>,
     op_ctx: OperationCtx,
     body: ValidatedJson<LoginRequest>,
 ) -> Result<HttpResponse, WebError> {
@@ -97,7 +102,7 @@ pub async fn login(
 
 /// `POST /api/auth/refresh` (`v1`) — rotate a refresh token into a fresh pair.
 pub async fn refresh(
-    state: web::Data<AppState>,
+    state: Data<AppState>,
     request: HttpRequest,
     op_ctx: OperationCtx,
 ) -> Result<HttpResponse, WebError> {
@@ -150,7 +155,7 @@ pub async fn refresh(
 
 /// `POST /api/auth/logout` (`v1`) — revoke the access token (and refresh).
 pub async fn logout(
-    state: web::Data<AppState>,
+    state: Data<AppState>,
     request: HttpRequest,
     actor: AuthedActor,
     op_ctx: OperationCtx,
@@ -177,7 +182,7 @@ pub async fn logout(
 
 /// `GET /api/auth/me` (`v1`) — the current user, roles, and accessible menus.
 pub async fn me(
-    state: web::Data<AppState>,
+    state: Data<AppState>,
     actor: AuthedActor,
 ) -> Result<WebResponse<MeResponse>, WebError> {
     let user_id = actor
@@ -218,9 +223,9 @@ fn issue_pair(
     session_exp: Option<i64>,
     generation: u64,
 ) -> Result<IssuedPair, WebError> {
-    let owned_family = family_id.map_or_else(|| uuid::Uuid::now_v7().to_string(), str::to_owned);
+    let owned_family = family_id.map_or_else(|| Uuid::now_v7().to_string(), str::to_owned);
     let absolute_session_exp = session_exp
-        .unwrap_or_else(|| chrono::Utc::now().timestamp() + state.jwt.absolute_session_ttl_secs());
+        .unwrap_or_else(|| Utc::now().timestamp() + state.jwt.absolute_session_ttl_secs());
     let access =
         state
             .jwt
@@ -235,7 +240,7 @@ fn issue_pair(
         response: TokenResponse {
             access_token: access.token,
             token_type: "Bearer",
-            expires_in: (access.exp - chrono::Utc::now().timestamp()).max(0),
+            expires_in: (access.exp - Utc::now().timestamp()).max(0),
         },
         refresh_token: refresh.token,
         refresh_jti: refresh.jti,
@@ -246,7 +251,7 @@ fn issue_pair(
 }
 
 fn token_response(pair: IssuedPair) -> HttpResponse {
-    let cookie_max_age = (pair.refresh_exp - chrono::Utc::now().timestamp()).max(1);
+    let cookie_max_age = (pair.refresh_exp - Utc::now().timestamp()).max(1);
     HttpResponse::Ok()
         .cookie(refresh_cookie(pair.refresh_token, cookie_max_age))
         .json(WebResponse::ok(pair.response))

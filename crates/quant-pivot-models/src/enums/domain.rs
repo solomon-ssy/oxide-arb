@@ -1,10 +1,10 @@
 //! External-vertical (domain) taxonomy: families, linkage lifecycle, resolver
-//! tiers, and domain-observation metrics (Phase 11.2.2).
+//! tiers, and domain-observation metrics.
 //!
 //! The domain plane models category-routed alpha built on **external** data
 //! sources (crypto underlying prices and airport daily-temperature weather). Everything
 //! here is deliberately open along the four extension axes: new vertical = new [`DomainFamily`] variant, new
-//! asset = resolver-ruleset entry, new oracle = [`ResolutionOracle`] variant
+//! asset = resolver-ruleset entry, new oracle = `ResolutionOracle` variant
 //! (in `domain::quant::linkage`), new feed = new `DomainSourceId` — the
 //! long-format `quant_domain_observation` fact never changes shape.
 
@@ -92,11 +92,9 @@ pg_enum! {
     /// Deterministic tiers (`Tier0Slug` / `Tier1Template`) are pure functions
     /// of frozen market metadata. `Override` is an audited operator decision.
     ///
-    /// A `Tier2Llm` variant (offline structured-extraction fallback, designed
-    /// in `phase-11/11.2.3`) is deliberately **not** modeled here yet — it
-    /// lands only alongside its real implementation, per the zero-dead-
-    /// semantics policy (an unemitted, unmatched enum variant is a
-    /// remediation blocker, not a reserved placeholder).
+    /// A `Tier2Llm` variant is deliberately absent: an offline structured-
+    /// extraction fallback may enter this enum only alongside a complete,
+    /// governed implementation. Unemitted variants are dead semantics.
     @derive(JsonSchema)
     pub enum ResolverTier {
         /// Deterministic series-slug direct read (`{asset}-updown-{tf}-{epoch}`).

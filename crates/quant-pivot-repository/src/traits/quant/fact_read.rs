@@ -336,7 +336,7 @@ pub trait QuantFactReadRepository: Send + Sync {
     /// `[from_ms, to_ms)` (epoch milliseconds), ordered by instrument, metric,
     /// event time, then `ingestion_time` (stable replay order). Feeds the
     /// online domain feature window and the offline materialized domain PIT
-    /// engine (Phase 11.2.2).
+    /// engine.
     async fn domain_observations_between(
         &self,
         instrument_keys: Vec<DomainInstrumentKey>,

@@ -6,16 +6,22 @@ use std::{
 };
 
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
+use csv::{ReaderBuilder, StringRecord};
 use futures_util::StreamExt;
 use quant_pivot_error::{QuantError, QuantResult, api::ApiError, ws::WsError};
 use quant_pivot_models::{
     config::BinanceSourceConfig,
-    domain::CryptoPriceReport,
+    domain::data_plane::CryptoPriceReport,
     enums::domain::BinanceMarketSegment,
     hashing::CanonicalDigest,
     types::{BinanceSymbol, ContentHash, DomainInstrumentKey, DomainSourceId, Shares, Usd},
 };
-use tokio::{net::TcpStream, sync::mpsc};
+use reqwest::Client;
+use rust_decimal::Decimal;
+use tokio::{
+    net::TcpStream,
+    sync::{mpsc, mpsc::Sender},
+};
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async,
     tungstenite::{Message, protocol::CloseFrame},
@@ -41,7 +47,7 @@ const USDM_FUTURES_AGG_TRADE_REQUEST_WEIGHT: u32 = 20;
 pub struct BinanceAggTradeSource {
     market: BinanceMarketSegment,
     config: BinanceSourceConfig,
-    http: reqwest::Client,
+    http: Client,
     retry_policy: RetryPolicy,
     request_budget: BinanceRequestBudget,
 }
@@ -71,7 +77,7 @@ impl BinanceAggTradeSource {
         request_budget: BinanceRequestBudget,
         market: BinanceMarketSegment,
     ) -> QuantResult<Self> {
-        let http = reqwest::Client::builder()
+        let http = Client::builder()
             .timeout(Duration::from_millis(config.request_timeout_ms))
             .build()
             .map_err(|error| ApiError::Sdk(format!("Binance aggTrade HTTP client: {error}")))?;
@@ -85,7 +91,7 @@ impl BinanceAggTradeSource {
     }
 
     #[must_use]
-    pub fn with_http_client(mut self, http: reqwest::Client) -> Self {
+    pub fn with_http_client(mut self, http: Client) -> Self {
         self.http = http;
         self
     }
@@ -328,7 +334,7 @@ fn map_report(
         }
         .into());
     }
-    if row.price <= rust_decimal::Decimal::ZERO || row.quantity <= rust_decimal::Decimal::ZERO {
+    if row.price <= Decimal::ZERO || row.quantity <= Decimal::ZERO {
         return Err(ApiError::Deserialize {
             context: "binance aggregate trade".into(),
             detail: "price and quantity must be positive".to_owned(),
@@ -381,12 +387,10 @@ fn decode_archive_batches(
     expected_member: &str,
     available_at: DateTime<Utc>,
     batch_size: usize,
-    sender: &mpsc::Sender<Vec<CryptoPriceReport>>,
+    sender: &Sender<Vec<CryptoPriceReport>>,
 ) -> QuantResult<()> {
     decode_single_csv_archive(archive, expected_member, |member| {
-        let mut reader = csv::ReaderBuilder::new()
-            .has_headers(false)
-            .from_reader(member);
+        let mut reader = ReaderBuilder::new().has_headers(false).from_reader(member);
         let mut reports = Vec::with_capacity(batch_size);
         for (index, row) in reader.records().enumerate() {
             let row = row.map_err(|error| archive_error(format!("invalid CSV row: {error}")))?;
@@ -417,9 +421,7 @@ fn decode_archive(
     available_at: DateTime<Utc>,
 ) -> QuantResult<Vec<CryptoPriceReport>> {
     decode_single_csv_archive(archive, expected_member, |member| {
-        let mut reader = csv::ReaderBuilder::new()
-            .has_headers(false)
-            .from_reader(member);
+        let mut reader = ReaderBuilder::new().has_headers(false).from_reader(member);
         let mut reports = Vec::new();
         for (index, row) in reader.records().enumerate() {
             let row = row.map_err(|error| archive_error(format!("invalid CSV row: {error}")))?;
@@ -444,7 +446,7 @@ fn decode_archive(
 fn map_archive_row(
     market: BinanceMarketSegment,
     symbol: &BinanceSymbol,
-    row: &csv::StringRecord,
+    row: &StringRecord,
     available_at: DateTime<Utc>,
 ) -> QuantResult<CryptoPriceReport> {
     if row.len() != 8 {
@@ -466,7 +468,7 @@ fn map_archive_row(
     let timestamp: i64 = parse_archive_field(field(5, "timestamp")?, "timestamp")?;
     parse_archive_bool(field(6, "buyer_is_market_maker")?)?;
     parse_archive_bool(field(7, "best_price_match")?)?;
-    if price <= rust_decimal::Decimal::ZERO || quantity <= rust_decimal::Decimal::ZERO {
+    if price <= Decimal::ZERO || quantity <= Decimal::ZERO {
         return Err(archive_error("price and quantity must be positive").into());
     }
     let event_time = if timestamp >= 100_000_000_000_000 {
@@ -534,7 +536,8 @@ fn closed(frame: Option<CloseFrame>) -> WsError {
 mod tests {
     use std::io::{Cursor, Write};
 
-    use chrono::{TimeZone, Utc};
+    use chrono::{NaiveDate, TimeZone, Utc};
+    use futures_util::SinkExt;
     use quant_pivot_models::{
         config::BinanceSourceConfig,
         enums::domain::BinanceMarketSegment,
@@ -542,20 +545,23 @@ mod tests {
     };
     use rust_decimal_macros::dec;
     use sha2::{Digest, Sha256};
+    use tokio::net::TcpListener;
+    use tokio_tungstenite::{accept_async, tungstenite::Message};
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
         matchers::{method, path, query_param},
     };
+    use zip::{ZipWriter, write::SimpleFileOptions};
 
     use super::{BinanceAggTradeSource, agg_trade_request_weight, decode_archive};
     use crate::binance::{BinanceRequestBudget, archive::verify_archive_checksum};
 
     fn archive_bytes(csv: &str) -> Vec<u8> {
-        let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
         writer
             .start_file(
                 "BTCUSDT-aggTrades-2025-01-01.csv",
-                zip::write::SimpleFileOptions::default(),
+                SimpleFileOptions::default(),
             )
             .expect("start archive member");
         writer.write_all(csv.as_bytes()).expect("write archive CSV");
@@ -655,6 +661,61 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn websocket_stream_maps_raw_usdm_trade_with_bound_provenance() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind local WebSocket server");
+        let address = listener.local_addr().expect("local WebSocket address");
+        let server = tokio::spawn(async move {
+            let (connection, _) = listener.accept().await.expect("accept WebSocket client");
+            let mut socket = accept_async(connection).await.expect("WebSocket handshake");
+            socket
+                .send(Message::Text(
+                    serde_json::json!({
+                        "e": "aggTrade",
+                        "E": 1_784_374_523_400_i64,
+                        "s": "HYPEUSDT",
+                        "a": 225_496_651_u64,
+                        "p": "58.833",
+                        "q": "0.1",
+                        "f": 300,
+                        "l": 300,
+                        "T": 1_784_374_523_343_i64,
+                        "m": true
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .expect("send aggregate-trade frame");
+        });
+        let config = BinanceSourceConfig {
+            websocket_url: format!("ws://{address}"),
+            ..BinanceSourceConfig::usdm_futures_default()
+        };
+        let source = BinanceAggTradeSource::connect_usdm_futures_with_budget(
+            config.clone(),
+            BinanceRequestBudget::new(&config).expect("budget"),
+        )
+        .expect("source");
+        let symbol = BinanceSymbol::parse("HYPEUSDT").expect("symbol");
+        let mut stream = source.stream(&symbol).await.expect("open local stream");
+        let report = stream.next_report().await.expect("map aggregate trade");
+
+        assert_eq!(report.source_sequence, 225_496_651);
+        assert_eq!(
+            report.source_id,
+            DomainSourceId::binance_usdm_futures_agg_trade()
+        );
+        assert_eq!(
+            report.instrument_key,
+            DomainInstrumentKey::binance_usdm_futures_agg_trade(&symbol)
+        );
+        assert_eq!(report.price.inner(), dec!(58.833));
+        server.await.expect("local WebSocket server");
+    }
+
     #[test]
     fn request_weight_is_source_native() {
         assert_eq!(agg_trade_request_weight(BinanceMarketSegment::Spot), 4);
@@ -745,7 +806,7 @@ mod tests {
         let mut stream = source
             .recover_archive_day(
                 &symbol,
-                chrono::NaiveDate::from_ymd_opt(2025, 1, 1).expect("date"),
+                NaiveDate::from_ymd_opt(2025, 1, 1).expect("date"),
                 available_at,
             )
             .await

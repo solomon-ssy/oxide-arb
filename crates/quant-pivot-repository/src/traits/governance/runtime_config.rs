@@ -4,12 +4,15 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{
-        ActivePolicyResourceInfo, ConfigActivityInfo, ConfigResourceInventoryInfo,
-        DecisionPolicySnapshotInfo, DecisionPolicySnapshotOptionInfo,
-        LifecycleSchemaVerificationPort, NewDecisionPolicySnapshot, NewPolicyActivation,
-        NewPolicyRevision, NewProductionBaseline, NewProductionEvidence, PolicyActivationCommit,
-        PolicyActivationInfo, PolicyApprovalInfo, PolicyRevisionInfo, ProductionBaselineInfo,
-        ProductionEvidenceArtifactVerificationPort, ProductionEvidenceInfo, RecordPolicyApproval,
+        governance::{
+            ActivePolicyResourceInfo, ConfigActivityInfo, ConfigResourceInventoryInfo,
+            DecisionPolicySnapshotInfo, DecisionPolicySnapshotOptionInfo,
+            NewDecisionPolicySnapshot, NewPolicyActivation, NewPolicyRevision,
+            NewProductionBaseline, NewProductionEvidence, PolicyActivationCommit,
+            PolicyActivationInfo, PolicyApprovalInfo, PolicyRevisionInfo, ProductionBaselineInfo,
+            ProductionEvidenceInfo, RecordPolicyApproval,
+        },
+        ports::{LifecycleSchemaVerificationPort, ProductionEvidenceArtifactVerificationPort},
     },
     enums::runtime_config::{ConfigResourceKind, ProductionEvidenceKind},
     runtime_config::{

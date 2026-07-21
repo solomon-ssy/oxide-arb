@@ -2,7 +2,7 @@
 
 use quant_pivot_error::{QuantResult, execution::ExecutionError};
 use quant_pivot_models::{
-    domain::{ModelVersionInfo, RecommendationInfo},
+    domain::quant::{ModelVersionInfo, RecommendationInfo},
     enums::quant::{PublicationStatus, TradePolicyStatus},
     types::{RecommendationTradePlan, ResearchProfileRef, TradePolicyArtifactId},
 };

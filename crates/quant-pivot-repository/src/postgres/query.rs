@@ -28,10 +28,10 @@
 use std::{collections::HashMap, hash::Hash};
 
 use quant_pivot_error::storage::StorageError;
-use quant_pivot_models::domain::{PageWindow, Paginated};
+use quant_pivot_models::domain::pagination::{PageWindow, Paginated};
 use sea_orm::{
     ColumnTrait, ConnectionTrait, EntityTrait, FromQueryResult, PaginatorTrait, QueryFilter,
-    QueryOrder, Select,
+    QueryOrder, Select, Value,
 };
 
 use crate::batch::chunk_for_in_clause;
@@ -92,7 +92,7 @@ where
 pub async fn list_by_fk_ordered_desc<E, Fk, Created, Item>(
     db: &impl ConnectionTrait,
     fk_column: Fk,
-    fk_value: impl Into<sea_orm::Value>,
+    fk_value: impl Into<Value>,
     created_at_column: Created,
     map: impl Fn(E::Model) -> Item,
 ) -> Result<Vec<Item>, StorageError>
@@ -119,7 +119,7 @@ pub async fn find_models_by_id_chunks<E, C, Id>(
 where
     E: EntityTrait,
     C: ColumnTrait + Copy,
-    Id: Clone + Into<sea_orm::Value>,
+    Id: Clone + Into<Value>,
 {
     if ids.is_empty() {
         return Ok(Vec::new());

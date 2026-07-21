@@ -24,8 +24,9 @@ pub fn combinations(n: usize, k: usize) -> Vec<Vec<usize>> {
 
 #[cfg(test)]
 mod tests {
-    use super::combinations;
     use std::collections::HashSet;
+
+    use super::combinations;
 
     #[test]
     fn combinations_count_matches_binomial_coefficient() {

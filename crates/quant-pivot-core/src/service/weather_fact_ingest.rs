@@ -15,7 +15,7 @@ use chrono::{DateTime, Datelike, NaiveDate, Utc};
 use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
     clickhouse::{WeatherForecastFactRow, WeatherObservationFactRow},
-    domain::{WeatherForecastPoint, WeatherObservationReport},
+    domain::data_plane::{WeatherForecastPoint, WeatherObservationReport},
     hashing::CanonicalDigest,
     types::{ContentHash, DomainInstrumentKey, DomainSourceId, WeatherVariable},
 };
@@ -460,9 +460,9 @@ fn forecast_identity(point: &WeatherForecastPoint) -> ForecastIdentity {
 mod tests {
     use std::collections::BTreeSet;
 
-    use chrono::{DateTime, Datelike, TimeZone, Utc};
+    use chrono::{DateTime, Datelike, NaiveDate, TimeZone, Utc};
     use quant_pivot_models::{
-        domain::{WeatherObservationReport, WeatherObservationReportKind},
+        domain::data_plane::{WeatherObservationReport, WeatherObservationReportKind},
         types::{
             ContentHash, DomainInstrumentKey, DomainMeasurementUnit, DomainSourceId,
             WeatherVariable,
@@ -505,7 +505,7 @@ mod tests {
 
     #[test]
     fn correction_chain_is_monotonic_and_exact_retry_is_suppressed() {
-        let local_date = chrono::NaiveDate::from_ymd_opt(2026, 7, 18).expect("date");
+        let local_date = NaiveDate::from_ymd_opt(2026, 7, 18).expect("date");
         let first = report('a', 1);
         let correction = report('b', 2);
         let planned = plan_observation_persistence(

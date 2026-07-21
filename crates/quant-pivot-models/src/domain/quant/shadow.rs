@@ -1,5 +1,9 @@
 //! Shadow-comparison ledger persistence DTOs (append-only governance evidence).
 
+use chrono::{DateTime, Utc};
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
+use serde::{Deserialize, Serialize};
+
 use crate::{
     entities::quant_shadow_comparison,
     enums::quant::ModelWeightSource,
@@ -8,9 +12,6 @@ use crate::{
         shadow::{ShadowMaturedOutcomeDelta, ShadowRankDelta, ShadowScoreDelta},
     },
 };
-use chrono::{DateTime, Utc};
-use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
-use serde::{Deserialize, Serialize};
 
 /// Frozen, content-addressed shadow-comparison row.
 #[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]

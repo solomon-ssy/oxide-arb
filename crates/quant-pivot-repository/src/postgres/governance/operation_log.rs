@@ -6,7 +6,11 @@
 
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    domain::{NewOperationLog, OperationLogInfo, OperationLogQuery, PageWindow, Paginated},
+    domain::{
+        api::OperationLogQuery,
+        governance::{NewOperationLog, OperationLogInfo},
+        pagination::{PageWindow, Paginated},
+    },
     entities::operation_log::{Column, Entity},
 };
 use sea_orm::{
@@ -126,9 +130,8 @@ impl OperationLogRepository for PgOperationLogRepository {
 
 #[cfg(test)]
 mod tests {
-    use super::{Entity, page_condition};
     use quant_pivot_models::{
-        domain::{OperationLogQuery, pagination::PageRequest},
+        domain::{api::OperationLogQuery, pagination::PageRequest},
         enums::{
             operation_log::{OperationCategory, OperationOutcome},
             rbac::ResourceType,
@@ -136,6 +139,8 @@ mod tests {
         types::UserId,
     };
     use sea_orm::{DbBackend, EntityTrait, QueryFilter, QueryTrait};
+
+    use super::{Entity, page_condition};
 
     #[test]
     fn page_condition_adds_optional_filters_to_sql() {

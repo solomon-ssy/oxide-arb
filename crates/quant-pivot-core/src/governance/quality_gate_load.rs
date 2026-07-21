@@ -1,6 +1,6 @@
-//! Load-time quality-gate checks for online model inference (Phase 3.7).
+//! Load-time quality-gate checks for online model inference.
 //!
-//! These are distinct from the offline [`ModelQualityGate`] evaluation at publish
+//! These are distinct from the offline model-quality-gate evaluation at publish
 //! time:
 //!
 //! - **Staleness** applies only to non-`Published` candidate / shadow versions.
@@ -12,7 +12,7 @@
 //!   to a `Published` row and shadow ids resolve to `Candidate` / `Shadow`.
 
 use chrono::{DateTime, Utc};
-use quant_pivot_models::{domain::ModelVersionInfo, enums::quant::PublicationStatus};
+use quant_pivot_models::{domain::quant::ModelVersionInfo, enums::quant::PublicationStatus};
 
 /// Whether the persisted gate report is fresh enough for a non-published load.
 ///
@@ -103,13 +103,9 @@ pub fn active_load_ok(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        active_publication_status_ok, quality_gate_passed_ok, quality_gate_staleness_ok,
-        shadow_publication_status_ok,
-    };
-    use chrono::{Duration, Utc};
+    use chrono::{DateTime, Duration, Utc};
     use quant_pivot_models::{
-        domain::ModelVersionInfo,
+        domain::quant::ModelVersionInfo,
         enums::{model::ModelFamily, quant::PublicationStatus},
         types::{
             ContentHash, ModelSpecId, ModelVersionId,
@@ -120,11 +116,16 @@ mod tests {
             model_training::ModelTrainingObjective,
         },
     };
-    use quant_pivot_test_support::{
+
+    use super::{
+        active_publication_status_ok, quality_gate_passed_ok, quality_gate_staleness_ok,
+        shadow_publication_status_ok,
+    };
+    use crate::test_fixtures::{
         execution_pg_seed::fixture_profile_ref, model_spec_fixtures::model_spec_lineage_fixture,
     };
 
-    fn report(evaluated_at: chrono::DateTime<Utc>, passed: bool) -> QualityGateReport {
+    fn report(evaluated_at: DateTime<Utc>, passed: bool) -> QualityGateReport {
         QualityGateReport {
             format_version: QUALITY_GATE_REPORT_FORMAT_VERSION,
             subject: GateSubject::ModelVersion(ModelVersionId::from_v7()),

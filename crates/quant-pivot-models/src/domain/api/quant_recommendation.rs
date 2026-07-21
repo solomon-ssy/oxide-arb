@@ -10,10 +10,13 @@
 //! [`QuantEvidenceView`] exposes replay handles as opaque strings so a client can
 //! reconstruct the decision trail without binding to internal id newtypes.
 
+use chrono::{DateTime, Utc};
+use serde::Serialize;
+
 use crate::{
     domain::{
-        DecisionBoundaryEvidenceView, FeatureCellEvidenceView, ModelInputEvidenceView,
-        RecommendationInfo,
+        api::{DecisionBoundaryEvidenceView, FeatureCellEvidenceView, ModelInputEvidenceView},
+        quant::RecommendationInfo,
     },
     enums::quant::{OutcomeSide, RecommendationReportStatus, RecommendationStatus},
     types::{
@@ -22,13 +25,11 @@ use crate::{
         RecommendationReportId, RecommendationTradePlan, TokenId,
     },
 };
-use chrono::{DateTime, Utc};
-use serde::Serialize;
 
 /// Full outbound projection of one actionable recommendation.
 ///
 /// Beyond the frozen decision contract, the view carries the two governance
-/// facts a client needs to decide whether an [`OrderIntent`] may still be
+/// facts a client needs to decide whether an `OrderIntent` may still be
 /// created without a follow-up round-trip: the parent report's current
 /// lifecycle [`Self::report_status`] and the id of any blocking pre-submission
 /// intent [`Self::active_order_intent_id`]. Both are resolved server-side (the

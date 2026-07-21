@@ -1,4 +1,4 @@
-//! HTTP API contract types — Phase 0 control plane subset.
+//! HTTP API contract types — control plane subset.
 
 mod auth;
 mod backtest_path_set;
@@ -27,6 +27,7 @@ mod quant_recommendation;
 mod quant_report;
 mod reconciliation;
 mod research_job;
+mod research_model_contract;
 mod role;
 mod runtime_config;
 mod settlement_redeem;
@@ -38,39 +39,145 @@ mod user;
 mod validation;
 mod window;
 
-pub use auth::*;
-pub use backtest_path_set::*;
-pub use backtest_report::*;
-pub use calibration_artifact::*;
-pub use comparison_report::*;
-pub use decision_evidence::*;
-pub use execution_recovery::*;
-pub use factor_governance::*;
-pub use feature_contract::*;
-pub use feature_integrity::*;
-pub use health::*;
-pub use market::*;
-pub use market_linkage::*;
-pub use menu::*;
-pub use model_governance::*;
-pub use model_training::*;
-pub use operation_log::*;
-pub use permission::*;
-pub use quality_gate::*;
-pub use quant_account::*;
-pub use quant_execution::*;
-pub use quant_model::*;
-pub use quant_recommendation::*;
-pub use quant_report::*;
-pub use reconciliation::*;
-pub use research_job::*;
-pub use role::*;
-pub use runtime_config::*;
-pub use settlement_redeem::*;
-pub use structural_monitor::*;
-pub use system::*;
-pub use trade_policy::*;
-pub use training_dataset::*;
-pub use user::*;
-pub use validation::*;
-pub use window::*;
+pub use auth::{LoginRequest, MeResponse, RoleView, TokenResponse, UserView};
+pub use backtest_path_set::{
+    BacktestPathSetListQuery, BacktestPathSetView, RunCpcvBacktestRequest,
+};
+pub use backtest_report::{BacktestReportListQuery, BacktestReportView, RunBacktestRequest};
+pub use calibration_artifact::{
+    ActivateCalibrationArtifactRequest, BindCalibrationRequest, CalibrationArtifactDetailView,
+    CalibrationArtifactListQuery, CalibrationArtifactSummaryView, FitBiasTableRequest,
+    FitModelCalibratorRequest, ModelCalibrationFitPreflightQuery, ModelCalibrationFitPreflightView,
+};
+pub use comparison_report::{ComparisonReportListQuery, ModelComparisonReportView};
+pub use decision_evidence::{
+    DecisionBoundaryEvidenceView, FeatureCellEvidenceView, ModelInputEvidenceView,
+    ModelRouteEvidenceView,
+};
+pub use execution_recovery::{
+    ExecutionRecoveryStep, ExecutionRecoverySummary, ExecutionRecoveryView,
+};
+pub use factor_governance::{
+    CollinearPairView, FactorCollinearityQuery, FactorCollinearitySource, FactorCollinearityView,
+    FactorDefinitionListQuery, FactorDefinitionView, PublishFactorRequest,
+    PublishFactorsBatchRequest, RegisterFactorDefinitionsRequest, RetireFactorRequest,
+};
+pub use feature_contract::{FeatureContractEntryView, FeatureContractView, FeatureNullPolicyView};
+pub use feature_integrity::{
+    AcknowledgeFeatureParityLatchRequest, FeatureIntegrityCounts, FeatureIntegrityLatchView,
+    FeatureIntegritySummaryView, FeatureParityEventListQuery, FeatureParityEventView,
+    FeatureParityEvidenceView, FeatureParityRunListQuery, FeatureParityRunView,
+    RunFullFeatureParityRequest,
+};
+pub use health::{DependencyCheck, HealthStatus, ReadinessReport, ReadinessStatus};
+pub use market::{
+    BlockMarketRequest, BookLevelView, MarketBookSideView, MarketBookSummaryView, MarketBookView,
+    MarketMicrostructureQuery, MarketMicrostructureView, MarketPageQuery, MarketTradeTick,
+    MarketView, MicrostructureBucket, MicrostructureResolution, ResolvedMicrostructureWindow,
+    UnblockMarketRequest,
+};
+pub use market_linkage::{
+    AcknowledgeBasisAlertRequest, BasisAlertListQuery, BasisAlertView, DomainSourceExpectationView,
+    LinkageResolveSummaryView, MarketLinkageDetailView, MarketLinkageHistoryEntryView,
+    MarketLinkageListQuery, MarketLinkageSummaryView, OverrideLinkageRequest,
+    OverrideSourceBindingInput, ResolveLinkagesRequest,
+};
+pub use menu::{CreateMenuRequest, UpdateMenuRequest};
+pub use model_governance::{BindPublishPathSetRequest, PublishModelRequest, RetireModelRequest};
+pub use model_training::{ModelVersionListQuery, TrainModelRequest, TrainedModelView};
+pub use operation_log::{OperationLogQuery, OperationLogView};
+pub use permission::PermissionCatalogEntry;
+pub use quality_gate::{
+    GateOutcomeView, GatePreviewIntent, QualityGatePreviewQuery, QualityGateReportView,
+};
+pub use quant_account::{
+    AccountSnapshotView, EquitySnapshotView, LiveAccountView, VenuePositionSnapshotView,
+};
+pub use quant_execution::{
+    ApproveIntentRequest, CancelIntentRequest, CreateIntentRequest, EntryConditionArtifactView,
+    EntryConditionAuditView, EntryConditionDetailView, EntryConditionEvaluationView,
+    EntryConditionInstanceSummaryView, EntryConditionLeafEvidenceView,
+    EntryConditionSourceCheckpointView, ExecutionOrderListQuery, ExecutionOrderView,
+    ExitMonitorObservationView, OrderIntentListQuery, OrderIntentView, PositionDetailView,
+    PositionListQuery, PositionSummary, PositionView, RecommendationAttributionView,
+    RejectIntentRequest,
+};
+pub use quant_model::{
+    CreateModelSpecRequest, ModelPickerSide, ModelPublishedCatalogQuery, ModelSpecListQuery,
+    PublishedModelOptionView, QuantModelSpecView,
+};
+pub use quant_recommendation::{
+    QuantEvidenceView, QuantRecommendationView, RecommendationViewContext,
+};
+pub use quant_report::{
+    CurrentReportQuery, QuantReportDetailView, QuantReportDiagnosticsView, QuantReportFunnelView,
+    QuantReportListQuery, QuantReportView, RecommendationChangedFieldView, RecommendationDeltaView,
+    RecommendationDiffSnapshotView, ReportCurrentHealthView, ReportDiagnosticsSubject,
+    ReportDiffView, ReportFactDeliveryView, ReportFunnelMarketListQuery, ReportFunnelMarketView,
+    ReportFunnelStageView, ReportRunListQuery, ReportRunView, ReportScheduleGapListQuery,
+    ReportScheduleGapView, ReportScheduleHealthView, ReportScheduleStateView, ReportTimelineQuery,
+    RetryReportRequest, RevokeReportRequest, RunReportRequest,
+};
+pub use reconciliation::{
+    ReconciliationListQuery, ReconciliationView, ResolveReconciliationCommand,
+    ResolveReconciliationOutcome, ResolveReconciliationRequest, ResolveReconciliationResponse,
+};
+pub use research_job::{
+    BacktestJobParams, CancelResearchJobRequest, CpcvBacktestJobParams, FeatureParityJobParams,
+    ModelTrainJobParams, ResearchJobListQuery, ResearchJobView, RetryResearchJobRequest,
+    TradePolicyFitJobParams, TradePolicyValidationJobParams,
+};
+pub use research_model_contract::ResearchModelApiContractSchema;
+pub use role::{
+    AssignMenusRequest, AssignPermissionsRequest, ChangeRoleStatusRequest, CreateRoleRequest,
+    UpdateRoleRequest,
+};
+pub use runtime_config::{
+    ActivatePolicyDraftRequest, ApprovePolicyDraftRequest, ConfigActivityQuery, ConfigActivityView,
+    ConfigApiContractSchema, ConfigResourceSummaryView, ConfigResourcesView,
+    ConfigSnapshotOptionsQuery, CreatePolicyDraftRequest, CredentialHealthView,
+    CurrentPolicyResourceView, DecisionPolicySnapshotOptionView, DeploymentConfigSnapshotView,
+    DeploymentConfigView, DeploymentEndpointView, DeploymentIdentityView,
+    DeploymentResourceBudgetView, DeploymentResourceLimitView, LifecycleCheckView, LifecycleView,
+    PolicyActivationResultView, PolicyActivationView, PolicyActorView, PolicyApprovalView,
+    PolicyResourceSchemaView, PolicyRevisionListQuery, PolicyRevisionView, PolicyValidationView,
+    ProductionBaselineView, SchedulePreviewRequest, SchedulePreviewView, SealProductionRequest,
+    ValidatePolicyDraftRequest,
+};
+pub use settlement_redeem::{
+    SettlementRedeemDetail, SettlementRedeemDetailView, SettlementRedeemListQuery,
+    SettlementRedeemLotView, SettlementRedeemSummary, SettlementRedeemView,
+};
+pub use structural_monitor::{
+    MissingReasonCountView, NegRiskEventDriftView, NegRiskLegView,
+    ParticipantConcentrationDetailView, ParticipantConcentrationMarketView,
+    ParticipantConcentrationParticipantView, ParticipantConcentrationSummaryView,
+    TradeTapeCoverageView, TradeTapeSourceHealthView,
+};
+pub use system::{
+    ActionEligibilityDecision, ActionEligibilityView, ActivateBootstrapRequest, BootstrapView,
+    CapabilityView, QuantModeView, SetKillSwitchRequest, SwitchQuantModeRequest,
+    SystemCapabilities, SystemStatusView,
+};
+pub use trade_policy::{
+    FitTradePolicyRequest, TradePolicyAuditListQuery, TradePolicyDetailView,
+    TradePolicyEvidenceDownloadView, TradePolicyEvidenceRowListQuery, TradePolicyEvidenceRowView,
+    TradePolicyFitPreflightRequest, TradePolicyFitPreflightView, TradePolicyFitReadiness,
+    TradePolicyFitSelection, TradePolicyGovernanceAuditView, TradePolicyGovernanceRequest,
+    TradePolicyListQuery, TradePolicyOperationalEvidenceView, TradePolicyPreflightBlockerDetail,
+    TradePolicyPreflightBlockerView, TradePolicyPreflightCheckStatus,
+    TradePolicySourceSliceObjectListQuery, TradePolicySourceSliceObjectView,
+    TradePolicySourceSliceView, TradePolicySummaryView, TradePolicyTrialAttemptView,
+    TradePolicyTrialListQuery, TradePolicyValidationListQuery, TradePolicyValidationRowListQuery,
+    TradePolicyValidationRowView, TradePolicyValidationRunView,
+};
+pub use training_dataset::{
+    BuildTrainingDatasetRequest, DatasetManifestView, TrainingDatasetListQuery,
+    TrainingDatasetPlanView, TrainingDatasetView,
+};
+pub use user::{
+    AssignRolesRequest, ChangePasswordRequest, ChangeUserStatusRequest, CreateUserRequest,
+    UpdateUserRequest, UserPageQuery,
+};
+pub use validation::{validate_half_open_window, validate_optional_inclusive_range};
+pub use window::TimeWindowQuery;

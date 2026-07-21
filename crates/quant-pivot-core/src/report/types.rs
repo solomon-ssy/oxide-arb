@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::QuantError;
 use quant_pivot_models::{
     clickhouse::{QuantReportRecommendationFactRow, ReportMarketFunnelRow},
-    domain::NewReportTransaction,
+    domain::quant::NewReportTransaction,
     enums::quant::{
         EmptyReportReason, OutcomeSide, QuantRuntimeMode, ReportKind, ReportTriggerKind,
     },

@@ -1,5 +1,22 @@
 //! Authoritative active-event keyset scan orchestration with retry.
 
+use std::{
+    collections::BTreeSet,
+    sync::{
+        Arc,
+        atomic::{AtomicU32, Ordering},
+    },
+};
+
+use futures_util::StreamExt;
+use quant_pivot_error::api::ApiError;
+use quant_pivot_models::{
+    config::GammaConfig, domain::market::EventRegistryInfo, enums::market::MarketStatus,
+    types::TokenId,
+};
+use reqwest::{Client, Response, header::CONTENT_TYPE};
+use url::Url;
+
 use super::{
     catalog::CatalogEvent,
     wire::{GAMMA_EVENTS_KEYSET_MAX_PAGE_SIZE, KeysetEventsPage, WireEvent},
@@ -8,20 +25,6 @@ use crate::infra::{
     http::retry_after_ms,
     retry::{self, RetryPolicy},
 };
-use futures_util::StreamExt;
-use quant_pivot_error::api::ApiError;
-use quant_pivot_models::{
-    config::GammaConfig, domain::market::EventRegistryInfo, enums::market::MarketStatus,
-    types::TokenId,
-};
-use std::{
-    collections::BTreeSet,
-    sync::{
-        Arc,
-        atomic::{AtomicU32, Ordering},
-    },
-};
-use url::Url;
 
 const EVENTS_KEYSET_PATH: &str = "/events/keyset";
 const MAX_KEYSET_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
@@ -44,12 +47,10 @@ impl GammaResponseBody {
     }
 }
 
-async fn read_bounded_keyset_body(
-    response: reqwest::Response,
-) -> Result<GammaResponseBody, ApiError> {
+async fn read_bounded_keyset_body(response: Response) -> Result<GammaResponseBody, ApiError> {
     let content_type = response
         .headers()
-        .get(reqwest::header::CONTENT_TYPE)
+        .get(CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .unwrap_or("<missing>")
         .to_owned();
@@ -145,7 +146,7 @@ fn normalize_wire_events(events: Vec<WireEvent>) -> Vec<CatalogEvent> {
 }
 
 async fn fetch_events_keyset_page(
-    http: &reqwest::Client,
+    http: &Client,
     config: &GammaConfig,
     retry_policy: &RetryPolicy,
     request_count: &Arc<AtomicU32>,
@@ -214,7 +215,7 @@ async fn fetch_events_keyset_page(
 }
 
 async fn walk_keyset_pages<F>(
-    http: &reqwest::Client,
+    http: &Client,
     config: &GammaConfig,
     retry_policy: &RetryPolicy,
     page_size: u32,
@@ -282,7 +283,7 @@ where
 
 /// Paginate all open events via keyset cursor and normalize to catalog rows.
 pub async fn full_sync_raw(
-    http: &reqwest::Client,
+    http: &Client,
     config: &GammaConfig,
     retry_policy: &RetryPolicy,
 ) -> Result<Vec<CatalogEvent>, ApiError> {
@@ -297,7 +298,7 @@ pub async fn full_sync_raw(
 }
 
 pub async fn full_sync(
-    http: &reqwest::Client,
+    http: &Client,
     config: &GammaConfig,
     retry_policy: &RetryPolicy,
 ) -> Result<Vec<EventRegistryInfo>, ApiError> {
@@ -310,7 +311,7 @@ pub async fn full_sync(
 
 /// Return the first active token found by the bounded keyset scan.
 pub async fn discover_active_token(
-    http: &reqwest::Client,
+    http: &Client,
     config: &GammaConfig,
     retry_policy: &RetryPolicy,
 ) -> Result<TokenId, ApiError> {
@@ -327,7 +328,7 @@ pub async fn discover_active_token(
 
 /// Collect up to `limit` active CLOB token ids by walking Gamma keyset pages.
 pub async fn discover_active_tokens(
-    http: &reqwest::Client,
+    http: &Client,
     config: &GammaConfig,
     retry_policy: &RetryPolicy,
     limit: usize,

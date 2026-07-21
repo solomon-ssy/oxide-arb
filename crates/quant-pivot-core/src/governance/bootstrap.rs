@@ -11,9 +11,10 @@ use chrono::{Duration, Utc};
 use quant_pivot_error::{QuantError, QuantResult, control::ControlError, storage::StorageError};
 use quant_pivot_models::{
     domain::{
-        ActivateBootstrapRequest, ActivateBootstrapState, BootstrapPort, BootstrapView,
-        CapabilityView, CoreEvent, CoreEventPublisher, PolicySnapshotPort, SystemCapabilities,
-        SystemRuntimeStateInfo, SystemStatus,
+        api::{ActivateBootstrapRequest, BootstrapView, CapabilityView, SystemCapabilities},
+        governance::{ActivateBootstrapState, SystemRuntimeStateInfo, SystemStatus},
+        ports::{BootstrapPort, PolicySnapshotPort},
+        runtime::{CoreEvent, CoreEventPublisher},
     },
     enums::{
         execution::KillSwitchState,
@@ -27,6 +28,10 @@ use quant_pivot_repository::traits::{
     ModelRunRepository, PolicyRepository, RecommendationReportRepository,
     SystemRuntimeStateRepository,
 };
+use tokio::sync::{
+    watch,
+    watch::{Receiver, Sender},
+};
 
 pub struct BootstrapService {
     state: ArcSwap<BootstrapView>,
@@ -36,8 +41,8 @@ pub struct BootstrapService {
     model_runs: Arc<dyn ModelRunRepository>,
     reports: Arc<dyn RecommendationReportRepository>,
     events: CoreEventPublisher,
-    phase_tx: tokio::sync::watch::Sender<BootstrapView>,
-    capability_tx: tokio::sync::watch::Sender<SystemCapabilities>,
+    phase_tx: Sender<BootstrapView>,
+    capability_tx: Sender<SystemCapabilities>,
     last_status: ArcSwap<SystemStatus>,
     serving_evidence_present: AtomicBool,
 }
@@ -53,10 +58,10 @@ impl BootstrapService {
     ) -> QuantResult<Self> {
         let state = state_repo.begin_baseline_collection().await?;
         let initial_view = bootstrap_view(&state);
-        let (phase_tx, _phase_rx) = tokio::sync::watch::channel(initial_view.clone());
+        let (phase_tx, _phase_rx) = watch::channel(initial_view.clone());
         let initial_capabilities =
             SystemCapabilities::fail_closed(CapabilityReason::BootstrapInitializing);
-        let (capability_tx, _capability_rx) = tokio::sync::watch::channel(initial_capabilities);
+        let (capability_tx, _capability_rx) = watch::channel(initial_capabilities);
         Ok(Self {
             state: ArcSwap::from_pointee(initial_view),
             state_repo,
@@ -241,7 +246,7 @@ impl BootstrapPort for BootstrapService {
         self.state.load_full().as_ref().clone()
     }
 
-    fn subscribe(&self) -> tokio::sync::watch::Receiver<BootstrapView> {
+    fn subscribe(&self) -> Receiver<BootstrapView> {
         self.phase_tx.subscribe()
     }
 
@@ -249,7 +254,7 @@ impl BootstrapPort for BootstrapService {
         self.capability_tx.borrow().clone()
     }
 
-    fn subscribe_capabilities(&self) -> tokio::sync::watch::Receiver<SystemCapabilities> {
+    fn subscribe_capabilities(&self) -> Receiver<SystemCapabilities> {
         self.capability_tx.subscribe()
     }
 

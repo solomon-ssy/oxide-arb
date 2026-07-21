@@ -11,23 +11,23 @@
 mod local;
 mod s3;
 
-pub use local::LocalArtifactStore;
-pub use s3::S3ArtifactStore;
+use std::{
+    fmt::{Display, Formatter, Result as FmtResult},
+    pin::Pin,
+    sync::Arc,
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures_util::{Stream, StreamExt, stream};
+pub use local::LocalArtifactStore;
 use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{
     config::{ArtifactStoreDeployConfig, ArtifactStoreKind},
     types::ArtifactUri,
 };
-use std::{
-    fmt::{self, Display, Formatter},
-    pin::Pin,
-    sync::Arc,
-    time::Duration,
-};
+pub use s3::S3ArtifactStore;
 
 pub type ArtifactByteStream = Pin<Box<dyn Stream<Item = QuantResult<Bytes>> + Send>>;
 
@@ -92,7 +92,7 @@ impl ArtifactNamespace {
 }
 
 impl Display for ArtifactNamespace {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         f.write_str(self.as_str())
     }
 }

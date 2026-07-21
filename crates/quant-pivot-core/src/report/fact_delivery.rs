@@ -2,6 +2,7 @@
 
 use std::{future::Future, sync::Arc, time::Duration};
 
+use blake3::Hasher;
 use chrono::Utc;
 use quant_pivot_error::{
     QuantError, QuantResult,
@@ -10,7 +11,7 @@ use quant_pivot_error::{
 };
 use quant_pivot_models::{
     clickhouse::{QuantReportRecommendationFactRow, ReportMarketFunnelRow},
-    domain::{FactDeliverySettlement, RecommendationReportInfo, ReportFactDeliveryInfo},
+    domain::quant::{FactDeliverySettlement, RecommendationReportInfo, ReportFactDeliveryInfo},
     enums::quant::{RecommendationReportStatus, ReportFactDeliveryStatus},
     hashing::CanonicalDigest,
     types::{
@@ -26,12 +27,11 @@ use quant_pivot_storage::clickhouse::{ChWriteManager, ClickHousePool};
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
-use crate::observability::metrics_hub::MetricsHub;
-
 use super::{
     publisher::ReportPublisher,
     types::{NotificationRecommendation, ReportNotificationPayload, durable_report_error_summary},
 };
+use crate::observability::metrics_hub::MetricsHub;
 
 const RECOMMENDATION_TABLE: &str = "quant_report_recommendation_fact";
 const FUNNEL_TABLE: &str = "quant_report_market_funnel";
@@ -504,14 +504,14 @@ fn validate_commitment<T: Serialize>(
 }
 
 struct RowChainVerifier {
-    hasher: blake3::Hasher,
+    hasher: Hasher,
     row_count: i64,
     first: bool,
 }
 
 impl RowChainVerifier {
     fn new() -> Self {
-        let mut hasher = blake3::Hasher::new();
+        let mut hasher = Hasher::new();
         hasher.update(b"[");
         Self {
             hasher,

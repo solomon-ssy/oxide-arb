@@ -7,8 +7,8 @@ pub mod operation_log;
 pub mod runtime_config;
 pub mod system_runtime_state;
 
-pub use event::*;
-pub use kill_switch::*;
-pub use operation_log::*;
-pub use runtime_config::*;
-pub use system_runtime_state::*;
+pub use event::EventRepository;
+pub use kill_switch::KillSwitchStateRepository;
+pub use operation_log::OperationLogRepository;
+pub use runtime_config::PolicyRepository;
+pub use system_runtime_state::SystemRuntimeStateRepository;

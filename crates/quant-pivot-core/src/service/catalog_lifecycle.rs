@@ -14,7 +14,7 @@ pub enum PauseReason {
 }
 
 impl PauseReason {
-    /// Prometheus label for [`MetricsHub::gamma_markets_paused`].
+    /// Prometheus label for the paused-market metric.
     #[must_use]
     pub const fn metric_label(self) -> &'static str {
         match self {
@@ -57,7 +57,8 @@ pub fn apply_past_deadline_to_catalog(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::slice;
+
     use chrono::Duration;
     use quant_pivot_models::{
         domain::market::TokenInfo,
@@ -68,7 +69,8 @@ mod tests {
         types::{EventId, MarketId, TokenId},
     };
     use rust_decimal_macros::dec;
-    use std::slice;
+
+    use super::*;
 
     fn sample_market(status: MarketStatus, end_date: Option<DateTime<Utc>>) -> MarketRegistryInfo {
         MarketRegistryInfo {

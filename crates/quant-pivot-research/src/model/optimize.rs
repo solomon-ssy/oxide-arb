@@ -1,4 +1,4 @@
-//! `argmin`-backed weight refinement (Phase 3.6, `optimize` feature).
+//! `argmin`-backed weight refinement behind the `optimize` feature.
 //!
 //! The deterministic coordinate search in [`crate::model::trainer`] is the base
 //! optimizer. When the `optimize` feature is enabled, this module runs a

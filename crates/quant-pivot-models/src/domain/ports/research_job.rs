@@ -10,10 +10,12 @@ use quant_pivot_error::QuantResult;
 
 use crate::{
     domain::{
-        BuildTrainingDatasetRequest, FitBiasTableRequest, FitModelCalibratorRequest,
-        FitTradePolicyRequest, Paginated, ResearchJobListQuery, ResearchJobView,
-        RunBacktestRequest, RunCpcvBacktestRequest, TradePolicyValidationJobParams,
-        TrainModelRequest,
+        api::{
+            BuildTrainingDatasetRequest, FitBiasTableRequest, FitModelCalibratorRequest,
+            FitTradePolicyRequest, ResearchJobListQuery, ResearchJobView, RunBacktestRequest,
+            RunCpcvBacktestRequest, TradePolicyValidationJobParams, TrainModelRequest,
+        },
+        pagination::Paginated,
     },
     types::{DecisionPolicySnapshotId, ModelVersionId, ResearchJobId},
 };
@@ -53,7 +55,7 @@ pub trait ResearchJobPort: Send + Sync {
     ) -> QuantResult<ResearchJobView>;
 
     /// Enqueue Combinatorial Purged Cross-Validation + governed trial-grid
-    /// validation (Phase 11.5).
+    /// validation.
     async fn enqueue_cpcv_backtest(
         &self,
         model_version_id: ModelVersionId,
@@ -61,7 +63,7 @@ pub trait ResearchJobPort: Send + Sync {
         ctx: JobSubmitContext,
     ) -> QuantResult<ResearchJobView>;
 
-    /// Enqueue a favorite-longshot bias-table fit (Phase 11.2.1).
+    /// Enqueue a favorite-longshot bias-table fit.
     ///
     /// The active runtime-config version is frozen at enqueue so the fit reads
     /// the exact `factors.structural.favorite_longshot` parameters that governed
@@ -73,7 +75,7 @@ pub trait ResearchJobPort: Send + Sync {
         ctx: JobSubmitContext,
     ) -> QuantResult<ResearchJobView>;
 
-    /// Enqueue a model-score `ProbabilityCalibrator` fit (Phase 11.3 §4).
+    /// Enqueue a model-score `ProbabilityCalibrator` fit.
     ///
     /// The active runtime-config version is frozen at enqueue so the fit
     /// replays through the exact `model.calibration` parameters (method
@@ -85,7 +87,7 @@ pub trait ResearchJobPort: Send + Sync {
         ctx: JobSubmitContext,
     ) -> QuantResult<ResearchJobView>;
 
-    /// Enqueue a governed executable trade-policy fit (Phase 11.7).
+    /// Enqueue a governed executable trade-policy fit.
     async fn enqueue_trade_policy_fit(
         &self,
         request: FitTradePolicyRequest,

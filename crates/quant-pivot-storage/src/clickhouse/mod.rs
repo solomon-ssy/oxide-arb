@@ -3,6 +3,8 @@
 mod ensure;
 mod migration;
 mod pool;
+mod query;
+mod query_limits;
 mod readiness;
 mod schema;
 pub mod write_manager;
@@ -16,6 +18,7 @@ pub use migration::{
     plan_schema, render_schema_manifest, schema_contract_hash, verify_schema,
 };
 pub use pool::ClickHousePool;
+pub use query::ClickHouseQueryLimits;
 pub use readiness::{BookLatencyObservation, RawHistoryObservation};
 pub use schema::extract_table_ttl;
 pub use write_manager::{ChWriteManager, ChWriteMetrics, WritePermit};

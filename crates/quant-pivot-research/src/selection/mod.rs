@@ -1,11 +1,10 @@
 //! Market selection plane: the [`MarketSelector`] contract and its
 //! compute-domain snapshot types.
 //!
-//! Online closure entry (3.1): a deterministic, replayable, hashable
+//! Online closure entry: a deterministic, replayable, hashable
 //! [`MarketSelectionSnapshot`] of which markets enter a research/report round.
-//! The 7-filter pipeline ([`filters`]), the pure selector ([`selector`]), and
-//! the canonical [`hash`] live here; the Postgres repository lands in
-//! `quant-pivot-repository`.
+//! The seven-filter pipeline, pure selector, and canonical hash live here; the
+//! Postgres repository lives in `quant-pivot-repository`.
 //!
 //! The selector is a **pure function** of two frozen inputs: a
 //! [`MarketSelectionBuildRequest`] (strategy intent: config + model
@@ -17,19 +16,19 @@ mod filters;
 mod hash;
 mod selector;
 
+use std::collections::{BTreeMap, BTreeSet};
+
+use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 pub use filters::{
     CategoryFilter, DataQualityFilter, FilterChain, FilterOutcome, LiquidityFilter,
     MarketCandidateCtx, MarketStatusFilter, ModelEligibilityFilter, ResolutionAmbiguityFilter,
     SelectionFilter, SelectionThresholds, accumulate_exclusion,
 };
 pub use hash::SelectorHashInput;
-pub use selector::ConfiguredMarketSelector;
-
-use async_trait::async_trait;
-use chrono::{DateTime, Utc};
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
-    domain::MarketCandidate,
+    domain::quant::MarketCandidate,
     enums::common::MarketCategory,
     runtime_config::{DataQualityConfig, FeaturesConfig, SelectionConfig},
     types::{
@@ -37,8 +36,8 @@ use quant_pivot_models::{
         ModelInputContract, ModelInputRequiredness, SelectionExclusionSummary, TokenId, Usd,
     },
 };
+pub use selector::ConfiguredMarketSelector;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
 
 use crate::features::{EvidenceSourceRef, FeatureName};
 
@@ -80,7 +79,7 @@ pub struct MarketSelectionBuildRequest {
 /// Feature availability requirements imposed by the routed model(s) on selection.
 ///
 /// A market's actual eligibility bar depends on **which model will score it**
-/// (11.2.2 remediation R7): a market whose category routes to a
+/// A market whose category routes to a
 /// category-specific artifact must be checked against that artifact's own
 /// required features, not just the generic model's — and, symmetrically, a
 /// category's domain-feature requirement must never gate a market of a

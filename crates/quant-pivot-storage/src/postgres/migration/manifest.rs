@@ -4,8 +4,7 @@ use std::collections::BTreeSet;
 
 use quant_pivot_error::storage::StorageError;
 use serde_json::Value;
-
-use crate::sql_contract_registry::POSTGRES_SCHEMA_VERIFY;
+use sqlx::PgPool;
 
 const MANIFEST_JSON: &str = include_str!("../../../../../schema/postgres/manifest.json");
 
@@ -220,14 +219,13 @@ pub(super) fn expected() -> Result<Value, StorageError> {
         .map_err(|error| StorageError::Migration(format!("parse PostgreSQL manifest: {error}")))
 }
 
-pub async fn inspect(pool: &sqlx::PgPool) -> Result<Value, StorageError> {
-    let mut value =
-        sqlx::query_scalar::<_, Value>(POSTGRES_SCHEMA_VERIFY.postgres_query(INSPECT_SQL))
-            .fetch_one(pool)
-            .await
-            .map_err(|error| {
-                StorageError::Migration(format!("inspect PostgreSQL manifest: {error}"))
-            })?;
+pub async fn inspect(pool: &PgPool) -> Result<Value, StorageError> {
+    let mut value = sqlx::query_scalar::<_, Value>(INSPECT_SQL)
+        .fetch_one(pool)
+        .await
+        .map_err(|error| {
+            StorageError::Migration(format!("inspect PostgreSQL manifest: {error}"))
+        })?;
     normalize_roles(&mut value);
     Ok(value)
 }

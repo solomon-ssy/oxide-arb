@@ -1,4 +1,4 @@
-//! Lot-native return series for Sell Sharpe / DSR / PBO (Phase 11.5.1).
+//! Lot-native return series for Sell Sharpe / DSR / PBO.
 //!
 //! Lot outcomes are **not** an equal-interval calendar process: lots open at
 //! irregular times and may cluster. Bailey–López de Prado DSR/PSR need a
@@ -95,18 +95,19 @@ pub fn active_observation_count(outcomes: &[LotOutcome], period_secs: u64) -> us
 
 #[cfg(test)]
 mod tests {
-    use super::{active_observation_count, calendarize_lot_returns};
-    use crate::backtest::LotOutcome;
-    use chrono::{TimeZone, Utc};
+    use chrono::{DateTime, TimeZone, Utc};
     use quant_pivot_models::types::PositionId;
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
 
-    fn ts(secs: i64) -> chrono::DateTime<Utc> {
+    use super::{active_observation_count, calendarize_lot_returns};
+    use crate::backtest::LotOutcome;
+
+    fn ts(secs: i64) -> DateTime<Utc> {
         Utc.timestamp_opt(1_700_000_000 + secs, 0).unwrap()
     }
 
-    fn outcome(as_of: chrono::DateTime<Utc>, return_value: Decimal) -> LotOutcome {
+    fn outcome(as_of: DateTime<Utc>, return_value: Decimal) -> LotOutcome {
         LotOutcome {
             position_id: PositionId::from_v7(),
             decision_at: as_of,

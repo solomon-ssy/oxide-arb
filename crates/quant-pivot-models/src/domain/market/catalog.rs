@@ -1,12 +1,13 @@
 //! Gamma catalog persistence DTOs for the `event` table.
 
+use chrono::{DateTime, Utc};
+use sea_orm::{ActiveValue, DeriveIntoActiveModel, DerivePartialModel, IntoActiveValue};
+use serde::{Deserialize, Serialize};
+
 use crate::{
     enums::market::EventStatus,
     types::{CatalogMarketIds, ContentHash, EventId},
 };
-use chrono::{DateTime, Utc};
-use sea_orm::{ActiveValue, DeriveIntoActiveModel, DerivePartialModel, IntoActiveValue};
-use serde::{Deserialize, Serialize};
 
 /// DB row projection matching `entities::event::Model` columns exactly.
 #[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]

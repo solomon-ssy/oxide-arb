@@ -7,7 +7,7 @@ use std::{
     time::Duration,
 };
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use quant_pivot_error::{QuantResult, research::ResearchError, storage::StorageError};
 use quant_pivot_models::{
     clickhouse::{
@@ -15,10 +15,15 @@ use quant_pivot_models::{
         MarketResolutionRow, TradeTapeRow,
     },
     domain::{
-        CatalogMarketChangeInfo, CatalogWindowInfo, CompleteSourceSlice, CryptoPriceReport,
-        DecisionBoundary, DecisionClock, DomainObservation, MarketLinkage, MarketRegistryInfo,
-        NewSourceSlice, SourceSliceIdentity, SourceSliceInfo, WeatherForecastPoint,
-        WeatherObservationFact,
+        data_plane::{
+            CryptoPriceReport, DecisionBoundary, DecisionClock, DomainObservation,
+            WeatherForecastPoint, WeatherObservationFact,
+        },
+        market::{CatalogMarketChangeInfo, CatalogWindowInfo, MarketRegistryInfo},
+        quant::{
+            CompleteSourceSlice, MarketLinkage, NewSourceSlice, SourceSliceIdentity,
+            SourceSliceInfo,
+        },
     },
     enums::quant::SourceSliceStatus,
     hashing::CanonicalDigest,
@@ -42,6 +47,7 @@ use quant_pivot_research::{
 };
 use serde::{Serialize, de::DeserializeOwned};
 use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
 use super::historical_window::{HistoricalWindowLoader, Prefetched, ReplaySample, WindowSpec};
 
@@ -814,7 +820,7 @@ impl SourceSliceMaterializer {
                 &identity.research_program_hash,
                 identity.window_start,
                 identity.window_end
-                    - chrono::Duration::seconds(
+                    - ChronoDuration::seconds(
                         i64::try_from(profile.spec.target_horizon_secs).map_err(|error| {
                             ResearchError::DatasetBuild {
                                 detail: error.to_string(),
@@ -970,7 +976,7 @@ fn replay_samples(versions: &[CatalogMarketChangeInfo]) -> QuantResult<Vec<Repla
     Ok(samples)
 }
 
-fn stream_session_ids(prefetched: &Prefetched, events: &[BookL2EventRow]) -> Vec<uuid::Uuid> {
+fn stream_session_ids(prefetched: &Prefetched, events: &[BookL2EventRow]) -> Vec<Uuid> {
     let mut ids = BTreeSet::new();
     for row in prefetched.books.values().flatten() {
         ids.insert(row.stream_session_id);

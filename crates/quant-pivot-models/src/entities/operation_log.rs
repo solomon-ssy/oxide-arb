@@ -1,5 +1,9 @@
 //! `operation_log` table entity (append-only activity log).
 
+use chrono::{DateTime, Utc};
+use sea_orm::entity::prelude::*;
+use serde::{Deserialize, Serialize};
+
 use crate::{
     enums::{
         operation_log::{OperationCategory, OperationHttpMethod, OperationOutcome},
@@ -10,9 +14,6 @@ use crate::{
         OperationLogId, RoleCode, UserId,
     },
 };
-use chrono::{DateTime, Utc};
-use sea_orm::entity::prelude::*;
-use serde::{Deserialize, Serialize};
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]

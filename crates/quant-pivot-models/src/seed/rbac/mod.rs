@@ -1,8 +1,8 @@
 //! Graph-ordered RBAC bootstrap seeds.
 //!
-//! These seeds form a dependency DAG (see `docs/plans/phase6.1-...`): roles and
-//! menus first, then the admin user, then the join tables and the Casbin policy
-//! set. IDs created upstream are passed downstream through [`SeedContext`]
+//! These seeds form a dependency DAG: roles and menus first, then the admin
+//! user, then the join tables and the Casbin policy set. IDs created upstream
+//! are passed downstream through [`SeedContext`]
 //! artifacts; idempotency is provided by the seed ledger plus per-loader
 //! `ON CONFLICT DO NOTHING`.
 //!

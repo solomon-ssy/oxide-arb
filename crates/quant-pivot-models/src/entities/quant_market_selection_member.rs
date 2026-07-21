@@ -1,10 +1,12 @@
 //! `quant_market_selection_member` table entity.
 
+use sea_orm::entity::prelude::*;
+
+use super::{event, market, quant_market_selection};
 use crate::{
     enums::{common::MarketCategory, market::MarketStatus},
     types::{EventId, MarketId, MarketSelectionId, TokenId, Usd},
 };
-use sea_orm::entity::prelude::*;
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -29,21 +31,21 @@ pub struct Model {
         from = "market_selection_id",
         to = "market_selection_id"
     )]
-    pub market_selection: BelongsTo<super::quant_market_selection::Entity>,
+    pub market_selection: BelongsTo<quant_market_selection::Entity>,
     #[sea_orm(
         belongs_to,
         relation_enum = "Market",
         from = "market_id",
         to = "market_id"
     )]
-    pub market: BelongsTo<super::market::Entity>,
+    pub market: BelongsTo<market::Entity>,
     #[sea_orm(
         belongs_to,
         relation_enum = "Event",
         from = "event_id",
         to = "event_id"
     )]
-    pub event: BelongsTo<super::event::Entity>,
+    pub event: BelongsTo<event::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

@@ -4,6 +4,8 @@
 //! [`PgRepositories::wire`] constructs each repository exactly once; downstream
 //! bundles and services [`Arc::clone`] the shared instances.
 
+use std::sync::Arc;
+
 use quant_pivot_repository::postgres::{
     PgAccountSnapshotRepository, PgAttributionRepository, PgBacktestPathSetRepository,
     PgBacktestReportRepository, PgBasisAlertRepository, PgCalibrationArtifactRepository,
@@ -25,7 +27,6 @@ use quant_pivot_repository::postgres::{
     PgUserRoleRepository, arc_repo,
 };
 use quant_pivot_storage::postgres::PostgresPool;
-use std::sync::Arc;
 
 /// All Postgres OLTP repositories shared across runtime bundles.
 pub struct PgRepositories {

@@ -18,20 +18,24 @@
 //! # `SeaORM` persistence
 //!
 //! [`SchemaVersion`] uses read-time validation via custom [`TryGetable`] /
-//! [`ValueType`] (not [`DeriveValueType`], which would accept corrupt integers).
+//! [`ValueType`] (not `DeriveValueType`, which would accept corrupt integers).
 //! [`ContentHash`] and [`ArtifactUri`] bind as `text` with **read-time validation**
-//! via [`validated_text_seaorm!`] — `DeriveValueType` on a `String` tuple struct
+//! via `validated_text_seaorm!` — `DeriveValueType` on a `String` tuple struct
 //! would skip validation when loading corrupt rows from Postgres.
 
-use std::{borrow::Cow, fmt, str::FromStr};
+use std::{
+    borrow::Cow,
+    fmt::{Display, Formatter, Result as FmtResult},
+    str::FromStr,
+};
 
 use quant_pivot_error::hashing::CanonicalDigestError;
-use schemars::JsonSchema;
+use schemars::{JsonSchema, Schema, SchemaGenerator};
 use sea_orm::{
-    ActiveValue, ColIdx, IntoActiveValue, TryGetError, TryGetable,
+    ActiveValue, ColIdx, DbErr, IntoActiveValue, QueryResult, TryGetError, TryGetable,
     sea_query::{ArrayType, ColumnType, Nullable, Value, ValueType, ValueTypeErr},
 };
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error};
 
 use crate::hashing::BLAKE3_PREFIX;
 
@@ -40,7 +44,7 @@ const BLAKE3_HEX_LEN: usize = 64;
 
 /// `SeaORM` bindings for validated `text` newtypes (read-time `parse`).
 ///
-/// Not [`DeriveValueType`]: struct derive wraps `String` losslessly and would
+/// Not `DeriveValueType`: struct derive wraps `String` losslessly and would
 /// accept malformed DB values without calling `parse`.
 macro_rules! validated_text_seaorm {
     ($name:ident) => {
@@ -125,7 +129,7 @@ impl JsonSchema for ContentHash {
         Cow::Borrowed("ContentHash")
     }
 
-    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    fn json_schema(_generator: &mut SchemaGenerator) -> Schema {
         schemars::json_schema!({
             "type": "string",
             "pattern": "^blake3:[0-9a-f]{64}$"
@@ -173,8 +177,8 @@ impl ContentHash {
     }
 }
 
-impl fmt::Display for ContentHash {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for ContentHash {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         f.write_str(&self.0)
     }
 }
@@ -196,7 +200,7 @@ impl Serialize for ContentHash {
 impl<'de> Deserialize<'de> for ContentHash {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let raw = String::deserialize(deserializer)?;
-        Self::parse(raw).map_err(serde::de::Error::custom)
+        Self::parse(raw).map_err(Error::custom)
     }
 }
 
@@ -249,8 +253,8 @@ impl ArtifactUri {
     }
 }
 
-impl fmt::Display for ArtifactUri {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for ArtifactUri {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         f.write_str(&self.0)
     }
 }
@@ -272,7 +276,7 @@ impl Serialize for ArtifactUri {
 impl<'de> Deserialize<'de> for ArtifactUri {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let raw = String::deserialize(deserializer)?;
-        Self::parse(raw).map_err(serde::de::Error::custom)
+        Self::parse(raw).map_err(Error::custom)
     }
 }
 
@@ -326,8 +330,8 @@ impl SchemaVersion {
     }
 }
 
-impl fmt::Display for SchemaVersion {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for SchemaVersion {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         write!(f, "{}", self.0)
     }
 }
@@ -342,7 +346,7 @@ impl IntoActiveValue<Self> for SchemaVersion {
 impl<'de> Deserialize<'de> for SchemaVersion {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let raw = i32::deserialize(deserializer)?;
-        Self::try_new(raw).map_err(serde::de::Error::custom)
+        Self::try_new(raw).map_err(Error::custom)
     }
 }
 
@@ -361,9 +365,9 @@ impl From<&SchemaVersion> for Value {
 }
 
 impl TryGetable for SchemaVersion {
-    fn try_get_by<I: ColIdx>(res: &sea_orm::QueryResult, index: I) -> Result<Self, TryGetError> {
+    fn try_get_by<I: ColIdx>(res: &QueryResult, index: I) -> Result<Self, TryGetError> {
         let raw: i32 = <i32 as TryGetable>::try_get_by(res, index)?;
-        Self::try_new(raw).map_err(|e| TryGetError::DbErr(sea_orm::DbErr::Type(e.to_string())))
+        Self::try_new(raw).map_err(|e| TryGetError::DbErr(DbErr::Type(e.to_string())))
     }
 }
 
@@ -396,8 +400,9 @@ impl Nullable for SchemaVersion {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use sea_orm::sea_query::{Value, ValueType};
+
+    use super::*;
 
     const VALID_HASH: &str =
         "blake3:0000000000000000000000000000000000000000000000000000000000000000";

@@ -1,5 +1,12 @@
 //! `quant_recommendation` table entity.
 
+use chrono::{DateTime, Utc};
+use sea_orm::entity::prelude::*;
+
+use super::{
+    event, market, quant_order_intent, quant_recommendation_attribution,
+    quant_recommendation_report, research_profile_artifact,
+};
 use crate::{
     enums::quant::{OutcomeSide, RecommendationStatus},
     types::{
@@ -8,8 +15,6 @@ use crate::{
         RecommendationReportId, RecommendationTradePlan, ResearchProfileArtifactId, TokenId,
     },
 };
-use chrono::{DateTime, Utc};
-use sea_orm::entity::prelude::*;
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -56,7 +61,7 @@ pub struct Model {
         from = "research_profile_artifact_id",
         to = "research_profile_artifact_id"
     )]
-    pub research_profile_artifact: BelongsTo<super::research_profile_artifact::Entity>,
+    pub research_profile_artifact: BelongsTo<research_profile_artifact::Entity>,
 
     #[sea_orm(
         belongs_to,
@@ -64,25 +69,25 @@ pub struct Model {
         from = "recommendation_report_id",
         to = "recommendation_report_id"
     )]
-    pub recommendation_report: BelongsTo<super::quant_recommendation_report::Entity>,
+    pub recommendation_report: BelongsTo<quant_recommendation_report::Entity>,
     #[sea_orm(
         belongs_to,
         relation_enum = "Market",
         from = "market_id",
         to = "market_id"
     )]
-    pub market: BelongsTo<super::market::Entity>,
+    pub market: BelongsTo<market::Entity>,
     #[sea_orm(
         belongs_to,
         relation_enum = "Event",
         from = "event_id",
         to = "event_id"
     )]
-    pub event: BelongsTo<super::event::Entity>,
+    pub event: BelongsTo<event::Entity>,
     #[sea_orm(has_many, relation_enum = "OrderIntent")]
-    pub order_intent: HasMany<super::quant_order_intent::Entity>,
+    pub order_intent: HasMany<quant_order_intent::Entity>,
     #[sea_orm(has_one, relation_enum = "Attribution")]
-    pub attribution: HasOne<super::quant_recommendation_attribution::Entity>,
+    pub attribution: HasOne<quant_recommendation_attribution::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

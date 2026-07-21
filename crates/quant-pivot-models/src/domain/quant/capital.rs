@@ -1,13 +1,14 @@
 //! Capital-allocation ledger persistence DTOs.
 
+use chrono::{DateTime, Utc};
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
+use serde::{Deserialize, Serialize};
+
 use crate::{
     entities::quant_capital_allocation,
     enums::execution::CapitalAllocationState,
     types::{CapitalAllocationId, OrderIntentId, RecommendationId, Usd},
 };
-use chrono::{DateTime, Utc};
-use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
-use serde::{Deserialize, Serialize};
 
 /// Persisted intent-level capital allocation state.
 #[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]

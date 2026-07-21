@@ -5,27 +5,36 @@
 //! activation must bind the exact approval, expected active revision,
 //! short-lived preflight proof, and idempotency key.
 
-use actix_web::{http::Method, web};
-use chrono::{Duration, Utc};
+use actix_web::{
+    http::Method,
+    web::{Data, Path, Query},
+};
+use chrono::{DateTime, Duration, Utc};
 use quant_pivot_error::config_validation::{
     ConfigValidationError, ConfigValidationReport, ConfigWarning,
 };
 use quant_pivot_models::{
     config::{DeployConfig, ProjectLifecyclePolicy},
     domain::{
-        ActivatePolicyDraftRequest, ApprovePolicyDraftRequest, ConfigActivityQuery,
-        ConfigActivityView, ConfigResourceSummaryView, ConfigResourcesView,
-        ConfigSnapshotOptionsQuery, CoreEvent, CreatePolicyDraftRequest, CredentialHealthView,
-        CurrentPolicyResourceView, DecisionPolicySnapshotOptionView, DeploymentConfigSnapshotView,
-        DeploymentConfigView, DeploymentEndpointView, DeploymentIdentityView,
-        DeploymentResourceBudgetView, DeploymentResourceLimitView, LifecycleCheckView,
-        LifecycleView, NewDecisionPolicySnapshot, NewPolicyActivation, NewPolicyRevision,
-        NewProductionBaseline, PolicyActivationCommit, PolicyActivationOutcome,
-        PolicyActivationResultView, PolicyApprovalView, PolicyResourceSchemaView,
-        PolicyRevisionInfo, PolicyRevisionListQuery, PolicyRevisionView, PolicyValidationView,
-        PreparedPolicySnapshot, ProductionEvidenceInfo, RecordPolicyApproval,
-        SchedulePreviewRequest, SchedulePreviewView, SealProductionRequest,
-        ValidatePolicyDraftRequest, VerifiedSchemaFingerprints,
+        api::{
+            ActivatePolicyDraftRequest, ApprovePolicyDraftRequest, ConfigActivityQuery,
+            ConfigActivityView, ConfigResourceSummaryView, ConfigResourcesView,
+            ConfigSnapshotOptionsQuery, CreatePolicyDraftRequest, CredentialHealthView,
+            CurrentPolicyResourceView, DecisionPolicySnapshotOptionView,
+            DeploymentConfigSnapshotView, DeploymentConfigView, DeploymentEndpointView,
+            DeploymentIdentityView, DeploymentResourceBudgetView, DeploymentResourceLimitView,
+            LifecycleCheckView, LifecycleView, PolicyActivationResultView, PolicyApprovalView,
+            PolicyResourceSchemaView, PolicyRevisionListQuery, PolicyRevisionView,
+            PolicyValidationView, SchedulePreviewRequest, SchedulePreviewView,
+            SealProductionRequest, ValidatePolicyDraftRequest,
+        },
+        governance::{
+            NewDecisionPolicySnapshot, NewPolicyActivation, NewPolicyRevision,
+            NewProductionBaseline, PolicyActivationCommit, PolicyActivationOutcome,
+            PolicyRevisionInfo, ProductionEvidenceInfo, RecordPolicyApproval,
+        },
+        ports::{PreparedPolicySnapshot, VerifiedSchemaFingerprints},
+        runtime::CoreEvent,
     },
     enums::{
         operation_log::OperationCategory,
@@ -208,7 +217,7 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
 }
 
 pub async fn resources(
-    state: web::Data<AppState>,
+    state: Data<AppState>,
 ) -> Result<WebResponse<ConfigResourcesView>, WebError> {
     let inventory = state.runtime_config.load_resource_inventory().await?;
     let summaries = inventory
@@ -234,8 +243,8 @@ pub async fn resources(
 }
 
 pub async fn current_resource(
-    state: web::Data<AppState>,
-    kind: web::Path<ConfigResourceKind>,
+    state: Data<AppState>,
+    kind: Path<ConfigResourceKind>,
 ) -> Result<WebResponse<CurrentPolicyResourceView>, WebError> {
     let kind = kind.into_inner();
     let current = state.runtime_config.load_current_resource(kind).await?;
@@ -254,7 +263,7 @@ pub async fn current_resource(
 }
 
 pub async fn resource_schema(
-    kind: web::Path<ConfigResourceKind>,
+    kind: Path<ConfigResourceKind>,
 ) -> Result<WebResponse<PolicyResourceSchemaView>, WebError> {
     let kind = kind.into_inner();
     Ok(WebResponse::ok(PolicyResourceSchemaView {
@@ -267,9 +276,9 @@ pub async fn resource_schema(
 }
 
 pub async fn list_revisions(
-    state: web::Data<AppState>,
-    kind: web::Path<ConfigResourceKind>,
-    query: web::Query<PolicyRevisionListQuery>,
+    state: Data<AppState>,
+    kind: Path<ConfigResourceKind>,
+    query: Query<PolicyRevisionListQuery>,
 ) -> Result<WebResponse<Vec<PolicyRevisionView>>, WebError> {
     let limit = bounded_limit(query.into_inner().limit);
     let revisions = state
@@ -283,8 +292,8 @@ pub async fn list_revisions(
 }
 
 pub async fn create_draft(
-    state: web::Data<AppState>,
-    kind: web::Path<ConfigResourceKind>,
+    state: Data<AppState>,
+    kind: Path<ConfigResourceKind>,
     actor: AuthedActor,
     acting_role: ActingRole,
     request_id: RequestId,
@@ -339,8 +348,8 @@ pub async fn create_draft(
 }
 
 pub async fn validate_draft(
-    state: web::Data<AppState>,
-    path: web::Path<(ConfigResourceKind, PolicyRevisionId)>,
+    state: Data<AppState>,
+    path: Path<(ConfigResourceKind, PolicyRevisionId)>,
     acting_role: ActingRole,
     request_id: RequestId,
     op_ctx: OperationCtx,
@@ -429,8 +438,8 @@ pub async fn validate_draft(
 }
 
 pub async fn approve_draft(
-    state: web::Data<AppState>,
-    path: web::Path<(ConfigResourceKind, PolicyRevisionId)>,
+    state: Data<AppState>,
+    path: Path<(ConfigResourceKind, PolicyRevisionId)>,
     actor: AuthedActor,
     acting_role: ActingRole,
     request_id: RequestId,
@@ -484,8 +493,8 @@ pub async fn approve_draft(
 }
 
 pub async fn activate_draft(
-    state: web::Data<AppState>,
-    path: web::Path<(ConfigResourceKind, PolicyRevisionId)>,
+    state: Data<AppState>,
+    path: Path<(ConfigResourceKind, PolicyRevisionId)>,
     actor: AuthedActor,
     acting_role: ActingRole,
     request_id: RequestId,
@@ -509,8 +518,8 @@ pub async fn activate_draft(
 }
 
 pub async fn rollback_revision(
-    state: web::Data<AppState>,
-    path: web::Path<(ConfigResourceKind, PolicyRevisionId)>,
+    state: Data<AppState>,
+    path: Path<(ConfigResourceKind, PolicyRevisionId)>,
     actor: AuthedActor,
     acting_role: ActingRole,
     request_id: RequestId,
@@ -534,8 +543,8 @@ pub async fn rollback_revision(
 }
 
 pub async fn activity(
-    state: web::Data<AppState>,
-    query: web::Query<ConfigActivityQuery>,
+    state: Data<AppState>,
+    query: Query<ConfigActivityQuery>,
 ) -> Result<WebResponse<Vec<ConfigActivityView>>, WebError> {
     let limit = bounded_limit(query.into_inner().limit);
     let events = state
@@ -549,8 +558,8 @@ pub async fn activity(
 }
 
 pub async fn snapshot_options(
-    state: web::Data<AppState>,
-    query: web::Query<ConfigSnapshotOptionsQuery>,
+    state: Data<AppState>,
+    query: Query<ConfigSnapshotOptionsQuery>,
 ) -> Result<WebResponse<Vec<DecisionPolicySnapshotOptionView>>, WebError> {
     let limit = bounded_limit(query.into_inner().limit);
     let options = state
@@ -572,12 +581,12 @@ pub async fn schedule_preview(
     Ok(WebResponse::ok(SchedulePreviewView { next_fire_times }))
 }
 
-pub async fn lifecycle(state: web::Data<AppState>) -> Result<WebResponse<LifecycleView>, WebError> {
+pub async fn lifecycle(state: Data<AppState>) -> Result<WebResponse<LifecycleView>, WebError> {
     lifecycle_view(&state).await.map(WebResponse::ok)
 }
 
 pub async fn deployment(
-    state: web::Data<AppState>,
+    state: Data<AppState>,
 ) -> Result<WebResponse<DeploymentConfigView>, WebError> {
     let deploy = &state.deploy;
     let artifact_store = &deploy.research.artifact_store;
@@ -871,7 +880,7 @@ fn usize_to_u64(value: usize) -> u64 {
 }
 
 pub async fn seal_production(
-    state: web::Data<AppState>,
+    state: Data<AppState>,
     actor: AuthedActor,
     acting_role: ActingRole,
     request_id: RequestId,
@@ -1160,7 +1169,7 @@ fn production_evidence_check(
     live_schema: &VerifiedSchemaFingerprints,
     active_bundle: Option<&ActivePolicyBundle>,
     artifact_valid: bool,
-    checked_at: chrono::DateTime<Utc>,
+    checked_at: DateTime<Utc>,
 ) -> ProductionSealCheck {
     let matches_current_state = artifact_valid
         && evidence

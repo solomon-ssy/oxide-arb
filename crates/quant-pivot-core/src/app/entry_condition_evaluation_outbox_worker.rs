@@ -2,6 +2,7 @@
 
 use std::{sync::Arc, time::Duration};
 
+use chrono::{Duration as ChronoDuration, Utc};
 use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{clickhouse::EntryConditionEvaluationEventRow, types::WorkerId};
 use quant_pivot_repository::traits::{EntryConditionRepository, FactWriter};
@@ -49,8 +50,8 @@ impl EntryConditionEvaluationOutboxWorker {
     }
 
     async fn run_once(&self) -> QuantResult<()> {
-        let now = chrono::Utc::now();
-        let lease_duration = chrono::Duration::from_std(LEASE_DURATION).map_err(|error| {
+        let now = Utc::now();
+        let lease_duration = ChronoDuration::from_std(LEASE_DURATION).map_err(|error| {
             QuantError::config(format!("invalid evaluation outbox lease duration: {error}"))
         })?;
         let evaluations = self
@@ -85,7 +86,7 @@ impl EntryConditionEvaluationOutboxWorker {
             }
             return Err(error.into());
         }
-        let published_at = chrono::Utc::now();
+        let published_at = Utc::now();
         for evaluation in evaluations {
             self.conditions
                 .mark_evaluation_published(

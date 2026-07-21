@@ -7,7 +7,7 @@ use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
     clickhouse::TradeTapeRow,
     config::TradeTapeOnChainConfig,
-    domain::trade_tape::trade_tape_coverage,
+    domain::data_plane::trade_tape::trade_tape_coverage::{SIDE, SIZE},
     enums::clickhouse::{ChTradeReconciliationStatus, ChTradeSide, ChTradeTapeSource},
 };
 use quant_pivot_repository::{
@@ -142,8 +142,8 @@ fn pending_indices(rows: &[TradeTapeRow], source: ChTradeTapeSource) -> Vec<usiz
 }
 
 fn observations_match(ws: &TradeTapeRow, chain: &TradeTapeRow, window_ms: i64) -> bool {
-    let fields_observed = ws.observed_field_flags & trade_tape_coverage::SIDE != 0
-        && ws.observed_field_flags & trade_tape_coverage::SIZE != 0;
+    let fields_observed =
+        ws.observed_field_flags & SIDE != 0 && ws.observed_field_flags & SIZE != 0;
     fields_observed
         && ws.market_id == chain.market_id
         && ws.token_id == chain.token_id
@@ -232,7 +232,7 @@ fn revision(
 mod tests {
     use quant_pivot_models::{
         clickhouse::{ChPrice, ChShares, ChUsd, TradeTapeRow},
-        domain::trade_tape::trade_tape_coverage,
+        domain::data_plane::trade_tape::trade_tape_coverage::{SIDE, SIZE},
         enums::clickhouse::{
             ChTradeParticipantRole, ChTradeReconciliationStatus, ChTradeSide, ChTradeTapeSource,
         },
@@ -259,7 +259,7 @@ mod tests {
             tx_hash: None,
             source_event_id: id.to_owned(),
             source,
-            observed_field_flags: trade_tape_coverage::SIDE | trade_tape_coverage::SIZE,
+            observed_field_flags: SIDE | SIZE,
             fee_rate_bps: None,
             reconciliation_status: match source {
                 ChTradeTapeSource::MarketWs => ChTradeReconciliationStatus::Pending,

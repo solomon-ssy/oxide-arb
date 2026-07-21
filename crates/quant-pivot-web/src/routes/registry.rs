@@ -1,6 +1,6 @@
 //! Route registration primitives shared by every route module.
 //!
-//! Each resource module owns its [`RouteSpec`] list; [`super::protected_route_specs`]
+//! Each resource module owns its `RouteSpec` list; `super::protected_route_specs`
 //! concatenates them into the single authorization manifest.
 
 use actix_web::{FromRequest, Responder, Route, dev::Handler, http::Method, web};
@@ -9,7 +9,7 @@ use crate::auth::casbin::Rule;
 
 /// Path prefix shared by every API route (the version is negotiated by header,
 /// not encoded in the path). Authorization rule keys are this prefix plus the
-/// route's pattern, matching actix's `match_pattern()`.
+/// route's pattern, matching actix's `match_pattern`.
 pub(crate) const API_PREFIX: &str = "/api";
 
 /// A protected route: its method, path pattern (relative to [`API_PREFIX`]),

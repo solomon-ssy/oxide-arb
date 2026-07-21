@@ -2,13 +2,14 @@
 
 use std::{sync::Arc, time::Duration};
 
+use chrono::{Duration as ChronoDuration, Utc};
 use quant_pivot_error::{
     QuantError, QuantResult,
-    storage::{StorageError, entity},
+    storage::{StorageError, entity::QUANT_DOMAIN_EVENT_OUTBOX},
 };
 use quant_pivot_models::{
     clickhouse::{ChSchemaVersion, DomainEventRow},
-    domain::{DomainEventEnvelope, DomainEventType},
+    domain::data_plane::{DomainEventEnvelope, DomainEventType},
     types::{DomainEventId, WorkerId},
 };
 use quant_pivot_repository::traits::{DomainProjectionRepository, FactWriter};
@@ -59,8 +60,8 @@ impl DomainEventOutboxWorker {
     }
 
     async fn run_once(&self) -> QuantResult<()> {
-        let now = chrono::Utc::now();
-        let lease_duration = chrono::Duration::from_std(LEASE_DURATION).map_err(|error| {
+        let now = Utc::now();
+        let lease_duration = ChronoDuration::from_std(LEASE_DURATION).map_err(|error| {
             QuantError::config(format!("invalid domain outbox lease duration: {error}"))
         })?;
         let events = self
@@ -95,7 +96,7 @@ impl DomainEventOutboxWorker {
             }
             return Err(error.into());
         }
-        let published_at = chrono::Utc::now();
+        let published_at = Utc::now();
         for event in events {
             self.projections
                 .mark_event_published(&event.id, self.worker_id.clone(), published_at)
@@ -108,7 +109,7 @@ impl DomainEventOutboxWorker {
 fn to_clickhouse_row(event: &DomainEventEnvelope) -> Result<DomainEventRow, QuantError> {
     let payload_json = serde_json::to_string(&event.payload).map_err(|error| {
         StorageError::invariant_violation(
-            Some(entity::QUANT_DOMAIN_EVENT_OUTBOX),
+            Some(QUANT_DOMAIN_EVENT_OUTBOX),
             format!("domain event payload serialization failed: {error}"),
         )
     })?;

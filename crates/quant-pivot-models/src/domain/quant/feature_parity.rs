@@ -1,5 +1,10 @@
 //! Feature-parity run and governed latch persistence contracts.
 
+use chrono::{DateTime, Utc};
+use quant_pivot_error::hashing::CanonicalDigestError;
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
+use serde::{Deserialize, Serialize};
+
 use crate::{
     entities::{quant_feature_parity_run, quant_feature_parity_state},
     enums::quant::{
@@ -14,10 +19,6 @@ use crate::{
         TrainingDatasetId,
     },
 };
-use chrono::{DateTime, Utc};
-use quant_pivot_error::hashing::CanonicalDigestError;
-use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
-use serde::{Deserialize, Serialize};
 
 /// One persisted deterministic parity replay.
 #[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]

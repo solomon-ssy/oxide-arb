@@ -30,6 +30,7 @@ use quant_pivot_models::{
     },
     types::{AuditEventId, ContentHash, OperationAction, OperationDetailDocument, UserId},
 };
+use serde::Serialize;
 
 use crate::error::WebError;
 
@@ -88,7 +89,7 @@ impl OperationContext {
 
     /// Attach a redacted detail summary / diff. The caller is responsible for
     /// ensuring no credentials, tokens, or PII are present.
-    pub fn set_detail<T: serde::Serialize>(&self, detail: T) -> Result<(), WebError> {
+    pub fn set_detail<T: Serialize>(&self, detail: T) -> Result<(), WebError> {
         let detail = OperationDetailDocument::from_serializable(&detail)
             .map_err(|error| WebError::Internal(error.to_string()))?;
         self.inner.borrow_mut().detail = Some(detail);

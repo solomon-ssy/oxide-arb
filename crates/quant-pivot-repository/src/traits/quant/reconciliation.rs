@@ -1,8 +1,12 @@
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{
-        AppendReconciliationEvidence, NewReconciliation, Paginated, ReconciliationInfo,
-        ReconciliationListQuery, ReconciliationPatch,
+        api::ReconciliationListQuery,
+        pagination::Paginated,
+        quant::{
+            AppendReconciliationEvidence, NewReconciliation, ReconciliationInfo,
+            ReconciliationPatch,
+        },
     },
     types::{ExecutionOrderId, ReconciliationId},
 };

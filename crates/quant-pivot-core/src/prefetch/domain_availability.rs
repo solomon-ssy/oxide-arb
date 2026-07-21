@@ -1,4 +1,4 @@
-//! Shared domain-plane availability projector (Phase 11.2.2 §3.8).
+//! Shared domain-plane availability projector.
 //!
 //! One canonical decision — mapped ∧ enabled ∧ `Resolved` linkage ∧ a visible
 //! PIT `Close` observation at the source-delayed cutoff — computed
@@ -23,14 +23,19 @@ use std::{
 };
 
 use async_trait::async_trait;
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use chrono_tz::Tz;
 use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
     domain::{
-        DecisionBoundary, DecisionSource, DomainAvailability, LinkageOutcome, MarketLinkageInfo,
-        MarketSubject, ResolvedBinding, WeatherForecastPoint, WeatherObservationFact,
-        WeatherObservationReportKind, WeatherSubject,
+        data_plane::{
+            DecisionBoundary, DecisionSource, WeatherForecastPoint, WeatherObservationFact,
+            WeatherObservationReportKind,
+        },
+        quant::{
+            DomainAvailability, LinkageOutcome, MarketLinkageInfo, MarketSubject, ResolvedBinding,
+            WeatherSubject,
+        },
     },
     enums::{
         common::MarketCategory,
@@ -70,8 +75,8 @@ pub trait DomainAvailabilitySource: Send + Sync {
 /// (`TrainingDatasetService::estimate_keep_rate`) — both need a
 /// point-in-time-correct read against the live repositories, just at
 /// different `as_of` instants (mapped ∧ enabled ∧ `Resolved` linkage ∧ the
-/// linked instrument has a visible PIT observation at `as_of`, Phase 11.2.2
-/// §3.8).
+/// linked instrument has a visible PIT observation at `as_of`,
+///).
 ///
 /// # Errors
 ///
@@ -132,7 +137,7 @@ enum AvailabilityBinding {
     Crypto(DomainInstrumentKey),
     Weather {
         station: IcaoStation,
-        local_date: chrono::NaiveDate,
+        local_date: NaiveDate,
         from: DateTime<Utc>,
         to: DateTime<Utc>,
     },
@@ -512,11 +517,8 @@ impl DomainAvailabilitySource for PrefetchedDomainAvailabilitySource<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        DomainAvailabilitySource, LiveDomainAvailabilitySource, PrefetchedDomainAvailabilitySource,
-        resolve_domain_availability,
-    };
-    use crate::prefetch::historical_window::Prefetched;
+    use std::{collections::HashMap, sync::Arc};
+
     use async_trait::async_trait;
     use chrono::{DateTime, Duration as ChronoDuration, TimeZone, Utc};
     use quant_pivot_error::storage::StorageError;
@@ -526,11 +528,16 @@ mod tests {
             MarketResolutionRow, MidPriceBucketRow, TradeTapeRow,
         },
         domain::{
-            CatalogWindowInfo, CryptoSubject, DecisionBoundary, DecisionClock, DecisionSource,
-            DomainAvailability, DomainObservation, GroundingProof, LinkageOutcome, MarketInfo,
-            MarketLinkage, MarketLinkageInfo, MarketLinkageListQuery, MarketSubject,
-            NewMarketLinkage, Paginated, PriceComparator, ResolutionOracle, ResolvedBinding,
-            ResolvedSourceBinding,
+            api::MarketLinkageListQuery,
+            data_plane::{DecisionBoundary, DecisionClock, DecisionSource, DomainObservation},
+            market::{CatalogWindowInfo, MarketInfo},
+            pagination::Paginated,
+            quant::{
+                CryptoSubject, DomainAvailability, GroundingProof, LinkageOutcome,
+                LinkageUnresolvedReason, MarketLinkage, MarketLinkageInfo, MarketSubject,
+                NewMarketLinkage, PriceComparator, ResolutionOracle, ResolvedBinding,
+                ResolvedSourceBinding,
+            },
         },
         enums::{
             common::{MarketCategory, TickSize},
@@ -549,7 +556,12 @@ mod tests {
     };
     use quant_pivot_repository::traits::{MarketLinkageRepository, QuantFactReadRepository};
     use rust_decimal_macros::dec;
-    use std::{collections::HashMap, sync::Arc};
+
+    use super::{
+        DomainAvailabilitySource, LiveDomainAvailabilitySource, PrefetchedDomainAvailabilitySource,
+        resolve_domain_availability,
+    };
+    use crate::prefetch::historical_window::Prefetched;
 
     fn instrument_for(symbol: &str) -> DomainInstrumentKey {
         DomainInstrumentKey::binance_kline(
@@ -709,7 +721,7 @@ mod tests {
             vec![linkage(
                 "unresolved",
                 LinkageOutcome::Unresolved {
-                    reason: "no template".to_owned(),
+                    reason: LinkageUnresolvedReason::NoDeterministicTemplate,
                 },
             )],
         );

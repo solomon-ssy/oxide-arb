@@ -1,14 +1,17 @@
 //! System-status WS broadcast helper (governed control-plane mutations).
 
-use quant_pivot_models::domain::{
-    BootstrapPort, CoreEvent, CoreEventPublisher, RuntimeControlPort, SystemStatus,
-    SystemStatusView,
-};
 use std::sync::{Arc, OnceLock};
+
+use quant_pivot_models::domain::{
+    api::SystemStatusView,
+    governance::SystemStatus,
+    ports::{BootstrapPort, RuntimeControlPort},
+    runtime::{CoreEvent, CoreEventPublisher},
+};
 
 /// Publishes [`CoreEvent::SystemStatusChanged`] after mode / kill-switch mutations.
 ///
-/// Registered once during [`GovernanceBundle`](crate::app::bundles::GovernanceBundle)
+/// Registered once during governance-bundle construction
 /// assembly so both runtime control and [`KillSwitchControl`](super::kill_switch::KillSwitchControl)
 /// share the same fan-out path without circular construction deps.
 pub struct SystemStatusPublisher {

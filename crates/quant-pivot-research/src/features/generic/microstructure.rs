@@ -11,7 +11,13 @@ use rust_decimal::Decimal;
 
 use crate::features::{
     builder::{FeatureComputeCtx, FeatureGroupBuilder, RawFeature},
-    names::micro,
+    names::{
+        micro,
+        micro::{
+            ADVERSE_SELECTION_PROXY, BOOK_CHURN, QUEUE_DEPLETION, QUOTE_UPDATE_RATE,
+            STALE_QUOTE_FREQUENCY, SUDDEN_LIQUIDITY_WITHDRAWAL,
+        },
+    },
     resolved::MicrostructureBucket,
     value::{EvidenceSourceKind, EvidenceSourceRef, FeatureName, FeatureValue, NullReason},
 };
@@ -146,26 +152,17 @@ fn stale_quote_frequency(
         .filter(|bucket| bucket.max_book_age_ms > threshold)
         .count();
     let Ok(total) = u64::try_from(buckets.len()) else {
-        return RawFeature::missing(
-            micro::STALE_QUOTE_FREQUENCY,
-            NullReason::InsufficientHistory,
-        );
+        return RawFeature::missing(STALE_QUOTE_FREQUENCY, NullReason::InsufficientHistory);
     };
     if total == 0 {
-        return RawFeature::missing(
-            micro::STALE_QUOTE_FREQUENCY,
-            NullReason::InsufficientHistory,
-        );
+        return RawFeature::missing(STALE_QUOTE_FREQUENCY, NullReason::InsufficientHistory);
     }
     let Ok(stale) = u64::try_from(stale) else {
-        return RawFeature::missing(
-            micro::STALE_QUOTE_FREQUENCY,
-            NullReason::InsufficientHistory,
-        );
+        return RawFeature::missing(STALE_QUOTE_FREQUENCY, NullReason::InsufficientHistory);
     };
     let fraction = Decimal::from(stale) / Decimal::from(total);
     RawFeature::present(
-        micro::STALE_QUOTE_FREQUENCY,
+        STALE_QUOTE_FREQUENCY,
         FeatureValue::Probability(Probability::new(fraction)),
         evidence.clone(),
     )
@@ -184,12 +181,12 @@ fn decimal(name: FeatureName, value: Option<Decimal>, evidence: &EvidenceSourceR
 /// Every microstructure feature marked missing for an empty window.
 fn missing_all() -> Vec<RawFeature> {
     [
-        micro::QUOTE_UPDATE_RATE,
-        micro::BOOK_CHURN,
-        micro::QUEUE_DEPLETION,
-        micro::SUDDEN_LIQUIDITY_WITHDRAWAL,
-        micro::ADVERSE_SELECTION_PROXY,
-        micro::STALE_QUOTE_FREQUENCY,
+        QUOTE_UPDATE_RATE,
+        BOOK_CHURN,
+        QUEUE_DEPLETION,
+        SUDDEN_LIQUIDITY_WITHDRAWAL,
+        ADVERSE_SELECTION_PROXY,
+        STALE_QUOTE_FREQUENCY,
     ]
     .into_iter()
     .map(|name| RawFeature::missing(name, NullReason::InsufficientHistory))

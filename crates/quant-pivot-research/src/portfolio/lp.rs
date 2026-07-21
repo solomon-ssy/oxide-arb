@@ -8,9 +8,8 @@
 //!
 //! subject to the budget / available-cash / single / liquidity / per-market /
 //! per-event / per-category / correlated-cluster caps and the binary `TopN`
-//! inclusion cardinality `Σ x_i ≤ top_n` (so budget and exposure are only ever
-//! consumed by names that are actually published — the core upgrade over the
-//! former greedy fill).
+//! inclusion cardinality `Σ x_i ≤ top_n`, so budget and exposure are consumed
+//! only by names that are actually published.
 //!
 //! Failure ladder (a report is *always* produced):
 //!
@@ -32,6 +31,11 @@ use std::{
     time::Instant,
 };
 
+use debug_test_hooks::{MilpBehavior, RelaxBehavior};
+use good_lp::{
+    Expression, ProblemVariables, Solution, SolverModel, Variable, constraint,
+    constraint::Constraint, variable, variable::UnsolvedProblem,
+};
 use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{
     enums::quant::{
@@ -56,7 +60,6 @@ use crate::{
     },
     precision::RESEARCH_DECIMAL_SCALE,
 };
-use good_lp::{Expression, ProblemVariables, Solution, Variable, constraint, variable};
 
 /// Lexicographic tie-break magnitude applied to objective weights so the solver
 /// resolves equal-utility candidates toward the canonical order deterministically.
@@ -721,7 +724,7 @@ impl SolveFail {
     }
 }
 
-#[cfg(all(feature = "lp-solver", debug_assertions))]
+#[cfg(debug_assertions)]
 pub mod debug_test_hooks {
     //! Debug-only overrides for the MILP / relaxation solve ladder (integration tests).
 
@@ -806,13 +809,12 @@ pub mod debug_test_hooks {
     }
 }
 
-#[cfg(feature = "lp-solver")]
 fn try_milp(ctx: &SolveContext, solver: PortfolioSolverKind) -> Result<Vec<f64>, SolveFail> {
     #[cfg(debug_assertions)]
     match debug_test_hooks::current_milp() {
-        debug_test_hooks::MilpBehavior::Normal => {}
-        debug_test_hooks::MilpBehavior::FailInfeasible => return Err(SolveFail::Infeasible),
-        debug_test_hooks::MilpBehavior::Panic => {
+        MilpBehavior::Normal => {}
+        MilpBehavior::FailInfeasible => return Err(SolveFail::Infeasible),
+        MilpBehavior::Panic => {
             let _ = panic::catch_unwind(AssertUnwindSafe(|| {
                 panic!("debug_test_hooks: forced MILP panic");
             }));
@@ -822,18 +824,12 @@ fn try_milp(ctx: &SolveContext, solver: PortfolioSolverKind) -> Result<Vec<f64>,
     dispatch_solve(ctx, true, solver)
 }
 
-#[cfg(not(feature = "lp-solver"))]
-fn try_milp(_ctx: &SolveContext, _solver: PortfolioSolverKind) -> Result<Vec<f64>, SolveFail> {
-    Err(SolveFail::Other("lp-solver feature not built".to_owned()))
-}
-
-#[cfg(feature = "lp-solver")]
 fn try_relaxation(ctx: &SolveContext) -> Result<Vec<f64>, SolveFail> {
     #[cfg(debug_assertions)]
     match debug_test_hooks::current_relax() {
-        debug_test_hooks::RelaxBehavior::Normal => {}
-        debug_test_hooks::RelaxBehavior::FailInfeasible => return Err(SolveFail::Infeasible),
-        debug_test_hooks::RelaxBehavior::Panic => {
+        RelaxBehavior::Normal => {}
+        RelaxBehavior::FailInfeasible => return Err(SolveFail::Infeasible),
+        RelaxBehavior::Panic => {
             let _ = panic::catch_unwind(AssertUnwindSafe(|| {
                 panic!("debug_test_hooks: forced relaxation panic");
             }));
@@ -843,12 +839,6 @@ fn try_relaxation(ctx: &SolveContext) -> Result<Vec<f64>, SolveFail> {
     dispatch_solve(ctx, false, PortfolioSolverKind::Microlp)
 }
 
-#[cfg(not(feature = "lp-solver"))]
-fn try_relaxation(_ctx: &SolveContext) -> Result<Vec<f64>, SolveFail> {
-    Err(SolveFail::Other("lp-solver feature not built".to_owned()))
-}
-
-#[cfg(feature = "lp-solver")]
 fn dispatch_solve(
     ctx: &SolveContext,
     binary: bool,
@@ -861,30 +851,19 @@ fn dispatch_solve(
     }
 }
 
-#[cfg(not(feature = "lp-solver"))]
-fn dispatch_solve(
-    _ctx: &SolveContext,
-    _binary: bool,
-    _solver: PortfolioSolverKind,
-) -> Result<Vec<f64>, SolveFail> {
-    Err(SolveFail::Other("lp-solver feature not built".to_owned()))
-}
-
-#[cfg(feature = "lp-solver")]
 fn build_and_solve<F, M>(ctx: &SolveContext, binary: bool, solver: F) -> Result<Vec<f64>, SolveFail>
 where
-    F: FnMut(good_lp::variable::UnsolvedProblem) -> M,
-    M: good_lp::SolverModel,
+    F: FnMut(UnsolvedProblem) -> M,
+    M: SolverModel,
 {
     let outcome = panic::catch_unwind(AssertUnwindSafe(|| solve_inner(ctx, binary, solver)));
     outcome.unwrap_or(Err(SolveFail::Panicked))
 }
 
-#[cfg(feature = "lp-solver")]
 fn solve_inner<F, M>(ctx: &SolveContext, binary: bool, solver: F) -> Result<Vec<f64>, SolveFail>
 where
-    F: FnMut(good_lp::variable::UnsolvedProblem) -> M,
-    M: good_lp::SolverModel,
+    F: FnMut(UnsolvedProblem) -> M,
+    M: SolverModel,
 {
     let mut vars = ProblemVariables::new();
     let u: Vec<Variable> = (0..ctx.n)
@@ -901,7 +880,7 @@ where
         .zip(&ctx.weight)
         .fold(Expression::from(0.0), |acc, (&v, &w)| acc + v * w);
 
-    let mut constraints: Vec<good_lp::constraint::Constraint> = Vec::new();
+    let mut constraints: Vec<Constraint> = Vec::new();
     // Total budget / available cash.
     let total = u.iter().fold(Expression::from(0.0), |acc, &v| acc + v);
     constraints.push(constraint!(total <= ctx.budget));

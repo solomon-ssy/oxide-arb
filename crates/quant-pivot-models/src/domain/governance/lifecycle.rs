@@ -40,7 +40,7 @@ pub enum OperationalDegradeReason {
         name: String,
     },
     /// Kill-switch tightened (`report_only_forced` / `exit_only`); reports may
-    /// continue but new entries are blocked (05.1 §6).
+    /// continue but new entries are blocked.
     KillSwitchTightened {
         state: KillSwitchState,
     },
@@ -115,12 +115,11 @@ impl MarketDataConnectivity {
 
 #[cfg(test)]
 mod tests {
-    use crate::{domain::OperationalDegradeReason, enums::execution::KillSwitchState};
-
     use super::{
         MarketDataConnectivity, OperationalPhase, WS_MARKET_DATA_STALE_THRESHOLD_MS,
         WsShardConnectivity,
     };
+    use crate::{domain::governance::OperationalDegradeReason, enums::execution::KillSwitchState};
 
     #[test]
     fn operational_phase_allows_submission_only_when_operational() {

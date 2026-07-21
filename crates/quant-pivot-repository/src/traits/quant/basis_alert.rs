@@ -1,13 +1,17 @@
-//! Basis-cross-check exceedance alert repository trait (11.2.2 remediation R6).
+//! Basis-cross-check exceedance alert repository trait.
 
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    domain::{BasisAlertInfo, BasisAlertListQuery, NewBasisAlert, Paginated},
+    domain::{
+        api::BasisAlertListQuery,
+        pagination::Paginated,
+        quant::{BasisAlertInfo, NewBasisAlert},
+    },
     types::{BasisAlertId, MarketId},
 };
 
 /// Append-only persistence port for the basis-cross-check exceedance feed,
-/// plus the single governed `acknowledge` mutation (R6 review-queue closed
+/// plus the single governed `acknowledge` mutation, forming a review-queue closed
 /// loop).
 #[async_trait::async_trait]
 pub trait BasisAlertRepository: Send + Sync {

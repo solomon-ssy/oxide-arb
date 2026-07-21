@@ -3,10 +3,10 @@
 use std::{future::Future, pin::Pin};
 
 use chrono::Utc;
-use sea_orm::{ActiveValue::Set, DbErr, EntityTrait, sea_query::OnConflict};
+use sea_orm::{ActiveValue::Set, DatabaseTransaction, DbErr, EntityTrait, sea_query::OnConflict};
 
 use crate::{
-    entities::system_kill_switch,
+    entities::system_kill_switch::{ActiveModel, Column, Entity},
     enums::execution::KillSwitchState,
     seed::{SeedArtifact, SeedConflictPolicy, SeedContext, SeedDependency, SeedSpec},
 };
@@ -27,9 +27,9 @@ pub const SYSTEM_KILL_SWITCH_SEED: SeedSpec = SeedSpec {
     hydrate: hydrate_boxed,
 };
 
-pub async fn load(db: &sea_orm::DatabaseTransaction, _ctx: &mut SeedContext) -> Result<u64, DbErr> {
+pub async fn load(db: &DatabaseTransaction, _ctx: &mut SeedContext) -> Result<u64, DbErr> {
     let now = Utc::now();
-    let model = system_kill_switch::ActiveModel {
+    let model = ActiveModel {
         id: Set(SINGLETON_ID),
         state: Set(KillSwitchState::ReportOnlyForced),
         changed_by: Set("bootstrap".to_owned()),
@@ -38,25 +38,21 @@ pub async fn load(db: &sea_orm::DatabaseTransaction, _ctx: &mut SeedContext) -> 
         changed_at: Set(now),
         updated_at: Set(now),
     };
-    system_kill_switch::Entity::insert(model)
-        .on_conflict(
-            OnConflict::column(system_kill_switch::Column::Id)
-                .do_nothing()
-                .to_owned(),
-        )
+    Entity::insert(model)
+        .on_conflict(OnConflict::column(Column::Id).do_nothing().to_owned())
         .exec_without_returning(db)
         .await
 }
 
 fn load_boxed<'a>(
-    db: &'a sea_orm::DatabaseTransaction,
+    db: &'a DatabaseTransaction,
     ctx: &'a mut SeedContext,
 ) -> Pin<Box<dyn Future<Output = Result<u64, DbErr>> + Send + 'a>> {
     Box::pin(load(db, ctx))
 }
 
-async fn hydrate(db: &sea_orm::DatabaseTransaction, _ctx: &mut SeedContext) -> Result<(), DbErr> {
-    let rows = system_kill_switch::Entity::find().all(db).await?;
+async fn hydrate(db: &DatabaseTransaction, _ctx: &mut SeedContext) -> Result<(), DbErr> {
+    let rows = Entity::find().all(db).await?;
     let [state] = rows.as_slice() else {
         return Err(DbErr::Custom(format!(
             "system_kill_switch must contain exactly singleton id=1; found {} rows",
@@ -73,7 +69,7 @@ async fn hydrate(db: &sea_orm::DatabaseTransaction, _ctx: &mut SeedContext) -> R
 }
 
 fn hydrate_boxed<'a>(
-    db: &'a sea_orm::DatabaseTransaction,
+    db: &'a DatabaseTransaction,
     ctx: &'a mut SeedContext,
 ) -> Pin<Box<dyn Future<Output = Result<(), DbErr>> + Send + 'a>> {
     Box::pin(hydrate(db, ctx))

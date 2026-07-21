@@ -1,9 +1,10 @@
 //! Web server + JWT configuration (`[web]` / `[web.jwt]`).
 
-use super::secret::SecretText;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::Deserialize;
 use zeroize::Zeroizing;
+
+use super::secret::SecretText;
 
 /// HTTP/WebSocket server configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]

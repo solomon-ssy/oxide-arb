@@ -7,8 +7,13 @@ use std::{
 };
 
 use quant_pivot_error::{QuantError, QuantResult, api::ApiError};
+use reqwest::Client;
 use sha2::{Digest, Sha256};
-use tokio::{sync::mpsc, task::JoinHandle};
+use tokio::{
+    sync::mpsc::{Receiver, Sender},
+    task::JoinHandle,
+};
+use zip::ZipArchive;
 
 use crate::infra::{http::get_optional_bytes_with_retry, retry::RetryPolicy};
 
@@ -19,13 +24,13 @@ use crate::infra::{http::get_optional_bytes_with_retry, retry::RetryPolicy};
 /// depth plus one decoded batch is resident; decoder errors and task panics are
 /// surfaced after the final successfully decoded batch.
 pub struct BinanceArchiveBatchStream<T> {
-    receiver: mpsc::Receiver<Vec<T>>,
+    receiver: Receiver<Vec<T>>,
     decoder: Option<JoinHandle<QuantResult<()>>>,
 }
 
 impl<T> BinanceArchiveBatchStream<T> {
     pub(super) const fn new(
-        receiver: mpsc::Receiver<Vec<T>>,
+        receiver: Receiver<Vec<T>>,
         decoder: JoinHandle<QuantResult<()>>,
     ) -> Self {
         Self {
@@ -48,12 +53,12 @@ impl<T> BinanceArchiveBatchStream<T> {
     }
 }
 
-pub(super) fn send_batch<T>(sender: &mpsc::Sender<Vec<T>>, batch: Vec<T>) -> bool {
+pub(super) fn send_batch<T>(sender: &Sender<Vec<T>>, batch: Vec<T>) -> bool {
     batch.is_empty() || sender.blocking_send(batch).is_ok()
 }
 
 pub(super) async fn download_verified_archive(
-    http: &reqwest::Client,
+    http: &Client,
     retry_policy: &RetryPolicy,
     url: &str,
     filename: &str,
@@ -80,7 +85,7 @@ pub(super) fn decode_single_csv_archive<T>(
     expected_member: &str,
     decode: impl FnOnce(&mut dyn Read) -> QuantResult<T>,
 ) -> QuantResult<T> {
-    let mut zip = zip::ZipArchive::new(Cursor::new(archive))
+    let mut zip = ZipArchive::new(Cursor::new(archive))
         .map_err(|error| archive_error(format!("invalid ZIP: {error}")))?;
     if zip.len() != 1 {
         return Err(archive_error("archive must contain exactly one CSV member").into());

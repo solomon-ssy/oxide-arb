@@ -2,7 +2,7 @@
 //! null-policy engine, and the concrete builders.
 //!
 //! Every feature build resolves through the single durable
-//! [`PointInTimeSnapshotSource`](crate::pit::PointInTimeSnapshotSource) contract.
+//! [`PointInTimeSnapshotSource`] contract.
 //! Serving and research therefore project from the same catalog/book snapshots;
 //! the live `BookStore` is not a decision input.
 
@@ -23,6 +23,7 @@ mod writer;
 #[cfg(test)]
 mod acceptance;
 
+use async_trait::async_trait;
 pub use availability::FeatureAvailabilityOracle;
 pub use builder::{
     ConfiguredFeatureBuilder, FeatureComputeCtx, FeatureGroupBuilder, FeatureSourceWindows,
@@ -37,13 +38,17 @@ pub use domain::{
     DomainSliceDataRef, DomainSliceInputs, WeatherDomainFeatureBuilder,
 };
 pub use null_policy::{NullDecision, NullPolicyEngine};
-pub use quant_pivot_models::{
+use quant_pivot_error::QuantResult;
+#[cfg(test)]
+pub(crate) use quant_pivot_models::types::{DecisionSnapshotEvidence, DomainFeatureSlice};
+pub(crate) use quant_pivot_models::{
+    domain::data_plane::DecisionBoundary,
     enums::feature::{EvidenceSourceKind, FeatureValueKind},
-    types::stable_name::FeatureName,
+    runtime_config::{DataQualityConfig, FeaturesConfig},
     types::{
-        CatalogDecisionRef, DecisionCaptureEvidence, DecisionSnapshotEvidence, DomainFeatureSlice,
-        EvidenceSourceRef, FeatureCell, FeatureCellState, FeatureStaleness, FeatureValue,
-        NullReason,
+        CatalogDecisionRef, DecisionCaptureEvidence, EvidenceSourceRef, FeatureCell,
+        FeatureCellState, FeatureStaleness, FeatureValue, NullReason, SchemaVersion,
+        stable_name::FeatureName,
     },
 };
 pub use resolved::{
@@ -56,15 +61,6 @@ pub use schema::{
 };
 pub use value::FeatureVector;
 pub use writer::feature_events;
-
-use async_trait::async_trait;
-
-use quant_pivot_error::QuantResult;
-use quant_pivot_models::{
-    domain::DecisionBoundary,
-    runtime_config::{DataQualityConfig, FeaturesConfig},
-    types::SchemaVersion,
-};
 
 use crate::{pit::PointInTimeSnapshotSource, selection::SelectedMarket};
 

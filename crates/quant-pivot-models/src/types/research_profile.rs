@@ -1,16 +1,21 @@
 //! Immutable research-profile contracts for policy fitting and serving lineage.
 
-use std::{borrow::Cow, fmt, str::FromStr, sync::Arc};
+use std::{
+    borrow::Cow,
+    fmt::{Display, Formatter, Result as FmtResult},
+    str::FromStr,
+    sync::Arc,
+};
 
 use chrono::{DateTime, TimeZone, Utc};
 use rust_decimal::Decimal;
-use schemars::JsonSchema;
+use schemars::{JsonSchema, Schema, SchemaGenerator};
 use sea_orm::{
     ActiveValue, ColIdx, DbErr, FromJsonQueryResult, FromQueryResult, IntoActiveValue, QueryResult,
     TryFromU64, TryGetError, TryGetable,
     sea_query::{ArrayType, ColumnType, Nullable, Value, ValueType, ValueTypeErr},
 };
-use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error};
 
 use crate::{
     enums::common::MarketCategory,
@@ -118,8 +123,8 @@ impl ResearchProfileArtifactId {
     }
 }
 
-impl fmt::Display for ResearchProfileArtifactId {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for ResearchProfileArtifactId {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> FmtResult {
         write!(
             formatter,
             "rpa:{}:{}:{}",
@@ -146,7 +151,7 @@ impl<'de> Deserialize<'de> for ResearchProfileArtifactId {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         String::deserialize(deserializer)?
             .parse()
-            .map_err(de::Error::custom)
+            .map_err(Error::custom)
     }
 }
 
@@ -159,7 +164,7 @@ impl JsonSchema for ResearchProfileArtifactId {
         Cow::Borrowed("ResearchProfileArtifactId")
     }
 
-    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    fn json_schema(_generator: &mut SchemaGenerator) -> Schema {
         schemars::json_schema!({
             "type": "string",
             "pattern": "^rpa:[a-z0-9_]+:[1-9][0-9]*:blake3:[0-9a-f]{64}$"
@@ -497,10 +502,9 @@ impl ResearchProfileArtifact {
                 content_hash,
             },
             spec,
-            published_by: "phase-11.9".to_owned(),
+            published_by: "research-governance".to_owned(),
             published_at,
-            governance_reason: "Phase 11.9 immutable vertical and feedback-policy freeze"
-                .to_owned(),
+            governance_reason: "immutable vertical and feedback-policy freeze".to_owned(),
         })
     }
 }

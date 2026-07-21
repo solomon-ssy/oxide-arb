@@ -1,9 +1,13 @@
 //! Execution-order reconciliation persistence DTOs.
 
+use chrono::{DateTime, Utc};
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
+use serde::{Deserialize, Serialize};
+
 use crate::{
     domain::{
-        PositionExit, PositionFill,
         patch::{NullablePatch, Patch},
+        quant::{PositionExit, PositionFill},
     },
     entities::quant_reconciliation,
     enums::{
@@ -15,9 +19,6 @@ use crate::{
         ReconciliationEvidenceChain, ReconciliationId, Shares, Usd,
     },
 };
-use chrono::{DateTime, Utc};
-use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
-use serde::{Deserialize, Serialize};
 
 /// Persisted reconciliation summary for one execution order.
 #[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
@@ -109,7 +110,7 @@ pub struct AppendReconciliationEvidence {
     pub evidence: ReconciliationEvidence,
 }
 
-/// How a reconciliation verdict settles the order's capital allocation (05.5).
+/// How a reconciliation verdict settles the order's capital allocation.
 ///
 /// Distinct from [`CapitalSettlement`](super::CapitalSettlement): the correction
 /// is **state-guarded and idempotent** — it only moves capital out of `Locked`
@@ -129,7 +130,7 @@ pub enum CapitalReconcileSettlement {
     Hold,
 }
 
-/// Atomic ledger correction applied by `apply_reconciliation` in one txn (05.5).
+/// Atomic ledger correction applied by `apply_reconciliation` in one txn.
 ///
 /// Built by the reconciliation service from venue truth and applied across
 /// execution order + capital + position + intent + the reconciliation summary

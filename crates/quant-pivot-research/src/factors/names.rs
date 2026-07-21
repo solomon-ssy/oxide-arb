@@ -37,7 +37,7 @@ pub const TIME_TO_RESOLUTION: FactorName = FactorName::from_static("time_to_reso
 /// Aggregate data-quality factor.
 pub const DATA_QUALITY: FactorName = FactorName::from_static("data_quality");
 
-/// Structural (prediction-market-aware) factors (Phase 11.2.1).
+/// Structural (prediction-market-aware) factors.
 ///
 /// Shock-gated reversal (conditional; orthogonal to the linear `mean_reversion`).
 pub const STRUCT_REVERSAL_AFTER_SHOCK: FactorName =
@@ -48,11 +48,9 @@ pub const STRUCT_RESOLUTION_PROXIMITY_REGIME: FactorName =
     FactorName::from_static("struct.resolution_proximity_regime");
 /// Book-churn intensity (delta-to-update ratio over the maker window).
 ///
-/// This is a **book-derived** liquidity-turnover proxy — NOT true maker
-/// participant concentration (Gini / top-1% share), which requires trade-tape
-/// (maker/taker address + fill size) the platform does not yet ingest. The
-/// honest concentration factor is `struct.participant_concentration`; the name
-/// reflects exactly what the current facts can compute.
+/// This is a **book-derived** liquidity-turnover proxy, not maker participant
+/// concentration. The separate `struct.participant_concentration` factor
+/// computes Gini, CR1, and HHI from trade-tape participant facts.
 pub const STRUCT_BOOK_CHURN_INTENSITY: FactorName =
     FactorName::from_static("struct.book_churn_intensity");
 /// Trade-tape participant concentration (neutral structural regime signal).
@@ -62,7 +60,7 @@ pub const STRUCT_PARTICIPANT_CONCENTRATION: FactorName =
 pub const STRUCT_NEGRISK_LEG_SUM_DRIFT: FactorName =
     FactorName::from_static("struct.negrisk_leg_sum_drift");
 
-/// Crypto domain plane (Phase 11.2.2; category-routed, never config-selected):
+/// Crypto domain plane (category-routed, never config-selected):
 /// strike distance scaled by settlement urgency.
 pub const DOMAIN_CRYPTO_STRIKE_PRESSURE: FactorName =
     FactorName::from_static("domain_crypto_strike_pressure");
@@ -91,7 +89,7 @@ pub const STRUCT_FAVORITE_LONGSHOT: FactorName =
 /// Signed unrealized `PnL` as a fraction of cost basis (`(mark − avg) / avg`).
 ///
 /// Position-state pseudo-factors consumed only by the Sell-side hold-vs-exit
-/// scorer (Phase 06.1). Computed per open lot from the ledger + live mark, not
+/// scorer. Computed per open lot from the ledger + live mark, not
 /// by the market [`FactorEngine`](crate::factors::FactorEngine); they let the
 /// exit scorer weigh the lot's own state alongside market factors.
 pub const POSITION_UNREALIZED_PNL: FactorName =

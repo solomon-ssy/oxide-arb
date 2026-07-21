@@ -8,12 +8,11 @@ use quant_pivot_repository::traits::{
     CatalogLedgerRepository, ClobMarketInfoRepository, ResearchReadinessEvidenceRepository,
 };
 
-use crate::service::research_readiness::{
-    EvidenceAttestor, EvidenceScopeIdentity, ResearchReadinessEvidenceProducer,
-};
-
 use super::{
     AppContext, capability_gate::wait_for_capability, task_id::TaskId, task_registry::AppRunner,
+};
+use crate::service::research_readiness::{
+    EvidenceAttestor, EvidenceScopeIdentity, ResearchReadinessEvidenceProducer,
 };
 
 const CAPTURE_INTERVAL: Duration = Duration::from_mins(5);

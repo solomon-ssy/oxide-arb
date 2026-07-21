@@ -7,9 +7,8 @@ use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{enums::quant::CalibrationMethod, types::Probability};
 use rust_decimal::Decimal;
 
-use crate::{model::apply_mapping, stats::pava_non_decreasing_grouped};
-
 use super::{IsotonicKnot, MonotoneMapping, ProbabilityCalibrator};
+use crate::{model::apply_mapping, stats::pava_non_decreasing_grouped};
 
 /// Minimum paired samples to attempt an isotonic fit at all (below this even
 /// a single knot is statistically meaningless).
@@ -161,10 +160,11 @@ pub fn interpolate(knots: &[IsotonicKnot], score: Decimal) -> QuantResult<Decima
 
 #[cfg(test)]
 mod tests {
-    use super::{IsotonicCalibrator, MonotoneMapping};
-    use crate::model::calibrator::ProbabilityCalibrator;
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
+
+    use super::{IsotonicCalibrator, MonotoneMapping};
+    use crate::model::calibrator::ProbabilityCalibrator;
 
     #[test]
     fn fit_fails_closed_below_min_samples() {

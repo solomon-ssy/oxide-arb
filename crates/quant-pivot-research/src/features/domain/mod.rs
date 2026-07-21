@@ -11,16 +11,15 @@
 pub mod crypto;
 pub mod weather;
 
-pub use crypto::CryptoDomainFeatureBuilder;
-pub use weather::WeatherDomainFeatureBuilder;
-
 use chrono::{DateTime, Utc};
+pub use crypto::CryptoDomainFeatureBuilder;
 use quant_pivot_models::{
-    domain::ResolvedBinding,
+    domain::quant::ResolvedBinding,
     enums::domain::DomainFamily,
     runtime_config::DomainConfig,
     types::{ContentHash, MarketLinkageId},
 };
+pub use weather::WeatherDomainFeatureBuilder;
 
 use crate::{
     domain::{CryptoPriceReportWindow, DomainObservationWindow, WeatherFactWindow},

@@ -3,16 +3,18 @@
 use std::{sync::Arc, time::Duration as StdDuration};
 
 use async_trait::async_trait;
+use blake3::Hasher;
 use chrono::Duration;
 use futures_util::StreamExt;
-use tokio_util::sync::CancellationToken;
-
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError, storage::StorageError};
 use quant_pivot_models::{
     domain::{
-        BuildTrainingDatasetRequest, JobProgressSink, PolicyFitDatasetBuildRequest,
-        SourceSliceIdentity, SourceSliceIdentityInput, SourceSliceInfo, TrainingDatasetInfo,
-        TrainingDatasetPlanView, TrainingDatasetPort, TrainingDatasetView,
+        api::{BuildTrainingDatasetRequest, TrainingDatasetPlanView, TrainingDatasetView},
+        ports::{PolicyFitDatasetBuildRequest, TrainingDatasetPort},
+        quant::{
+            JobProgressSink, SourceSliceIdentity, SourceSliceIdentityInput, SourceSliceInfo,
+            TrainingDatasetInfo,
+        },
     },
     enums::quant::{DatasetPurpose, SourceSliceStatus, TrainingDatasetStatus},
     hashing::CanonicalDigest,
@@ -32,6 +34,7 @@ use quant_pivot_repository::traits::{
     TradePolicyRepository, TrainingDatasetRepository,
 };
 use quant_pivot_research::{artifact::ArtifactStore, training::DatasetPlanRequest};
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     app::bundles::ResearchBundle,
@@ -202,7 +205,7 @@ impl CoreTrainingDatasetPort {
                 continue;
             }
             let mut stream = self.artifact_store.get_stream(&object.uri).await?;
-            let mut hasher = blake3::Hasher::new();
+            let mut hasher = Hasher::new();
             while let Some(chunk) = stream.next().await {
                 hasher.update(&chunk?);
             }

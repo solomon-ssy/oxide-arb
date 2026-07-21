@@ -1,41 +1,47 @@
-//! Recommendation report HTTP endpoints (Phase 04.4).
+//! Recommendation report HTTP endpoints.
 //!
 //! # UI integration contract
 //!
 //! | Method | Path | Permission | Purpose |
 //! |--------|------|------------|---------|
-//! | GET  | `/quant/reports` | `quant_report:read` | Paginated report list |
-//! | GET  | `/quant/reports/current?profile_id&kind` | `quant_report:read` | Current scope authority |
-//! | GET  | `/quant/reports/{id}` | `quant_report:read` | Report detail (header + summary) |
-//! | GET  | `/quant/reports/{id}/recommendations` | `quant_report:read` | Report recommendations |
-//! | GET  | `/quant/reports/{id}/diagnostics` | `quant_report:read` | Durable serving diagnostics |
-//! | GET  | `/quant/reports/{id}/funnel` | `quant_report:read` | Conserved stage counts |
-//! | GET  | `/quant/reports/{id}/funnel/markets` | `quant_report:read` | Row-level market decisions |
-//! | GET  | `/quant/reports/{id}/diff/{other_id}` | `quant_report:read` | Structural diff vs another report |
+//! | GET | `/quant/reports` | `quant_report:read` | Paginated report list |
+//! | GET | `/quant/reports/current?profile_id&kind` | `quant_report:read` | Current scope authority |
+//! | GET | `/quant/reports/{id}` | `quant_report:read` | Report detail (header + summary) |
+//! | GET | `/quant/reports/{id}/recommendations` | `quant_report:read` | Report recommendations |
+//! | GET | `/quant/reports/{id}/diagnostics` | `quant_report:read` | Durable serving diagnostics |
+//! | GET | `/quant/reports/{id}/funnel` | `quant_report:read` | Conserved stage counts |
+//! | GET | `/quant/reports/{id}/funnel/markets` | `quant_report:read` | Row-level market decisions |
+//! | GET | `/quant/reports/{id}/diff/{other_id}` | `quant_report:read` | Structural diff vs another report |
 //! | POST | `/quant/reports/run` | `quant_report:enqueue` (governed) | Enqueue an ad-hoc report (202) |
-//! | GET  | `/quant/report-runs` | `quant_report:read` | Durable run ledger |
-//! | GET  | `/quant/report-runs/{id}` | `quant_report:read` | Durable run detail |
+//! | GET | `/quant/report-runs` | `quant_report:read` | Durable run ledger |
+//! | GET | `/quant/report-runs/{id}` | `quant_report:read` | Durable run detail |
 //! | POST | `/quant/report-runs/{id}/retry` | `quant_report:enqueue` (governed) | Retry terminal ad-hoc run |
-//! | GET  | `/quant/report-schedules/health` | `quant_report:read` | Durable scheduler health |
-//! | GET  | `/quant/report-schedule-gaps` | `quant_report:read` | Append-only schedule gaps |
+//! | GET | `/quant/report-schedules/health` | `quant_report:read` | Durable scheduler health |
+//! | GET | `/quant/report-schedule-gaps` | `quant_report:read` | Append-only schedule gaps |
 //! | POST | `/quant/reports/{id}/publication/retry` | `quant_report:enqueue` (governed) | Retry failed delivery |
-//! | GET  | `/quant/reports/{id}/timeline` | `quant_report:read` | Report-scoped WORM timeline |
+//! | GET | `/quant/reports/{id}/timeline` | `quant_report:read` | Report-scoped WORM timeline |
 //! | POST | `/quant/reports/{id}/revoke` | `quant_report:revoke` (governed) | Revoke a published report |
 //!
 //! `reports/run` is asynchronous and returns the durable run row (`202` when
 //! created, `200` for an idempotent replay). WebSocket events are revision hints;
 //! clients always re-fetch durable REST state.
 
-use actix_web::{http::Method, web};
+use actix_web::{
+    http::Method,
+    web::{Data, Path, Query},
+};
 use quant_pivot_models::{
     domain::{
-        AdHocReportCommand, CurrentReportQuery, OperationLogView, Paginated,
-        QuantRecommendationView, QuantReportDetailView, QuantReportDiagnosticsView,
-        QuantReportFunnelView, QuantReportListQuery, QuantReportView, ReportDiffView,
-        ReportFactDeliveryView, ReportFunnelMarketListQuery, ReportFunnelMarketView,
-        ReportRunListQuery, ReportRunView, ReportScheduleGapListQuery, ReportScheduleGapView,
-        ReportScheduleHealthView, ReportTimelineQuery, RetryReportRequest, RevokeReportRequest,
-        RunReportRequest,
+        api::{
+            CurrentReportQuery, OperationLogView, QuantRecommendationView, QuantReportDetailView,
+            QuantReportDiagnosticsView, QuantReportFunnelView, QuantReportListQuery,
+            QuantReportView, ReportDiffView, ReportFactDeliveryView, ReportFunnelMarketListQuery,
+            ReportFunnelMarketView, ReportRunListQuery, ReportRunView, ReportScheduleGapListQuery,
+            ReportScheduleGapView, ReportScheduleHealthView, ReportTimelineQuery,
+            RetryReportRequest, RevokeReportRequest, RunReportRequest,
+        },
+        pagination::Paginated,
+        ports::AdHocReportCommand,
     },
     enums::{
         operation_log::OperationCategory,
@@ -167,8 +173,8 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
 
 /// `GET /api/quant/reports` — paginated, filtered report list.
 pub async fn list(
-    state: web::Data<AppState>,
-    query: web::Query<QuantReportListQuery>,
+    state: Data<AppState>,
+    query: Query<QuantReportListQuery>,
 ) -> Result<WebResponse<Paginated<QuantReportView>>, WebError> {
     let page = state.quant_reports.list_reports(query.into_inner()).await?;
     Ok(WebResponse::ok(page.map(QuantReportView::from)))
@@ -176,8 +182,8 @@ pub async fn list(
 
 /// `GET /api/quant/reports/current` — current authority in one exact scope.
 pub async fn current(
-    state: web::Data<AppState>,
-    query: web::Query<CurrentReportQuery>,
+    state: Data<AppState>,
+    query: Query<CurrentReportQuery>,
 ) -> Result<WebResponse<QuantReportDetailView>, WebError> {
     let query = query.into_inner();
     if query.profile_id.as_str().trim().is_empty() || query.profile_id.as_str().len() > 128 {
@@ -212,8 +218,8 @@ pub async fn current(
 
 /// `GET /api/quant/reports/{id}` — report detail.
 pub async fn detail(
-    state: web::Data<AppState>,
-    id: web::Path<RecommendationReportId>,
+    state: Data<AppState>,
+    id: Path<RecommendationReportId>,
 ) -> Result<WebResponse<QuantReportDetailView>, WebError> {
     let info = state
         .quant_reports
@@ -233,8 +239,8 @@ pub async fn detail(
 
 /// `GET /api/quant/report-runs` — durable run ledger.
 pub async fn list_runs(
-    state: web::Data<AppState>,
-    query: web::Query<ReportRunListQuery>,
+    state: Data<AppState>,
+    query: Query<ReportRunListQuery>,
 ) -> Result<WebResponse<Paginated<ReportRunView>>, WebError> {
     let page = state
         .quant_reports
@@ -245,8 +251,8 @@ pub async fn list_runs(
 
 /// `GET /api/quant/report-runs/{id}` — durable run detail and retry lineage.
 pub async fn run_detail(
-    state: web::Data<AppState>,
-    id: web::Path<ReportRunId>,
+    state: Data<AppState>,
+    id: Path<ReportRunId>,
 ) -> Result<WebResponse<ReportRunView>, WebError> {
     let run = state
         .quant_reports
@@ -258,8 +264,8 @@ pub async fn run_detail(
 
 /// `POST /api/quant/report-runs/{id}/retry` — retry a terminal ad-hoc run.
 pub async fn retry_run(
-    state: web::Data<AppState>,
-    id: web::Path<ReportRunId>,
+    state: Data<AppState>,
+    id: Path<ReportRunId>,
     acting_role: ActingRole,
     request_id: RequestId,
     op_ctx: OperationCtx,
@@ -292,7 +298,7 @@ pub async fn retry_run(
 
 /// `GET /api/quant/report-schedules/health` — durable scheduler health.
 pub async fn schedule_health(
-    state: web::Data<AppState>,
+    state: Data<AppState>,
 ) -> Result<WebResponse<ReportScheduleHealthView>, WebError> {
     Ok(WebResponse::ok(
         state.quant_reports.report_schedule_health().await?.into(),
@@ -301,8 +307,8 @@ pub async fn schedule_health(
 
 /// `GET /api/quant/report-schedule-gaps` — append-only gap ledger.
 pub async fn schedule_gaps(
-    state: web::Data<AppState>,
-    query: web::Query<ReportScheduleGapListQuery>,
+    state: Data<AppState>,
+    query: Query<ReportScheduleGapListQuery>,
 ) -> Result<WebResponse<Paginated<ReportScheduleGapView>>, WebError> {
     let page = state
         .quant_reports
@@ -313,8 +319,8 @@ pub async fn schedule_gaps(
 
 /// `GET /api/quant/reports/{id}/recommendations` — the report's recommendations.
 pub async fn recommendations(
-    state: web::Data<AppState>,
-    id: web::Path<RecommendationReportId>,
+    state: Data<AppState>,
+    id: Path<RecommendationReportId>,
 ) -> Result<WebResponse<Vec<QuantRecommendationView>>, WebError> {
     let views = state.quant_reports.find_recommendations(&id).await?;
     Ok(WebResponse::ok(views))
@@ -322,8 +328,8 @@ pub async fn recommendations(
 
 /// `GET /api/quant/reports/{id}/diagnostics` — durable serving evidence summary.
 pub async fn diagnostics(
-    state: web::Data<AppState>,
-    id: web::Path<RecommendationReportId>,
+    state: Data<AppState>,
+    id: Path<RecommendationReportId>,
 ) -> Result<WebResponse<QuantReportDiagnosticsView>, WebError> {
     let view = state
         .quant_reports
@@ -334,8 +340,8 @@ pub async fn diagnostics(
 }
 
 pub async fn funnel(
-    state: web::Data<AppState>,
-    id: web::Path<RecommendationReportId>,
+    state: Data<AppState>,
+    id: Path<RecommendationReportId>,
 ) -> Result<WebResponse<QuantReportFunnelView>, WebError> {
     let view = state
         .quant_reports
@@ -346,9 +352,9 @@ pub async fn funnel(
 }
 
 pub async fn funnel_markets(
-    state: web::Data<AppState>,
-    id: web::Path<RecommendationReportId>,
-    query: web::Query<ReportFunnelMarketListQuery>,
+    state: Data<AppState>,
+    id: Path<RecommendationReportId>,
+    query: Query<ReportFunnelMarketListQuery>,
 ) -> Result<WebResponse<Paginated<ReportFunnelMarketView>>, WebError> {
     let page = state
         .quant_reports
@@ -360,8 +366,8 @@ pub async fn funnel_markets(
 
 /// `GET /api/quant/reports/{id}/diff/{other_id}` — structural diff.
 pub async fn diff(
-    state: web::Data<AppState>,
-    path: web::Path<(RecommendationReportId, RecommendationReportId)>,
+    state: Data<AppState>,
+    path: Path<(RecommendationReportId, RecommendationReportId)>,
 ) -> Result<WebResponse<ReportDiffView>, WebError> {
     let (base, compare) = path.into_inner();
     let diff = state
@@ -374,8 +380,8 @@ pub async fn diff(
 
 /// `POST /api/quant/reports/{id}/publication/retry` — requeue failed delivery.
 pub async fn retry_publication(
-    state: web::Data<AppState>,
-    id: web::Path<RecommendationReportId>,
+    state: Data<AppState>,
+    id: Path<RecommendationReportId>,
     acting_role: ActingRole,
     request_id: RequestId,
     op_ctx: OperationCtx,
@@ -404,9 +410,9 @@ pub async fn retry_publication(
 
 /// `GET /api/quant/reports/{id}/timeline` — report-scoped WORM projection.
 pub async fn timeline(
-    state: web::Data<AppState>,
-    id: web::Path<RecommendationReportId>,
-    query: web::Query<ReportTimelineQuery>,
+    state: Data<AppState>,
+    id: Path<RecommendationReportId>,
+    query: Query<ReportTimelineQuery>,
 ) -> Result<WebResponse<Paginated<OperationLogView>>, WebError> {
     let report_id = id.into_inner();
     let page = state
@@ -419,7 +425,7 @@ pub async fn timeline(
 
 /// `POST /api/quant/reports/run` — enqueue an ad-hoc report build (202).
 pub async fn run(
-    state: web::Data<AppState>,
+    state: Data<AppState>,
     acting_role: ActingRole,
     request_id: RequestId,
     op_ctx: OperationCtx,
@@ -473,8 +479,8 @@ pub async fn run(
 
 /// `POST /api/quant/reports/{id}/revoke` — revoke a published report.
 pub async fn revoke(
-    state: web::Data<AppState>,
-    id: web::Path<RecommendationReportId>,
+    state: Data<AppState>,
+    id: Path<RecommendationReportId>,
     acting_role: ActingRole,
     request_id: RequestId,
     op_ctx: OperationCtx,

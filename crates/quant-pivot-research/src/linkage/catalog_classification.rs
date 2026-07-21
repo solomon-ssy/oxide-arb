@@ -1,9 +1,9 @@
-//! Deterministic full-catalog capability classification for Phase 11.9.
+//! Deterministic full-catalog capability classification.
 //!
-//! This audit is intentionally separate from the serving linkage ledger:
-//! serving still requires a fully grounded [`MarketSubject`], while every
-//! active Crypto/Weather catalog member must receive an explicit capability
-//! disposition even when its deterministic parser is not implemented yet.
+//! Classification runs before continuous linkage reconciliation. Serving still
+//! requires a fully grounded [`MarketSubject`], while every active
+//! Crypto/Weather catalog member receives an explicit capability disposition
+//! even when its deterministic parser is not implemented yet.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -11,8 +11,10 @@ use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
     config::WeatherVerticalBindingsConfig,
     domain::{
-        EventInfo, LinkageOutcome, LinkageSourceMetadata, MarketInfo, MarketSubject,
-        PriceComparator, ResolutionOracle,
+        market::{EventInfo, MarketInfo},
+        quant::{
+            LinkageOutcome, LinkageSourceMetadata, MarketSubject, PriceComparator, ResolutionOracle,
+        },
     },
     enums::{common::MarketCategory, domain::DomainFamily},
     hashing::CanonicalDigest,
@@ -68,7 +70,7 @@ impl DomainCatalogClassifier {
         })
     }
 
-    /// Classify every supplied active Crypto/Weather market and seal the audit.
+    /// Classify every supplied active Crypto/Weather market and seal the result.
     ///
     /// Markets outside those two primary categories are ignored. A missing
     /// event is a hard catalog-integrity error, never an exclusion guess.
@@ -761,7 +763,7 @@ mod tests {
             WeatherHistoricalBindingKind, WeatherStationProfileConfig,
             WeatherVerticalBindingsConfig,
         },
-        domain::{EventInfo, MarketInfo},
+        domain::market::{EventInfo, MarketInfo},
         enums::{
             common::{MarketCategory, TickSize},
             market::{EventStatus, MarketStatus},
@@ -787,7 +789,7 @@ mod tests {
     }
 
     #[test]
-    fn weather_family_detection_covers_every_phase_11_9_contract() {
+    fn weather_family_detection_covers_every_supported_contract() {
         for (text, tags, expected) in [
             (
                 "highest temperature in nyc",

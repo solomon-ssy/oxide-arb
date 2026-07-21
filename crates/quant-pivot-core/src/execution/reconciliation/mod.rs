@@ -1,4 +1,4 @@
-//! Reconciliation closed loop (Phase 05.5).
+//! Reconciliation closed loop.
 //!
 //! Brings the internal ledgers (`quant_execution_order` / `quant_capital_allocation`
 //! / `quant_position`) into agreement with Polymarket venue truth. For every
@@ -12,7 +12,7 @@ mod decide;
 mod reader;
 mod service;
 
-pub use collector::*;
-pub use decide::*;
-pub use reader::*;
-pub use service::*;
+pub use collector::{CollectedReconciliation, EvidenceCollector, VenueEvidenceCollector};
+pub use decide::{ReconcileFacts, ReconciliationDecision, VenuePresence, decide};
+pub use reader::{ClobReconciliationReader, VenueReconciliationReader};
+pub use service::{OperatorReconcileResolution, ReconciliationService, ReconciliationServiceDeps};

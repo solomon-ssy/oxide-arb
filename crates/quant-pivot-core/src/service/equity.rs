@@ -5,7 +5,7 @@ use std::{collections::HashMap, sync::Arc};
 use async_trait::async_trait;
 use quant_pivot_error::{QuantResult, report::ReportError};
 use quant_pivot_models::{
-    domain::{
+    domain::quant::{
         EquitySnapshotInfo, NewAccountSnapshot, NewEquitySnapshot, PositionInfo, capital_drawdown,
         capital_hwm,
     },

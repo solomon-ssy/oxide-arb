@@ -1,11 +1,12 @@
 //! Durable Postgres outbox for `ClickHouse` domain events.
 
-use crate::{
-    domain::DomainEventEnvelope,
-    types::{DomainEventId, WorkerId},
-};
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
+
+use crate::{
+    domain::data_plane::DomainEventEnvelope,
+    types::{DomainEventId, WorkerId},
+};
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]

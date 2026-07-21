@@ -2,23 +2,31 @@
 
 use std::{collections::BTreeMap, future::Future, time::Duration};
 
-use actix_web::{HttpResponse, http::Method, http::header::CACHE_CONTROL, web};
-use chrono::{Duration as ChronoDuration, Utc};
+use actix_web::{
+    HttpResponse,
+    http::{Method, header::CACHE_CONTROL},
+    web::{Data, Query},
+};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     domain::{
-        BasisAlertListQuery, EquitySnapshotQuery, EquitySnapshotView, ExecutionOrderListQuery,
-        FactorDefinitionListQuery, LiveAccountView, ModelVersionListQuery, OrderIntentListQuery,
-        PageRequest, QuantReportListQuery, QuantReportView, ReconciliationListQuery,
-        ReportRunListQuery, SystemStatusView,
-        api::dashboard::{
-            DashboardAccountView, DashboardActionItemView, DashboardActionOwner,
-            DashboardActionReasonCode, DashboardActionSeverity, DashboardAuthorityView,
-            DashboardExposureView, DashboardLifecycleView, DashboardOverviewQuery,
-            DashboardOverviewView, DashboardPrimaryAction, DashboardReasonCode,
-            DashboardReportView, DashboardResearchReadinessView, DashboardSection,
-            DashboardSubsystemHealthView,
+        api::{
+            BasisAlertListQuery, EquitySnapshotView, ExecutionOrderListQuery,
+            FactorDefinitionListQuery, LiveAccountView, ModelVersionListQuery,
+            OrderIntentListQuery, QuantReportListQuery, QuantReportView, ReconciliationListQuery,
+            ReportRunListQuery, SystemStatusView,
+            dashboard::{
+                DashboardAccountView, DashboardActionItemView, DashboardActionOwner,
+                DashboardActionReasonCode, DashboardActionSeverity, DashboardAuthorityView,
+                DashboardExposureView, DashboardLifecycleView, DashboardOverviewQuery,
+                DashboardOverviewView, DashboardPrimaryAction, DashboardReasonCode,
+                DashboardReportView, DashboardResearchReadinessView, DashboardSection,
+                DashboardSubsystemHealthView,
+            },
         },
+        pagination::PageRequest,
+        quant::EquitySnapshotQuery,
     },
     enums::{
         execution::KillSwitchState,
@@ -102,9 +110,9 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
 }
 
 async fn overview(
-    state: web::Data<AppState>,
+    state: Data<AppState>,
     actor: AuthedActor,
-    query: web::Query<DashboardOverviewQuery>,
+    query: Query<DashboardOverviewQuery>,
 ) -> Result<HttpResponse, WebError> {
     let generated_at = Utc::now();
     let query = query.into_inner();
@@ -320,7 +328,7 @@ async fn guarded<T, F>(
     future: F,
 ) -> DashboardSection<T>
 where
-    F: Future<Output = QuantResult<Option<(chrono::DateTime<Utc>, T)>>>,
+    F: Future<Output = QuantResult<Option<(DateTime<Utc>, T)>>>,
 {
     if !allowed {
         return DashboardSection::Forbidden;
@@ -445,8 +453,8 @@ async fn load_account(state: &AppState, allowed: bool) -> DashboardSection<Dashb
 async fn load_equity(
     state: &AppState,
     allowed: bool,
-    from: chrono::DateTime<Utc>,
-    to: chrono::DateTime<Utc>,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
 ) -> DashboardSection<Vec<EquitySnapshotView>> {
     guarded(
         allowed,
@@ -508,8 +516,8 @@ async fn load_latest_report(
 async fn load_report_lifecycle(
     state: &AppState,
     permissions: DashboardPermissions,
-    from: chrono::DateTime<Utc>,
-    to: chrono::DateTime<Utc>,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
 ) -> DashboardSection<DashboardLifecycleView> {
     let allowed = permissions.allows(DashboardPermission::ReadReports)
         || permissions.allows(DashboardPermission::ReadIntents)
@@ -665,7 +673,7 @@ fn exposure_section(
 async fn load_action_inbox(
     state: &AppState,
     permissions: DashboardPermissions,
-    observed_at: chrono::DateTime<Utc>,
+    observed_at: DateTime<Utc>,
 ) -> DashboardSection<Vec<DashboardActionItemView>> {
     guarded(
         permissions.allows(DashboardPermission::ReadSystem)
@@ -793,6 +801,7 @@ async fn load_action_inbox(
 #[cfg(test)]
 mod tests {
     use chrono::{Duration as ChronoDuration, Utc};
+    use quant_pivot_error::QuantError;
     use quant_pivot_models::{
         domain::api::dashboard::{DashboardPrimaryAction, DashboardReasonCode, DashboardSection},
         enums::system::BootstrapPhase,
@@ -851,13 +860,13 @@ mod tests {
     #[actix_web::test]
     async fn guarded_sections_fail_independently_and_mark_stale_snapshots() {
         let forbidden = guarded(false, DashboardReasonCode::NoSamples, None, async {
-            Ok::<_, quant_pivot_error::QuantError>(Some((Utc::now(), 1_u8)))
+            Ok::<_, QuantError>(Some((Utc::now(), 1_u8)))
         })
         .await;
         assert!(matches!(forbidden, DashboardSection::Forbidden));
 
         let unavailable = guarded(true, DashboardReasonCode::NoSamples, None, async {
-            Ok::<_, quant_pivot_error::QuantError>(None::<(_, u8)>)
+            Ok::<_, QuantError>(None::<(_, u8)>)
         })
         .await;
         assert!(matches!(
@@ -868,10 +877,7 @@ mod tests {
         ));
 
         let stale = guarded(true, DashboardReasonCode::NoSamples, Some(60), async {
-            Ok::<_, quant_pivot_error::QuantError>(Some((
-                Utc::now() - ChronoDuration::seconds(61),
-                7_u8,
-            )))
+            Ok::<_, QuantError>(Some((Utc::now() - ChronoDuration::seconds(61), 7_u8)))
         })
         .await;
         assert!(matches!(

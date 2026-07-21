@@ -4,13 +4,15 @@
 //! fields (identity, market context, book replay handle) and is built alongside
 //! [`ResolvedInputs`](super::builder::ResolvedInputs) — never re-derived in the composer.
 
+use std::collections::HashMap;
+
 use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{
     domain::{
-        DecisionBoundary, FeatureVectorInfo, ResolvedBinding,
+        data_plane::DecisionBoundary,
         market::{book::BookLevel, registry::MarketRegistryInfo},
-        quant::NewReportDataQualitySnapshot,
+        quant::{FeatureVectorInfo, NewReportDataQualitySnapshot, ResolvedBinding},
     },
     enums::quant::DataQualityStatus,
     hashing::CanonicalDigest,
@@ -24,6 +26,7 @@ use quant_pivot_models::{
 use rust_decimal::Decimal;
 use serde::Serialize;
 
+use super::DomainSliceInputs;
 use crate::{
     features::{
         FeatureName, FeatureVector, MarketWindowSnapshot, NullReason,
@@ -35,7 +38,6 @@ use crate::{
     pit::ResolvedMarketSnapshot,
     selection::SelectedMarket,
 };
-use std::collections::HashMap;
 
 impl From<&ResolvedMarketSnapshot> for CatalogDecisionRef {
     fn from(snapshot: &ResolvedMarketSnapshot) -> Self {
@@ -84,7 +86,7 @@ pub struct MarketDecisionCapture {
     pub market: ResolvedMarketContext,
     /// Human-readable identity for the recommendation.
     pub identity: RecommendationIdentity,
-    /// Fully materialized market context (parent doc §7).
+    /// Fully materialized market context.
     pub market_context: MarketContext,
     /// Replay handle for the frozen book.
     pub book_snapshot_ref: BookSnapshotRef,
@@ -282,7 +284,7 @@ pub struct MarketDecisionCaptureInput<'a> {
     pub market: ResolvedMarketContext,
     pub registry: Option<&'a MarketRegistryInfo>,
     pub catalog: CatalogDecisionRef,
-    pub domain: Option<&'a super::DomainSliceInputs>,
+    pub domain: Option<&'a DomainSliceInputs>,
     pub liquidity_cap_usd: Usd,
 }
 
@@ -458,6 +460,21 @@ fn fact_lag_ms(as_of: DateTime<Utc>, window: &MarketWindowSnapshot) -> QuantResu
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use chrono::Utc;
+    use quant_pivot_models::{
+        domain::market::{TokenInfo, book::BookLevel, registry::MarketRegistryInfo},
+        enums::{
+            catalog::CatalogFilterReasonSet,
+            common::{CategorySet, MarketCategory, TickSize},
+            market::MarketStatus,
+        },
+        types::{ContentHash, EventId, MarketId, Price, Shares, TokenId, Usd},
+    };
+    use rust_decimal_macros::dec;
+    use uuid::Uuid;
+
     use super::{
         book_snapshot_ref_from_resolved, liquidity_score_from_resolved,
         market_context_from_resolved, recommendation_identity_from_resolved,
@@ -467,21 +484,6 @@ mod tests {
         pit::CanonicalBookEventRef,
         selection::SelectedMarket,
     };
-    use chrono::Utc;
-    use quant_pivot_models::{
-        domain::{
-            TokenInfo,
-            market::{book::BookLevel, registry::MarketRegistryInfo},
-        },
-        enums::{
-            catalog::CatalogFilterReasonSet,
-            common::{CategorySet, MarketCategory, TickSize},
-            market::MarketStatus,
-        },
-        types::{ContentHash, EventId, MarketId, Price, Shares, TokenId, Usd},
-    };
-    use rust_decimal_macros::dec;
-    use std::sync::Arc;
 
     fn sample_book() -> ResolvedBook {
         let token = TokenId::new("123");
@@ -501,7 +503,7 @@ mod tests {
             version: 42,
             sequence: 42,
             source_event: Some(CanonicalBookEventRef {
-                stream_session_id: uuid::Uuid::from_u128(1),
+                stream_session_id: Uuid::from_u128(1),
                 token_sequence: 42,
                 source_event_hash: ContentHash::parse(format!("blake3:{}", "d".repeat(64)))
                     .expect("canonical event hash"),

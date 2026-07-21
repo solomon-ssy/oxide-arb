@@ -1,4 +1,4 @@
-//! Inference degradation policy (父文档 §28 / 03.4 §5.4).
+//! Inference degradation policy.
 //!
 //! A pure mapping from a runtime failure to the action the online round must
 //! take. Keeping the table here makes the money-safety contract auditable in one

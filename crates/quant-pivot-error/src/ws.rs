@@ -1,5 +1,7 @@
 //! WebSocket connection and streaming errors.
 
+#[cfg(feature = "serde")]
+use serde_json::Error as SerdeJsonError;
 use thiserror::Error;
 
 /// Errors from the CLOB WebSocket sharded connection manager.
@@ -26,7 +28,7 @@ pub enum WsError {
 
     #[cfg(feature = "serde")]
     #[error("Message parse error: {0}")]
-    MessageParse(#[from] serde_json::Error),
+    MessageParse(#[from] SerdeJsonError),
 
     #[cfg(not(feature = "serde"))]
     #[error("Message parse error: {0}")]

@@ -141,7 +141,6 @@ fn checked_next_sample(at: DateTime<Utc>, step: Duration) -> QuantResult<DateTim
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use chrono::{Duration, TimeZone, Utc};
     use quant_pivot_models::{
         enums::quant::DatasetPurpose,
@@ -152,6 +151,8 @@ mod tests {
         },
     };
     use rust_decimal::Decimal;
+
+    use super::*;
 
     fn request(interval_secs: u64) -> DatasetPlanRequest {
         let start = Utc.timestamp_opt(1_000_000, 0).single().expect("ts");

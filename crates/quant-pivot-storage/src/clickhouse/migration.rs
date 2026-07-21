@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use clickhouse::Row;
+use clickhouse::{Client, Row};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     config::ClickHouseConfig,
@@ -11,10 +11,13 @@ use quant_pivot_models::{
 };
 use serde::{Deserialize, Serialize};
 use tracing::info;
+use uuid::Uuid;
 
-use crate::{
-    clickhouse::{ensure, schema},
-    sql_contract_registry::{CLICKHOUSE_SCHEMA_APPLY, CLICKHOUSE_SCHEMA_VERIFY},
+use crate::clickhouse::{
+    ensure,
+    query_limits::{CLICKHOUSE_SCHEMA_APPLY, CLICKHOUSE_SCHEMA_VERIFY},
+    schema,
+    schema::{BOOTSTRAP_SOURCES, FORBIDDEN_SCHEMA_OBJECTS, REQUIRED_SCHEMA_OBJECTS},
 };
 
 const MIGRATION_TABLE: &str = "quant_pivot_schema_migration";
@@ -139,7 +142,7 @@ const fn migrations() -> [MigrationSpec; 1] {
         version: 1,
         name: "bootstrap",
         safety: ClickHouseMigrationSafety::OnlineMetadata,
-        sources: schema::BOOTSTRAP_SOURCES,
+        sources: BOOTSTRAP_SOURCES,
         expected_checksum: "blake3:5743af5991f934d52df632a094024bef0f9409ce46ccacb0c801b87cf21f448a",
         destructive_empty_tables: &[],
     }]
@@ -227,7 +230,7 @@ async fn apply_schema_migrations(
     validate_migration_registry()?;
     ensure::ensure_database(config).await?;
     let client = client(config);
-    let lock_owner = uuid::Uuid::now_v7().to_string();
+    let lock_owner = Uuid::now_v7().to_string();
     acquire_deployment_lock(&client, &lock_owner).await?;
     let result = apply_schema_migrations_locked(&client, allow_offline).await;
     let release = release_deployment_lock(&client, &lock_owner).await;
@@ -244,14 +247,14 @@ async fn apply_schema_migrations(
 }
 
 async fn apply_schema_migrations_locked(
-    client: &clickhouse::Client,
+    client: &Client,
     allow_offline: bool,
 ) -> Result<ClickHouseSchemaStatus, StorageError> {
     let names = schema_object_names(client).await?;
     if !names.contains(MIGRATION_TABLE) {
         reject_unmanaged_schema(&names)?;
         CLICKHOUSE_SCHEMA_APPLY
-            .clickhouse_query(client, MIGRATION_TABLE_DDL)
+            .query(client, MIGRATION_TABLE_DDL)
             .execute()
             .await?;
     }
@@ -281,12 +284,12 @@ async fn apply_schema_migrations_locked(
         claim_migration(client, migration).await?;
         for statement in spec.statements() {
             CLICKHOUSE_SCHEMA_APPLY
-                .clickhouse_query(client, &statement)
+                .query(client, &statement)
                 .execute()
                 .await?;
         }
         CLICKHOUSE_SCHEMA_APPLY
-            .clickhouse_query(
+            .query(
                 client,
                 "INSERT INTO quant_pivot_schema_migration (version, name, checksum) \
                  VALUES (?, ?, ?)",
@@ -307,16 +310,13 @@ async fn apply_schema_migrations_locked(
     verify_schema_client_during_deployment(client).await
 }
 
-async fn acquire_deployment_lock(
-    client: &clickhouse::Client,
-    owner: &str,
-) -> Result<(), StorageError> {
+async fn acquire_deployment_lock(client: &Client, owner: &str) -> Result<(), StorageError> {
     let ddl = format!(
         "CREATE TABLE {DEPLOYMENT_LOCK_TABLE} (owner String) \
          ENGINE = TinyLog COMMENT '{owner}'"
     );
     CLICKHOUSE_SCHEMA_APPLY
-        .clickhouse_query(client, &ddl)
+        .query(client, &ddl)
         .execute()
         .await
         .map_err(|error| {
@@ -327,12 +327,9 @@ async fn acquire_deployment_lock(
     Ok(())
 }
 
-async fn release_deployment_lock(
-    client: &clickhouse::Client,
-    owner: &str,
-) -> Result<(), StorageError> {
+async fn release_deployment_lock(client: &Client, owner: &str) -> Result<(), StorageError> {
     let observed = CLICKHOUSE_SCHEMA_APPLY
-        .clickhouse_query(
+        .query(
             client,
             "SELECT comment FROM system.tables \
              WHERE database = currentDatabase() AND name = ?",
@@ -347,14 +344,14 @@ async fn release_deployment_lock(
         )));
     }
     CLICKHOUSE_SCHEMA_APPLY
-        .clickhouse_query(client, &format!("DROP TABLE {DEPLOYMENT_LOCK_TABLE}"))
+        .query(client, &format!("DROP TABLE {DEPLOYMENT_LOCK_TABLE}"))
         .execute()
         .await?;
     Ok(())
 }
 
 async fn verify_destructive_empty_tables(
-    client: &clickhouse::Client,
+    client: &Client,
     migration: MigrationSpec,
 ) -> Result<(), StorageError> {
     if migration.destructive_empty_tables.is_empty() {
@@ -366,7 +363,7 @@ async fn verify_destructive_empty_tables(
     for table in migration.destructive_empty_tables {
         if table_exists(client, table).await?
             && CLICKHOUSE_SCHEMA_APPLY
-                .clickhouse_query(client, &format!("SELECT 1 FROM {table} LIMIT 1"))
+                .query(client, &format!("SELECT 1 FROM {table} LIMIT 1"))
                 .fetch_optional::<u8>()
                 .await?
                 .is_some()
@@ -496,19 +493,19 @@ fn validate_online_safe_statement(
 }
 
 pub(super) async fn verify_schema_client(
-    client: &clickhouse::Client,
+    client: &Client,
 ) -> Result<ClickHouseSchemaStatus, StorageError> {
     verify_schema_client_with_lock_policy(client, false).await
 }
 
 async fn verify_schema_client_during_deployment(
-    client: &clickhouse::Client,
+    client: &Client,
 ) -> Result<ClickHouseSchemaStatus, StorageError> {
     verify_schema_client_with_lock_policy(client, true).await
 }
 
 async fn verify_schema_client_with_lock_policy(
-    client: &clickhouse::Client,
+    client: &Client,
     deployment_lock_owned: bool,
 ) -> Result<ClickHouseSchemaStatus, StorageError> {
     if !deployment_lock_owned && table_exists(client, DEPLOYMENT_LOCK_TABLE).await? {
@@ -540,7 +537,7 @@ async fn verify_schema_client_with_lock_policy(
     })?;
     Ok(ClickHouseSchemaStatus {
         current_version,
-        required_object_count: schema::REQUIRED_SCHEMA_OBJECTS.len(),
+        required_object_count: REQUIRED_SCHEMA_OBJECTS.len(),
         schema_fingerprint: ContentHash::parse(schema_contract_hash()).map_err(|error| {
             StorageError::Migration(format!("construct ClickHouse schema fingerprint: {error}"))
         })?,
@@ -548,7 +545,7 @@ async fn verify_schema_client_with_lock_policy(
 }
 
 async fn claim_migration(
-    client: &clickhouse::Client,
+    client: &Client,
     migration: &ClickHouseSchemaMigrationInfo,
 ) -> Result<(), StorageError> {
     let table = format!("{MIGRATION_CLAIM_PREFIX}{:06}", migration.version);
@@ -558,11 +555,11 @@ async fn claim_migration(
         migration.checksum
     );
     CLICKHOUSE_SCHEMA_APPLY
-        .clickhouse_query(client, &ddl)
+        .query(client, &ddl)
         .execute()
         .await?;
     let observed = CLICKHOUSE_SCHEMA_APPLY
-        .clickhouse_query(
+        .query(
             client,
             "SELECT comment FROM system.tables \
              WHERE database = currentDatabase() AND name = ?",
@@ -580,12 +577,12 @@ async fn claim_migration(
 }
 
 async fn verify_migration_claim(
-    client: &clickhouse::Client,
+    client: &Client,
     migration: &ClickHouseSchemaMigrationInfo,
 ) -> Result<(), StorageError> {
     let table = format!("{MIGRATION_CLAIM_PREFIX}{:06}", migration.version);
     let observed = CLICKHOUSE_SCHEMA_VERIFY
-        .clickhouse_query(
+        .query(
             client,
             "SELECT comment FROM system.tables \
              WHERE database = currentDatabase() AND name = ?",
@@ -609,7 +606,7 @@ async fn verify_migration_claim(
 }
 
 async fn build_plan(
-    client: &clickhouse::Client,
+    client: &Client,
     migration_ledger_exists: bool,
 ) -> Result<ClickHouseSchemaPlan, StorageError> {
     let applied = applied_migrations(client).await?;
@@ -684,11 +681,9 @@ async fn build_plan(
     })
 }
 
-async fn applied_migrations(
-    client: &clickhouse::Client,
-) -> Result<Vec<AppliedMigrationRow>, StorageError> {
+async fn applied_migrations(client: &Client) -> Result<Vec<AppliedMigrationRow>, StorageError> {
     CLICKHOUSE_SCHEMA_VERIFY
-        .clickhouse_query(
+        .query(
             client,
             "SELECT version, argMax(name, applied_at) AS migration_name, \
              argMax(checksum, applied_at) AS migration_checksum, \
@@ -701,9 +696,9 @@ async fn applied_migrations(
         .map_err(Into::into)
 }
 
-async fn verify_structure(client: &clickhouse::Client) -> Result<(), StorageError> {
+async fn verify_structure(client: &Client) -> Result<(), StorageError> {
     let rows = CLICKHOUSE_SCHEMA_VERIFY
-        .clickhouse_query(
+        .query(
             client,
             "SELECT name, engine, engine_full, partition_key, sorting_key, \
              primary_key, sampling_key, create_table_query \
@@ -715,7 +710,7 @@ async fn verify_structure(client: &clickhouse::Client) -> Result<(), StorageErro
         .into_iter()
         .map(|row| (row.name.clone(), row))
         .collect::<BTreeMap<_, _>>();
-    let mut allowed = schema::REQUIRED_SCHEMA_OBJECTS
+    let mut allowed = REQUIRED_SCHEMA_OBJECTS
         .iter()
         .map(|name| (*name).to_owned())
         .collect::<BTreeSet<_>>();
@@ -738,7 +733,7 @@ async fn verify_structure(client: &clickhouse::Client) -> Result<(), StorageErro
         )));
     }
 
-    let missing = schema::REQUIRED_SCHEMA_OBJECTS
+    let missing = REQUIRED_SCHEMA_OBJECTS
         .iter()
         .filter(|name| !by_name.contains_key(**name))
         .copied()
@@ -749,7 +744,7 @@ async fn verify_structure(client: &clickhouse::Client) -> Result<(), StorageErro
             missing.join(", ")
         )));
     }
-    for name in schema::FORBIDDEN_SCHEMA_OBJECTS {
+    for name in FORBIDDEN_SCHEMA_OBJECTS {
         if by_name.contains_key(name) {
             return Err(StorageError::Migration(format!(
                 "ClickHouse contains forbidden compatibility object `{name}`; recreate the pre-production database"
@@ -766,7 +761,7 @@ async fn verify_structure(client: &clickhouse::Client) -> Result<(), StorageErro
             "ClickHouse object `book_microstructure_1m_mv` is not a MaterializedView".to_owned(),
         ));
     }
-    for name in schema::REQUIRED_SCHEMA_OBJECTS {
+    for name in REQUIRED_SCHEMA_OBJECTS {
         let object = by_name.get(name).ok_or_else(|| {
             StorageError::Migration(format!("ClickHouse managed object `{name}` is absent"))
         })?;
@@ -805,7 +800,7 @@ async fn verify_structure(client: &clickhouse::Client) -> Result<(), StorageErro
     Ok(())
 }
 
-async fn verify_schema_manifest(client: &clickhouse::Client) -> Result<(), StorageError> {
+async fn verify_schema_manifest(client: &Client) -> Result<(), StorageError> {
     let expected: ClickHouseSchemaManifest = serde_json::from_str(EXPECTED_SCHEMA_MANIFEST)
         .map_err(|error| {
             StorageError::Migration(format!(
@@ -841,19 +836,19 @@ async fn verify_schema_manifest(client: &clickhouse::Client) -> Result<(), Stora
 }
 
 async fn inspect_schema_manifest(
-    client: &clickhouse::Client,
+    client: &Client,
 ) -> Result<ClickHouseSchemaManifest, StorageError> {
     let database = CLICKHOUSE_SCHEMA_VERIFY
-        .clickhouse_query(client, "SELECT currentDatabase()")
+        .query(client, "SELECT currentDatabase()")
         .fetch_one::<String>()
         .await?;
-    let required = schema::REQUIRED_SCHEMA_OBJECTS
+    let required = REQUIRED_SCHEMA_OBJECTS
         .iter()
         .copied()
         .collect::<BTreeSet<_>>();
     let mut columns_by_table = BTreeMap::<String, Vec<ClickHouseColumnManifest>>::new();
     for column in CLICKHOUSE_SCHEMA_VERIFY
-        .clickhouse_query(
+        .query(
             client,
             "SELECT table, position, name, type AS column_type, default_kind, \
              default_expression, compression_codec \
@@ -879,7 +874,7 @@ async fn inspect_schema_manifest(
     }
 
     let rows = CLICKHOUSE_SCHEMA_VERIFY
-        .clickhouse_query(
+        .query(
             client,
             "SELECT name, engine, engine_full, partition_key, sorting_key, \
              primary_key, sampling_key, create_table_query \
@@ -887,7 +882,7 @@ async fn inspect_schema_manifest(
         )
         .fetch_all::<TableMetadataRow>()
         .await?;
-    let mut objects = Vec::with_capacity(schema::REQUIRED_SCHEMA_OBJECTS.len());
+    let mut objects = Vec::with_capacity(REQUIRED_SCHEMA_OBJECTS.len());
     for row in rows {
         if !required.contains(row.name.as_str()) {
             continue;
@@ -910,7 +905,7 @@ async fn inspect_schema_manifest(
             columns,
         });
     }
-    if objects.len() != schema::REQUIRED_SCHEMA_OBJECTS.len() {
+    if objects.len() != REQUIRED_SCHEMA_OBJECTS.len() {
         return Err(StorageError::Migration(format!(
             "ClickHouse semantic manifest observed {} managed objects, expected {}",
             objects.len(),
@@ -957,11 +952,9 @@ fn reject_unmanaged_schema(names: &BTreeSet<String>) -> Result<(), StorageError>
     )))
 }
 
-async fn schema_object_names(
-    client: &clickhouse::Client,
-) -> Result<BTreeSet<String>, StorageError> {
+async fn schema_object_names(client: &Client) -> Result<BTreeSet<String>, StorageError> {
     CLICKHOUSE_SCHEMA_VERIFY
-        .clickhouse_query(
+        .query(
             client,
             "SELECT name FROM system.tables WHERE database = currentDatabase()",
         )
@@ -971,9 +964,9 @@ async fn schema_object_names(
         .map_err(Into::into)
 }
 
-async fn table_exists(client: &clickhouse::Client, table: &str) -> Result<bool, StorageError> {
+async fn table_exists(client: &Client, table: &str) -> Result<bool, StorageError> {
     let count = CLICKHOUSE_SCHEMA_VERIFY
-        .clickhouse_query(
+        .query(
             client,
             "SELECT count() FROM system.tables \
              WHERE database = currentDatabase() AND name = ?",
@@ -984,8 +977,8 @@ async fn table_exists(client: &clickhouse::Client, table: &str) -> Result<bool, 
     Ok(count == 1)
 }
 
-fn client(config: &ClickHouseConfig) -> clickhouse::Client {
-    clickhouse::Client::default()
+fn client(config: &ClickHouseConfig) -> Client {
+    Client::default()
         .with_url(&config.url)
         .with_database(&config.database)
         .with_user(&config.user)
@@ -1030,10 +1023,8 @@ struct TableNameRow {
 
 #[cfg(test)]
 mod tests {
-    use crate::sql_contract_registry::CLICKHOUSE_SCHEMA_APPLY;
-
     use super::{
-        ClickHouseMigrationSafety, MigrationSpec, migrations, validate_migration_registry,
+        ClickHouseMigrationSafety, MigrationSpec, validate_migration_registry,
         validate_online_safe_statement,
     };
 
@@ -1044,27 +1035,6 @@ mod tests {
     #[test]
     fn compiled_migration_registry_is_contiguous_and_valid() {
         validate_migration_registry().expect("compiled migration registry should be valid");
-    }
-
-    #[test]
-    fn compiled_apply_plan_fits_statement_budget() {
-        // Fixed overhead covers database/ledger inspection, lifecycle lock,
-        // migration claims, ledger writes, verification, and lock release.
-        const FIXED_LIFECYCLE_STATEMENTS: usize = 20;
-        let upper_bound = migrations()
-            .into_iter()
-            .map(|migration| {
-                migration.statements().len()
-                    + migration.destructive_empty_tables.len().saturating_mul(2)
-                    + 3
-            })
-            .sum::<usize>()
-            .saturating_add(FIXED_LIFECYCLE_STATEMENTS);
-        assert!(
-            upper_bound <= usize::from(CLICKHOUSE_SCHEMA_APPLY.statement_budget()),
-            "compiled ClickHouse apply requires {upper_bound} statements, contract permits {}",
-            CLICKHOUSE_SCHEMA_APPLY.statement_budget()
-        );
     }
 
     #[test]

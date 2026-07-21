@@ -10,7 +10,8 @@
 use std::{collections::BTreeMap, ops::Deref};
 
 use sea_orm::FromJsonQueryResult;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as SerdeDeError};
+use serde_json::{Error, Value};
 
 const MAX_OPERATION_DETAIL_BYTES: usize = 64 * 1024;
 const MAX_OPERATION_DETAIL_DEPTH: usize = 8;
@@ -42,7 +43,7 @@ pub enum OperationDetailError {
     #[error("operation detail contains forbidden sensitive key `{0}`")]
     SensitiveKey(String),
     #[error("operation detail serialization failed: {0}")]
-    Serialization(#[from] serde_json::Error),
+    Serialization(#[from] Error),
 }
 
 /// Open-world, redacted forensic summary for the cross-domain operation log.
@@ -53,7 +54,7 @@ pub enum OperationDetailError {
 /// rejection of credential-bearing keys.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, FromJsonQueryResult)]
 #[serde(transparent)]
-pub struct OperationDetailDocument(BTreeMap<String, serde_json::Value>);
+pub struct OperationDetailDocument(BTreeMap<String, Value>);
 
 impl OperationDetailDocument {
     #[must_use]
@@ -66,16 +67,16 @@ impl OperationDetailDocument {
     }
 }
 
-impl TryFrom<serde_json::Value> for OperationDetailDocument {
+impl TryFrom<Value> for OperationDetailDocument {
     type Error = OperationDetailError;
 
-    fn try_from(value: serde_json::Value) -> Result<Self, Self::Error> {
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
         if serde_json::to_vec(&value)?.len() > MAX_OPERATION_DETAIL_BYTES {
             return Err(OperationDetailError::TooLarge);
         }
         let mut node_count = 0;
         validate_operation_detail_value(&value, 0, &mut node_count)?;
-        let serde_json::Value::Object(values) = value else {
+        let Value::Object(values) = value else {
             return Err(OperationDetailError::NotObject);
         };
         Ok(Self(values.into_iter().collect()))
@@ -85,15 +86,15 @@ impl TryFrom<serde_json::Value> for OperationDetailDocument {
 impl<'de> Deserialize<'de> for OperationDetailDocument {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
-        D: serde::Deserializer<'de>,
+        D: Deserializer<'de>,
     {
-        let value = serde_json::Value::deserialize(deserializer)?;
-        Self::try_from(value).map_err(serde::de::Error::custom)
+        let value = Value::deserialize(deserializer)?;
+        Self::try_from(value).map_err(SerdeDeError::custom)
     }
 }
 
 fn validate_operation_detail_value(
-    value: &serde_json::Value,
+    value: &Value,
     depth: usize,
     node_count: &mut usize,
 ) -> Result<(), OperationDetailError> {
@@ -105,7 +106,7 @@ fn validate_operation_detail_value(
         return Err(OperationDetailError::TooManyNodes);
     }
     match value {
-        serde_json::Value::Object(values) => {
+        Value::Object(values) => {
             for (key, child) in values {
                 if SENSITIVE_DETAIL_KEYS
                     .iter()
@@ -116,7 +117,7 @@ fn validate_operation_detail_value(
                 validate_operation_detail_value(child, depth + 1, node_count)?;
             }
         }
-        serde_json::Value::Array(values) => {
+        Value::Array(values) => {
             for child in values {
                 validate_operation_detail_value(child, depth + 1, node_count)?;
             }
@@ -129,23 +130,23 @@ fn validate_operation_detail_value(
 /// Opaque JSON received from an external system and retained byte-semantically.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
 #[serde(transparent)]
-pub struct ExternalJsonDocument(serde_json::Value);
+pub struct ExternalJsonDocument(Value);
 
 impl ExternalJsonDocument {
     #[must_use]
-    pub fn into_inner(self) -> serde_json::Value {
+    pub fn into_inner(self) -> Value {
         self.0
     }
 }
 
-impl From<serde_json::Value> for ExternalJsonDocument {
-    fn from(value: serde_json::Value) -> Self {
+impl From<Value> for ExternalJsonDocument {
+    fn from(value: Value) -> Self {
         Self(value)
     }
 }
 
 impl Deref for ExternalJsonDocument {
-    type Target = serde_json::Value;
+    type Target = Value;
 
     fn deref(&self) -> &Self::Target {
         &self.0

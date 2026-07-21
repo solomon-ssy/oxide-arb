@@ -9,6 +9,7 @@ mod domain_observation;
 mod market_resolution;
 mod projections;
 mod quant_facts;
+mod serde;
 mod trade_tape;
 mod types;
 

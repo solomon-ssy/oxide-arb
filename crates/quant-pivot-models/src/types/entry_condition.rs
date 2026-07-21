@@ -3,14 +3,14 @@
 //! Conditions are deterministic data. They cannot contain network calls,
 //! expressions, scripts, SQL, `JSONPath`, or dynamically selected sources.
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, NaiveDate, Utc};
 use rust_decimal::Decimal;
 use sea_orm::FromJsonQueryResult;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    domain::PriceComparator,
+    domain::quant::PriceComparator,
     enums::quant::{OutcomeSide, PriceComparison},
     hashing::CanonicalDigest,
     types::{
@@ -525,7 +525,7 @@ pub struct CryptoSubjectPredicateEntered {
 pub struct WeatherDailyTemperatureEnteredBand {
     pub source: EntryConditionSourceBinding,
     pub station: String,
-    pub local_date: chrono::NaiveDate,
+    pub local_date: NaiveDate,
     pub temperature_statistic: WeatherTemperatureStatistic,
     pub unit: TemperatureUnit,
     pub band: TemperatureBand,
@@ -540,7 +540,7 @@ pub struct WeatherDailyTemperatureEnteredBand {
 pub struct WeatherDailyTemperatureCrossedTerminalBound {
     pub source: EntryConditionSourceBinding,
     pub station: String,
-    pub local_date: chrono::NaiveDate,
+    pub local_date: NaiveDate,
     pub temperature_statistic: WeatherTemperatureStatistic,
     pub unit: TemperatureUnit,
     pub terminal_bound: Decimal,
@@ -553,7 +553,7 @@ pub struct WeatherDailyTemperatureCrossedTerminalBound {
 pub struct WeatherObservationDayClosedOutsideBand {
     pub source: EntryConditionSourceBinding,
     pub station: String,
-    pub local_date: chrono::NaiveDate,
+    pub local_date: NaiveDate,
     pub temperature_statistic: WeatherTemperatureStatistic,
     pub unit: TemperatureUnit,
     pub band: TemperatureBand,
@@ -622,7 +622,7 @@ pub struct CryptoPriceInput {
 pub struct WeatherDailyTemperatureInput {
     pub source: EntryConditionSourceBinding,
     pub station: String,
-    pub local_date: chrono::NaiveDate,
+    pub local_date: NaiveDate,
     pub temperature_statistic: WeatherTemperatureStatistic,
     pub current_extreme: TemperatureCelsius,
     pub observation_time: DateTime<Utc>,
@@ -760,7 +760,8 @@ pub enum EntryConditionValidationError {
 
 #[cfg(test)]
 mod tests {
-    use chrono::{TimeZone, Utc};
+    use chrono::{Duration, TimeZone, Utc};
+    use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
 
     use super::{
@@ -772,7 +773,7 @@ mod tests {
         types::{Price, TokenId},
     };
 
-    fn price(token: &str, threshold: rust_decimal::Decimal) -> EntryConditionV1 {
+    fn price(token: &str, threshold: Decimal) -> EntryConditionV1 {
         EntryConditionV1::Price(PriceCondition {
             token_id: TokenId::new(token),
             comparison: PriceComparison::AtOrAbove,
@@ -787,7 +788,7 @@ mod tests {
             anchor: ClockAnchor::RecommendationDecision,
             anchor_at,
             offset_ms,
-            deadline_at: anchor_at + chrono::Duration::milliseconds(offset_ms),
+            deadline_at: anchor_at + Duration::milliseconds(offset_ms),
         })
     }
 

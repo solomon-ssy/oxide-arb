@@ -2,8 +2,8 @@
 //! entry-time factor breakdown.
 //!
 //! Exit-side re-inference must reproduce the **entry** factor thesis, not
-//! recompute factors on a single-market pseudo cross-section. Post-11.1 a market
-//! has no peers at exit time, so recomputing would yield
+//! recompute factors on a single-market pseudo cross-section. A market has no
+//! cross-sectional peers at exit time, so recomputing would yield
 //! [`NormalizedFactor::Indeterminate`] for every cross-sectional factor and the
 //! exit model would score a degenerate factor plane. The frozen breakdown carries
 //! the exact normalized scores, provenance, directions, and confidences the entry
@@ -89,7 +89,6 @@ fn scored_from_entry(entry: &FactorBreakdownEntry) -> ScoredFactor {
 
 #[cfg(test)]
 mod tests {
-    use super::frozen_factor_outcome;
     use chrono::Utc;
     use quant_pivot_models::{
         enums::{
@@ -102,6 +101,7 @@ mod tests {
     };
     use rust_decimal::Decimal;
 
+    use super::frozen_factor_outcome;
     use crate::factors::NormalizedFactor;
 
     fn scored_entry(name: &str, score: i64) -> FactorBreakdownEntry {

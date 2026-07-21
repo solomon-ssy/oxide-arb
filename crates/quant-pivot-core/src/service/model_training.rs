@@ -1,4 +1,4 @@
-//! Offline model-training orchestration (Phase 3.6).
+//! Offline model-training orchestration.
 //!
 //! Loads a frozen training dataset's Parquet as the complete feature/factor/label
 //! truth, verifies its semantic content hash, trains with the pure research
@@ -12,17 +12,14 @@
 use std::{collections::BTreeSet, sync::Arc};
 
 use chrono::Utc;
-use tokio::{runtime::Handle, task};
-use tokio_util::sync::CancellationToken;
-
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError, storage::StorageError};
 use quant_pivot_models::{
-    domain::{
-        JobProgressSink, ModelVersionInfo, NewModelRun, NewModelVersion, ResearchJobProgress,
-        TrainingDatasetInfo,
+    domain::quant::{
+        JobProgressSink, ModelVersionInfo, NewModelRun, NewModelVersion, TrainingDatasetInfo,
     },
     enums::{
         common::MarketCategory,
+        model::{ClassicalKind, ModelFamily},
         quant::{
             ModelRunErrorCode, ModelRunKind, ModelRunStatus, PublicationStatus,
             TrainingDatasetStatus,
@@ -31,7 +28,7 @@ use quant_pivot_models::{
     runtime_config::sections::FactorsConfig,
     types::{
         DecisionPolicySnapshotId, ModelInputContract, ModelRunId, ModelSpecId, ModelVersionId,
-        TrainingDatasetId,
+        ResearchJobProgress, TrainingDatasetId,
         model_lineage::ModelVersionDerivation,
         model_metrics::{
             HeldOutMetricKind, LearningToRankInSampleMetrics, ModelArtifactTrainingLineage,
@@ -58,13 +55,16 @@ use quant_pivot_repository::traits::{
 };
 use quant_pivot_research::{
     artifact::ArtifactStore,
-    factors::{FactorEngine, names as factor_names},
+    factors::{
+        FactorEngine,
+        names::{POSITION_PEAK_DRAWDOWN, POSITION_TIME_IN_TRADE, POSITION_UNREALIZED_PNL},
+    },
     features::FeatureSchema,
     hashing::ResearchHasher,
     model::{
-        ClassicalKind, FactorWeight, LabelSelector, ModelArtifact, ModelArtifactHeader,
-        ModelFamily, ModelTrainer, ReturnModelSpec, ScoreMultiplierSpec, SellScorerOutputSpec,
-        SellScorerTrainer, SubstitutionConfidenceRules, TrainModelRequest, TrainSellScorerRequest,
+        FactorWeight, LabelSelector, ModelArtifact, ModelArtifactHeader, ModelTrainer,
+        ReturnModelSpec, ScoreMultiplierSpec, SellScorerOutputSpec, SellScorerTrainer,
+        SubstitutionConfidenceRules, TrainModelRequest, TrainSellScorerRequest,
         TrainedModelArtifact, TrainingObjectiveReport, ValidationReport, ValidationSpec,
         WeightedFactorTrainer, infer_training_category_scope,
         objective::{ObjectiveComponentReport, RankingDiagnostics},
@@ -83,6 +83,8 @@ use quant_pivot_research::{
     },
 };
 use rust_decimal::Decimal;
+use tokio::{runtime::Handle, task};
+use tokio_util::sync::CancellationToken;
 
 use crate::service::{
     historical_replay::ReplayConfig,
@@ -91,7 +93,7 @@ use crate::service::{
 
 /// Derive the candidate factor seed: configured `factor_weights` if present,
 /// else a uniform seed over the (sorted, de-duplicated) factors observed in
-/// `examples`. Shared by [`ModelTrainerService`] and Phase 11.5's CPCV/trial-grid
+/// `examples`. Shared by [`ModelTrainerService`] and the CPCV/trial-grid
 /// orchestration (`quant-pivot-core::service::cpcv_backtest`) so every
 /// `WeightedFactor` fold — production or validation — starts from the same
 /// governed seed.
@@ -130,7 +132,7 @@ pub(crate) fn weighted_seed_weights(
 
 /// Fail closed with a terminal [`ResearchError::Cancelled`] when the job was
 /// cooperatively cancelled (operator cancel, lease loss, or graceful shutdown),
-/// checked at each coarse phase boundary.
+/// checked at each coarse training-stage boundary.
 fn ensure_not_cancelled(cancel: &CancellationToken, phase: &str) -> QuantResult<()> {
     if cancel.is_cancelled() {
         return Err(ResearchError::Cancelled {
@@ -221,7 +223,7 @@ impl ModelTrainerService {
     ///
     /// Reports coarse but honest phases (`load → decode → verify → fit`) to
     /// `progress`; the fit itself is a single opaque research-trainer call,
-    /// offloaded to a blocking thread. `cancel` is polled at each phase boundary.
+    /// offloaded to a blocking thread. `cancel` is polled at each stage boundary.
     pub async fn train(
         &self,
         input: TrainModelInput,
@@ -498,7 +500,7 @@ impl ModelTrainerService {
         Ok((trained.artifact, metrics, objective))
     }
 
-    /// Sell-side hold-vs-exit training path (Phase 06.1). Seeds over the market
+    /// Sell-side hold-vs-exit training path. Seeds over the market
     /// factors plus the position-state pseudo-factors and fits the shared LTR
     /// simplex against the `hold_vs_exit_alpha_bps` label.
     async fn train_sell_scorer(
@@ -565,9 +567,9 @@ impl ModelTrainerService {
             }
         }
         for pseudo in [
-            factor_names::POSITION_UNREALIZED_PNL,
-            factor_names::POSITION_TIME_IN_TRADE,
-            factor_names::POSITION_PEAK_DRAWDOWN,
+            POSITION_UNREALIZED_PNL,
+            POSITION_TIME_IN_TRADE,
+            POSITION_PEAK_DRAWDOWN,
         ] {
             names.insert(pseudo.as_str().to_owned());
         }
@@ -891,7 +893,7 @@ pub(crate) fn classical_output_semantics(
 ///
 /// Examples are time-ordered (so the rolling-validation holdout splits on
 /// wall-clock time, never leaking). Columns come from the governed
-/// [`FeatureSchema`] (11.2.2 remediation R2) — not an ad hoc scan of whichever
+/// [`FeatureSchema`] — not an ad hoc scan of whichever
 /// numeric names happen to appear in this particular example batch — so the
 /// classical path respects the same requiredness / `unit` / `value_kind`
 /// contract the online governed path enforces (e.g. `Bps`-unit features are
@@ -899,7 +901,7 @@ pub(crate) fn classical_output_semantics(
 /// admission instead of silently being treated as fillable). This also makes
 /// the column set reproducible across runs and comparable to the schema
 /// hash, rather than an artifact of which markets happened to be sampled.
-/// Shared by [`ModelTrainerService::train_classical`] and Phase 11.5's
+/// Shared by [`ModelTrainerService::train_classical`] and the
 /// CPCV/trial-grid orchestration (`quant-pivot-core::service::cpcv_backtest`),
 /// so every classical fold — production or validation — builds its matrix
 /// through the identical governed [`FeatureSchema`] column contract.

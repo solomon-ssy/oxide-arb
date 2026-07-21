@@ -2,10 +2,14 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{
-        EnqueueReportRunOutcome, MaterializeReportSchedule, MaterializeReportScheduleOutcome,
-        NewReportRun, Paginated, ReconcileReportSchedule, ReconcileReportSchedulesOutcome,
-        ReportRunClaimConfig, ReportRunInfo, ReportRunListQuery, ReportScheduleGapInfo,
-        ReportScheduleGapListQuery, ReportScheduleHealthInfo, ReportScheduleStateInfo,
+        api::{ReportRunListQuery, ReportScheduleGapListQuery},
+        pagination::Paginated,
+        quant::{
+            EnqueueReportRunOutcome, MaterializeReportSchedule, MaterializeReportScheduleOutcome,
+            NewReportRun, ReconcileReportSchedule, ReconcileReportSchedulesOutcome,
+            ReportRunClaimConfig, ReportRunInfo, ReportScheduleGapInfo, ReportScheduleHealthInfo,
+            ReportScheduleStateInfo,
+        },
     },
     enums::quant::ReportRunTerminalReason,
     types::{

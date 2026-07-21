@@ -25,14 +25,14 @@ use chrono::{DateTime, Datelike, Duration, LocalResult, TimeZone, Utc};
 use chrono_tz::America::New_York;
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
-    domain::{
+    domain::quant::{
         CryptoSubject, GroundingField, GroundingKind, GroundingProof, GroundingSpan,
         LinkageSourceMetadata, MarketSubject, PriceBoundaryInclusion, PriceComparator,
     },
     enums::domain::ResolverTier,
     types::{Probability, Usd},
 };
-use regex::Regex;
+use regex::{Match, Regex};
 use rust_decimal::Decimal;
 
 use crate::linkage::{
@@ -369,7 +369,7 @@ fn question_span(field: &str, question: &str, start: usize, end: usize) -> Groun
 }
 
 /// Parse `$X` with thousands separators and `k`/`m` suffix into a decimal.
-fn parse_dollars(digits: &str, suffix: Option<regex::Match<'_>>) -> Option<Decimal> {
+fn parse_dollars(digits: &str, suffix: Option<Match<'_>>) -> Option<Decimal> {
     let cleaned = digits.replace(',', "");
     let base: Decimal = cleaned.parse().ok()?;
     let multiplier = match suffix.map(|m| m.as_str().to_ascii_lowercase()) {
@@ -479,16 +479,9 @@ fn infer_year(
 
 #[cfg(test)]
 mod tests {
-    use super::CryptoSubjectParser;
-    use crate::linkage::{
-        extractor::{
-            DefaultSubjectValidator, SubjectExtractor, SubjectValidator, ValidationOutcome,
-        },
-        rules,
-    };
     use chrono::{TimeZone, Utc};
     use quant_pivot_models::{
-        domain::{
+        domain::quant::{
             LinkageSourceMetadata, MarketSubject, PriceBoundaryInclusion, PriceComparator,
             ResolutionOracle,
         },
@@ -496,6 +489,14 @@ mod tests {
         types::{MarketId, Usd},
     };
     use rust_decimal_macros::dec;
+
+    use super::CryptoSubjectParser;
+    use crate::linkage::{
+        extractor::{
+            DefaultSubjectValidator, SubjectExtractor, SubjectValidator, ValidationOutcome,
+        },
+        rules,
+    };
 
     const CHAINLINK_RULES: &str = "This market will resolve to \"Up\" if the Bitcoin price at \
          the end of the time range specified in the title is greater than or equal to the price \

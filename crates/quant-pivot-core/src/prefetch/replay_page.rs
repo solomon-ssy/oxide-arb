@@ -13,9 +13,12 @@ use quant_pivot_models::{
         MarketResolutionRow, TradeTapeRow,
     },
     domain::{
-        CatalogEventChangeInfo, CatalogMarketChangeInfo, CryptoPriceReport, DecisionBoundary,
-        DecisionSource, DomainObservation, LinkageOutcome, MarketLinkage, MarketSubject,
-        WeatherForecastPoint, WeatherObservationFact,
+        data_plane::{
+            CryptoPriceReport, DecisionBoundary, DecisionSource, DomainObservation,
+            WeatherForecastPoint, WeatherObservationFact,
+        },
+        market::{CatalogEventChangeInfo, CatalogMarketChangeInfo},
+        quant::{LinkageOutcome, MarketLinkage, MarketSubject},
     },
     types::{
         ClobMarketInfoVersion, DomainInstrumentKey, IcaoStation, MarketId,
@@ -25,9 +28,8 @@ use quant_pivot_models::{
 use quant_pivot_research::pit::BookSnapshotAt;
 use uuid::Uuid;
 
-use crate::pit::platform::ch_historical::{reconstruct_checkpoint, reconstruct_checkpoint_series};
-
 use super::source_slice::FrozenSourceSlice;
+use crate::pit::platform::ch_historical::{reconstruct_checkpoint, reconstruct_checkpoint_series};
 
 /// Maximum candidate markets in a single replay page. Callers page above this
 /// boundary; token and candidate cardinality never create per-row repository I/O.
@@ -832,7 +834,7 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use quant_pivot_models::{
         clickhouse::{BookL2CheckpointRow, BookL2EventRow, ChSchemaVersion},
-        domain::CatalogWindowInfo,
+        domain::market::CatalogWindowInfo,
         enums::clickhouse::ChCanonicalBookEventType,
         types::{
             ContentHash, MarketId, SourceSliceInvalidSession, SourceSliceSessionInvalidationReason,
@@ -841,9 +843,8 @@ mod tests {
     };
     use uuid::Uuid;
 
-    use crate::prefetch::{historical_window::Prefetched, source_slice::FrozenSourceSlice};
-
     use super::ReplayPageRequest;
+    use crate::prefetch::{historical_window::Prefetched, source_slice::FrozenSourceSlice};
 
     fn hash(byte: char) -> ContentHash {
         ContentHash::parse(format!("blake3:{}", byte.to_string().repeat(64))).expect("hash")

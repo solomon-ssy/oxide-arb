@@ -1,7 +1,11 @@
 //! Content-addressed Gamma catalog objects and append-only change ledger.
 
+use chrono::{DateTime, Utc};
+use sea_orm::{DeriveIntoActiveModel, FromQueryResult};
+use serde::{Deserialize, Serialize};
+
 use crate::{
-    domain::{UpsertEvent, UpsertMarket},
+    domain::market::{UpsertEvent, UpsertMarket},
     entities::{
         catalog_event_change, catalog_event_object, catalog_market_change, catalog_market_object,
         catalog_sync_rejection,
@@ -16,9 +20,6 @@ use crate::{
         MarketId,
     },
 };
-use chrono::{DateTime, Utc};
-use sea_orm::{DeriveIntoActiveModel, FromQueryResult};
-use serde::{Deserialize, Serialize};
 
 pub const CATALOG_OBJECT_SCHEMA_VERSION: i32 = 1;
 

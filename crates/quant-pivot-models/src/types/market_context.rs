@@ -1,4 +1,4 @@
-//! Decision-time market readability block (parent doc §7).
+//! Decision-time market readability block.
 
 use rust_decimal::Decimal;
 use sea_orm::FromJsonQueryResult;

@@ -1,11 +1,13 @@
 //! Typed catalog input rejections retained with the failed sync attempt.
 
+use chrono::{DateTime, Utc};
+use sea_orm::entity::prelude::*;
+
+use super::catalog_sync_batch;
 use crate::{
     enums::catalog::{CatalogEntityKind, CatalogRejectionReason},
     types::{CatalogSyncBatchId, CatalogSyncRejectionId, ExternalJsonDocument},
 };
-use chrono::{DateTime, Utc};
-use sea_orm::entity::prelude::*;
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -28,7 +30,7 @@ pub struct Model {
         from = "catalog_sync_batch_id",
         to = "catalog_sync_batch_id"
     )]
-    pub catalog_sync_batch: BelongsTo<super::catalog_sync_batch::Entity>,
+    pub catalog_sync_batch: BelongsTo<catalog_sync_batch::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

@@ -3,13 +3,14 @@
 //! Official schema: fixed 12-element JSON array per row.
 //! <https://developers.binance.com/docs/binance-spot-api-docs/rest-api/market-data-endpoints>
 
-use std::fmt;
+use std::fmt::{Formatter, Result as FmtResult};
 
 use rust_decimal::Decimal;
 use serde::{
     Deserialize, Deserializer, Serialize,
-    de::{self, SeqAccess, Visitor},
+    de::{Error, Expected, IgnoredAny, SeqAccess, Visitor},
 };
+use serde_json::Value;
 
 use crate::wire::decimal::parse_decimal_value;
 
@@ -94,7 +95,7 @@ struct KlineRowVisitor;
 impl<'de> Visitor<'de> for KlineRowVisitor {
     type Value = BinanceKlineRow;
 
-    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn expecting(&self, formatter: &mut Formatter<'_>) -> FmtResult {
         formatter.write_str("a 12-element Binance kline array")
     }
 
@@ -115,8 +116,8 @@ impl<'de> Visitor<'de> for KlineRowVisitor {
         let taker_buy_quote_volume = next_decimal(&mut seq, "taker_buy_quote_volume")?;
         let ignore = next_string(&mut seq, "ignore")?;
 
-        if seq.next_element::<de::IgnoredAny>()?.is_some() {
-            return Err(de::Error::invalid_length(KLINE_FIELD_COUNT + 1, &self));
+        if seq.next_element::<IgnoredAny>()?.is_some() {
+            return Err(Error::invalid_length(KLINE_FIELD_COUNT + 1, &self));
         }
 
         Ok(BinanceKlineRow {
@@ -138,22 +139,22 @@ impl<'de> Visitor<'de> for KlineRowVisitor {
 
 fn next_i64<'de, A: SeqAccess<'de>>(seq: &mut A, field: &'static str) -> Result<i64, A::Error> {
     let value = seq
-        .next_element::<serde_json::Value>()?
-        .ok_or_else(|| de::Error::invalid_length(KLINE_FIELD_COUNT, &ExpectedField(field)))?;
-    value.as_i64().ok_or_else(|| {
-        de::Error::custom(format!("binance kline field `{field}`: expected integer"))
-    })
+        .next_element::<Value>()?
+        .ok_or_else(|| Error::invalid_length(KLINE_FIELD_COUNT, &ExpectedField(field)))?;
+    value
+        .as_i64()
+        .ok_or_else(|| Error::custom(format!("binance kline field `{field}`: expected integer")))
 }
 
 fn next_u64<'de, A: SeqAccess<'de>>(seq: &mut A, field: &'static str) -> Result<u64, A::Error> {
     let value = seq
-        .next_element::<serde_json::Value>()?
-        .ok_or_else(|| de::Error::invalid_length(KLINE_FIELD_COUNT, &ExpectedField(field)))?;
+        .next_element::<Value>()?
+        .ok_or_else(|| Error::invalid_length(KLINE_FIELD_COUNT, &ExpectedField(field)))?;
     value
         .as_u64()
         .or_else(|| value.as_i64().and_then(|v| u64::try_from(v).ok()))
         .ok_or_else(|| {
-            de::Error::custom(format!(
+            Error::custom(format!(
                 "binance kline field `{field}`: expected unsigned integer"
             ))
         })
@@ -164,10 +165,10 @@ fn next_string<'de, A: SeqAccess<'de>>(
     field: &'static str,
 ) -> Result<String, A::Error> {
     let value = seq
-        .next_element::<serde_json::Value>()?
-        .ok_or_else(|| de::Error::invalid_length(KLINE_FIELD_COUNT, &ExpectedField(field)))?;
+        .next_element::<Value>()?
+        .ok_or_else(|| Error::invalid_length(KLINE_FIELD_COUNT, &ExpectedField(field)))?;
     match value {
-        serde_json::Value::String(text) => Ok(text),
+        Value::String(text) => Ok(text),
         other => Ok(other.to_string()),
     }
 }
@@ -177,27 +178,29 @@ fn next_decimal<'de, A: SeqAccess<'de>>(
     field: &'static str,
 ) -> Result<Decimal, A::Error> {
     let value = seq
-        .next_element::<serde_json::Value>()?
-        .ok_or_else(|| de::Error::invalid_length(KLINE_FIELD_COUNT, &ExpectedField(field)))?;
+        .next_element::<Value>()?
+        .ok_or_else(|| Error::invalid_length(KLINE_FIELD_COUNT, &ExpectedField(field)))?;
     parse_decimal_value(&value)
-        .map_err(|detail| de::Error::custom(format!("binance kline field `{field}`: {detail}")))
+        .map_err(|detail| Error::custom(format!("binance kline field `{field}`: {detail}")))
 }
 
 struct ExpectedField(&'static str);
 
-impl de::Expected for ExpectedField {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Expected for ExpectedField {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> FmtResult {
         write!(formatter, "binance kline field `{}`", self.0)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use rust_decimal_macros::dec;
+    use serde_json::Value;
+
+    use super::*;
 
     /// Official Binance doc fixture (12 fields).
-    fn official_fixture_json() -> serde_json::Value {
+    fn official_fixture_json() -> Value {
         serde_json::json!([[
             1_499_040_000_000_i64,
             "0.01634790",

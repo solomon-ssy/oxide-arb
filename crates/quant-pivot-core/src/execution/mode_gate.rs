@@ -1,14 +1,16 @@
 //! Runtime-mode execution gate: published recommendation → intent policy.
 
-use crate::runtime_config::DecisionPolicyStore;
+use std::{sync::Arc, time::Duration};
+
 use async_trait::async_trait;
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
-    domain::RecommendationInfo,
+    domain::quant::RecommendationInfo,
     enums::{execution::ModeDenialReason, quant::QuantRuntimeMode},
     types::{ContentHash, Usd},
 };
-use std::{sync::Arc, time::Duration};
+
+use crate::runtime_config::DecisionPolicyStore;
 
 /// Policy result for turning a recommendation into an order intent.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,10 +107,10 @@ impl RuntimeModeGate for DefaultRuntimeModeGate {
 
 #[cfg(test)]
 mod tests {
-    use super::{DefaultRuntimeModeGate, IntentPolicyDecision, RuntimeModeGate};
-    use crate::runtime_config::DecisionPolicyStore;
+    use std::sync::Arc;
+
     use quant_pivot_models::{
-        domain::RecommendationInfo,
+        domain::quant::RecommendationInfo,
         enums::{
             execution::ModeDenialReason,
             quant::{OutcomeSide, QuantRuntimeMode},
@@ -118,9 +120,10 @@ mod tests {
             RecommendationId, RecommendationReportId, RecommendationTradePlan, RiskEnvelope, Usd,
         },
     };
-    use quant_pivot_test_support::report_fixtures;
     use rust_decimal_macros::dec;
-    use std::sync::Arc;
+
+    use super::{DefaultRuntimeModeGate, IntentPolicyDecision, RuntimeModeGate};
+    use crate::{runtime_config::DecisionPolicyStore, test_fixtures::report_fixtures};
 
     fn rec() -> RecommendationInfo {
         report_fixtures::recommendation(

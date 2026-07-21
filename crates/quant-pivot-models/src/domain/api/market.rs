@@ -1,11 +1,20 @@
 //! Market API contract: inbound list query + outbound response views
 //! (including the order-book projection).
 
+use std::collections::HashSet;
+
+use chrono::{DateTime, Duration, Utc};
+use quant_pivot_error::query::QueryError;
+use quant_pivot_macros::NormalizePageQuery;
+use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
+use validator::Validate;
+
 use crate::{
     clickhouse::{BookMicrostructureRow, ChBps, ChDecimal64, ChPrice, ChUsd, TradeTapeRow},
     domain::{
-        BookLevel, MarketInfo, NormalizePageQuery, market::book::BookSnapshot,
-        pagination::PageRequest,
+        market::{BookLevel, MarketInfo, book::BookSnapshot},
+        pagination::{NormalizePageQuery, PageRequest},
     },
     enums::{
         common::{MarketCategory, TickSize},
@@ -13,20 +22,13 @@ use crate::{
     },
     types::{Bps, EventId, MarketId, MicroUsd, Price, Shares, TokenId, Usd},
 };
-use chrono::{DateTime, Duration, Utc};
-use quant_pivot_error::query::QueryError;
-use quant_pivot_macros::NormalizePageQuery;
-use rust_decimal::Decimal;
-use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
-use validator::Validate;
 
 /// Filter + pagination query for the markets list endpoint.
 ///
 /// `keyword` matches the question or slug (case-insensitive substring); the
 /// other filters are exact and AND-combined. Call [`MarketPageQuery::prepare`]
 /// at the HTTP boundary before persistence when `subscribed` filtering is used;
-/// SQL pagination is hardened separately via [`PageWindow`](crate::domain::PageWindow).
+/// SQL pagination is hardened separately via [`PageWindow`](crate::domain::pagination::PageWindow).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, NormalizePageQuery)]
 pub struct MarketPageQuery {
     pub keyword: Option<String>,
@@ -392,15 +394,18 @@ pub struct MarketMicrostructureView {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use rust_decimal::Decimal;
+    use rust_decimal_macros::dec;
+
     use super::MarketBookSummaryView;
     use crate::{
         domain::market::book::{BookLevel, BookSnapshot},
         types::{Price, Shares, Usd},
     };
-    use rust_decimal_macros::dec;
-    use std::sync::Arc;
 
-    fn snapshot(bid: rust_decimal::Decimal, ask: rust_decimal::Decimal) -> BookSnapshot {
+    fn snapshot(bid: Decimal, ask: Decimal) -> BookSnapshot {
         let level = |price| {
             BookLevel::from_decimal(Price::new(price), Shares::new(dec!(10))).expect("valid level")
         };

@@ -1,9 +1,10 @@
 //! `user` table entity (RBAC account identities).
 
-use crate::{enums::rbac::UserStatus, types::UserId};
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
+
+use crate::{enums::rbac::UserStatus, types::UserId};
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]

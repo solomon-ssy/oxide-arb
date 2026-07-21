@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
 use crate::{
-    domain::{AffectedMarketIds, AffectedProfileIds},
+    domain::data_plane::{AffectedMarketIds, AffectedProfileIds},
     enums::domain::{DomainFamily, DomainSourceExpectationStatus},
     types::{ContentHash, DomainInstrumentKey, DomainSourceExpectationId, DomainSourceId},
 };

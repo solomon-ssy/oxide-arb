@@ -2,13 +2,14 @@
 
 use std::collections::BTreeSet;
 
+use schemars::JsonSchema;
 use sea_orm::FromJsonQueryResult;
 use serde::{Deserialize, Serialize};
 
 use crate::types::TradePolicyArtifactId;
 
 /// Whether a raw feature may be imputed by the fitted model-input transform.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelInputRequiredness {
     /// Only a genuinely observed cell is accepted; all other states reject the row.
@@ -18,7 +19,7 @@ pub enum ModelInputRequiredness {
 }
 
 /// One ordered raw feature consumed by a model.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ModelInputSpec {
     /// Stable feature name from the governed feature catalog.
@@ -49,7 +50,9 @@ impl ModelInputSpec {
 ///
 /// Encoded/synthetic columns are intentionally absent: they are derived only by
 /// the fitted transform and can never enter this source contract.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
+#[derive(
+    Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult, JsonSchema,
+)]
 #[serde(deny_unknown_fields)]
 pub struct ModelInputContract {
     pub inputs: Vec<ModelInputSpec>,
@@ -57,7 +60,7 @@ pub struct ModelInputContract {
 
 /// Frozen supervised-target and cross-validation policy owned by a model spec.
 /// Training requests cannot override these fields.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ModelTrainingContract {
     /// Governed label name materialized in the frozen dataset.

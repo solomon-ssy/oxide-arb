@@ -1,11 +1,13 @@
 //! `quant_account_snapshot` table entity.
 
+use chrono::{DateTime, Utc};
+use sea_orm::entity::prelude::*;
+
+use super::{quant_equity_snapshot, quant_recommendation_report};
 use crate::{
     enums::quant::AccountSource,
     types::{AccountPositions, AccountSnapshotId, ExposureBreakdown, Usd},
 };
-use chrono::{DateTime, Utc};
-use sea_orm::entity::prelude::*;
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -26,9 +28,9 @@ pub struct Model {
     pub created_at: DateTime<Utc>,
 
     #[sea_orm(has_many, relation_enum = "RecommendationReport")]
-    pub recommendation_report: HasMany<super::quant_recommendation_report::Entity>,
+    pub recommendation_report: HasMany<quant_recommendation_report::Entity>,
     #[sea_orm(has_many, relation_enum = "EquitySnapshot")]
-    pub equity_snapshot: HasMany<super::quant_equity_snapshot::Entity>,
+    pub equity_snapshot: HasMany<quant_equity_snapshot::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

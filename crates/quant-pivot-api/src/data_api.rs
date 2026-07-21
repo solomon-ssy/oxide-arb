@@ -14,6 +14,12 @@
 //!
 //! [`OpenAPI`]: https://polymarket-docs.copilot.markets/api-reference/core/get-current-positions-for-a-user
 
+use quant_pivot_error::api::ApiError;
+use quant_pivot_models::config::DataApiConfig;
+use reqwest::Client;
+use rust_decimal::Decimal;
+use serde::Deserialize;
+
 use crate::{
     infra::{
         http::is_retryable_status,
@@ -21,14 +27,10 @@ use crate::{
     },
     wire::decimal::de_decimal,
 };
-use quant_pivot_error::api::ApiError;
-use quant_pivot_models::config::DataApiConfig;
-use rust_decimal::Decimal;
-use serde::Deserialize;
 
 /// A single venue position as returned by the Data API.
 ///
-/// Tiered mapping of the [`OpenAPI`] `Position` schema: core fields used for capital
+/// Tiered mapping of the `OpenAPI` `Position` schema: core fields used for capital
 /// base / registry mapping, plus `PnL` and flag fields for contract fidelity.
 /// UI-only metadata (`title`, `slug`, `icon`, etc.) is intentionally omitted.
 ///
@@ -90,7 +92,7 @@ pub struct VenuePosition {
 /// All calls are wrapped with retry/backoff. Reads are keyless.
 pub struct DataApiClient {
     config: DataApiConfig,
-    http: reqwest::Client,
+    http: Client,
     retry_policy: RetryPolicy,
 }
 
@@ -100,14 +102,14 @@ impl DataApiClient {
     pub fn new(config: DataApiConfig) -> Self {
         Self {
             config,
-            http: reqwest::Client::new(),
+            http: Client::new(),
             retry_policy: RetryPolicy::gamma_default(),
         }
     }
 
     /// Override the HTTP client (tests inject a `no_proxy` client at a mock URL).
     #[must_use]
-    pub fn with_http_client(mut self, http: reqwest::Client) -> Self {
+    pub fn with_http_client(mut self, http: Client) -> Self {
         self.http = http;
         self
     }
@@ -192,8 +194,9 @@ impl DataApiClient {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use rust_decimal_macros::dec;
+
+    use super::*;
 
     #[test]
     fn deserializes_position_with_numeric_and_lossless_decimals() {

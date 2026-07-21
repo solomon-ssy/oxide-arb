@@ -5,7 +5,7 @@ use std::sync::Arc;
 use quant_pivot_error::{QuantResult, report::ReportError};
 use quant_pivot_models::{
     clickhouse::{QuantReportRecommendationFactRow, ReportMarketFunnelRow},
-    domain::NewReportFactDelivery,
+    domain::quant::NewReportFactDelivery,
     enums::quant::ReportFactDeliveryStatus,
     hashing::CanonicalDigest,
     types::{

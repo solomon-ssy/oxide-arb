@@ -1,11 +1,11 @@
 //! [`CoreCalibrationArtifactLoader`]: resolves `model_score` calibration artifacts.
 //!
 //! Loads a [`CalibrationArtifactId`] into compute-domain [`ResolvedCalibration`] for
-//! `quant-pivot-research`'s `DefaultModelRuntimeFactory` (Phase 11.3 §5).
+//! `quant-pivot-research`'s `DefaultModelRuntimeFactory`.
 //!
 //! Implements the research-crate-owned [`CalibrationArtifactLoader`] port over
 //! the persistence-crate `CalibrationArtifactRepository` — the same
-//! dependency-inversion shape as [`crate::artifact`]'s `ArtifactStore` for
+//! dependency-inversion shape as the artifact store for
 //! model bytes, keeping `quant-pivot-research` free of any persistence-crate
 //! dependency.
 
@@ -14,7 +14,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
-    domain::{CalibrationArtifactPayload, query::TimeWindow},
+    domain::{quant::CalibrationArtifactPayload, query::TimeWindow},
     enums::quant::CalibrationKind,
     hashing::CanonicalDigest,
     types::{CalibrationArtifactId, ContentHash, calibration::ModelScoreCalibrationPayload},
@@ -27,8 +27,7 @@ use rust_decimal::Decimal;
 use serde::Serialize;
 
 /// Resolve a model artifact's return-model calibration state through the
-/// **single** deep check every production consumer shares (Phase 11.3
-/// closed-loop hardening).
+/// **single** deep check shared by every production consumer.
 ///
 /// Publish gate, report builder, admission, and intent creation all call this —
 /// never their own independent re-implementation. Before this consolidation,
@@ -134,7 +133,7 @@ impl CalibrationArtifactLoader for CoreCalibrationArtifactLoader {
             }));
         }
         // Fail-closed governance: a calibrator that was never bound/activated
-        // (or was superseded — Phase 11.3 `active` lifecycle) must never
+        // (or was superseded — `active` lifecycle) must never
         // resolve. The `Calibrated` return model's `calibrator_ref` is only
         // ever set by `bind_calibration`, which activates the target row in
         // the same transaction, so a well-formed reference is always active;
@@ -260,12 +259,13 @@ fn validate_model_score_payload(
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use chrono::Utc;
+    use chrono::{DateTime, Duration, Utc};
     use quant_pivot_error::storage::StorageError;
     use quant_pivot_models::{
         domain::{
-            CalibrationArtifactInfo, CalibrationArtifactListQuery, NewCalibrationArtifact,
-            Paginated,
+            api::CalibrationArtifactListQuery,
+            pagination::Paginated,
+            quant::{CalibrationArtifactInfo, NewCalibrationArtifact},
         },
         types::{
             ModelVersionId, Probability, TrainingDatasetId,
@@ -323,7 +323,7 @@ mod tests {
 
         async fn published_weather_through(
             &self,
-            _at: chrono::DateTime<Utc>,
+            _at: DateTime<Utc>,
         ) -> Result<Vec<PublishedWeatherStationLeadBias>, StorageError> {
             unimplemented!("not exercised by loader tests")
         }
@@ -343,8 +343,8 @@ mod tests {
 
     fn valid_row(active: bool) -> CalibrationArtifactInfo {
         let fit_window = TimeWindow::new(
-            Utc::now() - chrono::Duration::days(30),
-            Utc::now() - chrono::Duration::days(1),
+            Utc::now() - Duration::days(30),
+            Utc::now() - Duration::days(1),
         );
         let calibration_split_hash = fake_content_hash(1);
         let payload = dummy_payload();

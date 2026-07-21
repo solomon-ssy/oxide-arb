@@ -1,28 +1,30 @@
-use super::order_book::OrderBook;
-use crate::{ingest::market_registry::MarketRegistry, observability::metrics_hub::MetricsHub};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Instant,
+};
+
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use num_traits::ToPrimitive;
 use parking_lot::Mutex;
 use quant_pivot_models::{
     domain::{
-        BookLevel,
-        book::{BinaryBookPair, BookSnapshot, TopOfBook},
-        latency::LatencyTrace,
+        data_plane::latency::LatencyTrace,
+        market::{
+            BookLevel,
+            book::{BinaryBookPair, BookSnapshot, TopOfBook},
+        },
     },
     enums::common::Side,
     types::{MarketId, Price, Shares, TokenId},
 };
-use std::{
-    sync::{
-        Arc,
-        atomic::{
-            self, AtomicU64 as StdSyncAtomicU64, AtomicU64, Ordering as StdSyncOrdering, Ordering,
-        },
-    },
-    time::Instant,
-};
 use tokio::sync::Notify;
+
+use super::order_book::OrderBook;
+use crate::{ingest::market_registry::MarketRegistry, observability::metrics_hub::MetricsHub};
 
 struct TokenBookState {
     live: Mutex<OrderBook>,
@@ -38,7 +40,7 @@ pub struct BookStore {
     books: DashMap<TokenId, Arc<TokenBookState>>,
     token_latency_traces: DashMap<TokenId, Arc<LatencyTrace>>,
     metrics: Arc<MetricsHub>,
-    metric_update_counter: atomic::AtomicU64,
+    metric_update_counter: AtomicU64,
     gap_generation: AtomicU64,
     update_notify: Notify,
 }
@@ -49,7 +51,7 @@ impl BookStore {
             books: DashMap::new(),
             token_latency_traces: DashMap::new(),
             metrics,
-            metric_update_counter: StdSyncAtomicU64::new(0),
+            metric_update_counter: AtomicU64::new(0),
             gap_generation: AtomicU64::new(0),
             update_notify: Notify::new(),
         }
@@ -96,9 +98,7 @@ impl BookStore {
                 .set(ToPrimitive::to_i64(&self.books.len()).unwrap_or(i64::MAX));
             return;
         }
-        let n = self
-            .metric_update_counter
-            .fetch_add(1, StdSyncOrdering::Relaxed);
+        let n = self.metric_update_counter.fetch_add(1, Ordering::Relaxed);
         if n.is_multiple_of(1024) {
             self.metrics
                 .book_store_token_count
@@ -255,10 +255,12 @@ impl BookStore {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use quant_pivot_models::enums::common::Side;
+    use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
-    fn make_level(price: rust_decimal::Decimal, size: rust_decimal::Decimal) -> BookLevel {
+
+    use super::*;
+    fn make_level(price: Decimal, size: Decimal) -> BookLevel {
         BookLevel::from_decimal_unchecked(Price::new(price), Shares::new(size))
     }
 

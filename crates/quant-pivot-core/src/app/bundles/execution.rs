@@ -1,4 +1,4 @@
-//! Entry-execution subsystem bundle (Phase 05.4 — real money).
+//! Money-critical entry-execution subsystem bundle.
 //!
 //! Owns the venue order client, the (stateless) admission engine + input
 //! builder, the stateful execution breaker, and the dispatcher that bridges an
@@ -14,7 +14,7 @@ use quant_pivot_api::{
 use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
     config::DeployConfig,
-    domain::{DataQualityPort, ExecutionSubmitPort},
+    domain::ports::{DataQualityPort, ExecutionSubmitPort},
     types::EvmAddress,
 };
 use quant_pivot_repository::traits::{
@@ -81,13 +81,13 @@ pub struct ExecutionBundle {
     pub breaker: Arc<ExecutionBreaker>,
     /// Cross-table submission transactions (also drives boot recovery).
     pub submission: Arc<dyn ExecutionSubmissionRepository>,
-    /// Reconciliation engine (05.5): resolves in-flight orders to venue truth.
+    /// Reconciliation engine: resolves in-flight orders to venue truth.
     pub reconciliation: Arc<ReconciliationService>,
-    /// Exit-monitor engine (05.6): scans open lots and drives the exit ladder.
+    /// Exit-monitor engine: scans open lots and drives the exit ladder.
     pub exit_monitor: Arc<ExitMonitorService>,
-    /// On-chain settlement redeem engine (05.10).
+    /// On-chain settlement redeem engine.
     pub settlement_redeem: Arc<SettlementRedeemService>,
-    /// Final WORM recommendation-attribution builder (05.7).
+    /// Final WORM recommendation-attribution builder.
     pub attribution: Arc<AttributionService>,
     /// Exit-monitor health hot read consumed by admission `#20`.
     pub exit_monitor_health: ExitMonitorHealthHandle,
@@ -104,7 +104,7 @@ impl ExecutionBundle {
 
         let breaker = build_execution_breaker(deps)?;
 
-        // Exit-monitor health seam (05.6): owned by the governance bundle so it
+        // Exit-monitor health seam: owned by the governance bundle so it
         // is shared with the mode preflight; published by the worker, read by
         // admission `#20`. Starts not-ready (fail-closed) until the first scan.
         let exit_monitor_health = deps.governance.exit_monitor_health.clone();
@@ -142,7 +142,7 @@ impl ExecutionBundle {
                     as Arc<dyn FeatureParityRepository>)),
             }));
 
-        // Reconciliation engine (05.5): venue reader + fixed-order evidence
+        // Reconciliation engine: venue reader + fixed-order evidence
         // collector + the service that resolves in-flight orders to venue truth.
         let reader: Arc<dyn VenueReconciliationReader> =
             Arc::new(ClobReconciliationReader::new(Arc::clone(&clob)));
@@ -171,7 +171,7 @@ impl ExecutionBundle {
             events: deps.intent_lifecycle.publisher(),
         }));
 
-        // Exit-monitor engine (05.6): model-driven signal seam + exit dispatcher
+        // Exit-monitor engine: model-driven signal seam + exit dispatcher
         // + per-lot sweep service.
         let exit_monitor = build_exit_monitor(
             ExitMonitorWiring {
@@ -345,7 +345,7 @@ struct ExitMonitorWiring<'a> {
     research: &'a ResearchBundle,
 }
 
-/// Assemble the 05.6 exit-monitor engine: model-backed signal re-inference (06.0)
+/// Assemble the exit-monitor engine: model-backed signal re-inference
 /// behind the score-degradation evaluator, the exit dispatcher, and the per-lot sweep.
 fn build_exit_monitor(
     wiring: ExitMonitorWiring<'_>,
@@ -367,7 +367,7 @@ fn build_exit_monitor(
         pit_source: Arc::clone(&wiring.data.pit_source),
         window_provider: FeatureWindowProvider::new(Arc::clone(&wiring.infra.quant_fact_read)),
     });
-    // 06.0 thesis-invalidation re-inference (invalidation-first).
+    // thesis-invalidation re-inference (invalidation-first).
     let reinference: Arc<dyn ExitSignalEvaluator> = Arc::new(ReinferenceSignalEvaluator::new(
         ReinferenceSignalEvaluatorDeps {
             reinferer,
@@ -376,7 +376,7 @@ fn build_exit_monitor(
             audit: Arc::clone(&audit),
         },
     ));
-    // 06.1 opportunistic Sell scorer (advisory scale-out; runs only when the
+    // opportunistic Sell scorer (advisory scale-out; runs only when the
     // thesis holds — composed behind re-inference).
     let opportunistic_scorer =
         ModelBackedOpportunisticSellScorer::new(ModelBackedOpportunisticSellScorerDeps {

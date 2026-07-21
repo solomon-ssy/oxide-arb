@@ -3,6 +3,9 @@
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
+use super::{
+    quant_model_version, quant_order_intent, quant_recommendation, quant_recommendation_report,
+};
 use crate::types::{
     ContentHash, ResearchProfileArtifactId, ResearchProfileId, ResearchProfileSpec,
 };
@@ -27,13 +30,13 @@ pub struct Model {
     pub created_at: DateTime<Utc>,
 
     #[sea_orm(has_many, relation_enum = "RecommendationReport")]
-    pub recommendation_report: HasMany<super::quant_recommendation_report::Entity>,
+    pub recommendation_report: HasMany<quant_recommendation_report::Entity>,
     #[sea_orm(has_many, relation_enum = "Recommendation")]
-    pub recommendation: HasMany<super::quant_recommendation::Entity>,
+    pub recommendation: HasMany<quant_recommendation::Entity>,
     #[sea_orm(has_many, relation_enum = "ModelVersion")]
-    pub model_version: HasMany<super::quant_model_version::Entity>,
+    pub model_version: HasMany<quant_model_version::Entity>,
     #[sea_orm(has_many, relation_enum = "OrderIntent")]
-    pub order_intent: HasMany<super::quant_order_intent::Entity>,
+    pub order_intent: HasMany<quant_order_intent::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

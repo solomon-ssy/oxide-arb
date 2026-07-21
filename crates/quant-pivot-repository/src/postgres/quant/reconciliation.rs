@@ -1,22 +1,27 @@
 //! Postgres-backed execution-order reconciliation repository.
 
-use crate::{
-    postgres::{error, query::paginate_mapped},
-    traits::ReconciliationRepository,
-};
-use quant_pivot_error::storage::{StorageError, entity};
+use quant_pivot_error::storage::{StorageError, entity::QUANT_RECONCILIATION};
 use quant_pivot_models::{
     domain::{
-        AppendReconciliationEvidence, NewReconciliation, PageWindow, Paginated, ReconciliationInfo,
-        ReconciliationListQuery, ReconciliationPatch,
+        api::ReconciliationListQuery,
+        pagination::{PageWindow, Paginated},
+        quant::{
+            AppendReconciliationEvidence, NewReconciliation, ReconciliationInfo,
+            ReconciliationPatch,
+        },
     },
-    entities::quant_reconciliation,
+    entities::quant_reconciliation::{Column, Entity},
     enums::execution::ReconciliationResult,
     types::{ExecutionOrderId, ReconciliationId},
 };
 use sea_orm::{
     ActiveModelTrait, ActiveValue, ColumnTrait, Condition, DatabaseConnection, EntityTrait,
     IntoActiveModel, IntoActiveValue, PaginatorTrait, QueryFilter, QueryOrder,
+};
+
+use crate::{
+    postgres::{error, query::paginate_mapped},
+    traits::ReconciliationRepository,
 };
 
 /// Postgres-backed reconciliation repository.
@@ -36,7 +41,7 @@ impl ReconciliationRepository for PgReconciliationRepository {
         &self,
         reconciliation: NewReconciliation,
     ) -> Result<ReconciliationInfo, StorageError> {
-        quant_reconciliation::Entity::insert(reconciliation.into_active_model())
+        Entity::insert(reconciliation.into_active_model())
             .exec_with_returning(&self.db)
             .await
             .map_err(StorageError::from)
@@ -48,15 +53,12 @@ impl ReconciliationRepository for PgReconciliationRepository {
         reconciliation_id: &ReconciliationId,
         evidence: AppendReconciliationEvidence,
     ) -> Result<ReconciliationInfo, StorageError> {
-        let Some(row) = quant_reconciliation::Entity::find_by_id(reconciliation_id.clone())
+        let Some(row) = Entity::find_by_id(reconciliation_id.clone())
             .one(&self.db)
             .await
             .map_err(StorageError::from)?
         else {
-            return Err(error::not_found(
-                entity::QUANT_RECONCILIATION,
-                reconciliation_id,
-            ));
+            return Err(error::not_found(QUANT_RECONCILIATION, reconciliation_id));
         };
 
         let mut chain = row.evidence_json.clone();
@@ -75,15 +77,12 @@ impl ReconciliationRepository for PgReconciliationRepository {
         reconciliation_id: &ReconciliationId,
         patch: ReconciliationPatch,
     ) -> Result<ReconciliationInfo, StorageError> {
-        let Some(row) = quant_reconciliation::Entity::find_by_id(reconciliation_id.clone())
+        let Some(row) = Entity::find_by_id(reconciliation_id.clone())
             .one(&self.db)
             .await
             .map_err(StorageError::from)?
         else {
-            return Err(error::not_found(
-                entity::QUANT_RECONCILIATION,
-                reconciliation_id,
-            ));
+            return Err(error::not_found(QUANT_RECONCILIATION, reconciliation_id));
         };
 
         let mut active = row.into_active_model();
@@ -109,7 +108,7 @@ impl ReconciliationRepository for PgReconciliationRepository {
         &self,
         reconciliation_id: &ReconciliationId,
     ) -> Result<Option<ReconciliationInfo>, StorageError> {
-        quant_reconciliation::Entity::find_by_id(reconciliation_id.clone())
+        Entity::find_by_id(reconciliation_id.clone())
             .one(&self.db)
             .await
             .map_err(StorageError::from)
@@ -120,8 +119,8 @@ impl ReconciliationRepository for PgReconciliationRepository {
         &self,
         execution_order_id: &ExecutionOrderId,
     ) -> Result<Option<ReconciliationInfo>, StorageError> {
-        quant_reconciliation::Entity::find()
-            .filter(quant_reconciliation::Column::ExecutionOrderId.eq(execution_order_id.clone()))
+        Entity::find()
+            .filter(Column::ExecutionOrderId.eq(execution_order_id.clone()))
             .one(&self.db)
             .await
             .map_err(StorageError::from)
@@ -133,9 +132,9 @@ impl ReconciliationRepository for PgReconciliationRepository {
         query: ReconciliationListQuery,
     ) -> Result<Paginated<ReconciliationInfo>, StorageError> {
         paginate_mapped(
-            quant_reconciliation::Entity::find()
+            Entity::find()
                 .filter(page_condition(&query))
-                .order_by_desc(quant_reconciliation::Column::CreatedAt),
+                .order_by_desc(Column::CreatedAt),
             &self.db,
             PageWindow::from_query(&query),
             Into::into,
@@ -144,8 +143,8 @@ impl ReconciliationRepository for PgReconciliationRepository {
     }
 
     async fn find_unresolved(&self) -> Result<Vec<ReconciliationInfo>, StorageError> {
-        quant_reconciliation::Entity::find()
-            .filter(quant_reconciliation::Column::ResolvedAt.is_null())
+        Entity::find()
+            .filter(Column::ResolvedAt.is_null())
             .all(&self.db)
             .await
             .map_err(StorageError::from)
@@ -157,9 +156,9 @@ impl ReconciliationRepository for PgReconciliationRepository {
     }
 
     async fn count_blocking_unresolvable(&self) -> Result<u64, StorageError> {
-        quant_reconciliation::Entity::find()
-            .filter(quant_reconciliation::Column::Result.eq(ReconciliationResult::Unresolvable))
-            .filter(quant_reconciliation::Column::ResolvedAt.is_null())
+        Entity::find()
+            .filter(Column::Result.eq(ReconciliationResult::Unresolvable))
+            .filter(Column::ResolvedAt.is_null())
             .count(&self.db)
             .await
             .map_err(StorageError::from)
@@ -168,34 +167,26 @@ impl ReconciliationRepository for PgReconciliationRepository {
 
 fn page_condition(query: &ReconciliationListQuery) -> Condition {
     Condition::all()
-        .add_option(
-            query
-                .result
-                .map(|result| quant_reconciliation::Column::Result.eq(result)),
-        )
+        .add_option(query.result.map(|result| Column::Result.eq(result)))
         .add_option(query.resolved.map(|resolved| {
             if resolved {
-                quant_reconciliation::Column::ResolvedAt.is_not_null()
+                Column::ResolvedAt.is_not_null()
             } else {
-                quant_reconciliation::Column::ResolvedAt.is_null()
+                Column::ResolvedAt.is_null()
             }
         }))
-        .add_option(query.execution_order_id.clone().map(|execution_order_id| {
-            quant_reconciliation::Column::ExecutionOrderId.eq(execution_order_id)
-        }))
         .add_option(
-            query.order_intent_id.clone().map(|order_intent_id| {
-                quant_reconciliation::Column::OrderIntentId.eq(order_intent_id)
-            }),
+            query
+                .execution_order_id
+                .clone()
+                .map(|execution_order_id| Column::ExecutionOrderId.eq(execution_order_id)),
         )
         .add_option(
             query
-                .from
-                .map(|from| quant_reconciliation::Column::CreatedAt.gte(from)),
+                .order_intent_id
+                .clone()
+                .map(|order_intent_id| Column::OrderIntentId.eq(order_intent_id)),
         )
-        .add_option(
-            query
-                .to
-                .map(|to| quant_reconciliation::Column::CreatedAt.lte(to)),
-        )
+        .add_option(query.from.map(|from| Column::CreatedAt.gte(from)))
+        .add_option(query.to.map(|to| Column::CreatedAt.lte(to)))
 }

@@ -7,8 +7,11 @@ use chrono::Utc;
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     domain::{
-        AccountReadPort, AccountSnapshotInfo, EquitySnapshotInfo, EquitySnapshotQuery,
-        LiveAccountInfo, LiveAccountSnapshot, Paginated, PolicySnapshotPort,
+        pagination::Paginated,
+        ports::{AccountReadPort, LiveAccountInfo, PolicySnapshotPort},
+        quant::{
+            AccountSnapshotInfo, EquitySnapshotInfo, EquitySnapshotQuery, LiveAccountSnapshot,
+        },
     },
     types::{AccountSnapshotId, EquitySnapshotId, Usd},
 };

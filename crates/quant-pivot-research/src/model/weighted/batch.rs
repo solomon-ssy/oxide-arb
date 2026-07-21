@@ -140,7 +140,8 @@ fn decimal_from_f64(value: f64) -> QuantResult<Decimal> {
 
 #[cfg(test)]
 mod tests {
-    use super::ScoringBatchLayout;
+    use std::collections::BTreeMap;
+
     use quant_pivot_models::{
         enums::{
             factor::FactorFamily,
@@ -150,8 +151,8 @@ mod tests {
     };
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
-    use std::collections::BTreeMap;
 
+    use super::ScoringBatchLayout;
     use crate::{
         factors::{
             FactorExplanation, FactorName, FactorValue, NormalizedFactor,

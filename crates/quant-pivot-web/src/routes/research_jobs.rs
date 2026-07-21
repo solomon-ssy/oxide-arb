@@ -7,11 +7,18 @@
 //! | POST | `/research/jobs/{id}/cancel` | governed `materialization:create` | Cancel (terminal if queued, cooperative if running) |
 //! | POST | `/research/jobs/{id}/retry` | governed `materialization:create` | Re-enqueue a terminal job's frozen params |
 
-use actix_web::{http::Method, web};
+use actix_web::{
+    http::Method,
+    web::{Data, Path, Query},
+};
 use quant_pivot_models::{
     domain::{
-        CancelResearchJobRequest, JobSubmitContext, Paginated, ResearchJobListQuery,
-        ResearchJobView, RetryResearchJobRequest,
+        api::{
+            CancelResearchJobRequest, ResearchJobListQuery, ResearchJobView,
+            RetryResearchJobRequest,
+        },
+        pagination::Paginated,
+        ports::JobSubmitContext,
     },
     enums::{
         operation_log::OperationCategory,
@@ -63,8 +70,8 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
 
 /// `GET /api/research/jobs` — paginated job ledger for the task center.
 pub async fn list(
-    state: web::Data<AppState>,
-    query: web::Query<ResearchJobListQuery>,
+    state: Data<AppState>,
+    query: Query<ResearchJobListQuery>,
 ) -> Result<WebResponse<Paginated<ResearchJobView>>, WebError> {
     let page = state.research_jobs.list(query.into_inner()).await?;
     Ok(WebResponse::ok(page))
@@ -72,8 +79,8 @@ pub async fn list(
 
 /// `GET /api/research/jobs/{id}` — single job (UI poll target).
 pub async fn get_by_id(
-    state: web::Data<AppState>,
-    id: web::Path<ResearchJobId>,
+    state: Data<AppState>,
+    id: Path<ResearchJobId>,
 ) -> Result<WebResponse<ResearchJobView>, WebError> {
     let view = state
         .research_jobs
@@ -85,8 +92,8 @@ pub async fn get_by_id(
 
 /// `POST /api/research/jobs/{id}/cancel` — cancel a job.
 pub async fn cancel(
-    state: web::Data<AppState>,
-    id: web::Path<ResearchJobId>,
+    state: Data<AppState>,
+    id: Path<ResearchJobId>,
     acting_role: ActingRole,
     request_id: RequestId,
     op_ctx: OperationCtx,
@@ -119,8 +126,8 @@ pub async fn cancel(
 
 /// `POST /api/research/jobs/{id}/retry` — re-enqueue a terminal job.
 pub async fn retry(
-    state: web::Data<AppState>,
-    id: web::Path<ResearchJobId>,
+    state: Data<AppState>,
+    id: Path<ResearchJobId>,
     acting_role: ActingRole,
     request_id: RequestId,
     op_ctx: OperationCtx,

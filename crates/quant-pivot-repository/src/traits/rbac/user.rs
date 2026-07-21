@@ -2,7 +2,11 @@
 
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    domain::{ChangeUserPassword, NewUser, Paginated, UserInfo, UserPageQuery, UserPatch},
+    domain::{
+        api::UserPageQuery,
+        pagination::Paginated,
+        rbac::{ChangeUserPassword, NewUser, UserInfo, UserPatch},
+    },
     enums::rbac::UserStatus,
     types::UserId,
 };

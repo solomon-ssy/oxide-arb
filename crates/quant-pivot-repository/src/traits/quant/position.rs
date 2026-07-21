@@ -2,8 +2,9 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{
-        ExitTrainingLotRow, Paginated, PositionExit, PositionFill, PositionInfo, PositionListQuery,
-        PositionSummary,
+        api::{PositionListQuery, PositionSummary},
+        pagination::Paginated,
+        quant::{ExitTrainingLotRow, PositionExit, PositionFill, PositionInfo},
     },
     types::{MarketId, OrderIntentId, PositionId, TokenId, Usd},
 };

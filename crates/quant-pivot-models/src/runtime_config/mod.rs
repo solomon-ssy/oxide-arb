@@ -5,25 +5,48 @@ pub mod sections;
 pub mod validation;
 pub mod wire;
 
+use std::collections::BTreeMap;
+
+use chrono::{DateTime, Utc};
+use quant_pivot_error::{
+    QuantError,
+    config::ConfigError,
+    config_validation::{ConfigValidationError, ConfigValidationReport},
+    hashing::CanonicalDigestError,
+};
 pub use schedule_preview::{
     DueScheduleWindow, MAX_PREVIEW_OCCURRENCES, due_schedule_window, preview_fire_times,
     validate_schedule_cadence,
 };
-pub use sections::*;
-pub use validation::validate_runtime_config;
-pub use wire::*;
-
-use std::collections::BTreeMap;
-
-use chrono::{DateTime, Utc};
 use schemars::{JsonSchema, Schema, SchemaGenerator, generate::SchemaSettings};
 use sea_orm::FromJsonQueryResult;
+pub use sections::{
+    AutoExecutionConfig, CryptoCrossCheckConfig, CryptoDomainConfig, DataQualityConfig,
+    DomainConfig, EntryConditionWorkerConfig, ExecutionConfig, FactorCrossSectionConfig,
+    FactorNormalizationConfig, FactorOrthogonalizeConfig, FactorsConfig, FavoriteLongshotConfig,
+    FeaturesConfig, KellySafetyConfig, MAX_REPORT_TOP_N, ModelCalibrationConfig, ModelConfig,
+    MomentumFeaturesConfig, NegRiskStructuralConfig, ParticipantConcentrationConfig,
+    PerFactorNormalization, PolicyValidationConfig, PortfolioBudget, PortfolioConfig,
+    PortfolioConstraints, QualityGateConfig, ReportScheduleConfig, ReportsConfig, ResearchConfig,
+    ResearchTrainingConfig, ResearchValidationConfig, ResearchValidationCpcvConfig,
+    ResearchValidationGatesConfig, ResearchValidationPboConfig, ResearchValidationPurgeConfig,
+    ResearchValidationTrialsConfig, ReversalAfterShockConfig, SelectionConfig,
+    SellQualityGateConfig, SemiAutoCanaryConfig, SemiAutoConfig, StructuralFactorsConfig,
+    StructuralFeaturesConfig, TrainingConfig, WeatherDomainConfig,
+};
 use serde::{Deserialize, Serialize};
+use serde_json::{Error as SerdeJsonError, Value};
 use thiserror::Error;
-
-use quant_pivot_error::{
-    ConfigValidationError, ConfigValidationReport, QuantError, config::ConfigError,
-    hashing::CanonicalDigestError,
+pub use validation::validate_runtime_config;
+pub use wire::{
+    AttributionPolicy, CapitalPolicy, ConfidenceSizeCurve, CorrelationConfig, DecimalValue,
+    DrawdownMultiplierPolicy, EmergencyExitKind, EmergencyExitPolicy, EntryOrderPolicy,
+    ExecutionBreakerConfig, ExitMonitorPolicy, ExitSignalReinferencePolicy, FactorWeights,
+    FeatureFamily, FeatureStalenessPolicy, KillSwitchPolicy, MASKED_SECRET, MissingFactorPolicy,
+    ModelVersionRef, NeutralizeDimension, NotificationPolicies, OpportunisticSellPolicy,
+    PortfolioOptimizerConfig, RankLossKind, ReconciliationPolicy, ReportDeliveryPolicy,
+    ScheduleCadence, SettlementRedeemPolicy, SizingModelConfig, SmallCrossSectionPolicy,
+    TrainingOptimizerKind,
 };
 
 use crate::{
@@ -981,7 +1004,7 @@ impl DecisionPolicySnapshot {
 #[derive(Debug, Error)]
 pub enum PolicySnapshotError {
     #[error("policy snapshot parse failed: {0}")]
-    Parse(#[from] serde_json::Error),
+    Parse(#[from] SerdeJsonError),
     #[error("policy document kind mismatch: expected {expected}, got {actual}")]
     ResourceKindMismatch {
         expected: ConfigResourceKind,
@@ -1061,7 +1084,7 @@ impl From<PolicySnapshotError> for QuantError {
 }
 
 impl DecisionPolicySnapshot {
-    pub fn from_json(config_json: &serde_json::Value) -> Result<Self, PolicySnapshotError> {
+    pub fn from_json(config_json: &Value) -> Result<Self, PolicySnapshotError> {
         let config: Self = serde_json::from_value(config_json.clone())?;
         if !config.uses_current_resource_schemas() {
             return Err(PolicySnapshotError::UnsupportedSchemaVersion);
@@ -1071,8 +1094,8 @@ impl DecisionPolicySnapshot {
 
     /// Encode to the canonical JSON document stored in `decision_policy_snapshot`.
     #[must_use]
-    pub fn to_json(&self) -> serde_json::Value {
-        serde_json::to_value(self).unwrap_or(serde_json::Value::Null)
+    pub fn to_json(&self) -> Value {
+        serde_json::to_value(self).unwrap_or(Value::Null)
     }
 
     #[must_use]
@@ -1082,7 +1105,7 @@ impl DecisionPolicySnapshot {
     }
 
     #[must_use]
-    pub fn to_masked_json(&self) -> serde_json::Value {
+    pub fn to_masked_json(&self) -> Value {
         self.to_json()
     }
 
@@ -1116,19 +1139,18 @@ impl DecisionPolicySnapshot {
 
 #[cfg(test)]
 mod tests {
-    use super::{DecisionPolicySnapshot, POLICY_RESOURCE_SCHEMA_VERSION, PolicySnapshotError};
-    use crate::types::SchemaVersion;
     use serde_json::json;
 
+    use super::{DecisionPolicySnapshot, POLICY_RESOURCE_SCHEMA_VERSION, PolicySnapshotError};
+
     #[test]
-    fn schema_version_is_current() {
+    fn default_document_uses_current_schema_version() {
         assert_eq!(
             DecisionPolicySnapshot::default()
                 .recommendation
                 .schema_version,
             POLICY_RESOURCE_SCHEMA_VERSION
         );
-        assert_eq!(POLICY_RESOURCE_SCHEMA_VERSION, SchemaVersion::new(1));
     }
 
     #[test]

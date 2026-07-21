@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use quant_pivot_error::QuantResult;
 
-use crate::domain::ExecutionRecoveryView;
+use crate::domain::api::ExecutionRecoveryView;
 
 #[async_trait]
 pub trait ExecutionRecoveryPort: Send + Sync {

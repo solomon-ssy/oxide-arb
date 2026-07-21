@@ -2,7 +2,7 @@
 //! built-in feature identifiers.
 //!
 //! Parameterized features (windowed time series, depth levels) are constructed
-//! via [`FeatureName::ts_return`] and siblings in [`super::value`] so the naming
+//! via [`FeatureName::ts_return`] and sibling constructors so the naming
 //! formula is never duplicated.
 
 use super::FeatureName;
@@ -85,7 +85,7 @@ pub mod micro {
 }
 
 /// Structural (prediction-market-aware) features — platform-computable from
-/// existing facts, no external data source (Phase 11.2.1).
+/// existing facts, no external data source.
 pub mod structural {
     use super::FeatureName;
 
@@ -101,8 +101,8 @@ pub mod structural {
     pub const PRICE_EXTREMITY: FeatureName = FeatureName::from_static("struct.price_extremity");
     /// Book-churn intensity (delta-to-update ratio over the maker window).
     ///
-    /// A book-derived liquidity-turnover proxy, NOT true maker concentration
-    /// (which needs trade-tape); see `11.2.1.1`.
+    /// A book-derived liquidity-turnover proxy, not the participant
+    /// concentration signal computed from the trade tape.
     pub const BOOK_CHURN_INTENSITY: FeatureName =
         FeatureName::from_static("struct.book_churn_intensity");
     /// Count of trade-tape participant rows in the configured PIT window.
@@ -141,7 +141,7 @@ pub mod structural {
 }
 
 /// Crypto external-vertical (domain-slice) features — computed from frozen
-/// market linkages + PIT domain observations (Phase 11.2.2).
+/// market linkages + PIT domain observations.
 pub mod domain_crypto {
     use super::FeatureName;
 

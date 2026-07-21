@@ -1,5 +1,9 @@
 //! `policy_activation` table entity.
 
+use chrono::{DateTime, Utc};
+use sea_orm::entity::prelude::*;
+
+use super::{decision_policy_snapshot, policy_approval, policy_revision, user};
 use crate::{
     enums::runtime_config::{ConfigResourceKind, PolicyActivationKind, PolicyActorKind},
     types::{
@@ -7,8 +11,6 @@ use crate::{
         PolicyBundleGeneration, PolicyIdempotencyKey, PolicyRevisionId, UserId,
     },
 };
-use chrono::{DateTime, Utc};
-use sea_orm::entity::prelude::*;
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -50,14 +52,14 @@ pub struct Model {
         from = "policy_revision_id",
         to = "policy_revision_id"
     )]
-    pub revision: BelongsTo<super::policy_revision::Entity>,
+    pub revision: BelongsTo<policy_revision::Entity>,
     #[sea_orm(
         belongs_to,
         relation_enum = "Approval",
         from = "policy_approval_id",
         to = "policy_approval_id"
     )]
-    pub approval: BelongsTo<super::policy_approval::Entity>,
+    pub approval: BelongsTo<policy_approval::Entity>,
 
     #[sea_orm(
         belongs_to,
@@ -65,14 +67,14 @@ pub struct Model {
         from = "decision_policy_snapshot_id",
         to = "decision_policy_snapshot_id"
     )]
-    pub snapshot: BelongsTo<super::decision_policy_snapshot::Entity>,
+    pub snapshot: BelongsTo<decision_policy_snapshot::Entity>,
     #[sea_orm(
         belongs_to,
         relation_enum = "ActivatedByUser",
         from = "activated_by_user_id",
         to = "id"
     )]
-    pub activated_by_user: BelongsTo<Option<super::user::Entity>>,
+    pub activated_by_user: BelongsTo<Option<user::Entity>>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

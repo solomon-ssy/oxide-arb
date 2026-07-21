@@ -6,16 +6,18 @@
 //! [`SubscriptionSource::Engine`]; the web plane remains an overlay and can
 //! never unsubscribe an engine-owned token.
 
-use crate::{
-    ingest::{market_filter::MarketFilter, market_registry::MarketRegistry},
-    observability::metrics_hub::MetricsHub,
-};
+use std::sync::Arc;
+
 use chrono::{DateTime, Duration, Utc};
 use quant_pivot_api::ws::{ClobWsManager, SubscriptionSource};
 use quant_pivot_models::{
     domain::market::MarketRegistryInfo, enums::market::MarketStatus, types::TokenId,
 };
-use std::sync::Arc;
+
+use crate::{
+    ingest::{market_filter::MarketFilter, market_registry::MarketRegistry},
+    observability::metrics_hub::MetricsHub,
+};
 
 /// Fraction of the token budget reserved for the detection-window tier (Tier1).
 const TIER1_TOKEN_BUDGET_PCT: usize = 80;
@@ -327,8 +329,6 @@ impl MarketDataSubscriptionPolicy {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::ingest::market_registry::MarketRegistry;
     use chrono::Duration;
     use quant_pivot_models::{
         domain::market::{MarketRegistryInfo, TokenInfo},
@@ -339,6 +339,9 @@ mod tests {
         types::{EventId, MarketId},
     };
     use rust_decimal_macros::dec;
+
+    use super::*;
+    use crate::ingest::market_registry::MarketRegistry;
 
     fn sample_market(id: &str, end_date: Option<DateTime<Utc>>) -> MarketRegistryInfo {
         MarketRegistryInfo {

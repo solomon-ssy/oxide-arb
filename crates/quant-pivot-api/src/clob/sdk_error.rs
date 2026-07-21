@@ -2,7 +2,7 @@
 
 use polymarket_client_sdk_v2::error::{Error as SdkError, Kind, Status};
 use quant_pivot_error::api::ApiError;
-use reqwest::StatusCode;
+use reqwest::{Method, StatusCode};
 
 /// Local wrapper for orphan-safe [`From`] into [`ApiError`].
 #[derive(Debug, Clone, Copy)]
@@ -60,13 +60,13 @@ fn is_retryable_status(code: StatusCode) -> bool {
         || code.is_server_error()
 }
 
-const fn http_method_label(method: &reqwest::Method) -> &'static str {
+const fn http_method_label(method: &Method) -> &'static str {
     match *method {
-        reqwest::Method::GET => "GET",
-        reqwest::Method::POST => "POST",
-        reqwest::Method::DELETE => "DELETE",
-        reqwest::Method::PUT => "PUT",
-        reqwest::Method::PATCH => "PATCH",
+        Method::GET => "GET",
+        Method::POST => "POST",
+        Method::DELETE => "DELETE",
+        Method::PUT => "PUT",
+        Method::PATCH => "PATCH",
         _ => "HTTP",
     }
 }
@@ -83,8 +83,9 @@ fn parse_retry_after_ms(message: &str) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use reqwest::Method;
+
+    use super::*;
 
     #[test]
     fn maps_429_to_rate_limited() {

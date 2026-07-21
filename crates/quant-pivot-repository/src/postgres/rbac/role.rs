@@ -1,15 +1,19 @@
 //! Postgres implementation of [`RoleRepository`].
 
 use chrono::Utc;
-use quant_pivot_error::storage::{StorageError, entity};
+use quant_pivot_error::storage::{StorageError, entity::ROLE};
 use quant_pivot_models::{
-    domain::{NewRole, RoleInfo, RolePatch},
-    entities::{role, role_menu, user_role},
+    domain::rbac::{NewRole, RoleInfo, RolePatch},
+    entities::{
+        role::{Column, Entity},
+        role_menu::{Column as RoleMenuColumn, Entity as RoleMenuEntity},
+        user_role::{Column as UserRoleColumn, Entity as UserRoleEntity},
+    },
     enums::rbac::{RoleKind, RoleStatus},
     types::{RoleId, UserId},
 };
 use sea_orm::{
-    ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, DatabaseConnection,
+    ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, DatabaseConnection, DbErr,
     EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, TransactionTrait,
 };
 
@@ -31,9 +35,9 @@ impl PgRoleRepository {
 }
 
 async fn do_list(db: &impl ConnectionTrait) -> Result<Vec<RoleInfo>, StorageError> {
-    let models = role::Entity::find()
-        .order_by_asc(role::Column::Sort)
-        .order_by_asc(role::Column::Code)
+    let models = Entity::find()
+        .order_by_asc(Column::Sort)
+        .order_by_asc(Column::Code)
         .all(db)
         .await
         .map_err(StorageError::from)?;
@@ -41,20 +45,20 @@ async fn do_list(db: &impl ConnectionTrait) -> Result<Vec<RoleInfo>, StorageErro
 }
 
 async fn do_find_by_id(db: &impl ConnectionTrait, id: &RoleId) -> Result<RoleInfo, StorageError> {
-    role::Entity::find_by_id(id.clone())
+    Entity::find_by_id(id.clone())
         .one(db)
         .await
         .map_err(StorageError::from)?
         .map(Into::into)
-        .ok_or_else(|| error::not_found(entity::ROLE, id))
+        .ok_or_else(|| error::not_found(ROLE, id))
 }
 
 async fn do_find_by_code(
     db: &impl ConnectionTrait,
     code: &str,
 ) -> Result<Option<RoleInfo>, StorageError> {
-    Ok(role::Entity::find()
-        .filter(role::Column::Code.eq(code))
+    Ok(Entity::find()
+        .filter(Column::Code.eq(code))
         .one(db)
         .await
         .map_err(StorageError::from)?
@@ -63,10 +67,10 @@ async fn do_find_by_code(
 
 async fn do_create(db: &impl ConnectionTrait, new: NewRole) -> Result<RoleInfo, StorageError> {
     let code = new.code.clone();
-    let model = role::Entity::insert(new.into_active_model())
+    let model = Entity::insert(new.into_active_model())
         .exec_with_returning(db)
         .await
-        .map_err(|error| error::map_unique(error, entity::ROLE, code.as_str()))?;
+        .map_err(|error| error::map_unique(error, ROLE, code.as_str()))?;
     Ok(model.into())
 }
 
@@ -80,7 +84,7 @@ async fn do_update(
     active.updated_at = Set(Utc::now());
     match active.update(db).await {
         Ok(model) => Ok(model.into()),
-        Err(sea_orm::DbErr::RecordNotUpdated) => Err(error::not_found(entity::ROLE, id)),
+        Err(DbErr::RecordNotUpdated) => Err(error::not_found(ROLE, id)),
         Err(error) => Err(StorageError::from(error)),
     }
 }
@@ -101,13 +105,13 @@ async fn do_change_status(
 ) -> Result<(), StorageError> {
     let txn = db.begin().await.map_err(StorageError::from)?;
 
-    let Some(role) = role::Entity::find_by_id(id.clone())
+    let Some(role) = Entity::find_by_id(id.clone())
         .one(&txn)
         .await
         .map_err(StorageError::from)?
     else {
         txn.rollback().await.map_err(StorageError::from)?;
-        return Err(error::not_found(entity::ROLE, id));
+        return Err(error::not_found(ROLE, id));
     };
 
     // No-op transitions skip the policy churn entirely.
@@ -116,9 +120,9 @@ async fn do_change_status(
         return Ok(());
     }
 
-    role::Entity::update_many()
-        .col_expr(role::Column::Status, primitives::enum_value(&status))
-        .filter(role::Column::Id.eq(id.clone()))
+    Entity::update_many()
+        .col_expr(Column::Status, primitives::enum_value(&status))
+        .filter(Column::Id.eq(id.clone()))
         .exec(&txn)
         .await
         .map_err(StorageError::from)?;
@@ -126,8 +130,8 @@ async fn do_change_status(
     match status {
         RoleStatus::Disabled => sync::do_revoke_role_bindings(&txn, &role.code).await?,
         RoleStatus::Enabled => {
-            let holders: Vec<UserId> = user_role::Entity::find()
-                .filter(user_role::Column::RoleId.eq(id.clone()))
+            let holders: Vec<UserId> = UserRoleEntity::find()
+                .filter(UserRoleColumn::RoleId.eq(id.clone()))
                 .all(&txn)
                 .await
                 .map_err(StorageError::from)?
@@ -145,35 +149,35 @@ async fn do_change_status(
 async fn do_delete(db: &DatabaseConnection, id: &RoleId) -> Result<(), StorageError> {
     let txn = db.begin().await.map_err(StorageError::from)?;
 
-    let role = role::Entity::find_by_id(id.clone())
+    let role = Entity::find_by_id(id.clone())
         .one(&txn)
         .await
         .map_err(StorageError::from)?;
     let Some(role) = role else {
         txn.rollback().await.map_err(StorageError::from)?;
-        return Err(error::not_found(entity::ROLE, id));
+        return Err(error::not_found(ROLE, id));
     };
     if matches!(role.kind, RoleKind::Builtin) {
         txn.rollback().await.map_err(StorageError::from)?;
         return Err(error::state_conflict(
-            entity::ROLE,
+            ROLE,
             Some(id),
             format!("built-in role cannot be deleted: {}", role.code),
         ));
     }
 
-    role_menu::Entity::delete_many()
-        .filter(role_menu::Column::RoleId.eq(id.clone()))
+    RoleMenuEntity::delete_many()
+        .filter(RoleMenuColumn::RoleId.eq(id.clone()))
         .exec(&txn)
         .await
         .map_err(StorageError::from)?;
-    user_role::Entity::delete_many()
-        .filter(user_role::Column::RoleId.eq(id.clone()))
+    UserRoleEntity::delete_many()
+        .filter(UserRoleColumn::RoleId.eq(id.clone()))
         .exec(&txn)
         .await
         .map_err(StorageError::from)?;
     sync::do_purge_role_code(&txn, &role.code).await?;
-    role::Entity::delete_by_id(id.clone())
+    Entity::delete_by_id(id.clone())
         .exec(&txn)
         .await
         .map_err(StorageError::from)?;

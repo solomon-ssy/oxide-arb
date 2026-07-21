@@ -1,14 +1,17 @@
 //! Configuration loading and validation errors.
 
-use crate::config_validation::ConfigValidationReport;
+#[cfg(feature = "config")]
+use config_rs::ConfigError as ConfigConfigError;
 use thiserror::Error;
+
+use crate::config_validation::ConfigValidationReport;
 
 /// Errors from configuration loading (TOML/env) and semantic validation.
 #[derive(Debug, Error)]
 pub enum ConfigError {
     #[cfg(feature = "config")]
     #[error("Configuration load failed: {0}")]
-    Load(#[from] config::ConfigError),
+    Load(#[from] ConfigConfigError),
 
     #[cfg(not(feature = "config"))]
     #[error("Configuration load failed: {0}")]

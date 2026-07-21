@@ -1,11 +1,18 @@
-//! Reconciliation HTTP endpoints (Phase 05.5 closeout).
+//! Reconciliation HTTP endpoints for operator closeout.
 
-use actix_web::{http::Method, web};
+use actix_web::{
+    http::Method,
+    web::{Data, Path, Query},
+};
 use quant_pivot_models::{
     domain::{
-        ExecutionOrderView, Paginated, ReconciliationInfo, ReconciliationListQuery,
-        ReconciliationView, ResolveReconciliationCommand, ResolveReconciliationRequest,
-        ResolveReconciliationResponse,
+        api::{
+            ExecutionOrderView, ReconciliationListQuery, ReconciliationView,
+            ResolveReconciliationCommand, ResolveReconciliationRequest,
+            ResolveReconciliationResponse,
+        },
+        pagination::Paginated,
+        quant::ReconciliationInfo,
     },
     enums::{
         operation_log::OperationCategory,
@@ -49,8 +56,8 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
 }
 
 async fn list(
-    state: web::Data<AppState>,
-    query: web::Query<ReconciliationListQuery>,
+    state: Data<AppState>,
+    query: Query<ReconciliationListQuery>,
 ) -> Result<WebResponse<Paginated<ReconciliationView>>, WebError> {
     let page = state
         .execution_read
@@ -60,8 +67,8 @@ async fn list(
 }
 
 async fn get(
-    state: web::Data<AppState>,
-    id: web::Path<ReconciliationId>,
+    state: Data<AppState>,
+    id: Path<ReconciliationId>,
 ) -> Result<WebResponse<ReconciliationView>, WebError> {
     let info = state
         .execution_read
@@ -72,11 +79,11 @@ async fn get(
 }
 
 async fn resolve(
-    state: web::Data<AppState>,
+    state: Data<AppState>,
     actor: AuthedActor,
     _acting_role: ActingRole,
     op_ctx: OperationCtx,
-    id: web::Path<ReconciliationId>,
+    id: Path<ReconciliationId>,
     body: ValidatedJson<ResolveReconciliationRequest>,
 ) -> Result<WebResponse<ResolveReconciliationResponse>, WebError> {
     let reconciliation_id = id.into_inner();

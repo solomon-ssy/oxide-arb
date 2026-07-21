@@ -1,4 +1,4 @@
-//! Shared model-runtime input assembly (Phase 3.6).
+//! Shared model-runtime input assembly.
 //!
 //! Both the online [`ModelRunner`](crate::service::model_runner::ModelRunner) and
 //! the offline [`BacktestService`](crate::service::backtest::BacktestService) turn
@@ -7,14 +7,19 @@
 //! the live plane would, so replayed metrics are money-faithful. The classical
 //! `FeatureMatrix` path is added alongside when the classical runtime lands.
 
+use std::collections::HashSet;
+
 use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantResult, research::ResearchError};
-use quant_pivot_models::types::{ModelRunId, stable_name::FeatureName};
+use quant_pivot_models::{
+    enums::model::ModelFamily,
+    types::{FeatureCell, FeatureStaleness, ModelRunId, NullReason, stable_name::FeatureName},
+};
 use quant_pivot_research::{
     factors::MarketFactorOutcome,
-    features::{FeatureCell, FeatureStaleness, FeatureVector, NullReason},
+    features::FeatureVector,
     model::{
-        FactorInferenceRow, FactorInferenceTable, InferenceMatrix, InferenceMatrixRow, ModelFamily,
+        FactorInferenceRow, FactorInferenceTable, InferenceMatrix, InferenceMatrixRow,
         ModelRuntimeInput, QuantModelRuntime,
     },
     selection::SelectedMarket,
@@ -22,7 +27,6 @@ use quant_pivot_research::{
 };
 
 use crate::projection::inference_context::build_market_inference_context;
-use std::collections::HashSet;
 
 /// Build one factor-inference row from an aligned `(market, vector, outcome)`.
 ///
@@ -266,43 +270,47 @@ pub fn build_feature_matrix(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_feature_matrix, build_frozen_runtime_input};
+    use std::collections::BTreeMap;
+
     use chrono::{TimeZone, Utc};
     use quant_pivot_error::QuantResult;
     use quant_pivot_models::{
-        domain::DecisionClock,
+        domain::data_plane::DecisionClock,
         enums::{
             common::MarketCategory,
             domain::DomainFamily,
             factor::FactorFamily,
+            model::ModelFamily,
             quant::{DataQualityStatus, FactorDirection},
         },
         hashing::CanonicalDigest,
         types::{
-            ContentHash, EventId, FactorDefinitionId, MarketId, ModelRunId, ModelVersionId, Price,
-            Probability, SchemaVersion, TokenId, TrainingExampleId, TrainingSampleSource,
-            factor::FactorExplanation, stable_name::FeatureName,
+            ContentHash, DomainFeatureSlice, EventId, FactorDefinitionId, FeatureCell,
+            FeatureCellState, FeatureStaleness, FeatureValue, MarketId, ModelRunId, ModelVersionId,
+            NullReason, Price, Probability, SchemaVersion, TokenId, TrainingExampleId,
+            TrainingSampleSource, factor::FactorExplanation, stable_name::FeatureName,
         },
     };
     use quant_pivot_research::{
         factors::{FactorValue, NormalizedFactor, names::LIQUIDITY_DEPTH},
         features::{
-            DomainFeatureSlice, FeatureCell, FeatureCellState, FeatureStaleness, FeatureValue,
-            FeatureVector, NullReason, names::book,
+            FeatureVector,
+            names::book::{BEST_ASK, MID, SECONDARY_BEST_ASK},
         },
-        model::{ModelFamily, ModelRuntimeInput, ModelRuntimeOutput, QuantModelRuntime},
+        model::{ModelRuntimeInput, ModelRuntimeOutput, QuantModelRuntime},
         selection::SelectedMarket,
         training::TrainingExample,
     };
     use rust_decimal_macros::dec;
-    use std::collections::BTreeMap;
+
+    use super::{build_feature_matrix, build_frozen_runtime_input};
 
     const FEATURE: &str = "domain.crypto.distance_to_strike";
 
     fn vector(domain_value: Option<FeatureCell>) -> FeatureVector {
         let mut generic = BTreeMap::new();
         generic.insert(
-            book::BEST_ASK,
+            BEST_ASK,
             FeatureCell::observed(
                 FeatureValue::Probability(Probability::new(dec!(0.56))),
                 None,
@@ -310,7 +318,7 @@ mod tests {
             ),
         );
         generic.insert(
-            book::SECONDARY_BEST_ASK,
+            SECONDARY_BEST_ASK,
             FeatureCell::observed(
                 FeatureValue::Probability(Probability::new(dec!(0.47))),
                 None,
@@ -318,7 +326,7 @@ mod tests {
             ),
         );
         generic.insert(
-            book::MID,
+            MID,
             FeatureCell::observed(
                 FeatureValue::Probability(Probability::new(dec!(0.5))),
                 None,

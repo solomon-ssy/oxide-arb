@@ -6,20 +6,17 @@
 //! (the transition proceeds only when every hard check passes). Downgrades skip
 //! this engine entirely (tightening is always permitted).
 
-use crate::{
-    execution::ExitMonitorHealthHandle,
-    governance::{
-        kill_switch::KillSwitchHandle,
-        quality_gate_load::{active_load_ok, active_publication_status_ok, shadow_load_ok},
-    },
-    runtime_config::DecisionPolicyStore,
-};
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     config::DeployConfig,
-    domain::{DataQualityPort, PreflightCheck, PreflightReport},
+    domain::{
+        governance::{PreflightCheck, PreflightReport},
+        ports::DataQualityPort,
+    },
     enums::{
         execution::KillSwitchState,
         quant::{ExecutionWalletKind, QuantRuntimeMode},
@@ -31,14 +28,22 @@ use quant_pivot_repository::traits::{
     ShadowComparisonRepository,
 };
 use rust_decimal::Decimal;
-use std::sync::Arc;
+
+use crate::{
+    execution::ExitMonitorHealthHandle,
+    governance::{
+        kill_switch::KillSwitchHandle,
+        quality_gate_load::{active_load_ok, active_publication_status_ok, shadow_load_ok},
+    },
+    runtime_config::DecisionPolicyStore,
+};
 
 /// Mode-upgrade preflight boundary.
 #[async_trait]
 pub trait ModePreflight: Send + Sync {
     /// Aggregate the read-only check list for a target upgrade mode.
     ///
-    /// Genuine infrastructure failures (DB down) propagate as [`QuantError`]
+    /// Genuine infrastructure failures (DB down) propagate as typed errors
     /// (mapped to 5xx). Business denials are captured as failed hard checks in
     /// the returned [`PreflightReport`] (`passed == false`).
     async fn run(&self, target: QuantRuntimeMode) -> QuantResult<PreflightReport>;
@@ -54,7 +59,7 @@ pub struct ModePreflightDeps {
     pub reconciliation: Arc<dyn ReconciliationRepository>,
     pub capital: Arc<dyn CapitalAllocationRepository>,
     pub kill_switch: KillSwitchHandle,
-    /// Exit-monitor health (05.6): `auto_execution` requires a live worker.
+    /// Exit-monitor health: `auto_execution` requires a live worker.
     pub exit_monitor_health: ExitMonitorHealthHandle,
 }
 
@@ -163,8 +168,7 @@ impl DefaultModePreflight {
         PreflightCheck::hard(
             "order_client_ready",
             keys_ok && url_ok,
-            "boot-level keystore + CLOB endpoint present (live connectivity probe \
-             lands with the ExecutionBundle in 05.4)",
+            "boot-level keystore and CLOB endpoint are configured; live connectivity is checked by the execution bundle",
         )
     }
 

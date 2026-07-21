@@ -8,13 +8,20 @@
 //! | POST | `/research/feature-integrity/runs/full` | governed `materialization:create` | Enqueue a full replay |
 //! | POST | `/research/feature-integrity/latch/acknowledge` | governed `materialization:create` | Clear the latch with verified evidence |
 
-use actix_web::{http::Method, web};
+use actix_web::{
+    http::Method,
+    web::{Data, Query},
+};
 use quant_pivot_models::{
     domain::{
-        AcknowledgeFeatureParityLatchRequest, FeatureIntegrityActionContext,
-        FeatureIntegrityLatchView, FeatureIntegritySummaryView, FeatureParityEventListQuery,
-        FeatureParityEventView, FeatureParityRunListQuery, FeatureParityRunView, Paginated,
-        ResearchJobView, RunFullFeatureParityRequest,
+        api::{
+            AcknowledgeFeatureParityLatchRequest, FeatureIntegrityLatchView,
+            FeatureIntegritySummaryView, FeatureParityEventListQuery, FeatureParityEventView,
+            FeatureParityRunListQuery, FeatureParityRunView, ResearchJobView,
+            RunFullFeatureParityRequest,
+        },
+        pagination::Paginated,
+        ports::FeatureIntegrityActionContext,
     },
     enums::{
         operation_log::OperationCategory,
@@ -68,14 +75,14 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
 }
 
 pub async fn summary(
-    state: web::Data<AppState>,
+    state: Data<AppState>,
 ) -> Result<WebResponse<FeatureIntegritySummaryView>, WebError> {
     Ok(WebResponse::ok(state.feature_integrity.summary().await?))
 }
 
 pub async fn list_runs(
-    state: web::Data<AppState>,
-    query: web::Query<FeatureParityRunListQuery>,
+    state: Data<AppState>,
+    query: Query<FeatureParityRunListQuery>,
 ) -> Result<WebResponse<Paginated<FeatureParityRunView>>, WebError> {
     Ok(WebResponse::ok(
         state
@@ -86,8 +93,8 @@ pub async fn list_runs(
 }
 
 pub async fn list_events(
-    state: web::Data<AppState>,
-    query: web::Query<FeatureParityEventListQuery>,
+    state: Data<AppState>,
+    query: Query<FeatureParityEventListQuery>,
 ) -> Result<WebResponse<Paginated<FeatureParityEventView>>, WebError> {
     Ok(WebResponse::ok(
         state
@@ -98,7 +105,7 @@ pub async fn list_events(
 }
 
 pub async fn run_full(
-    state: web::Data<AppState>,
+    state: Data<AppState>,
     actor: AuthedActor,
     acting_role: ActingRole,
     request_id: RequestId,
@@ -129,7 +136,7 @@ pub async fn run_full(
 }
 
 pub async fn acknowledge_latch(
-    state: web::Data<AppState>,
+    state: Data<AppState>,
     actor: AuthedActor,
     acting_role: ActingRole,
     request_id: RequestId,

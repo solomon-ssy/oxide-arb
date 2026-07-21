@@ -1,5 +1,9 @@
 //! `quant_model_spec` table entity.
 
+use chrono::{DateTime, Utc};
+use sea_orm::entity::prelude::*;
+
+use super::quant_model_version;
 use crate::{
     enums::model::ModelFamily,
     types::{
@@ -7,8 +11,6 @@ use crate::{
         SchemaVersion, UserId, model_spec::ModelSpecThesis,
     },
 };
-use chrono::{DateTime, Utc};
-use sea_orm::entity::prelude::*;
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -45,7 +47,7 @@ pub struct Model {
     pub created_at: DateTime<Utc>,
 
     #[sea_orm(has_many, relation_enum = "ModelVersion")]
-    pub model_version: HasMany<super::quant_model_version::Entity>,
+    pub model_version: HasMany<quant_model_version::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

@@ -1,12 +1,14 @@
 //! `quant_equity_snapshot` table entity.
 
+use chrono::{DateTime, Utc};
+use rust_decimal::Decimal;
+use sea_orm::entity::prelude::*;
+
+use super::{quant_account_snapshot, quant_recommendation_report};
 use crate::{
     enums::quant::AccountSource,
     types::{AccountSnapshotId, EquitySnapshotId, Usd},
 };
-use chrono::{DateTime, Utc};
-use rust_decimal::Decimal;
-use sea_orm::entity::prelude::*;
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -33,9 +35,9 @@ pub struct Model {
         from = "account_snapshot_ref",
         to = "account_snapshot_id"
     )]
-    pub account_snapshot: BelongsTo<Option<super::quant_account_snapshot::Entity>>,
+    pub account_snapshot: BelongsTo<Option<quant_account_snapshot::Entity>>,
     #[sea_orm(has_many, relation_enum = "RecommendationReport")]
-    pub recommendation_report: HasMany<super::quant_recommendation_report::Entity>,
+    pub recommendation_report: HasMany<quant_recommendation_report::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

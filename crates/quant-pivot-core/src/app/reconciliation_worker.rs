@@ -1,4 +1,4 @@
-//! Reconciliation worker wiring (Phase 05.5).
+//! Reconciliation worker wiring.
 //!
 //! Registers the periodic sweep that resolves in-flight orders against
 //! Polymarket venue truth. The cadence is read from runtime-config

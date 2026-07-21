@@ -1,9 +1,9 @@
-//! Signal re-inference exit-signal evaluator (Phase 05.6 / 06.0).
+//! Signal re-inference exit-signal evaluator.
 //!
 //! Implements the model-driven [`ExitSignalEvaluator`] seam via **score
 //! degradation**: at exit-evaluation time the market is re-scored and the fresh
 //! composite score / expected return / eligibility are compared against the
-//! thesis baselines **frozen on the intent** ([`ExitPolicySpec::entry_composite_score`]).
+//! thesis baselines **frozen on the intent** (`ExitPolicySpec::entry_composite_score`).
 //! The thesis is invalidated when any of:
 //!
 //! 1. the market would no longer pass the auto-execution eligibility gate, or
@@ -18,12 +18,12 @@
 //! returns [`ExitSignalVerdict::Indeterminate`], and the exit ladder does **not**
 //! force a signal exit — stop-loss / time / trailing still guard the downside.
 //!
-//! Phase 06.0 wires [`ModelBackedExitSignalReinferer`] as the production
+//! wires `ModelBackedExitSignalReinferer` as the production
 //! reinferer. `shadow_mode` runs the full pipeline but suppresses
 //! `ThesisInvalidated` exits until operators disable it.
 //!
 //! The opportunistic-Sell verdict is intentionally **not** produced here; it is
-//! the Phase 6.1 Sell ranking model behind the same [`ExitSignalEvaluator`] seam,
+//! the Sell ranking model behind the same [`ExitSignalEvaluator`] seam,
 //! composed ahead of this evaluator when it lands.
 
 use std::sync::Arc;
@@ -33,7 +33,7 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     clickhouse::{ChPrice, ChProbability, QuantExitSignalEvaluationEventRow},
-    domain::{OrderIntentInfo, PositionInfo},
+    domain::quant::{OrderIntentInfo, PositionInfo},
     enums::{
         clickhouse::{ChExitSignalEvaluatorKind, ChExitSignalVerdict},
         quant::QuantRuntimeMode,

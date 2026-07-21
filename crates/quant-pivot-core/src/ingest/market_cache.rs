@@ -1,11 +1,13 @@
-use super::{market_filter::MarketFilter, market_registry::MarketRegistry};
+use std::{collections::HashMap, sync::Arc};
+
 use arc_swap::ArcSwap;
 use chrono::{DateTime, Utc};
 use quant_pivot_models::{
     enums::common::{CategorySet, TickSize},
     types::{EventId, MarketId, TokenId},
 };
-use std::{collections::HashMap, sync::Arc};
+
+use super::{market_filter::MarketFilter, market_registry::MarketRegistry};
 
 /// Pre-computed scan entry for hot-path iteration.
 ///
@@ -100,21 +102,18 @@ impl MarketCache {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::ingest::market_registry::MarketRegistry;
-    use chrono::Utc;
+    use chrono::{Duration, Utc};
     use quant_pivot_models::{
         domain::market::{MarketRegistryInfo, TokenInfo},
         enums::{catalog::CatalogFilterReasonSet, common::MarketCategory, market::MarketStatus},
     };
     use rust_decimal_macros::dec;
 
+    use super::*;
+    use crate::ingest::market_registry::MarketRegistry;
+
     fn sample_entry(id: &str, categories: CategorySet) -> MarketRegistryInfo {
-        sample_entry_with_end_date(
-            id,
-            categories,
-            Some(Utc::now() + chrono::Duration::hours(2)),
-        )
+        sample_entry_with_end_date(id, categories, Some(Utc::now() + Duration::hours(2)))
     }
 
     fn sample_entry_with_end_date(
@@ -172,7 +171,7 @@ mod tests {
         reg.register_market(sample_entry_with_end_date(
             "past",
             CategorySet::EMPTY,
-            Some(Utc::now() - chrono::Duration::hours(1)),
+            Some(Utc::now() - Duration::hours(1)),
         ));
         reg.register_market(sample_entry("future", CategorySet::EMPTY));
 

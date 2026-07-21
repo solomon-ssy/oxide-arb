@@ -7,8 +7,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     domain::{
-        DataQualitySnapshot, DependencyCheck, EquitySnapshotView, LiveAccountView,
-        QuantRecommendationView, QuantReportView, SystemStatusView,
+        api::{
+            DependencyCheck, EquitySnapshotView, LiveAccountView, QuantRecommendationView,
+            QuantReportView, SystemStatusView,
+        },
+        data_plane::DataQualitySnapshot,
     },
     types::ExposureBreakdown,
 };
@@ -190,14 +193,12 @@ mod tests {
     use chrono::Utc;
     use rust_decimal_macros::dec;
 
+    use super::{DashboardOverviewQuery, DashboardReasonCode, DashboardSection, DashboardWindow};
     use crate::types::Usd;
-
-    use super::{DashboardReasonCode, DashboardSection, DashboardWindow};
 
     #[test]
     fn window_contract_is_closed_and_defaults_to_seven_days() {
-        let default =
-            serde_json::from_str::<super::DashboardOverviewQuery>("{}").expect("default window");
+        let default = serde_json::from_str::<DashboardOverviewQuery>("{}").expect("default window");
         assert_eq!(default.window, DashboardWindow::Days7);
         assert!(
             serde_json::from_str::<super::DashboardOverviewQuery>(r#"{"window":"days365"}"#)

@@ -3,7 +3,7 @@
 //! Dependency-inversion boundary between the HTTP handlers and the core
 //! `CoreOrderIntentService`. Handlers depend only on this trait — never on a
 //! repository, the mode gate, or a venue client directly. Implemented in
-//! `quant-pivot-core` and injected into `quant_pivot_web::AppState`.
+//! `quant-pivot-core` and injected into `quant_pivot_web::state::AppState`.
 //!
 //! Every mutation is governed and audited: `create` turns a published
 //! recommendation into an `OrderIntent` via the runtime mode gate; `approve` /
@@ -12,12 +12,16 @@
 //! `approved_by` and the operation log.
 
 use async_trait::async_trait;
+use quant_pivot_error::QuantResult;
 
 use crate::{
-    domain::{ExecutionOrderInfo, OrderIntentInfo, OrderIntentListQuery, Paginated},
+    domain::{
+        api::OrderIntentListQuery,
+        pagination::Paginated,
+        quant::{ExecutionOrderInfo, OrderIntentInfo},
+    },
     types::{OrderAmount, OrderIntentId, Price, RecommendationId, RoleCode, UserId},
 };
-use quant_pivot_error::QuantResult;
 
 /// Create an order intent from a published recommendation.
 ///
@@ -90,7 +94,7 @@ pub trait OrderIntentPort: Send + Sync {
     async fn find(&self, id: &OrderIntentId) -> QuantResult<Option<OrderIntentInfo>>;
 }
 
-/// Web-facing port for the real-money entry-submission bridge (Phase 05.4).
+/// Web-facing port for the real-money entry-submission bridge.
 ///
 /// Dependency-inversion boundary between the HTTP handler / auto worker and the
 /// core `CoreExecutionDispatcher`. Submission claims the intent (row-locked),

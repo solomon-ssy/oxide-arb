@@ -11,21 +11,18 @@ name = "quant-pivot"
 path = "src/main.rs"
 
 [features]
-# The default profile IS the production profile (Phase 11.0): `report_only` is
+# The default feature set is the production profile: `report_only` is
 # not dry-run — report sizing runs the real portfolio optimizer and classical
 # model runtime, so a deployed binary must always link them. `dataframe` is
 # always linked transitively via quant-pivot-core's research dependency.
-#   - lp-solver:   portfolio LP/MILP allocator (pure-Rust microlp; required for
-#                  report generation).
 #   - optimize:    argmin weight-refinement for the weighted trainer.
 #   - ml-classical: smartcore classical trainer + runtime for shadow candidates.
-default = ["lp-solver", "optimize", "ml-classical"]
+default = ["optimize", "ml-classical"]
 ml-classical = ["quant-pivot-core/ml-classical"]
 optimize = ["quant-pivot-core/optimize"]
-lp-solver = ["quant-pivot-core/lp-solver"]
 
 [dependencies]
-quant-pivot-core = { workspace = true, features = ["lp-solver"] }
+quant-pivot-core = { workspace = true, default-features = false }
 quant-pivot-models = { workspace = true }
 rustls = { workspace = true }
 tokio = { workspace = true }

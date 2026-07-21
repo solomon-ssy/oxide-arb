@@ -1,8 +1,9 @@
 //! Feature compute types → Postgres insert DTO projection.
 
+use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{
-    domain::{DecisionBoundary, NewFeatureVector},
+    domain::{data_plane::DecisionBoundary, quant::NewFeatureVector},
     enums::quant::DataQualityStatus,
     types::{
         ContentHash, DecisionCaptureEvidence, FeatureSourceRefs, FeatureVectorId,
@@ -16,7 +17,7 @@ use crate::hashing::ResearchHasher;
 pub struct FeatureVectorPersistenceProjection {
     pub market_id: MarketId,
     pub token_id: Option<TokenId>,
-    pub decision_at: chrono::DateTime<chrono::Utc>,
+    pub decision_at: DateTime<Utc>,
     pub decision_boundary: DecisionBoundary,
     pub feature_schema_version: SchemaVersion,
     pub feature_hash: ContentHash,

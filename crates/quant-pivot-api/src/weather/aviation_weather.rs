@@ -6,15 +6,17 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantError, QuantResult, api::ApiError};
 use quant_pivot_models::{
     config::AviationWeatherSourceConfig,
-    domain::{WeatherObservationReport, WeatherObservationReportKind},
+    domain::data_plane::{WeatherObservationReport, WeatherObservationReportKind},
     hashing::CanonicalDigest,
     types::{
         ContentHash, DomainInstrumentKey, DomainMeasurementUnit, DomainSourceId, IcaoStation,
         WeatherVariable,
     },
 };
+use reqwest::Client;
 use rust_decimal::Decimal;
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, de::Error};
+use serde_json::Value;
 
 use crate::{
     infra::{http::get_text_with_retry, retry::RetryPolicy},
@@ -36,13 +38,13 @@ struct MetarWire {
 /// Rate-limit-friendly station-scoped NOAA observation client.
 pub struct AviationWeatherSource {
     config: AviationWeatherSourceConfig,
-    http: reqwest::Client,
+    http: Client,
     retry_policy: RetryPolicy,
 }
 
 impl AviationWeatherSource {
     pub fn connect(config: AviationWeatherSourceConfig) -> QuantResult<Self> {
-        let http = reqwest::Client::builder()
+        let http = Client::builder()
             .timeout(Duration::from_millis(config.request_timeout_ms))
             .user_agent("quant-pivot/0.1 aviation-weather-ingest")
             .build()
@@ -55,7 +57,7 @@ impl AviationWeatherSource {
     }
 
     #[must_use]
-    pub fn with_http_client(mut self, http: reqwest::Client) -> Self {
+    pub fn with_http_client(mut self, http: Client) -> Self {
         self.http = http;
         self
     }
@@ -173,9 +175,9 @@ fn deserialize_optional_decimal<'de, D>(deserializer: D) -> Result<Option<Decima
 where
     D: Deserializer<'de>,
 {
-    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    let value = Option::<Value>::deserialize(deserializer)?;
     value
-        .map(|value| parse_decimal_value(&value).map_err(serde::de::Error::custom))
+        .map(|value| parse_decimal_value(&value).map_err(Error::custom))
         .transpose()
 }
 

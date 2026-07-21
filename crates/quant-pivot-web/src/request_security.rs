@@ -1,6 +1,6 @@
 //! Browser-origin checks shared by cookie mutations and WebSocket upgrades.
 
-use actix_web::{HttpRequest, http::header};
+use actix_web::{HttpRequest, http::header::ORIGIN};
 use quant_pivot_models::config::DeployConfig;
 
 use crate::error::WebError;
@@ -8,7 +8,7 @@ use crate::error::WebError;
 pub fn ensure_allowed_origin(request: &HttpRequest, deploy: &DeployConfig) -> Result<(), WebError> {
     let origin = request
         .headers()
-        .get(header::ORIGIN)
+        .get(ORIGIN)
         .and_then(|value| value.to_str().ok())
         .ok_or_else(|| WebError::Unauthorized("missing browser origin".to_owned()))?;
     if deploy

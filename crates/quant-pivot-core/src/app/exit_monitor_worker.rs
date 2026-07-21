@@ -1,4 +1,4 @@
-//! Exit-monitor worker wiring (Phase 05.6).
+//! Exit-monitor worker wiring.
 //!
 //! Registers the periodic sweep that scans every open position lot and drives
 //! the deterministic exit priority ladder (TP / SL / trailing / time / signal /

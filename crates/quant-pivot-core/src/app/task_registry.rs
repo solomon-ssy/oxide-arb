@@ -4,14 +4,7 @@
 //! At shutdown the registry cancels and drains tasks in deterministic
 //! [`ShutdownStage`] order so producers stop before consumers flush.
 
-use super::{
-    lifecycle::{force_exit_on_second_signal, shutdown_signal},
-    task_id::TaskId,
-};
-use crate::observability::metrics_hub::MetricsHub;
 use core::array;
-use quant_pivot_error::QuantError;
-use quant_pivot_models::enums::quant::QuantRuntimeMode;
 use std::{
     mem::take,
     pin::Pin,
@@ -21,10 +14,19 @@ use std::{
     },
     time::{Duration, Instant},
 };
+
+use quant_pivot_error::QuantError;
+use quant_pivot_models::enums::quant::QuantRuntimeMode;
 use strum::IntoStaticStr;
 use tokio::{task::AbortHandle, time::MissedTickBehavior};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::{error, info, warn};
+
+use super::{
+    lifecycle::{force_exit_on_second_signal, shutdown_signal},
+    task_id::TaskId,
+};
+use crate::observability::metrics_hub::MetricsHub;
 
 // ── Shutdown stages ─────────────────────────────────────────────────────────
 
@@ -632,7 +634,7 @@ impl AppRunner {
         self.registry.len()
     }
 
-    pub async fn run(mut self) -> Result<(), quant_pivot_error::QuantError> {
+    pub async fn run(mut self) -> Result<(), QuantError> {
         self.absorb_pending_tasks();
 
         let root = self.shutdown.clone();
@@ -658,9 +660,12 @@ impl AppRunner {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use quant_pivot_error::infra::InfraError;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    use quant_pivot_error::infra::InfraError;
+    use tokio::sync::Mutex;
+
+    use super::*;
 
     fn tick_budget() -> ShutdownBudget {
         let mut b = [Duration::from_secs(0); ShutdownStage::COUNT];
@@ -681,7 +686,7 @@ mod tests {
         let root = CancellationToken::new();
         let mut registry = TaskRegistry::new(root.clone());
 
-        let order = Arc::new(tokio::sync::Mutex::new(Vec::<&'static str>::new()));
+        let order = Arc::new(Mutex::new(Vec::<&'static str>::new()));
         let order_ws = Arc::clone(&order);
         let order_cache = Arc::clone(&order);
         let order_persist = Arc::clone(&order);

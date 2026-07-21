@@ -1,7 +1,7 @@
-//! Training-dataset admin HTTP contract (Phase 3.5).
+//! Training-dataset admin HTTP contract.
 //!
 //! These types are the **UI integration surface** for offline dataset plan/build.
-//! The Admin SPA (Phase 07) should:
+//! The Admin SPA should:
 //!
 //! 1. Let the operator pick a frozen [`DecisionPolicySnapshotId`] and [`ModelSpecId`].
 //! 2. `POST /research/training-datasets/plan` — validate the window and show
@@ -15,7 +15,7 @@
 //! ledger row (distinct from terminal `failed`, which persists diagnostics).
 //!
 //! Terminal semantics mirror [`TrainingDatasetStatus`]: trainer/backtest gates in
-//! 03.6 consume only `ready` datasets; `insufficient_labels` still persists the
+//! consume only `ready` datasets; `insufficient_labels` still persists the
 //! Parquet artifact for inspection.
 
 use chrono::{DateTime, Utc};
@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use validator::Validate;
 
 use crate::{
-    domain::{TrainingDatasetInfo, pagination::PageRequest},
+    domain::{pagination::PageRequest, quant::TrainingDatasetInfo},
     enums::quant::{DatasetPurpose, TrainingDatasetStatus},
     half_open_window_request,
     types::{
@@ -48,7 +48,7 @@ pub struct BuildTrainingDatasetRequest {
     /// Target model specification (trainer binds artifacts to this spec).
     pub model_spec_id: ModelSpecId,
     pub profile_ref: ResearchProfileRef,
-    /// What the materialized examples are used for (Phase 11.3 §4). Defaults
+    /// What the materialized examples are used for. Defaults
     /// to `Training`; set `Calibration` to build an independent held-out split
     /// for `ProbabilityCalibrator` fitting (must be disjoint + embargoed from
     /// the target model's own `Training` dataset — enforced at fit time).

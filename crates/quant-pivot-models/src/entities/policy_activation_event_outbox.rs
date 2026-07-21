@@ -3,6 +3,7 @@
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
+use super::{decision_policy_snapshot, policy_activation, policy_activation_audit};
 use crate::types::{
     AuditEventId, ContentHash, DecisionPolicySnapshotId, PolicyActivationId, PolicyBundleGeneration,
 };
@@ -27,21 +28,21 @@ pub struct Model {
         from = "audit_event_id",
         to = "audit_event_id"
     )]
-    pub audit: BelongsTo<super::policy_activation_audit::Entity>,
+    pub audit: BelongsTo<policy_activation_audit::Entity>,
     #[sea_orm(
         belongs_to,
         relation_enum = "Activation",
         from = "policy_activation_id",
         to = "policy_activation_id"
     )]
-    pub activation: BelongsTo<super::policy_activation::Entity>,
+    pub activation: BelongsTo<policy_activation::Entity>,
     #[sea_orm(
         belongs_to,
         relation_enum = "Snapshot",
         from = "decision_policy_snapshot_id",
         to = "decision_policy_snapshot_id"
     )]
-    pub snapshot: BelongsTo<super::decision_policy_snapshot::Entity>,
+    pub snapshot: BelongsTo<decision_policy_snapshot::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

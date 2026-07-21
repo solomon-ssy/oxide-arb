@@ -3,6 +3,7 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use async_trait::async_trait;
+use blake3::Hasher;
 use chrono::{DateTime, Duration, Utc};
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
@@ -10,8 +11,8 @@ use quant_pivot_models::{
         ArtifactStoreDeployConfig, ArtifactStoreKind, ClickHouseConfig, EvidenceAttestationConfig,
     },
     domain::{
-        NewResearchReadinessEvidence, ResearchReadinessEvidenceInfo, ResearchReadinessPort,
-        ResearchReadinessSnapshot,
+        ports::{ResearchReadinessPort, ResearchReadinessSnapshot},
+        quant::{NewResearchReadinessEvidence, ResearchReadinessEvidenceInfo},
     },
     enums::quant::ResearchReadinessEvidenceKind,
     hashing::CanonicalDigest,
@@ -764,9 +765,8 @@ fn decode_key(value: &str) -> QuantResult<AttestationKey> {
 }
 
 fn attestation_key_id(key: &AttestationKey) -> QuantResult<AttestationKeyId> {
-    let mut hasher = blake3::Hasher::new_derive_key(
-        "quant-pivot/research-evidence-attestation-key-fingerprint/v1",
-    );
+    let mut hasher =
+        Hasher::new_derive_key("quant-pivot/research-evidence-attestation-key-fingerprint/v1");
     hasher.update(&key.0);
     AttestationKeyId::parse(format!("b3k1:{}", hasher.finalize().to_hex()))
         .map_err(|error| methodology(error.to_string()))

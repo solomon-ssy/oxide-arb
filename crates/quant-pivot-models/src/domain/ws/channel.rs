@@ -13,13 +13,15 @@
 //! single value stored in a session's subscription set and produced by the event
 //! fan-out, so there is no longer any `"channel:market"` string parsing anywhere.
 
-use crate::{enums::rbac::ResourceType, types::MarketId};
-use serde_with::DeserializeFromStr;
 use std::{
     error::Error,
-    fmt::{self, Display, Formatter},
+    fmt::{Display, Formatter, Result as FmtResult},
     str::FromStr,
 };
+
+use serde_with::DeserializeFromStr;
+
+use crate::{enums::rbac::ResourceType, types::MarketId};
 
 /// Fan-out scope of a [`WsChannel`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -139,7 +141,7 @@ impl WsChannel {
 }
 
 impl Display for WsChannel {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         f.write_str(self.as_str())
     }
 }
@@ -152,7 +154,7 @@ impl Display for WsChannel {
 pub struct UnknownChannel(pub String);
 
 impl Display for UnknownChannel {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         write!(f, "unknown ws channel: {}", self.0)
     }
 }
@@ -216,7 +218,7 @@ impl SubscriptionKey {
 }
 
 impl Display for SubscriptionKey {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         match &self.market {
             Some(market) => write!(f, "{}:{}", self.channel.as_str(), market.as_str()),
             None => f.write_str(self.channel.as_str()),
@@ -226,9 +228,10 @@ impl Display for SubscriptionKey {
 
 #[cfg(test)]
 mod tests {
+    use std::str::FromStr;
+
     use super::{ChannelScope, SubscriptionKey, WsChannel};
     use crate::{enums::rbac::ResourceType, types::MarketId};
-    use std::str::FromStr;
 
     #[test]
     fn materialization_channel_reads_materialization_resource() {

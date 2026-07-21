@@ -1,5 +1,9 @@
 //! Model-governance audit ledger persistence DTOs (append-only WORM trail).
 
+use chrono::{DateTime, Utc};
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromJsonQueryResult};
+use serde::{Deserialize, Serialize};
+
 use crate::{
     entities::quant_model_governance_audit,
     enums::quant::{ModelGovernanceAction, PublicationStatus},
@@ -8,9 +12,6 @@ use crate::{
         ModelGovernanceAuditId, ModelVersionId, Probability, RoleCode, TrainingDatasetId, UserId,
     },
 };
-use chrono::{DateTime, Utc};
-use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromJsonQueryResult};
-use serde::{Deserialize, Serialize};
 
 /// Action-specific, closed audit evidence for model-governance transitions.
 ///

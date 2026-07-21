@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
-use crate::domain::DecisionBoundary;
+use crate::domain::data_plane::DecisionBoundary;
 
 /// Exact decision clock recovered from durable serving evidence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

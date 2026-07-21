@@ -3,6 +3,7 @@
 use std::collections::BTreeSet;
 
 use quant_pivot_error::hashing::CanonicalDigestError;
+use schemars::JsonSchema;
 use sea_orm::FromJsonQueryResult;
 use serde::{Deserialize, Serialize};
 
@@ -22,7 +23,7 @@ pub const MODEL_SPEC_DEFINITION_FORMAT_VERSION: u32 = 1;
 /// by individual JSON keys, and therefore uses typed JSONB through
 /// [`FromJsonQueryResult`]. Executable inputs, targets, horizons, and lifecycle
 /// state do not belong here.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ModelSpecThesis {
     /// Concise catalog summary for operators.

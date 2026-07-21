@@ -13,6 +13,7 @@ use polars::{
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::types::SOURCE_SLICE_MANIFEST_FORMAT_VERSION;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 /// One lossless typed source fact stored as canonical JSON in a queryable
 /// Parquet envelope. `record_key` must be the source-native immutable identity.
@@ -21,7 +22,7 @@ pub struct SourceSliceRecord {
     pub record_key: String,
     pub event_at: Option<DateTime<Utc>>,
     pub available_at: Option<DateTime<Utc>>,
-    pub payload: serde_json::Value,
+    pub payload: Value,
 }
 
 pub struct SourceSliceParquetCodec;

@@ -12,7 +12,7 @@
 
 use std::sync::Arc;
 
-use quant_pivot_models::domain::NewOperationLog;
+use quant_pivot_models::domain::governance::NewOperationLog;
 use quant_pivot_repository::traits::OperationLogRepository;
 use quant_pivot_storage::write::AsyncWriter;
 

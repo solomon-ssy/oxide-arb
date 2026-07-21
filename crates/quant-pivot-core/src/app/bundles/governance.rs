@@ -5,28 +5,16 @@ use std::{
     time::Duration,
 };
 
-use super::{DataBundle, InfraBundle, PgRepositories};
-use crate::{
-    execution::ExitMonitorHealthHandle,
-    governance::{
-        BiasTableApplicator, BootstrapService, CategoryPointerGuard, DefaultModePreflight,
-        DefaultModeTransitionGate, KillSwitchControl, KillSwitchHandle, ModePreflightDeps,
-        RuntimeModeHandle, SystemStatusPublisher, WeightOverlayApplicator,
-        execution_recovery::{ExecutionRecoveryCoordinator, ExecutionRecoveryHandle},
-        runtime_control::{QuantRuntimeControl, QuantRuntimeControlDeps},
-    },
-    infra::health_checker::{HealthChecker, HealthCheckerDeps},
-    observability::{alert_dispatcher::AlertDispatcher, metrics_hub::MetricsHub},
-    runtime_config::{DecisionPolicyStore, PolicySnapshotApplicator, PolicySnapshotSubscribers},
-};
 use quant_pivot_api::ws::WsShardHealthPort;
 use quant_pivot_error::{QuantError, QuantResult, storage::StorageError};
 use quant_pivot_models::{
     config::DeployConfig,
     domain::{
-        BootstrapPort, CoreEventPublisher, DataQualityPort, KillSwitchPort, KillSwitchStateInfo,
-        KillSwitchView, PolicySnapshotPort, RuntimeControlPort, SystemRuntimeStateInfo,
-        SystemStatus,
+        governance::{KillSwitchStateInfo, KillSwitchView, SystemRuntimeStateInfo, SystemStatus},
+        ports::{
+            BootstrapPort, DataQualityPort, KillSwitchPort, PolicySnapshotPort, RuntimeControlPort,
+        },
+        runtime::CoreEventPublisher,
     },
     enums::system::BootstrapPhase,
     runtime_config::{ActivePolicyBundle, DecisionPolicySnapshot},
@@ -41,6 +29,22 @@ use quant_pivot_repository::{
     },
 };
 use quant_pivot_research::artifact::{ArtifactStore, build_artifact_store};
+use tokio::{task::JoinHandle, time::MissedTickBehavior};
+
+use super::{DataBundle, InfraBundle, PgRepositories};
+use crate::{
+    execution::ExitMonitorHealthHandle,
+    governance::{
+        BiasTableApplicator, BootstrapService, CategoryPointerGuard, DefaultModePreflight,
+        DefaultModeTransitionGate, KillSwitchControl, KillSwitchHandle, ModePreflightDeps,
+        RuntimeModeHandle, SystemStatusPublisher, WeightOverlayApplicator,
+        execution_recovery::{ExecutionRecoveryCoordinator, ExecutionRecoveryHandle},
+        runtime_control::{QuantRuntimeControl, QuantRuntimeControlDeps},
+    },
+    infra::health_checker::{HealthChecker, HealthCheckerDeps},
+    observability::{alert_dispatcher::AlertDispatcher, metrics_hub::MetricsHub},
+    runtime_config::{DecisionPolicyStore, PolicySnapshotApplicator, PolicySnapshotSubscribers},
+};
 
 /// Active runtime config, mode, kill-switch, and notification wiring loaded from Postgres.
 pub struct RuntimeSnapshot {
@@ -112,10 +116,10 @@ pub struct GovernanceBundle {
     pub kill_switch: Arc<dyn KillSwitchPort>,
     /// Candidate / shadow factor-weight overlay snapshot, reloaded on activation.
     pub weight_overlay: Arc<WeightOverlayApplicator>,
-    /// Favorite-longshot bias-table snapshot bound to the factor plane (11.2.1),
+    /// Favorite-longshot bias-table snapshot bound to the factor plane,
     /// reloaded + content-hash verified on activation.
     pub bias_table: Arc<BiasTableApplicator>,
-    /// Exit-monitor health (05.6): shared with the execution bundle's worker and
+    /// Exit-monitor health: shared with the execution bundle's worker and
     /// read by admission `#20` + the auto-execution mode preflight.
     pub exit_monitor_health: ExitMonitorHealthHandle,
     /// Lock-free execution recovery summary embedded in [`SystemStatus`].
@@ -123,7 +127,7 @@ pub struct GovernanceBundle {
     /// Shared WS fan-out helper for mode / kill-switch and lifecycle broadcasts.
     pub status_publisher: Arc<SystemStatusPublisher>,
     /// Durable DB → `ArcSwap` convergence loop for activations committed by any instance.
-    pub policy_bundle_reconciler: tokio::task::JoinHandle<()>,
+    pub policy_bundle_reconciler: JoinHandle<()>,
 }
 
 impl GovernanceBundle {
@@ -257,10 +261,10 @@ impl GovernanceBundle {
 fn spawn_policy_bundle_reconciler(
     repository: Arc<dyn PolicyRepository>,
     applicator: Arc<PolicySnapshotApplicator>,
-) -> tokio::task::JoinHandle<()> {
+) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(2));
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
         loop {
             interval.tick().await;
             let bundle = match repository.load_current_bundle().await {

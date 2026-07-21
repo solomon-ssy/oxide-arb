@@ -1,5 +1,22 @@
 //! Quant runtime control port implementation for the web layer.
 
+use std::{sync::Arc, time::Instant};
+
+use async_trait::async_trait;
+use chrono::Utc;
+use quant_pivot_error::{QuantResult, execution::ExecutionError};
+use quant_pivot_models::{
+    domain::{
+        governance::{HealthReport, MarketDataConnectivity, SystemStatus, WsShardConnectivity},
+        ports::{
+            CatalogState, CatalogStatusPort, KillSwitchPort, QuantModeTransitionReport,
+            RuntimeControlPort,
+        },
+    },
+    enums::quant::QuantRuntimeMode,
+};
+use quant_pivot_repository::traits::SystemRuntimeStateRepository;
+
 use crate::{
     governance::{
         ModePreflight, ModeTransitionGate, RuntimeModeHandle,
@@ -8,18 +25,6 @@ use crate::{
     },
     infra::health_checker::HealthChecker,
 };
-use async_trait::async_trait;
-use chrono::Utc;
-use quant_pivot_error::{QuantResult, execution::ExecutionError};
-use quant_pivot_models::{
-    domain::{
-        CatalogState, CatalogStatusPort, HealthReport, KillSwitchPort, MarketDataConnectivity,
-        QuantModeTransitionReport, RuntimeControlPort, SystemStatus, WsShardConnectivity,
-    },
-    enums::quant::QuantRuntimeMode,
-};
-use quant_pivot_repository::traits::SystemRuntimeStateRepository;
-use std::{sync::Arc, time::Instant};
 
 /// Governed quant runtime control: mode reads/transitions, kill-switch projection,
 /// and live system-status assembly.

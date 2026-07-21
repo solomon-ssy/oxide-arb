@@ -1,7 +1,8 @@
 //! Stable shard routing for book-apply and execution runners.
 //!
 //! Fixed-seed hasher — shard assignment stable across process restarts and CI.
-const SHARD_SEED: ahash::RandomState = ahash::RandomState::with_seeds(
+use ahash::RandomState;
+const SHARD_SEED: RandomState = RandomState::with_seeds(
     0x9E37_79B9_7F4A_7C15,
     0xBF58_476D_1CE4_E5B9,
     0x94D0_49BB_1331_11EB,

@@ -1,4 +1,4 @@
-//! External-vertical (domain) point-in-time contracts (Phase 11.2.2).
+//! External-vertical (domain) point-in-time contracts.
 //!
 //! Train-serve parity for the domain slice is a **single shared code path**,
 //! not a dual-engine mirror: both the online feature pipeline
@@ -13,18 +13,19 @@
 
 pub mod slice;
 
-pub use slice::{
-    DomainAvailabilityFacts, DomainFactWindows, build_domain_slice_inputs, crypto_lookback_secs,
-    domain_availability_at, linkage_valid_at, oracle_instrument, source_binding,
-};
-
 use chrono::{DateTime, Utc};
 use quant_pivot_models::{
-    domain::{CryptoPriceReport, DomainObservation, WeatherForecastPoint, WeatherObservationFact},
+    domain::data_plane::{
+        CryptoPriceReport, DomainObservation, WeatherForecastPoint, WeatherObservationFact,
+    },
     enums::domain::DomainMetric,
     types::calibration::PublishedWeatherStationLeadBias,
 };
 use rust_decimal::Decimal;
+pub use slice::{
+    DomainAvailabilityFacts, DomainFactWindows, build_domain_slice_inputs, crypto_lookback_secs,
+    domain_availability_at, linkage_valid_at, oracle_instrument, source_binding,
+};
 
 /// A pre-fetched, PIT-bounded window of observations for one instrument.
 ///

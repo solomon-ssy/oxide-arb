@@ -4,11 +4,12 @@
 //! `system.databases`, and issues `CREATE DATABASE` when the configured target
 //! is missing. Idempotent and safe under concurrent first-start races.
 
+use clickhouse::Client;
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::config::ClickHouseConfig;
 use tracing::info;
 
-use crate::sql_contract_registry::{
+use crate::clickhouse::query_limits::{
     CLICKHOUSE_DATABASE_BOOTSTRAP, CLICKHOUSE_DATABASE_OBJECT_COUNT,
     CLICKHOUSE_PREPRODUCTION_INSPECT, CLICKHOUSE_PREPRODUCTION_RESET,
 };
@@ -25,7 +26,7 @@ pub(super) async fn ensure_database(config: &ClickHouseConfig) -> Result<(), Sto
 
     validate_ch_identifier(&config.database, "database")?;
 
-    let client = clickhouse::Client::default()
+    let client = Client::default()
         .with_url(&config.url)
         .with_database(MAINTENANCE_DATABASE)
         .with_user(&config.user)
@@ -42,7 +43,7 @@ pub(super) async fn ensure_database(config: &ClickHouseConfig) -> Result<(), Sto
     );
 
     CLICKHOUSE_DATABASE_BOOTSTRAP
-        .clickhouse_query(&client, &create_sql)
+        .query(&client, &create_sql)
         .execute()
         .await
         .map_err(|e| {
@@ -61,13 +62,13 @@ pub(super) async fn database_exists(config: &ClickHouseConfig) -> Result<bool, S
         return Ok(true);
     }
     validate_ch_identifier(&config.database, "database")?;
-    let client = clickhouse::Client::default()
+    let client = Client::default()
         .with_url(&config.url)
         .with_database(MAINTENANCE_DATABASE)
         .with_user(&config.user)
         .with_password(config.password.expose_secret());
     CLICKHOUSE_DATABASE_BOOTSTRAP
-        .clickhouse_query(
+        .query(
             &client,
             "SELECT count() FROM system.databases WHERE name = ?",
         )
@@ -86,7 +87,7 @@ pub async fn database_object_count(config: &ClickHouseConfig) -> Result<u64, Sto
     validate_preproduction_target(config)?;
     let client = maintenance_client(config);
     CLICKHOUSE_DATABASE_OBJECT_COUNT
-        .clickhouse_query(
+        .query(
             &client,
             "SELECT count() FROM system.tables WHERE database = ?",
         )
@@ -104,7 +105,7 @@ pub async fn active_preproduction_query_count(
     validate_preproduction_target(config)?;
     let client = maintenance_client(config);
     CLICKHOUSE_PREPRODUCTION_INSPECT
-        .clickhouse_query(
+        .query(
             &client,
             "SELECT count() FROM system.processes \
              WHERE query_id != currentQueryID() AND is_initial_query = 1 \
@@ -131,14 +132,14 @@ pub async fn reset_preproduction_database(config: &ClickHouseConfig) -> Result<(
     }
     let client = maintenance_client(config);
     CLICKHOUSE_PREPRODUCTION_RESET
-        .clickhouse_query(&client, "DROP DATABASE IF EXISTS `quant_pivot` SYNC")
+        .query(&client, "DROP DATABASE IF EXISTS `quant_pivot` SYNC")
         .execute()
         .await
         .map_err(|error| {
             StorageError::Migration(format!("drop ClickHouse preproduction database: {error}"))
         })?;
     CLICKHOUSE_PREPRODUCTION_RESET
-        .clickhouse_query(&client, "CREATE DATABASE `quant_pivot`")
+        .query(&client, "CREATE DATABASE `quant_pivot`")
         .execute()
         .await
         .map_err(|error| {
@@ -157,8 +158,8 @@ fn validate_preproduction_target(config: &ClickHouseConfig) -> Result<(), Storag
     validate_ch_identifier(&config.database, "database")
 }
 
-fn maintenance_client(config: &ClickHouseConfig) -> clickhouse::Client {
-    clickhouse::Client::default()
+fn maintenance_client(config: &ClickHouseConfig) -> Client {
+    Client::default()
         .with_url(&config.url)
         .with_database(MAINTENANCE_DATABASE)
         .with_user(&config.user)

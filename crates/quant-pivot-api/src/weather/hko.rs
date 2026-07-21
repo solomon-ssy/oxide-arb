@@ -7,15 +7,17 @@ use chrono_tz::Asia::Hong_Kong;
 use quant_pivot_error::{QuantError, QuantResult, api::ApiError};
 use quant_pivot_models::{
     config::HkoOpenDataSourceConfig,
-    domain::{WeatherObservationReport, WeatherObservationReportKind},
+    domain::data_plane::{WeatherObservationReport, WeatherObservationReportKind},
     hashing::CanonicalDigest,
     types::{
         ContentHash, DomainInstrumentKey, DomainMeasurementUnit, DomainSourceId, HkoStation,
         WeatherTemperatureStatistic, WeatherVariable,
     },
 };
+use reqwest::Client;
 use rust_decimal::Decimal;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Error};
+use serde_json::Value;
 
 use crate::{
     infra::{http::get_text_with_retry, retry::RetryPolicy},
@@ -93,13 +95,13 @@ pub struct HkoDailyTemperatureMonth {
 /// district maxima; an optional district minimum remains in raw provenance.
 pub struct HkoOpenDataSource {
     config: HkoOpenDataSourceConfig,
-    http: reqwest::Client,
+    http: Client,
     retry_policy: RetryPolicy,
 }
 
 impl HkoOpenDataSource {
     pub fn connect(config: HkoOpenDataSourceConfig) -> QuantResult<Self> {
-        let http = reqwest::Client::builder()
+        let http = Client::builder()
             .timeout(Duration::from_millis(config.request_timeout_ms))
             .user_agent("quant-pivot/0.1 hko-open-data-ingest")
             .build()
@@ -112,7 +114,7 @@ impl HkoOpenDataSource {
     }
 
     #[must_use]
-    pub fn with_http_client(mut self, http: reqwest::Client) -> Self {
+    pub fn with_http_client(mut self, http: Client) -> Self {
         self.http = http;
         self
     }
@@ -465,17 +467,17 @@ fn deserialize_decimal<'de, D>(deserializer: D) -> Result<Decimal, D::Error>
 where
     D: Deserializer<'de>,
 {
-    let value = serde_json::Value::deserialize(deserializer)?;
-    parse_decimal_value(&value).map_err(serde::de::Error::custom)
+    let value = Value::deserialize(deserializer)?;
+    parse_decimal_value(&value).map_err(Error::custom)
 }
 
 fn deserialize_optional_decimal<'de, D>(deserializer: D) -> Result<Option<Decimal>, D::Error>
 where
     D: Deserializer<'de>,
 {
-    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    let value = Option::<Value>::deserialize(deserializer)?;
     value
-        .map(|value| parse_decimal_value(&value).map_err(serde::de::Error::custom))
+        .map(|value| parse_decimal_value(&value).map_err(Error::custom))
         .transpose()
 }
 
@@ -498,7 +500,7 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use quant_pivot_models::{
         config::HkoOpenDataSourceConfig,
-        domain::WeatherObservationReportKind,
+        domain::data_plane::WeatherObservationReportKind,
         types::{DomainMeasurementUnit, HkoStation, WeatherTemperatureStatistic, WeatherVariable},
     };
     use rust_decimal_macros::dec;

@@ -7,7 +7,10 @@ mod wire;
 
 use std::{mem, num::NonZeroU32, slice, sync::Arc, time::Duration};
 
+pub use agg_trade::{BinanceAggTradeSource, BinanceAggTradeStream};
+pub use archive::BinanceArchiveBatchStream;
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
+use csv::{ReaderBuilder, StringRecord};
 use governor::{
     Quota, RateLimiter,
     clock::DefaultClock,
@@ -16,26 +19,24 @@ use governor::{
 use quant_pivot_error::{QuantError, QuantResult, api::ApiError};
 use quant_pivot_models::{
     config::BinanceSourceConfig,
-    domain::DomainObservation,
+    domain::data_plane::DomainObservation,
     enums::domain::{BinanceMarketSegment, DomainFamily, KlineInterval},
     types::{BinanceSymbol, DomainInstrumentKey, DomainSourceId},
 };
-use tokio::sync::mpsc;
-
-use crate::{
-    domain::{DomainDataSource, DomainFetchRequest},
-    infra::{http::get_text_with_retry, retry::RetryPolicy},
-};
+use reqwest::Client;
+use rust_decimal::Decimal;
+use tokio::sync::{mpsc, mpsc::Sender};
+use wire::BinanceServerTime;
+pub use wire::{BinanceAggTrade, BinanceKlineRow, KLINE_FIELD_COUNT};
 
 use self::archive::{
     archive_error, decode_single_csv_archive, download_verified_archive, parse_archive_field,
     send_batch,
 };
-
-pub use agg_trade::{BinanceAggTradeSource, BinanceAggTradeStream};
-pub use archive::BinanceArchiveBatchStream;
-pub use wire::BinanceAggTrade;
-pub use wire::{BinanceKlineRow, KLINE_FIELD_COUNT};
+use crate::{
+    domain::{DomainDataSource, DomainFetchRequest},
+    infra::{http::get_text_with_retry, retry::RetryPolicy},
+};
 
 type WeightLimiter = RateLimiter<NotKeyed, InMemoryState, DefaultClock>;
 
@@ -79,7 +80,7 @@ impl BinanceRequestBudget {
 pub struct BinanceKlineSource {
     market: BinanceMarketSegment,
     config: BinanceSourceConfig,
-    http: reqwest::Client,
+    http: Client,
     retry_policy: RetryPolicy,
     request_budget: BinanceRequestBudget,
 }
@@ -112,10 +113,9 @@ impl BinanceKlineSource {
         request_budget: BinanceRequestBudget,
         market: BinanceMarketSegment,
     ) -> QuantResult<Self> {
-        // A hung TCP connection must never block an ingest tick indefinitely
-        // (R10 ingest hardening); `reqwest::Client::new()` has no request
-        // timeout by default.
-        let http = reqwest::Client::builder()
+        // A hung TCP connection must never block an ingest tick indefinitely;
+        // `reqwest::Client::new` has no request timeout by default.
+        let http = Client::builder()
             .timeout(Duration::from_millis(config.request_timeout_ms))
             .build()
             .map_err(|error| ApiError::Sdk(format!("Binance HTTP client: {error}")))?;
@@ -130,7 +130,7 @@ impl BinanceKlineSource {
 
     /// Override the HTTP client (tests).
     #[must_use]
-    pub fn with_http_client(mut self, http: reqwest::Client) -> Self {
+    pub fn with_http_client(mut self, http: Client) -> Self {
         self.http = http;
         self
     }
@@ -255,7 +255,7 @@ impl BinanceKlineSource {
             .await
             .map_err(QuantError::from)?;
 
-        let rows: Vec<wire::BinanceKlineRow> =
+        let rows: Vec<BinanceKlineRow> =
             serde_json::from_str(&body).map_err(|error| ApiError::Deserialize {
                 context: "binance klines".into(),
                 detail: error.to_string(),
@@ -333,17 +333,17 @@ impl DomainDataSource for BinanceKlineSource {
     }
 }
 
-fn validate_kline_rows(rows: &[wire::BinanceKlineRow], interval: KlineInterval) -> QuantResult<()> {
+fn validate_kline_rows(rows: &[BinanceKlineRow], interval: KlineInterval) -> QuantResult<()> {
     let interval_ms = kline_interval_ms(interval)?;
     for (index, row) in rows.iter().enumerate() {
-        if row.open <= rust_decimal::Decimal::ZERO
-            || row.high <= rust_decimal::Decimal::ZERO
-            || row.low <= rust_decimal::Decimal::ZERO
-            || row.close <= rust_decimal::Decimal::ZERO
-            || row.volume < rust_decimal::Decimal::ZERO
-            || row.quote_volume < rust_decimal::Decimal::ZERO
-            || row.taker_buy_base_volume < rust_decimal::Decimal::ZERO
-            || row.taker_buy_quote_volume < rust_decimal::Decimal::ZERO
+        if row.open <= Decimal::ZERO
+            || row.high <= Decimal::ZERO
+            || row.low <= Decimal::ZERO
+            || row.close <= Decimal::ZERO
+            || row.volume < Decimal::ZERO
+            || row.quote_volume < Decimal::ZERO
+            || row.taker_buy_base_volume < Decimal::ZERO
+            || row.taker_buy_quote_volume < Decimal::ZERO
             || row.high < row.open.max(row.close)
             || row.low > row.open.min(row.close)
             || row.high < row.low
@@ -371,8 +371,8 @@ fn kline_interval_ms(interval: KlineInterval) -> QuantResult<i64> {
 }
 
 fn validate_adjacent_kline_rows(
-    previous: &wire::BinanceKlineRow,
-    next: &wire::BinanceKlineRow,
+    previous: &BinanceKlineRow,
+    next: &BinanceKlineRow,
     interval_ms: i64,
     index: usize,
 ) -> QuantResult<()> {
@@ -439,14 +439,12 @@ fn decode_kline_archive_batches(
     instrument_key: &DomainInstrumentKey,
     available_at: DateTime<Utc>,
     batch_size: usize,
-    sender: &mpsc::Sender<Vec<DomainObservation>>,
+    sender: &Sender<Vec<DomainObservation>>,
 ) -> QuantResult<()> {
     let interval_ms = kline_interval_ms(interval)?;
     decode_single_csv_archive(archive, expected_member, |member| {
-        let mut reader = csv::ReaderBuilder::new()
-            .has_headers(false)
-            .from_reader(member);
-        let mut previous = None::<wire::BinanceKlineRow>;
+        let mut reader = ReaderBuilder::new().has_headers(false).from_reader(member);
+        let mut previous = None::<BinanceKlineRow>;
         let mut batch = Vec::with_capacity(batch_size);
         for (index, record) in reader.records().enumerate() {
             let record =
@@ -483,11 +481,9 @@ fn decode_kline_archive(
     archive: Vec<u8>,
     expected_member: &str,
     interval: KlineInterval,
-) -> QuantResult<Vec<wire::BinanceKlineRow>> {
+) -> QuantResult<Vec<BinanceKlineRow>> {
     decode_single_csv_archive(archive, expected_member, |member| {
-        let mut reader = csv::ReaderBuilder::new()
-            .has_headers(false)
-            .from_reader(member);
+        let mut reader = ReaderBuilder::new().has_headers(false).from_reader(member);
         let mut rows = Vec::new();
         for (index, record) in reader.records().enumerate() {
             let record =
@@ -506,8 +502,8 @@ fn decode_kline_archive(
     })
 }
 
-fn parse_archive_kline_row(row: &csv::StringRecord) -> QuantResult<wire::BinanceKlineRow> {
-    if row.len() != wire::KLINE_FIELD_COUNT {
+fn parse_archive_kline_row(row: &StringRecord) -> QuantResult<BinanceKlineRow> {
+    if row.len() != KLINE_FIELD_COUNT {
         return Err(archive_error(format!(
             "kline CSV row has {} fields instead of {}",
             row.len(),
@@ -519,7 +515,7 @@ fn parse_archive_kline_row(row: &csv::StringRecord) -> QuantResult<wire::Binance
         row.get(index)
             .ok_or_else(|| archive_error(format!("missing `{name}` field")))
     };
-    Ok(wire::BinanceKlineRow {
+    Ok(BinanceKlineRow {
         open_time_ms: normalize_archive_timestamp(parse_archive_field(
             field(0, "open_time")?,
             "open_time",
@@ -557,7 +553,7 @@ const fn normalize_archive_timestamp(timestamp: i64) -> i64 {
 
 async fn validate_system_clock(
     config: &BinanceSourceConfig,
-    http: &reqwest::Client,
+    http: &Client,
     retry_policy: &RetryPolicy,
     request_budget: &BinanceRequestBudget,
     market: BinanceMarketSegment,
@@ -571,7 +567,7 @@ async fn validate_system_clock(
     let url = format!("{}{path}", config.rest_url.trim_end_matches('/'));
     let body = get_text_with_retry(http, retry_policy, &url).await?;
     let received_at = Utc::now();
-    let response: wire::BinanceServerTime =
+    let response: BinanceServerTime =
         serde_json::from_str(&body).map_err(|error| ApiError::Deserialize {
             context: "binance server time".to_owned(),
             detail: error.to_string(),
@@ -611,23 +607,26 @@ fn validate_clock_sample(
 mod tests {
     use std::io::{Cursor, Write};
 
-    use super::{
-        BinanceKlineSource, BinanceRequestBudget, DomainDataSource, DomainFetchRequest,
-        KLINE_PAGE_SIZE, decode_kline_archive, validate_clock_sample,
-    };
-    use chrono::{TimeZone, Utc};
+    use chrono::{DateTime, Duration, NaiveDate, TimeZone, Utc};
     use quant_pivot_models::{
         config::BinanceSourceConfig,
         enums::domain::{BinanceMarketSegment, DomainMetric, KlineInterval},
         types::{BinanceSymbol, DomainInstrumentKey, DomainSourceId},
     };
+    use serde_json::Value;
     use sha2::{Digest, Sha256};
     use wiremock::{
-        Mock, MockServer, ResponseTemplate,
+        Mock, MockServer, Request, ResponseTemplate,
         matchers::{method, path, query_param},
     };
+    use zip::{ZipWriter, write::SimpleFileOptions};
 
-    fn full_kline_row(open_time_ms: i64, close: &str) -> serde_json::Value {
+    use super::{
+        BinanceKlineSource, BinanceRequestBudget, DomainDataSource, DomainFetchRequest,
+        KLINE_PAGE_SIZE, decode_kline_archive, validate_clock_sample,
+    };
+
+    fn full_kline_row(open_time_ms: i64, close: &str) -> Value {
         serde_json::json!([
             open_time_ms,
             "0.01",
@@ -644,23 +643,22 @@ mod tests {
         ])
     }
 
-    async fn mock_server_time(server: &MockServer) {
+    async fn mock_server_time(server: &MockServer, time_path: &'static str) {
         Mock::given(method("GET"))
-            .and(path("/api/v3/time"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "serverTime": Utc::now().timestamp_millis()
-            })))
+            .and(path(time_path))
+            .respond_with(|_request: &Request| {
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "serverTime": Utc::now().timestamp_millis()
+                }))
+            })
             .mount(server)
             .await;
     }
 
     fn kline_archive_bytes(csv: &str) -> Vec<u8> {
-        let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
         writer
-            .start_file(
-                "BTCUSDT-1m-2025-01-01.csv",
-                zip::write::SimpleFileOptions::default(),
-            )
+            .start_file("BTCUSDT-1m-2025-01-01.csv", SimpleFileOptions::default())
             .expect("start archive member");
         writer.write_all(csv.as_bytes()).expect("write archive CSV");
         writer.finish().expect("finish archive").into_inner()
@@ -727,7 +725,7 @@ mod tests {
             .recover_archive_day(
                 &symbol,
                 KlineInterval::OneMinute,
-                chrono::NaiveDate::from_ymd_opt(2025, 1, 1).expect("date"),
+                NaiveDate::from_ymd_opt(2025, 1, 1).expect("date"),
                 available_at,
             )
             .await
@@ -763,7 +761,7 @@ mod tests {
             .recover_archive_day(
                 &symbol,
                 KlineInterval::OneMinute,
-                chrono::NaiveDate::from_ymd_opt(2025, 1, 1).expect("date"),
+                NaiveDate::from_ymd_opt(2025, 1, 1).expect("date"),
                 available_at,
             )
             .await
@@ -775,8 +773,8 @@ mod tests {
     #[test]
     fn clock_sample_uses_request_midpoint_and_fails_closed_on_rtt_or_skew() {
         let sent = Utc.with_ymd_and_hms(2026, 7, 18, 0, 0, 0).unwrap();
-        let received = sent + chrono::Duration::milliseconds(200);
-        let midpoint = sent + chrono::Duration::milliseconds(100);
+        let received = sent + Duration::milliseconds(200);
+        let midpoint = sent + Duration::milliseconds(100);
         validate_clock_sample(sent, received, midpoint, 250).expect("trusted midpoint");
         assert!(validate_clock_sample(sent, received, midpoint, 150).is_err());
         assert!(
@@ -793,7 +791,7 @@ mod tests {
     #[tokio::test]
     async fn fetch_parses_klines_into_close_observations() {
         let server = MockServer::start().await;
-        mock_server_time(&server).await;
+        mock_server_time(&server, "/api/v3/time").await;
         Mock::given(method("GET"))
             .and(path("/api/v3/klines"))
             .and(query_param("symbol", "BTCUSDT"))
@@ -841,13 +839,7 @@ mod tests {
     #[tokio::test]
     async fn usdm_futures_fetch_uses_fapi_and_preserves_provenance() {
         let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/fapi/v1/time"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "serverTime": Utc::now().timestamp_millis()
-            })))
-            .mount(&server)
-            .await;
+        mock_server_time(&server, "/fapi/v1/time").await;
         Mock::given(method("GET"))
             .and(path("/fapi/v1/klines"))
             .and(query_param("symbol", "HYPEUSDT"))
@@ -926,12 +918,12 @@ mod tests {
     #[tokio::test]
     async fn fetch_paginates_until_short_page() {
         let server = MockServer::start().await;
-        mock_server_time(&server).await;
+        mock_server_time(&server, "/api/v3/time").await;
         let range_start = Utc
             .with_ymd_and_hms(2017, 7, 1, 0, 0, 0)
             .unwrap()
             .timestamp_millis();
-        let mut full_page: Vec<serde_json::Value> = Vec::with_capacity(KLINE_PAGE_SIZE as usize);
+        let mut full_page: Vec<Value> = Vec::with_capacity(KLINE_PAGE_SIZE as usize);
         for index in 0..KLINE_PAGE_SIZE {
             let open_time_ms = range_start + i64::from(index) * 60_000;
             full_page.push(full_kline_row(open_time_ms, "0.01577100"));
@@ -979,7 +971,7 @@ mod tests {
     #[tokio::test]
     async fn fetch_excludes_current_open_kline_past_scan_boundary() {
         let server = MockServer::start().await;
-        mock_server_time(&server).await;
+        mock_server_time(&server, "/api/v3/time").await;
         let boundary = Utc.with_ymd_and_hms(2026, 7, 17, 3, 9, 54).unwrap();
         let closed_open_time = boundary.timestamp_millis() - 114_000;
         let current_open_time = closed_open_time + 60_000;
@@ -1003,7 +995,7 @@ mod tests {
                     &BinanceSymbol::parse("BTCUSDT").expect("symbol"),
                     KlineInterval::OneMinute,
                 ),
-                from_exclusive: chrono::DateTime::from_timestamp_millis(closed_open_time - 1)
+                from_exclusive: DateTime::from_timestamp_millis(closed_open_time - 1)
                     .expect("previous close"),
                 to_inclusive: boundary,
                 bootstrap: false,

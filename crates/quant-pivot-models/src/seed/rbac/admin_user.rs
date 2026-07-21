@@ -3,11 +3,12 @@
 use std::{future::Future, pin::Pin};
 
 use sea_orm::{
-    ActiveValue::Set, ColumnTrait, DbErr, EntityTrait, QueryFilter, sea_query::OnConflict,
+    ActiveValue::Set, ColumnTrait, DatabaseTransaction, DbErr, EntityTrait, QueryFilter,
+    sea_query::OnConflict,
 };
 
 use crate::{
-    entities::user,
+    entities::user::{ActiveModel, Column, Entity},
     enums::rbac::UserStatus,
     seed::{
         SeedArtifact, SeedConflictPolicy, SeedContext, SeedDependency, SeedSpec,
@@ -37,14 +38,14 @@ pub const ADMIN_USER_SEED: SeedSpec = SeedSpec {
 };
 
 /// Insert the bootstrap admin user and publish its `UserId` to the context.
-pub async fn load(db: &sea_orm::DatabaseTransaction, ctx: &mut SeedContext) -> Result<u64, DbErr> {
+pub async fn load(db: &DatabaseTransaction, ctx: &mut SeedContext) -> Result<u64, DbErr> {
     let id = UserId::from_v7();
     let password_hash = ctx
         .require::<String>(BOOTSTRAP_ADMIN_PASSWORD_HASH_INPUT)
         .map_err(|error| DbErr::Custom(error.to_string()))?
         .clone();
 
-    let model = user::ActiveModel {
+    let model = ActiveModel {
         id: Set(id.clone()),
         username: Set(DEFAULT_ADMIN_USERNAME.to_owned()),
         password_hash: Set(password_hash),
@@ -56,21 +57,17 @@ pub async fn load(db: &sea_orm::DatabaseTransaction, ctx: &mut SeedContext) -> R
         ..Default::default()
     };
 
-    let rows_affected = user::Entity::insert(model)
-        .on_conflict(
-            OnConflict::column(user::Column::Username)
-                .do_nothing()
-                .to_owned(),
-        )
+    let rows_affected = Entity::insert(model)
+        .on_conflict(OnConflict::column(Column::Username).do_nothing().to_owned())
         .exec_without_returning(db)
         .await?;
 
     Ok(rows_affected)
 }
 
-async fn hydrate(db: &sea_orm::DatabaseTransaction, ctx: &mut SeedContext) -> Result<(), DbErr> {
-    let row = user::Entity::find()
-        .filter(user::Column::Username.eq(DEFAULT_ADMIN_USERNAME))
+async fn hydrate(db: &DatabaseTransaction, ctx: &mut SeedContext) -> Result<(), DbErr> {
+    let row = Entity::find()
+        .filter(Column::Username.eq(DEFAULT_ADMIN_USERNAME))
         .one(db)
         .await?
         .ok_or_else(|| DbErr::Custom("bootstrap admin user is missing".to_owned()))?;
@@ -84,14 +81,14 @@ async fn hydrate(db: &sea_orm::DatabaseTransaction, ctx: &mut SeedContext) -> Re
 }
 
 fn load_boxed<'a>(
-    db: &'a sea_orm::DatabaseTransaction,
+    db: &'a DatabaseTransaction,
     ctx: &'a mut SeedContext,
 ) -> Pin<Box<dyn Future<Output = Result<u64, DbErr>> + Send + 'a>> {
     Box::pin(load(db, ctx))
 }
 
 fn hydrate_boxed<'a>(
-    db: &'a sea_orm::DatabaseTransaction,
+    db: &'a DatabaseTransaction,
     ctx: &'a mut SeedContext,
 ) -> Pin<Box<dyn Future<Output = Result<(), DbErr>> + Send + 'a>> {
     Box::pin(hydrate(db, ctx))

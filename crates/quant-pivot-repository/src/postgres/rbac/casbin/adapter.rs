@@ -16,7 +16,9 @@
 //! these write paths exist to satisfy the trait and stay correct if the adapter
 //! is ever driven directly, not to carry production mutations.
 
-use casbin::{Adapter, Filter, Model, error::AdapterError};
+use std::error::Error;
+
+use casbin::{Adapter, Error as CasbinError, Filter, Model, Result, error::AdapterError};
 use quant_pivot_models::{
     entities::casbin_rule::{Column, Entity},
     enums::rbac::casbin::SECTIONS,
@@ -25,8 +27,6 @@ use sea_orm::{
     ColumnTrait, DatabaseConnection, EntityTrait, Iterable, QueryFilter, TransactionTrait,
     sea_query::Condition,
 };
-
-use std::error::Error;
 
 use crate::{
     batch::max_rows_per_insert,
@@ -50,16 +50,16 @@ impl PgCasbinAdapter {
 }
 
 /// Wrap any storage/database error as a Casbin adapter error.
-fn adapter_error<E>(error: E) -> casbin::Error
+fn adapter_error<E>(error: E) -> CasbinError
 where
     E: Error + Send + Sync + 'static,
 {
-    casbin::Error::from(AdapterError(Box::new(error)))
+    CasbinError::from(AdapterError(Box::new(error)))
 }
 
 /// Build a Casbin adapter error from a static reason.
-fn adapter_reason(reason: &'static str) -> casbin::Error {
-    casbin::Error::from(AdapterError(reason.into()))
+fn adapter_reason(reason: &'static str) -> CasbinError {
+    CasbinError::from(AdapterError(reason.into()))
 }
 
 /// Whether a policy line is excluded by the supplied filter for its section.
@@ -79,7 +79,7 @@ fn filtered_out(filter: &Filter<'_>, section: &str, tokens: &[String]) -> bool {
 
 #[async_trait::async_trait]
 impl Adapter for PgCasbinAdapter {
-    async fn load_policy(&mut self, model: &mut dyn Model) -> casbin::Result<()> {
+    async fn load_policy(&mut self, model: &mut dyn Model) -> Result<()> {
         let rows = Entity::find().all(&self.db).await.map_err(adapter_error)?;
         for db_row in rows {
             if let Some((section, ptype, tokens)) = row::row_to_policy(db_row) {
@@ -94,7 +94,7 @@ impl Adapter for PgCasbinAdapter {
         &mut self,
         model: &mut dyn Model,
         filter: Filter<'a>,
-    ) -> casbin::Result<()> {
+    ) -> Result<()> {
         let rows = Entity::find().all(&self.db).await.map_err(adapter_error)?;
         for db_row in rows {
             if let Some((section, ptype, tokens)) = row::row_to_policy(db_row) {
@@ -108,7 +108,7 @@ impl Adapter for PgCasbinAdapter {
         Ok(())
     }
 
-    async fn save_policy(&mut self, model: &mut dyn Model) -> casbin::Result<()> {
+    async fn save_policy(&mut self, model: &mut dyn Model) -> Result<()> {
         // A filtered enforcer holds only a subset in memory; persisting it would
         // erase the rest of the table. Casbin disables save under filtering.
         if self.is_filtered {
@@ -143,7 +143,7 @@ impl Adapter for PgCasbinAdapter {
         Ok(())
     }
 
-    async fn clear_policy(&mut self) -> casbin::Result<()> {
+    async fn clear_policy(&mut self) -> Result<()> {
         Entity::delete_many()
             .exec(&self.db)
             .await
@@ -155,12 +155,7 @@ impl Adapter for PgCasbinAdapter {
         self.is_filtered
     }
 
-    async fn add_policy(
-        &mut self,
-        _sec: &str,
-        ptype: &str,
-        rule: Vec<String>,
-    ) -> casbin::Result<bool> {
+    async fn add_policy(&mut self, _sec: &str, ptype: &str, rule: Vec<String>) -> Result<bool> {
         let affected = Entity::insert(row::policy_to_row(ptype, &rule))
             .on_conflict(row::full_tuple_conflict().do_nothing().to_owned())
             .exec_without_returning(&self.db)
@@ -174,7 +169,7 @@ impl Adapter for PgCasbinAdapter {
         _sec: &str,
         ptype: &str,
         rules: Vec<Vec<String>>,
-    ) -> casbin::Result<bool> {
+    ) -> Result<bool> {
         if rules.is_empty() {
             return Ok(false);
         }
@@ -206,12 +201,7 @@ impl Adapter for PgCasbinAdapter {
         Ok(true)
     }
 
-    async fn remove_policy(
-        &mut self,
-        _sec: &str,
-        ptype: &str,
-        rule: Vec<String>,
-    ) -> casbin::Result<bool> {
+    async fn remove_policy(&mut self, _sec: &str, ptype: &str, rule: Vec<String>) -> Result<bool> {
         let result = Entity::delete_many()
             .filter(row::exact_match(ptype, &rule))
             .exec(&self.db)
@@ -225,7 +215,7 @@ impl Adapter for PgCasbinAdapter {
         _sec: &str,
         ptype: &str,
         rules: Vec<Vec<String>>,
-    ) -> casbin::Result<bool> {
+    ) -> Result<bool> {
         if rules.is_empty() {
             return Ok(false);
         }
@@ -253,7 +243,7 @@ impl Adapter for PgCasbinAdapter {
         ptype: &str,
         field_index: usize,
         field_values: Vec<String>,
-    ) -> casbin::Result<bool> {
+    ) -> Result<bool> {
         let mut condition = Condition::all().add(Column::Ptype.eq(ptype));
         for (offset, value) in field_values.iter().enumerate() {
             if value.is_empty() {

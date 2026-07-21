@@ -561,10 +561,10 @@ pg_enum! {
         Publish => "publish",
         /// A published version was retired.
         Retire => "retire",
-        /// A candidate model version bound a calibrated return model (Phase 11.3).
+        /// A candidate model version bound a calibrated return model.
         BindCalibration => "bind_calibration",
-        /// A candidate / shadow version bound the CPCV path set used by publish
-        /// quality gates (Phase 11.5 remediation — replaces implicit "latest").
+        /// A candidate / shadow version bound the exact CPCV path set used by
+        /// publish quality gates, replacing implicit "latest" selection.
         BindPublishPathSet => "bind_publish_path_set",
     }
 }
@@ -686,19 +686,19 @@ pg_enum! {
         DatasetBuild => "dataset_build",
         ModelTrain => "model_train",
         Backtest => "backtest",
-        /// Fit a favorite-longshot bias-table artifact (Phase 11.2.1).
+        /// Fit a favorite-longshot bias-table artifact.
         BiasTableFit => "bias_table_fit",
-        /// Fit a model-score `ProbabilityCalibrator` artifact (Phase 11.3 §4).
+        /// Fit a model-score `ProbabilityCalibrator` artifact.
         ModelCalibrationFit => "model_calibration_fit",
         /// Run Combinatorial Purged Cross-Validation + the governed trial
-        /// grid over a model version (Phase 11.5 §3.3/§3.5).
+        /// grid over a model version.
         CpcvBacktest => "cpcv_backtest",
-        /// Deterministic training/serving feature replay (Phase 11.6).
+        /// Deterministic training/serving feature replay.
         FeatureParity => "feature_parity",
-        /// Fit a governed executable entry/exit policy artifact (Phase 11.7).
+        /// Fit a governed executable entry/exit policy artifact.
         TradePolicyFit => "trade_policy_fit",
         /// Independently re-read and validate a Draft trade policy before CAS
-        /// governance transition (Phase 11.7.2).
+        /// governance transition.
         TradePolicyValidation => "trade_policy_validation",
     }
 }
@@ -872,8 +872,8 @@ pg_enum! {
     pub enum ModelRunKind {
         Training => "training",
         Backtest => "backtest",
-        /// Combinatorial Purged Cross-Validation + governed trial-grid run
-        /// (Phase 11.5). Distinct from single-path [`Self::Backtest`] so the
+        /// Combinatorial Purged Cross-Validation + governed trial-grid run.
+        /// Distinct from single-path [`Self::Backtest`] so the
         /// ledger can audit which validation methodology produced a path set.
         Cpcv => "cpcv",
         Shadow => "shadow",
@@ -958,7 +958,7 @@ impl ExecutionOrderState {
     }
 
     /// Whether venue truth for this order is still unsettled — attribution must
-    /// defer until reconciliation or a terminal order state (05.7).
+    /// defer until reconciliation or a terminal order state.
     #[must_use]
     pub const fn blocks_attribution(self) -> bool {
         matches!(
@@ -1047,19 +1047,19 @@ wire_enum! {
         LiquidityCap => "liquidity_cap",
         /// Correlated-cluster exposure cap (`max_correlated_exposure_usd`);
         /// also emitted when the Kelly-stage correlation shrink
-        /// (`f_i /= 1 + (n-1)·ρ̄`) is the dominant sizing shrink (Phase 11.3
-        /// §6.2 — same root cause, different pipeline stage).
+        /// (`f_i /= 1 + (n-1)·ρ̄`) is the dominant sizing shrink. This shares
+        /// the exposure cap's root cause but occurs at a different pipeline stage.
         CorrelationCap => "correlation_cap",
         /// Drawdown-scaling cap: the Kelly-stage drawdown multiplier was the
-        /// dominant shrink on the final size (Phase 11.3 §6.4).
+        /// dominant shrink on the final size.
         DrawdownCap => "drawdown_cap",
         /// Confidence-floor cap: the Kelly-stage confidence multiplier was the
-        /// dominant shrink on the final size (Phase 11.3 §6.4).
+        /// dominant shrink on the final size.
         ConfidenceCap => "confidence_cap",
         /// Fractional-Kelly upper bound.
         KellyCap => "kelly_cap",
         /// Total simultaneous portfolio exposure hard cap
-        /// (`portfolio.kelly_safety.max_aggregate_exposure_pct`; Phase 11.3 §6.3).
+        /// (`portfolio.kelly_safety.max_aggregate_exposure_pct`).
         AggregateExposureCap => "aggregate_exposure_cap",
         /// No hard cap bound the size.
         #[default]
@@ -1120,7 +1120,7 @@ wire_enum! {
         /// The execution budget is exhausted.
         BudgetExhausted => "budget_exhausted",
         /// The model's return model is `Heuristic` (uncalibrated) — fail-closed
-        /// per Phase 11.3 §8: `SemiAuto`/`AutoExecution` never build an intent
+        /// `SemiAuto`/`AutoExecution` never build an intent
         /// off an uncalibrated return estimate.
         ReturnModelUncalibrated => "return_model_uncalibrated",
         /// `ModelVersion` has no hash-verified Published policy or no executable cohort.
@@ -1163,8 +1163,7 @@ wire_enum! {
         AvailableCashExhausted => "available_cash_exhausted",
         /// Fundable, but ranked beyond the report's `top_n` cut.
         BeyondTopN => "beyond_top_n",
-        /// The total simultaneous portfolio exposure hard cap was exhausted
-        /// (Phase 11.3 §6.3).
+        /// The total simultaneous portfolio exposure hard cap was exhausted.
         AggregateExposureCapExhausted => "aggregate_exposure_cap_exhausted",
     }
 }
@@ -1172,7 +1171,8 @@ wire_enum! {
 pg_enum! {
     type_name = "qp_calibration_kind",
     /// Which empirical calibration artifact family a
-    /// [`crate::types::CalibrationArtifactId`] belongs to (Phase 11.3 §3.4).
+    /// Calibration artifact family to which an
+    /// [`crate::types::CalibrationArtifactId`] belongs.
     ///
     /// Both kinds share one governance table, one content-hash/split-hash
     /// contract, and one activation lifecycle; only the payload shape differs.
@@ -1183,7 +1183,7 @@ pg_enum! {
         #[default]
         ModelScore => "model_score",
         /// A `FavoriteLongshotBiasTable` mapping market-implied price →
-        /// empirical settlement frequency (Phase 11.2.1, folded in here).
+        /// empirical settlement frequency.
         MarketPriceBias => "market_price_bias",
         /// Frozen GEFS forecast-minus-observation bias by station and exact lead.
         WeatherStationLeadBias => "weather_station_lead_bias",
@@ -1222,14 +1222,12 @@ wire_enum! {
 
 pg_enum! {
     type_name = "qp_dataset_purpose",
-    /// What a `TrainingDataset` row's materialized examples are used for
-    /// (Phase 11.3 §0/§4).
+    /// What a `TrainingDataset` row's materialized examples are used for.
     ///
     /// `Calibration` datasets are built via the same pipeline as `Training`
     /// datasets but must be time-disjoint **and** embargoed relative to the
     /// training dataset of the model version they calibrate — the minimal,
-    /// literature-standard `WalkForwardSplit`-with-embargo purge primitive
-    /// (upgraded to full combinatorial CPCV by Phase 11.5).
+    /// literature-standard `WalkForwardSplit`-with-embargo purge primitive.
     @derive(Default)
     pub enum DatasetPurpose {
         #[default]
@@ -1342,7 +1340,7 @@ wire_enum! {
         Historical => "historical",
         /// Event/category proxy clusters (insufficient history for estimation).
         Proxy => "proxy",
-        /// Correlation constraint disabled (no clustering; equivalent to Phase 4).
+        /// Correlation constraint disabled; no clustering or correlated-exposure cap.
         #[default]
         Disabled => "disabled",
     }

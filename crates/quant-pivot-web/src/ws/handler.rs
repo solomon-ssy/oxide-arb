@@ -4,7 +4,12 @@
 //! ticket. The browser presents it in `Sec-WebSocket-Protocol`; the upgrade
 //! atomically consumes it before a socket is established.
 
-use actix_web::{HttpRequest, HttpResponse, http::header, rt, web};
+use actix_web::{
+    Error, HttpRequest, HttpResponse,
+    http::header::{HeaderValue, SEC_WEBSOCKET_PROTOCOL},
+    rt,
+    web::{Data, Payload},
+};
 use chrono::Utc;
 use quant_pivot_error::auth::AuthError;
 use quant_pivot_models::{
@@ -34,7 +39,7 @@ pub struct WsTicketResponse {
 }
 
 pub async fn issue_ws_ticket(
-    state: web::Data<AppState>,
+    state: Data<AppState>,
     actor: AuthedActor,
 ) -> Result<WebResponse<WsTicketResponse>, WebError> {
     if !state.casbin.is_healthy() {
@@ -59,9 +64,9 @@ pub async fn issue_ws_ticket(
 /// `GET /api/ws` — authenticate, upgrade, and spawn the session task.
 pub async fn ws_upgrade(
     req: HttpRequest,
-    body: web::Payload,
-    state: web::Data<AppState>,
-) -> Result<HttpResponse, actix_web::Error> {
+    body: Payload,
+    state: Data<AppState>,
+) -> Result<HttpResponse, Error> {
     ensure_allowed_origin(&req, &state.deploy)?;
     let protocol = ticket_protocol(&req)
         .ok_or_else(|| WebError::Unauthorized("missing websocket ticket protocol".to_owned()))?;
@@ -88,8 +93,8 @@ pub async fn ws_upgrade(
 
     let (mut response, ws_session, msg_stream) = actix_ws::handle(&req, body)?;
     response.headers_mut().insert(
-        header::SEC_WEBSOCKET_PROTOCOL,
-        header::HeaderValue::from_str(&protocol)
+        SEC_WEBSOCKET_PROTOCOL,
+        HeaderValue::from_str(&protocol)
             .map_err(|_| WebError::Unauthorized("invalid websocket protocol".to_owned()))?,
     );
     let ctx = SessionContext {
@@ -108,7 +113,7 @@ pub async fn ws_upgrade(
 fn ticket_protocol(req: &HttpRequest) -> Option<String> {
     let protocols = req
         .headers()
-        .get(header::SEC_WEBSOCKET_PROTOCOL)?
+        .get(SEC_WEBSOCKET_PROTOCOL)?
         .to_str()
         .ok()?
         .split(',')

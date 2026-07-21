@@ -1,0 +1,510 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ResearchModelApiContractSchema",
+  "description": "Schema-only envelope used to generate frontend types and runtime decoders.\n\nHTTP handlers never serialize this envelope. Its only purpose is to keep\nmodel authoring, frozen model-spec reads, and CPCV submission reachable from\none Rust-owned schema root so the SPA cannot maintain parallel wire types.",
+  "type": "object",
+  "properties": {
+    "create_model_spec_request": {
+      "$ref": "#/$defs/CreateModelSpecRequest"
+    },
+    "feature_contract_response": {
+      "$ref": "#/$defs/FeatureContractView"
+    },
+    "model_spec_response": {
+      "$ref": "#/$defs/QuantModelSpecView"
+    },
+    "run_cpcv_backtest_request": {
+      "$ref": "#/$defs/RunCpcvBacktestRequest"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "create_model_spec_request",
+    "feature_contract_response",
+    "model_spec_response",
+    "run_cpcv_backtest_request"
+  ],
+  "$defs": {
+    "CreateModelSpecRequest": {
+      "description": "Inbound body for `POST /research/model-specs`.\n\nA model spec is the **authoring root** of the offline research lifecycle:\nthe operator declares the model family, prediction horizon, and feature /\nlabel schema versions the downstream dataset build and training runs bind\nto. A spec is immutable once created; publication lifecycle belongs only to\ntrained model versions (see `TrainModelRequest` / model-governance).\n\n`model_family` deserializes from its canonical wire label (`\"weighted_factor\"`,\n`\"classical_random_forest\"`, `\"hold_vs_exit_weighted\"`, …); an unknown label\nis rejected at the boundary with `400`.",
+      "type": "object",
+      "properties": {
+        "feature_schema_version": {
+          "description": "Feature schema version the spec targets (defaults to the first version).",
+          "$ref": "#/$defs/SchemaVersion",
+          "default": 1
+        },
+        "input_contract": {
+          "description": "Ordered raw-input contract. This field is mandatory: an empty contract,\nunknown feature, duplicate, or encoded/synthetic name is rejected.",
+          "$ref": "#/$defs/ModelInputContract"
+        },
+        "label_schema_version": {
+          "description": "Label schema version the spec targets (defaults to the first version).",
+          "$ref": "#/$defs/SchemaVersion",
+          "default": 1
+        },
+        "model_family": {
+          "description": "Model family this spec authors (Buy ranker, Sell/exit scorer, classical).",
+          "$ref": "#/$defs/ModelFamily"
+        },
+        "name": {
+          "description": "Human-facing spec name (unique-ish label shown in the catalog picker).",
+          "type": "string",
+          "maxLength": 128,
+          "minLength": 1
+        },
+        "prediction_horizon_secs": {
+          "description": "Model-intrinsic prediction horizon in seconds (`>= 1`).",
+          "type": "integer",
+          "format": "int64",
+          "minimum": 1
+        },
+        "reason": {
+          "description": "Operator reason recorded on the operation log (UI should require non-empty).",
+          "type": "string",
+          "maxLength": 512,
+          "minLength": 1
+        },
+        "thesis": {
+          "description": "Closed, human-authored research thesis. This cannot carry executable\nparameters or arbitrary metadata keys.",
+          "$ref": "#/$defs/ModelSpecThesis"
+        },
+        "training_contract": {
+          "description": "Frozen target label/horizon and CV folds. Training cannot override it.",
+          "$ref": "#/$defs/ModelTrainingContract"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "model_family",
+        "prediction_horizon_secs",
+        "thesis",
+        "input_contract",
+        "training_contract",
+        "reason"
+      ]
+    },
+    "FeatureContractEntryView": {
+      "description": "One raw feature available to model input contracts.",
+      "type": "object",
+      "properties": {
+        "compute_revision": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "family": {
+          "$ref": "#/$defs/FeatureFamily"
+        },
+        "name": {
+          "type": "string"
+        },
+        "null_policy": {
+          "$ref": "#/$defs/FeatureNullPolicyView"
+        },
+        "point_in_time_rule": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "staleness_policy": {
+          "type": "string"
+        },
+        "unit": {
+          "type": "string"
+        },
+        "value_kind": {
+          "$ref": "#/$defs/FeatureValueKind"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "compute_revision",
+        "family",
+        "value_kind",
+        "unit",
+        "null_policy",
+        "source",
+        "point_in_time_rule",
+        "staleness_policy"
+      ]
+    },
+    "FeatureContractView": {
+      "description": "Active, hash-bound feature catalog used by model-spec authoring.",
+      "type": "object",
+      "properties": {
+        "feature_schema_hash": {
+          "type": "string",
+          "pattern": "^blake3:[0-9a-f]{64}$"
+        },
+        "feature_schema_version": {
+          "$ref": "#/$defs/SchemaVersion"
+        },
+        "features": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FeatureContractEntryView"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "feature_schema_hash",
+        "feature_schema_version",
+        "features"
+      ]
+    },
+    "FeatureFamily": {
+      "description": "Supported feature families for v3 feature generation.\n\nOne family ≈ one feature-builder group. The set gates which groups the\nfeature plane computes (`features.enabled_feature_families`) and tags each\n`FeatureSpec` in the research schema registry, so config and the compute\nschema share a single, precise taxonomy.",
+      "oneOf": [
+        {
+          "description": "Gamma market/event metadata (category, resolution timing, neg-risk, …).",
+          "type": "string",
+          "const": "market_metadata"
+        },
+        {
+          "description": "Top-of-book price and depth structure.",
+          "type": "string",
+          "const": "price_book"
+        },
+        {
+          "description": "Windowed return / volatility / momentum / trend features.",
+          "type": "string",
+          "const": "time_series"
+        },
+        {
+          "description": "Order-flow microstructure (quote rate, churn, queue depletion, …).",
+          "type": "string",
+          "const": "microstructure"
+        },
+        {
+          "description": "Prediction-market structural signals (neg-risk full-leg aggregates,\nshock/realized-vol windows, resolution-proximity, maker concentration).\nPlatform-computable from existing facts — no external data source.",
+          "type": "string",
+          "const": "structural"
+        },
+        {
+          "description": "Category-mapped external vertical slice (crypto underlying price, …).\nBuilt from `quant_domain_observation` + frozen market linkages; a market\nwhose category maps to no vertical carries no domain slice at all.",
+          "type": "string",
+          "const": "domain"
+        }
+      ]
+    },
+    "FeatureNullPolicyView": {
+      "description": "Stable wire projection of one feature's missing-value policy.",
+      "type": "object",
+      "properties": {
+        "policy": {
+          "description": "Policy name (`reject_market`, `neutral_value`, `penalize`, `optional`).",
+          "type": "string"
+        },
+        "value": {
+          "description": "Exact decimal neutral value when `policy = neutral_value`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "policy"
+      ]
+    },
+    "FeatureValueKind": {
+      "description": "The dimensional kind of a present feature value.\n\nCarries a stable `i8` code persisted to `quant_feature_event.value_kind`.\nAppend-only contract: never renumber an existing variant.",
+      "oneOf": [
+        {
+          "description": "A dimensionless decimal.",
+          "type": "string",
+          "const": "decimal"
+        },
+        {
+          "description": "A probability / confidence in `[0, 1]`.",
+          "type": "string",
+          "const": "probability"
+        },
+        {
+          "description": "A basis-point quantity.",
+          "type": "string",
+          "const": "bps"
+        },
+        {
+          "description": "A USD-denominated amount.",
+          "type": "string",
+          "const": "usd"
+        },
+        {
+          "description": "A non-negative count.",
+          "type": "string",
+          "const": "count"
+        },
+        {
+          "description": "A boolean flag.",
+          "type": "string",
+          "const": "bool"
+        },
+        {
+          "description": "A categorical market class (faithful enum; encoding is a downstream\nnormalization concern — never consumed as an ordinal number).",
+          "type": "string",
+          "const": "category"
+        }
+      ]
+    },
+    "ModelFamily": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "weighted_factor",
+            "classical_random_forest",
+            "classical_extra_trees",
+            "classical_logistic_regression",
+            "classical_ridge",
+            "classical_lasso",
+            "classical_elastic_net"
+          ]
+        },
+        {
+          "description": "Sell-side hold-vs-exit weighted scorer. Distinct family\nfrom the Buy-side `WeightedFactor` ranker so a Sell artifact can never\nbe confused for a Buy artifact at the registry / runtime boundary.",
+          "type": "string",
+          "const": "hold_vs_exit_weighted"
+        }
+      ]
+    },
+    "ModelInputContract": {
+      "description": "Frozen ordered raw-input graph for one model specification.\n\nEncoded/synthetic columns are intentionally absent: they are derived only by\nthe fitted transform and can never enter this source contract.",
+      "type": "object",
+      "properties": {
+        "inputs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ModelInputSpec"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "inputs"
+      ]
+    },
+    "ModelInputRequiredness": {
+      "description": "Whether a raw feature may be imputed by the fitted model-input transform.",
+      "oneOf": [
+        {
+          "description": "Only a genuinely observed cell is accepted; all other states reject the row.",
+          "type": "string",
+          "const": "required"
+        },
+        {
+          "description": "Missing states are retained and handled by the fitted transform.",
+          "type": "string",
+          "const": "optional"
+        }
+      ]
+    },
+    "ModelInputSpec": {
+      "description": "One ordered raw feature consumed by a model.",
+      "type": "object",
+      "properties": {
+        "feature_name": {
+          "description": "Stable feature name from the governed feature catalog.",
+          "type": "string"
+        },
+        "requiredness": {
+          "description": "Model-level availability requirement.",
+          "$ref": "#/$defs/ModelInputRequiredness"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "feature_name",
+        "requiredness"
+      ]
+    },
+    "ModelSpecThesis": {
+      "description": "Human-authored research thesis that cannot be inferred from executable fields.\n\nThis is intentionally a closed document rather than a free-form metadata map.\nIt is read and written atomically with the immutable model spec, never queried\nby individual JSON keys, and therefore uses typed JSONB through\n[`FromJsonQueryResult`]. Executable inputs, targets, horizons, and lifecycle\nstate do not belong here.",
+      "type": "object",
+      "properties": {
+        "hypothesis": {
+          "description": "Falsifiable relationship the research line is expected to demonstrate.",
+          "type": "string"
+        },
+        "limitations": {
+          "description": "Known boundaries that must be considered when evaluating a trained version.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "summary": {
+          "description": "Concise catalog summary for operators.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "summary",
+        "hypothesis",
+        "limitations"
+      ]
+    },
+    "ModelTrainingContract": {
+      "description": "Frozen supervised-target and cross-validation policy owned by a model spec.\nTraining requests cannot override these fields.",
+      "type": "object",
+      "properties": {
+        "target_label_horizon_secs": {
+          "description": "Target horizon (`0` for horizon-independent labels).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "target_label_name": {
+          "description": "Governed label name materialized in the frozen dataset.",
+          "type": "string"
+        },
+        "trade_policy_artifact_id": {
+          "description": "Required for executable policy-derived targets; absent for unrelated labels.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "validation_folds": {
+          "description": "Rolling validation fold count. Every fold fits its own transform.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "target_label_name",
+        "target_label_horizon_secs",
+        "validation_folds"
+      ]
+    },
+    "QuantModelSpecView": {
+      "description": "Outbound projection for a model specification row (the training entry point:\nthe operator picks a spec before planning a dataset or training a version).",
+      "type": "object",
+      "properties": {
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "created_by_label": {
+          "type": "string"
+        },
+        "created_by_role": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "created_by_user_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "definition_hash": {
+          "type": "string",
+          "pattern": "^blake3:[0-9a-f]{64}$"
+        },
+        "feature_schema_version": {
+          "$ref": "#/$defs/SchemaVersion"
+        },
+        "input_contract": {
+          "$ref": "#/$defs/ModelInputContract"
+        },
+        "label_schema_version": {
+          "$ref": "#/$defs/SchemaVersion"
+        },
+        "model_family": {
+          "$ref": "#/$defs/ModelFamily"
+        },
+        "model_spec_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "name": {
+          "type": "string"
+        },
+        "prediction_horizon_secs": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "thesis": {
+          "$ref": "#/$defs/ModelSpecThesis"
+        },
+        "training_contract": {
+          "$ref": "#/$defs/ModelTrainingContract"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "model_spec_id",
+        "name",
+        "model_family",
+        "prediction_horizon_secs",
+        "feature_schema_version",
+        "label_schema_version",
+        "thesis",
+        "input_contract",
+        "training_contract",
+        "definition_hash",
+        "created_by_label",
+        "reason",
+        "created_at"
+      ]
+    },
+    "RunCpcvBacktestRequest": {
+      "description": "Inbound body for `POST /research/models/{id}/cpcv-backtest` (the model\nversion id is taken from the path).\n\n`Serialize` is derived so the request can be frozen into a durable\nresearch job's `params_json` and replayed on execute.\n\nModel family, input contract, supervised target, and prediction horizon are\ndeliberately absent: the server resolves them from the model version's\nlinked dataset and immutable model specification.",
+      "type": "object",
+      "properties": {
+        "decision_policy_snapshot_id": {
+          "description": "Frozen runtime-config version governing `research.validation.*` (CPCV\npartitions, purge/embargo, trial grid, PBO block count, gate\nthresholds) + portfolio caps + provenance.",
+          "type": "string",
+          "format": "uuid"
+        },
+        "path_set_id": {
+          "description": "Pre-assigned path-set id frozen at async enqueue for effectively-once\nrecovery; omit on direct calls — the job engine mints one before\npersisting params.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "reason": {
+          "description": "Operator reason recorded on the operation log.",
+          "type": "string",
+          "maxLength": 512,
+          "minLength": 1
+        },
+        "training_dataset_id": {
+          "description": "Frozen, PIT-materialized dataset the model version was trained on.",
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "training_dataset_id",
+        "decision_policy_snapshot_id",
+        "reason"
+      ]
+    },
+    "SchemaVersion": {
+      "description": "A monotonic schema version for feature / factor / label / config schemas.\n\nWrapping the version prevents accidentally mixing it with unrelated integers\n(counts, ids, ordinals) and makes \"which schema generated this row\" explicit\nin every signature. Versions are `>= 1` by convention; untrusted wire and DB\nvalues are validated through [`SchemaVersion::try_new`].",
+      "type": "integer",
+      "format": "int32"
+    }
+  }
+}

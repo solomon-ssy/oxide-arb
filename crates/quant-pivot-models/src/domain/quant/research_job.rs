@@ -1,18 +1,17 @@
 //! Durable research-job persistence DTOs + progress sink.
 
-use crate::{
-    enums::quant::{ResearchJobKind, ResearchJobResultKind, ResearchJobStatus},
-    types::{
-        DatasetCoverage, DecisionPolicySnapshotId, ModelSpecId, ResearchJobId, ResearchJobParams,
-        RoleCode, WorkerId,
-    },
-};
 use chrono::{DateTime, Utc};
 use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-pub use crate::types::{ResearchJobError, ResearchJobProgress};
+use crate::{
+    enums::quant::{ResearchJobKind, ResearchJobResultKind, ResearchJobStatus},
+    types::{
+        DatasetCoverage, DecisionPolicySnapshotId, ModelSpecId, ResearchJobError, ResearchJobId,
+        ResearchJobParams, ResearchJobProgress, RoleCode, WorkerId,
+    },
+};
 
 /// Namespace-tagged terminal artifact reference produced by a research job.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

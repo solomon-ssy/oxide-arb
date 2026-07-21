@@ -1,4 +1,4 @@
-//! Shared application state injected into every request (Phase 0).
+//! Shared application state injected into every request.
 
 use std::sync::Arc;
 
@@ -7,17 +7,22 @@ use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     config::{CompiledBuildIdentity, DeployConfig},
     domain::{
-        AccountReadPort, BacktestPort, BootstrapPort, CalibrationArtifactFitPort,
-        CatalogStatusPort, CoreEvent, CoreEventPublisher, CpcvBacktestPort, DataQualityPort,
-        ExecutionReadPort, ExecutionRecoveryPort, FactorGovernancePort, FeatureIntegrityPort,
-        KillSwitchPort, LifecycleLeaseProviderPort, LifecycleSchemaVerificationPort,
-        MarketDataPort, MarketLinkageGovernancePort, MaterializationRunEvent,
-        MaterializationRunKind, MaterializationRunStatus, MetricsScrapePort,
-        ModelCalibrationFitPort, ModelGovernancePort, ModelSpecPort, ModelTrainingPort,
-        OrderIntentPort, PolicySnapshotPort, ProductionEvidenceArtifactVerificationPort,
-        QuantReportPort, ReadinessPort, ReconciliationPort, ResearchCatalogPort, ResearchJobPort,
-        ResearchReadinessPort, RuntimeControlPort, StructuralMonitorPort, TradePolicyPort,
-        TrainingDatasetPort, VerifiedSchemaFingerprints,
+        ports::{
+            AccountReadPort, BacktestPort, BootstrapPort, CalibrationArtifactFitPort,
+            CatalogStatusPort, CpcvBacktestPort, DataQualityPort, ExecutionReadPort,
+            ExecutionRecoveryPort, FactorGovernancePort, FeatureIntegrityPort, KillSwitchPort,
+            LifecycleLeaseProviderPort, LifecycleSchemaVerificationPort, MarketDataPort,
+            MarketLinkageGovernancePort, MetricsScrapePort, ModelCalibrationFitPort,
+            ModelGovernancePort, ModelSpecPort, ModelTrainingPort, OrderIntentPort,
+            PolicySnapshotPort, ProductionEvidenceArtifactVerificationPort, QuantReportPort,
+            ReadinessPort, ReconciliationPort, ResearchCatalogPort, ResearchJobPort,
+            ResearchReadinessPort, RuntimeControlPort, StructuralMonitorPort, TradePolicyPort,
+            TrainingDatasetPort, VerifiedSchemaFingerprints,
+        },
+        runtime::{
+            CoreEvent, CoreEventPublisher, MaterializationRunEvent, MaterializationRunKind,
+            MaterializationRunStatus,
+        },
     },
     types::ContentHash,
 };
@@ -65,7 +70,7 @@ pub struct AppState {
     pub operation_log: OperationLogBuffer,
     pub control: Arc<dyn RuntimeControlPort>,
     pub bootstrap: Arc<dyn BootstrapPort>,
-    /// Operational kill-switch governed read/write surface (05.1).
+    /// Operational kill-switch governed read/write surface.
     pub kill_switch: Arc<dyn KillSwitchPort>,
     pub market_data: Arc<dyn MarketDataPort>,
     pub catalog: Arc<dyn CatalogStatusPort>,
@@ -78,22 +83,22 @@ pub struct AppState {
     pub ws_sessions: SessionRegistry,
     pub metrics: Arc<dyn MetricsScrapePort>,
     pub readiness: Arc<dyn ReadinessPort>,
-    /// Offline training-dataset plan/build (Phase 3.5 Admin API).
+    /// Offline training-dataset plan/build API.
     pub training_datasets: Arc<dyn TrainingDatasetPort>,
-    /// Offline model training (Phase 3.6 Admin API).
+    /// Offline model training API.
     pub model_training: Arc<dyn ModelTrainingPort>,
-    /// Offline PIT backtests (Phase 3.6 Admin API).
+    /// Offline PIT backtest API.
     pub backtests: Arc<dyn BacktestPort>,
-    /// CPCV + governed trial-grid validation (Phase 11.5 Admin API).
+    /// CPCV and governed trial-grid validation API.
     pub cpcv_backtests: Arc<dyn CpcvBacktestPort>,
-    /// Model publish / rollback governance (Phase 3.7 Admin API).
+    /// Model publish and rollback governance API.
     pub model_governance: Arc<dyn ModelGovernancePort>,
-    /// Factor-definition publish / retire governance (Phase 05.7 Admin API).
+    /// Factor-definition publish and retire governance API.
     pub factor_governance: Arc<dyn FactorGovernancePort>,
     /// Model-spec authoring — the offline research lifecycle root write path.
     pub model_spec: Arc<dyn ModelSpecPort>,
     /// Read-only research catalog paging (datasets / models / backtests /
-    /// comparisons / factors) for the operator workbench (Phase 10.5).
+    /// comparisons / factors) for the operator workbench.
     pub research_catalog: Arc<dyn ResearchCatalogPort>,
     /// Durable async research-job engine (dataset build / model train / backtest
     /// / bias-table fit): enqueue + task-center list/get/cancel/retry.
@@ -102,38 +107,38 @@ pub struct AppState {
     pub research_readiness: Arc<dyn ResearchReadinessPort>,
     /// Deterministic feature replay evidence and governed parity latch.
     pub feature_integrity: Arc<dyn FeatureIntegrityPort>,
-    /// Favorite-longshot bias-table fit enqueue + unified calibration-artifact
-    /// read/activate, any kind (Phase 11.2.1, unified under Phase 11.3 §3.4).
+    /// Favorite-longshot bias-table fit enqueue plus unified calibration-artifact
+    /// read/activate operations for every artifact kind.
     pub calibration_artifacts: Arc<dyn CalibrationArtifactFitPort>,
-    /// Model-score `ProbabilityCalibrator` fit enqueue (Phase 11.3 §4).
+    /// Model-score `ProbabilityCalibrator` fit enqueue.
     pub model_calibration_fit: Arc<dyn ModelCalibrationFitPort>,
     /// Governed entry/exit policy artifact fit, catalog, and publication surface.
     pub trade_policies: Arc<dyn TradePolicyPort>,
-    /// Market → external-subject linkage ledger (Phase 11.2.2).
+    /// Market → external-subject linkage ledger.
     pub market_linkages: Arc<dyn MarketLinkageRepository>,
-    /// Domain-source ingest cursor health (Phase 11.2.2).
+    /// Domain-source ingest cursor health.
     pub domain_source_cursors: Arc<dyn DomainSourceCursorRepository>,
     /// Capability-declared source bindings, including pre-cursor blockers.
     pub domain_source_expectations: Arc<dyn DomainSourceExpectationRepository>,
-    /// Basis-cross-check exceedance alert feed (11.2.2 remediation R6).
+    /// Basis-cross-check exceedance alert feed.
     pub basis_alerts: Arc<dyn BasisAlertRepository>,
-    /// Offline market-linkage resolver (Phase 11.2.2).
+    /// Offline market-linkage resolver.
     pub linkage_governance: Arc<dyn MarketLinkageGovernancePort>,
-    /// Live neg-risk structural-drift monitor (Phase 11.2.1).
+    /// Live neg-risk structural-drift monitor.
     pub structural_monitor: Arc<dyn StructuralMonitorPort>,
-    /// Recommendation report read + governed mutation (Phase 04.4 API).
+    /// Recommendation report read and governed mutation API.
     pub quant_reports: Arc<dyn QuantReportPort>,
     /// Venue account live + snapshot read surface.
     pub account_read: Arc<dyn AccountReadPort>,
-    /// Order-intent read + governed mutation (Phase 05.2 API).
+    /// Order-intent read and governed mutation API.
     pub order_intents: Arc<dyn OrderIntentPort>,
     /// Recommendation-owned condition state and WORM audit timeline.
     pub entry_conditions: Arc<dyn EntryConditionRepository>,
-    /// Execution order, position, and attribution read surface (Phase 05.7 API).
+    /// Execution order, position, and attribution read API.
     pub execution_read: Arc<dyn ExecutionReadPort>,
-    /// Operator reconciliation resolve (Phase 05.5 closeout).
+    /// Operator reconciliation resolution API.
     pub reconciliation: Arc<dyn ReconciliationPort>,
-    /// Execution recovery playbook detail (Phase 05.5 closeout).
+    /// Execution recovery playbook detail API.
     pub execution_recovery: Arc<dyn ExecutionRecoveryPort>,
 }
 

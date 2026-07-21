@@ -1,4 +1,4 @@
-//! Recommendation-attribution worker wiring (Phase 05.7).
+//! Recommendation-attribution worker wiring.
 //!
 //! The sweep runs in all runtime modes because final attribution is a ledger
 //! closeout concern, not an order-submission capability. Runtime config gates

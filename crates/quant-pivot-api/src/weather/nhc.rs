@@ -6,12 +6,13 @@ use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
 use quant_pivot_error::{QuantError, QuantResult, api::ApiError};
 use quant_pivot_models::{
     config::NhcSourceConfig,
-    domain::{WeatherObservationReport, WeatherObservationReportKind},
+    domain::data_plane::{WeatherObservationReport, WeatherObservationReportKind},
     hashing::CanonicalDigest,
     types::{
         ContentHash, DomainInstrumentKey, DomainMeasurementUnit, DomainSourceId, WeatherVariable,
     },
 };
+use reqwest::Client;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use url::Url;
@@ -54,13 +55,13 @@ pub struct NhcBestTrack {
 /// Public NHC data client.
 pub struct NhcSource {
     config: NhcSourceConfig,
-    http: reqwest::Client,
+    http: Client,
     retry_policy: RetryPolicy,
 }
 
 impl NhcSource {
     pub fn connect(config: NhcSourceConfig) -> QuantResult<Self> {
-        let http = reqwest::Client::builder()
+        let http = Client::builder()
             .timeout(Duration::from_millis(config.request_timeout_ms))
             .user_agent("quant-pivot/0.1 nhc-ingest")
             .build()
@@ -73,7 +74,7 @@ impl NhcSource {
     }
 
     #[must_use]
-    pub fn with_http_client(mut self, http: reqwest::Client) -> Self {
+    pub fn with_http_client(mut self, http: Client) -> Self {
         self.http = http;
         self
     }
@@ -423,7 +424,9 @@ fn parse_error(context: &str, detail: impl Into<String>) -> ApiError {
 #[cfg(test)]
 mod tests {
     use chrono::{DateTime, TimeZone, Utc};
-    use quant_pivot_models::{config::NhcSourceConfig, domain::WeatherObservationReportKind};
+    use quant_pivot_models::{
+        config::NhcSourceConfig, domain::data_plane::WeatherObservationReportKind,
+    };
     use rust_decimal_macros::dec;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,

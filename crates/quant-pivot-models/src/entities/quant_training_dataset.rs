@@ -1,5 +1,9 @@
 //! `quant_training_dataset` table entity.
 
+use chrono::{DateTime, Utc};
+use sea_orm::entity::prelude::*;
+
+use super::{decision_policy_snapshot, quant_model_spec, quant_model_version};
 use crate::{
     enums::quant::{DatasetPurpose, TrainingDatasetStatus},
     types::{
@@ -7,8 +11,6 @@ use crate::{
         ModelSpecId, SchemaVersion, TrainingDatasetId, TrainingHorizonsSecs, TrainingSampleSources,
     },
 };
-use chrono::{DateTime, Utc};
-use sea_orm::entity::prelude::*;
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -52,16 +54,16 @@ pub struct Model {
         from = "model_spec_id",
         to = "model_spec_id"
     )]
-    pub model_spec: BelongsTo<super::quant_model_spec::Entity>,
+    pub model_spec: BelongsTo<quant_model_spec::Entity>,
     #[sea_orm(
         belongs_to,
         relation_enum = "DecisionPolicySnapshot",
         from = "decision_policy_snapshot_id",
         to = "decision_policy_snapshot_id"
     )]
-    pub decision_policy_snapshot: BelongsTo<super::decision_policy_snapshot::Entity>,
+    pub decision_policy_snapshot: BelongsTo<decision_policy_snapshot::Entity>,
     #[sea_orm(has_many, relation_enum = "ModelVersion")]
-    pub model_version: HasMany<super::quant_model_version::Entity>,
+    pub model_version: HasMany<quant_model_version::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

@@ -1,11 +1,13 @@
 //! Durable report-fact bundle outbox and `ClickHouse` verification acknowledgement.
 
+use chrono::{DateTime, Utc};
+use sea_orm::entity::prelude::*;
+
+use super::quant_recommendation_report;
 use crate::{
     enums::quant::ReportFactDeliveryStatus,
     types::{ArtifactUri, ContentHash, RecommendationReportId, WorkerId},
 };
-use chrono::{DateTime, Utc};
-use sea_orm::entity::prelude::*;
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -38,7 +40,7 @@ pub struct Model {
         from = "recommendation_report_id",
         to = "recommendation_report_id"
     )]
-    pub recommendation_report: BelongsTo<super::quant_recommendation_report::Entity>,
+    pub recommendation_report: BelongsTo<quant_recommendation_report::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

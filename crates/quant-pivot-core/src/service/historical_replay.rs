@@ -1,4 +1,4 @@
-//! Shared point-in-time cross-section materialization (Phase 3.6).
+//! Shared point-in-time cross-section materialization.
 //!
 //! This is the **single** feature→factor computation path the offline closure
 //! runs: the training-dataset build, model training rematerialization, and the
@@ -10,7 +10,7 @@
 //! duplicated.
 //!
 //! The function is pure orchestration over already-prefetched facts (served by
-//! [`HistoricalWindow`]); it never touches a live `BookStore`.
+//! `HistoricalWindow`); it never touches a live `BookStore`.
 
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
@@ -18,7 +18,7 @@ use chrono::{DateTime, Utc};
 use futures_util::future::try_join_all;
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
-    domain::DecisionBoundary,
+    domain::data_plane::DecisionBoundary,
     enums::quant::DataQualityStatus,
     runtime_config::{DataQualityConfig, DomainConfig, FactorsConfig, FeaturesConfig},
     types::{MarketId, Price, Usd},
@@ -47,7 +47,7 @@ pub struct ReplayConfig {
     pub features: FeaturesConfig,
     /// Factor engine configuration.
     pub factors: FactorsConfig,
-    /// External-vertical domain plane configuration (Phase 11.2.2).
+    /// External-vertical domain plane configuration.
     pub domain: DomainConfig,
     /// Data-quality gates applied during feature build.
     pub data_quality: DataQualityConfig,

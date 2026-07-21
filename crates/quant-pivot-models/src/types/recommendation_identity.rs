@@ -1,4 +1,4 @@
-//! Human-readable recommendation identity (parent doc §5).
+//! Human-readable recommendation identity.
 
 use sea_orm::FromJsonQueryResult;
 use serde::{Deserialize, Serialize};

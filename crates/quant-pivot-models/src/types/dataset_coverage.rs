@@ -4,7 +4,7 @@ use rust_decimal::Decimal;
 use sea_orm::FromJsonQueryResult;
 use serde::{Deserialize, Serialize};
 
-use crate::{types::ContentHash, types::SelectionExclusionSummary};
+use crate::types::{ContentHash, SelectionExclusionSummary};
 
 /// Decimal scale for coverage ratio helpers (matches research-plane precision).
 const DATASET_COVERAGE_DECIMAL_SCALE: u32 = 12;

@@ -1,22 +1,33 @@
 //! Postgres-backed training-dataset ledger repository.
 
-use crate::{
-    postgres::{error, query::paginate_mapped},
-    traits::TrainingDatasetRepository,
+use chrono::Utc;
+use quant_pivot_error::storage::{
+    StorageError,
+    entity::{QUANT_MODEL_SPEC, QUANT_TRAINING_DATASET},
 };
-use quant_pivot_error::storage::{StorageError, entity};
 use quant_pivot_models::{
     domain::{
-        CompleteTrainingDatasetBuild, NewTrainingDatasetPlan, PageWindow, Paginated,
-        TrainingDatasetInfo, TrainingDatasetListQuery,
+        api::TrainingDatasetListQuery,
+        pagination::{PageWindow, Paginated},
+        quant::{CompleteTrainingDatasetBuild, NewTrainingDatasetPlan, TrainingDatasetInfo},
     },
-    entities::{quant_model_spec, quant_training_dataset},
+    entities::{
+        quant_model_spec::{Column, Entity},
+        quant_training_dataset::{
+            Column as QuantTrainingDatasetColumn, Entity as QuantTrainingDatasetEntity, Model,
+        },
+    },
     enums::quant::TrainingDatasetStatus,
     types::{ContentHash, DATASET_ARTIFACT_FORMAT_VERSION, TrainingDatasetId},
 };
 use sea_orm::{
     ActiveModelTrait, ActiveValue, ColumnTrait, Condition, DatabaseConnection, EntityTrait,
     IntoActiveModel, QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
+};
+
+use crate::{
+    postgres::{error, query::paginate_mapped},
+    traits::TrainingDatasetRepository,
 };
 
 /// Postgres-backed training-dataset ledger repository.
@@ -36,18 +47,17 @@ impl TrainingDatasetRepository for PgTrainingDatasetRepository {
         &self,
         plan: NewTrainingDatasetPlan,
     ) -> Result<TrainingDatasetInfo, StorageError> {
-        let stored_definition_hash =
-            quant_model_spec::Entity::find_by_id(plan.model_spec_id.clone())
-                .select_only()
-                .column(quant_model_spec::Column::DefinitionHash)
-                .into_tuple::<ContentHash>()
-                .one(&self.db)
-                .await
-                .map_err(StorageError::from)?
-                .ok_or_else(|| error::not_found(entity::QUANT_MODEL_SPEC, &plan.model_spec_id))?;
+        let stored_definition_hash = Entity::find_by_id(plan.model_spec_id.clone())
+            .select_only()
+            .column(Column::DefinitionHash)
+            .into_tuple::<ContentHash>()
+            .one(&self.db)
+            .await
+            .map_err(StorageError::from)?
+            .ok_or_else(|| error::not_found(QUANT_MODEL_SPEC, &plan.model_spec_id))?;
         if plan.model_spec_definition_hash != stored_definition_hash {
             return Err(error::invariant_violation(
-                Some(entity::QUANT_TRAINING_DATASET),
+                Some(QUANT_TRAINING_DATASET),
                 format!(
                     "model_spec_definition_hash mismatch for {}: expected {stored_definition_hash}, got {}",
                     plan.model_spec_id, plan.model_spec_definition_hash
@@ -57,10 +67,10 @@ impl TrainingDatasetRepository for PgTrainingDatasetRepository {
         let key = plan.training_dataset_id.to_string();
         let mut active = plan.into_active_model();
         active.status = ActiveValue::Set(TrainingDatasetStatus::Planned);
-        quant_training_dataset::Entity::insert(active)
+        QuantTrainingDatasetEntity::insert(active)
             .exec_with_returning(&self.db)
             .await
-            .map_err(|err| error::map_unique(err, entity::QUANT_TRAINING_DATASET, key.as_str()))
+            .map_err(|err| error::map_unique(err, QUANT_TRAINING_DATASET, key.as_str()))
             .map(Into::into)
     }
 
@@ -68,7 +78,7 @@ impl TrainingDatasetRepository for PgTrainingDatasetRepository {
         &self,
         training_dataset_id: &TrainingDatasetId,
     ) -> Result<Option<TrainingDatasetInfo>, StorageError> {
-        quant_training_dataset::Entity::find_by_id(training_dataset_id.clone())
+        QuantTrainingDatasetEntity::find_by_id(training_dataset_id.clone())
             .one(&self.db)
             .await
             .map_err(StorageError::from)
@@ -80,9 +90,9 @@ impl TrainingDatasetRepository for PgTrainingDatasetRepository {
         query: TrainingDatasetListQuery,
     ) -> Result<Paginated<TrainingDatasetInfo>, StorageError> {
         paginate_mapped(
-            quant_training_dataset::Entity::find()
+            QuantTrainingDatasetEntity::find()
                 .filter(page_condition(&query))
-                .order_by_desc(quant_training_dataset::Column::CreatedAt),
+                .order_by_desc(QuantTrainingDatasetColumn::CreatedAt),
             &self.db,
             PageWindow::from_query(&query),
             Into::into,
@@ -95,14 +105,14 @@ impl TrainingDatasetRepository for PgTrainingDatasetRepository {
         training_dataset_id: &TrainingDatasetId,
     ) -> Result<TrainingDatasetInfo, StorageError> {
         let transaction = self.db.begin().await.map_err(StorageError::from)?;
-        let Some(row) = quant_training_dataset::Entity::find_by_id(training_dataset_id.clone())
+        let Some(row) = QuantTrainingDatasetEntity::find_by_id(training_dataset_id.clone())
             .lock_exclusive()
             .one(&transaction)
             .await
             .map_err(StorageError::from)?
         else {
             return Err(error::not_found(
-                entity::QUANT_TRAINING_DATASET,
+                QUANT_TRAINING_DATASET,
                 training_dataset_id,
             ));
         };
@@ -112,7 +122,7 @@ impl TrainingDatasetRepository for PgTrainingDatasetRepository {
         }
         if row.status != TrainingDatasetStatus::Planned {
             return Err(error::illegal_transition(
-                entity::QUANT_TRAINING_DATASET,
+                QUANT_TRAINING_DATASET,
                 Some(training_dataset_id),
                 row.status,
                 TrainingDatasetStatus::Building,
@@ -140,7 +150,7 @@ impl TrainingDatasetRepository for PgTrainingDatasetRepository {
                 | TrainingDatasetStatus::Failed
         ) {
             return Err(error::invariant_violation(
-                Some(entity::QUANT_TRAINING_DATASET),
+                Some(QUANT_TRAINING_DATASET),
                 format!(
                     "complete_build requires ready, insufficient_labels, or failed; got {}",
                     completion.status
@@ -148,20 +158,20 @@ impl TrainingDatasetRepository for PgTrainingDatasetRepository {
             ));
         }
         let transaction = self.db.begin().await.map_err(StorageError::from)?;
-        let Some(row) = quant_training_dataset::Entity::find_by_id(training_dataset_id.clone())
+        let Some(row) = QuantTrainingDatasetEntity::find_by_id(training_dataset_id.clone())
             .lock_exclusive()
             .one(&transaction)
             .await
             .map_err(StorageError::from)?
         else {
             return Err(error::not_found(
-                entity::QUANT_TRAINING_DATASET,
+                QUANT_TRAINING_DATASET,
                 training_dataset_id,
             ));
         };
         if row.status != TrainingDatasetStatus::Building {
             return Err(error::illegal_transition(
-                entity::QUANT_TRAINING_DATASET,
+                QUANT_TRAINING_DATASET,
                 Some(training_dataset_id),
                 row.status,
                 completion.status,
@@ -181,7 +191,7 @@ impl TrainingDatasetRepository for PgTrainingDatasetRepository {
         active.sample_count = ActiveValue::Set(Some(completion.sample_count));
         active.coverage_json = ActiveValue::Set(Some(completion.coverage_json));
         active.failure_detail = ActiveValue::Set(completion.failure_detail);
-        active.completed_at = ActiveValue::Set(Some(chrono::Utc::now()));
+        active.completed_at = ActiveValue::Set(Some(Utc::now()));
         let updated = active
             .update(&transaction)
             .await
@@ -196,14 +206,14 @@ impl TrainingDatasetRepository for PgTrainingDatasetRepository {
         detail: String,
     ) -> Result<TrainingDatasetInfo, StorageError> {
         let transaction = self.db.begin().await.map_err(StorageError::from)?;
-        let Some(row) = quant_training_dataset::Entity::find_by_id(training_dataset_id.clone())
+        let Some(row) = QuantTrainingDatasetEntity::find_by_id(training_dataset_id.clone())
             .lock_exclusive()
             .one(&transaction)
             .await
             .map_err(StorageError::from)?
         else {
             return Err(error::not_found(
-                entity::QUANT_TRAINING_DATASET,
+                QUANT_TRAINING_DATASET,
                 training_dataset_id,
             ));
         };
@@ -216,7 +226,7 @@ impl TrainingDatasetRepository for PgTrainingDatasetRepository {
             TrainingDatasetStatus::Planned | TrainingDatasetStatus::Building
         ) {
             return Err(error::illegal_transition(
-                entity::QUANT_TRAINING_DATASET,
+                QUANT_TRAINING_DATASET,
                 Some(training_dataset_id),
                 row.status,
                 TrainingDatasetStatus::Failed,
@@ -225,7 +235,7 @@ impl TrainingDatasetRepository for PgTrainingDatasetRepository {
         let mut active = row.into_active_model();
         active.status = ActiveValue::Set(TrainingDatasetStatus::Failed);
         active.failure_detail = ActiveValue::Set(Some(detail));
-        active.completed_at = ActiveValue::Set(Some(chrono::Utc::now()));
+        active.completed_at = ActiveValue::Set(Some(Utc::now()));
         let updated = active
             .update(&transaction)
             .await
@@ -239,20 +249,20 @@ impl TrainingDatasetRepository for PgTrainingDatasetRepository {
         training_dataset_id: &TrainingDatasetId,
     ) -> Result<TrainingDatasetInfo, StorageError> {
         let transaction = self.db.begin().await.map_err(StorageError::from)?;
-        let Some(row) = quant_training_dataset::Entity::find_by_id(training_dataset_id.clone())
+        let Some(row) = QuantTrainingDatasetEntity::find_by_id(training_dataset_id.clone())
             .lock_exclusive()
             .one(&transaction)
             .await
             .map_err(StorageError::from)?
         else {
             return Err(error::not_found(
-                entity::QUANT_TRAINING_DATASET,
+                QUANT_TRAINING_DATASET,
                 training_dataset_id,
             ));
         };
         if row.status != TrainingDatasetStatus::Ready {
             return Err(error::illegal_transition(
-                entity::QUANT_TRAINING_DATASET,
+                QUANT_TRAINING_DATASET,
                 Some(training_dataset_id),
                 row.status,
                 TrainingDatasetStatus::Expired,
@@ -270,25 +280,25 @@ impl TrainingDatasetRepository for PgTrainingDatasetRepository {
 }
 
 fn validate_manifest_binding(
-    row: &quant_training_dataset::Model,
+    row: &Model,
     completion: &CompleteTrainingDatasetBuild,
 ) -> Result<(), StorageError> {
     let manifest = &completion.manifest_json;
     let knowledge_lag_secs = u64::try_from(row.knowledge_lag_secs).map_err(|error| {
         error::invariant_violation(
-            Some(entity::QUANT_TRAINING_DATASET),
+            Some(QUANT_TRAINING_DATASET),
             format!("persisted knowledge_lag_secs is invalid: {error}"),
         )
     })?;
     let sample_interval_secs = u64::try_from(row.sample_interval_secs).map_err(|error| {
         error::invariant_violation(
-            Some(entity::QUANT_TRAINING_DATASET),
+            Some(QUANT_TRAINING_DATASET),
             format!("persisted sample_interval_secs is invalid: {error}"),
         )
     })?;
     let sample_count = u64::try_from(completion.sample_count).map_err(|error| {
         error::invariant_violation(
-            Some(entity::QUANT_TRAINING_DATASET),
+            Some(QUANT_TRAINING_DATASET),
             format!("completed sample_count is invalid: {error}"),
         )
     })?;
@@ -310,7 +320,7 @@ fn validate_manifest_binding(
         && manifest.sample_count == sample_count;
     if !bound {
         return Err(error::invariant_violation(
-            Some(entity::QUANT_TRAINING_DATASET),
+            Some(QUANT_TRAINING_DATASET),
             format!(
                 "manifest_json does not match frozen dataset plan and completion bindings for {}",
                 row.training_dataset_id
@@ -326,26 +336,26 @@ fn page_condition(query: &TrainingDatasetListQuery) -> Condition {
             query
                 .model_spec_id
                 .clone()
-                .map(|id| quant_training_dataset::Column::ModelSpecId.eq(id)),
+                .map(|id| QuantTrainingDatasetColumn::ModelSpecId.eq(id)),
         )
         .add_option(
             query
                 .status
-                .map(|status| quant_training_dataset::Column::Status.eq(status)),
+                .map(|status| QuantTrainingDatasetColumn::Status.eq(status)),
         )
         .add_option(
             query
                 .purpose
-                .map(|purpose| quant_training_dataset::Column::Purpose.eq(purpose)),
+                .map(|purpose| QuantTrainingDatasetColumn::Purpose.eq(purpose)),
         )
         .add_option(
             query
                 .from
-                .map(|from| quant_training_dataset::Column::CreatedAt.gte(from)),
+                .map(|from| QuantTrainingDatasetColumn::CreatedAt.gte(from)),
         )
         .add_option(
             query
                 .to
-                .map(|to| quant_training_dataset::Column::CreatedAt.lt(to)),
+                .map(|to| QuantTrainingDatasetColumn::CreatedAt.lt(to)),
         )
 }

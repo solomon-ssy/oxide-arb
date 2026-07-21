@@ -2,17 +2,24 @@
 
 use std::{collections::BTreeMap, str::FromStr, time::Duration};
 
-use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Timelike, Utc};
+use chrono::{
+    DateTime, Duration as ChronoDuration, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Timelike,
+    Utc,
+};
 use chrono_tz::Tz;
+use csv::{ReaderBuilder, StringRecord};
 use quant_pivot_error::{QuantError, QuantResult, api::ApiError};
 use quant_pivot_models::{
     config::{AirNowPm25SiteBindingConfig, AirNowSourceConfig},
-    domain::{WeatherForecastPoint, WeatherObservationReport, WeatherObservationReportKind},
+    domain::data_plane::{
+        WeatherForecastPoint, WeatherObservationReport, WeatherObservationReportKind,
+    },
     hashing::CanonicalDigest,
     types::{
         ContentHash, DomainInstrumentKey, DomainMeasurementUnit, DomainSourceId, WeatherVariable,
     },
 };
+use reqwest::Client;
 use rust_decimal::Decimal;
 use serde::Serialize;
 
@@ -35,13 +42,13 @@ pub struct AirNowPm25ReportingAreaSnapshot {
 /// preliminary; they are never treated as regulatory AQS observations.
 pub struct AirNowSource {
     config: AirNowSourceConfig,
-    http: reqwest::Client,
+    http: Client,
     retry_policy: RetryPolicy,
 }
 
 impl AirNowSource {
     pub fn connect(config: AirNowSourceConfig) -> QuantResult<Self> {
-        let http = reqwest::Client::builder()
+        let http = Client::builder()
             .timeout(Duration::from_millis(config.request_timeout_ms))
             .user_agent("quant-pivot/0.1 airnow-ingest")
             .build()
@@ -54,7 +61,7 @@ impl AirNowSource {
     }
 
     #[must_use]
-    pub fn with_http_client(mut self, http: reqwest::Client) -> Self {
+    pub fn with_http_client(mut self, http: Client) -> Self {
         self.http = http;
         self
     }
@@ -318,7 +325,7 @@ fn parse_hourly_pm25_area_observation(
     hour: DateTime<Utc>,
     available_at: DateTime<Utc>,
 ) -> QuantResult<Option<WeatherObservationReport>> {
-    let mut reader = csv::ReaderBuilder::new()
+    let mut reader = ReaderBuilder::new()
         .has_headers(true)
         .flexible(false)
         .from_reader(body.as_bytes());
@@ -381,7 +388,7 @@ fn parse_hourly_pm25_area_observation(
         precision: Decimal::ONE,
         observed_at: hour,
         valid_from: Some(hour),
-        valid_to: hour.checked_add_signed(chrono::Duration::hours(1)),
+        valid_to: hour.checked_add_signed(ChronoDuration::hours(1)),
         published_at: available_at,
         available_at,
         report_hash,
@@ -395,7 +402,7 @@ fn parse_hourly_pm25_site_observation(
     hour: DateTime<Utc>,
     available_at: DateTime<Utc>,
 ) -> QuantResult<Option<WeatherObservationReport>> {
-    let mut reader = csv::ReaderBuilder::new()
+    let mut reader = ReaderBuilder::new()
         .has_headers(true)
         .flexible(false)
         .from_reader(body.as_bytes());
@@ -457,7 +464,7 @@ fn parse_hourly_pm25_site_observation(
         precision: Decimal::ONE,
         observed_at: hour,
         valid_from: Some(hour),
-        valid_to: hour.checked_add_signed(chrono::Duration::hours(1)),
+        valid_to: hour.checked_add_signed(ChronoDuration::hours(1)),
         published_at: available_at,
         available_at,
         report_hash,
@@ -466,7 +473,7 @@ fn parse_hourly_pm25_site_observation(
 }
 
 fn validate_site_row(
-    row: &csv::StringRecord,
+    row: &StringRecord,
     binding: &AirNowPm25SiteBindingConfig,
     hour: DateTime<Utc>,
 ) -> QuantResult<()> {
@@ -502,7 +509,7 @@ fn validate_site_row(
 }
 
 fn matching_records(body: &str, area: &str, state: &str) -> QuantResult<Vec<AirNowRecord>> {
-    let mut reader = csv::ReaderBuilder::new()
+    let mut reader = ReaderBuilder::new()
         .delimiter(b'|')
         .has_headers(false)
         .flexible(false)
@@ -525,7 +532,7 @@ fn matching_records(body: &str, area: &str, state: &str) -> QuantResult<Vec<AirN
     Ok(records)
 }
 
-fn parse_record(row: &csv::StringRecord) -> QuantResult<AirNowRecord> {
+fn parse_record(row: &StringRecord) -> QuantResult<AirNowRecord> {
     let issue_date = parse_date(required(row, 0, "issue date")?)?;
     let valid_date = parse_date(required(row, 1, "valid date")?)?;
     let valid_time = row
@@ -637,7 +644,7 @@ fn validate_hour(hour: DateTime<Utc>, available_at: DateTime<Utc>) -> QuantResul
     Ok(hour)
 }
 
-fn required<'a>(row: &'a csv::StringRecord, index: usize, name: &str) -> QuantResult<&'a str> {
+fn required<'a>(row: &'a StringRecord, index: usize, name: &str) -> QuantResult<&'a str> {
     row.get(index)
         .filter(|value| !value.is_empty())
         .ok_or_else(|| parse_error(format!("missing {name}")).into())
@@ -702,7 +709,7 @@ mod tests {
     use chrono_tz::America::New_York;
     use quant_pivot_models::{
         config::{AirNowSourceConfig, WeatherVerticalBindingsConfig},
-        domain::WeatherObservationReportKind,
+        domain::data_plane::WeatherObservationReportKind,
         types::{DomainMeasurementUnit, WeatherVariable},
     };
     use rust_decimal_macros::dec;

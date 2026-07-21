@@ -1,8 +1,9 @@
 //! Unit tests for cache layer components (no external deps required).
 
+use std::time::Duration;
+
 use quant_pivot_models::types::MarketId;
 use quant_pivot_storage::cache::{CacheBackend, CacheKey, MokaBackend};
-use std::time::Duration;
 
 #[tokio::test]
 async fn moka_set_get_roundtrip() {

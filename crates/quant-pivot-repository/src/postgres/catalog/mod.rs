@@ -6,7 +6,7 @@ pub mod ingest;
 pub mod ledger;
 pub mod market;
 
-pub use clob_market_info::*;
-pub use event::*;
-pub use ledger::*;
-pub use market::*;
+pub use clob_market_info::PgClobMarketInfoRepository;
+pub use event::{PgEventRepository, PgEventRepositoryTxn};
+pub use ledger::PgCatalogLedgerRepository;
+pub use market::{PgMarketRepository, PgMarketRepositoryTxn};

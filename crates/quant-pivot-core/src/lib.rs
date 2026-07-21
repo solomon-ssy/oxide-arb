@@ -1,7 +1,7 @@
 //! `quant-pivot-core` — Polymarket quant-pivot system hub.
 //!
-//! Phase 0: data ingest, governance, and admin wiring. Report and execution
-//! planes arrive in later phases.
+//! It owns application composition for data ingest, research, reporting,
+//! governance, execution, and administration.
 
 pub mod app;
 pub mod execution;
@@ -15,3 +15,5 @@ pub mod projection;
 pub mod report;
 pub mod runtime_config;
 pub mod service;
+#[cfg(test)]
+mod test_fixtures;

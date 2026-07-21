@@ -2,10 +2,11 @@
 
 use std::sync::Arc;
 
+use chrono::Utc;
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     clickhouse::{QuantModelInputEventRow, QuantServingEvidenceCompletionRow},
-    domain::DecisionBoundary,
+    domain::data_plane::DecisionBoundary,
     types::ModelRunId,
 };
 use quant_pivot_repository::traits::FactWriter;
@@ -45,7 +46,7 @@ impl ModelInputEventWriter {
             boundary,
             features,
             &rows,
-            chrono::Utc::now().timestamp_millis(),
+            Utc::now().timestamp_millis(),
         )?;
         self.input_sink.write_batch(rows).await?;
         self.completion_sink

@@ -4,6 +4,8 @@
 //! pointing at an unreachable Redis endpoint: connections are only attempted
 //! on first use, so construction succeeds and every L2 operation fails.
 
+use std::collections::HashMap;
+
 use deadpool_redis::{Config, Runtime};
 use prometheus::Registry;
 use quant_pivot_models::{
@@ -11,7 +13,6 @@ use quant_pivot_models::{
     types::MarketId,
 };
 use quant_pivot_storage::cache::{CacheKey, CacheManager, MokaBackend, RedisBackend, TieredCache};
-use std::collections::HashMap;
 
 #[derive(
     bitcode::Encode,

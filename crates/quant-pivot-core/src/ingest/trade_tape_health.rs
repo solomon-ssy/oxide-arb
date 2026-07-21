@@ -8,11 +8,10 @@ use quant_pivot_api::exchange::{
 };
 use quant_pivot_models::{
     config::TradeTapeOnChainConfig,
-    domain::{TradeTapeBlockCursorInfo, TradeTapeBlockCursorStatus},
+    domain::data_plane::{TradeTapeBlockCursorInfo, TradeTapeBlockCursorStatus},
 };
-
 #[cfg(test)]
-use quant_pivot_models::{domain::TradeTapeSourceKind, types::EvmAddress};
+use quant_pivot_models::{domain::data_plane::TradeTapeSourceKind, types::EvmAddress};
 
 const ON_CHAIN_CONTRACT_COUNT: usize = EXCHANGE_CONTRACTS.len();
 

@@ -1,15 +1,96 @@
-//! Offline training-dataset orchestration (Phase 3.5).
+//! Offline training-dataset orchestration.
 //!
 //! Plans a deterministic sample grid, batch-prefetches every historical fact the
 //! build needs (book snapshots, microstructure, market metadata, settlements),
 //! serves point-in-time lookups from an in-memory
-//! [`MaterializedPitEngine`] so the build loop issues zero DB queries, then —
-//! per `decision_at` cross-section — runs the **same** feature builder + factor engine
+//! `MaterializedPitEngine` so the build loop issues zero DB queries, then runs
+//! the **same** feature builder and factor engine per `decision_at` cross-section
 //! the online path uses, attaches forward-looking labels, asserts no future
 //! leakage, materializes a content-hashed Parquet artifact, and records the
 //! ledger row. Features are bounded by the source cutoffs frozen in each
 //! [`DecisionBoundary`]; labels look strictly forward from `decision_at`; the
 //! dataset hash makes the whole thing reproducible.
+
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    sync::Arc,
+    time::Duration,
+};
+
+use async_trait::async_trait;
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use quant_pivot_error::{QuantError, QuantResult, research::ResearchError, storage::StorageError};
+use quant_pivot_models::{
+    clickhouse::{BookMicrostructureRow, ChPrice},
+    domain::{
+        data_plane::{DecisionBoundary, DecisionClock, DecisionSource},
+        market::{MarketInfo, MarketRegistryInfo, fee::MarketFeeSchedule},
+        quant::{
+            CompleteTrainingDatasetBuild, ExitTrainingLotRow, FeatureVectorInfo, JobProgressSink,
+            MarketSelectionMemberInfo, NewTrainingDatasetPlan, NoopProgressSink,
+            RecommendationAttributionInfo, RecommendationInfo, TrainingDatasetInfo,
+            TrainingDatasetMaterialization,
+        },
+        query::TimeWindow,
+    },
+    enums::{
+        common::MarketCategory,
+        quant::{
+            DatasetPurpose, RecommendationAttributionOutcome, TradePolicyStatus,
+            TrainingDatasetStatus,
+        },
+    },
+    hashing::CanonicalDigest,
+    runtime_config::{
+        DataQualityConfig, DomainConfig, FactorsConfig, FeaturesConfig, SelectionConfig,
+        TrainingConfig,
+    },
+    types::{
+        ArtifactUri, ClobMarketInfoVersion, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION,
+        DatasetCoverage, DatasetFeatureStateCounts, DatasetManifest, DecisionCaptureEvidence,
+        FeatureCellState, FeatureVectorId, MarketId, MarketSelectionId, ModelInputContract,
+        ModelSpecId, Price, RecommendationId, ResearchJobProgress, Shares, TokenId,
+        TradePolicyArtifactId, TradePolicyArtifactPayload, TrainingDatasetId, TrainingExampleId,
+        TrainingHorizonsSecs, TrainingSampleSource, TrainingSampleSources, Usd,
+        factor::FactorExplanation, stable_name::FactorName,
+    },
+};
+use quant_pivot_repository::traits::{
+    AttributionRepository, CalibrationArtifactRepository, CatalogLedgerRepository,
+    ClobMarketInfoRepository, FeatureRepository, MarketLinkageRepository, MarketRepository,
+    MarketSelectionRepository, ModelRegistryRepository, PositionRepository,
+    QuantFactReadRepository, RecommendationRepository, TradePolicyRepository,
+    TrainingDatasetRepository,
+};
+use quant_pivot_research::{
+    artifact::{ArtifactKey, ArtifactNamespace, ArtifactStore},
+    execution_semantics::BookFidelity,
+    factors::{
+        FactorEligibility, FactorEngine, FactorValue, MarketFactorOutcome, NormalizedFactor,
+    },
+    features::{ConfiguredFeatureBuilder, FeatureVector},
+    hashing::ResearchHasher,
+    model::{
+        FavoriteLongshotBiasTable,
+        sell_scorer::{LotStateInput, PositionStateFeatures, position_state_features},
+    },
+    pit::PointInTimeSnapshotSource,
+    selection::{ModelFeatureRequirements, SelectedMarket},
+    training::{
+        DatasetHashContract, DatasetParquetCodec, DatasetPlan, DatasetPlanRequest, DecisionBook,
+        ExitDecisionLabelContext, ForwardWindow, HoldVsExitProceedsLabeler, LabelBuildInput,
+        LabelBuildOutput, LabelName, Labeler, LiquidityExitLabeler, LotSamplePlan,
+        LotTerminalSnapshot, LotTrainingContext, MaxAdverseExcursionLabeler,
+        MaxFavorableExcursionLabeler, PlanMarket, ReturnToHorizonLabeler, SamplePlan,
+        SettlementOutcomeLabeler, TrainingDatasetArtifact, TrainingDatasetBuilder,
+        TrainingDatasetPlanner, TrainingExample, TrainingLabel, assert_no_future_leakage,
+        count_samples, dataset_manifest_hash, dataset_source_fingerprint, label_names_for_sources,
+        plan_lot_timeline_samples, plan_samples, probe_matrix_coverage, remaining_shares_at,
+    },
+};
+use rust_decimal::{Decimal, prelude::ToPrimitive};
+use tokio::{runtime::Handle, task};
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     pit::platform::ch_historical::DurablePitSource,
@@ -29,83 +110,6 @@ use crate::{
         pit_selection::OfflinePitSelector,
     },
 };
-use async_trait::async_trait;
-use chrono::{DateTime, Duration as ChronoDuration, Utc};
-use quant_pivot_error::{QuantError, QuantResult, research::ResearchError, storage::StorageError};
-use quant_pivot_models::{
-    clickhouse::{BookMicrostructureRow, ChPrice},
-    domain::{
-        CompleteTrainingDatasetBuild, DecisionBoundary, DecisionClock, DecisionSource,
-        ExitTrainingLotRow, FeatureVectorInfo, JobProgressSink, MarketInfo, MarketRegistryInfo,
-        MarketSelectionMemberInfo, NewTrainingDatasetPlan, NoopProgressSink,
-        RecommendationAttributionInfo, RecommendationInfo, ResearchJobProgress,
-        TrainingDatasetInfo, TrainingDatasetMaterialization, fee::MarketFeeSchedule,
-        query::TimeWindow,
-    },
-    enums::{
-        common::MarketCategory,
-        quant::{
-            DatasetPurpose, RecommendationAttributionOutcome, TradePolicyStatus,
-            TrainingDatasetStatus,
-        },
-    },
-    hashing::CanonicalDigest,
-    runtime_config::{
-        DataQualityConfig, DomainConfig, FactorsConfig, FeaturesConfig, SelectionConfig,
-        TrainingConfig,
-    },
-    types::{
-        ArtifactUri, ClobMarketInfoVersion, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION,
-        DatasetFeatureStateCounts, DatasetManifest, FeatureVectorId, MarketId, MarketSelectionId,
-        ModelInputContract, ModelSpecId, Price, RecommendationId, Shares, TokenId,
-        TradePolicyArtifactId, TradePolicyArtifactPayload, TrainingDatasetId, TrainingExampleId,
-        TrainingHorizonsSecs, TrainingSampleSource, TrainingSampleSources, Usd,
-        factor::FactorExplanation, stable_name::FactorName,
-    },
-};
-use quant_pivot_repository::traits::{
-    AttributionRepository, CalibrationArtifactRepository, CatalogLedgerRepository,
-    ClobMarketInfoRepository, FeatureRepository, MarketLinkageRepository, MarketRepository,
-    MarketSelectionRepository, ModelRegistryRepository, PositionRepository,
-    QuantFactReadRepository, RecommendationRepository, TradePolicyRepository,
-    TrainingDatasetRepository,
-};
-use quant_pivot_research::{
-    artifact::{ArtifactKey, ArtifactNamespace, ArtifactStore},
-    execution_semantics::BookFidelity,
-    factors::{
-        FactorEligibility, FactorEngine, FactorValue, MarketFactorOutcome, NormalizedFactor,
-    },
-    features::{
-        ConfiguredFeatureBuilder, DecisionCaptureEvidence, FeatureCellState, FeatureVector,
-    },
-    hashing::ResearchHasher,
-    model::{
-        FavoriteLongshotBiasTable,
-        sell_scorer::{LotStateInput, PositionStateFeatures, position_state_features},
-    },
-    pit::PointInTimeSnapshotSource,
-    selection::{ModelFeatureRequirements, SelectedMarket},
-    training::{
-        DatasetCoverage, DatasetHashContract, DatasetParquetCodec, DatasetPlan, DatasetPlanRequest,
-        DecisionBook, ExitDecisionLabelContext, ForwardWindow, HoldVsExitProceedsLabeler,
-        LabelBuildInput, LabelBuildOutput, LabelName, Labeler, LiquidityExitLabeler, LotSamplePlan,
-        LotTerminalSnapshot, LotTrainingContext, MaxAdverseExcursionLabeler,
-        MaxFavorableExcursionLabeler, PlanMarket, ReturnToHorizonLabeler, SamplePlan,
-        SettlementOutcomeLabeler, TrainingDatasetArtifact, TrainingDatasetBuilder,
-        TrainingDatasetPlanner, TrainingExample, TrainingLabel, assert_no_future_leakage,
-        count_samples, dataset_manifest_hash, dataset_source_fingerprint, label_names_for_sources,
-        plan_lot_timeline_samples, plan_samples, probe_matrix_coverage, remaining_shares_at,
-    },
-};
-use rust_decimal::{Decimal, prelude::ToPrimitive};
-use std::{
-    collections::{BTreeMap, HashMap, HashSet},
-    sync::Arc,
-    time::Duration,
-};
-use tokio::{runtime::Handle, task};
-use tokio_util::sync::CancellationToken;
 
 const LIVE_ATTRIBUTION_SAMPLE_LIMIT: u64 = 10_000;
 const DATASET_FAILURE_DETAIL_MAX_CHARS: usize = 2_048;
@@ -451,11 +455,11 @@ pub struct TrainingDatasetServiceDeps {
     pub position_repo: Arc<dyn PositionRepository>,
     /// Append-only point-in-time CLOB market parameters and fee schedules.
     pub clob_market_info_repo: Arc<dyn ClobMarketInfoRepository>,
-    /// Frozen market → external-subject linkage ledger (11.2.2).
+    /// Frozen market → external-subject linkage ledger.
     pub linkage_repo: Arc<dyn MarketLinkageRepository>,
     /// Model registry — resolves the target `ModelSpec`'s governed feature
     /// requirements so offline selection genuinely mirrors the online
-    /// funnel's `ModelFeatureUnavailable` gate (11.2.2 remediation R7).
+    /// funnel's `ModelFeatureUnavailable` gate.
     pub model_registry: Arc<dyn ModelRegistryRepository>,
     /// Governed policy catalog used for executable policy-derived labels.
     pub trade_policy_repo: Arc<dyn TradePolicyRepository>,
@@ -492,7 +496,7 @@ pub struct TrainingDatasetBuildConfig {
     pub features: FeaturesConfig,
     /// Factor engine configuration.
     pub factors: FactorsConfig,
-    /// External-vertical domain plane configuration (Phase 11.2.2).
+    /// External-vertical domain plane configuration.
     pub domain: DomainConfig,
     /// Data-quality gates applied during feature build.
     pub data_quality: DataQualityConfig,
@@ -1039,7 +1043,7 @@ impl TrainingDatasetService {
     /// over a bounded `slices × markets` sample.
     ///
     /// Returns `(keep_rate, trials)`: the fraction of `(market, slice)` pairs that
-    /// pass `FilterChain::standard()`, and the number of trials. The market sample
+    /// pass `FilterChain::standard`, and the number of trials. The market sample
     /// is stride-selected across the id-sorted candidate set for representativeness;
     /// slices are the midpoints of `slices` equal sub-intervals of the window.
     async fn estimate_keep_rate(
@@ -1771,7 +1775,7 @@ impl TrainingDatasetService {
 
     /// The offline point-in-time selection funnel for a build/plan, wired from
     /// the frozen selection/data-quality/feature config, PIT catalog liquidity,
-    /// and the target `ModelSpec`'s resolved feature requirements (R7).
+    /// and the target `ModelSpec`'s resolved feature requirements.
     fn offline_pit_selector(
         &self,
         request: &DatasetPlanRequest,
@@ -2510,7 +2514,7 @@ struct HistoricalSpineParams<'a> {
     data_quality: &'a DataQualityConfig,
     domain: &'a DomainConfig,
     selection: &'a SelectionConfig,
-    /// Target `ModelSpec`'s resolved feature requirements (R7).
+    /// Target `ModelSpec`'s resolved feature requirements.
     model_requirements: ModelFeatureRequirements,
     labelers: &'a [Box<dyn Labeler>],
     min_exit_depth_usd: Usd,
@@ -2534,7 +2538,7 @@ struct HistoricalSpineInputs {
     data_quality: DataQualityConfig,
     domain: DomainConfig,
     selection: SelectionConfig,
-    /// Target `ModelSpec`'s resolved feature requirements (R7).
+    /// Target `ModelSpec`'s resolved feature requirements.
     model_requirements: ModelFeatureRequirements,
     labelers: Arc<Vec<Box<dyn Labeler>>>,
     min_exit_depth_usd: Usd,
@@ -2707,7 +2711,7 @@ async fn pit_selected_replay_group(
         .collect();
     // Zero-I/O: replayed from the same batch-prefetched linkage +
     // domain-observation window `build_domain_slice_inputs` already uses for
-    // this build's actual feature computation (Phase 11.2.2 §3.8 parity).
+    // this build's actual feature computation for parity verification.
     let domain_source = PrefetchedDomainAvailabilitySource::new(params.prefetched, params.domain);
     let boundary = replay_boundary(
         params.as_of,
@@ -3094,7 +3098,7 @@ fn attribution_labels(
     attribution: &RecommendationAttributionInfo,
     recommendation: &RecommendationInfo,
 ) -> Vec<TrainingLabel> {
-    // `label_available_at` is the authoritative Phase 11.5 `matured_at` for
+    // `label_available_at` is the authoritative `matured_at` for
     // live-attribution labels; a live attribution row is only ever built once
     // its outcome is known, so `created_at` (the row's own persistence time,
     // necessarily at/after every value it carries became known) is the safe
@@ -3525,15 +3529,15 @@ fn record_exit_fill_fidelity(coverage: &mut DatasetCoverage, book_fidelity: Opti
 mod keep_rate_tests {
     use chrono::{Duration, TimeZone, Utc};
     use quant_pivot_models::{
-        domain::DecisionSource,
+        domain::data_plane::DecisionSource,
         enums::quant::DatasetPurpose,
         types::{DecisionPolicySnapshotId, ModelSpecId, SchemaVersion, default_sample_sources},
     };
-    use quant_pivot_test_support::execution_pg_seed::{
-        content_hash, fixture_profile_ref, source_slice_ref,
-    };
 
     use super::{DatasetPlanRequest, KeepRateEstimate, KeepRateGrid};
+    use crate::test_fixtures::execution_pg_seed::{
+        content_hash, fixture_profile_ref, source_slice_ref,
+    };
 
     fn request() -> DatasetPlanRequest {
         let window_start = Utc.timestamp_opt(1_000, 0).single().expect("start");
@@ -3670,7 +3674,7 @@ mod attribution_censor_tests {
 
     use chrono::Utc;
     use quant_pivot_models::{
-        domain::RecommendationAttributionInfo,
+        domain::quant::RecommendationAttributionInfo,
         enums::quant::RecommendationAttributionOutcome,
         types::{AttributionDetail, DatasetCoverage, EntryOutcome, ExitOutcome, RecommendationId},
     };
@@ -3745,7 +3749,7 @@ mod attribution_censor_tests {
 
 #[cfg(test)]
 mod pit_fee_tests {
-    use chrono::{Duration, TimeZone, Utc};
+    use chrono::{DateTime, Duration, TimeZone, Utc};
     use quant_pivot_models::{
         enums::common::{MarketCategory, TickSize},
         hashing::CanonicalDigest,
@@ -3755,6 +3759,7 @@ mod pit_fee_tests {
         },
     };
     use quant_pivot_research::selection::SelectedMarket;
+    use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
 
     use super::pit_exit_fee_schedule;
@@ -3762,9 +3767,9 @@ mod pit_fee_tests {
     fn version(
         market_id: &MarketId,
         token_id: &TokenId,
-        rate: rust_decimal::Decimal,
-        effective_at: chrono::DateTime<Utc>,
-        available_at: chrono::DateTime<Utc>,
+        rate: Decimal,
+        effective_at: DateTime<Utc>,
+        available_at: DateTime<Utc>,
     ) -> ClobMarketInfoVersion {
         let raw_payload = serde_json::json!({
             "market": market_id,

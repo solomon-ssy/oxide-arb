@@ -1,6 +1,6 @@
 //! `ProbabilityCalibrator`: maps raw model scores to calibrated win probabilities.
 //!
-//! Fit **only** on an independent held-out calibration split (Phase 11.3 §3.2).
+//! Fit **only** on an independent held-out calibration split.
 //!
 //! Two methods, matching production guidance (scikit-learn `CalibratedClassifierCV`):
 //! [`isotonic::IsotonicCalibrator`] (non-parametric monotone regression;
@@ -29,8 +29,8 @@ use crate::{model::artifact::ReturnEstimate, precision::RESEARCH_DECIMAL_SCALE};
 /// Maps raw model scores to empirically calibrated win probabilities.
 ///
 /// Implementations are pure (no I/O); the caller is responsible for sourcing
-/// `scores`/`outcomes` from an independent held-out calibration split (Phase
-/// 11.3 §4) — this trait has no opinion on data provenance.
+/// `scores`/`outcomes` from an independent held-out calibration split; this
+/// trait has no opinion on data provenance.
 pub trait ProbabilityCalibrator: Send + Sync {
     /// The method this calibrator implements.
     fn method(&self) -> CalibrationMethod;
@@ -137,7 +137,7 @@ impl ResolvedCalibration {
         apply_mapping(&self.mapping, composite_score)
     }
 
-    /// Derive the expected return / downside (bps) per Phase 11.3 §3.3:
+    /// Derive the expected return and downside (bps) using:
     /// `E[r] = P(win)·(1-p)/p − (1−P(win))`, `downside` = the calibration
     /// split's mean `max_adverse_excursion_bps` in the candidate's
     /// **calibrated-probability** bucket (matching the reliability report's
@@ -146,8 +146,8 @@ impl ResolvedCalibration {
     /// no MAE evidence rejects inference. Neither condition is a business zero.
     ///
     /// `win_probability` on the returned [`ReturnEstimate`] is the *same*
-    /// `P(win)` used to derive `expected_return_bps` — Kelly sizing (Phase
-    /// 11.3 §4 redesign) consumes it directly as `q`, so the sizing decision
+    /// `P(win)` used to derive `expected_return_bps` — Kelly sizing consumes it
+    /// directly as `q`, so the sizing decision
     /// and the return estimate always share one probability, never two
     /// independently-derived numbers.
     pub fn estimate_return(
@@ -210,12 +210,13 @@ pub trait CalibrationArtifactLoader: Send + Sync {
 
 #[cfg(test)]
 mod tests {
-    use super::ResolvedCalibration;
     use quant_pivot_models::types::{
         CalibrationArtifactId, Price, Probability,
         calibration::{IsotonicKnot, MonotoneMapping, ReliabilityBin, ReliabilityReport},
     };
     use rust_decimal_macros::dec;
+
+    use super::ResolvedCalibration;
 
     fn resolved() -> ResolvedCalibration {
         ResolvedCalibration {

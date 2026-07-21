@@ -1,7 +1,13 @@
 //! Model registry persistence DTOs.
 
+use chrono::{DateTime, Utc};
+use sea_orm::{
+    ActiveValue, ActiveValue::Set, DeriveIntoActiveModel, DerivePartialModel, FromQueryResult,
+};
+use serde::{Deserialize, Serialize};
+
 use crate::{
-    entities::quant_model_version,
+    entities::quant_model_version::ActiveModel,
     enums::{
         common::MarketCategory,
         model::ModelFamily,
@@ -23,9 +29,6 @@ use crate::{
         model_training::ModelTrainingObjective,
     },
 };
-use chrono::{DateTime, Utc};
-use sea_orm::{ActiveValue::Set, DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
-use serde::{Deserialize, Serialize};
 
 /// Governed model specification row.
 #[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
@@ -183,9 +186,7 @@ impl NewModelVersion {
     }
 
     /// Decompose typed derivation evidence into FK-backed persistence columns.
-    pub fn try_into_active_model(
-        self,
-    ) -> Result<quant_model_version::ActiveModel, ModelVersionDerivationError> {
+    pub fn try_into_active_model(self) -> Result<ActiveModel, ModelVersionDerivationError> {
         let derivation_evidence_hash = self.derivation.evidence_hash()?;
         let derivation_kind = self.derivation.kind();
         let parent_model_version_id = self.derivation.parent_model_version_id().cloned();
@@ -194,7 +195,7 @@ impl NewModelVersion {
         let score_multiplier_calibration_report =
             self.derivation.score_multiplier_report().cloned();
 
-        Ok(quant_model_version::ActiveModel {
+        Ok(ActiveModel {
             model_version_id: Set(self.model_version_id),
             model_spec_id: Set(self.model_spec_id),
             version: Set(self.version),
@@ -217,7 +218,7 @@ impl NewModelVersion {
             publication_status: Set(self.publication_status),
             published_at: Set(self.published_at),
             retired_at: Set(self.retired_at),
-            created_at: sea_orm::ActiveValue::NotSet,
+            created_at: ActiveValue::NotSet,
         })
     }
 }
@@ -267,7 +268,7 @@ info_from_model!(ModelRunInfo, crate::entities::quant_model_run::Model, {
 /// Insert payload for `quant_model_run`.
 ///
 /// Covers every `ActiveModel` column (no DB-managed timestamps); `SeaORM`'s derive
-/// emits a redundant `..Default::default()` that triggers `needless_update`.
+/// emits a redundant `..Default::default` that triggers `needless_update`.
 #[derive(Debug, Clone, Serialize, Deserialize, DeriveIntoActiveModel)]
 #[sea_orm(active_model = "crate::entities::quant_model_run::ActiveModel")]
 pub struct NewModelRun {

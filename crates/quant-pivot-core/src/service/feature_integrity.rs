@@ -7,13 +7,19 @@ use chrono::{DateTime, Duration, Utc};
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError, storage::StorageError};
 use quant_pivot_models::{
     domain::{
-        AcknowledgeFeatureParityLatchRequest, DecisionPolicySnapshotInfo,
-        FeatureIntegrityActionContext, FeatureIntegrityLatchView, FeatureIntegrityPort,
-        FeatureIntegritySummaryView, FeatureParityEventListQuery, FeatureParityEventView,
-        FeatureParityJobParams, FeatureParityRunInfo, FeatureParityRunListQuery,
-        FeatureParityRunView, NewFeatureParityRun, NewRecommendationReport, NewReportFeatureParity,
-        NewResearchJob, Paginated, RecommendationReportInfo, ReportRunInfo, ResearchJobView,
-        RunFullFeatureParityRequest,
+        api::{
+            AcknowledgeFeatureParityLatchRequest, FeatureIntegrityLatchView,
+            FeatureIntegritySummaryView, FeatureParityEventListQuery, FeatureParityEventView,
+            FeatureParityJobParams, FeatureParityRunListQuery, FeatureParityRunView,
+            ResearchJobView, RunFullFeatureParityRequest,
+        },
+        governance::DecisionPolicySnapshotInfo,
+        pagination::Paginated,
+        ports::{FeatureIntegrityActionContext, FeatureIntegrityPort},
+        quant::{
+            FeatureParityRunInfo, NewFeatureParityRun, NewRecommendationReport,
+            NewReportFeatureParity, NewResearchJob, RecommendationReportInfo, ReportRunInfo,
+        },
     },
     enums::{
         quant::{
@@ -154,7 +160,7 @@ impl FeatureParityRunCoordinator {
 
     /// Verify the invariant on an idempotent report lookup. This rejects legacy
     /// serving reports that were committed without a sampled replay instead of
-    /// silently treating them as Phase 11.6-compliant.
+    /// silently treating them as parity-compliant.
     pub async fn ensure_report_sample_committed(
         &self,
         report: &RecommendationReportInfo,
@@ -921,14 +927,19 @@ mod tests {
 
     use quant_pivot_models::{
         domain::{
-            CompleteFeatureParityRun, ConfigActivityInfo, ConfigResourceInventoryInfo,
-            DecisionPolicySnapshotInfo, DecisionPolicySnapshotOptionInfo, FeatureParityRunInfo,
-            FeatureParityStateInfo, FrozenFeatureParitySubject, LifecycleSchemaVerificationPort,
-            NewDecisionPolicySnapshot, NewFrozenModelParitySubject, NewPolicyActivation,
-            NewPolicyRevision, NewProductionBaseline, NewProductionEvidence,
-            PolicyActivationCommit, PolicyActivationInfo, PolicyApprovalInfo, PolicyRevisionInfo,
-            ProductionBaselineInfo, ProductionEvidenceArtifactVerificationPort,
-            ProductionEvidenceInfo, RecordPolicyApproval, ResearchJobInfo,
+            governance::{
+                ConfigActivityInfo, ConfigResourceInventoryInfo, DecisionPolicySnapshotInfo,
+                DecisionPolicySnapshotOptionInfo, NewDecisionPolicySnapshot, NewPolicyActivation,
+                NewPolicyRevision, NewProductionBaseline, NewProductionEvidence,
+                PolicyActivationCommit, PolicyActivationInfo, PolicyApprovalInfo,
+                PolicyRevisionInfo, ProductionBaselineInfo, ProductionEvidenceInfo,
+                RecordPolicyApproval,
+            },
+            ports::{LifecycleSchemaVerificationPort, ProductionEvidenceArtifactVerificationPort},
+            quant::{
+                CompleteFeatureParityRun, FeatureParityRunInfo, FeatureParityStateInfo,
+                FrozenFeatureParitySubject, NewFrozenModelParitySubject, ResearchJobInfo,
+            },
         },
         enums::{
             quant::{
@@ -947,9 +958,9 @@ mod tests {
         },
     };
     use quant_pivot_repository::traits::FeatureParityLatchActor;
-    use quant_pivot_test_support::report_fixtures;
 
     use super::*;
+    use crate::test_fixtures::report_fixtures;
 
     fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
         mutex.lock().expect("test mutex")

@@ -7,12 +7,18 @@ use quant_pivot_error::{
     QuantError, QuantResult,
     infra::InfraError,
     report::ReportError,
-    storage::{StorageError, entity},
+    storage::{
+        StorageError, entity,
+        entity::{QUANT_RECOMMENDATION_REPORT, QUANT_REPORT_RUN},
+    },
 };
 use quant_pivot_models::{
     domain::{
-        EnqueueReportRunOutcome, NewOperationLog, NewReportRun, RecommendationReportInfo,
-        ReportFactDeliveryInfo, ReportRunClaim, ReportRunInfo,
+        governance::NewOperationLog,
+        quant::{
+            EnqueueReportRunOutcome, NewReportRun, RecommendationReportInfo,
+            ReportFactDeliveryInfo, ReportRunClaim, ReportRunInfo,
+        },
     },
     enums::{
         operation_log::{OperationCategory, OperationHttpMethod, OperationOutcome},
@@ -29,16 +35,15 @@ use quant_pivot_repository::traits::{
 };
 use quant_pivot_research::artifact::ArtifactStore;
 
-use crate::{
-    execution::IntentTerminalEventSink,
-    service::feature_integrity::{FeatureParityGatePort, FeatureParityRunCoordinator},
-};
-
 use super::{
     builder::ReportBuilder,
     fact_bundle::prepare_report_fact_bundle,
     publisher::ReportPublisher,
     types::{BuildReportRequest, ComposedReport, ReportTrigger, durable_report_error_summary},
+};
+use crate::{
+    execution::IntentTerminalEventSink,
+    service::feature_integrity::{FeatureParityGatePort, FeatureParityRunCoordinator},
 };
 
 /// Ad-hoc report trigger request.
@@ -161,9 +166,7 @@ impl ReportLifecycleService {
             .run_repo
             .find_by_id(&request.source_run_id)
             .await?
-            .ok_or_else(|| {
-                StorageError::not_found(entity::QUANT_REPORT_RUN, &request.source_run_id)
-            })?;
+            .ok_or_else(|| StorageError::not_found(QUANT_REPORT_RUN, &request.source_run_id))?;
         if source.trigger_kind != ReportTriggerKind::AdHoc
             || !matches!(
                 source.status,
@@ -171,7 +174,7 @@ impl ReportLifecycleService {
             )
         {
             return Err(StorageError::state_conflict(
-                entity::QUANT_REPORT_RUN,
+                QUANT_REPORT_RUN,
                 Some(&request.source_run_id),
                 "only failed, skipped, or abandoned ad-hoc runs can be retried",
             )
@@ -218,9 +221,7 @@ impl ReportLifecycleService {
             .report_repo
             .find_by_id(report_id)
             .await?
-            .ok_or_else(|| {
-                StorageError::not_found(entity::QUANT_RECOMMENDATION_REPORT, report_id)
-            })?;
+            .ok_or_else(|| StorageError::not_found(QUANT_RECOMMENDATION_REPORT, report_id))?;
         self.publisher.publish_delivery_state(&report, false);
         Ok(delivery)
     }
@@ -265,9 +266,7 @@ impl ReportLifecycleService {
             .report_repo
             .find_by_id(report_id)
             .await?
-            .ok_or_else(|| {
-                StorageError::not_found(entity::QUANT_RECOMMENDATION_REPORT, report_id)
-            })?;
+            .ok_or_else(|| StorageError::not_found(QUANT_RECOMMENDATION_REPORT, report_id))?;
 
         if !is_parity_contained_report_status(current.status) {
             match self
@@ -291,10 +290,7 @@ impl ReportLifecycleService {
                             .find_by_id(report_id)
                             .await?
                             .ok_or_else(|| {
-                                StorageError::not_found(
-                                    entity::QUANT_RECOMMENDATION_REPORT,
-                                    report_id,
-                                )
+                                StorageError::not_found(QUANT_RECOMMENDATION_REPORT, report_id)
                             })?;
                     if !is_parity_contained_report_status(latest.status) {
                         return Err(error.into());
@@ -666,6 +662,8 @@ fn is_report_revoke_transition_conflict(
 
 #[cfg(test)]
 mod parity_containment_tests {
+    use entity::{QUANT_RECOMMENDATION, QUANT_RECOMMENDATION_REPORT};
+
     use super::*;
 
     #[test]
@@ -690,7 +688,7 @@ mod parity_containment_tests {
     fn only_exact_report_revoke_transition_conflict_is_retry_classified() {
         let report_id = RecommendationReportId::from_v7();
         let exact = StorageError::illegal_transition(
-            entity::QUANT_RECOMMENDATION_REPORT,
+            QUANT_RECOMMENDATION_REPORT,
             Some(&report_id),
             RecommendationReportStatus::Expired.as_str(),
             RecommendationReportStatus::Revoked.as_str(),
@@ -698,7 +696,7 @@ mod parity_containment_tests {
         assert!(is_report_revoke_transition_conflict(&exact, &report_id));
 
         let unrelated_report = StorageError::illegal_transition(
-            entity::QUANT_RECOMMENDATION_REPORT,
+            QUANT_RECOMMENDATION_REPORT,
             Some(&RecommendationReportId::from_v7()),
             RecommendationReportStatus::Expired.as_str(),
             RecommendationReportStatus::Revoked.as_str(),
@@ -708,7 +706,7 @@ mod parity_containment_tests {
             &report_id
         ));
         let unrelated_entity = StorageError::illegal_transition(
-            entity::QUANT_RECOMMENDATION,
+            QUANT_RECOMMENDATION,
             Some(&report_id),
             "attributed",
             "revoked",

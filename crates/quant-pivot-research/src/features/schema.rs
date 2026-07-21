@@ -21,8 +21,30 @@ use serde::{Deserialize, Serialize};
 use crate::features::{
     FeatureName,
     names::{
-        book, domain_crypto as domain_crypto_names, domain_weather as domain_weather_names,
-        market as market_names, micro, structural as structural_names, ts,
+        book::{
+            AGE_MS, BEST_ASK, BEST_BID, CROSSED, DEPTH_IMBALANCE, EMPTY, MID, SECONDARY_BEST_ASK,
+            SLOPE, SPREAD_BPS, VISIBLE_LIQUIDITY_USD,
+        },
+        domain_crypto::{
+            BASIS_VS_RESOLUTION_SOURCE, DISTANCE_TO_STRIKE, TIME_TO_OBSERVATION,
+            UNDERLYING_MOMENTUM, UNDERLYING_REALIZED_VOL,
+        },
+        domain_weather::{
+            ENSEMBLE_BIN_PROBABILITY, ENSEMBLE_SPREAD, NOAA_RESOLUTION_BASIS_RISK,
+            OBSERVED_EXTREME_HEADROOM,
+        },
+        market::{CATEGORY, EVENT_AGE_SECS, IS_ACTIVE, NEG_RISK, TIME_TO_RESOLUTION_SECS},
+        micro::{
+            ADVERSE_SELECTION_PROXY, BOOK_CHURN, QUEUE_DEPLETION, QUOTE_UPDATE_RATE,
+            STALE_QUOTE_FREQUENCY, SUDDEN_LIQUIDITY_WITHDRAWAL,
+        },
+        structural::{
+            BOOK_CHURN_INTENSITY, MAKER_GINI, NEGRISK_CONVERT_EDGE, NEGRISK_LEG_ASK_SUM,
+            NEGRISK_LEG_BID_SUM, NEGRISK_LEG_COUNT, PARTICIPANT_COUNT, PARTICIPANT_COVERAGE_RATIO,
+            PARTICIPANT_CR1_SHARE, PARTICIPANT_GINI, PARTICIPANT_HHI, PRICE_EXTREMITY, SHOCK_RATIO,
+            SHORT_RETURN, TAKER_GINI, TRADE_TAPE_COUNT, TRADE_TAPE_NOTIONAL_USD,
+        },
+        ts::{MACD_NORM, PRICE_REVERSAL},
     },
     value::{EvidenceSourceKind, FeatureValueKind},
 };
@@ -420,7 +442,7 @@ const fn spec(
 fn market_metadata_specs(out: &mut Vec<FeatureSpec>) {
     out.push(
         spec(
-            market_names::CATEGORY,
+            CATEGORY,
             FeatureFamily::MarketMetadata,
             FeatureValueKind::Category,
             SourceRequirement::GammaMetadata,
@@ -432,7 +454,7 @@ fn market_metadata_specs(out: &mut Vec<FeatureSpec>) {
     );
     out.push(
         spec(
-            market_names::TIME_TO_RESOLUTION_SECS,
+            TIME_TO_RESOLUTION_SECS,
             FeatureFamily::MarketMetadata,
             FeatureValueKind::Count,
             SourceRequirement::GammaMetadata,
@@ -445,7 +467,7 @@ fn market_metadata_specs(out: &mut Vec<FeatureSpec>) {
     );
     out.push(
         spec(
-            market_names::EVENT_AGE_SECS,
+            EVENT_AGE_SECS,
             FeatureFamily::MarketMetadata,
             FeatureValueKind::Count,
             SourceRequirement::GammaMetadata,
@@ -458,7 +480,7 @@ fn market_metadata_specs(out: &mut Vec<FeatureSpec>) {
     );
     out.push(
         spec(
-            market_names::NEG_RISK,
+            NEG_RISK,
             FeatureFamily::MarketMetadata,
             FeatureValueKind::Bool,
             SourceRequirement::GammaMetadata,
@@ -470,7 +492,7 @@ fn market_metadata_specs(out: &mut Vec<FeatureSpec>) {
     );
     out.push(
         spec(
-            market_names::IS_ACTIVE,
+            IS_ACTIVE,
             FeatureFamily::MarketMetadata,
             FeatureValueKind::Bool,
             SourceRequirement::GammaMetadata,
@@ -504,54 +526,54 @@ fn price_spec(name: FeatureName) -> FeatureSpec {
 }
 
 fn price_book_specs(config: &FeaturesConfig, out: &mut Vec<FeatureSpec>) {
-    out.push(price_spec(book::BEST_BID));
-    out.push(price_spec(book::BEST_ASK));
+    out.push(price_spec(BEST_BID));
+    out.push(price_spec(BEST_ASK));
     out.push(
-        book_spec(book::SECONDARY_BEST_ASK, FeatureValueKind::Probability)
+        book_spec(SECONDARY_BEST_ASK, FeatureValueKind::Probability)
             .unit(FeatureUnit::Probability)
             .range(Decimal::ZERO, Decimal::ONE)
             .null_policy(NullPolicy::Penalize)
             .build(),
     );
-    out.push(price_spec(book::MID));
+    out.push(price_spec(MID));
     out.push(
-        book_spec(book::SPREAD_BPS, FeatureValueKind::Bps)
+        book_spec(SPREAD_BPS, FeatureValueKind::Bps)
             .unit(FeatureUnit::Bps)
             .null_policy(NullPolicy::RejectMarket)
             .build(),
     );
     out.push(
-        book_spec(book::DEPTH_IMBALANCE, FeatureValueKind::Decimal)
+        book_spec(DEPTH_IMBALANCE, FeatureValueKind::Decimal)
             .unit(FeatureUnit::Ratio)
             .range(Decimal::NEGATIVE_ONE, Decimal::ONE)
             .null_policy(NullPolicy::Penalize)
             .build(),
     );
     out.push(
-        book_spec(book::SLOPE, FeatureValueKind::Decimal)
+        book_spec(SLOPE, FeatureValueKind::Decimal)
             .unit(FeatureUnit::Ratio)
             .null_policy(NullPolicy::Penalize)
             .build(),
     );
     out.push(
-        book_spec(book::VISIBLE_LIQUIDITY_USD, FeatureValueKind::Usd)
+        book_spec(VISIBLE_LIQUIDITY_USD, FeatureValueKind::Usd)
             .unit(FeatureUnit::Usd)
             .null_policy(NullPolicy::Penalize)
             .build(),
     );
     out.push(
-        book_spec(book::AGE_MS, FeatureValueKind::Count)
+        book_spec(AGE_MS, FeatureValueKind::Count)
             .unit(FeatureUnit::Milliseconds)
             .null_policy(NullPolicy::RejectMarket)
             .build(),
     );
     out.push(
-        book_spec(book::CROSSED, FeatureValueKind::Bool)
+        book_spec(CROSSED, FeatureValueKind::Bool)
             .null_policy(NullPolicy::RejectMarket)
             .build(),
     );
     out.push(
-        book_spec(book::EMPTY, FeatureValueKind::Bool)
+        book_spec(EMPTY, FeatureValueKind::Bool)
             .null_policy(NullPolicy::RejectMarket)
             .build(),
     );
@@ -639,7 +661,7 @@ fn time_series_specs(config: &FeaturesConfig, out: &mut Vec<FeatureSpec>) {
     }
     out.push(
         spec(
-            ts::PRICE_REVERSAL,
+            PRICE_REVERSAL,
             FeatureFamily::TimeSeries,
             FeatureValueKind::Decimal,
             SourceRequirement::MicrostructureWindow,
@@ -687,7 +709,7 @@ fn momentum_specs(config: &FeaturesConfig, out: &mut Vec<FeatureSpec>) {
     }
     out.push(
         spec(
-            ts::MACD_NORM,
+            MACD_NORM,
             FeatureFamily::TimeSeries,
             FeatureValueKind::Decimal,
             SourceRequirement::MicrostructureWindow,
@@ -703,27 +725,23 @@ fn momentum_specs(config: &FeaturesConfig, out: &mut Vec<FeatureSpec>) {
 fn microstructure_specs(out: &mut Vec<FeatureSpec>) {
     for (name, kind, unit) in [
         (
-            micro::QUOTE_UPDATE_RATE,
+            QUOTE_UPDATE_RATE,
             FeatureValueKind::Decimal,
             FeatureUnit::PerSecond,
         ),
+        (BOOK_CHURN, FeatureValueKind::Decimal, FeatureUnit::Ratio),
         (
-            micro::BOOK_CHURN,
+            QUEUE_DEPLETION,
             FeatureValueKind::Decimal,
             FeatureUnit::Ratio,
         ),
         (
-            micro::QUEUE_DEPLETION,
+            SUDDEN_LIQUIDITY_WITHDRAWAL,
             FeatureValueKind::Decimal,
             FeatureUnit::Ratio,
         ),
         (
-            micro::SUDDEN_LIQUIDITY_WITHDRAWAL,
-            FeatureValueKind::Decimal,
-            FeatureUnit::Ratio,
-        ),
-        (
-            micro::ADVERSE_SELECTION_PROXY,
+            ADVERSE_SELECTION_PROXY,
             FeatureValueKind::Decimal,
             FeatureUnit::Ratio,
         ),
@@ -744,7 +762,7 @@ fn microstructure_specs(out: &mut Vec<FeatureSpec>) {
     }
     out.push(
         spec(
-            micro::STALE_QUOTE_FREQUENCY,
+            STALE_QUOTE_FREQUENCY,
             FeatureFamily::Microstructure,
             FeatureValueKind::Probability,
             SourceRequirement::MicrostructureWindow,
@@ -758,7 +776,7 @@ fn microstructure_specs(out: &mut Vec<FeatureSpec>) {
     );
 }
 
-/// Structural (prediction-market-aware) feature specs (Phase 11.2.1).
+/// Structural (prediction-market-aware) feature specs.
 ///
 /// Platform-computable from existing facts (book, market metadata, microstructure
 /// window, and same-`as_of` neg-risk sibling-leg books) — no external source.
@@ -768,7 +786,7 @@ fn microstructure_specs(out: &mut Vec<FeatureSpec>) {
 fn structural_specs(out: &mut Vec<FeatureSpec>) {
     out.push(
         spec(
-            structural_names::SHORT_RETURN,
+            SHORT_RETURN,
             FeatureFamily::Structural,
             FeatureValueKind::Decimal,
             SourceRequirement::MicrostructureWindow,
@@ -781,7 +799,7 @@ fn structural_specs(out: &mut Vec<FeatureSpec>) {
     );
     out.push(
         spec(
-            structural_names::SHOCK_RATIO,
+            SHOCK_RATIO,
             FeatureFamily::Structural,
             FeatureValueKind::Decimal,
             SourceRequirement::MicrostructureWindow,
@@ -795,7 +813,7 @@ fn structural_specs(out: &mut Vec<FeatureSpec>) {
     );
     out.push(
         spec(
-            structural_names::PRICE_EXTREMITY,
+            PRICE_EXTREMITY,
             FeatureFamily::Structural,
             FeatureValueKind::Decimal,
             SourceRequirement::PublishedL2Book,
@@ -810,7 +828,7 @@ fn structural_specs(out: &mut Vec<FeatureSpec>) {
     );
     out.push(
         spec(
-            structural_names::BOOK_CHURN_INTENSITY,
+            BOOK_CHURN_INTENSITY,
             FeatureFamily::Structural,
             FeatureValueKind::Decimal,
             SourceRequirement::MicrostructureWindow,
@@ -828,7 +846,7 @@ fn structural_specs(out: &mut Vec<FeatureSpec>) {
 fn trade_tape_structural_specs(out: &mut Vec<FeatureSpec>) {
     out.push(
         spec(
-            structural_names::TRADE_TAPE_COUNT,
+            TRADE_TAPE_COUNT,
             FeatureFamily::Structural,
             FeatureValueKind::Count,
             SourceRequirement::TradeTapeWindow,
@@ -841,7 +859,7 @@ fn trade_tape_structural_specs(out: &mut Vec<FeatureSpec>) {
     );
     out.push(
         spec(
-            structural_names::PARTICIPANT_COUNT,
+            PARTICIPANT_COUNT,
             FeatureFamily::Structural,
             FeatureValueKind::Count,
             SourceRequirement::TradeTapeWindow,
@@ -854,7 +872,7 @@ fn trade_tape_structural_specs(out: &mut Vec<FeatureSpec>) {
     );
     out.push(
         spec(
-            structural_names::TRADE_TAPE_NOTIONAL_USD,
+            TRADE_TAPE_NOTIONAL_USD,
             FeatureFamily::Structural,
             FeatureValueKind::Usd,
             SourceRequirement::TradeTapeWindow,
@@ -866,12 +884,12 @@ fn trade_tape_structural_specs(out: &mut Vec<FeatureSpec>) {
         .build(),
     );
     for name in [
-        structural_names::PARTICIPANT_COVERAGE_RATIO,
-        structural_names::PARTICIPANT_GINI,
-        structural_names::PARTICIPANT_HHI,
-        structural_names::PARTICIPANT_CR1_SHARE,
-        structural_names::MAKER_GINI,
-        structural_names::TAKER_GINI,
+        PARTICIPANT_COVERAGE_RATIO,
+        PARTICIPANT_GINI,
+        PARTICIPANT_HHI,
+        PARTICIPANT_CR1_SHARE,
+        MAKER_GINI,
+        TAKER_GINI,
     ] {
         out.push(
             spec(
@@ -893,7 +911,7 @@ fn trade_tape_structural_specs(out: &mut Vec<FeatureSpec>) {
 fn structural_neg_risk_specs(out: &mut Vec<FeatureSpec>) {
     out.push(
         spec(
-            structural_names::NEGRISK_LEG_ASK_SUM,
+            NEGRISK_LEG_ASK_SUM,
             FeatureFamily::Structural,
             FeatureValueKind::Decimal,
             SourceRequirement::NegRiskSiblingLegs,
@@ -906,7 +924,7 @@ fn structural_neg_risk_specs(out: &mut Vec<FeatureSpec>) {
     );
     out.push(
         spec(
-            structural_names::NEGRISK_LEG_BID_SUM,
+            NEGRISK_LEG_BID_SUM,
             FeatureFamily::Structural,
             FeatureValueKind::Decimal,
             SourceRequirement::NegRiskSiblingLegs,
@@ -919,7 +937,7 @@ fn structural_neg_risk_specs(out: &mut Vec<FeatureSpec>) {
     );
     out.push(
         spec(
-            structural_names::NEGRISK_LEG_COUNT,
+            NEGRISK_LEG_COUNT,
             FeatureFamily::Structural,
             FeatureValueKind::Count,
             SourceRequirement::NegRiskSiblingLegs,
@@ -932,7 +950,7 @@ fn structural_neg_risk_specs(out: &mut Vec<FeatureSpec>) {
     );
     out.push(
         spec(
-            structural_names::NEGRISK_CONVERT_EDGE,
+            NEGRISK_CONVERT_EDGE,
             FeatureFamily::Structural,
             FeatureValueKind::Decimal,
             SourceRequirement::NegRiskSiblingLegs,
@@ -945,7 +963,7 @@ fn structural_neg_risk_specs(out: &mut Vec<FeatureSpec>) {
     );
 }
 
-/// Crypto external-vertical (domain-slice) feature specs (Phase 11.2.2).
+/// Crypto external-vertical (domain-slice) feature specs.
 ///
 /// Every spec requires a resolved PIT linkage. Observation-derived specs also
 /// require a PIT window of external domain facts; subject-derived specs cite
@@ -961,7 +979,7 @@ fn domain_specs(out: &mut Vec<FeatureSpec>) {
 fn crypto_domain_specs(out: &mut Vec<FeatureSpec>) {
     out.push(
         spec(
-            domain_crypto_names::DISTANCE_TO_STRIKE,
+            DISTANCE_TO_STRIKE,
             FeatureFamily::Domain,
             FeatureValueKind::Decimal,
             SourceRequirement::DomainObservationWindow,
@@ -974,7 +992,7 @@ fn crypto_domain_specs(out: &mut Vec<FeatureSpec>) {
     );
     out.push(
         spec(
-            domain_crypto_names::UNDERLYING_MOMENTUM,
+            UNDERLYING_MOMENTUM,
             FeatureFamily::Domain,
             FeatureValueKind::Decimal,
             SourceRequirement::DomainObservationWindow,
@@ -987,7 +1005,7 @@ fn crypto_domain_specs(out: &mut Vec<FeatureSpec>) {
     );
     out.push(
         spec(
-            domain_crypto_names::UNDERLYING_REALIZED_VOL,
+            UNDERLYING_REALIZED_VOL,
             FeatureFamily::Domain,
             FeatureValueKind::Decimal,
             SourceRequirement::DomainObservationWindow,
@@ -1003,7 +1021,7 @@ fn crypto_domain_specs(out: &mut Vec<FeatureSpec>) {
         // Intrinsically point-in-time: derived from the frozen subject's
         // observation instant, not from any observation feed.
         spec(
-            domain_crypto_names::TIME_TO_OBSERVATION,
+            TIME_TO_OBSERVATION,
             FeatureFamily::Domain,
             FeatureValueKind::Count,
             SourceRequirement::ResolvedLinkage,
@@ -1016,7 +1034,7 @@ fn crypto_domain_specs(out: &mut Vec<FeatureSpec>) {
     );
     out.push(
         spec(
-            domain_crypto_names::BASIS_VS_RESOLUTION_SOURCE,
+            BASIS_VS_RESOLUTION_SOURCE,
             FeatureFamily::Domain,
             FeatureValueKind::Bps,
             SourceRequirement::DomainObservationWindow,
@@ -1032,7 +1050,7 @@ fn crypto_domain_specs(out: &mut Vec<FeatureSpec>) {
 fn weather_domain_specs(out: &mut Vec<FeatureSpec>) {
     out.push(
         spec(
-            domain_weather_names::ENSEMBLE_BIN_PROBABILITY,
+            ENSEMBLE_BIN_PROBABILITY,
             FeatureFamily::Domain,
             FeatureValueKind::Probability,
             SourceRequirement::DomainObservationWindow,
@@ -1046,7 +1064,7 @@ fn weather_domain_specs(out: &mut Vec<FeatureSpec>) {
     );
     out.push(
         spec(
-            domain_weather_names::ENSEMBLE_SPREAD,
+            ENSEMBLE_SPREAD,
             FeatureFamily::Domain,
             FeatureValueKind::Decimal,
             SourceRequirement::DomainObservationWindow,
@@ -1059,7 +1077,7 @@ fn weather_domain_specs(out: &mut Vec<FeatureSpec>) {
     );
     out.push(
         spec(
-            domain_weather_names::OBSERVED_EXTREME_HEADROOM,
+            OBSERVED_EXTREME_HEADROOM,
             FeatureFamily::Domain,
             FeatureValueKind::Decimal,
             SourceRequirement::DomainObservationWindow,
@@ -1071,7 +1089,7 @@ fn weather_domain_specs(out: &mut Vec<FeatureSpec>) {
     );
     out.push(
         spec(
-            domain_weather_names::NOAA_RESOLUTION_BASIS_RISK,
+            NOAA_RESOLUTION_BASIS_RISK,
             FeatureFamily::Domain,
             FeatureValueKind::Decimal,
             SourceRequirement::DomainObservationWindow,
@@ -1086,14 +1104,17 @@ fn weather_domain_specs(out: &mut Vec<FeatureSpec>) {
 
 #[cfg(test)]
 mod contract_tests {
+    use quant_pivot_models::{
+        runtime_config::{FeatureFamily, FeaturesConfig},
+        types::SchemaVersion,
+    };
+
     use super::{
         FeatureSchema, FeatureSpecBuilder, FeatureUnit, NullPolicy, PitRule, SourceRequirement,
         StalenessRule,
     };
-    use crate::features::{FeatureName, FeatureSpec, FeatureValueKind, names::book};
-    use quant_pivot_models::{
-        runtime_config::{FeatureFamily, FeaturesConfig},
-        types::SchemaVersion,
+    use crate::features::{
+        FeatureName, FeatureSpec, FeatureValueKind, names::book::SECONDARY_BEST_ASK,
     };
 
     fn sample_spec() -> FeatureSpec {
@@ -1127,7 +1148,7 @@ mod contract_tests {
     fn secondary_executable_ask_contract_is_explicit_and_non_substituting() {
         let schema = FeatureSchema::build(&FeaturesConfig::default()).expect("schema");
         let spec = schema
-            .by_name(&book::SECONDARY_BEST_ASK)
+            .by_name(&SECONDARY_BEST_ASK)
             .expect("secondary ask feature");
 
         assert_eq!(spec.compute_revision, 1);

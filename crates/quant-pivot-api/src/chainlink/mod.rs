@@ -20,10 +20,11 @@ use chrono::{DateTime, TimeZone, Utc};
 use quant_pivot_error::{QuantError, QuantResult, rpc::RpcError};
 use quant_pivot_models::{
     config::{ChainlinkDataStreamFeedConfig, ChainlinkDataStreamsSourceConfig},
-    domain::CryptoPriceReport,
+    domain::data_plane::CryptoPriceReport,
     hashing::CanonicalDigest,
     types::{ChainlinkFeedKey, ContentHash, DomainInstrumentKey, DomainSourceId, Usd},
 };
+use reqwest::{Client as ReqwestClient, header::DATE};
 use rust_decimal::Decimal;
 
 #[derive(Clone)]
@@ -37,7 +38,7 @@ pub struct ChainlinkDataStreamsSource {
     config: ChainlinkDataStreamsSourceConfig,
     sdk_config: Config,
     client: Arc<Client>,
-    clock_http: reqwest::Client,
+    clock_http: ReqwestClient,
     feeds: BTreeMap<ChainlinkFeedKey, FeedBinding>,
 }
 
@@ -73,7 +74,7 @@ impl ChainlinkDataStreamsSource {
             .collect::<Result<BTreeMap<_, _>, _>>()?;
         let client = Client::new(sdk_config.clone())
             .map_err(|error| data_streams_failure("REST client", error))?;
-        let clock_http = reqwest::Client::builder()
+        let clock_http = ReqwestClient::builder()
             .timeout(Duration::from_secs(5))
             .build()
             .map_err(|error| data_streams_failure("clock client", error))?;
@@ -227,7 +228,7 @@ impl ChainlinkDataStreamsSource {
         }
         let header = response
             .headers()
-            .get(reqwest::header::DATE)
+            .get(DATE)
             .ok_or_else(|| data_streams_failure("clock sample", "server Date header is missing"))?
             .to_str()
             .map_err(|error| data_streams_failure("clock sample", error))?;
@@ -356,8 +357,9 @@ fn data_streams_failure(operation: &str, error: impl Display) -> RpcError {
 
 #[cfg(test)]
 mod tests {
-    use super::decimal_price;
     use rust_decimal_macros::dec;
+
+    use super::decimal_price;
 
     #[test]
     fn benchmark_price_uses_frozen_feed_scale() {

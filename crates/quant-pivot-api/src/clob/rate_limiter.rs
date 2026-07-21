@@ -3,12 +3,13 @@
 //! Each CLOB endpoint has its own rate limit bucket. The limiter is lock-free
 //! (`AtomicU64` under the hood) and handles burst correctly.
 
+use std::{collections::HashMap, num::NonZeroU32, sync::Arc};
+
 use governor::{
     Quota, RateLimiter as GovLimiter,
     clock::DefaultClock,
     state::{InMemoryState, NotKeyed},
 };
-use std::{collections::HashMap, num::NonZeroU32, sync::Arc};
 
 type Limiter = GovLimiter<NotKeyed, InMemoryState, DefaultClock>;
 

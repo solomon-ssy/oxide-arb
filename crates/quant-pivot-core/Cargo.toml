@@ -14,7 +14,7 @@ quant-pivot-migration  = { workspace = true }
 quant-pivot-api        = { workspace = true }
 quant-pivot-storage    = { workspace = true }
 quant-pivot-repository = { workspace = true }
-quant-pivot-research   = { workspace = true, features = ["dataframe", "lp-solver"] }
+quant-pivot-research   = { workspace = true, default-features = false, features = ["dataframe"] }
 quant-pivot-web        = { workspace = true }
 
 # ── Async runtime ──────────────────────────────────────────────────
@@ -63,21 +63,15 @@ rand = { workspace = true }
 strum = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]
-# Disconnected `DatabaseConnection` handles for I/O-free repository wiring in
-# the runtime-config applicator propagation test.
-sea-orm = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 serde_json = { workspace = true }
-quant-pivot-test-support = { workspace = true }
 
 [features]
 # Offline optimizer (argmin) for the weighted trainer's refinement step.
 optimize = ["quant-pivot-research/optimize"]
 # Classical ML (smartcore) shadow candidates: trainer + runtime.
 ml-classical = ["quant-pivot-research/ml-classical"]
-# Portfolio LP/MILP allocator (pure-Rust microlp; required for report generation).
-lp-solver = ["quant-pivot-research/lp-solver"]
-default = ["lp-solver"]
+default = []
 
 [lints]
 workspace = true

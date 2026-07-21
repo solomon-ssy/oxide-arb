@@ -7,8 +7,7 @@ rust-version.workspace = true
 
 [dependencies]
 quant-pivot-error = { workspace = true, features = ["storage"] }
-quant-pivot-models = { workspace = true, features = ["repository"] }
-quant-pivot-sql-contract = { workspace = true }
+quant-pivot-models = { workspace = true, features = ["persistence-entities"] }
 quant-pivot-storage = { workspace = true }
 num-traits = { workspace = true }
 sea-orm = { workspace = true }
@@ -27,12 +26,7 @@ async-trait = { workspace = true }
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 rust_decimal = { workspace = true }
-rust_decimal_macros = { workspace = true }
-quant-pivot-storage = { workspace = true, features = ["test-util"] }
-quant-pivot-test-support = { workspace = true }
-testcontainers = { workspace = true }
 sea-orm = { workspace = true, features = ["mock"] }
-chrono = { workspace = true }
 
 [lints]
 workspace = true

@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use quant_pivot_api::ws::{ClobWsManager, SubscriptionSource};
 use quant_pivot_error::control::ControlError;
 use quant_pivot_models::{
-    domain::{BookSnapshot, MarketDataPort},
+    domain::{market::BookSnapshot, ports::MarketDataPort},
     types::TokenId,
 };
 

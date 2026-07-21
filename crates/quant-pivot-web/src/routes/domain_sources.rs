@@ -1,4 +1,4 @@
-//! Domain-source ingest cursor health endpoints (Phase 11.2.2).
+//! Domain-source ingest cursor health endpoints.
 //!
 //! | Method | Path | Permission | Purpose |
 //! |--------|------|------------|---------|
@@ -6,10 +6,10 @@
 
 use std::collections::HashMap;
 
-use actix_web::{http::Method, web};
+use actix_web::{http::Method, web::Data};
 use chrono::Utc;
 use quant_pivot_models::{
-    domain::DomainSourceExpectationView,
+    domain::api::DomainSourceExpectationView,
     enums::rbac::{Operation, ResourceType},
     types::{DomainInstrumentKey, DomainSourceId},
 };
@@ -35,7 +35,7 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
 /// `GET /api/research/domain-sources` — ingest checkpoint health for every
 /// `(source, instrument)` stream.
 pub async fn list(
-    state: web::Data<AppState>,
+    state: Data<AppState>,
 ) -> Result<WebResponse<Vec<DomainSourceExpectationView>>, WebError> {
     let (expectations, cursors) = tokio::try_join!(
         state.domain_source_expectations.list_all(),

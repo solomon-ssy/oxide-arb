@@ -5,6 +5,11 @@ use std::{
     hash::Hash,
 };
 
+use chrono::{DateTime, Utc};
+use rust_decimal::Decimal;
+use sea_orm::FromJsonQueryResult;
+use serde::{Deserialize, Serialize};
+
 use crate::{
     enums::{common::MarketCategory, quant::DataQualityStatus},
     types::{
@@ -12,9 +17,6 @@ use crate::{
         SchemaVersion, TrainingDatasetId, WeatherTemperatureStatistic, feature::NullReason,
     },
 };
-use rust_decimal::Decimal;
-use sea_orm::FromJsonQueryResult;
-use serde::{Deserialize, Serialize};
 
 /// Current immutable schema/methodology for score-multiplier calibration.
 pub const SCORE_MULTIPLIER_CALIBRATION_METHODOLOGY_VERSION: SchemaVersion = SchemaVersion::FIRST;
@@ -389,16 +391,17 @@ pub struct WeatherStationLeadBiasArtifactV1 {
 pub struct PublishedWeatherStationLeadBias {
     pub artifact_id: CalibrationArtifactId,
     pub content_hash: ContentHash,
-    pub fit_window_start: chrono::DateTime<chrono::Utc>,
-    pub fit_window_end: chrono::DateTime<chrono::Utc>,
+    pub fit_window_start: DateTime<Utc>,
+    pub fit_window_end: DateTime<Utc>,
     pub sample_count: i64,
-    pub published_at: chrono::DateTime<chrono::Utc>,
+    pub published_at: DateTime<Utc>,
     pub payload: WeatherStationLeadBiasArtifactV1,
 }
 
 #[cfg(test)]
 mod tests {
     use rust_decimal_macros::dec;
+    use serde_json::Value;
 
     use super::{
         DataQualityStratumFit, HorizonCalibrationBucket, HorizonStratumFit,
@@ -512,7 +515,7 @@ mod tests {
         value
             .as_object_mut()
             .expect("report object")
-            .insert("future_magic".to_owned(), serde_json::Value::Bool(true));
+            .insert("future_magic".to_owned(), Value::Bool(true));
         assert!(serde_json::from_value::<ScoreMultiplierCalibrationReport>(value).is_err());
     }
 }

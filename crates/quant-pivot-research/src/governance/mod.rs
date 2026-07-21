@@ -1,5 +1,5 @@
 //! Research governance plane: the **pure** computation behind the offline
-//! governance closure (3.7).
+//! governance closure.
 //!
 //! Publish / rollback / dataset-promotion *orchestration* (which needs the
 //! repository + audit layers) lives in `quant-pivot-core`; this module owns only

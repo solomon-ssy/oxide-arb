@@ -2,7 +2,11 @@
 
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    domain::{BacktestReportInfo, BacktestReportListQuery, NewBacktestReport, Paginated},
+    domain::{
+        api::BacktestReportListQuery,
+        pagination::Paginated,
+        quant::{BacktestReportInfo, NewBacktestReport},
+    },
     types::{BacktestReportId, ModelVersionId},
 };
 

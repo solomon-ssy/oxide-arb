@@ -1,8 +1,8 @@
-//! Domain-source ingest cursor repository trait (Phase 11.2.2).
+//! Domain-source ingest cursor repository trait.
 
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    domain::{DomainSourceCursorInfo, UpsertDomainSourceCursor},
+    domain::data_plane::{DomainSourceCursorInfo, UpsertDomainSourceCursor},
     types::{DomainInstrumentKey, DomainSourceId},
 };
 

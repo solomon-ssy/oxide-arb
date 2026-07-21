@@ -12,11 +12,14 @@ use std::{sync::Arc, time::Duration};
 use chrono::{DateTime, Duration as ChronoDuration, TimeZone, Utc};
 use quant_pivot_error::research::ResearchError;
 use quant_pivot_models::{
-    domain::market::{
-        book::{BookLevel, IMBALANCE_DEPTH_LEVELS, top_n_share_depth},
-        registry::MarketRegistryInfo,
+    domain::{
+        data_plane::TradeTapePrint,
+        market::{
+            book::{BookLevel, IMBALANCE_DEPTH_LEVELS, top_n_share_depth},
+            fee::MarketFeeSchedule,
+            registry::MarketRegistryInfo,
+        },
     },
-    domain::{TradeTapePrint, fee::MarketFeeSchedule},
     enums::market::MarketStatus,
     types::{Bps, MarketId, MicroUsd, Price, TokenId, Usd},
 };
@@ -203,7 +206,7 @@ impl ResolvedBook {
     /// side), not full-book USD notional. Full-book USD weighting is
     /// structurally ask-biased (ask prices exceed bid prices) and dominated by
     /// deep resting liquidity, which strips the signal of predictive meaning.
-    /// Kept identical to the ingest-side `imbalance()` so live, persisted, and
+    /// Kept identical to the ingest-side `imbalance` so live, persisted, and
     /// materialized values share one definition.
     #[must_use]
     pub fn depth_imbalance(&self) -> Option<Decimal> {

@@ -5,7 +5,7 @@ mod menu;
 mod role;
 mod user;
 
-pub use assignment::*;
-pub use menu::*;
-pub use role::*;
-pub use user::*;
+pub use assignment::{AssignMenus, AssignPermissions, AssignRoles, Permission};
+pub use menu::{MenuInfo, MenuPatch, MenuTreeNode, NewMenu};
+pub use role::{NewRole, RoleInfo, RolePatch};
+pub use user::{ChangeUserPassword, NewUser, UserInfo, UserPatch};

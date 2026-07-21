@@ -17,11 +17,11 @@
 
 use std::{collections::HashMap, future::poll_fn, hash::Hash, time::Duration};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use quant_pivot_error::QuantResult;
 use tokio_util::{
     sync::CancellationToken,
-    time::{DelayQueue, delay_queue},
+    time::{DelayQueue, delay_queue::Key},
 };
 
 /// How far ahead deadlines are pre-loaded into the queue, bounding its size.
@@ -50,7 +50,7 @@ pub async fn run<K, L, LFut, F, FFut>(
     FFut: Future<Output = QuantResult<u32>>,
 {
     let mut queue: DelayQueue<K> = DelayQueue::new();
-    let mut scheduled: HashMap<K, delay_queue::Key> = HashMap::new();
+    let mut scheduled: HashMap<K, Key> = HashMap::new();
 
     loop {
         reconcile_once(name, &load, &fire, &mut queue, &mut scheduled).await;
@@ -80,7 +80,7 @@ async fn reconcile_once<K, L, LFut, F, FFut>(
     load: &L,
     fire: &F,
     queue: &mut DelayQueue<K>,
-    scheduled: &mut HashMap<K, delay_queue::Key>,
+    scheduled: &mut HashMap<K, Key>,
 ) where
     K: Eq + Hash + Clone + Send,
     L: Fn(DateTime<Utc>) -> LFut,
@@ -94,8 +94,8 @@ async fn reconcile_once<K, L, LFut, F, FFut>(
 
     let now = Utc::now();
     let horizon = now
-        + chrono::Duration::from_std(LOOKAHEAD_HORIZON)
-            .unwrap_or_else(|_| chrono::Duration::seconds(900));
+        + ChronoDuration::from_std(LOOKAHEAD_HORIZON)
+            .unwrap_or_else(|_| ChronoDuration::seconds(900));
     match load(horizon).await {
         Ok(items) => {
             for (key, at) in items {

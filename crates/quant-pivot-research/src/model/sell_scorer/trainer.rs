@@ -1,4 +1,4 @@
-//! [`SellScorerTrainer`]: fits a Sell-side hold-vs-exit scorer (Phase 06.1).
+//! [`SellScorerTrainer`]: fits a Sell-side hold-vs-exit scorer.
 //!
 //! Reuses the deterministic LTR simplex fit shared with the Buy-side
 //! weighted trainer.
@@ -41,7 +41,7 @@ const GAIN_CANDIDATES: [f64; 9] = [0.5, 1.0, 2.0, 3.0, 4.0, 6.0, 8.0, 10.0, 12.0
 
 /// Request to train a Sell-side hold-vs-exit scorer from frozen examples.
 ///
-/// Mirrors [`TrainModelRequest`] but carries the Sell governance (`output_spec`
+/// Mirrors `TrainModelRequest` but carries the Sell governance (`output_spec`
 /// + `label_schema_hash`) instead of the Buy multipliers / return model.
 #[derive(Debug, Clone)]
 pub struct TrainSellScorerRequest {
@@ -290,9 +290,10 @@ fn calibrate_logistic_gain(pairs: &[(Decimal, Decimal)]) -> QuantResult<Decimal>
 
 #[cfg(test)]
 mod tests {
-    use super::{GAIN_CANDIDATES, calibrate_alpha_scale, calibrate_logistic_gain};
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
+
+    use super::{GAIN_CANDIDATES, calibrate_alpha_scale, calibrate_logistic_gain};
 
     #[test]
     fn alpha_scale_is_the_origin_ols_slope() {

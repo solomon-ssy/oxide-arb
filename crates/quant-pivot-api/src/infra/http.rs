@@ -4,11 +4,14 @@ use std::time::{Duration, SystemTime};
 
 use futures_util::StreamExt;
 use quant_pivot_error::api::ApiError;
-use reqwest::header::{CONTENT_TYPE, HeaderMap, RETRY_AFTER};
+use reqwest::{
+    Client, Response, StatusCode,
+    header::{CONTENT_TYPE, HeaderMap, RETRY_AFTER},
+};
 
 use super::retry::{self, RetryPolicy};
 
-async fn response_error(response: reqwest::Response, url: String) -> ApiError {
+async fn response_error(response: Response, url: String) -> ApiError {
     let status = response.status().as_u16();
     let retry_after = retry_after_ms(response.headers());
     let body = response.text().await.unwrap_or_default();
@@ -52,7 +55,7 @@ pub(crate) fn retry_after_ms(headers: &HeaderMap) -> Option<u64> {
 
 /// Perform one GET and return the response body text on success.
 pub async fn get_text_with_retry(
-    http: &reqwest::Client,
+    http: &Client,
     retry_policy: &RetryPolicy,
     url: &str,
 ) -> Result<String, ApiError> {
@@ -90,7 +93,7 @@ pub async fn get_text_with_retry(
 /// Perform one GET and return response bytes. `404` is represented as `None`
 /// for immutable public-data partitions that may not have been published yet.
 pub async fn get_optional_bytes_with_retry(
-    http: &reqwest::Client,
+    http: &Client,
     retry_policy: &RetryPolicy,
     url: &str,
 ) -> Result<Option<Vec<u8>>, ApiError> {
@@ -110,7 +113,7 @@ pub async fn get_optional_bytes_with_retry(
                     retryable: true,
                 })?;
             let status = response.status();
-            if status == reqwest::StatusCode::NOT_FOUND {
+            if status == StatusCode::NOT_FOUND {
                 return Ok(None);
             }
             if status.is_success() {
@@ -135,7 +138,7 @@ pub async fn get_optional_bytes_with_retry(
 /// Perform one retrying GET while streaming into a caller-bounded byte buffer.
 /// `404` is represented as `None` for unpublished immutable partitions.
 pub async fn get_optional_bounded_bytes_with_retry(
-    http: &reqwest::Client,
+    http: &Client,
     retry_policy: &RetryPolicy,
     url: &str,
     context: &'static str,
@@ -157,7 +160,7 @@ pub async fn get_optional_bounded_bytes_with_retry(
                     retryable: true,
                 })?;
             let status = response.status();
-            if status == reqwest::StatusCode::NOT_FOUND {
+            if status == StatusCode::NOT_FOUND {
                 return Ok(None);
             }
             if !status.is_success() {
@@ -225,14 +228,18 @@ pub async fn get_optional_bounded_bytes_with_retry(
 
 #[cfg(test)]
 mod tests {
-    use super::{get_optional_bounded_bytes_with_retry, response_error, retry_after_ms};
-    use crate::infra::retry::RetryPolicy;
     use quant_pivot_error::api::ApiError;
-    use reqwest::header::{HeaderMap, HeaderValue, RETRY_AFTER};
+    use reqwest::{
+        Client,
+        header::{HeaderMap, HeaderValue, RETRY_AFTER},
+    };
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
         matchers::{method, path},
     };
+
+    use super::{get_optional_bounded_bytes_with_retry, response_error, retry_after_ms};
+    use crate::infra::retry::RetryPolicy;
 
     #[test]
     fn retry_after_seconds_are_converted_to_milliseconds() {
@@ -261,11 +268,7 @@ mod tests {
             .mount(&server)
             .await;
         let url = format!("{}/limited", server.uri());
-        let response = reqwest::Client::new()
-            .get(&url)
-            .send()
-            .await
-            .expect("response");
+        let response = Client::new().get(&url).send().await.expect("response");
         let error = response_error(response, url.clone()).await;
         assert!(matches!(
             error,
@@ -289,7 +292,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![0_u8; 8]))
             .mount(&server)
             .await;
-        let http = reqwest::Client::new();
+        let http = Client::new();
         let policy = RetryPolicy::gamma_default();
         let missing = get_optional_bounded_bytes_with_retry(
             &http,

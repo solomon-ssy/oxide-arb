@@ -4,7 +4,9 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{
-        NewResearchJob, Paginated, ResearchJobInfo, ResearchJobListQuery, ResearchJobResultRef,
+        api::ResearchJobListQuery,
+        pagination::Paginated,
+        quant::{NewResearchJob, ResearchJobInfo, ResearchJobResultRef},
     },
     enums::quant::{ResearchJobKind, ResearchJobStatus},
     types::{DatasetCoverage, ResearchJobError, ResearchJobId, ResearchJobProgress, WorkerId},

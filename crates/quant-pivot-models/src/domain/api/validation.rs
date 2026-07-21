@@ -8,7 +8,7 @@
 use chrono::{DateTime, Utc};
 use validator::ValidationError;
 
-use crate::domain::{TimeWindow, WindowBoundsError};
+use crate::domain::query::{TimeWindow, WindowBoundsError};
 
 /// Reject half-open windows where `end <= start` (empty or inverted span).
 pub fn validate_half_open_window(

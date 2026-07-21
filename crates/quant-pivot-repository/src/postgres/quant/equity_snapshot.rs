@@ -1,20 +1,23 @@
 //! Postgres-backed strategy-capital equity snapshot repository.
 
-use crate::{postgres::query::paginate_mapped, traits::EquitySnapshotRepository};
 use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{
-        EquitySnapshotInfo, EquitySnapshotQuery, NewEquitySnapshot, PageWindow, Paginated,
-        capital_drawdown, hwm_merge,
+        pagination::{PageWindow, Paginated},
+        quant::{
+            EquitySnapshotInfo, EquitySnapshotQuery, NewEquitySnapshot, capital_drawdown, hwm_merge,
+        },
     },
-    entities::quant_equity_snapshot,
+    entities::quant_equity_snapshot::{Column, Entity},
     types::EquitySnapshotId,
 };
 use sea_orm::{
     ColumnTrait, Condition, ConnectionTrait, DatabaseConnection, EntityTrait, IntoActiveModel,
     QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
 };
+
+use crate::{postgres::query::paginate_mapped, traits::EquitySnapshotRepository};
 
 /// Postgres-backed strategy-capital equity history repository.
 pub struct PgEquitySnapshotRepository {
@@ -43,7 +46,7 @@ impl EquitySnapshotRepository for PgEquitySnapshotRepository {
         &self,
         id: &EquitySnapshotId,
     ) -> Result<Option<EquitySnapshotInfo>, StorageError> {
-        quant_equity_snapshot::Entity::find_by_id(id.clone())
+        Entity::find_by_id(id.clone())
             .one(&self.db)
             .await
             .map_err(StorageError::from)
@@ -51,9 +54,9 @@ impl EquitySnapshotRepository for PgEquitySnapshotRepository {
     }
 
     async fn latest(&self) -> Result<Option<EquitySnapshotInfo>, StorageError> {
-        quant_equity_snapshot::Entity::find()
-            .order_by_desc(quant_equity_snapshot::Column::AsOf)
-            .order_by_desc(quant_equity_snapshot::Column::CreatedAt)
+        Entity::find()
+            .order_by_desc(Column::AsOf)
+            .order_by_desc(Column::CreatedAt)
             .one(&self.db)
             .await
             .map_err(StorageError::from)
@@ -64,10 +67,10 @@ impl EquitySnapshotRepository for PgEquitySnapshotRepository {
         &self,
         as_of: DateTime<Utc>,
     ) -> Result<Option<EquitySnapshotInfo>, StorageError> {
-        quant_equity_snapshot::Entity::find()
-            .filter(quant_equity_snapshot::Column::AsOf.lte(as_of))
-            .order_by_desc(quant_equity_snapshot::Column::AsOf)
-            .order_by_desc(quant_equity_snapshot::Column::CreatedAt)
+        Entity::find()
+            .filter(Column::AsOf.lte(as_of))
+            .order_by_desc(Column::AsOf)
+            .order_by_desc(Column::CreatedAt)
             .one(&self.db)
             .await
             .map_err(StorageError::from)
@@ -79,10 +82,10 @@ impl EquitySnapshotRepository for PgEquitySnapshotRepository {
         query: EquitySnapshotQuery,
     ) -> Result<Paginated<EquitySnapshotInfo>, StorageError> {
         paginate_mapped(
-            quant_equity_snapshot::Entity::find()
+            Entity::find()
                 .filter(page_condition(&query))
-                .order_by_desc(quant_equity_snapshot::Column::AsOf)
-                .order_by_desc(quant_equity_snapshot::Column::CreatedAt),
+                .order_by_desc(Column::AsOf)
+                .order_by_desc(Column::CreatedAt),
             &self.db,
             PageWindow::from_query(&query),
             Into::into,
@@ -98,10 +101,10 @@ pub(super) async fn insert_equity_snapshot_monotonic<C>(
 where
     C: ConnectionTrait,
 {
-    let previous = quant_equity_snapshot::Entity::find()
-        .filter(quant_equity_snapshot::Column::AsOf.lte(snapshot.as_of))
-        .order_by_desc(quant_equity_snapshot::Column::AsOf)
-        .order_by_desc(quant_equity_snapshot::Column::CreatedAt)
+    let previous = Entity::find()
+        .filter(Column::AsOf.lte(snapshot.as_of))
+        .order_by_desc(Column::AsOf)
+        .order_by_desc(Column::CreatedAt)
         .lock_exclusive()
         .one(db)
         .await
@@ -115,7 +118,7 @@ where
     snapshot.drawdown_pct =
         capital_drawdown(snapshot.capital_base_usd, snapshot.high_water_mark_usd);
 
-    quant_equity_snapshot::Entity::insert(snapshot.into_active_model())
+    Entity::insert(snapshot.into_active_model())
         .exec_with_returning(db)
         .await
         .map_err(StorageError::from)
@@ -124,14 +127,6 @@ where
 
 fn page_condition(query: &EquitySnapshotQuery) -> Condition {
     Condition::all()
-        .add_option(
-            query
-                .from
-                .map(|from| quant_equity_snapshot::Column::AsOf.gte(from)),
-        )
-        .add_option(
-            query
-                .to
-                .map(|to| quant_equity_snapshot::Column::AsOf.lt(to)),
-        )
+        .add_option(query.from.map(|from| Column::AsOf.gte(from)))
+        .add_option(query.to.map(|to| Column::AsOf.lt(to)))
 }

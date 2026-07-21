@@ -1,0 +1,3 @@
+# Deleted deterministic Ed25519 JWT test fixture. The exact historical finding is
+# ignored; the path and rule remain protected for every other commit.
+6ab2dfb9054ba8a978209299daa3ab0e3279ffbc:crates/quant-pivot-web/tests/fixtures/jwt/test-ed25519-private.pem:private-key:1

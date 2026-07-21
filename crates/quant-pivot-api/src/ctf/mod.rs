@@ -1,6 +1,7 @@
 //! Narrow CTF client for standard binary settlement redemption.
 
-use crate::keystore::OrderSigner;
+use std::{fmt::Display, str::FromStr, time::Duration};
+
 use alloy::{
     network::{Ethereum, EthereumWallet},
     primitives::{Address, B256, TxHash, U256},
@@ -16,8 +17,9 @@ use quant_pivot_models::{
     constants::{CTF_ADDRESS, POLYGON_CHAIN_ID, PUSD_ADDRESS},
     types::{MarketId, TokenId},
 };
-use reqwest::Url;
-use std::{fmt::Display, str::FromStr, time::Duration};
+use reqwest::{Client, Url};
+
+use crate::keystore::OrderSigner;
 
 const STANDARD_BINARY_INDEX_SETS: [u64; 2] = [1, 2];
 
@@ -152,7 +154,7 @@ impl CtfClient {
         // Bind the RPC request timeout: reqwest defaults to *no* timeout, which
         // would let a money-moving redeem/oracle call hang indefinitely on a
         // stalled provider. `onchain.rpc_timeout_ms` is the hard per-call bound.
-        let http_client = reqwest::Client::builder()
+        let http_client = Client::builder()
             .timeout(Duration::from_millis(config.onchain.rpc_timeout_ms))
             .build()
             .map_err(|e| {

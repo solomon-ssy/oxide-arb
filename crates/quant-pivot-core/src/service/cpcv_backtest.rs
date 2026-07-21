@@ -1,6 +1,6 @@
-//! Phase 11.5 Combinatorial Purged Cross-Validation + governed trial-grid
-//! orchestration for the `WeightedFactor` and Sell (`HoldVsExitWeighted`,
-//! Phase 11.5.1) model families.
+//! Combinatorial Purged Cross-Validation + governed trial-grid
+//! orchestration for the `WeightedFactor` and Sell (`HoldVsExitWeighted`)
+//! model families.
 //!
 //! Mirrors the crate boundary the single-path [`BacktestService`](crate::service::backtest::BacktestService)
 //! and [`ModelTrainerService`](crate::service::model_training::ModelTrainerService)
@@ -18,32 +18,30 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
-#[cfg(feature = "ml-classical")]
-use quant_pivot_research::model::{
-    ClassicalAdapterRegistry, ClassicalKind, ClassicalModelArtifact, ClassicalParams,
-    ClassicalRuntime,
-};
-use rayon::prelude::*;
-use tokio::{runtime::Handle, task};
-use tokio_util::sync::CancellationToken;
-
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError, storage::StorageError};
-#[cfg(feature = "ml-classical")]
-use quant_pivot_models::types::{ArtifactUri, ModelArtifactId};
 use quant_pivot_models::{
-    domain::{JobProgressSink, ResearchJobProgress, TrainingDatasetInfo},
-    enums::{common::MarketCategory, quant::TrainingDatasetStatus},
+    domain::quant::{JobProgressSink, TrainingDatasetInfo},
+    enums::{common::MarketCategory, model::ModelFamily, quant::TrainingDatasetStatus},
     runtime_config::{FactorCrossSectionConfig, PortfolioConfig, sections::FactorsConfig},
     types::{
         BacktestPathSetId, BacktestReportId, Bps, ContentHash, DecisionPolicySnapshotId,
-        ModelInputContract, ModelRunId, ModelVersionId, PositionId, TrainingDatasetId,
-        TrainingSampleSource,
+        ModelInputContract, ModelRunId, ModelVersionId, PositionId, ResearchJobProgress,
+        TrainingDatasetId, TrainingSampleSource,
         backtest::{BacktestPath, SharpeDistribution},
         model_training::TrainingObjectiveSpec,
         stable_name::{FactorName, FeatureName},
     },
 };
+#[cfg(feature = "ml-classical")]
+use quant_pivot_models::{
+    enums::model::ClassicalKind,
+    types::{ArtifactUri, ModelArtifactId},
+};
 use quant_pivot_repository::traits::TrainingDatasetRepository;
+#[cfg(feature = "ml-classical")]
+use quant_pivot_research::model::{
+    ClassicalAdapterRegistry, ClassicalModelArtifact, ClassicalParams, ClassicalRuntime,
+};
 use quant_pivot_research::{
     artifact::ArtifactStore,
     backtest::{
@@ -52,15 +50,15 @@ use quant_pivot_research::{
         PortfolioCaps, PortfolioReplayBacktester, SellNullBaseline, active_observation_count,
         calendarize_lot_returns, mean_calendar_return, replay_lot_null_baseline, sharpe_ratio,
     },
-    factors::names as factor_names,
+    factors::names::{POSITION_PEAK_DRAWDOWN, POSITION_TIME_IN_TRADE, POSITION_UNREALIZED_PNL},
     features::FeatureSchema,
     hashing::ResearchHasher,
     model::{
-        FactorWeight, LabelSelector, ModelArtifact, ModelArtifactHeader, ModelFamily,
-        ModelRuntimeInput, ModelRuntimeOutput, ModelTrainer, QuantModelRuntime, ReturnModelSpec,
-        ScoreMultiplierSpec, SellScorerOutputSpec, SellScorerRuntime, SellScorerTrainer,
-        SellSignalPolicy, SubstitutionConfidenceRules, TrainModelRequest, TrainSellScorerRequest,
-        ValidationSpec, WeightedFactorRuntime, WeightedFactorTrainer, WeightedSellScorerRuntime,
+        FactorWeight, LabelSelector, ModelArtifact, ModelArtifactHeader, ModelRuntimeInput,
+        ModelRuntimeOutput, ModelTrainer, QuantModelRuntime, ReturnModelSpec, ScoreMultiplierSpec,
+        SellScorerOutputSpec, SellScorerRuntime, SellScorerTrainer, SellSignalPolicy,
+        SubstitutionConfidenceRules, TrainModelRequest, TrainSellScorerRequest, ValidationSpec,
+        WeightedFactorRuntime, WeightedFactorTrainer, WeightedSellScorerRuntime,
     },
     precision::RESEARCH_DECIMAL_SCALE,
     selection::ModelFeatureRequirements,
@@ -74,7 +72,10 @@ use quant_pivot_research::{
         min_track_record_length, probability_of_backtest_overfitting,
     },
 };
+use rayon::prelude::*;
 use rust_decimal::{Decimal, prelude::ToPrimitive};
+use tokio::{runtime::Handle, task};
+use tokio_util::sync::CancellationToken;
 
 #[cfg(feature = "ml-classical")]
 use crate::service::model_training;
@@ -90,8 +91,8 @@ use crate::{
 
 /// Coarse CPCV job progress budget (units of work for `ResearchJobProgress`).
 ///
-/// Phases are sequential; each reports `with_total(..., TOTAL)` so the UI can
-/// show a determinate percentage plus a named phase.
+/// Progress stages are sequential; each reports `with_total(..., TOTAL)` so the
+/// UI can show a determinate percentage plus a named stage.
 struct CpcvProgress;
 
 impl CpcvProgress {
@@ -118,7 +119,7 @@ pub struct CpcvBacktestServiceDeps {
     pub artifact_store: Arc<dyn ArtifactStore>,
 }
 
-/// Governed methodology configuration (`research.validation.*`, Phase 11.5 §6).
+/// Governed methodology configuration (`research.validation.*`).
 #[derive(Debug, Clone)]
 pub struct CpcvBacktestConfig {
     /// Seed factor weights (`factors.factor_weights`), shared with production training.
@@ -138,7 +139,7 @@ pub struct CpcvBacktestConfig {
     /// Frozen aggressive-entry slippage cap shared with report composition.
     pub entry_max_slippage_bps: Bps,
     /// Governed opportunistic-exit thresholds Sell-side lot replay fires on
-    /// (Phase 11.5.1) — the exact same thresholds
+    /// — the exact same thresholds
     /// `OpportunisticSellSignalEvaluator` uses live, frozen from
     /// `execution.exit_monitor.opportunistic_sell`, so the CPCV-replayed
     /// decision rule can never drift from production.
@@ -154,7 +155,7 @@ pub struct CpcvBacktestInput {
     pub label: LabelSelector,
     /// The model family under validation. `WeightedFactor` trains via
     /// [`WeightedFactorTrainer`]; `HoldVsExitWeighted` trains via
-    /// [`SellScorerTrainer`] over lot-grouped timelines (Phase 11.5.1) —
+    /// [`SellScorerTrainer`] over lot-grouped timelines —
     /// sharing every CPCV/trial-grid/DSR/PBO algorithm with `WeightedFactor`
     /// through [`FoldModelSource`].
     pub model_family: ModelFamily,
@@ -171,7 +172,7 @@ pub struct CpcvBacktestInput {
     pub coord_search_effective_n: u32,
 }
 
-/// The full Phase 11.5 validation outcome: CPCV path distribution, the
+/// The full validation outcome: CPCV path distribution, the
 /// trial-grid-corrected Deflated Sharpe Ratio, PBO, and `MinTRL`.
 #[derive(Debug, Clone)]
 pub struct CpcvBacktestOutcome {
@@ -222,7 +223,7 @@ impl CpcvBacktestService {
         })
     }
 
-    /// Run CPCV + the governed trial grid, producing the full Phase 11.5
+    /// Run CPCV + the governed trial grid, producing the full
     /// validation outcome. Materializes training examples and backtest ticks
     /// **once** over the dataset's frozen window (real `ClickHouse` I/O),
     /// then runs every fold/trial as pure, `spawn_blocking`-offloaded,
@@ -303,7 +304,7 @@ impl CpcvBacktestService {
     /// Materialize training examples + backtest ticks once, and assemble the
     /// `Arc`-shared templates every CPCV fold and trial trains/evaluates
     /// against. Dispatches on `input.model_family` to build either a
-    /// `WeightedFactor` or a Sell (Phase 11.5.1) [`FoldTemplate`] — the
+    /// `WeightedFactor` or a Sell [`FoldTemplate`] — the
     /// **only** family branch point in this service.
     async fn prepare_templates(
         &self,
@@ -563,8 +564,8 @@ impl CpcvBacktestService {
         }))
     }
 
-    /// Build the Sell-side (`HoldVsExitWeighted`, Phase 11.5.1) fold + replay
-    /// templates: lot-grouped timeline (§3.2), lot-decision sequences shared
+    /// Build the Sell-side (`HoldVsExitWeighted`) fold and replay
+    /// templates: lot-grouped timeline, lot-decision sequences shared
     /// by training and replay, no ticks (Sell replay never touches the
     /// cross-sectional allocator).
     fn prepare_sell_templates(
@@ -936,7 +937,7 @@ fn selected_label_matured_at(
 
 /// Build one [`TimelineGroup`] per lot (`lot_context.position_id`), grouped
 /// so purge/embargo can never split one lot's decision points across folds
-/// (Phase 11.5.1 §3.2's core invariant). `as_of` is the lot's earliest
+/// (the core same-lot isolation invariant). `as_of` is the lot's earliest
 /// decision instant; `label_horizon_end` is the max `matured_at` across the
 /// lot's rows carrying the selected label (uniformly the lot's `closed_at`
 /// per [`quant_pivot_research::training::HoldVsExitProceedsLabeler`], taking
@@ -1067,9 +1068,9 @@ fn sell_seed_weights(examples: &[TrainingExample]) -> QuantResult<Vec<FactorWeig
         }
     }
     for pseudo in [
-        factor_names::POSITION_UNREALIZED_PNL,
-        factor_names::POSITION_TIME_IN_TRADE,
-        factor_names::POSITION_PEAK_DRAWDOWN,
+        POSITION_UNREALIZED_PNL,
+        POSITION_TIME_IN_TRADE,
+        POSITION_PEAK_DRAWDOWN,
     ] {
         names.insert(pseudo.as_str().to_owned());
     }
@@ -1096,7 +1097,7 @@ fn sell_seed_weights(examples: &[TrainingExample]) -> QuantResult<Vec<FactorWeig
 /// Everything a [`FoldModelSource`] needs to train a `WeightedFactor` fold.
 /// `handle` lets [`WeightedFactorFoldSource::train_fold`] block on the async
 /// trainer from inside a rayon worker thread (rayon threads carry no tokio
-/// runtime context, so `Handle::current()` would panic there — the handle
+/// runtime context, so `Handle::current` would panic there — the handle
 /// must be captured once, from the original async caller, and threaded
 /// through explicitly).
 struct FoldTrainTemplate {
@@ -1118,7 +1119,7 @@ struct FoldTrainTemplate {
 }
 
 /// Everything a Sell-side [`FoldModelSource`] needs to train a lot-grouped
-/// fold (Phase 11.5.1). `sequences` is index-aligned with `groups` and is the
+/// fold. `sequences` is index-aligned with `groups` and is the
 /// **single** materialized copy of every lot's decisions — shared with the
 /// [`SellReplayTemplate`] built alongside it, never duplicated.
 struct SellFoldTemplate {
@@ -1184,7 +1185,7 @@ impl FoldTemplate {
             }
             Self::Sell(template) => {
                 // Sell reuses the WeightedFactor trial-grid dimension
-                // verbatim (§0/§3.4): `SellScorerTrainer::train_sell_scorer`
+                // verbatim: `SellScorerTrainer::train_sell_scorer`
                 // consumes the exact same `TrainingObjectiveSpec` type
                 // `fit_simplex_weights` shares with the Buy-side trainer, so
                 // perturbing it via `TrialGridSpec::WeightedFactor` is not a
@@ -1327,8 +1328,8 @@ impl FoldModelSource for WeightedFactorFoldSource<'_> {
     }
 }
 
-/// [`FoldModelSource`] for the Sell-side `HoldVsExitWeighted` family
-/// (Phase 11.5.1): filters `template.sequences` down to `filter`'s lots, then
+/// [`FoldModelSource`] for the Sell-side `HoldVsExitWeighted` family: filters
+/// `template.sequences` down to `filter`'s lots, then
 /// trains via the exact same [`SellScorerTrainer`] production training uses.
 struct SellFoldSource<'a> {
     template: &'a SellFoldTemplate,
@@ -1382,8 +1383,8 @@ impl FoldModelSource for SellFoldSource<'_> {
     }
 }
 
-/// Everything a [`ClassicalFoldSource`] needs to train a classical-ML fold
-/// (Phase 11.5 §3.6's second-tier family). Classical training
+/// Everything a [`ClassicalFoldSource`] needs to train a classical-ML fold.
+/// Classical training
 /// ([`ClassicalAdapterRegistry::adapter_for`]) is fully synchronous CPU work
 /// (`smartcore`, no async I/O), so unlike [`FoldTrainTemplate`] this needs no
 /// [`Handle`] to cross the rayon-thread boundary.
@@ -1405,8 +1406,8 @@ struct ClassicalFoldTemplate {
 /// examples down to `filter`'s groups' `as_of`s, builds the governed
 /// [`quant_pivot_research::training::TrainingMatrix`], and fits via the exact
 /// same [`quant_pivot_research::model::ClassicalAdapterRegistry`] production
-/// training uses — with `params_override` (Phase 11.5 §3.5's classical trial
-/// grid) in place of the governed production defaults when set.
+/// training uses — with `params_override` from the governed classical trial
+/// grid in place of the production defaults when set.
 #[cfg(feature = "ml-classical")]
 struct ClassicalFoldSource<'a> {
     template: &'a ClassicalFoldTemplate,
@@ -1605,8 +1606,8 @@ fn evaluate_portfolio_groups(
     Ok(evaluations)
 }
 
-/// Scores the model over `filter`'s lots via [`LotReplayBacktester`]
-/// (Phase 11.5.1 §3.3), then derives one [`GroupEvaluation`] per lot from the
+/// Scores the model over `filter`'s lots via [`LotReplayBacktester`], then
+/// derives one [`GroupEvaluation`] per lot from the
 /// resulting outcomes. Lot-level `return_value` stays the on-path residual-shares
 /// alpha; activity-only collapse for Sharpe/DSR happens after φ-path
 /// reconstruction ([`calendarize_sell_path_set`]).
@@ -1976,7 +1977,7 @@ fn median_decimal(values: &[Decimal]) -> QuantResult<Decimal> {
 
 /// The CPCV path whose Sharpe is the distribution's median — the
 /// "representative path" DSR's `SR_hat`/`T`/skew/kurtosis are computed from
-/// (Phase 11.5 plan §3.4). `None` for an empty path set (never constructed by
+/// this path. `None` for an empty path set (never constructed by
 /// [`DefaultCombinatorialPurgedBacktester`], but handled defensively).
 fn representative_path(path_set: &BacktestPathSet) -> Option<&BacktestPath> {
     let median = path_set.sharpe_distribution.median;
@@ -2057,22 +2058,19 @@ fn min_trl_for_path(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        FoldReplayEngineAdapter, FoldTemplate, LotDecisionSequence, ReplayTemplate,
-        SellFoldTemplate, SellReplayTemplate, TimelineGroup, build_lot_timeline_groups,
-        calendarize_sell_path_set, selected_label_matured_at, sell_seed_weights,
-        validate_sell_examples,
-    };
+    use std::{collections::BTreeMap, sync::Arc};
+
     use chrono::{DateTime, TimeZone, Utc};
     use quant_pivot_models::{
-        domain::DecisionClock,
+        domain::data_plane::DecisionClock,
         enums::{
             common::MarketCategory,
             factor::FactorFamily,
+            model::ModelFamily,
             quant::{DataQualityStatus, FactorDirection},
         },
         types::{
-            BacktestPathSetId, ContentHash, EventId, FactorDefinitionId, MarketId,
+            BacktestPathSetId, ContentHash, DatasetCoverage, EventId, FactorDefinitionId, MarketId,
             ModelInputContract, ModelVersionId, OrderIntentId, PositionId, Price, Probability,
             SchemaVersion, Shares, TokenId, TrainingExampleId, TrainingSampleSource,
             backtest::{BacktestPath, SharpeDistribution},
@@ -2082,30 +2080,33 @@ mod tests {
         },
     };
     use quant_pivot_research::{
-        factors::{FactorValue, NormalizedFactor, names},
+        factors::{FactorValue, NormalizedFactor, names, names::MOMENTUM_ROC},
         features::FeatureVector,
         gates::{
             CpcvPathSetGateInput, DefaultModelQualityGate, ModelQualityGate, QualityGateInput,
             QualityGateThresholds, SellQualityGateThresholds, ValidationGateThresholds,
         },
-        model::{
-            LabelSelector, ModelArtifactHeader, ModelFamily, PositionStateFeatures,
-            SellSignalPolicy,
-        },
+        model::{LabelSelector, ModelArtifactHeader, PositionStateFeatures, SellSignalPolicy},
         selection::SelectedMarket,
         training::{
-            DatasetCoverage, HOLD_VS_EXIT_ALPHA_BPS, LabelName, LeakageFindings,
-            LotTrainingContext, TrainingExample, TrainingLabel,
+            HOLD_VS_EXIT_ALPHA_BPS, LabelName, LeakageFindings, LotTrainingContext,
+            TrainingExample, TrainingLabel,
         },
         validation::{
             BacktestPathSet, CombinatorialPurgedBacktester, CpcvConfig, CpcvRequest,
             DefaultCombinatorialPurgedBacktester, PurgeConfig,
         },
     };
-    use quant_pivot_test_support::execution_pg_seed::fixture_profile_ref;
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
-    use std::{collections::BTreeMap, sync::Arc};
+
+    use super::{
+        FoldReplayEngineAdapter, FoldTemplate, LotDecisionSequence, ReplayTemplate,
+        SellFoldTemplate, SellReplayTemplate, TimelineGroup, build_lot_timeline_groups,
+        calendarize_sell_path_set, selected_label_matured_at, sell_seed_weights,
+        validate_sell_examples,
+    };
+    use crate::test_fixtures::execution_pg_seed::fixture_profile_ref;
 
     fn ts(secs: i64) -> DateTime<Utc> {
         Utc.timestamp_opt(1_700_000_000 + secs, 0).unwrap()
@@ -2178,7 +2179,7 @@ mod tests {
         }
     }
 
-    /// The core Phase 11.5.1 invariant: every decision point belonging to one
+    /// The core invariant: every decision point belonging to one
     /// lot (`position_id`) must land in exactly one [`TimelineGroup`] — never
     /// split across groups, or purge/embargo could put one lot's early
     /// decisions in train and its later decisions in test (same-lot leakage).
@@ -2376,10 +2377,10 @@ mod tests {
         ContentHash::parse(format!("blake3:{hex}")).expect("hash")
     }
 
-    fn market_factor(score: rust_decimal::Decimal) -> FactorValue {
+    fn market_factor(score: Decimal) -> FactorValue {
         FactorValue {
             definition_id: FactorDefinitionId::from_v7(),
-            name: names::MOMENTUM_ROC,
+            name: MOMENTUM_ROC,
             family: FactorFamily::Momentum,
             raw_value: Some(score),
             normalization: NormalizedFactor::cross_section(Probability::new(score)),
@@ -2396,8 +2397,8 @@ mod tests {
     fn lot_with_signal(
         position_id: &PositionId,
         decision_offsets_secs: &[i64],
-        momentum: rust_decimal::Decimal,
-        alpha_bps: rust_decimal::Decimal,
+        momentum: Decimal,
+        alpha_bps: Decimal,
     ) -> Vec<TrainingExample> {
         let first = ts(*decision_offsets_secs.first().unwrap_or(&0));
         let closed_at = ts(*decision_offsets_secs.last().unwrap_or(&0) + 3_600);
@@ -2453,7 +2454,7 @@ mod tests {
         examples
     }
 
-    /// Phase 11.5.1 integration: synthetic multi-lot `ExitDecision` fixture →
+    /// End-to-end algorithm integration: synthetic multi-lot `ExitDecision` fixture →
     /// `SellFoldSource` + `LotReplayBacktester` CPCV → calendarize → diagnostics
     /// → quality-gate input shape. Exercises the full algorithm path without
     /// `ClickHouse` / Postgres (those are covered by governance bind e2e).

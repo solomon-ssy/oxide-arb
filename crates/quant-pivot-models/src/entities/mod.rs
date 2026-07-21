@@ -14,7 +14,7 @@ pub mod catalog_market_change;
 pub mod catalog_market_object;
 pub mod catalog_sync_batch;
 pub mod catalog_sync_rejection;
-#[cfg(feature = "repository")]
+#[cfg(feature = "persistence-entities")]
 pub mod clob_market_info_version;
 pub mod decision_policy_snapshot;
 pub mod event;
@@ -33,18 +33,18 @@ pub mod quant_backtest_path_set;
 pub mod quant_backtest_report;
 pub mod quant_basis_alert;
 pub mod quant_calibration_artifact;
-#[cfg(feature = "repository")]
+#[cfg(feature = "persistence-entities")]
 pub mod quant_calibration_artifact_publication;
 pub mod quant_capital_allocation;
-#[cfg_attr(not(feature = "repository"), allow(dead_code))]
+#[cfg_attr(not(feature = "persistence-entities"), allow(dead_code))]
 pub mod quant_crypto_price_projection;
-#[cfg_attr(not(feature = "repository"), allow(dead_code))]
+#[cfg_attr(not(feature = "persistence-entities"), allow(dead_code))]
 pub mod quant_domain_event_outbox;
 pub mod quant_domain_source_cursor;
 pub mod quant_domain_source_expectation;
 pub mod quant_entry_condition_artifact;
 pub mod quant_entry_condition_audit;
-#[cfg_attr(not(feature = "repository"), allow(dead_code))]
+#[cfg_attr(not(feature = "persistence-entities"), allow(dead_code))]
 pub mod quant_entry_condition_evaluation_outbox;
 pub mod quant_entry_condition_instance;
 pub mod quant_equity_snapshot;
@@ -57,7 +57,7 @@ pub mod quant_feature_parity_state;
 pub mod quant_feature_parity_subject;
 pub mod quant_feature_vector;
 pub mod quant_market_linkage;
-#[cfg_attr(not(feature = "repository"), allow(dead_code))]
+#[cfg_attr(not(feature = "persistence-entities"), allow(dead_code))]
 pub mod quant_market_linkage_source;
 pub mod quant_market_selection;
 pub mod quant_market_selection_member;
@@ -91,14 +91,14 @@ pub mod quant_trade_policy_validation;
 pub mod quant_trade_policy_validation_row;
 pub mod quant_trade_tape_block_cursor;
 pub mod quant_training_dataset;
-#[cfg_attr(not(feature = "repository"), allow(dead_code))]
+#[cfg_attr(not(feature = "persistence-entities"), allow(dead_code))]
 pub mod quant_weather_daily_temperature_projection;
-#[cfg_attr(not(feature = "repository"), allow(dead_code))]
+#[cfg_attr(not(feature = "persistence-entities"), allow(dead_code))]
 pub mod quant_weather_observation_current;
 pub mod research_profile_artifact;
 pub mod role;
 pub mod role_menu;
-#[cfg(feature = "repository")]
+#[cfg(feature = "persistence-entities")]
 pub mod seed_application;
 pub mod system_bootstrap_transition;
 pub mod system_kill_switch;

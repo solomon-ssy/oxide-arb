@@ -17,7 +17,7 @@ use std::collections::HashSet;
 use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
-    domain::{MarketCandidate, MarketDataHealth},
+    domain::quant::{MarketCandidate, MarketDataHealth},
     enums::{common::MarketCategory, market::MarketStatus},
     runtime_config::{DataQualityConfig, SelectionConfig},
     types::{Bps, SelectionExclusionSummary, Usd},

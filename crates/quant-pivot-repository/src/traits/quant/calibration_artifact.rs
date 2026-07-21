@@ -1,9 +1,12 @@
-//! Unified calibration-artifact ledger repository trait (Phase 11.3 §3.4).
+//! Unified calibration-artifact ledger repository trait.
 
+use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{
-        CalibrationArtifactInfo, CalibrationArtifactListQuery, NewCalibrationArtifact, Paginated,
+        api::CalibrationArtifactListQuery,
+        pagination::Paginated,
+        quant::{CalibrationArtifactInfo, NewCalibrationArtifact},
     },
     types::{CalibrationArtifactId, ContentHash, calibration::PublishedWeatherStationLeadBias},
 };
@@ -39,7 +42,7 @@ pub trait CalibrationArtifactRepository: Send + Sync {
     /// Immutable Weather calibration publications visible at or before `at`.
     async fn published_weather_through(
         &self,
-        at: chrono::DateTime<chrono::Utc>,
+        at: DateTime<Utc>,
     ) -> Result<Vec<PublishedWeatherStationLeadBias>, StorageError>;
 
     /// Mark an artifact `active` (idempotent) — recorded when an operator

@@ -6,14 +6,15 @@
 //! server is provided by the semaphore: batched inserts queue on permits
 //! instead of piling additional requests onto a slow `ClickHouse`.
 
-use clickhouse::{Client, RowOwned, RowWrite};
-use num_traits::ToPrimitive;
-use prometheus::{GaugeVec, IntCounterVec, IntGauge, Opts, Registry};
-use quant_pivot_error::storage::StorageError;
 use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
+
+use clickhouse::{Client, RowOwned, RowWrite};
+use num_traits::ToPrimitive;
+use prometheus::{Error, GaugeVec, IntCounterVec, IntGauge, Opts, Registry};
+use quant_pivot_error::storage::StorageError;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tracing::{error, warn};
 
@@ -57,7 +58,7 @@ impl ChWriteMetrics {
         }
     }
 
-    pub fn register(&self, registry: &Registry) -> Result<(), prometheus::Error> {
+    pub fn register(&self, registry: &Registry) -> Result<(), Error> {
         registry.register(Box::new(self.rows_written.clone()))?;
         registry.register(Box::new(self.insert_duration_seconds.clone()))?;
         registry.register(Box::new(self.insert_errors.clone()))?;
@@ -112,7 +113,7 @@ impl ChWriteManager {
 
     /// Durable batch insert sink: acquire a permit, insert all rows, retry with
     /// exponential backoff, and record metrics. Returns the last error after
-    /// [`MAX_INSERT_ATTEMPTS`] so the caller (e.g. an `AsyncWriter` flush) can
+    /// `MAX_INSERT_ATTEMPTS` so the caller (e.g. an `AsyncWriter` flush) can
     /// log and drop, while honoring server backpressure via the semaphore.
     pub async fn write_batch<T>(
         &self,

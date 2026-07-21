@@ -1,7 +1,10 @@
 use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    domain::{EquitySnapshotInfo, EquitySnapshotQuery, NewEquitySnapshot, Paginated},
+    domain::{
+        pagination::Paginated,
+        quant::{EquitySnapshotInfo, EquitySnapshotQuery, NewEquitySnapshot},
+    },
     types::EquitySnapshotId,
 };
 

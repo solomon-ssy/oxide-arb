@@ -1,4 +1,4 @@
-//! Unified calibration-artifact admin endpoints (Phase 11.3 §10).
+//! Unified calibration-artifact admin endpoints.
 //!
 //! | Method | Path | Permission | Purpose |
 //! |--------|------|------------|---------|
@@ -8,12 +8,19 @@
 //! | POST | `/research/calibration-artifacts/fit-model-calibrator` | `materialization:create` | Enqueue calibrator fit |
 //! | POST | `/research/calibration-artifacts/{id}/activate` | `materialization:create` | Activate reviewed artifact |
 
-use actix_web::{http::Method, web};
+use actix_web::{
+    http::Method,
+    web::{Data, Path, Query},
+};
 use quant_pivot_models::{
     domain::{
-        ActivateCalibrationArtifactRequest, CalibrationArtifactDetailView,
-        CalibrationArtifactListQuery, CalibrationArtifactSummaryView, FitBiasTableRequest,
-        FitModelCalibratorRequest, JobSubmitContext, Paginated, ResearchJobView,
+        api::{
+            ActivateCalibrationArtifactRequest, CalibrationArtifactDetailView,
+            CalibrationArtifactListQuery, CalibrationArtifactSummaryView, FitBiasTableRequest,
+            FitModelCalibratorRequest, ResearchJobView,
+        },
+        pagination::Paginated,
+        ports::JobSubmitContext,
     },
     enums::{
         operation_log::OperationCategory,
@@ -71,8 +78,8 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
 
 /// `GET /api/research/calibration-artifacts` — paginated artifact catalog.
 pub async fn list(
-    state: web::Data<AppState>,
-    query: web::Query<CalibrationArtifactListQuery>,
+    state: Data<AppState>,
+    query: Query<CalibrationArtifactListQuery>,
 ) -> Result<WebResponse<Paginated<CalibrationArtifactSummaryView>>, WebError> {
     let page = state
         .calibration_artifacts
@@ -84,8 +91,8 @@ pub async fn list(
 
 /// `GET /api/research/calibration-artifacts/{id}` — full artifact detail.
 pub async fn get(
-    state: web::Data<AppState>,
-    id: web::Path<CalibrationArtifactId>,
+    state: Data<AppState>,
+    id: Path<CalibrationArtifactId>,
 ) -> Result<WebResponse<CalibrationArtifactDetailView>, WebError> {
     let info = state
         .calibration_artifacts
@@ -97,7 +104,7 @@ pub async fn get(
 
 /// `POST /api/research/calibration-artifacts/fit-bias-table` — enqueue bias-table fit.
 pub async fn fit_bias_table(
-    state: web::Data<AppState>,
+    state: Data<AppState>,
     acting_role: ActingRole,
     request_id: RequestId,
     op_ctx: OperationCtx,
@@ -141,7 +148,7 @@ pub async fn fit_bias_table(
 
 /// `POST /api/research/calibration-artifacts/fit-model-calibrator` — enqueue calibrator fit.
 pub async fn fit_model_calibrator(
-    state: web::Data<AppState>,
+    state: Data<AppState>,
     acting_role: ActingRole,
     request_id: RequestId,
     op_ctx: OperationCtx,
@@ -185,8 +192,8 @@ pub async fn fit_model_calibrator(
 
 /// `POST /api/research/calibration-artifacts/{id}/activate` — pin a `market_price_bias` ref.
 pub async fn activate(
-    state: web::Data<AppState>,
-    id: web::Path<CalibrationArtifactId>,
+    state: Data<AppState>,
+    id: Path<CalibrationArtifactId>,
     _actor: AuthedActor,
     acting_role: ActingRole,
     request_id: RequestId,

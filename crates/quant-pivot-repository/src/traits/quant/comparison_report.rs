@@ -5,7 +5,9 @@ use std::collections::HashMap;
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{
-        ComparisonReportListQuery, ModelComparisonReportInfo, NewModelComparisonReport, Paginated,
+        api::ComparisonReportListQuery,
+        pagination::Paginated,
+        quant::{ModelComparisonReportInfo, NewModelComparisonReport},
     },
     types::{BacktestReportId, ModelComparisonReportId, ModelVersionId},
 };

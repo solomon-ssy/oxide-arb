@@ -1,5 +1,9 @@
 //! Position ledger persistence DTOs.
 
+use chrono::{DateTime, Utc};
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
+use serde::{Deserialize, Serialize};
+
 use crate::{
     enums::{
         common::MarketCategory,
@@ -8,9 +12,6 @@ use crate::{
     },
     types::{EventId, MarketId, OrderIntentId, PositionId, Price, Shares, TokenId, Usd},
 };
-use chrono::{DateTime, Utc};
-use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
-use serde::{Deserialize, Serialize};
 
 /// Persisted current-position ledger row (one lot per filled entry intent).
 #[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]

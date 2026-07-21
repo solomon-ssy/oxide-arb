@@ -1,5 +1,4 @@
-//! [`ModelGovernanceService`]: the offline governance closure orchestration
-//! (Phase 3.7).
+//! [`ModelGovernanceService`]: offline governance closure orchestration.
 //!
 //! Reuses the registry / backtest / shadow / dataset repositories and the
 //! research [`ModelQualityGate`] to enforce the money-critical lifecycle:
@@ -10,25 +9,30 @@
 //!   separately approved `ModelRouting` revision rollback.
 //!
 //! Leakage is enforced at dataset **build** time and **re-scanned** on
-//! publish: [`Self::rescan_leakage`] decodes the frozen Parquet and
+//! publish: `rescan_leakage` decodes the frozen Parquet and
 //! runs [`scan_future_leakage`] so a tampered or stale artifact cannot skip
 //! the `NoPitLeakage` hard gate. A missing dataset row fails closed.
 //!
 //! Actor identity is recorded for audit provenance only; hard role enforcement
-//! is deferred to the Phase 07 web wiring.
+//! is deferred to the web wiring.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, Utc};
 use quant_pivot_error::{QuantError, QuantResult, governance::GovernanceError};
 use quant_pivot_models::{
     domain::{
-        BacktestPathSetInfo, BacktestReportInfo, BindCalibrationRequest, BindPublishPathSetRequest,
-        CalibrationArtifactPayload, GateOutcomeView, GatePreviewIntent, GovernanceActor,
-        ModelGovernanceAuditDetail, ModelGovernancePort, ModelVersionInfo, NewModelGovernanceAudit,
-        NewModelVersion, PublishModelCommand, QualityGateReportView, RetireModelCommand,
-        ShadowStabilitySummary, TrainingDatasetInfo,
+        api::{
+            BindCalibrationRequest, BindPublishPathSetRequest, GateOutcomeView, GatePreviewIntent,
+            QualityGateReportView,
+        },
+        ports::{GovernanceActor, ModelGovernancePort, PublishModelCommand, RetireModelCommand},
+        quant::{
+            BacktestPathSetInfo, BacktestReportInfo, CalibrationArtifactPayload,
+            ModelGovernanceAuditDetail, ModelVersionInfo, NewModelGovernanceAudit, NewModelVersion,
+            ShadowStabilitySummary, TrainingDatasetInfo,
+        },
     },
     enums::{
         model::ModelFamily,
@@ -38,7 +42,7 @@ use quant_pivot_models::{
         DecisionPolicySnapshot, QualityGateConfig, sections::ResearchValidationGatesConfig,
     },
     types::{
-        AuditEventId, BacktestReportId, CalibrationArtifactId, FeatureParityRunId,
+        AuditEventId, BacktestReportId, CalibrationArtifactId, DatasetCoverage, FeatureParityRunId,
         ModelGovernanceAuditId, ModelVersionId, Probability,
         model_lineage::ModelVersionDerivation,
         model_quality::{
@@ -62,7 +66,7 @@ use quant_pivot_research::{
         CalibratedReturnModel, CalibrationArtifactLoader, ModelArtifact, ReturnModelSpec,
         load_hash_verified_artifact, validate_category_scope_weights,
     },
-    training::{DatasetCoverage, LeakageFindings, scan_future_leakage},
+    training::{LeakageFindings, scan_future_leakage},
 };
 use rust_decimal::Decimal;
 
@@ -81,7 +85,7 @@ pub struct ModelGovernanceDeps {
     pub model_registry_repo: Arc<dyn ModelRegistryRepository>,
     /// Backtest-report ledger (gate metric source).
     pub backtest_report_repo: Arc<dyn BacktestReportRepository>,
-    /// CPCV path-set ledger (Phase 11.5 alpha-significance gate source).
+    /// CPCV path-set ledger used by the alpha-significance gate.
     pub backtest_path_set_repo: Arc<dyn BacktestPathSetRepository>,
     /// Shadow-comparison ledger (publish stability source).
     pub shadow_comparison_repo: Arc<dyn ShadowComparisonRepository>,
@@ -95,7 +99,7 @@ pub struct ModelGovernanceDeps {
     pub calibration_repo: Arc<dyn CalibrationArtifactRepository>,
     /// Deep calibrator resolution (active + content-hash verified) — shared
     /// with the report builder / admission / intent creation via
-    /// [`resolve_return_model_calibration`] (Phase 11.3 closed-loop hardening).
+    /// [`resolve_return_model_calibration`].
     pub calibration_loader: Arc<dyn CalibrationArtifactLoader>,
     /// The model quality gate.
     pub gate: Arc<dyn ModelQualityGate>,
@@ -118,10 +122,9 @@ pub struct ModelGovernanceService {
 /// feeds the publish audit's shadow-overlap evidence.
 ///
 /// Also carries the hash-verified [`ModelArtifact`] this evaluation loaded to
-/// compute `return_model_calibrated` — `publish()` reuses it for
+/// compute `return_model_calibrated` — `publish` reuses it for
 /// [`ModelGovernanceService::validate_publish_artifact`] instead of a second,
-/// redundant `load_hash_verified_artifact` round-trip (Phase 11.3 §8: "one
-/// load, two checks").
+/// redundant `load_hash_verified_artifact` round-trip: one load, two checks.
 struct GateEvaluation {
     report: QualityGateReport,
     shadow_summary: Option<ShadowStabilitySummary>,
@@ -150,7 +153,7 @@ impl ModelGovernanceService {
             })
     }
 
-    /// Re-scan a frozen dataset Parquet for point-in-time leakage (Phase 11.5 #9).
+    /// Re-scan a frozen dataset Parquet for point-in-time leakage before publish.
     async fn rescan_leakage(&self, dataset: &TrainingDatasetInfo) -> QuantResult<LeakageFindings> {
         let materialization = training_dataset::require_dataset_materialization(dataset)?;
         let bytes = self
@@ -202,11 +205,11 @@ impl ModelGovernanceService {
             .map_err(QuantError::from)
     }
 
-    /// Optional publish guard (11.2.2): Crypto-scoped weighted artifacts must
+    /// Optional publish guard: Crypto-scoped weighted artifacts must
     /// carry non-zero weight on at least one domain-crypto factor column.
     ///
-    /// Takes the already hash-verified `artifact` `evaluate_gate` loaded —
-    /// never re-loads it (single-load publish path, Phase 11.3 §8).
+    /// Takes the already hash-verified `artifact` loaded by `evaluate_gate` and
+    /// never loads it a second time.
     fn validate_publish_artifact(artifact: &ModelArtifact) -> QuantResult<()> {
         if let ModelArtifact::WeightedFactor(weighted) = artifact {
             validate_category_scope_weights(weighted.category_scope, &weighted.weights)?;
@@ -696,8 +699,8 @@ impl ModelGovernanceService {
             )
             .await?;
 
-        // Activate the bound calibrator (Phase 11.3 `active` governance —
-        // §3.4): a `Calibrated` return model's `calibrator_ref` must resolve
+        // Activate the bound calibrator under the shared `active` governance:
+        // a `Calibrated` return model's `calibrator_ref` must resolve
         // through `CoreCalibrationArtifactLoader`, which fails closed on
         // `active == false`. `model_score` has no cross-model exclusivity, so
         // this never deactivates another model version's calibrator.
@@ -762,7 +765,7 @@ impl ModelGovernanceService {
         let model_family = Self::model_family_for_version(version);
 
         let artifact = load_hash_verified_artifact(&self.deps.artifact_store, version).await?;
-        // Deep check (Phase 11.3 closed-loop hardening): the *same* function
+        // Deep check: the same function
         // report/admission/intent-creation share, not the shallow enum-tag
         // read `ModelArtifact::return_model_is_calibrated` used to be — a
         // calibrator deactivated after `bind_calibration` must fail the
@@ -800,7 +803,7 @@ impl ModelGovernanceService {
                 id: dataset_id.to_string(),
             })?;
         let leakage = self.rescan_leakage(&dataset_info).await?;
-        // Phase 11.5.1: Sell (`HoldVsExitWeighted`) publish/promote requires
+        // Sell (`HoldVsExitWeighted`) publish/promote requires
         // the same bound CPCV path set as Buy — `bound_path_set` is already
         // family-agnostic (it only reads `version.publish_path_set_id`), so
         // no `is_exit` branch is needed here at all.
@@ -996,7 +999,7 @@ fn map_publish_gate_failure(
 fn effective_stability(
     summary: &ShadowStabilitySummary,
     required_window_secs: u64,
-    now: chrono::DateTime<Utc>,
+    now: DateTime<Utc>,
 ) -> Option<Probability> {
     if summary.sample_count == 0 || summary.any_hard_divergence {
         return None;
@@ -1061,7 +1064,7 @@ const fn thresholds_from_config(config: &QualityGateConfig) -> QualityGateThresh
     }
 }
 
-/// Assemble Phase 11.5 [`ValidationGateThresholds`] from `research.validation.gates`.
+/// Assemble [`ValidationGateThresholds`] from `research.validation.gates`.
 const fn validation_thresholds_from_config(
     config: &ResearchValidationGatesConfig,
 ) -> ValidationGateThresholds {
@@ -1160,10 +1163,9 @@ fn backtest_report_from_info(info: BacktestReportInfo) -> QuantResult<BacktestRe
 
 #[cfg(test)]
 mod path_set_gate_input_tests {
-    use super::{checked_shadow_stability_lookback, path_set_gate_input_from_info};
     use chrono::Utc;
     use quant_pivot_models::{
-        domain::BacktestPathSetInfo,
+        domain::quant::BacktestPathSetInfo,
         types::{
             BacktestPathSetId, ContentHash, DecisionPolicySnapshotId, ModelRunId, ModelVersionId,
             TrainingDatasetId,
@@ -1171,6 +1173,8 @@ mod path_set_gate_input_tests {
         },
     };
     use rust_decimal_macros::dec;
+
+    use super::{checked_shadow_stability_lookback, path_set_gate_input_from_info};
 
     fn hash() -> ContentHash {
         ContentHash::parse(format!("blake3:{}", "a".repeat(64))).expect("hash")

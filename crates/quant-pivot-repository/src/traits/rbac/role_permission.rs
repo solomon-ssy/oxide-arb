@@ -2,7 +2,7 @@
 
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    domain::{AssignPermissions, Permission},
+    domain::rbac::{AssignPermissions, Permission},
     types::RoleId,
 };
 

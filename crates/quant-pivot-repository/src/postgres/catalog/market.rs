@@ -1,15 +1,12 @@
-use crate::{
-    postgres::{
-        catalog::ingest::{find_existing_str_id_chunks, find_models_by_str_id_chunks},
-        primitives,
-        query::{non_empty, paginate_mapped},
-        write::upsert_many_chunked,
-    },
-    traits::MarketRepository,
-};
-use quant_pivot_error::storage::{StorageError, entity};
+use std::{collections::HashSet, sync::Arc};
+
+use quant_pivot_error::storage::{StorageError, entity::MARKET};
 use quant_pivot_models::{
-    domain::{MarketInfo, MarketPageQuery, PageWindow, Paginated, UpsertMarket},
+    domain::{
+        api::MarketPageQuery,
+        market::{MarketInfo, UpsertMarket},
+        pagination::{PageWindow, Paginated},
+    },
     entities::market::{
         ActiveModel as MarketActiveModel, Column as MarketColumn, Entity as MarketEntity,
     },
@@ -25,7 +22,16 @@ use sea_orm::{
     EntityTrait, IntoActiveModel, QueryFilter, QueryOrder,
     sea_query::{Condition, Expr, OnConflict, extension::postgres::PgExpr},
 };
-use std::{collections::HashSet, sync::Arc};
+
+use crate::{
+    postgres::{
+        catalog::ingest::{find_existing_str_id_chunks, find_models_by_str_id_chunks},
+        primitives,
+        query::{non_empty, paginate_mapped},
+        write::upsert_many_chunked,
+    },
+    traits::MarketRepository,
+};
 
 pub struct PgMarketRepository {
     db: DatabaseConnection,
@@ -178,10 +184,10 @@ async fn do_update_status(
         .one(db)
         .await
         .map_err(StorageError::from)?
-        .ok_or_else(|| StorageError::not_found(entity::MARKET, id))?;
+        .ok_or_else(|| StorageError::not_found(MARKET, id))?;
     if status == MarketStatus::Active && !current.filter_reasons.is_empty() {
         return Err(StorageError::state_conflict(
-            entity::MARKET,
+            MARKET,
             Some(id),
             "an upstream-filtered market cannot be activated until filter reasons clear",
         ));
@@ -361,14 +367,16 @@ impl MarketRepository for PgMarketRepositoryTxn<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{MarketEntity, page_condition};
+    use std::collections::HashSet;
+
     use quant_pivot_models::{
-        domain::{MarketPageQuery, pagination::PageRequest},
+        domain::{api::MarketPageQuery, pagination::PageRequest},
         enums::{common::MarketCategory, market::MarketStatus},
         types::{EventId, TokenId},
     };
     use sea_orm::{DbBackend, EntityTrait, QueryFilter, QueryTrait};
-    use std::collections::HashSet;
+
+    use super::{MarketEntity, page_condition};
 
     #[test]
     fn page_condition_adds_optional_filters_to_sql() {

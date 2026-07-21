@@ -1,5 +1,9 @@
 //! `quant_shadow_comparison` table entity.
 
+use chrono::{DateTime, Utc};
+use sea_orm::entity::prelude::*;
+
+use super::quant_model_version;
 use crate::{
     enums::quant::ModelWeightSource,
     types::{
@@ -7,8 +11,6 @@ use crate::{
         shadow::{ShadowMaturedOutcomeDelta, ShadowRankDelta, ShadowScoreDelta},
     },
 };
-use chrono::{DateTime, Utc};
-use sea_orm::entity::prelude::*;
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -37,14 +39,14 @@ pub struct Model {
         from = "active_model_version_id",
         to = "model_version_id"
     )]
-    pub active_version: BelongsTo<super::quant_model_version::Entity>,
+    pub active_version: BelongsTo<quant_model_version::Entity>,
     #[sea_orm(
         belongs_to,
         relation_enum = "ShadowVersion",
         from = "shadow_model_version_id",
         to = "model_version_id"
     )]
-    pub shadow_version: BelongsTo<super::quant_model_version::Entity>,
+    pub shadow_version: BelongsTo<quant_model_version::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

@@ -42,7 +42,7 @@ use crate::{
     },
 };
 
-// ── Entry plan (parent §8 "when to buy") ─────────────────────────────────────
+// ── Entry plan: when to buy ───────────────────────────────────────────────
 
 /// When and how a recommendation becomes executable.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
@@ -91,7 +91,7 @@ impl EntryOrderPolicy {
     }
 }
 
-// ── Sizing plan (parent §9 "how much to buy") ────────────────────────────────
+// ── Sizing plan: how much to buy ──────────────────────────────────────────
 
 /// How much capital a recommendation should deploy and the binding cap.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
@@ -124,14 +124,14 @@ pub struct SizingPlan {
     /// of every stage below — not the governed `portfolio.sizing.kelly_fraction`
     /// config constant, which is `kelly_fraction_config_applied`).
     pub kelly_fraction_applied: Option<Decimal>,
-    /// Edge-uncertainty shrink multiplier (Phase 11.3 §6.1).
+    /// Edge-uncertainty shrink multiplier.
     #[serde(default)]
     pub edge_uncertainty_shrink_applied: Option<Decimal>,
-    /// Correlation-cluster shrink multiplier (Phase 11.3 §6.2).
+    /// Correlation-cluster shrink multiplier.
     #[serde(default)]
     pub correlation_shrink_applied: Option<Decimal>,
     /// The raw, uncapped full-Kelly fraction (`edge / (gain · loss)`) —
-    /// the sizing waterfall's starting point (Phase 11.3 §10).
+    /// the sizing waterfall's starting point.
     #[serde(default)]
     pub f_star_applied: Option<Decimal>,
     /// The governed static fractional-Kelly constant (e.g. `0.5` for
@@ -157,7 +157,7 @@ pub struct SizingPlan {
     pub position_cap_fraction_applied: Option<Decimal>,
 }
 
-// ── Exit plan (parent §10 "when / how much to sell") ─────────────────────────
+// ── Exit plan: when and how much to sell ─────────────────────────────────
 
 /// Policy-fitted opportunistic exit rule frozen into recommendation and intent.
 ///
@@ -329,7 +329,7 @@ pub struct ThesisInvalidationPolicy {
     pub require_execution_eligibility: bool,
 }
 
-// ── Risk envelope (parent §11 — admission inputs) ────────────────────────────
+// ── Risk envelope: admission inputs ──────────────────────────────────────
 
 /// Hard risk bounds consumed by execution admission (not natural language).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
@@ -388,7 +388,7 @@ impl RiskEnvelope {
     }
 }
 
-// ── Factor breakdown (parent §12) ────────────────────────────────────────────
+// ── Factor breakdown ─────────────────────────────────────────────────────
 
 /// One factor's signed contribution to a recommendation's composite score.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -431,7 +431,7 @@ pub struct FactorBreakdownEntry {
 #[serde(transparent)]
 pub struct RecommendationFactorBreakdown(pub Vec<FactorBreakdownEntry>);
 
-// ── Evidence refs (parent §13 — replay) ──────────────────────────────────────
+// ── Evidence refs: replay anchors ────────────────────────────────────────
 
 /// Replay handles for one recommendation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
@@ -480,12 +480,12 @@ impl EvidenceRefs {
     }
 }
 
-// ── Execution eligibility (parent §14 — computed, mode-orthogonal) ────────────
+// ── Execution eligibility (computed, mode-orthogonal) ─────────────────────
 
 /// Per-recommendation execution eligibility across runtime modes.
 ///
-/// Computed and persisted in Phase 4; the actual create-intent / admission flow
-/// lands in Phase 5. `eligible_modes` always contains
+/// Computed and persisted with the recommendation. The create-intent and
+/// admission flow consumes it. `eligible_modes` always contains
 /// [`QuantRuntimeMode::ReportOnly`] (a report is the report-only artifact).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
 #[serde(deny_unknown_fields)]
@@ -498,8 +498,8 @@ pub struct ExecutionEligibility {
     pub approval_required: bool,
     /// Auto-execution policy id, when applicable.
     pub auto_policy_id: Option<String>,
-    /// Explicit "uncalibrated · experimental" watermark (Phase 11.3 closed-loop
-    /// hardening): `true` exactly when [`Self::ineligibility_reasons`] contains
+    /// Explicit "uncalibrated · experimental" watermark: `true` exactly when
+    /// [`Self::ineligibility_reasons`] contains
     /// [`IneligibilityReason::ReturnModelUncalibrated`]. A first-class DTO field
     /// — not something the UI must infer by scanning the reasons array — so a
     /// `ReportOnly`-only sizing is never mistaken for a normal, executable one.
@@ -523,7 +523,7 @@ impl ExecutionEligibility {
     }
 }
 
-// ── Report summary (parent §3 — report-level) ────────────────────────────────
+// ── Report summary ───────────────────────────────────────────────────────
 
 /// Report-level summary persisted to `quant_recommendation_report.summary_json`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]

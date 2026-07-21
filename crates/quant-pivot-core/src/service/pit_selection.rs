@@ -3,7 +3,7 @@
 //! Reconstructs, per historical `as_of`, the same market-selection funnel the
 //! online report pipeline runs — by projecting a [`MarketCandidate`] from
 //! point-in-time facts and evaluating it through the **identical**
-//! [`ConfiguredMarketSelector`] / `FilterChain::standard()` code. Only markets
+//! [`ConfiguredMarketSelector`] / `FilterChain::standard` code. Only markets
 //! that survive the funnel at that instant enter the training spine, so the
 //! offline dataset carries no train/serve selection skew.
 //!
@@ -19,7 +19,7 @@
 //! model eligibility) runs against exact point-in-time facts with the frozen
 //! config's own thresholds.
 //!
-//! # Model-feature gating (11.2.2 remediation R7)
+//! # Model-feature gating
 //!
 //! `DatasetPlanRequest.model_spec_id` names the `ModelSpec` this dataset is
 //! built **for** — the target model's requirements are therefore knowable at
@@ -30,9 +30,9 @@
 //! excludes a market whose domain features that spec's model would need are
 //! unavailable — mirroring exactly what the online funnel enforces once a
 //! version trained under this spec is routed, rather than a permissive
-//! `ModelFeatureRequirements::default()` placeholder.
+//! `ModelFeatureRequirements::default` placeholder.
 //!
-//! # Domain availability (11.2.2 §3.8 train-serve parity)
+//! # Domain availability parity
 //!
 //! [`select_at`](OfflinePitSelector::select_at) takes a
 //! [`DomainAvailabilitySource`] —
@@ -61,7 +61,9 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{
     domain::{
-        DecisionBoundary, DomainAvailability, MarketCandidate, MarketDataHealth, MarketRegistryInfo,
+        data_plane::DecisionBoundary,
+        market::MarketRegistryInfo,
+        quant::{DomainAvailability, MarketCandidate, MarketDataHealth},
     },
     runtime_config::{DataQualityConfig, FeaturesConfig, SelectionConfig},
     types::{DecisionPolicySnapshotId, MarketId},
@@ -85,8 +87,8 @@ pub struct OfflinePitSelector {
     features: FeaturesConfig,
     decision_policy_snapshot_id: DecisionPolicySnapshotId,
     knowledge_lag_secs: u64,
-    /// The target `ModelSpec`'s declared feature requirements (11.2.2
-    /// remediation R7) — genuinely gates `ModelFeatureUnavailable`, mirroring
+    /// The target `ModelSpec`'s declared feature requirements genuinely gate
+    /// `ModelFeatureUnavailable`, mirroring
     /// exactly what the online funnel would enforce once this spec's model is
     /// trained and routed, rather than a permissive placeholder.
     model_requirements: ModelFeatureRequirements,
@@ -251,22 +253,23 @@ fn book_age_ms(book: &ResolvedBook, decision_at: DateTime<Utc>) -> QuantResult<u
 
 #[cfg(test)]
 mod tests {
-    use super::{OfflinePitSelector, availability_for, project_candidate};
-    use crate::prefetch::{
-        domain_availability::PrefetchedDomainAvailabilitySource, historical_window::Prefetched,
-    };
+    use std::{collections::HashMap, slice, sync::Arc};
+
     use async_trait::async_trait;
     use chrono::{DateTime, Duration as ChronoDuration, TimeZone, Utc};
     use quant_pivot_error::QuantResult;
     use quant_pivot_models::{
         domain::{
-            CatalogWindowInfo, CryptoSubject, DecisionBoundary, DecisionClock, DecisionSource,
-            DomainAvailability, DomainObservation, EventRegistryInfo, GroundingProof,
-            LinkageOutcome, MarketDataHealth, MarketLinkage, MarketSubject, PriceComparator,
-            ResolutionOracle, ResolvedBinding, ResolvedSourceBinding,
+            data_plane::{DecisionBoundary, DecisionClock, DecisionSource, DomainObservation},
             market::{
+                CatalogWindowInfo, EventRegistryInfo,
                 book::BookLevel,
                 registry::{MarketRegistryInfo, NegRiskLegSet, TokenInfo},
+            },
+            quant::{
+                CryptoSubject, DomainAvailability, GroundingProof, LinkageOutcome,
+                MarketDataHealth, MarketLinkage, MarketSubject, PriceComparator, ResolutionOracle,
+                ResolvedBinding, ResolvedSourceBinding,
             },
         },
         enums::{
@@ -293,7 +296,11 @@ mod tests {
     };
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
-    use std::{collections::HashMap, slice, sync::Arc};
+
+    use super::{OfflinePitSelector, availability_for, project_candidate};
+    use crate::prefetch::{
+        domain_availability::PrefetchedDomainAvailabilitySource, historical_window::Prefetched,
+    };
 
     fn market() -> MarketRegistryInfo {
         let now = Utc.timestamp_millis_opt(1_000_000).single().expect("ts");
@@ -435,7 +442,7 @@ mod tests {
         );
     }
 
-    // ── select_at(): domain availability drives ModelEligibilityFilter ─────
+    // ── select_at: domain availability drives ModelEligibilityFilter ─────
 
     fn crypto_market(market_id: &str, end_date: DateTime<Utc>) -> MarketRegistryInfo {
         let mut info = market();

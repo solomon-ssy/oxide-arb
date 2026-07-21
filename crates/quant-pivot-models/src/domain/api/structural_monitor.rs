@@ -1,4 +1,4 @@
-//! Structural Alpha monitor HTTP contract (Phase 11.2.1+).
+//! Structural Alpha monitor HTTP contract.
 //!
 //! Read surface for structural signals: neg-risk leg-sum drift remains live
 //! book-derived, while trade-tape participant concentration is ClickHouse-backed

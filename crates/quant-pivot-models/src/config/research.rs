@@ -4,8 +4,9 @@
 //! artifact store is Local for development or S3-compatible WORM storage for
 //! production evidence and model artifacts.
 
-use super::secret::SecretText;
 use serde::Deserialize;
+
+use super::secret::SecretText;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]

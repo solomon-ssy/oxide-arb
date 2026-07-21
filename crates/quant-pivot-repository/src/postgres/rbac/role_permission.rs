@@ -4,10 +4,10 @@
 //! and replace-set semantics. Keyed by [`RoleId`]; the Casbin subject
 //! (`role_code`) is resolved inside the transaction.
 
-use quant_pivot_error::storage::{StorageError, entity};
+use quant_pivot_error::storage::{StorageError, entity::ROLE};
 use quant_pivot_models::{
-    domain::{AssignPermissions, Permission},
-    entities::role,
+    domain::rbac::{AssignPermissions, Permission},
+    entities::role::Entity,
     types::{RoleCode, RoleId},
 };
 use sea_orm::{ConnectionTrait, DatabaseConnection, EntityTrait, TransactionTrait};
@@ -31,12 +31,12 @@ impl PgRolePermissionRepository {
 
 /// Resolve a role's immutable `code` by id, or `NotFound`.
 async fn role_code_of(conn: &impl ConnectionTrait, id: &RoleId) -> Result<RoleCode, StorageError> {
-    role::Entity::find_by_id(id.clone())
+    Entity::find_by_id(id.clone())
         .one(conn)
         .await
         .map_err(StorageError::from)?
         .map(|model| model.code)
-        .ok_or_else(|| error::not_found(entity::ROLE, id))
+        .ok_or_else(|| error::not_found(ROLE, id))
 }
 
 async fn do_set_permissions(
@@ -52,7 +52,7 @@ async fn do_set_permissions(
     // touching the database. The web layer rejects these earlier as a 400.
     if let Some(invalid) = permissions.iter().find(|perm| !perm.is_valid()) {
         return Err(error::invariant_violation(
-            Some(entity::ROLE),
+            Some(ROLE),
             format!(
                 "invalid permission for role `{role_id}`: {}:{}",
                 invalid.resource.as_str(),

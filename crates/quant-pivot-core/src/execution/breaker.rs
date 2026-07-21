@@ -1,6 +1,6 @@
 //! Execution breaker — stateful venue-health accumulator + auto kill-switch trip.
 //!
-//! Phase 05.3 admission is **stateless**; the breaker is the single component
+//! admission is **stateless**; the breaker is the single component
 //! that carries cross-decision accumulated safety state. It observes venue
 //! submit/cancel outcomes over a rolling, monotone-time window and publishes two
 //! read paths:
@@ -36,7 +36,10 @@ use arc_swap::ArcSwap;
 use chrono::{DateTime, NaiveDate, Utc};
 use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
-    domain::{KillSwitchPort, KillSwitchView, NewOperationLog, SetKillSwitchCommand},
+    domain::{
+        governance::{KillSwitchView, NewOperationLog},
+        ports::{KillSwitchPort, SetKillSwitchCommand},
+    },
     enums::{
         execution::KillSwitchState,
         operation_log::{OperationCategory, OperationHttpMethod, OperationOutcome},
@@ -53,9 +56,9 @@ use crate::{execution::admission::VenueHealth, observability::metrics_hub::Metri
 
 /// Audit actor recorded for breaker-initiated kill-switch escalations.
 const BREAKER_ACTOR: &str = "system:execution_breaker";
-/// Breaker dimension label for metrics / op-log (venue health, 05.4).
+/// Breaker dimension label for venue-health metrics and operation logs.
 const DIMENSION_VENUE: &str = "venue";
-/// Breaker dimension label for the daily realized-loss escalation (05.6).
+/// Breaker dimension label for the daily realized-loss escalation.
 const DIMENSION_DAILY_LOSS: &str = "daily_loss";
 /// Fraction of the daily realized-loss cap that degrades venue health (defers
 /// admission `#18`) before the hard cap trips the kill-switch.
@@ -111,7 +114,7 @@ struct BreakerInner {
     /// [`BreakerInner::reset`] when the operator clears the kill-switch.
     tripped: bool,
     /// UTC day the realized-loss accumulator is scoped to (rolls over at the day
-    /// boundary, same口径 as the 05.9 equity snapshot).
+    /// boundary, using the same accounting basis as the equity snapshot.
     day: Option<NaiveDate>,
     /// Signed cumulative realized `PnL` for `day` (USD); the loss is `max(0, -·)`.
     realized_pnl_today: Decimal,
@@ -332,7 +335,7 @@ impl ExecutionBreaker {
         }
     }
 
-    /// Fold one **realized** exit `PnL` into the daily accumulator (05.6 §6.5).
+    /// Fold one **realized** exit `PnL` into the daily accumulator.
     ///
     /// Cumulative same-day realized **loss** (`max(0, -ΣPnL)`) drives the third
     /// breaker dimension: `≥ 80%` of the cap degrades venue health (admission

@@ -1,12 +1,18 @@
 //! Validated text contracts used by governed configuration workflows.
 
-use std::{borrow::Cow, fmt, str::FromStr};
+use std::{
+    borrow::Cow,
+    fmt,
+    fmt::{Display, Formatter, Result as FmtResult},
+    str::FromStr,
+};
 
+use schemars::{JsonSchema, Schema, SchemaGenerator};
 use sea_orm::{
-    ActiveValue, ColIdx, IntoActiveValue, TryGetError, TryGetable,
+    ActiveValue, ColIdx, DbErr, IntoActiveValue, QueryResult, TryGetError, TryGetable,
     sea_query::{ArrayType, ColumnType, Nullable, Value, ValueType, ValueTypeErr},
 };
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as SerdeDeError};
 use thiserror::Error;
 
 /// Process-independent advisory lock shared by schema mutation, reset, and
@@ -52,13 +58,13 @@ impl Default for PolicyBundleGeneration {
     }
 }
 
-impl fmt::Display for PolicyBundleGeneration {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for PolicyBundleGeneration {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> FmtResult {
         write!(formatter, "{}", self.0)
     }
 }
 
-impl schemars::JsonSchema for PolicyBundleGeneration {
+impl JsonSchema for PolicyBundleGeneration {
     fn inline_schema() -> bool {
         true
     }
@@ -67,7 +73,7 @@ impl schemars::JsonSchema for PolicyBundleGeneration {
         Cow::Borrowed("PolicyBundleGeneration")
     }
 
-    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    fn json_schema(_generator: &mut SchemaGenerator) -> Schema {
         schemars::json_schema!({ "type": "integer", "format": "int64", "minimum": 1 })
     }
 }
@@ -75,7 +81,7 @@ impl schemars::JsonSchema for PolicyBundleGeneration {
 impl<'de> Deserialize<'de> for PolicyBundleGeneration {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let value = i64::deserialize(deserializer)?;
-        Self::try_new(value).map_err(serde::de::Error::custom)
+        Self::try_new(value).map_err(SerdeDeError::custom)
     }
 }
 
@@ -92,10 +98,9 @@ impl From<&PolicyBundleGeneration> for Value {
 }
 
 impl TryGetable for PolicyBundleGeneration {
-    fn try_get_by<I: ColIdx>(result: &sea_orm::QueryResult, index: I) -> Result<Self, TryGetError> {
+    fn try_get_by<I: ColIdx>(result: &QueryResult, index: I) -> Result<Self, TryGetError> {
         let value = <i64 as TryGetable>::try_get_by(result, index)?;
-        Self::try_new(value)
-            .map_err(|error| TryGetError::DbErr(sea_orm::DbErr::Type(error.to_string())))
+        Self::try_new(value).map_err(|error| TryGetError::DbErr(DbErr::Type(error.to_string())))
     }
 }
 

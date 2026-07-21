@@ -1,9 +1,9 @@
-//! The frozen, versioned crypto resolver ruleset (Phase 11.2.2).
+//! The frozen, versioned crypto resolver ruleset.
 //!
 //! One table binds each supported asset's **slug aliases** (as they appear in
 //! Polymarket slugs/questions) to its Binance spot symbol and its Chainlink
 //! feed key. The table is data, not types: listing a new asset is an entry
-//! here plus a [`CRYPTO_RESOLVER_VERSION`] bump — historical linkages remain
+//! here plus a `CRYPTO_RESOLVER_VERSION` bump — historical linkages remain
 //! replayable because every ledger record carries the ruleset version that
 //! produced it (the bitemporal ruleset axis).
 //!

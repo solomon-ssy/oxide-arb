@@ -1,29 +1,12 @@
-//! Research plane bundle (Phase 3+): artifacts, selection, feature + factor pipelines.
+//! Research plane bundle: artifacts, selection, feature, and factor pipelines.
 
-use super::{DataBundle, GovernanceBundle, InfraBundle};
-use crate::{
-    governance::{
-        CoreCalibrationArtifactLoader, FactorGovernanceDeps, FactorGovernanceService,
-        ModelGovernanceDeps, ModelGovernanceService, ModelSpecDeps, ModelSpecService,
-    },
-    prefetch::{feature_window::FeatureWindowProvider, market_candidates::MarketCandidateProvider},
-    service::{
-        bias_table_fit::BiasTableFitService,
-        factor_pipeline::FactorPipelineService,
-        feature_integrity::RepositoryFeatureParityGate,
-        feature_pipeline::{FeaturePipelineDeps, FeaturePipelineService},
-        frozen_model_parity::{FrozenModelParityDeps, FrozenModelParityService},
-        model_runner::{DispatcherAlertSink, ModelRunner, ModelRunnerDeps},
-        training_dataset::{
-            TrainingDatasetService, TrainingDatasetServiceDeps, TrainingDatasetServiceWire,
-        },
-    },
-};
+use std::sync::Arc;
+
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     clickhouse::QuantFeatureParityEventRow,
     config::DeployConfig,
-    domain::{
+    domain::ports::{
         CalibrationArtifactFitPort, FactorGovernancePort, ModelGovernancePort, ModelSpecPort,
     },
 };
@@ -48,7 +31,26 @@ use quant_pivot_research::{
     },
     selection::{ConfiguredMarketSelector, MarketSelector},
 };
-use std::sync::Arc;
+
+use super::{DataBundle, GovernanceBundle, InfraBundle};
+use crate::{
+    governance::{
+        CoreCalibrationArtifactLoader, FactorGovernanceDeps, FactorGovernanceService,
+        ModelGovernanceDeps, ModelGovernanceService, ModelSpecDeps, ModelSpecService,
+    },
+    prefetch::{feature_window::FeatureWindowProvider, market_candidates::MarketCandidateProvider},
+    service::{
+        bias_table_fit::BiasTableFitService,
+        factor_pipeline::FactorPipelineService,
+        feature_integrity::RepositoryFeatureParityGate,
+        feature_pipeline::{FeaturePipelineDeps, FeaturePipelineService},
+        frozen_model_parity::{FrozenModelParityDeps, FrozenModelParityService},
+        model_runner::{DispatcherAlertSink, ModelRunner, ModelRunnerDeps},
+        training_dataset::{
+            TrainingDatasetService, TrainingDatasetServiceDeps, TrainingDatasetServiceWire,
+        },
+    },
+};
 
 /// Dependencies required to assemble the research plane after infra + data.
 pub struct ResearchBundleDeps<'a> {
@@ -72,76 +74,76 @@ fn frozen_parity_evidence_writer(
     ))
 }
 
-/// Research plane: selection, feature/factor pipelines, and artifact store (Phase 3+).
+/// Research plane: selection, feature/factor pipelines, and artifact store.
 pub struct ResearchBundle {
     /// Local (or future object-store) backend for dataset / model artifact bytes.
     pub artifact_store: Arc<dyn ArtifactStore>,
-    /// Pure, config-driven market selector (3.1).
+    /// Pure, config-driven market selector.
     pub market_selector: Arc<dyn MarketSelector>,
-    /// Persistence port for selection snapshots and their members (3.1).
+    /// Persistence port for selection snapshots and their members.
     pub market_selection_repo: Arc<dyn MarketSelectionRepository>,
-    /// Core-side projector freezing market facts into selector inputs (3.1).
+    /// Core-side projector freezing market facts into selector inputs.
     pub candidate_provider: Arc<MarketCandidateProvider>,
-    /// Postgres persistence for feature vectors (3.2).
+    /// Postgres persistence for feature vectors.
     pub feature_repo: Arc<dyn FeatureRepository>,
-    /// Online feature build loop: resolve → build → persist → emit (3.2).
+    /// Online feature build loop: resolve → build → persist → emit.
     pub feature_pipeline: Arc<FeaturePipelineService>,
-    /// Postgres persistence for factor definitions + values (3.3).
+    /// Postgres persistence for factor definitions + values.
     pub factor_repo: Arc<dyn FactorRepository>,
-    /// Online factor build loop: compute → partition → persist → emit (3.3).
+    /// Online factor build loop: compute → partition → persist → emit.
     pub factor_pipeline: Arc<FactorPipelineService>,
-    /// Model-run persistence (create / finalize live + shadow runs) (3.4).
+    /// Model-run persistence (create / finalize live + shadow runs).
     pub model_run_repo: Arc<dyn ModelRunRepository>,
-    /// Model registry persistence (resolve active / shadow versions) (3.4).
+    /// Model registry persistence (resolve active / shadow versions).
     pub model_registry_repo: Arc<dyn ModelRegistryRepository>,
     /// Full frozen dataset/model verification used by training and publish.
     pub frozen_model_parity: Arc<FrozenModelParityService>,
-    /// Online inference orchestrator: selection/features/factors → candidates (3.4).
+    /// Online inference orchestrator: selection/features/factors → candidates.
     pub model_runner: Arc<ModelRunner>,
-    /// Frozen training-dataset ledger persistence (3.5).
+    /// Frozen training-dataset ledger persistence.
     pub training_dataset_repo: Arc<dyn TrainingDatasetRepository>,
     /// Server-owned point-in-time source-slice materialization ledger.
     pub source_slice_repo: Arc<dyn SourceSliceRepository>,
     /// Governed executable trade-policy catalog.
     pub trade_policy_repo: Arc<dyn TradePolicyRepository>,
-    /// Final attribution rows available for supervised live samples (5.7).
+    /// Final attribution rows available for supervised live samples.
     pub attribution_repo: Arc<dyn AttributionRepository>,
     /// Recommendation rows carrying frozen evidence refs for live attribution samples.
     pub recommendation_repo: Arc<dyn RecommendationRepository>,
-    /// Append-only backtest-report ledger persistence (3.6).
+    /// Append-only backtest-report ledger persistence.
     pub backtest_report_repo: Arc<dyn BacktestReportRepository>,
-    /// Append-only CPCV + trial-grid path-set ledger persistence (11.5).
+    /// Append-only CPCV + trial-grid path-set ledger persistence.
     pub backtest_path_set_repo: Arc<dyn BacktestPathSetRepository>,
-    /// Append-only pairwise comparison-report ledger persistence (3.6 §5.6).
+    /// Append-only pairwise comparison-report ledger persistence.
     pub comparison_report_repo: Arc<dyn ModelComparisonReportRepository>,
-    /// Append-only shadow-comparison ledger persistence (3.7).
+    /// Append-only shadow-comparison ledger persistence.
     pub shadow_comparison_repo: Arc<dyn ShadowComparisonRepository>,
-    /// Append-only model-governance audit trail persistence (3.7).
+    /// Append-only model-governance audit trail persistence.
     pub governance_audit_repo: Arc<dyn ModelGovernanceAuditRepository>,
-    /// Offline governance orchestration: publish / rollback / dataset promotion (3.7).
+    /// Offline governance orchestration: publish / rollback / dataset promotion.
     pub model_governance: Arc<dyn ModelGovernancePort>,
-    /// Factor-definition publish / retire orchestration (05.7).
+    /// Factor-definition publish / retire orchestration.
     pub factor_governance: Arc<dyn FactorGovernancePort>,
     /// Model-spec authoring (the offline research lifecycle root write path).
     pub model_spec: Arc<dyn ModelSpecPort>,
-    /// Schema-bound runtime factory builder (loads model artifacts) (3.4/3.6).
+    /// Schema-bound runtime factory builder (loads model artifacts).
     pub model_runtime_factory_builder: Arc<dyn ModelRuntimeFactoryBuilder>,
-    /// Resolves `model_score` calibration artifacts for runtime + Kelly safety (11.3).
+    /// Resolves `model_score` calibration artifacts for runtime + Kelly safety.
     pub calibration_loader: Arc<dyn CalibrationArtifactLoader>,
-    /// Historical fact read port (PIT book / microstructure / settlement) (3.5).
+    /// Historical fact read port (PIT book / microstructure / settlement).
     pub quant_fact_read: Arc<dyn QuantFactReadRepository>,
     /// Append-only catalog ledger for every offline PIT metadata read.
     pub catalog_ledger_repo: Arc<dyn CatalogLedgerRepository>,
     /// Append-only point-in-time CLOB parameters and fee schedules.
     pub clob_market_info_repo: Arc<dyn ClobMarketInfoRepository>,
-    /// Market catalog read port for PIT metadata + sampling candidates (3.5).
+    /// Market catalog read port for PIT metadata + sampling candidates.
     pub market_repo: Arc<dyn MarketRepository>,
-    /// Frozen market → external-subject linkage ledger (11.2.2).
+    /// Frozen market → external-subject linkage ledger.
     pub market_linkage_repo: Arc<dyn MarketLinkageRepository>,
-    /// Position ledger for `ExitDecision` lot-timeline training (06.1).
+    /// Position ledger for `ExitDecision` lot-timeline training.
     pub position_repo: Arc<dyn PositionRepository>,
     /// Unified calibration-artifact ledger port: favorite-longshot bias-table
-    /// fitter + generic catalog read/activate for every artifact kind (11.2.1, 11.3).
+    /// fitter plus generic catalog read/activate for every artifact kind.
     pub calibration_artifact_fit: Arc<dyn CalibrationArtifactFitPort>,
     /// Calibration artifact catalog used by historical PIT feature windows.
     pub calibration_artifact_repo: Arc<dyn CalibrationArtifactRepository>,
@@ -209,8 +211,8 @@ fn assemble_research_pipelines(
 impl ResearchBundle {
     /// Build the research bundle from deploy config plus wired infra/data handles.
     ///
-    /// No report scheduler or trigger is wired here — periodic report generation
-    /// is a Phase 4 concern. The feature and factor pipelines are ready for
+    /// No report scheduler or trigger is wired here; report orchestration belongs
+    /// to the report bundle. The feature and factor pipelines are ready for
     /// on-demand invocation with a frozen runtime-config snapshot per round.
     pub fn assemble(deps: &ResearchBundleDeps<'_>) -> QuantResult<Self> {
         let repos = &deps.infra.repos;
@@ -351,7 +353,7 @@ impl ResearchBundle {
         )
     }
 
-    /// Wire the online inference orchestrator (3.4).
+    /// Wire the online inference orchestrator.
     fn assemble_model_runner(
         deps: &ResearchBundleDeps<'_>,
         model_run_repo: &Arc<dyn ModelRunRepository>,
@@ -394,7 +396,7 @@ impl ResearchBundle {
         }
     }
 
-    /// Wire offline publish / rollback / dataset-promotion governance (3.7).
+    /// Wire offline publish / rollback / dataset-promotion governance.
     fn assemble_model_governance(
         deps: &ResearchBundleDeps<'_>,
         artifact_store: &Arc<dyn ArtifactStore>,

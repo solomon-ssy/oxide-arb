@@ -1,4 +1,4 @@
-//! Structural Alpha monitor port (Phase 11.2.1+).
+//! Structural Alpha monitor application port.
 
 use std::{
     cmp::Reverse,
@@ -14,13 +14,18 @@ use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
     config::TradeTapeOnChainConfig,
     domain::{
-        DecisionBoundary, DecisionClock, DecisionSource, MissingReasonCountView,
-        NegRiskEventDriftView, NegRiskLegView, ParticipantConcentrationDetailView,
-        ParticipantConcentrationMarketView, ParticipantConcentrationParticipantView,
-        ParticipantConcentrationSummaryView, PolicySnapshotPort, StructuralMonitorPort,
-        TradeParticipantRole, TradeTapeBlockCursorStatus, TradeTapeCoverageView, TradeTapePrint,
-        TradeTapeSourceHealthView, TradeTapeSourceKind,
+        api::{
+            MissingReasonCountView, NegRiskEventDriftView, NegRiskLegView,
+            ParticipantConcentrationDetailView, ParticipantConcentrationMarketView,
+            ParticipantConcentrationParticipantView, ParticipantConcentrationSummaryView,
+            TradeTapeCoverageView, TradeTapeSourceHealthView,
+        },
+        data_plane::{
+            DecisionBoundary, DecisionClock, DecisionSource, TradeParticipantRole,
+            TradeTapeBlockCursorStatus, TradeTapePrint, TradeTapeSourceKind,
+        },
         market::{MarketRegistryInfo, registry::NegRiskLeg},
+        ports::{PolicySnapshotPort, StructuralMonitorPort},
     },
     types::{EventId, MarketId, Price},
 };

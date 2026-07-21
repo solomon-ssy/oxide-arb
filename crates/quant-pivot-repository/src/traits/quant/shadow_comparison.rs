@@ -3,7 +3,7 @@
 use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    domain::{NewShadowComparison, ShadowComparisonInfo, ShadowStabilitySummary},
+    domain::quant::{NewShadowComparison, ShadowComparisonInfo, ShadowStabilitySummary},
     types::ModelVersionId,
 };
 

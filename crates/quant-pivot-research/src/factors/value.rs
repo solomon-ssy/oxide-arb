@@ -14,19 +14,19 @@
 //! *parameters* are resolved from runtime config — never hardcoded here.
 
 use chrono::{DateTime, Utc};
-pub use quant_pivot_models::types::{
-    factor::{
-        FactorDefinitionDocument, FactorDriver, FactorExplanation, FactorOutputKind,
-        FactorQualityGate,
-    },
-    stable_name::{FactorName, FeatureName},
-};
-use quant_pivot_models::{
+pub(super) use quant_pivot_models::{
     enums::{
         factor::{FactorFamily, FactorIndeterminateReason, FactorValueState, NormalizationSource},
         quant::FactorDirection,
     },
-    types::{FactorDefinitionId, MarketId, Probability},
+    types::{
+        FactorDefinitionId, MarketId, Probability,
+        factor::{
+            FactorDefinitionDocument, FactorDriver, FactorExplanation, FactorOutputKind,
+            FactorQualityGate,
+        },
+        stable_name::{FactorName, FeatureName},
+    },
 };
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -178,7 +178,7 @@ pub struct RawFactor {
 /// `contributes` / `below_confidence_floor` are scoring decisions derived from
 /// the runtime `min_factor_confidence` floor and `missing_factor_policy`. They
 /// are **not persisted** (the floor can hot-update and weighting is a model-layer
-/// concern, 3.4): the immutable [`FactorValue`] is the persisted fact.
+/// concern): the immutable [`FactorValue`] is the persisted fact.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScoredFactor {
     /// The persisted factor fact.

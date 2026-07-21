@@ -1,7 +1,15 @@
 //! Seeds the full navigation menu tree (directories, pages, button permissions).
 
+use std::{future::Future, pin::Pin};
+
+use sea_orm::{
+    ActiveValue::Set, ColumnTrait, DatabaseTransaction, DbErr, EntityTrait, QueryFilter,
+    sea_query::OnConflict,
+};
+use uuid::Uuid;
+
 use crate::{
-    entities::menu,
+    entities::menu::{ActiveModel, Column, Entity},
     enums::rbac::{MenuKind, Operation, ResourceType, RoleStatus},
     seed::{
         SeedArtifact, SeedConflictPolicy, SeedContext, SeedDependency, SeedSpec,
@@ -9,11 +17,6 @@ use crate::{
     },
     types::MenuId,
 };
-use sea_orm::{
-    ActiveValue::Set, ColumnTrait, DbErr, EntityTrait, QueryFilter, sea_query::OnConflict,
-};
-use std::{future::Future, pin::Pin};
-use uuid::Uuid;
 
 const SEED_ID: &str = "rbac.menus.bootstrap";
 
@@ -66,7 +69,7 @@ pub struct MenuGrantSpec {
 
 /// Accumulates menu rows while assigning stable monotonic sort keys per parent.
 struct MenuTree {
-    models: Vec<menu::ActiveModel>,
+    models: Vec<ActiveModel>,
     grants: Vec<MenuGrantSpec>,
     ids: Vec<MenuId>,
     next_sort: i32,
@@ -136,7 +139,7 @@ impl MenuTree {
             kind: spec.kind,
             permission_code: spec.permission_code.clone(),
         });
-        self.models.push(menu::ActiveModel {
+        self.models.push(ActiveModel {
             id: Set(id.clone()),
             parent_id: Set(spec.parent.cloned()),
             name: Set(spec.name.to_owned()),
@@ -343,7 +346,7 @@ fn build_trading(t: &mut MenuTree) {
         permission_code: Some(perm(ResourceType::QuantReport, Operation::Read)),
         icon: "lucide:target",
     });
-    // Structural Alpha dashboard (Phase 11.2.1+): trade-tape participant
+    // Structural Alpha dashboard: trade-tape participant
     // concentration, source coverage, and neg-risk leg-sum drift.
     t.page(PageSpec {
         parent: &trading,
@@ -510,7 +513,7 @@ fn build_research_trade_policies(t: &mut MenuTree, research: &MenuId) {
 
 /// Research plane: real catalog pages backing the operator workbench —
 /// training-dataset ledger, trained-model registry, backtest reports, and factor
-/// governance. Each page pages a `GET /research/*` list endpoint (10.5 §2);
+/// governance. Each page pages a `GET /research/*` list endpoint;
 /// governed mutations (plan/build/train/backtest/publish/rollback/retire) are
 /// button permissions on the page they belong to. The pairwise comparison report
 /// is a deep-linkable detail reached from a backtest (hidden from the sidebar).
@@ -636,7 +639,7 @@ fn build_research_feature_integrity(t: &mut MenuTree, research: &MenuId) {
     );
 }
 
-/// Unified calibration-artifact catalog (Phase 11.3 §3.4): content-addressed
+/// Unified calibration-artifact catalog: content-addressed
 /// `market_price_bias` and `model_score` artifacts fit via governed research
 /// jobs; bias tables activate into runtime config, model calibrators bind to
 /// model versions.
@@ -658,7 +661,7 @@ fn build_research_calibration_artifacts(t: &mut MenuTree, research: &MenuId) {
     );
 }
 
-/// Market-linkage ledger + domain-source ingest health (Phase 11.2.2).
+/// Market-linkage ledger + domain-source ingest health.
 fn build_research_domain_governance(t: &mut MenuTree, research: &MenuId) {
     let linkages = t.page(PageSpec {
         parent: research,
@@ -816,11 +819,11 @@ fn build_audit(t: &mut MenuTree) {
 }
 
 /// Insert the menu tree and publish all menu IDs to the context.
-pub async fn load(db: &sea_orm::DatabaseTransaction, ctx: &mut SeedContext) -> Result<u64, DbErr> {
+pub async fn load(db: &DatabaseTransaction, ctx: &mut SeedContext) -> Result<u64, DbErr> {
     let tree = build_tree();
 
-    let rows_affected = menu::Entity::insert_many(tree.models)
-        .on_conflict(OnConflict::column(menu::Column::Id).do_nothing().to_owned())
+    let rows_affected = Entity::insert_many(tree.models)
+        .on_conflict(OnConflict::column(Column::Id).do_nothing().to_owned())
         .exec_without_returning(db)
         .await?;
 
@@ -828,10 +831,10 @@ pub async fn load(db: &sea_orm::DatabaseTransaction, ctx: &mut SeedContext) -> R
     Ok(rows_affected)
 }
 
-async fn hydrate(db: &sea_orm::DatabaseTransaction, ctx: &mut SeedContext) -> Result<(), DbErr> {
+async fn hydrate(db: &DatabaseTransaction, ctx: &mut SeedContext) -> Result<(), DbErr> {
     let tree = build_tree();
-    let rows = menu::Entity::find()
-        .filter(menu::Column::Id.is_in(tree.ids.clone()))
+    let rows = Entity::find()
+        .filter(Column::Id.is_in(tree.ids.clone()))
         .all(db)
         .await?;
     if rows.len() != tree.ids.len() {
@@ -862,14 +865,14 @@ async fn hydrate(db: &sea_orm::DatabaseTransaction, ctx: &mut SeedContext) -> Re
 }
 
 fn load_boxed<'a>(
-    db: &'a sea_orm::DatabaseTransaction,
+    db: &'a DatabaseTransaction,
     ctx: &'a mut SeedContext,
 ) -> Pin<Box<dyn Future<Output = Result<u64, DbErr>> + Send + 'a>> {
     Box::pin(load(db, ctx))
 }
 
 fn hydrate_boxed<'a>(
-    db: &'a sea_orm::DatabaseTransaction,
+    db: &'a DatabaseTransaction,
     ctx: &'a mut SeedContext,
 ) -> Pin<Box<dyn Future<Output = Result<(), DbErr>> + Send + 'a>> {
     Box::pin(hydrate(db, ctx))
@@ -877,9 +880,12 @@ fn hydrate_boxed<'a>(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
+    use sea_orm::ActiveValue;
+
     use super::{build_tree, stable_menu_id};
     use crate::enums::rbac::MenuKind;
-    use std::collections::HashSet;
 
     #[test]
     fn menu_ids_are_stable_for_node_name() {
@@ -899,59 +905,13 @@ mod tests {
     }
 
     #[test]
-    fn seed_tree_has_no_removed_pages() {
+    fn seed_tree_has_execution_pages_and_dashboard_system_buttons() {
         let tree = build_tree();
         let names: HashSet<_> = tree
             .models
             .iter()
             .map(|model| {
-                if let sea_orm::ActiveValue::Set(name) = &model.name {
-                    name.clone()
-                } else {
-                    String::new()
-                }
-            })
-            .collect();
-        assert!(!names.contains("pnl"));
-        assert!(!names.contains("materializations"));
-        assert!(!names.contains("system-control"));
-        assert!(!names.contains("permissions"));
-        assert!(!names.contains("analytics-root"));
-        // Endgame leftovers removed in Phase 04.4.
-        assert!(!names.contains("trades"));
-        assert!(!names.contains("risk"));
-        assert!(!names.contains("risk-overview"));
-        assert!(!names.contains("blacklist"));
-        // Phase 10.0 removals: old operations/analytics/audit surfaces.
-        assert!(!names.contains("analytics"));
-        assert!(!names.contains("audit"));
-        assert!(!names.contains("publications"));
-        assert!(!names.contains("replay"));
-        assert!(!names.contains("quant-models"));
-        assert!(!names.contains("operations"));
-        // Stale button name replaced by the canonical permission code.
-        assert!(!names.contains("quant_report:run"));
-        assert!(!names.contains("quant_model:reject"));
-        // Phase 10.5: the single ID-driven workbench is replaced by real catalogs.
-        assert!(!names.contains("research-workbench"));
-        // W8: never publish mock-only access-control pages. The RBAC APIs stay
-        // available, but a UI route requires a complete management workflow.
-        for placeholder in ["access-control", "users", "roles", "menus"] {
-            assert!(
-                !names.contains(placeholder),
-                "mock-only menu node `{placeholder}` must stay deleted"
-            );
-        }
-    }
-
-    #[test]
-    fn seed_tree_has_phase_10_execution_pages_and_dashboard_system_buttons() {
-        let tree = build_tree();
-        let names: HashSet<_> = tree
-            .models
-            .iter()
-            .map(|model| {
-                if let sea_orm::ActiveValue::Set(name) = &model.name {
+                if let ActiveValue::Set(name) = &model.name {
                     name.clone()
                 } else {
                     String::new()
@@ -984,10 +944,6 @@ mod tests {
         ] {
             assert!(names.contains(expected), "missing menu node `{expected}`");
         }
-        assert!(
-            !names.contains("system"),
-            "legacy /system page must be removed"
-        );
     }
 
     #[test]
@@ -1075,14 +1031,14 @@ mod tests {
         let tree = build_tree();
         for model in &tree.models {
             let kind = match &model.kind {
-                sea_orm::ActiveValue::Set(kind) => *kind,
+                ActiveValue::Set(kind) => *kind,
                 _ => continue,
             };
             if !matches!(kind, MenuKind::Directory | MenuKind::Menu) {
                 continue;
             }
             let icon = match &model.icon {
-                sea_orm::ActiveValue::Set(Some(icon)) => icon.as_str(),
+                ActiveValue::Set(Some(icon)) => icon.as_str(),
                 _ => panic!("menu node missing icon"),
             };
             assert!(

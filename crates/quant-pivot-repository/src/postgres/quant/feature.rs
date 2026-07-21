@@ -1,16 +1,17 @@
 //! Postgres-backed feature-vector repository.
 
+use quant_pivot_error::storage::StorageError;
+use quant_pivot_models::{
+    domain::quant::{FeatureVectorInfo, NewFeatureVector},
+    entities::quant_feature_vector::{Column, Entity},
+    types::FeatureVectorId,
+};
+use sea_orm::{DatabaseConnection, EntityTrait, IntoActiveModel, TransactionTrait};
+
 use crate::{
     postgres::{query::find_models_by_id_chunks, write::insert_many_returning_chunked},
     traits::FeatureRepository,
 };
-use quant_pivot_error::storage::StorageError;
-use quant_pivot_models::{
-    domain::{FeatureVectorInfo, NewFeatureVector},
-    entities::quant_feature_vector,
-    types::FeatureVectorId,
-};
-use sea_orm::{DatabaseConnection, EntityTrait, IntoActiveModel, TransactionTrait};
 
 /// Postgres-backed feature-vector repository (insert-only ledger).
 pub struct PgFeatureRepository {
@@ -28,7 +29,7 @@ impl PgFeatureRepository {
 #[async_trait::async_trait]
 impl FeatureRepository for PgFeatureRepository {
     async fn create(&self, vector: NewFeatureVector) -> Result<FeatureVectorInfo, StorageError> {
-        let model = quant_feature_vector::Entity::insert(vector.into_active_model())
+        let model = Entity::insert(vector.into_active_model())
             .exec_with_returning(&self.db)
             .await
             .map_err(StorageError::from)?;
@@ -43,8 +44,7 @@ impl FeatureRepository for PgFeatureRepository {
             return Ok(Vec::new());
         }
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let models =
-            insert_many_returning_chunked::<quant_feature_vector::Entity, _>(&txn, vectors).await?;
+        let models = insert_many_returning_chunked::<Entity, _>(&txn, vectors).await?;
         txn.commit().await.map_err(StorageError::from)?;
         Ok(models.into_iter().map(Into::into).collect())
     }
@@ -53,7 +53,7 @@ impl FeatureRepository for PgFeatureRepository {
         &self,
         id: &FeatureVectorId,
     ) -> Result<Option<FeatureVectorInfo>, StorageError> {
-        quant_feature_vector::Entity::find_by_id(id.clone())
+        Entity::find_by_id(id.clone())
             .one(&self.db)
             .await
             .map_err(StorageError::from)
@@ -64,12 +64,8 @@ impl FeatureRepository for PgFeatureRepository {
         &self,
         ids: &[FeatureVectorId],
     ) -> Result<Vec<FeatureVectorInfo>, StorageError> {
-        find_models_by_id_chunks::<quant_feature_vector::Entity, _, _>(
-            &self.db,
-            ids,
-            quant_feature_vector::Column::FeatureVectorId,
-        )
-        .await
-        .map(|rows| rows.into_iter().map(Into::into).collect())
+        find_models_by_id_chunks::<Entity, _, _>(&self.db, ids, Column::FeatureVectorId)
+            .await
+            .map(|rows| rows.into_iter().map(Into::into).collect())
     }
 }

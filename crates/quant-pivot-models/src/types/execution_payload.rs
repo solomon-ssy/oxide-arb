@@ -3,10 +3,10 @@
 //! Content contract for `entry_order_json` / `exit_policy_json`. Defined here
 //! (below the entity layer) so the entity uses them directly as JSONB columns —
 //! never a bare `serde_json::Value`. They are the **executable projection** of a
-//! recommendation's `EntryPlan` / `ExitPlan` (parent `01-domain-model-and-schema.md`
-//! §10.4 `EntryOrderSpec` / `ExitPolicy`).
+//! recommendation's `EntryPlan` / `ExitPlan`, materialized as
+//! `EntryOrderSpec` / `ExitPolicy`.
 //!
-//! The order-intent **write path** lands in a later phase; this module only fixes
+//! The order-intent write path owns mutation; this module defines
 //! the strong-typed contract so the dormant table never carries a bare `Value`.
 
 use chrono::{DateTime, Utc};

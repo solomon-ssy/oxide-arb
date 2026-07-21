@@ -1,20 +1,23 @@
-//! Per-connection WebSocket session loop (Phase 0).
+//! Per-connection WebSocket session loop.
 
-use actix_web::web;
-use actix_ws::{Message, MessageStream, Session};
-use futures_util::StreamExt;
 use std::{
     collections::HashSet,
     sync::{Arc, RwLock},
     time::{Duration, Instant},
 };
 
+use actix_web::web::Data;
+use actix_ws::{Message, MessageStream, Session};
+use futures_util::StreamExt;
 use quant_pivot_models::{
     domain::{
-        ClientCommand, SubscriptionKey, SyncSnapshot, SystemStatusView, WsChannel, WsEnvelope,
+        api::SystemStatusView,
+        ws::{ClientCommand, SubscriptionKey, SyncSnapshot, WsChannel, WsEnvelope},
     },
     enums::rbac::{Operation, ResourceType, UserStatus},
 };
+use tokio::time::MissedTickBehavior;
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     state::AppState,
@@ -26,7 +29,7 @@ const CLIENT_TIMEOUT: Duration = Duration::from_secs(30);
 const OUTBOUND_CAPACITY: usize = 256;
 
 pub struct SessionContext {
-    pub state: web::Data<AppState>,
+    pub state: Data<AppState>,
     pub registry: SessionRegistry,
     pub user_id: String,
     pub family_id: String,
@@ -48,7 +51,7 @@ impl SessionContext {
 pub async fn run(mut session: Session, mut msg_stream: MessageStream, ctx: SessionContext) {
     let subscriptions = Arc::new(RwLock::new(HashSet::<SubscriptionKey>::new()));
     let (outbound_tx, outbound_rx) = flume::bounded::<String>(OUTBOUND_CAPACITY);
-    let cancellation = tokio_util::sync::CancellationToken::new();
+    let cancellation = CancellationToken::new();
     let session_id = ctx.registry.register(SessionHandle {
         outbound: outbound_tx,
         subscriptions: Arc::clone(&subscriptions),
@@ -68,7 +71,7 @@ pub async fn run(mut session: Session, mut msg_stream: MessageStream, ctx: Sessi
     }
 
     let mut heartbeat = tokio::time::interval(HEARTBEAT_INTERVAL);
-    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    heartbeat.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut last_pong = Instant::now();
 
     loop {

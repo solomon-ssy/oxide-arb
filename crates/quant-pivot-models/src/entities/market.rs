@@ -1,5 +1,10 @@
 //! `markets` table entity.
 
+use chrono::{DateTime, Utc};
+use sea_orm::entity::prelude::*;
+use serde::{Deserialize, Serialize};
+
+use super::event;
 use crate::{
     enums::{
         catalog::CatalogFilterReason,
@@ -8,9 +13,6 @@ use crate::{
     },
     types::{ContentHash, EventId, MarketId, TokenId},
 };
-use chrono::{DateTime, Utc};
-use sea_orm::entity::prelude::*;
-use serde::{Deserialize, Serialize};
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]
@@ -23,7 +25,7 @@ pub struct Model {
     pub question: String,
     #[sea_orm(column_type = "Text")]
     pub slug: String,
-    /// Market rules text (resolution-source grounding anchor; 11.2.2).
+    /// Market rules text used as a resolution-source grounding anchor.
     #[sea_orm(column_type = "Text", nullable)]
     pub description: Option<String>,
     /// Category memberships inherited from the parent event's Gamma tags.
@@ -51,7 +53,7 @@ pub struct Model {
         from = "event_id",
         to = "event_id"
     )]
-    pub event: BelongsTo<super::event::Entity>,
+    pub event: BelongsTo<event::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

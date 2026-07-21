@@ -1,7 +1,9 @@
 use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    domain::{InsertFinalOutcome, NewRecommendationAttribution, RecommendationAttributionInfo},
+    domain::quant::{
+        InsertFinalOutcome, NewRecommendationAttribution, RecommendationAttributionInfo,
+    },
     types::RecommendationId,
 };
 

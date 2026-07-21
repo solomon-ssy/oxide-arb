@@ -6,11 +6,15 @@ use arc_swap::ArcSwap;
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     domain::{
-        ExecutionRecoveryStep, ExecutionRecoverySummary, ExecutionRecoveryView, KillSwitchPort,
-        KillSwitchView, PageRequest, Paginated, ReconciliationListQuery, ReconciliationView,
+        api::{
+            ExecutionRecoveryStep, ExecutionRecoverySummary, ExecutionRecoveryView,
+            ReconciliationListQuery, ReconciliationView,
+        },
+        governance::KillSwitchView,
+        pagination::{PageRequest, Paginated},
+        ports::KillSwitchPort,
     },
-    enums::execution::ReconciliationResult,
-    enums::quant::QuantRuntimeMode,
+    enums::{execution::ReconciliationResult, quant::QuantRuntimeMode},
 };
 use quant_pivot_repository::traits::ReconciliationRepository;
 
@@ -91,7 +95,7 @@ impl ExecutionRecoveryCoordinator {
     }
 }
 
-/// Build the lightweight recovery summary for [`SystemStatus`](quant_pivot_models::domain::SystemStatus).
+/// Build the lightweight recovery summary for [`SystemStatus`](quant_pivot_models::domain::governance::SystemStatus).
 pub async fn build_execution_recovery_summary(
     reconciliation: &Arc<dyn ReconciliationRepository>,
     kill_switch: &Arc<dyn KillSwitchPort>,
@@ -176,12 +180,13 @@ fn summary_from_parts(
 
 #[cfg(test)]
 mod tests {
-    use super::summary_from_parts;
     use chrono::Utc;
     use quant_pivot_models::{
-        domain::{ExecutionRecoveryStep, KillSwitchView},
+        domain::{api::ExecutionRecoveryStep, governance::KillSwitchView},
         enums::{execution::KillSwitchState, quant::QuantRuntimeMode},
     };
+
+    use super::summary_from_parts;
 
     fn kill_switch(state: KillSwitchState, requires_ack: bool) -> KillSwitchView {
         KillSwitchView {

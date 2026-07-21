@@ -1,7 +1,7 @@
 //! Strongly typed `PostgreSQL` enums for the Gamma catalog ledger.
 
 use sea_orm::{ActiveValue, IntoActiveValue};
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// A legitimate Gamma pre-listing object that cannot yet enter the canonical
 /// market projection because its venue identity is incomplete.
@@ -96,7 +96,7 @@ impl IntoActiveValue<Vec<CatalogFilterReason>> for CatalogFilterReasonSet {
 }
 
 impl Serialize for CatalogFilterReasonSet {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.collect_seq(self.iter())
     }
 }

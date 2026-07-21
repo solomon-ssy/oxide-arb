@@ -1,8 +1,9 @@
 //! Lock-free process-wide [`QuantRuntimeMode`] holder.
 
+use std::sync::Arc;
+
 use arc_swap::{ArcSwap, Guard};
 use quant_pivot_models::enums::quant::QuantRuntimeMode;
-use std::sync::Arc;
 
 /// Hot-path readable runtime mode shared across ingest, web, and future report planes.
 #[derive(Debug, Clone)]

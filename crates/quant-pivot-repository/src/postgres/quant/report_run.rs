@@ -1,26 +1,42 @@
 //! `PostgreSQL` durable report-run queue and lease ledger.
 
-use crate::{
-    postgres::{
-        governance::runtime_config::{acquire_activation_lock, do_load_current},
-        primitives,
-        query::paginate_mapped,
-    },
-    traits::ReportRunRepository,
-};
+use std::collections::{BTreeMap, HashSet};
+
 use chrono::{DateTime, Duration, Utc};
-use quant_pivot_error::storage::{StorageError, entity};
+use quant_pivot_error::storage::{
+    StorageError,
+    entity::{
+        DECISION_POLICY_SNAPSHOT, QUANT_REPORT_RUN, QUANT_REPORT_SCHEDULE_GAP,
+        QUANT_REPORT_SCHEDULE_STATE,
+    },
+};
 use quant_pivot_models::{
     domain::{
-        EnqueueReportRunOutcome, MaterializeReportSchedule, MaterializeReportScheduleOutcome,
-        NewReportRun, PageWindow, Paginated, ReconcileReportSchedule,
-        ReconcileReportSchedulesOutcome, ReportRunClaimConfig, ReportRunInfo, ReportRunListQuery,
-        ReportScheduleGapInfo, ReportScheduleGapListQuery, ReportScheduleHealthInfo,
-        ReportScheduleStateInfo,
+        api::{ReportRunListQuery, ReportScheduleGapListQuery},
+        pagination::{PageWindow, Paginated},
+        quant::{
+            EnqueueReportRunOutcome, MaterializeReportSchedule, MaterializeReportScheduleOutcome,
+            NewReportRun, ReconcileReportSchedule, ReconcileReportSchedulesOutcome,
+            ReportRunClaimConfig, ReportRunInfo, ReportScheduleGapInfo, ReportScheduleHealthInfo,
+            ReportScheduleStateInfo,
+        },
     },
     entities::{
-        quant_recommendation_report, quant_report_run, quant_report_schedule_gap,
-        quant_report_schedule_state, research_profile_artifact,
+        quant_recommendation_report::{
+            Column as QuantRecommendationReportColumn, Entity as QuantRecommendationReportEntity,
+        },
+        quant_report_run::{Column, Entity, Model},
+        quant_report_schedule_gap::{
+            ActiveModel, Column as QuantReportScheduleGapColumn,
+            Entity as QuantReportScheduleGapEntity, Model as QuantReportScheduleGapModel,
+        },
+        quant_report_schedule_state::{
+            ActiveModel as QuantReportScheduleStateActiveModel,
+            Column as QuantReportScheduleStateColumn, Entity as QuantReportScheduleStateEntity,
+        },
+        research_profile_artifact::{
+            Column as ResearchProfileArtifactColumn, Entity as ResearchProfileArtifactEntity,
+        },
     },
     enums::quant::{
         RecommendationReportStatus, ReportRunStatus, ReportRunTerminalReason,
@@ -32,12 +48,20 @@ use quant_pivot_models::{
     },
 };
 use sea_orm::{
-    ActiveModelTrait, ActiveValue, ColumnTrait, DatabaseConnection, DatabaseTransaction,
+    ActiveModelTrait, ActiveValue, ColumnTrait, Condition, DatabaseConnection, DatabaseTransaction,
     EntityTrait, ExprTrait, IntoActiveModel, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect,
     TransactionTrait,
     sea_query::{Alias, Expr, LockBehavior, LockType},
 };
-use std::collections::{BTreeMap, HashSet};
+
+use crate::{
+    postgres::{
+        governance::runtime_config::{acquire_activation_lock, do_load_current},
+        primitives,
+        query::paginate_mapped,
+    },
+    traits::ReportRunRepository,
+};
 
 const REPORT_RUN_QUEUE_LOCK_KEY: i64 = 0x_11_08_51_55;
 const REPORT_RUN_CLAIM_LOCK_KEY: i64 = 0x_11_08_43_4c;
@@ -59,13 +83,13 @@ impl PgReportRunRepository {
 fn checked_duration(field: &'static str, secs: u64) -> Result<Duration, StorageError> {
     let secs = i64::try_from(secs).map_err(|error| {
         StorageError::invariant_violation(
-            Some(entity::QUANT_REPORT_RUN),
+            Some(QUANT_REPORT_RUN),
             format!("{field} exceeds i64 seconds: {error}"),
         )
     })?;
     if secs <= 0 {
         return Err(StorageError::invariant_violation(
-            Some(entity::QUANT_REPORT_RUN),
+            Some(QUANT_REPORT_RUN),
             format!("{field} must be greater than zero"),
         ));
     }
@@ -78,12 +102,12 @@ async fn expire_stale_ad_hoc(
     ttl: Duration,
 ) -> Result<(), StorageError> {
     let cutoff = now - ttl;
-    let rows = quant_report_run::Entity::find()
-        .filter(quant_report_run::Column::Status.eq(ReportRunStatus::Queued))
-        .filter(quant_report_run::Column::TriggerKind.eq(ReportTriggerKind::AdHoc))
-        .filter(quant_report_run::Column::RequestedAt.lte(cutoff))
-        .order_by_asc(quant_report_run::Column::RequestedAt)
-        .order_by_asc(quant_report_run::Column::ReportRunId)
+    let rows = Entity::find()
+        .filter(Column::Status.eq(ReportRunStatus::Queued))
+        .filter(Column::TriggerKind.eq(ReportTriggerKind::AdHoc))
+        .filter(Column::RequestedAt.lte(cutoff))
+        .order_by_asc(Column::RequestedAt)
+        .order_by_asc(Column::ReportRunId)
         .lock_exclusive()
         .all(txn)
         .await
@@ -109,7 +133,7 @@ fn validate_new_ad_hoc(run: &NewReportRun) -> Result<(), StorageError> {
         || run.scheduled_for.is_some()
     {
         return Err(StorageError::invariant_violation(
-            Some(entity::QUANT_REPORT_RUN),
+            Some(QUANT_REPORT_RUN),
             "ad-hoc enqueue requires queued status, request id, and no schedule occurrence",
         ));
     }
@@ -117,65 +141,49 @@ fn validate_new_ad_hoc(run: &NewReportRun) -> Result<(), StorageError> {
         || run.knowledge_lag_secs.is_some_and(|value| value < 0)
     {
         return Err(StorageError::invariant_violation(
-            Some(entity::QUANT_REPORT_RUN),
+            Some(QUANT_REPORT_RUN),
             "ad-hoc report overrides must be non-negative and top_n must be positive",
         ));
     }
     Ok(())
 }
 
-fn page_condition(query: &ReportRunListQuery) -> sea_orm::Condition {
-    sea_orm::Condition::all()
-        .add_option(
-            query
-                .status
-                .map(|status| quant_report_run::Column::Status.eq(status)),
-        )
-        .add_option(
-            query
-                .trigger_kind
-                .map(|kind| quant_report_run::Column::TriggerKind.eq(kind)),
-        )
+fn page_condition(query: &ReportRunListQuery) -> Condition {
+    Condition::all()
+        .add_option(query.status.map(|status| Column::Status.eq(status)))
+        .add_option(query.trigger_kind.map(|kind| Column::TriggerKind.eq(kind)))
         .add_option(
             query
                 .schedule_id
                 .as_ref()
-                .map(|id| quant_report_run::Column::ScheduleId.eq(id.clone())),
+                .map(|id| Column::ScheduleId.eq(id.clone())),
         )
-        .add_option(
-            query
-                .from
-                .map(|from| quant_report_run::Column::RequestedAt.gte(from)),
-        )
-        .add_option(
-            query
-                .to
-                .map(|to| quant_report_run::Column::RequestedAt.lt(to)),
-        )
+        .add_option(query.from.map(|from| Column::RequestedAt.gte(from)))
+        .add_option(query.to.map(|to| Column::RequestedAt.lt(to)))
 }
 
-fn gap_page_condition(query: &ReportScheduleGapListQuery) -> sea_orm::Condition {
-    sea_orm::Condition::all()
+fn gap_page_condition(query: &ReportScheduleGapListQuery) -> Condition {
+    Condition::all()
         .add_option(
             query
                 .schedule_id
                 .as_ref()
-                .map(|id| quant_report_schedule_gap::Column::ScheduleId.eq(id.clone())),
+                .map(|id| QuantReportScheduleGapColumn::ScheduleId.eq(id.clone())),
         )
         .add_option(
             query
                 .reason
-                .map(|reason| quant_report_schedule_gap::Column::Reason.eq(reason)),
+                .map(|reason| QuantReportScheduleGapColumn::Reason.eq(reason)),
         )
         .add_option(
             query
                 .from
-                .map(|from| quant_report_schedule_gap::Column::DetectedAt.gte(from)),
+                .map(|from| QuantReportScheduleGapColumn::DetectedAt.gte(from)),
         )
         .add_option(
             query
                 .to
-                .map(|to| quant_report_schedule_gap::Column::DetectedAt.lt(to)),
+                .map(|to| QuantReportScheduleGapColumn::DetectedAt.lt(to)),
         )
 }
 
@@ -186,14 +194,14 @@ async fn verify_active_config(
     acquire_activation_lock(txn).await?;
     let current = do_load_current(txn).await?.ok_or_else(|| {
         StorageError::state_conflict(
-            entity::DECISION_POLICY_SNAPSHOT,
+            DECISION_POLICY_SNAPSHOT,
             Option::<&DecisionPolicySnapshotId>::None,
             "no active runtime config",
         )
     })?;
     if current.decision_policy_snapshot_id != *expected {
         return Err(StorageError::state_conflict(
-            entity::DECISION_POLICY_SNAPSHOT,
+            DECISION_POLICY_SNAPSHOT,
             Some(expected),
             "runtime config changed during report schedule operation",
         ));
@@ -206,11 +214,11 @@ async fn skip_queued_schedule(
     schedule_id: &ReportScheduleId,
     reason: ReportRunTerminalReason,
     occurred_at: DateTime<Utc>,
-) -> Result<Option<quant_report_run::Model>, StorageError> {
-    let row = quant_report_run::Entity::find()
-        .filter(quant_report_run::Column::Status.eq(ReportRunStatus::Queued))
-        .filter(quant_report_run::Column::TriggerKind.eq(ReportTriggerKind::Scheduled))
-        .filter(quant_report_run::Column::ScheduleId.eq(schedule_id.clone()))
+) -> Result<Option<Model>, StorageError> {
+    let row = Entity::find()
+        .filter(Column::Status.eq(ReportRunStatus::Queued))
+        .filter(Column::TriggerKind.eq(ReportTriggerKind::Scheduled))
+        .filter(Column::ScheduleId.eq(schedule_id.clone()))
         .lock_exclusive()
         .one(txn)
         .await
@@ -243,14 +251,14 @@ struct ScheduleGapInsert<'a> {
 async fn insert_schedule_gap(
     txn: &DatabaseTransaction,
     gap: ScheduleGapInsert<'_>,
-) -> Result<quant_report_schedule_gap::Model, StorageError> {
+) -> Result<QuantReportScheduleGapModel, StorageError> {
     if gap.count <= 0 || gap.first > gap.last {
         return Err(StorageError::invariant_violation(
-            Some(entity::QUANT_REPORT_SCHEDULE_GAP),
+            Some(QUANT_REPORT_SCHEDULE_GAP),
             "schedule gap requires a positive count and ordered occurrence range",
         ));
     }
-    quant_report_schedule_gap::ActiveModel {
+    ActiveModel {
         gap_id: ActiveValue::Set(ReportScheduleGapId::from_v7()),
         schedule_id: ActiveValue::Set(gap.schedule_id.clone()),
         decision_policy_snapshot_id: ActiveValue::Set(gap.decision_policy_snapshot_id.clone()),
@@ -286,7 +294,7 @@ impl ReportRunRepository for PgReportRunRepository {
                     .is_some()
             {
                 return Err(StorageError::invariant_violation(
-                    Some(entity::QUANT_REPORT_SCHEDULE_STATE),
+                    Some(QUANT_REPORT_SCHEDULE_STATE),
                     "schedule reconcile requires unique non-empty ids bound to the active config",
                 ));
             }
@@ -295,8 +303,8 @@ impl ReportRunRepository for PgReportRunRepository {
         primitives::advisory_xact_lock(&txn, REPORT_SCHEDULE_LOCK_KEY).await?;
         verify_active_config(&txn, decision_policy_snapshot_id).await?;
         let now = primitives::statement_timestamp(&txn).await?;
-        let existing = quant_report_schedule_state::Entity::find()
-            .order_by_asc(quant_report_schedule_state::Column::ScheduleId)
+        let existing = QuantReportScheduleStateEntity::find()
+            .order_by_asc(QuantReportScheduleStateColumn::ScheduleId)
             .lock_exclusive()
             .all(&txn)
             .await
@@ -322,7 +330,7 @@ impl ReportRunRepository for PgReportRunRepository {
             {
                 let scheduled_for = skipped.scheduled_for.ok_or_else(|| {
                     StorageError::invariant_violation(
-                        Some(entity::QUANT_REPORT_RUN),
+                        Some(QUANT_REPORT_RUN),
                         "queued scheduled run has no scheduled_for",
                     )
                 })?;
@@ -374,7 +382,7 @@ impl ReportRunRepository for PgReportRunRepository {
             if visited.contains(&schedule_id) {
                 continue;
             }
-            let created = quant_report_schedule_state::ActiveModel {
+            let created = QuantReportScheduleStateActiveModel {
                 schedule_id: ActiveValue::Set(schedule_id),
                 decision_policy_snapshot_id: ActiveValue::Set(decision_policy_snapshot_id.clone()),
                 spec_hash: ActiveValue::Set(spec.spec_hash),
@@ -401,8 +409,8 @@ impl ReportRunRepository for PgReportRunRepository {
     }
 
     async fn list_schedule_states(&self) -> Result<Vec<ReportScheduleStateInfo>, StorageError> {
-        quant_report_schedule_state::Entity::find()
-            .order_by_asc(quant_report_schedule_state::Column::ScheduleId)
+        QuantReportScheduleStateEntity::find()
+            .order_by_asc(QuantReportScheduleStateColumn::ScheduleId)
             .all(&self.db)
             .await
             .map_err(StorageError::from)
@@ -425,7 +433,7 @@ impl ReportRunRepository for PgReportRunRepository {
                     || command.earlier_last_scheduled_for.is_none()))
         {
             return Err(StorageError::invariant_violation(
-                Some(entity::QUANT_REPORT_SCHEDULE_STATE),
+                Some(QUANT_REPORT_SCHEDULE_STATE),
                 "invalid latest-only schedule materialization window",
             ));
         }
@@ -433,13 +441,13 @@ impl ReportRunRepository for PgReportRunRepository {
         primitives::advisory_xact_lock(&txn, REPORT_SCHEDULE_LOCK_KEY).await?;
         verify_active_config(&txn, &command.decision_policy_snapshot_id).await?;
         let now = primitives::statement_timestamp(&txn).await?;
-        let state = quant_report_schedule_state::Entity::find_by_id(command.schedule_id.clone())
+        let state = QuantReportScheduleStateEntity::find_by_id(command.schedule_id.clone())
             .lock_exclusive()
             .one(&txn)
             .await
             .map_err(StorageError::from)?
             .ok_or_else(|| {
-                StorageError::not_found(entity::QUANT_REPORT_SCHEDULE_STATE, &command.schedule_id)
+                StorageError::not_found(QUANT_REPORT_SCHEDULE_STATE, &command.schedule_id)
             })?;
         let version_changed =
             state.decision_policy_snapshot_id != command.decision_policy_snapshot_id;
@@ -447,7 +455,7 @@ impl ReportRunRepository for PgReportRunRepository {
         let cursor_changed = state.next_scheduled_for != command.expected_next_scheduled_for;
         if !state.enabled || version_changed || spec_changed || cursor_changed {
             return Err(StorageError::state_conflict(
-                entity::QUANT_REPORT_SCHEDULE_STATE,
+                QUANT_REPORT_SCHEDULE_STATE,
                 Some(&command.schedule_id),
                 "schedule cursor/spec changed before occurrence materialization",
             ));
@@ -468,7 +476,7 @@ impl ReportRunRepository for PgReportRunRepository {
                 .or(command.earlier_first_scheduled_for)
                 .ok_or_else(|| {
                     StorageError::invariant_violation(
-                        Some(entity::QUANT_REPORT_SCHEDULE_GAP),
+                        Some(QUANT_REPORT_SCHEDULE_GAP),
                         "coalesced schedule window has no first occurrence",
                     )
                 })?;
@@ -477,7 +485,7 @@ impl ReportRunRepository for PgReportRunRepository {
                 .or(skipped_scheduled_for)
                 .ok_or_else(|| {
                     StorageError::invariant_violation(
-                        Some(entity::QUANT_REPORT_SCHEDULE_GAP),
+                        Some(QUANT_REPORT_SCHEDULE_GAP),
                         "coalesced schedule window has no last occurrence",
                     )
                 })?;
@@ -514,7 +522,7 @@ impl ReportRunRepository for PgReportRunRepository {
                 command.latest_scheduled_for.to_rfc3339()
             ))
             .map_err(|error| {
-                StorageError::invariant_violation(Some(entity::QUANT_REPORT_RUN), error.to_string())
+                StorageError::invariant_violation(Some(QUANT_REPORT_RUN), error.to_string())
             })?,
             schedule_id: Some(command.schedule_id.clone()),
             request_id: None,
@@ -552,10 +560,10 @@ impl ReportRunRepository for PgReportRunRepository {
         query: ReportScheduleGapListQuery,
     ) -> Result<Paginated<ReportScheduleGapInfo>, StorageError> {
         paginate_mapped(
-            quant_report_schedule_gap::Entity::find()
+            QuantReportScheduleGapEntity::find()
                 .filter(gap_page_condition(&query))
-                .order_by_desc(quant_report_schedule_gap::Column::DetectedAt)
-                .order_by_desc(quant_report_schedule_gap::Column::GapId),
+                .order_by_desc(QuantReportScheduleGapColumn::DetectedAt)
+                .order_by_desc(QuantReportScheduleGapColumn::GapId),
             &self.db,
             PageWindow::from_query(&query),
             Into::into,
@@ -567,37 +575,34 @@ impl ReportRunRepository for PgReportRunRepository {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
         let observed_at = primitives::statement_timestamp(&txn).await?;
         let since = observed_at - Duration::hours(24);
-        let active_run = quant_report_run::Entity::find()
-            .filter(quant_report_run::Column::Status.eq(ReportRunStatus::Running))
-            .order_by_asc(quant_report_run::Column::StartedAt)
+        let active_run = Entity::find()
+            .filter(Column::Status.eq(ReportRunStatus::Running))
+            .order_by_asc(Column::StartedAt)
             .one(&txn)
             .await
             .map_err(StorageError::from)?
             .map(Into::into);
-        let queued_run_count = quant_report_run::Entity::find()
-            .filter(quant_report_run::Column::Status.eq(ReportRunStatus::Queued))
+        let queued_run_count = Entity::find()
+            .filter(Column::Status.eq(ReportRunStatus::Queued))
             .count(&txn)
             .await
             .map_err(StorageError::from)?;
-        let failed_run_count_24h = quant_report_run::Entity::find()
-            .filter(
-                quant_report_run::Column::Status
-                    .is_in([ReportRunStatus::Failed, ReportRunStatus::Abandoned]),
-            )
-            .filter(quant_report_run::Column::FinishedAt.gte(since))
+        let failed_run_count_24h = Entity::find()
+            .filter(Column::Status.is_in([ReportRunStatus::Failed, ReportRunStatus::Abandoned]))
+            .filter(Column::FinishedAt.gte(since))
             .count(&txn)
             .await
             .map_err(StorageError::from)?;
-        let gap_count_24h = quant_report_schedule_gap::Entity::find()
-            .filter(quant_report_schedule_gap::Column::DetectedAt.gte(since))
+        let gap_count_24h = QuantReportScheduleGapEntity::find()
+            .filter(QuantReportScheduleGapColumn::DetectedAt.gte(since))
             .count(&txn)
             .await
             .map_err(StorageError::from)?;
-        let missed_occurrence_count_24h = quant_report_schedule_gap::Entity::find()
-            .filter(quant_report_schedule_gap::Column::DetectedAt.gte(since))
+        let missed_occurrence_count_24h = QuantReportScheduleGapEntity::find()
+            .filter(QuantReportScheduleGapColumn::DetectedAt.gte(since))
             .select_only()
             .column_as(
-                Expr::col(quant_report_schedule_gap::Column::MissedCount)
+                Expr::col(QuantReportScheduleGapColumn::MissedCount)
                     .sum()
                     .cast_as(Alias::new("bigint"))
                     .if_null(0_i64),
@@ -609,35 +614,33 @@ impl ReportRunRepository for PgReportRunRepository {
             .map_err(StorageError::from)?
             .ok_or_else(|| {
                 StorageError::invariant_violation(
-                    Some(entity::QUANT_REPORT_SCHEDULE_GAP),
+                    Some(QUANT_REPORT_SCHEDULE_GAP),
                     "schedule health aggregate returned no row",
                 )
             })?;
-        let prepared_report_count = quant_recommendation_report::Entity::find()
+        let prepared_report_count = QuantRecommendationReportEntity::find()
             .filter(
-                quant_recommendation_report::Column::Status
-                    .eq(RecommendationReportStatus::Prepared),
+                QuantRecommendationReportColumn::Status.eq(RecommendationReportStatus::Prepared),
             )
             .count(&txn)
             .await
             .map_err(StorageError::from)?;
-        let current_reports = quant_recommendation_report::Entity::find()
-            .inner_join(research_profile_artifact::Entity)
+        let current_reports = QuantRecommendationReportEntity::find()
+            .inner_join(ResearchProfileArtifactEntity)
             .filter(
-                quant_recommendation_report::Column::Status
-                    .eq(RecommendationReportStatus::Published),
+                QuantRecommendationReportColumn::Status.eq(RecommendationReportStatus::Published),
             )
-            .order_by_desc(quant_recommendation_report::Column::PublishedAt)
-            .order_by_asc(research_profile_artifact::Column::ResearchProfileId)
-            .order_by_asc(quant_recommendation_report::Column::ReportKind)
+            .order_by_desc(QuantRecommendationReportColumn::PublishedAt)
+            .order_by_asc(ResearchProfileArtifactColumn::ResearchProfileId)
+            .order_by_asc(QuantRecommendationReportColumn::ReportKind)
             .all(&txn)
             .await
             .map_err(StorageError::from)?
             .into_iter()
             .map(Into::into)
             .collect();
-        let schedules = quant_report_schedule_state::Entity::find()
-            .order_by_asc(quant_report_schedule_state::Column::ScheduleId)
+        let schedules = QuantReportScheduleStateEntity::find()
+            .order_by_asc(QuantReportScheduleStateColumn::ScheduleId)
             .all(&txn)
             .await
             .map_err(StorageError::from)?
@@ -667,15 +670,15 @@ impl ReportRunRepository for PgReportRunRepository {
         validate_new_ad_hoc(&run)?;
         if capacity == 0 {
             return Err(StorageError::invariant_violation(
-                Some(entity::QUANT_REPORT_RUN),
+                Some(QUANT_REPORT_RUN),
                 "ad-hoc queue capacity must be greater than zero",
             ));
         }
         let ttl = checked_duration("ad_hoc_ttl_secs", ttl_secs)?;
         let txn = self.db.begin().await.map_err(StorageError::from)?;
         primitives::advisory_xact_lock(&txn, REPORT_RUN_QUEUE_LOCK_KEY).await?;
-        if let Some(existing) = quant_report_run::Entity::find()
-            .filter(quant_report_run::Column::TriggerKey.eq(run.trigger_key.clone()))
+        if let Some(existing) = Entity::find()
+            .filter(Column::TriggerKey.eq(run.trigger_key.clone()))
             .one(&txn)
             .await
             .map_err(StorageError::from)?
@@ -689,7 +692,7 @@ impl ReportRunRepository for PgReportRunRepository {
                 || existing.knowledge_lag_secs != run.knowledge_lag_secs
             {
                 return Err(StorageError::state_conflict(
-                    entity::QUANT_REPORT_RUN,
+                    QUANT_REPORT_RUN,
                     Some(&existing.report_run_id),
                     "trigger key is already bound to different report request semantics",
                 ));
@@ -699,17 +702,14 @@ impl ReportRunRepository for PgReportRunRepository {
         }
         let now = primitives::statement_timestamp(&txn).await?;
         expire_stale_ad_hoc(&txn, now, ttl).await?;
-        let queued = quant_report_run::Entity::find()
-            .filter(quant_report_run::Column::Status.eq(ReportRunStatus::Queued))
-            .filter(quant_report_run::Column::TriggerKind.eq(ReportTriggerKind::AdHoc))
+        let queued = Entity::find()
+            .filter(Column::Status.eq(ReportRunStatus::Queued))
+            .filter(Column::TriggerKind.eq(ReportTriggerKind::AdHoc))
             .count(&txn)
             .await
             .map_err(StorageError::from)?;
         if queued >= capacity {
-            return Err(StorageError::capacity_exceeded(
-                entity::QUANT_REPORT_RUN,
-                capacity,
-            ));
+            return Err(StorageError::capacity_exceeded(QUANT_REPORT_RUN, capacity));
         }
         let mut active = run.into_active_model();
         active.requested_at = ActiveValue::Set(now);
@@ -722,7 +722,7 @@ impl ReportRunRepository for PgReportRunRepository {
         &self,
         run_id: &ReportRunId,
     ) -> Result<Option<ReportRunInfo>, StorageError> {
-        quant_report_run::Entity::find_by_id(run_id.clone())
+        Entity::find_by_id(run_id.clone())
             .one(&self.db)
             .await
             .map_err(StorageError::from)
@@ -733,8 +733,8 @@ impl ReportRunRepository for PgReportRunRepository {
         &self,
         trigger_key: &ReportTriggerKey,
     ) -> Result<Option<ReportRunInfo>, StorageError> {
-        quant_report_run::Entity::find()
-            .filter(quant_report_run::Column::TriggerKey.eq(trigger_key))
+        Entity::find()
+            .filter(Column::TriggerKey.eq(trigger_key))
             .one(&self.db)
             .await
             .map_err(StorageError::from)
@@ -745,8 +745,8 @@ impl ReportRunRepository for PgReportRunRepository {
         &self,
         report_id: &RecommendationReportId,
     ) -> Result<Option<ReportRunInfo>, StorageError> {
-        quant_report_run::Entity::find()
-            .filter(quant_report_run::Column::OutputReportId.eq(report_id.clone()))
+        Entity::find()
+            .filter(Column::OutputReportId.eq(report_id.clone()))
             .one(&self.db)
             .await
             .map_err(StorageError::from)
@@ -758,10 +758,10 @@ impl ReportRunRepository for PgReportRunRepository {
         query: ReportRunListQuery,
     ) -> Result<Paginated<ReportRunInfo>, StorageError> {
         paginate_mapped(
-            quant_report_run::Entity::find()
+            Entity::find()
                 .filter(page_condition(&query))
-                .order_by_desc(quant_report_run::Column::RequestedAt)
-                .order_by_desc(quant_report_run::Column::ReportRunId),
+                .order_by_desc(Column::RequestedAt)
+                .order_by_desc(Column::ReportRunId),
             &self.db,
             PageWindow::from_query(&query),
             Into::into,
@@ -780,7 +780,7 @@ impl ReportRunRepository for PgReportRunRepository {
         let ttl = checked_duration("ad_hoc_ttl_secs", ad_hoc_ttl_secs)?;
         if config.ad_hoc_default_top_n <= 0 || config.ad_hoc_default_knowledge_lag_secs < 0 {
             return Err(StorageError::invariant_violation(
-                Some(entity::QUANT_REPORT_RUN),
+                Some(QUANT_REPORT_RUN),
                 "report-run claim defaults are invalid",
             ));
         }
@@ -796,7 +796,7 @@ impl ReportRunRepository for PgReportRunRepository {
                 .any(|schedule| schedule.top_n <= 0 || schedule.knowledge_lag_secs < 0)
         {
             return Err(StorageError::invariant_violation(
-                Some(entity::QUANT_REPORT_RUN),
+                Some(QUANT_REPORT_RUN),
                 "report-run claim schedule inputs are invalid or duplicated",
             ));
         }
@@ -805,8 +805,8 @@ impl ReportRunRepository for PgReportRunRepository {
         verify_active_config(&txn, &config.decision_policy_snapshot_id).await?;
         let now = primitives::statement_timestamp(&txn).await?;
         expire_stale_ad_hoc(&txn, now, ttl).await?;
-        let running = quant_report_run::Entity::find()
-            .filter(quant_report_run::Column::Status.eq(ReportRunStatus::Running))
+        let running = Entity::find()
+            .filter(Column::Status.eq(ReportRunStatus::Running))
             .count(&txn)
             .await
             .map_err(StorageError::from)?;
@@ -814,10 +814,10 @@ impl ReportRunRepository for PgReportRunRepository {
             txn.commit().await.map_err(StorageError::from)?;
             return Ok(None);
         }
-        let Some(row) = quant_report_run::Entity::find()
-            .filter(quant_report_run::Column::Status.eq(ReportRunStatus::Queued))
-            .order_by_asc(quant_report_run::Column::RequestedAt)
-            .order_by_asc(quant_report_run::Column::ReportRunId)
+        let Some(row) = Entity::find()
+            .filter(Column::Status.eq(ReportRunStatus::Queued))
+            .order_by_asc(Column::RequestedAt)
+            .order_by_asc(Column::ReportRunId)
             .lock_with_behavior(LockType::Update, LockBehavior::SkipLocked)
             .one(&txn)
             .await
@@ -835,13 +835,13 @@ impl ReportRunRepository for PgReportRunRepository {
             ReportTriggerKind::Scheduled => {
                 let schedule_id = row.schedule_id.as_ref().ok_or_else(|| {
                     StorageError::invariant_violation(
-                        Some(entity::QUANT_REPORT_RUN),
+                        Some(QUANT_REPORT_RUN),
                         "queued scheduled run has no schedule id",
                     )
                 })?;
                 let schedule = schedules.get(schedule_id.as_str()).ok_or_else(|| {
                     StorageError::state_conflict(
-                        entity::QUANT_REPORT_RUN,
+                        QUANT_REPORT_RUN,
                         Some(&row.report_run_id),
                         "queued run references a schedule absent from the active config",
                     )
@@ -874,18 +874,18 @@ impl ReportRunRepository for PgReportRunRepository {
         let lease = checked_duration("lease_secs", lease_secs)?;
         let txn = self.db.begin().await.map_err(StorageError::from)?;
         let now = primitives::statement_timestamp(&txn).await?;
-        let row = quant_report_run::Entity::find_by_id(run_id.clone())
+        let row = Entity::find_by_id(run_id.clone())
             .lock_exclusive()
             .one(&txn)
             .await
             .map_err(StorageError::from)?
-            .ok_or_else(|| StorageError::not_found(entity::QUANT_REPORT_RUN, run_id))?;
+            .ok_or_else(|| StorageError::not_found(QUANT_REPORT_RUN, run_id))?;
         if row.status != ReportRunStatus::Running
             || row.lease_owner != Some(worker_id)
             || row.lease_expires_at.is_none_or(|expires| expires <= now)
         {
             return Err(StorageError::state_conflict(
-                entity::QUANT_REPORT_RUN,
+                QUANT_REPORT_RUN,
                 Some(run_id),
                 "report run lease is not live and owned by this worker",
             ));
@@ -909,24 +909,24 @@ impl ReportRunRepository for PgReportRunRepository {
         let summary = error_summary.trim();
         if code.is_empty() || summary.is_empty() {
             return Err(StorageError::invariant_violation(
-                Some(entity::QUANT_REPORT_RUN),
+                Some(QUANT_REPORT_RUN),
                 "failed report run requires a non-empty error code and summary",
             ));
         }
         let txn = self.db.begin().await.map_err(StorageError::from)?;
         let now = primitives::statement_timestamp(&txn).await?;
-        let row = quant_report_run::Entity::find_by_id(run_id.clone())
+        let row = Entity::find_by_id(run_id.clone())
             .lock_exclusive()
             .one(&txn)
             .await
             .map_err(StorageError::from)?
-            .ok_or_else(|| StorageError::not_found(entity::QUANT_REPORT_RUN, run_id))?;
+            .ok_or_else(|| StorageError::not_found(QUANT_REPORT_RUN, run_id))?;
         if row.status != ReportRunStatus::Running
             || row.lease_owner != Some(worker_id)
             || row.lease_expires_at.is_none_or(|expires| expires <= now)
         {
             return Err(StorageError::state_conflict(
-                entity::QUANT_REPORT_RUN,
+                QUANT_REPORT_RUN,
                 Some(run_id),
                 "report run cannot fail after lease loss",
             ));
@@ -954,10 +954,10 @@ impl ReportRunRepository for PgReportRunRepository {
     async fn abandon_expired_runs(&self) -> Result<Vec<ReportRunInfo>, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
         let now = primitives::statement_timestamp(&txn).await?;
-        let rows = quant_report_run::Entity::find()
-            .filter(quant_report_run::Column::Status.eq(ReportRunStatus::Running))
-            .filter(quant_report_run::Column::LeaseExpiresAt.lte(now))
-            .order_by_asc(quant_report_run::Column::LeaseExpiresAt)
+        let rows = Entity::find()
+            .filter(Column::Status.eq(ReportRunStatus::Running))
+            .filter(Column::LeaseExpiresAt.lte(now))
+            .order_by_asc(Column::LeaseExpiresAt)
             .lock_with_behavior(LockType::Update, LockBehavior::SkipLocked)
             .all(&txn)
             .await
@@ -995,20 +995,20 @@ impl ReportRunRepository for PgReportRunRepository {
                 | ReportRunTerminalReason::QueueExpired
         ) {
             return Err(StorageError::invariant_violation(
-                Some(entity::QUANT_REPORT_RUN),
+                Some(QUANT_REPORT_RUN),
                 "queued report run requires a typed skip reason",
             ));
         }
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let row = quant_report_run::Entity::find_by_id(run_id.clone())
+        let row = Entity::find_by_id(run_id.clone())
             .lock_exclusive()
             .one(&txn)
             .await
             .map_err(StorageError::from)?
-            .ok_or_else(|| StorageError::not_found(entity::QUANT_REPORT_RUN, run_id))?;
+            .ok_or_else(|| StorageError::not_found(QUANT_REPORT_RUN, run_id))?;
         if row.status != ReportRunStatus::Queued {
             return Err(StorageError::illegal_transition(
-                entity::QUANT_REPORT_RUN,
+                QUANT_REPORT_RUN,
                 Some(run_id),
                 row.status,
                 ReportRunStatus::Skipped,

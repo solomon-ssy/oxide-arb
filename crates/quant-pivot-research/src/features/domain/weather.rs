@@ -7,13 +7,13 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use chrono::{DateTime, Duration, Timelike, Utc};
+use chrono::{DateTime, Duration, NaiveDate, Timelike, Utc};
 use chrono_tz::Tz;
 use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
     domain::{
-        MarketSubject, WeatherForecastPoint, WeatherObservationFact, WeatherObservationReportKind,
-        WeatherSubject,
+        data_plane::{WeatherForecastPoint, WeatherObservationFact, WeatherObservationReportKind},
+        quant::{MarketSubject, WeatherSubject},
     },
     enums::{domain::DomainFamily, feature::EvidenceSourceKind},
     hashing::CanonicalDigest,
@@ -31,7 +31,10 @@ use crate::{
     features::{
         builder::RawFeature,
         domain::{DomainComputeCtx, DomainFeatureBuilder, DomainSliceDataRef},
-        names::domain_weather as names,
+        names::domain_weather::{
+            ENSEMBLE_BIN_PROBABILITY, ENSEMBLE_SPREAD, NOAA_RESOLUTION_BASIS_RISK,
+            OBSERVED_EXTREME_HEADROOM,
+        },
         value::{EvidenceSourceRef, FeatureValue, NullReason},
     },
 };
@@ -368,20 +371,20 @@ fn compute_weather_features(
             let probability = Decimal::from(count) / Decimal::from(ensemble.member_extremes.len());
             (
                 RawFeature::present(
-                    names::ENSEMBLE_BIN_PROBABILITY,
+                    ENSEMBLE_BIN_PROBABILITY,
                     FeatureValue::Probability(Probability::new(probability)),
                     ensemble.evidence.clone(),
                 ),
                 RawFeature::present(
-                    names::ENSEMBLE_SPREAD,
+                    ENSEMBLE_SPREAD,
                     FeatureValue::Decimal(ensemble_standard_deviation(&ensemble.member_extremes)),
                     ensemble.evidence,
                 ),
             )
         }
         Err(reason) => (
-            RawFeature::missing(names::ENSEMBLE_BIN_PROBABILITY, reason),
-            RawFeature::missing(names::ENSEMBLE_SPREAD, reason),
+            RawFeature::missing(ENSEMBLE_BIN_PROBABILITY, reason),
+            RawFeature::missing(ENSEMBLE_SPREAD, reason),
         ),
     };
 
@@ -401,12 +404,12 @@ fn compute_weather_features(
     );
     let observed_headroom = match (observed_extreme, observed_evidence) {
         (Some(extreme), Some(evidence)) => RawFeature::present(
-            names::OBSERVED_EXTREME_HEADROOM,
+            OBSERVED_EXTREME_HEADROOM,
             FeatureValue::Decimal(headroom(subject, extreme)),
             evidence,
         ),
         _ => RawFeature::missing(
-            names::OBSERVED_EXTREME_HEADROOM,
+            OBSERVED_EXTREME_HEADROOM,
             NullReason::DomainSourceUnavailable,
         ),
     };
@@ -589,7 +592,7 @@ fn daily_extremes(
     secondary: Option<WeatherObservationReportKind>,
     tertiary: Option<WeatherObservationReportKind>,
     statistic: WeatherTemperatureStatistic,
-) -> BTreeMap<chrono::NaiveDate, TemperatureCelsius> {
+) -> BTreeMap<NaiveDate, TemperatureCelsius> {
     let accepted = |kind| kind == primary || secondary == Some(kind) || tertiary == Some(kind);
     let mut latest = BTreeMap::<DateTime<Utc>, &WeatherObservationFact>::new();
     for fact in facts
@@ -631,7 +634,7 @@ fn daily_extremes(
 
 fn latest_observation_evidence(
     facts: &[WeatherObservationFact],
-    local_date: chrono::NaiveDate,
+    local_date: NaiveDate,
     excluded: WeatherObservationReportKind,
     include_excluded: bool,
 ) -> Option<EvidenceSourceRef> {
@@ -704,16 +707,10 @@ fn noaa_basis_risk(
         })
         .collect::<Vec<_>>();
     let Ok(sample_count) = u64::try_from(differences.len()) else {
-        return RawFeature::missing(
-            names::NOAA_RESOLUTION_BASIS_RISK,
-            NullReason::OutOfValidRange,
-        );
+        return RawFeature::missing(NOAA_RESOLUTION_BASIS_RISK, NullReason::OutOfValidRange);
     };
     if sample_count < u64::from(config.minimum_bias_samples_per_lead) {
-        return RawFeature::missing(
-            names::NOAA_RESOLUTION_BASIS_RISK,
-            NullReason::InsufficientHistory,
-        );
+        return RawFeature::missing(NOAA_RESOLUTION_BASIS_RISK, NullReason::InsufficientHistory);
     }
     let overlap_dates = live
         .keys()
@@ -763,13 +760,10 @@ fn noaa_basis_risk(
         &differences,
         evidence_reports,
     )) else {
-        return RawFeature::missing(
-            names::NOAA_RESOLUTION_BASIS_RISK,
-            NullReason::OutOfValidRange,
-        );
+        return RawFeature::missing(NOAA_RESOLUTION_BASIS_RISK, NullReason::OutOfValidRange);
     };
     RawFeature::present(
-        names::NOAA_RESOLUTION_BASIS_RISK,
+        NOAA_RESOLUTION_BASIS_RISK,
         FeatureValue::Decimal(risk),
         EvidenceSourceRef {
             source_kind: EvidenceSourceKind::DomainExternal,
@@ -816,7 +810,9 @@ fn decimal_sqrt(value: Decimal) -> Decimal {
 mod tests {
     use chrono::{Duration, TimeZone, Utc};
     use quant_pivot_models::{
-        domain::{WeatherForecastPoint, WeatherObservationFact, WeatherObservationReportKind},
+        domain::data_plane::{
+            WeatherForecastPoint, WeatherObservationFact, WeatherObservationReportKind,
+        },
         types::{
             ContentHash, DomainInstrumentKey, DomainMeasurementUnit, DomainSourceId, IcaoStation,
             TemperatureCelsius, WeatherVariable,

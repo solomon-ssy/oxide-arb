@@ -1,5 +1,7 @@
 //! Fire-and-forget CH writer for token-level book facts.
 
+use std::{mem, sync::Arc, time::Duration};
+
 use chrono::Utc;
 use dashmap::{DashMap, mapref::entry::Entry};
 use quant_pivot_models::{
@@ -8,23 +10,28 @@ use quant_pivot_models::{
         ChDecimal64, ChPrice, ChSchemaVersion, ChShares, ChUsd, MarketResolutionRow, TradeTapeRow,
     },
     domain::{
-        book::{BookLevel, BookSnapshot, IMBALANCE_DEPTH_LEVELS, top_n_share_depth},
-        pipeline::{BookSnapshotCmd, IngressTrace, PriceDeltaCmd},
-        trade_tape::trade_tape_coverage,
+        data_plane::{
+            pipeline::{BookSnapshotCmd, IngressTrace, PriceDeltaCmd},
+            trade_tape::trade_tape_coverage::{
+                FEE_RATE, MARKET_ID, PRICE, SIDE, SIZE, TOKEN_ID, TRADE_ID,
+            },
+        },
+        market::book::{BookLevel, BookSnapshot, IMBALANCE_DEPTH_LEVELS, top_n_share_depth},
     },
-    enums::clickhouse::{
-        ChBookEventType, ChCanonicalBookEventType, ChFactSource, ChStreamSessionEndReason,
-        ChStreamSessionState, ChTradeParticipantRole, ChTradeReconciliationStatus, ChTradeSide,
-        ChTradeTapeSource,
+    enums::{
+        clickhouse::{
+            ChBookEventType, ChCanonicalBookEventType, ChFactSource, ChStreamSessionEndReason,
+            ChStreamSessionState, ChTradeParticipantRole, ChTradeReconciliationStatus, ChTradeSide,
+            ChTradeTapeSource,
+        },
+        common::{Side, TickSize},
     },
-    enums::common::{Side, TickSize},
     hashing::CanonicalDigest,
     types::{ContentHash, MarketId, Price, Shares, TokenId, Usd},
 };
 use quant_pivot_storage::write::{AsyncWriter, DurableWriter};
 use rust_decimal::Decimal;
 use serde::Serialize;
-use std::{mem, sync::Arc, time::Duration};
 use uuid::Uuid;
 
 const CANONICAL_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -340,18 +347,15 @@ impl BookFactWriter {
             return false;
         };
         let size_shares = trade_size.unwrap_or(Shares::ZERO);
-        let mut observed_field_flags = trade_tape_coverage::MARKET_ID
-            | trade_tape_coverage::TOKEN_ID
-            | trade_tape_coverage::PRICE
-            | trade_tape_coverage::TRADE_ID;
+        let mut observed_field_flags = MARKET_ID | TOKEN_ID | PRICE | TRADE_ID;
         if side.is_some() {
-            observed_field_flags |= trade_tape_coverage::SIDE;
+            observed_field_flags |= SIDE;
         }
         if trade_size.is_some() {
-            observed_field_flags |= trade_tape_coverage::SIZE;
+            observed_field_flags |= SIZE;
         }
         if fee_rate_bps.is_some() {
-            observed_field_flags |= trade_tape_coverage::FEE_RATE;
+            observed_field_flags |= FEE_RATE;
         }
         self.trades
             .write_async_timeout(
@@ -854,8 +858,9 @@ fn spread_bps(best_bid: Option<Price>, best_ask: Option<Price>) -> Option<Decima
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use quant_pivot_models::types::Shares;
+
+    use super::*;
 
     fn level(price: i64, size: i64) -> BookLevel {
         BookLevel::from_decimal_unchecked(

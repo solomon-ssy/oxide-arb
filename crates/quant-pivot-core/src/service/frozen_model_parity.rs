@@ -9,17 +9,25 @@
 
 use std::sync::Arc;
 
+use chrono::Utc;
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError, storage::StorageError};
 use quant_pivot_models::{
     clickhouse::QuantFeatureParityEventRow,
     domain::{
-        CompleteFeatureParityRun, DecisionBoundary, FeatureParityRunInfo, ModelSpecInfo,
-        ModelVersionInfo, ModelVersionParityEvidence, NewFeatureParityRun,
-        NewFrozenModelParitySubject, TrainingDatasetInfo, model_version_parity_evidence_hash,
+        data_plane::DecisionBoundary,
+        quant::{
+            CompleteFeatureParityRun, FeatureParityRunInfo, ModelSpecInfo, ModelVersionInfo,
+            ModelVersionParityEvidence, NewFeatureParityRun, NewFrozenModelParitySubject,
+            TrainingDatasetInfo, model_version_parity_evidence_hash,
+        },
     },
-    enums::quant::{
-        FeatureParityEventStatus, FeatureParityRunKind, FeatureParityRunStatus, FeatureParityStage,
-        FeatureParityStateTransition, PublicationStatus, TrainingDatasetStatus,
+    enums::{
+        model::ClassicalKind,
+        quant::{
+            FeatureParityEventStatus, FeatureParityRunKind, FeatureParityRunStatus,
+            FeatureParityStage, FeatureParityStateTransition, PublicationStatus,
+            TrainingDatasetStatus,
+        },
     },
     types::{
         ContentHash, DiagnosticCode, FeatureParityDetail, FeatureParityDetailSource,
@@ -34,20 +42,18 @@ use quant_pivot_research::{
     factors::FrozenReferenceQuantiles,
     hashing::ResearchHasher,
     model::{
-        ClassicalKind, ClassicalModelArtifact, ClassicalOutputSemantics, LabelSelector,
-        ModelArtifact, SellScorerArtifact, WeightedFactorModelArtifact,
-        fit_frozen_reference_quantiles, load_hash_verified_artifact, model_input_contract_hash,
-        weighted_training_input_hash,
+        ClassicalModelArtifact, ClassicalOutputSemantics, LabelSelector, ModelArtifact,
+        SellScorerArtifact, WeightedFactorModelArtifact, fit_frozen_reference_quantiles,
+        load_hash_verified_artifact, model_input_contract_hash, weighted_training_input_hash,
     },
     training::{LabelName, RETURN_TO_HORIZON, SETTLEMENT_OUTCOME, TrainingExample},
 };
-use serde::Serialize;
-
 #[cfg(feature = "ml-classical")]
 use quant_pivot_research::{
     model::{ClassicalRuntime, FittedInputTransform},
     training::{FeatureColumnSpec, FeatureMatrixSpec, build_training_matrix, training_input_hash},
 };
+use serde::Serialize;
 
 use crate::service::training_dataset::{
     require_dataset_materialization, verify_frozen_dataset_artifact,
@@ -734,7 +740,7 @@ struct FrozenExampleCommitment<'a> {
 fn frozen_model_evidence_rows(
     request: &FrozenEvidenceRequest<'_>,
 ) -> QuantResult<Vec<QuantFeatureParityEventRow>> {
-    let ingestion_time = chrono::Utc::now().timestamp_millis();
+    let ingestion_time = Utc::now().timestamp_millis();
     request
         .examples
         .iter()
@@ -864,11 +870,11 @@ pub(crate) fn validate_passed_model_parity_run(
 mod tests {
     use std::collections::BTreeMap;
 
-    use chrono::{Duration, Utc};
+    use chrono::{DateTime, Duration, Utc};
     use quant_pivot_models::{
         domain::{
-            DecisionClock, DecisionSource, FeatureParityRunInfo, ModelVersionInfo,
-            TrainingDatasetInfo,
+            data_plane::{DecisionClock, DecisionSource},
+            quant::{FeatureParityRunInfo, ModelVersionInfo, TrainingDatasetInfo},
         },
         enums::{
             common::MarketCategory,
@@ -890,13 +896,13 @@ mod tests {
         features::FeatureVector, model::model_input_contract_hash, selection::SelectedMarket,
         training::TrainingExample,
     };
-    use quant_pivot_test_support::{
-        execution_pg_seed::fixture_profile_ref, model_spec_fixtures::model_spec_lineage_fixture,
-    };
 
     use super::{
         FrozenEvidenceRequest, frozen_model_evidence_rows, validate_passed_model_parity_run,
         verify_input_contract_binding,
+    };
+    use crate::test_fixtures::{
+        execution_pg_seed::fixture_profile_ref, model_spec_fixtures::model_spec_lineage_fixture,
     };
 
     fn hash(seed: char) -> ContentHash {
@@ -1001,7 +1007,7 @@ mod tests {
         (version, dataset, run)
     }
 
-    fn training_example(decision_at: chrono::DateTime<Utc>) -> TrainingExample {
+    fn training_example(decision_at: DateTime<Utc>) -> TrainingExample {
         let market_id = MarketId::new("frozen-evidence-market");
         let token_id = TokenId::new("frozen-evidence-token");
         let decision_boundary = DecisionClock::new(7)

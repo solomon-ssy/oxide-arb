@@ -1,22 +1,27 @@
-//! Admin ports for the unified calibration-artifact family (Phase 11.3 §3.4).
+//! Admin ports for the unified calibration-artifact family.
 //!
-//! Covers favorite-longshot bias-table fitting (Phase 11.2.1, kind =
-//! `market_price_bias`) and model-score probability-calibrator fitting (kind =
+//! Covers favorite-longshot bias-table fitting (kind = `market_price_bias`)
+//! and model-score probability-calibrator fitting (kind =
 //! `model_score`).
 
-use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+
+use async_trait::async_trait;
+use quant_pivot_error::QuantResult;
+use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
     domain::{
-        CalibrationArtifactInfo, CalibrationArtifactListQuery, FitBiasTableRequest,
-        FitModelCalibratorRequest, JobProgressSink, ModelCalibrationFitPreflightView, Paginated,
+        api::{
+            CalibrationArtifactListQuery, FitBiasTableRequest, FitModelCalibratorRequest,
+            ModelCalibrationFitPreflightView,
+        },
+        pagination::Paginated,
+        quant::{CalibrationArtifactInfo, JobProgressSink},
     },
     types::{CalibrationArtifactId, DecisionPolicySnapshotId, ModelVersionId, TrainingDatasetId},
 };
-use quant_pivot_error::QuantResult;
 
 /// Frozen params for a durable `BiasTableFit` research job.
 ///
@@ -85,7 +90,7 @@ pub trait CalibrationArtifactFitPort: Send + Sync {
     ) -> QuantResult<CalibrationArtifactInfo>;
 }
 
-/// Frozen params for a durable `ModelCalibrationFit` research job (Phase 11.3 §4).
+/// Frozen params for a durable `ModelCalibrationFit` research job.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelCalibrationFitJobParams {
@@ -120,7 +125,7 @@ pub trait ModelCalibrationFitPort: Send + Sync {
         cancel: CancellationToken,
     ) -> QuantResult<ModelCalibrationFitOutcome>;
 
-    /// Read-only disjoint + embargo preflight check (Phase 11.3 §10) — the
+    /// Read-only disjoint + embargo preflight check — the
     /// same purge/embargo primitive `fit` enforces fail-closed, without
     /// enqueueing a job or mutating any state.
     async fn preflight(

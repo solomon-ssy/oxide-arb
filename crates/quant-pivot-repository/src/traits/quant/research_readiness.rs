@@ -3,7 +3,7 @@
 use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    domain::{NewResearchReadinessEvidence, ResearchReadinessEvidenceInfo},
+    domain::quant::{NewResearchReadinessEvidence, ResearchReadinessEvidenceInfo},
     enums::quant::ResearchReadinessEvidenceKind,
     types::{ContentHash, ResearchReadinessEvidenceId},
 };

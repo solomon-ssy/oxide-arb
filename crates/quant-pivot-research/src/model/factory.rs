@@ -10,14 +10,14 @@
 //!    schema ([`ResearchError::FeatureSchemaMismatch`] / [`ResearchError::SchemaHashMismatch`]),
 //! 5. dispatch on family, building the concrete runtime behind `dyn QuantModelRuntime`.
 //!
-//! Business layers (the core `ModelRunner`, the Phase 04 report builder) only ever
+//! Business layers (the core `ModelRunner`, the report builder) only ever
 //! see `dyn QuantModelRuntime` — never a weighted/classical concrete type.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use quant_pivot_error::{QuantResult, research::ResearchError};
-use quant_pivot_models::{domain::ModelVersionInfo, types::ContentHash};
+use quant_pivot_models::{domain::quant::ModelVersionInfo, types::ContentHash};
 
 #[cfg(feature = "ml-classical")]
 use crate::model::{artifact::ClassicalModelArtifact, classical_runtime::ClassicalRuntime};
@@ -75,8 +75,7 @@ pub struct DefaultModelRuntimeFactoryBuilder {
 
 impl DefaultModelRuntimeFactoryBuilder {
     /// Wrap the shared artifact store used for model bytes + the
-    /// `CalibrationArtifactLoader` used to resolve `Calibrated` return models
-    /// (Phase 11.3 §5).
+    /// `CalibrationArtifactLoader` used to resolve `Calibrated` return models.
     #[must_use]
     pub fn new(
         store: Arc<dyn ArtifactStore>,
@@ -177,7 +176,7 @@ impl DefaultModelRuntimeFactory {
 /// Used by governance checks (e.g. `CategoryPointerGuard`) that must inspect an
 /// artifact's structural metadata (its declared `category_scope`) at
 /// config-apply time, before the round's `ActiveSchemaBinding` even exists.
-/// [`DefaultModelRuntimeFactory::load_verified`] wraps this with the additional
+/// `DefaultModelRuntimeFactory::load_verified` wraps this with the additional
 /// schema-binding check required to actually run inference.
 ///
 /// # Errors
@@ -294,10 +293,13 @@ impl DefaultModelRuntimeFactory {
 
 #[cfg(test)]
 mod tests {
-    use super::{ActiveSchemaBinding, DefaultModelRuntimeFactory};
+    use std::{env, process, sync::Arc};
+
+    use async_trait::async_trait;
     use chrono::Utc;
+    use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
     use quant_pivot_models::{
-        domain::ModelVersionInfo,
+        domain::quant::ModelVersionInfo,
         enums::quant::{ModelVersionDerivationKind, PublicationStatus},
         runtime_config::FactorCrossSectionConfig,
         types::{
@@ -307,8 +309,8 @@ mod tests {
         },
     };
     use rust_decimal_macros::dec;
-    use std::{env, process, sync::Arc};
 
+    use super::{ActiveSchemaBinding, DefaultModelRuntimeFactory};
     use crate::{
         artifact::{ArtifactStore, LocalArtifactStore},
         factors::{FrozenReferenceQuantiles, names},
@@ -324,11 +326,8 @@ mod tests {
         test_support::content_hash as hash,
     };
 
-    use async_trait::async_trait;
-    use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
-
     /// Test-only loader: these fixtures never construct a `Calibrated` return
-    /// model, so `load` is unreachable in practice; errors closed if it is.
+    /// model, so `load` is unreachable in practice and fails closed if invoked.
     struct UnreachableCalibrationLoader;
 
     #[async_trait]

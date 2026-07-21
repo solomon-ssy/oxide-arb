@@ -1,4 +1,4 @@
-//! Provider-agnostic domain data-source contracts (Phase 11.2.2).
+//! Provider-agnostic domain data-source contracts.
 //!
 //! External vertical feature sources (Binance klines, Chainlink aggregators)
 //! implement [`DomainDataSource`] and emit normalized [`DomainObservation`]
@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
-    domain::DomainObservation,
+    domain::data_plane::DomainObservation,
     enums::domain::DomainFamily,
     types::{DomainInstrumentKey, DomainSourceId},
 };

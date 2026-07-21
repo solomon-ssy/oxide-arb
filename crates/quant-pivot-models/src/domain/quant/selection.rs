@@ -1,5 +1,9 @@
 //! Selection snapshot persistence DTOs.
 
+use chrono::{DateTime, Utc};
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
+use serde::{Deserialize, Serialize};
+
 use crate::{
     entities::quant_market_selection,
     enums::{common::MarketCategory, market::MarketStatus},
@@ -8,9 +12,6 @@ use crate::{
         SelectionExclusionSummary, TokenId, Usd,
     },
 };
-use chrono::{DateTime, Utc};
-use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
-use serde::{Deserialize, Serialize};
 
 /// Persisted selection snapshot metadata.
 #[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
@@ -74,7 +75,7 @@ info_from_model!(MarketSelectionMemberInfo, crate::entities::quant_market_select
 /// Insert payload for `quant_market_selection_member`.
 ///
 /// Covers every `ActiveModel` column (no DB-managed timestamps); `SeaORM`'s derive
-/// emits a redundant `..Default::default()` that triggers `needless_update`.
+/// emits a redundant `..Default::default` that triggers `needless_update`.
 #[derive(Debug, Clone, Serialize, Deserialize, DeriveIntoActiveModel)]
 #[sea_orm(active_model = "crate::entities::quant_market_selection_member::ActiveModel")]
 pub struct NewMarketSelectionMember {

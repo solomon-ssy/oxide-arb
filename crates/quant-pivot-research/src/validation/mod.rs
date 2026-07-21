@@ -1,4 +1,4 @@
-//! Leakage-aware validation & backtest-overfitting control (Phase 11.5).
+//! Leakage-aware validation & backtest-overfitting control.
 //!
 //! This module owns the **financial-ML validation methodology** layer that sits
 //! above [`crate::training`] (dataset/label construction) and [`crate::backtest`]
@@ -13,8 +13,8 @@
 //! represents** ([`TimelineGroup`] is just a time interval): the Buy-side
 //! (`WeightedFactor` / classical ML) wiring in [`crate::backtest`] groups by
 //! same-`as_of` cross-section (mirroring the [`crate::model::trainer`] LTR query
-//! groups); Phase 11.5.1 groups by lot instead, with zero changes to this
-//! module. See `docs/plans/quant-pivot/phase-11/11.5-leakage-aware-validation-and-overfitting.md`.
+//! groups); the Sell-side groups by lot instead, with zero changes to this
+//! module.
 //!
 //! Authoritative references (cited again at each algorithm's definition site):
 //! López de Prado, *Advances in Financial Machine Learning* (2018) Ch.7/11/12;

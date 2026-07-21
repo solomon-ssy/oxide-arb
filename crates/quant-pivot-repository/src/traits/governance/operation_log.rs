@@ -1,7 +1,11 @@
 //! Append-only operation-log repository contract.
 
 use quant_pivot_error::storage::StorageError;
-use quant_pivot_models::domain::{NewOperationLog, OperationLogInfo, OperationLogQuery, Paginated};
+use quant_pivot_models::domain::{
+    api::OperationLogQuery,
+    governance::{NewOperationLog, OperationLogInfo},
+    pagination::Paginated,
+};
 
 /// Persistence for the immutable operation-log activity trail.
 ///

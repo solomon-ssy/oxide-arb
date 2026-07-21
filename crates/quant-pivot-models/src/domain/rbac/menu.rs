@@ -1,13 +1,14 @@
 //! Menu DTOs (read model, insert, partial update, tree projection).
 
+use chrono::{DateTime, Utc};
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
+use serde::{Deserialize, Serialize};
+
 use crate::{
     domain::patch::{NullablePatch, Patch},
     enums::rbac::{MenuKind, RoleStatus},
     types::MenuId,
 };
-use chrono::{DateTime, Utc};
-use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
-use serde::{Deserialize, Serialize};
 
 /// DB row projection for the `menu` table.
 #[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]

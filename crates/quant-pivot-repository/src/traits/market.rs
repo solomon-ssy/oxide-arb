@@ -1,14 +1,21 @@
+use std::{collections::HashSet, sync::Arc};
+
+use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{
-        CatalogBatchChainInfo, CatalogBatchCommit, CatalogBatchFailure, CatalogEventChangeInfo,
-        CatalogMarketChangeInfo, CatalogSnapshotInfo, CatalogSyncBatchInfo, CatalogWindowInfo,
-        DecisionBoundary, MarketInfo, MarketPageQuery, Paginated, UpsertMarket,
+        api::MarketPageQuery,
+        data_plane::DecisionBoundary,
+        market::{
+            CatalogBatchChainInfo, CatalogBatchCommit, CatalogBatchFailure, CatalogEventChangeInfo,
+            CatalogMarketChangeInfo, CatalogSnapshotInfo, CatalogSyncBatchInfo, CatalogWindowInfo,
+            MarketInfo, UpsertMarket,
+        },
+        pagination::Paginated,
     },
     enums::market::MarketStatus,
     types::{ClobMarketInfoVersion, EventId, HistoryCoverage, MarketId},
 };
-use std::{collections::HashSet, sync::Arc};
 
 #[async_trait::async_trait]
 pub trait MarketRepository: Send + Sync {
@@ -34,7 +41,7 @@ pub trait ClobMarketInfoRepository: Send + Sync {
     /// Retention coverage of the append-only bitemporal source.
     async fn research_history_coverage(
         &self,
-        _as_of: chrono::DateTime<chrono::Utc>,
+        _as_of: DateTime<Utc>,
     ) -> Result<Vec<HistoryCoverage>, StorageError> {
         Err(StorageError::invariant_violation(
             Some("clob_market_info_version"),
@@ -50,8 +57,8 @@ pub trait ClobMarketInfoRepository: Send + Sync {
     async fn at(
         &self,
         market_id: &MarketId,
-        effective_at: chrono::DateTime<chrono::Utc>,
-        available_at_cutoff: chrono::DateTime<chrono::Utc>,
+        effective_at: DateTime<Utc>,
+        available_at_cutoff: DateTime<Utc>,
     ) -> Result<Option<ClobMarketInfoVersion>, StorageError>;
 
     /// Resolve at most one latest PIT-visible revision per market in one
@@ -59,8 +66,8 @@ pub trait ClobMarketInfoRepository: Send + Sync {
     async fn at_many(
         &self,
         market_ids: &[MarketId],
-        effective_at: chrono::DateTime<chrono::Utc>,
-        available_at_cutoff: chrono::DateTime<chrono::Utc>,
+        effective_at: DateTime<Utc>,
+        available_at_cutoff: DateTime<Utc>,
     ) -> Result<Vec<ClobMarketInfoVersion>, StorageError>;
 
     async fn latest(
@@ -74,9 +81,9 @@ pub trait ClobMarketInfoRepository: Send + Sync {
     async fn window(
         &self,
         _market_ids: &[MarketId],
-        _effective_from: chrono::DateTime<chrono::Utc>,
-        _effective_to: chrono::DateTime<chrono::Utc>,
-        _available_by: chrono::DateTime<chrono::Utc>,
+        _effective_from: DateTime<Utc>,
+        _effective_to: DateTime<Utc>,
+        _available_by: DateTime<Utc>,
     ) -> Result<Vec<ClobMarketInfoVersion>, StorageError> {
         Ok(Vec::new())
     }
@@ -91,7 +98,7 @@ pub trait CatalogLedgerRepository: Send + Sync {
     /// Retention coverage for both event and market change ledgers.
     async fn research_history_coverage(
         &self,
-        _as_of: chrono::DateTime<chrono::Utc>,
+        _as_of: DateTime<Utc>,
     ) -> Result<Vec<HistoryCoverage>, StorageError> {
         Err(StorageError::invariant_violation(
             Some("catalog_sync_batch"),
@@ -110,10 +117,10 @@ pub trait CatalogLedgerRepository: Send + Sync {
         failure: CatalogBatchFailure,
     ) -> Result<CatalogSyncBatchInfo, StorageError>;
 
-    async fn coverage_start(&self) -> Result<Option<chrono::DateTime<chrono::Utc>>, StorageError>;
+    async fn coverage_start(&self) -> Result<Option<DateTime<Utc>>, StorageError>;
 
     /// Commit watermark of the newest complete catalog sync batch.
-    async fn watermark(&self) -> Result<Option<chrono::DateTime<chrono::Utc>>, StorageError>;
+    async fn watermark(&self) -> Result<Option<DateTime<Utc>>, StorageError>;
 
     /// Freeze the complete committed batch chain visible to a source slice.
     ///
@@ -121,8 +128,8 @@ pub trait CatalogLedgerRepository: Send + Sync {
     /// by `window_start` or when no committed batch is visible by `pit_cutoff`.
     async fn batch_chain(
         &self,
-        _window_start: chrono::DateTime<chrono::Utc>,
-        _pit_cutoff: chrono::DateTime<chrono::Utc>,
+        _window_start: DateTime<Utc>,
+        _pit_cutoff: DateTime<Utc>,
     ) -> Result<Option<CatalogBatchChainInfo>, StorageError> {
         Ok(None)
     }

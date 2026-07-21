@@ -1,6 +1,6 @@
 //! Execution admission engine — the read-only, deterministic, fixed-order gate
 //! between an `Approved` / `ApprovedByPolicy` order intent and real venue
-//! submission (05.4).
+//! submission.
 //!
 //! Admission never mutates the report and never submits an order. It runs a
 //! fixed sequence of 24 hard checks over a frozen [`AdmissionInput`] (built once
@@ -23,19 +23,22 @@ mod builder;
 mod checks;
 mod engine;
 
-pub(crate) use builder::pit_fee_schedule;
-pub use builder::{AdmissionInputBuilder, AdmissionInputBuilderDeps};
-pub use engine::DefaultAdmissionEngine;
-
 use std::sync::Arc;
 
 use async_trait::async_trait;
+pub(crate) use builder::pit_fee_schedule;
+pub use builder::{AdmissionInputBuilder, AdmissionInputBuilderDeps};
 use chrono::{DateTime, Utc};
+pub use engine::DefaultAdmissionEngine;
 use quant_pivot_error::{QuantResult, execution::ExecutionError};
 use quant_pivot_models::{
     domain::{
-        BookSnapshot, CapitalAllocationInfo, DataQualitySnapshot, EntryConditionInstanceInfo,
-        OrderIntentInfo, RecommendationInfo, RecommendationReportInfo,
+        data_plane::DataQualitySnapshot,
+        market::BookSnapshot,
+        quant::{
+            CapitalAllocationInfo, EntryConditionInstanceInfo, OrderIntentInfo, RecommendationInfo,
+            RecommendationReportInfo,
+        },
     },
     enums::{
         common::{OrderType, Side, TickSize},
@@ -58,11 +61,11 @@ use serde::{Deserialize, Serialize};
 
 /// Venue-health seam read by `VenueGuardCheck` (#18).
 ///
-/// The 05.4 execution breaker is a *transient* accumulator: it publishes
+/// The execution breaker is a *transient* accumulator: it publishes
 /// `Healthy` / `Degraded` (defer) only. Sustained failure does **not** surface
 /// here as a third "halted" variant — it trips the kill-switch, and the
 /// authoritative deny of new entries comes from `#17` (`KillSwitchCheck`). This
-/// keeps the latch single-sourced in the kill-switch. See the 05.4 phase doc.
+/// keeps the latch single-sourced in the kill-switch.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum VenueHealth {
     /// Venue is accepting orders normally.
@@ -72,11 +75,11 @@ pub enum VenueHealth {
     Degraded { reason: String },
 }
 
-/// Readiness seams wired into admission input (05.3–05.6).
+/// Readiness seams wired into admission input.
 ///
-/// `venue_health` is driven by the 05.4 execution breaker; `credentials_ready`
+/// `venue_health` is driven by the execution breaker; `credentials_ready`
 /// reflects boot-time signer/CLOB connectivity; `exit_monitor_ready` is the
-/// shared exit-monitor health handle (05.6) read by check `#20`.
+/// shared exit-monitor health handle read by check `#20`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdmissionSeams {
     /// Venue health (`#18`): execution breaker hot read.
@@ -89,7 +92,7 @@ pub struct AdmissionSeams {
 
 /// Versioned provenance of the state the decision was made against.
 ///
-/// Recorded on the decision so the 05.4 dispatcher can persist *why* an intent
+/// Recorded on the decision so the dispatcher can persist *why* an intent
 /// was allowed / denied and the verdict can be replayed against the same state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StateVersion {
@@ -114,7 +117,7 @@ pub struct AdmissionModelState {
 pub struct AdmissionExposureState {
     /// Whether truth-unknown in-flight exposure exists — an `Ambiguous` order
     /// (capital held, venue truth unknown) or a terminal `Unresolvable` recon
-    /// verdict (05.5). Blocks new auto entries (fail-closed, parent §11).
+    /// verdict. Blocks new auto entries until venue truth is reconciled.
     pub has_blocking_inflight: bool,
     /// Whether the intent's market is on the operator block list.
     pub manual_block: bool,
@@ -147,11 +150,11 @@ pub struct AdmissionInput {
     pub recommendation: RecommendationInfo,
     /// Source report (governance status + config / model versions).
     pub report: RecommendationReportInfo,
-    /// Live governed runtime mode (05.1).
+    /// Live governed runtime mode.
     pub mode: QuantRuntimeMode,
-    /// Live operational kill-switch state (05.1).
+    /// Live operational kill-switch state.
     pub kill_switch: KillSwitchState,
-    /// Real venue account snapshot at decision time (09 §1).
+    /// Real venue account snapshot at decision time.
     pub account: AccountSnapshot,
     /// This intent's capital allocation (for the budget add-back).
     pub allocation: Option<CapitalAllocationInfo>,

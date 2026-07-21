@@ -1,11 +1,12 @@
 //! Postgres-backed shadow-comparison ledger repository (append-only).
 
-use crate::{postgres::primitives, traits::ShadowComparisonRepository};
+use std::cmp;
+
 use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    domain::{NewShadowComparison, ShadowComparisonInfo, ShadowStabilitySummary},
-    entities::quant_shadow_comparison,
+    domain::quant::{NewShadowComparison, ShadowComparisonInfo, ShadowStabilitySummary},
+    entities::quant_shadow_comparison::{Column, Entity},
     enums::quant::ModelWeightSource,
     types::{ModelVersionId, Probability},
 };
@@ -14,7 +15,8 @@ use sea_orm::{
     ColumnTrait, DatabaseConnection, EntityTrait, ExprTrait, FromQueryResult, IntoActiveModel,
     QueryFilter, QuerySelect, sea_query::Expr,
 };
-use std::cmp;
+
+use crate::{postgres::primitives, traits::ShadowComparisonRepository};
 
 /// Postgres-backed shadow-comparison ledger repository.
 pub struct PgShadowComparisonRepository {
@@ -42,7 +44,7 @@ impl ShadowComparisonRepository for PgShadowComparisonRepository {
         &self,
         comparison: NewShadowComparison,
     ) -> Result<ShadowComparisonInfo, StorageError> {
-        quant_shadow_comparison::Entity::insert(comparison.into_active_model())
+        Entity::insert(comparison.into_active_model())
             .exec_with_returning(&self.db)
             .await
             .map_err(StorageError::from)
@@ -54,32 +56,20 @@ impl ShadowComparisonRepository for PgShadowComparisonRepository {
         shadow_model_version_id: &ModelVersionId,
         since: DateTime<Utc>,
     ) -> Result<ShadowStabilitySummary, StorageError> {
-        let row = quant_shadow_comparison::Entity::find()
-            .filter(
-                quant_shadow_comparison::Column::ShadowModelVersionId
-                    .eq(shadow_model_version_id.clone()),
-            )
-            .filter(quant_shadow_comparison::Column::WeightSource.eq(ModelWeightSource::Artifact))
-            .filter(quant_shadow_comparison::Column::DecisionAt.gte(since))
+        let row = Entity::find()
+            .filter(Column::ShadowModelVersionId.eq(shadow_model_version_id.clone()))
+            .filter(Column::WeightSource.eq(ModelWeightSource::Artifact))
+            .filter(Column::DecisionAt.gte(since))
             .select_only()
             .column_as(
-                Expr::col(quant_shadow_comparison::Column::ShadowComparisonId).count(),
+                Expr::col(Column::ShadowComparisonId).count(),
                 "sample_count",
             )
+            .column_as(Expr::col(Column::DecisionAt).min(), "window_start")
+            .column_as(Expr::col(Column::DecisionAt).max(), "window_end")
+            .column_as(Expr::col(Column::TopnOverlap).avg(), "mean_topn_overlap")
             .column_as(
-                Expr::col(quant_shadow_comparison::Column::DecisionAt).min(),
-                "window_start",
-            )
-            .column_as(
-                Expr::col(quant_shadow_comparison::Column::DecisionAt).max(),
-                "window_end",
-            )
-            .column_as(
-                Expr::col(quant_shadow_comparison::Column::TopnOverlap).avg(),
-                "mean_topn_overlap",
-            )
-            .column_as(
-                primitives::bool_or(quant_shadow_comparison::Column::HardDivergence),
+                primitives::bool_or(Column::HardDivergence),
                 "any_hard_divergence",
             )
             .into_model::<ShadowSummaryRow>()

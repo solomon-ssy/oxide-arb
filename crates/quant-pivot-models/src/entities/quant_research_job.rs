@@ -1,5 +1,10 @@
 //! `quant_research_job` table entity.
 
+use chrono::{DateTime, Utc};
+use sea_orm::entity::prelude::*;
+use uuid::Uuid;
+
+use super::{decision_policy_snapshot, quant_model_spec};
 use crate::{
     enums::quant::{ResearchJobKind, ResearchJobResultKind, ResearchJobStatus},
     types::{
@@ -7,9 +12,6 @@ use crate::{
         ResearchJobParams, ResearchJobProgress, RoleCode, WorkerId,
     },
 };
-use chrono::{DateTime, Utc};
-use sea_orm::entity::prelude::*;
-use uuid::Uuid;
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
@@ -50,14 +52,14 @@ pub struct Model {
         from = "model_spec_id",
         to = "model_spec_id"
     )]
-    pub model_spec: BelongsTo<Option<super::quant_model_spec::Entity>>,
+    pub model_spec: BelongsTo<Option<quant_model_spec::Entity>>,
     #[sea_orm(
         belongs_to,
         relation_enum = "DecisionPolicySnapshot",
         from = "decision_policy_snapshot_id",
         to = "decision_policy_snapshot_id"
     )]
-    pub decision_policy_snapshot: BelongsTo<Option<super::decision_policy_snapshot::Entity>>,
+    pub decision_policy_snapshot: BelongsTo<Option<decision_policy_snapshot::Entity>>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

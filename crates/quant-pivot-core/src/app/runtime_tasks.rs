@@ -1,26 +1,7 @@
-//! Background runtime tasks for Phase 0 ingest plane.
+//! Background runtime tasks for ingest plane.
 
-use super::AppContext;
-use crate::{
-    app::{
-        clob_market_info_worker::ClobMarketInfoWorker,
-        crypto_kline_ingest_worker::CryptoKlineIngestWorker,
-        crypto_live_ingest_worker::{CryptoLiveIngestDeps, CryptoLiveIngestWorker},
-        crypto_rtds_ingest_worker::{CryptoRtdsIngestDeps, CryptoRtdsIngestWorker},
-        domain_event_outbox_worker::DomainEventOutboxWorker,
-        domain_source_supervisor::DomainSourceSupervisor,
-        task_id::TaskId,
-        task_registry::AppRunner,
-        trade_tape_reconciliation_worker::TradeTapeReconciliationWorker,
-        trade_tape_worker::TradeTapeWorker,
-        weather_backfill_worker::WeatherBackfillWorker,
-        weather_ingest_worker::{WeatherIngestDeps, WeatherIngestWorker},
-        weather_public_ingest_worker::{WeatherPublicIngestDeps, WeatherPublicIngestWorker},
-    },
-    service::{
-        crypto_kline_ingest::CryptoKlineIngestor, weather_fact_ingest::WeatherFactIngestService,
-    },
-};
+use std::{collections::BTreeSet, sync::Arc, time::Duration};
+
 use quant_pivot_api::{
     binance::{BinanceAggTradeSource, BinanceKlineSource, BinanceRequestBudget},
     chainlink::ChainlinkDataStreamsSource,
@@ -49,7 +30,28 @@ use quant_pivot_repository::{
         MarketLinkageRepository, MarketRepository, TradeTapeBlockCursorRepository,
     },
 };
-use std::{collections::BTreeSet, sync::Arc, time::Duration};
+
+use super::AppContext;
+use crate::{
+    app::{
+        clob_market_info_worker::ClobMarketInfoWorker,
+        crypto_kline_ingest_worker::CryptoKlineIngestWorker,
+        crypto_live_ingest_worker::{CryptoLiveIngestDeps, CryptoLiveIngestWorker},
+        crypto_rtds_ingest_worker::{CryptoRtdsIngestDeps, CryptoRtdsIngestWorker},
+        domain_event_outbox_worker::DomainEventOutboxWorker,
+        domain_source_supervisor::DomainSourceSupervisor,
+        task_id::TaskId,
+        task_registry::AppRunner,
+        trade_tape_reconciliation_worker::TradeTapeReconciliationWorker,
+        trade_tape_worker::TradeTapeWorker,
+        weather_backfill_worker::WeatherBackfillWorker,
+        weather_ingest_worker::{WeatherIngestDeps, WeatherIngestWorker},
+        weather_public_ingest_worker::{WeatherPublicIngestDeps, WeatherPublicIngestWorker},
+    },
+    service::{
+        crypto_kline_ingest::CryptoKlineIngestor, weather_fact_ingest::WeatherFactIngestService,
+    },
+};
 
 struct ConnectedDomainSources {
     binance: Option<Arc<BinanceAggTradeSource>>,

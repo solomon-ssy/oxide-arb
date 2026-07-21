@@ -13,7 +13,9 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{
     domain::{
-        DecisionBoundary, DomainAvailability, MarketCandidate, MarketDataHealth, MarketRegistryInfo,
+        data_plane::DecisionBoundary,
+        market::MarketRegistryInfo,
+        quant::{DomainAvailability, MarketCandidate, MarketDataHealth},
     },
     enums::common::MarketCategory,
     runtime_config::DomainConfig,
@@ -215,15 +217,14 @@ impl MarketCandidateProvider {
         })
     }
 
-    /// One batched domain-availability reading for the category-mapped subset
-    /// (Phase 11.2.2 §3.8): mapped ∧ enabled ∧ `Resolved` linkage ∧ the linked
+    /// One batched domain-availability reading for the category-mapped subset:
+    /// mapped ∧ enabled ∧ `Resolved` linkage ∧ the linked
     /// instrument has an observation effective by its source cutoff and
     /// available by the decision time.
     ///
     /// Thin wrapper over [`resolve_domain_availability`] — the same batched
-    /// projector the offline keep-rate estimator uses, so the live and
-    /// offline planes can never drift on this decision (Phase 11.2.2 §3.8
-    /// train-serve parity).
+    /// projector the offline keep-rate estimator uses, so live and offline
+    /// planes cannot drift on this train-serve decision.
     async fn project_domain_availability(
         &self,
         infos: &[Arc<MarketRegistryInfo>],

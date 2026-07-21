@@ -1,9 +1,10 @@
 //! Quant pivot deploy configuration (`[quant]`, restart to apply).
 
-use crate::enums::quant::{ExecutionWalletKind, ResearchJobKind};
 use serde::Deserialize;
 
-/// Quant-specific structural parameters for Phase 0+.
+use crate::enums::quant::{ExecutionWalletKind, ResearchJobKind};
+
+/// Quant-specific structural parameters.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct QuantDeployConfig {
@@ -34,10 +35,10 @@ pub struct ResearchJobsConfig {
     pub backtest_concurrency: usize,
     /// Per-kind concurrency cap for favorite-longshot bias-table fits.
     pub bias_table_fit_concurrency: usize,
-    /// Per-kind concurrency cap for model-score calibrator fits (Phase 11.3).
+    /// Per-kind concurrency cap for model-score calibrator fits.
     pub model_calibration_fit_concurrency: usize,
-    /// Per-kind concurrency cap for CPCV + trial-grid validation runs (Phase
-    /// 11.5) — the second-heaviest kind after dataset builds (rayon-parallel
+    /// Per-kind concurrency cap for CPCV + trial-grid validation runs — the
+    /// second-heaviest kind after dataset builds (rayon-parallel
     /// internally, so a low cap of `1` keeps host CPU predictable).
     pub cpcv_backtest_concurrency: usize,
     /// Per-kind cap for deterministic feature-parity replay.
@@ -66,7 +67,7 @@ pub struct ResearchJobsConfig {
     /// Minimum interval between throttled progress writes (DB heartbeat + WS push).
     pub progress_min_interval_ms: u64,
     /// Bounded grace period a graceful shutdown waits for in-flight jobs to
-    /// cooperatively unwind (at a section/phase boundary) before their rows are
+    /// cooperatively unwind at a stage boundary before their rows are
     /// explicitly re-queued for the next epoch. Keep short: the build restarts
     /// from scratch on re-lease, so draining only lets near-complete work finish.
     pub shutdown_drain_secs: u64,
@@ -153,7 +154,8 @@ pub struct QuantWorkersConfig {
     /// it for near-immediate submit. This cadence is the **backstop** poll that
     /// catches missed wakes, retries admission defers, and drains crash-recovery
     /// work. The durable queue is Postgres (`ApprovedByPolicy` rows under a
-    /// per-intent row lock); single instance (multi-replica is Phase 8+).
+    /// per-intent row lock). The current deployment runs a single dispatcher;
+    /// repository locking remains authoritative across processes.
     pub execution_dispatch_secs: u64,
     /// Execution-breaker self-heal tick cadence (seconds).
     ///
@@ -189,7 +191,7 @@ impl Default for QuantWorkersConfig {
 ///
 /// `report_only` is **not** dry-run: report sizing is built on the real venue
 /// account. The funder address is required for keyless Data API position reads;
-/// reports fail closed without it. Phase05.10 auto-redeem is EOA-only, so
+/// reports fail closed without it. auto-redeem is EOA-only, so
 /// money-moving settlement redemption additionally requires this address to
 /// equal the signer EOA. The private key is configured under `[keys]`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]

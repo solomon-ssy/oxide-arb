@@ -1,11 +1,13 @@
 //! `quant_capital_allocation` table entity.
 
+use chrono::{DateTime, Utc};
+use sea_orm::entity::prelude::*;
+
+use super::{quant_order_intent, quant_recommendation};
 use crate::{
     enums::execution::CapitalAllocationState,
     types::{CapitalAllocationId, OrderIntentId, RecommendationId, Usd},
 };
-use chrono::{DateTime, Utc};
-use sea_orm::entity::prelude::*;
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -32,14 +34,14 @@ pub struct Model {
         from = "order_intent_id",
         to = "order_intent_id"
     )]
-    pub order_intent: BelongsTo<super::quant_order_intent::Entity>,
+    pub order_intent: BelongsTo<quant_order_intent::Entity>,
     #[sea_orm(
         belongs_to,
         relation_enum = "Recommendation",
         from = "recommendation_id",
         to = "recommendation_id"
     )]
-    pub recommendation: BelongsTo<super::quant_recommendation::Entity>,
+    pub recommendation: BelongsTo<quant_recommendation::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

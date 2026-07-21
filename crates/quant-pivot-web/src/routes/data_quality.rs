@@ -1,8 +1,8 @@
-//! Data-quality observability endpoint (Phase 2).
+//! Data-quality observability endpoint.
 
-use actix_web::{http::Method, web};
+use actix_web::{http::Method, web::Data};
 use quant_pivot_models::{
-    domain::DataQualitySnapshot,
+    domain::data_plane::DataQualitySnapshot,
     enums::rbac::{Operation, ResourceType},
 };
 
@@ -24,8 +24,6 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
 }
 
 /// Aggregate live book-plane data-quality classification.
-pub async fn snapshot(
-    state: web::Data<AppState>,
-) -> Result<WebResponse<DataQualitySnapshot>, WebError> {
+pub async fn snapshot(state: Data<AppState>) -> Result<WebResponse<DataQualitySnapshot>, WebError> {
     Ok(WebResponse::ok(state.data_quality.snapshot()))
 }

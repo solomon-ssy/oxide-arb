@@ -1,4 +1,6 @@
-//! Phase 0 hot-path benchmarks (ingest + book store only).
+//! hot-path benchmarks (ingest + book store only).
+
+use std::sync::Arc;
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use quant_pivot_core::{ingest::book_store::BookStore, observability::metrics_hub::MetricsHub};
@@ -7,7 +9,6 @@ use quant_pivot_models::{
     types::{Price, Shares, TokenId},
 };
 use rust_decimal_macros::dec;
-use std::sync::Arc;
 
 fn bench_book_store_apply_snapshot(c: &mut Criterion) {
     let metrics = Arc::new(MetricsHub::new());

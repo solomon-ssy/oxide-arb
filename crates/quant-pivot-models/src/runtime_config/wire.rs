@@ -1,9 +1,10 @@
 //! Shared wire types and nested policy documents for runtime config.
 
+use std::collections::BTreeMap;
+
 use rust_decimal::Decimal;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 
 use crate::{enums::quant::PortfolioSolverKind, types::ModelVersionId};
 
@@ -170,7 +171,7 @@ pub enum DrawdownMultiplierPolicy {
 /// sizer, and an edge-free confidence-to-size curve has no place in a capital
 /// system (it would deploy capital regardless of expected value). `confidence`
 /// is an evidence-quality measure, **not** a calibrated win probability, so it
-/// never stands in for `q` (Phase 11.3 §4 redesign): for a `Calibrated` return
+/// never stands in for `q`: for a `Calibrated` return
 /// model, `q` is the calibrator's `P(win)` directly (`f* = (q - p) / (1 - p)`,
 /// `p` = market price) — never re-derived from a second, TP/SL-shaped bet
 /// structure. `confidence` enters only as an estimation-uncertainty shrinkage
@@ -240,7 +241,7 @@ impl Default for PortfolioOptimizerConfig {
 /// Correlation-cluster estimation configuration for the correlated-exposure cap.
 ///
 /// Drives whether `portfolio.constraints.max_correlated_exposure_usd` actually
-/// binds. When disabled, the cap is snapshot-only (Phase 4 behavior).
+/// binds. When disabled, the cap is snapshot-only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct CorrelationConfig {
@@ -268,8 +269,8 @@ impl Default for CorrelationConfig {
 
 /// How often a report schedule fires.
 ///
-/// Tagged on `kind`. The cron variant is parsed/scheduled by the 04.3 runner;
-/// 04.0 validation only checks structural validity.
+/// Tagged on `kind`. The cron variant is parsed/scheduled by the runner;
+/// validation only checks structural validity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ScheduleCadence {
@@ -376,11 +377,11 @@ impl Default for EntryOrderPolicy {
     }
 }
 
-/// Exit-monitor cadence and signal-degradation policy (Phase 05.6).
+/// Exit-monitor cadence and signal-degradation policy.
 ///
 /// The monitor scans open position lots every `monitor_secs` for the price /
 /// time / trailing / partial ladder; the heavier signal re-inference runs at
-/// Model-backed thesis-invalidation re-inference policy (Phase 06.0).
+/// Model-backed thesis-invalidation re-inference policy.
 ///
 /// When `enabled`, the exit monitor re-scores each lot's market via the
 /// intent-frozen model and compares the fresh composite score against the entry
@@ -405,7 +406,7 @@ impl Default for ExitSignalReinferencePolicy {
     }
 }
 
-/// Opportunistic-Sell operational control (Phase 06.1 / 11.7.2).
+/// Opportunistic-Sell operational control.
 ///
 /// Advisory model-driven scale-out when the thesis still holds but the Sell
 /// scorer ranks exiting now as better than holding. Evaluated at the same
@@ -448,9 +449,9 @@ pub struct ExitMonitorPolicy {
     pub monitor_secs: u64,
     /// Minimum seconds between signal re-inference checks for one lot.
     pub signal_recheck_secs: u64,
-    /// Model-backed thesis-invalidation re-inference (Phase 06.0).
+    /// Model-backed thesis-invalidation re-inference.
     pub signal_reinference: ExitSignalReinferencePolicy,
-    /// Opportunistic-Sell advisory scale-out (Phase 06.1).
+    /// Opportunistic-Sell advisory scale-out.
     pub opportunistic_sell: OpportunisticSellPolicy,
 }
 
@@ -612,9 +613,9 @@ impl Default for ReconciliationPolicy {
     }
 }
 
-/// Venue-dimension execution-breaker thresholds (Phase 05.4 §6.5).
+/// Venue-dimension execution-breaker thresholds.
 ///
-/// Drives the stateful [`ExecutionBreaker`] that watches venue submit/cancel
+/// Drives the stateful execution breaker that watches venue submit/cancel
 /// outcomes and publishes a `VenueHealth` seam for admission `#18` while
 /// auto-tripping the operational kill-switch on sustained failure. Transient
 /// degradation defers (admission retries); sustained failure halts and latches

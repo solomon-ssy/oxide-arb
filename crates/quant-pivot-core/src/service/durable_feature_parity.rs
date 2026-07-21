@@ -19,15 +19,18 @@ use quant_pivot_models::{
         QuantFeatureEventRow, QuantModelInputEventRow, QuantServingEvidenceCompletionRow,
     },
     domain::{
-        DecisionBoundary, DecisionClock, DecisionSource, FactorValueInfo, FeatureParityRunInfo,
-        FeatureVectorInfo, FrozenFeatureParitySubject, FrozenFeatureParitySubjectId,
-        MarketSelectionInfo, MarketSelectionMemberInfo, ModelRunInfo, RecommendationReportInfo,
-        ReportDataQualitySnapshotInfo, ReportRunInfo, model_run_parity_evidence_hash,
-        parity_candidate_membership_hash, parity_selection_hash, report_parity_evidence_hash,
-        report_parity_generation_hash,
+        data_plane::{DecisionBoundary, DecisionClock, DecisionSource},
+        quant::{
+            FactorValueInfo, FeatureParityRunInfo, FeatureVectorInfo, FrozenFeatureParitySubject,
+            FrozenFeatureParitySubjectId, MarketSelectionInfo, MarketSelectionMemberInfo,
+            ModelRunInfo, RecommendationReportInfo, ReportDataQualitySnapshotInfo, ReportRunInfo,
+            model_run_parity_evidence_hash, parity_candidate_membership_hash,
+            parity_selection_hash, report_parity_evidence_hash, report_parity_generation_hash,
+        },
     },
     enums::{
         clickhouse::ChFeatureCellState,
+        model::ModelFamily,
         quant::{
             DataQualityStatus, EmptyReportReason, FeatureCellState, FeatureParityRunKind,
             FeatureParityStage, ModelRunKind, ModelRunStatus,
@@ -35,9 +38,9 @@ use quant_pivot_models::{
     },
     runtime_config::DecisionPolicySnapshot,
     types::{
-        ContentHash, DecisionPolicySnapshotId, FeatureParityDetailSource, FeatureVectorId,
-        MarketId, MarketSelectionId, ModelRunId, ModelVersionId, RecommendationReportId,
-        SelectionExclusionSummary, stable_name::FeatureName,
+        ContentHash, DecisionCaptureEvidence, DecisionPolicySnapshotId, FeatureParityDetailSource,
+        FeatureVectorId, MarketId, MarketSelectionId, ModelRunId, ModelVersionId,
+        RecommendationReportId, SelectionExclusionSummary, stable_name::FeatureName,
     },
 };
 use quant_pivot_repository::traits::{
@@ -50,14 +53,13 @@ use quant_pivot_repository::traits::{
 use quant_pivot_research::{
     factors::{FactorEngine, FactorValue, MarketFactorOutcome},
     features::{
-        ConfiguredFeatureBuilder, DecisionCaptureEvidence, FeatureSchema, FeatureVector,
-        MarketDecisionCapture, feature_events,
+        ConfiguredFeatureBuilder, FeatureSchema, FeatureVector, MarketDecisionCapture,
+        feature_events,
     },
     hashing::ResearchHasher,
     model::{
-        ActiveSchemaBinding, ModelFamily, ModelInputAuditRow, ModelRuntimeFactoryBuilder,
-        ModelRuntimeMetrics, ModelRuntimeOutput, SignalCandidate,
-        canonical_business_prediction_hash,
+        ActiveSchemaBinding, ModelInputAuditRow, ModelRuntimeFactoryBuilder, ModelRuntimeMetrics,
+        ModelRuntimeOutput, SignalCandidate, canonical_business_prediction_hash,
     },
     selection::{
         ConfiguredMarketSelector, MarketSelectionBuildRequest, MarketSelectionSnapshot,
@@ -3156,15 +3158,11 @@ fn determinism(detail: String) -> QuantError {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        DataQualityStatus, EmptyReportReason, FeatureParityCandidate, FeatureParityComparison,
-        FeatureParityEvidence, FeatureParityStage, FeatureParitySubject, MarketId, ModelRunId,
-        PreInferenceStageCeiling, RecommendationReportId, pending_completion,
-        representative_candidate, select_comparisons, validate_pre_inference_stage_evidence,
-    };
-    use chrono::Utc;
+    use std::slice;
+
+    use chrono::{DateTime, Utc};
     use quant_pivot_models::{
-        domain::{MarketSelectionMemberInfo, ReportDataQualitySnapshotInfo},
+        domain::quant::{MarketSelectionMemberInfo, ReportDataQualitySnapshotInfo},
         enums::{
             common::MarketCategory,
             market::MarketStatus,
@@ -3175,14 +3173,20 @@ mod tests {
             TokenDataQualityRecord, TokenId, Usd,
         },
     };
-    use quant_pivot_test_support::report_fixtures;
     use rust_decimal_macros::dec;
-    use std::slice;
+
+    use super::{
+        DataQualityStatus, EmptyReportReason, FeatureParityCandidate, FeatureParityComparison,
+        FeatureParityEvidence, FeatureParityStage, FeatureParitySubject, MarketId, ModelRunId,
+        PreInferenceStageCeiling, RecommendationReportId, pending_completion,
+        representative_candidate, select_comparisons, validate_pre_inference_stage_evidence,
+    };
+    use crate::test_fixtures::report_fixtures;
 
     fn candidate(
         run_id: &ModelRunId,
         market: &str,
-        decision_at: chrono::DateTime<Utc>,
+        decision_at: DateTime<Utc>,
     ) -> FeatureParityCandidate {
         let market_id = MarketId::new(market);
         FeatureParityCandidate {
@@ -3196,7 +3200,7 @@ mod tests {
     fn comparison(
         run_id: &ModelRunId,
         market_id: Option<MarketId>,
-        decision_at: chrono::DateTime<Utc>,
+        decision_at: DateTime<Utc>,
     ) -> FeatureParityComparison {
         let evidence = FeatureParityEvidence {
             state: None,

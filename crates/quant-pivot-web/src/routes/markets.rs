@@ -4,13 +4,22 @@
 //! and the WS subscription controls are wired separately via the market-data
 //! port (see [`crate::routes::markets::book`]).
 
-use actix_web::{http::Method, web};
+use std::collections::HashSet;
+
+use actix_web::{
+    http::Method,
+    web::{Data, Path, Query},
+};
 use quant_pivot_models::{
     domain::{
-        BlockMarketRequest, MarketBookSideView, MarketBookSummaryView, MarketBookView,
-        MarketDataPort, MarketInfo, MarketMicrostructureQuery, MarketMicrostructureView,
-        MarketPageQuery, MarketTradeTick, MarketView, MicrostructureBucket, Paginated,
-        UnblockMarketRequest,
+        api::{
+            BlockMarketRequest, MarketBookSideView, MarketBookSummaryView, MarketBookView,
+            MarketMicrostructureQuery, MarketMicrostructureView, MarketPageQuery, MarketTradeTick,
+            MarketView, MicrostructureBucket, UnblockMarketRequest,
+        },
+        market::MarketInfo,
+        pagination::Paginated,
+        ports::MarketDataPort,
     },
     enums::{
         market::MarketStatus,
@@ -21,7 +30,6 @@ use quant_pivot_models::{
     types::{ContentHash, MarketId, TokenId},
 };
 use serde::Serialize;
-use std::collections::HashSet;
 
 use crate::{
     audit::OperationCtx,
@@ -105,8 +113,8 @@ fn project_market(
 /// `GET /api/markets` — paginated, filtered market list (newest first), each
 /// row enriched with the live book digest and WS subscription state.
 pub async fn list(
-    state: web::Data<AppState>,
-    query: web::Query<MarketPageQuery>,
+    state: Data<AppState>,
+    query: Query<MarketPageQuery>,
 ) -> Result<WebResponse<Paginated<MarketView>>, WebError> {
     let query = query
         .into_inner()
@@ -125,8 +133,8 @@ pub async fn list(
 
 /// `GET /api/markets/{market_id}` — single market detail with runtime overlay.
 pub async fn detail(
-    state: web::Data<AppState>,
-    market_id: web::Path<MarketId>,
+    state: Data<AppState>,
+    market_id: Path<MarketId>,
 ) -> Result<WebResponse<MarketView>, WebError> {
     let market_id = market_id.into_inner();
     let market = state
@@ -147,8 +155,8 @@ pub async fn detail(
 
 /// `GET /api/markets/{market_id}/book` — published YES/NO order books.
 pub async fn book(
-    state: web::Data<AppState>,
-    market_id: web::Path<MarketId>,
+    state: Data<AppState>,
+    market_id: Path<MarketId>,
 ) -> Result<WebResponse<MarketBookView>, WebError> {
     let market_id = market_id.into_inner();
     let market = state
@@ -179,9 +187,9 @@ const MICROSTRUCTURE_TRADE_LIMIT: u64 = 500;
 /// tokens plus recent last-trade prints. Powers the market-detail charts. The
 /// bucket resolution (1s vs 1m rollup) is chosen from the resolved window span.
 pub async fn microstructure(
-    state: web::Data<AppState>,
-    market_id: web::Path<MarketId>,
-    query: web::Query<MarketMicrostructureQuery>,
+    state: Data<AppState>,
+    market_id: Path<MarketId>,
+    query: Query<MarketMicrostructureQuery>,
 ) -> Result<WebResponse<MarketMicrostructureView>, WebError> {
     let market_id = market_id.into_inner();
     // `QueryError` (inverted / over-wide window) maps to a 400 via `From`.
@@ -234,8 +242,8 @@ pub async fn microstructure(
 
 /// `POST /api/markets/{market_id}/subscribe` — subscribe both tokens to the CLOB WS.
 pub async fn subscribe(
-    state: web::Data<AppState>,
-    market_id: web::Path<MarketId>,
+    state: Data<AppState>,
+    market_id: Path<MarketId>,
     op_ctx: OperationCtx,
 ) -> Result<WebResponse<()>, WebError> {
     let market_id = market_id.into_inner();
@@ -258,8 +266,8 @@ pub async fn subscribe(
 
 /// `POST /api/markets/{market_id}/unsubscribe` — unsubscribe both tokens.
 pub async fn unsubscribe(
-    state: web::Data<AppState>,
-    market_id: web::Path<MarketId>,
+    state: Data<AppState>,
+    market_id: Path<MarketId>,
     op_ctx: OperationCtx,
 ) -> Result<WebResponse<()>, WebError> {
     let market_id = market_id.into_inner();
@@ -282,8 +290,8 @@ pub async fn unsubscribe(
 
 /// `POST /api/markets/{market_id}/block` — operator-governed manual block.
 pub async fn block(
-    state: web::Data<AppState>,
-    market_id: web::Path<MarketId>,
+    state: Data<AppState>,
+    market_id: Path<MarketId>,
     op_ctx: OperationCtx,
     body: ValidatedJson<BlockMarketRequest>,
 ) -> Result<WebResponse<MarketView>, WebError> {
@@ -326,8 +334,8 @@ pub async fn block(
 
 /// `POST /api/markets/{market_id}/unblock` — restore to an explicit safe state.
 pub async fn unblock(
-    state: web::Data<AppState>,
-    market_id: web::Path<MarketId>,
+    state: Data<AppState>,
+    market_id: Path<MarketId>,
     op_ctx: OperationCtx,
     body: ValidatedJson<UnblockMarketRequest>,
 ) -> Result<WebResponse<MarketView>, WebError> {

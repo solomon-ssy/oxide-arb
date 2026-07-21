@@ -1,5 +1,5 @@
 //! [`BiasTableApplicator`]: the hot-reloadable favorite-longshot bias-table
-//! snapshot bound to the factor plane (Phase 11.2.1).
+//! snapshot bound to the factor plane.
 //!
 //! On each runtime-config activation the applicator resolves
 //! `factors.structural.favorite_longshot.bias_table_ref`: `None` clears the

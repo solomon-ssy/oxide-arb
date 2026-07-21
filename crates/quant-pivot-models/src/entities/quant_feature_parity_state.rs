@@ -1,11 +1,13 @@
 //! Append-only `quant_feature_parity_state` latch ledger entity.
 
+use chrono::{DateTime, Utc};
+use sea_orm::entity::prelude::*;
+
+use super::{quant_feature_parity_run, quant_feature_parity_state};
 use crate::{
     enums::quant::{FeatureParityLatchState, FeatureParityStateTransition},
     types::{FeatureParityRunId, FeatureParityStateId, RoleCode},
 };
-use chrono::{DateTime, Utc};
-use sea_orm::entity::prelude::*;
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -29,21 +31,21 @@ pub struct Model {
         from = "cause_run_id",
         to = "run_id"
     )]
-    pub cause_run: BelongsTo<Option<super::quant_feature_parity_run::Entity>>,
+    pub cause_run: BelongsTo<Option<quant_feature_parity_run::Entity>>,
     #[sea_orm(
         belongs_to,
         relation_enum = "RecoveryRun",
         from = "recovery_run_id",
         to = "run_id"
     )]
-    pub recovery_run: BelongsTo<Option<super::quant_feature_parity_run::Entity>>,
+    pub recovery_run: BelongsTo<Option<quant_feature_parity_run::Entity>>,
     #[sea_orm(
         belongs_to,
         relation_enum = "PreviousState",
         from = "previous_state_id",
         to = "state_id"
     )]
-    pub previous_state: BelongsTo<Option<super::quant_feature_parity_state::Entity>>,
+    pub previous_state: BelongsTo<Option<quant_feature_parity_state::Entity>>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

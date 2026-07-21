@@ -60,14 +60,14 @@ pub struct CorrelationGroups {
     /// Multi-market clusters (singletons are omitted — they add no cap beyond the
     /// per-market cap). Each inner vec is sorted; the outer vec is sorted.
     pub clusters: Vec<Vec<MarketId>>,
-    /// Mean pairwise |ρ| per cluster index (Phase 11.3 §6.2 Kelly shrink).
+    /// Mean pairwise |ρ| per cluster index, used for Kelly shrinkage.
     pub cluster_mean_rho: BTreeMap<usize, Decimal>,
     /// How the clusters were derived.
     pub source: CorrelationSource,
 }
 
 impl CorrelationGroups {
-    /// The disabled (no clustering) result, equivalent to Phase 4 behavior.
+    /// The disabled result: no clustering and no correlation shrinkage.
     #[must_use]
     pub const fn disabled() -> Self {
         Self {
@@ -201,7 +201,7 @@ impl CorrelationEstimator for HistoricalCorrelationEstimator {
         // Every evaluated pair's |ρ| (not just the above-threshold ones that
         // drove clustering) — a cluster formed via transitive closure (A-B and
         // B-C above threshold, A-C below) must still average in the A-C pair
-        // when computing the cluster's mean correlation (Phase 11.3 §4.2:
+        // when computing the cluster's mean correlation:
         // "ρ̄ = 平均因子/事件相关" is the full within-cluster pairwise mean,
         // not only the pairs that happened to clear the clustering threshold —
         // restricting to threshold-clearing pairs only would systematically
@@ -424,16 +424,17 @@ impl UnionFind {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        CorrelationEstimator, CorrelationInput, CorrelationMarket, HistoricalCorrelationEstimator,
-        ProxyCorrelationEstimator,
-    };
     use quant_pivot_models::{
         enums::{common::MarketCategory, quant::CorrelationSource},
         types::{EventId, MarketId},
     };
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
+
+    use super::{
+        CorrelationEstimator, CorrelationInput, CorrelationMarket, HistoricalCorrelationEstimator,
+        ProxyCorrelationEstimator,
+    };
 
     fn market(
         id: &str,

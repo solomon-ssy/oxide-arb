@@ -1,4 +1,4 @@
-//! Settlement redemption worker wiring (Phase 05.10).
+//! Settlement redemption worker wiring.
 //!
 //! Registers the periodic sweep that redeems resolved standard binary CTF lots
 //! whose frozen exit policy opted into `redeem_policy=auto`. The cadence is read

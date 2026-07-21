@@ -1,9 +1,11 @@
 //! Catalog-driven Postgres migration helpers.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use chrono::Utc;
 use quant_pivot_error::seed::SeedError;
 use quant_pivot_models::{
-    entities::seed_application,
+    entities::seed_application::{ActiveModel, Column, Entity},
     seed::{
         SeedContext, SeedDependency, SeedSpec, rbac::BOOTSTRAP_ADMIN_PASSWORD_HASH_INPUT,
         spec::all_specs,
@@ -13,14 +15,13 @@ use sea_orm::{
     ActiveValue::Set, ColumnTrait, ConnectionTrait, DatabaseConnection, DbErr, EntityTrait,
     QueryFilter, TransactionTrait,
 };
-use std::collections::{BTreeMap, BTreeSet};
 use tracing::info;
 
 /// Apply versioned catalog seeds after the immutable SQL schema is verified.
 pub async fn run_catalog_seeds(
     db: &DatabaseConnection,
     bootstrap_admin_password_hash: &str,
-) -> Result<(), sea_orm::DbErr> {
+) -> Result<(), DbErr> {
     let mut ctx = SeedContext::new();
     ctx.put(
         BOOTSTRAP_ADMIN_PASSWORD_HASH_INPUT,
@@ -165,9 +166,9 @@ async fn seed_already_applied<C>(db: &C, seed: &SeedSpec) -> Result<bool, DbErr>
 where
     C: ConnectionTrait,
 {
-    let Some(row) = seed_application::Entity::find()
-        .filter(seed_application::Column::SeedId.eq(seed.id))
-        .filter(seed_application::Column::SeedVersion.eq(seed_version_i32(seed)?))
+    let Some(row) = Entity::find()
+        .filter(Column::SeedId.eq(seed.id))
+        .filter(Column::SeedVersion.eq(seed_version_i32(seed)?))
         .one(db)
         .await?
     else {
@@ -191,7 +192,7 @@ async fn record_seed_application(
 ) -> Result<(), DbErr> {
     let rows = <i64 as TryFrom<u64>>::try_from(rows)
         .map_err(|_| DbErr::Custom(format!("seed `{}` affected too many rows", seed.id)))?;
-    seed_application::Entity::insert(seed_application::ActiveModel {
+    Entity::insert(ActiveModel {
         seed_id: Set(seed.id.to_owned()),
         seed_version: Set(seed_version_i32(seed)?),
         checksum: Set(seed.checksum.to_owned()),

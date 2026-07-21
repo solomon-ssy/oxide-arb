@@ -9,21 +9,23 @@
 //! so an idle book costs nothing and a hot book is throttled to one frame per
 //! tick regardless of delta rate.
 
-use crate::{
-    app::{AppContext, task_id::TaskId, task_registry::AppRunner},
-    ingest::{book_store::BookStore, market_registry::MarketRegistry},
-};
+use std::{collections::HashMap, sync::Arc, time::Duration};
+
 use quant_pivot_models::{
     domain::{
-        CoreEvent, CoreEventPublisher,
         api::{MarketBookSideView, MarketBookView},
+        runtime::{CoreEvent, CoreEventPublisher},
     },
     types::MarketId,
 };
 use quant_pivot_web::ws::SessionRegistry;
-use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::time::interval;
 use tokio_util::sync::CancellationToken;
+
+use crate::{
+    app::{AppContext, task_id::TaskId, task_registry::AppRunner},
+    ingest::{book_store::BookStore, market_registry::MarketRegistry},
+};
 
 /// Sampling cadence for watched-market book frames.
 const TICK_INTERVAL: Duration = Duration::from_millis(200);
@@ -146,16 +148,18 @@ impl AppContext {
 
 #[cfg(test)]
 mod tests {
-    use super::BookUpdateCoalescer;
-    use crate::{
-        ingest::{book_store::BookStore, market_registry::MarketRegistry},
-        observability::metrics_hub::MetricsHub,
+    use std::{
+        collections::HashSet,
+        sync::{Arc, RwLock},
     };
+
     use chrono::Utc;
+    use flume::Receiver;
     use quant_pivot_models::{
         domain::{
-            BookLevel, CoreEvent, CoreEventPublisher, SubscriptionKey, WsChannel,
-            market::{MarketRegistryInfo, TokenInfo},
+            market::{BookLevel, MarketRegistryInfo, TokenInfo},
+            runtime::{CoreEvent, CoreEventPublisher},
+            ws::{SubscriptionKey, WsChannel},
         },
         enums::{
             catalog::CatalogFilterReasonSet,
@@ -166,9 +170,12 @@ mod tests {
     };
     use quant_pivot_web::ws::{SessionHandle, SessionRegistry};
     use rust_decimal_macros::dec;
-    use std::{
-        collections::HashSet,
-        sync::{Arc, RwLock},
+    use tokio_util::sync::CancellationToken;
+
+    use super::BookUpdateCoalescer;
+    use crate::{
+        ingest::{book_store::BookStore, market_registry::MarketRegistry},
+        observability::metrics_hub::MetricsHub,
     };
 
     fn market_info(id: &str) -> MarketRegistryInfo {
@@ -224,7 +231,7 @@ mod tests {
             subject: "test-user".to_owned(),
             family_id: "test-family".to_owned(),
             can_read_system: false,
-            cancellation: tokio_util::sync::CancellationToken::new(),
+            cancellation: CancellationToken::new(),
         });
         drop(rx);
     }
@@ -241,10 +248,7 @@ mod tests {
         );
     }
 
-    fn build(
-        markets: &[&str],
-        subscribed: &[&str],
-    ) -> (BookUpdateCoalescer, flume::Receiver<CoreEvent>) {
+    fn build(markets: &[&str], subscribed: &[&str]) -> (BookUpdateCoalescer, Receiver<CoreEvent>) {
         let book_store = Arc::new(BookStore::new(Arc::new(MetricsHub::new())));
         let market_registry = Arc::new(MarketRegistry::new());
         for id in markets {
@@ -261,7 +265,7 @@ mod tests {
         )
     }
 
-    fn drain_book_updates(rx: &flume::Receiver<CoreEvent>) -> Vec<MarketId> {
+    fn drain_book_updates(rx: &Receiver<CoreEvent>) -> Vec<MarketId> {
         let mut ids = Vec::new();
         while let Ok(event) = rx.try_recv() {
             if let CoreEvent::MarketBookUpdate { market_id, .. } = event {

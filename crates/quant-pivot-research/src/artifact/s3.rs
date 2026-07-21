@@ -3,13 +3,15 @@ use std::{sync::Arc, time::Duration};
 use async_trait::async_trait;
 use aws_config::BehaviorVersion;
 use aws_sdk_s3::{
-    Client as S3ControlClient, config::Region, presigning::PresigningConfig,
+    Client as S3ControlClient,
+    config::{Builder, Region},
+    presigning::PresigningConfig,
     types::ObjectLockRetentionMode,
 };
 use chrono::Utc;
 use futures_util::StreamExt;
 use object_store::{
-    GetOptions, ObjectStore, ObjectStoreExt, WriteMultipart,
+    Error, GetOptions, ObjectMeta, ObjectStore, ObjectStoreExt, Result, WriteMultipart,
     aws::{AmazonS3, AmazonS3Builder},
     path::Path,
 };
@@ -161,7 +163,7 @@ impl S3ArtifactStore {
         ArtifactUri::parse(uri.to_string()).map_err(Into::into)
     }
 
-    fn io_error(&self, path: &Path, error: &object_store::Error) -> ResearchError {
+    fn io_error(&self, path: &Path, error: &Error) -> ResearchError {
         ResearchError::ArtifactIo {
             uri: format!("s3://{}/{}", self.bucket, path),
             detail: error.to_string(),
@@ -175,8 +177,7 @@ impl S3ArtifactStore {
                     .region(Region::new(self.region.clone()))
                     .load()
                     .await;
-                let mut builder =
-                    aws_sdk_s3::config::Builder::from(&shared).force_path_style(self.path_style);
+                let mut builder = Builder::from(&shared).force_path_style(self.path_style);
                 if let Some(endpoint) = &self.endpoint {
                     builder = builder.endpoint_url(endpoint);
                 }
@@ -215,10 +216,7 @@ impl S3ArtifactStore {
         Ok(recognized_mode && active_until)
     }
 
-    async fn head_object(
-        &self,
-        object: &S3ObjectRef,
-    ) -> object_store::Result<object_store::ObjectMeta> {
+    async fn head_object(&self, object: &S3ObjectRef) -> Result<ObjectMeta> {
         let options = GetOptions {
             version: object.version_id.clone(),
             head: true,
@@ -292,7 +290,7 @@ impl ArtifactStore for S3ArtifactStore {
                 .get_opts(&object.path, options)
                 .await
                 .map_err(|error| match error {
-                    object_store::Error::NotFound { .. } => ResearchError::ArtifactNotFound {
+                    Error::NotFound { .. } => ResearchError::ArtifactNotFound {
                         uri: uri.as_str().to_owned(),
                     },
                     error => self.io_error(&object.path, &error),
@@ -369,7 +367,7 @@ impl ArtifactStore for S3ArtifactStore {
         let object = self.object_ref_from_uri(uri)?;
         match self.head_object(&object).await {
             Ok(_) => Ok(true),
-            Err(object_store::Error::NotFound { .. }) => Ok(false),
+            Err(Error::NotFound { .. }) => Ok(false),
             Err(error) => Err(self.io_error(&object.path, &error).into()),
         }
     }

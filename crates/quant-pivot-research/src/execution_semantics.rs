@@ -591,14 +591,13 @@ pub struct PassiveTrade {
 
 #[cfg(test)]
 mod tests {
-    use chrono::TimeZone;
+    use chrono::{TimeZone, Utc};
     use quant_pivot_models::{
         domain::market::{book::BookLevel, fee::BuilderFeeAttribution},
         enums::{clickhouse::ChTradeReconciliationStatus, common::Side, quant::FillRequirement},
         types::{Bps, ContentHash, Price, Shares, Usd},
     };
     use rust_decimal::Decimal;
-
     use rust_decimal_macros::dec;
     use uuid::Uuid;
 
@@ -612,10 +611,7 @@ mod tests {
     }
 
     fn schedule() -> PitFeeSchedule {
-        let at = chrono::Utc
-            .timestamp_opt(1_700_000_000, 0)
-            .single()
-            .expect("time");
+        let at = Utc.timestamp_opt(1_700_000_000, 0).single().expect("time");
         PitFeeSchedule {
             schedule_hash: ContentHash::parse(format!("blake3:{}", "1".repeat(64))).expect("hash"),
             effective_at: at,

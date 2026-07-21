@@ -5,12 +5,12 @@ use std::{collections::BTreeMap, fmt::Display};
 use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    entities::clob_market_info_version,
+    entities::clob_market_info_version::{ActiveModel, Column, Entity, Model},
     types::{ClobMarketInfoVersion, ClobTokenSet, ContentHash, HistoryCoverage, MarketId},
 };
 use sea_orm::{
-    ActiveValue::Set, ColumnTrait, DatabaseConnection, EntityTrait, FromQueryResult, QueryFilter,
-    QueryOrder, QuerySelect, sea_query::OnConflict,
+    ActiveValue, ActiveValue::Set, ColumnTrait, DatabaseConnection, EntityTrait, FromQueryResult,
+    QueryFilter, QueryOrder, QuerySelect, sea_query::OnConflict,
 };
 
 use crate::traits::ClobMarketInfoRepository;
@@ -31,21 +31,12 @@ impl ClobMarketInfoRepository for PgClobMarketInfoRepository {
         &self,
         as_of: DateTime<Utc>,
     ) -> Result<Vec<HistoryCoverage>, StorageError> {
-        let row = clob_market_info_version::Entity::find()
+        let row = Entity::find()
             .select_only()
-            .column_as(
-                clob_market_info_version::Column::EffectiveAt.min(),
-                "earliest_event_time",
-            )
-            .column_as(
-                clob_market_info_version::Column::EffectiveAt.max(),
-                "latest_event_time",
-            )
-            .column_as(
-                clob_market_info_version::Column::VersionId.count(),
-                "row_count",
-            )
-            .filter(clob_market_info_version::Column::EffectiveAt.lte(as_of))
+            .column_as(Column::EffectiveAt.min(), "earliest_event_time")
+            .column_as(Column::EffectiveAt.max(), "latest_event_time")
+            .column_as(Column::VersionId.count(), "row_count")
+            .filter(Column::EffectiveAt.lte(as_of))
             .into_model::<HistoryRangeRow>()
             .one(&self.db)
             .await
@@ -82,7 +73,7 @@ impl ClobMarketInfoRepository for PgClobMarketInfoRepository {
                     .map_err(|error| invariant("minimum_order_age_secs", error.to_string()))
             })
             .transpose()?;
-        let active = clob_market_info_version::ActiveModel {
+        let active = ActiveModel {
             version_id: Set(observation.version_id),
             market_id: Set(observation.market_id),
             tokens_json: Set(ClobTokenSet(observation.tokens)),
@@ -99,16 +90,13 @@ impl ClobMarketInfoRepository for PgClobMarketInfoRepository {
             available_at: Set(observation.available_at),
             payload_hash: Set(observation.payload_hash),
             raw_payload: Set(observation.raw_payload.into()),
-            created_at: sea_orm::ActiveValue::NotSet,
+            created_at: ActiveValue::NotSet,
         };
-        clob_market_info_version::Entity::insert(active)
+        Entity::insert(active)
             .on_conflict(
-                OnConflict::columns([
-                    clob_market_info_version::Column::MarketId,
-                    clob_market_info_version::Column::PayloadHash,
-                ])
-                .do_nothing()
-                .to_owned(),
+                OnConflict::columns([Column::MarketId, Column::PayloadHash])
+                    .do_nothing()
+                    .to_owned(),
             )
             .exec_without_returning(&self.db)
             .await
@@ -130,12 +118,12 @@ impl ClobMarketInfoRepository for PgClobMarketInfoRepository {
         effective_at: DateTime<Utc>,
         available_at_cutoff: DateTime<Utc>,
     ) -> Result<Option<ClobMarketInfoVersion>, StorageError> {
-        clob_market_info_version::Entity::find()
-            .filter(clob_market_info_version::Column::MarketId.eq(market_id.clone()))
-            .filter(clob_market_info_version::Column::EffectiveAt.lte(effective_at))
-            .filter(clob_market_info_version::Column::AvailableAt.lte(available_at_cutoff))
-            .order_by_desc(clob_market_info_version::Column::EffectiveAt)
-            .order_by_desc(clob_market_info_version::Column::AvailableAt)
+        Entity::find()
+            .filter(Column::MarketId.eq(market_id.clone()))
+            .filter(Column::EffectiveAt.lte(effective_at))
+            .filter(Column::AvailableAt.lte(available_at_cutoff))
+            .order_by_desc(Column::EffectiveAt)
+            .order_by_desc(Column::AvailableAt)
             .one(&self.db)
             .await
             .map_err(StorageError::from)?
@@ -147,9 +135,9 @@ impl ClobMarketInfoRepository for PgClobMarketInfoRepository {
         &self,
         market_id: &MarketId,
     ) -> Result<Option<ClobMarketInfoVersion>, StorageError> {
-        clob_market_info_version::Entity::find()
-            .filter(clob_market_info_version::Column::MarketId.eq(market_id.clone()))
-            .order_by_desc(clob_market_info_version::Column::AvailableAt)
+        Entity::find()
+            .filter(Column::MarketId.eq(market_id.clone()))
+            .order_by_desc(Column::AvailableAt)
             .one(&self.db)
             .await
             .map_err(StorageError::from)?
@@ -166,15 +154,15 @@ impl ClobMarketInfoRepository for PgClobMarketInfoRepository {
         if market_ids.is_empty() {
             return Ok(Vec::new());
         }
-        clob_market_info_version::Entity::find()
-            .filter(clob_market_info_version::Column::MarketId.is_in(market_ids.iter().cloned()))
-            .filter(clob_market_info_version::Column::EffectiveAt.lte(effective_at))
-            .filter(clob_market_info_version::Column::AvailableAt.lte(available_at_cutoff))
-            .distinct_on([clob_market_info_version::Column::MarketId])
-            .order_by_asc(clob_market_info_version::Column::MarketId)
-            .order_by_desc(clob_market_info_version::Column::EffectiveAt)
-            .order_by_desc(clob_market_info_version::Column::AvailableAt)
-            .order_by_desc(clob_market_info_version::Column::PayloadHash)
+        Entity::find()
+            .filter(Column::MarketId.is_in(market_ids.iter().cloned()))
+            .filter(Column::EffectiveAt.lte(effective_at))
+            .filter(Column::AvailableAt.lte(available_at_cutoff))
+            .distinct_on([Column::MarketId])
+            .order_by_asc(Column::MarketId)
+            .order_by_desc(Column::EffectiveAt)
+            .order_by_desc(Column::AvailableAt)
+            .order_by_desc(Column::PayloadHash)
             .all(&self.db)
             .await
             .map_err(StorageError::from)?
@@ -193,13 +181,13 @@ impl ClobMarketInfoRepository for PgClobMarketInfoRepository {
         if market_ids.is_empty() {
             return Ok(Vec::new());
         }
-        let rows = clob_market_info_version::Entity::find()
-            .filter(clob_market_info_version::Column::MarketId.is_in(market_ids.iter().cloned()))
-            .filter(clob_market_info_version::Column::EffectiveAt.lt(effective_to))
-            .filter(clob_market_info_version::Column::AvailableAt.lte(available_by))
-            .order_by_asc(clob_market_info_version::Column::MarketId)
-            .order_by_asc(clob_market_info_version::Column::EffectiveAt)
-            .order_by_asc(clob_market_info_version::Column::AvailableAt)
+        let rows = Entity::find()
+            .filter(Column::MarketId.is_in(market_ids.iter().cloned()))
+            .filter(Column::EffectiveAt.lt(effective_to))
+            .filter(Column::AvailableAt.lte(available_by))
+            .order_by_asc(Column::MarketId)
+            .order_by_asc(Column::EffectiveAt)
+            .order_by_asc(Column::AvailableAt)
             .all(&self.db)
             .await
             .map_err(StorageError::from)?;
@@ -257,18 +245,16 @@ async fn find_by_hash(
     db: &DatabaseConnection,
     market_id: &MarketId,
     payload_hash: &ContentHash,
-) -> Result<Option<clob_market_info_version::Model>, StorageError> {
-    clob_market_info_version::Entity::find()
-        .filter(clob_market_info_version::Column::MarketId.eq(market_id.clone()))
-        .filter(clob_market_info_version::Column::PayloadHash.eq(payload_hash.clone()))
+) -> Result<Option<Model>, StorageError> {
+    Entity::find()
+        .filter(Column::MarketId.eq(market_id.clone()))
+        .filter(Column::PayloadHash.eq(payload_hash.clone()))
         .one(db)
         .await
         .map_err(StorageError::from)
 }
 
-fn model_to_domain(
-    model: clob_market_info_version::Model,
-) -> Result<ClobMarketInfoVersion, StorageError> {
+fn model_to_domain(model: Model) -> Result<ClobMarketInfoVersion, StorageError> {
     Ok(ClobMarketInfoVersion {
         version_id: model.version_id,
         market_id: model.market_id,

@@ -8,6 +8,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use blake3::Hasher;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use futures_util::StreamExt;
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError, storage::StorageError};
@@ -15,23 +16,29 @@ use quant_pivot_models::{
     clickhouse::TradeTapeRow,
     config::WEATHER_OBSERVATION_DAY_CLOSE_GRACE_SECS,
     domain::{
-        BuildTrainingDatasetRequest, CompleteTradePolicyValidation, FailTradePolicyValidation,
-        FitTradePolicyRequest, JobProgressSink, MarketLinkage, NewTradePolicyArtifact,
-        NewTradePolicyGovernanceAudit, NewTradePolicyTrialAttempt, NewTradePolicyValidationRow,
-        NewTradePolicyValidationRun, Paginated, PolicyFitDatasetBuildRequest, ResearchJobProgress,
-        ResearchReadinessEvidenceInfo, SourceSliceIdentity, SourceSliceIdentityInput,
-        SourceSliceInfo, TradePolicyArtifactInfo, TradePolicyAuditListQuery,
-        TradePolicyEvidenceDownloadView, TradePolicyEvidenceRowListQuery,
-        TradePolicyEvidenceRowView, TradePolicyFitPreflightRequest, TradePolicyFitPreflightView,
-        TradePolicyFitReadiness, TradePolicyFitSelection, TradePolicyGovernanceAuditInfo,
-        TradePolicyListQuery, TradePolicyOperationalEvidenceView, TradePolicyPort,
-        TradePolicyPreflightBlockerDetail, TradePolicyPreflightBlockerView,
-        TradePolicySourceSliceObjectListQuery, TradePolicySourceSliceObjectView,
-        TradePolicySourceSliceView, TradePolicyTrialAttemptInfo, TradePolicyTrialListQuery,
-        TradePolicyValidationListQuery, TradePolicyValidationRowInfo,
-        TradePolicyValidationRowListQuery, TradePolicyValidationRunInfo, TrainingDatasetInfo,
-        TrainingDatasetListQuery, TrainingDatasetPort, WeatherObservationFact,
-        pagination::PageRequest,
+        api::{
+            BuildTrainingDatasetRequest, FitTradePolicyRequest, TradePolicyAuditListQuery,
+            TradePolicyEvidenceDownloadView, TradePolicyEvidenceRowListQuery,
+            TradePolicyEvidenceRowView, TradePolicyFitPreflightRequest,
+            TradePolicyFitPreflightView, TradePolicyFitReadiness, TradePolicyFitSelection,
+            TradePolicyListQuery, TradePolicyOperationalEvidenceView,
+            TradePolicyPreflightBlockerDetail, TradePolicyPreflightBlockerView,
+            TradePolicySourceSliceObjectListQuery, TradePolicySourceSliceObjectView,
+            TradePolicySourceSliceView, TradePolicyTrialListQuery, TradePolicyValidationListQuery,
+            TradePolicyValidationRowListQuery, TrainingDatasetListQuery,
+        },
+        data_plane::WeatherObservationFact,
+        pagination::{PageRequest, Paginated},
+        ports::{PolicyFitDatasetBuildRequest, TradePolicyPort, TrainingDatasetPort},
+        quant::{
+            CompleteTradePolicyValidation, FailTradePolicyValidation, JobProgressSink,
+            MarketLinkage, NewTradePolicyArtifact, NewTradePolicyGovernanceAudit,
+            NewTradePolicyTrialAttempt, NewTradePolicyValidationRow, NewTradePolicyValidationRun,
+            ResearchReadinessEvidenceInfo, SourceSliceIdentity, SourceSliceIdentityInput,
+            SourceSliceInfo, TradePolicyArtifactInfo, TradePolicyGovernanceAuditInfo,
+            TradePolicyTrialAttemptInfo, TradePolicyValidationRowInfo,
+            TradePolicyValidationRunInfo, TrainingDatasetInfo,
+        },
     },
     enums::quant::{
         DatasetPurpose, PublicationStatus, SourceSliceStatus, TradePolicyGovernanceAction,
@@ -44,7 +51,7 @@ use quant_pivot_models::{
         ArtifactUri, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION, DecisionPolicySnapshotId,
         DiagnosticCode, ExecutablePriceBasis, MarketId, ModelSpecId, ModelVersionId,
         POLICY_EVIDENCE_OBJECT_FORMAT_VERSION, ResearchEvaluationTrack, ResearchJobId,
-        ResearchProfileArtifact, ResearchProfileId, ResearchProfileRef,
+        ResearchJobProgress, ResearchProfileArtifact, ResearchProfileId, ResearchProfileRef,
         ResearchReadinessEvidenceId, ResearchReadinessEvidencePayload, SchemaVersion,
         ShadowLatencyProfileV1, SourceSliceManifestRef, SourceSliceManifestV1,
         SourceSliceObjectKind, StructuralVolatilityOosFoldRow,
@@ -150,8 +157,8 @@ struct ContractPreflight {
     canonical_candidates: Option<Vec<TradePolicyCandidateSpec>>,
     candidate_set_hash: Option<ContentHash>,
     profile: Option<ResearchProfileArtifact>,
-    fit_window_start: Option<chrono::DateTime<chrono::Utc>>,
-    fit_window_end: Option<chrono::DateTime<chrono::Utc>>,
+    fit_window_start: Option<DateTime<Utc>>,
+    fit_window_end: Option<DateTime<Utc>>,
     research_program_hash: Option<ContentHash>,
     source_slice_identity: Option<SourceSliceIdentity>,
     messages: Vec<String>,
@@ -240,9 +247,9 @@ struct WeatherPolicyRecomputeInput<'a> {
     factor_schema_hash: &'a ContentHash,
     experiment_family_hash: &'a ContentHash,
     latency_profile: &'a ShadowLatencyProfileV1,
-    fit_window_start: chrono::DateTime<chrono::Utc>,
-    fit_window_end: chrono::DateTime<chrono::Utc>,
-    pit_cutoff: chrono::DateTime<chrono::Utc>,
+    fit_window_start: DateTime<Utc>,
+    fit_window_end: DateTime<Utc>,
+    pit_cutoff: DateTime<Utc>,
     activation_target: VerticalActivationTarget,
     progress: &'a dyn JobProgressSink,
     cancel: &'a CancellationToken,
@@ -334,8 +341,8 @@ struct DatasetEvaluationInput<'a> {
     evaluation_track: ResearchEvaluationTrack,
     profile: Option<&'a ResearchProfileArtifact>,
     research_program_hash: Option<&'a ContentHash>,
-    fit_window_start: Option<chrono::DateTime<chrono::Utc>>,
-    fit_window_end: Option<chrono::DateTime<chrono::Utc>>,
+    fit_window_start: Option<DateTime<Utc>>,
+    fit_window_end: Option<DateTime<Utc>>,
     dataset: Option<&'a TrainingDatasetInfo>,
     source_slice: Option<&'a SourceSliceInfo>,
 }
@@ -346,8 +353,8 @@ struct ContractIdentityInput<'a> {
     research_program_hash: Option<&'a ContentHash>,
     decision_policy_snapshot_id: Option<&'a DecisionPolicySnapshotId>,
     runtime_limits: Option<&'a RuntimePolicyLimits>,
-    fit_window_start: Option<chrono::DateTime<chrono::Utc>>,
-    fit_window_end: Option<chrono::DateTime<chrono::Utc>>,
+    fit_window_start: Option<DateTime<Utc>>,
+    fit_window_end: Option<DateTime<Utc>>,
 }
 
 struct OperationalPreflight {
@@ -555,7 +562,7 @@ impl TradePolicyService {
             }
             _ => None,
         };
-        let pit_cutoff_not_future = request.selection.pit_cutoff <= chrono::Utc::now();
+        let pit_cutoff_not_future = request.selection.pit_cutoff <= Utc::now();
         if !pit_cutoff_not_future {
             messages.push("PIT cutoff cannot be in the future".to_owned());
         }
@@ -1161,7 +1168,7 @@ impl TradePolicyService {
         candidates: &[TradePolicyCandidateSpec],
         evidence: &WeatherPolicyEvidence,
         objects: Option<&PolicyEvidenceObjects>,
-    ) -> QuantResult<(chrono::DateTime<chrono::Utc>, ContentHash)> {
+    ) -> QuantResult<(DateTime<Utc>, ContentHash)> {
         let candidate_hashes = candidates
             .iter()
             .map(|candidate| {
@@ -2099,7 +2106,7 @@ impl TradePolicyService {
             .map(|example| (example.example_id.clone(), example))
             .collect::<HashMap<_, _>>();
         let mut batch = Vec::with_capacity(BATCH_SIZE);
-        let mut row_chain = blake3::Hasher::new();
+        let mut row_chain = Hasher::new();
         row_chain.update(b"trade_policy_validation_row_chain_v2\0");
         row_chain.update(validation_run_id.to_string().as_bytes());
         row_chain.update(b"\0");
@@ -2557,7 +2564,7 @@ impl TradePolicyService {
             })
             .transpose()
             .map_err(|detail| ResearchError::ValidationMethodology { detail })?;
-        let evidence = self.readiness.latest_verified(chrono::Utc::now()).await?;
+        let evidence = self.readiness.latest_verified(Utc::now()).await?;
         let latency_profile = evidence
             .latency
             .as_ref()
@@ -2605,7 +2612,7 @@ impl TradePolicyService {
         const MAX_MANIFEST_BYTES: usize = 1_048_576;
 
         let mut stream = self.artifacts.get_stream(uri).await?;
-        let mut hasher = blake3::Hasher::new();
+        let mut hasher = Hasher::new();
         let mut bytes = Vec::new();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk?;
@@ -3264,7 +3271,7 @@ fn policy_simulator_hash() -> QuantResult<ContentHash> {
     .map_err(Into::into)
 }
 
-fn content_hash_from_hasher(hasher: &blake3::Hasher) -> QuantResult<ContentHash> {
+fn content_hash_from_hasher(hasher: &Hasher) -> QuantResult<ContentHash> {
     ContentHash::parse(format!("blake3:{}", hasher.finalize().to_hex())).map_err(Into::into)
 }
 
@@ -3537,21 +3544,16 @@ fn operational_evidence_view(
 
 fn contract_fit_window(
     profile: Option<&ResearchProfileArtifact>,
-    pit_cutoff: chrono::DateTime<chrono::Utc>,
-) -> (
-    Option<chrono::DateTime<chrono::Utc>>,
-    Option<chrono::DateTime<chrono::Utc>>,
-) {
+    pit_cutoff: DateTime<Utc>,
+) -> (Option<DateTime<Utc>>, Option<DateTime<Utc>>) {
     let end = profile.and_then(|profile| {
-        pit_cutoff.checked_sub_signed(chrono::Duration::seconds(
+        pit_cutoff.checked_sub_signed(ChronoDuration::seconds(
             i64::try_from(profile.spec.target_horizon_secs).ok()?,
         ))
     });
     let start = end.and_then(|end| {
         profile.and_then(|profile| {
-            end.checked_sub_signed(chrono::Duration::days(i64::from(
-                profile.spec.fit_span_days,
-            )))
+            end.checked_sub_signed(ChronoDuration::days(i64::from(profile.spec.fit_span_days)))
         })
     });
     (start, end)
@@ -3618,12 +3620,12 @@ fn derive_contract_source_identity(
         }
     })?;
     let window_start = start
-        .checked_sub_signed(chrono::Duration::seconds(lookback))
+        .checked_sub_signed(ChronoDuration::seconds(lookback))
         .ok_or_else(|| ResearchError::ValidationMethodology {
             detail: "source-slice lookback window overflows chrono".to_owned(),
         })?;
     let window_end = end
-        .checked_add_signed(chrono::Duration::seconds(horizon))
+        .checked_add_signed(ChronoDuration::seconds(horizon))
         .ok_or_else(|| ResearchError::ValidationMethodology {
             detail: "source-slice horizon window overflows chrono".to_owned(),
         })?;
@@ -4062,7 +4064,7 @@ impl TradePolicyPort for TradePolicyService {
             kind,
             byte_hash: object.byte_hash,
             row_count: object.row_count,
-            expires_at: chrono::Utc::now() + chrono::Duration::seconds(300),
+            expires_at: Utc::now() + ChronoDuration::seconds(300),
             url,
         }))
     }
@@ -4493,9 +4495,9 @@ fn weather_experiment_family_hash(
 }
 
 fn label_cutoff_counts(
-    fit_window_start: Option<chrono::DateTime<chrono::Utc>>,
-    fit_window_end: Option<chrono::DateTime<chrono::Utc>>,
-    pit_cutoff: chrono::DateTime<chrono::Utc>,
+    fit_window_start: Option<DateTime<Utc>>,
+    fit_window_end: Option<DateTime<Utc>>,
+    pit_cutoff: DateTime<Utc>,
     target_horizon_secs: Option<u64>,
     examples: &[TrainingExample],
 ) -> (u64, u64) {
@@ -4526,8 +4528,8 @@ fn label_cutoff_counts(
 fn raw_trajectory_labels_matured(
     labels: &[TrainingLabel],
     target_horizon_secs: u64,
-    decision_at: chrono::DateTime<chrono::Utc>,
-    pit_cutoff: chrono::DateTime<chrono::Utc>,
+    decision_at: DateTime<Utc>,
+    pit_cutoff: DateTime<Utc>,
 ) -> Option<bool> {
     let required = [
         RETURN_TO_HORIZON,
@@ -4554,11 +4556,11 @@ fn raw_trajectory_labels_matured(
 
 #[cfg(test)]
 fn label_visible_at_cutoff(
-    fit_window_start: Option<chrono::DateTime<chrono::Utc>>,
-    fit_window_end: Option<chrono::DateTime<chrono::Utc>>,
-    pit_cutoff: chrono::DateTime<chrono::Utc>,
-    decision_at: chrono::DateTime<chrono::Utc>,
-    matured_at: chrono::DateTime<chrono::Utc>,
+    fit_window_start: Option<DateTime<Utc>>,
+    fit_window_end: Option<DateTime<Utc>>,
+    pit_cutoff: DateTime<Utc>,
+    decision_at: DateTime<Utc>,
+    matured_at: DateTime<Utc>,
 ) -> bool {
     fit_window_start.is_some_and(|start| decision_at >= start)
         && fit_window_end.is_some_and(|end| decision_at < end)

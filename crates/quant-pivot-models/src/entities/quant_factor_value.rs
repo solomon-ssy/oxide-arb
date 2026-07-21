@@ -1,5 +1,10 @@
 //! `quant_factor_value` table entity.
 
+use chrono::{DateTime, Utc};
+use rust_decimal::Decimal;
+use sea_orm::entity::prelude::*;
+
+use super::{market, quant_factor_definition, quant_feature_vector, quant_model_run};
 use crate::{
     enums::{
         factor::{FactorIndeterminateReason, FactorValueState, NormalizationSource},
@@ -10,9 +15,6 @@ use crate::{
         factor::FactorExplanation,
     },
 };
-use chrono::{DateTime, Utc};
-use rust_decimal::Decimal;
-use sea_orm::entity::prelude::*;
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -48,28 +50,28 @@ pub struct Model {
         from = "factor_definition_id",
         to = "factor_definition_id"
     )]
-    pub factor_definition: BelongsTo<super::quant_factor_definition::Entity>,
+    pub factor_definition: BelongsTo<quant_factor_definition::Entity>,
     #[sea_orm(
         belongs_to,
         relation_enum = "FeatureVector",
         from = "feature_vector_id",
         to = "feature_vector_id"
     )]
-    pub feature_vector: BelongsTo<super::quant_feature_vector::Entity>,
+    pub feature_vector: BelongsTo<quant_feature_vector::Entity>,
     #[sea_orm(
         belongs_to,
         relation_enum = "Market",
         from = "market_id",
         to = "market_id"
     )]
-    pub market: BelongsTo<super::market::Entity>,
+    pub market: BelongsTo<market::Entity>,
     #[sea_orm(
         belongs_to,
         relation_enum = "ModelRun",
         from = "model_run_id",
         to = "model_run_id"
     )]
-    pub model_run: BelongsTo<super::quant_model_run::Entity>,
+    pub model_run: BelongsTo<quant_model_run::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

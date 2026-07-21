@@ -1,4 +1,4 @@
-//! External-vertical domain observations (Phase 11.2.2).
+//! External-vertical domain observations.
 //!
 //! A [`DomainObservation`] is one point-in-time metric reading from an external
 //! feature source (a Binance kline field, a Chainlink oracle round). The long
@@ -8,7 +8,7 @@
 
 use std::str::FromStr;
 
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use rust_decimal::Decimal;
 use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromJsonQueryResult};
 use serde::{Deserialize, Serialize};
@@ -174,7 +174,7 @@ pub enum DomainSourceCheckpoint {
     },
     NceiStormEvents {
         report_window_end: DateTime<Utc>,
-        collection_date: chrono::NaiveDate,
+        collection_date: NaiveDate,
         file_hash: ContentHash,
     },
     NhcAdvisory {
@@ -185,7 +185,7 @@ pub enum DomainSourceCheckpoint {
     },
     NhcHurdat2 {
         last_observation: DateTime<Utc>,
-        collection_date: chrono::NaiveDate,
+        collection_date: NaiveDate,
         file_hash: ContentHash,
     },
     NasaGistemp {
@@ -286,7 +286,7 @@ pub struct DomainSourceCursorInfo {
     pub checkpoint_hash: ContentHash,
     pub status: DomainCursorStatus,
     /// Detail from the most recent failed tick; `None` when the last tick
-    /// for this instrument succeeded (R10 ingest hardening).
+    /// for this instrument succeeded; failures remain isolated per instrument.
     pub last_error: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -328,13 +328,14 @@ fn millis_to_utc(timestamp_ms: i64) -> Option<DateTime<Utc>> {
 
 #[cfg(test)]
 mod tests {
+    use chrono::{TimeZone, Utc};
+    use rust_decimal_macros::dec;
+
     use super::DomainObservation;
     use crate::{
         enums::domain::{DomainFamily, DomainMetric, KlineInterval},
         types::{BinanceSymbol, DomainInstrumentKey, DomainSourceId},
     };
-    use chrono::{TimeZone, Utc};
-    use rust_decimal_macros::dec;
 
     #[test]
     fn observation_roundtrips_clickhouse_row() {

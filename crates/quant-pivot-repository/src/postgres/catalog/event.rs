@@ -1,14 +1,8 @@
-use crate::{
-    postgres::{
-        catalog::ingest::{find_existing_str_id_chunks, find_models_by_str_id_chunks},
-        primitives,
-        write::upsert_many_chunked,
-    },
-    traits::EventRepository,
-};
+use std::collections::HashSet;
+
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    domain::{EventInfo, UpsertEvent},
+    domain::market::{EventInfo, UpsertEvent},
     entities::event::{Column, Entity},
     enums::market::EventStatus,
     types::EventId,
@@ -17,7 +11,15 @@ use sea_orm::{
     ColumnTrait, ConnectionTrait, DatabaseConnection, DatabaseTransaction, EntityTrait,
     IntoActiveModel, QueryFilter, sea_query::OnConflict,
 };
-use std::collections::HashSet;
+
+use crate::{
+    postgres::{
+        catalog::ingest::{find_existing_str_id_chunks, find_models_by_str_id_chunks},
+        primitives,
+        write::upsert_many_chunked,
+    },
+    traits::EventRepository,
+};
 
 pub struct PgEventRepository {
     db: DatabaseConnection,

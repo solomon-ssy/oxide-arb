@@ -3,6 +3,7 @@
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
+use super::quant_entry_condition_instance;
 use crate::types::{ContentHash, EntryConditionArtifactId, EntryConditionArtifactV1};
 
 #[sea_orm::model]
@@ -19,7 +20,7 @@ pub struct Model {
     pub created_at: DateTime<Utc>,
 
     #[sea_orm(has_many, relation_enum = "Instance")]
-    pub instance: HasMany<super::quant_entry_condition_instance::Entity>,
+    pub instance: HasMany<quant_entry_condition_instance::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

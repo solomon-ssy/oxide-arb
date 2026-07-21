@@ -1,6 +1,5 @@
 //! Normalized Gamma catalog rows — validated wire → mapper input.
 
-use super::wire::{WireEvent, WireMarket};
 use chrono::{DateTime, Utc};
 use quant_pivot_models::{
     enums::{
@@ -11,7 +10,10 @@ use quant_pivot_models::{
     types::Usd,
 };
 use rust_decimal::Decimal;
+use serde_json::Value;
 use thiserror::Error;
+
+use super::wire::{WireEvent, WireMarket};
 
 /// Tradeable token row after Gamma wire normalization.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,7 +94,7 @@ pub struct CatalogEvent {
 pub struct FilteredPrelistingMarket {
     pub source_id: String,
     pub reason: CatalogPrelistingFilterReason,
-    pub raw_payload: serde_json::Value,
+    pub raw_payload: Value,
 }
 
 /// A structurally invalid market dropped during catalog normalization.
@@ -101,7 +103,7 @@ pub struct RejectedMarket {
     /// `condition_id` as received (may be empty for `EmptyConditionId`).
     pub condition_id: String,
     pub reject: CatalogMarketReject,
-    pub raw_payload: Option<serde_json::Value>,
+    pub raw_payload: Option<Value>,
 }
 
 /// Why a single embedded market was dropped during catalog normalization.
@@ -170,7 +172,7 @@ impl From<WireEvent> for CatalogEvent {
                 filtered_markets.push(FilteredPrelistingMarket {
                     source_id: source_id.to_owned(),
                     reason: CatalogPrelistingFilterReason::MissingConditionId,
-                    raw_payload: raw_payload.unwrap_or(serde_json::Value::Null),
+                    raw_payload: raw_payload.unwrap_or(Value::Null),
                 });
                 continue;
             }
@@ -369,8 +371,6 @@ fn parse_gamma_timestamp(raw: Option<&str>) -> Option<DateTime<Utc>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CatalogEvent, CatalogMarket, CatalogMarketReject};
-    use crate::gamma::wire::{WireEvent, WireMarket};
     use quant_pivot_models::{
         enums::{
             catalog::{CatalogFilterReason, CatalogPrelistingFilterReason},
@@ -379,6 +379,9 @@ mod tests {
         },
         types::Usd,
     };
+
+    use super::{CatalogEvent, CatalogMarket, CatalogMarketReject};
+    use crate::gamma::wire::{WireEvent, WireMarket};
 
     #[test]
     fn filters_prelisting_market_with_source_id_and_empty_condition_id() {

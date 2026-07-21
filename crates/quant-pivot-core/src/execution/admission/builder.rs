@@ -3,7 +3,7 @@
 //!
 //! This is the *only* place admission performs I/O. A failure to read any
 //! mandatory source (recommendation, report, account, active config version) is
-//! a `QuantError` — the 05.4 dispatcher treats it as not-executable (fail
+//! a `QuantError` — the dispatcher treats it as not-executable (fail
 //! closed). Optional state (book snapshot) maps to `None` and is handled by the
 //! checks. The resulting input is immutable; the checks are pure over it.
 
@@ -16,8 +16,12 @@ use quant_pivot_error::{
 };
 use quant_pivot_models::{
     domain::{
-        CapitalAllocationInfo, DataQualityPort, DecisionPolicySnapshotInfo, ModelVersionInfo,
-        OrderIntentInfo, RecommendationInfo, RecommendationReportInfo,
+        governance::DecisionPolicySnapshotInfo,
+        ports::DataQualityPort,
+        quant::{
+            CapitalAllocationInfo, ModelVersionInfo, OrderIntentInfo, RecommendationInfo,
+            RecommendationReportInfo,
+        },
     },
     enums::{market::MarketStatus, quant::PublicationStatus},
     types::{ClobMarketInfoVersion, Usd},
@@ -60,7 +64,7 @@ pub struct AdmissionInputBuilderDeps {
     /// Re-verifies a bound `model_score` calibrator's liveness (hash + `active`)
     /// at submit time — the enum tag alone (`ReturnModelSpec::Calibrated`) only
     /// proves a calibrator was bound at publish time, not that it still
-    /// resolves today (admission check #23 deep verification, Phase 11.3).
+    /// resolves today (the deep calibrator-verification check).
     pub calibration_loader: Arc<dyn CalibrationArtifactLoader>,
     pub reconciliation: Arc<dyn ReconciliationRepository>,
     pub execution_orders: Arc<dyn ExecutionOrderRepository>,
@@ -77,9 +81,9 @@ pub struct AdmissionInputBuilderDeps {
     pub config: Arc<DecisionPolicyStore>,
     pub runtime_mode: RuntimeModeHandle,
     pub kill_switch: KillSwitchHandle,
-    /// Venue-health hot read published by the 05.4 execution breaker (seam #18).
+    /// Venue-health hot read published by the execution breaker (seam #18).
     pub venue_health: VenueHealthHandle,
-    /// Exit-monitor health hot read published by the 05.6 worker (seam #20).
+    /// Exit-monitor health hot read published by the worker (seam #20).
     pub exit_monitor_health: ExitMonitorHealthHandle,
 }
 

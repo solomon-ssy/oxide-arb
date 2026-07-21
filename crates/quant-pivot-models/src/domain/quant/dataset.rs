@@ -1,5 +1,9 @@
 //! Training-dataset ledger persistence DTOs.
 
+use chrono::{DateTime, Utc};
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
+use serde::{Deserialize, Serialize};
+
 use crate::{
     entities::quant_training_dataset,
     enums::quant::{DatasetPurpose, TrainingDatasetStatus},
@@ -8,9 +12,6 @@ use crate::{
         ModelSpecId, SchemaVersion, TrainingDatasetId, TrainingHorizonsSecs, TrainingSampleSources,
     },
 };
-use chrono::{DateTime, Utc};
-use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
-use serde::{Deserialize, Serialize};
 
 /// Frozen training-dataset ledger row.
 #[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
@@ -22,7 +23,7 @@ pub struct TrainingDatasetInfo {
     pub window_start: DateTime<Utc>,
     pub window_end: DateTime<Utc>,
     pub status: TrainingDatasetStatus,
-    /// What the materialized examples are used for (Phase 11.3 §4): `Training`
+    /// What the materialized examples are used for: `Training`
     /// (the default, model-training spine) or `Calibration` (an independent
     /// held-out split a `ProbabilityCalibrator` fits on — must be disjoint +
     /// embargoed from the model's own `Training` dataset).

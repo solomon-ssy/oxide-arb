@@ -1,10 +1,10 @@
 //! Layered linkage resolver contracts + the deterministic grounding gate.
 //!
 //! [`SubjectExtractor`] is one tier of the layered resolver. The deterministic
-//! tiers (Tier 0 slug, Tier 1 template) are pure research functions shipped by
-//! 11.2.2; the Tier 2 LLM extractor lives behind the same trait and runs
+//! tiers (Tier 0 slug, Tier 1 template) are pure research functions. A future
+//! Tier 2 LLM extractor must live behind the same trait and run
 //! **offline only** — never on the online/PIT hot path (non-deterministic,
-//! non-replayable). Its design is frozen in `phase-11/11.2.3`.
+//! non-replayable).
 //!
 //! [`SubjectValidator`] is the **single gate**: every candidate subject, from
 //! ANY tier, must pass structural validation plus grounding (each extracted
@@ -13,11 +13,12 @@
 //! irreplaceable even once the Tier 2 LLM lands — an ungroundable field is a
 //! hallucination by definition and is rejected regardless of who produced it.
 
+use chrono_tz::Tz;
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
-    domain::{
+    domain::quant::{
         CryptoSubject, GroundingField, GroundingKind, GroundingProof, LinkageSourceMetadata,
-        MarketSubject, ResolutionOracle,
+        LinkageValidationFailure, MarketSubject, ResolutionOracle,
     },
     enums::domain::ResolverTier,
     types::{DomainInstrumentKey, Probability},
@@ -61,8 +62,8 @@ pub enum ValidationOutcome {
     Accepted,
     /// The candidate is rejected; the market fails closed to `Unresolved`.
     Rejected {
-        /// Operator-facing reason (drives the review queue).
-        reason: String,
+        /// Closed diagnostic consumed by persistence and the review queue.
+        reason: LinkageValidationFailure,
     },
 }
 
@@ -90,78 +91,85 @@ impl SubjectValidator for DefaultSubjectValidator {
         for span in &candidate.grounding.spans {
             let Some(source_text) = source_field_text(metadata, span.source) else {
                 return ValidationOutcome::Rejected {
-                    reason: format!(
-                        "grounding span for `{}` references absent source field {:?}",
-                        span.subject_field, span.source
-                    ),
+                    reason: LinkageValidationFailure::GroundingSourceAbsent {
+                        subject_field: span.subject_field.clone(),
+                        source: span.source,
+                    },
                 };
             };
             let Some(actual) = source_text.get(span.start..span.end) else {
                 return ValidationOutcome::Rejected {
-                    reason: format!(
-                        "grounding span for `{}` is out of bounds ({}..{} over {} bytes)",
-                        span.subject_field,
-                        span.start,
-                        span.end,
-                        source_text.len()
-                    ),
+                    reason: LinkageValidationFailure::GroundingSpanOutOfBounds {
+                        subject_field: span.subject_field.clone(),
+                        start: span.start,
+                        end: span.end,
+                        source_length: source_text.len(),
+                    },
                 };
             };
             if actual != span.text {
                 return ValidationOutcome::Rejected {
-                    reason: format!(
-                        "grounding span for `{}` does not match the source text \
-                         (expected `{}`, found `{actual}`)",
-                        span.subject_field, span.text
-                    ),
+                    reason: LinkageValidationFailure::GroundingTextMismatch {
+                        subject_field: span.subject_field.clone(),
+                    },
                 };
             }
         }
 
         // 2. Every load-bearing subject field must be grounded, and the
-        //    fields extracted independently of a template (`asset` / `strike`
-        //    / `resolution_oracle`) must carry a genuinely literal span — a
-        //    `TemplateEntailed` span is only acceptable for a value that is a
-        //    deterministic function of a fully-matched template
-        //    (`comparator` / `reference_at` / `observation_at`), never for
-        //    independently-extracted evidence. This is the fix for the
-        //    audited pseudo-grounding hole: a whole-slug span used to satisfy
-        //    "has any span" for every field regardless of kind.
+        // fields extracted independently of a template (`asset` / `strike`
+        // / `resolution_oracle`) must carry a genuinely literal span — a
+        // `TemplateEntailed` span is only acceptable for a value that is a
+        // deterministic function of a fully-matched template
+        // (`comparator` / `reference_at` / `observation_at`), never for
+        // independently-extracted evidence. This is the fix for the
+        // audited pseudo-grounding hole: a whole-slug span used to satisfy
+        // "has any span" for every field regardless of kind.
         let MarketSubject::Crypto(subject) = &candidate.subject else {
             return validate_weather_candidate(candidate);
         };
         if !has_span_of_kind(candidate, "asset", GroundingKind::LiteralSpan) {
             return ValidationOutcome::Rejected {
-                reason: "candidate carries no literal grounding span for `asset`".to_owned(),
+                reason: LinkageValidationFailure::MissingLiteralGrounding {
+                    subject_field: "asset".to_owned(),
+                },
             };
         }
         if subject.strike.is_some()
             && !has_span_of_kind(candidate, "strike", GroundingKind::LiteralSpan)
         {
             return ValidationOutcome::Rejected {
-                reason: "candidate extracted a strike without a literal grounding span".to_owned(),
+                reason: LinkageValidationFailure::MissingLiteralGrounding {
+                    subject_field: "strike".to_owned(),
+                },
             };
         }
         if !has_span_of_kind(candidate, "resolution_oracle", GroundingKind::LiteralSpan) {
             return ValidationOutcome::Rejected {
-                reason: "candidate carries no literal grounding span for `resolution_oracle` \
-                         (a ruleset-default oracle is never accepted)"
-                    .to_owned(),
+                reason: LinkageValidationFailure::MissingLiteralGrounding {
+                    subject_field: "resolution_oracle".to_owned(),
+                },
             };
         }
         if !has_span(candidate, "comparator") {
             return ValidationOutcome::Rejected {
-                reason: "candidate carries no grounding span for `comparator`".to_owned(),
+                reason: LinkageValidationFailure::MissingGrounding {
+                    subject_field: "comparator".to_owned(),
+                },
             };
         }
         if !has_span(candidate, "observation_at") {
             return ValidationOutcome::Rejected {
-                reason: "candidate carries no grounding span for `observation_at`".to_owned(),
+                reason: LinkageValidationFailure::MissingGrounding {
+                    subject_field: "observation_at".to_owned(),
+                },
             };
         }
         if subject.reference_at.is_some() && !has_span(candidate, "reference_at") {
             return ValidationOutcome::Rejected {
-                reason: "candidate extracted a reference_at without grounding it".to_owned(),
+                reason: LinkageValidationFailure::MissingGrounding {
+                    subject_field: "reference_at".to_owned(),
+                },
             };
         }
 
@@ -175,7 +183,7 @@ impl SubjectValidator for DefaultSubjectValidator {
 fn validate_weather_candidate(candidate: &ExtractedCandidate) -> ValidationOutcome {
     let MarketSubject::Weather(subject) = &candidate.subject else {
         return ValidationOutcome::Rejected {
-            reason: "unsupported domain subject".to_owned(),
+            reason: LinkageValidationFailure::UnsupportedSubject,
         };
     };
     for field in [
@@ -189,18 +197,20 @@ fn validate_weather_candidate(candidate: &ExtractedCandidate) -> ValidationOutco
     ] {
         if !has_span_of_kind(candidate, field, GroundingKind::LiteralSpan) {
             return ValidationOutcome::Rejected {
-                reason: format!("weather candidate carries no literal grounding for `{field}`"),
+                reason: LinkageValidationFailure::MissingLiteralGrounding {
+                    subject_field: field.to_owned(),
+                },
             };
         }
     }
     if !subject.has_valid_decision_group_id() {
         return ValidationOutcome::Rejected {
-            reason: "weather decision-group id does not match its canonical key".to_owned(),
+            reason: LinkageValidationFailure::InvalidWeatherDecisionGroupId,
         };
     }
     if !subject.outcome_band.is_valid() {
         return ValidationOutcome::Rejected {
-            reason: "weather outcome band is empty or inverted".to_owned(),
+            reason: LinkageValidationFailure::InvalidWeatherOutcomeBand,
         };
     }
     if subject
@@ -213,26 +223,23 @@ fn validate_weather_candidate(candidate: &ExtractedCandidate) -> ValidationOutco
             .is_some_and(|value| !value.fract().is_zero())
     {
         return ValidationOutcome::Rejected {
-            reason: "weather outcome band must use whole-degree bounds".to_owned(),
+            reason: LinkageValidationFailure::FractionalWeatherOutcomeBand,
         };
     }
-    if subject
-        .decision_group
-        .timezone
-        .parse::<chrono_tz::Tz>()
-        .is_err()
-    {
+    if subject.decision_group.timezone.parse::<Tz>().is_err() {
         return ValidationOutcome::Rejected {
-            reason: "weather station profile has an invalid IANA timezone".to_owned(),
+            reason: LinkageValidationFailure::InvalidWeatherTimezone {
+                timezone: subject.decision_group.timezone.clone(),
+            },
         };
     }
     let expected = DomainInstrumentKey::aviation_weather(&subject.decision_group.station);
     if candidate.instrument_key != expected {
         return ValidationOutcome::Rejected {
-            reason: format!(
-                "weather station instrument mismatch: expected `{expected}`, got `{}`",
-                candidate.instrument_key
-            ),
+            reason: LinkageValidationFailure::WeatherInstrumentMismatch {
+                expected,
+                actual: candidate.instrument_key.clone(),
+            },
         };
     }
     ValidationOutcome::Accepted
@@ -253,22 +260,21 @@ fn validate_weather_candidate(candidate: &ExtractedCandidate) -> ValidationOutco
 pub fn validate_structural_consistency(
     subject: &CryptoSubject,
     instrument_key: &DomainInstrumentKey,
-) -> Result<(), String> {
+) -> Result<(), LinkageValidationFailure> {
     // Ruleset consistency: the instrument binding must be exactly the frozen
     // table's binding for the extracted asset — a drifted key would silently
     // join the wrong price series.
     let ticker = subject.asset.as_str().to_lowercase();
     let Some(rule) = rule_for_alias(&ticker) else {
-        return Err(format!(
-            "asset `{}` is not in the frozen resolver ruleset",
-            subject.asset
-        ));
+        return Err(LinkageValidationFailure::AssetNotInRuleset {
+            asset: subject.asset.clone(),
+        });
     };
     if *instrument_key != rule.instrument_key() {
-        return Err(format!(
-            "instrument key `{instrument_key}` disagrees with the ruleset binding `{}`",
-            rule.instrument_key()
-        ));
+        return Err(LinkageValidationFailure::InstrumentRulesetMismatch {
+            expected: rule.instrument_key(),
+            actual: instrument_key.clone(),
+        });
     }
 
     // Oracle ↔ asset consistency: a Chainlink feed must name exactly the
@@ -279,15 +285,14 @@ pub fn validate_structural_consistency(
     if let ResolutionOracle::ChainlinkDataStreams { feed } = &subject.resolution_oracle
         && *feed != rule.feed()
     {
-        return Err(format!(
-            "resolution oracle cites Chainlink feed `{feed}`, which disagrees with the \
-             ruleset's `{}` feed for asset `{}`",
-            rule.feed(),
-            subject.asset
-        ));
+        return Err(LinkageValidationFailure::ChainlinkFeedRulesetMismatch {
+            asset: subject.asset.clone(),
+            expected: rule.feed(),
+            actual: feed.clone(),
+        });
     }
 
-    // Same consistency check for the Binance-settled path (R4 hardening):
+    // Apply the same consistency check to the Binance-settled path:
     // automated extraction binds product+symbol from the frozen venue rule so this
     // can never fire there, but an operator override supplies the oracle
     // independently — a mismatched symbol would silently join the basis
@@ -295,11 +300,13 @@ pub fn validate_structural_consistency(
     if let ResolutionOracle::BinanceKline { market, symbol, .. } = &subject.resolution_oracle {
         let expected = rule.symbol();
         if *market != rule.binance_market || *symbol != expected {
-            return Err(format!(
-                "resolution oracle cites Binance {market:?}/{symbol}, which disagrees with the \
-                 ruleset's {:?}/{expected} for asset `{}`",
-                rule.binance_market, subject.asset
-            ));
+            return Err(LinkageValidationFailure::BinanceOracleRulesetMismatch {
+                asset: subject.asset.clone(),
+                expected_market: rule.binance_market,
+                actual_market: *market,
+                expected_symbol: expected,
+                actual_symbol: symbol.clone(),
+            });
         }
     }
 

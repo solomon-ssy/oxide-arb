@@ -1,4 +1,4 @@
-//! Phase 05.8 acceptance tests for the `good_lp` LP/MILP portfolio allocator.
+//! acceptance tests for the `good_lp` LP/MILP portfolio allocator.
 //!
 //! Covers the money-critical invariants: every cap (budget / single / market /
 //! event / category / correlation / `TopN`) is respected, budget is only consumed
@@ -14,8 +14,8 @@ use quant_pivot_models::{
     enums::{
         common::MarketCategory,
         quant::{
-            BindingConstraint, CorrelationSource, OutcomeSide, PortfolioSolveMode,
-            PortfolioSolverKind,
+            BindingConstraint, CorrelationSource, OptimizerSolverStatus, OutcomeSide,
+            PortfolioSolveMode, PortfolioSolverKind,
         },
     },
     types::{
@@ -29,6 +29,7 @@ use quant_pivot_research::{
     portfolio::{
         AllocationInput, CandidateMeta, CorrelationConstraint, LinearProgrammingPortfolioAllocator,
         OptimizerConfig, PortfolioAllocator,
+        debug_test_hooks::{self, Guard, MilpBehavior, RelaxBehavior},
     },
 };
 use rust_decimal::Decimal;
@@ -373,11 +374,6 @@ fn highs_request_downgrades_to_microlp_without_native_feature() {
 
 #[test]
 fn lp_milp_falls_back_to_relaxation() {
-    use quant_pivot_models::enums::quant::OptimizerSolverStatus;
-    use quant_pivot_research::portfolio::debug_test_hooks::{
-        self, Guard, MilpBehavior, RelaxBehavior,
-    };
-
     let _guard = Guard::new();
     debug_test_hooks::set_milp(MilpBehavior::Panic);
     debug_test_hooks::set_relax(RelaxBehavior::Normal);
@@ -426,11 +422,6 @@ fn lp_milp_falls_back_to_relaxation() {
 
 #[test]
 fn solver_failure_yields_empty_plan_not_panic() {
-    use quant_pivot_models::enums::quant::OptimizerSolverStatus;
-    use quant_pivot_research::portfolio::debug_test_hooks::{
-        self, Guard, MilpBehavior, RelaxBehavior,
-    };
-
     let _guard = Guard::new();
     debug_test_hooks::set_milp(MilpBehavior::FailInfeasible);
     debug_test_hooks::set_relax(RelaxBehavior::Panic);
@@ -513,7 +504,7 @@ fn aggregate_exposure_with_existing_holdings_attributes_binding_correctly() {
     // so a $1,000 desired allocation must be capped down to (near) $200 and
     // the binding must cite `AggregateExposureCap` — not `None` or another
     // cap — proving `ExposureLedger::seed` folds existing holdings into
-    // `total` (Phase 11.3 P1-6).
+    // `total`.
     let c1 = candidate("0xa", dec!(0.9), dec!(100));
     let mut caps = caps(dec!(10_000), dec!(5_000), dec!(5_000), dec!(10_000));
     caps.max_aggregate_exposure_pct = dec!(0.25);
@@ -559,7 +550,7 @@ fn aggregate_exposure_denominator_is_capital_base_not_total_budget() {
     // `total_budget_usd` (a raw, venue-unaware config value) is set far above
     // `capital_base_usd` (the governed, venue-net-liquidation-capped sizing
     // anchor) — the aggregate cap must track `capital_base_usd`, never the
-    // larger, ungoverned config budget (Phase 11.3 §4.3 / P1-5).
+    // larger, ungoverned config budget.
     let c1 = candidate("0xa", dec!(0.9), dec!(100));
     let c2 = candidate("0xb", dec!(0.85), dec!(100));
     let mut caps = caps(dec!(100_000), dec!(50_000), dec!(50_000), dec!(100_000));

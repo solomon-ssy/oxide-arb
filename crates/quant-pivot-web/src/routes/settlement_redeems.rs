@@ -1,10 +1,16 @@
-//! Settlement redeem read API (worker-only writes; 05.10).
+//! Settlement-redeem read API; only the worker writes this ledger.
 
-use actix_web::{http::Method, web};
+use actix_web::{
+    http::Method,
+    web::{Data, Path, Query},
+};
 use quant_pivot_models::{
     domain::{
-        Paginated, SettlementRedeemDetailView, SettlementRedeemListQuery, SettlementRedeemLotView,
-        SettlementRedeemSummary, SettlementRedeemView,
+        api::{
+            SettlementRedeemDetailView, SettlementRedeemListQuery, SettlementRedeemLotView,
+            SettlementRedeemSummary, SettlementRedeemView,
+        },
+        pagination::Paginated,
     },
     enums::rbac::{Operation, ResourceType},
     types::SettlementRedeemId,
@@ -36,8 +42,8 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
 }
 
 async fn list(
-    state: web::Data<AppState>,
-    query: web::Query<SettlementRedeemListQuery>,
+    state: Data<AppState>,
+    query: Query<SettlementRedeemListQuery>,
 ) -> Result<WebResponse<Paginated<SettlementRedeemView>>, WebError> {
     let page = state
         .execution_read
@@ -47,8 +53,8 @@ async fn list(
 }
 
 async fn get(
-    state: web::Data<AppState>,
-    id: web::Path<SettlementRedeemId>,
+    state: Data<AppState>,
+    id: Path<SettlementRedeemId>,
 ) -> Result<WebResponse<SettlementRedeemDetailView>, WebError> {
     let detail = state
         .execution_read

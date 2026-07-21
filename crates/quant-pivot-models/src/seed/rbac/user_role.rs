@@ -1,17 +1,20 @@
 //! Binds the bootstrap admin user to the `super_admin` role.
 
+use std::{future::Future, pin::Pin};
+
+use sea_orm::{
+    ActiveValue::Set, ColumnTrait, DatabaseTransaction, DbErr, EntityTrait, QueryFilter,
+    sea_query::OnConflict,
+};
+
 use crate::{
-    entities::user_role,
+    entities::user_role::{ActiveModel, Column, Entity},
     seed::{
         SeedArtifact, SeedConflictPolicy, SeedContext, SeedDependency, SeedSpec,
         rbac::{ADMIN_USER_ARTIFACT, ROLE_SUPER_ADMIN, ROLES_ARTIFACT, RoleIdMap},
     },
     types::UserId,
 };
-use sea_orm::{
-    ActiveValue::Set, ColumnTrait, DbErr, EntityTrait, QueryFilter, sea_query::OnConflict,
-};
-use std::{future::Future, pin::Pin};
 
 const SEED_ID: &str = "rbac.user_role.bootstrap";
 
@@ -34,7 +37,7 @@ pub const USER_ROLE_SEED: SeedSpec = SeedSpec {
 };
 
 /// Assign `super_admin` to the bootstrap admin user.
-pub async fn load(db: &sea_orm::DatabaseTransaction, ctx: &mut SeedContext) -> Result<u64, DbErr> {
+pub async fn load(db: &DatabaseTransaction, ctx: &mut SeedContext) -> Result<u64, DbErr> {
     let roles = ctx
         .require::<RoleIdMap>(ROLES_ARTIFACT)
         .map_err(|error| DbErr::Custom(error.to_string()))?;
@@ -47,15 +50,15 @@ pub async fn load(db: &sea_orm::DatabaseTransaction, ctx: &mut SeedContext) -> R
         .map_err(|error| DbErr::Custom(error.to_string()))?
         .clone();
 
-    let model = user_role::ActiveModel {
+    let model = ActiveModel {
         user_id: Set(admin_id),
         role_id: Set(super_admin_id),
         ..Default::default()
     };
 
-    user_role::Entity::insert(model)
+    Entity::insert(model)
         .on_conflict(
-            OnConflict::columns([user_role::Column::UserId, user_role::Column::RoleId])
+            OnConflict::columns([Column::UserId, Column::RoleId])
                 .do_nothing()
                 .to_owned(),
         )
@@ -63,7 +66,7 @@ pub async fn load(db: &sea_orm::DatabaseTransaction, ctx: &mut SeedContext) -> R
         .await
 }
 
-async fn hydrate(db: &sea_orm::DatabaseTransaction, ctx: &SeedContext) -> Result<(), DbErr> {
+async fn hydrate(db: &DatabaseTransaction, ctx: &SeedContext) -> Result<(), DbErr> {
     let roles = ctx
         .require::<RoleIdMap>(ROLES_ARTIFACT)
         .map_err(|error| DbErr::Custom(error.to_string()))?;
@@ -75,9 +78,9 @@ async fn hydrate(db: &sea_orm::DatabaseTransaction, ctx: &SeedContext) -> Result
         .require::<UserId>(ADMIN_USER_ARTIFACT)
         .map_err(|error| DbErr::Custom(error.to_string()))?
         .clone();
-    let exists = user_role::Entity::find()
-        .filter(user_role::Column::UserId.eq(user_id))
-        .filter(user_role::Column::RoleId.eq(role_id))
+    let exists = Entity::find()
+        .filter(Column::UserId.eq(user_id))
+        .filter(Column::RoleId.eq(role_id))
         .one(db)
         .await?
         .is_some();
@@ -90,14 +93,14 @@ async fn hydrate(db: &sea_orm::DatabaseTransaction, ctx: &SeedContext) -> Result
 }
 
 fn load_boxed<'a>(
-    db: &'a sea_orm::DatabaseTransaction,
+    db: &'a DatabaseTransaction,
     ctx: &'a mut SeedContext,
 ) -> Pin<Box<dyn Future<Output = Result<u64, DbErr>> + Send + 'a>> {
     Box::pin(load(db, ctx))
 }
 
 fn hydrate_boxed<'a>(
-    db: &'a sea_orm::DatabaseTransaction,
+    db: &'a DatabaseTransaction,
     ctx: &'a mut SeedContext,
 ) -> Pin<Box<dyn Future<Output = Result<(), DbErr>> + Send + 'a>> {
     Box::pin(hydrate(db, ctx))

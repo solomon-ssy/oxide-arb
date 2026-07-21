@@ -1,14 +1,14 @@
-//! Core implementation of [`ModelTrainingPort`] for the Admin API (Phase 3.6).
+//! Core implementation of [`ModelTrainingPort`] for the Admin API.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use tokio_util::sync::CancellationToken;
-
 use quant_pivot_error::{QuantError, QuantResult, storage::StorageError};
 use quant_pivot_models::{
     domain::{
-        JobProgressSink, ModelTrainingPort, ModelVersionInfo, TrainModelRequest, TrainedModelView,
+        api::{TrainModelRequest, TrainedModelView},
+        ports::ModelTrainingPort,
+        quant::{JobProgressSink, ModelVersionInfo},
     },
     runtime_config::DecisionPolicySnapshot,
     types::{DecisionPolicySnapshotId, ModelVersionId},
@@ -22,6 +22,7 @@ use quant_pivot_research::{
     training::LabelName,
     validation::PurgeConfig,
 };
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     app::bundles::ResearchBundle,

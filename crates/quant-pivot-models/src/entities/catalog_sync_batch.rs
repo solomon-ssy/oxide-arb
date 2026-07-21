@@ -1,11 +1,13 @@
 //! `catalog_sync_batch` append-only Gamma synchronization ledger.
 
+use chrono::{DateTime, Utc};
+use sea_orm::entity::prelude::*;
+
+use super::{catalog_event_change, catalog_market_change, catalog_sync_rejection};
 use crate::{
     enums::catalog::{CatalogSyncFailureStage, CatalogSyncKind, CatalogSyncStatus},
     types::{CatalogSyncBatchId, ContentHash},
 };
-use chrono::{DateTime, Utc};
-use sea_orm::entity::prelude::*;
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -28,11 +30,11 @@ pub struct Model {
     pub updated_at: DateTime<Utc>,
 
     #[sea_orm(has_many, relation_enum = "EventChange")]
-    pub event_change: HasMany<super::catalog_event_change::Entity>,
+    pub event_change: HasMany<catalog_event_change::Entity>,
     #[sea_orm(has_many, relation_enum = "MarketChange")]
-    pub market_change: HasMany<super::catalog_market_change::Entity>,
+    pub market_change: HasMany<catalog_market_change::Entity>,
     #[sea_orm(has_many, relation_enum = "SyncRejection")]
-    pub sync_rejection: HasMany<super::catalog_sync_rejection::Entity>,
+    pub sync_rejection: HasMany<catalog_sync_rejection::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

@@ -1,9 +1,10 @@
 //! `system_kill_switch` table entity (singleton row).
 
-use crate::enums::execution::KillSwitchState;
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
+
+use crate::enums::execution::KillSwitchState;
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]

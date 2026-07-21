@@ -16974,7 +16974,7 @@
     },
     {
       "deferrable": false,
-      "definition": "CHECK (((jsonb_typeof(outcome) = 'object'::text) AND (((status = 'unresolved'::qp_linkage_status) AND ((outcome ->> 'status'::text) = 'unresolved'::text) AND (jsonb_typeof((outcome -> 'reason'::text)) = 'string'::text) AND (char_length(btrim((outcome ->> 'reason'::text))) >= 1) AND (char_length((outcome ->> 'reason'::text)) <= 2048)) OR ((status = ANY (ARRAY['resolved'::qp_linkage_status, 'overridden'::qp_linkage_status])) AND ((outcome ->> 'status'::text) = 'resolved'::text) AND (jsonb_typeof((outcome -> 'subject'::text)) = 'object'::text) AND (jsonb_typeof((outcome -> 'source_bindings'::text)) = 'array'::text) AND (jsonb_typeof((outcome -> 'grounding'::text)) = 'object'::text)))))",
+      "definition": "CHECK (((jsonb_typeof(outcome) = 'object'::text) AND (((status = 'unresolved'::qp_linkage_status) AND ((outcome ->> 'status'::text) = 'unresolved'::text) AND (jsonb_typeof((outcome -> 'reason'::text)) = 'object'::text) AND ((outcome -> 'reason'::text) ? 'code'::text) AND ((outcome #>> '{reason,code}'::text[]) = ANY (ARRAY['no_deterministic_template'::text, 'candidate_rejected'::text]))) OR ((status = ANY (ARRAY['resolved'::qp_linkage_status, 'overridden'::qp_linkage_status])) AND ((outcome ->> 'status'::text) = 'resolved'::text) AND (jsonb_typeof((outcome -> 'subject'::text)) = 'object'::text) AND (jsonb_typeof((outcome -> 'source_bindings'::text)) = 'array'::text) AND (jsonb_typeof((outcome -> 'grounding'::text)) = 'object'::text)))))",
       "initially_deferred": false,
       "name": "ck_quant_market_linkage_outcome",
       "table": "quant_market_linkage",

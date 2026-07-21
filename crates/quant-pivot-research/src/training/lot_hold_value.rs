@@ -1,4 +1,4 @@
-//! Terminal hold-value oracle for hold-vs-exit labels (Phase 06.1).
+//! Terminal hold-value oracle for hold-vs-exit labels.
 //!
 //! For a closed/settled lot with full ledger visibility, computes the net cash
 //! a holder of `remaining_shares@t` would realize by holding through the lot's
@@ -80,12 +80,13 @@ pub fn hold_terminal_proceeds(snapshot: &LotTerminalSnapshot, as_of: DateTime<Ut
 
 #[cfg(test)]
 mod tests {
-    use super::{LotExitEvent, LotTerminalSnapshot, hold_terminal_proceeds, remaining_shares_at};
-    use chrono::{TimeZone, Utc};
+    use chrono::{DateTime, TimeZone, Utc};
     use quant_pivot_models::types::{Shares, Usd};
     use rust_decimal_macros::dec;
 
-    fn ts(secs: i64) -> chrono::DateTime<Utc> {
+    use super::{LotExitEvent, LotTerminalSnapshot, hold_terminal_proceeds, remaining_shares_at};
+
+    fn ts(secs: i64) -> DateTime<Utc> {
         Utc.timestamp_opt(1_000_000 + secs, 0).single().expect("ts")
     }
 

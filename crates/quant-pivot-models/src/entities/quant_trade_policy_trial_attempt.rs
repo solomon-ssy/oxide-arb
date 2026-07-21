@@ -3,6 +3,7 @@
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
+use super::quant_research_job;
 use crate::{
     enums::quant::{TradePolicyTrialScope, TradePolicyTrialStatus},
     types::{
@@ -42,7 +43,7 @@ pub struct Model {
         from = "fit_job_id",
         to = "job_id"
     )]
-    pub research_job: BelongsTo<super::quant_research_job::Entity>,
+    pub research_job: BelongsTo<quant_research_job::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

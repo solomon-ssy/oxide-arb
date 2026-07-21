@@ -76,7 +76,7 @@ struct RunAccumulator {
     pnl_curve: Vec<PnlCurvePoint>,
     tick_weights: Vec<BTreeMap<String, Decimal>>,
     /// Per-tick return (`tick_pnl / tick_allocated`), `0` for a tick with no
-    /// allocation — the Sharpe-ratio input series (Phase 11.5 §3.4).
+    /// allocation — the Sharpe-ratio input series.
     tick_returns: Vec<Decimal>,
     missing_feature_count: u64,
     total_emitted: u64,
@@ -486,8 +486,7 @@ fn hash_report(input: &ReportHashInput<'_>) -> QuantResult<ContentHash> {
 
 #[cfg(test)]
 mod tests {
-    use super::PortfolioReplayBacktester;
-    use chrono::{TimeZone, Utc};
+    use chrono::{DateTime, TimeZone, Utc};
     use quant_pivot_models::{
         domain::market::{book::BookLevel, fee::BuilderFeeAttribution},
         enums::{
@@ -505,6 +504,7 @@ mod tests {
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
 
+    use super::PortfolioReplayBacktester;
     use crate::{
         backtest::{
             BacktestExecutionSnapshot, BacktestInputs, BacktestMarketMeta, BacktestRequest,
@@ -657,7 +657,7 @@ mod tests {
     fn execution_snapshot(
         market_id: &str,
         token_id: &str,
-        at: chrono::DateTime<Utc>,
+        at: DateTime<Utc>,
         price: Decimal,
     ) -> BacktestExecutionSnapshot {
         BacktestExecutionSnapshot {

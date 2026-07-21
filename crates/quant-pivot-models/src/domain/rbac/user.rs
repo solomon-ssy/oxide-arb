@@ -1,13 +1,14 @@
 //! User account DTOs (read model, insert, partial update, credential changes).
 
+use chrono::{DateTime, Utc};
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
+use serde::{Deserialize, Serialize};
+
 use crate::{
     domain::patch::{NullablePatch, Patch},
     enums::rbac::UserStatus,
     types::UserId,
 };
-use chrono::{DateTime, Utc};
-use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
-use serde::{Deserialize, Serialize};
 
 /// DB row projection for the `user` table.
 ///

@@ -1,15 +1,15 @@
-//! Shadow comparison at the signal-candidate / ranking layer (3.7).
+//! Shadow comparison at the signal-candidate / ranking layer.
 //!
 //! Pure computation: given the **active** model's ranked candidates and a
 //! **shadow** model's ranked candidates for the same `as_of` cross-section, it
-//! quantifies how far the shadow diverges from production at the layer Phase 03
-//! owns — `TopN` overlap, per-market rank delta, and per-market score delta.
-//! (Report-level deltas — capital allocation, would-execute, risk envelope —
-//! depend on Phase 04 report generation and are explicitly deferred.)
+//! quantifies how far the shadow diverges from production at the candidate
+//! ranking layer: `TopN` overlap, per-market rank delta, and per-market score
+//! delta. Report-level deltas such as capital allocation, would-execute, and
+//! risk envelope are outside this component's contract.
 //!
 //! The result is content-addressed and persisted to `quant_shadow_comparison`
 //! by the core `ModelRunner`; a `hard_divergence` raises a critical alert but
-//! never auto-switches the active model (parent §6 invariant).
+//! never auto-switches the active model.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -231,7 +231,6 @@ fn ratio(numerator: Decimal, denominator: Decimal) -> Decimal {
 
 #[cfg(test)]
 mod tests {
-    use super::{ShadowComparisonRequest, compute_shadow_comparison};
     use chrono::Utc;
     use quant_pivot_models::{
         enums::quant::{ModelWeightSource, OutcomeSide},
@@ -242,6 +241,7 @@ mod tests {
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
 
+    use super::{ShadowComparisonRequest, compute_shadow_comparison};
     use crate::model::{ModelExplanation, SignalCandidate};
 
     fn candidate(

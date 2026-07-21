@@ -6,18 +6,17 @@
 //! keys on the authoritative `winning_token_id`. All forward data is pre-fetched
 //! into [`LabelBuildInput::forward`]; a labeler never reads a database.
 
-use chrono::Duration;
+use chrono::{DateTime, Duration, Utc};
 use quant_pivot_models::{enums::quant::FillRequirement, types::Price};
 use rust_decimal::Decimal;
-
-use crate::{
-    execution_semantics::{LiquidityRole, PitFeeSchedule, walk_sell_exact_shares},
-    training::{DecisionBook, hold_terminal_proceeds},
-};
 
 use super::{
     LabelBuildInput, LabelBuildOutput, LabelDelayReason, LabelName, Labeler, MissingLabelReason,
     TrainingLabel, TrainingSampleSource,
+};
+use crate::{
+    execution_semantics::{LiquidityRole, PitFeeSchedule, walk_sell_exact_shares},
+    training::{DecisionBook, hold_terminal_proceeds},
 };
 /// `return_to_horizon`: signed mid-price return from entry to the horizon, bps.
 pub const RETURN_TO_HORIZON: LabelName = LabelName::from_static("return_to_horizon");
@@ -36,7 +35,7 @@ pub const POLICY_NET_POSITIVE: LabelName = LabelName::from_static("policy_net_po
 pub const POLICY_ENTRY_FILL_RATIO: LabelName = LabelName::from_static("policy_entry_fill_ratio");
 pub const POLICY_EXIT_FILL_RATIO: LabelName = LabelName::from_static("policy_exit_fill_ratio");
 /// `hold_vs_exit_alpha_bps`: bps advantage of exiting now (simulated fill @ t)
-/// over holding through the lot's terminal outcome (Phase 06.1).
+/// over holding through the lot's terminal outcome.
 pub const HOLD_VS_EXIT_ALPHA_BPS: LabelName = LabelName::from_static("hold_vs_exit_alpha_bps");
 pub const REALIZED_RETURN_BPS: LabelName = LabelName::from_static("realized_return_bps");
 pub const REALIZED_PNL_USD: LabelName = LabelName::from_static("realized_pnl_usd");
@@ -108,7 +107,7 @@ fn return_bps(entry: Decimal, value: Decimal) -> Option<Decimal> {
 }
 
 /// The horizon cutoff for a sample.
-fn horizon_end(input: &LabelBuildInput<'_>) -> Result<chrono::DateTime<chrono::Utc>, String> {
+fn horizon_end(input: &LabelBuildInput<'_>) -> Result<DateTime<Utc>, String> {
     let seconds = i64::try_from(input.horizon_secs)
         .map_err(|error| format!("label horizon does not fit chrono seconds: {error}"))?;
     input
@@ -311,7 +310,7 @@ impl Labeler for LiquidityExitLabeler {
     }
 }
 
-/// `hold_vs_exit_alpha_bps` labeler (Phase 06.1 Sell scorer supervision).
+/// `hold_vs_exit_alpha_bps` labeler for Sell-scorer supervision.
 ///
 /// Compares a depth-aware simulated exit at `t` against the net cash from holding
 /// `remaining_shares@t` through the lot's actual terminal outcome. Point-in-time
@@ -444,19 +443,21 @@ impl Labeler for SettlementOutcomeLabeler {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use chrono::{DateTime, TimeZone, Utc};
+    use quant_pivot_models::{
+        domain::market::{BookLevel, BuilderFeeAttribution, MarketFeeSchedule},
+        types::{Bps, ClobMarketInfoVersionId, ContentHash, MarketId, Price, Shares, TokenId, Usd},
+    };
+    use rust_decimal::Decimal;
+    use rust_decimal_macros::dec;
+
     use super::{
         super::{DecisionBook, ExitDecisionLabelContext, LotExitEvent, LotTerminalSnapshot},
         *,
     };
     use crate::training::{ForwardSample, ForwardWindow, MarketResolution};
-    use chrono::{DateTime, TimeZone, Utc};
-    use quant_pivot_models::{
-        domain::{BookLevel, BuilderFeeAttribution, MarketFeeSchedule},
-        types::{Bps, ClobMarketInfoVersionId, ContentHash, MarketId, Price, Shares, TokenId, Usd},
-    };
-    use rust_decimal::Decimal;
-    use rust_decimal_macros::dec;
-    use std::sync::Arc;
 
     fn at(offset: i64) -> DateTime<Utc> {
         Utc.timestamp_opt(1_000_000 + offset, 0)

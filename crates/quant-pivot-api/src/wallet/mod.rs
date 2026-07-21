@@ -17,11 +17,10 @@
 
 mod ownership;
 
-pub use ownership::{WalletOwnershipClient, WalletOwnershipVerifier};
-
 use std::str::FromStr;
 
 use alloy::primitives::Address;
+pub use ownership::{WalletOwnershipClient, WalletOwnershipVerifier};
 use polymarket_client_sdk_v2::{
     clob::types::SignatureType, derive_proxy_wallet, derive_safe_wallet,
 };
@@ -241,9 +240,10 @@ pub const fn signature_type_for(kind: ExecutionWalletKind) -> SignatureType {
 mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    use super::*;
     use async_trait::async_trait;
     use quant_pivot_error::rpc::RpcError;
+
+    use super::*;
 
     // Foundry/Anvil test key EOA — matches the SDK's CREATE2 derivation vectors.
     const SIGNER: &str = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";

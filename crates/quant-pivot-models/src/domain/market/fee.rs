@@ -8,7 +8,7 @@ use crate::types::{Bps, ClobMarketInfoVersionId, ContentHash, MarketId};
 
 /// Exact order-route attribution used when calculating builder fees.
 ///
-/// Phase 11.7.2 deliberately supports only unattributed venue orders. Builder
+/// deliberately supports only unattributed venue orders. Builder
 /// rates remain part of the venue fact so a later builder-enabled artifact must
 /// introduce a new route contract instead of silently changing historical `PnL`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

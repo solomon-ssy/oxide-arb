@@ -1,4 +1,4 @@
-//! Report scheduler task registration (04.3).
+//! Report scheduler task registration.
 //!
 //! Registers the Execution-stage report-lifecycle tasks:
 //! - `ReportGenerator`: rebuilds jobs from the active config, then runs the

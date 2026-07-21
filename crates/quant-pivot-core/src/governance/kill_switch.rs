@@ -11,22 +11,26 @@
 //! transition to any other (it is a safety valve), but clearing `emergency_halted`
 //! requires an explicit operator acknowledgement.
 
-use crate::{
-    governance::execution_recovery::ExecutionRecoveryCoordinator,
-    observability::metrics_hub::MetricsHub,
-};
+use std::sync::{Arc, OnceLock};
+
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use chrono::Utc;
 use quant_pivot_error::{QuantResult, execution::ExecutionError};
 use quant_pivot_models::{
-    domain::{KillSwitchPort, KillSwitchView, SetKillSwitchCommand, UpsertKillSwitchState},
+    domain::{
+        governance::{KillSwitchView, UpsertKillSwitchState},
+        ports::{KillSwitchPort, SetKillSwitchCommand},
+    },
     enums::execution::KillSwitchState,
 };
 use quant_pivot_repository::{postgres::SYSTEM_KILL_SWITCH_ID, traits::KillSwitchStateRepository};
-use std::sync::{Arc, OnceLock};
 
 use super::system_status::SystemStatusPublisher;
+use crate::{
+    governance::execution_recovery::ExecutionRecoveryCoordinator,
+    observability::metrics_hub::MetricsHub,
+};
 
 /// Lock-free, process-wide kill-switch state shared with the execution hot path.
 #[derive(Debug, Clone)]
@@ -66,7 +70,7 @@ impl KillSwitchHandle {
         self.current().allows_auto_exit()
     }
 
-    /// Whether the emergency-exit path must run over open positions (05.6).
+    /// Whether the emergency-exit path must run over open positions.
     #[must_use]
     #[inline]
     pub fn requires_emergency_exit(&self) -> bool {

@@ -1,10 +1,14 @@
-//! Unified calibration-artifact persistence DTOs (Phase 11.3 §3.4).
+//! Unified calibration-artifact persistence DTOs.
 //!
 //! One append-only table backs every empirical calibration artifact: `kind =
 //! model_score` (`ProbabilityCalibrator`), `kind = market_price_bias`
 //! (`FavoriteLongshotBiasTable`), and `kind = weather_station_lead_bias`
 //! (frozen station × forecast-lead correction). The kind-specific shape is a
 //! closed tagged document whose tag must match the relational `kind` column.
+
+use chrono::{DateTime, Utc};
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromJsonQueryResult};
+use serde::{Deserialize, Serialize};
 
 use crate::{
     entities::quant_calibration_artifact,
@@ -16,9 +20,6 @@ use crate::{
         },
     },
 };
-use chrono::{DateTime, Utc};
-use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromJsonQueryResult};
-use serde::{Deserialize, Serialize};
 
 /// Closed payload family persisted in `quant_calibration_artifact.payload`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]

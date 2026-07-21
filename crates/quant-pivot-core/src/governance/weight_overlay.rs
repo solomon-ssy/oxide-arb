@@ -1,5 +1,5 @@
 //! [`WeightOverlayApplicator`]: the hot-reloadable factor-weight overlay snapshot
-//! for non-published candidate / shadow versions (3.7 hot-update closure).
+//! for non-published candidate / shadow versions.
 //!
 //! On each runtime-config activation the applicator parses
 //! `FactorsConfig.factor_weights` into a research [`WeightOverlay`] and maps it
@@ -109,13 +109,14 @@ fn build_snapshot(factors: &FactorsConfig, model: &ModelConfig) -> WeightOverlay
 
 #[cfg(test)]
 mod tests {
-    use super::WeightOverlayApplicator;
     use quant_pivot_models::{
         runtime_config::{DecimalValue, FactorsConfig, ModelConfig, ModelVersionRef},
         types::ModelVersionId,
     };
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
+
+    use super::WeightOverlayApplicator;
 
     fn factors_with(weights: &[(&str, Decimal)]) -> FactorsConfig {
         let mut config = FactorsConfig::default();

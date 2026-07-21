@@ -9,16 +9,15 @@
 use std::{collections::HashMap, fmt::Display, sync::Arc};
 mod materialized;
 
-pub use materialized::MaterializedPitEngine;
-
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+pub use materialized::MaterializedPitEngine;
 use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{
     domain::{
-        CatalogMarketChangeInfo, CatalogMarketLeg, CatalogSnapshotInfo, DecisionBoundary,
-        DecisionSource,
+        data_plane::{DecisionBoundary, DecisionSource},
         market::{
+            CatalogMarketChangeInfo, CatalogMarketLeg, CatalogSnapshotInfo,
             book::BookLevel,
             fee::MarketFeeSchedule,
             registry::{EventRegistryInfo, MarketRegistryInfo, NegRiskLegSet},
@@ -30,7 +29,8 @@ use quant_pivot_models::{
         TokenId,
     },
 };
-use serde::Serialize;
+use serde::{Serialize, de::DeserializeOwned};
+use serde_json::Value;
 use uuid::Uuid;
 
 use crate::hashing::ResearchHasher;
@@ -345,10 +345,10 @@ fn decode_event_members(
 fn decode_catalog_payload<T>(
     entity: &'static str,
     change_id: &impl Display,
-    payload: serde_json::Value,
+    payload: Value,
 ) -> QuantResult<T>
 where
-    T: serde::de::DeserializeOwned,
+    T: DeserializeOwned,
 {
     serde_json::from_value(payload).map_err(|error| {
         ResearchError::PitResolution {

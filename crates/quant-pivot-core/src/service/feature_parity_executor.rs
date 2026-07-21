@@ -12,8 +12,9 @@ use quant_pivot_error::{QuantError, QuantResult, research::ResearchError, storag
 use quant_pivot_models::{
     clickhouse::QuantFeatureParityEventRow,
     domain::{
-        CompleteFeatureParityRun, FeatureParityExecutionPort, FeatureParityJobParams,
-        FeatureParityRunInfo, FeatureParityRunView, JobProgressSink,
+        api::{FeatureParityJobParams, FeatureParityRunView},
+        ports::FeatureParityExecutionPort,
+        quant::{CompleteFeatureParityRun, FeatureParityRunInfo, JobProgressSink},
     },
     enums::{
         common::{AlertCategory, AlertLevel, AlertSource},
@@ -1332,7 +1333,6 @@ fn view(info: FeatureParityRunInfo) -> QuantResult<FeatureParityRunView> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::{
         collections::VecDeque,
         slice,
@@ -1341,9 +1341,12 @@ mod tests {
 
     use quant_pivot_models::{
         domain::{
-            FeatureParityRunListQuery, FeatureParityStateInfo, FrozenFeatureParitySubject,
-            NewFeatureParityRun, NewFrozenModelParitySubject, NewResearchJob, NoopProgressSink,
-            Paginated, ResearchJobInfo, RunFullFeatureParityRequest,
+            api::{FeatureParityRunListQuery, RunFullFeatureParityRequest},
+            pagination::Paginated,
+            quant::{
+                FeatureParityStateInfo, FrozenFeatureParitySubject, NewFeatureParityRun,
+                NewFrozenModelParitySubject, NewResearchJob, NoopProgressSink, ResearchJobInfo,
+            },
         },
         enums::quant::FeatureParityLatchState,
         types::{FeatureParityRunId, FeatureParityStateId, FeatureVectorId, RoleCode},
@@ -1351,6 +1354,8 @@ mod tests {
     use quant_pivot_repository::traits::{
         EnqueueFrozenFeatureParityOutcome, FeatureParityLatchActor,
     };
+
+    use super::*;
 
     fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
         mutex.lock().expect("test mutex")

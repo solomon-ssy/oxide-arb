@@ -1,4 +1,4 @@
-//! Reconciliation service + worker pass (Phase 05.5).
+//! Reconciliation service + worker pass.
 //!
 //! For each reconcilable order the service resolves its recommendation context,
 //! collects venue evidence, optionally cancels a stale resting order, decides a
@@ -17,13 +17,18 @@ use chrono::{DateTime, Duration, Utc};
 use quant_pivot_error::{
     QuantResult,
     execution::ExecutionError,
-    storage::{StorageError, entity},
+    storage::{
+        StorageError,
+        entity::{QUANT_EXECUTION_ORDER, QUANT_ORDER_INTENT, QUANT_RECOMMENDATION},
+    },
 };
 use quant_pivot_models::{
     domain::{
-        CapitalReconcileSettlement, CoreEvent, CoreEventPublisher, ExecutionOrderInfo,
-        OrderIntentInfo, PositionExit, PositionFill, PositionInfo, RecommendationInfo,
-        ReconciliationLedgerWrite, ReconciliationLifecycleEvent,
+        quant::{
+            CapitalReconcileSettlement, ExecutionOrderInfo, OrderIntentInfo, PositionExit,
+            PositionFill, PositionInfo, RecommendationInfo, ReconciliationLedgerWrite,
+        },
+        runtime::{CoreEvent, CoreEventPublisher, ReconciliationLifecycleEvent},
     },
     enums::{
         clickhouse::ChQuantLedgerEventKind,
@@ -78,16 +83,12 @@ fn load_reconcile_context(
         .intents_by_id
         .get(&order.order_intent_id)
         .cloned()
-        .ok_or_else(|| {
-            StorageError::not_found(entity::QUANT_ORDER_INTENT, &order.order_intent_id)
-        })?;
+        .ok_or_else(|| StorageError::not_found(QUANT_ORDER_INTENT, &order.order_intent_id))?;
     let recommendation = context
         .recommendations_by_id
         .get(&intent.recommendation_id)
         .cloned()
-        .ok_or_else(|| {
-            StorageError::not_found(entity::QUANT_RECOMMENDATION, &intent.recommendation_id)
-        })?;
+        .ok_or_else(|| StorageError::not_found(QUANT_RECOMMENDATION, &intent.recommendation_id))?;
     Ok((intent, recommendation))
 }
 
@@ -129,7 +130,7 @@ pub struct OperatorReconcileResolution {
     pub note: String,
 }
 
-/// Reconciles in-flight orders against Polymarket venue truth (Phase 05.5).
+/// Reconciles in-flight orders against Polymarket venue truth.
 pub struct ReconciliationService {
     deps: ReconciliationServiceDeps,
 }
@@ -270,7 +271,7 @@ impl ReconciliationService {
         }
 
         // An exit order's correction needs the lot's cost basis to price the
-        // realized PnL; load it for the exit phase only.
+        // realized PnL; load it for exit orders only.
         let lot = self.exit_lot(order).await?;
         let terminal = TerminalDecision {
             result: decision.result,
@@ -308,12 +309,12 @@ impl ReconciliationService {
         Ok(())
     }
 
-    /// Operator override of an unresolvable reconciliation (Phase 05.5 §5).
+    /// Operator override of an unresolvable reconciliation.
     ///
     /// Appends an `OperatorNote`, drives the order/capital/position to the
     /// operator-determined terminal outcome, and clears the `has_unresolvable`
     /// block. The kill-switch latch is **not** auto-cleared — the operator must
-    /// ack it separately (05.1).
+    /// ack it separately.
     pub async fn resolve(
         &self,
         resolution: OperatorReconcileResolution,
@@ -325,26 +326,21 @@ impl ReconciliationService {
             .find_by_id(&resolution.execution_order_id)
             .await?
             .ok_or_else(|| {
-                StorageError::not_found(
-                    entity::QUANT_EXECUTION_ORDER,
-                    &resolution.execution_order_id,
-                )
+                StorageError::not_found(QUANT_EXECUTION_ORDER, &resolution.execution_order_id)
             })?;
         let intent = self
             .deps
             .intents
             .find_by_id(&order.order_intent_id)
             .await?
-            .ok_or_else(|| {
-                StorageError::not_found(entity::QUANT_ORDER_INTENT, &order.order_intent_id)
-            })?;
+            .ok_or_else(|| StorageError::not_found(QUANT_ORDER_INTENT, &order.order_intent_id))?;
         let recommendation = self
             .deps
             .recommendations
             .find_by_id(&intent.recommendation_id)
             .await?
             .ok_or_else(|| {
-                StorageError::not_found(entity::QUANT_RECOMMENDATION, &intent.recommendation_id)
+                StorageError::not_found(QUANT_RECOMMENDATION, &intent.recommendation_id)
             })?;
 
         let note = system_note(
@@ -997,7 +993,7 @@ const fn system_note(
 mod tests {
     use chrono::Utc;
     use quant_pivot_models::{
-        domain::{ExecutionOrderInfo, PositionInfo},
+        domain::quant::{ExecutionOrderInfo, PositionInfo},
         enums::{
             common::{MarketCategory, OrderType, Side},
             execution::{
@@ -1011,7 +1007,6 @@ mod tests {
             ReconciliationEvidenceChain, Shares, TokenId, Usd, VenueOrderAmount,
         },
     };
-    use quant_pivot_test_support::execution_pg_seed::prepared_order;
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
 
@@ -1019,6 +1014,7 @@ mod tests {
         ExitReconcileWriteInput, compute_exit_realized_pnl, exit_reconcile_write,
         neutral_terminal_write,
     };
+    use crate::test_fixtures::execution_pg_seed::prepared_order;
 
     fn lot(avg: Decimal) -> PositionInfo {
         PositionInfo {

@@ -1,11 +1,11 @@
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::{
     clickhouse::{ChPrice, ChSchemaVersion, ChShares},
     enums::clickhouse::ChCanonicalBookEventType,
     types::{ContentHash, MarketId, TokenId},
 };
-use uuid::Uuid;
 
 /// Canonical, loss-intolerant L2 event used for replay and policy evidence.
 #[derive(Debug, Clone, clickhouse::Row, Serialize, Deserialize)]

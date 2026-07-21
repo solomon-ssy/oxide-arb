@@ -7,10 +7,16 @@ use quant_pivot_models::{
         QuantFeatureEventRow, QuantModelInputEventRow, QuantServingEvidenceCompletionRow,
     },
     domain::{
-        CompleteFeatureParityRun, FeatureIntegrityCounts, FeatureParityEventListQuery,
-        FeatureParityEventView, FeatureParityRunInfo, FeatureParityRunListQuery,
-        FeatureParityStateInfo, FrozenFeatureParitySubject, NewFeatureParityRun,
-        NewFrozenModelParitySubject, NewResearchJob, Paginated, ResearchJobInfo,
+        api::{
+            FeatureIntegrityCounts, FeatureParityEventListQuery, FeatureParityEventView,
+            FeatureParityRunListQuery,
+        },
+        pagination::Paginated,
+        quant::{
+            CompleteFeatureParityRun, FeatureParityRunInfo, FeatureParityStateInfo,
+            FrozenFeatureParitySubject, NewFeatureParityRun, NewFrozenModelParitySubject,
+            NewResearchJob, ResearchJobInfo,
+        },
     },
     enums::quant::{FeatureParityRunKind, FeatureParityStateTransition},
     types::{

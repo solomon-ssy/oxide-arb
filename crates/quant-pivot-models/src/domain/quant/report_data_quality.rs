@@ -1,12 +1,13 @@
 //! Report-level data-quality snapshot persistence DTOs.
 
+use chrono::{DateTime, Utc};
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
+use serde::{Deserialize, Serialize};
+
 use crate::{
     entities::quant_report_data_quality_snapshot,
     types::{DecisionPolicySnapshotId, ReportDataQualitySnapshotId, ReportDataQualityTokens},
 };
-use chrono::{DateTime, Utc};
-use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
-use serde::{Deserialize, Serialize};
 
 /// Persisted per-fire data-quality snapshot (accepted + rejected markets).
 #[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]

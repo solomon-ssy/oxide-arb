@@ -1,0 +1,49 @@
+[package]
+name = "quant-pivot-system-tests"
+description = "Cross-crate system verification against one disposable infrastructure stack"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+quant-pivot-api = { workspace = true }
+quant-pivot-core = { workspace = true }
+quant-pivot-error = { workspace = true, features = ["storage"] }
+quant-pivot-migration = { workspace = true }
+quant-pivot-models = { workspace = true }
+quant-pivot-repository = { workspace = true }
+quant-pivot-research = { workspace = true, default-features = false, features = ["dataframe"] }
+quant-pivot-storage = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true, features = ["serde"] }
+prometheus = { workspace = true }
+reqwest = { workspace = true }
+rust_decimal = { workspace = true }
+rust_decimal_macros = { workspace = true }
+sea-orm = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+testcontainers = { workspace = true }
+testcontainers-modules = { workspace = true, features = ["postgres", "redis"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+toml = { workspace = true }
+uuid = { workspace = true, features = ["v4", "v5", "v7"] }
+wiremock = { workspace = true }
+
+[dev-dependencies]
+bitcode = { workspace = true }
+blake3 = { workspace = true }
+casbin = { workspace = true }
+clickhouse = { workspace = true }
+futures-util = { workspace = true }
+redis = { workspace = true }
+sea-orm-migration = { workspace = true }
+sqlx = { workspace = true }
+tokio-tungstenite = { workspace = true }
+tokio-util = { workspace = true, features = ["rt"] }
+url = { workspace = true }
+
+[lints]
+workspace = true

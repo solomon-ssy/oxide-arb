@@ -4,14 +4,16 @@
 //! a miss), so a Redis outage falls through to the inner repository instead of
 //! failing the read.
 
-use crate::traits::EventRepository;
+use std::{collections::HashSet, sync::Arc};
+
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    domain::{EventInfo, UpsertEvent},
+    domain::market::{EventInfo, UpsertEvent},
     types::EventId,
 };
 use quant_pivot_storage::cache::{CacheKey, CacheManager};
-use std::{collections::HashSet, sync::Arc};
+
+use crate::traits::EventRepository;
 
 /// Caching decorator for event metadata reads.
 pub struct CachedEventRepository<R: EventRepository> {

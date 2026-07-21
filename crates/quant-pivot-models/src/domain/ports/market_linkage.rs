@@ -1,10 +1,13 @@
-//! Admin port for market-linkage resolve / override (Phase 11.2.2).
+//! Admin port for market-linkage resolve / override.
 
 use async_trait::async_trait;
 use quant_pivot_error::QuantResult;
 
 use crate::{
-    domain::{LinkageResolveSummaryView, MarketLinkageInfo, OverrideLinkageRequest},
+    domain::{
+        api::{LinkageResolveSummaryView, OverrideLinkageRequest},
+        quant::MarketLinkageInfo,
+    },
     types::MarketId,
 };
 

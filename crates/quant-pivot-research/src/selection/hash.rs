@@ -9,7 +9,7 @@
 
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
-    domain::MarketCandidate,
+    domain::quant::MarketCandidate,
     types::{ContentHash, DecisionPolicySnapshotId, SelectionExclusionSummary},
 };
 use serde::Serialize;

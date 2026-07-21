@@ -1,5 +1,5 @@
 //! Lot position-state pseudo-factors — single source for runtime scoring and
-//! offline Sell-scorer training (Phase 06.1).
+//! offline Sell-scorer training.
 
 use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantResult, research::ResearchError};
@@ -178,16 +178,16 @@ fn checked_difference(label: &str, left: Decimal, right: Decimal) -> QuantResult
 
 #[cfg(test)]
 mod tests {
-    use super::{LotStateInput, position_state_features, position_state_signed_contribution};
-    use chrono::{TimeZone, Utc};
+    use chrono::{Duration, TimeZone, Utc};
     use rust_decimal_macros::dec;
 
-    use crate::factors::names;
+    use super::{LotStateInput, position_state_features, position_state_signed_contribution};
+    use crate::factors::{names, names::POSITION_UNREALIZED_PNL};
 
     #[test]
     fn position_state_matches_runtime_formula() {
         let opened = Utc.timestamp_opt(1_000, 0).single().expect("ts");
-        let now = opened + chrono::Duration::seconds(43_200);
+        let now = opened + Duration::seconds(43_200);
         let state = position_state_features(LotStateInput {
             avg_price: dec!(0.40),
             mark: Some(dec!(0.50)),
@@ -204,7 +204,7 @@ mod tests {
                 .peak_mark_drawdown
                 .is_some_and(|value| value > dec!(0))
         );
-        let signed = position_state_signed_contribution(&state, &names::POSITION_UNREALIZED_PNL);
+        let signed = position_state_signed_contribution(&state, &POSITION_UNREALIZED_PNL);
         assert!(signed.is_some_and(|value| value > dec!(0)));
     }
 
@@ -215,7 +215,7 @@ mod tests {
             avg_price: dec!(0.40),
             mark: None,
             opened_at: opened,
-            now: opened + chrono::Duration::seconds(60),
+            now: opened + Duration::seconds(60),
             max_hold_secs: 3_600,
             peak_mark: None,
         })

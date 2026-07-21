@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use quant_pivot_error::QuantResult;
 
 use crate::{
-    domain::{FeatureContractView, GovernanceActor, ModelSpecInfo},
+    domain::{api::FeatureContractView, ports::GovernanceActor, quant::ModelSpecInfo},
     enums::model::ModelFamily,
     types::{
         ModelInputContract, ModelSpecId, ModelTrainingContract, SchemaVersion,

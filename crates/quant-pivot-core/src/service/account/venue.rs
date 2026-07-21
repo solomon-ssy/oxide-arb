@@ -84,11 +84,12 @@ impl AccountProvider for VenueAccountProvider {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use quant_pivot_api::data_api::VenuePosition;
     use quant_pivot_error::account::AccountError;
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
+
+    use super::*;
 
     struct StubClient {
         collateral: Usd,

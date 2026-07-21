@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use sea_orm::entity::prelude::*;
 
+use super::market;
 use crate::{
     enums::common::TickSize,
     types::{
@@ -44,7 +45,7 @@ pub struct Model {
         from = "market_id",
         to = "market_id"
     )]
-    pub market: BelongsTo<super::market::Entity>,
+    pub market: BelongsTo<market::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

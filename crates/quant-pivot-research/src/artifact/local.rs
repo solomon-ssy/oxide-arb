@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use futures_util::StreamExt;
 use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::types::ArtifactUri;
-use tokio::{fs, io::AsyncWriteExt};
+use tokio::{fs, fs::File, io::AsyncWriteExt};
 use tokio_util::io::ReaderStream;
 
 use super::{
@@ -85,7 +85,7 @@ impl ArtifactStore for LocalArtifactStore {
         // Atomic publish: write a uniquely-named temp file, then rename onto the
         // final path so readers never observe a partial write.
         let temp = parent.join(temp_file_name(&key));
-        let mut file = fs::File::create(&temp)
+        let mut file = File::create(&temp)
             .await
             .map_err(|error| io_error(&temp, &error))?;
         while let Some(chunk) = stream.next().await {
@@ -108,7 +108,7 @@ impl ArtifactStore for LocalArtifactStore {
 
     async fn get_stream(&self, uri: &ArtifactUri) -> QuantResult<ArtifactByteStream> {
         let path = self.path_from_uri(uri)?;
-        match fs::File::open(&path).await {
+        match File::open(&path).await {
             Ok(file) => {
                 let display = path.display().to_string();
                 let stream = ReaderStream::new(file).map(move |result| {
@@ -234,10 +234,6 @@ fn temp_file_name(key: &ArtifactKey) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{ArtifactKey, ArtifactStore, LocalArtifactStore, temp_file_name};
-    use quant_pivot_models::types::ArtifactUri;
-
-    use crate::artifact::ArtifactNamespace;
     use std::{
         env, fs,
         path::PathBuf,
@@ -245,6 +241,11 @@ mod tests {
         sync::atomic::{AtomicU64, Ordering},
         time::{SystemTime, UNIX_EPOCH},
     };
+
+    use quant_pivot_models::types::ArtifactUri;
+
+    use super::{ArtifactKey, ArtifactStore, LocalArtifactStore, temp_file_name};
+    use crate::artifact::ArtifactNamespace;
 
     fn temp_root() -> PathBuf {
         static COUNTER: AtomicU64 = AtomicU64::new(0);

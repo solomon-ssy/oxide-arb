@@ -3,6 +3,7 @@
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
+use super::user;
 use crate::{
     enums::runtime_config::{PolicyActorKind, ProfileArtifactKind},
     runtime_config::PolicyProfileDocument,
@@ -35,7 +36,7 @@ pub struct Model {
         from = "created_by_user_id",
         to = "id"
     )]
-    pub created_by_user: BelongsTo<Option<super::user::Entity>>,
+    pub created_by_user: BelongsTo<Option<user::Entity>>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

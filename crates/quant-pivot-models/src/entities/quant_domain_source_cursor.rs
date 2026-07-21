@@ -1,11 +1,12 @@
 //! `quant_domain_source_cursor` table entity.
 
-use crate::{
-    domain::{DomainCursorStatus, DomainSourceCheckpoint},
-    types::{ContentHash, DomainInstrumentKey, DomainSourceId},
-};
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
+
+use crate::{
+    domain::data_plane::{DomainCursorStatus, DomainSourceCheckpoint},
+    types::{ContentHash, DomainInstrumentKey, DomainSourceId},
+};
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]

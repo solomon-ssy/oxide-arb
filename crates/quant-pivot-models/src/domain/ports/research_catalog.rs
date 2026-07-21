@@ -4,30 +4,35 @@
 //! governance) is ID-driven at the mutation boundary, but the operator console
 //! needs paginated catalogs to browse the artifacts a workflow produces. This
 //! port is the single read surface for those catalogs, mirroring
-//! [`AccountReadPort`](crate::domain::AccountReadPort) and
-//! [`ExecutionReadPort`](crate::domain::ExecutionReadPort): every method returns
+//! [`AccountReadPort`](crate::domain::ports::AccountReadPort) and
+//! [`ExecutionReadPort`](crate::domain::ports::ExecutionReadPort): every method returns
 //! a [`Paginated`] projection or a by-id row, and it never mutates state.
 
 use async_trait::async_trait;
+use quant_pivot_error::QuantResult;
+use rust_decimal::Decimal;
 
 use crate::{
     domain::{
-        BacktestPathSetInfo, BacktestPathSetListQuery, BacktestReportInfo, BacktestReportListQuery,
-        ComparisonReportListQuery, FactorCollinearitySource, FactorCollinearityView,
-        FactorDefinitionInfo, FactorDefinitionListQuery, ModelComparisonReportInfo,
-        ModelPublishedCatalogQuery, ModelSpecInfo, ModelSpecListQuery, ModelVersionInfo,
-        ModelVersionListQuery, Paginated, PublishedModelOptionView, TrainingDatasetInfo,
-        TrainingDatasetListQuery,
+        api::{
+            BacktestPathSetListQuery, BacktestReportListQuery, ComparisonReportListQuery,
+            FactorCollinearitySource, FactorCollinearityView, FactorDefinitionListQuery,
+            ModelPublishedCatalogQuery, ModelSpecListQuery, ModelVersionListQuery,
+            PublishedModelOptionView, TrainingDatasetListQuery,
+        },
+        pagination::Paginated,
+        quant::{
+            BacktestPathSetInfo, BacktestReportInfo, FactorDefinitionInfo,
+            ModelComparisonReportInfo, ModelSpecInfo, ModelVersionInfo, TrainingDatasetInfo,
+        },
     },
     types::FactorDefinitionId,
 };
-use quant_pivot_error::QuantResult;
-use rust_decimal::Decimal;
 
 /// Dependency-inversion boundary between the HTTP layer and the core research
 /// repositories for read-only catalog browsing.
 ///
-/// Implemented in `quant-pivot-core` and injected into `quant_pivot_web::AppState`.
+/// Implemented in `quant-pivot-core` and injected into `quant_pivot_web::state::AppState`.
 #[async_trait]
 pub trait ResearchCatalogPort: Send + Sync {
     /// Page the frozen training-dataset ledger, newest first.
@@ -49,8 +54,8 @@ pub trait ResearchCatalogPort: Send + Sync {
     ) -> QuantResult<Paginated<ModelSpecInfo>>;
 
     /// The `Published`, side-and-category-eligible candidates for one
-    /// `FieldWidget::ModelVersionSelect` runtime-config field (11.2.2
-    /// remediation R8). Unlike every other catalog method this is **not**
+    /// `FieldWidget::ModelVersionSelect` runtime-config field. Unlike every
+    /// other catalog method this is **not**
     /// paginated: the eligible set is bounded by the governed model registry
     /// (a human-curated handful of specs), never a market-scale collection.
     async fn list_published_model_options(

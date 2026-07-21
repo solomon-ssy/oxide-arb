@@ -11,7 +11,10 @@
 //! statistical fits; results are quantized back to `Decimal` immediately.
 
 use quant_pivot_error::{QuantResult, research::ResearchError};
-use rust_decimal::{Decimal, prelude::FromPrimitive, prelude::ToPrimitive};
+use rust_decimal::{
+    Decimal,
+    prelude::{FromPrimitive, ToPrimitive},
+};
 use statrs::distribution::{ContinuousCDF, Normal};
 
 use crate::precision::RESEARCH_DECIMAL_SCALE;
@@ -326,12 +329,13 @@ pub fn pava_non_decreasing_grouped(group_means: &[Decimal], group_weights: &[u64
 
 #[cfg(test)]
 mod calibration_stat_tests {
+    use rust_decimal::Decimal;
+    use rust_decimal_macros::dec;
+
     use super::{
         kurtosis, normal_cdf, normal_inverse_cdf, pava_non_decreasing, pava_non_decreasing_grouped,
         pava_non_increasing, skewness, stddev, variance, wilson_interval, wilson_z,
     };
-    use rust_decimal::Decimal;
-    use rust_decimal_macros::dec;
 
     #[test]
     fn pava_enforces_non_decreasing() {

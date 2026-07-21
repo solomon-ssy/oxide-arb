@@ -442,7 +442,7 @@
       "additionalProperties": false
     },
     "CorrelationConfig": {
-      "description": "Correlation-cluster estimation configuration for the correlated-exposure cap.\n\nDrives whether `portfolio.constraints.max_correlated_exposure_usd` actually\nbinds. When disabled, the cap is snapshot-only (Phase 4 behavior).",
+      "description": "Correlation-cluster estimation configuration for the correlated-exposure cap.\n\nDrives whether `portfolio.constraints.max_correlated_exposure_usd` actually\nbinds. When disabled, the cap is snapshot-only.",
       "type": "object",
       "properties": {
         "cluster_threshold": {
@@ -957,7 +957,7 @@
       "additionalProperties": false
     },
     "ExecutionBreakerConfig": {
-      "description": "Venue-dimension execution-breaker thresholds (Phase 05.4 §6.5).\n\nDrives the stateful [`ExecutionBreaker`] that watches venue submit/cancel\noutcomes and publishes a `VenueHealth` seam for admission `#18` while\nauto-tripping the operational kill-switch on sustained failure. Transient\ndegradation defers (admission retries); sustained failure halts and latches\nthe kill-switch (`execution_halted`, operator ack required to clear).",
+      "description": "Venue-dimension execution-breaker thresholds.\n\nDrives the stateful execution breaker that watches venue submit/cancel\noutcomes and publishes a `VenueHealth` seam for admission `#18` while\nauto-tripping the operational kill-switch on sustained failure. Transient\ndegradation defers (admission retries); sustained failure halts and latches\nthe kill-switch (`execution_halted`, operator ack required to clear).",
       "type": "object",
       "properties": {
         "cooldown_secs": {
@@ -1142,7 +1142,7 @@
           "minimum": 0
         },
         "opportunistic_sell": {
-          "description": "Opportunistic-Sell advisory scale-out (Phase 06.1).",
+          "description": "Opportunistic-Sell advisory scale-out.",
           "$ref": "#/$defs/OpportunisticSellPolicy",
           "default": {
             "enabled": false,
@@ -1157,7 +1157,7 @@
           "minimum": 0
         },
         "signal_reinference": {
-          "description": "Model-backed thesis-invalidation re-inference (Phase 06.0).",
+          "description": "Model-backed thesis-invalidation re-inference.",
           "$ref": "#/$defs/ExitSignalReinferencePolicy",
           "default": {
             "enabled": true,
@@ -1168,7 +1168,7 @@
       "additionalProperties": false
     },
     "ExitSignalReinferencePolicy": {
-      "description": "Exit-monitor cadence and signal-degradation policy (Phase 05.6).\n\nThe monitor scans open position lots every `monitor_secs` for the price /\ntime / trailing / partial ladder; the heavier signal re-inference runs at\nModel-backed thesis-invalidation re-inference policy (Phase 06.0).\n\nWhen `enabled`, the exit monitor re-scores each lot's market via the\nintent-frozen model and compares the fresh composite score against the entry\nbaseline. `shadow_mode` runs the full pipeline but suppresses\n`ThesisInvalidated` exits (metrics + logs only) until operators disable it.",
+      "description": "Exit-monitor cadence and signal-degradation policy.\n\nThe monitor scans open position lots every `monitor_secs` for the price /\ntime / trailing / partial ladder; the heavier signal re-inference runs at\nModel-backed thesis-invalidation re-inference policy.\n\nWhen `enabled`, the exit monitor re-scores each lot's market via the\nintent-frozen model and compares the fresh composite score against the entry\nbaseline. `shadow_mode` runs the full pipeline but suppresses\n`ThesisInvalidated` exits (metrics + logs only) until operators disable it.",
       "type": "object",
       "properties": {
         "enabled": {
@@ -1193,7 +1193,7 @@
       ]
     },
     "KellySafetyConfig": {
-      "description": "Kelly safety-layer parameters (Phase 11.3 §6).",
+      "description": "Kelly safety-layer parameters.",
       "type": "object",
       "properties": {
         "binding_materiality_threshold": {
@@ -1514,7 +1514,7 @@
       "type": "object",
       "properties": {
         "active_exit_model_version_id": {
-          "description": "Active published Sell-side hold-vs-exit scorer version (Phase 06.1). The\nopportunistic-Sell exit evaluator loads this; a distinct pointer from\n`active_model_version_id` so Buy and Sell models are governed separately.",
+          "description": "Active published Sell-side hold-vs-exit scorer version. The\nopportunistic-Sell exit evaluator loads this; a distinct pointer from\n`active_model_version_id` so Buy and Sell models are governed separately.",
           "anyOf": [
             {
               "$ref": "#/$defs/ModelVersionRef"
@@ -1538,7 +1538,7 @@
           "default": null
         },
         "calibration": {
-          "description": "Model-score probability-calibrator fit policy (Phase 11.3).",
+          "description": "Model-score probability-calibrator fit policy.",
           "$ref": "#/$defs/ModelCalibrationConfig",
           "default": {
             "ci_confidence": "0.95",
@@ -1553,7 +1553,7 @@
           "default": "0.00"
         },
         "category_model_pointers": {
-          "description": "Category-specific Buy-side model pointers (Phase 11.2.2 `ModelRouting`).\n\nA market whose category has a pointer here scores through that artifact\n(which may consume the category's domain slice); only categories without\na pointer use the generic `active_model_version_id`. A configured route\nthat cannot load, validate its exact scope, or infer fails the entire\nreport round. Governed exactly like the active/shadow pointers.",
+          "description": "Category-specific Buy-side model pointers (`ModelRouting`).\n\nA market whose category has a pointer here scores through that artifact\n(which may consume the category's domain slice); only categories without\na pointer use the generic `active_model_version_id`. A configured route\nthat cannot load, validate its exact scope, or infer fails the entire\nreport round. Governed exactly like the active/shadow pointers.",
           "type": "object",
           "properties": {
             "crypto": {
@@ -1596,7 +1596,7 @@
           "default": "0.50"
         },
         "min_quality_gate_age_secs": {
-          "description": "Maximum age of a quality-gate report before model load is denied.\nConsumed by Phase 3.7 governance (`ModelQualityGate` / load-time deny), not by\nthe 3.4 `ModelRunner` inference path.",
+          "description": "Maximum age of a quality-gate report before model load is denied.\nConsumed by governance (`ModelQualityGate` / load-time deny), not by\nthe `ModelRunner` inference path.",
           "type": "integer",
           "format": "uint64",
           "default": 86400,
@@ -1719,7 +1719,7 @@
       "additionalProperties": false
     },
     "OpportunisticSellPolicy": {
-      "description": "Opportunistic-Sell operational control (Phase 06.1 / 11.7.2).\n\nAdvisory model-driven scale-out when the thesis still holds but the Sell\nscorer ranks exiting now as better than holding. Evaluated at the same\ncadence as re-inference (`signal_recheck_secs`) and gated behind\nre-inference being enabled (thesis validity must be checkable first).\n\nAll trading thresholds and cumulative/clip bounds live exclusively in the\nimmutable policy and intent. Runtime may only disable or shadow an already\nfrozen rule; it cannot change that rule's decision boundary.",
+      "description": "Opportunistic-Sell operational control.\n\nAdvisory model-driven scale-out when the thesis still holds but the Sell\nscorer ranks exiting now as better than holding. Evaluated at the same\ncadence as re-inference (`signal_recheck_secs`) and gated behind\nre-inference being enabled (thesis validity must be checkable first).\n\nAll trading thresholds and cumulative/clip bounds live exclusively in the\nimmutable policy and intent. Runtime may only disable or shadow an already\nfrozen rule; it cannot change that rule's decision boundary.",
       "type": "object",
       "properties": {
         "enabled": {
@@ -2507,7 +2507,7 @@
       "additionalProperties": false
     },
     "PortfolioConfig": {
-      "description": "Portfolio policy: budget governance, exposure constraints, and sizing model.\n\nPolicy (limits) only — never account state. Real equity / positions come\nfrom the account snapshot, never from here (see 04.0 §6).",
+      "description": "Portfolio policy: budget governance, exposure constraints, and sizing model.\n\nPolicy limits only — never account state. Real equity and positions come\nfrom the account snapshot, never from this configuration.",
       "type": "object",
       "properties": {
         "budget": {
@@ -3031,7 +3031,7 @@
       ]
     },
     "ScheduleCadence": {
-      "description": "How often a report schedule fires.\n\nTagged on `kind`. The cron variant is parsed/scheduled by the 04.3 runner;\n04.0 validation only checks structural validity.",
+      "description": "How often a report schedule fires.\n\nTagged on `kind`. The cron variant is parsed/scheduled by the runner;\nvalidation only checks structural validity.",
       "oneOf": [
         {
           "description": "Fixed interval in seconds (`> 0`).",
@@ -3328,7 +3328,7 @@
       "additionalProperties": false
     },
     "SizingModelConfig": {
-      "description": "Fractional-Kelly position-sizing parameters for the portfolio planner.\n\nKelly is the **only** sizing model: it is the single edge-driven optimal-growth\nsizer, and an edge-free confidence-to-size curve has no place in a capital\nsystem (it would deploy capital regardless of expected value). `confidence`\nis an evidence-quality measure, **not** a calibrated win probability, so it\nnever stands in for `q` (Phase 11.3 §4 redesign): for a `Calibrated` return\nmodel, `q` is the calibrator's `P(win)` directly (`f* = (q - p) / (1 - p)`,\n`p` = market price) — never re-derived from a second, TP/SL-shaped bet\nstructure. `confidence` enters only as an estimation-uncertainty shrinkage\non the Kelly fraction (`confidence_weighting`) — the production-standard\nmitigation for Kelly's sensitivity to edge mis-estimation.",
+      "description": "Fractional-Kelly position-sizing parameters for the portfolio planner.\n\nKelly is the **only** sizing model: it is the single edge-driven optimal-growth\nsizer, and an edge-free confidence-to-size curve has no place in a capital\nsystem (it would deploy capital regardless of expected value). `confidence`\nis an evidence-quality measure, **not** a calibrated win probability, so it\nnever stands in for `q`: for a `Calibrated` return\nmodel, `q` is the calibrator's `P(win)` directly (`f* = (q - p) / (1 - p)`,\n`p` = market price) — never re-derived from a second, TP/SL-shaped bet\nstructure. `confidence` enters only as an estimation-uncertainty shrinkage\non the Kelly fraction (`confidence_weighting`) — the production-standard\nmitigation for Kelly's sensitivity to edge mis-estimation.",
       "type": "object",
       "properties": {
         "confidence_weighting": {

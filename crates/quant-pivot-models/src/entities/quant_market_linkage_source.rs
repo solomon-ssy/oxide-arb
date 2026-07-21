@@ -3,6 +3,7 @@
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
+use super::quant_market_linkage;
 use crate::{
     enums::domain::LinkageSourceRole,
     types::{ContentHash, DomainInstrumentKey, DomainSourceId, MarketLinkageId},
@@ -30,7 +31,7 @@ pub struct Model {
         from = "linkage_id",
         to = "linkage_id"
     )]
-    pub market_linkage: BelongsTo<super::quant_market_linkage::Entity>,
+    pub market_linkage: BelongsTo<quant_market_linkage::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

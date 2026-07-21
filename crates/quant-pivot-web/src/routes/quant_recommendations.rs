@@ -1,24 +1,26 @@
-//! Recommendation + evidence + attribution HTTP endpoints (Phase 04.4 / 05.7).
+//! Recommendation, evidence, and attribution HTTP endpoints.
 //!
 //! # UI integration contract
 //!
 //! | Method | Path | Permission | Purpose |
 //! |--------|------|------------|---------|
-//! | GET  | `/quant/recommendations/{id}` | `quant_report:read` | One recommendation |
-//! | GET  | `/quant/recommendations/{id}/evidence` | `quant_report:read` | Replay handles |
-//! | GET  | `/quant/recommendations/{id}/entry-condition` | `quant_report:read` | Durable condition state and tree |
-//! | GET  | `/quant/recommendations/{id}/entry-condition/audits` | `quant_report:read` | WORM condition timeline |
-//! | GET  | `/quant/recommendations/{id}/attribution` | `recommendation_attribution:read` | Final WORM attribution |
+//! | GET | `/quant/recommendations/{id}` | `quant_report:read` | One recommendation |
+//! | GET | `/quant/recommendations/{id}/evidence` | `quant_report:read` | Replay handles |
+//! | GET | `/quant/recommendations/{id}/entry-condition` | `quant_report:read` | Durable condition state and tree |
+//! | GET | `/quant/recommendations/{id}/entry-condition/audits` | `quant_report:read` | WORM condition timeline |
+//! | GET | `/quant/recommendations/{id}/attribution` | `recommendation_attribution:read` | Final WORM attribution |
 //!
 //! Creating an order intent from a recommendation is `POST /api/quant/intents`
-//! (see [`super::quant_intents`]), the governed execution surface added in
-//! Phase 05.2.
+//! (see [`super::quant_intents`]), the governed execution surface.
 
-use actix_web::{http::Method, web};
+use actix_web::{
+    http::Method,
+    web::{Data, Path},
+};
 use chrono::{DateTime, Utc};
 use quant_pivot_models::{
     clickhouse::EntryConditionEvaluationEventRow,
-    domain::{
+    domain::api::{
         EntryConditionArtifactView, EntryConditionAuditView, EntryConditionDetailView,
         EntryConditionEvaluationView, EntryConditionInstanceSummaryView,
         EntryConditionLeafEvidenceView, EntryConditionSourceCheckpointView, QuantEvidenceView,
@@ -77,8 +79,8 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
 
 /// Durable recommendation-owned condition state and immutable artifact.
 pub async fn entry_condition(
-    state: web::Data<AppState>,
-    id: web::Path<RecommendationId>,
+    state: Data<AppState>,
+    id: Path<RecommendationId>,
 ) -> Result<WebResponse<EntryConditionDetailView>, WebError> {
     let instance = state
         .entry_conditions
@@ -262,8 +264,8 @@ const fn condition_truth_label(truth: &ConditionTruth) -> &'static str {
 
 /// WORM condition lifecycle timeline ordered by revision.
 pub async fn entry_condition_audits(
-    state: web::Data<AppState>,
-    id: web::Path<RecommendationId>,
+    state: Data<AppState>,
+    id: Path<RecommendationId>,
 ) -> Result<WebResponse<Vec<EntryConditionAuditView>>, WebError> {
     let instance = state
         .entry_conditions
@@ -282,8 +284,8 @@ pub async fn entry_condition_audits(
 
 /// `GET /api/quant/recommendations/{id}` — one recommendation.
 pub async fn get(
-    state: web::Data<AppState>,
-    id: web::Path<RecommendationId>,
+    state: Data<AppState>,
+    id: Path<RecommendationId>,
 ) -> Result<WebResponse<QuantRecommendationView>, WebError> {
     let view = state
         .quant_reports
@@ -295,8 +297,8 @@ pub async fn get(
 
 /// `GET /api/quant/recommendations/{id}/evidence` — replay handles.
 pub async fn evidence(
-    state: web::Data<AppState>,
-    id: web::Path<RecommendationId>,
+    state: Data<AppState>,
+    id: Path<RecommendationId>,
 ) -> Result<WebResponse<QuantEvidenceView>, WebError> {
     let view = state
         .quant_reports
@@ -308,8 +310,8 @@ pub async fn evidence(
 
 /// `GET /api/quant/recommendations/{id}/attribution` — final WORM attribution.
 pub async fn attribution(
-    state: web::Data<AppState>,
-    id: web::Path<RecommendationId>,
+    state: Data<AppState>,
+    id: Path<RecommendationId>,
 ) -> Result<WebResponse<RecommendationAttributionView>, WebError> {
     let info = state
         .execution_read
@@ -322,7 +324,7 @@ pub async fn attribution(
 #[cfg(test)]
 mod tests {
     use quant_pivot_models::{
-        domain::EntryConditionSourceCheckpointView, types::ConditionLeafEvidence,
+        domain::api::EntryConditionSourceCheckpointView, types::ConditionLeafEvidence,
     };
     use serde_json::json;
 

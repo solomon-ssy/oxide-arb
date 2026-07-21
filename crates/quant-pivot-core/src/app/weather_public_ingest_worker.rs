@@ -2,7 +2,7 @@
 
 use std::{sync::Arc, time::Duration as StdDuration};
 
-use chrono::{DateTime, Datelike, Days, Duration, Months, Timelike, Utc};
+use chrono::{DateTime, Datelike, Days, Duration, Months, NaiveDate, Timelike, Utc};
 use chrono_tz::{Asia::Hong_Kong, Tz};
 use quant_pivot_api::weather::{
     airnow::AirNowSource,
@@ -20,7 +20,7 @@ use quant_pivot_models::{
         NasaGistempSourceConfig, NhcSourceConfig, NsidcSeaIceSourceConfig,
         NwsObservationSourceConfig, TornadoSourceConfig, WeatherVerticalBindingsConfig,
     },
-    domain::{
+    domain::data_plane::{
         DomainCursorStatus, DomainSourceCheckpoint, UpsertDomainSourceCursor,
         WeatherObservationReport,
     },
@@ -30,6 +30,7 @@ use quant_pivot_models::{
     },
 };
 use quant_pivot_repository::traits::DomainSourceCursorRepository;
+use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -895,11 +896,11 @@ impl WeatherPublicIngestWorker {
                         report: report.clone(),
                     }])
                     .await?;
-                let raw: serde_json::Value = serde_json::from_str(&report.raw_report)
+                let raw: Value = serde_json::from_str(&report.raw_report)
                     .map_err(|error| QuantError::config(format!("NHC provenance: {error}")))?;
                 let advisory_number = raw
                     .get("advisory_number")
-                    .and_then(serde_json::Value::as_str)
+                    .and_then(Value::as_str)
                     .ok_or_else(|| QuantError::config("NHC provenance has no advisory number"))?
                     .to_owned();
                 Ok(DomainSourceCheckpoint::NhcAdvisory {
@@ -1276,14 +1277,14 @@ impl WeatherPublicIngestWorker {
     }
 }
 
-fn local_date(report: &WeatherObservationReport, timezone: &str) -> QuantResult<chrono::NaiveDate> {
+fn local_date(report: &WeatherObservationReport, timezone: &str) -> QuantResult<NaiveDate> {
     Ok(report
         .observed_at
         .with_timezone(&parse_timezone(timezone)?)
         .date_naive())
 }
 
-fn hko_latest_publishable_date(available_at: DateTime<Utc>) -> QuantResult<chrono::NaiveDate> {
+fn hko_latest_publishable_date(available_at: DateTime<Utc>) -> QuantResult<NaiveDate> {
     let local = available_at.with_timezone(&Hong_Kong);
     let published_today = local.hour() > 1 || (local.hour() == 1 && local.minute() >= 30);
     local
@@ -1292,10 +1293,7 @@ fn hko_latest_publishable_date(available_at: DateTime<Utc>) -> QuantResult<chron
         .ok_or_else(|| QuantError::config("HKO latest publishable date underflow"))
 }
 
-fn hko_partition_date(
-    target_date: chrono::NaiveDate,
-    months_ago: u32,
-) -> QuantResult<chrono::NaiveDate> {
+fn hko_partition_date(target_date: NaiveDate, months_ago: u32) -> QuantResult<NaiveDate> {
     target_date
         .with_day(1)
         .and_then(|month| month.checked_sub_months(Months::new(months_ago)))
@@ -1358,7 +1356,7 @@ async fn wait_or_cancel(shutdown: &CancellationToken, duration: StdDuration) -> 
 
 #[cfg(test)]
 mod tests {
-    use chrono::{Duration, TimeZone, Utc};
+    use chrono::{Duration, NaiveDate, TimeZone, Utc};
 
     use super::{airnow_scan_window, hko_latest_publishable_date, hko_partition_date};
 
@@ -1397,7 +1395,7 @@ mod tests {
 
     #[test]
     fn hko_partition_scan_crosses_year_boundary_newest_first() {
-        let target = chrono::NaiveDate::from_ymd_opt(2026, 1, 18).expect("date");
+        let target = NaiveDate::from_ymd_opt(2026, 1, 18).expect("date");
         assert_eq!(
             hko_partition_date(target, 0).expect("current partition"),
             chrono::NaiveDate::from_ymd_opt(2026, 1, 1).expect("date")

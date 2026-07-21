@@ -1,7 +1,7 @@
 //! Combinatorial Purged Cross-Validation with full φ-path reconstruction.
 //!
-//! Phase 11.5 §3.3, López de Prado *Advances in Financial Machine Learning*
-//! Ch.12; path-reconstruction algorithm per the `mlfinlab`
+//! Purge and embargo follow López de Prado, *Advances in Financial Machine
+//! Learning*, Ch. 12; path reconstruction follows the `mlfinlab`
 //! `CombinatorialPurgedKFold._fill_backtest_paths` construction, faithfully
 //! reproduced here.
 //!
@@ -19,7 +19,7 @@
 //! ([`FoldModelSource`]) or evaluated ([`ReplayEngine`]) — the Buy-side wiring
 //! (`WeightedFactor` / classical ML) supplies same-`as_of` cross-section
 //! groups + [`crate::backtest::PortfolioReplayBacktester`]-backed
-//! implementations; Phase 11.5.1 supplies lot-grouped implementations with
+//! implementations; supplies lot-grouped implementations with
 //! zero changes here.
 
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
@@ -61,7 +61,7 @@ impl CpcvConfig {
     /// The number of complete, full-timeline backtest paths this config
     /// reconstructs (a combinatorial identity: `C(N,k)·k/N`, always an
     /// integer). **Not** the number of combinations (`C(N,k)`) — a common and
-    /// consequential mix-up (the original Phase 11.5 design draft made
+    /// consequential mix-up (the original design draft made
     /// exactly this error for `N=8,k=2`: 28 combinations, but only φ=7 paths).
     ///
     /// # Errors
@@ -133,7 +133,7 @@ pub struct GroupRowFilter {
 pub enum FoldRuntime {
     /// A Buy-side (`WeightedFactor` / classical ML) fold runtime.
     Buy(Box<dyn QuantModelRuntime>),
-    /// A Sell-side (`HoldVsExitWeighted`, Phase 11.5.1) fold runtime.
+    /// A Sell-side (`HoldVsExitWeighted`) fold runtime.
     Sell(Box<dyn SellScorerRuntime>),
     /// Policy-fit fold selection over precomputed executable candidate paths.
     Policy(PolicyFoldRuntime),
@@ -195,8 +195,8 @@ impl FoldRuntime {
 
 /// Trains one fold's model, restricted to the groups `filter` selects.
 ///
-/// Implementations close over the full underlying example set (or lot set,
-/// for Phase 11.5.1) and project it down to `filter`'s rows before training —
+/// Implementations close over the full underlying example set, or the full lot
+/// set for Sell models, and project it down to `filter`'s rows before training —
 /// this is the **only** family-specific seam in the entire CPCV pipeline.
 pub trait FoldModelSource: Send + Sync {
     /// Train a fold-scoped model. Errors propagate (a fold that cannot train
@@ -209,7 +209,7 @@ pub trait FoldModelSource: Send + Sync {
 /// candidate within a [`GroupEvaluation`].
 ///
 /// Pooled across every group in a reconstructed path to compute that path's
-/// rank IC ([`build_path`]) — a single population-level Spearman
+/// rank IC (`build_path`) — a single population-level Spearman
 /// correlation, not an average of small-sample per-group correlations
 /// (statistically more robust, and the only definition that survives atomic
 /// units with a single candidate, e.g. one Sell lot per group).
@@ -229,13 +229,13 @@ pub struct GroupEvaluation {
     /// This group's contribution to the reconstructed path's return series
     /// (a fractional per-period return, family-specific in derivation:
     /// realized tick `PnL` / allocated capital for Buy-side, realized lot
-    /// proceeds / cost basis for Phase 11.5.1's Sell-side).
+    /// proceeds / cost basis for the Sell-side).
     pub return_value: Decimal,
     /// Every (score, realized) pair this group's replay produced — zero for
     /// a group with nothing scored, one for a single-candidate atomic unit
     /// (e.g. one Sell lot's decision walk), many for a multi-candidate
     /// cross-section (e.g. one Buy `as_of` tick's ranked tokens). Pooled
-    /// across the whole path by [`build_path`] to compute rank IC.
+    /// across the whole path by `build_path` to compute rank IC.
     pub rank_observations: Vec<RankObservation>,
 }
 
@@ -254,16 +254,16 @@ pub trait ReplayEngine: Send + Sync {
 /// path distribution plus the fold-level provenance needed for audit.
 #[derive(Debug, Clone)]
 pub struct BacktestPathSet {
-    /// Pre-minted identity (Phase 11.5 §4; declared per the Phase 11.0 freeze).
+    /// Pre-minted identity declared by the frozen run input.
     pub path_set_id: BacktestPathSetId,
     /// The `phi(N, k)` reconstructed complete paths.
     pub paths: Vec<BacktestPath>,
-    /// `C(N, k)` — the number of folds run (audit visibility only; **not**
-    /// `paths.len()`, see [`CpcvConfig::path_count`]).
+    /// `C(N, k)` — the number of folds run for audit visibility. This is not
+    /// `paths.len`; see [`CpcvConfig::path_count`].
     pub combination_count: u64,
     /// Distribution of [`BacktestPath::sharpe`] across `paths`.
     pub sharpe_distribution: SharpeDistribution,
-    /// Median of [`BacktestPath::rank_ic`] across `paths` — the Phase 11.5
+    /// Median of [`BacktestPath::rank_ic`] across `paths` — the
     /// hard `RankIc` gate's data source (replacing the single-path number).
     pub median_rank_ic: Decimal,
 }
@@ -636,6 +636,13 @@ fn methodology(detail: String) -> QuantError {
 
 #[cfg(test)]
 mod tests {
+    use async_trait::async_trait;
+    use chrono::{TimeZone, Utc};
+    use quant_pivot_error::QuantResult;
+    use quant_pivot_models::types::{BacktestPathSetId, ContentHash, ModelVersionId};
+    use rust_decimal::Decimal;
+    use rust_decimal_macros::dec;
+
     use super::{
         CombinatorialPurgedBacktester, CpcvConfig, CpcvRequest,
         DefaultCombinatorialPurgedBacktester, FoldModelSource, FoldRuntime, GroupEvaluation,
@@ -646,12 +653,6 @@ mod tests {
         model::runtime::{ModelFamily, ModelRuntimeInput, ModelRuntimeOutput, QuantModelRuntime},
         validation::purge::{PurgeConfig, TimelineGroup},
     };
-    use async_trait::async_trait;
-    use chrono::{TimeZone, Utc};
-    use quant_pivot_error::QuantResult;
-    use quant_pivot_models::types::{BacktestPathSetId, ContentHash, ModelVersionId};
-    use rust_decimal::Decimal;
-    use rust_decimal_macros::dec;
 
     /// A stub runtime: fold identity is irrelevant to these tests (the
     /// [`ReplayEngine`] stub below ignores the model entirely and returns
@@ -858,8 +859,8 @@ mod tests {
 
     /// `build_path`'s rank IC is one population-level Spearman correlation
     /// over every group's pooled observations, not an average of per-group
-    /// correlations — required for a single-candidate atomic unit (Phase
-    /// 11.5.1's one-lot-per-group) to ever report a non-zero rank IC at all,
+    /// correlations — required for a single-candidate, one-lot-per-group
+    /// atomic unit to ever report a non-zero rank IC at all,
     /// and a strictly more robust estimator for a multi-candidate one too.
     #[test]
     fn build_path_pools_rank_observations_across_groups_not_per_group_mean() {

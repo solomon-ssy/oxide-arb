@@ -1,10 +1,10 @@
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::{
     clickhouse::ChSchemaVersion,
     types::{ContentHash, MarketId, TokenId},
 };
-use uuid::Uuid;
 
 /// Rebuild checkpoint anchored to one canonical L2 event.
 #[derive(Debug, Clone, clickhouse::Row, Serialize, Deserialize)]

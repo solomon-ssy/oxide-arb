@@ -2,20 +2,20 @@
 //!
 //! Given a persisted selection and built feature vectors, one round:
 //!
-//! 1. creates a `Running` [`quant_model_run`] (so factor values can take its FK),
+//! 1. creates a `Running` `quant_model_run` (so factor values can take its FK),
 //! 2. runs the factor plane ([`FactorPipelineService`]) under that run,
 //! 3. loads the active model runtime (content-addressed, hash + schema verified),
 //! 4. scores the eligible markets into [`SignalCandidate`]s,
 //! 5. durably writes exact input evidence and its run completion marker,
 //! 6. finalizes the run (`succeed` with the output hash + metrics, or `fail`), and
 //! 7. emits the non-authoritative `quant_signal_candidate_event` facts **after**
-//!    the run reaches a terminal PG state (§5.3 ordering).
+//!    the run reaches a terminal Postgres state.
 //!
 //! A shadow model, when configured, runs as an isolated `Shadow` run whose failure
-//! never affects the active result (父文档 §28 degrade table). Active-path failures
-//! fail the run and raise a critical alert — an empty report is never silently
-//! fabricated. Business callers depend only on this service and `dyn QuantModelRuntime`,
-//! never on a concrete runtime type.
+//! never affects the active result (see the inference degradation policy).
+//! Active-path failures fail the run and raise a critical alert — an empty report
+//! is never silently fabricated. Business callers depend only on this service
+//! and `dyn QuantModelRuntime`, never on a concrete runtime type.
 
 use std::{
     collections::{BTreeSet, HashMap},
@@ -30,9 +30,13 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
     clickhouse::{QuantModelInputEventRow, QuantSignalCandidateEventRow},
-    domain::{DecisionBoundary, ModelVersionInfo, NewModelRun, NewShadowComparison},
+    domain::{
+        data_plane::DecisionBoundary,
+        quant::{ModelVersionInfo, NewModelRun, NewShadowComparison},
+    },
     enums::{
         common::{AlertCategory, AlertLevel, AlertSource, MarketCategory},
+        model::ModelFamily,
         quant::{ModelRunKind, ModelRunStatus, ModelWeightSource, OutcomeSide, PublicationStatus},
     },
     runtime_config::{
@@ -54,7 +58,7 @@ use quant_pivot_research::{
     governance::shadow::{ShadowComparisonRequest, compute_shadow_comparison},
     hashing::ResearchHasher,
     model::{
-        ActiveSchemaBinding, InferenceStage, ModelFamily, ModelInputAuditRow, ModelRuntimeFactory,
+        ActiveSchemaBinding, InferenceStage, ModelInputAuditRow, ModelRuntimeFactory,
         ModelRuntimeFactoryBuilder, ModelRuntimeInput, ModelRuntimeMetrics, ModelRuntimeOutput,
         QuantModelRuntime, SignalCandidate, WeightOverlay, annotate,
         canonical_business_prediction_hash, signal_candidate_event,
@@ -126,7 +130,7 @@ pub struct ModelRunRequest<'a> {
     pub market_selection_id: Option<MarketSelectionId>,
     /// Selected markets (token ids, liquidity) for the scoring context.
     pub selection: &'a [SelectedMarket],
-    /// Accepted feature vectors (data-quality bar already passed at 3.2).
+    /// Accepted feature vectors whose data-quality bar already passed.
     pub feature_vectors: &'a [FeatureVector],
     /// Persisted feature-vector ids, aligned 1:1 with `feature_vectors`.
     pub feature_vector_ids: &'a [FeatureVectorId],
@@ -202,7 +206,7 @@ pub struct ModelRunOutcome {
     /// The active run id.
     pub model_run_id: ModelRunId,
     /// Accepted candidates (score + confidence above the configured floors),
-    /// ranked, ready for the Phase 04 portfolio planner.
+    /// ranked, ready for the portfolio planner.
     pub accepted: Vec<SignalCandidate>,
     /// Total candidates emitted to the fact stream (accepted + audited rejects).
     pub emitted: u32,
@@ -280,7 +284,7 @@ pub struct ModelRunnerDeps {
     pub bias_table: Arc<BiasTableApplicator>,
 }
 
-/// Online inference orchestrator (3.4 capstone).
+/// Online inference orchestrator.
 pub struct ModelRunner {
     model_run_repo: Arc<dyn ModelRunRepository>,
     model_registry_repo: Arc<dyn ModelRegistryRepository>,
@@ -425,7 +429,7 @@ impl ModelRunner {
     /// expose its required features before market selection.
     ///
     /// This does not create a model-run row and does not emit facts; it is a
-    /// deterministic precondition for the 04.2 report builder's selection step.
+    /// deterministic precondition for the report builder's selection step.
     pub async fn active_requirements(
         &self,
         request: ActiveModelRequirementsRequest<'_>,
@@ -495,9 +499,9 @@ impl ModelRunner {
 
     /// Resolve one category pointer's required features for selection
     /// eligibility, enforcing the same governance a live routed inference
-    /// would (11.2.2 remediation R7): the pointer must parse, resolve to a
-    /// registered version that passes the active-load gate, and — new in
-    /// this remediation — the loaded artifact's `category_scope` must be
+    /// would: the pointer must parse, resolve to a
+    /// registered version that passes the active-load gate; the loaded
+    /// artifact's `category_scope` must be
     /// exactly this category. Any configured-pointer failure aborts selection;
     /// substituting the generic model would silently change governed behavior.
     async fn resolve_category_requirements(
@@ -620,7 +624,7 @@ impl ModelRunner {
         })
     }
 
-    /// The isolated shadow path: never fails the round (父文档 §28).
+    /// The isolated shadow path never fails the active round.
     async fn run_shadow(
         &self,
         request: &ModelRunRequest<'_>,
@@ -1754,11 +1758,11 @@ fn input_hash(
 
 #[cfg(test)]
 mod tests {
-    use super::{AlignedFeatureCrossSection, project_model_input_rows};
-    use crate::governance::quality_gate_staleness_ok;
-    use chrono::{Duration, Utc};
+    use std::collections::BTreeMap;
+
+    use chrono::{DateTime, Duration, Utc};
     use quant_pivot_models::{
-        domain::{DecisionClock, ModelVersionInfo},
+        domain::{data_plane::DecisionClock, quant::ModelVersionInfo},
         enums::{
             model::ModelFamily,
             quant::{DataQualityStatus, PublicationStatus},
@@ -1777,12 +1781,16 @@ mod tests {
         features::FeatureVector,
         model::{ModelInputAuditRow, ModelInputAuditState},
     };
-    use quant_pivot_test_support::{
-        execution_pg_seed::fixture_profile_ref, model_spec_fixtures::model_spec_lineage_fixture,
-    };
-    use std::collections::BTreeMap;
 
-    fn gate_report(evaluated_at: chrono::DateTime<Utc>) -> QualityGateReport {
+    use super::{AlignedFeatureCrossSection, project_model_input_rows};
+    use crate::{
+        governance::quality_gate_staleness_ok,
+        test_fixtures::{
+            execution_pg_seed::fixture_profile_ref, model_spec_fixtures::model_spec_lineage_fixture,
+        },
+    };
+
+    fn gate_report(evaluated_at: DateTime<Utc>) -> QualityGateReport {
         QualityGateReport {
             format_version: QUALITY_GATE_REPORT_FORMAT_VERSION,
             subject: GateSubject::ModelVersion(ModelVersionId::from_v7()),

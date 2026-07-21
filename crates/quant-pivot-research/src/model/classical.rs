@@ -1,10 +1,10 @@
-//! Classical-ML adapters over `smartcore` (Phase 3.6, `ml-classical` feature).
+//! Classical-ML adapters over `smartcore` behind the `ml-classical` feature.
 //!
 //! The business layer never sees a `smartcore` concrete type: training produces
 //! a [`ClassicalTrainOutput`] (serialized estimator bytes + metadata) and the
 //! runtime ([`crate::model::classical_runtime`]) consumes it behind
 //! `dyn QuantModelRuntime`. The estimator union is `bincode`-serialized; loading
-//! verifies the recorded crate version (§15.6) before deserializing.
+//! verifies the recorded crate version before deserializing.
 //!
 //! Six production kinds are supported, dispatched through
 //! [`ClassicalAdapterRegistry`]: the tree ensembles (`RandomForest`,
@@ -20,8 +20,7 @@ use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
     enums::quant::ModelSerializationFormat,
     hashing::CanonicalDigest,
-    types::ContentHash,
-    types::{ModelInputContract, ModelInputRequiredness, ModelInputSpec},
+    types::{ContentHash, ModelInputContract, ModelInputRequiredness, ModelInputSpec},
 };
 use rust_decimal::{Decimal, prelude::FromPrimitive};
 use serde::{Deserialize, Serialize};
@@ -30,6 +29,7 @@ use smartcore::{
         extra_trees_regressor::{ExtraTreesRegressor, ExtraTreesRegressorParameters},
         random_forest_regressor::{RandomForestRegressor, RandomForestRegressorParameters},
     },
+    error::Failed,
     linalg::basic::{arrays::Array, matrix::DenseMatrix},
     linear::{
         elastic_net::{ElasticNet, ElasticNetParameters},
@@ -55,7 +55,7 @@ use crate::{
 };
 
 /// The ML crate + version stamped onto every classical artifact (load-time
-/// mismatch is rejected; §15.6).
+/// mismatch is rejected.
 pub const CLASSICAL_CRATE_NAME: &str = "smartcore";
 /// Recorded crate version (major.minor of the workspace `smartcore` dependency).
 pub const CLASSICAL_CRATE_VERSION: &str = "0.1";
@@ -213,7 +213,7 @@ impl ClassicalAdapterRegistry {
     }
 
     /// Construct the adapter for `kind` with an explicit hyperparameter
-    /// override (Phase 11.5 §3.5's governed classical trial grid) instead of
+    /// override from the governed classical trial grid instead of
     /// [`ClassicalParams::defaults_for`]. Production training always uses
     /// [`Self::adapter_for`]; only CPCV/trial-grid validation folds need to
     /// vary hyperparameters away from the governed production defaults.
@@ -478,7 +478,7 @@ fn fit_kind(
 
 /// Walk-forward purged validation: for each interior fold boundary, fit only on
 /// rows strictly before the validation block (after label-horizon purge +
-/// embargo), then score the held-out block (Phase 11.5).
+/// embargo), then score the held-out block.
 fn rolling_validation(
     kind: ClassicalKind,
     params: &ClassicalParams,
@@ -608,7 +608,7 @@ fn select_rows(matrix: &TrainingMatrix, indices: &[usize]) -> TrainingMatrix {
 }
 
 /// Map a `smartcore` regressor prediction `Result` into our error domain.
-fn regressor_predict(result: Result<Vec<f64>, smartcore::error::Failed>) -> QuantResult<Vec<f64>> {
+fn regressor_predict(result: Result<Vec<f64>, Failed>) -> QuantResult<Vec<f64>> {
     result.map_err(|error| {
         ResearchError::Inference {
             detail: format!("classical predict failed: {error}"),
@@ -677,7 +677,7 @@ fn validate_matrix(matrix: &TrainingMatrix) -> QuantResult<usize> {
 }
 
 /// Map a `smartcore` fit `Result` into our error domain.
-fn fit<M>(result: Result<M, smartcore::error::Failed>) -> QuantResult<M> {
+fn fit<M>(result: Result<M, Failed>) -> QuantResult<M> {
     result.map_err(|error| {
         ResearchError::MatrixBuild {
             detail: format!("classical fit failed: {error}"),
@@ -791,11 +791,12 @@ fn count_f64(n: usize) -> QuantResult<f64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ClassicalAdapterRegistry, ClassicalParams, SmartcoreModel, rolling_validation};
-    use chrono::TimeZone;
+    use chrono::{DateTime, TimeZone, Utc};
     use ndarray::Array1;
+    use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
 
+    use super::{ClassicalAdapterRegistry, ClassicalParams, SmartcoreModel, rolling_validation};
     use crate::{
         features::{FeatureName, FeatureUnit, FeatureValueKind},
         model::{classical::dense_matrix, runtime::ClassicalKind, trainer::ValidationSpec},
@@ -807,9 +808,8 @@ mod tests {
         i64::try_from(i).expect("fixture row index fits i64")
     }
 
-    fn fixture_ts(offset_secs: i64) -> chrono::DateTime<chrono::Utc> {
-        chrono::Utc
-            .timestamp_opt(1_700_000_000 + offset_secs, 0)
+    fn fixture_ts(offset_secs: i64) -> DateTime<Utc> {
+        Utc.timestamp_opt(1_700_000_000 + offset_secs, 0)
             .single()
             .expect("ts")
     }
@@ -822,7 +822,7 @@ mod tests {
         for i in 0..rows {
             let high = i % 2 == 0;
             let f0 = if high { dec!(0.9) } else { dec!(0.1) };
-            let f1 = rust_decimal::Decimal::from(i % 5) / rust_decimal::Decimal::from(5);
+            let f1 = Decimal::from(i % 5) / Decimal::from(5);
             cells.push(vec![
                 ModelInputCell::Observed(f0),
                 ModelInputCell::Observed(f1),

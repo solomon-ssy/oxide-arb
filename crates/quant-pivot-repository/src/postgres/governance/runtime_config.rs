@@ -1,24 +1,19 @@
 use std::collections::BTreeMap;
 
-use crate::{
-    postgres::{
-        error,
-        governance::{config_activity, config_resources},
-        primitives,
-    },
-    traits::PolicyRepository,
-};
 use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{
-        ActivePolicyResourceInfo, ConfigActivityInfo, ConfigResourceInventoryInfo,
-        DecisionPolicySnapshotInfo, DecisionPolicySnapshotOptionInfo,
-        LifecycleSchemaVerificationPort, NewDecisionPolicySnapshot, NewPolicyActivation,
-        NewPolicyApproval, NewPolicyProfileArtifact, NewPolicyRevision, NewProductionBaseline,
-        NewProductionEvidence, PolicyActivationCommit, PolicyActivationInfo,
-        PolicyActivationOutcome, PolicyApprovalInfo, PolicyRevisionInfo, ProductionBaselineInfo,
-        ProductionEvidenceArtifactVerificationPort, ProductionEvidenceInfo, RecordPolicyApproval,
+        governance::{
+            ActivePolicyResourceInfo, ConfigActivityInfo, ConfigResourceInventoryInfo,
+            DecisionPolicySnapshotInfo, DecisionPolicySnapshotOptionInfo,
+            NewDecisionPolicySnapshot, NewPolicyActivation, NewPolicyApproval,
+            NewPolicyProfileArtifact, NewPolicyRevision, NewProductionBaseline,
+            NewProductionEvidence, PolicyActivationCommit, PolicyActivationInfo,
+            PolicyActivationOutcome, PolicyApprovalInfo, PolicyRevisionInfo,
+            ProductionBaselineInfo, ProductionEvidenceInfo, RecordPolicyApproval,
+        },
+        ports::{LifecycleSchemaVerificationPort, ProductionEvidenceArtifactVerificationPort},
     },
     entities::{
         decision_policy_snapshot::{
@@ -38,7 +33,7 @@ use quant_pivot_models::{
             Model as ActivationGuardModel,
         },
         policy_approval::{
-            self, Column as ApprovalColumn, Entity as ApprovalEntity, Relation as ApprovalRelation,
+            Column as ApprovalColumn, Entity as ApprovalEntity, Relation as ApprovalRelation,
         },
         policy_profile_artifact::{
             Column as ProfileArtifactColumn, Entity as ProfileArtifactEntity,
@@ -69,10 +64,19 @@ use quant_pivot_models::{
     },
 };
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, Condition, ConnectionTrait, DatabaseConnection, EntityTrait,
-    ExprTrait, IntoActiveModel, JoinType, QueryFilter, QueryOrder, QuerySelect, RelationTrait, Set,
-    TransactionTrait, TryInsertResult,
+    ActiveModelTrait, ColumnTrait, Condition, ConnectionTrait, DatabaseConnection,
+    DatabaseTransaction, EntityTrait, ExprTrait, IntoActiveModel, JoinType, QueryFilter,
+    QueryOrder, QuerySelect, RelationTrait, Set, TransactionTrait, TryInsertResult,
     sea_query::{Expr, Query, extension::postgres::PgExpr},
+};
+
+use crate::{
+    postgres::{
+        error,
+        governance::{config_activity, config_resources},
+        primitives,
+    },
+    traits::PolicyRepository,
 };
 
 const POLICY_ACTIVATION_GUARD_ID: i16 = 1;
@@ -316,7 +320,7 @@ impl PgPolicyRepository {
 }
 
 pub(crate) async fn acquire_activation_lock(
-    transaction: &sea_orm::DatabaseTransaction,
+    transaction: &DatabaseTransaction,
 ) -> Result<ActivationGuardModel, StorageError> {
     ActivationGuardEntity::find_by_id(POLICY_ACTIVATION_GUARD_ID)
         .lock_exclusive()
@@ -332,7 +336,7 @@ pub(crate) async fn acquire_activation_lock(
 }
 
 async fn verify_production_evidence_refs(
-    transaction: &sea_orm::DatabaseTransaction,
+    transaction: &DatabaseTransaction,
     baseline: &NewProductionBaseline,
     artifact_verification: &dyn ProductionEvidenceArtifactVerificationPort,
 ) -> Result<(), StorageError> {
@@ -1006,7 +1010,7 @@ impl PolicyRepository for PgPolicyRepository {
             .join(JoinType::LeftJoin, ApprovalRelation::Activation.def())
             .join(JoinType::InnerJoin, ApprovalRelation::Revision.def())
             .filter(ActivationColumn::PolicyActivationId.is_null())
-            .filter(policy_approval::Column::Decision.eq(PolicyApprovalDecision::Approved))
+            .filter(ApprovalColumn::Decision.eq(PolicyApprovalDecision::Approved))
             .filter(RevisionColumn::Status.eq(PolicyRevisionStatus::Validated))
             .filter(
                 Expr::col((RevisionEntity, RevisionColumn::ResourceKind))
@@ -1030,17 +1034,17 @@ impl PolicyRepository for PgPolicyRepository {
             .filter(config_resources::approved_base_generation().eq(active_generation))
             .filter(
                 Condition::any()
-                    .add(policy_approval::Column::ExpiresAt.is_null())
+                    .add(ApprovalColumn::ExpiresAt.is_null())
                     .add(
                         Expr::col((ApprovalEntity, ApprovalColumn::ExpiresAt))
                             .gt(Expr::current_timestamp()),
                     ),
             );
         if let Some(kind) = kind {
-            query = query.filter(policy_approval::Column::ResourceKind.eq(kind));
+            query = query.filter(ApprovalColumn::ResourceKind.eq(kind));
         }
         query
-            .order_by_desc(policy_approval::Column::DecidedAt)
+            .order_by_desc(ApprovalColumn::DecidedAt)
             .limit(limit)
             .all(&self.db)
             .await

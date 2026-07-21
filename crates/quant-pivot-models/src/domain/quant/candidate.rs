@@ -18,18 +18,19 @@
 //!
 //! [`MarketRegistry`]: https://docs.rs/quant-pivot-core
 
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+
 use crate::{
     enums::{common::MarketCategory, market::MarketStatus},
     types::{EventId, MarketId, Price, TokenId, Usd},
 };
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
 
 /// Frozen domain-plane availability for one candidate at selection time.
 ///
 /// Produced by the core-side projector from the category → family routing
 /// table, the linkage ledger, and domain ingest health, so the selection
-/// filters stay pure functions over the frozen candidate (Phase 11.2.2 §3.8).
+/// filters stay pure functions over the frozen candidate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DomainAvailability {
@@ -108,7 +109,7 @@ pub struct MarketCandidate {
     /// This is a process-global measurement shared by all candidates in a round.
     /// `None` only when [`MarketDataHealth::NotApplicable`].
     pub ingest_lag_ms: Option<u64>,
-    /// Domain-plane availability at `decision_at` (Phase 11.2.2 §3.8).
+    /// Domain-plane availability at `decision_at`.
     pub domain_availability: DomainAvailability,
     /// The decision instant at which this candidate world was frozen.
     ///

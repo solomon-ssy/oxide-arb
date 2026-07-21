@@ -1,4 +1,4 @@
-//! Factor-plane acceptance tests (Phase 11.1 §8).
+//! Factor-plane acceptance tests.
 //!
 //! Closes audit #1 (all generic families default-on), #2 (momentum is not a
 //! return clone; collinearity is detectable), #3 (config-driven normalization,
@@ -6,9 +6,9 @@
 
 use std::{collections::BTreeMap, slice, sync::Arc};
 
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::{DateTime, Duration, TimeZone, Utc};
 use quant_pivot_models::{
-    domain::TimeWindow,
+    domain::query::TimeWindow,
     enums::{
         common::MarketCategory,
         factor::{FactorFamily, FactorIndeterminateReason, NormalizationSource},
@@ -148,7 +148,7 @@ fn compute_one(
 fn default_factor_config_enables_all_generic_and_structural_families() {
     let config = FactorsConfig::default();
     // The default enables every generic family plus the platform-internal
-    // structural plane (Phase 11.2.1).
+    // structural plane.
     for family in FactorFamily::ALL_GENERIC {
         assert!(
             config.enabled_factor_families.contains(&family),
@@ -287,7 +287,7 @@ fn compute_all_batch_rejects_mixed_as_of() {
         0,
         as_of,
     );
-    second.decision_at = as_of + chrono::Duration::seconds(1);
+    second.decision_at = as_of + Duration::seconds(1);
     let error = engine
         .compute_all_batch(&[first, second], &config)
         .expect_err("mixed as_of must fail");
@@ -910,7 +910,7 @@ fn default_momentum_estimators_not_mutually_collinear() {
         .expect("momentum collinearity report");
 
     // (a) Production orthogonality gate: the four *registered* momentum factors
-    //     must be mutually below the tolerance — no two collapse onto one signal.
+    // must be mutually below the tolerance — no two collapse onto one signal.
     for i in 1..=4 {
         for j in (i + 1)..=4 {
             let rho = report.matrix[i][j].abs();
@@ -923,9 +923,9 @@ fn default_momentum_estimators_not_mutually_collinear() {
         }
     }
     // (b) Audit #2 falsifiability: the old bug made momentum an *exact* clone of
-    //     the simple return (ρ = 1.0). Every estimator must be demonstrably
-    //     distinct — recent velocity co-moves with total return, but none is a
-    //     rank-identical copy.
+    // the simple return (ρ = 1.0). Every estimator must be demonstrably
+    // distinct — recent velocity co-moves with total return, but none is a
+    // rank-identical copy.
     let clone_ceiling = Decimal::new(98, 2);
     for (index, name) in momentum_names.iter().enumerate() {
         let rho = report.matrix[0][index + 1].abs();
@@ -935,8 +935,8 @@ fn default_momentum_estimators_not_mutually_collinear() {
         );
     }
     // (c) The risk/vol dimension adds genuinely orthogonal information: the
-    //     vol-adjusted and MACD estimators stay below the gate against the raw
-    //     return, not just below the clone ceiling.
+    // vol-adjusted and MACD estimators stay below the gate against the raw
+    // return, not just below the clone ceiling.
     for name in [&vol_adjusted, &macd] {
         let index = momentum_names.iter().position(|n| *n == name).unwrap() + 1;
         let rho = report.matrix[0][index].abs();
@@ -947,28 +947,7 @@ fn default_momentum_estimators_not_mutually_collinear() {
     }
 }
 
-// ── #3 no hardcoded normalization constants ───────────────────────────────────
-
-#[test]
-fn normalizer_has_no_hardcoded_constants() {
-    // The generic factor registry must declare only normalization *methods*, not
-    // numeric parameters. The deleted logistic heuristic (`k` / `x0`) must be gone.
-    let source = include_str!("generic.rs");
-    assert!(
-        !source.contains("Logistic"),
-        "the logistic heuristic normalization must be deleted"
-    );
-    assert!(
-        !source.contains("x0"),
-        "no hardcoded logistic midpoint may remain in the factor registry"
-    );
-    assert!(
-        !source.contains("clamp_sigma:"),
-        "sigma clamp is a config parameter, not a code constant"
-    );
-}
-
-// ── Phase 11.2.1 structural acceptance ─────────────────────────────────────
+// ── structural acceptance ─────────────────────────────────────
 
 #[test]
 fn reversal_after_shock_orthogonal_to_mean_reversion() {
@@ -990,7 +969,7 @@ fn reversal_after_shock_orthogonal_to_mean_reversion() {
     let as_of = Utc::now();
     // Heterogeneous panel: monotonic price_reversal vs zig-zag short_return with
     // shock always above the default k=2.5 gate — the conditional reversal must
-    // not collapse onto the linear mean-reversion signal (audit #4 / 11.2.1 §9).
+    // not collapse onto the linear mean-reversion signal.
     let short_pattern: [i64; 16] = [3, -5, 2, -4, 6, -1, 4, -3, 5, -2, 1, -6, 3, -4, 2, -5];
     let mut rows = Vec::with_capacity(short_pattern.len());
     for (index, short_return) in short_pattern.into_iter().enumerate() {

@@ -122,7 +122,7 @@ pub struct PlannedRecommendation {
     pub candidate: SignalCandidate,
     /// Strong-typed sizing decision.
     pub sizing: SizingPlan,
-    /// Strong-typed risk envelope (flags finalized by the 04.2 composer).
+    /// Strong-typed risk envelope (flags finalized by the composer).
     pub risk_envelope: RiskEnvelope,
     /// Portfolio-constraint-adjusted ranking score.
     pub risk_adjusted_score: Probability,
@@ -202,7 +202,7 @@ impl PortfolioPlanner for DefaultPortfolioPlanner {
         )?;
 
         // 2. Allocate over the account's current exposure net + available cash
-        //    via the injected LP/MILP optimizer (global TopN + capital choice).
+        // via the injected LP/MILP optimizer (global TopN + capital choice).
         let allocation = self.allocator.allocate(&AllocationInput {
             candidates: metas,
             caps: input.caps,
@@ -217,9 +217,9 @@ impl PortfolioPlanner for DefaultPortfolioPlanner {
         // 3. Classify allocations: ranked survivors vs min-size / cap rejections.
         let mut scored = classify_allocations(allocation, &mut sized, input.caps, &mut rejected);
 
-        // 4. Stable rank (parent §21.5). TopN inclusion is enforced by the LP
-        //    allocator (MILP cardinality or relaxation recover), so every funded
-        //    survivor is published — no second truncation pass.
+        // 4. Stable rank. TopN inclusion is enforced by the LP
+        // allocator (MILP cardinality or relaxation recover), so every funded
+        // survivor is published — no second truncation pass.
         scored.sort_by(rank_order);
         let mut planned: Vec<PlannedRecommendation> = Vec::new();
         let mut allocated_total = Usd::ZERO;
@@ -243,7 +243,7 @@ impl PortfolioPlanner for DefaultPortfolioPlanner {
     }
 }
 
-/// Phase 1: size each candidate, routing rejections out and returning the
+/// Stage 1: size each candidate, routing rejections out and returning the
 /// allocator metas plus a lookup from candidate id to its sizing + metadata.
 type SizedLookup<'a> = BTreeMap<String, (SizingSuggestion, &'a PlanCandidate<'a>)>;
 
@@ -261,7 +261,7 @@ fn size_candidates<'a>(
     for plan_candidate in candidates {
         let edge_half_width = if let Some(resolved) = calibration {
             // The reliability report's buckets partition the *calibrated*
-            // probability axis (Phase 11.3 ECE fix), not the raw composite
+            // probability axis, not the raw composite
             // score — look up the bucket via `resolved.calibrate(..)`, the
             // same P(win) the return model itself derives from this score.
             let p_win = resolved
@@ -310,7 +310,7 @@ fn size_candidates<'a>(
     Ok((metas, sized))
 }
 
-/// Phase 3: classify each allocation into a ranked survivor or a rejection.
+/// Stage 3: classify each allocation into a ranked survivor or a rejection.
 fn classify_allocations<'a>(
     allocation: AllocationOutput,
     sized: &mut SizedLookup<'a>,
@@ -409,7 +409,7 @@ fn align_allocation_to_executable_tier(
     }
 }
 
-/// Stable ranking order (parent §21.5): risk-adjusted desc → composite desc →
+/// Stable ranking order: risk-adjusted desc → composite desc →
 /// liquidity score desc → market id asc → token id asc.
 fn rank_order(a: &Scored<'_>, b: &Scored<'_>) -> Ordering {
     b.risk_adjusted

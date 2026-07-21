@@ -2,10 +2,10 @@
 //!
 //! [`OrderbookSnapshot`] is API-specific because it carries wire-format fields
 //! (`hash`) that only the CLOB REST layer cares about. For the canonical
-//! [`BookLevel`](quant_pivot_models::domain::BookLevel) type, import directly
-//! from `quant_pivot_models::domain`.
+//! [`BookLevel`](quant_pivot_models::domain::market::BookLevel) type, import it
+//! directly from `quant_pivot_models::domain::market`.
 
-use quant_pivot_models::{domain::BookLevel, types::TokenId};
+use quant_pivot_models::{domain::market::BookLevel, types::TokenId};
 use serde::{Deserialize, Serialize};
 
 /// A full orderbook snapshot from the REST API.

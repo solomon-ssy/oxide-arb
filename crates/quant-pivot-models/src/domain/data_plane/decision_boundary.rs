@@ -230,9 +230,10 @@ fn checked_duration(seconds: u64, field: &'static str) -> QuantResult<Duration> 
 #[cfg(test)]
 mod tests {
     use chrono::{Duration, TimeZone, Utc};
+    use proptest::{prop_assert_eq, proptest};
 
     use super::{DecisionClock, DecisionSource};
-    use crate::domain::DecisionBoundary;
+    use crate::domain::data_plane::DecisionBoundary;
 
     #[test]
     fn derives_global_cutoff_once() {
@@ -367,6 +368,51 @@ mod tests {
                 original_at - original.cutoff_for(source),
                 rebased_at - rebased.cutoff_for(source)
             );
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn serving_and_replay_apply_each_governed_lag_exactly_once(
+            epoch_secs in 946_684_800_i64..2_524_608_000_i64,
+            rebase_delta_secs in -604_800_i64..604_800_i64,
+            knowledge_lag_secs in 0_u32..1_000_000_u32,
+            crypto_lag_secs in 0_u32..1_000_000_u32,
+            weather_lag_secs in 0_u32..1_000_000_u32,
+        ) {
+            let decision_at = Utc
+                .timestamp_opt(epoch_secs, 0)
+                .single()
+                .expect("generated timestamp is representable");
+            let rebased_at = decision_at + Duration::seconds(rebase_delta_secs);
+            let boundary = DecisionClock::new(u64::from(knowledge_lag_secs))
+                .serving_boundary(
+                    decision_at,
+                    u64::from(crypto_lag_secs),
+                    u64::from(weather_lag_secs),
+                )
+                .expect("generated lags are representable");
+            let rebased = boundary
+                .rebased(rebased_at)
+                .expect("generated rebase is representable");
+
+            for (source, source_lag_secs) in [
+                (DecisionSource::Catalog, 0_u32),
+                (DecisionSource::Book, 0_u32),
+                (DecisionSource::Microstructure, 0_u32),
+                (DecisionSource::TradeTape, 0_u32),
+                (DecisionSource::Linkage, 0_u32),
+                (DecisionSource::DomainCrypto, crypto_lag_secs),
+                (DecisionSource::DomainWeather, weather_lag_secs),
+            ] {
+                let effective_lag = Duration::seconds(i64::from(
+                    knowledge_lag_secs.max(source_lag_secs),
+                ));
+                prop_assert_eq!(boundary.cutoff_for(source), decision_at - effective_lag);
+                prop_assert_eq!(rebased.cutoff_for(source), rebased_at - effective_lag);
+            }
+            prop_assert_eq!(boundary.per_source_cutoffs().len(), 7);
+            prop_assert_eq!(rebased.per_source_cutoffs().len(), 7);
         }
     }
 }

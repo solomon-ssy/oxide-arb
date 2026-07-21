@@ -2,7 +2,10 @@
 
 use alloy::primitives::{Address, B256, address};
 
-use super::{order_filled_v1, order_filled_v2};
+use super::{
+    order_filled_v1::ORDER_FILLED_TOPIC,
+    order_filled_v2::ORDER_FILLED_TOPIC as ORDER_FILLED_V2_TOPIC,
+};
 
 /// Exchange contract generation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -36,7 +39,7 @@ pub const CTF_EXCHANGE_V1: ExchangeContract = ExchangeContract {
     key: "ctf_v1",
     version: ExchangeVersion::V1,
     address: address!("0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E"),
-    topic: order_filled_v1::ORDER_FILLED_TOPIC,
+    topic: ORDER_FILLED_TOPIC,
     bootstrap_block: 57_000_000,
 };
 
@@ -45,7 +48,7 @@ pub const NEG_RISK_EXCHANGE_V1: ExchangeContract = ExchangeContract {
     key: "neg_risk_v1",
     version: ExchangeVersion::V1,
     address: address!("0xC5d563A36AE78145C45a50134d48A1215220f80a"),
-    topic: order_filled_v1::ORDER_FILLED_TOPIC,
+    topic: ORDER_FILLED_TOPIC,
     bootstrap_block: 57_000_000,
 };
 
@@ -54,7 +57,7 @@ pub const CTF_EXCHANGE_V2: ExchangeContract = ExchangeContract {
     key: "ctf_v2",
     version: ExchangeVersion::V2,
     address: address!("0xE111180000d2663C0091e4f400237545B87B996B"),
-    topic: order_filled_v2::ORDER_FILLED_TOPIC,
+    topic: ORDER_FILLED_V2_TOPIC,
     bootstrap_block: 84_902_353,
 };
 
@@ -63,7 +66,7 @@ pub const NEG_RISK_EXCHANGE_V2: ExchangeContract = ExchangeContract {
     key: "neg_risk_v2",
     version: ExchangeVersion::V2,
     address: address!("0xe2222d279d744050d28e00520010520000310F59"),
-    topic: order_filled_v2::ORDER_FILLED_TOPIC,
+    topic: ORDER_FILLED_V2_TOPIC,
     bootstrap_block: 84_902_353,
 };
 

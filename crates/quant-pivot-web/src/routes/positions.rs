@@ -1,8 +1,14 @@
-//! System lot position ledger read API (per-intent R3 lots).
+//! System lot position ledger read API with per-intent lots.
 
-use actix_web::{http::Method, web};
+use actix_web::{
+    http::Method,
+    web::{Data, Path, Query},
+};
 use quant_pivot_models::{
-    domain::{OrderIntentView, Paginated, PositionDetailView, PositionListQuery, PositionView},
+    domain::{
+        api::{OrderIntentView, PositionDetailView, PositionListQuery, PositionView},
+        pagination::Paginated,
+    },
     enums::rbac::{Operation, ResourceType},
     types::PositionId,
 };
@@ -36,8 +42,8 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
 }
 
 async fn list_positions(
-    state: web::Data<AppState>,
-    query: web::Query<PositionListQuery>,
+    state: Data<AppState>,
+    query: Query<PositionListQuery>,
 ) -> Result<WebResponse<Paginated<PositionView>>, WebError> {
     let page = state
         .execution_read
@@ -47,8 +53,8 @@ async fn list_positions(
 }
 
 async fn get_position(
-    state: web::Data<AppState>,
-    id: web::Path<PositionId>,
+    state: Data<AppState>,
+    id: Path<PositionId>,
 ) -> Result<WebResponse<PositionDetailView>, WebError> {
     let summary = state
         .execution_read

@@ -1,8 +1,10 @@
 //! Content-addressed normalized Gamma market objects.
 
-use crate::types::{CatalogMarketObjectId, ContentHash, ExternalJsonDocument};
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
+
+use super::catalog_market_change;
+use crate::types::{CatalogMarketObjectId, ContentHash, ExternalJsonDocument};
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -17,7 +19,7 @@ pub struct Model {
     pub created_at: DateTime<Utc>,
 
     #[sea_orm(has_many, relation_enum = "MarketChange")]
-    pub market_change: HasMany<super::catalog_market_change::Entity>,
+    pub market_change: HasMany<catalog_market_change::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

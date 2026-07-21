@@ -4,8 +4,9 @@
 //! specialized for WebSocket shard lifecycle (unlimited retries by default,
 //! shard-aware logging).
 
-use crate::infra::retry::{RetryController, RetryDecision, RetryPolicy};
 use std::time::Duration;
+
+use crate::infra::retry::{RetryController, RetryDecision, RetryPolicy};
 
 /// Reconnection policy for a WebSocket shard.
 ///

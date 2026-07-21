@@ -1,14 +1,12 @@
 //! Edge-triggered health alert dispatch — suppresses startup noise and emits
 //! recovery notifications when subsystems return to healthy.
 
-use crate::{
-    observability::alert_dispatcher::{Alert, AlertDispatcher},
-    service::system_status_nudge::SystemStatusNudge,
-};
+use std::{collections::HashMap, fmt::Display};
+
 use chrono::Utc;
 use parking_lot::Mutex;
 use quant_pivot_models::{
-    domain::{
+    domain::governance::{
         HealthReport, OperationalPhase, SubsystemCheckStatus, SubsystemHealth,
         WS_MARKET_DATA_STALE_THRESHOLD_MS,
     },
@@ -17,7 +15,11 @@ use quant_pivot_models::{
         quant::QuantRuntimeMode,
     },
 };
-use std::{collections::HashMap, fmt::Display};
+
+use crate::{
+    observability::alert_dispatcher::{Alert, AlertDispatcher},
+    service::system_status_nudge::SystemStatusNudge,
+};
 
 /// Prior probe outcome per subsystem name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -171,20 +173,22 @@ pub fn evaluate_ws_probe(
 
 #[cfg(test)]
 mod tests {
-    use super::{HealthAlertState, ProbeOutcome, evaluate_ws_probe, ws_probe_skipped};
-    use crate::{
-        observability::alert_dispatcher::AlertDispatcher,
-        service::system_status_nudge::SystemStatusNudge,
-    };
+    use std::sync::{Arc, Mutex};
+
     use chrono::Utc;
     use quant_pivot_models::{
-        domain::{
+        domain::governance::{
             HealthReport, OperationalPhase, SubsystemCheckStatus, SubsystemHealth,
             WS_MARKET_DATA_STALE_THRESHOLD_MS,
         },
         enums::quant::QuantRuntimeMode,
     };
-    use std::sync::{Arc, Mutex};
+
+    use super::{HealthAlertState, ProbeOutcome, evaluate_ws_probe, ws_probe_skipped};
+    use crate::{
+        observability::alert_dispatcher::AlertDispatcher,
+        service::system_status_nudge::SystemStatusNudge,
+    };
 
     #[test]
     fn ws_skipped_during_warming_phases() {

@@ -1,20 +1,25 @@
 //! Postgres implementation of [`UserRepository`].
 
 use chrono::Utc;
-use quant_pivot_error::storage::{StorageError, entity};
+use quant_pivot_error::storage::{StorageError, entity::USER};
 use quant_pivot_models::{
     domain::{
-        ChangeUserPassword, NewUser, PageWindow, Paginated, UserInfo, UserPageQuery, UserPatch,
+        api::UserPageQuery,
+        pagination::{PageWindow, Paginated},
+        rbac::{ChangeUserPassword, NewUser, UserInfo, UserPatch},
     },
-    entities::{user, user_role},
+    entities::{
+        user::{Column, Entity},
+        user_role::{Column as UserRoleColumn, Entity as UserRoleEntity},
+    },
     enums::rbac::UserStatus,
     types::UserId,
 };
 use sea_orm::{
     ActiveModelTrait,
     ActiveValue::Set,
-    ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait, IntoActiveModel, QueryFilter,
-    QueryOrder, TransactionTrait,
+    ColumnTrait, ConnectionTrait, DatabaseConnection, DbErr, EntityTrait, IntoActiveModel,
+    QueryFilter, QueryOrder, TransactionTrait,
     sea_query::{Condition, Expr, extension::postgres::PgExpr},
 };
 
@@ -43,8 +48,8 @@ async fn do_find_by_username(
     db: &impl ConnectionTrait,
     username: &str,
 ) -> Result<Option<UserInfo>, StorageError> {
-    Ok(user::Entity::find()
-        .filter(user::Column::Username.eq(username))
+    Ok(Entity::find()
+        .filter(Column::Username.eq(username))
         .one(db)
         .await
         .map_err(StorageError::from)?
@@ -52,20 +57,20 @@ async fn do_find_by_username(
 }
 
 async fn do_find_by_id(db: &impl ConnectionTrait, id: &UserId) -> Result<UserInfo, StorageError> {
-    user::Entity::find_by_id(id.clone())
+    Entity::find_by_id(id.clone())
         .one(db)
         .await
         .map_err(StorageError::from)?
         .map(Into::into)
-        .ok_or_else(|| error::not_found(entity::USER, id))
+        .ok_or_else(|| error::not_found(USER, id))
 }
 
 async fn do_create(db: &impl ConnectionTrait, new: NewUser) -> Result<UserInfo, StorageError> {
     let username = new.username.clone();
-    let model = user::Entity::insert(new.into_active_model())
+    let model = Entity::insert(new.into_active_model())
         .exec_with_returning(db)
         .await
-        .map_err(|error| error::map_unique(error, entity::USER, &username))?;
+        .map_err(|error| error::map_unique(error, USER, &username))?;
     Ok(model.into())
 }
 
@@ -79,7 +84,7 @@ async fn do_update(
     active.updated_at = Set(Utc::now());
     match active.update(db).await {
         Ok(model) => Ok(model.into()),
-        Err(sea_orm::DbErr::RecordNotUpdated) => Err(error::not_found(entity::USER, id)),
+        Err(DbErr::RecordNotUpdated) => Err(error::not_found(USER, id)),
         Err(error) => Err(StorageError::from(error)),
     }
 }
@@ -89,14 +94,14 @@ async fn do_change_status(
     id: &UserId,
     status: UserStatus,
 ) -> Result<(), StorageError> {
-    let result = user::Entity::update_many()
-        .col_expr(user::Column::Status, primitives::enum_value(&status))
-        .filter(user::Column::Id.eq(id.clone()))
+    let result = Entity::update_many()
+        .col_expr(Column::Status, primitives::enum_value(&status))
+        .filter(Column::Id.eq(id.clone()))
         .exec(db)
         .await
         .map_err(StorageError::from)?;
     if result.rows_affected == 0 {
-        return Err(error::not_found(entity::USER, id));
+        return Err(error::not_found(USER, id));
     }
     Ok(())
 }
@@ -106,17 +111,14 @@ async fn do_change_password(
     id: &UserId,
     change: ChangeUserPassword,
 ) -> Result<(), StorageError> {
-    let result = user::Entity::update_many()
-        .col_expr(
-            user::Column::PasswordHash,
-            Expr::value(change.password_hash),
-        )
-        .filter(user::Column::Id.eq(id.clone()))
+    let result = Entity::update_many()
+        .col_expr(Column::PasswordHash, Expr::value(change.password_hash))
+        .filter(Column::Id.eq(id.clone()))
         .exec(db)
         .await
         .map_err(StorageError::from)?;
     if result.rows_affected == 0 {
-        return Err(error::not_found(entity::USER, id));
+        return Err(error::not_found(USER, id));
     }
     Ok(())
 }
@@ -124,20 +126,20 @@ async fn do_change_password(
 async fn do_delete(db: &DatabaseConnection, id: &UserId) -> Result<(), StorageError> {
     let txn = db.begin().await.map_err(StorageError::from)?;
 
-    user_role::Entity::delete_many()
-        .filter(user_role::Column::UserId.eq(id.clone()))
+    UserRoleEntity::delete_many()
+        .filter(UserRoleColumn::UserId.eq(id.clone()))
         .exec(&txn)
         .await
         .map_err(StorageError::from)?;
     sync::do_revoke_all_roles_for_user(&txn, id).await?;
 
-    let result = user::Entity::delete_by_id(id.clone())
+    let result = Entity::delete_by_id(id.clone())
         .exec(&txn)
         .await
         .map_err(StorageError::from)?;
     if result.rows_affected == 0 {
         txn.rollback().await.map_err(StorageError::from)?;
-        return Err(error::not_found(entity::USER, id));
+        return Err(error::not_found(USER, id));
     }
 
     txn.commit().await.map_err(StorageError::from)?;
@@ -146,13 +148,13 @@ async fn do_delete(db: &DatabaseConnection, id: &UserId) -> Result<(), StorageEr
 
 fn page_condition(query: &UserPageQuery) -> Condition {
     let mut condition =
-        Condition::all().add_option(query.status.map(|status| user::Column::Status.eq(status)));
+        Condition::all().add_option(query.status.map(|status| Column::Status.eq(status)));
     if let Some(keyword) = non_empty(query.keyword.as_deref()) {
         let pattern = format!("%{keyword}%");
         condition = condition.add(
             Condition::any()
-                .add(Expr::col(user::Column::Username).ilike(pattern.clone()))
-                .add(Expr::col(user::Column::Nickname).ilike(pattern)),
+                .add(Expr::col(Column::Username).ilike(pattern.clone()))
+                .add(Expr::col(Column::Nickname).ilike(pattern)),
         );
     }
     condition
@@ -163,9 +165,9 @@ async fn do_page(
     query: UserPageQuery,
 ) -> Result<Paginated<UserInfo>, StorageError> {
     paginate_mapped(
-        user::Entity::find()
+        Entity::find()
             .filter(page_condition(&query))
-            .order_by_desc(user::Column::CreatedAt),
+            .order_by_desc(Column::CreatedAt),
         db,
         PageWindow::from_query(&query),
         Into::into,

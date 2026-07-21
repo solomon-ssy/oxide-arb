@@ -3,14 +3,14 @@
 //!
 //! # Lifecycle & recovery
 //!
-//! On start the worker runs a **boot recovery sweep** ([`ResearchJobRepository::reclaim_orphaned`]):
+//! On start the worker runs a **boot recovery sweep** (`reclaim_orphaned`):
 //! any `running` row whose lease is owned by a dead epoch or has expired is
 //! re-queued (bounded by `recovery_attempt`) or quarantined to `failed`. During
 //! steady state a per-job heartbeat renews the lease and doubles as a cooperative
 //! stop signal (a job that is no longer `running` under this owner is dropped).
 //! A graceful shutdown stops leasing, cooperatively drains in-flight runs
 //! (bounded by `shutdown_drain_secs`), and then explicitly re-queues this
-//! owner's still-`running` rows ([`ResearchJobRepository::requeue_inflight`]) so
+//! owner's still-`running` rows (`requeue_inflight`) so
 //! the next epoch re-leases them immediately rather than after a lease-expiry
 //! wait. Combined with pre-assigned result ids + idempotent result writes, this
 //! makes execution effectively-once across restarts.
@@ -27,15 +27,19 @@ use quant_pivot_models::{
     clickhouse::QuantFeatureParityEventRow,
     config::ResearchJobsConfig,
     domain::{
-        BacktestPort, CalibrationArtifactFitPort, CpcvBacktestPort, FeatureParityExecutionPort,
-        JobProgressSink, ModelCalibrationFitPort, ModelTrainingPort, ResearchJobError,
-        ResearchJobInfo, ResearchJobProgress, ResearchJobResultRef, TradePolicyPort,
-        TrainingDatasetPort,
+        ports::{
+            BacktestPort, CalibrationArtifactFitPort, CpcvBacktestPort, FeatureParityExecutionPort,
+            ModelCalibrationFitPort, ModelTrainingPort, TradePolicyPort, TrainingDatasetPort,
+        },
+        quant::{JobProgressSink, ResearchJobInfo, ResearchJobResultRef},
     },
     enums::quant::{
         ResearchJobErrorCode, ResearchJobKind, ResearchJobResultKind, ResearchJobStatus,
     },
-    types::{DatasetCoverage, ResearchJobId, ResearchJobParams, WorkerId},
+    types::{
+        DatasetCoverage, ResearchJobError, ResearchJobId, ResearchJobParams, ResearchJobProgress,
+        WorkerId,
+    },
 };
 use quant_pivot_repository::{
     clickhouse::{ChFactWriter, ChFeatureParityEventRepository},
@@ -45,7 +49,11 @@ use quant_pivot_repository::{
         ServingEvidenceRepository, TradePolicyRepository,
     },
 };
-use tokio::{sync::mpsc, task::JoinSet, time::interval};
+use tokio::{
+    sync::{mpsc, mpsc::UnboundedSender},
+    task::JoinSet,
+    time::interval,
+};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
@@ -82,7 +90,7 @@ const ALL_KINDS: [ResearchJobKind; 9] = [
 ];
 
 fn lease_deadline(lease_ttl_secs: i64) -> DateTime<Utc> {
-    Utc::now() + chrono::Duration::seconds(lease_ttl_secs)
+    Utc::now() + ChronoDuration::seconds(lease_ttl_secs)
 }
 
 /// Terminal outcome of one job execution.
@@ -109,7 +117,7 @@ struct ResearchJobExecutor {
 /// `.await`). The async supervisor ([`run_one`]) drains the channel, throttles,
 /// persists a heartbeat (renewing the lease), and pushes a WebSocket update.
 struct ChannelProgressSink {
-    tx: mpsc::UnboundedSender<ResearchJobProgress>,
+    tx: UnboundedSender<ResearchJobProgress>,
 }
 
 impl JobProgressSink for ChannelProgressSink {
@@ -487,7 +495,7 @@ async fn run_worker(
 
     // Graceful shutdown: leasing already stopped (the loop broke on `token`).
     // Cooperatively **drain** in-flight runs rather than aborting them — each
-    // `run_one` observes `shutdown.cancelled()` and unwinds at its next section
+    // `run_one` observes `shutdown.cancelled` and unwinds at its next section
     // boundary, deliberately leaving its row `running`. Bound the wait so a
     // stuck build cannot stall the deploy; then explicitly re-queue this owner's
     // still-`running` rows so the next epoch re-leases them immediately, instead

@@ -1,4 +1,4 @@
-//! Postgres-backed execution-submission repository (Phase 05.4 — real money).
+//! PostgreSQL-backed, money-critical execution-submission repository.
 //!
 //! Every method owns exactly one transaction spanning the execution order,
 //! order intent, capital allocation, position ledger, recommendation, and
@@ -6,6 +6,47 @@
 //! a submission's money state can never partially apply. Venue network I/O
 //! happens between [`create_entry_order_and_lock_capital`] and
 //! [`record_submission_result`] — never inside a transaction.
+
+use chrono::{DateTime, Utc};
+use quant_pivot_error::storage::{
+    StorageError,
+    entity::{
+        QUANT_EXECUTION_ORDER, QUANT_ORDER_INTENT, QUANT_RECOMMENDATION,
+        QUANT_RECOMMENDATION_REPORT,
+    },
+};
+use quant_pivot_models::{
+    domain::quant::{
+        EntryConditionClaim, EntryConditionInstanceInfo, ExecutionOrderInfo, ExitLedgerWrite,
+        NewExecutionOrder, NewReconciliation, OrderIntentInfo, ReconciliationLedgerWrite,
+        SubmissionLedgerWrite,
+    },
+    entities::{
+        quant_execution_order::{Column, Entity as QuantExecutionOrderEntity},
+        quant_order_intent::Model,
+        quant_recommendation::Entity,
+        quant_recommendation_report::Entity as QuantRecommendationReportEntity,
+        quant_reconciliation::{
+            Column as QuantReconciliationColumn, Entity as QuantReconciliationEntity,
+        },
+    },
+    enums::{
+        execution::{ExecutionOrderPhase, ExitReason, ExitState},
+        quant::{
+            ExecutionOrderState, OrderIntentStatus, RecommendationReportStatus,
+            RecommendationStatus, ReportKind,
+        },
+    },
+    types::{
+        ExecutionOrderId, ExitReinferenceObservation, FeatureParityStateId, OrderIntentId,
+        PendingScaleOut, Price, RecommendationId, RecommendationReportId, ReconciliationId,
+        ResearchProfileArtifactId, ResearchProfileId,
+    },
+};
+use sea_orm::{
+    ActiveModelTrait, ActiveValue, ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait,
+    IntoActiveModel, QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
+};
 
 use crate::{
     postgres::{
@@ -30,35 +71,6 @@ use crate::{
         },
     },
     traits::ExecutionSubmissionRepository,
-};
-use chrono::{DateTime, Utc};
-use quant_pivot_error::storage::{StorageError, entity};
-use quant_pivot_models::{
-    domain::{
-        EntryConditionClaim, EntryConditionInstanceInfo, ExecutionOrderInfo, ExitLedgerWrite,
-        NewExecutionOrder, NewReconciliation, OrderIntentInfo, ReconciliationLedgerWrite,
-        SubmissionLedgerWrite,
-    },
-    entities::{
-        quant_execution_order, quant_order_intent, quant_recommendation,
-        quant_recommendation_report, quant_reconciliation,
-    },
-    enums::{
-        execution::{ExecutionOrderPhase, ExitReason, ExitState},
-        quant::{
-            ExecutionOrderState, OrderIntentStatus, RecommendationReportStatus,
-            RecommendationStatus, ReportKind,
-        },
-    },
-    types::{
-        ExecutionOrderId, ExitReinferenceObservation, FeatureParityStateId, OrderIntentId,
-        PendingScaleOut, Price, RecommendationId, RecommendationReportId, ReconciliationId,
-        ResearchProfileArtifactId, ResearchProfileId,
-    },
-};
-use sea_orm::{
-    ActiveModelTrait, ActiveValue, ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait,
-    IntoActiveModel, QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
 };
 
 /// In-flight execution-order states scanned by boot recovery.
@@ -97,12 +109,12 @@ async fn probe_submission_scope(
     intent_id: &OrderIntentId,
 ) -> Result<SubmissionReportScope, StorageError> {
     let intent = load_intent(db, intent_id).await?;
-    let recommendation = quant_recommendation::Entity::find_by_id(intent.recommendation_id.clone())
+    let recommendation = Entity::find_by_id(intent.recommendation_id.clone())
         .one(db)
         .await
         .map_err(StorageError::from)?
-        .ok_or_else(|| error::not_found(entity::QUANT_RECOMMENDATION, &intent.recommendation_id))?;
-    let report = quant_recommendation_report::Entity::find_by_id(
+        .ok_or_else(|| error::not_found(QUANT_RECOMMENDATION, &intent.recommendation_id))?;
+    let report = QuantRecommendationReportEntity::find_by_id(
         recommendation.recommendation_report_id.clone(),
     )
     .one(db)
@@ -110,7 +122,7 @@ async fn probe_submission_scope(
     .map_err(StorageError::from)?
     .ok_or_else(|| {
         error::not_found(
-            entity::QUANT_RECOMMENDATION_REPORT,
+            QUANT_RECOMMENDATION_REPORT,
             &recommendation.recommendation_report_id,
         )
     })?;
@@ -127,34 +139,34 @@ async fn lock_submission_graph(
     db: &impl ConnectionTrait,
     intent_id: &OrderIntentId,
     scope: &SubmissionReportScope,
-) -> Result<quant_order_intent::Model, StorageError> {
-    let report = quant_recommendation_report::Entity::find_by_id(scope.report_id.clone())
+) -> Result<Model, StorageError> {
+    let report = QuantRecommendationReportEntity::find_by_id(scope.report_id.clone())
         .lock_exclusive()
         .one(db)
         .await
         .map_err(StorageError::from)?
-        .ok_or_else(|| error::not_found(entity::QUANT_RECOMMENDATION_REPORT, &scope.report_id))?;
+        .ok_or_else(|| error::not_found(QUANT_RECOMMENDATION_REPORT, &scope.report_id))?;
     if report.research_profile_artifact_id != scope.research_profile_artifact_id
         || report.report_kind != scope.report_kind
         || report.status != RecommendationReportStatus::Published
     {
         return Err(error::state_conflict(
-            entity::QUANT_RECOMMENDATION_REPORT,
+            QUANT_RECOMMENDATION_REPORT,
             Some(&scope.report_id),
             "parent report is no longer the published entry authority",
         ));
     }
-    let recommendation = quant_recommendation::Entity::find_by_id(scope.recommendation_id.clone())
+    let recommendation = Entity::find_by_id(scope.recommendation_id.clone())
         .lock_exclusive()
         .one(db)
         .await
         .map_err(StorageError::from)?
-        .ok_or_else(|| error::not_found(entity::QUANT_RECOMMENDATION, &scope.recommendation_id))?;
+        .ok_or_else(|| error::not_found(QUANT_RECOMMENDATION, &scope.recommendation_id))?;
     if recommendation.recommendation_report_id != scope.report_id
         || !recommendation.status.allows_new_intent()
     {
         return Err(error::state_conflict(
-            entity::QUANT_RECOMMENDATION,
+            QUANT_RECOMMENDATION,
             Some(&scope.recommendation_id),
             "recommendation is no longer actionable under its parent report",
         ));
@@ -162,7 +174,7 @@ async fn lock_submission_graph(
     let intent = load_intent_for_update(db, intent_id).await?;
     if intent.recommendation_id != scope.recommendation_id {
         return Err(error::state_conflict(
-            entity::QUANT_ORDER_INTENT,
+            QUANT_ORDER_INTENT,
             Some(intent_id),
             "intent recommendation changed while acquiring submission graph locks",
         ));
@@ -186,21 +198,21 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
             OrderIntentStatus::Approved | OrderIntentStatus::ApprovedByPolicy
         ) {
             return Err(error::state_conflict(
-                entity::QUANT_ORDER_INTENT,
+                QUANT_ORDER_INTENT,
                 Some(intent_id),
                 format!("intent is not submittable from {}", row.status.as_str()),
             ));
         }
         if row.expires_at <= claim.claimed_at {
             return Err(error::state_conflict(
-                entity::QUANT_ORDER_INTENT,
+                QUANT_ORDER_INTENT,
                 Some(intent_id),
                 "intent has expired and cannot be submitted",
             ));
         }
         if row.condition_instance_id != claim.condition_instance_id {
             return Err(error::state_conflict(
-                entity::QUANT_ORDER_INTENT,
+                QUANT_ORDER_INTENT,
                 Some(intent_id),
                 "intent/condition pair changed before atomic claim",
             ));
@@ -208,7 +220,7 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
         let condition = claim_entry_condition(&txn, &claim).await?;
         if condition.recommendation_id != row.recommendation_id {
             return Err(error::invariant_violation(
-                Some(entity::QUANT_ORDER_INTENT),
+                Some(QUANT_ORDER_INTENT),
                 "condition recommendation does not match intent recommendation",
             ));
         }
@@ -290,7 +302,7 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
         verify_clear_latch_generation(&txn, feature_parity_state_id).await?;
         if intent.status != OrderIntentStatus::AdmissionPending {
             return Err(error::state_conflict(
-                entity::QUANT_ORDER_INTENT,
+                QUANT_ORDER_INTENT,
                 Some(&intent_id),
                 format!(
                     "intent must be admission_pending to create an entry order, got {}",
@@ -303,7 +315,7 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
 
         // Write-ahead the venue intent: the row exists in `Submitted` before any
         // network call, so a crash mid-submit is recoverable via reconciliation.
-        let execution_order = quant_execution_order::Entity::insert(order.into_active_model())
+        let execution_order = QuantExecutionOrderEntity::insert(order.into_active_model())
             .exec_with_returning(&txn)
             .await
             .map_err(StorageError::from)?;
@@ -331,12 +343,12 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
     ) -> Result<ExecutionOrderInfo, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
 
-        let order = quant_execution_order::Entity::find_by_id(execution_order_id.clone())
+        let order = QuantExecutionOrderEntity::find_by_id(execution_order_id.clone())
             .lock_exclusive()
             .one(&txn)
             .await
             .map_err(StorageError::from)?
-            .ok_or_else(|| error::not_found(entity::QUANT_EXECUTION_ORDER, execution_order_id))?;
+            .ok_or_else(|| error::not_found(QUANT_EXECUTION_ORDER, execution_order_id))?;
         validate_execution_order_transition(order.state, write.state, execution_order_id)?;
         let intent_id = order.order_intent_id.clone();
         let entry_phase = order.order_phase == ExecutionOrderPhase::Entry;
@@ -403,7 +415,7 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
         }
 
         if let Some(reconciliation) = write.reconciliation {
-            quant_reconciliation::Entity::insert(reconciliation.into_active_model())
+            QuantReconciliationEntity::insert(reconciliation.into_active_model())
                 .exec(&txn)
                 .await
                 .map_err(StorageError::from)?;
@@ -471,7 +483,7 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
             )
         {
             return Err(error::invariant_violation(
-                Some(entity::QUANT_ORDER_INTENT),
+                Some(QUANT_ORDER_INTENT),
                 format!(
                     "pending scale-out requires PartialExit or Opportunistic reason, got {}",
                     exit_reason.as_str()
@@ -483,16 +495,16 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
 
         // At most one in-flight exit order per intent — prevents oversell when a
         // partial exit is re-triggered while a resting GTC/Ambiguous order exists.
-        let inflight = quant_execution_order::Entity::find()
-            .filter(quant_execution_order::Column::OrderIntentId.eq(intent_id.clone()))
-            .filter(quant_execution_order::Column::OrderPhase.eq(ExecutionOrderPhase::Exit))
-            .filter(quant_execution_order::Column::State.is_in(IN_FLIGHT_EXIT_STATES))
+        let inflight = QuantExecutionOrderEntity::find()
+            .filter(Column::OrderIntentId.eq(intent_id.clone()))
+            .filter(Column::OrderPhase.eq(ExecutionOrderPhase::Exit))
+            .filter(Column::State.is_in(IN_FLIGHT_EXIT_STATES))
             .one(&txn)
             .await
             .map_err(StorageError::from)?;
         if inflight.is_some() {
             return Err(error::state_conflict(
-                entity::QUANT_ORDER_INTENT,
+                QUANT_ORDER_INTENT,
                 Some(&intent_id),
                 "intent already has an in-flight exit order (Submitted/Ambiguous)",
             ));
@@ -500,7 +512,7 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
 
         // Write-ahead the venue exit intent: the Exit order row exists in
         // `Submitted` before any network call (crash-recoverable via recon).
-        let execution_order = quant_execution_order::Entity::insert(order.into_active_model())
+        let execution_order = QuantExecutionOrderEntity::insert(order.into_active_model())
             .exec_with_returning(&txn)
             .await
             .map_err(StorageError::from)?;
@@ -530,12 +542,12 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
     ) -> Result<ExecutionOrderInfo, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
 
-        let order = quant_execution_order::Entity::find_by_id(execution_order_id.clone())
+        let order = QuantExecutionOrderEntity::find_by_id(execution_order_id.clone())
             .lock_exclusive()
             .one(&txn)
             .await
             .map_err(StorageError::from)?
-            .ok_or_else(|| error::not_found(entity::QUANT_EXECUTION_ORDER, execution_order_id))?;
+            .ok_or_else(|| error::not_found(QUANT_EXECUTION_ORDER, execution_order_id))?;
 
         // Idempotency guard: a terminal exit order already settled its position +
         // capital. Never re-apply.
@@ -595,7 +607,7 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
             .map_err(StorageError::from)?;
 
         if let Some(reconciliation) = write.reconciliation {
-            quant_reconciliation::Entity::insert(reconciliation.into_active_model())
+            QuantReconciliationEntity::insert(reconciliation.into_active_model())
                 .exec(&txn)
                 .await
                 .map_err(StorageError::from)?;
@@ -606,9 +618,9 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
     }
 
     async fn recover_dangling(&self, limit: u64) -> Result<Vec<ExecutionOrderInfo>, StorageError> {
-        quant_execution_order::Entity::find()
-            .filter(quant_execution_order::Column::State.is_in(DANGLING_STATES))
-            .order_by_asc(quant_execution_order::Column::CreatedAt)
+        QuantExecutionOrderEntity::find()
+            .filter(Column::State.is_in(DANGLING_STATES))
+            .order_by_asc(Column::CreatedAt)
             .limit(limit)
             .all(&self.db)
             .await
@@ -623,12 +635,12 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
     ) -> Result<ExecutionOrderInfo, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
 
-        let order = quant_execution_order::Entity::find_by_id(execution_order_id.clone())
+        let order = QuantExecutionOrderEntity::find_by_id(execution_order_id.clone())
             .lock_exclusive()
             .one(&txn)
             .await
             .map_err(StorageError::from)?
-            .ok_or_else(|| error::not_found(entity::QUANT_EXECUTION_ORDER, execution_order_id))?;
+            .ok_or_else(|| error::not_found(QUANT_EXECUTION_ORDER, execution_order_id))?;
 
         // Idempotency guard: a terminal order has already had its capital and
         // position settled (at submit or by a prior reconciliation). Never
@@ -738,8 +750,8 @@ async fn upsert_reconciliation_summary(
     order_intent_id: &OrderIntentId,
     write: ReconciliationLedgerWrite,
 ) -> Result<(), StorageError> {
-    let existing = quant_reconciliation::Entity::find()
-        .filter(quant_reconciliation::Column::ExecutionOrderId.eq(execution_order_id.clone()))
+    let existing = QuantReconciliationEntity::find()
+        .filter(QuantReconciliationColumn::ExecutionOrderId.eq(execution_order_id.clone()))
         .one(db)
         .await
         .map_err(StorageError::from)?;
@@ -783,7 +795,7 @@ async fn upsert_reconciliation_summary(
         resolved_by: write.resolved_by,
         resolved_at: write.resolved_at,
     };
-    quant_reconciliation::Entity::insert(new.into_active_model())
+    QuantReconciliationEntity::insert(new.into_active_model())
         .exec(db)
         .await
         .map_err(StorageError::from)?;
@@ -794,7 +806,7 @@ async fn upsert_reconciliation_summary(
 ///
 /// Auto-execution intents (`policy_id` set) revert to `ApprovedByPolicy` so the
 /// dispatcher worker can retry; semi-auto manual approvals revert to `Approved`.
-const fn revert_target_status(row: &quant_order_intent::Model) -> OrderIntentStatus {
+const fn revert_target_status(row: &Model) -> OrderIntentStatus {
     if row.policy_id.is_some() {
         OrderIntentStatus::ApprovedByPolicy
     } else {
@@ -808,7 +820,7 @@ async fn advance_recommendation_executed(
     db: &impl ConnectionTrait,
     recommendation_id: &RecommendationId,
 ) -> Result<(), StorageError> {
-    let row = quant_recommendation::Entity::find_by_id(recommendation_id.clone())
+    let row = Entity::find_by_id(recommendation_id.clone())
         .one(db)
         .await
         .map_err(StorageError::from)?

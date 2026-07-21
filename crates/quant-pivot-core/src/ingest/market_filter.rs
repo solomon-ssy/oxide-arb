@@ -5,9 +5,10 @@
 //! narrowing it never loses settlement or evidence data. Reads are lock-free
 //! (`ArcSwap`); reloads come exclusively from runtime-config activation.
 
+use std::sync::Arc;
+
 use arc_swap::ArcSwap;
 use quant_pivot_models::enums::common::{CategorySet, MarketCategory};
-use std::sync::Arc;
 
 /// Lock-free view of `market_data.enabled_categories`.
 ///

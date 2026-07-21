@@ -7,10 +7,13 @@ use chrono::Utc;
 use quant_pivot_error::{
     QuantResult,
     execution::ExecutionError,
-    storage::{StorageError, entity},
+    storage::{StorageError, entity::QUANT_RECONCILIATION},
 };
 use quant_pivot_models::{
-    domain::{ReconciliationPort, ResolveReconciliationCommand, ResolveReconciliationOutcome},
+    domain::{
+        api::{ResolveReconciliationCommand, ResolveReconciliationOutcome},
+        ports::ReconciliationPort,
+    },
     enums::execution::ReconciliationResult,
 };
 use quant_pivot_repository::traits::ReconciliationRepository;
@@ -55,7 +58,7 @@ impl ReconciliationPort for CoreReconciliationPort {
             .find_by_id(&command.reconciliation_id)
             .await?
             .ok_or_else(|| {
-                StorageError::not_found(entity::QUANT_RECONCILIATION, &command.reconciliation_id)
+                StorageError::not_found(QUANT_RECONCILIATION, &command.reconciliation_id)
             })?;
 
         if reconciliation.result != ReconciliationResult::Unresolvable
@@ -121,7 +124,7 @@ fn validate_operator_result(command: &ResolveReconciliationCommand) -> QuantResu
 #[cfg(test)]
 mod validate_operator_result_tests {
     use quant_pivot_models::{
-        domain::ResolveReconciliationCommand,
+        domain::api::ResolveReconciliationCommand,
         enums::execution::ReconciliationResult,
         types::{Price, ReconciliationId, Shares},
     };

@@ -1,8 +1,10 @@
 //! Singleton row used to serialize policy activations with a typed row lock.
 
-use crate::types::{ContentHash, DecisionPolicySnapshotId, PolicyBundleGeneration};
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
+
+use super::decision_policy_snapshot;
+use crate::types::{ContentHash, DecisionPolicySnapshotId, PolicyBundleGeneration};
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -24,7 +26,7 @@ pub struct Model {
         from = "current_snapshot_id",
         to = "decision_policy_snapshot_id"
     )]
-    pub current_snapshot: BelongsTo<Option<super::decision_policy_snapshot::Entity>>,
+    pub current_snapshot: BelongsTo<Option<decision_policy_snapshot::Entity>>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

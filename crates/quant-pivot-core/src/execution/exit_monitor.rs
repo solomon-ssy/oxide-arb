@@ -1,16 +1,16 @@
-//! Exit-monitor decision engine (Phase 05.6).
+//! Exit-monitor decision engine.
 //!
 //! Each filled entry intent owns exactly one position lot (`A0` per-lot ledger).
 //! The monitor evaluates a **deterministic priority ladder** over that lot from
 //! the intent's **frozen** [`ExitPolicySpec`] plus the current book mark — it
 //! never re-reads the (possibly expired/revoked) recommendation for the
-//! price/time/trailing/partial ladder. The model-driven dimension
-//! (thesis-invalidation now, opportunistic Sell in Phase 6) enters through the
+//! price/time/trailing/partial ladder. The model-driven dimensions—thesis
+//! invalidation and opportunistic Sell—enter through the
 //! [`ExitSignalEvaluator`] seam as a pre-resolved [`ExitSignalVerdict`], so
 //! [`decide_exit`] stays a pure, side-effect-free, same-input-same-output
 //! function.
 //!
-//! Priority (父文档 §16.5, fail-closed):
+//! Fail-closed priority:
 //! 1. kill-switch emergency → policy (`LiquidateAll` submit / `ManualOnly` manual)
 //! 2. data stale → manual (never guess a price)
 //! 3. market abnormal → manual
@@ -22,12 +22,12 @@
 //! 7. manual review checkpoint (frozen `manual_review_at`)
 //! 8. take-profit
 //! 9. cumulative scale-out target (each target settles at most once)
-//! 10. opportunistic Sell (advisory; Phase 6 model)
+//! 10. opportunistic Sell (advisory; model)
 //! 11. hold
 //!
 //! Every non-emergency submit is gated by [`KillSwitchState::allows_auto_exit`]:
 //! when auto-exit is frozen (`execution_halted`) a would-be exit is routed to
-//! manual review instead of being auto-submitted (父文档 §8).
+//! manual review instead of being auto-submitted.
 
 use std::sync::Arc;
 
@@ -35,7 +35,7 @@ use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use quant_pivot_models::{
-    domain::{OrderIntentInfo, PositionInfo},
+    domain::quant::{OrderIntentInfo, PositionInfo},
     enums::{
         common::{OrderType, Side},
         execution::{ExitReason, KillSwitchState},
@@ -162,8 +162,8 @@ pub struct ExitSignalContext<'a> {
 
 /// Model-driven exit-signal seam.
 ///
-/// Unifies **thesis-invalidation** (implemented this phase via side-effect-free
-/// re-inference) and **opportunistic Sell** (Phase 6 Sell ranking model) behind
+/// Unifies **thesis-invalidation** (via side-effect-free
+/// re-inference) and **opportunistic Sell** (the Sell ranking model) behind
 /// one contract so the priority ladder is wired for both today.
 #[async_trait]
 pub trait ExitSignalEvaluator: Send + Sync {
@@ -173,8 +173,8 @@ pub trait ExitSignalEvaluator: Send + Sync {
     async fn evaluate(&self, ctx: ExitSignalContext<'_>) -> ExitSignalEvaluation;
 }
 
-/// Composes thesis-invalidation re-inference (Phase 06.0) with opportunistic
-/// Sell scoring (Phase 06.1) behind the single [`ExitSignalEvaluator`] seam.
+/// Composes thesis-invalidation re-inference with opportunistic
+/// Sell scoring behind the single [`ExitSignalEvaluator`] seam.
 ///
 /// Invalidation is strictly prior: re-inference runs first, and only when it
 /// **holds** does opportunistic scoring run. A `ThesisInvalidated` short-circuits
@@ -348,7 +348,7 @@ fn submit_or_manual(
     }
 }
 
-/// The deterministic exit priority ladder (父文档 §16.5). Pure: same input ⇒
+/// The deterministic exit priority ladder. Pure: same input ⇒
 /// same decision (modulo `input.now` / `mark_price`).
 #[must_use]
 pub fn decide_exit(input: &ExitMonitorInput) -> ExitDecision {
@@ -405,7 +405,7 @@ pub fn decide_exit(input: &ExitMonitorInput) -> ExitDecision {
     }
 
     // 5. Thesis invalidated (model re-inference) — forced full exit (protective:
-    //    fires even under hold-to-resolution).
+    // fires even under hold-to-resolution).
     if let ExitSignalVerdict::ThesisInvalidated { .. } = &input.signal {
         return submit_or_manual(
             input,
@@ -455,10 +455,10 @@ pub fn decide_exit(input: &ExitMonitorInput) -> ExitDecision {
         );
     }
 
-    // 10. Opportunistic Sell (advisory; Phase 6 Sell scorer). Idempotent
-    //     scale-out: the verdict is a *target cumulative* fraction of a frozen
-    //     denominator, so repeated ticks at the same target only ever sell the
-    //     incremental delta — never re-firing the whole fraction each tick.
+    // 10. Opportunistic Sell (advisory; Sell scorer). Idempotent
+    // scale-out: the verdict is a *target cumulative* fraction of a frozen
+    // denominator, so repeated ticks at the same target only ever sell the
+    // incremental delta — never re-firing the whole fraction each tick.
     if let ExitSignalVerdict::OpportunisticSell {
         target_cumulative_exit_pct,
         ..

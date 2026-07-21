@@ -16,13 +16,14 @@ use quant_pivot_models::{
     types::{ContentHash, POLICY_EVIDENCE_OBJECT_FORMAT_VERSION},
 };
 use serde::{Serialize, de::DeserializeOwned};
+use serde_json::Value;
 
 /// One canonical payload row with an independently verified semantic digest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PolicyEvidenceRecord {
     pub record_key: String,
     pub event_at: Option<DateTime<Utc>>,
-    pub payload: serde_json::Value,
+    pub payload: Value,
     pub row_hash: ContentHash,
 }
 
@@ -215,7 +216,7 @@ fn validate_records(records: &[PolicyEvidenceRecord]) -> QuantResult<()> {
 fn row_hash(
     record_key: &str,
     event_at: Option<DateTime<Utc>>,
-    payload: &serde_json::Value,
+    payload: &Value,
 ) -> QuantResult<ContentHash> {
     CanonicalDigest::content_hash_json(&(
         POLICY_EVIDENCE_OBJECT_FORMAT_VERSION,

@@ -1,18 +1,7 @@
 //! Infrastructure bundle: persistence, analytics write plane, metrics.
 
-use crate::{
-    app::{task_id::TaskId, task_registry::PendingTaskQueue},
-    observability::{
-        attribution_fact_writer::AttributionEventWriter, book_fact_writer::BookFactWriter,
-        capital_allocation_fact_writer::CapitalAllocationEventWriter,
-        execution_fact_writer::ExecutionEventWriter,
-        exit_signal_fact_writer::ExitSignalEvaluationEventWriter,
-        fact_lag::IngestPipelineLagTracker, factor_fact_writer::FactorEventWriter,
-        feature_fact_writer::FeatureEventWriter, metrics_hub::MetricsHub,
-        model_input_fact_writer::ModelInputEventWriter, position_fact_writer::PositionEventWriter,
-        signal_candidate_fact_writer::SignalCandidateEventWriter,
-    },
-};
+use std::{sync::Arc, time::Duration};
+
 use prometheus::IntCounter;
 use quant_pivot_error::{QuantResult, infra::InfraError};
 use quant_pivot_models::{
@@ -30,8 +19,6 @@ use quant_pivot_repository::{
     clickhouse::{ChFactWriter, ChQuantFactReadRepository},
     traits::{FactWriter, QuantFactReadRepository},
 };
-
-use super::pg_repos::PgRepositories;
 use quant_pivot_storage::{
     cache::{CacheManager, MokaBackend, RedisBackend, RedisPool, TieredCache, connect_pool},
     clickhouse::{ChWriteManager, ClickHousePool, verify_schema as verify_clickhouse_schema},
@@ -42,7 +29,21 @@ use quant_pivot_storage::{
     },
 };
 use quant_pivot_web::jwt::RedisTokenBlacklist;
-use std::{sync::Arc, time::Duration};
+
+use super::pg_repos::PgRepositories;
+use crate::{
+    app::{task_id::TaskId, task_registry::PendingTaskQueue},
+    observability::{
+        attribution_fact_writer::AttributionEventWriter, book_fact_writer::BookFactWriter,
+        capital_allocation_fact_writer::CapitalAllocationEventWriter,
+        execution_fact_writer::ExecutionEventWriter,
+        exit_signal_fact_writer::ExitSignalEvaluationEventWriter,
+        fact_lag::IngestPipelineLagTracker, factor_fact_writer::FactorEventWriter,
+        feature_fact_writer::FeatureEventWriter, metrics_hub::MetricsHub,
+        model_input_fact_writer::ModelInputEventWriter, position_fact_writer::PositionEventWriter,
+        signal_candidate_fact_writer::SignalCandidateEventWriter,
+    },
+};
 
 /// Persistence connections, `ClickHouse` fact writers, and shared observability.
 pub struct InfraBundle {

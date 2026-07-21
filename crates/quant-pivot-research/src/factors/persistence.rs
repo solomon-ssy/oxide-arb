@@ -3,7 +3,7 @@
 use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{
-    domain::{NewFactorDefinition, NewFactorValue},
+    domain::quant::{NewFactorDefinition, NewFactorValue},
     enums::quant::PublicationStatus,
     types::{
         FactorValueId, FeatureVectorId, MarketId, ModelRunId, SchemaVersion,

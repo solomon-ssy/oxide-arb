@@ -14,29 +14,32 @@ mod session_hook;
 mod shard;
 mod token_intern;
 
-pub use health::{ShardHealthBoard, ShardHealthSummary, TokenFreshnessBoard, WsShardHealthPort};
-pub use ingest_hooks::BookLevelRejectHook;
-pub use reconnect::ReconnectPolicy;
-pub use session_hook::WsSessionInvalidationHook;
-pub use token_intern::{TOKEN_INTERN, TokenInternPool, intern_str, intern_u256};
-
-use crate::infra::retry::RetryPolicy;
-use flume::Receiver;
-use num_traits::ToPrimitive;
-use quant_pivot_models::{
-    config::{PolymarketConfig, WebSocketConfig},
-    domain::pipeline::PipelineEvent,
-    types::TokenId,
-};
-use router::ShardRouter;
-use shard::ShardDeps;
 use std::{
     collections::HashSet,
     slice,
     sync::Arc,
     time::{Duration, Instant},
 };
+
+use flume::Receiver;
+pub use health::{ShardHealthBoard, ShardHealthSummary, TokenFreshnessBoard, WsShardHealthPort};
+pub use ingest_hooks::BookLevelRejectHook;
+use num_traits::ToPrimitive;
+use parking_lot::Mutex;
+use quant_pivot_models::{
+    config::{PolymarketConfig, WebSocketConfig},
+    domain::data_plane::pipeline::PipelineEvent,
+    types::TokenId,
+};
+pub use reconnect::ReconnectPolicy;
+use router::ShardRouter;
+pub use session_hook::WsSessionInvalidationHook;
+use shard::ShardDeps;
+pub use token_intern::{TOKEN_INTERN, TokenInternPool, intern_str, intern_u256};
 use tokio::sync::Semaphore;
+use tokio_util::sync::CancellationToken;
+
+use crate::infra::retry::RetryPolicy;
 
 /// Who requested a token subscription.
 ///
@@ -145,8 +148,8 @@ pub struct ClobWsManager {
     router: ShardRouter,
     output_rx: Receiver<PipelineEvent>,
     ws_url: String,
-    last_message_at: Arc<parking_lot::Mutex<Option<Instant>>>,
-    subscriptions: parking_lot::Mutex<SubscriptionState>,
+    last_message_at: Arc<Mutex<Option<Instant>>>,
+    subscriptions: Mutex<SubscriptionState>,
     health: Arc<ShardHealthBoard>,
     token_freshness: Arc<TokenFreshnessBoard>,
 }
@@ -157,12 +160,12 @@ impl ClobWsManager {
     pub fn new(
         polymarket_config: &PolymarketConfig,
         ws_config: &WebSocketConfig,
-        shutdown: tokio_util::sync::CancellationToken,
+        shutdown: CancellationToken,
         on_session_invalidated: Option<WsSessionInvalidationHook>,
         on_book_level_rejected: Option<BookLevelRejectHook>,
     ) -> Self {
         let (output_tx, output_rx) = flume::bounded(8192);
-        let last_message_at = Arc::new(parking_lot::Mutex::new(None));
+        let last_message_at = Arc::new(Mutex::new(None));
         let health = Arc::new(ShardHealthBoard::default());
         let token_freshness = Arc::new(TokenFreshnessBoard::default());
         // `[market_data.websocket]` reconnect knobs drive both backoff layers:
@@ -206,7 +209,7 @@ impl ClobWsManager {
             output_rx,
             ws_url: polymarket_config.clob_ws_url.clone(),
             last_message_at,
-            subscriptions: parking_lot::Mutex::new(SubscriptionState::default()),
+            subscriptions: Mutex::new(SubscriptionState::default()),
             health,
             token_freshness,
         }
@@ -352,9 +355,11 @@ impl WsShardHealthPort for ClobWsManager {
 
 #[cfg(test)]
 mod tests {
-    use super::{SubscriptionSource, SubscriptionState};
-    use quant_pivot_models::types::TokenId;
     use std::{collections::HashSet, iter};
+
+    use quant_pivot_models::types::TokenId;
+
+    use super::{SubscriptionSource, SubscriptionState};
 
     fn tok(s: &str) -> TokenId {
         TokenId::new(s)

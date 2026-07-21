@@ -1,8 +1,16 @@
 //! Web-facing runtime control ports (dependency inversion).
 
+use std::{collections::HashSet, sync::Arc};
+
+use async_trait::async_trait;
+use chrono::{DateTime, Utc};
+use quant_pivot_error::{QuantResult, control::ControlError};
+use serde::{Deserialize, Serialize};
+use tokio::sync::watch::Receiver;
+
 use crate::{
     domain::{
-        ActivateBootstrapRequest, BootstrapView, ReadinessReport, SystemCapabilities,
+        api::{ActivateBootstrapRequest, BootstrapView, ReadinessReport, SystemCapabilities},
         data_plane::DataQualitySnapshot,
         governance::{
             kill_switch::KillSwitchView,
@@ -15,11 +23,6 @@ use crate::{
     runtime_config::{ActivePolicyBundle, DecisionPolicySnapshot},
     types::TokenId,
 };
-use async_trait::async_trait;
-use chrono::{DateTime, Utc};
-use quant_pivot_error::{QuantResult, control::ControlError};
-use serde::{Deserialize, Serialize};
-use std::{collections::HashSet, sync::Arc};
 
 /// Gamma catalog warmup state for operator dashboards.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -48,9 +51,9 @@ pub trait CatalogStatusPort: Send + Sync {
 #[async_trait]
 pub trait BootstrapPort: Send + Sync {
     fn view(&self) -> BootstrapView;
-    fn subscribe(&self) -> tokio::sync::watch::Receiver<BootstrapView>;
+    fn subscribe(&self) -> Receiver<BootstrapView>;
     fn capability_snapshot(&self) -> SystemCapabilities;
-    fn subscribe_capabilities(&self) -> tokio::sync::watch::Receiver<SystemCapabilities>;
+    fn subscribe_capabilities(&self) -> Receiver<SystemCapabilities>;
     fn refresh_operational_capabilities(&self, status: &SystemStatus) -> SystemCapabilities;
     async fn capabilities(&self, status: &SystemStatus) -> QuantResult<SystemCapabilities>;
     async fn mark_catalog_ready(&self) -> QuantResult<BootstrapView>;
@@ -113,7 +116,7 @@ pub struct SetKillSwitchCommand {
 /// Operational kill-switch control boundary consumed by the web layer.
 ///
 /// The hot-path query methods (`allows_new_entry` etc.) live on
-/// [`KillSwitchState`](crate::enums::execution::KillSwitchState) and the
+/// [`KillSwitchState`] and the
 /// in-process handle; this port exposes only the governed read/write surface
 /// needed by the HTTP control plane.
 #[async_trait]

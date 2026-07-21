@@ -1,10 +1,9 @@
 //! Model plane: unified runtime contract, strongly-typed signal candidate,
 //! serialized artifacts, and the training contract.
 //!
-//! Online closure terminus (3.4): `FactorValue → QuantModelRuntime →
-//! SignalCandidate`. The runtime/factory traits and the artifact shell are
-//! fixed here; 3.4 implements the weighted-factor runtime and 3.6 the
-//! classical trainer/runtime.
+//! Online closure terminus: `FactorValue → QuantModelRuntime →
+//! SignalCandidate`. The runtime/factory traits and artifact shell support the
+//! weighted-factor runtime and the feature-gated classical trainer/runtime.
 
 pub mod artifact;
 pub mod calibration;
@@ -69,10 +68,9 @@ pub use routing::{
     ModelRouting, generic_model_version_id, resolve_model_route, version_id_for_category,
 };
 pub use runtime::{
-    ClassicalKind, FactorInferenceRow, FactorInferenceTable, InferenceMatrix, InferenceMatrixRow,
-    MarketInferenceContext, ModelFamily, ModelFamilyParseError, ModelInputAuditRow,
-    ModelInputAuditState, ModelRuntimeFactory, ModelRuntimeInput, ModelRuntimeMetrics,
-    ModelRuntimeOutput, QuantModelRuntime,
+    FactorInferenceRow, FactorInferenceTable, InferenceMatrix, InferenceMatrixRow,
+    MarketInferenceContext, ModelInputAuditRow, ModelInputAuditState, ModelRuntimeFactory,
+    ModelRuntimeInput, ModelRuntimeMetrics, ModelRuntimeOutput, QuantModelRuntime,
 };
 pub use score_percentile::annotate;
 pub use sell_scorer::{

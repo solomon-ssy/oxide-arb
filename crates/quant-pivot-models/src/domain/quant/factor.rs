@@ -1,5 +1,10 @@
 //! Factor registry and factor value persistence DTOs.
 
+use chrono::{DateTime, Utc};
+use rust_decimal::Decimal;
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
+use serde::{Deserialize, Serialize};
+
 use crate::{
     entities::quant_factor_definition,
     enums::{
@@ -15,10 +20,6 @@ use crate::{
         factor::{FactorDefinitionDocument, FactorExplanation},
     },
 };
-use chrono::{DateTime, Utc};
-use rust_decimal::Decimal;
-use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
-use serde::{Deserialize, Serialize};
 
 /// Governed factor definition row.
 #[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]

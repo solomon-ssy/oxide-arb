@@ -23,7 +23,7 @@ use jsonwebtoken::{
     errors::ErrorKind,
 };
 use quant_pivot_error::auth::AuthError;
-use quant_pivot_models::{config::JwtConfig, domain::UserInfo};
+use quant_pivot_models::{config::JwtConfig, domain::rbac::UserInfo};
 use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -746,7 +746,7 @@ mod tests {
     use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
     use quant_pivot_error::auth::AuthError;
     use quant_pivot_models::{
-        config::JwtConfig, domain::UserInfo, enums::rbac::UserStatus, types::UserId,
+        config::JwtConfig, domain::rbac::UserInfo, enums::rbac::UserStatus, types::UserId,
     };
 
     use super::{Claims, JwtService, RedisTokenBlacklist, TokenUse};
@@ -816,8 +816,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn blacklist_key_derivation_matches_legacy_default_prefix() {
-        // The pool is lazy — no connection is attempted until `get()`.
+    async fn blacklist_key_uses_the_configured_namespace() {
+        // The pool is lazy — no connection is attempted until `get`.
         let pool = Config::from_url("redis://127.0.0.1:1")
             .create_pool(Some(Runtime::Tokio1))
             .expect("lazy pool");

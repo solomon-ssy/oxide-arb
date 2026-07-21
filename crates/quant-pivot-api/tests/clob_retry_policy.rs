@@ -1,8 +1,9 @@
 //! CLOB retry policy exercises `ApiError::RateLimited` end-to-end.
 
+use std::sync::atomic::{AtomicU32, Ordering};
+
 use quant_pivot_api::infra::retry::{ErrorKind, RetryPolicy, retry_with_policy};
 use quant_pivot_error::api::ApiError;
-use std::sync::atomic::{AtomicU32, Ordering};
 
 #[tokio::test]
 async fn rate_limited_error_retries_then_succeeds() {

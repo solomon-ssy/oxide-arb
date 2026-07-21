@@ -5,17 +5,17 @@ use std::time::Duration;
 use alloy::{
     eips::BlockNumberOrTag,
     primitives::{Address, B256},
-    providers::{Provider, ProviderBuilder},
-    rpc::client::RpcClient,
-    rpc::types::{Filter, Log},
+    providers::{DynProvider as AlloyProvider, Provider, ProviderBuilder},
+    rpc::{
+        client::RpcClient,
+        types::{Filter, Log},
+    },
     transports::http::Http,
 };
 use quant_pivot_error::rpc::RpcError;
 use quant_pivot_models::config::OnchainConfig;
 use reqwest::Client as ReqwestClient;
 use url::Url;
-
-type DynProvider = alloy::providers::DynProvider;
 
 /// One log returned from `eth_getLogs`.
 #[derive(Debug, Clone)]
@@ -50,7 +50,7 @@ impl From<LogFetchError> for RpcError {
 
 /// Read-only client for Polymarket exchange `OrderFilled` logs.
 pub struct ExchangeLogClient {
-    provider: DynProvider,
+    provider: AlloyProvider,
 }
 
 impl ExchangeLogClient {

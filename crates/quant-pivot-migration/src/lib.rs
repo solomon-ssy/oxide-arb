@@ -9,33 +9,28 @@ pub mod migrations;
     reason = "the immutable SeaORM CLI snapshot preserves generated model and enum names; SeaORM 2.0 intentionally removes Eq from ModelEx"
 )]
 mod snapshots;
-pub mod sql_contract_registry;
 
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
+use blake3::Hasher;
+use migrations::Migrator;
 use quant_pivot_error::{QuantResult, storage::StorageError};
 use quant_pivot_models::{
     config::PostgresConfig,
-    domain::{LifecycleLeaseGuardPort, LifecycleLeaseProviderPort},
+    domain::ports::{LifecycleLeaseGuardPort, LifecycleLeaseProviderPort},
     types::LIFECYCLE_ADVISORY_LOCK_KEY,
 };
 use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, FromQueryResult, Statement};
 use sea_orm_migration::MigratorTrait;
 use serde::Serialize;
-use sqlx::{Connection, PgConnection};
+use sqlx::{Connection, Error, PgConnection, PgPool};
 use tokio::{
     sync::Mutex,
     task::JoinHandle,
     time::{MissedTickBehavior, interval, timeout},
 };
 use tokio_util::sync::CancellationToken;
-
-use migrations::Migrator;
-use sql_contract_registry::{
-    POSTGRES_LIFECYCLE_LEASE, POSTGRES_MIGRATION_INSPECT, POSTGRES_PREPRODUCTION_INSPECT,
-    POSTGRES_PREPRODUCTION_RESET,
-};
 
 const CHECKSUM_DOMAIN: &str = "quant-pivot/postgres-migration/v1";
 const CHECKSUM_ALGORITHM: &str = "blake3-256";
@@ -88,12 +83,11 @@ pub async fn inspect_preproduction_postgres(
     let maintenance_url = config
         .try_connection_url_with_database("postgres")
         .map_err(|error| StorageError::Migration(format!("build PG maintenance URL: {error}")))?;
-    let maintenance = sqlx::PgPool::connect(&maintenance_url)
+    let maintenance = PgPool::connect(&maintenance_url)
         .await
         .map_err(migration_error("connect PostgreSQL maintenance database"))?;
     let database_exists = sqlx::query_scalar::<_, bool>(
-        POSTGRES_PREPRODUCTION_INSPECT
-            .postgres_query("SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)"),
+        "SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)",
     )
     .bind(PREPRODUCTION_DATABASE)
     .fetch_one(&maintenance)
@@ -108,22 +102,21 @@ pub async fn inspect_preproduction_postgres(
             production_baseline_exists: false,
         });
     }
-    let connection_count =
-        sqlx::query_scalar::<_, i64>(POSTGRES_PREPRODUCTION_INSPECT.postgres_query(
-            "SELECT COUNT(*)::bigint FROM pg_stat_activity \
+    let connection_count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::bigint FROM pg_stat_activity \
              WHERE datname = $1 AND pid <> pg_backend_pid()",
-        ))
-        .bind(PREPRODUCTION_DATABASE)
-        .fetch_one(&maintenance)
-        .await
-        .map_err(migration_error("count PostgreSQL target connections"))?;
+    )
+    .bind(PREPRODUCTION_DATABASE)
+    .fetch_one(&maintenance)
+    .await
+    .map_err(migration_error("count PostgreSQL target connections"))?;
     let target_url = config
         .try_connection_url()
         .map_err(|error| StorageError::Migration(format!("build PG target URL: {error}")))?;
-    let target = sqlx::PgPool::connect(&target_url)
+    let target = PgPool::connect(&target_url)
         .await
         .map_err(migration_error("connect PostgreSQL target database"))?;
-    let object_count = sqlx::query_scalar::<_, i64>(POSTGRES_PREPRODUCTION_INSPECT.postgres_query(
+    let object_count = sqlx::query_scalar::<_, i64>(
         "WITH objects AS (\
              SELECT c.oid FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
              WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f') \
@@ -135,13 +128,12 @@ pub async fn inspect_preproduction_postgres(
              JOIN pg_namespace n ON n.oid = c.relnamespace \
              WHERE n.nspname = 'public' AND NOT g.tgisinternal) \
              SELECT COUNT(*)::bigint FROM objects",
-    ))
+    )
     .fetch_one(&target)
     .await
     .map_err(migration_error("count PostgreSQL target objects"))?;
     let baseline_relation_exists = sqlx::query_scalar::<_, bool>(
-        POSTGRES_PREPRODUCTION_INSPECT
-            .postgres_query("SELECT to_regclass('public.system_production_baseline') IS NOT NULL"),
+        "SELECT to_regclass('public.system_production_baseline') IS NOT NULL",
     )
     .fetch_one(&target)
     .await
@@ -149,13 +141,10 @@ pub async fn inspect_preproduction_postgres(
         "inspect PostgreSQL production baseline relation",
     ))?;
     let production_baseline_exists = if baseline_relation_exists {
-        sqlx::query_scalar::<_, bool>(
-            POSTGRES_PREPRODUCTION_INSPECT
-                .postgres_query("SELECT EXISTS (SELECT 1 FROM system_production_baseline)"),
-        )
-        .fetch_one(&target)
-        .await
-        .map_err(migration_error("inspect PostgreSQL production baseline"))?
+        sqlx::query_scalar::<_, bool>("SELECT EXISTS (SELECT 1 FROM system_production_baseline)")
+            .fetch_one(&target)
+            .await
+            .map_err(migration_error("inspect PostgreSQL production baseline"))?
     } else {
         false
     };
@@ -193,20 +182,17 @@ pub async fn reset_preproduction_postgres(
     let maintenance_url = config
         .try_connection_url_with_database("postgres")
         .map_err(|error| StorageError::Migration(format!("build PG maintenance URL: {error}")))?;
-    let maintenance = sqlx::PgPool::connect(&maintenance_url)
+    let maintenance = PgPool::connect(&maintenance_url)
         .await
         .map_err(migration_error("connect PostgreSQL maintenance database"))?;
-    sqlx::query(POSTGRES_PREPRODUCTION_RESET.postgres_query("DROP DATABASE IF EXISTS quant_pivot"))
+    sqlx::query("DROP DATABASE IF EXISTS quant_pivot")
         .execute(&maintenance)
         .await
         .map_err(migration_error("drop PostgreSQL preproduction database"))?;
-    sqlx::query(
-        POSTGRES_PREPRODUCTION_RESET
-            .postgres_query("CREATE DATABASE quant_pivot OWNER quant_pivot"),
-    )
-    .execute(&maintenance)
-    .await
-    .map_err(migration_error("create PostgreSQL preproduction database"))?;
+    sqlx::query("CREATE DATABASE quant_pivot OWNER quant_pivot")
+        .execute(&maintenance)
+        .await
+        .map_err(migration_error("create PostgreSQL preproduction database"))?;
     maintenance.close().await;
     lease.ensure_active()
 }
@@ -314,28 +300,26 @@ pub async fn acquire_lifecycle_lease(
             "connect canonical PostgreSQL lifecycle coordination database failed".to_owned(),
         )
     })?;
-    let acquired = sqlx::query_scalar::<_, bool>(
-        POSTGRES_LIFECYCLE_LEASE.postgres_query("SELECT pg_try_advisory_lock($1)"),
-    )
-    .bind(LIFECYCLE_ADVISORY_LOCK_KEY)
-    .fetch_one(&mut connection)
-    .await
-    .map_err(|_| {
-        StorageError::Connection("acquire canonical PostgreSQL lifecycle lease failed".to_owned())
-    })?;
+    let acquired = sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_lock($1)")
+        .bind(LIFECYCLE_ADVISORY_LOCK_KEY)
+        .fetch_one(&mut connection)
+        .await
+        .map_err(|_| {
+            StorageError::Connection(
+                "acquire canonical PostgreSQL lifecycle lease failed".to_owned(),
+            )
+        })?;
     if !acquired {
         return Err(StorageError::Migration(
             "schema/reset/seal mutation already holds the canonical lifecycle lease".to_owned(),
         ));
     }
-    let backend_pid = sqlx::query_scalar::<_, i32>(
-        POSTGRES_LIFECYCLE_LEASE.postgres_query("SELECT pg_backend_pid()"),
-    )
-    .fetch_one(&mut connection)
-    .await
-    .map_err(|_| {
-        StorageError::Connection("inspect PostgreSQL lifecycle lease session failed".to_owned())
-    })?;
+    let backend_pid = sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()")
+        .fetch_one(&mut connection)
+        .await
+        .map_err(|_| {
+            StorageError::Connection("inspect PostgreSQL lifecycle lease session failed".to_owned())
+        })?;
 
     let connection = Arc::new(Mutex::new(connection));
     let lost = CancellationToken::new();
@@ -354,9 +338,7 @@ pub async fn acquire_lifecycle_lease(
                     let mut connection = heartbeat_connection.lock().await;
                     let heartbeat_result = timeout(
                         LIFECYCLE_HEARTBEAT_TIMEOUT,
-                        sqlx::query_scalar::<_, i32>(
-                            POSTGRES_LIFECYCLE_LEASE.postgres_query("SELECT 1"),
-                        )
+                        sqlx::query_scalar::<_, i32>("SELECT 1")
                         .fetch_one(&mut *connection),
                     )
                     .await;
@@ -395,15 +377,15 @@ pub async fn release_lifecycle_lease(mut lease: LifecycleLease) -> Result<(), St
         StorageError::Migration("PostgreSQL lifecycle lease is still borrowed".to_owned())
     })?;
     let mut connection = connection.into_inner();
-    let released = sqlx::query_scalar::<_, bool>(
-        POSTGRES_LIFECYCLE_LEASE.postgres_query("SELECT pg_advisory_unlock($1)"),
-    )
-    .bind(LIFECYCLE_ADVISORY_LOCK_KEY)
-    .fetch_one(&mut connection)
-    .await
-    .map_err(|_| {
-        StorageError::Connection("release canonical PostgreSQL lifecycle lease failed".to_owned())
-    })?;
+    let released = sqlx::query_scalar::<_, bool>("SELECT pg_advisory_unlock($1)")
+        .bind(LIFECYCLE_ADVISORY_LOCK_KEY)
+        .fetch_one(&mut connection)
+        .await
+        .map_err(|_| {
+            StorageError::Connection(
+                "release canonical PostgreSQL lifecycle lease failed".to_owned(),
+            )
+        })?;
     connection.close().await.map_err(|_| {
         StorageError::Connection("close PostgreSQL lifecycle lease session failed".to_owned())
     })?;
@@ -498,13 +480,10 @@ async fn reject_frozen_production_baseline(db: &impl ConnectionTrait) -> Result<
         return Ok(());
     }
     let row = db
-        .query_one_raw(
-            POSTGRES_MIGRATION_INSPECT.postgres_statement(Statement::from_string(
-                DbBackend::Postgres,
-                "SELECT COUNT(*)::bigint AS baseline_count FROM system_production_baseline"
-                    .to_owned(),
-            )),
-        )
+        .query_one_raw(Statement::from_string(
+            DbBackend::Postgres,
+            "SELECT COUNT(*)::bigint AS baseline_count FROM system_production_baseline".to_owned(),
+        ))
         .await
         .map_err(StorageError::from)?
         .ok_or_else(|| {
@@ -561,7 +540,7 @@ pub fn render_manifest() -> Result<String, StorageError> {
 }
 
 fn migration_spec(version: &str, artifacts: &[&[u8]]) -> MigrationSpec {
-    let mut hasher = blake3::Hasher::new();
+    let mut hasher = Hasher::new();
     hasher.update(CHECKSUM_DOMAIN.as_bytes());
     hasher.update(&[0]);
     hasher.update(version.as_bytes());
@@ -583,12 +562,10 @@ fn migration_spec(version: &str, artifacts: &[&[u8]]) -> MigrationSpec {
 
 async fn relation_exists(db: &impl ConnectionTrait, relation: &str) -> Result<bool, StorageError> {
     let row = db
-        .query_one_raw(POSTGRES_MIGRATION_INSPECT.postgres_statement(
-            Statement::from_sql_and_values(
-                DbBackend::Postgres,
-                "SELECT to_regclass($1) IS NOT NULL AS exists",
-                [format!("public.{relation}").into()],
-            ),
+        .query_one_raw(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT to_regclass($1) IS NOT NULL AS exists",
+            [format!("public.{relation}").into()],
         ))
         .await
         .map_err(|error| StorageError::Migration(error.to_string()))?
@@ -599,12 +576,10 @@ async fn relation_exists(db: &impl ConnectionTrait, relation: &str) -> Result<bo
 
 async fn read_native_versions(db: &DatabaseConnection) -> Result<Vec<String>, StorageError> {
     let rows = db
-        .query_all_raw(
-            POSTGRES_MIGRATION_INSPECT.postgres_statement(Statement::from_string(
-                DbBackend::Postgres,
-                "SELECT version FROM seaql_migrations ORDER BY version",
-            )),
-        )
+        .query_all_raw(Statement::from_string(
+            DbBackend::Postgres,
+            "SELECT version FROM seaql_migrations ORDER BY version",
+        ))
         .await
         .map_err(|error| StorageError::Migration(error.to_string()))?;
     rows.into_iter()
@@ -624,12 +599,10 @@ async fn verify_audit_rows(
             "migration checksum ledger `schema_migration_audit` does not exist".to_owned(),
         ));
     }
-    let rows = AuditRow::find_by_statement(POSTGRES_MIGRATION_INSPECT.postgres_statement(
-        Statement::from_string(
-            DbBackend::Postgres,
-            "SELECT version, checksum_algorithm, checksum, artifact_length, migration_engine \
+    let rows = AuditRow::find_by_statement(Statement::from_string(
+        DbBackend::Postgres,
+        "SELECT version, checksum_algorithm, checksum, artifact_length, migration_engine \
              FROM schema_migration_audit ORDER BY version",
-        ),
     ))
     .all(db)
     .await
@@ -701,7 +674,7 @@ fn validate_complete_versions(applied_versions: &[String]) -> Result<(), Storage
     Ok(())
 }
 
-fn migration_error(context: &'static str) -> impl FnOnce(sqlx::Error) -> StorageError {
+fn migration_error(context: &'static str) -> impl FnOnce(Error) -> StorageError {
     move |error| StorageError::Migration(format!("{context}: {error}"))
 }
 

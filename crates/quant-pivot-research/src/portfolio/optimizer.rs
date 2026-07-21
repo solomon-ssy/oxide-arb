@@ -36,7 +36,7 @@ impl OptimizerConfig {
     /// Parse the wire config (decimal `objective_return_weight` → `λ`).
     ///
     /// # Errors
-    /// Returns [`QuantError::config`] when `objective_return_weight` is malformed
+    /// Returns a configuration error when `objective_return_weight` is malformed
     /// (runtime-config validation rejects this upstream, so this is a hard guard).
     pub fn from_wire(config: &PortfolioOptimizerConfig) -> QuantResult<Self> {
         let lambda = config.objective_return_weight.value.max(Decimal::ZERO);

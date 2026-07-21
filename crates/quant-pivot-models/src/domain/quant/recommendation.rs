@@ -3,8 +3,15 @@
 //! Payload columns are strong-typed value objects (`types::report_payload`)
 //! serialized into the existing JSONB columns — never a bare `serde_json::Value`.
 
+use chrono::{DateTime, Utc};
+use sea_orm::DeriveIntoActiveModel;
+use serde::{Deserialize, Serialize};
+
 use crate::{
-    entities::{quant_recommendation, quant_recommendation_report},
+    entities::{
+        quant_recommendation, quant_recommendation::Model as RecommendationModel,
+        quant_recommendation_report, quant_recommendation_report::Model,
+    },
     enums::quant::{
         AccountSource, OutcomeSide, QuantRuntimeMode, RecommendationReportStatus,
         RecommendationStatus, ReportKind,
@@ -18,9 +25,6 @@ use crate::{
         ResearchProfileRef, TokenId, Usd,
     },
 };
-use chrono::{DateTime, Utc};
-use sea_orm::DeriveIntoActiveModel;
-use serde::{Deserialize, Serialize};
 
 /// Immutable `TopN` recommendation report row.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -58,8 +62,8 @@ pub struct RecommendationReportInfo {
     pub created_at: DateTime<Utc>,
 }
 
-impl From<quant_recommendation_report::Model> for RecommendationReportInfo {
-    fn from(model: quant_recommendation_report::Model) -> Self {
+impl From<Model> for RecommendationReportInfo {
+    fn from(model: Model) -> Self {
         let profile_ref = model.research_profile_artifact_id.profile_ref();
         Self {
             recommendation_report_id: model.recommendation_report_id,
@@ -160,8 +164,8 @@ pub struct RecommendationInfo {
     pub created_at: DateTime<Utc>,
 }
 
-impl From<quant_recommendation::Model> for RecommendationInfo {
-    fn from(model: quant_recommendation::Model) -> Self {
+impl From<RecommendationModel> for RecommendationInfo {
+    fn from(model: RecommendationModel) -> Self {
         Self {
             recommendation_id: model.recommendation_id,
             profile_ref: model.research_profile_artifact_id.profile_ref(),

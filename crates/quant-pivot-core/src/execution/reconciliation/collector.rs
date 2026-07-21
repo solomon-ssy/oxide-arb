@@ -1,4 +1,4 @@
-//! Venue evidence collection in fixed order (Phase 05.5, parent doc §11).
+//! Venue evidence collection in deterministic reconciliation order.
 //!
 //! For one reconcilable order the collector gathers, in the immutable order
 //! 1→5, one [`ReconciliationEvidence`] per source: CLOB order status → CLOB
@@ -13,7 +13,7 @@ use chrono::{DateTime, Duration, Utc};
 use quant_pivot_api::clob::ClobTrade;
 use quant_pivot_error::{QuantResult, execution::ExecutionError};
 use quant_pivot_models::{
-    domain::ExecutionOrderInfo,
+    domain::quant::ExecutionOrderInfo,
     enums::{execution::ReconciliationEvidenceKind, fee::FeeLiquidityRole},
     types::{FeeEvidence, Price, ReconciliationEvidence, Shares, TokenId, Usd},
 };

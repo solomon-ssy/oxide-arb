@@ -15,7 +15,7 @@
 use std::{collections::BTreeSet, sync::LazyLock};
 
 use quant_pivot_models::{
-    domain::{GroundingField, GroundingKind, GroundingSpan, ResolutionOracle},
+    domain::quant::{GroundingField, GroundingKind, GroundingSpan, ResolutionOracle},
     enums::domain::KlineInterval,
     types::ChainlinkFeedKey,
 };
@@ -155,9 +155,10 @@ fn parse_interval(value: &str) -> Option<KlineInterval> {
 
 #[cfg(test)]
 mod tests {
+    use quant_pivot_models::{domain::quant::ResolutionOracle, enums::domain::KlineInterval};
+
     use super::extract_oracle;
     use crate::linkage::ruleset::rule_for_alias;
-    use quant_pivot_models::{domain::ResolutionOracle, enums::domain::KlineInterval};
 
     #[test]
     fn no_description_grounds_no_oracle() {

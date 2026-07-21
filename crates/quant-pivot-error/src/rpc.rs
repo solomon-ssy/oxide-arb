@@ -1,6 +1,9 @@
 //! Blockchain RPC errors — Polygon JSON-RPC and contract interactions.
 
-use std::{error::Error, fmt};
+use std::{
+    error::Error,
+    fmt::{Debug, Display, Formatter, Result as FmtResult},
+};
 
 /// Errors from on-chain RPC calls (Polygon node, CTF contract, etc.).
 pub enum RpcError {
@@ -15,8 +18,8 @@ pub enum RpcError {
     InsufficientFunds(String),
 }
 
-impl fmt::Display for RpcError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for RpcError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> FmtResult {
         match self {
             Self::CallFailed { method, reason } => write!(
                 formatter,
@@ -49,9 +52,9 @@ impl fmt::Display for RpcError {
 // Error values are frequently logged with `?error`. Keep Debug on the same
 // fail-closed rendering path so switching tracing formatters cannot reveal a
 // provider API key embedded in a URL path or query string.
-impl fmt::Debug for RpcError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Display::fmt(self, formatter)
+impl Debug for RpcError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> FmtResult {
+        Display::fmt(self, formatter)
     }
 }
 

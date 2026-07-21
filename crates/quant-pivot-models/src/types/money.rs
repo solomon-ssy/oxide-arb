@@ -20,14 +20,15 @@
 //! round-trip never truncates. Each newtype declares its DDL precision via the
 //! `PRECISION` associated constant, consumed by the schema column builders.
 
-use rust_decimal::Decimal;
-use sea_orm::DeriveValueType;
-use serde::{Deserialize, Serialize};
 use std::{
     fmt,
     iter::Sum,
     ops::{Add, AddAssign, Div, Mul, Neg, Sub, SubAssign},
 };
+
+use rust_decimal::Decimal;
+use sea_orm::DeriveValueType;
+use serde::{Deserialize, Serialize};
 
 macro_rules! decimal_newtype {
     ($(#[$meta:meta])* $name:ident, precision = ($precision:expr, $scale:expr)) => {
@@ -295,8 +296,9 @@ impl Bps {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use rust_decimal_macros::dec;
+
+    use super::*;
 
     #[test]
     fn shares_times_price_equals_usd() {

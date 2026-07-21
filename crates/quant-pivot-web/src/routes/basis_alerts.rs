@@ -1,13 +1,19 @@
-//! Basis-cross-check exceedance alert feed (11.2.2 remediation R6).
+//! Basis-cross-check exceedance alert feed.
 //!
 //! | Method | Path | Permission | Purpose |
 //! |--------|------|------------|---------|
 //! | GET | `/research/basis-alerts` | `materialization:read` | Paginated exceedance feed |
 //! | POST | `/research/basis-alerts/{alert_id}/acknowledge` | `materialization:create` | Audited triage acknowledgement |
 
-use actix_web::{http::Method, web};
+use actix_web::{
+    http::Method,
+    web::{Data, Path, Query},
+};
 use quant_pivot_models::{
-    domain::{AcknowledgeBasisAlertRequest, BasisAlertListQuery, BasisAlertView, Paginated},
+    domain::{
+        api::{AcknowledgeBasisAlertRequest, BasisAlertListQuery, BasisAlertView},
+        pagination::Paginated,
+    },
     enums::{
         operation_log::OperationCategory,
         rbac::{Operation, ResourceType},
@@ -49,8 +55,8 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
 /// (the review-queue default view), so the linkage detail page can
 /// cross-link "alerts for this market".
 pub async fn list(
-    state: web::Data<AppState>,
-    query: web::Query<BasisAlertListQuery>,
+    state: Data<AppState>,
+    query: Query<BasisAlertListQuery>,
 ) -> Result<WebResponse<Paginated<BasisAlertView>>, WebError> {
     let page = state
         .basis_alerts
@@ -65,10 +71,10 @@ pub async fn list(
 /// Records who acknowledged the alert and when on the ledger row itself
 /// (idempotent — re-acknowledging is a no-op), and the operator's reason on
 /// the operation log, mirroring the linkage `resolve`/`override` audit
-/// pattern (R6 review-queue closed loop).
+/// review-queue pattern.
 pub async fn acknowledge(
-    state: web::Data<AppState>,
-    alert_id: web::Path<BasisAlertId>,
+    state: Data<AppState>,
+    alert_id: Path<BasisAlertId>,
     actor: AuthedActor,
     acting_role: ActingRole,
     request_id: RequestId,

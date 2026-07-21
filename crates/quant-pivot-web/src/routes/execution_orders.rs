@@ -1,8 +1,14 @@
 //! Execution order read API (venue submission records).
 
-use actix_web::{http::Method, web};
+use actix_web::{
+    http::Method,
+    web::{Data, Path, Query},
+};
 use quant_pivot_models::{
-    domain::{ExecutionOrderListQuery, ExecutionOrderView, Paginated},
+    domain::{
+        api::{ExecutionOrderListQuery, ExecutionOrderView},
+        pagination::Paginated,
+    },
     enums::rbac::{Operation, ResourceType},
     types::ExecutionOrderId,
 };
@@ -33,8 +39,8 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
 }
 
 async fn list_execution_orders(
-    state: web::Data<AppState>,
-    query: web::Query<ExecutionOrderListQuery>,
+    state: Data<AppState>,
+    query: Query<ExecutionOrderListQuery>,
 ) -> Result<WebResponse<Paginated<ExecutionOrderView>>, WebError> {
     let page = state
         .execution_read
@@ -44,8 +50,8 @@ async fn list_execution_orders(
 }
 
 async fn get_execution_order(
-    state: web::Data<AppState>,
-    id: web::Path<ExecutionOrderId>,
+    state: Data<AppState>,
+    id: Path<ExecutionOrderId>,
 ) -> Result<WebResponse<ExecutionOrderView>, WebError> {
     let info = state
         .execution_read

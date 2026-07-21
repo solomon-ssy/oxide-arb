@@ -1,5 +1,9 @@
 //! Irreversible production lifecycle seal evidence.
 
+use chrono::{DateTime, Utc};
+use sea_orm::entity::prelude::*;
+
+use super::user;
 use crate::{
     enums::runtime_config::PolicyActorKind,
     runtime_config::ProductionSealEvidence,
@@ -8,8 +12,6 @@ use crate::{
         PolicyBundleGeneration, ProductionBaselineId, UserId,
     },
 };
-use chrono::{DateTime, Utc};
-use sea_orm::entity::prelude::*;
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -43,7 +45,7 @@ pub struct Model {
         from = "sealed_by_user_id",
         to = "id"
     )]
-    pub sealed_by_user: BelongsTo<Option<super::user::Entity>>,
+    pub sealed_by_user: BelongsTo<Option<user::Entity>>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

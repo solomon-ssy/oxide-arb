@@ -1,6 +1,6 @@
 //! Prometheus counters for cache hit/miss tracking.
 
-use prometheus::{IntCounterVec, Opts, Registry};
+use prometheus::{Error, IntCounterVec, Opts, Registry};
 
 pub struct CacheMetrics {
     hits: IntCounterVec,
@@ -24,7 +24,7 @@ impl CacheMetrics {
         Self { hits, misses }
     }
 
-    pub fn register(&self, registry: &Registry) -> Result<(), prometheus::Error> {
+    pub fn register(&self, registry: &Registry) -> Result<(), Error> {
         registry.register(Box::new(self.hits.clone()))?;
         registry.register(Box::new(self.misses.clone()))?;
         Ok(())

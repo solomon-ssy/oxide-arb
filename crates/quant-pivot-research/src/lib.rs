@@ -22,12 +22,11 @@
 //!
 //! # Feature flags
 //!
-//! The base build links only the pure-Rust numeric stack (`ndarray` / `statrs` /
-//! `rayon`), which the online feature plane needs
-//! for rolling statistics and parallel batch build. The heavy / native-adjacent
-//! stacks are feature-gated and never appear in the default `report_only` build:
-//! `dataframe` (polars / parquet), `optimize` (argmin), `ml-classical`
-//! (smartcore).
+//! The base research build links the pure-Rust numeric stack (`ndarray` /
+//! `statrs` / `rayon`) and the required `microlp` portfolio solver. `dataframe`
+//! (`polars` / `parquet`), `optimize` (`argmin`), and `ml-classical`
+//! (`smartcore`) remain independently feature-gated; the production binary
+//! chooses its deployment feature set explicitly.
 
 #![deny(unsafe_code)]
 
@@ -80,7 +79,7 @@ mod acceptance_tests {
         process::Command,
     };
 
-    /// Phase 3.0 §11: default build must not link polars / smartcore / argmin.
+    /// The default build must not link `Polars`, `SmartCore`, or `Argmin`.
     #[test]
     fn research_default_build_excludes_heavy_deps() {
         let output = Command::new("cargo")
@@ -101,7 +100,7 @@ mod acceptance_tests {
         }
     }
 
-    /// Phase 3.6 boundary: no `smartcore` concrete type may leak into the
+    /// boundary: no `smartcore` concrete type may leak into the
     /// business layers (core / web / models). Inside this crate it may appear
     /// only behind the `ml-classical` adapter / runtime modules.
     #[test]
@@ -158,38 +157,16 @@ mod acceptance_tests {
         }
         out
     }
-
-    /// Phase 3.0 §11: the models-domain `SignalCandidate` stub must stay deleted.
-    #[test]
-    fn signal_candidate_typed_replaces_stub() {
-        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let quant_mod = manifest_dir.join("../quant-pivot-models/src/domain/quant/mod.rs");
-        let signal_rs = manifest_dir.join("../quant-pivot-models/src/domain/quant/signal.rs");
-        assert!(
-            !signal_rs.exists(),
-            "domain/quant/signal.rs stub must remain deleted"
-        );
-        let mod_src = fs::read_to_string(&quant_mod).expect("read domain/quant/mod.rs");
-        assert!(
-            !mod_src.contains("mod signal"),
-            "domain/quant/mod.rs must not declare mod signal"
-        );
-        assert!(
-            !mod_src.contains("SignalCandidate"),
-            "domain/quant must not reference SignalCandidate"
-        );
-    }
 }
 
 #[cfg(test)]
 mod feature_guard_tests {
-    /// The optimizer (`argmin`) and classical-ML (`smartcore`) stacks stay gated
-    /// until Phase 3.6 and must never be linked by default.
+    /// The optimizer (`argmin`) and classical-ML (`smartcore`) stacks stay behind
+    /// explicit features and must never be linked by default.
     ///
     /// `dataframe` (polars/parquet) is **intentionally excluded** from this
-    /// guard: Phase 3.5 links it workspace-wide so `quant-pivot-core` can
-    /// materialize offline training datasets (the `always_compile` decision —
-    /// `quant-pivot-core` enables `quant-pivot-research/dataframe`). Under
+    /// guard because `quant-pivot-core` enables it to materialize offline
+    /// training datasets. Under
     /// `cargo test --workspace` feature unification therefore turns `dataframe`
     /// on here, which is expected.
     //

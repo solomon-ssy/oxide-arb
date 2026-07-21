@@ -1,6 +1,8 @@
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    domain::{TradeTapeBlockCursorInfo, TradeTapeSourceKind, UpsertTradeTapeBlockCursor},
+    domain::data_plane::{
+        TradeTapeBlockCursorInfo, TradeTapeSourceKind, UpsertTradeTapeBlockCursor,
+    },
     types::EvmAddress,
 };
 

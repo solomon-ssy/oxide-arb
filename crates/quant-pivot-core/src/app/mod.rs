@@ -18,7 +18,6 @@ pub mod fact_writer_tasks;
 pub mod intent_service;
 pub mod lifecycle;
 pub mod periodic_services;
-pub mod phase_11_9_evidence_bootstrap;
 pub mod ports;
 pub mod reconciliation_worker;
 pub mod report_scheduler;
@@ -40,7 +39,25 @@ pub mod web_services;
 mod bundles;
 mod clob_market_info_worker;
 
-pub use bundles::*;
+use std::sync::Arc;
+
+pub use bundles::{
+    AccountBundle, AccountBundleDeps, DataBundle, DataBundleDeps, ExecutionBundle,
+    ExecutionBundleDeps, GovernanceBundle, GovernanceBundleDeps, InfraBundle, PgRepositories,
+    ReportBundle, ReportBundleDeps, ResearchBundle, ResearchBundleDeps, RuntimeSnapshot,
+};
+use flume::Receiver;
+use parking_lot::Mutex;
+use quant_pivot_models::{
+    config::DeployConfig,
+    domain::{
+        ports::ExecutionSubmitPort,
+        runtime::{CoreEvent, CoreEventPublisher},
+    },
+};
+use quant_pivot_repository::traits::FactorRepository;
+use quant_pivot_research::{artifact::ArtifactStore, pit::PointInTimeSnapshotSource};
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     execution::{DispatchWake, IntentLifecyclePublisher},
@@ -52,16 +69,6 @@ use crate::{
         model_runner::ModelRunner,
     },
 };
-use flume::Receiver;
-use parking_lot::Mutex;
-use quant_pivot_models::{
-    config::DeployConfig,
-    domain::{CoreEvent, CoreEventPublisher, ExecutionSubmitPort},
-};
-use quant_pivot_repository::traits::FactorRepository;
-use quant_pivot_research::{artifact::ArtifactStore, pit::PointInTimeSnapshotSource};
-use std::sync::Arc;
-use tokio_util::sync::CancellationToken;
 
 /// System composition root — bundles are the sole subsystem containers.
 pub struct AppContext {
@@ -103,22 +110,22 @@ impl AppContext {
         Arc::clone(&self.research.artifact_store)
     }
 
-    /// Online feature pipeline (3.2): invoke per round with a frozen config snapshot.
+    /// Online feature pipeline: invoke per round with a frozen config snapshot.
     pub fn feature_pipeline(&self) -> &FeaturePipelineService {
         self.research.feature_pipeline.as_ref()
     }
 
-    /// Online factor pipeline (3.3): invoke per round after feature vectors persist.
+    /// Online factor pipeline: invoke per round after feature vectors persist.
     pub fn factor_pipeline(&self) -> &FactorPipelineService {
         self.research.factor_pipeline.as_ref()
     }
 
-    /// Online inference orchestrator (3.4): selection/features/factors → candidates.
+    /// Online inference orchestrator: selection/features/factors → candidates.
     pub fn model_runner(&self) -> Arc<ModelRunner> {
         Arc::clone(&self.research.model_runner)
     }
 
-    /// Report lifecycle service (04.2): trigger → build → transaction → publish.
+    /// Report lifecycle service: trigger → build → transaction → publish.
     pub fn report_lifecycle(&self) -> Arc<ReportLifecycleService> {
         Arc::clone(&self.report.lifecycle)
     }
@@ -128,7 +135,7 @@ impl AppContext {
         Arc::clone(&self.report.coordinator)
     }
 
-    /// Postgres persistence for factor definitions and values (3.3).
+    /// Postgres persistence for factor definitions and values.
     pub fn factor_repo(&self) -> Arc<dyn FactorRepository> {
         Arc::clone(&self.research.factor_repo)
     }
@@ -138,7 +145,7 @@ impl AppContext {
         self.data.pit_source.as_ref()
     }
 
-    /// Entry-execution dispatcher (05.4): the single intent → venue submit bridge.
+    /// Entry-execution dispatcher: the single intent → venue submit bridge.
     pub fn execution_dispatcher(&self) -> Arc<dyn ExecutionSubmitPort> {
         Arc::clone(&self.execution.dispatcher)
     }

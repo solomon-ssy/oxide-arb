@@ -1,11 +1,12 @@
 //! Content-addressed identity for immutable factor-definition revisions.
 
-use crate::factors::FactorDefinitionDocument;
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::types::{
     ContentHash, FactorDefinitionId, factor::factor_definition_content_hash,
 };
 use uuid::Uuid;
+
+use crate::factors::FactorDefinitionDocument;
 
 /// Immutable identity of one logical factor revision.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -1,13 +1,26 @@
 //! Postgres-backed recommendation attribution repository.
 
-use crate::{postgres::error::not_found, traits::AttributionRepository};
 use chrono::{DateTime, Utc};
-use quant_pivot_error::storage::{StorageError, entity};
+use quant_pivot_error::storage::{StorageError, entity::QUANT_RECOMMENDATION};
 use quant_pivot_models::{
-    domain::{InsertFinalOutcome, NewRecommendationAttribution, RecommendationAttributionInfo},
+    domain::quant::{
+        InsertFinalOutcome, NewRecommendationAttribution, RecommendationAttributionInfo,
+    },
     entities::{
-        quant_execution_order, quant_order_intent, quant_position, quant_recommendation,
-        quant_recommendation_attribution, quant_reconciliation,
+        quant_execution_order::{
+            Column as QuantExecutionOrderColumn, Entity as QuantExecutionOrderEntity,
+            Relation as QuantExecutionOrderRelation,
+        },
+        quant_order_intent::{Column as QuantOrderIntentColumn, Entity as QuantOrderIntentEntity},
+        quant_position::{Column as QuantPositionColumn, Entity as QuantPositionEntity, Relation},
+        quant_recommendation::{Column as QuantRecommendationColumn, Entity},
+        quant_recommendation_attribution::{
+            Column, Entity as QuantRecommendationAttributionEntity,
+        },
+        quant_reconciliation::{
+            Column as QuantReconciliationColumn, Entity as QuantReconciliationEntity,
+            Relation as QuantReconciliationRelation,
+        },
     },
     enums::{
         execution::{PositionLedgerState, ReconciliationResult},
@@ -21,6 +34,8 @@ use sea_orm::{
     RelationTrait, Set, TransactionTrait,
     sea_query::{Expr, OnConflict, SelectStatement, SimpleExpr},
 };
+
+use crate::{postgres::error::not_found, traits::AttributionRepository};
 
 /// Postgres-backed recommendation attribution repository.
 pub struct PgAttributionRepository {
@@ -42,16 +57,15 @@ impl AttributionRepository for PgAttributionRepository {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
         let recommendation_id = attribution.recommendation_id.clone();
 
-        let recommendation_row =
-            quant_recommendation::Entity::find_by_id(recommendation_id.clone())
-                .one(&txn)
-                .await
-                .map_err(StorageError::from)?
-                .ok_or_else(|| not_found(entity::QUANT_RECOMMENDATION, &recommendation_id))?;
+        let recommendation_row = Entity::find_by_id(recommendation_id.clone())
+            .one(&txn)
+            .await
+            .map_err(StorageError::from)?
+            .ok_or_else(|| not_found(QUANT_RECOMMENDATION, &recommendation_id))?;
         if !recommendation_row.status.eligible_for_attribution() {
             txn.rollback().await.map_err(StorageError::from)?;
             return Err(StorageError::InvariantViolation {
-                entity: Some(entity::QUANT_RECOMMENDATION),
+                entity: Some(QUANT_RECOMMENDATION),
                 detail: format!(
                     "cannot attribute recommendation {recommendation_id} in status {:?}",
                     recommendation_row.status
@@ -59,13 +73,12 @@ impl AttributionRepository for PgAttributionRepository {
             });
         }
 
-        let on_conflict =
-            OnConflict::column(quant_recommendation_attribution::Column::RecommendationId)
-                .do_nothing()
-                .to_owned();
+        let on_conflict = OnConflict::column(Column::RecommendationId)
+            .do_nothing()
+            .to_owned();
 
         let row =
-            match quant_recommendation_attribution::Entity::insert(attribution.into_active_model())
+            match QuantRecommendationAttributionEntity::insert(attribution.into_active_model())
                 .on_conflict(on_conflict)
                 .exec_with_returning(&txn)
                 .await
@@ -93,11 +106,8 @@ impl AttributionRepository for PgAttributionRepository {
         &self,
         recommendation_id: &RecommendationId,
     ) -> Result<Option<RecommendationAttributionInfo>, StorageError> {
-        quant_recommendation_attribution::Entity::find()
-            .filter(
-                quant_recommendation_attribution::Column::RecommendationId
-                    .eq(recommendation_id.clone()),
-            )
+        QuantRecommendationAttributionEntity::find()
+            .filter(Column::RecommendationId.eq(recommendation_id.clone()))
             .one(&self.db)
             .await
             .map_err(StorageError::from)
@@ -113,13 +123,13 @@ impl AttributionRepository for PgAttributionRepository {
         if limit == 0 {
             return Ok(Vec::new());
         }
-        quant_recommendation_attribution::Entity::find()
+        QuantRecommendationAttributionEntity::find()
             .filter(
-                quant_recommendation_attribution::Column::LabelAvailableAt
+                Column::LabelAvailableAt
                     .gte(window_start)
-                    .and(quant_recommendation_attribution::Column::LabelAvailableAt.lt(window_end)),
+                    .and(Column::LabelAvailableAt.lt(window_end)),
             )
-            .order_by_asc(quant_recommendation_attribution::Column::LabelAvailableAt)
+            .order_by_asc(Column::LabelAvailableAt)
             .limit(limit)
             .all(&self.db)
             .await
@@ -128,7 +138,7 @@ impl AttributionRepository for PgAttributionRepository {
     }
 }
 
-// ── Expired-path ledger guards (05.7) ────────────────────────────────────────
+// ── Expired-path ledger guards ────────────────────────────────────────
 
 /// SQL filters: expired recommendations whose execution ledger has settled.
 #[must_use]
@@ -145,10 +155,10 @@ pub fn expired_ledger_filters() -> Vec<SimpleExpr> {
 pub async fn blocks_attribution(
     db: &DatabaseConnection,
     recommendation_id: &RecommendationId,
-) -> Result<bool, sea_orm::DbErr> {
-    if quant_order_intent::Entity::find()
-        .filter(quant_order_intent::Column::RecommendationId.eq(recommendation_id.clone()))
-        .filter(quant_order_intent::Column::Status.is_in(non_terminal_intents()))
+) -> Result<bool, DbErr> {
+    if QuantOrderIntentEntity::find()
+        .filter(QuantOrderIntentColumn::RecommendationId.eq(recommendation_id.clone()))
+        .filter(QuantOrderIntentColumn::Status.is_in(non_terminal_intents()))
         .limit(1)
         .one(db)
         .await?
@@ -157,13 +167,10 @@ pub async fn blocks_attribution(
         return Ok(true);
     }
 
-    if quant_position::Entity::find()
-        .join(
-            JoinType::InnerJoin,
-            quant_position::Relation::OrderIntent.def(),
-        )
-        .filter(quant_order_intent::Column::RecommendationId.eq(recommendation_id.clone()))
-        .filter(quant_position::Column::State.is_in(blocking_positions()))
+    if QuantPositionEntity::find()
+        .join(JoinType::InnerJoin, Relation::OrderIntent.def())
+        .filter(QuantOrderIntentColumn::RecommendationId.eq(recommendation_id.clone()))
+        .filter(QuantPositionColumn::State.is_in(blocking_positions()))
         .limit(1)
         .one(db)
         .await?
@@ -172,13 +179,13 @@ pub async fn blocks_attribution(
         return Ok(true);
     }
 
-    if quant_execution_order::Entity::find()
+    if QuantExecutionOrderEntity::find()
         .join(
             JoinType::InnerJoin,
-            quant_execution_order::Relation::OrderIntent.def(),
+            QuantExecutionOrderRelation::OrderIntent.def(),
         )
-        .filter(quant_order_intent::Column::RecommendationId.eq(recommendation_id.clone()))
-        .filter(quant_execution_order::Column::State.is_in(blocking_orders()))
+        .filter(QuantOrderIntentColumn::RecommendationId.eq(recommendation_id.clone()))
+        .filter(QuantExecutionOrderColumn::State.is_in(blocking_orders()))
         .limit(1)
         .one(db)
         .await?
@@ -187,13 +194,13 @@ pub async fn blocks_attribution(
         return Ok(true);
     }
 
-    if quant_reconciliation::Entity::find()
+    if QuantReconciliationEntity::find()
         .join(
             JoinType::InnerJoin,
-            quant_reconciliation::Relation::OrderIntent.def(),
+            QuantReconciliationRelation::OrderIntent.def(),
         )
-        .filter(quant_order_intent::Column::RecommendationId.eq(recommendation_id.clone()))
-        .filter(quant_reconciliation::Column::Result.is_in(blocking_recons()))
+        .filter(QuantOrderIntentColumn::RecommendationId.eq(recommendation_id.clone()))
+        .filter(QuantReconciliationColumn::Result.is_in(blocking_recons()))
         .limit(1)
         .one(db)
         .await?
@@ -244,69 +251,63 @@ fn blocking_positions() -> Vec<PositionLedgerState> {
 
 fn exists_non_terminal_intent() -> SimpleExpr {
     exists(
-        quant_order_intent::Entity::find()
+        QuantOrderIntentEntity::find()
             .select_only()
-            .column(quant_order_intent::Column::OrderIntentId)
+            .column(QuantOrderIntentColumn::OrderIntentId)
             .filter(recommendation_matches_intent())
-            .filter(quant_order_intent::Column::Status.is_in(non_terminal_intents()))
+            .filter(QuantOrderIntentColumn::Status.is_in(non_terminal_intents()))
             .into_query(),
     )
 }
 
 fn exists_open_position() -> SimpleExpr {
     exists(
-        quant_position::Entity::find()
+        QuantPositionEntity::find()
             .select_only()
-            .column(quant_position::Column::PositionId)
-            .join(
-                JoinType::InnerJoin,
-                quant_position::Relation::OrderIntent.def(),
-            )
+            .column(QuantPositionColumn::PositionId)
+            .join(JoinType::InnerJoin, Relation::OrderIntent.def())
             .filter(recommendation_matches_intent())
-            .filter(quant_position::Column::State.is_in(blocking_positions()))
+            .filter(QuantPositionColumn::State.is_in(blocking_positions()))
             .into_query(),
     )
 }
 
 fn exists_blocking_order() -> SimpleExpr {
     exists(
-        quant_execution_order::Entity::find()
+        QuantExecutionOrderEntity::find()
             .select_only()
-            .column(quant_execution_order::Column::ExecutionOrderId)
+            .column(QuantExecutionOrderColumn::ExecutionOrderId)
             .join(
                 JoinType::InnerJoin,
-                quant_execution_order::Relation::OrderIntent.def(),
+                QuantExecutionOrderRelation::OrderIntent.def(),
             )
             .filter(recommendation_matches_intent())
-            .filter(quant_execution_order::Column::State.is_in(blocking_orders()))
+            .filter(QuantExecutionOrderColumn::State.is_in(blocking_orders()))
             .into_query(),
     )
 }
 
 fn exists_blocking_recon() -> SimpleExpr {
     exists(
-        quant_reconciliation::Entity::find()
+        QuantReconciliationEntity::find()
             .select_only()
-            .column(quant_reconciliation::Column::ReconciliationId)
+            .column(QuantReconciliationColumn::ReconciliationId)
             .join(
                 JoinType::InnerJoin,
-                quant_reconciliation::Relation::OrderIntent.def(),
+                QuantReconciliationRelation::OrderIntent.def(),
             )
             .filter(recommendation_matches_intent())
-            .filter(quant_reconciliation::Column::Result.is_in(blocking_recons()))
+            .filter(QuantReconciliationColumn::Result.is_in(blocking_recons()))
             .into_query(),
     )
 }
 
 fn recommendation_matches_intent() -> SimpleExpr {
     Expr::col((
-        quant_order_intent::Entity,
-        quant_order_intent::Column::RecommendationId,
+        QuantOrderIntentEntity,
+        QuantOrderIntentColumn::RecommendationId,
     ))
-    .equals((
-        quant_recommendation::Entity,
-        quant_recommendation::Column::RecommendationId,
-    ))
+    .equals((Entity, QuantRecommendationColumn::RecommendationId))
 }
 
 fn exists(sub_query: SelectStatement) -> SimpleExpr {

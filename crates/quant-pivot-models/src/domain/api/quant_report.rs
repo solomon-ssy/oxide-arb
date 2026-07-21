@@ -6,13 +6,23 @@
 //! (`Deserialize` + `Validate`). Views are built from persistence `*Info` / the
 //! computed `ReportDiff`; the persistence structs are never serialized directly.
 
+use std::collections::BTreeMap;
+
+use chrono::{DateTime, Utc};
+use quant_pivot_macros::NormalizePageQuery;
+use serde::{Deserialize, Serialize};
+use validator::Validate;
+
 use crate::{
     domain::{
-        DecisionBoundaryEvidenceView, ModelRouteEvidenceView, RecommendationChangedField,
-        RecommendationDelta, RecommendationDiffSnapshot, RecommendationReportInfo,
-        ReportCurrentHealthInfo, ReportDiff, ReportFactDeliveryInfo, ReportRunInfo,
-        ReportScheduleGapInfo, ReportScheduleHealthInfo, ReportScheduleStateInfo,
+        api::{DecisionBoundaryEvidenceView, ModelRouteEvidenceView},
         pagination::PageRequest,
+        quant::{
+            RecommendationChangedField, RecommendationDelta, RecommendationDiffSnapshot,
+            RecommendationReportInfo, ReportCurrentHealthInfo, ReportDiff, ReportFactDeliveryInfo,
+            ReportRunInfo, ReportScheduleGapInfo, ReportScheduleHealthInfo,
+            ReportScheduleStateInfo,
+        },
     },
     enums::quant::{
         AccountSource, EmptyReportReason, FeatureParityStage, OutcomeSide, QuantRuntimeMode,
@@ -29,11 +39,6 @@ use crate::{
         ResearchProfileId, ResearchProfileRef, SignalCandidateId, TokenId, Usd, WorkerId,
     },
 };
-use chrono::{DateTime, Utc};
-use quant_pivot_macros::NormalizePageQuery;
-use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
-use validator::Validate;
 
 /// List-row projection of a recommendation report (header + summary roll-up).
 #[derive(Debug, Clone, Serialize)]

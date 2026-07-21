@@ -1,7 +1,7 @@
 //! [`ClassicalRuntime`]: the online `QuantModelRuntime` for a classical
-//! (smartcore-backed) model (Phase 3.6, `ml-classical` feature).
+//! SmartCore-backed model behind the `ml-classical` feature.
 //!
-//! Loading is fail-closed: the recorded crate version must match (§15.6) and the
+//! Loading is fail-closed: the recorded crate version must match and the
 //! serialization format must be `bincode` before the estimator is deserialized.
 //! Inference standardizes each row with the frozen preprocessing, predicts a
 //! yes-probability, and maps it to a sided [`SignalCandidate`] priced from the
@@ -292,8 +292,8 @@ impl ClassicalRuntime {
             confidence: scores.confidence,
             expected_return_bps: projection.expected_return_bps,
             downside_bps: Decimal::from(MAX_LONG_DOWNSIDE_BPS),
-            // Classical is explicitly ShadowOnly until 11.9 binds an
-            // independently validated probability/return/downside calibration.
+            // Classical is explicitly ShadowOnly until it binds an independently
+            // validated probability/return/downside calibration.
             win_probability: None,
             entry_price_ref: projection.entry_price_ref,
             suggested_horizon_secs: scores.suggested_horizon_secs,
@@ -820,6 +820,18 @@ fn f64_to_decimal(value: f64) -> QuantResult<Decimal> {
 
 #[cfg(test)]
 mod tests {
+    use chrono::{DateTime, TimeZone, Utc};
+    use ndarray::Array1;
+    use quant_pivot_models::{
+        enums::quant::{DataQualityStatus, OutcomeSide},
+        types::{
+            ArtifactUri, MarketId, ModelArtifactId, ModelInputRequiredness, ModelInputSpec,
+            ModelRunId, ModelVersionId, Price, TokenId, builtin_research_profiles,
+        },
+    };
+    use rust_decimal::Decimal;
+    use rust_decimal_macros::dec;
+
     use super::{ClassicalRuntime, project_settlement_probability};
     use crate::{
         features::{
@@ -843,17 +855,6 @@ mod tests {
         test_support::content_hash as hash,
         training::{FeatureColumnSpec, ModelInputCell, TrainingMatrix},
     };
-    use chrono::{DateTime, TimeZone, Utc};
-    use ndarray::Array1;
-    use quant_pivot_models::{
-        enums::quant::{DataQualityStatus, OutcomeSide},
-        types::{
-            ArtifactUri, MarketId, ModelArtifactId, ModelInputRequiredness, ModelInputSpec,
-            ModelRunId, ModelVersionId, Price, TokenId, builtin_research_profiles,
-        },
-    };
-    use rust_decimal::Decimal;
-    use rust_decimal_macros::dec;
 
     fn fixture_row_secs(i: usize) -> i64 {
         i64::try_from(i).expect("fixture row index fits i64")

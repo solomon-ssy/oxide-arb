@@ -1,5 +1,12 @@
 //! Recommendation-level durable entry-condition state.
 
+use chrono::{DateTime, Utc};
+use sea_orm::entity::prelude::*;
+
+use super::{
+    quant_entry_condition_artifact, quant_entry_condition_audit, quant_order_intent,
+    quant_recommendation,
+};
 use crate::{
     enums::quant::EntryConditionState,
     types::{
@@ -7,8 +14,6 @@ use crate::{
         EntryConditionInstanceId, OrderIntentId, RecommendationId, WorkerId,
     },
 };
-use chrono::{DateTime, Utc};
-use sea_orm::entity::prelude::*;
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -47,18 +52,18 @@ pub struct Model {
         from = "recommendation_id",
         to = "recommendation_id"
     )]
-    pub recommendation: BelongsTo<super::quant_recommendation::Entity>,
+    pub recommendation: BelongsTo<quant_recommendation::Entity>,
     #[sea_orm(
         belongs_to,
         relation_enum = "Artifact",
         from = "artifact_id",
         to = "artifact_id"
     )]
-    pub artifact: BelongsTo<Option<super::quant_entry_condition_artifact::Entity>>,
+    pub artifact: BelongsTo<Option<quant_entry_condition_artifact::Entity>>,
     #[sea_orm(has_many, relation_enum = "Audit")]
-    pub audit: HasMany<super::quant_entry_condition_audit::Entity>,
+    pub audit: HasMany<quant_entry_condition_audit::Entity>,
     #[sea_orm(has_many, relation_enum = "OrderIntent")]
-    pub order_intent: HasMany<super::quant_order_intent::Entity>,
+    pub order_intent: HasMany<quant_order_intent::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

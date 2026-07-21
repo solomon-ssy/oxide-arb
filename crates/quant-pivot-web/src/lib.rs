@@ -1,4 +1,4 @@
-//! `quant-pivot-web` — HTTP API + RBAC control-plane (Phase 6 complete).
+//! `quant-pivot-web` — HTTP API and RBAC control plane.
 //!
 //! Delivers the full web tier: JWT authentication (access/refresh + Redis
 //! revocation blacklist, fail-closed on store outage), Casbin authorization,
@@ -28,13 +28,13 @@ pub mod static_files;
 pub mod ws;
 
 use actix_cors::Cors;
-use actix_web::{App, HttpServer, middleware::from_fn, web};
+use actix_web::{App, HttpServer, middleware::from_fn, web::Data};
 use quant_pivot_error::{QuantResult, infra::InfraError};
 use quant_pivot_models::config::WebConfig;
+use request_tracing::HttpRootSpanBuilder;
+use state::AppState;
 use tokio_util::sync::CancellationToken;
 use tracing_actix_web::TracingLogger;
-
-pub use state::AppState;
 
 /// Build the CORS middleware from configuration.
 ///
@@ -66,7 +66,7 @@ pub async fn spawn_web_server(
     config: WebConfig,
     shutdown: CancellationToken,
 ) -> QuantResult<()> {
-    let data = web::Data::new(state);
+    let data = Data::new(state);
     let bind_addr = (config.listen_host.clone(), config.listen_port);
     let app_config = config.clone();
 
@@ -74,7 +74,7 @@ pub async fn spawn_web_server(
         let static_config = app_config.clone();
         App::new()
             .app_data(data.clone())
-            .wrap(TracingLogger::<request_tracing::HttpRootSpanBuilder>::new())
+            .wrap(TracingLogger::<HttpRootSpanBuilder>::new())
             .wrap(cors_from(&app_config))
             .wrap(from_fn(middleware::request_id))
             // Outermost: observes the final status + inner-injected attributes.

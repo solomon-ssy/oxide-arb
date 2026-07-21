@@ -1,14 +1,20 @@
-//! Model publication lifecycle admin endpoints (Phase 3.7).
+//! Model publication lifecycle admin endpoints.
 //!
 //! Money-critical lifecycle transitions are gated by quality gates + shadow
 //! stability in core; these routes add Casbin role enforcement and HTTP audit.
 
-use actix_web::{http::Method, web};
+use actix_web::{
+    http::Method,
+    web::{Data, Path, Query},
+};
 use quant_pivot_models::{
     domain::{
-        BindCalibrationRequest, BindPublishPathSetRequest, GovernanceActor,
-        ModelCalibrationFitPreflightQuery, ModelCalibrationFitPreflightView, PublishModelCommand,
-        PublishModelRequest, RetireModelCommand, RetireModelRequest, TrainedModelView,
+        api::{
+            BindCalibrationRequest, BindPublishPathSetRequest, ModelCalibrationFitPreflightQuery,
+            ModelCalibrationFitPreflightView, PublishModelRequest, RetireModelRequest,
+            TrainedModelView,
+        },
+        ports::{GovernanceActor, PublishModelCommand, RetireModelCommand},
     },
     enums::{
         operation_log::OperationCategory,
@@ -67,8 +73,8 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
 
 /// `POST /api/research/models/{id}/publish` — promote after quality gate + shadow stability.
 pub async fn publish(
-    state: web::Data<AppState>,
-    id: web::Path<ModelVersionId>,
+    state: Data<AppState>,
+    id: Path<ModelVersionId>,
     actor: AuthedActor,
     acting_role: ActingRole,
     request_id: RequestId,
@@ -112,8 +118,8 @@ pub async fn publish(
 
 /// `POST /api/research/models/{id}/retire` — retire a published version without restore.
 pub async fn retire(
-    state: web::Data<AppState>,
-    id: web::Path<ModelVersionId>,
+    state: Data<AppState>,
+    id: Path<ModelVersionId>,
     actor: AuthedActor,
     acting_role: ActingRole,
     request_id: RequestId,
@@ -157,8 +163,8 @@ pub async fn retire(
 
 /// `POST /api/research/models/{id}/bind-publish-path-set` — pin CPCV path set for publish gates.
 pub async fn bind_publish_path_set(
-    state: web::Data<AppState>,
-    id: web::Path<ModelVersionId>,
+    state: Data<AppState>,
+    id: Path<ModelVersionId>,
     actor: AuthedActor,
     acting_role: ActingRole,
     request_id: RequestId,
@@ -200,8 +206,8 @@ pub async fn bind_publish_path_set(
 
 /// `POST /api/research/models/{id}/bind-calibration` — bind a calibrator artifact.
 pub async fn bind_calibration(
-    state: web::Data<AppState>,
-    id: web::Path<ModelVersionId>,
+    state: Data<AppState>,
+    id: Path<ModelVersionId>,
     actor: AuthedActor,
     acting_role: ActingRole,
     request_id: RequestId,
@@ -245,12 +251,12 @@ pub async fn bind_calibration(
 /// `GET /api/research/models/{id}/calibration-fit-preflight` — read-only
 /// disjoint + embargo check for the "Fit Model Calibrator" wizard.
 ///
-/// Surfaced live as the operator picks a model/dataset pair (Phase 11.3
-/// §10). Never enqueues a job or mutates state.
+/// Surfaced live as the operator picks a model/dataset pair. Never enqueues a
+/// job or mutates state.
 pub async fn calibration_fit_preflight(
-    state: web::Data<AppState>,
-    id: web::Path<ModelVersionId>,
-    query: web::Query<ModelCalibrationFitPreflightQuery>,
+    state: Data<AppState>,
+    id: Path<ModelVersionId>,
+    query: Query<ModelCalibrationFitPreflightQuery>,
 ) -> Result<WebResponse<ModelCalibrationFitPreflightView>, WebError> {
     let view = state
         .model_calibration_fit

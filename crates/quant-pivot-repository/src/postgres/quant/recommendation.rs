@@ -1,5 +1,25 @@
 //! Postgres-backed recommendation repository (read + per-recommendation expiry).
 
+use chrono::{DateTime, Utc};
+use quant_pivot_error::storage::{StorageError, entity::QUANT_RECOMMENDATION};
+use quant_pivot_models::{
+    domain::{
+        governance::NewOperationLog,
+        quant::{OrderIntentInfo, RecommendationInfo},
+    },
+    entities::{
+        operation_log::Entity as OperationLogEntity,
+        quant_recommendation::{Column, Entity, Relation},
+        quant_recommendation_attribution::Column as QuantRecommendationAttributionColumn,
+    },
+    enums::{execution::ApprovalInvalidation, quant::RecommendationStatus},
+    types::{RecommendationId, RecommendationReportId},
+};
+use sea_orm::{
+    ActiveModelTrait, ActiveValue, ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel,
+    JoinType, QueryFilter, QueryOrder, QuerySelect, RelationTrait, TransactionTrait,
+};
+
 use crate::{
     postgres::{
         error,
@@ -8,18 +28,6 @@ use crate::{
         state_hash,
     },
     traits::RecommendationRepository,
-};
-use chrono::{DateTime, Utc};
-use quant_pivot_error::storage::{StorageError, entity};
-use quant_pivot_models::{
-    domain::{NewOperationLog, OrderIntentInfo, RecommendationInfo},
-    entities::{operation_log, quant_recommendation, quant_recommendation_attribution},
-    enums::{execution::ApprovalInvalidation, quant::RecommendationStatus},
-    types::{RecommendationId, RecommendationReportId},
-};
-use sea_orm::{
-    ActiveModelTrait, ActiveValue, ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel,
-    JoinType, QueryFilter, QueryOrder, QuerySelect, RelationTrait, TransactionTrait,
 };
 
 /// Postgres-backed recommendation repository.
@@ -39,9 +47,9 @@ impl RecommendationRepository for PgRecommendationRepository {
         &self,
         report_id: &RecommendationReportId,
     ) -> Result<Vec<RecommendationInfo>, StorageError> {
-        quant_recommendation::Entity::find()
-            .filter(quant_recommendation::Column::RecommendationReportId.eq(report_id.clone()))
-            .order_by_asc(quant_recommendation::Column::Rank)
+        Entity::find()
+            .filter(Column::RecommendationReportId.eq(report_id.clone()))
+            .order_by_asc(Column::Rank)
             .all(&self.db)
             .await
             .map_err(StorageError::from)
@@ -52,7 +60,7 @@ impl RecommendationRepository for PgRecommendationRepository {
         &self,
         recommendation_id: &RecommendationId,
     ) -> Result<Option<RecommendationInfo>, StorageError> {
-        quant_recommendation::Entity::find_by_id(recommendation_id.clone())
+        Entity::find_by_id(recommendation_id.clone())
             .one(&self.db)
             .await
             .map_err(StorageError::from)
@@ -63,10 +71,10 @@ impl RecommendationRepository for PgRecommendationRepository {
         &self,
         recommendation_ids: &[RecommendationId],
     ) -> Result<Vec<RecommendationInfo>, StorageError> {
-        find_models_by_id_chunks::<quant_recommendation::Entity, _, _>(
+        find_models_by_id_chunks::<Entity, _, _>(
             &self.db,
             recommendation_ids,
-            quant_recommendation::Column::RecommendationId,
+            Column::RecommendationId,
         )
         .await
         .map(|rows| rows.into_iter().map(Into::into).collect())
@@ -77,13 +85,10 @@ impl RecommendationRepository for PgRecommendationRepository {
         now: DateTime<Utc>,
         limit: u64,
     ) -> Result<Vec<RecommendationId>, StorageError> {
-        quant_recommendation::Entity::find()
-            .filter(
-                quant_recommendation::Column::Status
-                    .is_in(RecommendationStatus::NEW_INTENT_AUTHORITY),
-            )
-            .filter(quant_recommendation::Column::ValidUntil.lte(now))
-            .order_by_asc(quant_recommendation::Column::ValidUntil)
+        Entity::find()
+            .filter(Column::Status.is_in(RecommendationStatus::NEW_INTENT_AUTHORITY))
+            .filter(Column::ValidUntil.lte(now))
+            .order_by_asc(Column::ValidUntil)
             .limit(limit)
             .all(&self.db)
             .await
@@ -96,13 +101,10 @@ impl RecommendationRepository for PgRecommendationRepository {
         before: DateTime<Utc>,
         limit: u64,
     ) -> Result<Vec<(RecommendationId, DateTime<Utc>)>, StorageError> {
-        quant_recommendation::Entity::find()
-            .filter(
-                quant_recommendation::Column::Status
-                    .is_in(RecommendationStatus::NEW_INTENT_AUTHORITY),
-            )
-            .filter(quant_recommendation::Column::ValidUntil.lte(before))
-            .order_by_asc(quant_recommendation::Column::ValidUntil)
+        Entity::find()
+            .filter(Column::Status.is_in(RecommendationStatus::NEW_INTENT_AUTHORITY))
+            .filter(Column::ValidUntil.lte(before))
+            .order_by_asc(Column::ValidUntil)
             .limit(limit)
             .all(&self.db)
             .await
@@ -121,15 +123,15 @@ impl RecommendationRepository for PgRecommendationRepository {
         operation_log: NewOperationLog,
     ) -> Result<(RecommendationInfo, Vec<OrderIntentInfo>), StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let row = quant_recommendation::Entity::find_by_id(recommendation_id.clone())
+        let row = Entity::find_by_id(recommendation_id.clone())
             .lock_exclusive()
             .one(&txn)
             .await
             .map_err(StorageError::from)?
-            .ok_or_else(|| error::not_found(entity::QUANT_RECOMMENDATION, recommendation_id))?;
+            .ok_or_else(|| error::not_found(QUANT_RECOMMENDATION, recommendation_id))?;
         if !row.status.allows_new_intent() {
             return Err(error::state_conflict(
-                entity::QUANT_RECOMMENDATION,
+                QUANT_RECOMMENDATION,
                 Some(recommendation_id),
                 format!(
                     "recommendation is {} (only actionable recommendations expire)",
@@ -152,7 +154,7 @@ impl RecommendationRepository for PgRecommendationRepository {
         let after_info: RecommendationInfo = model.clone().into();
         let operation_log =
             state_hash::apply_transition_hashes(operation_log, &before_info, &after_info)?;
-        operation_log::Entity::insert(operation_log.into_active_model())
+        OperationLogEntity::insert(operation_log.into_active_model())
             .exec(&txn)
             .await
             .map_err(StorageError::from)?;
@@ -167,17 +169,14 @@ impl RecommendationRepository for PgRecommendationRepository {
         if limit == 0 {
             return Ok(Vec::new());
         }
-        let mut query = quant_recommendation::Entity::find()
-            .join(
-                JoinType::LeftJoin,
-                quant_recommendation::Relation::Attribution.def(),
-            )
-            .filter(quant_recommendation::Column::Status.is_in([
+        let mut query = Entity::find()
+            .join(JoinType::LeftJoin, Relation::Attribution.def())
+            .filter(Column::Status.is_in([
                 RecommendationStatus::Expired,
                 RecommendationStatus::Superseded,
             ]))
-            .filter(quant_recommendation_attribution::Column::RecommendationId.is_null())
-            .order_by_asc(quant_recommendation::Column::ValidUntil)
+            .filter(QuantRecommendationAttributionColumn::RecommendationId.is_null())
+            .order_by_asc(Column::ValidUntil)
             .limit(limit);
         for guard in attribution::expired_ledger_filters() {
             query = query.filter(guard);

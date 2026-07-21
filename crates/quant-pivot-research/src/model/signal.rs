@@ -1,8 +1,8 @@
 //! Strongly-typed [`SignalCandidate`] and its explanation types.
 //!
-//! Replaces the deleted `quant-pivot-models` stub (`String` id / `i8` side /
-//! bare `Decimal`). This is the model runtime's output before portfolio
-//! pruning; 3.4 maps it to `QuantSignalCandidateEventRow` for `ClickHouse`.
+//! This is the model runtime's output before portfolio pruning; the
+//! observability boundary maps it to
+//! `QuantSignalCandidateEventRow` for `ClickHouse`.
 
 use std::collections::BTreeSet;
 
@@ -108,19 +108,18 @@ pub struct SignalCandidate {
     pub confidence: Probability,
     /// Expected (probability-weighted **mean**) return in basis points — `E[r]`,
     /// not a conditional take-profit target. Audit-only once `win_probability`
-    /// is `Some`: Kelly sizing (Phase 11.3 §4 redesign) uses `win_probability`
+    /// is `Some`: Kelly sizing uses `win_probability`
     /// directly, never re-derives it from `E[r]`.
     pub expected_return_bps: Decimal,
     /// Estimated downside (stop-loss magnitude) in basis points — `l`. Feeds
-    /// the exit plan's stop-loss price (Phase 11.7 territory); no longer part
-    /// of the Kelly win-probability derivation (Phase 11.3 §4 redesign).
+    /// the exit plan's stop-loss price; no longer part
+    /// of the Kelly win-probability derivation.
     pub downside_bps: Decimal,
     /// The calibrated `P(win)` Kelly sizing consumes directly as `q`
     /// (`f* = (q - p) / (1 - p)`, `p` = `entry_price_ref`). `Some` only when
     /// the emitting model's return model is `Calibrated`; `None` for the
     /// `Heuristic` bootstrap path, whose sizing is fenced off from production
-    /// by fail-closed publish/admission gates (Phase 11.3 §4 redesign — see
-    /// `crate::portfolio::sizing`).
+    /// by fail-closed publish and admission gates; see `crate::portfolio::sizing`.
     pub win_probability: Option<Probability>,
     /// Reference entry price.
     pub entry_price_ref: Price,
@@ -306,18 +305,20 @@ pub fn signal_candidate_events(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        ModelExplanation, OutcomeSide, SignalCandidate, SignalWarning,
-        canonical_business_prediction_hash, signal_candidate_event, signal_candidate_events,
-    };
+    use std::slice;
+
     use chrono::Utc;
     use quant_pivot_models::types::{
         MarketId, ModelRunId, Price, Probability, SignalCandidateId, TokenId,
     };
     use rust_decimal::Decimal;
-    use std::slice;
 
-    /// Constructs a strongly-typed candidate (replaces the deleted models stub).
+    use super::{
+        ModelExplanation, OutcomeSide, SignalCandidate, SignalWarning,
+        canonical_business_prediction_hash, signal_candidate_event, signal_candidate_events,
+    };
+
+    /// Construct a strongly-typed candidate.
     #[test]
     fn typed_signal_candidate_constructs_from_newtypes() {
         let candidate = SignalCandidate {

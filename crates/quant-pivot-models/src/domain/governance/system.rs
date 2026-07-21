@@ -1,10 +1,16 @@
 //! System status, lifecycle, config, accounting, and reporting domain models.
 
+use chrono::{DateTime, Utc};
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
+use serde::{Deserialize, Serialize};
+
 use crate::{
     domain::{
-        ExecutionRecoverySummary,
-        governance::kill_switch::KillSwitchView,
-        lifecycle::{MarketDataConnectivity, OperationalPhase, WsShardConnectivity},
+        api::ExecutionRecoverySummary,
+        governance::{
+            kill_switch::KillSwitchView,
+            lifecycle::{MarketDataConnectivity, OperationalPhase, WsShardConnectivity},
+        },
         ports::runtime_control::CatalogState,
     },
     entities::{
@@ -33,9 +39,6 @@ use crate::{
         ProductionEvidenceId, ProfileArtifactId, RoleCode, SchemaVersion, UserId,
     },
 };
-use chrono::{DateTime, Utc};
-use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
-use serde::{Deserialize, Serialize};
 
 /// Overall system status reported by the health endpoint.
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -42,7 +42,12 @@ use crate::{
     },
     features::{
         self, FeatureCellState, FeatureName, FeatureValue, FeatureVector,
-        names::{book, market, micro, ts},
+        names::{
+            book,
+            market::TIME_TO_RESOLUTION_SECS,
+            micro::QUOTE_UPDATE_RATE,
+            ts::{MACD_NORM, PRICE_REVERSAL},
+        },
     },
     precision::RESEARCH_DECIMAL_SCALE,
 };
@@ -86,7 +91,7 @@ pub fn generic_factors(
     factors.push(feature_factor(
         &MEAN_REVERSION,
         FactorFamily::MeanReversion,
-        ts::PRICE_REVERSAL,
+        PRICE_REVERSAL,
         FactorDirection::Positive,
         FactorNormalization::WinsorizedZScore,
         false,
@@ -111,7 +116,7 @@ pub fn generic_factors(
         feature_factor(
             &MARKET_ACTIVITY,
             FactorFamily::Activity,
-            micro::QUOTE_UPDATE_RATE,
+            QUOTE_UPDATE_RATE,
             FactorDirection::Positive,
             FactorNormalization::WinsorizedZScore,
             false,
@@ -120,7 +125,7 @@ pub fn generic_factors(
         feature_factor(
             &TIME_TO_RESOLUTION,
             FactorFamily::Resolution,
-            market::TIME_TO_RESOLUTION_SECS,
+            TIME_TO_RESOLUTION_SECS,
             FactorDirection::Positive,
             FactorNormalization::Rank,
             false,
@@ -182,7 +187,7 @@ fn momentum_factors(
     factors.push(feature_factor(
         &MOMENTUM_MACD,
         FactorFamily::Momentum,
-        ts::MACD_NORM,
+        MACD_NORM,
         FactorDirection::Positive,
         FactorNormalization::WinsorizedZScore,
         false,
@@ -431,7 +436,7 @@ pub(super) fn extract_decimal(value: &FeatureValue) -> Option<Decimal> {
 /// audit #3 removed — those (winsor / clamp / min-max) are fully config-driven in
 /// [`crate::factors::normalize`]. Keeping this mapping fixed also preserves the
 /// factor engine's infallible construction (no per-compute `DecimalValue`
-/// parse). Distributional tuning of the alpha itself is learned in 11.4.
+/// parse). Distributional tuning of the alpha itself belongs to model training.
 pub(super) fn data_quality_confidence(status: DataQualityStatus) -> Decimal {
     match status {
         DataQualityStatus::Fresh => Decimal::ONE,

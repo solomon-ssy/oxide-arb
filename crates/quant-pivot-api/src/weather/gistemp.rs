@@ -3,15 +3,17 @@
 use std::{str::FromStr, time::Duration};
 
 use chrono::{DateTime, NaiveDate, Utc};
+use csv::ReaderBuilder;
 use quant_pivot_error::{QuantError, QuantResult, api::ApiError};
 use quant_pivot_models::{
     config::NasaGistempSourceConfig,
-    domain::{WeatherObservationReport, WeatherObservationReportKind},
+    domain::data_plane::{WeatherObservationReport, WeatherObservationReportKind},
     hashing::CanonicalDigest,
     types::{
         ContentHash, DomainInstrumentKey, DomainMeasurementUnit, DomainSourceId, WeatherVariable,
     },
 };
+use reqwest::Client;
 use rust_decimal::Decimal;
 use serde::Serialize;
 
@@ -30,13 +32,13 @@ pub struct GistempDataset {
 /// Public NASA GISS table client.
 pub struct NasaGistempSource {
     config: NasaGistempSourceConfig,
-    http: reqwest::Client,
+    http: Client,
     retry_policy: RetryPolicy,
 }
 
 impl NasaGistempSource {
     pub fn connect(config: NasaGistempSourceConfig) -> QuantResult<Self> {
-        let http = reqwest::Client::builder()
+        let http = Client::builder()
             .timeout(Duration::from_millis(config.request_timeout_ms))
             .user_agent("quant-pivot/0.1 nasa-gistemp-ingest")
             .build()
@@ -49,7 +51,7 @@ impl NasaGistempSource {
     }
 
     #[must_use]
-    pub fn with_http_client(mut self, http: reqwest::Client) -> Self {
+    pub fn with_http_client(mut self, http: Client) -> Self {
         self.http = http;
         self
     }
@@ -80,7 +82,7 @@ fn parse_gistemp(body: &str, available_at: DateTime<Utc>) -> QuantResult<Gistemp
     if title.trim_end_matches('\r') != "Land-Ocean: Global Means" {
         return Err(parse_error("unexpected GISTEMP product title").into());
     }
-    let mut reader = csv::ReaderBuilder::new().from_reader(csv.as_bytes());
+    let mut reader = ReaderBuilder::new().from_reader(csv.as_bytes());
     let headers = reader
         .headers()
         .map_err(|error| parse_error(error.to_string()))?
@@ -185,7 +187,7 @@ fn parse_error(detail: impl Into<String>) -> ApiError {
 mod tests {
     use chrono::{TimeZone, Utc};
     use quant_pivot_models::{
-        config::NasaGistempSourceConfig, domain::WeatherObservationReportKind,
+        config::NasaGistempSourceConfig, domain::data_plane::WeatherObservationReportKind,
     };
     use rust_decimal_macros::dec;
     use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};

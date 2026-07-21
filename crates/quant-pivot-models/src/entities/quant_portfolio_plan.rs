@@ -1,11 +1,13 @@
 //! `quant_portfolio_plan` table entity.
 
+use chrono::{DateTime, Utc};
+use sea_orm::entity::prelude::*;
+
+use super::{quant_market_selection, quant_model_run};
 use crate::types::{
     MarketSelectionId, ModelRunId, PortfolioConstraintsSnapshot, PortfolioOptimizerMeta,
     PortfolioPlanId, PortfolioRejectedSummary, PortfolioRiskBudget, Usd,
 };
-use chrono::{DateTime, Utc};
-use sea_orm::entity::prelude::*;
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -34,14 +36,14 @@ pub struct Model {
         from = "model_run_id",
         to = "model_run_id"
     )]
-    pub model_run: BelongsTo<Option<super::quant_model_run::Entity>>,
+    pub model_run: BelongsTo<Option<quant_model_run::Entity>>,
     #[sea_orm(
         belongs_to,
         relation_enum = "MarketSelection",
         from = "market_selection_id",
         to = "market_selection_id"
     )]
-    pub market_selection: BelongsTo<super::quant_market_selection::Entity>,
+    pub market_selection: BelongsTo<quant_market_selection::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

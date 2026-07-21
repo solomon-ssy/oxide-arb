@@ -3,6 +3,12 @@
 
 use std::collections::BTreeSet;
 
+use chrono_tz::Tz;
+use quant_pivot_error::config_validation::{ConfigValidationError, ConfigValidationReport};
+use rust_decimal_macros::dec;
+use url::Url;
+use zeroize::Zeroizing;
+
 use super::{
     DeployConfig, DomainSourcesConfig, MAX_TRADE_TAPE_RECONCILIATION_ROWS, PolygonRpcEndpoint,
     WEATHER_OBSERVATION_DAY_CLOSE_GRACE_SECS, WeatherHistoricalBindingKind,
@@ -12,10 +18,6 @@ use crate::{
     enums::quant::{ExecutionWalletKind, QuantRuntimeMode},
     types::{HkoStation, IcaoStation},
 };
-use quant_pivot_error::config_validation::{ConfigValidationError, ConfigValidationReport};
-use rust_decimal_macros::dec;
-use url::Url;
-use zeroize::Zeroizing;
 
 /// Mode-agnostic deploy validation: structural and platform invariants that
 /// must hold regardless of quant runtime mode.
@@ -316,7 +318,7 @@ fn validate_domain_sources(deploy: &DeployConfig, report: &mut ConfigValidationR
             WeatherHistoricalBindingKind::Unavailable => profile.ghcnh_station_id.is_none(),
         };
         if IcaoStation::parse(station).is_err()
-            || profile.timezone.parse::<chrono_tz::Tz>().is_err()
+            || profile.timezone.parse::<Tz>().is_err()
             || profile.latitude < dec!(-90)
             || profile.latitude > dec!(90)
             || profile.longitude < dec!(-180)
@@ -455,7 +457,7 @@ fn validate_weather_vertical_bindings(deploy: &DeployConfig, report: &mut Config
     let mut identities = BTreeSet::new();
     for binding in &bindings.hko_rainfall {
         let valid = printable_binding(&binding.place, 128)
-            && binding.timezone.parse::<chrono_tz::Tz>().is_ok()
+            && binding.timezone.parse::<Tz>().is_ok()
             && identities.insert(format!("HKO:{}:RAIN", binding.place));
         if !valid {
             invalid_domain_source(
@@ -482,7 +484,7 @@ fn validate_weather_vertical_bindings(deploy: &DeployConfig, report: &mut Config
             binding.state.len() == 2 && binding.state.bytes().all(|byte| byte.is_ascii_uppercase());
         let valid = printable_binding(&binding.area, 128)
             && state_valid
-            && binding.timezone.parse::<chrono_tz::Tz>().is_ok()
+            && binding.timezone.parse::<Tz>().is_ok()
             && identities.insert(format!("AIRNOW:{}:{}", binding.state, binding.area));
         if !valid {
             invalid_domain_source(
@@ -507,7 +509,7 @@ fn validate_weather_vertical_bindings(deploy: &DeployConfig, report: &mut Config
             && aqsid_valid
             && state_valid
             && coordinate_valid
-            && binding.timezone.parse::<chrono_tz::Tz>().is_ok()
+            && binding.timezone.parse::<Tz>().is_ok()
             && identities.insert(format!("AIRNOW_SITE:{}:PM25_AQI", binding.aqsid));
         if !valid {
             invalid_domain_source(
@@ -526,7 +528,7 @@ fn validate_weather_vertical_bindings(deploy: &DeployConfig, report: &mut Config
         let valid = printable_binding(&binding.region_id, 64)
             && printable_binding(&binding.ncei_state_name, 128)
             && state_valid
-            && binding.timezone.parse::<chrono_tz::Tz>().is_ok()
+            && binding.timezone.parse::<Tz>().is_ok()
             && identities.insert(format!("TORNADO:{}", binding.region_id));
         if !valid {
             invalid_domain_source(
@@ -561,7 +563,7 @@ fn validate_weather_vertical_bindings(deploy: &DeployConfig, report: &mut Config
     }
     for binding in &bindings.nws_wind_stations {
         let valid = IcaoStation::parse(&binding.station).is_ok()
-            && binding.timezone.parse::<chrono_tz::Tz>().is_ok()
+            && binding.timezone.parse::<Tz>().is_ok()
             && identities.insert(format!("NWS:{}", binding.station));
         if !valid {
             invalid_domain_source(
@@ -674,7 +676,7 @@ pub fn validate_deploy_for_quant_mode(
 /// collateral / L2 read credential) and the funder (Data API position reads) are
 /// required in every mode. Missing either fails closed. The private key is used
 /// only for reads here; signing/submission gating stays mode-aware elsewhere.
-/// Phase05.10 EOA auto-redeem additionally checks signer/funder equality during
+/// EOA auto-redeem additionally checks signer/funder equality during
 /// CTF worker assembly, where the signer address is available.
 fn validate_credentials_quant_mode(
     deploy: &DeployConfig,

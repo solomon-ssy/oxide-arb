@@ -1,15 +1,18 @@
 //! Postgres source-slice materialization ledger.
 
-use quant_pivot_error::storage::{StorageError, entity};
+use chrono::Utc;
+use quant_pivot_error::storage::{StorageError, entity::QUANT_SOURCE_SLICE};
 use quant_pivot_models::{
-    domain::{BeginSourceSliceOutcome, CompleteSourceSlice, NewSourceSlice, SourceSliceInfo},
-    entities::quant_source_slice,
+    domain::quant::{
+        BeginSourceSliceOutcome, CompleteSourceSlice, NewSourceSlice, SourceSliceInfo,
+    },
+    entities::quant_source_slice::{Column, Entity, Model},
     enums::quant::SourceSliceStatus,
     types::{ContentHash, SourceSliceId},
 };
 use sea_orm::{
-    ActiveModelTrait, ActiveValue, ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel,
-    QueryFilter, QuerySelect, TransactionTrait, sea_query::OnConflict,
+    ActiveModelTrait, ActiveValue, ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait,
+    IntoActiveModel, QueryFilter, QuerySelect, TransactionTrait, sea_query::OnConflict,
 };
 
 use crate::{postgres::error, traits::SourceSliceRepository};
@@ -34,9 +37,9 @@ impl SourceSliceRepository for PgSourceSliceRepository {
         let identity_hash = source_slice.identity_hash.clone();
         let mut active = source_slice.into_active_model();
         active.status = ActiveValue::Set(SourceSliceStatus::Materializing);
-        let insert = quant_source_slice::Entity::insert(active)
+        let insert = Entity::insert(active)
             .on_conflict(
-                OnConflict::column(quant_source_slice::Column::IdentityHash)
+                OnConflict::column(Column::IdentityHash)
                     .do_nothing()
                     .to_owned(),
             )
@@ -48,7 +51,7 @@ impl SourceSliceRepository for PgSourceSliceRepository {
             .await?
             .ok_or_else(|| {
                 error::invariant_violation(
-                    Some(entity::QUANT_SOURCE_SLICE),
+                    Some(QUANT_SOURCE_SLICE),
                     "source-slice claim was not observable after insert".to_owned(),
                 )
             })?;
@@ -62,7 +65,7 @@ impl SourceSliceRepository for PgSourceSliceRepository {
         &self,
         source_slice_id: &SourceSliceId,
     ) -> Result<Option<SourceSliceInfo>, StorageError> {
-        quant_source_slice::Entity::find_by_id(source_slice_id.clone())
+        Entity::find_by_id(source_slice_id.clone())
             .one(&self.db)
             .await
             .map_err(StorageError::from)
@@ -73,8 +76,8 @@ impl SourceSliceRepository for PgSourceSliceRepository {
         &self,
         identity_hash: &ContentHash,
     ) -> Result<Option<SourceSliceInfo>, StorageError> {
-        quant_source_slice::Entity::find()
-            .filter(quant_source_slice::Column::IdentityHash.eq(identity_hash.clone()))
+        Entity::find()
+            .filter(Column::IdentityHash.eq(identity_hash.clone()))
             .one(&self.db)
             .await
             .map_err(StorageError::from)
@@ -86,9 +89,10 @@ impl SourceSliceRepository for PgSourceSliceRepository {
         source_slice_id: &SourceSliceId,
         completion: CompleteSourceSlice,
     ) -> Result<SourceSliceInfo, StorageError> {
-        completion.manifest.validate().map_err(|detail| {
-            error::invariant_violation(Some(entity::QUANT_SOURCE_SLICE), detail)
-        })?;
+        completion
+            .manifest
+            .validate()
+            .map_err(|detail| error::invariant_violation(Some(QUANT_SOURCE_SLICE), detail))?;
         let transaction = self.db.begin().await.map_err(StorageError::from)?;
         let row = load_for_update(&transaction, source_slice_id).await?;
         if row.status == SourceSliceStatus::Ready {
@@ -98,7 +102,7 @@ impl SourceSliceRepository for PgSourceSliceRepository {
         }
         if row.status != SourceSliceStatus::Materializing {
             return Err(error::illegal_transition(
-                entity::QUANT_SOURCE_SLICE,
+                QUANT_SOURCE_SLICE,
                 Some(source_slice_id),
                 row.status,
                 SourceSliceStatus::Ready,
@@ -110,7 +114,7 @@ impl SourceSliceRepository for PgSourceSliceRepository {
         active.manifest_uri = ActiveValue::Set(Some(completion.manifest_ref.manifest_uri));
         active.manifest_hash = ActiveValue::Set(Some(completion.manifest_ref.manifest_hash));
         active.manifest_json = ActiveValue::Set(Some(completion.manifest));
-        active.completed_at = ActiveValue::Set(Some(chrono::Utc::now()));
+        active.completed_at = ActiveValue::Set(Some(Utc::now()));
         let updated = active
             .update(&transaction)
             .await
@@ -126,7 +130,7 @@ impl SourceSliceRepository for PgSourceSliceRepository {
     ) -> Result<SourceSliceInfo, StorageError> {
         if detail.trim().is_empty() {
             return Err(error::invariant_violation(
-                Some(entity::QUANT_SOURCE_SLICE),
+                Some(QUANT_SOURCE_SLICE),
                 "source-slice failure detail must not be empty".to_owned(),
             ));
         }
@@ -138,7 +142,7 @@ impl SourceSliceRepository for PgSourceSliceRepository {
         }
         if row.status != SourceSliceStatus::Materializing {
             return Err(error::illegal_transition(
-                entity::QUANT_SOURCE_SLICE,
+                QUANT_SOURCE_SLICE,
                 Some(source_slice_id),
                 row.status,
                 SourceSliceStatus::Failed,
@@ -147,7 +151,7 @@ impl SourceSliceRepository for PgSourceSliceRepository {
         let mut active = row.into_active_model();
         active.status = ActiveValue::Set(SourceSliceStatus::Failed);
         active.failure_detail = ActiveValue::Set(Some(detail));
-        active.completed_at = ActiveValue::Set(Some(chrono::Utc::now()));
+        active.completed_at = ActiveValue::Set(Some(Utc::now()));
         let updated = active
             .update(&transaction)
             .await
@@ -157,19 +161,16 @@ impl SourceSliceRepository for PgSourceSliceRepository {
     }
 }
 
-async fn load_for_update<C>(
-    db: &C,
-    source_slice_id: &SourceSliceId,
-) -> Result<quant_source_slice::Model, StorageError>
+async fn load_for_update<C>(db: &C, source_slice_id: &SourceSliceId) -> Result<Model, StorageError>
 where
-    C: sea_orm::ConnectionTrait,
+    C: ConnectionTrait,
 {
-    quant_source_slice::Entity::find_by_id(source_slice_id.clone())
+    Entity::find_by_id(source_slice_id.clone())
         .lock_exclusive()
         .one(db)
         .await
         .map_err(StorageError::from)?
-        .ok_or_else(|| error::not_found(entity::QUANT_SOURCE_SLICE, source_slice_id))
+        .ok_or_else(|| error::not_found(QUANT_SOURCE_SLICE, source_slice_id))
 }
 
 fn validate_new(source_slice: &NewSourceSlice) -> Result<(), StorageError> {
@@ -177,7 +178,7 @@ fn validate_new(source_slice: &NewSourceSlice) -> Result<(), StorageError> {
         || source_slice.window_end > source_slice.pit_cutoff
     {
         return Err(error::invariant_violation(
-            Some(entity::QUANT_SOURCE_SLICE),
+            Some(QUANT_SOURCE_SLICE),
             "source-slice identity boundaries or contracts are invalid".to_owned(),
         ));
     }
@@ -185,7 +186,7 @@ fn validate_new(source_slice: &NewSourceSlice) -> Result<(), StorageError> {
 }
 
 fn ensure_manifest_binding(
-    row: &quant_source_slice::Model,
+    row: &Model,
     completion: &CompleteSourceSlice,
 ) -> Result<(), StorageError> {
     let manifest = &completion.manifest;
@@ -201,7 +202,7 @@ fn ensure_manifest_binding(
         && manifest.schema_contract_version == row.schema_contract_version;
     if !bound {
         return Err(error::invariant_violation(
-            Some(entity::QUANT_SOURCE_SLICE),
+            Some(QUANT_SOURCE_SLICE),
             "source-slice manifest does not match the claimed canonical identity".to_owned(),
         ));
     }
@@ -209,7 +210,7 @@ fn ensure_manifest_binding(
 }
 
 fn ensure_idempotent_completion(
-    row: &quant_source_slice::Model,
+    row: &Model,
     completion: &CompleteSourceSlice,
 ) -> Result<(), StorageError> {
     if row.manifest_uri.as_ref() != Some(&completion.manifest_ref.manifest_uri)
@@ -217,7 +218,7 @@ fn ensure_idempotent_completion(
         || row.manifest_json.as_ref() != Some(&completion.manifest)
     {
         return Err(error::state_conflict(
-            entity::QUANT_SOURCE_SLICE,
+            QUANT_SOURCE_SLICE,
             Some(&row.source_slice_id),
             "ready source slice cannot be rebound to different manifest evidence".to_owned(),
         ));

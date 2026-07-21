@@ -1,10 +1,19 @@
 //! Time-series feature builder: windowed returns, momentum, realized volatility,
 //! reversal, and spread/depth trends from the pre-fetched microstructure window.
 //!
-//! Statistical reductions live in [`crate::features::stats`]; returns are exact
+//! Statistical reductions live in the feature-statistics module; returns are exact
 //! `Decimal`, and the one `f64` reduction (realized vol) is quantized there so a
 //! value never reaches the vector unrounded. Provenance is anchored on the
 //! window's freshest bucket, so the fact-lag staleness check sees the true age.
+
+use std::time::Duration;
+
+use quant_pivot_error::QuantResult;
+use quant_pivot_models::{
+    runtime_config::FeatureFamily,
+    types::{Bps, Price, Usd},
+};
+use rust_decimal::Decimal;
 
 use crate::features::{
     builder::{FeatureComputeCtx, FeatureGroupBuilder, RawFeature},
@@ -12,13 +21,6 @@ use crate::features::{
     resolved::MarketWindowSnapshot,
     value::{EvidenceSourceKind, EvidenceSourceRef, FeatureName, FeatureValue, NullReason},
 };
-use quant_pivot_error::QuantResult;
-use quant_pivot_models::{
-    runtime_config::FeatureFamily,
-    types::{Bps, Price, Usd},
-};
-use rust_decimal::Decimal;
-use std::time::Duration;
 
 /// Builds the [`FeatureFamily::TimeSeries`] features.
 pub struct TimeSeriesFeatureBuilder;

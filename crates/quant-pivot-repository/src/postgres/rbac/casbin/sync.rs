@@ -12,7 +12,7 @@
 
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    domain::Permission,
+    domain::rbac::Permission,
     entities::casbin_rule::{Column, Entity},
     enums::rbac::{
         casbin::{PTYPE_GROUPING, PTYPE_POLICY},

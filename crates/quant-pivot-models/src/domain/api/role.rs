@@ -1,16 +1,17 @@
 //! Role management API contract.
 
+use serde::Deserialize;
+use serde_with::rust::double_option;
+use validator::{Validate, ValidationError};
+
 use crate::{
     domain::{
-        Permission, RolePatch,
         patch::{NullablePatch, Patch},
+        rbac::{Permission, RolePatch},
     },
     enums::rbac::RoleStatus,
     types::MenuId,
 };
-use serde::Deserialize;
-use serde_with::rust::double_option;
-use validator::{Validate, ValidationError};
 
 fn validate_role_code(code: &str) -> Result<(), ValidationError> {
     let mut bytes = code.bytes();

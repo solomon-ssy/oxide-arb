@@ -15,13 +15,18 @@ use chrono::{Duration, Utc};
 use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
     domain::{
-        BacktestPathSetInfo, BacktestPathSetListQuery, BacktestReportInfo, BacktestReportListQuery,
-        CollinearPairView, ComparisonReportListQuery, FactorCollinearitySource,
-        FactorCollinearityView, FactorDefinitionInfo, FactorDefinitionListQuery,
-        ModelComparisonReportInfo, ModelPublishedCatalogQuery, ModelSpecInfo, ModelSpecListQuery,
-        ModelVersionInfo, ModelVersionListQuery, Paginated, PublishedModelOptionView,
-        ResearchCatalogPort, TrainingDatasetInfo, TrainingDatasetListQuery,
-        pagination::PageRequest,
+        api::{
+            BacktestPathSetListQuery, BacktestReportListQuery, CollinearPairView,
+            ComparisonReportListQuery, FactorCollinearitySource, FactorCollinearityView,
+            FactorDefinitionListQuery, ModelPublishedCatalogQuery, ModelSpecListQuery,
+            ModelVersionListQuery, PublishedModelOptionView, TrainingDatasetListQuery,
+        },
+        pagination::{PageRequest, Paginated},
+        ports::ResearchCatalogPort,
+        quant::{
+            BacktestPathSetInfo, BacktestReportInfo, FactorDefinitionInfo,
+            ModelComparisonReportInfo, ModelSpecInfo, ModelVersionInfo, TrainingDatasetInfo,
+        },
     },
     enums::{common::MarketCategory, quant::PublicationStatus},
     types::{FactorDefinitionId, MarketId, Probability, stable_name::FactorName},

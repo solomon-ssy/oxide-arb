@@ -1,12 +1,18 @@
 //! Execution-intent persistence DTOs.
 
+use chrono::{DateTime, Utc};
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
+use serde::{Deserialize, Serialize};
+
 use crate::{
     domain::{
-        NewReconciliation, PositionExit, PositionFill, RecommendationInfo,
-        RecommendationReportInfo,
         patch::{NullablePatch, Patch},
+        quant::{
+            NewReconciliation, PositionExit, PositionFill, RecommendationInfo,
+            RecommendationReportInfo,
+        },
     },
-    entities::quant_order_intent,
+    entities::{quant_order_intent, quant_order_intent::Model},
     enums::{
         common::Side,
         execution::{
@@ -26,9 +32,6 @@ use crate::{
         Shares, TokenId, Usd, UserId,
     },
 };
-use chrono::{DateTime, Utc};
-use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
-use serde::{Deserialize, Serialize};
 
 /// Governed bridge from a recommendation to execution.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,8 +68,8 @@ pub struct OrderIntentInfo {
     pub updated_at: DateTime<Utc>,
 }
 
-impl From<quant_order_intent::Model> for OrderIntentInfo {
-    fn from(model: quant_order_intent::Model) -> Self {
+impl From<Model> for OrderIntentInfo {
+    fn from(model: Model) -> Self {
         Self {
             order_intent_id: model.order_intent_id,
             recommendation_id: model.recommendation_id,
@@ -230,10 +233,10 @@ pub enum ApproveOrderIntentOutcome {
     Invalidated(OrderIntentInfo, ApprovalInvalidation),
 }
 
-/// Cheap, deterministic approval-time invalidation re-check (Phase 05.2 set).
+/// Cheap, deterministic approval-time invalidation re-check.
 ///
 /// Model retirement, data-quality thresholds, and envelope-hash recomputation
-/// are the admission engine's responsibility (Phase 05.3).
+/// are the admission engine's responsibility.
 #[must_use]
 pub fn evaluate_intent_approval_invalidation(
     rec: &RecommendationInfo,
@@ -265,7 +268,7 @@ pub fn evaluate_intent_approval_invalidation(
     None
 }
 
-/// How a submission outcome settles the intent's capital allocation (Phase 05.4).
+/// How a submission outcome settles the intent's capital allocation.
 ///
 /// The capital row carries explicit amounts (`locked`/`spent`/`released`); the
 /// state enum is a coarse lifecycle marker. The reserved aggregate is
@@ -290,7 +293,7 @@ pub enum CapitalSettlement {
 
 /// Complete ledger write applied by `record_submission_result` in one txn.
 ///
-/// Built by the dispatcher from the venue [`VenueSubmitResult`] and applied
+/// Built by the dispatcher from its venue submit result and applied
 /// atomically across execution order + capital + position + intent + recon.
 #[derive(Debug, Clone)]
 pub struct SubmissionLedgerWrite {
@@ -318,9 +321,9 @@ pub struct SubmissionLedgerWrite {
     pub reconciliation: Option<NewReconciliation>,
 }
 
-/// Complete ledger write applied by `record_exit_result` in one txn (Phase 05.6).
+/// Complete ledger write applied by `record_exit_result` in one txn.
 ///
-/// Built by the exit dispatcher from the venue [`VenueSubmitResult`] of a Sell
+/// Built by the exit dispatcher from the venue submit result of a Sell
 /// exit order and applied atomically across the exit execution order, the
 /// per-intent position lot, the capital allocation (`Spent -> Released` on full
 /// exit), the intent's exit FSM, and reconciliation.

@@ -3,7 +3,7 @@
 use std::{collections::BTreeMap, sync::Arc, time::Duration as StdDuration};
 
 use chrono::{DateTime, Datelike, Duration, Timelike, Utc};
-use grib::LatLons;
+use grib::{Grib2SubmessageDecoder, LatLons};
 use num_traits::FromPrimitive;
 use quant_pivot_error::{QuantError, QuantResult, api::ApiError};
 use quant_pivot_models::{
@@ -11,7 +11,7 @@ use quant_pivot_models::{
     hashing::CanonicalDigest,
     types::{ContentHash, IcaoStation, TemperatureCelsius, WeatherTemperatureStatistic},
 };
-use reqwest::{StatusCode, header::RANGE};
+use reqwest::{Client, StatusCode, header::RANGE};
 use rust_decimal::Decimal;
 use tokio::sync::Semaphore;
 
@@ -63,14 +63,14 @@ struct ByteRange {
 /// full global product for one field is treated as a contract violation.
 pub struct GefsSource {
     config: GefsSourceConfig,
-    http: reqwest::Client,
+    http: Client,
     retry_policy: RetryPolicy,
     request_slots: Arc<Semaphore>,
 }
 
 impl GefsSource {
     pub fn connect(config: GefsSourceConfig) -> QuantResult<Self> {
-        let http = reqwest::Client::builder()
+        let http = Client::builder()
             .timeout(StdDuration::from_millis(config.request_timeout_ms))
             .user_agent("quant-pivot/0.1 noaa-gefs-ingest")
             .build()
@@ -85,7 +85,7 @@ impl GefsSource {
     }
 
     #[must_use]
-    pub fn with_http_client(mut self, http: reqwest::Client) -> Self {
+    pub fn with_http_client(mut self, http: Client) -> Self {
         self.http = http;
         self
     }
@@ -239,7 +239,7 @@ fn temperature_range(
 }
 
 async fn get_range_with_retry(
-    http: &reqwest::Client,
+    http: &Client,
     retry_policy: &RetryPolicy,
     url: &str,
     range: ByteRange,
@@ -316,7 +316,7 @@ fn decode_temperature(
     let coordinates = message
         .latlons()
         .map_err(|error| parse_error(format!("GEFS grid decode failed: {error}")))?;
-    let decoder = grib::Grib2SubmessageDecoder::from(message)
+    let decoder = Grib2SubmessageDecoder::from(message)
         .map_err(|error| parse_error(format!("GEFS value decoder failed: {error}")))?;
     let values = decoder
         .dispatch()
@@ -480,15 +480,16 @@ fn parse_error(detail: impl Into<String>) -> ApiError {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        ByteRange, DecodedStationTemperature, GefsStationBinding, GridSampler,
-        merge_daily_temperature_points, product_url, temperature_range,
-    };
     use chrono::{TimeZone, Utc};
     use quant_pivot_models::types::{
         ContentHash, IcaoStation, TemperatureCelsius, WeatherTemperatureStatistic,
     };
     use rust_decimal_macros::dec;
+
+    use super::{
+        ByteRange, DecodedStationTemperature, GefsStationBinding, GridSampler,
+        merge_daily_temperature_points, product_url, temperature_range,
+    };
 
     #[test]
     fn selects_bounded_tmax_and_tmin_ranges() {

@@ -1,10 +1,12 @@
 //! `quant_report_data_quality_snapshot` table entity.
 
+use chrono::{DateTime, Utc};
+use sea_orm::entity::prelude::*;
+
+use super::{decision_policy_snapshot, quant_recommendation_report};
 use crate::types::{
     DecisionPolicySnapshotId, ReportDataQualitySnapshotId, ReportDataQualityTokens,
 };
-use chrono::{DateTime, Utc};
-use sea_orm::entity::prelude::*;
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -24,9 +26,9 @@ pub struct Model {
         from = "decision_policy_snapshot_id",
         to = "decision_policy_snapshot_id"
     )]
-    pub decision_policy_snapshot: BelongsTo<super::decision_policy_snapshot::Entity>,
+    pub decision_policy_snapshot: BelongsTo<decision_policy_snapshot::Entity>,
     #[sea_orm(has_many, relation_enum = "RecommendationReport")]
-    pub recommendation_report: HasMany<super::quant_recommendation_report::Entity>,
+    pub recommendation_report: HasMany<quant_recommendation_report::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

@@ -104,10 +104,10 @@ pub fn canonical_state_hash<T: Serialize>(value: &T) -> Result<ContentHash, Cano
 
 #[cfg(test)]
 mod tests {
-    use crate::hashing::canonical_state_hash;
+    use serde::Serialize;
 
     use super::{BLAKE3_PREFIX, CanonicalDigest};
-    use serde::Serialize;
+    use crate::hashing::canonical_state_hash;
 
     #[derive(Serialize)]
     struct Sample {

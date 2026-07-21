@@ -42,28 +42,25 @@ argmin = { workspace = true, optional = true }
 argmin-math = { workspace = true, optional = true }
 smartcore = { workspace = true, optional = true, features = ["serde"] }
 bincode = { workspace = true, optional = true }
-good_lp = { workspace = true, optional = true }
+good_lp = { workspace = true, features = ["microlp"] }
 
 [dev-dependencies]
+proptest = { workspace = true }
 rust_decimal_macros = { workspace = true }
 
 [features]
-# `lp-solver` (pure-Rust microlp) is the sole portfolio allocator since greedy
-# was removed, so it is on by default — microlp carries no native dependency and
-# is safe in every build (including report_only). The heavy / native-adjacent
-# stacks (polars / smartcore / argmin / HiGHS) stay opt-in.
-default = ["lp-solver"]
+# The pure-Rust microlp backend is the sole baseline allocator and is therefore
+# a normal dependency. Heavy and native-adjacent stacks stay opt-in.
+default = []
 # Offline feature / dataset materialization (lazy frames + parquet).
 dataframe = ["dep:polars", "dep:parquet"]
 # Factor-weight / threshold optimization.
 optimize = ["dep:argmin", "dep:argmin-math"]
 # Classical ML (tree / ensemble / linear) for shadow candidates.
 ml-classical = ["dep:smartcore", "dep:bincode"]
-# Portfolio LP/MILP optimization via good_lp's pure-Rust microlp backend.
-lp-solver = ["dep:good_lp", "good_lp/microlp"]
 # Optional native HiGHS backend for large-scale MILP (never a report_only hard
 # dependency; only linked when this feature is explicitly enabled).
-lp-solver-highs = ["lp-solver", "good_lp/highs"]
+lp-solver-highs = ["good_lp/highs"]
 
 [lints]
 workspace = true

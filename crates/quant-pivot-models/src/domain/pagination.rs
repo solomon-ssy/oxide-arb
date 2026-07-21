@@ -3,10 +3,11 @@
 //! Three layers:
 //! 1. **Wire** — [`PageRequest`] embedded in list query DTOs (untrusted).
 //! 2. **Contract** — [`NormalizePageQuery`] hardens the full query; domain enrich
-//!    hooks like `MarketPageQuery::prepare()` live on specific query types.
+//!    hooks like `MarketPageQuery::prepare` live on specific query types.
 //! 3. **SQL boundary** — [`PageWindow`] is the only type accepted by
 //!    `paginate_mapped`; it is always hardened via [`PageWindow::harden`].
 
+use sealed::Sealed;
 use serde::{Deserialize, Serialize};
 use serde_with::{DisplayFromStr, PickFirst, serde_as};
 
@@ -16,7 +17,7 @@ pub(crate) mod sealed {
 }
 
 /// Inbound list-query contract for DTOs embedding a `#[normalize_page]` field.
-pub trait NormalizePageQuery: sealed::Sealed + Sized {
+pub trait NormalizePageQuery: Sealed + Sized {
     /// Embedded pagination parameters (may be caller-supplied / unnormalized).
     fn page(&self) -> &PageRequest;
 

@@ -4,9 +4,13 @@ use async_trait::async_trait;
 use quant_pivot_error::QuantResult;
 
 use crate::domain::{
-    AcknowledgeFeatureParityLatchRequest, FeatureIntegrityLatchView, FeatureIntegritySummaryView,
-    FeatureParityEventListQuery, FeatureParityEventView, FeatureParityRunListQuery,
-    FeatureParityRunView, Paginated, ResearchJobView, RunFullFeatureParityRequest,
+    api::{
+        AcknowledgeFeatureParityLatchRequest, FeatureIntegrityLatchView,
+        FeatureIntegritySummaryView, FeatureParityEventListQuery, FeatureParityEventView,
+        FeatureParityRunListQuery, FeatureParityRunView, ResearchJobView,
+        RunFullFeatureParityRequest,
+    },
+    pagination::Paginated,
 };
 
 /// Actor provenance captured for governed parity mutations.

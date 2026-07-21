@@ -19,7 +19,7 @@ use actix_files::NamedFile;
 use actix_web::{
     HttpRequest, HttpResponse,
     dev::{ServiceRequest, ServiceResponse, fn_service},
-    http::header::{self, HeaderValue},
+    http::header::{CACHE_CONTROL, HeaderValue, X_CONTENT_TYPE_OPTIONS},
     web::ServiceConfig,
 };
 use quant_pivot_models::config::WebConfig;
@@ -75,13 +75,10 @@ fn finalize(req: &HttpRequest, file: NamedFile, key: &str) -> HttpResponse {
     let mut response = file.into_response(req);
     let headers = response.headers_mut();
     headers.insert(
-        header::CACHE_CONTROL,
+        CACHE_CONTROL,
         HeaderValue::from_static(cache_control_for_path(key)),
     );
-    headers.insert(
-        header::X_CONTENT_TYPE_OPTIONS,
-        HeaderValue::from_static("nosniff"),
-    );
+    headers.insert(X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
     response
 }
 

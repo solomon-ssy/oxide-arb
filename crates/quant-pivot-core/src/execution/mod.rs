@@ -1,8 +1,7 @@
-//! Execution-plane contracts.
+//! Execution plane.
 //!
-//! Phase 05.0 defines the boundaries only. Implementations, worker wiring,
-//! mode preflight, admission business rules, dispatch, and exit monitoring land
-//! in later Phase 05 slices.
+//! This module owns admission, dispatch, reconciliation, exit monitoring, and
+//! their production boundaries.
 
 pub mod admission;
 pub mod attribution;
@@ -22,20 +21,48 @@ pub mod reconciliation;
 pub mod settlement_redeem;
 pub mod trade_policy_guard;
 
-pub use admission::*;
-pub use attribution::*;
-pub use breaker::*;
-pub use dispatch_wake::*;
-pub use dispatcher::*;
-pub use entry_condition::*;
-pub use entry_condition_worker::*;
-pub use exit_dispatcher::*;
-pub use exit_monitor::*;
-pub use exit_monitor_service::*;
-pub use intent_lifecycle::*;
-pub use intent_service::*;
-pub use mode_gate::*;
-pub use order_client::*;
-pub use reconciliation::*;
-pub use settlement_redeem::*;
-pub use trade_policy_guard::*;
+pub use admission::{
+    AdmissionCheck, AdmissionCheckTrace, AdmissionDecision, AdmissionExposureState, AdmissionInput,
+    AdmissionInputBuilder, AdmissionInputBuilderDeps, AdmissionModelState, AdmissionSeams,
+    AdmissionVenueMetadata, DefaultAdmissionEngine, ExecutionAdmissionEngine, StateVersion,
+    VenueHealth, prepare_entry_order,
+};
+pub use attribution::{AttributionPassSummary, AttributionService, AttributionServiceDeps};
+pub use breaker::{ExecutionBreaker, VenueHealthHandle};
+pub use dispatch_wake::DispatchWake;
+pub use dispatcher::{CoreExecutionDispatcher, ExecutionDispatcherDeps};
+pub use entry_condition::{
+    EntryConditionEvaluation, EntryConditionStateDecision, decide_entry_condition_state,
+    evaluate_entry_condition,
+};
+pub use entry_condition_worker::{
+    EntryConditionInputProvider, EntryConditionWorker, LiveEntryConditionInputDeps,
+    LiveEntryConditionInputProvider,
+};
+pub use exit_dispatcher::{CoreExitDispatcher, ExitDispatcherDeps, ExitSubmitRequest};
+pub use exit_monitor::{
+    CompositeExitSignalEvaluator, ExitDecision, ExitMonitorHealth, ExitMonitorHealthHandle,
+    ExitMonitorInput, ExitOrderSpec, ExitSignalContext, ExitSignalEvaluation, ExitSignalEvaluator,
+    ExitSignalVerdict, decide_exit,
+};
+pub use exit_monitor_service::{ExitMonitorService, ExitMonitorServiceDeps};
+pub use intent_lifecycle::IntentLifecyclePublisher;
+pub use intent_service::{CoreOrderIntentService, IntentTerminalEventSink, OrderIntentServiceDeps};
+pub use mode_gate::{DefaultRuntimeModeGate, IntentPolicyDecision, RuntimeModeGate};
+pub use order_client::{
+    ClobOrderClient, PolymarketOrderClient, VenueCancelResult, VenueOrder, VenueOutcome,
+    VenueSubmitResult,
+};
+pub use reconciliation::{
+    ClobReconciliationReader, CollectedReconciliation, EvidenceCollector,
+    OperatorReconcileResolution, ReconcileFacts, ReconciliationDecision, ReconciliationService,
+    ReconciliationServiceDeps, VenueEvidenceCollector, VenuePresence, VenueReconciliationReader,
+    decide,
+};
+pub use settlement_redeem::{
+    RelayerConnectParams, RelayerSettlementClient, SettlementCtfBalances, SettlementCtfClient,
+    SettlementCtfPayoutVector, SettlementCtfRedeemReceipt, SettlementCtfSubmittedRedeemReceipt,
+    SettlementRedeemPassSummary, SettlementRedeemService, SettlementRedeemServiceDeps,
+    SettlementRedeemTx,
+};
+pub use trade_policy_guard::require_frozen_trade_policy;

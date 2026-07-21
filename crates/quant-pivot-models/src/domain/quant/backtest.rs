@@ -1,5 +1,10 @@
 //! Backtest-report ledger persistence DTOs.
 
+use chrono::{DateTime, Utc};
+use rust_decimal::Decimal;
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
+use serde::{Deserialize, Serialize};
+
 use crate::{
     entities::quant_backtest_report,
     types::{
@@ -8,10 +13,6 @@ use crate::{
         backtest::{CategoryMetrics, ExpectedVsRealized, PnlSimulation},
     },
 };
-use chrono::{DateTime, Utc};
-use rust_decimal::Decimal;
-use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
-use serde::{Deserialize, Serialize};
 
 /// Frozen, content-addressed backtest-report row.
 #[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]

@@ -4,7 +4,7 @@
 //! therefore share the same exact tie-breaker coordinates.
 
 use std::{
-    fmt::{self, Display, Formatter},
+    fmt::{Display, Formatter, Result as FmtResult},
     str::FromStr,
 };
 
@@ -46,7 +46,7 @@ impl BookSnapshotRef {
 }
 
 impl Display for BookSnapshotRef {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         match &self.source {
             BookSnapshotSource::CanonicalL2 {
                 stream_session_id,

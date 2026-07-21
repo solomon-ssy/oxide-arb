@@ -1,4 +1,4 @@
-//! Model-backed exit signal re-inference (Phase 06.0).
+//! Model-backed exit signal re-inference.
 //!
 //! Side-effect-free, single-market re-score for thesis-invalidation: reuses the
 //! research feature / factor / model primitives without persisting model-run,
@@ -8,12 +8,15 @@
 use std::{slice, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
     domain::{
-        DecisionBoundary, DecisionClock, DecisionSource, LatestFactorSnapshotBundleInfo,
-        LatestFactorSnapshotValueInfo, ModelVersionInfo, OrderIntentInfo, PositionInfo,
+        data_plane::{DecisionBoundary, DecisionClock, DecisionSource},
+        quant::{
+            LatestFactorSnapshotBundleInfo, LatestFactorSnapshotValueInfo, ModelVersionInfo,
+            OrderIntentInfo, PositionInfo,
+        },
     },
     enums::{
         factor::FactorValueState,
@@ -328,7 +331,7 @@ pub(crate) async fn fresh_exit_outcome(
         );
         return Ok(None);
     }
-    let max_age = chrono::Duration::seconds(i64::try_from(max_age_secs).map_err(|error| {
+    let max_age = ChronoDuration::seconds(i64::try_from(max_age_secs).map_err(|error| {
         QuantError::config(format!(
             "factor snapshot max age does not fit seconds: {error}"
         ))
@@ -777,8 +780,9 @@ mod tests {
     use chrono::{Duration as ChronoDuration, Utc};
     use quant_pivot_models::{
         domain::{
-            DecisionClock, DecisionSource, PositionInfo,
+            data_plane::{DecisionClock, DecisionSource},
             market::registry::{EventRegistryInfo, MarketRegistryInfo, NegRiskLegSet},
+            quant::PositionInfo,
         },
         enums::{
             catalog::{CatalogFilterReasonSet, CatalogTimestampQuality},
@@ -798,6 +802,7 @@ mod tests {
         model::{ModelExplanation, SignalCandidate},
         pit::{MarketContextAt, ResolvedMarketSnapshot},
     };
+    use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
 
     use super::{
@@ -988,7 +993,7 @@ mod tests {
             .portfolio
             .budget
             .max_single_recommendation_usd
-            .value = rust_decimal::Decimal::ZERO;
+            .value = Decimal::ZERO;
         assert!(liquidity_score_cap(&config).is_none());
     }
 

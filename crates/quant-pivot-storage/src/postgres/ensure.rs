@@ -4,13 +4,15 @@
 //! `pg_database`, and issues `CREATE DATABASE` when the configured target is
 //! missing. Idempotent and safe under concurrent first-start races.
 
+use std::time::Duration;
+
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::config::PostgresConfig;
-use sea_orm::{ConnectOptions, ConnectionTrait, Database, DbBackend, DbErr, Statement, Value};
-use std::time::Duration;
+use sea_orm::{
+    ConnectOptions, ConnectionTrait, Database, DatabaseConnection, DbBackend, DbErr, RuntimeErr,
+    Statement, Value, sqlx::error::DatabaseError,
+};
 use tracing::info;
-
-use crate::sql_contract_registry::POSTGRES_DATABASE_BOOTSTRAP;
 
 /// Maintenance catalog used for `CREATE DATABASE` bootstrap.
 const MAINTENANCE_DATABASE: &str = "postgres";
@@ -44,12 +46,10 @@ pub async fn ensure_database(
     })?;
 
     let exists = db
-        .query_one_raw(POSTGRES_DATABASE_BOOTSTRAP.postgres_statement(
-            Statement::from_sql_and_values(
-                DbBackend::Postgres,
-                "SELECT 1 FROM pg_database WHERE datname = $1",
-                [Value::from(config.database.clone())],
-            ),
+        .query_one_raw(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT 1 FROM pg_database WHERE datname = $1",
+            [Value::from(config.database.clone())],
         ))
         .await?;
 
@@ -66,10 +66,7 @@ pub async fn ensure_database(
     );
 
     match db
-        .execute_raw(
-            POSTGRES_DATABASE_BOOTSTRAP
-                .postgres_statement(Statement::from_string(DbBackend::Postgres, create_sql)),
-        )
+        .execute_raw(Statement::from_string(DbBackend::Postgres, create_sql))
         .await
     {
         Ok(_) => {
@@ -93,7 +90,7 @@ pub async fn ensure_database(
     Ok(())
 }
 
-async fn close_quietly(db: sea_orm::DatabaseConnection) {
+async fn close_quietly(db: DatabaseConnection) {
     if let Err(e) = db.close().await {
         tracing::debug!("Maintenance connection close: {e}");
     }
@@ -135,12 +132,12 @@ fn quote_ident(ident: &str) -> String {
 }
 
 fn duplicate_database_error(err: &DbErr) -> bool {
-    let DbErr::Exec(sea_orm::RuntimeErr::SqlxError(sqlx_err)) = err else {
+    let DbErr::Exec(RuntimeErr::SqlxError(sqlx_err)) = err else {
         return false;
     };
     sqlx_err
         .as_database_error()
-        .and_then(sea_orm::sqlx::error::DatabaseError::code)
+        .and_then(DatabaseError::code)
         .is_some_and(|code| code == "42P04")
 }
 

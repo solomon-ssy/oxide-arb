@@ -1,10 +1,12 @@
 //! In-process L1 cache using Moka (`TinyLFU` eviction).
 
-use crate::cache::backend::CacheBackend;
+use std::time::{Duration, Instant};
+
 use async_trait::async_trait;
 use moka::{Expiry, future::Cache};
 use quant_pivot_error::storage::StorageError;
-use std::time::{Duration, Instant};
+
+use crate::cache::backend::CacheBackend;
 
 #[derive(Clone)]
 struct CacheEntry {

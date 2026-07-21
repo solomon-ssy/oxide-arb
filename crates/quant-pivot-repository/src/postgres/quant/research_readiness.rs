@@ -1,10 +1,10 @@
 //! Postgres append-only operational-readiness evidence index.
 
 use chrono::{DateTime, Utc};
-use quant_pivot_error::storage::{StorageError, entity};
+use quant_pivot_error::storage::{StorageError, entity::QUANT_RESEARCH_READINESS_EVIDENCE};
 use quant_pivot_models::{
-    domain::{NewResearchReadinessEvidence, ResearchReadinessEvidenceInfo},
-    entities::quant_research_readiness_evidence,
+    domain::quant::{NewResearchReadinessEvidence, ResearchReadinessEvidenceInfo},
+    entities::quant_research_readiness_evidence::{Column, Entity},
     enums::quant::ResearchReadinessEvidenceKind,
     hashing::CanonicalDigest,
     types::{ContentHash, ResearchReadinessEvidenceId, ResearchReadinessEvidencePayload},
@@ -39,30 +39,26 @@ impl ResearchReadinessEvidenceRepository for PgResearchReadinessEvidenceReposito
         let kind = evidence.kind;
         let scope_hash = evidence.scope_hash.clone();
         let payload_hash = evidence.payload_hash.clone();
-        quant_research_readiness_evidence::Entity::insert(evidence.into_active_model())
+        Entity::insert(evidence.into_active_model())
             .on_conflict(
-                OnConflict::columns([
-                    quant_research_readiness_evidence::Column::Kind,
-                    quant_research_readiness_evidence::Column::ScopeHash,
-                    quant_research_readiness_evidence::Column::PayloadHash,
-                ])
-                .do_nothing()
-                .to_owned(),
+                OnConflict::columns([Column::Kind, Column::ScopeHash, Column::PayloadHash])
+                    .do_nothing()
+                    .to_owned(),
             )
             .exec_without_returning(&self.db)
             .await
             .map_err(StorageError::from)?;
-        quant_research_readiness_evidence::Entity::find()
-            .filter(quant_research_readiness_evidence::Column::Kind.eq(kind))
-            .filter(quant_research_readiness_evidence::Column::ScopeHash.eq(scope_hash))
-            .filter(quant_research_readiness_evidence::Column::PayloadHash.eq(payload_hash))
+        Entity::find()
+            .filter(Column::Kind.eq(kind))
+            .filter(Column::ScopeHash.eq(scope_hash))
+            .filter(Column::PayloadHash.eq(payload_hash))
             .one(&self.db)
             .await
             .map_err(StorageError::from)?
             .map(Into::into)
             .ok_or_else(|| {
                 StorageError::invariant_violation(
-                    Some(entity::QUANT_RESEARCH_READINESS_EVIDENCE),
+                    Some(QUANT_RESEARCH_READINESS_EVIDENCE),
                     "readiness evidence was not observable after append",
                 )
             })
@@ -74,12 +70,12 @@ impl ResearchReadinessEvidenceRepository for PgResearchReadinessEvidenceReposito
         scope_hash: &ContentHash,
         as_of: DateTime<Utc>,
     ) -> Result<Option<ResearchReadinessEvidenceInfo>, StorageError> {
-        quant_research_readiness_evidence::Entity::find()
-            .filter(quant_research_readiness_evidence::Column::Kind.eq(kind))
-            .filter(quant_research_readiness_evidence::Column::ScopeHash.eq(scope_hash.clone()))
-            .filter(quant_research_readiness_evidence::Column::ObservedAt.lte(as_of))
-            .filter(quant_research_readiness_evidence::Column::ExpiresAt.gt(as_of))
-            .order_by_desc(quant_research_readiness_evidence::Column::ObservedAt)
+        Entity::find()
+            .filter(Column::Kind.eq(kind))
+            .filter(Column::ScopeHash.eq(scope_hash.clone()))
+            .filter(Column::ObservedAt.lte(as_of))
+            .filter(Column::ExpiresAt.gt(as_of))
+            .order_by_desc(Column::ObservedAt)
             .one(&self.db)
             .await
             .map_err(StorageError::from)
@@ -90,7 +86,7 @@ impl ResearchReadinessEvidenceRepository for PgResearchReadinessEvidenceReposito
         &self,
         evidence_id: &ResearchReadinessEvidenceId,
     ) -> Result<Option<ResearchReadinessEvidenceInfo>, StorageError> {
-        quant_research_readiness_evidence::Entity::find_by_id(evidence_id.clone())
+        Entity::find_by_id(evidence_id.clone())
             .one(&self.db)
             .await
             .map_err(StorageError::from)
@@ -104,7 +100,7 @@ impl ResearchReadinessEvidenceRepository for PgResearchReadinessEvidenceReposito
     ) -> Result<ShadowLatencyObservation, StorageError> {
         if window_start >= window_end {
             return Err(StorageError::invariant_violation(
-                Some(entity::QUANT_RESEARCH_READINESS_EVIDENCE),
+                Some(QUANT_RESEARCH_READINESS_EVIDENCE),
                 "shadow latency observation window must be half-open and non-empty",
             ));
         }
@@ -135,7 +131,7 @@ impl ResearchReadinessEvidenceRepository for PgResearchReadinessEvidenceReposito
 fn checked_count(column: &str, value: i64) -> Result<u64, StorageError> {
     u64::try_from(value).map_err(|error| {
         StorageError::invariant_violation(
-            Some(entity::QUANT_RESEARCH_READINESS_EVIDENCE),
+            Some(QUANT_RESEARCH_READINESS_EVIDENCE),
             format!("shadow latency {column} is invalid: {error}"),
         )
     })
@@ -146,7 +142,7 @@ fn checked_percentile(column: &str, value: Option<i64>) -> Result<Option<u64>, S
         .map(|value| {
             u64::try_from(value).map_err(|error| {
                 StorageError::invariant_violation(
-                    Some(entity::QUANT_RESEARCH_READINESS_EVIDENCE),
+                    Some(QUANT_RESEARCH_READINESS_EVIDENCE),
                     format!("shadow latency {column} is invalid: {error}"),
                 )
             })
@@ -160,21 +156,21 @@ fn validate_new(evidence: &NewResearchReadinessEvidence) -> Result<(), StorageEr
         || evidence.observed_at >= evidence.expires_at
     {
         return Err(StorageError::invariant_violation(
-            Some(entity::QUANT_RESEARCH_READINESS_EVIDENCE),
+            Some(QUANT_RESEARCH_READINESS_EVIDENCE),
             "readiness evidence time, artifact, or attestation contract is invalid",
         ));
     }
     let payload_bytes =
         CanonicalDigest::canonical_json_bytes(&evidence.payload_json).map_err(|error| {
             StorageError::invariant_violation(
-                Some(entity::QUANT_RESEARCH_READINESS_EVIDENCE),
+                Some(QUANT_RESEARCH_READINESS_EVIDENCE),
                 format!("readiness evidence payload cannot be serialized: {error}"),
             )
         })?;
     let actual_payload_hash = ContentHash::parse(CanonicalDigest::prefixed_bytes(&payload_bytes))
         .map_err(|error| {
         StorageError::invariant_violation(
-            Some(entity::QUANT_RESEARCH_READINESS_EVIDENCE),
+            Some(QUANT_RESEARCH_READINESS_EVIDENCE),
             format!("readiness evidence payload hash is invalid: {error}"),
         )
     })?;
@@ -182,7 +178,7 @@ fn validate_new(evidence: &NewResearchReadinessEvidence) -> Result<(), StorageEr
         || !payload_matches_kind(evidence.kind, &evidence.payload_json)
     {
         return Err(StorageError::invariant_violation(
-            Some(entity::QUANT_RESEARCH_READINESS_EVIDENCE),
+            Some(QUANT_RESEARCH_READINESS_EVIDENCE),
             "readiness evidence payload hash or kind binding is invalid",
         ));
     }

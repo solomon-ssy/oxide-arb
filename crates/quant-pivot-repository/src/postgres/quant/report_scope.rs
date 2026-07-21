@@ -1,9 +1,10 @@
 //! Shared serialization lock for report publication and entry submission.
 
-use crate::postgres::primitives;
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{enums::quant::ReportKind, types::ResearchProfileId};
 use sea_orm::ConnectionTrait;
+
+use crate::postgres::primitives;
 
 /// Serialize every authority-changing mutation for one report scope.
 ///

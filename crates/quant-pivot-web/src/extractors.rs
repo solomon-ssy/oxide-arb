@@ -20,7 +20,10 @@ use actix_web::{
 };
 use quant_pivot_error::auth::AuthError;
 use quant_pivot_models::{
-    domain::{PageRequest, PageWindow, RoleInfo},
+    domain::{
+        pagination::{PageRequest, PageWindow},
+        rbac::RoleInfo,
+    },
     enums::rbac::RoleStatus,
     types::RoleId,
 };

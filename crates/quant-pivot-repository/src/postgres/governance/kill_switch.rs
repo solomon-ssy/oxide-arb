@@ -1,12 +1,13 @@
 //! Postgres-backed operational kill-switch repository.
 
-use crate::{postgres::error, traits::KillSwitchStateRepository};
-use quant_pivot_error::storage::{StorageError, entity};
+use quant_pivot_error::storage::{StorageError, entity::QUANT_KILL_SWITCH};
 use quant_pivot_models::{
-    domain::{KillSwitchStateInfo, UpsertKillSwitchState},
-    entities::system_kill_switch,
+    domain::governance::{KillSwitchStateInfo, UpsertKillSwitchState},
+    entities::system_kill_switch::Entity,
 };
 use sea_orm::{ActiveModelTrait, ActiveValue, DatabaseConnection, EntityTrait, IntoActiveModel};
+
+use crate::{postgres::error, traits::KillSwitchStateRepository};
 
 /// Singleton row id for `system_kill_switch`.
 pub const SYSTEM_KILL_SWITCH_ID: i32 = 1;
@@ -25,7 +26,7 @@ impl PgKillSwitchStateRepository {
 #[async_trait::async_trait]
 impl KillSwitchStateRepository for PgKillSwitchStateRepository {
     async fn load(&self) -> Result<Option<KillSwitchStateInfo>, StorageError> {
-        system_kill_switch::Entity::find_by_id(SYSTEM_KILL_SWITCH_ID)
+        Entity::find_by_id(SYSTEM_KILL_SWITCH_ID)
             .one(&self.db)
             .await
             .map_err(StorageError::from)
@@ -38,7 +39,7 @@ impl KillSwitchStateRepository for PgKillSwitchStateRepository {
     ) -> Result<KillSwitchStateInfo, StorageError> {
         if state.id != SYSTEM_KILL_SWITCH_ID {
             return Err(error::invariant_violation(
-                Some(entity::QUANT_KILL_SWITCH),
+                Some(QUANT_KILL_SWITCH),
                 format!(
                     "system_kill_switch id must be {SYSTEM_KILL_SWITCH_ID}, got {}",
                     state.id
@@ -46,13 +47,13 @@ impl KillSwitchStateRepository for PgKillSwitchStateRepository {
             ));
         }
 
-        let existing = system_kill_switch::Entity::find_by_id(SYSTEM_KILL_SWITCH_ID)
+        let existing = Entity::find_by_id(SYSTEM_KILL_SWITCH_ID)
             .one(&self.db)
             .await
             .map_err(StorageError::from)?;
 
         let Some(row) = existing else {
-            return system_kill_switch::Entity::insert(state.into_active_model())
+            return Entity::insert(state.into_active_model())
                 .exec_with_returning(&self.db)
                 .await
                 .map_err(StorageError::from)

@@ -7,7 +7,9 @@ use std::collections::HashMap;
 
 use quant_pivot_error::{QuantResult, report::ReportError};
 use quant_pivot_models::{
-    domain::{MarketCandidate, MarketSelectionModel, NewMarketSelection, NewMarketSelectionMember},
+    domain::quant::{
+        MarketCandidate, MarketSelectionModel, NewMarketSelection, NewMarketSelectionMember,
+    },
     enums::market::MarketStatus,
     types::MarketId,
 };
@@ -80,10 +82,9 @@ pub fn map_snapshot_to_model(
 
 #[cfg(test)]
 mod tests {
-    use super::map_snapshot_to_model;
-    use chrono::{TimeZone, Utc};
+    use chrono::{DateTime, Duration, TimeZone, Utc};
     use quant_pivot_models::{
-        domain::{DomainAvailability, MarketCandidate, MarketDataHealth},
+        domain::quant::{DomainAvailability, MarketCandidate, MarketDataHealth},
         enums::{common::MarketCategory, market::MarketStatus},
         types::{
             ContentHash, DecisionPolicySnapshotId, EventId, MarketId, MarketSelectionId, Price,
@@ -95,7 +96,9 @@ mod tests {
     };
     use rust_decimal::Decimal;
 
-    fn as_of() -> chrono::DateTime<Utc> {
+    use super::map_snapshot_to_model;
+
+    fn as_of() -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 0).unwrap()
     }
 
@@ -107,7 +110,7 @@ mod tests {
             status: MarketStatus::Active,
             primary_token_id: TokenId::new("yes"),
             secondary_token_id: Some(TokenId::new("no")),
-            end_date: Some(as_of() + chrono::Duration::days(7)),
+            end_date: Some(as_of() + Duration::days(7)),
             liquidity_usd: Some(Usd::new(Decimal::from(10_000))),
             volume_24h_usd: Some(Usd::new(Decimal::from(5_000))),
             best_bid: Some(Price::new(Decimal::new(49, 2))),

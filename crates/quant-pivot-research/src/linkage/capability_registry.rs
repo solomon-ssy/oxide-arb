@@ -1,4 +1,4 @@
-//! Canonical Phase 11.9 Crypto/Weather capability registry.
+//! Canonical Crypto/Weather capability registry.
 
 use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
@@ -629,10 +629,6 @@ fn source(
 
 #[cfg(test)]
 mod tests {
-    use crate::linkage::{
-        rules, ruleset::CREDENTIAL_CHAINLINK_ASSETS,
-        weather_daily_temperature::WeatherStationRegistry,
-    };
     use quant_pivot_models::{
         config::{WeatherVerticalBindingsConfig, builtin_weather_station_profiles},
         enums::domain::{DomainFamily, LinkageSourceRole},
@@ -644,6 +640,10 @@ mod tests {
 
     use super::{
         BINANCE_USDM_FUTURES_ASSETS, CREDENTIAL_BINANCE_ASSETS, domain_capability_registry,
+    };
+    use crate::linkage::{
+        rules, ruleset::CREDENTIAL_CHAINLINK_ASSETS,
+        weather_daily_temperature::WeatherStationRegistry,
     };
 
     fn registry() -> DomainCapabilityRegistryArtifact {
@@ -657,7 +657,7 @@ mod tests {
     }
 
     #[test]
-    fn registry_is_valid_and_covers_every_phase_11_9_family() {
+    fn registry_is_valid_and_covers_every_supported_family() {
         let registry = registry();
         assert!(registry.validate().is_ok());
         for family in [

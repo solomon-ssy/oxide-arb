@@ -4,15 +4,21 @@
 //! a miss), so a Redis outage falls through to the inner repository instead of
 //! failing the read.
 
-use crate::traits::MarketRepository;
+use std::{collections::HashSet, sync::Arc};
+
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    domain::{MarketInfo, MarketPageQuery, Paginated, UpsertMarket},
+    domain::{
+        api::MarketPageQuery,
+        market::{MarketInfo, UpsertMarket},
+        pagination::Paginated,
+    },
     enums::market::MarketStatus,
     types::MarketId,
 };
 use quant_pivot_storage::cache::{CacheKey, CacheManager};
-use std::{collections::HashSet, sync::Arc};
+
+use crate::traits::MarketRepository;
 
 /// Caching decorator for market metadata reads.
 pub struct CachedMarketRepository<R: MarketRepository> {

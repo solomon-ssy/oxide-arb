@@ -1,9 +1,10 @@
-//! Phase 0 end-to-end micro-benchmarks (data plane skeleton).
+//! end-to-end micro-benchmarks (data plane skeleton).
+
+use std::sync::Arc;
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use quant_pivot_core::{ingest::book_store::BookStore, observability::metrics_hub::MetricsHub};
 use quant_pivot_models::types::TokenId;
-use std::sync::Arc;
 
 fn bench_book_store_load_empty(c: &mut Criterion) {
     let store = BookStore::new(Arc::new(MetricsHub::new()));

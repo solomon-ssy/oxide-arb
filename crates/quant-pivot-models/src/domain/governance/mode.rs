@@ -5,8 +5,9 @@
 //! It is fail-closed: the transition is only allowed when every **hard** check
 //! passes. Soft (informational) checks never block but are surfaced for audit.
 
-use crate::enums::quant::QuantRuntimeMode;
 use serde::{Deserialize, Serialize};
+
+use crate::enums::quant::QuantRuntimeMode;
 
 /// One preflight check outcome.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -8,12 +8,11 @@
 //! also back the `quant_account_snapshot` persistence DTOs.
 
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
-
 use quant_pivot_models::{
     enums::quant::AccountSource,
     types::{ExposureBreakdown, PositionSnapshot, Usd},
 };
+use serde::{Deserialize, Serialize};
 
 /// Real venue account state frozen at a report's `as_of`.
 ///

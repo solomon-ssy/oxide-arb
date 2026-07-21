@@ -1,15 +1,23 @@
-mod jsonb_field_audit;
-mod persistence_field_audit;
-mod sql_contract_audit;
-mod sql_contract_registry;
+mod account_read_smoke;
+mod architecture;
+mod public_read_smoke;
 
-use anyhow::{Context, Result, bail};
+use std::{
+    env, fs,
+    fs::{File, OpenOptions, Permissions},
+    io::{BufReader, Read, Write},
+    os::unix::fs::{OpenOptionsExt, PermissionsExt},
+    path::{Path, PathBuf},
+    process::ExitCode,
+    time::Duration as StdDuration,
+};
+
+use anyhow::{Context, Error, Result, bail};
 use async_trait::async_trait;
+use blake3::Hasher;
 use chrono::{DateTime, Duration, Utc};
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use quant_pivot_core::app::phase_11_9_evidence_bootstrap::{
-    Phase119EvidenceBootstrapOptions, run_phase_11_9_evidence_bootstrap,
-};
+use quant_pivot_error::QuantResult;
 use quant_pivot_migration::{
     acquire_lifecycle_lease, apply_under_lifecycle_lease, inspect_preproduction_postgres,
     plan as plan_postgres_migrations, release_lifecycle_lease, reset_preproduction_postgres,
@@ -17,37 +25,22 @@ use quant_pivot_migration::{
 use quant_pivot_models::{
     config::{CompiledBuildIdentity, DeployConfig, PostgresConfig},
     domain::{
-        ConfigApiContractSchema, LifecycleSchemaVerificationPort, NewProductionEvidence,
-        VerifiedSchemaFingerprints,
+        api::{ConfigApiContractSchema, ResearchModelApiContractSchema},
+        governance::NewProductionEvidence,
+        ports::{LifecycleSchemaVerificationPort, VerifiedSchemaFingerprints},
     },
-    enums::{
-        common::MarketCategory,
-        domain::DomainFamily,
-        runtime_config::{PolicyActorKind, ProductionEvidenceKind},
-    },
+    enums::runtime_config::{PolicyActorKind, ProductionEvidenceKind},
     hashing::CanonicalDigest,
     runtime_config::DecisionPolicySnapshot,
     security::hash_password,
-    types::{
-        ArtifactUri, ContentHash, EventId, PreproductionResetNonce, ProductionEvidenceId,
-        domain_capability::DomainContractFamily,
-        domain_classification::DomainMarketClassificationOutcome,
-    },
+    types::{ArtifactUri, ContentHash, PreproductionResetNonce, ProductionEvidenceId},
 };
 use quant_pivot_repository::{
     postgres::{
         PgModelRegistryRepository, PgPolicyRepository,
-        catalog::{event::PgEventRepository, market::PgMarketRepository},
         governance::policy_bootstrap::ensure_default_policy_bundle,
     },
-    traits::{PolicyRepository, governance::event::EventRepository, market::MarketRepository},
-};
-use quant_pivot_research::{
-    artifact::{ArtifactKey, ArtifactNamespace, build_artifact_store},
-    linkage::{
-        catalog_classification::DomainCatalogClassifier,
-        weather_daily_temperature::WeatherStationRegistry,
-    },
+    traits::PolicyRepository,
 };
 use quant_pivot_storage::{
     cache::{count_preproduction_namespace, unlink_preproduction_namespace},
@@ -67,83 +60,16 @@ use quant_pivot_storage::{
         },
     },
 };
+use quant_pivot_system_tests::production_stack;
 use rustls::crypto::aws_lc_rs;
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    env, fs,
-    io::{BufReader, Read, Write},
-    os::unix::fs::{OpenOptionsExt, PermissionsExt},
-    path::{Path, PathBuf},
-    process::{Command, ExitCode, Stdio},
-    sync::Arc,
-};
 use testcontainers::{ImageExt, runners::AsyncRunner};
 use testcontainers_modules::postgres::Postgres;
+use url::Url;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
 const BOOTSTRAP_ADMIN_PASSWORD_FILE_ENV: &str = "QUANT_PIVOT_BOOTSTRAP__ADMIN_PASSWORD_FILE";
-
-const DOCKER_SUITES: &[(&str, &str)] = &[
-    ("quant-pivot-storage", "migration_pg"),
-    ("quant-pivot-repository", "pg_catalog_ledger"),
-    ("quant-pivot-repository", "pg_feature_parity"),
-    ("quant-pivot-repository", "pg_bootstrap"),
-    ("quant-pivot-repository", "pg_account_capital"),
-    ("quant-pivot-repository", "pg_attribution"),
-    ("quant-pivot-repository", "pg_backtest_path_set"),
-    ("quant-pivot-repository", "pg_basis_alert"),
-    ("quant-pivot-repository", "pg_calibration_artifact"),
-    ("quant-pivot-repository", "pg_entry_condition_evaluation"),
-    ("quant-pivot-repository", "pg_equity_snapshot"),
-    ("quant-pivot-repository", "pg_factor_revision"),
-    ("quant-pivot-repository", "pg_market_selection"),
-    ("quant-pivot-repository", "pg_market_linkage"),
-    ("quant-pivot-repository", "pg_market_page"),
-    ("quant-pivot-repository", "pg_governance"),
-    ("quant-pivot-repository", "pg_rbac"),
-    ("quant-pivot-repository", "pg_report_scheduler"),
-    ("quant-pivot-repository", "pg_training_dataset"),
-    ("quant-pivot-repository", "pg_model_registry"),
-    ("quant-pivot-repository", "pg_research_job"),
-    ("quant-pivot-repository", "pg_research_readiness"),
-    ("quant-pivot-repository", "pg_trade_policy_trial"),
-    ("quant-pivot-repository", "pg_typed_persistence"),
-    ("quant-pivot-repository", "pg_backtest_report"),
-    ("quant-pivot-repository", "pg_comparison_report"),
-    ("quant-pivot-repository", "pg_domain_projection"),
-    ("quant-pivot-repository", "pg_domain_source_expectation"),
-    ("quant-pivot-repository", "pg_execution_submission"),
-    ("quant-pivot-repository", "pg_policy_governance"),
-    ("quant-pivot-repository", "pg_production_lifecycle"),
-    (
-        "quant-pivot-repository",
-        "pg_weather_daily_temperature_projection",
-    ),
-    ("quant-pivot-repository", "portfolio_optimizer_meta"),
-    ("quant-pivot-repository", "ch_fact_read_pit"),
-    ("quant-pivot-storage", "redis_integration"),
-    ("quant-pivot-storage", "clickhouse_integration"),
-    ("quant-pivot-storage", "cache_tiered_integration"),
-    ("quant-pivot-core", "health_checker"),
-    ("quant-pivot-core", "market_selection_e2e"),
-    ("quant-pivot-core", "bootstrap_registry_e2e"),
-    ("quant-pivot-core", "equity_snapshot"),
-    ("quant-pivot-core", "factor_plane_e2e"),
-    ("quant-pivot-core", "governance_e2e"),
-    ("quant-pivot-core", "model_train_backtest_e2e"),
-    ("quant-pivot-core", "report_pipeline_e2e"),
-    ("quant-pivot-core", "weather_linkage_group_e2e"),
-    ("quant-pivot-web", "web"),
-];
-
-const NETWORK_SUITES: &[(&str, &str)] = &[
-    ("quant-pivot-api", "http_gamma_wiremock"),
-    ("quant-pivot-api", "http_data_api_wiremock"),
-];
-
-const UI_E2E_SERVER_TEST: &str = "ui_e2e_server_impl::serve_protected_ui_e2e";
 
 #[derive(Parser)]
 #[command(name = "quant-pivot-xtask")]
@@ -155,6 +81,22 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Enforce workspace dependency direction and production/test boundaries.
+    Architecture {
+        #[command(subcommand)]
+        command: ArchitectureCommand,
+    },
+    /// Run the real production binary against disposable infrastructure.
+    #[command(name = "production-stack")]
+    ProductionStack {
+        #[command(subcommand)]
+        command: ProductionStackCommand,
+    },
+    /// Run explicitly classified external read-only smoke checks.
+    Smoke {
+        #[command(subcommand)]
+        command: SmokeCommand,
+    },
     /// Plan, apply online-safe migrations, or verify the `ClickHouse` schema.
     #[command(name = "clickhouse-schema")]
     ClickHouseSchema {
@@ -167,27 +109,12 @@ enum Commands {
         #[command(subcommand)]
         command: PostgresSchemaCommand,
     },
-    /// Run the default workspace tests, Docker suites, and network suites.
-    #[command(name = "test-full")]
-    Full,
-    /// Run testcontainers-based integration tests (requires Docker daemon).
-    #[command(name = "test-docker")]
-    Docker,
-    /// Run network-shaped API tests that are ignored by default.
-    #[command(name = "test-network")]
-    Network,
     /// Derive the report hard ceiling from the recent 30-day catalog-visible p99.
     #[command(name = "report-capacity-ceiling")]
     ReportCapacityCeiling {
         #[arg(long)]
         catalog_visible_p99: u64,
     },
-    /// Classify every active Crypto/Weather market and write immutable evidence.
-    #[command(name = "phase-11-9-classify-catalog")]
-    Phase119ClassifyCatalog(ConfigDirArgs),
-    /// Bootstrap durable Crypto/Weather evidence and emit a gap-audited manifest.
-    #[command(name = "phase-11-9-evidence-bootstrap")]
-    Phase119EvidenceBootstrap(Phase119EvidenceBootstrapArgs),
     /// Render the canonical boot policy bundle for schema and inventory tooling.
     #[command(name = "render-boot-policy")]
     RenderBootPolicy,
@@ -197,27 +124,12 @@ enum Commands {
         #[arg(long, default_value = "schema/api/config-v1.schema.json")]
         output: PathBuf,
     },
-    /// Audit primitive persistence fields against explicit semantic decisions.
-    #[command(name = "persistence-field-audit")]
-    PersistenceFieldAudit {
-        #[arg(long, default_value = "schema/persistence-field-decisions.toml")]
-        registry: PathBuf,
-        /// Print structurally discovered candidates without reading the registry.
-        #[arg(long)]
-        print_candidates: bool,
+    /// Generate the Rust-owned research-model API schema used by the SPA.
+    #[command(name = "research-model-api-schema")]
+    ResearchModelApiSchema {
+        #[arg(long, default_value = "schema/api/research-model-v1.schema.json")]
+        output: PathBuf,
     },
-    /// Audit every runtime JSONB field against its explicit persistence decision.
-    #[command(name = "jsonb-field-audit")]
-    JsonbFieldAudit {
-        #[arg(long, default_value = "schema/jsonb-field-decisions.toml")]
-        registry: PathBuf,
-        /// Print structurally discovered candidates without reading the registry.
-        #[arg(long)]
-        print_candidates: bool,
-    },
-    /// Audit native SQL declarations, registry entries, usages, and bypasses.
-    #[command(name = "sql-contract-audit")]
-    SqlContractAudit,
     /// Record content-addressed WORM evidence for the irreversible production seal.
     #[command(name = "production-evidence")]
     ProductionEvidence(ProductionEvidenceArgs),
@@ -227,6 +139,64 @@ enum Commands {
         #[command(subcommand)]
         command: PreproductionResetCommand,
     },
+}
+
+#[derive(Subcommand)]
+enum ArchitectureCommand {
+    /// Validate the current Cargo metadata graph without changing the workspace.
+    Check,
+}
+
+#[derive(Subcommand)]
+enum ProductionStackCommand {
+    /// Serve until terminated for browser E2E or local system verification.
+    Serve(ProductionStackServeArgs),
+    /// Boot, probe, and stop fresh stacks repeatedly.
+    Verify(ProductionStackVerifyArgs),
+}
+
+#[derive(Subcommand)]
+enum SmokeCommand {
+    /// Verify configured account identity and venue reads without submitting.
+    #[command(name = "account-read")]
+    AccountRead(ConfigDirArgs),
+    /// Probe public endpoints without credentials or money-moving operations.
+    #[command(name = "public-read")]
+    PublicRead(PublicReadSmokeArgs),
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum PublicReadSmokeScope {
+    All,
+    Binance,
+    Polymarket,
+    Weather,
+}
+
+#[derive(Args)]
+struct PublicReadSmokeArgs {
+    #[arg(long, value_enum, default_value_t = PublicReadSmokeScope::All)]
+    scope: PublicReadSmokeScope,
+    #[arg(long, default_value_t = 90)]
+    stream_timeout_secs: u64,
+}
+
+#[derive(Args)]
+struct ProductionStackServeArgs {
+    #[arg(long, default_value_t = 8088)]
+    listen_port: u16,
+    /// Seed the smallest published-report/pending-intent/model lineage needed by browser E2E.
+    #[arg(long)]
+    browser_fixture: bool,
+    /// Retain the isolated run directory so CI can archive backend logs after a failure.
+    #[arg(long)]
+    retain_artifacts: bool,
+}
+
+#[derive(Args)]
+struct ProductionStackVerifyArgs {
+    #[arg(long, default_value_t = 2)]
+    runs: u16,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -346,36 +316,6 @@ struct PreproductionResetVerifyArgs {
     operation_id: Uuid,
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
-enum Phase119EvidenceCategory {
-    Crypto,
-    Weather,
-}
-
-#[derive(Args)]
-struct Phase119EvidenceBootstrapArgs {
-    #[command(flatten)]
-    config: ConfigDirArgs,
-    /// Comma-delimited verticals to ingest and audit.
-    #[arg(long, value_delimiter = ',', default_value = "crypto,weather")]
-    categories: Vec<Phase119EvidenceCategory>,
-    /// Content-addressed evidence manifest directory.
-    #[arg(long, default_value = ".local/phase-11-9/manifests")]
-    manifest_dir: PathBuf,
-    /// Optional frozen ICAO station shard; repeat or pass comma-delimited values.
-    #[arg(long = "weather-station", value_delimiter = ',')]
-    weather_stations: Vec<String>,
-    /// Skip the authoritative Gamma keyset reconciliation for an offline rerun.
-    #[arg(long)]
-    skip_catalog_sync: bool,
-    /// Bounded number of one-day Binance archive recovery passes.
-    #[arg(long, default_value_t = 64)]
-    max_crypto_cycles: u16,
-    /// Maximum wait for all public Crypto live bindings to commit a live cursor.
-    #[arg(long, default_value_t = 120)]
-    crypto_live_timeout_secs: u64,
-}
-
 #[tokio::main]
 async fn main() -> ExitCode {
     if aws_lc_rs::default_provider().install_default().is_err() {
@@ -392,20 +332,51 @@ async fn main() -> ExitCode {
 
 async fn run() -> Result<()> {
     match Cli::parse().command {
+        Commands::Architecture { command } => match command {
+            ArchitectureCommand::Check => architecture::run(),
+        },
+        Commands::ProductionStack { command } => match command {
+            ProductionStackCommand::Serve(args) => {
+                Box::pin(production_stack::serve(
+                    args.listen_port,
+                    args.browser_fixture,
+                    args.retain_artifacts,
+                ))
+                .await
+            }
+            ProductionStackCommand::Verify(args) => production_stack::verify(args.runs).await,
+        },
+        Commands::Smoke { command } => match command {
+            SmokeCommand::AccountRead(args) => account_read_smoke::run(&args.config_dir).await,
+            SmokeCommand::PublicRead(args) => {
+                if args.stream_timeout_secs == 0 {
+                    bail!("public-read smoke requires --stream-timeout-secs greater than zero");
+                }
+                Box::pin(public_read_smoke::run(
+                    matches!(
+                        args.scope,
+                        PublicReadSmokeScope::All | PublicReadSmokeScope::Binance
+                    ),
+                    matches!(
+                        args.scope,
+                        PublicReadSmokeScope::All | PublicReadSmokeScope::Polymarket
+                    ),
+                    matches!(
+                        args.scope,
+                        PublicReadSmokeScope::All | PublicReadSmokeScope::Weather
+                    ),
+                    StdDuration::from_secs(args.stream_timeout_secs),
+                ))
+                .await
+            }
+        },
         Commands::ClickHouseSchema { command } => clickhouse_schema(command).await,
         Commands::PostgresSchema { command } => postgres_schema(command).await,
-        Commands::Full => test_full(),
-        Commands::Docker => test_docker(),
-        Commands::Network => test_network(),
         Commands::ReportCapacityCeiling {
             catalog_visible_p99,
         } => {
             println!("{}", report_capacity_ceiling(catalog_visible_p99)?);
             Ok(())
-        }
-        Commands::Phase119ClassifyCatalog(args) => classify_phase_11_9_catalog(args).await,
-        Commands::Phase119EvidenceBootstrap(args) => {
-            Box::pin(phase_11_9_evidence_bootstrap(args)).await
         }
         Commands::RenderBootPolicy => {
             println!(
@@ -416,15 +387,7 @@ async fn run() -> Result<()> {
             Ok(())
         }
         Commands::ConfigApiSchema { output } => write_config_api_schema(&output),
-        Commands::PersistenceFieldAudit {
-            registry,
-            print_candidates,
-        } => persistence_field_audit::run(&registry, print_candidates),
-        Commands::JsonbFieldAudit {
-            registry,
-            print_candidates,
-        } => jsonb_field_audit::run(&registry, print_candidates),
-        Commands::SqlContractAudit => sql_contract_audit::run(),
+        Commands::ResearchModelApiSchema { output } => write_research_model_api_schema(&output),
         Commands::ProductionEvidence(args) => record_production_evidence(args).await,
         Commands::PreproductionReset { command } => preproduction_reset(command).await,
     }
@@ -446,216 +409,20 @@ fn write_config_api_schema(output: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-async fn phase_11_9_evidence_bootstrap(args: Phase119EvidenceBootstrapArgs) -> Result<()> {
-    let config_dir = args
-        .config
-        .config_dir
-        .to_str()
-        .context("evidence bootstrap config directory is not valid UTF-8")?;
-    let deploy = Arc::new(DeployConfig::load(config_dir).context("load deploy config")?);
-    let categories = args
-        .categories
-        .into_iter()
-        .map(|category| match category {
-            Phase119EvidenceCategory::Crypto => DomainFamily::Crypto,
-            Phase119EvidenceCategory::Weather => DomainFamily::Weather,
-        })
-        .collect::<BTreeSet<_>>();
-    let weather_stations = args
-        .weather_stations
-        .into_iter()
-        .map(|station| station.trim().to_ascii_uppercase())
-        .filter(|station| !station.is_empty())
-        .collect::<BTreeSet<_>>();
-    let manifest = Box::pin(run_phase_11_9_evidence_bootstrap(
-        deploy,
-        Phase119EvidenceBootstrapOptions {
-            categories,
-            weather_stations,
-            sync_catalog: !args.skip_catalog_sync,
-            max_crypto_cycles: args.max_crypto_cycles,
-            crypto_live_timeout_secs: args.crypto_live_timeout_secs,
-        },
-    ))
-    .await
-    .context("run Phase 11.9 evidence bootstrap")?;
-    let manifest_hash =
-        CanonicalDigest::content_hash_json(&("boot_evidence_manifest_v1", &manifest))
-            .context("hash Phase 11.9 evidence manifest")?;
-    let bytes = serde_json::to_vec_pretty(&manifest).context("encode evidence manifest")?;
-    fs::create_dir_all(&args.manifest_dir).with_context(|| {
-        format!(
-            "create evidence manifest directory {}",
-            args.manifest_dir.display()
-        )
-    })?;
-    let path = args
-        .manifest_dir
-        .join(format!("{}.json", manifest_hash.hex()));
-    if path.exists() {
-        let current = fs::read(&path)
-            .with_context(|| format!("read existing evidence manifest {}", path.display()))?;
-        if current != bytes {
-            bail!(
-                "content-addressed evidence manifest {} has different bytes",
-                path.display()
-            );
-        }
-    } else {
-        fs::write(&path, bytes)
-            .with_context(|| format!("write evidence manifest {}", path.display()))?;
-    }
-    println!("manifest_path={}", path.display());
-    println!("manifest_hash={manifest_hash}");
-    println!("passed={}", manifest.passed());
-    println!("catalog_markets={}", manifest.catalog_market_count);
-    println!("linkages={}", manifest.linkage_count);
-    println!("source_expectations={}", manifest.source_expectation_count);
-    println!("source_cursors={}", manifest.source_cursor_count);
-    println!(
-        "crypto_observation_rows={}",
-        manifest.crypto_observation_rows
-    );
-    println!(
-        "weather_observation_rows={}",
-        manifest.weather_observation_rows
-    );
-    println!("weather_forecast_rows={}", manifest.weather_forecast_rows);
-    if !manifest.passed() {
-        bail!(
-            "Phase 11.9 evidence gap audit failed: {}",
-            manifest.blockers.join(" | ")
-        );
-    }
-    Ok(())
-}
-
-async fn classify_phase_11_9_catalog(args: ConfigDirArgs) -> Result<()> {
-    let config_dir = args
-        .config_dir
-        .to_str()
-        .context("catalog classification config directory is not valid UTF-8")?;
-    let deploy = DeployConfig::load(config_dir).context("load deploy config")?;
-    let pool = PostgresPool::connect_existing(&deploy.db.postgres)
-        .await
-        .context("connect PostgreSQL for catalog classification")?;
-    let market_repo = PgMarketRepository::new(pool.connection().clone());
-    let event_repo = PgEventRepository::new(pool.connection().clone());
-    let markets = market_repo
-        .find_active()
-        .await
-        .context("load active market catalog")?;
-    let event_ids: Vec<EventId> = markets
-        .iter()
-        .filter(|market| {
-            let categories = market.category_set();
-            categories.contains(MarketCategory::Crypto)
-                || categories.contains(MarketCategory::Weather)
-        })
-        .map(|market| market.event_id.clone())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect();
-    let events: BTreeMap<_, _> = event_repo
-        .find_by_ids(&event_ids)
-        .await
-        .context("load domain events")?
-        .into_iter()
-        .map(|event| (event.event_id.clone(), event))
-        .collect();
-    let stations = WeatherStationRegistry::try_new(deploy.domain_sources.weather_stations.clone())
-        .context("build Weather station registry")?;
-    let classifier =
-        DomainCatalogClassifier::new(stations, &deploy.domain_sources.weather_vertical_bindings)
-            .context("build catalog classifier")?;
-    let artifact = classifier
-        .classify_catalog(&markets, &events)
-        .context("classify active Crypto/Weather catalog")?;
-    let bytes = serde_json::to_vec_pretty(&artifact).context("encode classification artifact")?;
-    let store = build_artifact_store(&deploy.research.artifact_store)
-        .context("build classification artifact store")?;
-    let key = ArtifactKey::new(
-        ArtifactNamespace::CapabilityAudit,
-        artifact.artifact_hash.hex(),
-        "json",
+fn write_research_model_api_schema(output: &PathBuf) -> Result<()> {
+    let schema = schemars::schema_for!(ResearchModelApiContractSchema);
+    let mut rendered = serde_json::to_string_pretty(&schema)
+        .context("render research-model API contract schema")?;
+    rendered.push('\n');
+    fs::create_dir_all(
+        output
+            .parent()
+            .context("research-model API schema path has no parent")?,
     )
-    .context("build classification artifact key")?;
-    let uri = store
-        .put(key, &bytes)
-        .await
-        .context("write classification artifact")?;
-    let persisted = store
-        .get(&uri)
-        .await
-        .context("read classification artifact back")?;
-    if persisted != bytes {
-        bail!("catalog classification artifact read-after-write mismatch");
-    }
-
-    let mut family_counts = BTreeMap::new();
-    let mut contract_counts = BTreeMap::new();
-    let mut outcome_counts = BTreeMap::new();
-    for row in &artifact.classifications {
-        *family_counts
-            .entry(family_label(row.family))
-            .or_insert(0_usize) += 1;
-        if let Some(contract_family) = row.contract_family {
-            *contract_counts
-                .entry(contract_family_label(contract_family))
-                .or_insert(0_usize) += 1;
-        }
-        *outcome_counts
-            .entry(outcome_label(row.outcome))
-            .or_insert(0_usize) += 1;
-    }
-    println!("artifact_uri={uri}");
-    println!("artifact_hash={}", artifact.artifact_hash);
-    println!("catalog_hash={}", artifact.catalog_hash);
-    println!("markets={}", artifact.classifications.len());
-    for (family, count) in family_counts {
-        println!("family.{family}={count}");
-    }
-    for (contract_family, count) in contract_counts {
-        println!("contract_family.{contract_family}={count}");
-    }
-    for (outcome, count) in outcome_counts {
-        println!("outcome.{outcome}={count}");
-    }
-    pool.close().await;
+    .with_context(|| format!("create {}", output.display()))?;
+    fs::write(output, rendered).with_context(|| format!("write {}", output.display()))?;
+    println!("generated {}", output.display());
     Ok(())
-}
-
-const fn family_label(family: DomainFamily) -> &'static str {
-    match family {
-        DomainFamily::Crypto => "crypto",
-        DomainFamily::Weather => "weather",
-    }
-}
-
-const fn contract_family_label(family: DomainContractFamily) -> &'static str {
-    match family {
-        DomainContractFamily::CryptoDirection => "crypto_direction",
-        DomainContractFamily::CryptoThreshold => "crypto_threshold",
-        DomainContractFamily::CryptoBand => "crypto_band",
-        DomainContractFamily::WeatherDailyTemperature => "weather_daily_temperature",
-        DomainContractFamily::WeatherPrecipitation => "weather_precipitation",
-        DomainContractFamily::WeatherAqi => "weather_aqi",
-        DomainContractFamily::WeatherTornado => "weather_tornado",
-        DomainContractFamily::WeatherTropicalCyclone => "weather_tropical_cyclone",
-        DomainContractFamily::WeatherGlobalTemperature => "weather_global_temperature",
-        DomainContractFamily::WeatherSeaIce => "weather_sea_ice",
-        DomainContractFamily::WeatherWindExtreme => "weather_wind_extreme",
-    }
-}
-
-const fn outcome_label(outcome: DomainMarketClassificationOutcome) -> &'static str {
-    match outcome {
-        DomainMarketClassificationOutcome::Supported => "supported",
-        DomainMarketClassificationOutcome::CredentialBlocked { .. } => "credential_blocked",
-        DomainMarketClassificationOutcome::InsufficientEvidence { .. } => "insufficient_evidence",
-        DomainMarketClassificationOutcome::Excluded { .. } => "excluded",
-        DomainMarketClassificationOutcome::UnsupportedTemplate { .. } => "unsupported_template",
-    }
 }
 
 struct XtaskLiveSchemaVerification<'a> {
@@ -665,7 +432,7 @@ struct XtaskLiveSchemaVerification<'a> {
 
 #[async_trait]
 impl LifecycleSchemaVerificationPort for XtaskLiveSchemaVerification<'_> {
-    async fn verify_live(&self) -> quant_pivot_error::QuantResult<VerifiedSchemaFingerprints> {
+    async fn verify_live(&self) -> QuantResult<VerifiedSchemaFingerprints> {
         let (postgres, clickhouse) = tokio::try_join!(
             verify_postgres_schema(self.postgres.connection()),
             self.clickhouse.verify_schema(),
@@ -744,10 +511,8 @@ async fn record_production_evidence(args: ProductionEvidenceArgs) -> Result<()> 
           "canonical PostgreSQL lifecycle lease was lost while recording production evidence"
       )),
     };
-    let active_result = lease.ensure_active().map_err(anyhow::Error::from);
-    let release_result = release_lifecycle_lease(lease)
-        .await
-        .map_err(anyhow::Error::from);
+    let active_result = lease.ensure_active().map_err(Error::from);
+    let release_result = release_lifecycle_lease(lease).await.map_err(Error::from);
     let recorded = match (record_result, active_result, release_result) {
         (Err(error), _, _) | (Ok(_), Err(error), _) | (Ok(_), Ok(()), Err(error)) => {
             return Err(error.context("record exact production evidence under lifecycle lease"));
@@ -805,20 +570,20 @@ fn persist_evidence_artifact(
             bail!("evidence source changed while it was being content-addressed");
         }
     }
-    fs::set_permissions(&destination, fs::Permissions::from_mode(0o444))
+    fs::set_permissions(&destination, Permissions::from_mode(0o444))
         .with_context(|| format!("seal evidence artifact {} read-only", destination.display()))?;
     let canonical = fs::canonicalize(&destination)
         .with_context(|| format!("canonicalize evidence artifact {}", destination.display()))?;
-    let uri = url::Url::from_file_path(&canonical)
+    let uri = Url::from_file_path(&canonical)
         .map_err(|()| anyhow::anyhow!("evidence artifact path cannot be represented as file://"))?;
     let artifact_uri = ArtifactUri::parse(uri.to_string()).context("validate evidence URI")?;
     Ok((artifact_uri, source_hash))
 }
 
 fn hash_file(path: &Path) -> Result<ContentHash> {
-    let file = fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
+    let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
     let mut reader = BufReader::new(file);
-    let mut hasher = blake3::Hasher::new();
+    let mut hasher = Hasher::new();
     let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
     loop {
         let read = reader
@@ -1152,7 +917,7 @@ async fn preproduction_reset_verify(args: PreproductionResetVerifyArgs) -> Resul
             "canonical PostgreSQL lifecycle lease was lost during reset verification"
         )),
     };
-    let active_result = lease.ensure_active().map_err(anyhow::Error::from);
+    let active_result = lease.ensure_active().map_err(Error::from);
     let release_result = release_lifecycle_lease(lease)
         .await
         .context("release reset verification lifecycle lease");
@@ -1410,7 +1175,7 @@ fn write_private_json_atomic(path: &Path, value: &impl Serialize) -> Result<()> 
     if parent_metadata.file_type().is_symlink() || !parent_metadata.is_dir() {
         bail!("reset journal parent must be a regular non-symlink directory");
     }
-    fs::set_permissions(parent, fs::Permissions::from_mode(0o700))
+    fs::set_permissions(parent, Permissions::from_mode(0o700))
         .with_context(|| format!("restrict reset journal directory {}", parent.display()))?;
     if let Ok(metadata) = fs::symlink_metadata(path)
         && (metadata.file_type().is_symlink() || !metadata.is_file())
@@ -1422,7 +1187,7 @@ fn write_private_json_atomic(path: &Path, value: &impl Serialize) -> Result<()> 
     rendered.push(b'\n');
     let temp_path = parent.join(format!(".reset-journal-{}.tmp", Uuid::now_v7()));
     let write_result = (|| -> Result<()> {
-        let mut file = fs::OpenOptions::new()
+        let mut file = OpenOptions::new()
             .create_new(true)
             .write(true)
             .mode(0o600)
@@ -1450,7 +1215,7 @@ fn write_private_json_atomic(path: &Path, value: &impl Serialize) -> Result<()> 
 
 fn sync_parent_directory(path: &Path) -> Result<()> {
     let parent = path.parent().context("reset journal path has no parent")?;
-    fs::File::open(parent)
+    File::open(parent)
         .with_context(|| format!("open reset journal directory {}", parent.display()))?
         .sync_all()
         .with_context(|| format!("fsync reset journal directory {}", parent.display()))
@@ -1519,7 +1284,7 @@ async fn postgres_schema(command: PostgresSchemaCommand) -> Result<()> {
                     "canonical PostgreSQL lifecycle lease was lost during schema deployment"
                 )),
             };
-            let active_result = lease.ensure_active().map_err(anyhow::Error::from);
+            let active_result = lease.ensure_active().map_err(Error::from);
             let release_result = release_lifecycle_lease(lease)
                 .await
                 .context("release PostgreSQL deployment lifecycle lease");
@@ -1554,7 +1319,7 @@ async fn postgres_schema(command: PostgresSchemaCommand) -> Result<()> {
                     "canonical PostgreSQL lifecycle lease was lost during schema verification"
                 )),
             };
-            let active_result = lease.ensure_active().map_err(anyhow::Error::from);
+            let active_result = lease.ensure_active().map_err(Error::from);
             let release_result = release_lifecycle_lease(lease)
                 .await
                 .context("release PostgreSQL verification lifecycle lease");
@@ -1650,7 +1415,7 @@ async fn generate_clean_postgres_manifest() -> Result<()> {
             "canonical PostgreSQL lifecycle lease was lost during manifest generation"
         )),
     };
-    let active_result = lease.ensure_active().map_err(anyhow::Error::from);
+    let active_result = lease.ensure_active().map_err(Error::from);
     let release_result = release_lifecycle_lease(lease)
         .await
         .context("release disposable manifest lifecycle lease");
@@ -1827,9 +1592,9 @@ async fn clickhouse_schema(command: ClickHouseSchemaCommand) -> Result<()> {
             Ok(())
         }
     };
-    let active_result = lifecycle_lease.as_ref().map_or(Ok(()), |lease| {
-        lease.ensure_active().map_err(anyhow::Error::from)
-    });
+    let active_result = lifecycle_lease
+        .as_ref()
+        .map_or(Ok(()), |lease| lease.ensure_active().map_err(Error::from));
     let release_result = match lifecycle_lease {
         Some(lease) => release_lifecycle_lease(lease)
             .await
@@ -1904,93 +1669,9 @@ fn workspace_root() -> Result<PathBuf> {
         .map(PathBuf::from)
 }
 
-fn ensure_docker_daemon() -> Result<()> {
-    let status = Command::new("docker")
-        .arg("info")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .context("failed to run `docker info`")?;
-    if status.success() {
-        Ok(())
-    } else {
-        bail!("Docker daemon is not running (required for testcontainers)");
-    }
-}
-
-fn test_full() -> Result<()> {
-    test_workspace()?;
-    test_docker()?;
-    test_network()?;
-
-    eprintln!("All tests passed.");
-    Ok(())
-}
-
-fn test_workspace() -> Result<()> {
-    let root = workspace_root()?;
-
-    eprintln!("== workspace :: cargo test --workspace ==");
-    let status = Command::new("cargo")
-        .current_dir(&root)
-        .args(["test", "--workspace"])
-        .status()
-        .context("failed to run workspace test suite")?;
-    if !status.success() {
-        bail!("workspace test suite failed");
-    }
-
-    Ok(())
-}
-
-fn test_docker() -> Result<()> {
-    ensure_docker_daemon()?;
-    run_ignored_suites(DOCKER_SUITES, "docker")?;
-
-    eprintln!("All Docker integration tests passed.");
-    Ok(())
-}
-
-fn test_network() -> Result<()> {
-    run_ignored_suites(NETWORK_SUITES, "network")?;
-
-    eprintln!("All network integration tests passed.");
-    Ok(())
-}
-
-fn run_ignored_suites(suites: &[(&str, &str)], label: &str) -> Result<()> {
-    let root = workspace_root()?;
-
-    for (pkg, test) in suites {
-        eprintln!("== {pkg} :: {test} ==");
-        let mut command = Command::new("cargo");
-        command.current_dir(&root).args([
-            "test",
-            "-p",
-            pkg,
-            "--test",
-            test,
-            "--",
-            "--ignored",
-            "--test-threads=1",
-        ]);
-        if (*pkg, *test) == ("quant-pivot-web", "web") {
-            command.args(["--skip", UI_E2E_SERVER_TEST]);
-        }
-        let status = command
-            .status()
-            .with_context(|| format!("failed to run {label} suite {pkg}::{test}"))?;
-        if !status.success() {
-            bail!("{label} suite failed: {pkg}::{test}");
-        }
-    }
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeSet, env, fs, os::unix::fs::PermissionsExt, path::Path};
+    use std::{env, fs, os::unix::fs::PermissionsExt};
 
     use chrono::{Duration, Utc};
     use quant_pivot_models::{
@@ -1999,56 +1680,18 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        DOCKER_SUITES, PreproductionResetJournal, RESET_JOURNAL_FORMAT_VERSION,
-        RESET_PLAN_TTL_MINUTES, ResetObjectInventory, ResetStage, archive_reset_journal,
-        mark_reset_journal_failed, read_reset_journal, report_capacity_ceiling, reset_journal_hash,
-        reset_target_fingerprints, transition_reset_journal, validate_completed_reset_journal,
-        validate_reset_journal_for_apply, workspace_root, write_private_json_atomic,
+        PreproductionResetJournal, RESET_JOURNAL_FORMAT_VERSION, RESET_PLAN_TTL_MINUTES,
+        ResetObjectInventory, ResetStage, archive_reset_journal, mark_reset_journal_failed,
+        read_reset_journal, report_capacity_ceiling, reset_journal_hash, reset_target_fingerprints,
+        transition_reset_journal, validate_completed_reset_journal,
+        validate_reset_journal_for_apply, write_private_json_atomic,
     };
-
-    const DOCKER_IGNORE_MARKER: &str = "#[ignore = \"requires Docker\"]";
 
     #[test]
     fn report_capacity_ceiling_enforces_floor_double_runway_and_rounding() {
         assert_eq!(report_capacity_ceiling(1).expect("ceiling"), 100_000);
         assert_eq!(report_capacity_ceiling(50_001).expect("ceiling"), 101_000);
         assert_eq!(report_capacity_ceiling(120_000).expect("ceiling"), 240_000);
-    }
-
-    #[test]
-    fn docker_suite_registry_matches_ignored_integration_targets() {
-        let root = workspace_root().expect("workspace root");
-        let packages = DOCKER_SUITES
-            .iter()
-            .map(|(package, _)| *package)
-            .collect::<BTreeSet<_>>();
-        let mut discovered = BTreeSet::new();
-
-        for package in packages {
-            let tests_dir = root.join("crates").join(package).join("tests");
-            for entry in fs::read_dir(&tests_dir).expect("integration test directory") {
-                let path = entry.expect("integration test entry").path();
-                if path.extension().and_then(|value| value.to_str()) != Some("rs") {
-                    continue;
-                }
-                let target = path
-                    .file_stem()
-                    .and_then(|value| value.to_str())
-                    .expect("UTF-8 integration target");
-                let module_dir = tests_dir.join(target);
-                if path_contains(&path, DOCKER_IGNORE_MARKER)
-                    || path_contains(&module_dir, DOCKER_IGNORE_MARKER)
-                {
-                    discovered.insert((package.to_owned(), target.to_owned()));
-                }
-            }
-        }
-
-        let registered = DOCKER_SUITES
-            .iter()
-            .map(|(package, target)| ((*package).to_owned(), (*target).to_owned()))
-            .collect::<BTreeSet<_>>();
-        assert_eq!(registered, discovered);
     }
 
     #[test]
@@ -2170,18 +1813,5 @@ mod tests {
         };
         journal.journal_hash = reset_journal_hash(&journal).expect("reset journal hash");
         journal
-    }
-
-    fn path_contains(path: &Path, marker: &str) -> bool {
-        if path.is_file() {
-            return fs::read_to_string(path).is_ok_and(|contents| contents.contains(marker));
-        }
-        if !path.is_dir() {
-            return false;
-        }
-        fs::read_dir(path)
-            .expect("integration module directory")
-            .filter_map(Result::ok)
-            .any(|entry| path_contains(&entry.path(), marker))
     }
 }

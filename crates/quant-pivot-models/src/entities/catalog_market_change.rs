@@ -1,5 +1,9 @@
 //! Append-only market changes committed by Gamma reconciliation batches.
 
+use chrono::{DateTime, Utc};
+use sea_orm::entity::prelude::*;
+
+use super::{catalog_event_change, catalog_market_object, catalog_sync_batch};
 use crate::{
     enums::catalog::{CatalogChangeType, CatalogTimestampQuality},
     types::{
@@ -7,8 +11,6 @@ use crate::{
         EventId, MarketId,
     },
 };
-use chrono::{DateTime, Utc};
-use sea_orm::entity::prelude::*;
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -33,21 +35,21 @@ pub struct Model {
         from = "catalog_sync_batch_id",
         to = "catalog_sync_batch_id"
     )]
-    pub catalog_sync_batch: BelongsTo<super::catalog_sync_batch::Entity>,
+    pub catalog_sync_batch: BelongsTo<catalog_sync_batch::Entity>,
     #[sea_orm(
         belongs_to,
         relation_enum = "EventChange",
         from = "event_change_id",
         to = "event_change_id"
     )]
-    pub event_change: BelongsTo<super::catalog_event_change::Entity>,
+    pub event_change: BelongsTo<catalog_event_change::Entity>,
     #[sea_orm(
         belongs_to,
         relation_enum = "MarketObject",
         from = "market_object_id",
         to = "market_object_id"
     )]
-    pub market_object: BelongsTo<super::catalog_market_object::Entity>,
+    pub market_object: BelongsTo<catalog_market_object::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

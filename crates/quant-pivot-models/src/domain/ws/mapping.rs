@@ -1,8 +1,10 @@
-//! [`CoreEvent`] → wire-envelope projection (Phase 0).
+//! [`CoreEvent`] → wire-envelope projection.
+
+use serde_json::Value;
 
 use crate::{
     domain::{
-        CoreEvent,
+        runtime::CoreEvent,
         ws::{
             channel::{SubscriptionKey, WsChannel},
             envelope::WsEnvelope,
@@ -10,7 +12,6 @@ use crate::{
     },
     types::MarketId,
 };
-use serde_json::Value;
 
 /// Map a [`CoreEvent`] to its fan-out [`SubscriptionKey`] and [`WsEnvelope`].
 #[must_use]
@@ -84,14 +85,19 @@ pub fn event_envelope(event: &CoreEvent) -> Option<(SubscriptionKey, WsEnvelope)
 
 #[cfg(test)]
 mod tests {
+    use chrono::Utc;
+
     use super::event_envelope;
     use crate::{
         domain::{
-            BootstrapView, CoreEvent, MarketBookView, MaterializationRunEvent,
-            MaterializationRunKind, MaterializationRunStatus, ReconciliationLifecycleEvent,
-            ReportEventKind, ReportLifecycleEvent, ReportRunLifecycleEvent,
-            SettlementRedeemLifecycleEvent, SubscriptionKey, SystemCapabilities, SystemStatus,
-            SystemStatusView, ws::channel::WsChannel,
+            api::{BootstrapView, MarketBookView, SystemCapabilities, SystemStatusView},
+            governance::SystemStatus,
+            runtime::{
+                CoreEvent, MaterializationRunEvent, MaterializationRunKind,
+                MaterializationRunStatus, ReconciliationLifecycleEvent, ReportEventKind,
+                ReportLifecycleEvent, ReportRunLifecycleEvent, SettlementRedeemLifecycleEvent,
+            },
+            ws::{SubscriptionKey, channel::WsChannel},
         },
         enums::{
             execution::{ReconciliationResult, SettlementRedeemState},
@@ -103,7 +109,6 @@ mod tests {
         },
         types::{MarketId, RecommendationReportId, ReportRunId, ResearchProfileId},
     };
-    use chrono::Utc;
 
     #[test]
     fn market_book_update_maps_to_market_scoped_key() {

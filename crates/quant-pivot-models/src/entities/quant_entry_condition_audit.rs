@@ -3,6 +3,7 @@
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
+use super::quant_entry_condition_instance;
 use crate::{
     enums::quant::{EntryConditionAuditAction, EntryConditionState},
     types::{ConditionTruth, ContentHash, EntryConditionAuditId, EntryConditionInstanceId},
@@ -36,7 +37,7 @@ pub struct Model {
         from = "condition_instance_id",
         to = "condition_instance_id"
     )]
-    pub instance: BelongsTo<super::quant_entry_condition_instance::Entity>,
+    pub instance: BelongsTo<quant_entry_condition_instance::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

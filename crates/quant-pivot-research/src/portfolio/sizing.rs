@@ -12,14 +12,14 @@
 //! resolution and it either pays `(1-p)/p` per unit stake (win) or loses the
 //! whole stake (lose), where `p` is the executable market price. This is
 //! *exactly* the payoff [`ReturnEstimate::win_probability`](crate::model::artifact::ReturnEstimate)'s
-//! `E[r] = q·(1-p)/p − (1-q)` already assumes (Phase 11.3 §3.3), so Kelly uses
+//! `E[r] = q·(1-p)/p − (1-q)` already assumes, so Kelly uses
 //! the *same* `q` directly — never re-derives a different "implied" win
 //! probability from a second, inconsistent bet structure:
 //!
 //! ```text
-//! q = win_probability                             // calibrated P(win), same q as E[r]
+//! q = win_probability // calibrated P(win), same q as E[r]
 //! p = (walk gross cash + PIT fee) / filled shares // all-in executable price
-//! f* = (q − p) / (1 − p)                           // binary Kelly, b = (1-p)/p odds
+//! f* = (q − p) / (1 − p) // binary Kelly, b = (1-p)/p odds
 //! ```
 //!
 //! This is the binary Kelly identity `f* = (q·b − (1-q)) / b` after
@@ -37,7 +37,7 @@
 //!
 //! ```text
 //! multiplier = kelly_fraction · confidence_shrink(confidence) · drawdown_scale
-//!              · edge_uncertainty_shrink · correlation_shrink
+//! · edge_uncertainty_shrink · correlation_shrink
 //! raw_fraction = multiplier · f*
 //! position_fraction = clamp(raw_fraction, 0, max_position_pct)
 //! desired tier = largest executable cash tier ≤ round(position_fraction · equity)
@@ -93,7 +93,7 @@ impl Default for DrawdownState {
     }
 }
 
-/// Correlation-aware shrink inputs for one candidate (Phase 11.3 §6.2).
+/// Correlation-aware shrink inputs for one candidate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CorrelationShrinkInput {
     /// Number of same-cluster candidates in the current batch (including self).
@@ -153,14 +153,14 @@ pub struct SizingSuggestion {
     pub kelly_fraction_applied: Option<Decimal>,
     /// Whether the per-position equity cap (`max_position_pct`) bound the size.
     pub binding_kelly_cap: bool,
-    /// Edge-uncertainty shrink multiplier applied (audit only; Phase 11.3 §6.1).
+    /// Edge-uncertainty shrink multiplier applied (audit only).
     pub edge_uncertainty_shrink_applied: Option<Decimal>,
-    /// Correlation-cluster shrink multiplier applied (Phase 11.3 §6.2).
+    /// Correlation-cluster shrink multiplier applied.
     pub correlation_shrink_applied: Option<Decimal>,
     /// Kelly-stage soft binding (confidence / drawdown / correlation shrink).
     pub kelly_stage_binding: Option<BindingConstraint>,
-    /// The full per-stage derivation of `kelly_fraction_applied` (Phase 11.3
-    /// §10 "sizing waterfall"), for the report UI to render each multiplier
+    /// The full per-stage derivation of `kelly_fraction_applied` (the sizing
+    /// waterfall), for the report UI to render each multiplier
     /// step rather than only the already-merged product. `None` for the
     /// edge-free curve model (mirrors `kelly_fraction_applied`).
     pub provenance: Option<SizingProvenance>,
@@ -215,14 +215,14 @@ pub struct SizingProvenance {
 
 /// A position-sizing model (pure: no I/O, no clock, no mutable state).
 pub trait SizingModel: Send + Sync {
-    /// The model family, recorded on every [`crate::portfolio::SizingPlan`].
+    /// The model family, recorded on every sizing plan.
     fn kind(&self) -> SizingModelKind;
 
     /// Suggest a desired USD size for one candidate, or reject it.
     fn suggest(&self, input: &SizingInput<'_>) -> QuantResult<SizingOutcome>;
 }
 
-/// Parsed Kelly safety-layer parameters (Phase 11.3 §6).
+/// Parsed Kelly safety-layer parameters.
 #[derive(Debug, Clone, Copy)]
 pub struct KellySafetyParams {
     edge_uncertainty_k: Decimal,
@@ -396,7 +396,7 @@ impl SizingModel for KellySizingModel {
 ///
 /// # Errors
 ///
-/// Returns [`QuantError::config`] when any decimal parameter is malformed
+/// Returns a configuration error when any decimal parameter is malformed
 /// (runtime-config validation rejects these upstream, so this is a hard guard).
 pub fn sizing_model_from_config(
     sizing: &SizingModelConfig,
@@ -494,11 +494,6 @@ fn resolve_kelly_stage_binding(
 mod tests {
     use std::slice;
 
-    use super::{
-        ConfidenceSizeCurve, CorrelationShrinkInput, DrawdownMultiplierPolicy, DrawdownState,
-        ExecutableSizingTier, KellySafetyParams, KellySizingModel, SizingInput, SizingModel,
-        SizingOutcome,
-    };
     use chrono::Utc;
     use quant_pivot_models::{
         domain::market::{book::BookLevel, fee::BuilderFeeAttribution},
@@ -513,6 +508,11 @@ mod tests {
     use rust_decimal::{Decimal, prelude::ToPrimitive};
     use rust_decimal_macros::dec;
 
+    use super::{
+        ConfidenceSizeCurve, CorrelationShrinkInput, DrawdownMultiplierPolicy, DrawdownState,
+        ExecutableSizingTier, KellySafetyParams, KellySizingModel, SizingInput, SizingModel,
+        SizingOutcome,
+    };
     use crate::{
         execution_semantics::{LiquidityRole, PitFeeSchedule, walk_buy_cash_budget},
         model::signal::{ModelExplanation, SignalCandidate},

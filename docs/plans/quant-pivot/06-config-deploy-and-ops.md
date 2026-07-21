@@ -15,8 +15,10 @@
 - 生命周期源码：[`project-lifecycle.toml`](../../../project-lifecycle.toml)。
 - Deploy 类型：[`crates/quant-pivot-models/src/config/`](../../../crates/quant-pivot-models/src/config/mod.rs)。
 - 六类 policy 类型：[`crates/quant-pivot-models/src/runtime_config/`](../../../crates/quant-pivot-models/src/runtime_config/mod.rs)。
-- 逐叶处置：[`inventory/config-leaf-inventory.tsv`](inventory/config-leaf-inventory.tsv)。
-- 持久化语义字段处置：[`schema/persistence-field-decisions.toml`](../../../schema/persistence-field-decisions.toml)，由 AST 审计器同时核对 runtime entity、persistence DTO 与 fresh-boot v1 snapshot。
+- Deploy 结构与默认值：[`crates/quant-pivot-models/src/config/`](../../../crates/quant-pivot-models/src/config/mod.rs)；所有 section 使用 typed `Deserialize` 与 `deny_unknown_fields`。
+- Deploy 语义校验：[`crates/quant-pivot-models/src/config/validation.rs`](../../../crates/quant-pivot-models/src/config/validation.rs)。
+- Runtime Config API contract：[`schema/api/config-v1.schema.json`](../../../schema/api/config-v1.schema.json)，由 Rust DTO 生成并与前端 TypeScript decoder 双向检查。
+- 持久化边界：runtime entity/DTO 的 Rust 类型、fresh-boot schema manifest、repository system contracts 与 `cargo xtask architecture check`；不维护逐字段影子清单。
 
 系统只允许以下四种配置所有权：
 
@@ -48,7 +50,7 @@
 | `feedback` | 删除 | 无 | 旧字段没有完整消费者；能力落地后再新增独立资源 |
 | `hold_to_resolution*` | 删除 | 无 | 旧路径为 no-op，不能伪装成治理能力 |
 
-Deploy Config 的逐叶路径、消费者、生效边界、validator、secret classification 与删除原因必须以 config leaf inventory 为准；持久化语义字段以独立 TOML 决策表为准。两者均由 CI 对源码做双向一致性检查。
+Deploy Config 以 Rust typed tree、`deny_unknown_fields`、mode-aware semantic validation 与实际 adapter constructor 为唯一事实源；不维护逐叶 TSV 或基于路径前缀推导 ownership 的第二份清单。Runtime Policy wire contract 由 Rust JSON Schema 生成并与前端 decoder 双向检查；持久化语义字段继续由独立 TOML 决策表与 AST 审计器治理。
 
 ## 2. 六类 Runtime Policy
 

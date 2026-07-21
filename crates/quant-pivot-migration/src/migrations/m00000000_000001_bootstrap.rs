@@ -7,15 +7,20 @@ use sea_orm::{
 };
 use sea_orm_migration::{prelude::*, sea_query::extension::postgres::Type};
 
+use super::support::{
+    column_defaults, column_defaults::SOURCE as COLUMN_DEFAULTS_SQL, query_indexes,
+    query_indexes::SOURCE as QUERY_INDEXES_SQL, relational_invariants,
+    relational_invariants::SOURCE as RELATIONAL_INVARIANTS_SQL, v1, v1::SOURCE as V1_SCHEMA_SQL,
+    worm_triggers, worm_triggers::SOURCE as WORM_TRIGGERS_SQL,
+};
 use crate::{
     MigrationSpec, audit, migration_spec,
     snapshots::v1::{
-        ARTIFACTS, ENUMS, MODULE_PREFIX, TABLES, policy_activation_guard,
+        ARTIFACTS, ENUMS, MODULE_PREFIX, TABLES,
+        policy_activation_guard::{ActiveModel, Entity},
         sea_orm_active_enums::{QpCatalogFilterReason, QpMarketCategory},
     },
 };
-
-use super::support::{column_defaults, query_indexes, relational_invariants, v1, worm_triggers};
 
 const NAME: &str = "m00000000_000001_bootstrap";
 const SOURCE: &str = include_str!("m00000000_000001_bootstrap.rs");
@@ -121,7 +126,7 @@ impl MigrationTrait for Migration {
 }
 
 async fn seed_boot_rows(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
-    policy_activation_guard::Entity::insert(policy_activation_guard::ActiveModel {
+    Entity::insert(ActiveModel {
         id: Set(1),
         generation: Set(1),
         current_snapshot_id: Set(None),
@@ -181,11 +186,11 @@ pub fn spec() -> MigrationSpec {
     artifacts.push(SOURCE.as_bytes());
     artifacts.extend_from_slice(ARTIFACTS);
     artifacts.extend([
-        relational_invariants::SOURCE,
-        query_indexes::SOURCE,
-        worm_triggers::SOURCE,
-        column_defaults::SOURCE,
-        v1::SOURCE,
+        RELATIONAL_INVARIANTS_SQL,
+        QUERY_INDEXES_SQL,
+        WORM_TRIGGERS_SQL,
+        COLUMN_DEFAULTS_SQL,
+        V1_SCHEMA_SQL,
     ]);
     migration_spec(NAME, &artifacts)
 }

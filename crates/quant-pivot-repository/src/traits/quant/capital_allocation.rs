@@ -1,6 +1,6 @@
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    domain::CapitalAllocationInfo,
+    domain::quant::CapitalAllocationInfo,
     types::{OrderIntentId, Usd},
 };
 
@@ -20,7 +20,7 @@ pub trait CapitalAllocationRepository: Send + Sync {
         order_intent_id: &OrderIntentId,
     ) -> Result<Option<CapitalAllocationInfo>, StorageError>;
 
-    /// Net reserved capital across in-flight allocations (see [`ReservedCapitalRepository`]).
+    /// Net reserved capital across in-flight allocations (see `ReservedCapitalRepository`).
     async fn sum_reserved_usd(&self) -> Result<Usd, StorageError>;
 
     /// Whether any allocation is in the `Impaired` recovery state.

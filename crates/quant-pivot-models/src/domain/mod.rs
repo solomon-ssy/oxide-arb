@@ -50,7 +50,7 @@
 //! # Rules
 //!
 //! - **No `ActiveModel` / `ActiveValue`** in any public signature or field.
-//! - **No `to_active_model()`** methods — `DeriveIntoActiveModel` handles this.
+//! - **No `to_active_model`** methods — `DeriveIntoActiveModel` handles this.
 //! - Repository traits use only these 5 write verbs: `create`, `create_batch`,
 //!   `update`, `upsert`, `upsert_batch`.
 //! - Port traits (e.g. `RiskPersistence`) use domain verbs: `upsert_state`,
@@ -88,18 +88,3 @@ pub mod ws;
 pub mod pagination;
 pub mod patch;
 pub mod query;
-
-// Flattened facade: every domain type is reachable directly under `domain::`.
-pub use api::*;
-pub use data_plane::*;
-pub use governance::*;
-pub use market::*;
-pub use order::*;
-pub use pagination::*;
-pub use patch::*;
-pub use ports::*;
-pub use quant::*;
-pub use query::*;
-pub use rbac::*;
-pub use runtime::*;
-pub use ws::*;

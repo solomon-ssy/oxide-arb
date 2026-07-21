@@ -1,17 +1,18 @@
 //! Postgres-backed domain-source ingest cursor repository.
 
-use crate::traits::DomainSourceCursorRepository;
 use chrono::Utc;
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    domain::{DomainSourceCursorInfo, UpsertDomainSourceCursor},
-    entities::quant_domain_source_cursor,
+    domain::data_plane::{DomainSourceCursorInfo, UpsertDomainSourceCursor},
+    entities::quant_domain_source_cursor::{Column, Entity},
     types::{DomainInstrumentKey, DomainSourceId},
 };
 use sea_orm::{
     ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder,
     sea_query::OnConflict,
 };
+
+use crate::traits::DomainSourceCursorRepository;
 
 /// Postgres-backed checkpoint store for external domain-source ingestion.
 pub struct PgDomainSourceCursorRepository {
@@ -32,9 +33,9 @@ impl DomainSourceCursorRepository for PgDomainSourceCursorRepository {
         source_id: &DomainSourceId,
         instrument_key: &DomainInstrumentKey,
     ) -> Result<Option<DomainSourceCursorInfo>, StorageError> {
-        quant_domain_source_cursor::Entity::find()
-            .filter(quant_domain_source_cursor::Column::SourceId.eq(source_id.clone()))
-            .filter(quant_domain_source_cursor::Column::InstrumentKey.eq(instrument_key.clone()))
+        Entity::find()
+            .filter(Column::SourceId.eq(source_id.clone()))
+            .filter(Column::InstrumentKey.eq(instrument_key.clone()))
             .one(&self.db)
             .await
             .map_err(StorageError::from)
@@ -46,20 +47,17 @@ impl DomainSourceCursorRepository for PgDomainSourceCursorRepository {
         mut cursor: UpsertDomainSourceCursor,
     ) -> Result<DomainSourceCursorInfo, StorageError> {
         cursor.updated_at = Utc::now();
-        quant_domain_source_cursor::Entity::insert(cursor.into_active_model())
+        Entity::insert(cursor.into_active_model())
             .on_conflict(
-                OnConflict::columns([
-                    quant_domain_source_cursor::Column::SourceId,
-                    quant_domain_source_cursor::Column::InstrumentKey,
-                ])
-                .update_columns([
-                    quant_domain_source_cursor::Column::CheckpointJson,
-                    quant_domain_source_cursor::Column::CheckpointHash,
-                    quant_domain_source_cursor::Column::Status,
-                    quant_domain_source_cursor::Column::LastError,
-                    quant_domain_source_cursor::Column::UpdatedAt,
-                ])
-                .to_owned(),
+                OnConflict::columns([Column::SourceId, Column::InstrumentKey])
+                    .update_columns([
+                        Column::CheckpointJson,
+                        Column::CheckpointHash,
+                        Column::Status,
+                        Column::LastError,
+                        Column::UpdatedAt,
+                    ])
+                    .to_owned(),
             )
             .exec_with_returning(&self.db)
             .await
@@ -68,9 +66,9 @@ impl DomainSourceCursorRepository for PgDomainSourceCursorRepository {
     }
 
     async fn list_all(&self) -> Result<Vec<DomainSourceCursorInfo>, StorageError> {
-        quant_domain_source_cursor::Entity::find()
-            .order_by_asc(quant_domain_source_cursor::Column::SourceId)
-            .order_by_asc(quant_domain_source_cursor::Column::InstrumentKey)
+        Entity::find()
+            .order_by_asc(Column::SourceId)
+            .order_by_asc(Column::InstrumentKey)
             .all(&self.db)
             .await
             .map_err(StorageError::from)

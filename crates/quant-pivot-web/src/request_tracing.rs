@@ -95,8 +95,9 @@ const fn http_flavor(version: Version) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::request_target;
     use actix_web::test::TestRequest;
+
+    use super::request_target;
 
     #[test]
     fn request_path_excludes_query_values() {

@@ -5,9 +5,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     domain::{
-        BacktestJobParams, BiasTableFitJobParams, BuildTrainingDatasetRequest,
-        CpcvBacktestJobParams, FeatureParityJobParams, ModelCalibrationFitJobParams,
-        ModelTrainJobParams, TradePolicyFitJobParams, TradePolicyValidationJobParams,
+        api::{
+            BacktestJobParams, BuildTrainingDatasetRequest, CpcvBacktestJobParams,
+            FeatureParityJobParams, ModelTrainJobParams, TradePolicyFitJobParams,
+            TradePolicyValidationJobParams,
+        },
+        ports::{BiasTableFitJobParams, ModelCalibrationFitJobParams},
     },
     enums::quant::{ResearchJobErrorCode, ResearchJobKind},
 };
@@ -122,7 +125,7 @@ impl ResearchJobError {
 mod tests {
     use super::ResearchJobParams;
     use crate::{
-        domain::TradePolicyValidationJobParams,
+        domain::api::TradePolicyValidationJobParams,
         enums::quant::ResearchJobKind,
         types::{TradePolicyArtifactId, TradePolicyValidationRunId, UserId},
     };

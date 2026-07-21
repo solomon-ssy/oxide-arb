@@ -1,4 +1,4 @@
-//! Basis-cross-check exceedance detection (11.2.2 remediation R6).
+//! Basis-cross-check exceedance detection.
 //!
 //! Closes the loop the design promised but never built: `domain.crypto.
 //! basis_vs_resolution_source` was computed and persisted as a feature value,
@@ -21,14 +21,16 @@
 use std::{collections::HashMap, hash::BuildHasher};
 
 use quant_pivot_models::{
-    domain::NewBasisAlert,
+    domain::quant::NewBasisAlert,
     enums::domain::LinkageSourceRole,
     runtime_config::DomainConfig,
-    types::{BasisAlertId, Bps, MarketId},
+    types::{BasisAlertId, Bps, FeatureValue, MarketId},
 };
 use quant_pivot_research::{
     domain::{oracle_instrument, source_binding},
-    features::{DomainSliceInputs, FeatureValue, FeatureVector, names::domain_crypto},
+    features::{
+        DomainSliceInputs, FeatureVector, names::domain_crypto::BASIS_VS_RESOLUTION_SOURCE,
+    },
 };
 use rust_decimal::Decimal;
 /// Scan `accepted` vectors for a basis exceedance and build the alert rows to
@@ -43,9 +45,7 @@ pub fn detect_basis_alerts<S: BuildHasher>(
     accepted
         .iter()
         .filter_map(|vector| {
-            let FeatureValue::Bps(basis) =
-                vector.value(&domain_crypto::BASIS_VS_RESOLUTION_SOURCE)?
-            else {
+            let FeatureValue::Bps(basis) = vector.value(&BASIS_VS_RESOLUTION_SOURCE)? else {
                 return None;
             };
             if basis.abs() <= threshold_bps.inner() {
@@ -69,37 +69,46 @@ pub fn detect_basis_alerts<S: BuildHasher>(
 
 #[cfg(test)]
 mod tests {
-    use super::detect_basis_alerts;
-    use chrono::{TimeZone, Utc};
-    use quant_pivot_models::{
-        domain::{
-            BasisAlertInfo, BasisAlertListQuery, CryptoSubject, GroundingProof, MarketSubject,
-            NewBasisAlert, Paginated, PriceComparator, ResolutionOracle, ResolvedBinding,
-            ResolvedSourceBinding, pagination::PageRequest,
-        },
-        enums::{
-            domain::{DomainFamily, KlineInterval, LinkageSourceRole},
-            quant::DataQualityStatus,
-        },
-        runtime_config::DomainConfig,
-        types::{
-            BasisAlertId, BinanceSymbol, ChainlinkFeedKey, ContentHash, CryptoAsset, CryptoQuote,
-            DomainInstrumentKey, DomainSourceId, MarketId, MarketLinkageId, SchemaVersion, TokenId,
-        },
-    };
-    use quant_pivot_research::{
-        domain::DomainObservationWindow,
-        features::{
-            DomainSliceData, DomainSliceInputs, EvidenceSourceKind, EvidenceSourceRef, FeatureCell,
-            FeatureStaleness, FeatureValue, FeatureVector, names::domain_crypto,
-        },
-    };
-    use rust_decimal_macros::dec;
     use std::{
         collections::{BTreeMap, HashMap},
         slice,
         sync::Mutex,
     };
+
+    use chrono::{TimeZone, Utc};
+    use quant_pivot_error::storage::StorageError;
+    use quant_pivot_models::{
+        domain::{
+            api::BasisAlertListQuery,
+            pagination::{PageRequest, Paginated},
+            quant::{
+                BasisAlertInfo, CryptoSubject, GroundingProof, MarketSubject, NewBasisAlert,
+                PriceComparator, ResolutionOracle, ResolvedBinding, ResolvedSourceBinding,
+            },
+        },
+        enums::{
+            domain::{DomainFamily, KlineInterval, LinkageSourceRole},
+            feature::EvidenceSourceKind,
+            quant::DataQualityStatus,
+        },
+        runtime_config::DomainConfig,
+        types::{
+            BasisAlertId, BinanceSymbol, ChainlinkFeedKey, ContentHash, CryptoAsset, CryptoQuote,
+            DomainInstrumentKey, DomainSourceId, EvidenceSourceRef, FeatureCell, FeatureStaleness,
+            FeatureValue, MarketId, MarketLinkageId, SchemaVersion, TokenId,
+        },
+    };
+    use quant_pivot_repository::traits::BasisAlertRepository;
+    use quant_pivot_research::{
+        domain::DomainObservationWindow,
+        features::{
+            DomainSliceData, DomainSliceInputs, FeatureVector,
+            names::domain_crypto::BASIS_VS_RESOLUTION_SOURCE,
+        },
+    };
+    use rust_decimal_macros::dec;
+
+    use super::detect_basis_alerts;
 
     fn instrument() -> DomainInstrumentKey {
         DomainInstrumentKey::binance_kline(
@@ -152,7 +161,7 @@ mod tests {
         let mut generic = BTreeMap::new();
         if let Some(value) = basis_bps {
             generic.insert(
-                domain_crypto::BASIS_VS_RESOLUTION_SOURCE,
+                BASIS_VS_RESOLUTION_SOURCE,
                 FeatureCell::observed(value, None, FeatureStaleness::Unknown),
             );
         }
@@ -254,10 +263,7 @@ mod tests {
         assert!(alerts.is_empty());
     }
 
-    // ── R6: detect → record → acknowledge closed loop ───────────────────────
-
-    use quant_pivot_error::storage::StorageError;
-    use quant_pivot_repository::traits::BasisAlertRepository;
+    // ── Detect → record → acknowledge closed loop ──────────────────────────
 
     /// A minimal in-memory `BasisAlertRepository`, real enough to prove the
     /// `detect_basis_alerts` → `record` → `acknowledge` wiring end to end

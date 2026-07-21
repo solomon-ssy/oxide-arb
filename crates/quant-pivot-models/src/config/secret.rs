@@ -1,6 +1,6 @@
 //! In-memory deploy secret value with non-leaking formatting semantics.
 
-use std::fmt;
+use std::fmt::{Debug, Formatter, Result as FmtResult};
 
 use serde::{Deserialize, Deserializer};
 use zeroize::Zeroizing;
@@ -25,8 +25,8 @@ impl SecretText {
     }
 }
 
-impl fmt::Debug for SecretText {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Debug for SecretText {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> FmtResult {
         formatter.write_str(if self.is_empty() {
             "<secret:unset>"
         } else {

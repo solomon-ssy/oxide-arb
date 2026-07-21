@@ -9,7 +9,7 @@
 use async_trait::async_trait;
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
-    domain::MarketCandidate,
+    domain::quant::MarketCandidate,
     types::{MarketSelectionId, SelectionExclusionSummary},
 };
 
@@ -135,6 +135,15 @@ impl MarketSelector for ConfiguredMarketSelector {
 
 #[cfg(test)]
 mod tests {
+    use chrono::{DateTime, Duration, TimeZone, Utc};
+    use quant_pivot_models::{
+        domain::quant::{DomainAvailability, MarketCandidate, MarketDataHealth},
+        enums::{common::MarketCategory, market::MarketStatus},
+        runtime_config::{DataQualityConfig, DecimalValue, FeaturesConfig, SelectionConfig},
+        types::{DecisionPolicySnapshotId, EventId, MarketId, Price, TokenId, Usd},
+    };
+    use rust_decimal::Decimal;
+
     use super::ConfiguredMarketSelector;
     use crate::{
         features::{
@@ -146,14 +155,6 @@ mod tests {
             ModelFeatureRequirements,
         },
     };
-    use chrono::{DateTime, TimeZone, Utc};
-    use quant_pivot_models::{
-        domain::{DomainAvailability, MarketCandidate, MarketDataHealth},
-        enums::{common::MarketCategory, market::MarketStatus},
-        runtime_config::{DataQualityConfig, DecimalValue, FeaturesConfig, SelectionConfig},
-        types::{DecisionPolicySnapshotId, EventId, MarketId, Price, TokenId, Usd},
-    };
-    use rust_decimal::Decimal;
 
     fn as_of() -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 0).unwrap()
@@ -168,7 +169,7 @@ mod tests {
             status: MarketStatus::Active,
             primary_token_id: TokenId::new("token-yes"),
             secondary_token_id: Some(TokenId::new("token-no")),
-            end_date: Some(as_of() + chrono::Duration::days(7)),
+            end_date: Some(as_of() + Duration::days(7)),
             liquidity_usd: Some(Usd::new(Decimal::from(10_000))),
             volume_24h_usd: Some(Usd::new(Decimal::from(5_000))),
             best_bid: Some(Price::new(Decimal::new(49, 2))),
@@ -381,7 +382,7 @@ mod tests {
 
     #[tokio::test]
     async fn category_specific_requirement_never_gates_a_different_category() {
-        // 11.2.2 remediation R7: a crypto-only domain requirement (from the
+        // a crypto-only domain requirement (from the
         // category-specific model routed for Crypto) must gate ONLY crypto
         // candidates — a Sports candidate lacking that feature is unaffected,
         // even though the feature is globally "required" for one category.

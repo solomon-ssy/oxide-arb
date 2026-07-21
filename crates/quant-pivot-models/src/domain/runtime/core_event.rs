@@ -1,8 +1,18 @@
 //! In-process runtime event bus for control-plane notifications.
 
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
+
+use chrono::{DateTime, Utc};
+use flume::{Receiver, Sender};
+use serde::{Deserialize, Serialize};
+
 use crate::{
     domain::{
-        MarketBookView, OrderIntentInfo, RecommendationReportInfo, ReportRunInfo, SystemStatusView,
+        api::{MarketBookView, SystemStatusView},
+        quant::{OrderIntentInfo, RecommendationReportInfo, ReportRunInfo},
     },
     enums::{
         common::{AlertCategory, AlertLevel, AlertSource},
@@ -17,12 +27,6 @@ use crate::{
         ConditionTruth, ContentHash, EntryConditionInstanceId, MarketId, RecommendationReportId,
         ReportRunId, ResearchProfileId,
     },
-};
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
-use std::sync::{
-    Arc,
-    atomic::{AtomicU64, Ordering},
 };
 
 /// Operator-facing alert payload published on the core event bus.
@@ -352,17 +356,17 @@ pub enum MaterializationRunKind {
     Training,
     /// Point-in-time backtest run.
     Backtest,
-    /// Favorite-longshot bias-table fit (Phase 11.2.1).
+    /// Favorite-longshot bias-table fit.
     BiasTableFit,
-    /// Model-score probability-calibrator fit (Phase 11.3).
+    /// Model-score probability-calibrator fit.
     ModelCalibrationFit,
-    /// Combinatorial Purged Cross-Validation + governed trial-grid run (Phase 11.5).
+    /// Combinatorial Purged Cross-Validation + governed trial-grid run.
     CpcvBacktest,
-    /// Deterministic training/serving parity replay (Phase 11.6).
+    /// Deterministic training/serving parity replay.
     FeatureParity,
-    /// Executable trade-policy fit (Phase 11.7).
+    /// Executable trade-policy fit.
     TradePolicyFit,
-    /// Independent row-level trade-policy validation (Phase 11.7.2).
+    /// Independent row-level trade-policy validation.
     TradePolicyValidation,
 }
 
@@ -572,14 +576,14 @@ pub type DropObserver = Arc<dyn Fn(&'static str) + Send + Sync>;
 /// Non-blocking publisher for [`CoreEvent`] with drop counting.
 #[derive(Clone)]
 pub struct CoreEventPublisher {
-    tx: flume::Sender<CoreEvent>,
+    tx: Sender<CoreEvent>,
     on_drop: Option<DropObserver>,
     dropped: Arc<AtomicU64>,
 }
 
 impl CoreEventPublisher {
     #[must_use]
-    pub fn bounded(capacity: usize) -> (Self, flume::Receiver<CoreEvent>) {
+    pub fn bounded(capacity: usize) -> (Self, Receiver<CoreEvent>) {
         let (tx, rx) = flume::bounded(capacity);
         (
             Self {

@@ -1,5 +1,9 @@
 //! Persistence DTOs for append-only operational readiness evidence.
 
+use chrono::{DateTime, Utc};
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
+use serde::{Deserialize, Serialize};
+
 use crate::{
     entities::quant_research_readiness_evidence,
     enums::quant::ResearchReadinessEvidenceKind,
@@ -8,9 +12,6 @@ use crate::{
         ResearchReadinessEvidencePayload,
     },
 };
-use chrono::{DateTime, Utc};
-use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
-use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, DeriveIntoActiveModel)]
 #[sea_orm(active_model = "crate::entities::quant_research_readiness_evidence::ActiveModel")]

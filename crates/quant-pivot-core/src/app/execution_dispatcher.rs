@@ -1,11 +1,11 @@
-//! Entry-execution worker wiring (Phase 05.4): the `auto_execution` dispatcher
+//! Entry-execution worker wiring: the `auto_execution` dispatcher
 //! poll loop, the execution-breaker self-heal tick, and crash recovery.
 //!
 //! Correctness note: the per-intent `SELECT … FOR UPDATE` claim inside
 //! [`ExecutionSubmissionRepository::claim_for_submission`] is the authoritative
 //! double-submit guard and holds **across processes**. The worker is a single
-//! spawned task; multi-replica leader election is Phase 8+ (the row lock keeps it
-//! safe regardless of replica count).
+//! spawned task. Repository row locks remain the cross-process double-submit
+//! guard, even if the deployment later uses multiple replicas.
 
 use std::{future::Future, sync::Arc, time::Duration};
 
@@ -13,8 +13,10 @@ use chrono::Utc;
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     domain::{
-        ExecutionOrderInfo, ExecutionSubmitPort, NewReconciliation, OrderIntentListQuery,
-        PageRequest,
+        api::OrderIntentListQuery,
+        pagination::PageRequest,
+        ports::ExecutionSubmitPort,
+        quant::{ExecutionOrderInfo, NewReconciliation},
     },
     enums::{
         execution::{ReconciliationEvidenceKind, ReconciliationResult},
@@ -93,7 +95,7 @@ impl AppContext {
             // Crash recovery is the dispatcher's first action — it must complete
             // before any new submission. In-flight (`Submitted`/`Ambiguous`)
             // orders are handed to reconciliation so a crash mid-submit is
-            // reconciled (05.5) rather than re-submitted or lost. Fail-closed:
+            // reconciled rather than re-submitted or lost. Fail-closed:
             // retry with backoff until it succeeds; the submit loop is not
             // entered (so nothing is auto-submitted) until recovery is durably
             // done. The report plane runs independently and is unaffected.
@@ -185,9 +187,9 @@ struct ArmedDispatchWorker {
 
 /// Boot recovery: scan in-flight (`Submitted`/`Ambiguous`) orders with no
 /// reconciliation row and enqueue a `Pending` one, so a crash mid-submit is
-/// reconciled (05.5) rather than silently lost. Returns the count enqueued.
+/// reconciled rather than silently lost. Returns the count enqueued.
 ///
-/// The 05.5 `ReconciliationWorker` consumes these `Pending` rows (and every
+/// The `ReconciliationWorker` consumes these `Pending` rows (and every
 /// `find_reconcilable` order), resolves venue truth for `Ambiguous`/resting
 /// orders, and either drives them to a terminal verdict (clearing the
 /// `Ambiguous` admission block `#17`) or escalates to `Unresolvable` (latching
@@ -227,7 +229,7 @@ async fn recover_dangling_orders(
 /// `ApprovedByPolicy` intents and submit each. Each submit is independently
 /// row-locked + admitted; a per-intent failure never aborts the batch. The
 /// `has_unresolvable` early-exit is a cheap batch-level backstop in addition to
-/// admission `#17`, which denies the same condition per intent (05.5).
+/// admission `#17`, which denies the same condition per intent.
 async fn armed_dispatch_pass(worker: &ArmedDispatchWorker) -> QuantResult<()> {
     dispatch_for_runtime_mode(worker.runtime_mode.current(), |status| {
         armed_dispatch_enabled_pass(worker, status)
@@ -317,7 +319,7 @@ fn boot_recovery_reconciliation(order: &ExecutionOrderInfo) -> NewReconciliation
         reconciliation_id: ReconciliationId::from_v7(),
         execution_order_id: order.execution_order_id.clone(),
         order_intent_id: order.order_intent_id.clone(),
-        // Truth is not yet known at boot — this is `Pending` (awaiting the 05.5
+        // Truth is not yet known at boot — this is `Pending` (awaiting the
         // recon worker), never `Unresolvable` (that is the worker's terminal
         // verdict). The fail-closed block on truly truth-unknown exposure keys
         // off the order's `Ambiguous` state, not this row's result.

@@ -8,9 +8,9 @@ use quant_pivot_models::types::{
 };
 use serde::Deserialize;
 
-use crate::{
-    clickhouse::pool::ClickHousePool,
-    sql_contract_registry::{CLICKHOUSE_BOOK_LATENCY_READINESS, CLICKHOUSE_RAW_HISTORY_READINESS},
+use crate::clickhouse::{
+    pool::ClickHousePool,
+    query_limits::{CLICKHOUSE_BOOK_LATENCY_READINESS, CLICKHOUSE_RAW_HISTORY_READINESS},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,7 +50,7 @@ impl ClickHousePool {
             table = spec.object,
         );
         let range_query = CLICKHOUSE_RAW_HISTORY_READINESS
-            .clickhouse_query(self.client(), &range_sql)
+            .query(self.client(), &range_sql)
             .bind(as_of.timestamp_millis());
         let range = if let Some(filter) = &spec.filter {
             range_query
@@ -61,7 +61,7 @@ impl ClickHousePool {
             range_query.fetch_one::<TimeRangeRow>().await?
         };
         let parts = CLICKHOUSE_RAW_HISTORY_READINESS
-            .clickhouse_query(
+            .query(
                 self.client(),
                 "SELECT sum(bytes_on_disk) AS active_bytes, \
                  uniqExact(partition) AS active_partition_count FROM system.parts \
@@ -71,7 +71,7 @@ impl ClickHousePool {
             .fetch_one::<PartStatsRow>()
             .await?;
         let metadata = CLICKHOUSE_RAW_HISTORY_READINESS
-            .clickhouse_query(
+            .query(
                 self.client(),
                 "SELECT partition_key, create_table_query FROM system.tables \
                  WHERE database = currentDatabase() AND name = ?",
@@ -96,7 +96,7 @@ impl ClickHousePool {
         window_end: DateTime<Utc>,
     ) -> Result<BookLatencyObservation, StorageError> {
         let row = CLICKHOUSE_BOOK_LATENCY_READINESS
-            .clickhouse_query(
+            .query(
                 self.client(),
                 "SELECT count() AS event_count, \
                  toUInt64(quantileExact(0.50)(greatest(0, dateDiff('millisecond', venue_event_time, ingress_time)))) AS age_p50_ms, \

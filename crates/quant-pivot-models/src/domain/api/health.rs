@@ -27,7 +27,7 @@ pub struct ReadinessStatus {
     pub checks: Vec<DependencyCheck>,
 }
 
-/// Internal readiness report returned by [`ReadinessPort::check`].
+/// Internal readiness report returned by the runtime-control readiness port.
 #[derive(Debug, Clone)]
 pub struct ReadinessReport {
     pub ready: bool,

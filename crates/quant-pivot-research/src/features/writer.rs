@@ -12,7 +12,10 @@ use std::collections::HashSet;
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
     clickhouse::QuantFeatureEventRow,
-    domain::{DecisionBoundary, DecisionSource, FeatureVectorInfo},
+    domain::{
+        data_plane::{DecisionBoundary, DecisionSource},
+        quant::FeatureVectorInfo,
+    },
     enums::{
         clickhouse::{ChFeatureCellState, ChFeatureSourceKind, ChFeatureValueKind},
         feature::EvidenceSourceKind,

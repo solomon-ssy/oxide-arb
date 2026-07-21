@@ -13,7 +13,7 @@ use crate::{
 /// Current immutable capability-registry envelope version.
 pub const DOMAIN_CAPABILITY_REGISTRY_FORMAT_VERSION: u32 = 1;
 
-/// Closed contract families supported or explicitly classified by Phase 11.9.
+/// Closed contract families supported or explicitly classified by the catalog reconciler.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DomainContractFamily {
@@ -322,6 +322,8 @@ fn compute_registry_hash(
 
 #[cfg(test)]
 mod tests {
+    use rust_decimal_macros::dec;
+
     use super::{
         CapabilityEligibility, CapabilitySourceBinding, DomainCapabilityRegistryArtifact,
         DomainContractCapability, DomainContractFamily, DomainMeasurementUnit,
@@ -331,7 +333,6 @@ mod tests {
         enums::domain::{DomainFamily, LinkageSourceRole},
         types::{DomainSourceId, ResolverVersion},
     };
-    use rust_decimal_macros::dec;
 
     fn capability(scope: &[&str]) -> DomainContractCapability {
         DomainContractCapability {

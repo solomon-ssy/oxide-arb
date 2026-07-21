@@ -1,5 +1,9 @@
 //! Durable report build-attempt ledger.
 
+use chrono::{DateTime, Utc};
+use sea_orm::entity::prelude::*;
+
+use super::{decision_policy_snapshot, quant_recommendation_report};
 use crate::{
     enums::quant::{ReportRunStatus, ReportRunTerminalReason, ReportTriggerKind},
     types::{
@@ -7,8 +11,6 @@ use crate::{
         ReportRunId, ReportScheduleId, ReportTriggerKey, WorkerId,
     },
 };
-use chrono::{DateTime, Utc};
-use sea_orm::entity::prelude::*;
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -52,14 +54,14 @@ pub struct Model {
         from = "decision_policy_snapshot_id",
         to = "decision_policy_snapshot_id"
     )]
-    pub decision_policy_snapshot: BelongsTo<Option<super::decision_policy_snapshot::Entity>>,
+    pub decision_policy_snapshot: BelongsTo<Option<decision_policy_snapshot::Entity>>,
     #[sea_orm(
         belongs_to,
         relation_enum = "OutputReport",
         from = "output_report_id",
         to = "recommendation_report_id"
     )]
-    pub output_report: BelongsTo<Option<super::quant_recommendation_report::Entity>>,
+    pub output_report: BelongsTo<Option<quant_recommendation_report::Entity>>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

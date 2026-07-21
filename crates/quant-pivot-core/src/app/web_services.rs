@@ -1,4 +1,49 @@
-//! Web admin surface assembly for Phase 0.
+//! Web administration surface assembly.
+
+use std::{sync::Arc, time::Duration};
+
+use quant_pivot_error::{QuantResult, infra::InfraError};
+use quant_pivot_migration::PostgresLifecycleLeaseProvider;
+use quant_pivot_models::{
+    config::CompiledBuildIdentity,
+    domain::{
+        governance::NewOperationLog,
+        ports::{
+            CatalogStatusPort, DataQualityPort, ExecutionReadPort, ExecutionRecoveryPort,
+            FeatureIntegrityPort, MarketLinkageGovernancePort, ModelCalibrationFitPort,
+            OrderIntentPort, PolicySnapshotPort, ReconciliationPort, ResearchJobPort,
+            ResearchReadinessPort, TradePolicyPort, TrainingDatasetPort,
+        },
+    },
+};
+use quant_pivot_repository::{
+    clickhouse::ChFeatureParityEventRepository,
+    traits::{
+        AccountSnapshotRepository, AttributionRepository, BasisAlertRepository,
+        CalibrationArtifactRepository, CatalogLedgerRepository, DomainSourceCursorRepository,
+        DomainSourceExpectationRepository, EntryConditionRepository, EquitySnapshotRepository,
+        ExecutionOrderRepository, FeatureParityEventRepository, FeatureRepository, MenuRepository,
+        OperationLogRepository, OrderIntentRepository, PolicyRepository, PositionRepository,
+        RecommendationReportRepository, RecommendationRepository, ReconciliationRepository,
+        ReportRunRepository, ResearchReadinessEvidenceRepository, RoleMenuRepository,
+        RolePermissionRepository, RoleRepository, ServingEvidenceRepository,
+        SettlementRedeemRepository, TradePolicyRepository, TradeTapeBlockCursorRepository,
+        UserRepository, UserRoleRepository,
+    },
+};
+use quant_pivot_storage::{
+    evidence::FileProductionEvidenceVerifier,
+    write::{AsyncWriter, AsyncWriterConfig, AsyncWriterWorker},
+};
+use quant_pivot_web::{
+    audit::OperationLogBuffer,
+    auth::casbin::{CasbinService, PermChecker},
+    jwt::{JwtService, TokenBlacklist},
+    readiness::PgRedisReadiness,
+    routes, spawn_web_server,
+    state::{AppState, LiveSchemaVerifier},
+    ws::{SessionRegistry, spawn_ws_broadcaster},
+};
 
 use super::AppContext;
 use crate::{
@@ -31,47 +76,6 @@ use crate::{
         trade_policy::{TradePolicyService, TradePolicyServiceDeps},
     },
 };
-use quant_pivot_error::{QuantResult, infra::InfraError};
-use quant_pivot_migration::PostgresLifecycleLeaseProvider;
-use quant_pivot_models::{
-    config::CompiledBuildIdentity,
-    domain::{
-        CatalogStatusPort, DataQualityPort, ExecutionReadPort, ExecutionRecoveryPort,
-        FeatureIntegrityPort, MarketLinkageGovernancePort, ModelCalibrationFitPort,
-        NewOperationLog, OrderIntentPort, PolicySnapshotPort, ReconciliationPort, ResearchJobPort,
-        ResearchReadinessPort, TradePolicyPort, TrainingDatasetPort,
-    },
-};
-use quant_pivot_repository::{
-    clickhouse::ChFeatureParityEventRepository,
-    traits::{
-        AccountSnapshotRepository, AttributionRepository, BasisAlertRepository,
-        CalibrationArtifactRepository, CatalogLedgerRepository, DomainSourceCursorRepository,
-        DomainSourceExpectationRepository, EntryConditionRepository, EquitySnapshotRepository,
-        ExecutionOrderRepository, FeatureParityEventRepository, FeatureRepository, MenuRepository,
-        OperationLogRepository, OrderIntentRepository, PolicyRepository, PositionRepository,
-        RecommendationReportRepository, RecommendationRepository, ReconciliationRepository,
-        ReportRunRepository, ResearchReadinessEvidenceRepository, RoleMenuRepository,
-        RolePermissionRepository, RoleRepository, ServingEvidenceRepository,
-        SettlementRedeemRepository, TradePolicyRepository, TradeTapeBlockCursorRepository,
-        UserRepository, UserRoleRepository,
-    },
-};
-use quant_pivot_storage::{
-    evidence::FileProductionEvidenceVerifier,
-    write::{AsyncWriter, AsyncWriterConfig, AsyncWriterWorker},
-};
-use quant_pivot_web::{
-    AppState,
-    audit::OperationLogBuffer,
-    auth::casbin::{CasbinService, PermChecker},
-    jwt::{JwtService, TokenBlacklist},
-    readiness::PgRedisReadiness,
-    routes, spawn_web_server,
-    state::LiveSchemaVerifier,
-    ws::{SessionRegistry, spawn_ws_broadcaster},
-};
-use std::{sync::Arc, time::Duration};
 
 const OPERATION_LOG_BATCH_SIZE: usize = 64;
 const OPERATION_LOG_FLUSH_INTERVAL: Duration = Duration::from_millis(250);

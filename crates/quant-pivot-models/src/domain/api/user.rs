@@ -1,18 +1,19 @@
 //! User management API contract.
 
-use crate::{
-    domain::{
-        UserPatch,
-        pagination::PageRequest,
-        patch::{NullablePatch, Patch},
-    },
-    enums::rbac::UserStatus,
-    types::RoleId,
-};
 use quant_pivot_macros::NormalizePageQuery;
 use serde::{Deserialize, Serialize};
 use serde_with::rust::double_option;
 use validator::Validate;
+
+use crate::{
+    domain::{
+        pagination::PageRequest,
+        patch::{NullablePatch, Patch},
+        rbac::UserPatch,
+    },
+    enums::rbac::UserStatus,
+    types::RoleId,
+};
 
 /// Create-user payload.
 #[derive(Debug, Deserialize, Validate)]

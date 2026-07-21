@@ -3,7 +3,7 @@
 //! - [`handler`] consumes a short-lived single-use ticket from the negotiated
 //!   `Sec-WebSocket-Protocol` during upgrade;
 //! - [`session`] runs the per-connection loop (subscriptions, heartbeat, sync);
-//! - [`protocol`] defines the envelope + client command grammar;
+//! - the protocol module defines the envelope + client command grammar;
 //! - [`SessionRegistry`] + [`spawn_ws_broadcaster`] fan `CoreEvent`s out to the
 //!   sessions subscribed to each event's channel.
 //!
@@ -13,17 +13,22 @@
 pub mod handler;
 pub mod session;
 
-use dashmap::DashMap;
-use quant_pivot_models::{
-    domain::{CoreEvent, SubscriptionKey, WsChannel, event_envelope},
-    types::MarketId,
-};
 use std::{
     collections::HashSet,
     sync::{
         Arc, RwLock,
         atomic::{AtomicU64, Ordering},
     },
+};
+
+use dashmap::DashMap;
+use flume::{Receiver, Sender};
+use quant_pivot_models::{
+    domain::{
+        runtime::CoreEvent,
+        ws::{SubscriptionKey, WsChannel, event_envelope},
+    },
+    types::MarketId,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -35,7 +40,7 @@ pub type SessionId = u64;
 #[derive(Clone)]
 pub struct SessionHandle {
     /// Non-blocking outbound queue drained by the session task into the socket.
-    pub outbound: flume::Sender<String>,
+    pub outbound: Sender<String>,
     /// Subscription keys this session holds (shared with the session task).
     pub subscriptions: Arc<RwLock<HashSet<SubscriptionKey>>>,
     /// Authenticated subject owning the socket.
@@ -163,7 +168,7 @@ impl SessionRegistry {
 /// Consume `CoreEvent`s and fan each out to its subscribed sessions until
 /// `shutdown` is cancelled or the bus is closed.
 pub async fn spawn_ws_broadcaster(
-    rx: flume::Receiver<CoreEvent>,
+    rx: Receiver<CoreEvent>,
     registry: SessionRegistry,
     shutdown: CancellationToken,
 ) {
@@ -188,17 +193,21 @@ pub async fn spawn_ws_broadcaster(
 
 #[cfg(test)]
 mod tests {
-    use super::{SessionHandle, SessionRegistry};
-    use quant_pivot_models::{
-        domain::{SubscriptionKey, WsChannel},
-        types::MarketId,
-    };
     use std::{
         collections::HashSet,
         sync::{Arc, RwLock},
     };
 
-    fn handle_with(keys: Vec<SubscriptionKey>) -> (SessionHandle, flume::Receiver<String>) {
+    use flume::Receiver;
+    use quant_pivot_models::{
+        domain::ws::{SubscriptionKey, WsChannel},
+        types::MarketId,
+    };
+    use tokio_util::sync::CancellationToken;
+
+    use super::{SessionHandle, SessionRegistry};
+
+    fn handle_with(keys: Vec<SubscriptionKey>) -> (SessionHandle, Receiver<String>) {
         let (outbound, rx) = flume::bounded::<String>(8);
         let subscriptions: HashSet<SubscriptionKey> = keys.into_iter().collect();
         (
@@ -208,7 +217,7 @@ mod tests {
                 subject: "test-user".to_owned(),
                 family_id: "test-family".to_owned(),
                 can_read_system: true,
-                cancellation: tokio_util::sync::CancellationToken::new(),
+                cancellation: CancellationToken::new(),
             },
             rx,
         )

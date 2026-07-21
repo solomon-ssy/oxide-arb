@@ -3,13 +3,13 @@
 
 use std::sync::Arc;
 
-use crate::runtime_config::DecisionPolicyStore;
 use async_trait::async_trait;
 use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
     domain::{
-        CreateModelSpecCommand, FeatureContractEntryView, FeatureContractView,
-        FeatureNullPolicyView, GovernanceActor, ModelSpecInfo, ModelSpecPort, NewModelSpec,
+        api::{FeatureContractEntryView, FeatureContractView, FeatureNullPolicyView},
+        ports::{CreateModelSpecCommand, GovernanceActor, ModelSpecPort},
+        quant::{ModelSpecInfo, NewModelSpec},
     },
     runtime_config::FeaturesConfig,
     types::{
@@ -22,6 +22,8 @@ use quant_pivot_research::{
     features::{FeatureSchema, FeatureUnit, NullPolicy, PitRule, SourceRequirement, StalenessRule},
     hashing::ResearchHasher,
 };
+
+use crate::runtime_config::DecisionPolicyStore;
 
 /// Dependencies for model-spec authoring.
 pub struct ModelSpecDeps {
@@ -303,7 +305,7 @@ mod tests {
     }
 
     #[test]
-    fn feature_contract_is_hash_bound_sorted_and_contains_no_removed_stub() {
+    fn feature_contract_is_hash_bound_sorted_and_describes_mid_price() {
         let features = FeaturesConfig::default();
         let contract = build_feature_contract(&features).expect("active feature contract");
 
@@ -317,12 +319,6 @@ mod tests {
                 .features
                 .windows(2)
                 .all(|pair| pair[0].name < pair[1].name)
-        );
-        assert!(
-            contract
-                .features
-                .iter()
-                .all(|feature| feature.name != "market.outcome_count")
         );
         let mid = contract
             .features

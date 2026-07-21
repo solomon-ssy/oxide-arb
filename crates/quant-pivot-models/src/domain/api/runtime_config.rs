@@ -1,7 +1,12 @@
 //! Governed configuration-resource API contracts.
 
+use chrono::{DateTime, Utc};
+use schemars::{JsonSchema, Schema};
+use serde::{Deserialize, Serialize};
+use validator::Validate;
+
 use crate::{
-    domain::{
+    domain::governance::{
         ConfigActivityInfo, DecisionPolicySnapshotOptionInfo, PolicyActivationInfo,
         PolicyActivationOutcome, PolicyApprovalInfo, PolicyRevisionInfo, ProductionBaselineInfo,
     },
@@ -23,10 +28,6 @@ use crate::{
         ProductionSealConfirmationPhrase, SchemaVersion, UserId,
     },
 };
-use chrono::{DateTime, Utc};
-use schemars::{JsonSchema, Schema};
-use serde::{Deserialize, Serialize};
-use validator::Validate;
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ConfigResourceSummaryView {

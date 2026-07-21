@@ -7,11 +7,19 @@
 //! `CancelIntentRequest`, all `Deserialize` + `Validate`). The persistence
 //! struct is never serialized directly.
 
+use chrono::{DateTime, Utc};
+use quant_pivot_macros::NormalizePageQuery;
+use rust_decimal::Decimal;
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
+use validator::Validate;
+
 use crate::{
     domain::{
-        EntryConditionArtifactInfo, EntryConditionAuditInfo, EntryConditionInstanceInfo,
-        ExecutionOrderInfo, OrderIntentInfo, PositionInfo, RecommendationAttributionInfo,
         pagination::PageRequest,
+        quant::{
+            EntryConditionArtifactInfo, EntryConditionAuditInfo, EntryConditionInstanceInfo,
+            ExecutionOrderInfo, OrderIntentInfo, PositionInfo, RecommendationAttributionInfo,
+        },
     },
     enums::{
         common::Side,
@@ -34,10 +42,6 @@ use crate::{
         Price, RecommendationId, ScaleOutState, Shares, TokenId, Usd, UserId,
     },
 };
-use chrono::{DateTime, Utc};
-use quant_pivot_macros::NormalizePageQuery;
-use serde::{Deserialize, Serialize, de::Error as _};
-use validator::Validate;
 
 /// Outbound projection of a governed order intent (full operator transparency).
 #[derive(Debug, Clone, Serialize)]
@@ -304,7 +308,7 @@ pub struct ExitMonitorObservationView {
     pub effective_stop: Option<Price>,
     pub next_scale_out: Option<NextScaleOutProjection>,
     pub cumulative_exited_shares: Shares,
-    pub cumulative_exit_pct: Option<rust_decimal::Decimal>,
+    pub cumulative_exit_pct: Option<Decimal>,
     pub latest_reinference: Option<ExitReinferenceObservation>,
     pub last_check_at: Option<DateTime<Utc>>,
     pub next_check_at: Option<DateTime<Utc>>,
@@ -432,8 +436,8 @@ pub struct RecommendationAttributionView {
     pub recommendation_id: RecommendationId,
     pub outcome: RecommendationAttributionOutcome,
     pub realized_pnl_usd: Option<Usd>,
-    pub max_adverse_excursion_bps: Option<rust_decimal::Decimal>,
-    pub max_favorable_excursion_bps: Option<rust_decimal::Decimal>,
+    pub max_adverse_excursion_bps: Option<Decimal>,
+    pub max_favorable_excursion_bps: Option<Decimal>,
     pub label_available_at: Option<DateTime<Utc>>,
     pub entry_outcome: EntryOutcome,
     pub exit_outcome: ExitOutcome,
@@ -492,7 +496,7 @@ fn deserialize_statuses_csv<'de, D>(
     deserializer: D,
 ) -> Result<Option<Vec<OrderIntentStatus>>, D::Error>
 where
-    D: serde::Deserializer<'de>,
+    D: Deserializer<'de>,
 {
     let Some(raw) = Option::<String>::deserialize(deserializer)? else {
         return Ok(None);

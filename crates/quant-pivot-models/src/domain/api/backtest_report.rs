@@ -1,4 +1,4 @@
-//! Backtest admin HTTP contract (Phase 3.6).
+//! Backtest admin HTTP contract.
 //!
 //! UI surface for offline PIT backtests of a registered model version:
 //!
@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use validator::Validate;
 
 use crate::{
-    domain::{BacktestReportInfo, pagination::PageRequest},
+    domain::{pagination::PageRequest, quant::BacktestReportInfo},
     types::{
         BacktestReportId, ContentHash, DecisionPolicySnapshotId, ModelComparisonReportId,
         ModelRunId, ModelVersionId, Probability, TrainingDatasetId,
@@ -40,13 +40,13 @@ pub struct RunBacktestRequest {
     /// liquidity / horizon / substitution penalties) from this backtest's
     /// realized stratified outcomes and register a tightened child candidate
     /// version. Does **not** calibrate the return model — that requires an
-    /// independent held-out split via `ProbabilityCalibrator` (Phase 11.3
-    /// §4/§5, `POST /research/calibration-artifacts/fit-model-calibrator`).
+    /// independent held-out split via `ProbabilityCalibrator` and
+    /// `POST /research/calibration-artifacts/fit-model-calibrator`.
     #[serde(default)]
     pub calibrate: bool,
     /// When set, run **pair mode**: replay this baseline over the same window
     /// alongside the path model (the candidate), persist both backtest reports,
-    /// and persist a [`ModelComparisonReportView`] of candidate − baseline. The
+    /// and persist a `ModelComparisonReportView` of candidate − baseline. The
     /// candidate's report (with `comparison_report_id` populated) is returned.
     #[serde(default)]
     pub comparison_model_version_id: Option<ModelVersionId>,
@@ -74,7 +74,7 @@ pub struct BacktestReportView {
     pub missing_feature_count: i64,
     pub rank_ic: Decimal,
     /// Unannualized Sharpe ratio of the single-path per-tick return series
-    /// (Phase 11.5 §3.4) — the debug-view sibling of the CPCV path-set's
+    /// — the debug-view sibling of the CPCV path-set's
     /// Sharpe distribution, never the alpha-significance gate's data source.
     pub sharpe: Decimal,
     pub hit_rate: Probability,

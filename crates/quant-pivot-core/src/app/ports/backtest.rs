@@ -1,15 +1,14 @@
-//! Core implementation of [`BacktestPort`] for the Admin API (Phase 3.6).
+//! Core implementation of [`BacktestPort`] for the Admin API.
 
 use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
-use tokio_util::sync::CancellationToken;
-
 use quant_pivot_error::{QuantError, QuantResult, storage::StorageError};
 use quant_pivot_models::{
     domain::{
-        BacktestPort, BacktestReportView, JobProgressSink, ModelComparisonReportInfo,
-        RunBacktestRequest,
+        api::{BacktestReportView, RunBacktestRequest},
+        ports::BacktestPort,
+        quant::{JobProgressSink, ModelComparisonReportInfo},
     },
     runtime_config::DecisionPolicySnapshot,
     types::{
@@ -22,6 +21,7 @@ use quant_pivot_repository::traits::{
 };
 use quant_pivot_research::{artifact::ArtifactStore, model::ModelRuntimeFactoryBuilder};
 use rust_decimal::Decimal;
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     app::bundles::ResearchBundle,
@@ -69,7 +69,7 @@ impl CoreBacktestPort {
     /// version (bias table, replay config, portfolio caps). `pub` so
     /// [`crate::service::model_calibration_fit::ModelCalibrationFitService`]
     /// can reuse the exact same replay-engine assembly for calibration fits
-    /// (Phase 11.3 §4) — one construction path, never duplicated.
+    /// — one construction path, never duplicated.
     pub async fn backtest_service_for(
         &self,
         decision_policy_snapshot_id: &DecisionPolicySnapshotId,

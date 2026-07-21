@@ -1,6 +1,8 @@
+use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
+
 use parking_lot::Mutex;
 use quant_pivot_error::QuantError;
-use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
+use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 
 pub struct DebouncedWriter<T: Clone + Send + 'static> {
@@ -25,7 +27,7 @@ impl<T: Clone + Send + 'static> DebouncedWriter<T> {
 
         let worker = async move {
             let mut timer = tokio::time::interval(interval);
-            timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
             loop {
                 tokio::select! {

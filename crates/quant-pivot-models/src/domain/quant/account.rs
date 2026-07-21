@@ -5,6 +5,12 @@
 //! types live in [`crate::types::account`] (shared with the research-plane
 //! `AccountSnapshot` aggregate).
 
+use chrono::{DateTime, Utc};
+use quant_pivot_macros::NormalizePageQuery;
+use rust_decimal::Decimal;
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
+use serde::{Deserialize, Serialize};
+
 use crate::{
     domain::pagination::PageRequest,
     entities::{quant_account_snapshot, quant_equity_snapshot},
@@ -14,11 +20,6 @@ use crate::{
         Usd,
     },
 };
-use chrono::{DateTime, Utc};
-use quant_pivot_macros::NormalizePageQuery;
-use rust_decimal::Decimal;
-use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
-use serde::{Deserialize, Serialize};
 
 /// Persisted decision-time account capital snapshot.
 #[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
@@ -208,10 +209,11 @@ pub fn capital_drawdown(capital_base_usd: Usd, high_water_mark_usd: Usd) -> Deci
 
 #[cfg(test)]
 mod equity_metrics_tests {
-    use super::{capital_drawdown, capital_hwm};
-    use crate::types::Usd;
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
+
+    use super::{capital_drawdown, capital_hwm};
+    use crate::types::Usd;
 
     #[test]
     fn first_or_new_high_water_mark_has_zero_drawdown() {

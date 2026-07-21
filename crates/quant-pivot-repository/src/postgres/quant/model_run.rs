@@ -1,11 +1,10 @@
 //! Postgres-backed model-run repository.
 
-use crate::{postgres::error, traits::ModelRunRepository};
 use chrono::{DateTime, Utc};
-use quant_pivot_error::storage::{StorageError, entity};
+use quant_pivot_error::storage::{StorageError, entity::QUANT_MODEL_RUN};
 use quant_pivot_models::{
-    domain::{ModelRunInfo, NewModelRun},
-    entities::quant_model_run,
+    domain::quant::{ModelRunInfo, NewModelRun},
+    entities::quant_model_run::{Column, Entity, Model},
     enums::quant::{ModelRunErrorCode, ModelRunKind, ModelRunStatus},
     types::{ContentHash, ModelRunId, ModelVersionId},
 };
@@ -13,6 +12,8 @@ use sea_orm::{
     ActiveModelTrait, ActiveValue, ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel,
     QueryFilter, QueryOrder,
 };
+
+use crate::{postgres::error, traits::ModelRunRepository};
 
 /// Postgres-backed model-run repository: create a `Running` run, then finalize it
 /// to a terminal state through the guarded [`Self::succeed`] / [`Self::fail`]
@@ -30,20 +31,17 @@ impl PgModelRunRepository {
 
     /// Load a `Running` run for finalization, rejecting a missing row or an
     /// already-terminal transition.
-    async fn load_running(
-        &self,
-        model_run_id: &ModelRunId,
-    ) -> Result<quant_model_run::Model, StorageError> {
-        let Some(row) = quant_model_run::Entity::find_by_id(model_run_id.clone())
+    async fn load_running(&self, model_run_id: &ModelRunId) -> Result<Model, StorageError> {
+        let Some(row) = Entity::find_by_id(model_run_id.clone())
             .one(&self.db)
             .await
             .map_err(StorageError::from)?
         else {
-            return Err(error::not_found(entity::QUANT_MODEL_RUN, model_run_id));
+            return Err(error::not_found(QUANT_MODEL_RUN, model_run_id));
         };
         if row.status != ModelRunStatus::Running {
             return Err(error::state_conflict(
-                entity::QUANT_MODEL_RUN,
+                QUANT_MODEL_RUN,
                 Some(model_run_id),
                 format!(
                     "cannot finalize from non-running status {}",
@@ -58,7 +56,7 @@ impl PgModelRunRepository {
 #[async_trait::async_trait]
 impl ModelRunRepository for PgModelRunRepository {
     async fn create(&self, run: NewModelRun) -> Result<ModelRunInfo, StorageError> {
-        quant_model_run::Entity::insert(run.into_active_model())
+        Entity::insert(run.into_active_model())
             .exec_with_returning(&self.db)
             .await
             .map_err(StorageError::from)
@@ -69,7 +67,7 @@ impl ModelRunRepository for PgModelRunRepository {
         &self,
         model_run_id: &ModelRunId,
     ) -> Result<Option<ModelRunInfo>, StorageError> {
-        quant_model_run::Entity::find_by_id(model_run_id.clone())
+        Entity::find_by_id(model_run_id.clone())
             .one(&self.db)
             .await
             .map_err(StorageError::from)
@@ -81,13 +79,13 @@ impl ModelRunRepository for PgModelRunRepository {
         from: DateTime<Utc>,
         until: DateTime<Utc>,
     ) -> Result<Vec<ModelRunInfo>, StorageError> {
-        quant_model_run::Entity::find()
-            .filter(quant_model_run::Column::RunKind.eq(ModelRunKind::LiveInference))
-            .filter(quant_model_run::Column::Status.eq(ModelRunStatus::Succeeded))
-            .filter(quant_model_run::Column::WindowStart.gte(from))
-            .filter(quant_model_run::Column::WindowStart.lt(until))
-            .order_by_asc(quant_model_run::Column::WindowStart)
-            .order_by_asc(quant_model_run::Column::ModelRunId)
+        Entity::find()
+            .filter(Column::RunKind.eq(ModelRunKind::LiveInference))
+            .filter(Column::Status.eq(ModelRunStatus::Succeeded))
+            .filter(Column::WindowStart.gte(from))
+            .filter(Column::WindowStart.lt(until))
+            .order_by_asc(Column::WindowStart)
+            .order_by_asc(Column::ModelRunId)
             .all(&self.db)
             .await
             .map_err(StorageError::from)

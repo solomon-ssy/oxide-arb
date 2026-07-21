@@ -1,17 +1,21 @@
-//! Postgres-backed unified calibration-artifact ledger repository (append-only
-//! identity; `active` is the sole mutable column — Phase 11.3 §3.4).
+//! Postgres-backed unified calibration-artifact ledger repository. Artifact
+//! identity is append-only; `active` is the sole mutable column.
 
-use crate::{
-    postgres::{error, query::paginate_mapped},
-    traits::CalibrationArtifactRepository,
-};
-use quant_pivot_error::storage::{StorageError, entity};
+use chrono::{DateTime, Utc};
+use quant_pivot_error::storage::{StorageError, entity::QUANT_CALIBRATION_ARTIFACT};
 use quant_pivot_models::{
     domain::{
-        CalibrationArtifactInfo, CalibrationArtifactListQuery, CalibrationArtifactPayload,
-        NewCalibrationArtifact, PageWindow, Paginated,
+        api::CalibrationArtifactListQuery,
+        pagination::{PageWindow, Paginated},
+        quant::{CalibrationArtifactInfo, CalibrationArtifactPayload, NewCalibrationArtifact},
     },
-    entities::{quant_calibration_artifact, quant_calibration_artifact_publication},
+    entities::{
+        quant_calibration_artifact::{Column, Entity},
+        quant_calibration_artifact_publication::{
+            ActiveModel, Column as QuantCalibrationArtifactPublicationColumn,
+            Entity as QuantCalibrationArtifactPublicationEntity,
+        },
+    },
     enums::quant::CalibrationKind,
     hashing::CanonicalDigest,
     types::{
@@ -22,6 +26,11 @@ use quant_pivot_models::{
 use sea_orm::{
     ActiveModelTrait, ActiveValue, ColumnTrait, Condition, DatabaseConnection, EntityTrait,
     IntoActiveModel, QueryFilter, QueryOrder, TransactionTrait, sea_query::Expr,
+};
+
+use crate::{
+    postgres::{error, query::paginate_mapped},
+    traits::CalibrationArtifactRepository,
 };
 
 /// Postgres-backed unified calibration-artifact ledger repository.
@@ -50,15 +59,11 @@ impl CalibrationArtifactRepository for PgCalibrationArtifactRepository {
             validate_weather_artifact(&artifact)?;
         }
         let content_hash = artifact.content_hash.clone();
-        quant_calibration_artifact::Entity::insert(artifact.into_active_model())
+        Entity::insert(artifact.into_active_model())
             .exec_with_returning(&self.db)
             .await
             .map_err(|err| {
-                error::map_unique(
-                    err,
-                    entity::QUANT_CALIBRATION_ARTIFACT,
-                    content_hash.as_str(),
-                )
+                error::map_unique(err, QUANT_CALIBRATION_ARTIFACT, content_hash.as_str())
             })
             .map(Into::into)
     }
@@ -67,7 +72,7 @@ impl CalibrationArtifactRepository for PgCalibrationArtifactRepository {
         &self,
         artifact_id: &CalibrationArtifactId,
     ) -> Result<Option<CalibrationArtifactInfo>, StorageError> {
-        quant_calibration_artifact::Entity::find_by_id(artifact_id.clone())
+        Entity::find_by_id(artifact_id.clone())
             .one(&self.db)
             .await
             .map_err(StorageError::from)
@@ -78,8 +83,8 @@ impl CalibrationArtifactRepository for PgCalibrationArtifactRepository {
         &self,
         content_hash: &ContentHash,
     ) -> Result<Option<CalibrationArtifactInfo>, StorageError> {
-        quant_calibration_artifact::Entity::find()
-            .filter(quant_calibration_artifact::Column::ContentHash.eq(content_hash.clone()))
+        Entity::find()
+            .filter(Column::ContentHash.eq(content_hash.clone()))
             .one(&self.db)
             .await
             .map_err(StorageError::from)
@@ -91,25 +96,13 @@ impl CalibrationArtifactRepository for PgCalibrationArtifactRepository {
         query: CalibrationArtifactListQuery,
     ) -> Result<Paginated<CalibrationArtifactInfo>, StorageError> {
         let condition = Condition::all()
-            .add_option(
-                query
-                    .kind
-                    .map(|kind| quant_calibration_artifact::Column::Kind.eq(kind)),
-            )
-            .add_option(
-                query
-                    .from
-                    .map(|from| quant_calibration_artifact::Column::CreatedAt.gte(from)),
-            )
-            .add_option(
-                query
-                    .to
-                    .map(|to| quant_calibration_artifact::Column::CreatedAt.lt(to)),
-            );
+            .add_option(query.kind.map(|kind| Column::Kind.eq(kind)))
+            .add_option(query.from.map(|from| Column::CreatedAt.gte(from)))
+            .add_option(query.to.map(|to| Column::CreatedAt.lt(to)));
         paginate_mapped(
-            quant_calibration_artifact::Entity::find()
+            Entity::find()
                 .filter(condition)
-                .order_by_desc(quant_calibration_artifact::Column::CreatedAt),
+                .order_by_desc(Column::CreatedAt),
             &self.db,
             PageWindow::from_query(&query),
             Into::into,
@@ -119,30 +112,30 @@ impl CalibrationArtifactRepository for PgCalibrationArtifactRepository {
 
     async fn published_weather_through(
         &self,
-        at: chrono::DateTime<chrono::Utc>,
+        at: DateTime<Utc>,
     ) -> Result<Vec<PublishedWeatherStationLeadBias>, StorageError> {
-        let rows = quant_calibration_artifact_publication::Entity::find()
+        let rows = QuantCalibrationArtifactPublicationEntity::find()
             .filter(
-                quant_calibration_artifact_publication::Column::Kind
+                QuantCalibrationArtifactPublicationColumn::Kind
                     .eq(CalibrationKind::WeatherStationLeadBias),
             )
-            .filter(quant_calibration_artifact_publication::Column::PublishedAt.lte(at))
-            .order_by_asc(quant_calibration_artifact_publication::Column::PublishedAt)
-            .order_by_asc(quant_calibration_artifact_publication::Column::PublicationId)
-            .find_also_related(quant_calibration_artifact::Entity)
+            .filter(QuantCalibrationArtifactPublicationColumn::PublishedAt.lte(at))
+            .order_by_asc(QuantCalibrationArtifactPublicationColumn::PublishedAt)
+            .order_by_asc(QuantCalibrationArtifactPublicationColumn::PublicationId)
+            .find_also_related(Entity)
             .all(&self.db)
             .await
             .map_err(StorageError::from)?;
         rows.into_iter()
             .map(|(publication, artifact)| {
                 let artifact = artifact.ok_or_else(|| StorageError::InvariantViolation {
-                    entity: Some(entity::QUANT_CALIBRATION_ARTIFACT),
+                    entity: Some(QUANT_CALIBRATION_ARTIFACT),
                     detail: "calibration publication has no artifact".to_owned(),
                 })?;
                 let CalibrationArtifactPayload::WeatherStationLeadBias(payload) = artifact.payload
                 else {
                     return Err(StorageError::InvariantViolation {
-                        entity: Some(entity::QUANT_CALIBRATION_ARTIFACT),
+                        entity: Some(QUANT_CALIBRATION_ARTIFACT),
                         detail: "published Weather calibration has mismatched payload kind"
                             .to_owned(),
                     });
@@ -165,15 +158,12 @@ impl CalibrationArtifactRepository for PgCalibrationArtifactRepository {
         artifact_id: &CalibrationArtifactId,
     ) -> Result<CalibrationArtifactInfo, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let Some(row) = quant_calibration_artifact::Entity::find_by_id(artifact_id.clone())
+        let Some(row) = Entity::find_by_id(artifact_id.clone())
             .one(&txn)
             .await
             .map_err(StorageError::from)?
         else {
-            return Err(error::not_found(
-                entity::QUANT_CALIBRATION_ARTIFACT,
-                artifact_id,
-            ));
+            return Err(error::not_found(QUANT_CALIBRATION_ARTIFACT, artifact_id));
         };
         // `market_price_bias` has exactly one global governance pointer
         // (runtime-config `bias_table_ref`), so activating one deactivates
@@ -187,13 +177,10 @@ impl CalibrationArtifactRepository for PgCalibrationArtifactRepository {
             row.kind,
             CalibrationKind::MarketPriceBias | CalibrationKind::WeatherStationLeadBias
         ) {
-            quant_calibration_artifact::Entity::update_many()
-                .col_expr(
-                    quant_calibration_artifact::Column::Active,
-                    Expr::value(false),
-                )
-                .filter(quant_calibration_artifact::Column::Kind.eq(row.kind))
-                .filter(quant_calibration_artifact::Column::Active.eq(true))
+            Entity::update_many()
+                .col_expr(Column::Active, Expr::value(false))
+                .filter(Column::Kind.eq(row.kind))
+                .filter(Column::Active.eq(true))
                 .exec(&txn)
                 .await
                 .map_err(StorageError::from)?;
@@ -203,11 +190,11 @@ impl CalibrationArtifactRepository for PgCalibrationArtifactRepository {
         active.active = ActiveValue::Set(true);
         let updated = active.update(&txn).await.map_err(StorageError::from)?;
         if updated.kind == CalibrationKind::WeatherStationLeadBias && !was_active {
-            quant_calibration_artifact_publication::ActiveModel {
+            ActiveModel {
                 publication_id: ActiveValue::Set(CalibrationArtifactPublicationId::from_v7()),
                 artifact_id: ActiveValue::Set(updated.artifact_id.clone()),
                 kind: ActiveValue::Set(updated.kind),
-                published_at: ActiveValue::Set(chrono::Utc::now()),
+                published_at: ActiveValue::Set(Utc::now()),
                 ..Default::default()
             }
             .insert(&txn)
@@ -298,7 +285,7 @@ fn ensure_strictly_sorted(values: &[ContentHash], field: &str) -> Result<(), Sto
 
 fn invariant(detail: impl Into<String>) -> StorageError {
     StorageError::InvariantViolation {
-        entity: Some(entity::QUANT_CALIBRATION_ARTIFACT),
+        entity: Some(QUANT_CALIBRATION_ARTIFACT),
         detail: detail.into(),
     }
 }

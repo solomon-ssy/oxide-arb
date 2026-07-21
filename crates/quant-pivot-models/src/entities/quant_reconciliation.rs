@@ -1,5 +1,9 @@
 //! `quant_reconciliation` table entity.
 
+use chrono::{DateTime, Utc};
+use sea_orm::entity::prelude::*;
+
+use super::{quant_execution_order, quant_order_intent};
 use crate::{
     enums::execution::ReconciliationResult,
     types::{
@@ -7,8 +11,6 @@ use crate::{
         Shares, Usd,
     },
 };
-use chrono::{DateTime, Utc};
-use sea_orm::entity::prelude::*;
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -41,14 +43,14 @@ pub struct Model {
         from = "execution_order_id",
         to = "execution_order_id"
     )]
-    pub execution_order: BelongsTo<super::quant_execution_order::Entity>,
+    pub execution_order: BelongsTo<quant_execution_order::Entity>,
     #[sea_orm(
         belongs_to,
         relation_enum = "OrderIntent",
         from = "order_intent_id",
         to = "order_intent_id"
     )]
-    pub order_intent: BelongsTo<super::quant_order_intent::Entity>,
+    pub order_intent: BelongsTo<quant_order_intent::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

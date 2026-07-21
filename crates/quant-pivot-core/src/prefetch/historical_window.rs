@@ -1,4 +1,4 @@
-//! Shared historical-window prefetch + point-in-time materialization (Phase 3.6).
+//! Shared historical-window prefetch + point-in-time materialization.
 //!
 //! The offline closure (training-dataset build **and** backtest replay) resolves
 //! every feature/factor point-in-time from a single batch-prefetched window served
@@ -29,9 +29,12 @@ use quant_pivot_models::{
         MarketResolutionRow, TradeTapeRow,
     },
     domain::{
-        CatalogWindowInfo, CryptoPriceReport, DecisionBoundary, DecisionClock, DecisionSource,
-        DomainObservation, MarketLinkage, MarketRegistryInfo, MarketSubject, TradeTapePrint,
-        WeatherForecastPoint, WeatherObservationFact, WeatherSubject,
+        data_plane::{
+            CryptoPriceReport, DecisionBoundary, DecisionClock, DecisionSource, DomainObservation,
+            TradeTapePrint, WeatherForecastPoint, WeatherObservationFact,
+        },
+        market::{CatalogWindowInfo, MarketRegistryInfo},
+        quant::{MarketLinkage, MarketSubject, WeatherSubject},
     },
     enums::domain::DomainFamily,
     runtime_config::DomainConfig,
@@ -95,7 +98,7 @@ pub struct Prefetched {
     pub resolutions: HashMap<MarketId, Vec<MarketResolutionRow>>,
     /// Every immutable market/event revision required by the replay window.
     pub catalog: CatalogWindowInfo,
-    /// External domain observations per instrument, ascending (Phase 11.2.2).
+    /// External domain observations per instrument, ascending.
     pub domain_observations: HashMap<DomainInstrumentKey, Vec<DomainObservation>>,
     /// Source-native Crypto reports per settlement instrument, ascending.
     pub crypto_reports: HashMap<DomainInstrumentKey, Vec<CryptoPriceReport>>,
@@ -293,7 +296,7 @@ impl HistoricalWindowLoader {
     }
 
     /// Prefetch the frozen linkage ledger and PIT domain observations for every
-    /// category-mapped sample market (Phase 11.2.2).
+    /// category-mapped sample market.
     ///
     /// The observation range covers the widest domain lookback before
     /// `window_start` through `window_end` (domain features never look

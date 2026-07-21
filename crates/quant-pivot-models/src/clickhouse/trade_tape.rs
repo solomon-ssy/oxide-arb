@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::{
     clickhouse::{ChBps, ChPrice, ChSchemaVersion, ChShares, ChUsd},
@@ -7,7 +8,6 @@ use crate::{
     },
     types::{MarketId, TokenId},
 };
-use uuid::Uuid;
 
 /// `ClickHouse` row for the `quant_trade_tape` table.
 #[derive(Debug, Clone, clickhouse::Row, Serialize, Deserialize)]

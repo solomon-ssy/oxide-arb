@@ -1,12 +1,14 @@
 //! `events` table entity.
 
+use chrono::{DateTime, Utc};
+use sea_orm::entity::prelude::*;
+use serde::{Deserialize, Serialize};
+
+use super::market;
 use crate::{
     enums::market::EventStatus,
     types::{CatalogMarketIds, ContentHash, EventId},
 };
-use chrono::{DateTime, Utc};
-use sea_orm::entity::prelude::*;
-use serde::{Deserialize, Serialize};
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]
@@ -33,7 +35,7 @@ pub struct Model {
     pub updated_at: DateTime<Utc>,
 
     #[sea_orm(has_many, relation_enum = "Market")]
-    pub market: HasMany<super::market::Entity>,
+    pub market: HasMany<market::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

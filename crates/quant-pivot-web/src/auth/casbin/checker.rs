@@ -9,6 +9,10 @@
 //! manifest (see [`crate::routes`]), so every registered protected route is
 //! guaranteed to have a rule by construction.
 
+use std::collections::HashMap;
+
+use actix_web::http::Method;
+
 use crate::{
     auth::casbin::{
         rules::{AuthzOutcome, Rule},
@@ -18,8 +22,6 @@ use crate::{
     extractors::ActorRoles,
     jwt::Claims,
 };
-use actix_web::http::Method;
-use std::collections::HashMap;
 
 /// The role code whose holders bypass all route-level authorization.
 pub const SUPER_ADMIN_ROLE: &str = "super_admin";
@@ -102,7 +104,7 @@ impl PermChecker {
 mod tests {
     use chrono::Utc;
     use quant_pivot_models::{
-        domain::RoleInfo,
+        domain::rbac::RoleInfo,
         enums::rbac::{Operation, ResourceType, RoleKind, RoleStatus},
         types::RoleId,
     };

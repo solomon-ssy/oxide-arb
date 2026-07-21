@@ -1,10 +1,10 @@
 //! Postgres-backed reserved-capital reader.
 
+use quant_pivot_error::storage::StorageError;
+use quant_pivot_models::types::Usd;
 use sea_orm::DatabaseConnection;
 
 use crate::{postgres::quant::capital_allocation, traits::ReservedCapitalRepository};
-use quant_pivot_error::storage::StorageError;
-use quant_pivot_models::types::Usd;
 
 /// Postgres-backed reserved-capital reader.
 pub struct PgReservedCapitalRepository {

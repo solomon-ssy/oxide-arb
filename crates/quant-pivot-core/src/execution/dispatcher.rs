@@ -1,5 +1,5 @@
 //! Execution dispatcher — the single bridge from an admitted intent to a real
-//! venue order (Phase 05.4).
+//! venue order.
 //!
 //! `submit_if_admitted` is the only path that signs and submits money. It is
 //! **claim-first**: a short row-locked transaction moves the intent
@@ -19,10 +19,13 @@ use quant_pivot_error::{
 };
 use quant_pivot_models::{
     domain::{
-        CapitalSettlement, CoreEvent, EntryConditionClaim, EntryConditionInstanceInfo,
-        EntryConditionLifecycleEvent, ExecutionOrderInfo, ExecutionSubmitPort, IntentEventKind,
-        NewExecutionOrder, NewReconciliation, OrderIntentInfo, PositionFill, RecommendationInfo,
-        SubmissionLedgerWrite,
+        ports::ExecutionSubmitPort,
+        quant::{
+            CapitalSettlement, EntryConditionClaim, EntryConditionInstanceInfo, ExecutionOrderInfo,
+            NewExecutionOrder, NewReconciliation, OrderIntentInfo, PositionFill,
+            RecommendationInfo, SubmissionLedgerWrite,
+        },
+        runtime::{CoreEvent, EntryConditionLifecycleEvent, IntentEventKind},
     },
     enums::{
         clickhouse::ChQuantLedgerEventKind,
@@ -51,10 +54,9 @@ use crate::{
         intent_lifecycle::IntentLifecyclePublisher,
         order_client::{PolymarketOrderClient, VenueOrder, VenueOutcome, VenueSubmitResult},
     },
-    observability::metrics_hub::MetricsHub,
     observability::{
         execution_fact_writer::ExecutionEventWriter,
-        ledger_fact_projection::project_execution_event,
+        ledger_fact_projection::project_execution_event, metrics_hub::MetricsHub,
     },
     service::feature_integrity::FeatureParityGatePort,
 };
@@ -130,12 +132,12 @@ impl ExecutionSubmitPort for CoreExecutionDispatcher {
         let prior_status = intent.status;
 
         // 2. Evaluate against a read-only frozen snapshot. The exact condition
-        //    revision and admission fingerprint are revalidated by the atomic
-        //    claim below, so a concurrent correction cannot slip through.
+        // revision and admission fingerprint are revalidated by the atomic
+        // claim below, so a concurrent correction cannot slip through.
         let (recommendation, condition_claim, prepared_order) =
             Box::pin(self.evaluate_admission(intent_id, &intent, now)).await?;
         // 3. Atomically claim intent + condition. There is no observable
-        //    `AdmissionPending` intent with an unconsumed condition.
+        // `AdmissionPending` intent with an unconsumed condition.
         let (_, claimed_condition) = match self
             .deps
             .submission
@@ -591,7 +593,7 @@ fn build_ledger_write(
         },
         VenueOutcome::Open => SubmissionLedgerWrite {
             // Resting limit order: stays `Submitted`, capital stays locked, no
-            // recon (05.5 polls open orders). Only venue metadata is recorded.
+            // Reconciliation polls open orders. Only venue metadata is recorded.
             state: ExecutionOrderState::Submitted,
             intent_status: OrderIntentStatus::Submitted,
             venue_order_id: result.venue_order_id.clone(),

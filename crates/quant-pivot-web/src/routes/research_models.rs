@@ -1,4 +1,4 @@
-//! Offline trainer + backtest admin endpoints (Phase 3.6).
+//! Offline trainer + backtest admin endpoints.
 //!
 //! # UI integration contract
 //!
@@ -12,25 +12,31 @@
 //!
 //! Recommended SPA flow:
 //!
-//! 1. Build a `ready` training dataset (03.5 Admin API).
+//! 1. Build a `ready` training dataset through the Admin API.
 //! 2. **train** → save the returned `model_version_id`.
 //! 3. **backtest** with a (holdout) `training_dataset_id` + `calibrate` flag.
 //! 4. Poll **GET** the version / report.
 //!
-//! Training + backtest run synchronously on the HTTP worker (may take seconds to
-//! minutes); the SPA should disable double-submit and show a spinner. An async
-//! job queue is a later concern (mirrors 03.5).
+//! Training, backtest, and CPCV requests enqueue durable research jobs. The SPA
+//! follows their progress through the research-job API and WebSocket updates,
+//! then reloads the resulting version or report.
 
-use actix_web::{http::Method, web};
+use actix_web::{
+    http::Method,
+    web::{Data, Path, Query},
+};
 use quant_pivot_models::{
     domain::{
-        BacktestPathSetListQuery, BacktestPathSetView, BacktestReportListQuery, BacktestReportView,
-        ComparisonReportListQuery, CreateModelSpecCommand, CreateModelSpecRequest,
-        FeatureContractView, GovernanceActor, JobSubmitContext, ModelComparisonReportView,
-        ModelPublishedCatalogQuery, ModelSpecListQuery, ModelVersionListQuery, Paginated,
-        PublishedModelOptionView, QualityGatePreviewQuery, QualityGateReportView,
-        QuantModelSpecView, ResearchJobView, RunBacktestRequest, RunCpcvBacktestRequest,
-        TrainModelRequest, TrainedModelView,
+        api::{
+            BacktestPathSetListQuery, BacktestPathSetView, BacktestReportListQuery,
+            BacktestReportView, ComparisonReportListQuery, CreateModelSpecRequest,
+            FeatureContractView, ModelComparisonReportView, ModelPublishedCatalogQuery,
+            ModelSpecListQuery, ModelVersionListQuery, PublishedModelOptionView,
+            QualityGatePreviewQuery, QualityGateReportView, QuantModelSpecView, ResearchJobView,
+            RunBacktestRequest, RunCpcvBacktestRequest, TrainModelRequest, TrainedModelView,
+        },
+        pagination::Paginated,
+        ports::{CreateModelSpecCommand, GovernanceActor, JobSubmitContext},
     },
     enums::{
         operation_log::OperationCategory,
@@ -177,7 +183,7 @@ fn validation_route_specs() -> Vec<RouteSpec> {
 /// This is the only model-spec editor source; it is rebuilt from the same
 /// runtime snapshot used to validate model-spec creation.
 pub async fn get_feature_contract(
-    state: web::Data<AppState>,
+    state: Data<AppState>,
 ) -> Result<WebResponse<FeatureContractView>, WebError> {
     Ok(WebResponse::ok(state.model_spec.feature_contract().await?))
 }
@@ -185,8 +191,8 @@ pub async fn get_feature_contract(
 /// `GET /api/research/model-specs` — paginated model-spec catalog (the
 /// dataset/training selector source).
 pub async fn list_model_specs(
-    state: web::Data<AppState>,
-    query: web::Query<ModelSpecListQuery>,
+    state: Data<AppState>,
+    query: Query<ModelSpecListQuery>,
 ) -> Result<WebResponse<Paginated<QuantModelSpecView>>, WebError> {
     let page = state
         .research_catalog
@@ -202,7 +208,7 @@ pub async fn list_model_specs(
 /// mints it before planning a training dataset or training a version. Returns
 /// `201 Created` with the persisted spec projection.
 pub async fn create_model_spec(
-    state: web::Data<AppState>,
+    state: Data<AppState>,
     actor: AuthedActor,
     acting_role: ActingRole,
     request_id: RequestId,
@@ -254,8 +260,8 @@ pub async fn create_model_spec(
 
 /// `GET /api/research/model-specs/{id}` — single model specification (detail drawer).
 pub async fn get_model_spec(
-    state: web::Data<AppState>,
-    id: web::Path<ModelSpecId>,
+    state: Data<AppState>,
+    id: Path<ModelSpecId>,
 ) -> Result<WebResponse<QuantModelSpecView>, WebError> {
     let info = state
         .model_spec
@@ -267,8 +273,8 @@ pub async fn get_model_spec(
 
 /// `GET /api/research/models` — paginated trained-model registry catalog.
 pub async fn list_models(
-    state: web::Data<AppState>,
-    query: web::Query<ModelVersionListQuery>,
+    state: Data<AppState>,
+    query: Query<ModelVersionListQuery>,
 ) -> Result<WebResponse<Paginated<TrainedModelView>>, WebError> {
     let page = state
         .research_catalog
@@ -280,10 +286,10 @@ pub async fn list_models(
 
 /// `GET /api/research/models/published-catalog` — the `Published`,
 /// side-and-category-eligible candidates for one `ModelVersionSelect`
-/// runtime-config field (11.2.2 remediation R8).
+/// runtime-config field.
 pub async fn list_published_catalog(
-    state: web::Data<AppState>,
-    query: web::Query<ModelPublishedCatalogQuery>,
+    state: Data<AppState>,
+    query: Query<ModelPublishedCatalogQuery>,
 ) -> Result<WebResponse<Vec<PublishedModelOptionView>>, WebError> {
     let options = state
         .research_catalog
@@ -294,8 +300,8 @@ pub async fn list_published_catalog(
 
 /// `GET /api/research/backtest-reports` — paginated backtest-report ledger catalog.
 pub async fn list_backtest_reports(
-    state: web::Data<AppState>,
-    query: web::Query<BacktestReportListQuery>,
+    state: Data<AppState>,
+    query: Query<BacktestReportListQuery>,
 ) -> Result<WebResponse<Paginated<BacktestReportView>>, WebError> {
     let page = state
         .research_catalog
@@ -329,8 +335,8 @@ pub async fn list_backtest_reports(
 
 /// `GET /api/research/comparison-reports` — paginated comparison-report catalog.
 pub async fn list_comparison_reports(
-    state: web::Data<AppState>,
-    query: web::Query<ComparisonReportListQuery>,
+    state: Data<AppState>,
+    query: Query<ComparisonReportListQuery>,
 ) -> Result<WebResponse<Paginated<ModelComparisonReportView>>, WebError> {
     let page = state
         .research_catalog
@@ -345,7 +351,7 @@ pub async fn list_comparison_reports(
 /// Returns `202 Accepted` with the queued [`ResearchJobView`]; training runs on
 /// the `ResearchJobWorker`. Poll the job / listen on `materialization.run_update`.
 pub async fn train(
-    state: web::Data<AppState>,
+    state: Data<AppState>,
     acting_role: ActingRole,
     request_id: RequestId,
     op_ctx: OperationCtx,
@@ -377,8 +383,8 @@ pub async fn train(
 
 /// `GET /api/research/models/{id}` — registered version (UI polling).
 pub async fn get_version(
-    state: web::Data<AppState>,
-    id: web::Path<ModelVersionId>,
+    state: Data<AppState>,
+    id: Path<ModelVersionId>,
 ) -> Result<WebResponse<TrainedModelView>, WebError> {
     let info = state
         .model_training
@@ -393,9 +399,9 @@ pub async fn get_version(
 /// Runs the same quality gate as `publish` (no persistence, no state change) and
 /// returns the full per-gate scorecard so operators can judge readiness before acting.
 pub async fn preview_quality_gate(
-    state: web::Data<AppState>,
-    id: web::Path<ModelVersionId>,
-    query: web::Query<QualityGatePreviewQuery>,
+    state: Data<AppState>,
+    id: Path<ModelVersionId>,
+    query: Query<QualityGatePreviewQuery>,
 ) -> Result<WebResponse<QualityGateReportView>, WebError> {
     let query = query.into_inner();
     let view = state
@@ -410,8 +416,8 @@ pub async fn preview_quality_gate(
 /// Returns `202 Accepted` with the queued [`ResearchJobView`]; the replay runs on
 /// the `ResearchJobWorker`. Poll the job / listen on `materialization.run_update`.
 pub async fn backtest(
-    state: web::Data<AppState>,
-    id: web::Path<ModelVersionId>,
+    state: Data<AppState>,
+    id: Path<ModelVersionId>,
     acting_role: ActingRole,
     request_id: RequestId,
     op_ctx: OperationCtx,
@@ -445,8 +451,8 @@ pub async fn backtest(
 
 /// `GET /api/research/backtest-reports/{id}` — stored report.
 pub async fn get_backtest_report(
-    state: web::Data<AppState>,
-    id: web::Path<BacktestReportId>,
+    state: Data<AppState>,
+    id: Path<BacktestReportId>,
 ) -> Result<WebResponse<BacktestReportView>, WebError> {
     let view = state
         .backtests
@@ -458,8 +464,8 @@ pub async fn get_backtest_report(
 
 /// `GET /api/research/comparison-reports/{id}` — stored pairwise comparison.
 pub async fn get_comparison_report(
-    state: web::Data<AppState>,
-    id: web::Path<ModelComparisonReportId>,
+    state: Data<AppState>,
+    id: Path<ModelComparisonReportId>,
 ) -> Result<WebResponse<ModelComparisonReportView>, WebError> {
     let info = state
         .backtests
@@ -471,8 +477,8 @@ pub async fn get_comparison_report(
 
 /// `GET /api/research/backtest-path-sets` — paginated CPCV path-set catalog.
 pub async fn list_backtest_path_sets(
-    state: web::Data<AppState>,
-    query: web::Query<BacktestPathSetListQuery>,
+    state: Data<AppState>,
+    query: Query<BacktestPathSetListQuery>,
 ) -> Result<WebResponse<Paginated<BacktestPathSetView>>, WebError> {
     let page = state
         .research_catalog
@@ -484,8 +490,8 @@ pub async fn list_backtest_path_sets(
 
 /// `GET /api/research/backtest-path-sets/{id}` — stored CPCV path set.
 pub async fn get_backtest_path_set(
-    state: web::Data<AppState>,
-    id: web::Path<BacktestPathSetId>,
+    state: Data<AppState>,
+    id: Path<BacktestPathSetId>,
 ) -> Result<WebResponse<BacktestPathSetView>, WebError> {
     let view = state
         .cpcv_backtests
@@ -497,8 +503,8 @@ pub async fn get_backtest_path_set(
 
 /// `POST /api/research/models/{id}/cpcv-backtest` — enqueue async CPCV validation.
 pub async fn cpcv_backtest(
-    state: web::Data<AppState>,
-    id: web::Path<ModelVersionId>,
+    state: Data<AppState>,
+    id: Path<ModelVersionId>,
     acting_role: ActingRole,
     request_id: RequestId,
     op_ctx: OperationCtx,

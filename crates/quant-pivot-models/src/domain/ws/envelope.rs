@@ -7,10 +7,11 @@
 //! millisecond instant, so the wire format is fixed by the serializer rather
 //! than re-derived at every call site.
 
-use crate::domain::ws::channel::WsChannel;
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Serialize, Serializer};
-use serde_json::Value;
+use serde_json::{Map, Value};
+
+use crate::domain::ws::channel::WsChannel;
 
 /// The `type` discriminator of a server message.
 ///
@@ -94,10 +95,7 @@ impl WsEnvelope {
     /// A `pong` keepalive reply.
     #[must_use]
     pub fn pong() -> Self {
-        Self::now(
-            ServerMessageKind::Pong,
-            Value::Object(serde_json::Map::new()),
-        )
+        Self::now(ServerMessageKind::Pong, Value::Object(Map::new()))
     }
 
     /// A command `error` reply.
@@ -115,14 +113,15 @@ impl WsEnvelope {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::Value;
+
     use super::{ServerMessageKind, WsEnvelope};
     use crate::domain::ws::channel::WsChannel;
 
     #[test]
     fn channel_envelope_serializes_type_and_millis_timestamp() {
         let envelope = WsEnvelope::channel(WsChannel::MarketBookUpdate, serde_json::json!({}));
-        let json: serde_json::Value =
-            serde_json::from_str(&envelope.to_text()).expect("valid json");
+        let json: Value = serde_json::from_str(&envelope.to_text()).expect("valid json");
         assert_eq!(json["type"], "market.book_update");
         let ts = json["timestamp"].as_str().expect("timestamp string");
         assert!(ts.ends_with('Z'), "trailing Z: {ts}");
@@ -136,8 +135,7 @@ mod tests {
         assert_eq!(ServerMessageKind::Sync.as_str(), "sync");
         assert_eq!(ServerMessageKind::Pong.as_str(), "pong");
         assert_eq!(ServerMessageKind::Error.as_str(), "error");
-        let pong: serde_json::Value =
-            serde_json::from_str(&WsEnvelope::pong().to_text()).expect("valid json");
+        let pong: Value = serde_json::from_str(&WsEnvelope::pong().to_text()).expect("valid json");
         assert_eq!(pong["type"], "pong");
         assert!(pong["data"].is_object());
     }

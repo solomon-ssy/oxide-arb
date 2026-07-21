@@ -21,7 +21,10 @@ use arc_swap::ArcSwap;
 use chrono::Utc;
 use quant_pivot_api::ws::WsShardHealthPort;
 use quant_pivot_models::{
-    domain::{DataQualityInput, DataQualityPort, DataQualityReport, DataQualitySnapshot},
+    domain::{
+        data_plane::{DataQualityInput, DataQualityReport, DataQualitySnapshot},
+        ports::DataQualityPort,
+    },
     enums::{common::StalenessLevel, quant::DataQualityStatus},
     runtime_config::DataQualityConfig,
 };

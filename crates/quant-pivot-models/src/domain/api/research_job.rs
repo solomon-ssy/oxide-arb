@@ -18,9 +18,12 @@ use validator::Validate;
 
 use crate::{
     domain::{
-        FitTradePolicyRequest, ResearchJobInfo, ResearchJobResultRef, RunBacktestRequest,
-        RunCpcvBacktestRequest, RunFullFeatureParityRequest, TrainModelRequest,
+        api::{
+            FitTradePolicyRequest, RunBacktestRequest, RunCpcvBacktestRequest,
+            RunFullFeatureParityRequest, TrainModelRequest,
+        },
         pagination::PageRequest,
+        quant::{ResearchJobInfo, ResearchJobResultRef},
     },
     enums::quant::{ResearchJobKind, ResearchJobResultKind, ResearchJobStatus},
     types::{
@@ -83,7 +86,7 @@ pub struct BacktestJobParams {
     pub request: RunBacktestRequest,
 }
 
-/// Frozen params for a `cpcv_backtest` job (Phase 11.5): the path model
+/// Frozen params for a `cpcv_backtest` job: the path model
 /// version + the CPCV/trial-grid request body.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

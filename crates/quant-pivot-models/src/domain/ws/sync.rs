@@ -1,8 +1,8 @@
-//! Strongly-typed `sync` full-state snapshot (Phase 0).
+//! Strongly-typed `sync` full-state snapshot.
 
 use serde::Serialize;
 
-use crate::domain::SystemStatusView;
+use crate::domain::api::SystemStatusView;
 
 /// Authorized projection of live system state, returned for a `sync` command.
 #[derive(Debug, Clone, Default, Serialize)]

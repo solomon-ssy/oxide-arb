@@ -101,9 +101,11 @@ async fn wait_until_ready(pool: &Pool, budget: Duration) -> Result<(), StorageEr
 
 #[cfg(test)]
 mod tests {
-    use super::{CREATE_TIMEOUT, create_timeout, deadpool_config};
-    use quant_pivot_models::config::RedisConfig;
     use std::time::Duration;
+
+    use quant_pivot_models::config::RedisConfig;
+
+    use super::{CREATE_TIMEOUT, create_timeout, deadpool_config};
 
     #[test]
     fn operation_and_startup_timeouts_are_independent() {

@@ -1,5 +1,27 @@
 //! Polymarket data ingest bundle: live books, catalog sync, pipeline, quality.
 
+use std::sync::Arc;
+
+use quant_pivot_api::{
+    gamma::GammaClient,
+    ws::{ClobWsManager, WsSessionInvalidationHook, WsShardHealthPort},
+};
+use quant_pivot_error::QuantResult;
+use quant_pivot_models::{
+    config::DeployConfig, domain::runtime::CoreEventPublisher,
+    runtime_config::DecisionPolicySnapshot,
+};
+use quant_pivot_repository::{
+    cached::{CachedEventRepository, CachedMarketRepository},
+    postgres::{PgEventRepository, PgMarketRepository},
+    traits::{
+        CatalogLedgerRepository, ClobMarketInfoRepository, EventRepository,
+        MarketLinkageRepository, MarketRepository,
+    },
+};
+use quant_pivot_research::pit::PointInTimeSnapshotSource;
+use tokio_util::sync::CancellationToken;
+
 use super::InfraBundle;
 use crate::{
     governance::{LinkageResolverDeps, LinkageResolverService},
@@ -21,25 +43,6 @@ use crate::{
         ws_subscription::{MarketDataSubscriptionPolicy, WsSubscriptionCoordinator},
     },
 };
-use quant_pivot_api::{
-    gamma::GammaClient,
-    ws::{ClobWsManager, WsSessionInvalidationHook, WsShardHealthPort},
-};
-use quant_pivot_error::QuantResult;
-use quant_pivot_models::{
-    config::DeployConfig, domain::CoreEventPublisher, runtime_config::DecisionPolicySnapshot,
-};
-use quant_pivot_repository::{
-    cached::{CachedEventRepository, CachedMarketRepository},
-    postgres::{PgEventRepository, PgMarketRepository},
-    traits::{
-        CatalogLedgerRepository, ClobMarketInfoRepository, EventRepository,
-        MarketLinkageRepository, MarketRepository,
-    },
-};
-use quant_pivot_research::pit::PointInTimeSnapshotSource;
-use std::sync::Arc;
-use tokio_util::sync::CancellationToken;
 
 /// Dependencies required to assemble the live data plane.
 pub struct DataBundleDeps<'a> {
@@ -59,7 +62,7 @@ pub struct DataBundle {
     pub market_filter: Arc<MarketFilter>,
     pub data_pipeline: Arc<DataPipeline>,
     pub gamma_service: Arc<GammaService>,
-    /// Offline market-linkage resolver (Phase 11.2.2).
+    /// Offline market-linkage resolver.
     pub linkage_resolver: Arc<LinkageResolverService>,
     pub ws_manager: Arc<ClobWsManager>,
     pub ws_subscription: Arc<WsSubscriptionCoordinator>,
@@ -76,27 +79,9 @@ pub struct DataBundle {
     pub status_nudge: SystemStatusNudge,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum CatalogSyncComposition {
-    Runtime,
-    MetadataOnly,
-}
-
 impl DataBundle {
     /// Wire the full Polymarket ingest stack from deploy config and infra handles.
     pub fn assemble(deps: &DataBundleDeps<'_>) -> QuantResult<Self> {
-        Self::assemble_with_catalog_sync(deps, CatalogSyncComposition::Runtime)
-    }
-
-    /// Wire authoritative catalog/linkage services without starting CLOB book subscriptions.
-    pub(crate) fn assemble_metadata_only(deps: &DataBundleDeps<'_>) -> QuantResult<Self> {
-        Self::assemble_with_catalog_sync(deps, CatalogSyncComposition::MetadataOnly)
-    }
-
-    fn assemble_with_catalog_sync(
-        deps: &DataBundleDeps<'_>,
-        catalog_sync: CatalogSyncComposition,
-    ) -> QuantResult<Self> {
         let invalidation_metrics = Arc::clone(deps.metrics);
         let on_session_invalidated: WsSessionInvalidationHook = Arc::new(move |n| {
             invalidation_metrics
@@ -156,7 +141,6 @@ impl DataBundle {
             catalog: &catalog,
             linkage_resolver: &linkage_resolver,
             status_nudge: status_nudge.clone(),
-            catalog_sync,
         });
 
         let data_quality = Arc::new(BookDataQualityService::new(
@@ -218,7 +202,6 @@ struct GammaServiceAssembly<'a> {
     catalog: &'a Arc<CatalogReadiness>,
     linkage_resolver: &'a Arc<LinkageResolverService>,
     status_nudge: SystemStatusNudge,
-    catalog_sync: CatalogSyncComposition,
 }
 
 fn assemble_gamma_service(
@@ -236,7 +219,6 @@ fn assemble_gamma_service(
         catalog,
         linkage_resolver,
         status_nudge,
-        catalog_sync,
     } = inputs;
     let ws_subscription = Arc::new(WsSubscriptionCoordinator::new(
         Arc::clone(ws_manager),
@@ -261,10 +243,7 @@ fn assemble_gamma_service(
         cache: Arc::clone(&deps.infra.cache),
         metrics: Arc::clone(deps.metrics),
         catalog: Arc::clone(catalog),
-        ws_subscription: match catalog_sync {
-            CatalogSyncComposition::Runtime => Some(Arc::clone(&ws_subscription)),
-            CatalogSyncComposition::MetadataOnly => None,
-        },
+        ws_subscription: Some(Arc::clone(&ws_subscription)),
         events: deps.events.clone(),
         status_nudge,
         subscription_window_hours: deps

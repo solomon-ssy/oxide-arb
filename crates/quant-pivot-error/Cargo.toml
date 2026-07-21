@@ -12,7 +12,7 @@ storage = [
     "dep:deadpool-redis",
     "dep:bitcode",
 ]
-config = ["dep:config"]
+config = ["dep:config-rs"]
 serde = ["dep:serde_json"]
 
 [dependencies]
@@ -27,7 +27,7 @@ deadpool-redis = { workspace = true, optional = true }
 bitcode = { workspace = true, optional = true }
 
 # Configuration error types
-config = { workspace = true, optional = true }
+config-rs = { workspace = true, optional = true }
 
 # Serialization error types (ApiError::Deserialize, WsError::MessageParse)
 serde_json = { workspace = true, optional = true }

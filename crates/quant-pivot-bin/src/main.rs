@@ -1,8 +1,9 @@
+use std::{env, error::Error, sync::Arc};
+
 use clap::Parser;
 use quant_pivot_core::app::bootstrap;
 use quant_pivot_models::config::{DeployConfig, ObservabilityConfig};
 use rustls::crypto::aws_lc_rs;
-use std::{env, error::Error, sync::Arc};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]

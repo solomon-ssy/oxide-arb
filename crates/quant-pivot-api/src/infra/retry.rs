@@ -8,14 +8,15 @@
 //! [`retry_with_policy`] is a convenience async executor that drives the full
 //! retry loop, classifying each error and applying backoff.
 
-use backoff::{ExponentialBackoff, backoff::Backoff};
-use quant_pivot_error::api::ApiError;
-use serde::{Deserialize, Serialize};
 use std::{
     fmt::Display,
     future::Future,
     time::{Duration, Instant},
 };
+
+use backoff::{ExponentialBackoff, backoff::Backoff};
+use quant_pivot_error::api::ApiError;
+use serde::{Deserialize, Serialize};
 
 // ─── Error classification ───────────────────────────────────────────────────
 
@@ -295,14 +296,15 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::{
-        fmt::{self, Formatter},
+        fmt::{Formatter, Result as FmtResult},
         sync::{
             Arc,
             atomic::{AtomicU32, Ordering},
         },
     };
+
+    use super::*;
 
     #[test]
     fn controller_exhausts_after_max_attempts() {
@@ -378,7 +380,7 @@ mod tests {
     struct TestErr(ErrorKind, String);
 
     impl Display for TestErr {
-        fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
             self.1.fmt(f)
         }
     }

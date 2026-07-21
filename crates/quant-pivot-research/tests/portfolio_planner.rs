@@ -1,4 +1,4 @@
-//! Phase 04.1 acceptance tests for the governed portfolio planner.
+//! acceptance tests for the governed portfolio planner.
 //!
 //! Covers the money-critical invariants: available-cash convergence, exposure
 //! netting against the real account snapshot, stable ranking, min-size drops,
@@ -25,18 +25,17 @@ use quant_pivot_research::{
     backtest::PortfolioCaps,
     execution_semantics::{BookWalkFill, BookWalkOutcome},
     model::signal::{ModelExplanation, SignalCandidate},
-    portfolio::sizing::KellySafetyParams,
     portfolio::{
         AccountSnapshot, DefaultPortfolioPlanner, DrawdownState, ExecutableSizingTier,
         KellySizingModel, LinearProgrammingPortfolioAllocator, OptimizerConfig, PlanCandidate,
-        PortfolioPlanInput, PortfolioPlanner, SizingModel,
+        PortfolioPlanInput, PortfolioPlanner, SizingModel, sizing::KellySafetyParams,
     },
 };
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 
 /// The exact-MILP planner over the pure-Rust microlp backend used by the
-/// Phase 04.1 acceptance tests (no expected-return tilt: `λ = 0`).
+/// acceptance tests (no expected-return tilt: `λ = 0`).
 fn planner() -> DefaultPortfolioPlanner {
     let config = OptimizerConfig {
         solver: PortfolioSolverKind::Microlp,

@@ -3,7 +3,7 @@
 use chrono::{TimeZone, Utc};
 use quant_pivot_error::{QuantError, QuantResult, api::ApiError};
 use quant_pivot_models::{
-    domain::DomainObservation,
+    domain::data_plane::DomainObservation,
     enums::domain::{DomainFamily, DomainMetric},
     types::{DomainInstrumentKey, DomainSourceId},
 };
@@ -58,10 +58,10 @@ pub fn into_observations(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use quant_pivot_models::{enums::domain::KlineInterval, types::BinanceSymbol};
     use rust_decimal_macros::dec;
 
+    use super::*;
     use crate::binance::wire::BinanceKlineRow;
 
     fn sample_row(close_time_ms: i64) -> BinanceKlineRow {

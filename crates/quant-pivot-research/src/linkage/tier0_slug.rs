@@ -8,7 +8,7 @@
 //! `data.chain.link/streams/{feed}` anchor — the slug template alone is
 //! deterministic evidence for the *subject shape* (asset / comparator /
 //! window), but the *settlement oracle* is independently grounded to that
-//! literal description anchor via [`oracle::extract_oracle`], exactly like
+//! literal description anchor via the oracle extractor, exactly like
 //! Tier 1. A market whose description does not ground a recognized oracle
 //! produces **no candidate** — never a guessed default.
 //!
@@ -19,7 +19,7 @@
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
-    domain::{
+    domain::quant::{
         CryptoSubject, GroundingField, GroundingKind, GroundingProof, GroundingSpan,
         LinkageSourceMetadata, MarketSubject, PriceComparator,
     },
@@ -153,17 +153,18 @@ pub fn window_bounds(slug: &str) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
 
 #[cfg(test)]
 mod tests {
+    use chrono::{TimeZone, Utc};
+    use quant_pivot_models::{
+        domain::quant::{LinkageSourceMetadata, MarketSubject, PriceComparator, ResolutionOracle},
+        types::MarketId,
+    };
+
     use super::{Tier0SlugExtractor, window_bounds};
     use crate::linkage::{
         extractor::{
             DefaultSubjectValidator, SubjectExtractor, SubjectValidator, ValidationOutcome,
         },
         rules,
-    };
-    use chrono::{TimeZone, Utc};
-    use quant_pivot_models::{
-        domain::{LinkageSourceMetadata, MarketSubject, PriceComparator, ResolutionOracle},
-        types::MarketId,
     };
 
     /// The literal Chainlink Data Streams rules-text anchor every observed

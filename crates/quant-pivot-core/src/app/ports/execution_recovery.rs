@@ -4,7 +4,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use quant_pivot_error::QuantResult;
-use quant_pivot_models::domain::{ExecutionRecoveryPort, ExecutionRecoveryView, KillSwitchPort};
+use quant_pivot_models::domain::{
+    api::ExecutionRecoveryView,
+    ports::{ExecutionRecoveryPort, KillSwitchPort},
+};
 use quant_pivot_repository::traits::ReconciliationRepository;
 
 use crate::governance::{RuntimeModeHandle, execution_recovery::build_execution_recovery_view};

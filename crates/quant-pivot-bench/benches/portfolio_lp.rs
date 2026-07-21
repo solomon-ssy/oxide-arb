@@ -1,5 +1,6 @@
-//! Phase 05.8 portfolio LP spike: 100-candidate MILP vs relaxation throughput.
+//! portfolio LP spike: 100-candidate MILP vs relaxation throughput.
 
+use chrono::Utc;
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use quant_pivot_models::{
     enums::{
@@ -47,7 +48,7 @@ fn candidate(index: usize, composite: Decimal) -> SignalCandidate {
         liquidity_score: Probability::ZERO,
         data_quality_score: Probability::ZERO,
         model_score_percentile: Probability::ZERO,
-        decision_at: chrono::Utc::now(),
+        decision_at: Utc::now(),
     }
 }
 

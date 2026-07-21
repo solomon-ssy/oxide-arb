@@ -5,6 +5,7 @@
 //! configuration on every request, so model-spec authoring cannot drift onto a
 //! hard-coded UI catalog.
 
+use schemars::JsonSchema;
 use serde::Serialize;
 
 use crate::{
@@ -14,7 +15,8 @@ use crate::{
 };
 
 /// Stable wire projection of one feature's missing-value policy.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[schemars(deny_unknown_fields)]
 pub struct FeatureNullPolicyView {
     /// Policy name (`reject_market`, `neutral_value`, `penalize`, `optional`).
     pub policy: String,
@@ -24,7 +26,8 @@ pub struct FeatureNullPolicyView {
 }
 
 /// One raw feature available to model input contracts.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[schemars(deny_unknown_fields)]
 pub struct FeatureContractEntryView {
     pub name: String,
     pub compute_revision: u32,
@@ -38,7 +41,8 @@ pub struct FeatureContractEntryView {
 }
 
 /// Active, hash-bound feature catalog used by model-spec authoring.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[schemars(deny_unknown_fields)]
 pub struct FeatureContractView {
     pub feature_schema_hash: ContentHash,
     pub feature_schema_version: SchemaVersion,

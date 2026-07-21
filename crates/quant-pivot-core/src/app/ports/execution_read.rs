@@ -6,10 +6,15 @@ use async_trait::async_trait;
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     domain::{
-        ExecutionOrderInfo, ExecutionOrderListQuery, ExecutionReadPort, Paginated, PositionInfo,
-        PositionListQuery, PositionSummary, RecommendationAttributionInfo, ReconciliationInfo,
-        ReconciliationListQuery, SettlementRedeemDetail, SettlementRedeemListQuery,
-        SettlementRedeemSummary,
+        api::{
+            ExecutionOrderListQuery, PositionListQuery, PositionSummary, ReconciliationListQuery,
+            SettlementRedeemDetail, SettlementRedeemListQuery, SettlementRedeemSummary,
+        },
+        pagination::Paginated,
+        ports::ExecutionReadPort,
+        quant::{
+            ExecutionOrderInfo, PositionInfo, RecommendationAttributionInfo, ReconciliationInfo,
+        },
     },
     types::{
         ExecutionOrderId, OrderIntentId, PositionId, RecommendationId, ReconciliationId,

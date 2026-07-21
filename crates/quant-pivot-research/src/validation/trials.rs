@@ -1,4 +1,4 @@
-//! Governed hyperparameter trial grid (Phase 11.5 §3.5).
+//! Governed hyperparameter trial grid.
 //!
 //! CSCV/PBO (`validation::pbo`) and the Deflated Sharpe Ratio's
 //! multiple-testing correction (`validation::dsr`) both need `N` genuinely
@@ -17,16 +17,16 @@ use quant_pivot_models::{
     runtime_config::RankLossKind, types::model_training::TrainingObjectiveSpec,
 };
 use rust_decimal::Decimal;
+#[cfg(feature = "ml-classical")]
+use rust_decimal::prelude::ToPrimitive;
 
 #[cfg(feature = "ml-classical")]
 use crate::model::classical::{ClassicalParams, ForestParams, LinearParams};
-#[cfg(feature = "ml-classical")]
-use rust_decimal::prelude::ToPrimitive;
 
 /// One governed, independently trainable configuration in the trial grid.
 #[derive(Debug, Clone)]
 pub struct Trial {
-    /// Stable index into the grid (`0..grid.len()`), deterministic across runs
+    /// Stable index into the grid (`0..grid.len`), deterministic across runs
     /// for the same [`TrialGridSpec`].
     pub trial_id: u32,
     /// Human-readable summary of what varies from the base config (audit /
@@ -253,13 +253,14 @@ fn methodology(detail: impl Into<String>) -> QuantError {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(feature = "ml-classical")]
-    use super::ClassicalTrialGrid;
-    use super::{Trial, TrialGridSpec, WeightedFactorTrialGrid};
     use quant_pivot_models::{
         runtime_config::RankLossKind, types::model_training::TrainingObjectiveSpec,
     };
     use rust_decimal_macros::dec;
+
+    #[cfg(feature = "ml-classical")]
+    use super::ClassicalTrialGrid;
+    use super::{Trial, TrialGridSpec, WeightedFactorTrialGrid};
 
     #[test]
     fn weighted_factor_grid_expands_to_cartesian_product() {

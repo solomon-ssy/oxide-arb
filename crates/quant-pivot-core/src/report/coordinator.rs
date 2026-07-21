@@ -2,10 +2,10 @@
 
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use quant_pivot_error::{QuantError, QuantResult, report::ReportError};
 use quant_pivot_models::{
-    domain::{
+    domain::quant::{
         ClaimReportSchedule, MaterializeReportSchedule, ReconcileReportSchedule,
         ReportRunClaimConfig, ReportRunInfo,
     },
@@ -336,7 +336,7 @@ fn predecessor_occurrence(
     let window = due_schedule_window(
         &schedule.cadence,
         first,
-        latest - chrono::Duration::nanoseconds(1),
+        latest - ChronoDuration::nanoseconds(1),
     )?
     .ok_or_else(|| ReportError::InvariantViolation {
         stage: "report_schedule_materialize",

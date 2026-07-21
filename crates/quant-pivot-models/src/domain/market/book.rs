@@ -4,12 +4,15 @@
 //! [`QuantBookView`] provides zero-copy detection views; serde/API boundaries
 //! convert via [`BookLevel::from_decimal`] / [`BookLevel::price_decimal`].
 
+use std::sync::Arc;
+
+use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
 use crate::types::{
     MicroConversionError, MicroPrice, MicroShares, MicroUsd, Price, Shares, TokenId,
 };
-use serde::{Deserialize, Serialize};
-use std::sync::Arc;
-use thiserror::Error;
 
 /// Which YES/NO leg triggered a pair-level book gate failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,7 +57,7 @@ pub struct BookLevel {
 impl BookLevel {
     pub fn from_decimal(price: Price, size: Shares) -> Result<Self, MicroConversionError> {
         let price_d = price.inner();
-        if price_d <= rust_decimal::Decimal::ZERO || price_d > rust_decimal::Decimal::ONE {
+        if price_d <= Decimal::ZERO || price_d > Decimal::ONE {
             return Err(MicroConversionError);
         }
         Ok(Self {
@@ -144,7 +147,7 @@ pub fn bid_depth_down_to(levels: &[BookLevel], limit_price: Price) -> Shares {
 /// Immutable published snapshot for a single token (Arc-backed, lock-free read).
 ///
 /// Sides use [`Arc<[BookLevel]>`] so readers share level storage without copying;
-/// writers use copy-on-write on the mutable [`OrderBook`] before publish.
+/// writers use copy-on-write on the mutable order book before publish.
 #[derive(Debug, Clone)]
 pub struct BookSnapshot {
     pub bids: Arc<[BookLevel]>,
@@ -244,7 +247,7 @@ impl BookSideView<'_> {
     }
 }
 
-/// Zero-copy YES+NO book view for the endgame detector hot path.
+/// Zero-copy YES+NO book view for paired binary-market calculations.
 #[derive(Debug, Clone, Copy)]
 pub struct QuantBookView<'a> {
     pub yes_bids: BookSideView<'a>,
@@ -413,13 +416,15 @@ impl QuantBookSnapshot {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
-    fn level(price: rust_decimal::Decimal) -> BookLevel {
+
+    use super::*;
+    fn level(price: Decimal) -> BookLevel {
         BookLevel::from_decimal(Price::new(price), Shares::new(dec!(10))).unwrap()
     }
 
-    fn side(price: rust_decimal::Decimal, timestamp_ms: u64) -> OrderbookSide {
+    fn side(price: Decimal, timestamp_ms: u64) -> OrderbookSide {
         OrderbookSide {
             levels: vec![level(price)],
             timestamp_ms,
@@ -478,7 +483,7 @@ mod tests {
         assert_eq!(snap.bid_depth_down_to(Price::new(dec!(0.96))), Shares::ZERO);
     }
 
-    fn level_with_size(price: rust_decimal::Decimal, size: rust_decimal::Decimal) -> BookLevel {
+    fn level_with_size(price: Decimal, size: Decimal) -> BookLevel {
         BookLevel::from_decimal_unchecked(Price::new(price), Shares::new(size))
     }
 

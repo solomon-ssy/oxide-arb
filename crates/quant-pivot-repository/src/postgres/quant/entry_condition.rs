@@ -1,19 +1,33 @@
 //! Postgres-backed condition artifact and recommendation-instance state machine.
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     clickhouse::{ChSchemaVersion, EntryConditionEvaluationEventRow},
-    domain::{
+    domain::quant::{
         ApplyEntryConditionEvaluation, ApplyEntryConditionEvaluationOutcome,
         CryptoPriceProjectionInfo, EntryConditionArtifactInfo, EntryConditionAuditInfo,
         EntryConditionClaim, EntryConditionInstanceInfo, NewEntryConditionArtifact,
         NewEntryConditionAudit, NewEntryConditionInstance, WeatherDailyTemperatureProjectionInfo,
     },
     entities::{
-        quant_crypto_price_projection, quant_entry_condition_artifact, quant_entry_condition_audit,
-        quant_entry_condition_evaluation_outbox, quant_entry_condition_instance,
-        quant_weather_daily_temperature_projection,
+        quant_crypto_price_projection::Entity as QuantCryptoPriceProjectionEntity,
+        quant_entry_condition_artifact::{Column, Entity},
+        quant_entry_condition_audit::{
+            Column as QuantEntryConditionAuditColumn, Entity as QuantEntryConditionAuditEntity,
+        },
+        quant_entry_condition_evaluation_outbox::{
+            ActiveModel, Column as QuantEntryConditionEvaluationOutboxColumn,
+            Entity as QuantEntryConditionEvaluationOutboxEntity,
+        },
+        quant_entry_condition_instance::{
+            Column as QuantEntryConditionInstanceColumn,
+            Entity as QuantEntryConditionInstanceEntity, Model,
+        },
+        quant_weather_daily_temperature_projection::{
+            Column as QuantWeatherDailyTemperatureProjectionColumn,
+            Entity as QuantWeatherDailyTemperatureProjectionEntity,
+        },
     },
     enums::quant::{EntryConditionAuditAction, EntryConditionState},
     hashing::CanonicalDigest,
@@ -25,8 +39,8 @@ use quant_pivot_models::{
     },
 };
 use sea_orm::{
-    ActiveModelTrait, ActiveValue, ColumnTrait, Condition, DatabaseConnection, EntityTrait,
-    IntoActiveModel, QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
+    ActiveModelTrait, ActiveValue, ColumnTrait, Condition, ConnectionTrait, DatabaseConnection,
+    EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
     sea_query::{Expr, LockBehavior, LockType},
 };
 
@@ -69,22 +83,20 @@ impl EntryConditionRepository for PgEntryConditionRepository {
             ));
         }
         artifact.payload_json = canonical;
-        quant_entry_condition_artifact::Entity::insert(artifact.into_active_model())
-            .on_conflict_do_nothing_on([quant_entry_condition_artifact::Column::ContentHash])
+        Entity::insert(artifact.into_active_model())
+            .on_conflict_do_nothing_on([Column::ContentHash])
             .exec(&self.db)
             .await
             .map_err(StorageError::from)?;
-        quant_entry_condition_artifact::Entity::find_by_id(
-            EntryConditionArtifactId::from_content_hash(&content_hash),
-        )
-        .one(&self.db)
-        .await
-        .map_err(StorageError::from)?
-        .map(Into::into)
-        .ok_or(StorageError::NotFound {
-            entity: ENTITY_ARTIFACT,
-            id: content_hash.to_string(),
-        })
+        Entity::find_by_id(EntryConditionArtifactId::from_content_hash(&content_hash))
+            .one(&self.db)
+            .await
+            .map_err(StorageError::from)?
+            .map(Into::into)
+            .ok_or(StorageError::NotFound {
+                entity: ENTITY_ARTIFACT,
+                id: content_hash.to_string(),
+            })
     }
 
     async fn create_instance(
@@ -109,11 +121,11 @@ impl EntryConditionRepository for PgEntryConditionRepository {
             occurred_at: now,
         };
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let row = quant_entry_condition_instance::Entity::insert(instance.into_active_model())
+        let row = QuantEntryConditionInstanceEntity::insert(instance.into_active_model())
             .exec_with_returning(&txn)
             .await
             .map_err(StorageError::from)?;
-        quant_entry_condition_audit::Entity::insert(audit.into_active_model())
+        QuantEntryConditionAuditEntity::insert(audit.into_active_model())
             .exec(&txn)
             .await
             .map_err(StorageError::from)?;
@@ -125,7 +137,7 @@ impl EntryConditionRepository for PgEntryConditionRepository {
         &self,
         artifact_id: &EntryConditionArtifactId,
     ) -> Result<Option<EntryConditionArtifactInfo>, StorageError> {
-        quant_entry_condition_artifact::Entity::find_by_id(artifact_id.clone())
+        Entity::find_by_id(artifact_id.clone())
             .one(&self.db)
             .await
             .map_err(StorageError::from)
@@ -136,7 +148,7 @@ impl EntryConditionRepository for PgEntryConditionRepository {
         &self,
         instance_id: &EntryConditionInstanceId,
     ) -> Result<Option<EntryConditionInstanceInfo>, StorageError> {
-        quant_entry_condition_instance::Entity::find_by_id(instance_id.clone())
+        QuantEntryConditionInstanceEntity::find_by_id(instance_id.clone())
             .one(&self.db)
             .await
             .map_err(StorageError::from)
@@ -147,10 +159,9 @@ impl EntryConditionRepository for PgEntryConditionRepository {
         &self,
         recommendation_id: &RecommendationId,
     ) -> Result<Option<EntryConditionInstanceInfo>, StorageError> {
-        quant_entry_condition_instance::Entity::find()
+        QuantEntryConditionInstanceEntity::find()
             .filter(
-                quant_entry_condition_instance::Column::RecommendationId
-                    .eq(recommendation_id.clone()),
+                QuantEntryConditionInstanceColumn::RecommendationId.eq(recommendation_id.clone()),
             )
             .one(&self.db)
             .await
@@ -162,11 +173,9 @@ impl EntryConditionRepository for PgEntryConditionRepository {
         &self,
         instance_id: &EntryConditionInstanceId,
     ) -> Result<Vec<EntryConditionAuditInfo>, StorageError> {
-        quant_entry_condition_audit::Entity::find()
-            .filter(
-                quant_entry_condition_audit::Column::ConditionInstanceId.eq(instance_id.clone()),
-            )
-            .order_by_asc(quant_entry_condition_audit::Column::Revision)
+        QuantEntryConditionAuditEntity::find()
+            .filter(QuantEntryConditionAuditColumn::ConditionInstanceId.eq(instance_id.clone()))
+            .order_by_asc(QuantEntryConditionAuditColumn::Revision)
             .all(&self.db)
             .await
             .map_err(StorageError::from)
@@ -178,36 +187,33 @@ impl EntryConditionRepository for PgEntryConditionRepository {
         source_id: &DomainSourceId,
         instrument_key: &DomainInstrumentKey,
     ) -> Result<Option<CryptoPriceProjectionInfo>, StorageError> {
-        quant_crypto_price_projection::Entity::find_by_id((
-            source_id.clone(),
-            instrument_key.clone(),
-        ))
-        .one(&self.db)
-        .await
-        .map_err(StorageError::from)
-        .and_then(|row| {
-            row.map(|row| {
-                let source_sequence = u64::try_from(row.source_sequence).map_err(|error| {
-                    invariant(
-                        "quant_crypto_price_projection",
-                        format!("source_sequence: {error}"),
-                    )
-                })?;
-                Ok(CryptoPriceProjectionInfo {
-                    source_id: row.source_id,
-                    instrument_key: row.instrument_key,
-                    previous_price: row.previous_price,
-                    current_price: row.current_price,
-                    source_sequence,
-                    event_time: row.event_time,
-                    available_at: row.available_at,
-                    report_hash: row.report_hash,
-                    gap_generation: row.gap_generation,
-                    source_healthy: row.source_healthy,
+        QuantCryptoPriceProjectionEntity::find_by_id((source_id.clone(), instrument_key.clone()))
+            .one(&self.db)
+            .await
+            .map_err(StorageError::from)
+            .and_then(|row| {
+                row.map(|row| {
+                    let source_sequence = u64::try_from(row.source_sequence).map_err(|error| {
+                        invariant(
+                            "quant_crypto_price_projection",
+                            format!("source_sequence: {error}"),
+                        )
+                    })?;
+                    Ok(CryptoPriceProjectionInfo {
+                        source_id: row.source_id,
+                        instrument_key: row.instrument_key,
+                        previous_price: row.previous_price,
+                        current_price: row.current_price,
+                        source_sequence,
+                        event_time: row.event_time,
+                        available_at: row.available_at,
+                        report_hash: row.report_hash,
+                        gap_generation: row.gap_generation,
+                        source_healthy: row.source_healthy,
+                    })
                 })
+                .transpose()
             })
-            .transpose()
-        })
     }
 
     async fn find_weather_projection(
@@ -215,16 +221,16 @@ impl EntryConditionRepository for PgEntryConditionRepository {
         source_id: &DomainSourceId,
         instrument_key: &DomainInstrumentKey,
         station: &str,
-        local_date: chrono::NaiveDate,
+        local_date: NaiveDate,
         temperature_statistic: WeatherTemperatureStatistic,
     ) -> Result<Option<WeatherDailyTemperatureProjectionInfo>, StorageError> {
-        quant_weather_daily_temperature_projection::Entity::find_by_id((
+        QuantWeatherDailyTemperatureProjectionEntity::find_by_id((
             source_id.clone(),
             instrument_key.clone(),
             local_date,
             temperature_statistic,
         ))
-        .filter(quant_weather_daily_temperature_projection::Column::Station.eq(station))
+        .filter(QuantWeatherDailyTemperatureProjectionColumn::Station.eq(station))
         .one(&self.db)
         .await
         .map_err(StorageError::from)
@@ -254,15 +260,15 @@ impl EntryConditionRepository for PgEntryConditionRepository {
         limit: u64,
     ) -> Result<Vec<EntryConditionInstanceInfo>, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let rows = quant_entry_condition_instance::Entity::find()
-            .filter(quant_entry_condition_instance::Column::State.is_in([
+        let rows = QuantEntryConditionInstanceEntity::find()
+            .filter(QuantEntryConditionInstanceColumn::State.is_in([
                 EntryConditionState::Waiting,
                 EntryConditionState::Unavailable,
                 EntryConditionState::Confirming,
                 EntryConditionState::Qualified,
             ]))
-            .filter(quant_entry_condition_instance::Column::ExpiresAt.lte(now))
-            .order_by_asc(quant_entry_condition_instance::Column::ExpiresAt)
+            .filter(QuantEntryConditionInstanceColumn::ExpiresAt.lte(now))
+            .order_by_asc(QuantEntryConditionInstanceColumn::ExpiresAt)
             .limit(limit)
             .lock_with_behavior(LockType::Update, LockBehavior::SkipLocked)
             .all(&txn)
@@ -308,19 +314,19 @@ impl EntryConditionRepository for PgEntryConditionRepository {
             EntryConditionState::Confirming,
             EntryConditionState::Qualified,
         ];
-        let evaluation = quant_entry_condition_instance::Entity::find()
-            .filter(quant_entry_condition_instance::Column::State.is_in(active_states))
-            .filter(quant_entry_condition_instance::Column::ExpiresAt.gt(now))
-            .filter(quant_entry_condition_instance::Column::NextEvaluationAt.is_not_null())
-            .order_by_asc(quant_entry_condition_instance::Column::NextEvaluationAt)
+        let evaluation = QuantEntryConditionInstanceEntity::find()
+            .filter(QuantEntryConditionInstanceColumn::State.is_in(active_states))
+            .filter(QuantEntryConditionInstanceColumn::ExpiresAt.gt(now))
+            .filter(QuantEntryConditionInstanceColumn::NextEvaluationAt.is_not_null())
+            .order_by_asc(QuantEntryConditionInstanceColumn::NextEvaluationAt)
             .one(&self.db)
             .await
             .map_err(StorageError::from)?
             .and_then(|row| row.next_evaluation_at);
-        let expiry = quant_entry_condition_instance::Entity::find()
-            .filter(quant_entry_condition_instance::Column::State.is_in(active_states))
-            .filter(quant_entry_condition_instance::Column::ExpiresAt.gt(now))
-            .order_by_asc(quant_entry_condition_instance::Column::ExpiresAt)
+        let expiry = QuantEntryConditionInstanceEntity::find()
+            .filter(QuantEntryConditionInstanceColumn::State.is_in(active_states))
+            .filter(QuantEntryConditionInstanceColumn::ExpiresAt.gt(now))
+            .order_by_asc(QuantEntryConditionInstanceColumn::ExpiresAt)
             .one(&self.db)
             .await
             .map_err(StorageError::from)?
@@ -345,21 +351,21 @@ impl EntryConditionRepository for PgEntryConditionRepository {
             EntryConditionState::Confirming,
             EntryConditionState::Qualified,
         ];
-        let row = quant_entry_condition_instance::Entity::find()
-            .filter(quant_entry_condition_instance::Column::State.is_in(active_states))
-            .filter(quant_entry_condition_instance::Column::ExpiresAt.gt(now))
+        let row = QuantEntryConditionInstanceEntity::find()
+            .filter(QuantEntryConditionInstanceColumn::State.is_in(active_states))
+            .filter(QuantEntryConditionInstanceColumn::ExpiresAt.gt(now))
             .filter(
                 Condition::any()
-                    .add(quant_entry_condition_instance::Column::NextEvaluationAt.is_null())
-                    .add(quant_entry_condition_instance::Column::NextEvaluationAt.lte(now)),
+                    .add(QuantEntryConditionInstanceColumn::NextEvaluationAt.is_null())
+                    .add(QuantEntryConditionInstanceColumn::NextEvaluationAt.lte(now)),
             )
             .filter(
                 Condition::any()
-                    .add(quant_entry_condition_instance::Column::LeaseExpiresAt.is_null())
-                    .add(quant_entry_condition_instance::Column::LeaseExpiresAt.lte(now)),
+                    .add(QuantEntryConditionInstanceColumn::LeaseExpiresAt.is_null())
+                    .add(QuantEntryConditionInstanceColumn::LeaseExpiresAt.lte(now)),
             )
-            .order_by_asc(quant_entry_condition_instance::Column::NextEvaluationAt)
-            .order_by_asc(quant_entry_condition_instance::Column::CreatedAt)
+            .order_by_asc(QuantEntryConditionInstanceColumn::NextEvaluationAt)
+            .order_by_asc(QuantEntryConditionInstanceColumn::CreatedAt)
             .lock_with_behavior(LockType::Update, LockBehavior::SkipLocked)
             .one(&txn)
             .await
@@ -429,16 +435,14 @@ impl EntryConditionRepository for PgEntryConditionRepository {
         lease_epoch: i64,
         lease_expires_at: DateTime<Utc>,
     ) -> Result<bool, StorageError> {
-        let result = quant_entry_condition_instance::Entity::update_many()
+        let result = QuantEntryConditionInstanceEntity::update_many()
             .col_expr(
-                quant_entry_condition_instance::Column::LeaseExpiresAt,
-                sea_orm::sea_query::Expr::value(lease_expires_at),
+                QuantEntryConditionInstanceColumn::LeaseExpiresAt,
+                Expr::value(lease_expires_at),
             )
-            .filter(
-                quant_entry_condition_instance::Column::ConditionInstanceId.eq(instance_id.clone()),
-            )
-            .filter(quant_entry_condition_instance::Column::LeaseOwner.eq(worker_id))
-            .filter(quant_entry_condition_instance::Column::LeaseEpoch.eq(lease_epoch))
+            .filter(QuantEntryConditionInstanceColumn::ConditionInstanceId.eq(instance_id.clone()))
+            .filter(QuantEntryConditionInstanceColumn::LeaseOwner.eq(worker_id))
+            .filter(QuantEntryConditionInstanceColumn::LeaseEpoch.eq(lease_epoch))
             .exec(&self.db)
             .await
             .map_err(StorageError::from)?;
@@ -538,14 +542,14 @@ impl EntryConditionRepository for PgEntryConditionRepository {
         limit: u64,
     ) -> Result<Vec<EntryConditionEvaluationEventRow>, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let rows = quant_entry_condition_evaluation_outbox::Entity::find()
-            .filter(quant_entry_condition_evaluation_outbox::Column::PublishedAt.is_null())
+        let rows = QuantEntryConditionEvaluationOutboxEntity::find()
+            .filter(QuantEntryConditionEvaluationOutboxColumn::PublishedAt.is_null())
             .filter(
                 Condition::any()
-                    .add(quant_entry_condition_evaluation_outbox::Column::LeaseExpiresAt.is_null())
-                    .add(quant_entry_condition_evaluation_outbox::Column::LeaseExpiresAt.lte(now)),
+                    .add(QuantEntryConditionEvaluationOutboxColumn::LeaseExpiresAt.is_null())
+                    .add(QuantEntryConditionEvaluationOutboxColumn::LeaseExpiresAt.lte(now)),
             )
-            .order_by_asc(quant_entry_condition_evaluation_outbox::Column::CreatedAt)
+            .order_by_asc(QuantEntryConditionEvaluationOutboxColumn::CreatedAt)
             .limit(limit)
             .lock_with_behavior(LockType::Update, LockBehavior::SkipLocked)
             .all(&txn)
@@ -574,28 +578,27 @@ impl EntryConditionRepository for PgEntryConditionRepository {
         worker_id: WorkerId,
         published_at: DateTime<Utc>,
     ) -> Result<(), StorageError> {
-        let result = quant_entry_condition_evaluation_outbox::Entity::update_many()
+        let result = QuantEntryConditionEvaluationOutboxEntity::update_many()
             .col_expr(
-                quant_entry_condition_evaluation_outbox::Column::PublishedAt,
+                QuantEntryConditionEvaluationOutboxColumn::PublishedAt,
                 Expr::value(published_at),
             )
             .col_expr(
-                quant_entry_condition_evaluation_outbox::Column::LastError,
+                QuantEntryConditionEvaluationOutboxColumn::LastError,
                 Expr::value(Option::<String>::None),
             )
             .col_expr(
-                quant_entry_condition_evaluation_outbox::Column::ClaimOwner,
+                QuantEntryConditionEvaluationOutboxColumn::ClaimOwner,
                 Expr::value(Option::<WorkerId>::None),
             )
             .col_expr(
-                quant_entry_condition_evaluation_outbox::Column::LeaseExpiresAt,
+                QuantEntryConditionEvaluationOutboxColumn::LeaseExpiresAt,
                 Expr::value(Option::<DateTime<Utc>>::None),
             )
             .filter(
-                quant_entry_condition_evaluation_outbox::Column::EvaluationId
-                    .eq(evaluation_id.clone()),
+                QuantEntryConditionEvaluationOutboxColumn::EvaluationId.eq(evaluation_id.clone()),
             )
-            .filter(quant_entry_condition_evaluation_outbox::Column::ClaimOwner.eq(worker_id))
+            .filter(QuantEntryConditionEvaluationOutboxColumn::ClaimOwner.eq(worker_id))
             .exec(&self.db)
             .await
             .map_err(StorageError::from)?;
@@ -608,24 +611,23 @@ impl EntryConditionRepository for PgEntryConditionRepository {
         worker_id: WorkerId,
         detail: String,
     ) -> Result<(), StorageError> {
-        let result = quant_entry_condition_evaluation_outbox::Entity::update_many()
+        let result = QuantEntryConditionEvaluationOutboxEntity::update_many()
             .col_expr(
-                quant_entry_condition_evaluation_outbox::Column::LastError,
+                QuantEntryConditionEvaluationOutboxColumn::LastError,
                 Expr::value(Some(detail)),
             )
             .col_expr(
-                quant_entry_condition_evaluation_outbox::Column::ClaimOwner,
+                QuantEntryConditionEvaluationOutboxColumn::ClaimOwner,
                 Expr::value(Option::<WorkerId>::None),
             )
             .col_expr(
-                quant_entry_condition_evaluation_outbox::Column::LeaseExpiresAt,
+                QuantEntryConditionEvaluationOutboxColumn::LeaseExpiresAt,
                 Expr::value(Option::<DateTime<Utc>>::None),
             )
             .filter(
-                quant_entry_condition_evaluation_outbox::Column::EvaluationId
-                    .eq(evaluation_id.clone()),
+                QuantEntryConditionEvaluationOutboxColumn::EvaluationId.eq(evaluation_id.clone()),
             )
-            .filter(quant_entry_condition_evaluation_outbox::Column::ClaimOwner.eq(worker_id))
+            .filter(QuantEntryConditionEvaluationOutboxColumn::ClaimOwner.eq(worker_id))
             .exec(&self.db)
             .await
             .map_err(StorageError::from)?;
@@ -709,7 +711,7 @@ fn crypto_semantics_changed(
         || previous.triggering_at != next.triggering_at
 }
 
-async fn insert_evaluation_outbox<C: sea_orm::ConnectionTrait>(
+async fn insert_evaluation_outbox<C: ConnectionTrait>(
     db: &C,
     instance_id: &EntryConditionInstanceId,
     evaluation: &ApplyEntryConditionEvaluation,
@@ -741,7 +743,7 @@ async fn insert_evaluation_outbox<C: sea_orm::ConnectionTrait>(
         tree_json: evaluation.tree_json.clone(),
         schema_version: ChSchemaVersion::FIRST,
     };
-    quant_entry_condition_evaluation_outbox::ActiveModel {
+    ActiveModel {
         outbox_id: ActiveValue::Set(EntryConditionEvaluationOutboxId::from_v7()),
         evaluation_id: ActiveValue::Set(evaluation_id),
         event_json: ActiveValue::Set(event),
@@ -758,10 +760,10 @@ async fn insert_evaluation_outbox<C: sea_orm::ConnectionTrait>(
     Ok(())
 }
 
-pub async fn claim_for_submission<C: sea_orm::ConnectionTrait>(
+pub async fn claim_for_submission<C: ConnectionTrait>(
     db: &C,
     claim: &EntryConditionClaim,
-) -> Result<quant_entry_condition_instance::Model, StorageError> {
+) -> Result<Model, StorageError> {
     let row = load_for_update(db, &claim.condition_instance_id).await?;
     let artifact_matches =
         row.artifact_id == claim.artifact_id && row.artifact_hash == claim.artifact_hash;
@@ -818,12 +820,12 @@ pub async fn claim_for_submission<C: sea_orm::ConnectionTrait>(
     Ok(updated)
 }
 
-pub async fn revert_consumed_for_intent<C: sea_orm::ConnectionTrait>(
+pub async fn revert_consumed_for_intent<C: ConnectionTrait>(
     db: &C,
     instance_id: &EntryConditionInstanceId,
     intent_id: &OrderIntentId,
     now: DateTime<Utc>,
-) -> Result<quant_entry_condition_instance::Model, StorageError> {
+) -> Result<Model, StorageError> {
     let row = load_for_update(db, instance_id).await?;
     if row.state != EntryConditionState::Consumed
         || row.claimed_by_intent_id.as_ref() != Some(intent_id)
@@ -872,13 +874,13 @@ pub async fn revert_consumed_for_intent<C: sea_orm::ConnectionTrait>(
 /// Complete the condition side of a pre-submission intent terminal command.
 /// The caller owns the surrounding transaction and follows the global lock
 /// order: recommendation, intent, condition, capital reservation.
-pub async fn invalidate_for_intent_terminal<C: sea_orm::ConnectionTrait>(
+pub async fn invalidate_for_intent_terminal<C: ConnectionTrait>(
     db: &C,
     instance_id: &EntryConditionInstanceId,
     intent_id: &OrderIntentId,
     detail: String,
     now: DateTime<Utc>,
-) -> Result<quant_entry_condition_instance::Model, StorageError> {
+) -> Result<Model, StorageError> {
     let row = load_for_update(db, instance_id).await?;
     if matches!(
         row.state,
@@ -929,7 +931,7 @@ pub async fn invalidate_for_intent_terminal<C: sea_orm::ConnectionTrait>(
     Ok(updated)
 }
 
-pub async fn require_consumed_for_intent<C: sea_orm::ConnectionTrait>(
+pub async fn require_consumed_for_intent<C: ConnectionTrait>(
     db: &C,
     instance_id: &EntryConditionInstanceId,
     intent_id: &OrderIntentId,
@@ -969,11 +971,11 @@ fn validate_new_instance(instance: &NewEntryConditionInstance) -> Result<(), Sto
     Ok(())
 }
 
-async fn load_for_update<C: sea_orm::ConnectionTrait>(
+async fn load_for_update<C: ConnectionTrait>(
     db: &C,
     instance_id: &EntryConditionInstanceId,
-) -> Result<quant_entry_condition_instance::Model, StorageError> {
-    quant_entry_condition_instance::Entity::find_by_id(instance_id.clone())
+) -> Result<Model, StorageError> {
+    QuantEntryConditionInstanceEntity::find_by_id(instance_id.clone())
         .lock_exclusive()
         .one(db)
         .await
@@ -984,11 +986,11 @@ async fn load_for_update<C: sea_orm::ConnectionTrait>(
         })
 }
 
-async fn insert_audit<C: sea_orm::ConnectionTrait>(
+async fn insert_audit<C: ConnectionTrait>(
     db: &C,
     audit: NewEntryConditionAudit,
 ) -> Result<(), StorageError> {
-    quant_entry_condition_audit::Entity::insert(audit.into_active_model())
+    QuantEntryConditionAuditEntity::insert(audit.into_active_model())
         .exec(db)
         .await
         .map_err(StorageError::from)?;
@@ -996,7 +998,7 @@ async fn insert_audit<C: sea_orm::ConnectionTrait>(
 }
 
 fn audit_from_model(
-    model: &quant_entry_condition_instance::Model,
+    model: &Model,
     revision: i64,
     action: EntryConditionAuditAction,
     from_state: Option<EntryConditionState>,

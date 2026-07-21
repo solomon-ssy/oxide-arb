@@ -1,4 +1,5 @@
-use crate::ingest::market_filter::MarketFilter;
+use std::{collections::HashSet, sync::Arc};
+
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use quant_pivot_models::{
@@ -9,7 +10,8 @@ use quant_pivot_models::{
     enums::market::MarketStatus,
     types::{EventId, MarketId, TokenId},
 };
-use std::{collections::HashSet, sync::Arc};
+
+use crate::ingest::market_filter::MarketFilter;
 
 /// Market metadata registry with bidirectional token ↔ market lookup.
 ///
@@ -270,7 +272,6 @@ impl Default for MarketRegistry {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use chrono::Utc;
     use quant_pivot_models::{
         domain::market::TokenInfo,
@@ -281,6 +282,8 @@ mod tests {
         },
     };
     use rust_decimal_macros::dec;
+
+    use super::*;
     fn sample_market(id: &str, status: MarketStatus) -> MarketRegistryInfo {
         sample_market_for_event(id, "evt-1", status, false)
     }

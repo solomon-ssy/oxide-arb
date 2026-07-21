@@ -1,7 +1,7 @@
 //! Factor family taxonomy.
 //!
-//! Generic planes, the platform-internal structural plane (Phase 11.2.1), and
-//! the category-routed external domain planes (Phase 11.2.2).
+//! Generic planes, the platform-internal structural plane, and
+//! the category-routed external domain planes.
 
 use schemars::JsonSchema;
 
@@ -35,7 +35,7 @@ pg_enum! {
     pub enum FactorDefinitionScope {
         Generic => "generic",
         Structural => "structural",
-        /// Category-routed crypto domain factors (Phase 11.2.2).
+        /// Category-routed crypto domain factors.
         DomainCrypto => "domain_crypto",
         /// Category-routed Weather domain factors.
         DomainWeather => "domain_weather",
@@ -153,13 +153,13 @@ impl FactorFamily {
         )
     }
 
-    /// Whether this is the platform-internal structural plane (Phase 11.2.1).
+    /// Whether this is the platform-internal structural plane.
     #[must_use]
     pub const fn is_structural(self) -> bool {
         matches!(self, Self::Structural)
     }
 
-    /// Whether this is a category-routed external domain plane (Phase 11.2.2).
+    /// Whether this is a category-routed external domain plane.
     #[must_use]
     pub const fn is_domain(self) -> bool {
         matches!(self, Self::DomainCrypto | Self::DomainWeather)

@@ -1,12 +1,14 @@
 //! Append-only policy approval decisions.
 
+use chrono::{DateTime, Utc};
+use sea_orm::entity::prelude::*;
+
+use super::{policy_activation, policy_revision, user};
 use crate::{
     enums::runtime_config::{ConfigResourceKind, PolicyActorKind, PolicyApprovalDecision},
     runtime_config::PolicyValidationSubject,
     types::{ContentHash, PolicyApprovalId, PolicyRevisionId, UserId},
 };
-use chrono::{DateTime, Utc};
-use sea_orm::entity::prelude::*;
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -37,16 +39,16 @@ pub struct Model {
         from = "policy_revision_id",
         to = "policy_revision_id"
     )]
-    pub revision: BelongsTo<super::policy_revision::Entity>,
+    pub revision: BelongsTo<policy_revision::Entity>,
     #[sea_orm(has_one, relation_enum = "Activation")]
-    pub activation: HasOne<super::policy_activation::Entity>,
+    pub activation: HasOne<policy_activation::Entity>,
     #[sea_orm(
         belongs_to,
         relation_enum = "DecidedByUser",
         from = "decided_by_user_id",
         to = "id"
     )]
-    pub decided_by_user: BelongsTo<Option<super::user::Entity>>,
+    pub decided_by_user: BelongsTo<Option<user::Entity>>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

@@ -351,6 +351,8 @@ const fn invalid_session_key(session: &SourceSliceInvalidSession) -> (&str, &str
 
 #[cfg(test)]
 mod tests {
+    use chrono::Duration;
+
     use super::*;
     use crate::types::{ResearchProfileId, builtin_research_profiles};
 
@@ -470,7 +472,7 @@ mod tests {
             },
             evaluation_track: ResearchEvaluationTrack::SemiAutoCandidate,
             research_program_hash: hash.clone(),
-            window_start: now - chrono::Duration::days(1),
+            window_start: now - Duration::days(1),
             window_end: now,
             pit_cutoff: now,
             materialized_at: now,

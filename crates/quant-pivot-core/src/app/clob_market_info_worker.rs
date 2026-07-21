@@ -6,6 +6,7 @@ use futures_util::{StreamExt, stream};
 use quant_pivot_api::clob::ClobClient;
 use quant_pivot_error::QuantError;
 use quant_pivot_repository::traits::{ClobMarketInfoRepository, MarketRepository};
+use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 
 const FETCH_CONCURRENCY: usize = 8;
@@ -34,7 +35,7 @@ impl ClobMarketInfoWorker {
 
     pub async fn run(&self, token: CancellationToken) {
         let mut interval = tokio::time::interval(self.refresh_interval);
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
         loop {
             tokio::select! {
                 () = token.cancelled() => break,

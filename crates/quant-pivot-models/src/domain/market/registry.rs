@@ -1,5 +1,11 @@
 //! Polymarket catalog persistence DTOs.
 
+use chrono::{DateTime, Utc};
+use quant_pivot_error::market::MarketError;
+use rust_decimal::Decimal;
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
+use serde::{Deserialize, Serialize};
+
 use crate::{
     enums::{
         catalog::{CatalogFilterReason, CatalogFilterReasonSet},
@@ -9,11 +15,6 @@ use crate::{
     hashing::CanonicalDigest,
     types::{ContentHash, EventId, MarketId, TokenId, Usd},
 };
-use chrono::{DateTime, Utc};
-use quant_pivot_error::market::MarketError;
-use rust_decimal::Decimal;
-use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
-use serde::{Deserialize, Serialize};
 
 /// DB row projection matching `entities::market::Model` columns exactly.
 #[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
@@ -23,7 +24,7 @@ pub struct MarketInfo {
     pub event_id: EventId,
     pub question: String,
     pub slug: String,
-    /// Market rules text (resolution-source grounding anchor; 11.2.2).
+    /// Market rules text used as a resolution-source grounding anchor.
     pub description: Option<String>,
     /// Persisted category memberships (`text[]`).
     pub categories: Vec<MarketCategory>,
@@ -93,7 +94,7 @@ pub struct TokenInfo {
     pub neg_risk: bool,
 }
 
-/// One YES leg of a neg-risk event (Phase 11.2.1).
+/// One YES leg of a neg-risk event.
 ///
 /// Deterministically ordered by `(market_id, yes_token_id)` when enumerated, so
 /// full-leg structural aggregates hash and replay identically online and offline.
@@ -105,14 +106,14 @@ pub struct NegRiskLeg {
     pub yes_token_id: TokenId,
 }
 
-/// Expected vs resolved neg-risk YES legs for an event (Phase 11.2.1 PIT).
+/// Expected versus resolved neg-risk YES legs at a point-in-time boundary.
 ///
 /// `expected_legs` is the count of **neg-risk outcome markets** listed in the
 /// event's Gamma catalog snapshot (`EventRegistryInfo.market_ids` online,
 /// `EventInfo.catalog_market_ids` offline). Non-neg-risk catalog members are
 /// excluded. `legs` holds the materialized subset with YES tokens. When
-/// `legs.len() < expected_legs`, structural features fail closed with
-/// [`NullReason::LegBookMissing`].
+/// `legs.len < expected_legs`, structural features fail closed with
+/// `NullReason::LegBookMissing`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct NegRiskLegSet {
     /// Expected neg-risk YES-leg count for this event.
@@ -143,7 +144,7 @@ impl NegRiskLegSet {
     /// Build from the event's Gamma catalog snapshot and a market resolver.
     ///
     /// `catalog_market_ids` preserves Gamma sync order. `resolve` returns:
-    /// - `Some(CatalogMarketLeg::NegRisk { .. })` when the market is materialized
+    /// - `Some(CatalogMarketLeg::NegRisk {.. })` when the market is materialized
     ///   and `neg_risk`;
     /// - `Some(CatalogMarketLeg::NonNegRisk)` when materialized but not neg-risk;
     /// - `None` when the catalog member is not yet materialized (still expected).
@@ -206,7 +207,7 @@ pub struct MarketRegistryInfo {
     pub token_no: TokenId,
     pub question: String,
     pub slug: String,
-    /// Market rules text (resolution-source grounding anchor; 11.2.2).
+    /// Market rules text used as a resolution-source grounding anchor.
     pub description: Option<String>,
     pub categories: CategorySet,
     pub status: MarketStatus,

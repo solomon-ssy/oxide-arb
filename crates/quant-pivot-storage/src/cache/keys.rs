@@ -4,8 +4,9 @@
 //! (Redis), and a domain label for metrics partitioning. L1 (Moka) TTL is
 //! derived as `ttl / 4` by the [`TieredCache`] layer.
 
-use quant_pivot_models::types::{EventId, MarketId};
 use std::time::Duration;
+
+use quant_pivot_models::types::{EventId, MarketId};
 
 /// Strongly-typed cache key encompassing all cacheable domains.
 ///

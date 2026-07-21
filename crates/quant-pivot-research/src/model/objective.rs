@@ -12,6 +12,7 @@
 
 use std::collections::BTreeMap;
 
+use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{
     runtime_config::{RankLossKind, ResearchTrainingConfig},
@@ -147,12 +148,12 @@ impl SampleRow {
 /// Grouping by `as_of` happens when the trainer builds the dataset; once formed,
 /// the evaluator only needs the rows (pair loss / pseudo portfolio). The
 /// `[as_of, label_horizon_end]` interval is retained so trainer CV can apply
-/// the same label-horizon purge/embargo as CPCV (Phase 11.5).
+/// the same label-horizon purge/embargo as CPCV.
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct CrossSectionGroup {
-    pub(crate) decision_at: chrono::DateTime<chrono::Utc>,
+    pub(crate) decision_at: DateTime<Utc>,
     /// Conservative upper bound of member rows' `TrainingLabel::matured_at`.
-    pub(crate) label_horizon_end: chrono::DateTime<chrono::Utc>,
+    pub(crate) label_horizon_end: DateTime<Utc>,
     pub(crate) rows: Vec<SampleRow>,
 }
 
@@ -573,6 +574,8 @@ fn parse_tail_fraction(value: Decimal) -> QuantResult<Decimal> {
 
 #[cfg(test)]
 mod tests {
+    use std::slice;
+
     use chrono::{TimeZone, Utc};
     use quant_pivot_models::{
         runtime_config::{
@@ -582,7 +585,6 @@ mod tests {
     };
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
-    use std::slice;
 
     use super::{
         CrossSectionGroup, ObjectiveEvaluator, SampleRow, ndcg_at_k, rank_ic_weighted_pair_weight,

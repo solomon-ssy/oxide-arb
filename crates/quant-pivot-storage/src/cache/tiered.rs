@@ -1,9 +1,11 @@
 //! Tiered cache: L1 (Moka) → L2 (Redis) fallthrough.
 
-use crate::cache::{CacheBackend, CacheKey, CacheMetrics, MokaBackend, RedisBackend};
 use bitcode::{Decode, Encode};
 use quant_pivot_error::storage::StorageError;
+use serde::{Serialize, de::DeserializeOwned};
 use tracing::trace;
+
+use crate::cache::{CacheBackend, CacheKey, CacheMetrics, MokaBackend, RedisBackend};
 
 pub struct TieredCache {
     l1: MokaBackend,
@@ -78,7 +80,7 @@ impl TieredCache {
     ///
     /// Use this for types that cannot derive `bitcode::Decode` (e.g. `SeaORM`
     /// entity models with `DateTime` fields).
-    pub async fn get_json<T: serde::de::DeserializeOwned + Send>(
+    pub async fn get_json<T: DeserializeOwned + Send>(
         &self,
         key: &CacheKey,
     ) -> Result<Option<T>, StorageError> {
@@ -109,7 +111,7 @@ impl TieredCache {
     ///
     /// Use this for types that cannot derive `bitcode::Encode` (e.g. `SeaORM`
     /// entity models with `DateTime` fields).
-    pub async fn set_json<T: serde::Serialize + Send + Sync>(
+    pub async fn set_json<T: Serialize + Send + Sync>(
         &self,
         key: &CacheKey,
         value: &T,
@@ -131,11 +133,13 @@ impl TieredCache {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::{collections::HashMap, sync::Arc, time::Duration};
+
     use async_trait::async_trait;
     use quant_pivot_models::types::{EventId, MarketId};
-    use std::{collections::HashMap, sync::Arc, time::Duration};
     use tokio::sync::Mutex;
+
+    use super::*;
 
     #[derive(Default)]
     struct MockL2 {

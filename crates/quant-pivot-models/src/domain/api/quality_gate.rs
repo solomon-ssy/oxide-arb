@@ -1,4 +1,4 @@
-//! Model-version quality-gate preview HTTP contract (Phase 3.8).
+//! Model-version quality-gate preview HTTP contract.
 //!
 //! `GET /research/models/{id}/quality-gate` runs the publish gate as a read-only
 //! dry-run (no persistence, no state change) and returns the full per-gate

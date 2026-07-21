@@ -2,4 +2,4 @@
 
 pub mod clob;
 
-pub use clob::*;
+pub use clob::{OrderRequest, OrderResponse};

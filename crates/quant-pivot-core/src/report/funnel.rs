@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantResult, report::ReportError};
 use quant_pivot_models::{
     clickhouse::ReportMarketFunnelRow,
-    domain::NewRecommendation,
+    domain::quant::NewRecommendation,
     enums::quant::RejectionReason,
     hashing::CanonicalDigest,
     types::{
@@ -510,9 +510,9 @@ mod tests {
     use quant_pivot_research::selection::{
         ExcludedMarket, ExclusionReason, MarketSelectionSnapshot, SelectedMarket,
     };
-    use quant_pivot_test_support::execution_pg_seed::fixture_profile_ref;
 
     use super::{ReportFunnelInput, build_report_market_funnel};
+    use crate::test_fixtures::execution_pg_seed::fixture_profile_ref;
 
     fn selection() -> MarketSelectionSnapshot {
         let decision_at = Utc

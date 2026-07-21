@@ -5,8 +5,13 @@
 //! decoupled from the persistence projection and stays a single, discoverable
 //! source of truth for clients / `OpenAPI` generation.
 
+use chrono::{DateTime, Utc};
+use quant_pivot_macros::NormalizePageQuery;
+use sea_orm::entity::prelude::IpNetwork;
+use serde::{Deserialize, Serialize};
+
 use crate::{
-    domain::{OperationLogInfo, pagination::PageRequest},
+    domain::{governance::OperationLogInfo, pagination::PageRequest},
     enums::{
         operation_log::{OperationCategory, OperationHttpMethod, OperationOutcome},
         rbac::ResourceType,
@@ -16,10 +21,6 @@ use crate::{
         OperationLogId, RoleCode, UserId,
     },
 };
-use chrono::{DateTime, Utc};
-use quant_pivot_macros::NormalizePageQuery;
-use sea_orm::entity::prelude::IpNetwork;
-use serde::{Deserialize, Serialize};
 
 /// Outbound view of one append-only operation-log row.
 #[derive(Debug, Serialize)]

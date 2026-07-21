@@ -1,17 +1,19 @@
 //! Fixed-point monetary types for hot paths (6 decimal places).
 //!
-//! Interior arithmetic uses `i64` micro-units. Convert to [`Decimal`](rust_decimal::Decimal)
+//! Interior arithmetic uses `i64` micro-units. Convert to [`Decimal`]
 //! only at serde, persistence, and API boundaries.
 
-use num_traits::ToPrimitive;
-use rust_decimal::Decimal;
-use serde::{Deserialize, Serialize};
 use std::{
     cmp::Ordering,
     error::Error,
     fmt,
+    fmt::{Display, Formatter, Result as FmtResult},
     ops::{Add, AddAssign, Div, Mul, Sub, SubAssign},
 };
+
+use num_traits::ToPrimitive;
+use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
 
 /// Scale factor: 1 unit = 1 / `MICRO_SCALE`.
 pub const MICRO_SCALE: i64 = 1_000_000;
@@ -20,8 +22,8 @@ pub const MICRO_SCALE: i64 = 1_000_000;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MicroConversionError;
 
-impl fmt::Display for MicroConversionError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for MicroConversionError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         f.write_str("decimal value out of fixed-point range")
     }
 }
@@ -386,8 +388,9 @@ impl MicroBps {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use rust_decimal_macros::dec;
+
+    use super::*;
 
     #[test]
     fn price_shares_to_usd() {

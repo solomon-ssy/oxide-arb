@@ -1,7 +1,12 @@
 //! Settlement redemption persistence DTOs.
 
+use chrono::{DateTime, Utc};
+use rust_decimal::Decimal;
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
+use serde::{Deserialize, Serialize};
+
 use crate::{
-    domain::PositionExit,
+    domain::quant::PositionExit,
     entities::{quant_settlement_redeem, quant_settlement_redeem_lot},
     enums::{
         execution::SettlementRedeemState,
@@ -13,10 +18,6 @@ use crate::{
         SettlementRedeemIndexSets, SettlementRedeemLotId, Shares, TokenId, Usd,
     },
 };
-use chrono::{DateTime, Utc};
-use rust_decimal::Decimal;
-use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
-use serde::{Deserialize, Serialize};
 
 /// One on-chain CTF redemption batch for a `(condition_id, funder)` pair.
 #[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]

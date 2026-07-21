@@ -3,6 +3,7 @@
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
+use super::{decision_policy_snapshot, user};
 use crate::{
     enums::runtime_config::{PolicyActorKind, ProductionEvidenceKind},
     types::{
@@ -43,14 +44,14 @@ pub struct Model {
         from = "decision_policy_snapshot_id",
         to = "decision_policy_snapshot_id"
     )]
-    pub snapshot: BelongsTo<super::decision_policy_snapshot::Entity>,
+    pub snapshot: BelongsTo<decision_policy_snapshot::Entity>,
     #[sea_orm(
         belongs_to,
         relation_enum = "RecordedByUser",
         from = "recorded_by_user_id",
         to = "id"
     )]
-    pub recorded_by_user: BelongsTo<Option<super::user::Entity>>,
+    pub recorded_by_user: BelongsTo<Option<user::Entity>>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

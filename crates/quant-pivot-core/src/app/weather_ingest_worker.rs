@@ -20,10 +20,15 @@ use quant_pivot_models::{
         WeatherStationProfileConfig,
     },
     domain::{
-        CalibrationArtifactPayload, DomainCursorStatus, DomainSourceCheckpoint,
-        DomainSourceCursorInfo, LinkageOutcome, MarketLinkage, MarketSubject,
-        NewCalibrationArtifact, UpsertDomainSourceCursor, WeatherForecastPoint,
-        WeatherObservationFact, WeatherObservationReport,
+        data_plane::{
+            DomainCursorStatus, DomainSourceCheckpoint, DomainSourceCursorInfo,
+            UpsertDomainSourceCursor, WeatherForecastPoint, WeatherObservationFact,
+            WeatherObservationReport,
+        },
+        quant::{
+            CalibrationArtifactPayload, LinkageOutcome, MarketLinkage, MarketSubject,
+            NewCalibrationArtifact,
+        },
     },
     enums::{
         domain::{DomainFamily, LinkageSourceRole},
@@ -43,6 +48,7 @@ use quant_pivot_research::{
     features::domain::weather::{WeatherStationLeadBiasFit, fit_weather_station_lead_bias},
     linkage::weather_station_profile_hash,
 };
+use rust_decimal::Decimal;
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 
@@ -60,8 +66,8 @@ struct WeatherTarget {
     station: IcaoStation,
     timezone: Tz,
     local_date: NaiveDate,
-    latitude: rust_decimal::Decimal,
-    longitude: rust_decimal::Decimal,
+    latitude: Decimal,
+    longitude: Decimal,
     ghcnh_station_id: Option<String>,
     station_profile_hash: ContentHash,
 }
@@ -1286,7 +1292,7 @@ impl WeatherIngestWorker {
                         variable,
                         value: temperature.value(),
                         unit: DomainMeasurementUnit::Celsius,
-                        precision: rust_decimal::Decimal::new(1, 1),
+                        precision: Decimal::new(1, 1),
                         reference_time: member.reference_time,
                         valid_time: member.valid_time,
                         published_at: member.available_at,
@@ -1595,7 +1601,7 @@ mod tests {
     use chrono::{DateTime, Duration, NaiveDate, TimeZone, Utc};
     use quant_pivot_models::{
         config::{WeatherHistoricalBindingKind, WeatherStationProfileConfig},
-        domain::{
+        domain::data_plane::{
             DomainCursorStatus, DomainSourceCheckpoint, DomainSourceCursorInfo,
             WeatherObservationReport, WeatherObservationReportKind,
         },

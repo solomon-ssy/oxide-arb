@@ -1,4 +1,4 @@
-//! Domain-slice PIT input assembly (Phase 11.2.2).
+//! Domain-slice PIT input assembly.
 //!
 //! [`build_domain_slice_inputs`] is the **single** shared function that decides
 //! whether a market carries a domain slice and, if so, assembles its PIT
@@ -21,9 +21,14 @@ use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
     domain::{
-        CryptoPriceReport, DecisionBoundary, DecisionSource, DomainAvailability, DomainObservation,
-        MarketLinkage, MarketSubject, ResolvedBinding, ResolvedSourceBinding, WeatherForecastPoint,
-        WeatherObservationFact, WeatherObservationReportKind,
+        data_plane::{
+            CryptoPriceReport, DecisionBoundary, DecisionSource, DomainObservation,
+            WeatherForecastPoint, WeatherObservationFact, WeatherObservationReportKind,
+        },
+        quant::{
+            DomainAvailability, MarketLinkage, MarketSubject, ResolvedBinding,
+            ResolvedSourceBinding,
+        },
     },
     enums::{
         common::MarketCategory,
@@ -88,8 +93,8 @@ fn linkage_evidence(linkage: &MarketLinkage) -> EvidenceSourceRef {
     }
 }
 
-/// Frozen domain-plane availability for one category and decision boundary (Phase
-/// 11.2.2 §3.8), computed purely from a market's PIT-bounded linkage history
+/// Frozen domain-plane availability for one category and decision boundary,
+/// computed purely from a market's PIT-bounded linkage history
 /// and a prefetched observation series.
 ///
 /// This is the **zero-I/O, offline-replay counterpart** to the live batched
@@ -411,17 +416,17 @@ fn crypto_report_window<S: BuildHasher>(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        DomainAvailabilityFacts, DomainFactWindows, build_domain_slice_inputs,
-        domain_availability_at, linkage_valid_at,
-    };
-    use crate::features::DomainSliceData;
+    use std::collections::HashMap;
+
     use chrono::{DateTime, Duration, TimeZone, Utc};
     use quant_pivot_models::{
         domain::{
-            CryptoSubject, DecisionBoundary, DecisionClock, DecisionSource, DomainAvailability,
-            DomainObservation, GroundingProof, LinkageOutcome, MarketLinkage, MarketSubject,
-            PriceComparator, ResolutionOracle, ResolvedBinding, ResolvedSourceBinding,
+            data_plane::{DecisionBoundary, DecisionClock, DecisionSource, DomainObservation},
+            quant::{
+                CryptoSubject, DomainAvailability, GroundingProof, LinkageOutcome,
+                LinkageUnresolvedReason, MarketLinkage, MarketSubject, PriceComparator,
+                ResolutionOracle, ResolvedBinding, ResolvedSourceBinding,
+            },
         },
         enums::{
             common::MarketCategory,
@@ -435,7 +440,13 @@ mod tests {
         },
     };
     use rust_decimal_macros::dec;
-    use std::collections::HashMap;
+    use uuid::Uuid;
+
+    use super::{
+        DomainAvailabilityFacts, DomainFactWindows, build_domain_slice_inputs,
+        domain_availability_at, linkage_valid_at,
+    };
+    use crate::features::DomainSliceData;
 
     macro_rules! fact_windows {
         ($observations:expr, $reports:expr, $weather:expr, $forecasts:expr) => {
@@ -554,7 +565,7 @@ mod tests {
         let early = linkage(LinkageOutcome::Resolved(Box::new(binding())), 0);
         let late = linkage(
             LinkageOutcome::Unresolved {
-                reason: "metadata revised".to_owned(),
+                reason: LinkageUnresolvedReason::NoDeterministicTemplate,
             },
             30,
         );
@@ -591,7 +602,7 @@ mod tests {
         let early = linkage(LinkageOutcome::Resolved(Box::new(binding())), 0);
         let mut backdated = linkage(
             LinkageOutcome::Unresolved {
-                reason: "late correction".to_owned(),
+                reason: LinkageUnresolvedReason::NoDeterministicTemplate,
             },
             10,
         );
@@ -628,14 +639,14 @@ mod tests {
     fn linkage_ties_use_the_stable_id_order() {
         let domain = DomainConfig::default();
         let mut lower_id = linkage(LinkageOutcome::Resolved(Box::new(binding())), 0);
-        lower_id.linkage_id = MarketLinkageId::new(uuid::Uuid::from_u128(1));
+        lower_id.linkage_id = MarketLinkageId::new(Uuid::from_u128(1));
         let mut higher_id = linkage(
             LinkageOutcome::Unresolved {
-                reason: "same-clock correction".to_owned(),
+                reason: LinkageUnresolvedReason::NoDeterministicTemplate,
             },
             0,
         );
-        higher_id.linkage_id = MarketLinkageId::new(uuid::Uuid::from_u128(2));
+        higher_id.linkage_id = MarketLinkageId::new(Uuid::from_u128(2));
 
         let at = boundary(Utc.with_ymd_and_hms(2026, 7, 1, 11, 1, 0).unwrap(), &domain);
         assert_eq!(
@@ -694,7 +705,7 @@ mod tests {
 
         let unresolved = vec![linkage(
             LinkageOutcome::Unresolved {
-                reason: "no template".to_owned(),
+                reason: LinkageUnresolvedReason::NoDeterministicTemplate,
             },
             0,
         )];
@@ -858,7 +869,7 @@ mod tests {
 
         let unresolved = vec![linkage(
             LinkageOutcome::Unresolved {
-                reason: "no template matched".to_owned(),
+                reason: LinkageUnresolvedReason::NoDeterministicTemplate,
             },
             0,
         )];

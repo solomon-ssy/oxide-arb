@@ -2,12 +2,11 @@
 
 use std::collections::BTreeSet;
 
-use crate::{postgres::primitives, traits::SystemRuntimeStateRepository};
 use async_trait::async_trait;
 use chrono::Utc;
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    domain::{
+    domain::governance::{
         ActivateBootstrapState, BootstrapActivationInfo, NewSystemBootstrapTransition,
         SystemRuntimeStateInfo,
     },
@@ -21,9 +20,14 @@ use quant_pivot_models::{
     types::{BootstrapTransitionId, RoleCode},
 };
 use sea_orm::{
-    ActiveModelTrait, ActiveValue::Set, ColumnTrait, DatabaseConnection, EntityTrait,
-    IntoActiveModel, QueryFilter, QuerySelect, TransactionTrait, sea_query::LockType,
+    ActiveModelTrait,
+    ActiveValue::Set,
+    ColumnTrait, DatabaseConnection, DatabaseTransaction, EntityTrait, IntoActiveModel,
+    QueryFilter, QuerySelect, TransactionTrait,
+    sea_query::{Expr, LockType},
 };
+
+use crate::{postgres::primitives, traits::SystemRuntimeStateRepository};
 
 const SINGLETON_ID: i32 = 1;
 
@@ -37,7 +41,7 @@ impl PgSystemRuntimeStateRepository {
     }
 }
 
-async fn locked_state(txn: &sea_orm::DatabaseTransaction) -> Result<Model, StorageError> {
+async fn locked_state(txn: &DatabaseTransaction) -> Result<Model, StorageError> {
     Entity::find_by_id(SINGLETON_ID)
         .lock(LockType::Update)
         .one(txn)
@@ -55,7 +59,7 @@ struct PhaseTransition<'a> {
 }
 
 async fn persist_phase(
-    txn: &sea_orm::DatabaseTransaction,
+    txn: &DatabaseTransaction,
     state: Model,
     transition: PhaseTransition<'_>,
 ) -> Result<SystemRuntimeStateInfo, StorageError> {
@@ -285,19 +289,10 @@ impl SystemRuntimeStateRepository for PgSystemRuntimeStateRepository {
         let result = Entity::update_many()
             .filter(Column::Id.eq(SINGLETON_ID))
             .filter(Column::BootstrapPhase.eq(BootstrapPhase::Active))
-            .col_expr(
-                Column::QuantRuntimeMode,
-                sea_orm::sea_query::Expr::value(mode),
-            )
-            .col_expr(
-                Column::ChangedBy,
-                sea_orm::sea_query::Expr::value(changed_by),
-            )
-            .col_expr(Column::Reason, sea_orm::sea_query::Expr::value(reason))
-            .col_expr(
-                Column::ChangedAt,
-                sea_orm::sea_query::Expr::value(Utc::now()),
-            )
+            .col_expr(Column::QuantRuntimeMode, Expr::value(mode))
+            .col_expr(Column::ChangedBy, Expr::value(changed_by))
+            .col_expr(Column::Reason, Expr::value(reason))
+            .col_expr(Column::ChangedAt, Expr::value(Utc::now()))
             .exec(&self.db)
             .await
             .map_err(StorageError::from)?;

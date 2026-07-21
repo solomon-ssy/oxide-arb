@@ -6,7 +6,7 @@ use quant_pivot_models::{
 };
 
 /// Derive the dashboard [`OperationalPhase`] from infra readiness and the
-/// operational kill-switch FSM (05.1 §6 behavior table).
+/// operational kill-switch state machine.
 ///
 /// Priority: catalog warmup → market-data connecting → kill-switch impact →
 /// nominal operational. Tightened kill-switch states (`report_only_forced`,
@@ -39,11 +39,12 @@ pub fn operational_phase_from_readiness(
 
 #[cfg(test)]
 mod tests {
-    use super::operational_phase_from_readiness;
     use quant_pivot_models::{
         domain::governance::lifecycle::{OperationalDegradeReason, OperationalPhase},
         enums::execution::KillSwitchState,
     };
+
+    use super::operational_phase_from_readiness;
 
     #[test]
     fn closed_with_ready_infra_is_operational() {

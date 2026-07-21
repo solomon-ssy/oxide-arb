@@ -16,15 +16,17 @@
 //! - **Noop mode**: When `config.disabled = true`, all operations are no-ops.
 //! - **Operation timeouts**: Every cache operation has a bounded deadline.
 
-use crate::cache::{CacheKey, TieredCache};
+use std::{collections::HashMap, future::Future, time::Duration};
+
 use bitcode::{Decode, Encode};
-use prometheus::Registry;
+use prometheus::{Error, Registry};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::config::CacheConfig;
 use serde::{Serialize, de::DeserializeOwned};
-use std::{collections::HashMap, future::Future, time::Duration};
 use tokio::time::timeout;
 use tracing::{debug, warn};
+
+use crate::cache::{CacheKey, TieredCache};
 
 /// Resolved per-domain cache behavior (computed from config at construction time).
 #[derive(Debug, Clone)]
@@ -191,7 +193,7 @@ impl CacheManager {
 
     /// Register the cache hit/miss counters into the process metrics registry.
     /// A noop manager registers nothing.
-    pub fn register_metrics(&self, registry: &Registry) -> Result<(), prometheus::Error> {
+    pub fn register_metrics(&self, registry: &Registry) -> Result<(), Error> {
         self.cache
             .as_ref()
             .map_or(Ok(()), |cache| cache.metrics().register(registry))

@@ -33,26 +33,46 @@ pub mod secret;
 pub mod validation;
 mod web;
 
-pub use cache::*;
-pub use db::*;
-pub use domain_sources::*;
-pub use keys::*;
-pub use lifecycle::*;
-pub use market_data::*;
-pub use observability::*;
-pub use polymarket::*;
-pub use quant::*;
-pub use research::*;
-pub use web::*;
+pub use cache::{CacheConfig, DomainCacheConfig, MokaConfig, RedisConfig};
+use config_rs::{Config, ConfigError as ConfigConfigError, File};
+pub use db::{ClickHouseConfig, DatabaseConfig, PostgresConfig};
+pub use domain_sources::{
+    AirNowPm25ReportingAreaBindingConfig, AirNowPm25SiteBindingConfig, AirNowSourceConfig,
+    AviationWeatherSourceConfig, BinanceSourceConfig, ChainlinkDataStreamFeedConfig,
+    ChainlinkDataStreamsSourceConfig, DomainSourcesConfig, GefsSourceConfig, GhcnhSourceConfig,
+    HkoDailyTemperatureBindingConfig, HkoOpenDataSourceConfig, HkoRainfallBindingConfig,
+    NasaGistempSourceConfig, NhcHistoricalStormBindingConfig, NhcSourceConfig,
+    NsidcSeaIceSourceConfig, NwsObservationSourceConfig, NwsWindStationBindingConfig,
+    PolymarketRtdsSourceConfig, TornadoRegionBindingConfig, TornadoSourceConfig,
+    WEATHER_OBSERVATION_DAY_CLOSE_GRACE_SECS, WeatherHistoricalBindingKind,
+    WeatherStationProfileConfig, WeatherVerticalBindingsConfig, builtin_weather_station_profiles,
+};
+pub use keys::KeysConfig;
+pub use lifecycle::{CompiledBuildIdentity, LifecycleDeployConfig, ProjectLifecyclePolicy};
+pub use market_data::{
+    DataApiConfig, GammaConfig, MAX_TRADE_TAPE_RECONCILIATION_ROWS, MarketDataDeployConfig,
+    TradeTapeOnChainConfig, WebSocketConfig,
+};
+pub use observability::{
+    NotificationChannelsConfig, ObservabilityConfig, TelegramChannelConfig, WebhookChannelConfig,
+};
+pub use polymarket::{OnchainConfig, PolygonRpcEndpoint, PolymarketConfig, RelayerConfig};
+pub use quant::{
+    QuantAccountDeployConfig, QuantDeployConfig, QuantWorkersConfig, ResearchJobsConfig,
+};
+use quant_pivot_error::{
+    QuantResult, config::ConfigError, config_validation::ConfigValidationReport,
+};
+pub use research::{
+    ArtifactStoreDeployConfig, ArtifactStoreKind, EvidenceAttestationConfig, ResearchDeployConfig,
+};
+use serde::Deserialize;
+pub use web::{JwtConfig, WebConfig};
 
 use crate::{
     config::validation::{validate_deploy_common, validate_deploy_for_quant_mode},
     enums::quant::QuantRuntimeMode,
 };
-use quant_pivot_error::{
-    QuantResult, config::ConfigError, config_validation::ConfigValidationReport,
-};
-use serde::Deserialize;
 
 /// Deserialized deploy-configuration root.
 ///
@@ -119,12 +139,10 @@ impl DeployConfig {
 }
 
 /// Shared config-crate builder: base file → immutable environment overlay.
-fn build_config(config_dir: &str) -> Result<config::Config, config::ConfigError> {
-    config::Config::builder()
-        .add_source(config::File::with_name(&format!("{config_dir}/quant-pivot")).required(false))
-        .add_source(
-            config::File::with_name(&format!("{config_dir}/quant-pivot.local")).required(false),
-        )
+fn build_config(config_dir: &str) -> Result<Config, ConfigConfigError> {
+    Config::builder()
+        .add_source(File::with_name(&format!("{config_dir}/quant-pivot")).required(false))
+        .add_source(File::with_name(&format!("{config_dir}/quant-pivot.local")).required(false))
         .build()
 }
 
@@ -168,13 +186,16 @@ impl DeployConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::{
         env::{self, var},
         fs,
         path::{Path, PathBuf},
         process,
     };
+
+    use secret::SecretText;
+
+    use super::*;
 
     #[test]
     fn default_config_loads_when_file_absent() {
@@ -207,14 +228,39 @@ mod tests {
     fn protected_rpc_endpoint_accepts_authenticated_url_without_debug_leakage() {
         let mut deploy = DeployConfig::default();
         deploy.polymarket.onchain.rpc_endpoint = PolygonRpcEndpoint::Protected {
-            url: secret::SecretText::from(
-                "https://provider.invalid/v2/provider-key?tenant=private",
-            ),
+            url: SecretText::from("https://provider.invalid/v2/provider-key?tenant=private"),
         };
         deploy
             .ensure_valid_common()
             .expect("resolved authenticated RPC endpoint must validate");
         assert!(!format!("{deploy:?}").contains("provider-key"));
+    }
+
+    #[test]
+    fn deploy_debug_redacts_every_credential_family() {
+        let sentinel = "qp-secret-redaction-sentinel";
+        let mut deploy = DeployConfig::default();
+        deploy.polymarket.onchain.rpc_endpoint = PolygonRpcEndpoint::Protected {
+            url: format!("https://provider.invalid/{sentinel}").into(),
+        };
+        deploy.polymarket.relayer.api_key = Some(sentinel.into());
+        deploy.domain_sources.chainlink_data_streams.api_key = Some(sentinel.into());
+        deploy.domain_sources.chainlink_data_streams.api_secret = Some(sentinel.into());
+        deploy.notifications.telegram.bot_token = sentinel.into();
+        deploy.notifications.webhook.url = format!("https://alerts.invalid/{sentinel}").into();
+        deploy.notifications.webhook.authorization = sentinel.into();
+        deploy.db.postgres.password = sentinel.into();
+        deploy.db.clickhouse.password = sentinel.into();
+        deploy.cache.redis.password = sentinel.into();
+        deploy.keys.private_key = Some(sentinel.into());
+        deploy.web.jwt.signing_key = sentinel.into();
+        deploy.research.evidence_attestation.signing_key = sentinel.into();
+        deploy.research.evidence_attestation.previous_signing_keys =
+            vec![sentinel.into(), sentinel.into()];
+
+        let debug = format!("{deploy:?}");
+        assert!(!debug.contains(sentinel));
+        assert_eq!(debug.matches("<secret:redacted>").count(), 15);
     }
 
     #[test]

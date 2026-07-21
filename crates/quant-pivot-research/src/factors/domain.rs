@@ -1,4 +1,4 @@
-//! Category-routed domain factor plane (Phase 11.2.2 §3.7).
+//! Category-routed domain factor plane.
 //!
 //! Domain factors are **never** config-selectable through
 //! `factors.enabled_factor_families`: [`DomainFactorRegistry`] routes them by
@@ -12,7 +12,7 @@
 //! confidence (`DomainMissing` semantics — never a silent zero). The same
 //! `NotApplicable` eligibility (not `DomainMissing`) is also used when the
 //! market maps to the vertical but an *input feature itself* carries
-//! [`crate::features::NullReason::NotApplicable`] (e.g. a basis feature that
+//! [`quant_pivot_models::types::NullReason::NotApplicable`] (e.g. a basis feature that
 //! structurally cannot exist for a Binance-settled market) — see
 //! [`read_input`]; this is never conflated with a transient data-source gap.
 
@@ -50,7 +50,18 @@ use crate::{
     },
     features::{
         FeatureCellState, FeatureName, FeatureValue, FeatureVector, feature_scalar,
-        names::{domain_crypto, domain_weather, market as market_names},
+        names::{
+            domain_crypto,
+            domain_crypto::{
+                DISTANCE_TO_STRIKE, TIME_TO_OBSERVATION, UNDERLYING_MOMENTUM,
+                UNDERLYING_REALIZED_VOL,
+            },
+            domain_weather::{
+                ENSEMBLE_BIN_PROBABILITY, ENSEMBLE_SPREAD, NOAA_RESOLUTION_BASIS_RISK,
+                OBSERVED_EXTREME_HEADROOM,
+            },
+            market::CATEGORY,
+        },
     },
     precision::RESEARCH_DECIMAL_SCALE,
 };
@@ -144,22 +155,22 @@ pub fn weather_domain_factors() -> Vec<(FactorDefinitionDocument, Arc<dyn Factor
     [
         (
             DOMAIN_WEATHER_ENSEMBLE_BIN_PROBABILITY,
-            domain_weather::ENSEMBLE_BIN_PROBABILITY,
+            ENSEMBLE_BIN_PROBABILITY,
             FactorDirection::Positive,
         ),
         (
             DOMAIN_WEATHER_ENSEMBLE_SPREAD,
-            domain_weather::ENSEMBLE_SPREAD,
+            ENSEMBLE_SPREAD,
             FactorDirection::Negative,
         ),
         (
             DOMAIN_WEATHER_OBSERVED_EXTREME_HEADROOM,
-            domain_weather::OBSERVED_EXTREME_HEADROOM,
+            OBSERVED_EXTREME_HEADROOM,
             FactorDirection::Neutral,
         ),
         (
             DOMAIN_WEATHER_NOAA_RESOLUTION_BASIS_RISK,
-            domain_weather::NOAA_RESOLUTION_BASIS_RISK,
+            NOAA_RESOLUTION_BASIS_RISK,
             FactorDirection::Negative,
         ),
     ]
@@ -236,7 +247,7 @@ fn beta_regime_factor() -> (FactorDefinitionDocument, Arc<dyn FactorComputer>) {
 
 /// Whether a vector's market routes to the crypto vertical.
 fn routes_to_crypto(features: &FeatureVector) -> bool {
-    match features.value(&market_names::CATEGORY) {
+    match features.value(&CATEGORY) {
         Some(FeatureValue::Category(category)) => {
             DomainFamily::for_category(*category) == Some(DomainFamily::Crypto)
         }
@@ -246,7 +257,7 @@ fn routes_to_crypto(features: &FeatureVector) -> bool {
 }
 
 fn routes_to_weather(features: &FeatureVector) -> bool {
-    match features.value(&market_names::CATEGORY) {
+    match features.value(&CATEGORY) {
         Some(FeatureValue::Category(category)) => {
             DomainFamily::for_category(*category) == Some(DomainFamily::Weather)
         }
@@ -384,8 +395,8 @@ impl FactorComputer for StrikePressureFactor {
             return Ok(not_applicable(&self.spec));
         }
         let (distance_state, tto_state) = (
-            read_input(features, &domain_crypto::DISTANCE_TO_STRIKE),
-            read_input(features, &domain_crypto::TIME_TO_OBSERVATION),
+            read_input(features, &DISTANCE_TO_STRIKE),
+            read_input(features, &TIME_TO_OBSERVATION),
         );
         if matches!(distance_state, InputState::NotApplicable)
             || matches!(tto_state, InputState::NotApplicable)
@@ -448,8 +459,8 @@ impl FactorComputer for BetaRegimeFactor {
             return Ok(not_applicable(&self.spec));
         }
         let (momentum_state, vol_state) = (
-            read_input(features, &domain_crypto::UNDERLYING_MOMENTUM),
-            read_input(features, &domain_crypto::UNDERLYING_REALIZED_VOL),
+            read_input(features, &UNDERLYING_MOMENTUM),
+            read_input(features, &UNDERLYING_REALIZED_VOL),
         );
         if matches!(momentum_state, InputState::NotApplicable)
             || matches!(vol_state, InputState::NotApplicable)
@@ -487,15 +498,8 @@ impl FactorComputer for BetaRegimeFactor {
 
 #[cfg(test)]
 mod tests {
-    use super::{DomainFactorRegistry, crypto_domain_factors};
-    use crate::{
-        factors::value::RawFactorEligibility,
-        features::{
-            DomainFeatureSlice, FeatureCell, FeatureStaleness, FeatureValue, FeatureVector,
-            NullReason,
-            names::{domain_crypto, market as market_names},
-        },
-    };
+    use std::collections::BTreeMap;
+
     use chrono::Utc;
     use quant_pivot_models::{
         enums::{common::MarketCategory, domain::DomainFamily, quant::DataQualityStatus},
@@ -503,12 +507,27 @@ mod tests {
         types::{MarketId, SchemaVersion, TokenId},
     };
     use rust_decimal_macros::dec;
-    use std::collections::BTreeMap;
+
+    use super::{DomainFactorRegistry, crypto_domain_factors};
+    use crate::{
+        factors::value::RawFactorEligibility,
+        features::{
+            DomainFeatureSlice, FeatureCell, FeatureStaleness, FeatureValue, FeatureVector,
+            NullReason,
+            names::{
+                domain_crypto::{
+                    DISTANCE_TO_STRIKE, TIME_TO_OBSERVATION, UNDERLYING_MOMENTUM,
+                    UNDERLYING_REALIZED_VOL,
+                },
+                market::CATEGORY,
+            },
+        },
+    };
 
     fn vector(category: MarketCategory, domain: Option<DomainFeatureSlice>) -> FeatureVector {
         let mut generic = BTreeMap::new();
         generic.insert(
-            market_names::CATEGORY,
+            CATEGORY,
             FeatureCell::observed(
                 FeatureValue::Category(category),
                 None,
@@ -529,7 +548,7 @@ mod tests {
     fn crypto_slice() -> DomainFeatureSlice {
         let mut values = BTreeMap::new();
         values.insert(
-            domain_crypto::DISTANCE_TO_STRIKE,
+            DISTANCE_TO_STRIKE,
             FeatureCell::observed(
                 FeatureValue::Decimal(dec!(0.02)),
                 None,
@@ -537,11 +556,11 @@ mod tests {
             ),
         );
         values.insert(
-            domain_crypto::TIME_TO_OBSERVATION,
+            TIME_TO_OBSERVATION,
             FeatureCell::observed(FeatureValue::Count(86_400), None, FeatureStaleness::Unknown),
         );
         values.insert(
-            domain_crypto::UNDERLYING_MOMENTUM,
+            UNDERLYING_MOMENTUM,
             FeatureCell::observed(
                 FeatureValue::Decimal(dec!(0.01)),
                 None,
@@ -549,7 +568,7 @@ mod tests {
             ),
         );
         values.insert(
-            domain_crypto::UNDERLYING_REALIZED_VOL,
+            UNDERLYING_REALIZED_VOL,
             FeatureCell::observed(
                 FeatureValue::Decimal(dec!(0.005)),
                 None,
@@ -612,11 +631,11 @@ mod tests {
         // `raw_value: None` used for a transient source outage.
         let mut values = BTreeMap::new();
         values.insert(
-            domain_crypto::DISTANCE_TO_STRIKE,
+            DISTANCE_TO_STRIKE,
             FeatureCell::not_applicable(NullReason::NotApplicable),
         );
         values.insert(
-            domain_crypto::TIME_TO_OBSERVATION,
+            TIME_TO_OBSERVATION,
             FeatureCell::not_applicable(NullReason::NotApplicable),
         );
         let slice = DomainFeatureSlice {

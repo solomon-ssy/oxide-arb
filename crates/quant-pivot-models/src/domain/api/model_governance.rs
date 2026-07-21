@@ -1,4 +1,4 @@
-//! Model-governance admin HTTP contract (Phase 3.7).
+//! Model-governance admin HTTP contract.
 //!
 //! | Method | Path | Permission | Purpose |
 //! |--------|------|------------|---------|
@@ -32,8 +32,8 @@ pub struct RetireModelRequest {
 
 /// Inbound body for `POST /research/models/{id}/bind-publish-path-set`.
 ///
-/// Pins the CPCV path set that publish/promote quality gates must evaluate
-/// (Phase 11.5 remediation — replaces implicit "latest path set").
+/// Pins the exact CPCV path set that publish/promote quality gates must
+/// evaluate, replacing implicit "latest path set" selection.
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
 pub struct BindPublishPathSetRequest {
     /// Path set that belongs to this model version.

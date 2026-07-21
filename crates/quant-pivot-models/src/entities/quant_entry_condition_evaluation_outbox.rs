@@ -1,11 +1,12 @@
 //! Durable outbox for authoritative and observed entry-condition evaluations.
 
+use chrono::{DateTime, Utc};
+use sea_orm::entity::prelude::*;
+
 use crate::{
     clickhouse::EntryConditionEvaluationEventRow,
     types::{ContentHash, EntryConditionEvaluationOutboxId, WorkerId},
 };
-use chrono::{DateTime, Utc};
-use sea_orm::entity::prelude::*;
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]

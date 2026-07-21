@@ -10,16 +10,13 @@ pub mod batch;
 pub mod cached;
 pub mod clickhouse;
 pub mod postgres;
-pub mod sql_contract_registry;
 pub mod traits;
-
-pub use postgres::arc_repo;
 
 #[cfg(test)]
 mod seaorm_stable_semantics {
     use std::collections::BTreeMap;
 
-    use quant_pivot_models::entities::role;
+    use quant_pivot_models::entities::role::Entity;
     use sea_orm::{
         DbBackend, EntityTrait, MockDatabase, PaginatorTrait, QuerySelect, QueryTrait, Transaction,
         Value, error::DbErr,
@@ -34,9 +31,9 @@ mod seaorm_stable_semantics {
             .append_query_results([[count_row]])
             .into_connection();
 
-        let count = role::Entity::find().limit(4).offset(8).count(&db).await?;
+        let count = Entity::find().limit(4).offset(8).count(&db).await?;
 
-        let sub_query = role::Entity::find().limit(4).offset(8).into_query();
+        let sub_query = Entity::find().limit(4).offset(8).into_query();
         let count_query = Query::select()
             .expr(Expr::cust("COUNT(*) AS num_items"))
             .from_subquery(sub_query, "sub_query")

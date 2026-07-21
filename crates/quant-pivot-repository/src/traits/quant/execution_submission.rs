@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    domain::{
+    domain::quant::{
         EntryConditionClaim, EntryConditionInstanceInfo, ExecutionOrderInfo, ExitLedgerWrite,
         NewExecutionOrder, OrderIntentInfo, ReconciliationLedgerWrite, SubmissionLedgerWrite,
     },
@@ -12,7 +12,7 @@ use quant_pivot_models::{
     },
 };
 
-/// Cross-table execution-submission transactions (Phase 05.4 — real money).
+/// Money-critical cross-table execution-submission transactions.
 ///
 /// Each method owns exactly one Postgres transaction spanning the execution
 /// order, order intent, capital allocation, position ledger, recommendation, and
@@ -73,7 +73,7 @@ pub trait ExecutionSubmissionRepository: Send + Sync {
         write: SubmissionLedgerWrite,
     ) -> Result<ExecutionOrderInfo, StorageError>;
 
-    /// Write-ahead an exit (Sell) order in one txn (Phase 05.6): insert the exit
+    /// Write-ahead an exit (Sell) order in one txn: insert the exit
     /// execution order (`order_phase = Exit`, `state = Submitted`), mark the
     /// per-intent position lot `Open -> Closing`, and advance the intent's exit
     /// FSM to `OrderSubmitted` recording `exit_reason`. No capital change — the
@@ -107,7 +107,7 @@ pub trait ExecutionSubmissionRepository: Send + Sync {
         latest_reinference: Option<ExitReinferenceObservation>,
     ) -> Result<(), StorageError>;
 
-    /// Apply the exit venue outcome in one txn (Phase 05.6): advance the exit
+    /// Apply the exit venue outcome in one txn: advance the exit
     /// order state, reduce/close the position lot on a (partial) fill (exact
     /// average-cost realized `PnL`), complete the capital (`Spent -> Released`) on
     /// full exit, advance the intent's exit FSM, revert `Closing -> Open` on a
@@ -124,7 +124,7 @@ pub trait ExecutionSubmissionRepository: Send + Sync {
     /// terminal resolution, handed to reconciliation after a process crash.
     async fn recover_dangling(&self, limit: u64) -> Result<Vec<ExecutionOrderInfo>, StorageError>;
 
-    /// Apply a reconciliation verdict in one txn (Phase 05.5): advance the entry
+    /// Apply a reconciliation verdict in one txn: advance the entry
     /// order to its terminal state, correct the capital (state-guarded and
     /// idempotent), upsert the position on a confirmed fill (applied exactly
     /// once as the order leaves a non-filled state), advance the intent, and

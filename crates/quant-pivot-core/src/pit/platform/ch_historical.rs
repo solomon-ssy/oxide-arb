@@ -22,7 +22,10 @@ use quant_pivot_models::{
     clickhouse::{
         BookL2CheckpointRow, BookL2EventRow, BookStreamSessionRow, ChPrice, ChShares, TradeTapeRow,
     },
-    domain::{DecisionBoundary, DecisionSource, market::book::BookLevel},
+    domain::{
+        data_plane::{DecisionBoundary, DecisionSource},
+        market::book::BookLevel,
+    },
     enums::{
         clickhouse::{ChCanonicalBookEventType, ChStreamSessionState},
         common::Side,
@@ -735,13 +738,14 @@ pub fn decode_levels(json: &str) -> (Arc<[BookLevel]>, BookDecodeStatus) {
 
 #[cfg(test)]
 mod tests {
-    use super::{BookDecodeStatus, decode_book_row, decode_levels, snapshot_from_row};
     use chrono::{TimeZone, Utc};
     use quant_pivot_models::{
         clickhouse::{BookL2CheckpointRow, ChSchemaVersion},
         types::{ContentHash, TokenId},
     };
     use uuid::Uuid;
+
+    use super::{BookDecodeStatus, decode_book_row, decode_levels, snapshot_from_row};
 
     fn sample_row(bids_json: &str, asks_json: &str) -> BookL2CheckpointRow {
         BookL2CheckpointRow {

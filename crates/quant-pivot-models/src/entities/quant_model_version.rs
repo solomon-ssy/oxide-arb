@@ -1,5 +1,13 @@
 //! `quant_model_version` table entity.
 
+use chrono::{DateTime, Utc};
+use sea_orm::entity::prelude::*;
+
+use super::{
+    quant_backtest_report, quant_calibration_artifact, quant_model_run, quant_model_spec,
+    quant_model_version, quant_trade_policy_artifact, quant_training_dataset,
+    research_profile_artifact,
+};
 use crate::{
     enums::{
         common::MarketCategory,
@@ -12,8 +20,6 @@ use crate::{
         model_quality::QualityGateReport, model_training::ModelTrainingObjective,
     },
 };
-use chrono::{DateTime, Utc};
-use sea_orm::entity::prelude::*;
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -57,7 +63,7 @@ pub struct Model {
         from = "research_profile_artifact_id",
         to = "research_profile_artifact_id"
     )]
-    pub research_profile_artifact: BelongsTo<super::research_profile_artifact::Entity>,
+    pub research_profile_artifact: BelongsTo<research_profile_artifact::Entity>,
 
     #[sea_orm(
         belongs_to,
@@ -65,44 +71,44 @@ pub struct Model {
         from = "model_spec_id",
         to = "model_spec_id"
     )]
-    pub model_spec: BelongsTo<super::quant_model_spec::Entity>,
+    pub model_spec: BelongsTo<quant_model_spec::Entity>,
     #[sea_orm(
         belongs_to,
         relation_enum = "TrainingDataset",
         from = "training_dataset_id",
         to = "training_dataset_id"
     )]
-    pub training_dataset: BelongsTo<Option<super::quant_training_dataset::Entity>>,
+    pub training_dataset: BelongsTo<Option<quant_training_dataset::Entity>>,
     #[sea_orm(
         belongs_to,
         relation_enum = "TradePolicyArtifact",
         from = "trade_policy_artifact_id",
         to = "artifact_id"
     )]
-    pub trade_policy_artifact: BelongsTo<Option<super::quant_trade_policy_artifact::Entity>>,
+    pub trade_policy_artifact: BelongsTo<Option<quant_trade_policy_artifact::Entity>>,
     #[sea_orm(
         belongs_to,
         relation_enum = "ParentModelVersion",
         from = "parent_model_version_id",
         to = "model_version_id"
     )]
-    pub parent_model_version: BelongsTo<Option<super::quant_model_version::Entity>>,
+    pub parent_model_version: BelongsTo<Option<quant_model_version::Entity>>,
     #[sea_orm(
         belongs_to,
         relation_enum = "SourceBacktestReport",
         from = "source_backtest_report_id",
         to = "backtest_report_id"
     )]
-    pub source_backtest_report: BelongsTo<Option<super::quant_backtest_report::Entity>>,
+    pub source_backtest_report: BelongsTo<Option<quant_backtest_report::Entity>>,
     #[sea_orm(
         belongs_to,
         relation_enum = "CalibrationArtifact",
         from = "calibration_artifact_id",
         to = "artifact_id"
     )]
-    pub calibration_artifact: BelongsTo<Option<super::quant_calibration_artifact::Entity>>,
+    pub calibration_artifact: BelongsTo<Option<quant_calibration_artifact::Entity>>,
     #[sea_orm(has_many, relation_enum = "ModelRun")]
-    pub model_run: HasMany<super::quant_model_run::Entity>,
+    pub model_run: HasMany<quant_model_run::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

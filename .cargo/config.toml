@@ -3,6 +3,3 @@ rustflags = ["-C", "target-cpu=native"]
 
 [alias]
 xtask = "run --package quant-pivot-xtask --"
-test-full = "xtask test-full"
-test-docker = "xtask test-docker"
-test-network = "xtask test-network"

@@ -1,30 +1,36 @@
 //! Core implementation of [`ResearchJobPort`] — the HTTP enqueue/cancel/retry surface.
 
-use async_trait::async_trait;
+use std::sync::Arc;
 
+use async_trait::async_trait;
 use quant_pivot_error::{
     QuantError, QuantResult,
-    storage::{StorageError, entity},
+    storage::{StorageError, entity::QUANT_RESEARCH_JOB},
 };
 use quant_pivot_models::{
     domain::{
-        BacktestJobParams, BiasTableFitJobParams, BuildTrainingDatasetRequest,
-        CpcvBacktestJobParams, FitBiasTableRequest, FitModelCalibratorRequest,
-        FitTradePolicyRequest, JobSubmitContext, ModelCalibrationFitJobParams, ModelTrainJobParams,
-        NewResearchJob, Paginated, ResearchJobError, ResearchJobInfo, ResearchJobListQuery,
-        ResearchJobPort, ResearchJobView, RunBacktestRequest, RunCpcvBacktestRequest,
-        TradePolicyFitJobParams, TradePolicyValidationJobParams, TrainModelRequest,
+        api::{
+            BacktestJobParams, BuildTrainingDatasetRequest, CpcvBacktestJobParams,
+            FitBiasTableRequest, FitModelCalibratorRequest, FitTradePolicyRequest,
+            ModelTrainJobParams, ResearchJobListQuery, ResearchJobView, RunBacktestRequest,
+            RunCpcvBacktestRequest, TradePolicyFitJobParams, TradePolicyValidationJobParams,
+            TrainModelRequest,
+        },
+        pagination::Paginated,
+        ports::{
+            BiasTableFitJobParams, JobSubmitContext, ModelCalibrationFitJobParams, ResearchJobPort,
+        },
+        quant::{NewResearchJob, ResearchJobInfo},
     },
     enums::quant::{ResearchJobErrorCode, ResearchJobKind, ResearchJobStatus},
     types::{
         BacktestPathSetId, BacktestReportId, DecisionPolicySnapshotId, ModelSpecId, ModelVersionId,
-        ResearchJobId, ResearchJobParams, RoleCode, TrainingDatasetId,
+        ResearchJobError, ResearchJobId, ResearchJobParams, RoleCode, TrainingDatasetId,
     },
 };
+use quant_pivot_repository::traits::{PolicyRepository, TrainingDatasetRepository};
 
 use crate::app::research_job::ResearchJobEngine;
-use quant_pivot_repository::traits::{PolicyRepository, TrainingDatasetRepository};
-use std::sync::Arc;
 
 /// Core implementation of [`ResearchJobPort`] — the HTTP enqueue/cancel/retry surface.
 pub struct CoreResearchJobPort {
@@ -275,16 +281,14 @@ impl ResearchJobPort for CoreResearchJobPort {
             .find_by_id(job_id)
             .await
             .map_err(QuantError::from)?
-            .ok_or_else(|| {
-                QuantError::from(StorageError::not_found(entity::QUANT_RESEARCH_JOB, job_id))
-            })?;
+            .ok_or_else(|| QuantError::from(StorageError::not_found(QUANT_RESEARCH_JOB, job_id)))?;
         if info.status.is_terminal() {
             // Idempotent no-op: already terminal.
             return Ok(ResearchJobView::from(info));
         }
         if info.kind == ResearchJobKind::FeatureParity && info.status == ResearchJobStatus::Queued {
             return Err(QuantError::from(StorageError::state_conflict(
-                entity::QUANT_RESEARCH_JOB,
+                QUANT_RESEARCH_JOB,
                 Some(job_id),
                 "queued feature parity jobs are safety-critical and cannot be cancelled",
             )));
@@ -320,12 +324,10 @@ impl ResearchJobPort for CoreResearchJobPort {
             .find_by_id(job_id)
             .await
             .map_err(QuantError::from)?
-            .ok_or_else(|| {
-                QuantError::from(StorageError::not_found(entity::QUANT_RESEARCH_JOB, job_id))
-            })?;
+            .ok_or_else(|| QuantError::from(StorageError::not_found(QUANT_RESEARCH_JOB, job_id)))?;
         if info.status.is_active() {
             return Err(QuantError::from(StorageError::state_conflict(
-                entity::QUANT_RESEARCH_JOB,
+                QUANT_RESEARCH_JOB,
                 Some(job_id),
                 "cannot retry a job that is still queued or running",
             )));
@@ -348,8 +350,6 @@ impl CoreResearchJobPort {
             .find_by_id(job_id)
             .await
             .map_err(QuantError::from)?
-            .ok_or_else(|| {
-                QuantError::from(StorageError::not_found(entity::QUANT_RESEARCH_JOB, job_id))
-            })
+            .ok_or_else(|| QuantError::from(StorageError::not_found(QUANT_RESEARCH_JOB, job_id)))
     }
 }

@@ -11,7 +11,7 @@ use chrono_tz::Tz;
 use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
     config::{WeatherHistoricalBindingKind, WeatherStationProfileConfig},
-    domain::{
+    domain::quant::{
         GroundingField, GroundingKind, GroundingProof, GroundingSpan, LinkageSourceMetadata,
         MarketSubject, WeatherDecisionGroupKey, WeatherSubject,
     },
@@ -610,7 +610,7 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use quant_pivot_models::{
         config::{WeatherHistoricalBindingKind, WeatherStationProfileConfig},
-        domain::{LinkageSourceMetadata, MarketSubject, WeatherSubject},
+        domain::quant::{LinkageSourceMetadata, MarketSubject, WeatherSubject},
         types::{
             IcaoStation, MarketId, WeatherContractFinalizationPolicy, WeatherTemperatureStatistic,
         },

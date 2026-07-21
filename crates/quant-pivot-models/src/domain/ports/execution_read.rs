@@ -5,10 +5,14 @@ use quant_pivot_error::QuantResult;
 
 use crate::{
     domain::{
-        ExecutionOrderInfo, ExecutionOrderListQuery, Paginated, PositionInfo, PositionListQuery,
-        PositionSummary, RecommendationAttributionInfo, ReconciliationInfo,
-        ReconciliationListQuery, SettlementRedeemDetail, SettlementRedeemListQuery,
-        SettlementRedeemSummary,
+        api::{
+            ExecutionOrderListQuery, PositionListQuery, PositionSummary, ReconciliationListQuery,
+            SettlementRedeemDetail, SettlementRedeemListQuery, SettlementRedeemSummary,
+        },
+        pagination::Paginated,
+        quant::{
+            ExecutionOrderInfo, PositionInfo, RecommendationAttributionInfo, ReconciliationInfo,
+        },
     },
     types::{
         ExecutionOrderId, OrderIntentId, PositionId, RecommendationId, ReconciliationId,

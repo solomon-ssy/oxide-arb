@@ -1,7 +1,8 @@
 //! Addresses that must never appear as trade-tape participants.
 
-use alloy::primitives::{Address, address};
 use std::sync::LazyLock;
+
+use alloy::primitives::{Address, address};
 
 use super::constants::{
     CTF_EXCHANGE_V1, CTF_EXCHANGE_V2, NEG_RISK_EXCHANGE_V1, NEG_RISK_EXCHANGE_V2,

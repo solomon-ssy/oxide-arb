@@ -6,5 +6,4 @@ pub mod clickhouse;
 pub mod error;
 pub mod evidence;
 pub mod postgres;
-pub mod sql_contract_registry;
 pub mod write;

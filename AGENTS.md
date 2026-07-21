@@ -84,43 +84,39 @@ normalized into columns/tables instead of JSONB.
 ```bash
 cargo fmt --all --
 cargo clippy --workspace --all-targets -- -D warnings
-bash scripts/lint-architecture.sh
-bash scripts/lint-import-style.sh
-bash scripts/lint-quant-pivot-boundary.sh
-bash scripts/lint-quant-pivot-errors.sh
-bash scripts/lint-dead-semantics.sh
+cargo xtask architecture check
 cargo test --workspace
 ```
 
 ## 7.1 Import style
 
 Full rules: [`.cursor/rules/quant-pivot-rust-style.mdc`](.cursor/rules/quant-pivot-rust-style.mdc).
-Enforced by [`scripts/lint-import-style.sh`](scripts/lint-import-style.sh)
-(`--fix` merges duplicate-root trees; then `cargo fmt`).
+Enforced structurally by `cargo xtask architecture check`.
 
 | Rule | Detail |
 |------|--------|
-| Preamble only | `use` only in file / nested `mod` headers — never inside `fn` / `impl` |
-| Short paths in bodies | After imports, ≤1 `::` (`HashMap::new`, `module::item`) — no `crate::a::B` / `std::a::B` in bodies |
-| One tree per root | In each module scope, one non-`pub` `use` per root (`std`, `crate`, `quant_pivot_*`, …) — merge siblings into a brace tree |
-| Attr exception | Distinct leading `#[cfg(…)]` (etc.) may keep a separate `use` of the same root — attrs cannot sit inside use braces on stable |
-| `pub use` | Canonical public barrels are allowed; migration/deletion compatibility shims are forbidden |
+| Module preamble only | `use` belongs at the file/module head, including the head of `mod tests`; never inside a function, method, closure, loop or block |
+| One tree per root | With the same visibility and attributes, every root has one tree-shaped import: `use std::{cmp::Ordering, panic::{self, AssertUnwindSafe}};` |
+| Imported body symbols | Structs, enums, traits, types and constants are imported into the module preamble; bodies do not spell deep fully qualified paths |
+| Body qualifiers | Body paths normally have at most one `::`: `Side::Buy`, `task::spawn_blocking`; Tokio functions may retain `tokio::time::timeout` / `tokio::task::spawn_blocking` |
+| Collision aliases | Import conflicting owners with a semantic alias, e.g. `use anyhow::Error as AnyhowError;` and call `AnyhowError::from` |
+| Alias semantics | Aliases name the role/domain (`MarketEntity`, `SdkError`, `ChronoDuration`); aliases assembled from a full internal path are forbidden |
+| Attribute exception | Imports with different leading attributes may remain separate because stable Rust cannot attach `#[cfg]` to members inside one `use` tree |
+| Public paths | Canonical bounded-context facades are allowed; compatibility and forwarding re-exports are forbidden |
+| SeaORM relation exception | `#[sea_orm::model]` relation descriptors import the relation module and retain `module::Entity`; the derive macro requires the final identifier to remain literally `Entity` |
+| Macro/attribute exception | A `macro_rules!` definition may be followed by its restricted re-export; framework attribute/derive paths such as `#[sea_orm::model]` remain canonical qualified invocations |
+| Associated-item exception | Primitive/generic owner paths such as `i64::MAX`, `D::Error::custom`, and `Self::Error` remain qualified |
 
 ```rust
-// Good — one tree per root
 use std::{cmp::Ordering, panic::{self, AssertUnwindSafe}};
-use crate::{
-    entities::{quant_trade_policy_artifact, quant_trade_policy_governance_audit},
-    enums::quant::{TradePolicyGovernanceAction, TradePolicyStatus},
-    types::{ContentHash, TradePolicyArtifactId},
-};
 
-// Forbidden — split roots
-use std::cmp::Ordering;
-use std::panic;
-use std::panic::AssertUnwindSafe;
-use crate::entities::quant_trade_policy_artifact;
-use crate::{enums::quant::TradePolicyStatus, types::ContentHash};
+use anyhow::Error as AnyhowError;
+use quant_pivot_models::enums::Side;
+
+let ordering = Ordering::Equal;
+let side = Side::Buy;
+let result = tokio::task::spawn_blocking(work).await;
+let error = AnyhowError::from(source);
 ```
 
 ## 7.2 Error layering
@@ -138,8 +134,9 @@ HTTP status mapping stays in **`quant-pivot-web/src/error.rs`**.
 | `ControlError` | Runtime mode / config apply / book subscriptions |
 | `QueryError` | Inbound API time-window validation |
 
-Production `src/` must not call `QuantError::Internal(` directly — use typed variants
-(enforced by `scripts/lint-quant-pivot-errors.sh`).
+`QuantError` has no catch-all string variant. Every platform failure must enter through a
+domain-specific typed sub-error and its `From` conversion. HTTP-only masking and status mapping
+stay in `quant-pivot-web::error::WebError` and are covered by mapping tests.
 
 `StorageError` persistence variants (no string bucket — `Conflict(String)` removed):
 
@@ -162,7 +159,9 @@ Idempotent writes (e.g. attribution final insert) return repository **outcome en
 | `ExecutionMode::DryRun/Paper/Live` | `QuantRuntimeMode` |
 | `pub use` compatibility re-exports | explicit module paths |
 | bare `Json` / `serde_json::Value` persistence | relation/typed columns, or canonical `FromJsonQueryResult` document |
-| Split `use std::…` / `use crate::…` (same root, same attrs) | one tree: `use std::{…}` / `use crate::{…}` |
+| Split same-root imports with the same visibility/attributes | one tree: `use std::{cmp::Ordering, panic::{self, AssertUnwindSafe}};` |
+| `use` inside a function/method/block | import at the owning file or nested module preamble |
+| Deep body path such as `quant_pivot_models::enums::Side::Buy` | import the owner and use `Side::Buy`; only Tokio function paths receive the explicit three-segment exception |
 | `unwrap()` in `src/` | `?` / structured errors |
 | `QuantError::Internal(` in production `src/` | typed `quant-pivot-error` sub-variant |
 | `fn *_error(` manual mappers | `From` + `?` |

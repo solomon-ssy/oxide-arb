@@ -14,7 +14,8 @@ use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
     clickhouse::CryptoPriceReportRow,
     domain::{
-        CryptoPriceReport, DomainSourceCheckpoint, LinkageOutcome, MarketLinkage, MarketSubject,
+        data_plane::{CryptoPriceReport, DomainSourceCheckpoint},
+        quant::{LinkageOutcome, MarketLinkage, MarketSubject},
     },
     enums::domain::{BinanceMarketSegment, LinkageSourceRole},
     types::{BinanceSymbol, ChainlinkFeedKey, ContentHash, DomainInstrumentKey, DomainSourceId},
@@ -23,7 +24,10 @@ use quant_pivot_repository::traits::{
     DomainProjectionRepository, DomainSourceCursorRepository, FactWriter, MarketLinkageRepository,
 };
 use quant_pivot_research::linkage::rules;
-use tokio::{task::JoinHandle, time::MissedTickBehavior};
+use tokio::{
+    task::JoinHandle,
+    time::{Instant, MissedTickBehavior},
+};
 use tokio_util::sync::CancellationToken;
 
 use crate::app::domain_source_supervisor::DomainSourceSupervisor;
@@ -329,13 +333,13 @@ impl CryptoLiveIngestWorker {
             .resume_binance_sequence(source, source_id, instrument, symbol, gap_generation)
             .await?;
         let mut stream = source.stream(symbol).await?;
-        let mut next_clock_check = tokio::time::Instant::now() + StdDuration::from_secs(30);
+        let mut next_clock_check = Instant::now() + StdDuration::from_secs(30);
         let recovery_poll_interval = source.recovery_poll_interval();
-        let mut next_recovery = tokio::time::Instant::now() + recovery_poll_interval;
+        let mut next_recovery = Instant::now() + recovery_poll_interval;
         loop {
-            if tokio::time::Instant::now() >= next_clock_check {
+            if Instant::now() >= next_clock_check {
                 source.validate_system_clock().await?;
-                next_clock_check = tokio::time::Instant::now() + StdDuration::from_secs(30);
+                next_clock_check = Instant::now() + StdDuration::from_secs(30);
             }
             let (report, planned_rotation) = if stream.rotation_due() {
                 match source.stream(symbol).await {
@@ -382,7 +386,7 @@ impl CryptoLiveIngestWorker {
                 };
                 (report, false)
             };
-            next_recovery = tokio::time::Instant::now() + recovery_poll_interval;
+            next_recovery = Instant::now() + recovery_poll_interval;
             if let Some(next_id) = expected {
                 if report.source_sequence < next_id {
                     continue;
@@ -954,7 +958,7 @@ mod tests {
     use chrono::{Duration, Utc};
     use quant_pivot_error::QuantError;
     use quant_pivot_models::{
-        domain::CryptoPriceReport,
+        domain::data_plane::CryptoPriceReport,
         types::{ContentHash, DomainInstrumentKey, DomainSourceId, Usd},
     };
     use rust_decimal_macros::dec;

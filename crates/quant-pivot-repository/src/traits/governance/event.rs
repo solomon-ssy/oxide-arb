@@ -1,9 +1,10 @@
+use std::collections::HashSet;
+
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    domain::{EventInfo, UpsertEvent},
+    domain::market::{EventInfo, UpsertEvent},
     types::EventId,
 };
-use std::collections::HashSet;
 
 #[async_trait::async_trait]
 pub trait EventRepository: Send + Sync {

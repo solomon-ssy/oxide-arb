@@ -1,8 +1,7 @@
 //! Operational metrics for the quant-pivot runtime.
 //!
-//! Covers the ingest plane, catalog sync, subscription ingest, fact writers, and
-//! shutdown. Legacy Endgame detection / execution / risk / settlement /
-//! control-factor series do not exist here.
+//! Covers catalog sync, subscription ingest, fact writers, research, reporting,
+//! execution, governance, and orderly shutdown.
 
 use std::sync::Arc;
 
@@ -81,7 +80,7 @@ const REPORT_RUN_BUCKETS_SECS: &[f64] = &[
     0.1, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0,
 ];
 
-/// Central Prometheus registry for Phase 0 live paths only.
+/// Central Prometheus registry for live paths only.
 pub struct MetricsHub {
     pub registry: Registry,
 
@@ -127,7 +126,7 @@ pub struct MetricsHub {
     pub report_recommendations_total: IntCounterVec,
     pub report_publish_failures_total: IntCounterVec,
 
-    // ── Durable report coordinator (11.8) ─────────────────────────────────
+    // ── Durable report coordinator ─────────────────────────────────
     pub report_run_total: IntCounterVec,
     pub report_run_duration_seconds: HistogramVec,
     pub report_run_queue_latency_seconds: HistogramVec,
@@ -141,7 +140,7 @@ pub struct MetricsHub {
     pub report_fact_settlement_claim_lost_total: IntCounterVec,
     pub report_fact_worker_errors_total: IntCounterVec,
 
-    // ── Training/serving feature parity (11.6) ────────────────────────
+    // ── Training/serving feature parity ────────────────────────
     /// Runs by controlled kind/status labels.
     pub feature_parity_runs_total: IntCounterVec,
     /// Stage comparisons by controlled stage/status/reason labels.
@@ -151,12 +150,12 @@ pub struct MetricsHub {
     /// Containment attempts by terminal outcome (`completed`/`failed`).
     pub feature_parity_containment_total: IntCounterVec,
 
-    // ── Execution governance (05.1) ───────────────────────────────────────
+    // ── Execution governance ───────────────────────────────────────
     /// `1` when the operational kill-switch blocks new auto entries (any
     /// non-`closed` state), `0` when `closed`.
     pub auto_execution_halted: IntGauge,
 
-    // ── Execution admission (05.3) ────────────────────────────────────────
+    // ── Execution admission ────────────────────────────────────────
     /// Admission denials by the check id that determined the `Deny` outcome.
     pub admission_denied: IntCounterVec,
     /// Order intents created by runtime mode and intent kind.
@@ -166,7 +165,7 @@ pub struct MetricsHub {
     /// Order intents rejected by runtime mode and intent kind.
     pub order_intents_rejected: IntCounterVec,
 
-    // ── Entry execution (05.4) ────────────────────────────────────────────
+    // ── Entry execution ────────────────────────────────────────────
     /// Entry orders successfully submitted to the venue (write-ahead committed).
     pub execution_orders_submitted: IntCounter,
     /// Venue fills observed on submission (full or partial).
@@ -174,15 +173,15 @@ pub struct MetricsHub {
     /// Execution-breaker kill-switch trips by triggering dimension.
     pub execution_breaker_trips: IntCounterVec,
 
-    // ── Reconciliation (05.5) ─────────────────────────────────────────────
+    // ── Reconciliation ─────────────────────────────────────────────
     /// Reconciliations that resolved to a terminal `Unresolvable` verdict
     /// (capital impaired, kill-switch latched until an operator resolves).
     pub reconciliation_unresolvable: IntCounter,
-    /// Exit-monitor triggers by exit reason (05.6).
+    /// Exit-monitor triggers by exit reason.
     pub exit_triggers: IntCounterVec,
-    /// Exit signal re-inference outcomes (06.0).
+    /// Exit signal re-inference outcomes.
     pub exit_signal_reinference: IntCounterVec,
-    /// Opportunistic-Sell scorer evaluation outcomes (06.1).
+    /// Opportunistic-Sell scorer evaluation outcomes.
     pub opportunistic_sell_eval: IntCounterVec,
 }
 
@@ -247,7 +246,7 @@ struct FeatureParityMetrics {
     containment: IntCounterVec,
 }
 
-/// Execution / risk / governance counters (Phase 05.1–05.5).
+/// Execution, risk, and governance counters.
 struct ExecutionMetrics {
     auto_execution_halted: IntGauge,
     admission_denied: IntCounterVec,
@@ -741,7 +740,7 @@ impl MetricsHub {
         self.reconciliation_unresolvable.inc();
     }
 
-    /// Count one exit-monitor trigger for an exit reason (05.6).
+    /// Count one exit-monitor trigger for an exit reason.
     pub fn inc_exit_trigger(&self, reason: &str) {
         self.exit_triggers.with_label_values(&[reason]).inc();
     }
@@ -785,7 +784,7 @@ impl MetricsHub {
     ///
     /// Every writer reports its enqueue→flush-ack latency into the per-writer
     /// `ingest_pipeline_lag_seconds` histogram (complete backpressure telemetry).
-    /// Feeding the plane-level [`IngestPipelineLagTracker`] that gates book-plane
+    /// Feeding the plane-level ingest-lag tracker that gates book-plane
     /// data quality is done separately, and only for the book-fact streams, so a
     /// slow output sink never poisons the live book-quality gate.
     #[must_use]

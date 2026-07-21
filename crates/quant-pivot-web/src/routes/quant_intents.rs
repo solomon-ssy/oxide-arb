@@ -1,12 +1,12 @@
-//! Order-intent HTTP endpoints (Phase 05.2).
+//! Order-intent HTTP endpoints.
 //!
 //! # UI integration contract
 //!
 //! | Method | Path | Permission | Purpose |
 //! |--------|------|------------|---------|
-//! | GET  | `/quant/intents` | `order_intent:read` | Paginated intent list |
+//! | GET | `/quant/intents` | `order_intent:read` | Paginated intent list |
 //! | POST | `/quant/intents` | `order_intent:create` (governed) | Create from a recommendation |
-//! | GET  | `/quant/intents/{id}` | `order_intent:read` | One intent |
+//! | GET | `/quant/intents/{id}` | `order_intent:read` | One intent |
 //! | POST | `/quant/intents/{id}/approve` | `order_intent:approve` (governed) | Approve a pending intent |
 //! | POST | `/quant/intents/{id}/reject` | `order_intent:reject` (governed) | Reject a pending intent |
 //! | POST | `/quant/intents/{id}/cancel` | `order_intent:cancel` (governed) | Cancel a not-yet-submitted intent |
@@ -17,15 +17,25 @@
 //! order. All mutations reserve / release capital atomically with the intent
 //! transition and are recorded in the operation log.
 
-use actix_web::{http::Method, web};
+use actix_web::{
+    http::Method,
+    web::{Data, Path, Query},
+};
 use chrono::{DateTime, Utc};
 use quant_pivot_models::{
     domain::{
-        ApproveIntentCommand, BookSnapshot, CancelIntentCommand, CreateIntentCommand,
-        EntryConditionInstanceSummaryView, ExitMonitorObservationView, OrderIntentListQuery,
-        OrderIntentView, Paginated, PositionInfo, RejectIntentCommand,
+        api::{
+            ApproveIntentRequest, CancelIntentRequest, CreateIntentRequest,
+            EntryConditionInstanceSummaryView, ExitMonitorObservationView, OrderIntentListQuery,
+            OrderIntentView, RejectIntentRequest,
+        },
+        market::BookSnapshot,
+        pagination::Paginated,
+        ports::{
+            ApproveIntentCommand, CancelIntentCommand, CreateIntentCommand, RejectIntentCommand,
+        },
+        quant::PositionInfo,
     },
-    domain::{ApproveIntentRequest, CancelIntentRequest, CreateIntentRequest, RejectIntentRequest},
     enums::{
         operation_log::OperationCategory,
         rbac::{Operation, ResourceType},
@@ -89,8 +99,8 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
 
 /// `GET /api/quant/intents` — paginated, filtered intent list.
 pub async fn list(
-    state: web::Data<AppState>,
-    query: web::Query<OrderIntentListQuery>,
+    state: Data<AppState>,
+    query: Query<OrderIntentListQuery>,
 ) -> Result<WebResponse<Paginated<OrderIntentView>>, WebError> {
     let page = state.order_intents.list(query.into_inner()).await?;
     Ok(WebResponse::ok(page.map(OrderIntentView::from)))
@@ -98,8 +108,8 @@ pub async fn list(
 
 /// `GET /api/quant/intents/{id}` — one intent.
 pub async fn get(
-    state: web::Data<AppState>,
-    id: web::Path<OrderIntentId>,
+    state: Data<AppState>,
+    id: Path<OrderIntentId>,
 ) -> Result<WebResponse<OrderIntentView>, WebError> {
     let info = state
         .order_intents
@@ -183,7 +193,7 @@ pub(crate) async fn exit_monitor_observation(
 
 /// `POST /api/quant/intents` — create an intent from a recommendation.
 pub async fn create(
-    state: web::Data<AppState>,
+    state: Data<AppState>,
     actor: AuthedActor,
     acting_role: ActingRole,
     request_id: RequestId,
@@ -221,8 +231,8 @@ pub async fn create(
 
 /// `POST /api/quant/intents/{id}/approve` — approve a pending intent.
 pub async fn approve(
-    state: web::Data<AppState>,
-    id: web::Path<OrderIntentId>,
+    state: Data<AppState>,
+    id: Path<OrderIntentId>,
     actor: AuthedActor,
     acting_role: ActingRole,
     request_id: RequestId,
@@ -269,8 +279,8 @@ pub async fn approve(
 
 /// `POST /api/quant/intents/{id}/reject` — reject a pending intent.
 pub async fn reject(
-    state: web::Data<AppState>,
-    id: web::Path<OrderIntentId>,
+    state: Data<AppState>,
+    id: Path<OrderIntentId>,
     actor: AuthedActor,
     acting_role: ActingRole,
     request_id: RequestId,
@@ -313,8 +323,8 @@ pub async fn reject(
 
 /// `POST /api/quant/intents/{id}/cancel` — cancel a not-yet-submitted intent.
 pub async fn cancel(
-    state: web::Data<AppState>,
-    id: web::Path<OrderIntentId>,
+    state: Data<AppState>,
+    id: Path<OrderIntentId>,
     actor: AuthedActor,
     acting_role: ActingRole,
     request_id: RequestId,

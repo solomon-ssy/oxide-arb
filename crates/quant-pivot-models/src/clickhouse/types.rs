@@ -3,6 +3,8 @@
 //! `ClickHouse` `Decimal*` values are serialized by the Rust client as scaled
 //! signed integers. These wrappers keep that storage detail out of domain code.
 
+use std::fmt::{Display, Formatter, Result as FmtResult};
+
 use chrono::{Datelike, NaiveDate};
 use quant_pivot_error::hashing::CanonicalDigestError;
 use rust_decimal::Decimal;
@@ -10,7 +12,6 @@ use serde::{
     Deserialize, Deserializer, Serialize, Serializer,
     de::{Error as DeError, Visitor},
 };
-use std::fmt::{self, Display, Formatter};
 
 use crate::types::{Bps, Price, Probability, SchemaVersion, Shares, Usd};
 
@@ -215,7 +216,7 @@ struct ScaledI128Visitor;
 impl Visitor<'_> for ScaledI128Visitor {
     type Value = i128;
 
-    fn expecting(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+    fn expecting(&self, formatter: &mut Formatter<'_>) -> FmtResult {
         formatter.write_str("an exact signed 128-bit integer encoded as a decimal string")
     }
 
@@ -286,19 +287,19 @@ impl From<Decimal> for ChDecimal64 {
 }
 
 impl Display for ChPrice {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         write!(f, "{}", self.to_price())
     }
 }
 
 impl Display for ChUsd {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         write!(f, "{}", self.to_usd())
     }
 }
 
 impl Display for ChShares {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         write!(f, "{}", self.to_shares())
     }
 }
@@ -332,11 +333,11 @@ fn decimal_from_i128(value: i128, scale: u32) -> Decimal {
 #[cfg(test)]
 mod tests {
     use chrono::NaiveDate;
+    use quant_pivot_error::hashing::CanonicalDigestError;
+    use rust_decimal_macros::dec;
 
     use super::{ChEpochDay, ChPrice, ChSchemaVersion, ChShares, ChUsd};
     use crate::types::{Price, SchemaVersion, Shares, Usd};
-    use quant_pivot_error::hashing::CanonicalDigestError;
-    use rust_decimal_macros::dec;
 
     #[test]
     fn schema_version_roundtrips_positive_values() {

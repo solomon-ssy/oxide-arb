@@ -2,7 +2,7 @@
 
 use std::{future::Future, sync::Arc};
 
-use quant_pivot_models::{domain::BootstrapPort, enums::system::CapabilityId};
+use quant_pivot_models::{domain::ports::BootstrapPort, enums::system::CapabilityId};
 use tokio_util::sync::CancellationToken;
 
 pub async fn wait_for_capability(

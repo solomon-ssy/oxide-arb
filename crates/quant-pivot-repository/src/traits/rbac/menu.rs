@@ -2,7 +2,7 @@
 
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    domain::{MenuInfo, MenuPatch, MenuTreeNode, NewMenu},
+    domain::rbac::{MenuInfo, MenuPatch, MenuTreeNode, NewMenu},
     types::{MenuId, RoleId},
 };
 

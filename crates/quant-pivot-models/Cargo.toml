@@ -27,11 +27,10 @@ tokio-util = { workspace = true }
 flume = { workspace = true }
 validator = { workspace = true }
 tracing = { workspace = true }
-config = { workspace = true }
+config-rs = { workspace = true }
 toml = { workspace = true }
 url = { workspace = true }
 zeroize = { workspace = true }
-libc = { workspace = true }
 base64 = { workspace = true }
 clickhouse = { workspace = true }
 thiserror = { workspace = true }
@@ -46,10 +45,11 @@ rand_core_06 = { workspace = true }
 
 [dev-dependencies]
 insta = { workspace = true }
-quant-pivot-test-support = { workspace = true }
+proptest = { workspace = true }
+uuid = { workspace = true, features = ["v5"] }
 
 [features]
-repository = []
+persistence-entities = []
 
 [lints]
 workspace = true

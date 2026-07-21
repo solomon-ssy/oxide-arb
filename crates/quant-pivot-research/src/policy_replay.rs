@@ -1218,7 +1218,7 @@ fn methodology(detail: String) -> QuantError {
 
 #[cfg(test)]
 mod tests {
-    use chrono::{Duration, TimeZone, Utc};
+    use chrono::{DateTime, Duration, TimeZone, Utc};
     use quant_pivot_models::{
         domain::market::{book::BookLevel, fee::BuilderFeeAttribution},
         enums::{
@@ -1249,7 +1249,7 @@ mod tests {
         ContentHash::parse(format!("blake3:{}", seed.to_string().repeat(64))).expect("hash")
     }
 
-    fn at(seconds: i64) -> chrono::DateTime<Utc> {
+    fn at(seconds: i64) -> DateTime<Utc> {
         Utc.timestamp_opt(1_700_000_000 + seconds, 0)
             .single()
             .expect("time")
@@ -1259,7 +1259,7 @@ mod tests {
         BookLevel::try_from_decimal(Price::new(price), Shares::new(shares)).expect("level")
     }
 
-    fn schedule(time: chrono::DateTime<Utc>) -> PitFeeSchedule {
+    fn schedule(time: DateTime<Utc>) -> PitFeeSchedule {
         PitFeeSchedule {
             schedule_hash: hash('a'),
             effective_at: time,

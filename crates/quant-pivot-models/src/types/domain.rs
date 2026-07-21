@@ -1,4 +1,4 @@
-//! External-vertical (domain) vocabulary newtypes (Phase 11.2.2).
+//! External-vertical (domain) vocabulary newtypes.
 //!
 //! Covers [`ResolverVersion`], [`CryptoAsset`], [`CryptoQuote`], [`BinanceSymbol`],
 //! [`ChainlinkFeedKey`], station identifiers, temperature values, and the
@@ -11,7 +11,7 @@
 //! venue symbol, or feed key.
 
 use std::{
-    fmt::{self, Display, Formatter},
+    fmt::{self, Display, Formatter, Result as FmtResult},
     str::FromStr,
     sync::Arc,
 };
@@ -19,10 +19,10 @@ use std::{
 use rust_decimal::{Decimal, RoundingStrategy};
 use schemars::JsonSchema;
 use sea_orm::{
-    ActiveValue, ColIdx, IntoActiveValue, TryGetError, TryGetable,
+    ActiveValue, ColIdx, DbErr, IntoActiveValue, QueryResult, TryGetError, TryGetable,
     sea_query::{ArrayType, ColumnType, Nullable, Value, ValueType, ValueTypeErr},
 };
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as SerdeDeError};
 use thiserror::Error;
 
 use crate::{
@@ -96,7 +96,7 @@ impl ResolverVersion {
 }
 
 impl Display for ResolverVersion {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         write!(f, "{}", self.0)
     }
 }
@@ -111,7 +111,7 @@ impl IntoActiveValue<Self> for ResolverVersion {
 impl<'de> Deserialize<'de> for ResolverVersion {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let raw = i32::deserialize(deserializer)?;
-        Self::try_new(raw).map_err(serde::de::Error::custom)
+        Self::try_new(raw).map_err(SerdeDeError::custom)
     }
 }
 
@@ -130,9 +130,9 @@ impl From<&ResolverVersion> for Value {
 }
 
 impl TryGetable for ResolverVersion {
-    fn try_get_by<I: ColIdx>(res: &sea_orm::QueryResult, index: I) -> Result<Self, TryGetError> {
+    fn try_get_by<I: ColIdx>(res: &QueryResult, index: I) -> Result<Self, TryGetError> {
         let raw: i32 = <i32 as TryGetable>::try_get_by(res, index)?;
-        Self::try_new(raw).map_err(|e| TryGetError::DbErr(sea_orm::DbErr::Type(e.to_string())))
+        Self::try_new(raw).map_err(|e| TryGetError::DbErr(DbErr::Type(e.to_string())))
     }
 }
 

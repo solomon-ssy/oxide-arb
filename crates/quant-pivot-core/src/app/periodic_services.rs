@@ -1,5 +1,16 @@
 //! Periodic background services (Gamma catalog sync, data-quality refresh).
 
+use std::{sync::Arc, time::Duration};
+
+use chrono::{DateTime, Utc};
+use quant_pivot_error::QuantResult;
+use quant_pivot_models::{
+    domain::ports::PolicySnapshotPort,
+    enums::system::{BootstrapPhase, CapabilityId},
+    types::Usd,
+};
+use quant_pivot_repository::traits::{EquitySnapshotRepository, PositionRepository};
+
 use super::AppContext;
 use crate::{
     app::{capability_gate::wait_for_capability, task_id::TaskId, task_registry::AppRunner},
@@ -7,14 +18,6 @@ use crate::{
     ingest::data_quality::DataQualityService,
     service::{equity::EquitySnapshotService, feature_integrity::AutomaticFullParityOutcome},
 };
-use quant_pivot_error::QuantResult;
-use quant_pivot_models::{
-    domain::PolicySnapshotPort,
-    enums::system::{BootstrapPhase, CapabilityId},
-    types::Usd,
-};
-use quant_pivot_repository::traits::{EquitySnapshotRepository, PositionRepository};
-use std::{sync::Arc, time::Duration};
 
 /// Interval between data-quality snapshot refreshes into Prometheus.
 const DATA_QUALITY_REFRESH_SECS: u64 = 5;
@@ -109,7 +112,7 @@ impl AppContext {
                                 .total_budget_usd
                                 .value,
                         );
-                        let as_of = chrono::Utc::now();
+                        let as_of = Utc::now();
                         let account = account_factory.create(budget_cap)?.snapshot(as_of).await?;
                         equity_service.record_history_snapshot(&account).await?;
                         Ok(())
@@ -135,7 +138,7 @@ impl AppContext {
             }
             let _ = PeriodicTask::run(
                 "feature-parity-scheduler",
-                || duration_until_next_utc_hour(chrono::Utc::now()),
+                || duration_until_next_utc_hour(Utc::now()),
                 0.0,
                 true,
                 token,
@@ -150,7 +153,7 @@ impl AppContext {
                         {
                             return QuantResult::Ok(());
                         }
-                        match coordinator.ensure_automatic_full(chrono::Utc::now()).await? {
+                        match coordinator.ensure_automatic_full(Utc::now()).await? {
                             AutomaticFullParityOutcome::Enqueued { run_id, job_id } => {
                                 tracing::info!(%run_id, %job_id, "enqueued automatic 24-hour feature parity replay");
                             }
@@ -171,7 +174,7 @@ impl AppContext {
     }
 }
 
-const fn duration_until_next_utc_hour(now: chrono::DateTime<chrono::Utc>) -> Duration {
+const fn duration_until_next_utc_hour(now: DateTime<Utc>) -> Duration {
     let elapsed = now.timestamp().rem_euclid(60 * 60) as u64;
     let nanos = now.timestamp_subsec_nanos();
     let seconds = 60 * 60 - elapsed;

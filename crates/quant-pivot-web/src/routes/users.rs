@@ -8,12 +8,18 @@
 //! Casbin is reloaded only where a write actually mutated the policy table:
 //! deleting a user (cascades its `g` groupings) and replacing a user's roles.
 
-use actix_web::{http::Method, web};
+use actix_web::{
+    http::Method,
+    web::{Data, Path, Query},
+};
 use quant_pivot_models::{
     domain::{
-        AssignRoles, AssignRolesRequest, ChangePasswordRequest, ChangeUserPassword,
-        ChangeUserStatusRequest, CreateUserRequest, NewUser, Paginated, UpdateUserRequest,
-        UserInfo, UserPageQuery, UserView,
+        api::{
+            AssignRolesRequest, ChangePasswordRequest, ChangeUserStatusRequest, CreateUserRequest,
+            UpdateUserRequest, UserPageQuery, UserView,
+        },
+        pagination::Paginated,
+        rbac::{AssignRoles, ChangeUserPassword, NewUser, UserInfo},
     },
     enums::{
         operation_log::OperationCategory,
@@ -89,8 +95,8 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
 
 /// `GET /api/users` — paginated, filtered user listing.
 pub async fn list(
-    state: web::Data<AppState>,
-    query: web::Query<UserPageQuery>,
+    state: Data<AppState>,
+    query: Query<UserPageQuery>,
 ) -> Result<WebResponse<Paginated<UserView>>, WebError> {
     let result = state.users.page(query.into_inner()).await?;
     Ok(WebResponse::ok(project_page(result)))
@@ -98,7 +104,7 @@ pub async fn list(
 
 /// `POST /api/users` — create a user with an argon2id-hashed password.
 pub async fn create(
-    state: web::Data<AppState>,
+    state: Data<AppState>,
     op_ctx: OperationCtx,
     body: ValidatedJson<CreateUserRequest>,
 ) -> Result<WebResponse<UserView>, WebError> {
@@ -125,8 +131,8 @@ pub async fn create(
 
 /// `GET /api/users/{id}` — fetch a single user.
 pub async fn get(
-    state: web::Data<AppState>,
-    id: web::Path<UserId>,
+    state: Data<AppState>,
+    id: Path<UserId>,
 ) -> Result<WebResponse<UserView>, WebError> {
     let user = state.users.find_by_id(&id).await?;
     Ok(WebResponse::ok(UserView::from(user)))
@@ -134,8 +140,8 @@ pub async fn get(
 
 /// `PUT /api/users/{id}` — partial profile update.
 pub async fn update(
-    state: web::Data<AppState>,
-    id: web::Path<UserId>,
+    state: Data<AppState>,
+    id: Path<UserId>,
     op_ctx: OperationCtx,
     body: ValidatedJson<UpdateUserRequest>,
 ) -> Result<WebResponse<UserView>, WebError> {
@@ -148,8 +154,8 @@ pub async fn update(
 /// `DELETE /api/users/{id}` — delete a user and reload the enforcer (its `g`
 /// groupings were cascaded away in the same repository transaction).
 pub async fn delete(
-    state: web::Data<AppState>,
-    id: web::Path<UserId>,
+    state: Data<AppState>,
+    id: Path<UserId>,
     op_ctx: OperationCtx,
 ) -> Result<WebResponse<()>, WebError> {
     state.jwt.revoke_subject_sessions(&id.to_string()).await?;
@@ -163,8 +169,8 @@ pub async fn delete(
 
 /// `PUT /api/users/{id}/status` — activate/deactivate an account.
 pub async fn change_status(
-    state: web::Data<AppState>,
-    id: web::Path<UserId>,
+    state: Data<AppState>,
+    id: Path<UserId>,
     op_ctx: OperationCtx,
     body: ValidatedJson<ChangeUserStatusRequest>,
 ) -> Result<WebResponse<()>, WebError> {
@@ -184,8 +190,8 @@ pub async fn change_status(
 
 /// `PUT /api/users/{id}/password` — reset a user's password.
 pub async fn change_password(
-    state: web::Data<AppState>,
-    id: web::Path<UserId>,
+    state: Data<AppState>,
+    id: Path<UserId>,
     op_ctx: OperationCtx,
     body: ValidatedJson<ChangePasswordRequest>,
 ) -> Result<WebResponse<()>, WebError> {
@@ -206,8 +212,8 @@ pub async fn change_password(
 /// `PUT /api/users/{id}/roles` — replace a user's role set, then reload the
 /// enforcer so the new groupings take effect immediately.
 pub async fn set_roles(
-    state: web::Data<AppState>,
-    id: web::Path<UserId>,
+    state: Data<AppState>,
+    id: Path<UserId>,
     op_ctx: OperationCtx,
     body: ValidatedJson<AssignRolesRequest>,
 ) -> Result<WebResponse<()>, WebError> {

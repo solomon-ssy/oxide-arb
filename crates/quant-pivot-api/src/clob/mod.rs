@@ -7,24 +7,14 @@ mod rate_limiter;
 mod sdk_error;
 mod token;
 
-pub use book::OrderbookSnapshot;
-pub use convert::{ClobSide, SdkSideConversionError};
-pub use orders::{CancelAllResult, CancelResult, ClobMakerOrder, ClobTrade, OpenOrder};
-pub use rate_limiter::RateLimiter;
-pub use sdk_error::SdkClobError;
-pub use token::WireTokenId;
+use std::{convert::TryFrom, str::FromStr, sync::Arc, time::Duration};
 
-use crate::{
-    infra::{
-        http::get_text_with_retry,
-        retry::{self, RetryPolicy},
-    },
-    keystore::OrderSigner,
-    wallet::WalletTopology,
-    ws::BookLevelRejectHook,
-};
 use alloy::signers::Signer;
+pub use book::OrderbookSnapshot;
+use chrono::{DateTime, Utc};
+pub use convert::{ClobSide, SdkSideConversionError};
 use num_traits::ToPrimitive;
+pub use orders::{CancelAllResult, CancelResult, ClobMakerOrder, ClobTrade, OpenOrder};
 use polymarket_client_sdk_v2::{
     auth::{Normal, state::Authenticated},
     clob::{
@@ -32,7 +22,9 @@ use polymarket_client_sdk_v2::{
         types::{
             Amount, AssetType, OrderType as SdkOrderType, Side as SdkSide, SignableOrder,
             TraderSide,
-            request::{BalanceAllowanceRequest, OrderBookSummaryRequest, TradesRequest},
+            request::{
+                BalanceAllowanceRequest, OrderBookSummaryRequest, OrdersRequest, TradesRequest,
+            },
             response::{ClobMarketInfoResponse, PostOrderResponse},
         },
     },
@@ -42,8 +34,10 @@ use quant_pivot_error::api::ApiError;
 use quant_pivot_models::{
     config::PolymarketConfig,
     domain::{
-        BookLevel,
-        book::{OrderbookSide, QuantBookSnapshot},
+        market::{
+            BookLevel,
+            book::{OrderbookSide, QuantBookSnapshot},
+        },
         order::{OrderRequest, OrderResponse},
     },
     enums::{
@@ -57,9 +51,23 @@ use quant_pivot_models::{
         MarketId, OrderId, Price, Shares, TokenId, Usd, VenueOrderAmount,
     },
 };
+pub use rate_limiter::RateLimiter;
+use reqwest::Client;
 use rust_decimal::Decimal;
+pub use sdk_error::SdkClobError;
 use serde::Deserialize;
-use std::{convert::TryFrom, str::FromStr, sync::Arc, time::Duration};
+use serde_json::Value;
+pub use token::WireTokenId;
+
+use crate::{
+    infra::{
+        http::get_text_with_retry,
+        retry::{self, RetryPolicy},
+    },
+    keystore::OrderSigner,
+    wallet::WalletTopology,
+    ws::BookLevelRejectHook,
+};
 
 /// Stage reached by a single-attempt money-changing order submission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,7 +117,7 @@ impl OrderSubmissionError {
 /// money-changing `POST /order` is always a single bounded attempt.
 pub struct ClobClient {
     sdk: Arc<SdkClient<Authenticated<Normal>>>,
-    http: reqwest::Client,
+    http: Client,
     clob_base_url: String,
     signer: Arc<OrderSigner>,
     order_post_timeout: Duration,
@@ -208,7 +216,7 @@ fn map_post_order_response(
     req: &OrderRequest,
     order_type: OrderType,
     order_amount: VenueOrderAmount,
-    submitted_at: chrono::DateTime<chrono::Utc>,
+    submitted_at: DateTime<Utc>,
     resp: &PostOrderResponse,
 ) -> OrderResponse {
     let (filled_shares, cash_amount) = match req.side {
@@ -257,7 +265,7 @@ fn map_post_order_response(
         filled_shares,
         avg_fill_price,
         submitted_at,
-        responded_at: chrono::Utc::now(),
+        responded_at: Utc::now(),
     }
 }
 
@@ -278,11 +286,9 @@ impl ClobClient {
         );
         let raw_body = get_text_with_retry(&self.http, &RetryPolicy::clob_default(), &url).await?;
         let raw_payload =
-            serde_json::from_str::<serde_json::Value>(&raw_body).map_err(|error| {
-                ApiError::Deserialize {
-                    context: "CLOB market-info raw payload".to_owned(),
-                    detail: error.to_string(),
-                }
+            serde_json::from_str::<Value>(&raw_body).map_err(|error| ApiError::Deserialize {
+                context: "CLOB market-info raw payload".to_owned(),
+                detail: error.to_string(),
             })?;
         let raw =
             serde_json::from_value::<RawClobMarketInfo>(raw_payload.clone()).map_err(|error| {
@@ -356,7 +362,7 @@ impl ClobClient {
                 detail: error.to_string(),
             }
         })?;
-        let available_at = chrono::Utc::now();
+        let available_at = Utc::now();
         let version = ClobMarketInfoVersion {
             version_id: ClobMarketInfoVersionId::from_v7(),
             market_id: market_id.clone(),
@@ -436,7 +442,7 @@ impl ClobClient {
 
         let sdk_config = SdkConfig::builder().use_server_time(true).build();
         let builder = SdkClient::new(&config.clob_base_url, sdk_config)
-            .map_err(|e| ApiError::from(sdk_error::SdkClobError(&e)))?
+            .map_err(|e| ApiError::from(SdkClobError(&e)))?
             .authentication_builder(&auth_signer);
         // EOA is the SDK default; only Proxy / Safe attach an explicit funder +
         // signature type (the SDK rejects a funder paired with the EOA type).
@@ -450,8 +456,8 @@ impl ClobClient {
         let sdk = builder
             .authenticate()
             .await
-            .map_err(|e| ApiError::from(sdk_error::SdkClobError(&e)))?;
-        let http = reqwest::Client::builder()
+            .map_err(|e| ApiError::from(SdkClobError(&e)))?;
+        let http = Client::builder()
             .timeout(Duration::from_secs(15))
             .build()
             .map_err(|error| ApiError::Http {
@@ -519,14 +525,12 @@ impl ClobClient {
                     .build()
                     .await
                     .map_err(|error| {
-                        OrderSubmissionError::prepare(ApiError::from(sdk_error::SdkClobError(
-                            &error,
-                        )))
+                        OrderSubmissionError::prepare(ApiError::from(SdkClobError(&error)))
                     })
             }
             OrderType::Gtd { expiration } => {
                 let expiration = ToPrimitive::to_i64(&expiration)
-                    .and_then(|timestamp| chrono::DateTime::from_timestamp(timestamp, 0))
+                    .and_then(|timestamp| DateTime::from_timestamp(timestamp, 0))
                     .ok_or_else(|| {
                         OrderSubmissionError::prepare(ApiError::Clob {
                             endpoint: "POST /order".to_owned(),
@@ -549,9 +553,7 @@ impl ClobClient {
                     .build()
                     .await
                     .map_err(|error| {
-                        OrderSubmissionError::prepare(ApiError::from(sdk_error::SdkClobError(
-                            &error,
-                        )))
+                        OrderSubmissionError::prepare(ApiError::from(SdkClobError(&error)))
                     })
             }
             OrderType::Gtc => {
@@ -568,9 +570,7 @@ impl ClobClient {
                     .build()
                     .await
                     .map_err(|error| {
-                        OrderSubmissionError::prepare(ApiError::from(sdk_error::SdkClobError(
-                            &error,
-                        )))
+                        OrderSubmissionError::prepare(ApiError::from(SdkClobError(&error)))
                     })
             }
         }
@@ -596,13 +596,13 @@ impl ClobClient {
         Self::validate_order_semantics(order_type, post_only)
             .map_err(OrderSubmissionError::prepare)?;
 
-        let submitted_at = chrono::Utc::now();
+        let submitted_at = Utc::now();
         let unsigned = self.build_unsigned_order(req, token_id, order_side).await?;
 
         let signed_order = sdk
             .sign(signer.inner(), unsigned)
             .await
-            .map_err(|e| OrderSubmissionError::sign(ApiError::from(sdk_error::SdkClobError(&e))))?;
+            .map_err(|e| OrderSubmissionError::sign(ApiError::from(SdkClobError(&e))))?;
 
         let resp = tokio::time::timeout(self.order_post_timeout, sdk.post_order(signed_order))
             .await
@@ -613,7 +613,7 @@ impl ClobClient {
                         .unwrap_or(u64::MAX),
                 })
             })?
-            .map_err(|e| OrderSubmissionError::post(ApiError::from(sdk_error::SdkClobError(&e))))?;
+            .map_err(|e| OrderSubmissionError::post(ApiError::from(SdkClobError(&e))))?;
 
         Ok(map_post_order_response(
             req,
@@ -639,7 +639,7 @@ impl ClobClient {
                 let resp = sdk
                     .cancel_order(&oid)
                     .await
-                    .map_err(|e| ApiError::from(sdk_error::SdkClobError(&e)))?;
+                    .map_err(|e| ApiError::from(SdkClobError(&e)))?;
 
                 let success = resp.canceled.contains(&oid);
                 let reason = resp.not_canceled.get(&oid).cloned();
@@ -667,7 +667,7 @@ impl ClobClient {
                 let resp = sdk
                     .cancel_all_orders()
                     .await
-                    .map_err(|e| ApiError::from(sdk_error::SdkClobError(&e)))?;
+                    .map_err(|e| ApiError::from(SdkClobError(&e)))?;
 
                 Ok(CancelAllResult {
                     canceled: resp
@@ -703,7 +703,7 @@ impl ClobClient {
                 let resp = sdk
                     .order_book(&request)
                     .await
-                    .map_err(|e| ApiError::from(sdk_error::SdkClobError(&e)))?;
+                    .map_err(|e| ApiError::from(SdkClobError(&e)))?;
 
                 let mut bids = Vec::with_capacity(resp.bids.len());
                 for level in &resp.bids {
@@ -728,10 +728,10 @@ impl ClobClient {
         .await
     }
 
-    /// Fetch both YES and NO token books and build a strict endgame snapshot.
+    /// Fetch both YES and NO token books and build a strict binary-market snapshot.
     ///
     /// This method intentionally fails if either token book cannot be fetched.
-    /// The endgame strategy must never synthesize a NO book from YES prices.
+    /// Consumers must never synthesize a NO book from YES prices.
     #[tracing::instrument(skip(self), fields(yes_token = %yes_token, no_token = %no_token))]
     pub async fn get_dual_book(
         &self,
@@ -857,7 +857,7 @@ impl ClobClient {
                 let resp = sdk
                     .trades(&request, None)
                     .await
-                    .map_err(|e| ApiError::from(sdk_error::SdkClobError(&e)))?;
+                    .map_err(|e| ApiError::from(SdkClobError(&e)))?;
 
                 resp.data
                     .into_iter()
@@ -974,12 +974,11 @@ impl ClobClient {
         retry::retry_with_policy(&RetryPolicy::clob_default(), || {
             let sdk = Arc::clone(&sdk);
             async move {
-                let request =
-                    polymarket_client_sdk_v2::clob::types::request::OrdersRequest::default();
+                let request = OrdersRequest::default();
                 let resp = sdk
                     .orders(&request, None)
                     .await
-                    .map_err(|e| ApiError::from(sdk_error::SdkClobError(&e)))?;
+                    .map_err(|e| ApiError::from(SdkClobError(&e)))?;
 
                 let orders: Vec<OpenOrder> = resp
                     .data
@@ -1006,23 +1005,7 @@ impl ClobClient {
         })
         .await
     }
-
-    /// Inject a pre-authenticated SDK client for wiremock/integration tests.
-    #[doc(hidden)]
-    pub fn from_sdk_for_test(
-        sdk: Arc<SdkClient<Authenticated<Normal>>>,
-        clob_base_url: String,
-        signer: Arc<OrderSigner>,
-        order_post_timeout: Duration,
-    ) -> Self {
-        Self {
-            sdk,
-            http: reqwest::Client::new(),
-            clob_base_url,
-            signer,
-            order_post_timeout,
-            rate_limiter: RateLimiter::new(),
-            on_book_level_rejected: None,
-        }
-    }
 }
+
+#[cfg(test)]
+mod tests;

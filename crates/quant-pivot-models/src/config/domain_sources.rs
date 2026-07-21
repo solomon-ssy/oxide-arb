@@ -9,9 +9,8 @@ use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 
-use super::secret::SecretText;
-
 use self::WeatherHistoricalBindingKind::{ExactStation as Exact, OfficialNearbyProxy as Proxy};
+use super::secret::SecretText;
 
 /// Governed NOAA observation-day close grace used by live projection and
 /// immutable Weather policy replay. It is methodology, not an ops tuning knob.

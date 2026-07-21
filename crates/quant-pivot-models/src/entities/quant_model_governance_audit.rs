@@ -1,14 +1,16 @@
 //! `quant_model_governance_audit` table entity.
 
+use chrono::{DateTime, Utc};
+use sea_orm::entity::prelude::*;
+
+use super::{quant_model_version, quant_training_dataset};
 use crate::{
-    domain::ModelGovernanceAuditDetail,
+    domain::quant::ModelGovernanceAuditDetail,
     enums::quant::{ModelGovernanceAction, PublicationStatus},
     types::{
         AuditEventId, ModelGovernanceAuditId, ModelVersionId, RoleCode, TrainingDatasetId, UserId,
     },
 };
-use chrono::{DateTime, Utc};
-use sea_orm::entity::prelude::*;
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -36,14 +38,14 @@ pub struct Model {
         from = "model_version_id",
         to = "model_version_id"
     )]
-    pub model_version: BelongsTo<Option<super::quant_model_version::Entity>>,
+    pub model_version: BelongsTo<Option<quant_model_version::Entity>>,
     #[sea_orm(
         belongs_to,
         relation_enum = "TrainingDataset",
         from = "training_dataset_id",
         to = "training_dataset_id"
     )]
-    pub training_dataset: BelongsTo<Option<super::quant_training_dataset::Entity>>,
+    pub training_dataset: BelongsTo<Option<quant_training_dataset::Entity>>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

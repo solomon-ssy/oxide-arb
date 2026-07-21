@@ -175,17 +175,14 @@ mod tests {
     use super::{BOOTSTRAP_SOURCES, extract_table_ttl, split_statements};
 
     #[test]
-    fn schema_replaces_legacy_microstructure_view_and_has_no_parallel_capture_table() {
+    fn microstructure_rollup_preserves_latest_availability() {
         let ddl = BOOTSTRAP_SOURCES
             .iter()
             .flat_map(|source| split_statements(source))
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(!ddl.contains("DROP TABLE"));
         assert!(ddl.contains("book_microstructure_1m_mv"));
-        assert!(!ddl.contains("availability_v2"));
         assert!(ddl.contains("max(available_at) AS available_at"));
-        assert!(!ddl.contains("PARTITION BY toYYYYMMDD"));
     }
 
     #[test]

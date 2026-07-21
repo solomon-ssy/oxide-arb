@@ -1,6 +1,6 @@
 //! Atomic report-creation transaction input.
 //!
-//! Produced by the 04.2 composer and written as one Postgres transaction:
+//! Produced by the composer and written as one Postgres transaction:
 //! `account_snapshot → equity_snapshot → data_quality_snapshot → portfolio_plan → report → recommendations`.
 
 use super::{

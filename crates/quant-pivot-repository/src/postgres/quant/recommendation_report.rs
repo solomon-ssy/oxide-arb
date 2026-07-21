@@ -2,37 +2,47 @@
 
 use std::{collections::HashSet, convert::identity};
 
-use super::equity_snapshot::insert_equity_snapshot_monotonic;
-use crate::{
-    postgres::{
-        error, primitives,
-        quant::{
-            feature_parity, order_intent::invalidate_pre_submission_for_recommendation,
-            report_scope::acquire_report_scope_lock, research_profile,
-        },
-        query::paginate_mapped,
-        state_hash,
-        write::insert_many_chunked,
+use chrono::{DateTime, Duration, Utc};
+use quant_pivot_error::storage::{
+    StorageError,
+    entity::{
+        QUANT_FEATURE_PARITY_RUN, QUANT_RECOMMENDATION_REPORT, QUANT_REPORT_RUN, QUANT_RESEARCH_JOB,
     },
-    traits::RecommendationReportRepository,
 };
-use chrono::{DateTime, Utc};
-use quant_pivot_error::storage::{StorageError, entity};
 use quant_pivot_models::{
     domain::{
-        FactDeliverySettlement, NewEntryConditionArtifact, NewEntryConditionAudit,
-        NewEntryConditionInstance, NewOperationLog, NewRecommendation, NewRecommendationReport,
-        NewReportDataQualitySnapshot, NewReportFactDelivery, NewReportFeatureParity,
-        NewReportTransaction, OrderIntentInfo, PageWindow, Paginated, PreparedReportOutcome,
-        PublishReportOutcome, QuantReportListQuery, RecommendationReportInfo,
-        ReportDataQualitySnapshotInfo, ReportFactDeliveryInfo, ReportRunClaim,
+        api::QuantReportListQuery,
+        governance::NewOperationLog,
+        pagination::{PageWindow, Paginated},
+        quant::{
+            FactDeliverySettlement, NewEntryConditionArtifact, NewEntryConditionAudit,
+            NewEntryConditionInstance, NewRecommendation, NewRecommendationReport,
+            NewReportDataQualitySnapshot, NewReportFactDelivery, NewReportFeatureParity,
+            NewReportTransaction, OrderIntentInfo, PreparedReportOutcome, PublishReportOutcome,
+            RecommendationReportInfo, ReportDataQualitySnapshotInfo, ReportFactDeliveryInfo,
+            ReportRunClaim,
+        },
     },
     entities::{
-        operation_log, quant_account_snapshot, quant_entry_condition_artifact,
-        quant_entry_condition_audit, quant_entry_condition_instance, quant_feature_parity_run,
-        quant_portfolio_plan, quant_recommendation, quant_recommendation_report,
-        quant_report_data_quality_snapshot, quant_report_fact_delivery, quant_report_run,
-        quant_research_job, research_profile_artifact,
+        operation_log::Entity as OperationLogEntity,
+        quant_account_snapshot::Entity as QuantAccountSnapshotEntity,
+        quant_entry_condition_artifact::Entity as QuantEntryConditionArtifactEntity,
+        quant_entry_condition_audit::Entity as QuantEntryConditionAuditEntity,
+        quant_entry_condition_instance::Entity as QuantEntryConditionInstanceEntity,
+        quant_feature_parity_run::Entity as QuantFeatureParityRunEntity,
+        quant_portfolio_plan::Entity as QuantPortfolioPlanEntity,
+        quant_recommendation::{Column, Entity as QuantRecommendationEntity},
+        quant_recommendation_report::{
+            Column as QuantRecommendationReportColumn, Entity as QuantRecommendationReportEntity,
+            Model as QuantRecommendationReportModel,
+        },
+        quant_report_data_quality_snapshot::Entity as QuantReportDataQualitySnapshotEntity,
+        quant_report_fact_delivery::{Column as QuantReportFactDeliveryColumn, Entity, Model},
+        quant_report_run::Entity as QuantReportRunEntity,
+        quant_research_job::Entity as QuantResearchJobEntity,
+        research_profile_artifact::{
+            Column as ResearchProfileArtifactColumn, Entity as ResearchProfileArtifactEntity,
+        },
     },
     enums::{
         execution::ApprovalInvalidation,
@@ -60,23 +70,38 @@ use sea_orm::{
     sea_query::{Expr, LockBehavior, LockType},
 };
 
+use super::equity_snapshot::insert_equity_snapshot_monotonic;
+use crate::{
+    postgres::{
+        error, primitives,
+        quant::{
+            feature_parity, order_intent::invalidate_pre_submission_for_recommendation,
+            report_scope::acquire_report_scope_lock, research_profile,
+        },
+        query::paginate_mapped,
+        state_hash,
+        write::insert_many_chunked,
+    },
+    traits::RecommendationReportRepository,
+};
+
 const REPORT_FACT_RETRY_MAX_SECS: i64 = 300;
 const REPORT_FACT_ERROR_MAX_CHARS: usize = 4_096;
 
-fn report_fact_lease_duration(lease_secs: u64) -> Result<chrono::Duration, StorageError> {
+fn report_fact_lease_duration(lease_secs: u64) -> Result<Duration, StorageError> {
     let seconds = i64::try_from(lease_secs).map_err(|error| {
         StorageError::invariant_violation(
-            Some(entity::QUANT_RECOMMENDATION_REPORT),
+            Some(QUANT_RECOMMENDATION_REPORT),
             format!("report fact lease exceeds i64 seconds: {error}"),
         )
     })?;
     if seconds <= 0 {
         return Err(StorageError::invariant_violation(
-            Some(entity::QUANT_RECOMMENDATION_REPORT),
+            Some(QUANT_RECOMMENDATION_REPORT),
             "report fact lease must be greater than zero",
         ));
     }
-    Ok(chrono::Duration::seconds(seconds))
+    Ok(Duration::seconds(seconds))
 }
 
 /// Postgres-backed recommendation report repository.
@@ -91,8 +116,8 @@ impl PgRecommendationReportRepository {
 }
 
 enum FactDeliveryClaim {
-    Held(quant_report_fact_delivery::Model),
-    Lost(quant_report_fact_delivery::Model),
+    Held(Model),
+    Lost(Model),
 }
 
 async fn fact_delivery_claim(
@@ -101,12 +126,12 @@ async fn fact_delivery_claim(
     worker_id: WorkerId,
     now: DateTime<Utc>,
 ) -> Result<FactDeliveryClaim, StorageError> {
-    let row = quant_report_fact_delivery::Entity::find_by_id(report_id.clone())
+    let row = Entity::find_by_id(report_id.clone())
         .lock_exclusive()
         .one(txn)
         .await
         .map_err(StorageError::from)?
-        .ok_or_else(|| StorageError::not_found(entity::QUANT_RECOMMENDATION_REPORT, report_id))?;
+        .ok_or_else(|| StorageError::not_found(QUANT_RECOMMENDATION_REPORT, report_id))?;
     if row.status != ReportFactDeliveryStatus::Delivering
         || row.claim_owner != Some(worker_id)
         || row.lease_expires_at.is_none_or(|expires| expires <= now)
@@ -152,8 +177,8 @@ fn publication_operation_log(
 async fn insert_report_transition_log(
     txn: &DatabaseTransaction,
     action: &str,
-    before: &quant_recommendation_report::Model,
-    after: &quant_recommendation_report::Model,
+    before: &QuantRecommendationReportModel,
+    after: &QuantRecommendationReportModel,
     successor_report_id: Option<&RecommendationReportId>,
 ) -> Result<(), StorageError> {
     let before_info: RecommendationReportInfo = before.clone().into();
@@ -167,7 +192,7 @@ async fn insert_report_transition_log(
         &before_info,
         &after_info,
     )?;
-    operation_log::Entity::insert(log.into_active_model())
+    OperationLogEntity::insert(log.into_active_model())
         .exec(txn)
         .await
         .map_err(StorageError::from)?;
@@ -187,7 +212,7 @@ fn validate_sampled_feature_parity(
 ) -> Result<(), StorageError> {
     let parity = parity.ok_or_else(|| {
         StorageError::invariant_violation(
-            Some(entity::QUANT_FEATURE_PARITY_RUN),
+            Some(QUANT_FEATURE_PARITY_RUN),
             "every committed report requires atomic sampled parity",
         )
     })?;
@@ -195,7 +220,7 @@ fn validate_sampled_feature_parity(
     let job = &parity.job;
     let ResearchJobParams::FeatureParity(params) = &job.params_json else {
         return Err(StorageError::invariant_violation(
-            Some(entity::QUANT_RESEARCH_JOB),
+            Some(QUANT_RESEARCH_JOB),
             "sampled parity job requires typed feature parity params",
         ));
     };
@@ -209,7 +234,7 @@ fn validate_sampled_feature_parity(
         || run.feature_contract_hash.is_none()
     {
         return Err(StorageError::invariant_violation(
-            Some(entity::QUANT_FEATURE_PARITY_RUN),
+            Some(QUANT_FEATURE_PARITY_RUN),
             "sampled parity run must be queued and bound to the exact report/model/decision window",
         ));
     }
@@ -227,7 +252,7 @@ fn validate_sampled_feature_parity(
         || params.request.reason != run.reason
     {
         return Err(StorageError::invariant_violation(
-            Some(entity::QUANT_RESEARCH_JOB),
+            Some(QUANT_RESEARCH_JOB),
             "sampled parity research job must exactly bind the report parity run and runtime config",
         ));
     }
@@ -243,7 +268,7 @@ fn validate_report_data_quality(
     let wrong_config = dq.decision_policy_snapshot_id != report.decision_policy_snapshot_id;
     if wrong_snapshot || wrong_decision || wrong_config {
         return Err(StorageError::invariant_violation(
-            Some(entity::QUANT_RECOMMENDATION_REPORT),
+            Some(QUANT_RECOMMENDATION_REPORT),
             "report DQ snapshot must bind the exact report decision and runtime config",
         ));
     }
@@ -252,7 +277,7 @@ fn validate_report_data_quality(
     for record in &dq.tokens_json.0 {
         let vector_id = record.feature_vector_id.as_ref().ok_or_else(|| {
             StorageError::invariant_violation(
-                Some(entity::QUANT_RECOMMENDATION_REPORT),
+                Some(QUANT_RECOMMENDATION_REPORT),
                 format!(
                     "new report DQ row for market {} has no exact feature-vector binding",
                     record.market_id
@@ -261,7 +286,7 @@ fn validate_report_data_quality(
         })?;
         if !vector_ids.insert(vector_id.clone()) || !markets.insert(record.market_id.clone()) {
             return Err(StorageError::invariant_violation(
-                Some(entity::QUANT_RECOMMENDATION_REPORT),
+                Some(QUANT_RECOMMENDATION_REPORT),
                 "report DQ snapshot contains duplicate feature-vector or market bindings",
             ));
         }
@@ -276,7 +301,7 @@ fn validate_entry_conditions(
 ) -> Result<(), StorageError> {
     if recommendations.len() != instances.len() {
         return Err(StorageError::invariant_violation(
-            Some(entity::QUANT_RECOMMENDATION_REPORT),
+            Some(QUANT_RECOMMENDATION_REPORT),
             "report commit requires exactly one condition instance per recommendation",
         ));
     }
@@ -425,19 +450,19 @@ fn new_condition_audit(
 async fn insert_sampled_feature_parity(
     txn: &DatabaseTransaction,
     parity: Option<NewReportFeatureParity>,
-    report: &quant_recommendation_report::Model,
+    report: &QuantRecommendationReportModel,
 ) -> Result<(), StorageError> {
     let Some(parity) = parity else {
         return Ok(());
     };
     let parity_key = report.recommendation_report_id.to_string();
     let run_id = parity.run.run_id.clone();
-    quant_feature_parity_run::Entity::insert(parity.run.into_active_model())
+    QuantFeatureParityRunEntity::insert(parity.run.into_active_model())
         .exec(txn)
         .await
-        .map_err(|error| error::map_unique(error, entity::QUANT_FEATURE_PARITY_RUN, &parity_key))?;
+        .map_err(|error| error::map_unique(error, QUANT_FEATURE_PARITY_RUN, &parity_key))?;
     feature_parity::insert_frozen_report_subject(txn, &run_id, report).await?;
-    quant_research_job::Entity::insert(parity.job.into_active_model())
+    QuantResearchJobEntity::insert(parity.job.into_active_model())
         .exec(txn)
         .await
         .map_err(StorageError::from)?;
@@ -449,7 +474,7 @@ fn validate_report_transaction(
 ) -> Result<DateTime<Utc>, StorageError> {
     let max_top_n = usize::try_from(MAX_REPORT_TOP_N).map_err(|error| {
         StorageError::invariant_violation(
-            Some(entity::QUANT_RECOMMENDATION_REPORT),
+            Some(QUANT_RECOMMENDATION_REPORT),
             format!("report cascade budget does not fit this platform: {error}"),
         )
     })?;
@@ -458,7 +483,7 @@ fn validate_report_transaction(
         || transaction.recommendations.len() > max_top_n
     {
         return Err(StorageError::invariant_violation(
-            Some(entity::QUANT_RECOMMENDATION_REPORT),
+            Some(QUANT_RECOMMENDATION_REPORT),
             format!("report recommendation set exceeds the {MAX_REPORT_TOP_N}-row cascade budget"),
         ));
     }
@@ -471,7 +496,7 @@ fn validate_report_transaction(
         || transaction.report.expired_at.is_some()
     {
         return Err(StorageError::invariant_violation(
-            Some(entity::QUANT_RECOMMENDATION_REPORT),
+            Some(QUANT_RECOMMENDATION_REPORT),
             "new report must be a scope-normalized Prepared artifact with no lifecycle timestamps",
         ));
     }
@@ -482,7 +507,7 @@ fn validate_report_transaction(
             || recommendation.status != RecommendationStatus::Prepared
     }) {
         return Err(StorageError::invariant_violation(
-            Some(entity::QUANT_RECOMMENDATION_REPORT),
+            Some(QUANT_RECOMMENDATION_REPORT),
             "every recommendation must bind the exact report id and research profile",
         ));
     }
@@ -506,7 +531,7 @@ fn validate_fact_delivery(
 ) -> Result<(), StorageError> {
     let delivery = delivery.ok_or_else(|| {
         StorageError::invariant_violation(
-            Some(entity::QUANT_RECOMMENDATION_REPORT),
+            Some(QUANT_RECOMMENDATION_REPORT),
             "report commit requires an atomic report-fact delivery row",
         )
     })?;
@@ -517,7 +542,7 @@ fn validate_fact_delivery(
         || delivery.funnel_row_count < 0
     {
         return Err(StorageError::invariant_violation(
-            Some(entity::QUANT_RECOMMENDATION_REPORT),
+            Some(QUANT_RECOMMENDATION_REPORT),
             "report-fact delivery must be pending, non-empty, and bind the exact report id",
         ));
     }
@@ -533,10 +558,10 @@ async fn transition_recommendations_for_report(
     if from.is_empty() {
         return Ok(0);
     }
-    quant_recommendation::Entity::update_many()
-        .col_expr(quant_recommendation::Column::Status, Expr::value(to))
-        .filter(quant_recommendation::Column::RecommendationReportId.eq(report_id.clone()))
-        .filter(quant_recommendation::Column::Status.is_in(from.iter().copied()))
+    QuantRecommendationEntity::update_many()
+        .col_expr(Column::Status, Expr::value(to))
+        .filter(Column::RecommendationReportId.eq(report_id.clone()))
+        .filter(Column::Status.is_in(from.iter().copied()))
         .exec(db)
         .await
         .map(|result| result.rows_affected)
@@ -545,9 +570,9 @@ async fn transition_recommendations_for_report(
 
 async fn obsolete_stale_candidate(
     txn: &DatabaseTransaction,
-    candidate: quant_recommendation_report::Model,
-    delivery: quant_report_fact_delivery::Model,
-    current: &quant_recommendation_report::Model,
+    candidate: QuantRecommendationReportModel,
+    delivery: Model,
+    current: &QuantRecommendationReportModel,
     now: DateTime<Utc>,
 ) -> Result<PublishReportOutcome, StorageError> {
     transition_recommendations_for_report(
@@ -614,7 +639,7 @@ async fn publish_candidate_recommendations(
 
 async fn supersede_current_report(
     txn: &DatabaseTransaction,
-    current: quant_recommendation_report::Model,
+    current: QuantRecommendationReportModel,
     successor_report_id: &RecommendationReportId,
     now: DateTime<Utc>,
 ) -> Result<(RecommendationReportInfo, Vec<OrderIntentInfo>), StorageError> {
@@ -623,16 +648,13 @@ async fn supersede_current_report(
         &current.recommendation_report_id,
         Some(successor_report_id),
     )?;
-    let recommendations = quant_recommendation::Entity::find()
-        .filter(
-            quant_recommendation::Column::RecommendationReportId
-                .eq(current.recommendation_report_id.clone()),
-        )
-        .filter(quant_recommendation::Column::Status.is_in([
+    let recommendations = QuantRecommendationEntity::find()
+        .filter(Column::RecommendationReportId.eq(current.recommendation_report_id.clone()))
+        .filter(Column::Status.is_in([
             RecommendationStatus::Published,
             RecommendationStatus::IntentCreated,
         ]))
-        .order_by_asc(quant_recommendation::Column::RecommendationId)
+        .order_by_asc(Column::RecommendationId)
         .lock_exclusive()
         .all(txn)
         .await
@@ -683,25 +705,23 @@ async fn supersede_current_report(
 
 async fn obsolete_older_prepared_reports(
     txn: &DatabaseTransaction,
-    published: &quant_recommendation_report::Model,
+    published: &QuantRecommendationReportModel,
     now: DateTime<Utc>,
 ) -> Result<Vec<RecommendationReportInfo>, StorageError> {
-    let older_prepared = quant_recommendation_report::Entity::find()
+    let older_prepared = QuantRecommendationReportEntity::find()
         .filter(
-            quant_recommendation_report::Column::ResearchProfileArtifactId
+            QuantRecommendationReportColumn::ResearchProfileArtifactId
                 .eq(published.research_profile_artifact_id.clone()),
         )
-        .filter(quant_recommendation_report::Column::ReportKind.eq(published.report_kind))
+        .filter(QuantRecommendationReportColumn::ReportKind.eq(published.report_kind))
+        .filter(QuantRecommendationReportColumn::Status.eq(RecommendationReportStatus::Prepared))
         .filter(
-            quant_recommendation_report::Column::Status.eq(RecommendationReportStatus::Prepared),
-        )
-        .filter(
-            quant_recommendation_report::Column::RecommendationReportId
+            QuantRecommendationReportColumn::RecommendationReportId
                 .ne(published.recommendation_report_id.clone()),
         )
-        .filter(quant_recommendation_report::Column::DecisionAt.lte(published.decision_at))
-        .order_by_asc(quant_recommendation_report::Column::DecisionAt)
-        .order_by_asc(quant_recommendation_report::Column::RecommendationReportId)
+        .filter(QuantRecommendationReportColumn::DecisionAt.lte(published.decision_at))
+        .order_by_asc(QuantRecommendationReportColumn::DecisionAt)
+        .order_by_asc(QuantRecommendationReportColumn::RecommendationReportId)
         .lock_exclusive()
         .all(txn)
         .await
@@ -717,7 +737,7 @@ async fn obsolete_older_prepared_reports(
 
 async fn obsolete_prepared_report(
     txn: &DatabaseTransaction,
-    older: quant_recommendation_report::Model,
+    older: QuantRecommendationReportModel,
     successor_report_id: &RecommendationReportId,
     now: DateTime<Utc>,
 ) -> Result<RecommendationReportInfo, StorageError> {
@@ -728,12 +748,11 @@ async fn obsolete_prepared_report(
         RecommendationStatus::Obsolete,
     )
     .await?;
-    if let Some(older_delivery) =
-        quant_report_fact_delivery::Entity::find_by_id(older.recommendation_report_id.clone())
-            .lock_exclusive()
-            .one(txn)
-            .await
-            .map_err(StorageError::from)?
+    if let Some(older_delivery) = Entity::find_by_id(older.recommendation_report_id.clone())
+        .lock_exclusive()
+        .one(txn)
+        .await
+        .map_err(StorageError::from)?
         && !matches!(
             older_delivery.status,
             ReportFactDeliveryStatus::Verified | ReportFactDeliveryStatus::Cancelled
@@ -766,7 +785,7 @@ async fn obsolete_prepared_report(
 
 async fn verify_delivery(
     txn: &DatabaseTransaction,
-    delivery: quant_report_fact_delivery::Model,
+    delivery: Model,
     now: DateTime<Utc>,
 ) -> Result<ReportFactDeliveryInfo, StorageError> {
     let mut delivery_active = delivery.into_active_model();
@@ -809,21 +828,19 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
 
         let feature_parity_state_id = feature_parity_state_id.ok_or_else(|| {
             StorageError::invariant_violation(
-                Some(entity::QUANT_RECOMMENDATION_REPORT),
+                Some(QUANT_RECOMMENDATION_REPORT),
                 "report commit requires a durable feature-parity clear generation",
             )
         })?;
 
         let txn = self.db.begin().await.map_err(StorageError::from)?;
         let commit_at = primitives::statement_timestamp(&txn).await?;
-        let run = quant_report_run::Entity::find_by_id(run_claim.report_run_id.clone())
+        let run = QuantReportRunEntity::find_by_id(run_claim.report_run_id.clone())
             .lock_exclusive()
             .one(&txn)
             .await
             .map_err(StorageError::from)?
-            .ok_or_else(|| {
-                StorageError::not_found(entity::QUANT_REPORT_RUN, &run_claim.report_run_id)
-            })?;
+            .ok_or_else(|| StorageError::not_found(QUANT_REPORT_RUN, &run_claim.report_run_id))?;
         if run.status != ReportRunStatus::Running
             || run.lease_owner != Some(run_claim.lease_owner)
             || run.lease_expires_at != Some(run_claim.lease_expires_at)
@@ -834,7 +851,7 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
             || run.top_n != Some(report.top_n)
         {
             return Err(StorageError::state_conflict(
-                entity::QUANT_REPORT_RUN,
+                QUANT_REPORT_RUN,
                 Some(&run_claim.report_run_id),
                 "report prepare commit lost its exact running lease or frozen inputs",
             ));
@@ -844,55 +861,53 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
         let profile_artifact_id = research_profile::ensure(&txn, &profile_ref).await?;
         if profile_artifact_id != report.research_profile_artifact_id {
             return Err(StorageError::invariant_violation(
-                Some(entity::QUANT_RECOMMENDATION_REPORT),
+                Some(QUANT_RECOMMENDATION_REPORT),
                 "report profile identity differs from the canonical research artifact",
             ));
         }
 
         // Insert FK targets before the report header, then the report's children.
-        quant_account_snapshot::Entity::insert(account_snapshot.into_active_model())
+        QuantAccountSnapshotEntity::insert(account_snapshot.into_active_model())
             .exec(&txn)
             .await
             .map_err(StorageError::from)?;
         insert_equity_snapshot_monotonic(&txn, equity_snapshot).await?;
-        quant_report_data_quality_snapshot::Entity::insert(
-            data_quality_snapshot.into_active_model(),
-        )
-        .exec(&txn)
-        .await
-        .map_err(StorageError::from)?;
-        quant_portfolio_plan::Entity::insert(portfolio_plan.into_active_model())
+        QuantReportDataQualitySnapshotEntity::insert(data_quality_snapshot.into_active_model())
             .exec(&txn)
             .await
             .map_err(StorageError::from)?;
-        let report_model = quant_recommendation_report::Entity::insert(report.into_active_model())
+        QuantPortfolioPlanEntity::insert(portfolio_plan.into_active_model())
+            .exec(&txn)
+            .await
+            .map_err(StorageError::from)?;
+        let report_model = QuantRecommendationReportEntity::insert(report.into_active_model())
             .exec_with_returning(&txn)
             .await
             .map_err(StorageError::from)?;
         let fact_delivery = fact_delivery.ok_or_else(|| {
             StorageError::invariant_violation(
-                Some(entity::QUANT_RECOMMENDATION_REPORT),
+                Some(QUANT_RECOMMENDATION_REPORT),
                 "validated report-fact delivery disappeared before insert",
             )
         })?;
-        quant_report_fact_delivery::Entity::insert(fact_delivery.into_active_model())
+        Entity::insert(fact_delivery.into_active_model())
             .exec(&txn)
             .await
             .map_err(StorageError::from)?;
-        insert_many_chunked::<quant_entry_condition_artifact::Entity, _>(
+        insert_many_chunked::<QuantEntryConditionArtifactEntity, _>(
             &txn,
             entry_condition_artifacts,
         )
         .await?;
         insert_sampled_feature_parity(&txn, sampled_feature_parity, &report_model).await?;
-        insert_many_chunked::<quant_recommendation::Entity, _>(&txn, recommendations).await?;
+        insert_many_chunked::<QuantRecommendationEntity, _>(&txn, recommendations).await?;
         if !entry_condition_instances.is_empty() {
-            insert_many_chunked::<quant_entry_condition_instance::Entity, _>(
+            insert_many_chunked::<QuantEntryConditionInstanceEntity, _>(
                 &txn,
                 entry_condition_instances.clone(),
             )
             .await?;
-            insert_many_chunked::<quant_entry_condition_audit::Entity, _>(
+            insert_many_chunked::<QuantEntryConditionAuditEntity, _>(
                 &txn,
                 entry_condition_instances
                     .iter()
@@ -901,7 +916,7 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
             )
             .await?;
         }
-        operation_log::Entity::insert(operation_log.into_active_model())
+        OperationLogEntity::insert(operation_log.into_active_model())
             .exec(&txn)
             .await
             .map_err(StorageError::from)?;
@@ -926,7 +941,7 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
         &self,
         report_id: &RecommendationReportId,
     ) -> Result<Option<RecommendationReportInfo>, StorageError> {
-        quant_recommendation_report::Entity::find_by_id(report_id.clone())
+        QuantRecommendationReportEntity::find_by_id(report_id.clone())
             .one(&self.db)
             .await
             .map_err(StorageError::from)
@@ -937,13 +952,12 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
         &self,
         report_id: &RecommendationReportId,
     ) -> Result<Option<RecommendationReportId>, StorageError> {
-        quant_recommendation_report::Entity::find()
-            .filter(quant_recommendation_report::Column::SuccessorReportId.eq(report_id.clone()))
+        QuantRecommendationReportEntity::find()
+            .filter(QuantRecommendationReportColumn::SuccessorReportId.eq(report_id.clone()))
             .filter(
-                quant_recommendation_report::Column::Status
-                    .eq(RecommendationReportStatus::Superseded),
+                QuantRecommendationReportColumn::Status.eq(RecommendationReportStatus::Superseded),
             )
-            .order_by_desc(quant_recommendation_report::Column::SupersededAt)
+            .order_by_desc(QuantRecommendationReportColumn::SupersededAt)
             .one(&self.db)
             .await
             .map_err(StorageError::from)
@@ -954,7 +968,7 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
         &self,
         report_id: &RecommendationReportId,
     ) -> Result<Option<ReportFactDeliveryInfo>, StorageError> {
-        quant_report_fact_delivery::Entity::find_by_id(report_id.clone())
+        Entity::find_by_id(report_id.clone())
             .one(&self.db)
             .await
             .map_err(StorageError::from)
@@ -970,36 +984,30 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
         let database_now = primitives::statement_timestamp(&txn).await?;
         let effective_lease_expires_at = database_now + lease_duration;
-        let row = quant_report_fact_delivery::Entity::find()
+        let row = Entity::find()
             .filter(
                 Condition::any()
                     .add(
-                        quant_report_fact_delivery::Column::Status
-                            .eq(ReportFactDeliveryStatus::Pending),
+                        QuantReportFactDeliveryColumn::Status.eq(ReportFactDeliveryStatus::Pending),
                     )
                     .add(
                         Condition::all()
                             .add(
-                                quant_report_fact_delivery::Column::Status
+                                QuantReportFactDeliveryColumn::Status
                                     .eq(ReportFactDeliveryStatus::Retrying),
                             )
-                            .add(
-                                quant_report_fact_delivery::Column::NextAttemptAt.lte(database_now),
-                            ),
+                            .add(QuantReportFactDeliveryColumn::NextAttemptAt.lte(database_now)),
                     )
                     .add(
                         Condition::all()
                             .add(
-                                quant_report_fact_delivery::Column::Status
+                                QuantReportFactDeliveryColumn::Status
                                     .eq(ReportFactDeliveryStatus::Delivering),
                             )
-                            .add(
-                                quant_report_fact_delivery::Column::LeaseExpiresAt
-                                    .lte(database_now),
-                            ),
+                            .add(QuantReportFactDeliveryColumn::LeaseExpiresAt.lte(database_now)),
                     ),
             )
-            .order_by_asc(quant_report_fact_delivery::Column::CreatedAt)
+            .order_by_asc(QuantReportFactDeliveryColumn::CreatedAt)
             .lock_with_behavior(LockType::Update, LockBehavior::SkipLocked)
             .one(&txn)
             .await
@@ -1010,7 +1018,7 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
         };
         let attempt_count = row.attempt_count.checked_add(1).ok_or_else(|| {
             StorageError::invariant_violation(
-                Some(entity::QUANT_RECOMMENDATION_REPORT),
+                Some(QUANT_RECOMMENDATION_REPORT),
                 "report fact delivery attempt count overflow",
             )
         })?;
@@ -1039,13 +1047,13 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
             ReportFactDeliveryStatus::Retrying | ReportFactDeliveryStatus::Failed
         ) {
             return Err(StorageError::invariant_violation(
-                Some(entity::QUANT_RECOMMENDATION_REPORT),
+                Some(QUANT_RECOMMENDATION_REPORT),
                 "failed report fact delivery must transition to retrying or failed",
             ));
         }
         if error.trim().is_empty() {
             return Err(StorageError::invariant_violation(
-                Some(entity::QUANT_RECOMMENDATION_REPORT),
+                Some(QUANT_RECOMMENDATION_REPORT),
                 "failed report fact delivery requires a non-empty diagnostic",
             ));
         }
@@ -1083,13 +1091,11 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
         occurred_at: DateTime<Utc>,
     ) -> Result<ReportFactDeliveryInfo, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let report_probe = quant_recommendation_report::Entity::find_by_id(report_id.clone())
+        let report_probe = QuantRecommendationReportEntity::find_by_id(report_id.clone())
             .one(&txn)
             .await
             .map_err(StorageError::from)?
-            .ok_or_else(|| {
-                StorageError::not_found(entity::QUANT_RECOMMENDATION_REPORT, report_id)
-            })?;
+            .ok_or_else(|| StorageError::not_found(QUANT_RECOMMENDATION_REPORT, report_id))?;
         acquire_report_scope_lock(
             &txn,
             &report_probe.research_profile_artifact_id.profile_ref().id,
@@ -1097,41 +1103,37 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
         )
         .await?;
         let now = primitives::statement_timestamp(&txn).await?;
-        if occurred_at > now + chrono::Duration::seconds(5) {
+        if occurred_at > now + Duration::seconds(5) {
             return Err(StorageError::invariant_violation(
-                Some(entity::QUANT_RECOMMENDATION_REPORT),
+                Some(QUANT_RECOMMENDATION_REPORT),
                 "publication retry occurrence time cannot be in the future",
             ));
         }
-        let report = quant_recommendation_report::Entity::find_by_id(report_id.clone())
+        let report = QuantRecommendationReportEntity::find_by_id(report_id.clone())
             .lock_exclusive()
             .one(&txn)
             .await
             .map_err(StorageError::from)?
-            .ok_or_else(|| {
-                StorageError::not_found(entity::QUANT_RECOMMENDATION_REPORT, report_id)
-            })?;
+            .ok_or_else(|| StorageError::not_found(QUANT_RECOMMENDATION_REPORT, report_id))?;
         if report.status != RecommendationReportStatus::Prepared
             || report.research_profile_artifact_id != report_probe.research_profile_artifact_id
             || report.report_kind != report_probe.report_kind
         {
             return Err(StorageError::state_conflict(
-                entity::QUANT_RECOMMENDATION_REPORT,
+                QUANT_RECOMMENDATION_REPORT,
                 Some(report_id),
                 "publication retry requires the same immutable Prepared report scope",
             ));
         }
-        let delivery = quant_report_fact_delivery::Entity::find_by_id(report_id.clone())
+        let delivery = Entity::find_by_id(report_id.clone())
             .lock_exclusive()
             .one(&txn)
             .await
             .map_err(StorageError::from)?
-            .ok_or_else(|| {
-                StorageError::not_found(entity::QUANT_RECOMMENDATION_REPORT, report_id)
-            })?;
+            .ok_or_else(|| StorageError::not_found(QUANT_RECOMMENDATION_REPORT, report_id))?;
         if delivery.status != ReportFactDeliveryStatus::Failed {
             return Err(StorageError::state_conflict(
-                entity::QUANT_RECOMMENDATION_REPORT,
+                QUANT_RECOMMENDATION_REPORT,
                 Some(report_id),
                 "publication retry requires a Failed fact delivery",
             ));
@@ -1154,13 +1156,11 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
         occurred_at: DateTime<Utc>,
     ) -> Result<FactDeliverySettlement<PublishReportOutcome>, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let candidate_probe = quant_recommendation_report::Entity::find_by_id(report_id.clone())
+        let candidate_probe = QuantRecommendationReportEntity::find_by_id(report_id.clone())
             .one(&txn)
             .await
             .map_err(StorageError::from)?
-            .ok_or_else(|| {
-                StorageError::not_found(entity::QUANT_RECOMMENDATION_REPORT, report_id)
-            })?;
+            .ok_or_else(|| StorageError::not_found(QUANT_RECOMMENDATION_REPORT, report_id))?;
         acquire_report_scope_lock(
             &txn,
             &candidate_probe
@@ -1171,9 +1171,9 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
         )
         .await?;
         let now = primitives::statement_timestamp(&txn).await?;
-        if occurred_at > now + chrono::Duration::seconds(5) {
+        if occurred_at > now + Duration::seconds(5) {
             return Err(StorageError::invariant_violation(
-                Some(entity::QUANT_RECOMMENDATION_REPORT),
+                Some(QUANT_RECOMMENDATION_REPORT),
                 "publication occurrence time cannot be in the future",
             ));
         }
@@ -1184,17 +1184,15 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
                 return Ok(FactDeliverySettlement::ClaimLost(Box::new(row.into())));
             }
         };
-        let candidate = quant_recommendation_report::Entity::find_by_id(report_id.clone())
+        let candidate = QuantRecommendationReportEntity::find_by_id(report_id.clone())
             .lock_exclusive()
             .one(&txn)
             .await
             .map_err(StorageError::from)?
-            .ok_or_else(|| {
-                StorageError::not_found(entity::QUANT_RECOMMENDATION_REPORT, report_id)
-            })?;
+            .ok_or_else(|| StorageError::not_found(QUANT_RECOMMENDATION_REPORT, report_id))?;
         if candidate.status != RecommendationReportStatus::Prepared {
             return Err(StorageError::illegal_transition(
-                entity::QUANT_RECOMMENDATION_REPORT,
+                QUANT_RECOMMENDATION_REPORT,
                 Some(report_id),
                 candidate.status,
                 RecommendationReportStatus::Published,
@@ -1204,21 +1202,20 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
             || candidate.report_kind != candidate_probe.report_kind
         {
             return Err(StorageError::state_conflict(
-                entity::QUANT_RECOMMENDATION_REPORT,
+                QUANT_RECOMMENDATION_REPORT,
                 Some(report_id),
                 "report scope changed while acquiring publication lock",
             ));
         }
 
-        let current = quant_recommendation_report::Entity::find()
+        let current = QuantRecommendationReportEntity::find()
             .filter(
-                quant_recommendation_report::Column::ResearchProfileArtifactId
+                QuantRecommendationReportColumn::ResearchProfileArtifactId
                     .eq(candidate.research_profile_artifact_id.clone()),
             )
-            .filter(quant_recommendation_report::Column::ReportKind.eq(candidate.report_kind))
+            .filter(QuantRecommendationReportColumn::ReportKind.eq(candidate.report_kind))
             .filter(
-                quant_recommendation_report::Column::Status
-                    .eq(RecommendationReportStatus::Published),
+                QuantRecommendationReportColumn::Status.eq(RecommendationReportStatus::Published),
             )
             .lock_exclusive()
             .one(&txn)
@@ -1277,17 +1274,15 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
         let database_now = primitives::statement_timestamp(&txn).await?;
         let effective_lease_expires_at = database_now + lease_duration;
-        let row = quant_report_fact_delivery::Entity::find()
-            .filter(
-                quant_report_fact_delivery::Column::Status.eq(ReportFactDeliveryStatus::Verified),
-            )
-            .filter(quant_report_fact_delivery::Column::AnnouncedAt.is_null())
+        let row = Entity::find()
+            .filter(QuantReportFactDeliveryColumn::Status.eq(ReportFactDeliveryStatus::Verified))
+            .filter(QuantReportFactDeliveryColumn::AnnouncedAt.is_null())
             .filter(
                 Condition::any()
-                    .add(quant_report_fact_delivery::Column::LeaseExpiresAt.is_null())
-                    .add(quant_report_fact_delivery::Column::LeaseExpiresAt.lte(database_now)),
+                    .add(QuantReportFactDeliveryColumn::LeaseExpiresAt.is_null())
+                    .add(QuantReportFactDeliveryColumn::LeaseExpiresAt.lte(database_now)),
             )
-            .order_by_asc(quant_report_fact_delivery::Column::VerifiedAt)
+            .order_by_asc(QuantReportFactDeliveryColumn::VerifiedAt)
             .lock_with_behavior(LockType::Update, LockBehavior::SkipLocked)
             .one(&txn)
             .await
@@ -1312,21 +1307,19 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
     ) -> Result<ReportFactDeliveryInfo, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
         let now = primitives::statement_timestamp(&txn).await?;
-        let row = quant_report_fact_delivery::Entity::find_by_id(report_id.clone())
+        let row = Entity::find_by_id(report_id.clone())
             .lock_exclusive()
             .one(&txn)
             .await
             .map_err(StorageError::from)?
-            .ok_or_else(|| {
-                StorageError::not_found(entity::QUANT_RECOMMENDATION_REPORT, report_id)
-            })?;
+            .ok_or_else(|| StorageError::not_found(QUANT_RECOMMENDATION_REPORT, report_id))?;
         if row.status != ReportFactDeliveryStatus::Verified
             || row.announced_at.is_some()
             || row.claim_owner != Some(worker_id)
             || row.lease_expires_at.is_none_or(|expires| expires <= now)
         {
             return Err(StorageError::state_conflict(
-                entity::QUANT_RECOMMENDATION_REPORT,
+                QUANT_RECOMMENDATION_REPORT,
                 Some(report_id),
                 "report fact announcement is not leased by this worker",
             ));
@@ -1345,8 +1338,8 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
         &self,
         model_run_id: &ModelRunId,
     ) -> Result<Option<RecommendationReportInfo>, StorageError> {
-        quant_recommendation_report::Entity::find()
-            .filter(quant_recommendation_report::Column::ModelRunId.eq(model_run_id.clone()))
+        QuantRecommendationReportEntity::find()
+            .filter(QuantRecommendationReportColumn::ModelRunId.eq(model_run_id.clone()))
             .one(&self.db)
             .await
             .map_err(StorageError::from)
@@ -1360,15 +1353,15 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
     ) -> Result<Vec<RecommendationReportInfo>, StorageError> {
         if to <= from {
             return Err(StorageError::invariant_violation(
-                Some(entity::QUANT_RECOMMENDATION_REPORT),
+                Some(QUANT_RECOMMENDATION_REPORT),
                 "committed report window requires to > from",
             ));
         }
-        quant_recommendation_report::Entity::find()
-            .filter(quant_recommendation_report::Column::DecisionAt.gte(from))
-            .filter(quant_recommendation_report::Column::DecisionAt.lt(to))
-            .order_by_asc(quant_recommendation_report::Column::DecisionAt)
-            .order_by_asc(quant_recommendation_report::Column::RecommendationReportId)
+        QuantRecommendationReportEntity::find()
+            .filter(QuantRecommendationReportColumn::DecisionAt.gte(from))
+            .filter(QuantRecommendationReportColumn::DecisionAt.lt(to))
+            .order_by_asc(QuantRecommendationReportColumn::DecisionAt)
+            .order_by_asc(QuantRecommendationReportColumn::RecommendationReportId)
             .all(&self.db)
             .await
             .map_err(StorageError::from)
@@ -1379,9 +1372,9 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
         &self,
         report_id: &RecommendationReportId,
     ) -> Result<Option<ReportDataQualitySnapshotInfo>, StorageError> {
-        let Some(snapshot_id) = quant_recommendation_report::Entity::find_by_id(report_id.clone())
+        let Some(snapshot_id) = QuantRecommendationReportEntity::find_by_id(report_id.clone())
             .select_only()
-            .column(quant_recommendation_report::Column::DataQualitySnapshotRef)
+            .column(QuantRecommendationReportColumn::DataQualitySnapshotRef)
             .into_tuple::<ReportDataQualitySnapshotId>()
             .one(&self.db)
             .await
@@ -1389,7 +1382,7 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
         else {
             return Ok(None);
         };
-        quant_report_data_quality_snapshot::Entity::find_by_id(snapshot_id)
+        QuantReportDataQualitySnapshotEntity::find_by_id(snapshot_id)
             .one(&self.db)
             .await
             .map_err(StorageError::from)
@@ -1401,11 +1394,11 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
         query: QuantReportListQuery,
     ) -> Result<Paginated<RecommendationReportInfo>, StorageError> {
         paginate_mapped(
-            quant_recommendation_report::Entity::find()
-                .inner_join(research_profile_artifact::Entity)
+            QuantRecommendationReportEntity::find()
+                .inner_join(ResearchProfileArtifactEntity)
                 .filter(page_condition(&query))
-                .order_by_desc(quant_recommendation_report::Column::PublishedAt)
-                .order_by_desc(quant_recommendation_report::Column::CreatedAt),
+                .order_by_desc(QuantRecommendationReportColumn::PublishedAt)
+                .order_by_desc(QuantRecommendationReportColumn::CreatedAt),
             &self.db,
             PageWindow::from_query(&query),
             Into::into,
@@ -1418,19 +1411,16 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
         profile_id: &ResearchProfileId,
         kind: ReportKind,
     ) -> Result<Option<RecommendationReportInfo>, StorageError> {
-        quant_recommendation_report::Entity::find()
-            .inner_join(quant_report_fact_delivery::Entity)
-            .inner_join(research_profile_artifact::Entity)
-            .filter(research_profile_artifact::Column::ResearchProfileId.eq(profile_id))
-            .filter(quant_recommendation_report::Column::ReportKind.eq(kind))
+        QuantRecommendationReportEntity::find()
+            .inner_join(Entity)
+            .inner_join(ResearchProfileArtifactEntity)
+            .filter(ResearchProfileArtifactColumn::ResearchProfileId.eq(profile_id))
+            .filter(QuantRecommendationReportColumn::ReportKind.eq(kind))
             .filter(
-                quant_recommendation_report::Column::Status
-                    .eq(RecommendationReportStatus::Published),
+                QuantRecommendationReportColumn::Status.eq(RecommendationReportStatus::Published),
             )
-            .filter(
-                quant_report_fact_delivery::Column::Status.eq(ReportFactDeliveryStatus::Verified),
-            )
-            .order_by_desc(quant_recommendation_report::Column::PublishedAt)
+            .filter(QuantReportFactDeliveryColumn::Status.eq(ReportFactDeliveryStatus::Verified))
+            .order_by_desc(QuantRecommendationReportColumn::PublishedAt)
             .one(&self.db)
             .await
             .map_err(StorageError::from)
@@ -1444,24 +1434,21 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
     ) -> Result<Vec<RecommendationReportId>, StorageError> {
         if to <= from {
             return Err(StorageError::invariant_violation(
-                Some(entity::QUANT_RECOMMENDATION_REPORT),
+                Some(QUANT_RECOMMENDATION_REPORT),
                 "actionable report window requires to > from",
             ));
         }
-        quant_recommendation_report::Entity::find()
-            .inner_join(quant_report_fact_delivery::Entity)
+        QuantRecommendationReportEntity::find()
+            .inner_join(Entity)
             .select_only()
-            .column(quant_recommendation_report::Column::RecommendationReportId)
-            .filter(quant_recommendation_report::Column::DecisionAt.gte(from))
-            .filter(quant_recommendation_report::Column::DecisionAt.lt(to))
+            .column(QuantRecommendationReportColumn::RecommendationReportId)
+            .filter(QuantRecommendationReportColumn::DecisionAt.gte(from))
+            .filter(QuantRecommendationReportColumn::DecisionAt.lt(to))
             .filter(
-                quant_recommendation_report::Column::Status
-                    .eq(RecommendationReportStatus::Published),
+                QuantRecommendationReportColumn::Status.eq(RecommendationReportStatus::Published),
             )
-            .filter(
-                quant_report_fact_delivery::Column::Status.eq(ReportFactDeliveryStatus::Verified),
-            )
-            .order_by_asc(quant_recommendation_report::Column::DecisionAt)
+            .filter(QuantReportFactDeliveryColumn::Status.eq(ReportFactDeliveryStatus::Verified))
+            .order_by_asc(QuantRecommendationReportColumn::DecisionAt)
             .into_tuple::<RecommendationReportId>()
             .all(&self.db)
             .await
@@ -1473,17 +1460,14 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
         now: DateTime<Utc>,
         limit: u64,
     ) -> Result<Vec<RecommendationReportId>, StorageError> {
-        quant_recommendation_report::Entity::find()
-            .inner_join(quant_report_fact_delivery::Entity)
+        QuantRecommendationReportEntity::find()
+            .inner_join(Entity)
             .filter(
-                quant_recommendation_report::Column::Status
-                    .eq(RecommendationReportStatus::Published),
+                QuantRecommendationReportColumn::Status.eq(RecommendationReportStatus::Published),
             )
-            .filter(
-                quant_report_fact_delivery::Column::Status.eq(ReportFactDeliveryStatus::Verified),
-            )
-            .filter(quant_recommendation_report::Column::ValidUntil.lte(now))
-            .order_by_asc(quant_recommendation_report::Column::ValidUntil)
+            .filter(QuantReportFactDeliveryColumn::Status.eq(ReportFactDeliveryStatus::Verified))
+            .filter(QuantRecommendationReportColumn::ValidUntil.lte(now))
+            .order_by_asc(QuantRecommendationReportColumn::ValidUntil)
             .limit(limit)
             .all(&self.db)
             .await
@@ -1502,13 +1486,11 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
         operation_log: NewOperationLog,
     ) -> Result<Option<RecommendationReportInfo>, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let probe = quant_recommendation_report::Entity::find_by_id(report_id.clone())
+        let probe = QuantRecommendationReportEntity::find_by_id(report_id.clone())
             .one(&txn)
             .await
             .map_err(StorageError::from)?
-            .ok_or_else(|| {
-                StorageError::not_found(entity::QUANT_RECOMMENDATION_REPORT, report_id)
-            })?;
+            .ok_or_else(|| StorageError::not_found(QUANT_RECOMMENDATION_REPORT, report_id))?;
         acquire_report_scope_lock(
             &txn,
             &probe.research_profile_artifact_id.profile_ref().id,
@@ -1516,29 +1498,26 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
         )
         .await?;
         let now = primitives::statement_timestamp(&txn).await?;
-        if expired_at > now + chrono::Duration::seconds(5) {
+        if expired_at > now + Duration::seconds(5) {
             return Err(StorageError::invariant_violation(
-                Some(entity::QUANT_RECOMMENDATION_REPORT),
+                Some(QUANT_RECOMMENDATION_REPORT),
                 "report expiry occurrence time cannot be in the future",
             ));
         }
 
-        let Some(report) = quant_recommendation_report::Entity::find_by_id(report_id.clone())
+        let Some(report) = QuantRecommendationReportEntity::find_by_id(report_id.clone())
             .lock_exclusive()
             .one(&txn)
             .await
             .map_err(StorageError::from)?
         else {
-            return Err(error::not_found(
-                entity::QUANT_RECOMMENDATION_REPORT,
-                report_id,
-            ));
+            return Err(error::not_found(QUANT_RECOMMENDATION_REPORT, report_id));
         };
         if report.research_profile_artifact_id != probe.research_profile_artifact_id
             || report.report_kind != probe.report_kind
         {
             return Err(StorageError::state_conflict(
-                entity::QUANT_RECOMMENDATION_REPORT,
+                QUANT_RECOMMENDATION_REPORT,
                 Some(report_id),
                 "report scope changed while acquiring expiry lock",
             ));
@@ -1550,12 +1529,9 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
 
         // Roll up only when every recommendation explicitly completes the
         // report roll-up contract; unknown/prepared/actionable states fail closed.
-        let rollup_blockers = quant_recommendation::Entity::find()
-            .filter(quant_recommendation::Column::RecommendationReportId.eq(report_id.clone()))
-            .filter(
-                quant_recommendation::Column::Status
-                    .is_not_in(RecommendationStatus::REPORT_ROLLUP_COMPLETE),
-            )
+        let rollup_blockers = QuantRecommendationEntity::find()
+            .filter(Column::RecommendationReportId.eq(report_id.clone()))
+            .filter(Column::Status.is_not_in(RecommendationStatus::REPORT_ROLLUP_COMPLETE))
             .count(&txn)
             .await
             .map_err(StorageError::from)?;
@@ -1574,7 +1550,7 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
 
         let operation_log =
             state_hash::apply_transition_hashes(operation_log, &before_info, &after_info)?;
-        operation_log::Entity::insert(operation_log.into_active_model())
+        OperationLogEntity::insert(operation_log.into_active_model())
             .exec(&txn)
             .await
             .map_err(StorageError::from)?;
@@ -1603,44 +1579,44 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
     }
 }
 
-fn report_fact_retry_delay(attempt_count: i32) -> chrono::Duration {
+fn report_fact_retry_delay(attempt_count: i32) -> Duration {
     let exponent = u32::try_from(attempt_count.saturating_sub(1)).map_or(u32::MAX, identity);
     let seconds = 1_i64
         .checked_shl(exponent.min(62))
         .map_or(i64::MAX, identity)
         .min(REPORT_FACT_RETRY_MAX_SECS);
-    chrono::Duration::seconds(seconds)
+    Duration::seconds(seconds)
 }
 
 fn page_condition(query: &QuantReportListQuery) -> Condition {
     Condition::all()
         .add_option(query.profile_id.as_ref().map(|profile_id| {
-            research_profile_artifact::Column::ResearchProfileId.eq(profile_id.clone())
+            ResearchProfileArtifactColumn::ResearchProfileId.eq(profile_id.clone())
         }))
         .add_option(
             query
                 .kind
-                .map(|kind| quant_recommendation_report::Column::ReportKind.eq(kind)),
+                .map(|kind| QuantRecommendationReportColumn::ReportKind.eq(kind)),
         )
         .add_option(
             query
                 .status
-                .map(|status| quant_recommendation_report::Column::Status.eq(status)),
+                .map(|status| QuantRecommendationReportColumn::Status.eq(status)),
         )
         .add_option(
-            query.runtime_mode.map(|runtime_mode| {
-                quant_recommendation_report::Column::RuntimeMode.eq(runtime_mode)
-            }),
+            query
+                .runtime_mode
+                .map(|runtime_mode| QuantRecommendationReportColumn::RuntimeMode.eq(runtime_mode)),
         )
         .add_option(
             query
                 .from
-                .map(|from| quant_recommendation_report::Column::DecisionAt.gte(from)),
+                .map(|from| QuantRecommendationReportColumn::DecisionAt.gte(from)),
         )
         .add_option(
             query
                 .to
-                .map(|to| quant_recommendation_report::Column::DecisionAt.lt(to)),
+                .map(|to| QuantRecommendationReportColumn::DecisionAt.lt(to)),
         )
 }
 
@@ -1654,11 +1630,11 @@ async fn transition_report_status(
     operation_log: NewOperationLog,
 ) -> Result<(RecommendationReportInfo, Vec<OrderIntentInfo>), StorageError> {
     let txn = db.begin().await.map_err(StorageError::from)?;
-    let probe = quant_recommendation_report::Entity::find_by_id(report_id.clone())
+    let probe = QuantRecommendationReportEntity::find_by_id(report_id.clone())
         .one(&txn)
         .await
         .map_err(StorageError::from)?
-        .ok_or_else(|| StorageError::not_found(entity::QUANT_RECOMMENDATION_REPORT, report_id))?;
+        .ok_or_else(|| StorageError::not_found(QUANT_RECOMMENDATION_REPORT, report_id))?;
     acquire_report_scope_lock(
         &txn,
         &probe.research_profile_artifact_id.profile_ref().id,
@@ -1666,29 +1642,26 @@ async fn transition_report_status(
     )
     .await?;
     let now = primitives::statement_timestamp(&txn).await?;
-    if occurred_at > now + chrono::Duration::seconds(5) {
+    if occurred_at > now + Duration::seconds(5) {
         return Err(StorageError::invariant_violation(
-            Some(entity::QUANT_RECOMMENDATION_REPORT),
+            Some(QUANT_RECOMMENDATION_REPORT),
             "report lifecycle occurrence time cannot be in the future",
         ));
     }
 
-    let Some(row) = quant_recommendation_report::Entity::find_by_id(report_id.clone())
+    let Some(row) = QuantRecommendationReportEntity::find_by_id(report_id.clone())
         .lock_exclusive()
         .one(&txn)
         .await
         .map_err(StorageError::from)?
     else {
-        return Err(error::not_found(
-            entity::QUANT_RECOMMENDATION_REPORT,
-            report_id,
-        ));
+        return Err(error::not_found(QUANT_RECOMMENDATION_REPORT, report_id));
     };
     if row.research_profile_artifact_id != probe.research_profile_artifact_id
         || row.report_kind != probe.report_kind
     {
         return Err(StorageError::state_conflict(
-            entity::QUANT_RECOMMENDATION_REPORT,
+            QUANT_RECOMMENDATION_REPORT,
             Some(report_id),
             "report scope changed while acquiring lifecycle lock",
         ));
@@ -1696,21 +1669,21 @@ async fn transition_report_status(
     let idempotent = row.status == report_status;
     if !idempotent && !row.status.allows_transition_to(report_status) {
         return Err(error::illegal_transition(
-            entity::QUANT_RECOMMENDATION_REPORT,
+            QUANT_RECOMMENDATION_REPORT,
             Some(report_id),
             row.status,
             report_status,
         ));
     }
 
-    let recommendations = quant_recommendation::Entity::find()
-        .filter(quant_recommendation::Column::RecommendationReportId.eq(report_id.clone()))
-        .filter(quant_recommendation::Column::Status.is_in([
+    let recommendations = QuantRecommendationEntity::find()
+        .filter(Column::RecommendationReportId.eq(report_id.clone()))
+        .filter(Column::Status.is_in([
             RecommendationStatus::Prepared,
             RecommendationStatus::Published,
             RecommendationStatus::IntentCreated,
         ]))
-        .order_by_asc(quant_recommendation::Column::RecommendationId)
+        .order_by_asc(Column::RecommendationId)
         .lock_exclusive()
         .all(&txn)
         .await
@@ -1719,7 +1692,7 @@ async fn transition_report_status(
         RecommendationReportStatus::Revoked => ApprovalInvalidation::ReportRevoked,
         _ => {
             return Err(error::invariant_violation(
-                Some(entity::QUANT_RECOMMENDATION_REPORT),
+                Some(QUANT_RECOMMENDATION_REPORT),
                 "composite report terminal command only supports revoke",
             ));
         }
@@ -1755,7 +1728,7 @@ async fn transition_report_status(
         return Ok((info, invalidated_intents));
     }
 
-    if let Some(delivery) = quant_report_fact_delivery::Entity::find_by_id(report_id.clone())
+    if let Some(delivery) = Entity::find_by_id(report_id.clone())
         .lock_exclusive()
         .one(&txn)
         .await
@@ -1784,7 +1757,7 @@ async fn transition_report_status(
 
     let operation_log =
         state_hash::apply_transition_hashes(operation_log, &before_info, &after_info)?;
-    operation_log::Entity::insert(operation_log.into_active_model())
+    OperationLogEntity::insert(operation_log.into_active_model())
         .exec(&txn)
         .await
         .map_err(StorageError::from)?;
@@ -1795,14 +1768,18 @@ async fn transition_report_status(
 
 #[cfg(test)]
 mod tests {
-    use super::{REPORT_FACT_RETRY_MAX_SECS, page_condition, report_fact_retry_delay};
     use quant_pivot_models::{
-        domain::{QuantReportListQuery, pagination::PageRequest},
-        entities::{quant_recommendation_report, research_profile_artifact},
+        domain::{api::QuantReportListQuery, pagination::PageRequest},
+        entities::{
+            quant_recommendation_report::Entity,
+            research_profile_artifact::Entity as ResearchProfileArtifactEntity,
+        },
         enums::quant::{QuantRuntimeMode, RecommendationReportStatus, ReportKind},
         types::ResearchProfileId,
     };
     use sea_orm::{DbBackend, EntityTrait, QueryFilter, QueryTrait};
+
+    use super::{REPORT_FACT_RETRY_MAX_SECS, page_condition, report_fact_retry_delay};
 
     #[test]
     fn page_condition_adds_optional_filters_to_sql() {
@@ -1816,8 +1793,8 @@ mod tests {
             page: PageRequest::default(),
         };
 
-        let sql = quant_recommendation_report::Entity::find()
-            .inner_join(research_profile_artifact::Entity)
+        let sql = Entity::find()
+            .inner_join(ResearchProfileArtifactEntity)
             .filter(page_condition(&query))
             .build(DbBackend::Postgres)
             .to_string();

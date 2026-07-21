@@ -1,9 +1,9 @@
 //! Deterministic live/replay entry-condition evaluator.
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, NaiveDate, Utc};
 use quant_pivot_error::{QuantError, QuantResult, report::ReportError};
 use quant_pivot_models::{
-    domain::{PriceBoundaryInclusion, PriceComparator},
+    domain::quant::{PriceBoundaryInclusion, PriceComparator},
     enums::quant::{EntryConditionState, OutcomeSide, PriceComparison},
     hashing::CanonicalDigest,
     types::{
@@ -590,7 +590,7 @@ fn evaluate_weather_closed_outside(
 trait WeatherPredicate {
     fn source(&self) -> &EntryConditionSourceBinding;
     fn station(&self) -> &str;
-    fn local_date(&self) -> chrono::NaiveDate;
+    fn local_date(&self) -> NaiveDate;
     fn temperature_statistic(&self) -> WeatherTemperatureStatistic;
     fn max_input_age_ms(&self) -> Option<u64>;
 }
@@ -602,7 +602,7 @@ impl WeatherPredicate for WeatherDailyTemperatureEnteredBand {
     fn station(&self) -> &str {
         &self.station
     }
-    fn local_date(&self) -> chrono::NaiveDate {
+    fn local_date(&self) -> NaiveDate {
         self.local_date
     }
     fn temperature_statistic(&self) -> WeatherTemperatureStatistic {
@@ -620,7 +620,7 @@ impl WeatherPredicate for WeatherDailyTemperatureCrossedTerminalBound {
     fn station(&self) -> &str {
         &self.station
     }
-    fn local_date(&self) -> chrono::NaiveDate {
+    fn local_date(&self) -> NaiveDate {
         self.local_date
     }
     fn temperature_statistic(&self) -> WeatherTemperatureStatistic {
@@ -638,7 +638,7 @@ impl WeatherPredicate for WeatherObservationDayClosedOutsideBand {
     fn station(&self) -> &str {
         &self.station
     }
-    fn local_date(&self) -> chrono::NaiveDate {
+    fn local_date(&self) -> NaiveDate {
         self.local_date
     }
     fn temperature_statistic(&self) -> WeatherTemperatureStatistic {
@@ -901,7 +901,7 @@ pub fn decide_entry_condition_state(
 mod tests {
     use chrono::{DateTime, Duration, NaiveDate, TimeZone, Utc};
     use quant_pivot_models::{
-        domain::{PriceBoundaryInclusion, PriceComparator},
+        domain::quant::{PriceBoundaryInclusion, PriceComparator},
         enums::quant::{EntryConditionState, OutcomeSide},
         types::{
             ClockAnchor, ClockCondition, ConditionTruth, ConditionUnavailableReason,

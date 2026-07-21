@@ -1,5 +1,5 @@
 //! [`CategoryPointerGuard`]: config-apply-time validation of
-//! `model.category_model_pointers` (11.2.2 remediation R7).
+//! `model.category_model_pointers`.
 //!
 //! A configured category route is a governed decision and never falls back to
 //! the generic model. This guard runs on every runtime-config activation and
@@ -9,6 +9,8 @@
 //! The online runner repeats the same invariant before each round so artifact
 //! replacement or registry corruption still fails closed.
 
+use std::sync::Arc;
+
 use quant_pivot_error::control::ControlError;
 use quant_pivot_models::{
     enums::{common::MarketCategory, quant::PublicationStatus},
@@ -17,7 +19,6 @@ use quant_pivot_models::{
 };
 use quant_pivot_repository::traits::ModelRegistryRepository;
 use quant_pivot_research::{artifact::ArtifactStore, model::load_hash_verified_artifact};
-use std::sync::Arc;
 /// Validates `model.category_model_pointers` against the model registry and
 /// the content-addressed artifact store on every runtime-config activation.
 pub struct CategoryPointerGuard {
@@ -105,15 +106,26 @@ impl CategoryPointerGuard {
 
 #[cfg(test)]
 mod tests {
-    use super::CategoryPointerGuard;
+    use std::{
+        collections::BTreeMap,
+        env, process,
+        sync::{
+            Arc,
+            atomic::{AtomicU64, Ordering},
+        },
+    };
+
     use async_trait::async_trait;
     use chrono::Utc;
     use quant_pivot_error::storage::StorageError;
     use quant_pivot_models::{
         domain::{
-            ModelPickerSide, ModelSpecInfo, ModelSpecListQuery, ModelVersionInfo,
-            ModelVersionListQuery, NewModelSpec, NewModelVersion, Paginated,
-            PublishedModelCatalogInfo,
+            api::{ModelPickerSide, ModelSpecListQuery, ModelVersionListQuery},
+            pagination::Paginated,
+            quant::{
+                ModelSpecInfo, ModelVersionInfo, NewModelSpec, NewModelVersion,
+                PublishedModelCatalogInfo,
+            },
         },
         enums::{common::MarketCategory, model::ModelFamily, quant::PublicationStatus},
         runtime_config::{FactorCrossSectionConfig, ModelConfig, ModelVersionRef},
@@ -130,23 +142,16 @@ mod tests {
         artifact::{ArtifactStore, LocalArtifactStore},
         factors::{FrozenReferenceQuantiles, names},
         model::{
-            FactorWeight, ModelArtifact, ModelArtifactHeader, ModelFamily as ResearchModelFamily,
-            ReturnModelSpec, ScoreMultiplierSpec, SubstitutionConfidenceRules,
-            WeightedFactorModelArtifact, model_input_contract_hash,
+            FactorWeight, ModelArtifact, ModelArtifactHeader, ReturnModelSpec, ScoreMultiplierSpec,
+            SubstitutionConfidenceRules, WeightedFactorModelArtifact, model_input_contract_hash,
         },
-    };
-    use quant_pivot_test_support::{
-        execution_pg_seed::fixture_profile_ref,
-        model_spec_fixtures::{model_spec_lineage_fixture, new_model_spec_fixture},
     };
     use rust_decimal_macros::dec;
-    use std::{
-        collections::BTreeMap,
-        env, process,
-        sync::{
-            Arc,
-            atomic::{AtomicU64, Ordering},
-        },
+
+    use super::CategoryPointerGuard;
+    use crate::test_fixtures::{
+        execution_pg_seed::fixture_profile_ref,
+        model_spec_fixtures::{model_spec_lineage_fixture, new_model_spec_fixture},
     };
 
     struct FakeRegistry {
@@ -323,7 +328,7 @@ mod tests {
                 model_version_id,
                 model_spec_definition_hash: spec().definition_hash,
                 profile_ref: fixture_profile_ref(),
-                model_family: ResearchModelFamily::WeightedFactor,
+                model_family: ModelFamily::WeightedFactor,
                 feature_schema_hash: ContentHash::parse(format!("blake3:{}", "1".repeat(64)))
                     .expect("hash"),
                 factor_schema_hash: ContentHash::parse(format!("blake3:{}", "2".repeat(64)))

@@ -1,4 +1,4 @@
-//! Structural (prediction-market-aware) factor computers (Phase 11.2.1).
+//! Structural (prediction-market-aware) factor computers.
 //!
 //! Each is a pure, per-market function over a [`FeatureVector`]; distributional
 //! normalization is the [`FactorEngine`](crate::factors::FactorEngine)'s job.
@@ -39,7 +39,18 @@ use crate::{
     },
     features::{
         self, FeatureCellState, FeatureName, FeatureValue, FeatureVector, NullReason,
-        names::{book as book_names, market as market_names, structural as feat},
+        names::{
+            book as book_names,
+            book::MID,
+            market as market_names,
+            market::{CATEGORY, TIME_TO_RESOLUTION_SECS},
+            structural as feat,
+            structural::{
+                NEGRISK_CONVERT_EDGE, NEGRISK_LEG_ASK_SUM, NEGRISK_LEG_BID_SUM, NEGRISK_LEG_COUNT,
+                PARTICIPANT_CR1_SHARE, PARTICIPANT_GINI, PARTICIPANT_HHI, PRICE_EXTREMITY,
+                SHOCK_RATIO, SHORT_RETURN,
+            },
+        },
     },
     model::FavoriteLongshotBiasTable,
     trade_tape::{ConcentrationCompositeWeights, composite_concentration},
@@ -131,7 +142,7 @@ pub fn structural_factors(
                 // signal: it measures whether the basket-vs-adapter route is
                 // mispriced, but does NOT indicate which leg to buy. It is a
                 // magnitude/regime feature (Neutral direction, NormalizedScore)
-                // that the learned model (11.4) may weight — it never picks a
+                // that the learned model may weight — it never picks a
                 // side in the heuristic net.
                 FactorDirection::Neutral,
                 FactorNormalization::WinsorizedZScore,
@@ -198,8 +209,8 @@ fn participant_concentration_factor(
     })
 }
 
-/// A structural factor spec (never *required* — structural signals degrade
-/// gracefully; weighting is learned in 11.4).
+/// A structural factor spec. Structural signals are never required: missing
+/// inputs degrade gracefully, while weighting is learned by the model.
 fn structural_spec(
     name: FactorName,
     input_features: Vec<FeatureName>,
@@ -291,10 +302,9 @@ impl FactorComputer for ReversalAfterShockFactor {
         &self.spec
     }
     fn compute_raw(&self, features: &FeatureVector) -> QuantResult<RawFactor> {
-        let (Some(shock), Some(short_return)) = (
-            read(features, &feat::SHOCK_RATIO),
-            read(features, &feat::SHORT_RETURN),
-        ) else {
+        let (Some(shock), Some(short_return)) =
+            (read(features, &SHOCK_RATIO), read(features, &SHORT_RETURN))
+        else {
             return Ok(inert(
                 self.definition_id.clone(),
                 &self.spec,
@@ -359,8 +369,8 @@ impl FactorComputer for ResolutionProximityRegimeFactor {
     }
     fn compute_raw(&self, features: &FeatureVector) -> QuantResult<RawFactor> {
         let (Some(extremity), Some(ttr_secs)) = (
-            read(features, &feat::PRICE_EXTREMITY),
-            read(features, &market_names::TIME_TO_RESOLUTION_SECS),
+            read(features, &PRICE_EXTREMITY),
+            read(features, &TIME_TO_RESOLUTION_SECS),
         ) else {
             return Ok(inert(
                 self.definition_id.clone(),
@@ -459,9 +469,9 @@ impl FactorComputer for ParticipantConcentrationFactor {
 
     fn compute_raw(&self, features: &FeatureVector) -> QuantResult<RawFactor> {
         let (Some(gini), Some(cr1), Some(hhi)) = (
-            read(features, &feat::PARTICIPANT_GINI),
-            read(features, &feat::PARTICIPANT_CR1_SHARE),
-            read(features, &feat::PARTICIPANT_HHI),
+            read(features, &PARTICIPANT_GINI),
+            read(features, &PARTICIPANT_CR1_SHARE),
+            read(features, &PARTICIPANT_HHI),
         ) else {
             return Ok(inert(
                 self.definition_id.clone(),
@@ -534,7 +544,7 @@ fn negrisk_outcome(
             let Some(decimal) = cell.value().and_then(features::feature_scalar) else {
                 return NegRiskOutcome::LegMissing;
             };
-            let Some(legs) = read(features, &feat::NEGRISK_LEG_COUNT) else {
+            let Some(legs) = read(features, &NEGRISK_LEG_COUNT) else {
                 return NegRiskOutcome::LegMissing;
             };
             if legs < Decimal::from(min_legs) {
@@ -605,7 +615,7 @@ impl FactorComputer for NegRiskLegSumDriftFactor {
             &self.definition_id,
             &self.spec,
             features,
-            feat::NEGRISK_LEG_ASK_SUM,
+            NEGRISK_LEG_ASK_SUM,
             self.min_legs,
             |ask_sum| ask_sum - Decimal::ONE,
             "neg-risk leg-sum drift",
@@ -628,9 +638,9 @@ impl FactorComputer for NegRiskLegSumDriftFactor {
 /// mispricing measure; wide legs ⇒ discount confidence. `None` when the bid-sum
 /// or count is unavailable (confidence then keeps its data-quality base).
 fn leg_tightness(features: &FeatureVector) -> Option<Decimal> {
-    let ask_sum = read(features, &feat::NEGRISK_LEG_ASK_SUM)?;
-    let bid_sum = read(features, &feat::NEGRISK_LEG_BID_SUM)?;
-    let count = read(features, &feat::NEGRISK_LEG_COUNT)?;
+    let ask_sum = read(features, &NEGRISK_LEG_ASK_SUM)?;
+    let bid_sum = read(features, &NEGRISK_LEG_BID_SUM)?;
+    let count = read(features, &NEGRISK_LEG_COUNT)?;
     if count <= Decimal::ZERO {
         return None;
     }
@@ -656,7 +666,7 @@ impl FactorComputer for NegRiskConvertEdgeFactor {
             &self.definition_id,
             &self.spec,
             features,
-            feat::NEGRISK_CONVERT_EDGE,
+            NEGRISK_CONVERT_EDGE,
             self.min_legs,
             |edge| edge,
             "neg-risk convert edge",
@@ -690,11 +700,9 @@ impl FactorComputer for FavoriteLongshotFactor {
                 "no bias table bound".to_owned(),
             ));
         };
-        let category = features
-            .value(&market_names::CATEGORY)
-            .and_then(feature_category);
-        let mid = read(features, &book_names::MID);
-        let ttr = read(features, &market_names::TIME_TO_RESOLUTION_SECS);
+        let category = features.value(&CATEGORY).and_then(feature_category);
+        let mid = read(features, &MID);
+        let ttr = read(features, &TIME_TO_RESOLUTION_SECS);
         let (Some(category), Some(mid), Some(ttr_secs)) = (category, mid, ttr) else {
             return Ok(inert(
                 self.definition_id.clone(),
@@ -772,7 +780,7 @@ mod tests {
         factors::{names::STRUCT_NEGRISK_LEG_SUM_DRIFT, value::RawFactorEligibility},
         features::{
             FeatureCell, FeatureName, FeatureStaleness, FeatureValue, FeatureVector, NullReason,
-            names::structural as feat,
+            names::structural::{NEGRISK_LEG_ASK_SUM, NEGRISK_LEG_COUNT},
         },
     };
 
@@ -802,11 +810,11 @@ mod tests {
     fn binary_market_gets_not_applicable_for_negrisk_factor() {
         let mut values = BTreeMap::new();
         values.insert(
-            feat::NEGRISK_LEG_ASK_SUM,
+            NEGRISK_LEG_ASK_SUM,
             FeatureCell::not_applicable(NullReason::NotApplicable),
         );
         values.insert(
-            feat::NEGRISK_LEG_COUNT,
+            NEGRISK_LEG_COUNT,
             FeatureCell::not_applicable(NullReason::NotApplicable),
         );
         assert!(matches!(
@@ -819,11 +827,11 @@ mod tests {
     fn negrisk_factor_indeterminate_when_leg_book_missing() {
         let mut values = BTreeMap::new();
         values.insert(
-            feat::NEGRISK_LEG_ASK_SUM,
+            NEGRISK_LEG_ASK_SUM,
             FeatureCell::missing(NullReason::LegBookMissing, None, FeatureStaleness::Unknown),
         );
         values.insert(
-            feat::NEGRISK_LEG_COUNT,
+            NEGRISK_LEG_COUNT,
             FeatureCell::missing(NullReason::LegBookMissing, None, FeatureStaleness::Unknown),
         );
         assert!(matches!(
@@ -837,7 +845,7 @@ mod tests {
         let mut values = BTreeMap::new();
         // Σ best-ask across 3 legs = 1.08 ⇒ drift = 0.08.
         values.insert(
-            feat::NEGRISK_LEG_ASK_SUM,
+            NEGRISK_LEG_ASK_SUM,
             FeatureCell::observed(
                 FeatureValue::Decimal(Decimal::new(108, 2)),
                 None,
@@ -845,7 +853,7 @@ mod tests {
             ),
         );
         values.insert(
-            feat::NEGRISK_LEG_COUNT,
+            NEGRISK_LEG_COUNT,
             FeatureCell::observed(FeatureValue::Count(3), None, FeatureStaleness::Unknown),
         );
         let factors = FactorsConfig::default();

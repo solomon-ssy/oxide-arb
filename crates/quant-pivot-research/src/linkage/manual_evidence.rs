@@ -1,4 +1,4 @@
-//! Operator-override grounding gate (11.2.2 remediation R4).
+//! Operator-override grounding gate.
 //!
 //! An operator override is a human decision, not text-extracted evidence —
 //! no [`crate::linkage::SubjectExtractor`] tier produced it. But the
@@ -12,7 +12,7 @@
 //! judgment call and are not required to cite a span here either.
 
 use quant_pivot_models::{
-    domain::{
+    domain::quant::{
         CryptoSubject, GroundingKind, GroundingProof, GroundingSpan, LinkageSourceMetadata,
         ManualEvidenceInput,
     },
@@ -31,9 +31,8 @@ const ALWAYS_REQUIRED_FIELDS: [&str; 2] = ["asset", "resolution_oracle"];
 ///
 /// Runs the same [`validate_structural_consistency`] every automated
 /// candidate must clear, then verifies the operator cited real, byte-exact
-/// text for every load-bearing identity field. Returns the constructed
-/// [`GroundingProof`] on success — never an empty one, unlike the
-/// pre-remediation stub.
+/// text for every load-bearing identity field. Returns a non-empty
+/// [`GroundingProof`] on success.
 ///
 /// # Errors
 ///
@@ -46,7 +45,8 @@ pub fn validate_manual_override(
     metadata: &LinkageSourceMetadata,
     evidence: &[ManualEvidenceInput],
 ) -> Result<GroundingProof, String> {
-    validate_structural_consistency(subject, instrument_key)?;
+    validate_structural_consistency(subject, instrument_key)
+        .map_err(|failure| failure.to_string())?;
 
     let mut required_fields = ALWAYS_REQUIRED_FIELDS.to_vec();
     if subject.strike.is_some() {
@@ -100,17 +100,18 @@ fn ground_one(
 
 #[cfg(test)]
 mod tests {
-    use crate::linkage;
-
-    use super::validate_manual_override;
     use chrono::{TimeZone, Utc};
     use quant_pivot_models::{
-        domain::{
+        domain::quant::{
             CryptoSubject, GroundingField, GroundingKind, LinkageSourceMetadata,
             ManualEvidenceInput, PriceComparator, ResolutionOracle,
         },
         types::{ChainlinkFeedKey, CryptoAsset, CryptoQuote, DomainInstrumentKey, MarketId, Usd},
     };
+    use rust_decimal::Decimal;
+
+    use super::validate_manual_override;
+    use crate::linkage;
 
     fn metadata() -> LinkageSourceMetadata {
         LinkageSourceMetadata {
@@ -211,7 +212,7 @@ mod tests {
     fn strike_is_required_only_when_present() {
         let mut with_strike = subject();
         with_strike.comparator = PriceComparator::GreaterThanOrEqual;
-        with_strike.strike = Some(Usd::new(rust_decimal::Decimal::from(100_000)));
+        with_strike.strike = Some(Usd::new(Decimal::from(100_000)));
         let evidence = vec![
             ManualEvidenceInput {
                 subject_field: "asset".to_owned(),

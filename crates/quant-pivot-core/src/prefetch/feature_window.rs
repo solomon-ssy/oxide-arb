@@ -7,8 +7,8 @@
 //! bucket is bounded by the source cutoff frozen in [`DecisionBoundary`], so no
 //! look-ahead is possible.
 //!
-//! The historical (`as_of`-bounded, replay) provider for backtests and training
-//! datasets is deferred to 3.5; this online provider reads only recent facts.
+//! Historical `as_of`-bounded replay uses its dedicated provider; this online
+//! provider reads only recent facts.
 
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
@@ -16,7 +16,7 @@ use chrono::{DateTime, Duration as ChronoDuration, TimeZone, Utc};
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
     clickhouse::{BookMicrostructureRow, ChBps, ChDecimal64, ChPrice, ChUsd},
-    domain::{
+    domain::data_plane::{
         CryptoPriceReport, DecisionBoundary, DecisionSource, DomainObservation, TradeTapePrint,
         WeatherForecastPoint, WeatherObservationFact,
     },
@@ -24,8 +24,7 @@ use quant_pivot_models::{
 };
 use quant_pivot_repository::traits::QuantFactReadRepository;
 use quant_pivot_research::{
-    features::TradeTapeWindowSnapshot,
-    features::{MarketWindowSnapshot, MicrostructureBucket},
+    features::{MarketWindowSnapshot, MicrostructureBucket, TradeTapeWindowSnapshot},
     selection::SelectedMarket,
 };
 
@@ -121,8 +120,8 @@ impl FeatureWindowProvider {
         Ok(windows)
     }
 
-    /// Load PIT-bounded domain observations for a set of external instruments
-    /// (Phase 11.2.2). Series are ascending by `observed_at`, all inside
+    /// Load PIT-bounded domain observations for a set of external instruments.
+    /// Series are ascending by `observed_at`, all inside
     /// `[source_cutoff - lookback, source_cutoff]` and available by `decision_at`.
     ///
     /// # Errors
@@ -505,8 +504,7 @@ mod tests {
     use std::time::Duration;
 
     use chrono::{Duration as ChronoDuration, TimeZone, Utc};
-
-    use quant_pivot_models::domain::DecisionClock;
+    use quant_pivot_models::domain::data_plane::DecisionClock;
 
     use super::window_start;
 

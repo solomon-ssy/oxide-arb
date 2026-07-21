@@ -1,5 +1,9 @@
 //! Durable entry-condition artifact, instance, lease, and audit DTOs.
 
+use chrono::{DateTime, NaiveDate, Utc};
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
+use serde::{Deserialize, Serialize};
+
 use crate::{
     entities::{
         quant_entry_condition_artifact, quant_entry_condition_audit, quant_entry_condition_instance,
@@ -12,9 +16,6 @@ use crate::{
         WeatherTemperatureStatistic, WorkerId,
     },
 };
-use chrono::{DateTime, Utc};
-use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
-use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
 #[sea_orm(entity = "quant_entry_condition_artifact::Entity")]
@@ -251,7 +252,7 @@ pub struct WeatherDailyTemperatureProjectionInfo {
     pub source_id: DomainSourceId,
     pub instrument_key: DomainInstrumentKey,
     pub station: String,
-    pub local_date: chrono::NaiveDate,
+    pub local_date: NaiveDate,
     pub timezone: String,
     pub temperature_statistic: WeatherTemperatureStatistic,
     pub current_extreme: TemperatureCelsius,

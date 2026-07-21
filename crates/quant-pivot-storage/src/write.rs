@@ -23,15 +23,18 @@ use std::{
     future::Future,
     mem,
     pin::Pin,
-    sync::Arc,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 
+use flume::{Receiver, RecvTimeoutError, SendTimeoutError, Sender};
 use parking_lot::Mutex;
 use prometheus::{IntCounter, IntGauge};
 use quant_pivot_error::storage::StorageError;
-use tokio::time::timeout;
+use tokio::time::{MissedTickBehavior, timeout};
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
@@ -159,7 +162,7 @@ impl AsyncWriterConfig {
 ///
 /// Cheap to clone (clones the `flume` sender and shares the drop counter).
 pub struct AsyncWriter<T: Send + 'static> {
-    tx: flume::Sender<Queued<T>>,
+    tx: Sender<Queued<T>>,
     name: &'static str,
     drops: IntCounter,
     observability: AsyncWriterObservability,
@@ -179,7 +182,7 @@ pub enum DurableWriteError {
 struct DurableQueued<T> {
     item: T,
     enqueued: Instant,
-    acknowledgement: flume::Sender<bool>,
+    acknowledgement: Sender<bool>,
 }
 
 /// Bounded writer whose producer observes both queue admission and persistence.
@@ -187,7 +190,7 @@ struct DurableQueued<T> {
 /// This is reserved for canonical evidence. A timeout is not converted into a
 /// drop: callers must invalidate the enclosing stream session and reconnect.
 pub struct DurableWriter<T: Send + 'static> {
-    tx: flume::Sender<DurableQueued<T>>,
+    tx: Sender<DurableQueued<T>>,
     name: &'static str,
     observability: AsyncWriterObservability,
 }
@@ -231,15 +234,15 @@ impl<T: Send + 'static> DurableWriter<T> {
         self.tx
             .send_timeout(queued, timeout)
             .map_err(|error| match error {
-                flume::SendTimeoutError::Timeout(_) => DurableWriteError::QueueTimeout,
-                flume::SendTimeoutError::Disconnected(_) => DurableWriteError::QueueClosed,
+                SendTimeoutError::Timeout(_) => DurableWriteError::QueueTimeout,
+                SendTimeoutError::Disconnected(_) => DurableWriteError::QueueClosed,
             })?;
         self.publish_queue_depth();
         ack_rx
             .recv_timeout(timeout)
             .map_err(|error| match error {
-                flume::RecvTimeoutError::Timeout => DurableWriteError::AcknowledgementTimeout,
-                flume::RecvTimeoutError::Disconnected => DurableWriteError::QueueClosed,
+                RecvTimeoutError::Timeout => DurableWriteError::AcknowledgementTimeout,
+                RecvTimeoutError::Disconnected => DurableWriteError::QueueClosed,
             })?
             .then_some(())
             .ok_or(DurableWriteError::PersistenceFailed)
@@ -289,7 +292,7 @@ impl<T: Send + 'static> DurableWriter<T> {
 }
 
 pub struct DurableWriterWorker<T: Send + 'static> {
-    rx: flume::Receiver<DurableQueued<T>>,
+    rx: Receiver<DurableQueued<T>>,
     flush: FlushFn<T>,
     name: &'static str,
     max_batch_size: usize,
@@ -369,7 +372,7 @@ impl<T: Send + 'static> DurableWriterWorker<T> {
     }
 
     async fn drain_and_flush(
-        rx: &flume::Receiver<DurableQueued<T>>,
+        rx: &Receiver<DurableQueued<T>>,
         flush: &FlushFn<T>,
         name: &'static str,
         observability: &AsyncWriterObservability,
@@ -399,7 +402,7 @@ impl<T: Send + 'static> DurableWriterWorker<T> {
         }
         let queued = mem::take(buffer);
         let oldest_enqueued = queued.iter().map(|item| item.enqueued).min();
-        let (batch, acknowledgements): (Vec<T>, Vec<flume::Sender<bool>>) = queued
+        let (batch, acknowledgements): (Vec<T>, Vec<Sender<bool>>) = queued
             .into_iter()
             .map(|item| (item.item, item.acknowledgement))
             .unzip();
@@ -526,7 +529,7 @@ impl<T: Send + 'static> AsyncWriter<T> {
 
 /// Background drain that batches items and flushes them through the sink.
 pub struct AsyncWriterWorker<T: Send + 'static> {
-    rx: flume::Receiver<Queued<T>>,
+    rx: Receiver<Queued<T>>,
     flush: FlushFn<T>,
     name: &'static str,
     batch_size: usize,
@@ -549,7 +552,7 @@ impl<T: Send + 'static> AsyncWriterWorker<T> {
         } = self;
         let mut buffer = Vec::with_capacity(batch_size);
         let mut interval = tokio::time::interval(flush_interval);
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
         let publish_queue_depth = || {
             if let Some(gauge) = &observability.queue_depth {
@@ -622,10 +625,13 @@ impl<T: Send + 'static> AsyncWriterWorker<T> {
 
 #[cfg(test)]
 mod tests {
-    use super::{AsyncWriterObservability, DurableWriteError, DurableWriter, DurableWriterConfig};
-    use parking_lot::Mutex;
     use std::{sync::Arc, time::Duration};
+
+    use parking_lot::Mutex;
+    use tokio::task::JoinSet;
     use tokio_util::sync::CancellationToken;
+
+    use super::{AsyncWriterObservability, DurableWriteError, DurableWriter, DurableWriterConfig};
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn durable_writer_acknowledges_within_its_low_latency_batch_contract() {
@@ -683,7 +689,7 @@ mod tests {
         let shutdown = CancellationToken::new();
         let worker_task = tokio::spawn(worker.run(shutdown.clone()));
         let writer = Arc::new(writer);
-        let mut producers = tokio::task::JoinSet::new();
+        let mut producers = JoinSet::new();
         for value in 0..8 {
             let writer = Arc::clone(&writer);
             producers.spawn(async move {

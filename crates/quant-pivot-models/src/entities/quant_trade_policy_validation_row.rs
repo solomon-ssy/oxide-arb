@@ -3,6 +3,7 @@
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
+use super::quant_trade_policy_validation;
 use crate::types::{
     ContentHash, DiagnosticCode, MarketId, TokenId, TradePolicyValidationRunId, TrainingExampleId,
 };
@@ -36,7 +37,7 @@ pub struct Model {
         from = "validation_run_id",
         to = "validation_run_id"
     )]
-    pub validation_run: BelongsTo<super::quant_trade_policy_validation::Entity>,
+    pub validation_run: BelongsTo<quant_trade_policy_validation::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

@@ -1,13 +1,14 @@
 //! Durable report-fact outbox persistence contracts.
 
+use chrono::{DateTime, Utc};
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
+use serde::{Deserialize, Serialize};
+
 use crate::{
     entities::quant_report_fact_delivery,
     enums::quant::ReportFactDeliveryStatus,
     types::{ArtifactUri, ContentHash, RecommendationReportId, WorkerId},
 };
-use chrono::{DateTime, Utc};
-use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
-use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
 #[sea_orm(entity = "crate::entities::quant_report_fact_delivery::Entity")]

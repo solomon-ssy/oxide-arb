@@ -1,23 +1,27 @@
 //! Market-catalog readiness gate.
 //!
 //! The catalog starts `Warming` and flips to `Ready` after the first
-//! successful Gamma sync ([`GammaService::sync`]). Consumers split by need:
+//! successful Gamma sync. Consumers split by need:
 //!
 //! - **Control plane** (readiness report, `GET /system`): the full
 //!   [`CatalogState`] snapshot via the [`CatalogStatusPort`] trait.
 //! - **Reactive consumers**: [`CatalogReadiness::subscribe`] for a
 //!   `tokio::sync::watch` receiver that fires on state changes.
 
-use chrono::{DateTime, Utc};
-use quant_pivot_models::domain::{CatalogState, CatalogStatusPort};
 use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::sync::watch;
+
+use chrono::{DateTime, Utc};
+use quant_pivot_models::domain::ports::{CatalogState, CatalogStatusPort};
+use tokio::sync::{
+    watch,
+    watch::{Receiver, Sender},
+};
 
 /// Shared catalog warmup state (fail-closed: starts `Warming`).
 pub struct CatalogReadiness {
     /// Lock-free fast flag mirrored from the watch state for hot-path reads.
     ready: AtomicBool,
-    state: watch::Sender<CatalogState>,
+    state: Sender<CatalogState>,
 }
 
 impl Default for CatalogReadiness {
@@ -46,7 +50,7 @@ impl CatalogReadiness {
 
     /// Subscribe to state transitions (`Warming` → `Ready` and refreshes).
     #[must_use]
-    pub fn subscribe(&self) -> watch::Receiver<CatalogState> {
+    pub fn subscribe(&self) -> Receiver<CatalogState> {
         self.state.subscribe()
     }
 }

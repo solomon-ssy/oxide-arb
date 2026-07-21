@@ -3,7 +3,7 @@
 use std::ops::Deref;
 
 use sea_orm::{
-    ActiveValue, ColIdx, IntoActiveValue, TryGetError, TryGetable,
+    ActiveValue, ColIdx, IntoActiveValue, QueryResult, TryGetError, TryGetable,
     sea_query::{ArrayType, ColumnType, Nullable, Value, ValueType, ValueTypeErr},
 };
 use serde::{Deserialize, Serialize};
@@ -13,8 +13,8 @@ use super::MarketId;
 /// Gamma event catalog snapshot: ordered `condition_id`s at sync time.
 ///
 /// Mirrors [`crate::domain::market::registry::EventRegistryInfo::market_ids`]
-/// persisted for offline neg-risk leg enumeration (Phase 11.2.1 train-serve
-/// parity). Stored as Postgres `text[]`; each element is a [`MarketId`]
+/// persisted for offline neg-risk leg enumeration and train-serve parity.
+/// Stored as Postgres `text[]`; each element is a [`MarketId`]
 /// (`condition_id`).
 ///
 /// `SeaORM` bindings round-trip through `Vec<String>` at the wire layer because
@@ -75,7 +75,7 @@ impl From<&CatalogMarketIds> for Value {
 }
 
 impl TryGetable for CatalogMarketIds {
-    fn try_get_by<I: ColIdx>(res: &sea_orm::QueryResult, index: I) -> Result<Self, TryGetError> {
+    fn try_get_by<I: ColIdx>(res: &QueryResult, index: I) -> Result<Self, TryGetError> {
         let raw: Vec<String> = TryGetable::try_get_by(res, index)?;
         Ok(from_wire_strings(raw))
     }
@@ -116,8 +116,9 @@ impl IntoActiveValue<Self> for CatalogMarketIds {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use sea_orm::sea_query::{Value, ValueType};
+
+    use super::*;
 
     #[test]
     fn catalog_market_ids_value_type_roundtrip() {

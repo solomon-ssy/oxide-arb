@@ -1,11 +1,13 @@
 //! Append-only calibration publication timeline.
 
+use chrono::{DateTime, Utc};
+use sea_orm::entity::prelude::*;
+
+use super::quant_calibration_artifact;
 use crate::{
     enums::quant::CalibrationKind,
     types::{CalibrationArtifactId, CalibrationArtifactPublicationId},
 };
-use chrono::{DateTime, Utc};
-use sea_orm::entity::prelude::*;
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -24,7 +26,7 @@ pub struct Model {
         from = "artifact_id",
         to = "artifact_id"
     )]
-    pub artifact: BelongsTo<super::quant_calibration_artifact::Entity>,
+    pub artifact: BelongsTo<quant_calibration_artifact::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

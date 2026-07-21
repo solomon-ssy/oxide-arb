@@ -15,7 +15,7 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     clickhouse::{ChDecimal64, ChUsd, QuantRecommendationAttributionEventRow},
-    domain::{
+    domain::quant::{
         ExecutionOrderInfo, InsertFinalOutcome, NewRecommendationAttribution, OrderIntentInfo,
         PositionInfo, RecommendationAttributionInfo, RecommendationInfo, ReconciliationInfo,
     },
@@ -32,9 +32,9 @@ use quant_pivot_repository::traits::{
     AttributionRepository, ExecutionOrderRepository, OrderIntentRepository, PositionRepository,
     RecommendationRepository, ReconciliationRepository,
 };
+use rust_decimal::Decimal;
 
 use crate::observability::attribution_fact_writer::AttributionEventWriter;
-use rust_decimal::Decimal;
 
 /// Dependencies for [`AttributionService`].
 pub struct AttributionServiceDeps {
@@ -374,7 +374,7 @@ impl AttributionService {
                 outcome,
             ),
             realized_pnl_usd: Some(position.realized_pnl_usd),
-            // MAE: deferred to 06.6 book replay; see phase-06/06.6 §3.
+            // MAE stays absent until a book replay can derive it from evidence.
             max_adverse_excursion_bps: None,
             max_favorable_excursion_bps: favorable_excursion_bps(
                 entry_anchor_price(position, entry_order),
@@ -403,7 +403,7 @@ fn favorable_excursion_bps(entry: Price, peak: Option<Price>) -> Option<Decimal>
 }
 
 /// Lot entry anchor for MFE: closed lots zero out `avg_price`, so fall back to the
-/// filled entry order's price (05.7).
+/// filled entry order's price.
 const fn entry_anchor_price(position: &PositionInfo, entry_order: &ExecutionOrderInfo) -> Price {
     if position.avg_price.is_zero() {
         entry_order.price

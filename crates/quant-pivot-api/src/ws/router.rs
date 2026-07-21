@@ -6,18 +6,20 @@
 //! Full-state publication is idempotent and self-healing: a missed or
 //! coalesced update is corrected by the next one.
 
-use super::shard::{ShardDeps, WsShard};
-use parking_lot::Mutex;
-use quant_pivot_models::types::TokenId;
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
 };
-use tokio::sync::watch;
+
+use parking_lot::Mutex;
+use quant_pivot_models::types::TokenId;
+use tokio::sync::{watch, watch::Sender};
+
+use super::shard::{ShardDeps, WsShard};
 
 /// One spawned shard: command channel plus its assignment ledger entry.
 struct ShardSlot {
-    tokens_tx: watch::Sender<Arc<HashSet<TokenId>>>,
+    tokens_tx: Sender<Arc<HashSet<TokenId>>>,
     assigned: HashSet<TokenId>,
 }
 
@@ -160,14 +162,17 @@ fn publish(ledger: &RouterLedger, dirty: &HashSet<usize>) {
 
 #[cfg(test)]
 mod tests {
+    use std::{sync::Arc, time::Duration};
+
+    use parking_lot::Mutex;
+    use tokio::sync::Semaphore;
+    use tokio_util::sync::CancellationToken;
+
     use super::*;
     use crate::ws::{
         health::{ShardHealthBoard, TokenFreshnessBoard},
         reconnect::ReconnectPolicy,
     };
-    use std::{sync::Arc, time::Duration};
-    use tokio::sync::Semaphore;
-    use tokio_util::sync::CancellationToken;
 
     fn test_router(max_per_shard: usize) -> ShardRouter {
         let (output_tx, _output_rx) = flume::bounded(64);
@@ -177,7 +182,7 @@ mod tests {
                 output_tx,
                 ws_url: "ws://test".into(),
                 shutdown: CancellationToken::new(),
-                last_message_at: Arc::new(parking_lot::Mutex::new(None)),
+                last_message_at: Arc::new(Mutex::new(None)),
                 on_session_invalidated: None,
                 on_book_level_rejected: None,
                 reconnect_policy: ReconnectPolicy::default(),

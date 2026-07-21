@@ -1,11 +1,16 @@
 //! Single-statement projection of the Config governance activity ledger.
 
-use crate::postgres::primitives::enum_null;
 use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    domain::{ConfigActivityInfo, PolicyActivationInfo, PolicyApprovalInfo, PolicyRevisionInfo},
-    entities::{policy_activation, policy_approval, policy_revision},
+    domain::governance::{
+        ConfigActivityInfo, PolicyActivationInfo, PolicyApprovalInfo, PolicyRevisionInfo,
+    },
+    entities::{
+        policy_activation::{Column as PolicyActivationColumn, Entity as PolicyActivationEntity},
+        policy_approval::{Column as PolicyApprovalColumn, Entity as PolicyApprovalEntity},
+        policy_revision::{Column, Entity},
+    },
     enums::runtime_config::{
         ConfigResourceKind, PolicyActivationKind, PolicyActorKind, PolicyApprovalDecision,
         PolicyRevisionStatus,
@@ -20,6 +25,8 @@ use sea_orm::{
     ConnectionTrait, FromQueryResult, Order,
     sea_query::{Expr, Iden, Query, SelectStatement, UnionType},
 };
+
+use crate::postgres::primitives::enum_null;
 
 #[derive(Debug, Clone, Copy)]
 enum ActivityRecordKind {
@@ -250,7 +257,7 @@ fn revision_query_head() -> SelectStatement {
             ActivityColumn::EventType,
         )
         .expr_as(
-            Expr::col((policy_revision::Entity, policy_revision::Column::CreatedAt)),
+            Expr::col((Entity, Column::CreatedAt)),
             ActivityColumn::EventAt,
         )
         .expr_as(
@@ -258,60 +265,36 @@ fn revision_query_head() -> SelectStatement {
             ActivityColumn::EventRank,
         )
         .expr_as(
-            Expr::col((
-                policy_revision::Entity,
-                policy_revision::Column::PolicyRevisionId,
-            )),
+            Expr::col((Entity, Column::PolicyRevisionId)),
             ActivityColumn::SortId,
         )
         .expr_as(
-            Expr::col((
-                policy_revision::Entity,
-                policy_revision::Column::PolicyRevisionId,
-            )),
+            Expr::col((Entity, Column::PolicyRevisionId)),
             ActivityColumn::PolicyRevisionId,
         )
         .expr_as(
-            Expr::col((
-                policy_revision::Entity,
-                policy_revision::Column::ResourceKind,
-            )),
+            Expr::col((Entity, Column::ResourceKind)),
             ActivityColumn::ResourceKind,
         )
         .expr_as(
-            Expr::col((
-                policy_revision::Entity,
-                policy_revision::Column::RevisionHash,
-            )),
+            Expr::col((Entity, Column::RevisionHash)),
             ActivityColumn::RevisionHash,
         )
+        .expr_as(Expr::col((Entity, Column::Reason)), ActivityColumn::Reason)
         .expr_as(
-            Expr::col((policy_revision::Entity, policy_revision::Column::Reason)),
-            ActivityColumn::Reason,
-        )
-        .expr_as(
-            Expr::col((
-                policy_revision::Entity,
-                policy_revision::Column::CreatedByKind,
-            )),
+            Expr::col((Entity, Column::CreatedByKind)),
             ActivityColumn::ActorKind,
         )
         .expr_as(
-            Expr::col((
-                policy_revision::Entity,
-                policy_revision::Column::CreatedByUserId,
-            )),
+            Expr::col((Entity, Column::CreatedByUserId)),
             ActivityColumn::ActorUserId,
         )
         .expr_as(
-            Expr::col((
-                policy_revision::Entity,
-                policy_revision::Column::CreatedByLabel,
-            )),
+            Expr::col((Entity, Column::CreatedByLabel)),
             ActivityColumn::ActorLabel,
         )
         .expr_as(
-            Expr::col((policy_revision::Entity, policy_revision::Column::CreatedAt)),
+            Expr::col((Entity, Column::CreatedAt)),
             ActivityColumn::CreatedAt,
         )
         .to_owned()
@@ -331,46 +314,31 @@ fn revision_query() -> SelectStatement {
     let mut query = revision_query_head();
     query
         .expr_as(
-            Expr::col((
-                policy_revision::Entity,
-                policy_revision::Column::SchemaVersion,
-            )),
+            Expr::col((Entity, Column::SchemaVersion)),
             ActivityColumn::SchemaVersion,
         )
         .expr_as(
-            Expr::col((policy_revision::Entity, policy_revision::Column::Document)),
+            Expr::col((Entity, Column::Document)),
             ActivityColumn::Document,
         )
         .expr_as(
-            Expr::col((policy_revision::Entity, policy_revision::Column::Status)),
+            Expr::col((Entity, Column::Status)),
             ActivityColumn::RevisionStatus,
         )
         .expr_as(
-            Expr::col((
-                policy_revision::Entity,
-                policy_revision::Column::ValidationEvidence,
-            )),
+            Expr::col((Entity, Column::ValidationEvidence)),
             ActivityColumn::ValidationEvidence,
         )
         .expr_as(
-            Expr::col((
-                policy_revision::Entity,
-                policy_revision::Column::ValidatedAt,
-            )),
+            Expr::col((Entity, Column::ValidatedAt)),
             ActivityColumn::ValidatedAt,
         )
         .expr_as(
-            Expr::col((
-                policy_revision::Entity,
-                policy_revision::Column::PreflightTokenHash,
-            )),
+            Expr::col((Entity, Column::PreflightTokenHash)),
             ActivityColumn::PreflightTokenHash,
         )
         .expr_as(
-            Expr::col((
-                policy_revision::Entity,
-                policy_revision::Column::PreflightExpiresAt,
-            )),
+            Expr::col((Entity, Column::PreflightExpiresAt)),
             ActivityColumn::PreflightExpiresAt,
         )
         .expr_as(null_approval_id(), ActivityColumn::PolicyApprovalId)
@@ -399,7 +367,7 @@ fn revision_query() -> SelectStatement {
         .expr_as(null_idempotency_key(), ActivityColumn::IdempotencyKey)
         .expr_as(null_content_hash(), ActivityColumn::ActivationRequestHash)
         .expr_as(null_audit_id(), ActivityColumn::AuditEventId)
-        .from(policy_revision::Entity)
+        .from(Entity)
         .to_owned()
 }
 
@@ -421,7 +389,7 @@ fn approval_query() -> SelectStatement {
             ActivityColumn::EventType,
         )
         .expr_as(
-            Expr::col((policy_approval::Entity, policy_approval::Column::DecidedAt)),
+            Expr::col((PolicyApprovalEntity, PolicyApprovalColumn::DecidedAt)),
             ActivityColumn::EventAt,
         )
         .expr_as(
@@ -429,60 +397,39 @@ fn approval_query() -> SelectStatement {
             ActivityColumn::EventRank,
         )
         .expr_as(
-            Expr::col((
-                policy_approval::Entity,
-                policy_approval::Column::PolicyApprovalId,
-            )),
+            Expr::col((PolicyApprovalEntity, PolicyApprovalColumn::PolicyApprovalId)),
             ActivityColumn::SortId,
         )
         .expr_as(
-            Expr::col((
-                policy_approval::Entity,
-                policy_approval::Column::PolicyRevisionId,
-            )),
+            Expr::col((PolicyApprovalEntity, PolicyApprovalColumn::PolicyRevisionId)),
             ActivityColumn::PolicyRevisionId,
         )
         .expr_as(
-            Expr::col((
-                policy_approval::Entity,
-                policy_approval::Column::ResourceKind,
-            )),
+            Expr::col((PolicyApprovalEntity, PolicyApprovalColumn::ResourceKind)),
             ActivityColumn::ResourceKind,
         )
         .expr_as(
-            Expr::col((
-                policy_approval::Entity,
-                policy_approval::Column::RevisionHash,
-            )),
+            Expr::col((PolicyApprovalEntity, PolicyApprovalColumn::RevisionHash)),
             ActivityColumn::RevisionHash,
         )
         .expr_as(
-            Expr::col((policy_approval::Entity, policy_approval::Column::Reason)),
+            Expr::col((PolicyApprovalEntity, PolicyApprovalColumn::Reason)),
             ActivityColumn::Reason,
         )
         .expr_as(
-            Expr::col((
-                policy_approval::Entity,
-                policy_approval::Column::DecidedByKind,
-            )),
+            Expr::col((PolicyApprovalEntity, PolicyApprovalColumn::DecidedByKind)),
             ActivityColumn::ActorKind,
         )
         .expr_as(
-            Expr::col((
-                policy_approval::Entity,
-                policy_approval::Column::DecidedByUserId,
-            )),
+            Expr::col((PolicyApprovalEntity, PolicyApprovalColumn::DecidedByUserId)),
             ActivityColumn::ActorUserId,
         )
         .expr_as(
-            Expr::col((
-                policy_approval::Entity,
-                policy_approval::Column::DecidedByLabel,
-            )),
+            Expr::col((PolicyApprovalEntity, PolicyApprovalColumn::DecidedByLabel)),
             ActivityColumn::ActorLabel,
         )
         .expr_as(
-            Expr::col((policy_approval::Entity, policy_approval::Column::CreatedAt)),
+            Expr::col((PolicyApprovalEntity, PolicyApprovalColumn::CreatedAt)),
             ActivityColumn::CreatedAt,
         )
         .expr_as(null_schema_version(), ActivityColumn::SchemaVersion)
@@ -499,29 +446,26 @@ fn approval_query() -> SelectStatement {
         .expr_as(null_content_hash(), ActivityColumn::PreflightTokenHash)
         .expr_as(null_timestamp(), ActivityColumn::PreflightExpiresAt)
         .expr_as(
-            Expr::col((
-                policy_approval::Entity,
-                policy_approval::Column::PolicyApprovalId,
-            )),
+            Expr::col((PolicyApprovalEntity, PolicyApprovalColumn::PolicyApprovalId)),
             ActivityColumn::PolicyApprovalId,
         )
         .expr_as(
             Expr::col((
-                policy_approval::Entity,
-                policy_approval::Column::ValidationSubject,
+                PolicyApprovalEntity,
+                PolicyApprovalColumn::ValidationSubject,
             )),
             ActivityColumn::ApprovalValidationSubject,
         )
         .expr_as(
-            Expr::col((policy_approval::Entity, policy_approval::Column::Decision)),
+            Expr::col((PolicyApprovalEntity, PolicyApprovalColumn::Decision)),
             ActivityColumn::ApprovalDecision,
         )
         .expr_as(
-            Expr::col((policy_approval::Entity, policy_approval::Column::DecidedAt)),
+            Expr::col((PolicyApprovalEntity, PolicyApprovalColumn::DecidedAt)),
             ActivityColumn::DecidedAt,
         )
         .expr_as(
-            Expr::col((policy_approval::Entity, policy_approval::Column::ExpiresAt)),
+            Expr::col((PolicyApprovalEntity, PolicyApprovalColumn::ExpiresAt)),
             ActivityColumn::ApprovalExpiresAt,
         )
         .expr_as(null_generation(), ActivityColumn::BundleGeneration)
@@ -539,7 +483,7 @@ fn approval_query() -> SelectStatement {
         .expr_as(null_idempotency_key(), ActivityColumn::IdempotencyKey)
         .expr_as(null_content_hash(), ActivityColumn::ActivationRequestHash)
         .expr_as(null_audit_id(), ActivityColumn::AuditEventId)
-        .from(policy_approval::Entity)
+        .from(PolicyApprovalEntity)
         .to_owned()
 }
 
@@ -555,10 +499,7 @@ fn activation_query_head() -> SelectStatement {
             ActivityColumn::EventType,
         )
         .expr_as(
-            Expr::col((
-                policy_activation::Entity,
-                policy_activation::Column::ActivatedAt,
-            )),
+            Expr::col((PolicyActivationEntity, PolicyActivationColumn::ActivatedAt)),
             ActivityColumn::EventAt,
         )
         .expr_as(
@@ -567,56 +508,50 @@ fn activation_query_head() -> SelectStatement {
         )
         .expr_as(
             Expr::col((
-                policy_activation::Entity,
-                policy_activation::Column::PolicyActivationId,
+                PolicyActivationEntity,
+                PolicyActivationColumn::PolicyActivationId,
             )),
             ActivityColumn::SortId,
         )
         .expr_as(
             Expr::col((
-                policy_activation::Entity,
-                policy_activation::Column::PolicyRevisionId,
+                PolicyActivationEntity,
+                PolicyActivationColumn::PolicyRevisionId,
             )),
             ActivityColumn::PolicyRevisionId,
         )
         .expr_as(
-            Expr::col((
-                policy_activation::Entity,
-                policy_activation::Column::ResourceKind,
-            )),
+            Expr::col((PolicyActivationEntity, PolicyActivationColumn::ResourceKind)),
             ActivityColumn::ResourceKind,
         )
         .expr_as(null_content_hash(), ActivityColumn::RevisionHash)
         .expr_as(
-            Expr::col((policy_activation::Entity, policy_activation::Column::Reason)),
+            Expr::col((PolicyActivationEntity, PolicyActivationColumn::Reason)),
             ActivityColumn::Reason,
         )
         .expr_as(
             Expr::col((
-                policy_activation::Entity,
-                policy_activation::Column::ActivatedByKind,
+                PolicyActivationEntity,
+                PolicyActivationColumn::ActivatedByKind,
             )),
             ActivityColumn::ActorKind,
         )
         .expr_as(
             Expr::col((
-                policy_activation::Entity,
-                policy_activation::Column::ActivatedByUserId,
+                PolicyActivationEntity,
+                PolicyActivationColumn::ActivatedByUserId,
             )),
             ActivityColumn::ActorUserId,
         )
         .expr_as(
             Expr::col((
-                policy_activation::Entity,
-                policy_activation::Column::ActivatedByLabel,
+                PolicyActivationEntity,
+                PolicyActivationColumn::ActivatedByLabel,
             )),
             ActivityColumn::ActorLabel,
         )
         .expr_as(
-            Expr::col((
-                policy_activation::Entity,
-                policy_activation::Column::CreatedAt,
-            )),
+            Expr::col((PolicyActivationEntity, PolicyActivationColumn::CreatedAt)),
             ActivityColumn::CreatedAt,
         )
         .expr_as(null_schema_version(), ActivityColumn::SchemaVersion)
@@ -632,8 +567,8 @@ fn activation_query_head() -> SelectStatement {
         .expr_as(null_timestamp(), ActivityColumn::ValidatedAt)
         .expr_as(
             Expr::col((
-                policy_activation::Entity,
-                policy_activation::Column::PreflightTokenHash,
+                PolicyActivationEntity,
+                PolicyActivationColumn::PreflightTokenHash,
             )),
             ActivityColumn::PreflightTokenHash,
         )
@@ -648,8 +583,8 @@ fn activation_query() -> SelectStatement {
     query
         .expr_as(
             Expr::col((
-                policy_activation::Entity,
-                policy_activation::Column::PolicyApprovalId,
+                PolicyActivationEntity,
+                PolicyActivationColumn::PolicyApprovalId,
             )),
             ActivityColumn::PolicyApprovalId,
         )
@@ -665,89 +600,83 @@ fn activation_query() -> SelectStatement {
         .expr_as(null_timestamp(), ActivityColumn::ApprovalExpiresAt)
         .expr_as(
             Expr::col((
-                policy_activation::Entity,
-                policy_activation::Column::BundleGeneration,
+                PolicyActivationEntity,
+                PolicyActivationColumn::BundleGeneration,
             )),
             ActivityColumn::BundleGeneration,
         )
         .expr_as(
             Expr::col((
-                policy_activation::Entity,
-                policy_activation::Column::ExpectedBundleGeneration,
+                PolicyActivationEntity,
+                PolicyActivationColumn::ExpectedBundleGeneration,
             )),
             ActivityColumn::ExpectedBundleGeneration,
         )
         .expr_as(
             Expr::col((
-                policy_activation::Entity,
-                policy_activation::Column::PolicyActivationId,
+                PolicyActivationEntity,
+                PolicyActivationColumn::PolicyActivationId,
             )),
             ActivityColumn::PolicyActivationId,
         )
         .expr_as(
             Expr::col((
-                policy_activation::Entity,
-                policy_activation::Column::DecisionPolicySnapshotId,
+                PolicyActivationEntity,
+                PolicyActivationColumn::DecisionPolicySnapshotId,
             )),
             ActivityColumn::DecisionPolicySnapshotId,
         )
         .expr_as(
-            Expr::col((
-                policy_activation::Entity,
-                policy_activation::Column::ActivatedAt,
-            )),
+            Expr::col((PolicyActivationEntity, PolicyActivationColumn::ActivatedAt)),
             ActivityColumn::ActivatedAt,
         )
         .expr_as(
             Expr::col((
-                policy_activation::Entity,
-                policy_activation::Column::ActivationKind,
+                PolicyActivationEntity,
+                PolicyActivationColumn::ActivationKind,
             )),
             ActivityColumn::ActivationKind,
         )
         .expr_as(
             Expr::col((
-                policy_activation::Entity,
-                policy_activation::Column::ExpectedActiveRevisionId,
+                PolicyActivationEntity,
+                PolicyActivationColumn::ExpectedActiveRevisionId,
             )),
             ActivityColumn::ExpectedActiveRevisionId,
         )
         .expr_as(
             Expr::col((
-                policy_activation::Entity,
-                policy_activation::Column::PreviousPolicyRevisionId,
+                PolicyActivationEntity,
+                PolicyActivationColumn::PreviousPolicyRevisionId,
             )),
             ActivityColumn::PreviousPolicyRevisionId,
         )
         .expr_as(
             Expr::col((
-                policy_activation::Entity,
-                policy_activation::Column::RollbackTargetRevisionId,
+                PolicyActivationEntity,
+                PolicyActivationColumn::RollbackTargetRevisionId,
             )),
             ActivityColumn::RollbackTargetRevisionId,
         )
         .expr_as(
             Expr::col((
-                policy_activation::Entity,
-                policy_activation::Column::IdempotencyKey,
+                PolicyActivationEntity,
+                PolicyActivationColumn::IdempotencyKey,
             )),
             ActivityColumn::IdempotencyKey,
         )
         .expr_as(
             Expr::col((
-                policy_activation::Entity,
-                policy_activation::Column::ActivationRequestHash,
+                PolicyActivationEntity,
+                PolicyActivationColumn::ActivationRequestHash,
             )),
             ActivityColumn::ActivationRequestHash,
         )
         .expr_as(
-            Expr::col((
-                policy_activation::Entity,
-                policy_activation::Column::AuditEventId,
-            )),
+            Expr::col((PolicyActivationEntity, PolicyActivationColumn::AuditEventId)),
             ActivityColumn::AuditEventId,
         )
-        .from(policy_activation::Entity)
+        .from(PolicyActivationEntity)
         .to_owned()
 }
 
@@ -772,11 +701,12 @@ pub(super) async fn list(
 
 #[cfg(test)]
 mod tests {
-    use super::list;
     use std::collections::BTreeMap;
 
     use quant_pivot_error::storage::StorageError;
     use sea_orm::{DbBackend, MockDatabase, Value};
+
+    use super::list;
 
     #[tokio::test]
     async fn list_executes_one_global_activity_statement() -> Result<(), StorageError> {

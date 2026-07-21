@@ -12,11 +12,13 @@
 
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{enums::quant::CalibrationMethod, types::Probability};
-use rust_decimal::{Decimal, prelude::FromPrimitive, prelude::ToPrimitive};
-
-use crate::model::apply_mapping;
+use rust_decimal::{
+    Decimal,
+    prelude::{FromPrimitive, ToPrimitive},
+};
 
 use super::{MonotoneMapping, ProbabilityCalibrator};
+use crate::model::apply_mapping;
 
 /// Minimum paired samples for a numerically meaningful 2-parameter fit.
 const MIN_SAMPLES: usize = 10;
@@ -96,7 +98,7 @@ impl ProbabilityCalibrator for PlattCalibrator {
                 ),
             }));
         }
-        // Fail-closed (README §5: "NaN/inf rejects the sample, never a
+        // Fail-closed (README: "NaN/inf rejects the sample, never a
         // silent 0"): a score that cannot round-trip through `f64` must
         // reject the whole fit, not silently corrupt the Newton loop with a
         // fabricated `0.0`.
@@ -246,10 +248,11 @@ fn neg_log_likelihood(scores: &[f64], targets: &[f64], param_a: f64, param_b: f6
 
 #[cfg(test)]
 mod tests {
-    use super::{PlattCalibrator, fit_platt};
-    use crate::model::calibrator::{MonotoneMapping, ProbabilityCalibrator};
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
+
+    use super::{PlattCalibrator, fit_platt};
+    use crate::model::calibrator::{MonotoneMapping, ProbabilityCalibrator};
 
     #[test]
     fn fit_fails_closed_without_both_classes() {

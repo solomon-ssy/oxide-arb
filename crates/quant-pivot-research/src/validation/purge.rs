@@ -1,4 +1,4 @@
-//! Label-horizon-aware purge + embargo splitting (Phase 11.5 §3.1/§3.2, AFML Ch.7).
+//! Label-horizon-aware purge and embargo splitting, following AFML Ch. 7.
 //!
 //! Ordinary k-fold/time-block cross-validation systematically overstates
 //! out-of-sample performance whenever labels have an overlapping forward
@@ -15,8 +15,8 @@
 //! `as_of` cross-section — the Buy-side backtest wiring in
 //! [`crate::backtest`] happens to group rows by same-`as_of` cross-section
 //! (mirroring the [`crate::model::trainer`] LTR query groups), but
-//! [`PurgedSplitter`] itself has no opinion on what a group represents. Phase
-//! 11.5.1 groups by lot (`position_id`) instead and reuses this module
+//! [`PurgedSplitter`] itself has no opinion on what a group represents. The
+//! Sell-side groups by lot (`position_id`) and reuses this module
 //! unmodified.
 
 use chrono::{DateTime, Duration, Utc};
@@ -79,7 +79,7 @@ impl PurgeConfig {
 /// The result of purging/embargoing one candidate train/test group assignment.
 ///
 /// Every index is into the caller's `groups` slice; the four sets partition
-/// it completely (`train ∪ test ∪ purged ∪ embargoed == 0..groups.len()`).
+/// it completely (`train ∪ test ∪ purged ∪ embargoed == 0..groups.len`).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PurgedSplit {
     /// Groups eligible for training after purge/embargo.
@@ -250,9 +250,10 @@ fn methodology(detail: String) -> QuantError {
 
 #[cfg(test)]
 mod tests {
-    use super::{DefaultPurgedSplitter, PurgeConfig, PurgedSplitter, TimelineGroup};
-    use chrono::{TimeZone, Utc};
+    use chrono::{Duration, TimeZone, Utc};
     use rust_decimal_macros::dec;
+
+    use super::{DefaultPurgedSplitter, PurgeConfig, PurgedSplitter, TimelineGroup};
 
     /// Hourly groups whose label horizon extends 90 minutes forward (i.e. each
     /// group's interval overlaps the *next* group's `as_of`) — the canonical
@@ -263,7 +264,7 @@ mod tests {
                 let as_of = Utc.timestamp_opt(1_700_000_000 + h * 3_600, 0).unwrap();
                 TimelineGroup {
                     decision_at: as_of,
-                    label_horizon_end: as_of + chrono::Duration::minutes(90),
+                    label_horizon_end: as_of + Duration::minutes(90),
                 }
             })
             .collect()
@@ -358,13 +359,13 @@ mod tests {
     fn purged_splitter_is_agnostic_to_what_a_group_represents() {
         // No field, method, or behavior here depends on "as_of" meaning a
         // cross-section — an abstract, business-meaning-free set of intervals
-        // (e.g. 11.5.1's per-lot groups) must split identically to any other.
+        // Per-lot groups must split identically to any other grouping scheme.
         let groups: Vec<TimelineGroup> = (0..5)
             .map(|i| {
                 let start = Utc.timestamp_opt(1_000_000 + i * 1_000, 0).unwrap();
                 TimelineGroup {
                     decision_at: start,
-                    label_horizon_end: start + chrono::Duration::seconds(500),
+                    label_horizon_end: start + Duration::seconds(500),
                 }
             })
             .collect();

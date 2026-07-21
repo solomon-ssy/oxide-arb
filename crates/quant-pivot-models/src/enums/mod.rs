@@ -1,9 +1,9 @@
-//! Domain enums: [`pg_enum!`] for Postgres column types, [`wire_enum!`] for JSON/wire only.
+//! Domain enums: `pg_enum!` for Postgres column types, `wire_enum!` for JSON/wire only.
 //!
 //! Both macros generate [`std::str::FromStr`] + a `${Name}ParseError` by default (canonical
 //! wire-label parse). Opt out or customize with:
 //!
-//! - `@no_from_str` — alias / domain-specific error (e.g. [`super::common::MarketCategory`])
+//! - `@no_from_str` — alias / domain-specific error (e.g. `MarketCategory`)
 //! - `@from_str(trim)` — trim input before matching (e.g. Gamma tick sizes)
 //! - `@from_str(err = MyError)` — tuple-struct error (`MyError(value)`)
 

@@ -29,16 +29,12 @@ mod value;
 mod writer;
 
 #[cfg(test)]
-mod test_types {
-    use quant_pivot_models::types;
-
-    pub use types::factor::{FactorExplanation, FactorOutputKind, FactorQualityGate};
-}
+pub(crate) use quant_pivot_models::types::factor::{
+    FactorExplanation, FactorOutputKind, FactorQualityGate,
+};
 pub(crate) use quant_pivot_models::types::{
     factor::FactorDefinitionDocument, stable_name::FactorName,
 };
-#[cfg(test)]
-pub(crate) use test_types::{FactorExplanation, FactorOutputKind, FactorQualityGate};
 
 #[cfg(test)]
 mod acceptance;

@@ -6,7 +6,7 @@ use quant_pivot_models::{
         ChPrice, ChShares, ChUsd, QuantCapitalAllocationEventRow, QuantExecutionEventRow,
         QuantPositionEventRow,
     },
-    domain::{CapitalAllocationInfo, ExecutionOrderInfo, PositionInfo},
+    domain::quant::{CapitalAllocationInfo, ExecutionOrderInfo, PositionInfo},
     enums::clickhouse::ChQuantLedgerEventKind,
     types::RecommendationId,
 };
@@ -84,7 +84,6 @@ pub fn project_position_event(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use quant_pivot_models::{
         enums::{
             clickhouse::{ChExecutionSide, ChPositionLedgerState, ChQuantLedgerEventKind},
@@ -97,8 +96,10 @@ mod tests {
             VenueOrderAmount,
         },
     };
-    use quant_pivot_test_support::execution_pg_seed::prepared_order;
     use rust_decimal_macros::dec;
+
+    use super::*;
+    use crate::test_fixtures::execution_pg_seed::prepared_order;
 
     #[test]
     fn execution_projection_maps_core_fields() {

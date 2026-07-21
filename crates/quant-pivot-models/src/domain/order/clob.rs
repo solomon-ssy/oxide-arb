@@ -1,5 +1,8 @@
 //! Polymarket CLOB wire order types.
 
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+
 use crate::{
     enums::{
         common::{OrderType, Side},
@@ -7,8 +10,6 @@ use crate::{
     },
     types::{MarketId, OrderId, Price, Shares, TokenId, VenueOrderAmount},
 };
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
 
 /// Outbound CLOB order submission request.
 #[derive(Debug, Clone, Serialize, Deserialize)]

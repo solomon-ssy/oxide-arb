@@ -1,10 +1,11 @@
 //! Assignment DTOs: user→roles, role→menus, role→permissions.
 
+use serde::{Deserialize, Serialize};
+
 use crate::{
     enums::rbac::{Operation, ResourceType},
     types::{MenuId, RoleId, UserId},
 };
-use serde::{Deserialize, Serialize};
 
 /// A single `resource × operation` grant — the typed form of a Casbin `p` line's
 /// `(obj, act)` pair.

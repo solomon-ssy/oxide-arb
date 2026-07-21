@@ -1,15 +1,16 @@
 //! System control-plane API contract.
 
+use serde::{Deserialize, Serialize};
+use validator::Validate;
+
 use crate::{
-    domain::SystemStatus,
+    domain::governance::SystemStatus,
     enums::{
         execution::KillSwitchState,
         quant::QuantRuntimeMode,
         system::{BootstrapPhase, CapabilityId, CapabilityReason},
     },
 };
-use serde::{Deserialize, Serialize};
-use validator::Validate;
 
 /// Governed quant runtime mode transition request.
 #[derive(Debug, Deserialize, Validate)]

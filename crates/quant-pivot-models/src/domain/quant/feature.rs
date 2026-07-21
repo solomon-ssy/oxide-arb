@@ -1,16 +1,17 @@
 //! Feature vector persistence DTOs.
 
+use chrono::{DateTime, Utc};
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
+use serde::{Deserialize, Serialize};
+
 use crate::{
-    domain::DecisionBoundary,
+    domain::data_plane::DecisionBoundary,
     enums::quant::DataQualityStatus,
     types::{
         ContentHash, DecisionCaptureEvidence, FeatureSourceRefs, FeatureVectorId,
         FeatureVectorPayload, MarketId, SchemaVersion, TokenId,
     },
 };
-use chrono::{DateTime, Utc};
-use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
-use serde::{Deserialize, Serialize};
 
 /// Persisted point-in-time feature vector metadata.
 #[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]

@@ -1,13 +1,13 @@
 //! Postgres-backed expected domain-source binding repository.
 
 use chrono::Utc;
-use quant_pivot_error::storage::{StorageError, entity};
+use quant_pivot_error::storage::{StorageError, entity::QUANT_DOMAIN_SOURCE_EXPECTATION};
 use quant_pivot_models::{
-    domain::{
+    domain::data_plane::{
         DomainSourceExpectationInfo, DomainSourceExpectationTransition,
         UpsertDomainSourceExpectation,
     },
-    entities::quant_domain_source_expectation,
+    entities::quant_domain_source_expectation::{Column, Entity},
     types::DomainSourceExpectationId,
 };
 use sea_orm::{
@@ -34,7 +34,7 @@ impl DomainSourceExpectationRepository for PgDomainSourceExpectationRepository {
         &self,
         expectation_id: &DomainSourceExpectationId,
     ) -> Result<Option<DomainSourceExpectationInfo>, StorageError> {
-        quant_domain_source_expectation::Entity::find_by_id(expectation_id.clone())
+        Entity::find_by_id(expectation_id.clone())
             .one(&self.db)
             .await
             .map_err(StorageError::from)
@@ -48,31 +48,28 @@ impl DomainSourceExpectationRepository for PgDomainSourceExpectationRepository {
         expectation
             .validate()
             .map_err(|detail| StorageError::InvariantViolation {
-                entity: Some(entity::QUANT_DOMAIN_SOURCE_EXPECTATION),
+                entity: Some(QUANT_DOMAIN_SOURCE_EXPECTATION),
                 detail,
             })?;
         expectation.updated_at = Utc::now();
-        quant_domain_source_expectation::Entity::insert(expectation.into_active_model())
+        Entity::insert(expectation.into_active_model())
             .on_conflict(
-                OnConflict::columns([
-                    quant_domain_source_expectation::Column::SourceId,
-                    quant_domain_source_expectation::Column::InstrumentKey,
-                ])
-                .update_columns([
-                    quant_domain_source_expectation::Column::ExpectationId,
-                    quant_domain_source_expectation::Column::Family,
-                    quant_domain_source_expectation::Column::CapabilityRegistryHash,
-                    quant_domain_source_expectation::Column::BindingHash,
-                    quant_domain_source_expectation::Column::Required,
-                    quant_domain_source_expectation::Column::CredentialRequired,
-                    quant_domain_source_expectation::Column::FreshnessSecs,
-                    quant_domain_source_expectation::Column::AffectedMarketIds,
-                    quant_domain_source_expectation::Column::AffectedProfileIds,
-                    quant_domain_source_expectation::Column::Status,
-                    quant_domain_source_expectation::Column::StatusReason,
-                    quant_domain_source_expectation::Column::UpdatedAt,
-                ])
-                .to_owned(),
+                OnConflict::columns([Column::SourceId, Column::InstrumentKey])
+                    .update_columns([
+                        Column::ExpectationId,
+                        Column::Family,
+                        Column::CapabilityRegistryHash,
+                        Column::BindingHash,
+                        Column::Required,
+                        Column::CredentialRequired,
+                        Column::FreshnessSecs,
+                        Column::AffectedMarketIds,
+                        Column::AffectedProfileIds,
+                        Column::Status,
+                        Column::StatusReason,
+                        Column::UpdatedAt,
+                    ])
+                    .to_owned(),
             )
             .exec_with_returning(&self.db)
             .await
@@ -87,27 +84,15 @@ impl DomainSourceExpectationRepository for PgDomainSourceExpectationRepository {
         transition
             .validate()
             .map_err(|detail| StorageError::InvariantViolation {
-                entity: Some(entity::QUANT_DOMAIN_SOURCE_EXPECTATION),
+                entity: Some(QUANT_DOMAIN_SOURCE_EXPECTATION),
                 detail,
             })?;
-        let result = quant_domain_source_expectation::Entity::update_many()
-            .col_expr(
-                quant_domain_source_expectation::Column::Status,
-                primitives::enum_value(&transition.to),
-            )
-            .col_expr(
-                quant_domain_source_expectation::Column::StatusReason,
-                Expr::value(transition.reason),
-            )
-            .col_expr(
-                quant_domain_source_expectation::Column::UpdatedAt,
-                Expr::value(Utc::now()),
-            )
-            .filter(
-                quant_domain_source_expectation::Column::ExpectationId
-                    .eq(transition.expectation_id.clone()),
-            )
-            .filter(quant_domain_source_expectation::Column::Status.eq(transition.from))
+        let result = Entity::update_many()
+            .col_expr(Column::Status, primitives::enum_value(&transition.to))
+            .col_expr(Column::StatusReason, Expr::value(transition.reason))
+            .col_expr(Column::UpdatedAt, Expr::value(Utc::now()))
+            .filter(Column::ExpectationId.eq(transition.expectation_id.clone()))
+            .filter(Column::Status.eq(transition.from))
             .exec(&self.db)
             .await
             .map_err(StorageError::from)?;
@@ -115,13 +100,13 @@ impl DomainSourceExpectationRepository for PgDomainSourceExpectationRepository {
             let current = self.find(&transition.expectation_id).await?;
             return Err(match current {
                 Some(row) => StorageError::IllegalTransition {
-                    entity: entity::QUANT_DOMAIN_SOURCE_EXPECTATION,
+                    entity: QUANT_DOMAIN_SOURCE_EXPECTATION,
                     id: Some(transition.expectation_id.to_string()),
                     from: row.status.to_string(),
                     to: transition.to.to_string(),
                 },
                 None => StorageError::NotFound {
-                    entity: entity::QUANT_DOMAIN_SOURCE_EXPECTATION,
+                    entity: QUANT_DOMAIN_SOURCE_EXPECTATION,
                     id: transition.expectation_id.to_string(),
                 },
             });
@@ -129,16 +114,16 @@ impl DomainSourceExpectationRepository for PgDomainSourceExpectationRepository {
         self.find(&transition.expectation_id)
             .await?
             .ok_or_else(|| StorageError::NotFound {
-                entity: entity::QUANT_DOMAIN_SOURCE_EXPECTATION,
+                entity: QUANT_DOMAIN_SOURCE_EXPECTATION,
                 id: transition.expectation_id.to_string(),
             })
     }
 
     async fn list_all(&self) -> Result<Vec<DomainSourceExpectationInfo>, StorageError> {
-        quant_domain_source_expectation::Entity::find()
-            .order_by_asc(quant_domain_source_expectation::Column::Family)
-            .order_by_asc(quant_domain_source_expectation::Column::SourceId)
-            .order_by_asc(quant_domain_source_expectation::Column::InstrumentKey)
+        Entity::find()
+            .order_by_asc(Column::Family)
+            .order_by_asc(Column::SourceId)
+            .order_by_asc(Column::InstrumentKey)
             .all(&self.db)
             .await
             .map_err(StorageError::from)

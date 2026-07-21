@@ -3,12 +3,14 @@
 use std::os::unix::fs::PermissionsExt;
 
 use async_trait::async_trait;
+use blake3::Hasher;
 use quant_pivot_error::{QuantResult, storage::StorageError};
 use quant_pivot_models::{
-    domain::ProductionEvidenceArtifactVerificationPort,
+    domain::ports::ProductionEvidenceArtifactVerificationPort,
     types::{ArtifactUri, ContentHash},
 };
-use tokio::io::AsyncReadExt;
+use tokio::{fs::File, io::AsyncReadExt};
+use url::Url;
 
 pub struct FileProductionEvidenceVerifier;
 
@@ -19,7 +21,7 @@ impl ProductionEvidenceArtifactVerificationPort for FileProductionEvidenceVerifi
         artifact_uri: &ArtifactUri,
         expected_hash: &ContentHash,
     ) -> QuantResult<()> {
-        let url = url::Url::parse(artifact_uri.as_str()).map_err(|error| {
+        let url = Url::parse(artifact_uri.as_str()).map_err(|error| {
             StorageError::invariant_violation(
                 Some("system_production_evidence"),
                 format!("invalid evidence artifact URI: {error}"),
@@ -52,13 +54,13 @@ impl ProductionEvidenceArtifactVerificationPort for FileProductionEvidenceVerifi
             .into());
         }
 
-        let mut file = tokio::fs::File::open(&path).await.map_err(|error| {
+        let mut file = File::open(&path).await.map_err(|error| {
             StorageError::invariant_violation(
                 Some("system_production_evidence"),
                 format!("evidence artifact cannot be opened: {error}"),
             )
         })?;
-        let mut hasher = blake3::Hasher::new();
+        let mut hasher = Hasher::new();
         let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
         loop {
             let read = file.read(&mut buffer).await.map_err(|error| {

@@ -3,10 +3,17 @@
 
 use std::collections::{HashMap, HashSet};
 
-use quant_pivot_error::storage::{StorageError, entity};
+use quant_pivot_error::storage::{
+    StorageError,
+    entity::{ROLE, USER},
+};
 use quant_pivot_models::{
-    domain::{AssignRoles, RoleInfo},
-    entities::{role, user, user_role},
+    domain::rbac::{AssignRoles, RoleInfo},
+    entities::{
+        role::{Column, Entity as RoleEntity},
+        user::Entity,
+        user_role::{ActiveModel, Column as UserRoleColumn, Entity as UserRoleEntity},
+    },
     enums::rbac::RoleStatus,
     types::{RoleCode, RoleId, UserId},
 };
@@ -44,19 +51,19 @@ async fn do_set_roles(
 
     let txn = db.begin().await.map_err(StorageError::from)?;
 
-    if user::Entity::find_by_id(user_id.clone())
+    if Entity::find_by_id(user_id.clone())
         .one(&txn)
         .await
         .map_err(StorageError::from)?
         .is_none()
     {
         txn.rollback().await.map_err(StorageError::from)?;
-        return Err(error::not_found(entity::USER, &user_id));
+        return Err(error::not_found(USER, &user_id));
     }
 
     // Resolve every target role to its code, rejecting unknown ids.
-    let target_roles = role::Entity::find()
-        .filter(role::Column::Id.is_in(target.iter().cloned()))
+    let target_roles = RoleEntity::find()
+        .filter(Column::Id.is_in(target.iter().cloned()))
         .all(&txn)
         .await
         .map_err(StorageError::from)?;
@@ -67,7 +74,7 @@ async fn do_set_roles(
             .find(|id| !found.contains(id))
             .map_or_else(|| "<unknown>".to_owned(), ToString::to_string);
         txn.rollback().await.map_err(StorageError::from)?;
-        return Err(error::not_found(entity::ROLE, missing));
+        return Err(error::not_found(ROLE, missing));
     }
     // Only *enabled* roles project a Casbin grouping (`g`): a disabled role keeps
     // its relational `user_role` membership but grants nothing until re-enabled,
@@ -78,8 +85,8 @@ async fn do_set_roles(
         .map(|role| (role.id.clone(), role.code.clone()))
         .collect();
 
-    let current: HashSet<RoleId> = user_role::Entity::find()
-        .filter(user_role::Column::UserId.eq(user_id.clone()))
+    let current: HashSet<RoleId> = UserRoleEntity::find()
+        .filter(UserRoleColumn::UserId.eq(user_id.clone()))
         .all(&txn)
         .await
         .map_err(StorageError::from)?
@@ -93,8 +100,8 @@ async fn do_set_roles(
     let removed_codes = if removed.is_empty() {
         HashMap::new()
     } else {
-        role::Entity::find()
-            .filter(role::Column::Id.is_in(removed.iter().cloned()))
+        RoleEntity::find()
+            .filter(Column::Id.is_in(removed.iter().cloned()))
             .all(&txn)
             .await
             .map_err(StorageError::from)?
@@ -104,15 +111,15 @@ async fn do_set_roles(
     };
 
     if !added.is_empty() {
-        let rows = added.iter().map(|role_id| user_role::ActiveModel {
+        let rows = added.iter().map(|role_id| ActiveModel {
             user_id: Set(user_id.clone()),
             role_id: Set(role_id.clone()),
             ..Default::default()
         });
-        junction::insert_junction_rows::<user_role::Entity>(
+        junction::insert_junction_rows::<UserRoleEntity>(
             &txn,
             rows,
-            OnConflict::columns([user_role::Column::UserId, user_role::Column::RoleId])
+            OnConflict::columns([UserRoleColumn::UserId, UserRoleColumn::RoleId])
                 .do_nothing()
                 .to_owned(),
         )
@@ -126,9 +133,9 @@ async fn do_set_roles(
     }
 
     if !removed.is_empty() {
-        user_role::Entity::delete_many()
-            .filter(user_role::Column::UserId.eq(user_id.clone()))
-            .filter(user_role::Column::RoleId.is_in(removed.iter().cloned()))
+        UserRoleEntity::delete_many()
+            .filter(UserRoleColumn::UserId.eq(user_id.clone()))
+            .filter(UserRoleColumn::RoleId.is_in(removed.iter().cloned()))
             .exec(&txn)
             .await
             .map_err(StorageError::from)?;
@@ -148,8 +155,8 @@ async fn do_list_roles_for_user(
     db: &impl ConnectionTrait,
     user_id: &UserId,
 ) -> Result<Vec<RoleInfo>, StorageError> {
-    let role_ids: Vec<RoleId> = user_role::Entity::find()
-        .filter(user_role::Column::UserId.eq(user_id.clone()))
+    let role_ids: Vec<RoleId> = UserRoleEntity::find()
+        .filter(UserRoleColumn::UserId.eq(user_id.clone()))
         .all(db)
         .await
         .map_err(StorageError::from)?
@@ -160,10 +167,10 @@ async fn do_list_roles_for_user(
         return Ok(Vec::new());
     }
 
-    let roles = role::Entity::find()
-        .filter(role::Column::Id.is_in(role_ids))
-        .order_by_asc(role::Column::Sort)
-        .order_by_asc(role::Column::Code)
+    let roles = RoleEntity::find()
+        .filter(Column::Id.is_in(role_ids))
+        .order_by_asc(Column::Sort)
+        .order_by_asc(Column::Code)
         .all(db)
         .await
         .map_err(StorageError::from)?;

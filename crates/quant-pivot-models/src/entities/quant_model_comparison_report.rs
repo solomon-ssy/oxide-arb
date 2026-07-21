@@ -1,12 +1,14 @@
 //! `quant_model_comparison_report` table entity.
 
+use chrono::{DateTime, Utc};
+use rust_decimal::Decimal;
+use sea_orm::entity::prelude::*;
+
+use super::{quant_backtest_report, quant_model_run, quant_model_version};
 use crate::types::{
     BacktestReportId, ContentHash, ModelComparisonReportId, ModelRunId, ModelVersionId,
     backtest::CategoryRankIcDeltas,
 };
-use chrono::{DateTime, Utc};
-use rust_decimal::Decimal;
-use sea_orm::entity::prelude::*;
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -36,35 +38,35 @@ pub struct Model {
         from = "model_run_id",
         to = "model_run_id"
     )]
-    pub model_run: BelongsTo<super::quant_model_run::Entity>,
+    pub model_run: BelongsTo<quant_model_run::Entity>,
     #[sea_orm(
         belongs_to,
         relation_enum = "BaselineModelVersion",
         from = "baseline_model_version_id",
         to = "model_version_id"
     )]
-    pub baseline_model_version: BelongsTo<super::quant_model_version::Entity>,
+    pub baseline_model_version: BelongsTo<quant_model_version::Entity>,
     #[sea_orm(
         belongs_to,
         relation_enum = "CandidateModelVersion",
         from = "candidate_model_version_id",
         to = "model_version_id"
     )]
-    pub candidate_model_version: BelongsTo<super::quant_model_version::Entity>,
+    pub candidate_model_version: BelongsTo<quant_model_version::Entity>,
     #[sea_orm(
         belongs_to,
         relation_enum = "BaselineReport",
         from = "baseline_report_id",
         to = "backtest_report_id"
     )]
-    pub baseline_report: BelongsTo<super::quant_backtest_report::Entity>,
+    pub baseline_report: BelongsTo<quant_backtest_report::Entity>,
     #[sea_orm(
         belongs_to,
         relation_enum = "CandidateReport",
         from = "candidate_report_id",
         to = "backtest_report_id"
     )]
-    pub candidate_report: BelongsTo<super::quant_backtest_report::Entity>,
+    pub candidate_report: BelongsTo<quant_backtest_report::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

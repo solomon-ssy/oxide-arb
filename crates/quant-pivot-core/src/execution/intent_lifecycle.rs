@@ -11,7 +11,8 @@
 use chrono::{DateTime, Utc};
 use quant_pivot_models::{
     domain::{
-        CoreEvent, CoreEventPublisher, IntentEventKind, IntentLifecycleEvent, OrderIntentInfo,
+        quant::OrderIntentInfo,
+        runtime::{CoreEvent, CoreEventPublisher, IntentEventKind, IntentLifecycleEvent},
     },
     enums::quant::OrderIntentStatus,
 };

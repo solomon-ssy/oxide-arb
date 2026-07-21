@@ -116,12 +116,12 @@ pub enum ResearchError {
     },
 
     /// A concrete model family is recognized but its runtime is not linked in
-    /// this build/phase (classical → 3.6, ONNX → Phase 06+).
+    /// this build.
     #[error("model runtime not available for family `{family}`: {detail}")]
     RuntimeUnavailable {
         /// The model family whose runtime is not linked.
         family: String,
-        /// Context (which phase introduces it).
+        /// Context describing the unavailable capability.
         detail: String,
     },
 
@@ -173,7 +173,7 @@ pub enum ResearchError {
         detail: String,
     },
 
-    /// A Phase 11.5 validation-methodology invariant was violated: an invalid
+    /// A validation-methodology invariant was violated: an invalid
     /// CPCV/trial-grid/CSCV configuration (e.g. an odd `block_count`, a
     /// `k_test >= n_groups`), or a computation that cannot proceed without
     /// silently degrading (e.g. fewer trials than the CSCV comparison needs).
@@ -198,8 +198,8 @@ pub enum ResearchError {
         detail: String,
     },
 
-    /// A long-running research job was cooperatively cancelled at a
-    /// section/phase boundary (operator cancel, lease loss, or graceful
+    /// A long-running research job was cooperatively cancelled at a stage
+    /// boundary (operator cancel, lease loss, or graceful
     /// shutdown). Terminal but distinct from a failure — the durable worker
     /// records it as `Cancelled`, not `Failed`, and never persists a partial
     /// artifact.

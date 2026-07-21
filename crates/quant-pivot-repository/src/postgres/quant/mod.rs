@@ -42,30 +42,42 @@ mod source_slice;
 mod trade_policy;
 mod trade_tape_block_cursor;
 
-pub use {
-    account_snapshot::PgAccountSnapshotRepository, attribution::PgAttributionRepository,
-    backtest_path_set::PgBacktestPathSetRepository, backtest_report::PgBacktestReportRepository,
-    basis_alert::PgBasisAlertRepository, calibration_artifact::PgCalibrationArtifactRepository,
-    capital_allocation::PgCapitalAllocationRepository,
-    comparison_report::PgModelComparisonReportRepository, dataset::PgTrainingDatasetRepository,
-    domain_projection::PgDomainProjectionRepository,
-    domain_source_cursor::PgDomainSourceCursorRepository,
-    domain_source_expectation::PgDomainSourceExpectationRepository,
-    entry_condition::PgEntryConditionRepository, equity_snapshot::PgEquitySnapshotRepository,
-    execution_order::PgExecutionOrderRepository,
-    execution_submission::PgExecutionSubmissionRepository, factor::PgFactorRepository,
-    feature::PgFeatureRepository, feature_parity::PgFeatureParityRepository,
-    governance_audit::PgModelGovernanceAuditRepository, market_linkage::PgMarketLinkageRepository,
-    market_selection::PgMarketSelectionRepository, model_registry::PgModelRegistryRepository,
-    model_run::PgModelRunRepository, order_intent::PgOrderIntentRepository,
-    portfolio_plan::PgPortfolioPlanRepository, position::PgPositionRepository,
-    recommendation::PgRecommendationRepository,
-    recommendation_report::PgRecommendationReportRepository,
-    reconciliation::PgReconciliationRepository, report_run::PgReportRunRepository,
-    research_job::PgResearchJobRepository,
-    research_readiness::PgResearchReadinessEvidenceRepository,
-    reserved_capital::PgReservedCapitalRepository, settlement_redeem::PgSettlementRedeemRepository,
-    shadow_comparison::PgShadowComparisonRepository, source_slice::PgSourceSliceRepository,
-    trade_policy::PgTradePolicyRepository,
-    trade_tape_block_cursor::PgTradeTapeBlockCursorRepository,
-};
+pub use account_snapshot::PgAccountSnapshotRepository;
+pub use attribution::PgAttributionRepository;
+pub use backtest_path_set::PgBacktestPathSetRepository;
+pub use backtest_report::PgBacktestReportRepository;
+pub use basis_alert::PgBasisAlertRepository;
+pub use calibration_artifact::PgCalibrationArtifactRepository;
+pub use capital_allocation::PgCapitalAllocationRepository;
+pub use comparison_report::PgModelComparisonReportRepository;
+pub use dataset::PgTrainingDatasetRepository;
+pub use domain_projection::PgDomainProjectionRepository;
+pub use domain_source_cursor::PgDomainSourceCursorRepository;
+pub use domain_source_expectation::PgDomainSourceExpectationRepository;
+pub use entry_condition::PgEntryConditionRepository;
+pub use equity_snapshot::PgEquitySnapshotRepository;
+pub use execution_order::PgExecutionOrderRepository;
+pub use execution_submission::PgExecutionSubmissionRepository;
+pub use factor::PgFactorRepository;
+pub use feature::PgFeatureRepository;
+pub use feature_parity::PgFeatureParityRepository;
+pub use governance_audit::PgModelGovernanceAuditRepository;
+pub use market_linkage::PgMarketLinkageRepository;
+pub use market_selection::PgMarketSelectionRepository;
+pub use model_registry::PgModelRegistryRepository;
+pub use model_run::PgModelRunRepository;
+pub use order_intent::PgOrderIntentRepository;
+pub use portfolio_plan::PgPortfolioPlanRepository;
+pub use position::PgPositionRepository;
+pub use recommendation::PgRecommendationRepository;
+pub use recommendation_report::PgRecommendationReportRepository;
+pub use reconciliation::PgReconciliationRepository;
+pub use report_run::PgReportRunRepository;
+pub use research_job::PgResearchJobRepository;
+pub use research_readiness::PgResearchReadinessEvidenceRepository;
+pub use reserved_capital::PgReservedCapitalRepository;
+pub use settlement_redeem::PgSettlementRedeemRepository;
+pub use shadow_comparison::PgShadowComparisonRepository;
+pub use source_slice::PgSourceSliceRepository;
+pub use trade_policy::PgTradePolicyRepository;
+pub use trade_tape_block_cursor::PgTradeTapeBlockCursorRepository;

@@ -19,8 +19,10 @@ use chrono::{DateTime, Duration, Utc};
 use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{
     domain::{
-        CatalogEventChangeInfo, CatalogMarketChangeInfo, CatalogSnapshotInfo, CatalogWindowInfo,
-        DecisionBoundary, DecisionSource,
+        data_plane::{DecisionBoundary, DecisionSource},
+        market::{
+            CatalogEventChangeInfo, CatalogMarketChangeInfo, CatalogSnapshotInfo, CatalogWindowInfo,
+        },
     },
     types::{CatalogEventChangeId, MarketId, TokenId},
 };
@@ -239,14 +241,17 @@ fn ms_ge(timestamp_ms: u64, min_ms: i64) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::MaterializedPitEngine;
-    use crate::pit::{BookSnapshotAt, PointInTimeSnapshotSource};
-    use chrono::{Duration, TimeZone, Utc};
+    use std::{collections::HashMap, sync::Arc};
+
+    use chrono::{DateTime, Duration, TimeZone, Utc};
     use quant_pivot_models::{
         domain::{
-            CATALOG_OBJECT_SCHEMA_VERSION, CatalogEventChangeInfo, CatalogMarketChangeInfo,
-            CatalogWindowInfo, DecisionClock, EventRegistryInfo,
-            market::{book::BookLevel, registry::MarketRegistryInfo},
+            data_plane::DecisionClock,
+            market::{
+                CATALOG_OBJECT_SCHEMA_VERSION, CatalogEventChangeInfo, CatalogMarketChangeInfo,
+                CatalogWindowInfo, EventRegistryInfo, book::BookLevel,
+                registry::MarketRegistryInfo,
+            },
         },
         enums::{
             catalog::{CatalogChangeType, CatalogFilterReasonSet, CatalogTimestampQuality},
@@ -260,7 +265,9 @@ mod tests {
         },
     };
     use rust_decimal::Decimal;
-    use std::{collections::HashMap, sync::Arc};
+
+    use super::MaterializedPitEngine;
+    use crate::pit::{BookSnapshotAt, PointInTimeSnapshotSource};
 
     fn level(price: &str) -> BookLevel {
         BookLevel::from_decimal_unchecked(
@@ -291,7 +298,7 @@ mod tests {
 
     fn catalog_window(
         market_id: &MarketId,
-        revisions: &[(chrono::DateTime<Utc>, MarketStatus)],
+        revisions: &[(DateTime<Utc>, MarketStatus)],
     ) -> CatalogWindowInfo {
         let event_id = EventId::new("event");
         let event_version_id = CatalogEventChangeId::from_v7();

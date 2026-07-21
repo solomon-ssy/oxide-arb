@@ -3,7 +3,7 @@
 use alloy::primitives::{Address, B256, U256};
 use chrono::{DateTime, TimeZone, Utc};
 use quant_pivot_models::{
-    domain::{
+    domain::data_plane::{
         TradeParticipantRole, TradeTapePrint, TradeTapeSourceKind,
         trade_tape_coverage::{PARTICIPANT_ADDRESS, PARTICIPANT_ROLE, SIDE, TOKEN_ID, TX_HASH},
     },
@@ -334,24 +334,24 @@ fn u256_to_decimal(value: U256, scale: u32) -> Result<Decimal, DecodeRejectReaso
 
 #[cfg(test)]
 mod tests {
-    use crate::exchange::{
-        constants::{CTF_EXCHANGE_V1, CTF_EXCHANGE_V2},
-        order_filled_v1::OrderFilledV1,
-        order_filled_v2::OrderFilledV2,
-    };
-
-    use super::*;
     use alloy::{
-        primitives::{Address, B256, U256},
+        primitives::{Address, B256, Log as PrimitiveLog, U256},
         rpc::types::Log,
         sol_types::SolEvent,
     };
     use quant_pivot_models::types::MarketId;
     use rust_decimal_macros::dec;
 
+    use super::*;
+    use crate::exchange::{
+        constants::{CTF_EXCHANGE_V1, CTF_EXCHANGE_V2},
+        order_filled_v1::OrderFilledV1,
+        order_filled_v2::OrderFilledV2,
+    };
+
     fn fetched_log(event: &impl SolEvent, block_timestamp: u64) -> FetchedLog {
         let log = Log {
-            inner: alloy::primitives::Log {
+            inner: PrimitiveLog {
                 address: Address::ZERO,
                 data: event.encode_log_data(),
             },

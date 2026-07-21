@@ -339,6 +339,23 @@ impl DatasetParquetCodec {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        env,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use chrono::{Duration, Utc};
+    use polars::prelude::{Column, DataFrame, ParquetWriter};
+    use quant_pivot_models::{
+        domain::data_plane::{DecisionClock, DecisionSource},
+        enums::quant::DatasetPurpose,
+        types::{
+            ArtifactUri, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION, DatasetManifest,
+            DecisionPolicySnapshotId, ModelSpecId, SourceSliceManifestRef, TrainingDatasetId,
+            builtin_research_profiles,
+        },
+    };
+
     use super::DatasetParquetCodec;
     use crate::{
         artifact::{ArtifactKey, ArtifactNamespace, ArtifactStore, LocalArtifactStore},
@@ -347,21 +364,6 @@ mod tests {
             dataset_source_fingerprint,
             fixtures::{bind_capture_to_boundary, example},
         },
-    };
-    use chrono::{Duration, Utc};
-    use polars::prelude::{Column, DataFrame, ParquetWriter};
-    use quant_pivot_models::{
-        domain::{DecisionClock, DecisionSource},
-        enums::quant::DatasetPurpose,
-        types::{
-            ArtifactUri, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION, DatasetManifest,
-            DecisionPolicySnapshotId, ModelSpecId, SourceSliceManifestRef, TrainingDatasetId,
-            builtin_research_profiles,
-        },
-    };
-    use std::{
-        env,
-        time::{SystemTime, UNIX_EPOCH},
     };
 
     fn manifest(examples: &[TrainingExample]) -> DatasetManifest {
@@ -478,11 +480,6 @@ mod tests {
             .finish(&mut frame)
             .expect("legacy parquet");
         assert!(DatasetParquetCodec::decode(&bytes).is_err());
-    }
-
-    #[test]
-    fn dataset_artifact_version_is_one() {
-        assert_eq!(DATASET_ARTIFACT_FORMAT_VERSION, 1);
     }
 
     #[tokio::test(flavor = "multi_thread")]

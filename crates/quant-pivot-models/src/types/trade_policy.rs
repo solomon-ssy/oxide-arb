@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use rust_decimal::Decimal;
 use sea_orm::FromJsonQueryResult;
 use serde::{Deserialize, Serialize};
@@ -179,7 +179,7 @@ impl TradePolicyFitContract {
                 "research profile does not permit the requested evaluation track".to_owned(),
             );
         }
-        let expected_span = chrono::Duration::days(i64::from(profile.spec.fit_span_days));
+        let expected_span = Duration::days(i64::from(profile.spec.fit_span_days));
         if self.fit_window_end - self.fit_window_start != expected_span {
             return Err("trade-policy fit window does not match the immutable profile".to_owned());
         }
@@ -1450,7 +1450,7 @@ pub struct TradePolicyArtifact {
 
 #[cfg(test)]
 mod tests {
-    use chrono::{TimeZone, Utc};
+    use chrono::{Duration, TimeZone, Utc};
     use rust_decimal::Decimal;
 
     use super::{
@@ -1483,7 +1483,7 @@ mod tests {
             source_dataset_id: TrainingDatasetId::from_v7(),
             model_version_id: ModelVersionId::from_v7(),
             decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
-            fit_window_start: fit_window_end - chrono::Duration::days(30),
+            fit_window_start: fit_window_end - Duration::days(30),
             fit_window_end,
             pit_cutoff: fit_window_end,
             target_horizon_secs: profile.spec.target_horizon_secs,
@@ -1498,7 +1498,7 @@ mod tests {
     #[test]
     fn fit_contract_rejects_labels_beyond_pit_cutoff() {
         let mut value = contract();
-        value.pit_cutoff = value.fit_window_end - chrono::Duration::seconds(1);
+        value.pit_cutoff = value.fit_window_end - Duration::seconds(1);
         assert!(value.validate().is_err());
     }
 

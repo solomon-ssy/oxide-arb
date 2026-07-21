@@ -1,13 +1,21 @@
-//! Factor-definition publish / retire admin endpoints (Phase 05.7).
+//! Factor-definition publish / retire admin endpoints.
 
-use actix_web::{http::Method, web};
+use actix_web::{
+    http::Method,
+    web::{Data, Path, Query},
+};
 use quant_pivot_models::{
     domain::{
-        FactorCollinearityQuery, FactorCollinearityView, FactorDefinitionListQuery,
-        FactorDefinitionView, GovernanceActor, Paginated, PublishFactorCommand,
-        PublishFactorRequest, PublishFactorsBatchCommand, PublishFactorsBatchRequest,
-        RegisterFactorDefinitionsCommand, RegisterFactorDefinitionsRequest, RetireFactorCommand,
-        RetireFactorRequest,
+        api::{
+            FactorCollinearityQuery, FactorCollinearityView, FactorDefinitionListQuery,
+            FactorDefinitionView, PublishFactorRequest, PublishFactorsBatchRequest,
+            RegisterFactorDefinitionsRequest, RetireFactorRequest,
+        },
+        pagination::Paginated,
+        ports::{
+            GovernanceActor, PublishFactorCommand, PublishFactorsBatchCommand,
+            RegisterFactorDefinitionsCommand, RetireFactorCommand,
+        },
     },
     enums::{
         operation_log::OperationCategory,
@@ -17,6 +25,7 @@ use quant_pivot_models::{
     runtime_config::NeutralizeDimension,
     types::{ContentHash, FactorDefinitionId, RoleCode, UserId},
 };
+use rust_decimal::Decimal;
 use serde::Serialize;
 
 use crate::{
@@ -81,8 +90,8 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
 
 /// `GET /api/research/factors` — paginated factor-definition governance catalog.
 pub async fn list(
-    state: web::Data<AppState>,
-    query: web::Query<FactorDefinitionListQuery>,
+    state: Data<AppState>,
+    query: Query<FactorDefinitionListQuery>,
 ) -> Result<WebResponse<Paginated<FactorDefinitionView>>, WebError> {
     let page = state
         .research_catalog
@@ -102,8 +111,8 @@ const DEFAULT_COLLINEARITY_LOOKBACK_SECS: u64 = 7 * 24 * 60 * 60;
 /// `threshold` query param overrides it. The `source` param selects the raw
 /// (default) or normalized value plane.
 pub async fn collinearity(
-    state: web::Data<AppState>,
-    query: web::Query<FactorCollinearityQuery>,
+    state: Data<AppState>,
+    query: Query<FactorCollinearityQuery>,
 ) -> Result<WebResponse<FactorCollinearityView>, WebError> {
     let query = query.into_inner();
     let lookback_secs = query
@@ -111,7 +120,7 @@ pub async fn collinearity(
         .unwrap_or(DEFAULT_COLLINEARITY_LOOKBACK_SECS);
     let threshold = if let Some(raw) = query.threshold {
         raw.trim()
-            .parse::<rust_decimal::Decimal>()
+            .parse::<Decimal>()
             .map_err(|error| WebError::BadRequest(format!("invalid threshold `{raw}`: {error}")))?
     } else {
         let config = state.runtime_config_apply.current();
@@ -144,8 +153,8 @@ pub async fn collinearity(
 
 /// `GET /api/research/factors/{id}` — single factor definition (detail drawer).
 pub async fn get_by_id(
-    state: web::Data<AppState>,
-    id: web::Path<FactorDefinitionId>,
+    state: Data<AppState>,
+    id: Path<FactorDefinitionId>,
 ) -> Result<WebResponse<FactorDefinitionView>, WebError> {
     let info = state
         .research_catalog
@@ -157,8 +166,8 @@ pub async fn get_by_id(
 
 /// `POST /api/research/factors/{id}/publish` — promote a draft/retired definition.
 pub async fn publish(
-    state: web::Data<AppState>,
-    id: web::Path<FactorDefinitionId>,
+    state: Data<AppState>,
+    id: Path<FactorDefinitionId>,
     actor: AuthedActor,
     acting_role: ActingRole,
     request_id: RequestId,
@@ -207,8 +216,8 @@ pub async fn publish(
 
 /// `POST /api/research/factors/{id}/retire` — retire a published definition.
 pub async fn retire(
-    state: web::Data<AppState>,
-    id: web::Path<FactorDefinitionId>,
+    state: Data<AppState>,
+    id: Path<FactorDefinitionId>,
     actor: AuthedActor,
     acting_role: ActingRole,
     request_id: RequestId,
@@ -262,7 +271,7 @@ pub async fn retire(
 /// bootstrap step that seeds the factor catalog so the operator can then publish
 /// them — the online report path fails closed on non-`Published` definitions.
 pub async fn register(
-    state: web::Data<AppState>,
+    state: Data<AppState>,
     actor: AuthedActor,
     acting_role: ActingRole,
     request_id: RequestId,
@@ -300,7 +309,7 @@ pub async fn register(
 
 /// `POST /api/research/factors/publish-batch` — publish a batch of definitions.
 pub async fn publish_batch(
-    state: web::Data<AppState>,
+    state: Data<AppState>,
     actor: AuthedActor,
     acting_role: ActingRole,
     request_id: RequestId,

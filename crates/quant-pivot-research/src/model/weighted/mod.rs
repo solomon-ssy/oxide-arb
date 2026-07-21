@@ -6,13 +6,13 @@
 //! from a **return/risk mapping**, both frozen in the artifact:
 //!
 //! ```text
-//! signedᵢ        = dir_signᵢ · normalizedᵢ · confidenceᵢ        (∈ [-1, 1])
-//! net            = Σ weightᵢ · signedᵢ                          (∈ [-1, 1])
-//! outcome_side   = sign(net)  → Yes (>0) / No (<0)             (0 ⇒ no candidate)
-//! conviction     = |net|
-//! composite      = clamp₀₁(conviction · dq_mult · liq_mult · horizon_mult)
-//! confidence     = clamp₀₁(weighted_mean(confidenceᵢ) · Π substitution_penalty)
-//! (return,down)  = artifact.return_model.estimate(composite, confidence)
+//! signedᵢ = dir_signᵢ · normalizedᵢ · confidenceᵢ (∈ [-1, 1])
+//! net = Σ weightᵢ · signedᵢ (∈ [-1, 1])
+//! outcome_side = sign(net) → Yes (>0) / No (<0) (0 ⇒ no candidate)
+//! conviction = |net|
+//! composite = clamp₀₁(conviction · dq_mult · liq_mult · horizon_mult)
+//! confidence = clamp₀₁(weighted_mean(confidenceᵢ) · Π substitution_penalty)
+//! (return,down) = artifact.return_model.estimate(composite, confidence)
 //! ```
 //!
 //! Weights are non-negative and sum to 1 (validated on construction); missing
@@ -24,6 +24,7 @@ use std::{cmp::Reverse, collections::BTreeMap, time::Instant};
 mod batch;
 
 use async_trait::async_trait;
+use batch::ScoringBatchLayout;
 use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{
@@ -56,8 +57,6 @@ use crate::{
     precision::RESEARCH_DECIMAL_SCALE,
 };
 
-use batch::ScoringBatchLayout;
-
 /// How many positive / negative contributions the explanation surfaces.
 const EXPLANATION_TOP_K: usize = 3;
 
@@ -68,7 +67,7 @@ pub struct WeightedFactorRuntime {
     batch_layout: ScoringBatchLayout,
     weight_source: ModelWeightSource,
     /// Resolved `ProbabilityCalibrator` data when `artifact.return_model` is
-    /// `Calibrated` (Phase 11.3 §5) — bound once at load time by the factory,
+    /// `Calibrated` — bound once at load time by the factory,
     /// never re-fetched per candidate. `None` for `Heuristic`.
     calibration: Option<ResolvedCalibration>,
 }
@@ -534,7 +533,6 @@ fn context_warnings(
 
 #[cfg(test)]
 mod tests {
-    use super::WeightedFactorRuntime;
     use chrono::Utc;
     use quant_pivot_models::{
         enums::{
@@ -549,6 +547,7 @@ mod tests {
     };
     use rust_decimal_macros::dec;
 
+    use super::WeightedFactorRuntime;
     use crate::{
         factors::{
             FactorExplanation, FactorName, FactorValue, FrozenReferenceQuantiles, NormalizedFactor,

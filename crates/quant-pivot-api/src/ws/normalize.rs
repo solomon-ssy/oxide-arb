@@ -1,7 +1,7 @@
 //! Map Polymarket SDK WebSocket payloads into domain [`PipelineEvent`].
 
-use super::{ingest_hooks::BookLevelRejectHook, token_intern::intern_u256};
-use crate::clob::ClobSide;
+use std::{cell::RefCell, cmp::Reverse, sync::Arc, time::Instant};
+
 use ahash::AHashMap;
 use num_traits::ToPrimitive;
 use polymarket_client_sdk_v2::clob::ws::types::response::{
@@ -9,16 +9,18 @@ use polymarket_client_sdk_v2::clob::ws::types::response::{
 };
 use quant_pivot_models::{
     domain::{
-        book::BookLevel,
-        pipeline::{
+        data_plane::pipeline::{
             BookSideData, BookSnapshotCmd, IngressTrace, PipelineEvent, PriceDeltaCmd,
             PriceLevelDelta,
         },
+        market::book::BookLevel,
     },
     enums::common::TickSize,
     types::{MarketId, Price, Shares, TokenId},
 };
-use std::{cell::RefCell, cmp::Reverse, sync::Arc, time::Instant};
+
+use super::{ingest_hooks::BookLevelRejectHook, token_intern::intern_u256};
+use crate::clob::ClobSide;
 
 thread_local! {
     static DELTA_GROUP: RefCell<AHashMap<TokenId, Vec<PriceLevelDelta>>> =
@@ -27,7 +29,7 @@ thread_local! {
 
 /// Convert a raw SDK market message into zero or more normalized events.
 ///
-/// `ws_ingress` must be captured before parsing (typically `Instant::now()` in the shard).
+/// `ws_ingress` must be captured before parsing (typically `Instant::now` in the shard).
 #[inline]
 pub fn normalize_ws_message(
     msg: WsMessage,
@@ -225,7 +227,8 @@ fn market_resolved_event(mr: &MarketResolved, ws_ingress: Instant) -> PipelineEv
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
     use polymarket_client_sdk_v2::{
         clob::{
             types::Side,
@@ -233,9 +236,10 @@ mod tests {
         },
         types::{B256, U256},
     };
-    use quant_pivot_models::domain::pipeline::PipelineEvent;
+    use quant_pivot_models::domain::data_plane::pipeline::PipelineEvent;
     use rust_decimal_macros::dec;
-    use std::sync::atomic::{AtomicU32, Ordering};
+
+    use super::*;
 
     #[test]
     fn maps_tick_size_change_for_half_and_quarter_cent() {

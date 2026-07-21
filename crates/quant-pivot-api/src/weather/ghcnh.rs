@@ -3,16 +3,18 @@
 use std::time::Duration;
 
 use chrono::{DateTime, Datelike, NaiveDateTime, Utc};
+use csv::{ReaderBuilder, StringRecord};
 use quant_pivot_error::{QuantError, QuantResult, api::ApiError};
 use quant_pivot_models::{
     config::GhcnhSourceConfig,
-    domain::{WeatherObservationReport, WeatherObservationReportKind},
+    domain::data_plane::{WeatherObservationReport, WeatherObservationReportKind},
     hashing::CanonicalDigest,
     types::{
         ContentHash, DomainInstrumentKey, DomainMeasurementUnit, DomainSourceId, IcaoStation,
         WeatherVariable,
     },
 };
+use reqwest::Client;
 use rust_decimal::Decimal;
 
 use crate::infra::{http::get_optional_bounded_bytes_with_retry, retry::RetryPolicy};
@@ -38,13 +40,13 @@ pub struct GhcnhYear {
 /// availability and never enter the live `AviationWeather` projection.
 pub struct GhcnhSource {
     config: GhcnhSourceConfig,
-    http: reqwest::Client,
+    http: Client,
     retry_policy: RetryPolicy,
 }
 
 impl GhcnhSource {
     pub fn connect(config: GhcnhSourceConfig) -> QuantResult<Self> {
-        let http = reqwest::Client::builder()
+        let http = Client::builder()
             .timeout(Duration::from_millis(config.request_timeout_ms))
             .user_agent("quant-pivot/0.1 ghcnh-calibration")
             .build()
@@ -57,7 +59,7 @@ impl GhcnhSource {
     }
 
     #[must_use]
-    pub fn with_http_client(mut self, http: reqwest::Client) -> Self {
+    pub fn with_http_client(mut self, http: Client) -> Self {
         self.http = http;
         self
     }
@@ -99,7 +101,7 @@ fn parse_year_file(
     body: &[u8],
 ) -> QuantResult<GhcnhYear> {
     let file_hash = ContentHash::parse(CanonicalDigest::prefixed_bytes(body))?;
-    let mut reader = csv::ReaderBuilder::new()
+    let mut reader = ReaderBuilder::new()
         .delimiter(b'|')
         .flexible(true)
         .from_reader(body);
@@ -170,7 +172,7 @@ struct GhcnhColumns {
     quality: usize,
 }
 
-fn required_column_indices(headers: &csv::StringRecord) -> QuantResult<GhcnhColumns> {
+fn required_column_indices(headers: &StringRecord) -> QuantResult<GhcnhColumns> {
     for name in REQUIRED_COLUMNS {
         if !headers.iter().any(|header| header == name) {
             return Err(parse_error(format!("missing required column {name}")).into());

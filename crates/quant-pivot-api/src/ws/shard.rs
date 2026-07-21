@@ -6,25 +6,6 @@
 //! client and resubscribing — there is never more than one connection per
 //! shard. An empty token set parks the actor instead of busy-looping.
 
-use super::{
-    health::{ShardHealthBoard, TokenFreshnessBoard},
-    ingest_hooks::BookLevelRejectHook,
-    normalize::normalize_ws_message,
-    reconnect::{ReconnectPolicy, ReconnectState},
-    session_hook::WsSessionInvalidationHook,
-};
-use futures_util::StreamExt;
-use polymarket_client_sdk_v2::{
-    clob::ws::{Client as SdkWsClient, types::response::WsMessage},
-    types::U256,
-    ws::config::Config as SdkWsConfig,
-};
-use quant_pivot_models::{
-    domain::pipeline::{PipelineEvent, StreamSessionEndReason},
-    enums::system::ShardConnectionStatus,
-    hashing::CanonicalDigest,
-    types::{ContentHash, TokenId},
-};
 use std::{
     collections::{HashMap, HashSet},
     fmt::Display,
@@ -32,12 +13,38 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
+
+use chrono::Utc;
+use flume::Sender;
+use futures_util::StreamExt;
+use parking_lot::Mutex;
+use polymarket_client_sdk_v2::{
+    clob::ws::{Client as SdkWsClient, types::response::WsMessage},
+    types::U256,
+    ws::config::Config as SdkWsConfig,
+};
+use quant_pivot_models::{
+    domain::data_plane::pipeline::{PipelineEvent, StreamSessionEndReason},
+    enums::system::ShardConnectionStatus,
+    hashing::CanonicalDigest,
+    types::{ContentHash, TokenId},
+};
 use tokio::{
-    sync::{OwnedSemaphorePermit, Semaphore, oneshot, watch},
+    sync::{
+        OwnedSemaphorePermit, Semaphore, oneshot, oneshot::Sender as OneshotSender, watch::Receiver,
+    },
     time::{sleep, timeout},
 };
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
+
+use super::{
+    health::{ShardHealthBoard, TokenFreshnessBoard},
+    ingest_hooks::BookLevelRejectHook,
+    normalize::normalize_ws_message,
+    reconnect::{ReconnectPolicy, ReconnectState},
+    session_hook::WsSessionInvalidationHook,
+};
 
 /// Debounce window for token-set changes: bursts of assign/remove during a
 /// catalog sync coalesce into a single teardown + resubscribe.
@@ -58,10 +65,10 @@ const SESSION_LEDGER_TIMEOUT: Duration = Duration::from_secs(2);
 /// Shared construction dependencies, owned by the router and cloned per shard.
 #[derive(Clone)]
 pub(super) struct ShardDeps {
-    pub output_tx: flume::Sender<PipelineEvent>,
+    pub output_tx: Sender<PipelineEvent>,
     pub ws_url: String,
     pub shutdown: CancellationToken,
-    pub last_message_at: Arc<parking_lot::Mutex<Option<Instant>>>,
+    pub last_message_at: Arc<Mutex<Option<Instant>>>,
     pub on_session_invalidated: Option<WsSessionInvalidationHook>,
     pub on_book_level_rejected: Option<BookLevelRejectHook>,
     /// Shard-level reconnect backoff (from `[market_data.websocket]`).
@@ -94,14 +101,14 @@ enum StreamEnd {
 /// A single shard actor: one SDK WebSocket connection, multiplexed streams.
 pub struct WsShard {
     shard_id: usize,
-    tokens_rx: watch::Receiver<Arc<HashSet<TokenId>>>,
+    tokens_rx: Receiver<Arc<HashSet<TokenId>>>,
     deps: ShardDeps,
 }
 
 impl WsShard {
     pub(super) const fn new(
         shard_id: usize,
-        tokens_rx: watch::Receiver<Arc<HashSet<TokenId>>>,
+        tokens_rx: Receiver<Arc<HashSet<TokenId>>>,
         deps: ShardDeps,
     ) -> Self {
         Self {
@@ -203,7 +210,7 @@ fn stagger_slot(shard_id: usize) -> u32 {
 
 /// Wait for the token set to settle: every further change restarts the window.
 async fn debounce_token_changes(
-    tokens_rx: &mut watch::Receiver<Arc<HashSet<TokenId>>>,
+    tokens_rx: &mut Receiver<Arc<HashSet<TokenId>>>,
     shutdown: &CancellationToken,
 ) {
     loop {
@@ -226,7 +233,7 @@ async fn debounce_token_changes(
 async fn connect_and_stream(
     deps: &ShardDeps,
     shard_id: usize,
-    tokens_rx: &mut watch::Receiver<Arc<HashSet<TokenId>>>,
+    tokens_rx: &mut Receiver<Arc<HashSet<TokenId>>>,
     reconnect: &mut ReconnectState,
 ) -> StreamEnd {
     let tokens = Arc::clone(&tokens_rx.borrow_and_update());
@@ -280,7 +287,7 @@ async fn connect_and_stream(
     deps.health.set_connected(shard_id, true);
     emit_status(deps, shard_id, ShardConnectionStatus::Connected);
     let stream_session_id = Uuid::now_v7();
-    let opened_at_ms = chrono::Utc::now().timestamp_millis();
+    let opened_at_ms = Utc::now().timestamp_millis();
     let mut subscription_tokens = tokens.iter().cloned().collect::<Vec<_>>();
     subscription_tokens.sort_unstable_by(|left, right| left.as_str().cmp(right.as_str()));
     let subscription_token_hash = match subscription_token_hash(&subscription_tokens) {
@@ -379,7 +386,7 @@ async fn connect_and_stream(
 fn spawn_permit_holder(
     permit: OwnedSemaphorePermit,
     shutdown: &CancellationToken,
-) -> oneshot::Sender<()> {
+) -> OneshotSender<()> {
     let (traffic_tx, traffic_rx) = oneshot::channel();
     let shutdown = shutdown.clone();
     tokio::spawn(async move {
@@ -509,7 +516,7 @@ async fn close_stream_session(
     if reason != StreamSessionEndReason::Normal {
         deps.token_freshness.invalidate_tokens(subscription_tokens);
     }
-    let closed_at_ms = chrono::Utc::now().timestamp_millis();
+    let closed_at_ms = Utc::now().timestamp_millis();
     let mut received_sequences = token_sequences
         .iter()
         .map(|(token_id, sequence)| (token_id.clone(), *sequence))
@@ -572,21 +579,26 @@ fn emit_status(deps: &ShardDeps, shard_id: usize, status: ShardConnectionStatus)
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::{
         slice,
         sync::atomic::{AtomicU64, Ordering},
     };
 
+    use flume::Sender;
+    use parking_lot::Mutex;
+    use tokio::sync::watch;
+
+    use super::*;
+
     fn test_deps(
-        output_tx: flume::Sender<PipelineEvent>,
+        output_tx: Sender<PipelineEvent>,
         hook: Option<WsSessionInvalidationHook>,
     ) -> ShardDeps {
         ShardDeps {
             output_tx,
             ws_url: "ws://test".into(),
             shutdown: CancellationToken::new(),
-            last_message_at: Arc::new(parking_lot::Mutex::new(None)),
+            last_message_at: Arc::new(Mutex::new(None)),
             on_session_invalidated: hook,
             on_book_level_rejected: None,
             reconnect_policy: ReconnectPolicy::default(),

@@ -1,8 +1,9 @@
 //! Database configuration (`[db]`, deploy): Postgres OLTP + `ClickHouse` OLAP.
 
-use super::secret::SecretText;
 use serde::Deserialize;
-use url::Url;
+use url::{ParseError, Url};
+
+use super::secret::SecretText;
 
 /// Postgres + `ClickHouse` connections.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -77,28 +78,25 @@ pub struct PostgresConfig {
 
 impl PostgresConfig {
     /// Build the connection URL for the configured application database.
-    pub fn try_connection_url(&self) -> Result<String, url::ParseError> {
+    pub fn try_connection_url(&self) -> Result<String, ParseError> {
         self.try_connection_url_with_database(&self.database)
     }
 
     /// Build a connection URL targeting a specific database name on the same
     /// server (e.g. the `postgres` maintenance catalog).
-    pub fn try_connection_url_with_database(
-        &self,
-        database: &str,
-    ) -> Result<String, url::ParseError> {
+    pub fn try_connection_url_with_database(&self, database: &str) -> Result<String, ParseError> {
         let mut url = Url::parse("postgres://localhost/")?;
         url.set_host(Some(self.host.as_str()))?;
         url.set_port(Some(self.port))
-            .map_err(|()| url::ParseError::InvalidPort)?;
+            .map_err(|()| ParseError::InvalidPort)?;
         let escaped_user = escape_percent_for_url_setter(&self.user);
         if url.set_username(&escaped_user).is_err() {
-            return Err(url::ParseError::InvalidDomainCharacter);
+            return Err(ParseError::InvalidDomainCharacter);
         }
         if !self.password.is_empty() {
             let escaped_password = escape_percent_for_url_setter(self.password.expose_secret());
             url.set_password(Some(&escaped_password))
-                .map_err(|()| url::ParseError::InvalidDomainCharacter)?;
+                .map_err(|()| ParseError::InvalidDomainCharacter)?;
         }
         url.set_path(&format!("/{database}"));
         url.query_pairs_mut().append_pair("sslmode", "prefer");

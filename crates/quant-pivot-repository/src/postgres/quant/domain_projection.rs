@@ -4,15 +4,34 @@ use chrono::{DateTime, NaiveDate, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{
-        CryptoPriceProjectionInfo, CryptoPriceReport, CryptoPriceTransition, DomainCursorStatus,
-        DomainEventEnvelope, DomainEventPayload, DomainEventType, DomainSourceCheckpoint,
-        UpsertDomainSourceCursor, WeatherDailyTemperatureExtremeChange,
-        WeatherDailyTemperatureProjectionInfo, WeatherObservationDayClosed,
-        WeatherObservationReport, WeatherObservationReportKind,
+        data_plane::{
+            CryptoPriceReport, CryptoPriceTransition, DomainCursorStatus, DomainEventEnvelope,
+            DomainEventPayload, DomainEventType, DomainSourceCheckpoint, UpsertDomainSourceCursor,
+            WeatherDailyTemperatureExtremeChange, WeatherObservationDayClosed,
+            WeatherObservationReport, WeatherObservationReportKind,
+        },
+        quant::{CryptoPriceProjectionInfo, WeatherDailyTemperatureProjectionInfo},
     },
     entities::{
-        quant_crypto_price_projection, quant_domain_event_outbox, quant_domain_source_cursor,
-        quant_weather_daily_temperature_projection, quant_weather_observation_current,
+        quant_crypto_price_projection::{
+            ActiveModel, Entity, Model as QuantCryptoPriceProjectionModel,
+        },
+        quant_domain_event_outbox::{
+            ActiveModel as QuantDomainEventOutboxActiveModel,
+            Column as QuantDomainEventOutboxColumn, Entity as QuantDomainEventOutboxEntity,
+        },
+        quant_domain_source_cursor::{
+            Column as QuantDomainSourceCursorColumn, Entity as QuantDomainSourceCursorEntity,
+        },
+        quant_weather_daily_temperature_projection::{
+            ActiveModel as QuantWeatherDailyTemperatureProjectionActiveModel, Column,
+            Entity as QuantWeatherDailyTemperatureProjectionEntity, Model,
+        },
+        quant_weather_observation_current::{
+            ActiveModel as QuantWeatherObservationCurrentActiveModel,
+            Column as QuantWeatherObservationCurrentColumn,
+            Entity as QuantWeatherObservationCurrentEntity,
+        },
     },
     hashing::CanonicalDigest,
     types::{
@@ -21,10 +40,11 @@ use quant_pivot_models::{
         WorkerId,
     },
 };
+use rust_decimal::Decimal;
 use sea_orm::{
-    ActiveModelTrait, ActiveValue, ColumnTrait, Condition, DatabaseConnection, DatabaseTransaction,
-    EntityTrait, ExprTrait, IntoActiveModel, QueryFilter, QueryOrder, QuerySelect,
-    TransactionTrait,
+    ActiveModelTrait, ActiveValue, ColumnTrait, Condition, ConnectionTrait, DatabaseConnection,
+    DatabaseTransaction, EntityTrait, ExprTrait, IntoActiveModel, QueryFilter, QueryOrder,
+    QuerySelect, TransactionTrait,
     sea_query::{Expr, LockBehavior, LockType, OnConflict},
 };
 
@@ -60,14 +80,12 @@ impl DomainProjectionRepository for PgDomainProjectionRepository {
         let source_sequence = to_i64(report.source_sequence, "crypto source sequence")?;
         let checkpoint_hash = hash_checkpoint(&checkpoint)?;
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let existing = quant_crypto_price_projection::Entity::find_by_id((
-            report.source_id.clone(),
-            report.instrument_key.clone(),
-        ))
-        .lock_exclusive()
-        .one(&txn)
-        .await
-        .map_err(StorageError::from)?;
+        let existing =
+            Entity::find_by_id((report.source_id.clone(), report.instrument_key.clone()))
+                .lock_exclusive()
+                .one(&txn)
+                .await
+                .map_err(StorageError::from)?;
 
         let model = match existing {
             Some(existing) if existing.report_hash == report.report_hash => existing,
@@ -100,7 +118,7 @@ impl DomainProjectionRepository for PgDomainProjectionRepository {
                 }
                 updated
             }
-            None => quant_crypto_price_projection::ActiveModel {
+            None => ActiveModel {
                 source_id: ActiveValue::Set(report.source_id.clone()),
                 instrument_key: ActiveValue::Set(report.instrument_key.clone()),
                 previous_price: ActiveValue::Set(None),
@@ -194,17 +212,11 @@ impl DomainProjectionRepository for PgDomainProjectionRepository {
     ) -> Result<Vec<WeatherDailyTemperatureProjectionInfo>, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
         let instrument_key = DomainInstrumentKey::aviation_weather(station);
-        let rows = quant_weather_daily_temperature_projection::Entity::find()
-            .filter(
-                quant_weather_daily_temperature_projection::Column::SourceId
-                    .eq(DomainSourceId::aviation_weather()),
-            )
-            .filter(
-                quant_weather_daily_temperature_projection::Column::InstrumentKey
-                    .eq(instrument_key.clone()),
-            )
-            .filter(quant_weather_daily_temperature_projection::Column::LocalDate.eq(local_date))
-            .order_by_asc(quant_weather_daily_temperature_projection::Column::TemperatureStatistic)
+        let rows = QuantWeatherDailyTemperatureProjectionEntity::find()
+            .filter(Column::SourceId.eq(DomainSourceId::aviation_weather()))
+            .filter(Column::InstrumentKey.eq(instrument_key.clone()))
+            .filter(Column::LocalDate.eq(local_date))
+            .order_by_asc(Column::TemperatureStatistic)
             .lock_exclusive()
             .all(&txn)
             .await
@@ -215,7 +227,7 @@ impl DomainProjectionRepository for PgDomainProjectionRepository {
         }
         let checkpoint_hash = if rows.iter().any(|row| !row.day_closed) {
             Some(
-                quant_domain_source_cursor::Entity::find_by_id((
+                QuantDomainSourceCursorEntity::find_by_id((
                     DomainSourceId::aviation_weather(),
                     DomainInstrumentKey::aviation_weather(station),
                 ))
@@ -269,14 +281,11 @@ impl DomainProjectionRepository for PgDomainProjectionRepository {
         observed_at: DateTime<Utc>,
     ) -> Result<u64, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let row = quant_crypto_price_projection::Entity::find_by_id((
-            source_id.clone(),
-            instrument_key.clone(),
-        ))
-        .lock_exclusive()
-        .one(&txn)
-        .await
-        .map_err(StorageError::from)?;
+        let row = Entity::find_by_id((source_id.clone(), instrument_key.clone()))
+            .lock_exclusive()
+            .one(&txn)
+            .await
+            .map_err(StorageError::from)?;
         let Some(row) = row else {
             txn.commit().await.map_err(StorageError::from)?;
             return Ok(0);
@@ -300,16 +309,10 @@ impl DomainProjectionRepository for PgDomainProjectionRepository {
     ) -> Result<u64, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
         let instrument_key = DomainInstrumentKey::aviation_weather(station);
-        let rows = quant_weather_daily_temperature_projection::Entity::find()
-            .filter(
-                quant_weather_daily_temperature_projection::Column::SourceId
-                    .eq(DomainSourceId::aviation_weather()),
-            )
-            .filter(
-                quant_weather_daily_temperature_projection::Column::InstrumentKey
-                    .eq(instrument_key.clone()),
-            )
-            .filter(quant_weather_daily_temperature_projection::Column::LocalDate.eq(local_date))
+        let rows = QuantWeatherDailyTemperatureProjectionEntity::find()
+            .filter(Column::SourceId.eq(DomainSourceId::aviation_weather()))
+            .filter(Column::InstrumentKey.eq(instrument_key.clone()))
+            .filter(Column::LocalDate.eq(local_date))
             .lock_exclusive()
             .all(&txn)
             .await
@@ -329,28 +332,13 @@ impl DomainProjectionRepository for PgDomainProjectionRepository {
         let generation = checked_add(first.gap_generation, "weather gap generation")?;
         let row_count = u64::try_from(rows.len())
             .map_err(|error| invariant(format!("weather projection count overflow: {error}")))?;
-        let updated = quant_weather_daily_temperature_projection::Entity::update_many()
-            .col_expr(
-                quant_weather_daily_temperature_projection::Column::GapGeneration,
-                Expr::value(generation),
-            )
-            .col_expr(
-                quant_weather_daily_temperature_projection::Column::SourceHealthy,
-                Expr::value(false),
-            )
-            .col_expr(
-                quant_weather_daily_temperature_projection::Column::AvailableAt,
-                Expr::value(observed_at),
-            )
-            .filter(
-                quant_weather_daily_temperature_projection::Column::SourceId
-                    .eq(DomainSourceId::aviation_weather()),
-            )
-            .filter(
-                quant_weather_daily_temperature_projection::Column::InstrumentKey
-                    .eq(instrument_key),
-            )
-            .filter(quant_weather_daily_temperature_projection::Column::LocalDate.eq(local_date))
+        let updated = QuantWeatherDailyTemperatureProjectionEntity::update_many()
+            .col_expr(Column::GapGeneration, Expr::value(generation))
+            .col_expr(Column::SourceHealthy, Expr::value(false))
+            .col_expr(Column::AvailableAt, Expr::value(observed_at))
+            .filter(Column::SourceId.eq(DomainSourceId::aviation_weather()))
+            .filter(Column::InstrumentKey.eq(instrument_key))
+            .filter(Column::LocalDate.eq(local_date))
             .exec(&txn)
             .await
             .map_err(StorageError::from)?;
@@ -372,14 +360,14 @@ impl DomainProjectionRepository for PgDomainProjectionRepository {
         limit: u64,
     ) -> Result<Vec<DomainEventEnvelope>, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let rows = quant_domain_event_outbox::Entity::find()
-            .filter(quant_domain_event_outbox::Column::PublishedAt.is_null())
+        let rows = QuantDomainEventOutboxEntity::find()
+            .filter(QuantDomainEventOutboxColumn::PublishedAt.is_null())
             .filter(
                 Condition::any()
-                    .add(quant_domain_event_outbox::Column::LeaseExpiresAt.is_null())
-                    .add(quant_domain_event_outbox::Column::LeaseExpiresAt.lte(now)),
+                    .add(QuantDomainEventOutboxColumn::LeaseExpiresAt.is_null())
+                    .add(QuantDomainEventOutboxColumn::LeaseExpiresAt.lte(now)),
             )
-            .order_by_asc(quant_domain_event_outbox::Column::CreatedAt)
+            .order_by_asc(QuantDomainEventOutboxColumn::CreatedAt)
             .limit(limit)
             .lock_with_behavior(LockType::Update, LockBehavior::SkipLocked)
             .all(&txn)
@@ -396,20 +384,20 @@ impl DomainProjectionRepository for PgDomainProjectionRepository {
             .iter()
             .map(|row| row.event_id.clone())
             .collect::<Vec<_>>();
-        let updated = quant_domain_event_outbox::Entity::update_many()
+        let updated = QuantDomainEventOutboxEntity::update_many()
             .col_expr(
-                quant_domain_event_outbox::Column::ClaimOwner,
+                QuantDomainEventOutboxColumn::ClaimOwner,
                 Expr::value(Some(worker_id)),
             )
             .col_expr(
-                quant_domain_event_outbox::Column::LeaseExpiresAt,
+                QuantDomainEventOutboxColumn::LeaseExpiresAt,
                 Expr::value(Some(lease_expires_at)),
             )
             .col_expr(
-                quant_domain_event_outbox::Column::PublishAttempts,
-                Expr::col(quant_domain_event_outbox::Column::PublishAttempts).add(1),
+                QuantDomainEventOutboxColumn::PublishAttempts,
+                Expr::col(QuantDomainEventOutboxColumn::PublishAttempts).add(1),
             )
-            .filter(quant_domain_event_outbox::Column::EventId.is_in(event_ids))
+            .filter(QuantDomainEventOutboxColumn::EventId.is_in(event_ids))
             .exec(&txn)
             .await
             .map_err(StorageError::from)?;
@@ -429,25 +417,25 @@ impl DomainProjectionRepository for PgDomainProjectionRepository {
         worker_id: WorkerId,
         published_at: DateTime<Utc>,
     ) -> Result<(), StorageError> {
-        quant_domain_event_outbox::Entity::update_many()
+        QuantDomainEventOutboxEntity::update_many()
             .col_expr(
-                quant_domain_event_outbox::Column::PublishedAt,
+                QuantDomainEventOutboxColumn::PublishedAt,
                 Expr::value(published_at),
             )
             .col_expr(
-                quant_domain_event_outbox::Column::LastError,
+                QuantDomainEventOutboxColumn::LastError,
                 Expr::value(Option::<String>::None),
             )
             .col_expr(
-                quant_domain_event_outbox::Column::ClaimOwner,
+                QuantDomainEventOutboxColumn::ClaimOwner,
                 Expr::value(Option::<WorkerId>::None),
             )
             .col_expr(
-                quant_domain_event_outbox::Column::LeaseExpiresAt,
+                QuantDomainEventOutboxColumn::LeaseExpiresAt,
                 Expr::value(Option::<DateTime<Utc>>::None),
             )
-            .filter(quant_domain_event_outbox::Column::EventId.eq(event_id.clone()))
-            .filter(quant_domain_event_outbox::Column::ClaimOwner.eq(worker_id))
+            .filter(QuantDomainEventOutboxColumn::EventId.eq(event_id.clone()))
+            .filter(QuantDomainEventOutboxColumn::ClaimOwner.eq(worker_id))
             .exec(&self.db)
             .await
             .map_err(StorageError::from)?;
@@ -460,21 +448,21 @@ impl DomainProjectionRepository for PgDomainProjectionRepository {
         worker_id: WorkerId,
         detail: String,
     ) -> Result<(), StorageError> {
-        quant_domain_event_outbox::Entity::update_many()
+        QuantDomainEventOutboxEntity::update_many()
             .col_expr(
-                quant_domain_event_outbox::Column::LastError,
+                QuantDomainEventOutboxColumn::LastError,
                 Expr::value(Some(detail)),
             )
             .col_expr(
-                quant_domain_event_outbox::Column::ClaimOwner,
+                QuantDomainEventOutboxColumn::ClaimOwner,
                 Expr::value(Option::<WorkerId>::None),
             )
             .col_expr(
-                quant_domain_event_outbox::Column::LeaseExpiresAt,
+                QuantDomainEventOutboxColumn::LeaseExpiresAt,
                 Expr::value(Option::<DateTime<Utc>>::None),
             )
-            .filter(quant_domain_event_outbox::Column::EventId.eq(event_id.clone()))
-            .filter(quant_domain_event_outbox::Column::ClaimOwner.eq(worker_id))
+            .filter(QuantDomainEventOutboxColumn::EventId.eq(event_id.clone()))
+            .filter(QuantDomainEventOutboxColumn::ClaimOwner.eq(worker_id))
             .exec(&self.db)
             .await
             .map_err(StorageError::from)?;
@@ -490,7 +478,7 @@ async fn upsert_weather_observation(
     local_date: NaiveDate,
 ) -> Result<bool, StorageError> {
     let observation_key = (station.as_str().to_owned(), local_date, report.observed_at);
-    let observation = quant_weather_observation_current::Entity::find_by_id(observation_key)
+    let observation = QuantWeatherObservationCurrentEntity::find_by_id(observation_key)
         .lock_exclusive()
         .one(txn)
         .await
@@ -524,7 +512,7 @@ async fn upsert_weather_observation(
             active.update(txn).await.map_err(StorageError::from)?;
         }
         None => {
-            quant_weather_observation_current::ActiveModel {
+            QuantWeatherObservationCurrentActiveModel {
                 station: ActiveValue::Set(station.as_str().to_owned()),
                 local_date: ActiveValue::Set(local_date),
                 observation_time: ActiveValue::Set(report.observed_at),
@@ -558,33 +546,28 @@ struct WeatherProjectionInput<'a> {
 async fn upsert_weather_daily_temperature_projections(
     txn: &DatabaseTransaction,
     input: WeatherProjectionInput<'_>,
-) -> Result<
-    Vec<(
-        quant_weather_daily_temperature_projection::Model,
-        Option<DomainEventEnvelope>,
-    )>,
-    StorageError,
-> {
+) -> Result<Vec<(Model, Option<DomainEventEnvelope>)>, StorageError> {
     let mut projections = Vec::with_capacity(2);
     for statistic in [
         WeatherTemperatureStatistic::Maximum,
         WeatherTemperatureStatistic::Minimum,
     ] {
-        let observations = quant_weather_observation_current::Entity::find()
-            .filter(quant_weather_observation_current::Column::Station.eq(input.station.as_str()))
-            .filter(quant_weather_observation_current::Column::LocalDate.eq(input.local_date));
-        let extreme = match statistic {
-            WeatherTemperatureStatistic::Maximum => observations
-                .order_by_desc(quant_weather_observation_current::Column::TemperatureCelsius),
-            WeatherTemperatureStatistic::Minimum => observations
-                .order_by_asc(quant_weather_observation_current::Column::TemperatureCelsius),
-        }
-        .order_by_desc(quant_weather_observation_current::Column::AvailableAt)
-        .one(txn)
-        .await
-        .map_err(StorageError::from)?
-        .ok_or_else(|| invariant("weather daily projection has no current observations"))?;
-        let existing = quant_weather_daily_temperature_projection::Entity::find_by_id((
+        let observations = QuantWeatherObservationCurrentEntity::find()
+            .filter(QuantWeatherObservationCurrentColumn::Station.eq(input.station.as_str()))
+            .filter(QuantWeatherObservationCurrentColumn::LocalDate.eq(input.local_date));
+        let extreme =
+            match statistic {
+                WeatherTemperatureStatistic::Maximum => observations
+                    .order_by_desc(QuantWeatherObservationCurrentColumn::TemperatureCelsius),
+                WeatherTemperatureStatistic::Minimum => observations
+                    .order_by_asc(QuantWeatherObservationCurrentColumn::TemperatureCelsius),
+            }
+            .order_by_desc(QuantWeatherObservationCurrentColumn::AvailableAt)
+            .one(txn)
+            .await
+            .map_err(StorageError::from)?
+            .ok_or_else(|| invariant("weather daily projection has no current observations"))?;
+        let existing = QuantWeatherDailyTemperatureProjectionEntity::find_by_id((
             input.report.source_id.clone(),
             input.instrument_key.clone(),
             input.local_date,
@@ -641,12 +624,12 @@ async fn upsert_weather_daily_temperature_projections(
 
 async fn update_weather_daily_temperature_projection(
     txn: &DatabaseTransaction,
-    existing: quant_weather_daily_temperature_projection::Model,
+    existing: Model,
     input: &WeatherProjectionInput<'_>,
-    previous_extreme: Option<rust_decimal::Decimal>,
-    current_extreme: rust_decimal::Decimal,
+    previous_extreme: Option<Decimal>,
+    current_extreme: Decimal,
     event: Option<&DomainEventEnvelope>,
-) -> Result<quant_weather_daily_temperature_projection::Model, StorageError> {
+) -> Result<Model, StorageError> {
     if existing.timezone != input.timezone {
         return Err(conflict("weather station timezone binding drift"));
     }
@@ -672,10 +655,10 @@ async fn insert_weather_daily_temperature_projection(
     txn: &DatabaseTransaction,
     input: &WeatherProjectionInput<'_>,
     statistic: WeatherTemperatureStatistic,
-    current_extreme: rust_decimal::Decimal,
+    current_extreme: Decimal,
     event: Option<&DomainEventEnvelope>,
-) -> Result<quant_weather_daily_temperature_projection::Model, StorageError> {
-    quant_weather_daily_temperature_projection::ActiveModel {
+) -> Result<Model, StorageError> {
+    QuantWeatherDailyTemperatureProjectionActiveModel {
         source_id: ActiveValue::Set(input.report.source_id.clone()),
         instrument_key: ActiveValue::Set(input.instrument_key.clone()),
         station: ActiveValue::Set(input.station.as_str().to_owned()),
@@ -715,8 +698,8 @@ struct WeatherChangeEventInput<'a> {
     report: &'a WeatherObservationReport,
     local_date: NaiveDate,
     temperature_statistic: WeatherTemperatureStatistic,
-    previous_extreme: Option<rust_decimal::Decimal>,
-    current_extreme: rust_decimal::Decimal,
+    previous_extreme: Option<Decimal>,
+    current_extreme: Decimal,
     gap_generation: i64,
     checkpoint_hash: ContentHash,
     supersedes_event_id: Option<DomainEventId>,
@@ -797,7 +780,7 @@ fn weather_change_event(
 }
 
 fn weather_close_event(
-    row: &quant_weather_daily_temperature_projection::Model,
+    row: &Model,
     closed_at: DateTime<Utc>,
     checkpoint_hash: ContentHash,
 ) -> Result<DomainEventEnvelope, StorageError> {
@@ -854,20 +837,20 @@ fn build_event(input: EventBuildInput) -> Result<DomainEventEnvelope, StorageErr
     })
 }
 
-async fn insert_outbox<C: sea_orm::ConnectionTrait>(
+async fn insert_outbox<C: ConnectionTrait>(
     db: &C,
     event: DomainEventEnvelope,
 ) -> Result<(), StorageError> {
     insert_outboxes(db, vec![event]).await
 }
 
-async fn insert_outboxes<C: sea_orm::ConnectionTrait>(
+async fn insert_outboxes<C: ConnectionTrait>(
     db: &C,
     events: Vec<DomainEventEnvelope>,
 ) -> Result<(), StorageError> {
     let rows = events
         .into_iter()
-        .map(|event| quant_domain_event_outbox::ActiveModel {
+        .map(|event| QuantDomainEventOutboxActiveModel {
             event_id: ActiveValue::Set(event.id.clone()),
             envelope_json: ActiveValue::Set(event),
             published_at: ActiveValue::Set(None),
@@ -878,10 +861,10 @@ async fn insert_outboxes<C: sea_orm::ConnectionTrait>(
             ..Default::default()
         })
         .collect();
-    upsert_many_chunked::<quant_domain_event_outbox::Entity, _>(
+    upsert_many_chunked::<QuantDomainEventOutboxEntity, _>(
         db,
         rows,
-        OnConflict::column(quant_domain_event_outbox::Column::EventId)
+        OnConflict::column(QuantDomainEventOutboxColumn::EventId)
             .do_nothing()
             .to_owned(),
     )
@@ -889,7 +872,7 @@ async fn insert_outboxes<C: sea_orm::ConnectionTrait>(
     Ok(())
 }
 
-async fn upsert_cursor<C: sea_orm::ConnectionTrait>(
+async fn upsert_cursor<C: ConnectionTrait>(
     db: &C,
     source_id: &DomainSourceId,
     instrument_key: &DomainInstrumentKey,
@@ -905,18 +888,18 @@ async fn upsert_cursor<C: sea_orm::ConnectionTrait>(
         last_error: None,
         updated_at: Utc::now(),
     };
-    quant_domain_source_cursor::Entity::insert(cursor.into_active_model())
+    QuantDomainSourceCursorEntity::insert(cursor.into_active_model())
         .on_conflict(
             OnConflict::columns([
-                quant_domain_source_cursor::Column::SourceId,
-                quant_domain_source_cursor::Column::InstrumentKey,
+                QuantDomainSourceCursorColumn::SourceId,
+                QuantDomainSourceCursorColumn::InstrumentKey,
             ])
             .update_columns([
-                quant_domain_source_cursor::Column::CheckpointJson,
-                quant_domain_source_cursor::Column::CheckpointHash,
-                quant_domain_source_cursor::Column::Status,
-                quant_domain_source_cursor::Column::LastError,
-                quant_domain_source_cursor::Column::UpdatedAt,
+                QuantDomainSourceCursorColumn::CheckpointJson,
+                QuantDomainSourceCursorColumn::CheckpointHash,
+                QuantDomainSourceCursorColumn::Status,
+                QuantDomainSourceCursorColumn::LastError,
+                QuantDomainSourceCursorColumn::UpdatedAt,
             ])
             .to_owned(),
         )
@@ -942,7 +925,7 @@ fn validate_weather_temperature_report(
     if report.source_id != DomainSourceId::aviation_weather()
         || report.variable != WeatherVariable::Temperature
         || report.unit != DomainMeasurementUnit::Celsius
-        || report.precision <= rust_decimal::Decimal::ZERO
+        || report.precision <= Decimal::ZERO
         || report.available_at < report.published_at
     {
         return Err(invariant(
@@ -962,7 +945,7 @@ fn hash_checkpoint(checkpoint: &DomainSourceCheckpoint) -> Result<ContentHash, S
 }
 
 fn crypto_info(
-    row: quant_crypto_price_projection::Model,
+    row: QuantCryptoPriceProjectionModel,
 ) -> Result<CryptoPriceProjectionInfo, StorageError> {
     Ok(CryptoPriceProjectionInfo {
         source_id: row.source_id,
@@ -978,9 +961,7 @@ fn crypto_info(
     })
 }
 
-fn weather_info(
-    row: quant_weather_daily_temperature_projection::Model,
-) -> WeatherDailyTemperatureProjectionInfo {
+fn weather_info(row: Model) -> WeatherDailyTemperatureProjectionInfo {
     WeatherDailyTemperatureProjectionInfo {
         source_id: row.source_id,
         instrument_key: row.instrument_key,
@@ -1032,7 +1013,7 @@ fn conflict(detail: impl Into<String>) -> StorageError {
 mod tests {
     use chrono::{Duration, TimeZone, Utc};
     use quant_pivot_models::{
-        domain::{WeatherObservationReport, WeatherObservationReportKind},
+        domain::data_plane::{WeatherObservationReport, WeatherObservationReportKind},
         types::{
             ContentHash, DomainInstrumentKey, DomainMeasurementUnit, DomainSourceId, IcaoStation,
             WeatherVariable,

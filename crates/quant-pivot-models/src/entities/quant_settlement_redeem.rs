@@ -1,5 +1,10 @@
 //! `quant_settlement_redeem` table entity.
 
+use chrono::{DateTime, Utc};
+use rust_decimal::Decimal;
+use sea_orm::entity::prelude::*;
+
+use super::{market, quant_settlement_redeem_lot};
 use crate::{
     enums::{execution::SettlementRedeemState, quant::ExecutionWalletKind},
     types::{
@@ -7,9 +12,6 @@ use crate::{
         SettlementPayoutVector, SettlementRedeemId, SettlementRedeemIndexSets, Usd,
     },
 };
-use chrono::{DateTime, Utc};
-use rust_decimal::Decimal;
-use sea_orm::entity::prelude::*;
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -38,14 +40,14 @@ pub struct Model {
     pub updated_at: DateTime<Utc>,
 
     #[sea_orm(has_many, relation_enum = "RedeemLot")]
-    pub redeem_lot: HasMany<super::quant_settlement_redeem_lot::Entity>,
+    pub redeem_lot: HasMany<quant_settlement_redeem_lot::Entity>,
     #[sea_orm(
         belongs_to,
         relation_enum = "Market",
         from = "market_id",
         to = "market_id"
     )]
-    pub market: BelongsTo<super::market::Entity>,
+    pub market: BelongsTo<market::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

@@ -1,4 +1,4 @@
-//! Trainer admin HTTP contract (Phase 3.6).
+//! Trainer admin HTTP contract.
 //!
 //! UI surface for offline model training from a frozen training dataset:
 //!
@@ -9,7 +9,7 @@
 //!
 //! The trainer produces a content-addressed artifact (`models/<hash>.json`) and
 //! a `quant_model_version` row in `Candidate` status; promotion to `Published`
-//! is governed separately (Phase 3.7).
+//! is governed separately.
 
 use chrono::{DateTime, Utc};
 use quant_pivot_macros::NormalizePageQuery;
@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use validator::Validate;
 
 use crate::{
-    domain::{ModelVersionInfo, pagination::PageRequest},
+    domain::{pagination::PageRequest, quant::ModelVersionInfo},
     enums::quant::PublicationStatus,
     types::{
         BacktestPathSetId, ContentHash, ModelRunId, ModelSpecId, ModelVersionId,
@@ -92,7 +92,7 @@ pub struct TrainedModelView {
     /// Frozen training objective provenance used for this model version.
     pub training_objective: ModelTrainingObjective,
     pub created_at: DateTime<Utc>,
-    /// Materialization run id — populated on `POST .../train` only (absent on poll).
+    /// Materialization run id — populated on `POST.../train` only (absent on poll).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_run_id: Option<ModelRunId>,
     /// Model family wire label from the owning spec (`weighted_factor`,

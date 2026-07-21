@@ -1,9 +1,10 @@
 //! Token ID parsing for CLOB wire types.
 
+use std::str::FromStr;
+
 use polymarket_client_sdk_v2::types::U256;
 use quant_pivot_error::api::ApiError;
 use quant_pivot_models::types::TokenId;
-use std::str::FromStr;
 
 /// CLOB wire-format token identifier (SDK `U256`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

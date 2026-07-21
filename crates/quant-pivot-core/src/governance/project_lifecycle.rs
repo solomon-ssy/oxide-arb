@@ -1,6 +1,7 @@
 //! Startup verification for the irreversible project production lifecycle.
 
-use crate::app::InfraBundle;
+use std::fmt::Display;
+
 use quant_pivot_error::{QuantResult, storage::StorageError};
 use quant_pivot_models::{
     config::{CompiledBuildIdentity, DeployConfig, ProjectLifecyclePolicy},
@@ -9,7 +10,8 @@ use quant_pivot_models::{
     runtime_config::DecisionPolicySnapshot,
 };
 use quant_pivot_repository::traits::PolicyRepository;
-use std::fmt::Display;
+
+use crate::app::InfraBundle;
 
 /// Fail closed unless source, deployment, database and active policy bundle agree.
 pub async fn verify_project_lifecycle(

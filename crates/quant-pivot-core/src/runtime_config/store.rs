@@ -1,5 +1,7 @@
 //! Lock-free in-process snapshot of the active runtime configuration.
 
+use std::sync::Arc;
+
 use arc_swap::{ArcSwap, Guard};
 use parking_lot::Mutex;
 use quant_pivot_error::control::ControlError;
@@ -7,7 +9,6 @@ use quant_pivot_models::{
     runtime_config::{ActivePolicyBundle, DecisionPolicySnapshot},
     types::{ContentHash, DecisionPolicySnapshotId, PolicyBundleGeneration},
 };
-use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublishedPolicyBundle {
@@ -76,7 +77,7 @@ impl DecisionPolicyStore {
         self.publication.lock().clone()
     }
 
-    /// Install a new active snapshot (used by [`PolicySnapshotPort`] implementations).
+    /// Install a new active snapshot (used by policy-snapshot port implementations).
     pub fn replace(&self, config: DecisionPolicySnapshot) {
         let mut publication = self.publication.lock();
         self.inner.store(Arc::new(config));
@@ -125,12 +126,14 @@ impl DecisionPolicyStore {
 
 #[cfg(test)]
 mod tests {
-    use super::{DecisionPolicyStore, PolicyBundlePublication, PublishedPolicyBundle};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use quant_pivot_models::{
         runtime_config::{ActivePolicyBundle, DecisionPolicySnapshot},
         types::{DecisionPolicySnapshotId, PolicyBundleGeneration},
     };
-    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::{DecisionPolicyStore, PolicyBundlePublication, PublishedPolicyBundle};
 
     fn bundle(generation: i64, book_age_increment: u64) -> ActivePolicyBundle {
         let mut snapshot = DecisionPolicySnapshot::default();

@@ -1,5 +1,13 @@
 //! `quant_order_intent` table entity.
 
+use chrono::{DateTime, Utc};
+use sea_orm::entity::prelude::*;
+
+use super::{
+    decision_policy_snapshot, quant_capital_allocation, quant_entry_condition_instance,
+    quant_execution_order, quant_model_version, quant_position, quant_recommendation,
+    research_profile_artifact,
+};
 use crate::{
     enums::{
         execution::{ExitReason, ExitState, OrderIntentKind},
@@ -11,8 +19,6 @@ use crate::{
         RecommendationId, ResearchProfileArtifactId, ScaleOutState, UserId,
     },
 };
-use chrono::{DateTime, Utc};
-use sea_orm::entity::prelude::*;
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -64,7 +70,7 @@ pub struct Model {
         from = "research_profile_artifact_id",
         to = "research_profile_artifact_id"
     )]
-    pub research_profile_artifact: BelongsTo<super::research_profile_artifact::Entity>,
+    pub research_profile_artifact: BelongsTo<research_profile_artifact::Entity>,
 
     #[sea_orm(
         belongs_to,
@@ -72,34 +78,34 @@ pub struct Model {
         from = "recommendation_id",
         to = "recommendation_id"
     )]
-    pub recommendation: BelongsTo<super::quant_recommendation::Entity>,
+    pub recommendation: BelongsTo<quant_recommendation::Entity>,
     #[sea_orm(
         belongs_to,
         relation_enum = "ConditionInstance",
         from = "condition_instance_id",
         to = "condition_instance_id"
     )]
-    pub condition_instance: BelongsTo<super::quant_entry_condition_instance::Entity>,
+    pub condition_instance: BelongsTo<quant_entry_condition_instance::Entity>,
     #[sea_orm(
         belongs_to,
         relation_enum = "DecisionPolicySnapshot",
         from = "decision_policy_snapshot_id",
         to = "decision_policy_snapshot_id"
     )]
-    pub decision_policy_snapshot: BelongsTo<super::decision_policy_snapshot::Entity>,
+    pub decision_policy_snapshot: BelongsTo<decision_policy_snapshot::Entity>,
     #[sea_orm(
         belongs_to,
         relation_enum = "ModelVersion",
         from = "model_version_id",
         to = "model_version_id"
     )]
-    pub model_version: BelongsTo<super::quant_model_version::Entity>,
+    pub model_version: BelongsTo<quant_model_version::Entity>,
     #[sea_orm(has_many, relation_enum = "ExecutionOrder")]
-    pub execution_order: HasMany<super::quant_execution_order::Entity>,
+    pub execution_order: HasMany<quant_execution_order::Entity>,
     #[sea_orm(has_one, relation_enum = "CapitalAllocation")]
-    pub capital_allocation: HasOne<super::quant_capital_allocation::Entity>,
+    pub capital_allocation: HasOne<quant_capital_allocation::Entity>,
     #[sea_orm(has_one, relation_enum = "Position")]
-    pub position: HasOne<super::quant_position::Entity>,
+    pub position: HasOne<quant_position::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

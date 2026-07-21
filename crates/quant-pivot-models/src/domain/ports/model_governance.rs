@@ -1,4 +1,4 @@
-//! Admin port for the offline model-governance closure (Phase 3.7).
+//! Admin port for the offline model-governance closure.
 //!
 //! The dependency-inversion boundary between an operator-facing caller (HTTP
 //! routes, jobs, tests) and the core governance service. The [`GovernanceActor`]
@@ -10,8 +10,11 @@ use quant_pivot_error::QuantResult;
 
 use crate::{
     domain::{
-        BindCalibrationRequest, BindPublishPathSetRequest, GatePreviewIntent, ModelVersionInfo,
-        QualityGateReportView,
+        api::{
+            BindCalibrationRequest, BindPublishPathSetRequest, GatePreviewIntent,
+            QualityGateReportView,
+        },
+        quant::ModelVersionInfo,
     },
     types::{BacktestReportId, ModelVersionId, RoleCode, UserId},
 };
@@ -99,7 +102,7 @@ pub trait ModelGovernancePort: Send + Sync {
     ) -> QuantResult<QualityGateReportView>;
 
     /// Bind a `model_score` calibrator to a candidate version, minting a new
-    /// candidate whose `return_model` is `Calibrated { … }` (Phase 11.3 §5).
+    /// candidate whose `return_model` is `Calibrated { … }`.
     async fn bind_calibration(
         &self,
         model_version_id: &ModelVersionId,

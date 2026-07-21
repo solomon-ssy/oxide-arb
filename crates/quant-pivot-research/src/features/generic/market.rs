@@ -6,7 +6,10 @@ use quant_pivot_models::{enums::market::MarketStatus, runtime_config::FeatureFam
 
 use crate::features::{
     builder::{FeatureComputeCtx, FeatureGroupBuilder, RawFeature},
-    names::market,
+    names::{
+        market,
+        market::{EVENT_AGE_SECS, TIME_TO_RESOLUTION_SECS},
+    },
     resolved::ResolvedMarketContext,
     value::{EvidenceSourceKind, EvidenceSourceRef, FeatureValue, NullReason},
 };
@@ -36,7 +39,7 @@ impl FeatureGroupBuilder for MarketMetadataFeatureBuilder {
             // Category is carried faithfully as the enum; it comes from the frozen
             // selection snapshot (identical online and offline), so the build is
             // parity-stable. Numeric encoding is a downstream normalization
-            // concern (3.3) — never an ordinal value fed to a model.
+            // concern — never an ordinal value fed to a model.
             RawFeature::present(
                 market::CATEGORY,
                 FeatureValue::Category(ctx.category),
@@ -65,24 +68,14 @@ fn time_to_resolution(
     evidence: &EvidenceSourceRef,
 ) -> RawFeature {
     market.end_date.map_or_else(
-        || {
-            RawFeature::missing(
-                market::TIME_TO_RESOLUTION_SECS,
-                NullReason::SourceUnavailable,
-            )
-        },
+        || RawFeature::missing(TIME_TO_RESOLUTION_SECS, NullReason::SourceUnavailable),
         |end_date| {
             let secs = (end_date - ctx.decision_at).num_seconds();
             u64::try_from(secs).map_or_else(
-                |_| {
-                    RawFeature::missing(
-                        market::TIME_TO_RESOLUTION_SECS,
-                        NullReason::OutOfValidRange,
-                    )
-                },
+                |_| RawFeature::missing(TIME_TO_RESOLUTION_SECS, NullReason::OutOfValidRange),
                 |secs| {
                     RawFeature::present(
-                        market::TIME_TO_RESOLUTION_SECS,
+                        TIME_TO_RESOLUTION_SECS,
                         FeatureValue::Count(secs),
                         evidence.clone(),
                     )
@@ -98,14 +91,14 @@ fn event_age(
     evidence: &EvidenceSourceRef,
 ) -> RawFeature {
     let Some(created_at) = market.created_at else {
-        return RawFeature::missing(market::EVENT_AGE_SECS, NullReason::SourceUnavailable);
+        return RawFeature::missing(EVENT_AGE_SECS, NullReason::SourceUnavailable);
     };
     let seconds = (ctx.decision_at - created_at).num_seconds();
     u64::try_from(seconds).map_or_else(
-        |_| RawFeature::missing(market::EVENT_AGE_SECS, NullReason::OutOfValidRange),
+        |_| RawFeature::missing(EVENT_AGE_SECS, NullReason::OutOfValidRange),
         |seconds| {
             RawFeature::present(
-                market::EVENT_AGE_SECS,
+                EVENT_AGE_SECS,
                 FeatureValue::Count(seconds),
                 evidence.clone(),
             )

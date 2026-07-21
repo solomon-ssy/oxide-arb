@@ -2,7 +2,9 @@
 
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    domain::{BeginSourceSliceOutcome, CompleteSourceSlice, NewSourceSlice, SourceSliceInfo},
+    domain::quant::{
+        BeginSourceSliceOutcome, CompleteSourceSlice, NewSourceSlice, SourceSliceInfo,
+    },
     types::{ContentHash, SourceSliceId},
 };
 

@@ -10,8 +10,6 @@ use sea_orm::{
     },
 };
 
-use crate::sql_contract_registry::POSTGRES_SHADOW_LATENCY;
-
 #[derive(Debug, FromQueryResult)]
 struct DatabaseClock {
     now: DateTime<Utc>,
@@ -103,10 +101,9 @@ pub(super) async fn shadow_latency_aggregate(
     window_start: DateTime<Utc>,
     window_end: DateTime<Utc>,
 ) -> Result<ShadowLatencyAggregate, StorageError> {
-    ShadowLatencyAggregate::find_by_statement(POSTGRES_SHADOW_LATENCY.postgres_statement(
-        Statement::from_sql_and_values(
-            DatabaseBackend::Postgres,
-            r"
+    ShadowLatencyAggregate::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        r"
 WITH decision_prepared AS (
     SELECT
         COUNT(*)::bigint AS sample_count,
@@ -145,8 +142,7 @@ SELECT
     market_delay.p95_ms AS market_delay_p95_ms
 FROM decision_prepared, endpoint_rtt, market_delay
 ",
-            [window_start.into(), window_end.into()],
-        ),
+        [window_start.into(), window_end.into()],
     ))
     .one(db)
     .await

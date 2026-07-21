@@ -9,15 +9,17 @@
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use tokio_util::sync::CancellationToken;
-use uuid::Uuid;
-
 use quant_pivot_models::{
-    domain::{CoreEvent, CoreEventPublisher, MaterializationRunEvent, ResearchJobInfo},
+    domain::{
+        quant::ResearchJobInfo,
+        runtime::{CoreEvent, CoreEventPublisher, MaterializationRunEvent},
+    },
     enums::quant::{ResearchJobKind, ResearchJobStatus},
     types::{ResearchJobId, WorkerId},
 };
 use quant_pivot_repository::traits::ResearchJobRepository;
+use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
 /// Shared, cheaply-cloneable handle wiring the job ledger, event bus, live
 /// cancellation-token registry, and this process's boot epoch id.

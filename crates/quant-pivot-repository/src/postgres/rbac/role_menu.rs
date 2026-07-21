@@ -2,10 +2,17 @@
 
 use std::collections::HashSet;
 
-use quant_pivot_error::storage::{StorageError, entity};
+use quant_pivot_error::storage::{
+    StorageError,
+    entity::{MENU, ROLE},
+};
 use quant_pivot_models::{
-    domain::{AssignMenus, MenuInfo},
-    entities::{menu, role, role_menu},
+    domain::rbac::{AssignMenus, MenuInfo},
+    entities::{
+        menu::{Column, Entity as MenuEntity},
+        role::Entity,
+        role_menu::{ActiveModel, Column as RoleMenuColumn, Entity as RoleMenuEntity},
+    },
     types::{MenuId, RoleId},
 };
 use sea_orm::{
@@ -39,30 +46,30 @@ async fn do_set_menus(
 
     let txn = db.begin().await.map_err(StorageError::from)?;
 
-    if role::Entity::find_by_id(role_id.clone())
+    if Entity::find_by_id(role_id.clone())
         .one(&txn)
         .await
         .map_err(StorageError::from)?
         .is_none()
     {
         txn.rollback().await.map_err(StorageError::from)?;
-        return Err(error::not_found(entity::ROLE, &role_id));
+        return Err(error::not_found(ROLE, &role_id));
     }
 
     if !target.is_empty() {
-        let present = menu::Entity::find()
-            .filter(menu::Column::Id.is_in(target.iter().cloned()))
+        let present = MenuEntity::find()
+            .filter(Column::Id.is_in(target.iter().cloned()))
             .count(&txn)
             .await
             .map_err(StorageError::from)?;
         if present != target.len() as u64 {
             txn.rollback().await.map_err(StorageError::from)?;
-            return Err(error::not_found(entity::MENU, "<one or more menu ids>"));
+            return Err(error::not_found(MENU, "<one or more menu ids>"));
         }
     }
 
-    let current: HashSet<MenuId> = role_menu::Entity::find()
-        .filter(role_menu::Column::RoleId.eq(role_id.clone()))
+    let current: HashSet<MenuId> = RoleMenuEntity::find()
+        .filter(RoleMenuColumn::RoleId.eq(role_id.clone()))
         .all(&txn)
         .await
         .map_err(StorageError::from)?
@@ -73,15 +80,15 @@ async fn do_set_menus(
     let (added, removed) = junction::replace_set_diff(&target, &current);
 
     if !added.is_empty() {
-        let rows = added.iter().map(|menu_id| role_menu::ActiveModel {
+        let rows = added.iter().map(|menu_id| ActiveModel {
             role_id: Set(role_id.clone()),
             menu_id: Set(menu_id.clone()),
             ..Default::default()
         });
-        junction::insert_junction_rows::<role_menu::Entity>(
+        junction::insert_junction_rows::<RoleMenuEntity>(
             &txn,
             rows,
-            OnConflict::columns([role_menu::Column::RoleId, role_menu::Column::MenuId])
+            OnConflict::columns([RoleMenuColumn::RoleId, RoleMenuColumn::MenuId])
                 .do_nothing()
                 .to_owned(),
         )
@@ -89,9 +96,9 @@ async fn do_set_menus(
     }
 
     if !removed.is_empty() {
-        role_menu::Entity::delete_many()
-            .filter(role_menu::Column::RoleId.eq(role_id.clone()))
-            .filter(role_menu::Column::MenuId.is_in(removed))
+        RoleMenuEntity::delete_many()
+            .filter(RoleMenuColumn::RoleId.eq(role_id.clone()))
+            .filter(RoleMenuColumn::MenuId.is_in(removed))
             .exec(&txn)
             .await
             .map_err(StorageError::from)?;
@@ -105,8 +112,8 @@ async fn do_list_menus_for_role(
     db: &impl ConnectionTrait,
     role_id: &RoleId,
 ) -> Result<Vec<MenuInfo>, StorageError> {
-    let menu_ids: Vec<MenuId> = role_menu::Entity::find()
-        .filter(role_menu::Column::RoleId.eq(role_id.clone()))
+    let menu_ids: Vec<MenuId> = RoleMenuEntity::find()
+        .filter(RoleMenuColumn::RoleId.eq(role_id.clone()))
         .all(db)
         .await
         .map_err(StorageError::from)?
@@ -117,10 +124,10 @@ async fn do_list_menus_for_role(
         return Ok(Vec::new());
     }
 
-    let menus = menu::Entity::find()
-        .filter(menu::Column::Id.is_in(menu_ids))
-        .order_by_asc(menu::Column::Sort)
-        .order_by_asc(menu::Column::Id)
+    let menus = MenuEntity::find()
+        .filter(Column::Id.is_in(menu_ids))
+        .order_by_asc(Column::Sort)
+        .order_by_asc(Column::Id)
         .all(db)
         .await
         .map_err(StorageError::from)?;

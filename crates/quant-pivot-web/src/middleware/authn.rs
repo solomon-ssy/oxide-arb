@@ -15,7 +15,7 @@ use actix_web::{
     dev::{ServiceRequest, ServiceResponse},
     http::header::AUTHORIZATION,
     middleware::Next,
-    web,
+    web::Data,
 };
 use quant_pivot_error::{auth::AuthError, storage::StorageError};
 use quant_pivot_models::{enums::rbac::UserStatus, types::UserId};
@@ -28,7 +28,7 @@ pub async fn authn<B: MessageBody>(
     next: Next<B>,
 ) -> Result<ServiceResponse<B>, Error> {
     let state = req
-        .app_data::<web::Data<AppState>>()
+        .app_data::<Data<AppState>>()
         .cloned()
         .ok_or_else(|| WebError::Internal("application state missing".to_owned()))?;
 

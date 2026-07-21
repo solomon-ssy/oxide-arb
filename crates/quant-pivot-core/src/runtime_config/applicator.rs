@@ -1,4 +1,14 @@
-//! Runtime-config activation applicator — Phase 0 minimal propagation.
+//! Runtime-config activation applicator — minimal propagation.
+
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use parking_lot::Mutex;
+use quant_pivot_error::control::ControlError;
+use quant_pivot_models::{
+    domain::ports::{PolicySnapshotPort, PreparedPolicySnapshot},
+    runtime_config::DecisionPolicySnapshot,
+};
 
 use super::store::{DecisionPolicyStore, PublishedPolicyBundle};
 use crate::{
@@ -9,28 +19,20 @@ use crate::{
         market_filter::MarketFilter,
     },
 };
-use async_trait::async_trait;
-use parking_lot::Mutex;
-use quant_pivot_error::control::ControlError;
-use quant_pivot_models::{
-    domain::{PolicySnapshotPort, PreparedPolicySnapshot},
-    runtime_config::DecisionPolicySnapshot,
-};
-use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct PolicySnapshotSubscribers {
     pub market_filter: Arc<MarketFilter>,
     pub market_cache: Arc<MarketCache>,
     pub data_quality: Arc<BookDataQualityService>,
-    /// Candidate / shadow factor-weight overlay snapshot (3.7 hot-update).
+    /// Candidate / shadow factor-weight overlay snapshot.
     pub weight_overlay: Arc<WeightOverlayApplicator>,
-    /// Favorite-longshot bias-table snapshot bound to the factor plane (11.2.1).
+    /// Favorite-longshot bias-table snapshot bound to the factor plane.
     /// Reloaded (and content-hash verified) on activation; a bad ref fails the
     /// activation closed.
     pub bias_table: Arc<BiasTableApplicator>,
-    /// `model.category_model_pointers` config-apply-time validator (11.2.2
-    /// remediation R7): a dangling or mis-scoped pointer fails the activation
+    /// Config-apply-time validator for `model.category_model_pointers`: a
+    /// dangling or mis-scoped pointer fails the activation
     /// closed rather than surfacing only as a runtime fallback.
     pub category_pointer_guard: Arc<CategoryPointerGuard>,
 }
@@ -116,8 +118,7 @@ impl PolicySnapshotPort for PolicySnapshotApplicator {
 
         // Validate every category pointer before mutating the live snapshot:
         // a dangling or mis-scoped pointer must fail the activation closed,
-        // never rely solely on the router's runtime fallback (11.2.2
-        // remediation R7).
+        // never rely solely on the router's runtime fallback.
         self.subscribers
             .category_pointer_guard
             .validate(&arc.model_routing.model)

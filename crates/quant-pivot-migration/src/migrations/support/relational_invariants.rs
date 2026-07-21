@@ -1,691 +1,694 @@
 use sea_orm_migration::prelude::*;
 
-use super::v1;
+use super::{
+    v1,
+    v1::{ConstraintKind, ConstraintSpec},
+};
 
 pub const SOURCE: &[u8] = include_bytes!("relational_invariants.rs");
-const CONSTRAINTS: &[v1::ConstraintSpec] = &[
-    v1::ConstraintSpec {
+const CONSTRAINTS: &[ConstraintSpec] = &[
+    ConstraintSpec {
         name: "catalog_event_object_schema_version_check",
         table: "catalog_event_object",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK ((schema_version > 0))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "catalog_market_object_schema_version_check",
         table: "catalog_market_object",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK ((schema_version > 0))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "catalog_sync_batch_check",
         table: "catalog_sync_batch",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK (((event_count >= 0) AND (market_count >= 0) AND (rejected_count >= 0) AND (((status = 'committed'::qp_catalog_sync_status) AND (fetched_at IS NOT NULL) AND (committed_at IS NOT NULL) AND (batch_hash IS NOT NULL) AND (failure_stage IS NULL) AND (failure_detail IS NULL)) OR ((status = 'failed'::qp_catalog_sync_status) AND (committed_at IS NULL) AND (failure_stage IS NOT NULL) AND (failure_detail IS NOT NULL) AND ((length(failure_detail) >= 1) AND (length(failure_detail) <= 2048))))))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "catalog_sync_rejection_detail_check",
         table: "catalog_sync_rejection",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK (((char_length(detail) >= 1) AND (char_length(detail) <= 2048)))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "market_check",
         table: "market",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK (((status <> 'active'::qp_market_status) OR (cardinality(filter_reasons) = 0)))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "market_check1",
         table: "market",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK (((status <> 'filtered'::qp_market_status) OR (cardinality(filter_reasons) > 0)))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "quant_factor_definition_definition_hash_check",
         table: "quant_factor_definition",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK ((definition_hash ~ '^blake3:[0-9a-f]{64}$'::text))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "quant_factor_definition_feature_contract_hash_check",
         table: "quant_factor_definition",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK ((feature_contract_hash ~ '^blake3:[0-9a-f]{64}$'::text))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "ck_quant_factor_definition_document",
         table: "quant_factor_definition",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK (((jsonb_typeof(definition) = 'object'::text) AND ((definition ->> 'name'::text) = name) AND ((definition ->> 'family'::text) = (factor_family)::text) AND (jsonb_typeof((definition -> 'input_features'::text)) = 'array'::text) AND (jsonb_typeof((definition -> 'quality_gates'::text)) = 'array'::text) AND (jsonb_typeof((definition -> 'owner'::text)) = 'string'::text) AND (char_length(btrim((definition ->> 'owner'::text))) >= 1)))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "ck_quant_factor_value_explanation",
         table: "quant_factor_value",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK (((jsonb_typeof(explanation) = 'object'::text) AND (jsonb_typeof((explanation -> 'headline'::text)) = 'string'::text) AND (char_length(btrim((explanation ->> 'headline'::text))) >= 1) AND (jsonb_typeof((explanation -> 'drivers'::text)) = 'array'::text)))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "ck_quant_feature_parity_candidate_ordinal",
         table: "quant_feature_parity_candidate",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK ((ordinal >= 0))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "ck_quant_calibration_artifact_payload_kind",
         table: "quant_calibration_artifact",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK (((jsonb_typeof(payload) = 'object'::text) AND ((payload ->> 'kind'::text) = (kind)::text) AND (jsonb_typeof((payload -> 'payload'::text)) = 'object'::text)))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "uq_quant_feature_parity_candidate_subject_market",
         table: "quant_feature_parity_candidate",
-        kind: v1::ConstraintKind::Unique,
+        kind: ConstraintKind::Unique,
         definition: "UNIQUE (parity_subject_id, market_id)",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "ck_quant_feature_parity_subject_identity",
         table: "quant_feature_parity_subject",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK ((((subject_kind = 'model_run'::qp_parity_subject_kind) AND (model_run_id IS NOT NULL) AND (recommendation_report_id IS NULL) AND (model_version_id IS NULL) AND (training_dataset_id IS NULL) AND (market_selection_id IS NOT NULL) AND (decision_at IS NOT NULL) AND (selection_hash IS NOT NULL)) OR ((subject_kind = 'recommendation_report'::qp_parity_subject_kind) AND (model_run_id IS NULL) AND (recommendation_report_id IS NOT NULL) AND (model_version_id IS NULL) AND (training_dataset_id IS NULL) AND (market_selection_id IS NOT NULL) AND (decision_at IS NOT NULL) AND (selection_hash IS NOT NULL)) OR ((subject_kind = 'model_version'::qp_parity_subject_kind) AND (model_run_id IS NULL) AND (recommendation_report_id IS NULL) AND (model_version_id IS NOT NULL) AND (training_dataset_id IS NOT NULL) AND (market_selection_id IS NULL) AND (decision_at IS NULL) AND (selection_hash IS NULL))))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "ck_quant_feature_parity_run_semantic_codes",
         table: "quant_feature_parity_run",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK ((((acting_role)::text ~ '^[a-z][a-z0-9_]{0,63}$'::text) AND ((failure_code IS NULL) OR ((failure_code)::text ~ '^[a-z][a-z0-9_]{0,127}$'::text))))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "ck_quant_feature_parity_state_acting_role",
         table: "quant_feature_parity_state",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK (((acting_role IS NULL) OR ((acting_role)::text ~ '^[a-z][a-z0-9_]{0,63}$'::text)))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "ck_quant_feature_vector_documents",
         table: "quant_feature_vector",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK (((jsonb_typeof(decision_boundary) = 'object'::text) AND (jsonb_typeof(payload) = 'object'::text) AND (payload ? 'generic'::text) AND (payload ? 'domain'::text) AND (jsonb_typeof((payload -> 'generic'::text)) = 'object'::text) AND (jsonb_typeof((payload -> 'domain'::text)) = ANY (ARRAY['object'::text, 'null'::text])) AND (jsonb_typeof(source_refs) = 'array'::text) AND (jsonb_typeof(decision_capture) = 'object'::text) AND (jsonb_typeof((decision_capture -> 'snapshot'::text)) = 'object'::text) AND (decision_capture_hash ~ '^blake3:[0-9a-f]{64}$'::text)))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "ck_quant_market_linkage_outcome",
         table: "quant_market_linkage",
-        kind: v1::ConstraintKind::Check,
-        definition: "CHECK (((jsonb_typeof(outcome) = 'object'::text) AND ((((status = 'unresolved'::qp_linkage_status) AND ((outcome ->> 'status'::text) = 'unresolved'::text) AND (jsonb_typeof((outcome -> 'reason'::text)) = 'string'::text) AND (char_length(btrim((outcome ->> 'reason'::text))) >= 1) AND (char_length((outcome ->> 'reason'::text)) <= 2048)) OR ((status = ANY (ARRAY['resolved'::qp_linkage_status, 'overridden'::qp_linkage_status])) AND ((outcome ->> 'status'::text) = 'resolved'::text) AND (jsonb_typeof((outcome -> 'subject'::text)) = 'object'::text) AND (jsonb_typeof((outcome -> 'source_bindings'::text)) = 'array'::text) AND (jsonb_typeof((outcome -> 'grounding'::text)) = 'object'::text))))))",
+        kind: ConstraintKind::Check,
+        definition: "CHECK (((jsonb_typeof(outcome) = 'object'::text) AND ((((status = 'unresolved'::qp_linkage_status) AND ((outcome ->> 'status'::text) = 'unresolved'::text) AND (jsonb_typeof((outcome -> 'reason'::text)) = 'object'::text) AND ((outcome -> 'reason'::text) ? 'code'::text) AND ((outcome #>> '{reason,code}'::text[]) = ANY (ARRAY['no_deterministic_template'::text, 'candidate_rejected'::text]))) OR ((status = ANY (ARRAY['resolved'::qp_linkage_status, 'overridden'::qp_linkage_status])) AND ((outcome ->> 'status'::text) = 'resolved'::text) AND (jsonb_typeof((outcome -> 'subject'::text)) = 'object'::text) AND (jsonb_typeof((outcome -> 'source_bindings'::text)) = 'array'::text) AND (jsonb_typeof((outcome -> 'grounding'::text)) = 'object'::text))))))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "ck_operation_log_detail_document",
         table: "operation_log",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK (((jsonb_typeof(detail) = 'object'::text) AND (pg_column_size(detail) <= 65536)))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "ck_quant_model_governance_audit_detail_action",
         table: "quant_model_governance_audit",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK (((jsonb_typeof(detail) = 'object'::text) AND ((detail ->> 'action'::text) = (action)::text)))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "quant_model_spec_check",
         table: "quant_model_spec",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK (((jsonb_typeof(input_contract) = 'object'::text) AND (jsonb_typeof((input_contract -> 'inputs'::text)) = 'array'::text) AND (jsonb_array_length((input_contract -> 'inputs'::text)) > 0) AND (jsonb_typeof(training_contract) = 'object'::text) AND (jsonb_typeof((training_contract -> 'target_label_name'::text)) = 'string'::text) AND ((length((training_contract ->> 'target_label_name'::text)) >= 1) AND (length((training_contract ->> 'target_label_name'::text)) <= 128)) AND ((((training_contract ->> 'validation_folds'::text))::integer >= 2) AND (((training_contract ->> 'validation_folds'::text))::integer <= 20)) AND (definition_hash ~ '^blake3:[0-9a-f]{64}$'::text)))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "ck_quant_model_spec_thesis",
         table: "quant_model_spec",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK (((jsonb_typeof(thesis) = 'object'::text) AND (jsonb_typeof((thesis -> 'summary'::text)) = 'string'::text) AND (char_length(btrim((thesis ->> 'summary'::text))) BETWEEN 1 AND 512) AND ((thesis ->> 'summary'::text) = btrim((thesis ->> 'summary'::text))) AND (jsonb_typeof((thesis -> 'hypothesis'::text)) = 'string'::text) AND (char_length(btrim((thesis ->> 'hypothesis'::text))) BETWEEN 1 AND 2048) AND ((thesis ->> 'hypothesis'::text) = btrim((thesis ->> 'hypothesis'::text))) AND (jsonb_typeof((thesis -> 'limitations'::text)) = 'array'::text) AND (jsonb_array_length((thesis -> 'limitations'::text)) BETWEEN 1 AND 16)))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "ck_quant_model_spec_authoring_provenance",
         table: "quant_model_spec",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK (((char_length(btrim(created_by_label)) >= 1) AND (char_length(btrim(created_by_label)) <= 256) AND ((created_by_role IS NULL) OR ((char_length(btrim(created_by_role)) >= 1) AND (char_length(btrim(created_by_role)) <= 128))) AND (char_length(btrim(reason)) >= 1) AND (char_length(btrim(reason)) <= 2048)))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "ck_quant_model_version_quality_gate_report",
         table: "quant_model_version",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK (((quality_gate_report IS NULL) OR ((jsonb_typeof(quality_gate_report) = 'object'::text) AND (((quality_gate_report ->> 'format_version'::text))::integer = 1) AND ((quality_gate_report -> 'subject'::text) ->> 'kind'::text) = 'model_version'::text AND ((((quality_gate_report -> 'subject'::text) ->> 'id'::text))::uuid = model_version_id) AND (jsonb_typeof((quality_gate_report -> 'gates'::text)) = 'array'::text) AND (jsonb_typeof((quality_gate_report -> 'hard_failures'::text)) = 'array'::text) AND (jsonb_typeof((quality_gate_report -> 'soft_warnings'::text)) = 'array'::text) AND (jsonb_typeof((quality_gate_report -> 'passed'::text)) = 'boolean'::text) AND ((quality_gate_report ->> 'report_hash'::text) ~ '^blake3:[0-9a-f]{64}$'::text))))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "ck_quant_model_version_training_objective",
         table: "quant_model_version",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK (((jsonb_typeof(training_objective) = 'object'::text) AND (((training_objective ->> 'format_version'::text))::integer = 1) AND (jsonb_typeof((training_objective -> 'definition'::text)) = 'object'::text) AND (((training_objective -> 'definition'::text) ->> 'kind'::text) = ANY (ARRAY['learning_to_rank'::text, 'classical_pointwise'::text, 'hand_authored'::text]))))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "ck_quant_model_version_metrics",
         table: "quant_model_version",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK (((jsonb_typeof(metrics) = 'object'::text) AND ((metrics ->> 'format_version'::text) = '1'::text) AND (jsonb_typeof((metrics -> 'definition'::text)) = 'object'::text) AND ((((metrics -> 'definition'::text) ->> 'kind'::text) = 'learning_to_rank'::text AND ((training_objective -> 'definition'::text) ->> 'kind'::text) = 'learning_to_rank'::text AND (jsonb_typeof(((metrics -> 'definition'::text) -> 'in_sample'::text)) = 'object'::text) AND (jsonb_typeof(((metrics -> 'definition'::text) -> 'validation'::text)) = 'object'::text) AND (jsonb_typeof(((metrics -> 'definition'::text) -> 'artifact_lineage'::text)) = 'object'::text) AND ((((metrics -> 'definition'::text) -> 'artifact_lineage'::text) ->> 'kind'::text) = ANY (ARRAY['factor_native'::text, 'fitted_feature_matrix'::text]))) OR (((metrics -> 'definition'::text) ->> 'kind'::text) = 'classical_pointwise'::text AND ((training_objective -> 'definition'::text) ->> 'kind'::text) = 'classical_pointwise'::text AND (jsonb_typeof(((metrics -> 'definition'::text) -> 'in_sample'::text)) = 'object'::text) AND (jsonb_typeof(((metrics -> 'definition'::text) -> 'validation'::text)) = 'object'::text) AND (jsonb_typeof(((metrics -> 'definition'::text) -> 'feature_importances'::text)) = 'array'::text) AND (jsonb_typeof(((metrics -> 'definition'::text) -> 'artifact_lineage'::text)) = 'object'::text) AND ((((metrics -> 'definition'::text) -> 'artifact_lineage'::text) ->> 'kind'::text) = 'fitted_feature_matrix'::text)) OR (((metrics -> 'definition'::text) ->> 'kind'::text) = 'not_measured'::text AND ((training_objective -> 'definition'::text) ->> 'kind'::text) = 'hand_authored'::text AND (jsonb_typeof(((metrics -> 'definition'::text) -> 'rationale'::text)) = 'string'::text) AND (char_length(btrim(((metrics -> 'definition'::text) ->> 'rationale'::text))) BETWEEN 1 AND 2048)))))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "ck_quant_model_version_derivation",
         table: "quant_model_version",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK ((((derivation_kind = 'training'::qp_model_version_derivation_kind) AND (parent_model_version_id IS NULL) AND (source_backtest_report_id IS NULL) AND (calibration_artifact_id IS NULL) AND (score_multiplier_calibration_report IS NULL) AND (derivation_evidence_hash IS NULL)) OR ((derivation_kind = 'score_multiplier_calibration'::qp_model_version_derivation_kind) AND (parent_model_version_id IS NOT NULL) AND (parent_model_version_id <> model_version_id) AND (source_backtest_report_id IS NOT NULL) AND (calibration_artifact_id IS NULL) AND (jsonb_typeof(score_multiplier_calibration_report) = 'object'::text) AND (((score_multiplier_calibration_report ->> 'methodology_version'::text))::integer = 1) AND (((score_multiplier_calibration_report ->> 'minimum_stratum_samples'::text))::bigint > 0) AND (((score_multiplier_calibration_report ->> 'total_samples'::text))::bigint > 0) AND (derivation_evidence_hash ~ '^blake3:[0-9a-f]{64}$'::text)) OR ((derivation_kind = 'return_calibration'::qp_model_version_derivation_kind) AND (parent_model_version_id IS NOT NULL) AND (parent_model_version_id <> model_version_id) AND (source_backtest_report_id IS NULL) AND (calibration_artifact_id IS NOT NULL) AND (score_multiplier_calibration_report IS NULL) AND (derivation_evidence_hash ~ '^blake3:[0-9a-f]{64}$'::text))))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "fk-quant_model_version-source_backtest_report_id",
         table: "quant_model_version",
-        kind: v1::ConstraintKind::ForeignKey,
+        kind: ConstraintKind::ForeignKey,
         definition: "FOREIGN KEY (source_backtest_report_id) REFERENCES public.quant_backtest_report(backtest_report_id) ON UPDATE NO ACTION ON DELETE NO ACTION",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "quant_recommendation_report_capital_base_usd_check",
         table: "quant_recommendation_report",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK ((capital_base_usd >= (0)::numeric))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "quant_recommendation_report_check1",
         table: "quant_recommendation_report",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK (((valid_until IS NULL) OR (valid_until > decision_at)))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "quant_recommendation_report_check10",
         table: "quant_recommendation_report",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK (((published_at IS NULL) OR (published_at >= decision_at)))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "quant_recommendation_report_check11",
         table: "quant_recommendation_report",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK (((superseded_at IS NULL) OR (superseded_at >= published_at)))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "quant_recommendation_report_check12",
         table: "quant_recommendation_report",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK (((obsoleted_at IS NULL) OR (obsoleted_at >= decision_at)))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "quant_recommendation_report_check13",
         table: "quant_recommendation_report",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK (((expired_at IS NULL) OR (expired_at >= published_at)))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "quant_recommendation_report_check14",
         table: "quant_recommendation_report",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK (((revoked_at IS NULL) OR (revoked_at >= decision_at)))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "quant_recommendation_report_check2",
         table: "quant_recommendation_report",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK (((successor_report_id IS NULL) OR (successor_report_id <> recommendation_report_id)))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "quant_recommendation_report_check3",
         table: "quant_recommendation_report",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK ((((status = ANY (ARRAY['prepared'::qp_recommendation_report_status, 'published'::qp_recommendation_report_status])) AND (status_reason IS NULL)) OR ((status <> ALL (ARRAY['prepared'::qp_recommendation_report_status, 'published'::qp_recommendation_report_status])) AND (status_reason IS NOT NULL))))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "quant_recommendation_report_check4",
         table: "quant_recommendation_report",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK ((((status = 'prepared'::qp_recommendation_report_status) AND (published_at IS NULL) AND (successor_report_id IS NULL) AND (superseded_at IS NULL) AND (obsoleted_at IS NULL) AND (revoked_at IS NULL) AND (expired_at IS NULL)) OR (status <> 'prepared'::qp_recommendation_report_status)))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "quant_recommendation_report_check5",
         table: "quant_recommendation_report",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK ((((status = 'published'::qp_recommendation_report_status) AND (published_at IS NOT NULL) AND (successor_report_id IS NULL) AND (superseded_at IS NULL) AND (obsoleted_at IS NULL) AND (revoked_at IS NULL) AND (expired_at IS NULL)) OR (status <> 'published'::qp_recommendation_report_status)))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "quant_recommendation_report_check6",
         table: "quant_recommendation_report",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK ((((status = 'superseded'::qp_recommendation_report_status) AND (published_at IS NOT NULL) AND (successor_report_id IS NOT NULL) AND (superseded_at IS NOT NULL) AND (obsoleted_at IS NULL) AND (revoked_at IS NULL) AND (expired_at IS NULL)) OR (status <> 'superseded'::qp_recommendation_report_status)))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "quant_recommendation_report_check7",
         table: "quant_recommendation_report",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK ((((status = 'obsolete'::qp_recommendation_report_status) AND (published_at IS NULL) AND (successor_report_id IS NOT NULL) AND (superseded_at IS NULL) AND (obsoleted_at IS NOT NULL) AND (revoked_at IS NULL) AND (expired_at IS NULL)) OR (status <> 'obsolete'::qp_recommendation_report_status)))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "quant_recommendation_report_check8",
         table: "quant_recommendation_report",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK ((((status = 'revoked'::qp_recommendation_report_status) AND (successor_report_id IS NULL) AND (superseded_at IS NULL) AND (obsoleted_at IS NULL) AND (revoked_at IS NOT NULL) AND (expired_at IS NULL)) OR (status <> 'revoked'::qp_recommendation_report_status)))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "quant_recommendation_report_check9",
         table: "quant_recommendation_report",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK ((((status = 'expired'::qp_recommendation_report_status) AND (published_at IS NOT NULL) AND (successor_report_id IS NULL) AND (superseded_at IS NULL) AND (obsoleted_at IS NULL) AND (revoked_at IS NULL) AND (expired_at IS NOT NULL)) OR (status <> 'expired'::qp_recommendation_report_status)))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "quant_recommendation_report_horizon_secs_check",
         table: "quant_recommendation_report",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK ((horizon_secs > 0))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "quant_recommendation_report_status_reason_check",
         table: "quant_recommendation_report",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK (((status_reason IS NULL) OR ((char_length(status_reason) >= 1) AND (char_length(status_reason) <= 4096))))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "quant_recommendation_report_top_n_check",
         table: "quant_recommendation_report",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK (((top_n > 0) AND (top_n <= 1000)))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "quant_report_fact_delivery_check",
         table: "quant_report_fact_delivery",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK (((bundle_bytes > 0) AND (recommendation_row_count >= 0) AND (funnel_row_count >= 0) AND (attempt_count >= 0)))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "quant_report_fact_delivery_check1",
         table: "quant_report_fact_delivery",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK (((claim_owner IS NULL) = (lease_expires_at IS NULL)))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "quant_report_fact_delivery_check2",
         table: "quant_report_fact_delivery",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK ((((status = 'pending'::qp_report_fact_delivery_status) AND (attempt_count = 0) AND (claim_owner IS NULL) AND (next_attempt_at IS NULL) AND (last_error IS NULL) AND (verified_at IS NULL) AND (announced_at IS NULL)) OR (status <> 'pending'::qp_report_fact_delivery_status)))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "quant_report_fact_delivery_check3",
         table: "quant_report_fact_delivery",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK ((((status = 'delivering'::qp_report_fact_delivery_status) AND (attempt_count > 0) AND (claim_owner IS NOT NULL) AND (next_attempt_at IS NULL) AND (last_error IS NULL) AND (verified_at IS NULL) AND (announced_at IS NULL)) OR (status <> 'delivering'::qp_report_fact_delivery_status)))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "quant_report_fact_delivery_check4",
         table: "quant_report_fact_delivery",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK ((((status = 'retrying'::qp_report_fact_delivery_status) AND (attempt_count > 0) AND (claim_owner IS NULL) AND (next_attempt_at IS NOT NULL) AND (last_error IS NOT NULL) AND (verified_at IS NULL) AND (announced_at IS NULL)) OR (status <> 'retrying'::qp_report_fact_delivery_status)))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "quant_report_fact_delivery_check5",
         table: "quant_report_fact_delivery",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK ((((status = 'failed'::qp_report_fact_delivery_status) AND (attempt_count > 0) AND (claim_owner IS NULL) AND (next_attempt_at IS NULL) AND (last_error IS NOT NULL) AND (verified_at IS NULL) AND (announced_at IS NULL)) OR (status <> 'failed'::qp_report_fact_delivery_status)))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "quant_report_fact_delivery_check6",
         table: "quant_report_fact_delivery",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK ((((status = 'verified'::qp_report_fact_delivery_status) AND (attempt_count > 0) AND (next_attempt_at IS NULL) AND (last_error IS NULL) AND (verified_at IS NOT NULL)) OR (status <> 'verified'::qp_report_fact_delivery_status)))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "quant_report_fact_delivery_check7",
         table: "quant_report_fact_delivery",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK ((((status = 'cancelled'::qp_report_fact_delivery_status) AND (claim_owner IS NULL) AND (next_attempt_at IS NULL) AND (verified_at IS NULL) AND (announced_at IS NULL)) OR (status <> 'cancelled'::qp_report_fact_delivery_status)))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "quant_report_fact_delivery_check8",
         table: "quant_report_fact_delivery",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK (((announced_at IS NULL) OR ((status = 'verified'::qp_report_fact_delivery_status) AND (claim_owner IS NULL) AND (announced_at >= verified_at))))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "quant_report_fact_delivery_last_error_check",
         table: "quant_report_fact_delivery",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK (((last_error IS NULL) OR ((char_length(last_error) >= 1) AND (char_length(last_error) <= 4096))))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "quant_report_run_check",
         table: "quant_report_run",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK ((((trigger_kind = 'scheduled'::qp_report_trigger_kind) AND (schedule_id IS NOT NULL) AND (request_id IS NULL) AND (scheduled_for IS NOT NULL)) OR ((trigger_kind = 'ad_hoc'::qp_report_trigger_kind) AND (schedule_id IS NULL) AND (request_id IS NOT NULL) AND (scheduled_for IS NULL))))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "quant_report_run_check1",
         table: "quant_report_run",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK (((status <> 'queued'::qp_report_run_status) OR (trigger_kind = 'ad_hoc'::qp_report_trigger_kind) OR ((top_n IS NULL) AND (knowledge_lag_secs IS NULL))))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "quant_report_run_check10",
         table: "quant_report_run",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK ((((status = 'succeeded'::qp_report_run_status) AND (started_at IS NOT NULL) AND (decision_at IS NOT NULL) AND (heartbeat_at IS NOT NULL) AND (decision_policy_snapshot_id IS NOT NULL) AND (top_n IS NOT NULL) AND (knowledge_lag_secs IS NOT NULL) AND (terminal_reason IS NULL) AND (error_code IS NULL) AND (error_summary IS NULL)) OR (status <> 'succeeded'::qp_report_run_status)))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "quant_report_run_check11",
         table: "quant_report_run",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK ((((status = 'failed'::qp_report_run_status) AND (started_at IS NOT NULL) AND (decision_at IS NOT NULL) AND (heartbeat_at IS NOT NULL) AND (decision_policy_snapshot_id IS NOT NULL) AND (top_n IS NOT NULL) AND (knowledge_lag_secs IS NOT NULL) AND (terminal_reason = 'build_failed'::qp_report_run_terminal_reason) AND (error_code IS NOT NULL) AND (error_summary IS NOT NULL)) OR (status <> 'failed'::qp_report_run_status)))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "quant_report_run_check12",
         table: "quant_report_run",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK ((((status = 'abandoned'::qp_report_run_status) AND (started_at IS NOT NULL) AND (decision_at IS NOT NULL) AND (heartbeat_at IS NOT NULL) AND (decision_policy_snapshot_id IS NOT NULL) AND (top_n IS NOT NULL) AND (knowledge_lag_secs IS NOT NULL) AND (terminal_reason = 'lease_expired'::qp_report_run_terminal_reason) AND (error_code IS NULL) AND (error_summary IS NULL)) OR (status <> 'abandoned'::qp_report_run_status)))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "quant_report_run_check13",
         table: "quant_report_run",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK (((terminal_reason <> 'queue_expired'::qp_report_run_terminal_reason) OR (trigger_kind = 'ad_hoc'::qp_report_trigger_kind)))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "quant_report_run_check14",
         table: "quant_report_run",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK (((terminal_reason <> ALL (ARRAY['coalesced_by_newer_occurrence'::qp_report_run_terminal_reason, 'schedule_reconfigured'::qp_report_run_terminal_reason])) OR (trigger_kind = 'scheduled'::qp_report_trigger_kind)))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "quant_report_run_check15",
         table: "quant_report_run",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK (((started_at IS NULL) OR ((decision_at = started_at) AND (requested_at <= started_at))))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "quant_report_run_check16",
         table: "quant_report_run",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK (((finished_at IS NULL) OR (started_at IS NULL) OR (finished_at >= started_at)))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "quant_report_run_check17",
         table: "quant_report_run",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK (((lease_expires_at IS NULL) OR (lease_expires_at > heartbeat_at)))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "quant_report_run_check2",
         table: "quant_report_run",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK (((char_length(trigger_key) >= 1) AND (char_length(trigger_key) <= 512) AND ((schedule_id IS NULL) OR ((char_length(schedule_id) >= 1) AND (char_length(schedule_id) <= 128))) AND ((request_id IS NULL) OR ((char_length(request_id) >= 1) AND (char_length(request_id) <= 256)))))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "quant_report_run_check3",
         table: "quant_report_run",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK (((retry_of_run_id IS NULL) OR (trigger_kind = 'ad_hoc'::qp_report_trigger_kind)))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "quant_report_run_check4",
         table: "quant_report_run",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK (((scheduled_for IS NULL) OR (scheduled_for <= requested_at)))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "quant_report_run_check5",
         table: "quant_report_run",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK ((((status = 'succeeded'::qp_report_run_status) AND (output_report_id IS NOT NULL)) OR ((status <> 'succeeded'::qp_report_run_status) AND (output_report_id IS NULL))))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "quant_report_run_check6",
         table: "quant_report_run",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK ((((status = 'running'::qp_report_run_status) AND (lease_owner IS NOT NULL) AND (started_at IS NOT NULL) AND (decision_at IS NOT NULL) AND (heartbeat_at IS NOT NULL) AND (lease_expires_at IS NOT NULL) AND (decision_policy_snapshot_id IS NOT NULL) AND (top_n IS NOT NULL) AND (knowledge_lag_secs IS NOT NULL) AND (finished_at IS NULL) AND (terminal_reason IS NULL)) OR ((status <> 'running'::qp_report_run_status) AND (lease_owner IS NULL) AND (lease_expires_at IS NULL))))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "quant_report_run_check7",
         table: "quant_report_run",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK (((status = ANY (ARRAY['succeeded'::qp_report_run_status, 'failed'::qp_report_run_status, 'skipped'::qp_report_run_status, 'abandoned'::qp_report_run_status])) = (finished_at IS NOT NULL)))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "quant_report_run_check8",
         table: "quant_report_run",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK ((((status = 'queued'::qp_report_run_status) AND (started_at IS NULL) AND (decision_at IS NULL) AND (heartbeat_at IS NULL) AND (finished_at IS NULL) AND (decision_policy_snapshot_id IS NULL) AND (output_report_id IS NULL) AND (terminal_reason IS NULL) AND (error_code IS NULL) AND (error_summary IS NULL)) OR (status <> 'queued'::qp_report_run_status)))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "quant_report_run_check9",
         table: "quant_report_run",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK ((((status = 'skipped'::qp_report_run_status) AND (started_at IS NULL) AND (decision_at IS NULL) AND (heartbeat_at IS NULL) AND (decision_policy_snapshot_id IS NULL) AND (output_report_id IS NULL) AND (terminal_reason = ANY (ARRAY['coalesced_by_newer_occurrence'::qp_report_run_terminal_reason, 'schedule_reconfigured'::qp_report_run_terminal_reason, 'queue_expired'::qp_report_run_terminal_reason])) AND (error_code IS NULL) AND (error_summary IS NULL)) OR (status <> 'skipped'::qp_report_run_status)))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "quant_report_run_error_code_check",
         table: "quant_report_run",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK (((error_code IS NULL) OR ((error_code)::text ~ '^[a-z][a-z0-9_]{0,127}$'::text)))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "quant_report_run_error_summary_check",
         table: "quant_report_run",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK (((error_summary IS NULL) OR ((char_length(error_summary) >= 1) AND (char_length(error_summary) <= 4096))))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "ck_role_code_canonical",
         table: "role",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK (((code)::text ~ '^[a-z][a-z0-9_]{0,63}$'::text))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "ck_system_bootstrap_transition_acting_role",
         table: "system_bootstrap_transition",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK (((acting_role IS NULL) OR ((acting_role)::text ~ '^[a-z][a-z0-9_]{0,63}$'::text)))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "ck_quant_report_run_trigger_key",
         table: "quant_report_run",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK (((length((trigger_key)::text) >= 1) AND (length((trigger_key)::text) <= 256) AND (octet_length((trigger_key)::text) = length((trigger_key)::text)) AND ((trigger_key)::text ~ '^[[:graph:]]+$'::text) AND (position(chr(92) in (trigger_key)::text) = 0) AND (position(chr(34) in (trigger_key)::text) = 0)))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "quant_report_run_knowledge_lag_secs_check",
         table: "quant_report_run",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK (((knowledge_lag_secs IS NULL) OR (knowledge_lag_secs >= 0)))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "quant_report_run_top_n_check",
         table: "quant_report_run",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK (((top_n IS NULL) OR ((top_n > 0) AND (top_n <= 1000))))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "quant_report_schedule_gap_check",
         table: "quant_report_schedule_gap",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK ((first_scheduled_for <= last_scheduled_for))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "quant_report_schedule_gap_detail_check",
         table: "quant_report_schedule_gap",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK (((detail IS NULL) OR ((char_length(detail) >= 1) AND (char_length(detail) <= 4096))))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "quant_report_schedule_gap_missed_count_check",
         table: "quant_report_schedule_gap",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK ((missed_count > 0))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "quant_research_readiness_evidence_check",
         table: "quant_research_readiness_evidence",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK (((window_start < window_end) AND (window_end <= observed_at) AND (observed_at < expires_at) AND (length((artifact_version)::text) BETWEEN 1 AND 256) AND (octet_length((artifact_version)::text) = length((artifact_version)::text)) AND ((artifact_version)::text ~ '^[[:graph:]]+$'::text) AND (position(chr(92) in (artifact_version)::text) = 0) AND (position(chr(34) in (artifact_version)::text) = 0) AND (length((attestation_key_id)::text) BETWEEN 1 AND 256) AND (octet_length((attestation_key_id)::text) = length((attestation_key_id)::text)) AND ((attestation_key_id)::text ~ '^[[:graph:]]+$'::text) AND (position(chr(92) in (attestation_key_id)::text) = 0) AND (position(chr(34) in (attestation_key_id)::text) = 0)))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "ck_quant_research_job_params_kind",
         table: "quant_research_job",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK (((jsonb_typeof(params_json) = 'object'::text) AND (jsonb_typeof((params_json -> 'params'::text)) = 'object'::text) AND ((params_json ->> 'kind'::text) = (kind)::text)))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "ck_quant_research_job_result_reference",
         table: "quant_research_job",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK ((((result_kind IS NULL) = (result_ref IS NULL)) AND ((status = 'succeeded'::qp_research_job_status) OR ((result_kind IS NULL) AND (result_ref IS NULL))) AND ((result_kind IS NULL) OR ((kind = 'dataset_build'::qp_research_job_kind) AND (result_kind = 'training_dataset'::qp_research_job_result_kind)) OR ((kind = 'model_train'::qp_research_job_kind) AND (result_kind = 'model_version'::qp_research_job_result_kind)) OR ((kind = 'backtest'::qp_research_job_kind) AND (result_kind = 'backtest_report'::qp_research_job_result_kind)) OR ((kind = 'cpcv_backtest'::qp_research_job_kind) AND (result_kind = 'backtest_path_set'::qp_research_job_result_kind)) OR ((kind = ANY (ARRAY['bias_table_fit'::qp_research_job_kind, 'model_calibration_fit'::qp_research_job_kind])) AND (result_kind = 'calibration_artifact'::qp_research_job_result_kind)) OR ((kind = 'feature_parity'::qp_research_job_kind) AND (result_kind = 'feature_parity_run'::qp_research_job_result_kind)) OR ((kind = 'trade_policy_fit'::qp_research_job_kind) AND (result_kind = 'trade_policy_artifact'::qp_research_job_result_kind)) OR ((kind = 'trade_policy_validation'::qp_research_job_kind) AND (result_kind = 'trade_policy_validation_run'::qp_research_job_result_kind)))))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "ck_quant_research_job_acting_role",
         table: "quant_research_job",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK (((acting_role)::text ~ '^[a-z][a-z0-9_]{0,63}$'::text))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "quant_source_slice_check",
         table: "quant_source_slice",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK (((window_start < window_end) AND (window_end <= pit_cutoff) AND ((reader_contract_version)::text ~ '^[A-Za-z0-9_.@-]{1,64}$'::text) AND ((schema_contract_version)::text ~ '^[A-Za-z0-9_.@-]{1,64}$'::text) AND (((status = 'materializing'::qp_source_slice_status) AND (manifest_uri IS NULL) AND (manifest_hash IS NULL) AND (manifest_json IS NULL) AND (failure_detail IS NULL) AND (completed_at IS NULL)) OR ((status = 'ready'::qp_source_slice_status) AND (manifest_uri IS NOT NULL) AND (manifest_hash IS NOT NULL) AND (manifest_json IS NOT NULL) AND (failure_detail IS NULL) AND (completed_at IS NOT NULL)) OR ((status = 'failed'::qp_source_slice_status) AND (manifest_uri IS NULL) AND (manifest_hash IS NULL) AND (manifest_json IS NULL) AND (failure_detail IS NOT NULL) AND (completed_at IS NOT NULL)))))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "ck_quant_settlement_redeem_evm_identity",
         table: "quant_settlement_redeem",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK ((((funder_address)::text ~ '^0x[0-9a-f]{40}$'::text) AND ((tx_hash IS NULL) OR ((tx_hash)::text ~ '^0x[0-9a-f]{64}$'::text))))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "ck_quant_trade_tape_block_cursor_contract_address",
         table: "quant_trade_tape_block_cursor",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK (((contract_address)::text ~ '^0x[0-9a-f]{40}$'::text))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "quant_trade_policy_trial_attempt_check",
         table: "quant_trade_policy_trial_attempt",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK (((attempt_ordinal >= 0) AND (length((candidate_id)::text) BETWEEN 1 AND 128) AND (octet_length((candidate_id)::text) = length((candidate_id)::text)) AND ((candidate_id)::text ~ '^[[:graph:]]+$'::text) AND (position(chr(92) in (candidate_id)::text) = 0) AND (position(chr(34) in (candidate_id)::text) = 0) AND ((fold_index IS NULL) OR (fold_index >= 0)) AND ((path_index IS NULL) OR (path_index >= 0)) AND ((evidence_row_count IS NULL) OR (evidence_row_count >= 0))))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "quant_trade_policy_trial_attempt_check1",
         table: "quant_trade_policy_trial_attempt",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK ((((scope = ANY (ARRAY['candidate'::qp_trade_policy_trial_scope, 'latency_stress'::qp_trade_policy_trial_scope])) AND (fold_index IS NULL) AND (path_index IS NULL)) OR ((scope = 'fold'::qp_trade_policy_trial_scope) AND (fold_index IS NOT NULL) AND (path_index IS NULL)) OR ((scope = 'path'::qp_trade_policy_trial_scope) AND (fold_index IS NULL) AND (path_index IS NOT NULL))))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "quant_trade_policy_trial_attempt_check2",
         table: "quant_trade_policy_trial_attempt",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK ((((status = 'succeeded'::qp_trade_policy_trial_status) AND (metrics_json IS NOT NULL) AND (failure_detail IS NULL) AND (evidence_uri IS NOT NULL) AND (evidence_hash IS NOT NULL) AND (evidence_row_count IS NOT NULL)) OR ((status = ANY (ARRAY['failed'::qp_trade_policy_trial_status, 'cancelled'::qp_trade_policy_trial_status])) AND (metrics_json IS NULL) AND ((length(btrim(failure_detail)) >= 1) AND (length(btrim(failure_detail)) <= 8192)))))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "quant_trade_policy_trial_attempt_check3",
         table: "quant_trade_policy_trial_attempt",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK ((((evidence_uri IS NULL) AND (evidence_hash IS NULL) AND (evidence_row_count IS NULL)) OR ((evidence_uri IS NOT NULL) AND (evidence_hash IS NOT NULL) AND (evidence_row_count IS NOT NULL))))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "quant_trade_policy_validation_check",
         table: "quant_trade_policy_validation",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK (((total_rows >= 0) AND (passed_rows >= 0) AND (failed_rows >= 0) AND ((passed_rows + failed_rows) <= total_rows) AND ((length(btrim(reason)) >= 1) AND (length(btrim(reason)) <= 512)) AND (((status = 'running'::qp_trade_policy_validation_status) AND (validation_hash IS NULL) AND (failure_detail IS NULL) AND (completed_at IS NULL)) OR ((status = 'succeeded'::qp_trade_policy_validation_status) AND (validation_hash IS NOT NULL) AND (failure_detail IS NULL) AND (completed_at IS NOT NULL) AND (failed_rows = 0) AND (passed_rows = total_rows) AND (total_rows > 0)) OR ((status = ANY (ARRAY['failed'::qp_trade_policy_validation_status, 'cancelled'::qp_trade_policy_validation_status])) AND (validation_hash IS NOT NULL) AND (failure_detail IS NOT NULL) AND (completed_at IS NOT NULL)))))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "quant_trade_policy_validation_row_check",
         table: "quant_trade_policy_validation_row",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK (((row_ordinal >= 0) AND (record_key <> ''::text) AND ((evidence_kind)::text = ANY (ARRAY[('observation_eligibility'::character varying)::text, ('fills'::character varying)::text, ('candidate_trials'::character varying)::text, ('cohort_trials'::character varying)::text, ('cpcv_paths'::character varying)::text, ('coverage_gaps'::character varying)::text, ('statistical_summaries'::character varying)::text])) AND ((expected_row_hash IS NOT NULL) OR (actual_row_hash IS NOT NULL)) AND ((diagnostic_kind IS NULL) OR ((diagnostic_kind)::text ~ '^[a-z][a-z0-9_]{0,127}$'::text)) AND ((passed AND (expected_row_hash = actual_row_hash) AND (diagnostic_kind IS NULL) AND (detail IS NULL)) OR ((NOT passed) AND (diagnostic_kind IS NOT NULL) AND (detail IS NOT NULL)))))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "quant_training_dataset_check",
         table: "quant_training_dataset",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK ((((status <> ALL (ARRAY['planned'::qp_training_dataset_status, 'building'::qp_training_dataset_status])) OR ((feature_schema_version IS NOT NULL) AND (sample_sources IS NOT NULL) AND (feature_schema_hash IS NULL) AND (factor_schema_hash IS NULL) AND (label_schema_hash IS NULL) AND (dataset_hash IS NULL) AND (manifest_hash IS NULL) AND (manifest_json IS NULL) AND (artifact_bytes_hash IS NULL) AND (parquet_uri IS NULL) AND (sample_count IS NULL) AND (coverage_json IS NULL) AND (completed_at IS NULL))) AND ((status <> ALL (ARRAY['ready'::qp_training_dataset_status, 'insufficient_labels'::qp_training_dataset_status])) OR ((feature_schema_version IS NOT NULL) AND (sample_sources IS NOT NULL) AND (feature_schema_hash IS NOT NULL) AND (factor_schema_hash IS NOT NULL) AND (label_schema_hash IS NOT NULL) AND (dataset_hash IS NOT NULL) AND (manifest_hash IS NOT NULL) AND (manifest_json IS NOT NULL) AND (artifact_bytes_hash IS NOT NULL) AND (parquet_uri IS NOT NULL) AND (sample_count IS NOT NULL) AND (sample_count >= 0) AND (coverage_json IS NOT NULL) AND (completed_at IS NOT NULL))) AND ((status <> 'failed'::qp_training_dataset_status) OR (completed_at IS NOT NULL))))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "ck_policy_approval_expiry",
         table: "policy_approval",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK (((expires_at IS NULL) OR (expires_at > decided_at)))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "ck_policy_approval_reason",
         table: "policy_approval",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK (((length(reason) >= 1) AND (length(reason) <= 2048)))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "ck_policy_approval_validation_subject",
         table: "policy_approval",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK ((((decision <> 'approved'::qp_policy_approval_decision) OR (validation_subject IS NOT NULL)) AND ((validation_subject IS NULL) OR ((jsonb_typeof(validation_subject) = 'object'::text) AND (validation_subject ?& ARRAY['base_generation'::text, 'base_revision_vector'::text, 'candidate_bundle_hash'::text])))))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "ck_schema_migration_audit_algorithm",
         table: "schema_migration_audit",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK (((checksum_algorithm)::text = 'blake3-256'::text))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "ck_schema_migration_audit_artifact_length",
         table: "schema_migration_audit",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK ((artifact_length > 0))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "ck_schema_migration_audit_checksum",
         table: "schema_migration_audit",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK ((checksum ~ '^[0-9a-f]{64}$'::text))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "ck_system_bootstrap_transition_contract_version",
         table: "system_bootstrap_transition",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK ((bootstrap_contract_version = 1))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "ck_system_bootstrap_transition_revision",
         table: "system_bootstrap_transition",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK ((state_revision > 0))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "ck_policy_profile_artifact_identity",
         table: "policy_profile_artifact",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK (((schema_version = 1) AND (content_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND ((document ->> 'profile_kind'::text) = (kind)::text)))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "ck_research_profile_artifact_identity",
         table: "research_profile_artifact",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK (((version > 0) AND (research_profile_id ~ '^[a-z0-9_]+$'::text) AND (content_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (research_profile_artifact_id = (((('rpa:'::text || research_profile_id) || ':'::text) || version::text) || ':'::text) || content_hash)))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "ck_system_production_baseline_singleton",
         table: "system_production_baseline",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK ((production_baseline_id = '1f0e1c5e-0000-5000-8000-000000000001'::uuid))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "ck_system_production_baseline_hashes",
         table: "system_production_baseline",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK (((postgres_schema_fingerprint ~ '^blake3:[0-9a-f]{64}$'::text) AND (clickhouse_schema_fingerprint ~ '^blake3:[0-9a-f]{64}$'::text) AND (policy_bundle_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (lifecycle_policy_hash ~ '^blake3:[0-9a-f]{64}$'::text)))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "ck_system_production_baseline_generation",
         table: "system_production_baseline",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK ((policy_bundle_generation > 0))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "ck_system_production_evidence_identity",
         table: "system_production_evidence",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK (((policy_bundle_generation > 0) AND (evidence_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (postgres_schema_fingerprint ~ '^blake3:[0-9a-f]{64}$'::text) AND (clickhouse_schema_fingerprint ~ '^blake3:[0-9a-f]{64}$'::text) AND (policy_bundle_hash ~ '^blake3:[0-9a-f]{64}$'::text)))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "ck_system_runtime_state_contract_version",
         table: "system_runtime_state",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK ((bootstrap_contract_version = 1))",
     },
-    v1::ConstraintSpec {
+    ConstraintSpec {
         name: "ck_system_runtime_state_revision",
         table: "system_runtime_state",
-        kind: v1::ConstraintKind::Check,
+        kind: ConstraintKind::Check,
         definition: "CHECK ((state_revision >= 0))",
     },
 ];

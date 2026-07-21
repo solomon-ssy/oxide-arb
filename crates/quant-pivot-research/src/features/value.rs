@@ -3,16 +3,15 @@
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
-pub use quant_pivot_models::{
-    enums::feature::{EvidenceSourceKind, FeatureValueKind},
+pub(super) use quant_pivot_models::{
+    enums::{
+        feature::{EvidenceSourceKind, FeatureValueKind},
+        quant::DataQualityStatus,
+    },
     types::{
         DomainFeatureSlice, EvidenceSourceRef, FeatureCell, FeatureCellState, FeatureStaleness,
-        FeatureValue, NullReason, stable_name::FeatureName,
+        FeatureValue, MarketId, NullReason, SchemaVersion, TokenId, stable_name::FeatureName,
     },
-};
-use quant_pivot_models::{
-    enums::quant::DataQualityStatus,
-    types::{MarketId, SchemaVersion, TokenId},
 };
 use serde::{Deserialize, Serialize};
 

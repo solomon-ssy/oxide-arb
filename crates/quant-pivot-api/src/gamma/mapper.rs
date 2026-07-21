@@ -4,9 +4,8 @@
 //! so downstream persistence and the in-memory registry share one canonical
 //! normalized representation.
 
-use crate::gamma::CatalogMarketReject;
+use std::collections::HashMap;
 
-use super::catalog::{CatalogEvent, CatalogMarket, FilteredPrelistingMarket, RejectedMarket};
 use chrono::{DateTime, Utc};
 use quant_pivot_error::market::MarketError;
 use quant_pivot_models::{
@@ -14,7 +13,9 @@ use quant_pivot_models::{
     enums::common::CategorySet,
     types::{EventId, MarketId, TokenId},
 };
-use std::collections::HashMap;
+
+use super::catalog::{CatalogEvent, CatalogMarket, FilteredPrelistingMarket, RejectedMarket};
+use crate::gamma::CatalogMarketReject;
 
 /// Source timestamps retained separately from the live registry's resolved
 /// clock fields so the durable ledger can distinguish source time from a
@@ -215,12 +216,13 @@ impl From<&CatalogMarket> for TokenInfoPair {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::gamma::wire::WireEvent;
     use quant_pivot_models::{
-        domain::UpsertMarket,
+        domain::market::UpsertMarket,
         enums::{common::MarketCategory, market::MarketStatus},
     };
+
+    use super::*;
+    use crate::gamma::wire::WireEvent;
 
     fn batch_from(json: &str) -> GammaCatalogBatch {
         let wire: WireEvent = serde_json::from_str(json).expect("wire event");

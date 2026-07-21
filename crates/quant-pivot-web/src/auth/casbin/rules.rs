@@ -8,13 +8,14 @@
 //!
 //! [`PermChecker`]: super::checker::PermChecker
 
+use quant_pivot_models::enums::rbac::{Operation, ResourceType};
+
 use crate::{
     auth::casbin::{checker::SUPER_ADMIN_ROLE, service::CasbinService},
     error::WebError,
     extractors::ActorRoles,
     jwt::Claims,
 };
-use quant_pivot_models::enums::rbac::{Operation, ResourceType};
 
 /// The result of a successful authorization check.
 ///
@@ -45,8 +46,8 @@ pub enum Rule {
     /// `(resource, operation)` permission. The resolved role is returned for the
     /// audit envelope.
     ///
-    /// Defined and evaluated here in Phase 6.4; the governance routes that use
-    /// it land in Phase 6.5.
+    /// Defined and evaluated centrally; governance routes consume the resolved
+    /// actor context.
     ActingRoleGoverned(ResourceType, Operation),
 
     /// A governed, audited mutation whose concrete operation is not known until
@@ -165,7 +166,7 @@ impl Rule {
 mod tests {
     use chrono::Utc;
     use quant_pivot_models::{
-        domain::RoleInfo,
+        domain::rbac::RoleInfo,
         enums::rbac::{Operation, ResourceType, RoleKind, RoleStatus},
         types::RoleId,
     };

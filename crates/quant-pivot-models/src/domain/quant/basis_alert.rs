@@ -1,10 +1,10 @@
-//! Basis-cross-check exceedance alert persistence DTOs (11.2.2 remediation R6).
+//! Basis-cross-check exceedance alert persistence DTOs.
 //!
 //! One row per `(market, as_of)` where `domain.crypto.basis_vs_resolution_source`
 //! exceeded the governed `domain.crypto.cross_check.max_basis_bps` threshold —
 //! the feature-source (Binance) and the settlement oracle (Chainlink) disagreed
 //! enough to warrant operator review. The row is append-only except for the
-//! single governed `acknowledge` mutation (R6 review-queue closed loop): an
+//! single governed `acknowledge` mutation, forming a review-queue closed loop: an
 //! operator marks an alert as triaged, recording who and when.
 
 use chrono::{DateTime, Utc};

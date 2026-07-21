@@ -1,4 +1,4 @@
-//! Venue account capital subsystem bundle (Phase 4).
+//! Venue account capital subsystem bundle.
 //!
 //! Assembled at boot: loads the keystore, authenticates the CLOB client (the
 //! private-key-derived L2 read credential), and wires the Data API +

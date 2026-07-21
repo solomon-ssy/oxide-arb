@@ -1,14 +1,17 @@
 use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    domain::{NewOperationLog, OrderIntentInfo, RecommendationInfo},
+    domain::{
+        governance::NewOperationLog,
+        quant::{OrderIntentInfo, RecommendationInfo},
+    },
     types::{RecommendationId, RecommendationReportId},
 };
 
 /// Recommendation access + per-recommendation TTL expiry.
 ///
 /// Recommendations are inserted only as part of the report-creation transaction
-/// ([`super::RecommendationReportRepository::create_report`]); there is no
+/// (the recommendation-report repository's atomic create operation); there is no
 /// standalone batch insert. Their lifecycle transition is per-recommendation:
 /// each expires at its own data-driven `valid_until` (the report rolls up to
 /// `Expired` once all its recommendations are terminal).
@@ -67,7 +70,7 @@ pub trait RecommendationRepository: Send + Sync {
     ) -> Result<Vec<RecommendationInfo>, StorageError>;
 
     /// Returns `true` when execution ledger truth is still ambiguous and final
-    /// attribution must defer (05.7).
+    /// attribution must defer.
     async fn recommendation_blocks_final_attribution(
         &self,
         recommendation_id: &RecommendationId,

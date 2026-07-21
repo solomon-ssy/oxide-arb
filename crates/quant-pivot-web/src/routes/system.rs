@@ -1,12 +1,15 @@
-//! System status + quant runtime mode endpoints (Phase 0).
+//! System status + quant runtime mode endpoints.
 
-use actix_web::{http::Method, web};
+use actix_web::{http::Method, web::Data};
 use quant_pivot_models::{
     domain::{
-        ActionEligibilityDecision, ActionEligibilityView, ActivateBootstrapRequest, BootstrapView,
-        CapabilityView, ExecutionRecoveryView, HealthReport, KillSwitchView,
-        QuantModeTransitionReport, QuantModeView, SetKillSwitchCommand, SetKillSwitchRequest,
-        SwitchQuantModeRequest, SystemStatusView,
+        api::{
+            ActionEligibilityDecision, ActionEligibilityView, ActivateBootstrapRequest,
+            BootstrapView, CapabilityView, ExecutionRecoveryView, QuantModeView,
+            SetKillSwitchRequest, SwitchQuantModeRequest, SystemStatusView,
+        },
+        governance::{HealthReport, KillSwitchView},
+        ports::{QuantModeTransitionReport, SetKillSwitchCommand},
     },
     enums::{
         execution::KillSwitchState,
@@ -89,7 +92,7 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
     ]
 }
 
-pub async fn status(state: web::Data<AppState>) -> Result<WebResponse<SystemStatusView>, WebError> {
+pub async fn status(state: Data<AppState>) -> Result<WebResponse<SystemStatusView>, WebError> {
     let runtime = state.control.system_status();
     let capabilities = state.bootstrap.capabilities(&runtime).await?;
     Ok(WebResponse::ok(SystemStatusView {
@@ -100,7 +103,7 @@ pub async fn status(state: web::Data<AppState>) -> Result<WebResponse<SystemStat
 }
 
 pub async fn action_eligibility(
-    state: web::Data<AppState>,
+    state: Data<AppState>,
     actor: AuthedActor,
 ) -> Result<WebResponse<ActionEligibilityView>, WebError> {
     let runtime = state.control.system_status();
@@ -153,7 +156,7 @@ const fn action_decision(
 }
 
 pub async fn activate_bootstrap(
-    state: web::Data<AppState>,
+    state: Data<AppState>,
     actor: AuthedActor,
     ActingRole(acting_role): ActingRole,
     op_ctx: OperationCtx,
@@ -174,26 +177,24 @@ pub async fn activate_bootstrap(
     Ok(WebResponse::ok(view))
 }
 
-pub async fn health(state: web::Data<AppState>) -> Result<WebResponse<HealthReport>, WebError> {
+pub async fn health(state: Data<AppState>) -> Result<WebResponse<HealthReport>, WebError> {
     Ok(WebResponse::ok(state.control.health().await))
 }
 
 pub async fn execution_recovery(
-    state: web::Data<AppState>,
+    state: Data<AppState>,
 ) -> Result<WebResponse<ExecutionRecoveryView>, WebError> {
     Ok(WebResponse::ok(state.execution_recovery.view().await?))
 }
 
-pub async fn quant_mode(
-    state: web::Data<AppState>,
-) -> Result<WebResponse<QuantModeView>, WebError> {
+pub async fn quant_mode(state: Data<AppState>) -> Result<WebResponse<QuantModeView>, WebError> {
     Ok(WebResponse::ok(QuantModeView {
         mode: state.control.quant_runtime_mode(),
     }))
 }
 
 pub async fn switch_quant_mode(
-    state: web::Data<AppState>,
+    state: Data<AppState>,
     actor: AuthedActor,
     _acting_role: ActingRole,
     op_ctx: OperationCtx,
@@ -220,7 +221,7 @@ pub async fn switch_quant_mode(
 }
 
 pub async fn kill_switch_status(
-    state: web::Data<AppState>,
+    state: Data<AppState>,
 ) -> Result<WebResponse<KillSwitchView>, WebError> {
     Ok(WebResponse::ok(state.kill_switch.view()))
 }
@@ -244,7 +245,7 @@ const fn required_kill_switch_op(current: KillSwitchState, target: KillSwitchSta
 }
 
 pub async fn set_kill_switch(
-    state: web::Data<AppState>,
+    state: Data<AppState>,
     actor: AuthedActor,
     acting_role: ActingRole,
     op_ctx: OperationCtx,

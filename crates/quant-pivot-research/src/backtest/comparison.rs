@@ -1,19 +1,21 @@
-//! Pairwise model comparison over a shared backtest window (Phase 3.6, §5.6).
+//! Pairwise model comparison over a shared backtest window.
 //!
 //! Given a baseline and a candidate model replayed over the **same** PIT
 //! cross-sections, [`compare_reports`] computes the head-to-head divergence the
-//! Admin surface (and Phase 04 promotion gate) needs: the rank-IC / hit-rate /
+//! Admin surface (and promotion gate) needs: the rank-IC / hit-rate /
 //! realized-PnL deltas, the per-`(as_of, market, token)` composite-score
 //! correlation and side-disagreement rate, and a per-category rank-IC diff. The
 //! report is content-addressed so a comparison is reproducible and auditable.
 
+use std::collections::BTreeMap;
+
+use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     enums::common::MarketCategory,
     types::{ContentHash, ModelVersionId, backtest::CategoryRankIcDelta},
 };
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 
 use crate::{
     backtest::{BacktestRunResult, SampleOutcome},
@@ -21,7 +23,6 @@ use crate::{
     precision::RESEARCH_DECIMAL_SCALE,
     stats,
 };
-use quant_pivot_error::QuantResult;
 
 /// Head-to-head comparison of a candidate against a baseline over one window.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -212,7 +213,6 @@ impl SampleKey {
 
 #[cfg(test)]
 mod tests {
-    use super::compare_reports;
     use chrono::{TimeZone, Utc};
     use quant_pivot_models::{
         enums::{
@@ -228,6 +228,7 @@ mod tests {
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
 
+    use super::compare_reports;
     use crate::{
         backtest::{BacktestReport, BacktestRunResult, SampleOutcome},
         test_support::content_hash as hash,

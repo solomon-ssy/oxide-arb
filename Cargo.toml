@@ -3,7 +3,6 @@ resolver = "2"
 members = [
   "crates/quant-pivot-error",
   "crates/quant-pivot-macros",
-  "crates/quant-pivot-sql-contract",
   "crates/quant-pivot-models",
   "crates/quant-pivot-migration",
   "crates/quant-pivot-api",
@@ -14,7 +13,7 @@ members = [
   "crates/quant-pivot-web",
   "crates/quant-pivot-bin",
   "crates/quant-pivot-bench",
-  "crates/quant-pivot-test-support",
+  "crates/quant-pivot-system-tests",
   "crates/quant-pivot-xtask",
 ]
 
@@ -103,7 +102,7 @@ uuid = { version = "1", features = ["v4", "v7", "serde"] }
 tracing = "0.1"
 
 # Configuration loading (TOML + env vars)
-config = { version = "0.15", features = ["toml"] }
+config-rs = { package = "config", version = "0.15", features = ["toml"] }
 
 # Async trait (still needed for dyn trait objects)
 async-trait = "0.1"
@@ -149,7 +148,7 @@ proc-macro2 = "1"
 linkme = "0.3"
 paste = "1"
 
-# ── Phase 1: Data Access Layer Dependencies ──────────────────────────────────
+# ── Venue and market-data adapters ───────────────────────────────────────────
 
 # Polymarket SDK (official v2 — CLOB, WS, Gamma, CTF, signing)
 polymarket_client_sdk_v2 = { version = "0.6", features = [
@@ -194,11 +193,9 @@ governor = "0.10"
 
 # Security
 zeroize = { version = "1", features = ["derive"] }
-libc = "0.2"
 base64 = "0.22"
 hex = "0.4"
 blake3 = "1"
-secrecy = { version = "0.10", features = ["serde"] }
 chainlink-data-streams-report = "1.2.2"
 chainlink-data-streams-sdk = { version = "1.2.2", default-features = false, features = ["rest", "websocket", "tracing"] }
 
@@ -208,7 +205,7 @@ url = "2"
 # HTTP mocking (integration tests)
 wiremock = "0.6"
 
-# ── Phase 2: Persistence Layer Dependencies ──────────────────────────────────
+# ── Persistence and observability ────────────────────────────────────────────
 
 # Redis connection pool + client
 deadpool-redis = { version = "0.23", features = ["rt_tokio_1"] }
@@ -230,7 +227,7 @@ teloxide = { version = "0.17", features = ["macros"] }
 testcontainers = { version = "0.27", features = ["http_wait"] }
 testcontainers-modules = { version = "0.15", features = ["postgres", "redis"] }
 
-# ── Phase 3: Research / ML Stack (feature-gated in quant-pivot-research) ──────
+# ── Research / ML stack (feature-gated in quant-pivot-research) ───────────────
 #
 # `stats` (ndarray/rayon/…) are base deps on `quant-pivot-research`. Polars/Arrow
 # are gated behind `dataframe` on that crate; `quant-pivot-core` enables
@@ -258,15 +255,15 @@ smartcore = "0.5"
 # Pinned to the 1.x `serialize`/`deserialize` API that smartcore 0.5 uses.
 bincode = "1.3"
 
-# lp-solver: portfolio LP/MILP optimization (good_lp modeling layer).
-# `microlp` is the pure-Rust default backend (no native dependency, ships in
-# every build); the optional `highs` backend (native) is enabled separately via
+# Portfolio LP/MILP optimization (`good_lp` modeling layer). `microlp` is the
+# pure-Rust baseline backend and ships in every build; the optional native
+# `highs` backend is enabled separately via
 # the `lp-solver-highs` feature on quant-pivot-research.
 good_lp = { version = "1.15", default-features = false }
 
-# ── Phase 6: Web Layer + RBAC Dependencies ───────────────────────────────────
+# ── Web layer and RBAC ────────────────────────────────────────────────────────
 
-# HTTP server stack (actix-web 4) — wired in later sub-phases
+# HTTP server stack
 actix-web = "4"
 actix-cors = "0.7"
 actix-files = "0.6"
@@ -279,9 +276,6 @@ casbin = { version = "2", features = ["runtime-tokio"] }
 # JWT access/refresh tokens: HS256 with an explicit 256-bit signing key.
 jsonwebtoken = { version = "10", default-features = false, features = ["rust_crypto"] }
 
-# actix runtime (integration tests: #[actix_web::test])
-actix-rt = "2"
-
 # Password hashing (argon2id) — shared by seed + web login
 argon2 = "0.5"
 rand_core_06 = { package = "rand_core", version = "0.6", features = ["getrandom"] }
@@ -293,6 +287,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # Property-based / snapshot testing
 insta = { version = "1.42", features = ["json"] }
+proptest = "1.11"
 
 # Serialization helpers
 serde_repr = "0.1.20"
@@ -305,23 +300,19 @@ regex = "1.11"
 rand = "0.10"
 
 # actix integration tests (quant-pivot-web)
-actix-http = { version = "3", features = ["ws"] }
-actix-test = "0.1"
 
 # ── Internal Crates ──────────────────────────────────────────────────────────
 
 quant-pivot-error = { path = "crates/quant-pivot-error" }
 quant-pivot-macros = { path = "crates/quant-pivot-macros" }
-quant-pivot-sql-contract = { path = "crates/quant-pivot-sql-contract" }
 quant-pivot-models = { path = "crates/quant-pivot-models" }
 quant-pivot-migration = { path = "crates/quant-pivot-migration" }
 quant-pivot-api = { path = "crates/quant-pivot-api" }
 quant-pivot-storage = { path = "crates/quant-pivot-storage" }
+quant-pivot-system-tests = { path = "crates/quant-pivot-system-tests" }
 quant-pivot-repository = { path = "crates/quant-pivot-repository" }
-quant-pivot-core = { path = "crates/quant-pivot-core" }
-quant-pivot-research = { path = "crates/quant-pivot-research" }
-quant-pivot-test-support = { path = "crates/quant-pivot-test-support" }
-quant-pivot-bench = { path = "crates/quant-pivot-bench" }
+quant-pivot-core = { path = "crates/quant-pivot-core", default-features = false }
+quant-pivot-research = { path = "crates/quant-pivot-research", default-features = false }
 quant-pivot-web = { path = "crates/quant-pivot-web" }
 
 # Upstream 2.0.1 is archived with an unmerged fix for Rust E0365 future

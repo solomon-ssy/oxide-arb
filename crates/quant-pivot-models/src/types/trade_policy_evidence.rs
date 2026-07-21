@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::{
     enums::{common::Side, execution::ExitReason, quant::OutcomeSide},
@@ -147,7 +148,7 @@ pub struct TradePolicyFillEvidenceRow {
     pub fee: Usd,
     pub cash_delta: Decimal,
     pub fee_schedule_hash: Option<ContentHash>,
-    pub stream_session_id: Option<uuid::Uuid>,
+    pub stream_session_id: Option<Uuid>,
     pub token_sequence: Option<u64>,
     pub source_event_hash: Option<ContentHash>,
 }

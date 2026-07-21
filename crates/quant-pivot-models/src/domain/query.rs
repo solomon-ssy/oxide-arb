@@ -1,17 +1,18 @@
 //! Cross-resource read-filter domain types.
 //!
 //! These are the canonical read-query primitives shared by the API contract
-//! layer (`domain::api` `*WindowQuery::resolve()` produces them) and the
+//! layer (`domain::api` `*WindowQuery::resolve` produces them) and the
 //! repository read methods (evidence timeseries, analytics) that consume them.
 //! They live in `quant-pivot-models` — the lowest layer — so the API contract can
 //! resolve into them without depending on `quant-pivot-repository`.
+
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 
 use crate::{
     enums::{common::MarketCategory, quant::QuantRuntimeMode},
     types::{EventId, MarketId, TokenId},
 };
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
 
 /// Windowed trade aggregation scope for analytics endpoints.
 #[derive(Debug, Clone, Copy)]

@@ -2,8 +2,14 @@
 
 use std::collections::BTreeMap;
 
+use chrono::{DateTime, Utc};
+use quant_pivot_error::{QuantResult, research::ResearchError};
+use rust_decimal::Decimal;
+use sea_orm::FromJsonQueryResult;
+use serde::{Deserialize, Deserializer, Serialize, de::Error};
+
 use crate::{
-    domain::DecisionBoundary,
+    domain::data_plane::DecisionBoundary,
     enums::{
         catalog::CatalogTimestampQuality,
         common::MarketCategory,
@@ -18,11 +24,6 @@ use crate::{
         stable_name::FeatureName,
     },
 };
-use chrono::{DateTime, Utc};
-use quant_pivot_error::{QuantResult, research::ResearchError};
-use rust_decimal::Decimal;
-use sea_orm::FromJsonQueryResult;
-use serde::{Deserialize, Serialize};
 
 /// Why a feature value is absent. Missing values are never silently zero.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -228,7 +229,7 @@ pub struct FeatureVectorPayload {
 impl<'de> Deserialize<'de> for FeatureVectorPayload {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
-        D: serde::Deserializer<'de>,
+        D: Deserializer<'de>,
     {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
@@ -242,7 +243,7 @@ impl<'de> Deserialize<'de> for FeatureVectorPayload {
             generic: wire.generic,
             domain: wire.domain,
         };
-        payload.validate().map_err(serde::de::Error::custom)?;
+        payload.validate().map_err(Error::custom)?;
         Ok(payload)
     }
 }
@@ -424,9 +425,8 @@ impl FeatureParityDetail {
 
 #[cfg(test)]
 mod tests {
-    use crate::enums::quant::{FeatureParityEventStatus, FeatureParityStage};
-
     use super::{FeatureCell, FeatureCellState, FeatureParityDetail, FeatureParityDetailSource};
+    use crate::enums::quant::{FeatureParityEventStatus, FeatureParityStage};
 
     #[test]
     fn feature_cell_validation_rejects_cross_field_corruption() {

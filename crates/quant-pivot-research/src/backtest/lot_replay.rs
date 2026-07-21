@@ -1,5 +1,4 @@
-//! [`LotReplayBacktester`]: the deterministic lot-level Sell replay loop
-//! (Phase 11.5.1).
+//! [`LotReplayBacktester`]: the deterministic lot-level Sell replay loop.
 //!
 //! Symmetric to [`crate::backtest::PortfolioReplayBacktester`], but the
 //! atomic unit is one held lot instead of one `as_of` cross-section tick.
@@ -38,6 +37,7 @@
 //! only reads that frozen label back while the simulated path remains
 //! isomorphic to the historical remaining path.
 
+use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::types::PositionId;
 use rust_decimal::Decimal;
@@ -70,7 +70,7 @@ pub struct LotOutcome {
     /// The lot this outcome replays.
     pub position_id: PositionId,
     /// First decision time (timeline / DSR period anchor).
-    pub decision_at: chrono::DateTime<chrono::Utc>,
+    pub decision_at: DateTime<Utc>,
     /// This lot's contribution to the reconstructed path's return series (a
     /// fractional return): the sum over every on-path incremental scale-out of
     /// `(sold_shares / historical_remaining) × (frozen hold_vs_exit_alpha_bps / 10_000)`.
@@ -208,9 +208,7 @@ fn replay_lot(
     })
 }
 
-fn replay_denominator(
-    sequence: &LotDecisionSequence,
-) -> QuantResult<(chrono::DateTime<chrono::Utc>, Decimal)> {
+fn replay_denominator(sequence: &LotDecisionSequence) -> QuantResult<(DateTime<Utc>, Decimal)> {
     let Some(first) = sequence.decisions.first() else {
         return Err(ResearchError::ValidationMethodology {
             detail: format!(
@@ -428,6 +426,21 @@ fn selected_label_value(example: &TrainingExample, label: &LabelSelector) -> Opt
 
 #[cfg(test)]
 mod tests {
+    use std::{collections::BTreeMap, sync::Mutex, vec::IntoIter};
+
+    use chrono::{DateTime, TimeZone, Utc};
+    use quant_pivot_error::QuantResult;
+    use quant_pivot_models::{
+        domain::data_plane::DecisionClock,
+        enums::{common::MarketCategory, quant::DataQualityStatus},
+        types::{
+            Bps, ContentHash, MarketId, ModelVersionId, OrderIntentId, PositionId, Price,
+            Probability, SchemaVersion, Shares, TokenId, TrainingExampleId, TrainingSampleSource,
+        },
+    };
+    use rust_decimal::Decimal;
+    use rust_decimal_macros::dec;
+
     use super::{
         LotBacktestInputs, LotBacktester, LotDecisionSequence, LotReplayBacktester,
         SellNullBaseline, replay_lot_null_baseline,
@@ -442,19 +455,6 @@ mod tests {
             HOLD_VS_EXIT_ALPHA_BPS, LotTrainingContext, TrainingExample, TrainingLabel, fixtures,
         },
     };
-    use chrono::{DateTime, TimeZone, Utc};
-    use quant_pivot_error::QuantResult;
-    use quant_pivot_models::{
-        domain::DecisionClock,
-        enums::{common::MarketCategory, quant::DataQualityStatus},
-        types::{
-            Bps, ContentHash, MarketId, ModelVersionId, OrderIntentId, PositionId, Price,
-            Probability, SchemaVersion, Shares, TokenId, TrainingExampleId, TrainingSampleSource,
-        },
-    };
-    use rust_decimal::Decimal;
-    use rust_decimal_macros::dec;
-    use std::{collections::BTreeMap, sync::Mutex, vec::IntoIter};
 
     fn ts(secs: i64) -> DateTime<Utc> {
         Utc.timestamp_opt(1_700_000_000 + secs, 0).unwrap()

@@ -1,4 +1,4 @@
-//! Shared calibration-split primitives (Phase 11.3 §2/§4).
+//! Shared calibration-split primitives.
 //!
 //! Purge (disjoint-window) and embargo checks every empirical calibration fit
 //! (`BiasTableFitService`'s `market_price_bias` fit and
@@ -11,16 +11,16 @@
 //! training-dataset window (purge), and — when calibrating a specific
 //! model version — must start no earlier than that model's own training
 //! window end plus a governed embargo gap (drops the serially-correlated
-//! buffer immediately after training). Phase 11.5 upgrades this to full
-//! combinatorial purged CV; the interface here is designed to absorb that
-//! upgrade without a call-site rewrite.
+//! buffer immediately after training). Full combinatorial purged CV uses a
+//! separate validation path; this primitive remains the single-window
+//! calibration guard.
 
 use std::collections::HashSet;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
-    domain::{TrainingDatasetListQuery, query::TimeWindow},
+    domain::{api::TrainingDatasetListQuery, query::TimeWindow},
     enums::quant::TrainingDatasetStatus,
     hashing::CanonicalDigest,
     types::ContentHash,
@@ -112,7 +112,7 @@ pub fn assert_embargoed_after(
     embargo_secs: i64,
     fit_label: &str,
 ) -> QuantResult<()> {
-    let required_start = reference_window.to + chrono::Duration::seconds(embargo_secs.max(0));
+    let required_start = reference_window.to + Duration::seconds(embargo_secs.max(0));
     if window.from < required_start {
         return Err(QuantError::from(ResearchError::DatasetBuild {
             detail: format!(

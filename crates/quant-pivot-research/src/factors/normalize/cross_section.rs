@@ -389,12 +389,12 @@ fn resolve_param(over: Option<&DecimalValue>, default: &DecimalValue) -> Decimal
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        CrossSectionalNormalizer, MinMaxNormalizer, RankNormalizer, WinsorizedZScoreNormalizer,
-    };
     use quant_pivot_models::enums::factor::{FactorIndeterminateReason, NormalizationSource};
     use rust_decimal::Decimal;
 
+    use super::{
+        CrossSectionalNormalizer, MinMaxNormalizer, RankNormalizer, WinsorizedZScoreNormalizer,
+    };
     use crate::factors::{
         normalize::{NormalizationStats, NormalizedFactor, RawFactorColumn},
         value::FactorName,

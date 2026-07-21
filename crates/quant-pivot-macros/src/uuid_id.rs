@@ -16,7 +16,8 @@
 use proc_macro2::TokenStream;
 use quote::quote;
 use syn::{
-    Data, DeriveInput, Error, Fields, ImplGenerics, Result, TypeGenerics, Visibility, WhereClause,
+    Data, DeriveInput, Error, Fields, Ident, ImplGenerics, Result, TypeGenerics, Visibility,
+    WhereClause,
 };
 
 pub fn expand(input: TokenStream) -> Result<TokenStream> {
@@ -45,7 +46,7 @@ pub fn expand(input: TokenStream) -> Result<TokenStream> {
 }
 
 fn expand_json_schema(
-    name: &syn::Ident,
+    name: &Ident,
     impl_generics: &ImplGenerics<'_>,
     ty_generics: &TypeGenerics<'_>,
     where_clause: Option<&WhereClause>,
@@ -73,7 +74,7 @@ fn expand_json_schema(
 }
 
 fn expand_core(
-    name: &syn::Ident,
+    name: &Ident,
     vis: &Visibility,
     impl_generics: &ImplGenerics<'_>,
     ty_generics: &TypeGenerics<'_>,
@@ -153,7 +154,7 @@ fn expand_core(
 }
 
 fn expand_serde(
-    name: &syn::Ident,
+    name: &Ident,
     impl_generics: &ImplGenerics<'_>,
     ty_generics: &TypeGenerics<'_>,
     where_clause: Option<&WhereClause>,
@@ -181,7 +182,7 @@ fn expand_serde(
 }
 
 fn expand_seaorm(
-    name: &syn::Ident,
+    name: &Ident,
     impl_generics: &ImplGenerics<'_>,
     ty_generics: &TypeGenerics<'_>,
     where_clause: Option<&WhereClause>,
@@ -244,7 +245,7 @@ fn expand_seaorm(
 }
 
 fn expand_seaorm_try_getable(
-    name: &syn::Ident,
+    name: &Ident,
     impl_generics: &ImplGenerics<'_>,
     ty_generics: &TypeGenerics<'_>,
     where_clause: Option<&WhereClause>,

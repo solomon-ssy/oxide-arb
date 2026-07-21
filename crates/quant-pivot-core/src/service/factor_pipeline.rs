@@ -9,18 +9,16 @@
 //! present-only long-format facts. Rejected markets are observable but never
 //! reach persistence, facts, or the downstream model plane.
 //!
-//! `model_run_id` is minted up front by the online round and threaded through;
-//! the `quant_model_run` row lifecycle (create / finalize) lands in 3.4, which
-//! also adds the factor-value foreign key. This service is the callable unit the
-//! Phase 4 / 3.4 `ModelRunner` reuses.
+//! `model_run_id` is minted up front by the online round and threaded through
+//! the `quant_model_run` create/finalize lifecycle and factor-value foreign key.
+//! This service is the callable unit reused by `ModelRunner`.
 
-use crate::{
-    governance::BiasTableApplicator, observability::factor_fact_writer::FactorEventWriter,
-};
+use std::{collections::HashMap, sync::Arc};
+
 use chrono::Utc;
 use quant_pivot_error::{QuantError, QuantResult, infra::InfraError, report::ReportError};
 use quant_pivot_models::{
-    domain::{FactorValueInfo, NewFactorValue},
+    domain::quant::{FactorValueInfo, NewFactorValue},
     enums::quant::PublicationStatus,
     runtime_config::{DomainConfig, FactorsConfig, FeaturesConfig, SmallCrossSectionPolicy},
     types::{FactorDefinitionId, FeatureVectorId, MarketId, ModelRunId},
@@ -33,13 +31,16 @@ use quant_pivot_research::{
     },
     features::FeatureVector,
 };
-use std::{collections::HashMap, sync::Arc};
+
+use crate::{
+    governance::BiasTableApplicator, observability::factor_fact_writer::FactorEventWriter,
+};
 
 /// Frozen inputs for one factor-plane round.
 pub struct FactorPipelineRequest<'a> {
     /// The owning online round (minted up front, threaded through the round).
     pub model_run_id: &'a ModelRunId,
-    /// Accepted feature vectors (data-quality bar already passed at 3.2).
+    /// Accepted feature vectors whose data-quality bar already passed.
     pub vectors: &'a [FeatureVector],
     /// Persisted feature-vector ids, aligned 1:1 with `vectors`.
     pub feature_vector_ids: &'a [FeatureVectorId],
@@ -63,7 +64,7 @@ pub struct RejectedFactorMarket {
 /// Outcome of one factor-plane round.
 pub struct FactorPipelineResult {
     /// Per-market factor outcomes (eligible + rejected), with transient scoring
-    /// flags — the input the 3.4 model runtime consumes.
+    /// flags — the input consumed by the model runtime.
     pub outcomes: Vec<MarketFactorOutcome>,
     /// Markets excluded under `RejectCandidate` (not persisted, not emitted).
     pub rejected: Vec<RejectedFactorMarket>,
@@ -163,7 +164,7 @@ impl FactorPipelineService {
 
         // Definitions are registered out-of-band by the explicit factor-register
         // governance action (not on this money-facing hot path). Fail closed if
-        // any enabled definition is not `Published` (05.7).
+        // any enabled definition is not `Published`.
         self.require_published_definitions(&engine).await?;
 
         // Factor compute is pure CPU work; run it on the blocking pool so a large

@@ -5,12 +5,17 @@
 //! transitions and permission assignment mutate the Casbin policy table inside
 //! the repository transaction, so each is followed by an enforcer reload.
 
-use actix_web::{http::Method, web};
+use actix_web::{
+    http::Method,
+    web::{Data, Path},
+};
 use quant_pivot_models::{
     domain::{
-        AssignMenus, AssignMenusRequest, AssignPermissions, AssignPermissionsRequest,
-        ChangeRoleStatusRequest, CreateRoleRequest, MenuInfo, NewRole, Permission, RoleInfo,
-        UpdateRoleRequest,
+        api::{
+            AssignMenusRequest, AssignPermissionsRequest, ChangeRoleStatusRequest,
+            CreateRoleRequest, UpdateRoleRequest,
+        },
+        rbac::{AssignMenus, AssignPermissions, MenuInfo, NewRole, Permission, RoleInfo},
     },
     enums::{
         operation_log::OperationCategory,
@@ -96,13 +101,13 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
 }
 
 /// `GET /api/roles` — the full role catalog (ordered by sort, then code).
-pub async fn list(state: web::Data<AppState>) -> Result<WebResponse<Vec<RoleInfo>>, WebError> {
+pub async fn list(state: Data<AppState>) -> Result<WebResponse<Vec<RoleInfo>>, WebError> {
     Ok(WebResponse::ok(state.roles.list().await?))
 }
 
 /// `POST /api/roles` — create a custom role.
 pub async fn create(
-    state: web::Data<AppState>,
+    state: Data<AppState>,
     op_ctx: OperationCtx,
     body: ValidatedJson<CreateRoleRequest>,
 ) -> Result<WebResponse<RoleInfo>, WebError> {
@@ -125,16 +130,16 @@ pub async fn create(
 
 /// `GET /api/roles/{id}` — fetch a single role.
 pub async fn get(
-    state: web::Data<AppState>,
-    id: web::Path<RoleId>,
+    state: Data<AppState>,
+    id: Path<RoleId>,
 ) -> Result<WebResponse<RoleInfo>, WebError> {
     Ok(WebResponse::ok(state.roles.find_by_id(&id).await?))
 }
 
 /// `PUT /api/roles/{id}` — partial role update.
 pub async fn update(
-    state: web::Data<AppState>,
-    id: web::Path<RoleId>,
+    state: Data<AppState>,
+    id: Path<RoleId>,
     op_ctx: OperationCtx,
     body: ValidatedJson<UpdateRoleRequest>,
 ) -> Result<WebResponse<RoleInfo>, WebError> {
@@ -147,8 +152,8 @@ pub async fn update(
 /// `DELETE /api/roles/{id}` — delete a custom role, then reload the enforcer
 /// (its `p` policies and `g` groupings were purged in the same transaction).
 pub async fn delete(
-    state: web::Data<AppState>,
-    id: web::Path<RoleId>,
+    state: Data<AppState>,
+    id: Path<RoleId>,
     op_ctx: OperationCtx,
 ) -> Result<WebResponse<()>, WebError> {
     state.roles.delete(&id).await?;
@@ -165,8 +170,8 @@ pub async fn delete(
 /// rebuilds them from the surviving membership. Either way the enforcer is
 /// reloaded so the change takes effect at once.
 pub async fn change_status(
-    state: web::Data<AppState>,
-    id: web::Path<RoleId>,
+    state: Data<AppState>,
+    id: Path<RoleId>,
     op_ctx: OperationCtx,
     body: ValidatedJson<ChangeRoleStatusRequest>,
 ) -> Result<WebResponse<()>, WebError> {
@@ -182,8 +187,8 @@ pub async fn change_status(
 
 /// `GET /api/roles/{id}/permissions` — the role's current permission set.
 pub async fn list_permissions(
-    state: web::Data<AppState>,
-    id: web::Path<RoleId>,
+    state: Data<AppState>,
+    id: Path<RoleId>,
 ) -> Result<WebResponse<Vec<Permission>>, WebError> {
     Ok(WebResponse::ok(
         state.role_permissions.list_permissions(&id).await?,
@@ -193,8 +198,8 @@ pub async fn list_permissions(
 /// `PUT /api/roles/{id}/permissions` — replace the role's permission set
 /// (rejecting unknown `resource × operation` pairs), then reload the enforcer.
 pub async fn set_permissions(
-    state: web::Data<AppState>,
-    id: web::Path<RoleId>,
+    state: Data<AppState>,
+    id: Path<RoleId>,
     op_ctx: OperationCtx,
     body: ValidatedJson<AssignPermissionsRequest>,
 ) -> Result<WebResponse<()>, WebError> {
@@ -217,8 +222,8 @@ pub async fn set_permissions(
 
 /// `GET /api/roles/{id}/menus` — the menus currently granted to the role.
 pub async fn list_menus(
-    state: web::Data<AppState>,
-    id: web::Path<RoleId>,
+    state: Data<AppState>,
+    id: Path<RoleId>,
 ) -> Result<WebResponse<Vec<MenuInfo>>, WebError> {
     Ok(WebResponse::ok(
         state.role_menus.list_menus_for_role(&id).await?,
@@ -228,8 +233,8 @@ pub async fn list_menus(
 /// `PUT /api/roles/{id}/menus` — replace the role's menu set. Menus are not part
 /// of the Casbin policy, so no enforcer reload is needed.
 pub async fn set_menus(
-    state: web::Data<AppState>,
-    id: web::Path<RoleId>,
+    state: Data<AppState>,
+    id: Path<RoleId>,
     op_ctx: OperationCtx,
     body: ValidatedJson<AssignMenusRequest>,
 ) -> Result<WebResponse<()>, WebError> {

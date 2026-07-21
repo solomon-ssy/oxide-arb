@@ -20,10 +20,19 @@ use quant_pivot_error::{
 };
 use quant_pivot_models::{
     domain::{
-        ApproveIntentCommand, ApproveOrderIntent, ApproveOrderIntentOutcome, CancelIntentCommand,
-        CreateIntentCommand, IntentCreationLimits, IntentEventKind, NewCapitalAllocation,
-        NewOperationLog, NewOrderIntent, OrderIntentInfo, OrderIntentListQuery, OrderIntentPort,
-        Paginated, RecommendationInfo, RecommendationReportInfo, RejectIntentCommand,
+        api::OrderIntentListQuery,
+        governance::NewOperationLog,
+        pagination::Paginated,
+        ports::{
+            ApproveIntentCommand, CancelIntentCommand, CreateIntentCommand, OrderIntentPort,
+            RejectIntentCommand,
+        },
+        quant::{
+            ApproveOrderIntent, ApproveOrderIntentOutcome, IntentCreationLimits,
+            NewCapitalAllocation, NewOrderIntent, OrderIntentInfo, RecommendationInfo,
+            RecommendationReportInfo,
+        },
+        runtime::IntentEventKind,
     },
     enums::{
         common::{OrderType, Side},
@@ -86,8 +95,8 @@ pub struct OrderIntentServiceDeps {
     pub intent_lifecycle: Arc<IntentLifecyclePublisher>,
     /// Wake the dispatcher when an `ApprovedByPolicy` intent is created (auto).
     pub dispatch_wake: DispatchWake,
-    /// Model registry (calibration-state recheck at `SemiAuto`/`AutoExecution`
-    /// intent-creation time — Phase 11.3 closed-loop hardening).
+    /// Model registry used to recheck calibration state when creating a
+    /// `SemiAuto` or `AutoExecution` intent.
     pub model_registry: Arc<dyn ModelRegistryRepository>,
     /// Governance source used to re-verify the frozen policy at intent creation.
     pub trade_policies: Arc<dyn TradePolicyRepository>,
@@ -162,9 +171,9 @@ impl CoreOrderIntentService {
     /// TOCTOU window between report generation and intent creation: a
     /// calibrator deactivated after a report was built must not let a stale,
     /// frozen `execution_eligibility` still create a capital-reserving
-    /// `SemiAuto`/`AutoExecution` intent (Phase 11.3 closed-loop hardening;
-    /// the same [`resolve_return_model_calibration`] deep check publish /
-    /// report / admission share). A free function (not `&self`) so it is
+    /// `SemiAuto`/`AutoExecution` intent. This uses the same deep
+    /// [`resolve_return_model_calibration`] check as publish, report, and
+    /// admission. A free function (not `&self`) keeps the guard
     /// directly unit-testable against fakes for just its three dependencies.
     async fn ensure_return_model_still_calibrated(
         &self,
@@ -652,7 +661,7 @@ impl IntentTerminalEventSink for CoreOrderIntentService {
     }
 }
 
-/// The Phase 11.3 closed-loop calibration recheck (see
+/// The closed-loop calibration recheck (see
 /// [`CoreOrderIntentService::ensure_return_model_still_calibrated`]), extracted
 /// as a free function over its three dependencies so it is unit-testable
 /// without constructing a full [`CoreOrderIntentService`].
@@ -1066,14 +1075,15 @@ fn intent_operation_log(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        project_entry_order_spec, project_exit_policy_spec, resolve_downscale, resolve_policy,
-    };
-    use crate::execution::mode_gate::IntentPolicyDecision;
+    use std::time::Duration as StdDuration;
+
     use chrono::{DateTime, Duration, TimeZone, Utc};
     use quant_pivot_error::execution::ExecutionError;
     use quant_pivot_models::{
-        domain::{ApproveIntentCommand, RecommendationInfo, evaluate_intent_approval_invalidation},
+        domain::{
+            ports::ApproveIntentCommand,
+            quant::{RecommendationInfo, evaluate_intent_approval_invalidation},
+        },
         enums::{
             common::{OrderType, Side},
             execution::ApprovalInvalidation,
@@ -1089,9 +1099,13 @@ mod tests {
             SizingPlan, TokenId, Usd, UserId,
         },
     };
-    use quant_pivot_test_support::report_fixtures;
     use rust_decimal_macros::dec;
-    use std::time::Duration as StdDuration;
+    use uuid::Uuid;
+
+    use super::{
+        project_entry_order_spec, project_exit_policy_spec, resolve_downscale, resolve_policy,
+    };
+    use crate::{execution::mode_gate::IntentPolicyDecision, test_fixtures::report_fixtures};
 
     fn rec() -> RecommendationInfo {
         report_fixtures::recommendation(
@@ -1152,7 +1166,7 @@ mod tests {
     fn approve_command() -> ApproveIntentCommand {
         ApproveIntentCommand {
             order_intent_id: OrderIntentId::from_v7(),
-            operator_id: UserId::new(uuid::Uuid::nil()),
+            operator_id: UserId::new(Uuid::nil()),
             acting_role: RoleCode::new("operator"),
             reason: "ok".to_owned(),
             override_amount: None,
@@ -1537,8 +1551,8 @@ mod tests {
         );
     }
 
-    // ── Phase 11.3 closed-loop hardening: intent-creation-time calibration
-    // recheck (closes the TOCTOU window between report generation and intent
+    // ── Intent-creation-time calibration recheck ────────────────────
+    // Closes the TOCTOU window between report generation and intent
     // creation — a calibrator deactivated after a report was built must not
     // let a stale `execution_eligibility` still create a capital-reserving
     // `SemiAuto`/`AutoExecution` intent) ────────────────────────────────────
@@ -1552,7 +1566,6 @@ mod tests {
             },
         };
 
-        use crate::execution::intent_service::recheck_return_model_calibrated;
         use async_trait::async_trait;
         use chrono::Utc;
         use quant_pivot_error::{
@@ -1560,12 +1573,16 @@ mod tests {
         };
         use quant_pivot_models::{
             domain::{
-                ModelPickerSide, ModelSpecInfo, ModelSpecListQuery, ModelVersionInfo,
-                ModelVersionListQuery, NewModelSpec, NewModelVersion, Paginated,
-                PublishedModelCatalogInfo,
+                api::{ModelPickerSide, ModelSpecListQuery, ModelVersionListQuery},
+                pagination::Paginated,
+                quant::{
+                    ModelSpecInfo, ModelVersionInfo, NewModelSpec, NewModelVersion,
+                    PublishedModelCatalogInfo,
+                },
             },
             enums::{
                 common::MarketCategory,
+                model::ModelFamily,
                 quant::{DownsideSource, PublicationStatus},
             },
             runtime_config::FactorCrossSectionConfig,
@@ -1586,13 +1603,19 @@ mod tests {
             factors::{FrozenReferenceQuantiles, names::LIQUIDITY_DEPTH},
             model::{
                 CalibratedReturnModel, CalibrationArtifactLoader, FactorWeight, ModelArtifact,
-                ModelArtifactHeader, ModelFamily, ResolvedCalibration, ReturnModelSpec,
-                ScoreMultiplierSpec, SubstitutionConfidenceRules, WeightedFactorModelArtifact,
+                ModelArtifactHeader, ResolvedCalibration, ReturnModelSpec, ScoreMultiplierSpec,
+                SubstitutionConfidenceRules, WeightedFactorModelArtifact,
                 model_input_contract_hash,
             },
         };
-        use quant_pivot_test_support::{
-            execution_pg_seed::fixture_profile_ref, model_spec_fixtures::model_spec_lineage_fixture,
+        use rust_decimal::Decimal;
+
+        use crate::{
+            execution::intent_service::recheck_return_model_calibrated,
+            test_fixtures::{
+                execution_pg_seed::fixture_profile_ref,
+                model_spec_fixtures::model_spec_lineage_fixture,
+            },
         };
 
         struct FakeRegistry {
@@ -1713,9 +1736,9 @@ mod tests {
                         mapping: MonotoneMapping::Isotonic { knots: Vec::new() },
                         reliability: ReliabilityReport {
                             bins: Vec::new(),
-                            brier_score: rust_decimal::Decimal::ZERO,
-                            log_loss: rust_decimal::Decimal::ZERO,
-                            ece: rust_decimal::Decimal::ZERO,
+                            brier_score: Decimal::ZERO,
+                            log_loss: Decimal::ZERO,
+                            ece: Decimal::ZERO,
                             n_samples: 0,
                         },
                     })
@@ -1838,8 +1861,8 @@ mod tests {
 
         #[tokio::test]
         async fn uncalibrated_model_blocks_semi_auto_intent_creation() {
-            // Alias for the acceptance name in Phase 11.3 §8 — same TOCTOU
-            // close as `heuristic_return_model_denies_semi_auto_intent_creation`.
+            // Acceptance alias for the same TOCTOU guard exercised by
+            // `heuristic_return_model_denies_semi_auto_intent_creation`.
             let (store, version) = seeded(ReturnModelSpec::heuristic_default()).await;
             let model_registry: Arc<dyn ModelRegistryRepository> = Arc::new(FakeRegistry {
                 version: Some(version.clone()),

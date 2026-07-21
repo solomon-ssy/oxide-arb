@@ -11,7 +11,10 @@ use quant_pivot_api::rtds::{PolymarketRtdsSource, RtdsCryptoSource};
 use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
     clickhouse::CryptoPriceReportRow,
-    domain::{CryptoPriceReport, DomainSourceCheckpoint, LinkageOutcome},
+    domain::{
+        data_plane::{CryptoPriceReport, DomainSourceCheckpoint},
+        quant::LinkageOutcome,
+    },
     enums::domain::LinkageSourceRole,
     types::{ContentHash, DomainInstrumentKey},
 };

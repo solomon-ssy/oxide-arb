@@ -1,7 +1,18 @@
 //! Grants built-in roles visibility of menu nodes aligned with Casbin policies.
 
+use std::{
+    collections::{HashMap, HashSet},
+    future::Future,
+    pin::Pin,
+};
+
+use sea_orm::{
+    ActiveValue::Set, ColumnTrait, DatabaseTransaction, DbErr, EntityTrait, QueryFilter,
+    sea_query::OnConflict,
+};
+
 use crate::{
-    entities::role_menu,
+    entities::role_menu::{ActiveModel, Column, Entity},
     enums::rbac::MenuKind,
     seed::{
         SeedArtifact, SeedConflictPolicy, SeedContext, SeedDependency, SeedSpec,
@@ -11,14 +22,6 @@ use crate::{
         },
     },
     types::{MenuId, RoleId},
-};
-use sea_orm::{
-    ActiveValue::Set, ColumnTrait, DbErr, EntityTrait, QueryFilter, sea_query::OnConflict,
-};
-use std::{
-    collections::{HashMap, HashSet},
-    future::Future,
-    pin::Pin,
 };
 
 const SEED_ID: &str = "rbac.role_menu.bootstrap";
@@ -98,18 +101,18 @@ fn expected_grants(ctx: &SeedContext) -> Result<Vec<(RoleId, MenuId)>, DbErr> {
     Ok(grants)
 }
 
-pub async fn load(db: &sea_orm::DatabaseTransaction, ctx: &mut SeedContext) -> Result<u64, DbErr> {
+pub async fn load(db: &DatabaseTransaction, ctx: &mut SeedContext) -> Result<u64, DbErr> {
     let models = expected_grants(ctx)?
         .into_iter()
-        .map(|(role_id, menu_id)| role_menu::ActiveModel {
+        .map(|(role_id, menu_id)| ActiveModel {
             role_id: Set(role_id),
             menu_id: Set(menu_id),
             ..Default::default()
         })
         .collect::<Vec<_>>();
-    role_menu::Entity::insert_many(models)
+    Entity::insert_many(models)
         .on_conflict(
-            OnConflict::columns([role_menu::Column::RoleId, role_menu::Column::MenuId])
+            OnConflict::columns([Column::RoleId, Column::MenuId])
                 .do_nothing()
                 .to_owned(),
         )
@@ -117,7 +120,7 @@ pub async fn load(db: &sea_orm::DatabaseTransaction, ctx: &mut SeedContext) -> R
         .await
 }
 
-async fn hydrate(db: &sea_orm::DatabaseTransaction, ctx: &SeedContext) -> Result<(), DbErr> {
+async fn hydrate(db: &DatabaseTransaction, ctx: &SeedContext) -> Result<(), DbErr> {
     let expected = expected_grants(ctx)?.into_iter().collect::<HashSet<_>>();
     let role_ids = ctx
         .require::<RoleIdMap>(ROLES_ARTIFACT)
@@ -125,8 +128,8 @@ async fn hydrate(db: &sea_orm::DatabaseTransaction, ctx: &SeedContext) -> Result
         .values()
         .cloned()
         .collect::<Vec<_>>();
-    let actual = role_menu::Entity::find()
-        .filter(role_menu::Column::RoleId.is_in(role_ids))
+    let actual = Entity::find()
+        .filter(Column::RoleId.is_in(role_ids))
         .all(db)
         .await?
         .into_iter()
@@ -143,14 +146,14 @@ async fn hydrate(db: &sea_orm::DatabaseTransaction, ctx: &SeedContext) -> Result
 }
 
 fn load_boxed<'a>(
-    db: &'a sea_orm::DatabaseTransaction,
+    db: &'a DatabaseTransaction,
     ctx: &'a mut SeedContext,
 ) -> Pin<Box<dyn Future<Output = Result<u64, DbErr>> + Send + 'a>> {
     Box::pin(load(db, ctx))
 }
 
 fn hydrate_boxed<'a>(
-    db: &'a sea_orm::DatabaseTransaction,
+    db: &'a DatabaseTransaction,
     ctx: &'a mut SeedContext,
 ) -> Pin<Box<dyn Future<Output = Result<(), DbErr>> + Send + 'a>> {
     Box::pin(hydrate(db, ctx))

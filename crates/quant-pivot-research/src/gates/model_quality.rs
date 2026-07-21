@@ -10,10 +10,10 @@
 //! **soft** (recorded as warnings, never blocking). The intent
 //! ([`GateIntent`]) selects which hard gates apply: a `Publish` adds
 //! shadow-stability, and an `AutoExecution`
-//! evaluation additionally requires liquidity-exit feasibility (parent §18).
+//! evaluation additionally requires liquidity-exit feasibility.
 //!
 //! The resulting [`QualityGateReport`] is content-addressed and serializes into
-//! `quant_model_version.quality_gate_report`; its `evaluated_at` drives the 3.7
+//! `quant_model_version.quality_gate_report`; its `evaluated_at` drives the
 //! load-time staleness deny (`min_quality_gate_age_secs`).
 
 use chrono::{DateTime, Utc};
@@ -128,7 +128,7 @@ impl GateLedger {
 /// runtime-config `quality_gate` section carries (hot-reloadable).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QualityGateThresholds {
-    /// Minimum resolved sample count (parent §18 default 500).
+    /// Minimum resolved sample count (default 500).
     pub min_sample_count: u64,
     /// Minimum label coverage in `[0, 1]` (default 0.70).
     pub min_label_coverage: Decimal,
@@ -144,7 +144,7 @@ pub struct QualityGateThresholds {
     pub max_category_concentration: Decimal,
 }
 
-/// Phase 11.5 CPCV alpha-significance gate thresholds (`research.validation.gates.*`).
+/// CPCV alpha-significance gate thresholds (`research.validation.gates.*`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ValidationGateThresholds {
     /// Minimum CPCV path-set median rank IC (hard gate).
@@ -194,8 +194,7 @@ pub struct CpcvPathSetGateInput {
     pub window_end: Option<DateTime<Utc>>,
 }
 
-/// Sell-side hold-vs-exit gate thresholds (Phase 06.1; alpha-significance
-/// fields added Phase 11.5.1).
+/// Sell-side hold-vs-exit gate thresholds with hard alpha-significance fields.
 ///
 /// DSR significance (`α`) is **not** duplicated here — Sell publish reads the
 /// single authority [`ValidationGateThresholds::dsr_significance`]
@@ -206,13 +205,11 @@ pub struct CpcvPathSetGateInput {
 pub struct SellQualityGateThresholds {
     pub min_sample_count: u64,
     pub min_label_coverage: Decimal,
-    /// Minimum CPCV path-set median rank IC (hard gate; Phase 11.5.1 —
-    /// replaces the deleted single-path soft `min_exit_alpha_rank_ic`,
-    /// mirroring the Buy-side `ValidationGateThresholds::rank_ic_min`
-    /// upgrade Phase 11.5 already made).
+    /// Minimum CPCV path-set median rank IC. This hard gate replaces the
+    /// retired single-path soft `min_exit_alpha_rank_ic` and mirrors the
+    /// Buy-side [`ValidationGateThresholds::rank_ic_min`].
     pub rank_ic_min: Decimal,
-    /// Maximum tolerated Probability of Backtest Overfitting (hard gate;
-    /// Phase 11.5.1).
+    /// Maximum tolerated Probability of Backtest Overfitting (hard gate).
     pub max_pbo: Decimal,
     pub min_l2_book_fidelity_ratio: Decimal,
     pub max_fallback_ratio: Decimal,
@@ -232,7 +229,7 @@ impl Default for SellQualityGateThresholds {
 }
 
 impl QualityGateThresholds {
-    /// Conservative defaults matching parent §18.
+    /// Conservative schema defaults.
     #[must_use]
     pub fn conservative() -> Self {
         Self {
@@ -270,7 +267,7 @@ pub struct QualityGateInput {
     pub shadow_stability: Option<Probability>,
     /// Governed thresholds.
     pub thresholds: QualityGateThresholds,
-    /// Phase 11.5 CPCV alpha-significance thresholds.
+    /// CPCV alpha-significance thresholds.
     pub validation_thresholds: ValidationGateThresholds,
     /// Latest persisted CPCV path-set metrics (`None` when absent).
     pub path_set: Option<CpcvPathSetGateInput>,
@@ -278,8 +275,8 @@ pub struct QualityGateInput {
     pub sell_thresholds: SellQualityGateThresholds,
     /// Model family under evaluation (`None` ⇒ buy-oriented defaults).
     pub model_family: Option<ModelFamily>,
-    /// Whether the evaluated artifact's `ReturnModelSpec` is `Calibrated`
-    /// (Phase 11.3 #5/#13), resolved through the **same deep check**
+    /// Whether the evaluated artifact's `ReturnModelSpec` is `Calibrated`,
+    /// resolved through the **same deep check**
     /// (`resolve_return_model_calibration`) the report builder, admission,
     /// and intent creation share — never a shallow enum-tag read. Buy-family
     /// `Publish`/`AutoExecution` intents hard-gate on this; exit scorers and
@@ -297,7 +294,7 @@ struct ReportHashInput<'a> {
     passed: bool,
 }
 
-/// The default, deterministic model-publication gate (parent §18).
+/// The default, deterministic model-publication gate.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct DefaultModelQualityGate;
 
@@ -436,7 +433,7 @@ fn evaluate_coverage_gates(input: &QualityGateInput, is_exit: bool, ledger: &mut
     );
 }
 
-/// Sell-side hold-vs-exit hard/soft gates (Phase 06.1).
+/// Sell-side hold-vs-exit hard/soft gates.
 fn evaluate_sell_gates(input: &QualityGateInput, ledger: &mut GateLedger) {
     let t = &input.sell_thresholds;
     let samples = input
@@ -667,7 +664,7 @@ fn evaluate_cpcv_alpha_gates(input: &QualityGateInput, ledger: &mut GateLedger) 
 
 /// CPCV/lot-replay alpha-significance gates (hard) plus `MinTRL` advisory
 /// (soft) — shared by the Buy (`evaluate_cpcv_alpha_gates`) and Sell
-/// (`evaluate_sell_gates`, Phase 11.5.1) branches.
+/// (`evaluate_sell_gates`) branches.
 ///
 /// Both families' publish readiness is judged by the identical persisted
 /// [`BacktestPathSet`](crate::validation::BacktestPathSet) methodology
@@ -812,7 +809,7 @@ fn evaluate_intent_gates(input: &QualityGateInput, ledger: &mut GateLedger) {
     evaluate_shadow_stability_gate(input, ledger);
 }
 
-/// Hard gate (Phase 11.3 #5/#13): `Publish` / `AutoExecution` intents on a Buy
+/// Hard gate: `Publish` / `AutoExecution` intents on a Buy
 /// model require a `Calibrated` return model. `uncalibrated` (`Heuristic`)
 /// artifacts are bootstrap-only and must never reach publish or
 /// auto-execution — fail-closed, never a silent downgrade to the heuristic
@@ -904,11 +901,6 @@ fn max_category_concentration(report: &BacktestReport) -> Decimal {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        CpcvPathSetGateInput, DefaultModelQualityGate, GateId, GateIntent, GateStatus, GateSubject,
-        QualityGateInput, QualityGateThresholds, SellQualityGateThresholds,
-        ValidationGateThresholds,
-    };
     use chrono::{Duration, Utc};
     use quant_pivot_models::{
         enums::model::ModelFamily,
@@ -920,6 +912,11 @@ mod tests {
     };
     use rust_decimal_macros::dec;
 
+    use super::{
+        CpcvPathSetGateInput, DefaultModelQualityGate, GateId, GateIntent, GateStatus, GateSubject,
+        QualityGateInput, QualityGateThresholds, SellQualityGateThresholds,
+        ValidationGateThresholds,
+    };
     use crate::{
         backtest::BacktestReport,
         gates::ModelQualityGate,

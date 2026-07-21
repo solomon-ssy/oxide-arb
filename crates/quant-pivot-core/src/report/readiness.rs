@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use quant_pivot_api::ws::ClobWsManager;
 use quant_pivot_models::domain::{
-    CatalogStatusPort,
     governance::lifecycle::{MarketDataConnectivity, OperationalPhase, WsShardConnectivity},
+    ports::CatalogStatusPort,
 };
 
 use crate::service::catalog_readiness::CatalogReadiness;

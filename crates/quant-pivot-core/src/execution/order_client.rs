@@ -1,4 +1,4 @@
-//! Polymarket CLOB order-write façade (Phase 05.4 — real money).
+//! Money-critical Polymarket CLOB order-write façade.
 //!
 //! Wraps [`ClobClient`] (which already owns rate limiting, retry, EIP-712
 //! signing, and SDK type mapping) behind a venue-neutral, SDK-free boundary. The
@@ -19,7 +19,7 @@ use chrono::{DateTime, Utc};
 use quant_pivot_api::clob::{ClobClient, OrderSubmissionError, OrderSubmissionStage};
 use quant_pivot_error::api::ApiError;
 use quant_pivot_models::{
-    domain::{OrderRequest, OrderResponse},
+    domain::order::{OrderRequest, OrderResponse},
     enums::{
         common::{OrderType, Side},
         execution::{ReconciliationResult, VenueOrderStatus},
@@ -103,7 +103,7 @@ impl VenueOutcome {
             Self::Rejected => ReconciliationResult::NotFilled,
             Self::Cancelled | Self::Expired => ReconciliationResult::Cancelled,
             // Ambiguous (and the unused Open path) are truth-unknown at submit
-            // time: enqueue as `Pending` for the 05.5 recon worker to resolve.
+            // time: enqueue as `Pending` for the recon worker to resolve.
             // `Unresolvable` is reserved for that worker's terminal verdict.
             Self::Ambiguous | Self::Open => ReconciliationResult::Pending,
         }
@@ -316,13 +316,13 @@ impl PolymarketOrderClient for ClobOrderClient {
 
 #[cfg(test)]
 mod tests {
+    use chrono::Utc;
     use quant_pivot_models::{
         enums::common::OrderType,
         types::{ContentHash, FeeEvidence, Shares, Usd},
     };
 
     use super::{VenueOutcome, VenueSubmitResult};
-    use chrono::Utc;
 
     #[test]
     fn fok_partial_normalizes_to_ambiguous() {

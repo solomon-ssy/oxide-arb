@@ -1,20 +1,23 @@
-//! Admin port for CPCV + governed trial-grid validation (Phase 11.5).
-
-use async_trait::async_trait;
-use tokio_util::sync::CancellationToken;
+//! Admin port for CPCV + governed trial-grid validation.
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
+use quant_pivot_error::QuantResult;
+use tokio_util::sync::CancellationToken;
+
 use crate::{
-    domain::{BacktestPathSetView, JobProgressSink, RunCpcvBacktestRequest},
+    domain::{
+        api::{BacktestPathSetView, RunCpcvBacktestRequest},
+        quant::JobProgressSink,
+    },
     types::{BacktestPathSetId, ModelVersionId},
 };
-use quant_pivot_error::QuantResult;
 
 /// Dependency-inversion boundary between the HTTP layer and the core CPCV
 /// orchestrator ([`crate::runtime_config`] is frozen at request time).
 ///
-/// Implemented in `quant-pivot-core` and injected into `quant_pivot_web::AppState`.
+/// Implemented in `quant-pivot-core` and injected into `quant_pivot_web::state::AppState`.
 #[async_trait]
 pub trait CpcvBacktestPort: Send + Sync {
     /// Run Combinatorial Purged Cross-Validation + the governed trial grid

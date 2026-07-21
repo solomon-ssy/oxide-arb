@@ -2,7 +2,7 @@
 //!
 //! Content contract for `quant_portfolio_plan.risk_budget_json` /
 //! `constraints_json` / `rejected_summary`. Produced by the governed planner
-//! (04.1); defined here so the entity uses them directly as JSONB columns.
+//! and defined here so the entity uses them directly as JSONB columns.
 
 use rust_decimal::Decimal;
 use sea_orm::FromJsonQueryResult;

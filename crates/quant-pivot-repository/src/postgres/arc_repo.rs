@@ -1,7 +1,8 @@
 //! Helpers for wiring `Arc<Pg*Repository>` from a shared [`DatabaseConnection`].
 
-use sea_orm::DatabaseConnection;
 use std::sync::Arc;
+
+use sea_orm::DatabaseConnection;
 
 /// Construct an `Arc`-wrapped Postgres repository from a shared connection clone.
 ///
@@ -24,9 +25,11 @@ macro_rules! pg_arc_repo {
 
 #[cfg(test)]
 mod tests {
-    use super::arc_repo;
-    use sea_orm::DatabaseConnection;
     use std::sync::Arc;
+
+    use sea_orm::DatabaseConnection;
+
+    use super::arc_repo;
 
     /// Lightweight stand-in proving [`arc_repo`] clones the connection handle.
     struct DummyRepo {

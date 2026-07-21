@@ -53,7 +53,7 @@ pub enum TrainingSampleSource {
     HistoricalPit,
     LiveAttribution,
     /// Per-tick hold-vs-exit decision points sampled along a closed/settled
-    /// lot's life (Phase 06.1 Sell scorer training). Anchored on position-lot
+    /// lot's life for Sell-scorer training. Anchored on position-lot
     /// timelines rather than a uniform market grid.
     ExitDecision,
 }

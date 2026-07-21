@@ -1,6 +1,6 @@
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    domain::{
+    domain::quant::{
         MarketSelectionInfo, MarketSelectionMemberInfo, NewMarketSelection,
         NewMarketSelectionMember,
     },

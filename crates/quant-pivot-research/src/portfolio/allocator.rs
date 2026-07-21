@@ -4,7 +4,7 @@
 //! ([`crate::portfolio::lp::LinearProgrammingPortfolioAllocator`]) — there is no
 //! greedy allocator. This module owns the allocation IO contract
 //! ([`AllocationInput`] / [`AllocationOutput`] / [`Allocation`]) plus the
-//! deterministic *binding-constraint attribution* helper ([`decide_ceiling`]),
+//! deterministic *binding-constraint attribution* helper (`decide_ceiling`),
 //! which the optimizer reuses after solving to label each funded candidate with
 //! the single [`BindingConstraint`] that limited its size — keeping report
 //! fields identical regardless of the solve path.
@@ -24,8 +24,9 @@ use quant_pivot_models::{
 use rust_decimal::Decimal;
 
 use crate::{
-    backtest::PortfolioCaps, model::signal::SignalCandidate,
-    portfolio::correlation::CorrelationConstraint, portfolio::optimizer::OptimizerOutcome,
+    backtest::PortfolioCaps,
+    model::signal::SignalCandidate,
+    portfolio::{correlation::CorrelationConstraint, optimizer::OptimizerOutcome},
 };
 
 /// A candidate paired with the allocation metadata the caps need.
@@ -87,7 +88,7 @@ pub struct AllocationInput<'a> {
     /// real equity would let the cap exceed the account's actual bankroll.
     pub capital_base_usd: Decimal,
     /// Correlated-cluster exposure constraint, when correlation is enabled.
-    /// `None` ⇒ the correlation cap does not bind (Phase 4 behavior).
+    /// `None` means the correlation cap does not bind.
     pub correlation: Option<&'a CorrelationConstraint>,
     /// Maximum published recommendations (`TopN` inclusion cardinality).
     pub top_n: usize,

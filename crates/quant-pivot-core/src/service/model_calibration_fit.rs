@@ -1,7 +1,7 @@
-//! Model-score probability-calibrator fit orchestration (Phase 11.3 §4).
+//! Model-score probability-calibrator fit orchestration.
 //!
 //! Reuses the existing PIT backtest-replay engine
-//! ([`BacktestService::run_for_calibration`]) to harvest per-sample
+//! (`BacktestService::run_for_calibration`) to harvest per-sample
 //! `(composite_score, settled_yes, max_adverse_excursion_bps)` triples over an
 //! **independent, disjoint + embargoed** `purpose = Calibration` dataset —
 //! never the model's own training spine — then fits a
@@ -11,14 +11,18 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use tokio_util::sync::CancellationToken;
-
+use chrono::Duration;
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
     domain::{
-        CalibrationArtifactInfo, CalibrationArtifactPayload, FitModelCalibratorRequest,
-        JobProgressSink, ModelCalibrationFitJobParams, ModelCalibrationFitOutcome,
-        ModelCalibrationFitPort, ModelCalibrationFitPreflightView, NewCalibrationArtifact,
+        api::{FitModelCalibratorRequest, ModelCalibrationFitPreflightView},
+        ports::{
+            ModelCalibrationFitJobParams, ModelCalibrationFitOutcome, ModelCalibrationFitPort,
+        },
+        quant::{
+            CalibrationArtifactInfo, CalibrationArtifactPayload, JobProgressSink,
+            NewCalibrationArtifact,
+        },
         query::TimeWindow,
     },
     enums::quant::{
@@ -41,6 +45,7 @@ use quant_pivot_research::{
     },
 };
 use rust_decimal::Decimal;
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     app::ports::backtest::CoreBacktestPort,
@@ -55,7 +60,7 @@ use crate::{
 };
 
 /// Governed knobs the fit needs from the frozen `model.calibration` config
-/// section (Phase 11.3 §7), resolved from the pinned runtime-config version at
+/// section, resolved from the pinned runtime-config version at
 /// fit time — deterministic on replay, mirrors the bias-table fit's
 /// `frozen_fit`.
 #[derive(Debug, Clone, Copy)]
@@ -161,11 +166,11 @@ impl ModelCalibrationFitService {
 
     /// Validate the calibration dataset's purpose/spec-match and its
     /// disjoint + embargoed relationship to the target model's own training
-    /// dataset (Phase 11.3 §0/§4 — the `WalkForwardSplit`-with-embargo purge
-    /// primitive). Fail-closed on any mismatch.
+    /// dataset using the `WalkForwardSplit`-with-embargo purge primitive.
+    /// Fail closed on any mismatch.
     ///
     /// Returns the **catalog** calibration window (`calibration_dataset.window_start/end`) —
-    /// the exact window this function verified disjoint + embargoed. `fit()`
+    /// the exact window this function verified disjoint + embargoed. `fit`
     /// persists this same window as `fit_window`, never a window re-derived
     /// from which samples happened to materialize (that could be a strict
     /// subset of the verified window, e.g. under sparse market activity,
@@ -368,8 +373,7 @@ impl ModelCalibrationFitPort for ModelCalibrationFitService {
                 training_window_start = Some(training_window.from);
                 training_window_end = Some(training_window.to);
                 let embargo_secs = self.current_embargo_secs().await?;
-                required_start =
-                    Some(training_window.to + chrono::Duration::seconds(embargo_secs.max(0)));
+                required_start = Some(training_window.to + Duration::seconds(embargo_secs.max(0)));
                 if let Err(error) = assert_embargoed_after(
                     &calibration_window,
                     &training_window,

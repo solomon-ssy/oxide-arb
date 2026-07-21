@@ -25,27 +25,45 @@ pub mod structural_monitor;
 pub mod trade_policy;
 pub mod training_dataset;
 
-pub use account_read::*;
-pub use backtest::*;
-pub use backtest_path_set::*;
-pub use calibration_artifact::*;
-pub use execution_read::*;
-pub use execution_recovery::*;
-pub use factor_governance::*;
-pub use feature_integrity::*;
-pub use feature_parity_execution::*;
-pub use market_linkage::*;
-pub use model_governance::*;
-pub use model_spec::*;
-pub use model_training::*;
-pub use order_intent::*;
-pub use quant_report::*;
-pub use reconciliation::*;
-pub use research_catalog::*;
-pub use research_job::*;
-pub use research_readiness::*;
-pub use runtime_control::*;
-pub use schema_verification::*;
-pub use structural_monitor::*;
-pub use trade_policy::*;
-pub use training_dataset::*;
+pub use account_read::{AccountReadPort, LiveAccountInfo};
+pub use backtest::BacktestPort;
+pub use backtest_path_set::CpcvBacktestPort;
+pub use calibration_artifact::{
+    BiasTableFitJobParams, BiasTableFitOutcome, CalibrationArtifactFitPort,
+    ModelCalibrationFitJobParams, ModelCalibrationFitOutcome, ModelCalibrationFitPort,
+};
+pub use execution_read::ExecutionReadPort;
+pub use execution_recovery::ExecutionRecoveryPort;
+pub use factor_governance::{
+    FactorGovernancePort, PublishFactorCommand, PublishFactorsBatchCommand,
+    RegisterFactorDefinitionsCommand, RetireFactorCommand,
+};
+pub use feature_integrity::{FeatureIntegrityActionContext, FeatureIntegrityPort};
+pub use feature_parity_execution::FeatureParityExecutionPort;
+pub use market_linkage::MarketLinkageGovernancePort;
+pub use model_governance::{
+    GovernanceActor, ModelGovernancePort, PublishModelCommand, RetireModelCommand,
+};
+pub use model_spec::{CreateModelSpecCommand, ModelSpecPort};
+pub use model_training::ModelTrainingPort;
+pub use order_intent::{
+    ApproveIntentCommand, CancelIntentCommand, CreateIntentCommand, ExecutionSubmitPort,
+    OrderIntentPort, RejectIntentCommand,
+};
+pub use quant_report::{AdHocReportCommand, QuantReportPort};
+pub use reconciliation::ReconciliationPort;
+pub use research_catalog::ResearchCatalogPort;
+pub use research_job::{JobSubmitContext, ResearchJobPort};
+pub use research_readiness::{ResearchReadinessPort, ResearchReadinessSnapshot};
+pub use runtime_control::{
+    BootstrapPort, CatalogState, CatalogStatusPort, DataQualityPort, KillSwitchPort,
+    MarketDataPort, MetricsScrapePort, PolicySnapshotPort, PreparedPolicySnapshot,
+    QuantModeTransitionReport, ReadinessPort, RuntimeControlPort, SetKillSwitchCommand,
+};
+pub use schema_verification::{
+    LifecycleLeaseGuardPort, LifecycleLeaseProviderPort, LifecycleSchemaVerificationPort,
+    ProductionEvidenceArtifactVerificationPort, VerifiedSchemaFingerprints,
+};
+pub use structural_monitor::StructuralMonitorPort;
+pub use trade_policy::TradePolicyPort;
+pub use training_dataset::{PolicyFitDatasetBuildRequest, TrainingDatasetPort};

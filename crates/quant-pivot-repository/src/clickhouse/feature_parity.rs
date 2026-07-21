@@ -3,6 +3,7 @@
 use std::{collections::BTreeMap, str::FromStr, sync::Arc};
 
 use chrono::{DateTime, Utc};
+use clickhouse::query::Query;
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     clickhouse::{
@@ -10,8 +11,11 @@ use quant_pivot_models::{
         QuantServingEvidenceCompletionRow,
     },
     domain::{
-        FeatureIntegrityCounts, FeatureParityEventListQuery, FeatureParityEventView,
-        FeatureParityEvidenceView, PageWindow, Paginated,
+        api::{
+            FeatureIntegrityCounts, FeatureParityEventListQuery, FeatureParityEventView,
+            FeatureParityEvidenceView,
+        },
+        pagination::{PageWindow, Paginated},
     },
     enums::quant::{FeatureCellState, FeatureParityEventStatus, FeatureParityStage},
     types::{FeatureParityDetail, FeatureVectorId, ModelRunId},
@@ -19,7 +23,7 @@ use quant_pivot_models::{
 use quant_pivot_storage::clickhouse::ClickHousePool;
 
 use crate::{
-    sql_contract_registry::{
+    clickhouse::query_limits::{
         FEATURE_CELLS_FOR_VECTORS, FEATURE_PARITY_PAGE, FEATURE_PARITY_SUMMARY,
         MODEL_INPUTS_FOR_RUNS, SERVING_COMPLETIONS_FOR_RUNS,
     },
@@ -47,7 +51,7 @@ impl FeatureParityEventRepository for ChFeatureParityEventRepository {
         let window = PageWindow::from_query(&query);
         let filters = EventFilters::from_query(&query);
         let count = bind_filters(
-            FEATURE_PARITY_PAGE.clickhouse_query(
+            FEATURE_PARITY_PAGE.query(
                 self.pool.client(),
                 "SELECT count() FROM quant_feature_parity_event FINAL \
                  WHERE (? = '' OR parity_run_id = ?) \
@@ -67,7 +71,7 @@ impl FeatureParityEventRepository for ChFeatureParityEventRepository {
         .await?;
 
         let rows = bind_filters(
-            FEATURE_PARITY_PAGE.clickhouse_query(
+            FEATURE_PARITY_PAGE.query(
                 self.pool.client(),
                 "SELECT ?fields FROM quant_feature_parity_event FINAL \
                  WHERE (? = '' OR parity_run_id = ?) \
@@ -104,7 +108,7 @@ impl FeatureParityEventRepository for ChFeatureParityEventRepository {
         }
 
         let states = FEATURE_PARITY_SUMMARY
-            .clickhouse_query(
+            .query(
                 self.pool.client(),
                 "SELECT toString(cell_state) AS key, count() AS count \
                  FROM quant_feature_event \
@@ -114,7 +118,7 @@ impl FeatureParityEventRepository for ChFeatureParityEventRepository {
             .fetch_all::<CountRow>()
             .await?;
         let reasons = FEATURE_PARITY_SUMMARY
-            .clickhouse_query(
+            .query(
                 self.pool.client(),
                 "SELECT assumeNotNull(reason) AS key, count() AS count \
                  FROM quant_feature_event \
@@ -159,7 +163,7 @@ impl ServingEvidenceRepository for ChFeatureParityEventRepository {
             return Ok(Vec::new());
         }
         SERVING_COMPLETIONS_FOR_RUNS
-            .clickhouse_query(
+            .query(
                 self.pool.client(),
                 "SELECT ?fields FROM quant_serving_evidence_completion \
                  WHERE model_run_id IN ? \
@@ -179,7 +183,7 @@ impl ServingEvidenceRepository for ChFeatureParityEventRepository {
             return Ok(Vec::new());
         }
         MODEL_INPUTS_FOR_RUNS
-            .clickhouse_query(
+            .query(
                 self.pool.client(),
                 "SELECT ?fields FROM quant_model_input_event \
                  WHERE model_run_id IN ? \
@@ -199,7 +203,7 @@ impl ServingEvidenceRepository for ChFeatureParityEventRepository {
             return Ok(Vec::new());
         }
         FEATURE_CELLS_FOR_VECTORS
-            .clickhouse_query(
+            .query(
                 self.pool.client(),
                 "SELECT ?fields FROM quant_feature_event \
                  WHERE feature_vector_id IN ? \
@@ -262,10 +266,7 @@ impl EventFilters {
     }
 }
 
-fn bind_filters(
-    query: clickhouse::query::Query,
-    filters: &EventFilters,
-) -> clickhouse::query::Query {
+fn bind_filters(query: Query, filters: &EventFilters) -> Query {
     query
         .bind(&filters.parity_run_id)
         .bind(&filters.parity_run_id)

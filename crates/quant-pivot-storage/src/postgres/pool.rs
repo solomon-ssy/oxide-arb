@@ -9,7 +9,8 @@
 //! - Post-connect verification optionally confirms that GUCs actually took effect,
 //!   catching silent stripping by connection poolers like `PgBouncer` in transaction mode.
 
-use super::ensure;
+use std::time::Duration;
+
 use num_traits::ToPrimitive;
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::config::PostgresConfig;
@@ -17,10 +18,9 @@ use sea_orm::{
     ConnectOptions, ConnectionTrait, Database, DatabaseConnection, DbBackend, Statement,
     sqlx::postgres::PgListener,
 };
-use std::time::Duration;
 use tracing::{debug, error, info};
 
-use crate::sql_contract_registry::{POSTGRES_HEALTH, POSTGRES_SESSION_PARAMETER};
+use super::ensure;
 
 pub struct PostgresPool {
     db: DatabaseConnection,
@@ -166,10 +166,7 @@ impl PostgresPool {
     /// Verify the connection is alive.
     pub async fn health_check(&self) -> Result<(), StorageError> {
         self.db
-            .execute_raw(
-                POSTGRES_HEALTH
-                    .postgres_statement(Statement::from_string(DbBackend::Postgres, "SELECT 1")),
-            )
+            .execute_raw(Statement::from_string(DbBackend::Postgres, "SELECT 1"))
             .await
             .map_err(|e| {
                 StorageError::Connection(format!("PostgreSQL health check failed: {e}"))
@@ -244,10 +241,7 @@ impl PostgresPool {
         let sql = format!("SHOW {param}");
         let result = self
             .db
-            .query_one_raw(
-                POSTGRES_SESSION_PARAMETER
-                    .postgres_statement(Statement::from_string(DbBackend::Postgres, sql)),
-            )
+            .query_one_raw(Statement::from_string(DbBackend::Postgres, sql))
             .await
             .map_err(|e| StorageError::Connection(format!("Failed to SHOW {param}: {e}")))?;
 

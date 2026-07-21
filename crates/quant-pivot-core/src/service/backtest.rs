@@ -1,4 +1,4 @@
-//! Offline backtest orchestration (Phase 3.6).
+//! Offline backtest orchestration.
 //!
 //! Replays a registered model over exact immutable v1 Parquet rows plus their
 //! Dataset-bound Source Slice execution facts. Frozen
@@ -16,15 +16,12 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
-use tokio::{runtime::Handle, task};
-use tokio_util::sync::CancellationToken;
-
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError, storage::StorageError};
 use quant_pivot_models::{
-    domain::{
+    domain::quant::{
         BacktestReportInfo, JobProgressSink, ModelComparisonReportInfo, ModelVersionInfo,
         NewBacktestReport, NewModelComparisonReport, NewModelRun, NewModelVersion,
-        ResearchJobProgress, TrainingDatasetInfo,
+        TrainingDatasetInfo,
     },
     enums::quant::{
         ModelRunErrorCode, ModelRunKind, ModelRunStatus, PublicationStatus, TrainingDatasetStatus,
@@ -33,8 +30,8 @@ use quant_pivot_models::{
     runtime_config::PortfolioConfig,
     types::{
         BacktestReportId, Bps, ContentHash, DecisionPolicySnapshotId, MarketId,
-        ModelComparisonReportId, ModelRunId, ModelVersionId, TokenId, TrainingDatasetId, Usd,
-        model_lineage::ModelVersionDerivation,
+        ModelComparisonReportId, ModelRunId, ModelVersionId, ResearchJobProgress, TokenId,
+        TrainingDatasetId, Usd, model_lineage::ModelVersionDerivation,
     },
 };
 use quant_pivot_repository::traits::{
@@ -56,6 +53,9 @@ use quant_pivot_research::{
     },
     training::{LabelName, TrainingExample},
 };
+use rust_decimal::Decimal;
+use tokio::{runtime::Handle, task};
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     prefetch::{
@@ -185,14 +185,14 @@ impl BacktestService {
     }
 
     /// Run a backtest purely to harvest per-sample `(score, outcome)` pairs for
-    /// Phase 11.3 `ProbabilityCalibrator` fitting.
+    /// `ProbabilityCalibrator` fitting.
     ///
     /// Persists the same backtest-report / model-run ledger rows as [`Self::run`]
     /// (a full audit trail of the exact PIT replay that produced the
     /// calibration evidence — recomputed features/factors, never trusted from
     /// Parquet, so the calibrator fits the identical computation graph the
     /// live plane scores), and additionally returns the raw per-sample
-    /// outcomes `run()` discards.
+    /// outcomes `run` discards.
     pub async fn run_for_calibration(
         &self,
         input: BacktestInput,
@@ -452,7 +452,7 @@ impl BacktestService {
     /// conservative governed baseline stays in force. Does **not** touch
     /// `return_model`: the return model is calibrated separately, from an
     /// independent held-out split, via `ProbabilityCalibrator` +
-    /// `ModelGovernanceService::bind_calibration` (Phase 11.3 §5) — never as a
+    /// `ModelGovernanceService::bind_calibration` — never as a
     /// same-backtest side effect (that would be a leaked "calibration").
     async fn maybe_calibrate(
         &self,
@@ -900,14 +900,11 @@ fn settlement_outcome(example: &TrainingExample, label: &LabelName) -> (bool, bo
         .iter()
         .find(|row| row.label_name == *label)
         .map_or((false, false), |row| {
-            (row.value >= rust_decimal::Decimal::ONE, row.is_resolved)
+            (row.value >= Decimal::ONE, row.is_resolved)
         })
 }
 
-fn max_adverse_excursion(
-    example: &TrainingExample,
-    label: &LabelName,
-) -> Option<rust_decimal::Decimal> {
+fn max_adverse_excursion(example: &TrainingExample, label: &LabelName) -> Option<Decimal> {
     example
         .labels
         .iter()

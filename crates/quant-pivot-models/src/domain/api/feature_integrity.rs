@@ -8,7 +8,10 @@ use serde::{Deserialize, Serialize};
 use validator::Validate;
 
 use crate::{
-    domain::{FeatureParityRunInfo, FeatureParityStateInfo, pagination::PageRequest},
+    domain::{
+        pagination::PageRequest,
+        quant::{FeatureParityRunInfo, FeatureParityStateInfo},
+    },
     enums::quant::{
         FeatureCellState, FeatureParityEventStatus, FeatureParityLatchState, FeatureParityRunKind,
         FeatureParityRunStatus, FeatureParityStage,
@@ -234,7 +237,7 @@ mod tests {
     use chrono::Utc;
 
     use crate::{
-        domain::{FeatureParityRunInfo, FeatureParityRunView},
+        domain::{api::FeatureParityRunView, quant::FeatureParityRunInfo},
         enums::quant::{FeatureParityRunKind, FeatureParityRunStatus},
         types::{
             ContentHash, DiagnosticCode, FeatureParityRunId, ModelVersionId,

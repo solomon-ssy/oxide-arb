@@ -1,13 +1,14 @@
 //! Authentication API contract (login, refresh, logout, `/me`).
 
-use crate::{
-    domain::{MenuTreeNode, RoleInfo, UserInfo},
-    enums::rbac::UserStatus,
-    types::{RoleId, UserId},
-};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use validator::Validate;
+
+use crate::{
+    domain::rbac::{MenuTreeNode, RoleInfo, UserInfo},
+    enums::rbac::UserStatus,
+    types::{RoleId, UserId},
+};
 
 /// Login credentials.
 #[derive(Debug, Deserialize, Validate)]

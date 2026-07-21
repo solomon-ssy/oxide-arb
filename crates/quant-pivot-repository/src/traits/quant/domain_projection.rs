@@ -2,8 +2,11 @@ use chrono::{DateTime, NaiveDate, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{
-        CryptoPriceProjectionInfo, CryptoPriceReport, DomainEventEnvelope, DomainSourceCheckpoint,
-        WeatherDailyTemperatureProjectionInfo, WeatherObservationReport,
+        data_plane::{
+            CryptoPriceReport, DomainEventEnvelope, DomainSourceCheckpoint,
+            WeatherObservationReport,
+        },
+        quant::{CryptoPriceProjectionInfo, WeatherDailyTemperatureProjectionInfo},
     },
     types::{DomainEventId, DomainInstrumentKey, DomainSourceId, IcaoStation, WorkerId},
 };

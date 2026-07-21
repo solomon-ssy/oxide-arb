@@ -1,15 +1,21 @@
 //! Single-statement, DB-authoritative Config resource inventory.
 
-use crate::postgres::primitives::enum_value;
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    domain::{ConfigResourceInventoryInfo, ConfigResourceInventoryRow},
+    domain::governance::{ConfigResourceInventoryInfo, ConfigResourceInventoryRow},
     entities::{
-        decision_policy_snapshot, policy_activation, policy_activation_guard, policy_approval,
-        policy_revision,
+        decision_policy_snapshot::{
+            Column as DecisionPolicySnapshotColumn, Entity as DecisionPolicySnapshotEntity,
+        },
+        policy_activation::{Column as PolicyActivationColumn, Entity as PolicyActivationEntity},
+        policy_activation_guard::{
+            Column as PolicyActivationGuardColumn, Entity as PolicyActivationGuardEntity,
+        },
+        policy_approval::{Column, Entity},
+        policy_revision::{Column as PolicyRevisionColumn, Entity as PolicyRevisionEntity},
     },
     enums::runtime_config::{ConfigResourceKind, PolicyApprovalDecision, PolicyRevisionStatus},
     types::{ContentHash, DecisionPolicySnapshotId, PolicyBundleGeneration, PolicyRevisionId},
@@ -20,16 +26,15 @@ use sea_query::{
     extension::postgres::PgExpr,
 };
 
+use crate::postgres::primitives::enum_value;
+
 const VALIDATION_SUBJECT_FIELD: &str = "subject";
 const VALIDATION_BASE_GENERATION_FIELD: &str = "base_generation";
 
 pub(super) fn approved_base_generation() -> Expr {
-    Expr::col((
-        policy_approval::Entity,
-        policy_approval::Column::ValidationSubject,
-    ))
-    .cast_json_field(VALIDATION_BASE_GENERATION_FIELD)
-    .cast_as(Alias::new("bigint"))
+    Expr::col((Entity, Column::ValidationSubject))
+        .cast_json_field(VALIDATION_BASE_GENERATION_FIELD)
+        .cast_as(Alias::new("bigint"))
 }
 
 #[derive(Iden)]
@@ -87,62 +92,44 @@ fn resources_query() -> SelectStatement {
     Query::select()
         .distinct()
         .expr_as(
-            Expr::col((
-                policy_revision::Entity,
-                policy_revision::Column::ResourceKind,
-            )),
+            Expr::col((PolicyRevisionEntity, PolicyRevisionColumn::ResourceKind)),
             Resources::ResourceKind,
         )
-        .from(policy_revision::Entity)
+        .from(PolicyRevisionEntity)
         .to_owned()
 }
 
 fn current_activation_query() -> SelectStatement {
     Query::select()
-        .distinct_on([(
-            policy_activation::Entity,
-            policy_activation::Column::ResourceKind,
-        )])
+        .distinct_on([(PolicyActivationEntity, PolicyActivationColumn::ResourceKind)])
         .expr_as(
-            Expr::col((
-                policy_activation::Entity,
-                policy_activation::Column::ResourceKind,
-            )),
+            Expr::col((PolicyActivationEntity, PolicyActivationColumn::ResourceKind)),
             CurrentActivation::ResourceKind,
         )
         .expr_as(
             Expr::col((
-                policy_activation::Entity,
-                policy_activation::Column::PolicyRevisionId,
+                PolicyActivationEntity,
+                PolicyActivationColumn::PolicyRevisionId,
             )),
             CurrentActivation::PolicyRevisionId,
         )
         .expr_as(
-            Expr::col((
-                policy_activation::Entity,
-                policy_activation::Column::ActivatedAt,
-            )),
+            Expr::col((PolicyActivationEntity, PolicyActivationColumn::ActivatedAt)),
             CurrentActivation::ActivatedAt,
         )
-        .from(policy_activation::Entity)
+        .from(PolicyActivationEntity)
         .order_by(
-            (
-                policy_activation::Entity,
-                policy_activation::Column::ResourceKind,
-            ),
+            (PolicyActivationEntity, PolicyActivationColumn::ResourceKind),
             Order::Asc,
         )
         .order_by(
-            (
-                policy_activation::Entity,
-                policy_activation::Column::ActivatedAt,
-            ),
+            (PolicyActivationEntity, PolicyActivationColumn::ActivatedAt),
             Order::Desc,
         )
         .order_by(
             (
-                policy_activation::Entity,
-                policy_activation::Column::PolicyActivationId,
+                PolicyActivationEntity,
+                PolicyActivationColumn::PolicyActivationId,
             ),
             Order::Desc,
         )
@@ -152,125 +139,76 @@ fn current_activation_query() -> SelectStatement {
 fn pending_approval_query() -> SelectStatement {
     Query::select()
         .expr_as(
-            Expr::col((
-                policy_approval::Entity,
-                policy_approval::Column::ResourceKind,
-            )),
+            Expr::col((Entity, Column::ResourceKind)),
             PendingApproval::ResourceKind,
         )
         .expr_as(
-            Expr::col((
-                policy_approval::Entity,
-                policy_approval::Column::PolicyApprovalId,
-            ))
-            .count(),
+            Expr::col((Entity, Column::PolicyApprovalId)).count(),
             PendingApproval::ApprovalCount,
         )
-        .from(policy_approval::Entity)
+        .from(Entity)
         .join(
             JoinType::LeftJoin,
-            policy_activation::Entity,
-            Expr::col((
-                policy_approval::Entity,
-                policy_approval::Column::PolicyApprovalId,
-            ))
-            .equals((
-                policy_activation::Entity,
-                policy_activation::Column::PolicyApprovalId,
+            PolicyActivationEntity,
+            Expr::col((Entity, Column::PolicyApprovalId)).equals((
+                PolicyActivationEntity,
+                PolicyActivationColumn::PolicyApprovalId,
             )),
         )
         .join(
             JoinType::InnerJoin,
-            policy_revision::Entity,
-            Expr::col((
-                policy_approval::Entity,
-                policy_approval::Column::PolicyRevisionId,
-            ))
-            .equals((
-                policy_revision::Entity,
-                policy_revision::Column::PolicyRevisionId,
-            )),
+            PolicyRevisionEntity,
+            Expr::col((Entity, Column::PolicyRevisionId))
+                .equals((PolicyRevisionEntity, PolicyRevisionColumn::PolicyRevisionId)),
         )
-        .cross_join(policy_activation_guard::Entity)
+        .cross_join(PolicyActivationGuardEntity)
         .and_where(
             Expr::col((
-                policy_activation::Entity,
-                policy_activation::Column::PolicyActivationId,
+                PolicyActivationEntity,
+                PolicyActivationColumn::PolicyActivationId,
             ))
             .is_null(),
         )
         .and_where(
-            Expr::col((policy_approval::Entity, policy_approval::Column::Decision))
-                .eq(enum_value(&PolicyApprovalDecision::Approved)),
+            Expr::col((Entity, Column::Decision)).eq(enum_value(&PolicyApprovalDecision::Approved)),
         )
         .and_where(
-            Expr::col((policy_revision::Entity, policy_revision::Column::Status))
+            Expr::col((PolicyRevisionEntity, PolicyRevisionColumn::Status))
                 .eq(enum_value(&PolicyRevisionStatus::Validated)),
         )
         .and_where(
-            Expr::col((
-                policy_revision::Entity,
-                policy_revision::Column::ResourceKind,
-            ))
-            .equals((
-                policy_approval::Entity,
-                policy_approval::Column::ResourceKind,
-            )),
+            Expr::col((PolicyRevisionEntity, PolicyRevisionColumn::ResourceKind))
+                .equals((Entity, Column::ResourceKind)),
         )
         .and_where(
-            Expr::col((
-                policy_approval::Entity,
-                policy_approval::Column::ValidationSubject,
-            ))
-            .eq(Expr::col((
-                policy_revision::Entity,
-                policy_revision::Column::ValidationEvidence,
+            Expr::col((Entity, Column::ValidationSubject)).eq(Expr::col((
+                PolicyRevisionEntity,
+                PolicyRevisionColumn::ValidationEvidence,
             ))
             .get_json_field(VALIDATION_SUBJECT_FIELD)),
         )
         .and_where(
-            Expr::col((
-                policy_revision::Entity,
-                policy_revision::Column::RevisionHash,
-            ))
-            .equals((
-                policy_approval::Entity,
-                policy_approval::Column::RevisionHash,
-            )),
+            Expr::col((PolicyRevisionEntity, PolicyRevisionColumn::RevisionHash))
+                .equals((Entity, Column::RevisionHash)),
         )
         .and_where(
             Expr::col((
-                policy_revision::Entity,
-                policy_revision::Column::PreflightExpiresAt,
+                PolicyRevisionEntity,
+                PolicyRevisionColumn::PreflightExpiresAt,
             ))
             .gt(Expr::current_timestamp()),
         )
         .and_where(approved_base_generation().eq(Expr::col((
-            policy_activation_guard::Entity,
-            policy_activation_guard::Column::Generation,
+            PolicyActivationGuardEntity,
+            PolicyActivationGuardColumn::Generation,
         ))))
-        .and_where(
-            Expr::col((
-                policy_activation_guard::Entity,
-                policy_activation_guard::Column::Id,
-            ))
-            .eq(1),
-        )
+        .and_where(Expr::col((PolicyActivationGuardEntity, PolicyActivationGuardColumn::Id)).eq(1))
         .cond_where(
             Condition::any()
-                .add(
-                    Expr::col((policy_approval::Entity, policy_approval::Column::ExpiresAt))
-                        .is_null(),
-                )
-                .add(
-                    Expr::col((policy_approval::Entity, policy_approval::Column::ExpiresAt))
-                        .gt(Expr::current_timestamp()),
-                ),
+                .add(Expr::col((Entity, Column::ExpiresAt)).is_null())
+                .add(Expr::col((Entity, Column::ExpiresAt)).gt(Expr::current_timestamp())),
         )
-        .group_by_col((
-            policy_approval::Entity,
-            policy_approval::Column::ResourceKind,
-        ))
+        .group_by_col((Entity, Column::ResourceKind))
         .to_owned()
 }
 
@@ -282,43 +220,43 @@ fn inventory_query() -> SelectStatement {
         )
         .expr_as(
             Expr::col((
-                policy_activation_guard::Entity,
-                policy_activation_guard::Column::Generation,
+                PolicyActivationGuardEntity,
+                PolicyActivationGuardColumn::Generation,
             )),
             InventoryColumn::GuardGeneration,
         )
         .expr_as(
             Expr::col((
-                policy_activation_guard::Entity,
-                policy_activation_guard::Column::CurrentSnapshotId,
+                PolicyActivationGuardEntity,
+                PolicyActivationGuardColumn::CurrentSnapshotId,
             )),
             InventoryColumn::GuardSnapshotId,
         )
         .expr_as(
             Expr::col((
-                policy_activation_guard::Entity,
-                policy_activation_guard::Column::CurrentSnapshotHash,
+                PolicyActivationGuardEntity,
+                PolicyActivationGuardColumn::CurrentSnapshotHash,
             )),
             InventoryColumn::GuardSnapshotHash,
         )
         .expr_as(
             Expr::col((
-                decision_policy_snapshot::Entity,
-                decision_policy_snapshot::Column::BundleGeneration,
+                DecisionPolicySnapshotEntity,
+                DecisionPolicySnapshotColumn::BundleGeneration,
             )),
             InventoryColumn::SnapshotGeneration,
         )
         .expr_as(
             Expr::col((
-                decision_policy_snapshot::Entity,
-                decision_policy_snapshot::Column::DecisionPolicySnapshotId,
+                DecisionPolicySnapshotEntity,
+                DecisionPolicySnapshotColumn::DecisionPolicySnapshotId,
             )),
             InventoryColumn::SnapshotId,
         )
         .expr_as(
             Expr::col((
-                decision_policy_snapshot::Entity,
-                decision_policy_snapshot::Column::SnapshotHash,
+                DecisionPolicySnapshotEntity,
+                DecisionPolicySnapshotColumn::SnapshotHash,
             )),
             InventoryColumn::SnapshotHash,
         )
@@ -330,10 +268,7 @@ fn inventory_query() -> SelectStatement {
             InventoryColumn::ActiveRevisionId,
         )
         .expr_as(
-            Expr::col((
-                policy_revision::Entity,
-                policy_revision::Column::RevisionHash,
-            )),
+            Expr::col((PolicyRevisionEntity, PolicyRevisionColumn::RevisionHash)),
             InventoryColumn::ActiveRevisionHash,
         )
         .expr_as(
@@ -345,17 +280,17 @@ fn inventory_query() -> SelectStatement {
             InventoryColumn::PendingApprovalCount,
         )
         .from_subquery(resources_query(), Resources::Table)
-        .cross_join(policy_activation_guard::Entity)
+        .cross_join(PolicyActivationGuardEntity)
         .join(
             JoinType::LeftJoin,
-            decision_policy_snapshot::Entity,
+            DecisionPolicySnapshotEntity,
             Expr::col((
-                policy_activation_guard::Entity,
-                policy_activation_guard::Column::CurrentSnapshotId,
+                PolicyActivationGuardEntity,
+                PolicyActivationGuardColumn::CurrentSnapshotId,
             ))
             .equals((
-                decision_policy_snapshot::Entity,
-                decision_policy_snapshot::Column::DecisionPolicySnapshotId,
+                DecisionPolicySnapshotEntity,
+                DecisionPolicySnapshotColumn::DecisionPolicySnapshotId,
             )),
         )
         .join_subquery(
@@ -367,15 +302,12 @@ fn inventory_query() -> SelectStatement {
         )
         .join(
             JoinType::LeftJoin,
-            policy_revision::Entity,
+            PolicyRevisionEntity,
             Expr::col((
                 CurrentActivation::Table,
                 CurrentActivation::PolicyRevisionId,
             ))
-            .equals((
-                policy_revision::Entity,
-                policy_revision::Column::PolicyRevisionId,
-            )),
+            .equals((PolicyRevisionEntity, PolicyRevisionColumn::PolicyRevisionId)),
         )
         .join_subquery(
             JoinType::LeftJoin,
@@ -384,13 +316,7 @@ fn inventory_query() -> SelectStatement {
             Expr::col((Resources::Table, Resources::ResourceKind))
                 .equals((PendingApproval::Table, PendingApproval::ResourceKind)),
         )
-        .and_where(
-            Expr::col((
-                policy_activation_guard::Entity,
-                policy_activation_guard::Column::Id,
-            ))
-            .eq(1),
-        )
+        .and_where(Expr::col((PolicyActivationGuardEntity, PolicyActivationGuardColumn::Id)).eq(1))
         .order_by((Resources::Table, Resources::ResourceKind), Order::Asc)
         .to_owned()
 }
@@ -529,11 +455,12 @@ pub(super) async fn load(
 
 #[cfg(test)]
 mod tests {
-    use super::load;
     use std::collections::BTreeMap;
 
     use quant_pivot_error::storage::StorageError;
     use sea_orm::{DbBackend, MockDatabase, Value};
+
+    use super::load;
 
     #[tokio::test]
     async fn load_executes_one_consistent_inventory_statement() {

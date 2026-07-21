@@ -1,9 +1,14 @@
 //! Venue account read API (live + persisted snapshots).
 
-use actix_web::{http::Method, web};
+use actix_web::{
+    http::Method,
+    web::{Data, Path, Query},
+};
 use quant_pivot_models::{
     domain::{
-        AccountSnapshotView, EquitySnapshotQuery, EquitySnapshotView, LiveAccountView, Paginated,
+        api::{AccountSnapshotView, EquitySnapshotView, LiveAccountView},
+        pagination::Paginated,
+        quant::EquitySnapshotQuery,
     },
     enums::rbac::{Operation, ResourceType},
     types::{AccountSnapshotId, EquitySnapshotId},
@@ -52,9 +57,7 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
     ]
 }
 
-async fn live_account(
-    state: web::Data<AppState>,
-) -> Result<WebResponse<LiveAccountView>, WebError> {
+async fn live_account(state: Data<AppState>) -> Result<WebResponse<LiveAccountView>, WebError> {
     let info = state.account_read.live_account().await?;
     Ok(WebResponse::ok(LiveAccountView::from_live(
         info.fetched_at,
@@ -64,8 +67,8 @@ async fn live_account(
 }
 
 async fn get_snapshot(
-    state: web::Data<AppState>,
-    id: web::Path<AccountSnapshotId>,
+    state: Data<AppState>,
+    id: Path<AccountSnapshotId>,
 ) -> Result<WebResponse<AccountSnapshotView>, WebError> {
     let info = state
         .account_read
@@ -76,7 +79,7 @@ async fn get_snapshot(
 }
 
 async fn latest_equity_snapshot(
-    state: web::Data<AppState>,
+    state: Data<AppState>,
 ) -> Result<WebResponse<EquitySnapshotView>, WebError> {
     let info = state
         .account_read
@@ -87,8 +90,8 @@ async fn latest_equity_snapshot(
 }
 
 async fn get_equity_snapshot(
-    state: web::Data<AppState>,
-    id: web::Path<EquitySnapshotId>,
+    state: Data<AppState>,
+    id: Path<EquitySnapshotId>,
 ) -> Result<WebResponse<EquitySnapshotView>, WebError> {
     let info = state
         .account_read
@@ -99,8 +102,8 @@ async fn get_equity_snapshot(
 }
 
 async fn list_equity_snapshots(
-    state: web::Data<AppState>,
-    query: web::Query<EquitySnapshotQuery>,
+    state: Data<AppState>,
+    query: Query<EquitySnapshotQuery>,
 ) -> Result<WebResponse<Paginated<EquitySnapshotView>>, WebError> {
     let page = state
         .account_read

@@ -1,13 +1,17 @@
-//! `quant_backtest_path_set` table entity (Phase 11.5 CPCV result).
+//! `quant_backtest_path_set` table entity for CPCV results.
 
+use chrono::{DateTime, Utc};
+use rust_decimal::Decimal;
+use sea_orm::entity::prelude::*;
+
+use super::{
+    decision_policy_snapshot, quant_model_run, quant_model_version, quant_training_dataset,
+};
 use crate::types::{
     BacktestPathSetId, ContentHash, DecisionPolicySnapshotId, ModelRunId, ModelVersionId,
     TrainingDatasetId,
     backtest::{BacktestPaths, SharpeDistribution},
 };
-use chrono::{DateTime, Utc};
-use rust_decimal::Decimal;
-use sea_orm::entity::prelude::*;
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -48,28 +52,28 @@ pub struct Model {
         from = "model_version_id",
         to = "model_version_id"
     )]
-    pub model_version: BelongsTo<super::quant_model_version::Entity>,
+    pub model_version: BelongsTo<quant_model_version::Entity>,
     #[sea_orm(
         belongs_to,
         relation_enum = "ModelRun",
         from = "model_run_id",
         to = "model_run_id"
     )]
-    pub model_run: BelongsTo<super::quant_model_run::Entity>,
+    pub model_run: BelongsTo<quant_model_run::Entity>,
     #[sea_orm(
         belongs_to,
         relation_enum = "TrainingDataset",
         from = "training_dataset_id",
         to = "training_dataset_id"
     )]
-    pub training_dataset: BelongsTo<super::quant_training_dataset::Entity>,
+    pub training_dataset: BelongsTo<quant_training_dataset::Entity>,
     #[sea_orm(
         belongs_to,
         relation_enum = "DecisionPolicySnapshot",
         from = "decision_policy_snapshot_id",
         to = "decision_policy_snapshot_id"
     )]
-    pub decision_policy_snapshot: BelongsTo<super::decision_policy_snapshot::Entity>,
+    pub decision_policy_snapshot: BelongsTo<decision_policy_snapshot::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

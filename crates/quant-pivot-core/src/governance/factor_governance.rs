@@ -1,5 +1,5 @@
 //! [`FactorGovernanceService`]: publish / retire orchestration for governed factor
-//! definitions (Phase 05.7).
+//! definitions.
 
 use std::sync::Arc;
 
@@ -7,8 +7,11 @@ use async_trait::async_trait;
 use quant_pivot_error::{QuantError, QuantResult, governance::GovernanceError};
 use quant_pivot_models::{
     domain::{
-        FactorDefinitionInfo, FactorGovernancePort, GovernanceActor, PublishFactorCommand,
-        PublishFactorsBatchCommand, RegisterFactorDefinitionsCommand, RetireFactorCommand,
+        ports::{
+            FactorGovernancePort, GovernanceActor, PublishFactorCommand,
+            PublishFactorsBatchCommand, RegisterFactorDefinitionsCommand, RetireFactorCommand,
+        },
+        quant::FactorDefinitionInfo,
     },
     enums::quant::PublicationStatus,
     types::FactorDefinitionId,

@@ -3,10 +3,10 @@
 
 use std::{collections::HashSet, future::Future, pin::Pin};
 
-use sea_orm::{ActiveValue::Set, DbErr, EntityTrait, sea_query::OnConflict};
+use sea_orm::{ActiveValue::Set, DatabaseTransaction, DbErr, EntityTrait, sea_query::OnConflict};
 
 use crate::{
-    entities::casbin_rule,
+    entities::casbin_rule::{ActiveModel, Column, Entity},
     enums::rbac::{
         Operation, ResourceType,
         casbin::{OBJECT_TYPE_RESOURCE, PTYPE_GROUPING, PTYPE_POLICY},
@@ -41,7 +41,7 @@ pub const CASBIN_SEED: SeedSpec = SeedSpec {
     hydrate: hydrate_boxed,
 };
 
-/// Resources granted read access to every non-super-admin built-in role (Phase 0).
+/// Resources granted read access to every non-super-admin built-in role.
 const READ_RESOURCES: &[ResourceType] = &[
     ResourceType::System,
     ResourceType::Market,
@@ -105,9 +105,9 @@ fn expected_policy_keys(ctx: &SeedContext) -> Result<HashSet<[String; 7]>, DbErr
     Ok(keys)
 }
 
-async fn hydrate(db: &sea_orm::DatabaseTransaction, ctx: &SeedContext) -> Result<(), DbErr> {
+async fn hydrate(db: &DatabaseTransaction, ctx: &SeedContext) -> Result<(), DbErr> {
     let expected = expected_policy_keys(ctx)?;
-    let actual = casbin_rule::Entity::find()
+    let actual = Entity::find()
         .all(db)
         .await?
         .into_iter()
@@ -223,12 +223,8 @@ fn emergency_operator_policies() -> Vec<(ResourceType, Operation)> {
     policies
 }
 
-fn policy_row(
-    role_code: &str,
-    resource: ResourceType,
-    operation: Operation,
-) -> casbin_rule::ActiveModel {
-    casbin_rule::ActiveModel {
+fn policy_row(role_code: &str, resource: ResourceType, operation: Operation) -> ActiveModel {
+    ActiveModel {
         ptype: Set(PTYPE_POLICY.to_owned()),
         v0: Set(role_code.to_owned()),
         v1: Set(resource.as_str().to_owned()),
@@ -240,8 +236,8 @@ fn policy_row(
     }
 }
 
-fn grouping_row(subject: &str, role_code: &str) -> casbin_rule::ActiveModel {
-    casbin_rule::ActiveModel {
+fn grouping_row(subject: &str, role_code: &str) -> ActiveModel {
+    ActiveModel {
         ptype: Set(PTYPE_GROUPING.to_owned()),
         v0: Set(subject.to_owned()),
         v1: Set(role_code.to_owned()),
@@ -253,7 +249,7 @@ fn grouping_row(subject: &str, role_code: &str) -> casbin_rule::ActiveModel {
     }
 }
 
-pub async fn load(db: &sea_orm::DatabaseTransaction, ctx: &mut SeedContext) -> Result<u64, DbErr> {
+pub async fn load(db: &DatabaseTransaction, ctx: &mut SeedContext) -> Result<u64, DbErr> {
     let admin_id = ctx
         .require::<UserId>(ADMIN_USER_ARTIFACT)
         .map_err(|error| DbErr::Custom(error.to_string()))?
@@ -266,16 +262,16 @@ pub async fn load(db: &sea_orm::DatabaseTransaction, ctx: &mut SeedContext) -> R
         }
     }
 
-    casbin_rule::Entity::insert_many(models)
+    Entity::insert_many(models)
         .on_conflict(
             OnConflict::columns([
-                casbin_rule::Column::Ptype,
-                casbin_rule::Column::V0,
-                casbin_rule::Column::V1,
-                casbin_rule::Column::V2,
-                casbin_rule::Column::V3,
-                casbin_rule::Column::V4,
-                casbin_rule::Column::V5,
+                Column::Ptype,
+                Column::V0,
+                Column::V1,
+                Column::V2,
+                Column::V3,
+                Column::V4,
+                Column::V5,
             ])
             .do_nothing()
             .to_owned(),
@@ -285,14 +281,14 @@ pub async fn load(db: &sea_orm::DatabaseTransaction, ctx: &mut SeedContext) -> R
 }
 
 fn load_boxed<'a>(
-    db: &'a sea_orm::DatabaseTransaction,
+    db: &'a DatabaseTransaction,
     ctx: &'a mut SeedContext,
 ) -> Pin<Box<dyn Future<Output = Result<u64, DbErr>> + Send + 'a>> {
     Box::pin(load(db, ctx))
 }
 
 fn hydrate_boxed<'a>(
-    db: &'a sea_orm::DatabaseTransaction,
+    db: &'a DatabaseTransaction,
     ctx: &'a mut SeedContext,
 ) -> Pin<Box<dyn Future<Output = Result<(), DbErr>> + Send + 'a>> {
     Box::pin(hydrate(db, ctx))
@@ -300,12 +296,13 @@ fn hydrate_boxed<'a>(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::{READ_RESOURCES, builtin_role_policies};
     use crate::{
         enums::rbac::{Operation, ResourceType},
         seed::rbac::{ROLE_RISK_OWNER, ROLE_VIEWER},
     };
-    use std::collections::HashSet;
 
     #[test]
     fn every_seeded_policy_is_in_the_permission_catalog() {

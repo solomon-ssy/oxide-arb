@@ -1,4 +1,4 @@
-//! Category-scoped training artifacts (Phase 11.2.2).
+//! Category-scoped training artifacts.
 //!
 //! [`infer_training_category_scope`] derives `WeightedFactorModelArtifact.category_scope`
 //! from the governed model-spec contract, the frozen selection policy, and the
@@ -15,7 +15,7 @@ use rust_decimal::Decimal;
 use super::FactorWeight;
 use crate::{
     factors::names::{DOMAIN_CRYPTO_BETA_REGIME, DOMAIN_CRYPTO_STRIKE_PRESSURE},
-    features::{FeatureValue, names::market as market_names},
+    features::{FeatureValue, names::market::CATEGORY},
     selection::ModelFeatureRequirements,
     training::TrainingExample,
 };
@@ -48,7 +48,7 @@ fn categories_from_examples(examples: &[TrainingExample]) -> Option<MarketCatego
         .filter_map(|example| {
             example
                 .feature_vector
-                .value(&market_names::CATEGORY)
+                .value(&CATEGORY)
                 .and_then(|value| match value {
                     FeatureValue::Category(category) => Some(*category),
                     _ => None,
@@ -94,6 +94,18 @@ pub fn validate_category_scope_weights(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
+    use chrono::Utc;
+    use quant_pivot_models::{
+        domain::data_plane::DecisionClock,
+        enums::{common::MarketCategory, quant::DataQualityStatus},
+        types::{
+            MarketId, SchemaVersion, TokenId, TrainingExampleId, training::TrainingSampleSource,
+        },
+    };
+    use rust_decimal_macros::dec;
+
     use super::{
         super::FactorWeight, infer_training_category_scope, validate_category_scope_weights,
     };
@@ -101,27 +113,17 @@ mod tests {
         factors::names::{DOMAIN_CRYPTO_STRIKE_PRESSURE, LIQUIDITY_DEPTH},
         features::{
             FeatureCell, FeatureName, FeatureStaleness, FeatureValue, FeatureVector,
-            names::market as market_names,
+            names::market::CATEGORY,
         },
         selection::ModelFeatureRequirements,
         training::{TrainingExample, fixtures},
     };
-    use chrono::Utc;
-    use quant_pivot_models::{
-        domain::DecisionClock,
-        enums::{common::MarketCategory, quant::DataQualityStatus},
-        types::{
-            MarketId, SchemaVersion, TokenId, TrainingExampleId, training::TrainingSampleSource,
-        },
-    };
-    use rust_decimal_macros::dec;
-    use std::collections::BTreeMap;
 
     fn example(category: MarketCategory) -> TrainingExample {
         let decision_at = Utc::now();
         let mut generic = BTreeMap::new();
         generic.insert(
-            market_names::CATEGORY,
+            CATEGORY,
             FeatureCell::observed(
                 FeatureValue::Category(category),
                 None,

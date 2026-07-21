@@ -1,16 +1,18 @@
 //! Typed project/deployment lifecycle declarations.
 
-use crate::{
-    enums::runtime_config::{LifecycleBaseline, ProjectLifecycleState},
-    hashing::CanonicalDigest,
-    types::{BuildCommitHash, ContentHash, DeploymentEnvironment},
-};
+use config_rs::ConfigError as ConfigConfigError;
 use quant_pivot_error::{
     QuantResult,
     config::ConfigError,
     config_validation::{ConfigValidationError, ConfigValidationReport},
 };
 use serde::{Deserialize, Serialize};
+
+use crate::{
+    enums::runtime_config::{LifecycleBaseline, ProjectLifecycleState},
+    hashing::CanonicalDigest,
+    types::{BuildCommitHash, ContentHash, DeploymentEnvironment},
+};
 
 const PROJECT_LIFECYCLE_SOURCE: &str = include_str!("../../../../project-lifecycle.toml");
 
@@ -61,7 +63,7 @@ impl ProjectLifecyclePolicy {
     /// Parse the lifecycle contract embedded in this build.
     pub fn compiled() -> QuantResult<Self> {
         toml::from_str(PROJECT_LIFECYCLE_SOURCE).map_err(|error| {
-            ConfigError::Load(config::ConfigError::Message(error.to_string())).into()
+            ConfigError::Load(ConfigConfigError::Message(error.to_string())).into()
         })
     }
 

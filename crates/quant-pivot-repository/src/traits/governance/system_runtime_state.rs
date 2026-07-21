@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    domain::{ActivateBootstrapState, BootstrapActivationInfo, SystemRuntimeStateInfo},
+    domain::governance::{ActivateBootstrapState, BootstrapActivationInfo, SystemRuntimeStateInfo},
     enums::quant::QuantRuntimeMode,
 };
 

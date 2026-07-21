@@ -6,7 +6,7 @@
 
 use thiserror::Error;
 
-/// Failure modes of the offline governance closure (Phase 3.7).
+/// Failure modes of the offline governance closure.
 #[derive(Debug, Error)]
 pub enum GovernanceError {
     /// A governance count cannot be represented by its durable/API type.

@@ -11,13 +11,15 @@ use std::{
 
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use chrono_tz::Tz;
-use quant_pivot_error::{QuantResult, research::ResearchError};
+use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
     config::WEATHER_OBSERVATION_DAY_CLOSE_GRACE_SECS,
     domain::{
-        CatalogMarketChangeInfo, DecisionBoundary, DecisionSource, LinkageOutcome, MarketLinkage,
-        MarketRegistryInfo, MarketSubject, ModelVersionInfo, WeatherObservationFact,
-        WeatherObservationReportKind,
+        data_plane::{
+            DecisionBoundary, DecisionSource, WeatherObservationFact, WeatherObservationReportKind,
+        },
+        market::{CatalogMarketChangeInfo, MarketRegistryInfo},
+        quant::{LinkageOutcome, MarketLinkage, MarketSubject, ModelVersionInfo},
     },
     enums::{
         clickhouse::{ChTradeReconciliationStatus, ChTradeSide, ChTradeTapeSource},
@@ -2125,6 +2127,6 @@ fn deterministic_market_selection_id(hash: &ContentHash) -> MarketSelectionId {
     MarketSelectionId::new(Uuid::new_v5(&NAMESPACE, hash.as_str().as_bytes()))
 }
 
-fn methodology(detail: String) -> quant_pivot_error::QuantError {
+fn methodology(detail: String) -> QuantError {
     ResearchError::ValidationMethodology { detail }.into()
 }

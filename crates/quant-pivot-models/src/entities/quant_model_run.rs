@@ -1,11 +1,13 @@
 //! `quant_model_run` table entity.
 
+use chrono::{DateTime, Utc};
+use sea_orm::entity::prelude::*;
+
+use super::{quant_market_selection, quant_model_version};
 use crate::{
     enums::quant::{ModelRunErrorCode, ModelRunKind, ModelRunStatus},
     types::{ContentHash, DecisionPolicySnapshotId, MarketSelectionId, ModelRunId, ModelVersionId},
 };
-use chrono::{DateTime, Utc};
-use sea_orm::entity::prelude::*;
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -34,14 +36,14 @@ pub struct Model {
         from = "model_version_id",
         to = "model_version_id"
     )]
-    pub model_version: BelongsTo<Option<super::quant_model_version::Entity>>,
+    pub model_version: BelongsTo<Option<quant_model_version::Entity>>,
     #[sea_orm(
         belongs_to,
         relation_enum = "MarketSelection",
         from = "market_selection_id",
         to = "market_selection_id"
     )]
-    pub market_selection: BelongsTo<Option<super::quant_market_selection::Entity>>,
+    pub market_selection: BelongsTo<Option<quant_market_selection::Entity>>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

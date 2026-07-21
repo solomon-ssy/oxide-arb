@@ -1,12 +1,14 @@
 //! `quant_market_linkage` table entity.
 
+use chrono::{DateTime, Utc};
+use sea_orm::entity::prelude::*;
+
+use super::market;
 use crate::{
-    domain::LinkageOutcome,
+    domain::quant::LinkageOutcome,
     enums::domain::{DomainFamily, LinkageStatus, ResolverTier},
     types::{ContentHash, MarketId, MarketLinkageId, Probability, ResolverVersion},
 };
-use chrono::{DateTime, Utc};
-use sea_orm::entity::prelude::*;
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -36,7 +38,7 @@ pub struct Model {
         from = "market_id",
         to = "market_id"
     )]
-    pub market: BelongsTo<super::market::Entity>,
+    pub market: BelongsTo<market::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

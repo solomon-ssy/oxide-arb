@@ -7,18 +7,23 @@
 //! Gamma / health recovery) and to [`CatalogReadiness`] watch transitions, and
 //! runs a faster tick while `operational_phase` is still in a startup bucket.
 
+use std::{sync::Arc, time::Duration};
+
+use quant_pivot_models::{
+    domain::{
+        governance::{OperationalPhase, SystemStatus},
+        ports::{BootstrapPort, runtime_control::CatalogState},
+    },
+    enums::quant::QuantRuntimeMode,
+};
+use tokio::time::sleep;
+use tokio_util::sync::CancellationToken;
+
 use crate::{
     app::{AppContext, task_id::TaskId, task_registry::AppRunner},
     governance::SystemStatusPublisher,
     service::{catalog_readiness::CatalogReadiness, system_status_nudge::SystemStatusNudge},
 };
-use quant_pivot_models::{
-    domain::{BootstrapPort, OperationalPhase, SystemStatus, ports::runtime_control::CatalogState},
-    enums::quant::QuantRuntimeMode,
-};
-use std::{sync::Arc, time::Duration};
-use tokio::time::sleep;
-use tokio_util::sync::CancellationToken;
 
 /// Faster cadence while catalog / market-data are still warming.
 const STARTUP_TICK: Duration = Duration::from_secs(3);
@@ -157,7 +162,7 @@ impl SystemStatusBroadcaster {
     }
 
     fn current_status(&self) -> SystemStatus {
-        // `publish()` reads the same snapshot; peek once for dedup only.
+        // `publish` reads the same snapshot; peek once for dedup only.
         self.publisher
             .peek()
             .unwrap_or_else(|| SystemStatus::bootstrap(QuantRuntimeMode::ReportOnly))
@@ -181,22 +186,23 @@ impl AppContext {
 
 #[cfg(test)]
 mod tests {
-    use super::{CatalogFingerprint, SystemStatusBroadcaster, status_fingerprint};
-    use crate::{
-        governance::{SystemStatusPublisher, operational_phase_from_readiness},
-        service::catalog_readiness::CatalogReadiness,
-        service::system_status_nudge::SystemStatusNudge,
-    };
+    use std::{sync::Arc, time::Duration};
+
     use async_trait::async_trait;
     use chrono::Utc;
     use quant_pivot_error::QuantResult;
     use quant_pivot_models::{
         domain::{
-            ActivateBootstrapRequest, BootstrapPort, BootstrapView, CatalogStatusPort, CoreEvent,
-            CoreEventPublisher, HealthReport, OperationalPhase, QuantModeTransitionReport,
-            RuntimeControlPort, SystemCapabilities, SystemStatus,
-            lifecycle::{MarketDataConnectivity, WsShardConnectivity},
-            ports::runtime_control::CatalogState,
+            api::{ActivateBootstrapRequest, BootstrapView, SystemCapabilities},
+            governance::{
+                HealthReport, OperationalPhase, SystemStatus,
+                lifecycle::{MarketDataConnectivity, WsShardConnectivity},
+            },
+            ports::{
+                BootstrapPort, CatalogStatusPort, QuantModeTransitionReport, RuntimeControlPort,
+                runtime_control::CatalogState,
+            },
+            runtime::{CoreEvent, CoreEventPublisher},
         },
         enums::{
             execution::KillSwitchState,
@@ -204,8 +210,14 @@ mod tests {
             system::{BootstrapPhase, CapabilityReason},
         },
     };
-    use std::{sync::Arc, time::Duration};
+    use tokio::sync::{watch, watch::Receiver};
     use tokio_util::sync::CancellationToken;
+
+    use super::{CatalogFingerprint, SystemStatusBroadcaster, status_fingerprint};
+    use crate::{
+        governance::{SystemStatusPublisher, operational_phase_from_readiness},
+        service::{catalog_readiness::CatalogReadiness, system_status_nudge::SystemStatusNudge},
+    };
 
     struct CatalogAwareControl {
         catalog: Arc<CatalogReadiness>,
@@ -223,8 +235,8 @@ mod tests {
             }
         }
 
-        fn subscribe(&self) -> tokio::sync::watch::Receiver<BootstrapView> {
-            let (_, receiver) = tokio::sync::watch::channel(self.view());
+        fn subscribe(&self) -> Receiver<BootstrapView> {
+            let (_, receiver) = watch::channel(self.view());
             receiver
         }
 
@@ -232,8 +244,8 @@ mod tests {
             SystemCapabilities::fail_closed(CapabilityReason::CatalogBaselineMissing)
         }
 
-        fn subscribe_capabilities(&self) -> tokio::sync::watch::Receiver<SystemCapabilities> {
-            let (_, receiver) = tokio::sync::watch::channel(self.capability_snapshot());
+        fn subscribe_capabilities(&self) -> Receiver<SystemCapabilities> {
+            let (_, receiver) = watch::channel(self.capability_snapshot());
             receiver
         }
 
@@ -326,7 +338,7 @@ mod tests {
         let mut ready = warming.clone();
         ready.catalog = CatalogState::Ready {
             markets: 42,
-            synced_at: chrono::Utc::now(),
+            synced_at: Utc::now(),
         };
         ready.operational_phase = OperationalPhase::MarketDataConnecting;
 

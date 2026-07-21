@@ -1,19 +1,22 @@
-//! Admin port for offline model training (Phase 3.6).
+//! Admin port for offline model training.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use quant_pivot_error::QuantResult;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    domain::{JobProgressSink, ModelVersionInfo, TrainModelRequest, TrainedModelView},
+    domain::{
+        api::{TrainModelRequest, TrainedModelView},
+        quant::{JobProgressSink, ModelVersionInfo},
+    },
     types::ModelVersionId,
 };
-use quant_pivot_error::QuantResult;
 
 /// Dependency-inversion boundary between the HTTP layer and the core trainer.
 ///
-/// Implemented in `quant-pivot-core` and injected into `quant_pivot_web::AppState`.
+/// Implemented in `quant-pivot-core` and injected into `quant_pivot_web::state::AppState`.
 #[async_trait]
 pub trait ModelTrainingPort: Send + Sync {
     /// Train a model from a frozen dataset and register a Candidate version.

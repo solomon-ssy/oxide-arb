@@ -2,22 +2,24 @@
 
 use std::collections::HashMap;
 
-use crate::{
-    postgres::query::{list_by_fk_ordered_desc, paginate_mapped},
-    traits::ModelComparisonReportRepository,
-};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{
-        ComparisonReportListQuery, ModelComparisonReportInfo, NewModelComparisonReport, PageWindow,
-        Paginated,
+        api::ComparisonReportListQuery,
+        pagination::{PageWindow, Paginated},
+        quant::{ModelComparisonReportInfo, NewModelComparisonReport},
     },
-    entities::quant_model_comparison_report,
+    entities::quant_model_comparison_report::{Column, Entity},
     types::{BacktestReportId, ModelComparisonReportId, ModelVersionId},
 };
 use sea_orm::{
     ColumnTrait, Condition, DatabaseConnection, EntityTrait, IntoActiveModel, QueryFilter,
     QueryOrder,
+};
+
+use crate::{
+    postgres::query::{list_by_fk_ordered_desc, paginate_mapped},
+    traits::ModelComparisonReportRepository,
 };
 
 /// Postgres-backed comparison-report ledger repository.
@@ -37,7 +39,7 @@ impl ModelComparisonReportRepository for PgModelComparisonReportRepository {
         &self,
         report: NewModelComparisonReport,
     ) -> Result<ModelComparisonReportInfo, StorageError> {
-        quant_model_comparison_report::Entity::insert(report.into_active_model())
+        Entity::insert(report.into_active_model())
             .exec_with_returning(&self.db)
             .await
             .map_err(StorageError::from)
@@ -48,7 +50,7 @@ impl ModelComparisonReportRepository for PgModelComparisonReportRepository {
         &self,
         comparison_report_id: &ModelComparisonReportId,
     ) -> Result<Option<ModelComparisonReportInfo>, StorageError> {
-        quant_model_comparison_report::Entity::find_by_id(comparison_report_id.clone())
+        Entity::find_by_id(comparison_report_id.clone())
             .one(&self.db)
             .await
             .map_err(StorageError::from)
@@ -59,11 +61,11 @@ impl ModelComparisonReportRepository for PgModelComparisonReportRepository {
         &self,
         candidate_model_version_id: &ModelVersionId,
     ) -> Result<Vec<ModelComparisonReportInfo>, StorageError> {
-        list_by_fk_ordered_desc::<quant_model_comparison_report::Entity, _, _, _>(
+        list_by_fk_ordered_desc::<Entity, _, _, _>(
             &self.db,
-            quant_model_comparison_report::Column::CandidateModelVersionId,
+            Column::CandidateModelVersionId,
             candidate_model_version_id.clone(),
-            quant_model_comparison_report::Column::CreatedAt,
+            Column::CreatedAt,
             Into::into,
         )
         .await
@@ -73,25 +75,19 @@ impl ModelComparisonReportRepository for PgModelComparisonReportRepository {
         &self,
         query: ComparisonReportListQuery,
     ) -> Result<Paginated<ModelComparisonReportInfo>, StorageError> {
-        let condition =
-            Condition::all()
-                .add_option(query.candidate_model_version_id.clone().map(|id| {
-                    quant_model_comparison_report::Column::CandidateModelVersionId.eq(id)
-                }))
-                .add_option(
-                    query
-                        .from
-                        .map(|from| quant_model_comparison_report::Column::CreatedAt.gte(from)),
-                )
-                .add_option(
-                    query
-                        .to
-                        .map(|to| quant_model_comparison_report::Column::CreatedAt.lt(to)),
-                );
+        let condition = Condition::all()
+            .add_option(
+                query
+                    .candidate_model_version_id
+                    .clone()
+                    .map(|id| Column::CandidateModelVersionId.eq(id)),
+            )
+            .add_option(query.from.map(|from| Column::CreatedAt.gte(from)))
+            .add_option(query.to.map(|to| Column::CreatedAt.lt(to)));
         paginate_mapped(
-            quant_model_comparison_report::Entity::find()
+            Entity::find()
                 .filter(condition)
-                .order_by_desc(quant_model_comparison_report::Column::CreatedAt),
+                .order_by_desc(Column::CreatedAt),
             &self.db,
             PageWindow::from_query(&query),
             Into::into,
@@ -103,19 +99,13 @@ impl ModelComparisonReportRepository for PgModelComparisonReportRepository {
         &self,
         backtest_report_id: &BacktestReportId,
     ) -> Result<Option<ModelComparisonReportInfo>, StorageError> {
-        quant_model_comparison_report::Entity::find()
+        Entity::find()
             .filter(
                 Condition::any()
-                    .add(
-                        quant_model_comparison_report::Column::CandidateReportId
-                            .eq(backtest_report_id.clone()),
-                    )
-                    .add(
-                        quant_model_comparison_report::Column::BaselineReportId
-                            .eq(backtest_report_id.clone()),
-                    ),
+                    .add(Column::CandidateReportId.eq(backtest_report_id.clone()))
+                    .add(Column::BaselineReportId.eq(backtest_report_id.clone())),
             )
-            .order_by_desc(quant_model_comparison_report::Column::CreatedAt)
+            .order_by_desc(Column::CreatedAt)
             .one(&self.db)
             .await
             .map_err(StorageError::from)
@@ -129,19 +119,13 @@ impl ModelComparisonReportRepository for PgModelComparisonReportRepository {
         if backtest_report_ids.is_empty() {
             return Ok(HashMap::new());
         }
-        let rows = quant_model_comparison_report::Entity::find()
+        let rows = Entity::find()
             .filter(
                 Condition::any()
-                    .add(
-                        quant_model_comparison_report::Column::CandidateReportId
-                            .is_in(backtest_report_ids.to_vec()),
-                    )
-                    .add(
-                        quant_model_comparison_report::Column::BaselineReportId
-                            .is_in(backtest_report_ids.to_vec()),
-                    ),
+                    .add(Column::CandidateReportId.is_in(backtest_report_ids.to_vec()))
+                    .add(Column::BaselineReportId.is_in(backtest_report_ids.to_vec())),
             )
-            .order_by_desc(quant_model_comparison_report::Column::CreatedAt)
+            .order_by_desc(Column::CreatedAt)
             .all(&self.db)
             .await
             .map_err(StorageError::from)?;

@@ -14,7 +14,7 @@ use rayon::prelude::*;
 /// Map `f` over `items` in parallel, collecting in source order and
 /// short-circuiting on the first error.
 ///
-/// Equivalent to `items.iter().map(f).collect::<Result<Vec<_>, _>>()` but spread
+/// Equivalent to `items.iter.map(f).collect::<Result<Vec<_>, _>>` but spread
 /// across the `rayon` pool; the returned `Vec` is index-aligned with `items`.
 pub fn par_try_map<T, R, E, F>(items: &[T], f: F) -> Result<Vec<R>, E>
 where

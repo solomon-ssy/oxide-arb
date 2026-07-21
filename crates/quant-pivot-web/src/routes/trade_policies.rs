@@ -1,18 +1,25 @@
-//! Governed trade-policy artifact endpoints (Phase 11.7).
+//! Governed trade-policy artifact endpoints.
 
-use actix_web::{http::Method, web};
+use actix_web::{
+    http::Method,
+    web::{Data, Path, Query},
+};
 use quant_pivot_models::{
     domain::{
-        FitTradePolicyRequest, JobSubmitContext, Paginated, ResearchJobView,
-        TradePolicyAuditListQuery, TradePolicyDetailView, TradePolicyEvidenceDownloadView,
-        TradePolicyEvidenceRowListQuery, TradePolicyEvidenceRowView,
-        TradePolicyFitPreflightRequest, TradePolicyFitPreflightView,
-        TradePolicyGovernanceAuditView, TradePolicyGovernanceRequest, TradePolicyListQuery,
-        TradePolicyPreflightCheckStatus, TradePolicySourceSliceObjectListQuery,
-        TradePolicySourceSliceObjectView, TradePolicySourceSliceView, TradePolicySummaryView,
-        TradePolicyTrialAttemptView, TradePolicyTrialListQuery, TradePolicyValidationJobParams,
-        TradePolicyValidationListQuery, TradePolicyValidationRowListQuery,
-        TradePolicyValidationRowView, TradePolicyValidationRunView,
+        api::{
+            FitTradePolicyRequest, ResearchJobView, TradePolicyAuditListQuery,
+            TradePolicyDetailView, TradePolicyEvidenceDownloadView,
+            TradePolicyEvidenceRowListQuery, TradePolicyEvidenceRowView,
+            TradePolicyFitPreflightRequest, TradePolicyFitPreflightView,
+            TradePolicyGovernanceAuditView, TradePolicyGovernanceRequest, TradePolicyListQuery,
+            TradePolicyPreflightCheckStatus, TradePolicySourceSliceObjectListQuery,
+            TradePolicySourceSliceObjectView, TradePolicySourceSliceView, TradePolicySummaryView,
+            TradePolicyTrialAttemptView, TradePolicyTrialListQuery, TradePolicyValidationJobParams,
+            TradePolicyValidationListQuery, TradePolicyValidationRowListQuery,
+            TradePolicyValidationRowView, TradePolicyValidationRunView,
+        },
+        pagination::Paginated,
+        ports::JobSubmitContext,
     },
     enums::{
         operation_log::OperationCategory,
@@ -161,14 +168,14 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
 }
 
 pub async fn profiles(
-    state: web::Data<AppState>,
+    state: Data<AppState>,
 ) -> Result<WebResponse<Vec<ResearchProfileArtifact>>, WebError> {
     Ok(WebResponse::ok(state.trade_policies.list_profiles()?))
 }
 
 pub async fn profile(
-    state: web::Data<AppState>,
-    path: web::Path<(String, u32)>,
+    state: Data<AppState>,
+    path: Path<(String, u32)>,
 ) -> Result<WebResponse<ResearchProfileArtifact>, WebError> {
     let (id, version) = path.into_inner();
     let profile = state
@@ -179,8 +186,8 @@ pub async fn profile(
 }
 
 pub async fn get_fit(
-    state: web::Data<AppState>,
-    id: web::Path<ResearchJobId>,
+    state: Data<AppState>,
+    id: Path<ResearchJobId>,
 ) -> Result<WebResponse<ResearchJobView>, WebError> {
     let job = state
         .research_jobs
@@ -192,9 +199,9 @@ pub async fn get_fit(
 }
 
 pub async fn get_fit_trials(
-    state: web::Data<AppState>,
-    id: web::Path<ResearchJobId>,
-    query: web::Query<TradePolicyTrialListQuery>,
+    state: Data<AppState>,
+    id: Path<ResearchJobId>,
+    query: Query<TradePolicyTrialListQuery>,
 ) -> Result<WebResponse<Paginated<TradePolicyTrialAttemptView>>, WebError> {
     let fit_job_id = id.into_inner();
     state
@@ -212,9 +219,9 @@ pub async fn get_fit_trials(
 }
 
 pub async fn audits(
-    state: web::Data<AppState>,
-    id: web::Path<TradePolicyArtifactId>,
-    query: web::Query<TradePolicyAuditListQuery>,
+    state: Data<AppState>,
+    id: Path<TradePolicyArtifactId>,
+    query: Query<TradePolicyAuditListQuery>,
 ) -> Result<WebResponse<Paginated<TradePolicyGovernanceAuditView>>, WebError> {
     let page = state
         .trade_policies
@@ -225,8 +232,8 @@ pub async fn audits(
 }
 
 pub async fn list(
-    state: web::Data<AppState>,
-    query: web::Query<TradePolicyListQuery>,
+    state: Data<AppState>,
+    query: Query<TradePolicyListQuery>,
 ) -> Result<WebResponse<Paginated<TradePolicySummaryView>>, WebError> {
     let page = state
         .trade_policies
@@ -237,8 +244,8 @@ pub async fn list(
 }
 
 pub async fn get(
-    state: web::Data<AppState>,
-    id: web::Path<TradePolicyArtifactId>,
+    state: Data<AppState>,
+    id: Path<TradePolicyArtifactId>,
 ) -> Result<WebResponse<TradePolicyDetailView>, WebError> {
     let info = state
         .trade_policies
@@ -249,8 +256,8 @@ pub async fn get(
 }
 
 pub async fn cohorts(
-    state: web::Data<AppState>,
-    id: web::Path<TradePolicyArtifactId>,
+    state: Data<AppState>,
+    id: Path<TradePolicyArtifactId>,
 ) -> Result<WebResponse<Vec<TradePolicyCohort>>, WebError> {
     let info = state
         .trade_policies
@@ -261,8 +268,8 @@ pub async fn cohorts(
 }
 
 pub async fn source_slice(
-    state: web::Data<AppState>,
-    id: web::Path<TradePolicyArtifactId>,
+    state: Data<AppState>,
+    id: Path<TradePolicyArtifactId>,
 ) -> Result<WebResponse<TradePolicySourceSliceView>, WebError> {
     let view = state
         .trade_policies
@@ -273,9 +280,9 @@ pub async fn source_slice(
 }
 
 pub async fn source_slice_objects(
-    state: web::Data<AppState>,
-    id: web::Path<TradePolicyArtifactId>,
-    query: web::Query<TradePolicySourceSliceObjectListQuery>,
+    state: Data<AppState>,
+    id: Path<TradePolicyArtifactId>,
+    query: Query<TradePolicySourceSliceObjectListQuery>,
 ) -> Result<WebResponse<Paginated<TradePolicySourceSliceObjectView>>, WebError> {
     let page = state
         .trade_policies
@@ -286,8 +293,8 @@ pub async fn source_slice_objects(
 }
 
 pub async fn evidence_download(
-    state: web::Data<AppState>,
-    path: web::Path<(TradePolicyArtifactId, TradePolicyEvidenceObjectKind)>,
+    state: Data<AppState>,
+    path: Path<(TradePolicyArtifactId, TradePolicyEvidenceObjectKind)>,
 ) -> Result<WebResponse<TradePolicyEvidenceDownloadView>, WebError> {
     let (artifact_id, kind) = path.into_inner();
     let view = state
@@ -299,9 +306,9 @@ pub async fn evidence_download(
 }
 
 pub async fn evidence_rows(
-    state: web::Data<AppState>,
-    path: web::Path<(TradePolicyArtifactId, TradePolicyEvidenceObjectKind)>,
-    query: web::Query<TradePolicyEvidenceRowListQuery>,
+    state: Data<AppState>,
+    path: Path<(TradePolicyArtifactId, TradePolicyEvidenceObjectKind)>,
+    query: Query<TradePolicyEvidenceRowListQuery>,
 ) -> Result<WebResponse<Paginated<TradePolicyEvidenceRowView>>, WebError> {
     let (artifact_id, kind) = path.into_inner();
     let page = state
@@ -313,7 +320,7 @@ pub async fn evidence_rows(
 }
 
 pub async fn preflight(
-    state: web::Data<AppState>,
+    state: Data<AppState>,
     body: ValidatedJson<TradePolicyFitPreflightRequest>,
 ) -> Result<WebResponse<TradePolicyFitPreflightView>, WebError> {
     let request = body.into_inner();
@@ -323,7 +330,7 @@ pub async fn preflight(
 }
 
 pub async fn fit(
-    state: web::Data<AppState>,
+    state: Data<AppState>,
     acting_role: ActingRole,
     request_id: RequestId,
     op_ctx: OperationCtx,
@@ -372,8 +379,8 @@ pub async fn fit(
 }
 
 pub async fn validate(
-    state: web::Data<AppState>,
-    id: web::Path<TradePolicyArtifactId>,
+    state: Data<AppState>,
+    id: Path<TradePolicyArtifactId>,
     actor: AuthedActor,
     role: ActingRole,
     request_id: RequestId,
@@ -416,9 +423,9 @@ pub async fn validate(
 }
 
 pub async fn validations(
-    state: web::Data<AppState>,
-    id: web::Path<TradePolicyArtifactId>,
-    query: web::Query<TradePolicyValidationListQuery>,
+    state: Data<AppState>,
+    id: Path<TradePolicyArtifactId>,
+    query: Query<TradePolicyValidationListQuery>,
 ) -> Result<WebResponse<Paginated<TradePolicyValidationRunView>>, WebError> {
     let page = state
         .trade_policies
@@ -429,8 +436,8 @@ pub async fn validations(
 }
 
 pub async fn validation(
-    state: web::Data<AppState>,
-    id: web::Path<TradePolicyValidationRunId>,
+    state: Data<AppState>,
+    id: Path<TradePolicyValidationRunId>,
 ) -> Result<WebResponse<TradePolicyValidationRunView>, WebError> {
     let run = state
         .trade_policies
@@ -441,9 +448,9 @@ pub async fn validation(
 }
 
 pub async fn validation_rows(
-    state: web::Data<AppState>,
-    id: web::Path<TradePolicyValidationRunId>,
-    query: web::Query<TradePolicyValidationRowListQuery>,
+    state: Data<AppState>,
+    id: Path<TradePolicyValidationRunId>,
+    query: Query<TradePolicyValidationRowListQuery>,
 ) -> Result<WebResponse<Paginated<TradePolicyValidationRowView>>, WebError> {
     if state.trade_policies.find_validation(&id).await?.is_none() {
         return Err(WebError::NotFound(format!(
@@ -459,8 +466,8 @@ pub async fn validation_rows(
 }
 
 pub async fn publish(
-    state: web::Data<AppState>,
-    id: web::Path<TradePolicyArtifactId>,
+    state: Data<AppState>,
+    id: Path<TradePolicyArtifactId>,
     actor: AuthedActor,
     role: ActingRole,
     request_id: RequestId,
@@ -483,8 +490,8 @@ pub async fn publish(
 }
 
 pub async fn retire(
-    state: web::Data<AppState>,
-    id: web::Path<TradePolicyArtifactId>,
+    state: Data<AppState>,
+    id: Path<TradePolicyArtifactId>,
     actor: AuthedActor,
     role: ActingRole,
     request_id: RequestId,
@@ -507,7 +514,7 @@ pub async fn retire(
 }
 
 struct TransitionContext {
-    state: web::Data<AppState>,
+    state: Data<AppState>,
     artifact_id: TradePolicyArtifactId,
     actor: AuthedActor,
     role: ActingRole,

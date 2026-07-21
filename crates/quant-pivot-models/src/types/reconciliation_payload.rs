@@ -40,10 +40,11 @@ impl ReconciliationEvidenceChain {
 
 #[cfg(test)]
 mod tests {
-    use super::{ReconciliationEvidence, ReconciliationEvidenceChain};
-    use crate::{enums::execution::ReconciliationEvidenceKind, types::Shares};
     use chrono::TimeZone;
     use rust_decimal_macros::dec;
+
+    use super::{ReconciliationEvidence, ReconciliationEvidenceChain};
+    use crate::{enums::execution::ReconciliationEvidenceKind, types::Shares};
 
     #[test]
     fn evidence_chain_round_trips_as_json_array() {

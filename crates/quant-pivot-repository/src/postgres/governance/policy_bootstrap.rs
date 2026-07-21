@@ -5,7 +5,7 @@ use std::fmt::Display;
 use chrono::{Duration, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    domain::{
+    domain::governance::{
         NewDecisionPolicySnapshot, NewPolicyActivation, NewPolicyRevision, RecordPolicyApproval,
     },
     enums::runtime_config::{

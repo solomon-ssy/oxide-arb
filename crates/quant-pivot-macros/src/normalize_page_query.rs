@@ -1,12 +1,12 @@
 //! `#[derive(NormalizePageQuery)]` — register list queries and implement
-//! [`NormalizePageQuery`](quant_pivot_models::domain::NormalizePageQuery).
+//! [`NormalizePageQuery`](quant_pivot_models::domain::pagination::NormalizePageQuery).
 //!
 //! Requires exactly one field annotated with `#[normalize_page]` whose type is
 //! `PageRequest` (by final path segment).
 
 use proc_macro2::TokenStream;
 use quote::quote;
-use syn::{Data, DeriveInput, Error, Fields, Ident, Result, Type};
+use syn::{Data, DeriveInput, Error, Field, Fields, Ident, Result, Type};
 
 pub fn expand(input: TokenStream) -> Result<TokenStream> {
     let input: DeriveInput = syn::parse2(input)?;
@@ -82,8 +82,8 @@ pub fn expand(input: TokenStream) -> Result<TokenStream> {
     Ok(quote! {
         impl #impl_generics crate::domain::pagination::sealed::Sealed for #name #ty_generics #where_clause {}
 
-        impl #impl_generics crate::domain::NormalizePageQuery for #name #ty_generics #where_clause {
-            fn page(&self) -> &crate::domain::PageRequest {
+        impl #impl_generics crate::domain::pagination::NormalizePageQuery for #name #ty_generics #where_clause {
+            fn page(&self) -> &crate::domain::pagination::PageRequest {
                 &self.#page_ident
             }
 
@@ -95,7 +95,7 @@ pub fn expand(input: TokenStream) -> Result<TokenStream> {
     })
 }
 
-fn has_normalize_page_attr(field: &syn::Field) -> bool {
+fn has_normalize_page_attr(field: &Field) -> bool {
     field
         .attrs
         .iter()

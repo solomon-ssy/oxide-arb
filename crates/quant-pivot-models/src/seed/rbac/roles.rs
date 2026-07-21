@@ -1,7 +1,14 @@
 //! Seeds the built-in RBAC roles and publishes their IDs to the context.
 
+use std::{future::Future, pin::Pin};
+
+use sea_orm::{
+    ActiveValue::Set, ColumnTrait, DatabaseTransaction, DbErr, EntityTrait, QueryFilter,
+    sea_query::OnConflict,
+};
+
 use crate::{
-    entities::role,
+    entities::role::{ActiveModel, Column, Entity},
     enums::rbac::{RoleKind, RoleStatus},
     seed::{
         SeedArtifact, SeedConflictPolicy, SeedContext, SeedDependency, SeedSpec,
@@ -12,10 +19,6 @@ use crate::{
     },
     types::{RoleCode, RoleId},
 };
-use sea_orm::{
-    ActiveValue::Set, ColumnTrait, DbErr, EntityTrait, QueryFilter, sea_query::OnConflict,
-};
-use std::{future::Future, pin::Pin};
 
 const SEED_ID: &str = "rbac.roles.bootstrap";
 
@@ -76,11 +79,11 @@ pub const ROLES_SEED: SeedSpec = SeedSpec {
 };
 
 /// Insert built-in roles and publish the `code -> RoleId` map to the context.
-pub async fn load(db: &sea_orm::DatabaseTransaction, ctx: &mut SeedContext) -> Result<u64, DbErr> {
+pub async fn load(db: &DatabaseTransaction, ctx: &mut SeedContext) -> Result<u64, DbErr> {
     let mut models = Vec::with_capacity(BUILTIN_ROLES.len());
     for (code, name, description, sort) in BUILTIN_ROLES {
         let id = RoleId::from_v7();
-        models.push(role::ActiveModel {
+        models.push(ActiveModel {
             id: Set(id),
             code: Set(RoleCode::new(*code)),
             name: Set((*name).to_owned()),
@@ -92,12 +95,8 @@ pub async fn load(db: &sea_orm::DatabaseTransaction, ctx: &mut SeedContext) -> R
         });
     }
 
-    let rows_affected = role::Entity::insert_many(models)
-        .on_conflict(
-            OnConflict::column(role::Column::Code)
-                .do_nothing()
-                .to_owned(),
-        )
+    let rows_affected = Entity::insert_many(models)
+        .on_conflict(OnConflict::column(Column::Code).do_nothing().to_owned())
         .exec_without_returning(db)
         .await?;
 
@@ -105,13 +104,13 @@ pub async fn load(db: &sea_orm::DatabaseTransaction, ctx: &mut SeedContext) -> R
     Ok(rows_affected)
 }
 
-async fn hydrate(db: &sea_orm::DatabaseTransaction, ctx: &mut SeedContext) -> Result<(), DbErr> {
+async fn hydrate(db: &DatabaseTransaction, ctx: &mut SeedContext) -> Result<(), DbErr> {
     let codes = BUILTIN_ROLES
         .iter()
         .map(|(code, _, _, _)| *code)
         .collect::<Vec<_>>();
-    let rows = role::Entity::find()
-        .filter(role::Column::Code.is_in(codes))
+    let rows = Entity::find()
+        .filter(Column::Code.is_in(codes))
         .all(db)
         .await?;
     if rows.len() != BUILTIN_ROLES.len() {
@@ -145,14 +144,14 @@ async fn hydrate(db: &sea_orm::DatabaseTransaction, ctx: &mut SeedContext) -> Re
 }
 
 fn load_boxed<'a>(
-    db: &'a sea_orm::DatabaseTransaction,
+    db: &'a DatabaseTransaction,
     ctx: &'a mut SeedContext,
 ) -> Pin<Box<dyn Future<Output = Result<u64, DbErr>> + Send + 'a>> {
     Box::pin(load(db, ctx))
 }
 
 fn hydrate_boxed<'a>(
-    db: &'a sea_orm::DatabaseTransaction,
+    db: &'a DatabaseTransaction,
     ctx: &'a mut SeedContext,
 ) -> Pin<Box<dyn Future<Output = Result<(), DbErr>> + Send + 'a>> {
     Box::pin(hydrate(db, ctx))

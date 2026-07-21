@@ -6,7 +6,7 @@
 
 use actix_web::http::Method;
 use quant_pivot_models::{
-    domain::PermissionCatalogEntry,
+    domain::api::PermissionCatalogEntry,
     enums::rbac::{Operation, RESOURCE_OPERATIONS, ResourceType},
 };
 

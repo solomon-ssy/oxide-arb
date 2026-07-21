@@ -1,4 +1,4 @@
-//! Offline training-dataset admin endpoints (Phase 3.5).
+//! Offline training-dataset admin endpoints.
 //!
 //! # UI integration contract
 //!
@@ -15,18 +15,24 @@
 //! 3. Call **build** with the same body **plus** the plan's `training_dataset_id`.
 //! 4. Poll **GET** every few seconds until `status` is terminal.
 //!
-//! # Sync vs async
+//! # Asynchronous execution
 //!
-//! Build currently runs synchronously on the HTTP worker (may take minutes for
-//! large windows). Phase 03.7 will introduce an async job queue + WS channel
-//! `materialization.run_update` for progress; until then the UI should disable
-//! double-submit and show a long-running spinner.
+//! Build enqueues a durable research job and returns immediately. The UI tracks
+//! job progress over the research-job surface, then reloads this ledger when the
+//! job reaches a terminal state.
 
-use actix_web::{http::Method, web};
+use actix_web::{
+    http::Method,
+    web::{Data, Path, Query},
+};
 use quant_pivot_models::{
     domain::{
-        BuildTrainingDatasetRequest, JobSubmitContext, Paginated, ResearchJobView,
-        TrainingDatasetListQuery, TrainingDatasetPlanView, TrainingDatasetView,
+        api::{
+            BuildTrainingDatasetRequest, ResearchJobView, TrainingDatasetListQuery,
+            TrainingDatasetPlanView, TrainingDatasetView,
+        },
+        pagination::Paginated,
+        ports::JobSubmitContext,
     },
     enums::{
         operation_log::OperationCategory,
@@ -78,8 +84,8 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
 
 /// `GET /api/research/training-datasets` — paginated ledger catalog.
 pub async fn list(
-    state: web::Data<AppState>,
-    query: web::Query<TrainingDatasetListQuery>,
+    state: Data<AppState>,
+    query: Query<TrainingDatasetListQuery>,
 ) -> Result<WebResponse<Paginated<TrainingDatasetView>>, WebError> {
     let page = state
         .research_catalog
@@ -91,8 +97,8 @@ pub async fn list(
 
 /// `GET /api/research/training-datasets/{id}` — ledger row for UI polling.
 pub async fn get_by_id(
-    state: web::Data<AppState>,
-    id: web::Path<TrainingDatasetId>,
+    state: Data<AppState>,
+    id: Path<TrainingDatasetId>,
 ) -> Result<WebResponse<TrainingDatasetView>, WebError> {
     let info = state
         .training_datasets
@@ -104,7 +110,7 @@ pub async fn get_by_id(
 
 /// `POST /api/research/training-datasets/plan` — dry plan; no artifact or ledger write.
 pub async fn plan(
-    state: web::Data<AppState>,
+    state: Data<AppState>,
     acting_role: ActingRole,
     request_id: RequestId,
     op_ctx: OperationCtx,
@@ -133,7 +139,7 @@ pub async fn plan(
 /// SPA tracks progress over the `materialization.run_update` WS channel and the
 /// `GET /research/jobs/{id}` poll.
 pub async fn build(
-    state: web::Data<AppState>,
+    state: Data<AppState>,
     acting_role: ActingRole,
     request_id: RequestId,
     op_ctx: OperationCtx,

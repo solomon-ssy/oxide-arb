@@ -7,8 +7,7 @@ rust-version.workspace = true
 
 [dependencies]
 quant-pivot-error = { workspace = true, features = ["storage"] }
-quant-pivot-models = { workspace = true, features = ["repository"] }
-quant-pivot-migration = { workspace = true }
+quant-pivot-models = { workspace = true }
 quant-pivot-repository = { workspace = true }
 quant-pivot-storage = { workspace = true }
 
@@ -37,19 +36,6 @@ tokio-util = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
-
-[dev-dependencies]
-actix-http = { workspace = true }
-actix-test = { workspace = true }
-quant-pivot-core = { workspace = true }
-quant-pivot-research = { workspace = true }
-quant-pivot-storage = { workspace = true, features = ["test-util"] }
-quant-pivot-test-support = { workspace = true }
-rust_decimal = { workspace = true }
-rust_decimal_macros = { workspace = true }
-testcontainers = { workspace = true }
-testcontainers-modules = { workspace = true }
-tracing-subscriber = { workspace = true }
 
 [lints]
 workspace = true

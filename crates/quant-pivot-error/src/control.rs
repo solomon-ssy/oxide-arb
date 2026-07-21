@@ -1,7 +1,8 @@
 //! Runtime control plane errors (mode switch, config apply, book subscriptions).
 
-use crate::QuantError;
 use thiserror::Error;
+
+use crate::QuantError;
 
 /// Failures from governed runtime control operations.
 #[derive(Debug, Error)]

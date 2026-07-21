@@ -8,7 +8,7 @@
 //! `entry_slippage_bps`, `exit_compliance`, `realized_pnl_usd`, `hit_stop_loss`,
 //! `liquidity_exit_possible`, `settlement_outcome`).
 //!
-//! The attribution **write path** lands in a later phase; this module only fixes
+//! The attribution write path owns mutation; this module defines
 //! the strong-typed contract so the dormant table never carries a bare `Value`.
 
 use chrono::{DateTime, Utc};

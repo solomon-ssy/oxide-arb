@@ -1,0 +1,11 @@
+title = "quant-pivot secret detection"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "quant-pivot-evm-private-key"
+description = "EVM private key assigned to a credential field"
+regex = '''(?i)private[_-]?key\s*[:=]\s*["']?(0x[a-f0-9]{64})["']?'''
+secretGroup = 1
+keywords = ["private_key", "private-key"]

@@ -1,8 +1,8 @@
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     clickhouse::EntryConditionEvaluationEventRow,
-    domain::{
+    domain::quant::{
         ApplyEntryConditionEvaluation, ApplyEntryConditionEvaluationOutcome,
         CryptoPriceProjectionInfo, EntryConditionArtifactInfo, EntryConditionAuditInfo,
         EntryConditionInstanceInfo, NewEntryConditionArtifact, NewEntryConditionInstance,
@@ -59,7 +59,7 @@ pub trait EntryConditionRepository: Send + Sync {
         source_id: &DomainSourceId,
         instrument_key: &DomainInstrumentKey,
         station: &str,
-        local_date: chrono::NaiveDate,
+        local_date: NaiveDate,
         temperature_statistic: WeatherTemperatureStatistic,
     ) -> Result<Option<WeatherDailyTemperatureProjectionInfo>, StorageError>;
 

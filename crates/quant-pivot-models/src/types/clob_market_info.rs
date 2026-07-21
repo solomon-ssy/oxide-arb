@@ -4,9 +4,10 @@ use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use sea_orm::FromJsonQueryResult;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::{
-    domain::fee::{BuilderFeeAttribution, MarketFeeSchedule},
+    domain::market::fee::{BuilderFeeAttribution, MarketFeeSchedule},
     enums::common::TickSize,
     hashing::CanonicalDigest,
     types::{Bps, ClobMarketInfoVersionId, ContentHash, MarketId, TokenId},
@@ -53,7 +54,7 @@ pub struct ClobMarketInfoVersion {
     pub effective_at: DateTime<Utc>,
     pub available_at: DateTime<Utc>,
     pub payload_hash: ContentHash,
-    pub raw_payload: serde_json::Value,
+    pub raw_payload: Value,
 }
 
 impl ClobMarketInfoVersion {

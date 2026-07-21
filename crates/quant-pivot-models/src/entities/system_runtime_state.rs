@@ -1,9 +1,10 @@
 //! `system_runtime_state` table entity (singleton row).
 
-use crate::enums::{quant::QuantRuntimeMode, system::BootstrapPhase};
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
+
+use crate::enums::{quant::QuantRuntimeMode, system::BootstrapPhase};
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]

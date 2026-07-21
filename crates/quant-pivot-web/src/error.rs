@@ -64,12 +64,6 @@ pub enum WebError {
     /// A dependency (DB / Redis) is unavailable (HTTP 503).
     #[error("service unavailable: {0}")]
     ServiceUnavailable(String),
-
-    /// The endpoint is recognized but deliberately not yet implemented (HTTP
-    /// 501). Used for forward-declared routes (e.g. execution lands in Phase 5)
-    /// so a client is never misled by a silent 404 or a fake success.
-    #[error("not implemented: {0}")]
-    NotImplemented(String),
 }
 
 impl WebError {
@@ -85,7 +79,6 @@ impl WebError {
             Self::UnprocessableEntity(_) => StatusCode::UNPROCESSABLE_ENTITY,
             Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::ServiceUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
-            Self::NotImplemented(_) => StatusCode::NOT_IMPLEMENTED,
         }
     }
 
@@ -99,8 +92,7 @@ impl WebError {
             | Self::Conflict(msg)
             | Self::TooManyRequests(msg)
             | Self::UnprocessableEntity(msg)
-            | Self::ServiceUnavailable(msg)
-            | Self::NotImplemented(msg) => msg.clone(),
+            | Self::ServiceUnavailable(msg) => msg.clone(),
             Self::Forbidden => "forbidden".to_owned(),
             Self::Internal(_) => "internal error".to_owned(),
         }
@@ -259,7 +251,6 @@ impl From<QuantError> for WebError {
             }
             QuantError::Report(_) => Self::Internal(error.to_string()),
             QuantError::Execution(execution) => execution.into(),
-            QuantError::NotImplemented(detail) => Self::NotImplemented(detail),
             QuantError::Infra(ref infra) => match infra {
                 InfraError::MetricsRegistration { .. }
                 | InfraError::ChannelClosed { .. }
@@ -297,22 +288,28 @@ impl From<GovernanceError> for WebError {
 
 #[cfg(test)]
 mod tests {
-    use super::WebError;
     use actix_web::http::StatusCode;
     use quant_pivot_error::{
-        QuantError, execution::ExecutionError, storage::StorageError, storage::entity,
+        QuantError,
+        execution::ExecutionError,
+        storage::{
+            StorageError,
+            entity::{QUANT_ORDER_INTENT, USER},
+        },
     };
+
+    use super::WebError;
 
     #[test]
     fn storage_duplicate_maps_to_409() {
-        let web = WebError::from(StorageError::duplicate(entity::USER, "alice"));
+        let web = WebError::from(StorageError::duplicate(USER, "alice"));
         assert_eq!(web.status(), StatusCode::CONFLICT);
     }
 
     #[test]
     fn storage_invariant_violation_maps_to_400() {
         let web = WebError::from(StorageError::invariant_violation(
-            Some(entity::QUANT_ORDER_INTENT),
+            Some(QUANT_ORDER_INTENT),
             "invalid create payload",
         ));
         assert_eq!(web.status(), StatusCode::BAD_REQUEST);

@@ -30,7 +30,7 @@ use sea_orm::Iterable;
 ///
 /// - Grouping (`g`) line: `v0 = user_id`, `v1 = role_code`.
 /// - Permission (`p`) line: `v0 = role_code`, `v1 = resource`, `v2 = operation`,
-///   and `v3` holds [`OBJECT_TYPE_RESOURCE`].
+///   and `v3` holds `OBJECT_TYPE_RESOURCE`.
 ///
 /// [`Adapter`]: https://docs.rs/casbin/latest/casbin/trait.Adapter.html
 pub mod casbin {
@@ -353,9 +353,11 @@ impl ResourceType {
 
 #[cfg(test)]
 mod tests {
-    use super::{Operation, RESOURCE_OPERATIONS, ResourceType, parse_permission};
-    use sea_orm::Iterable;
     use std::{collections::HashSet, str::FromStr};
+
+    use sea_orm::Iterable;
+
+    use super::{Operation, RESOURCE_OPERATIONS, ResourceType, parse_permission};
 
     #[test]
     fn resource_type_round_trips_via_from_str() {

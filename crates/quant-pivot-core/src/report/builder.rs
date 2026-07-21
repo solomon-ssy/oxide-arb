@@ -5,13 +5,16 @@ use std::{
     sync::Arc,
 };
 
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, Utc};
 use quant_pivot_error::{QuantError, QuantResult, report::ReportError};
 use quant_pivot_models::{
     domain::{
-        DecisionBoundary, DecisionClock, DecisionPolicySnapshotInfo, MarketSubject,
-        ModelVersionInfo, PriceComparator, TradePolicyArtifactInfo,
-        quant::{NewPortfolioPlan, NewReportDataQualitySnapshot},
+        data_plane::{DecisionBoundary, DecisionClock},
+        governance::DecisionPolicySnapshotInfo,
+        quant::{
+            MarketSubject, ModelVersionInfo, NewPortfolioPlan, NewReportDataQualitySnapshot,
+            PriceComparator, TradePolicyArtifactInfo,
+        },
     },
     enums::{
         domain::LinkageSourceRole,
@@ -49,27 +52,28 @@ use quant_pivot_research::{
 };
 use rust_decimal::Decimal;
 
-use crate::{
-    governance::{RuntimeModeHandle, resolve_return_model_calibration},
-    prefetch::market_candidates::{DecisionSnapshotSource, MarketCandidateProvider},
-    service::{
-        account::AccountProviderFactory,
-        equity::{DrawdownProvider, ReportEquitySnapshot},
-        feature_pipeline::{FeaturePipelineRequest, FeaturePipelineResult, FeaturePipelineService},
-        market_selection::map_snapshot_to_model,
-        model_runner::{
-            ActiveModelRequirements, ActiveModelRequirementsRequest, ModelRunOutcome,
-            ModelRunRequest, ModelRunner,
-        },
-    },
-};
-
 use super::{
     composer::{
         ComposeReportInput, RecommendationComposer, empty_plan_for_report, executable_sizing_tiers,
     },
     readiness::ReportReadinessGate,
     types::{BuildReportRequest, ComposedReport, EmptyReportContext, ReportTrigger},
+};
+use crate::{
+    governance::{RuntimeModeHandle, resolve_return_model_calibration},
+    prefetch::market_candidates::{DecisionSnapshotSource, MarketCandidateProvider},
+    service::{
+        account::AccountProviderFactory,
+        equity::{DrawdownProvider, ReportEquitySnapshot},
+        feature_pipeline::{
+            FeaturePipelineRequest, FeaturePipelineResult, FeaturePipelineService, RejectedMarket,
+        },
+        market_selection::map_snapshot_to_model,
+        model_runner::{
+            ActiveModelRequirements, ActiveModelRequirementsRequest, ModelMarketDecision,
+            ModelRunOutcome, ModelRunRequest, ModelRunner,
+        },
+    },
 };
 
 /// Report builder interface.
@@ -133,8 +137,8 @@ struct EmptyComposeInput<'a> {
     /// provenance + rejected summary) instead of synthesizing a default plan.
     portfolio_plan: Option<NewPortfolioPlan>,
     planner_rejected: &'a [RejectedCandidate],
-    feature_rejected: &'a [crate::service::feature_pipeline::RejectedMarket],
-    model_decisions: &'a [crate::service::model_runner::ModelMarketDecision],
+    feature_rejected: &'a [RejectedMarket],
+    model_decisions: &'a [ModelMarketDecision],
     early_funnel_terminal: Option<(ReportFunnelStage, ReportFunnelReason)>,
 }
 
@@ -603,11 +607,11 @@ impl DefaultReportBuilder {
 
     /// Single hash-verified artifact load resolving both `return_model_calibrated`
     /// and the (optional) [`ResolvedCalibration`] — never two independent loads
-    /// of the same artifact (Phase 11.3 §8: "one load, two checks"). Delegates
+    /// of the same artifact (one load, two checks). Delegates
     /// the calibration-state decision to
     /// [`resolve_return_model_calibration`](crate::governance::resolve_return_model_calibration) —
     /// the same shared deep check `publish` / admission / intent creation use
-    /// (Phase 11.3 closed-loop hardening).
+    /// across the closed loop.
     async fn resolve_calibration_state(
         &self,
         version: &ModelVersionInfo,
@@ -825,8 +829,8 @@ impl DefaultReportBuilder {
     }
 
     /// Pre-fetch historical mid-price series and estimate correlated clusters,
-    /// when the correlation cap is enabled and configured. Returns `None` (the
-    /// cap does not bind) when disabled or the cap is unset — the Phase 4 path.
+    /// when the correlation cap is enabled and configured. Returns `None` when
+    /// the cap is disabled or unset.
     async fn build_correlation(
         &self,
         context: &BuildContext,
@@ -1037,7 +1041,7 @@ impl DefaultReportBuilder {
 
     async fn account_snapshot(
         &self,
-        as_of: chrono::DateTime<Utc>,
+        as_of: DateTime<Utc>,
         config: &DecisionPolicySnapshot,
     ) -> QuantResult<AccountSnapshot> {
         let caps = portfolio_caps(config);
@@ -1236,7 +1240,7 @@ fn plan_candidates<'a>(
     selected: &'a [SelectedMarket],
     captures: &HashMap<MarketId, MarketDecisionCapture>,
     trade_policy: Option<&TradePolicyArtifactInfo>,
-    decision_at: chrono::DateTime<Utc>,
+    decision_at: DateTime<Utc>,
 ) -> Vec<PlanCandidate<'a>> {
     candidates
         .iter()
@@ -1293,7 +1297,7 @@ fn count_u32(count: usize, field: &'static str) -> QuantResult<u32> {
 
 fn empty_data_quality_snapshot(
     context: &BuildContext,
-    decision_at: chrono::DateTime<Utc>,
+    decision_at: DateTime<Utc>,
 ) -> NewReportDataQualitySnapshot {
     NewReportDataQualitySnapshot {
         report_data_quality_snapshot_id: ReportDataQualitySnapshotId::from_v7(),
@@ -1405,8 +1409,8 @@ fn liquidity_score_cap(config: &DecisionPolicySnapshot) -> Usd {
     Usd::new(Decimal::from(10_000))
 }
 
-/// Map planner rejections + solver provenance to the report-level empty reason
-/// (04.2 §4 step 8). Each reason has an independent, non-collapsed trigger:
+/// Map planner rejections and solver provenance to the report-level empty
+/// reason. Each reason has an independent, non-collapsed trigger:
 ///
 /// 1. `SolverUnavailable` (no solver could produce a plan) -> `SystemDegraded`;
 /// 2. any `ReturnModelUncalibrated` -> `ReturnModelUncalibrated`;

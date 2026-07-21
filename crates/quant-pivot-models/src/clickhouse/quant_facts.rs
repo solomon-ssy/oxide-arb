@@ -1,5 +1,7 @@
 //! Quant-pivot `ClickHouse` fact rows.
 
+use serde::{Deserialize, Serialize};
+
 use crate::{
     clickhouse::{ChDecimal64, ChPrice, ChProbability, ChShares, ChUsd},
     enums::clickhouse::{
@@ -15,7 +17,6 @@ use crate::{
         RecommendationReportId, SignalCandidateId, TokenId, TrainingDatasetId,
     },
 };
-use serde::{Deserialize, Serialize};
 
 /// Complete stateful feature-cell evidence emitted by PIT feature builders.
 ///
@@ -297,7 +298,7 @@ pub struct QuantPositionEventRow {
     pub ingestion_time: i64,
 }
 
-/// Exit-signal evaluation audit fact (Phase 06.0 re-inference + 06.1 opportunistic).
+/// Exit-signal evaluation audit fact for re-inference and opportunistic exits.
 ///
 /// One row per model-driven exit-signal evaluation of an open lot, whether it
 /// forced a hold, invalidated the thesis, or proposed an opportunistic exit —
@@ -341,7 +342,7 @@ pub struct QuantRecommendationAttributionEventRow {
     pub recommendation_id: RecommendationId,
     pub outcome: ChRecommendationAttributionOutcome,
     pub realized_pnl_usd: ChUsd,
-    /// `None` when PG stores `NULL` (filled-path MAE deferred to 06.6 book replay).
+    /// `None` when PG stores `NULL` (filled-path MAE deferred to book replay).
     pub max_adverse_excursion_bps: Option<ChDecimal64>,
     pub max_favorable_excursion_bps: ChDecimal64,
     pub label_available_at: i64,

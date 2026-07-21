@@ -7,7 +7,7 @@
 //! the authoritative fallback: read the funder's on-chain controller and confirm
 //! it is the bot signer.
 //!
-//! - **Proxy** exposes `owner()` — the controlling EOA.
+//! - **Proxy** exposes `owner` — the controlling EOA.
 //! - **Gnosis Safe** exposes `isOwner(address)` — its (1-of-1) owner set.
 
 use std::time::Duration;
@@ -22,7 +22,7 @@ use alloy::{
 use async_trait::async_trait;
 use quant_pivot_error::rpc::RpcError;
 use quant_pivot_models::{config::PolymarketConfig, enums::quant::ExecutionWalletKind};
-use reqwest::Url;
+use reqwest::{Client, Url};
 
 sol! {
     #[sol(rpc)]
@@ -71,7 +71,7 @@ impl WalletOwnershipClient {
         })?;
         // reqwest defaults to *no* timeout; bound each ownership read so a stalled
         // provider cannot hang boot indefinitely.
-        let http_client = reqwest::Client::builder()
+        let http_client = Client::builder()
             .timeout(Duration::from_millis(config.onchain.rpc_timeout_ms))
             .build()
             .map_err(|e| {

@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
 use crate::{
-    domain::{TradeTapeBlockCursorStatus, TradeTapeSourceKind},
+    domain::data_plane::{TradeTapeBlockCursorStatus, TradeTapeSourceKind},
     types::EvmAddress,
 };
 

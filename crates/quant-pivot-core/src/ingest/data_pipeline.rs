@@ -1,3 +1,34 @@
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
+    time::{Duration, Instant},
+};
+
+use dashmap::DashSet;
+use flume::{Receiver, Sender};
+use futures_util::future::join_all;
+use parking_lot::Mutex;
+use quant_pivot_error::{QuantError, infra::InfraError};
+use quant_pivot_models::{
+    clickhouse::{BookStreamSessionRow, ChSchemaVersion},
+    domain::data_plane::{
+        BookSnapshotCmd, PriceDeltaCmd,
+        latency::LatencyTrace,
+        pipeline::{IngressTrace, PipelineEvent, StreamSessionEndReason},
+    },
+    enums::{
+        clickhouse::{ChBookEventType, ChStreamSessionEndReason, ChStreamSessionState},
+        system::ShardConnectionStatus,
+    },
+    types::{ContentHash, Shares, TokenId},
+};
+use tokio::{task::JoinSet, time::timeout};
+use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
+
 use super::{
     book_store::BookStore, event_source::PipelineEventSource, market_registry::MarketRegistry,
 };
@@ -9,34 +40,6 @@ use crate::{
     },
     service::system_status_nudge::SystemStatusNudge,
 };
-use dashmap::DashSet;
-use flume::{Receiver, Sender};
-use futures_util::future::join_all;
-use parking_lot::Mutex;
-use quant_pivot_error::{QuantError, infra::InfraError};
-use quant_pivot_models::{
-    clickhouse::{BookStreamSessionRow, ChSchemaVersion},
-    domain::{
-        BookSnapshotCmd, PriceDeltaCmd,
-        latency::LatencyTrace,
-        pipeline::{IngressTrace, PipelineEvent, StreamSessionEndReason},
-    },
-    enums::{
-        clickhouse::{ChBookEventType, ChStreamSessionEndReason, ChStreamSessionState},
-        system::ShardConnectionStatus,
-    },
-    types::{ContentHash, Shares, TokenId},
-};
-use std::{
-    collections::{BTreeMap, HashMap, HashSet},
-    sync::{
-        Arc,
-        atomic::{AtomicBool, AtomicU64, Ordering},
-    },
-    time::{Duration, Instant},
-};
-use tokio::{task::JoinSet, time::timeout};
-use tokio_util::sync::CancellationToken;
 
 const MIN_BOOK_SHARD_COUNT: usize = 4;
 // Canonical L2 persistence is one shared batching plane. Hundreds of async
@@ -415,18 +418,18 @@ struct BookApplyWorker {
     event_source: Arc<dyn PipelineEventSource>,
     book_fact_writer: Arc<BookFactWriter>,
     stream_state: HashMap<TokenId, TokenStreamState>,
-    invalid_sessions: Arc<DashSet<uuid::Uuid>>,
+    invalid_sessions: Arc<DashSet<Uuid>>,
 }
 
 #[derive(Debug, Clone, Copy)]
 struct TokenStreamState {
-    session_id: uuid::Uuid,
+    session_id: Uuid,
     last_sequence: u64,
     has_fresh_snapshot: bool,
 }
 
 struct SessionClose {
-    stream_session_id: uuid::Uuid,
+    stream_session_id: Uuid,
     shard_id: u32,
     subscription_token_hash: ContentHash,
     subscription_token_count: u32,
@@ -841,7 +844,7 @@ impl BookApplyWorker {
     fn invalidate_batch_sessions(
         &mut self,
         events: &[PipelineEvent],
-        failed_sessions: &HashSet<uuid::Uuid>,
+        failed_sessions: &HashSet<Uuid>,
     ) {
         let mut invalidated_tokens = HashSet::new();
         for event in events {

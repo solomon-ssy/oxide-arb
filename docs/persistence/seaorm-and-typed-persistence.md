@@ -82,9 +82,9 @@ Rust struct 与 PostgreSQL 列布局是两个不同层次的决策：
 
 `quant_feature_vector` 的四份文档必须分别建模：`decision_boundary` 是统一 PIT 时间边界，`payload` 是固定 envelope + registry 驱动的 feature-name map，`source_refs` 是 `Vec<EvidenceSourceRef>`，`decision_capture` 是内容哈希承诺的 `DecisionCaptureEvidence`。四者都由系统解释，因此使用 canonical typed JSONB；动态 feature key 不等于允许裸 `Value`。这些类型由 compute/persistence 共享，repository 不做二次 JSON 解码。
 
-### 3.2 当前 JSONB 逐域决策账本
+### 3.2 当前 JSONB 逐域决策
 
-下表记录当前 runtime entity 的全部 JSONB 字段族。机器可校验的逐字段事实源是 `schema/jsonb-field-decisions.toml`：`jsonb-field-audit` 以 Rust AST 双向核对 runtime entity、persistence DTO、fresh-boot v1 snapshot、顶层闭合 serde shape 和登记项，新增、删除、类型漂移、裸 `Json`/`Value`、external boundary 扩张或未知字段 fail-open 都会阻断 CI。这里的“保留”不是因为已经 derive `FromJsonQueryResult`，而是因为生产者、消费者、查询、更新、约束和生命周期共同证明其为原子文档。任何调用方开始按内部字段过滤、局部 patch 或建立 FK 时，必须重新打开该决策。
+下表记录当前 runtime entity 的 JSONB 字段族和业务访问模式，不作为需要逐字段同步的机器清单。`cargo xtask architecture check` 直接发现所有 `JsonBinary` entity 字段，拒绝裸 `Json`/`Value`、缺少 `FromJsonQueryResult` 的类型以及 fail-open 的顶层 serde shape；Rust 编译继续证明 entity/DTO 转换，fresh-boot schema verification 和 repository system tests 证明数据库约束与解码行为。这里的“保留”不是因为已经 derive `FromJsonQueryResult`，而是因为生产者、消费者、查询、更新、约束和生命周期共同证明其为原子文档。任何调用方开始按内部字段过滤、局部 patch 或建立 FK 时，必须重新打开该决策。
 
 | 字段族 | 上下文与访问模式 | 决策与取舍 |
 |---|---|---|
@@ -198,25 +198,18 @@ CI 只用 deterministic statement/row/byte budget 判定。p50/p95/p99 通过 tr
 
 ## 9. Raw SQL 例外
 
-允许的 native SQL 只存在于集中 typed dialect module，并必须绑定 compiled `SqlContract`：
+允许的 native SQL 只存在于 owning crate 的集中 typed dialect module：
 
 - PostgreSQL catalog/admin/advisory lock；
 - SeaORM/SeaQuery 无法表达的 ordered-set percentile；
 - ClickHouse typed schema/query renderer；
 - 明确标注的 test-only corruption case。
 
-`SqlContract` 是唯一 native-SQL registry，至少包含稳定 ID、dialect、owner、typed input/output、statement/result-row/result-byte budget 和 safety class。ClickHouse wrapper 将 contract ID 写入 `log_comment`，并以 `max_result_rows`、`max_result_bytes`、`result_overflow_mode=throw` 在服务端拒绝越界结果；PostgreSQL raw result 由固定 shape 和 typed decode 约束。identifier 必须来自封闭 enum/manifest，不得格式化用户字符串。
+`PostgreSQL` raw result 由固定 query shape 和 typed decode 约束；其 catalog、lifecycle 与 migration SQL 必须与 owning function 放在同一模块。`ClickHouse` native reads 通过 `ClickHouseQueryLimits` 设置稳定 `log_comment`，并以 `max_result_rows`、`max_result_bytes`、`result_overflow_mode=throw` 在服务端拒绝越界结果。identifier 必须来自封闭 enum/manifest，不得格式化用户输入字符串。
 
 动态 renderer 的 identifier 来源同样是契约：runtime research-readiness 在插值前要求整个 `ResearchSourceBinding` 与 canonical built-in registry 精确相等；PG/CH lifecycle 只接受通过长度/字符校验并被 dialect quote 的配置标识，或 compiled migration manifest 中的封闭对象名。仅“做了转义”但来源仍开放的字符串不满足该边界。
 
-`cargo run -q -p quant-pivot-xtask -- sql-contract-audit` 使用 Rust AST 双向核对 declaration、compiled registry 和 usage，并拒绝：
-
-- 未登记的 ClickHouse `.query`、`sqlx::query*` 或 SeaORM raw `Statement`；
-- Core/Web/Bin 直接持有 native SQL；
-- 非 lifecycle native SQL 在循环中执行；
-- registry 陈旧项、未使用项和重复 contract ID。
-
-普通 CRUD、join、aggregate、upsert 和 SeaQuery 可表达的 DDL 不得以“更方便”为由进入 registry。test-only corruption SQL只允许留在 `cfg(test)` 隔离模块，不计入 production registry。
+普通 CRUD、join、aggregate、upsert 和 SeaQuery 可表达的 DDL 不得以“更方便”为由改写成 native SQL。review 必须确认 raw SQL 位于基础设施或 repository owner，参数通过 bind/typed `Statement` 传入，动态 identifier 已按 dialect 校验并 quote；test-only corruption SQL 只允许留在隔离的测试模块。
 
 ## 10. Review checklist
 

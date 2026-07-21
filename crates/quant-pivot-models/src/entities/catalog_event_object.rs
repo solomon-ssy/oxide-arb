@@ -1,8 +1,10 @@
 //! Content-addressed normalized Gamma event objects.
 
-use crate::types::{CatalogEventObjectId, ContentHash, ExternalJsonDocument};
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
+
+use super::catalog_event_change;
+use crate::types::{CatalogEventObjectId, ContentHash, ExternalJsonDocument};
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -16,7 +18,7 @@ pub struct Model {
     pub payload: ExternalJsonDocument,
     pub created_at: DateTime<Utc>,
     #[sea_orm(has_many, relation_enum = "EventChange")]
-    pub event_changes: HasMany<super::catalog_event_change::Entity>,
+    pub event_changes: HasMany<catalog_event_change::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

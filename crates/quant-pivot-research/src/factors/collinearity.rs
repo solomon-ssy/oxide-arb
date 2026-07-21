@@ -2,11 +2,11 @@
 //! matrix of a factor-value panel and the pairs that breach a tolerance.
 //!
 //! Two momentum factors that are really the same signal (audit #2) show up here
-//! as a high `|ρ|`. In 11.1 this is an **analyzer + offline/CI lint**: the
+//! as a high `|ρ|`. This is an **analyzer plus an offline/CI gate**: the
 //! acceptance suite (`default_momentum_estimators_not_mutually_collinear`)
 //! asserts the four momentum estimators and the simple return stay below the
-//! configured tolerance on a heterogeneous synthetic panel. Wiring `|ρ|` as a
-//! hard model-publish gate is 11.5.
+//! configured tolerance on a heterogeneous synthetic panel. Collinearity is an
+//! offline diagnostic; the model-publish gate consumes its governed evidence.
 //!
 //! Spearman is Pearson correlation of average ranks, computed over the
 //! observations where **both** factors are present. The `f64` reductions are

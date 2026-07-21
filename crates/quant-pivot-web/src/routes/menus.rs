@@ -4,9 +4,15 @@
 //! returns only the menus the caller's **enabled** roles grant. Menus are not
 //! part of the Casbin policy, so none of these endpoints touch the enforcer.
 
-use actix_web::{http::Method, web};
+use actix_web::{
+    http::Method,
+    web::{Data, Path},
+};
 use quant_pivot_models::{
-    domain::{CreateMenuRequest, MenuInfo, MenuTreeNode, NewMenu, UpdateMenuRequest},
+    domain::{
+        api::{CreateMenuRequest, UpdateMenuRequest},
+        rbac::{MenuInfo, MenuTreeNode, NewMenu},
+    },
     enums::{
         operation_log::OperationCategory,
         rbac::{Operation, ResourceType, RoleStatus},
@@ -61,13 +67,13 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
 }
 
 /// `GET /api/menus` — the full menu tree.
-pub async fn list(state: web::Data<AppState>) -> Result<WebResponse<Vec<MenuTreeNode>>, WebError> {
+pub async fn list(state: Data<AppState>) -> Result<WebResponse<Vec<MenuTreeNode>>, WebError> {
     Ok(WebResponse::ok(state.menus.tree().await?))
 }
 
 /// `POST /api/menus` — create a menu node.
 pub async fn create(
-    state: web::Data<AppState>,
+    state: Data<AppState>,
     op_ctx: OperationCtx,
     body: ValidatedJson<CreateMenuRequest>,
 ) -> Result<WebResponse<MenuInfo>, WebError> {
@@ -96,8 +102,8 @@ pub async fn create(
 
 /// `PUT /api/menus/{id}` — partial menu update.
 pub async fn update(
-    state: web::Data<AppState>,
-    id: web::Path<MenuId>,
+    state: Data<AppState>,
+    id: Path<MenuId>,
     op_ctx: OperationCtx,
     body: ValidatedJson<UpdateMenuRequest>,
 ) -> Result<WebResponse<MenuInfo>, WebError> {
@@ -109,8 +115,8 @@ pub async fn update(
 
 /// `DELETE /api/menus/{id}` — delete a menu node.
 pub async fn delete(
-    state: web::Data<AppState>,
-    id: web::Path<MenuId>,
+    state: Data<AppState>,
+    id: Path<MenuId>,
     op_ctx: OperationCtx,
 ) -> Result<WebResponse<()>, WebError> {
     state.menus.delete(&id).await?;
@@ -121,7 +127,7 @@ pub async fn delete(
 
 /// `GET /api/menus/accessible` — the menu tree the caller's enabled roles grant.
 pub async fn accessible(
-    state: web::Data<AppState>,
+    state: Data<AppState>,
     actor: AuthedActor,
 ) -> Result<WebResponse<Vec<MenuTreeNode>>, WebError> {
     let menus = state

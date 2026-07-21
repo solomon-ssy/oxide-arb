@@ -1,11 +1,12 @@
 //! Strongly-typed identifiers for every long-lived background task.
 //!
 //! [`TaskId`] is the single registration key: it resolves shutdown
-//! [`TaskKind`](super::task_registry::TaskKind), log labels, and Prometheus
+//! [`TaskKind`], log labels, and Prometheus
 //! dimensions without a parallel string-constant module.
 
-use super::task_registry::TaskKind;
 use strum::IntoStaticStr;
+
+use super::task_registry::TaskKind;
 
 /// Canonical identifier for a registered background task.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, IntoStaticStr)]
@@ -82,13 +83,13 @@ pub enum TaskId {
     /// Self-heals the execution breaker (`Degraded → Healthy` after cooldown).
     ExecutionBreakerTick,
     ReconciliationWorker,
-    /// Scans open position lots and evaluates the exit priority ladder (05.6).
+    /// Scans open position lots and evaluates the exit priority ladder.
     ExitMonitor,
     /// Redeems resolved standard binary CTF positions and closes settlement lots.
     SettlementRedeemWorker,
     /// Writes final recommendation-attribution rows after execution reaches truth.
     AttributionWorker,
-    /// Best-effort analytics mirror for final attribution events (05.7).
+    /// Best-effort analytics mirror for final attribution events.
     AttributionEventsWriter,
     /// Best-effort analytics mirror for execution-order lifecycle events.
     ExecutionEventsWriter,
@@ -96,7 +97,7 @@ pub enum TaskId {
     CapitalAllocationEventsWriter,
     /// Best-effort analytics mirror for position-lot ledger events.
     PositionEventsWriter,
-    /// Best-effort analytics mirror for exit-signal evaluation audit events (06.1).
+    /// Best-effort analytics mirror for exit-signal evaluation audit events.
     ExitSignalEvaluationEventsWriter,
 
     // ── Risk / periodic ───────────────────────────────────────────────

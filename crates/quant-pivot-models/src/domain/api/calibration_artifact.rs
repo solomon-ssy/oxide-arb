@@ -1,9 +1,8 @@
-//! Unified calibration-artifact admin HTTP contract (Phase 11.3 §3.4).
+//! Unified calibration-artifact admin HTTP contract.
 //!
 //! Read surface for the content-addressed `CalibrationArtifact` catalog
-//! (both `kind`s) plus the governed mutations: fitting a new `market_price_bias`
-//! table (async research job, unchanged from Phase 11.2.1), fitting a new
-//! `model_score` calibrator (async research job, new), activating a bias table
+//! (all `kind`s) plus the governed mutations: fitting a new `market_price_bias`
+//! table, fitting a new `model_score` calibrator, activating a bias table
 //! into `factors.structural.favorite_longshot.bias_table_ref`, and binding a
 //! `model_score` calibrator to a model version's return model (routed with
 //! model governance — see `BindCalibrationRequest`).
@@ -14,7 +13,10 @@ use serde::{Deserialize, Serialize};
 use validator::Validate;
 
 use crate::{
-    domain::{CalibrationArtifactInfo, CalibrationArtifactPayload, pagination::PageRequest},
+    domain::{
+        pagination::PageRequest,
+        quant::{CalibrationArtifactInfo, CalibrationArtifactPayload},
+    },
     enums::quant::{CalibrationKind, CalibrationMethod, DownsideSource},
     half_open_window_request,
     types::{CalibrationArtifactId, ContentHash, ModelVersionId, TrainingDatasetId},
@@ -43,8 +45,8 @@ half_open_window_request!(FitBiasTableRequest);
 ///
 /// `calibration_dataset_id` must reference a `Ready`
 /// `purpose = calibration` `TrainingDataset` whose window is disjoint and
-/// embargoed relative to `model_version_id`'s own training-dataset window
-/// (enforced server-side, fail-closed — Phase 11.3 §4).
+/// embargoed relative to `model_version_id`'s own training-dataset window.
+/// The server enforces this fail-closed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Validate)]
 pub struct FitModelCalibratorRequest {
     /// The candidate model version to calibrate.
@@ -74,7 +76,7 @@ pub struct ActivateCalibrationArtifactRequest {
 /// (`model_score` artifacts only — routed with model governance).
 ///
 /// Creates a new candidate model version whose `return_model` is
-/// `Calibrated { calibrator_ref, downside_source }` (Phase 11.3 §5).
+/// `Calibrated { calibrator_ref, downside_source }`.
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
 pub struct BindCalibrationRequest {
     /// The `model_score` calibration artifact to bind.
@@ -94,7 +96,7 @@ pub struct ModelCalibrationFitPreflightQuery {
 }
 
 /// Read-only disjoint + embargo preflight result for the "Fit Model
-/// Calibrator" wizard (Phase 11.3 §10).
+/// Calibrator" wizard.
 ///
 /// Reuses the exact purge/embargo primitive
 /// `ModelCalibrationFitService::fit` enforces fail-closed, surfaced *before*

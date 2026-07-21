@@ -18,26 +18,27 @@
 
 use std::{rc::Rc, str::FromStr, time::Instant};
 
-use crate::{
-    audit::OperationContext,
-    extractors::{ActingRole, RequestId},
-    jwt::Claims,
-    state::AppState,
-};
 use actix_web::{
     Error, HttpMessage,
     body::MessageBody,
     dev::{ServiceRequest, ServiceResponse},
     http::{Method, StatusCode},
     middleware::Next,
-    web,
+    web::Data,
 };
 use quant_pivot_models::{
-    domain::NewOperationLog,
+    domain::governance::NewOperationLog,
     enums::operation_log::{OperationCategory, OperationHttpMethod, OperationOutcome},
     types::{OperationAction, OperationDetailDocument, OperationLogId, UserId},
 };
 use sea_orm::entity::prelude::IpNetwork;
+
+use crate::{
+    audit::OperationContext,
+    extractors::{ActingRole, RequestId},
+    jwt::Claims,
+    state::AppState,
+};
 
 /// Capture every mutating request / auth event into the operation log.
 pub async fn operation_audit<B: MessageBody>(
@@ -57,7 +58,7 @@ pub async fn operation_audit<B: MessageBody>(
     let user_agent = header_value(&req, "user-agent");
     // The buffer is cheap to clone; capturing it avoids borrowing the response.
     let buffer = req
-        .app_data::<web::Data<AppState>>()
+        .app_data::<Data<AppState>>()
         .map(|state| state.operation_log.clone());
 
     let res = next.call(req).await?;

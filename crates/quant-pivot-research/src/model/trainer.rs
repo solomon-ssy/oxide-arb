@@ -1,4 +1,4 @@
-//! Model training contract and the [`WeightedFactorTrainer`] (Phase 3.6 / 11.4).
+//! Model training contract and the [`WeightedFactorTrainer`].
 //!
 //! The weighted-factor trainer optimizes the **frozen factor weights** that the
 //! online [`WeightedFactorRuntime`](crate::model::weighted::WeightedFactorRuntime)
@@ -6,7 +6,7 @@
 //!
 //! ```text
 //! signedᵢ = dir_signᵢ · normalizedᵢ · confidenceᵢ
-//! net     = Σ weightᵢ · signedᵢ                 (the ranking score, ∈ [-1, 1])
+//! net = Σ weightᵢ · signedᵢ (the ranking score, ∈ [-1, 1])
 //! ```
 //!
 //! and searches the weight **simplex** (non-negative, sum to 1) to minimize the
@@ -19,11 +19,16 @@
 //! Determinism is a hard, money-critical invariant: the same `(examples, label,
 //! seed, objective)` must yield a byte-identical artifact hash.
 
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    mem,
+};
+
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
-    domain::DecisionBoundary,
+    domain::data_plane::DecisionBoundary,
     enums::{common::MarketCategory, factor::NormalizationSource},
     runtime_config::{FactorCrossSectionConfig, SmallCrossSectionPolicy, TrainingOptimizerKind},
     types::{
@@ -58,10 +63,6 @@ use crate::{
     precision::RESEARCH_DECIMAL_SCALE,
     training::{LabelName, TrainingExample},
     validation::{DefaultPurgedSplitter, PurgeConfig, PurgedSplitter, TimelineGroup},
-};
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    mem,
 };
 /// Which forward label a trainer targets.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -129,8 +130,8 @@ pub struct ValidationReport {
     /// Number of sample rows discarded with those singleton cross-sections.
     #[serde(default)]
     pub dropped_singleton_rows: u64,
-    /// Effective independent trial count from `coordinate_search` (Bailey
-    /// multiple-testing correction input; Phase 11.5 DSR N decomposition).
+    /// Effective independent trial count from `coordinate_search`, used as the
+    /// Bailey multiple-testing correction input for DSR.
     #[serde(default)]
     pub coord_search_effective_n: u32,
 }
@@ -169,7 +170,7 @@ pub struct TrainModelRequest {
     /// Small-cross-section transform policy/minimum fitted together with the
     /// weighted artifact.
     pub factor_cross_section: FactorCrossSectionConfig,
-    /// When set, this artifact is scoped to one market category (Phase 11.2.2).
+    /// When set, this artifact is scoped to one market category.
     /// `None` means the generic cross-category scorer.
     pub category_scope: Option<MarketCategory>,
 }
@@ -1301,11 +1302,6 @@ struct TimeBlock {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        LabelSelector, ModelTrainer, TimeSplit, TrainModelRequest, TrainingDataset,
-        TrainingObjectiveSpec, ValidationSpec, WeightedFactorTrainer, coordinate_search,
-        weighted_training_input_hash,
-    };
     use std::{
         collections::{BTreeMap, BTreeSet},
         slice,
@@ -1315,7 +1311,7 @@ mod tests {
     #[cfg(not(feature = "optimize"))]
     use quant_pivot_models::runtime_config::TrainingOptimizerKind;
     use quant_pivot_models::{
-        domain::DecisionClock,
+        domain::data_plane::DecisionClock,
         enums::{
             common::MarketCategory,
             factor::FactorFamily,
@@ -1328,9 +1324,15 @@ mod tests {
             builtin_research_profiles,
         },
     };
+    use rayon::ThreadPoolBuilder;
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
 
+    use super::{
+        LabelSelector, ModelTrainer, TimeSplit, TrainModelRequest, TrainingDataset,
+        TrainingObjectiveSpec, ValidationSpec, WeightedFactorTrainer, coordinate_search,
+        weighted_training_input_hash,
+    };
     use crate::{
         factors::{
             FactorExplanation, FactorName, FactorValue, FrozenReferenceQuantiles, NormalizedFactor,
@@ -1588,11 +1590,11 @@ mod tests {
     #[test]
     fn weighted_trainer_is_thread_count_invariant() {
         let req = request(momentum_dataset());
-        let single = rayon::ThreadPoolBuilder::new()
+        let single = ThreadPoolBuilder::new()
             .num_threads(1)
             .build()
             .expect("single-thread pool");
-        let many = rayon::ThreadPoolBuilder::new()
+        let many = ThreadPoolBuilder::new()
             .num_threads(4)
             .build()
             .expect("multi-thread pool");
@@ -1892,15 +1894,16 @@ mod tests {
 /// is deterministic on a fixed platform.
 #[cfg(all(test, feature = "optimize"))]
 mod optimize_tests {
+    use chrono::{TimeZone, Utc};
+    use quant_pivot_models::types::model_training::TrainingObjectiveSpec;
+    use rust_decimal::Decimal;
+    use rust_decimal_macros::dec;
+
     use super::{coordinate_search, refine};
     use crate::model::{
         objective::{CrossSectionGroup, ObjectiveEvaluator, SampleRow},
         optimize::refine_weights,
     };
-    use chrono::{TimeZone, Utc};
-    use quant_pivot_models::types::model_training::TrainingObjectiveSpec;
-    use rust_decimal::Decimal;
-    use rust_decimal_macros::dec;
 
     /// A tiny deterministic LCG so the property test needs no `rand` dependency.
     const fn next(state: &mut u64) -> u64 {

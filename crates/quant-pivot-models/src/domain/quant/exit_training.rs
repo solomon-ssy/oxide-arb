@@ -1,4 +1,4 @@
-//! Closed-lot projections for `ExitDecision` training (Phase 06.1).
+//! Closed-lot projections for `ExitDecision` training.
 
 use chrono::{DateTime, Utc};
 

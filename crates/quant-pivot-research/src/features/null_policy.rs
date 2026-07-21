@@ -47,8 +47,8 @@ impl NullPolicyEngine {
     /// model lists this feature in its required set.
     ///
     /// Domain-missing values are always kept missing (the generic model
-    /// proceeds): imputation of a vertical gap is a governed model-layer concern
-    /// (3.4), never a silent feature-plane substitution.
+    /// proceeds): imputation of a vertical gap is a governed model-layer
+    /// concern, never a silent feature-plane substitution.
     #[must_use]
     pub fn decide(
         spec: &FeatureSpec,

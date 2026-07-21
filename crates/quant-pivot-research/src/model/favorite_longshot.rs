@@ -1,4 +1,4 @@
-//! Favorite-longshot bias table (Phase 11.2.1 — an 11.3 calibration advance).
+//! Favorite-longshot bias table for empirical market-price calibration.
 //!
 //! A content-addressed calibration artifact mapping a market's implied price
 //! (mid) to the **empirical** settlement-as-YES frequency, conditioned on
@@ -33,7 +33,7 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
     domain::{
-        CalibrationArtifactInfo, CalibrationArtifactPayload, NewCalibrationArtifact,
+        quant::{CalibrationArtifactInfo, CalibrationArtifactPayload, NewCalibrationArtifact},
         query::TimeWindow,
     },
     enums::{common::MarketCategory, quant::CalibrationKind},
@@ -42,7 +42,10 @@ use quant_pivot_models::{
         calibration::{CategoryBiasCurve, MarketPriceBiasPayload, PriceBiasBin, TtrBucketCurve},
     },
 };
-use rust_decimal::{Decimal, prelude::FromPrimitive, prelude::ToPrimitive};
+use rust_decimal::{
+    Decimal,
+    prelude::{FromPrimitive, ToPrimitive},
+};
 use serde::{Deserialize, Serialize};
 use statrs::distribution::{ContinuousCDF, StudentsT};
 
@@ -82,7 +85,7 @@ fn category_bias_for(
 }
 
 /// A content-addressed favorite-longshot bias table — the `MarketPriceBias`
-/// payload of the unified `CalibrationArtifact` family (Phase 11.3 §3.4).
+/// payload of the unified `CalibrationArtifact` family.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FavoriteLongshotBiasTable {
     /// Surrogate artifact id (shared `CalibrationArtifactId` space).
@@ -91,7 +94,7 @@ pub struct FavoriteLongshotBiasTable {
     pub content_hash: ContentHash,
     /// The sample window the table was fit over.
     pub fit_window: TimeWindow,
-    /// Hash of the independent calibration split (leakage guard; 11.5-aligned).
+    /// Hash of the independent, point-in-time-aligned calibration split.
     pub calibration_split_hash: ContentHash,
     /// Per-category empirical-bias curves (each conditioned on ttr).
     pub by_category: BTreeMap<MarketCategory, CategoryBiasCurve>,
@@ -123,7 +126,7 @@ impl FavoriteLongshotBiasTable {
     ///
     /// # Errors
     ///
-    /// Returns [`ResearchError::DatasetBuild`](quant_pivot_error::research::ResearchError::DatasetBuild)
+    /// Returns [`ResearchError::DatasetBuild`]
     /// when `info.kind` is not [`CalibrationKind::MarketPriceBias`], the
     /// payload cannot be deserialized, or the recomputed hash does not match
     /// the persisted `content_hash` (fail-closed: a tampered / corrupt / wrong-
@@ -139,9 +142,8 @@ impl FavoriteLongshotBiasTable {
             }));
         }
         // Fail-closed governance, unified with the `ModelScore` calibrator
-        // loader (Phase 11.3 closed-loop hardening — both `kind`s of the same
-        // `CalibrationArtifact` family share one `active` lifecycle
-        // semantics): a superseded or never-activated bias table must never
+        // loader: both `kind`s in the `CalibrationArtifact` family share one
+        // `active` lifecycle. A superseded or never-activated bias table must never
         // resolve, even if a stale `factors.structural.favorite_longshot.bias_table_ref`
         // still names it.
         if !info.active {
@@ -507,12 +509,14 @@ fn ic_is_significant(
 
 #[cfg(test)]
 mod tests {
-    use crate::hashing::ResearchHasher;
+    use std::collections::BTreeMap;
 
-    use super::{BiasFitConfig, BiasSample, BiasTableCanonical, FavoriteLongshotBiasTable};
     use chrono::{TimeZone, Utc};
     use quant_pivot_models::{
-        domain::{CalibrationArtifactInfo, CalibrationArtifactPayload, query::TimeWindow},
+        domain::{
+            quant::{CalibrationArtifactInfo, CalibrationArtifactPayload},
+            query::TimeWindow,
+        },
         enums::{common::MarketCategory, quant::CalibrationKind},
         types::{
             CalibrationArtifactId, ContentHash, MarketId, Price,
@@ -520,7 +524,9 @@ mod tests {
         },
     };
     use rust_decimal::Decimal;
-    use std::collections::BTreeMap;
+
+    use super::{BiasFitConfig, BiasSample, BiasTableCanonical, FavoriteLongshotBiasTable};
+    use crate::hashing::ResearchHasher;
 
     fn window() -> TimeWindow {
         TimeWindow::new(
@@ -697,7 +703,7 @@ mod tests {
 
     #[test]
     fn favorite_longshot_governance_unified_under_calibration_artifact() {
-        // Phase 11.3 closed-loop: `MarketPriceBias` shares the same `active`
+        // closed-loop: `MarketPriceBias` shares the same `active`
         // lifecycle gate as `model_score` calibrators — a superseded bias table
         // must fail closed at resolve time, not only at activate time.
         let info = persisted_info(false);
@@ -709,8 +715,8 @@ mod tests {
 
     #[test]
     fn from_persisted_rejects_inactive_bias_table() {
-        // Unified with `CoreCalibrationArtifactLoader` (Phase 11.3 closed-loop
-        // hardening): a superseded or never-activated bias table must never
+        // Unified with `CoreCalibrationArtifactLoader`: a superseded or
+        // never-activated bias table must never
         // resolve, even though `MarketPriceBias` previously had no such gate.
         let info = persisted_info(false);
         assert!(

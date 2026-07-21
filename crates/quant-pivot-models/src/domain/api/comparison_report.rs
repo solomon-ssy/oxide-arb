@@ -1,4 +1,4 @@
-//! Pairwise model-comparison report HTTP view (Phase 3.6, §5.6).
+//! Pairwise model-comparison report HTTP view.
 //!
 //! `GET /research/comparison-reports/{id}` returns this; it is also embedded by
 //! reference (`comparison_report_id`) on the candidate's [`BacktestReportView`]
@@ -10,7 +10,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    domain::{ModelComparisonReportInfo, pagination::PageRequest},
+    domain::{pagination::PageRequest, quant::ModelComparisonReportInfo},
     types::{
         BacktestReportId, ContentHash, ModelComparisonReportId, ModelRunId, ModelVersionId,
         backtest::CategoryRankIcDeltas,

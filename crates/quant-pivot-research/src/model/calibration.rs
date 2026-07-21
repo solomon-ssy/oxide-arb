@@ -1,12 +1,11 @@
-//! Governed score-multiplier calibration from realized backtest outcomes
-//! (Phase 3.6, §1.1 / §4).
+//! Governed score-multiplier calibration from realized backtest outcomes.
 //!
 //! After a candidate model is backtested, this module tightens every governed
 //! score multiplier — data-quality, liquidity, horizon — plus the substitution
 //! confidence penalties, from realized **stratified** performance.
 //!
 //! **Not** the return-model calibration path: `ReturnModelSpec::Calibrated`
-//! (Phase 11.3 §3.3/§5) is derived from an independently-fit
+//! is derived from an independently-fit
 //! `ProbabilityCalibrator` (see [`crate::model::calibrator`]) on a held-out
 //! split, never from this module's same-backtest realized samples (that would
 //! be a leaked, non-independent "calibration").
@@ -64,7 +63,7 @@ const MIN_BUCKET_SAMPLES: usize = 3;
 
 /// Multiplier calibration of a weighted artifact (score multipliers + substitution rules).
 ///
-/// Does **not** touch `return_model` (Phase 11.3 §5 — that is a separate,
+/// Does **not** touch `return_model`; that is a separate,
 /// independently-fit `ProbabilityCalibrator` governance action, never a same-backtest
 /// side effect).
 #[derive(Debug, Clone)]
@@ -81,7 +80,7 @@ pub struct CalibrationResult {
 /// rules from realized backtest outcomes.
 ///
 /// Always attempts multiplier tightening (each stratum fails closed to its
-/// baseline independently on insufficient evidence — see [`fail_closed`]); the
+/// baseline independently on insufficient evidence — see `fail_closed`); the
 /// return model is never touched here.
 #[must_use]
 pub fn calibrate_weighted_artifact(
@@ -450,16 +449,16 @@ fn best_of(means: &[Option<Decimal>]) -> Decimal {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        CalibrationSample, calibrate_liquidity_multipliers, calibrate_score_multipliers,
-        calibrate_substitution_rules,
-    };
     use quant_pivot_models::{
         enums::quant::DataQualityStatus, types::calibration::SubstitutionCalibrationBucket,
     };
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
 
+    use super::{
+        CalibrationSample, calibrate_liquidity_multipliers, calibrate_score_multipliers,
+        calibrate_substitution_rules,
+    };
     use crate::{
         features::NullReason,
         model::artifact::{

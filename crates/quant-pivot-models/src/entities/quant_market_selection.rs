@@ -1,10 +1,12 @@
 //! `quant_market_selection` table entity.
 
+use chrono::{DateTime, Utc};
+use sea_orm::entity::prelude::*;
+
+use super::quant_market_selection_member;
 use crate::types::{
     ContentHash, DecisionPolicySnapshotId, MarketSelectionId, SelectionExclusionSummary,
 };
-use chrono::{DateTime, Utc};
-use sea_orm::entity::prelude::*;
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -21,7 +23,7 @@ pub struct Model {
     pub created_at: DateTime<Utc>,
 
     #[sea_orm(has_many, relation_enum = "Member")]
-    pub member: HasMany<super::quant_market_selection_member::Entity>,
+    pub member: HasMany<quant_market_selection_member::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

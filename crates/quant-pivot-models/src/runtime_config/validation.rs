@@ -1,14 +1,14 @@
 //! Runtime-config semantic validation.
 //!
-//! This module validates only the current quant-pivot document. Legacy Endgame
-//! and superseded pre-quant configuration paths are not accepted (clean-break
-//! runtime configuration).
+//! This module validates only the current quant-pivot document. Unknown and
+//! superseded configuration paths are rejected by the typed schema.
 
-use crate::{
-    enums::factor::FactorNormalization,
-    runtime_config::{FeatureFamily, PerFactorNormalization},
-    types::CalibrationArtifactId,
-};
+use std::collections::HashSet;
+
+use chrono::DateTime;
+use linkme::distributed_slice;
+use quant_pivot_error::config_validation::{ConfigValidationError, ConfigValidationReport};
+use rust_decimal::Decimal;
 
 use super::{
     DecimalValue, DecisionPolicySnapshot, PolicyValidationConfig, ResearchValidationConfig,
@@ -16,15 +16,16 @@ use super::{
     sections::{FeaturesConfig, KellySafetyConfig, MAX_REPORT_TOP_N},
     validate_schedule_cadence,
 };
-use linkme::distributed_slice;
-use quant_pivot_error::config_validation::{ConfigValidationError, ConfigValidationReport};
-use rust_decimal::Decimal;
-use std::collections::HashSet;
+use crate::{
+    enums::factor::FactorNormalization,
+    runtime_config::{FeatureFamily, PerFactorNormalization},
+    types::CalibrationArtifactId,
+};
 
 /// Extension hook for feature-config validation that requires research-plane schema knowledge.
 ///
 /// Crates such as `quant-pivot-research` register validators here at link time so
-/// [`validate_features`] remains the single features entry point inside
+/// `validate_features` remains the single features entry point inside
 /// [`validate_runtime_config`].
 pub type FeaturesConfigValidator = fn(&FeaturesConfig, &mut ConfigValidationReport);
 
@@ -423,7 +424,7 @@ fn validate_factors(config: &DecisionPolicySnapshot, report: &mut ConfigValidati
     validate_factor_structural(config, report);
 }
 
-/// Validate the structural factor plane (Phase 11.2.1). Every knob a structural
+/// Validate the structural factor plane. Every knob a structural
 /// factor / bias-table fit reads is checked here so the compute path never falls
 /// back on a silent default (the factor / fit parse the same values fail-closed).
 fn validate_factor_structural(
@@ -682,7 +683,7 @@ fn validate_model(config: &DecisionPolicySnapshot, report: &mut ConfigValidation
         });
     }
     // Must be strictly positive: `0` would make the calibration-dataset
-    // purge/embargo primitive (Phase 11.3 §0) a no-op disjoint-only check,
+    // purge/embargo primitive a no-op disjoint-only check,
     // silently defeating the anti-leakage guarantee the embargo gap exists
     // to enforce.
     if config.model_routing.model.calibration.embargo_secs == 0 {
@@ -922,15 +923,17 @@ fn validate_portfolio(config: &DecisionPolicySnapshot, report: &mut ConfigValida
     validate_optimizer(config, report);
 }
 
-/// Highest sane `edge_uncertainty_k` (Phase 11.3 §6.1 `shrink = clamp(1 -
-/// k·edge_std, floor, 1)`): `edge_std` is a Wilson-CI half-width in `[0, 0.5]`,
+/// Highest sane `edge_uncertainty_k`.
+///
+/// The shrink rule is `clamp(1 - k·edge_std, floor, 1)`. `edge_std` is a
+/// Wilson-CI half-width in `[0, 0.5]`,
 /// so `k = 10` already drives `shrink` to `floor` for any half-width above
 /// `0.1` — an unbounded `k` has no further governance effect beyond making
 /// every calibrated candidate collapse to the floor, i.e. a de facto (and
 /// silent) disabling of edge-sensitivity rather than a deliberate one.
 const MAX_EDGE_UNCERTAINTY_K: Decimal = Decimal::TEN;
 
-/// Validate Kelly safety-layer parameters (Phase 11.3).
+/// Validate Kelly safety-layer parameters.
 fn validate_kelly_safety(kelly: &KellySafetyConfig, report: &mut ConfigValidationReport) {
     bounded_decimal(
         "portfolio.kelly_safety.edge_uncertainty_k",
@@ -1006,9 +1009,8 @@ fn validate_execution(config: &DecisionPolicySnapshot, report: &mut ConfigValida
     if config.execution_authorization.auto_execution.enabled {
         report.errors.push(ConfigValidationError::InvalidValue {
             field: "execution.auto_execution.enabled",
-            detail:
-                "Runtime v1 keeps AutoExecution blocked; Phase 11.11 owns its final governance gate"
-                    .to_owned(),
+            detail: "AutoExecution is blocked until its production governance gate is enabled"
+                .to_owned(),
         });
     }
     non_negative_decimal(
@@ -1109,7 +1111,7 @@ fn validate_semi_auto_canary(config: &DecisionPolicySnapshot, report: &mut Confi
     if canary
         .expires_at
         .as_deref()
-        .is_none_or(|value| chrono::DateTime::parse_from_rfc3339(value).is_err())
+        .is_none_or(|value| DateTime::parse_from_rfc3339(value).is_err())
     {
         report.errors.push(ConfigValidationError::InvalidValue {
             field: "execution.semi_auto.canary.expires_at",
@@ -1264,7 +1266,7 @@ fn validate_policy_validation(
     }
 }
 
-/// Phase 11.5 `research.validation.*` methodology config validation.
+/// `research.validation.*` methodology config validation.
 fn validate_research_validation(
     config: &DecisionPolicySnapshot,
     report: &mut ConfigValidationReport,

@@ -3,8 +3,6 @@
 use sea_orm::{DbBackend, Statement};
 use sea_orm_migration::prelude::*;
 
-use crate::sql_contract_registry::POSTGRES_SCHEMA_EXTENSION;
-
 pub(in crate::migrations) const SOURCE: &[u8] = include_bytes!("v1.rs");
 
 const EMPTY_BOOT_TARGET_SQL: &str = "WITH target_objects AS (\
@@ -39,12 +37,10 @@ pub(in crate::migrations) async fn assert_empty_boot_target(
 ) -> Result<(), DbErr> {
     let row = manager
         .get_connection()
-        .query_one_raw(
-            POSTGRES_SCHEMA_EXTENSION.postgres_statement(Statement::from_string(
-                DbBackend::Postgres,
-                EMPTY_BOOT_TARGET_SQL,
-            )),
-        )
+        .query_one_raw(Statement::from_string(
+            DbBackend::Postgres,
+            EMPTY_BOOT_TARGET_SQL,
+        ))
         .await?
         .ok_or_else(|| {
             DbErr::Custom("PostgreSQL catalog returned no boot preflight row".to_owned())
@@ -214,7 +210,7 @@ fn quote_identifier(identifier: &str) -> String {
 async fn execute(manager: &SchemaManager<'_>, sql: String) -> Result<(), DbErr> {
     manager
         .get_connection()
-        .execute_unprepared(&POSTGRES_SCHEMA_EXTENSION.postgres_owned_query(sql))
+        .execute_unprepared(&sql)
         .await
         .map(|_| ())
 }

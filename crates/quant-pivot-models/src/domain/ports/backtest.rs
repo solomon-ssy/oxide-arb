@@ -1,19 +1,22 @@
-//! Admin port for offline PIT backtests (Phase 3.6).
-
-use async_trait::async_trait;
-use tokio_util::sync::CancellationToken;
+//! Admin port for offline PIT backtests.
 
 use std::{collections::HashMap, sync::Arc};
 
+use async_trait::async_trait;
+use quant_pivot_error::QuantResult;
+use tokio_util::sync::CancellationToken;
+
 use crate::{
-    domain::{BacktestReportView, JobProgressSink, ModelComparisonReportInfo, RunBacktestRequest},
+    domain::{
+        api::{BacktestReportView, RunBacktestRequest},
+        quant::{JobProgressSink, ModelComparisonReportInfo},
+    },
     types::{BacktestReportId, ModelComparisonReportId, ModelVersionId},
 };
-use quant_pivot_error::QuantResult;
 
 /// Dependency-inversion boundary between the HTTP layer and the core backtester.
 ///
-/// Implemented in `quant-pivot-core` and injected into `quant_pivot_web::AppState`.
+/// Implemented in `quant-pivot-core` and injected into `quant_pivot_web::state::AppState`.
 #[async_trait]
 pub trait BacktestPort: Send + Sync {
     /// Replay a model version over a frozen dataset and persist a report.

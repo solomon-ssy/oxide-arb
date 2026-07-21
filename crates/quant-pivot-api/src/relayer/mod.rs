@@ -10,7 +10,8 @@
 //! data,nonce,signature,signatureParams,type}` body, polled via
 //! `GET /transaction?id=`.
 
-use crate::{keystore::OrderSigner, wallet::WalletTopology};
+use std::{str::FromStr, time::Duration};
+
 use alloy::{
     primitives::{Address, B256, Bytes, U256, keccak256},
     signers::{SignerSync, local::PrivateKeySigner},
@@ -23,9 +24,10 @@ use quant_pivot_models::{
     constants::{CTF_ADDRESS, PUSD_ADDRESS},
     enums::quant::ExecutionWalletKind,
 };
-use reqwest::Url;
+use reqwest::{Client, Error, Response, Url};
 use serde::{Deserialize, Serialize};
-use std::{str::FromStr, time::Duration};
+
+use crate::{keystore::OrderSigner, wallet::WalletTopology};
 
 /// Polygon Polymarket Proxy factory (EIP-1167 minimal proxy / GSN entry).
 const PROXY_FACTORY: &str = "0xaB45c5A4B0c941a2F231C04C3f49182e1A254052";
@@ -107,7 +109,7 @@ pub enum RelayerTxOutcome {
 /// Gasless relayer client scoped to standard binary CTF redemption.
 #[derive(Clone)]
 pub struct RelayerClient {
-    http: reqwest::Client,
+    http: Client,
     base_url: Url,
     api_key: String,
     api_key_address: String,
@@ -158,7 +160,7 @@ impl RelayerClient {
                 config.base_url
             ))
         })?;
-        let http = reqwest::Client::builder()
+        let http = Client::builder()
             .timeout(Duration::from_millis(config.request_timeout_ms))
             .build()
             .map_err(|e| RpcError::ConnectionFailed(format!("relayer http client: {e}")))?;
@@ -397,7 +399,7 @@ impl RelayerClient {
 
     async fn parse_response<R: for<'de> Deserialize<'de>>(
         path: &str,
-        response: reqwest::Response,
+        response: Response,
     ) -> Result<R, RpcError> {
         let status = response.status();
         let body = response
@@ -494,7 +496,7 @@ fn parse_u256(label: &str, value: &str) -> Result<U256, RpcError> {
     })
 }
 
-fn relayer_call_failed(path: &str, err: &reqwest::Error) -> RpcError {
+fn relayer_call_failed(path: &str, err: &Error) -> RpcError {
     if err.is_timeout() {
         RpcError::Timeout {
             method: format!("relayer.{path}"),

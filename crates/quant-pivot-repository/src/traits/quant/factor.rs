@@ -2,9 +2,12 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{
-        FactorDefinitionInfo, FactorDefinitionListQuery, FactorValueInfo,
-        LatestFactorSnapshotBundleInfo, LatestFactorSnapshotInfo, NewFactorDefinition,
-        NewFactorValue, Paginated,
+        api::FactorDefinitionListQuery,
+        pagination::Paginated,
+        quant::{
+            FactorDefinitionInfo, FactorValueInfo, LatestFactorSnapshotBundleInfo,
+            LatestFactorSnapshotInfo, NewFactorDefinition, NewFactorValue,
+        },
     },
     types::{FactorDefinitionId, MarketId, ModelRunId, ModelVersionId},
 };

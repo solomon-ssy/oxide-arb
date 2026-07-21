@@ -3,8 +3,9 @@
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{
-        CompleteTrainingDatasetBuild, NewTrainingDatasetPlan, Paginated, TrainingDatasetInfo,
-        TrainingDatasetListQuery,
+        api::TrainingDatasetListQuery,
+        pagination::Paginated,
+        quant::{CompleteTrainingDatasetBuild, NewTrainingDatasetPlan, TrainingDatasetInfo},
     },
     types::TrainingDatasetId,
 };

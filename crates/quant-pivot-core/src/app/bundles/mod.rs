@@ -6,17 +6,17 @@
 mod account;
 mod data;
 mod execution;
-mod future;
 mod governance;
 mod infra;
 mod pg_repos;
+mod report;
 mod research;
 
 pub use account::{AccountBundle, AccountBundleDeps};
 pub use data::{DataBundle, DataBundleDeps};
 pub use execution::{ExecutionBundle, ExecutionBundleDeps};
-pub use future::{PortfolioBundle, ReportBundle, ReportBundleDeps, RuntimeChannels};
 pub use governance::{GovernanceBundle, GovernanceBundleDeps, RuntimeSnapshot};
 pub use infra::InfraBundle;
 pub use pg_repos::PgRepositories;
+pub use report::{ReportBundle, ReportBundleDeps};
 pub use research::{ResearchBundle, ResearchBundleDeps};

@@ -1,7 +1,15 @@
 //! Settlement redeem HTTP contract types.
 
+use chrono::{DateTime, Utc};
+use quant_pivot_macros::NormalizePageQuery;
+use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
+
 use crate::{
-    domain::{SettlementRedeemInfo, SettlementRedeemLotInfo, pagination::PageRequest},
+    domain::{
+        pagination::PageRequest,
+        quant::{SettlementRedeemInfo, SettlementRedeemLotInfo},
+    },
     enums::{
         execution::SettlementRedeemState,
         quant::{ExecutionWalletKind, OutcomeSide},
@@ -11,10 +19,6 @@ use crate::{
         SettlementRedeemLotId, Shares, TokenId, Usd,
     },
 };
-use chrono::{DateTime, Utc};
-use quant_pivot_macros::NormalizePageQuery;
-use rust_decimal::Decimal;
-use serde::{Deserialize, Serialize};
 
 /// Outbound projection of one settlement redeem lot row.
 #[derive(Debug, Clone, Serialize)]

@@ -1,5 +1,5 @@
 //! Exit dispatcher — submits a triggered Sell exit order and settles it in one
-//! transaction (Phase 05.6).
+//! transaction.
 //!
 //! Mirrors the entry dispatcher's write-ahead / venue-call / settle shape but
 //! for the exit side: it does **not** run the 24-check admission engine (an exit
@@ -12,14 +12,14 @@
 
 use std::sync::Arc;
 
-use chrono::Utc;
+use chrono::{DateTime, Duration, Utc};
 use quant_pivot_error::{
     QuantResult,
     execution::ExecutionError,
-    storage::{StorageError, entity},
+    storage::{StorageError, entity::QUANT_ORDER_INTENT},
 };
 use quant_pivot_models::{
-    domain::{
+    domain::quant::{
         ExecutionOrderInfo, ExitLedgerWrite, NewExecutionOrder, NewReconciliation, PositionExit,
         PositionInfo,
     },
@@ -109,9 +109,7 @@ impl CoreExitDispatcher {
             .intents
             .find_by_id(&lot.order_intent_id)
             .await?
-            .ok_or_else(|| {
-                StorageError::not_found(entity::QUANT_ORDER_INTENT, &lot.order_intent_id)
-            })?;
+            .ok_or_else(|| StorageError::not_found(QUANT_ORDER_INTENT, &lot.order_intent_id))?;
         let prepared_order = self
             .prepare_exit_order(&lot, &order, &intent.profile_ref)
             .await?;
@@ -238,7 +236,7 @@ impl CoreExitDispatcher {
         ))?;
         let clob_market_info_hash = market_info.payload_hash;
         let valid_until = match order.order_type {
-            OrderType::Gtd { expiration } => chrono::DateTime::from_timestamp(
+            OrderType::Gtd { expiration } => DateTime::from_timestamp(
                 i64::try_from(expiration).map_err(|error| ExecutionError::TimeConversion {
                     field: "exit.gtd.expiration",
                     value: expiration.to_string(),
@@ -251,7 +249,7 @@ impl CoreExitDispatcher {
                 value: expiration.to_string(),
                 detail: "timestamp is outside chrono range".to_owned(),
             })?,
-            OrderType::Fok | OrderType::Fak | OrderType::Gtc => now + chrono::Duration::minutes(1),
+            OrderType::Fok | OrderType::Fak | OrderType::Gtc => now + Duration::minutes(1),
         };
         Ok(PreparedVenueOrder {
             profile_ref: profile_ref.clone(),

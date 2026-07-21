@@ -1,4 +1,4 @@
-//! Opportunistic-Sell exit-signal evaluator (Phase 06.1).
+//! Opportunistic-Sell exit-signal evaluator.
 //!
 //! Closes the advisory branch of the [`ExitSignalEvaluator`] seam: when the
 //! thesis still holds but the Sell scorer ranks exiting now above holding, this
@@ -20,7 +20,7 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
     clickhouse::{ChDecimal64, ChPrice, ChProbability, QuantExitSignalEvaluationEventRow},
-    domain::{OrderIntentInfo, PositionInfo},
+    domain::quant::{OrderIntentInfo, PositionInfo},
     enums::{
         clickhouse::{ChExitSignalEvaluatorKind, ChExitSignalVerdict},
         quant::QuantRuntimeMode,

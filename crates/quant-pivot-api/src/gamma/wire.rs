@@ -3,6 +3,7 @@
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Deserializer, Serialize, de::Error as DeError};
+use serde_json::Value;
 
 /// Maximum `limit` accepted by `GET /events/keyset`.
 pub const GAMMA_EVENTS_KEYSET_MAX_PAGE_SIZE: u32 = 500;
@@ -29,9 +30,9 @@ impl<'de> Deserialize<'de> for GammaStringList {
     where
         D: Deserializer<'de>,
     {
-        match Option::<serde_json::Value>::deserialize(deserializer)? {
-            None | Some(serde_json::Value::Null) => Ok(Self(Vec::new())),
-            Some(serde_json::Value::Array(items)) => {
+        match Option::<Value>::deserialize(deserializer)? {
+            None | Some(Value::Null) => Ok(Self(Vec::new())),
+            Some(Value::Array(items)) => {
                 let strings = items
                     .into_iter()
                     .map(|item| {
@@ -44,7 +45,7 @@ impl<'de> Deserialize<'de> for GammaStringList {
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok(Self(strings))
             }
-            Some(serde_json::Value::String(encoded)) => {
+            Some(Value::String(encoded)) => {
                 let parsed: Vec<String> = serde_json::from_str(&encoded).map_err(|err| {
                     DeError::custom(format!("gamma string list is not valid JSON array: {err}"))
                 })?;
@@ -247,8 +248,9 @@ pub struct WireFeeSchedule {
 
 #[cfg(test)]
 mod tests {
-    use super::{GammaStringList, KeysetEventsPage, WireEvent, WireMarket};
     use rust_decimal::Decimal;
+
+    use super::{GammaStringList, KeysetEventsPage, WireEvent, WireMarket};
 
     #[test]
     fn string_list_deserializes_json_array() {

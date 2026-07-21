@@ -1,11 +1,15 @@
-use std::{env, path::Path, process::Command};
+use std::{
+    env,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 const BUILD_GIT_SHA_ENV: &str = "QUANT_PIVOT_BUILD_GIT_SHA";
 const BUILD_GIT_STATE_ENV: &str = "QUANT_PIVOT_BUILD_GIT_STATE";
 
 fn main() {
     let manifest_dir = env::var_os("CARGO_MANIFEST_DIR")
-        .map(std::path::PathBuf::from)
+        .map(PathBuf::from)
         .unwrap_or_default();
     let workspace_root = manifest_dir.join("../..");
     let git_dir = workspace_root.join(".git");

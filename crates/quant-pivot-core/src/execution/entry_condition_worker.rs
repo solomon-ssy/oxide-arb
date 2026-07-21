@@ -3,12 +3,12 @@
 use std::{future::pending, slice, sync::Arc, time::Duration as StdDuration};
 
 use async_trait::async_trait;
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, NaiveDate, Utc};
 use quant_pivot_error::{QuantError, QuantResult, report::ReportError};
 use quant_pivot_models::{
     domain::{
-        ApplyEntryConditionEvaluation, CoreEvent, CoreEventPublisher, EntryConditionInstanceInfo,
-        EntryConditionLifecycleEvent, MarketLinkageInfo,
+        quant::{ApplyEntryConditionEvaluation, EntryConditionInstanceInfo, MarketLinkageInfo},
+        runtime::{CoreEvent, CoreEventPublisher, EntryConditionLifecycleEvent},
     },
     enums::{domain::LinkageStatus, quant::PublicationStatus},
     hashing::CanonicalDigest,
@@ -27,6 +27,7 @@ use quant_pivot_repository::traits::{
     ModelRegistryRepository, PolicyRepository, QuantFactReadRepository, RecommendationRepository,
 };
 use quant_pivot_storage::postgres::PostgresNotificationListener;
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use super::{
@@ -499,7 +500,7 @@ struct RequiredInputs {
 struct RequiredWeather {
     source: EntryConditionSourceBinding,
     station: String,
-    local_date: chrono::NaiveDate,
+    local_date: NaiveDate,
     temperature_statistic: WeatherTemperatureStatistic,
 }
 
@@ -838,7 +839,7 @@ impl EntryConditionWorker {
         instance: &EntryConditionInstanceInfo,
         stop: CancellationToken,
         policy: &EntryConditionWorkerConfig,
-    ) -> QuantResult<tokio::task::JoinHandle<()>> {
+    ) -> QuantResult<JoinHandle<()>> {
         let conditions = Arc::clone(&self.conditions);
         let instance_id = instance.condition_instance_id.clone();
         let worker_id = self.worker_id.clone();

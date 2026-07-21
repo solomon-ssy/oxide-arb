@@ -1,13 +1,16 @@
 //! `ClickHouse` client wrapper.
 
+use clickhouse::Client;
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::config::ClickHouseConfig;
 use tracing::info;
 
-use crate::{clickhouse::migration, sql_contract_registry::CLICKHOUSE_HEALTH};
+use crate::clickhouse::{
+    migration, migration::ClickHouseSchemaStatus, query_limits::CLICKHOUSE_HEALTH,
+};
 
 pub struct ClickHousePool {
-    client: clickhouse::Client,
+    client: Client,
 }
 
 impl ClickHousePool {
@@ -30,7 +33,7 @@ impl ClickHousePool {
     #[must_use]
     pub fn from_config(config: &ClickHouseConfig) -> Self {
         Self {
-            client: clickhouse::Client::default()
+            client: Client::default()
                 .with_url(&config.url)
                 .with_database(&config.database)
                 .with_user(&config.user)
@@ -38,13 +41,13 @@ impl ClickHousePool {
         }
     }
 
-    pub const fn client(&self) -> &clickhouse::Client {
+    pub const fn client(&self) -> &Client {
         &self.client
     }
 
     pub async fn health_check(&self) -> Result<(), StorageError> {
         CLICKHOUSE_HEALTH
-            .clickhouse_query(&self.client, "SELECT 1")
+            .query(&self.client, "SELECT 1")
             .fetch_one::<u8>()
             .await
             .map_err(|e| {
@@ -54,7 +57,7 @@ impl ClickHousePool {
     }
 
     /// Verify the immutable schema contract using metadata reads only.
-    pub async fn verify_schema(&self) -> Result<migration::ClickHouseSchemaStatus, StorageError> {
+    pub async fn verify_schema(&self) -> Result<ClickHouseSchemaStatus, StorageError> {
         migration::verify_schema_client(&self.client).await
     }
 }

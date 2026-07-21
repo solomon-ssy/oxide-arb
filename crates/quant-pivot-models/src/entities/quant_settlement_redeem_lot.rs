@@ -1,13 +1,15 @@
 //! `quant_settlement_redeem_lot` table entity.
 
+use chrono::{DateTime, Utc};
+use sea_orm::entity::prelude::*;
+
+use super::{quant_order_intent, quant_position, quant_settlement_redeem};
 use crate::{
     enums::quant::OutcomeSide,
     types::{
         OrderIntentId, PositionId, SettlementRedeemId, SettlementRedeemLotId, Shares, TokenId, Usd,
     },
 };
-use chrono::{DateTime, Utc};
-use sea_orm::entity::prelude::*;
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -32,21 +34,21 @@ pub struct Model {
         from = "settlement_redeem_id",
         to = "settlement_redeem_id"
     )]
-    pub settlement_redeem: BelongsTo<super::quant_settlement_redeem::Entity>,
+    pub settlement_redeem: BelongsTo<quant_settlement_redeem::Entity>,
     #[sea_orm(
         belongs_to,
         relation_enum = "Position",
         from = "position_id",
         to = "position_id"
     )]
-    pub position: BelongsTo<super::quant_position::Entity>,
+    pub position: BelongsTo<quant_position::Entity>,
     #[sea_orm(
         belongs_to,
         relation_enum = "OrderIntent",
         from = "order_intent_id",
         to = "order_intent_id"
     )]
-    pub order_intent: BelongsTo<super::quant_order_intent::Entity>,
+    pub order_intent: BelongsTo<quant_order_intent::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

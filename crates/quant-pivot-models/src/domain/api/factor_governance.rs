@@ -1,4 +1,4 @@
-//! Factor-definition governance HTTP contract (Phase 05.7).
+//! Factor-definition governance HTTP contract.
 //!
 //! | Method | Path | Permission | Purpose |
 //! |--------|------|------------|---------|
@@ -9,11 +9,12 @@
 
 use chrono::{DateTime, Utc};
 use quant_pivot_macros::NormalizePageQuery;
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use validator::Validate;
 
 use crate::{
-    domain::{FactorDefinitionInfo, pagination::PageRequest},
+    domain::{pagination::PageRequest, quant::FactorDefinitionInfo},
     enums::{
         factor::{FactorDefinitionScope, FactorFamily},
         quant::PublicationStatus,
@@ -111,7 +112,7 @@ pub enum FactorCollinearitySource {
 pub struct CollinearPairView {
     pub left: String,
     pub right: String,
-    pub correlation: rust_decimal::Decimal,
+    pub correlation: Decimal,
 }
 
 /// Factor-collinearity analysis over a recent window of factor values.
@@ -120,11 +121,11 @@ pub struct FactorCollinearityView {
     /// Factor names, index-aligned with `matrix` rows/columns.
     pub factors: Vec<String>,
     /// Symmetric Spearman rank-correlation matrix (`matrix[i][j]`), diagonal `1`.
-    pub matrix: Vec<Vec<rust_decimal::Decimal>>,
+    pub matrix: Vec<Vec<Decimal>>,
     /// Pairs whose `|ρ|` exceeds the tolerance.
     pub violations: Vec<CollinearPairView>,
     /// The absolute-correlation tolerance applied.
-    pub threshold: rust_decimal::Decimal,
+    pub threshold: Decimal,
     /// Number of joint observations the correlations were computed over.
     pub observation_count: usize,
     /// The lookback window (seconds) the sample was drawn from.

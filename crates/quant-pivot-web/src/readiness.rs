@@ -8,7 +8,8 @@ use std::{sync::Arc, time::Instant};
 
 use async_trait::async_trait;
 use quant_pivot_models::domain::{
-    CatalogState, CatalogStatusPort, DependencyCheck, ReadinessPort, ReadinessReport,
+    api::{DependencyCheck, ReadinessReport},
+    ports::{CatalogState, CatalogStatusPort, ReadinessPort},
 };
 use sea_orm::DatabaseConnection;
 use tracing::warn;

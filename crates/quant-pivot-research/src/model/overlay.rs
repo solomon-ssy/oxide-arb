@@ -1,5 +1,5 @@
 //! [`WeightOverlay`]: a governed, non-persisted factor-weight override for
-//! **non-published** candidate / shadow versions (3.7 hot-update closure).
+//! **non-published** candidate / shadow versions.
 //!
 //! An operator may experiment with factor weights on a `Candidate` / `Shadow`
 //! version without re-publishing or mutating the frozen artifact bytes: the
@@ -7,7 +7,7 @@
 //! artifact's weight table at runtime construction. It is fail-closed —
 //! non-negative weights summing to 1, and (at apply time) an exact match against
 //! the artifact's factor set, so an unknown or missing factor is rejected rather
-//! than silently scored. The overlay never participates in `content_hash()`;
+//! than silently scored. The overlay never participates in `content_hash`;
 //! publishing must bake a winning experiment back into a fresh artifact.
 
 use std::collections::BTreeMap;
@@ -113,11 +113,12 @@ impl WeightOverlay {
 
 #[cfg(test)]
 mod tests {
-    use super::WeightOverlay;
-    use quant_pivot_models::runtime_config::{DecimalValue, FactorWeights};
-    use rust_decimal_macros::dec;
     use std::collections::BTreeMap;
 
+    use quant_pivot_models::runtime_config::{DecimalValue, FactorWeights};
+    use rust_decimal_macros::dec;
+
+    use super::WeightOverlay;
     use crate::factors::{
         FactorName,
         names::{LIQUIDITY_DEPTH, MOMENTUM_ROC},

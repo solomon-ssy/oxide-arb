@@ -21,6 +21,8 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+#[cfg(test)]
+use casbin::MemoryAdapter;
 use casbin::{CoreApi, DefaultModel, Enforcer, MgmtApi};
 use quant_pivot_models::enums::rbac::casbin::OBJECT_TYPE_RESOURCE;
 use quant_pivot_repository::postgres::PgCasbinAdapter;
@@ -126,7 +128,7 @@ impl CasbinService {
         let model = DefaultModel::from_str(CASBIN_MODEL)
             .await
             .expect("casbin model");
-        let enforcer = Enforcer::new(model, casbin::MemoryAdapter::default())
+        let enforcer = Enforcer::new(model, MemoryAdapter::default())
             .await
             .expect("in-memory enforcer");
         Self {
