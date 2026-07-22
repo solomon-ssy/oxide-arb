@@ -23,6 +23,9 @@ pub enum InfraError {
     #[error("blocking task join failed: {detail}")]
     BlockingTaskJoin { detail: String },
 
+    #[error("governed compute execution failed: {detail}")]
+    ComputeExecution { detail: String },
+
     #[error("operation audit detail is invalid: {detail}")]
     AuditDetailInvalid { detail: String },
 

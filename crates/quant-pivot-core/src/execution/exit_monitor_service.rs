@@ -24,7 +24,10 @@ use quant_pivot_models::{
         market::book::BookSnapshot,
         quant::{OrderIntentInfo, PositionInfo, RecommendationInfo},
     },
-    enums::execution::ExitState,
+    enums::{
+        common::{AlertCategory, AlertLevel, AlertSource},
+        execution::{ExitReason, ExitState},
+    },
     runtime_config::EmergencyExitPolicy,
     types::{ExitReinferenceObservation, OrderIntentId, Price, RecommendationId},
 };
@@ -44,7 +47,10 @@ use crate::{
     },
     governance::KillSwitchHandle,
     ingest::book_store::BookStore,
-    observability::metrics_hub::MetricsHub,
+    observability::{
+        alert_dispatcher::{Alert, AlertDispatcher},
+        metrics_hub::MetricsHub,
+    },
     runtime_config::DecisionPolicyStore,
 };
 
@@ -64,6 +70,7 @@ pub struct ExitMonitorServiceDeps {
     pub dispatcher: Arc<CoreExitDispatcher>,
     pub health: ExitMonitorHealthHandle,
     pub metrics: Arc<MetricsHub>,
+    pub alerts: Arc<AlertDispatcher>,
 }
 
 /// Scans open lots and drives the exit priority ladder.
@@ -184,7 +191,34 @@ impl ExitMonitorService {
             return Ok(());
         }
 
-        let snapshot = self.deps.book_store.load_by_id(&lot.token_id);
+        let snapshot = match self.deps.book_store.load_fresh_by_id(&lot.token_id) {
+            Ok(snapshot) => snapshot,
+            Err(unavailable) => {
+                self.deps
+                    .submission
+                    .mark_exit_manual(&intent.order_intent_id, ExitReason::DataStale)
+                    .await?;
+                self.deps
+                    .alerts
+                    .dispatch_operator_notification(
+                        Alert::new(
+                            format!("exit-book-unavailable:{}", intent.order_intent_id),
+                            AlertLevel::Critical,
+                            AlertCategory::TradingSafety,
+                            AlertSource::Execution,
+                            "Automatic exit requires manual intervention",
+                            format!(
+                                "intent={} token={} fresh book unavailable ({unavailable:?}); automatic pricing and submission were blocked",
+                                intent.order_intent_id, lot.token_id
+                            ),
+                            now,
+                        )
+                        .with_dedupe_secs(60),
+                    )
+                    .await;
+                return Ok(());
+            }
+        };
         let now_ms = u64::try_from(now.timestamp_millis()).map_err(|error| {
             ExecutionError::TimeConversion {
                 field: "exit_monitor.now_ms",
@@ -205,7 +239,7 @@ impl ExitMonitorService {
             })
             .unwrap_or(0);
         let (mark_price, book_fresh, market_abnormal) =
-            classify_book(snapshot.as_deref(), now_ms, max_book_age_ms)?;
+            classify_book(Some(&snapshot), now_ms, max_book_age_ms)?;
 
         // Fold the current mark into the trailing peak.
         let peak_mark_price = max_price(intent.peak_mark_price, mark_price);

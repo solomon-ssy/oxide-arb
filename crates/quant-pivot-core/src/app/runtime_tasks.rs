@@ -170,6 +170,7 @@ impl AppContext {
                     BinanceAggTradeSource::connect_with_budget(
                         sources.binance.clone(),
                         binance_budget,
+                        Arc::clone(&self.compute),
                     )
                     .map(Arc::new)
                     .map_err(|error| {
@@ -193,6 +194,7 @@ impl AppContext {
                     BinanceAggTradeSource::connect_usdm_futures_with_budget(
                         sources.binance_usdm_futures.clone(),
                         budget,
+                        Arc::clone(&self.compute),
                     )
                     .map(Arc::new)
                     .map_err(|error| {
@@ -294,7 +296,7 @@ impl AppContext {
             .tornado
             .enabled
             .then(|| {
-                TornadoSource::connect(sources.tornado.clone())
+                TornadoSource::connect(sources.tornado.clone(), Arc::clone(&self.compute))
                     .map(Arc::new)
                     .map_err(|error| {
                         tracing::error!(%error, "NOAA tornado sources unavailable");
@@ -613,6 +615,7 @@ impl AppContext {
             let source = match BinanceKlineSource::connect_with_budget(
                 sources_config.binance.clone(),
                 binance_budget,
+                Arc::clone(&self.compute),
             ) {
                 Ok(source) => source,
                 Err(error) => {
@@ -631,6 +634,7 @@ impl AppContext {
             let source = match BinanceKlineSource::connect_usdm_futures_with_budget(
                 sources_config.binance_usdm_futures.clone(),
                 budget,
+                Arc::clone(&self.compute),
             ) {
                 Ok(source) => Arc::new(source),
                 Err(error) => {

@@ -19,7 +19,8 @@ cargo test --workspace
 ## 性能门禁原则
 
 - 使用固定语料、固定随机种子和相同 runner。
-- 连续运行十次，记录中位数、p95、p99、CPU/event、alloc/event 和 RSS。
+- 短 kernel 连续运行十次；完整在线负载连续运行三次。记录 HDR p50/p95/p99/max、
+  CPU/event、jemalloc net allocated/event、encoded bytes/event 和 RSS。
 - runner 自身波动超过 3% 时本轮无效，不得据此接受优化。
 - channel/crate 候选只有在目标指标改善至少 10%，且其他核心指标退化不超过
   3% 时才能替换现有实现。
@@ -41,26 +42,40 @@ cargo build --release -p quant-pivot-bench --no-default-features --bin training_
 ```
 
 门禁同时要求 transform 不超过 60s、maximum RSS 不超过 8GiB，并验证
-row count 不发生截断。固定 jemalloc 后的 macOS 2026-07-22 smoke：
-1,000,000×128 transform 13.093s，process 14.14s，maximum RSS
-3,570,515,968 bytes (3.325GiB)。
+row count 不发生截断。binary 在 Linux 直接读取 `/proc/self/status` 的 `VmHWM`；缺值或
+超过 8GiB 都会非零退出，不依赖操作者另外运行 `/usr/bin/time`。mixed-state fixture 的
+macOS 2026-07-22 统一 release smoke 为 16.470s；macOS 不提供 `VmHWM`，因此该值只证明
+功能与时间回归，不签收 RSS。
 
-1M-row/10-partition CPCV 门禁隔离模型本身的已独立矩阵门禁，专门覆盖
+1M-row/10-partition CPCV orchestration 门禁隔离模型本身，专门覆盖
 45 个 purge/train/evaluate combination、9 条完整路径、精确 row coverage 和
 2-thread offline Rayon 预算：
 
 ```bash
-cargo build --release -p quant-pivot-bench --no-default-features --bin cpcv_gate
-/usr/bin/time -l target/release/cpcv_gate 1000000   # macOS
-/usr/bin/time -v target/release/cpcv_gate 1000000   # Linux
+cargo build --release -p quant-pivot-bench --no-default-features --bin cpcv_orchestration_gate
+/usr/bin/time -l target/release/cpcv_orchestration_gate 1000000   # macOS
+/usr/bin/time -v target/release/cpcv_orchestration_gate 1000000   # Linux
 ```
 
-门禁为 300s，同时受离线进程 RSS 10GiB 上限约束。macOS 2026-07-22
-固定 jemalloc smoke：核心 CPCV 0.536s，process 0.97s，maximum RSS
-718,405,632 bytes (0.669GiB)。
+该 gate 只证明 purge/train/evaluate orchestration kernel，不签收真实模型训练。门禁为
+300s，同时受离线进程 RSS 10GiB 上限约束；Linux binary 同样直接读取 `VmHWM` 并硬拒绝
+超限。macOS 2026-07-22 统一 release smoke 为 0.555s，RSS 不参与本机签收。
 
-2K market report pure-compute 门禁反复执行 5 次 warm-up + 100 次测量，
-验证 funnel row count 和 `market_id` 确定性排序：
+真实 classical model gate 使用 mixed observed/substituted/missing/not-applicable Decimal
+矩阵，完成 1M-row Ridge train、冻结 transform replay 和全量 prediction 校验：
+
+```bash
+cargo run --release -p quant-pivot-bench \
+  --features model-train-gate --bin model_train_replay_gate -- 1000000
+```
+
+该 gate 的 1M-row 时间上限为 300s、RSS 上限为 10GiB；Linux 缺少 `VmHWM` 也视为失败。
+macOS 2026-07-22 统一 smoke 使用 100K rows：train 79.965s、replay 0.443s、total
+80.464s，prediction checksum 50,000。它不外推或签收 1M-row Linux SLO。
+
+2K market report pure-compute 门禁反复执行 5 次 warm-up + 100 次测量。输入包含每个
+market 的 feature/model decision，前 100 个进入 optimizer/TopN recommendation，其余由
+planner 以 `BeyondTopN` 拒绝；early-terminal 输入会直接使 gate 失败：
 
 ```bash
 cargo build --release -p quant-pivot-bench --bin report_compute_gate
@@ -68,11 +83,18 @@ cargo build --release -p quant-pivot-bench --bin report_compute_gate
 /usr/bin/time -v target/release/report_compute_gate   # Linux
 ```
 
-单 sample p99 门禁为 2s。固定 jemalloc 后的 macOS 2026-07-22 smoke：
-median 12.585ms，p99 13.157ms，maximum RSS 11,878,400 bytes。warm-cache 端到端 5s 仍由
-Linux fixed runner 的真实 PostgreSQL/ClickHouse 套件验收，不以纯计算数值替代。
+单 sample p99 门禁为 2s。macOS 2026-07-22 当前 full-compute 统一 release smoke：median
+13.819ms、p99 14.408ms；该结果只用于回归预警。旧 early-terminal 数值已 superseded，
+不得用于签收。warm-cache 端到端 5s 仍由 Linux fixed runner 的真实
+PostgreSQL/ClickHouse 套件验收，不以纯计算数值替代。
 
 ## 在线热路径门禁
+
+SessionHub 的资源上限属于二进制架构契约，不是部署可调参数：control lane 1,024、
+reliable lane 2,048、best-effort topic 8,192、共享 frame budget 64 MiB、单 frame
+上限 1 MiB。修改这些值必须同时修改实现、架构门禁并重新取得负载证据；不得通过
+部署配置绕过验证。control enqueue/ACK 的 100ms deadline 超限会触发 hub-wide
+fail-closed cancellation。
 
 固定 jemalloc 后的 macOS 2026-07-22 Criterion smoke（1s warm-up、3s
 measurement、20 samples）：
@@ -83,9 +105,32 @@ measurement、20 samples）：
 - `session_hub_10k_sessions_1k_topic_fanout`：45.596–49.836µs/事件；一个
   `ByteString` frame 共享投递至 1,000 个 outbox，远低于 2ms smoke 目标。
 
-这些数值只用于 macOS 回归预警；10K events/s sustained、50K events/s burst、
-enqueue p99、durable-ack p99、在线 RSS 以及 Linux p99 仍必须在固定 Linux runner
-用完整网络与 ClickHouse 负载验收。
+这些数值只用于 macOS 回归预警。完整在线门禁统一运行：
+
+```bash
+cargo xtask performance run --profile full --output target/performance-evidence
+```
+
+`full` 固定为 2K active tokens、5 分钟 warm-up、30 分钟 10K events/s open-loop、
+10 秒 50K burst、5 分钟 recovery，并连续运行三次；`soak` 固定为两小时
+catalog/session churn。两者只接受 Linux 上
+`QUANT_PIVOT_PERF_RUNNER=quant-pivot-perf-8c16g`，该值是 runner 身份证明，不是可调性能
+配置。`smoke` 仍使用 2K tokens 和真实 parser→normalize→partition→ClickHouse durable
+ack→Fresh BookStore 链，只缩短时间与速率，且只签收功能/证据完整性，不签收硬 SLO。
+
+系统负载由本地 deterministic Gamma HTTP 和按 subscription 路由的 CLOB WebSocket
+upstream 驱动真实 production adapter。每次生成 schema-versioned
+`PerformanceEvidenceV1`、原始 HDR bucket JSON 及 SHA-256，包含 git/rustc/kernel、CPU
+model/governor、allocator、ClickHouse version/settings、RTT、fixture/seed hash、事件与
+正确性计数、吞吐、CPU/event、encoded bytes/event、jemalloc net allocated/event 和 RSS。
+warm-up 在打开 histogram 前必须跨越 durable publication barrier，禁止 backlog 污染样本。
+kernel evidence 另保存每次 stdout/stderr、输出 SHA-256 与 `peak_rss_bytes`；Linux matrix、
+CPCV、model gate 在 binary 内执行 RSS ceiling，不能通过省略外部采集绕过。
+
+`.github/workflows/performance.yml` 只使用 `[self-hosted,
+quant-pivot-perf-8c16g]`；main relevant-path 运行 `full`，nightly 运行 `soak`，manual 可显式
+选择 profile。GitHub Actions v4 artifact 保存 evidence 与最终 SHA-256 manifest。
+manifest 先写入工作目录外的临时文件，并排除既有 manifest 后原子移动，禁止自引用哈希。
 
 ## 破坏式 L2 reset
 

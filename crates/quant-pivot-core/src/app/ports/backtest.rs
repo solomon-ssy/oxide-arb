@@ -3,6 +3,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
+use quant_pivot_compute::ComputeExecutor;
 use quant_pivot_error::{QuantError, QuantResult, storage::StorageError};
 use quant_pivot_models::{
     domain::{
@@ -33,6 +34,7 @@ use crate::{
 
 /// Admin port wired from [`ResearchBundle`] plus runtime-config catalog reads.
 pub struct CoreBacktestPort {
+    compute: Arc<ComputeExecutor>,
     dataset_repo: Arc<dyn TrainingDatasetRepository>,
     artifact_store: Arc<dyn ArtifactStore>,
     model_registry_repo: Arc<dyn ModelRegistryRepository>,
@@ -53,6 +55,7 @@ impl CoreBacktestPort {
         bias_table_repo: Arc<dyn CalibrationArtifactRepository>,
     ) -> Self {
         Self {
+            compute: Arc::clone(&research.compute),
             dataset_repo: Arc::clone(&research.training_dataset_repo),
             artifact_store: Arc::clone(&research.artifact_store),
             model_registry_repo: Arc::clone(&research.model_registry_repo),
@@ -84,6 +87,7 @@ impl CoreBacktestPort {
         .await?;
         BacktestService::new(
             BacktestServiceDeps {
+                compute: Arc::clone(&self.compute),
                 dataset_repo: Arc::clone(&self.dataset_repo),
                 artifact_store: Arc::clone(&self.artifact_store),
                 model_registry_repo: Arc::clone(&self.model_registry_repo),

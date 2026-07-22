@@ -65,7 +65,7 @@ use quant_pivot_research::{
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 
 use super::{
-    funnel::{ReportFunnelInput, build_report_market_funnel},
+    funnel::{PublishedRecommendationRef, ReportFunnelInput, build_report_market_funnel},
     types::{
         ComposedReport, EmptyReportContext, NotificationRecommendation, ReportNotificationPayload,
         ReportTrigger,
@@ -207,6 +207,13 @@ impl RecommendationComposer for DefaultRecommendationComposer {
         )?;
         let operation_log = operation_log(&report_id, &input, status, &report)?;
         let ch_rows = recommendation_events(&report_id, &recommendations, input.published_at)?;
+        let published_recommendations = recommendations
+            .iter()
+            .map(|recommendation| PublishedRecommendationRef {
+                recommendation_id: recommendation.recommendation_id,
+                market_id: recommendation.market_id.clone(),
+            })
+            .collect::<Vec<_>>();
         let funnel_rows = build_report_market_funnel(ReportFunnelInput {
             report_id: &report_id,
             profile_ref: &input.profile_ref,
@@ -218,7 +225,7 @@ impl RecommendationComposer for DefaultRecommendationComposer {
             feature_vector_by_market: &input.feature_vector_by_market,
             model_decisions: input.model_decisions,
             planner_rejected: input.planner_rejected,
-            recommendations: &recommendations,
+            recommendations: &published_recommendations,
             early_terminal: input.early_funnel_terminal,
             event_time: input.published_at,
         })?;

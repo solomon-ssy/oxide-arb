@@ -113,7 +113,7 @@ struct ResearchJobExecutor {
 }
 
 /// Synchronous progress sink handed to the offline service: a lock-free channel
-/// push, safe to call from CPU-bound `spawn_blocking` code (which cannot
+/// push, safe to call from CPU-bound executor code (which cannot
 /// `.await`). The async supervisor ([`run_one`]) drains the channel, throttles,
 /// persists a heartbeat (renewing the lease), and pushes a WebSocket update.
 struct ChannelProgressSink {
@@ -406,6 +406,7 @@ impl AppContext {
                 Duration::from_secs(config.poll_secs.max(1)),
             )) as Arc<dyn FeatureParityExecutionPort>,
             trade_policies: Arc::new(TradePolicyService::new(TradePolicyServiceDeps {
+                compute: Arc::clone(&self.compute),
                 datasets: Arc::clone(&self.research.training_dataset_repo),
                 dataset_builder: dataset_port,
                 artifacts: Arc::clone(&self.research.artifact_store),
@@ -582,7 +583,7 @@ async fn sleep_or_cancel(token: &CancellationToken, duration: Duration) {
 }
 
 /// Supervise one leased job: spawn its execution (which offloads CPU-bound work
-/// to `spawn_blocking` and polls `cancel`), then `select!` over completion,
+/// to the governed executor and polls `cancel`), then `select!` over completion,
 /// throttled progress-heartbeats drained from the sink channel, periodic lease
 /// renewal, and graceful shutdown.
 async fn run_one(

@@ -97,17 +97,20 @@ pub async fn ws_upgrade(
         HeaderValue::from_str(&protocol)
             .map_err(|_| WebError::Unauthorized("invalid websocket protocol".to_owned()))?,
     );
-    let ctx = SessionContext {
-        state: state.clone(),
-        registry: state.ws_sessions.clone(),
-        subject_id,
-        user_id: ticket_claims.subject,
-        family_id: ticket_claims.family_id,
-        access_jti: ticket_claims.access_jti,
-        authorization_revision: ticket_claims.authorization_revision,
-        can_read_system,
-    };
-    rt::spawn(session::run(ws_session, msg_stream, ctx));
+    rt::spawn(session::run(
+        ws_session,
+        msg_stream,
+        SessionContext {
+            state: state.clone(),
+            registry: state.ws_sessions.clone(),
+            subject_id,
+            user_id: ticket_claims.subject,
+            family_id: ticket_claims.family_id,
+            access_jti: ticket_claims.access_jti,
+            authorization_revision: ticket_claims.authorization_revision,
+            can_read_system,
+        },
+    ));
     Ok(response)
 }
 

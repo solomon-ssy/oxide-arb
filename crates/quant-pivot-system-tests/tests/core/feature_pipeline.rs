@@ -10,6 +10,7 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use quant_pivot_compute::ComputeExecutor;
 use quant_pivot_core::{
     ingest::{book_store::BookStore, data_plane_index::DataPlane, market_registry::MarketRegistry},
     observability::{feature_fact_writer::FeatureEventWriter, metrics_hub::MetricsHub},
@@ -74,6 +75,7 @@ use quant_pivot_system_tests::{
         catalog_fixtures::{make_event, make_market},
         fact_sink::RecordingFactWriter,
         pit::InMemoryDecisionSnapshotSource,
+        publish_fresh_book,
         report_pipeline_harness::{EmptyBasisAlertRepo, EmptyLinkageRepo},
         trade_tape_fixtures::live_trade_tape_block_cursor_repo,
     },
@@ -179,11 +181,11 @@ fn wire_live_book(registry: &MarketRegistry, book_store: &BookStore, catalog: &E
     });
     registry.register_market(market);
     let yes = TokenId::new(catalog.yes_token);
-    let yes = book_store.resolve(&yes).expect("registered YES token");
     let timestamp_ms = u64::try_from(Utc::now().timestamp_millis())
         .expect("test book timestamp must be non-negative");
-    assert!(book_store.publish(
-        yes,
+    publish_fresh_book(
+        book_store,
+        &yes,
         BookSnapshot::new(
             Arc::from([BookLevel::from_decimal_unchecked(
                 Price::new(Decimal::new(47, 2)),
@@ -197,9 +199,7 @@ fn wire_live_book(registry: &MarketRegistry, book_store: &BookStore, catalog: &E
             1,
         ),
         1,
-        1,
-        None,
-    ));
+    );
 }
 
 struct EmptyFactRead;
@@ -510,6 +510,7 @@ pub async fn insufficient_vectors_are_audited_but_partitioned_from_model_input()
     ))));
     let window_provider = FeatureWindowProvider::new(Arc::new(EmptyFactRead));
     let pipeline = FeaturePipelineService::new(FeaturePipelineDeps {
+        compute: Arc::new(ComputeExecutor::new().expect("test compute executor")),
         window_provider,
         feature_repo: Arc::clone(&repo) as Arc<dyn FeatureRepository>,
         event_writer,
@@ -630,6 +631,7 @@ pub async fn create_feature_vector_then_find() {
 
     let window_provider = FeatureWindowProvider::new(Arc::new(EmptyFactRead));
     let pipeline = FeaturePipelineService::new(FeaturePipelineDeps {
+        compute: Arc::new(ComputeExecutor::new().expect("test compute executor")),
         window_provider,
         feature_repo: Arc::clone(&feature_repo),
         event_writer: Arc::clone(&event_writer),

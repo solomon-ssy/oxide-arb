@@ -16,6 +16,7 @@ use governor::{
     clock::DefaultClock,
     state::{InMemoryState, NotKeyed},
 };
+use quant_pivot_compute::{ComputeExecutor, OfflineMemory};
 use quant_pivot_error::{QuantError, QuantResult, api::ApiError};
 use quant_pivot_models::{
     config::BinanceSourceConfig,
@@ -83,34 +84,46 @@ pub struct BinanceKlineSource {
     http: Client,
     retry_policy: RetryPolicy,
     request_budget: BinanceRequestBudget,
+    compute: Arc<ComputeExecutor>,
 }
 
 impl BinanceKlineSource {
     /// Build from deploy configuration.
-    pub fn connect(config: BinanceSourceConfig) -> QuantResult<Self> {
+    pub fn connect(
+        config: BinanceSourceConfig,
+        compute: Arc<ComputeExecutor>,
+    ) -> QuantResult<Self> {
         let request_budget = BinanceRequestBudget::new(&config)?;
-        Self::connect_with_budget(config, request_budget)
+        Self::connect_with_budget(config, request_budget, compute)
     }
 
     /// Build with the process-shared Binance IP request budget.
     pub fn connect_with_budget(
         config: BinanceSourceConfig,
         request_budget: BinanceRequestBudget,
+        compute: Arc<ComputeExecutor>,
     ) -> QuantResult<Self> {
-        Self::connect_for_market(config, request_budget, BinanceMarketSegment::Spot)
+        Self::connect_for_market(config, request_budget, compute, BinanceMarketSegment::Spot)
     }
 
     /// Build a USD-M Futures client with its own venue request budget.
     pub fn connect_usdm_futures_with_budget(
         config: BinanceSourceConfig,
         request_budget: BinanceRequestBudget,
+        compute: Arc<ComputeExecutor>,
     ) -> QuantResult<Self> {
-        Self::connect_for_market(config, request_budget, BinanceMarketSegment::UsdmFutures)
+        Self::connect_for_market(
+            config,
+            request_budget,
+            compute,
+            BinanceMarketSegment::UsdmFutures,
+        )
     }
 
     fn connect_for_market(
         config: BinanceSourceConfig,
         request_budget: BinanceRequestBudget,
+        compute: Arc<ComputeExecutor>,
         market: BinanceMarketSegment,
     ) -> QuantResult<Self> {
         // A hung TCP connection must never block an ingest tick indefinitely;
@@ -125,6 +138,7 @@ impl BinanceKlineSource {
             http,
             retry_policy: RetryPolicy::gamma_default(),
             request_budget,
+            compute,
         })
     }
 
@@ -220,17 +234,21 @@ impl BinanceKlineSource {
         let member = filename.replace(".zip", ".csv");
         let batch_size = self.config.batch_size.max(1);
         let (sender, receiver) = mpsc::channel(2);
-        let decoder = tokio::task::spawn_blocking(move || {
-            decode_kline_archive_batches(
-                archive,
-                &member,
-                interval,
-                &instrument_key,
-                available_at,
-                batch_size,
-                &sender,
-            )
-        });
+        let memory = OfflineMemory::try_bytes(archive.len().max(1024 * 1024 * 1024))?;
+        let decoder = self
+            .compute
+            .spawn_offline(memory, move || {
+                decode_kline_archive_batches(
+                    archive,
+                    &member,
+                    interval,
+                    &instrument_key,
+                    available_at,
+                    batch_size,
+                    &sender,
+                )
+            })
+            .await?;
         Ok(Some(BinanceArchiveBatchStream::new(receiver, decoder)))
     }
 
@@ -605,9 +623,13 @@ fn validate_clock_sample(
 
 #[cfg(test)]
 mod tests {
-    use std::io::{Cursor, Write};
+    use std::{
+        io::{Cursor, Write},
+        sync::Arc,
+    };
 
     use chrono::{DateTime, Duration, NaiveDate, TimeZone, Utc};
+    use quant_pivot_compute::ComputeExecutor;
     use quant_pivot_models::{
         config::BinanceSourceConfig,
         enums::domain::{BinanceMarketSegment, DomainMetric, KlineInterval},
@@ -625,6 +647,10 @@ mod tests {
         BinanceKlineSource, BinanceRequestBudget, DomainDataSource, DomainFetchRequest,
         KLINE_PAGE_SIZE, decode_kline_archive, validate_clock_sample,
     };
+
+    fn test_compute() -> Arc<ComputeExecutor> {
+        Arc::new(ComputeExecutor::new().expect("test compute executor"))
+    }
 
     fn full_kline_row(open_time_ms: i64, close: &str) -> Value {
         serde_json::json!([
@@ -713,11 +739,14 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_string(checksum))
             .mount(&server)
             .await;
-        let source = BinanceKlineSource::connect(BinanceSourceConfig {
-            archive_url: server.uri(),
-            batch_size: 1,
-            ..BinanceSourceConfig::default()
-        })
+        let source = BinanceKlineSource::connect(
+            BinanceSourceConfig {
+                archive_url: server.uri(),
+                batch_size: 1,
+                ..BinanceSourceConfig::default()
+            },
+            test_compute(),
+        )
         .expect("source");
         let symbol = BinanceSymbol::parse("BTCUSDT").expect("symbol");
         let available_at = Utc.with_ymd_and_hms(2025, 1, 2, 0, 0, 0).unwrap();
@@ -752,10 +781,13 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_bytes(archive))
             .mount(&missing_checksum_server)
             .await;
-        let missing_checksum_source = BinanceKlineSource::connect(BinanceSourceConfig {
-            archive_url: missing_checksum_server.uri(),
-            ..BinanceSourceConfig::default()
-        })
+        let missing_checksum_source = BinanceKlineSource::connect(
+            BinanceSourceConfig {
+                archive_url: missing_checksum_server.uri(),
+                ..BinanceSourceConfig::default()
+            },
+            test_compute(),
+        )
         .expect("source");
         let error = missing_checksum_source
             .recover_archive_day(
@@ -814,10 +846,13 @@ mod tests {
             .mount(&server)
             .await;
 
-        let source = BinanceKlineSource::connect(BinanceSourceConfig {
-            rest_url: server.uri(),
-            ..BinanceSourceConfig::default()
-        })
+        let source = BinanceKlineSource::connect(
+            BinanceSourceConfig {
+                rest_url: server.uri(),
+                ..BinanceSourceConfig::default()
+            },
+            test_compute(),
+        )
         .expect("source");
         let key = DomainInstrumentKey::binance_kline(
             &BinanceSymbol::parse("BTCUSDT").expect("symbol"),
@@ -870,6 +905,7 @@ mod tests {
         let source = BinanceKlineSource::connect_usdm_futures_with_budget(
             config.clone(),
             BinanceRequestBudget::new(&config).expect("budget"),
+            test_compute(),
         )
         .expect("source");
         let key = DomainInstrumentKey::binance_usdm_futures_kline(
@@ -947,10 +983,13 @@ mod tests {
             .mount(&server)
             .await;
 
-        let source = BinanceKlineSource::connect(BinanceSourceConfig {
-            rest_url: server.uri(),
-            ..BinanceSourceConfig::default()
-        })
+        let source = BinanceKlineSource::connect(
+            BinanceSourceConfig {
+                rest_url: server.uri(),
+                ..BinanceSourceConfig::default()
+            },
+            test_compute(),
+        )
         .expect("source");
         let key = DomainInstrumentKey::binance_kline(
             &BinanceSymbol::parse("BTCUSDT").expect("symbol"),
@@ -984,10 +1023,13 @@ mod tests {
             .mount(&server)
             .await;
 
-        let source = BinanceKlineSource::connect(BinanceSourceConfig {
-            rest_url: server.uri(),
-            ..BinanceSourceConfig::default()
-        })
+        let source = BinanceKlineSource::connect(
+            BinanceSourceConfig {
+                rest_url: server.uri(),
+                ..BinanceSourceConfig::default()
+            },
+            test_compute(),
+        )
         .expect("source");
         let rows = source
             .fetch(DomainFetchRequest {

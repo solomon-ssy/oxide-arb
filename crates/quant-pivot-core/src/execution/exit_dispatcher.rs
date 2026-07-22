@@ -193,9 +193,9 @@ impl CoreExitDispatcher {
         let book = self
             .deps
             .book_store
-            .load_by_id(&lot.token_id)
-            .ok_or_else(|| ExecutionError::IntentDenied {
-                reason: "cannot prepare exit without a current L2 book".to_owned(),
+            .load_fresh_by_id(&lot.token_id)
+            .map_err(|unavailable| ExecutionError::IntentDenied {
+                reason: format!("cannot prepare exit without a fresh L2 book: {unavailable:?}"),
             })?;
         let market_info = self
             .deps

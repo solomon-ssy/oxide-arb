@@ -51,7 +51,7 @@ pub use category_scope::{infer_training_category_scope, validate_category_scope_
 #[cfg(feature = "ml-classical")]
 pub use classical::{
     CLASSICAL_CRATE_NAME, CLASSICAL_CRATE_VERSION, ClassicalAdapterRegistry, ClassicalModelAdapter,
-    ClassicalParams, ClassicalTrainOutput, ForestParams, LinearParams,
+    ClassicalParams, ClassicalTrainOutput, ForestParams, LinearParams, replay_training_matrix,
 };
 #[cfg(feature = "ml-classical")]
 pub use classical_runtime::ClassicalRuntime;
@@ -83,8 +83,8 @@ pub use signal::{
     canonical_business_prediction_hash, signal_candidate_event, signal_candidate_events,
 };
 pub use trainer::{
-    LabelSelector, ModelTrainer, TrainModelRequest, TrainedModelArtifact, ValidationReport,
-    ValidationSpec, WeightedFactorTrainer, fit_frozen_reference_quantiles,
+    CancellationProbe, LabelSelector, ModelTrainer, TrainModelRequest, TrainedModelArtifact,
+    ValidationReport, ValidationSpec, WeightedFactorTrainer, fit_frozen_reference_quantiles,
     weighted_training_input_hash,
 };
 pub use weighted::WeightedFactorRuntime;

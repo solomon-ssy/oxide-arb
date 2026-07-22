@@ -2,7 +2,7 @@ use std::{hint::black_box, time::Instant};
 
 use bytestring::ByteString;
 use criterion::{Criterion, criterion_group, criterion_main};
-use prometheus::IntCounter;
+use prometheus::{GaugeVec, Histogram, HistogramOpts, IntCounter, IntGauge, IntGaugeVec, Opts};
 use quant_pivot_models::{
     domain::ws::{SubscriptionKey, WsChannel},
     types::{MarketId, UserId},
@@ -24,8 +24,25 @@ fn bench_session_hub_fanout(c: &mut Criterion) {
     let (registry, hub) = SessionRegistry::new(SessionHubMetrics {
         best_effort_dropped: IntCounter::new("bench_ws_best_effort_dropped", "benchmark")
             .expect("drop counter"),
+        best_effort_coalesced: IntCounter::new("bench_ws_best_effort_coalesced", "benchmark")
+            .expect("coalesced counter"),
         reliable_disconnects: IntCounter::new("bench_ws_reliable_disconnects", "benchmark")
             .expect("disconnect counter"),
+        control_timeouts: IntCounter::new("bench_ws_control_timeouts", "benchmark")
+            .expect("timeout counter"),
+        control_latency_seconds: Histogram::with_opts(HistogramOpts::new(
+            "bench_ws_control_latency_seconds",
+            "benchmark",
+        ))
+        .expect("control latency"),
+        queue_depth: IntGaugeVec::new(Opts::new("bench_ws_queue_depth", "benchmark"), &["lane"])
+            .expect("queue depth"),
+        queue_oldest_age_seconds: GaugeVec::new(
+            Opts::new("bench_ws_queue_oldest_age_seconds", "benchmark"),
+            &["lane"],
+        )
+        .expect("queue age"),
+        frame_bytes: IntGauge::new("bench_ws_frame_bytes", "benchmark").expect("frame bytes"),
     });
     let hub_task = runtime.spawn(hub.run(shutdown.clone()));
     let topic = SubscriptionKey::scoped(WsChannel::MarketBookUpdate, MarketId::new("bench-market"));

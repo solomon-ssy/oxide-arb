@@ -76,6 +76,7 @@ pub async fn authz<B: MessageBody>(
             acting_role.as_deref(),
         )
         .await?;
+    drop(state);
 
     if let Some(role) = outcome.acting_role {
         req.extensions_mut().insert(ActingRole(role));

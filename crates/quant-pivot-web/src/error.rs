@@ -261,7 +261,8 @@ impl From<QuantError> for WebError {
                 | InfraError::ServerRuntime { .. }
                 | InfraError::Misconfigured { .. }
                 | InfraError::AuditDetailInvalid { .. }
-                | InfraError::BlockingTaskJoin { .. } => Self::Internal(error.to_string()),
+                | InfraError::BlockingTaskJoin { .. }
+                | InfraError::ComputeExecution { .. } => Self::Internal(error.to_string()),
             },
             QuantError::Control(control) => control.into(),
             other => Self::Internal(other.to_string()),

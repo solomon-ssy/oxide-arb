@@ -1,5 +1,6 @@
 mod account_read_smoke;
 mod architecture;
+mod performance;
 mod public_read_smoke;
 
 use std::{
@@ -61,7 +62,7 @@ use quant_pivot_storage::{
         },
     },
 };
-use quant_pivot_system_tests::production_stack;
+use quant_pivot_system_tests::{performance::PerformanceProfile, production_stack};
 use rustls::crypto::aws_lc_rs;
 use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
 use serde::{Deserialize, Serialize};
@@ -99,6 +100,11 @@ enum Commands {
     Smoke {
         #[command(subcommand)]
         command: SmokeCommand,
+    },
+    /// Run reproducible kernel and production-stack performance gates.
+    Performance {
+        #[command(subcommand)]
+        command: PerformanceCommand,
     },
     /// Plan, apply online-safe migrations, or verify the `ClickHouse` schema.
     #[command(name = "clickhouse-schema")]
@@ -166,6 +172,20 @@ enum SmokeCommand {
     /// Probe public endpoints without credentials or money-moving operations.
     #[command(name = "public-read")]
     PublicRead(PublicReadSmokeArgs),
+}
+
+#[derive(Subcommand)]
+enum PerformanceCommand {
+    /// Build release gates, run kernel repetitions, then run the system profile.
+    Run(PerformanceRunArgs),
+}
+
+#[derive(Args)]
+struct PerformanceRunArgs {
+    #[arg(long, value_enum, default_value_t = PerformanceProfile::Full)]
+    profile: PerformanceProfile,
+    #[arg(long, default_value = "target/performance-evidence")]
+    output: PathBuf,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -375,6 +395,9 @@ async fn run() -> Result<()> {
                 ))
                 .await
             }
+        },
+        Commands::Performance { command } => match command {
+            PerformanceCommand::Run(args) => performance::run(args.profile, &args.output),
         },
         Commands::ClickHouseSchema { command } => clickhouse_schema(command).await,
         Commands::PostgresSchema { command } => postgres_schema(command).await,

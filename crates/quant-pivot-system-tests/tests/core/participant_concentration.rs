@@ -28,6 +28,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use prometheus::IntCounter;
+use quant_pivot_compute::ComputeExecutor;
 use quant_pivot_core::{
     app::ports::structural_monitor::CoreStructuralMonitor,
     governance::BiasTableApplicator,
@@ -106,6 +107,7 @@ use quant_pivot_system_tests::{
         fact_sink::DiscardFactWriter,
         factor_governance::publish_all_factor_definitions,
         pit::InMemoryDecisionSnapshotSource,
+        publish_fresh_book,
         report_pipeline_harness::{EmptyBasisAlertRepo, EmptyLinkageRepo},
         trade_tape_fixtures::{
             ConfigurableFactRead, live_trade_tape_block_cursor_repo, whale_concentration_by_market,
@@ -362,11 +364,11 @@ fn wire_live_book(registry: &MarketRegistry, book_store: &BookStore, catalog: &C
     });
     registry.register_market(market);
     let yes = TokenId::new(catalog.yes_token);
-    let yes = book_store.resolve(&yes).expect("registered YES token");
     let timestamp_ms = u64::try_from(Utc::now().timestamp_millis())
         .expect("test book timestamp must be non-negative");
-    assert!(book_store.publish(
-        yes,
+    publish_fresh_book(
+        book_store,
+        &yes,
         BookSnapshot::new(
             Arc::from([BookLevel::from_decimal_unchecked(
                 Price::new(Decimal::new(47, 2)),
@@ -380,9 +382,7 @@ fn wire_live_book(registry: &MarketRegistry, book_store: &BookStore, catalog: &C
             1,
         ),
         1,
-        1,
-        None,
-    ));
+    );
 }
 
 fn noop_feature_writer() -> Arc<FeatureEventWriter> {
@@ -479,6 +479,7 @@ async fn run_whale_feature_pipeline(harness: &WhaleTapeConcHarness) -> FeaturePi
     let feature_repo =
         Arc::new(PgFeatureRepository::new(harness.db.clone())) as Arc<dyn FeatureRepository>;
     let feature_pipeline = FeaturePipelineService::new(FeaturePipelineDeps {
+        compute: Arc::new(ComputeExecutor::new().expect("test compute executor")),
         window_provider: FeatureWindowProvider::new(Arc::clone(&harness.fact_read)),
         feature_repo: Arc::clone(&feature_repo),
         event_writer: noop_feature_writer(),
@@ -596,6 +597,7 @@ async fn run_factor_round_and_assert_concentration(
             Arc::new(PgCalibrationArtifactRepository::new(harness.db.clone()))
                 as Arc<dyn CalibrationArtifactRepository>,
         )),
+        Arc::new(ComputeExecutor::new().expect("test compute executor")),
     );
     let factor_result = factor_service
         .run(FactorPipelineRequest {

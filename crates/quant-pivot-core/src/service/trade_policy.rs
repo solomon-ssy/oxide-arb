@@ -11,6 +11,7 @@ use async_trait::async_trait;
 use blake3::Hasher;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use futures_util::StreamExt;
+use quant_pivot_compute::{ComputeExecutor, OfflineMemory};
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError, storage::StorageError};
 use quant_pivot_models::{
     clickhouse::TradeTapeRow,
@@ -109,6 +110,7 @@ use crate::{
 };
 
 pub struct TradePolicyService {
+    compute: Arc<ComputeExecutor>,
     datasets: Arc<dyn TrainingDatasetRepository>,
     dataset_builder: Arc<dyn TrainingDatasetPort>,
     artifacts: Arc<dyn ArtifactStore>,
@@ -121,6 +123,7 @@ pub struct TradePolicyService {
 }
 
 pub struct TradePolicyServiceDeps {
+    pub compute: Arc<ComputeExecutor>,
     pub datasets: Arc<dyn TrainingDatasetRepository>,
     pub dataset_builder: Arc<dyn TrainingDatasetPort>,
     pub artifacts: Arc<dyn ArtifactStore>,
@@ -380,6 +383,7 @@ impl TradePolicyService {
     #[must_use]
     pub fn new(deps: TradePolicyServiceDeps) -> Self {
         Self {
+            compute: deps.compute,
             datasets: deps.datasets,
             dataset_builder: deps.dataset_builder,
             artifacts: deps.artifacts,
@@ -1843,27 +1847,43 @@ impl TradePolicyService {
         input
             .progress
             .report(ResearchJobProgress::indeterminate("evaluating_trials", 0));
-        let (structural_volatility_oos, structural_volatility_folds) =
-            evaluate_structural_volatility_oos(
-                &replay.structural_examples,
-                &replay.structural_trade_tape,
-            )?;
-        let mut evidence = evaluate_weather_policy_evidence(&WeatherEvidenceRequest {
-            profile: input.profile,
-            candidates: input.candidates,
-            experiment_family_hash: input.experiment_family_hash,
-            min_embargo_secs: embargo_secs,
-            replayed: &replay.replayed_examples,
-            structural_volatility_oos,
-            structural_volatility_folds,
-        })?;
-        let vertical_gate = evaluate_weather_proxy_gate(
-            &replay.gate_linkages,
-            &replay.gate_observations,
-            input.fit_window_start,
-            input.fit_window_end,
-            input.activation_target,
-        )?;
+        let (mut evidence, vertical_gate) = self
+            .compute
+            .run_offline_scoped(OfflineMemory::try_gib(6)?, input.cancel, || {
+                ensure_policy_replay_active(
+                    input.purpose,
+                    input.cancel,
+                    "offline validation boundary",
+                )?;
+                let (structural_volatility_oos, structural_volatility_folds) =
+                    evaluate_structural_volatility_oos(
+                        &replay.structural_examples,
+                        &replay.structural_trade_tape,
+                    )?;
+                let evidence = evaluate_weather_policy_evidence(&WeatherEvidenceRequest {
+                    profile: input.profile,
+                    candidates: input.candidates,
+                    experiment_family_hash: input.experiment_family_hash,
+                    min_embargo_secs: embargo_secs,
+                    replayed: &replay.replayed_examples,
+                    structural_volatility_oos,
+                    structural_volatility_folds,
+                })?;
+                let vertical_gate = evaluate_weather_proxy_gate(
+                    &replay.gate_linkages,
+                    &replay.gate_observations,
+                    input.fit_window_start,
+                    input.fit_window_end,
+                    input.activation_target,
+                )?;
+                ensure_policy_replay_active(
+                    input.purpose,
+                    input.cancel,
+                    "offline validation completion",
+                )?;
+                Ok((evidence, vertical_gate))
+            })
+            .await?;
         if input.activation_target != VerticalActivationTarget::ResearchOnly {
             evidence.all_gates_passed &= vertical_gate.passes(input.activation_target);
         }

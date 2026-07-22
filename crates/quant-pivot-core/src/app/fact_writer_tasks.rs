@@ -6,6 +6,6 @@ use crate::app::task_registry::AppRunner;
 impl AppContext {
     /// Register `AsyncWriter` flush workers for each book fact stream.
     pub fn register_fact_writer_tasks(&self, runner: &mut AppRunner) {
-        runner.absorb_pending_queue(&self.infra.fact_writer_queue);
+        self.infra.register_fact_writer_tasks(runner);
     }
 }

@@ -12,6 +12,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use prometheus::IntCounter;
 use quant_pivot_api::data_api::VenuePosition;
+use quant_pivot_compute::ComputeExecutor;
 use quant_pivot_core::{
     governance::{
         BiasTableApplicator, CoreCalibrationArtifactLoader, RuntimeModeHandle,
@@ -1165,6 +1166,7 @@ fn build_model_runner(
         Arc::clone(&factor_repo),
         noop_factor_writer(),
         Arc::clone(&bias_table),
+        Arc::new(ComputeExecutor::new().expect("test compute executor")),
     ));
     Arc::new(ModelRunner::new(ModelRunnerDeps {
         model_run_repo: Arc::new(PgModelRunRepository::new(db.clone())),
@@ -1225,6 +1227,7 @@ fn build_report_builder(input: ReportBuilderHarnessInput<'_>) -> Arc<DefaultRepo
             Arc::new(EmptyFactRead),
         )),
         feature_pipeline: Arc::new(FeaturePipelineService::new(FeaturePipelineDeps {
+            compute: Arc::new(ComputeExecutor::new().expect("test compute executor")),
             window_provider: FeatureWindowProvider::new(Arc::new(EmptyFactRead)),
             feature_repo: Arc::new(PgFeatureRepository::new(db.clone())),
             event_writer: noop_feature_writer(),
@@ -1369,13 +1372,12 @@ fn registry_market(
 }
 
 fn apply_book_snapshot(book_store: &BookStore, yes_token: &str, bid_shares: i64, ask_shares: i64) {
-    let token = book_store
-        .resolve(&TokenId::new(yes_token))
-        .expect("registered book token");
+    let token_id = TokenId::new(yes_token);
     let timestamp_ms = u64::try_from(Utc::now().timestamp_millis())
         .expect("test book timestamp must be non-negative");
-    assert!(book_store.publish(
-        token,
+    super::publish_fresh_book(
+        book_store,
+        &token_id,
         BookSnapshot::new(
             Arc::from([BookLevel::from_decimal_unchecked(
                 Price::new(Decimal::new(47, 2)),
@@ -1389,9 +1391,7 @@ fn apply_book_snapshot(book_store: &BookStore, yes_token: &str, bid_shares: i64,
             1,
         ),
         1,
-        1,
-        None,
-    ));
+    );
 }
 
 async fn seed_catalog(db: &DatabaseConnection) {

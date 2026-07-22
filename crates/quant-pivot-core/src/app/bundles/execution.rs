@@ -422,5 +422,6 @@ fn build_exit_monitor(
         dispatcher: exit_dispatcher,
         health,
         metrics: Arc::clone(&metrics),
+        alerts: Arc::clone(&wiring.governance.alerts),
     }))
 }

@@ -5,14 +5,14 @@ use std::{
     str::FromStr,
     sync::{
         Arc,
-        atomic::{AtomicU8, AtomicU64, Ordering},
+        atomic::{AtomicU8, AtomicU64, Ordering, fence},
     },
     time::Instant,
 };
 
 use ahash::AHashMap;
 use alloy::primitives::U256;
-use arc_swap::ArcSwap;
+use arc_swap::{ArcSwap, Guard};
 use parking_lot::Mutex;
 use quant_pivot_api::ws::TokenKeyResolver;
 use quant_pivot_models::{
@@ -123,6 +123,7 @@ pub enum TokenSlotState {
     Unseen = 0,
     Fresh = 1,
     Invalid = 2,
+    Retired = 3,
 }
 
 impl TokenSlotState {
@@ -130,6 +131,7 @@ impl TokenSlotState {
         match value {
             1 => Self::Fresh,
             2 => Self::Invalid,
+            3 => Self::Retired,
             _ => Self::Unseen,
         }
     }
@@ -200,8 +202,14 @@ impl TokenSlot {
         session_generation: u64,
         freshness_tick: u64,
         latency_tick: u64,
-    ) {
+    ) -> bool {
         let version = self.begin_freshness_write();
+        let current_generation = self.session_generation.load(Ordering::Relaxed);
+        let current_state = TokenSlotState::from_raw(self.state.load(Ordering::Relaxed));
+        if current_generation != session_generation || current_state != TokenSlotState::Fresh {
+            self.end_freshness_write(version);
+            return false;
+        }
         self.sequence.store(sequence, Ordering::Relaxed);
         self.session_generation
             .store(session_generation, Ordering::Relaxed);
@@ -210,17 +218,29 @@ impl TokenSlot {
         self.state
             .store(TokenSlotState::Fresh as u8, Ordering::Relaxed);
         self.end_freshness_write(version);
+        true
     }
 
-    pub fn publish(
+    pub fn publish_snapshot(
         &self,
         snapshot: Arc<BookSnapshot>,
         sequence: u64,
         session_generation: u64,
         freshness_tick: u64,
         latency_tick: u64,
-    ) {
+    ) -> bool {
         let version = self.begin_freshness_write();
+        let current_generation = self.session_generation.load(Ordering::Relaxed);
+        let current_state = TokenSlotState::from_raw(self.state.load(Ordering::Relaxed));
+        let same_session_ready = current_generation == session_generation
+            && matches!(
+                current_state,
+                TokenSlotState::Unseen | TokenSlotState::Fresh
+            );
+        if !same_session_ready && session_generation <= current_generation {
+            self.end_freshness_write(version);
+            return false;
+        }
         self.published.store(snapshot);
         self.sequence.store(sequence, Ordering::Relaxed);
         self.session_generation
@@ -230,38 +250,122 @@ impl TokenSlot {
         self.state
             .store(TokenSlotState::Fresh as u8, Ordering::Relaxed);
         self.end_freshness_write(version);
+        true
     }
 
-    pub fn invalidate(&self, session_generation: u64) {
+    pub fn publish_update(
+        &self,
+        snapshot: Arc<BookSnapshot>,
+        sequence: u64,
+        session_generation: u64,
+        freshness_tick: u64,
+        latency_tick: u64,
+    ) -> bool {
         let version = self.begin_freshness_write();
+        let current_generation = self.session_generation.load(Ordering::Relaxed);
+        let current_state = TokenSlotState::from_raw(self.state.load(Ordering::Relaxed));
+        if current_generation != session_generation || current_state != TokenSlotState::Fresh {
+            self.end_freshness_write(version);
+            return false;
+        }
+        self.published.store(snapshot);
+        self.sequence.store(sequence, Ordering::Relaxed);
+        self.freshness_tick.store(freshness_tick, Ordering::Relaxed);
+        self.latency_tick.store(latency_tick, Ordering::Relaxed);
+        self.end_freshness_write(version);
+        true
+    }
+
+    pub fn begin_session(&self, session_generation: u64) -> bool {
+        let version = self.begin_freshness_write();
+        let current_generation = self.session_generation.load(Ordering::Relaxed);
+        if session_generation <= current_generation {
+            self.end_freshness_write(version);
+            return false;
+        }
+        self.sequence.store(0, Ordering::Relaxed);
         self.session_generation
             .store(session_generation, Ordering::Relaxed);
+        self.freshness_tick.store(0, Ordering::Relaxed);
+        self.latency_tick.store(0, Ordering::Relaxed);
+        self.state
+            .store(TokenSlotState::Unseen as u8, Ordering::Relaxed);
+        self.end_freshness_write(version);
+        true
+    }
+
+    pub fn invalidate(&self) {
+        let version = self.begin_freshness_write();
         self.freshness_tick.store(0, Ordering::Relaxed);
         self.state
             .store(TokenSlotState::Invalid as u8, Ordering::Relaxed);
         self.end_freshness_write(version);
     }
 
+    pub fn retire(&self, through_generation: u64) -> bool {
+        let version = self.begin_freshness_write();
+        let current_generation = self.session_generation.load(Ordering::Relaxed);
+        if current_generation > through_generation {
+            self.end_freshness_write(version);
+            return false;
+        }
+        self.published.store(Arc::new(BookSnapshot::new(
+            Arc::from([]),
+            Arc::from([]),
+            0,
+            0,
+        )));
+        self.sequence.store(0, Ordering::Relaxed);
+        self.session_generation
+            .store(through_generation, Ordering::Relaxed);
+        self.freshness_tick.store(0, Ordering::Relaxed);
+        self.latency_tick.store(0, Ordering::Relaxed);
+        self.state
+            .store(TokenSlotState::Retired as u8, Ordering::Relaxed);
+        self.end_freshness_write(version);
+        true
+    }
+
     #[must_use]
     pub fn freshness(&self) -> TokenFreshness {
+        let (_, freshness, _) = self.snapshot_with_freshness();
+        freshness
+    }
+
+    /// Load the immutable snapshot and every provenance field under one
+    /// coherent odd/even slot version.
+    #[must_use]
+    pub fn snapshot_with_freshness(&self) -> (Guard<Arc<BookSnapshot>>, TokenFreshness, u64) {
         loop {
             let before = self.freshness_version.load(Ordering::Acquire);
             if before & 1 == 1 {
                 spin_loop();
                 continue;
             }
-            let snapshot = TokenFreshness {
+            let published = self.published.load();
+            let freshness = TokenFreshness {
                 sequence: self.sequence.load(Ordering::Relaxed),
                 session_generation: self.session_generation.load(Ordering::Relaxed),
                 freshness_tick: self.freshness_tick.load(Ordering::Relaxed),
                 state: TokenSlotState::from_raw(self.state.load(Ordering::Relaxed)),
                 latency_tick: self.latency_tick.load(Ordering::Relaxed),
             };
-            let after = self.freshness_version.load(Ordering::Acquire);
+            // A second acquire load only orders operations that follow it. The
+            // acquire fence is the read barrier that keeps every protected
+            // load above the retry-counter read, matching read_seqcount_retry.
+            fence(Ordering::Acquire);
+            let after = self.freshness_version.load(Ordering::Relaxed);
             if before == after {
-                return snapshot;
+                return (published, freshness, after);
             }
         }
+    }
+
+    #[must_use]
+    #[inline]
+    pub fn coherent_version_is(&self, version: u64) -> bool {
+        fence(Ordering::Acquire);
+        self.freshness_version.load(Ordering::Relaxed) == version
     }
 }
 
@@ -449,7 +553,7 @@ mod tests {
     use alloy::primitives::U256;
 
     use super::{DataPlane, TokenSlot, TokenSlotState};
-    use quant_pivot_models::types::TokenId;
+    use quant_pivot_models::{domain::market::book::BookSnapshot, types::TokenId};
 
     #[test]
     fn unknown_token_fails_closed() {
@@ -483,7 +587,13 @@ mod tests {
     #[test]
     fn freshness_snapshot_is_coherent_and_invalidates() {
         let slot = Arc::new(TokenSlot::new());
-        slot.mark_fresh(9, 3, 101, 102);
+        assert!(slot.publish_snapshot(
+            Arc::new(BookSnapshot::new(Arc::from([]), Arc::from([]), 1, 0)),
+            9,
+            3,
+            101,
+            102,
+        ));
         assert_eq!(
             slot.freshness(),
             super::TokenFreshness {
@@ -494,9 +604,9 @@ mod tests {
                 latency_tick: 102,
             }
         );
-        slot.invalidate(4);
+        slot.invalidate();
         let invalid = slot.freshness();
-        assert_eq!(invalid.session_generation, 4);
+        assert_eq!(invalid.session_generation, 3);
         assert_eq!(invalid.state, TokenSlotState::Invalid);
         assert_eq!(invalid.freshness_tick, 0);
     }
@@ -507,7 +617,13 @@ mod tests {
         let writer_slot = Arc::clone(&slot);
         let writer = thread::spawn(move || {
             for value in 1..=10_000 {
-                writer_slot.mark_fresh(value, value, value, value);
+                assert!(writer_slot.publish_snapshot(
+                    Arc::new(BookSnapshot::new(Arc::from([]), Arc::from([]), value, 0,)),
+                    value,
+                    value,
+                    value,
+                    value,
+                ));
             }
         });
 

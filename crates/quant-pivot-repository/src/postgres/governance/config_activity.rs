@@ -389,7 +389,7 @@ fn approval_query() -> SelectStatement {
             ActivityColumn::EventType,
         )
         .expr_as(
-            Expr::col((PolicyApprovalEntity, PolicyApprovalColumn::DecidedAt)),
+            Expr::col((PolicyApprovalEntity, PolicyApprovalColumn::CreatedAt)),
             ActivityColumn::EventAt,
         )
         .expr_as(
@@ -499,7 +499,7 @@ fn activation_query_head() -> SelectStatement {
             ActivityColumn::EventType,
         )
         .expr_as(
-            Expr::col((PolicyActivationEntity, PolicyActivationColumn::ActivatedAt)),
+            Expr::col((PolicyActivationEntity, PolicyActivationColumn::CreatedAt)),
             ActivityColumn::EventAt,
         )
         .expr_as(
@@ -684,6 +684,9 @@ pub(super) async fn list(
     db: &impl ConnectionTrait,
     limit: u64,
 ) -> Result<Vec<ConfigActivityInfo>, StorageError> {
+    // Global ordering follows the database commit clock (`created_at`). Domain
+    // timestamps such as `decided_at` may originate on another host and cannot
+    // establish causal order across revision, approval, and activation tables.
     let mut query = revision_query();
     query
         .union(UnionType::All, approval_query())

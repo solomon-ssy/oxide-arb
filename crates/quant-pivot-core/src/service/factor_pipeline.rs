@@ -16,7 +16,8 @@
 use std::{collections::HashMap, sync::Arc};
 
 use chrono::Utc;
-use quant_pivot_error::{QuantError, QuantResult, infra::InfraError, report::ReportError};
+use quant_pivot_compute::ComputeExecutor;
+use quant_pivot_error::{QuantError, QuantResult, report::ReportError};
 use quant_pivot_models::{
     domain::quant::{FactorValueInfo, NewFactorValue},
     enums::quant::PublicationStatus,
@@ -77,6 +78,7 @@ pub struct FactorPipelineService {
     factor_repo: Arc<dyn FactorRepository>,
     event_writer: Arc<FactorEventWriter>,
     bias_table: Arc<BiasTableApplicator>,
+    compute: Arc<ComputeExecutor>,
 }
 
 impl FactorPipelineService {
@@ -86,11 +88,13 @@ impl FactorPipelineService {
         factor_repo: Arc<dyn FactorRepository>,
         event_writer: Arc<FactorEventWriter>,
         bias_table: Arc<BiasTableApplicator>,
+        compute: Arc<ComputeExecutor>,
     ) -> Self {
         Self {
             factor_repo,
             event_writer,
             bias_table,
+            compute,
         }
     }
 
@@ -173,15 +177,14 @@ impl FactorPipelineService {
         let config = request.factors.clone();
         let vectors = request.vectors;
         let references = references.clone();
-        let (_engine, outcomes) = tokio::task::spawn_blocking(move || {
-            let outcomes = engine.compute_all_batch_with_references(&vectors, &config, &references);
-            (engine, outcomes)
-        })
-        .await
-        .map_err(|err| InfraError::BlockingTaskJoin {
-            detail: err.to_string(),
-        })?;
-        let outcomes = outcomes?;
+        let (_engine, outcomes) = self
+            .compute
+            .run_serving(move || {
+                let outcomes =
+                    engine.compute_all_batch_with_references(&vectors, &config, &references)?;
+                Ok((engine, outcomes))
+            })
+            .await?;
 
         // Build rows for eligible markets, tagging each factor with its source
         // feature-vector id (aligned by index), and collect rejections.

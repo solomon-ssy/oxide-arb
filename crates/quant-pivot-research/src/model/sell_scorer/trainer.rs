@@ -26,8 +26,8 @@ use crate::{
             SellScorerOutputSpec, model_input_contract_hash,
         },
         trainer::{
-            LabelSelector, TrainedModelArtifact, ValidationSpec, fit_simplex_weights,
-            signed_contribution, weighted_training_input_hash,
+            CancellationProbe, LabelSelector, TrainedModelArtifact, ValidationSpec,
+            fit_simplex_weights, signed_contribution, weighted_training_input_hash,
         },
     },
     training::TrainingExample,
@@ -47,6 +47,8 @@ const GAIN_CANDIDATES: [f64; 9] = [0.5, 1.0, 2.0, 3.0, 4.0, 6.0, 8.0, 10.0, 12.0
 /// + `label_schema_hash`) instead of the Buy multipliers / return model.
 #[derive(Debug, Clone)]
 pub struct TrainSellScorerRequest {
+    /// Cooperative cancellation observed at fold/trial/search boundaries.
+    pub cancellation: CancellationProbe,
     /// Frozen, point-in-time exit-decision training examples.
     pub examples: Arc<[TrainingExample]>,
     /// Supervised target label (`hold_vs_exit_alpha_bps`).
@@ -99,6 +101,7 @@ impl SellScorerTrainer {
             &request.objective,
             request.validation,
             None,
+            &request.cancellation,
         )?;
 
         // Calibrate the net→business-output mapping on the training labels so

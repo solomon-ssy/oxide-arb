@@ -1,9 +1,9 @@
-//! Single-shot time/RSS gate for 1M-row, ten-partition CPCV orchestration.
+//! Single-shot time/RSS gate for the 1M-row CPCV orchestration kernel.
 
 use std::{env, error::Error, time::Instant};
 
 use chrono::{DateTime, Utc};
-use quant_pivot_bench as _;
+use quant_pivot_bench::{self as _, enforce_linux_peak_rss, peak_rss_bytes};
 use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::types::BacktestPathSetId;
 use quant_pivot_research::validation::{
@@ -16,6 +16,7 @@ use rust_decimal::Decimal;
 
 const DEFAULT_ROWS: usize = 1_000_000;
 const MAX_SECONDS: f64 = 300.0;
+const MAX_RSS_BYTES: u64 = 10 * 1_024 * 1_024 * 1_024;
 const PARTITIONS: u32 = 10;
 const TEST_PARTITIONS: u32 = 2;
 const OFFLINE_THREADS: usize = 2;
@@ -31,7 +32,7 @@ impl FoldModelSource for GateFoldSource {
         })?;
         Ok(FoldRuntime::Policy(PolicyFoldRuntime {
             candidate_index: 0,
-            candidate_id: "cpcv-gate".to_owned(),
+            candidate_id: "cpcv-orchestration-gate".to_owned(),
             training_group_count,
             training_utility_bps: Decimal::ZERO,
         }))
@@ -70,7 +71,7 @@ fn groups(rows: usize) -> Result<Vec<TimelineGroup>, Box<dyn Error>> {
         .map(|row| {
             let seconds = i64::try_from(row)?;
             let decision_at = DateTime::<Utc>::from_timestamp(seconds, 0)
-                .ok_or("CPCV gate timestamp exceeds chrono range")?;
+                .ok_or("CPCV orchestration gate timestamp exceeds chrono range")?;
             Ok(TimelineGroup {
                 decision_at,
                 label_horizon_end: decision_at,
@@ -111,20 +112,25 @@ fn main() -> Result<(), Box<dyn Error>> {
             .iter()
             .all(|path| path.group_returns.len() == rows);
     if !exact_shape {
-        return Err("CPCV gate result shape mismatch".into());
+        return Err("CPCV orchestration gate result shape mismatch".into());
     }
+    let peak_rss = peak_rss_bytes()?;
+    let peak_rss_label = peak_rss.map_or_else(|| "unavailable".to_owned(), |rss| rss.to_string());
     println!(
-        "cpcv_gate rows={rows} partitions={PARTITIONS} combinations={} paths={} elapsed_seconds={:.3}",
+        "cpcv_orchestration_gate rows={rows} partitions={PARTITIONS} combinations={} paths={} elapsed_seconds={:.3} peak_rss_bytes={peak_rss_label}",
         result.combination_count,
         result.paths.len(),
         elapsed.as_secs_f64()
     );
-    if rows == DEFAULT_ROWS && elapsed.as_secs_f64() > MAX_SECONDS {
-        return Err(format!(
-            "CPCV hard gate exceeded {MAX_SECONDS}s: {:.3}s",
-            elapsed.as_secs_f64()
-        )
-        .into());
+    if rows == DEFAULT_ROWS {
+        if elapsed.as_secs_f64() > MAX_SECONDS {
+            return Err(format!(
+                "CPCV hard gate exceeded {MAX_SECONDS}s: {:.3}s",
+                elapsed.as_secs_f64()
+            )
+            .into());
+        }
+        enforce_linux_peak_rss(peak_rss, MAX_RSS_BYTES, "CPCV")?;
     }
     Ok(())
 }

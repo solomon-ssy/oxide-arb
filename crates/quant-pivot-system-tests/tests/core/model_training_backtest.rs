@@ -8,6 +8,7 @@
 use std::{collections::BTreeMap, env, sync::Arc};
 
 use chrono::{DateTime, Duration as ChronoDuration, TimeZone, Utc};
+use quant_pivot_compute::ComputeExecutor;
 use quant_pivot_core::{
     app::ports::cpcv_backtest::{CoreCpcvBacktestPort, CoreCpcvBacktestPortDeps},
     governance::CoreCalibrationArtifactLoader,
@@ -766,6 +767,7 @@ fn make_trainer(
 ) -> ModelTrainerService {
     ModelTrainerService::new(
         ModelTrainerServiceDeps {
+            compute: Arc::new(ComputeExecutor::new().expect("test compute executor")),
             dataset_repo: Arc::new(PgTrainingDatasetRepository::new(db.clone())),
             artifact_store: store,
             model_registry_repo: registry,
@@ -816,6 +818,7 @@ pub async fn train_then_backtest_then_calibrate_e2e() {
     );
     let backtester = BacktestService::new(
         BacktestServiceDeps {
+            compute: Arc::new(ComputeExecutor::new().expect("test compute executor")),
             dataset_repo: Arc::new(PgTrainingDatasetRepository::new(db.clone())),
             artifact_store: Arc::clone(&store),
             model_registry_repo: Arc::clone(&registry),
@@ -903,6 +906,7 @@ pub async fn train_then_cpcv_persists_path_set_with_dsr_n_decomposition() {
 
     let path_set_id = BacktestPathSetId::from_v7();
     let port = CoreCpcvBacktestPort::new(CoreCpcvBacktestPortDeps {
+        compute: Arc::new(ComputeExecutor::new().expect("test compute executor")),
         dataset_repo: Arc::new(PgTrainingDatasetRepository::new(db.clone())),
         artifact_store: Arc::clone(&store),
         path_set_repo: Arc::new(PgBacktestPathSetRepository::new(db.clone())),

@@ -361,7 +361,10 @@ mod tests {
     };
     use quant_pivot_repository::traits::FactWriter;
     use quant_pivot_storage::write::AsyncWriterObservability;
-    use tokio::sync::{mpsc, watch};
+    use tokio::{
+        sync::{mpsc, watch},
+        time::sleep,
+    };
     use tokio_util::sync::CancellationToken;
     use uuid::Uuid;
 
@@ -514,6 +517,47 @@ mod tests {
             client.wait_for(PartitionBatchId::new(6)).await,
             Err(LedgerPersistenceError::CommitCursorClosed)
         );
+    }
+
+    #[tokio::test]
+    async fn late_commit_is_recovered_before_the_next_batch_is_submitted() {
+        let (request_tx, mut request_rx) = mpsc::channel::<QueuedLedgerWriteRequest>(1);
+        let (commit_tx, commit_rx) = watch::channel(PartitionCommit::Pending);
+        let mut client = PartitionLedgerClient {
+            partition_id: PartitionId::new(0),
+            request_tx,
+            commit: commit_rx,
+            in_flight: None,
+        };
+        let committer = tokio::spawn(async move {
+            let first = request_rx.recv().await.expect("first queued batch");
+            sleep(Duration::from_millis(20)).await;
+            commit_tx.send_replace(PartitionCommit::Committed(first.request.batch_id));
+            let second = request_rx.recv().await.expect("second queued batch");
+            commit_tx.send_replace(PartitionCommit::Committed(second.request.batch_id));
+        });
+
+        assert_eq!(
+            client
+                .persist(
+                    PartitionBatchId::new(1),
+                    vec![row(0, 1)],
+                    Duration::from_millis(5),
+                )
+                .await,
+            Err(LedgerPersistenceError::CommitTimeout)
+        );
+        assert_eq!(
+            client
+                .persist(
+                    PartitionBatchId::new(2),
+                    vec![row(0, 2)],
+                    Duration::from_secs(1),
+                )
+                .await,
+            Ok(())
+        );
+        committer.await.expect("late committer");
     }
 
     #[test]

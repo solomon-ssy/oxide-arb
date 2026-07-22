@@ -26,7 +26,7 @@ use polymarket_client_sdk_v2::{
     ws::config::Config as SdkWsConfig,
 };
 use quant_pivot_models::{
-    domain::data_plane::pipeline::{PipelineEvent, StreamSessionEndReason},
+    domain::data_plane::pipeline::{PipelineEvent, StreamSessionEndReason, StreamSessionTicket},
     enums::system::ShardConnectionStatus,
     hashing::CanonicalDigest,
     types::{ContentHash, TokenId, TokenKey},
@@ -41,6 +41,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use super::{
+    IngressEnqueueObserver,
     health::ShardHealthBoard,
     ingest_hooks::BookLevelRejectHook,
     ingress::{NormalizedIngressBatch, ingress_permits},
@@ -49,6 +50,24 @@ use super::{
     session_hook::WsSessionInvalidationHook,
     token_resolver::TokenKeyResolver,
 };
+
+/// Full desired shard state. `restart_generation` makes a forced transport
+/// restart observable even when the token set itself is unchanged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ShardAssignment {
+    pub tokens: Arc<HashSet<TokenId>>,
+    pub restart_generation: u64,
+}
+
+impl ShardAssignment {
+    #[must_use]
+    pub(super) fn empty() -> Self {
+        Self {
+            tokens: Arc::new(HashSet::new()),
+            restart_generation: 0,
+        }
+    }
+}
 
 /// Debounce window for token-set changes: bursts of assign/remove during a
 /// catalog sync coalesce into a single teardown + resubscribe.
@@ -75,9 +94,11 @@ pub(super) struct ShardDeps {
     pub shutdown: CancellationToken,
     pub message_epoch: Arc<Instant>,
     pub last_message_tick: Arc<AtomicU64>,
+    pub session_epoch: Arc<AtomicU64>,
     pub token_resolver: Arc<dyn TokenKeyResolver>,
     pub on_session_invalidated: Option<WsSessionInvalidationHook>,
     pub on_book_level_rejected: Option<BookLevelRejectHook>,
+    pub ingress_enqueue_observer: Option<IngressEnqueueObserver>,
     /// Shard-level reconnect backoff (from `[market_data.websocket]`).
     pub reconnect_policy: ReconnectPolicy,
     /// SDK-internal reconnect backoff (same config source).
@@ -106,19 +127,19 @@ enum StreamEnd {
 /// A single shard actor: one SDK WebSocket connection, multiplexed streams.
 pub struct WsShard {
     shard_id: usize,
-    tokens_rx: Receiver<Arc<HashSet<TokenId>>>,
+    assignment_rx: Receiver<ShardAssignment>,
     deps: ShardDeps,
 }
 
 impl WsShard {
     pub(super) const fn new(
         shard_id: usize,
-        tokens_rx: Receiver<Arc<HashSet<TokenId>>>,
+        assignment_rx: Receiver<ShardAssignment>,
         deps: ShardDeps,
     ) -> Self {
         Self {
             shard_id,
-            tokens_rx,
+            assignment_rx,
             deps,
         }
     }
@@ -127,7 +148,7 @@ impl WsShard {
     pub async fn run_loop(self) {
         let Self {
             shard_id,
-            mut tokens_rx,
+            mut assignment_rx,
             deps,
         } = self;
         let mut reconnect = ReconnectState::new(shard_id, &deps.reconnect_policy);
@@ -147,14 +168,14 @@ impl WsShard {
             }
 
             // Park while the shard owns no tokens — no reconnect churn on idle.
-            if tokens_rx.borrow_and_update().is_empty() {
+            if assignment_rx.borrow_and_update().tokens.is_empty() {
                 tokio::select! {
                     () = deps.shutdown.cancelled() => break,
-                    changed = tokens_rx.changed() => {
+                    changed = assignment_rx.changed() => {
                         if changed.is_err() {
                             break;
                         }
-                        debounce_token_changes(&mut tokens_rx, &deps.shutdown).await;
+                        debounce_assignment_changes(&mut assignment_rx, &deps.shutdown).await;
                         continue;
                     }
                 }
@@ -168,7 +189,7 @@ impl WsShard {
                 },
             );
 
-            let end = connect_and_stream(&deps, shard_id, &mut tokens_rx, &mut reconnect).await;
+            let end = connect_and_stream(&deps, shard_id, &mut assignment_rx, &mut reconnect).await;
             deps.health.set_connected(shard_id, false);
             emit_status(&deps, shard_id, ShardConnectionStatus::Disconnected);
 
@@ -191,13 +212,13 @@ impl WsShard {
                     tokio::select! {
                         () = deps.shutdown.cancelled() => break,
                         () = sleep(delay) => {}
-                        changed = tokens_rx.changed() => {
+                        changed = assignment_rx.changed() => {
                             // Token changes cut the backoff short: resubscribe
                             // with the fresh set right away.
                             if changed.is_err() {
                                 break;
                             }
-                            debounce_token_changes(&mut tokens_rx, &deps.shutdown).await;
+                            debounce_assignment_changes(&mut assignment_rx, &deps.shutdown).await;
                         }
                     }
                 }
@@ -214,8 +235,8 @@ fn stagger_slot(shard_id: usize) -> u32 {
 }
 
 /// Wait for the token set to settle: every further change restarts the window.
-async fn debounce_token_changes(
-    tokens_rx: &mut Receiver<Arc<HashSet<TokenId>>>,
+async fn debounce_assignment_changes(
+    assignment_rx: &mut Receiver<ShardAssignment>,
     shutdown: &CancellationToken,
 ) {
     loop {
@@ -224,7 +245,7 @@ async fn debounce_token_changes(
         tokio::select! {
             () = shutdown.cancelled() => return,
             () = &mut deadline => return,
-            changed = tokens_rx.changed() => {
+            changed = assignment_rx.changed() => {
                 if changed.is_err() {
                     return;
                 }
@@ -238,10 +259,11 @@ async fn debounce_token_changes(
 async fn connect_and_stream(
     deps: &ShardDeps,
     shard_id: usize,
-    tokens_rx: &mut Receiver<Arc<HashSet<TokenId>>>,
+    assignment_rx: &mut Receiver<ShardAssignment>,
     reconnect: &mut ReconnectState,
 ) -> StreamEnd {
-    let tokens = Arc::clone(&tokens_rx.borrow_and_update());
+    let assignment = assignment_rx.borrow_and_update().clone();
+    let tokens = Arc::clone(&assignment.tokens);
     let asset_ids: Vec<U256> = tokens
         .iter()
         .filter_map(|t| U256::from_str(t.as_str()).ok())
@@ -292,6 +314,18 @@ async fn connect_and_stream(
     deps.health.set_connected(shard_id, true);
     emit_status(deps, shard_id, ShardConnectionStatus::Connected);
     let stream_session_id = Uuid::now_v7();
+    let Some(stream_epoch) = deps
+        .session_epoch
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            current.checked_add(1)
+        })
+        .ok()
+        .and_then(|previous| StreamSessionTicket::new(stream_session_id, previous + 1))
+    else {
+        tracing::error!(shard_id, "stream session epoch exhausted");
+        deps.shutdown.cancel();
+        return StreamEnd::Shutdown;
+    };
     let opened_at_ms = Utc::now().timestamp_millis();
     let mut subscription_tokens = tokens.iter().cloned().collect::<Vec<_>>();
     subscription_tokens.sort_unstable_by(|left, right| left.as_str().cmp(right.as_str()));
@@ -304,7 +338,7 @@ async fn connect_and_stream(
     if !send_session_event(
         deps,
         PipelineEvent::StreamSessionOpened {
-            stream_session_id,
+            session: stream_epoch,
             shard_id: u32::try_from(shard_id).unwrap_or(u32::MAX),
             subscription_token_hash,
             subscription_token_count,
@@ -326,7 +360,7 @@ async fn connect_and_stream(
             match on_stream_item(
                 deps,
                 shard_id,
-                stream_session_id,
+                stream_epoch,
                 &mut token_sequences,
                 $item,
                 $name,
@@ -348,12 +382,12 @@ async fn connect_and_stream(
     let end = loop {
         tokio::select! {
             () = deps.shutdown.cancelled() => break StreamEnd::Shutdown,
-            changed = tokens_rx.changed() => {
+            changed = assignment_rx.changed() => {
                 if changed.is_err() {
                     break StreamEnd::RouterDropped;
                 }
-                debounce_token_changes(tokens_rx, &deps.shutdown).await;
-                if tokens_rx.borrow_and_update().as_ref() != tokens.as_ref() {
+                debounce_assignment_changes(assignment_rx, &deps.shutdown).await;
+                if *assignment_rx.borrow_and_update() != assignment {
                     break StreamEnd::Resubscribe;
                 }
             }
@@ -370,7 +404,7 @@ async fn connect_and_stream(
         }
     };
     let closing = ClosingStreamSession {
-        stream_session_id,
+        session: stream_epoch,
         shard_id,
         subscription_token_hash,
         subscription_token_count,
@@ -409,7 +443,7 @@ fn spawn_permit_holder(
 async fn on_stream_item<T, E: Display>(
     deps: &ShardDeps,
     shard_id: usize,
-    stream_session_id: Uuid,
+    session: StreamSessionTicket,
     token_sequences: &mut HashMap<TokenKey, u64>,
     item: Option<Result<T, E>>,
     stream: &'static str,
@@ -425,7 +459,7 @@ async fn on_stream_item<T, E: Display>(
                 deps.token_resolver.as_ref(),
             )
             .map_err(|error| error.to_string())?;
-            dispatch_events(deps, shard_id, stream_session_id, token_sequences, events).await
+            dispatch_events(deps, shard_id, session, token_sequences, events).await
         }
         Some(Err(error)) => {
             tracing::debug!(shard_id, %error, stream, "stream error");
@@ -438,7 +472,7 @@ async fn on_stream_item<T, E: Display>(
 async fn dispatch_events(
     deps: &ShardDeps,
     shard_id: usize,
-    stream_session_id: Uuid,
+    session: StreamSessionTicket,
     token_sequences: &mut HashMap<TokenKey, u64>,
     mut events: Vec<PipelineEvent>,
 ) -> Result<(), String> {
@@ -456,7 +490,7 @@ async fn dispatch_events(
             *sequence
         });
         event.assign_stream_provenance(
-            stream_session_id,
+            session,
             u32::try_from(shard_id).unwrap_or(u32::MAX),
             token_sequence,
         );
@@ -496,6 +530,11 @@ async fn send_event_batch(
     if events.is_empty() {
         return Ok(());
     }
+    let event_count = events
+        .iter()
+        .filter(|event| event.token().is_some())
+        .count();
+    let enqueue_started = Instant::now();
     let permits = ingress_permits(&events);
     let batch = NormalizedIngressBatch::new(
         events,
@@ -512,11 +551,17 @@ async fn send_event_batch(
     timeout(enqueue_timeout, deps.output_tx.send_async(batch))
         .await
         .map_err(|_| "WS output queue timed out; canonical session invalidated".to_owned())?
-        .map_err(|_| "WS output queue closed".to_owned())
+        .map_err(|_| "WS output queue closed".to_owned())?;
+    if event_count > 0
+        && let Some(observer) = &deps.ingress_enqueue_observer
+    {
+        observer(enqueue_started.elapsed(), event_count);
+    }
+    Ok(())
 }
 
 struct ClosingStreamSession<'a> {
-    stream_session_id: Uuid,
+    session: StreamSessionTicket,
     shard_id: usize,
     subscription_token_hash: ContentHash,
     subscription_token_count: u32,
@@ -531,7 +576,7 @@ async fn close_stream_session(
     reason: StreamSessionEndReason,
 ) {
     let ClosingStreamSession {
-        stream_session_id,
+        session,
         shard_id,
         subscription_token_hash,
         subscription_token_count,
@@ -552,7 +597,7 @@ async fn close_stream_session(
     received_sequences.sort_unstable_by_key(|entry| entry.0);
     let received_sequences: Arc<[(TokenKey, u64)]> = Arc::from(received_sequences);
     let closed = PipelineEvent::StreamSessionClosed {
-        stream_session_id,
+        session,
         shard_id: u32::try_from(shard_id).unwrap_or(u32::MAX),
         subscription_token_hash,
         subscription_token_count,
@@ -569,7 +614,7 @@ async fn close_stream_session(
                 .iter()
                 .map(|(token, last_received_sequence)| PipelineEvent::StreamGap {
                     token: *token,
-                    stream_session_id,
+                    session,
                     shard_id: u32::try_from(shard_id).unwrap_or(u32::MAX),
                     last_received_sequence: *last_received_sequence,
                     timestamp_ms: u64::try_from(closed_at_ms).unwrap_or(0),
@@ -578,7 +623,7 @@ async fn close_stream_session(
     }
     if !send_session_events(deps, events).await {
         tracing::error!(
-            %stream_session_id,
+            stream_session_id = %session.stream_session_id,
             shard_id,
             affected_tokens = subscription_tokens.len(),
             ?reason,
@@ -621,15 +666,21 @@ mod tests {
             shutdown: CancellationToken::new(),
             message_epoch: Arc::new(Instant::now()),
             last_message_tick: Arc::new(AtomicU64::new(0)),
+            session_epoch: Arc::new(AtomicU64::new(0)),
             token_resolver: Arc::new(|token: U256| Some(TokenKey::new(token.to::<u32>()))),
             on_session_invalidated: hook,
             on_book_level_rejected: None,
+            ingress_enqueue_observer: None,
             reconnect_policy: ReconnectPolicy::default(),
             sdk_initial_backoff: Duration::from_secs(1),
             sdk_max_backoff: Duration::from_secs(30),
             connect_limiter: Arc::new(Semaphore::new(4)),
             health: Arc::new(ShardHealthBoard::default()),
         }
+    }
+
+    fn ticket() -> StreamSessionTicket {
+        StreamSessionTicket::new(Uuid::new_v4(), 1).expect("valid session ticket")
     }
 
     #[tokio::test]
@@ -656,7 +707,7 @@ mod tests {
         dispatch_events(
             &deps,
             0,
-            Uuid::new_v4(),
+            ticket(),
             &mut sequences,
             vec![status(1), status(2), status(3)],
         )
@@ -687,7 +738,7 @@ mod tests {
         let error = dispatch_events(
             &deps,
             0,
-            Uuid::new_v4(),
+            ticket(),
             &mut sequences,
             vec![PipelineEvent::ShardStatus {
                 shard_id: 0,
@@ -711,7 +762,7 @@ mod tests {
         close_stream_session(
             &deps,
             ClosingStreamSession {
-                stream_session_id: Uuid::new_v4(),
+                session: ticket(),
                 shard_id: 0,
                 subscription_token_hash: subscription_token_hash(slice::from_ref(&token))
                     .expect("subscription hash"),
@@ -760,7 +811,7 @@ mod tests {
         close_stream_session(
             &deps,
             ClosingStreamSession {
-                stream_session_id: session_id,
+                session: StreamSessionTicket::new(session_id, 1).expect("valid session ticket"),
                 shard_id: 0,
                 subscription_token_hash: subscription_token_hash(slice::from_ref(&token))
                     .expect("subscription hash"),
@@ -783,25 +834,48 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn debounce_waits_for_token_set_to_settle() {
-        let (tx, mut rx) = watch::channel(Arc::new(HashSet::<TokenId>::new()));
+        let (tx, mut rx) = watch::channel(ShardAssignment::empty());
         let shutdown = CancellationToken::new();
 
-        tx.send_replace(Arc::new(HashSet::from([TokenId::new("1")])));
+        tx.send_replace(ShardAssignment {
+            tokens: Arc::new(HashSet::from([TokenId::new("1")])),
+            restart_generation: 0,
+        });
         rx.changed().await.expect("sender alive");
 
         let debounce = tokio::spawn(async move {
-            debounce_token_changes(&mut rx, &shutdown).await;
-            Arc::clone(&rx.borrow())
+            debounce_assignment_changes(&mut rx, &shutdown).await;
+            rx.borrow().clone()
         });
 
         // A second update inside the window must be folded into one rebuild.
         tokio::time::sleep(Duration::from_millis(200)).await;
-        tx.send_replace(Arc::new(HashSet::from([
-            TokenId::new("1"),
-            TokenId::new("2"),
-        ])));
+        tx.send_replace(ShardAssignment {
+            tokens: Arc::new(HashSet::from([TokenId::new("1"), TokenId::new("2")])),
+            restart_generation: 0,
+        });
 
         let settled = debounce.await.expect("debounce task");
-        assert_eq!(settled.len(), 2, "debounced set reflects the last write");
+        assert_eq!(
+            settled.tokens.len(),
+            2,
+            "debounced set reflects the last write"
+        );
+    }
+
+    #[test]
+    fn restart_generation_changes_assignment_without_token_churn() {
+        let tokens = Arc::new(HashSet::from([TokenId::new("1")]));
+        let first = ShardAssignment {
+            tokens: Arc::clone(&tokens),
+            restart_generation: 1,
+        };
+        let restarted = ShardAssignment {
+            tokens,
+            restart_generation: 2,
+        };
+
+        assert_ne!(first, restarted);
+        assert_eq!(first.tokens, restarted.tokens);
     }
 }

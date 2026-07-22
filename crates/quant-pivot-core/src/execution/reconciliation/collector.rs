@@ -63,12 +63,13 @@ impl VenueEvidenceCollector {
         token_id: &TokenId,
         now: DateTime<Utc>,
     ) -> ReconciliationEvidence {
-        let detail = self.book_store.load_by_id(token_id).map_or_else(
-            || "no published book snapshot".to_owned(),
+        let last_known = self.book_store.load_last_known_by_id(token_id);
+        let detail = last_known.snapshot.map_or_else(
+            || format!("no book snapshot ({:?})", last_known.availability),
             |snapshot| {
                 format!(
-                    "book version={} ts_ms={}",
-                    snapshot.version, snapshot.timestamp_ms
+                    "book version={} ts_ms={} availability={:?}",
+                    snapshot.version, snapshot.timestamp_ms, last_known.availability
                 )
             },
         );

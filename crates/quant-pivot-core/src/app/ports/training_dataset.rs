@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use blake3::Hasher;
 use chrono::Duration;
 use futures_util::StreamExt;
+use quant_pivot_compute::ComputeExecutor;
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError, storage::StorageError};
 use quant_pivot_models::{
     domain::{
@@ -52,6 +53,7 @@ use crate::{
 
 /// Admin port wired from [`ResearchBundle`] plus runtime-config catalog reads.
 pub struct CoreTrainingDatasetPort {
+    compute: Arc<ComputeExecutor>,
     fact_read: Arc<dyn QuantFactReadRepository>,
     catalog_repo: Arc<dyn CatalogLedgerRepository>,
     market_repo: Arc<dyn MarketRepository>,
@@ -85,6 +87,7 @@ impl CoreTrainingDatasetPort {
         _plan_sample_markets: u32,
     ) -> Self {
         Self {
+            compute: Arc::clone(&research.compute),
             fact_read: Arc::clone(&research.quant_fact_read),
             catalog_repo: Arc::clone(&research.catalog_ledger_repo),
             market_repo: Arc::clone(&research.market_repo),
@@ -126,6 +129,7 @@ impl CoreTrainingDatasetPort {
         .await?;
         TrainingDatasetService::new(
             TrainingDatasetServiceDeps {
+                compute: Arc::clone(&self.compute),
                 fact_read: Arc::clone(&self.fact_read),
                 catalog_repo: Arc::clone(&self.catalog_repo),
                 market_repo: Arc::clone(&self.market_repo),

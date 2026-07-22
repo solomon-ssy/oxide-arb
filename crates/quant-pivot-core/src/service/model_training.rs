@@ -12,7 +12,8 @@
 use std::{collections::BTreeSet, sync::Arc};
 
 use chrono::Utc;
-use quant_pivot_error::{QuantError, QuantResult, research::ResearchError, storage::StorageError};
+use quant_pivot_compute::{ComputeExecutor, OfflineMemory};
+use quant_pivot_error::{QuantResult, research::ResearchError, storage::StorageError};
 use quant_pivot_models::{
     domain::quant::{
         JobProgressSink, ModelVersionInfo, NewModelRun, NewModelVersion, TrainingDatasetInfo,
@@ -62,9 +63,9 @@ use quant_pivot_research::{
     features::FeatureSchema,
     hashing::ResearchHasher,
     model::{
-        FactorWeight, LabelSelector, ModelArtifact, ModelArtifactHeader, ModelTrainer,
-        ReturnModelSpec, ScoreMultiplierSpec, SellScorerOutputSpec, SellScorerTrainer,
-        SubstitutionConfidenceRules, TrainModelRequest, TrainSellScorerRequest,
+        CancellationProbe, FactorWeight, LabelSelector, ModelArtifact, ModelArtifactHeader,
+        ModelTrainer, ReturnModelSpec, ScoreMultiplierSpec, SellScorerOutputSpec,
+        SellScorerTrainer, SubstitutionConfidenceRules, TrainModelRequest, TrainSellScorerRequest,
         TrainedModelArtifact, TrainingObjectiveReport, ValidationReport, ValidationSpec,
         WeightedFactorTrainer, infer_training_category_scope,
         objective::{ObjectiveComponentReport, RankingDiagnostics},
@@ -83,7 +84,7 @@ use quant_pivot_research::{
     },
 };
 use rust_decimal::Decimal;
-use tokio::{runtime::Handle, task};
+use tokio::runtime::Handle;
 use tokio_util::sync::CancellationToken;
 
 use crate::service::{
@@ -143,8 +144,15 @@ fn ensure_not_cancelled(cancel: &CancellationToken, phase: &str) -> QuantResult<
     Ok(())
 }
 
+fn cancellation_probe(cancel: &CancellationToken) -> CancellationProbe {
+    let cancel = cancel.clone();
+    CancellationProbe::new(move || cancel.is_cancelled())
+}
+
 /// Repository + store dependencies for the trainer service.
 pub struct ModelTrainerServiceDeps {
+    /// Process-wide offline CPU and memory governor.
+    pub compute: Arc<ComputeExecutor>,
     /// Frozen training-dataset ledger.
     pub dataset_repo: Arc<dyn TrainingDatasetRepository>,
     /// Content-addressed artifact store (model bytes).
@@ -223,7 +231,7 @@ impl ModelTrainerService {
     ///
     /// Reports coarse but honest phases (`load → decode → verify → fit`) to
     /// `progress`; the fit itself is a single opaque research-trainer call,
-    /// offloaded to a blocking thread. `cancel` is polled at each stage boundary.
+    /// offloaded to the governed offline pool. `cancel` is polled at each stage boundary.
     pub async fn train(
         &self,
         input: TrainModelInput,
@@ -252,7 +260,7 @@ impl ModelTrainerService {
             examples.len() as u64,
         ));
         match self
-            .train_and_register(&model_version_id, &input, &dataset, &examples)
+            .train_and_register(&model_version_id, &input, &dataset, &examples, cancel)
             .await
         {
             Ok(version) => {
@@ -365,6 +373,7 @@ impl ModelTrainerService {
         input: &TrainModelInput,
         dataset: &TrainingDatasetInfo,
         examples: &Arc<[TrainingExample]>,
+        cancel: &CancellationToken,
     ) -> QuantResult<ModelVersionInfo> {
         let materialization = require_dataset_materialization(dataset)?;
         let manifest =
@@ -386,16 +395,16 @@ impl ModelTrainerService {
         };
 
         let (artifact, metrics, training_objective) = if input.model_family.is_exit_scorer() {
-            self.train_sell_scorer(header, input, dataset, examples)
+            self.train_sell_scorer(header, input, dataset, examples, cancel)
                 .await?
         } else {
             match input.model_family.classical_kind() {
                 None => {
-                    self.train_weighted(header, input, dataset, examples)
+                    self.train_weighted(header, input, dataset, examples, cancel)
                         .await?
                 }
                 Some(kind) => {
-                    self.train_classical(header, input, dataset, examples, kind)
+                    self.train_classical(header, input, dataset, examples, kind, cancel)
                         .await?
                 }
             }
@@ -449,6 +458,7 @@ impl ModelTrainerService {
         input: &TrainModelInput,
         dataset: &TrainingDatasetInfo,
         examples: &Arc<[TrainingExample]>,
+        cancel: &CancellationToken,
     ) -> QuantResult<(ModelArtifact, ModelVersionMetrics, ModelTrainingObjective)> {
         let materialization = require_dataset_materialization(dataset)?;
         let requirements = ModelFeatureRequirements::from_input_contract(&input.input_contract);
@@ -461,6 +471,7 @@ impl ModelTrainerService {
         });
         let seed_weights = weighted_seed_weights(&self.config.factors, examples);
         let request = TrainModelRequest {
+            cancellation: cancellation_probe(cancel),
             examples: Arc::clone(examples),
             training_dataset_hash: *materialization.dataset_hash,
             label: input.label.clone(),
@@ -480,17 +491,18 @@ impl ModelTrainerService {
             factor_cross_section: self.config.factors.cross_section.clone(),
             category_scope,
         };
-        // Offload the CPU-bound fit to a blocking thread so it never occupies an
-        // async runtime worker (starving other jobs' heartbeats).
-        let trained: TrainedModelArtifact = task::spawn_blocking(move || {
-            Handle::current().block_on(WeightedFactorTrainer::new().train(request))
-        })
-        .await
-        .map_err(|error| {
-            QuantError::from(ResearchError::DatasetBuild {
-                detail: format!("weighted-factor trainer task join failed: {error}"),
+        let runtime = Handle::current();
+        let cancellation = cancel.clone();
+        let trained: TrainedModelArtifact = self
+            .deps
+            .compute
+            .run_offline_cancellable(OfflineMemory::try_gib(8)?, cancel, move || {
+                ensure_not_cancelled(&cancellation, "weighted fit start")?;
+                let trained = runtime.block_on(WeightedFactorTrainer::new().train(request))?;
+                ensure_not_cancelled(&cancellation, "weighted fit completion")?;
+                Ok(trained)
             })
-        })??;
+            .await?;
         let objective = ModelTrainingObjective::learning_to_rank(self.config.objective.clone());
         let metrics = learning_to_rank_metrics(
             &trained.in_sample_metrics,
@@ -509,6 +521,7 @@ impl ModelTrainerService {
         input: &TrainModelInput,
         dataset: &TrainingDatasetInfo,
         examples: &Arc<[TrainingExample]>,
+        cancel: &CancellationToken,
     ) -> QuantResult<(ModelArtifact, ModelVersionMetrics, ModelTrainingObjective)> {
         let materialization = require_dataset_materialization(dataset)?;
         if !examples
@@ -522,6 +535,7 @@ impl ModelTrainerService {
         }
         let seed_weights = Self::seed_weights(examples);
         let request = TrainSellScorerRequest {
+            cancellation: cancellation_probe(cancel),
             examples: Arc::clone(examples),
             label: input.label.clone(),
             seed_weights,
@@ -538,15 +552,17 @@ impl ModelTrainerService {
             training_dataset_hash: *materialization.dataset_hash,
             input_contract: input.input_contract.clone(),
         };
-        // Offload the CPU-bound fit to a blocking thread (keeps the runtime free).
-        let trained =
-            task::spawn_blocking(move || SellScorerTrainer::new().train_sell_scorer(&request))
-                .await
-                .map_err(|error| {
-                    QuantError::from(ResearchError::DatasetBuild {
-                        detail: format!("sell-scorer trainer task join failed: {error}"),
-                    })
-                })??;
+        let cancellation = cancel.clone();
+        let trained = self
+            .deps
+            .compute
+            .run_offline_cancellable(OfflineMemory::try_gib(8)?, cancel, move || {
+                ensure_not_cancelled(&cancellation, "sell-scorer fit start")?;
+                let trained = SellScorerTrainer::new().train_sell_scorer(&request)?;
+                ensure_not_cancelled(&cancellation, "sell-scorer fit completion")?;
+                Ok(trained)
+            })
+            .await?;
         let objective = ModelTrainingObjective::learning_to_rank(self.config.objective.clone());
         let metrics = learning_to_rank_metrics(
             &trained.in_sample_metrics,
@@ -745,6 +761,7 @@ impl ModelTrainerService {
         dataset: &TrainingDatasetInfo,
         examples: &Arc<[TrainingExample]>,
         kind: ClassicalKind,
+        cancel: &CancellationToken,
     ) -> QuantResult<(ModelArtifact, ModelVersionMetrics, ModelTrainingObjective)> {
         let materialization = require_dataset_materialization(dataset)?;
         let output_semantics =
@@ -760,32 +777,33 @@ impl ModelTrainerService {
             }
             .into());
         }
-        let matrix = build_classical_matrix(
-            examples.iter(),
-            &input.label,
-            &schema,
-            &input.input_contract,
-        )?;
         let folds = input.validation_folds.max(2);
         let validation = ValidationSpec {
             folds,
             embargo_pct: self.config.validation_purge.embargo_pct,
             min_embargo_secs: self.config.validation_purge.min_embargo_secs,
         };
-        // Offload the CPU-bound classical fit + rolling validation to a blocking
-        // thread (keeps the async runtime free for other jobs' heartbeats).
-        let (output, validation) = task::spawn_blocking(move || {
-            let adapter = ClassicalAdapterRegistry::adapter_for(kind);
-            let output = adapter.train(&matrix)?;
-            let validation = adapter.validate(&matrix, validation)?;
-            QuantResult::Ok((output, validation))
-        })
-        .await
-        .map_err(|error| {
-            QuantError::from(ResearchError::DatasetBuild {
-                detail: format!("classical trainer task join failed: {error}"),
+        let examples = Arc::clone(examples);
+        let label = input.label.clone();
+        let input_contract = input.input_contract.clone();
+        let cancellation = cancel.clone();
+        let (output, validation) = self
+            .deps
+            .compute
+            .run_offline_cancellable(OfflineMemory::try_gib(8)?, cancel, move || {
+                ensure_not_cancelled(&cancellation, "classical matrix")?;
+                let matrix =
+                    build_classical_matrix(examples.iter(), &label, &schema, &input_contract)?;
+                ensure_not_cancelled(&cancellation, "classical fit")?;
+                let adapter = ClassicalAdapterRegistry::adapter_for(kind);
+                let output = adapter.train(&matrix)?;
+                ensure_not_cancelled(&cancellation, "classical validation")?;
+                let validation =
+                    adapter.validate(&matrix, validation, &cancellation_probe(&cancellation))?;
+                ensure_not_cancelled(&cancellation, "classical completion")?;
+                Ok((output, validation))
             })
-        })??;
+            .await?;
         if output.input_contract != input.input_contract {
             return Err(ResearchError::Determinism {
                 detail: "classical trainer input contract differs from its owning model spec"
@@ -944,6 +962,7 @@ impl ModelTrainerService {
         _dataset: &TrainingDatasetInfo,
         _examples: &Arc<[TrainingExample]>,
         kind: ClassicalKind,
+        _cancel: &CancellationToken,
     ) -> QuantResult<(ModelArtifact, ModelVersionMetrics, ModelTrainingObjective)> {
         Err(ResearchError::RuntimeUnavailable {
             family: kind.to_string(),

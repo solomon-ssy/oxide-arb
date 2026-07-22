@@ -7,6 +7,7 @@
 
 use quant_pivot_allocator as _;
 
+pub mod performance;
 pub mod postgres;
 pub mod production_stack;
 pub mod resources;

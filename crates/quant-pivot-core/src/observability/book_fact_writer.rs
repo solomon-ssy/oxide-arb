@@ -341,7 +341,7 @@ fn base_ledger_row(
     venue_event_time: u64,
 ) -> BookL2LedgerRow {
     ledger_row(LedgerIdentity {
-        stream_session_id: trace.stream_session_id,
+        stream_session_id: trace.session.stream_session_id,
         shard_id: trace.shard_id,
         token_sequence: trace.token_sequence,
         token_id,

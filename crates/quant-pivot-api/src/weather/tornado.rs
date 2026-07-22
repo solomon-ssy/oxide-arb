@@ -3,6 +3,7 @@
 use std::{
     collections::BTreeSet,
     io::{Cursor, Read},
+    sync::Arc,
     time::Duration,
 };
 
@@ -12,6 +13,7 @@ use chrono::{
 use chrono_tz::Tz;
 use csv::{ReaderBuilder, StringRecord};
 use flate2::read::GzDecoder;
+use quant_pivot_compute::{ComputeExecutor, OfflineMemory};
 use quant_pivot_error::{QuantError, QuantResult, api::ApiError};
 use quant_pivot_models::{
     config::TornadoSourceConfig,
@@ -45,10 +47,14 @@ pub struct TornadoSource {
     config: TornadoSourceConfig,
     http: Client,
     retry_policy: RetryPolicy,
+    compute: Arc<ComputeExecutor>,
 }
 
 impl TornadoSource {
-    pub fn connect(config: TornadoSourceConfig) -> QuantResult<Self> {
+    pub fn connect(
+        config: TornadoSourceConfig,
+        compute: Arc<ComputeExecutor>,
+    ) -> QuantResult<Self> {
         let http = Client::builder()
             .timeout(Duration::from_millis(config.request_timeout_ms))
             .user_agent("quant-pivot/0.1 noaa-tornado-ingest")
@@ -58,6 +64,7 @@ impl TornadoSource {
             config,
             http,
             retry_policy: RetryPolicy::gamma_default(),
+            compute,
         })
     }
 
@@ -122,19 +129,21 @@ impl TornadoSource {
         let file_hash = CanonicalDigest::content_hash_bytes(&bytes);
         let region_id = region_id.to_owned();
         let state_name = state_name.to_owned();
-        let decoded = tokio::task::spawn_blocking(move || {
-            parse_ncei_gzip(
-                bytes,
-                &region_id,
-                &state_name,
-                timezone,
-                report_date,
-                collection_date,
-                available_at,
-            )
-        })
-        .await
-        .map_err(|error| ApiError::Sdk(format!("NCEI decoder task failed: {error}")))??;
+        let memory = OfflineMemory::try_bytes(bytes.len().max(1024 * 1024 * 1024))?;
+        let decoded = self
+            .compute
+            .run_offline(memory, move || {
+                parse_ncei_gzip(
+                    bytes,
+                    &region_id,
+                    &state_name,
+                    timezone,
+                    report_date,
+                    collection_date,
+                    available_at,
+                )
+            })
+            .await?;
         Ok(NceiTornadoDay {
             file_hash,
             collection_date,
@@ -426,11 +435,12 @@ fn parse_error(context: &str, detail: impl Into<String>) -> ApiError {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Write;
+    use std::{io::Write, sync::Arc};
 
     use chrono::{NaiveDate, TimeZone, Utc};
     use chrono_tz::America::Chicago;
     use flate2::{Compression, write::GzEncoder};
+    use quant_pivot_compute::ComputeExecutor;
     use quant_pivot_models::{
         config::TornadoSourceConfig, domain::data_plane::WeatherObservationReportKind,
     };
@@ -438,6 +448,10 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate, matchers, matchers::method};
 
     use super::TornadoSource;
+
+    fn test_compute() -> Arc<ComputeExecutor> {
+        Arc::new(ComputeExecutor::new().expect("test compute executor"))
+    }
 
     #[tokio::test]
     async fn spc_partition_counts_matching_preliminary_reports() {
@@ -452,10 +466,13 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_string(body))
             .mount(&server)
             .await;
-        let source = TornadoSource::connect(TornadoSourceConfig {
-            spc_base_url: server.uri(),
-            ..TornadoSourceConfig::default()
-        })
+        let source = TornadoSource::connect(
+            TornadoSourceConfig {
+                spc_base_url: server.uri(),
+                ..TornadoSourceConfig::default()
+            },
+            test_compute(),
+        )
         .expect("source");
         let report = source
             .spc_preliminary_day(
@@ -503,10 +520,13 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_bytes(gzip))
             .mount(&server)
             .await;
-        let source = TornadoSource::connect(TornadoSourceConfig {
-            ncei_csv_base_url: server.uri(),
-            ..TornadoSourceConfig::default()
-        })
+        let source = TornadoSource::connect(
+            TornadoSourceConfig {
+                ncei_csv_base_url: server.uri(),
+                ..TornadoSourceConfig::default()
+            },
+            test_compute(),
+        )
         .expect("source");
         let day = source
             .ncei_final_day(

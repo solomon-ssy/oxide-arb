@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use quant_pivot_compute::ComputeExecutor;
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{config::DeployConfig, domain::ports::ResearchJobPort};
 use quant_pivot_repository::traits::{
@@ -14,9 +15,9 @@ use crate::app::{
     task_registry::AppRunner,
 };
 
-pub async fn run(deploy: Arc<DeployConfig>) -> QuantResult<()> {
+pub async fn run(deploy: Arc<DeployConfig>, compute: Arc<ComputeExecutor>) -> QuantResult<()> {
     let shutdown = CancellationToken::new();
-    let ctx = AppContext::build(deploy, shutdown.clone()).await?;
+    let ctx = AppContext::build(deploy, shutdown.clone(), compute).await?;
 
     // Crash recovery (in-flight orders → reconciliation) is owned by the
     // execution dispatcher worker, which runs it fail-closed as its first action

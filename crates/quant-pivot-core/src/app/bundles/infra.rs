@@ -31,7 +31,10 @@ use quant_pivot_web::jwt::RedisTokenBlacklist;
 
 use super::pg_repos::PgRepositories;
 use crate::{
-    app::{task_id::TaskId, task_registry::PendingTaskQueue},
+    app::{
+        task_id::TaskId,
+        task_registry::{AppRunner, PendingTaskQueue},
+    },
     observability::{
         attribution_fact_writer::AttributionEventWriter, book_fact_writer::BookFactWriter,
         capital_allocation_fact_writer::CapitalAllocationEventWriter,
@@ -122,6 +125,13 @@ impl InfraBundle {
             exit_signal_evaluation_event_writer: analytics.exit_signal_evaluation_event_writer,
             fact_writer_queue: analytics.fact_writer_queue,
         })
+    }
+
+    /// Register every analytics writer built with this bundle on the owning
+    /// application runner. System-level harnesses use the same lifecycle entry
+    /// point without exposing or cloning the one-shot pending task queue.
+    pub fn register_fact_writer_tasks(&self, runner: &mut AppRunner) {
+        runner.absorb_pending_queue(&self.fact_writer_queue);
     }
 }
 

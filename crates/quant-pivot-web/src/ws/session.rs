@@ -19,7 +19,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     state::AppState,
-    ws::{SessionId, SessionRegistration, SessionRegistry},
+    ws::{SessionId, SessionRegistration, SessionRegistry, SharedFrame},
 };
 
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
@@ -48,8 +48,9 @@ impl SessionContext {
 }
 
 pub async fn run(mut session: Session, mut msg_stream: MessageStream, ctx: SessionContext) {
-    let (outbound, mut outbound_rx) = mpsc::channel::<ByteString>(OUTBOUND_CAPACITY);
+    let (outbound, mut outbound_rx) = mpsc::channel::<SharedFrame>(OUTBOUND_CAPACITY);
     let cancellation = CancellationToken::new();
+    let hub_fail_closed = ctx.registry.fail_closed_token();
     let Some(session_id) = ctx
         .registry
         .register(SessionRegistration {
@@ -80,11 +81,12 @@ pub async fn run(mut session: Session, mut msg_stream: MessageStream, ctx: Sessi
 
     loop {
         tokio::select! {
+            () = hub_fail_closed.cancelled() => break,
             () = cancellation.cancelled() => break,
             outbound = outbound_rx.recv() => {
                 match outbound {
                     Some(text) => {
-                        if session.text(text).await.is_err() {
+                        if session.text(text.text().clone()).await.is_err() {
                             break;
                         }
                     }

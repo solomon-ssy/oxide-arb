@@ -7,6 +7,7 @@ use quant_pivot_models::types::TokenId;
 /// Unified read side for WS-normalized pipeline events.
 pub trait PipelineEventSource: Send + Sync {
     fn events(&self) -> &Receiver<NormalizedIngressBatch>;
+    fn owns_all_tokens(&self, token_ids: &[TokenId]) -> bool;
     fn invalidate_token(&self, token_id: &TokenId);
     fn invalidate_tokens(&self, token_ids: &[TokenId]);
 }
@@ -14,6 +15,10 @@ pub trait PipelineEventSource: Send + Sync {
 impl PipelineEventSource for ClobWsManager {
     fn events(&self) -> &Receiver<NormalizedIngressBatch> {
         Self::events(self)
+    }
+
+    fn owns_all_tokens(&self, token_ids: &[TokenId]) -> bool {
+        Self::owns_all_tokens(self, token_ids)
     }
 
     fn invalidate_token(&self, token_id: &TokenId) {

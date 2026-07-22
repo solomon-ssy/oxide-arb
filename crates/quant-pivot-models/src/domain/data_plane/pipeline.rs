@@ -15,6 +15,40 @@ use crate::{
     types::{ContentHash, MarketId, Price, Shares, TokenId, TokenKey},
 };
 
+/// Process-local continuity identity for one physical WebSocket stream.
+///
+/// The UUID is the durable ledger identity. `epoch` is a non-zero monotonic
+/// process-local fence used by hot state; unlike a reduced UUID hash, it has no
+/// collision semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct StreamSessionTicket {
+    pub stream_session_id: Uuid,
+    pub epoch: u64,
+}
+
+impl StreamSessionTicket {
+    pub const INVALID: Self = Self {
+        stream_session_id: Uuid::nil(),
+        epoch: 0,
+    };
+
+    #[must_use]
+    pub const fn new(stream_session_id: Uuid, epoch: u64) -> Option<Self> {
+        if stream_session_id.is_nil() || epoch == 0 {
+            return None;
+        }
+        Some(Self {
+            stream_session_id,
+            epoch,
+        })
+    }
+
+    #[must_use]
+    pub const fn is_valid(self) -> bool {
+        !self.stream_session_id.is_nil() && self.epoch != 0
+    }
+}
+
 /// Monotonic ingress trace for a WS payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IngressTrace {
@@ -22,7 +56,7 @@ pub struct IngressTrace {
     /// Local wall-clock instant captured when the SDK payload entered our process.
     pub ingress_time_ms: i64,
     pub ws_timestamp_ms: u64,
-    pub stream_session_id: Uuid,
+    pub session: StreamSessionTicket,
     pub shard_id: u32,
     pub token_sequence: u64,
 }
@@ -34,7 +68,7 @@ impl IngressTrace {
             mono,
             ingress_time_ms: Utc::now().timestamp_millis(),
             ws_timestamp_ms,
-            stream_session_id: Uuid::nil(),
+            session: StreamSessionTicket::INVALID,
             shard_id: 0,
             token_sequence: 0,
         }
@@ -42,11 +76,11 @@ impl IngressTrace {
 
     pub const fn assign_stream(
         &mut self,
-        stream_session_id: Uuid,
+        session: StreamSessionTicket,
         shard_id: u32,
         token_sequence: u64,
     ) {
-        self.stream_session_id = stream_session_id;
+        self.session = session;
         self.shard_id = shard_id;
         self.token_sequence = token_sequence;
     }
@@ -142,7 +176,7 @@ pub enum PipelineEvent {
         status: ShardConnectionStatus,
     },
     StreamSessionOpened {
-        stream_session_id: Uuid,
+        session: StreamSessionTicket,
         shard_id: u32,
         subscription_token_hash: ContentHash,
         subscription_token_count: u32,
@@ -150,7 +184,7 @@ pub enum PipelineEvent {
         opened_at_ms: i64,
     },
     StreamSessionClosed {
-        stream_session_id: Uuid,
+        session: StreamSessionTicket,
         shard_id: u32,
         subscription_token_hash: ContentHash,
         subscription_token_count: u32,
@@ -161,7 +195,7 @@ pub enum PipelineEvent {
     },
     StreamGap {
         token: TokenKey,
-        stream_session_id: Uuid,
+        session: StreamSessionTicket,
         shard_id: u32,
         last_received_sequence: u64,
         timestamp_ms: u64,
@@ -203,7 +237,7 @@ impl PipelineEvent {
     /// Assign canonical per-token stream provenance after normalization.
     pub const fn assign_stream_provenance(
         &mut self,
-        stream_session_id: Uuid,
+        session: StreamSessionTicket,
         shard_id: u32,
         token_sequence: u64,
     ) {
@@ -219,7 +253,7 @@ impl PipelineEvent {
             | Self::StreamGap { .. } => None,
         };
         if let Some(trace) = trace {
-            trace.assign_stream(stream_session_id, shard_id, token_sequence);
+            trace.assign_stream(session, shard_id, token_sequence);
         }
     }
 }

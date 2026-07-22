@@ -15,12 +15,13 @@ use parking_lot::Mutex;
 use quant_pivot_models::types::TokenId;
 use tokio::sync::{watch, watch::Sender};
 
-use super::shard::{ShardDeps, WsShard};
+use super::shard::{ShardAssignment, ShardDeps, WsShard};
 
 /// One spawned shard: command channel plus its assignment ledger entry.
 struct ShardSlot {
-    tokens_tx: Sender<Arc<HashSet<TokenId>>>,
+    assignment_tx: Sender<ShardAssignment>,
     assigned: HashSet<TokenId>,
+    restart_generation: u64,
 }
 
 /// Mutable routing state guarded by one lock (assignments must stay
@@ -92,21 +93,33 @@ impl ShardRouter {
     /// same shard. Publishing once per shard avoids a reconnect storm while
     /// preserving the full-state watch contract.
     pub fn restart_tokens(&self, tokens: &[TokenId]) {
-        let ledger = self.ledger.lock();
+        let mut ledger = self.ledger.lock();
         let dirty = tokens
             .iter()
             .filter_map(|token| ledger.assignments.get(token).copied())
             .collect::<HashSet<_>>();
         let publications = dirty
             .into_iter()
-            .map(|shard_id| {
-                let slot = &ledger.shards[shard_id];
-                (slot.tokens_tx.clone(), Arc::new(slot.assigned.clone()))
+            .filter_map(|shard_id| {
+                let slot = &mut ledger.shards[shard_id];
+                let Some(next_generation) = slot.restart_generation.checked_add(1) else {
+                    tracing::error!(shard_id, "WS shard restart generation exhausted");
+                    self.deps.shutdown.cancel();
+                    return None;
+                };
+                slot.restart_generation = next_generation;
+                Some((
+                    slot.assignment_tx.clone(),
+                    ShardAssignment {
+                        tokens: Arc::new(slot.assigned.clone()),
+                        restart_generation: slot.restart_generation,
+                    },
+                ))
             })
             .collect::<Vec<_>>();
         drop(ledger);
-        for (tokens_tx, assigned) in publications {
-            tokens_tx.send_replace(assigned);
+        for (assignment_tx, assignment) in publications {
+            assignment_tx.send_replace(assignment);
         }
     }
 
@@ -130,12 +143,13 @@ impl ShardRouter {
     /// Spawn a new resident shard actor (exactly once per `shard_id`).
     fn spawn_shard(&self, ledger: &mut RouterLedger) -> usize {
         let shard_id = ledger.shards.len();
-        let (tokens_tx, tokens_rx) = watch::channel(Arc::new(HashSet::new()));
+        let (assignment_tx, assignment_rx) = watch::channel(ShardAssignment::empty());
         self.deps.health.register(shard_id);
-        tokio::spawn(WsShard::new(shard_id, tokens_rx, self.deps.clone()).run_loop());
+        tokio::spawn(WsShard::new(shard_id, assignment_rx, self.deps.clone()).run_loop());
         ledger.shards.push(ShardSlot {
-            tokens_tx,
+            assignment_tx,
             assigned: HashSet::new(),
+            restart_generation: 0,
         });
         tracing::info!(shard_id, "WS shard spawned");
         shard_id
@@ -145,10 +159,19 @@ impl ShardRouter {
     #[cfg(test)]
     fn shard_tokens(&self, shard_id: usize) -> HashSet<TokenId> {
         self.ledger.lock().shards[shard_id]
-            .tokens_tx
+            .assignment_tx
             .borrow()
+            .tokens
             .as_ref()
             .clone()
+    }
+
+    #[cfg(test)]
+    fn shard_restart_generation(&self, shard_id: usize) -> u64 {
+        self.ledger.lock().shards[shard_id]
+            .assignment_tx
+            .borrow()
+            .restart_generation
     }
 }
 
@@ -156,7 +179,10 @@ impl ShardRouter {
 fn publish(ledger: &RouterLedger, dirty: &HashSet<usize>) {
     for &shard_id in dirty {
         let slot = &ledger.shards[shard_id];
-        slot.tokens_tx.send_replace(Arc::new(slot.assigned.clone()));
+        slot.assignment_tx.send_replace(ShardAssignment {
+            tokens: Arc::new(slot.assigned.clone()),
+            restart_generation: slot.restart_generation,
+        });
     }
 }
 
@@ -186,9 +212,11 @@ mod tests {
                 shutdown: CancellationToken::new(),
                 message_epoch: Arc::new(Instant::now()),
                 last_message_tick: Arc::new(AtomicU64::new(0)),
+                session_epoch: Arc::new(AtomicU64::new(0)),
                 token_resolver: Arc::new(|token: U256| Some(TokenKey::new(token.to::<u32>()))),
                 on_session_invalidated: None,
                 on_book_level_rejected: None,
+                ingress_enqueue_observer: None,
                 reconnect_policy: ReconnectPolicy::default(),
                 sdk_initial_backoff: Duration::from_secs(1),
                 sdk_max_backoff: Duration::from_secs(30),
@@ -232,6 +260,33 @@ mod tests {
         router.remove_tokens(&[tok("2")]);
         assert!(router.shard_tokens(0).is_empty());
         assert_eq!(router.shard_count(), 1);
+        drop(router);
+    }
+
+    #[tokio::test]
+    async fn restart_publishes_a_new_generation_without_changing_tokens() {
+        let router = test_router(8);
+        router.assign_tokens(&[tok("1"), tok("2")]);
+        let tokens = router.shard_tokens(0);
+
+        router.restart_tokens(&[tok("1"), tok("2")]);
+
+        assert_eq!(router.shard_tokens(0), tokens);
+        assert_eq!(router.shard_restart_generation(0), 1);
+        router.restart_tokens(&[tok("1")]);
+        assert_eq!(router.shard_restart_generation(0), 2);
+        drop(router);
+    }
+
+    #[tokio::test]
+    async fn restart_generation_exhaustion_cancels_the_data_plane() {
+        let router = test_router(8);
+        router.assign_tokens(&[tok("1")]);
+        router.ledger.lock().shards[0].restart_generation = u64::MAX;
+
+        router.restart_tokens(&[tok("1")]);
+
+        assert!(router.deps.shutdown.is_cancelled());
         drop(router);
     }
 

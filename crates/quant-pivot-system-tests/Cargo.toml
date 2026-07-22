@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 quant-pivot-allocator = { workspace = true }
+quant-pivot-compute = { workspace = true }
 quant-pivot-api = { workspace = true }
 quant-pivot-core = { workspace = true }
 quant-pivot-error = { workspace = true, features = ["storage"] }
@@ -18,7 +19,15 @@ quant-pivot-research = { workspace = true, default-features = false, features = 
 quant-pivot-storage = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
+blake3 = { workspace = true }
 chrono = { workspace = true, features = ["serde"] }
+clap = { workspace = true, features = ["derive"] }
+clickhouse = { workspace = true }
+flume = { workspace = true }
+futures-util = { workspace = true }
+hdrhistogram = { workspace = true }
+hex = { workspace = true }
+num-traits = { workspace = true }
 prometheus = { workspace = true }
 reqwest = { workspace = true }
 rust_decimal = { workspace = true }
@@ -26,24 +35,24 @@ rust_decimal_macros = { workspace = true }
 sea-orm = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 testcontainers = { workspace = true }
 testcontainers-modules = { workspace = true, features = ["postgres", "redis"] }
+tikv-jemalloc-ctl = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio-tungstenite = { workspace = true }
+tokio-util = { workspace = true, features = ["rt"] }
 toml = { workspace = true }
+tracing = { workspace = true }
 uuid = { workspace = true, features = ["v4", "v5", "v7"] }
 wiremock = { workspace = true }
 
 [dev-dependencies]
 bitcode = { workspace = true }
-blake3 = { workspace = true }
 casbin = { workspace = true }
-clickhouse = { workspace = true }
-futures-util = { workspace = true }
 redis = { workspace = true }
 sea-orm-migration = { workspace = true }
 sqlx = { workspace = true }
-tokio-tungstenite = { workspace = true }
-tokio-util = { workspace = true, features = ["rt"] }
 url = { workspace = true }
 
 [lints]

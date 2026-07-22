@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
   "crates/quant-pivot-allocator",
+  "crates/quant-pivot-compute",
   "crates/quant-pivot-error",
   "crates/quant-pivot-macros",
   "crates/quant-pivot-models",
@@ -81,10 +82,12 @@ num-traits = "0.2"
 ahash = "0.8"
 bytestring = "1"
 criterion = { version = "0.8", features = ["html_reports", "async_tokio"] }
+hdrhistogram = "7.5"
 smallvec = "1"
 
 # Process allocator selected for every workspace executable and test harness.
 tikv-jemallocator = "0.7.0"
+tikv-jemalloc-ctl = { version = "0.7.0", features = ["stats", "use_std"] }
 
 # Decimal arithmetic — never use f64 for money
 rust_decimal = { version = "1", features = ["serde-with-str", "maths"] }
@@ -313,6 +316,7 @@ rand = "0.10"
 # ── Internal Crates ──────────────────────────────────────────────────────────
 
 quant-pivot-allocator = { path = "crates/quant-pivot-allocator" }
+quant-pivot-compute = { path = "crates/quant-pivot-compute" }
 quant-pivot-error = { path = "crates/quant-pivot-error" }
 quant-pivot-macros = { path = "crates/quant-pivot-macros" }
 quant-pivot-models = { path = "crates/quant-pivot-models" }

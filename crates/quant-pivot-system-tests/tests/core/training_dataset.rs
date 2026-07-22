@@ -10,6 +10,7 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use quant_pivot_compute::ComputeExecutor;
 use quant_pivot_core::{
     pit::platform::ch_historical::DurablePitSource,
     service::training_dataset::{
@@ -980,6 +981,7 @@ fn service_with_selection_and_linkage(
 ) -> TrainingDatasetService {
     TrainingDatasetService::new(
         TrainingDatasetServiceDeps {
+            compute: Arc::new(ComputeExecutor::new().expect("test compute executor")),
             fact_read,
             catalog_repo: Arc::new(PgCatalogLedgerRepository::new(db.clone())),
             market_repo: Arc::new(PgMarketRepository::new(db.clone())),

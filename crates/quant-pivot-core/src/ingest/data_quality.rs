@@ -178,7 +178,15 @@ impl DataQualityService for BookDataQualityService {
         snapshot.ingest_lag_exceeded = ingest_lag_exceeded;
 
         let mut worst_book_age_ms = 0_u64;
-        for (token, token_id, book) in self.book_store.published_snapshots() {
+        for (token, token_id, last_known) in self.book_store.diagnostic_books() {
+            if last_known.availability.is_err() {
+                snapshot.tally(DataQualityStatus::Insufficient);
+                continue;
+            }
+            let Some(book) = last_known.snapshot else {
+                snapshot.tally(DataQualityStatus::Insufficient);
+                continue;
+            };
             // Prefer the local WS receipt clock (no venue clock skew / reconnect
             // re-write artifacts); fall back to the venue timestamp age.
             let book_age_ms = self

@@ -52,6 +52,7 @@ use quant_pivot_system_tests::{
     support::{
         catalog_fixtures::{make_event, make_market},
         pit::InMemoryDecisionSnapshotSource,
+        publish_fresh_book,
         report_pipeline_harness::EmptyLinkageRepo,
     },
 };
@@ -281,11 +282,11 @@ fn wire_live_book(registry: &MarketRegistry, book_store: &BookStore, catalog: &E
     });
     registry.register_market(market);
     let yes = TokenId::new(catalog.yes_token);
-    let yes = book_store.resolve(&yes).expect("registered YES token");
     let timestamp_ms = u64::try_from(Utc::now().timestamp_millis())
         .expect("test book timestamp must be non-negative");
-    assert!(book_store.publish(
-        yes,
+    publish_fresh_book(
+        book_store,
+        &yes,
         BookSnapshot::new(
             Arc::from([BookLevel::from_decimal_unchecked(
                 Price::new(Decimal::new(49, 2)),
@@ -299,9 +300,7 @@ fn wire_live_book(registry: &MarketRegistry, book_store: &BookStore, catalog: &E
             1,
         ),
         1,
-        1,
-        None,
-    ));
+    );
 }
 
 pub async fn provider_selector_mapper_persist_round_trip() {

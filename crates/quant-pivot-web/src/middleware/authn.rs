@@ -74,6 +74,7 @@ pub async fn authn<B: MessageBody>(
         .list_roles_for_user(&user_id)
         .await
         .map_err(WebError::from)?;
+    drop(state);
 
     {
         let mut extensions = req.extensions_mut();

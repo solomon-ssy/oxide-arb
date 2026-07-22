@@ -10,17 +10,20 @@ pub mod session;
 
 use std::{
     hash::Hash,
+    ops::Deref,
     sync::{
         Arc,
         atomic::{AtomicU64, AtomicUsize, Ordering},
     },
+    time::{Duration, Instant},
 };
 
 use ahash::{AHashMap, AHashSet};
 use arc_swap::ArcSwap;
 use bytestring::ByteString;
 use flume::Receiver as FlumeReceiver;
-use prometheus::IntCounter;
+use parking_lot::Mutex;
+use prometheus::{GaugeVec, Histogram, IntCounter, IntGauge, IntGaugeVec};
 use quant_pivot_models::{
     domain::{
         runtime::CoreEvent,
@@ -29,13 +32,22 @@ use quant_pivot_models::{
     types::{MarketId, UserId},
 };
 use smallvec::SmallVec;
-use tokio::sync::{
-    mpsc::{self, Receiver, Sender, error::TrySendError},
-    oneshot::{self, Sender as OneshotSender},
+use tokio::{
+    sync::{
+        Notify, OwnedSemaphorePermit, Semaphore,
+        mpsc::{self, Receiver, Sender, error::TrySendError},
+        oneshot::{self, Sender as OneshotSender},
+    },
+    time::timeout,
 };
 use tokio_util::sync::CancellationToken;
 
-const HUB_COMMAND_CAPACITY: usize = 16_384;
+const CONTROL_TIMEOUT: Duration = Duration::from_millis(100);
+const HUB_CONTROL_CAPACITY: usize = 1_024;
+const HUB_RELIABLE_CAPACITY: usize = 2_048;
+const HUB_BEST_EFFORT_TOPIC_CAPACITY: usize = 8_192;
+const HUB_FRAME_BUDGET_BYTES: usize = 64 * 1_024 * 1_024;
+const HUB_MAX_FRAME_BYTES: usize = 1_024 * 1_024;
 
 /// Per-connection identifier within the process-local session hub.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -72,7 +84,7 @@ impl DeliveryClass {
 
 /// Immutable registration payload transferred from one connection task.
 pub struct SessionRegistration {
-    pub outbound: Sender<ByteString>,
+    pub outbound: Sender<SharedFrame>,
     pub subject: UserId,
     pub family_id: String,
     pub can_read_system: bool,
@@ -81,7 +93,7 @@ pub struct SessionRegistration {
 
 /// Mutable state owned exclusively by [`SessionHub`].
 pub struct SessionRecord {
-    pub outbound: Sender<ByteString>,
+    pub outbound: Sender<SharedFrame>,
     pub cancellation: CancellationToken,
     subject: UserId,
     family_id: String,
@@ -92,11 +104,69 @@ pub struct SessionRecord {
 #[derive(Clone)]
 pub struct SessionHubMetrics {
     pub best_effort_dropped: IntCounter,
+    pub best_effort_coalesced: IntCounter,
     pub reliable_disconnects: IntCounter,
+    pub control_timeouts: IntCounter,
+    pub control_latency_seconds: Histogram,
+    pub queue_depth: IntGaugeVec,
+    pub queue_oldest_age_seconds: GaugeVec,
+    pub frame_bytes: IntGauge,
 }
 
-/// Commands accepted by the single-writer hub.
-pub enum SessionHubCommand {
+/// One encoded frame charged exactly once against the process-wide byte
+/// budget. Every outbox clone shares both allocation and byte permit.
+#[derive(Clone)]
+pub struct SharedFrame(Arc<SharedFrameInner>);
+
+struct SharedFrameInner {
+    text: ByteString,
+    _byte_permit: OwnedSemaphorePermit,
+    frame_bytes: IntGauge,
+}
+
+impl SharedFrame {
+    fn new(text: ByteString, byte_permit: OwnedSemaphorePermit, frame_bytes: IntGauge) -> Self {
+        frame_bytes.add(i64::try_from(text.len()).unwrap_or(i64::MAX));
+        Self(Arc::new(SharedFrameInner {
+            text,
+            _byte_permit: byte_permit,
+            frame_bytes,
+        }))
+    }
+
+    #[must_use]
+    pub fn text(&self) -> &ByteString {
+        &self.0.text
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.0.text.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.text.is_empty()
+    }
+}
+
+impl Deref for SharedFrame {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.0.text.as_ref()
+    }
+}
+
+impl Drop for SharedFrameInner {
+    fn drop(&mut self) {
+        self.frame_bytes
+            .sub(i64::try_from(self.text.len()).unwrap_or(i64::MAX));
+    }
+}
+
+/// Security and subscription commands accepted by the high-priority lane.
+pub enum SessionControlCommand {
     Register {
         session_id: SessionId,
         registration: SessionRegistration,
@@ -127,17 +197,43 @@ pub enum SessionHubCommand {
     CloseAll {
         completion: OneshotSender<bool>,
     },
-    Fanout {
+    DisconnectTopic {
         key: SubscriptionKey,
-        frame: ByteString,
-        delivery: DeliveryClass,
+        completion: OneshotSender<bool>,
     },
+}
+
+struct ReliableFanout {
+    key: SubscriptionKey,
+    frame: SharedFrame,
+    enqueued_at: Instant,
+}
+
+struct PendingBestEffort {
+    frame: SharedFrame,
+    enqueued_at: Instant,
+}
+
+struct BestEffortState {
+    pending: AHashMap<SubscriptionKey, PendingBestEffort>,
+}
+
+struct BestEffortCoalescer {
+    state: Mutex<BestEffortState>,
+    notify: Notify,
+    capacity: usize,
+    metrics: SessionHubMetrics,
 }
 
 /// Cloneable command/read handle shared by HTTP and connection tasks.
 #[derive(Clone)]
 pub struct SessionRegistry {
-    commands: Sender<SessionHubCommand>,
+    control: Sender<SessionControlCommand>,
+    reliable: Sender<ReliableFanout>,
+    best_effort: Arc<BestEffortCoalescer>,
+    frame_budget: Arc<Semaphore>,
+    fail_closed: CancellationToken,
+    metrics: SessionHubMetrics,
     next_id: Arc<AtomicU64>,
     session_count: Arc<AtomicUsize>,
     watched_markets: Arc<ArcSwap<AHashSet<MarketId>>>,
@@ -147,24 +243,58 @@ impl SessionRegistry {
     /// Create the shared handle and its unique single-writer actor.
     #[must_use]
     pub fn new(metrics: SessionHubMetrics) -> (Self, SessionHub) {
-        let (commands, receiver) = mpsc::channel(HUB_COMMAND_CAPACITY);
+        let (control, control_rx) = mpsc::channel(HUB_CONTROL_CAPACITY);
+        let (reliable, reliable_rx) = mpsc::channel(HUB_RELIABLE_CAPACITY);
         let session_count = Arc::new(AtomicUsize::new(0));
         let watched_markets = Arc::new(ArcSwap::from_pointee(AHashSet::new()));
+        let fail_closed = CancellationToken::new();
+        let best_effort = Arc::new(BestEffortCoalescer {
+            state: Mutex::new(BestEffortState {
+                pending: AHashMap::new(),
+            }),
+            notify: Notify::new(),
+            capacity: HUB_BEST_EFFORT_TOPIC_CAPACITY,
+            metrics: metrics.clone(),
+        });
         (
             Self {
-                commands,
+                control,
+                reliable,
+                best_effort: Arc::clone(&best_effort),
+                frame_budget: Arc::new(Semaphore::new(HUB_FRAME_BUDGET_BYTES)),
+                fail_closed: fail_closed.clone(),
+                metrics: metrics.clone(),
                 next_id: Arc::new(AtomicU64::new(1)),
                 session_count: Arc::clone(&session_count),
                 watched_markets: Arc::clone(&watched_markets),
             },
-            SessionHub::new(receiver, session_count, watched_markets, metrics),
+            SessionHub::new(
+                control_rx,
+                reliable_rx,
+                best_effort,
+                session_count,
+                watched_markets,
+                metrics,
+                fail_closed,
+            ),
         )
     }
 
     /// Register a session only after the actor has installed all reverse indexes.
     pub async fn register(&self, registration: SessionRegistration) -> Option<SessionId> {
-        let session_id = SessionId(self.next_id.fetch_add(1, Ordering::Relaxed));
-        self.confirm(|completion| SessionHubCommand::Register {
+        let session_id =
+            match self
+                .next_id
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                    current.checked_add(1)
+                }) {
+                Ok(id) if id != 0 => SessionId(id),
+                Ok(_) | Err(_) => {
+                    self.fail_closed.cancel();
+                    return None;
+                }
+            };
+        self.confirm(|completion| SessionControlCommand::Register {
             session_id,
             registration,
             completion,
@@ -175,7 +305,7 @@ impl SessionRegistry {
 
     /// Remove one disconnected session and all of its topic memberships.
     pub async fn deregister(&self, session_id: SessionId) {
-        self.confirm(|completion| SessionHubCommand::Deregister {
+        self.confirm(|completion| SessionControlCommand::Deregister {
             session_id,
             completion,
         })
@@ -184,7 +314,7 @@ impl SessionRegistry {
 
     /// Add one exact channel/scope subscription.
     pub async fn subscribe(&self, session_id: SessionId, key: SubscriptionKey) -> bool {
-        self.confirm(|completion| SessionHubCommand::Subscribe {
+        self.confirm(|completion| SessionControlCommand::Subscribe {
             session_id,
             key,
             completion,
@@ -194,7 +324,7 @@ impl SessionRegistry {
 
     /// Remove one exact channel/scope subscription.
     pub async fn unsubscribe(&self, session_id: SessionId, key: SubscriptionKey) -> bool {
-        self.confirm(|completion| SessionHubCommand::Unsubscribe {
+        self.confirm(|completion| SessionControlCommand::Unsubscribe {
             session_id,
             key,
             completion,
@@ -204,7 +334,7 @@ impl SessionRegistry {
 
     /// Close every live socket owned by one user.
     pub async fn close_subject(&self, subject: UserId) {
-        self.confirm(|completion| SessionHubCommand::CloseSubject {
+        self.confirm(|completion| SessionControlCommand::CloseSubject {
             subject,
             completion,
         })
@@ -213,7 +343,7 @@ impl SessionRegistry {
 
     /// Close every live socket issued from one refresh-session family.
     pub async fn close_family(&self, family_id: &str) {
-        self.confirm(|completion| SessionHubCommand::CloseFamily {
+        self.confirm(|completion| SessionControlCommand::CloseFamily {
             family_id: family_id.to_owned(),
             completion,
         })
@@ -222,7 +352,7 @@ impl SessionRegistry {
 
     /// Close all sockets after a global RBAC policy revision.
     pub async fn close_all(&self) {
-        self.confirm(|completion| SessionHubCommand::CloseAll { completion })
+        self.confirm(|completion| SessionControlCommand::CloseAll { completion })
             .await;
     }
 
@@ -233,14 +363,39 @@ impl SessionRegistry {
         frame: ByteString,
         delivery: DeliveryClass,
     ) -> bool {
-        self.commands
-            .send(SessionHubCommand::Fanout {
-                key,
-                frame,
-                delivery,
-            })
-            .await
-            .is_ok()
+        if self.fail_closed.is_cancelled() {
+            return false;
+        }
+        let Some(frame) = self.charge_frame(frame, delivery).await else {
+            return match delivery {
+                DeliveryClass::BestEffort => true,
+                DeliveryClass::Reliable => self.disconnect_topic(key).await,
+            };
+        };
+        match delivery {
+            DeliveryClass::BestEffort => {
+                self.best_effort.push(key, frame);
+                true
+            }
+            DeliveryClass::Reliable => {
+                let command = ReliableFanout {
+                    key,
+                    frame,
+                    enqueued_at: Instant::now(),
+                };
+                match self.reliable.try_send(command) {
+                    Ok(()) => {
+                        self.update_queue_depth("reliable", &self.reliable);
+                        true
+                    }
+                    Err(TrySendError::Full(command)) => self.disconnect_topic(command.key).await,
+                    Err(TrySendError::Closed(_)) => {
+                        self.fail_closed.cancel();
+                        false
+                    }
+                }
+            }
+        }
     }
 
     /// Number of sessions installed in the actor (diagnostics only).
@@ -255,21 +410,149 @@ impl SessionRegistry {
         read(snapshot.as_ref())
     }
 
+    #[must_use]
+    pub fn fail_closed_token(&self) -> CancellationToken {
+        self.fail_closed.clone()
+    }
+
+    async fn charge_frame(
+        &self,
+        frame: ByteString,
+        delivery: DeliveryClass,
+    ) -> Option<SharedFrame> {
+        if frame.len() > HUB_MAX_FRAME_BYTES {
+            if delivery == DeliveryClass::BestEffort {
+                self.metrics.best_effort_dropped.inc();
+            }
+            return None;
+        }
+        let permits = u32::try_from(frame.len()).ok()?;
+        let permit = match delivery {
+            DeliveryClass::BestEffort => Arc::clone(&self.frame_budget)
+                .try_acquire_many_owned(permits)
+                .ok(),
+            DeliveryClass::Reliable => timeout(
+                CONTROL_TIMEOUT,
+                Arc::clone(&self.frame_budget).acquire_many_owned(permits),
+            )
+            .await
+            .ok()
+            .and_then(Result::ok),
+        };
+        let Some(permit) = permit else {
+            if delivery == DeliveryClass::BestEffort {
+                self.metrics.best_effort_dropped.inc();
+            }
+            return None;
+        };
+        Some(SharedFrame::new(
+            frame,
+            permit,
+            self.metrics.frame_bytes.clone(),
+        ))
+    }
+
+    async fn disconnect_topic(&self, key: SubscriptionKey) -> bool {
+        self.confirm(|completion| SessionControlCommand::DisconnectTopic { key, completion })
+            .await
+    }
+
+    fn update_queue_depth<T>(&self, lane: &str, sender: &Sender<T>) {
+        self.metrics.queue_depth.with_label_values(&[lane]).set(
+            i64::try_from(sender.max_capacity().saturating_sub(sender.capacity()))
+                .unwrap_or(i64::MAX),
+        );
+    }
+
     async fn confirm(
         &self,
-        command: impl FnOnce(OneshotSender<bool>) -> SessionHubCommand,
+        command: impl FnOnce(OneshotSender<bool>) -> SessionControlCommand,
     ) -> bool {
-        let (completion, applied) = oneshot::channel();
-        if self.commands.send(command(completion)).await.is_err() {
+        if self.fail_closed.is_cancelled() {
             return false;
         }
-        applied.await.unwrap_or(false)
+        let (completion, applied) = oneshot::channel();
+        let started_at = Instant::now();
+        let confirmed = timeout(CONTROL_TIMEOUT, async {
+            self.control
+                .send(command(completion))
+                .await
+                .map_err(|_| ())?;
+            self.update_queue_depth("control", &self.control);
+            applied.await.map_err(|_| ())
+        })
+        .await;
+        self.metrics
+            .control_latency_seconds
+            .observe(started_at.elapsed().as_secs_f64());
+        self.metrics
+            .queue_oldest_age_seconds
+            .with_label_values(&["control"])
+            .set(started_at.elapsed().as_secs_f64());
+        if let Ok(Ok(applied)) = confirmed {
+            applied
+        } else {
+            self.metrics.control_timeouts.inc();
+            self.fail_closed.cancel();
+            false
+        }
+    }
+}
+
+impl BestEffortCoalescer {
+    fn push(&self, key: SubscriptionKey, frame: SharedFrame) {
+        let mut state = self.state.lock();
+        if state.pending.contains_key(&key) {
+            self.metrics.best_effort_coalesced.inc();
+        } else if state.pending.len() >= self.capacity {
+            self.metrics.best_effort_dropped.inc();
+            return;
+        }
+        state.pending.insert(
+            key,
+            PendingBestEffort {
+                frame,
+                enqueued_at: Instant::now(),
+            },
+        );
+        self.metrics
+            .queue_depth
+            .with_label_values(&["best_effort"])
+            .set(i64::try_from(state.pending.len()).unwrap_or(i64::MAX));
+        drop(state);
+        self.notify.notify_one();
+    }
+
+    fn pop(&self) -> Option<(SubscriptionKey, PendingBestEffort)> {
+        let mut state = self.state.lock();
+        let key = state.pending.keys().next()?.clone();
+        let pending = state.pending.remove(&key)?;
+        self.metrics
+            .queue_depth
+            .with_label_values(&["best_effort"])
+            .set(i64::try_from(state.pending.len()).unwrap_or(i64::MAX));
+        let oldest = state
+            .pending
+            .values()
+            .map(|entry| entry.enqueued_at.elapsed().as_secs_f64())
+            .fold(0.0_f64, f64::max);
+        self.metrics
+            .queue_oldest_age_seconds
+            .with_label_values(&["best_effort"])
+            .set(oldest);
+        if !state.pending.is_empty() {
+            self.notify.notify_one();
+        }
+        Some((key, pending))
     }
 }
 
 /// Single writer for every WebSocket session and reverse index.
 pub struct SessionHub {
-    commands: Receiver<SessionHubCommand>,
+    control: Receiver<SessionControlCommand>,
+    reliable: Receiver<ReliableFanout>,
+    best_effort: Arc<BestEffortCoalescer>,
+    fail_closed: CancellationToken,
     sessions: AHashMap<SessionId, SessionRecord>,
     topic_subscribers: AHashMap<SubscriptionKey, AHashSet<SessionId>>,
     subject_sessions: AHashMap<UserId, AHashSet<SessionId>>,
@@ -283,13 +566,19 @@ pub struct SessionHub {
 
 impl SessionHub {
     fn new(
-        commands: Receiver<SessionHubCommand>,
+        control: Receiver<SessionControlCommand>,
+        reliable: Receiver<ReliableFanout>,
+        best_effort: Arc<BestEffortCoalescer>,
         session_count: Arc<AtomicUsize>,
         watched_markets: Arc<ArcSwap<AHashSet<MarketId>>>,
         metrics: SessionHubMetrics,
+        fail_closed: CancellationToken,
     ) -> Self {
         Self {
-            commands,
+            control,
+            reliable,
+            best_effort,
+            fail_closed,
             sessions: AHashMap::new(),
             topic_subscribers: AHashMap::new(),
             subject_sessions: AHashMap::new(),
@@ -306,26 +595,61 @@ impl SessionHub {
     pub async fn run(mut self, shutdown: CancellationToken) {
         loop {
             tokio::select! {
+                biased;
+
                 () = shutdown.cancelled() => {
                     self.close_all_sessions();
                     tracing::info!("ws session hub shutting down");
                     return;
                 }
-                command = self.commands.recv() => {
+                () = self.fail_closed.cancelled() => {
+                    self.close_all_sessions();
+                    tracing::error!("ws session hub entered fail-closed cancellation");
+                    return;
+                }
+                command = self.control.recv() => {
                     let Some(command) = command else {
                         self.close_all_sessions();
-                        tracing::info!("ws session hub command queue closed");
+                        self.fail_closed.cancel();
+                        tracing::error!("ws session hub control lane closed");
                         return;
                     };
-                    self.apply(command);
+                    self.apply_control(command);
+                    self.update_receiver_depth("control", &self.control);
+                }
+                command = self.reliable.recv() => {
+                    let Some(command) = command else {
+                        self.close_all_sessions();
+                        self.fail_closed.cancel();
+                        tracing::error!("ws session hub reliable lane closed");
+                        return;
+                    };
+                    self.metrics
+                        .queue_oldest_age_seconds
+                        .with_label_values(&["reliable"])
+                        .set(command.enqueued_at.elapsed().as_secs_f64());
+                    self.fanout(&command.key, &command.frame, DeliveryClass::Reliable);
+                    self.update_receiver_depth("reliable", &self.reliable);
+                }
+                () = self.best_effort.notify.notified() => {
+                    if let Some((key, pending)) = self.best_effort.pop() {
+                        self.fanout(&key, &pending.frame, DeliveryClass::BestEffort);
+                    }
                 }
             }
         }
     }
 
-    fn apply(&mut self, command: SessionHubCommand) {
+    fn update_receiver_depth<T>(&self, lane: &str, receiver: &Receiver<T>) {
+        self.metrics
+            .queue_depth
+            .with_label_values(&[lane])
+            .set(i64::try_from(receiver.len()).unwrap_or(i64::MAX));
+    }
+
+    fn apply_control(&mut self, command: SessionControlCommand) {
         match command {
-            SessionHubCommand::Register {
+            SessionControlCommand::Register {
                 session_id,
                 registration,
                 completion,
@@ -333,14 +657,14 @@ impl SessionHub {
                 let applied = self.register(session_id, registration);
                 let _ = completion.send(applied);
             }
-            SessionHubCommand::Deregister {
+            SessionControlCommand::Deregister {
                 session_id,
                 completion,
             } => {
                 self.remove_session(session_id, false);
                 let _ = completion.send(true);
             }
-            SessionHubCommand::Subscribe {
+            SessionControlCommand::Subscribe {
                 session_id,
                 key,
                 completion,
@@ -348,7 +672,7 @@ impl SessionHub {
                 let applied = self.subscribe(session_id, key);
                 let _ = completion.send(applied);
             }
-            SessionHubCommand::Unsubscribe {
+            SessionControlCommand::Unsubscribe {
                 session_id,
                 key,
                 completion,
@@ -356,29 +680,28 @@ impl SessionHub {
                 let applied = self.unsubscribe(session_id, &key);
                 let _ = completion.send(applied);
             }
-            SessionHubCommand::CloseSubject {
+            SessionControlCommand::CloseSubject {
                 subject,
                 completion,
             } => {
                 self.close_subject(subject);
                 let _ = completion.send(true);
             }
-            SessionHubCommand::CloseFamily {
+            SessionControlCommand::CloseFamily {
                 family_id,
                 completion,
             } => {
                 self.close_family(&family_id);
                 let _ = completion.send(true);
             }
-            SessionHubCommand::CloseAll { completion } => {
+            SessionControlCommand::CloseAll { completion } => {
                 self.close_all_sessions();
                 let _ = completion.send(true);
             }
-            SessionHubCommand::Fanout {
-                key,
-                frame,
-                delivery,
-            } => self.fanout(&key, &frame, delivery),
+            SessionControlCommand::DisconnectTopic { key, completion } => {
+                self.disconnect_topic(&key);
+                let _ = completion.send(true);
+            }
         }
     }
 
@@ -459,7 +782,7 @@ impl SessionHub {
         }
     }
 
-    fn fanout(&mut self, key: &SubscriptionKey, frame: &ByteString, delivery: DeliveryClass) {
+    fn fanout(&mut self, key: &SubscriptionKey, frame: &SharedFrame, delivery: DeliveryClass) {
         let mut disconnected = SmallVec::<[SessionId; 8]>::new();
         {
             let recipients = if matches!(
@@ -494,6 +817,28 @@ impl SessionHub {
         for session_id in disconnected {
             self.remove_session(session_id, false);
         }
+    }
+
+    fn disconnect_topic(&mut self, key: &SubscriptionKey) -> usize {
+        let session_ids = if matches!(
+            key.channel,
+            WsChannel::SystemStatus | WsChannel::SystemAlert
+        ) {
+            self.system_readers.iter().copied().collect::<Vec<_>>()
+        } else {
+            self.topic_subscribers
+                .get(key)
+                .map(|sessions| sessions.iter().copied().collect())
+                .unwrap_or_default()
+        };
+        let disconnected = session_ids.len();
+        self.metrics
+            .reliable_disconnects
+            .inc_by(u64::try_from(disconnected).unwrap_or(u64::MAX));
+        for session_id in session_ids {
+            self.remove_session(session_id, true);
+        }
+        disconnected
     }
 
     fn remove_session(&mut self, session_id: SessionId, cancel: bool) {
@@ -634,20 +979,27 @@ pub async fn spawn_ws_broadcaster(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::{
+        sync::atomic::{AtomicU64, Ordering},
+        time::Instant,
+    };
 
     use bytestring::ByteString;
-    use prometheus::IntCounter;
+    use prometheus::{GaugeVec, Histogram, HistogramOpts, IntCounter, IntGauge, IntGaugeVec, Opts};
     use quant_pivot_models::{
         domain::ws::{SubscriptionKey, WsChannel},
         types::{MarketId, UserId},
     };
-    use tokio::sync::mpsc::{self, Receiver};
+    use tokio::{
+        sync::mpsc::{self, Receiver},
+        time::timeout,
+    };
     use tokio_util::sync::CancellationToken;
     use uuid::Uuid;
 
     use super::{
-        DeliveryClass, SessionHub, SessionHubMetrics, SessionRegistration, SessionRegistry,
+        CONTROL_TIMEOUT, DeliveryClass, HUB_MAX_FRAME_BYTES, HUB_RELIABLE_CAPACITY, SessionHub,
+        SessionHubMetrics, SessionId, SessionRegistration, SessionRegistry, SharedFrame,
     };
 
     static METRIC_ID: AtomicU64 = AtomicU64::new(1);
@@ -665,11 +1017,35 @@ mod tests {
                 "test",
             )
             .expect("best-effort counter"),
+            best_effort_coalesced: IntCounter::new(
+                format!("test_ws_best_effort_coalesced_{id}"),
+                "test",
+            )
+            .expect("coalesced counter"),
             reliable_disconnects: IntCounter::new(
                 format!("test_ws_reliable_disconnects_{id}"),
                 "test",
             )
             .expect("reliable counter"),
+            control_timeouts: IntCounter::new(format!("test_ws_control_timeouts_{id}"), "test")
+                .expect("timeout counter"),
+            control_latency_seconds: Histogram::with_opts(HistogramOpts::new(
+                format!("test_ws_control_latency_{id}"),
+                "test",
+            ))
+            .expect("control latency"),
+            queue_depth: IntGaugeVec::new(
+                Opts::new(format!("test_ws_queue_depth_{id}"), "test"),
+                &["lane"],
+            )
+            .expect("queue depth"),
+            queue_oldest_age_seconds: GaugeVec::new(
+                Opts::new(format!("test_ws_queue_oldest_age_{id}"), "test"),
+                &["lane"],
+            )
+            .expect("queue age"),
+            frame_bytes: IntGauge::new(format!("test_ws_frame_bytes_{id}"), "test")
+                .expect("frame bytes"),
         };
         let (registry, hub) = SessionRegistry::new(metrics.clone());
         (registry, hub, metrics, CancellationToken::new())
@@ -680,7 +1056,11 @@ mod tests {
         subject: UserId,
         family_id: &str,
         can_read_system: bool,
-    ) -> (SessionRegistration, Receiver<ByteString>, CancellationToken) {
+    ) -> (
+        SessionRegistration,
+        Receiver<SharedFrame>,
+        CancellationToken,
+    ) {
         let (outbound, receiver) = mpsc::channel(capacity);
         let cancellation = CancellationToken::new();
         (
@@ -832,6 +1212,13 @@ mod tests {
                 )
                 .await
         );
+        timeout(CONTROL_TIMEOUT, async {
+            while !registry.best_effort.state.lock().pending.is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("first best-effort dispatch");
         assert!(
             registry
                 .fanout(
@@ -841,7 +1228,13 @@ mod tests {
                 )
                 .await
         );
-        assert!(registry.subscribe(session_id, key.clone()).await, "barrier");
+        timeout(CONTROL_TIMEOUT, async {
+            while metrics.best_effort_dropped.get() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("best-effort drop observed");
         assert_eq!(metrics.best_effort_dropped.get(), 1);
         assert!(!cancellation.is_cancelled());
         assert_eq!(receiver.recv().await.as_deref(), Some("state-1"));
@@ -855,6 +1248,13 @@ mod tests {
                 )
                 .await
         );
+        timeout(CONTROL_TIMEOUT, async {
+            while receiver.is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("first reliable dispatch");
         assert!(
             registry
                 .fanout(
@@ -864,11 +1264,185 @@ mod tests {
                 )
                 .await
         );
-        registry.close_family("unrelated").await;
+        timeout(CONTROL_TIMEOUT, cancellation.cancelled())
+            .await
+            .expect("reliable overflow disconnect");
         assert!(cancellation.is_cancelled());
         assert_eq!(metrics.reliable_disconnects.get(), 1);
         assert_eq!(registry.session_count(), 0);
         shutdown.cancel();
         task.await.expect("hub task");
+    }
+
+    #[tokio::test]
+    async fn best_effort_lane_keeps_only_the_latest_frame_per_topic() {
+        let (registry, _hub, metrics, _shutdown) = test_hub();
+        let key = book("0xlatest");
+        assert!(
+            registry
+                .fanout(
+                    key.clone(),
+                    ByteString::from_static("state-1"),
+                    DeliveryClass::BestEffort,
+                )
+                .await
+        );
+        assert!(
+            registry
+                .fanout(
+                    key.clone(),
+                    ByteString::from_static("state-2"),
+                    DeliveryClass::BestEffort,
+                )
+                .await
+        );
+
+        let (pending_key, pending) = registry.best_effort.pop().expect("pending latest frame");
+        assert_eq!(pending_key, key);
+        assert_eq!(&pending.frame.text()[..], "state-2");
+        assert_eq!(metrics.best_effort_coalesced.get(), 1);
+        assert!(registry.best_effort.pop().is_none());
+    }
+
+    #[tokio::test]
+    async fn missing_control_ack_cancels_every_socket_fail_closed() {
+        let (registry, _hub, metrics, _shutdown) = test_hub();
+
+        registry.close_all().await;
+
+        assert!(registry.fail_closed_token().is_cancelled());
+        assert_eq!(metrics.control_timeouts.get(), 1);
+    }
+
+    #[tokio::test]
+    async fn session_id_exhaustion_is_fail_closed() {
+        let (registry, _hub, _metrics, _shutdown) = test_hub();
+        registry.next_id.store(u64::MAX, Ordering::Relaxed);
+        let (registration, _receiver, _cancellation) =
+            registration(1, user(1), "id-overflow", false);
+
+        assert!(registry.register(registration).await.is_none());
+        assert!(registry.fail_closed_token().is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn oversized_best_effort_frame_is_rejected_before_queueing() {
+        let (registry, _hub, metrics, _shutdown) = test_hub();
+        let oversized = ByteString::from("x".repeat(HUB_MAX_FRAME_BYTES + 1));
+
+        assert!(
+            registry
+                .fanout(book("0xoversized"), oversized, DeliveryClass::BestEffort,)
+                .await
+        );
+
+        assert_eq!(metrics.best_effort_dropped.get(), 1);
+        assert_eq!(metrics.frame_bytes.get(), 0);
+        assert!(registry.best_effort.pop().is_none());
+    }
+
+    #[tokio::test]
+    async fn reliable_lane_overflow_disconnects_the_affected_topic() {
+        let (registry, mut hub, metrics, shutdown) = test_hub();
+        let key = book("0xreliable-overflow");
+        let (registration, _receiver, cancellation) =
+            registration(8, user(1), "overflow-family", false);
+        let session_id = SessionId(1);
+        assert!(hub.register(session_id, registration));
+        assert!(hub.subscribe(session_id, key.clone()));
+        for _ in 0..HUB_RELIABLE_CAPACITY {
+            let frame = registry
+                .charge_frame(ByteString::from_static("reliable"), DeliveryClass::Reliable)
+                .await
+                .expect("charged reliable frame");
+            assert!(
+                registry
+                    .reliable
+                    .try_send(super::ReliableFanout {
+                        key: key.clone(),
+                        frame,
+                        enqueued_at: Instant::now(),
+                    })
+                    .is_ok()
+            );
+        }
+        let overflow_registry = registry.clone();
+        let overflow_key = key.clone();
+        let overflow = tokio::spawn(async move {
+            overflow_registry
+                .fanout(
+                    overflow_key,
+                    ByteString::from_static("overflow"),
+                    DeliveryClass::Reliable,
+                )
+                .await
+        });
+        tokio::task::yield_now().await;
+        let task = tokio::spawn(hub.run(shutdown.clone()));
+
+        assert!(overflow.await.expect("overflow task"));
+        assert!(cancellation.is_cancelled());
+        assert_eq!(metrics.reliable_disconnects.get(), 1);
+        shutdown.cancel();
+        task.await.expect("hub overflow task");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ten_thousand_session_fanout_cannot_starve_subject_revoke() {
+        const SESSION_COUNT: usize = 10_000;
+        const SUBSCRIBER_COUNT: usize = 1_000;
+        const FLOOD_EVENTS: usize = 10_000;
+
+        let (registry, hub, _metrics, shutdown) = test_hub();
+        let task = tokio::spawn(hub.run(shutdown.clone()));
+        let topic = book("0xflood");
+        let target_subject = user(1);
+        let mut receivers = Vec::with_capacity(SESSION_COUNT);
+        let mut target_cancellation = None;
+        for index in 0..SESSION_COUNT {
+            let subject = user(u128::try_from(index).unwrap_or(u128::MAX) + 1);
+            let (registration, receiver, cancellation) =
+                registration(4, subject, &format!("family-{index}"), false);
+            let session_id = registry
+                .register(registration)
+                .await
+                .expect("register flood session");
+            if index < SUBSCRIBER_COUNT {
+                assert!(registry.subscribe(session_id, topic.clone()).await);
+            }
+            if index == 0 {
+                target_cancellation = Some(cancellation);
+            }
+            receivers.push(receiver);
+        }
+        for _ in 0..FLOOD_EVENTS {
+            assert!(
+                registry
+                    .fanout(
+                        topic.clone(),
+                        ByteString::from_static("flood"),
+                        DeliveryClass::BestEffort,
+                    )
+                    .await
+            );
+        }
+
+        let started_at = Instant::now();
+        registry.close_subject(target_subject).await;
+        let control_latency = started_at.elapsed();
+
+        assert!(
+            control_latency <= CONTROL_TIMEOUT,
+            "revoke latency {control_latency:?} exceeded {CONTROL_TIMEOUT:?}"
+        );
+        assert!(
+            target_cancellation
+                .as_ref()
+                .is_some_and(CancellationToken::is_cancelled)
+        );
+        assert!(!registry.fail_closed_token().is_cancelled());
+        shutdown.cancel();
+        task.await.expect("hub flood task");
+        drop(receivers);
     }
 }

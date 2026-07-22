@@ -6,8 +6,8 @@
 use std::sync::Arc;
 
 use prometheus::{
-    Encoder, Gauge, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec,
-    Opts, Registry, TextEncoder,
+    Encoder, Gauge, GaugeVec, Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec,
+    IntGauge, IntGaugeVec, Opts, Registry, TextEncoder,
 };
 use quant_pivot_storage::write::AsyncWriterObservability;
 
@@ -70,6 +70,24 @@ macro_rules! register_gauge_vec {
     }};
 }
 
+macro_rules! register_gauge_float_vec {
+    ($registry:expr, $name:expr, $help:expr, $labels:expr) => {{
+        let gauge_vec = GaugeVec::new(Opts::new($name, $help), $labels).unwrap();
+        $registry.register(Box::new(gauge_vec.clone())).unwrap();
+        gauge_vec
+    }};
+}
+
+macro_rules! register_histogram {
+    ($registry:expr, $name:expr, $help:expr, $buckets:expr) => {{
+        let histogram =
+            Histogram::with_opts(HistogramOpts::new($name, $help).buckets($buckets.to_vec()))
+                .unwrap();
+        $registry.register(Box::new(histogram.clone())).unwrap();
+        histogram
+    }};
+}
+
 /// Lag buckets in seconds for fact ingest histograms (1 ms … 60 s).
 const FACT_LAG_BUCKETS_SECS: &[f64] = &[
     0.001, 0.005, 0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0,
@@ -90,12 +108,19 @@ pub struct MetricsHub {
     pub price_changes_applied: IntCounter,
     pub ws_session_backpressure_invalidations: IntCounter,
     pub ws_fanout_best_effort_dropped: IntCounter,
+    pub ws_fanout_best_effort_coalesced: IntCounter,
     pub ws_fanout_reliable_disconnects: IntCounter,
+    pub ws_hub_control_timeouts: IntCounter,
+    pub ws_hub_control_latency_seconds: Histogram,
+    pub ws_hub_queue_depth: IntGaugeVec,
+    pub ws_hub_queue_oldest_age_seconds: GaugeVec,
+    pub ws_hub_frame_bytes: IntGauge,
     pub book_apply_backpressure_invalidations: IntCounter,
     pub markets_resolved_ws: IntCounter,
     pub shard_status_changes: IntCounter,
     pub ws_shard_connected: IntGaugeVec,
     pub book_store_token_count: IntGauge,
+    pub mutable_book_count: IntGauge,
 
     // ── Gamma catalog sync ──────────────────────────────────────────────
     pub gamma_sync_duration_ms: IntGauge,
@@ -193,12 +218,19 @@ struct PipelineMetrics {
     price_changes_applied: IntCounter,
     ws_session_backpressure_invalidations: IntCounter,
     ws_fanout_best_effort_dropped: IntCounter,
+    ws_fanout_best_effort_coalesced: IntCounter,
     ws_fanout_reliable_disconnects: IntCounter,
+    ws_hub_control_timeouts: IntCounter,
+    ws_hub_control_latency_seconds: Histogram,
+    ws_hub_queue_depth: IntGaugeVec,
+    ws_hub_queue_oldest_age_seconds: GaugeVec,
+    ws_hub_frame_bytes: IntGauge,
     book_apply_backpressure_invalidations: IntCounter,
     markets_resolved_ws: IntCounter,
     shard_status_changes: IntCounter,
     ws_shard_connected: IntGaugeVec,
     book_store_token_count: IntGauge,
+    mutable_book_count: IntGauge,
 }
 
 struct GammaMetrics {
@@ -293,10 +325,45 @@ fn register_pipeline_metrics(registry: &Registry) -> PipelineMetrics {
             "quant_pivot_ws_fanout_best_effort_dropped_total",
             "Best-effort WebSocket frames dropped for full client queues"
         ),
+        ws_fanout_best_effort_coalesced: register_counter!(
+            registry,
+            "quant_pivot_ws_fanout_best_effort_coalesced_total",
+            "Best-effort WebSocket frames superseded in the latest-value topic coalescer"
+        ),
         ws_fanout_reliable_disconnects: register_counter!(
             registry,
             "quant_pivot_ws_fanout_reliable_disconnects_total",
             "Slow WebSocket clients disconnected before a reliable frame could be queued"
+        ),
+        ws_hub_control_timeouts: register_counter!(
+            registry,
+            "quant_pivot_ws_hub_control_timeouts_total",
+            "SessionHub control commands that exceeded the fail-closed deadline"
+        ),
+        ws_hub_control_latency_seconds: register_histogram!(
+            registry,
+            "quant_pivot_ws_hub_control_latency_seconds",
+            "SessionHub control enqueue-to-ack latency",
+            &[
+                0.0001, 0.00025, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.025, 0.05, 0.1
+            ]
+        ),
+        ws_hub_queue_depth: register_gauge_vec!(
+            registry,
+            "quant_pivot_ws_hub_queue_depth",
+            "Pending SessionHub work by lane",
+            &["lane"]
+        ),
+        ws_hub_queue_oldest_age_seconds: register_gauge_float_vec!(
+            registry,
+            "quant_pivot_ws_hub_queue_oldest_age_seconds",
+            "Oldest observed SessionHub pending age by lane",
+            &["lane"]
+        ),
+        ws_hub_frame_bytes: register_gauge_int!(
+            registry,
+            "quant_pivot_ws_hub_frame_bytes",
+            "Bytes retained by unique shared WebSocket frames"
         ),
         book_apply_backpressure_invalidations: register_counter!(
             registry,
@@ -323,6 +390,11 @@ fn register_pipeline_metrics(registry: &Registry) -> PipelineMetrics {
             registry,
             "quant_pivot_pipeline_book_store_token_count",
             "Tokens tracked in book store"
+        ),
+        mutable_book_count: register_gauge_int!(
+            registry,
+            "quant_pivot_pipeline_mutable_book_count",
+            "Actor-owned mutable order books currently resident"
         ),
     }
 }
@@ -658,12 +730,19 @@ impl MetricsHub {
             price_changes_applied: pipeline.price_changes_applied,
             ws_session_backpressure_invalidations: pipeline.ws_session_backpressure_invalidations,
             ws_fanout_best_effort_dropped: pipeline.ws_fanout_best_effort_dropped,
+            ws_fanout_best_effort_coalesced: pipeline.ws_fanout_best_effort_coalesced,
             ws_fanout_reliable_disconnects: pipeline.ws_fanout_reliable_disconnects,
+            ws_hub_control_timeouts: pipeline.ws_hub_control_timeouts,
+            ws_hub_control_latency_seconds: pipeline.ws_hub_control_latency_seconds,
+            ws_hub_queue_depth: pipeline.ws_hub_queue_depth,
+            ws_hub_queue_oldest_age_seconds: pipeline.ws_hub_queue_oldest_age_seconds,
+            ws_hub_frame_bytes: pipeline.ws_hub_frame_bytes,
             book_apply_backpressure_invalidations: pipeline.book_apply_backpressure_invalidations,
             markets_resolved_ws: pipeline.markets_resolved_ws,
             shard_status_changes: pipeline.shard_status_changes,
             ws_shard_connected: pipeline.ws_shard_connected,
             book_store_token_count: pipeline.book_store_token_count,
+            mutable_book_count: pipeline.mutable_book_count,
             gamma_sync_duration_ms: gamma.gamma_sync_duration_ms,
             gamma_markets_total: gamma.gamma_markets_total,
             gamma_last_sync_success: gamma.gamma_last_sync_success,

@@ -24,14 +24,30 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     app::{AppContext, task_id::TaskId, task_registry::AppRunner},
-    ingest::{book_store::BookStore, market_registry::MarketRegistry},
+    ingest::{
+        book_store::{BookStore, BookUnavailable, LastKnownBook},
+        data_plane_index::TokenFreshness,
+        market_registry::MarketRegistry,
+    },
 };
 
 /// Sampling cadence for watched-market book frames.
 const TICK_INTERVAL: Duration = Duration::from_millis(200);
 
-/// Last emitted `(yes_version, no_version)` pair per watched market.
-type EmittedVersions = HashMap<MarketId, (u64, u64)>;
+type SideEmissionStamp = (u64, Option<TokenFreshness>, Result<(), BookUnavailable>);
+/// Last emitted coherent version/availability pair per watched market.
+type EmittedVersions = HashMap<MarketId, (SideEmissionStamp, SideEmissionStamp)>;
+
+fn emission_stamp(last_known: &LastKnownBook) -> SideEmissionStamp {
+    (
+        last_known
+            .snapshot
+            .as_ref()
+            .map_or(0, |snapshot| snapshot.version),
+        last_known.freshness,
+        last_known.availability,
+    )
+}
 
 /// Samples watched markets from the [`BookStore`] and publishes throttled
 /// [`CoreEvent::MarketBookUpdate`] frames for the WS fanout plane.
@@ -88,11 +104,13 @@ impl BookUpdateCoalescer {
                     continue;
                 };
 
+                let yes_last_known = book_store.load_last_known(pair.yes);
+                let no_last_known = book_store.load_last_known(pair.no);
                 let versions = (
-                    book_store.book_version(pair.yes),
-                    book_store.book_version(pair.no),
+                    emission_stamp(&yes_last_known),
+                    emission_stamp(&no_last_known),
                 );
-                if versions == (0, 0) {
+                if versions.0.0 == 0 && versions.1.0 == 0 && !emitted.contains_key(market_id) {
                     // No published book on either side yet — nothing to emit.
                     continue;
                 }
@@ -103,10 +121,12 @@ impl BookUpdateCoalescer {
                 let view = MarketBookView {
                     market_id: market_id.clone(),
                     yes: book_store
-                        .load_owned(pair.yes)
+                        .load_fresh_owned(pair.yes)
+                        .ok()
                         .map(|snapshot| MarketBookSideView::from_snapshot(yes_token, &snapshot)),
                     no: book_store
-                        .load_owned(pair.no)
+                        .load_fresh_owned(pair.no)
+                        .ok()
                         .map(|snapshot| MarketBookSideView::from_snapshot(no_token, &snapshot)),
                 };
                 events.publish(CoreEvent::MarketBookUpdate {
@@ -163,9 +183,9 @@ mod tests {
 
     use chrono::Utc;
     use flume::Receiver;
-    use prometheus::IntCounter;
     use quant_pivot_models::{
         domain::{
+            data_plane::pipeline::StreamSessionTicket,
             market::{BookLevel, MarketRegistryInfo, TokenInfo, book::BookSnapshot},
             runtime::{CoreEvent, CoreEventPublisher},
             ws::{SubscriptionKey, WsChannel},
@@ -181,6 +201,7 @@ mod tests {
     use rust_decimal_macros::dec;
     use tokio::{sync::mpsc, task::JoinHandle};
     use tokio_util::sync::CancellationToken;
+    use uuid::Uuid;
 
     use super::BookUpdateCoalescer;
     use crate::{
@@ -257,14 +278,21 @@ mod tests {
     fn apply_book(store: &BookStore, token: &str) {
         let level = BookLevel::from_decimal(Price::new(dec!(0.5)), Shares::new(dec!(10)))
             .expect("valid level");
-        let token = store
-            .resolve(&TokenId::new(token))
-            .expect("registered book token");
-        assert!(store.publish(
+        let token_id = TokenId::new(token);
+        let token = store.resolve(&token_id).expect("registered book token");
+        let epoch = u64::try_from(token.index()).expect("token index fits") + 1;
+        let session = StreamSessionTicket::new(Uuid::from_u128(u128::from(epoch)), epoch)
+            .expect("valid session ticket");
+        assert!(
+            store
+                .session_directory()
+                .open(session, Arc::from([token_id]))
+        );
+        assert!(store.publish_snapshot_session(
             token,
             BookSnapshot::new(Arc::from([level]), Arc::from([level]), 1_700_000_000_000, 1,),
             1,
-            1,
+            session,
             None,
         ));
     }
@@ -279,19 +307,24 @@ mod tests {
         JoinHandle<()>,
     ) {
         let data_plane = Arc::new(DataPlane::new());
+        let metrics = Arc::new(MetricsHub::new());
         let book_store = Arc::new(BookStore::new(
             Arc::clone(&data_plane),
-            Arc::new(MetricsHub::new()),
+            Arc::clone(&metrics),
         ));
         let market_registry = Arc::new(MarketRegistry::new(data_plane));
         for id in markets {
             market_registry.register_market(market_info(id));
         }
         let (sessions, hub) = SessionRegistry::new(SessionHubMetrics {
-            best_effort_dropped: IntCounter::new("test_coalescer_ws_dropped", "test")
-                .expect("drop counter"),
-            reliable_disconnects: IntCounter::new("test_coalescer_ws_closed", "test")
-                .expect("disconnect counter"),
+            best_effort_dropped: metrics.ws_fanout_best_effort_dropped.clone(),
+            best_effort_coalesced: metrics.ws_fanout_best_effort_coalesced.clone(),
+            reliable_disconnects: metrics.ws_fanout_reliable_disconnects.clone(),
+            control_timeouts: metrics.ws_hub_control_timeouts.clone(),
+            control_latency_seconds: metrics.ws_hub_control_latency_seconds.clone(),
+            queue_depth: metrics.ws_hub_queue_depth.clone(),
+            queue_oldest_age_seconds: metrics.ws_hub_queue_oldest_age_seconds.clone(),
+            frame_bytes: metrics.ws_hub_frame_bytes.clone(),
         });
         let shutdown = CancellationToken::new();
         let hub_task = tokio::spawn(hub.run(shutdown.clone()));
@@ -349,6 +382,27 @@ mod tests {
         apply_book(&coalescer.book_store, "m1-no");
         assert_eq!(coalescer.tick(), 1, "no-side change re-emits");
         assert_eq!(drain_book_updates(&rx).len(), 2);
+        shutdown.cancel();
+        hub_task.await.expect("hub task");
+    }
+
+    #[tokio::test]
+    async fn invalidation_emits_an_unavailable_tombstone() {
+        let (mut coalescer, rx, shutdown, hub_task) = build(&["m1"], &["m1"]).await;
+        apply_book(&coalescer.book_store, "m1-yes");
+        assert_eq!(coalescer.tick(), 1);
+        let _ = rx.try_recv().expect("baseline update");
+        coalescer
+            .book_store
+            .invalidate_ids(&[TokenId::new("m1-yes")]);
+
+        assert_eq!(coalescer.tick(), 1);
+        let event = rx.try_recv().expect("tombstone update");
+        let CoreEvent::MarketBookUpdate { view, .. } = event else {
+            panic!("expected market book update");
+        };
+        assert!(view.yes.is_none());
+
         shutdown.cancel();
         hub_task.await.expect("hub task");
     }

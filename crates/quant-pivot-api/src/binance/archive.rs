@@ -6,13 +6,11 @@ use std::{
     str::{self, FromStr},
 };
 
-use quant_pivot_error::{QuantError, QuantResult, api::ApiError};
+use quant_pivot_compute::ComputeTask;
+use quant_pivot_error::{QuantResult, api::ApiError};
 use reqwest::Client;
 use sha2::{Digest, Sha256};
-use tokio::{
-    sync::mpsc::{Receiver, Sender},
-    task::JoinHandle,
-};
+use tokio::sync::mpsc::{Receiver, Sender};
 use zip::ZipArchive;
 
 use crate::infra::{http::get_optional_bytes_with_retry, retry::RetryPolicy};
@@ -25,14 +23,11 @@ use crate::infra::{http::get_optional_bytes_with_retry, retry::RetryPolicy};
 /// surfaced after the final successfully decoded batch.
 pub struct BinanceArchiveBatchStream<T> {
     receiver: Receiver<Vec<T>>,
-    decoder: Option<JoinHandle<QuantResult<()>>>,
+    decoder: Option<ComputeTask<()>>,
 }
 
 impl<T> BinanceArchiveBatchStream<T> {
-    pub(super) const fn new(
-        receiver: Receiver<Vec<T>>,
-        decoder: JoinHandle<QuantResult<()>>,
-    ) -> Self {
+    pub(super) const fn new(receiver: Receiver<Vec<T>>, decoder: ComputeTask<()>) -> Self {
         Self {
             receiver,
             decoder: Some(decoder),
@@ -46,9 +41,7 @@ impl<T> BinanceArchiveBatchStream<T> {
         let Some(decoder) = self.decoder.take() else {
             return Ok(None);
         };
-        decoder
-            .await
-            .map_err(|error| QuantError::config(format!("Binance archive decoder: {error}")))??;
+        decoder.join().await?;
         Ok(None)
     }
 }

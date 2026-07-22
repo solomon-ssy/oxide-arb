@@ -63,6 +63,34 @@ pub enum SubscriptionSource {
     Web,
 }
 
+/// Transport ownership that ended after all subscription sources released the
+/// token set. Sessions allocated through `through_epoch` are stale and must
+/// never reactivate retired mutable books.
+#[derive(Debug, Clone)]
+pub struct TransportRetirement {
+    pub tokens: Arc<[TokenId]>,
+    pub through_epoch: u64,
+}
+
+/// Cold-path handoff from transport ownership to the core retirement barrier.
+pub type TransportRetirementHook = Arc<dyn Fn(TransportRetirement) + Send + Sync>;
+
+/// Successful normalized-ingress enqueue observation used by the production
+/// performance harness. `event_count` excludes transport/session control
+/// events so the histogram describes only market-data work.
+pub type IngressEnqueueObserver = Arc<dyn Fn(Duration, usize) + Send + Sync>;
+
+/// Cold-path lifecycle and performance observation hooks supplied by the
+/// composition root. Missing hooks disable only the corresponding observation,
+/// never transport correctness behavior.
+#[derive(Default)]
+pub struct ClobWsManagerHooks {
+    pub on_session_invalidated: Option<WsSessionInvalidationHook>,
+    pub on_book_level_rejected: Option<BookLevelRejectHook>,
+    pub on_transport_retired: Option<TransportRetirementHook>,
+    pub ingress_enqueue_observer: Option<IngressEnqueueObserver>,
+}
+
 /// Per-source desired token sets, used to refcount the transport subscription.
 ///
 /// The underlying transport is subscribed to a token iff **at least one** source
@@ -140,6 +168,12 @@ impl SubscriptionState {
     fn active_tokens(&self) -> HashSet<TokenId> {
         self.engine.union(&self.web).cloned().collect()
     }
+
+    fn owns_all(&self, tokens: &[TokenId]) -> bool {
+        tokens
+            .iter()
+            .all(|token| self.engine.contains(token) || self.web.contains(token))
+    }
 }
 
 /// Upper bound on simultaneous connection establishments across all shards.
@@ -159,6 +193,8 @@ pub struct ClobWsManager {
     last_message_tick: Arc<AtomicU64>,
     subscriptions: Mutex<SubscriptionState>,
     health: Arc<ShardHealthBoard>,
+    session_epoch: Arc<AtomicU64>,
+    on_transport_retired: Option<TransportRetirementHook>,
 }
 
 impl ClobWsManager {
@@ -169,15 +205,21 @@ impl ClobWsManager {
         ws_config: &WebSocketConfig,
         shutdown: CancellationToken,
         token_resolver: Arc<dyn TokenKeyResolver>,
-        on_session_invalidated: Option<WsSessionInvalidationHook>,
-        on_book_level_rejected: Option<BookLevelRejectHook>,
+        hooks: ClobWsManagerHooks,
     ) -> Self {
+        let ClobWsManagerHooks {
+            on_session_invalidated,
+            on_book_level_rejected,
+            on_transport_retired,
+            ingress_enqueue_observer,
+        } = hooks;
         let (output_tx, output_rx) = flume::bounded(INGRESS_MAILBOX_CAPACITY);
         let ingress_budget = Arc::new(Semaphore::new(
             INGRESS_MEMORY_BUDGET_BYTES / INGRESS_PERMIT_BYTES,
         ));
         let message_epoch = Arc::new(Instant::now());
         let last_message_tick = Arc::new(AtomicU64::new(0));
+        let session_epoch = Arc::new(AtomicU64::new(0));
         let health = Arc::new(ShardHealthBoard::default());
         // `[market_data.websocket]` reconnect knobs drive both backoff layers:
         // the shard loop and the SDK-internal reconnect.
@@ -206,9 +248,11 @@ impl ClobWsManager {
                 shutdown,
                 message_epoch: Arc::clone(&message_epoch),
                 last_message_tick: Arc::clone(&last_message_tick),
+                session_epoch: Arc::clone(&session_epoch),
                 token_resolver,
                 on_session_invalidated,
                 on_book_level_rejected,
+                ingress_enqueue_observer,
                 reconnect_policy,
                 sdk_initial_backoff: initial_backoff,
                 sdk_max_backoff: max_backoff,
@@ -225,6 +269,8 @@ impl ClobWsManager {
             last_message_tick,
             subscriptions: Mutex::new(SubscriptionState::default()),
             health,
+            session_epoch,
+            on_transport_retired,
         }
     }
 
@@ -252,6 +298,7 @@ impl ClobWsManager {
         };
         if !gone.is_empty() {
             self.router.remove_tokens(&gone);
+            self.notify_transport_retired(gone);
         }
     }
 
@@ -268,7 +315,18 @@ impl ClobWsManager {
         }
         if !to_unsubscribe.is_empty() {
             self.router.remove_tokens(&to_unsubscribe);
+            self.notify_transport_retired(to_unsubscribe);
         }
+    }
+
+    fn notify_transport_retired(&self, tokens: Vec<TokenId>) {
+        let Some(notify) = &self.on_transport_retired else {
+            return;
+        };
+        notify(TransportRetirement {
+            tokens: Arc::from(tokens),
+            through_epoch: self.session_epoch.load(Ordering::Acquire),
+        });
     }
 
     /// Number of tokens a given source currently holds (diagnostics / tests).
@@ -295,6 +353,14 @@ impl ClobWsManager {
     #[must_use]
     pub fn all_subscribed_tokens(&self) -> HashSet<TokenId> {
         self.subscriptions.lock().active_tokens()
+    }
+
+    /// Verify one physical session scope against the current transport union
+    /// under a single ownership lock.
+    #[must_use]
+    pub fn owns_all_tokens(&self, tokens: &[TokenId]) -> bool {
+        let state = self.subscriptions.lock();
+        state.owns_all(tokens)
     }
 
     /// Returns the unified event receiver for all shards.
@@ -427,5 +493,19 @@ mod tests {
             to_unsubscribe.is_empty(),
             "`b` is protected by the web overlay; `a` stays"
         );
+    }
+
+    #[test]
+    fn physical_session_scope_must_still_belong_to_the_transport_union() {
+        let mut state = SubscriptionState::default();
+        state.add(SubscriptionSource::Engine, &[tok("a"), tok("b")]);
+        assert!(state.owns_all(&[tok("a"), tok("b")]));
+
+        assert_eq!(
+            state.remove(SubscriptionSource::Engine, &[tok("b")]),
+            vec![tok("b")]
+        );
+        assert!(!state.owns_all(&[tok("a"), tok("b")]));
+        assert!(state.owns_all(&[tok("a")]));
     }
 }

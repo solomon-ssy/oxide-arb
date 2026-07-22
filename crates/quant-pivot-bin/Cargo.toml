@@ -32,6 +32,7 @@ optimize = ["research-jobs", "quant-pivot-core/optimize"]
 
 [dependencies]
 quant-pivot-allocator = { workspace = true }
+quant-pivot-compute = { workspace = true }
 quant-pivot-core = { workspace = true, default-features = false }
 quant-pivot-models = { workspace = true }
 rustls = { workspace = true }
@@ -39,7 +40,6 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 clap = { workspace = true, features = ["derive", "env"] }
-rayon = { workspace = true }
 
 [lints]
 workspace = true

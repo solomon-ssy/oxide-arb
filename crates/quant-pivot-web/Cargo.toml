@@ -28,6 +28,7 @@ ahash = { workspace = true }
 arc-swap = { workspace = true }
 bytestring = { workspace = true }
 prometheus = { workspace = true }
+parking_lot = { workspace = true }
 smallvec = { workspace = true }
 
 serde = { workspace = true }

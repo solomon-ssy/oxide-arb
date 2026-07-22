@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 # ── Workspace internal ─────────────────────────────────────────────
 quant-pivot-allocator  = { workspace = true }
+quant-pivot-compute    = { workspace = true }
 quant-pivot-error      = { workspace = true, features = ["storage", "config", "serde"] }
 quant-pivot-models     = { workspace = true }
 quant-pivot-migration  = { workspace = true }

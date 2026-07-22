@@ -118,7 +118,7 @@ pub struct NewResearchJob {
 /// The task reports coarse progress snapshots (`prefetch → materialize → finalize`
 /// phases, cross-section counts) and the implementation decides how to surface
 /// them. `report` is **synchronous** and non-blocking by contract so it is safe
-/// to call from CPU-bound `spawn_blocking` code (which cannot `.await`): the
+/// to call from CPU-bound executor code (which cannot `.await`): the
 /// durable worker's sink is a lock-free channel push, coalesced + persisted by
 /// the async supervisor, while non-job callers use [`NoopProgressSink`].
 pub trait JobProgressSink: Send + Sync {

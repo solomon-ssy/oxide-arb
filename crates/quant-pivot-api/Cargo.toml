@@ -13,6 +13,7 @@ domain-chainlink = [
 
 [dependencies]
 quant-pivot-allocator = { workspace = true }
+quant-pivot-compute = { workspace = true }
 quant-pivot-error = { workspace = true, features = ["serde"] }
 quant-pivot-models = { workspace = true }
 chainlink-data-streams-report = { workspace = true, optional = true }

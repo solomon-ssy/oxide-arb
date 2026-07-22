@@ -21,6 +21,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    fmt::{Debug, Formatter, Result as FmtResult},
     mem,
     sync::Arc,
 };
@@ -104,6 +105,45 @@ impl Default for ValidationSpec {
     }
 }
 
+/// Cloneable, runtime-agnostic cooperative cancellation probe for pure model
+/// kernels. The core binds it to the owning research job token.
+#[derive(Clone)]
+pub struct CancellationProbe {
+    cancelled: Arc<dyn Fn() -> bool + Send + Sync>,
+}
+
+impl Debug for CancellationProbe {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> FmtResult {
+        formatter.debug_struct("CancellationProbe").finish()
+    }
+}
+
+impl Default for CancellationProbe {
+    fn default() -> Self {
+        Self {
+            cancelled: Arc::new(|| false),
+        }
+    }
+}
+
+impl CancellationProbe {
+    pub fn new(cancelled: impl Fn() -> bool + Send + Sync + 'static) -> Self {
+        Self {
+            cancelled: Arc::new(cancelled),
+        }
+    }
+
+    pub fn check(&self, phase: &str) -> QuantResult<()> {
+        if (self.cancelled)() {
+            return Err(ResearchError::Cancelled {
+                detail: format!("model computation cancelled at `{phase}`"),
+            }
+            .into());
+        }
+        Ok(())
+    }
+}
+
 /// Per-fold and aggregate validation result.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ValidationReport {
@@ -144,6 +184,8 @@ pub struct ValidationReport {
 /// and fills the objective report.
 #[derive(Debug, Clone)]
 pub struct TrainModelRequest {
+    /// Cooperative cancellation observed at fold/trial/search boundaries.
+    pub cancellation: CancellationProbe,
     /// Frozen, point-in-time training examples (decoded from the dataset Parquet).
     pub examples: Arc<[TrainingExample]>,
     /// Semantic hash of the frozen dataset envelope supplying `examples`.
@@ -242,6 +284,7 @@ fn train_weighted(request: &TrainModelRequest) -> QuantResult<TrainedModelArtifa
         &request.objective,
         request.validation,
         Some(&request.factor_cross_section),
+        &request.cancellation,
     )?;
 
     let factors = fit
@@ -499,6 +542,7 @@ struct SimplexFitContext<'a> {
     seed: &'a [Decimal],
     evaluator: &'a ObjectiveEvaluator,
     factor_cross_section: Option<&'a FactorCrossSectionConfig>,
+    cancellation: &'a CancellationProbe,
 }
 
 /// Fit the weight simplex against a supervised label via deterministic LTR
@@ -511,7 +555,9 @@ pub(crate) fn fit_simplex_weights(
     objective: &TrainingObjectiveSpec,
     validation: ValidationSpec,
     factor_cross_section: Option<&FactorCrossSectionConfig>,
+    cancellation: &CancellationProbe,
 ) -> QuantResult<FittedWeights> {
+    cancellation.check("dataset matrix")?;
     if seed_weights.is_empty() {
         return Err(ResearchError::InvalidModelArtifact {
             detail: "trainer requires a non-empty seed weight (candidate factor) set".to_owned(),
@@ -556,6 +602,7 @@ pub(crate) fn fit_simplex_weights(
         seed: &seed,
         evaluator: &evaluator,
         factor_cross_section,
+        cancellation,
     };
     if folds < 2 {
         return fit_full_window(&context);
@@ -565,6 +612,7 @@ pub(crate) fn fit_simplex_weights(
 }
 
 fn fit_full_window(context: &SimplexFitContext<'_>) -> QuantResult<FittedWeights> {
+    context.cancellation.check("full-window transform")?;
     let references = fit_frozen_reference_quantiles(
         context.examples,
         context.label,
@@ -574,8 +622,12 @@ fn fit_full_window(context: &SimplexFitContext<'_>) -> QuantResult<FittedWeights
     let prepared =
         apply_reference_quantiles(context.examples, &references, context.factor_cross_section)?;
     let dataset = TrainingDataset::build(&prepared, context.label, context.factors)?;
-    let (grid_weights, coord_search_effective_n) =
-        coordinate_search(context.seed, &dataset.groups, context.evaluator)?;
+    let (grid_weights, coord_search_effective_n) = coordinate_search(
+        context.seed,
+        &dataset.groups,
+        context.evaluator,
+        context.cancellation,
+    )?;
     let grid_report = context.evaluator.evaluate(&grid_weights, &dataset.groups)?;
     let (weights, train_report) = refine(
         &grid_weights,
@@ -625,6 +677,7 @@ fn fit_purged_validation(
     let mut fold_diagnostics = Vec::with_capacity(validation_blocks.len());
     let mut coord_search_effective_n = 0_u32;
     for (fold_index, block) in validation_blocks.iter().enumerate() {
+        context.cancellation.check("validation fold")?;
         let fold = fit_validation_fold(
             context,
             timeline_dataset,
@@ -734,8 +787,12 @@ fn fit_validation_fold(
         .map(|index| fold_dataset.groups[*index].clone())
         .collect::<Vec<_>>();
     let validation_groups = &fold_dataset.groups[block.start..block.end];
-    let (grid_weights, effective_n) =
-        coordinate_search(context.seed, &train_groups, context.evaluator)?;
+    let (grid_weights, effective_n) = coordinate_search(
+        context.seed,
+        &train_groups,
+        context.evaluator,
+        context.cancellation,
+    )?;
     let grid_report = context.evaluator.evaluate(&grid_weights, &train_groups)?;
     let (weights, _) = refine(
         &grid_weights,
@@ -780,6 +837,7 @@ fn fit_final_full_window(
     context: &SimplexFitContext<'_>,
     validation: ValidationReport,
 ) -> QuantResult<FittedWeights> {
+    context.cancellation.check("final full-window transform")?;
     // Refit both the reference CDFs and the estimator on the final full training
     // partition after CV. Held-out rows may assess the fold transform but cannot
     // influence it; only this explicit final fit may consume the full dataset.
@@ -795,8 +853,12 @@ fn fit_final_full_window(
         context.factor_cross_section,
     )?;
     let final_dataset = TrainingDataset::build(&final_examples, context.label, context.factors)?;
-    let (final_grid, final_effective_n) =
-        coordinate_search(context.seed, &final_dataset.groups, context.evaluator)?;
+    let (final_grid, final_effective_n) = coordinate_search(
+        context.seed,
+        &final_dataset.groups,
+        context.evaluator,
+        context.cancellation,
+    )?;
     let final_grid_report = context
         .evaluator
         .evaluate(&final_grid, &final_dataset.groups)?;
@@ -973,7 +1035,9 @@ fn coordinate_search(
     seed: &[Decimal],
     groups: &[CrossSectionGroup],
     evaluator: &ObjectiveEvaluator,
+    cancellation: &CancellationProbe,
 ) -> QuantResult<(Vec<Decimal>, u32)> {
+    cancellation.check("coordinate-search seed")?;
     let n = seed.len();
     let mut best = seed.to_vec();
     let mut best_obj = evaluator.evaluate(&best, groups)?.objective_value();
@@ -983,6 +1047,7 @@ fn coordinate_search(
     }
 
     for _ in 0..MAX_SEARCH_ROUNDS {
+        cancellation.check("coordinate-search round")?;
         let moves = enumerate_moves(n, &best);
         if moves.is_empty() {
             break;
@@ -1309,6 +1374,7 @@ mod tests {
     };
 
     use chrono::{TimeZone, Utc};
+    use quant_pivot_error::{QuantError, research::ResearchError};
     #[cfg(not(feature = "optimize"))]
     use quant_pivot_models::runtime_config::TrainingOptimizerKind;
     use quant_pivot_models::{
@@ -1330,9 +1396,9 @@ mod tests {
     use rust_decimal_macros::dec;
 
     use super::{
-        LabelSelector, ModelTrainer, TimeSplit, TrainModelRequest, TrainingDataset,
-        TrainingObjectiveSpec, ValidationSpec, WeightedFactorTrainer, coordinate_search,
-        weighted_training_input_hash,
+        CancellationProbe, LabelSelector, ModelTrainer, TimeSplit, TrainModelRequest,
+        TrainingDataset, TrainingObjectiveSpec, ValidationSpec, WeightedFactorTrainer,
+        coordinate_search, weighted_training_input_hash,
     };
     use crate::{
         factors::{
@@ -1419,6 +1485,7 @@ mod tests {
 
     fn request(examples: Vec<TrainingExample>) -> TrainModelRequest {
         TrainModelRequest {
+            cancellation: CancellationProbe::default(),
             examples: examples.into(),
             training_dataset_hash: hash("cc"),
             label: LabelSelector {
@@ -1512,6 +1579,22 @@ mod tests {
                 panic!("expected weighted artifact")
             }
         }
+    }
+
+    #[tokio::test]
+    async fn weighted_trainer_honors_cancellation_before_matrix_build() {
+        let mut request = request(momentum_dataset());
+        request.cancellation = CancellationProbe::new(|| true);
+
+        let error = WeightedFactorTrainer::new()
+            .train(request)
+            .await
+            .expect_err("cancelled training must fail closed");
+
+        assert!(matches!(
+            error,
+            QuantError::Research(ResearchError::Cancelled { .. })
+        ));
     }
 
     #[test]
@@ -1886,7 +1969,9 @@ mod tests {
             ..TrainingObjectiveSpec::default()
         });
         let seed = vec![dec!(0.5), dec!(0.5)];
-        let (_, effective_n) = coordinate_search(&seed, &groups, &evaluator).expect("search");
+        let (_, effective_n) =
+            coordinate_search(&seed, &groups, &evaluator, &CancellationProbe::default())
+                .expect("search");
         assert!(
             effective_n >= 1,
             "seed always counts as one effective trial"
@@ -1905,7 +1990,7 @@ mod optimize_tests {
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
 
-    use super::{coordinate_search, refine};
+    use super::{CancellationProbe, coordinate_search, refine};
     use crate::model::{
         objective::{CrossSectionGroup, ObjectiveEvaluator, SampleRow},
         optimize::refine_weights,
@@ -1981,7 +2066,13 @@ mod optimize_tests {
             let n = 3;
             let groups = synth_group(trial, n, 50);
             let evaluator = evaluator(l2);
-            let (grid, _) = coordinate_search(&uniform(n), &groups, &evaluator).expect("grid");
+            let (grid, _) = coordinate_search(
+                &uniform(n),
+                &groups,
+                &evaluator,
+                &CancellationProbe::default(),
+            )
+            .expect("grid");
             let grid_obj = evaluator
                 .evaluate(&grid, &groups)
                 .expect("eval")
@@ -2011,7 +2102,13 @@ mod optimize_tests {
         let l2 = Decimal::ZERO;
         let groups = synth_group(42, 3, 80);
         let evaluator = evaluator(l2);
-        let (grid, _) = coordinate_search(&uniform(3), &groups, &evaluator).expect("grid");
+        let (grid, _) = coordinate_search(
+            &uniform(3),
+            &groups,
+            &evaluator,
+            &CancellationProbe::default(),
+        )
+        .expect("grid");
         let grid_obj = evaluator
             .evaluate(&grid, &groups)
             .expect("eval")

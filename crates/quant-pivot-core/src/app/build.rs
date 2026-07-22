@@ -8,6 +8,7 @@ use quant_pivot_api::{
     keystore::{Keystore, OrderSigner},
     wallet::{WalletOwnershipClient, WalletTopology},
 };
+use quant_pivot_compute::ComputeExecutor;
 use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{config::DeployConfig, domain::runtime::CoreEventPublisher};
 use tokio_util::sync::CancellationToken;
@@ -30,6 +31,7 @@ impl AppContext {
     pub async fn build(
         deploy: Arc<DeployConfig>,
         shutdown: CancellationToken,
+        compute: Arc<ComputeExecutor>,
     ) -> QuantResult<Self> {
         let metrics = Arc::new(MetricsHub::new());
         let infra = InfraBundle::assemble(&deploy, Arc::clone(&metrics)).await?;
@@ -62,6 +64,7 @@ impl AppContext {
         .await?;
         let research = ResearchBundle::assemble(&ResearchBundleDeps {
             deploy: &deploy,
+            compute: &compute,
             infra: &infra,
             data: &data,
             governance: &governance,
@@ -115,6 +118,7 @@ impl AppContext {
 
         Ok(Self {
             config: deploy,
+            compute,
             shutdown,
             events,
             intent_lifecycle,

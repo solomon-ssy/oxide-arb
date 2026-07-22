@@ -218,7 +218,7 @@ impl LiveEntryConditionInputProvider {
         token_ids
             .into_iter()
             .filter_map(|token_id| {
-                let snapshot = self.books.load_by_id(&token_id)?;
+                let snapshot = self.books.load_fresh_by_id(&token_id).ok()?;
                 let price = snapshot.best_ask()?;
                 let timestamp_ms = i64::try_from(snapshot.timestamp_ms).ok()?;
                 let observed_at = DateTime::from_timestamp_millis(timestamp_ms)?;

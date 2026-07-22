@@ -273,7 +273,9 @@ pub async fn active_resources_are_loaded_in_one_typed_set_and_approvals_are_sing
         decided_by_user_id: None,
         decided_by_label: "policy-governance-it".to_owned(),
         reason: "approve exact revision hash".to_owned(),
-        decided_at: Utc::now(),
+        // An actor clock may lead the database clock. The globally ordered
+        // activity ledger must still place the later committed activation last.
+        decided_at: Utc::now() + Duration::seconds(1),
         expires_at: None,
     })
     .await

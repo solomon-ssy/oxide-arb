@@ -49,7 +49,7 @@ use crate::{
             model_input_contract_hash,
         },
         runtime::ClassicalKind,
-        trainer::{ValidationReport, ValidationSpec},
+        trainer::{CancellationProbe, ValidationReport, ValidationSpec},
     },
     precision::RESEARCH_DECIMAL_SCALE,
     stats,
@@ -181,6 +181,48 @@ pub struct ClassicalTrainOutput {
     pub metrics: ClassicalModelMetrics,
 }
 
+/// Replay a freshly trained estimator over the exact raw training matrix.
+///
+/// The frozen transform makes this the production-parity verification boundary
+/// used by the model train/replay gate; serialized bytes and estimator family
+/// are validated before prediction.
+pub fn replay_training_matrix(
+    output: &ClassicalTrainOutput,
+    matrix: &TrainingMatrix,
+) -> QuantResult<Vec<f64>> {
+    let actual_hash = CanonicalDigest::content_hash_bytes(&output.model_bytes);
+    if actual_hash != output.model_bytes_hash {
+        return Err(ResearchError::InvalidModelArtifact {
+            detail: "classical train output bytes do not match their recorded hash".to_owned(),
+        }
+        .into());
+    }
+    let model: SmartcoreModel = bincode::deserialize(&output.model_bytes).map_err(|error| {
+        ResearchError::Serialization {
+            detail: format!("bincode deserialize classical replay model: {error}"),
+        }
+    })?;
+    if !model.matches_kind(output.kind) {
+        return Err(ResearchError::InvalidModelArtifact {
+            detail: "classical train output estimator family mismatch".to_owned(),
+        }
+        .into());
+    }
+    let encoded = output
+        .input_transform
+        .apply_range(&matrix.cells, 0..matrix.row_count())?;
+    let predictions = model.predict(&dense_matrix(encoded)?)?;
+    if predictions.len() != matrix.row_count()
+        || predictions.iter().any(|prediction| !prediction.is_finite())
+    {
+        return Err(ResearchError::MatrixBuild {
+            detail: "classical train/replay produced an invalid prediction vector".to_owned(),
+        }
+        .into());
+    }
+    Ok(predictions)
+}
+
 /// A classical training adapter. Concrete impls wrap a `smartcore` estimator and
 /// its frozen hyperparameters.
 pub trait ClassicalModelAdapter: Send + Sync {
@@ -197,6 +239,7 @@ pub trait ClassicalModelAdapter: Send + Sync {
         &self,
         matrix: &TrainingMatrix,
         validation: ValidationSpec,
+        cancellation: &CancellationProbe,
     ) -> QuantResult<ValidationReport>;
 }
 
@@ -304,8 +347,9 @@ impl ClassicalModelAdapter for SmartcoreAdapter {
         &self,
         matrix: &TrainingMatrix,
         validation: ValidationSpec,
+        cancellation: &CancellationProbe,
     ) -> QuantResult<ValidationReport> {
-        rolling_validation(self.kind, &self.params, matrix, validation)
+        rolling_validation(self.kind, &self.params, matrix, validation, cancellation)
     }
 }
 
@@ -486,7 +530,9 @@ fn rolling_validation(
     params: &ClassicalParams,
     matrix: &TrainingMatrix,
     validation: ValidationSpec,
+    cancellation: &CancellationProbe,
 ) -> QuantResult<ValidationReport> {
+    cancellation.check("classical validation setup")?;
     let rows = matrix.row_count();
     if matrix.row_decision_at.len() != rows || matrix.row_label_horizon_end.len() != rows {
         return Err(ResearchError::ValidationMethodology {
@@ -527,6 +573,7 @@ fn rolling_validation(
 
     let mut fold_objectives = Vec::new();
     for k in 1..folds {
+        cancellation.check("classical validation fold")?;
         let (val_start, val_end) = (boundaries[k], boundaries[k + 1]);
         if val_end <= val_start {
             continue;
@@ -806,7 +853,11 @@ mod tests {
     use super::{ClassicalAdapterRegistry, ClassicalParams, SmartcoreModel, rolling_validation};
     use crate::{
         features::{FeatureName, FeatureUnit, FeatureValueKind},
-        model::{classical::dense_matrix, runtime::ClassicalKind, trainer::ValidationSpec},
+        model::{
+            classical::dense_matrix,
+            runtime::ClassicalKind,
+            trainer::{CancellationProbe, ValidationSpec},
+        },
         training::{
             DenseInputMatrix, FeatureColumnSpec, ModelInputCell, RawInputMatrix, TrainingMatrix,
         },
@@ -919,6 +970,7 @@ mod tests {
                 folds: 4,
                 ..ValidationSpec::default()
             },
+            &CancellationProbe::default(),
         )
         .expect("purged rolling validation");
         assert_eq!(report.sample_count, 40);
@@ -938,6 +990,7 @@ mod tests {
                 folds: 4,
                 ..ValidationSpec::default()
             },
+            &CancellationProbe::default(),
         )
         .expect_err("an empty validation fold set must fail closed");
         assert!(error.to_string().contains("no evaluable folds"));
@@ -974,6 +1027,7 @@ mod tests {
                         folds: 3,
                         ..ValidationSpec::default()
                     },
+                    &CancellationProbe::default(),
                 )
                 .unwrap_or_else(|e| panic!("validate {kind}: {e}"));
             assert_eq!(validation.sample_count, 60, "{kind}");

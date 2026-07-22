@@ -49,7 +49,7 @@ use crate::{
         trade_policy_guard::require_frozen_trade_policy,
     },
     governance::{KillSwitchHandle, RuntimeModeHandle, resolve_return_model_calibration},
-    ingest::book_store::BookStore,
+    ingest::book_store::{BookStore, FreshBook},
     runtime_config::DecisionPolicyStore,
     service::account::AccountProviderFactory,
 };
@@ -167,7 +167,9 @@ impl AdmissionInputBuilder {
 
         let book = deps
             .book_store
-            .load_by_id(&intent.entry_order_json.token_id);
+            .load_fresh_by_id(&intent.entry_order_json.token_id)
+            .ok()
+            .map(FreshBook::into_snapshot);
         let data_quality = deps.data_quality.snapshot();
         let mode = deps.runtime_mode.current();
         let kill_switch = deps.kill_switch.current();

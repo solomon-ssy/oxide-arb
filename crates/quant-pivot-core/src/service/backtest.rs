@@ -16,6 +16,7 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
+use quant_pivot_compute::{ComputeExecutor, OfflineMemory};
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError, storage::StorageError};
 use quant_pivot_models::{
     domain::quant::{
@@ -54,7 +55,7 @@ use quant_pivot_research::{
     training::{LabelName, TrainingExample},
 };
 use rust_decimal::Decimal;
-use tokio::{runtime::Handle, task};
+use tokio::runtime::Handle;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -68,6 +69,8 @@ use crate::{
 
 /// Repository + store + factory dependencies for the backtest service.
 pub struct BacktestServiceDeps {
+    /// Process-wide offline CPU and memory governor.
+    pub compute: Arc<ComputeExecutor>,
     /// Frozen training-dataset ledger.
     pub dataset_repo: Arc<dyn TrainingDatasetRepository>,
     /// Content-addressed artifact store.
@@ -370,7 +373,7 @@ impl BacktestService {
         };
 
         // Offload frozen tick assembly + portfolio replay
-        // to a blocking thread so it never occupies an async runtime worker,
+        // to the governed offline pool so it never occupies an async runtime worker,
         // polling `cancel` at each cross-section boundary.
         let inputs = BacktestReplayInputs {
             model,
@@ -383,13 +386,15 @@ impl BacktestService {
             frozen_source,
             entry_max_slippage_bps: self.entry_max_slippage_bps,
         };
-        let result = task::spawn_blocking(move || run_backtest_replay_blocking(inputs))
-            .await
-            .map_err(|error| {
-                QuantError::from(ResearchError::DatasetBuild {
-                    detail: format!("backtest replay task join failed: {error}"),
-                })
-            })??;
+        let runtime = Handle::current();
+        let result = self
+            .deps
+            .compute
+            .run_offline_cancellable(OfflineMemory::try_gib(4)?, cancel, move || {
+                let _runtime = runtime.enter();
+                run_backtest_replay_blocking(inputs)
+            })
+            .await?;
         let Some(result) = result else {
             return Err(ResearchError::Cancelled {
                 detail: "backtest cancelled during the replay".to_owned(),
@@ -598,7 +603,7 @@ struct RecordedRun {
     result: BacktestRunResult,
 }
 
-/// Owned inputs for the blocking backtest replay (moved into `spawn_blocking`).
+/// Owned inputs moved into the governed offline backtest replay.
 struct BacktestReplayInputs {
     model: Box<dyn QuantModelRuntime>,
     examples: Vec<TrainingExample>,
@@ -611,7 +616,7 @@ struct BacktestReplayInputs {
     entry_max_slippage_bps: Bps,
 }
 
-/// Run the backtest replay on a blocking thread.
+/// Run the backtest replay on an offline Rayon worker.
 ///
 /// Frozen tick assembly is synchronous; `block_on` drives only the pure async
 /// portfolio replay without occupying an async runtime worker.

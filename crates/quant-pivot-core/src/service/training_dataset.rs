@@ -19,6 +19,7 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use quant_pivot_compute::{ComputeExecutor, OfflineMemory};
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError, storage::StorageError};
 use quant_pivot_models::{
     clickhouse::{BookMicrostructureRow, ChPrice},
@@ -89,7 +90,7 @@ use quant_pivot_research::{
     },
 };
 use rust_decimal::{Decimal, prelude::ToPrimitive};
-use tokio::{runtime::Handle, task};
+use tokio::runtime::Handle;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -433,6 +434,8 @@ pub fn require_dataset_materialization(
 
 /// Dependencies injected into [`TrainingDatasetService`].
 pub struct TrainingDatasetServiceDeps {
+    /// Process-wide offline CPU and memory governor.
+    pub compute: Arc<ComputeExecutor>,
     /// `ClickHouse` fact reader for batch prefetch.
     pub fact_read: Arc<dyn QuantFactReadRepository>,
     /// Append-only catalog ledger for all historical metadata resolution.
@@ -516,6 +519,7 @@ pub struct TrainingDatasetBuildConfig {
 
 /// Orchestrates the offline training-dataset build for one frozen config.
 pub struct TrainingDatasetService {
+    compute: Arc<ComputeExecutor>,
     fact_read: Arc<dyn QuantFactReadRepository>,
     catalog_repo: Arc<dyn CatalogLedgerRepository>,
     market_repo: Arc<dyn MarketRepository>,
@@ -544,8 +548,8 @@ pub struct TrainingDatasetService {
     enabled_categories: HashSet<MarketCategory>,
     /// Deploy guard: hard cap on the deterministic historical spine.
     max_spine_samples: u64,
-    /// Shared so the historical spine can be built inside a `spawn_blocking`
-    /// closure (labelers are `Send + Sync` but not `Clone`).
+    /// Shared so the historical spine can be built inside the governed offline
+    /// executor (labelers are `Send + Sync` but not `Clone`).
     labelers: Arc<Vec<Box<dyn Labeler>>>,
     /// Frozen favorite-longshot bias table bound to the offline factor engine.
     bias_table: Option<Arc<FavoriteLongshotBiasTable>>,
@@ -682,6 +686,7 @@ impl TrainingDatasetService {
         let min_exit_depth_usd = config.training.min_exit_depth_usd_typed();
         let max_book_staleness = Duration::from_millis(config.training.max_book_staleness_ms);
         Ok(Self {
+            compute: deps.compute,
             fact_read: deps.fact_read,
             catalog_repo: deps.catalog_repo,
             market_repo: deps.market_repo,
@@ -1373,7 +1378,7 @@ impl TrainingDatasetService {
         let pit: Arc<dyn PointInTimeSnapshotSource> = Arc::new(window.pit);
         let prefetched = Arc::new(window.prefetched);
 
-        // Offload the unbounded historical PIT loop to a blocking thread so it
+        // Offload the unbounded historical PIT loop to the offline pool so it
         // never occupies an async runtime worker (CPU-bound in-memory scoring
         // that would otherwise starve other jobs' heartbeats / lease renewals),
         // polling `cancel` at each cross-section boundary for a ~one-section
@@ -1391,13 +1396,14 @@ impl TrainingDatasetService {
                     coverage,
                 )
                 .await?;
-            let output = task::spawn_blocking(move || run_historical_spine_blocking(inputs))
-                .await
-                .map_err(|error| {
-                    QuantError::from(ResearchError::DatasetBuild {
-                        detail: format!("historical spine task join failed: {error}"),
-                    })
-                })??;
+            let cancellation = inputs.cancel.clone();
+            let runtime = Handle::current();
+            let output = self
+                .compute
+                .run_offline_cancellable(OfflineMemory::try_gib(10)?, &cancellation, move || {
+                    run_historical_spine_blocking(&runtime, inputs)
+                })
+                .await?;
             if output.cancelled {
                 return Err(ResearchError::Cancelled {
                     detail: "dataset build cancelled during the historical spine".to_owned(),
@@ -1564,7 +1570,7 @@ impl TrainingDatasetService {
     /// Prefetch still runs against the configured fact reader; only point-in-time
     /// book/market resolution is overridden. Runs the historical spine inline on
     /// the async runtime (the borrowed PIT source is not `'static`, so it cannot
-    /// be moved into `spawn_blocking`) — acceptable for the leakage-probe tests.
+    /// be moved into the offline executor) — acceptable for the leakage-probe tests.
     #[doc(hidden)]
     pub async fn build_with_pit_source(
         &self,
@@ -1620,7 +1626,7 @@ impl TrainingDatasetService {
         .await
     }
 
-    /// Owned inputs for the blocking historical spine (moved into `spawn_blocking`).
+    /// Owned inputs moved into the governed offline historical spine.
     async fn historical_inputs(
         &self,
         plan: &DatasetPlan,
@@ -2430,8 +2436,8 @@ struct PersistedDatasetArtifact {
 }
 
 /// Build every label (labeler × horizon) for one example, accounting coverage.
-/// Free function so the historical spine can call it from a `spawn_blocking`
-/// closure (no `&self` borrow).
+/// Free function so the historical spine can call it from the governed offline
+/// executor (no `&self` borrow).
 fn build_labels_for(
     params: &LabelBuildParams<'_>,
     min_exit_depth_usd: Usd,
@@ -2519,8 +2525,8 @@ struct HistoricalSpineParams<'a> {
     context: ReplayContext,
 }
 
-/// Owned inputs for the historical PIT loop, moved into a `spawn_blocking`
-/// closure (every field is `Send + 'static`; `Arc` shares the PIT engine,
+/// Owned inputs for the historical PIT loop, moved into the offline executor
+/// (every field is `Send + 'static`; `Arc` shares the PIT engine,
 /// prefetched facts, progress sink, and labelers with the async parent).
 struct HistoricalSpineInputs {
     pit: Arc<dyn PointInTimeSnapshotSource>,
@@ -2544,16 +2550,17 @@ struct HistoricalSpineInputs {
     coverage: DatasetCoverage,
 }
 
-/// Run the historical PIT spine on a blocking thread.
+/// Run the historical PIT spine on an offline Rayon worker.
 ///
 /// The per-section materialization is in-memory (the `MaterializedPitEngine`
 /// resolves books/markets without I/O), so its `async` entrypoints resolve
-/// immediately — we drive them with `block_on` on this blocking thread rather
+/// immediately — we drive them with `block_on` on this offline worker rather
 /// than occupying an async runtime worker. `cancel` is polled per section.
 fn run_historical_spine_blocking(
+    runtime: &Handle,
     inputs: HistoricalSpineInputs,
 ) -> QuantResult<HistoricalSpineOutput> {
-    Handle::current().block_on(run_historical_spine(
+    runtime.block_on(run_historical_spine(
         HistoricalSpineParams {
             pit: &*inputs.pit,
             prefetched: &inputs.prefetched,
@@ -2740,7 +2747,7 @@ async fn pit_selected_replay_group(
 
 /// Append training examples (factors + forward labels) for one PIT-resolved
 /// cross-section. Free function so the historical spine can run inside a
-/// `spawn_blocking` closure without borrowing the service.
+/// governed offline executor without borrowing the service.
 fn append_historical_examples(
     input: &CrossSectionAppendInput<'_>,
     labelers: &[Box<dyn Labeler>],

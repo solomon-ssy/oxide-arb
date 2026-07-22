@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use quant_pivot_compute::ComputeExecutor;
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     clickhouse::QuantFeatureParityEventRow,
@@ -56,6 +57,8 @@ use crate::{
 pub struct ResearchBundleDeps<'a> {
     /// Deploy-time configuration (artifact root, etc.).
     pub deploy: &'a DeployConfig,
+    /// Process-wide serving/offline CPU and memory governor.
+    pub compute: &'a Arc<ComputeExecutor>,
     /// Persistence and analytics handles.
     pub infra: &'a InfraBundle,
     /// Live data plane (books, registry, PIT source for online feature builds).
@@ -76,6 +79,8 @@ fn frozen_parity_evidence_writer(
 
 /// Research plane: selection, feature/factor pipelines, and artifact store.
 pub struct ResearchBundle {
+    /// Process-wide serving/offline CPU and memory governor.
+    pub compute: Arc<ComputeExecutor>,
     /// Local (or future object-store) backend for dataset / model artifact bytes.
     pub artifact_store: Arc<dyn ArtifactStore>,
     /// Pure, config-driven market selector.
@@ -179,6 +184,7 @@ fn assemble_research_pipelines(
     let feature_repo: Arc<dyn FeatureRepository> =
         Arc::clone(&deps.infra.repos.feature) as Arc<dyn FeatureRepository>;
     let feature_pipeline = Arc::new(FeaturePipelineService::new(FeaturePipelineDeps {
+        compute: Arc::clone(deps.compute),
         window_provider: FeatureWindowProvider::new(Arc::clone(&deps.infra.quant_fact_read)),
         feature_repo: Arc::clone(&feature_repo),
         event_writer: Arc::clone(&deps.infra.feature_event_writer),
@@ -198,6 +204,7 @@ fn assemble_research_pipelines(
         Arc::clone(&factor_repo),
         Arc::clone(&deps.infra.factor_event_writer),
         Arc::clone(&deps.governance.bias_table),
+        Arc::clone(deps.compute),
     ));
     ResearchPipelines {
         candidate_provider,
@@ -282,6 +289,7 @@ impl ResearchBundle {
             assemble_calibration_artifact_fit(deps, &market_linkage_repo, &offline);
 
         Ok(Self {
+            compute: Arc::clone(deps.compute),
             artifact_store,
             market_selector,
             market_selection_repo,
@@ -332,6 +340,7 @@ impl ResearchBundle {
     ) -> QuantResult<TrainingDatasetService> {
         TrainingDatasetService::new(
             TrainingDatasetServiceDeps {
+                compute: Arc::clone(&self.compute),
                 fact_read: Arc::clone(&self.quant_fact_read),
                 catalog_repo: Arc::clone(&self.catalog_ledger_repo),
                 market_repo: Arc::clone(&self.market_repo),

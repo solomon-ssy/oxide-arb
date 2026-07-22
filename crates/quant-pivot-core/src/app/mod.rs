@@ -48,6 +48,7 @@ pub use bundles::{
 };
 use flume::Receiver;
 use parking_lot::Mutex;
+use quant_pivot_compute::ComputeExecutor;
 use quant_pivot_models::{
     config::DeployConfig,
     domain::{
@@ -73,6 +74,7 @@ use crate::{
 /// System composition root — bundles are the sole subsystem containers.
 pub struct AppContext {
     pub config: Arc<DeployConfig>,
+    pub compute: Arc<ComputeExecutor>,
     pub shutdown: CancellationToken,
     pub events: CoreEventPublisher,
     /// Shared `quant.intent` lifecycle fan-out (bootstrap singleton).

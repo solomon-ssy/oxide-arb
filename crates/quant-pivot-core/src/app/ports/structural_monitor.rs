@@ -87,7 +87,8 @@ impl CoreStructuralMonitor {
     fn leg_view(&self, leg: &NegRiskLeg) -> NegRiskLegView {
         let best_ask = self
             .book_store
-            .load_by_id(&leg.yes_token_id)
+            .load_fresh_by_id(&leg.yes_token_id)
+            .ok()
             .and_then(|book| book.best_ask())
             .map(Price::inner);
         let question = self

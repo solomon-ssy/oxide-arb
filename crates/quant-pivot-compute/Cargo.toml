@@ -1,0 +1,20 @@
+[package]
+name = "quant-pivot-compute"
+description = "Process-wide governed serving and offline compute executor"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+quant-pivot-allocator = { workspace = true }
+quant-pivot-error = { workspace = true }
+rayon = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "sync"] }
+tokio-util = { workspace = true, features = ["rt"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

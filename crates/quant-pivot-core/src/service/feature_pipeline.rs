@@ -20,6 +20,7 @@ use std::{
 use chrono::{DateTime, Duration as ChronoDuration, TimeZone, Utc};
 use chrono_tz::Tz;
 use futures_util::future::join_all;
+use quant_pivot_compute::ComputeExecutor;
 use quant_pivot_error::{QuantError, QuantResult, report::ReportError};
 use quant_pivot_models::{
     config::TradeTapeOnChainConfig,
@@ -127,6 +128,7 @@ pub struct FeaturePipelineResult {
 /// the request's frozen [`FeaturesConfig`], so runtime-config activations never
 /// require rebootstrap.
 pub struct FeaturePipelineService {
+    compute: Arc<ComputeExecutor>,
     window_provider: FeatureWindowProvider,
     feature_repo: Arc<dyn FeatureRepository>,
     event_writer: Arc<FeatureEventWriter>,
@@ -140,6 +142,7 @@ pub struct FeaturePipelineService {
 
 /// Boot-time dependencies for [`FeaturePipelineService::new`].
 pub struct FeaturePipelineDeps {
+    pub compute: Arc<ComputeExecutor>,
     pub window_provider: FeatureWindowProvider,
     pub feature_repo: Arc<dyn FeatureRepository>,
     pub event_writer: Arc<FeatureEventWriter>,
@@ -156,6 +159,7 @@ impl FeaturePipelineService {
     #[must_use]
     pub fn new(deps: FeaturePipelineDeps) -> Self {
         Self {
+            compute: deps.compute,
             window_provider: deps.window_provider,
             feature_repo: deps.feature_repo,
             event_writer: deps.event_writer,
@@ -231,8 +235,12 @@ impl FeaturePipelineService {
         // category's requirement here never falsely gates a market outside
         // that category.
         let required = request.model_requirements.union_all();
-        let vectors =
-            builder.build_batch(&bundles, &required, request.features, request.data_quality)?;
+        let vectors = self
+            .compute
+            .run_serving_scoped(|| {
+                builder.build_batch(&bundles, &required, request.features, request.data_quality)
+            })
+            .await?;
 
         let required_names: HashSet<FeatureName> = required.iter().cloned().collect();
         let partition = partition_feature_vectors(&bundles, &vectors, &required_names);

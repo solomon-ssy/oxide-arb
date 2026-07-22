@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::Utc;
+use quant_pivot_compute::ComputeExecutor;
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError, storage::StorageError};
 use quant_pivot_models::{
     domain::{
@@ -63,6 +64,7 @@ use crate::{
 
 /// Repository / store wiring for [`CoreCpcvBacktestPort`] (tests + non-bundle).
 pub struct CoreCpcvBacktestPortDeps {
+    pub compute: Arc<ComputeExecutor>,
     pub dataset_repo: Arc<dyn TrainingDatasetRepository>,
     pub artifact_store: Arc<dyn ArtifactStore>,
     pub path_set_repo: Arc<dyn BacktestPathSetRepository>,
@@ -74,6 +76,7 @@ pub struct CoreCpcvBacktestPortDeps {
 
 /// Admin port wired from [`ResearchBundle`] plus runtime-config catalog reads.
 pub struct CoreCpcvBacktestPort {
+    compute: Arc<ComputeExecutor>,
     dataset_repo: Arc<dyn TrainingDatasetRepository>,
     artifact_store: Arc<dyn ArtifactStore>,
     path_set_repo: Arc<dyn BacktestPathSetRepository>,
@@ -99,6 +102,7 @@ impl CoreCpcvBacktestPort {
     #[must_use]
     pub fn new(deps: CoreCpcvBacktestPortDeps) -> Self {
         Self {
+            compute: deps.compute,
             dataset_repo: deps.dataset_repo,
             artifact_store: deps.artifact_store,
             path_set_repo: deps.path_set_repo,
@@ -117,6 +121,7 @@ impl CoreCpcvBacktestPort {
         bias_table_repo: Arc<dyn CalibrationArtifactRepository>,
     ) -> Self {
         Self::new(CoreCpcvBacktestPortDeps {
+            compute: Arc::clone(&research.compute),
             dataset_repo: Arc::clone(&research.training_dataset_repo),
             artifact_store: Arc::clone(&research.artifact_store),
             path_set_repo: Arc::clone(&research.backtest_path_set_repo),
@@ -139,6 +144,7 @@ impl CoreCpcvBacktestPort {
         .await?;
         CpcvBacktestService::new(
             CpcvBacktestServiceDeps {
+                compute: Arc::clone(&self.compute),
                 dataset_repo: Arc::clone(&self.dataset_repo),
                 artifact_store: Arc::clone(&self.artifact_store),
             },

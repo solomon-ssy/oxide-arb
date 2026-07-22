@@ -7,7 +7,6 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantResult, report::ReportError};
 use quant_pivot_models::{
     clickhouse::ReportMarketFunnelRow,
-    domain::quant::NewRecommendation,
     enums::quant::RejectionReason,
     hashing::CanonicalDigest,
     types::{
@@ -37,9 +36,18 @@ pub struct ReportFunnelInput<'a> {
     pub feature_vector_by_market: &'a HashMap<MarketId, FeatureVectorId>,
     pub model_decisions: &'a [ModelMarketDecision],
     pub planner_rejected: &'a [RejectedCandidate],
-    pub recommendations: &'a [NewRecommendation],
+    pub recommendations: &'a [PublishedRecommendationRef],
     pub early_terminal: Option<(ReportFunnelStage, ReportFunnelReason)>,
     pub event_time: DateTime<Utc>,
+}
+
+/// Minimal published lineage consumed by the conserved funnel. Keeping the
+/// full persistence DTO out of this pure kernel avoids cloning trade plans and
+/// evidence graphs that the funnel never reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublishedRecommendationRef {
+    pub recommendation_id: RecommendationId,
+    pub market_id: MarketId,
 }
 
 struct DraftDecision {

@@ -8,9 +8,9 @@
 
 - 基线分支：`quant-pivot`
 - 工作树基线：开始执行时干净
-- 当前任务：`PERF-15`（`blocked`：等待固定 Linux x86_64 runner 硬验收）
-- 最后完成步骤：macOS 全部质量门禁、完整 workspace 测试、静态审计和性能 smoke 通过
-- 恢复命令：在 8 vCPU/16 GiB Linux x86_64 runner 按 `docs/operations/performance.md` 执行完整负载套件
+- 当前任务：`PERF-21`（`in_progress`：可复核性能 harness 与 CI evidence）
+- 最后完成步骤：真实 2K-token Gamma/CLOB→ClickHouse→Fresh BookStore smoke 首次贯通并生成 JSON/HDR/SHA-256；发现并修复 warm-up backlog 污染测量窗口
+- 恢复命令：`cargo run -p quant-pivot-system-tests --bin performance_load -- --profile smoke --output target/performance-evidence-smoke`
 
 ## 任务表
 
@@ -29,9 +29,16 @@
 | PERF-10 | SessionHub 与 ByteString fanout | done | PERF-01 | 无全 session 扫描/String fanout | actor/index/refcount snapshot；ByteString 单分配；慢客户端语义；10K/1K smoke 45.596–49.836µs；production-stack PASS |
 | PERF-11 | destructive L2 reset/cutover | done | PERF-06/09 | 旧表/reader/hash 全删除 | 无 v2/迁移；双确认 clean bootstrap；PG/CH/Redis 隔离全流程 260.90s PASS |
 | PERF-12 | 全仓 clone/borrow/move 治理 | done | PERF-02/03 | clone lints 全仓 deny | 三项 clone lint deny；Arc slice 大批共享；ArcSwap/blocking/UUID/WS 架构门禁；workspace Clippy PASS |
-| PERF-13 | 报告/训练/CPCV 性能治理 | done | PERF-12 | 计算 SLO 通过 | 连续矩阵/CPCV/report 三项 release 门禁通过；定向测试通过 |
-| PERF-14 | feature/线程池/固定 jemalloc | done | PERF-13 | serving 裁剪与预算通过 | serving 图无 Polars/AWS/Chainlink/SmartCore/Argmin；固定 jemalloc；workspace Clippy/architecture/定向测试通过 |
-| PERF-15 | 全负载验收与规范收口 | blocked | PERF-08/10/11/14 | 所有门禁通过 | macOS 全质量门禁、全测试、静态审计与 smoke 已通过；当前环境不是 8 vCPU/16 GiB Linux x86_64 fixed runner，硬 SLO 尚不能签收 |
+| PERF-13 | 报告/训练/CPCV 性能治理 | superseded | PERF-12 | 计算 SLO 通过 | 数据布局优化有效；CPCV 仅覆盖 orchestration、report 仅覆盖 early-terminal，不能签收完整计算 SLO |
+| PERF-14 | feature/线程池/固定 jemalloc | superseded | PERF-13 | serving 裁剪与预算通过 | 依赖裁剪与 allocator 已完成；线程常量不等于全局 CPU/内存执行预算 |
+| PERF-15 | 全负载验收与规范收口 | superseded | PERF-08/10/11/14 | 所有门禁通过 | 深度复核发现 P0 correctness 与真实 load harness 缺口，不能直接进入 fixed-runner 签收 |
+| PERF-16 | session continuity 与跨分区 fail-closed | done | PERF-15 | poison 全局持久、重启代次有效、跨分区投递无部分提交 | 完整 UUID + 单调 epoch；ShardAssignment restart generation；进程级 SessionDirectory；按 session 拆批并原子预留全部 mailbox；durable publish 前后三重 ticket fence；API/Core/architecture 门禁通过 |
+| PERF-17 | Fresh/LastKnown book 语义隔离 | done | PERF-16 | invalid book 无法进入 report/execution | coherent ArcSwap/seqlock/session fence；fresh-only port；诊断 LastKnown；资金路径与 WS tombstone；Loom/并发/全 core 门禁通过 |
+| PERF-18 | token retirement 与 SessionHub 背压 | done | PERF-17 | mutable book 可回收、control 不被 fanout 饥饿 | transport ownership retirement barrier；三 lane biased hub；共享 64MiB frame permit；10K churn/fanout 门禁通过 |
+| PERF-19 | 集中 ComputeExecutor 资源治理 | done | PERF-18 | CPU/内存预算在 composition root 强制执行 | 唯一 serving/offline executor；CPU/memory/job lease；取消边界；语义 architecture gate；workspace Clippy 与定向测试通过 |
+| PERF-20 | ClickHouse durability/idempotency 收口 | superseded | PERF-19 | 26.5 allowlist、bounded retry、duplicate readiness | 用户明确取消，不实施、不签收 |
+| PERF-21 | 可复核性能 harness 与 CI evidence | in_progress | PERF-19 | full-network load、JSON/HDR artifact、独立 workflow | 统一 release smoke 已通过且 artifact/hash 可复核；待 fixed Linux runner 生成 full/soak CI artifact |
+| PERF-22 | fixed-runner/预生产硬验收与封存 | superseded | PERF-21 | 全部 SLO 与 24h ReportOnly soak 真实通过 | 用户明确取消，不实施、不签收 |
 
 ## 决策记录
 
@@ -41,6 +48,9 @@
 | 2026-07-22 | 不保留旧 L2 历史 | 用户明确选择 clean reset |
 | 2026-07-22 | 固定 8 partition actor | 8 vCPU 生产门禁；不按 token 数建 worker |
 | 2026-07-22 | ClickHouse 最低版本锁定为 26.1 | 26.1 才修复 acknowledged async-insert retry 在 dependent materialized view 上的端到端去重；旧版本 fail closed |
+| 2026-07-22 | PERF-13～15 superseded，新增 PERF-16～22 收尾链 | 深度复核证明已有局部门禁未覆盖 session poison、invalid book 资金边界、完整业务负载和全局资源预算；禁止用缺 runner 掩盖实现缺口 |
+| 2026-07-22 | PERF-20 与 PERF-22 superseded，PERF-21 直接依赖 PERF-19 | 用户明确取消 ClickHouse durability/idempotency 收口与 fixed-runner/24h rollout；不得把未实施内容记为 done 或纳入最终闭环声明 |
+| 2026-07-22 | SessionHub 固定预算使用 private compile-time constants，不进入 DeployConfig | 这些值只有一个已验证组合；伪可配置会制造不存在的受支持状态空间。architecture check 锁定精确常量并拒绝 `WebSocketHubConfig` |
 | 2026-07-22 | 不在本地执行真实数据删除 | 只实现并测试强确认 reset 工具 |
 | 2026-07-22 | PERF-11 采用整库 clean bootstrap，不实现 `v2`、ALTER 数据迁移或兼容读写 | 系统从未正式投产；用户明确允许删除未封存的 PostgreSQL/ClickHouse 项目库并重跑唯一 bootstrap。已有 production baseline 时仍永久拒绝 reset |
 | 2026-07-22 | `ContentHash` 内存态只保留 raw BLAKE3-256 | canonical text 仅在 wire/DB/日志边界生成；内部比较、排序和 hash 组合使用固定字节 |
@@ -388,6 +398,165 @@
 - [ ] `blocked`：当前主机为 macOS arm64，无法伪造 8 vCPU/16 GiB Linux x86_64
   fixed-runner 的 10K sustained/50K burst、enqueue/durable-ack p99、在线 RSS、
   warm-cache E2E 和 Linux 性能证据；须在指定 runner 执行后才可将 PERF-15 标为 `done`。
+
+### PERF-16
+
+- [x] 将 shard watch payload 从裸 token set 改为 `ShardAssignment { tokens,
+  restart_generation }`；相同 token set 的强制重启也会进入 `Resubscribe`，同一 shard 的
+  批量 invalidation 只增加一次 generation；generation 溢出取消数据面，fail closed。
+- [x] `IngressTrace` 与所有 session lifecycle event 改为完整
+  `StreamSessionTicket { stream_session_id: Uuid, epoch: u64 }`；删除 UUID XOR 压缩，
+  全局 epoch 使用 checked 单调分配，溢出取消数据面。
+- [x] 新增进程级 ArcSwap `SessionDirectory`，注册完整订阅 scope；poison 是 epoch-scoped
+  且不可被旧 UUID/新 epoch 重新打开，所有 partition 与 `BookStore` 共享同一 fence。
+- [x] normalized batch 先按 physical session 拆分；每个 session batch 在发送前一次性
+  reserve 全部目标 partition mailbox permits，任何 timeout 都不发送任何 partition batch，
+  并 poison/restart 完整订阅 scope。
+- [x] canonical 路径在 sequence acceptance 前、durable ACK 后及 slot publish 前后复核
+  session；open ledger failure、gap、sequence discontinuity、commit timeout 均 poison 整个
+  session。late commit 只能恢复 commit cursor，不能恢复已 poison 的旧 ticket。
+- [x] 回归测试覆盖等 token 强制重启、restart/epoch overflow、按 session 拆批、全 mailbox
+  reservation 失败零部分投递、poison 后旧 snapshot 拒绝、新 session snapshot 恢复、
+  durable ACK timeout 后 late commit cursor recovery。
+- [x] 验证：`cargo check -p quant-pivot-models -p quant-pivot-api -p quant-pivot-core`；
+  `cargo test -p quant-pivot-api ws::` 29 passed；`cargo test -p quant-pivot-core ingest::`
+  60 passed；ledger persistence 5 passed；`cargo xtask architecture check` passed。
+- [x] 命令修正记录：两次尝试向单次 `cargo test` 传两个位置 filter 被 Cargo 参数解析拒绝；
+  改为共同父 filter 或独立命令后全部通过，不属于源码/测试失败。
+
+### PERF-17
+
+- [x] 删除业务可直接取得裸 snapshot 的 `read/load_owned/load_by_id/load_pair`、
+  top-of-book 与 published snapshot API；不保留 alias、forwarding re-export 或兼容 wrapper。
+- [x] 新增 `FreshBook`、诊断专用且不实现 `Deref` 的 `LastKnownBook`，以及
+  `BookUnavailable::{UnknownToken, Unseen, Invalid, Retired, PoisonedSession}`；跨 await/task
+  只能显式调用 `load_fresh_owned`，同步热读使用 ArcSwap guard 的 `read_fresh`。
+- [x] `TokenSlot` 在同一 odd/even 版本内采样 ArcSwap snapshot、sequence、session epoch、
+  freshness/state/latency，并在回调/owned clone 后再次复核 slot version 与进程级
+  `SessionDirectory` active epoch。发布、poison、invalidate 任一竞态都不能返回语义 Fresh。
+- [x] admission、entry condition、report/model market-data port、structural monitor、exit
+  monitor/dispatcher 全部迁移 fresh-only。exit monitor 缺 fresh book 时先持久化
+  `ManualRequired`，再同步发送 Critical `TradingSafety` operator alert；不使用 last-known depth
+  创建、签名、提交或猜测退出订单。
+- [x] reconciliation 与 data-quality 只能显式消费 `LastKnownBook` 诊断信息；unavailable token
+  计入 insufficient 分母。WebSocket coalescer 在 invalid/poison 时发送 unavailable tombstone，
+  客户端不会保留旧价。
+- [x] system-test/benchmark fixture 不再绕过 session contract：先打开完整 ticket，再经
+  `publish_snapshot_session` 写入；architecture gate 拒绝重新引入裸 public API，并要求 fresh read
+  同时包含 coherent slot 与 active-session fence。
+- [x] 并发门禁首次捕获真实 torn read：第二次 `freshness_version.load(Acquire)` 不能约束其前
+  面的 protected loads，曾观察到 sequence=5288/session=5289。按 Linux
+  `read_seqcount_retry` 与成熟 Rust seqlock 顺序，在 retry-counter load 前增加 Acquire fence，
+  随后同一高并发回归连续 50 次通过。
+- [x] Loom 初版断言错误地要求并发 poison 后物理 slot 绝不能短暂保持 Fresh；按冻结语义改为
+  验证 `(slot Fresh && session Active)` 复合状态永不成立。该测试以及实际 publisher/poison
+  线程竞态均通过。
+- [x] 验证：`cargo check --workspace --all-targets`；受影响三 crate Clippy `-D warnings`；
+  fresh BookStore 6、coalescer 6、entry condition 12、core ingest 63；最终完整 core lib
+  391/391；`cargo fmt --all -- --check` 与 `cargo xtask architecture check` 全部通过。
+
+### PERF-18
+
+- [x] `ClobWsManager` 在 token transport ownership 从 1 降为 0 时发送带当前 epoch 的
+  retirement 通知；pipeline 以 bounded queue 接收，按 partition 预留全部 mailbox permit，
+  等待 barrier 后才完成。较新 session/epoch 已接管时旧 retirement 不得删除新状态。
+- [x] partition retirement 删除 actor-owned `OrderBook`、stream sequence 和 microstructure
+  scratch，发布 `Retired` tombstone 并释放大 `Arc` sides；`TokenKey` 与 slot 进程内保持稳定且
+  永不复用。新 session 先进入 `Unseen`，只有完整 snapshot 可以重新变为 Fresh。
+- [x] 修复 retirement 与 stale shard open 的竞态：创建 session epoch 前必须验证完整物理
+  session scope 仍属于 transport union；任何 token 已失去 ownership 时整 session fail closed，
+  防止旧 assignment 用更高 epoch 绕过 retirement cutoff。
+- [x] SessionHub 拆为 1,024 control、2,048 reliable、8,192 topic latest-value best-effort
+  三条 lane，并使用 biased select 优先 shutdown/fail-closed/control。control enqueue 或 ACK
+  超过 100ms 触发 hub-wide cancellation；session loop 直接监听该 token，不依赖阻塞 hub 再发 close。
+- [x] fanout 使用 `SharedFrame { ByteString, OwnedSemaphorePermit }`：唯一 frame allocation
+  只收费一次，clone 共享同一 permit，最后一个 outbox 释放时归还。64MiB retained-frame
+  budget 与 1MiB 单 frame 上限同时约束 count 和 bytes；reliable 溢出断开受影响 topic 的
+  sessions，best-effort 只保留每 topic 最新值。
+- [x] 用户指出固定唯一合法值不应伪装成部署配置；已删除新加的 config model、TOML 和
+  `validate_web` 精确值检查。五个预算保留为 private constants，并由 architecture check
+  验证精确声明、三 lane、biased select、byte permit 与 fail-closed contract。
+- [x] 新增 control latency/timeout、三 lane depth/oldest age、retained frame bytes、coalesced、
+  dropped、reliable disconnect，以及 partition mutable-book count 指标。
+- [x] 回归覆盖 session ID 溢出、超大 frame、best-effort coalescing、reliable overflow、control
+  ACK timeout、10K sessions/1K subscribers/10K fanout 下 subject revoke 在 100ms 内完成；
+  10K catalog churn 的 mutable books 始终不超过 2K active window 且最终归零。
+- [x] 验证：`cargo check --workspace --all-targets`；`cargo test -p quant-pivot-api ws::`
+  30/30；`cargo test -p quant-pivot-core ingest::` 65/65；`cargo test -p quant-pivot-web
+  ws::tests` 12/12；受影响四 crate Clippy `-D warnings` 与 `cargo xtask architecture check`
+  全部通过。
+
+### PERF-19
+
+- [x] 新增唯一 `quant-pivot-compute::ComputeExecutor`，由 composition root 构建后注入；
+  serving/offline Rayon 各固定 2 threads，统一持有 CPU permits、exclusive offline job lease
+  与 10GiB offline memory permits，service 不再自建 pool。
+- [x] CPCV、training dataset、model training、matrix/backtest/trade-policy 以及 archive/weather
+  decode 均经统一 executor；caller future 被取消或丢弃时，worker 仍持有 lease 直到真实计算
+  完成，禁止把 `spawn_blocking::abort` 当作终止语义。
+- [x] weighted/sell/classical trainer 在 matrix、fold、trial、chunk/coordinate-search 边界检查
+  `CancellationProbe`；取消等待者不会启动计算，panic 映射 typed `InfraError`。
+- [x] architecture 从整文件 allowlist 改为语义扫描：生产直接 `spawn_blocking`、
+  `ThreadPoolBuilder`、global Rayon 与非批准函数内 `par_iter` 均拒绝；新增同文件未批准并行
+  调用的反例测试。
+- [x] 验证：compute 5/5、research trainer 13/13、classical 5/5、core CPCV 9/9、API
+  Binance 21/21、Tornado 2/2；`cargo check --workspace --all-targets`、workspace Clippy
+  `-D warnings`、architecture tests 21/21 与实际 architecture check 通过。
+- [x] 最终全仓测试发现 historical PIT 闭包进入 offline Rayon 后调用
+  `Handle::current()` 会失去 Tokio reactor；现改为在 async 边界捕获显式 runtime handle，
+  worker 仅用该 handle 驱动已预取的内存 async facade。`core_business` 全场景回归通过，
+  未退回无预算 `spawn_blocking`。
+
+### PERF-21
+
+- [x] report gate 改为 2K full-compute funnel：完整 feature/model lineage、planner rejection、
+  optimizer/TopN recommendation；禁止 early-terminal。CPCV gate 明确重命名为
+  `cpcv_orchestration_gate`。
+- [x] matrix fixture 覆盖 observed/substituted/missing/not-applicable 的真实 Decimal cell；新增
+  feature-gated `model_train_replay_gate`，执行 1M-row Ridge train、冻结 transform replay 与
+  全量 prediction checksum。
+- [x] `quant-pivot-system-tests::performance` 使用 deterministic Gamma HTTP 与按真实
+  subscription scope 路由的 CLOB WebSocket，贯通 SDK parser→normalize→bounded ingress→8
+  partition→ClickHouse durable cursor→Fresh BookStore，不调用测试 publish shortcut。
+- [x] 新增 enqueue 与 durable-publication observer；HDR 使用 coordinated-omission correction，
+  原始 bucket JSON 与 SHA-256 随 `PerformanceEvidenceV1` 保存。证据包含 fixture/seed hash、
+  环境、ClickHouse/RTT、事件与 correctness counters、CPU、encoded bytes、jemalloc net
+  allocated、RSS。warm-up 必须经过 durable barrier 后才能打开测量窗口。
+- [x] `cargo xtask performance run --profile full` 统一执行短 kernel 十次、真实 model gate
+  一次与完整在线负载三次；跨 run variation 超过 3% 非零退出。`smoke` 不签收 SLO。
+- [x] 新增独立 `performance.yml`：固定 self-hosted runner；main relevant-path 为 full，nightly
+  为 2h soak，manual 可选 profile；artifact v4 保存 evidence 和 SHA-256 manifest。
+- [x] kernel binary 在 Linux 直接采集 `VmHWM`；matrix 8GiB、CPCV/model 10GiB ceiling
+  由 binary 自身硬拒绝，缺值同样失败。kernel evidence 结构化保存 `peak_rss_bytes`；CI
+  manifest 经临时文件生成并排除既有 manifest，消除自引用哈希。
+- [x] 首次本机 debug smoke 真实启动 PG/Redis/ClickHouse 26.5、解析 1K Gamma markets/2K
+  tokens、完成初始 snapshots 与 8K 测量事件，所有 correctness counter 为零并生成完整
+  artifact。该次发现 warm-up backlog 在开表后继续 publish（8,630/8,000）且污染 HDR；已加
+  `all_durable_publications` barrier，原证据保留为失败诊断，不作为性能基线。
+- [x] mixed-state fixture 首轮统一 smoke 拒绝 required `f0` 的 `Substituted` cell；修复为
+  required 列恒为 `Observed`、optional 列覆盖四种状态，并新增直接执行
+  `FittedInputTransform::fit` 的回归测试。失败证据保留为诊断，不删除 gate 或放宽契约。
+- [x] 修复后 `cargo xtask performance run --profile smoke` 统一 release 验证：matrix
+  1M×128 16.470s；CPCV orchestration 0.555s；2K full report median 13.819ms / p99
+  14.408ms；100K Ridge train/replay 80.464s。真实 2K-token system load 的 8,000 source
+  events 与 8,000 durable publications 精确一致，dropped/gap/duplicate/out-of-order/
+  invalid-fresh-read/writer failures 全为零；两个 HDR artifact 的 SHA-256 已逐一复算一致。
+  macOS `VmHWM`/CPU/RSS 缺值符合 smoke 语义，durable p99 不作为 Linux SLO 签收。
+- [x] 最终全仓验证发现并修复 Config activity 的跨时钟因果排序：全局 feed 改用数据库
+  `created_at`，领域 `decided_at/activated_at` 仍完整保留；actor clock 领先数据库 1 秒的
+  确定性 repository contract 通过。
+- [x] 最终本机质量链：`cargo fmt --all -- --check`、workspace Clippy `-D warnings`、
+  `cargo xtask architecture check`、`cargo check --release --workspace` 全部通过。完整
+  workspace test 两次分别暴露并推动修复上述 reactor/因果排序问题；修复后的测试集合已
+  全覆盖通过：`core_business`、`repository_contracts`、reset/recovery 229.41s、production
+  web boundary 295.27s，以及其余 workspace unit/integration/doc tests。一次完整命令中的
+  reset plan 因容器尚残留 1 条 PostgreSQL session 正确 fail-closed；同一目标隔离复跑通过，
+  未放宽生产连接检查。
+- [x] 最终再次执行不跳项 `cargo test --workspace` 单次 exit 0：reset/recovery
+  236.27s、repository contracts 22.95s、production web boundary 159.76s；Web 43/43、
+  xtask 24/24、全部 workspace unit/integration/doc tests 均通过。
+- [ ] fixed Linux runner 生成 full/soak CI artifact。未取得 artifact 前 PERF-21 保持
+  `in_progress`，不得伪称 SLO 已通过。
 
 ## 更新规则
 

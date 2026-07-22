@@ -9,8 +9,9 @@ use anyhow::{Context, Result, bail};
 use quote::ToTokens;
 use serde::Deserialize;
 use syn::{
-    Attribute, Block, Expr, Fields, File, GenericArgument, Item, ItemMod, ItemUse, Lit, Meta,
-    Path as SynPath, PathArguments, Token, Type, UseTree, Visibility,
+    Attribute, Block, Expr, ExprMethodCall, Fields, File, GenericArgument, ImplItemFn, Item,
+    ItemFn, ItemMod, ItemUse, Lit, Meta, Path as SynPath, PathArguments, Token, Type, UseTree,
+    Visibility,
     punctuated::Punctuated,
     visit::{self, Visit},
 };
@@ -31,6 +32,7 @@ const KNOWN_WORKSPACE_PACKAGES: &[&str] = &[
     "quant-pivot-api",
     "quant-pivot-bench",
     "quant-pivot-bin",
+    "quant-pivot-compute",
     "quant-pivot-core",
     "quant-pivot-error",
     "quant-pivot-macros",
@@ -494,6 +496,8 @@ fn validate_source_style(file: &File, path: &Path) -> Vec<String> {
     let mut visitor = BodyStyleVisitor {
         path,
         block_depth: 0,
+        test_depth: 0,
+        function_name: None,
         generated_sea_orm_entity: file.attrs.iter().any(|attribute| {
             attribute
                 .meta
@@ -634,19 +638,24 @@ fn pascal_identifier(identifier: &str) -> String {
         .collect()
 }
 
-fn blocking_task_path_allowed(path: &Path) -> bool {
+fn parallel_kernel_allowed(path: &Path, function_name: Option<&str>) -> bool {
     matches!(
-        path.to_str(),
-        Some(
-            "crates/quant-pivot-api/src/binance/mod.rs"
-                | "crates/quant-pivot-api/src/binance/agg_trade.rs"
-                | "crates/quant-pivot-api/src/weather/tornado.rs"
-                | "crates/quant-pivot-core/src/service/backtest.rs"
-                | "crates/quant-pivot-core/src/service/cpcv_backtest.rs"
-                | "crates/quant-pivot-core/src/service/factor_pipeline.rs"
-                | "crates/quant-pivot-core/src/service/model_training.rs"
-                | "crates/quant-pivot-core/src/service/training_dataset.rs"
-                | "crates/quant-pivot-storage/src/write.rs"
+        (path.to_str(), function_name),
+        (
+            Some("crates/quant-pivot-core/src/service/cpcv_backtest.rs"),
+            Some("run_trial_grid")
+        ) | (
+            Some("crates/quant-pivot-research/src/features/builder.rs"),
+            Some("build_batch")
+        ) | (
+            Some("crates/quant-pivot-research/src/parallel.rs"),
+            Some("par_try_map" | "par_map_with_index" | "par_try_map_with_index")
+        ) | (
+            Some("crates/quant-pivot-research/src/validation/cpcv.rs"),
+            Some("run")
+        ) | (
+            Some("crates/quant-pivot-research/src/validation/pbo.rs"),
+            Some("probability_of_backtest_overfitting")
         )
     )
 }
@@ -654,6 +663,8 @@ fn blocking_task_path_allowed(path: &Path) -> bool {
 struct BodyStyleVisitor<'a> {
     path: &'a Path,
     block_depth: usize,
+    test_depth: usize,
+    function_name: Option<String>,
     generated_sea_orm_entity: bool,
     violations: Vec<String>,
 }
@@ -698,9 +709,31 @@ impl<'ast> Visit<'ast> for BodyStyleVisitor<'_> {
 
     fn visit_item_mod(&mut self, item_mod: &'ast ItemMod) {
         let previous_depth = self.block_depth;
+        let is_test = item_mod.ident == "tests"
+            || item_mod.attrs.iter().any(|attribute| {
+                attribute
+                    .meta
+                    .to_token_stream()
+                    .to_string()
+                    .contains("test")
+            });
+        self.test_depth += usize::from(is_test);
         self.block_depth = 0;
         visit::visit_item_mod(self, item_mod);
         self.block_depth = previous_depth;
+        self.test_depth -= usize::from(is_test);
+    }
+
+    fn visit_item_fn(&mut self, item_fn: &'ast ItemFn) {
+        let previous = self.function_name.replace(item_fn.sig.ident.to_string());
+        visit::visit_item_fn(self, item_fn);
+        self.function_name = previous;
+    }
+
+    fn visit_impl_item_fn(&mut self, item_fn: &'ast ImplItemFn) {
+        let previous = self.function_name.replace(item_fn.sig.ident.to_string());
+        visit::visit_impl_item_fn(self, item_fn);
+        self.function_name = previous;
     }
 
     fn visit_item_use(&mut self, item_use: &'ast ItemUse) {
@@ -738,13 +771,25 @@ impl<'ast> Visit<'ast> for BodyStyleVisitor<'_> {
             .iter()
             .map(|segment| segment.ident.to_string())
             .collect::<Vec<_>>();
-        if segments
-            .last()
-            .is_some_and(|segment| segment == "spawn_blocking")
-            && !blocking_task_path_allowed(self.path)
+        if self.test_depth == 0
+            && segments
+                .last()
+                .is_some_and(|segment| segment == "spawn_blocking")
         {
             self.violations.push(format!(
-                "{} introduces an ungoverned `spawn_blocking`; use an existing budgeted owner or add this path only with an explicit CPU/memory budget",
+                "{} directly calls `spawn_blocking` in production code; route CPU work through ComputeExecutor and keep bounded blocking I/O inside its owned boundary",
+                self.path.display()
+            ));
+        }
+        if self.test_depth == 0
+            && segments
+                .iter()
+                .any(|segment| segment == "ThreadPoolBuilder")
+            && !self.path.starts_with("crates/quant-pivot-compute/src")
+            && !self.path.starts_with("crates/quant-pivot-bench")
+        {
+            self.violations.push(format!(
+                "{} constructs a production Rayon pool outside ComputeExecutor",
                 self.path.display()
             ));
         }
@@ -780,6 +825,26 @@ impl<'ast> Visit<'ast> for BodyStyleVisitor<'_> {
             ));
         }
         visit::visit_path(self, path);
+    }
+
+    fn visit_expr_method_call(&mut self, call: &'ast ExprMethodCall) {
+        let method = call.method.to_string();
+        if self.test_depth == 0
+            && matches!(
+                method.as_str(),
+                "par_iter" | "par_iter_mut" | "into_par_iter" | "build_global"
+            )
+            && !self.path.starts_with("crates/quant-pivot-compute/src")
+            && !self.path.starts_with("crates/quant-pivot-bench")
+            && !(method != "build_global"
+                && parallel_kernel_allowed(self.path, self.function_name.as_deref()))
+        {
+            self.violations.push(format!(
+                "{} uses governed compute primitive `{method}` outside ComputeExecutor or an approved pure parallel kernel",
+                self.path.display()
+            ));
+        }
+        visit::visit_expr_method_call(self, call);
     }
 }
 
@@ -920,8 +985,100 @@ fn validate_performance_contracts(metadata: &CargoMetadata) -> Result<Vec<String
     validate_allocator_contract(root, &mut violations)?;
     validate_deployment_contract(root, &mut violations)?;
     validate_runtime_contract(root, &mut violations)?;
+    validate_performance_evidence_contract(root, &mut violations)?;
     validate_removed_l2_contract(root, &mut violations)?;
     Ok(violations)
+}
+
+fn validate_performance_evidence_contract(root: &Path, violations: &mut Vec<String>) -> Result<()> {
+    for (relative, fragments) in [
+        (
+            "crates/quant-pivot-system-tests/src/performance/mod.rs",
+            &[
+                "const REQUIRED_RUNNER: &str = \"quant-pivot-perf-8c16g\";",
+                "const ACTIVE_TOKENS: usize = 2_000;",
+                "const FULL_RUN_COUNT: u16 = 3;",
+                "const MAX_RUNNER_VARIATION_PERCENT: f64 = 3.0;",
+                "warmup: Duration::from_mins(5),",
+                "sustained: Duration::from_mins(30),",
+                "sustained_rate: 10_000,",
+                "burst: Duration::from_secs(10),",
+                "burst_rate: 50_000,",
+                "sustained: Duration::from_hours(2),",
+                "churn_interval: Some(Duration::from_mins(5)),",
+                "record_correct(value, expected)",
+                "all_durable_publications",
+                "profile == PerformanceProfile::Smoke || hard_slo_passed",
+            ][..],
+        ),
+        (
+            "crates/quant-pivot-system-tests/src/performance/evidence.rs",
+            &[
+                "pub const PERFORMANCE_EVIDENCE_SCHEMA_VERSION: u16 = 1;",
+                "pub struct PerformanceEvidenceV1",
+                "coordinated_omission_expected_interval_us",
+                "sha256: sha256_hex(&bytes)",
+                "VmHWM:",
+            ][..],
+        ),
+        (
+            "crates/quant-pivot-xtask/src/performance.rs",
+            &[
+                "const FULL_KERNEL_REPETITIONS: u16 = 10;",
+                "name: \"training_matrix_gate\"",
+                "name: \"cpcv_orchestration_gate\"",
+                "name: \"report_compute_gate\"",
+                "name: \"model_train_replay_gate\"",
+                "peak_rss_bytes: Option<u64>",
+            ][..],
+        ),
+        (
+            "crates/quant-pivot-bench/src/bin/training_matrix_gate.rs",
+            &[
+                "const MAX_RSS_BYTES: u64 = 8 * 1_024 * 1_024 * 1_024;",
+                "enforce_linux_peak_rss(peak_rss, MAX_RSS_BYTES, \"training matrix\")?;",
+            ][..],
+        ),
+        (
+            "crates/quant-pivot-bench/src/bin/model_train_replay_gate.rs",
+            &[
+                "const MAX_RSS_BYTES: u64 = 10 * 1_024 * 1_024 * 1_024;",
+                "enforce_linux_peak_rss(peak_rss, MAX_RSS_BYTES, \"model train/replay\")?;",
+            ][..],
+        ),
+        (
+            ".github/workflows/performance.yml",
+            &[
+                "runs-on: [self-hosted, quant-pivot-perf-8c16g]",
+                "QUANT_PIVOT_PERF_RUNNER: quant-pivot-perf-8c16g",
+                "profile=soak",
+                "profile=full",
+                "actions/upload-artifact@v4",
+                "! -name artifact-manifest.sha256 -print0",
+            ][..],
+        ),
+    ] {
+        let path = root.join(relative);
+        let source = fs::read_to_string(&path)
+            .with_context(|| format!("read performance evidence contract {}", path.display()))?;
+        for fragment in fragments {
+            if !source.contains(fragment) {
+                violations.push(format!(
+                    "{} is missing governed performance evidence contract `{fragment}`",
+                    path.display()
+                ));
+            }
+        }
+    }
+
+    let legacy_gate = root.join("crates/quant-pivot-bench/src/bin/cpcv_gate.rs");
+    if legacy_gate.exists() {
+        violations.push(format!(
+            "{} retains the superseded ambiguous CPCV gate name",
+            legacy_gate.display()
+        ));
+    }
+    Ok(())
 }
 
 fn validate_allocator_contract(root: &Path, violations: &mut Vec<String>) -> Result<()> {
@@ -945,6 +1102,7 @@ fn validate_allocator_contract(root: &Path, violations: &mut Vec<String>) -> Res
         "api",
         "bench",
         "bin",
+        "compute",
         "core",
         "error",
         "migration",
@@ -1041,22 +1199,86 @@ fn validate_deployment_contract(root: &Path, violations: &mut Vec<String>) -> Re
 }
 
 fn validate_runtime_contract(root: &Path, violations: &mut Vec<String>) -> Result<()> {
+    validate_compute_runtime_contract(root, violations)?;
+    validate_data_plane_runtime_contract(root, violations)
+}
+
+fn validate_compute_runtime_contract(root: &Path, violations: &mut Vec<String>) -> Result<()> {
     let runtime_path = root.join("crates/quant-pivot-bin/src/main.rs");
     let runtime = fs::read_to_string(&runtime_path)
         .with_context(|| format!("read {}", runtime_path.display()))?;
     for fragment in [
         "const TOKIO_WORKER_THREADS: usize = 3;",
         "const TOKIO_MAX_BLOCKING_THREADS: usize = 4;",
-        "const OFFLINE_RAYON_THREADS: usize = 2;",
         ".worker_threads(TOKIO_WORKER_THREADS)",
         ".max_blocking_threads(TOKIO_MAX_BLOCKING_THREADS)",
-        ".num_threads(OFFLINE_RAYON_THREADS)",
+        "let compute = Arc::new(ComputeExecutor::new()?);",
+        "bootstrap::run(deploy, compute)",
     ] {
         if !runtime.contains(fragment) {
             violations.push(format!(
                 "{} is missing governed runtime budget `{fragment}`",
                 runtime_path.display()
             ));
+        }
+    }
+
+    let compute_path = root.join("crates/quant-pivot-compute/src/lib.rs");
+    let compute = fs::read_to_string(&compute_path)
+        .with_context(|| format!("read {}", compute_path.display()))?;
+    for fragment in [
+        "pub const SERVING_THREADS: usize = 2;",
+        "pub const OFFLINE_THREADS: usize = 2;",
+        "pub const OFFLINE_MEMORY_BYTES: usize = 10 * 1024 * 1024 * 1024;",
+        "offline_jobs: Arc<Semaphore>",
+        "offline_memory: Arc<Semaphore>",
+        "run_offline_cancellable",
+        "run_serving_scoped",
+    ] {
+        if !compute.contains(fragment) {
+            violations.push(format!(
+                "{} is missing governed compute contract `{fragment}`",
+                compute_path.display()
+            ));
+        }
+    }
+
+    for (relative, fragments) in [
+        (
+            "crates/quant-pivot-core/src/service/feature_pipeline.rs",
+            &["ComputeExecutor", "run_serving_scoped"][..],
+        ),
+        (
+            "crates/quant-pivot-core/src/service/factor_pipeline.rs",
+            &["ComputeExecutor", "run_serving"][..],
+        ),
+        (
+            "crates/quant-pivot-core/src/service/model_training.rs",
+            &["ComputeExecutor", "run_offline_cancellable"][..],
+        ),
+        (
+            "crates/quant-pivot-core/src/service/training_dataset.rs",
+            &["ComputeExecutor", "run_offline_cancellable"][..],
+        ),
+        (
+            "crates/quant-pivot-core/src/service/backtest.rs",
+            &["ComputeExecutor", "run_offline_cancellable"][..],
+        ),
+        (
+            "crates/quant-pivot-core/src/service/cpcv_backtest.rs",
+            &["ComputeExecutor", "run_offline_cancellable"][..],
+        ),
+    ] {
+        let path = root.join(relative);
+        let source =
+            fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+        for fragment in fragments {
+            if !source.contains(fragment) {
+                violations.push(format!(
+                    "{} bypasses the centralized compute contract `{fragment}`",
+                    path.display()
+                ));
+            }
         }
     }
 
@@ -1068,6 +1290,56 @@ fn validate_runtime_contract(root: &Path, violations: &mut Vec<String>) -> Resul
             violations.push(format!(
                 "{} is missing governed Actix budget `{fragment}`",
                 web_path.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_data_plane_runtime_contract(root: &Path, violations: &mut Vec<String>) -> Result<()> {
+    let session_hub_path = root.join("crates/quant-pivot-web/src/ws/mod.rs");
+    let session_hub = fs::read_to_string(&session_hub_path)
+        .with_context(|| format!("read {}", session_hub_path.display()))?;
+    for fragment in [
+        "const HUB_CONTROL_CAPACITY: usize = 1_024;",
+        "const HUB_RELIABLE_CAPACITY: usize = 2_048;",
+        "const HUB_BEST_EFFORT_TOPIC_CAPACITY: usize = 8_192;",
+        "const HUB_FRAME_BUDGET_BYTES: usize = 64 * 1_024 * 1_024;",
+        "const HUB_MAX_FRAME_BYTES: usize = 1_024 * 1_024;",
+        "biased;",
+        "control: Receiver<SessionControlCommand>",
+        "reliable: Receiver<ReliableFanout>",
+        "best_effort: Arc<BestEffortCoalescer>",
+        "_byte_permit: OwnedSemaphorePermit",
+        "self.fail_closed.cancel();",
+    ] {
+        if !session_hub.contains(fragment) {
+            violations.push(format!(
+                "{} is missing governed SessionHub contract `{fragment}`",
+                session_hub_path.display()
+            ));
+        }
+    }
+    if session_hub.contains("WebSocketHubConfig") {
+        violations.push(format!(
+            "{} exposes fixed SessionHub qualification budgets as pseudo-configuration",
+            session_hub_path.display()
+        ));
+    }
+
+    let data_pipeline_path = root.join("crates/quant-pivot-core/src/ingest/data_pipeline.rs");
+    let data_pipeline = fs::read_to_string(&data_pipeline_path)
+        .with_context(|| format!("read {}", data_pipeline_path.display()))?;
+    for fragment in [
+        "Retire {",
+        "retire_transport_tokens",
+        "take_retired_mutable_book",
+        "mutable_book_count",
+    ] {
+        if !data_pipeline.contains(fragment) {
+            violations.push(format!(
+                "{} is missing governed token-retirement contract `{fragment}`",
+                data_pipeline_path.display()
             ));
         }
     }
@@ -1086,16 +1358,32 @@ fn validate_runtime_contract(root: &Path, violations: &mut Vec<String>) -> Resul
     let book_store = fs::read_to_string(&book_store_path)
         .with_context(|| format!("read {}", book_store_path.display()))?;
     let read_body = book_store
-        .split_once("pub fn read<R>")
-        .and_then(|(_, tail)| tail.split_once("/// Load an owned snapshot"))
+        .split_once("pub fn read_fresh<R>")
+        .and_then(|(_, tail)| tail.split_once("/// Load an owned fresh snapshot"))
         .map(|(body, _)| body);
-    if read_body
-        .is_none_or(|body| !body.contains("slot.published.load()") || body.contains("load_full"))
-    {
+    if read_body.is_none_or(|body| {
+        !body.contains("slot.snapshot_with_freshness()")
+            || !body.contains("is_epoch_active")
+            || body.contains("load_full")
+    }) {
         violations.push(format!(
-            "{} must keep the synchronous BookStore reader on an ArcSwap guard without `load_full()`",
+            "{} must keep the synchronous Fresh reader on one coherent ArcSwap/seqlock guard with an active-session fence and without `load_full()`",
             book_store_path.display()
         ));
+    }
+    for forbidden in [
+        "pub fn read<",
+        "pub fn load_owned(",
+        "pub fn load_by_id(",
+        "pub fn load_pair(",
+        "pub fn published_snapshots(",
+    ] {
+        if book_store.contains(forbidden) {
+            violations.push(format!(
+                "{} exposes forbidden raw book API `{forbidden}`; use FreshBook or diagnostic LastKnownBook",
+                book_store_path.display()
+            ));
+        }
     }
     Ok(())
 }
@@ -1246,7 +1534,13 @@ fn is_production_package(name: &str) -> bool {
 fn allowed_workspace_dependencies(package: &str) -> &'static [&'static str] {
     match package {
         "quant-pivot-models" => &["quant-pivot-error", "quant-pivot-macros"],
-        "quant-pivot-api" | "quant-pivot-research" => &["quant-pivot-error", "quant-pivot-models"],
+        "quant-pivot-compute" => &["quant-pivot-error"],
+        "quant-pivot-api" => &[
+            "quant-pivot-compute",
+            "quant-pivot-error",
+            "quant-pivot-models",
+        ],
+        "quant-pivot-research" => &["quant-pivot-error", "quant-pivot-models"],
         "quant-pivot-migration" | "quant-pivot-storage" => {
             &["quant-pivot-error", "quant-pivot-models"]
         }
@@ -1264,6 +1558,7 @@ fn allowed_workspace_dependencies(package: &str) -> &'static [&'static str] {
         ],
         "quant-pivot-core" => &[
             "quant-pivot-api",
+            "quant-pivot-compute",
             "quant-pivot-error",
             "quant-pivot-migration",
             "quant-pivot-models",
@@ -1272,8 +1567,13 @@ fn allowed_workspace_dependencies(package: &str) -> &'static [&'static str] {
             "quant-pivot-storage",
             "quant-pivot-web",
         ],
-        "quant-pivot-bin" => &["quant-pivot-core", "quant-pivot-models"],
+        "quant-pivot-bin" => &[
+            "quant-pivot-compute",
+            "quant-pivot-core",
+            "quant-pivot-models",
+        ],
         "quant-pivot-bench" => &[
+            "quant-pivot-compute",
             "quant-pivot-core",
             "quant-pivot-error",
             "quant-pivot-models",
@@ -1281,6 +1581,7 @@ fn allowed_workspace_dependencies(package: &str) -> &'static [&'static str] {
         ],
         "quant-pivot-system-tests" => &[
             "quant-pivot-api",
+            "quant-pivot-compute",
             "quant-pivot-core",
             "quant-pivot-error",
             "quant-pivot-migration",
@@ -1291,6 +1592,7 @@ fn allowed_workspace_dependencies(package: &str) -> &'static [&'static str] {
         ],
         "quant-pivot-xtask" => &[
             "quant-pivot-api",
+            "quant-pivot-compute",
             "quant-pivot-error",
             "quant-pivot-migration",
             "quant-pivot-models",
@@ -1440,21 +1742,42 @@ mod tests {
     }
 
     #[test]
-    fn blocking_tasks_are_restricted_to_budgeted_owners() {
+    fn blocking_tasks_are_restricted_to_executor_or_tests() {
         let source = syn::parse_file("fn run() { let _ = tokio::task::spawn_blocking(work); }")
             .expect("parse fixture");
 
         let violations = validate_source_style(&source, Path::new("src/unbudgeted.rs"));
         assert_eq!(violations.len(), 1);
-        assert!(violations[0].contains("ungoverned `spawn_blocking`"));
+        assert!(violations[0].contains("directly calls `spawn_blocking`"));
 
-        assert!(
-            validate_source_style(
-                &source,
-                Path::new("crates/quant-pivot-core/src/service/factor_pipeline.rs"),
-            )
-            .is_empty()
-        );
+        let test_source = syn::parse_file(
+            "#[cfg(test)] mod tests { fn run() { let _ = tokio::task::spawn_blocking(work); } }",
+        )
+        .expect("parse test fixture");
+        assert!(validate_source_style(&test_source, Path::new("src/test_owner.rs")).is_empty());
+    }
+
+    #[test]
+    fn rayon_primitives_are_restricted_to_exact_governed_kernels() {
+        let pool = syn::parse_file(
+            "fn run() { let _ = ThreadPoolBuilder::new().num_threads(9).build(); }",
+        )
+        .expect("parse pool fixture");
+        let violations = validate_source_style(&pool, Path::new("src/unbudgeted.rs"));
+        assert_eq!(violations.len(), 1);
+        assert!(violations[0].contains("production Rayon pool"));
+
+        let unapproved = syn::parse_file("fn surprise() { let _ = rows.par_iter(); }")
+            .expect("parse parallel fixture");
+        let builder_path = Path::new("crates/quant-pivot-research/src/features/builder.rs");
+        let violations = validate_source_style(&unapproved, builder_path);
+        assert_eq!(violations.len(), 1);
+        assert!(violations[0].contains("governed compute primitive `par_iter`"));
+
+        let approved =
+            syn::parse_file("impl Builder { fn build_batch(&self) { let _ = rows.par_iter(); } }")
+                .expect("parse approved kernel fixture");
+        assert!(validate_source_style(&approved, builder_path).is_empty());
     }
 
     #[test]

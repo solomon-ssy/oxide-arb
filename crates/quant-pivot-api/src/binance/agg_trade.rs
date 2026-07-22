@@ -2,12 +2,14 @@
 
 use std::{
     mem,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use csv::{ReaderBuilder, StringRecord};
 use futures_util::StreamExt;
+use quant_pivot_compute::{ComputeExecutor, OfflineMemory};
 use quant_pivot_error::{QuantError, QuantResult, api::ApiError, ws::WsError};
 use quant_pivot_models::{
     config::BinanceSourceConfig,
@@ -50,31 +52,43 @@ pub struct BinanceAggTradeSource {
     http: Client,
     retry_policy: RetryPolicy,
     request_budget: BinanceRequestBudget,
+    compute: Arc<ComputeExecutor>,
 }
 
 impl BinanceAggTradeSource {
-    pub fn connect(config: BinanceSourceConfig) -> QuantResult<Self> {
+    pub fn connect(
+        config: BinanceSourceConfig,
+        compute: Arc<ComputeExecutor>,
+    ) -> QuantResult<Self> {
         let request_budget = BinanceRequestBudget::new(&config)?;
-        Self::connect_with_budget(config, request_budget)
+        Self::connect_with_budget(config, request_budget, compute)
     }
 
     pub fn connect_with_budget(
         config: BinanceSourceConfig,
         request_budget: BinanceRequestBudget,
+        compute: Arc<ComputeExecutor>,
     ) -> QuantResult<Self> {
-        Self::connect_for_market(config, request_budget, BinanceMarketSegment::Spot)
+        Self::connect_for_market(config, request_budget, compute, BinanceMarketSegment::Spot)
     }
 
     pub fn connect_usdm_futures_with_budget(
         config: BinanceSourceConfig,
         request_budget: BinanceRequestBudget,
+        compute: Arc<ComputeExecutor>,
     ) -> QuantResult<Self> {
-        Self::connect_for_market(config, request_budget, BinanceMarketSegment::UsdmFutures)
+        Self::connect_for_market(
+            config,
+            request_budget,
+            compute,
+            BinanceMarketSegment::UsdmFutures,
+        )
     }
 
     fn connect_for_market(
         config: BinanceSourceConfig,
         request_budget: BinanceRequestBudget,
+        compute: Arc<ComputeExecutor>,
         market: BinanceMarketSegment,
     ) -> QuantResult<Self> {
         let http = Client::builder()
@@ -87,6 +101,7 @@ impl BinanceAggTradeSource {
             http,
             retry_policy: RetryPolicy::gamma_default(),
             request_budget,
+            compute,
         })
     }
 
@@ -201,17 +216,21 @@ impl BinanceAggTradeSource {
         let member = filename.replace(".zip", ".csv");
         let batch_size = self.config.batch_size.max(1);
         let (sender, receiver) = mpsc::channel(2);
-        let decoder = tokio::task::spawn_blocking(move || {
-            decode_archive_batches(
-                market,
-                &symbol,
-                archive,
-                &member,
-                available_at,
-                batch_size,
-                &sender,
-            )
-        });
+        let memory = OfflineMemory::try_bytes(archive.len().max(1024 * 1024 * 1024))?;
+        let decoder = self
+            .compute
+            .spawn_offline(memory, move || {
+                decode_archive_batches(
+                    market,
+                    &symbol,
+                    archive,
+                    &member,
+                    available_at,
+                    batch_size,
+                    &sender,
+                )
+            })
+            .await?;
         Ok(Some(BinanceArchiveBatchStream::new(receiver, decoder)))
     }
 
@@ -534,10 +553,14 @@ fn closed(frame: Option<CloseFrame>) -> WsError {
 
 #[cfg(test)]
 mod tests {
-    use std::io::{Cursor, Write};
+    use std::{
+        io::{Cursor, Write},
+        sync::Arc,
+    };
 
     use chrono::{NaiveDate, TimeZone, Utc};
     use futures_util::SinkExt;
+    use quant_pivot_compute::ComputeExecutor;
     use quant_pivot_models::{
         config::BinanceSourceConfig,
         enums::domain::BinanceMarketSegment,
@@ -555,6 +578,10 @@ mod tests {
 
     use super::{BinanceAggTradeSource, agg_trade_request_weight, decode_archive};
     use crate::binance::{BinanceRequestBudget, archive::verify_archive_checksum};
+
+    fn test_compute() -> Arc<ComputeExecutor> {
+        Arc::new(ComputeExecutor::new().expect("test compute executor"))
+    }
 
     fn archive_bytes(csv: &str) -> Vec<u8> {
         let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
@@ -590,10 +617,13 @@ mod tests {
             )
             .mount(&server)
             .await;
-        let source = BinanceAggTradeSource::connect(BinanceSourceConfig {
-            rest_url: server.uri(),
-            ..BinanceSourceConfig::default()
-        })
+        let source = BinanceAggTradeSource::connect(
+            BinanceSourceConfig {
+                rest_url: server.uri(),
+                ..BinanceSourceConfig::default()
+            },
+            test_compute(),
+        )
         .expect("source");
         let symbol = BinanceSymbol::parse("BTCUSDT").expect("symbol");
         let available_at = Utc.with_ymd_and_hms(2023, 11, 14, 23, 0, 0).unwrap();
@@ -634,6 +664,7 @@ mod tests {
         let source = BinanceAggTradeSource::connect_usdm_futures_with_budget(
             config.clone(),
             BinanceRequestBudget::new(&config).expect("budget"),
+            test_compute(),
         )
         .expect("source");
         let symbol = BinanceSymbol::parse("HYPEUSDT").expect("symbol");
@@ -697,6 +728,7 @@ mod tests {
         let source = BinanceAggTradeSource::connect_usdm_futures_with_budget(
             config.clone(),
             BinanceRequestBudget::new(&config).expect("budget"),
+            test_compute(),
         )
         .expect("source");
         let symbol = BinanceSymbol::parse("HYPEUSDT").expect("symbol");
@@ -754,6 +786,7 @@ mod tests {
         let source = BinanceAggTradeSource::connect_usdm_futures_with_budget(
             config.clone(),
             BinanceRequestBudget::new(&config).expect("budget"),
+            test_compute(),
         )
         .expect("source");
         let symbol = BinanceSymbol::parse("HYPEUSDT").expect("symbol");
@@ -792,11 +825,14 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_string(checksum))
             .mount(&server)
             .await;
-        let source = BinanceAggTradeSource::connect(BinanceSourceConfig {
-            archive_url: server.uri(),
-            batch_size: 1,
-            ..BinanceSourceConfig::default()
-        })
+        let source = BinanceAggTradeSource::connect(
+            BinanceSourceConfig {
+                archive_url: server.uri(),
+                batch_size: 1,
+                ..BinanceSourceConfig::default()
+            },
+            test_compute(),
+        )
         .expect("source");
         let symbol = BinanceSymbol::parse("BTCUSDT").expect("symbol");
         let available_at = Utc

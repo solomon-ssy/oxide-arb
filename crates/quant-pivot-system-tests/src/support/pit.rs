@@ -75,8 +75,8 @@ impl InMemoryDecisionSnapshotSource {
                 continue;
             };
             for token_id in [&market.token_yes, &market.token_no] {
-                if let Some(book) = book_store.load_by_id(token_id) {
-                    books.insert(token_id.clone(), book);
+                if let Ok(book) = book_store.load_fresh_by_id(token_id) {
+                    books.insert(token_id.clone(), book.into_snapshot());
                 }
             }
             if let Some(event) = registry.get_event(&market.event_id) {

@@ -19,6 +19,7 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use quant_pivot_compute::{ComputeExecutor, OfflineMemory};
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError, storage::StorageError};
 use quant_pivot_models::{
     domain::quant::{JobProgressSink, TrainingDatasetInfo},
@@ -55,11 +56,11 @@ use quant_pivot_research::{
     features::FeatureSchema,
     hashing::ResearchHasher,
     model::{
-        FactorWeight, LabelSelector, ModelArtifact, ModelArtifactHeader, ModelRuntimeInput,
-        ModelRuntimeOutput, ModelTrainer, QuantModelRuntime, ReturnModelSpec, ScoreMultiplierSpec,
-        SellScorerOutputSpec, SellScorerRuntime, SellScorerTrainer, SellSignalPolicy,
-        SubstitutionConfidenceRules, TrainModelRequest, TrainSellScorerRequest, ValidationSpec,
-        WeightedFactorRuntime, WeightedFactorTrainer, WeightedSellScorerRuntime,
+        CancellationProbe, FactorWeight, LabelSelector, ModelArtifact, ModelArtifactHeader,
+        ModelRuntimeInput, ModelRuntimeOutput, ModelTrainer, QuantModelRuntime, ReturnModelSpec,
+        ScoreMultiplierSpec, SellScorerOutputSpec, SellScorerRuntime, SellScorerTrainer,
+        SellSignalPolicy, SubstitutionConfidenceRules, TrainModelRequest, TrainSellScorerRequest,
+        ValidationSpec, WeightedFactorRuntime, WeightedFactorTrainer, WeightedSellScorerRuntime,
     },
     precision::RESEARCH_DECIMAL_SCALE,
     selection::ModelFeatureRequirements,
@@ -73,9 +74,9 @@ use quant_pivot_research::{
         min_track_record_length, probability_of_backtest_overfitting,
     },
 };
-use rayon::{ThreadPool, ThreadPoolBuilder, prelude::*};
+use rayon::prelude::*;
 use rust_decimal::{Decimal, prelude::ToPrimitive};
-use tokio::{runtime::Handle, task};
+use tokio::runtime::Handle;
 use tokio_util::sync::CancellationToken;
 
 #[cfg(feature = "ml-classical")]
@@ -106,10 +107,55 @@ impl CpcvProgress {
     const FINALIZE: ProgressPhase = ProgressPhase { start: 95 };
 }
 
-const OFFLINE_RAYON_THREADS: usize = 2;
-
 struct ProgressPhase {
     start: u64,
+}
+
+fn ensure_cpcv_not_cancelled(cancel: &CancellationToken, phase: &str) -> QuantResult<()> {
+    if cancel.is_cancelled() {
+        return Err(ResearchError::Cancelled {
+            detail: format!("cpcv backtest cancelled at `{phase}`"),
+        }
+        .into());
+    }
+    Ok(())
+}
+
+fn cancellation_probe(cancel: &CancellationToken) -> CancellationProbe {
+    let cancel = cancel.clone();
+    CancellationProbe::new(move || cancel.is_cancelled())
+}
+
+struct CancellableFoldSource<'a> {
+    inner: &'a dyn FoldModelSource,
+    cancel: &'a CancellationToken,
+}
+
+impl FoldModelSource for CancellableFoldSource<'_> {
+    fn train_fold(&self, filter: &GroupRowFilter) -> QuantResult<FoldRuntime> {
+        ensure_cpcv_not_cancelled(self.cancel, "fold train boundary")?;
+        let model = self.inner.train_fold(filter)?;
+        ensure_cpcv_not_cancelled(self.cancel, "fold train completion")?;
+        Ok(model)
+    }
+}
+
+struct CancellableReplayEngine<'a> {
+    inner: &'a dyn ReplayEngine,
+    cancel: &'a CancellationToken,
+}
+
+impl ReplayEngine for CancellableReplayEngine<'_> {
+    fn evaluate(
+        &self,
+        model: &FoldRuntime,
+        filter: &GroupRowFilter,
+    ) -> QuantResult<Vec<GroupEvaluation>> {
+        ensure_cpcv_not_cancelled(self.cancel, "fold replay boundary")?;
+        let evaluations = self.inner.evaluate(model, filter)?;
+        ensure_cpcv_not_cancelled(self.cancel, "fold replay completion")?;
+        Ok(evaluations)
+    }
 }
 
 /// Repository + store dependencies.
@@ -118,6 +164,7 @@ struct ProgressPhase {
 /// it mirrors `BacktestServiceDeps` (`crate::service::backtest`) combined
 /// with `ModelTrainerServiceDeps` (`crate::service::model_training`).
 pub struct CpcvBacktestServiceDeps {
+    pub compute: Arc<ComputeExecutor>,
     pub dataset_repo: Arc<dyn TrainingDatasetRepository>,
     pub artifact_store: Arc<dyn ArtifactStore>,
 }
@@ -201,7 +248,6 @@ pub struct CpcvBacktestService {
     config: CpcvBacktestConfig,
     caps: PortfolioCaps,
     replay: ReplayConfig,
-    offline_pool: Arc<ThreadPool>,
 }
 
 impl CpcvBacktestService {
@@ -219,27 +265,19 @@ impl CpcvBacktestService {
         portfolio: &PortfolioConfig,
         replay: ReplayConfig,
     ) -> QuantResult<Self> {
-        let offline_pool = ThreadPoolBuilder::new()
-            .num_threads(OFFLINE_RAYON_THREADS)
-            .thread_name(|index| format!("quant-offline-{index}"))
-            .build()
-            .map_err(|error| ResearchError::ValidationMethodology {
-                detail: format!("failed to build governed offline Rayon pool: {error}"),
-            })?;
         Ok(Self {
             deps,
             config,
             caps: PortfolioCaps::try_from(portfolio)?,
             replay,
-            offline_pool: Arc::new(offline_pool),
         })
     }
 
     /// Run CPCV + the governed trial grid, producing the full
     /// validation outcome. Materializes training examples and backtest ticks
     /// **once** over the dataset's frozen window (real `ClickHouse` I/O),
-    /// then runs every fold/trial as pure, `spawn_blocking`-offloaded,
-    /// rayon-parallel compute with no further I/O.
+    /// then runs every fold/trial through the process-wide governed offline
+    /// executor with no further I/O.
     pub async fn run(
         &self,
         input: CpcvBacktestInput,
@@ -260,7 +298,13 @@ impl CpcvBacktestService {
         ));
         let path_set_id = input.path_set_id.unwrap_or_else(BacktestPathSetId::from_v7);
         let mut path_set = self
-            .run_cpcv(path_set_id, &fold_template, &replay_template, &groups)
+            .run_cpcv(
+                path_set_id,
+                &fold_template,
+                &replay_template,
+                &groups,
+                cancel,
+            )
             .await?;
         if let (FoldTemplate::Sell(_), ReplayTemplate::Sell(template)) =
             (fold_template.as_ref(), replay_template.as_ref())
@@ -281,6 +325,7 @@ impl CpcvBacktestService {
                 &replay_template,
                 &groups,
                 sample_interval_secs,
+                cancel,
             )
             .await?;
 
@@ -289,12 +334,26 @@ impl CpcvBacktestService {
             CpcvProgress::FINALIZE.start,
             CpcvProgress::TOTAL,
         ));
-        let (dsr, pbo) =
-            compute_dsr_and_pbo(&dataset, &path_set, &matrix, trial_grid_count, &self.config)?;
-        let min_track_record_length = representative_path(&path_set)
-            .map(|path| min_trl_for_path(&dataset, path, &self.config.dsr_significance))
-            .transpose()?
-            .flatten();
+        let (dsr, pbo, min_track_record_length) = self
+            .deps
+            .compute
+            .run_offline_scoped(OfflineMemory::try_gib(2)?, cancel, || {
+                ensure_cpcv_not_cancelled(cancel, "final statistics start")?;
+                let (dsr, pbo) = compute_dsr_and_pbo(
+                    &dataset,
+                    &path_set,
+                    &matrix,
+                    trial_grid_count,
+                    &self.config,
+                )?;
+                let min_track_record_length = representative_path(&path_set)
+                    .map(|path| min_trl_for_path(&dataset, path, &self.config.dsr_significance))
+                    .transpose()?
+                    .flatten();
+                ensure_cpcv_not_cancelled(cancel, "final statistics completion")?;
+                Ok((dsr, pbo, min_track_record_length))
+            })
+            .await?;
         // Bailey DSR N/V must describe the same trial population: the governed
         // trial grid that produced `matrix` (and thus V). Coord-search is
         // audit-only and must not inflate N without a matching Sharpe column.
@@ -338,7 +397,7 @@ impl CpcvBacktestService {
         let mut parquet_examples = self.decode_examples(dataset).await?;
 
         if input.model_family.is_exit_scorer() {
-            return self.prepare_sell_templates(dataset, input, parquet_examples, progress);
+            return self.prepare_sell_templates(dataset, input, parquet_examples, progress, cancel);
         }
 
         progress.report(ResearchJobProgress::with_total(
@@ -463,6 +522,7 @@ impl CpcvBacktestService {
             header_template,
             groups,
             handle,
+            cancellation: cancellation_probe(cancel),
         };
         #[cfg(feature = "ml-classical")]
         let fold_template = self.build_fold_template(dataset, input, fold_build)?;
@@ -532,6 +592,7 @@ impl CpcvBacktestService {
             header_template,
             groups,
             handle,
+            cancellation,
         } = build;
         if let Some(kind) = input.model_family.classical_kind() {
             let materialization = require_dataset_materialization(dataset)?;
@@ -564,6 +625,7 @@ impl CpcvBacktestService {
             groups,
             purge: self.config.purge,
             handle,
+            cancellation,
         })))
     }
 
@@ -580,6 +642,7 @@ impl CpcvBacktestService {
             header_template,
             groups,
             handle,
+            cancellation,
         } = build;
         let seed_weights = weighted_seed_weights(&self.config.factors, &examples);
         Arc::new(FoldTemplate::WeightedFactor(FoldTrainTemplate {
@@ -596,6 +659,7 @@ impl CpcvBacktestService {
             groups,
             purge: self.config.purge,
             handle,
+            cancellation,
         }))
     }
 
@@ -609,6 +673,7 @@ impl CpcvBacktestService {
         input: &CpcvBacktestInput,
         parquet_examples: Vec<TrainingExample>,
         progress: &dyn JobProgressSink,
+        cancel: &CancellationToken,
     ) -> QuantResult<(Arc<FoldTemplate>, Arc<ReplayTemplate>)> {
         let materialization = require_dataset_materialization(dataset)?;
         if input.model_family != ModelFamily::HoldVsExitWeighted {
@@ -705,6 +770,7 @@ impl CpcvBacktestService {
             input_contract: Arc::new(input.input_contract.clone()),
             groups: Arc::clone(&groups),
             purge: self.config.purge,
+            cancellation: cancellation_probe(cancel),
         }));
         let replay_template = Arc::new(ReplayTemplate::Sell(SellReplayTemplate {
             sequences,
@@ -714,7 +780,7 @@ impl CpcvBacktestService {
         Ok((fold_template, replay_template))
     }
 
-    /// Run the CPCV fold sweep on a blocking thread (rayon-parallel across
+    /// Run the CPCV fold sweep in the offline pool (rayon-parallel across
     /// combinations internally).
     async fn run_cpcv(
         &self,
@@ -722,38 +788,45 @@ impl CpcvBacktestService {
         fold_template: &Arc<FoldTemplate>,
         replay_template: &Arc<ReplayTemplate>,
         groups: &Arc<[TimelineGroup]>,
+        cancel: &CancellationToken,
     ) -> QuantResult<BacktestPathSet> {
         let fold_template = Arc::clone(fold_template);
         let replay_template = Arc::clone(replay_template);
         let groups = Arc::clone(groups);
         let cpcv_config = self.config.cpcv;
         let purge_config = self.config.purge;
-        let offline_pool = Arc::clone(&self.offline_pool);
-        task::spawn_blocking(move || -> QuantResult<BacktestPathSet> {
-            offline_pool.install(|| {
+        let cancellation = cancel.clone();
+        self.deps
+            .compute
+            .run_offline_cancellable(OfflineMemory::try_gib(6)?, cancel, move || {
+                ensure_cpcv_not_cancelled(&cancellation, "fold sweep start")?;
                 let fold_source = fold_template.fold_source(None)?;
                 let replay_engine = FoldReplayEngineAdapter {
                     template: &replay_template,
                 };
-                DefaultCombinatorialPurgedBacktester::new().run(CpcvRequest {
+                let fold_source = CancellableFoldSource {
+                    inner: fold_source.as_ref(),
+                    cancel: &cancellation,
+                };
+                let replay_engine = CancellableReplayEngine {
+                    inner: &replay_engine,
+                    cancel: &cancellation,
+                };
+                let path_set = DefaultCombinatorialPurgedBacktester::new().run(CpcvRequest {
                     path_set_id,
                     groups: &groups,
                     cpcv: cpcv_config,
                     purge: purge_config,
-                    fold_source: fold_source.as_ref(),
+                    fold_source: &fold_source,
                     replay: &replay_engine,
-                })
+                })?;
+                ensure_cpcv_not_cancelled(&cancellation, "fold sweep completion")?;
+                Ok(path_set)
             })
-        })
-        .await
-        .map_err(|error| {
-            QuantError::from(ResearchError::ValidationMethodology {
-                detail: format!("cpcv fold task join failed: {error}"),
-            })
-        })?
+            .await
     }
 
-    /// Run the governed trial grid on a blocking thread, returning the
+    /// Run the governed trial grid in the offline pool, returning the
     /// resulting performance matrix + trial count.
     async fn run_trials(
         &self,
@@ -761,6 +834,7 @@ impl CpcvBacktestService {
         replay_template: &Arc<ReplayTemplate>,
         groups: &Arc<[TimelineGroup]>,
         sample_interval_secs: u64,
+        cancel: &CancellationToken,
     ) -> QuantResult<(TrialPerformanceMatrix, u32)> {
         let trials = self.config.trials.generate(&self.config.objective)?;
         let trial_count =
@@ -770,24 +844,24 @@ impl CpcvBacktestService {
         let fold_template = Arc::clone(fold_template);
         let replay_template = Arc::clone(replay_template);
         let groups = Arc::clone(groups);
-        let offline_pool = Arc::clone(&self.offline_pool);
-        let matrix = task::spawn_blocking(move || -> QuantResult<TrialPerformanceMatrix> {
-            offline_pool.install(|| {
-                run_trial_grid(
+        let cancellation = cancel.clone();
+        let matrix = self
+            .deps
+            .compute
+            .run_offline_cancellable(OfflineMemory::try_gib(6)?, cancel, move || {
+                ensure_cpcv_not_cancelled(&cancellation, "trial grid start")?;
+                let matrix = run_trial_grid(
                     &trials,
                     &fold_template,
                     &replay_template,
                     &groups,
                     sample_interval_secs,
-                )
+                    &cancellation,
+                )?;
+                ensure_cpcv_not_cancelled(&cancellation, "trial grid completion")?;
+                Ok(matrix)
             })
-        })
-        .await
-        .map_err(|error| {
-            QuantError::from(ResearchError::ValidationMethodology {
-                detail: format!("trial grid task join failed: {error}"),
-            })
-        })??;
+            .await?;
         Ok((matrix, trial_count))
     }
 
@@ -1174,6 +1248,7 @@ struct FoldTemplateBuild {
     header_template: ModelArtifactHeader,
     groups: Arc<[TimelineGroup]>,
     handle: Handle,
+    cancellation: CancellationProbe,
 }
 
 /// Everything a [`FoldModelSource`] needs to train a `WeightedFactor` fold.
@@ -1199,6 +1274,7 @@ struct FoldTrainTemplate {
     /// Same purge/embargo as the outer CPCV run (trainer nested CV).
     purge: PurgeConfig,
     handle: Handle,
+    cancellation: CancellationProbe,
 }
 
 /// Everything a Sell-side [`FoldModelSource`] needs to train a lot-grouped
@@ -1217,6 +1293,7 @@ struct SellFoldTemplate {
     groups: Arc<[TimelineGroup]>,
     /// Same purge/embargo as the outer CPCV run (trainer nested CV).
     purge: PurgeConfig,
+    cancellation: CancellationProbe,
 }
 
 /// A family-dispatching fold template: selects which concrete
@@ -1399,6 +1476,7 @@ impl FoldModelSource for WeightedFactorFoldSource<'_> {
         let mut header = self.template.header_template.clone();
         header.model_version_id = ModelVersionId::from_v7();
         let request = TrainModelRequest {
+            cancellation: self.template.cancellation.clone(),
             examples: fold_examples.into(),
             training_dataset_hash,
             label: self.template.label.clone(),
@@ -1463,6 +1541,7 @@ impl FoldModelSource for SellFoldSource<'_> {
         let mut header = self.template.header_template.clone();
         header.model_version_id = ModelVersionId::from_v7();
         let request = TrainSellScorerRequest {
+            cancellation: self.template.cancellation.clone(),
             examples: fold_examples.into(),
             training_dataset_hash,
             label: self.template.label.clone(),
@@ -1771,6 +1850,7 @@ fn run_trial_grid(
     replay_template: &ReplayTemplate,
     groups: &[TimelineGroup],
     sample_interval_secs: u64,
+    cancel: &CancellationToken,
 ) -> QuantResult<TrialPerformanceMatrix> {
     let all_indices = GroupRowFilter {
         group_indices: (0..groups.len()).collect(),
@@ -1790,8 +1870,10 @@ fn run_trial_grid(
     let columns: Vec<QuantResult<Vec<Decimal>>> = trials
         .par_iter()
         .map(|trial| -> QuantResult<Vec<Decimal>> {
+            ensure_cpcv_not_cancelled(cancel, "trial train boundary")?;
             let fold_source = fold_template.fold_source(Some(trial))?;
             let model = fold_source.train_fold(&all_indices)?;
+            ensure_cpcv_not_cancelled(cancel, "trial replay boundary")?;
             let evaluations = replay_engine.evaluate(&model, &all_indices)?;
             let mut by_group = vec![None; groups.len()];
             for evaluation in evaluations {
@@ -1817,6 +1899,7 @@ fn run_trial_grid(
             // invariant as CPCV fold replay). Silent zeros would bias PBO/DSR V.
             let mut column = Vec::with_capacity(groups.len());
             for (idx, return_value) in by_group.into_iter().enumerate() {
+                ensure_cpcv_not_cancelled(cancel, "trial group boundary")?;
                 let Some(return_value) = return_value else {
                     return Err(ResearchError::ValidationMethodology {
                         detail: format!(
@@ -2198,7 +2281,10 @@ mod tests {
             CpcvPathSetGateInput, DefaultModelQualityGate, ModelQualityGate, QualityGateInput,
             QualityGateThresholds, SellQualityGateThresholds, ValidationGateThresholds,
         },
-        model::{LabelSelector, ModelArtifactHeader, PositionStateFeatures, SellSignalPolicy},
+        model::{
+            CancellationProbe, LabelSelector, ModelArtifactHeader, PositionStateFeatures,
+            SellSignalPolicy,
+        },
         selection::SelectedMarket,
         training::{
             HOLD_VS_EXIT_ALPHA_BPS, LabelName, LeakageFindings, LotTrainingContext,
@@ -2615,6 +2701,7 @@ mod tests {
         );
 
         let fold_template = FoldTemplate::Sell(SellFoldTemplate {
+            cancellation: CancellationProbe::default(),
             sequences: Arc::clone(&sequences),
             label: label(),
             seed_weights,

@@ -21,8 +21,9 @@ use quant_pivot_api::{
         nws::NwsObservationSource,
         tornado::TornadoSource,
     },
-    ws::{ClobWsManager, SubscriptionSource, TokenKeyResolver},
+    ws::{ClobWsManager, ClobWsManagerHooks, SubscriptionSource, TokenKeyResolver},
 };
+use quant_pivot_compute::ComputeExecutor;
 use quant_pivot_models::{
     config::{
         AirNowSourceConfig, BinanceSourceConfig, GammaConfig, GhcnhSourceConfig,
@@ -47,9 +48,10 @@ pub async fn run(
     include_weather: bool,
     stream_timeout: Duration,
 ) -> Result<()> {
+    let compute = Arc::new(ComputeExecutor::new()?);
     if include_binance {
         println!("smoke public-read: Binance spot/USD-M REST + public archive");
-        Box::pin(binance())
+        Box::pin(binance(Arc::clone(&compute)))
             .await
             .context("Binance public-read smoke")?;
         println!("smoke public-read: Binance passed");
@@ -63,7 +65,7 @@ pub async fn run(
     }
     if include_weather {
         println!("smoke public-read: weather providers");
-        Box::pin(weather())
+        Box::pin(weather(compute))
             .await
             .context("weather public-read smoke")?;
         println!("smoke public-read: weather passed");
@@ -71,9 +73,10 @@ pub async fn run(
     Ok(())
 }
 
-async fn binance() -> Result<()> {
+async fn binance(compute: Arc<ComputeExecutor>) -> Result<()> {
     let spot_config = BinanceSourceConfig::default();
-    let spot = BinanceKlineSource::connect(spot_config.clone()).context("connect Binance spot")?;
+    let spot = BinanceKlineSource::connect(spot_config.clone(), Arc::clone(&compute))
+        .context("connect Binance spot")?;
     let spot_symbol = BinanceSymbol::parse("BTCUSDT").context("parse Binance spot symbol")?;
     let spot_key = DomainInstrumentKey::binance_kline(&spot_symbol, KlineInterval::OneMinute);
     let to = Utc::now() - ChronoDuration::minutes(5);
@@ -107,6 +110,7 @@ async fn binance() -> Result<()> {
     let futures = BinanceKlineSource::connect_usdm_futures_with_budget(
         futures_config.clone(),
         futures_budget,
+        Arc::clone(&compute),
     )
     .context("connect Binance USD-M klines")?;
     let futures_symbol = BinanceSymbol::parse("HYPEUSDT").context("parse USD-M symbol")?;
@@ -137,6 +141,7 @@ async fn binance() -> Result<()> {
     let aggregate_trades = BinanceAggTradeSource::connect_usdm_futures_with_budget(
         futures_config,
         aggregate_trade_budget,
+        Arc::clone(&compute),
     )
     .context("connect Binance USD-M aggregate trades")?;
     let report = aggregate_trades
@@ -210,8 +215,7 @@ async fn clob_book(token: &TokenId, timeout: Duration) -> Result<()> {
         &WebSocketConfig::default(),
         shutdown.clone(),
         token_resolver,
-        None,
-        None,
+        ClobWsManagerHooks::default(),
     );
     manager.subscribe_tokens(SubscriptionSource::Engine, from_ref(token));
     let observed = tokio::time::timeout(timeout, async {
@@ -290,12 +294,12 @@ async fn rtds_topics(timeout: Duration) -> Result<()> {
     Ok(())
 }
 
-async fn weather() -> Result<()> {
+async fn weather(compute: Arc<ComputeExecutor>) -> Result<()> {
     tokio::try_join!(
         hko(),
         ghcnh(),
         airnow(),
-        tornado(),
+        tornado(compute),
         nhc(),
         gistemp(),
         nsidc(),
@@ -443,8 +447,8 @@ async fn airnow() -> Result<()> {
     Ok(())
 }
 
-async fn tornado() -> Result<()> {
-    let source = TornadoSource::connect(TornadoSourceConfig::default())
+async fn tornado(compute: Arc<ComputeExecutor>) -> Result<()> {
+    let source = TornadoSource::connect(TornadoSourceConfig::default(), compute)
         .context("connect tornado sources")?;
     let report_date = (Utc::now() - ChronoDuration::days(1)).date_naive();
     let preliminary = source

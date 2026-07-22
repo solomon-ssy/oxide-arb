@@ -1,0 +1,105 @@
+name: Fixed Runner Performance
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: Performance profile
+        required: true
+        default: full
+        type: choice
+        options:
+          - full
+          - soak
+          - smoke
+  schedule:
+    - cron: "0 18 * * *"
+  push:
+    branches: [main]
+    paths:
+      - ".cargo/**"
+      - ".github/workflows/performance.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "config/**"
+      - "crates/quant-pivot-api/**"
+      - "crates/quant-pivot-bench/**"
+      - "crates/quant-pivot-compute/**"
+      - "crates/quant-pivot-core/**"
+      - "crates/quant-pivot-models/**"
+      - "crates/quant-pivot-research/**"
+      - "crates/quant-pivot-storage/**"
+      - "crates/quant-pivot-system-tests/**"
+      - "crates/quant-pivot-web/**"
+      - "crates/quant-pivot-xtask/**"
+      - "docs/operations/performance.md"
+      - "docs/plans/quant-pivot/09-extreme-performance-ledger.md"
+
+concurrency:
+  group: fixed-runner-performance
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  QUANT_PIVOT_PERF_RUNNER: quant-pivot-perf-8c16g
+  RUST_TOOLCHAIN: "1.97.1"
+
+jobs:
+  performance:
+    name: performance-${{ github.event_name }}
+    runs-on: [self-hosted, quant-pivot-perf-8c16g]
+    timeout-minutes: 240
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Select immutable profile contract
+        env:
+          MANUAL_PROFILE: ${{ inputs.profile }}
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "schedule" ]]; then
+            profile=soak
+          elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            profile="$MANUAL_PROFILE"
+          else
+            profile=full
+          fi
+          printf 'PERFORMANCE_PROFILE=%s\n' "$profile" >> "$GITHUB_ENV"
+      - name: Verify fixed runner identity
+        run: |
+          set -euo pipefail
+          test "$(uname -s)" = Linux
+          test "$QUANT_PIVOT_PERF_RUNNER" = quant-pivot-perf-8c16g
+          docker info
+      - name: Run kernel and production-stack gates
+        run: >-
+          cargo xtask performance run
+          --profile "$PERFORMANCE_PROFILE"
+          --output target/performance-evidence
+      - name: Seal artifact manifest
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p target/performance-evidence
+          manifest_file="$(mktemp)"
+          find target/performance-evidence -type f \
+            ! -name artifact-manifest.sha256 -print0 |
+            sort -z |
+            xargs -0 sha256sum > "$manifest_file"
+          mv "$manifest_file" target/performance-evidence/artifact-manifest.sha256
+      - name: Upload immutable performance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-${{ github.run_id }}-${{ github.run_attempt }}-${{ env.PERFORMANCE_PROFILE }}
+          path: target/performance-evidence
+          if-no-files-found: error
+          retention-days: 90

@@ -1,10 +1,14 @@
 //! Polymarket data ingest bundle: live books, catalog sync, pipeline, quality.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
+use flume::Receiver;
 use quant_pivot_api::{
     gamma::GammaClient,
-    ws::{ClobWsManager, TokenKeyResolver, WsSessionInvalidationHook, WsShardHealthPort},
+    ws::{
+        ClobWsManager, ClobWsManagerHooks, TokenKeyResolver, TransportRetirement,
+        TransportRetirementHook, WsSessionInvalidationHook, WsShardHealthPort,
+    },
 };
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
@@ -96,13 +100,29 @@ impl DataBundle {
                 .ws_session_backpressure_invalidations
                 .inc_by(u64::try_from(invalidated).unwrap_or(u64::MAX));
         });
+        let (retirement_tx, retirement_rx) = flume::bounded(1_024);
+        let retirement_shutdown = deps.shutdown.clone();
+        let on_transport_retired: TransportRetirementHook = Arc::new(move |retirement| {
+            if retirement_tx
+                .send_timeout(retirement, Duration::from_millis(100))
+                .is_err()
+            {
+                tracing::error!(
+                    "token retirement control queue unavailable; cancelling data plane"
+                );
+                retirement_shutdown.cancel();
+            }
+        });
         let ws_manager = Arc::new(ClobWsManager::new(
             &deps.deploy.polymarket,
             &deps.deploy.market_data.websocket,
             deps.shutdown.clone(),
             Arc::clone(&data_plane) as Arc<dyn TokenKeyResolver>,
-            Some(on_session_invalidated),
-            None,
+            ClobWsManagerHooks {
+                on_session_invalidated: Some(on_session_invalidated),
+                on_transport_retired: Some(on_transport_retired),
+                ..ClobWsManagerHooks::default()
+            },
         ));
         let gamma_client = Arc::new(GammaClient::new(deps.deploy.market_data.gamma.clone()));
         let market_registry = Arc::new(MarketRegistry::new(data_plane));
@@ -167,6 +187,7 @@ impl DataBundle {
             book_store: &book_store,
             market_registry: &market_registry,
             ws_manager: &ws_manager,
+            retirement_rx,
             status_nudge: status_nudge.clone(),
         });
 
@@ -269,6 +290,7 @@ struct DataPipelineAssembly<'a> {
     book_store: &'a Arc<BookStore>,
     market_registry: &'a Arc<MarketRegistry>,
     ws_manager: &'a Arc<ClobWsManager>,
+    retirement_rx: Receiver<TransportRetirement>,
     status_nudge: SystemStatusNudge,
 }
 
@@ -278,6 +300,7 @@ fn build_data_pipeline(inputs: DataPipelineAssembly<'_>) -> Arc<DataPipeline> {
         book_store,
         market_registry,
         ws_manager,
+        retirement_rx,
         status_nudge,
     } = inputs;
     let event_source: Arc<dyn PipelineEventSource> =
@@ -290,5 +313,7 @@ fn build_data_pipeline(inputs: DataPipelineAssembly<'_>) -> Arc<DataPipeline> {
         book_fact_writer: Arc::clone(&deps.infra.book_fact_writer),
         shutdown: deps.shutdown.clone(),
         status_nudge,
+        retirement_rx,
+        durable_publish_observer: None,
     }))
 }

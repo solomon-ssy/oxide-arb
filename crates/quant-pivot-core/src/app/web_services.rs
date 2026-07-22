@@ -91,7 +91,13 @@ impl AppContext {
         let (operation_log, op_log_worker) = build_operation_log_writer(self);
         let (ws_sessions, session_hub) = SessionRegistry::new(SessionHubMetrics {
             best_effort_dropped: self.infra.metrics.ws_fanout_best_effort_dropped.clone(),
+            best_effort_coalesced: self.infra.metrics.ws_fanout_best_effort_coalesced.clone(),
             reliable_disconnects: self.infra.metrics.ws_fanout_reliable_disconnects.clone(),
+            control_timeouts: self.infra.metrics.ws_hub_control_timeouts.clone(),
+            control_latency_seconds: self.infra.metrics.ws_hub_control_latency_seconds.clone(),
+            queue_depth: self.infra.metrics.ws_hub_queue_depth.clone(),
+            queue_oldest_age_seconds: self.infra.metrics.ws_hub_queue_oldest_age_seconds.clone(),
+            frame_bytes: self.infra.metrics.ws_hub_frame_bytes.clone(),
         });
         let state = build_app_state(
             self,
@@ -290,6 +296,7 @@ fn build_trade_policy_port(
     readiness: Arc<ResearchReadinessEvidenceService>,
 ) -> Arc<dyn TradePolicyPort> {
     Arc::new(TradePolicyService::new(TradePolicyServiceDeps {
+        compute: Arc::clone(&ctx.compute),
         datasets: Arc::clone(&ctx.research.training_dataset_repo),
         dataset_builder,
         artifacts: Arc::clone(&ctx.research.artifact_store),

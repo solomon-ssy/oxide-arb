@@ -12,19 +12,23 @@ publish = false
 # core, web, storage, Polars, and AWS dependency graph into an RSS measurement.
 default = ["online"]
 online = ["dep:quant-pivot-core"]
+model-train-gate = ["quant-pivot-research/ml-classical"]
 
 [dependencies]
 quant-pivot-allocator = { workspace = true }
 quant-pivot-core = { workspace = true, optional = true }
+quant-pivot-compute = { workspace = true }
 quant-pivot-error = { workspace = true }
 quant-pivot-models = { workspace = true }
 quant-pivot-research = { workspace = true }
 ndarray = { workspace = true }
 rust_decimal = { workspace = true }
 rust_decimal_macros = { workspace = true }
+uuid = { workspace = true }
 chrono = { workspace = true }
 criterion = { workspace = true }
 rayon = { workspace = true }
+tokio = { workspace = true }
 
 [[bench]]
 name = "hot_paths"
@@ -48,6 +52,11 @@ harness = false
 name = "report_compute_gate"
 path = "src/bin/report_compute_gate.rs"
 required-features = ["online"]
+
+[[bin]]
+name = "model_train_replay_gate"
+path = "src/bin/model_train_replay_gate.rs"
+required-features = ["model-train-gate"]
 
 [lints]
 workspace = true

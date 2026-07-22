@@ -13,6 +13,7 @@ use std::{
 use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
 use prometheus::IntCounter;
+use quant_pivot_compute::ComputeExecutor;
 use quant_pivot_core::{
     governance::{BiasTableApplicator, CoreCalibrationArtifactLoader, WeightOverlayApplicator},
     ingest::{book_store::BookStore, data_plane_index::DataPlane, market_registry::MarketRegistry},
@@ -99,6 +100,7 @@ use quant_pivot_system_tests::{
         factor_governance::publish_all_factor_definitions,
         model_spec_fixtures,
         pit::InMemoryDecisionSnapshotSource,
+        publish_fresh_book,
         report_pipeline_harness::{EmptyBasisAlertRepo, EmptyLinkageRepo},
         trade_tape_fixtures::live_trade_tape_block_cursor_repo,
     },
@@ -399,13 +401,12 @@ async fn build_features(
     let market = registry_market();
     register_runtime_event(&registry, vec![market.market_id.clone()]);
     registry.register_market(market);
-    let yes_token = book_store
-        .resolve(&TokenId::new(YES_TOKEN))
-        .expect("registered YES token");
+    let yes_token = TokenId::new(YES_TOKEN);
     let timestamp_ms = u64::try_from(Utc::now().timestamp_millis())
         .expect("test book timestamp must be non-negative");
-    assert!(book_store.publish(
-        yes_token,
+    publish_fresh_book(
+        &book_store,
+        &yes_token,
         BookSnapshot::new(
             Arc::from([BookLevel::from_decimal_unchecked(
                 Price::new(Decimal::new(47, 2)),
@@ -419,13 +420,12 @@ async fn build_features(
             1,
         ),
         1,
-        1,
-        None,
-    ));
+    );
     let live_pit = InMemoryDecisionSnapshotSource::freeze(registry.as_ref(), book_store.as_ref());
 
     let feature_repo = Arc::new(PgFeatureRepository::new(db.clone())) as Arc<dyn FeatureRepository>;
     let pipeline = FeaturePipelineService::new(FeaturePipelineDeps {
+        compute: Arc::new(ComputeExecutor::new().expect("test compute executor")),
         window_provider: FeatureWindowProvider::new(Arc::new(EmptyFactRead)),
         feature_repo,
         event_writer: noop_feature_writer(),
@@ -590,11 +590,10 @@ fn apply_book(
     ask_shares: i64,
     ts_ms: u64,
 ) {
-    let token = book_store
-        .resolve(&TokenId::new(token))
-        .expect("registered book token");
-    assert!(book_store.publish(
-        token,
+    let token_id = TokenId::new(token);
+    publish_fresh_book(
+        book_store,
+        &token_id,
         BookSnapshot::new(
             Arc::from([BookLevel::from_decimal_unchecked(
                 Price::new(bid_px),
@@ -608,9 +607,7 @@ fn apply_book(
             1,
         ),
         1,
-        1,
-        None,
-    ));
+    );
 }
 
 /// Build + persist feature vectors for the primary market plus dispersed peers,
@@ -665,6 +662,7 @@ async fn build_cross_section_features(
 
     let feature_repo = Arc::new(PgFeatureRepository::new(db.clone())) as Arc<dyn FeatureRepository>;
     let pipeline = FeaturePipelineService::new(FeaturePipelineDeps {
+        compute: Arc::new(ComputeExecutor::new().expect("test compute executor")),
         window_provider: FeatureWindowProvider::new(Arc::new(EmptyFactRead)),
         feature_repo,
         event_writer: noop_feature_writer(),
@@ -948,6 +946,7 @@ fn build_runner(
         factor_repo,
         noop_factor_writer(),
         Arc::clone(&bias_table),
+        Arc::new(ComputeExecutor::new().expect("test compute executor")),
     ));
     let model_run_repo =
         Arc::new(PgModelRunRepository::new(db.clone())) as Arc<dyn ModelRunRepository>;

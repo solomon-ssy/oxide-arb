@@ -10,7 +10,7 @@ use quant_pivot_models::{
     types::TokenId,
 };
 
-use crate::ingest::book_store::BookStore;
+use crate::ingest::book_store::{BookStore, FreshBook};
 
 pub struct CoreMarketData {
     book_store: Arc<BookStore>,
@@ -30,7 +30,10 @@ impl CoreMarketData {
 #[async_trait]
 impl MarketDataPort for CoreMarketData {
     fn book_for_token(&self, token_id: &TokenId) -> Option<Arc<BookSnapshot>> {
-        self.book_store.load_by_id(token_id)
+        self.book_store
+            .load_fresh_by_id(token_id)
+            .ok()
+            .map(FreshBook::into_snapshot)
     }
 
     fn book(
@@ -39,8 +42,14 @@ impl MarketDataPort for CoreMarketData {
         no_token: &TokenId,
     ) -> (Option<Arc<BookSnapshot>>, Option<Arc<BookSnapshot>>) {
         (
-            self.book_store.load_by_id(yes_token),
-            self.book_store.load_by_id(no_token),
+            self.book_store
+                .load_fresh_by_id(yes_token)
+                .ok()
+                .map(FreshBook::into_snapshot),
+            self.book_store
+                .load_fresh_by_id(no_token)
+                .ok()
+                .map(FreshBook::into_snapshot),
         )
     }
 

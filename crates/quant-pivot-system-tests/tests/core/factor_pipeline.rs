@@ -11,6 +11,7 @@ use std::{
 use async_trait::async_trait;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use prometheus::IntCounter;
+use quant_pivot_compute::ComputeExecutor;
 use quant_pivot_core::{
     governance::BiasTableApplicator,
     ingest::{book_store::BookStore, data_plane_index::DataPlane, market_registry::MarketRegistry},
@@ -83,6 +84,7 @@ use quant_pivot_system_tests::{
         fact_sink::DiscardFactWriter,
         factor_governance::{publish_all_factor_definitions, register_all_factor_definitions},
         pit::InMemoryDecisionSnapshotSource,
+        publish_fresh_book,
         report_pipeline_harness::{EmptyBasisAlertRepo, EmptyLinkageRepo},
         trade_tape_fixtures::live_trade_tape_block_cursor_repo,
     },
@@ -189,11 +191,11 @@ fn wire_live_book(registry: &MarketRegistry, book_store: &BookStore, catalog: &C
     });
     registry.register_market(market);
     let yes = TokenId::new(catalog.yes_token);
-    let yes = book_store.resolve(&yes).expect("registered YES token");
     let timestamp_ms = u64::try_from(Utc::now().timestamp_millis())
         .expect("test book timestamp must be non-negative");
-    assert!(book_store.publish(
-        yes,
+    publish_fresh_book(
+        book_store,
+        &yes,
         BookSnapshot::new(
             Arc::from([BookLevel::from_decimal_unchecked(
                 Price::new(Decimal::new(47, 2)),
@@ -207,9 +209,7 @@ fn wire_live_book(registry: &MarketRegistry, book_store: &BookStore, catalog: &C
             1,
         ),
         1,
-        1,
-        None,
-    ));
+    );
 }
 
 struct EmptyFactRead;
@@ -377,6 +377,7 @@ async fn build_features(db: &DatabaseConnection) -> (Vec<FeatureVector>, Vec<Fea
     let feature_repo = Arc::new(PgFeatureRepository::new(db.clone())) as Arc<dyn FeatureRepository>;
     let window_provider = FeatureWindowProvider::new(Arc::new(EmptyFactRead));
     let pipeline = FeaturePipelineService::new(FeaturePipelineDeps {
+        compute: Arc::new(ComputeExecutor::new().expect("test compute executor")),
         window_provider,
         feature_repo,
         event_writer: noop_feature_writer(),
@@ -436,7 +437,12 @@ pub async fn create_definition_and_values_then_list_for_run() {
         PgCalibrationArtifactRepository::new(db.clone()),
     )
         as Arc<dyn CalibrationArtifactRepository>));
-    let service = FactorPipelineService::new(Arc::clone(&factor_repo), event_writer, bias_table);
+    let service = FactorPipelineService::new(
+        Arc::clone(&factor_repo),
+        event_writer,
+        bias_table,
+        Arc::new(ComputeExecutor::new().expect("test compute executor")),
+    );
 
     let model_run_id = ModelRunId::from_v7();
     // The factor-value → model_run FK (added in 3.4) requires the owning run to
@@ -539,6 +545,7 @@ pub async fn unpublished_factor_definitions_block_pipeline() {
         Arc::clone(&factor_repo),
         Arc::new(FactorEventWriter::new(Arc::new(writer))),
         bias_table,
+        Arc::new(ComputeExecutor::new().expect("test compute executor")),
     );
 
     let model_run_id = ModelRunId::from_v7();
