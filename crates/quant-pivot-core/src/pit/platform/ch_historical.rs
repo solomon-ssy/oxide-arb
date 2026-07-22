@@ -8,7 +8,6 @@
 
 use std::{
     collections::{BTreeMap, HashMap},
-    str::FromStr,
     sync::Arc,
 };
 
@@ -19,9 +18,7 @@ use quant_pivot_error::{
     research::{PitResolutionStorageError, ResearchError},
 };
 use quant_pivot_models::{
-    clickhouse::{
-        BookL2CheckpointRow, BookL2EventRow, BookStreamSessionRow, ChPrice, ChShares, TradeTapeRow,
-    },
+    clickhouse::{BookL2LedgerRow, BookStreamSessionRow, ChPrice, ChShares},
     domain::{
         data_plane::{DecisionBoundary, DecisionSource},
         market::book::BookLevel,
@@ -30,7 +27,7 @@ use quant_pivot_models::{
         clickhouse::{ChCanonicalBookEventType, ChStreamSessionState},
         common::Side,
     },
-    types::{MarketId, Price, Shares, TokenId},
+    types::{ContentHash, MarketId, TokenId},
 };
 use quant_pivot_repository::traits::{
     CatalogLedgerRepository, ClobMarketInfoRepository, QuantFactReadRepository,
@@ -39,7 +36,6 @@ use quant_pivot_research::pit::{
     BookSnapshotAt, CanonicalBookEventRef, PointInTimeSnapshotSource, ResolvedMarketSnapshot,
     resolve_catalog_snapshot,
 };
-use rust_decimal::Decimal;
 
 use crate::ingest::order_book::OrderBook;
 
@@ -50,9 +46,7 @@ pub enum BookDecodeStatus {
     Ok,
     /// Valid JSON but the level array is empty.
     Empty,
-    /// JSON could not be parsed as `[(price, size)]` pairs.
-    MalformedJson,
-    /// JSON parsed but every level pair failed validation.
+    /// Typed arrays have unequal lengths or contain an invalid level.
     InvalidLevel,
     /// Persisted event time cannot be represented as a non-negative epoch.
     InvalidTimestamp,
@@ -62,17 +56,13 @@ impl BookDecodeStatus {
     /// Whether this status should increment dataset `book_decode_failures`.
     #[must_use]
     pub const fn counts_as_failure(self) -> bool {
-        matches!(
-            self,
-            Self::MalformedJson | Self::InvalidLevel | Self::InvalidTimestamp
-        )
+        matches!(self, Self::InvalidLevel | Self::InvalidTimestamp)
     }
 
     /// Merge two decode statuses, preferring the more severe failure.
     #[must_use]
     pub const fn merge(self, other: Self) -> Self {
         match (self, other) {
-            (Self::MalformedJson, _) | (_, Self::MalformedJson) => Self::MalformedJson,
             (Self::InvalidTimestamp, _) | (_, Self::InvalidTimestamp) => Self::InvalidTimestamp,
             (Self::InvalidLevel, _) | (_, Self::InvalidLevel) => Self::InvalidLevel,
             (Self::Empty, Self::Empty) => Self::Empty,
@@ -114,7 +104,7 @@ impl PointInTimeSnapshotSource for DurablePitSource {
         let source_cutoff = boundary.cutoff_for(DecisionSource::Book);
         let Some(row) = self
             .fact_read
-            .book_checkpoint_at(
+            .book_ledger_snapshot_at(
                 token_id,
                 source_cutoff.timestamp_millis(),
                 boundary.decision_at().timestamp_millis(),
@@ -136,7 +126,7 @@ impl PointInTimeSnapshotSource for DurablePitSource {
         let cutoff = boundary.cutoff_for(DecisionSource::Book);
         let rows = self
             .fact_read
-            .book_checkpoints_at(
+            .book_ledger_snapshots_at(
                 token_ids.to_vec(),
                 cutoff.timestamp_millis(),
                 boundary.decision_at().timestamp_millis(),
@@ -168,7 +158,7 @@ impl PointInTimeSnapshotSource for DurablePitSource {
         let Some(snapshot) = snapshot else {
             return Ok(None);
         };
-        let mut resolved = resolve_catalog_snapshot(snapshot, boundary)?;
+        let mut resolved = resolve_catalog_snapshot(&snapshot, boundary)?;
         resolved.context.fee_schedule = self
             .clob_market_info_repo
             .at(
@@ -210,7 +200,7 @@ impl PointInTimeSnapshotSource for DurablePitSource {
         snapshots
             .into_iter()
             .map(|snapshot| {
-                let mut resolved = resolve_catalog_snapshot(snapshot, boundary)?;
+                let mut resolved = resolve_catalog_snapshot(&snapshot, boundary)?;
                 resolved.context.fee_schedule =
                     fee_schedules.get(&resolved.context.market_id).cloned();
                 Ok(resolved)
@@ -222,14 +212,14 @@ impl PointInTimeSnapshotSource for DurablePitSource {
 impl DurablePitSource {
     async fn reconstruct_book_row(
         &self,
-        checkpoint: BookL2CheckpointRow,
+        snapshot: BookL2LedgerRow,
         source_cutoff: DateTime<Utc>,
         decision_at: DateTime<Utc>,
     ) -> QuantResult<Option<BookSnapshotAt>> {
-        let token_id = checkpoint.token_id.clone();
+        let token_id = snapshot.token_id.clone();
         let session = self
             .fact_read
-            .book_stream_session_at(checkpoint.stream_session_id, decision_at.timestamp_millis())
+            .book_stream_session_at(snapshot.stream_session_id, decision_at.timestamp_millis())
             .await
             .map_err(PitResolutionStorageError::from)?
             .ok_or_else(|| replay_error(&token_id, "stream session ledger is unavailable"))?;
@@ -238,34 +228,16 @@ impl DurablePitSource {
         }
         let events = self
             .fact_read
-            .book_l2_events_from(
+            .book_l2_ledger_from(
                 &token_id,
-                checkpoint.stream_session_id,
-                checkpoint.token_sequence,
+                snapshot.stream_session_id,
+                snapshot.token_sequence,
                 source_cutoff.timestamp_millis(),
                 decision_at.timestamp_millis(),
             )
             .await
             .map_err(PitResolutionStorageError::from)?;
-        let trades = self
-            .fact_read
-            .market_ws_trades_from(
-                &token_id,
-                checkpoint.stream_session_id,
-                checkpoint.token_sequence,
-                source_cutoff.timestamp_millis(),
-                decision_at.timestamp_millis(),
-            )
-            .await
-            .map_err(PitResolutionStorageError::from)?;
-        reconstruct_checkpoint(
-            checkpoint,
-            &session,
-            &events,
-            &trades,
-            source_cutoff,
-            decision_at,
-        )
+        reconstruct_snapshot(snapshot, &session, &events, source_cutoff, decision_at)
     }
 }
 
@@ -275,22 +247,19 @@ fn replay_error(token_id: &TokenId, detail: &str) -> ResearchError {
     }
 }
 
-pub(crate) fn reconstruct_checkpoint(
-    checkpoint: BookL2CheckpointRow,
+pub(crate) fn reconstruct_snapshot(
+    snapshot: BookL2LedgerRow,
     session: &BookStreamSessionRow,
-    events: &[BookL2EventRow],
-    trades: &[TradeTapeRow],
+    events: &[BookL2LedgerRow],
     source_cutoff: DateTime<Utc>,
     decision_at: DateTime<Utc>,
 ) -> QuantResult<Option<BookSnapshotAt>> {
-    let token_id = checkpoint.token_id.clone();
-    let anchor_sequence = checkpoint.token_sequence;
-    validate_replay_identity(&checkpoint, session, events, trades)?;
-    let (snapshot, status) = snapshot_from_row(checkpoint, source_cutoff, decision_at);
+    let token_id = snapshot.token_id.clone();
+    let anchor_sequence = snapshot.token_sequence;
+    validate_replay_identity(&snapshot, session, events)?;
+    let (snapshot, status) = snapshot_from_row(snapshot, source_cutoff, decision_at);
     if status.counts_as_failure() {
-        return Err(
-            replay_error(&token_id, &format!("checkpoint decode status {status:?}")).into(),
-        );
+        return Err(replay_error(&token_id, &format!("snapshot decode status {status:?}")).into());
     }
     let Some(anchor) = snapshot else {
         return Ok(None);
@@ -311,12 +280,12 @@ pub(crate) fn reconstruct_checkpoint(
             .map_err(|_| replay_error(&token_id, "event timestamp is negative"))?;
         latest_available_at = DateTime::from_timestamp_millis(event.persisted_time)
             .ok_or_else(|| replay_error(&token_id, "persisted timestamp is invalid"))?;
-        latest_version = event.book_version;
+        latest_version = event.token_sequence;
         latest_sequence = event.token_sequence;
         latest_source_event = Some(CanonicalBookEventRef {
             stream_session_id: event.stream_session_id,
             token_sequence: event.token_sequence,
-            source_event_hash: event.payload_hash.clone(),
+            source_event_hash: ContentHash::from(event.event_hash),
         });
     }
     Ok(Some(BookSnapshotAt {
@@ -336,17 +305,16 @@ pub(crate) fn reconstruct_checkpoint(
 struct ReplaySequence<'a> {
     effective_ms: i64,
     available_ms: i64,
-    event: Option<&'a BookL2EventRow>,
+    event: &'a BookL2LedgerRow,
 }
 
 /// Reconstruct a monotonic series of boundaries from one session anchor in a
 /// single sequence walk. The query count and event scan are independent of the
 /// candidate count; only the requested output snapshots are cloned.
-pub(crate) fn reconstruct_checkpoint_series(
-    checkpoint: BookL2CheckpointRow,
+pub(crate) fn reconstruct_snapshot_series(
+    snapshot: BookL2LedgerRow,
     session: &BookStreamSessionRow,
-    events: &[BookL2EventRow],
-    trades: &[TradeTapeRow],
+    events: &[BookL2LedgerRow],
     boundaries: &[DecisionBoundary],
 ) -> QuantResult<Vec<BookSnapshotAt>> {
     if boundaries.is_empty() {
@@ -357,28 +325,26 @@ pub(crate) fn reconstruct_checkpoint_series(
             || pair[0].cutoff_for(DecisionSource::Book) >= pair[1].cutoff_for(DecisionSource::Book)
     }) {
         return Err(replay_error(
-            &checkpoint.token_id,
+            &snapshot.token_id,
             "series boundaries are not strictly monotonic",
         )
         .into());
     }
-    validate_replay_identity(&checkpoint, session, events, trades)?;
-    let token_id = checkpoint.token_id.clone();
-    let anchor_sequence = checkpoint.token_sequence;
+    validate_replay_identity(&snapshot, session, events)?;
+    let token_id = snapshot.token_id.clone();
+    let anchor_sequence = snapshot.token_sequence;
     let first = boundaries
         .first()
         .ok_or_else(|| replay_error(&token_id, "series has no first boundary"))?;
     let (anchor, status) = snapshot_from_row(
-        checkpoint,
+        snapshot,
         first.cutoff_for(DecisionSource::Book),
         first.decision_at(),
     );
     if status.counts_as_failure() {
-        return Err(
-            replay_error(&token_id, &format!("checkpoint decode status {status:?}")).into(),
-        );
+        return Err(replay_error(&token_id, &format!("snapshot decode status {status:?}")).into());
     }
-    let anchor = anchor.ok_or_else(|| replay_error(&token_id, "checkpoint is empty"))?;
+    let anchor = anchor.ok_or_else(|| replay_error(&token_id, "snapshot is empty"))?;
     let mut book = OrderBook::new(token_id.clone());
     book.apply_snapshot_validated(anchor.bids, anchor.asks, anchor.timestamp_ms);
     let mut latest_event_time = anchor.timestamp_ms;
@@ -397,22 +363,9 @@ pub(crate) fn reconstruct_checkpoint_series(
             ReplaySequence {
                 effective_ms: event.venue_event_time,
                 available_ms: event.persisted_time,
-                event: Some(event),
+                event,
             },
         );
-    }
-    for trade in trades {
-        let sequence = trade
-            .token_sequence
-            .ok_or_else(|| replay_error(&token_id, "Market WS trade has no token sequence"))?;
-        if sequence <= anchor_sequence {
-            continue;
-        }
-        sequence_rows.entry(sequence).or_insert(ReplaySequence {
-            effective_ms: trade.event_time,
-            available_ms: trade.ingestion_time,
-            event: None,
-        });
     }
     let sequence_rows = sequence_rows.into_iter().collect::<Vec<_>>();
     let mut cursor = 0_usize;
@@ -424,20 +377,19 @@ pub(crate) fn reconstruct_checkpoint_series(
             if row.effective_ms > cutoff_ms || row.available_ms > decision_ms {
                 break;
             }
-            if let Some(event) = row.event {
-                apply_replay_event(&mut book, event, &token_id)?;
-                latest_event_time = u64::try_from(event.venue_event_time)
-                    .map_err(|_| replay_error(&token_id, "event timestamp is negative"))?;
-                latest_available_at = DateTime::from_timestamp_millis(event.persisted_time)
-                    .ok_or_else(|| replay_error(&token_id, "persisted timestamp is invalid"))?;
-                latest_version = event.book_version;
-                latest_sequence = event.token_sequence;
-                latest_source_event = Some(CanonicalBookEventRef {
-                    stream_session_id: event.stream_session_id,
-                    token_sequence: event.token_sequence,
-                    source_event_hash: event.payload_hash.clone(),
-                });
-            }
+            let event = row.event;
+            apply_replay_event(&mut book, event, &token_id)?;
+            latest_event_time = u64::try_from(event.venue_event_time)
+                .map_err(|_| replay_error(&token_id, "event timestamp is negative"))?;
+            latest_available_at = DateTime::from_timestamp_millis(event.persisted_time)
+                .ok_or_else(|| replay_error(&token_id, "persisted timestamp is invalid"))?;
+            latest_version = event.token_sequence;
+            latest_sequence = event.token_sequence;
+            latest_source_event = Some(CanonicalBookEventRef {
+                stream_session_id: event.stream_session_id,
+                token_sequence: event.token_sequence,
+                source_event_hash: ContentHash::from(event.event_hash),
+            });
             cursor = cursor
                 .checked_add(1)
                 .ok_or_else(|| replay_error(&token_id, "series cursor overflow"))?;
@@ -459,45 +411,32 @@ pub(crate) fn reconstruct_checkpoint_series(
 }
 
 fn validate_replay_identity(
-    checkpoint: &BookL2CheckpointRow,
+    snapshot: &BookL2LedgerRow,
     session: &BookStreamSessionRow,
-    events: &[BookL2EventRow],
-    trades: &[TradeTapeRow],
+    events: &[BookL2LedgerRow],
 ) -> QuantResult<()> {
-    let token_id = &checkpoint.token_id;
-    if session.stream_session_id != checkpoint.stream_session_id {
-        return Err(replay_error(token_id, "checkpoint/session identity mismatch").into());
+    let token_id = &snapshot.token_id;
+    if session.stream_session_id != snapshot.stream_session_id {
+        return Err(replay_error(token_id, "snapshot/session identity mismatch").into());
     }
     let Some(anchor) = events.first() else {
-        return Err(replay_error(token_id, "checkpoint source event is unavailable").into());
+        return Err(replay_error(token_id, "snapshot source event is unavailable").into());
     };
-    if anchor.token_sequence != checkpoint.token_sequence
+    if anchor.token_sequence != snapshot.token_sequence
         || anchor.event_type != ChCanonicalBookEventType::Snapshot
-        || anchor.payload_hash != checkpoint.source_event_hash
+        || anchor.event_hash != snapshot.event_hash
     {
-        return Err(replay_error(
-            token_id,
-            "checkpoint source event hash or sequence mismatch",
-        )
-        .into());
+        return Err(
+            replay_error(token_id, "snapshot source event hash or sequence mismatch").into(),
+        );
     }
     let mut sequence_identities = BTreeMap::<u64, String>::new();
     for event in events {
+        let payload_hash = ContentHash::from(event.event_hash).to_string();
         insert_sequence_identity(
             &mut sequence_identities,
             event.token_sequence,
-            event.payload_hash.as_str(),
-            token_id,
-        )?;
-    }
-    for trade in trades {
-        let sequence = trade
-            .token_sequence
-            .ok_or_else(|| replay_error(token_id, "Market WS trade has no token sequence"))?;
-        insert_sequence_identity(
-            &mut sequence_identities,
-            sequence,
-            &trade.source_event_id,
+            &payload_hash,
             token_id,
         )?;
     }
@@ -505,7 +444,7 @@ fn validate_replay_identity(
         .last_key_value()
         .map(|(sequence, _)| *sequence)
     {
-        for sequence in checkpoint.token_sequence..=last {
+        for sequence in snapshot.token_sequence..=last {
             if !sequence_identities.contains_key(&sequence) {
                 return Err(
                     replay_error(token_id, &format!("missing token sequence {sequence}")).into(),
@@ -560,7 +499,7 @@ fn validate_sealed_session_boundaries(
 
 fn apply_replay_event(
     book: &mut OrderBook,
-    event: &BookL2EventRow,
+    event: &BookL2LedgerRow,
     token_id: &TokenId,
 ) -> QuantResult<()> {
     let timestamp_ms = u64::try_from(event.venue_event_time)
@@ -590,7 +529,7 @@ fn apply_replay_event(
                 .map(|(price, size)| (Side::Sell, price.to_price(), size.to_shares()));
             book.apply_delta(bids.chain(asks), timestamp_ms);
         }
-        ChCanonicalBookEventType::TickSizeChange => {}
+        ChCanonicalBookEventType::TickSizeChange | ChCanonicalBookEventType::LastTrade => {}
         ChCanonicalBookEventType::Gap => {
             return Err(replay_error(token_id, "gap event encountered").into());
         }
@@ -599,7 +538,7 @@ fn apply_replay_event(
 }
 
 fn decode_event_levels(
-    event: &BookL2EventRow,
+    event: &BookL2LedgerRow,
     token_id: &TokenId,
 ) -> QuantResult<(Vec<BookLevel>, Vec<BookLevel>)> {
     if event.bid_prices.len() != event.bid_sizes.len()
@@ -628,7 +567,7 @@ fn decode_event_levels(
 
 #[cfg(test)]
 fn decode_book_row(
-    row: BookL2CheckpointRow,
+    row: BookL2LedgerRow,
     source_cutoff: DateTime<Utc>,
     decision_at: DateTime<Utc>,
 ) -> QuantResult<Option<BookSnapshotAt>> {
@@ -675,15 +614,18 @@ fn decode_book_row(
 /// both sides decode to empty — treated as a missing book for PIT resolution.
 #[must_use]
 pub fn snapshot_from_row(
-    row: BookL2CheckpointRow,
+    row: BookL2LedgerRow,
     source_cutoff: DateTime<Utc>,
     decision_at: DateTime<Utc>,
 ) -> (Option<BookSnapshotAt>, BookDecodeStatus) {
-    let Ok(timestamp_ms) = u64::try_from(row.event_time) else {
+    let Ok(timestamp_ms) = u64::try_from(row.venue_event_time) else {
         return (None, BookDecodeStatus::InvalidTimestamp);
     };
-    let (bids, bid_status) = decode_levels(&row.bids_json);
-    let (asks, ask_status) = decode_levels(&row.asks_json);
+    if row.event_type != ChCanonicalBookEventType::Snapshot {
+        return (None, BookDecodeStatus::InvalidLevel);
+    }
+    let (bids, bid_status) = decode_levels(&row.bid_prices, &row.bid_sizes);
+    let (asks, ask_status) = decode_levels(&row.ask_prices, &row.ask_sizes);
     let status = bid_status.merge(ask_status);
     if status.counts_as_failure() || (bids.is_empty() && asks.is_empty()) {
         return (None, status);
@@ -691,7 +633,7 @@ pub fn snapshot_from_row(
     let source_event = CanonicalBookEventRef {
         stream_session_id: row.stream_session_id,
         token_sequence: row.token_sequence,
-        source_event_hash: row.source_event_hash.clone(),
+        source_event_hash: ContentHash::from(row.event_hash),
     };
     (
         Some(BookSnapshotAt {
@@ -701,10 +643,10 @@ pub fn snapshot_from_row(
             bids,
             asks,
             timestamp_ms,
-            version: row.book_version,
+            version: row.token_sequence,
             sequence: row.token_sequence,
             source_event: Some(source_event),
-            available_at: match DateTime::from_timestamp_millis(row.created_at) {
+            available_at: match DateTime::from_timestamp_millis(row.persisted_time) {
                 Some(value) => value,
                 None => return (None, BookDecodeStatus::InvalidTimestamp),
             },
@@ -713,22 +655,21 @@ pub fn snapshot_from_row(
     )
 }
 
-/// Decode the `[(price, size)]` decimal-string pairs into best-first book levels.
+/// Decode typed price/size arrays into best-first book levels.
 #[must_use]
-pub fn decode_levels(json: &str) -> (Arc<[BookLevel]>, BookDecodeStatus) {
-    let pairs: Vec<(String, String)> = match serde_json::from_str(json) {
-        Ok(parsed) => parsed,
-        Err(_) => return (Arc::from([]), BookDecodeStatus::MalformedJson),
-    };
-    if pairs.is_empty() {
+pub fn decode_levels(
+    prices: &[ChPrice],
+    sizes: &[ChShares],
+) -> (Arc<[BookLevel]>, BookDecodeStatus) {
+    if prices.len() != sizes.len() {
+        return (Arc::from([]), BookDecodeStatus::InvalidLevel);
+    }
+    if prices.is_empty() {
         return (Arc::from([]), BookDecodeStatus::Empty);
     }
-    let mut levels = Vec::with_capacity(pairs.len());
-    for (price, size) in pairs {
-        let (Ok(price), Ok(size)) = (Decimal::from_str(&price), Decimal::from_str(&size)) else {
-            return (Arc::from([]), BookDecodeStatus::InvalidLevel);
-        };
-        let Some(level) = BookLevel::try_from_decimal(Price::new(price), Shares::new(size)) else {
+    let mut levels = Vec::with_capacity(prices.len());
+    for (price, size) in prices.iter().zip(sizes) {
+        let Some(level) = BookLevel::try_from_decimal(price.to_price(), size.to_shares()) else {
             return (Arc::from([]), BookDecodeStatus::InvalidLevel);
         };
         levels.push(level);
@@ -740,72 +681,63 @@ pub fn decode_levels(json: &str) -> (Arc<[BookLevel]>, BookDecodeStatus) {
 mod tests {
     use chrono::{TimeZone, Utc};
     use quant_pivot_models::{
-        clickhouse::{BookL2CheckpointRow, ChSchemaVersion},
-        types::{ContentHash, TokenId},
+        clickhouse::{BookL2LedgerRow, ChDigest, ChPrice, ChShares},
+        enums::clickhouse::ChCanonicalBookEventType,
+        types::{Price, Shares, TokenId},
     };
+    use rust_decimal::Decimal;
     use uuid::Uuid;
 
     use super::{BookDecodeStatus, decode_book_row, decode_levels, snapshot_from_row};
 
-    fn sample_row(bids_json: &str, asks_json: &str) -> BookL2CheckpointRow {
-        BookL2CheckpointRow {
+    fn sample_row() -> BookL2LedgerRow {
+        BookL2LedgerRow {
+            stream_session_id: Uuid::nil(),
+            shard_id: 0,
             token_id: TokenId::new("tok"),
             market_id: None,
-            stream_session_id: Uuid::nil(),
             token_sequence: 1,
-            bids_json: bids_json.to_owned(),
-            asks_json: asks_json.to_owned(),
-            book_version: 1,
-            source_event_hash: ContentHash::parse(format!("blake3:{}", "1".repeat(64)))
-                .expect("source hash"),
-            checkpoint_hash: ContentHash::parse(format!("blake3:{}", "2".repeat(64)))
-                .expect("checkpoint hash"),
-            event_time: 1_000_000,
-            created_at: 1_000_000,
-            schema_version: ChSchemaVersion(2),
+            event_type: ChCanonicalBookEventType::Snapshot,
+            bid_prices: vec![ChPrice::from(Price::new(Decimal::new(48, 2)))],
+            bid_sizes: vec![ChShares::from(Shares::new(Decimal::from(100)))],
+            ask_prices: vec![ChPrice::from(Price::new(Decimal::new(52, 2)))],
+            ask_sizes: vec![ChShares::from(Shares::new(Decimal::from(100)))],
+            old_tick_size: None,
+            new_tick_size: None,
+            trade_price: None,
+            trade_side: None,
+            trade_size: None,
+            fee_rate_bps: None,
+            venue_event_time: 1_000_000,
+            ingress_time: 1_000_000,
+            persisted_time: 1_000_000,
+            event_hash: ChDigest::new([1; 32]),
+            schema_version: BookL2LedgerRow::SCHEMA_VERSION,
         }
     }
 
     #[test]
-    fn decode_levels_valid_pairs() {
-        let (levels, status) = decode_levels(r#"[["0.48","100"],["0.47","50"]]"#);
+    fn decode_levels_valid_typed_arrays() {
+        let row = sample_row();
+        let (levels, status) = decode_levels(&row.bid_prices, &row.bid_sizes);
         assert_eq!(status, BookDecodeStatus::Ok);
-        assert_eq!(levels.len(), 2);
+        assert_eq!(levels.len(), 1);
     }
 
     #[test]
-    fn decode_levels_malformed_json() {
-        let (levels, status) = decode_levels("not-json");
-        assert!(levels.is_empty());
-        assert_eq!(status, BookDecodeStatus::MalformedJson);
-        assert!(status.counts_as_failure());
-    }
-
-    #[test]
-    fn decode_levels_rejects_a_partially_invalid_book() {
-        let (levels, status) = decode_levels(r#"[["0.48","100"],["not-a-price","50"]]"#);
-
+    fn decode_levels_rejects_mismatched_array_lengths() {
+        let row = sample_row();
+        let (levels, status) = decode_levels(&row.bid_prices, &[]);
         assert!(levels.is_empty());
         assert_eq!(status, BookDecodeStatus::InvalidLevel);
         assert!(status.counts_as_failure());
     }
 
     #[test]
-    fn snapshot_from_row_malformed_bids_yields_none() {
-        let row = sample_row("not-json", r#"[["0.52","100"]]"#);
-        let decision_at = Utc.timestamp_opt(1_000_000, 0).single().expect("ts");
-        let (snapshot, status) = snapshot_from_row(row, decision_at, decision_at);
-        assert!(snapshot.is_none());
-        assert_eq!(status, BookDecodeStatus::MalformedJson);
-    }
-
-    #[test]
-    fn snapshot_from_row_rejects_one_invalid_level_in_an_otherwise_valid_side() {
-        let row = sample_row(
-            r#"[["0.48","100"],["0.47","invalid-size"]]"#,
-            r#"[["0.52","100"]]"#,
-        );
-        let decision_at = Utc.timestamp_opt(1_000_000, 0).single().expect("ts");
+    fn snapshot_from_row_rejects_invalid_typed_level() {
+        let mut row = sample_row();
+        row.bid_sizes[0] = ChShares::from(Decimal::NEGATIVE_ONE);
+        let decision_at = Utc.timestamp_millis_opt(1_000_000).single().expect("ts");
         let (snapshot, status) = snapshot_from_row(row.clone(), decision_at, decision_at);
 
         assert!(snapshot.is_none());
@@ -822,12 +754,12 @@ mod tests {
             .single()
             .expect("decision time");
 
-        let mut future_effective = sample_row(r#"[["0.48","100"]]"#, r#"[["0.52","100"]]"#);
-        future_effective.event_time += 1;
+        let mut future_effective = sample_row();
+        future_effective.venue_event_time += 1;
         assert!(decode_book_row(future_effective, decision_at, decision_at).is_err());
 
-        let mut future_available = sample_row(r#"[["0.48","100"]]"#, r#"[["0.52","100"]]"#);
-        future_available.created_at += 1;
+        let mut future_available = sample_row();
+        future_available.persisted_time += 1;
         assert!(decode_book_row(future_available, decision_at, decision_at).is_err());
     }
 }

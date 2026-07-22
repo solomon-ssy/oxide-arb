@@ -9,7 +9,7 @@ use crate::{
     types::{
         ArtifactUri, ContentHash, DecisionPolicySnapshotId, ReaderContractVersion,
         ResearchEvaluationTrack, ResearchProfileRef, SchemaContractVersion, SourceSliceId,
-        SourceSliceManifestV1,
+        SourceSliceManifest,
     },
 };
 
@@ -35,7 +35,7 @@ pub struct Model {
     pub manifest_uri: Option<ArtifactUri>,
     pub manifest_hash: Option<ContentHash>,
     #[sea_orm(column_type = "JsonBinary")]
-    pub manifest_json: Option<SourceSliceManifestV1>,
+    pub manifest_json: Option<SourceSliceManifest>,
     pub failure_detail: Option<String>,
     pub completed_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,

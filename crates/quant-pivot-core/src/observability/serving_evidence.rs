@@ -59,7 +59,7 @@ impl FeatureEvidenceCommitment {
         let mut seen = HashSet::with_capacity(admitted.len());
         let mut model_vector_markets = HashMap::with_capacity(admitted.len());
         for vector_id in admitted {
-            if !seen.insert(vector_id.clone()) {
+            if !seen.insert(*vector_id) {
                 return Err(determinism(format!(
                     "model-admitted feature vector list contains duplicate {vector_id}"
                 )));
@@ -69,7 +69,7 @@ impl FeatureEvidenceCommitment {
                     "model-admitted feature vector {vector_id} is absent from the serving feature commitment"
                 ))
             })?;
-            model_vector_markets.insert(vector_id.clone(), market_id);
+            model_vector_markets.insert(*vector_id, market_id);
         }
         self.model_vector_markets = model_vector_markets;
         Ok(self)
@@ -141,8 +141,8 @@ pub fn feature_commitment(rows: &[QuantFeatureEventRow]) -> QuantResult<FeatureE
                 "feature evidence batch contains duplicate key {key}"
             )));
         }
-        vector_ids.insert(row.feature_vector_id.clone());
-        match vector_markets.insert(row.feature_vector_id.clone(), row.market_id.clone()) {
+        vector_ids.insert(row.feature_vector_id);
+        match vector_markets.insert(row.feature_vector_id, row.market_id.clone()) {
             Some(previous) if previous != row.market_id => {
                 return Err(determinism(format!(
                     "feature vector {} is bound to multiple markets",
@@ -151,10 +151,9 @@ pub fn feature_commitment(rows: &[QuantFeatureEventRow]) -> QuantResult<FeatureE
             }
             _ => {}
         }
-        match vector_capture_hashes.insert(
-            row.feature_vector_id.clone(),
-            row.decision_capture_hash.as_str(),
-        ) {
+        match vector_capture_hashes
+            .insert(row.feature_vector_id, row.decision_capture_hash.as_str())
+        {
             Some(previous) if previous != row.decision_capture_hash => {
                 return Err(determinism(format!(
                     "feature vector {} is bound to multiple decision captures",
@@ -233,15 +232,15 @@ pub fn completion_marker(
     Ok(QuantServingEvidenceCompletionRow {
         event_time: decision_at,
         format_version: SERVING_EVIDENCE_FORMAT_VERSION,
-        model_run_id: model_run_id.clone(),
+        model_run_id: *model_run_id,
         decision_at,
         knowledge_cutoff,
         feature_vector_ids_json,
         expected_feature_row_count: features.expected_row_count,
-        feature_rows_hash: features.rows_hash.as_str().to_owned(),
+        feature_rows_hash: features.rows_hash.to_string(),
         expected_model_input_row_count,
-        model_input_rows_hash: model_input_rows_hash.as_str().to_owned(),
-        completion_hash: completion_hash.as_str().to_owned(),
+        model_input_rows_hash: model_input_rows_hash.to_string(),
+        completion_hash: completion_hash.to_string(),
         ingestion_time,
     })
 }
@@ -260,6 +259,34 @@ pub fn verify_completion(
         )));
     }
     let features = feature_commitment(feature_rows)?;
+    let marker_feature_hash = marker
+        .feature_rows_hash
+        .parse::<ContentHash>()
+        .map_err(|error| {
+            determinism(format!(
+                "invalid feature evidence hash in completion {}: {error}",
+                marker.model_run_id
+            ))
+        })?;
+    let marker_input_hash = marker
+        .model_input_rows_hash
+        .parse::<ContentHash>()
+        .map_err(|error| {
+            determinism(format!(
+                "invalid model-input evidence hash in completion {}: {error}",
+                marker.model_run_id
+            ))
+        })?;
+    let marker_completion_hash =
+        marker
+            .completion_hash
+            .parse::<ContentHash>()
+            .map_err(|error| {
+                determinism(format!(
+                    "invalid completion evidence hash for run {}: {error}",
+                    marker.model_run_id
+                ))
+            })?;
     let marker_vector_ids = serde_json::from_str::<Vec<FeatureVectorId>>(
         &marker.feature_vector_ids_json,
     )
@@ -269,8 +296,8 @@ pub fn verify_completion(
             marker.model_run_id
         ),
     })?;
-    let marker_vector_set = marker_vector_ids.iter().cloned().collect::<HashSet<_>>();
-    let mut canonical_vector_ids = marker_vector_set.iter().cloned().collect::<Vec<_>>();
+    let marker_vector_set = marker_vector_ids.iter().copied().collect::<HashSet<_>>();
+    let mut canonical_vector_ids = marker_vector_set.iter().copied().collect::<Vec<_>>();
     canonical_vector_ids.sort_by_key(ToString::to_string);
     if marker_vector_ids.len() != marker_vector_set.len()
         || marker_vector_ids != canonical_vector_ids
@@ -284,7 +311,7 @@ pub fn verify_completion(
         || features.knowledge_cutoff != marker.knowledge_cutoff
         || features.feature_vector_ids != marker_vector_ids
         || features.expected_row_count != marker.expected_feature_row_count
-        || features.rows_hash.as_str() != marker.feature_rows_hash
+        || features.rows_hash != marker_feature_hash
     {
         return Err(determinism(format!(
             "durable feature evidence does not match completion marker for run {}",
@@ -301,31 +328,13 @@ pub fn verify_completion(
         .iter()
         .any(|(vector_id, market_id)| features.vector_markets.get(vector_id) != Some(market_id))
         || input_count != marker.expected_model_input_row_count
-        || input_hash.as_str() != marker.model_input_rows_hash
+        || input_hash != marker_input_hash
     {
         return Err(determinism(format!(
             "durable model-input evidence does not match completion marker for run {}",
             marker.model_run_id
         )));
     }
-    let feature_hash = marker
-        .feature_rows_hash
-        .parse::<ContentHash>()
-        .map_err(|error| {
-            determinism(format!(
-                "invalid feature evidence hash in completion {}: {error}",
-                marker.model_run_id
-            ))
-        })?;
-    let input_hash = marker
-        .model_input_rows_hash
-        .parse::<ContentHash>()
-        .map_err(|error| {
-            determinism(format!(
-                "invalid model-input evidence hash in completion {}: {error}",
-                marker.model_run_id
-            ))
-        })?;
     let expected_completion = ResearchHasher::canonical(&CompletionDigest {
         format_version: marker.format_version,
         model_run_id: &marker.model_run_id,
@@ -333,11 +342,11 @@ pub fn verify_completion(
         knowledge_cutoff: marker.knowledge_cutoff,
         feature_vector_ids: &marker_vector_ids,
         expected_feature_row_count: marker.expected_feature_row_count,
-        feature_rows_hash: &feature_hash,
+        feature_rows_hash: &marker_feature_hash,
         expected_model_input_row_count: marker.expected_model_input_row_count,
-        model_input_rows_hash: &input_hash,
+        model_input_rows_hash: &marker_input_hash,
     })?;
-    if expected_completion.as_str() != marker.completion_hash {
+    if expected_completion != marker_completion_hash {
         return Err(determinism(format!(
             "completion hash mismatch for serving run {}",
             marker.model_run_id
@@ -384,7 +393,7 @@ fn model_input_commitment(
                 "model-input evidence for run {model_run_id} contains duplicate key {key}"
             )));
         }
-        match vector_markets.insert(row.feature_vector_id.clone(), row.market_id.clone()) {
+        match vector_markets.insert(row.feature_vector_id, row.market_id.clone()) {
             Some(previous) if previous != row.market_id => {
                 return Err(determinism(format!(
                     "model-input vector {} is bound to multiple markets in run {model_run_id}",
@@ -393,7 +402,7 @@ fn model_input_commitment(
             }
             _ => {}
         }
-        match market_vectors.insert(row.market_id.clone(), row.feature_vector_id.clone()) {
+        match market_vectors.insert(row.market_id.clone(), row.feature_vector_id) {
             Some(previous) if previous != row.feature_vector_id => {
                 return Err(determinism(format!(
                     "model-input market {} is bound to multiple vectors in run {model_run_id}",
@@ -502,7 +511,7 @@ mod tests {
     ) -> QuantFeatureEventRow {
         QuantFeatureEventRow {
             event_time: decision_at,
-            feature_vector_id: vector_id.clone(),
+            feature_vector_id: *vector_id,
             decision_policy_snapshot_id: DecisionPolicySnapshotId::new(Uuid::from_u128(1)),
             decision_at,
             knowledge_cutoff: decision_at,
@@ -540,11 +549,11 @@ mod tests {
             event_time: decision_at,
             decision_at,
             knowledge_cutoff: decision_at,
-            model_run_id: run_id.clone(),
+            model_run_id: *run_id,
             model_version_id: ModelVersionId::new(Uuid::from_u128(2)),
             recommendation_report_id: None,
             market_id: market_id.clone(),
-            feature_vector_id: vector_id.clone(),
+            feature_vector_id: *vector_id,
             model_family: "classical_logistic".to_owned(),
             raw_input_name: "book.best_bid".to_owned(),
             raw_state: "observed".to_owned(),

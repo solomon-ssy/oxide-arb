@@ -51,7 +51,7 @@ pub async fn job_kind_must_match_tagged_params() {
     let db = pool.connection().clone();
     let repo = PgResearchJobRepository::new(db.clone());
     let job_id = ResearchJobId::from_v7();
-    repo.enqueue(new_job(job_id.clone()))
+    repo.enqueue(new_job(job_id))
         .await
         .expect("enqueue typed job");
 
@@ -73,9 +73,7 @@ pub async fn finalize_requires_running_lease_owner() {
     let db = pool.connection().clone();
     let repo = PgResearchJobRepository::new(db);
     let job_id = ResearchJobId::from_v7();
-    repo.enqueue(new_job(job_id.clone()))
-        .await
-        .expect("enqueue");
+    repo.enqueue(new_job(job_id)).await.expect("enqueue");
 
     let worker = WorkerId::from_v7();
     let lease_expires = Utc::now() + ChronoDuration::seconds(90);
@@ -107,9 +105,7 @@ pub async fn stale_owner_finalize_is_rejected_after_reclaim() {
     let db = pool.connection().clone();
     let repo = PgResearchJobRepository::new(db);
     let job_id = ResearchJobId::from_v7();
-    repo.enqueue(new_job(job_id.clone()))
-        .await
-        .expect("enqueue");
+    repo.enqueue(new_job(job_id)).await.expect("enqueue");
 
     let worker_a = WorkerId::from_v7();
     let worker_b = WorkerId::from_v7();
@@ -174,9 +170,7 @@ pub async fn requeue_inflight_requeues_own_running_row_and_bumps_recovery() {
     let db = pool.connection().clone();
     let repo = PgResearchJobRepository::new(db);
     let job_id = ResearchJobId::from_v7();
-    repo.enqueue(new_job(job_id.clone()))
-        .await
-        .expect("enqueue");
+    repo.enqueue(new_job(job_id)).await.expect("enqueue");
 
     let worker = WorkerId::from_v7();
     // Own this row under `worker-a`, then a graceful shutdown drains it.
@@ -211,9 +205,7 @@ pub async fn requeue_inflight_ignores_other_owners_running_rows() {
     let db = pool.connection().clone();
     let repo = PgResearchJobRepository::new(db);
     let job_id = ResearchJobId::from_v7();
-    repo.enqueue(new_job(job_id.clone()))
-        .await
-        .expect("enqueue");
+    repo.enqueue(new_job(job_id)).await.expect("enqueue");
 
     let worker_a = WorkerId::from_v7();
     let worker_b = WorkerId::from_v7();
@@ -238,7 +230,7 @@ pub async fn requeue_inflight_quarantines_at_recovery_cap() {
     let repo = PgResearchJobRepository::new(db);
     let job_id = ResearchJobId::from_v7();
     // A job that has already exhausted its recovery budget.
-    let mut job = new_job(job_id.clone());
+    let mut job = new_job(job_id);
     job.recovery_attempt = 3;
     job.max_recovery_attempts = 3;
     repo.enqueue(job).await.expect("enqueue");
@@ -270,9 +262,7 @@ pub async fn double_finalize_returns_state_conflict() {
     let db = pool.connection().clone();
     let repo = PgResearchJobRepository::new(db);
     let job_id = ResearchJobId::from_v7();
-    repo.enqueue(new_job(job_id.clone()))
-        .await
-        .expect("enqueue");
+    repo.enqueue(new_job(job_id)).await.expect("enqueue");
 
     let worker = WorkerId::from_v7();
     let lease_expires = Utc::now() + ChronoDuration::seconds(90);

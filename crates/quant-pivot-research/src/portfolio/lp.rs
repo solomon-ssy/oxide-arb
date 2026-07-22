@@ -28,9 +28,11 @@ use std::{
     cmp::Ordering,
     collections::BTreeMap,
     panic::{self, AssertUnwindSafe},
+    string::ToString,
     time::Instant,
 };
 
+#[cfg(debug_assertions)]
 use debug_test_hooks::{MilpBehavior, RelaxBehavior};
 use good_lp::{
     Expression, ProblemVariables, Solution, SolverModel, Variable, constraint,
@@ -187,7 +189,7 @@ impl<'a> PreparedModel<'a> {
             for (cluster_idx, members) in correlation.clusters.iter().enumerate() {
                 let mut held = Decimal::ZERO;
                 for market in members {
-                    cluster_of.insert(market.as_str().to_owned(), cluster_idx);
+                    cluster_of.insert(market.to_string(), cluster_idx);
                     held += input
                         .initial_exposures
                         .per_market
@@ -216,11 +218,11 @@ impl<'a> PreparedModel<'a> {
                 TIE_BREAK_EPSILON.mul_add(count_to_f64(n - rank, "candidate tie-break rank")?, 1.0);
             let weight_f64 = (decimal_to_f64(weight, "candidate objective weight")? * tie).max(0.0);
             let ub = candidate_upper_bound(meta, caps);
-            let market_key = meta.candidate.market_id.as_str().to_owned();
+            let market_key = meta.candidate.market_id.to_string();
             let event_key = meta
                 .event_id
                 .as_ref()
-                .map_or_else(|| market_key.clone(), |id| id.as_str().to_owned());
+                .map_or_else(|| market_key.clone(), ToString::to_string);
             let cluster = cluster_of.get(&market_key).copied();
             candidates.push(LpCandidate {
                 meta_index,
@@ -446,7 +448,7 @@ impl<'a> PreparedModel<'a> {
             };
 
             allocations.push(Allocation {
-                signal_candidate_id: meta.candidate.signal_candidate_id.clone(),
+                signal_candidate_id: meta.candidate.signal_candidate_id,
                 market_id: meta.candidate.market_id.clone(),
                 allocated_usd: Usd::new(allocated),
                 binding_constraint: binding,

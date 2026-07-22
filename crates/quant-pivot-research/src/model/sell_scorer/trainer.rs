@@ -8,6 +8,8 @@
 //! Determinism is a money-critical invariant: the same `(examples, label, seed,
 //! output_spec, header)` yields a byte-identical artifact hash.
 
+use std::sync::Arc;
+
 use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::types::{
     ContentHash, ModelInputContract, model_training::TrainingObjectiveSpec,
@@ -46,7 +48,7 @@ const GAIN_CANDIDATES: [f64; 9] = [0.5, 1.0, 2.0, 3.0, 4.0, 6.0, 8.0, 10.0, 12.0
 #[derive(Debug, Clone)]
 pub struct TrainSellScorerRequest {
     /// Frozen, point-in-time exit-decision training examples.
-    pub examples: Vec<TrainingExample>,
+    pub examples: Arc<[TrainingExample]>,
     /// Supervised target label (`hold_vs_exit_alpha_bps`).
     pub label: LabelSelector,
     /// Initial weights / candidate factor set (market + position-state).
@@ -129,8 +131,8 @@ impl SellScorerTrainer {
             weights: fit.factor_weights,
             prediction_horizon_secs: request.prediction_horizon_secs,
             output_spec,
-            label_schema_hash: request.label_schema_hash.clone(),
-            training_dataset_hash: request.training_dataset_hash.clone(),
+            label_schema_hash: request.label_schema_hash,
+            training_dataset_hash: request.training_dataset_hash,
             training_input_hash,
             input_contract: request.input_contract.clone(),
             input_contract_hash,

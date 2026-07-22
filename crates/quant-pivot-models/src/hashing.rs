@@ -17,6 +17,12 @@ pub const BLAKE3_PREFIX: &str = "blake3:";
 pub struct CanonicalDigest;
 
 impl CanonicalDigest {
+    /// Compute a typed content hash directly from raw bytes.
+    #[must_use]
+    pub fn content_hash_bytes(bytes: &[u8]) -> ContentHash {
+        ContentHash::from_bytes(*blake3::hash(bytes).as_bytes())
+    }
+
     /// Lowercase hex BLAKE3 digest of `bytes` (no algorithm prefix).
     #[must_use]
     pub fn raw_hex(bytes: &[u8]) -> String {
@@ -63,7 +69,8 @@ impl CanonicalDigest {
     where
         T: Serialize + ?Sized,
     {
-        ContentHash::parse(Self::blake3_json(value)?)
+        let bytes = Self::canonical_json_bytes(value)?;
+        Ok(Self::content_hash_bytes(&bytes))
     }
 
     /// RFC 8785 canonical, domain-separated content identifier.
@@ -93,7 +100,7 @@ impl CanonicalDigest {
         input.extend_from_slice(domain_separator.as_bytes());
         input.push(0);
         input.extend_from_slice(&canonical);
-        ContentHash::parse(Self::prefixed_bytes(&input))
+        Ok(Self::content_hash_bytes(&input))
     }
 }
 

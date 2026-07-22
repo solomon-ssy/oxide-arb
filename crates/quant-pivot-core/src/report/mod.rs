@@ -5,7 +5,7 @@ mod composer;
 mod coordinator;
 mod fact_bundle;
 mod fact_delivery;
-mod funnel;
+pub mod funnel;
 mod lifecycle;
 mod publisher;
 mod readiness;

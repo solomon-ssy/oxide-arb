@@ -14,7 +14,7 @@ use quant_pivot_models::{
     domain::data_plane::CryptoPriceReport,
     enums::domain::BinanceMarketSegment,
     hashing::CanonicalDigest,
-    types::{BinanceSymbol, ContentHash, DomainInstrumentKey, DomainSourceId, Shares, Usd},
+    types::{BinanceSymbol, DomainInstrumentKey, DomainSourceId, Shares, Usd},
 };
 use reqwest::Client;
 use rust_decimal::Decimal;
@@ -362,7 +362,7 @@ fn map_report(
         context: "binance aggregate trade serialization".into(),
         detail: error.to_string(),
     })?;
-    let report_hash = ContentHash::parse(CanonicalDigest::prefixed_bytes(raw_report.as_bytes()))?;
+    let report_hash = CanonicalDigest::content_hash_bytes(raw_report.as_bytes());
     Ok(CryptoPriceReport {
         source_id: agg_trade_source_id(market),
         instrument_key: agg_trade_instrument(market, symbol),
@@ -478,7 +478,7 @@ fn map_archive_row(
     }
     .ok_or_else(|| archive_error(format!("invalid archive timestamp: {timestamp}")))?;
     let raw_report = row.iter().collect::<Vec<_>>().join(",");
-    let report_hash = ContentHash::parse(CanonicalDigest::prefixed_bytes(raw_report.as_bytes()))?;
+    let report_hash = CanonicalDigest::content_hash_bytes(raw_report.as_bytes());
     Ok(CryptoPriceReport {
         source_id: agg_trade_source_id(market),
         instrument_key: agg_trade_instrument(market, symbol),

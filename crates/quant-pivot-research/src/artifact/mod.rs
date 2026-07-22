@@ -9,6 +9,7 @@
 //! backend.
 
 mod local;
+#[cfg(feature = "research-jobs")]
 mod s3;
 
 use std::{
@@ -27,6 +28,7 @@ use quant_pivot_models::{
     config::{ArtifactStoreDeployConfig, ArtifactStoreKind},
     types::ArtifactUri,
 };
+#[cfg(feature = "research-jobs")]
 pub use s3::S3ArtifactStore;
 
 pub type ArtifactByteStream = Pin<Box<dyn Stream<Item = QuantResult<Bytes>> + Send>>;
@@ -229,6 +231,24 @@ pub fn build_artifact_store(
 ) -> QuantResult<Arc<dyn ArtifactStore>> {
     match config.kind {
         ArtifactStoreKind::Local => Ok(Arc::new(LocalArtifactStore::new(&config.prefix))),
-        ArtifactStoreKind::S3 => Ok(Arc::new(S3ArtifactStore::new(config)?)),
+        ArtifactStoreKind::S3 => build_s3_artifact_store(config),
     }
+}
+
+#[cfg(feature = "research-jobs")]
+fn build_s3_artifact_store(
+    config: &ArtifactStoreDeployConfig,
+) -> QuantResult<Arc<dyn ArtifactStore>> {
+    Ok(Arc::new(S3ArtifactStore::new(config)?))
+}
+
+#[cfg(not(feature = "research-jobs"))]
+fn build_s3_artifact_store(
+    _config: &ArtifactStoreDeployConfig,
+) -> QuantResult<Arc<dyn ArtifactStore>> {
+    Err(ResearchError::NotEligible {
+        code: "research_jobs_feature_disabled",
+        detail: "S3 artifact storage requires the compile-time `research-jobs` feature".to_owned(),
+    }
+    .into())
 }

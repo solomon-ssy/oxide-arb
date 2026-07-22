@@ -54,7 +54,7 @@ impl MarketSelectionRepository for PgMarketSelectionRepository {
         &self,
         snapshot_id: &MarketSelectionId,
     ) -> Result<Option<MarketSelectionInfo>, StorageError> {
-        Entity::find_by_id(snapshot_id.clone())
+        Entity::find_by_id(*snapshot_id)
             .one(&self.db)
             .await
             .map_err(StorageError::from)
@@ -66,7 +66,7 @@ impl MarketSelectionRepository for PgMarketSelectionRepository {
         snapshot_id: &MarketSelectionId,
     ) -> Result<Vec<MarketSelectionMemberInfo>, StorageError> {
         QuantMarketSelectionMemberEntity::find()
-            .filter(Column::MarketSelectionId.eq(snapshot_id.clone()))
+            .filter(Column::MarketSelectionId.eq(*snapshot_id))
             .order_by_asc(Column::MarketId)
             .all(&self.db)
             .await

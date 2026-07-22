@@ -596,7 +596,7 @@ pub fn validate_weather_decision_group(
         }
     }
     Ok(WeatherDecisionGroupValidation {
-        decision_group_id: first.subject.decision_group_id.clone(),
+        decision_group_id: first.subject.decision_group_id,
         member_count: members.len(),
         exhaustive: require_exhaustive,
         resolution_complete: all_resolved,

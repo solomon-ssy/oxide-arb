@@ -51,24 +51,24 @@ async fn do_set_roles(
 
     let txn = db.begin().await.map_err(StorageError::from)?;
 
-    if Entity::find_by_id(user_id.clone())
+    if Entity::find_by_id(user_id)
         .one(&txn)
         .await
         .map_err(StorageError::from)?
         .is_none()
     {
         txn.rollback().await.map_err(StorageError::from)?;
-        return Err(error::not_found(USER, &user_id));
+        return Err(error::not_found(USER, user_id));
     }
 
     // Resolve every target role to its code, rejecting unknown ids.
     let target_roles = RoleEntity::find()
-        .filter(Column::Id.is_in(target.iter().cloned()))
+        .filter(Column::Id.is_in(target.iter().copied()))
         .all(&txn)
         .await
         .map_err(StorageError::from)?;
     if target_roles.len() != target.len() {
-        let found: HashSet<RoleId> = target_roles.iter().map(|role| role.id.clone()).collect();
+        let found: HashSet<RoleId> = target_roles.iter().map(|role| role.id).collect();
         let missing = target
             .iter()
             .find(|id| !found.contains(id))
@@ -82,11 +82,11 @@ async fn do_set_roles(
     let enabled_code_of: HashMap<RoleId, RoleCode> = target_roles
         .iter()
         .filter(|role| role.status == RoleStatus::Enabled)
-        .map(|role| (role.id.clone(), role.code.clone()))
+        .map(|role| (role.id, role.code.clone()))
         .collect();
 
     let current: HashSet<RoleId> = UserRoleEntity::find()
-        .filter(UserRoleColumn::UserId.eq(user_id.clone()))
+        .filter(UserRoleColumn::UserId.eq(user_id))
         .all(&txn)
         .await
         .map_err(StorageError::from)?
@@ -101,7 +101,7 @@ async fn do_set_roles(
         HashMap::new()
     } else {
         RoleEntity::find()
-            .filter(Column::Id.is_in(removed.iter().cloned()))
+            .filter(Column::Id.is_in(removed.iter().copied()))
             .all(&txn)
             .await
             .map_err(StorageError::from)?
@@ -112,8 +112,8 @@ async fn do_set_roles(
 
     if !added.is_empty() {
         let rows = added.iter().map(|role_id| ActiveModel {
-            user_id: Set(user_id.clone()),
-            role_id: Set(role_id.clone()),
+            user_id: Set(user_id),
+            role_id: Set(*role_id),
             ..Default::default()
         });
         junction::insert_junction_rows::<UserRoleEntity>(
@@ -134,8 +134,8 @@ async fn do_set_roles(
 
     if !removed.is_empty() {
         UserRoleEntity::delete_many()
-            .filter(UserRoleColumn::UserId.eq(user_id.clone()))
-            .filter(UserRoleColumn::RoleId.is_in(removed.iter().cloned()))
+            .filter(UserRoleColumn::UserId.eq(user_id))
+            .filter(UserRoleColumn::RoleId.is_in(removed.iter().copied()))
             .exec(&txn)
             .await
             .map_err(StorageError::from)?;
@@ -156,7 +156,7 @@ async fn do_list_roles_for_user(
     user_id: &UserId,
 ) -> Result<Vec<RoleInfo>, StorageError> {
     let role_ids: Vec<RoleId> = UserRoleEntity::find()
-        .filter(UserRoleColumn::UserId.eq(user_id.clone()))
+        .filter(UserRoleColumn::UserId.eq(*user_id))
         .all(db)
         .await
         .map_err(StorageError::from)?

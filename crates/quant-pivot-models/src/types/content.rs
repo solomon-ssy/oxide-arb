@@ -19,13 +19,15 @@
 //!
 //! [`SchemaVersion`] uses read-time validation via custom [`TryGetable`] /
 //! [`ValueType`] (not `DeriveValueType`, which would accept corrupt integers).
-//! [`ContentHash`] and [`ArtifactUri`] bind as `text` with **read-time validation**
-//! via `validated_text_seaorm!` — `DeriveValueType` on a `String` tuple struct
-//! would skip validation when loading corrupt rows from Postgres.
+//! [`ContentHash`] and [`ArtifactUri`] bind as `text` with **read-time validation**.
+//! `ContentHash` stores only the 32-byte digest in memory and formats the
+//! canonical text at persistence/wire boundaries; `ArtifactUri` uses
+//! `validated_text_seaorm!`. `DeriveValueType` on a `String` tuple struct would
+//! skip validation when loading corrupt rows from Postgres.
 
 use std::{
     borrow::Cow,
-    fmt::{Display, Formatter, Result as FmtResult},
+    fmt::{Debug, Display, Formatter, Result as FmtResult},
     str::FromStr,
 };
 
@@ -35,12 +37,21 @@ use sea_orm::{
     ActiveValue, ColIdx, DbErr, IntoActiveValue, QueryResult, TryGetError, TryGetable,
     sea_query::{ArrayType, ColumnType, Nullable, Value, ValueType, ValueTypeErr},
 };
-use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error};
+use serde::{
+    Deserialize, Deserializer, Serialize, Serializer,
+    de::{Error, Visitor},
+};
 
 use crate::hashing::BLAKE3_PREFIX;
 
 /// Length, in hexadecimal characters, of a BLAKE3-256 digest.
 const BLAKE3_HEX_LEN: usize = 64;
+
+/// Length of the canonical `blake3:<64 lowercase hex>` representation.
+const CONTENT_HASH_TEXT_LEN: usize = BLAKE3_PREFIX.len() + BLAKE3_HEX_LEN;
+
+/// Lowercase hexadecimal alphabet used by the allocation-free formatter.
+const LOWER_HEX: &[u8; 16] = b"0123456789abcdef";
 
 /// `SeaORM` bindings for validated `text` newtypes (read-time `parse`).
 ///
@@ -111,14 +122,45 @@ macro_rules! validated_text_seaorm {
 
 // ── ContentHash ─────────────────────────────────────────────────────────────
 
-/// A canonical `blake3:<64 lowercase hex>` content hash.
+/// A BLAKE3-256 content hash with canonical text formatting at boundaries.
 ///
-/// The inner string is private and validated on every construction path, so an
-/// instance is a proof that the value is a well-formed canonical digest. Use
-/// [`ContentHash::parse`] for untrusted input or
+/// The digest is stored inline as 32 bytes. Use [`ContentHash::parse`] for
+/// untrusted canonical text or
 /// [`crate::hashing::CanonicalDigest::content_hash_json`] to hash a value.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ContentHash(String);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ContentHash([u8; 32]);
+
+/// Stack-backed canonical `blake3:<64 lowercase hex>` text.
+///
+/// This is primarily the stable UUID-v5 name representation for existing
+/// content-addressed identifiers. It also avoids allocating when an API accepts
+/// bytes directly.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ContentHashText([u8; CONTENT_HASH_TEXT_LEN]);
+
+impl ContentHashText {
+    /// Canonical text bytes, including the `blake3:` prefix.
+    #[must_use]
+    #[inline]
+    pub const fn as_bytes(&self) -> &[u8; CONTENT_HASH_TEXT_LEN] {
+        &self.0
+    }
+}
+
+impl Display for ContentHashText {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        for byte in self.0 {
+            f.write_str(char::from(byte).encode_utf8(&mut [0; 4]))?;
+        }
+        Ok(())
+    }
+}
+
+impl Debug for ContentHashText {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        Display::fmt(self, f)
+    }
+}
 
 impl JsonSchema for ContentHash {
     fn inline_schema() -> bool {
@@ -145,41 +187,68 @@ impl ContentHash {
     /// Returns [`CanonicalDigestError::InvalidContentHash`] when the value does
     /// not start with the `blake3:` prefix followed by exactly 64 lowercase hex
     /// characters.
-    pub fn parse(value: impl Into<String>) -> Result<Self, CanonicalDigestError> {
-        let value = value.into();
-        if Self::is_canonical(&value) {
-            Ok(Self(value))
-        } else {
-            Err(CanonicalDigestError::InvalidContentHash { value })
+    pub fn parse(value: &str) -> Result<Self, CanonicalDigestError> {
+        let Some(hex) = value.strip_prefix(BLAKE3_PREFIX) else {
+            return Err(Self::invalid(value));
+        };
+        if hex.len() != BLAKE3_HEX_LEN
+            || !hex
+                .bytes()
+                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+        {
+            return Err(Self::invalid(value));
         }
+
+        let mut digest = [0_u8; 32];
+        hex::decode_to_slice(hex, &mut digest).map_err(|_| Self::invalid(value))?;
+        Ok(Self(digest))
     }
 
-    /// The canonical `blake3:<hex>` string.
+    /// Construct from an already computed BLAKE3-256 digest.
     #[must_use]
     #[inline]
-    pub fn as_str(&self) -> &str {
+    pub const fn from_bytes(digest: [u8; 32]) -> Self {
+        Self(digest)
+    }
+
+    /// Raw 32-byte digest.
+    #[must_use]
+    #[inline]
+    pub const fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
 
-    /// The hex digest without the `blake3:` algorithm prefix.
+    /// Lowercase digest hex without the algorithm prefix.
+    ///
+    /// This allocates only for boundaries that require an owned path/id string.
     #[must_use]
-    #[inline]
-    pub fn hex(&self) -> &str {
-        &self.0[BLAKE3_PREFIX.len()..]
+    pub fn hex(&self) -> String {
+        hex::encode(self.0)
     }
 
-    /// Whether `value` has the canonical `blake3:<64 lowercase hex>` shape.
-    fn is_canonical(value: &str) -> bool {
-        let Some(hex) = value.strip_prefix(BLAKE3_PREFIX) else {
-            return false;
-        };
-        hex.len() == BLAKE3_HEX_LEN && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    /// Stack-backed canonical `blake3:<64 lowercase hex>` representation.
+    #[must_use]
+    pub fn canonical_text(&self) -> ContentHashText {
+        let mut text = [0_u8; CONTENT_HASH_TEXT_LEN];
+        text[..BLAKE3_PREFIX.len()].copy_from_slice(BLAKE3_PREFIX.as_bytes());
+        for (index, byte) in self.0.iter().copied().enumerate() {
+            let offset = BLAKE3_PREFIX.len() + index * 2;
+            text[offset] = LOWER_HEX[usize::from(byte >> 4)];
+            text[offset + 1] = LOWER_HEX[usize::from(byte & 0x0f)];
+        }
+        ContentHashText(text)
+    }
+
+    fn invalid(value: &str) -> CanonicalDigestError {
+        CanonicalDigestError::InvalidContentHash {
+            value: value.to_owned(),
+        }
     }
 }
 
 impl Display for ContentHash {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        f.write_str(&self.0)
+        Display::fmt(&self.canonical_text(), f)
     }
 }
 
@@ -193,18 +262,84 @@ impl FromStr for ContentHash {
 
 impl Serialize for ContentHash {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&self.0)
+        serializer.collect_str(self)
     }
 }
 
 impl<'de> Deserialize<'de> for ContentHash {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let raw = String::deserialize(deserializer)?;
-        Self::parse(raw).map_err(Error::custom)
+        struct ContentHashVisitor;
+
+        impl Visitor<'_> for ContentHashVisitor {
+            type Value = ContentHash;
+
+            fn expecting(&self, formatter: &mut Formatter<'_>) -> FmtResult {
+                formatter.write_str("a canonical blake3:<64 lowercase hex> digest")
+            }
+
+            fn visit_str<E: Error>(self, value: &str) -> Result<Self::Value, E> {
+                ContentHash::parse(value).map_err(E::custom)
+            }
+        }
+
+        deserializer.deserialize_str(ContentHashVisitor)
     }
 }
 
-validated_text_seaorm!(ContentHash);
+impl From<ContentHash> for Value {
+    #[inline]
+    fn from(value: ContentHash) -> Self {
+        Self::String(Some(value.to_string()))
+    }
+}
+
+impl From<&ContentHash> for Value {
+    #[inline]
+    fn from(value: &ContentHash) -> Self {
+        Self::String(Some(value.to_string()))
+    }
+}
+
+impl TryGetable for ContentHash {
+    fn try_get_by<I: ColIdx>(res: &QueryResult, index: I) -> Result<Self, TryGetError> {
+        let raw: String = <String as TryGetable>::try_get_by(res, index)?;
+        Self::parse(&raw).map_err(|error| TryGetError::DbErr(DbErr::Type(error.to_string())))
+    }
+}
+
+impl ValueType for ContentHash {
+    fn try_from(value: Value) -> Result<Self, ValueTypeErr> {
+        match value {
+            Value::String(Some(raw)) => Self::parse(&raw).map_err(|_| ValueTypeErr),
+            _ => Err(ValueTypeErr),
+        }
+    }
+
+    fn type_name() -> String {
+        stringify!(ContentHash).to_owned()
+    }
+
+    fn array_type() -> ArrayType {
+        ArrayType::String
+    }
+
+    fn column_type() -> ColumnType {
+        ColumnType::Text
+    }
+}
+
+impl Nullable for ContentHash {
+    fn null() -> Value {
+        Value::String(None)
+    }
+}
+
+impl IntoActiveValue<Self> for ContentHash {
+    #[inline]
+    fn into_active_value(self) -> ActiveValue<Self> {
+        ActiveValue::Set(self)
+    }
+}
 
 // ── ArtifactUri ───────────────────────────────────────────────────────────────
 
@@ -400,9 +535,14 @@ impl Nullable for SchemaVersion {
 
 #[cfg(test)]
 mod tests {
+    use std::mem::{needs_drop, size_of};
+
+    use bincode::{deserialize as bincode_deserialize, serialize as bincode_serialize};
+    use bitcode::{deserialize as bitcode_deserialize, serialize as bitcode_serialize};
     use sea_orm::sea_query::{Value, ValueType};
 
     use super::*;
+    use crate::hashing::CanonicalDigest;
 
     const VALID_HASH: &str =
         "blake3:0000000000000000000000000000000000000000000000000000000000000000";
@@ -410,16 +550,36 @@ mod tests {
     #[test]
     fn content_hash_accepts_canonical_blake3() {
         let h = ContentHash::parse(VALID_HASH).expect("valid");
-        assert_eq!(h.as_str(), VALID_HASH);
-        assert_eq!(h.hex().len(), BLAKE3_HEX_LEN);
+        assert_eq!(h.to_string(), VALID_HASH);
+        assert_eq!(h.as_bytes(), &[0; 32]);
+        assert_eq!(h.canonical_text().as_bytes().len(), CONTENT_HASH_TEXT_LEN);
+    }
+
+    #[test]
+    fn content_hash_is_inline_copy_value() {
+        fn assert_copy<T: Copy>() {}
+
+        assert_copy::<ContentHash>();
+        assert_eq!(size_of::<ContentHash>(), 32);
+        assert!(!needs_drop::<ContentHash>());
+    }
+
+    #[test]
+    fn content_hash_raw_blake3_golden_is_cross_platform_stable() {
+        let hash = CanonicalDigest::content_hash_bytes(b"abc");
+        assert_eq!(
+            hash.to_string(),
+            "blake3:6437b3ac38465133ffb63b75273a8db548c558465d79db03fd359c6cd5bd9d85"
+        );
+        assert_eq!(ContentHash::from_bytes(*hash.as_bytes()), hash);
     }
 
     #[test]
     fn content_hash_rejects_non_blake3_prefix() {
         let sha = format!("sha256:{}", "a".repeat(BLAKE3_HEX_LEN));
-        assert!(ContentHash::parse(sha).is_err());
+        assert!(ContentHash::parse(&sha).is_err());
         assert!(ContentHash::parse("blake3:short").is_err());
-        assert!(ContentHash::parse(format!("blake3:{}", "A".repeat(BLAKE3_HEX_LEN))).is_err());
+        assert!(ContentHash::parse(&format!("blake3:{}", "A".repeat(BLAKE3_HEX_LEN))).is_err());
     }
 
     #[test]
@@ -431,10 +591,40 @@ mod tests {
     }
 
     #[test]
+    fn content_hash_binary_wire_form_matches_canonical_string() {
+        let hash = ContentHash::parse(VALID_HASH).expect("valid");
+        let canonical = VALID_HASH.to_owned();
+
+        {
+            let actual_wire = bincode_serialize(&hash).expect("serialize bincode hash");
+            assert_eq!(
+                actual_wire,
+                bincode_serialize(&canonical).expect("serialize bincode string")
+            );
+            assert_eq!(
+                bincode_deserialize::<ContentHash>(&actual_wire).expect("deserialize bincode hash"),
+                hash
+            );
+        }
+
+        {
+            let actual_wire = bitcode_serialize(&hash).expect("serialize bitcode hash");
+            assert_eq!(
+                actual_wire,
+                bitcode_serialize(&canonical).expect("serialize bitcode string")
+            );
+            assert_eq!(
+                bitcode_deserialize::<ContentHash>(&actual_wire).expect("deserialize bitcode hash"),
+                hash
+            );
+        }
+    }
+
+    #[test]
     fn content_hash_seaorm_value_type_validates() {
         let valid = Value::String(Some(VALID_HASH.to_owned()));
         let parsed = <ContentHash as ValueType>::try_from(valid).expect("valid db value");
-        assert_eq!(parsed.as_str(), VALID_HASH);
+        assert_eq!(parsed.to_string(), VALID_HASH);
 
         let sha = format!("sha256:{}", "a".repeat(BLAKE3_HEX_LEN));
         let invalid = Value::String(Some(sha));
@@ -446,7 +636,7 @@ mod tests {
     #[test]
     fn content_hash_seaorm_roundtrip_value() {
         let hash = ContentHash::parse(VALID_HASH).expect("valid");
-        let value: Value = hash.clone().into();
+        let value: Value = hash.into();
         let back = <ContentHash as ValueType>::try_from(value).expect("roundtrip");
         assert_eq!(back, hash);
     }

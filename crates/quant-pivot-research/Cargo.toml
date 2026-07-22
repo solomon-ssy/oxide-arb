@@ -7,6 +7,7 @@ license.workspace = true
 description = "Quant-pivot feature, factor, and model materialization pipeline"
 
 [dependencies]
+quant-pivot-allocator = { workspace = true }
 quant-pivot-error = { path = "../quant-pivot-error" }
 quant-pivot-models = { path = "../quant-pivot-models" }
 tokio = { workspace = true }
@@ -23,9 +24,9 @@ regex = { workspace = true }
 url = { workspace = true }
 bytes = { workspace = true }
 futures-util = { workspace = true }
-object_store = { workspace = true }
-aws-config = { workspace = true }
-aws-sdk-s3 = { workspace = true }
+object_store = { workspace = true, optional = true }
+aws-config = { workspace = true, optional = true }
+aws-sdk-s3 = { workspace = true, optional = true }
 
 # ── Research numeric stack ────────────────────────────────────────────────────
 # Pure-Rust, lightweight, and load-bearing for the online feature plane (rolling
@@ -52,8 +53,14 @@ rust_decimal_macros = { workspace = true }
 # The pure-Rust microlp backend is the sole baseline allocator and is therefore
 # a normal dependency. Heavy and native-adjacent stacks stay opt-in.
 default = []
-# Offline feature / dataset materialization (lazy frames + parquet).
-dataframe = ["dep:polars", "dep:parquet"]
+# Offline jobs: remote artifact storage plus dataframe/Parquet materialization.
+research-jobs = [
+  "dep:polars",
+  "dep:parquet",
+  "dep:object_store",
+  "dep:aws-config",
+  "dep:aws-sdk-s3",
+]
 # Factor-weight / threshold optimization.
 optimize = ["dep:argmin", "dep:argmin-math"]
 # Classical ML (tree / ensemble / linear) for shadow candidates.

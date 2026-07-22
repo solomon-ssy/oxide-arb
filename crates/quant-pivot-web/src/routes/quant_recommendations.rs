@@ -118,7 +118,7 @@ pub async fn entry_condition(
         .quant_facts
         .latest_applied_entry_condition_evaluation(&instance.condition_instance_id)
         .await?
-        .map(evaluation_view)
+        .map(|row| evaluation_view(&row))
         .transpose()?;
     Ok(WebResponse::ok(EntryConditionDetailView {
         instance: EntryConditionInstanceSummaryView::from(instance),
@@ -128,7 +128,7 @@ pub async fn entry_condition(
 }
 
 fn evaluation_view(
-    row: EntryConditionEvaluationEventRow,
+    row: &EntryConditionEvaluationEventRow,
 ) -> Result<EntryConditionEvaluationView, WebError> {
     let applied_revision = row.applied_revision.ok_or_else(|| {
         WebError::Internal("applied condition trace has no applied_revision".to_owned())
@@ -220,9 +220,9 @@ fn evidence_metadata(evidence: &ConditionLeafEvidence) -> EvidenceMetadata {
             Some(input.observed_at),
             Some(input.available_at),
             Some(EntryConditionSourceCheckpointView::Factor {
-                definition_hash: input.definition_hash.clone(),
-                model_version_id: input.model_version_id.clone(),
-                snapshot_hash: input.snapshot_hash.clone(),
+                definition_hash: input.definition_hash,
+                model_version_id: input.model_version_id,
+                snapshot_hash: input.snapshot_hash,
             }),
         ),
         ConditionLeafEvidence::Weather(input) => (
@@ -230,7 +230,7 @@ fn evidence_metadata(evidence: &ConditionLeafEvidence) -> EvidenceMetadata {
             Some(input.available_at),
             Some(EntryConditionSourceCheckpointView::Weather {
                 revision: input.revision,
-                report_hash: input.report_hash.clone(),
+                report_hash: input.report_hash,
                 gap_generation: input.gap_generation,
             }),
         ),
@@ -241,7 +241,7 @@ fn evidence_metadata(evidence: &ConditionLeafEvidence) -> EvidenceMetadata {
                 latest.map(|report| report.available_at),
                 Some(EntryConditionSourceCheckpointView::Crypto {
                     source_sequence: latest.map(|report| report.source_sequence),
-                    report_hash: latest.map(|report| report.report_hash.clone()),
+                    report_hash: latest.map(|report| report.report_hash),
                     gap_generation: input.gap_generation,
                     discontinuity_epoch: state.discontinuity_epoch,
                     latched: state.latched,

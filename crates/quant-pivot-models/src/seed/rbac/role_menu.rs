@@ -93,7 +93,7 @@ fn expected_grants(ctx: &SeedContext) -> Result<Vec<(RoleId, MenuId)>, DbErr> {
             };
 
             if grant {
-                grants.push((role_id.clone(), row.id.clone()));
+                grants.push((*role_id, row.id));
             }
         }
     }
@@ -126,7 +126,7 @@ async fn hydrate(db: &DatabaseTransaction, ctx: &SeedContext) -> Result<(), DbEr
         .require::<RoleIdMap>(ROLES_ARTIFACT)
         .map_err(|error| DbErr::Custom(error.to_string()))?
         .values()
-        .cloned()
+        .copied()
         .collect::<Vec<_>>();
     let actual = Entity::find()
         .filter(Column::RoleId.is_in(role_ids))

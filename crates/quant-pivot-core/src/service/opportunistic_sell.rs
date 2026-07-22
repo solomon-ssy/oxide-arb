@@ -118,7 +118,7 @@ impl OpportunisticSellScorer for ModelBackedOpportunisticSellScorer {
         else {
             return Ok(None);
         };
-        let version_id = reference.id.clone();
+        let version_id = reference.id;
         let Some(version) = self
             .deps
             .model_registry
@@ -322,7 +322,7 @@ impl<S: OpportunisticSellScorer> ExitSignalEvaluator for OpportunisticSellSignal
             .model
             .active_exit_model_version_id
             .as_ref()
-            .map(|reference| reference.id.clone());
+            .map(|reference| reference.id);
 
         let Some(score) = self
             .fetch_score(&ctx, policy.shadow_mode, model_version_id.as_ref())
@@ -400,13 +400,13 @@ fn audit_row(
     let now_ms = ctx.now.timestamp_millis();
     QuantExitSignalEvaluationEventRow {
         event_time: now_ms,
-        order_intent_id: ctx.lot.order_intent_id.clone(),
-        position_id: ctx.lot.position_id.clone(),
+        order_intent_id: ctx.lot.order_intent_id,
+        position_id: ctx.lot.position_id,
         market_id: ctx.lot.market_id.clone(),
         token_id: ctx.lot.token_id.clone(),
         evaluator_kind: ChExitSignalEvaluatorKind::Opportunistic,
         verdict,
-        model_version_id: model_version_id.cloned(),
+        model_version_id: model_version_id.copied(),
         mark_price: ctx.mark_price.map(ChPrice::from),
         entry_composite_score: ChProbability::from(
             ctx.intent.exit_policy_json.entry_composite_score,

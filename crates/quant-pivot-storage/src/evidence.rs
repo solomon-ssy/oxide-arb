@@ -74,13 +74,7 @@ impl ProductionEvidenceArtifactVerificationPort for FileProductionEvidenceVerifi
             }
             hasher.update(&buffer[..read]);
         }
-        let actual_hash = ContentHash::parse(format!("blake3:{}", hasher.finalize().to_hex()))
-            .map_err(|error| {
-                StorageError::invariant_violation(
-                    Some("system_production_evidence"),
-                    format!("computed evidence hash is invalid: {error}"),
-                )
-            })?;
+        let actual_hash = ContentHash::from_bytes(*hasher.finalize().as_bytes());
         if &actual_hash != expected_hash {
             return Err(StorageError::state_conflict(
                 "system_production_evidence",

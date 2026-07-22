@@ -53,7 +53,7 @@ impl ReconciliationRepository for PgReconciliationRepository {
         reconciliation_id: &ReconciliationId,
         evidence: AppendReconciliationEvidence,
     ) -> Result<ReconciliationInfo, StorageError> {
-        let Some(row) = Entity::find_by_id(reconciliation_id.clone())
+        let Some(row) = Entity::find_by_id(*reconciliation_id)
             .one(&self.db)
             .await
             .map_err(StorageError::from)?
@@ -77,7 +77,7 @@ impl ReconciliationRepository for PgReconciliationRepository {
         reconciliation_id: &ReconciliationId,
         patch: ReconciliationPatch,
     ) -> Result<ReconciliationInfo, StorageError> {
-        let Some(row) = Entity::find_by_id(reconciliation_id.clone())
+        let Some(row) = Entity::find_by_id(*reconciliation_id)
             .one(&self.db)
             .await
             .map_err(StorageError::from)?
@@ -108,7 +108,7 @@ impl ReconciliationRepository for PgReconciliationRepository {
         &self,
         reconciliation_id: &ReconciliationId,
     ) -> Result<Option<ReconciliationInfo>, StorageError> {
-        Entity::find_by_id(reconciliation_id.clone())
+        Entity::find_by_id(*reconciliation_id)
             .one(&self.db)
             .await
             .map_err(StorageError::from)
@@ -120,7 +120,7 @@ impl ReconciliationRepository for PgReconciliationRepository {
         execution_order_id: &ExecutionOrderId,
     ) -> Result<Option<ReconciliationInfo>, StorageError> {
         Entity::find()
-            .filter(Column::ExecutionOrderId.eq(execution_order_id.clone()))
+            .filter(Column::ExecutionOrderId.eq(*execution_order_id))
             .one(&self.db)
             .await
             .map_err(StorageError::from)
@@ -178,13 +178,11 @@ fn page_condition(query: &ReconciliationListQuery) -> Condition {
         .add_option(
             query
                 .execution_order_id
-                .clone()
                 .map(|execution_order_id| Column::ExecutionOrderId.eq(execution_order_id)),
         )
         .add_option(
             query
                 .order_intent_id
-                .clone()
                 .map(|order_intent_id| Column::OrderIntentId.eq(order_intent_id)),
         )
         .add_option(query.from.map(|from| Column::CreatedAt.gte(from)))

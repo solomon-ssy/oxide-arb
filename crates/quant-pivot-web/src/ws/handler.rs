@@ -81,11 +81,11 @@ pub async fn ws_upgrade(
         .await
         .map_err(WebError::from)?
         .ok_or_else(|| WebError::Unauthorized("invalid or consumed websocket ticket".to_owned()))?;
-    let user_id = validate_ticket(&state, &ticket_claims).await?;
+    let subject_id = validate_ticket(&state, &ticket_claims).await?;
     let can_read_system = state
         .casbin
         .enforce(
-            &user_id,
+            &ticket_claims.subject,
             ResourceType::System.as_str(),
             Operation::Read.as_str(),
         )
@@ -100,7 +100,8 @@ pub async fn ws_upgrade(
     let ctx = SessionContext {
         state: state.clone(),
         registry: state.ws_sessions.clone(),
-        user_id,
+        subject_id,
+        user_id: ticket_claims.subject,
         family_id: ticket_claims.family_id,
         access_jti: ticket_claims.access_jti,
         authorization_revision: ticket_claims.authorization_revision,
@@ -126,7 +127,7 @@ fn ticket_protocol(req: &HttpRequest) -> Option<String> {
     Some(protocols[0].to_owned())
 }
 
-async fn validate_ticket(state: &AppState, ticket: &WsTicketClaims) -> Result<String, WebError> {
+async fn validate_ticket(state: &AppState, ticket: &WsTicketClaims) -> Result<UserId, WebError> {
     if !state.casbin.is_healthy()
         || ticket.session_exp <= Utc::now().timestamp()
         || state.jwt.is_revoked(&ticket.access_jti).await?
@@ -145,5 +146,5 @@ async fn validate_ticket(state: &AppState, ticket: &WsTicketClaims) -> Result<St
     if state.casbin.authorization_revision() != ticket.authorization_revision {
         return Err(WebError::from(AuthError::Blacklisted));
     }
-    Ok(ticket.subject.clone())
+    Ok(user_id)
 }

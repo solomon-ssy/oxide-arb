@@ -509,14 +509,11 @@ impl SettlementRedeemService {
             .into_iter()
             .filter(|lot| lot.state == PositionLedgerState::Open)
             .collect();
-        let intent_ids: Vec<_> = open_lots
-            .iter()
-            .map(|lot| lot.order_intent_id.clone())
-            .collect();
+        let intent_ids: Vec<_> = open_lots.iter().map(|lot| lot.order_intent_id).collect();
         let intents = self.deps.intents.find_by_ids(&intent_ids).await?;
         let intent_map: HashMap<_, _> = intents
             .into_iter()
-            .map(|intent| (intent.order_intent_id.clone(), intent))
+            .map(|intent| (intent.order_intent_id, intent))
             .collect();
 
         let mut groups: BTreeMap<MarketId, Vec<CandidateLot>> = BTreeMap::new();
@@ -806,7 +803,7 @@ impl SettlementRedeemService {
             return Ok(PreflightDecision::ManualRequired {
                 reason: "neg-risk auto redeem is not implemented".to_owned(),
                 record: self.new_redeem_record(NewRedeemRecordParams {
-                    settlement_redeem_id: settlement_redeem_id.clone(),
+                    settlement_redeem_id: *settlement_redeem_id,
                     market,
                     state: SettlementRedeemState::ManualRequired,
                     payout: &zero_payout,
@@ -839,7 +836,7 @@ impl SettlementRedeemService {
             return Ok(PreflightDecision::ManualRequired {
                 reason: reason.clone(),
                 record: self.new_redeem_record(NewRedeemRecordParams {
-                    settlement_redeem_id: settlement_redeem_id.clone(),
+                    settlement_redeem_id: *settlement_redeem_id,
                     market,
                     state: SettlementRedeemState::ManualRequired,
                     payout: &payout,
@@ -852,7 +849,7 @@ impl SettlementRedeemService {
 
         Ok(PreflightDecision::Auto {
             record: self.new_redeem_record(NewRedeemRecordParams {
-                settlement_redeem_id: settlement_redeem_id.clone(),
+                settlement_redeem_id: *settlement_redeem_id,
                 market,
                 state: SettlementRedeemState::Pending,
                 payout: &payout,
@@ -925,7 +922,7 @@ impl SettlementRedeemService {
         self.deps
             .settlement_redeems
             .confirm(ConfirmSettlementRedeem {
-                settlement_redeem_id: settlement_redeem_id.clone(),
+                settlement_redeem_id: *settlement_redeem_id,
                 balance_after_json,
                 payout_usd,
                 gas_fee_pol: Some(gas_fee_pol),
@@ -1208,9 +1205,9 @@ fn build_lot_writes(
         writes.push(SettlementRedeemLotWrite {
             lot: NewSettlementRedeemLot {
                 settlement_redeem_lot_id: SettlementRedeemLotId::from_v7(),
-                settlement_redeem_id: settlement_redeem_id.clone(),
-                position_id: candidate.lot.position_id.clone(),
-                order_intent_id: candidate.lot.order_intent_id.clone(),
+                settlement_redeem_id: *settlement_redeem_id,
+                position_id: candidate.lot.position_id,
+                order_intent_id: candidate.lot.order_intent_id,
                 token_id: candidate.lot.token_id.clone(),
                 side: candidate.lot.side,
                 shares_redeemed: candidate.lot.shares,
@@ -1282,7 +1279,7 @@ mod tests {
 
     fn test_content_hash(seed: u8) -> ContentHash {
         let hex: String = format!("{seed:02x}").chars().cycle().take(64).collect();
-        ContentHash::parse(format!("blake3:{hex}")).expect("hash")
+        ContentHash::parse(&format!("blake3:{hex}")).expect("hash")
     }
 
     #[test]

@@ -21,7 +21,7 @@ impl<T: Clone + Send + 'static> DebouncedWriter<T> {
     {
         let latest: Arc<Mutex<Option<T>>> = Arc::new(Mutex::new(None));
         let writer = Self {
-            latest: latest.clone(),
+            latest: Arc::clone(&latest),
         };
         let name = name.into();
 

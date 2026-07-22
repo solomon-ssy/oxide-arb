@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use quant_pivot_api::{
     gamma::GammaClient,
-    ws::{ClobWsManager, WsSessionInvalidationHook, WsShardHealthPort},
+    ws::{ClobWsManager, TokenKeyResolver, WsSessionInvalidationHook, WsShardHealthPort},
 };
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
@@ -27,7 +27,8 @@ use crate::{
     governance::{LinkageResolverDeps, LinkageResolverService},
     ingest::{
         book_store::BookStore,
-        data_pipeline::{self, DataPipeline, DataPipelineDeps},
+        data_pipeline::{DataPipeline, DataPipelineDeps},
+        data_plane_index::DataPlane,
         data_quality::BookDataQualityService,
         event_source::PipelineEventSource,
         market_cache::MarketCache,
@@ -82,22 +83,29 @@ pub struct DataBundle {
 impl DataBundle {
     /// Wire the full Polymarket ingest stack from deploy config and infra handles.
     pub fn assemble(deps: &DataBundleDeps<'_>) -> QuantResult<Self> {
+        let data_plane = Arc::new(DataPlane::new());
+        let book_store = Arc::new(BookStore::new(
+            Arc::clone(&data_plane),
+            Arc::clone(deps.metrics),
+        ));
         let invalidation_metrics = Arc::clone(deps.metrics);
-        let on_session_invalidated: WsSessionInvalidationHook = Arc::new(move |n| {
+        let invalidation_books = Arc::clone(&book_store);
+        let on_session_invalidated: WsSessionInvalidationHook = Arc::new(move |token_ids| {
+            let invalidated = invalidation_books.invalidate_ids(token_ids);
             invalidation_metrics
                 .ws_session_backpressure_invalidations
-                .inc_by(n);
+                .inc_by(u64::try_from(invalidated).unwrap_or(u64::MAX));
         });
         let ws_manager = Arc::new(ClobWsManager::new(
             &deps.deploy.polymarket,
             &deps.deploy.market_data.websocket,
             deps.shutdown.clone(),
+            Arc::clone(&data_plane) as Arc<dyn TokenKeyResolver>,
             Some(on_session_invalidated),
             None,
         ));
         let gamma_client = Arc::new(GammaClient::new(deps.deploy.market_data.gamma.clone()));
-        let book_store = Arc::new(BookStore::new(Arc::clone(deps.metrics)));
-        let market_registry = Arc::new(MarketRegistry::new());
+        let market_registry = Arc::new(MarketRegistry::new(data_plane));
         let market_filter = Arc::new(MarketFilter::new(
             &deps.runtime.recommendation.selection.enabled_categories,
         ));
@@ -274,20 +282,12 @@ fn build_data_pipeline(inputs: DataPipelineAssembly<'_>) -> Arc<DataPipeline> {
     } = inputs;
     let event_source: Arc<dyn PipelineEventSource> =
         Arc::clone(ws_manager) as Arc<dyn PipelineEventSource>;
-    let (book_shard_count, book_channel_capacity) = data_pipeline::book_apply_topology(
-        deps.deploy
-            .market_data
-            .websocket
-            .engine_max_subscription_tokens,
-    );
     Arc::new(DataPipeline::new(DataPipelineDeps {
         event_source,
         book_store: Arc::clone(book_store),
         market_registry: Arc::clone(market_registry),
         metrics: Arc::clone(deps.metrics),
         book_fact_writer: Arc::clone(&deps.infra.book_fact_writer),
-        book_shard_count,
-        book_channel_capacity,
         shutdown: deps.shutdown.clone(),
         status_nudge,
     }))

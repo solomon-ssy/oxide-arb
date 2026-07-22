@@ -57,7 +57,7 @@ impl ShadowComparisonRepository for PgShadowComparisonRepository {
         since: DateTime<Utc>,
     ) -> Result<ShadowStabilitySummary, StorageError> {
         let row = Entity::find()
-            .filter(Column::ShadowModelVersionId.eq(shadow_model_version_id.clone()))
+            .filter(Column::ShadowModelVersionId.eq(*shadow_model_version_id))
             .filter(Column::WeightSource.eq(ModelWeightSource::Artifact))
             .filter(Column::DecisionAt.gte(since))
             .select_only()
@@ -79,7 +79,7 @@ impl ShadowComparisonRepository for PgShadowComparisonRepository {
 
         let Some(row) = row else {
             return Ok(ShadowStabilitySummary {
-                shadow_model_version_id: shadow_model_version_id.clone(),
+                shadow_model_version_id: *shadow_model_version_id,
                 sample_count: 0,
                 window_start: None,
                 window_end: None,
@@ -90,7 +90,7 @@ impl ShadowComparisonRepository for PgShadowComparisonRepository {
 
         let sample_count = u64::try_from(cmp::max(row.sample_count, 0)).unwrap_or(u64::MAX);
         Ok(ShadowStabilitySummary {
-            shadow_model_version_id: shadow_model_version_id.clone(),
+            shadow_model_version_id: *shadow_model_version_id,
             sample_count,
             window_start: row.window_start,
             window_end: row.window_end,

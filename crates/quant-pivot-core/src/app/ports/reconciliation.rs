@@ -58,7 +58,7 @@ impl ReconciliationPort for CoreReconciliationPort {
             .find_by_id(&command.reconciliation_id)
             .await?
             .ok_or_else(|| {
-                StorageError::not_found(QUANT_RECONCILIATION, &command.reconciliation_id)
+                StorageError::not_found(QUANT_RECONCILIATION, command.reconciliation_id)
             })?;
 
         if reconciliation.result != ReconciliationResult::Unresolvable
@@ -66,7 +66,7 @@ impl ReconciliationPort for CoreReconciliationPort {
         {
             return Err(ExecutionError::ReconciliationNotResolvable {
                 reconciliation_id: command.reconciliation_id.to_string(),
-                result: reconciliation.result.as_str().to_owned(),
+                result: reconciliation.result.to_string(),
             }
             .into());
         }
@@ -75,7 +75,7 @@ impl ReconciliationPort for CoreReconciliationPort {
             .service
             .resolve(
                 OperatorReconcileResolution {
-                    execution_order_id: reconciliation.execution_order_id.clone(),
+                    execution_order_id: reconciliation.execution_order_id,
                     result: command.result,
                     filled_shares: command.filled_shares,
                     avg_price: command.avg_price,

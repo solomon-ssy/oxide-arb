@@ -29,7 +29,7 @@ pub async fn persist_and_publish_report(
     let repository = PgRecommendationReportRepository::new(db.clone());
     let delivery_worker = WorkerId::from_v7();
     let claimed = repository
-        .claim_fact_delivery(delivery_worker.clone(), 600)
+        .claim_fact_delivery(delivery_worker, 600)
         .await
         .expect("claim report delivery")
         .expect("seeded report delivery is claimable");
@@ -80,7 +80,7 @@ pub async fn persist_prepared_report(
     }
 
     ActiveModel {
-        report_run_id: ActiveValue::Set(report_run_id.clone()),
+        report_run_id: ActiveValue::Set(report_run_id),
         trigger_kind: ActiveValue::Set(ReportTriggerKind::Scheduled),
         trigger_key: ActiveValue::Set(
             ReportTriggerKey::parse(trigger_key).expect("valid report fixture trigger key"),
@@ -96,9 +96,9 @@ pub async fn persist_prepared_report(
         heartbeat_at: ActiveValue::Set(Some(now)),
         lease_expires_at: ActiveValue::Set(Some(lease_expires_at)),
         finished_at: ActiveValue::Set(None),
-        lease_owner: ActiveValue::Set(Some(worker_id.clone())),
+        lease_owner: ActiveValue::Set(Some(worker_id)),
         decision_policy_snapshot_id: ActiveValue::Set(Some(
-            transaction.report.decision_policy_snapshot_id.clone(),
+            transaction.report.decision_policy_snapshot_id,
         )),
         top_n: ActiveValue::Set(Some(transaction.report.top_n)),
         knowledge_lag_secs: ActiveValue::Set(Some(knowledge_lag_secs)),

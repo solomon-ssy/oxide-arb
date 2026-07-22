@@ -55,7 +55,7 @@ impl ResearchJobRepository for PgResearchJobRepository {
         &self,
         job_id: &ResearchJobId,
     ) -> Result<Option<ResearchJobInfo>, StorageError> {
-        Entity::find_by_id(job_id.clone())
+        Entity::find_by_id(*job_id)
             .one(&self.db)
             .await
             .map_err(StorageError::from)
@@ -123,7 +123,7 @@ impl ResearchJobRepository for PgResearchJobRepository {
         let now = Utc::now();
         let mut active = model.into_active_model();
         active.status = Set(ResearchJobStatus::Running);
-        active.lease_owner = Set(Some(owner.clone()));
+        active.lease_owner = Set(Some(*owner));
         active.lease_expires_at = Set(Some(lease_expires_at));
         active.started_at = Set(Some(now));
         active.heartbeat_at = Set(Some(now));
@@ -142,7 +142,7 @@ impl ResearchJobRepository for PgResearchJobRepository {
         lease_expires_at: DateTime<Utc>,
         progress: Option<ResearchJobProgress>,
     ) -> Result<bool, StorageError> {
-        let Some(model) = Entity::find_by_id(job_id.clone())
+        let Some(model) = Entity::find_by_id(*job_id)
             .one(&self.db)
             .await
             .map_err(StorageError::from)?
@@ -189,7 +189,7 @@ impl ResearchJobRepository for PgResearchJobRepository {
             .col_expr(Column::FinishedAt, Expr::value(Utc::now()))
             .col_expr(Column::LeaseOwner, Expr::value(None::<WorkerId>))
             .col_expr(Column::LeaseExpiresAt, Expr::value(None::<DateTime<Utc>>))
-            .filter(Column::JobId.eq(job_id.clone()))
+            .filter(Column::JobId.eq(*job_id))
             .filter(Column::Status.eq(ResearchJobStatus::Running))
             .filter(Column::LeaseOwner.eq(owner))
             .exec(&self.db)
@@ -198,7 +198,7 @@ impl ResearchJobRepository for PgResearchJobRepository {
         if result.rows_affected == 0 {
             return Err(finalize_guard_failure(&self.db, job_id).await);
         }
-        Entity::find_by_id(job_id.clone())
+        Entity::find_by_id(*job_id)
             .one(&self.db)
             .await
             .map_err(StorageError::from)?
@@ -221,7 +221,7 @@ impl ResearchJobRepository for PgResearchJobRepository {
             )
             .col_expr(Column::ErrorJson, Expr::value(error))
             .col_expr(Column::FinishedAt, Expr::value(Utc::now()))
-            .filter(Column::JobId.eq(job_id.clone()))
+            .filter(Column::JobId.eq(*job_id))
             .filter(Column::Status.eq(ResearchJobStatus::Queued))
             .exec(&self.db)
             .await
@@ -315,7 +315,7 @@ async fn reclaim_by_condition(
 
 /// Diagnose why a guarded finalize touched zero rows.
 async fn finalize_guard_failure(db: &DatabaseConnection, job_id: &ResearchJobId) -> StorageError {
-    let row = match Entity::find_by_id(job_id.clone()).one(db).await {
+    let row = match Entity::find_by_id(*job_id).one(db).await {
         Ok(row) => row,
         Err(err) => return StorageError::from(err),
     };
@@ -366,12 +366,7 @@ fn page_condition(query: &ResearchJobListQuery) -> Condition {
         .add_option(query.result_kind.map(|kind| Column::ResultKind.eq(kind)))
         .add_option(query.kind.map(|kind| Column::Kind.eq(kind)))
         .add_option(query.status.map(|status| Column::Status.eq(status)))
-        .add_option(
-            query
-                .model_spec_id
-                .clone()
-                .map(|id| Column::ModelSpecId.eq(id)),
-        )
+        .add_option(query.model_spec_id.map(|id| Column::ModelSpecId.eq(id)))
         .add_option(query.result_ref.map(|id| Column::ResultRef.eq(id)))
         .add_option(query.from.map(|from| Column::CreatedAt.gte(from)))
         .add_option(query.to.map(|to| Column::CreatedAt.lt(to)))

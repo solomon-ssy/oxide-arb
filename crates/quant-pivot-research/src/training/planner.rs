@@ -107,8 +107,8 @@ pub fn plan_lot_timeline_samples(
         let mut as_of = lot.opened_at.max(window_start);
         while as_of < lot.closed_at {
             samples.push(LotSamplePlan {
-                order_intent_id: lot.order_intent_id.clone(),
-                position_id: lot.position_id.clone(),
+                order_intent_id: lot.order_intent_id,
+                position_id: lot.position_id,
                 market_id: lot.market_id.clone(),
                 token_id: lot.token_id.clone(),
                 decision_at: as_of,
@@ -162,11 +162,11 @@ mod tests {
                 .expect("built-in profiles")
                 .remove(0)
                 .profile_ref,
-            research_program_hash: ContentHash::parse(format!("blake3:{}", "4".repeat(64)))
+            research_program_hash: ContentHash::parse(&format!("blake3:{}", "4".repeat(64)))
                 .expect("hash"),
             source_slice: SourceSliceManifestRef {
                 manifest_uri: ArtifactUri::parse("s3://fixture/source-slice.json").expect("URI"),
-                manifest_hash: ContentHash::parse(format!("blake3:{}", "5".repeat(64)))
+                manifest_hash: ContentHash::parse(&format!("blake3:{}", "5".repeat(64)))
                     .expect("hash"),
             },
             decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),

@@ -592,7 +592,7 @@ async fn run_one(
     config: ResearchJobsConfig,
     shutdown: CancellationToken,
 ) {
-    let job_id = job.job_id.clone();
+    let job_id = job.job_id;
     let cancel = CancellationToken::new();
     engine.register_cancel(&job_id, cancel.clone());
     engine.publish_progress(

@@ -94,7 +94,7 @@ impl EvidenceAttestor {
                 detail: format!("readiness attestation serialization failed: {error}"),
             })
         })?;
-        ContentHash::parse(format!(
+        ContentHash::parse(&format!(
             "blake3:{}",
             blake3::keyed_hash(&key.0, &bytes).to_hex()
         ))
@@ -319,7 +319,7 @@ impl ResearchReadinessEvidenceService {
             ));
         }
         let bytes = self.artifacts.get(&info.artifact_uri).await?;
-        let actual_hash = ContentHash::parse(CanonicalDigest::prefixed_bytes(&bytes))?;
+        let actual_hash = CanonicalDigest::content_hash_bytes(&bytes);
         let metadata = self.artifacts.metadata(&info.artifact_uri).await?;
         if actual_hash != info.payload_hash
             || metadata.version_id.as_deref() != Some(info.artifact_version.as_str())
@@ -522,7 +522,7 @@ impl ResearchReadinessEvidenceProducer {
                 detail: format!("readiness evidence serialization failed: {error}"),
             })
         })?;
-        let payload_hash = ContentHash::parse(CanonicalDigest::prefixed_bytes(&bytes))?;
+        let payload_hash = CanonicalDigest::content_hash_bytes(&bytes);
         let scope_hash = evidence_scope_hash(kind, &self.scope)?;
         let artifact_uri = self
             .artifacts

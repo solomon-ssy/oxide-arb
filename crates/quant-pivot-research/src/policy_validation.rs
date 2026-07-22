@@ -408,25 +408,26 @@ fn policy_significance(
         })?,
         trial_sharpe_variance: stats::variance(&candidate_sharpes),
     })?;
+    let trial_matrix = TrialPerformanceMatrix::from_rows(
+        basis
+            .groups
+            .iter()
+            .map(|group| group.timeline.decision_at)
+            .collect(),
+        basis
+            .groups
+            .iter()
+            .map(|group| {
+                group
+                    .candidate_returns_bps
+                    .iter()
+                    .map(|value| *value / Decimal::from(10_000))
+                    .collect()
+            })
+            .collect(),
+    )?;
     let pbo = probability_of_backtest_overfitting(
-        &TrialPerformanceMatrix {
-            periods: basis
-                .groups
-                .iter()
-                .map(|group| group.timeline.decision_at)
-                .collect(),
-            returns: basis
-                .groups
-                .iter()
-                .map(|group| {
-                    group
-                        .candidate_returns_bps
-                        .iter()
-                        .map(|value| *value / Decimal::from(10_000))
-                        .collect()
-                })
-                .collect(),
-        },
+        &trial_matrix,
         &PboInput {
             block_count: POLICY_PBO_BLOCKS,
         },
@@ -683,7 +684,8 @@ fn candidate_performance(
 
 fn deterministic_path_set_id(hash: &ContentHash) -> BacktestPathSetId {
     const NAMESPACE: Uuid = Uuid::from_u128(0x6bc1_1f75_8ca8_4f31_9be5_17ad_1170_0722);
-    BacktestPathSetId::new(Uuid::new_v5(&NAMESPACE, hash.as_str().as_bytes()))
+    let canonical = hash.canonical_text();
+    BacktestPathSetId::new(Uuid::new_v5(&NAMESPACE, canonical.as_bytes()))
 }
 
 fn clustered_bootstrap_lower_bound(
@@ -707,16 +709,9 @@ fn clustered_bootstrap_lower_bound(
     let seed_digest =
         CanonicalDigest::content_hash_json(&(seed_hash, "market_cluster_bootstrap_v1", candidate))
             .map_err(QuantError::from)?;
-    let hex = seed_digest
-        .as_str()
-        .strip_prefix("blake3:")
-        .ok_or_else(|| methodology("bootstrap seed is not a BLAKE3 hash".to_owned()))?;
-    let mut state = u64::from_str_radix(
-        hex.get(..16)
-            .ok_or_else(|| methodology("bootstrap seed digest is too short".to_owned()))?,
-        16,
-    )
-    .map_err(|error| methodology(format!("bootstrap seed cannot be decoded: {error}")))?;
+    let mut seed = [0_u8; 8];
+    seed.copy_from_slice(&seed_digest.as_bytes()[..8]);
+    let mut state = u64::from_be_bytes(seed);
     let cluster_count = u64::try_from(clusters.len()).map_err(|error| {
         methodology(format!("bootstrap cluster count does not fit u64: {error}"))
     })?;
@@ -772,7 +767,7 @@ mod tests {
     };
 
     fn hash() -> ContentHash {
-        ContentHash::parse(format!("blake3:{}", "7".repeat(64))).expect("hash")
+        ContentHash::parse(&format!("blake3:{}", "7".repeat(64))).expect("hash")
     }
 
     fn observations() -> Vec<PolicyPerformanceObservation> {

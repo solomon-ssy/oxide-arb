@@ -109,7 +109,7 @@ impl ClassicalRuntime {
             }
             .into());
         }
-        let actual_hash = ContentHash::parse(CanonicalDigest::prefixed_bytes(model_bytes))?;
+        let actual_hash = CanonicalDigest::content_hash_bytes(model_bytes);
         if actual_hash != artifact.serialized_model_hash {
             return Err(ResearchError::InvalidModelArtifact {
                 detail: format!(
@@ -206,9 +206,9 @@ impl ClassicalRuntime {
             }
             .into());
         }
-        let input_contract_hash = self.artifact.input_contract_hash.clone();
-        let transform_hash = self.artifact.input_transform_hash.clone();
-        let training_input_hash = self.artifact.training_input_hash.clone();
+        let input_contract_hash = self.artifact.input_contract_hash;
+        let transform_hash = self.artifact.input_transform_hash;
+        let training_input_hash = self.artifact.training_input_hash;
         self.artifact
             .input_transform
             .encoded_columns
@@ -244,7 +244,7 @@ impl ClassicalRuntime {
                         })?;
                 let (raw_state, raw_value) = classical_raw_evidence(cell)?;
                 Ok(ModelInputAuditRow {
-                    model_version_id: self.artifact.header.model_version_id.clone(),
+                    model_version_id: self.artifact.header.model_version_id,
                     model_family: self.artifact.header.model_family,
                     market_id: row.market_id.clone(),
                     raw_input_name: column.source_feature.to_string(),
@@ -252,9 +252,9 @@ impl ClassicalRuntime {
                     raw_value,
                     encoded_column: column.name.to_string(),
                     encoded_value_bits: Some(value.to_bits()),
-                    input_contract_hash: input_contract_hash.clone(),
-                    transform_hash: transform_hash.clone(),
-                    training_input_hash: training_input_hash.clone(),
+                    input_contract_hash,
+                    transform_hash,
+                    training_input_hash,
                 })
             })
             .collect()
@@ -284,7 +284,7 @@ impl ClassicalRuntime {
 
         Ok(Some(SignalCandidate {
             signal_candidate_id: SignalCandidateId::from_v7(),
-            model_run_id: model_run_id.clone(),
+            model_run_id: *model_run_id,
             market_id: row.market_id.clone(),
             token_id: projection.token_id,
             outcome_side: projection.outcome_side,
@@ -418,7 +418,7 @@ fn candidate_warnings(context: &MarketInferenceContext) -> Vec<SignalWarning> {
 #[async_trait]
 impl QuantModelRuntime for ClassicalRuntime {
     fn model_version_id(&self) -> ModelVersionId {
-        self.artifact.header.model_version_id.clone()
+        self.artifact.header.model_version_id
     }
 
     fn model_family(&self) -> ModelFamily {
@@ -426,7 +426,7 @@ impl QuantModelRuntime for ClassicalRuntime {
     }
 
     fn feature_schema_hash(&self) -> ContentHash {
-        self.artifact.header.feature_schema_hash.clone()
+        self.artifact.header.feature_schema_hash
     }
 
     fn required_features(&self) -> Vec<FeatureName> {
@@ -853,7 +853,7 @@ mod tests {
             },
         },
         test_support::content_hash as hash,
-        training::{FeatureColumnSpec, ModelInputCell, TrainingMatrix},
+        training::{FeatureColumnSpec, ModelInputCell, RawInputMatrix, TrainingMatrix},
     };
 
     fn fixture_row_secs(i: usize) -> i64 {
@@ -883,7 +883,7 @@ mod tests {
             labels[i] = if high { 1.0 } else { 0.0 };
         }
         TrainingMatrix {
-            cells,
+            cells: RawInputMatrix::from_rows(cells).expect("raw input matrix"),
             labels,
             columns: vec![
                 FeatureColumnSpec {
@@ -933,11 +933,11 @@ mod tests {
             multipliers: ScoreMultiplierSpec::conservative(),
             substitution_confidence_rules: SubstitutionConfidenceRules::conservative(),
             input_contract: output.input_contract.clone(),
-            input_contract_hash: output.input_contract_hash.clone(),
-            input_transform_hash: output.input_transform_hash.clone(),
-            training_input_hash: output.training_input_hash.clone(),
+            input_contract_hash: output.input_contract_hash,
+            input_transform_hash: output.input_transform_hash,
+            training_input_hash: output.training_input_hash,
             serialized_model_uri: ArtifactUri::parse("file:///tmp/model.bin").expect("uri"),
-            serialized_model_hash: output.model_bytes_hash.clone(),
+            serialized_model_hash: output.model_bytes_hash,
             serialization_format: output.serialization_format,
             input_transform: output.input_transform.clone(),
             metrics: output.metrics.clone(),

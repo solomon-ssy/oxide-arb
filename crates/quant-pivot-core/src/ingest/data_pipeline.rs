@@ -1,111 +1,153 @@
 use std::{
+    array,
     collections::{BTreeMap, HashMap, HashSet},
+    mem, slice,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
 
-use dashmap::DashSet;
-use flume::{Receiver, Sender};
-use futures_util::future::join_all;
+use ahash::AHashMap;
+use chrono::Utc;
+use flume::{Receiver, Sender as FlumeSender};
 use parking_lot::Mutex;
+use quant_pivot_api::ws::{NormalizedIngressBatch, estimated_event_bytes};
 use quant_pivot_error::{QuantError, infra::InfraError};
 use quant_pivot_models::{
-    clickhouse::{BookStreamSessionRow, ChSchemaVersion},
-    domain::data_plane::{
-        BookSnapshotCmd, PriceDeltaCmd,
-        latency::LatencyTrace,
-        pipeline::{IngressTrace, PipelineEvent, StreamSessionEndReason},
+    clickhouse::{BookL2LedgerRow, BookStreamSessionRow, ChSchemaVersion},
+    domain::{
+        data_plane::{
+            BookSnapshotCmd, PriceDeltaCmd,
+            latency::LatencyTrace,
+            pipeline::{IngressTrace, PipelineEvent, StreamSessionEndReason},
+        },
+        market::book::BookSnapshot,
     },
     enums::{
         clickhouse::{ChBookEventType, ChStreamSessionEndReason, ChStreamSessionState},
         system::ShardConnectionStatus,
     },
-    types::{ContentHash, Shares, TokenId},
+    types::{ContentHash, PartitionBatchId, PartitionId, Shares, TokenId, TokenKey},
 };
-use tokio::{task::JoinSet, time::timeout};
+use tokio::{
+    sync::{
+        Notify, OwnedSemaphorePermit,
+        mpsc::{self, Receiver as MpscReceiver, Sender as MpscSender},
+    },
+    task::JoinSet,
+    time::{MissedTickBehavior, interval, timeout},
+};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use super::{
-    book_store::BookStore, event_source::PipelineEventSource, market_registry::MarketRegistry,
+    book_store::BookStore,
+    data_plane_index::TokenSlotState,
+    event_source::PipelineEventSource,
+    market_registry::MarketRegistry,
+    order_book::{BookDeltaScratch, OrderBook},
 };
 use crate::{
-    infra::sharding::shard_index,
     observability::{
-        book_fact_writer::{BookFactWriter, MarketWsTradeFact},
+        book_fact_writer::{BookFactWriter, MarketWsTradeFact, MicrostructureAccumulator},
+        ledger_persistence::{LEDGER_PARTITION_COUNT, PartitionLedgerClient},
         metrics_hub::MetricsHub,
     },
     service::system_status_nudge::SystemStatusNudge,
 };
 
-const MIN_BOOK_SHARD_COUNT: usize = 4;
-// Canonical L2 persistence is one shared batching plane. Hundreds of async
-// token-affine workers are enough to fill it without creating one task and one
-// independently tiny queue per configured token.
-const MAX_BOOK_SHARD_COUNT: usize = 512;
-// A worker micro-batch must fit in its mailbox. Four micro-batches of headroom
-// absorb the measured snapshot/checkpoint barrier and five-minute-market burst;
-// sustained overload still reaches the bounded timeout and fails closed.
-const MIN_BOOK_CHANNEL_CAPACITY: usize = 1_024;
-const BOOK_CHANNEL_HEADROOM_PER_TOKEN: usize = 256;
+pub const PARTITION_COUNT: usize = LEDGER_PARTITION_COUNT;
+const PARTITION_MAILBOX_CAPACITY: usize = 256;
+const MAX_PARTITION_BATCH_EVENTS: usize = 1_024;
+const MAX_PARTITION_BATCH_BYTES: usize = 1_024 * 1_024;
 const BOOK_CHANNEL_TIMEOUT: Duration = Duration::from_millis(250);
 const SHUTDOWN_DRAIN_QUIET_PERIOD: Duration = Duration::from_millis(250);
 const BACKPRESSURE_WARN_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_CANONICAL_MICRO_BATCH_SIZE: usize = 256;
-const CANONICAL_COALESCE_WINDOW: Duration = Duration::from_millis(2);
 
-const fn canonical_identity(event: &PipelineEvent) -> Option<(&TokenId, IngressTrace)> {
+const fn session_generation(session_id: Uuid) -> u64 {
+    let bytes = session_id.as_bytes();
+    let upper = u64::from_be_bytes([
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+    ]);
+    let lower = u64::from_be_bytes([
+        bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
+    ]);
+    upper ^ lower
+}
+
+const fn canonical_identity(event: &PipelineEvent) -> Option<(TokenKey, IngressTrace)> {
     match event {
-        PipelineEvent::BookSnapshot(command) => Some((&command.asset_id, command.trace)),
-        PipelineEvent::PriceDelta(command) => Some((&command.asset_id, command.trace)),
-        PipelineEvent::TickSizeChange {
-            asset_id, trace, ..
-        }
-        | PipelineEvent::LastTradePrice {
-            asset_id, trace, ..
-        } => Some((asset_id, *trace)),
+        PipelineEvent::BookSnapshot(command) => Some((command.token, command.trace)),
+        PipelineEvent::PriceDelta(command) => Some((command.token, command.trace)),
+        PipelineEvent::TickSizeChange { token, trace, .. }
+        | PipelineEvent::LastTradePrice { token, trace, .. } => Some((*token, *trace)),
         _ => None,
     }
 }
 
-/// Size token-affine workers from the configured maximum live subscription set.
-///
-/// Each async worker waits for canonical `ClickHouse` persistence, while
-/// independent token shards wait concurrently. Worker count is capped by the
-/// shared sink's useful concurrency and channel capacity is derived from a
-/// fixed amount of burst headroom per configured token. Flume grows its queue
-/// on demand, so the upper bound does not preallocate the worst-case capacity.
-#[must_use]
-pub fn book_apply_topology(max_subscription_tokens: usize) -> (usize, usize) {
-    let token_budget = max_subscription_tokens.max(1);
-    let shard_count = token_budget
-        .checked_next_power_of_two()
-        .unwrap_or(MAX_BOOK_SHARD_COUNT)
-        .clamp(MIN_BOOK_SHARD_COUNT, MAX_BOOK_SHARD_COUNT);
-    let total_capacity = token_budget
-        .saturating_mul(BOOK_CHANNEL_HEADROOM_PER_TOKEN)
-        .max(shard_count.saturating_mul(MIN_BOOK_CHANNEL_CAPACITY));
-    let channel_capacity = total_capacity.div_ceil(shard_count);
-    (shard_count, channel_capacity)
-}
-
-fn book_worker_index(event: &PipelineEvent, shard_count: usize) -> usize {
+fn partition_index(event: &PipelineEvent) -> usize {
     match event {
         PipelineEvent::StreamSessionOpened { shard_id, .. }
         | PipelineEvent::StreamSessionClosed { shard_id, .. } => {
-            usize::try_from(*shard_id).unwrap_or(usize::MAX) % shard_count
+            usize::try_from(*shard_id).unwrap_or(usize::MAX) % PARTITION_COUNT
         }
-        PipelineEvent::ShardStatus { shard_id, .. } => *shard_id % shard_count,
-        PipelineEvent::MarketResolved {
-            winning_token_id, ..
-        } => shard_index(winning_token_id.as_str(), shard_count),
+        PipelineEvent::ShardStatus { shard_id, .. } => *shard_id % PARTITION_COUNT,
+        PipelineEvent::MarketResolved { winning_token, .. } => {
+            winning_token.index() % PARTITION_COUNT
+        }
         _ => event
-            .asset_id()
-            .map_or(0, |asset_id| shard_index(asset_id.as_str(), shard_count)),
+            .token()
+            .map_or(0, |token| token.index() % PARTITION_COUNT),
     }
+}
+
+const fn partition_batch_would_overflow(
+    event_count: usize,
+    retained_bytes: usize,
+    next_event_bytes: usize,
+) -> bool {
+    event_count >= MAX_PARTITION_BATCH_EVENTS
+        || retained_bytes.saturating_add(next_event_bytes) > MAX_PARTITION_BATCH_BYTES
+}
+
+fn accept_token_sequence(
+    stream_state: &mut HashMap<TokenKey, TokenStreamState>,
+    token: TokenKey,
+    trace: IngressTrace,
+) -> bool {
+    if trace.stream_session_id.is_nil() || trace.token_sequence == 0 {
+        return false;
+    }
+    match stream_state.get_mut(&token) {
+        Some(state) if state.session_id == trace.stream_session_id => {
+            if trace.token_sequence != state.last_sequence.saturating_add(1) {
+                state.has_fresh_snapshot = false;
+                return false;
+            }
+            state.last_sequence = trace.token_sequence;
+        }
+        Some(state) => {
+            *state = TokenStreamState {
+                session_id: trace.stream_session_id,
+                last_sequence: trace.token_sequence,
+                has_fresh_snapshot: false,
+            };
+        }
+        None => {
+            stream_state.insert(
+                token,
+                TokenStreamState {
+                    session_id: trace.stream_session_id,
+                    last_sequence: trace.token_sequence,
+                    has_fresh_snapshot: false,
+                },
+            );
+        }
+    }
+    true
 }
 
 const fn pipeline_event_kind(event: &PipelineEvent) -> &'static str {
@@ -129,8 +171,6 @@ pub struct DataPipelineDeps {
     pub market_registry: Arc<MarketRegistry>,
     pub metrics: Arc<MetricsHub>,
     pub book_fact_writer: Arc<BookFactWriter>,
-    pub book_shard_count: usize,
-    pub book_channel_capacity: usize,
     pub shutdown: CancellationToken,
     pub status_nudge: SystemStatusNudge,
 }
@@ -142,8 +182,6 @@ pub struct DataPipeline {
     market_registry: Arc<MarketRegistry>,
     metrics: Arc<MetricsHub>,
     book_fact_writer: Arc<BookFactWriter>,
-    book_shard_count: usize,
-    book_channel_capacity: usize,
     shutdown: CancellationToken,
     status_nudge: SystemStatusNudge,
     market_data_nudged: Arc<AtomicBool>,
@@ -154,54 +192,81 @@ pub struct DataPipeline {
 #[derive(Clone)]
 enum BackpressureScope {
     None,
-    Token(TokenId),
+    Tokens(Vec<TokenKey>),
     Subscription(Arc<[TokenId]>),
-    Received(Arc<[(TokenId, u64)]>),
+    Received(Arc<[(TokenKey, u64)]>),
 }
 
 impl BackpressureScope {
-    fn from_event(event: &PipelineEvent) -> Self {
-        match event {
+    fn from_events(events: &[PipelineEvent]) -> Self {
+        if let Some(scope) = events.iter().find_map(|event| match event {
             PipelineEvent::StreamSessionOpened {
                 subscription_tokens,
                 ..
-            } => Self::Subscription(Arc::clone(subscription_tokens)),
+            } => Some(Self::Subscription(Arc::clone(subscription_tokens))),
             PipelineEvent::StreamSessionClosed {
                 received_sequences, ..
-            } => Self::Received(Arc::clone(received_sequences)),
-            _ => event.asset_id().cloned().map_or(Self::None, Self::Token),
+            } => Some(Self::Received(Arc::clone(received_sequences))),
+            _ => None,
+        }) {
+            return scope;
+        }
+        let mut tokens = Vec::new();
+        for token in events.iter().filter_map(PipelineEvent::token) {
+            if !tokens.contains(&token) {
+                tokens.push(token);
+            }
+        }
+        if tokens.is_empty() {
+            Self::None
+        } else {
+            Self::Tokens(tokens)
         }
     }
 
-    fn invalidate(self, event_source: &dyn PipelineEventSource) -> usize {
+    fn invalidate(
+        &self,
+        event_source: &dyn PipelineEventSource,
+        book_store: &BookStore,
+        registry: &MarketRegistry,
+    ) -> usize {
         match self {
             Self::None => 0,
-            Self::Token(token_id) => {
-                event_source.invalidate_token(&token_id);
-                1
+            Self::Tokens(tokens) => {
+                book_store.invalidate_tokens(tokens);
+                let token_ids = tokens
+                    .iter()
+                    .filter_map(|token| registry.token_id(*token))
+                    .collect::<Vec<_>>();
+                event_source.invalidate_tokens(&token_ids);
+                tokens.len()
             }
             Self::Subscription(token_ids) => {
-                event_source.invalidate_tokens(&token_ids);
+                book_store.invalidate_ids(token_ids);
+                event_source.invalidate_tokens(token_ids);
                 token_ids.len()
             }
             Self::Received(received_sequences) => {
-                let token_ids = received_sequences
+                let tokens = received_sequences
                     .iter()
-                    .map(|(token_id, _)| token_id.clone())
+                    .map(|(token, _)| *token)
+                    .collect::<Vec<_>>();
+                book_store.invalidate_tokens(&tokens);
+                let token_ids = tokens
+                    .iter()
+                    .filter_map(|token| registry.token_id(*token))
                     .collect::<Vec<_>>();
                 event_source.invalidate_tokens(&token_ids);
-                token_ids.len()
+                tokens.len()
             }
         }
     }
 
-    fn diagnostic_token(&self) -> Option<&TokenId> {
+    fn diagnostic_token(&self, registry: &MarketRegistry) -> Option<TokenId> {
         match self {
-            Self::Token(token_id) => Some(token_id),
-            Self::Subscription(token_ids) => token_ids.first(),
-            Self::Received(received_sequences) => {
-                received_sequences.first().map(|(token_id, _)| token_id)
-            }
+            Self::Tokens(tokens) => registry.token_id(*tokens.first()?),
+            Self::Subscription(token_ids) => token_ids.first().cloned(),
+            Self::Received(received_sequences) => registry.token_id(received_sequences.first()?.0),
             Self::None => None,
         }
     }
@@ -215,8 +280,6 @@ impl DataPipeline {
             market_registry: deps.market_registry,
             metrics: deps.metrics,
             book_fact_writer: deps.book_fact_writer,
-            book_shard_count: deps.book_shard_count,
-            book_channel_capacity: deps.book_channel_capacity,
             shutdown: deps.shutdown,
             status_nudge: deps.status_nudge,
             market_data_nudged: Arc::new(AtomicBool::new(false)),
@@ -227,37 +290,47 @@ impl DataPipeline {
 
     /// Run until shutdown or channel close.
     pub async fn run(&self) -> Result<(), QuantError> {
-        let shard_count = self.book_shard_count.max(1);
         tracing::info!(
-            shard_count,
-            channel_capacity = self.book_channel_capacity,
-            "book-apply topology initialized"
+            partition_count = PARTITION_COUNT,
+            mailbox_capacity = PARTITION_MAILBOX_CAPACITY,
+            "fixed token-affine partition topology initialized"
         );
-        let mut book_senders = Vec::with_capacity(shard_count);
-        let mut book_receivers = Vec::with_capacity(shard_count);
-        for _ in 0..shard_count {
-            let (tx, rx) = flume::bounded(self.book_channel_capacity);
-            book_senders.push(tx);
-            book_receivers.push(rx);
-        }
-
-        let book_fact_writer = Arc::clone(&self.book_fact_writer);
-        let invalid_sessions = Arc::new(DashSet::new());
-        let mut book_tasks = JoinSet::new();
-        for rx in book_receivers {
-            let worker = BookApplyWorker {
+        let mut partition_senders = Vec::with_capacity(PARTITION_COUNT);
+        let mut recycle_receivers = Vec::with_capacity(PARTITION_COUNT);
+        let mut partition_tasks = JoinSet::new();
+        for partition in 0..PARTITION_COUNT {
+            let (tx, rx) = mpsc::channel(PARTITION_MAILBOX_CAPACITY);
+            let (recycle_tx, recycle_rx) = flume::unbounded();
+            partition_senders.push(tx);
+            recycle_receivers.push(recycle_rx);
+            let partition_id = PartitionId::new(u8::try_from(partition).unwrap_or(u8::MAX));
+            let ledger = self
+                .book_fact_writer
+                .ledger_client(partition_id)
+                .ok_or_else(|| InfraError::Misconfigured {
+                    detail: format!("missing ledger commit cursor for partition {partition}"),
+                })?;
+            let actor = PartitionActor {
+                partition_id,
                 book_store: Arc::clone(&self.book_store),
                 market_registry: Arc::clone(&self.market_registry),
                 metrics: Arc::clone(&self.metrics),
                 event_source: Arc::clone(&self.event_source),
-                book_fact_writer: Arc::clone(&book_fact_writer),
+                book_fact_writer: Arc::clone(&self.book_fact_writer),
+                ledger,
+                next_batch_id: 0,
                 stream_state: HashMap::new(),
-                invalid_sessions: Arc::clone(&invalid_sessions),
+                invalid_sessions: HashSet::new(),
+                books: AHashMap::new(),
+                delta_command_order: Vec::new(),
+                delta_scratch: BookDeltaScratch::default(),
+                delta_commands: Vec::new(),
             };
-            book_tasks.spawn(worker.run(rx));
+            partition_tasks.spawn(actor.run(rx, recycle_tx));
         }
 
-        let rx = self.event_source.events();
+        let mut buffers = array::from_fn(|_| Vec::new());
+        let mut buffer_bytes = [0_usize; PARTITION_COUNT];
         let failure = loop {
             tokio::select! {
                 biased;
@@ -265,20 +338,32 @@ impl DataPipeline {
                 () = self.shutdown.cancelled() => {
                     tracing::info!("DataPipeline draining ingress after shutdown");
                     break self
-                        .drain_ingress(rx, &book_senders, shard_count)
+                        .drain_ingress(
+                            self.event_source.events(),
+                            &partition_senders,
+                            &recycle_receivers,
+                            &mut buffers,
+                            &mut buffer_bytes,
+                        )
                         .await
                         .err();
                 }
 
-                event = rx.recv_async() => {
-                    let Ok(pipeline_event) = event else {
+                batch = self.event_source.events().recv_async() => {
+                    let Ok(batch) = batch else {
                         tracing::error!("Pipeline event channel closed unexpectedly");
                         break Some(InfraError::ChannelClosed {
                             name: "pipeline_events",
                         }.into());
                     };
                     if let Err(error) = self
-                        .dispatch_to_book_worker(pipeline_event, &book_senders, shard_count)
+                        .dispatch_ingress_batch(
+                            batch,
+                            &partition_senders,
+                            &recycle_receivers,
+                            &mut buffers,
+                            &mut buffer_bytes,
+                        )
                         .await
                     {
                         break Some(error);
@@ -287,91 +372,261 @@ impl DataPipeline {
             }
         };
 
-        drop(book_senders);
+        drop(partition_senders);
         let mut failure = failure;
-        while let Some(result) = book_tasks.join_next().await {
+        while let Some(result) = partition_tasks.join_next().await {
             if let Err(error) = result
                 && failure.is_none()
             {
                 failure = Some(
                     InfraError::BlockingTaskJoin {
-                        detail: format!("book-apply task failed: {error}"),
+                        detail: format!("partition actor failed: {error}"),
                     }
                     .into(),
                 );
             }
         }
-        // Flush open microstructure buckets before analytics writers drain (WsIngress
-        // stage precedes Analytics in shutdown ordering).
-        self.book_fact_writer.flush_pending_microstructure();
         failure.map_or(Ok(()), Err)
     }
 
     async fn drain_ingress(
         &self,
-        rx: &Receiver<PipelineEvent>,
-        book_senders: &[Sender<PipelineEvent>],
-        shard_count: usize,
+        rx: &Receiver<NormalizedIngressBatch>,
+        partition_senders: &[MpscSender<PartitionMessage>],
+        recycle_receivers: &[Receiver<Vec<PipelineEvent>>],
+        buffers: &mut [Vec<PipelineEvent>; PARTITION_COUNT],
+        buffer_bytes: &mut [usize; PARTITION_COUNT],
     ) -> Result<(), QuantError> {
         let mut drained = 0_u64;
         loop {
-            let Ok(Ok(event)) = timeout(SHUTDOWN_DRAIN_QUIET_PERIOD, rx.recv_async()).await else {
+            let Ok(Ok(batch)) = timeout(SHUTDOWN_DRAIN_QUIET_PERIOD, rx.recv_async()).await else {
                 tracing::info!(drained, "DataPipeline ingress drain complete");
                 return Ok(());
             };
-            self.dispatch_to_book_worker(event, book_senders, shard_count)
-                .await?;
+            self.dispatch_ingress_batch(
+                batch,
+                partition_senders,
+                recycle_receivers,
+                buffers,
+                buffer_bytes,
+            )
+            .await?;
             drained = drained.saturating_add(1);
         }
     }
 
-    async fn dispatch_to_book_worker(
+    async fn dispatch_ingress_batch(
         &self,
-        pipeline_event: PipelineEvent,
-        book_senders: &[Sender<PipelineEvent>],
-        shard_count: usize,
+        batch: NormalizedIngressBatch,
+        partition_senders: &[MpscSender<PartitionMessage>],
+        recycle_receivers: &[Receiver<Vec<PipelineEvent>>],
+        buffers: &mut [Vec<PipelineEvent>; PARTITION_COUNT],
+        buffer_bytes: &mut [usize; PARTITION_COUNT],
     ) -> Result<(), QuantError> {
-        if pipeline_event.is_market_data_event()
+        if batch.events.iter().any(PipelineEvent::is_market_data_event)
             && !self.market_data_nudged.swap(true, Ordering::AcqRel)
         {
             self.status_nudge.nudge();
         }
-        let shard = book_worker_index(&pipeline_event, shard_count);
-        let event_kind = pipeline_event_kind(&pipeline_event);
-        let backpressure_scope = BackpressureScope::from_event(&pipeline_event);
+        let backpressure_scope = BackpressureScope::from_events(&batch.events);
+        if !self
+            .await_session_barrier(&batch.events, partition_senders, &backpressure_scope)
+            .await?
+        {
+            return Ok(());
+        }
+        if let Some(event) = batch
+            .events
+            .iter()
+            .find(|event| estimated_event_bytes(event) > MAX_PARTITION_BATCH_BYTES)
+        {
+            let partition = partition_index(event);
+            self.handle_book_apply_timeout(
+                partition,
+                pipeline_event_kind(event),
+                partition_queue_depth(&partition_senders[partition]),
+                &backpressure_scope,
+                "single event exceeds partition byte limit",
+            );
+            return Ok(());
+        }
+        let memory_permit = batch.memory_permit;
+        for event in batch.events {
+            let partition = partition_index(&event);
+            let event_bytes = estimated_event_bytes(&event);
+            if !buffers[partition].is_empty()
+                && partition_batch_would_overflow(
+                    buffers[partition].len(),
+                    buffer_bytes[partition],
+                    event_bytes,
+                )
+            {
+                let events = mem::take(&mut buffers[partition]);
+                buffer_bytes[partition] = 0;
+                if !self
+                    .send_partition_batch(
+                        partition,
+                        events,
+                        Arc::clone(&memory_permit),
+                        partition_senders,
+                        &backpressure_scope,
+                    )
+                    .await?
+                {
+                    return Ok(());
+                }
+            }
+            if buffers[partition].capacity() == 0
+                && let Ok(recycled) = recycle_receivers[partition].try_recv()
+            {
+                buffers[partition] = recycled;
+            }
+            buffer_bytes[partition] = buffer_bytes[partition].saturating_add(event_bytes);
+            buffers[partition].push(event);
+        }
+
+        for partition in 0..PARTITION_COUNT {
+            if buffers[partition].is_empty() {
+                continue;
+            }
+            let events = mem::take(&mut buffers[partition]);
+            buffer_bytes[partition] = 0;
+            if !self
+                .send_partition_batch(
+                    partition,
+                    events,
+                    Arc::clone(&memory_permit),
+                    partition_senders,
+                    &backpressure_scope,
+                )
+                .await?
+            {
+                return Ok(());
+            }
+        }
+        Ok(())
+    }
+
+    async fn send_partition_batch(
+        &self,
+        partition: usize,
+        mut events: Vec<PipelineEvent>,
+        memory_permit: Arc<OwnedSemaphorePermit>,
+        partition_senders: &[MpscSender<PartitionMessage>],
+        backpressure_scope: &BackpressureScope,
+    ) -> Result<bool, QuantError> {
+        let event_kind = events.first().map_or("empty", pipeline_event_kind);
+        events.reverse();
+        let batch = PartitionIngressBatch {
+            events,
+            memory_permit,
+        };
         match timeout(
             BOOK_CHANNEL_TIMEOUT,
-            book_senders[shard].send_async(pipeline_event),
+            partition_senders[partition].send(PartitionMessage::Events(batch)),
         )
         .await
         {
-            Ok(Ok(())) => Ok(()),
+            Ok(Ok(())) => Ok(true),
             Ok(Err(_)) => {
-                tracing::error!(shard, "Book-apply worker channel closed unexpectedly");
-                Err(InfraError::ChannelClosed { name: "book_apply" }.into())
+                tracing::error!(partition, "Partition actor channel closed unexpectedly");
+                Err(InfraError::ChannelClosed {
+                    name: "partition_actor",
+                }
+                .into())
             }
             Err(_) => {
                 self.handle_book_apply_timeout(
-                    shard,
+                    partition,
                     event_kind,
-                    book_senders[shard].len(),
+                    partition_queue_depth(&partition_senders[partition]),
                     backpressure_scope,
+                    "partition mailbox timed out",
                 );
-                Ok(())
+                Ok(false)
+            }
+        }
+    }
+
+    async fn await_session_barrier(
+        &self,
+        events: &[PipelineEvent],
+        partition_senders: &[MpscSender<PartitionMessage>],
+        backpressure_scope: &BackpressureScope,
+    ) -> Result<bool, QuantError> {
+        let mut partitions = [false; PARTITION_COUNT];
+        for received_sequences in events.iter().filter_map(|event| match event {
+            PipelineEvent::StreamSessionClosed {
+                received_sequences, ..
+            } => Some(received_sequences.as_ref()),
+            _ => None,
+        }) {
+            for (token, _) in received_sequences {
+                partitions[token.index() % PARTITION_COUNT] = true;
+            }
+        }
+        let partition_count = partitions.iter().filter(|included| **included).count();
+        if partition_count == 0 {
+            return Ok(true);
+        }
+        let barrier = Arc::new(PartitionBarrier::new(
+            u8::try_from(partition_count).unwrap_or(u8::MAX),
+        ));
+        let send_and_wait = async {
+            for (partition, included) in partitions.into_iter().enumerate() {
+                if !included {
+                    continue;
+                }
+                partition_senders[partition]
+                    .send(PartitionMessage::Barrier(Arc::clone(&barrier)))
+                    .await
+                    .map_err(|_| partition)?;
+            }
+            barrier.wait().await;
+            Ok::<(), usize>(())
+        };
+        match timeout(BOOK_CHANNEL_TIMEOUT, send_and_wait).await {
+            Ok(Ok(())) => Ok(true),
+            Ok(Err(partition)) => Err(InfraError::ChannelClosed {
+                name: if partition < PARTITION_COUNT {
+                    "partition_barrier"
+                } else {
+                    "partition_actor"
+                },
+            }
+            .into()),
+            Err(_) => {
+                let partition = partitions
+                    .iter()
+                    .position(|included| *included)
+                    .unwrap_or(0);
+                self.handle_book_apply_timeout(
+                    partition,
+                    "stream_session_closed",
+                    partition_queue_depth(&partition_senders[partition]),
+                    backpressure_scope,
+                    "session drain barrier timed out",
+                );
+                Ok(false)
             }
         }
     }
 
     fn handle_book_apply_timeout(
         &self,
-        shard: usize,
+        partition: usize,
         event_kind: &'static str,
         queue_depth: usize,
-        scope: BackpressureScope,
+        scope: &BackpressureScope,
+        reason: &'static str,
     ) {
         self.book_store.mark_gap();
-        let diagnostic_token = scope.diagnostic_token().cloned();
-        let affected_tokens = scope.invalidate(self.event_source.as_ref());
+        let diagnostic_token = scope.diagnostic_token(&self.market_registry);
+        let affected_tokens = scope.invalidate(
+            self.event_source.as_ref(),
+            &self.book_store,
+            &self.market_registry,
+        );
         self.metrics
             .book_apply_backpressure_invalidations
             .inc_by(u64::try_from(affected_tokens.max(1)).unwrap_or(u64::MAX));
@@ -388,37 +643,206 @@ impl DataPipeline {
             .book_apply_timeouts_since_warn
             .swap(0, Ordering::Relaxed);
         tracing::warn!(
-            shard,
+            partition,
             event_kind,
             queue_depth,
-            channel_capacity = self.book_channel_capacity,
+            channel_capacity = PARTITION_MAILBOX_CAPACITY,
             affected_tokens,
             token_id = diagnostic_token.as_ref().map(TokenId::as_str),
             timeouts_since_last,
-            "Book-apply queue saturated; continuity invalidated and owning WS shards restarted"
+            reason,
+            "Partition queue rejected a batch; continuity invalidated and owning WS shards restarted"
         );
+    }
+}
+
+fn partition_queue_depth(sender: &MpscSender<PartitionMessage>) -> usize {
+    sender.max_capacity().saturating_sub(sender.capacity())
+}
+
+struct PartitionIngressBatch {
+    events: Vec<PipelineEvent>,
+    memory_permit: Arc<OwnedSemaphorePermit>,
+}
+
+enum PartitionMessage {
+    Events(PartitionIngressBatch),
+    Barrier(Arc<PartitionBarrier>),
+}
+
+struct PartitionBarrier {
+    remaining: AtomicU8,
+    completed: Notify,
+}
+
+impl PartitionBarrier {
+    const fn new(partitions: u8) -> Self {
+        Self {
+            remaining: AtomicU8::new(partitions),
+            completed: Notify::const_new(),
+        }
+    }
+
+    fn arrive(&self) {
+        if self.remaining.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.completed.notify_one();
+        }
+    }
+
+    async fn wait(&self) {
+        loop {
+            let completed = self.completed.notified();
+            if self.remaining.load(Ordering::Acquire) == 0 {
+                return;
+            }
+            completed.await;
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::book_apply_topology;
+    use std::{collections::HashMap, sync::Arc, time::Instant};
+
+    use quant_pivot_models::{
+        domain::data_plane::pipeline::{IngressTrace, PipelineEvent},
+        enums::system::ShardConnectionStatus,
+        types::TokenKey,
+    };
+    use uuid::Uuid;
+
+    use super::{
+        MAX_PARTITION_BATCH_BYTES, MAX_PARTITION_BATCH_EVENTS, PARTITION_COUNT,
+        PARTITION_MAILBOX_CAPACITY, PartitionBarrier, accept_token_sequence,
+        partition_batch_would_overflow, partition_index,
+    };
 
     #[test]
-    fn topology_scales_durable_ack_concurrency_without_unbounded_queues() {
-        assert_eq!(book_apply_topology(2_000), (512, 1_024));
-        assert_eq!(book_apply_topology(1), (4, 1_024));
+    fn token_partition_is_fixed_and_affine() {
+        for value in 0..2_000_u32 {
+            let event = PipelineEvent::StreamGap {
+                token: TokenKey::new(value),
+                stream_session_id: Uuid::nil(),
+                shard_id: 0,
+                last_received_sequence: 0,
+                timestamp_ms: 0,
+            };
+            assert_eq!(partition_index(&event), value as usize % PARTITION_COUNT);
+        }
+        assert_eq!(PARTITION_COUNT, 8);
+        assert_eq!(PARTITION_MAILBOX_CAPACITY, 256);
+    }
+
+    #[test]
+    fn control_events_are_bounded_to_the_same_partition_set() {
+        let event = PipelineEvent::ShardStatus {
+            shard_id: usize::MAX,
+            status: ShardConnectionStatus::Connected,
+        };
+        assert!(partition_index(&event) < PARTITION_COUNT);
+    }
+
+    #[tokio::test]
+    async fn session_barrier_waits_for_every_affected_partition() {
+        let barrier = Arc::new(PartitionBarrier::new(2));
+        barrier.arrive();
+        let waiter = {
+            let barrier = Arc::clone(&barrier);
+            tokio::spawn(async move { barrier.wait().await })
+        };
+        assert!(!waiter.is_finished());
+        barrier.arrive();
+        waiter.await.expect("barrier waiter");
+    }
+
+    #[test]
+    fn partition_batch_caps_are_enforced_before_push() {
+        assert!(partition_batch_would_overflow(
+            MAX_PARTITION_BATCH_EVENTS,
+            0,
+            1
+        ));
+        assert!(partition_batch_would_overflow(
+            1,
+            MAX_PARTITION_BATCH_BYTES,
+            1
+        ));
+        assert!(!partition_batch_would_overflow(
+            MAX_PARTITION_BATCH_EVENTS - 1,
+            MAX_PARTITION_BATCH_BYTES - 1,
+            1
+        ));
+    }
+
+    #[test]
+    fn token_sequence_is_monotonic_and_resets_on_new_session() {
+        let token = TokenKey::new(7);
+        let first_session = Uuid::new_v4();
+        let second_session = Uuid::new_v4();
+        let mut states = HashMap::new();
+        let trace = |session, sequence| IngressTrace {
+            mono: Instant::now(),
+            ingress_time_ms: 0,
+            ws_timestamp_ms: 0,
+            stream_session_id: session,
+            shard_id: 0,
+            token_sequence: sequence,
+        };
+
+        assert!(accept_token_sequence(
+            &mut states,
+            token,
+            trace(first_session, 1)
+        ));
+        assert!(!accept_token_sequence(
+            &mut states,
+            token,
+            trace(first_session, 3)
+        ));
+        assert!(accept_token_sequence(
+            &mut states,
+            token,
+            trace(second_session, 1)
+        ));
     }
 }
 
-struct BookApplyWorker {
+struct PartitionActor {
+    partition_id: PartitionId,
     book_store: Arc<BookStore>,
     market_registry: Arc<MarketRegistry>,
     metrics: Arc<MetricsHub>,
     event_source: Arc<dyn PipelineEventSource>,
     book_fact_writer: Arc<BookFactWriter>,
-    stream_state: HashMap<TokenId, TokenStreamState>,
-    invalid_sessions: Arc<DashSet<Uuid>>,
+    ledger: PartitionLedgerClient,
+    next_batch_id: u64,
+    stream_state: HashMap<TokenKey, TokenStreamState>,
+    invalid_sessions: HashSet<Uuid>,
+    books: AHashMap<TokenKey, MutableBookState>,
+    delta_command_order: Vec<usize>,
+    delta_scratch: BookDeltaScratch,
+    delta_commands: Vec<PriceDeltaCmd>,
+}
+
+struct MutableBookState {
+    book: OrderBook,
+    version: u64,
+    microstructure: MicrostructureAccumulator,
+}
+
+impl MutableBookState {
+    fn new(token_id: TokenId, version: u64) -> Self {
+        Self {
+            book: OrderBook::new(token_id),
+            version,
+            microstructure: MicrostructureAccumulator::default(),
+        }
+    }
+
+    fn next_snapshot(&mut self) -> BookSnapshot {
+        self.version = self.version.saturating_add(1);
+        self.book.publish_cow(self.version)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -433,49 +857,81 @@ struct SessionClose {
     shard_id: u32,
     subscription_token_hash: ContentHash,
     subscription_token_count: u32,
-    received_sequences: Arc<[(TokenId, u64)]>,
+    received_sequences: Arc<[(TokenKey, u64)]>,
     opened_at_ms: i64,
     closed_at_ms: i64,
     reason: StreamSessionEndReason,
 }
 
-impl BookApplyWorker {
-    async fn run(mut self, rx: Receiver<PipelineEvent>) {
-        let mut deferred = None;
+impl PartitionActor {
+    async fn run(
+        mut self,
+        mut rx: MpscReceiver<PartitionMessage>,
+        recycle_tx: FlumeSender<Vec<PipelineEvent>>,
+    ) {
+        let mut telemetry_flush = interval(Duration::from_secs(1));
+        telemetry_flush.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        telemetry_flush.tick().await;
         loop {
-            let event = if let Some(event) = deferred.take() {
-                event
-            } else {
-                let Ok(event) = rx.recv_async().await else {
-                    return;
-                };
-                event
-            };
-            if canonical_identity(&event).is_none() {
-                self.handle_event(event).await;
-                continue;
-            }
-
-            let mut events = Vec::with_capacity(MAX_CANONICAL_MICRO_BATCH_SIZE);
-            events.push(event);
-            let mut disconnected = false;
-            while events.len() < MAX_CANONICAL_MICRO_BATCH_SIZE {
-                match timeout(CANONICAL_COALESCE_WINDOW, rx.recv_async()).await {
-                    Ok(Ok(event)) if canonical_identity(&event).is_some() => events.push(event),
-                    Ok(Ok(event)) => {
-                        deferred = Some(event);
-                        break;
-                    }
-                    Ok(Err(_)) => {
-                        disconnected = true;
-                        break;
-                    }
-                    Err(_) => break,
+            let Some(message) = (tokio::select! {
+                message = rx.recv() => message,
+                _ = telemetry_flush.tick() => {
+                    self.flush_elapsed_microstructure();
+                    continue;
                 }
+            }) else {
+                break;
+            };
+            let (mut events, memory_permit) = match message {
+                PartitionMessage::Events(PartitionIngressBatch {
+                    events,
+                    memory_permit,
+                }) => (events, memory_permit),
+                PartitionMessage::Barrier(barrier) => {
+                    barrier.arrive();
+                    continue;
+                }
+            };
+            let mut canonical =
+                Vec::with_capacity(events.len().min(MAX_CANONICAL_MICRO_BATCH_SIZE));
+            events.reverse();
+            while let Some(event) = events.pop() {
+                debug_assert_eq!(
+                    partition_index(&event),
+                    usize::from(self.partition_id.get()),
+                    "router violated token affinity"
+                );
+                if canonical_identity(&event).is_some() {
+                    canonical.push(event);
+                    if canonical.len() == MAX_CANONICAL_MICRO_BATCH_SIZE {
+                        self.handle_canonical_batch(mem::take(&mut canonical)).await;
+                    }
+                    continue;
+                }
+                if !canonical.is_empty() {
+                    self.handle_canonical_batch(mem::take(&mut canonical)).await;
+                }
+                self.handle_event(event).await;
             }
-            self.handle_canonical_batch(events).await;
-            if disconnected {
-                return;
+            if !canonical.is_empty() {
+                self.handle_canonical_batch(canonical).await;
+            }
+            events.clear();
+            let _ = recycle_tx.try_send(events);
+            drop(memory_permit);
+        }
+        for state in self.books.values_mut() {
+            if let Some(row) = state.microstructure.flush() {
+                self.book_fact_writer.write_microstructure_row(row);
+            }
+        }
+    }
+
+    fn flush_elapsed_microstructure(&mut self) {
+        let now_ms = Utc::now().timestamp_millis();
+        for state in self.books.values_mut() {
+            if let Some(row) = state.microstructure.flush_elapsed(now_ms) {
+                self.book_fact_writer.write_microstructure_row(row);
             }
         }
     }
@@ -494,15 +950,30 @@ impl BookApplyWorker {
 
             PipelineEvent::MarketResolved {
                 market_id,
-                winning_token_id,
+                winning_token,
                 winning_outcome,
-                asset_ids,
+                tokens,
                 timestamp_ms,
                 ..
             } => {
                 let known = self.market_registry.get_market(&market_id).is_some();
                 tracing::info!(%market_id, known, "Market resolved via WS (ingest only)");
                 self.metrics.markets_resolved_ws.inc();
+                let Some(winning_token_id) = self.market_registry.token_id(winning_token) else {
+                    tracing::error!(
+                        ?winning_token,
+                        "resolved event lost registered winning token"
+                    );
+                    return;
+                };
+                let asset_ids = tokens
+                    .iter()
+                    .filter_map(|token| self.market_registry.token_id(*token))
+                    .collect::<Vec<_>>();
+                if asset_ids.len() != tokens.len() {
+                    tracing::error!(%market_id, "resolved event lost registered outcome token");
+                    return;
+                }
                 self.book_fact_writer.write_market_resolved(
                     &market_id,
                     &winning_token_id,
@@ -521,7 +992,7 @@ impl BookApplyWorker {
                 shard_id,
                 subscription_token_hash,
                 subscription_token_count,
-                subscription_tokens: _,
+                subscription_tokens,
                 opened_at_ms,
             } => {
                 if !self
@@ -536,6 +1007,8 @@ impl BookApplyWorker {
                     .await
                 {
                     self.invalid_sessions.insert(stream_session_id);
+                    self.book_store.invalidate_ids(&subscription_tokens);
+                    self.event_source.invalidate_tokens(&subscription_tokens);
                     self.book_store.mark_gap();
                 }
             }
@@ -562,25 +1035,33 @@ impl BookApplyWorker {
                 .await;
             }
             PipelineEvent::StreamGap {
-                asset_id,
+                token,
                 stream_session_id,
                 shard_id,
                 last_received_sequence,
                 timestamp_ms,
             } => {
-                let _ = self
-                    .book_fact_writer
-                    .write_gap(
-                        &asset_id,
-                        self.market_registry.market_for_token(&asset_id),
-                        stream_session_id,
-                        shard_id,
-                        last_received_sequence.saturating_add(1),
-                        timestamp_ms,
-                    )
-                    .await;
+                let Some(token_id) = self.market_registry.token_id(token) else {
+                    tracing::error!(?token, "stream gap lost registered token");
+                    return;
+                };
+                if let Some(row) = BookFactWriter::gap_ledger_row(
+                    &token_id,
+                    self.market_registry.market_for_key(token),
+                    stream_session_id,
+                    shard_id,
+                    last_received_sequence.saturating_add(1),
+                    timestamp_ms,
+                ) && let Some(batch_id) = self.allocate_batch_id()
+                    && let Err(error) = self
+                        .ledger
+                        .persist(batch_id, vec![row], BOOK_CHANNEL_TIMEOUT)
+                        .await
+                {
+                    tracing::error!(?error, ?token, "gap ledger persistence failed");
+                }
                 self.invalid_sessions.insert(stream_session_id);
-                self.invalidate_token(&asset_id);
+                self.invalidate_token(token);
             }
         }
     }
@@ -591,25 +1072,31 @@ impl BookApplyWorker {
             .ws_events_received
             .inc_by(u64::try_from(events.len()).unwrap_or(u64::MAX));
 
+        let batch_scope = events
+            .iter()
+            .filter_map(|event| {
+                canonical_identity(event).map(|(token, trace)| (token, trace.stream_session_id))
+            })
+            .collect::<Vec<_>>();
         let mut failed_sessions = HashSet::new();
         for event in &events {
-            let Some((token_id, trace)) = canonical_identity(event) else {
+            let Some((token, trace)) = canonical_identity(event) else {
                 continue;
             };
             if failed_sessions.contains(&trace.stream_session_id) {
                 continue;
             }
-            let accepted = self.accept_sequence(token_id, trace);
+            let accepted = accept_token_sequence(&mut self.stream_state, token, trace);
             let fresh_enough = match event {
                 PipelineEvent::BookSnapshot(_) => {
-                    if let Some(state) = self.stream_state.get_mut(token_id) {
+                    if let Some(state) = self.stream_state.get_mut(&token) {
                         state.has_fresh_snapshot = true;
                     }
                     true
                 }
                 PipelineEvent::PriceDelta(_) => self
                     .stream_state
-                    .get(token_id)
+                    .get(&token)
                     .is_some_and(|state| state.has_fresh_snapshot),
                 _ => true,
             };
@@ -618,24 +1105,51 @@ impl BookApplyWorker {
             }
         }
 
-        let persisted = join_all(events.iter().map(|event| async {
-            let Some((_, trace)) = canonical_identity(event) else {
-                return true;
+        let mut prepared = Vec::with_capacity(events.len());
+        for event in events {
+            let Some((_, trace)) = canonical_identity(&event) else {
+                continue;
             };
-            failed_sessions.contains(&trace.stream_session_id)
-                || self.persist_canonical_event(event).await
-        }))
-        .await;
-        for (event, persisted) in events.iter().zip(persisted) {
-            if !persisted && let Some((_, trace)) = canonical_identity(event) {
+            if failed_sessions.contains(&trace.stream_session_id) {
+                continue;
+            }
+            if let Some(row) = self.prepare_ledger_event(&event) {
+                prepared.push((event, row));
+            } else {
                 failed_sessions.insert(trace.stream_session_id);
+            }
+        }
+        prepared.retain(|(event, _)| {
+            canonical_identity(event)
+                .is_some_and(|(_, trace)| !failed_sessions.contains(&trace.stream_session_id))
+        });
+
+        let mut rows = Vec::with_capacity(prepared.len());
+        let mut committed = Vec::with_capacity(prepared.len());
+        for (event, row) in prepared {
+            rows.push(row);
+            committed.push(event);
+        }
+        if !rows.is_empty() {
+            let persisted = if let Some(batch_id) = self.allocate_batch_id() {
+                self.ledger
+                    .persist(batch_id, rows, BOOK_CHANNEL_TIMEOUT)
+                    .await
+                    .is_ok()
+            } else {
+                false
+            };
+            if !persisted {
+                failed_sessions.extend(committed.iter().filter_map(|event| {
+                    canonical_identity(event).map(|(_, trace)| trace.stream_session_id)
+                }));
             }
         }
 
         if !failed_sessions.is_empty() {
-            self.invalidate_batch_sessions(&events, &failed_sessions);
+            self.invalidate_batch_sessions(&batch_scope, &failed_sessions);
         }
-        let events = events
+        let events = committed
             .into_iter()
             .filter(|event| {
                 canonical_identity(event)
@@ -646,7 +1160,7 @@ impl BookApplyWorker {
         let event_count = events.len();
         let unique_token_count = events
             .iter()
-            .filter_map(PipelineEvent::asset_id)
+            .filter_map(PipelineEvent::token)
             .collect::<HashSet<_>>()
             .len();
         self.apply_canonical_events(events);
@@ -665,43 +1179,42 @@ impl BookApplyWorker {
         }
     }
 
-    async fn persist_canonical_event(&self, event: &PipelineEvent) -> bool {
+    fn prepare_ledger_event(&self, event: &PipelineEvent) -> Option<BookL2LedgerRow> {
         match event {
-            PipelineEvent::BookSnapshot(command) => self
-                .book_fact_writer
-                .write_snapshot_bundle(
+            PipelineEvent::BookSnapshot(command) => {
+                let token_id = self.market_registry.token_id(command.token)?;
+                BookFactWriter::snapshot_ledger_row(
                     command,
-                    self.market_registry.market_for_token(&command.asset_id),
+                    &token_id,
+                    self.market_registry.market_for_key(command.token),
                 )
-                .await
-                .is_some(),
-            PipelineEvent::PriceDelta(command) => self
-                .book_fact_writer
-                .write_delta_event(
+            }
+            PipelineEvent::PriceDelta(command) => {
+                let token_id = self.market_registry.token_id(command.token)?;
+                BookFactWriter::delta_ledger_row(
                     command,
-                    self.market_registry.market_for_token(&command.asset_id),
+                    &token_id,
+                    self.market_registry.market_for_key(command.token),
                 )
-                .await
-                .is_some(),
+            }
             PipelineEvent::TickSizeChange {
-                asset_id,
+                token,
                 old_tick,
                 new_tick,
                 trace,
             } => {
-                self.book_fact_writer
-                    .write_tick_size_change(
-                        asset_id,
-                        self.market_registry.market_for_token(asset_id),
-                        *old_tick,
-                        *new_tick,
-                        *trace,
-                    )
-                    .await
+                let token_id = self.market_registry.token_id(*token)?;
+                BookFactWriter::tick_size_ledger_row(
+                    &token_id,
+                    self.market_registry.market_for_key(*token),
+                    *old_tick,
+                    *new_tick,
+                    *trace,
+                )
             }
             PipelineEvent::LastTradePrice {
                 market_id,
-                asset_id,
+                token,
                 price,
                 side,
                 size,
@@ -709,25 +1222,30 @@ impl BookApplyWorker {
                 timestamp_ms,
                 trace,
             } => {
-                self.book_fact_writer
-                    .write_last_trade(MarketWsTradeFact {
-                        token_id: asset_id,
-                        market_id: market_id.clone(),
-                        price: *price,
-                        side: *side,
-                        trade_size: *size,
-                        fee_rate_bps: *fee_rate_bps,
-                        timestamp_ms: *timestamp_ms,
-                        trace: *trace,
-                    })
-                    .await
+                let token_id = self.market_registry.token_id(*token)?;
+                BookFactWriter::last_trade_ledger_row(&MarketWsTradeFact {
+                    token_id: &token_id,
+                    market_id: market_id.clone(),
+                    price: *price,
+                    side: *side,
+                    trade_size: *size,
+                    fee_rate_bps: *fee_rate_bps,
+                    timestamp_ms: *timestamp_ms,
+                    trace: *trace,
+                })
             }
-            _ => true,
+            _ => None,
         }
     }
 
+    fn allocate_batch_id(&mut self) -> Option<PartitionBatchId> {
+        self.next_batch_id = self.next_batch_id.checked_add(1)?;
+        Some(PartitionBatchId::new(self.next_batch_id))
+    }
+
     fn apply_canonical_events(&mut self, events: Vec<PipelineEvent>) {
-        let mut deltas = Vec::new();
+        let mut deltas = mem::take(&mut self.delta_commands);
+        deltas.clear();
         for event in events {
             match event {
                 PipelineEvent::PriceDelta(command) => deltas.push(command),
@@ -739,77 +1257,112 @@ impl BookApplyWorker {
                             self.apply_book_snapshot(&command);
                         }
                         PipelineEvent::TickSizeChange {
-                            asset_id,
+                            token,
                             old_tick,
                             new_tick,
-                            ..
+                            trace,
                         } => {
-                            tracing::info!(%asset_id, %old_tick, %new_tick, "Tick size changed");
+                            tracing::info!(?token, %old_tick, %new_tick, "Tick size changed");
+                            self.book_store.mark_canonical_fresh(
+                                token,
+                                trace.token_sequence,
+                                session_generation(trace.stream_session_id),
+                            );
                         }
-                        PipelineEvent::LastTradePrice { .. } => {}
+                        PipelineEvent::LastTradePrice { token, trace, .. } => {
+                            self.book_store.mark_canonical_fresh(
+                                token,
+                                trace.token_sequence,
+                                session_generation(trace.stream_session_id),
+                            );
+                        }
                         _ => unreachable!("only canonical events are applied here"),
                     }
                 }
             }
         }
         self.apply_price_delta_batch(&deltas);
+        deltas.clear();
+        self.delta_commands = deltas;
     }
 
     fn apply_book_snapshot(&mut self, cmd: &BookSnapshotCmd) {
-        let market_id = self.market_registry.market_for_token(&cmd.asset_id);
-        self.book_store.apply_snapshot(
-            &cmd.asset_id,
-            Arc::clone(&cmd.bids.levels),
-            Arc::clone(&cmd.asks.levels),
-            cmd.timestamp_ms,
-            Some(LatencyTrace::from_ingress(cmd.trace.mono)),
+        let market_id = self.market_registry.market_for_key(cmd.token);
+        let Some(token_id) = self.market_registry.token_id(cmd.token) else {
+            tracing::error!(token = ?cmd.token, "snapshot lost registered token metadata");
+            self.invalidate_token(cmd.token);
+            return;
+        };
+        let initial_version = self.book_store.book_version(cmd.token);
+        let state = self
+            .books
+            .entry(cmd.token)
+            .or_insert_with(|| MutableBookState::new(token_id.clone(), initial_version));
+        state
+            .book
+            .apply_snapshot_arc(&cmd.bids.levels, &cmd.asks.levels, cmd.timestamp_ms);
+        let snapshot = state.next_snapshot();
+        let stale_microstructure = state.microstructure.observe(
+            &token_id,
+            market_id,
+            &snapshot,
+            ChBookEventType::Snapshot,
+            0,
         );
-        if let Some(state) = self.stream_state.get_mut(&cmd.asset_id) {
+        if !self.book_store.publish(
+            cmd.token,
+            snapshot,
+            cmd.trace.token_sequence,
+            session_generation(cmd.trace.stream_session_id),
+            Some(LatencyTrace::from_ingress(cmd.trace.mono)),
+        ) {
+            self.invalidate_token(cmd.token);
+            return;
+        }
+        if let Some(row) = stale_microstructure {
+            self.book_fact_writer.write_microstructure_row(row);
+        }
+        if let Some(state) = self.stream_state.get_mut(&cmd.token) {
             state.has_fresh_snapshot = true;
         }
-        if let Some(snapshot) = self.book_store.load(&cmd.asset_id) {
-            self.book_fact_writer.write_microstructure_snapshot(
-                &cmd.asset_id,
-                market_id,
-                &snapshot,
-                ChBookEventType::Snapshot,
-                0,
-            );
-        }
-        self.event_source
-            .mark_token_applied(&cmd.asset_id, Instant::now());
         self.metrics.book_snapshots_applied.inc();
     }
 
-    fn apply_price_delta_batch(&self, commands: &[PriceDeltaCmd]) {
+    fn apply_price_delta_batch(&mut self, commands: &[PriceDeltaCmd]) {
         if commands.is_empty() {
             return;
         }
-        let market_ids = commands
-            .iter()
-            .map(|command| self.market_registry.market_for_token(&command.asset_id))
-            .collect::<Vec<_>>();
-        let mut token_order = Vec::new();
-        let mut token_commands = HashMap::<TokenId, Vec<usize>>::new();
-        for (index, command) in commands.iter().enumerate() {
-            if !token_commands.contains_key(&command.asset_id) {
-                token_order.push(command.asset_id.clone());
+        self.delta_command_order.clear();
+        self.delta_command_order.extend(0..commands.len());
+        self.delta_command_order
+            .sort_unstable_by_key(|index| (commands[*index].token.index(), *index));
+        let mut start = 0;
+        while start < self.delta_command_order.len() {
+            let token = commands[self.delta_command_order[start]].token;
+            let mut end = start + 1;
+            while end < self.delta_command_order.len()
+                && commands[self.delta_command_order[end]].token == token
+            {
+                end += 1;
             }
-            token_commands
-                .entry(command.asset_id.clone())
-                .or_default()
-                .push(index);
-        }
-        for token_id in token_order {
-            let Some(indices) = token_commands.remove(&token_id) else {
-                continue;
-            };
-            let Some(last_index) = indices.last().copied() else {
-                continue;
-            };
+            let indices = &self.delta_command_order[start..end];
+            let last_index = indices[indices.len() - 1];
             let last_command = &commands[last_index];
-            self.book_store.apply_delta(
-                &token_id,
+            let Some(token_id) = self.market_registry.token_id(token) else {
+                tracing::error!(?token, "delta lost registered token metadata");
+                start = end;
+                continue;
+            };
+            let Some(state) = self.books.get_mut(&token) else {
+                tracing::error!(
+                    ?token,
+                    "delta reached partition actor without mutable snapshot"
+                );
+                self.invalidate_token(token);
+                start = end;
+                continue;
+            };
+            state.book.apply_delta_with_scratch(
                 indices.iter().flat_map(|index| {
                     commands[*index]
                         .changes
@@ -817,24 +1370,36 @@ impl BookApplyWorker {
                         .map(|delta| (delta.side, delta.price, delta.size))
                 }),
                 last_command.timestamp_ms,
-                Some(LatencyTrace::from_ingress(last_command.trace.mono)),
+                &mut self.delta_scratch,
             );
-            if let Some(snapshot) = self.book_store.load(&token_id) {
-                let delete_count = indices
-                    .iter()
-                    .flat_map(|index| commands[*index].changes.iter())
-                    .filter(|change| change.size <= Shares::ZERO)
-                    .count();
-                self.book_fact_writer.write_microstructure_snapshot(
-                    &token_id,
-                    market_ids[last_index].clone(),
-                    &snapshot,
-                    ChBookEventType::Delta,
-                    u64::try_from(delete_count).unwrap_or(u64::MAX),
-                );
+            let snapshot = state.next_snapshot();
+            let delete_count = indices
+                .iter()
+                .flat_map(|index| commands[*index].changes.iter())
+                .filter(|change| change.size <= Shares::ZERO)
+                .count();
+            let stale_microstructure = state.microstructure.observe(
+                &token_id,
+                self.market_registry.market_for_key(token),
+                &snapshot,
+                ChBookEventType::Delta,
+                u64::try_from(delete_count).unwrap_or(u64::MAX),
+            );
+            if !self.book_store.publish(
+                token,
+                snapshot,
+                last_command.trace.token_sequence,
+                session_generation(last_command.trace.stream_session_id),
+                Some(LatencyTrace::from_ingress(last_command.trace.mono)),
+            ) {
+                self.invalidate_token(token);
+                start = end;
+                continue;
             }
-            self.event_source
-                .mark_token_applied(&token_id, Instant::now());
+            if let Some(row) = stale_microstructure {
+                self.book_fact_writer.write_microstructure_row(row);
+            }
+            start = end;
         }
         self.metrics
             .price_changes_applied
@@ -843,18 +1408,15 @@ impl BookApplyWorker {
 
     fn invalidate_batch_sessions(
         &mut self,
-        events: &[PipelineEvent],
+        batch_scope: &[(TokenKey, Uuid)],
         failed_sessions: &HashSet<Uuid>,
     ) {
         let mut invalidated_tokens = HashSet::new();
-        for event in events {
-            let Some((token_id, trace)) = canonical_identity(event) else {
-                continue;
-            };
-            if failed_sessions.contains(&trace.stream_session_id) {
-                self.invalid_sessions.insert(trace.stream_session_id);
-                invalidated_tokens.insert(token_id.clone());
-                if let Some(state) = self.stream_state.get_mut(token_id) {
+        for (token, session_id) in batch_scope {
+            if failed_sessions.contains(session_id) {
+                self.invalid_sessions.insert(*session_id);
+                invalidated_tokens.insert(*token);
+                if let Some(state) = self.stream_state.get_mut(token) {
                     state.has_fresh_snapshot = false;
                 }
             }
@@ -863,57 +1425,43 @@ impl BookApplyWorker {
             return;
         }
         self.book_store.mark_gap();
-        self.event_source
-            .invalidate_tokens(&invalidated_tokens.into_iter().collect::<Vec<_>>());
+        let invalidated_tokens = invalidated_tokens.into_iter().collect::<Vec<_>>();
+        self.book_store.invalidate_tokens(&invalidated_tokens);
+        let token_ids = invalidated_tokens
+            .iter()
+            .filter_map(|token| self.market_registry.token_id(*token))
+            .collect::<Vec<_>>();
+        self.event_source.invalidate_tokens(&token_ids);
     }
 
-    fn accept_sequence(&mut self, token_id: &TokenId, trace: IngressTrace) -> bool {
-        if trace.stream_session_id.is_nil() || trace.token_sequence == 0 {
-            return false;
-        }
-        match self.stream_state.get_mut(token_id) {
-            Some(state) if state.session_id == trace.stream_session_id => {
-                if trace.token_sequence != state.last_sequence.saturating_add(1) {
-                    state.has_fresh_snapshot = false;
-                    return false;
-                }
-                state.last_sequence = trace.token_sequence;
-            }
-            Some(state) => {
-                *state = TokenStreamState {
-                    session_id: trace.stream_session_id,
-                    last_sequence: trace.token_sequence,
-                    has_fresh_snapshot: false,
-                };
-            }
-            None => {
-                self.stream_state.insert(
-                    token_id.clone(),
-                    TokenStreamState {
-                        session_id: trace.stream_session_id,
-                        last_sequence: trace.token_sequence,
-                        has_fresh_snapshot: false,
-                    },
-                );
-            }
-        }
-        true
-    }
-
-    fn invalidate_token(&mut self, token_id: &TokenId) {
-        if let Some(state) = self.stream_state.get_mut(token_id) {
+    fn invalidate_token(&mut self, token: TokenKey) {
+        if let Some(state) = self.stream_state.get_mut(&token) {
             state.has_fresh_snapshot = false;
         }
+        self.book_store.invalidate_tokens(slice::from_ref(&token));
         self.book_store.mark_gap();
-        self.event_source.invalidate_token(token_id);
+        if let Some(token_id) = self.market_registry.token_id(token) {
+            self.event_source.invalidate_token(&token_id);
+        }
     }
 
     async fn handle_session_close(&mut self, close: SessionClose) {
-        let sequences = close
-            .received_sequences
-            .iter()
-            .map(|(token, sequence)| (token.as_str(), *sequence))
-            .collect::<BTreeMap<_, _>>();
+        let expected_generation = session_generation(close.stream_session_id);
+        let continuity_invalid = close.received_sequences.iter().any(|(token, sequence)| {
+            self.book_store.freshness(*token).is_none_or(|freshness| {
+                freshness.state != TokenSlotState::Fresh
+                    || freshness.session_generation != expected_generation
+                    || freshness.sequence != *sequence
+            })
+        });
+        let mut sequences = BTreeMap::new();
+        for (token, sequence) in close.received_sequences.iter() {
+            let Some(token_id) = self.market_registry.token_id(*token) else {
+                self.book_store.mark_gap();
+                return;
+            };
+            sequences.insert(token_id, *sequence);
+        }
         let Ok(sequence_json) = serde_json::to_string(&sequences) else {
             self.book_store.mark_gap();
             return;
@@ -940,11 +1488,7 @@ impl BookApplyWorker {
                 ChStreamSessionEndReason::Shutdown,
             ),
         };
-        if self
-            .invalid_sessions
-            .remove(&close.stream_session_id)
-            .is_some()
-        {
+        if self.invalid_sessions.remove(&close.stream_session_id) || continuity_invalid {
             state = ChStreamSessionState::Invalidated;
             end_reason = ChStreamSessionEndReason::Overflow;
         }
@@ -966,8 +1510,8 @@ impl BookApplyWorker {
             })
             .await;
         if !persisted || state == ChStreamSessionState::Invalidated {
-            for (token_id, _) in close.received_sequences.iter() {
-                self.invalidate_token(token_id);
+            for (token, _) in close.received_sequences.iter() {
+                self.invalidate_token(*token);
             }
         }
     }

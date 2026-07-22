@@ -3,7 +3,7 @@
 //! Off the ingest hot path: the data pipeline keeps applying deltas into the
 //! [`BookStore`] at full rate, while this task samples the *published*
 //! snapshots on a fixed cadence and only for markets that a WebSocket session
-//! is actively watching ([`SessionRegistry::subscribed_markets`]). Each tick
+//! is actively watching (the [`SessionRegistry`] `ArcSwap` snapshot). Each tick
 //! compares the per-token publish versions against the last emitted pair and
 //! publishes a [`CoreEvent::MarketBookUpdate`] only when either side changed —
 //! so an idle book costs nothing and a hot book is throttled to one frame per
@@ -64,49 +64,60 @@ impl BookUpdateCoalescer {
     /// State for markets that lost their last subscriber is dropped so a
     /// re-subscribe always receives a fresh baseline frame on the next tick.
     pub fn tick(&mut self) -> usize {
-        let watched = self.sessions.subscribed_markets();
-        self.emitted
-            .retain(|market_id, _| watched.contains(market_id));
+        let Self {
+            book_store,
+            market_registry,
+            sessions,
+            events,
+            emitted,
+        } = self;
+        sessions.read_watched_markets(|watched| {
+            emitted.retain(|market_id, _| watched.contains(market_id));
 
-        let mut published = 0_usize;
-        for market_id in watched {
-            let Some((yes_token, no_token)) = self.market_registry.token_pair(&market_id) else {
-                // Unknown market (e.g. subscribed before catalog sync) — skip
-                // silently; the registry will learn it on the next Gamma sync.
-                continue;
-            };
+            let mut published = 0_usize;
+            for market_id in watched {
+                let Some((yes_token, no_token)) = market_registry.token_pair(market_id) else {
+                    // Unknown market (e.g. subscribed before catalog sync) — skip
+                    // silently; the registry will learn it on the next Gamma sync.
+                    continue;
+                };
+                let Some(pair) = market_registry
+                    .data_plane()
+                    .with_index(|index| index.market_token_pair(market_id))
+                else {
+                    continue;
+                };
 
-            let versions = (
-                self.book_store.book_version(&yes_token),
-                self.book_store.book_version(&no_token),
-            );
-            if versions == (0, 0) {
-                // No published book on either side yet — nothing to emit.
-                continue;
+                let versions = (
+                    book_store.book_version(pair.yes),
+                    book_store.book_version(pair.no),
+                );
+                if versions == (0, 0) {
+                    // No published book on either side yet — nothing to emit.
+                    continue;
+                }
+                if emitted.get(market_id) == Some(&versions) {
+                    continue;
+                }
+
+                let view = MarketBookView {
+                    market_id: market_id.clone(),
+                    yes: book_store
+                        .load_owned(pair.yes)
+                        .map(|snapshot| MarketBookSideView::from_snapshot(yes_token, &snapshot)),
+                    no: book_store
+                        .load_owned(pair.no)
+                        .map(|snapshot| MarketBookSideView::from_snapshot(no_token, &snapshot)),
+                };
+                events.publish(CoreEvent::MarketBookUpdate {
+                    market_id: market_id.clone(),
+                    view: Box::new(view),
+                });
+                emitted.insert(market_id.clone(), versions);
+                published += 1;
             }
-            if self.emitted.get(&market_id) == Some(&versions) {
-                continue;
-            }
-
-            let view = MarketBookView {
-                market_id: market_id.clone(),
-                yes: self
-                    .book_store
-                    .load(&yes_token)
-                    .map(|snapshot| MarketBookSideView::from_snapshot(yes_token, &snapshot)),
-                no: self
-                    .book_store
-                    .load(&no_token)
-                    .map(|snapshot| MarketBookSideView::from_snapshot(no_token, &snapshot)),
-            };
-            self.events.publish(CoreEvent::MarketBookUpdate {
-                market_id: market_id.clone(),
-                view: Box::new(view),
-            });
-            self.emitted.insert(market_id, versions);
-            published += 1;
-        }
-        published
+            published
+        })
     }
 
     /// Sampling loop: one [`Self::tick`] per interval until shutdown.
@@ -148,16 +159,14 @@ impl AppContext {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        collections::HashSet,
-        sync::{Arc, RwLock},
-    };
+    use std::sync::Arc;
 
     use chrono::Utc;
     use flume::Receiver;
+    use prometheus::IntCounter;
     use quant_pivot_models::{
         domain::{
-            market::{BookLevel, MarketRegistryInfo, TokenInfo},
+            market::{BookLevel, MarketRegistryInfo, TokenInfo, book::BookSnapshot},
             runtime::{CoreEvent, CoreEventPublisher},
             ws::{SubscriptionKey, WsChannel},
         },
@@ -166,15 +175,18 @@ mod tests {
             common::{CategorySet, MarketCategory, TickSize},
             market::MarketStatus,
         },
-        types::{EventId, MarketId, Price, Shares, TokenId},
+        types::{EventId, MarketId, Price, Shares, TokenId, UserId},
     };
-    use quant_pivot_web::ws::{SessionHandle, SessionRegistry};
+    use quant_pivot_web::ws::{SessionHubMetrics, SessionRegistration, SessionRegistry};
     use rust_decimal_macros::dec;
+    use tokio::{sync::mpsc, task::JoinHandle};
     use tokio_util::sync::CancellationToken;
 
     use super::BookUpdateCoalescer;
     use crate::{
-        ingest::{book_store::BookStore, market_registry::MarketRegistry},
+        ingest::{
+            book_store::BookStore, data_plane_index::DataPlane, market_registry::MarketRegistry,
+        },
         observability::metrics_hub::MetricsHub,
     };
 
@@ -219,49 +231,79 @@ mod tests {
         }
     }
 
-    fn subscribe_market(registry: &SessionRegistry, market: &str) {
-        let (outbound, rx) = flume::bounded::<String>(8);
-        let keys: HashSet<SubscriptionKey> = HashSet::from([SubscriptionKey::scoped(
-            WsChannel::MarketBookUpdate,
-            MarketId::new(market),
-        )]);
-        registry.register(SessionHandle {
-            outbound,
-            subscriptions: Arc::new(RwLock::new(keys)),
-            subject: "test-user".to_owned(),
-            family_id: "test-family".to_owned(),
-            can_read_system: false,
-            cancellation: CancellationToken::new(),
-        });
-        drop(rx);
+    async fn subscribe_market(registry: &SessionRegistry, market: &str) {
+        let (outbound, receiver) = mpsc::channel(8);
+        let session_id = registry
+            .register(SessionRegistration {
+                outbound,
+                subject: UserId::from_v7(),
+                family_id: "test-family".to_owned(),
+                can_read_system: false,
+                cancellation: CancellationToken::new(),
+            })
+            .await
+            .expect("register coalescer test session");
+        assert!(
+            registry
+                .subscribe(
+                    session_id,
+                    SubscriptionKey::scoped(WsChannel::MarketBookUpdate, MarketId::new(market),),
+                )
+                .await
+        );
+        drop(receiver);
     }
 
     fn apply_book(store: &BookStore, token: &str) {
         let level = BookLevel::from_decimal(Price::new(dec!(0.5)), Shares::new(dec!(10)))
             .expect("valid level");
-        store.apply_snapshot(
-            &TokenId::new(token),
-            vec![level],
-            vec![level],
-            1_700_000_000_000,
+        let token = store
+            .resolve(&TokenId::new(token))
+            .expect("registered book token");
+        assert!(store.publish(
+            token,
+            BookSnapshot::new(Arc::from([level]), Arc::from([level]), 1_700_000_000_000, 1,),
+            1,
+            1,
             None,
-        );
+        ));
     }
 
-    fn build(markets: &[&str], subscribed: &[&str]) -> (BookUpdateCoalescer, Receiver<CoreEvent>) {
-        let book_store = Arc::new(BookStore::new(Arc::new(MetricsHub::new())));
-        let market_registry = Arc::new(MarketRegistry::new());
+    async fn build(
+        markets: &[&str],
+        subscribed: &[&str],
+    ) -> (
+        BookUpdateCoalescer,
+        Receiver<CoreEvent>,
+        CancellationToken,
+        JoinHandle<()>,
+    ) {
+        let data_plane = Arc::new(DataPlane::new());
+        let book_store = Arc::new(BookStore::new(
+            Arc::clone(&data_plane),
+            Arc::new(MetricsHub::new()),
+        ));
+        let market_registry = Arc::new(MarketRegistry::new(data_plane));
         for id in markets {
             market_registry.register_market(market_info(id));
         }
-        let sessions = SessionRegistry::default();
+        let (sessions, hub) = SessionRegistry::new(SessionHubMetrics {
+            best_effort_dropped: IntCounter::new("test_coalescer_ws_dropped", "test")
+                .expect("drop counter"),
+            reliable_disconnects: IntCounter::new("test_coalescer_ws_closed", "test")
+                .expect("disconnect counter"),
+        });
+        let shutdown = CancellationToken::new();
+        let hub_task = tokio::spawn(hub.run(shutdown.clone()));
         for id in subscribed {
-            subscribe_market(&sessions, id);
+            subscribe_market(&sessions, id).await;
         }
         let (events, rx) = CoreEventPublisher::bounded(64);
         (
             BookUpdateCoalescer::new(book_store, market_registry, sessions, events),
             rx,
+            shutdown,
+            hub_task,
         )
     }
 
@@ -275,26 +317,30 @@ mod tests {
         ids
     }
 
-    #[test]
-    fn emits_only_for_subscribed_markets_with_published_books() {
-        let (mut coalescer, rx) = build(&["m1", "m2"], &["m1"]);
+    #[tokio::test]
+    async fn emits_only_for_subscribed_markets_with_published_books() {
+        let (mut coalescer, rx, shutdown, hub_task) = build(&["m1", "m2"], &["m1"]).await;
         apply_book(&coalescer.book_store, "m1-yes");
         apply_book(&coalescer.book_store, "m2-yes");
 
         assert_eq!(coalescer.tick(), 1);
         assert_eq!(drain_book_updates(&rx), vec![MarketId::new("m1")]);
+        shutdown.cancel();
+        hub_task.await.expect("hub task");
     }
 
-    #[test]
-    fn skips_markets_without_any_published_side() {
-        let (mut coalescer, rx) = build(&["m1"], &["m1"]);
+    #[tokio::test]
+    async fn skips_markets_without_any_published_side() {
+        let (mut coalescer, rx, shutdown, hub_task) = build(&["m1"], &["m1"]).await;
         assert_eq!(coalescer.tick(), 0);
         assert!(drain_book_updates(&rx).is_empty());
+        shutdown.cancel();
+        hub_task.await.expect("hub task");
     }
 
-    #[test]
-    fn dedupes_unchanged_versions_and_reemits_on_change() {
-        let (mut coalescer, rx) = build(&["m1"], &["m1"]);
+    #[tokio::test]
+    async fn dedupes_unchanged_versions_and_reemits_on_change() {
+        let (mut coalescer, rx, shutdown, hub_task) = build(&["m1"], &["m1"]).await;
         apply_book(&coalescer.book_store, "m1-yes");
 
         assert_eq!(coalescer.tick(), 1, "baseline frame");
@@ -303,26 +349,29 @@ mod tests {
         apply_book(&coalescer.book_store, "m1-no");
         assert_eq!(coalescer.tick(), 1, "no-side change re-emits");
         assert_eq!(drain_book_updates(&rx).len(), 2);
+        shutdown.cancel();
+        hub_task.await.expect("hub task");
     }
 
-    #[test]
-    fn skips_markets_unknown_to_the_registry() {
-        let (mut coalescer, rx) = build(&[], &["m1"]);
-        apply_book(&coalescer.book_store, "m1-yes");
+    #[tokio::test]
+    async fn skips_markets_unknown_to_the_registry() {
+        let (mut coalescer, rx, shutdown, hub_task) = build(&[], &["m1"]).await;
         assert_eq!(coalescer.tick(), 0);
         assert!(drain_book_updates(&rx).is_empty());
+        shutdown.cancel();
+        hub_task.await.expect("hub task");
     }
 
-    #[test]
-    fn emitted_state_resets_after_unsubscribe() {
-        let (mut coalescer, rx) = build(&["m1"], &["m1"]);
+    #[tokio::test]
+    async fn emitted_state_resets_after_unsubscribe() {
+        let (mut coalescer, rx, shutdown, hub_task) = build(&["m1"], &["m1"]).await;
         apply_book(&coalescer.book_store, "m1-yes");
         assert_eq!(coalescer.tick(), 1);
 
         // Simulate all subscribers leaving, then a fresh subscribe.
-        coalescer.sessions = SessionRegistry::default();
+        coalescer.sessions.close_all().await;
         assert_eq!(coalescer.tick(), 0);
-        subscribe_market(&coalescer.sessions, "m1");
+        subscribe_market(&coalescer.sessions, "m1").await;
 
         assert_eq!(
             coalescer.tick(),
@@ -330,5 +379,7 @@ mod tests {
             "fresh subscriber gets a baseline frame"
         );
         assert_eq!(drain_book_updates(&rx).len(), 2);
+        shutdown.cancel();
+        hub_task.await.expect("hub task");
     }
 }

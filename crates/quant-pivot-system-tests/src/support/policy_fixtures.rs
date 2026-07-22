@@ -62,7 +62,7 @@ async fn activate_prepared_resources(
                 policy_activation_id: PolicyActivationId::from_v7(),
                 resource_kind: resource.kind,
                 policy_revision_id: resource.revision_id,
-                decision_policy_snapshot_id: context.snapshot_id.clone(),
+                decision_policy_snapshot_id: *context.snapshot_id,
                 policy_approval_id: resource.approval_id,
                 activated_by_kind: PolicyActorKind::System,
                 activated_by_user_id: None,
@@ -76,7 +76,7 @@ async fn activate_prepared_resources(
                 activation_request_hash: CanonicalDigest::content_hash_json(&(
                     "test-policy-activation",
                     idempotency_key.as_str(),
-                    context.snapshot_hash.as_str(),
+                    context.snapshot_hash,
                 ))
                 .expect("hash test activation request"),
                 idempotency_key,
@@ -112,18 +112,15 @@ pub async fn bootstrap_policy_bundle(
     let mut prepared = Vec::with_capacity(ConfigResourceKind::ALL.len());
     for kind in ConfigResourceKind::ALL {
         let revision_id = PolicyRevisionId::from_v7();
-        snapshot.set_resource_revision_id(kind, revision_id.clone());
+        snapshot.set_resource_revision_id(kind, revision_id);
         let document = snapshot.resource_document(kind);
         let revision_hash =
             CanonicalDigest::content_hash_json(&document).expect("hash typed policy document");
-        let preflight_token_hash = CanonicalDigest::content_hash_json(&(
-            "test-policy-preflight",
-            kind,
-            revision_hash.as_str(),
-        ))
-        .expect("hash test preflight token");
+        let preflight_token_hash =
+            CanonicalDigest::content_hash_json(&("test-policy-preflight", kind, revision_hash))
+                .expect("hash test preflight token");
         repo.create_revision(NewPolicyRevision {
-            policy_revision_id: revision_id.clone(),
+            policy_revision_id: revision_id,
             resource_kind: kind,
             schema_version: POLICY_RESOURCE_SCHEMA_VERSION,
             revision_hash,
@@ -160,18 +157,18 @@ pub async fn bootstrap_policy_bundle(
                 subject: Some(PolicyValidationSubject {
                     base_generation: PolicyBundleGeneration::FIRST,
                     base_revision_vector: PolicyRevisionBundle::default(),
-                    candidate_bundle_hash: snapshot_hash.clone(),
+                    candidate_bundle_hash: snapshot_hash,
                 }),
                 ..PolicyValidationEvidence::default()
             },
-            resource.preflight_token_hash.clone(),
+            resource.preflight_token_hash,
             Utc::now() + Duration::days(1),
         )
         .await
         .expect("bind policy validation to the complete boot bundle");
         repo.record_approval(RecordPolicyApproval {
-            policy_approval_id: resource.approval_id.clone(),
-            policy_revision_id: resource.revision_id.clone(),
+            policy_approval_id: resource.approval_id,
+            policy_revision_id: resource.revision_id,
             resource_kind: resource.kind,
             decision: PolicyApprovalDecision::Approved,
             decided_by_kind: PolicyActorKind::System,
@@ -188,8 +185,8 @@ pub async fn bootstrap_policy_bundle(
         bundle_generation: PolicyBundleGeneration::FIRST
             .checked_next()
             .expect("boot generation has a successor"),
-        decision_policy_snapshot_id: snapshot_id.clone(),
-        snapshot_hash: snapshot_hash.clone(),
+        decision_policy_snapshot_id: snapshot_id,
+        snapshot_hash,
         snapshot: snapshot
             .persistence_document()
             .expect("build typed persistence policy document"),
@@ -251,12 +248,12 @@ pub async fn bootstrap_default_policy_bundle(
     .await
 }
 
-fn required_revision(
+const fn required_revision(
     snapshot: &DecisionPolicySnapshot,
     kind: ConfigResourceKind,
 ) -> PolicyRevisionId {
     snapshot
         .resource_revision_id(kind)
-        .cloned()
+        .copied()
         .expect("complete test policy revision bundle")
 }

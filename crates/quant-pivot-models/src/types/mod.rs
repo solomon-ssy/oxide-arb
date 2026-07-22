@@ -7,6 +7,7 @@ pub mod catalog;
 pub mod clob_market_info;
 pub mod config_governance;
 pub mod content;
+pub mod data_plane;
 pub mod dataset_coverage;
 pub mod domain;
 pub mod domain_capability;
@@ -59,7 +60,8 @@ pub use config_governance::{
     PolicyBundleGeneration, PolicyBundleGenerationError, PolicyIdempotencyKey,
     PolicyPreflightToken, ProductionSealConfirmationPhrase,
 };
-pub use content::{ArtifactUri, ContentHash, SchemaVersion};
+pub use content::{ArtifactUri, ContentHash, ContentHashText, SchemaVersion};
+pub use data_plane::{PartitionBatchId, PartitionId, TokenKey};
 pub use dataset_coverage::{
     DatasetCoverage, DatasetFeatureStateCounts, MatrixCoverageProbe, TrainingHorizonsSecs,
 };
@@ -191,7 +193,7 @@ pub use settlement_payload::{
 };
 pub use source_slice::{
     SOURCE_SLICE_MANIFEST_FORMAT_VERSION, SourceSliceCatalogProof, SourceSliceInvalidSession,
-    SourceSliceManifestRef, SourceSliceManifestV1, SourceSliceObjectKind, SourceSliceObjectRef,
+    SourceSliceManifest, SourceSliceManifestRef, SourceSliceObjectKind, SourceSliceObjectRef,
     SourceSlicePitCutoffs, SourceSliceSessionInvalidationReason,
 };
 pub use trade_policy::{

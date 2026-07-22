@@ -66,12 +66,7 @@ impl DomainEventOutboxWorker {
         })?;
         let events = self
             .projections
-            .claim_pending_events(
-                self.worker_id.clone(),
-                now,
-                now + lease_duration,
-                BATCH_SIZE,
-            )
+            .claim_pending_events(self.worker_id, now, now + lease_duration, BATCH_SIZE)
             .await?;
         if events.is_empty() {
             return Ok(());
@@ -84,7 +79,7 @@ impl DomainEventOutboxWorker {
             for event in &events {
                 if let Err(mark_error) = self
                     .projections
-                    .mark_event_failed(&event.id, self.worker_id.clone(), error.to_string())
+                    .mark_event_failed(&event.id, self.worker_id, error.to_string())
                     .await
                 {
                     tracing::error!(
@@ -99,7 +94,7 @@ impl DomainEventOutboxWorker {
         let published_at = Utc::now();
         for event in events {
             self.projections
-                .mark_event_published(&event.id, self.worker_id.clone(), published_at)
+                .mark_event_published(&event.id, self.worker_id, published_at)
                 .await?;
         }
         Ok(())
@@ -123,12 +118,9 @@ fn to_clickhouse_row(event: &DomainEventEnvelope) -> Result<DomainEventRow, Quan
         available_at: event.available_at.timestamp_millis(),
         schema_version: ChSchemaVersion(event.schema_version),
         revision: event.revision,
-        supersedes_event_id: event
-            .supersedes_event_id
-            .as_ref()
-            .map(DomainEventId::as_uuid),
-        payload_hash: event.payload_hash.clone(),
-        source_checkpoint_hash: event.source_checkpoint_hash.clone(),
+        supersedes_event_id: event.supersedes_event_id.map(DomainEventId::as_uuid),
+        payload_hash: event.payload_hash,
+        source_checkpoint_hash: event.source_checkpoint_hash,
         payload_json,
     })
 }

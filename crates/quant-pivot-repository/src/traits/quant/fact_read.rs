@@ -3,7 +3,7 @@
 //! The feature plane pre-fetches windowed microstructure facts once per round
 //! (never a query inside the build loop). Online callers read recent facts
 //! bounded by the PIT cutoff; the historical, `as_of`-bounded reads
-//! (`book_checkpoint_at`, `book_checkpoints_between`, `resolution_at`,
+//! (`book_ledger_snapshot_at`, `book_ledger_snapshots_between`, `resolution_at`,
 //! `resolutions_between`) materialize backtests / training datasets.
 //!
 //! Every query states explicit, stable SQL ordering: point-in-time reads order
@@ -13,10 +13,10 @@
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     clickhouse::{
-        BookL2CheckpointRow, BookL2EventRow, BookMicrostructureRow, BookStreamSessionRow,
-        CryptoPriceReportRow, DomainObservationRow, EntryConditionEvaluationEventRow,
-        MarketResolutionRow, MidPriceBucketRow, ReportMarketFunnelCountRow, ReportMarketFunnelRow,
-        TradeTapeRow, WeatherForecastFactRow, WeatherObservationFactRow,
+        BookL2LedgerRow, BookMicrostructureRow, BookStreamSessionRow, CryptoPriceReportRow,
+        DomainObservationRow, EntryConditionEvaluationEventRow, MarketResolutionRow,
+        MidPriceBucketRow, ReportMarketFunnelCountRow, ReportMarketFunnelRow, TradeTapeRow,
+        WeatherForecastFactRow, WeatherObservationFactRow,
     },
     types::{
         DomainInstrumentKey, DomainSourceId, EntryConditionInstanceId, MarketId,
@@ -197,47 +197,35 @@ pub trait QuantFactReadRepository: Send + Sync {
     /// The freshest book snapshot whose source-effective timestamp is at or
     /// before `source_cutoff_ms` and whose ingestion timestamp is visible by
     /// `decision_at_ms`, or `None` when none exists.
-    async fn book_checkpoint_at(
+    async fn book_ledger_snapshot_at(
         &self,
         token_id: &TokenId,
         source_cutoff_ms: i64,
         decision_at_ms: i64,
-    ) -> Result<Option<BookL2CheckpointRow>, StorageError>;
+    ) -> Result<Option<BookL2LedgerRow>, StorageError>;
 
-    /// Canonical L2 events in the checkpoint's session, including the anchor
+    /// Canonical L2 events in the snapshot's session, including the anchor
     /// sequence, visible at the supplied PIT boundary.
-    async fn book_l2_events_from(
+    async fn book_l2_ledger_from(
         &self,
         _token_id: &TokenId,
         _stream_session_id: Uuid,
         _from_sequence: u64,
         _source_cutoff_ms: i64,
         _decision_at_ms: i64,
-    ) -> Result<Vec<BookL2EventRow>, StorageError> {
+    ) -> Result<Vec<BookL2LedgerRow>, StorageError> {
         Ok(Vec::new())
     }
 
     /// Canonical L2 events for one token page. Query shape is page-bounded and
     /// must not issue one query per token.
-    async fn book_l2_events_between(
+    async fn book_l2_ledger_between(
         &self,
         _token_ids: Vec<TokenId>,
         _from_ms: i64,
         _to_ms: i64,
         _available_by_ms: i64,
-    ) -> Result<Vec<BookL2EventRow>, StorageError> {
-        Ok(Vec::new())
-    }
-
-    /// Market-WS trade observations interleaved in the same per-token stream.
-    async fn market_ws_trades_from(
-        &self,
-        _token_id: &TokenId,
-        _stream_session_id: Uuid,
-        _from_sequence: u64,
-        _source_cutoff_ms: i64,
-        _decision_at_ms: i64,
-    ) -> Result<Vec<TradeTapeRow>, StorageError> {
+    ) -> Result<Vec<BookL2LedgerRow>, StorageError> {
         Ok(Vec::new())
     }
 
@@ -262,16 +250,16 @@ pub trait QuantFactReadRepository: Send + Sync {
     /// Freshest visible book per token at one source cutoff. Implementations
     /// should override with one grouped query; the default preserves correctness
     /// for test adapters.
-    async fn book_checkpoints_at(
+    async fn book_ledger_snapshots_at(
         &self,
         token_ids: Vec<TokenId>,
         source_cutoff_ms: i64,
         decision_at_ms: i64,
-    ) -> Result<Vec<BookL2CheckpointRow>, StorageError> {
+    ) -> Result<Vec<BookL2LedgerRow>, StorageError> {
         let mut rows = Vec::with_capacity(token_ids.len());
         for token_id in token_ids {
             if let Some(row) = self
-                .book_checkpoint_at(&token_id, source_cutoff_ms, decision_at_ms)
+                .book_ledger_snapshot_at(&token_id, source_cutoff_ms, decision_at_ms)
                 .await?
             {
                 rows.push(row);
@@ -284,13 +272,13 @@ pub trait QuantFactReadRepository: Send + Sync {
     /// range `[from_ms, to_ms]`, ordered by token then event time (with
     /// tie-breakers). A batch prefetch for offline dataset materialization; the
     /// caller resolves the per-sample point-in-time snapshot in memory.
-    async fn book_checkpoints_between(
+    async fn book_ledger_snapshots_between(
         &self,
         token_ids: Vec<TokenId>,
         from_ms: i64,
         to_ms: i64,
         available_by_ms: i64,
-    ) -> Result<Vec<BookL2CheckpointRow>, StorageError>;
+    ) -> Result<Vec<BookL2LedgerRow>, StorageError>;
 
     /// The latest resolution whose economic timestamp is at or before
     /// `source_cutoff_ms` and whose writer observation is visible by

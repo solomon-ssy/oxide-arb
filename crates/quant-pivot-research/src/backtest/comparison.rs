@@ -93,10 +93,10 @@ pub fn compare_reports(
     })?;
 
     Ok(ModelComparisonReport {
-        baseline_model_version_id: baseline.report.model_version_id.clone(),
-        candidate_model_version_id: candidate.report.model_version_id.clone(),
-        baseline_report_hash: baseline.report.report_hash.clone(),
-        candidate_report_hash: candidate.report.report_hash.clone(),
+        baseline_model_version_id: baseline.report.model_version_id,
+        candidate_model_version_id: candidate.report.model_version_id,
+        baseline_report_hash: baseline.report.report_hash,
+        candidate_report_hash: candidate.report.report_hash,
         rank_ic_delta,
         hit_rate_delta,
         realized_pnl_delta,
@@ -205,8 +205,8 @@ impl SampleKey {
     fn of(sample: &SampleOutcome) -> Self {
         Self {
             as_of: sample.decision_at.timestamp_millis(),
-            market_id: sample.market_id.as_str().to_owned(),
-            token_id: sample.token_id.as_str().to_owned(),
+            market_id: sample.market_id.to_string(),
+            token_id: sample.token_id.to_string(),
         }
     }
 }
@@ -359,7 +359,12 @@ mod tests {
             comparison.category_breakdown_diff[0].rank_ic_delta,
             dec!(0.15)
         );
-        assert!(comparison.comparison_hash.as_str().starts_with("blake3:"));
+        assert!(
+            comparison
+                .comparison_hash
+                .to_string()
+                .starts_with("blake3:")
+        );
     }
 }
 

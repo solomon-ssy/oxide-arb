@@ -16,7 +16,7 @@ use quant_pivot_repository::{
 use quant_pivot_system_tests::postgres::setup_pg;
 
 fn hash(fill: char) -> ContentHash {
-    ContentHash::parse(format!("blake3:{}", fill.to_string().repeat(64))).expect("hash")
+    ContentHash::parse(&format!("blake3:{}", fill.to_string().repeat(64))).expect("hash")
 }
 
 fn expectation() -> UpsertDomainSourceExpectation {
@@ -55,7 +55,7 @@ pub async fn expected_source_exists_before_cursor_and_transitions_optimistically
 
     let live = repo
         .transition(DomainSourceExpectationTransition {
-            expectation_id: inserted.expectation_id.clone(),
+            expectation_id: inserted.expectation_id,
             from: DomainSourceExpectationStatus::NotStarted,
             to: DomainSourceExpectationStatus::Live,
             reason: None,

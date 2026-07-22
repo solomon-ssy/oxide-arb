@@ -141,16 +141,11 @@ async fn freeze_full_window(
         .map_err(StorageError::from)?;
     let report_by_run = reports
         .iter()
-        .filter_map(|report| {
-            report
-                .model_run_id
-                .as_ref()
-                .map(|run_id| (run_id.clone(), report))
-        })
+        .filter_map(|report| report.model_run_id.as_ref().map(|run_id| (*run_id, report)))
         .collect::<HashMap<_, _>>();
     let model_run_ids = model_runs
         .iter()
-        .map(|model_run| model_run.model_run_id.clone())
+        .map(|model_run| model_run.model_run_id)
         .collect::<HashSet<_>>();
     for run_id in report_by_run.keys() {
         if !model_run_ids.contains(run_id) {
@@ -166,14 +161,14 @@ async fn freeze_full_window(
 
     let mut seeds = Vec::with_capacity(model_runs.len() + reports.len());
     for model_run in model_runs {
-        let selection_id = model_run.market_selection_id.clone().ok_or_else(|| {
+        let selection_id = model_run.market_selection_id.ok_or_else(|| {
             StorageError::state_conflict(
                 "quant_model_run",
                 Some(&model_run.model_run_id),
                 "successful live model run has no market selection",
             )
         })?;
-        let generation = model_run.output_hash.clone().ok_or_else(|| {
+        let generation = model_run.output_hash.ok_or_else(|| {
             StorageError::state_conflict(
                 "quant_model_run",
                 Some(&model_run.model_run_id),
@@ -241,7 +236,7 @@ pub(super) async fn insert_frozen_report_subject(
     report: &Model,
 ) -> Result<(), StorageError> {
     let seed = if let Some(model_run_id) = report.model_run_id.as_ref() {
-        let model_run = QuantModelRunEntity::find_by_id(model_run_id.clone())
+        let model_run = QuantModelRunEntity::find_by_id(*model_run_id)
             .one(txn)
             .await
             .map_err(StorageError::from)?
@@ -259,7 +254,7 @@ pub(super) async fn insert_frozen_report_subject(
                 "sampled parity report does not bind an exact successful live model run",
             ));
         }
-        let generation = model_run.output_hash.clone().ok_or_else(|| {
+        let generation = model_run.output_hash.ok_or_else(|| {
             StorageError::state_conflict(
                 "quant_model_run",
                 Some(model_run_id),
@@ -278,7 +273,7 @@ pub(super) async fn insert_frozen_report_subject(
             identity: ServingSubjectIdentity::ModelRun(model_run.model_run_id),
             generation,
             decision_at: model_run.window_start,
-            selection_id: report.market_selection_id.clone(),
+            selection_id: report.market_selection_id,
             evidence_hash,
         }
     } else {
@@ -298,12 +293,10 @@ pub(super) async fn insert_frozen_report_subject(
         )
         .map_err(|error| map_parity_hash_error(&error, "report evidence"))?;
         ServingSubjectSeed {
-            identity: ServingSubjectIdentity::RecommendationReport(
-                report.recommendation_report_id.clone(),
-            ),
+            identity: ServingSubjectIdentity::RecommendationReport(report.recommendation_report_id),
             generation,
             decision_at: report.decision_at,
-            selection_id: report.market_selection_id.clone(),
+            selection_id: report.market_selection_id,
             evidence_hash,
         }
     };
@@ -317,7 +310,7 @@ async fn insert_frozen_subjects(
 ) -> Result<(), StorageError> {
     let selection_ids = seeds
         .iter()
-        .map(|seed| seed.selection_id.clone())
+        .map(|seed| seed.selection_id)
         .collect::<Vec<_>>();
     let selections = QuantMarketSelectionEntity::find()
         .filter(QuantMarketSelectionColumn::MarketSelectionId.is_in(selection_ids.clone()))
@@ -325,7 +318,7 @@ async fn insert_frozen_subjects(
         .await
         .map_err(StorageError::from)?
         .into_iter()
-        .map(|selection| (selection.market_selection_id.clone(), selection))
+        .map(|selection| (selection.market_selection_id, selection))
         .collect::<HashMap<_, _>>();
     let members = QuantMarketSelectionMemberEntity::find()
         .filter(QuantMarketSelectionMemberColumn::MarketSelectionId.is_in(selection_ids))
@@ -337,7 +330,7 @@ async fn insert_frozen_subjects(
     let mut members_by_selection: HashMap<MarketSelectionId, Vec<_>> = HashMap::new();
     for member in members {
         members_by_selection
-            .entry(member.market_selection_id.clone())
+            .entry(member.market_selection_id)
             .or_default()
             .push(member);
     }
@@ -345,7 +338,7 @@ async fn insert_frozen_subjects(
     for seed in seeds {
         let selection = selections
             .get(&seed.selection_id)
-            .ok_or_else(|| StorageError::not_found("quant_market_selection", &seed.selection_id))?;
+            .ok_or_else(|| StorageError::not_found("quant_market_selection", seed.selection_id))?;
         let members = members_by_selection
             .get(&seed.selection_id)
             .cloned()
@@ -365,8 +358,8 @@ async fn insert_frozen_subjects(
             }
         };
         QuantFeatureParitySubjectEntity::insert(ActiveModel {
-            parity_subject_id: Set(subject_id.clone()),
-            run_id: Set(run_id.clone()),
+            parity_subject_id: Set(subject_id),
+            run_id: Set(*run_id),
             subject_kind: Set(subject_kind),
             model_run_id: Set(model_run_id),
             recommendation_report_id: Set(recommendation_report_id),
@@ -375,7 +368,7 @@ async fn insert_frozen_subjects(
             market_selection_id: Set(Some(seed.selection_id)),
             subject_generation: Set(seed.generation),
             decision_at: Set(Some(seed.decision_at)),
-            selection_hash: Set(Some(selection_hash.clone())),
+            selection_hash: Set(Some(selection_hash)),
             evidence_hash: Set(seed.evidence_hash),
             created_at: ActiveValue::NotSet,
         })
@@ -396,7 +389,7 @@ async fn insert_frozen_subjects(
                     })?;
             QuantFeatureParityCandidateEntity::insert(QuantFeatureParityCandidateActiveModel {
                 parity_candidate_id: Set(FeatureParityCandidateId::from_v7()),
-                parity_subject_id: Set(subject_id.clone()),
+                parity_subject_id: Set(subject_id),
                 market_id: Set(member.market_id),
                 ordinal: Set(ordinal),
                 membership_hash: Set(membership_hash),
@@ -441,7 +434,7 @@ impl FeatureParityRepository for PgFeatureParityRepository {
                 "offline frozen parity subject must exactly bind its full model/dataset run",
             ));
         }
-        let run_id = run.run_id.clone();
+        let run_id = run.run_id;
         let run_key = run_id.to_string();
         let txn = self.db.begin().await.map_err(StorageError::from)?;
         let run_model = QuantFeatureParityRunEntity::insert(run.into_active_model())
@@ -541,7 +534,7 @@ impl FeatureParityRepository for PgFeatureParityRepository {
             txn.rollback().await.map_err(StorageError::from)?;
             return Ok(EnqueueFrozenFeatureParityOutcome::NotEligible);
         }
-        let run_id = run.run_id.clone();
+        let run_id = run.run_id;
         let run_model = QuantFeatureParityRunEntity::insert(run.into_active_model())
             .exec_with_returning(&txn)
             .await
@@ -565,7 +558,7 @@ impl FeatureParityRepository for PgFeatureParityRepository {
         run_id: &FeatureParityRunId,
     ) -> Result<Vec<FrozenFeatureParitySubject>, StorageError> {
         let subjects = QuantFeatureParitySubjectEntity::find()
-            .filter(QuantFeatureParitySubjectColumn::RunId.eq(run_id.clone()))
+            .filter(QuantFeatureParitySubjectColumn::RunId.eq(*run_id))
             .order_by_asc(QuantFeatureParitySubjectColumn::DecisionAt)
             .order_by_asc(QuantFeatureParitySubjectColumn::SubjectKind)
             .order_by_asc(QuantFeatureParitySubjectColumn::ModelRunId)
@@ -651,16 +644,15 @@ impl FeatureParityRepository for PgFeatureParityRepository {
             condition = condition.add(QuantFeatureParityRunColumn::Status.eq(status));
         }
         if let Some(report_id) = query.report_id.as_ref() {
-            condition = condition.add(QuantFeatureParityRunColumn::ReportId.eq(report_id.clone()));
+            condition = condition.add(QuantFeatureParityRunColumn::ReportId.eq(*report_id));
         }
         if let Some(model_version_id) = query.model_version_id.as_ref() {
-            condition = condition
-                .add(QuantFeatureParityRunColumn::ModelVersionId.eq(model_version_id.clone()));
+            condition =
+                condition.add(QuantFeatureParityRunColumn::ModelVersionId.eq(*model_version_id));
         }
         if let Some(training_dataset_id) = query.training_dataset_id.as_ref() {
-            condition = condition.add(
-                QuantFeatureParityRunColumn::TrainingDatasetId.eq(training_dataset_id.clone()),
-            );
+            condition = condition
+                .add(QuantFeatureParityRunColumn::TrainingDatasetId.eq(*training_dataset_id));
         }
         if let Some(from) = query.from {
             condition = condition.add(QuantFeatureParityRunColumn::CreatedAt.gte(from));
@@ -737,7 +729,7 @@ impl FeatureParityRepository for PgFeatureParityRepository {
     ) -> Result<Option<FeatureParityRunInfo>, StorageError> {
         QuantFeatureParityRunEntity::find()
             .filter(QuantFeatureParityRunColumn::Kind.eq(FeatureParityRunKind::Sampled))
-            .filter(QuantFeatureParityRunColumn::ReportId.eq(report_id.clone()))
+            .filter(QuantFeatureParityRunColumn::ReportId.eq(*report_id))
             .one(&self.db)
             .await
             .map_err(StorageError::from)
@@ -751,8 +743,8 @@ impl FeatureParityRepository for PgFeatureParityRepository {
     ) -> Result<Option<FeatureParityRunInfo>, StorageError> {
         QuantFeatureParityRunEntity::find()
             .filter(QuantFeatureParityRunColumn::Kind.eq(FeatureParityRunKind::Full))
-            .filter(QuantFeatureParityRunColumn::ModelVersionId.eq(model_version_id.clone()))
-            .filter(QuantFeatureParityRunColumn::TrainingDatasetId.eq(training_dataset_id.clone()))
+            .filter(QuantFeatureParityRunColumn::ModelVersionId.eq(*model_version_id))
+            .filter(QuantFeatureParityRunColumn::TrainingDatasetId.eq(*training_dataset_id))
             .order_by_desc(QuantFeatureParityRunColumn::CreatedAt)
             .order_by_desc(QuantFeatureParityRunColumn::RunId)
             .one(&self.db)
@@ -774,7 +766,7 @@ impl FeatureParityRepository for PgFeatureParityRepository {
                 QuantFeatureParityRunColumn::StartedAt,
                 primitives::timestamp_once(QuantFeatureParityRunColumn::StartedAt),
             )
-            .filter(QuantFeatureParityRunColumn::RunId.eq(run_id.clone()))
+            .filter(QuantFeatureParityRunColumn::RunId.eq(*run_id))
             .filter(
                 Condition::any()
                     .add(QuantFeatureParityRunColumn::Status.eq(FeatureParityRunStatus::Queued))
@@ -831,11 +823,11 @@ impl FeatureParityRepository for PgFeatureParityRepository {
             )
             .col_expr(
                 QuantFeatureParityRunColumn::FeatureContractHash,
-                Expr::value(result.feature_contract_hash.clone()),
+                Expr::value(result.feature_contract_hash),
             )
             .col_expr(
                 QuantFeatureParityRunColumn::TransformHash,
-                Expr::value(result.transform_hash.clone()),
+                Expr::value(result.transform_hash),
             )
             .col_expr(
                 QuantFeatureParityRunColumn::FailureCode,
@@ -853,7 +845,7 @@ impl FeatureParityRepository for PgFeatureParityRepository {
             );
         }
         let update = statement
-            .filter(QuantFeatureParityRunColumn::RunId.eq(run_id.clone()))
+            .filter(QuantFeatureParityRunColumn::RunId.eq(*run_id))
             .filter(QuantFeatureParityRunColumn::Status.eq(FeatureParityRunStatus::Running))
             .exec(&txn)
             .await
@@ -887,7 +879,7 @@ impl FeatureParityRepository for PgFeatureParityRepository {
                 QuantFeatureParityRunColumn::ContainmentCompletedAt,
                 primitives::timestamp_once(QuantFeatureParityRunColumn::ContainmentCompletedAt),
             )
-            .filter(QuantFeatureParityRunColumn::RunId.eq(run_id.clone()))
+            .filter(QuantFeatureParityRunColumn::RunId.eq(*run_id))
             .filter(QuantFeatureParityRunColumn::Status.is_in([
                 FeatureParityRunStatus::Mismatched,
                 FeatureParityRunStatus::Failed,
@@ -991,7 +983,7 @@ impl FeatureParityRepository for PgFeatureParityRepository {
         let now = Utc::now();
         let incident_id = FeatureParityRunId::from_v7();
         let incident = NewFeatureParityRun {
-            run_id: incident_id.clone(),
+            run_id: incident_id,
             kind: FeatureParityRunKind::Full,
             status: FeatureParityRunStatus::Failed,
             window_start: source.window_start,
@@ -1077,9 +1069,9 @@ impl FeatureParityRepository for PgFeatureParityRepository {
             state_id: FeatureParityStateId::from_v7(),
             state: FeatureParityLatchState::Clear,
             transition: FeatureParityStateTransition::GovernedAcknowledge,
-            cause_run_id: current.as_ref().and_then(|row| row.cause_run_id.clone()),
-            recovery_run_id: Some(recovery_run_id.clone()),
-            previous_state_id: current.as_ref().map(|row| row.state_id.clone()),
+            cause_run_id: current.as_ref().and_then(|row| row.cause_run_id),
+            recovery_run_id: Some(*recovery_run_id),
+            previous_state_id: current.as_ref().map(|row| row.state_id),
             actor: actor.actor,
             acting_role: Some(RoleCode::new(actor.acting_role)),
             reason: actor.reason,
@@ -1516,7 +1508,7 @@ pub(super) async fn resolve_publish_latch_generation(
                 state: FeatureParityLatchState::Clear,
                 transition: FeatureParityStateTransition::BootstrapProof,
                 cause_run_id: None,
-                recovery_run_id: Some(recovery_run_id.clone()),
+                recovery_run_id: Some(*recovery_run_id),
                 previous_state_id: None,
                 actor: Some(actor),
                 acting_role,
@@ -1548,9 +1540,9 @@ async fn append_open_state(
         state_id: FeatureParityStateId::from_v7(),
         state: FeatureParityLatchState::Open,
         transition,
-        cause_run_id: Some(cause_run_id.clone()),
+        cause_run_id: Some(*cause_run_id),
         recovery_run_id: None,
-        previous_state_id: current.as_ref().map(|row| row.state_id.clone()),
+        previous_state_id: current.as_ref().map(|row| row.state_id),
         actor: None,
         acting_role: None,
         reason: reason.to_owned(),
@@ -1616,7 +1608,7 @@ where
 
         cursor = match state.previous_state_id {
             Some(previous_state_id) => Some(
-                QuantFeatureParityStateEntity::find_by_id(previous_state_id.clone())
+                QuantFeatureParityStateEntity::find_by_id(previous_state_id)
                     .one(db)
                     .await
                     .map_err(StorageError::from)?
@@ -1665,7 +1657,7 @@ async fn find_run_on<C>(
 where
     C: ConnectionTrait,
 {
-    QuantFeatureParityRunEntity::find_by_id(run_id.clone())
+    QuantFeatureParityRunEntity::find_by_id(*run_id)
         .one(db)
         .await
         .map_err(StorageError::from)
@@ -1715,7 +1707,7 @@ mod tests {
     use super::*;
 
     fn hash() -> ContentHash {
-        ContentHash::parse(format!("blake3:{}", "a".repeat(64))).expect("content hash")
+        ContentHash::parse(&format!("blake3:{}", "a".repeat(64))).expect("content hash")
     }
 
     fn parity_run(
@@ -1765,7 +1757,7 @@ mod tests {
             state_id: FeatureParityStateId::from_v7(),
             state: FeatureParityLatchState::Open,
             transition: FeatureParityStateTransition::DeterministicMismatch,
-            cause_run_id: Some(cause_run_id.clone()),
+            cause_run_id: Some(*cause_run_id),
             recovery_run_id: None,
             previous_state_id: None,
             actor: None,
@@ -1781,7 +1773,7 @@ mod tests {
             state: FeatureParityLatchState::Clear,
             transition: FeatureParityStateTransition::GovernedAcknowledge,
             cause_run_id: None,
-            recovery_run_id: Some(recovery_run_id.clone()),
+            recovery_run_id: Some(*recovery_run_id),
             previous_state_id: None,
             actor: Some("risk-owner".to_owned()),
             acting_role: Some(RoleCode::new("risk_owner")),
@@ -1988,8 +1980,8 @@ mod tests {
             base - Duration::hours(1),
             base,
         );
-        cause.model_version_id = Some(model_version_id.clone());
-        cause.training_dataset_id = Some(training_dataset_id.clone());
+        cause.model_version_id = Some(model_version_id);
+        cause.training_dataset_id = Some(training_dataset_id);
         let mut recovery = parity_run(
             FeatureParityRunKind::Full,
             FeatureParityRunStatus::Passed,

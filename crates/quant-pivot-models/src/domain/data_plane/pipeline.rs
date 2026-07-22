@@ -12,7 +12,7 @@ use crate::{
         common::{Side, TickSize},
         system::ShardConnectionStatus,
     },
-    types::{ContentHash, MarketId, Price, Shares, TokenId},
+    types::{ContentHash, MarketId, Price, Shares, TokenId, TokenKey},
 };
 
 /// Monotonic ingress trace for a WS payload.
@@ -92,7 +92,7 @@ impl BookSideData {
 /// Full L2 book snapshot command from the WS ingest plane.
 #[derive(Debug, Clone)]
 pub struct BookSnapshotCmd {
-    pub asset_id: TokenId,
+    pub token: TokenKey,
     pub bids: BookSideData,
     pub asks: BookSideData,
     pub timestamp_ms: u64,
@@ -102,7 +102,7 @@ pub struct BookSnapshotCmd {
 /// Incremental price delta command from the WS ingest plane.
 #[derive(Debug, Clone)]
 pub struct PriceDeltaCmd {
-    pub asset_id: TokenId,
+    pub token: TokenKey,
     pub changes: Arc<[PriceLevelDelta]>,
     pub timestamp_ms: u64,
     pub trace: IngressTrace,
@@ -114,14 +114,14 @@ pub enum PipelineEvent {
     BookSnapshot(BookSnapshotCmd),
     PriceDelta(PriceDeltaCmd),
     TickSizeChange {
-        asset_id: TokenId,
+        token: TokenKey,
         old_tick: TickSize,
         new_tick: TickSize,
         trace: IngressTrace,
     },
     LastTradePrice {
         market_id: MarketId,
-        asset_id: TokenId,
+        token: TokenKey,
         price: Price,
         side: Option<Side>,
         size: Option<Shares>,
@@ -131,9 +131,9 @@ pub enum PipelineEvent {
     },
     MarketResolved {
         market_id: MarketId,
-        winning_token_id: TokenId,
+        winning_token: TokenKey,
         winning_outcome: String,
-        asset_ids: Arc<[TokenId]>,
+        tokens: Arc<[TokenKey]>,
         timestamp_ms: u64,
         trace: IngressTrace,
     },
@@ -154,13 +154,13 @@ pub enum PipelineEvent {
         shard_id: u32,
         subscription_token_hash: ContentHash,
         subscription_token_count: u32,
-        received_sequences: Arc<[(TokenId, u64)]>,
+        received_sequences: Arc<[(TokenKey, u64)]>,
         opened_at_ms: i64,
         closed_at_ms: i64,
         reason: StreamSessionEndReason,
     },
     StreamGap {
-        asset_id: TokenId,
+        token: TokenKey,
         stream_session_id: Uuid,
         shard_id: u32,
         last_received_sequence: u64,
@@ -186,13 +186,13 @@ impl PipelineEvent {
     }
 
     #[must_use]
-    pub const fn asset_id(&self) -> Option<&TokenId> {
+    pub const fn token(&self) -> Option<TokenKey> {
         match self {
-            Self::BookSnapshot(cmd) => Some(&cmd.asset_id),
-            Self::PriceDelta(cmd) => Some(&cmd.asset_id),
-            Self::TickSizeChange { asset_id, .. }
-            | Self::LastTradePrice { asset_id, .. }
-            | Self::StreamGap { asset_id, .. } => Some(asset_id),
+            Self::BookSnapshot(cmd) => Some(cmd.token),
+            Self::PriceDelta(cmd) => Some(cmd.token),
+            Self::TickSizeChange { token, .. }
+            | Self::LastTradePrice { token, .. }
+            | Self::StreamGap { token, .. } => Some(*token),
             Self::MarketResolved { .. }
             | Self::ShardStatus { .. }
             | Self::StreamSessionOpened { .. }

@@ -31,7 +31,7 @@ use prometheus::IntCounter;
 use quant_pivot_core::{
     app::ports::structural_monitor::CoreStructuralMonitor,
     governance::BiasTableApplicator,
-    ingest::{book_store::BookStore, market_registry::MarketRegistry},
+    ingest::{book_store::BookStore, data_plane_index::DataPlane, market_registry::MarketRegistry},
     observability::{
         factor_fact_writer::FactorEventWriter, feature_fact_writer::FeatureEventWriter,
         metrics_hub::MetricsHub,
@@ -48,13 +48,16 @@ use quant_pivot_core::{
 use quant_pivot_error::{control::ControlError, storage::StorageError};
 use quant_pivot_models::{
     clickhouse::{
-        BookL2CheckpointRow, BookMicrostructureRow, DomainObservationRow, MarketResolutionRow,
+        BookL2LedgerRow, BookMicrostructureRow, DomainObservationRow, MarketResolutionRow,
         MidPriceBucketRow, TradeTapeRow,
     },
     config::TradeTapeOnChainConfig,
     domain::{
         data_plane::DecisionClock,
-        market::{EventRegistryInfo, MarketRegistryInfo, TokenInfo, book::BookLevel},
+        market::{
+            EventRegistryInfo, MarketRegistryInfo, TokenInfo,
+            book::{BookLevel, BookSnapshot},
+        },
         ports::{PolicySnapshotPort, PreparedPolicySnapshot, StructuralMonitorPort},
         quant::NewModelRun,
     },
@@ -206,22 +209,22 @@ impl QuantFactReadRepository for EmptyFactRead {
         Ok(Vec::new())
     }
 
-    async fn book_checkpoint_at(
+    async fn book_ledger_snapshot_at(
         &self,
         _token_id: &TokenId,
         _as_of_ms: i64,
         _decision_at_ms: i64,
-    ) -> Result<Option<BookL2CheckpointRow>, StorageError> {
+    ) -> Result<Option<BookL2LedgerRow>, StorageError> {
         Ok(None)
     }
 
-    async fn book_checkpoints_between(
+    async fn book_ledger_snapshots_between(
         &self,
         _token_ids: Vec<TokenId>,
         _from_ms: i64,
         _to_ms: i64,
         _available_by_ms: i64,
-    ) -> Result<Vec<BookL2CheckpointRow>, StorageError> {
+    ) -> Result<Vec<BookL2LedgerRow>, StorageError> {
         Ok(Vec::new())
     }
 
@@ -351,7 +354,7 @@ fn wire_live_book(registry: &MarketRegistry, book_store: &BookStore, catalog: &C
         status: EventStatus::Active,
         market_ids: vec![market.market_id.clone()],
         categories: CategorySet::from(MarketCategory::Sports),
-        tags: vec![MarketCategory::Sports.as_str().to_owned()],
+        tags: vec![MarketCategory::Sports.to_string()],
         neg_risk: false,
         end_date: market.end_date,
         created_at: Utc::now() - ChronoDuration::days(2),
@@ -359,20 +362,27 @@ fn wire_live_book(registry: &MarketRegistry, book_store: &BookStore, catalog: &C
     });
     registry.register_market(market);
     let yes = TokenId::new(catalog.yes_token);
-    book_store.apply_snapshot(
-        &yes,
-        Arc::from([BookLevel::from_decimal_unchecked(
-            Price::new(Decimal::new(47, 2)),
-            Shares::new(Decimal::from(120)),
-        )]),
-        Arc::from([BookLevel::from_decimal_unchecked(
-            Price::new(Decimal::new(53, 2)),
-            Shares::new(Decimal::from(120)),
-        )]),
-        u64::try_from(Utc::now().timestamp_millis())
-            .expect("test book timestamp must be non-negative"),
+    let yes = book_store.resolve(&yes).expect("registered YES token");
+    let timestamp_ms = u64::try_from(Utc::now().timestamp_millis())
+        .expect("test book timestamp must be non-negative");
+    assert!(book_store.publish(
+        yes,
+        BookSnapshot::new(
+            Arc::from([BookLevel::from_decimal_unchecked(
+                Price::new(Decimal::new(47, 2)),
+                Shares::new(Decimal::from(120)),
+            )]),
+            Arc::from([BookLevel::from_decimal_unchecked(
+                Price::new(Decimal::new(53, 2)),
+                Shares::new(Decimal::from(120)),
+            )]),
+            timestamp_ms,
+            1,
+        ),
+        1,
+        1,
         None,
-    );
+    ));
 }
 
 fn noop_feature_writer() -> Arc<FeatureEventWriter> {
@@ -437,8 +447,9 @@ async fn whale_tape_conc_harness() -> WhaleTapeConcHarness {
     let db = pool.connection().clone();
     seed_catalog(&db, &CATALOG).await;
 
-    let registry = Arc::new(MarketRegistry::new());
-    let book_store = Arc::new(BookStore::new(Arc::new(MetricsHub::new())));
+    let data_plane = Arc::new(DataPlane::new());
+    let registry = Arc::new(MarketRegistry::new(Arc::clone(&data_plane)));
+    let book_store = Arc::new(BookStore::new(data_plane, Arc::new(MetricsHub::new())));
     wire_live_book(&registry, &book_store, &CATALOG);
     let live_pit = InMemoryDecisionSnapshotSource::freeze(registry.as_ref(), book_store.as_ref());
 
@@ -549,7 +560,7 @@ async fn run_factor_round_and_assert_concentration(
     let model_run_id = ModelRunId::from_v7();
     PgModelRunRepository::new(harness.db.clone())
         .create(NewModelRun {
-            model_run_id: model_run_id.clone(),
+            model_run_id,
             run_kind: ModelRunKind::LiveInference,
             model_version_id: None,
             decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
@@ -557,7 +568,7 @@ async fn run_factor_round_and_assert_concentration(
             window_start: harness.as_of,
             window_end: harness.as_of,
             status: ModelRunStatus::Running,
-            input_hash: ContentHash::parse(format!("blake3:{}", "1".repeat(64))).expect("hash"),
+            input_hash: ContentHash::parse(&format!("blake3:{}", "1".repeat(64))).expect("hash"),
             output_hash: None,
             error_code: None,
             error_message: None,
@@ -570,7 +581,7 @@ async fn run_factor_round_and_assert_concentration(
     let feature_vector_ids: Vec<FeatureVectorId> = feature_result
         .persisted
         .iter()
-        .map(|row| row.feature_vector_id.clone())
+        .map(|row| row.feature_vector_id)
         .collect();
     assert_eq!(
         feature_vector_ids.len(),
@@ -589,7 +600,7 @@ async fn run_factor_round_and_assert_concentration(
     let factor_result = factor_service
         .run(FactorPipelineRequest {
             model_run_id: &model_run_id,
-            vectors: &feature_result.accepted,
+            vectors: Arc::from(feature_result.accepted.clone()),
             feature_vector_ids: &feature_vector_ids,
             factors: &factors,
             features: &features,

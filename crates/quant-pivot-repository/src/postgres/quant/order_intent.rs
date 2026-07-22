@@ -102,12 +102,12 @@ impl OrderIntentRepository for PgOrderIntentRepository {
     ) -> Result<OrderIntentInfo, StorageError> {
         validate_new_intent_and_allocation(&intent, &allocation)?;
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let rec_row = Entity::find_by_id(intent.recommendation_id.clone())
+        let rec_row = Entity::find_by_id(intent.recommendation_id)
             .lock_exclusive()
             .one(&txn)
             .await
             .map_err(StorageError::from)?
-            .ok_or_else(|| error::not_found(QUANT_RECOMMENDATION, &intent.recommendation_id))?;
+            .ok_or_else(|| error::not_found(QUANT_RECOMMENDATION, intent.recommendation_id))?;
         if rec_row.research_profile_artifact_id != intent.research_profile_artifact_id {
             return Err(error::invariant_violation(
                 Some(QUANT_ORDER_INTENT),
@@ -137,16 +137,15 @@ impl OrderIntentRepository for PgOrderIntentRepository {
                 intent.recommendation_id,
             ));
         }
-        let condition =
-            QuantEntryConditionInstanceEntity::find_by_id(intent.condition_instance_id.clone())
-                .lock_shared()
-                .one(&txn)
-                .await
-                .map_err(StorageError::from)?
-                .ok_or_else(|| StorageError::NotFound {
-                    entity: "quant_entry_condition_instance",
-                    id: intent.condition_instance_id.to_string(),
-                })?;
+        let condition = QuantEntryConditionInstanceEntity::find_by_id(intent.condition_instance_id)
+            .lock_shared()
+            .one(&txn)
+            .await
+            .map_err(StorageError::from)?
+            .ok_or_else(|| StorageError::NotFound {
+                entity: "quant_entry_condition_instance",
+                id: intent.condition_instance_id.to_string(),
+            })?;
         if condition.recommendation_id != intent.recommendation_id {
             return Err(error::invariant_violation(
                 Some(QUANT_ORDER_INTENT),
@@ -358,7 +357,7 @@ impl OrderIntentRepository for PgOrderIntentRepository {
         &self,
         intent_id: &OrderIntentId,
     ) -> Result<Option<OrderIntentInfo>, StorageError> {
-        QuantOrderIntentEntity::find_by_id(intent_id.clone())
+        QuantOrderIntentEntity::find_by_id(*intent_id)
             .one(&self.db)
             .await
             .map_err(StorageError::from)
@@ -438,7 +437,7 @@ impl OrderIntentRepository for PgOrderIntentRepository {
         recommendation_id: &RecommendationId,
     ) -> Result<Vec<OrderIntentInfo>, StorageError> {
         QuantOrderIntentEntity::find()
-            .filter(Column::RecommendationId.eq(recommendation_id.clone()))
+            .filter(Column::RecommendationId.eq(*recommendation_id))
             .filter(Column::Status.is_in(OrderIntentStatus::PRE_SUBMISSION_ACTIVE))
             .all(&self.db)
             .await
@@ -576,7 +575,6 @@ fn page_condition(query: &OrderIntentListQuery) -> Condition {
         .add_option(
             query
                 .recommendation_id
-                .clone()
                 .map(|id| Column::RecommendationId.eq(id)),
         )
         .add_option(query.from.map(|from| Column::CreatedAt.gte(from)))
@@ -587,7 +585,7 @@ pub async fn load_intent_for_update(
     db: &impl ConnectionTrait,
     intent_id: &OrderIntentId,
 ) -> Result<Model, StorageError> {
-    QuantOrderIntentEntity::find_by_id(intent_id.clone())
+    QuantOrderIntentEntity::find_by_id(*intent_id)
         .lock_exclusive()
         .one(db)
         .await
@@ -604,7 +602,7 @@ async fn load_recommendation_with_report(
     db: &impl ConnectionTrait,
     recommendation_id: &RecommendationId,
 ) -> Result<(RecommendationInfo, RecommendationReportInfo), StorageError> {
-    let (rec, report) = Entity::find_by_id(recommendation_id.clone())
+    let (rec, report) = Entity::find_by_id(*recommendation_id)
         .find_also_related(QuantRecommendationReportEntity)
         .one(db)
         .await
@@ -733,7 +731,7 @@ async fn intents_for_report_all(
 ) -> Result<Vec<OrderIntentInfo>, StorageError> {
     QuantOrderIntentEntity::find()
         .join(JoinType::InnerJoin, Relation::Recommendation.def())
-        .filter(QuantRecommendationColumn::RecommendationReportId.eq(report_id.clone()))
+        .filter(QuantRecommendationColumn::RecommendationReportId.eq(*report_id))
         .all(db)
         .await
         .map_err(StorageError::from)
@@ -748,7 +746,7 @@ async fn intents_for_report<const N: usize>(
     QuantOrderIntentEntity::find()
         .filter(Column::Status.is_in(statuses))
         .join(JoinType::InnerJoin, Relation::Recommendation.def())
-        .filter(QuantRecommendationColumn::RecommendationReportId.eq(report_id.clone()))
+        .filter(QuantRecommendationColumn::RecommendationReportId.eq(*report_id))
         .all(db)
         .await
         .map_err(StorageError::from)
@@ -760,7 +758,7 @@ async fn find_blocking_intent_for_recommendation(
     recommendation_id: &RecommendationId,
 ) -> Result<Option<Model>, StorageError> {
     QuantOrderIntentEntity::find()
-        .filter(Column::RecommendationId.eq(recommendation_id.clone()))
+        .filter(Column::RecommendationId.eq(*recommendation_id))
         .filter(Column::Status.is_in(OrderIntentStatus::SIBLING_INTENT_BLOCKING))
         .one(db)
         .await
@@ -839,7 +837,7 @@ async fn transition_invalidated(
     }
     let mut active = row.into_active_model();
     active.status = ActiveValue::Set(OrderIntentStatus::Invalidated);
-    active.status_reason = ActiveValue::Set(Some(reason.as_str().to_owned()));
+    active.status_reason = ActiveValue::Set(Some(reason.to_string()));
     let intent_model = active.update(db).await.map_err(StorageError::from)?;
     invalidate_for_intent_terminal(
         db,
@@ -880,7 +878,7 @@ pub async fn invalidate_pre_submission_for_recommendation(
     parent_log: &NewOperationLog,
 ) -> Result<Vec<OrderIntentInfo>, StorageError> {
     let rows = QuantOrderIntentEntity::find()
-        .filter(Column::RecommendationId.eq(recommendation_id.clone()))
+        .filter(Column::RecommendationId.eq(*recommendation_id))
         .filter(Column::Status.is_in(OrderIntentStatus::PRE_SUBMISSION_ACTIVE))
         .order_by_asc(Column::OrderIntentId)
         .lock_exclusive()
@@ -889,12 +887,12 @@ pub async fn invalidate_pre_submission_for_recommendation(
         .map_err(StorageError::from)?;
     let mut invalidated = Vec::with_capacity(rows.len());
     for row in rows {
-        let intent_id = row.order_intent_id.clone();
+        let intent_id = row.order_intent_id;
         validate_intent_transition(row.status, OrderIntentStatus::Invalidated, &intent_id)?;
         let before_info: OrderIntentInfo = row.clone().into();
         let mut active = row.into_active_model();
         active.status = ActiveValue::Set(OrderIntentStatus::Invalidated);
-        active.status_reason = ActiveValue::Set(Some(reason.as_str().to_owned()));
+        active.status_reason = ActiveValue::Set(Some(reason.to_string()));
         let model = active.update(db).await.map_err(StorageError::from)?;
         invalidate_for_intent_terminal(
             db,
@@ -929,7 +927,7 @@ fn terminal_intent_operation_log(
     Ok(NewOperationLog {
         id: OperationLogId::from_v7(),
         request_id: format!("{}:intent:{intent_id}", parent.request_id).into(),
-        actor_user_id: parent.actor_user_id.clone(),
+        actor_user_id: parent.actor_user_id,
         actor_username: parent.actor_username.clone(),
         acting_role: parent.acting_role.clone(),
         category: OperationCategory::Governance,
@@ -951,7 +949,7 @@ fn terminal_intent_operation_log(
         .map_err(|error| StorageError::Codec(error.to_string()))?,
         before_hash: None,
         after_hash: None,
-        governance_audit_event_id: parent.governance_audit_event_id.clone(),
+        governance_audit_event_id: parent.governance_audit_event_id,
         governance_audit_sequence: parent.governance_audit_sequence,
     })
 }
@@ -961,12 +959,12 @@ pub async fn lock_terminal_graph(
     intent_id: &OrderIntentId,
 ) -> Result<Model, StorageError> {
     let probe = load_intent(db, intent_id).await?;
-    let recommendation = Entity::find_by_id(probe.recommendation_id.clone())
+    let recommendation = Entity::find_by_id(probe.recommendation_id)
         .lock_exclusive()
         .one(db)
         .await
         .map_err(StorageError::from)?
-        .ok_or_else(|| error::not_found(QUANT_RECOMMENDATION, &probe.recommendation_id))?;
+        .ok_or_else(|| error::not_found(QUANT_RECOMMENDATION, probe.recommendation_id))?;
     let intent = load_intent_for_update(db, intent_id).await?;
     if recommendation.recommendation_id != intent.recommendation_id {
         return Err(error::state_conflict(
@@ -975,15 +973,12 @@ pub async fn lock_terminal_graph(
             "intent recommendation changed while acquiring terminal graph locks",
         ));
     }
-    let condition =
-        QuantEntryConditionInstanceEntity::find_by_id(intent.condition_instance_id.clone())
-            .lock_exclusive()
-            .one(db)
-            .await
-            .map_err(StorageError::from)?
-            .ok_or_else(|| {
-                error::not_found(ENTRY_CONDITION_ENTITY, &intent.condition_instance_id)
-            })?;
+    let condition = QuantEntryConditionInstanceEntity::find_by_id(intent.condition_instance_id)
+        .lock_exclusive()
+        .one(db)
+        .await
+        .map_err(StorageError::from)?
+        .ok_or_else(|| error::not_found(ENTRY_CONDITION_ENTITY, intent.condition_instance_id))?;
     if condition.recommendation_id != recommendation.recommendation_id {
         return Err(error::invariant_violation(
             Some(ENTRY_CONDITION_ENTITY),
@@ -998,7 +993,7 @@ pub async fn load_intent(
     db: &impl ConnectionTrait,
     intent_id: &OrderIntentId,
 ) -> Result<Model, StorageError> {
-    QuantOrderIntentEntity::find_by_id(intent_id.clone())
+    QuantOrderIntentEntity::find_by_id(*intent_id)
         .one(db)
         .await
         .map_err(StorageError::from)?

@@ -137,7 +137,7 @@ mod tests {
                     source_id: DomainSourceId::binance(),
                     instrument_key: instrument(),
                     available_at: now,
-                    binding_hash: ContentHash::parse(format!("blake3:{}", "a".repeat(64)))
+                    binding_hash: ContentHash::parse(&format!("blake3:{}", "a".repeat(64)))
                         .expect("binding hash"),
                 },
                 ResolvedSourceBinding {
@@ -147,7 +147,7 @@ mod tests {
                         &ChainlinkFeedKey::parse("BTC-USD").expect("feed"),
                     ),
                     available_at: now,
-                    binding_hash: ContentHash::parse(format!("blake3:{}", "c".repeat(64)))
+                    binding_hash: ContentHash::parse(&format!("blake3:{}", "c".repeat(64)))
                         .expect("binding hash"),
                 },
             ],
@@ -182,7 +182,7 @@ mod tests {
             DomainSliceInputs {
                 family: DomainFamily::Crypto,
                 linkage_id: MarketLinkageId::from_v7(),
-                linkage_hash: ContentHash::parse(format!("blake3:{}", "b".repeat(64)))
+                linkage_hash: ContentHash::parse(&format!("blake3:{}", "b".repeat(64)))
                     .expect("linkage hash"),
                 binding: binding(),
                 linkage_evidence: EvidenceSourceRef {

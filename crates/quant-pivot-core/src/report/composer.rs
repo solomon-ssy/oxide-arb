@@ -149,10 +149,7 @@ impl RecommendationComposer for DefaultRecommendationComposer {
                 .entry_window_ratio
                 .value,
         );
-        let data_quality_snapshot_ref = input
-            .data_quality_snapshot
-            .report_data_quality_snapshot_id
-            .clone();
+        let data_quality_snapshot_ref = input.data_quality_snapshot.report_data_quality_snapshot_id;
 
         let recommendation_rows = input
             .planned
@@ -268,7 +265,7 @@ fn build_report_header(
         .reports
         .fallback_horizon_secs;
     Ok(NewRecommendationReport {
-        recommendation_report_id: report_id.clone(),
+        recommendation_report_id: *report_id,
         research_profile_artifact_id: input.profile_ref.artifact_id(),
         report_kind: ReportKind::TopN,
         decision_at: input.decision_at,
@@ -276,19 +273,19 @@ fn build_report_header(
             QuantError::config(format!("reports.fallback_horizon_secs too large: {error}"))
         })?,
         runtime_mode: input.runtime_mode,
-        decision_policy_snapshot_id: input.decision_policy_snapshot_id.clone(),
-        model_run_id: input.model_run_id.clone(),
-        model_version_id: input.model_version_id.clone(),
-        market_selection_id: input.market_selection_id.clone(),
-        portfolio_plan_id: input.portfolio_plan.portfolio_plan_id.clone(),
+        decision_policy_snapshot_id: input.decision_policy_snapshot_id,
+        model_run_id: input.model_run_id,
+        model_version_id: input.model_version_id,
+        market_selection_id: input.market_selection_id,
+        portfolio_plan_id: input.portfolio_plan.portfolio_plan_id,
         top_n: i32::try_from(input.top_n).map_err(|error| {
             QuantError::config(format!("reports top_n exceeds i32::MAX: {error}"))
         })?,
         status,
         account_source: input.account.source,
         capital_base_usd: input.account.capital_base_usd,
-        account_snapshot_ref: input.account_snapshot.account_snapshot_id.clone(),
-        equity_snapshot_ref: input.equity_snapshot.equity_snapshot_id.clone(),
+        account_snapshot_ref: input.account_snapshot.account_snapshot_id,
+        equity_snapshot_ref: input.equity_snapshot.equity_snapshot_id,
         data_quality_snapshot_ref,
         summary_json: summary,
         published_at: None,
@@ -380,9 +377,9 @@ fn report_notification(
     recommendations: &[NewRecommendation],
 ) -> QuantResult<ReportNotificationPayload> {
     Ok(ReportNotificationPayload {
-        report_id: report_id.clone(),
+        report_id: *report_id,
         kind: ReportKind::TopN,
-        status: status.as_str().to_owned(),
+        status: status.to_string(),
         runtime_mode: input.runtime_mode,
         published_count: u32::try_from(recommendations.len()).map_err(|error| {
             ReportError::NumericOverflow {
@@ -501,7 +498,7 @@ fn resolve_compose_context(
     let feature_vector_id = input
         .feature_vector_by_market
         .get(&candidate.market_id)
-        .cloned()
+        .copied()
         .ok_or_else(|| ReportError::InvariantViolation {
             stage: "compose",
             detail: format!(
@@ -509,14 +506,12 @@ fn resolve_compose_context(
                 candidate.market_id
             ),
         })?;
-    let model_run_id =
-        input
-            .model_run_id
-            .clone()
-            .ok_or_else(|| ReportError::InvariantViolation {
-                stage: "compose",
-                detail: "non-empty recommendation missing model_run_id".into(),
-            })?;
+    let model_run_id = input
+        .model_run_id
+        .ok_or_else(|| ReportError::InvariantViolation {
+            stage: "compose",
+            detail: "non-empty recommendation missing model_run_id".into(),
+        })?;
     Ok(ComposeRecommendationContext {
         feature_vector_id,
         model_run_id,
@@ -615,8 +610,8 @@ fn resolve_recommendation_policy(
         .map_err(|_| vec![TradePlanBlocker::ArtifactFormatUnsupported])?;
     Ok(ResolvedRecommendationPolicy {
         provenance: TradePolicyCohortProvenance {
-            artifact_id: artifact.artifact_id.clone(),
-            artifact_hash: artifact.content_hash.clone(),
+            artifact_id: artifact.artifact_id,
+            artifact_hash: artifact.content_hash,
             cohort_index,
             cohort_key: cohort.key.clone(),
         },
@@ -900,16 +895,16 @@ fn materialize_condition_artifact(
         schema_version: ENTRY_CONDITION_SCHEMA_VERSION,
         evaluator_version: ENTRY_CONDITION_EVALUATOR_VERSION,
         binding: EntryConditionBinding {
-            recommendation_id: recommendation_id.clone(),
+            recommendation_id: *recommendation_id,
             market_id: candidate.market_id.clone(),
             token_id: candidate.token_id.clone(),
             outcome_side: candidate.outcome_side,
-            market_linkage_id: capture.market_linkage_id.clone(),
-            market_linkage_hash: capture.market_linkage_hash.clone(),
-            catalog_snapshot_id: input.market_selection_id.clone(),
-            catalog_snapshot_hash: input.market_selection_hash.clone(),
-            model_version_id: input.model_version_id.clone(),
-            decision_policy_snapshot_id: input.decision_policy_snapshot_id.clone(),
+            market_linkage_id: capture.market_linkage_id,
+            market_linkage_hash: capture.market_linkage_hash,
+            catalog_snapshot_id: input.market_selection_id,
+            catalog_snapshot_hash: input.market_selection_hash,
+            model_version_id: input.model_version_id,
+            decision_policy_snapshot_id: input.decision_policy_snapshot_id,
             factor_bindings,
             source_bindings,
         },
@@ -934,8 +929,8 @@ fn materialize_condition_artifact(
     let artifact_id = EntryConditionArtifactId::from_content_hash(&content_hash);
     Ok((
         EntryConditionPlan::Conditional {
-            artifact_id: artifact_id.clone(),
-            content_hash: content_hash.clone(),
+            artifact_id,
+            content_hash,
         },
         NewEntryConditionArtifact {
             artifact_id,
@@ -1001,9 +996,9 @@ fn materialize_condition_tree(
                 .into());
             }
             Ok(EntryConditionV1::Factor(FactorCondition {
-                definition_id: definition_id.clone(),
-                definition_hash: definition_hash.clone(),
-                model_version_id: input.model_version_id.clone(),
+                definition_id: *definition_id,
+                definition_hash: *definition_hash,
+                model_version_id: input.model_version_id,
                 measure: *measure,
                 comparison: *comparison,
                 threshold: *threshold,
@@ -1112,7 +1107,7 @@ fn materialize_market_event(
     let source = EntryConditionSourceBinding {
         source_id: live.source_id.clone(),
         instrument_key: live.instrument_key.clone(),
-        binding_hash: live.binding_hash.clone(),
+        binding_hash: live.binding_hash,
     };
     let family_matches = matches!(
         (&binding.subject, template),
@@ -1187,8 +1182,7 @@ fn materialize_event_payload(
                             band: subject.outcome_band.clone(),
                             proxy_methodology_hash: subject
                                 .decision_group
-                                .proxy_methodology_hash
-                                .clone(),
+                                .proxy_methodology_hash,
                             max_input_age_ms,
                         },
                     )
@@ -1214,8 +1208,7 @@ fn materialize_event_payload(
                                 terminal_bound,
                                 proxy_methodology_hash: subject
                                     .decision_group
-                                    .proxy_methodology_hash
-                                    .clone(),
+                                    .proxy_methodology_hash,
                                 max_input_age_ms,
                             },
                         )
@@ -1230,8 +1223,7 @@ fn materialize_event_payload(
                             band: subject.outcome_band.clone(),
                             proxy_methodology_hash: subject
                                 .decision_group
-                                .proxy_methodology_hash
-                                .clone(),
+                                .proxy_methodology_hash,
                         },
                     ),
                 },
@@ -1277,8 +1269,8 @@ fn collect_condition_leaf_bindings(
 ) {
     match node {
         EntryConditionV1::Factor(condition) => factors.push(EntryConditionFactorBinding {
-            definition_id: condition.definition_id.clone(),
-            definition_hash: condition.definition_hash.clone(),
+            definition_id: condition.definition_id,
+            definition_hash: condition.definition_hash,
         }),
         EntryConditionV1::MarketEvent { event: condition } => {
             let source = match condition {
@@ -1495,9 +1487,9 @@ fn build_new_recommendation(
         })?;
     let condition = condition_instance_projection(&trade_plan, input.published_at);
     let recommendation = NewRecommendation {
-        recommendation_id: recommendation_id.clone(),
+        recommendation_id,
         research_profile_artifact_id: input.profile_ref.artifact_id(),
-        recommendation_report_id: report_id.clone(),
+        recommendation_report_id: *report_id,
         rank: i32::try_from(planned.rank).map_err(|error| ReportError::NumericOverflow {
             field: "recommendation.rank",
             detail: error.to_string(),
@@ -1525,15 +1517,15 @@ fn build_new_recommendation(
         trade_plan,
         factor_breakdown: factor_breakdown(candidate),
         evidence_refs: EvidenceRefs::from_input(EvidenceRefsInput {
-            signal_candidate_id: candidate.signal_candidate_id.clone(),
+            signal_candidate_id: candidate.signal_candidate_id,
             feature_vector_id: compose_context.feature_vector_id,
             model_run_id: compose_context.model_run_id,
-            market_selection_id: input.market_selection_id.clone(),
+            market_selection_id: input.market_selection_id,
             book_snapshot_ref: capture.book_snapshot_ref.clone(),
-            decision_policy_snapshot_id: input.decision_policy_snapshot_id.clone(),
-            model_version_id: input.model_version_id.clone(),
+            decision_policy_snapshot_id: input.decision_policy_snapshot_id,
+            model_version_id: input.model_version_id,
             factor_definition_versions: factor_definition_versions(candidate),
-            data_quality_snapshot_ref: data_quality_snapshot_ref.clone(),
+            data_quality_snapshot_ref: *data_quality_snapshot_ref,
         }),
         execution_eligibility: execution_eligibility(
             auto_gate,
@@ -1619,7 +1611,7 @@ struct ConditionInstanceProjection {
     next_evaluation_at: Option<DateTime<Utc>>,
 }
 
-fn condition_instance_projection(
+const fn condition_instance_projection(
     trade_plan: &RecommendationTradePlan,
     published_at: DateTime<Utc>,
 ) -> ConditionInstanceProjection {
@@ -1638,8 +1630,8 @@ fn condition_instance_projection(
             } => ConditionInstanceProjection {
                 state: EntryConditionState::Waiting,
                 truth: None,
-                artifact_id: Some(artifact_id.clone()),
-                artifact_hash: Some(content_hash.clone()),
+                artifact_id: Some(*artifact_id),
+                artifact_hash: Some(*content_hash),
                 next_evaluation_at: Some(published_at),
             },
         },
@@ -1732,7 +1724,7 @@ fn factor_definition_versions(candidate: &SignalCandidate) -> Vec<FactorDefiniti
     let mut ids = Vec::new();
     for factor in &candidate.factor_breakdown {
         if !ids.contains(&factor.definition_id) {
-            ids.push(factor.definition_id.clone());
+            ids.push(factor.definition_id);
         }
     }
     ids
@@ -1971,7 +1963,7 @@ fn rejection_summary(input: &ComposeReportInput<'_>) -> Vec<RejectionReasonCount
         && empty.reason != EmptyReportReason::InsufficientDataQuality
         && empty.rejected_count > 0
     {
-        counts.insert(empty.reason.as_str().to_owned(), empty.rejected_count);
+        counts.insert(empty.reason.to_string(), empty.rejected_count);
     }
     if input.feature_rejected_count > 0 {
         *counts
@@ -1983,9 +1975,7 @@ fn rejection_summary(input: &ComposeReportInput<'_>) -> Vec<RejectionReasonCount
             .or_default() += input.feature_rejected_count;
     }
     for rejected in input.planner_rejected {
-        *counts
-            .entry(rejected.reason.as_str().to_owned())
-            .or_default() += 1;
+        *counts.entry(rejected.reason.to_string()).or_default() += 1;
     }
     counts
         .into_iter()
@@ -2032,8 +2022,8 @@ fn recommendation_events(
             })?;
             Ok(QuantReportRecommendationFactRow {
                 event_time: event_time.timestamp_millis(),
-                recommendation_report_id: report_id.clone(),
-                recommendation_id: rec.recommendation_id.clone(),
+                recommendation_report_id: *report_id,
+                recommendation_id: rec.recommendation_id,
                 rank,
                 market_id: rec.market_id.clone(),
                 token_id: rec.token_id.clone(),
@@ -2218,7 +2208,7 @@ pub(super) fn empty_plan_for_report(
         PortfolioRejectedSummary {
             rejected_count,
             reasons: vec![RejectionReasonCount {
-                reason: reason.as_str().to_owned(),
+                reason: reason.to_string(),
                 count: rejected_count,
             }],
         },
@@ -2564,7 +2554,7 @@ mod tests {
                 requires_approval: true,
                 auto_execution_allowed: false,
                 risk_notes: Vec::new(),
-                envelope_hash: ContentHash::parse(format!("blake3:{}", "0".repeat(64)))
+                envelope_hash: ContentHash::parse(&format!("blake3:{}", "0".repeat(64)))
                     .expect("hash"),
             },
             risk_adjusted_score: Probability::new(dec!(0.7)),
@@ -2588,12 +2578,12 @@ mod tests {
         );
         let market_selection_id = MarketSelectionId::from_v7();
         let market_selection_hash =
-            ContentHash::parse(format!("blake3:{}", "a".repeat(64))).expect("selection hash");
+            ContentHash::parse(&format!("blake3:{}", "a".repeat(64))).expect("selection hash");
         let selection = MarketSelectionSnapshot {
-            market_selection_id: market_selection_id.clone(),
+            market_selection_id,
             decision_at: as_of,
             decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
-            selector_hash: market_selection_hash.clone(),
+            selector_hash: market_selection_hash,
             included: vec![SelectedMarket {
                 market_id: MarketId::new("market-1"),
                 event_id: EventId::new("event-1"),
@@ -2610,8 +2600,8 @@ mod tests {
         let model_run_id = ModelRunId::from_v7();
         let planned = vec![planned_recommendation(candidate())];
         let portfolio_plan = empty_plan_for_report(
-            Some(model_run_id.clone()),
-            market_selection_id.clone(),
+            Some(model_run_id),
+            market_selection_id,
             as_of,
             &account,
             &config,
@@ -2626,7 +2616,7 @@ mod tests {
         };
         let account_snapshot_id = AccountSnapshotId::from_v7();
         let account_snapshot = NewAccountSnapshot {
-            account_snapshot_id: account_snapshot_id.clone(),
+            account_snapshot_id,
             as_of: account.as_of,
             source: account.source,
             venue_net_liquidation_usd: account.venue_net_liquidation_usd,

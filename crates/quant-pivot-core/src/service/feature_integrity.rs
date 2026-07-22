@@ -121,13 +121,13 @@ impl FeatureParityRunCoordinator {
             reason: reason.clone(),
         };
         let run = NewFeatureParityRun {
-            run_id: run_id.clone(),
+            run_id,
             kind: FeatureParityRunKind::Sampled,
             status: FeatureParityRunStatus::Queued,
             window_start: report.decision_at,
             window_end,
-            report_id: Some(report.recommendation_report_id.clone()),
-            model_version_id: Some(report.model_version_id.clone()),
+            report_id: Some(report.recommendation_report_id),
+            model_version_id: Some(report.model_version_id),
             training_dataset_id: None,
             triggered_by: SYSTEM_ACTOR.to_owned(),
             requested_by: None,
@@ -150,7 +150,7 @@ impl FeatureParityRunCoordinator {
         let job = self.build_job(
             run_id,
             request,
-            report.decision_policy_snapshot_id.clone(),
+            report.decision_policy_snapshot_id,
             None,
             SYSTEM_ACTING_ROLE.to_owned(),
             materialization_timeout_secs,
@@ -211,7 +211,7 @@ impl FeatureParityRunCoordinator {
             reason: request.reason.clone(),
         };
         let run = queued_full_run(QueuedFullRunArgs {
-            run_id: parity_run_id.clone(),
+            run_id: parity_run_id,
             window_start,
             window_end,
             triggered_by,
@@ -290,7 +290,7 @@ impl FeatureParityRunCoordinator {
             reason: reason.clone(),
         };
         let run = queued_full_run(QueuedFullRunArgs {
-            run_id: run_id.clone(),
+            run_id,
             window_start,
             window_end,
             triggered_by: SYSTEM_ACTOR.to_owned(),
@@ -300,14 +300,14 @@ impl FeatureParityRunCoordinator {
             feature_contract_hash,
         });
         let job = self.build_job(
-            run_id.clone(),
+            run_id,
             request,
             current.decision_policy_snapshot_id,
             None,
             SYSTEM_ACTING_ROLE.to_owned(),
             materialization_timeout_secs,
         );
-        let job_id = job.job_id.clone();
+        let job_id = job.job_id;
         match self.parity.enqueue_frozen_full(run, job).await {
             Ok(EnqueueFrozenFeatureParityOutcome::NotEligible) => {
                 Ok(AutomaticFullParityOutcome::NotEligible {
@@ -974,7 +974,7 @@ mod tests {
     }
 
     fn hash() -> ContentHash {
-        ContentHash::parse(format!("blake3:{}", "b".repeat(64))).expect("content hash")
+        ContentHash::parse(&format!("blake3:{}", "b".repeat(64))).expect("content hash")
     }
 
     fn run_info(run: NewFeatureParityRun, now: DateTime<Utc>) -> FeatureParityRunInfo {
@@ -1466,10 +1466,10 @@ mod tests {
             lease_expires_at: None,
             finished_at: Some(report.decision_at),
             lease_owner: None,
-            decision_policy_snapshot_id: Some(report.decision_policy_snapshot_id.clone()),
+            decision_policy_snapshot_id: Some(report.decision_policy_snapshot_id),
             top_n: Some(report.top_n),
             knowledge_lag_secs: Some(10),
-            output_report_id: Some(report.recommendation_report_id.clone()),
+            output_report_id: Some(report.recommendation_report_id),
             terminal_reason: None,
             error_code: None,
             error_summary: None,
@@ -1480,7 +1480,7 @@ mod tests {
     async fn pre_inference_report_still_gets_atomic_sampled_parity() {
         let now = Utc::now();
         let runtime = runtime_repo(now);
-        let decision_policy_snapshot_id = runtime.current.decision_policy_snapshot_id.clone();
+        let decision_policy_snapshot_id = runtime.current.decision_policy_snapshot_id;
         let coordinator = FeatureParityRunCoordinator::new(
             Arc::new(CoordinatorParityRepository::default()),
             Arc::new(runtime),
@@ -1491,7 +1491,7 @@ mod tests {
             ReportKind::TopN,
             RecommendationReportStatus::Published,
         );
-        info.decision_policy_snapshot_id = decision_policy_snapshot_id.clone();
+        info.decision_policy_snapshot_id = decision_policy_snapshot_id;
         info.model_run_id = None;
         info.summary_json.empty_reason = Some(EmptyReportReason::EmptySelection);
         let report = new_report(info);
@@ -1573,7 +1573,7 @@ mod tests {
         let window_end = truncate_to_hour(now).expect("hour bucket");
         let window_start = window_end - Duration::hours(24);
         let existing = exact_full_run(now - Duration::days(2), window_start, window_end);
-        let existing_id = existing.run_id.clone();
+        let existing_id = existing.run_id;
         let parity = Arc::new(CoordinatorParityRepository::default());
         *lock(&parity.exact_window) = Some(existing);
         let coordinator = FeatureParityRunCoordinator::new(

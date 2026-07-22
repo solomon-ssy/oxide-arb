@@ -144,7 +144,7 @@ pub async fn acknowledge_latch(
     body: ValidatedJson<AcknowledgeFeatureParityLatchRequest>,
 ) -> Result<WebResponse<FeatureIntegrityLatchView>, WebError> {
     let request = body.into_inner();
-    let parity_run_id = request.parity_run_id.clone();
+    let parity_run_id = request.parity_run_id;
     let reason = request.reason.clone();
     let latch = state
         .feature_integrity

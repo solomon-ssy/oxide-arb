@@ -24,7 +24,7 @@ use quant_pivot_system_tests::{
 use sea_orm::{DatabaseConnection, EntityTrait, PaginatorTrait};
 
 fn hash(seed: char) -> ContentHash {
-    ContentHash::parse(format!("blake3:{}", seed.to_string().repeat(64))).expect("hash")
+    ContentHash::parse(&format!("blake3:{}", seed.to_string().repeat(64))).expect("hash")
 }
 
 pub async fn semantic_revision_and_outbox_claims_are_atomic_and_deduplicated() {
@@ -53,7 +53,7 @@ pub async fn semantic_revision_and_outbox_claims_are_atomic_and_deduplicated() {
     let repo = PgEntryConditionRepository::new(db.clone());
     let worker = WorkerId::from_v7();
     let now = Utc::now();
-    assert_initial_transition(&repo, &ids.condition_instance, worker.clone(), now).await;
+    assert_initial_transition(&repo, &ids.condition_instance, worker, now).await;
     let second_time = now + Duration::seconds(2);
     assert_unchanged_evaluation_race(&db, &repo, &ids.condition_instance, worker, second_time)
         .await;
@@ -68,7 +68,7 @@ async fn assert_initial_transition(
     now: DateTime<Utc>,
 ) {
     let leased = repo
-        .lease_next(worker.clone(), now, now + Duration::minutes(1))
+        .lease_next(worker, now, now + Duration::minutes(1))
         .await
         .expect("lease initial condition")
         .expect("condition due");
@@ -106,11 +106,7 @@ async fn assert_unchanged_evaluation_race(
     second_time: DateTime<Utc>,
 ) {
     let leased_again = repo
-        .lease_next(
-            worker.clone(),
-            second_time,
-            second_time + Duration::minutes(1),
-        )
+        .lease_next(worker, second_time, second_time + Duration::minutes(1))
         .await
         .expect("lease unchanged evaluation")
         .expect("condition due again");
@@ -132,7 +128,7 @@ async fn assert_unchanged_evaluation_race(
     let evaluator_left = PgEntryConditionRepository::new(db.clone());
     let evaluator_right = PgEntryConditionRepository::new(db.clone());
     let (left, right) = tokio::join!(
-        evaluator_left.apply_evaluation(instance_id, worker.clone(), unchanged.clone(),),
+        evaluator_left.apply_evaluation(instance_id, worker, unchanged.clone(),),
         evaluator_right.apply_evaluation(instance_id, worker, unchanged,),
     );
     assert_eq!(
@@ -156,13 +152,13 @@ async fn assert_outbox_claim_race(
     let outbox_repo_b = PgEntryConditionRepository::new(db.clone());
     let (claimed_a, claimed_b) = tokio::join!(
         repo.claim_pending_evaluations(
-            outbox_worker_a.clone(),
+            outbox_worker_a,
             claim_time,
             claim_time + Duration::minutes(1),
             10,
         ),
         outbox_repo_b.claim_pending_evaluations(
-            outbox_worker_b.clone(),
+            outbox_worker_b,
             claim_time,
             claim_time + Duration::minutes(1),
             10,
@@ -174,7 +170,7 @@ async fn assert_outbox_claim_race(
     let mut ids_and_kinds = claimed_a
         .iter()
         .chain(&claimed_b)
-        .map(|event| (event.evaluation_id.clone(), event.trace_kind.clone()))
+        .map(|event| (event.evaluation_id, event.trace_kind.clone()))
         .collect::<Vec<_>>();
     ids_and_kinds.sort();
     ids_and_kinds.dedup();
@@ -183,10 +179,10 @@ async fn assert_outbox_claim_race(
     assert!(ids_and_kinds.iter().any(|(_, kind)| kind == "observed"));
 
     let wrong_owner = if let Some(event) = claimed_a.first() {
-        repo.mark_evaluation_published(&event.evaluation_id, outbox_worker_b.clone(), claim_time)
+        repo.mark_evaluation_published(&event.evaluation_id, outbox_worker_b, claim_time)
             .await
     } else if let Some(event) = claimed_b.first() {
-        repo.mark_evaluation_published(&event.evaluation_id, outbox_worker_a.clone(), claim_time)
+        repo.mark_evaluation_published(&event.evaluation_id, outbox_worker_a, claim_time)
             .await
     } else {
         Err(StorageError::InvariantViolation {

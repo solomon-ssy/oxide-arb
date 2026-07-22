@@ -392,7 +392,7 @@ fn canonicalize_template_group(
                 .map_err(|error| error.to_string())
         })
         .collect::<Result<Vec<_>, _>>()?;
-    hashed.sort_by(|left, right| left.0.as_str().cmp(right.0.as_str()));
+    hashed.sort_by_key(|left| left.0);
     if hashed.windows(2).any(|pair| pair[0].0 == pair[1].0) {
         return Err("entry-condition group contains a duplicate subtree".to_owned());
     }
@@ -1465,7 +1465,7 @@ mod tests {
     };
 
     fn hash(digit: char) -> ContentHash {
-        ContentHash::parse(format!("blake3:{}", digit.to_string().repeat(64)))
+        ContentHash::parse(&format!("blake3:{}", digit.to_string().repeat(64)))
             .expect("canonical hash")
     }
 

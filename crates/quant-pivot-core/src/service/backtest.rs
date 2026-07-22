@@ -162,8 +162,8 @@ impl BacktestService {
             .await?;
         let baseline_input = BacktestInput {
             model_version_id: baseline_version_id,
-            training_dataset_id: input.training_dataset_id.clone(),
-            decision_policy_snapshot_id: input.decision_policy_snapshot_id.clone(),
+            training_dataset_id: input.training_dataset_id,
+            decision_policy_snapshot_id: input.decision_policy_snapshot_id,
             calibrate: false,
             backtest_report_id: None,
         };
@@ -238,7 +238,6 @@ impl BacktestService {
         let model_run_id = ModelRunId::from_v7();
         let backtest_report_id = input
             .backtest_report_id
-            .clone()
             .unwrap_or_else(BacktestReportId::from_v7);
         self.create_run(&model_run_id, input, dataset).await?;
 
@@ -261,9 +260,9 @@ impl BacktestService {
                     .model_run_repo
                     .succeed(
                         &model_run_id,
-                        info.report_hash.clone(),
+                        info.report_hash,
                         Utc::now(),
-                        Some(version.model_version_id.clone()),
+                        Some(version.model_version_id),
                     )
                     .await?;
                 Ok(RecordedRun {
@@ -299,11 +298,11 @@ impl BacktestService {
             .comparison_report_repo
             .create(NewModelComparisonReport {
                 comparison_report_id: ModelComparisonReportId::from_v7(),
-                baseline_model_version_id: baseline.info.model_version_id.clone(),
-                candidate_model_version_id: candidate.info.model_version_id.clone(),
-                baseline_report_id: baseline.info.backtest_report_id.clone(),
-                candidate_report_id: candidate.info.backtest_report_id.clone(),
-                model_run_id: candidate.model_run_id.clone(),
+                baseline_model_version_id: baseline.info.model_version_id,
+                candidate_model_version_id: candidate.info.model_version_id,
+                baseline_report_id: baseline.info.backtest_report_id,
+                candidate_report_id: candidate.info.backtest_report_id,
+                model_run_id: candidate.model_run_id,
                 rank_ic_delta: comparison.rank_ic_delta,
                 hit_rate_delta: comparison.hit_rate_delta,
                 realized_pnl_delta: comparison.realized_pnl_delta,
@@ -311,7 +310,7 @@ impl BacktestService {
                 side_disagreement_rate: comparison.side_disagreement_rate,
                 common_samples: i64::try_from(comparison.common_samples).unwrap_or(i64::MAX),
                 category_breakdown_diff: comparison.category_breakdown_diff.clone().into(),
-                comparison_hash: comparison.comparison_hash.clone(),
+                comparison_hash: comparison.comparison_hash,
             })
             .await
             .map_err(QuantError::from)
@@ -334,9 +333,9 @@ impl BacktestService {
         let materialization = require_dataset_materialization(dataset)?;
         // Load the model under test, bound to the dataset's frozen schema.
         let binding = ActiveSchemaBinding {
-            feature_schema_hash: materialization.feature_schema_hash.clone(),
-            factor_schema_hash: materialization.factor_schema_hash.clone(),
-            bias_table_hash: self.bias_table_hash.clone(),
+            feature_schema_hash: *materialization.feature_schema_hash,
+            factor_schema_hash: *materialization.factor_schema_hash,
+            bias_table_hash: self.bias_table_hash,
         };
         let factory = self.deps.factory_builder.build(binding);
         // Backtests are deterministic and never apply a config weight overlay.
@@ -363,9 +362,9 @@ impl BacktestService {
             .await?;
 
         let request = BacktestRequest {
-            backtest_report_id: backtest_report_id.clone(),
-            model_version_id: version.model_version_id.clone(),
-            decision_policy_snapshot_id: input.decision_policy_snapshot_id.clone(),
+            backtest_report_id: *backtest_report_id,
+            model_version_id: version.model_version_id,
+            decision_policy_snapshot_id: input.decision_policy_snapshot_id,
             window_start: dataset.window_start,
             window_end: dataset.window_end,
         };
@@ -378,7 +377,7 @@ impl BacktestService {
             examples,
             caps: self.caps.clone(),
             request,
-            model_run_id: model_run_id.clone(),
+            model_run_id: *model_run_id,
             sink: Arc::clone(progress),
             cancel: cancel.clone(),
             frozen_source,
@@ -418,10 +417,10 @@ impl BacktestService {
             .deps
             .backtest_report_repo
             .create(NewBacktestReport {
-                backtest_report_id: report.backtest_report_id.clone(),
-                model_version_id: report.model_version_id.clone(),
-                model_run_id: model_run_id.clone(),
-                decision_policy_snapshot_id: report.decision_policy_snapshot_id.clone(),
+                backtest_report_id: report.backtest_report_id,
+                model_version_id: report.model_version_id,
+                model_run_id: *model_run_id,
+                decision_policy_snapshot_id: report.decision_policy_snapshot_id,
                 window_start: report.window_start,
                 window_end: report.window_end,
                 coverage: report.coverage,
@@ -438,7 +437,7 @@ impl BacktestService {
                 category_breakdown: report.category_breakdown.clone().into(),
                 tail_loss: report.tail_loss,
                 report_pnl_simulation: report.report_pnl_simulation.clone(),
-                report_hash: report.report_hash.clone(),
+                report_hash: report.report_hash,
                 parquet_uri: None,
             })
             .await?;
@@ -478,7 +477,7 @@ impl BacktestService {
         };
 
         let new_version_id = ModelVersionId::from_v7();
-        weighted.header.model_version_id = new_version_id.clone();
+        weighted.header.model_version_id = new_version_id;
         weighted.multipliers = result.multipliers;
         weighted.substitution_confidence_rules = result.substitution_rules;
         let calibrated = ModelArtifact::WeightedFactor(weighted);
@@ -501,18 +500,18 @@ impl BacktestService {
             .model_registry_repo
             .create_model_version(NewModelVersion {
                 model_version_id: new_version_id,
-                model_spec_id: version.model_spec_id.clone(),
+                model_spec_id: version.model_spec_id,
                 version: next,
                 artifact_hash,
                 category_scope: calibrated.category_scope(),
                 profile_ref: version.profile_ref.clone(),
-                training_dataset_id: version.training_dataset_id.clone(),
-                trade_policy_artifact_id: calibrated.header().trade_policy_artifact_id.clone(),
-                trade_policy_hash: calibrated.header().trade_policy_hash.clone(),
+                training_dataset_id: version.training_dataset_id,
+                trade_policy_artifact_id: calibrated.header().trade_policy_artifact_id,
+                trade_policy_hash: calibrated.header().trade_policy_hash,
                 publish_path_set_id: None,
                 derivation: ModelVersionDerivation::ScoreMultiplierCalibration {
-                    parent_model_version_id: version.model_version_id.clone(),
-                    source_backtest_report_id: source_backtest.backtest_report_id.clone(),
+                    parent_model_version_id: version.model_version_id,
+                    source_backtest_report_id: source_backtest.backtest_report_id,
                     report: result.report,
                 },
                 metrics: version.metrics.clone(),
@@ -561,15 +560,15 @@ impl BacktestService {
         self.deps
             .model_run_repo
             .create(NewModelRun {
-                model_run_id: model_run_id.clone(),
+                model_run_id: *model_run_id,
                 run_kind: ModelRunKind::Backtest,
-                model_version_id: Some(input.model_version_id.clone()),
-                decision_policy_snapshot_id: input.decision_policy_snapshot_id.clone(),
+                model_version_id: Some(input.model_version_id),
+                decision_policy_snapshot_id: input.decision_policy_snapshot_id,
                 market_selection_id: None,
                 window_start: dataset.window_start,
                 window_end: dataset.window_end,
                 status: ModelRunStatus::Running,
-                input_hash: materialization.dataset_hash.clone(),
+                input_hash: *materialization.dataset_hash,
                 output_hash: None,
                 error_code: None,
                 error_message: None,

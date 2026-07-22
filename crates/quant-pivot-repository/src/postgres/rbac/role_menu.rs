@@ -46,19 +46,19 @@ async fn do_set_menus(
 
     let txn = db.begin().await.map_err(StorageError::from)?;
 
-    if Entity::find_by_id(role_id.clone())
+    if Entity::find_by_id(role_id)
         .one(&txn)
         .await
         .map_err(StorageError::from)?
         .is_none()
     {
         txn.rollback().await.map_err(StorageError::from)?;
-        return Err(error::not_found(ROLE, &role_id));
+        return Err(error::not_found(ROLE, role_id));
     }
 
     if !target.is_empty() {
         let present = MenuEntity::find()
-            .filter(Column::Id.is_in(target.iter().cloned()))
+            .filter(Column::Id.is_in(target.iter().copied()))
             .count(&txn)
             .await
             .map_err(StorageError::from)?;
@@ -69,7 +69,7 @@ async fn do_set_menus(
     }
 
     let current: HashSet<MenuId> = RoleMenuEntity::find()
-        .filter(RoleMenuColumn::RoleId.eq(role_id.clone()))
+        .filter(RoleMenuColumn::RoleId.eq(role_id))
         .all(&txn)
         .await
         .map_err(StorageError::from)?
@@ -81,8 +81,8 @@ async fn do_set_menus(
 
     if !added.is_empty() {
         let rows = added.iter().map(|menu_id| ActiveModel {
-            role_id: Set(role_id.clone()),
-            menu_id: Set(menu_id.clone()),
+            role_id: Set(role_id),
+            menu_id: Set(*menu_id),
             ..Default::default()
         });
         junction::insert_junction_rows::<RoleMenuEntity>(
@@ -97,7 +97,7 @@ async fn do_set_menus(
 
     if !removed.is_empty() {
         RoleMenuEntity::delete_many()
-            .filter(RoleMenuColumn::RoleId.eq(role_id.clone()))
+            .filter(RoleMenuColumn::RoleId.eq(role_id))
             .filter(RoleMenuColumn::MenuId.is_in(removed))
             .exec(&txn)
             .await
@@ -113,7 +113,7 @@ async fn do_list_menus_for_role(
     role_id: &RoleId,
 ) -> Result<Vec<MenuInfo>, StorageError> {
     let menu_ids: Vec<MenuId> = RoleMenuEntity::find()
-        .filter(RoleMenuColumn::RoleId.eq(role_id.clone()))
+        .filter(RoleMenuColumn::RoleId.eq(*role_id))
         .all(db)
         .await
         .map_err(StorageError::from)?

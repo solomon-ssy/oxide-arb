@@ -310,7 +310,7 @@ pub async fn list_backtest_reports(
     let ids: Vec<_> = page
         .items
         .iter()
-        .map(|info| info.backtest_report_id.clone())
+        .map(|info| info.backtest_report_id)
         .collect();
     let comparison_ids = state
         .backtests
@@ -320,7 +320,7 @@ pub async fn list_backtest_reports(
         .items
         .into_iter()
         .map(|info| {
-            let comparison_report_id = comparison_ids.get(&info.backtest_report_id).cloned();
+            let comparison_report_id = comparison_ids.get(&info.backtest_report_id).copied();
             BacktestReportView::from_info(info, comparison_report_id)
         })
         .collect();

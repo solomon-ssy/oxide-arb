@@ -16,6 +16,7 @@ config = ["dep:config-rs"]
 serde = ["dep:serde_json"]
 
 [dependencies]
+quant-pivot-allocator = { workspace = true }
 thiserror = { workspace = true }
 sea-orm = { workspace = true }
 rust_decimal = { workspace = true }

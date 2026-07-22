@@ -11,8 +11,8 @@ use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use quant_pivot_error::{QuantResult, research::ResearchError, storage::StorageError};
 use quant_pivot_models::{
     clickhouse::{
-        BookL2CheckpointRow, BookL2EventRow, BookMicrostructureRow, BookStreamSessionRow,
-        MarketResolutionRow, TradeTapeRow,
+        BookL2LedgerRow, BookMicrostructureRow, BookStreamSessionRow, MarketResolutionRow,
+        TradeTapeRow,
     },
     domain::{
         data_plane::{
@@ -25,14 +25,14 @@ use quant_pivot_models::{
             SourceSliceInfo,
         },
     },
-    enums::quant::SourceSliceStatus,
+    enums::{clickhouse::ChCanonicalBookEventType, quant::SourceSliceStatus},
     hashing::CanonicalDigest,
     runtime_config::DomainConfig,
     types::{
         ArtifactUri, ClobMarketInfoVersion, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION,
         IcaoStation, ResearchProfileArtifact, ResearchProfileDataSource,
         SOURCE_SLICE_MANIFEST_FORMAT_VERSION, SourceSliceCatalogProof, SourceSliceId,
-        SourceSliceInvalidSession, SourceSliceManifestRef, SourceSliceManifestV1,
+        SourceSliceInvalidSession, SourceSliceManifest, SourceSliceManifestRef,
         SourceSliceObjectKind, SourceSliceObjectRef, SourceSlicePitCutoffs,
         SourceSliceSessionInvalidationReason,
     },
@@ -77,7 +77,7 @@ pub struct FrozenSourceSlice {
     pub pit_cutoff: DateTime<Utc>,
     pub prefetched: Prefetched,
     pub clob_market_info: Vec<ClobMarketInfoVersion>,
-    pub l2_events: Vec<BookL2EventRow>,
+    pub l2_ledger: Vec<BookL2LedgerRow>,
     pub sessions: Vec<BookStreamSessionRow>,
     pub invalid_sessions: Vec<SourceSliceInvalidSession>,
 }
@@ -85,13 +85,13 @@ pub struct FrozenSourceSlice {
 struct SourceSliceInputs {
     prefetched: Prefetched,
     clob_market_info: Vec<ClobMarketInfoVersion>,
-    l2_events: Vec<BookL2EventRow>,
+    l2_ledger: Vec<BookL2LedgerRow>,
     sessions: Vec<BookStreamSessionRow>,
     gap_records: Vec<SourceSliceRecord>,
     invalid_sessions: Vec<SourceSliceInvalidSession>,
 }
 
-/// Strict reader for the V1 Parquet envelope and immutable object bindings.
+/// Strict reader for the current Parquet envelope and immutable object bindings.
 pub struct SourceSliceReader {
     artifacts: Arc<dyn ArtifactStore>,
 }
@@ -126,7 +126,7 @@ impl SourceSliceReader {
     async fn read_manifest(
         &self,
         source_slice: &SourceSliceInfo,
-    ) -> QuantResult<SourceSliceManifestV1> {
+    ) -> QuantResult<SourceSliceManifest> {
         if source_slice.status != SourceSliceStatus::Ready {
             return Err(StorageError::state_conflict(
                 "quant_source_slice",
@@ -161,7 +161,7 @@ impl SourceSliceReader {
         })?;
         let manifest_ref = SourceSliceManifestRef {
             manifest_uri: manifest_uri.clone(),
-            manifest_hash: manifest_hash.clone(),
+            manifest_hash: *manifest_hash,
         };
         let decoded = self.read_manifest_artifact(&manifest_ref).await?;
         if decoded != *manifest {
@@ -178,7 +178,7 @@ impl SourceSliceReader {
     async fn read_manifest_artifact(
         &self,
         source_slice: &SourceSliceManifestRef,
-    ) -> QuantResult<SourceSliceManifestV1> {
+    ) -> QuantResult<SourceSliceManifest> {
         let manifest_metadata = self.artifacts.metadata(&source_slice.manifest_uri).await?;
         if manifest_metadata.durability.remote
             && !manifest_metadata.durability.permits_production_publish()
@@ -190,8 +190,7 @@ impl SourceSliceReader {
             .into());
         }
         let manifest_bytes = self.artifacts.get(&source_slice.manifest_uri).await?;
-        let actual_manifest_hash =
-            ContentHash::parse(CanonicalDigest::prefixed_bytes(&manifest_bytes))?;
+        let actual_manifest_hash = CanonicalDigest::content_hash_bytes(&manifest_bytes);
         if actual_manifest_hash != source_slice.manifest_hash {
             return Err(ResearchError::DatasetBuild {
                 detail: "Source Slice manifest bytes do not match the Dataset binding".to_owned(),
@@ -199,7 +198,7 @@ impl SourceSliceReader {
             .into());
         }
         let manifest =
-            serde_json::from_slice::<SourceSliceManifestV1>(&manifest_bytes).map_err(|error| {
+            serde_json::from_slice::<SourceSliceManifest>(&manifest_bytes).map_err(|error| {
                 ResearchError::DatasetBuild {
                     detail: format!("Source Slice manifest JSON is invalid: {error}"),
                 }
@@ -222,12 +221,12 @@ impl SourceSliceReader {
 
     async fn read_objects(
         &self,
-        manifest: &SourceSliceManifestV1,
+        manifest: &SourceSliceManifest,
     ) -> QuantResult<SourceRecordsByKind> {
         let mut by_kind = SourceRecordsByKind::new();
         for object in &manifest.objects {
             let expected_schema = CanonicalDigest::content_hash_json(&(
-                "source_slice_parquet_envelope_v1",
+                "source_slice_parquet_envelope_v2",
                 object.kind,
             ))?;
             if object.schema_hash != expected_schema {
@@ -248,7 +247,7 @@ impl SourceSliceReader {
             }
             let observed_version = metadata
                 .version_id
-                .unwrap_or_else(|| format!("local-content:{}", object.byte_hash.as_str()));
+                .unwrap_or_else(|| format!("local-content:{}", object.byte_hash));
             if observed_version != object.object_version {
                 return Err(ResearchError::DatasetBuild {
                     detail: format!("Source Slice object {} version changed", object.uri),
@@ -256,7 +255,7 @@ impl SourceSliceReader {
                 .into());
             }
             let bytes = self.artifacts.get(&object.uri).await?;
-            let actual_hash = ContentHash::parse(CanonicalDigest::prefixed_bytes(&bytes))?;
+            let actual_hash = CanonicalDigest::content_hash_bytes(&bytes);
             if actual_hash != object.byte_hash {
                 return Err(ResearchError::ArtifactHashMismatch {
                     expected: object.byte_hash.to_string(),
@@ -296,18 +295,21 @@ impl SourceSliceReader {
 type SourceRecordsByKind = BTreeMap<SourceSliceObjectKind, Vec<SourceSliceRecord>>;
 
 fn decode_frozen_source_slice(
-    manifest: &SourceSliceManifestV1,
+    manifest: &SourceSliceManifest,
     mut by_kind: SourceRecordsByKind,
 ) -> QuantResult<FrozenSourceSlice> {
     let catalog = CatalogWindowInfo {
         market_changes: decode_records(take(&mut by_kind, SourceSliceObjectKind::CatalogMarket))?,
         event_changes: decode_records(take(&mut by_kind, SourceSliceObjectKind::CatalogEvent))?,
     };
+    let l2_ledger =
+        decode_records::<BookL2LedgerRow>(take(&mut by_kind, SourceSliceObjectKind::L2Ledger))?;
     let books = group_by(
-        decode_records::<BookL2CheckpointRow>(take(
-            &mut by_kind,
-            SourceSliceObjectKind::L2Checkpoint,
-        ))?,
+        l2_ledger
+            .iter()
+            .filter(|row| row.event_type == ChCanonicalBookEventType::Snapshot)
+            .cloned()
+            .collect(),
         |row| row.token_id.clone(),
     );
     let micro = group_by(
@@ -360,7 +362,6 @@ fn decode_frozen_source_slice(
     ))?;
     let clob_market_info =
         decode_records(take(&mut by_kind, SourceSliceObjectKind::ClobMarketInfo))?;
-    let l2_events = decode_records(take(&mut by_kind, SourceSliceObjectKind::L2Event))?;
     let sessions = decode_records(take(&mut by_kind, SourceSliceObjectKind::L2Session))?;
     let _gap_rows = take(&mut by_kind, SourceSliceObjectKind::L2Gap);
     if by_kind.values().any(|rows| !rows.is_empty()) {
@@ -387,7 +388,7 @@ fn decode_frozen_source_slice(
             linkages,
         },
         clob_market_info,
-        l2_events,
+        l2_ledger,
         sessions,
         invalid_sessions: manifest.invalid_sessions.clone(),
     })
@@ -537,17 +538,18 @@ impl SourceSliceMaterializer {
         ensure_not_cancelled(cancel, "after Source Slice prefetch")?;
 
         let tokens = prefetched.books.keys().cloned().collect::<Vec<_>>();
-        let l2_events = self
+        let ledger_window = self
             .deps
             .facts
-            .book_l2_events_between(
+            .book_l2_ledger_between(
                 tokens,
                 identity.window_start.timestamp_millis(),
                 identity.window_end.timestamp_millis(),
                 identity.pit_cutoff.timestamp_millis(),
             )
             .await?;
-        let session_ids = stream_session_ids(&prefetched, &l2_events);
+        let l2_ledger = merge_l2_ledger(&prefetched, ledger_window)?;
+        let session_ids = stream_session_ids(&l2_ledger);
         let sessions = self
             .deps
             .facts
@@ -567,7 +569,7 @@ impl SourceSliceMaterializer {
         Ok(SourceSliceInputs {
             prefetched,
             clob_market_info,
-            l2_events,
+            l2_ledger,
             sessions,
             gap_records,
             invalid_sessions,
@@ -615,23 +617,11 @@ impl SourceSliceMaterializer {
         );
         objects.push(
             self.write_object(
-                SourceSliceObjectKind::L2Event,
+                SourceSliceObjectKind::L2Ledger,
                 records(
-                    &inputs.l2_events,
+                    &inputs.l2_ledger,
                     |row| millis(row.venue_event_time),
                     |row| millis(row.persisted_time),
-                )?,
-            )
-            .await?,
-        );
-        let checkpoints = flatten(&prefetched.books);
-        objects.push(
-            self.write_object(
-                SourceSliceObjectKind::L2Checkpoint,
-                records(
-                    &checkpoints,
-                    |row| millis(row.event_time),
-                    |row| millis(row.created_at),
                 )?,
             )
             .await?,
@@ -787,11 +777,11 @@ impl SourceSliceMaterializer {
             || profile.required_sources_contains(ResearchProfileDataSource::GefsEnsemble);
         let calibration_required =
             profile.required_sources_contains(ResearchProfileDataSource::GhcnhCalibration);
-        let manifest = SourceSliceManifestV1 {
+        let manifest = SourceSliceManifest {
             format_version: SOURCE_SLICE_MANIFEST_FORMAT_VERSION,
             profile_ref: identity.profile_ref.clone(),
             evaluation_track: identity.evaluation_track,
-            research_program_hash: identity.research_program_hash.clone(),
+            research_program_hash: identity.research_program_hash,
             window_start: identity.window_start,
             window_end: identity.window_end,
             pit_cutoff: identity.pit_cutoff,
@@ -799,8 +789,8 @@ impl SourceSliceMaterializer {
             catalog_proof,
             reader_contract_version: identity.reader_contract_version.clone(),
             schema_contract_version: identity.schema_contract_version.clone(),
-            decision_policy_snapshot_id: identity.decision_policy_snapshot_id.clone(),
-            runtime_config_hash: identity.runtime_config_hash.clone(),
+            decision_policy_snapshot_id: identity.decision_policy_snapshot_id,
+            runtime_config_hash: identity.runtime_config_hash,
             dataset_format_version: DATASET_ARTIFACT_FORMAT_VERSION,
             pit_cutoffs: SourceSlicePitCutoffs {
                 catalog_available_at: identity.pit_cutoff,
@@ -832,7 +822,7 @@ impl SourceSliceMaterializer {
             .map_err(|detail| ResearchError::DatasetBuild { detail })?;
         ensure_not_cancelled(cancel, "before Source Slice manifest seal")?;
         let manifest_bytes = CanonicalDigest::canonical_json_bytes(&manifest)?;
-        let manifest_hash = ContentHash::parse(CanonicalDigest::prefixed_bytes(&manifest_bytes))?;
+        let manifest_hash = CanonicalDigest::content_hash_bytes(&manifest_bytes);
         let manifest_uri = self
             .put_verified(&manifest_hash, "json", &manifest_bytes)
             .await?
@@ -853,7 +843,7 @@ impl SourceSliceMaterializer {
         records: Vec<SourceSliceRecord>,
     ) -> QuantResult<SourceSliceObjectRef> {
         let bytes = SourceSliceParquetCodec::encode(&records)?;
-        let byte_hash = ContentHash::parse(CanonicalDigest::prefixed_bytes(&bytes))?;
+        let byte_hash = CanonicalDigest::content_hash_bytes(&bytes);
         let (uri, object_version) = self.put_verified(&byte_hash, "parquet", &bytes).await?;
         let decoded = SourceSliceParquetCodec::decode(&self.deps.artifacts.get(&uri).await?)?;
         if decoded != records {
@@ -863,7 +853,7 @@ impl SourceSliceMaterializer {
             .into());
         }
         let schema_hash =
-            CanonicalDigest::content_hash_json(&("source_slice_parquet_envelope_v1", kind))?;
+            CanonicalDigest::content_hash_json(&("source_slice_parquet_envelope_v2", kind))?;
         Ok(SourceSliceObjectRef {
             kind,
             uri,
@@ -888,7 +878,7 @@ impl SourceSliceMaterializer {
         extension: &str,
         bytes: &[u8],
     ) -> QuantResult<(ArtifactUri, String)> {
-        let id = byte_hash.as_str().replace(':', "-");
+        let id = byte_hash.to_string().replace(':', "-");
         let uri = self
             .deps
             .artifacts
@@ -918,7 +908,7 @@ impl SourceSliceMaterializer {
             .into());
         }
         let persisted = self.deps.artifacts.get(&uri).await?;
-        let actual = ContentHash::parse(CanonicalDigest::prefixed_bytes(&persisted))?;
+        let actual = CanonicalDigest::content_hash_bytes(&persisted);
         if &actual != byte_hash {
             return Err(ResearchError::ArtifactHashMismatch {
                 expected: byte_hash.to_string(),
@@ -928,7 +918,7 @@ impl SourceSliceMaterializer {
         }
         let object_version = metadata
             .version_id
-            .unwrap_or_else(|| format!("local-content:{}", byte_hash.as_str()));
+            .unwrap_or_else(|| format!("local-content:{byte_hash}"));
         Ok((uri, object_version))
     }
 }
@@ -976,15 +966,55 @@ fn replay_samples(versions: &[CatalogMarketChangeInfo]) -> QuantResult<Vec<Repla
     Ok(samples)
 }
 
-fn stream_session_ids(prefetched: &Prefetched, events: &[BookL2EventRow]) -> Vec<Uuid> {
+fn stream_session_ids(ledger: &[BookL2LedgerRow]) -> Vec<Uuid> {
     let mut ids = BTreeSet::new();
-    for row in prefetched.books.values().flatten() {
-        ids.insert(row.stream_session_id);
-    }
-    for row in events {
+    for row in ledger {
         ids.insert(row.stream_session_id);
     }
     ids.into_iter().collect()
+}
+
+fn merge_l2_ledger(
+    prefetched: &Prefetched,
+    mut ledger_window: Vec<BookL2LedgerRow>,
+) -> QuantResult<Vec<BookL2LedgerRow>> {
+    let mut ledger = flatten(&prefetched.books);
+    ledger.append(&mut ledger_window);
+    ledger.sort_by(|left, right| {
+        (
+            &left.token_id,
+            left.stream_session_id,
+            left.token_sequence,
+            left.event_hash,
+        )
+            .cmp(&(
+                &right.token_id,
+                right.stream_session_id,
+                right.token_sequence,
+                right.event_hash,
+            ))
+    });
+    let mut canonical = Vec::<BookL2LedgerRow>::with_capacity(ledger.len());
+    for row in ledger {
+        if let Some(previous) = canonical.last()
+            && previous.token_id == row.token_id
+            && previous.stream_session_id == row.stream_session_id
+            && previous.token_sequence == row.token_sequence
+        {
+            if previous.event_hash != row.event_hash {
+                return Err(ResearchError::DatasetBuild {
+                    detail: format!(
+                        "conflicting L2 ledger identity for token {}, session {}, sequence {}",
+                        row.token_id, row.stream_session_id, row.token_sequence
+                    ),
+                }
+                .into());
+            }
+            continue;
+        }
+        canonical.push(row);
+    }
+    Ok(canonical)
 }
 
 fn gap_evidence(
@@ -997,21 +1027,18 @@ fn gap_evidence(
             let event_at = millis(row.bucket_time);
             let available_at = millis(row.available_at);
             gap_rows.push(source_record(row, event_at, available_at)?);
-            let checkpoint = prefetched.books.get(token_id).and_then(|rows| {
+            let snapshot = prefetched.books.get(token_id).and_then(|rows| {
                 rows.iter()
                     .rev()
-                    .find(|checkpoint| checkpoint.event_time <= row.bucket_time)
+                    .find(|snapshot| snapshot.venue_event_time <= row.bucket_time)
             });
-            if let (Some(event_at), Some(checkpoint)) = (event_at, checkpoint) {
+            if let (Some(event_at), Some(snapshot)) = (event_at, snapshot) {
                 let diagnostic_hash = CanonicalDigest::content_hash_json(row)?;
                 invalid
-                    .entry((
-                        token_id.to_string(),
-                        checkpoint.stream_session_id.to_string(),
-                    ))
+                    .entry((token_id.to_string(), snapshot.stream_session_id.to_string()))
                     .or_insert_with(|| SourceSliceInvalidSession {
                         token_id: token_id.to_string(),
-                        session_id: checkpoint.stream_session_id.to_string(),
+                        session_id: snapshot.stream_session_id.to_string(),
                         invalidated_at: event_at,
                         first_failure_sequence: None,
                         reason: SourceSliceSessionInvalidationReason::SequenceGap,
@@ -1058,7 +1085,7 @@ async fn catalog_proof(
         .iter()
         .map(|batch| {
             Ok((
-                batch.catalog_sync_batch_id.clone(),
+                batch.catalog_sync_batch_id,
                 batch.sync_kind,
                 batch
                     .committed_at
@@ -1070,7 +1097,6 @@ async fn catalog_proof(
                     })?,
                 batch
                     .batch_hash
-                    .clone()
                     .ok_or_else(|| ResearchError::DatasetBuild {
                         detail: format!(
                             "catalog batch {} has no content hash",
@@ -1091,8 +1117,8 @@ async fn catalog_proof(
         }
     })?;
     Ok(SourceSliceCatalogProof {
-        base_complete_batch_id: first.catalog_sync_batch_id.clone(),
-        terminal_batch_id: last.catalog_sync_batch_id.clone(),
+        base_complete_batch_id: first.catalog_sync_batch_id,
+        terminal_batch_id: last.catalog_sync_batch_id,
         committed_through,
         ordered_batch_chain_hash: CanonicalDigest::content_hash_json(&chain_entries)?,
         market_count,

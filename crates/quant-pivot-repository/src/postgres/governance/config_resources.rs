@@ -344,11 +344,7 @@ fn validate_global_identity(
                 && guard_hash == hash
                 && row.guard_generation == snapshot_generation =>
         {
-            Ok((
-                row.guard_generation,
-                Some(guard_id.clone()),
-                Some(guard_hash.clone()),
-            ))
+            Ok((row.guard_generation, Some(*guard_id), Some(*guard_hash)))
         }
         _ => Err(StorageError::invariant_violation(
             Some("policy_activation_guard"),
@@ -375,13 +371,7 @@ pub(super) async fn load(
     let mut by_kind = BTreeMap::new();
     for row in rows {
         let identity = validate_global_identity(&row)?;
-        if identity
-            != (
-                bundle_generation,
-                active_snapshot_id.clone(),
-                active_snapshot_hash.clone(),
-            )
-        {
+        if identity != (bundle_generation, active_snapshot_id, active_snapshot_hash) {
             return Err(StorageError::invariant_violation(
                 Some("policy_activation_guard"),
                 "Config inventory statement returned inconsistent bundle identities",

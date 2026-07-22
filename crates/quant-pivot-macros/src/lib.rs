@@ -2,7 +2,7 @@
 //!
 //! - [`StrId`]: Generates a type-safe string ID newtype backed by `Arc<str>`
 //!   (external identifiers that are not UUIDs).
-//! - [`UuidId`]: Generates a type-safe UUID ID newtype backed by `Arc<Uuid>`
+//! - [`UuidId`]: Generates a type-safe UUID ID newtype backed by `Uuid`
 //!   (internal, system-generated identifiers persisted as native `uuid`).
 //! - [`IntoActiveValue`]: Generates `IntoActiveValue` impl for enums stored as
 //!   strings in `SeaORM`.
@@ -40,19 +40,19 @@ pub fn derive_str_id(input: TokenStream) -> TokenStream {
         .into()
 }
 
-/// Derive a type-safe UUID ID newtype backed by `Arc<Uuid>`.
+/// Derive a type-safe UUID ID newtype backed by `Uuid`.
 ///
 /// # Usage
 ///
 /// ```ignore
-/// #[derive(UuidId)]
-/// pub struct TradeId(Arc<Uuid>);
+/// #[derive(UuidId, Clone, Copy)]
+/// pub struct TradeId(Uuid);
 /// ```
 ///
-/// This generates `new`, `from_v7`, `as_uuid`, `into_uuid`, `Display`,
-/// `FromStr`, `Serialize`, `Deserialize`, and full `SeaORM` bindings backed by
-/// the native Postgres `uuid` column type. All generated ids are UUID v7
-/// (time-ordered); there is no v4 constructor.
+/// This generates `new`, `from_v7`, `as_uuid`, `as_uuid_ref`, `into_uuid`,
+/// `Display`, `FromStr`, `Serialize`, `Deserialize`, and full `SeaORM` bindings
+/// backed by the native Postgres `uuid` column type. All generated ids are
+/// UUID v7 (time-ordered); there is no v4 constructor.
 #[proc_macro_derive(UuidId)]
 pub fn derive_uuid_id(input: TokenStream) -> TokenStream {
     uuid_id::expand(input.into())

@@ -275,7 +275,7 @@ impl PolymarketOrderClient for ClobOrderClient {
     async fn submit(&self, order: VenueOrder) -> VenueSubmitResult {
         let submitted_at = Utc::now();
         let expected_fee = order.expected_fee;
-        let fee_schedule_hash = order.fee_schedule_hash.clone();
+        let fee_schedule_hash = order.fee_schedule_hash;
         let request = OrderRequest {
             market_id: order.market_id.clone(),
             token_id: order.token_id.clone(),

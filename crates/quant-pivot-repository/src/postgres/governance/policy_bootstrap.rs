@@ -48,13 +48,13 @@ fn prepare_boot_policy(
     let mut resources = Vec::with_capacity(ConfigResourceKind::ALL.len());
     for kind in ConfigResourceKind::ALL {
         let revision_id = PolicyRevisionId::from_v7();
-        snapshot.set_resource_revision_id(kind, revision_id.clone());
+        snapshot.set_resource_revision_id(kind, revision_id);
         let document_hash = CanonicalDigest::content_hash_json(&snapshot.resource_document(kind))
             .map_err(hash_error)?;
         let preflight_token_hash = CanonicalDigest::content_hash_json(&(
             "quant-pivot/boot-policy-preflight/v1",
             kind,
-            document_hash.as_str(),
+            document_hash,
         ))
         .map_err(hash_error)?;
         resources.push(PreparedResource {
@@ -72,7 +72,7 @@ fn prepare_boot_policy(
     let validation_subject = PolicyValidationSubject {
         base_generation: PolicyBundleGeneration::FIRST,
         base_revision_vector: PolicyRevisionBundle::default(),
-        candidate_bundle_hash: candidate_hash.clone(),
+        candidate_bundle_hash: candidate_hash,
     };
     Ok(PreparedBootPolicy {
         resources,
@@ -92,10 +92,10 @@ async fn seed_resource_governance(
     for resource in &prepared.resources {
         repository
             .create_revision(NewPolicyRevision {
-                policy_revision_id: resource.revision_id.clone(),
+                policy_revision_id: resource.revision_id,
                 resource_kind: resource.kind,
                 schema_version: POLICY_RESOURCE_SCHEMA_VERSION,
-                revision_hash: resource.document_hash.clone(),
+                revision_hash: resource.document_hash,
                 document: snapshot.resource_document(resource.kind),
                 status: PolicyRevisionStatus::Draft,
                 validation_evidence: None,
@@ -115,14 +115,14 @@ async fn seed_resource_governance(
                     subject: Some(prepared.validation_subject.clone()),
                     ..PolicyValidationEvidence::default()
                 },
-                resource.preflight_token_hash.clone(),
+                resource.preflight_token_hash,
                 Utc::now() + Duration::hours(1),
             )
             .await?;
         repository
             .record_approval(RecordPolicyApproval {
-                policy_approval_id: resource.approval_id.clone(),
-                policy_revision_id: resource.revision_id.clone(),
+                policy_approval_id: resource.approval_id,
+                policy_revision_id: resource.revision_id,
                 resource_kind: resource.kind,
                 decision: PolicyApprovalDecision::Approved,
                 decided_by_kind: PolicyActorKind::System,
@@ -165,7 +165,7 @@ async fn activate_boot_resources(
         let request_hash = CanonicalDigest::content_hash_json(&(
             "quant-pivot/boot-policy-activation/v1",
             idempotency_key.as_str(),
-            context.candidate_hash.as_str(),
+            context.candidate_hash,
         ))
         .map_err(hash_error)?;
         repository
@@ -176,7 +176,7 @@ async fn activate_boot_resources(
                     policy_activation_id: PolicyActivationId::from_v7(),
                     resource_kind: resource.kind,
                     policy_revision_id: resource.revision_id,
-                    decision_policy_snapshot_id: context.snapshot_id.clone(),
+                    decision_policy_snapshot_id: *context.snapshot_id,
                     policy_approval_id: resource.approval_id,
                     activated_by_kind: PolicyActorKind::System,
                     activated_by_user_id: None,
@@ -235,8 +235,8 @@ pub async fn ensure_default_policy_bundle(
     let snapshot_id = DecisionPolicySnapshotId::from_content_hash(&candidate_hash);
     let persisted_snapshot = NewDecisionPolicySnapshot {
         bundle_generation: generation,
-        decision_policy_snapshot_id: snapshot_id.clone(),
-        snapshot_hash: candidate_hash.clone(),
+        decision_policy_snapshot_id: snapshot_id,
+        snapshot_hash: candidate_hash,
         snapshot: snapshot_document,
         recommendation_policy_revision_id: required_revision(
             &snapshot,
@@ -301,7 +301,7 @@ fn required_revision(
     snapshot: &DecisionPolicySnapshot,
     kind: ConfigResourceKind,
 ) -> Result<PolicyRevisionId, StorageError> {
-    snapshot.resource_revision_id(kind).cloned().ok_or_else(|| {
+    snapshot.resource_revision_id(kind).copied().ok_or_else(|| {
         StorageError::invariant_violation(
             Some("decision_policy_snapshot"),
             format!("boot policy has no {} revision", kind.as_str()),

@@ -179,10 +179,10 @@ impl FavoriteLongshotBiasTable {
             }));
         }
         Ok(Self {
-            table_id: info.artifact_id.clone(),
-            content_hash: info.content_hash.clone(),
+            table_id: info.artifact_id,
+            content_hash: info.content_hash,
             fit_window,
-            calibration_split_hash: info.calibration_split_hash.clone(),
+            calibration_split_hash: info.calibration_split_hash,
             by_category,
         })
     }

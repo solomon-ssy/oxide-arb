@@ -729,19 +729,19 @@ impl DecisionPolicySnapshotDocument {
     ) -> Result<DecisionPolicySnapshot, PolicySnapshotError> {
         let mut by_id = BTreeMap::new();
         for (id, document) in documents {
-            if by_id.insert(id.clone(), document).is_some() {
+            if by_id.insert(id, document).is_some() {
                 return Err(PolicySnapshotError::DuplicateArtifact { id });
             }
         }
         let resolve = |reference: &PolicyProfileArtifactReference| {
-            let document = by_id.get(&reference.profile_artifact_id).ok_or_else(|| {
+            let document = by_id.get(&reference.profile_artifact_id).ok_or({
                 PolicySnapshotError::MissingArtifact {
-                    id: reference.profile_artifact_id.clone(),
+                    id: reference.profile_artifact_id,
                 }
             })?;
             if document.kind() != reference.kind {
                 return Err(PolicySnapshotError::ArtifactKindMismatch {
-                    id: reference.profile_artifact_id.clone(),
+                    id: reference.profile_artifact_id,
                     expected: reference.kind,
                     actual: document.kind(),
                 });
@@ -752,7 +752,7 @@ impl DecisionPolicySnapshotDocument {
                     != reference.profile_artifact_id
             {
                 return Err(PolicySnapshotError::ArtifactIdentityMismatch {
-                    id: reference.profile_artifact_id.clone(),
+                    id: reference.profile_artifact_id,
                 });
             }
             Ok(document.clone())
@@ -906,7 +906,7 @@ impl DecisionPolicySnapshot {
         }
     }
 
-    pub fn set_resource_revision_id(
+    pub const fn set_resource_revision_id(
         &mut self,
         kind: ConfigResourceKind,
         revision_id: PolicyRevisionId,

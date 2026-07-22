@@ -60,7 +60,7 @@ pub struct RecommendationDiffSnapshot {
 impl From<&RecommendationInfo> for RecommendationDiffSnapshot {
     fn from(rec: &RecommendationInfo) -> Self {
         Self {
-            recommendation_id: rec.recommendation_id.clone(),
+            recommendation_id: rec.recommendation_id,
             rank: rec.rank,
             composite_score: rec.composite_score,
             risk_adjusted_score: rec.risk_adjusted_score,
@@ -182,8 +182,8 @@ pub fn compute_report_diff(
     let compare_total = total_suggested(compare_recs);
 
     ReportDiff {
-        base_report_id: base.recommendation_report_id.clone(),
-        compare_report_id: compare.recommendation_report_id.clone(),
+        base_report_id: base.recommendation_report_id,
+        compare_report_id: compare.recommendation_report_id,
         added,
         removed,
         retained,

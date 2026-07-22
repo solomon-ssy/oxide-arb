@@ -11,8 +11,8 @@ pub(super) const REQUIRED_SCHEMA_OBJECTS: [&str; 27] = [
     "book_microstructure_1m_mv",
     "book_microstructure_1s",
     "market_resolution_event",
-    "quant_book_l2_checkpoint",
-    "quant_book_l2_event",
+    "quant_book_l2_ledger",
+    "quant_book_l2_trade_tape_mv",
     "quant_book_stream_session",
     "quant_capital_allocation_event",
     "quant_crypto_price_report",
@@ -34,13 +34,6 @@ pub(super) const REQUIRED_SCHEMA_OBJECTS: [&str; 27] = [
     "quant_trade_tape",
     "quant_weather_forecast_fact",
     "quant_weather_observation_fact",
-];
-
-pub(super) const FORBIDDEN_SCHEMA_OBJECTS: [&str; 4] = [
-    "book_microstructure_1m_availability_v2_mv",
-    "quant_recommendation_event",
-    "quant_weather_forecast_point",
-    "quant_weather_observation_report",
 ];
 
 /// Extract the table-level TTL expression from normalized `CREATE TABLE` SQL.
@@ -183,6 +176,22 @@ mod tests {
             .join("\n");
         assert!(ddl.contains("book_microstructure_1m_mv"));
         assert!(ddl.contains("max(available_at) AS available_at"));
+    }
+
+    #[test]
+    fn last_trade_projection_is_single_ledger_materialized_view() {
+        let ddl = BOOTSTRAP_SOURCES
+            .iter()
+            .flat_map(|source| split_statements(source))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let normalized_ddl = ddl.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(ddl.contains("quant_book_l2_trade_tape_mv"));
+        assert!(
+            normalized_ddl.contains("FROM quant_book_l2_ledger WHERE event_type = 'LastTrade'")
+        );
+        assert!(ddl.contains("concat('blake3:', lower(hex(event_hash)))"));
+        assert!(ddl.contains("non_replicated_deduplication_window = 10000"));
     }
 
     #[test]

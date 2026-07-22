@@ -79,11 +79,8 @@ impl FactorRepository for PgFactorRepository {
                 let mut conflicts = Entity::find()
                     .filter(
                         Condition::any()
-                            .add(
-                                Column::FactorDefinitionId
-                                    .eq(definition.factor_definition_id.clone()),
-                            )
-                            .add(Column::DefinitionHash.eq(definition.definition_hash.clone())),
+                            .add(Column::FactorDefinitionId.eq(definition.factor_definition_id))
+                            .add(Column::DefinitionHash.eq(definition.definition_hash)),
                     )
                     .all(&self.db)
                     .await
@@ -144,7 +141,7 @@ impl FactorRepository for PgFactorRepository {
         &self,
         factor_definition_id: &FactorDefinitionId,
     ) -> Result<Option<FactorDefinitionInfo>, StorageError> {
-        Entity::find_by_id(factor_definition_id.clone())
+        Entity::find_by_id(*factor_definition_id)
             .one(&self.db)
             .await
             .map_err(StorageError::from)
@@ -159,7 +156,7 @@ impl FactorRepository for PgFactorRepository {
             return Ok(Vec::new());
         }
         Entity::find()
-            .filter(Column::FactorDefinitionId.is_in(factor_definition_ids.iter().cloned()))
+            .filter(Column::FactorDefinitionId.is_in(factor_definition_ids.iter().copied()))
             .all(&self.db)
             .await
             .map_err(StorageError::from)
@@ -222,7 +219,7 @@ impl FactorRepository for PgFactorRepository {
         model_run_id: &ModelRunId,
     ) -> Result<Vec<FactorValueInfo>, StorageError> {
         QuantFactorValueEntity::find()
-            .filter(QuantFactorValueColumn::ModelRunId.eq(model_run_id.clone()))
+            .filter(QuantFactorValueColumn::ModelRunId.eq(*model_run_id))
             .order_by_desc(QuantFactorValueColumn::DecisionAt)
             .all(&self.db)
             .await
@@ -242,7 +239,7 @@ impl FactorRepository for PgFactorRepository {
         QuantFactorValueEntity::find()
             .filter(
                 QuantFactorValueColumn::FactorDefinitionId
-                    .is_in(factor_definition_ids.iter().cloned()),
+                    .is_in(factor_definition_ids.iter().copied()),
             )
             .filter(QuantFactorValueColumn::DecisionAt.gte(from))
             .filter(QuantFactorValueColumn::DecisionAt.lt(until))
@@ -261,10 +258,10 @@ impl FactorRepository for PgFactorRepository {
     ) -> Result<Option<LatestFactorSnapshotInfo>, StorageError> {
         let row = QuantFactorValueEntity::find()
             .find_also_related(QuantModelRunEntity)
-            .filter(QuantFactorValueColumn::FactorDefinitionId.eq(factor_definition_id.clone()))
+            .filter(QuantFactorValueColumn::FactorDefinitionId.eq(*factor_definition_id))
             .filter(QuantFactorValueColumn::MarketId.eq(market_id.clone()))
             .filter(QuantFactorValueColumn::ValueState.eq(FactorValueState::Scored))
-            .filter(QuantModelRunColumn::ModelVersionId.eq(model_version_id.clone()))
+            .filter(QuantModelRunColumn::ModelVersionId.eq(*model_version_id))
             .order_by_desc(QuantFactorValueColumn::DecisionAt)
             .one(&self.db)
             .await
@@ -278,7 +275,7 @@ impl FactorRepository for PgFactorRepository {
         let Some(normalized_score) = value.normalized_score else {
             return Ok(None);
         };
-        let definition = Entity::find_by_id(factor_definition_id.clone())
+        let definition = Entity::find_by_id(*factor_definition_id)
             .one(&self.db)
             .await
             .map_err(StorageError::from)?
@@ -307,7 +304,7 @@ impl FactorRepository for PgFactorRepository {
             factor_value_id: value.factor_value_id,
             factor_definition_id: value.factor_definition_id,
             definition_hash: definition.definition_hash,
-            model_version_id: model_version_id.clone(),
+            model_version_id: *model_version_id,
             market_id: value.market_id,
             raw_value,
             normalized_value: normalized_score.inner(),
@@ -332,7 +329,7 @@ impl FactorRepository for PgFactorRepository {
         }
         let requested = factor_definition_ids
             .iter()
-            .cloned()
+            .copied()
             .collect::<HashSet<_>>();
         if requested.len() != factor_definition_ids.len() {
             return Err(error::invariant_violation(
@@ -346,9 +343,9 @@ impl FactorRepository for PgFactorRepository {
             .filter(QuantFactorValueColumn::MarketId.eq(market_id.clone()))
             .filter(
                 QuantFactorValueColumn::FactorDefinitionId
-                    .is_in(factor_definition_ids.iter().cloned()),
+                    .is_in(factor_definition_ids.iter().copied()),
             )
-            .filter(QuantModelRunColumn::ModelVersionId.eq(model_version_id.clone()))
+            .filter(QuantModelRunColumn::ModelVersionId.eq(*model_version_id))
             .order_by_desc(QuantFactorValueColumn::DecisionAt)
             .order_by_desc(QuantFactorValueColumn::CreatedAt)
             .one(&self.db)
@@ -359,11 +356,11 @@ impl FactorRepository for PgFactorRepository {
         };
 
         let rows = QuantFactorValueEntity::find()
-            .filter(QuantFactorValueColumn::ModelRunId.eq(run.model_run_id.clone()))
+            .filter(QuantFactorValueColumn::ModelRunId.eq(run.model_run_id))
             .filter(QuantFactorValueColumn::MarketId.eq(market_id.clone()))
             .filter(
                 QuantFactorValueColumn::FactorDefinitionId
-                    .is_in(factor_definition_ids.iter().cloned()),
+                    .is_in(factor_definition_ids.iter().copied()),
             )
             .order_by_asc(QuantFactorValueColumn::FactorDefinitionId)
             .all(&self.db)
@@ -371,7 +368,7 @@ impl FactorRepository for PgFactorRepository {
             .map_err(StorageError::from)?;
         let found = rows
             .iter()
-            .map(|row| row.factor_definition_id.clone())
+            .map(|row| row.factor_definition_id)
             .collect::<HashSet<_>>();
         if found != requested || rows.len() != requested.len() {
             return Ok(None);
@@ -419,7 +416,7 @@ impl FactorRepository for PgFactorRepository {
         })?;
         Ok(Some(LatestFactorSnapshotBundleInfo {
             model_run_id: run.model_run_id,
-            model_version_id: model_version_id.clone(),
+            model_version_id: *model_version_id,
             market_id: market_id.clone(),
             observed_at: latest_value.decision_at,
             available_at,
@@ -498,12 +495,12 @@ async fn project_snapshot_values(
     expected_definition_count: usize,
 ) -> Result<Vec<LatestFactorSnapshotValueInfo>, StorageError> {
     let definitions = Entity::find()
-        .filter(Column::FactorDefinitionId.is_in(factor_definition_ids.iter().cloned()))
+        .filter(Column::FactorDefinitionId.is_in(factor_definition_ids.iter().copied()))
         .all(db)
         .await
         .map_err(StorageError::from)?
         .into_iter()
-        .map(|definition| (definition.factor_definition_id.clone(), definition))
+        .map(|definition| (definition.factor_definition_id, definition))
         .collect::<HashMap<_, _>>();
     if definitions.len() != expected_definition_count {
         return Err(error::state_conflict(
@@ -524,7 +521,7 @@ async fn project_snapshot_values(
             Ok(LatestFactorSnapshotValueInfo {
                 factor_value_id: row.factor_value_id,
                 factor_definition_id: row.factor_definition_id,
-                definition_hash: definition.definition_hash.clone(),
+                definition_hash: definition.definition_hash,
                 name: definition.name.clone(),
                 family: definition.factor_family,
                 value_state: row.value_state,
@@ -575,7 +572,7 @@ async fn publish_definition_revisions(
     validate_unique_publish_ids(factor_definition_ids)?;
     let txn = db.begin().await.map_err(StorageError::from)?;
     let initial = Entity::find()
-        .filter(Column::FactorDefinitionId.is_in(factor_definition_ids.iter().cloned()))
+        .filter(Column::FactorDefinitionId.is_in(factor_definition_ids.iter().copied()))
         .all(&txn)
         .await
         .map_err(StorageError::from)?;
@@ -587,7 +584,7 @@ async fn publish_definition_revisions(
         acquire_factor_publication_lock(&txn, name).await?;
     }
     let locked = Entity::find()
-        .filter(Column::FactorDefinitionId.is_in(factor_definition_ids.iter().cloned()))
+        .filter(Column::FactorDefinitionId.is_in(factor_definition_ids.iter().copied()))
         .order_by_asc(Column::Name)
         .lock_exclusive()
         .all(&txn)
@@ -602,7 +599,7 @@ async fn publish_definition_revisions(
                 .get(*id)
                 .is_some_and(|row| row.status != PublicationStatus::Published)
         })
-        .cloned()
+        .copied()
         .collect::<Vec<_>>();
     replace_published_revisions(&txn, factor_definition_ids, &locked_by_id).await?;
     let published = load_published_batch(&txn, &newly_published_ids).await?;
@@ -615,7 +612,7 @@ fn validate_unique_publish_ids(
 ) -> Result<(), StorageError> {
     let mut seen_ids = HashSet::with_capacity(factor_definition_ids.len());
     for id in factor_definition_ids {
-        if !seen_ids.insert(id.clone()) {
+        if !seen_ids.insert(*id) {
             return Err(error::invariant_violation(
                 Some(QUANT_FACTOR),
                 format!("duplicate factor definition id in publish batch: {id}"),
@@ -630,7 +627,7 @@ fn definitions_by_id(
 ) -> HashMap<FactorDefinitionId, QuantFactorDefinitionModel> {
     definitions
         .into_iter()
-        .map(|row| (row.factor_definition_id.clone(), row))
+        .map(|row| (row.factor_definition_id, row))
         .collect()
 }
 
@@ -697,7 +694,7 @@ async fn replace_published_revisions(
                 primitives::enum_value(&PublicationStatus::Retired),
             )
             .filter(Column::Name.eq(target.name.clone()))
-            .filter(Column::FactorDefinitionId.ne(id.clone()))
+            .filter(Column::FactorDefinitionId.ne(*id))
             .filter(Column::Status.eq(PublicationStatus::Published))
             .exec(txn)
             .await
@@ -717,13 +714,13 @@ async fn load_published_batch(
     factor_definition_ids: &[FactorDefinitionId],
 ) -> Result<Vec<FactorDefinitionInfo>, StorageError> {
     let refreshed = Entity::find()
-        .filter(Column::FactorDefinitionId.is_in(factor_definition_ids.iter().cloned()))
+        .filter(Column::FactorDefinitionId.is_in(factor_definition_ids.iter().copied()))
         .all(txn)
         .await
         .map_err(StorageError::from)?;
     let mut refreshed_by_id: HashMap<FactorDefinitionId, FactorDefinitionInfo> = refreshed
         .into_iter()
-        .map(|row| (row.factor_definition_id.clone(), row.into()))
+        .map(|row| (row.factor_definition_id, row.into()))
         .collect();
     let published = factor_definition_ids
         .iter()
@@ -749,7 +746,7 @@ async fn update_definition_status(
     next: PublicationStatus,
 ) -> Result<FactorDefinitionInfo, StorageError> {
     let txn = db.begin().await.map_err(StorageError::from)?;
-    let Some(initial) = Entity::find_by_id(factor_definition_id.clone())
+    let Some(initial) = Entity::find_by_id(*factor_definition_id)
         .one(&txn)
         .await
         .map_err(StorageError::from)?
@@ -757,7 +754,7 @@ async fn update_definition_status(
         return Err(error::not_found(QUANT_FACTOR, factor_definition_id));
     };
     acquire_factor_publication_lock(&txn, &initial.name).await?;
-    let Some(row) = Entity::find_by_id(factor_definition_id.clone())
+    let Some(row) = Entity::find_by_id(*factor_definition_id)
         .lock_exclusive()
         .one(&txn)
         .await

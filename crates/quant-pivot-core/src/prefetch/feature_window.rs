@@ -294,10 +294,10 @@ impl FeatureWindowProvider {
         }
         for facts in grouped.values_mut() {
             facts.sort_by(|left, right| {
-                (left.observed_at, left.revision, left.report_hash.as_str()).cmp(&(
+                (left.observed_at, left.revision, left.report_hash).cmp(&(
                     right.observed_at,
                     right.revision,
-                    right.report_hash.as_str(),
+                    right.report_hash,
                 ))
             });
         }
@@ -362,14 +362,14 @@ impl FeatureWindowProvider {
                     left.valid_time,
                     left.lead_hours,
                     left.member,
-                    left.run_manifest_hash.as_str(),
+                    left.run_manifest_hash,
                 )
                     .cmp(&(
                         right.reference_time,
                         right.valid_time,
                         right.lead_hours,
                         right.member,
-                        right.run_manifest_hash.as_str(),
+                        right.run_manifest_hash,
                     ))
             });
         }

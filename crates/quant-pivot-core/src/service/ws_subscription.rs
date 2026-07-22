@@ -338,10 +338,11 @@ mod tests {
         },
         types::{EventId, MarketId},
     };
+
     use rust_decimal_macros::dec;
 
     use super::*;
-    use crate::ingest::market_registry::MarketRegistry;
+    use crate::ingest::{data_plane_index::DataPlane, market_registry::MarketRegistry};
 
     fn sample_market(id: &str, end_date: Option<DateTime<Utc>>) -> MarketRegistryInfo {
         MarketRegistryInfo {
@@ -387,7 +388,7 @@ mod tests {
     #[test]
     fn excludes_past_deadline_and_selects_nearest_future_first() {
         let now = Utc::now();
-        let reg = MarketRegistry::new();
+        let reg = MarketRegistry::new(Arc::new(DataPlane::new()));
         reg.register_market(sample_market("past", Some(now - Duration::hours(1))));
         reg.register_market(sample_market("soon", Some(now + Duration::hours(2))));
         reg.register_market(sample_market("later", Some(now + Duration::hours(10))));
@@ -405,7 +406,7 @@ mod tests {
 
     #[test]
     fn no_end_date_markets_are_not_subscribed() {
-        let reg = MarketRegistry::new();
+        let reg = MarketRegistry::new(Arc::new(DataPlane::new()));
         reg.register_market(sample_market("no-date", None));
 
         let policy = MarketDataSubscriptionPolicy::new(2000, 72);
@@ -418,7 +419,7 @@ mod tests {
     #[test]
     fn token_cap_truncates_to_nearest_deadlines() {
         let now = Utc::now();
-        let reg = MarketRegistry::new();
+        let reg = MarketRegistry::new(Arc::new(DataPlane::new()));
         for hour in [1_i64, 2, 3, 4, 5] {
             reg.register_market(sample_market(
                 &format!("m{hour}"),

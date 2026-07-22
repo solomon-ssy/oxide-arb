@@ -134,7 +134,7 @@ impl KillSwitchPort for KillSwitchControl {
     }
 
     fn view(&self) -> KillSwitchView {
-        self.view.load_full().as_ref().clone()
+        self.view.load().as_ref().clone()
     }
 
     async fn set(&self, command: SetKillSwitchCommand) -> QuantResult<KillSwitchView> {
@@ -147,7 +147,7 @@ impl KillSwitchPort for KillSwitchControl {
         let loosening = command.target.restriction_rank() < current.restriction_rank();
         if current_latched && loosening && !command.ack {
             return Err(ExecutionError::KillSwitchBlocks {
-                state: current.as_str().to_owned(),
+                state: current.to_string(),
                 operation: "loosen_latched_requires_ack".to_owned(),
             }
             .into());

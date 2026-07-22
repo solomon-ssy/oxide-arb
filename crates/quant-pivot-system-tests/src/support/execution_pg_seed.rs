@@ -255,8 +255,8 @@ impl ReportBuildOptions {
     pub fn published_single(ids: &ExecutionTxnIds) -> Self {
         Self {
             recommendations: vec![demo_recommendation(
-                ids.recommendation.clone(),
-                ids.report.clone(),
+                ids.recommendation,
+                ids.report,
                 ids,
                 1,
                 &ids.market,
@@ -355,10 +355,9 @@ async fn find_existing_demo_infra(
         }
     }
     let run = QuantModelRunEntity::find()
-        .filter(QuantModelRunColumn::ModelVersionId.eq(version.model_version_id.clone()))
+        .filter(QuantModelRunColumn::ModelVersionId.eq(version.model_version_id))
         .filter(
-            QuantModelRunColumn::DecisionPolicySnapshotId
-                .eq(active_decision_policy_snapshot_id.clone()),
+            QuantModelRunColumn::DecisionPolicySnapshotId.eq(*active_decision_policy_snapshot_id),
         )
         .order_by_desc(QuantModelRunColumn::StartedAt)
         .one(db)
@@ -403,7 +402,7 @@ async fn ensure_clear_feature_parity_state(db: &DatabaseConnection) -> FeaturePa
     let state_id = FeatureParityStateId::from_v7();
     QuantFeatureParityStateEntity::insert(
         NewFeatureParityState {
-            state_id: state_id.clone(),
+            state_id,
             state: FeatureParityLatchState::Clear,
             transition: FeatureParityStateTransition::GovernedAcknowledge,
             cause_run_id: None,
@@ -469,8 +468,8 @@ async fn seed_conditional_price_report_with_mode(
         .first_mut()
         .expect("conditional report recommendation");
     let condition = EntryConditionPlan::Conditional {
-        artifact_id: artifact.artifact_id.clone(),
-        content_hash: artifact.content_hash.clone(),
+        artifact_id: artifact.artifact_id,
+        content_hash: artifact.content_hash,
     };
     match &mut recommendation.trade_plan {
         RecommendationTradePlan::Frozen { entry, .. } => {
@@ -511,17 +510,17 @@ async fn prepare_report_seed(
     let model_run_id = seed_report_model_run(db, infra, &market_selection_id, decision_at).await;
     ExecutionTxnIds {
         decision_at,
-        feature_parity_state_id: infra.feature_parity_state_id.clone(),
+        feature_parity_state_id: infra.feature_parity_state_id,
         account_snapshot: AccountSnapshotId::from_v7(),
         data_quality_snapshot: ReportDataQualitySnapshotId::from_v7(),
         portfolio_plan: PortfolioPlanId::from_v7(),
         report: RecommendationReportId::from_v7(),
         recommendation: RecommendationId::from_v7(),
         condition_instance: EntryConditionInstanceId::from_v7(),
-        model_version: infra.model_version_id.clone(),
+        model_version: infra.model_version_id,
         model_run: model_run_id,
         market_selection: market_selection_id,
-        decision_policy_snapshot: infra.decision_policy_snapshot_id.clone(),
+        decision_policy_snapshot: infra.decision_policy_snapshot_id,
         trade_policy: infra.trade_policy.clone(),
         market: config.market_id.clone(),
         event: config.event_id.clone(),
@@ -556,11 +555,11 @@ pub async fn seed_report_model_run(
     .expect("hash report fixture model output");
     PgModelRunRepository::new(db.clone())
         .create(NewModelRun {
-            model_run_id: model_run_id.clone(),
+            model_run_id,
             run_kind: ModelRunKind::LiveInference,
-            model_version_id: Some(infra.model_version_id.clone()),
-            decision_policy_snapshot_id: infra.decision_policy_snapshot_id.clone(),
-            market_selection_id: Some(market_selection_id.clone()),
+            model_version_id: Some(infra.model_version_id),
+            decision_policy_snapshot_id: infra.decision_policy_snapshot_id,
+            market_selection_id: Some(*market_selection_id),
             window_start: decision_at,
             window_end: decision_at,
             status: ModelRunStatus::Succeeded,
@@ -650,14 +649,14 @@ pub async fn seed_pending_intent(db: &DatabaseConnection, ids: &ExecutionTxnIds)
     PgOrderIntentRepository::new(db.clone())
         .create_with_allocation(
             new_order_intent(
-                order_intent_id.clone(),
+                order_intent_id,
                 ids,
                 OrderIntentStatus::PendingApproval,
                 ApprovalStatus::Pending,
                 QuantRuntimeMode::SemiAuto,
                 None,
             ),
-            new_capital_allocation(order_intent_id.clone(), ids),
+            new_capital_allocation(order_intent_id, ids),
             None,
         )
         .await
@@ -694,14 +693,14 @@ pub async fn seed_approved_intent(db: &DatabaseConnection, ids: &ExecutionTxnIds
     PgOrderIntentRepository::new(db.clone())
         .create_with_allocation(
             new_order_intent(
-                order_intent_id.clone(),
+                order_intent_id,
                 ids,
                 OrderIntentStatus::ApprovedByPolicy,
                 ApprovalStatus::NotRequired,
                 QuantRuntimeMode::AutoExecution,
                 None,
             ),
-            new_capital_allocation(order_intent_id.clone(), ids),
+            new_capital_allocation(order_intent_id, ids),
             None,
         )
         .await
@@ -845,10 +844,10 @@ fn new_order_intent(
     );
     NewOrderIntent {
         order_intent_id,
-        recommendation_id: ids.recommendation.clone(),
+        recommendation_id: ids.recommendation,
         runtime_mode,
-        decision_policy_snapshot_id: ids.decision_policy_snapshot.clone(),
-        model_version_id: ids.model_version.clone(),
+        decision_policy_snapshot_id: ids.decision_policy_snapshot,
+        model_version_id: ids.model_version,
         research_profile_artifact_id: fixture_profile_ref().artifact_id(),
         intent_kind: OrderIntentKind::Buy,
         status,
@@ -868,10 +867,10 @@ fn new_order_intent(
             None
         },
         policy_hash: (runtime_mode == QuantRuntimeMode::SemiAuto)
-            .then(|| ids.trade_policy.artifact_hash.clone()),
+            .then_some(ids.trade_policy.artifact_hash),
         status_reason: None,
         admission_trace_ref: None,
-        condition_instance_id: ids.condition_instance.clone(),
+        condition_instance_id: ids.condition_instance,
         entry_order_json: EntryOrderSpec {
             token_id: TokenId::new(&ids.token),
             side: Side::Buy,
@@ -915,7 +914,7 @@ fn new_capital_allocation(
     NewCapitalAllocation {
         capital_allocation_id: CapitalAllocationId::from_v7(),
         order_intent_id,
-        recommendation_id: ids.recommendation.clone(),
+        recommendation_id: ids.recommendation,
         state: CapitalAllocationState::Allocated,
         planned_usd: Usd::new(EXECUTION_NOTIONAL),
         allocated_usd: Usd::new(EXECUTION_NOTIONAL),
@@ -994,7 +993,7 @@ pub fn prepared_order(
 fn new_execution_order(intent_id: &OrderIntentId, ids: &ExecutionTxnIds) -> NewExecutionOrder {
     NewExecutionOrder {
         execution_order_id: ExecutionOrderId::from_v7(),
-        order_intent_id: intent_id.clone(),
+        order_intent_id: *intent_id,
         order_phase: ExecutionOrderPhase::Entry,
         market_id: MarketId::new(&ids.market),
         token_id: TokenId::new(&ids.token),
@@ -1039,7 +1038,7 @@ pub fn position_fill_public(
     cost_usd: Usd,
 ) -> PositionFill {
     PositionFill {
-        order_intent_id: intent_id.clone(),
+        order_intent_id: *intent_id,
         token_id: TokenId::new(&ids.token),
         market_id: MarketId::new(&ids.market),
         event_id: Some(EventId::new(&ids.event)),
@@ -1059,8 +1058,8 @@ fn reconciliation_row(
 ) -> NewReconciliation {
     NewReconciliation {
         reconciliation_id: ReconciliationId::from_v7(),
-        execution_order_id: execution_order_id.clone(),
-        order_intent_id: intent_id.clone(),
+        execution_order_id: *execution_order_id,
+        order_intent_id: *intent_id,
         result: ReconciliationResult::Unresolvable,
         evidence_json: ReconciliationEvidenceChain(vec![ReconciliationEvidence {
             kind: ReconciliationEvidenceKind::ClobOrderStatus,
@@ -1092,7 +1091,7 @@ fn exit_order(
 ) -> NewExecutionOrder {
     NewExecutionOrder {
         execution_order_id: ExecutionOrderId::from_v7(),
-        order_intent_id: intent_id.clone(),
+        order_intent_id: *intent_id,
         order_phase: ExecutionOrderPhase::Exit,
         market_id: MarketId::new(&ids.market),
         token_id: TokenId::new(&ids.token),
@@ -1319,15 +1318,15 @@ fn executable_policy_fixture_payload(
             research_program_hash: content_hash('7'),
             source_dataset_id: TrainingDatasetId::from_v7(),
             model_version_id: ModelVersionId::from_v7(),
-            decision_policy_snapshot_id: decision_policy_snapshot_id.clone(),
+            decision_policy_snapshot_id: *decision_policy_snapshot_id,
             fit_window_start: now - Duration::days(92),
             fit_window_end: now - Duration::days(2),
             pit_cutoff: now - Duration::days(1),
             target_horizon_secs: profile.spec.target_horizon_secs,
             cash_budget_tiers: profile.spec.allowed_cash_budget_tiers,
-            methodology_hash: methodology_hash.clone(),
-            latency_evidence_id: latency_evidence_id.clone(),
-            latency_profile_hash: latency_profile_hash.clone(),
+            methodology_hash,
+            latency_evidence_id,
+            latency_profile_hash,
             quality_gate: profile.spec.quality_gate,
         },
         source_dataset_hash: content_hash('1'),
@@ -1363,7 +1362,7 @@ fn executable_policy_fixture_payload(
             catalog_ledger_hash: content_hash('e'),
             source_slice_manifest_hash: content_hash('f'),
             fit_job_id: ResearchJobId::from_v7(),
-            trial_ledger_hash: trial_ledger_hash.clone(),
+            trial_ledger_hash,
         }),
         vertical_gate_evidence,
         structural_volatility_oos: StructuralVolatilityOosEvidence {
@@ -1415,10 +1414,10 @@ async fn seed_trade_policy_fixture(
     let policies = PgTradePolicyRepository::new(db.clone());
     policies
         .insert(NewTradePolicyArtifact {
-            artifact_id: artifact_id.clone(),
-            content_hash: artifact_hash.clone(),
+            artifact_id,
+            content_hash: artifact_hash,
             status: TradePolicyStatus::Validated,
-            source_dataset_id: payload.fit_contract.source_dataset_id.clone(),
+            source_dataset_id: payload.fit_contract.source_dataset_id,
             payload_json: payload,
         })
         .await
@@ -1430,11 +1429,11 @@ async fn seed_trade_policy_fixture(
             TradePolicyStatus::Published,
             NewTradePolicyGovernanceAudit {
                 audit_id: TradePolicyGovernanceAuditId::from_v7(),
-                artifact_id: artifact_id.clone(),
+                artifact_id,
                 action: TradePolicyGovernanceAction::Publish,
                 from_status: TradePolicyStatus::Validated,
                 to_status: TradePolicyStatus::Published,
-                content_hash: artifact_hash.clone(),
+                content_hash: artifact_hash,
                 actor_id: UserId::new(Uuid::nil()),
                 reason: "test-only execution fixture publication".to_owned(),
             },
@@ -1480,7 +1479,7 @@ pub async fn seed_model_score_calibration_fixture(
     let fit_window = TimeWindow::new(fit_window_start, fit_window_end);
     let calibration_split_hash = content_hash('c');
     let calibration_payload = ModelScoreCalibrationPayload {
-        model_version_id: model_version_id.clone(),
+        model_version_id: *model_version_id,
         calibration_dataset_id: TrainingDatasetId::from_v7(),
         mapping: MonotoneMapping::Isotonic {
             knots: vec![
@@ -1515,7 +1514,7 @@ pub async fn seed_model_score_calibration_fixture(
             .expect("hash demo calibration artifact");
     PgCalibrationArtifactRepository::new(db.clone())
         .create(NewCalibrationArtifact {
-            artifact_id: calibration_id.clone(),
+            artifact_id: calibration_id,
             kind: CalibrationKind::ModelScore,
             content_hash: calibration_hash,
             fit_window_start,
@@ -1545,14 +1544,14 @@ async fn seed_calibrated_execution_model_artifact(
         model_input_contract_hash(&input_contract).expect("hash demo model input contract");
     let artifact = ModelArtifact::WeightedFactor(Box::new(WeightedFactorModelArtifact {
         header: ModelArtifactHeader {
-            model_version_id: model_version_id.clone(),
-            model_spec_definition_hash: model_spec_definition_hash.clone(),
+            model_version_id: *model_version_id,
+            model_spec_definition_hash: *model_spec_definition_hash,
             profile_ref: fixture_profile_ref(),
             model_family: ModelFamily::WeightedFactor,
             feature_schema_hash: content_hash('f'),
             factor_schema_hash: content_hash('6'),
-            trade_policy_artifact_id: Some(trade_policy.artifact_id.clone()),
-            trade_policy_hash: Some(trade_policy.artifact_hash.clone()),
+            trade_policy_artifact_id: Some(trade_policy.artifact_id),
+            trade_policy_hash: Some(trade_policy.artifact_hash),
         },
         training_dataset_hash: content_hash('d'),
         training_input_hash: content_hash('7'),
@@ -1603,14 +1602,14 @@ async fn seed_model_version_named(
     } else {
         let model_spec_id = ModelSpecId::from_v7();
         let spec = new_model_spec_fixture(
-            model_spec_id.clone(),
+            model_spec_id,
             model_name,
             ModelFamily::WeightedFactor,
             86_400,
             ModelInputContract::single_required("book.mid"),
             ModelTrainingContract::settlement_default(),
         );
-        let definition_hash = spec.definition_hash.clone();
+        let definition_hash = spec.definition_hash;
         registry.create_model_spec(spec).await.expect("model spec");
         (model_spec_id, definition_hash)
     };
@@ -1635,15 +1634,15 @@ async fn seed_model_version_named(
     };
     registry
         .create_model_version(NewModelVersion {
-            model_version_id: model_version_id.clone(),
+            model_version_id,
             model_spec_id,
             version,
             artifact_hash,
             category_scope: None,
             profile_ref: fixture_profile_ref(),
             training_dataset_id: None,
-            trade_policy_artifact_id: Some(trade_policy.artifact_id.clone()),
-            trade_policy_hash: Some(trade_policy.artifact_hash.clone()),
+            trade_policy_artifact_id: Some(trade_policy.artifact_id),
+            trade_policy_hash: Some(trade_policy.artifact_hash),
             publish_path_set_id: None,
             derivation: NewModelVersion::training_derivation(),
             metrics: ModelVersionMetrics::not_measured("test fixture"),
@@ -1658,10 +1657,10 @@ async fn seed_model_version_named(
     let model_run_id = ModelRunId::from_v7();
     PgModelRunRepository::new(db.clone())
         .create(NewModelRun {
-            model_run_id: model_run_id.clone(),
+            model_run_id,
             run_kind: ModelRunKind::LiveInference,
-            model_version_id: Some(model_version_id.clone()),
-            decision_policy_snapshot_id: rc_id.clone(),
+            model_version_id: Some(model_version_id),
+            decision_policy_snapshot_id: *rc_id,
             market_selection_id: None,
             window_start: Utc::now(),
             window_end: Utc::now(),
@@ -1687,9 +1686,9 @@ async fn seed_market_selection(
     PgMarketSelectionRepository::new(db.clone())
         .create_snapshot(
             NewMarketSelection {
-                market_selection_id: id.clone(),
+                market_selection_id: id,
                 decision_at: Utc::now(),
-                decision_policy_snapshot_id: rc_id.clone(),
+                decision_policy_snapshot_id: *rc_id,
                 selector_hash: content_hash('b'),
                 market_count: 1,
                 exclusion_summary: SelectionExclusionSummary::default(),
@@ -1723,9 +1722,9 @@ fn build_report_transaction_inner(
         .map(|recommendation| fixture_condition_instance(recommendation, ids, as_of))
         .collect();
     NewReportTransaction {
-        feature_parity_state_id: Some(ids.feature_parity_state_id.clone()),
+        feature_parity_state_id: Some(ids.feature_parity_state_id),
         account_snapshot: NewAccountSnapshot {
-            account_snapshot_id: ids.account_snapshot.clone(),
+            account_snapshot_id: ids.account_snapshot,
             ..new_account_snapshot(ids)
         },
         equity_snapshot: NewEquitySnapshot {
@@ -1740,18 +1739,18 @@ fn build_report_transaction_inner(
             unrealized_pnl_usd: Usd::ZERO,
             high_water_mark_usd: Usd::new(dec!(10000)),
             drawdown_pct: Decimal::ZERO,
-            account_snapshot_ref: Some(ids.account_snapshot.clone()),
+            account_snapshot_ref: Some(ids.account_snapshot),
         },
         data_quality_snapshot: NewReportDataQualitySnapshot {
-            report_data_quality_snapshot_id: ids.data_quality_snapshot.clone(),
+            report_data_quality_snapshot_id: ids.data_quality_snapshot,
             decision_at: as_of,
-            decision_policy_snapshot_id: ids.decision_policy_snapshot.clone(),
+            decision_policy_snapshot_id: ids.decision_policy_snapshot,
             tokens_json: ReportDataQualityTokens(Vec::new()),
         },
         portfolio_plan: NewPortfolioPlan {
-            portfolio_plan_id: ids.portfolio_plan.clone(),
-            model_run_id: Some(ids.model_run.clone()),
-            market_selection_id: ids.market_selection.clone(),
+            portfolio_plan_id: ids.portfolio_plan,
+            model_run_id: Some(ids.model_run),
+            market_selection_id: ids.market_selection,
             decision_at: as_of,
             budget_usd: Usd::new(dec!(10000)),
             allocated_usd,
@@ -1789,8 +1788,8 @@ fn fixture_condition_instance(
                     artifact_id,
                     content_hash,
                 } => (
-                    Some(artifact_id.clone()),
-                    Some(content_hash.clone()),
+                    Some(*artifact_id),
+                    Some(*content_hash),
                     EntryConditionState::Waiting,
                     None,
                     Some(published_at),
@@ -1802,11 +1801,11 @@ fn fixture_condition_instance(
         };
     NewEntryConditionInstance {
         condition_instance_id: if recommendation.recommendation_id == ids.recommendation {
-            ids.condition_instance.clone()
+            ids.condition_instance
         } else {
             EntryConditionInstanceId::from_v7()
         },
-        recommendation_id: recommendation.recommendation_id.clone(),
+        recommendation_id: recommendation.recommendation_id,
         artifact_id,
         artifact_hash,
         state,
@@ -1834,16 +1833,16 @@ fn price_condition_artifact(ids: &ExecutionTxnIds) -> NewEntryConditionArtifact 
         schema_version: ENTRY_CONDITION_SCHEMA_VERSION,
         evaluator_version: ENTRY_CONDITION_EVALUATOR_VERSION,
         binding: EntryConditionBinding {
-            recommendation_id: ids.recommendation.clone(),
+            recommendation_id: ids.recommendation,
             market_id: MarketId::new(&ids.market),
             token_id: TokenId::new(&ids.token),
             outcome_side: OutcomeSide::Yes,
             market_linkage_id: None,
             market_linkage_hash: None,
-            catalog_snapshot_id: ids.market_selection.clone(),
+            catalog_snapshot_id: ids.market_selection,
             catalog_snapshot_hash: content_hash('b'),
-            model_version_id: ids.model_version.clone(),
-            decision_policy_snapshot_id: ids.decision_policy_snapshot.clone(),
+            model_version_id: ids.model_version,
+            decision_policy_snapshot_id: ids.decision_policy_snapshot,
             factor_bindings: Vec::new(),
             source_bindings: Vec::new(),
         },
@@ -1885,24 +1884,24 @@ fn fixture_report(
         .filter_map(|rec| rec.trade_plan.sizing().map(|sizing| sizing.suggested_usd))
         .sum();
     let report = NewRecommendationReport {
-        recommendation_report_id: ids.report.clone(),
+        recommendation_report_id: ids.report,
         research_profile_artifact_id: fixture_profile_ref().artifact_id(),
         report_kind: ReportKind::TopN,
         decision_at: options.as_of,
         horizon_secs: 86_400,
         runtime_mode: options.runtime_mode,
-        decision_policy_snapshot_id: ids.decision_policy_snapshot.clone(),
-        model_run_id: Some(ids.model_run.clone()),
-        model_version_id: ids.model_version.clone(),
-        market_selection_id: ids.market_selection.clone(),
-        portfolio_plan_id: ids.portfolio_plan.clone(),
+        decision_policy_snapshot_id: ids.decision_policy_snapshot,
+        model_run_id: Some(ids.model_run),
+        model_version_id: ids.model_version,
+        market_selection_id: ids.market_selection,
+        portfolio_plan_id: ids.portfolio_plan,
         top_n: 20,
         status: RecommendationReportStatus::Prepared,
         account_source: AccountSource::Polymarket,
         capital_base_usd: Usd::new(dec!(10000)),
-        account_snapshot_ref: ids.account_snapshot.clone(),
-        equity_snapshot_ref: equity_snapshot_id.clone(),
-        data_quality_snapshot_ref: ids.data_quality_snapshot.clone(),
+        account_snapshot_ref: ids.account_snapshot,
+        equity_snapshot_ref: *equity_snapshot_id,
+        data_quality_snapshot_ref: ids.data_quality_snapshot,
         summary_json: options.summary.clone(),
         published_at: None,
         successor_report_id: None,
@@ -2102,8 +2101,8 @@ fn evidence_refs(ids: &ExecutionTxnIds) -> EvidenceRefs {
     EvidenceRefs {
         signal_candidate_id: SignalCandidateId::from_v7(),
         feature_vector_id: FeatureVectorId::from_v7(),
-        model_run_id: ids.model_run.clone(),
-        market_selection_id: ids.market_selection.clone(),
+        model_run_id: ids.model_run,
+        market_selection_id: ids.market_selection,
         book_snapshot_ref: BookSnapshotRef::from_str(&format!(
             "book:l2|{}|00000000-0000-0000-0000-000000000001|1|blake3:{}|1700000000|1700000000@blake3:{}",
             ids.token,
@@ -2111,10 +2110,10 @@ fn evidence_refs(ids: &ExecutionTxnIds) -> EvidenceRefs {
             "0".repeat(64)
         ))
         .expect("book ref"),
-        decision_policy_snapshot_id: ids.decision_policy_snapshot.clone(),
-        model_version_id: ids.model_version.clone(),
+        decision_policy_snapshot_id: ids.decision_policy_snapshot,
+        model_version_id: ids.model_version,
         factor_definition_versions: Vec::new(),
-        data_quality_snapshot_ref: ids.data_quality_snapshot.clone(),
+        data_quality_snapshot_ref: ids.data_quality_snapshot,
     }
 }
 

@@ -19,7 +19,7 @@ use sea_orm::DatabaseConnection;
 use uuid::Uuid;
 
 fn hash(byte: char) -> ContentHash {
-    ContentHash::parse(format!("blake3:{}", byte.to_string().repeat(64)))
+    ContentHash::parse(&format!("blake3:{}", byte.to_string().repeat(64)))
         .expect("valid content hash")
 }
 
@@ -47,7 +47,7 @@ fn ad_hoc(request_id: &str) -> NewReportRun {
 
 fn claim_config(version_id: &DecisionPolicySnapshotId) -> ReportRunClaimConfig {
     ReportRunClaimConfig {
-        decision_policy_snapshot_id: version_id.clone(),
+        decision_policy_snapshot_id: *version_id,
         ad_hoc_default_top_n: 20,
         ad_hoc_default_knowledge_lag_secs: 10,
         schedules: vec![ClaimReportSchedule {
@@ -96,7 +96,7 @@ pub async fn restart_coalesces_latest_and_records_aggregate_gap() {
             &version_id,
             vec![ReconcileReportSchedule {
                 schedule_id: "primary".into(),
-                decision_policy_snapshot_id: version_id.clone(),
+                decision_policy_snapshot_id: version_id,
                 spec_hash: hash('b'),
                 next_scheduled_for: first_due,
                 enabled: true,
@@ -110,7 +110,7 @@ pub async fn restart_coalesces_latest_and_records_aggregate_gap() {
     let materialized = repository
         .materialize_schedule(MaterializeReportSchedule {
             schedule_id: "primary".into(),
-            decision_policy_snapshot_id: version_id.clone(),
+            decision_policy_snapshot_id: version_id,
             spec_hash: hash('b'),
             expected_next_scheduled_for: first_due,
             latest_scheduled_for: latest,
@@ -179,7 +179,7 @@ pub async fn config_change_skips_old_queued_occurrence() {
             &version_id,
             vec![ReconcileReportSchedule {
                 schedule_id: "primary".into(),
-                decision_policy_snapshot_id: version_id.clone(),
+                decision_policy_snapshot_id: version_id,
                 spec_hash: hash('b'),
                 next_scheduled_for: due,
                 enabled: true,
@@ -190,7 +190,7 @@ pub async fn config_change_skips_old_queued_occurrence() {
     repository
         .materialize_schedule(MaterializeReportSchedule {
             schedule_id: "primary".into(),
-            decision_policy_snapshot_id: version_id.clone(),
+            decision_policy_snapshot_id: version_id,
             spec_hash: hash('b'),
             expected_next_scheduled_for: due,
             latest_scheduled_for: due,
@@ -207,7 +207,7 @@ pub async fn config_change_skips_old_queued_occurrence() {
             &version_id,
             vec![ReconcileReportSchedule {
                 schedule_id: "primary".into(),
-                decision_policy_snapshot_id: version_id.clone(),
+                decision_policy_snapshot_id: version_id,
                 spec_hash: hash('c'),
                 next_scheduled_for: due + Duration::minutes(2),
                 enabled: true,

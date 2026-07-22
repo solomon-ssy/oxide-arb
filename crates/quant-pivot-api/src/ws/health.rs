@@ -5,15 +5,12 @@
 //! the core `HealthChecker`) instead of per-shard reconnect log spam.
 
 use std::{
-    collections::{HashMap, HashSet},
     fmt::{Display, Formatter, Result as FmtResult},
     time::Instant,
 };
 
 use parking_lot::RwLock;
-use quant_pivot_models::{
-    domain::governance::lifecycle::WS_MARKET_DATA_STALE_THRESHOLD_MS, types::TokenId,
-};
+use quant_pivot_models::domain::governance::lifecycle::WS_MARKET_DATA_STALE_THRESHOLD_MS;
 
 /// Per-shard connection slots, indexed by `shard_id`.
 #[derive(Default)]
@@ -21,22 +18,11 @@ pub struct ShardHealthBoard {
     slots: RwLock<Vec<ShardSlot>>,
 }
 
-/// Token-level market-data freshness observed by the CLOB WS transport.
-#[derive(Default)]
-pub struct TokenFreshnessBoard {
-    tokens: RwLock<HashMap<TokenId, TokenFreshnessSlot>>,
-}
-
 #[derive(Clone, Copy)]
 struct ShardSlot {
     connected: bool,
     /// When the slot last transitioned into its current state.
     since: Instant,
-}
-
-#[derive(Clone, Copy)]
-struct TokenFreshnessSlot {
-    last_message_at: Instant,
 }
 
 impl ShardHealthBoard {
@@ -86,47 +72,6 @@ impl ShardHealthBoard {
     }
 }
 
-impl TokenFreshnessBoard {
-    /// Record that a token event was durably persisted and successfully applied.
-    pub fn mark_token(&self, token_id: &TokenId, at: Instant) {
-        self.tokens.write().insert(
-            token_id.clone(),
-            TokenFreshnessSlot {
-                last_message_at: at,
-            },
-        );
-    }
-
-    /// Remove freshness immediately when continuity is no longer provable.
-    pub fn invalidate_token(&self, token_id: &TokenId) {
-        self.tokens.write().remove(token_id);
-    }
-
-    /// Remove a session's token freshness under one lock acquisition.
-    pub fn invalidate_tokens(&self, token_ids: &[TokenId]) {
-        let mut tokens = self.tokens.write();
-        for token_id in token_ids {
-            tokens.remove(token_id);
-        }
-    }
-
-    /// Milliseconds since the last WS event for a token.
-    #[must_use]
-    pub fn token_age_ms(&self, token_id: &TokenId) -> Option<u64> {
-        self.tokens
-            .read()
-            .get(token_id)
-            .and_then(|slot| u64::try_from(slot.last_message_at.elapsed().as_millis()).ok())
-    }
-
-    /// Drop freshness slots for tokens no longer present in the transport union.
-    pub fn prune_tokens(&self, active_tokens: &HashSet<TokenId>) {
-        self.tokens
-            .write()
-            .retain(|token_id, _| active_tokens.contains(token_id));
-    }
-}
-
 /// Snapshot of shard connectivity for health checks and aggregate logs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ShardHealthSummary {
@@ -162,10 +107,6 @@ pub trait WsShardHealthPort: Send + Sync {
 
     /// Milliseconds since the last CLOB websocket message on any shard.
     fn last_message_age_ms(&self) -> Option<u64>;
-
-    /// Milliseconds since a specific token last produced a normalized WS event
-    /// (local receipt clock), or `None` when the token has never been seen.
-    fn token_message_age_ms(&self, token_id: &TokenId) -> Option<u64>;
 
     /// Whether market-data is healthy: global traffic fresh within
     /// [`WS_MARKET_DATA_STALE_THRESHOLD_MS`] AND every spawned shard connected.

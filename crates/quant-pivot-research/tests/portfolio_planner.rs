@@ -411,7 +411,7 @@ fn risk_envelope_hash_stable() {
         a.planned[0]
             .risk_envelope
             .envelope_hash
-            .as_str()
+            .to_string()
             .starts_with("blake3:")
     );
     // Flags are excluded from the hash anchor.

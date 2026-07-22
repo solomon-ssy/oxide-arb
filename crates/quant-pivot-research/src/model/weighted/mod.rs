@@ -146,7 +146,7 @@ impl WeightedFactorRuntime {
                 confidence_weighted += *weight * confidence;
             }
             contributions.push(FactorContribution {
-                definition_id: factor.definition_id.clone(),
+                definition_id: factor.definition_id,
                 name: factor.name.clone(),
                 family: factor.family,
                 value_state: factor.value_state(),
@@ -230,7 +230,7 @@ impl WeightedFactorRuntime {
 
         Ok(Some(SignalCandidate {
             signal_candidate_id: SignalCandidateId::from_v7(),
-            model_run_id: model_run_id.clone(),
+            model_run_id: *model_run_id,
             market_id: row.market_id.clone(),
             token_id,
             outcome_side,
@@ -319,9 +319,9 @@ impl WeightedFactorRuntime {
     }
 
     fn input_audit(&self, table: &FactorInferenceTable) -> QuantResult<Vec<ModelInputAuditRow>> {
-        let input_contract_hash = self.artifact.input_contract_hash.clone();
+        let input_contract_hash = self.artifact.input_contract_hash;
         let transform_hash = self.artifact.input_transform_hash()?;
-        let training_input_hash = self.artifact.training_input_hash.clone();
+        let training_input_hash = self.artifact.training_input_hash;
         let row_count = table
             .rows
             .iter()
@@ -357,7 +357,7 @@ impl WeightedFactorRuntime {
                     })
                     .transpose()?;
                 audit.push(ModelInputAuditRow {
-                    model_version_id: self.artifact.header.model_version_id.clone(),
+                    model_version_id: self.artifact.header.model_version_id,
                     model_family: self.artifact.header.model_family,
                     market_id: row.market_id.clone(),
                     raw_input_name: factor.name.to_string(),
@@ -365,9 +365,9 @@ impl WeightedFactorRuntime {
                     raw_value: factor.raw_value.map(|value| value.to_string()),
                     encoded_column: format!("{}.normalized_score", factor.name),
                     encoded_value_bits,
-                    input_contract_hash: input_contract_hash.clone(),
-                    transform_hash: transform_hash.clone(),
-                    training_input_hash: training_input_hash.clone(),
+                    input_contract_hash,
+                    transform_hash,
+                    training_input_hash,
                 });
             }
         }
@@ -378,7 +378,7 @@ impl WeightedFactorRuntime {
 #[async_trait]
 impl QuantModelRuntime for WeightedFactorRuntime {
     fn model_version_id(&self) -> ModelVersionId {
-        self.artifact.header.model_version_id.clone()
+        self.artifact.header.model_version_id
     }
 
     fn model_family(&self) -> ModelFamily {
@@ -386,7 +386,7 @@ impl QuantModelRuntime for WeightedFactorRuntime {
     }
 
     fn feature_schema_hash(&self) -> ContentHash {
-        self.artifact.header.feature_schema_hash.clone()
+        self.artifact.header.feature_schema_hash
     }
 
     fn required_features(&self) -> Vec<FeatureName> {
@@ -712,8 +712,12 @@ mod tests {
                     .encoded_value_bits
                     .is_some_and(|bits| f64::from_bits(bits).is_finite())
                 && row.input_contract_hash == expected_contract_hash
-                && !row.transform_hash.as_str().is_empty()
-                && !row.training_input_hash.as_str().is_empty()
+                && row.transform_hash.as_bytes().iter().any(|byte| *byte != 0)
+                && row
+                    .training_input_hash
+                    .as_bytes()
+                    .iter()
+                    .any(|byte| *byte != 0)
         }));
     }
 

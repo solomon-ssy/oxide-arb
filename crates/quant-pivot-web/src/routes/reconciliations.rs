@@ -107,7 +107,7 @@ async fn resolve(
         "reason": body.reason,
     }))?;
 
-    let reconciliation_id_for_cmd = reconciliation_id.clone();
+    let reconciliation_id_for_cmd = reconciliation_id;
     let outcome = state
         .reconciliation
         .resolve_operator(ResolveReconciliationCommand {

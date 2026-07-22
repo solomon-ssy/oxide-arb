@@ -103,7 +103,7 @@ use rust_decimal_macros::dec;
 use sea_orm::{ActiveModelTrait, ActiveValue, DatabaseConnection, EntityTrait, IntoActiveModel};
 
 fn content_hash(seed: char) -> ContentHash {
-    ContentHash::parse(format!("blake3:{}", seed.to_string().repeat(64))).expect("hash")
+    ContentHash::parse(&format!("blake3:{}", seed.to_string().repeat(64))).expect("hash")
 }
 
 fn new_account_snapshot() -> NewAccountSnapshot {
@@ -138,7 +138,7 @@ pub async fn account_snapshot_repo_create_find() {
     let repo = PgAccountSnapshotRepository::new(db.clone());
 
     let snapshot = new_account_snapshot();
-    let id = snapshot.account_snapshot_id.clone();
+    let id = snapshot.account_snapshot_id;
     let created = repo.create(snapshot).await.expect("create snapshot");
     assert_eq!(created.account_snapshot_id, id);
     assert_eq!(created.capital_base_usd, Usd::new(dec!(10000)));
@@ -189,10 +189,10 @@ pub async fn report_transaction_persists_chain_and_reserved_capital_sums_pending
         report: RecommendationReportId::from_v7(),
         recommendation: RecommendationId::from_v7(),
         condition_instance: EntryConditionInstanceId::from_v7(),
-        model_version: model_version_id.clone(),
-        model_run: model_run_id.clone(),
-        market_selection: market_selection_id.clone(),
-        decision_policy_snapshot: rc_id.clone(),
+        model_version: model_version_id,
+        model_run: model_run_id,
+        market_selection: market_selection_id,
+        decision_policy_snapshot: rc_id,
         market: market_id.to_owned(),
         event: event_id.to_owned(),
     };
@@ -255,7 +255,7 @@ pub async fn find_expirable_returns_published_reports_before_cutoff_only() {
     );
     let worker_id = WorkerId::from_v7();
     let claimed = report_repo
-        .claim_fact_delivery(worker_id.clone(), 60)
+        .claim_fact_delivery(worker_id, 60)
         .await
         .expect("claim report facts")
         .expect("pending report facts");
@@ -282,7 +282,7 @@ pub async fn find_expirable_returns_published_reports_before_cutoff_only() {
         .find_expirable(Utc::now() + Duration::hours(2), 100)
         .await
         .expect("find due");
-    assert_eq!(due, vec![ids.report.clone()]);
+    assert_eq!(due, vec![ids.report]);
 
     // Roll-up is gated on every recommendation being terminal; the report's
     // recommendation is still `Published`, so the roll-up is a no-op.
@@ -371,7 +371,7 @@ pub async fn report_fact_delivery_recovers_retry_and_expired_lease_without_early
     .await;
 
     let worker_one = WorkerId::from_v7();
-    repo.claim_fact_delivery(worker_one.clone(), 60)
+    repo.claim_fact_delivery(worker_one, 60)
         .await
         .expect("claim initial delivery")
         .expect("pending delivery");
@@ -398,7 +398,7 @@ pub async fn report_fact_delivery_recovers_retry_and_expired_lease_without_early
         "retry must not hot-loop before next_attempt_at"
     );
 
-    let row = Entity::find_by_id(ids.report.clone())
+    let row = Entity::find_by_id(ids.report)
         .one(&db)
         .await
         .expect("load retrying delivery")
@@ -422,7 +422,7 @@ pub async fn report_fact_delivery_recovers_retry_and_expired_lease_without_early
         "a live delivery lease must be exclusive"
     );
 
-    let row = Entity::find_by_id(ids.report.clone())
+    let row = Entity::find_by_id(ids.report)
         .one(&db)
         .await
         .expect("load delivering lease")
@@ -433,7 +433,7 @@ pub async fn report_fact_delivery_recovers_retry_and_expired_lease_without_early
 
     let worker_three = WorkerId::from_v7();
     let recovered = repo
-        .claim_fact_delivery(worker_three.clone(), 60)
+        .claim_fact_delivery(worker_three, 60)
         .await
         .expect("recover expired lease")
         .expect("expired delivery lease");
@@ -497,7 +497,7 @@ async fn create_and_assert_report_transaction(db: &DatabaseConnection, ids: &Txn
         .await
         .expect("find by trigger key")
         .expect("trigger key row");
-    assert_eq!(found_by_trigger.output_report_id, Some(ids.report.clone()));
+    assert_eq!(found_by_trigger.output_report_id, Some(ids.report));
 
     let op_logs = PgOperationLogRepository::new(db.clone())
         .page(OperationLogQuery {
@@ -545,11 +545,11 @@ async fn assert_reserved_capital_tracks_pending_intent(
     intent_repo
         .create_with_allocation(
             NewOrderIntent {
-                order_intent_id: order_intent_id.clone(),
-                recommendation_id: recommendation_id.clone(),
+                order_intent_id,
+                recommendation_id: *recommendation_id,
                 runtime_mode: QuantRuntimeMode::SemiAuto,
-                decision_policy_snapshot_id: decision_policy_snapshot_id.clone(),
-                model_version_id: model_version_id.clone(),
+                decision_policy_snapshot_id: *decision_policy_snapshot_id,
+                model_version_id: *model_version_id,
                 research_profile_artifact_id: fixture_profile_ref().artifact_id(),
                 intent_kind: OrderIntentKind::Buy,
                 status: OrderIntentStatus::PendingApproval,
@@ -561,7 +561,7 @@ async fn assert_reserved_capital_tracks_pending_intent(
                 policy_hash: None,
                 status_reason: None,
                 admission_trace_ref: None,
-                condition_instance_id: condition_instance_id.clone(),
+                condition_instance_id: *condition_instance_id,
                 entry_order_json: EntryOrderSpec {
                     token_id: TokenId::new("token-1"),
                     side: Side::Buy,
@@ -598,8 +598,8 @@ async fn assert_reserved_capital_tracks_pending_intent(
             },
             NewCapitalAllocation {
                 capital_allocation_id: CapitalAllocationId::from_v7(),
-                order_intent_id: order_intent_id.clone(),
-                recommendation_id: recommendation_id.clone(),
+                order_intent_id,
+                recommendation_id: *recommendation_id,
                 state: CapitalAllocationState::Allocated,
                 planned_usd: Usd::new(dec!(250)),
                 allocated_usd: Usd::new(dec!(250)),
@@ -662,8 +662,8 @@ async fn create_and_submit_execution_order(
 ) {
     let order = execution_repo
         .create(NewExecutionOrder {
-            execution_order_id: execution_order_id.clone(),
-            order_intent_id: order_intent_id.clone(),
+            execution_order_id: *execution_order_id,
+            order_intent_id: *order_intent_id,
             order_phase: ExecutionOrderPhase::Entry,
             market_id: MarketId::new(ids.market.clone()),
             token_id: TokenId::new("token-1"),
@@ -718,9 +718,9 @@ async fn append_and_resolve_reconciliation(
     let reconciliation_id = ReconciliationId::from_v7();
     reconciliation_repo
         .create(NewReconciliation {
-            reconciliation_id: reconciliation_id.clone(),
-            execution_order_id: execution_order_id.clone(),
-            order_intent_id: order_intent_id.clone(),
+            reconciliation_id,
+            execution_order_id: *execution_order_id,
+            order_intent_id: *order_intent_id,
             result: ReconciliationResult::Unresolvable,
             evidence_json: ReconciliationEvidenceChain::default(),
             venue_filled_shares: None,
@@ -840,7 +840,7 @@ pub async fn capital_kill_switch_and_attribution_repositories_round_trip() {
     let attribution_repo = PgAttributionRepository::new(db.clone());
     let outcome = attribution_repo
         .insert_final_and_mark_attributed(NewRecommendationAttribution {
-            recommendation_id: ids.recommendation.clone(),
+            recommendation_id: ids.recommendation,
             outcome: RecommendationAttributionOutcome::FailedUnfilled,
             entry_outcome_json: EntryOutcome::default(),
             exit_outcome_json: ExitOutcome::default(),
@@ -910,7 +910,7 @@ async fn seed_clear_feature_parity_state(db: &DatabaseConnection) -> FeaturePari
     let state_id = FeatureParityStateId::from_v7();
     QuantFeatureParityStateEntity::insert(
         NewFeatureParityState {
-            state_id: state_id.clone(),
+            state_id,
             state: FeatureParityLatchState::Clear,
             transition: FeatureParityStateTransition::GovernedAcknowledge,
             cause_run_id: None,
@@ -933,11 +933,11 @@ async fn create_pending_intent(db: &DatabaseConnection, ids: &TxnIds) -> OrderIn
     PgOrderIntentRepository::new(db.clone())
         .create_with_allocation(
             NewOrderIntent {
-                order_intent_id: order_intent_id.clone(),
-                recommendation_id: ids.recommendation.clone(),
+                order_intent_id,
+                recommendation_id: ids.recommendation,
                 runtime_mode: QuantRuntimeMode::SemiAuto,
-                decision_policy_snapshot_id: ids.decision_policy_snapshot.clone(),
-                model_version_id: ids.model_version.clone(),
+                decision_policy_snapshot_id: ids.decision_policy_snapshot,
+                model_version_id: ids.model_version,
                 research_profile_artifact_id: fixture_profile_ref().artifact_id(),
                 intent_kind: OrderIntentKind::Buy,
                 status: OrderIntentStatus::PendingApproval,
@@ -949,7 +949,7 @@ async fn create_pending_intent(db: &DatabaseConnection, ids: &TxnIds) -> OrderIn
                 policy_hash: None,
                 status_reason: None,
                 admission_trace_ref: None,
-                condition_instance_id: ids.condition_instance.clone(),
+                condition_instance_id: ids.condition_instance,
                 entry_order_json: EntryOrderSpec {
                     token_id: TokenId::new("token-1"),
                     side: Side::Buy,
@@ -986,8 +986,8 @@ async fn create_pending_intent(db: &DatabaseConnection, ids: &TxnIds) -> OrderIn
             },
             NewCapitalAllocation {
                 capital_allocation_id: CapitalAllocationId::from_v7(),
-                order_intent_id: order_intent_id.clone(),
-                recommendation_id: ids.recommendation.clone(),
+                order_intent_id,
+                recommendation_id: ids.recommendation,
                 state: CapitalAllocationState::Allocated,
                 planned_usd: Usd::new(dec!(250)),
                 allocated_usd: Usd::new(dec!(250)),
@@ -1032,7 +1032,7 @@ async fn seed_model_version(
     let model_spec_id = ModelSpecId::from_v7();
     registry
         .create_model_spec(model_spec_fixtures::new_model_spec_fixture(
-            model_spec_id.clone(),
+            model_spec_id,
             "pg-account-it",
             ModelFamily::WeightedFactor,
             86_400,
@@ -1045,7 +1045,7 @@ async fn seed_model_version(
     let model_version_id = ModelVersionId::from_v7();
     registry
         .create_model_version(NewModelVersion {
-            model_version_id: model_version_id.clone(),
+            model_version_id,
             model_spec_id,
             version: 1,
             artifact_hash: content_hash('a'),
@@ -1069,10 +1069,10 @@ async fn seed_model_version(
     let model_run_id = ModelRunId::from_v7();
     PgModelRunRepository::new(db.clone())
         .create(NewModelRun {
-            model_run_id: model_run_id.clone(),
+            model_run_id,
             run_kind: ModelRunKind::LiveInference,
-            model_version_id: Some(model_version_id.clone()),
-            decision_policy_snapshot_id: rc_id.clone(),
+            model_version_id: Some(model_version_id),
+            decision_policy_snapshot_id: *rc_id,
             market_selection_id: None,
             window_start: Utc::now(),
             window_end: Utc::now(),
@@ -1100,9 +1100,9 @@ async fn seed_market_selection(
     PgMarketSelectionRepository::new(db.clone())
         .create_snapshot(
             NewMarketSelection {
-                market_selection_id: id.clone(),
+                market_selection_id: id,
                 decision_at: Utc::now(),
-                decision_policy_snapshot_id: rc_id.clone(),
+                decision_policy_snapshot_id: *rc_id,
                 selector_hash: content_hash('b'),
                 market_count: 1,
                 exclusion_summary: SelectionExclusionSummary::default(),
@@ -1135,12 +1135,12 @@ struct TxnIds {
 fn build_report_transaction(ids: &TxnIds) -> NewReportTransaction {
     let equity_snapshot_id = EquitySnapshotId::from_v7();
     let decision_at = Utc::now();
-    let report = report_row(ids, equity_snapshot_id.clone(), decision_at);
+    let report = report_row(ids, equity_snapshot_id, decision_at);
     let sampled_feature_parity = report_fixtures::sampled_parity(&report);
     let recommendation = report_recommendation(ids, decision_at);
     let entry_condition_instance = NewEntryConditionInstance {
-        condition_instance_id: ids.condition_instance.clone(),
-        recommendation_id: ids.recommendation.clone(),
+        condition_instance_id: ids.condition_instance,
+        recommendation_id: ids.recommendation,
         artifact_id: None,
         artifact_hash: None,
         state: EntryConditionState::NotRequired,
@@ -1162,16 +1162,16 @@ fn build_report_transaction(ids: &TxnIds) -> NewReportTransaction {
         consumed_at: None,
     };
     NewReportTransaction {
-        feature_parity_state_id: Some(ids.feature_parity_state_id.clone()),
+        feature_parity_state_id: Some(ids.feature_parity_state_id),
         account_snapshot: NewAccountSnapshot {
-            account_snapshot_id: ids.account_snapshot.clone(),
+            account_snapshot_id: ids.account_snapshot,
             ..new_account_snapshot()
         },
         equity_snapshot: report_equity_snapshot(ids, &equity_snapshot_id, decision_at),
         data_quality_snapshot: NewReportDataQualitySnapshot {
-            report_data_quality_snapshot_id: ids.data_quality_snapshot.clone(),
+            report_data_quality_snapshot_id: ids.data_quality_snapshot,
             decision_at,
-            decision_policy_snapshot_id: ids.decision_policy_snapshot.clone(),
+            decision_policy_snapshot_id: ids.decision_policy_snapshot,
             tokens_json: ReportDataQualityTokens(Vec::new()),
         },
         portfolio_plan: report_portfolio_plan(ids, decision_at),
@@ -1185,13 +1185,13 @@ fn build_report_transaction(ids: &TxnIds) -> NewReportTransaction {
     }
 }
 
-fn report_equity_snapshot(
+const fn report_equity_snapshot(
     ids: &TxnIds,
     equity_snapshot_id: &EquitySnapshotId,
     decision_at: DateTime<Utc>,
 ) -> NewEquitySnapshot {
     NewEquitySnapshot {
-        equity_snapshot_id: equity_snapshot_id.clone(),
+        equity_snapshot_id: *equity_snapshot_id,
         as_of: decision_at,
         source: AccountSource::Polymarket,
         venue_net_liquidation_usd: Usd::new(dec!(10000)),
@@ -1202,15 +1202,15 @@ fn report_equity_snapshot(
         unrealized_pnl_usd: Usd::ZERO,
         high_water_mark_usd: Usd::new(dec!(10000)),
         drawdown_pct: Decimal::ZERO,
-        account_snapshot_ref: Some(ids.account_snapshot.clone()),
+        account_snapshot_ref: Some(ids.account_snapshot),
     }
 }
 
 fn report_portfolio_plan(ids: &TxnIds, decision_at: DateTime<Utc>) -> NewPortfolioPlan {
     NewPortfolioPlan {
-        portfolio_plan_id: ids.portfolio_plan.clone(),
-        model_run_id: Some(ids.model_run.clone()),
-        market_selection_id: ids.market_selection.clone(),
+        portfolio_plan_id: ids.portfolio_plan,
+        model_run_id: Some(ids.model_run),
+        market_selection_id: ids.market_selection,
         decision_at,
         budget_usd: Usd::new(dec!(10000)),
         allocated_usd: Usd::new(dec!(250)),
@@ -1227,24 +1227,24 @@ fn report_row(
     decision_at: DateTime<Utc>,
 ) -> NewRecommendationReport {
     NewRecommendationReport {
-        recommendation_report_id: ids.report.clone(),
+        recommendation_report_id: ids.report,
         research_profile_artifact_id: execution_pg_seed::fixture_profile_ref().artifact_id(),
         report_kind: ReportKind::TopN,
         decision_at,
         horizon_secs: 86_400,
         runtime_mode: QuantRuntimeMode::ReportOnly,
-        decision_policy_snapshot_id: ids.decision_policy_snapshot.clone(),
+        decision_policy_snapshot_id: ids.decision_policy_snapshot,
         model_run_id: None,
-        model_version_id: ids.model_version.clone(),
-        market_selection_id: ids.market_selection.clone(),
-        portfolio_plan_id: ids.portfolio_plan.clone(),
+        model_version_id: ids.model_version,
+        market_selection_id: ids.market_selection,
+        portfolio_plan_id: ids.portfolio_plan,
         top_n: 20,
         status: RecommendationReportStatus::Prepared,
         account_source: AccountSource::Polymarket,
         capital_base_usd: Usd::new(dec!(10000)),
-        account_snapshot_ref: ids.account_snapshot.clone(),
+        account_snapshot_ref: ids.account_snapshot,
         equity_snapshot_ref: equity_snapshot_id,
-        data_quality_snapshot_ref: ids.data_quality_snapshot.clone(),
+        data_quality_snapshot_ref: ids.data_quality_snapshot,
         summary_json: report_summary(),
         published_at: None,
         successor_report_id: None,
@@ -1259,9 +1259,9 @@ fn report_row(
 
 fn report_recommendation(ids: &TxnIds, decision_at: DateTime<Utc>) -> NewRecommendation {
     NewRecommendation {
-        recommendation_id: ids.recommendation.clone(),
+        recommendation_id: ids.recommendation,
         research_profile_artifact_id: execution_pg_seed::fixture_profile_ref().artifact_id(),
-        recommendation_report_id: ids.report.clone(),
+        recommendation_report_id: ids.report,
         rank: 1,
         market_id: MarketId::new(&ids.market),
         event_id: EventId::new(&ids.event),
@@ -1428,7 +1428,7 @@ fn trade_plan(notional: Usd) -> RecommendationTradePlan {
     let artifact_hash = content_hash('f');
     let dimension = TradePolicyCohortDimension {
         methodology_id: "fixture-v1".to_owned(),
-        methodology_hash: artifact_hash.clone(),
+        methodology_hash: artifact_hash,
         bucket_id: "fixture".to_owned(),
     };
     RecommendationTradePlan::Frozen {

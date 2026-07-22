@@ -17,13 +17,14 @@ use async_trait::async_trait;
 use blake3::Hasher;
 use chrono::{DateTime, Duration, Utc};
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use quant_pivot_allocator as _;
 use quant_pivot_error::QuantResult;
 use quant_pivot_migration::{
     acquire_lifecycle_lease, apply_under_lifecycle_lease, inspect_preproduction_postgres,
     plan as plan_postgres_migrations, release_lifecycle_lease, reset_preproduction_postgres,
 };
 use quant_pivot_models::{
-    config::{CompiledBuildIdentity, DeployConfig, PostgresConfig},
+    config::{ClickHouseConfig, CompiledBuildIdentity, DeployConfig, PostgresConfig},
     domain::{
         api::{ConfigApiContractSchema, ResearchModelApiContractSchema},
         governance::NewProductionEvidence,
@@ -62,6 +63,7 @@ use quant_pivot_storage::{
 };
 use quant_pivot_system_tests::production_stack;
 use rustls::crypto::aws_lc_rs;
+use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
 use serde::{Deserialize, Serialize};
 use testcontainers::{ImageExt, runners::AsyncRunner};
 use testcontainers_modules::postgres::Postgres;
@@ -70,6 +72,7 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 const BOOTSTRAP_ADMIN_PASSWORD_FILE_ENV: &str = "QUANT_PIVOT_BOOTSTRAP__ADMIN_PASSWORD_FILE";
+const CLEAN_BOOTSTRAP_CONFIRMATION: &str = "DELETE_ALL_PREPRODUCTION_DATA_AND_REBOOTSTRAP";
 
 #[derive(Parser)]
 #[command(name = "quant-pivot-xtask")]
@@ -301,6 +304,9 @@ struct PreproductionResetApplyArgs {
     journal_file: PathBuf,
     #[arg(long)]
     confirm_nonce: PreproductionResetNonce,
+    /// Exact destructive scope acknowledgement printed by `plan`.
+    #[arg(long)]
+    confirm: String,
 }
 
 #[derive(Args)]
@@ -542,13 +548,7 @@ fn persist_evidence_artifact(
     let source_hash = hash_file(source)?;
     fs::create_dir_all(evidence_dir)
         .with_context(|| format!("create evidence directory {}", evidence_dir.display()))?;
-    let destination = evidence_dir.join(format!(
-        "{}.evidence",
-        source_hash
-            .as_str()
-            .strip_prefix("blake3:")
-            .context("content hash has no blake3 prefix")?
-    ));
+    let destination = evidence_dir.join(format!("{}.evidence", source_hash.hex()));
     if destination.exists() {
         if hash_file(&destination)? != source_hash {
             bail!(
@@ -594,8 +594,7 @@ fn hash_file(path: &Path) -> Result<ContentHash> {
         }
         hasher.update(&buffer[..read]);
     }
-    ContentHash::parse(format!("blake3:{}", hasher.finalize().to_hex()))
-        .context("validate computed evidence content hash")
+    Ok(ContentHash::from_bytes(*hasher.finalize().as_bytes()))
 }
 
 const RESET_JOURNAL_FORMAT_VERSION: u32 = 2;
@@ -740,6 +739,7 @@ async fn preproduction_reset_plan(args: PreproductionResetPlanArgs) -> Result<()
     println!("operation_id={}", journal.operation_id);
     println!("journal_file={}", args.journal_file.display());
     println!("confirmation_nonce={}", journal.nonce);
+    println!("required_confirmation={CLEAN_BOOTSTRAP_CONFIRMATION}");
     println!("expires_at={}", journal.expires_at.to_rfc3339());
     println!("postgres_endpoint_fingerprint={}", journal.targets.postgres);
     println!(
@@ -769,7 +769,7 @@ async fn preproduction_reset_plan(args: PreproductionResetPlanArgs) -> Result<()
 async fn preproduction_reset_apply(args: PreproductionResetApplyArgs) -> Result<()> {
     let deploy = load_reset_deploy(&args.config)?;
     let mut journal = read_reset_journal(&args.journal_file)?;
-    validate_reset_journal_for_apply(&journal, &deploy, &args.confirm_nonce)?;
+    validate_reset_journal_for_apply(&journal, &deploy, &args.confirm_nonce, &args.confirm)?;
     let current_inventory = reset_inventory(&deploy).await?;
     if current_inventory != journal.inventory {
         bail!("reset target inventory changed after planning; create a new reset plan");
@@ -859,6 +859,7 @@ async fn preproduction_reset_apply(args: PreproductionResetApplyArgs) -> Result<
         if redis_remaining != 0 {
             bail!("Redis qp:* namespace is not empty after reset");
         }
+        verify_clean_bootstrap_facts(&postgres, &deploy.db.clickhouse).await?;
         transition_reset_journal(
             &args.journal_file,
             &mut journal,
@@ -946,6 +947,7 @@ async fn preproduction_reset_verify_under_lease(deploy: &DeployConfig) -> Result
     let clickhouse_status = verify_schema(&deploy.db.clickhouse)
         .await
         .context("verify ClickHouse boot manifest")?;
+    verify_clean_bootstrap_facts(&postgres, &deploy.db.clickhouse).await?;
     let redis_keys = count_preproduction_namespace(&deploy.cache.redis)
         .await
         .context("count Redis qp:* namespace")?;
@@ -961,6 +963,48 @@ async fn preproduction_reset_verify_under_lease(deploy: &DeployConfig) -> Result
         postgres_status.current_version, clickhouse_status.current_version
     );
     postgres.close().await;
+    Ok(())
+}
+
+async fn verify_clean_bootstrap_facts(
+    postgres: &PostgresPool,
+    clickhouse_config: &ClickHouseConfig,
+) -> Result<()> {
+    let clickhouse = ClickHousePool::connect(clickhouse_config)
+        .await
+        .context("connect clean-bootstrap ClickHouse target")?;
+    let ledger_rows = clickhouse
+        .client()
+        .query("SELECT count() FROM quant_book_l2_ledger")
+        .fetch_one::<u64>()
+        .await
+        .context("count clean-bootstrap L2 ledger")?;
+    if ledger_rows != 0 {
+        bail!("clean bootstrap unexpectedly contains {ledger_rows} L2 ledger rows");
+    }
+
+    let evidence_row = postgres
+        .connection()
+        .query_one_raw(Statement::from_string(
+            DatabaseBackend::Postgres,
+            "SELECT (SELECT COUNT(*) FROM quant_source_slice) + \
+                    (SELECT COUNT(*) FROM quant_training_dataset) + \
+                    (SELECT COUNT(*) FROM quant_backtest_path_set) + \
+                    (SELECT COUNT(*) FROM quant_backtest_report) + \
+                    (SELECT COUNT(*) FROM quant_feature_parity_run) + \
+                    (SELECT COUNT(*) FROM quant_trade_policy_validation) + \
+                    (SELECT COUNT(*) FROM quant_research_readiness_evidence) \
+                    AS l2_dependent_evidence_count",
+        ))
+        .await
+        .context("count clean-bootstrap L2-dependent evidence")?
+        .context("PostgreSQL returned no clean-bootstrap evidence count")?;
+    let evidence_rows = evidence_row
+        .try_get::<i64>("", "l2_dependent_evidence_count")
+        .context("decode clean-bootstrap evidence count")?;
+    if evidence_rows != 0 {
+        bail!("clean bootstrap unexpectedly contains {evidence_rows} L2-dependent evidence rows");
+    }
     Ok(())
 }
 
@@ -1072,8 +1116,14 @@ fn validate_reset_journal_for_apply(
     journal: &PreproductionResetJournal,
     deploy: &DeployConfig,
     confirm_nonce: &PreproductionResetNonce,
+    confirmation: &str,
 ) -> Result<()> {
     validate_reset_journal_integrity(journal, deploy)?;
+    if confirmation != CLEAN_BOOTSTRAP_CONFIRMATION {
+        bail!(
+            "destructive clean bootstrap requires exact --confirm {CLEAN_BOOTSTRAP_CONFIRMATION}"
+        );
+    }
     if journal.stage != ResetStage::Planned
         || &journal.nonce != confirm_nonce
         || journal.expires_at <= Utc::now()
@@ -1680,10 +1730,10 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        PreproductionResetJournal, RESET_JOURNAL_FORMAT_VERSION, RESET_PLAN_TTL_MINUTES,
-        ResetObjectInventory, ResetStage, archive_reset_journal, mark_reset_journal_failed,
-        read_reset_journal, report_capacity_ceiling, reset_journal_hash, reset_target_fingerprints,
-        transition_reset_journal, validate_completed_reset_journal,
+        CLEAN_BOOTSTRAP_CONFIRMATION, PreproductionResetJournal, RESET_JOURNAL_FORMAT_VERSION,
+        RESET_PLAN_TTL_MINUTES, ResetObjectInventory, ResetStage, archive_reset_journal,
+        mark_reset_journal_failed, read_reset_journal, report_capacity_ceiling, reset_journal_hash,
+        reset_target_fingerprints, transition_reset_journal, validate_completed_reset_journal,
         validate_reset_journal_for_apply, write_private_json_atomic,
     };
 
@@ -1727,6 +1777,7 @@ mod tests {
                 &journal,
                 &deploy,
                 &PreproductionResetNonce::from_v7(),
+                CLEAN_BOOTSTRAP_CONFIRMATION,
             )
             .is_err(),
             "nonce drift must fail closed"
@@ -1734,8 +1785,19 @@ mod tests {
         let mut tampered = journal.clone();
         tampered.operation_id = Uuid::now_v7();
         assert!(
-            validate_reset_journal_for_apply(&tampered, &deploy, &tampered.nonce).is_err(),
+            validate_reset_journal_for_apply(
+                &tampered,
+                &deploy,
+                &tampered.nonce,
+                CLEAN_BOOTSTRAP_CONFIRMATION,
+            )
+            .is_err(),
             "immutable journal tampering must fail closed"
+        );
+        assert!(
+            validate_reset_journal_for_apply(&journal, &deploy, &journal.nonce, "DELETE_ONLY_L2",)
+                .is_err(),
+            "an acknowledgement that understates the full reset scope must fail closed"
         );
         let mut stage_tampered = journal.clone();
         stage_tampered.stage = ResetStage::Completed;

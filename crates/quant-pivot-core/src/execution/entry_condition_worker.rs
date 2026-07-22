@@ -133,7 +133,7 @@ impl LiveEntryConditionInputProvider {
         let factor_ids = expected
             .factor_bindings
             .iter()
-            .map(|binding| binding.definition_id.clone())
+            .map(|binding| binding.definition_id)
             .collect::<Vec<_>>();
         let factors = self.factors.find_definitions_by_ids(&factor_ids).await?;
         let (linkage, latest_linkage) = self.load_linkage_binding(expected).await?;
@@ -218,7 +218,7 @@ impl LiveEntryConditionInputProvider {
         token_ids
             .into_iter()
             .filter_map(|token_id| {
-                let snapshot = self.books.load(&token_id)?;
+                let snapshot = self.books.load_by_id(&token_id)?;
                 let price = snapshot.best_ask()?;
                 let timestamp_ms = i64::try_from(snapshot.timestamp_ms).ok()?;
                 let observed_at = DateTime::from_timestamp_millis(timestamp_ms)?;
@@ -244,12 +244,9 @@ impl LiveEntryConditionInputProvider {
                 .iter_mut()
                 .find(|(model_version_id, _)| model_version_id == &condition.model_version_id);
             if let Some((_, definition_ids)) = group {
-                push_unique(definition_ids, condition.definition_id.clone());
+                push_unique(definition_ids, condition.definition_id);
             } else {
-                groups.push((
-                    condition.model_version_id.clone(),
-                    vec![condition.definition_id.clone()],
-                ));
+                groups.push((condition.model_version_id, vec![condition.definition_id]));
             }
         }
         let mut inputs = Vec::with_capacity(required.len());
@@ -270,13 +267,13 @@ impl LiveEntryConditionInputProvider {
                 inputs.push(FactorSnapshotInput {
                     definition_id: value.factor_definition_id,
                     definition_hash: value.definition_hash,
-                    model_version_id: model_version_id.clone(),
+                    model_version_id,
                     raw_value,
                     normalized_value: normalized_value.inner(),
                     confidence: value.confidence.inner(),
                     observed_at: snapshot.observed_at,
                     available_at: snapshot.available_at,
-                    snapshot_hash: snapshot.snapshot_hash.clone(),
+                    snapshot_hash: snapshot.snapshot_hash,
                 });
             }
         }
@@ -669,11 +666,7 @@ impl EntryConditionWorker {
             let evaluated_at = Utc::now();
             let leased = self
                 .conditions
-                .lease_next(
-                    self.worker_id.clone(),
-                    evaluated_at,
-                    evaluated_at + lease_duration,
-                )
+                .lease_next(self.worker_id, evaluated_at, evaluated_at + lease_duration)
                 .await?;
             let Some(instance) = leased else {
                 break;
@@ -812,15 +805,15 @@ impl EntryConditionWorker {
             .conditions
             .apply_evaluation(
                 &instance.condition_instance_id,
-                self.worker_id.clone(),
+                self.worker_id,
                 ApplyEntryConditionEvaluation {
                     expected_revision: instance.revision,
                     expected_lease_epoch: instance.lease_epoch,
                     state: decision.state,
                     truth: evaluation.truth.clone(),
-                    evaluation_hash: evaluation.evaluation_hash.clone(),
-                    input_fingerprint: evaluation.input_fingerprint.clone(),
-                    continuity_hash: evaluation.continuity_hash.clone(),
+                    evaluation_hash: evaluation.evaluation_hash,
+                    input_fingerprint: evaluation.input_fingerprint,
+                    continuity_hash: evaluation.continuity_hash,
                     fold_state: evaluation.fold_state.clone(),
                     confirmation_started_at: decision.confirmation_started_at,
                     evaluated_at,
@@ -841,8 +834,8 @@ impl EntryConditionWorker {
         policy: &EntryConditionWorkerConfig,
     ) -> QuantResult<JoinHandle<()>> {
         let conditions = Arc::clone(&self.conditions);
-        let instance_id = instance.condition_instance_id.clone();
-        let worker_id = self.worker_id.clone();
+        let instance_id = instance.condition_instance_id;
+        let worker_id = self.worker_id;
         let lease_epoch = instance.lease_epoch;
         let renew_interval = StdDuration::from_secs(policy.lease_renew_interval_secs);
         let lease_duration = chrono_duration_secs(policy.lease_duration_secs, "lease duration")?;
@@ -855,12 +848,7 @@ impl EntryConditionWorker {
                 }
                 let now = Utc::now();
                 match conditions
-                    .renew_lease(
-                        &instance_id,
-                        worker_id.clone(),
-                        lease_epoch,
-                        now + lease_duration,
-                    )
+                    .renew_lease(&instance_id, worker_id, lease_epoch, now + lease_duration)
                     .await
                 {
                     Ok(true) => {}
@@ -883,7 +871,7 @@ impl EntryConditionWorker {
         self.conditions
             .invalidate(
                 &instance.condition_instance_id,
-                self.worker_id.clone(),
+                self.worker_id,
                 instance.revision,
                 instance.lease_epoch,
                 detail.into(),
@@ -896,11 +884,11 @@ impl EntryConditionWorker {
     fn publish(&self, instance: &EntryConditionInstanceInfo) {
         self.events
             .publish(CoreEvent::Condition(EntryConditionLifecycleEvent {
-                condition_instance_id: instance.condition_instance_id.clone(),
+                condition_instance_id: instance.condition_instance_id,
                 revision: instance.revision,
                 state: instance.state,
                 truth: instance.truth_json.clone(),
-                evaluation_hash: instance.evaluation_hash.clone(),
+                evaluation_hash: instance.evaluation_hash,
             }));
     }
 }

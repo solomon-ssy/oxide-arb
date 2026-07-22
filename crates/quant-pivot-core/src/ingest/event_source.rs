@@ -1,26 +1,19 @@
 //! Injectable sources for the data pipeline event loop.
 
-use std::time::Instant;
-
 use flume::Receiver;
-use quant_pivot_api::ws::ClobWsManager;
-use quant_pivot_models::{domain::data_plane::pipeline::PipelineEvent, types::TokenId};
+use quant_pivot_api::ws::{ClobWsManager, NormalizedIngressBatch};
+use quant_pivot_models::types::TokenId;
 
 /// Unified read side for WS-normalized pipeline events.
 pub trait PipelineEventSource: Send + Sync {
-    fn events(&self) -> &Receiver<PipelineEvent>;
-    fn mark_token_applied(&self, token_id: &TokenId, at: Instant);
+    fn events(&self) -> &Receiver<NormalizedIngressBatch>;
     fn invalidate_token(&self, token_id: &TokenId);
     fn invalidate_tokens(&self, token_ids: &[TokenId]);
 }
 
 impl PipelineEventSource for ClobWsManager {
-    fn events(&self) -> &Receiver<PipelineEvent> {
+    fn events(&self) -> &Receiver<NormalizedIngressBatch> {
         Self::events(self)
-    }
-
-    fn mark_token_applied(&self, token_id: &TokenId, at: Instant) {
-        Self::mark_token_applied(self, token_id, at);
     }
 
     fn invalidate_token(&self, token_id: &TokenId) {

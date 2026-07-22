@@ -48,7 +48,7 @@ impl BacktestPathSetRepository for PgBacktestPathSetRepository {
         &self,
         path_set_id: &BacktestPathSetId,
     ) -> Result<Option<BacktestPathSetInfo>, StorageError> {
-        Entity::find_by_id(path_set_id.clone())
+        Entity::find_by_id(*path_set_id)
             .one(&self.db)
             .await
             .map_err(StorageError::from)
@@ -62,7 +62,7 @@ impl BacktestPathSetRepository for PgBacktestPathSetRepository {
         list_by_fk_ordered_desc::<Entity, _, _, _>(
             &self.db,
             Column::ModelVersionId,
-            model_version_id.clone(),
+            *model_version_id,
             Column::CreatedAt,
             Into::into,
         )
@@ -77,7 +77,6 @@ impl BacktestPathSetRepository for PgBacktestPathSetRepository {
             .add_option(
                 query
                     .model_version_id
-                    .clone()
                     .map(|id| Column::ModelVersionId.eq(id)),
             )
             .add_option(query.from.map(|from| Column::CreatedAt.gte(from)))

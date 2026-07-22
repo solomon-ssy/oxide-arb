@@ -9,12 +9,9 @@ use std::{
 
 use chrono::{DateTime, Duration, Utc};
 use num_traits::ToPrimitive;
-use quant_pivot_api::{
-    gamma::{
-        CatalogMarketReject, CatalogSourceTimestamps, FilteredPrelistingMarket, GammaCatalogBatch,
-        GammaClient, RejectedMarket,
-    },
-    ws::TOKEN_INTERN,
+use quant_pivot_api::gamma::{
+    CatalogMarketReject, CatalogSourceTimestamps, FilteredPrelistingMarket, GammaCatalogBatch,
+    GammaClient, RejectedMarket,
 };
 use quant_pivot_error::{QuantError, api::ApiError, market::MarketError, storage::StorageError};
 use quant_pivot_models::{
@@ -309,8 +306,8 @@ impl GammaService {
         let newly_settled = self
             .detect_settlement_transitions(&batch.registry_markets)
             .await?;
-        let commit = build_catalog_commit(CatalogCommitInput {
-            batch_id: attempt.batch_id.clone(),
+        let commit = build_catalog_commit(&CatalogCommitInput {
+            batch_id: attempt.batch_id,
             sync_kind: attempt.sync_kind,
             started_at: attempt.started_at,
             fetched_at,
@@ -327,7 +324,6 @@ impl GammaService {
 
         self.market_registry
             .register_events(batch.registry_events.clone());
-        prewarm_token_intern(&batch.registry_markets);
         self.market_registry
             .register_markets(batch.registry_markets.clone());
         self.publish_market_resolutions(newly_settled);
@@ -480,7 +476,7 @@ impl GammaService {
             .await?
             .into_iter()
             .filter(|market| market.status == MarketStatus::ManuallyBlocked)
-            .map(|market| market.market_id.as_str().to_owned())
+            .map(|market| market.market_id.to_string())
             .collect::<HashSet<_>>();
         if blocked.is_empty() {
             return Ok(());
@@ -747,19 +743,17 @@ struct CatalogBatchDigest {
     markets: Vec<(MarketId, CatalogChangeType, ContentHash)>,
 }
 
-fn build_catalog_commit(input: CatalogCommitInput<'_>) -> Result<CatalogBatchCommit, QuantError> {
-    let CatalogCommitInput {
-        sync_kind,
-        batch_id: catalog_sync_batch_id,
-        started_at,
-        fetched_at,
-        registry_events,
-        event_source_timestamps,
-        registry_markets,
-        market_source_timestamps,
-        event_mutations,
-        market_mutations,
-    } = input;
+fn build_catalog_commit(input: &CatalogCommitInput<'_>) -> Result<CatalogBatchCommit, QuantError> {
+    let sync_kind = input.sync_kind;
+    let catalog_sync_batch_id = input.batch_id;
+    let started_at = input.started_at;
+    let fetched_at = input.fetched_at;
+    let registry_events = input.registry_events;
+    let event_source_timestamps = input.event_source_timestamps;
+    let registry_markets = input.registry_markets;
+    let market_source_timestamps = input.market_source_timestamps;
+    let event_mutations = input.event_mutations;
+    let market_mutations = input.market_mutations;
     let event_build = build_event_candidates(
         &catalog_sync_batch_id,
         registry_events,
@@ -842,12 +836,8 @@ fn build_event_candidates(
             .get(&event.event_id)
             .copied()
             .unwrap_or_else(CatalogMutation::sync);
-        object_ids.insert(event.event_id.clone(), event_object_id.clone());
-        digests.push((
-            event.event_id.clone(),
-            mutation.change_type,
-            content_hash.clone(),
-        ));
+        object_ids.insert(event.event_id.clone(), event_object_id);
+        digests.push((event.event_id.clone(), mutation.change_type, content_hash));
         candidates.push(CatalogEventCandidate {
             projection: UpsertEvent {
                 event_id: event.event_id.clone(),
@@ -859,17 +849,17 @@ fn build_event_candidates(
                 neg_risk: event.neg_risk,
                 catalog_market_ids: CatalogMarketIds(event.market_ids.clone()),
                 end_date: event.end_date,
-                content_hash: content_hash.clone(),
+                content_hash,
             },
             object: NewCatalogEventObject {
-                event_object_id: event_object_id.clone(),
+                event_object_id,
                 content_hash,
                 schema_version: CATALOG_OBJECT_SCHEMA_VERSION,
                 payload: payload.into(),
             },
             change: NewCatalogEventChange {
                 event_change_id: CatalogEventChangeId::from_v7(),
-                catalog_sync_batch_id: batch_id.clone(),
+                catalog_sync_batch_id: *batch_id,
                 event_object_id,
                 event_id: event.event_id.clone(),
                 source_effective_at: timestamps.source_effective_at,
@@ -909,7 +899,7 @@ fn build_market_candidates(
     for market in ordered {
         let event_object_id = event_object_ids
             .get(&market.event_id)
-            .cloned()
+            .copied()
             .ok_or_else(|| MarketError::MissingEventVersion {
                 market_id: market.market_id.to_string(),
                 event_id: market.event_id.to_string(),
@@ -933,11 +923,7 @@ fn build_market_candidates(
             .get(&market.market_id)
             .copied()
             .unwrap_or_else(CatalogMutation::sync);
-        digests.push((
-            market.market_id.clone(),
-            mutation.change_type,
-            content_hash.clone(),
-        ));
+        digests.push((market.market_id.clone(), mutation.change_type, content_hash));
         candidates.push(CatalogMarketCandidate {
             projection: UpsertMarket::from_registry(market)?,
             object: NewCatalogMarketObject {
@@ -947,7 +933,7 @@ fn build_market_candidates(
                 payload: payload.into(),
             },
             market_change_id: CatalogMarketChangeId::from_v7(),
-            catalog_sync_batch_id: batch_id.clone(),
+            catalog_sync_batch_id: *batch_id,
             event_object_id,
             source_effective_at: timestamps.source_effective_at,
             source_timestamp_quality: timestamps.quality,
@@ -1033,7 +1019,7 @@ fn build_catalog_rejections(
         .iter()
         .map(|rejection| NewCatalogSyncRejection {
             catalog_sync_rejection_id: CatalogSyncRejectionId::from_v7(),
-            catalog_sync_batch_id: batch_id.clone(),
+            catalog_sync_batch_id: *batch_id,
             entity_kind: CatalogEntityKind::Market,
             source_id: (!rejection.condition_id.is_empty()).then(|| rejection.condition_id.clone()),
             reason_code: rejection_reason(&rejection.reject),
@@ -1151,21 +1137,6 @@ fn primary_outcome_won(market: &MarketRegistryInfo) -> Option<bool> {
     } else {
         None
     }
-}
-
-fn prewarm_token_intern(markets: &[MarketRegistryInfo]) {
-    let token_ids: Vec<&str> = markets
-        .iter()
-        .flat_map(|market| market.tokens.iter().map(|t| t.token_id.as_str()))
-        .collect();
-    if token_ids.is_empty() {
-        return;
-    }
-    TOKEN_INTERN.prewarm_token_strs(&token_ids);
-    tracing::debug!(
-        count = token_ids.len(),
-        "token intern pool prewarmed after gamma sync"
-    );
 }
 
 #[cfg(test)]

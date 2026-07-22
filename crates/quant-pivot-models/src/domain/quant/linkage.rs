@@ -909,7 +909,7 @@ mod tests {
                     KlineInterval::OneMinute,
                 ),
                 available_at: Utc::now(),
-                binding_hash: ContentHash::parse(format!("blake3:{}", "1".repeat(64)))
+                binding_hash: ContentHash::parse(&format!("blake3:{}", "1".repeat(64)))
                     .expect("binding hash"),
             }],
             grounding: GroundingProof {
@@ -928,9 +928,10 @@ mod tests {
 
     fn sample_linkage(outcome: LinkageOutcome, tier: ResolverTier) -> MarketLinkage {
         let market_id = MarketId::new("0xmarket");
-        let metadata_hash = ContentHash::parse(format!("blake3:{}", "0".repeat(64))).expect("hash");
+        let metadata_hash =
+            ContentHash::parse(&format!("blake3:{}", "0".repeat(64))).expect("hash");
         let capability_registry_hash =
-            ContentHash::parse(format!("blake3:{}", "f".repeat(64))).expect("hash");
+            ContentHash::parse(&format!("blake3:{}", "f".repeat(64))).expect("hash");
         let content_hash = MarketLinkage::compute_content_hash(
             &market_id,
             DomainFamily::Crypto,
@@ -992,8 +993,8 @@ mod tests {
             confidence: Probability::ONE,
             resolver_tier: ResolverTier::Tier0Slug,
             resolver_version: ResolverVersion::FIRST,
-            metadata_hash: ContentHash::parse(format!("blake3:{}", "1".repeat(64))).expect("hash"),
-            capability_registry_hash: ContentHash::parse(format!("blake3:{}", "f".repeat(64)))
+            metadata_hash: ContentHash::parse(&format!("blake3:{}", "1".repeat(64))).expect("hash"),
+            capability_registry_hash: ContentHash::parse(&format!("blake3:{}", "f".repeat(64)))
                 .expect("hash"),
             effective_at,
         })
@@ -1019,8 +1020,8 @@ mod tests {
             confidence: Probability::ZERO,
             resolver_tier: ResolverTier::Tier1Template,
             resolver_version: ResolverVersion::FIRST,
-            metadata_hash: ContentHash::parse(format!("blake3:{}", "1".repeat(64))).expect("hash"),
-            capability_registry_hash: ContentHash::parse(format!("blake3:{}", "f".repeat(64)))
+            metadata_hash: ContentHash::parse(&format!("blake3:{}", "1".repeat(64))).expect("hash"),
+            capability_registry_hash: ContentHash::parse(&format!("blake3:{}", "f".repeat(64)))
                 .expect("hash"),
             effective_at: Utc::now(),
         })
@@ -1034,8 +1035,8 @@ mod tests {
             confidence: Probability::ONE,
             resolver_tier: ResolverTier::Tier0Slug,
             resolver_version: ResolverVersion::FIRST,
-            metadata_hash: ContentHash::parse(format!("blake3:{}", "2".repeat(64))).expect("hash"),
-            capability_registry_hash: ContentHash::parse(format!("blake3:{}", "e".repeat(64)))
+            metadata_hash: ContentHash::parse(&format!("blake3:{}", "2".repeat(64))).expect("hash"),
+            capability_registry_hash: ContentHash::parse(&format!("blake3:{}", "e".repeat(64)))
                 .expect("hash"),
             effective_at: Utc::now(),
         });
@@ -1072,9 +1073,10 @@ mod tests {
     #[test]
     fn content_hash_is_idempotent_and_outcome_sensitive() {
         let market_id = MarketId::new("0xmarket");
-        let metadata_hash = ContentHash::parse(format!("blake3:{}", "0".repeat(64))).expect("hash");
+        let metadata_hash =
+            ContentHash::parse(&format!("blake3:{}", "0".repeat(64))).expect("hash");
         let capability_registry_hash =
-            ContentHash::parse(format!("blake3:{}", "f".repeat(64))).expect("hash");
+            ContentHash::parse(&format!("blake3:{}", "f".repeat(64))).expect("hash");
         let resolved = LinkageOutcome::Resolved(Box::new(sample_binding()));
         let a = MarketLinkage::compute_content_hash(
             &market_id,
@@ -1114,7 +1116,7 @@ mod tests {
         assert_ne!(a, c, "outcome must perturb the digest");
 
         let different_registry_hash =
-            ContentHash::parse(format!("blake3:{}", "e".repeat(64))).expect("hash");
+            ContentHash::parse(&format!("blake3:{}", "e".repeat(64))).expect("hash");
         let d = MarketLinkage::compute_content_hash(
             &market_id,
             DomainFamily::Crypto,

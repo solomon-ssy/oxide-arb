@@ -14,6 +14,8 @@
 //! with persistence through domain DTOs (`New*`, `Update*`, `Upsert*`) and read
 //! models (`*Info`).
 
+use quant_pivot_allocator as _;
+
 pub mod clickhouse;
 pub mod config;
 pub mod constants;

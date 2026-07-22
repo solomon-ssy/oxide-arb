@@ -58,12 +58,12 @@ impl CalibrationArtifactRepository for PgCalibrationArtifactRepository {
         if artifact.kind == CalibrationKind::WeatherStationLeadBias {
             validate_weather_artifact(&artifact)?;
         }
-        let content_hash = artifact.content_hash.clone();
+        let content_hash = artifact.content_hash;
         Entity::insert(artifact.into_active_model())
             .exec_with_returning(&self.db)
             .await
             .map_err(|err| {
-                error::map_unique(err, QUANT_CALIBRATION_ARTIFACT, content_hash.as_str())
+                error::map_unique(err, QUANT_CALIBRATION_ARTIFACT, &content_hash.to_string())
             })
             .map(Into::into)
     }
@@ -72,7 +72,7 @@ impl CalibrationArtifactRepository for PgCalibrationArtifactRepository {
         &self,
         artifact_id: &CalibrationArtifactId,
     ) -> Result<Option<CalibrationArtifactInfo>, StorageError> {
-        Entity::find_by_id(artifact_id.clone())
+        Entity::find_by_id(*artifact_id)
             .one(&self.db)
             .await
             .map_err(StorageError::from)
@@ -84,7 +84,7 @@ impl CalibrationArtifactRepository for PgCalibrationArtifactRepository {
         content_hash: &ContentHash,
     ) -> Result<Option<CalibrationArtifactInfo>, StorageError> {
         Entity::find()
-            .filter(Column::ContentHash.eq(content_hash.clone()))
+            .filter(Column::ContentHash.eq(*content_hash))
             .one(&self.db)
             .await
             .map_err(StorageError::from)
@@ -158,7 +158,7 @@ impl CalibrationArtifactRepository for PgCalibrationArtifactRepository {
         artifact_id: &CalibrationArtifactId,
     ) -> Result<CalibrationArtifactInfo, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let Some(row) = Entity::find_by_id(artifact_id.clone())
+        let Some(row) = Entity::find_by_id(*artifact_id)
             .one(&txn)
             .await
             .map_err(StorageError::from)?
@@ -192,7 +192,7 @@ impl CalibrationArtifactRepository for PgCalibrationArtifactRepository {
         if updated.kind == CalibrationKind::WeatherStationLeadBias && !was_active {
             ActiveModel {
                 publication_id: ActiveValue::Set(CalibrationArtifactPublicationId::from_v7()),
-                artifact_id: ActiveValue::Set(updated.artifact_id.clone()),
+                artifact_id: ActiveValue::Set(updated.artifact_id),
                 kind: ActiveValue::Set(updated.kind),
                 published_at: ActiveValue::Set(Utc::now()),
                 ..Default::default()

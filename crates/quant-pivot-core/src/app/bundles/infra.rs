@@ -6,11 +6,10 @@ use prometheus::IntCounter;
 use quant_pivot_error::{QuantResult, infra::InfraError};
 use quant_pivot_models::{
     clickhouse::{
-        BookL2CheckpointRow, BookL2EventRow, BookMicrostructureRow, BookStreamSessionRow,
-        MarketResolutionRow, QuantCapitalAllocationEventRow, QuantExecutionEventRow,
-        QuantExitSignalEvaluationEventRow, QuantFactorEventRow, QuantPositionEventRow,
-        QuantRecommendationAttributionEventRow, QuantServingEvidenceCompletionRow,
-        QuantSignalCandidateEventRow, TradeTapeRow,
+        BookL2LedgerRow, BookMicrostructureRow, BookStreamSessionRow, MarketResolutionRow,
+        QuantCapitalAllocationEventRow, QuantExecutionEventRow, QuantExitSignalEvaluationEventRow,
+        QuantFactorEventRow, QuantPositionEventRow, QuantRecommendationAttributionEventRow,
+        QuantServingEvidenceCompletionRow, QuantSignalCandidateEventRow,
     },
     config::DeployConfig,
     types::ContentHash,
@@ -39,8 +38,9 @@ use crate::{
         execution_fact_writer::ExecutionEventWriter,
         exit_signal_fact_writer::ExitSignalEvaluationEventWriter,
         fact_lag::IngestPipelineLagTracker, factor_fact_writer::FactorEventWriter,
-        feature_fact_writer::FeatureEventWriter, metrics_hub::MetricsHub,
-        model_input_fact_writer::ModelInputEventWriter, position_fact_writer::PositionEventWriter,
+        feature_fact_writer::FeatureEventWriter, ledger_persistence::LedgerPersistenceCoordinator,
+        metrics_hub::MetricsHub, model_input_fact_writer::ModelInputEventWriter,
+        position_fact_writer::PositionEventWriter,
         signal_candidate_fact_writer::SignalCandidateEventWriter,
     },
 };
@@ -341,39 +341,17 @@ fn build_book_fact_writer(
         lag_obs("quant_book_stream_session"),
         durable_config("quant_book_stream_session"),
     );
-    let l2 = spawn_durable_fact_stream::<BookL2EventRow>(
-        &queue,
-        TaskId::BookL2EventWriter,
-        Arc::new(ChFactWriter::new(
+    let (ledger, ledger_coordinator) = LedgerPersistenceCoordinator::new(
+        Arc::new(ChFactWriter::<BookL2LedgerRow>::new_async_insert(
             Arc::clone(ch_pool),
             Arc::clone(write_manager),
-            "quant_book_l2_event",
+            "quant_book_l2_ledger",
         )),
-        lag_obs("quant_book_l2_event"),
-        durable_config("quant_book_l2_event"),
+        lag_obs("quant_book_l2_ledger"),
     );
-    let checkpoints = spawn_durable_fact_stream::<BookL2CheckpointRow>(
-        &queue,
-        TaskId::BookL2CheckpointWriter,
-        Arc::new(ChFactWriter::new(
-            Arc::clone(ch_pool),
-            Arc::clone(write_manager),
-            "quant_book_l2_checkpoint",
-        )),
-        lag_obs("quant_book_l2_checkpoint"),
-        durable_config("quant_book_l2_checkpoint"),
-    );
-    let trades = spawn_durable_fact_stream::<TradeTapeRow>(
-        &queue,
-        TaskId::TradeTapeWsWriter,
-        Arc::new(ChFactWriter::new(
-            Arc::clone(ch_pool),
-            Arc::clone(write_manager),
-            "quant_trade_tape",
-        )),
-        lag_obs("quant_trade_tape"),
-        durable_config("quant_trade_tape"),
-    );
+    queue.push(TaskId::BookL2LedgerWriter, move |token| {
+        ledger_coordinator.run(token)
+    });
     let microstructure = spawn_fact_stream::<BookMicrostructureRow>(
         &queue,
         TaskId::BookMicrostructure1sWriter,
@@ -400,10 +378,8 @@ fn build_book_fact_writer(
     );
 
     let writer = Arc::new(BookFactWriter::new(
-        l2,
-        checkpoints,
+        ledger,
         sessions,
-        trades,
         microstructure,
         resolutions,
     ));
@@ -706,7 +682,7 @@ fn spawn_fact_stream<T>(
     config: AsyncWriterConfig,
 ) -> Arc<AsyncWriter<T>>
 where
-    T: Send + 'static,
+    T: Send + Sync + 'static,
 {
     let (writer, worker) = AsyncWriter::new(
         config,
@@ -729,7 +705,7 @@ fn spawn_durable_fact_stream<T>(
     config: DurableWriterConfig,
 ) -> Arc<DurableWriter<T>>
 where
-    T: Send + 'static,
+    T: Send + Sync + 'static,
 {
     let (writer, worker) = DurableWriter::new(
         config,

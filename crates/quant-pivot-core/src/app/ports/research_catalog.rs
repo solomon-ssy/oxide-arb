@@ -7,6 +7,7 @@
 
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
+    string::ToString,
     sync::Arc,
 };
 
@@ -229,7 +230,7 @@ impl ResearchCatalogPort for CoreResearchCatalogPort {
         let column_index: HashMap<FactorDefinitionId, usize> = definitions
             .iter()
             .enumerate()
-            .map(|(index, definition)| (definition.factor_definition_id.clone(), index))
+            .map(|(index, definition)| (definition.factor_definition_id, index))
             .collect();
         let factor_names: Vec<FactorName> = definitions
             .iter()
@@ -240,7 +241,7 @@ impl ResearchCatalogPort for CoreResearchCatalogPort {
         let from = until - Duration::seconds(i64::try_from(lookback_secs).unwrap_or(i64::MAX));
         let ids: Vec<FactorDefinitionId> = definitions
             .iter()
-            .map(|definition| definition.factor_definition_id.clone())
+            .map(|definition| definition.factor_definition_id)
             .collect();
         let values = self
             .factors
@@ -297,18 +298,14 @@ impl ResearchCatalogPort for CoreResearchCatalogPort {
         let report = FactorCollinearityAnalyzer::analyze(&panel, threshold)?;
 
         Ok(FactorCollinearityView {
-            factors: panel
-                .factors
-                .iter()
-                .map(|name| name.as_str().to_owned())
-                .collect(),
+            factors: panel.factors.iter().map(ToString::to_string).collect(),
             matrix: report.matrix,
             violations: report
                 .violations
                 .into_iter()
                 .map(|pair| CollinearPairView {
-                    left: pair.left.as_str().to_owned(),
-                    right: pair.right.as_str().to_owned(),
+                    left: pair.left.to_string(),
+                    right: pair.right.to_string(),
                     correlation: pair.correlation,
                 })
                 .collect(),

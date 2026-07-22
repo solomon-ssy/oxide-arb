@@ -7,35 +7,42 @@
 
 mod health;
 mod ingest_hooks;
+mod ingress;
 pub mod normalize;
 mod reconnect;
 mod router;
 mod session_hook;
 mod shard;
-mod token_intern;
+mod token_resolver;
 
 use std::{
     collections::HashSet,
     slice,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 
 use flume::Receiver;
-pub use health::{ShardHealthBoard, ShardHealthSummary, TokenFreshnessBoard, WsShardHealthPort};
+pub use health::{ShardHealthBoard, ShardHealthSummary, WsShardHealthPort};
 pub use ingest_hooks::BookLevelRejectHook;
+pub use ingress::{
+    INGRESS_MAILBOX_CAPACITY, INGRESS_MEMORY_BUDGET_BYTES, INGRESS_PERMIT_BYTES,
+    NormalizedIngressBatch, estimated_event_bytes,
+};
 use num_traits::ToPrimitive;
 use parking_lot::Mutex;
 use quant_pivot_models::{
     config::{PolymarketConfig, WebSocketConfig},
-    domain::data_plane::pipeline::PipelineEvent,
     types::TokenId,
 };
 pub use reconnect::ReconnectPolicy;
 use router::ShardRouter;
 pub use session_hook::WsSessionInvalidationHook;
 use shard::ShardDeps;
-pub use token_intern::{TOKEN_INTERN, TokenInternPool, intern_str, intern_u256};
+pub use token_resolver::{TokenKeyResolver, UnregisteredToken};
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
@@ -146,12 +153,12 @@ const MAX_CONCURRENT_CONNECTS: usize = 4;
 /// Messages are normalized and dispatched to a unified output channel.
 pub struct ClobWsManager {
     router: ShardRouter,
-    output_rx: Receiver<PipelineEvent>,
+    output_rx: Receiver<NormalizedIngressBatch>,
     ws_url: String,
-    last_message_at: Arc<Mutex<Option<Instant>>>,
+    message_epoch: Arc<Instant>,
+    last_message_tick: Arc<AtomicU64>,
     subscriptions: Mutex<SubscriptionState>,
     health: Arc<ShardHealthBoard>,
-    token_freshness: Arc<TokenFreshnessBoard>,
 }
 
 impl ClobWsManager {
@@ -161,13 +168,17 @@ impl ClobWsManager {
         polymarket_config: &PolymarketConfig,
         ws_config: &WebSocketConfig,
         shutdown: CancellationToken,
+        token_resolver: Arc<dyn TokenKeyResolver>,
         on_session_invalidated: Option<WsSessionInvalidationHook>,
         on_book_level_rejected: Option<BookLevelRejectHook>,
     ) -> Self {
-        let (output_tx, output_rx) = flume::bounded(8192);
-        let last_message_at = Arc::new(Mutex::new(None));
+        let (output_tx, output_rx) = flume::bounded(INGRESS_MAILBOX_CAPACITY);
+        let ingress_budget = Arc::new(Semaphore::new(
+            INGRESS_MEMORY_BUDGET_BYTES / INGRESS_PERMIT_BYTES,
+        ));
+        let message_epoch = Arc::new(Instant::now());
+        let last_message_tick = Arc::new(AtomicU64::new(0));
         let health = Arc::new(ShardHealthBoard::default());
-        let token_freshness = Arc::new(TokenFreshnessBoard::default());
         // `[market_data.websocket]` reconnect knobs drive both backoff layers:
         // the shard loop and the SDK-internal reconnect.
         let initial_backoff = Duration::from_millis(ws_config.reconnect_delay_ms.max(1));
@@ -190,9 +201,12 @@ impl ClobWsManager {
             ws_config.max_subscriptions_per_connection,
             ShardDeps {
                 output_tx,
+                ingress_budget,
                 ws_url: polymarket_config.clob_ws_url.clone(),
                 shutdown,
-                last_message_at: Arc::clone(&last_message_at),
+                message_epoch: Arc::clone(&message_epoch),
+                last_message_tick: Arc::clone(&last_message_tick),
+                token_resolver,
                 on_session_invalidated,
                 on_book_level_rejected,
                 reconnect_policy,
@@ -200,7 +214,6 @@ impl ClobWsManager {
                 sdk_max_backoff: max_backoff,
                 connect_limiter: Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTS)),
                 health: Arc::clone(&health),
-                token_freshness: Arc::clone(&token_freshness),
             },
         );
 
@@ -208,10 +221,10 @@ impl ClobWsManager {
             router,
             output_rx,
             ws_url: polymarket_config.clob_ws_url.clone(),
-            last_message_at,
+            message_epoch,
+            last_message_tick,
             subscriptions: Mutex::new(SubscriptionState::default()),
             health,
-            token_freshness,
         }
     }
 
@@ -233,14 +246,12 @@ impl ClobWsManager {
     /// it — so the web control plane can drop its overlay without ever tearing
     /// down a token the trading engine baseline depends on.
     pub fn unsubscribe_tokens(&self, source: SubscriptionSource, tokens: &[TokenId]) {
-        let (gone, active_tokens) = {
+        let gone = {
             let mut subscriptions = self.subscriptions.lock();
-            let gone = subscriptions.remove(source, tokens);
-            (gone, subscriptions.active_tokens())
+            subscriptions.remove(source, tokens)
         };
         if !gone.is_empty() {
             self.router.remove_tokens(&gone);
-            self.token_freshness.prune_tokens(&active_tokens);
         }
     }
 
@@ -248,17 +259,15 @@ impl ClobWsManager {
     /// transport against the new union (the other source's baseline is protected).
     pub fn sync_tokens(&self, source: SubscriptionSource, tokens: &[TokenId]) {
         let desired: HashSet<TokenId> = tokens.iter().cloned().collect();
-        let (to_subscribe, to_unsubscribe, active_tokens) = {
+        let (to_subscribe, to_unsubscribe) = {
             let mut subscriptions = self.subscriptions.lock();
-            let (to_subscribe, to_unsubscribe) = subscriptions.sync(source, desired);
-            (to_subscribe, to_unsubscribe, subscriptions.active_tokens())
+            subscriptions.sync(source, desired)
         };
         if !to_subscribe.is_empty() {
             self.router.assign_tokens(&to_subscribe);
         }
         if !to_unsubscribe.is_empty() {
             self.router.remove_tokens(&to_unsubscribe);
-            self.token_freshness.prune_tokens(&active_tokens);
         }
     }
 
@@ -289,23 +298,17 @@ impl ClobWsManager {
     }
 
     /// Returns the unified event receiver for all shards.
-    pub const fn events(&self) -> &Receiver<PipelineEvent> {
+    pub const fn events(&self) -> &Receiver<NormalizedIngressBatch> {
         &self.output_rx
     }
 
-    /// Advance token freshness only after canonical persistence and book apply.
-    pub fn mark_token_applied(&self, token_id: &TokenId, at: Instant) {
-        self.token_freshness.mark_token(token_id, at);
-    }
-
-    /// Fail closed when a stream/session boundary invalidates token continuity.
+    /// Restart transport ownership for a token whose canonical continuity failed.
     pub fn invalidate_token(&self, token_id: &TokenId) {
         self.invalidate_tokens(slice::from_ref(token_id));
     }
 
     /// Fail closed for a whole stream session and coalesce transport restarts by shard.
     pub fn invalidate_tokens(&self, token_ids: &[TokenId]) {
-        self.token_freshness.invalidate_tokens(token_ids);
         self.router.restart_tokens(token_ids);
     }
 
@@ -327,15 +330,11 @@ impl ClobWsManager {
 
     /// Milliseconds since last WS message received from any shard.
     pub fn last_message_age_ms(&self) -> Option<u64> {
-        self.last_message_at
-            .lock()
-            .and_then(|ts| ToPrimitive::to_u64(&ts.elapsed().as_millis()))
-    }
-
-    /// Milliseconds since a token last produced a normalized WS event.
-    #[must_use]
-    pub fn token_message_age_ms(&self, token_id: &TokenId) -> Option<u64> {
-        self.token_freshness.token_age_ms(token_id)
+        let last = self.last_message_tick.load(Ordering::Acquire);
+        if last == 0 {
+            return None;
+        }
+        Some(monotonic_tick(&self.message_epoch).saturating_sub(last))
     }
 }
 
@@ -347,10 +346,12 @@ impl WsShardHealthPort for ClobWsManager {
     fn last_message_age_ms(&self) -> Option<u64> {
         Self::last_message_age_ms(self)
     }
+}
 
-    fn token_message_age_ms(&self, token_id: &TokenId) -> Option<u64> {
-        Self::token_message_age_ms(self, token_id)
-    }
+fn monotonic_tick(epoch: &Instant) -> u64 {
+    ToPrimitive::to_u64(&epoch.elapsed().as_millis())
+        .unwrap_or(u64::MAX - 1)
+        .saturating_add(1)
 }
 
 #[cfg(test)]

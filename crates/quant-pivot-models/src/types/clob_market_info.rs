@@ -89,8 +89,8 @@ impl ClobMarketInfoVersion {
     pub fn fee_schedule(&self) -> MarketFeeSchedule {
         MarketFeeSchedule {
             market_id: self.market_id.clone(),
-            market_info_version_id: self.version_id.clone(),
-            market_info_payload_hash: self.payload_hash.clone(),
+            market_info_version_id: self.version_id,
+            market_info_payload_hash: self.payload_hash,
             platform_rate: self.fee_details.rate,
             exponent: Decimal::from(self.fee_details.exponent),
             taker_only: self.fee_details.taker_only,

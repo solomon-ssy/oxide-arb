@@ -114,7 +114,7 @@ impl WeatherFactIngestService {
                 item.report.to_clickhouse_row(
                     item.local_date,
                     item.revision,
-                    item.supersedes_report_hash.clone(),
+                    item.supersedes_report_hash,
                 )
             })
             .collect::<Vec<_>>();
@@ -342,10 +342,10 @@ fn plan_observation_persistence(
         let supersedes_report_hash = state
             .latest
             .as_ref()
-            .map(|(_, _, report_hash)| report_hash.clone());
+            .map(|(_, _, report_hash)| *report_hash);
         add_existing_revision(
             state,
-            candidate.report.report_hash.clone(),
+            candidate.report.report_hash,
             revision,
             candidate.report.available_at.timestamp_millis(),
         )?;
@@ -403,7 +403,7 @@ fn plan_forecast_rows(
         })?;
         add_existing_revision(
             state,
-            candidate.report_hash.clone(),
+            candidate.report_hash,
             candidate.revision,
             candidate.available_at.timestamp_millis(),
         )?;
@@ -418,7 +418,7 @@ fn add_existing_revision(
     revision: u32,
     available_at_ms: i64,
 ) -> QuantResult<()> {
-    if let Some(existing_revision) = state.by_hash.insert(report_hash.clone(), revision)
+    if let Some(existing_revision) = state.by_hash.insert(report_hash, revision)
         && existing_revision != revision
     {
         return Err(QuantError::config(
@@ -476,7 +476,7 @@ mod tests {
     };
 
     fn hash(fill: char) -> ContentHash {
-        ContentHash::parse(format!("blake3:{}", fill.to_string().repeat(64))).expect("hash")
+        ContentHash::parse(&format!("blake3:{}", fill.to_string().repeat(64))).expect("hash")
     }
 
     fn report(fill: char, available_minute: u32) -> WeatherObservationReport {

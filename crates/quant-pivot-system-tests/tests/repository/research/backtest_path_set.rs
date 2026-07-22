@@ -43,7 +43,7 @@ use rust_decimal_macros::dec;
 use sea_orm::DatabaseConnection;
 
 fn content_hash(seed: char) -> ContentHash {
-    ContentHash::parse(format!("blake3:{}", seed.to_string().repeat(64))).expect("hash")
+    ContentHash::parse(&format!("blake3:{}", seed.to_string().repeat(64))).expect("hash")
 }
 
 async fn seed_runtime_config(db: &DatabaseConnection) -> DecisionPolicySnapshotId {
@@ -69,7 +69,7 @@ async fn seed_model_spec(db: &DatabaseConnection) -> ModelSpecId {
     let model_spec_id = ModelSpecId::from_v7();
     registry
         .create_model_spec(model_spec_fixtures::new_model_spec_fixture(
-            model_spec_id.clone(),
+            model_spec_id,
             "pg-path-set-it",
             ModelFamily::WeightedFactor,
             86_400,
@@ -90,7 +90,7 @@ async fn seed_training_dataset(
     let training_dataset_id = TrainingDatasetId::from_v7();
     let window_end = window_start + ChronoDuration::hours(1);
     let model_spec_definition_hash = model_spec_fixtures::new_model_spec_fixture(
-        model_spec_id.clone(),
+        *model_spec_id,
         "pg-path-set-it",
         ModelFamily::WeightedFactor,
         86_400,
@@ -100,15 +100,15 @@ async fn seed_training_dataset(
     .definition_hash;
     let manifest = DatasetManifest {
         format_version: DATASET_ARTIFACT_FORMAT_VERSION,
-        training_dataset_id: training_dataset_id.clone(),
+        training_dataset_id,
         profile_ref: execution_pg_seed::fixture_profile_ref(),
         research_program_hash: content_hash('4'),
         source_slice: execution_pg_seed::source_slice_ref('5'),
-        model_spec_id: model_spec_id.clone(),
-        model_spec_definition_hash: model_spec_definition_hash.clone(),
+        model_spec_id: *model_spec_id,
+        model_spec_definition_hash,
         trade_policy_artifact_id: None,
         trade_policy_hash: None,
-        decision_policy_snapshot_id: rc_id.clone(),
+        decision_policy_snapshot_id: *rc_id,
         window_start,
         window_end,
         purpose: DatasetPurpose::Training,
@@ -125,8 +125,8 @@ async fn seed_training_dataset(
     let dataset_repo = PgTrainingDatasetRepository::new(db.clone());
     dataset_repo
         .create_plan(NewTrainingDatasetPlan {
-            training_dataset_id: training_dataset_id.clone(),
-            model_spec_id: model_spec_id.clone(),
+            training_dataset_id,
+            model_spec_id: *model_spec_id,
             model_spec_definition_hash,
             window_start,
             window_end,
@@ -136,7 +136,7 @@ async fn seed_training_dataset(
             horizons_secs: TrainingHorizonsSecs(vec![0]),
             feature_schema_version: Some(SchemaVersion::FIRST),
             sample_sources: Some(TrainingSampleSources(default_sample_sources())),
-            decision_policy_snapshot_id: rc_id.clone(),
+            decision_policy_snapshot_id: *rc_id,
         })
         .await
         .expect("dataset plan");
@@ -178,13 +178,13 @@ async fn seed_model_version_and_run(
     let model_version_id = ModelVersionId::from_v7();
     registry
         .create_model_version(NewModelVersion {
-            model_version_id: model_version_id.clone(),
+            model_version_id,
             model_spec_id,
             version: 1,
             artifact_hash: content_hash('a'),
             category_scope: None,
             profile_ref: execution_pg_seed::fixture_profile_ref(),
-            training_dataset_id: Some(training_dataset_id.clone()),
+            training_dataset_id: Some(*training_dataset_id),
             trade_policy_artifact_id: None,
             trade_policy_hash: None,
             publish_path_set_id: None,
@@ -202,10 +202,10 @@ async fn seed_model_version_and_run(
     let model_run_id = ModelRunId::from_v7();
     PgModelRunRepository::new(db.clone())
         .create(NewModelRun {
-            model_run_id: model_run_id.clone(),
+            model_run_id,
             run_kind: ModelRunKind::Backtest,
-            model_version_id: Some(model_version_id.clone()),
-            decision_policy_snapshot_id: rc_id.clone(),
+            model_version_id: Some(model_version_id),
+            decision_policy_snapshot_id: *rc_id,
             market_selection_id: None,
             window_start,
             window_end: window_start + ChronoDuration::hours(1),
@@ -235,8 +235,8 @@ pub async fn quant_backtest_path_set_migration_and_crud() {
 
     let created = repo
         .create(NewBacktestPathSet {
-            path_set_id: path_set_id.clone(),
-            model_version_id: model_version_id.clone(),
+            path_set_id,
+            model_version_id,
             model_run_id,
             training_dataset_id,
             decision_policy_snapshot_id: rc_id,

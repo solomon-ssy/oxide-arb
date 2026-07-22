@@ -1,10 +1,11 @@
 //! Credential-free, read-only probes for public upstream contracts.
 
-use std::{slice::from_ref, time::Duration};
+use std::{slice::from_ref, str::FromStr, sync::Arc, time::Duration};
 
 use anyhow::{Context, Error, Result, ensure};
 use chrono::{Duration as ChronoDuration, NaiveDate, Timelike, Utc};
 use chrono_tz::{America, Tz};
+use polymarket_client_sdk_v2::types::U256;
 use quant_pivot_api::{
     binance::{BinanceAggTradeSource, BinanceKlineSource, BinanceRequestBudget},
     domain::{DomainDataSource, DomainFetchRequest},
@@ -20,7 +21,7 @@ use quant_pivot_api::{
         nws::NwsObservationSource,
         tornado::TornadoSource,
     },
-    ws::{ClobWsManager, SubscriptionSource},
+    ws::{ClobWsManager, SubscriptionSource, TokenKeyResolver},
 };
 use quant_pivot_models::{
     config::{
@@ -33,7 +34,7 @@ use quant_pivot_models::{
     enums::domain::{DomainFamily, DomainMetric, KlineInterval},
     types::{
         BinanceSymbol, ChainlinkFeedKey, DomainInstrumentKey, DomainMeasurementUnit,
-        DomainSourceId, HkoStation, IcaoStation, TokenId, WeatherTemperatureStatistic,
+        DomainSourceId, HkoStation, IcaoStation, TokenId, TokenKey, WeatherTemperatureStatistic,
         WeatherVariable,
     },
 };
@@ -200,21 +201,32 @@ async fn polymarket(stream_timeout: Duration) -> Result<()> {
 
 async fn clob_book(token: &TokenId, timeout: Duration) -> Result<()> {
     let shutdown = CancellationToken::new();
+    let token_value = U256::from_str(token.as_str()).context("parse Gamma token as U256")?;
+    let token_key = TokenKey::new(0);
+    let token_resolver: Arc<dyn TokenKeyResolver> =
+        Arc::new(move |candidate| (candidate == token_value).then_some(token_key));
     let manager = ClobWsManager::new(
         &PolymarketConfig::default(),
         &WebSocketConfig::default(),
         shutdown.clone(),
+        token_resolver,
         None,
         None,
     );
     manager.subscribe_tokens(SubscriptionSource::Engine, from_ref(token));
-    let events = manager.events();
     let observed = tokio::time::timeout(timeout, async {
         loop {
-            match events.recv_async().await {
-                Ok(PipelineEvent::BookSnapshot(book))
-                    if book.asset_id == *token
-                        && (!book.bids.levels.is_empty() || !book.asks.levels.is_empty()) =>
+            match manager.events().recv_async().await {
+                Ok(batch)
+                    if batch.events.iter().any(|event| {
+                        matches!(
+                            event,
+                            PipelineEvent::BookSnapshot(book)
+                                if book.token == token_key
+                                    && (!book.bids.levels.is_empty()
+                                        || !book.asks.levels.is_empty())
+                        )
+                    }) =>
                 {
                     return Ok(());
                 }
@@ -225,6 +237,7 @@ async fn clob_book(token: &TokenId, timeout: Duration) -> Result<()> {
     })
     .await;
     shutdown.cancel();
+    drop(manager);
     observed
         .with_context(|| format!("CLOB book snapshot timeout after {timeout:?}"))?
         .context("receive CLOB book snapshot")

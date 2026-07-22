@@ -388,7 +388,7 @@ mod tests {
     }
 
     fn content_hash() -> ContentHash {
-        ContentHash::parse(format!("blake3:{}", "1".repeat(64))).expect("hash")
+        ContentHash::parse(&format!("blake3:{}", "1".repeat(64))).expect("hash")
     }
 
     fn binding(comparator: PriceComparator, strike: Option<Usd>) -> ResolvedBinding {

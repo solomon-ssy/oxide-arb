@@ -400,7 +400,7 @@ pub async fn validate(
         .enqueue_trade_policy_validation(
             TradePolicyValidationJobParams {
                 validation_run_id: TradePolicyValidationRunId::from_v7(),
-                artifact_id: artifact_id.clone(),
+                artifact_id,
                 actor_id,
                 reason: request.reason,
             },

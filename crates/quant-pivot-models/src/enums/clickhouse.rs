@@ -22,6 +22,15 @@ pub enum ChCanonicalBookEventType {
     Delta = 2,
     TickSizeChange = 3,
     Gap = 4,
+    LastTrade = 5,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
+#[repr(i8)]
+pub enum ChLedgerTradeSide {
+    Unknown = 0,
+    Buy = 1,
+    Sell = 2,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]

@@ -564,11 +564,11 @@ mod tests {
         kind: CalibrationKind,
         payload: CalibrationArtifactPayload,
     ) -> CalibrationArtifactInfo {
-        let hash = ContentHash::parse(format!("blake3:{}", "0".repeat(64))).expect("hash");
+        let hash = ContentHash::parse(&format!("blake3:{}", "0".repeat(64))).expect("hash");
         CalibrationArtifactInfo {
             artifact_id: CalibrationArtifactId::from_v7(),
             kind,
-            content_hash: hash.clone(),
+            content_hash: hash,
             fit_window_start: Utc::now(),
             fit_window_end: Utc::now(),
             calibration_split_hash: hash,

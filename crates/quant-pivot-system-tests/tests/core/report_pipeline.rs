@@ -439,21 +439,24 @@ pub async fn report_persists_real_drawdown_from_equity_history() {
         .iter()
         .find(|rec| rec.market_id.as_str() == MARKET_ID)
         .expect("drawdown report must publish primary market recommendation");
-    let drawdown_kelly = drawdown_rec
-        .trade_plan
-        .sizing()
-        .expect("frozen sizing")
+    let drawdown_sizing = drawdown_rec.trade_plan.sizing().expect("frozen sizing");
+    assert_eq!(
+        drawdown_sizing.drawdown_shrink_applied,
+        Some(dec!(0.8)),
+        "the frozen sizing provenance must bind the real 20% drawdown"
+    );
+    let drawdown_kelly = drawdown_sizing
         .kelly_fraction_applied
         .expect("drawdown kelly fraction");
 
-    // KellySizingModel persists `round_dp(RESEARCH_DECIMAL_SCALE)(kelly_fraction · shrink · drawdown_scale)`
-    // (see `portfolio/sizing.rs`). Drawdown enters linearly before that single canonical round.
-    // Comparing against the unrounded product `neutral_kelly · 0.8` fails because the neutral
-    // multiplier is already stored at research scale — the expected drawdown audit field is
-    // `round_12(neutral_kelly · (1 − dd))`, matching how the second run is computed.
+    // Each report stores only the final research-scale multiplier. Scaling the already-rounded
+    // neutral report is therefore a double-rounded comparison against the drawdown report's
+    // single final round, so the two may differ by one research-scale quantum.
     let expected_drawdown_kelly = (neutral_kelly * dec!(0.8)).round_dp(RESEARCH_DECIMAL_SCALE);
-    assert_eq!(
-        drawdown_kelly, expected_drawdown_kelly,
-        "Conservative drawdown scale must apply before research-scale rounding"
+    let rounding_quantum = Decimal::new(1, RESEARCH_DECIMAL_SCALE);
+    assert!(
+        (drawdown_kelly - expected_drawdown_kelly).abs() <= rounding_quantum,
+        "Conservative drawdown scale must apply before research-scale rounding: actual={drawdown_kelly}, expected={expected_drawdown_kelly}, quantum={rounding_quantum}"
     );
+    assert!(drawdown_kelly < neutral_kelly);
 }

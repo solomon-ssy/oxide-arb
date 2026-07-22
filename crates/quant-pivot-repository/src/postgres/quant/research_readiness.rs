@@ -37,8 +37,8 @@ impl ResearchReadinessEvidenceRepository for PgResearchReadinessEvidenceReposito
     ) -> Result<ResearchReadinessEvidenceInfo, StorageError> {
         validate_new(&evidence)?;
         let kind = evidence.kind;
-        let scope_hash = evidence.scope_hash.clone();
-        let payload_hash = evidence.payload_hash.clone();
+        let scope_hash = evidence.scope_hash;
+        let payload_hash = evidence.payload_hash;
         Entity::insert(evidence.into_active_model())
             .on_conflict(
                 OnConflict::columns([Column::Kind, Column::ScopeHash, Column::PayloadHash])
@@ -72,7 +72,7 @@ impl ResearchReadinessEvidenceRepository for PgResearchReadinessEvidenceReposito
     ) -> Result<Option<ResearchReadinessEvidenceInfo>, StorageError> {
         Entity::find()
             .filter(Column::Kind.eq(kind))
-            .filter(Column::ScopeHash.eq(scope_hash.clone()))
+            .filter(Column::ScopeHash.eq(*scope_hash))
             .filter(Column::ObservedAt.lte(as_of))
             .filter(Column::ExpiresAt.gt(as_of))
             .order_by_desc(Column::ObservedAt)
@@ -86,7 +86,7 @@ impl ResearchReadinessEvidenceRepository for PgResearchReadinessEvidenceReposito
         &self,
         evidence_id: &ResearchReadinessEvidenceId,
     ) -> Result<Option<ResearchReadinessEvidenceInfo>, StorageError> {
-        Entity::find_by_id(evidence_id.clone())
+        Entity::find_by_id(*evidence_id)
             .one(&self.db)
             .await
             .map_err(StorageError::from)
@@ -167,13 +167,7 @@ fn validate_new(evidence: &NewResearchReadinessEvidence) -> Result<(), StorageEr
                 format!("readiness evidence payload cannot be serialized: {error}"),
             )
         })?;
-    let actual_payload_hash = ContentHash::parse(CanonicalDigest::prefixed_bytes(&payload_bytes))
-        .map_err(|error| {
-        StorageError::invariant_violation(
-            Some(QUANT_RESEARCH_READINESS_EVIDENCE),
-            format!("readiness evidence payload hash is invalid: {error}"),
-        )
-    })?;
+    let actual_payload_hash = CanonicalDigest::content_hash_bytes(&payload_bytes);
     if actual_payload_hash != evidence.payload_hash
         || !payload_matches_kind(evidence.kind, &evidence.payload_json)
     {

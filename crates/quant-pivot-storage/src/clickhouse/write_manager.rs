@@ -92,9 +92,7 @@ impl ChWriteManager {
     /// Acquire a write permit. Awaits when the semaphore is exhausted.
     /// Returns the permit guard; dropping it releases the permit.
     pub async fn acquire_write_permit(&self) -> Result<WritePermit, StorageError> {
-        let permit = self
-            .semaphore
-            .clone()
+        let permit = Arc::clone(&self.semaphore)
             .acquire_owned()
             .await
             .map_err(|_| StorageError::ClickHouseWriteSemaphoreClosed)?;
@@ -124,6 +122,47 @@ impl ChWriteManager {
     where
         T: RowOwned + RowWrite + Send + Sync,
     {
+        self.write_batch_borrowed(client, table, &rows).await
+    }
+
+    /// Persist a borrowed batch while retaining caller allocation capacity.
+    pub async fn write_batch_borrowed<T>(
+        &self,
+        client: &Client,
+        table: &'static str,
+        rows: &[T],
+    ) -> Result<(), StorageError>
+    where
+        T: RowOwned + RowWrite + Send + Sync,
+    {
+        self.write_batch_borrowed_with_mode(client, table, rows, false)
+            .await
+    }
+
+    /// Persist a borrowed batch through acknowledged `ClickHouse` async inserts.
+    pub async fn write_async_insert_batch_borrowed<T>(
+        &self,
+        client: &Client,
+        table: &'static str,
+        rows: &[T],
+    ) -> Result<(), StorageError>
+    where
+        T: RowOwned + RowWrite + Send + Sync,
+    {
+        self.write_batch_borrowed_with_mode(client, table, rows, true)
+            .await
+    }
+
+    async fn write_batch_borrowed_with_mode<T>(
+        &self,
+        client: &Client,
+        table: &'static str,
+        rows: &[T],
+        async_insert: bool,
+    ) -> Result<(), StorageError>
+    where
+        T: RowOwned + RowWrite + Send + Sync,
+    {
         if rows.is_empty() {
             return Ok(());
         }
@@ -133,7 +172,7 @@ impl ChWriteManager {
         for attempt in 0..MAX_INSERT_ATTEMPTS {
             let start = Instant::now();
             let permit = self.acquire_write_permit().await?;
-            let result = Self::insert_rows(client, table, &rows, None).await;
+            let result = Self::insert_rows(client, table, rows, None, async_insert).await;
             drop(permit);
 
             match result {
@@ -187,7 +226,8 @@ impl ChWriteManager {
         for attempt in 0..MAX_INSERT_ATTEMPTS {
             let start = Instant::now();
             let permit = self.acquire_write_permit().await?;
-            let result = Self::insert_rows(client, table, &rows, Some(deduplication_token)).await;
+            let result =
+                Self::insert_rows(client, table, &rows, Some(deduplication_token), false).await;
             drop(permit);
             match result {
                 Ok(()) => {
@@ -224,6 +264,7 @@ impl ChWriteManager {
         table: &str,
         rows: &[T],
         deduplication_token: Option<&str>,
+        async_insert: bool,
     ) -> Result<(), StorageError>
     where
         T: RowOwned + RowWrite + Send + Sync,
@@ -231,6 +272,13 @@ impl ChWriteManager {
         let mut insert = client.insert::<T>(table).await?;
         if let Some(token) = deduplication_token {
             insert = insert.with_setting("insert_deduplication_token", token);
+        }
+        if async_insert {
+            insert = insert
+                .with_setting("async_insert", "1")
+                .with_setting("async_insert_deduplicate", "1")
+                .with_setting("wait_for_async_insert", "1")
+                .with_setting("async_insert_busy_timeout_ms", "100");
         }
         for row in rows {
             insert.write(row).await?;

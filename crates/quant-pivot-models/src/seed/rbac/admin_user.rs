@@ -46,7 +46,7 @@ pub async fn load(db: &DatabaseTransaction, ctx: &mut SeedContext) -> Result<u64
         .clone();
 
     let model = ActiveModel {
-        id: Set(id.clone()),
+        id: Set(id),
         username: Set(DEFAULT_ADMIN_USERNAME.to_owned()),
         password_hash: Set(password_hash),
         nickname: Set(DEFAULT_ADMIN_NICKNAME.to_owned()),

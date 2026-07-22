@@ -60,19 +60,17 @@ pub const TRADE_TAPE_WINDOW: ClickHouseQueryLimits = ClickHouseQueryLimits::new(
 );
 pub const MID_PRICE_SERIES: ClickHouseQueryLimits =
     ClickHouseQueryLimits::new("ch.repository.mid_price_series.v1", ONLINE_ROWS, 128 * MIB);
-pub const BOOK_CHECKPOINT_AT: ClickHouseQueryLimits =
-    ClickHouseQueryLimits::new("ch.repository.book_checkpoint_at.v1", 1, 4 * MIB);
-pub const BOOK_EVENTS_FROM: ClickHouseQueryLimits =
-    ClickHouseQueryLimits::new("ch.repository.book_events_from.v1", ONLINE_ROWS, 256 * MIB);
-pub const BOOK_EVENTS_BETWEEN: ClickHouseQueryLimits = ClickHouseQueryLimits::new(
-    "ch.repository.book_events_between.v1",
-    RESEARCH_ROWS,
-    512 * MIB,
-);
-pub const MARKET_WS_TRADES_FROM: ClickHouseQueryLimits = ClickHouseQueryLimits::new(
-    "ch.repository.market_ws_trades_from.v1",
+pub const BOOK_LEDGER_SNAPSHOT_AT: ClickHouseQueryLimits =
+    ClickHouseQueryLimits::new("ch.repository.book_ledger_snapshot_at.v1", 1, 4 * MIB);
+pub const BOOK_LEDGER_FROM: ClickHouseQueryLimits = ClickHouseQueryLimits::new(
+    "ch.repository.book_l2_ledger_from.v1",
     ONLINE_ROWS,
     256 * MIB,
+);
+pub const BOOK_LEDGER_BETWEEN: ClickHouseQueryLimits = ClickHouseQueryLimits::new(
+    "ch.repository.book_l2_ledger_between.v1",
+    RESEARCH_ROWS,
+    512 * MIB,
 );
 pub const BOOK_STREAM_SESSION_AT: ClickHouseQueryLimits =
     ClickHouseQueryLimits::new("ch.repository.book_stream_session_at.v1", 1, 64 * KIB);
@@ -81,13 +79,13 @@ pub const BOOK_STREAM_SESSIONS: ClickHouseQueryLimits = ClickHouseQueryLimits::n
     ONLINE_ROWS,
     128 * MIB,
 );
-pub const BOOK_CHECKPOINTS_AT: ClickHouseQueryLimits = ClickHouseQueryLimits::new(
-    "ch.repository.book_checkpoints_at.v1",
+pub const BOOK_LEDGER_SNAPSHOTS_AT: ClickHouseQueryLimits = ClickHouseQueryLimits::new(
+    "ch.repository.book_ledger_snapshots_at.v1",
     ONLINE_ROWS,
     256 * MIB,
 );
-pub const BOOK_CHECKPOINTS_BETWEEN: ClickHouseQueryLimits = ClickHouseQueryLimits::new(
-    "ch.repository.book_checkpoints_between.v1",
+pub const BOOK_LEDGER_SNAPSHOTS_BETWEEN: ClickHouseQueryLimits = ClickHouseQueryLimits::new(
+    "ch.repository.book_ledger_snapshots_between.v1",
     RESEARCH_ROWS,
     512 * MIB,
 );

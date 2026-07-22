@@ -57,7 +57,7 @@ async fn do_find_by_username(
 }
 
 async fn do_find_by_id(db: &impl ConnectionTrait, id: &UserId) -> Result<UserInfo, StorageError> {
-    Entity::find_by_id(id.clone())
+    Entity::find_by_id(*id)
         .one(db)
         .await
         .map_err(StorageError::from)?
@@ -80,7 +80,7 @@ async fn do_update(
     patch: UserPatch,
 ) -> Result<UserInfo, StorageError> {
     let mut active = patch.into_active_model();
-    active.id = Set(id.clone());
+    active.id = Set(*id);
     active.updated_at = Set(Utc::now());
     match active.update(db).await {
         Ok(model) => Ok(model.into()),
@@ -96,7 +96,7 @@ async fn do_change_status(
 ) -> Result<(), StorageError> {
     let result = Entity::update_many()
         .col_expr(Column::Status, primitives::enum_value(&status))
-        .filter(Column::Id.eq(id.clone()))
+        .filter(Column::Id.eq(*id))
         .exec(db)
         .await
         .map_err(StorageError::from)?;
@@ -113,7 +113,7 @@ async fn do_change_password(
 ) -> Result<(), StorageError> {
     let result = Entity::update_many()
         .col_expr(Column::PasswordHash, Expr::value(change.password_hash))
-        .filter(Column::Id.eq(id.clone()))
+        .filter(Column::Id.eq(*id))
         .exec(db)
         .await
         .map_err(StorageError::from)?;
@@ -127,13 +127,13 @@ async fn do_delete(db: &DatabaseConnection, id: &UserId) -> Result<(), StorageEr
     let txn = db.begin().await.map_err(StorageError::from)?;
 
     UserRoleEntity::delete_many()
-        .filter(UserRoleColumn::UserId.eq(id.clone()))
+        .filter(UserRoleColumn::UserId.eq(*id))
         .exec(&txn)
         .await
         .map_err(StorageError::from)?;
     sync::do_revoke_all_roles_for_user(&txn, id).await?;
 
-    let result = Entity::delete_by_id(id.clone())
+    let result = Entity::delete_by_id(*id)
         .exec(&txn)
         .await
         .map_err(StorageError::from)?;

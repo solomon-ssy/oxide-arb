@@ -4,7 +4,6 @@ use std::{collections::BTreeSet, sync::Arc, time::Duration};
 
 use quant_pivot_api::{
     binance::{BinanceAggTradeSource, BinanceKlineSource, BinanceRequestBudget},
-    chainlink::ChainlinkDataStreamsSource,
     domain::DomainDataSource,
     exchange::ExchangeLogClient,
     rtds::PolymarketRtdsSource,
@@ -14,13 +13,14 @@ use quant_pivot_api::{
         nsidc::NsidcSeaIceSource, nws::NwsObservationSource, tornado::TornadoSource,
     },
 };
+#[cfg(feature = "domain-chainlink")]
+use quant_pivot_models::types::DomainSourceId;
 use quant_pivot_models::{
     clickhouse::{
         CryptoPriceReportRow, DomainEventRow, DomainObservationRow, TradeTapeRow,
         WeatherForecastFactRow, WeatherObservationFactRow,
     },
     config::BinanceSourceConfig,
-    types::DomainSourceId,
 };
 use quant_pivot_repository::{
     clickhouse::{ChFactWriter, ChNativeReadRepository},
@@ -32,6 +32,8 @@ use quant_pivot_repository::{
 };
 
 use super::AppContext;
+#[cfg(feature = "domain-chainlink")]
+use crate::app::crypto_live_ingest_worker::ChainlinkDataStreamsSource;
 use crate::{
     app::{
         clob_market_info_worker::ClobMarketInfoWorker,
@@ -56,6 +58,7 @@ use crate::{
 struct ConnectedDomainSources {
     binance: Option<Arc<BinanceAggTradeSource>>,
     binance_usdm_futures: Option<Arc<BinanceAggTradeSource>>,
+    #[cfg(feature = "domain-chainlink")]
     chainlink: Option<Arc<ChainlinkDataStreamsSource>>,
     rtds: Option<Arc<PolymarketRtdsSource>>,
     aviation: Option<Arc<AviationWeatherSource>>,
@@ -67,6 +70,7 @@ struct ConnectedDomainSources {
 struct ConnectedCryptoSources {
     binance: Option<Arc<BinanceAggTradeSource>>,
     binance_usdm_futures: Option<Arc<BinanceAggTradeSource>>,
+    #[cfg(feature = "domain-chainlink")]
     chainlink: Option<Arc<ChainlinkDataStreamsSource>>,
     rtds: Option<Arc<PolymarketRtdsSource>>,
 }
@@ -200,6 +204,7 @@ impl AppContext {
         } else {
             None
         };
+        #[cfg(feature = "domain-chainlink")]
         let chainlink = sources.chainlink_data_streams.enabled.then(|| {
             ChainlinkDataStreamsSource::connect(sources.chainlink_data_streams.clone())
                 .map(Arc::new)
@@ -208,6 +213,14 @@ impl AppContext {
                 })
                 .ok()
         }).flatten();
+        #[cfg(not(feature = "domain-chainlink"))]
+        {
+            if sources.chainlink_data_streams.enabled {
+                tracing::error!(
+                    "Chainlink Data Streams configured but compile-time `domain-chainlink` is disabled; bound conditions fail closed"
+                );
+            }
+        }
         let rtds = sources.polymarket_rtds.enabled.then(|| {
             Arc::new(PolymarketRtdsSource::connect(
                 sources.polymarket_rtds.clone(),
@@ -241,6 +254,7 @@ impl AppContext {
         ConnectedDomainSources {
             binance,
             binance_usdm_futures,
+            #[cfg(feature = "domain-chainlink")]
             chainlink,
             rtds,
             aviation,
@@ -356,6 +370,7 @@ impl AppContext {
         let ConnectedDomainSources {
             binance,
             binance_usdm_futures,
+            #[cfg(feature = "domain-chainlink")]
             chainlink,
             rtds,
             aviation,
@@ -372,11 +387,14 @@ impl AppContext {
                     nws,
                 },
         } = self.connect_domain_sources(binance_budgets.clone());
+        #[cfg(feature = "domain-chainlink")]
         let credential_ready_sources = chainlink
             .is_some()
             .then(DomainSourceId::chainlink_data_streams)
             .into_iter()
             .collect::<BTreeSet<_>>();
+        #[cfg(not(feature = "domain-chainlink"))]
+        let credential_ready_sources = BTreeSet::new();
         let source_supervisor = match DomainSourceSupervisor::new(
             Arc::clone(&self.infra.repos.domain_source_expectation)
                 as Arc<dyn DomainSourceExpectationRepository>,
@@ -406,6 +424,7 @@ impl AppContext {
             ConnectedCryptoSources {
                 binance,
                 binance_usdm_futures,
+                #[cfg(feature = "domain-chainlink")]
                 chainlink,
                 rtds,
             },
@@ -526,6 +545,7 @@ impl AppContext {
             crypto_writer,
             binance: sources.binance,
             binance_usdm_futures: sources.binance_usdm_futures,
+            #[cfg(feature = "domain-chainlink")]
             chainlink: sources.chainlink,
         }));
         runner.spawn(TaskId::CryptoLiveIngestWorker, move |token| async move {

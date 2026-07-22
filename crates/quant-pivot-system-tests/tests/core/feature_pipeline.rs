@@ -11,7 +11,7 @@ use std::{
 use async_trait::async_trait;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use quant_pivot_core::{
-    ingest::{book_store::BookStore, market_registry::MarketRegistry},
+    ingest::{book_store::BookStore, data_plane_index::DataPlane, market_registry::MarketRegistry},
     observability::{feature_fact_writer::FeatureEventWriter, metrics_hub::MetricsHub},
     prefetch::{feature_window::FeatureWindowProvider, market_candidates::MarketCandidateProvider},
     service::feature_pipeline::{
@@ -21,14 +21,17 @@ use quant_pivot_core::{
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     clickhouse::{
-        BookL2CheckpointRow, BookMicrostructureRow, DomainObservationRow, MarketResolutionRow,
+        BookL2LedgerRow, BookMicrostructureRow, DomainObservationRow, MarketResolutionRow,
         MidPriceBucketRow, QuantFeatureEventRow, TradeTapeRow,
     },
     config::TradeTapeOnChainConfig,
     domain::{
         api::CalibrationArtifactListQuery,
         data_plane::DecisionClock,
-        market::{EventRegistryInfo, MarketRegistryInfo, TokenInfo, book::BookLevel},
+        market::{
+            EventRegistryInfo, MarketRegistryInfo, TokenInfo,
+            book::{BookLevel, BookSnapshot},
+        },
         pagination::Paginated,
         quant::{
             CalibrationArtifactInfo, FeatureVectorInfo, NewCalibrationArtifact, NewFeatureVector,
@@ -168,7 +171,7 @@ fn wire_live_book(registry: &MarketRegistry, book_store: &BookStore, catalog: &E
         status: EventStatus::Active,
         market_ids: vec![market.market_id.clone()],
         categories: CategorySet::from(MarketCategory::Sports),
-        tags: vec![MarketCategory::Sports.as_str().to_owned()],
+        tags: vec![MarketCategory::Sports.to_string()],
         neg_risk: false,
         end_date: market.end_date,
         created_at: Utc::now() - ChronoDuration::days(2),
@@ -176,20 +179,27 @@ fn wire_live_book(registry: &MarketRegistry, book_store: &BookStore, catalog: &E
     });
     registry.register_market(market);
     let yes = TokenId::new(catalog.yes_token);
-    book_store.apply_snapshot(
-        &yes,
-        Arc::from([BookLevel::from_decimal_unchecked(
-            Price::new(Decimal::new(47, 2)),
-            Shares::new(Decimal::from(120)),
-        )]),
-        Arc::from([BookLevel::from_decimal_unchecked(
-            Price::new(Decimal::new(53, 2)),
-            Shares::new(Decimal::from(120)),
-        )]),
-        u64::try_from(Utc::now().timestamp_millis())
-            .expect("test book timestamp must be non-negative"),
+    let yes = book_store.resolve(&yes).expect("registered YES token");
+    let timestamp_ms = u64::try_from(Utc::now().timestamp_millis())
+        .expect("test book timestamp must be non-negative");
+    assert!(book_store.publish(
+        yes,
+        BookSnapshot::new(
+            Arc::from([BookLevel::from_decimal_unchecked(
+                Price::new(Decimal::new(47, 2)),
+                Shares::new(Decimal::from(120)),
+            )]),
+            Arc::from([BookLevel::from_decimal_unchecked(
+                Price::new(Decimal::new(53, 2)),
+                Shares::new(Decimal::from(120)),
+            )]),
+            timestamp_ms,
+            1,
+        ),
+        1,
+        1,
         None,
-    );
+    ));
 }
 
 struct EmptyFactRead;
@@ -295,22 +305,22 @@ impl QuantFactReadRepository for EmptyFactRead {
         Ok(Vec::new())
     }
 
-    async fn book_checkpoint_at(
+    async fn book_ledger_snapshot_at(
         &self,
         _token_id: &TokenId,
         _as_of_ms: i64,
         _decision_at_ms: i64,
-    ) -> Result<Option<BookL2CheckpointRow>, StorageError> {
+    ) -> Result<Option<BookL2LedgerRow>, StorageError> {
         Ok(None)
     }
 
-    async fn book_checkpoints_between(
+    async fn book_ledger_snapshots_between(
         &self,
         _token_ids: Vec<TokenId>,
         _from_ms: i64,
         _to_ms: i64,
         _available_by_ms: i64,
-    ) -> Result<Vec<BookL2CheckpointRow>, StorageError> {
+    ) -> Result<Vec<BookL2LedgerRow>, StorageError> {
         Ok(Vec::new())
     }
 
@@ -472,8 +482,9 @@ pub async fn insufficient_vectors_are_audited_but_partitioned_from_model_input()
     // Catalog and book inputs are valid, but the required microstructure window
     // is absent. The model contract must reject the vector without inventing a
     // replacement value, while retaining its complete audit evidence.
-    let registry = Arc::new(MarketRegistry::new());
-    let book_store = Arc::new(BookStore::new(Arc::new(MetricsHub::new())));
+    let data_plane = Arc::new(DataPlane::new());
+    let registry = Arc::new(MarketRegistry::new(Arc::clone(&data_plane)));
+    let book_store = Arc::new(BookStore::new(data_plane, Arc::new(MetricsHub::new())));
     wire_live_book(&registry, &book_store, &CATALOG);
     let live_pit = InMemoryDecisionSnapshotSource::freeze(registry.as_ref(), book_store.as_ref());
 
@@ -566,8 +577,9 @@ pub async fn create_feature_vector_then_find() {
     let db = pool.connection().clone();
     seed_catalog(&db, &CATALOG).await;
 
-    let registry = Arc::new(MarketRegistry::new());
-    let book_store = Arc::new(BookStore::new(Arc::new(MetricsHub::new())));
+    let data_plane = Arc::new(DataPlane::new());
+    let registry = Arc::new(MarketRegistry::new(Arc::clone(&data_plane)));
+    let book_store = Arc::new(BookStore::new(data_plane, Arc::new(MetricsHub::new())));
     wire_live_book(&registry, &book_store, &CATALOG);
 
     let pit_source: Arc<dyn PointInTimeSnapshotSource> = Arc::new(

@@ -151,12 +151,7 @@ async fn verify_contract(db: &DatabaseConnection) -> Result<PostgresSchemaStatus
         migration_count: migration_manifest.migrations.len(),
         required_table_count,
         required_index_count,
-        schema_fingerprint: ContentHash::parse(CanonicalDigest::prefixed_bytes(
-            manifest_bytes.as_bytes(),
-        ))
-        .map_err(|error| {
-            StorageError::Migration(format!("construct PostgreSQL schema fingerprint: {error}"))
-        })?,
+        schema_fingerprint: CanonicalDigest::content_hash_bytes(manifest_bytes.as_bytes()),
     })
 }
 

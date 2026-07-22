@@ -41,7 +41,7 @@ pub struct FactorPipelineRequest<'a> {
     /// The owning online round (minted up front, threaded through the round).
     pub model_run_id: &'a ModelRunId,
     /// Accepted feature vectors whose data-quality bar already passed.
-    pub vectors: &'a [FeatureVector],
+    pub vectors: Arc<[FeatureVector]>,
     /// Persisted feature-vector ids, aligned 1:1 with `vectors`.
     pub feature_vector_ids: &'a [FeatureVectorId],
     /// Frozen factor config (enabled families, confidence floor, missing policy).
@@ -148,7 +148,7 @@ impl FactorPipelineService {
             ));
         }
 
-        FactorEngine::validate_batch_invariants(request.vectors)?;
+        FactorEngine::validate_batch_invariants(request.vectors.as_ref())?;
         references.validate()?;
         if request.factors.cross_section.small_cross_section_policy
             == SmallCrossSectionPolicy::FrozenReferenceQuantile
@@ -171,7 +171,7 @@ impl FactorPipelineService {
         // cross-sectional batch never stalls the async runtime. The engine moves
         // in and back out so its registry is reused for definition persistence.
         let config = request.factors.clone();
-        let vectors = request.vectors.to_vec();
+        let vectors = request.vectors;
         let references = references.clone();
         let (_engine, outcomes) = tokio::task::spawn_blocking(move || {
             let outcomes = engine.compute_all_batch_with_references(&vectors, &config, &references);
@@ -241,7 +241,7 @@ impl FactorPipelineService {
         let identities = engine.definition_identities()?;
         let ids: Vec<_> = identities
             .iter()
-            .map(|identity| identity.factor_definition_id.clone())
+            .map(|identity| identity.factor_definition_id)
             .collect();
         let rows = self
             .factor_repo

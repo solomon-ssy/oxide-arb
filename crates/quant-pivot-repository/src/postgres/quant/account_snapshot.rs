@@ -38,7 +38,7 @@ impl AccountSnapshotRepository for PgAccountSnapshotRepository {
         &self,
         account_snapshot_id: &AccountSnapshotId,
     ) -> Result<Option<AccountSnapshotInfo>, StorageError> {
-        Entity::find_by_id(account_snapshot_id.clone())
+        Entity::find_by_id(*account_snapshot_id)
             .one(&self.db)
             .await
             .map_err(StorageError::from)

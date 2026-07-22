@@ -121,13 +121,13 @@ impl<R> ReinferenceSignalEvaluator<R> {
         let ch_verdict: ChExitSignalVerdict = verdict.into();
         self.audit.write(QuantExitSignalEvaluationEventRow {
             event_time: now_ms,
-            order_intent_id: ctx.lot.order_intent_id.clone(),
-            position_id: ctx.lot.position_id.clone(),
+            order_intent_id: ctx.lot.order_intent_id,
+            position_id: ctx.lot.position_id,
             market_id: ctx.lot.market_id.clone(),
             token_id: ctx.lot.token_id.clone(),
             evaluator_kind: ChExitSignalEvaluatorKind::Reinference,
             verdict: ch_verdict,
-            model_version_id: Some(ctx.intent.model_version_id.clone()),
+            model_version_id: Some(ctx.intent.model_version_id),
             mark_price: ctx.mark_price.map(ChPrice::from),
             entry_composite_score: ChProbability::from(
                 ctx.intent.exit_policy_json.entry_composite_score,
@@ -252,9 +252,9 @@ impl<R: ExitSignalReinferer> ExitSignalEvaluator for ReinferenceSignalEvaluator<
                 .is_positive()
                 .then(|| ExitReinferenceObservation {
                     observed_at: ctx.now,
-                    model_version_id: ctx.intent.model_version_id.clone(),
-                    model_artifact_hash: signal.model_artifact_hash.clone(),
-                    factor_snapshot_hash: signal.factor_snapshot_hash.clone(),
+                    model_version_id: ctx.intent.model_version_id,
+                    model_artifact_hash: signal.model_artifact_hash,
+                    factor_snapshot_hash: signal.factor_snapshot_hash,
                     mark,
                     score: signal.composite_score,
                     score_retention: signal.composite_score.inner() / entry_score.inner(),
@@ -330,9 +330,9 @@ mod tests {
 
     fn fresh(score: &str, ret_bps: i64, eligible: bool) -> FreshSignal {
         FreshSignal {
-            model_artifact_hash: ContentHash::parse(format!("blake3:{}", "a".repeat(64)))
+            model_artifact_hash: ContentHash::parse(&format!("blake3:{}", "a".repeat(64)))
                 .expect("hash"),
-            factor_snapshot_hash: ContentHash::parse(format!("blake3:{}", "b".repeat(64)))
+            factor_snapshot_hash: ContentHash::parse(&format!("blake3:{}", "b".repeat(64)))
                 .expect("hash"),
             composite_score: Probability::new(score.parse().unwrap()),
             expected_return_bps: Bps::new(Decimal::from(ret_bps)),

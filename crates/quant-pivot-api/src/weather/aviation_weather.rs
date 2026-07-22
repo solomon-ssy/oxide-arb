@@ -9,8 +9,7 @@ use quant_pivot_models::{
     domain::data_plane::{WeatherObservationReport, WeatherObservationReportKind},
     hashing::CanonicalDigest,
     types::{
-        ContentHash, DomainInstrumentKey, DomainMeasurementUnit, DomainSourceId, IcaoStation,
-        WeatherVariable,
+        DomainInstrumentKey, DomainMeasurementUnit, DomainSourceId, IcaoStation, WeatherVariable,
     },
 };
 use reqwest::Client;
@@ -94,7 +93,7 @@ impl AviationWeatherSource {
                 .cmp(&right.available_at)
                 .then_with(|| left.published_at.cmp(&right.published_at))
                 .then_with(|| left.observed_at.cmp(&right.observed_at))
-                .then_with(|| left.report_hash.as_str().cmp(right.report_hash.as_str()))
+                .then_with(|| left.report_hash.cmp(&right.report_hash))
         });
         Ok(reports)
     }
@@ -150,7 +149,7 @@ fn map_report(
         }
         .into());
     };
-    let report_hash = ContentHash::parse(CanonicalDigest::prefixed_bytes(row.raw_ob.as_bytes()))?;
+    let report_hash = CanonicalDigest::content_hash_bytes(row.raw_ob.as_bytes());
     let precision_celsius = Decimal::new(1, temperature.scale().min(1));
     Ok(Some(WeatherObservationReport {
         source_id: DomainSourceId::aviation_weather(),

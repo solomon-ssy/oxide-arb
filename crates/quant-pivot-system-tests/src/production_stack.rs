@@ -309,7 +309,7 @@ async fn await_sampled_parity_containment(
     loop {
         let run = Entity::find()
             .filter(Column::Kind.eq(FeatureParityRunKind::Sampled))
-            .filter(Column::ReportId.eq(report_id.clone()))
+            .filter(Column::ReportId.eq(*report_id))
             .order_by_desc(Column::CreatedAt)
             .one(db)
             .await

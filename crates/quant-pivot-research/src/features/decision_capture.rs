@@ -42,12 +42,12 @@ use crate::{
 impl From<&ResolvedMarketSnapshot> for CatalogDecisionRef {
     fn from(snapshot: &ResolvedMarketSnapshot) -> Self {
         Self {
-            catalog_sync_batch_id: snapshot.catalog_sync_batch_id.clone(),
-            market_change_id: snapshot.market_change_id.clone(),
-            event_change_id: snapshot.event_change_id.clone(),
-            market_content_hash: snapshot.market_content_hash.clone(),
-            event_content_hash: snapshot.event_content_hash.clone(),
-            membership_hash: snapshot.membership_hash.clone(),
+            catalog_sync_batch_id: snapshot.catalog_sync_batch_id,
+            market_change_id: snapshot.market_change_id,
+            event_change_id: snapshot.event_change_id,
+            market_content_hash: snapshot.market_content_hash,
+            event_content_hash: snapshot.event_content_hash,
+            membership_hash: snapshot.membership_hash,
             market_effective_at: snapshot.market_effective_at,
             market_available_at: snapshot.market_available_at,
             event_effective_at: snapshot.event_effective_at,
@@ -230,7 +230,7 @@ pub fn book_snapshot_ref_from_resolved(book: &ResolvedBook) -> QuantResult<BookS
         source: BookSnapshotSource::CanonicalL2 {
             stream_session_id: source_event.stream_session_id,
             token_sequence: source_event.token_sequence,
-            source_event_hash: source_event.source_event_hash.clone(),
+            source_event_hash: source_event.source_event_hash,
             event_time_ms: i64::try_from(book.timestamp_ms).map_err(|error| {
                 ResearchError::PitResolution {
                     detail: format!(
@@ -312,8 +312,8 @@ pub fn market_decision_capture_from_resolved(
         market_id: selected.market_id.clone(),
         event_id: selected.event_id.clone(),
         token_id: selected.primary_token_id.clone(),
-        market_linkage_id: domain.map(|inputs| inputs.linkage_id.clone()),
-        market_linkage_hash: domain.map(|inputs| inputs.linkage_hash.clone()),
+        market_linkage_id: domain.map(|inputs| inputs.linkage_id),
+        market_linkage_hash: domain.map(|inputs| inputs.linkage_hash),
         domain_binding: domain.map(|inputs| inputs.binding.clone()),
         book,
         market,
@@ -384,12 +384,12 @@ pub fn draft_data_quality_snapshot(
                     .map(|row| {
                         row.missing_required
                             .iter()
-                            .map(|(name, _)| name.as_str().to_owned())
+                            .map(|(name, _)| name.to_string())
                             .collect()
                     })
                     .unwrap_or_default();
                 Ok(TokenDataQualityRecord {
-                    feature_vector_id: Some(persisted.feature_vector_id.clone()),
+                    feature_vector_id: Some(persisted.feature_vector_id),
                     token_id: bundle.capture.token_id.clone(),
                     market_id: bundle.capture.market_id.clone(),
                     status: vector.data_quality,
@@ -505,7 +505,7 @@ mod tests {
             source_event: Some(CanonicalBookEventRef {
                 stream_session_id: Uuid::from_u128(1),
                 token_sequence: 42,
-                source_event_hash: ContentHash::parse(format!("blake3:{}", "d".repeat(64)))
+                source_event_hash: ContentHash::parse(&format!("blake3:{}", "d".repeat(64)))
                     .expect("canonical event hash"),
             }),
             effective_at: Utc::now(),

@@ -12,6 +12,8 @@
 //! Integration tests build an equivalent `App` via [`cors_from`],
 //! [`middleware::request_id`], and [`routes::configure`].
 
+use quant_pivot_allocator as _;
+
 pub mod audit;
 pub mod auth;
 pub mod error;
@@ -83,6 +85,8 @@ pub async fn spawn_web_server(
             // Static SPA registered last so API routes take precedence.
             .configure(move |cfg| static_files::configure_static(cfg, &static_config))
     })
+    .workers(1)
+    .worker_max_blocking_threads(1)
     .bind(bind_addr)
     .map_err(|error| InfraError::ServerBind {
         detail: error.to_string(),

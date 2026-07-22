@@ -17,7 +17,7 @@ use quant_pivot_core::{
         BiasTableApplicator, CoreCalibrationArtifactLoader, RuntimeModeHandle,
         WeightOverlayApplicator,
     },
-    ingest::{book_store::BookStore, market_registry::MarketRegistry},
+    ingest::{book_store::BookStore, data_plane_index::DataPlane, market_registry::MarketRegistry},
     observability::{
         alert_dispatcher::AlertDispatcher, factor_fact_writer::FactorEventWriter,
         feature_fact_writer::FeatureEventWriter, metrics_hub::MetricsHub,
@@ -45,7 +45,7 @@ use quant_pivot_core::{
 use quant_pivot_error::{QuantResult, storage::StorageError};
 use quant_pivot_models::{
     clickhouse::{
-        BookL2CheckpointRow, BookMicrostructureRow, DomainObservationRow, MarketResolutionRow,
+        BookL2LedgerRow, BookMicrostructureRow, DomainObservationRow, MarketResolutionRow,
         MidPriceBucketRow, TradeTapeRow,
     },
     config::TradeTapeOnChainConfig,
@@ -53,7 +53,10 @@ use quant_pivot_models::{
         api::{BasisAlertListQuery, MarketLinkageListQuery},
         data_plane::DecisionBoundary,
         governance::{NewOperationLog, lifecycle::OperationalPhase},
-        market::{EventRegistryInfo, MarketRegistryInfo, TokenInfo, book::BookLevel},
+        market::{
+            EventRegistryInfo, MarketRegistryInfo, TokenInfo,
+            book::{BookLevel, BookSnapshot},
+        },
         pagination::Paginated,
         quant::{
             BasisAlertInfo, ClaimReportSchedule, MarketLinkageInfo, NewAccountSnapshot,
@@ -262,7 +265,7 @@ impl ReportPipelineHarness {
                 120,
                 300,
                 ReportRunClaimConfig {
-                    decision_policy_snapshot_id: self.decision_policy_snapshot_id.clone(),
+                    decision_policy_snapshot_id: self.decision_policy_snapshot_id,
                     ad_hoc_default_top_n: 20,
                     ad_hoc_default_knowledge_lag_secs: 10,
                     schedules: Vec::<ClaimReportSchedule>::new(),
@@ -281,7 +284,7 @@ impl ReportPipelineHarness {
         let now = Utc::now();
         let claimed = self
             .report_repo
-            .claim_fact_delivery(delivery_worker.clone(), 60)
+            .claim_fact_delivery(delivery_worker, 60)
             .await?
             .ok_or_else(|| {
                 StorageError::state_conflict(
@@ -329,7 +332,7 @@ impl FeatureParityGatePort for ClearFeatureParityGate {
     }
 
     async fn commit_state_id(&self, _action: &'static str) -> QuantResult<FeatureParityStateId> {
-        Ok(self.state_id.clone())
+        Ok(self.state_id)
     }
 }
 
@@ -540,22 +543,22 @@ impl QuantFactReadRepository for EmptyFactRead {
         Ok(Vec::new())
     }
 
-    async fn book_checkpoint_at(
+    async fn book_ledger_snapshot_at(
         &self,
         _token_id: &TokenId,
         _as_of_ms: i64,
         _decision_at_ms: i64,
-    ) -> Result<Option<BookL2CheckpointRow>, StorageError> {
+    ) -> Result<Option<BookL2LedgerRow>, StorageError> {
         Ok(None)
     }
 
-    async fn book_checkpoints_between(
+    async fn book_ledger_snapshots_between(
         &self,
         _token_ids: Vec<TokenId>,
         _from_ms: i64,
         _to_ms: i64,
         _available_by_ms: i64,
-    ) -> Result<Vec<BookL2CheckpointRow>, StorageError> {
+    ) -> Result<Vec<BookL2LedgerRow>, StorageError> {
         Ok(Vec::new())
     }
 
@@ -614,8 +617,9 @@ impl ReportPipelineHarness {
     pub async fn bootstrap(db: &DatabaseConnection, options: HarnessOptions) -> Self {
         seed_catalog(db).await;
 
-        let registry = Arc::new(MarketRegistry::new());
-        let book_store = Arc::new(BookStore::new(Arc::new(MetricsHub::new())));
+        let data_plane = Arc::new(DataPlane::new());
+        let registry = Arc::new(MarketRegistry::new(Arc::clone(&data_plane)));
+        let book_store = Arc::new(BookStore::new(data_plane, Arc::new(MetricsHub::new())));
         wire_live_book(&registry, &book_store);
 
         let factors = factors_config();
@@ -763,22 +767,22 @@ async fn seed_fixture_report(
         seed_minimal_market_selection(db, &ctx.decision_policy_snapshot_id).await;
 
     let mut report = report_fixtures::report(
-        report_id.clone(),
+        report_id,
         ReportKind::TopN,
         RecommendationReportStatus::Published,
     );
-    report.decision_policy_snapshot_id = ctx.decision_policy_snapshot_id.clone();
-    report.model_version_id = ctx.model_version_id.clone();
-    report.market_selection_id = market_selection_id.clone();
+    report.decision_policy_snapshot_id = ctx.decision_policy_snapshot_id;
+    report.model_version_id = ctx.model_version_id;
+    report.market_selection_id = market_selection_id;
     let model_run_id =
         seed_fixture_model_run(db, ctx, &market_selection_id, report.decision_at).await;
-    report.model_run_id = Some(model_run_id.clone());
+    report.model_run_id = Some(model_run_id);
     report.profile_id = profile_ref.id.clone();
     report.profile_ref = profile_ref.clone();
 
     let mut recommendations = vec![
         report_fixtures::recommendation(
-            report_id.clone(),
+            report_id,
             RecommendationId::from_v7(),
             1,
             FIXTURE_MARKET_A,
@@ -797,10 +801,10 @@ async fn seed_fixture_report(
     for rec in &mut recommendations {
         rec.profile_ref = profile_ref.clone();
         rec.event_id = EventId::new(FIXTURE_EVENT);
-        rec.evidence_refs.decision_policy_snapshot_id = ctx.decision_policy_snapshot_id.clone();
-        rec.evidence_refs.model_version_id = ctx.model_version_id.clone();
-        rec.evidence_refs.model_run_id = model_run_id.clone();
-        rec.evidence_refs.market_selection_id = market_selection_id.clone();
+        rec.evidence_refs.decision_policy_snapshot_id = ctx.decision_policy_snapshot_id;
+        rec.evidence_refs.model_version_id = ctx.model_version_id;
+        rec.evidence_refs.model_run_id = model_run_id;
+        rec.evidence_refs.market_selection_id = market_selection_id;
     }
 
     let feature_parity_state_id = seed_clear_feature_parity_state(db).await;
@@ -835,11 +839,11 @@ async fn seed_fixture_model_run(
     .expect("hash web report fixture model output");
     PgModelRunRepository::new(db.clone())
         .create(NewModelRun {
-            model_run_id: model_run_id.clone(),
+            model_run_id,
             run_kind: ModelRunKind::LiveInference,
-            model_version_id: Some(ctx.model_version_id.clone()),
-            decision_policy_snapshot_id: ctx.decision_policy_snapshot_id.clone(),
-            market_selection_id: Some(market_selection_id.clone()),
+            model_version_id: Some(ctx.model_version_id),
+            decision_policy_snapshot_id: ctx.decision_policy_snapshot_id,
+            market_selection_id: Some(*market_selection_id),
             window_start: decision_at,
             window_end: decision_at,
             status: ModelRunStatus::Succeeded,
@@ -891,10 +895,10 @@ async fn seed_minimal_market_selection(
     PgMarketSelectionRepository::new(db.clone())
         .create_snapshot(
             NewMarketSelection {
-                market_selection_id: market_selection_id.clone(),
+                market_selection_id,
                 decision_at: Utc::now(),
-                decision_policy_snapshot_id: decision_policy_snapshot_id.clone(),
-                selector_hash: ContentHash::parse(format!("blake3:{}", "b".repeat(64)))
+                decision_policy_snapshot_id: *decision_policy_snapshot_id,
+                selector_hash: ContentHash::parse(&format!("blake3:{}", "b".repeat(64)))
                     .expect("selector hash"),
                 market_count: 2,
                 exclusion_summary: SelectionExclusionSummary::default(),
@@ -936,8 +940,8 @@ fn fixture_report_transaction(
                         } => (
                             EntryConditionState::Waiting,
                             None,
-                            Some(artifact_id.clone()),
-                            Some(content_hash.clone()),
+                            Some(*artifact_id),
+                            Some(*content_hash),
                             Some(report.decision_at),
                         ),
                     },
@@ -947,7 +951,7 @@ fn fixture_report_transaction(
                 };
             NewEntryConditionInstance {
                 condition_instance_id: EntryConditionInstanceId::from_v7(),
-                recommendation_id: recommendation.recommendation_id.clone(),
+                recommendation_id: recommendation.recommendation_id,
                 artifact_id,
                 artifact_hash,
                 state,
@@ -990,7 +994,7 @@ fn fixture_report_transaction(
 
 fn fixture_account_snapshot(report: &RecommendationReportInfo) -> NewAccountSnapshot {
     NewAccountSnapshot {
-        account_snapshot_id: report.account_snapshot_ref.clone(),
+        account_snapshot_id: report.account_snapshot_ref,
         as_of: report.decision_at,
         source: report.account_source,
         venue_net_liquidation_usd: report.capital_base_usd,
@@ -1002,9 +1006,9 @@ fn fixture_account_snapshot(report: &RecommendationReportInfo) -> NewAccountSnap
     }
 }
 
-fn fixture_equity_snapshot(report: &RecommendationReportInfo) -> NewEquitySnapshot {
+const fn fixture_equity_snapshot(report: &RecommendationReportInfo) -> NewEquitySnapshot {
     NewEquitySnapshot {
-        equity_snapshot_id: report.equity_snapshot_ref.clone(),
+        equity_snapshot_id: report.equity_snapshot_ref,
         as_of: report.decision_at,
         source: report.account_source,
         venue_net_liquidation_usd: report.capital_base_usd,
@@ -1015,26 +1019,26 @@ fn fixture_equity_snapshot(report: &RecommendationReportInfo) -> NewEquitySnapsh
         unrealized_pnl_usd: Usd::ZERO,
         high_water_mark_usd: report.capital_base_usd,
         drawdown_pct: Decimal::ZERO,
-        account_snapshot_ref: Some(report.account_snapshot_ref.clone()),
+        account_snapshot_ref: Some(report.account_snapshot_ref),
     }
 }
 
-fn fixture_data_quality_snapshot(
+const fn fixture_data_quality_snapshot(
     report: &RecommendationReportInfo,
 ) -> NewReportDataQualitySnapshot {
     NewReportDataQualitySnapshot {
-        report_data_quality_snapshot_id: report.data_quality_snapshot_ref.clone(),
+        report_data_quality_snapshot_id: report.data_quality_snapshot_ref,
         decision_at: report.decision_at,
-        decision_policy_snapshot_id: report.decision_policy_snapshot_id.clone(),
+        decision_policy_snapshot_id: report.decision_policy_snapshot_id,
         tokens_json: ReportDataQualityTokens(Vec::new()),
     }
 }
 
 fn fixture_portfolio_plan(report: &RecommendationReportInfo) -> NewPortfolioPlan {
     NewPortfolioPlan {
-        portfolio_plan_id: report.portfolio_plan_id.clone(),
-        model_run_id: report.model_run_id.clone(),
-        market_selection_id: report.market_selection_id.clone(),
+        portfolio_plan_id: report.portfolio_plan_id,
+        model_run_id: report.model_run_id,
+        market_selection_id: report.market_selection_id,
         decision_at: report.decision_at,
         budget_usd: report.capital_base_usd,
         allocated_usd: report.summary_json.total_suggested_usd,
@@ -1047,27 +1051,27 @@ fn fixture_portfolio_plan(report: &RecommendationReportInfo) -> NewPortfolioPlan
 
 fn fixture_new_report(report: &RecommendationReportInfo) -> NewRecommendationReport {
     NewRecommendationReport {
-        recommendation_report_id: report.recommendation_report_id.clone(),
+        recommendation_report_id: report.recommendation_report_id,
         research_profile_artifact_id: report.profile_ref.artifact_id(),
         report_kind: report.report_kind,
         decision_at: report.decision_at,
         horizon_secs: report.horizon_secs,
         runtime_mode: report.runtime_mode,
-        decision_policy_snapshot_id: report.decision_policy_snapshot_id.clone(),
-        model_run_id: report.model_run_id.clone(),
-        model_version_id: report.model_version_id.clone(),
-        market_selection_id: report.market_selection_id.clone(),
-        portfolio_plan_id: report.portfolio_plan_id.clone(),
+        decision_policy_snapshot_id: report.decision_policy_snapshot_id,
+        model_run_id: report.model_run_id,
+        model_version_id: report.model_version_id,
+        market_selection_id: report.market_selection_id,
+        portfolio_plan_id: report.portfolio_plan_id,
         top_n: report.top_n,
         status: report.status,
         account_source: report.account_source,
         capital_base_usd: report.capital_base_usd,
-        account_snapshot_ref: report.account_snapshot_ref.clone(),
-        equity_snapshot_ref: report.equity_snapshot_ref.clone(),
-        data_quality_snapshot_ref: report.data_quality_snapshot_ref.clone(),
+        account_snapshot_ref: report.account_snapshot_ref,
+        equity_snapshot_ref: report.equity_snapshot_ref,
+        data_quality_snapshot_ref: report.data_quality_snapshot_ref,
         summary_json: report.summary_json.clone(),
         published_at: report.published_at,
-        successor_report_id: report.successor_report_id.clone(),
+        successor_report_id: report.successor_report_id,
         superseded_at: report.superseded_at,
         obsoleted_at: report.obsoleted_at,
         valid_until: report.valid_until,
@@ -1297,7 +1301,7 @@ async fn seed_clear_feature_parity_state(db: &DatabaseConnection) -> FeaturePari
     let state_id = FeatureParityStateId::from_v7();
     Entity::insert(
         NewFeatureParityState {
-            state_id: state_id.clone(),
+            state_id,
             state: FeatureParityLatchState::Clear,
             transition: FeatureParityStateTransition::GovernedAcknowledge,
             cause_run_id: None,
@@ -1365,20 +1369,29 @@ fn registry_market(
 }
 
 fn apply_book_snapshot(book_store: &BookStore, yes_token: &str, bid_shares: i64, ask_shares: i64) {
-    book_store.apply_snapshot(
-        &TokenId::new(yes_token),
-        Arc::from([BookLevel::from_decimal_unchecked(
-            Price::new(Decimal::new(47, 2)),
-            Shares::new(Decimal::from(bid_shares)),
-        )]),
-        Arc::from([BookLevel::from_decimal_unchecked(
-            Price::new(Decimal::new(53, 2)),
-            Shares::new(Decimal::from(ask_shares)),
-        )]),
-        u64::try_from(Utc::now().timestamp_millis())
-            .expect("test book timestamp must be non-negative"),
+    let token = book_store
+        .resolve(&TokenId::new(yes_token))
+        .expect("registered book token");
+    let timestamp_ms = u64::try_from(Utc::now().timestamp_millis())
+        .expect("test book timestamp must be non-negative");
+    assert!(book_store.publish(
+        token,
+        BookSnapshot::new(
+            Arc::from([BookLevel::from_decimal_unchecked(
+                Price::new(Decimal::new(47, 2)),
+                Shares::new(Decimal::from(bid_shares)),
+            )]),
+            Arc::from([BookLevel::from_decimal_unchecked(
+                Price::new(Decimal::new(53, 2)),
+                Shares::new(Decimal::from(ask_shares)),
+            )]),
+            timestamp_ms,
+            1,
+        ),
+        1,
+        1,
         None,
-    );
+    ));
 }
 
 async fn seed_catalog(db: &DatabaseConnection) {
@@ -1442,7 +1455,7 @@ fn wire_live_book(registry: &MarketRegistry, book_store: &BookStore) {
         status: EventStatus::Active,
         market_ids: vec![primary.market_id.clone(), secondary.market_id.clone()],
         categories: CategorySet::from(MarketCategory::Sports),
-        tags: vec![MarketCategory::Sports.as_str().to_owned()],
+        tags: vec![MarketCategory::Sports.to_string()],
         neg_risk: false,
         end_date: primary.end_date,
         created_at: Utc::now() - ChronoDuration::days(2),
@@ -1495,7 +1508,7 @@ fn runtime_config_for_pipeline(
     config.profile_artifacts.scoring.definition = factors.clone();
     config.profile_artifacts.features.definition = features.clone();
     config.model_routing.model = ModelConfig {
-        active_model_version_id: Some(ModelVersionRef::new(model_version_id.clone())),
+        active_model_version_id: Some(ModelVersionRef::new(*model_version_id)),
         min_model_confidence: DecimalValue::new(rust_decimal_macros::dec!(0.00)),
         candidate_score_floor: DecimalValue::new(rust_decimal_macros::dec!(0.00)),
         ..ModelConfig::default()
@@ -1596,31 +1609,27 @@ async fn publish_weighted_model(input: &WeightedModelFixture<'_>) {
         model_input_contract_hash(&input_contract).expect("input contract hash");
     let model_spec_id = ModelSpecId::from_v7();
     let spec = new_model_spec_fixture(
-        model_spec_id.clone(),
+        model_spec_id,
         "report-pipeline-e2e",
         ModelFamily::WeightedFactor,
         86_400,
         input_contract.clone(),
         ModelTrainingContract::settlement_default(),
     );
-    let model_spec_definition_hash = spec.definition_hash.clone();
+    let model_spec_definition_hash = spec.definition_hash;
 
     let artifact = ModelArtifact::WeightedFactor(Box::new(WeightedFactorModelArtifact {
         header: ModelArtifactHeader {
-            model_version_id: input.model_version_id.clone(),
+            model_version_id: *input.model_version_id,
             model_spec_definition_hash,
             profile_ref: fixture_profile_ref(),
             model_family: ModelFamily::WeightedFactor,
             feature_schema_hash,
-            factor_schema_hash: factor_schema_hash.clone(),
-            trade_policy_artifact_id: trade_policy
-                .as_ref()
-                .map(|policy| policy.artifact_id.clone()),
-            trade_policy_hash: trade_policy
-                .as_ref()
-                .map(|policy| policy.artifact_hash.clone()),
+            factor_schema_hash,
+            trade_policy_artifact_id: trade_policy.as_ref().map(|policy| policy.artifact_id),
+            trade_policy_hash: trade_policy.as_ref().map(|policy| policy.artifact_hash),
         },
-        training_dataset_hash: factor_schema_hash.clone(),
+        training_dataset_hash: factor_schema_hash,
         training_input_hash: factor_schema_hash,
         input_contract: input_contract.clone(),
         input_contract_hash,
@@ -1632,7 +1641,7 @@ async fn publish_weighted_model(input: &WeightedModelFixture<'_>) {
             calibrator_ref: calibration_id,
             downside_source: DownsideSource::MfeMae,
         }),
-        factor_cross_section: FactorCrossSectionConfig::default(),
+        factor_cross_section: input.factors.cross_section.clone(),
         frozen_reference_quantiles: FrozenReferenceQuantiles::empty(),
         objective_report: None,
         category_scope: None,
@@ -1650,16 +1659,14 @@ async fn publish_weighted_model(input: &WeightedModelFixture<'_>) {
     registry.create_model_spec(spec).await.expect("create spec");
     registry
         .create_model_version(NewModelVersion {
-            model_version_id: input.model_version_id.clone(),
+            model_version_id: *input.model_version_id,
             model_spec_id,
             version: 1,
             artifact_hash,
             category_scope: None,
             profile_ref: fixture_profile_ref(),
             training_dataset_id: None,
-            trade_policy_artifact_id: trade_policy
-                .as_ref()
-                .map(|policy| policy.artifact_id.clone()),
+            trade_policy_artifact_id: trade_policy.as_ref().map(|policy| policy.artifact_id),
             trade_policy_hash: trade_policy.map(|policy| policy.artifact_hash),
             publish_path_set_id: None,
             derivation: NewModelVersion::training_derivation(),

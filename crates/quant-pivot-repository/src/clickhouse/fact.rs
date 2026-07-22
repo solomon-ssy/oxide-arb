@@ -34,6 +34,7 @@ pub struct ChFactWriter<T> {
     pool: Arc<ClickHousePool>,
     write_manager: Arc<ChWriteManager>,
     table: &'static str,
+    async_insert: bool,
     _row: PhantomData<fn(T)>,
 }
 
@@ -48,6 +49,23 @@ impl<T> ChFactWriter<T> {
             pool,
             write_manager,
             table,
+            async_insert: false,
+            _row: PhantomData,
+        }
+    }
+
+    /// Build a writer using server-side async insert with durable acknowledgement.
+    #[must_use]
+    pub const fn new_async_insert(
+        pool: Arc<ClickHousePool>,
+        write_manager: Arc<ChWriteManager>,
+        table: &'static str,
+    ) -> Self {
+        Self {
+            pool,
+            write_manager,
+            table,
+            async_insert: true,
             _row: PhantomData,
         }
     }
@@ -59,9 +77,30 @@ where
     T: RowOwned + RowWrite + Send + Sync + 'static,
 {
     async fn write_batch(&self, rows: Vec<T>) -> Result<(), StorageError> {
-        self.write_manager
-            .write_batch(self.pool.client(), self.table, rows)
-            .await
+        if self.async_insert {
+            self.write_manager
+                .write_async_insert_batch_borrowed(self.pool.client(), self.table, &rows)
+                .await
+        } else {
+            self.write_manager
+                .write_batch_borrowed(self.pool.client(), self.table, &rows)
+                .await
+        }
+    }
+
+    async fn write_batch_borrowed(&self, rows: &[T]) -> Result<(), StorageError>
+    where
+        T: Clone,
+    {
+        if self.async_insert {
+            self.write_manager
+                .write_async_insert_batch_borrowed(self.pool.client(), self.table, rows)
+                .await
+        } else {
+            self.write_manager
+                .write_batch_borrowed(self.pool.client(), self.table, rows)
+                .await
+        }
     }
 
     async fn write_batch_idempotent(
@@ -69,13 +108,9 @@ where
         deduplication_token: &ContentHash,
         rows: Vec<T>,
     ) -> Result<(), StorageError> {
+        let deduplication_token = deduplication_token.to_string();
         self.write_manager
-            .write_batch_deduplicated(
-                self.pool.client(),
-                self.table,
-                deduplication_token.as_str(),
-                rows,
-            )
+            .write_batch_deduplicated(self.pool.client(), self.table, &deduplication_token, rows)
             .await
     }
 }

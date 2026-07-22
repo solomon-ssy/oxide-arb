@@ -45,7 +45,7 @@ async fn do_list(db: &impl ConnectionTrait) -> Result<Vec<RoleInfo>, StorageErro
 }
 
 async fn do_find_by_id(db: &impl ConnectionTrait, id: &RoleId) -> Result<RoleInfo, StorageError> {
-    Entity::find_by_id(id.clone())
+    Entity::find_by_id(*id)
         .one(db)
         .await
         .map_err(StorageError::from)?
@@ -80,7 +80,7 @@ async fn do_update(
     patch: RolePatch,
 ) -> Result<RoleInfo, StorageError> {
     let mut active = patch.into_active_model();
-    active.id = Set(id.clone());
+    active.id = Set(*id);
     active.updated_at = Set(Utc::now());
     match active.update(db).await {
         Ok(model) => Ok(model.into()),
@@ -105,7 +105,7 @@ async fn do_change_status(
 ) -> Result<(), StorageError> {
     let txn = db.begin().await.map_err(StorageError::from)?;
 
-    let Some(role) = Entity::find_by_id(id.clone())
+    let Some(role) = Entity::find_by_id(*id)
         .one(&txn)
         .await
         .map_err(StorageError::from)?
@@ -122,7 +122,7 @@ async fn do_change_status(
 
     Entity::update_many()
         .col_expr(Column::Status, primitives::enum_value(&status))
-        .filter(Column::Id.eq(id.clone()))
+        .filter(Column::Id.eq(*id))
         .exec(&txn)
         .await
         .map_err(StorageError::from)?;
@@ -131,7 +131,7 @@ async fn do_change_status(
         RoleStatus::Disabled => sync::do_revoke_role_bindings(&txn, &role.code).await?,
         RoleStatus::Enabled => {
             let holders: Vec<UserId> = UserRoleEntity::find()
-                .filter(UserRoleColumn::RoleId.eq(id.clone()))
+                .filter(UserRoleColumn::RoleId.eq(*id))
                 .all(&txn)
                 .await
                 .map_err(StorageError::from)?
@@ -149,7 +149,7 @@ async fn do_change_status(
 async fn do_delete(db: &DatabaseConnection, id: &RoleId) -> Result<(), StorageError> {
     let txn = db.begin().await.map_err(StorageError::from)?;
 
-    let role = Entity::find_by_id(id.clone())
+    let role = Entity::find_by_id(*id)
         .one(&txn)
         .await
         .map_err(StorageError::from)?;
@@ -167,17 +167,17 @@ async fn do_delete(db: &DatabaseConnection, id: &RoleId) -> Result<(), StorageEr
     }
 
     RoleMenuEntity::delete_many()
-        .filter(RoleMenuColumn::RoleId.eq(id.clone()))
+        .filter(RoleMenuColumn::RoleId.eq(*id))
         .exec(&txn)
         .await
         .map_err(StorageError::from)?;
     UserRoleEntity::delete_many()
-        .filter(UserRoleColumn::RoleId.eq(id.clone()))
+        .filter(UserRoleColumn::RoleId.eq(*id))
         .exec(&txn)
         .await
         .map_err(StorageError::from)?;
     sync::do_purge_role_code(&txn, &role.code).await?;
-    Entity::delete_by_id(id.clone())
+    Entity::delete_by_id(*id)
         .exec(&txn)
         .await
         .map_err(StorageError::from)?;

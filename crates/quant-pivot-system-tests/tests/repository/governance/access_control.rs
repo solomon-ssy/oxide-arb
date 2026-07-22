@@ -300,12 +300,7 @@ pub async fn menu_tree_accessibility_and_delete_guard() {
         .await
         .expect("create root");
     let child = menus
-        .create(new_menu(
-            "rbac-child",
-            Some(root.id.clone()),
-            MenuKind::Menu,
-            0,
-        ))
+        .create(new_menu("rbac-child", Some(root.id), MenuKind::Menu, 0))
         .await
         .expect("create child");
 
@@ -329,8 +324,8 @@ pub async fn menu_tree_accessibility_and_delete_guard() {
     let role = roles.create(new_role("menu_role")).await.expect("role");
     role_menu
         .set_menus_for_role(AssignMenus {
-            role_id: role.id.clone(),
-            menu_ids: vec![child.id.clone()],
+            role_id: role.id,
+            menu_ids: vec![child.id],
         })
         .await
         .expect("assign menu");
@@ -391,8 +386,8 @@ pub async fn assign_roles_replaces_join_and_casbin_grouping() {
 
     user_role
         .set_roles_for_user(AssignRoles {
-            user_id: user.id.clone(),
-            role_ids: vec![role_a.id.clone()],
+            user_id: user.id,
+            role_ids: vec![role_a.id],
         })
         .await
         .expect("assign a");
@@ -404,8 +399,8 @@ pub async fn assign_roles_replaces_join_and_casbin_grouping() {
     // Replace set: B in, A out — relational and Casbin `g` both follow.
     user_role
         .set_roles_for_user(AssignRoles {
-            user_id: user.id.clone(),
-            role_ids: vec![role_b.id.clone()],
+            user_id: user.id,
+            role_ids: vec![role_b.id],
         })
         .await
         .expect("assign b");
@@ -418,8 +413,8 @@ pub async fn assign_roles_replaces_join_and_casbin_grouping() {
     // Idempotent re-apply.
     user_role
         .set_roles_for_user(AssignRoles {
-            user_id: user.id.clone(),
-            role_ids: vec![role_b.id.clone()],
+            user_id: user.id,
+            role_ids: vec![role_b.id],
         })
         .await
         .expect("re-assign b");
@@ -428,7 +423,7 @@ pub async fn assign_roles_replaces_join_and_casbin_grouping() {
     // Clear all.
     user_role
         .set_roles_for_user(AssignRoles {
-            user_id: user.id.clone(),
+            user_id: user.id,
             role_ids: vec![],
         })
         .await
@@ -446,7 +441,7 @@ pub async fn assign_roles_replaces_join_and_casbin_grouping() {
     assert!(matches!(
         user_role
             .set_roles_for_user(AssignRoles {
-                user_id: user.id.clone(),
+                user_id: user.id,
                 role_ids: vec![RoleId::from_v7()],
             })
             .await,
@@ -464,7 +459,7 @@ pub async fn assign_permissions_validates_and_round_trips() {
 
     perms
         .set_permissions_for_role(AssignPermissions {
-            role_id: role.id.clone(),
+            role_id: role.id,
             permissions: vec![
                 Permission::new(ResourceType::Market, Operation::Read),
                 Permission::new(ResourceType::Market, Operation::Update),
@@ -491,7 +486,7 @@ pub async fn assign_permissions_validates_and_round_trips() {
     // Full replacement.
     perms
         .set_permissions_for_role(AssignPermissions {
-            role_id: role.id.clone(),
+            role_id: role.id,
             permissions: vec![Permission::new(ResourceType::OperationLog, Operation::Read)],
         })
         .await
@@ -505,7 +500,7 @@ pub async fn assign_permissions_validates_and_round_trips() {
     assert!(matches!(
         perms
             .set_permissions_for_role(AssignPermissions {
-                role_id: role.id.clone(),
+                role_id: role.id,
                 permissions: vec![Permission::new(
                     ResourceType::QuantReport,
                     Operation::Delete
@@ -692,7 +687,7 @@ pub async fn enforce_reflects_assignments_and_super_admin_bypass() {
     let role = roles.create(new_role("enforce_role")).await.expect("role");
     perms
         .set_permissions_for_role(AssignPermissions {
-            role_id: role.id.clone(),
+            role_id: role.id,
             permissions: vec![Permission::new(ResourceType::Market, Operation::Read)],
         })
         .await
@@ -700,8 +695,8 @@ pub async fn enforce_reflects_assignments_and_super_admin_bypass() {
     let user = users.create(new_user("enforcee")).await.expect("user");
     user_role
         .set_roles_for_user(AssignRoles {
-            user_id: user.id.clone(),
-            role_ids: vec![role.id.clone()],
+            user_id: user.id,
+            role_ids: vec![role.id],
         })
         .await
         .expect("assign");
@@ -753,7 +748,7 @@ pub async fn role_disable_revokes_then_enable_rebuilds_grouping() {
     let role = roles.create(new_role("toggle_role")).await.expect("role");
     perms
         .set_permissions_for_role(AssignPermissions {
-            role_id: role.id.clone(),
+            role_id: role.id,
             permissions: vec![Permission::new(ResourceType::Market, Operation::Read)],
         })
         .await
@@ -761,8 +756,8 @@ pub async fn role_disable_revokes_then_enable_rebuilds_grouping() {
     let user = users.create(new_user("toggler")).await.expect("user");
     user_role
         .set_roles_for_user(AssignRoles {
-            user_id: user.id.clone(),
-            role_ids: vec![role.id.clone()],
+            user_id: user.id,
+            role_ids: vec![role.id],
         })
         .await
         .expect("assign");
@@ -833,8 +828,8 @@ pub async fn assigning_a_disabled_role_writes_no_grouping() {
     let user = users.create(new_user("late_joiner")).await.expect("user");
     user_role
         .set_roles_for_user(AssignRoles {
-            user_id: user.id.clone(),
-            role_ids: vec![role.id.clone()],
+            user_id: user.id,
+            role_ids: vec![role.id],
         })
         .await
         .expect("assign");

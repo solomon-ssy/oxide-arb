@@ -30,7 +30,7 @@ impl FeatureGroupBuilder for MarketMetadataFeatureBuilder {
         };
         let evidence = EvidenceSourceRef {
             source_kind: EvidenceSourceKind::GammaMetadata,
-            reference: market.market_id.as_str().to_owned(),
+            reference: market.market_id.to_string(),
             effective_at: market.effective_at,
             available_at: Some(market.available_at),
         };

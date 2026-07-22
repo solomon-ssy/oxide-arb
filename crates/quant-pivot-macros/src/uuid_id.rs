@@ -1,17 +1,17 @@
-//! `#[derive(UuidId)]` — type-safe UUID ID newtype backed by `Arc<Uuid>`.
+//! `#[derive(UuidId)]` — type-safe UUID ID newtype backed by `Uuid`.
 //!
-//! Generates: `new`, `from_v7`, `as_uuid`, `into_uuid`, `Debug`, `Clone`,
-//! `PartialEq`, `Eq`, `Hash`, `Display`, `FromStr`, `Serialize`,
-//! `Deserialize`, and full `SeaORM` bindings backed by the native Postgres
-//! `uuid` column type. All generated ids are UUID v7 (time-ordered).
+//! Generates: `new`, `from_v7`, `as_uuid`, `as_uuid_ref`, `into_uuid`,
+//! `Display`, `FromStr`, `Serialize`, `Deserialize`, and full `SeaORM`
+//! bindings backed by the native Postgres `uuid` column type. All generated
+//! ids are UUID v7 (time-ordered).
 //!
 //! Used for internal, system-generated identifiers (`UserId`,
 //! `RecommendationId`, …). Externally defined string identifiers that are not
 //! UUIDs use [`crate::StrId`] instead.
 //!
-//! The inner value is `Arc<Uuid>` so cloning a typed id is a cheap atomic
-//! reference-count bump, matching the ergonomics of the string-backed ids on
-//! the hot path.
+//! `Uuid` is a 16-byte `Copy` value. Keeping it inline avoids a heap allocation,
+//! pointer indirection, and atomic reference-count traffic for every internal
+//! identifier.
 
 use proc_macro2::TokenStream;
 use quote::quote;
@@ -85,8 +85,8 @@ fn expand_core(
             /// Wrap an existing UUID value.
             #[must_use]
             #[inline]
-            #vis fn new(id: ::uuid::Uuid) -> Self {
-                Self(::std::sync::Arc::new(id))
+            #vis const fn new(id: ::uuid::Uuid) -> Self {
+                Self(id)
             }
 
             /// Generate a fresh time-ordered identifier (UUID v7).
@@ -98,21 +98,28 @@ fn expand_core(
             #[must_use]
             #[inline]
             #vis fn from_v7() -> Self {
-                Self(::std::sync::Arc::new(::uuid::Uuid::now_v7()))
+                Self(::uuid::Uuid::now_v7())
             }
 
-            /// Borrow the inner UUID value (cheap copy, `Uuid` is `Copy`).
+            /// Return the inner UUID value.
             #[must_use]
             #[inline]
-            #vis fn as_uuid(&self) -> ::uuid::Uuid {
-                *self.0
+            #vis const fn as_uuid(self) -> ::uuid::Uuid {
+                self.0
+            }
+
+            /// Borrow the inner UUID value.
+            #[must_use]
+            #[inline]
+            #vis const fn as_uuid_ref(&self) -> &::uuid::Uuid {
+                &self.0
             }
 
             /// Consume the id and return the inner UUID value.
             #[must_use]
             #[inline]
-            #vis fn into_uuid(self) -> ::uuid::Uuid {
-                *self.0
+            #vis const fn into_uuid(self) -> ::uuid::Uuid {
+                self.0
             }
         }
 
@@ -126,14 +133,14 @@ fn expand_core(
         impl #impl_generics From<#name #ty_generics> for ::uuid::Uuid #where_clause {
             #[inline]
             fn from(id: #name #ty_generics) -> Self {
-                *id.0
+                id.0
             }
         }
 
         impl #impl_generics From<&#name #ty_generics> for #name #ty_generics #where_clause {
             #[inline]
             fn from(id: &#name #ty_generics) -> Self {
-                id.clone()
+                *id
             }
         }
 
@@ -167,15 +174,40 @@ fn expand_serde(
         // binding below, not serde — so storage stays compact there.
         impl #impl_generics ::serde::Serialize for #name #ty_generics #where_clause {
             fn serialize<S: ::serde::Serializer>(&self, serializer: S) -> ::std::result::Result<S::Ok, S::Error> {
-                serializer.serialize_str(&self.0.as_hyphenated().to_string())
+                serializer.collect_str(&self.0)
             }
         }
 
         impl<'de> ::serde::Deserialize<'de> for #name {
             fn deserialize<D: ::serde::Deserializer<'de>>(deserializer: D) -> ::std::result::Result<Self, D::Error> {
-                let raw = <String as ::serde::Deserialize>::deserialize(deserializer)?;
-                let id = ::uuid::Uuid::parse_str(&raw).map_err(::serde::de::Error::custom)?;
-                Ok(Self(::std::sync::Arc::new(id)))
+                struct UuidVisitor;
+
+                impl<'de> ::serde::de::Visitor<'de> for UuidVisitor {
+                    type Value = ::uuid::Uuid;
+
+                    fn expecting(
+                        &self,
+                        formatter: &mut ::std::fmt::Formatter<'_>,
+                    ) -> ::std::fmt::Result {
+                        formatter.write_str("a canonical hyphenated UUID string")
+                    }
+
+                    fn visit_str<E: ::serde::de::Error>(
+                        self,
+                        value: &str,
+                    ) -> ::std::result::Result<Self::Value, E> {
+                        ::uuid::Uuid::parse_str(value).map_err(E::custom)
+                    }
+
+                    fn visit_borrowed_str<E: ::serde::de::Error>(
+                        self,
+                        value: &'de str,
+                    ) -> ::std::result::Result<Self::Value, E> {
+                        self.visit_str(value)
+                    }
+                }
+
+                deserializer.deserialize_str(UuidVisitor).map(Self)
             }
         }
     }
@@ -191,14 +223,14 @@ fn expand_seaorm(
         impl #impl_generics From<#name #ty_generics> for sea_orm::sea_query::Value #where_clause {
             #[inline]
             fn from(id: #name #ty_generics) -> Self {
-                sea_orm::sea_query::Value::Uuid(Some(*id.0))
+                sea_orm::sea_query::Value::Uuid(Some(id.0))
             }
         }
 
         impl #impl_generics From<&#name #ty_generics> for sea_orm::sea_query::Value #where_clause {
             #[inline]
             fn from(id: &#name #ty_generics) -> Self {
-                sea_orm::sea_query::Value::Uuid(Some(*id.0))
+                sea_orm::sea_query::Value::Uuid(Some(id.0))
             }
         }
 
@@ -270,7 +302,7 @@ fn validate_struct(input: &DeriveInput) -> Result<()> {
             Fields::Unnamed(fields) if fields.unnamed.len() == 1 => Ok(()),
             _ => Err(Error::new_spanned(
                 input,
-                "UuidId requires a tuple struct with exactly one field: `struct Foo(Arc<Uuid>)`",
+                "UuidId requires a tuple struct with exactly one field: `struct Foo(Uuid)`",
             )),
         },
         _ => Err(Error::new_spanned(

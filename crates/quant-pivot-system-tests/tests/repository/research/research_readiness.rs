@@ -18,7 +18,7 @@ use sea_orm::ConnectionTrait;
 use uuid::Uuid;
 
 fn hash(seed: char) -> ContentHash {
-    ContentHash::parse(format!("blake3:{}", seed.to_string().repeat(64))).expect("valid hash")
+    ContentHash::parse(&format!("blake3:{}", seed.to_string().repeat(64))).expect("valid hash")
 }
 
 fn latency_payload(observed_at: DateTime<Utc>) -> ResearchReadinessEvidencePayload {
@@ -71,7 +71,7 @@ pub async fn readiness_evidence_is_scoped_expiring_idempotent_and_append_only() 
     let repo = PgResearchReadinessEvidenceRepository::new(db.clone());
     let observed_at = Utc::now() - Duration::minutes(1);
     let scope_hash = hash('a');
-    let evidence = new_evidence(observed_at, scope_hash.clone());
+    let evidence = new_evidence(observed_at, scope_hash);
 
     let inserted = repo
         .append(evidence.clone())

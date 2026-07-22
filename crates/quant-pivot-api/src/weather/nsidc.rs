@@ -100,7 +100,7 @@ fn parse_extent(
     hemisphere: SeaIceHemisphere,
     available_at: DateTime<Utc>,
 ) -> QuantResult<SeaIceDataset> {
-    let file_hash = ContentHash::parse(CanonicalDigest::prefixed_bytes(body.as_bytes()))?;
+    let file_hash = CanonicalDigest::content_hash_bytes(body.as_bytes());
     let mut reader = ReaderBuilder::new()
         .has_headers(false)
         .flexible(true)

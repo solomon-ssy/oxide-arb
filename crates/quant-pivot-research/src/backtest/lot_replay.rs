@@ -197,7 +197,7 @@ fn replay_lot(
     }
 
     Ok(LotOutcome {
-        position_id: sequence.position_id.clone(),
+        position_id: sequence.position_id,
         decision_at: first_as_of,
         return_value,
         cumulative_exit_pct: (simulated_sold / denominator)
@@ -379,7 +379,7 @@ pub fn replay_lot_null_baseline(
     }
     match baseline {
         SellNullBaseline::AlwaysHold => Ok(LotOutcome {
-            position_id: sequence.position_id.clone(),
+            position_id: sequence.position_id,
             decision_at: first.decision_at(),
             return_value: Decimal::ZERO,
             cumulative_exit_pct: Decimal::ZERO,
@@ -400,7 +400,7 @@ pub fn replay_lot_null_baseline(
                 .into());
             };
             Ok(LotOutcome {
-                position_id: sequence.position_id.clone(),
+                position_id: sequence.position_id,
                 decision_at: first.decision_at(),
                 return_value: realized / Decimal::from(10_000),
                 cumulative_exit_pct: Decimal::ONE,
@@ -540,7 +540,7 @@ mod tests {
             ModelVersionId::from_v7()
         }
         fn feature_schema_hash(&self) -> ContentHash {
-            ContentHash::parse(format!("blake3:{}", "0".repeat(64))).expect("hash")
+            ContentHash::parse(&format!("blake3:{}", "0".repeat(64))).expect("hash")
         }
         fn required_features(&self) -> Vec<FeatureName> {
             Vec::new()
@@ -577,9 +577,9 @@ mod tests {
         let mut d0 = decision(ts(0), dec!(-20), dec!(100));
         let mut d1 = decision(ts(60), dec!(100), dec!(100));
         let mut d2 = decision(ts(120), dec!(9999), dec!(100));
-        d0.lot_context.as_mut().unwrap().position_id = position_id.clone();
-        d1.lot_context.as_mut().unwrap().position_id = position_id.clone();
-        d2.lot_context.as_mut().unwrap().position_id = position_id.clone();
+        d0.lot_context.as_mut().unwrap().position_id = position_id;
+        d1.lot_context.as_mut().unwrap().position_id = position_id;
+        d2.lot_context.as_mut().unwrap().position_id = position_id;
         let sequence = LotDecisionSequence {
             position_id,
             decisions: vec![d0, d1, d2],
@@ -609,9 +609,9 @@ mod tests {
         let mut d0 = decision(ts(0), dec!(100), dec!(100));
         let mut d1 = decision(ts(60), dec!(200), dec!(100));
         let mut d2 = decision(ts(120), dec!(999), dec!(100));
-        d0.lot_context.as_mut().unwrap().position_id = position_id.clone();
-        d1.lot_context.as_mut().unwrap().position_id = position_id.clone();
-        d2.lot_context.as_mut().unwrap().position_id = position_id.clone();
+        d0.lot_context.as_mut().unwrap().position_id = position_id;
+        d1.lot_context.as_mut().unwrap().position_id = position_id;
+        d2.lot_context.as_mut().unwrap().position_id = position_id;
         let sequence = LotDecisionSequence {
             position_id,
             decisions: vec![d0, d1, d2],
@@ -643,8 +643,8 @@ mod tests {
         let position_id = PositionId::from_v7();
         let mut d0 = decision(ts(0), dec!(-20), dec!(100));
         let mut d1 = decision(ts(60), dec!(-10), dec!(100));
-        d0.lot_context.as_mut().unwrap().position_id = position_id.clone();
-        d1.lot_context.as_mut().unwrap().position_id = position_id.clone();
+        d0.lot_context.as_mut().unwrap().position_id = position_id;
+        d1.lot_context.as_mut().unwrap().position_id = position_id;
         let sequence = LotDecisionSequence {
             position_id,
             decisions: vec![d0, d1],
@@ -670,8 +670,8 @@ mod tests {
         let position_id = PositionId::from_v7();
         let mut d0 = decision(ts(0), dec!(80), dec!(100));
         let mut d1 = decision(ts(60), dec!(200), dec!(100));
-        d0.lot_context.as_mut().unwrap().position_id = position_id.clone();
-        d1.lot_context.as_mut().unwrap().position_id = position_id.clone();
+        d0.lot_context.as_mut().unwrap().position_id = position_id;
+        d1.lot_context.as_mut().unwrap().position_id = position_id;
         let sequence = LotDecisionSequence {
             position_id,
             decisions: vec![d0, d1],
@@ -687,7 +687,7 @@ mod tests {
     fn null_baseline_always_hold_is_zero_alpha() {
         let position_id = PositionId::from_v7();
         let mut d0 = decision(ts(0), dec!(80), dec!(100));
-        d0.lot_context.as_mut().unwrap().position_id = position_id.clone();
+        d0.lot_context.as_mut().unwrap().position_id = position_id;
         let sequence = LotDecisionSequence {
             position_id,
             decisions: vec![d0],

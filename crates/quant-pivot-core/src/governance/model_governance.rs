@@ -342,7 +342,7 @@ impl ModelGovernancePort for ModelGovernanceService {
 
         self.write_audit(NewModelGovernanceAudit {
             audit_id: ModelGovernanceAuditId::from_v7(),
-            model_version_id: Some(retired.model_version_id.clone()),
+            model_version_id: Some(retired.model_version_id),
             training_dataset_id: None,
             action: ModelGovernanceAction::Retire,
             actor_user_id: actor.user_id,
@@ -352,8 +352,8 @@ impl ModelGovernancePort for ModelGovernanceService {
             before_status,
             after_status: retired.publication_status,
             detail: ModelGovernanceAuditDetail::Retire {
-                retired_version_id: retired.model_version_id.clone(),
-                artifact_hash: retired.artifact_hash.clone(),
+                retired_version_id: retired.model_version_id,
+                artifact_hash: retired.artifact_hash,
             },
             audit_event_id: AuditEventId::from_v7(),
         })
@@ -449,17 +449,17 @@ impl ModelGovernancePort for ModelGovernanceService {
             }
             .into());
         }
-        let before = version.publish_path_set_id.clone();
+        let before = version.publish_path_set_id;
         let updated = self
             .deps
             .model_registry_repo
-            .set_publish_path_set_id(&version.model_version_id, Some(request.path_set_id.clone()))
+            .set_publish_path_set_id(&version.model_version_id, Some(request.path_set_id))
             .await
             .map_err(QuantError::from)?;
         self.write_audit(NewModelGovernanceAudit {
             audit_id: ModelGovernanceAuditId::from_v7(),
-            model_version_id: Some(version.model_version_id.clone()),
-            training_dataset_id: version.training_dataset_id.clone(),
+            model_version_id: Some(version.model_version_id),
+            training_dataset_id: version.training_dataset_id,
             action: ModelGovernanceAction::BindPublishPathSet,
             actor_user_id: actor.user_id,
             actor_username: actor.username,
@@ -543,7 +543,7 @@ impl ModelGovernanceService {
 
         self.write_audit(NewModelGovernanceAudit {
             audit_id: ModelGovernanceAuditId::from_v7(),
-            model_version_id: Some(published.model_version_id.clone()),
+            model_version_id: Some(published.model_version_id),
             training_dataset_id: None,
             action: ModelGovernanceAction::Publish,
             actor_user_id: actor.user_id,
@@ -553,7 +553,7 @@ impl ModelGovernanceService {
             before_status,
             after_status: published.publication_status,
             detail: ModelGovernanceAuditDetail::Publish {
-                artifact_hash: published.artifact_hash.clone(),
+                artifact_hash: published.artifact_hash,
                 gate_report_hash: report.report_hash,
                 shadow_samples: summary.sample_count,
                 shadow_mean_overlap: summary.mean_topn_overlap,
@@ -631,9 +631,9 @@ impl ModelGovernanceService {
         };
 
         let new_version_id = ModelVersionId::from_v7();
-        weighted.header.model_version_id = new_version_id.clone();
+        weighted.header.model_version_id = new_version_id;
         weighted.return_model = ReturnModelSpec::Calibrated(CalibratedReturnModel {
-            calibrator_ref: request.calibrator_ref.clone(),
+            calibrator_ref: request.calibrator_ref,
             downside_source: request.downside_source,
         });
         let calibrated = ModelArtifact::WeightedFactor(weighted);
@@ -657,7 +657,7 @@ impl ModelGovernanceService {
         actor: GovernanceActor,
     ) -> QuantResult<ModelVersionInfo> {
         let artifact_hash = calibrated.content_hash()?;
-        let new_version_id = calibrated.header().model_version_id.clone();
+        let new_version_id = calibrated.header().model_version_id;
         let next = self
             .deps
             .model_registry_repo
@@ -667,19 +667,19 @@ impl ModelGovernanceService {
             .deps
             .model_registry_repo
             .create_model_version(NewModelVersion {
-                model_version_id: new_version_id.clone(),
-                model_spec_id: version.model_spec_id.clone(),
+                model_version_id: new_version_id,
+                model_spec_id: version.model_spec_id,
                 version: next,
                 artifact_hash,
                 category_scope: calibrated.category_scope(),
                 profile_ref: version.profile_ref.clone(),
-                training_dataset_id: version.training_dataset_id.clone(),
-                trade_policy_artifact_id: calibrated.header().trade_policy_artifact_id.clone(),
-                trade_policy_hash: calibrated.header().trade_policy_hash.clone(),
+                training_dataset_id: version.training_dataset_id,
+                trade_policy_artifact_id: calibrated.header().trade_policy_artifact_id,
+                trade_policy_hash: calibrated.header().trade_policy_hash,
                 publish_path_set_id: None,
                 derivation: ModelVersionDerivation::ReturnCalibration {
-                    parent_model_version_id: version.model_version_id.clone(),
-                    calibration_artifact_id: request.calibrator_ref.clone(),
+                    parent_model_version_id: version.model_version_id,
+                    calibration_artifact_id: request.calibrator_ref,
                 },
                 metrics: version.metrics.clone(),
                 training_objective: version.training_objective.clone(),
@@ -711,7 +711,7 @@ impl ModelGovernanceService {
 
         self.write_audit(NewModelGovernanceAudit {
             audit_id: ModelGovernanceAuditId::from_v7(),
-            model_version_id: Some(created.model_version_id.clone()),
+            model_version_id: Some(created.model_version_id),
             training_dataset_id: None,
             action: ModelGovernanceAction::BindCalibration,
             actor_user_id: actor.user_id,
@@ -721,11 +721,11 @@ impl ModelGovernanceService {
             before_status: version.publication_status,
             after_status: created.publication_status,
             detail: ModelGovernanceAuditDetail::BindCalibration {
-                source_version_id: version.model_version_id.clone(),
-                source_artifact_hash: version.artifact_hash.clone(),
-                calibrated_version_id: created.model_version_id.clone(),
-                calibrated_artifact_hash: created.artifact_hash.clone(),
-                calibrator_id: request.calibrator_ref.clone(),
+                source_version_id: version.model_version_id,
+                source_artifact_hash: version.artifact_hash,
+                calibrated_version_id: created.model_version_id,
+                calibrated_artifact_hash: created.artifact_hash,
+                calibrator_id: request.calibrator_ref,
             },
             audit_event_id: AuditEventId::from_v7(),
         })
@@ -822,7 +822,7 @@ impl ModelGovernanceService {
         };
 
         let decision = self.deps.gate.evaluate(QualityGateInput {
-            subject: GateSubject::ModelVersion(version.model_version_id.clone()),
+            subject: GateSubject::ModelVersion(version.model_version_id),
             intent,
             backtest,
             dataset,
@@ -940,7 +940,7 @@ fn gate_report_view(report: &QualityGateReport) -> QualityGateReportView {
         evaluated_at: report.evaluated_at,
         passed: report.passed,
         gates: report.gates.iter().map(gate_outcome_view).collect(),
-        report_hash: report.report_hash.as_str().to_owned(),
+        report_hash: report.report_hash.to_string(),
     }
 }
 
@@ -1177,7 +1177,7 @@ mod path_set_gate_input_tests {
     use super::{checked_shadow_stability_lookback, path_set_gate_input_from_info};
 
     fn hash() -> ContentHash {
-        ContentHash::parse(format!("blake3:{}", "a".repeat(64))).expect("hash")
+        ContentHash::parse(&format!("blake3:{}", "a".repeat(64))).expect("hash")
     }
 
     fn info_with_distribution(sharpe_distribution: SharpeDistribution) -> BacktestPathSetInfo {

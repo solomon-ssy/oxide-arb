@@ -74,7 +74,7 @@ pub fn build_factor_table(
         }
     }
     FactorInferenceTable {
-        model_run_id: model_run_id.clone(),
+        model_run_id: *model_run_id,
         decision_at,
         rows,
     }
@@ -178,7 +178,7 @@ pub fn build_frozen_runtime_input(
                 });
             }
             Ok(ModelRuntimeInput::FactorTable(FactorInferenceTable {
-                model_run_id: model_run_id.clone(),
+                model_run_id: *model_run_id,
                 decision_at,
                 rows,
             }))
@@ -261,7 +261,7 @@ pub fn build_feature_matrix(
         });
     }
     InferenceMatrix {
-        model_run_id: model_run_id.clone(),
+        model_run_id: *model_run_id,
         decision_at,
         feature_names: feature_names.to_vec(),
         rows,
@@ -427,7 +427,7 @@ mod tests {
     #[async_trait::async_trait]
     impl QuantModelRuntime for WeightedProbe {
         fn model_version_id(&self) -> ModelVersionId {
-            self.version_id.clone()
+            self.version_id
         }
 
         fn model_family(&self) -> ModelFamily {
@@ -435,7 +435,7 @@ mod tests {
         }
 
         fn feature_schema_hash(&self) -> ContentHash {
-            self.schema_hash.clone()
+            self.schema_hash
         }
 
         fn required_features(&self) -> Vec<FeatureName> {

@@ -190,7 +190,7 @@ impl LinkageResolverService {
                 domain_family,
                 &metadata,
                 metadata_hash,
-                self.capability_registry_hash.clone(),
+                self.capability_registry_hash,
                 result,
                 cycle_at,
             )?);
@@ -337,7 +337,7 @@ impl LinkageResolverService {
             resolver_tier: ResolverTier::Override,
             resolver_version,
             metadata_hash,
-            capability_registry_hash: self.capability_registry_hash.clone(),
+            capability_registry_hash: self.capability_registry_hash,
             effective_at,
         })?;
         self.deps
@@ -718,7 +718,7 @@ mod tests {
     use super::{LinkageCurrentness, currentness_matches};
 
     fn hash(fill: char) -> ContentHash {
-        ContentHash::parse(format!("blake3:{}", fill.to_string().repeat(64))).expect("hash")
+        ContentHash::parse(&format!("blake3:{}", fill.to_string().repeat(64))).expect("hash")
     }
 
     fn currentness<'a>(

@@ -94,8 +94,8 @@ fn expected_policy_keys(ctx: &SeedContext) -> Result<HashSet<[String; 7]>, DbErr
             keys.insert([
                 PTYPE_POLICY.to_owned(),
                 role_code.to_owned(),
-                resource.as_str().to_owned(),
-                operation.as_str().to_owned(),
+                resource.to_string(),
+                operation.to_string(),
                 OBJECT_TYPE_RESOURCE.to_owned(),
                 String::new(),
                 String::new(),
@@ -227,8 +227,8 @@ fn policy_row(role_code: &str, resource: ResourceType, operation: Operation) -> 
     ActiveModel {
         ptype: Set(PTYPE_POLICY.to_owned()),
         v0: Set(role_code.to_owned()),
-        v1: Set(resource.as_str().to_owned()),
-        v2: Set(operation.as_str().to_owned()),
+        v1: Set(resource.to_string()),
+        v2: Set(operation.to_string()),
         v3: Set(OBJECT_TYPE_RESOURCE.to_owned()),
         v4: Set(String::new()),
         v5: Set(String::new()),
@@ -250,10 +250,9 @@ fn grouping_row(subject: &str, role_code: &str) -> ActiveModel {
 }
 
 pub async fn load(db: &DatabaseTransaction, ctx: &mut SeedContext) -> Result<u64, DbErr> {
-    let admin_id = ctx
+    let admin_id = *ctx
         .require::<UserId>(ADMIN_USER_ARTIFACT)
-        .map_err(|error| DbErr::Custom(error.to_string()))?
-        .clone();
+        .map_err(|error| DbErr::Custom(error.to_string()))?;
 
     let mut models = vec![grouping_row(&admin_id.to_string(), ROLE_SUPER_ADMIN)];
     for (role_code, permissions) in builtin_role_policies() {

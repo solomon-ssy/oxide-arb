@@ -114,7 +114,7 @@ impl ReportFactDeliveryWorker {
             .reports
             .verify_and_publish_report(
                 &delivery.recommendation_report_id,
-                self.worker_id.clone(),
+                self.worker_id,
                 Utc::now(),
             )
             .await?
@@ -136,7 +136,7 @@ impl ReportFactDeliveryWorker {
         let delivery = self
             .deps
             .reports
-            .claim_fact_delivery(self.worker_id.clone(), LEASE_DURATION.as_secs())
+            .claim_fact_delivery(self.worker_id, LEASE_DURATION.as_secs())
             .await?;
         let Some(delivery) = delivery else {
             return self.announce_one().await;
@@ -158,7 +158,7 @@ impl ReportFactDeliveryWorker {
                     .reports
                     .fail_fact_delivery(
                         &delivery.recommendation_report_id,
-                        self.worker_id.clone(),
+                        self.worker_id,
                         status,
                         &summary,
                     )
@@ -197,7 +197,7 @@ impl ReportFactDeliveryWorker {
         let Some(delivery) = self
             .deps
             .reports
-            .claim_fact_announcement(self.worker_id.clone(), LEASE_DURATION.as_secs())
+            .claim_fact_announcement(self.worker_id, LEASE_DURATION.as_secs())
             .await?
         else {
             return Ok(false);
@@ -216,10 +216,7 @@ impl ReportFactDeliveryWorker {
                 .await;
             self.deps
                 .reports
-                .acknowledge_fact_announcement(
-                    &delivery.recommendation_report_id,
-                    self.worker_id.clone(),
-                )
+                .acknowledge_fact_announcement(&delivery.recommendation_report_id, self.worker_id)
                 .await?;
             QuantResult::Ok(())
         }
@@ -256,7 +253,7 @@ impl ReportFactDeliveryWorker {
                 field: "report_fact_bundle.bundle_bytes",
                 detail: error.to_string(),
             })?;
-        let actual_bundle_hash = ContentHash::parse(CanonicalDigest::prefixed_bytes(&bytes))?;
+        let actual_bundle_hash = CanonicalDigest::content_hash_bytes(&bytes);
         if byte_count != delivery.bundle_bytes || actual_bundle_hash != delivery.bundle_hash {
             return Err(ReportError::InvariantViolation {
                 stage: "report_fact_delivery",
@@ -285,7 +282,7 @@ impl ReportFactDeliveryWorker {
             .ok_or_else(|| {
                 StorageError::not_found(
                     QUANT_RECOMMENDATION_REPORT,
-                    &delivery.recommendation_report_id,
+                    delivery.recommendation_report_id,
                 )
             })?;
         if report.status != RecommendationReportStatus::Prepared {
@@ -310,7 +307,7 @@ impl ReportFactDeliveryWorker {
             .ok_or_else(|| {
                 StorageError::not_found(
                     QUANT_RECOMMENDATION_REPORT,
-                    &delivery.recommendation_report_id,
+                    delivery.recommendation_report_id,
                 )
             })?;
         if report.status != RecommendationReportStatus::Published {
@@ -547,8 +544,7 @@ impl RowChainVerifier {
         table: &'static str,
     ) -> QuantResult<()> {
         self.hasher.update(b"]");
-        let actual_hash =
-            ContentHash::parse(format!("blake3:{}", self.hasher.finalize().to_hex()))?;
+        let actual_hash = ContentHash::from_bytes(*self.hasher.finalize().as_bytes());
         if self.row_count != expected_count || &actual_hash != expected_hash {
             return Err(ReportError::InvariantViolation {
                 stage: "report_fact_delivery",
@@ -565,7 +561,7 @@ impl RowChainVerifier {
 
 fn notification_payload(bundle: &ReportFactBundleV1) -> ReportNotificationPayload {
     ReportNotificationPayload {
-        report_id: bundle.recommendation_report_id.clone(),
+        report_id: bundle.recommendation_report_id,
         kind: bundle.notification.kind,
         status: bundle.notification.status.clone(),
         runtime_mode: bundle.notification.runtime_mode,

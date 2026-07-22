@@ -117,7 +117,7 @@ impl DomainSourceSupervisor {
             .list_all()
             .await?
             .into_iter()
-            .map(|row| (row.expectation_id.clone(), row))
+            .map(|row| (row.expectation_id, row))
             .collect::<HashMap<_, _>>();
         let mut desired_ids = HashSet::new();
         for definition in desired {
@@ -138,7 +138,7 @@ impl DomainSourceSupervisor {
                 Utc::now(),
             )
             .map_err(QuantError::config)?;
-            desired_ids.insert(candidate.expectation_id.clone());
+            desired_ids.insert(candidate.expectation_id);
             let candidate = match existing.get(&candidate.expectation_id) {
                 Some(current)
                     if current.binding_hash == candidate.binding_hash
@@ -294,7 +294,7 @@ impl CompiledExpectation {
             family: self.family,
             source_id: self.source_id,
             instrument_key: self.instrument_key,
-            capability_registry_hash: registry.registry_hash.clone(),
+            capability_registry_hash: registry.registry_hash,
             required: self.required,
             credential_required: self.credential_required,
             freshness_secs: self.freshness_secs,

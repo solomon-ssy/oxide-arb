@@ -171,7 +171,7 @@ mod tests {
     fn durable_run_revision_maps_to_dedicated_run_channel() {
         let run_id = ReportRunId::from_v7();
         let event = CoreEvent::ReportRun(ReportRunLifecycleEvent {
-            report_run_id: run_id.clone(),
+            report_run_id: run_id,
             status: ReportRunStatus::Running,
             terminal_reason: None,
             output_report_id: None,
@@ -210,7 +210,7 @@ mod tests {
 
         let run_id = ReportRunId::from_v7();
         let run = CoreEvent::ReportRun(ReportRunLifecycleEvent {
-            report_run_id: run_id.clone(),
+            report_run_id: run_id,
             status: ReportRunStatus::Succeeded,
             terminal_reason: None,
             output_report_id: Some(RecommendationReportId::from_v7()),

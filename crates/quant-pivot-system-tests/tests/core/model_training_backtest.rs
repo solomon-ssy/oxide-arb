@@ -288,7 +288,7 @@ struct E2eReplaySlice {
 fn e2e_replay_slice() -> E2eReplaySlice {
     let mut weights = BTreeMap::new();
     weights.insert(
-        LIQUIDITY_DEPTH.as_str().to_owned(),
+        LIQUIDITY_DEPTH.to_string(),
         DecimalValue::new(rust_decimal_macros::dec!(1)),
     );
     // PriceBook + MarketMetadata only. Cap every lookback-driving window so
@@ -416,7 +416,7 @@ async fn seed_model_spec(db: &DatabaseConnection) -> ModelSpecId {
     let id = ModelSpecId::from_v7();
     PgModelRegistryRepository::new(db.clone())
         .create_model_spec(model_spec_fixtures::new_model_spec_fixture(
-            id.clone(),
+            id,
             "train-backtest-e2e",
             ModelFamily::WeightedFactor,
             86_400,
@@ -513,8 +513,8 @@ async fn seed_dataset(
         &examples,
         ReplayableSourceSliceFixture {
             profile_ref: profile_ref.clone(),
-            research_program_hash: research_program_hash.clone(),
-            decision_policy_snapshot_id: rc_id.clone(),
+            research_program_hash,
+            decision_policy_snapshot_id: *rc_id,
             runtime_config_hash: content_hash('c'),
             window_start,
             window_end,
@@ -530,32 +530,31 @@ async fn seed_dataset(
         .definition_hash;
     let manifest = DatasetManifest {
         format_version: DATASET_ARTIFACT_FORMAT_VERSION,
-        training_dataset_id: dataset_id.clone(),
+        training_dataset_id: dataset_id,
         profile_ref,
         research_program_hash,
         source_slice,
-        model_spec_id: model_spec_id.clone(),
-        model_spec_definition_hash: model_spec_definition_hash.clone(),
+        model_spec_id: *model_spec_id,
+        model_spec_definition_hash,
         trade_policy_artifact_id: None,
         trade_policy_hash: None,
-        decision_policy_snapshot_id: rc_id.clone(),
+        decision_policy_snapshot_id: *rc_id,
         window_start,
         window_end,
         purpose: DatasetPurpose::Training,
         knowledge_lag_secs: u64::try_from(KNOWLEDGE_LAG_SECS).expect("knowledge lag"),
         sample_interval_secs: u64::try_from(TICK_INTERVAL_SECS).expect("sample interval"),
         horizons_secs: vec![0],
-        feature_schema_hash: feature_schema_hash.clone(),
-        factor_schema_hash: factor_schema_hash.clone(),
-        label_schema_hash: label_schema_hash.clone(),
-        semantic_dataset_hash: dataset_hash.clone(),
+        feature_schema_hash,
+        factor_schema_hash,
+        label_schema_hash,
+        semantic_dataset_hash: dataset_hash,
         source_fingerprint: dataset_source_fingerprint(&examples).expect("source fingerprint"),
         sample_count: u64::try_from(examples.len()).expect("sample count"),
     };
     let bytes = DatasetParquetCodec::encode(&examples, &manifest).expect("encode parquet");
     let manifest_hash = dataset_manifest_hash(&manifest).expect("manifest hash");
-    let artifact_bytes_hash =
-        ContentHash::parse(CanonicalDigest::prefixed_bytes(&bytes)).expect("bytes hash");
+    let artifact_bytes_hash = CanonicalDigest::content_hash_bytes(&bytes);
     let hex = dataset_id.as_uuid().simple().to_string();
     let key = ArtifactKey::new(ArtifactNamespace::Dataset, hex, "parquet").expect("key");
     let uri = store.put(key, &bytes).await.expect("store parquet");
@@ -563,8 +562,8 @@ async fn seed_dataset(
     let dataset_repo = PgTrainingDatasetRepository::new(db.clone());
     dataset_repo
         .create_plan(NewTrainingDatasetPlan {
-            training_dataset_id: dataset_id.clone(),
-            model_spec_id: model_spec_id.clone(),
+            training_dataset_id: dataset_id,
+            model_spec_id: *model_spec_id,
             model_spec_definition_hash,
             window_start,
             window_end,
@@ -574,7 +573,7 @@ async fn seed_dataset(
             horizons_secs: TrainingHorizonsSecs(vec![0]),
             feature_schema_version: Some(SchemaVersion::FIRST),
             sample_sources: Some(TrainingSampleSources(default_sample_sources())),
-            decision_policy_snapshot_id: rc_id.clone(),
+            decision_policy_snapshot_id: *rc_id,
         })
         .await
         .expect("dataset plan");
@@ -590,7 +589,7 @@ async fn seed_dataset(
                 feature_schema_hash,
                 factor_schema_hash,
                 label_schema_hash,
-                dataset_hash: dataset_hash.clone(),
+                dataset_hash,
                 manifest_hash,
                 manifest_json: manifest,
                 artifact_bytes_hash,
@@ -795,7 +794,7 @@ pub async fn train_then_backtest_then_calibrate_e2e() {
 
     let outcome = trainer
         .train(
-            weighted_train_input(model_spec_id.clone(), dataset_id.clone(), rc_id.clone()),
+            weighted_train_input(model_spec_id, dataset_id, rc_id),
             &NoopProgressSink,
             &CancellationToken::new(),
         )
@@ -834,9 +833,9 @@ pub async fn train_then_backtest_then_calibrate_e2e() {
     let report = backtester
         .run(
             BacktestInput {
-                model_version_id: version.model_version_id.clone(),
-                training_dataset_id: dataset_id.clone(),
-                decision_policy_snapshot_id: rc_id.clone(),
+                model_version_id: version.model_version_id,
+                training_dataset_id: dataset_id,
+                decision_policy_snapshot_id: rc_id,
                 calibrate: true,
                 backtest_report_id: None,
             },
@@ -848,7 +847,11 @@ pub async fn train_then_backtest_then_calibrate_e2e() {
     assert!(report.sample_count > 0, "resolved samples");
     assert_eq!(report.model_version_id, version.model_version_id);
     assert!(
-        report.report_hash.as_str().starts_with("blake3:"),
+        report
+            .report_hash
+            .canonical_text()
+            .as_bytes()
+            .starts_with(b"blake3:"),
         "report hash persisted"
     );
 
@@ -880,7 +883,7 @@ pub async fn train_then_cpcv_persists_path_set_with_dsr_n_decomposition() {
 
     let outcome = trainer
         .train(
-            weighted_train_input(model_spec_id.clone(), dataset_id.clone(), rc_id.clone()),
+            weighted_train_input(model_spec_id, dataset_id, rc_id),
             &NoopProgressSink,
             &CancellationToken::new(),
         )
@@ -910,12 +913,12 @@ pub async fn train_then_cpcv_persists_path_set_with_dsr_n_decomposition() {
     });
     let view = port
         .run(
-            version.model_version_id.clone(),
+            version.model_version_id,
             RunCpcvBacktestRequest {
                 training_dataset_id: dataset_id,
                 decision_policy_snapshot_id: rc_id,
                 reason: "train-then-cpcv e2e".to_owned(),
-                path_set_id: Some(path_set_id.clone()),
+                path_set_id: Some(path_set_id),
             },
             Arc::new(NoopProgressSink),
             CancellationToken::new(),
@@ -947,7 +950,7 @@ async fn assert_cpcv_view_and_bind(
     assert_eq!(view.path_count, 3);
     assert_eq!(view.combination_count, 6);
     assert!(
-        !view.path_set_hash.as_str().is_empty(),
+        view.path_set_hash.as_bytes().iter().any(|byte| *byte != 0),
         "port must persist a content hash"
     );
 
@@ -971,7 +974,7 @@ async fn assert_cpcv_view_and_bind(
     );
 
     registry
-        .set_publish_path_set_id(&version.model_version_id, Some(path_set_id.clone()))
+        .set_publish_path_set_id(&version.model_version_id, Some(*path_set_id))
         .await
         .expect("explicit bind for publish gate");
 

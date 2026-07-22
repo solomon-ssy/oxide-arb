@@ -30,11 +30,81 @@ use crate::{precision::RESEARCH_DECIMAL_SCALE, stats, validation::combinatorics:
 pub struct TrialPerformanceMatrix {
     /// Ascending period timestamps (`T` rows).
     pub periods: Vec<DateTime<Utc>>,
-    /// `T` rows × `N` columns; `returns[t].len` must equal `N` for every `t`.
-    pub returns: Vec<Vec<Decimal>>,
+    /// Contiguous row-major `T × N` returns.
+    returns: Vec<Decimal>,
+    trials: usize,
 }
 
 impl TrialPerformanceMatrix {
+    /// Validate and flatten row-major returns into one allocation.
+    pub fn from_rows(periods: Vec<DateTime<Utc>>, returns: Vec<Vec<Decimal>>) -> QuantResult<Self> {
+        let trials = returns.first().map_or(0, Vec::len);
+        if periods.len() != returns.len() {
+            return Err(methodology(format!(
+                "PBO period/return row count mismatch: periods={} returns={}",
+                periods.len(),
+                returns.len()
+            )));
+        }
+        if let Some((row, values)) = returns
+            .iter()
+            .enumerate()
+            .find(|(_, values)| values.len() != trials)
+        {
+            return Err(methodology(format!(
+                "PBO return row {row} has {} trials, expected {trials}",
+                values.len()
+            )));
+        }
+        let capacity = periods
+            .len()
+            .checked_mul(trials)
+            .ok_or_else(|| methodology("PBO matrix capacity overflowed usize".to_owned()))?;
+        let mut flattened = Vec::with_capacity(capacity);
+        for row in returns {
+            flattened.extend(row);
+        }
+        Ok(Self {
+            periods,
+            returns: flattened,
+            trials,
+        })
+    }
+
+    /// Validate column-major trial output and transpose it directly into one
+    /// row-major allocation. This is the canonical trial-grid construction
+    /// path: it avoids allocating one `Vec` for every period (one million
+    /// allocations at the governed maximum dataset size).
+    pub fn from_columns(
+        periods: Vec<DateTime<Utc>>,
+        columns: &[Vec<Decimal>],
+    ) -> QuantResult<Self> {
+        let period_count = periods.len();
+        if let Some((trial, values)) = columns
+            .iter()
+            .enumerate()
+            .find(|(_, values)| values.len() != period_count)
+        {
+            return Err(methodology(format!(
+                "PBO trial column {trial} has {} periods, expected {period_count}",
+                values.len()
+            )));
+        }
+        let trials = columns.len();
+        let capacity = period_count
+            .checked_mul(trials)
+            .ok_or_else(|| methodology("PBO matrix capacity overflowed usize".to_owned()))?;
+        let mut returns = Vec::with_capacity(capacity);
+        for period in 0..period_count {
+            returns.extend(columns.iter().map(|column| column[period]));
+        }
+        Ok(Self {
+            periods,
+            returns,
+            trials,
+        })
+    }
+
     /// Number of periods (`T`).
     #[must_use]
     pub const fn period_count(&self) -> usize {
@@ -43,8 +113,23 @@ impl TrialPerformanceMatrix {
 
     /// Number of trials (`N`), or `0` for an empty matrix.
     #[must_use]
-    pub fn trial_count(&self) -> usize {
-        self.returns.first().map_or(0, Vec::len)
+    pub const fn trial_count(&self) -> usize {
+        self.trials
+    }
+
+    /// Borrow one period's trial returns.
+    #[must_use]
+    pub fn row(&self, period: usize) -> Option<&[Decimal]> {
+        let start = period.checked_mul(self.trials)?;
+        let end = start.checked_add(self.trials)?;
+        self.returns.get(start..end)
+    }
+
+    /// Iterate borrowed period rows.
+    pub fn rows(&self) -> impl ExactSizeIterator<Item = &[Decimal]> {
+        self.returns
+            .chunks_exact(self.trials.max(1))
+            .take(self.periods.len())
     }
 }
 
@@ -92,7 +177,7 @@ fn aggregate_blocks(
                 .map(|trial| {
                     let mut sum = Decimal::ZERO;
                     let mut sum_sq = Decimal::ZERO;
-                    for row in &matrix.returns[start..end] {
+                    for row in matrix.rows().skip(start).take(end - start) {
                         let value = row[trial];
                         sum += value;
                         sum_sq += value * value;
@@ -285,21 +370,17 @@ fn negative_logit(
 }
 
 fn validate_matrix(matrix: &TrialPerformanceMatrix) -> QuantResult<()> {
-    if matrix.periods.len() != matrix.returns.len() {
+    let expected = matrix
+        .period_count()
+        .checked_mul(matrix.trial_count())
+        .ok_or_else(|| methodology("PBO matrix shape overflowed usize".to_owned()))?;
+    if matrix.returns.len() != expected {
         return Err(methodology(format!(
-            "PBO period/return row count mismatch: periods={} returns={}",
-            matrix.periods.len(),
-            matrix.returns.len()
+            "PBO matrix has {} values but shape {}x{} requires {expected}",
+            matrix.returns.len(),
+            matrix.period_count(),
+            matrix.trial_count()
         )));
-    }
-    let trial_count = matrix.trial_count();
-    for (row_index, row) in matrix.returns.iter().enumerate() {
-        if row.len() != trial_count {
-            return Err(methodology(format!(
-                "PBO return row {row_index} has {} trials, expected {trial_count}",
-                row.len()
-            )));
-        }
     }
     Ok(())
 }
@@ -323,10 +404,7 @@ mod tests {
                 Utc.timestamp_opt(1_700_000_000 + offset, 0).unwrap()
             })
             .collect();
-        TrialPerformanceMatrix {
-            periods: period_times,
-            returns: columns,
-        }
+        TrialPerformanceMatrix::from_rows(period_times, columns).expect("performance matrix")
     }
 
     /// A "good" trial with a consistently high, low-variance return, and a
@@ -363,9 +441,40 @@ mod tests {
 
     #[test]
     fn pbo_rejects_non_rectangular_matrix() {
-        let mut m = matrix(16, vec![vec![dec!(0.01), dec!(0.02)]; 16]);
-        m.returns[7].pop();
-        assert!(probability_of_backtest_overfitting(&m, &PboInput { block_count: 4 }).is_err());
+        let periods = (0..16)
+            .map(|i| Utc.timestamp_opt(1_700_000_000 + i * 3_600, 0).unwrap())
+            .collect();
+        let mut rows = vec![vec![dec!(0.01), dec!(0.02)]; 16];
+        rows[7].pop();
+        assert!(TrialPerformanceMatrix::from_rows(periods, rows).is_err());
+    }
+
+    #[test]
+    fn column_constructor_transposes_into_the_same_row_major_layout() {
+        let periods = (0..3)
+            .map(|i| Utc.timestamp_opt(1_700_000_000 + i * 3_600, 0).unwrap())
+            .collect::<Vec<_>>();
+        let from_rows = TrialPerformanceMatrix::from_rows(
+            periods.clone(),
+            vec![
+                vec![dec!(1), dec!(4)],
+                vec![dec!(2), dec!(5)],
+                vec![dec!(3), dec!(6)],
+            ],
+        )
+        .expect("row-major matrix");
+        let from_columns = TrialPerformanceMatrix::from_columns(
+            periods,
+            &[
+                vec![dec!(1), dec!(2), dec!(3)],
+                vec![dec!(4), dec!(5), dec!(6)],
+            ],
+        )
+        .expect("column-major source");
+        assert_eq!(
+            from_columns.rows().collect::<Vec<_>>(),
+            from_rows.rows().collect::<Vec<_>>()
+        );
     }
 
     #[test]

@@ -16,7 +16,7 @@ use crate::{
     },
 };
 
-pub const SOURCE_SLICE_MANIFEST_FORMAT_VERSION: u32 = 1;
+pub const SOURCE_SLICE_MANIFEST_FORMAT_VERSION: u32 = 2;
 
 /// Immutable artifact-store location and content identity of one source slice.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -32,8 +32,7 @@ pub enum SourceSliceObjectKind {
     CatalogMarket,
     CatalogEvent,
     ClobMarketInfo,
-    L2Event,
-    L2Checkpoint,
+    L2Ledger,
     L2Session,
     L2Gap,
     BookMicrostructure,
@@ -111,7 +110,7 @@ pub struct SourceSlicePitCutoffs {
 /// The only readable input to fitting and validation after materialization.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
 #[serde(deny_unknown_fields)]
-pub struct SourceSliceManifestV1 {
+pub struct SourceSliceManifest {
     pub format_version: u32,
     pub profile_ref: ResearchProfileRef,
     pub evaluation_track: ResearchEvaluationTrack,
@@ -131,7 +130,7 @@ pub struct SourceSliceManifestV1 {
     pub objects: Vec<SourceSliceObjectRef>,
 }
 
-impl SourceSliceManifestV1 {
+impl SourceSliceManifest {
     pub fn validate(&self) -> Result<(), String> {
         if self.format_version != SOURCE_SLICE_MANIFEST_FORMAT_VERSION {
             return Err(format!(
@@ -314,8 +313,7 @@ impl SourceSliceManifestV1 {
             SourceSliceObjectKind::CatalogMarket,
             SourceSliceObjectKind::CatalogEvent,
             SourceSliceObjectKind::ClobMarketInfo,
-            SourceSliceObjectKind::L2Event,
-            SourceSliceObjectKind::L2Checkpoint,
+            SourceSliceObjectKind::L2Ledger,
             SourceSliceObjectKind::L2Session,
             SourceSliceObjectKind::L2Gap,
             SourceSliceObjectKind::BookMicrostructure,
@@ -357,14 +355,14 @@ mod tests {
     use crate::types::{ResearchProfileId, builtin_research_profiles};
 
     fn hash(index: u8) -> ContentHash {
-        ContentHash::parse(format!("blake3:{index:064x}")).expect("hash")
+        ContentHash::parse(&format!("blake3:{index:064x}")).expect("hash")
     }
 
     fn weather_manifest(
         window_start: DateTime<Utc>,
         window_end: DateTime<Utc>,
         materialized_at: DateTime<Utc>,
-    ) -> (SourceSliceManifestV1, ResearchProfileArtifact, ContentHash) {
+    ) -> (SourceSliceManifest, ResearchProfileArtifact, ContentHash) {
         let profile = builtin_research_profiles()
             .expect("profiles")
             .into_iter()
@@ -375,8 +373,7 @@ mod tests {
             SourceSliceObjectKind::CatalogMarket,
             SourceSliceObjectKind::CatalogEvent,
             SourceSliceObjectKind::ClobMarketInfo,
-            SourceSliceObjectKind::L2Event,
-            SourceSliceObjectKind::L2Checkpoint,
+            SourceSliceObjectKind::L2Ledger,
             SourceSliceObjectKind::L2Session,
             SourceSliceObjectKind::L2Gap,
             SourceSliceObjectKind::BookMicrostructure,
@@ -407,11 +404,11 @@ mod tests {
                 max_available_at: Some(materialized_at),
             })
             .collect();
-        let manifest = SourceSliceManifestV1 {
+        let manifest = SourceSliceManifest {
             format_version: SOURCE_SLICE_MANIFEST_FORMAT_VERSION,
             profile_ref: profile.profile_ref.clone(),
             evaluation_track: ResearchEvaluationTrack::SemiAutoCandidate,
-            research_program_hash: program_hash.clone(),
+            research_program_hash: program_hash,
             window_start,
             window_end,
             pit_cutoff: materialized_at,
@@ -450,28 +447,28 @@ mod tests {
     #[test]
     fn duplicate_object_uri_is_rejected() {
         let now = Utc::now();
-        let hash = ContentHash::parse(format!("blake3:{}", "1".repeat(64))).expect("hash");
+        let hash = ContentHash::parse(&format!("blake3:{}", "1".repeat(64))).expect("hash");
         let object = SourceSliceObjectRef {
             kind: SourceSliceObjectKind::CatalogMarket,
             uri: ArtifactUri::parse("s3://worm/slice/catalog.parquet").expect("URI"),
             object_version: "1".to_owned(),
-            byte_hash: hash.clone(),
-            schema_hash: hash.clone(),
+            byte_hash: hash,
+            schema_hash: hash,
             row_count: 1,
             min_event_at: Some(now),
             max_event_at: Some(now),
             min_available_at: Some(now),
             max_available_at: Some(now),
         };
-        let manifest = SourceSliceManifestV1 {
+        let manifest = SourceSliceManifest {
             format_version: SOURCE_SLICE_MANIFEST_FORMAT_VERSION,
             profile_ref: ResearchProfileRef {
                 id: ResearchProfileId::new("test"),
                 version: 1,
-                content_hash: hash.clone(),
+                content_hash: hash,
             },
             evaluation_track: ResearchEvaluationTrack::SemiAutoCandidate,
-            research_program_hash: hash.clone(),
+            research_program_hash: hash,
             window_start: now - Duration::days(1),
             window_end: now,
             pit_cutoff: now,
@@ -480,10 +477,10 @@ mod tests {
                 base_complete_batch_id: CatalogSyncBatchId::from_v7(),
                 terminal_batch_id: CatalogSyncBatchId::from_v7(),
                 committed_through: now,
-                ordered_batch_chain_hash: hash.clone(),
+                ordered_batch_chain_hash: hash,
                 market_count: 1,
                 event_count: 1,
-                snapshot_hash: hash.clone(),
+                snapshot_hash: hash,
             },
             reader_contract_version: ReaderContractVersion::parse("reader@1")
                 .expect("reader contract version"),

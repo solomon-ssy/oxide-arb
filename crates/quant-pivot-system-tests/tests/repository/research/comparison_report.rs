@@ -36,7 +36,7 @@ use rust_decimal_macros::dec;
 use sea_orm::DatabaseConnection;
 
 fn content_hash(seed: &str) -> ContentHash {
-    ContentHash::parse(format!("blake3:{seed:0>64}")).expect("hash")
+    ContentHash::parse(&format!("blake3:{seed:0>64}")).expect("hash")
 }
 
 async fn seed_runtime_config(db: &DatabaseConnection) -> DecisionPolicySnapshotId {
@@ -52,8 +52,8 @@ async fn seed_model_version(
     let model_version_id = ModelVersionId::from_v7();
     PgModelRegistryRepository::new(db.clone())
         .create_model_version(NewModelVersion {
-            model_version_id: model_version_id.clone(),
-            model_spec_id: model_spec_id.clone(),
+            model_version_id,
+            model_spec_id: *model_spec_id,
             version,
             artifact_hash: content_hash(artifact_seed),
             category_scope: None,
@@ -86,10 +86,10 @@ async fn seed_backtest_report(
     let window_start = Utc::now() - ChronoDuration::hours(2);
     PgBacktestReportRepository::new(db.clone())
         .create(NewBacktestReport {
-            backtest_report_id: id.clone(),
-            model_version_id: model_version_id.clone(),
-            model_run_id: model_run_id.clone(),
-            decision_policy_snapshot_id: rc_id.clone(),
+            backtest_report_id: id,
+            model_version_id: *model_version_id,
+            model_run_id: *model_run_id,
+            decision_policy_snapshot_id: *rc_id,
             window_start,
             window_end: window_start + ChronoDuration::hours(1),
             coverage: dec!(1),
@@ -132,10 +132,10 @@ async fn seed_run(
     let window_start = Utc::now() - ChronoDuration::hours(2);
     PgModelRunRepository::new(db.clone())
         .create(NewModelRun {
-            model_run_id: model_run_id.clone(),
+            model_run_id,
             run_kind: ModelRunKind::Backtest,
-            model_version_id: Some(model_version_id.clone()),
-            decision_policy_snapshot_id: rc_id.clone(),
+            model_version_id: Some(*model_version_id),
+            decision_policy_snapshot_id: *rc_id,
             market_selection_id: None,
             window_start,
             window_end: window_start + ChronoDuration::hours(1),
@@ -160,7 +160,7 @@ pub async fn quant_model_comparison_report_migration_and_crud() {
     let model_spec_id = ModelSpecId::from_v7();
     PgModelRegistryRepository::new(db.clone())
         .create_model_spec(model_spec_fixtures::new_model_spec_fixture(
-            model_spec_id.clone(),
+            model_spec_id,
             "pg-comparison-it",
             ModelFamily::WeightedFactor,
             86_400,
@@ -182,11 +182,11 @@ pub async fn quant_model_comparison_report_migration_and_crud() {
     let comparison_report_id = ModelComparisonReportId::from_v7();
     let created = repo
         .create(NewModelComparisonReport {
-            comparison_report_id: comparison_report_id.clone(),
-            baseline_model_version_id: baseline_version.clone(),
-            candidate_model_version_id: candidate_version.clone(),
-            baseline_report_id: baseline_report.clone(),
-            candidate_report_id: candidate_report.clone(),
+            comparison_report_id,
+            baseline_model_version_id: baseline_version,
+            candidate_model_version_id: candidate_version,
+            baseline_report_id: baseline_report,
+            candidate_report_id: candidate_report,
             model_run_id,
             rank_ic_delta: dec!(0.15),
             hit_rate_delta: dec!(0.05),
@@ -233,7 +233,7 @@ pub async fn quant_model_comparison_report_migration_and_crud() {
     assert_eq!(by_baseline.comparison_report_id, comparison_report_id);
 
     let id_map = repo
-        .comparison_ids_for_backtest_reports(&[candidate_report.clone(), baseline_report.clone()])
+        .comparison_ids_for_backtest_reports(&[candidate_report, baseline_report])
         .await
         .expect("batch lookup");
     assert_eq!(id_map.get(&candidate_report), Some(&comparison_report_id));

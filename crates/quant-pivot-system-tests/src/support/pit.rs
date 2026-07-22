@@ -75,7 +75,7 @@ impl InMemoryDecisionSnapshotSource {
                 continue;
             };
             for token_id in [&market.token_yes, &market.token_no] {
-                if let Some(book) = book_store.load(token_id) {
+                if let Some(book) = book_store.load_by_id(token_id) {
                     books.insert(token_id.clone(), book);
                 }
             }

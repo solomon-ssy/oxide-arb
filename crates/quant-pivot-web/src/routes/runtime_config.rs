@@ -310,7 +310,7 @@ pub async fn create_draft(
             policy_revision_id: PolicyRevisionId::from_v7(),
             resource_kind: kind,
             schema_version: POLICY_RESOURCE_SCHEMA_VERSION,
-            revision_hash: revision_hash.clone(),
+            revision_hash,
             document: body.document,
             status: PolicyRevisionStatus::Draft,
             validation_evidence: None,
@@ -380,7 +380,7 @@ pub async fn validate_draft(
     candidate
         .replace_resource_document(kind, revision.document.clone())
         .map_err(|error| WebError::BadRequest(error.to_string()))?;
-    candidate.set_resource_revision_id(kind, revision_id.clone());
+    candidate.set_resource_revision_id(kind, revision_id);
 
     let candidate_bundle_hash = candidate
         .persistence_hash()
@@ -395,7 +395,7 @@ pub async fn validate_draft(
     let (preflight_token, preflight_expires_at) = if valid {
         drop(prepared);
         let token = new_preflight_token()?;
-        let token_hash = preflight_token_hash(&token)?;
+        let token_hash = preflight_token_hash(&token);
         let expires_at = Utc::now() + Duration::minutes(PREFLIGHT_TTL_MINUTES);
         state
             .runtime_config
@@ -457,7 +457,7 @@ pub async fn approve_draft(
         .runtime_config
         .record_approval(RecordPolicyApproval {
             policy_approval_id: PolicyApprovalId::from_v7(),
-            policy_revision_id: revision_id.clone(),
+            policy_revision_id: revision_id,
             resource_kind: kind,
             decision: body.decision,
             decided_by_kind: PolicyActorKind::Operator,
@@ -476,7 +476,7 @@ pub async fn approve_draft(
         ResourceType::DecisionPolicySnapshot,
         revision_id.to_string(),
     );
-    op_ctx.set_state_hashes(None, Some(approval.revision_hash.clone()));
+    op_ctx.set_state_hashes(None, Some(approval.revision_hash));
     set_audit_detail(
         &op_ctx,
         &ConfigAuditDetail {
@@ -924,7 +924,7 @@ pub async fn seal_production(
         .await?
         .ok_or_else(|| WebError::Conflict("no active policy bundle exists".to_owned()))?;
     let (evidence, live_schema) = production_seal_evidence(&state, Some(&active_bundle)).await?;
-    let policy_bundle_hash = active_bundle.snapshot_hash.clone();
+    let policy_bundle_hash = active_bundle.snapshot_hash;
     if evidence
         .checks
         .iter()
@@ -945,7 +945,7 @@ pub async fn seal_production(
     let seal_result = tokio::select! {
       result = state.runtime_config.seal_production_baseline(
             NewProductionBaseline {
-                production_baseline_id: production_baseline_id.clone(),
+                production_baseline_id,
                 environment: body.environment.clone(),
                 sealed_at: now,
                 sealed_by_kind: PolicyActorKind::Operator,
@@ -955,9 +955,9 @@ pub async fn seal_production(
                 postgres_schema_fingerprint: live_schema.postgres_schema_fingerprint,
                 clickhouse_schema_fingerprint: live_schema.clickhouse_schema_fingerprint,
                 policy_bundle_generation: active_bundle.generation,
-                decision_policy_snapshot_id: active_bundle.decision_policy_snapshot_id.clone(),
-                policy_bundle_hash: policy_bundle_hash.clone(),
-                lifecycle_policy_hash: lifecycle_policy_hash.clone(),
+                decision_policy_snapshot_id: active_bundle.decision_policy_snapshot_id,
+                policy_bundle_hash,
+                lifecycle_policy_hash,
                 evidence,
             },
             state.schema_verification.as_ref(),
@@ -984,7 +984,7 @@ pub async fn seal_production(
         ResourceType::ConfigLifecycle,
         production_baseline_id.to_string(),
     );
-    op_ctx.set_state_hashes(None, Some(lifecycle_policy_hash.clone()));
+    op_ctx.set_state_hashes(None, Some(lifecycle_policy_hash));
     set_audit_detail(
         &op_ctx,
         &ProductionSealAuditDetail {
@@ -1084,7 +1084,7 @@ async fn production_seal_evidence(
             outcome: CheckOutcome::Passed,
             checked_at: now,
             detail: LifecycleCheckDetail::SchemaFingerprint {
-                fingerprint: live_schema.postgres_schema_fingerprint.clone(),
+                fingerprint: live_schema.postgres_schema_fingerprint,
             },
         },
         ProductionSealCheck {
@@ -1092,7 +1092,7 @@ async fn production_seal_evidence(
             outcome: CheckOutcome::Passed,
             checked_at: now,
             detail: LifecycleCheckDetail::SchemaFingerprint {
-                fingerprint: live_schema.clickhouse_schema_fingerprint.clone(),
+                fingerprint: live_schema.clickhouse_schema_fingerprint,
             },
         },
         ProductionSealCheck {
@@ -1125,7 +1125,7 @@ async fn production_seal_evidence(
             detail: active_bundle.map_or(
                 LifecycleCheckDetail::MissingActivePolicyBundle,
                 |bundle| LifecycleCheckDetail::PolicyBundle {
-                    policy_bundle_hash: bundle.snapshot_hash.clone(),
+                    policy_bundle_hash: bundle.snapshot_hash,
                 },
             ),
         },
@@ -1194,7 +1194,7 @@ fn production_evidence_check(
         },
         checked_at,
         detail: LifecycleCheckDetail::ExternalEvidence {
-            evidence_hash: evidence.map(|evidence| evidence.evidence_hash.clone()),
+            evidence_hash: evidence.map(|evidence| evidence.evidence_hash),
         },
     }
 }
@@ -1258,7 +1258,7 @@ async fn transition_revision(
     candidate
         .replace_resource_document(kind, revision.document.clone())
         .map_err(|error| WebError::BadRequest(error.to_string()))?;
-    candidate.set_resource_revision_id(kind, revision_id.clone());
+    candidate.set_resource_revision_id(kind, revision_id);
     ensure_runtime_valid(&candidate)?;
     let prepared = state
         .runtime_config_apply
@@ -1280,8 +1280,8 @@ async fn transition_revision(
             }
         },
     )?;
-    let snapshot_id = snapshot.decision_policy_snapshot_id.clone();
-    let preflight_token_hash = preflight_token_hash(&request.preflight_token)?;
+    let snapshot_id = snapshot.decision_policy_snapshot_id;
+    let preflight_token_hash = preflight_token_hash(&request.preflight_token);
     let actor_user_id = actor_user_id(actor)?;
     let activation_request_hash = CanonicalDigest::content_hash_typed(
         POLICY_ACTIVATION_HASH_DOMAIN,
@@ -1311,7 +1311,7 @@ async fn transition_revision(
                 expected_bundle_generation: request.expected_bundle_generation,
                 policy_activation_id: PolicyActivationId::from_v7(),
                 resource_kind: kind,
-                policy_revision_id: revision_id.clone(),
+                policy_revision_id: revision_id,
                 decision_policy_snapshot_id: snapshot_id,
                 policy_approval_id: request.approval_id,
                 activated_by_kind: PolicyActorKind::Operator,
@@ -1322,11 +1322,11 @@ async fn transition_revision(
                 expected_active_revision_id: request.expected_active_revision_id,
                 previous_policy_revision_id: None,
                 rollback_target_revision_id: (activation_kind == PolicyActivationKind::Rollback)
-                    .then(|| revision_id.clone()),
+                    .then_some(revision_id),
                 preflight_token_hash,
                 idempotency_key: request.idempotency_key,
                 activation_request_hash,
-                audit_event_id: audit_event_id.clone(),
+                audit_event_id,
             },
             snapshot,
         )
@@ -1343,7 +1343,7 @@ async fn transition_revision(
         ResourceType::DecisionPolicySnapshot,
         revision_id.to_string(),
     );
-    op_ctx.set_state_hashes(Some(before_hash), Some(revision.revision_hash.clone()));
+    op_ctx.set_state_hashes(Some(before_hash), Some(revision.revision_hash));
     set_audit_detail(
         op_ctx,
         &ConfigAuditDetail {
@@ -1357,7 +1357,7 @@ async fn transition_revision(
         },
     )?;
     op_ctx.link_governance(
-        commit.activation.audit_event_id.clone(),
+        commit.activation.audit_event_id,
         commit.bundle.generation.get(),
     );
     state.events.publish(CoreEvent::ConfigActivated {
@@ -1580,23 +1580,13 @@ fn new_snapshot(
         decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
         snapshot_hash: CanonicalDigest::content_hash_json(&snapshot_document)
             .map_err(|error| WebError::Internal(error.to_string()))?,
-        recommendation_policy_revision_id: revisions
-            .recommendation_policy
-            .clone()
-            .ok_or_else(missing)?,
-        execution_risk_policy_revision_id: revisions
-            .execution_risk_policy
-            .clone()
-            .ok_or_else(missing)?,
-        model_routing_revision_id: revisions.model_routing.clone().ok_or_else(missing)?,
-        report_schedule_revision_id: revisions.report_schedule.clone().ok_or_else(missing)?,
-        operational_control_revision_id: revisions
-            .operational_control
-            .clone()
-            .ok_or_else(missing)?,
+        recommendation_policy_revision_id: revisions.recommendation_policy.ok_or_else(missing)?,
+        execution_risk_policy_revision_id: revisions.execution_risk_policy.ok_or_else(missing)?,
+        model_routing_revision_id: revisions.model_routing.ok_or_else(missing)?,
+        report_schedule_revision_id: revisions.report_schedule.ok_or_else(missing)?,
+        operational_control_revision_id: revisions.operational_control.ok_or_else(missing)?,
         execution_authorization_revision_id: revisions
             .execution_authorization
-            .clone()
             .ok_or_else(missing)?,
         snapshot: snapshot_document,
         source,
@@ -1617,9 +1607,8 @@ fn new_preflight_token() -> Result<PolicyPreflightToken, WebError> {
         .map_err(|error| WebError::Internal(error.to_string()))
 }
 
-fn preflight_token_hash(token: &PolicyPreflightToken) -> Result<ContentHash, WebError> {
-    ContentHash::parse(CanonicalDigest::prefixed_bytes(token.as_str().as_bytes()))
-        .map_err(|error| WebError::Internal(error.to_string()))
+fn preflight_token_hash(token: &PolicyPreflightToken) -> ContentHash {
+    CanonicalDigest::content_hash_bytes(token.as_str().as_bytes())
 }
 
 fn actor_user_id(actor: &AuthedActor) -> Result<UserId, WebError> {

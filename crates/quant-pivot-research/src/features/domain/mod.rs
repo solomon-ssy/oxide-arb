@@ -88,18 +88,18 @@ pub enum DomainSliceData {
         primary: DomainObservationWindow,
         oracle: Option<CryptoPriceReportWindow>,
     },
-    Weather(WeatherFactWindow),
+    Weather(Box<WeatherFactWindow>),
 }
 
 impl DomainSliceData {
     #[must_use]
-    pub const fn as_ref(&self) -> DomainSliceDataRef<'_> {
+    pub fn as_ref(&self) -> DomainSliceDataRef<'_> {
         match self {
             Self::Crypto { primary, oracle } => DomainSliceDataRef::Crypto {
                 primary,
                 oracle: oracle.as_ref(),
             },
-            Self::Weather(window) => DomainSliceDataRef::Weather(window),
+            Self::Weather(window) => DomainSliceDataRef::Weather(window.as_ref()),
         }
     }
 

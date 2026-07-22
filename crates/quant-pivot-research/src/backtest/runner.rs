@@ -249,8 +249,8 @@ fn process_tick(
             allocated_usd,
             entry_fee_usd: settlement.economics.entry_fee,
             filled_shares: settlement.economics.filled_shares,
-            fee_schedule_hash: snapshot.fee_schedule.schedule_hash.clone(),
-            book_hash: snapshot.book_hash.clone(),
+            fee_schedule_hash: snapshot.fee_schedule.schedule_hash,
+            book_hash: snapshot.book_hash,
             liquidity_feasible,
             data_quality: market_context
                 .map_or(DataQualityStatus::Insufficient, |c| c.data_quality),
@@ -434,9 +434,9 @@ fn build_report(request: &BacktestRequest, m: &BuildMetrics<'_>) -> QuantResult<
     })?;
 
     Ok(BacktestReport {
-        backtest_report_id: request.backtest_report_id.clone(),
-        model_version_id: request.model_version_id.clone(),
-        decision_policy_snapshot_id: request.decision_policy_snapshot_id.clone(),
+        backtest_report_id: request.backtest_report_id,
+        model_version_id: request.model_version_id,
+        decision_policy_snapshot_id: request.decision_policy_snapshot_id,
         window_start: request.window_start,
         window_end: request.window_end,
         coverage,
@@ -628,7 +628,7 @@ mod tests {
         BacktestTick {
             decision_at: as_of,
             model_input: ModelRuntimeInput::FactorTable(FactorInferenceTable {
-                model_run_id: model_run_id.clone(),
+                model_run_id: *model_run_id,
                 decision_at: as_of,
                 rows: vec![row("0xbull", true), row("0xbear", false)],
             }),
@@ -741,7 +741,7 @@ mod tests {
             "PnL curve filled"
         );
         assert!(
-            report.report_hash.as_str().starts_with("blake3:"),
+            report.report_hash.to_string().starts_with("blake3:"),
             "canonical report hash"
         );
     }

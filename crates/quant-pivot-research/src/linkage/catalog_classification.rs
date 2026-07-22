@@ -100,7 +100,7 @@ impl DomainCatalogClassifier {
         }
         let artifact = DomainCatalogClassificationArtifact::new(
             self.resolver.resolver_version(),
-            self.capability_registry.registry_hash.clone(),
+            self.capability_registry.registry_hash,
             classifications,
         )?;
         artifact.validate().map_err(QuantError::config)?;
@@ -1118,6 +1118,7 @@ mod tests {
     }
 
     fn hash(byte: char) -> ContentHash {
-        ContentHash::parse(format!("blake3:{}", byte.to_string().repeat(64))).expect("content hash")
+        ContentHash::parse(&format!("blake3:{}", byte.to_string().repeat(64)))
+            .expect("content hash")
     }
 }

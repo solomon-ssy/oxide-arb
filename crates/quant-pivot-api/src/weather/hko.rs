@@ -177,7 +177,7 @@ fn parse_daily_temperatures(
     let wire: DailyTemperatureWire =
         serde_json::from_str(body).map_err(|error| daily_temperature_error(error.to_string()))?;
     validate_daily_temperature_schema(&wire, station, statistic)?;
-    let response_hash = ContentHash::parse(CanonicalDigest::prefixed_bytes(body.as_bytes()))?;
+    let response_hash = CanonicalDigest::content_hash_bytes(body.as_bytes());
     let mut dates = BTreeSet::new();
     let mut reports = Vec::new();
     let mut incomplete_rows = 0_usize;

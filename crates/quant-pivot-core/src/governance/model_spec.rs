@@ -159,7 +159,7 @@ fn build_feature_contract(features: &FeaturesConfig) -> QuantResult<FeatureContr
         .specs()
         .iter()
         .map(|spec| FeatureContractEntryView {
-            name: spec.name.as_str().to_owned(),
+            name: spec.name.to_string(),
             compute_revision: spec.compute_revision,
             family: spec.family,
             value_kind: spec.value_kind,
@@ -313,7 +313,12 @@ mod tests {
             contract.feature_schema_version,
             features.feature_schema_version
         );
-        assert!(contract.feature_schema_hash.as_str().starts_with("blake3:"));
+        assert!(
+            contract
+                .feature_schema_hash
+                .to_string()
+                .starts_with("blake3:")
+        );
         assert!(
             contract
                 .features

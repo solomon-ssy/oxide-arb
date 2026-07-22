@@ -696,8 +696,8 @@ fn dedup_observations(observations: Vec<DomainObservation>) -> Vec<DomainObserva
     let mut deduped = Vec::with_capacity(observations.len());
     for observation in observations {
         let key = (
-            observation.instrument_key.as_str().to_owned(),
-            observation.metric.as_str().to_owned(),
+            observation.instrument_key.to_string(),
+            observation.metric.to_string(),
             observation.observed_at.timestamp_millis(),
         );
         if seen.insert(key) {
@@ -746,7 +746,7 @@ mod tests {
                 KlineInterval::OneMinute,
             ),
             checkpoint_json: DomainSourceCheckpoint::BinanceKline { close_time: last },
-            checkpoint_hash: ContentHash::parse(format!("blake3:{}", "a".repeat(64)))
+            checkpoint_hash: ContentHash::parse(&format!("blake3:{}", "a".repeat(64)))
                 .expect("checkpoint hash"),
             status,
             last_error: None,

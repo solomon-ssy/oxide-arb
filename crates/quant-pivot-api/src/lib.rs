@@ -9,7 +9,10 @@
 //!
 //! All types propagate errors through [`quant_pivot_error`]'s sub-error system.
 
+use quant_pivot_allocator as _;
+
 pub mod binance;
+#[cfg(feature = "domain-chainlink")]
 pub mod chainlink;
 pub mod clob;
 pub mod ctf;

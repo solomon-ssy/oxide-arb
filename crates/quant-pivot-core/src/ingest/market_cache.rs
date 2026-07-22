@@ -110,7 +110,7 @@ mod tests {
     use rust_decimal_macros::dec;
 
     use super::*;
-    use crate::ingest::market_registry::MarketRegistry;
+    use crate::ingest::{data_plane_index::DataPlane, market_registry::MarketRegistry};
 
     fn sample_entry(id: &str, categories: CategorySet) -> MarketRegistryInfo {
         sample_entry_with_end_date(id, categories, Some(Utc::now() + Duration::hours(2)))
@@ -167,7 +167,7 @@ mod tests {
 
     #[test]
     fn past_deadline_markets_are_excluded_from_cache() {
-        let reg = Arc::new(MarketRegistry::new());
+        let reg = Arc::new(MarketRegistry::new(Arc::new(DataPlane::new())));
         reg.register_market(sample_entry_with_end_date(
             "past",
             CategorySet::EMPTY,
@@ -183,7 +183,7 @@ mod tests {
 
     #[test]
     fn no_end_date_markets_are_excluded_from_cache() {
-        let reg = Arc::new(MarketRegistry::new());
+        let reg = Arc::new(MarketRegistry::new(Arc::new(DataPlane::new())));
         reg.register_market(sample_entry_with_end_date(
             "no-date",
             CategorySet::EMPTY,
@@ -196,7 +196,7 @@ mod tests {
 
     #[test]
     fn rebuild_populates_entries() {
-        let reg = Arc::new(MarketRegistry::new());
+        let reg = Arc::new(MarketRegistry::new(Arc::new(DataPlane::new())));
         reg.register_market(sample_entry("m1", CategorySet::EMPTY));
         reg.register_market(sample_entry("m2", CategorySet::EMPTY));
 
@@ -207,7 +207,7 @@ mod tests {
 
     #[test]
     fn get_returns_entry_by_market_id() {
-        let reg = Arc::new(MarketRegistry::new());
+        let reg = Arc::new(MarketRegistry::new(Arc::new(DataPlane::new())));
         reg.register_market(sample_entry("m1", CategorySet::EMPTY));
 
         let cache = MarketCache::new(reg, admit_all());
@@ -218,7 +218,7 @@ mod tests {
 
     #[test]
     fn empty_registry_yields_empty_cache() {
-        let reg = Arc::new(MarketRegistry::new());
+        let reg = Arc::new(MarketRegistry::new(Arc::new(DataPlane::new())));
         let cache = MarketCache::new(reg, admit_all());
         assert!(cache.entries().is_empty());
         assert!(cache.get(&MarketId::new("missing")).is_none());
@@ -226,7 +226,7 @@ mod tests {
 
     #[test]
     fn market_filter_bounds_rebuild() {
-        let reg = Arc::new(MarketRegistry::new());
+        let reg = Arc::new(MarketRegistry::new(Arc::new(DataPlane::new())));
         reg.register_market(sample_entry(
             "m-sports",
             CategorySet::from(MarketCategory::Sports),

@@ -17,7 +17,7 @@ use quant_pivot_repository::{postgres::PgFactorRepository, traits::FactorReposit
 use quant_pivot_system_tests::postgres::setup_pg;
 
 fn content_hash(seed: char) -> ContentHash {
-    ContentHash::parse(format!("blake3:{}", seed.to_string().repeat(64))).expect("hash")
+    ContentHash::parse(&format!("blake3:{}", seed.to_string().repeat(64))).expect("hash")
 }
 
 fn revision(name: &str, seed: char) -> NewFactorDefinition {
@@ -53,7 +53,7 @@ pub async fn registration_is_insert_only_and_publication_retires_prior_revision(
     let (pool, _container) = setup_pg().await;
     let repo = PgFactorRepository::new(pool.connection().clone());
     let first = revision("momentum", '1');
-    let first_id = first.factor_definition_id.clone();
+    let first_id = first.factor_definition_id;
 
     repo.create_definition(first.clone())
         .await
@@ -69,7 +69,7 @@ pub async fn registration_is_insert_only_and_publication_retires_prior_revision(
     assert_eq!(idempotent.status, PublicationStatus::Published);
 
     let second = revision("momentum", '2');
-    let second_id = second.factor_definition_id.clone();
+    let second_id = second.factor_definition_id;
     repo.create_definition(second)
         .await
         .expect("register second revision");
@@ -95,16 +95,16 @@ pub async fn batch_publication_is_atomic_and_rejects_content_address_collisions(
     let (pool, _container) = setup_pg().await;
     let repo = PgFactorRepository::new(pool.connection().clone());
     let left = revision("left", '3');
-    let left_id = left.factor_definition_id.clone();
+    let left_id = left.factor_definition_id;
     let right = revision("right", '4');
-    let right_id = right.factor_definition_id.clone();
+    let right_id = right.factor_definition_id;
     repo.create_definition(left.clone())
         .await
         .expect("register left");
     repo.create_definition(right).await.expect("register right");
 
     let missing = FactorDefinitionId::from_definition_hash(&content_hash('5'));
-    let failed = repo.publish_definitions(&[left_id.clone(), missing]).await;
+    let failed = repo.publish_definitions(&[left_id, missing]).await;
     assert!(matches!(failed, Err(StorageError::NotFound { .. })));
     assert_eq!(
         repo.find_definition(&left_id)
@@ -117,7 +117,7 @@ pub async fn batch_publication_is_atomic_and_rejects_content_address_collisions(
     );
 
     let published = repo
-        .publish_definitions(&[left_id.clone(), right_id])
+        .publish_definitions(&[left_id, right_id])
         .await
         .expect("publish batch");
     assert_eq!(published.len(), 2);

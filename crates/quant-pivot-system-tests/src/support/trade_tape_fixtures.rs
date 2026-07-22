@@ -8,8 +8,8 @@ use quant_pivot_api::exchange::EXCHANGE_CONTRACTS;
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     clickhouse::{
-        BookL2CheckpointRow, BookMicrostructureRow, ChBps, ChPrice, ChSchemaVersion, ChShares,
-        ChUsd, DomainObservationRow, MarketResolutionRow, MidPriceBucketRow, TradeTapeRow,
+        BookL2LedgerRow, BookMicrostructureRow, ChBps, ChPrice, ChSchemaVersion, ChShares, ChUsd,
+        DomainObservationRow, MarketResolutionRow, MidPriceBucketRow, TradeTapeRow,
     },
     domain::data_plane::{
         TradeTapeBlockCursorInfo, TradeTapeBlockCursorStatus, TradeTapeSourceKind,
@@ -215,26 +215,26 @@ impl QuantFactReadRepository for ConfigurableFactRead {
             .await
     }
 
-    async fn book_checkpoint_at(
+    async fn book_ledger_snapshot_at(
         &self,
         token_id: &TokenId,
         source_cutoff_ms: i64,
         decision_at_ms: i64,
-    ) -> Result<Option<BookL2CheckpointRow>, StorageError> {
+    ) -> Result<Option<BookL2LedgerRow>, StorageError> {
         self.inner
-            .book_checkpoint_at(token_id, source_cutoff_ms, decision_at_ms)
+            .book_ledger_snapshot_at(token_id, source_cutoff_ms, decision_at_ms)
             .await
     }
 
-    async fn book_checkpoints_between(
+    async fn book_ledger_snapshots_between(
         &self,
         token_ids: Vec<TokenId>,
         from_ms: i64,
         to_ms: i64,
         available_by_ms: i64,
-    ) -> Result<Vec<BookL2CheckpointRow>, StorageError> {
+    ) -> Result<Vec<BookL2LedgerRow>, StorageError> {
         self.inner
-            .book_checkpoints_between(token_ids, from_ms, to_ms, available_by_ms)
+            .book_ledger_snapshots_between(token_ids, from_ms, to_ms, available_by_ms)
             .await
     }
 

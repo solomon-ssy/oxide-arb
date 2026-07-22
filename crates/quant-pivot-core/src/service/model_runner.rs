@@ -251,13 +251,13 @@ struct LoadedRoutes {
 
 pub(crate) struct AlignedFeatureCrossSection {
     pub(crate) markets: Vec<SelectedMarket>,
-    pub(crate) vectors: Vec<FeatureVector>,
+    pub(crate) vectors: Arc<[FeatureVector]>,
     pub(crate) vector_ids: Vec<FeatureVectorId>,
 }
 
 struct RoutedFeatureBatch {
     markets: Vec<SelectedMarket>,
-    vectors: Vec<FeatureVector>,
+    vectors: Arc<[FeatureVector]>,
     vector_ids: Vec<FeatureVectorId>,
 }
 /// Boot-time dependencies for the [`ModelRunner`].
@@ -337,15 +337,15 @@ impl ModelRunner {
         let bias_table_hash = self.bias_table.current_content_hash();
         let binding = ActiveSchemaBinding {
             feature_schema_hash,
-            factor_schema_hash: factor_schema_hash.clone(),
-            bias_table_hash: bias_table_hash.clone(),
+            factor_schema_hash,
+            bias_table_hash,
         };
 
         let active_version_id = request
             .model
             .active_model_version_id
             .as_ref()
-            .map(|reference| reference.id.clone());
+            .map(|reference| reference.id);
 
         let model_run_id = ModelRunId::from_v7();
         let input_hash = input_hash(
@@ -358,7 +358,7 @@ impl ModelRunner {
         self.create_run(
             &model_run_id,
             ModelRunKind::LiveInference,
-            active_version_id.clone(),
+            active_version_id,
             &request,
             input_hash,
         )
@@ -397,9 +397,9 @@ impl ModelRunner {
                 self.model_run_repo
                     .succeed(
                         &model_run_id,
-                        active.output_hash.clone(),
+                        active.output_hash,
                         Utc::now(),
-                        active_version_id.clone(),
+                        active_version_id,
                     )
                     .await?;
                 let shadow = self
@@ -439,7 +439,7 @@ impl ModelRunner {
             .active_model_version_id
             .as_ref()
             .ok_or_else(|| QuantError::config("model.active_model_version_id is not configured"))
-            .map(|reference| reference.id.clone())?;
+            .map(|reference| reference.id)?;
         let version = self
             .model_registry_repo
             .find_model_version_by_id(&version_id)
@@ -511,7 +511,7 @@ impl ModelRunner {
         factory: &Arc<dyn ModelRuntimeFactory>,
         request: &ActiveModelRequirementsRequest<'_>,
     ) -> QuantResult<Vec<FeatureName>> {
-        let version_id = reference.id.clone();
+        let version_id = reference.id;
         let version = self
             .model_registry_repo
             .find_model_version_by_id(&version_id)
@@ -616,7 +616,7 @@ impl ModelRunner {
             accepted,
             emitted,
             decisions,
-            active_version_id: version_id.clone(),
+            active_version_id: *version_id,
             active_index,
             active_candidates,
             ch_rows: rows,
@@ -633,7 +633,7 @@ impl ModelRunner {
         active: &ActiveResult,
     ) -> Option<ShadowRunOutcome> {
         let reference = request.model.shadow_model_version_id.as_ref()?;
-        let shadow_version_id = reference.id.clone();
+        let shadow_version_id = reference.id;
 
         let model_run_id = ModelRunId::from_v7();
         let input_hash = match input_hash(
@@ -660,7 +660,7 @@ impl ModelRunner {
             .create_run(
                 &model_run_id,
                 ModelRunKind::Shadow,
-                Some(shadow_version_id.clone()),
+                Some(shadow_version_id),
                 request,
                 input_hash,
             )
@@ -750,7 +750,7 @@ impl ModelRunner {
                 model_run_id,
                 output_hash,
                 Utc::now(),
-                Some(shadow_version_id.clone()),
+                Some(*shadow_version_id),
             )
             .await
             .map_err(|error| (InferenceStage::ShadowInference, QuantError::from(error)))?;
@@ -771,7 +771,7 @@ impl ModelRunner {
         self.maybe_promote_shadow_status(shadow_version_id).await;
 
         Ok(ShadowRunOutcome {
-            model_run_id: Some(model_run_id.clone()),
+            model_run_id: Some(*model_run_id),
             emitted,
             diff: Some(diff),
             failure: None,
@@ -841,7 +841,7 @@ impl ModelRunner {
                 .run_with_references(
                     FactorPipelineRequest {
                         model_run_id,
-                        vectors: &aligned.vectors,
+                        vectors: Arc::clone(&aligned.vectors),
                         feature_vector_ids: &aligned.vector_ids,
                         factors: &factors,
                         features: request.features,
@@ -934,9 +934,9 @@ impl ModelRunner {
             .map_err(|error| (InferenceStage::ActiveLoad, error))?;
 
         let mut category_routes = HashMap::new();
-        let mut runtimes = HashMap::from([(generic_version_id.clone(), generic_runtime)]);
+        let mut runtimes = HashMap::from([(*generic_version_id, generic_runtime)]);
         for (category, reference) in &request.model.category_model_pointers {
-            let version_id = reference.id.clone();
+            let version_id = reference.id;
             let version = self.resolve_active_version(&version_id, request).await?;
             let runtime = factory
                 .load(&version, self.resolve_overlay(&version))
@@ -956,7 +956,7 @@ impl ModelRunner {
             }
             ensure_production_buy_runtime_family(runtime.as_ref())
                 .map_err(|error| (InferenceStage::ActiveLoad, error))?;
-            if runtimes.insert(version_id.clone(), runtime).is_some() {
+            if runtimes.insert(version_id, runtime).is_some() {
                 return Err((
                     InferenceStage::ActiveLoad,
                     ResearchError::InvalidModelArtifact {
@@ -970,7 +970,7 @@ impl ModelRunner {
             category_routes.insert(*category, version_id);
         }
         Ok(LoadedRoutes {
-            generic_version_id: generic_version_id.clone(),
+            generic_version_id: *generic_version_id,
             category_routes,
             runtimes,
         })
@@ -1024,7 +1024,7 @@ impl ModelRunner {
                 .run_with_references(
                     FactorPipelineRequest {
                         model_run_id,
-                        vectors: &batch.vectors,
+                        vectors: Arc::clone(&batch.vectors),
                         feature_vector_ids: &batch.vector_ids,
                         factors: &factors,
                         features: request.features,
@@ -1106,9 +1106,9 @@ impl ModelRunner {
         shadow_candidates: &[SignalCandidate],
     ) {
         let threshold = request.model.shadow_diff_threshold.value;
-        let comparison = match compute_shadow_comparison(ShadowComparisonRequest {
-            active_model_version_id: active.active_version_id.clone(),
-            shadow_model_version_id: shadow_version_id.clone(),
+        let comparison = match compute_shadow_comparison(&ShadowComparisonRequest {
+            active_model_version_id: active.active_version_id,
+            shadow_model_version_id: *shadow_version_id,
             weight_source,
             decision_at: request.boundary.decision_at(),
             active: &active.active_candidates,
@@ -1181,11 +1181,11 @@ impl ModelRunner {
     ) -> QuantResult<()> {
         let now = Utc::now();
         let run = NewModelRun {
-            model_run_id: model_run_id.clone(),
+            model_run_id: *model_run_id,
             run_kind,
             model_version_id,
-            decision_policy_snapshot_id: request.decision_policy_snapshot_id.clone(),
-            market_selection_id: request.market_selection_id.clone(),
+            decision_policy_snapshot_id: request.decision_policy_snapshot_id,
+            market_selection_id: request.market_selection_id,
             window_start: request.boundary.decision_at(),
             window_end: request.boundary.decision_at(),
             status: ModelRunStatus::Running,
@@ -1245,7 +1245,7 @@ async fn finalize_shadow_failure(
     }
     tracing::warn!(%error, ?stage, "shadow inference failed; keeping active result");
     ShadowRunOutcome {
-        model_run_id: model_run_id.cloned(),
+        model_run_id: model_run_id.copied(),
         emitted: 0,
         diff: None,
         failure: Some(error.to_string()),
@@ -1282,7 +1282,7 @@ pub(crate) fn project_model_input_rows(
     let mut vector_by_market = HashMap::with_capacity(aligned.vectors.len());
     for (vector, vector_id) in aligned.vectors.iter().zip(&aligned.vector_ids) {
         if vector_by_market
-            .insert(vector.market_id.clone(), vector_id.clone())
+            .insert(vector.market_id.clone(), *vector_id)
             .is_some()
         {
             return Err(ResearchError::Inference {
@@ -1337,11 +1337,11 @@ pub(crate) fn project_model_input_rows(
                 event_time,
                 decision_at: boundary.decision_at().timestamp_millis(),
                 knowledge_cutoff: boundary.knowledge_cutoff().timestamp_millis(),
-                model_run_id: model_run_id.clone(),
-                model_version_id: row.model_version_id.clone(),
+                model_run_id: *model_run_id,
+                model_version_id: row.model_version_id,
                 recommendation_report_id: None,
                 market_id: row.market_id.clone(),
-                feature_vector_id: feature_vector_id.clone(),
+                feature_vector_id: *feature_vector_id,
                 model_family,
                 raw_input_name: row.raw_input_name.clone(),
                 raw_state: raw_state.to_owned(),
@@ -1376,7 +1376,7 @@ fn partition_candidates(
     for candidate in candidates {
         let reason = rejection_reason(&candidate, floor, min_confidence);
         decisions.push(ModelMarketDecision {
-            signal_candidate_id: candidate.signal_candidate_id.clone(),
+            signal_candidate_id: candidate.signal_candidate_id,
             market_id: candidate.market_id.clone(),
             token_id: candidate.token_id.clone(),
             gate_passed: reason.is_empty(),
@@ -1479,11 +1479,11 @@ fn align_feature_cross_section(
             })?;
         markets.push((*market).clone());
         vectors.push(vector.clone());
-        vector_ids.push(vector_id.clone());
+        vector_ids.push(*vector_id);
     }
     Ok(AlignedFeatureCrossSection {
         markets,
-        vectors,
+        vectors: Arc::from(vectors),
         vector_ids,
     })
 }
@@ -1494,11 +1494,10 @@ fn ordered_route_groups(
 ) -> Vec<(ModelVersionId, Vec<usize>)> {
     let mut groups: HashMap<ModelVersionId, Vec<usize>> = HashMap::new();
     for (index, market) in batch.markets.iter().enumerate() {
-        let version_id = routes
+        let version_id = *routes
             .category_routes
             .get(&market.category)
-            .unwrap_or(&routes.generic_version_id)
-            .clone();
+            .unwrap_or(&routes.generic_version_id);
         groups.entry(version_id).or_default().push(index);
     }
     let mut ordered = groups.into_iter().collect::<Vec<_>>();
@@ -1510,40 +1509,41 @@ fn routed_feature_batch(
     batch: &AlignedFeatureCrossSection,
     indices: &[usize],
 ) -> QuantResult<RoutedFeatureBatch> {
-    let mut routed = RoutedFeatureBatch {
-        markets: Vec::with_capacity(indices.len()),
-        vectors: Vec::with_capacity(indices.len()),
-        vector_ids: Vec::with_capacity(indices.len()),
-    };
+    let mut markets = Vec::with_capacity(indices.len());
+    let mut vectors = Vec::with_capacity(indices.len());
+    let mut vector_ids = Vec::with_capacity(indices.len());
     for &index in indices {
         let missing = |column: &str| {
             QuantError::from(ResearchError::Inference {
                 detail: format!("route index {index} is outside aligned {column} cross-section"),
             })
         };
-        routed.markets.push(
+        markets.push(
             batch
                 .markets
                 .get(index)
                 .ok_or_else(|| missing("market"))?
                 .clone(),
         );
-        routed.vectors.push(
+        vectors.push(
             batch
                 .vectors
                 .get(index)
                 .ok_or_else(|| missing("feature"))?
                 .clone(),
         );
-        routed.vector_ids.push(
-            batch
+        vector_ids.push(
+            *batch
                 .vector_ids
                 .get(index)
-                .ok_or_else(|| missing("feature-vector id"))?
-                .clone(),
+                .ok_or_else(|| missing("feature-vector id"))?,
         );
     }
-    Ok(routed)
+    Ok(RoutedFeatureBatch {
+        markets,
+        vectors: Arc::from(vectors),
+        vector_ids,
+    })
 }
 
 const fn empty_runtime_output() -> ModelRuntimeOutput {
@@ -1711,11 +1711,11 @@ fn shadow_diff(
 }
 
 /// Project a computed [`ShadowComparison`] into its persistence insert payload.
-fn new_shadow_comparison(comparison: &ShadowComparison) -> NewShadowComparison {
+const fn new_shadow_comparison(comparison: &ShadowComparison) -> NewShadowComparison {
     NewShadowComparison {
-        shadow_comparison_id: comparison.shadow_comparison_id.clone(),
-        active_model_version_id: comparison.active_model_version_id.clone(),
-        shadow_model_version_id: comparison.shadow_model_version_id.clone(),
+        shadow_comparison_id: comparison.shadow_comparison_id,
+        active_model_version_id: comparison.active_model_version_id,
+        shadow_model_version_id: comparison.shadow_model_version_id,
         weight_source: comparison.weight_source,
         decision_at: comparison.decision_at,
         topn_overlap: comparison.topn_overlap,
@@ -1723,7 +1723,7 @@ fn new_shadow_comparison(comparison: &ShadowComparison) -> NewShadowComparison {
         score_delta_json: comparison.score_delta,
         matured_outcome_json: comparison.matured_outcome_delta,
         hard_divergence: comparison.hard_divergence,
-        comparison_hash: comparison.comparison_hash.clone(),
+        comparison_hash: comparison.comparison_hash,
     }
 }
 
@@ -1758,7 +1758,7 @@ fn input_hash(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::{collections::BTreeMap, sync::Arc};
 
     use chrono::{DateTime, Duration, Utc};
     use quant_pivot_models::{
@@ -1800,7 +1800,7 @@ mod tests {
             hard_failures: Vec::new(),
             soft_warnings: Vec::new(),
             passed: true,
-            report_hash: ContentHash::parse(format!("blake3:{}", "1".repeat(64))).expect("hash"),
+            report_hash: ContentHash::parse(&format!("blake3:{}", "1".repeat(64))).expect("hash"),
         }
     }
 
@@ -1818,7 +1818,7 @@ mod tests {
             model_spec_thesis,
             model_spec_definition_hash,
             version: 1,
-            artifact_hash: ContentHash::parse(format!("blake3:{}", "0".repeat(64))).expect("hash"),
+            artifact_hash: ContentHash::parse(&format!("blake3:{}", "0".repeat(64))).expect("hash"),
             category_scope: None,
             profile_ref: fixture_profile_ref(),
             training_dataset_id: None,
@@ -1854,7 +1854,7 @@ mod tests {
             domain: None,
             data_quality: DataQualityStatus::Fresh,
         };
-        let hash = ContentHash::parse(format!("blake3:{}", "1".repeat(64))).expect("hash");
+        let hash = ContentHash::parse(&format!("blake3:{}", "1".repeat(64))).expect("hash");
         let audit = [ModelInputAuditRow {
             model_version_id: ModelVersionId::from_v7(),
             model_family: ModelFamily::WeightedFactor,
@@ -1864,15 +1864,15 @@ mod tests {
             raw_value: Some("1.25".to_owned()),
             encoded_column: "factor.liquidity.normalized_score".to_owned(),
             encoded_value_bits: Some(0.75_f64.to_bits()),
-            input_contract_hash: hash.clone(),
-            transform_hash: hash.clone(),
+            input_contract_hash: hash,
+            transform_hash: hash,
             training_input_hash: hash,
         }];
         let first_id = FeatureVectorId::from_v7();
         let first = AlignedFeatureCrossSection {
             markets: Vec::new(),
-            vectors: vec![vector.clone()],
-            vector_ids: vec![first_id.clone()],
+            vectors: Arc::from([vector.clone()]),
+            vector_ids: vec![first_id],
         };
         let boundary = DecisionClock::new(7)
             .boundary(decision_at)
@@ -1893,7 +1893,7 @@ mod tests {
 
         let second = AlignedFeatureCrossSection {
             markets: Vec::new(),
-            vectors: vec![vector],
+            vectors: Arc::from([vector]),
             vector_ids: vec![FeatureVectorId::from_v7()],
         };
         let second_row = project_model_input_rows(

@@ -23,6 +23,8 @@
 //! SeedError ────────┘
 //! ```
 
+use quant_pivot_allocator as _;
+
 pub mod account;
 pub mod api;
 pub mod auth;

@@ -135,7 +135,7 @@ mod tests {
             hard_failures: Vec::new(),
             soft_warnings: Vec::new(),
             passed,
-            report_hash: ContentHash::parse(format!("blake3:{}", "1".repeat(64))).expect("hash"),
+            report_hash: ContentHash::parse(&format!("blake3:{}", "1".repeat(64))).expect("hash"),
         }
     }
 
@@ -153,7 +153,7 @@ mod tests {
             model_spec_thesis,
             model_spec_definition_hash,
             version: 1,
-            artifact_hash: ContentHash::parse(format!("blake3:{}", "0".repeat(64))).expect("hash"),
+            artifact_hash: ContentHash::parse(&format!("blake3:{}", "0".repeat(64))).expect("hash"),
             category_scope: None,
             profile_ref: fixture_profile_ref(),
             training_dataset_id: None,

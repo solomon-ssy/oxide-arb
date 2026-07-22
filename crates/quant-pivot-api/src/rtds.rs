@@ -17,7 +17,7 @@ use quant_pivot_models::{
     config::PolymarketRtdsSourceConfig,
     domain::data_plane::CryptoPriceReport,
     hashing::CanonicalDigest,
-    types::{ContentHash, DomainInstrumentKey, DomainSourceId, Usd},
+    types::{DomainInstrumentKey, DomainSourceId, Usd},
 };
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -409,7 +409,7 @@ fn parse_price_report(
     validate_clock(published_at, available_at, max_clock_skew_ms)?;
     let source_sequence = u64::try_from(envelope.payload.timestamp)
         .map_err(|error| invalid_payload(format!("negative source timestamp: {error}")))?;
-    let report_hash = ContentHash::parse(CanonicalDigest::prefixed_bytes(raw.as_bytes()))?;
+    let report_hash = CanonicalDigest::content_hash_bytes(raw.as_bytes());
     Ok(CryptoPriceReport {
         source_id: source.source_id(),
         instrument_key,

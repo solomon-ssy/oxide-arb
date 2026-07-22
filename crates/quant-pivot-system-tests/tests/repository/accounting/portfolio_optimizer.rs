@@ -39,7 +39,7 @@ use rust_decimal_macros::dec;
 use sea_orm::{DatabaseConnection, EntityTrait, IntoActiveModel};
 
 fn content_hash(seed: char) -> ContentHash {
-    ContentHash::parse(format!("blake3:{}", seed.to_string().repeat(64))).expect("hash")
+    ContentHash::parse(&format!("blake3:{}", seed.to_string().repeat(64))).expect("hash")
 }
 
 async fn seed_runtime_config(db: &DatabaseConnection) -> DecisionPolicySnapshotId {
@@ -51,7 +51,7 @@ async fn seed_model_run(db: &DatabaseConnection, rc_id: &DecisionPolicySnapshotI
     let model_spec_id = ModelSpecId::from_v7();
     registry
         .create_model_spec(model_spec_fixtures::new_model_spec_fixture(
-            model_spec_id.clone(),
+            model_spec_id,
             "portfolio-optimizer-meta-it",
             ModelFamily::WeightedFactor,
             86_400,
@@ -64,7 +64,7 @@ async fn seed_model_run(db: &DatabaseConnection, rc_id: &DecisionPolicySnapshotI
     let model_version_id = ModelVersionId::from_v7();
     registry
         .create_model_version(NewModelVersion {
-            model_version_id: model_version_id.clone(),
+            model_version_id,
             model_spec_id,
             version: 1,
             profile_ref: execution_pg_seed::fixture_profile_ref(),
@@ -88,10 +88,10 @@ async fn seed_model_run(db: &DatabaseConnection, rc_id: &DecisionPolicySnapshotI
     let model_run_id = ModelRunId::from_v7();
     PgModelRunRepository::new(db.clone())
         .create(NewModelRun {
-            model_run_id: model_run_id.clone(),
+            model_run_id,
             run_kind: ModelRunKind::LiveInference,
             model_version_id: Some(model_version_id),
-            decision_policy_snapshot_id: rc_id.clone(),
+            decision_policy_snapshot_id: *rc_id,
             market_selection_id: None,
             window_start: Utc::now(),
             window_end: Utc::now(),
@@ -116,9 +116,9 @@ async fn seed_market_selection(
     PgMarketSelectionRepository::new(db.clone())
         .create_snapshot(
             NewMarketSelection {
-                market_selection_id: id.clone(),
+                market_selection_id: id,
                 decision_at: Utc::now(),
-                decision_policy_snapshot_id: rc_id.clone(),
+                decision_policy_snapshot_id: *rc_id,
                 selector_hash: content_hash('b'),
                 market_count: 1,
                 exclusion_summary: SelectionExclusionSummary::default(),
@@ -150,7 +150,7 @@ pub async fn optimizer_meta_persisted_in_plan_row() {
 
     let plan_id = PortfolioPlanId::from_v7();
     let plan = NewPortfolioPlan {
-        portfolio_plan_id: plan_id.clone(),
+        portfolio_plan_id: plan_id,
         model_run_id: Some(model_run_id),
         market_selection_id,
         decision_at: Utc::now(),

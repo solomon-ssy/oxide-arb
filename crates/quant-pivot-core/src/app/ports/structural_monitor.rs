@@ -87,7 +87,7 @@ impl CoreStructuralMonitor {
     fn leg_view(&self, leg: &NegRiskLeg) -> NegRiskLegView {
         let best_ask = self
             .book_store
-            .load(&leg.yes_token_id)
+            .load_by_id(&leg.yes_token_id)
             .and_then(|book| book.best_ask())
             .map(Price::inner);
         let question = self
@@ -368,7 +368,7 @@ impl StructuralMonitorPort for CoreStructuralMonitor {
             market_cursor_count: live_contract_count,
             covered_market_ratio,
             source_health: vec![TradeTapeSourceHealthView {
-                source: TradeTapeSourceKind::OnChain.as_str().to_owned(),
+                source: TradeTapeSourceKind::OnChain.to_string(),
                 enabled: ingest_enabled,
                 token_cursor_count: contract_cursor_count,
                 bootstrap_count,

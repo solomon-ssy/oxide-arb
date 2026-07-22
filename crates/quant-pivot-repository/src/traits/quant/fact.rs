@@ -16,10 +16,20 @@ use quant_pivot_models::{
 /// evidence callers await it directly and must not declare completion until
 /// the insert acknowledgement is returned.
 #[async_trait::async_trait]
-pub trait FactWriter<T: Send + 'static>: Send + Sync {
+pub trait FactWriter<T: Send + Sync + 'static>: Send + Sync {
     /// Persist a batch of fact rows. Best-effort callers may log a failure;
     /// durable callers propagate it and fail closed.
     async fn write_batch(&self, rows: Vec<T>) -> Result<(), StorageError>;
+
+    /// Persist borrowed rows so long-lived coordinators can retain allocation
+    /// capacity across flushes. Production sinks should override this method;
+    /// the cloning default keeps lightweight test sinks concise.
+    async fn write_batch_borrowed(&self, rows: &[T]) -> Result<(), StorageError>
+    where
+        T: Clone,
+    {
+        self.write_batch(rows.to_vec()).await
+    }
 
     /// Persist one immutable logical chunk with a deterministic identity.
     ///

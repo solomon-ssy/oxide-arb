@@ -102,7 +102,7 @@ impl ClickHousePool {
                  toUInt64(quantileExact(0.50)(greatest(0, dateDiff('millisecond', venue_event_time, ingress_time)))) AS age_p50_ms, \
                  toUInt64(quantileExact(0.95)(greatest(0, dateDiff('millisecond', venue_event_time, ingress_time)))) AS age_p95_ms, \
                  toUInt64(quantileExact(0.99)(greatest(0, dateDiff('millisecond', venue_event_time, ingress_time)))) AS age_p99_ms \
-                 FROM quant_book_l2_event WHERE persisted_time >= fromUnixTimestamp64Milli(?) \
+                 FROM quant_book_l2_ledger WHERE persisted_time >= fromUnixTimestamp64Milli(?) \
                  AND persisted_time < fromUnixTimestamp64Milli(?)",
             )
             .bind(window_start.timestamp_millis())

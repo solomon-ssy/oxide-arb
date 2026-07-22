@@ -26,7 +26,7 @@ use rust_decimal::Decimal;
 use sea_orm::ConnectionTrait;
 
 fn hash(seed: char) -> ContentHash {
-    ContentHash::parse(format!("blake3:{}", seed.to_string().repeat(64))).expect("valid hash")
+    ContentHash::parse(&format!("blake3:{}", seed.to_string().repeat(64))).expect("valid hash")
 }
 
 fn job(job_id: ResearchJobId) -> NewResearchJob {
@@ -105,11 +105,11 @@ pub async fn trial_ledger_is_ordered_idempotent_cutoff_bound_and_append_only() {
     let jobs = PgResearchJobRepository::new(db.clone());
     let trials = PgTradePolicyRepository::new(db.clone());
     let fit_job_id = ResearchJobId::from_v7();
-    jobs.enqueue(job(fit_job_id.clone()))
+    jobs.enqueue(job(fit_job_id))
         .await
         .expect("enqueue fit job");
 
-    let first_input = successful_attempt(fit_job_id.clone(), 0, "candidate-a");
+    let first_input = successful_attempt(fit_job_id, 0, "candidate-a");
     let first = trials
         .append_trial_attempt(first_input.clone())
         .await
@@ -122,7 +122,7 @@ pub async fn trial_ledger_is_ordered_idempotent_cutoff_bound_and_append_only() {
 
     tokio::time::sleep(Duration::from_millis(2)).await;
     let second = trials
-        .append_trial_attempt(successful_attempt(fit_job_id.clone(), 1, "candidate-b"))
+        .append_trial_attempt(successful_attempt(fit_job_id, 1, "candidate-b"))
         .await
         .expect("append second attempt");
     assert!(second.created_at > first.created_at);
@@ -144,8 +144,7 @@ pub async fn trial_ledger_is_ordered_idempotent_cutoff_bound_and_append_only() {
         vec![0, 1]
     );
 
-    let ordinal_conflict =
-        successful_attempt(fit_job_id.clone(), 1, "different-candidate-same-ordinal");
+    let ordinal_conflict = successful_attempt(fit_job_id, 1, "different-candidate-same-ordinal");
     assert!(trials.append_trial_attempt(ordinal_conflict).await.is_err());
 
     let mutation = db
@@ -163,11 +162,11 @@ pub async fn trial_ledger_rejects_row_hash_or_terminal_shape_tampering() {
     let jobs = PgResearchJobRepository::new(db.clone());
     let trials = PgTradePolicyRepository::new(db);
     let fit_job_id = ResearchJobId::from_v7();
-    jobs.enqueue(job(fit_job_id.clone()))
+    jobs.enqueue(job(fit_job_id))
         .await
         .expect("enqueue fit job");
 
-    let mut wrong_hash = successful_attempt(fit_job_id.clone(), 0, "candidate-a");
+    let mut wrong_hash = successful_attempt(fit_job_id, 0, "candidate-a");
     wrong_hash.row_hash = hash('f');
     assert!(trials.append_trial_attempt(wrong_hash).await.is_err());
 

@@ -178,12 +178,12 @@ impl DataQualityService for BookDataQualityService {
         snapshot.ingest_lag_exceeded = ingest_lag_exceeded;
 
         let mut worst_book_age_ms = 0_u64;
-        for (token_id, book) in self.book_store.published_snapshots() {
+        for (token, token_id, book) in self.book_store.published_snapshots() {
             // Prefer the local WS receipt clock (no venue clock skew / reconnect
             // re-write artifacts); fall back to the venue timestamp age.
             let book_age_ms = self
-                .ws_health
-                .token_message_age_ms(&token_id)
+                .book_store
+                .freshness_age_ms(token)
                 .unwrap_or_else(|| now_ms.saturating_sub(book.timestamp_ms));
             worst_book_age_ms = worst_book_age_ms.max(book_age_ms);
             let empty = book.bids.is_empty() || book.asks.is_empty();

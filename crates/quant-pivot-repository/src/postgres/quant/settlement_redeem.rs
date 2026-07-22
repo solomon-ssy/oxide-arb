@@ -57,7 +57,7 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
         &self,
         settlement_redeem_id: &SettlementRedeemId,
     ) -> Result<Option<SettlementRedeemInfo>, StorageError> {
-        Entity::find_by_id(settlement_redeem_id.clone())
+        Entity::find_by_id(*settlement_redeem_id)
             .one(&self.db)
             .await
             .map_err(StorageError::from)
@@ -79,9 +79,7 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
         .await?;
         let counts = lot_counts_for(
             &self.db,
-            page.items
-                .iter()
-                .map(|redeem| redeem.settlement_redeem_id.clone()),
+            page.items.iter().map(|redeem| redeem.settlement_redeem_id),
         )
         .await?;
         Ok(page.map(|redeem| {
@@ -98,9 +96,7 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
         settlement_redeem_id: &SettlementRedeemId,
     ) -> Result<Vec<SettlementRedeemLotInfo>, StorageError> {
         QuantSettlementRedeemLotEntity::find()
-            .filter(
-                QuantSettlementRedeemLotColumn::SettlementRedeemId.eq(settlement_redeem_id.clone()),
-            )
+            .filter(QuantSettlementRedeemLotColumn::SettlementRedeemId.eq(*settlement_redeem_id))
             .order_by_asc(QuantSettlementRedeemLotColumn::CreatedAt)
             .all(&self.db)
             .await
@@ -234,14 +230,12 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
         }
 
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let redeem = Entity::find_by_id(write.settlement_redeem_id.clone())
+        let redeem = Entity::find_by_id(write.settlement_redeem_id)
             .lock_exclusive()
             .one(&txn)
             .await
             .map_err(StorageError::from)?
-            .ok_or_else(|| {
-                error::not_found(QUANT_SETTLEMENT_REDEEM, &write.settlement_redeem_id)
-            })?;
+            .ok_or_else(|| error::not_found(QUANT_SETTLEMENT_REDEEM, write.settlement_redeem_id))?;
 
         if redeem.state == SettlementRedeemState::Confirmed {
             txn.commit().await.map_err(StorageError::from)?;
@@ -262,7 +256,7 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
             .map_err(StorageError::from)?;
 
         for lot_write in write.lots {
-            let intent_id = lot_write.lot.order_intent_id.clone();
+            let intent_id = lot_write.lot.order_intent_id;
             QuantSettlementRedeemLotEntity::insert(lot_write.lot.into_active_model())
                 .exec(&txn)
                 .await
@@ -315,7 +309,7 @@ async fn load_redeem(
     db: &DatabaseConnection,
     settlement_redeem_id: &SettlementRedeemId,
 ) -> Result<Model, StorageError> {
-    Entity::find_by_id(settlement_redeem_id.clone())
+    Entity::find_by_id(*settlement_redeem_id)
         .one(db)
         .await
         .map_err(StorageError::from)?
@@ -326,7 +320,7 @@ async fn mark_intent_redeemed(
     db: &impl ConnectionTrait,
     intent_id: &OrderIntentId,
 ) -> Result<(), StorageError> {
-    let intent = QuantOrderIntentEntity::find_by_id(intent_id.clone())
+    let intent = QuantOrderIntentEntity::find_by_id(*intent_id)
         .lock_exclusive()
         .one(db)
         .await

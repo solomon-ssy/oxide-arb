@@ -102,7 +102,7 @@ fn build_snapshot(factors: &FactorsConfig, model: &ModelConfig) -> WeightOverlay
     .into_iter()
     .flatten()
     {
-        by_version.insert(reference.id.clone(), overlay.clone());
+        by_version.insert(reference.id, overlay.clone());
     }
     WeightOverlaySnapshot { by_version }
 }
@@ -132,8 +132,8 @@ mod tests {
         let active = ModelVersionId::from_v7();
         let shadow = ModelVersionId::from_v7();
         let model = ModelConfig {
-            active_model_version_id: Some(ModelVersionRef::new(active.clone())),
-            shadow_model_version_id: Some(ModelVersionRef::new(shadow.clone())),
+            active_model_version_id: Some(ModelVersionRef::new(active)),
+            shadow_model_version_id: Some(ModelVersionRef::new(shadow)),
             ..ModelConfig::default()
         };
         let applicator = WeightOverlayApplicator::new();
@@ -150,7 +150,7 @@ mod tests {
     fn invalid_overlay_falls_back_to_none() {
         let active = ModelVersionId::from_v7();
         let model = ModelConfig {
-            active_model_version_id: Some(ModelVersionRef::new(active.clone())),
+            active_model_version_id: Some(ModelVersionRef::new(active)),
             ..ModelConfig::default()
         };
         let applicator = WeightOverlayApplicator::new();

@@ -7,6 +7,8 @@
 //! [`SelectorHashInput`], which is then hashed verbatim by
 //! [`ResearchHasher::canonical`].
 
+use std::string::ToString;
+
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     domain::quant::MarketCandidate,
@@ -82,7 +84,7 @@ impl SelectorHashInput {
         let mut enabled_categories = selection
             .enabled_categories
             .iter()
-            .map(|category| category.as_str().to_owned())
+            .map(ToString::to_string)
             .collect::<Vec<_>>();
         enabled_categories.sort();
 
@@ -95,7 +97,7 @@ impl SelectorHashInput {
 
         Ok(Self {
             decision_at: request.decision_at.timestamp_millis(),
-            decision_policy_snapshot_id: request.decision_policy_snapshot_id.clone(),
+            decision_policy_snapshot_id: request.decision_policy_snapshot_id,
             enabled_categories,
             min_liquidity_usd: selection.min_liquidity_usd.value.to_string(),
             min_volume_24h_usd: selection.min_volume_24h_usd.value.to_string(),

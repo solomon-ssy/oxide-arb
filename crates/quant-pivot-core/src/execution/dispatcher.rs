@@ -199,7 +199,7 @@ impl CoreExecutionDispatcher {
                     recommendation,
                     EntryConditionClaim {
                         condition_instance_id: condition.condition_instance_id,
-                        order_intent_id: intent_id.clone(),
+                        order_intent_id: *intent_id,
                         artifact_id: condition.artifact_id,
                         artifact_hash: condition.artifact_hash,
                         expected_revision: condition.revision,
@@ -265,7 +265,7 @@ impl CoreExecutionDispatcher {
         self.deps.metrics.inc_execution_order_submitted();
         self.deps.execution_events.write(project_execution_event(
             &execution_order,
-            recommendation.recommendation_id.clone(),
+            recommendation.recommendation_id,
             ChQuantLedgerEventKind::Submitted,
             now,
         ));
@@ -297,7 +297,7 @@ impl CoreExecutionDispatcher {
             .await?;
         self.deps.execution_events.write(project_execution_event(
             &recorded,
-            recommendation.recommendation_id.clone(),
+            recommendation.recommendation_id,
             ChQuantLedgerEventKind::SubmissionResult,
             now,
         ));
@@ -339,11 +339,11 @@ impl CoreExecutionDispatcher {
             .intent_lifecycle
             .publisher()
             .publish(CoreEvent::Condition(EntryConditionLifecycleEvent {
-                condition_instance_id: condition.condition_instance_id.clone(),
+                condition_instance_id: condition.condition_instance_id,
                 revision: condition.revision,
                 state: condition.state,
                 truth: condition.truth_json.clone(),
-                evaluation_hash: condition.evaluation_hash.clone(),
+                evaluation_hash: condition.evaluation_hash,
             }));
     }
 }
@@ -355,7 +355,7 @@ fn ensure_submittable(intent: &OrderIntentInfo, now: DateTime<Utc>) -> Result<()
     ) {
         return Err(ExecutionError::NotSubmittable {
             intent_id: intent.order_intent_id.to_string(),
-            state: intent.status.as_str().to_owned(),
+            state: intent.status.to_string(),
         });
     }
     if intent.expires_at <= now {
@@ -431,7 +431,7 @@ fn build_new_execution_order(
 ) -> Result<NewExecutionOrder, ExecutionError> {
     Ok(NewExecutionOrder {
         execution_order_id: ExecutionOrderId::from_v7(),
-        order_intent_id: intent.order_intent_id.clone(),
+        order_intent_id: intent.order_intent_id,
         order_phase: ExecutionOrderPhase::Entry,
         market_id: recommendation.market_id.clone(),
         token_id: spec.token_id.clone(),
@@ -467,7 +467,7 @@ fn build_venue_order(
         order_type: prepared.order_type,
         post_only: prepared.post_only,
         expected_fee: prepared.expected_fee,
-        fee_schedule_hash: prepared.fee_schedule.schedule_hash.clone(),
+        fee_schedule_hash: prepared.fee_schedule.schedule_hash,
     }
 }
 
@@ -484,7 +484,7 @@ fn position_fill(
     let price = fill_avg_price(result, spec);
     let fill_cost = result.filled_shares * price;
     PositionFill {
-        order_intent_id: order_intent_id.clone(),
+        order_intent_id: *order_intent_id,
         token_id: spec.token_id.clone(),
         market_id: recommendation.market_id.clone(),
         event_id: Some(recommendation.event_id.clone()),
@@ -518,8 +518,8 @@ fn reconciliation_row(
     }]);
     NewReconciliation {
         reconciliation_id: ReconciliationId::from_v7(),
-        execution_order_id: execution_order.execution_order_id.clone(),
-        order_intent_id: execution_order.order_intent_id.clone(),
+        execution_order_id: execution_order.execution_order_id,
+        order_intent_id: execution_order.order_intent_id,
         result: outcome.reconciliation_result(),
         evidence_json: evidence,
         venue_filled_shares: Some(result.filled_shares),

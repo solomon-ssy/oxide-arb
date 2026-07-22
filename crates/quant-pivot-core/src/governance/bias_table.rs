@@ -101,6 +101,6 @@ impl BiasTableApplicator {
     /// auditable without polluting `factor_schema_hash`.
     #[must_use]
     pub fn current_content_hash(&self) -> Option<ContentHash> {
-        self.current().map(|table| table.content_hash.clone())
+        self.current().map(|table| table.content_hash)
     }
 }

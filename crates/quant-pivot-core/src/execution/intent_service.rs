@@ -282,7 +282,7 @@ impl CoreOrderIntentService {
             policy_hash,
             expires_at,
             limits: IntentCreationLimits {
-                recommendation_report_id: report.recommendation_report_id.clone(),
+                recommendation_report_id: report.recommendation_report_id,
                 max_open_intents: canary.max_open_intents,
                 max_total_cash_per_report,
             },
@@ -329,7 +329,7 @@ impl CoreOrderIntentService {
         if let Some(canary) = canary.as_ref() {
             resolved.expires_at = resolved.expires_at.min(canary.expires_at);
             resolved.policy_id = Some(canary.policy_id.to_string());
-            resolved.policy_hash = Some(canary.policy_hash.clone());
+            resolved.policy_hash = Some(canary.policy_hash);
         }
         let condition = self
             .conditions
@@ -406,7 +406,7 @@ impl CoreOrderIntentService {
         }
         if !self.kill_switch.allows_new_entry() {
             return Err(ExecutionError::KillSwitchBlocks {
-                state: self.kill_switch.current().as_str().to_owned(),
+                state: self.kill_switch.current().to_string(),
                 operation: "intent creation".to_owned(),
             }
             .into());
@@ -475,7 +475,7 @@ impl CoreOrderIntentService {
         let (entry_override, allocated_override) =
             resolve_downscale(&command, &intent.entry_order_json)?;
         let approval = ApproveOrderIntent {
-            approved_by: command.operator_id.clone(),
+            approved_by: command.operator_id,
             approval_reason: approval_reason(&command),
             approved_at: now,
         };
@@ -504,7 +504,7 @@ impl CoreOrderIntentService {
             ApproveOrderIntentOutcome::Invalidated(invalidated, reason) => {
                 self.publish(&invalidated, IntentEventKind::Invalidated, now);
                 Err(ExecutionError::ApprovalInvalidated {
-                    reason: reason.as_str().to_owned(),
+                    reason: reason.to_string(),
                 }
                 .into())
             }
@@ -742,11 +742,11 @@ fn compose_create_rows(
             })?;
     let planned_usd = entry.notional();
     let intent = NewOrderIntent {
-        order_intent_id: intent_id.clone(),
-        recommendation_id: rec.recommendation_id.clone(),
+        order_intent_id: intent_id,
+        recommendation_id: rec.recommendation_id,
         runtime_mode: mode,
-        decision_policy_snapshot_id: report.decision_policy_snapshot_id.clone(),
-        model_version_id: report.model_version_id.clone(),
+        decision_policy_snapshot_id: report.decision_policy_snapshot_id,
+        model_version_id: report.model_version_id,
         research_profile_artifact_id: profile_ref.artifact_id(),
         intent_kind: OrderIntentKind::Buy,
         status: resolved.status,
@@ -761,13 +761,13 @@ fn compose_create_rows(
         condition_instance_id,
         entry_order_json: entry,
         exit_policy_json: exit,
-        risk_envelope_hash: risk_envelope.envelope_hash.clone(),
+        risk_envelope_hash: risk_envelope.envelope_hash,
         expires_at: resolved.expires_at,
     };
     let allocation = NewCapitalAllocation {
         capital_allocation_id: CapitalAllocationId::from_v7(),
         order_intent_id: intent_id,
-        recommendation_id: rec.recommendation_id.clone(),
+        recommendation_id: rec.recommendation_id,
         state: CapitalAllocationState::Allocated,
         planned_usd,
         allocated_usd: planned_usd,
@@ -804,7 +804,7 @@ fn resolve_policy(
     match policy {
         IntentPolicyDecision::ReportOnly => Err(ExecutionError::ReportOnlyMode),
         IntentPolicyDecision::Denied { reason } => Err(ExecutionError::IntentDenied {
-            reason: reason.as_str().to_owned(),
+            reason: reason.to_string(),
         }),
         IntentPolicyDecision::RequiresApproval { approval_ttl, .. } => {
             let ttl_secs = i64::try_from(approval_ttl.as_secs()).map_err(|error| {
@@ -1334,12 +1334,12 @@ mod tests {
         let mut rec = rec();
         rec.valid_until = Utc::now() + Duration::hours(1);
         let report = report_fixtures::report(
-            rec.recommendation_report_id.clone(),
+            rec.recommendation_report_id,
             ReportKind::TopN,
             RecommendationReportStatus::Published,
         );
         let version = DecisionPolicySnapshotId::from_v7();
-        let hash = risk(&rec).envelope_hash.clone();
+        let hash = risk(&rec).envelope_hash;
         assert!(
             evaluate_intent_approval_invalidation(
                 &rec,
@@ -1481,12 +1481,12 @@ mod tests {
         let mut rec = rec();
         rec.valid_until = now + Duration::hours(1);
         let report = report_fixtures::report(
-            rec.recommendation_report_id.clone(),
+            rec.recommendation_report_id,
             ReportKind::TopN,
             RecommendationReportStatus::Published,
         );
         let version = DecisionPolicySnapshotId::from_v7();
-        let hash = risk(&rec).envelope_hash.clone();
+        let hash = risk(&rec).envelope_hash;
 
         // recommendation expired
         let mut expired = rec.clone();
@@ -1500,7 +1500,7 @@ mod tests {
 
         // report no longer published
         let revoked = report_fixtures::report(
-            rec.recommendation_report_id.clone(),
+            rec.recommendation_report_id,
             ReportKind::TopN,
             RecommendationReportStatus::Revoked,
         );
@@ -1535,7 +1535,7 @@ mod tests {
         );
 
         // risk envelope hash mismatch: a stored hash differing from the rec's.
-        let stored_hash = ContentHash::parse(format!("blake3:{}", "1".repeat(64))).expect("hash");
+        let stored_hash = ContentHash::parse(&format!("blake3:{}", "1".repeat(64))).expect("hash");
         assert_ne!(stored_hash, risk(&rec).envelope_hash);
         assert_eq!(
             evaluate_intent_approval_invalidation(
@@ -1732,7 +1732,7 @@ mod tests {
             ) -> QuantResult<ResolvedCalibration> {
                 if self.succeeds {
                     Ok(ResolvedCalibration {
-                        artifact_id: artifact_id.clone(),
+                        artifact_id: *artifact_id,
                         mapping: MonotoneMapping::Isotonic { knots: Vec::new() },
                         reliability: ReliabilityReport {
                             bins: Vec::new(),
@@ -1764,16 +1764,16 @@ mod tests {
         fn header(model_version_id: ModelVersionId) -> ModelArtifactHeader {
             ModelArtifactHeader {
                 model_version_id,
-                model_spec_definition_hash: ContentHash::parse(format!(
+                model_spec_definition_hash: ContentHash::parse(&format!(
                     "blake3:{}",
                     "0".repeat(64)
                 ))
                 .expect("hash"),
                 profile_ref: fixture_profile_ref(),
                 model_family: ModelFamily::WeightedFactor,
-                feature_schema_hash: ContentHash::parse(format!("blake3:{}", "1".repeat(64)))
+                feature_schema_hash: ContentHash::parse(&format!("blake3:{}", "1".repeat(64)))
                     .expect("hash"),
-                factor_schema_hash: ContentHash::parse(format!("blake3:{}", "2".repeat(64)))
+                factor_schema_hash: ContentHash::parse(&format!("blake3:{}", "2".repeat(64)))
                     .expect("hash"),
                 trade_policy_artifact_id: None,
                 trade_policy_hash: None,
@@ -1789,9 +1789,9 @@ mod tests {
                 model_input_contract_hash(&input_contract).expect("input contract hash");
             ModelArtifact::WeightedFactor(Box::new(WeightedFactorModelArtifact {
                 header: header(model_version_id),
-                training_dataset_hash: ContentHash::parse(format!("blake3:{}", "3".repeat(64)))
+                training_dataset_hash: ContentHash::parse(&format!("blake3:{}", "3".repeat(64)))
                     .expect("hash"),
-                training_input_hash: ContentHash::parse(format!("blake3:{}", "4".repeat(64)))
+                training_input_hash: ContentHash::parse(&format!("blake3:{}", "4".repeat(64)))
                     .expect("hash"),
                 input_contract,
                 input_contract_hash,
@@ -1818,7 +1818,7 @@ mod tests {
         ) -> (Arc<dyn ArtifactStore>, ModelVersionInfo) {
             let store = temp_store();
             let model_version_id = ModelVersionId::from_v7();
-            let artifact = weighted_artifact(model_version_id.clone(), return_model);
+            let artifact = weighted_artifact(model_version_id, return_model);
             let digest = artifact.content_hash().expect("hash");
             let key = ModelArtifact::artifact_key(&digest).expect("key");
             store

@@ -10,6 +10,7 @@ name = "quant-pivot-xtask"
 path = "src/main.rs"
 
 [dependencies]
+quant-pivot-allocator = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 blake3 = { workspace = true }
@@ -19,6 +20,7 @@ clap = { workspace = true, features = ["derive", "env"] }
 quant-pivot-api = { workspace = true }
 quant-pivot-error = { workspace = true, features = ["storage"] }
 quant-pivot-models = { workspace = true }
+polymarket_client_sdk_v2 = { workspace = true }
 quant-pivot-migration = { path = "../quant-pivot-migration" }
 quant-pivot-repository = { workspace = true }
 quant-pivot-storage = { workspace = true }
@@ -27,6 +29,7 @@ quote = { workspace = true }
 rustls = { workspace = true }
 rust_decimal = { workspace = true }
 schemars = { workspace = true }
+sea-orm = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 syn = { workspace = true }

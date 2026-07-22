@@ -78,7 +78,7 @@ use quant_pivot_research::{
     artifact::{ArtifactKey, ArtifactNamespace},
     model::{ClassicalAdapterRegistry, ClassicalOutputSemantics, artifact::ClassicalModelArtifact},
     training::{
-        RETURN_TO_HORIZON, SETTLEMENT_OUTCOME, TrainingMatrix, build_training_matrix,
+        RETURN_TO_HORIZON, SETTLEMENT_OUTCOME, TrainingMatrix, build_training_matrix_from_refs,
         matrix_spec_from_contract,
     },
 };
@@ -116,7 +116,7 @@ pub(crate) fn weighted_seed_weights(
     let mut names: BTreeSet<String> = BTreeSet::new();
     for example in examples {
         for factor in &example.factor_values {
-            names.insert(factor.name.as_str().to_owned());
+            names.insert(factor.name.to_string());
         }
     }
     let count = names.len().max(1);
@@ -235,14 +235,14 @@ impl ModelTrainerService {
         let dataset = self.load_ready_dataset(&input.training_dataset_id).await?;
         self.validate_dataset_contracts(&dataset)?;
         progress.report(ResearchJobProgress::indeterminate("decode", 0));
-        let examples = self.decode_examples(&dataset).await?;
+        let examples: Arc<[TrainingExample]> = self.decode_examples(&dataset).await?.into();
         ensure_not_cancelled(cancel, "verify")?;
         progress.report(ResearchJobProgress::indeterminate(
             "verify",
             examples.len() as u64,
         ));
 
-        let model_version_id = input.model_version_id.clone();
+        let model_version_id = input.model_version_id;
         let model_run_id = ModelRunId::from_v7();
         self.create_run(&model_run_id, &input, &dataset).await?;
 
@@ -260,9 +260,9 @@ impl ModelTrainerService {
                     .model_run_repo
                     .succeed(
                         &model_run_id,
-                        version.artifact_hash.clone(),
+                        version.artifact_hash,
                         Utc::now(),
-                        Some(model_version_id.clone()),
+                        Some(model_version_id),
                     )
                     .await?;
                 Ok(TrainModelOutcome {
@@ -364,7 +364,7 @@ impl ModelTrainerService {
         model_version_id: &ModelVersionId,
         input: &TrainModelInput,
         dataset: &TrainingDatasetInfo,
-        examples: &[TrainingExample],
+        examples: &Arc<[TrainingExample]>,
     ) -> QuantResult<ModelVersionInfo> {
         let materialization = require_dataset_materialization(dataset)?;
         let manifest =
@@ -375,14 +375,14 @@ impl ModelTrainerService {
                     detail: "v1 dataset is missing its immutable manifest".to_owned(),
                 })?;
         let header = ModelArtifactHeader {
-            model_version_id: model_version_id.clone(),
-            model_spec_definition_hash: manifest.model_spec_definition_hash.clone(),
+            model_version_id: *model_version_id,
+            model_spec_definition_hash: manifest.model_spec_definition_hash,
             profile_ref: manifest.profile_ref.clone(),
             model_family: input.model_family,
-            feature_schema_hash: materialization.feature_schema_hash.clone(),
-            factor_schema_hash: materialization.factor_schema_hash.clone(),
-            trade_policy_artifact_id: manifest.trade_policy_artifact_id.clone(),
-            trade_policy_hash: manifest.trade_policy_hash.clone(),
+            feature_schema_hash: *materialization.feature_schema_hash,
+            factor_schema_hash: *materialization.factor_schema_hash,
+            trade_policy_artifact_id: manifest.trade_policy_artifact_id,
+            trade_policy_hash: manifest.trade_policy_hash,
         };
 
         let (artifact, metrics, training_objective) = if input.model_family.is_exit_scorer() {
@@ -402,8 +402,8 @@ impl ModelTrainerService {
         };
 
         let category_scope = artifact.category_scope();
-        let trade_policy_artifact_id = artifact.header().trade_policy_artifact_id.clone();
-        let trade_policy_hash = artifact.header().trade_policy_hash.clone();
+        let trade_policy_artifact_id = artifact.header().trade_policy_artifact_id;
+        let trade_policy_hash = artifact.header().trade_policy_hash;
         let artifact_hash = artifact.content_hash()?;
         let key = ModelArtifact::artifact_key(&artifact_hash)?;
         self.deps
@@ -420,13 +420,13 @@ impl ModelTrainerService {
             .deps
             .model_registry_repo
             .create_model_version(NewModelVersion {
-                model_version_id: model_version_id.clone(),
-                model_spec_id: input.model_spec_id.clone(),
+                model_version_id: *model_version_id,
+                model_spec_id: input.model_spec_id,
                 version,
                 artifact_hash,
                 category_scope,
                 profile_ref: manifest.profile_ref.clone(),
-                training_dataset_id: Some(input.training_dataset_id.clone()),
+                training_dataset_id: Some(input.training_dataset_id),
                 trade_policy_artifact_id,
                 trade_policy_hash,
                 publish_path_set_id: None,
@@ -448,7 +448,7 @@ impl ModelTrainerService {
         header: ModelArtifactHeader,
         input: &TrainModelInput,
         dataset: &TrainingDatasetInfo,
-        examples: &[TrainingExample],
+        examples: &Arc<[TrainingExample]>,
     ) -> QuantResult<(ModelArtifact, ModelVersionMetrics, ModelTrainingObjective)> {
         let materialization = require_dataset_materialization(dataset)?;
         let requirements = ModelFeatureRequirements::from_input_contract(&input.input_contract);
@@ -461,8 +461,8 @@ impl ModelTrainerService {
         });
         let seed_weights = weighted_seed_weights(&self.config.factors, examples);
         let request = TrainModelRequest {
-            examples: examples.to_vec(),
-            training_dataset_hash: materialization.dataset_hash.clone(),
+            examples: Arc::clone(examples),
+            training_dataset_hash: *materialization.dataset_hash,
             label: input.label.clone(),
             seed_weights,
             objective: self.config.objective.clone(),
@@ -508,7 +508,7 @@ impl ModelTrainerService {
         header: ModelArtifactHeader,
         input: &TrainModelInput,
         dataset: &TrainingDatasetInfo,
-        examples: &[TrainingExample],
+        examples: &Arc<[TrainingExample]>,
     ) -> QuantResult<(ModelArtifact, ModelVersionMetrics, ModelTrainingObjective)> {
         let materialization = require_dataset_materialization(dataset)?;
         if !examples
@@ -522,7 +522,7 @@ impl ModelTrainerService {
         }
         let seed_weights = Self::seed_weights(examples);
         let request = TrainSellScorerRequest {
-            examples: examples.to_vec(),
+            examples: Arc::clone(examples),
             label: input.label.clone(),
             seed_weights,
             objective: self.config.objective.clone(),
@@ -534,8 +534,8 @@ impl ModelTrainerService {
             header,
             prediction_horizon_secs: input.prediction_horizon_secs,
             output_spec: SellScorerOutputSpec::conservative(),
-            label_schema_hash: materialization.label_schema_hash.clone(),
-            training_dataset_hash: materialization.dataset_hash.clone(),
+            label_schema_hash: *materialization.label_schema_hash,
+            training_dataset_hash: *materialization.dataset_hash,
             input_contract: input.input_contract.clone(),
         };
         // Offload the CPU-bound fit to a blocking thread (keeps the runtime free).
@@ -563,7 +563,7 @@ impl ModelTrainerService {
         let mut names: BTreeSet<String> = BTreeSet::new();
         for example in examples {
             for factor in &example.factor_values {
-                names.insert(factor.name.as_str().to_owned());
+                names.insert(factor.name.to_string());
             }
         }
         for pseudo in [
@@ -571,7 +571,7 @@ impl ModelTrainerService {
             POSITION_TIME_IN_TRADE,
             POSITION_PEAK_DRAWDOWN,
         ] {
-            names.insert(pseudo.as_str().to_owned());
+            names.insert(pseudo.to_string());
         }
         let count = names.len().max(1);
         let weight = Decimal::ONE / Decimal::from(count as u64);
@@ -600,15 +600,15 @@ impl ModelTrainerService {
         self.deps
             .model_run_repo
             .create(NewModelRun {
-                model_run_id: model_run_id.clone(),
+                model_run_id: *model_run_id,
                 run_kind: ModelRunKind::Training,
                 model_version_id: None,
-                decision_policy_snapshot_id: input.decision_policy_snapshot_id.clone(),
+                decision_policy_snapshot_id: input.decision_policy_snapshot_id,
                 market_selection_id: None,
                 window_start: dataset.window_start,
                 window_end: dataset.window_end,
                 status: ModelRunStatus::Running,
-                input_hash: materialization.dataset_hash.clone(),
+                input_hash: *materialization.dataset_hash,
                 output_hash: None,
                 error_code: None,
                 error_message: None,
@@ -677,9 +677,9 @@ fn artifact_training_lineage(
 ) -> QuantResult<ModelArtifactTrainingLineage> {
     match artifact {
         ModelArtifact::WeightedFactor(weighted) => Ok(ModelArtifactTrainingLineage::FactorNative {
-            training_dataset_hash: weighted.training_dataset_hash.clone(),
-            training_input_hash: weighted.training_input_hash.clone(),
-            input_contract_hash: weighted.input_contract_hash.clone(),
+            training_dataset_hash: weighted.training_dataset_hash,
+            training_input_hash: weighted.training_input_hash,
+            input_contract_hash: weighted.input_contract_hash,
             input_transform_hash: weighted.input_transform_hash()?,
             factor_inputs: weighted
                 .weights
@@ -690,18 +690,18 @@ fn artifact_training_lineage(
         ModelArtifact::Classical(classical) => {
             Ok(ModelArtifactTrainingLineage::FittedFeatureMatrix {
                 model_kind: classical.kind,
-                training_dataset_hash: classical.training_dataset_hash.clone(),
-                training_input_hash: classical.training_input_hash.clone(),
-                input_contract_hash: classical.input_contract_hash.clone(),
-                input_transform_hash: classical.input_transform_hash.clone(),
-                serialized_model_hash: classical.serialized_model_hash.clone(),
+                training_dataset_hash: classical.training_dataset_hash,
+                training_input_hash: classical.training_input_hash,
+                input_contract_hash: classical.input_contract_hash,
+                input_transform_hash: classical.input_transform_hash,
+                serialized_model_hash: classical.serialized_model_hash,
                 serialization_format: classical.serialization_format,
             })
         }
         ModelArtifact::SellScorer(sell) => Ok(ModelArtifactTrainingLineage::FactorNative {
-            training_dataset_hash: sell.training_dataset_hash.clone(),
-            training_input_hash: sell.training_input_hash.clone(),
-            input_contract_hash: sell.input_contract_hash.clone(),
+            training_dataset_hash: sell.training_dataset_hash,
+            training_input_hash: sell.training_input_hash,
+            input_contract_hash: sell.input_contract_hash,
             input_transform_hash: sell.input_transform_hash()?,
             factor_inputs: sell
                 .weights
@@ -743,7 +743,7 @@ impl ModelTrainerService {
         header: ModelArtifactHeader,
         input: &TrainModelInput,
         dataset: &TrainingDatasetInfo,
-        examples: &[TrainingExample],
+        examples: &Arc<[TrainingExample]>,
         kind: ClassicalKind,
     ) -> QuantResult<(ModelArtifact, ModelVersionMetrics, ModelTrainingObjective)> {
         let materialization = require_dataset_materialization(dataset)?;
@@ -760,8 +760,12 @@ impl ModelTrainerService {
             }
             .into());
         }
-        let matrix =
-            build_classical_matrix(examples, &input.label, &schema, &input.input_contract)?;
+        let matrix = build_classical_matrix(
+            examples.iter(),
+            &input.label,
+            &schema,
+            &input.input_contract,
+        )?;
         let folds = input.validation_folds.max(2);
         let validation = ValidationSpec {
             folds,
@@ -824,8 +828,8 @@ impl ModelTrainerService {
             kind,
             crate_name: output.crate_name.clone(),
             crate_version: output.crate_version.clone(),
-            label_schema_hash: materialization.label_schema_hash.clone(),
-            training_dataset_hash: materialization.dataset_hash.clone(),
+            label_schema_hash: *materialization.label_schema_hash,
+            training_dataset_hash: *materialization.dataset_hash,
             prediction_horizon_secs: input.prediction_horizon_secs,
             output_semantics,
             multipliers: ScoreMultiplierSpec::conservative(),
@@ -906,13 +910,13 @@ pub(crate) fn classical_output_semantics(
 /// so every classical fold — production or validation — builds its matrix
 /// through the identical governed [`FeatureSchema`] column contract.
 #[cfg(feature = "ml-classical")]
-pub(crate) fn build_classical_matrix(
-    examples: &[TrainingExample],
+pub(crate) fn build_classical_matrix<'a>(
+    examples: impl IntoIterator<Item = &'a TrainingExample>,
     label: &LabelSelector,
     schema: &FeatureSchema,
     input_contract: &ModelInputContract,
 ) -> QuantResult<TrainingMatrix> {
-    let mut sorted: Vec<_> = examples.to_vec();
+    let mut sorted: Vec<_> = examples.into_iter().collect();
     sorted.sort_by(|a, b| {
         a.decision_at()
             .cmp(&b.decision_at())
@@ -926,7 +930,7 @@ pub(crate) fn build_classical_matrix(
         label.name.clone(),
         label.horizon_secs,
     )?;
-    build_training_matrix(&sorted, &spec)
+    build_training_matrix_from_refs(&sorted, &spec)
 }
 
 /// Classical training is not linked in this build.
@@ -938,7 +942,7 @@ impl ModelTrainerService {
         _header: ModelArtifactHeader,
         _input: &TrainModelInput,
         _dataset: &TrainingDatasetInfo,
-        _examples: &[TrainingExample],
+        _examples: &Arc<[TrainingExample]>,
         kind: ClassicalKind,
     ) -> QuantResult<(ModelArtifact, ModelVersionMetrics, ModelTrainingObjective)> {
         Err(ResearchError::RuntimeUnavailable {

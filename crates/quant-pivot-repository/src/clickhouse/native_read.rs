@@ -100,7 +100,7 @@ impl ChNativeReadRepository {
                  WHERE recommendation_report_id = ? \
                  ORDER BY rank, recommendation_id",
             )
-            .bind(report_id.clone())
+            .bind(*report_id)
             .fetch_all::<QuantReportRecommendationFactRow>()
             .await
             .map_err(StorageError::from)
@@ -116,7 +116,7 @@ impl ChNativeReadRepository {
                 "SELECT ?fields FROM quant_report_market_funnel FINAL \
                  WHERE recommendation_report_id = ? ORDER BY market_id",
             )
-            .bind(report_id.clone())
+            .bind(*report_id)
             .fetch_all::<ReportMarketFunnelRow>()
             .await
             .map_err(StorageError::from)

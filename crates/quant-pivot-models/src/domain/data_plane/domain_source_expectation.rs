@@ -340,7 +340,7 @@ mod tests {
     };
 
     fn hash(fill: char) -> ContentHash {
-        ContentHash::parse(format!("blake3:{}", fill.to_string().repeat(64))).expect("hash")
+        ContentHash::parse(&format!("blake3:{}", fill.to_string().repeat(64))).expect("hash")
     }
 
     #[test]

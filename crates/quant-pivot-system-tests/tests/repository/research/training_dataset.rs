@@ -30,7 +30,7 @@ use quant_pivot_system_tests::{
 use sea_orm::DatabaseConnection;
 
 fn content_hash(seed: char) -> ContentHash {
-    ContentHash::parse(format!("blake3:{}", seed.to_string().repeat(64))).expect("hash")
+    ContentHash::parse(&format!("blake3:{}", seed.to_string().repeat(64))).expect("hash")
 }
 
 async fn seed_runtime_config(db: &DatabaseConnection) -> DecisionPolicySnapshotId {
@@ -41,7 +41,7 @@ async fn seed_model_spec(db: &DatabaseConnection) -> ModelSpecId {
     let model_spec_id = ModelSpecId::from_v7();
     PgModelRegistryRepository::new(db.clone())
         .create_model_spec(model_spec_fixtures::new_model_spec_fixture(
-            model_spec_id.clone(),
+            model_spec_id,
             "pg-dataset-it",
             ModelFamily::WeightedFactor,
             86_400,
@@ -57,7 +57,7 @@ fn dataset_hash(dataset_id: &TrainingDatasetId) -> ContentHash {
     let mut hex = dataset_id.as_uuid().simple().to_string();
     hex.truncate(64);
     hex.push_str(&"0".repeat(64usize.saturating_sub(hex.len())));
-    ContentHash::parse(format!("blake3:{hex}")).expect("hash")
+    ContentHash::parse(&format!("blake3:{hex}")).expect("hash")
 }
 
 fn new_plan(
@@ -67,7 +67,7 @@ fn new_plan(
 ) -> NewTrainingDatasetPlan {
     let window_start = Utc::now() - ChronoDuration::hours(2);
     let model_spec_definition_hash = model_spec_fixtures::new_model_spec_fixture(
-        model_spec_id.clone(),
+        model_spec_id,
         "pg-dataset-it",
         ModelFamily::WeightedFactor,
         86_400,
@@ -98,25 +98,25 @@ fn completion(
     let hash = dataset_hash(&plan.training_dataset_id);
     let manifest = DatasetManifest {
         format_version: DATASET_ARTIFACT_FORMAT_VERSION,
-        training_dataset_id: plan.training_dataset_id.clone(),
+        training_dataset_id: plan.training_dataset_id,
         profile_ref: execution_pg_seed::fixture_profile_ref(),
         research_program_hash: content_hash('4'),
         source_slice: execution_pg_seed::source_slice_ref('5'),
-        model_spec_id: plan.model_spec_id.clone(),
-        model_spec_definition_hash: plan.model_spec_definition_hash.clone(),
+        model_spec_id: plan.model_spec_id,
+        model_spec_definition_hash: plan.model_spec_definition_hash,
         trade_policy_artifact_id: None,
         trade_policy_hash: None,
-        decision_policy_snapshot_id: plan.decision_policy_snapshot_id.clone(),
+        decision_policy_snapshot_id: plan.decision_policy_snapshot_id,
         window_start: plan.window_start,
         window_end: plan.window_end,
         purpose: plan.purpose,
         knowledge_lag_secs: u64::try_from(plan.knowledge_lag_secs).expect("knowledge lag"),
         sample_interval_secs: u64::try_from(plan.sample_interval_secs).expect("sample interval"),
         horizons_secs: plan.horizons_secs.0.clone(),
-        feature_schema_hash: hash.clone(),
-        factor_schema_hash: hash.clone(),
-        label_schema_hash: hash.clone(),
-        semantic_dataset_hash: hash.clone(),
+        feature_schema_hash: hash,
+        factor_schema_hash: hash,
+        label_schema_hash: hash,
+        semantic_dataset_hash: hash,
         source_fingerprint: content_hash('f'),
         sample_count: 42,
     };
@@ -124,10 +124,10 @@ fn completion(
         CanonicalDigest::content_hash_json(&manifest).expect("canonical manifest hash");
     CompleteTrainingDatasetBuild {
         status,
-        feature_schema_hash: hash.clone(),
-        factor_schema_hash: hash.clone(),
-        label_schema_hash: hash.clone(),
-        dataset_hash: hash.clone(),
+        feature_schema_hash: hash,
+        factor_schema_hash: hash,
+        label_schema_hash: hash,
+        dataset_hash: hash,
         manifest_hash,
         manifest_json: manifest,
         artifact_bytes_hash: hash,
@@ -147,11 +147,7 @@ async fn create_ready(
     model_spec_id: ModelSpecId,
     decision_policy_snapshot_id: DecisionPolicySnapshotId,
 ) {
-    let plan = new_plan(
-        dataset_id.clone(),
-        model_spec_id,
-        decision_policy_snapshot_id,
-    );
+    let plan = new_plan(dataset_id, model_spec_id, decision_policy_snapshot_id);
     repo.create_plan(plan.clone()).await.expect("create plan");
     repo.start_build(&dataset_id).await.expect("start build");
     repo.complete_build(&dataset_id, completion(&plan, TrainingDatasetStatus::Ready))
@@ -167,7 +163,7 @@ pub async fn quant_training_dataset_migration_and_crud() {
     let dataset_id = TrainingDatasetId::from_v7();
     let repo = PgTrainingDatasetRepository::new(db.clone());
 
-    let plan = new_plan(dataset_id.clone(), model_spec_id, rc_id);
+    let plan = new_plan(dataset_id, model_spec_id, rc_id);
     repo.create_plan(plan.clone()).await.expect("create plan");
     let building = repo.start_build(&dataset_id).await.expect("start build");
     assert!(building.dataset_hash.is_none());
@@ -213,7 +209,7 @@ pub async fn training_dataset_status_transitions_enforce_state_machine() {
     let dataset_id = TrainingDatasetId::from_v7();
     let repo = PgTrainingDatasetRepository::new(db.clone());
 
-    let plan = new_plan(dataset_id.clone(), model_spec_id.clone(), rc_id.clone());
+    let plan = new_plan(dataset_id, model_spec_id, rc_id);
     repo.create_plan(plan.clone())
         .await
         .expect("create planned");
@@ -226,11 +222,7 @@ pub async fn training_dataset_status_transitions_enforce_state_machine() {
         .expect("building -> ready");
 
     let insufficient_id = TrainingDatasetId::from_v7();
-    let insufficient_plan = new_plan(
-        insufficient_id.clone(),
-        model_spec_id.clone(),
-        rc_id.clone(),
-    );
+    let insufficient_plan = new_plan(insufficient_id, model_spec_id, rc_id);
     repo.create_plan(insufficient_plan.clone())
         .await
         .expect("create insufficient plan");
@@ -275,18 +267,18 @@ pub async fn model_version_training_dataset_foreign_key() {
     let repo = PgTrainingDatasetRepository::new(db.clone());
     let registry = PgModelRegistryRepository::new(db.clone());
 
-    create_ready(&repo, dataset_id.clone(), model_spec_id.clone(), rc_id).await;
+    create_ready(&repo, dataset_id, model_spec_id, rc_id).await;
 
     let hash = content_hash('a');
     registry
         .create_model_version(NewModelVersion {
             model_version_id: ModelVersionId::from_v7(),
-            model_spec_id: model_spec_id.clone(),
+            model_spec_id,
             version: 1,
-            artifact_hash: hash.clone(),
+            artifact_hash: hash,
             category_scope: None,
             profile_ref: execution_pg_seed::fixture_profile_ref(),
-            training_dataset_id: Some(dataset_id.clone()),
+            training_dataset_id: Some(dataset_id),
             trade_policy_artifact_id: None,
             trade_policy_hash: None,
             publish_path_set_id: None,

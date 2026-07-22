@@ -296,12 +296,12 @@ impl ExposureLedger {
             market: exposures
                 .per_market
                 .iter()
-                .map(|(id, usd)| (id.as_str().to_owned(), usd.inner()))
+                .map(|(id, usd)| (id.to_string(), usd.inner()))
                 .collect(),
             event: exposures
                 .per_event
                 .iter()
-                .map(|(id, usd)| (id.as_str().to_owned(), usd.inner()))
+                .map(|(id, usd)| (id.to_string(), usd.inner()))
                 .collect(),
             category: exposures
                 .per_category

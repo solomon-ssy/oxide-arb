@@ -1,24 +1,28 @@
 //! `ClickHouse` storage and schema system contracts.
 
-use std::{sync::Arc, time::Duration};
+use std::{slice, sync::Arc, time::Duration};
 
 use chrono::Utc;
 use clickhouse::Client;
 use prometheus::IntCounter;
 use quant_pivot_models::{
     clickhouse::{
-        ChDecimal64, ChPrice, ChProbability, ChSchemaVersion, ChShares, ChUsd,
-        CryptoPriceReportRow, DomainEventRow, QuantRecommendationAttributionEventRow,
-        QuantReportRecommendationFactRow, TradeTapeRow,
+        BookL2LedgerRow, ChBps, ChDecimal64, ChDigest, ChPrice, ChProbability, ChSchemaVersion,
+        ChShares, ChUsd, CryptoPriceReportRow, DomainEventRow,
+        QuantRecommendationAttributionEventRow, QuantReportRecommendationFactRow, TradeTapeRow,
     },
     config::ClickHouseConfig,
+    domain::data_plane::trade_tape_coverage::{
+        FEE_RATE, MARKET_ID, PRICE, SIDE, SIZE, TOKEN_ID, TRADE_ID,
+    },
     enums::clickhouse::{
-        ChOutcomeSide, ChRecommendationAttributionOutcome, ChTradeParticipantRole,
-        ChTradeReconciliationStatus, ChTradeSide, ChTradeTapeSource,
+        ChCanonicalBookEventType, ChLedgerTradeSide, ChOutcomeSide,
+        ChRecommendationAttributionOutcome, ChTradeParticipantRole, ChTradeReconciliationStatus,
+        ChTradeSide, ChTradeTapeSource,
     },
     hashing::CanonicalDigest,
     types::{
-        DomainInstrumentKey, DomainSourceId, MarketId, Price, RecommendationId,
+        ContentHash, DomainInstrumentKey, DomainSourceId, MarketId, Price, RecommendationId,
         RecommendationReportId, Shares, TokenId, Usd,
     },
 };
@@ -284,8 +288,7 @@ pub async fn canonical_evidence_tables_have_no_delete_ttl() {
     let (_pool, client, _config, _stack) = setup_clickhouse().await;
 
     for table in [
-        "quant_book_l2_event",
-        "quant_book_l2_checkpoint",
+        "quant_book_l2_ledger",
         "quant_book_stream_session",
         "quant_trade_tape",
     ] {
@@ -305,7 +308,7 @@ pub async fn runtime_schema_verification_rejects_unmanaged_raw_ttl() {
     let (_pool, client, config, _stack) = setup_clickhouse().await;
     client
         .query(
-            "ALTER TABLE quant_book_l2_event \
+            "ALTER TABLE quant_book_l2_ledger \
              MODIFY TTL venue_event_time + INTERVAL 200 DAY DELETE \
              SETTINGS materialize_ttl_after_modify = 0",
         )
@@ -356,21 +359,14 @@ pub async fn runtime_schema_verification_rejects_semantic_column_drift() {
 
 pub async fn clickhouse_fact_contract_uses_decimal_and_enum_columns() {
     let (_pool, client, _config, _stack) = setup_clickhouse().await;
-    let expected: [(&str, &[&str]); 8] = [
+    let expected: [(&str, &[&str]); 7] = [
         (
-            "quant_book_l2_event",
+            "quant_book_l2_ledger",
             &[
                 "`bid_prices` Array(Decimal(18, 8))",
                 "`bid_sizes` Array(Decimal(38, 18))",
                 "`token_sequence` UInt64",
-            ],
-        ),
-        (
-            "quant_book_l2_checkpoint",
-            &[
-                "`bids_json` String CODEC(ZSTD(3))",
-                "`asks_json` String CODEC(ZSTD(3))",
-                "`source_event_hash` String",
+                "`event_hash` FixedString(32)",
             ],
         ),
         (
@@ -546,8 +542,8 @@ pub async fn report_fact_schema_accepts_decision_snapshot_and_superseded_censor(
     let recommendation_id = RecommendationId::from_v7();
     let decision = QuantReportRecommendationFactRow {
         event_time: now,
-        recommendation_report_id: report_id.clone(),
-        recommendation_id: recommendation_id.clone(),
+        recommendation_report_id: report_id,
+        recommendation_id,
         rank: 1,
         market_id: MarketId::new("report-fact-schema-market"),
         token_id: TokenId::new("report-fact-schema-token"),
@@ -573,7 +569,7 @@ pub async fn report_fact_schema_accepts_decision_snapshot_and_superseded_censor(
 
     let attribution = QuantRecommendationAttributionEventRow {
         event_time: now,
-        recommendation_id: recommendation_id.clone(),
+        recommendation_id,
         outcome: ChRecommendationAttributionOutcome::SupersededUnfilled,
         realized_pnl_usd: ChUsd::from(Usd::ZERO),
         max_adverse_excursion_bps: None,
@@ -600,7 +596,7 @@ pub async fn report_fact_schema_accepts_decision_snapshot_and_superseded_censor(
              WHERE recommendation_report_id = ? AND recommendation_id = ?",
         )
         .bind(report_id)
-        .bind(recommendation_id.clone())
+        .bind(recommendation_id)
         .fetch_one()
         .await
         .expect("read recommendation decision");
@@ -671,6 +667,111 @@ pub async fn trade_tape_direct_insert_roundtrip() {
         .await
         .expect("count");
     assert_eq!(count, 1);
+}
+
+pub async fn last_trade_ledger_retry_projects_exactly_once() {
+    let (_pool, client, _config, _stack) = setup_clickhouse().await;
+    let now = Utc::now().timestamp_millis();
+    let stream_session_id = Uuid::now_v7();
+    let row = BookL2LedgerRow {
+        stream_session_id,
+        shard_id: 3,
+        token_id: TokenId::new("tok-ledger-last-trade"),
+        market_id: Some(MarketId::new("market-ledger-last-trade")),
+        token_sequence: 41,
+        event_type: ChCanonicalBookEventType::LastTrade,
+        bid_prices: Vec::new(),
+        bid_sizes: Vec::new(),
+        ask_prices: Vec::new(),
+        ask_sizes: Vec::new(),
+        old_tick_size: None,
+        new_tick_size: None,
+        trade_price: Some(ChPrice::from(Price::new(dec!(0.4115)))),
+        trade_side: Some(ChLedgerTradeSide::Sell),
+        trade_size: Some(ChShares::from(Shares::new(dec!(9)))),
+        fee_rate_bps: Some(ChBps::from(dec!(2.5))),
+        venue_event_time: now,
+        ingress_time: now + 1,
+        persisted_time: now + 2,
+        event_hash: ChDigest::new([0; 32]),
+        schema_version: BookL2LedgerRow::SCHEMA_VERSION,
+    }
+    .seal()
+    .expect("seal LastTrade ledger row");
+    let expected_source_event_id = ContentHash::from(row.event_hash).to_string();
+    let write_manager = ChWriteManager::new(1);
+
+    for _ in 0..2 {
+        write_manager
+            .write_async_insert_batch_borrowed(
+                &client,
+                "quant_book_l2_ledger",
+                slice::from_ref(&row),
+            )
+            .await
+            .expect("acknowledged async ledger insert");
+    }
+
+    let ledger_count: u64 = client
+        .query(
+            "SELECT count() FROM quant_book_l2_ledger \
+             WHERE token_id = 'tok-ledger-last-trade'",
+        )
+        .fetch_one()
+        .await
+        .expect("count deduplicated LastTrade ledger rows");
+    let trade_count: u64 = client
+        .query(
+            "SELECT count() FROM quant_trade_tape \
+             WHERE token_id = 'tok-ledger-last-trade'",
+        )
+        .fetch_one()
+        .await
+        .expect("count materialized LastTrade rows");
+    assert_eq!(ledger_count, 1, "retried ledger block must deduplicate");
+    assert_eq!(
+        trade_count, 1,
+        "dependent materialized view must deduplicate"
+    );
+
+    let projected = client
+        .query(
+            "SELECT ?fields FROM quant_trade_tape \
+             WHERE token_id = 'tok-ledger-last-trade' LIMIT 1",
+        )
+        .fetch_one::<TradeTapeRow>()
+        .await
+        .expect("read materialized trade tape row");
+    let expected_coverage = TRADE_ID | MARKET_ID | TOKEN_ID | PRICE | SIDE | SIZE | FEE_RATE;
+    assert_eq!(
+        projected.market_id,
+        MarketId::new("market-ledger-last-trade")
+    );
+    assert_eq!(projected.token_id, TokenId::new("tok-ledger-last-trade"));
+    assert_eq!(projected.event_time, now);
+    assert_eq!(projected.ingestion_time, now + 2);
+    assert_eq!(projected.stream_session_id, Some(stream_session_id));
+    assert_eq!(projected.token_sequence, Some(41));
+    assert_eq!(projected.participant_address, "");
+    assert_eq!(projected.participant_role, ChTradeParticipantRole::Unknown);
+    assert_eq!(projected.side, ChTradeSide::Sell);
+    assert_eq!(projected.price, ChPrice::from(Price::new(dec!(0.4115))));
+    assert_eq!(projected.size_shares, ChShares::from(Shares::new(dec!(9))));
+    assert_eq!(projected.notional_usd, ChUsd::from(Usd::new(dec!(3.7035))));
+    assert_eq!(projected.tx_hash, None);
+    assert_eq!(projected.source_event_id, expected_source_event_id);
+    assert_eq!(projected.source, ChTradeTapeSource::MarketWs);
+    assert_eq!(projected.observed_field_flags, expected_coverage);
+    assert_eq!(projected.fee_rate_bps, Some(ChBps::from(dec!(2.5))));
+    assert_eq!(
+        projected.reconciliation_status,
+        ChTradeReconciliationStatus::Pending
+    );
+    assert_eq!(projected.matched_source_event_id, None);
+    assert_eq!(projected.revision, 1);
+    assert_eq!(projected.reconciled_at, None);
+    assert_eq!(projected.raw_payload_json, None);
+    assert_eq!(projected.schema_version, ChSchemaVersion::FIRST);
 }
 
 /// Build a tick-event `AsyncWriter` whose flush sink is `ChWriteManager::write_batch`.

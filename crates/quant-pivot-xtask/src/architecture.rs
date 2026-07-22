@@ -27,6 +27,7 @@ const TEST_ONLY_EXTERNAL_DEPENDENCIES: &[&str] = &[
 ];
 
 const KNOWN_WORKSPACE_PACKAGES: &[&str] = &[
+    "quant-pivot-allocator",
     "quant-pivot-api",
     "quant-pivot-bench",
     "quant-pivot-bin",
@@ -83,6 +84,7 @@ pub fn run() -> Result<()> {
         serde_json::from_slice(&output.stdout).context("decode cargo metadata")?;
     let mut violations = validate(&metadata);
     violations.extend(validate_workspace_dependency_inventory(&metadata)?);
+    violations.extend(validate_performance_contracts(&metadata)?);
     violations.extend(validate_public_api(&metadata.workspace_root)?);
     if violations.is_empty() {
         println!("architecture check passed");
@@ -632,11 +634,53 @@ fn pascal_identifier(identifier: &str) -> String {
         .collect()
 }
 
+fn blocking_task_path_allowed(path: &Path) -> bool {
+    matches!(
+        path.to_str(),
+        Some(
+            "crates/quant-pivot-api/src/binance/mod.rs"
+                | "crates/quant-pivot-api/src/binance/agg_trade.rs"
+                | "crates/quant-pivot-api/src/weather/tornado.rs"
+                | "crates/quant-pivot-core/src/service/backtest.rs"
+                | "crates/quant-pivot-core/src/service/cpcv_backtest.rs"
+                | "crates/quant-pivot-core/src/service/factor_pipeline.rs"
+                | "crates/quant-pivot-core/src/service/model_training.rs"
+                | "crates/quant-pivot-core/src/service/training_dataset.rs"
+                | "crates/quant-pivot-storage/src/write.rs"
+        )
+    )
+}
+
 struct BodyStyleVisitor<'a> {
     path: &'a Path,
     block_depth: usize,
     generated_sea_orm_entity: bool,
     violations: Vec<String>,
+}
+
+fn type_path_has_direct_argument(ty: &Type, owner: &str, argument: &str) -> bool {
+    let Type::Path(type_path) = ty else {
+        return false;
+    };
+    let Some(segment) = type_path.path.segments.last() else {
+        return false;
+    };
+    if segment.ident != owner {
+        return false;
+    }
+    let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+        return false;
+    };
+    arguments.args.iter().any(|generic| {
+        let GenericArgument::Type(Type::Path(argument_path)) = generic else {
+            return false;
+        };
+        argument_path
+            .path
+            .segments
+            .last()
+            .is_some_and(|segment| segment.ident == argument)
+    })
 }
 
 impl<'ast> Visit<'ast> for BodyStyleVisitor<'_> {
@@ -670,12 +714,40 @@ impl<'ast> Visit<'ast> for BodyStyleVisitor<'_> {
         let _ = item_use;
     }
 
+    fn visit_type(&mut self, ty: &'ast Type) {
+        if type_path_has_direct_argument(ty, "Arc", "Uuid") {
+            self.violations.push(format!(
+                "{} heap-shares a 16-byte UUID as `Arc<Uuid>`; use the Copy UUID newtype value",
+                self.path.display()
+            ));
+        }
+        if self.path.starts_with("crates/quant-pivot-web/src/ws")
+            && type_path_has_direct_argument(ty, "Sender", "String")
+        {
+            self.violations.push(format!(
+                "{} uses `Sender<String>` in WebSocket delivery; encode once and fan out shared `ByteString` frames",
+                self.path.display()
+            ));
+        }
+        visit::visit_type(self, ty);
+    }
+
     fn visit_path(&mut self, path: &'ast SynPath) {
         let segments = path
             .segments
             .iter()
             .map(|segment| segment.ident.to_string())
             .collect::<Vec<_>>();
+        if segments
+            .last()
+            .is_some_and(|segment| segment == "spawn_blocking")
+            && !blocking_task_path_allowed(self.path)
+        {
+            self.violations.push(format!(
+                "{} introduces an ungoverned `spawn_blocking`; use an existing budgeted owner or add this path only with an explicit CPU/memory budget",
+                self.path.display()
+            ));
+        }
         if self
             .path
             .starts_with("crates/quant-pivot-repository/src/postgres")
@@ -807,6 +879,17 @@ fn validate(metadata: &CargoMetadata) -> Vec<String> {
                 package.name
             ));
         }
+        if !matches!(
+            package.name.as_str(),
+            "quant-pivot-allocator" | "quant-pivot-macros"
+        ) && !package.dependencies.iter().any(|dependency| {
+            dependency.kind.is_none() && dependency.name == "quant-pivot-allocator"
+        }) {
+            violations.push(format!(
+                "{} does not link the target-process jemalloc policy crate",
+                package.name
+            ));
+        }
         for dependency in package
             .dependencies
             .iter()
@@ -816,6 +899,7 @@ fn validate(metadata: &CargoMetadata) -> Vec<String> {
             validate_entity_visibility(package, dependency, &mut violations);
             if dependency.path.is_some()
                 && dependency.name.starts_with("quant-pivot-")
+                && dependency.name != "quant-pivot-allocator"
                 && !allowed_workspace_dependencies(&package.name)
                     .contains(&dependency.name.as_str())
             {
@@ -828,6 +912,260 @@ fn validate(metadata: &CargoMetadata) -> Vec<String> {
     }
 
     violations
+}
+
+fn validate_performance_contracts(metadata: &CargoMetadata) -> Result<Vec<String>> {
+    let root = &metadata.workspace_root;
+    let mut violations = Vec::new();
+    validate_allocator_contract(root, &mut violations)?;
+    validate_deployment_contract(root, &mut violations)?;
+    validate_runtime_contract(root, &mut violations)?;
+    validate_removed_l2_contract(root, &mut violations)?;
+    Ok(violations)
+}
+
+fn validate_allocator_contract(root: &Path, violations: &mut Vec<String>) -> Result<()> {
+    let allocator_source_path = root.join("crates/quant-pivot-allocator/src/lib.rs");
+    let allocator_source = fs::read_to_string(&allocator_source_path)
+        .with_context(|| format!("read {}", allocator_source_path.display()))?;
+    for fragment in [
+        "#[global_allocator]",
+        "use tikv_jemallocator::Jemalloc;",
+        "static GLOBAL_ALLOCATOR: Jemalloc = Jemalloc;",
+        "pub const NAME: &str = \"tikv-jemalloc\";",
+    ] {
+        if !allocator_source.contains(fragment) {
+            violations.push(format!(
+                "{} must contain fixed allocator contract `{fragment}`",
+                allocator_source_path.display()
+            ));
+        }
+    }
+    let package_roots = [
+        "api",
+        "bench",
+        "bin",
+        "core",
+        "error",
+        "migration",
+        "models",
+        "repository",
+        "research",
+        "storage",
+        "system-tests",
+        "web",
+        "xtask",
+    ];
+    for package in package_roots {
+        let crate_root = if matches!(package, "bin" | "xtask") {
+            root.join(format!("crates/quant-pivot-{package}/src/main.rs"))
+        } else {
+            root.join(format!("crates/quant-pivot-{package}/src/lib.rs"))
+        };
+        let source = fs::read_to_string(&crate_root)
+            .with_context(|| format!("read {}", crate_root.display()))?;
+        if !source.contains("use quant_pivot_allocator as _;") {
+            violations.push(format!(
+                "{} must force-link the target-process jemalloc policy",
+                crate_root.display()
+            ));
+        }
+    }
+    for manifest in [
+        "Cargo.toml",
+        "crates/quant-pivot-api/Cargo.toml",
+        "crates/quant-pivot-bench/Cargo.toml",
+        "crates/quant-pivot-bin/Cargo.toml",
+        "crates/quant-pivot-core/Cargo.toml",
+        "crates/quant-pivot-research/Cargo.toml",
+    ] {
+        let path = root.join(manifest);
+        let source =
+            fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+        for forbidden in ["mimalloc", "allocator-jemalloc", "allocator-mimalloc"] {
+            if source.contains(forbidden) {
+                violations.push(format!(
+                    "{} contains allocator fallback/selection token `{forbidden}`; jemalloc is unconditional",
+                    path.display()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_deployment_contract(root: &Path, violations: &mut Vec<String>) -> Result<()> {
+    for (manifest, required_features) in [
+        (
+            "crates/quant-pivot-bin/Cargo.toml",
+            &["serving", "research-jobs", "domain-chainlink"][..],
+        ),
+        (
+            "crates/quant-pivot-core/Cargo.toml",
+            &["serving", "research-jobs", "domain-chainlink"][..],
+        ),
+        (
+            "crates/quant-pivot-research/Cargo.toml",
+            &["research-jobs"][..],
+        ),
+        (
+            "crates/quant-pivot-api/Cargo.toml",
+            &["domain-chainlink"][..],
+        ),
+    ] {
+        let path = root.join(manifest);
+        let source =
+            fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+        let parsed: Value =
+            toml::from_str(&source).with_context(|| format!("parse {}", path.display()))?;
+        let features = parsed
+            .get("features")
+            .and_then(Value::as_table)
+            .with_context(|| format!("{} must declare a feature table", path.display()))?;
+        for feature in required_features {
+            if !features.contains_key(*feature) {
+                violations.push(format!(
+                    "{} is missing deployment feature `{feature}`",
+                    path.display()
+                ));
+            }
+        }
+        if features.contains_key("dataframe") {
+            violations.push(format!(
+                "{} retains the removed `dataframe` compatibility feature",
+                path.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_runtime_contract(root: &Path, violations: &mut Vec<String>) -> Result<()> {
+    let runtime_path = root.join("crates/quant-pivot-bin/src/main.rs");
+    let runtime = fs::read_to_string(&runtime_path)
+        .with_context(|| format!("read {}", runtime_path.display()))?;
+    for fragment in [
+        "const TOKIO_WORKER_THREADS: usize = 3;",
+        "const TOKIO_MAX_BLOCKING_THREADS: usize = 4;",
+        "const OFFLINE_RAYON_THREADS: usize = 2;",
+        ".worker_threads(TOKIO_WORKER_THREADS)",
+        ".max_blocking_threads(TOKIO_MAX_BLOCKING_THREADS)",
+        ".num_threads(OFFLINE_RAYON_THREADS)",
+    ] {
+        if !runtime.contains(fragment) {
+            violations.push(format!(
+                "{} is missing governed runtime budget `{fragment}`",
+                runtime_path.display()
+            ));
+        }
+    }
+
+    let web_path = root.join("crates/quant-pivot-web/src/lib.rs");
+    let web =
+        fs::read_to_string(&web_path).with_context(|| format!("read {}", web_path.display()))?;
+    for fragment in [".workers(1)", ".worker_max_blocking_threads(1)"] {
+        if !web.contains(fragment) {
+            violations.push(format!(
+                "{} is missing governed Actix budget `{fragment}`",
+                web_path.display()
+            ));
+        }
+    }
+
+    let ledger_path = root.join("crates/quant-pivot-core/src/observability/ledger_persistence.rs");
+    let ledger = fs::read_to_string(&ledger_path)
+        .with_context(|| format!("read {}", ledger_path.display()))?;
+    if !ledger.contains("pub const LEDGER_PARTITION_COUNT: usize = 8;") {
+        violations.push(format!(
+            "{} must retain exactly eight durable partition cursors",
+            ledger_path.display()
+        ));
+    }
+
+    let book_store_path = root.join("crates/quant-pivot-core/src/ingest/book_store.rs");
+    let book_store = fs::read_to_string(&book_store_path)
+        .with_context(|| format!("read {}", book_store_path.display()))?;
+    let read_body = book_store
+        .split_once("pub fn read<R>")
+        .and_then(|(_, tail)| tail.split_once("/// Load an owned snapshot"))
+        .map(|(body, _)| body);
+    if read_body
+        .is_none_or(|body| !body.contains("slot.published.load()") || body.contains("load_full"))
+    {
+        violations.push(format!(
+            "{} must keep the synchronous BookStore reader on an ArcSwap guard without `load_full()`",
+            book_store_path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn validate_removed_l2_contract(root: &Path, violations: &mut Vec<String>) -> Result<()> {
+    let mut production_sources = Vec::new();
+    for package in [
+        "api",
+        "bin",
+        "core",
+        "error",
+        "macros",
+        "migration",
+        "models",
+        "repository",
+        "research",
+        "storage",
+        "web",
+    ] {
+        collect_rust_sources(
+            &root.join(format!("crates/quant-pivot-{package}/src")),
+            &mut production_sources,
+        )?;
+    }
+    for path in production_sources {
+        let source =
+            fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+        for legacy in [
+            "BookL2EventRow",
+            "BookL2CheckpointRow",
+            "quant_book_l2_event",
+            "quant_book_l2_checkpoint",
+            "bids_json",
+            "asks_json",
+        ] {
+            if source.contains(legacy) {
+                violations.push(format!(
+                    "{} contains removed L2 compatibility contract `{legacy}`",
+                    path.display()
+                ));
+            }
+        }
+        let l2_path = path.starts_with(root.join("crates/quant-pivot-core/src/ingest"))
+            || path.starts_with(root.join("crates/quant-pivot-core/src/observability"))
+            || path.starts_with(root.join("crates/quant-pivot-models/src/clickhouse"));
+        if l2_path && source.contains("serde_json_canonicalizer") {
+            violations.push(format!(
+                "{} uses JCS in the L2 production path; hash typed fixed-width fields directly",
+                path.display()
+            ));
+        }
+        if source.contains("#[global_allocator]") {
+            violations.push(format!(
+                "{} declares a second global allocator; only quant-pivot-allocator owns that policy",
+                path.display()
+            ));
+        }
+    }
+    let bootstrap_path = root.join("crates/quant-pivot-storage/src/clickhouse/sql/bootstrap.sql");
+    let bootstrap = fs::read_to_string(&bootstrap_path)
+        .with_context(|| format!("read {}", bootstrap_path.display()))?;
+    for legacy in ["quant_book_l2_event", "quant_book_l2_checkpoint"] {
+        if bootstrap.contains(legacy) {
+            violations.push(format!(
+                "{} contains removed L2 schema `{legacy}`",
+                bootstrap_path.display()
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn validate_workspace_dependency_inventory(metadata: &CargoMetadata) -> Result<Vec<String>> {
@@ -937,6 +1275,7 @@ fn allowed_workspace_dependencies(package: &str) -> &'static [&'static str] {
         "quant-pivot-bin" => &["quant-pivot-core", "quant-pivot-models"],
         "quant-pivot-bench" => &[
             "quant-pivot-core",
+            "quant-pivot-error",
             "quant-pivot-models",
             "quant-pivot-research",
         ],
@@ -988,7 +1327,10 @@ mod tests {
         }
     }
 
-    fn metadata(package: CargoPackage) -> CargoMetadata {
+    fn metadata(mut package: CargoPackage) -> CargoMetadata {
+        package
+            .dependencies
+            .push(dependency("quant-pivot-allocator", None, &[]));
         CargoMetadata {
             workspace_members: BTreeSet::from([package.id.clone()]),
             packages: vec![package],
@@ -1084,7 +1426,6 @@ mod tests {
             fn run<D>() -> Result<(), AnyhowError> {
                 let _ = Ordering::Equal;
                 let _ = panic::catch_unwind(AssertUnwindSafe(|| Side::Buy));
-                let _ = tokio::task::spawn_blocking(run);
                 let _ = tokio::time::timeout;
                 let _ = i64::MAX;
                 let _ = D::Error::custom;
@@ -1096,6 +1437,40 @@ mod tests {
 
         let violations = validate_source_style(&source, Path::new("src/example.rs"));
         assert!(violations.is_empty(), "{violations:#?}");
+    }
+
+    #[test]
+    fn blocking_tasks_are_restricted_to_budgeted_owners() {
+        let source = syn::parse_file("fn run() { let _ = tokio::task::spawn_blocking(work); }")
+            .expect("parse fixture");
+
+        let violations = validate_source_style(&source, Path::new("src/unbudgeted.rs"));
+        assert_eq!(violations.len(), 1);
+        assert!(violations[0].contains("ungoverned `spawn_blocking`"));
+
+        assert!(
+            validate_source_style(
+                &source,
+                Path::new("crates/quant-pivot-core/src/service/factor_pipeline.rs"),
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn source_style_rejects_heap_uuid_and_ws_string_sender() {
+        let uuid = syn::parse_file("struct Id(Arc<Uuid>);").expect("parse fixture");
+        let violations = validate_source_style(&uuid, Path::new("src/id.rs"));
+        assert_eq!(violations.len(), 1);
+        assert!(violations[0].contains("`Arc<Uuid>`"));
+
+        let sender = syn::parse_file("struct Outbound(Sender<String>);").expect("parse fixture");
+        let violations = validate_source_style(
+            &sender,
+            Path::new("crates/quant-pivot-web/src/ws/session.rs"),
+        );
+        assert_eq!(violations.len(), 1);
+        assert!(violations[0].contains("`Sender<String>`"));
     }
 
     #[test]

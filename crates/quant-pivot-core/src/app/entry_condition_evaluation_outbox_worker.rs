@@ -56,12 +56,7 @@ impl EntryConditionEvaluationOutboxWorker {
         })?;
         let evaluations = self
             .conditions
-            .claim_pending_evaluations(
-                self.worker_id.clone(),
-                now,
-                now + lease_duration,
-                BATCH_SIZE,
-            )
+            .claim_pending_evaluations(self.worker_id, now, now + lease_duration, BATCH_SIZE)
             .await?;
         if evaluations.is_empty() {
             return Ok(());
@@ -72,7 +67,7 @@ impl EntryConditionEvaluationOutboxWorker {
                     .conditions
                     .mark_evaluation_failed(
                         &evaluation.evaluation_id,
-                        self.worker_id.clone(),
+                        self.worker_id,
                         error.to_string(),
                     )
                     .await
@@ -89,11 +84,7 @@ impl EntryConditionEvaluationOutboxWorker {
         let published_at = Utc::now();
         for evaluation in evaluations {
             self.conditions
-                .mark_evaluation_published(
-                    &evaluation.evaluation_id,
-                    self.worker_id.clone(),
-                    published_at,
-                )
+                .mark_evaluation_published(&evaluation.evaluation_id, self.worker_id, published_at)
                 .await?;
         }
         Ok(())

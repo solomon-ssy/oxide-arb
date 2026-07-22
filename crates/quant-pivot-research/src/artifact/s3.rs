@@ -96,7 +96,7 @@ impl S3ArtifactStore {
 
     fn object_ref_from_uri(&self, uri: &ArtifactUri) -> QuantResult<S3ObjectRef> {
         let parsed = Url::parse(uri.as_str()).map_err(|error| ResearchError::ArtifactIo {
-            uri: uri.as_str().to_owned(),
+            uri: uri.to_string(),
             detail: format!("invalid S3 artifact URI: {error}"),
         })?;
         if parsed.scheme() != "s3"
@@ -107,7 +107,7 @@ impl S3ArtifactStore {
             || parsed.fragment().is_some()
         {
             return Err(ResearchError::ArtifactIo {
-                uri: uri.as_str().to_owned(),
+                uri: uri.to_string(),
                 detail: format!("URI is outside configured bucket `{}`", self.bucket),
             }
             .into());
@@ -125,7 +125,7 @@ impl S3ArtifactStore {
             || !in_prefix
         {
             return Err(ResearchError::ArtifactIo {
-                uri: uri.as_str().to_owned(),
+                uri: uri.to_string(),
                 detail: "invalid object path".to_owned(),
             }
             .into());
@@ -138,7 +138,7 @@ impl S3ArtifactStore {
             }
             _ => {
                 return Err(ResearchError::ArtifactIo {
-                    uri: uri.as_str().to_owned(),
+                    uri: uri.to_string(),
                     detail: "S3 artifact URI has an invalid version query".to_owned(),
                 }
                 .into());
@@ -291,11 +291,11 @@ impl ArtifactStore for S3ArtifactStore {
                 .await
                 .map_err(|error| match error {
                     Error::NotFound { .. } => ResearchError::ArtifactNotFound {
-                        uri: uri.as_str().to_owned(),
+                        uri: uri.to_string(),
                     },
                     error => self.io_error(&object.path, &error),
                 })?;
-        let display = uri.as_str().to_owned();
+        let display = uri.to_string();
         let stream = result.into_stream().map(move |result| {
             result.map_err(|error| {
                 ResearchError::ArtifactIo {
@@ -342,7 +342,7 @@ impl ArtifactStore for S3ArtifactStore {
         let object = self.object_ref_from_uri(uri)?;
         let signing =
             PresigningConfig::expires_in(valid_for).map_err(|error| ResearchError::ArtifactIo {
-                uri: uri.as_str().to_owned(),
+                uri: uri.to_string(),
                 detail: format!("invalid signed-download lifetime: {error}"),
             })?;
         self.control_client()
@@ -356,7 +356,7 @@ impl ArtifactStore for S3ArtifactStore {
             .map(|request| request.uri().to_owned())
             .map_err(|error| {
                 ResearchError::ArtifactIo {
-                    uri: uri.as_str().to_owned(),
+                    uri: uri.to_string(),
                     detail: format!("failed to sign evidence download: {error}"),
                 }
                 .into()

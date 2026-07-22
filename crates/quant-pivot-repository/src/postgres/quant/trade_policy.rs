@@ -82,7 +82,7 @@ impl TradePolicyRepository for PgTradePolicyRepository {
         attempt: NewTradePolicyTrialAttempt,
     ) -> Result<TradePolicyTrialAttemptInfo, StorageError> {
         validate_trial_attempt(&attempt)?;
-        let trial_attempt_id = attempt.trial_attempt_id.clone();
+        let trial_attempt_id = attempt.trial_attempt_id;
         QuantTradePolicyTrialAttemptEntity::insert(attempt.clone().into_active_model())
             .on_conflict(
                 OnConflict::column(Column::TrialAttemptId)
@@ -124,7 +124,7 @@ impl TradePolicyRepository for PgTradePolicyRepository {
         cutoff: Option<DateTime<Utc>>,
     ) -> Result<Vec<TradePolicyTrialAttemptInfo>, StorageError> {
         let condition = Condition::all()
-            .add(Column::FitJobId.eq(fit_job_id.clone()))
+            .add(Column::FitJobId.eq(*fit_job_id))
             .add_option(cutoff.map(|value| Column::CreatedAt.lte(value)));
         QuantTradePolicyTrialAttemptEntity::find()
             .filter(condition)
@@ -139,7 +139,7 @@ impl TradePolicyRepository for PgTradePolicyRepository {
         &self,
         artifact_id: &TradePolicyArtifactId,
     ) -> Result<Option<TradePolicyArtifactInfo>, StorageError> {
-        Entity::find_by_id(artifact_id.clone())
+        Entity::find_by_id(*artifact_id)
             .one(&self.db)
             .await
             .map_err(StorageError::from)
@@ -150,25 +150,26 @@ impl TradePolicyRepository for PgTradePolicyRepository {
         &self,
         query: TradePolicyListQuery,
     ) -> Result<Paginated<TradePolicyArtifactInfo>, StorageError> {
-        let condition = Condition::all()
-            .add_option(
-                query
-                    .status
-                    .map(|status| QuantTradePolicyArtifactColumn::Status.eq(status)),
-            )
-            .add_option(query.source_dataset_id.as_ref().map(|dataset_id| {
-                QuantTradePolicyArtifactColumn::SourceDatasetId.eq(dataset_id.clone())
-            }))
-            .add_option(
-                query
-                    .from
-                    .map(|from| QuantTradePolicyArtifactColumn::CreatedAt.gte(from)),
-            )
-            .add_option(
-                query
-                    .to
-                    .map(|to| QuantTradePolicyArtifactColumn::CreatedAt.lt(to)),
-            );
+        let condition =
+            Condition::all()
+                .add_option(
+                    query
+                        .status
+                        .map(|status| QuantTradePolicyArtifactColumn::Status.eq(status)),
+                )
+                .add_option(query.source_dataset_id.as_ref().map(|dataset_id| {
+                    QuantTradePolicyArtifactColumn::SourceDatasetId.eq(*dataset_id)
+                }))
+                .add_option(
+                    query
+                        .from
+                        .map(|from| QuantTradePolicyArtifactColumn::CreatedAt.gte(from)),
+                )
+                .add_option(
+                    query
+                        .to
+                        .map(|to| QuantTradePolicyArtifactColumn::CreatedAt.lt(to)),
+                );
         paginate_mapped(
             Entity::find()
                 .filter(condition)
@@ -188,7 +189,7 @@ impl TradePolicyRepository for PgTradePolicyRepository {
         audit: NewTradePolicyGovernanceAudit,
     ) -> Result<TradePolicyArtifactInfo, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let row = Entity::find_by_id(artifact_id.clone())
+        let row = Entity::find_by_id(*artifact_id)
             .lock_exclusive()
             .one(&txn)
             .await
@@ -231,7 +232,7 @@ impl TradePolicyRepository for PgTradePolicyRepository {
     ) -> Result<Paginated<TradePolicyGovernanceAuditInfo>, StorageError> {
         paginate_mapped(
             QuantTradePolicyGovernanceAuditEntity::find()
-                .filter(QuantTradePolicyGovernanceAuditColumn::ArtifactId.eq(artifact_id.clone()))
+                .filter(QuantTradePolicyGovernanceAuditColumn::ArtifactId.eq(*artifact_id))
                 .order_by_desc(QuantTradePolicyGovernanceAuditColumn::CreatedAt)
                 .order_by_desc(QuantTradePolicyGovernanceAuditColumn::AuditId),
             &self.db,
@@ -246,7 +247,7 @@ impl TradePolicyRepository for PgTradePolicyRepository {
         run: NewTradePolicyValidationRun,
     ) -> Result<TradePolicyValidationRunInfo, StorageError> {
         validate_new_validation(&run)?;
-        let validation_run_id = run.validation_run_id.clone();
+        let validation_run_id = run.validation_run_id;
         QuantTradePolicyValidationEntity::insert(run.clone().into_active_model())
             .on_conflict(
                 OnConflict::column(QuantTradePolicyValidationColumn::ValidationRunId)
@@ -284,7 +285,7 @@ impl TradePolicyRepository for PgTradePolicyRepository {
             return Ok(());
         }
         validate_validation_rows(&rows)?;
-        let validation_run_id = rows[0].validation_run_id.clone();
+        let validation_run_id = rows[0].validation_run_id;
         let ordinals = rows.iter().map(|row| row.row_ordinal).collect::<Vec<_>>();
         upsert_many_chunked::<QuantTradePolicyValidationRowEntity, _>(
             &self.db,
@@ -346,12 +347,12 @@ impl TradePolicyRepository for PgTradePolicyRepository {
                 "validation completion counts do not match persisted row diagnostics",
             ));
         }
-        let artifact = Entity::find_by_id(run.artifact_id.clone())
+        let artifact = Entity::find_by_id(run.artifact_id)
             .lock_exclusive()
             .one(&transaction)
             .await
             .map_err(StorageError::from)?
-            .ok_or_else(|| error::not_found(QUANT_TRADE_POLICY_ARTIFACT, &run.artifact_id))?;
+            .ok_or_else(|| error::not_found(QUANT_TRADE_POLICY_ARTIFACT, run.artifact_id))?;
         if artifact.status != TradePolicyStatus::Draft || artifact.content_hash != run.artifact_hash
         {
             return Err(error::state_conflict(
@@ -444,7 +445,7 @@ impl TradePolicyRepository for PgTradePolicyRepository {
         &self,
         validation_run_id: &TradePolicyValidationRunId,
     ) -> Result<Option<TradePolicyValidationRunInfo>, StorageError> {
-        QuantTradePolicyValidationEntity::find_by_id(validation_run_id.clone())
+        QuantTradePolicyValidationEntity::find_by_id(*validation_run_id)
             .one(&self.db)
             .await
             .map_err(StorageError::from)
@@ -456,7 +457,7 @@ impl TradePolicyRepository for PgTradePolicyRepository {
         artifact_id: &TradePolicyArtifactId,
     ) -> Result<Option<TradePolicyValidationRunInfo>, StorageError> {
         QuantTradePolicyValidationEntity::find()
-            .filter(QuantTradePolicyValidationColumn::ArtifactId.eq(artifact_id.clone()))
+            .filter(QuantTradePolicyValidationColumn::ArtifactId.eq(*artifact_id))
             .filter(
                 QuantTradePolicyValidationColumn::Status.eq(TradePolicyValidationStatus::Succeeded),
             )
@@ -474,7 +475,7 @@ impl TradePolicyRepository for PgTradePolicyRepository {
         query: TradePolicyValidationListQuery,
     ) -> Result<Paginated<TradePolicyValidationRunInfo>, StorageError> {
         let condition = Condition::all()
-            .add(QuantTradePolicyValidationColumn::ArtifactId.eq(artifact_id.clone()))
+            .add(QuantTradePolicyValidationColumn::ArtifactId.eq(*artifact_id))
             .add_option(
                 query
                     .status
@@ -497,24 +498,22 @@ impl TradePolicyRepository for PgTradePolicyRepository {
         validation_run_id: &TradePolicyValidationRunId,
         query: TradePolicyValidationRowListQuery,
     ) -> Result<Paginated<TradePolicyValidationRowInfo>, StorageError> {
-        let condition = Condition::all()
-            .add(QuantTradePolicyValidationRowColumn::ValidationRunId.eq(validation_run_id.clone()))
-            .add_option(
-                query
-                    .passed
-                    .map(|passed| QuantTradePolicyValidationRowColumn::Passed.eq(passed)),
-            )
-            .add_option(
-                query
-                    .evidence_kind
-                    .as_ref()
-                    .map(|kind| QuantTradePolicyValidationRowColumn::EvidenceKind.eq(kind.clone())),
-            )
-            .add_option(
-                query.diagnostic_kind.as_ref().map(|kind| {
+        let condition =
+            Condition::all()
+                .add(QuantTradePolicyValidationRowColumn::ValidationRunId.eq(*validation_run_id))
+                .add_option(
+                    query
+                        .passed
+                        .map(|passed| QuantTradePolicyValidationRowColumn::Passed.eq(passed)),
+                )
+                .add_option(
+                    query.evidence_kind.as_ref().map(|kind| {
+                        QuantTradePolicyValidationRowColumn::EvidenceKind.eq(kind.clone())
+                    }),
+                )
+                .add_option(query.diagnostic_kind.as_ref().map(|kind| {
                     QuantTradePolicyValidationRowColumn::DiagnosticKind.eq(kind.clone())
-                }),
-            );
+                }));
         paginate_mapped(
             QuantTradePolicyValidationRowEntity::find()
                 .filter(condition)
@@ -682,7 +681,7 @@ async fn validation_run_for_update<C>(
 where
     C: ConnectionTrait,
 {
-    QuantTradePolicyValidationEntity::find_by_id(validation_run_id.clone())
+    QuantTradePolicyValidationEntity::find_by_id(*validation_run_id)
         .lock_exclusive()
         .one(db)
         .await
@@ -698,9 +697,8 @@ where
     C: ConnectionTrait,
 {
     let base = || {
-        QuantTradePolicyValidationRowEntity::find().filter(
-            QuantTradePolicyValidationRowColumn::ValidationRunId.eq(validation_run_id.clone()),
-        )
+        QuantTradePolicyValidationRowEntity::find()
+            .filter(QuantTradePolicyValidationRowColumn::ValidationRunId.eq(*validation_run_id))
     };
     let total = base().count(db).await.map_err(StorageError::from)?;
     let passed = base()

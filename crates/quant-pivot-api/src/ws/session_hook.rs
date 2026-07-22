@@ -2,5 +2,7 @@
 
 use std::sync::Arc;
 
-/// Called once for each stream session invalidated by output backpressure.
-pub type WsSessionInvalidationHook = Arc<dyn Fn(u64) + Send + Sync>;
+use quant_pivot_models::types::TokenId;
+
+/// Called with the complete token set whenever stream continuity is invalidated.
+pub type WsSessionInvalidationHook = Arc<dyn Fn(&[TokenId]) + Send + Sync>;

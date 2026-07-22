@@ -109,23 +109,22 @@ async fn probe_submission_scope(
     intent_id: &OrderIntentId,
 ) -> Result<SubmissionReportScope, StorageError> {
     let intent = load_intent(db, intent_id).await?;
-    let recommendation = Entity::find_by_id(intent.recommendation_id.clone())
+    let recommendation = Entity::find_by_id(intent.recommendation_id)
         .one(db)
         .await
         .map_err(StorageError::from)?
-        .ok_or_else(|| error::not_found(QUANT_RECOMMENDATION, &intent.recommendation_id))?;
-    let report = QuantRecommendationReportEntity::find_by_id(
-        recommendation.recommendation_report_id.clone(),
-    )
-    .one(db)
-    .await
-    .map_err(StorageError::from)?
-    .ok_or_else(|| {
-        error::not_found(
-            QUANT_RECOMMENDATION_REPORT,
-            &recommendation.recommendation_report_id,
-        )
-    })?;
+        .ok_or_else(|| error::not_found(QUANT_RECOMMENDATION, intent.recommendation_id))?;
+    let report =
+        QuantRecommendationReportEntity::find_by_id(recommendation.recommendation_report_id)
+            .one(db)
+            .await
+            .map_err(StorageError::from)?
+            .ok_or_else(|| {
+                error::not_found(
+                    QUANT_RECOMMENDATION_REPORT,
+                    recommendation.recommendation_report_id,
+                )
+            })?;
     Ok(SubmissionReportScope {
         report_id: report.recommendation_report_id,
         recommendation_id: recommendation.recommendation_id,
@@ -140,12 +139,12 @@ async fn lock_submission_graph(
     intent_id: &OrderIntentId,
     scope: &SubmissionReportScope,
 ) -> Result<Model, StorageError> {
-    let report = QuantRecommendationReportEntity::find_by_id(scope.report_id.clone())
+    let report = QuantRecommendationReportEntity::find_by_id(scope.report_id)
         .lock_exclusive()
         .one(db)
         .await
         .map_err(StorageError::from)?
-        .ok_or_else(|| error::not_found(QUANT_RECOMMENDATION_REPORT, &scope.report_id))?;
+        .ok_or_else(|| error::not_found(QUANT_RECOMMENDATION_REPORT, scope.report_id))?;
     if report.research_profile_artifact_id != scope.research_profile_artifact_id
         || report.report_kind != scope.report_kind
         || report.status != RecommendationReportStatus::Published
@@ -156,12 +155,12 @@ async fn lock_submission_graph(
             "parent report is no longer the published entry authority",
         ));
     }
-    let recommendation = Entity::find_by_id(scope.recommendation_id.clone())
+    let recommendation = Entity::find_by_id(scope.recommendation_id)
         .lock_exclusive()
         .one(db)
         .await
         .map_err(StorageError::from)?
-        .ok_or_else(|| error::not_found(QUANT_RECOMMENDATION, &scope.recommendation_id))?;
+        .ok_or_else(|| error::not_found(QUANT_RECOMMENDATION, scope.recommendation_id))?;
     if recommendation.recommendation_report_id != scope.report_id
         || !recommendation.status.allows_new_intent()
     {
@@ -290,7 +289,7 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
         order: NewExecutionOrder,
         feature_parity_state_id: &FeatureParityStateId,
     ) -> Result<ExecutionOrderInfo, StorageError> {
-        let intent_id = order.order_intent_id.clone();
+        let intent_id = order.order_intent_id;
         let txn = self.db.begin().await.map_err(StorageError::from)?;
 
         // Scope lock linearizes write-ahead submission against report supersession.
@@ -310,7 +309,7 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
                 ),
             ));
         }
-        let recommendation_id = intent.recommendation_id.clone();
+        let recommendation_id = intent.recommendation_id;
         require_consumed_for_intent(&txn, &intent.condition_instance_id, &intent_id).await?;
 
         // Write-ahead the venue intent: the row exists in `Submitted` before any
@@ -343,14 +342,14 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
     ) -> Result<ExecutionOrderInfo, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
 
-        let order = QuantExecutionOrderEntity::find_by_id(execution_order_id.clone())
+        let order = QuantExecutionOrderEntity::find_by_id(*execution_order_id)
             .lock_exclusive()
             .one(&txn)
             .await
             .map_err(StorageError::from)?
             .ok_or_else(|| error::not_found(QUANT_EXECUTION_ORDER, execution_order_id))?;
         validate_execution_order_transition(order.state, write.state, execution_order_id)?;
-        let intent_id = order.order_intent_id.clone();
+        let intent_id = order.order_intent_id;
         let entry_phase = order.order_phase == ExecutionOrderPhase::Entry;
 
         // Lock the intent so its status advances atomically with the ledger.
@@ -490,13 +489,13 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
                 ),
             ));
         }
-        let intent_id = order.order_intent_id.clone();
+        let intent_id = order.order_intent_id;
         let txn = self.db.begin().await.map_err(StorageError::from)?;
 
         // At most one in-flight exit order per intent — prevents oversell when a
         // partial exit is re-triggered while a resting GTC/Ambiguous order exists.
         let inflight = QuantExecutionOrderEntity::find()
-            .filter(Column::OrderIntentId.eq(intent_id.clone()))
+            .filter(Column::OrderIntentId.eq(intent_id))
             .filter(Column::OrderPhase.eq(ExecutionOrderPhase::Exit))
             .filter(Column::State.is_in(IN_FLIGHT_EXIT_STATES))
             .one(&txn)
@@ -542,7 +541,7 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
     ) -> Result<ExecutionOrderInfo, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
 
-        let order = QuantExecutionOrderEntity::find_by_id(execution_order_id.clone())
+        let order = QuantExecutionOrderEntity::find_by_id(*execution_order_id)
             .lock_exclusive()
             .one(&txn)
             .await
@@ -557,7 +556,7 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
         }
 
         validate_execution_order_transition(order.state, write.order_state, execution_order_id)?;
-        let intent_id = order.order_intent_id.clone();
+        let intent_id = order.order_intent_id;
         let existing_venue_order_id = order.venue_order_id.clone();
 
         let mut order_active = order.into_active_model();
@@ -635,7 +634,7 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
     ) -> Result<ExecutionOrderInfo, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
 
-        let order = QuantExecutionOrderEntity::find_by_id(execution_order_id.clone())
+        let order = QuantExecutionOrderEntity::find_by_id(*execution_order_id)
             .lock_exclusive()
             .one(&txn)
             .await
@@ -651,8 +650,8 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
         }
 
         validate_execution_order_transition(order.state, write.order_state, execution_order_id)?;
-        let intent_id = order.order_intent_id.clone();
-        let order_intent_id_for_recon = intent_id.clone();
+        let intent_id = order.order_intent_id;
+        let order_intent_id_for_recon = intent_id;
         let existing_venue_order_id = order.venue_order_id.clone();
         let is_exit = order.order_phase == ExecutionOrderPhase::Exit;
 
@@ -751,7 +750,7 @@ async fn upsert_reconciliation_summary(
     write: ReconciliationLedgerWrite,
 ) -> Result<(), StorageError> {
     let existing = QuantReconciliationEntity::find()
-        .filter(QuantReconciliationColumn::ExecutionOrderId.eq(execution_order_id.clone()))
+        .filter(QuantReconciliationColumn::ExecutionOrderId.eq(*execution_order_id))
         .one(db)
         .await
         .map_err(StorageError::from)?;
@@ -780,8 +779,8 @@ async fn upsert_reconciliation_summary(
 
     let new = NewReconciliation {
         reconciliation_id: ReconciliationId::from_v7(),
-        execution_order_id: execution_order_id.clone(),
-        order_intent_id: order_intent_id.clone(),
+        execution_order_id: *execution_order_id,
+        order_intent_id: *order_intent_id,
         result: write.result,
         evidence_json: write.evidence,
         venue_filled_shares: write.venue_filled_shares,
@@ -820,7 +819,7 @@ async fn advance_recommendation_executed(
     db: &impl ConnectionTrait,
     recommendation_id: &RecommendationId,
 ) -> Result<(), StorageError> {
-    let row = Entity::find_by_id(recommendation_id.clone())
+    let row = Entity::find_by_id(*recommendation_id)
         .one(db)
         .await
         .map_err(StorageError::from)?

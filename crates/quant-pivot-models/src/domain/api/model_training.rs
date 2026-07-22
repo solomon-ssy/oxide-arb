@@ -131,12 +131,12 @@ impl From<ModelVersionInfo> for TrainedModelView {
             trade_policy_artifact_id: info.trade_policy_artifact_id,
             trade_policy_hash: info.trade_policy_hash,
             publish_path_set_id: info.publish_path_set_id,
-            publication_status: info.publication_status.as_str().to_owned(),
+            publication_status: info.publication_status.to_string(),
             metrics: info.metrics,
             training_objective: info.training_objective,
             created_at: info.created_at,
             model_run_id: None,
-            model_family: info.model_family.as_str().to_owned(),
+            model_family: info.model_family.to_string(),
         }
     }
 }

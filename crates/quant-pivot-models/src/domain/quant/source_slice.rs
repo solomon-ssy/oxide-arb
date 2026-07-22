@@ -12,7 +12,7 @@ use crate::{
     types::{
         ArtifactUri, ContentHash, DecisionPolicySnapshotId, ReaderContractVersion,
         ResearchEvaluationTrack, ResearchProfileRef, SchemaContractVersion, SourceSliceId,
-        SourceSliceManifestRef, SourceSliceManifestV1,
+        SourceSliceManifest, SourceSliceManifestRef,
     },
 };
 
@@ -129,7 +129,7 @@ impl NewSourceSlice {
 #[derive(Debug, Clone)]
 pub struct CompleteSourceSlice {
     pub manifest_ref: SourceSliceManifestRef,
-    pub manifest: SourceSliceManifestV1,
+    pub manifest: SourceSliceManifest,
 }
 
 /// Operator/read-model projection for one source slice.
@@ -151,7 +151,7 @@ pub struct SourceSliceInfo {
     pub status: SourceSliceStatus,
     pub manifest_uri: Option<ArtifactUri>,
     pub manifest_hash: Option<ContentHash>,
-    pub manifest_json: Option<SourceSliceManifestV1>,
+    pub manifest_json: Option<SourceSliceManifest>,
     pub failure_detail: Option<String>,
     pub completed_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,

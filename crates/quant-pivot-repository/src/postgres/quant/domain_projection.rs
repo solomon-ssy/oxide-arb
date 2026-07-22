@@ -103,17 +103,13 @@ impl DomainProjectionRepository for PgDomainProjectionRepository {
                 active.source_sequence = ActiveValue::Set(source_sequence);
                 active.event_time = ActiveValue::Set(report.event_time);
                 active.available_at = ActiveValue::Set(report.available_at);
-                active.report_hash = ActiveValue::Set(report.report_hash.clone());
+                active.report_hash = ActiveValue::Set(report.report_hash);
                 active.gap_generation = ActiveValue::Set(gap_generation);
                 active.source_healthy = ActiveValue::Set(source_healthy);
                 let updated = active.update(&txn).await.map_err(StorageError::from)?;
                 if previous_price != report.price {
-                    let event = crypto_event(
-                        &report,
-                        previous_price,
-                        gap_generation,
-                        checkpoint_hash.clone(),
-                    )?;
+                    let event =
+                        crypto_event(&report, previous_price, gap_generation, checkpoint_hash)?;
                     insert_outbox(&txn, event).await?;
                 }
                 updated
@@ -126,7 +122,7 @@ impl DomainProjectionRepository for PgDomainProjectionRepository {
                 source_sequence: ActiveValue::Set(source_sequence),
                 event_time: ActiveValue::Set(report.event_time),
                 available_at: ActiveValue::Set(report.available_at),
-                report_hash: ActiveValue::Set(report.report_hash.clone()),
+                report_hash: ActiveValue::Set(report.report_hash),
                 gap_generation: ActiveValue::Set(gap_generation),
                 source_healthy: ActiveValue::Set(source_healthy),
                 ..Default::default()
@@ -251,14 +247,13 @@ impl DomainProjectionRepository for PgDomainProjectionRepository {
                 &row,
                 closed_at,
                 checkpoint_hash
-                    .clone()
                     .ok_or_else(|| invariant("open weather projection has no checkpoint hash"))?,
             )?;
             let revision = checked_add(row.revision, "weather daily close revision")?;
             let mut active = row.into_active_model();
             active.day_closed = ActiveValue::Set(true);
             active.revision = ActiveValue::Set(revision);
-            active.last_event_id = ActiveValue::Set(Some(event.id.clone()));
+            active.last_event_id = ActiveValue::Set(Some(event.id));
             active.available_at = ActiveValue::Set(closed_at);
             let model = active.update(&txn).await.map_err(StorageError::from)?;
             insert_outbox(&txn, event).await?;
@@ -380,10 +375,7 @@ impl DomainProjectionRepository for PgDomainProjectionRepository {
         }
         let row_count = u64::try_from(rows.len())
             .map_err(|error| invariant(format!("domain event claim count overflow: {error}")))?;
-        let event_ids = rows
-            .iter()
-            .map(|row| row.event_id.clone())
-            .collect::<Vec<_>>();
+        let event_ids = rows.iter().map(|row| row.event_id).collect::<Vec<_>>();
         let updated = QuantDomainEventOutboxEntity::update_many()
             .col_expr(
                 QuantDomainEventOutboxColumn::ClaimOwner,
@@ -434,7 +426,7 @@ impl DomainProjectionRepository for PgDomainProjectionRepository {
                 QuantDomainEventOutboxColumn::LeaseExpiresAt,
                 Expr::value(Option::<DateTime<Utc>>::None),
             )
-            .filter(QuantDomainEventOutboxColumn::EventId.eq(event_id.clone()))
+            .filter(QuantDomainEventOutboxColumn::EventId.eq(*event_id))
             .filter(QuantDomainEventOutboxColumn::ClaimOwner.eq(worker_id))
             .exec(&self.db)
             .await
@@ -461,7 +453,7 @@ impl DomainProjectionRepository for PgDomainProjectionRepository {
                 QuantDomainEventOutboxColumn::LeaseExpiresAt,
                 Expr::value(Option::<DateTime<Utc>>::None),
             )
-            .filter(QuantDomainEventOutboxColumn::EventId.eq(event_id.clone()))
+            .filter(QuantDomainEventOutboxColumn::EventId.eq(*event_id))
             .filter(QuantDomainEventOutboxColumn::ClaimOwner.eq(worker_id))
             .exec(&self.db)
             .await
@@ -477,7 +469,7 @@ async fn upsert_weather_observation(
     temperature: TemperatureCelsius,
     local_date: NaiveDate,
 ) -> Result<bool, StorageError> {
-    let observation_key = (station.as_str().to_owned(), local_date, report.observed_at);
+    let observation_key = (station.to_string(), local_date, report.observed_at);
     let observation = QuantWeatherObservationCurrentEntity::find_by_id(observation_key)
         .lock_exclusive()
         .one(txn)
@@ -505,7 +497,7 @@ async fn upsert_weather_observation(
             let revision = checked_add(current.revision, "weather observation revision")?;
             let mut active = current.into_active_model();
             active.temperature_celsius = ActiveValue::Set(temperature.value());
-            active.report_hash = ActiveValue::Set(report.report_hash.clone());
+            active.report_hash = ActiveValue::Set(report.report_hash);
             active.revision = ActiveValue::Set(revision);
             active.published_at = ActiveValue::Set(report.published_at);
             active.available_at = ActiveValue::Set(report.available_at);
@@ -513,11 +505,11 @@ async fn upsert_weather_observation(
         }
         None => {
             QuantWeatherObservationCurrentActiveModel {
-                station: ActiveValue::Set(station.as_str().to_owned()),
+                station: ActiveValue::Set(station.to_string()),
                 local_date: ActiveValue::Set(local_date),
                 observation_time: ActiveValue::Set(report.observed_at),
                 temperature_celsius: ActiveValue::Set(temperature.value()),
-                report_hash: ActiveValue::Set(report.report_hash.clone()),
+                report_hash: ActiveValue::Set(report.report_hash),
                 revision: ActiveValue::Set(0),
                 published_at: ActiveValue::Set(report.published_at),
                 available_at: ActiveValue::Set(report.available_at),
@@ -587,8 +579,8 @@ async fn upsert_weather_daily_temperature_projections(
                 previous_extreme,
                 current_extreme,
                 gap_generation: input.gap_generation,
-                checkpoint_hash: input.checkpoint_hash.clone(),
-                supersedes_event_id: existing.as_ref().and_then(|row| row.last_event_id.clone()),
+                checkpoint_hash: *input.checkpoint_hash,
+                supersedes_event_id: existing.as_ref().and_then(|row| row.last_event_id),
             })?)
         } else {
             None
@@ -634,15 +626,12 @@ async fn update_weather_daily_temperature_projection(
         return Err(conflict("weather station timezone binding drift"));
     }
     let revision = checked_add(existing.revision, "weather daily revision")?;
-    let last_event_id = event.map_or_else(
-        || existing.last_event_id.clone(),
-        |event| Some(event.id.clone()),
-    );
+    let last_event_id = event.map_or_else(|| existing.last_event_id, |event| Some(event.id));
     let mut active = existing.into_active_model();
     active.previous_extreme_celsius = ActiveValue::Set(previous_extreme);
     active.current_extreme_celsius = ActiveValue::Set(current_extreme);
     active.last_observation_time = ActiveValue::Set(input.report.observed_at);
-    active.last_report_hash = ActiveValue::Set(input.report.report_hash.clone());
+    active.last_report_hash = ActiveValue::Set(input.report.report_hash);
     active.last_event_id = ActiveValue::Set(last_event_id);
     active.revision = ActiveValue::Set(revision);
     active.gap_generation = ActiveValue::Set(input.gap_generation);
@@ -661,15 +650,15 @@ async fn insert_weather_daily_temperature_projection(
     QuantWeatherDailyTemperatureProjectionActiveModel {
         source_id: ActiveValue::Set(input.report.source_id.clone()),
         instrument_key: ActiveValue::Set(input.instrument_key.clone()),
-        station: ActiveValue::Set(input.station.as_str().to_owned()),
+        station: ActiveValue::Set(input.station.to_string()),
         local_date: ActiveValue::Set(input.local_date),
         temperature_statistic: ActiveValue::Set(statistic),
         timezone: ActiveValue::Set(input.timezone.to_owned()),
         current_extreme_celsius: ActiveValue::Set(current_extreme),
         previous_extreme_celsius: ActiveValue::Set(None),
         last_observation_time: ActiveValue::Set(input.report.observed_at),
-        last_report_hash: ActiveValue::Set(input.report.report_hash.clone()),
-        last_event_id: ActiveValue::Set(event.map(|event| event.id.clone())),
+        last_report_hash: ActiveValue::Set(input.report.report_hash),
+        last_event_id: ActiveValue::Set(event.map(|event| event.id)),
         revision: ActiveValue::Set(0),
         day_closed: ActiveValue::Set(false),
         gap_generation: ActiveValue::Set(input.gap_generation),
@@ -694,6 +683,7 @@ struct EventBuildInput {
     payload: DomainEventPayload,
 }
 
+#[derive(Clone, Copy)]
 struct WeatherChangeEventInput<'a> {
     report: &'a WeatherObservationReport,
     local_date: NaiveDate,
@@ -717,7 +707,7 @@ fn crypto_event(
         current_price: report.price,
         source_sequence: report.source_sequence,
         gap_generation: from_i64(gap_generation, "crypto gap generation")?,
-        report_hash: report.report_hash.clone(),
+        report_hash: report.report_hash,
     });
     build_event(EventBuildInput {
         source: report.source_id.clone(),
@@ -753,7 +743,7 @@ fn weather_change_event(
         temperature_statistic: input.temperature_statistic,
         previous_extreme: input.previous_extreme.map(TemperatureCelsius::new),
         current_extreme: TemperatureCelsius::new(input.current_extreme),
-        report_hash: input.report.report_hash.clone(),
+        report_hash: input.report.report_hash,
         gap_generation: from_i64(input.gap_generation, "weather gap generation")?,
     };
     let payload = if corrected {
@@ -794,14 +784,14 @@ fn weather_close_event(
         time: closed_at,
         published_at: closed_at,
         available_at: closed_at,
-        supersedes_event_id: row.last_event_id.clone(),
+        supersedes_event_id: row.last_event_id,
         source_checkpoint_hash: checkpoint_hash,
         payload: DomainEventPayload::WeatherObservationDayClosed(WeatherObservationDayClosed {
             station: row.station.clone(),
             local_date: row.local_date,
             temperature_statistic: row.temperature_statistic,
             final_noaa_extreme: TemperatureCelsius::new(row.current_extreme_celsius),
-            last_report_hash: row.last_report_hash.clone(),
+            last_report_hash: row.last_report_hash,
             gap_generation: from_i64(row.gap_generation, "weather gap generation")?,
         }),
     })
@@ -851,7 +841,7 @@ async fn insert_outboxes<C: ConnectionTrait>(
     let rows = events
         .into_iter()
         .map(|event| QuantDomainEventOutboxActiveModel {
-            event_id: ActiveValue::Set(event.id.clone()),
+            event_id: ActiveValue::Set(event.id),
             envelope_json: ActiveValue::Set(event),
             published_at: ActiveValue::Set(None),
             publish_attempts: ActiveValue::Set(0),
@@ -1042,7 +1032,7 @@ mod tests {
             valid_to: None,
             published_at,
             available_at: published_at,
-            report_hash: ContentHash::parse(format!("blake3:{}", "a".repeat(64)))
+            report_hash: ContentHash::parse(&format!("blake3:{}", "a".repeat(64)))
                 .expect("report hash"),
             raw_report: "official fixture".to_owned(),
         };

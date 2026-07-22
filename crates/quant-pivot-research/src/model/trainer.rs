@@ -22,6 +22,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     mem,
+    sync::Arc,
 };
 
 use async_trait::async_trait;
@@ -144,7 +145,7 @@ pub struct ValidationReport {
 #[derive(Debug, Clone)]
 pub struct TrainModelRequest {
     /// Frozen, point-in-time training examples (decoded from the dataset Parquet).
-    pub examples: Vec<TrainingExample>,
+    pub examples: Arc<[TrainingExample]>,
     /// Semantic hash of the frozen dataset envelope supplying `examples`.
     pub training_dataset_hash: ContentHash,
     /// Supervised target label.
@@ -258,7 +259,7 @@ fn train_weighted(request: &TrainModelRequest) -> QuantResult<TrainedModelArtifa
     let input_contract_hash = model_input_contract_hash(&request.input_contract)?;
     let artifact = WeightedFactorModelArtifact {
         header: request.header.clone(),
-        training_dataset_hash: request.training_dataset_hash.clone(),
+        training_dataset_hash: request.training_dataset_hash,
         training_input_hash,
         input_contract: request.input_contract.clone(),
         input_contract_hash,
@@ -1418,7 +1419,7 @@ mod tests {
 
     fn request(examples: Vec<TrainingExample>) -> TrainModelRequest {
         TrainModelRequest {
-            examples,
+            examples: examples.into(),
             training_dataset_hash: hash("cc"),
             label: LabelSelector {
                 name: label_name(),
@@ -1488,7 +1489,7 @@ mod tests {
         let trainer = WeightedFactorTrainer::new();
         // Same request (identical version id + data) ⇒ identical artifact hash.
         let req = request(momentum_dataset());
-        let expected_dataset_hash = req.training_dataset_hash.clone();
+        let expected_dataset_hash = req.training_dataset_hash;
         let a = trainer.train(req.clone()).await.expect("train a");
         let b = trainer.train(req).await.expect("train b");
         assert_eq!(
@@ -1500,7 +1501,12 @@ mod tests {
                 art.validate().expect("valid weights");
                 assert!(art.objective_report.is_some(), "objective report filled");
                 assert_eq!(art.training_dataset_hash, expected_dataset_hash);
-                assert!(!art.training_input_hash.as_str().is_empty());
+                assert!(
+                    art.training_input_hash
+                        .as_bytes()
+                        .iter()
+                        .any(|byte| *byte != 0)
+                );
             }
             ModelArtifact::Classical(_) | ModelArtifact::SellScorer(_) => {
                 panic!("expected weighted artifact")

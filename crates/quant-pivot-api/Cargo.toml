@@ -4,11 +4,19 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 
+[features]
+default = ["domain-chainlink"]
+domain-chainlink = [
+  "dep:chainlink-data-streams-report",
+  "dep:chainlink-data-streams-sdk",
+]
+
 [dependencies]
+quant-pivot-allocator = { workspace = true }
 quant-pivot-error = { workspace = true, features = ["serde"] }
 quant-pivot-models = { workspace = true }
-chainlink-data-streams-report = { workspace = true }
-chainlink-data-streams-sdk = { workspace = true }
+chainlink-data-streams-report = { workspace = true, optional = true }
+chainlink-data-streams-sdk = { workspace = true, optional = true }
 num-traits = { workspace = true }
 
 # Polymarket SDK
@@ -46,7 +54,6 @@ grib = { workspace = true }
 
 # Concurrency
 ahash = { workspace = true }
-dashmap = { workspace = true }
 parking_lot = { workspace = true }
 flume = { workspace = true }
 

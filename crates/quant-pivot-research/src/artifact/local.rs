@@ -50,14 +50,14 @@ impl LocalArtifactStore {
             uri.as_str()
                 .strip_prefix(FILE_SCHEME)
                 .ok_or_else(|| ResearchError::ArtifactIo {
-                    uri: uri.as_str().to_owned(),
+                    uri: uri.to_string(),
                     detail: format!("unsupported scheme (expected `{FILE_SCHEME}`)"),
                 })?;
         let candidate = absolutize(Path::new(raw))?;
         let root = absolutize(&self.root)?;
         if !candidate.starts_with(&root) {
             return Err(ResearchError::ArtifactIo {
-                uri: uri.as_str().to_owned(),
+                uri: uri.to_string(),
                 detail: "resolved path escapes the artifact store root".to_owned(),
             }
             .into());
@@ -124,7 +124,7 @@ impl ArtifactStore for LocalArtifactStore {
             }
             Err(error) if error.kind() == ErrorKind::NotFound => {
                 Err(ResearchError::ArtifactNotFound {
-                    uri: uri.as_str().to_owned(),
+                    uri: uri.to_string(),
                 }
                 .into())
             }
@@ -163,7 +163,7 @@ impl ArtifactStore for LocalArtifactStore {
         _valid_for: Duration,
     ) -> QuantResult<String> {
         Err(ResearchError::ArtifactIo {
-            uri: uri.as_str().to_owned(),
+            uri: uri.to_string(),
             detail: "local artifact storage cannot issue signed download URLs".to_owned(),
         }
         .into())

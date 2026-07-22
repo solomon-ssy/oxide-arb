@@ -13,7 +13,7 @@ use serde::{
     de::{Error as DeError, Visitor},
 };
 
-use crate::types::{Bps, Price, Probability, SchemaVersion, Shares, Usd};
+use crate::types::{Bps, ContentHash, Price, Probability, SchemaVersion, Shares, Usd};
 
 const PRICE_SCALE: u32 = 8;
 const MONEY_SCALE: u32 = 18;
@@ -60,6 +60,51 @@ pub struct ChEpochDay(i32);
 #[serde(transparent)]
 pub struct ChSchemaVersion(pub u32);
 
+/// Binary BLAKE3 digest stored as `FixedString(32)` in `ClickHouse`.
+///
+/// Unlike [`ContentHash`], this boundary type deliberately serializes as the
+/// raw 32-byte tuple expected by the native `RowBinary` protocol.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ChDigest([u8; 32]);
+
+impl ChDigest {
+    /// Construct from a raw 32-byte digest.
+    #[must_use]
+    #[inline]
+    pub const fn new(digest: [u8; 32]) -> Self {
+        Self(digest)
+    }
+
+    /// Borrow the raw digest bytes.
+    #[must_use]
+    #[inline]
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    /// Consume the wrapper and return the raw digest bytes.
+    #[must_use]
+    #[inline]
+    pub const fn into_bytes(self) -> [u8; 32] {
+        self.0
+    }
+}
+
+impl From<ContentHash> for ChDigest {
+    #[inline]
+    fn from(value: ContentHash) -> Self {
+        Self(*value.as_bytes())
+    }
+}
+
+impl From<ChDigest> for ContentHash {
+    #[inline]
+    fn from(value: ChDigest) -> Self {
+        Self::from_bytes(value.into_bytes())
+    }
+}
+
 impl ChSchemaVersion {
     /// The first valid `ClickHouse` fact-row schema version.
     pub const FIRST: Self = Self(1);
@@ -102,6 +147,11 @@ impl From<SchemaVersion> for ChSchemaVersion {
 }
 
 impl ChPrice {
+    #[must_use]
+    pub const fn scaled_i128(self) -> i128 {
+        self.0 as i128
+    }
+
     #[must_use]
     pub fn to_price(self) -> Price {
         Price::new(decimal_from_i64(self.0, PRICE_SCALE))
@@ -148,6 +198,11 @@ impl From<Decimal> for ChFactor {
 
 impl ChBps {
     #[must_use]
+    pub const fn scaled_i128(self) -> i128 {
+        self.0 as i128
+    }
+
+    #[must_use]
     pub fn to_bps(self) -> Bps {
         Bps::new(decimal_from_i64(self.0, BPS_SCALE))
     }
@@ -185,6 +240,11 @@ impl From<Decimal> for ChUsd {
 }
 
 impl ChShares {
+    #[must_use]
+    pub const fn scaled_i128(self) -> i128 {
+        self.0
+    }
+
     #[must_use]
     pub fn to_shares(self) -> Shares {
         Shares::new(decimal_from_i128(self.0, MONEY_SCALE))
@@ -336,8 +396,19 @@ mod tests {
     use quant_pivot_error::hashing::CanonicalDigestError;
     use rust_decimal_macros::dec;
 
-    use super::{ChEpochDay, ChPrice, ChSchemaVersion, ChShares, ChUsd};
-    use crate::types::{Price, SchemaVersion, Shares, Usd};
+    use super::{ChDigest, ChEpochDay, ChPrice, ChSchemaVersion, ChShares, ChUsd};
+    use crate::types::{ContentHash, Price, SchemaVersion, Shares, Usd};
+
+    #[test]
+    fn digest_maps_content_hash_to_fixed_32_bytes() {
+        let content_hash = ContentHash::from_bytes([0xa5; 32]);
+        let digest = ChDigest::from(content_hash);
+
+        assert_eq!(digest.as_bytes(), &[0xa5; 32]);
+        assert_eq!(ContentHash::from(digest), content_hash);
+        assert_eq!(std::mem::size_of::<ChDigest>(), 32);
+        assert!(!std::mem::needs_drop::<ChDigest>());
+    }
 
     #[test]
     fn schema_version_roundtrips_positive_values() {

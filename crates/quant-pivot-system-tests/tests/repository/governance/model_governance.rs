@@ -35,7 +35,7 @@ use sea_orm::DatabaseConnection;
 fn content_hash(seed: char) -> ContentHash {
     let pair = format!("{:02x}", seed as u32);
     let hex: String = pair.chars().cycle().take(64).collect();
-    ContentHash::parse(format!("blake3:{hex}")).expect("hash")
+    ContentHash::parse(&format!("blake3:{hex}")).expect("hash")
 }
 
 async fn seed_two_versions(db: &DatabaseConnection) -> (ModelVersionId, ModelVersionId) {
@@ -43,7 +43,7 @@ async fn seed_two_versions(db: &DatabaseConnection) -> (ModelVersionId, ModelVer
     let model_spec_id = ModelSpecId::from_v7();
     registry
         .create_model_spec(model_spec_fixtures::new_model_spec_fixture(
-            model_spec_id.clone(),
+            model_spec_id,
             "pg-governance-it",
             ModelFamily::WeightedFactor,
             86_400,
@@ -58,8 +58,8 @@ async fn seed_two_versions(db: &DatabaseConnection) -> (ModelVersionId, ModelVer
         let id = ModelVersionId::from_v7();
         registry
             .create_model_version(NewModelVersion {
-                model_version_id: id.clone(),
-                model_spec_id: model_spec_id.clone(),
+                model_version_id: id,
+                model_spec_id,
                 version: i32::try_from(index + 1).unwrap_or(1),
                 artifact_hash: content_hash(seed.0),
                 category_scope: None,
@@ -80,7 +80,7 @@ async fn seed_two_versions(db: &DatabaseConnection) -> (ModelVersionId, ModelVer
             .expect("model version");
         ids.push(id);
     }
-    (ids[0].clone(), ids[1].clone())
+    (ids[0], ids[1])
 }
 
 pub async fn quant_shadow_comparison_migration_and_crud() {
@@ -97,8 +97,8 @@ pub async fn quant_shadow_comparison_migration_and_crud() {
     ] {
         repo.create(NewShadowComparison {
             shadow_comparison_id: ShadowComparisonId::from_v7(),
-            active_model_version_id: active.clone(),
-            shadow_model_version_id: shadow.clone(),
+            active_model_version_id: active,
+            shadow_model_version_id: shadow,
             weight_source,
             decision_at: now - ChronoDuration::hours(hours_ago),
             topn_overlap: Probability::new(overlap),
@@ -146,8 +146,8 @@ pub async fn quant_model_governance_audit_migration_and_crud() {
     let audit_id = ModelGovernanceAuditId::from_v7();
     let created = repo
         .create(NewModelGovernanceAudit {
-            audit_id: audit_id.clone(),
-            model_version_id: Some(active.clone()),
+            audit_id,
+            model_version_id: Some(active),
             training_dataset_id: None,
             action: ModelGovernanceAction::Publish,
             actor_user_id: None,

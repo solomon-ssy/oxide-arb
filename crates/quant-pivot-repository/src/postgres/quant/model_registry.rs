@@ -99,7 +99,7 @@ async fn find_version_info(
     model_version_id: &ModelVersionId,
 ) -> Result<Option<ModelVersionInfo>, StorageError> {
     let info = select_version_with_family()
-        .filter(QuantModelVersionColumn::ModelVersionId.eq(model_version_id.clone()))
+        .filter(QuantModelVersionColumn::ModelVersionId.eq(*model_version_id))
         .into_model::<ModelVersionInfo>()
         .one(db)
         .await
@@ -176,7 +176,7 @@ async fn validate_version_derivation(
             detail: "a model version cannot derive from itself".to_owned(),
         });
     }
-    let parent = Entity::find_by_id(parent_id.clone())
+    let parent = Entity::find_by_id(*parent_id)
         .one(db)
         .await
         .map_err(StorageError::from)?
@@ -211,7 +211,7 @@ async fn validate_version_derivation(
             source_backtest_report_id,
             ..
         } => {
-            let source = QuantBacktestReportEntity::find_by_id(source_backtest_report_id.clone())
+            let source = QuantBacktestReportEntity::find_by_id(*source_backtest_report_id)
                 .one(db)
                 .await
                 .map_err(StorageError::from)?
@@ -232,14 +232,13 @@ async fn validate_version_derivation(
             calibration_artifact_id,
             ..
         } => {
-            let artifact =
-                QuantCalibrationArtifactEntity::find_by_id(calibration_artifact_id.clone())
-                    .one(db)
-                    .await
-                    .map_err(StorageError::from)?
-                    .ok_or_else(|| {
-                        error::not_found("quant_calibration_artifact", calibration_artifact_id)
-                    })?;
+            let artifact = QuantCalibrationArtifactEntity::find_by_id(*calibration_artifact_id)
+                .one(db)
+                .await
+                .map_err(StorageError::from)?
+                .ok_or_else(|| {
+                    error::not_found("quant_calibration_artifact", calibration_artifact_id)
+                })?;
             let CalibrationArtifactPayload::ModelScore(payload) = artifact.payload else {
                 return Err(StorageError::InvariantViolation {
                     entity: Some(QUANT_MODEL_VERSION),
@@ -310,7 +309,7 @@ impl ModelRegistryRepository for PgModelRegistryRepository {
         &self,
         model_spec_id: &ModelSpecId,
     ) -> Result<Option<ModelSpecInfo>, StorageError> {
-        let row = QuantModelSpecEntity::find_by_id(model_spec_id.clone())
+        let row = QuantModelSpecEntity::find_by_id(*model_spec_id)
             .one(&self.db)
             .await
             .map_err(StorageError::from)?;
@@ -327,17 +326,17 @@ impl ModelRegistryRepository for PgModelRegistryRepository {
         // MAX+1 here is authoritative.
         let txn = self.db.begin().await.map_err(StorageError::from)?;
         research_profile::ensure(&txn, &version.profile_ref).await?;
-        let Some(_spec) = QuantModelSpecEntity::find_by_id(version.model_spec_id.clone())
+        let Some(_spec) = QuantModelSpecEntity::find_by_id(version.model_spec_id)
             .lock_exclusive()
             .one(&txn)
             .await
             .map_err(StorageError::from)?
         else {
-            return Err(error::not_found(QUANT_MODEL_SPEC, &version.model_spec_id));
+            return Err(error::not_found(QUANT_MODEL_SPEC, version.model_spec_id));
         };
         validate_version_derivation(&txn, &version).await?;
         let max_version = Entity::find()
-            .filter(QuantModelVersionColumn::ModelSpecId.eq(version.model_spec_id.clone()))
+            .filter(QuantModelVersionColumn::ModelSpecId.eq(version.model_spec_id))
             .select_only()
             .column_as(QuantModelVersionColumn::Version.max(), "max_version")
             .into_tuple::<Option<i32>>()
@@ -346,7 +345,7 @@ impl ModelRegistryRepository for PgModelRegistryRepository {
             .map_err(StorageError::from)?;
         version.version = next_model_version(max_version.flatten())?;
         let duplicate_key = format!("{}:v{}", version.model_spec_id, version.version);
-        let model_version_id = version.model_version_id.clone();
+        let model_version_id = version.model_version_id;
         let active =
             version
                 .try_into_active_model()
@@ -369,7 +368,7 @@ impl ModelRegistryRepository for PgModelRegistryRepository {
     ) -> Result<i32, StorageError> {
         // Preview only — `create_model_version` re-allocates under lock.
         let max_version = Entity::find()
-            .filter(QuantModelVersionColumn::ModelSpecId.eq(model_spec_id.clone()))
+            .filter(QuantModelVersionColumn::ModelSpecId.eq(*model_spec_id))
             .select_only()
             .column_as(QuantModelVersionColumn::Version.max(), "max_version")
             .into_tuple::<Option<i32>>()
@@ -420,7 +419,6 @@ impl ModelRegistryRepository for PgModelRegistryRepository {
             .add_option(
                 query
                     .model_spec_id
-                    .clone()
                     .map(|id| QuantModelVersionColumn::ModelSpecId.eq(id)),
             )
             .add_option(
@@ -492,7 +490,7 @@ impl ModelRegistryRepository for PgModelRegistryRepository {
         model_spec_id: &ModelSpecId,
     ) -> Result<Vec<ModelVersionInfo>, StorageError> {
         let rows = select_version_with_family()
-            .filter(QuantModelVersionColumn::ModelSpecId.eq(model_spec_id.clone()))
+            .filter(QuantModelVersionColumn::ModelSpecId.eq(*model_spec_id))
             .filter(QuantModelVersionColumn::PublicationStatus.eq(PublicationStatus::Published))
             .order_by_desc(QuantModelVersionColumn::PublishedAt)
             .into_model::<ModelVersionInfo>()
@@ -531,7 +529,7 @@ impl ModelRegistryRepository for PgModelRegistryRepository {
         )
         .await?;
         // Serialize concurrent publishes for the same spec.
-        let Some(_spec) = QuantModelSpecEntity::find_by_id(model_spec_id.clone())
+        let Some(_spec) = QuantModelSpecEntity::find_by_id(*model_spec_id)
             .lock_exclusive()
             .one(&txn)
             .await
@@ -539,7 +537,7 @@ impl ModelRegistryRepository for PgModelRegistryRepository {
         else {
             return Err(error::not_found(QUANT_MODEL_SPEC, model_spec_id));
         };
-        let Some(target) = Entity::find_by_id(model_version_id.clone())
+        let Some(target) = Entity::find_by_id(*model_version_id)
             .lock_exclusive()
             .one(&txn)
             .await
@@ -583,7 +581,7 @@ impl ModelRegistryRepository for PgModelRegistryRepository {
         quality_gate_report: QualityGateReport,
     ) -> Result<ModelVersionInfo, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let Some(row) = Entity::find_by_id(model_version_id.clone())
+        let Some(row) = Entity::find_by_id(*model_version_id)
             .lock_exclusive()
             .one(&txn)
             .await
@@ -605,7 +603,7 @@ impl ModelRegistryRepository for PgModelRegistryRepository {
         publish_path_set_id: Option<BacktestPathSetId>,
     ) -> Result<ModelVersionInfo, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let Some(row) = Entity::find_by_id(model_version_id.clone())
+        let Some(row) = Entity::find_by_id(*model_version_id)
             .lock_exclusive()
             .one(&txn)
             .await
@@ -644,7 +642,7 @@ async fn verify_frozen_model_parity_permit(
             "model parity permit requires an exact training dataset binding",
         )
     })?;
-    let run = QuantFeatureParityRunEntity::find_by_id(run_id.clone())
+    let run = QuantFeatureParityRunEntity::find_by_id(*run_id)
         .lock_exclusive()
         .one(txn)
         .await
@@ -674,7 +672,7 @@ async fn verify_frozen_model_parity_permit(
             ),
         ));
     }
-    let dataset = QuantTrainingDatasetEntity::find_by_id(training_dataset_id.clone())
+    let dataset = QuantTrainingDatasetEntity::find_by_id(*training_dataset_id)
         .one(txn)
         .await
         .map_err(StorageError::from)?
@@ -691,10 +689,10 @@ async fn verify_frozen_model_parity_permit(
         ));
     };
     let subject = QuantFeatureParitySubjectEntity::find()
-        .filter(QuantFeatureParitySubjectColumn::RunId.eq(run_id.clone()))
+        .filter(QuantFeatureParitySubjectColumn::RunId.eq(*run_id))
         .filter(QuantFeatureParitySubjectColumn::SubjectKind.eq(ParitySubjectKind::ModelVersion))
-        .filter(QuantFeatureParitySubjectColumn::ModelVersionId.eq(model_version_id.clone()))
-        .filter(QuantFeatureParitySubjectColumn::TrainingDatasetId.eq(training_dataset_id.clone()))
+        .filter(QuantFeatureParitySubjectColumn::ModelVersionId.eq(*model_version_id))
+        .filter(QuantFeatureParitySubjectColumn::TrainingDatasetId.eq(*training_dataset_id))
         .one(txn)
         .await
         .map_err(StorageError::from)?
@@ -737,7 +735,7 @@ async fn update_model_version_status(
     model_version_id: &ModelVersionId,
     next: PublicationStatus,
 ) -> Result<ModelVersionInfo, StorageError> {
-    let Some(row) = Entity::find_by_id(model_version_id.clone())
+    let Some(row) = Entity::find_by_id(*model_version_id)
         .lock_exclusive()
         .one(db)
         .await

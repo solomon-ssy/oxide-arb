@@ -127,13 +127,7 @@ fn parse_observations(
             available_at,
         )?);
     }
-    reports.sort_by_key(|report| {
-        (
-            report.observed_at,
-            report.variable,
-            report.report_hash.clone(),
-        )
-    });
+    reports.sort_by_key(|report| (report.observed_at, report.variable, report.report_hash));
     Ok(reports)
 }
 

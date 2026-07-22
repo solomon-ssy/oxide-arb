@@ -75,7 +75,7 @@ struct CanonicalGistempMonth {
 }
 
 fn parse_gistemp(body: &str, available_at: DateTime<Utc>) -> QuantResult<GistempDataset> {
-    let file_hash = ContentHash::parse(CanonicalDigest::prefixed_bytes(body.as_bytes()))?;
+    let file_hash = CanonicalDigest::content_hash_bytes(body.as_bytes());
     let (title, csv) = body
         .split_once('\n')
         .ok_or_else(|| parse_error("missing title/header separator"))?;

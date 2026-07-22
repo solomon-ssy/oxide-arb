@@ -22,7 +22,7 @@ use quant_pivot_system_tests::postgres::setup_pg;
 use sea_orm::EntityTrait;
 
 fn hash(byte: char) -> ContentHash {
-    ContentHash::parse(format!("blake3:{}", byte.to_string().repeat(64)))
+    ContentHash::parse(&format!("blake3:{}", byte.to_string().repeat(64)))
         .expect("valid content hash")
 }
 
@@ -136,16 +136,16 @@ pub async fn cold_window_is_not_eligible_and_writes_no_run_or_job() {
     let repo = PgFeatureParityRepository::new(pool.connection().clone());
     let window_end = Utc::now();
     let run = queued_run(window_end - Duration::hours(24), window_end);
-    let run_id = run.run_id.clone();
+    let run_id = run.run_id;
     let job_id = ResearchJobId::from_v7();
     let job = NewResearchJob {
-        job_id: job_id.clone(),
+        job_id,
         kind: ResearchJobKind::FeatureParity,
         status: ResearchJobStatus::Queued,
         model_spec_id: None,
         decision_policy_snapshot_id: None,
         params_json: ResearchJobParams::FeatureParity(FeatureParityJobParams {
-            parity_run_id: run_id.clone(),
+            parity_run_id: run_id,
             materialization_timeout_secs: 600,
             request: RunFullFeatureParityRequest {
                 window_start: Some(run.window_start),

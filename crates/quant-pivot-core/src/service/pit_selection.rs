@@ -170,7 +170,7 @@ impl OfflinePitSelector {
     fn request(&self, decision_at: DateTime<Utc>) -> MarketSelectionBuildRequest {
         MarketSelectionBuildRequest {
             decision_at,
-            decision_policy_snapshot_id: self.decision_policy_snapshot_id.clone(),
+            decision_policy_snapshot_id: self.decision_policy_snapshot_id,
             selection: self.selection.clone(),
             data_quality: self.data_quality.clone(),
             features: self.features.clone(),
@@ -506,11 +506,11 @@ mod tests {
             catalog_sync_batch_id: CatalogSyncBatchId::from_v7(),
             market_change_id: CatalogMarketChangeId::from_v7(),
             event_change_id: CatalogEventChangeId::from_v7(),
-            market_content_hash: ContentHash::parse(format!("blake3:{}", "a".repeat(64)))
+            market_content_hash: ContentHash::parse(&format!("blake3:{}", "a".repeat(64)))
                 .expect("hash"),
-            event_content_hash: ContentHash::parse(format!("blake3:{}", "b".repeat(64)))
+            event_content_hash: ContentHash::parse(&format!("blake3:{}", "b".repeat(64)))
                 .expect("hash"),
-            membership_hash: ContentHash::parse(format!("blake3:{}", "c".repeat(64)))
+            membership_hash: ContentHash::parse(&format!("blake3:{}", "c".repeat(64)))
                 .expect("hash"),
             market_timestamp_quality: CatalogTimestampQuality::Source,
             event_timestamp_quality: CatalogTimestampQuality::Source,
@@ -565,15 +565,16 @@ mod tests {
                 source_id: DomainSourceId::binance(),
                 instrument_key: instrument(),
                 available_at: now,
-                binding_hash: ContentHash::parse(format!("blake3:{}", "d".repeat(64)))
+                binding_hash: ContentHash::parse(&format!("blake3:{}", "d".repeat(64)))
                     .expect("binding hash"),
             }],
             grounding: GroundingProof { spans: Vec::new() },
             override_context: None,
         }));
-        let metadata_hash = ContentHash::parse(format!("blake3:{}", "0".repeat(64))).expect("hash");
+        let metadata_hash =
+            ContentHash::parse(&format!("blake3:{}", "0".repeat(64))).expect("hash");
         let capability_registry_hash =
-            ContentHash::parse(format!("blake3:{}", "f".repeat(64))).expect("hash");
+            ContentHash::parse(&format!("blake3:{}", "f".repeat(64))).expect("hash");
         let content_hash = MarketLinkage::compute_content_hash(
             &market_id,
             DomainFamily::Crypto,

@@ -58,10 +58,10 @@ pub async fn create_snapshot_then_find_and_list_members() {
 
     let selection_id = MarketSelectionId::from_v7();
     let snapshot = NewMarketSelection {
-        market_selection_id: selection_id.clone(),
+        market_selection_id: selection_id,
         decision_at: Utc::now(),
         decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
-        selector_hash: ContentHash::parse(format!("blake3:{}", "a".repeat(64)))
+        selector_hash: ContentHash::parse(&format!("blake3:{}", "a".repeat(64)))
             .expect("valid content hash"),
         market_count: 1,
         exclusion_summary: SelectionExclusionSummary {
@@ -72,7 +72,7 @@ pub async fn create_snapshot_then_find_and_list_members() {
         },
     };
     let member = NewMarketSelectionMember {
-        market_selection_id: selection_id.clone(),
+        market_selection_id: selection_id,
         market_id: MarketId::new(market_id),
         event_id: EventId::new(event_id),
         category: MarketCategory::Sports,

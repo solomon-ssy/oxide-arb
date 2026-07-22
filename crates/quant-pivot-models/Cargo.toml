@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+quant-pivot-allocator = { workspace = true }
 quant-pivot-error = { workspace = true, features = ["config"] }
 quant-pivot-macros = { workspace = true }
 rust_decimal = { workspace = true }
@@ -44,6 +45,8 @@ argon2 = { workspace = true }
 rand_core_06 = { workspace = true }
 
 [dev-dependencies]
+bincode = { workspace = true }
+bitcode = { workspace = true }
 insta = { workspace = true }
 proptest = { workspace = true }
 uuid = { workspace = true, features = ["v5"] }

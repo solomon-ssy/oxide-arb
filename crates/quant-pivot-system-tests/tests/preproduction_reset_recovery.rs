@@ -10,7 +10,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{Duration as ChronoDuration, Utc};
 use quant_pivot_error::QuantResult;
 use quant_pivot_migration::{
     acquire_lifecycle_lease, inspect_preproduction_postgres, release_lifecycle_lease,
@@ -37,7 +37,8 @@ use quant_pivot_repository::{postgres::PgPolicyRepository, traits::PolicyReposit
 use quant_pivot_storage::{
     cache::{CacheBackend, RedisBackend, connect_pool, count_preproduction_namespace},
     clickhouse::{
-        ClickHousePool, database_object_count, verify_schema as verify_clickhouse_schema,
+        ClickHousePool, active_preproduction_query_count, database_object_count,
+        verify_schema as verify_clickhouse_schema,
     },
     evidence::FileProductionEvidenceVerifier,
     postgres::{
@@ -66,6 +67,7 @@ const REDIS_PASSWORD: &str = "w9-redis-test-secret";
 const BOOTSTRAP_ADMIN_PASSWORD: &str = "w9-bootstrap-admin-test-secret";
 const BOOTSTRAP_ADMIN_PASSWORD_ENV: &str = "QUANT_PIVOT_BOOTSTRAP__ADMIN_PASSWORD_FILE";
 const JOURNAL_FILE_NAME: &str = "active-operation.json";
+const CLEAN_BOOTSTRAP_CONFIRMATION: &str = "DELETE_ALL_PREPRODUCTION_DATA_AND_REBOOTSTRAP";
 
 #[derive(Debug, Deserialize)]
 struct ResetFailure {
@@ -165,6 +167,37 @@ async fn clean_boot_recovers_each_system_stage_and_restores_backups() {
     assert_eq!(read_journal(&journal_file).operation_id, first_operation);
 
     let deploy = load_deploy(workspace.path());
+    assert_reset_plan_rejects_live_owners(&deploy, workspace.path(), &journal_file).await;
+
+    seed_partial_reset_markers(&deploy).await;
+    let confirmation_operation = plan_reset(workspace.path(), &journal_file).await;
+    let confirmation_journal = read_journal(&journal_file);
+    let wrong_confirmation = run_xtask(
+        reset_apply_args(
+            workspace.path(),
+            &journal_file,
+            &confirmation_journal.nonce,
+            "DELETE_ONLY_L2",
+        ),
+        Some(&bootstrap_password_file),
+    )
+    .await;
+    assert!(!wrong_confirmation.status.success());
+    assert_output_redacted(&wrong_confirmation);
+    assert!(
+        String::from_utf8_lossy(&wrong_confirmation.stderr).contains(CLEAN_BOOTSTRAP_CONFIRMATION)
+    );
+    assert!(postgres_marker_exists(&deploy.db.postgres).await);
+    assert!(clickhouse_marker_exists(&deploy).await);
+    assert_redis_markers_preserved(&deploy).await;
+    let confirmed_reset =
+        apply_planned_reset(workspace.path(), &journal_file, &bootstrap_password_file).await;
+    assert_success(&confirmed_reset, "confirmed clean bootstrap apply");
+    assert_eq!(
+        read_journal(&journal_file).operation_id,
+        confirmation_operation
+    );
+    assert_clean_recovery_state(&deploy).await;
 
     seed_partial_reset_markers(&deploy).await;
     let postgres_failed_operation = plan_reset(workspace.path(), &journal_file).await;
@@ -225,7 +258,12 @@ async fn full_reset_cycle(
     let operation_id = plan_reset(config_dir, journal_file).await;
     let journal = read_journal(journal_file);
     let apply = run_xtask(
-        reset_apply_args(config_dir, journal_file, &journal.nonce),
+        reset_apply_args(
+            config_dir,
+            journal_file,
+            &journal.nonce,
+            CLEAN_BOOTSTRAP_CONFIRMATION,
+        ),
         Some(bootstrap_password_file),
     )
     .await;
@@ -272,7 +310,12 @@ async fn apply_planned_reset(
     tokio::time::timeout(
         Duration::from_mins(2),
         run_xtask(
-            reset_apply_args(config_dir, journal_file, &journal.nonce),
+            reset_apply_args(
+                config_dir,
+                journal_file,
+                &journal.nonce,
+                CLEAN_BOOTSTRAP_CONFIRMATION,
+            ),
             Some(bootstrap_password_file),
         ),
     )
@@ -302,24 +345,29 @@ fn assert_failed_journal(path: &Path, operation_id: Uuid, failed_stage: &str) {
 }
 
 async fn plan_reset(config_dir: &Path, journal_file: &Path) -> Uuid {
-    let plan = run_xtask(
-        vec![
-            "preproduction-reset".to_owned(),
-            "plan".to_owned(),
-            "--config-dir".to_owned(),
-            path_text(config_dir),
-            "--journal-file".to_owned(),
-            path_text(journal_file),
-        ],
-        None,
-    )
-    .await;
+    let plan = run_xtask(reset_plan_args(config_dir, journal_file), None).await;
     assert_success(&plan, "preproduction reset plan");
     assert_output_redacted(&plan);
     read_journal(journal_file).operation_id
 }
 
-fn reset_apply_args(config_dir: &Path, journal_file: &Path, nonce: &str) -> Vec<String> {
+fn reset_plan_args(config_dir: &Path, journal_file: &Path) -> Vec<String> {
+    vec![
+        "preproduction-reset".to_owned(),
+        "plan".to_owned(),
+        "--config-dir".to_owned(),
+        path_text(config_dir),
+        "--journal-file".to_owned(),
+        path_text(journal_file),
+    ]
+}
+
+fn reset_apply_args(
+    config_dir: &Path,
+    journal_file: &Path,
+    nonce: &str,
+    confirmation: &str,
+) -> Vec<String> {
     vec![
         "preproduction-reset".to_owned(),
         "apply".to_owned(),
@@ -329,6 +377,8 @@ fn reset_apply_args(config_dir: &Path, journal_file: &Path, nonce: &str) -> Vec<
         path_text(journal_file),
         "--confirm-nonce".to_owned(),
         nonce.to_owned(),
+        "--confirm".to_owned(),
+        confirmation.to_owned(),
     ]
 }
 
@@ -594,6 +644,136 @@ async fn assert_clean_recovery_state(deploy: &DeployConfig) {
         foreign_redis_marker(deploy).await.as_deref(),
         Some(b"preserve".as_slice())
     );
+
+    let clickhouse = ClickHousePool::connect(&deploy.db.clickhouse)
+        .await
+        .expect("connect clean ClickHouse target");
+    assert_eq!(
+        clickhouse
+            .client()
+            .query("SELECT count() FROM quant_book_l2_ledger")
+            .fetch_one::<u64>()
+            .await
+            .expect("count clean L2 ledger"),
+        0
+    );
+    let now = Utc::now();
+    let latency = clickhouse
+        .observe_book_latency(now - ChronoDuration::hours(1), now)
+        .await
+        .expect("observe empty clean-bootstrap L2 readiness");
+    assert_eq!(latency.event_count, 0);
+
+    let postgres = PostgresPool::connect_existing(&deploy.db.postgres)
+        .await
+        .expect("connect clean PostgreSQL target");
+    let evidence = postgres
+        .connection()
+        .query_one_raw(Statement::from_string(
+            DatabaseBackend::Postgres,
+            "SELECT (SELECT COUNT(*) FROM quant_source_slice) + \
+                    (SELECT COUNT(*) FROM quant_training_dataset) + \
+                    (SELECT COUNT(*) FROM quant_backtest_report) + \
+                    (SELECT COUNT(*) FROM quant_feature_parity_run) + \
+                    (SELECT COUNT(*) FROM quant_trade_policy_validation) + \
+                    (SELECT COUNT(*) FROM quant_research_readiness_evidence) AS evidence_count",
+        ))
+        .await
+        .expect("count invalidated research evidence")
+        .expect("research evidence count row");
+    assert_eq!(
+        evidence
+            .try_get::<i64>("", "evidence_count")
+            .expect("decode research evidence count"),
+        0
+    );
+    postgres.close().await;
+}
+
+async fn assert_reset_plan_rejects_live_owners(
+    deploy: &DeployConfig,
+    config_dir: &Path,
+    journal_file: &Path,
+) {
+    let postgres = PostgresPool::connect_existing(&deploy.db.postgres)
+        .await
+        .expect("hold project PostgreSQL connection");
+    postgres
+        .connection()
+        .execute_unprepared("SELECT 1")
+        .await
+        .expect("activate held PostgreSQL connection");
+    let postgres_denial = run_xtask(reset_plan_args(config_dir, journal_file), None).await;
+    assert!(!postgres_denial.status.success());
+    assert_output_redacted(&postgres_denial);
+    assert!(
+        String::from_utf8_lossy(&postgres_denial.stderr)
+            .contains("PostgreSQL target connections remain")
+    );
+    postgres.close().await;
+
+    let clickhouse = ClickHousePool::from_config(&deploy.db.clickhouse);
+    let query_client = clickhouse.client().clone();
+    let active_query_id = format!("reset-preflight-{}", Uuid::now_v7());
+    let task_query_id = active_query_id.clone();
+    let active_query = tokio::spawn(async move {
+        query_client
+            .query(
+                "SELECT sleepEachRow(0.02) FROM numbers(10000) \
+                 SETTINGS max_block_size = 1",
+            )
+            .with_setting("query_id", task_query_id)
+            .fetch_all::<u8>()
+            .await
+    });
+    let mut observed = false;
+    for _ in 0..100 {
+        if active_preproduction_query_count(&deploy.db.clickhouse)
+            .await
+            .expect("inspect active ClickHouse query")
+            != 0
+        {
+            observed = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        observed,
+        "long-running project query must become observable"
+    );
+    let clickhouse_denial = run_xtask(reset_plan_args(config_dir, journal_file), None).await;
+    assert!(!clickhouse_denial.status.success());
+    assert_output_redacted(&clickhouse_denial);
+    assert!(
+        String::from_utf8_lossy(&clickhouse_denial.stderr)
+            .contains("active ClickHouse project queries")
+    );
+    clickhouse
+        .client()
+        .query("KILL QUERY WHERE query_id = ? SYNC")
+        .bind(&active_query_id)
+        .execute()
+        .await
+        .expect("kill active ClickHouse preflight fixture");
+    active_query.abort();
+    let _ = active_query.await;
+    let mut drained = false;
+    for _ in 0..250 {
+        if active_preproduction_query_count(&deploy.db.clickhouse)
+            .await
+            .expect("inspect cancelled ClickHouse query")
+            == 0
+        {
+            drained = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        drained,
+        "cancelled ClickHouse query must leave system.processes"
+    );
 }
 
 async fn postgres_marker_exists(config: &PostgresConfig) -> bool {
@@ -836,13 +1016,13 @@ async fn seal_disposable_baseline(deploy: &DeployConfig, directory: &Path, journ
         passed_seal_check(
             LifecycleCheckKind::PostgresSchemaFingerprint,
             LifecycleCheckDetail::SchemaFingerprint {
-                fingerprint: live_schema.postgres_schema_fingerprint.clone(),
+                fingerprint: live_schema.postgres_schema_fingerprint,
             },
         ),
         passed_seal_check(
             LifecycleCheckKind::ClickhouseSchemaFingerprint,
             LifecycleCheckDetail::SchemaFingerprint {
-                fingerprint: live_schema.clickhouse_schema_fingerprint.clone(),
+                fingerprint: live_schema.clickhouse_schema_fingerprint,
             },
         ),
         passed_seal_check(
@@ -859,19 +1039,19 @@ async fn seal_disposable_baseline(deploy: &DeployConfig, directory: &Path, journ
         passed_seal_check(
             LifecycleCheckKind::ActivePolicyBundle,
             LifecycleCheckDetail::PolicyBundle {
-                policy_bundle_hash: bundle.snapshot_hash.clone(),
+                policy_bundle_hash: bundle.snapshot_hash,
             },
         ),
         passed_seal_check(
             LifecycleCheckKind::BackupEvidence,
             LifecycleCheckDetail::ExternalEvidence {
-                evidence_hash: Some(backup.evidence_hash.clone()),
+                evidence_hash: Some(backup.evidence_hash),
             },
         ),
         passed_seal_check(
             LifecycleCheckKind::ConfigEndToEnd,
             LifecycleCheckDetail::ExternalEvidence {
-                evidence_hash: Some(config_e2e.evidence_hash.clone()),
+                evidence_hash: Some(config_e2e.evidence_hash),
             },
         ),
     ];
@@ -887,8 +1067,8 @@ async fn seal_disposable_baseline(deploy: &DeployConfig, directory: &Path, journ
         postgres_schema_fingerprint: live_schema.postgres_schema_fingerprint,
         clickhouse_schema_fingerprint: live_schema.clickhouse_schema_fingerprint,
         policy_bundle_generation: bundle.generation,
-        decision_policy_snapshot_id: bundle.decision_policy_snapshot_id.clone(),
-        policy_bundle_hash: bundle.snapshot_hash.clone(),
+        decision_policy_snapshot_id: bundle.decision_policy_snapshot_id,
+        policy_bundle_hash: bundle.snapshot_hash,
         lifecycle_policy_hash: frozen_policy
             .content_hash()
             .expect("frozen lifecycle policy hash"),
@@ -942,11 +1122,11 @@ async fn record_disposable_evidence(
                 artifact_uri: artifact.0,
                 evidence_hash: artifact.1,
                 build_commit: build_commit.clone(),
-                postgres_schema_fingerprint: live_schema.postgres_schema_fingerprint.clone(),
-                clickhouse_schema_fingerprint: live_schema.clickhouse_schema_fingerprint.clone(),
+                postgres_schema_fingerprint: live_schema.postgres_schema_fingerprint,
+                clickhouse_schema_fingerprint: live_schema.clickhouse_schema_fingerprint,
                 policy_bundle_generation: bundle.generation,
-                decision_policy_snapshot_id: bundle.decision_policy_snapshot_id.clone(),
-                policy_bundle_hash: bundle.snapshot_hash.clone(),
+                decision_policy_snapshot_id: bundle.decision_policy_snapshot_id,
+                policy_bundle_hash: bundle.snapshot_hash,
                 recorded_by_kind: PolicyActorKind::Operator,
                 recorded_by_user_id: None,
                 recorded_by_label: "w9-disposable".to_owned(),
@@ -981,7 +1161,7 @@ fn write_read_only_evidence(
     fs::write(&path, content).expect("write disposable evidence");
     fs::set_permissions(&path, Permissions::from_mode(0o444))
         .expect("make disposable evidence read-only");
-    let hash = ContentHash::parse(format!("blake3:{}", blake3::hash(content).to_hex()))
+    let hash = ContentHash::parse(&format!("blake3:{}", blake3::hash(content).to_hex()))
         .expect("disposable evidence hash");
     let uri = Url::from_file_path(&path).expect("disposable evidence file URL");
     (

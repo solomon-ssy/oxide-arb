@@ -37,7 +37,7 @@ use rust_decimal_macros::dec;
 use super::fixture_profile_ref;
 
 fn content_hash() -> ContentHash {
-    ContentHash::parse(format!("blake3:{}", "0".repeat(64))).expect("valid hash")
+    ContentHash::parse(&format!("blake3:{}", "0".repeat(64))).expect("valid hash")
 }
 
 /// A report header fixture with the given id / kind / status.
@@ -246,7 +246,7 @@ fn trade_policy_provenance() -> TradePolicyCohortProvenance {
     let artifact_hash = content_hash();
     let dimension = TradePolicyCohortDimension {
         methodology_id: "fixture-v1".to_owned(),
-        methodology_hash: artifact_hash.clone(),
+        methodology_hash: artifact_hash,
         bucket_id: "fixture".to_owned(),
     };
     TradePolicyCohortProvenance {

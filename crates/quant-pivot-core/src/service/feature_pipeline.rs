@@ -241,7 +241,7 @@ impl FeaturePipelineService {
             .await?;
         let data_quality_snapshot = draft_data_quality_snapshot(
             request.boundary.decision_at(),
-            request.decision_policy_snapshot_id.clone(),
+            request.decision_policy_snapshot_id,
             &bundles,
             &vectors,
             &persistence.all,
@@ -337,7 +337,7 @@ impl FeaturePipelineService {
         for ((vector, info), events) in vectors.iter().zip(&all_persisted).zip(projected) {
             if vector.data_quality != DataQualityStatus::Insufficient {
                 accepted.push(info.clone());
-                admitted_vector_ids.push(info.feature_vector_id.clone());
+                admitted_vector_ids.push(info.feature_vector_id);
             }
             all_events.extend(events);
         }

@@ -168,11 +168,11 @@ impl WeightedSellScorerRuntime {
 
 impl SellScorerRuntime for WeightedSellScorerRuntime {
     fn model_version_id(&self) -> ModelVersionId {
-        self.artifact.header.model_version_id.clone()
+        self.artifact.header.model_version_id
     }
 
     fn feature_schema_hash(&self) -> ContentHash {
-        self.artifact.header.feature_schema_hash.clone()
+        self.artifact.header.feature_schema_hash
     }
 
     fn required_features(&self) -> Vec<FeatureName> {

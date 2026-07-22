@@ -422,8 +422,7 @@
 | 旧 ClickHouse row | 新命名 | 说明 |
 |---|---|---|
 | `tick_event.rs` | `quant_tick_event` | 保留 tick/BBO 基础事实 |
-| `book_snapshot.rs` | `quant_book_snapshot` | 保留 L2 snapshot |
-| `book_l2_replay.rs` | `quant_book_l2_event` | 保留 replay 输入 |
+| `book_l2_ledger.rs` | `quant_book_l2_ledger` | 统一保存 typed-array snapshot、delta、tick、gap 与 last-trade replay 输入 |
 | `book_microstructure.rs` | `quant_book_microstructure` | 保留并扩展 spread/depth/imbalance |
 | `book_decision_context.rs` | `quant_decision_context` | 从 endgame decision 改为 recommendation context |
 

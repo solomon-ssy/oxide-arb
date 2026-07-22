@@ -100,7 +100,7 @@ fn parse_year_file(
     available_at: DateTime<Utc>,
     body: &[u8],
 ) -> QuantResult<GhcnhYear> {
-    let file_hash = ContentHash::parse(CanonicalDigest::prefixed_bytes(body))?;
+    let file_hash = CanonicalDigest::content_hash_bytes(body);
     let mut reader = ReaderBuilder::new()
         .delimiter(b'|')
         .flexible(true)
@@ -137,8 +137,7 @@ fn parse_year_file(
             return Err(parse_error("row year does not match requested GHCNh file").into());
         }
         let raw_report = row.iter().collect::<Vec<_>>().join("|");
-        let report_hash =
-            ContentHash::parse(CanonicalDigest::prefixed_bytes(raw_report.as_bytes()))?;
+        let report_hash = CanonicalDigest::content_hash_bytes(raw_report.as_bytes());
         reports.push(WeatherObservationReport {
             source_id: DomainSourceId::ghcnh(),
             instrument_key: DomainInstrumentKey::ghcnh(station),
@@ -160,7 +159,7 @@ fn parse_year_file(
     reports.sort_by(|left, right| {
         left.observed_at
             .cmp(&right.observed_at)
-            .then_with(|| left.report_hash.as_str().cmp(right.report_hash.as_str()))
+            .then_with(|| left.report_hash.cmp(&right.report_hash))
     });
     Ok(GhcnhYear { file_hash, reports })
 }

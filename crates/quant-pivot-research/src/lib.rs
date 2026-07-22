@@ -23,12 +23,14 @@
 //! # Feature flags
 //!
 //! The base research build links the pure-Rust numeric stack (`ndarray` /
-//! `statrs` / `rayon`) and the required `microlp` portfolio solver. `dataframe`
-//! (`polars` / `parquet`), `optimize` (`argmin`), and `ml-classical`
+//! `statrs` / `rayon`) and the required `microlp` portfolio solver. `research-jobs`
+//! (`S3` / `polars` / `parquet`), `optimize` (`argmin`), and `ml-classical`
 //! (`smartcore`) remain independently feature-gated; the production binary
 //! chooses its deployment feature set explicitly.
 
 #![deny(unsafe_code)]
+
+use quant_pivot_allocator as _;
 
 mod naming;
 mod parallel;
@@ -48,13 +50,11 @@ pub mod hashing;
 pub mod linkage;
 pub mod model;
 pub mod pit;
-#[cfg(feature = "dataframe")]
 pub mod policy_evidence;
 pub mod policy_replay;
 pub mod policy_validation;
 pub mod portfolio;
 pub mod selection;
-#[cfg(feature = "dataframe")]
 pub mod source_slice;
 pub mod trade_tape;
 pub mod training;
@@ -164,10 +164,10 @@ mod feature_guard_tests {
     /// The optimizer (`argmin`) and classical-ML (`smartcore`) stacks stay behind
     /// explicit features and must never be linked by default.
     ///
-    /// `dataframe` (polars/parquet) is **intentionally excluded** from this
+    /// `research-jobs` (S3/polars/parquet) is **intentionally excluded** from this
     /// guard because `quant-pivot-core` enables it to materialize offline
     /// training datasets. Under
-    /// `cargo test --workspace` feature unification therefore turns `dataframe`
+    /// `cargo test --workspace` feature unification therefore turns `research-jobs`
     /// on here, which is expected.
     //
     // Gated to the default build: heavy-feature CI jobs legitimately enable

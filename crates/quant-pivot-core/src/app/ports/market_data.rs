@@ -30,7 +30,7 @@ impl CoreMarketData {
 #[async_trait]
 impl MarketDataPort for CoreMarketData {
     fn book_for_token(&self, token_id: &TokenId) -> Option<Arc<BookSnapshot>> {
-        self.book_store.load(token_id)
+        self.book_store.load_by_id(token_id)
     }
 
     fn book(
@@ -39,8 +39,8 @@ impl MarketDataPort for CoreMarketData {
         no_token: &TokenId,
     ) -> (Option<Arc<BookSnapshot>>, Option<Arc<BookSnapshot>>) {
         (
-            self.book_store.load(yes_token),
-            self.book_store.load(no_token),
+            self.book_store.load_by_id(yes_token),
+            self.book_store.load_by_id(no_token),
         )
     }
 

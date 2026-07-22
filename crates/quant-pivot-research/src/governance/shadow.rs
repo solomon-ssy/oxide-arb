@@ -71,18 +71,16 @@ pub struct ShadowComparisonRequest<'a> {
 ///
 /// Propagates canonical-hash failures when sealing the comparison.
 pub fn compute_shadow_comparison(
-    request: ShadowComparisonRequest<'_>,
+    request: &ShadowComparisonRequest<'_>,
 ) -> QuantResult<ShadowComparison> {
-    let ShadowComparisonRequest {
-        active_model_version_id,
-        shadow_model_version_id,
-        weight_source,
-        decision_at,
-        active,
-        shadow,
-        top_n,
-        score_divergence_threshold,
-    } = request;
+    let active_model_version_id = request.active_model_version_id;
+    let shadow_model_version_id = request.shadow_model_version_id;
+    let weight_source = request.weight_source;
+    let decision_at = request.decision_at;
+    let active = request.active;
+    let shadow = request.shadow;
+    let top_n = request.top_n;
+    let score_divergence_threshold = request.score_divergence_threshold;
     let active_index = index_by_market(active);
     let shadow_index = index_by_market(shadow);
 
@@ -173,7 +171,7 @@ fn index_by_market(candidates: &[SignalCandidate]) -> BTreeMap<String, Ranked> {
         .iter()
         .map(|candidate| {
             (
-                candidate.market_id.as_str().to_owned(),
+                candidate.market_id.to_string(),
                 Ranked {
                     rank: candidate.rank_before_portfolio,
                     score: candidate.composite_score.inner(),
@@ -217,7 +215,7 @@ fn top_markets(candidates: &[SignalCandidate], top_n: usize) -> BTreeSet<String>
         .filter(|candidate| {
             candidate.rank_before_portfolio >= 1 && candidate.rank_before_portfolio <= bound
         })
-        .map(|candidate| candidate.market_id.as_str().to_owned())
+        .map(|candidate| candidate.market_id.to_string())
         .collect()
 }
 
@@ -295,7 +293,7 @@ mod tests {
                 )
             })
             .collect::<Vec<_>>();
-        let comparison = compute_shadow_comparison(ShadowComparisonRequest {
+        let comparison = compute_shadow_comparison(&ShadowComparisonRequest {
             active_model_version_id: ModelVersionId::from_v7(),
             shadow_model_version_id: ModelVersionId::from_v7(),
             weight_source: ModelWeightSource::Artifact,
@@ -316,7 +314,7 @@ mod tests {
     fn large_score_gap_flags_hard_divergence() {
         let active = vec![candidate("a", 1, dec!(0.90), OutcomeSide::Yes)];
         let shadow = vec![candidate("a", 1, dec!(0.40), OutcomeSide::No)];
-        let comparison = compute_shadow_comparison(ShadowComparisonRequest {
+        let comparison = compute_shadow_comparison(&ShadowComparisonRequest {
             active_model_version_id: ModelVersionId::from_v7(),
             shadow_model_version_id: ModelVersionId::from_v7(),
             weight_source: ModelWeightSource::Artifact,
@@ -345,7 +343,7 @@ mod tests {
             candidate("a", 2, dec!(0.72), OutcomeSide::Yes),
             candidate("d", 3, dec!(0.40), OutcomeSide::Yes),
         ];
-        let comparison = compute_shadow_comparison(ShadowComparisonRequest {
+        let comparison = compute_shadow_comparison(&ShadowComparisonRequest {
             active_model_version_id: ModelVersionId::from_v7(),
             shadow_model_version_id: ModelVersionId::from_v7(),
             weight_source: ModelWeightSource::Artifact,
@@ -370,7 +368,7 @@ mod tests {
     fn disjoint_topn_has_zero_overlap() {
         let active = vec![candidate("a", 1, dec!(0.9), OutcomeSide::Yes)];
         let shadow = vec![candidate("b", 1, dec!(0.9), OutcomeSide::Yes)];
-        let comparison = compute_shadow_comparison(ShadowComparisonRequest {
+        let comparison = compute_shadow_comparison(&ShadowComparisonRequest {
             active_model_version_id: ModelVersionId::from_v7(),
             shadow_model_version_id: ModelVersionId::from_v7(),
             weight_source: ModelWeightSource::Artifact,

@@ -95,6 +95,7 @@ mod tests {
     use rust_decimal_macros::dec;
 
     use super::*;
+    use crate::ingest::data_plane_index::DataPlane;
 
     struct StubClient;
 
@@ -121,7 +122,7 @@ mod tests {
     fn fails_closed_without_private_key() {
         let factory = AccountProviderFactory::new(
             None,
-            Arc::new(MarketRegistry::new()),
+            Arc::new(MarketRegistry::new(Arc::new(DataPlane::new()))),
             Arc::new(StubReserved),
             Some("0xfunder".to_owned()),
         );
@@ -136,7 +137,7 @@ mod tests {
     fn fails_closed_without_funder() {
         let factory = AccountProviderFactory::new(
             Some(Arc::new(StubClient)),
-            Arc::new(MarketRegistry::new()),
+            Arc::new(MarketRegistry::new(Arc::new(DataPlane::new()))),
             Arc::new(StubReserved),
             None,
         );
@@ -151,7 +152,7 @@ mod tests {
     fn blank_funder_fails_closed() {
         let factory = AccountProviderFactory::new(
             Some(Arc::new(StubClient)),
-            Arc::new(MarketRegistry::new()),
+            Arc::new(MarketRegistry::new(Arc::new(DataPlane::new()))),
             Arc::new(StubReserved),
             Some("   ".to_owned()),
         );

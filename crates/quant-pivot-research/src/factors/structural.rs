@@ -296,7 +296,7 @@ struct ReversalAfterShockFactor {
 
 impl FactorComputer for ReversalAfterShockFactor {
     fn definition_id(&self) -> FactorDefinitionId {
-        self.definition_id.clone()
+        self.definition_id
     }
     fn spec(&self) -> &FactorDefinitionDocument {
         &self.spec
@@ -306,7 +306,7 @@ impl FactorComputer for ReversalAfterShockFactor {
             (read(features, &SHOCK_RATIO), read(features, &SHORT_RETURN))
         else {
             return Ok(inert(
-                self.definition_id.clone(),
+                self.definition_id,
                 &self.spec,
                 RawFactorEligibility::Normalizable,
                 "no shock-window history".to_owned(),
@@ -316,7 +316,7 @@ impl FactorComputer for ReversalAfterShockFactor {
         // not contribute (raw value absent), it never fabricates a neutral.
         if shock <= self.shock_k {
             return Ok(inert(
-                self.definition_id.clone(),
+                self.definition_id,
                 &self.spec,
                 RawFactorEligibility::Normalizable,
                 format!("shock {shock} below threshold {}", self.shock_k),
@@ -325,7 +325,7 @@ impl FactorComputer for ReversalAfterShockFactor {
         let magnitude = shock.min(self.shock_cap);
         let raw = -sign(short_return) * magnitude;
         Ok(scored(
-            self.definition_id.clone(),
+            self.definition_id,
             &self.spec,
             raw,
             features,
@@ -362,7 +362,7 @@ struct ResolutionProximityRegimeFactor {
 
 impl FactorComputer for ResolutionProximityRegimeFactor {
     fn definition_id(&self) -> FactorDefinitionId {
-        self.definition_id.clone()
+        self.definition_id
     }
     fn spec(&self) -> &FactorDefinitionDocument {
         &self.spec
@@ -373,7 +373,7 @@ impl FactorComputer for ResolutionProximityRegimeFactor {
             read(features, &TIME_TO_RESOLUTION_SECS),
         ) else {
             return Ok(inert(
-                self.definition_id.clone(),
+                self.definition_id,
                 &self.spec,
                 RawFactorEligibility::Normalizable,
                 "missing extremity or time-to-resolution".to_owned(),
@@ -386,7 +386,7 @@ impl FactorComputer for ResolutionProximityRegimeFactor {
         let ttr_days = (ttr_secs / Decimal::from(86_400u64)).max(Decimal::ONE);
         let raw = (extremity / ttr_days).round_dp(12);
         Ok(scored(
-            self.definition_id.clone(),
+            self.definition_id,
             &self.spec,
             raw,
             features,
@@ -416,7 +416,7 @@ struct SingleFeatureStructuralFactor {
 
 impl FactorComputer for SingleFeatureStructuralFactor {
     fn definition_id(&self) -> FactorDefinitionId {
-        self.definition_id.clone()
+        self.definition_id
     }
     fn spec(&self) -> &FactorDefinitionDocument {
         &self.spec
@@ -425,7 +425,7 @@ impl FactorComputer for SingleFeatureStructuralFactor {
         Ok(read(features, &self.input).map_or_else(
             || {
                 inert(
-                    self.definition_id.clone(),
+                    self.definition_id,
                     &self.spec,
                     RawFactorEligibility::Normalizable,
                     format!("{} unavailable", self.headline_label),
@@ -433,7 +433,7 @@ impl FactorComputer for SingleFeatureStructuralFactor {
             },
             |value| {
                 scored(
-                    self.definition_id.clone(),
+                    self.definition_id,
                     &self.spec,
                     value,
                     features,
@@ -460,7 +460,7 @@ struct ParticipantConcentrationFactor {
 
 impl FactorComputer for ParticipantConcentrationFactor {
     fn definition_id(&self) -> FactorDefinitionId {
-        self.definition_id.clone()
+        self.definition_id
     }
 
     fn spec(&self) -> &FactorDefinitionDocument {
@@ -474,7 +474,7 @@ impl FactorComputer for ParticipantConcentrationFactor {
             read(features, &PARTICIPANT_HHI),
         ) else {
             return Ok(inert(
-                self.definition_id.clone(),
+                self.definition_id,
                 &self.spec,
                 RawFactorEligibility::Normalizable,
                 "trade-tape participant concentration unavailable".to_owned(),
@@ -487,14 +487,14 @@ impl FactorComputer for ParticipantConcentrationFactor {
         };
         let Some(raw) = composite_concentration(gini, cr1, hhi, &weights) else {
             return Ok(inert(
-                self.definition_id.clone(),
+                self.definition_id,
                 &self.spec,
                 RawFactorEligibility::Normalizable,
                 "participant concentration weights disabled".to_owned(),
             ));
         };
         Ok(scored(
-            self.definition_id.clone(),
+            self.definition_id,
             &self.spec,
             raw.round_dp(12),
             features,
@@ -571,7 +571,7 @@ fn negrisk_raw(
         NegRiskOutcome::Applicable(value) => {
             let raw = to_raw(value).round_dp(12);
             scored(
-                definition_id.clone(),
+                *definition_id,
                 spec,
                 raw,
                 features,
@@ -583,13 +583,13 @@ fn negrisk_raw(
             )
         }
         NegRiskOutcome::NotApplicable => inert(
-            definition_id.clone(),
+            *definition_id,
             spec,
             RawFactorEligibility::NotApplicable,
             format!("{label} not applicable (binary / too few legs)"),
         ),
         NegRiskOutcome::LegMissing => inert(
-            definition_id.clone(),
+            *definition_id,
             spec,
             RawFactorEligibility::Indeterminate(FactorIndeterminateReason::LegBookMissing),
             format!("{label} indeterminate (leg book missing)"),
@@ -605,7 +605,7 @@ struct NegRiskLegSumDriftFactor {
 
 impl FactorComputer for NegRiskLegSumDriftFactor {
     fn definition_id(&self) -> FactorDefinitionId {
-        self.definition_id.clone()
+        self.definition_id
     }
     fn spec(&self) -> &FactorDefinitionDocument {
         &self.spec
@@ -656,7 +656,7 @@ struct NegRiskConvertEdgeFactor {
 
 impl FactorComputer for NegRiskConvertEdgeFactor {
     fn definition_id(&self) -> FactorDefinitionId {
-        self.definition_id.clone()
+        self.definition_id
     }
     fn spec(&self) -> &FactorDefinitionDocument {
         &self.spec
@@ -685,7 +685,7 @@ struct FavoriteLongshotFactor {
 
 impl FactorComputer for FavoriteLongshotFactor {
     fn definition_id(&self) -> FactorDefinitionId {
-        self.definition_id.clone()
+        self.definition_id
     }
     fn spec(&self) -> &FactorDefinitionDocument {
         &self.spec
@@ -694,7 +694,7 @@ impl FactorComputer for FavoriteLongshotFactor {
         // No fitted table ⇒ inert (never a fabricated constant).
         let Some(table) = self.bias_table.as_ref() else {
             return Ok(inert(
-                self.definition_id.clone(),
+                self.definition_id,
                 &self.spec,
                 RawFactorEligibility::Normalizable,
                 "no bias table bound".to_owned(),
@@ -705,7 +705,7 @@ impl FactorComputer for FavoriteLongshotFactor {
         let ttr = read(features, &TIME_TO_RESOLUTION_SECS);
         let (Some(category), Some(mid), Some(ttr_secs)) = (category, mid, ttr) else {
             return Ok(inert(
-                self.definition_id.clone(),
+                self.definition_id,
                 &self.spec,
                 RawFactorEligibility::Normalizable,
                 "missing category, mid, or time-to-resolution".to_owned(),
@@ -713,7 +713,7 @@ impl FactorComputer for FavoriteLongshotFactor {
         };
         if ttr_secs < Decimal::ZERO {
             return Ok(inert(
-                self.definition_id.clone(),
+                self.definition_id,
                 &self.spec,
                 RawFactorEligibility::Normalizable,
                 "negative time-to-resolution".to_owned(),
@@ -721,7 +721,7 @@ impl FactorComputer for FavoriteLongshotFactor {
         }
         let Some(ttr_secs) = ttr_secs.to_u64() else {
             return Ok(inert(
-                self.definition_id.clone(),
+                self.definition_id,
                 &self.spec,
                 RawFactorEligibility::Normalizable,
                 "time-to-resolution is outside u64 range".to_owned(),
@@ -732,7 +732,7 @@ impl FactorComputer for FavoriteLongshotFactor {
             .map_or_else(
                 || {
                     inert(
-                        self.definition_id.clone(),
+                        self.definition_id,
                         &self.spec,
                         RawFactorEligibility::Normalizable,
                         "no significant bias for category / ttr / bucket".to_owned(),
@@ -740,7 +740,7 @@ impl FactorComputer for FavoriteLongshotFactor {
                 },
                 |bias| {
                     scored(
-                        self.definition_id.clone(),
+                        self.definition_id,
                         &self.spec,
                         bias,
                         features,

@@ -30,7 +30,7 @@ use quant_pivot_system_tests::{
 };
 
 fn hash(seed: u8) -> ContentHash {
-    ContentHash::parse(format!("blake3:{}", format!("{seed:02x}").repeat(32)))
+    ContentHash::parse(&format!("blake3:{}", format!("{seed:02x}").repeat(32)))
         .expect("test content hash")
 }
 
@@ -59,8 +59,8 @@ fn baseline(bundle: &ActivePolicyBundle) -> NewProductionBaseline {
         postgres_schema_fingerprint: hash(1),
         clickhouse_schema_fingerprint: hash(2),
         policy_bundle_generation: bundle.generation,
-        decision_policy_snapshot_id: bundle.decision_policy_snapshot_id.clone(),
-        policy_bundle_hash: bundle.snapshot_hash.clone(),
+        decision_policy_snapshot_id: bundle.decision_policy_snapshot_id,
+        policy_bundle_hash: bundle.snapshot_hash,
         lifecycle_policy_hash: frozen_policy.content_hash().expect("lifecycle hash"),
         evidence: ProductionSealEvidence {
             checks: vec![ProductionSealCheck {
@@ -97,8 +97,8 @@ fn evidence(bundle: &ActivePolicyBundle, kind: ProductionEvidenceKind) -> NewPro
         postgres_schema_fingerprint: hash(1),
         clickhouse_schema_fingerprint: hash(2),
         policy_bundle_generation: bundle.generation,
-        decision_policy_snapshot_id: bundle.decision_policy_snapshot_id.clone(),
-        policy_bundle_hash: bundle.snapshot_hash.clone(),
+        decision_policy_snapshot_id: bundle.decision_policy_snapshot_id,
+        policy_bundle_hash: bundle.snapshot_hash,
         recorded_by_kind: PolicyActorKind::Operator,
         recorded_by_user_id: None,
         recorded_by_label: "integration-test".to_owned(),

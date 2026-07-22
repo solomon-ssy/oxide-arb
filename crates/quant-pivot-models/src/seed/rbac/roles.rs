@@ -137,7 +137,7 @@ async fn hydrate(db: &DatabaseTransaction, ctx: &mut SeedContext) -> Result<(), 
                 "built-in role `{code}` differs from seed contract"
             )));
         }
-        id_map.insert(*code, row.id.clone());
+        id_map.insert(*code, row.id);
     }
     ctx.put(ROLES_ARTIFACT, id_map);
     Ok(())

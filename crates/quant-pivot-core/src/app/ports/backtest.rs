@@ -93,7 +93,7 @@ impl CoreBacktestPort {
                 factory_builder: Arc::clone(&self.factory_builder),
             },
             &runtime.execution_risk.portfolio,
-            bias_table.map(|table| table.content_hash.clone()),
+            bias_table.map(|table| table.content_hash),
             Bps::new(Decimal::from(
                 runtime.execution_risk.entry_order_policy.max_slippage_bps,
             )),

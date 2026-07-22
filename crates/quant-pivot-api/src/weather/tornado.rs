@@ -119,7 +119,7 @@ impl TornadoSource {
             .await
             .map_err(QuantError::from)?
             .ok_or_else(|| parse_error("NCEI Storm Events index", "indexed file returned 404"))?;
-        let file_hash = ContentHash::parse(CanonicalDigest::prefixed_bytes(&bytes))?;
+        let file_hash = CanonicalDigest::content_hash_bytes(&bytes);
         let region_id = region_id.to_owned();
         let state_name = state_name.to_owned();
         let decoded = tokio::task::spawn_blocking(move || {

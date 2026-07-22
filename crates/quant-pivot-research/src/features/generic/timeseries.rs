@@ -34,7 +34,7 @@ impl FeatureGroupBuilder for TimeSeriesFeatureBuilder {
         let window = ctx.window;
         let evidence = EvidenceSourceRef {
             source_kind: EvidenceSourceKind::ClickHouseFact,
-            reference: window.token_id.as_str().to_owned(),
+            reference: window.token_id.to_string(),
             // Anchor provenance on the freshest fact actually available so the
             // fact-lag staleness check measures the true age (not the cutoff).
             effective_at: window

@@ -268,8 +268,8 @@ pub fn signal_candidate_event(
 ) -> QuantSignalCandidateEventRow {
     QuantSignalCandidateEventRow {
         event_time,
-        signal_candidate_id: candidate.signal_candidate_id.clone(),
-        model_run_id: candidate.model_run_id.clone(),
+        signal_candidate_id: candidate.signal_candidate_id,
+        model_run_id: candidate.model_run_id,
         market_id: candidate.market_id.clone(),
         token_id: candidate.token_id.clone(),
         side: candidate.outcome_side.into(),

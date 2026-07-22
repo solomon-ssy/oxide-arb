@@ -25,7 +25,7 @@ use chrono_tz::Tz;
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
     clickhouse::{
-        BookL2CheckpointRow, BookMicrostructureRow, ChBps, ChDecimal64, ChPrice, ChUsd,
+        BookL2LedgerRow, BookMicrostructureRow, ChBps, ChDecimal64, ChPrice, ChUsd,
         MarketResolutionRow, TradeTapeRow,
     },
     domain::{
@@ -89,7 +89,7 @@ pub struct WindowSpec {
 /// Batch-prefetched historical facts for an offline replay window.
 pub struct Prefetched {
     /// Book snapshots per token (ascending by observation time).
-    pub books: HashMap<TokenId, Vec<BookL2CheckpointRow>>,
+    pub books: HashMap<TokenId, Vec<BookL2LedgerRow>>,
     /// Microstructure buckets per token (trailing + forward).
     pub micro: HashMap<TokenId, Vec<BookMicrostructureRow>>,
     /// Trade-tape participant rows per market.
@@ -243,7 +243,7 @@ impl HistoricalWindowLoader {
         let available_by_ms = spec.available_by.timestamp_millis();
         let book_rows = self
             .fact_read
-            .book_checkpoints_between(book_tokens, book_from, book_to, available_by_ms)
+            .book_ledger_snapshots_between(book_tokens, book_from, book_to, available_by_ms)
             .await
             .map_err(QuantError::from)?;
         let micro_rows = self
@@ -403,13 +403,13 @@ impl HistoricalWindowLoader {
 }
 
 fn group_book_and_resolution_rows(
-    book_rows: Vec<BookL2CheckpointRow>,
+    book_rows: Vec<BookL2LedgerRow>,
     resolution_rows: Vec<MarketResolutionRow>,
 ) -> (
-    HashMap<TokenId, Vec<BookL2CheckpointRow>>,
+    HashMap<TokenId, Vec<BookL2LedgerRow>>,
     HashMap<MarketId, Vec<MarketResolutionRow>>,
 ) {
-    let mut books: HashMap<TokenId, Vec<BookL2CheckpointRow>> = HashMap::new();
+    let mut books: HashMap<TokenId, Vec<BookL2LedgerRow>> = HashMap::new();
     for row in book_rows {
         books.entry(row.token_id.clone()).or_default().push(row);
     }
@@ -616,10 +616,10 @@ async fn load_weather_facts(
     }
     for series in observations.values_mut() {
         series.sort_by(|left, right| {
-            (left.observed_at, left.revision, left.report_hash.as_str()).cmp(&(
+            (left.observed_at, left.revision, left.report_hash).cmp(&(
                 right.observed_at,
                 right.revision,
-                right.report_hash.as_str(),
+                right.report_hash,
             ))
         });
     }
@@ -798,8 +798,8 @@ fn build_materialized_pit(
     for (token, rows) in &prefetched.books {
         let mut series = Vec::with_capacity(rows.len());
         for row in rows {
-            let source_cutoff = timestamp_millis(row.event_time, "book event_time")?;
-            let decision_at = timestamp_millis(row.created_at, "book checkpoint created_at")?;
+            let source_cutoff = timestamp_millis(row.venue_event_time, "book venue_event_time")?;
+            let decision_at = timestamp_millis(row.persisted_time, "book persisted_time")?;
             let (snapshot, status) = snapshot_from_row(row.clone(), source_cutoff, decision_at);
             if status.counts_as_failure() {
                 book_decode_failures += 1;

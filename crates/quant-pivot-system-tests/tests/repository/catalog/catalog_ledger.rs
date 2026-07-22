@@ -140,7 +140,7 @@ pub async fn batch_snapshot_observes_one_exact_event_revision_and_membership() {
     let t0 = Utc.with_ymd_and_hms(2026, 7, 10, 1, 0, 0).unwrap();
 
     let original = membership_commit(10, t0, t0, "original");
-    let original_event_change_id = original.events[0].change.event_change_id.clone();
+    let original_event_change_id = original.events[0].change.event_change_id;
     let original_batch = repo
         .commit(original)
         .await
@@ -152,7 +152,7 @@ pub async fn batch_snapshot_observes_one_exact_event_revision_and_membership() {
         t0 + Duration::seconds(5),
         "correction",
     );
-    let corrected_event_change_id = correction.events[0].change.event_change_id.clone();
+    let corrected_event_change_id = correction.events[0].change.event_change_id;
     let correction_batch = repo
         .commit(correction)
         .await
@@ -481,12 +481,12 @@ fn commit(
         source_effective_at,
         label,
     );
-    let event_object_id = event_object.event_object_id.clone();
+    let event_object_id = event_object.event_object_id;
     let (market, market_object) =
         market_object_fixture(market_id, event_id.clone(), source_effective_at, label);
     CatalogBatchCommit {
         batch: NewCatalogSyncBatch {
-            catalog_sync_batch_id: batch_id.clone(),
+            catalog_sync_batch_id: batch_id,
             sync_kind,
             started_at: available_at,
             fetched_at: available_at,
@@ -500,8 +500,8 @@ fn commit(
             object: event_object,
             change: NewCatalogEventChange {
                 event_change_id: CatalogEventChangeId::from_v7(),
-                catalog_sync_batch_id: batch_id.clone(),
-                event_object_id: event_object_id.clone(),
+                catalog_sync_batch_id: batch_id,
+                event_object_id,
                 event_id,
                 source_effective_at,
                 source_timestamp_quality: CatalogTimestampQuality::Source,
@@ -543,7 +543,7 @@ fn membership_commit(
         source_effective_at,
         label,
     );
-    let event_object_id = event_object.event_object_id.clone();
+    let event_object_id = event_object.event_object_id;
 
     let market_candidates = market_ids
         .iter()
@@ -558,8 +558,8 @@ fn membership_commit(
                 projection,
                 object,
                 market_change_id: CatalogMarketChangeId::from_v7(),
-                catalog_sync_batch_id: batch_id.clone(),
-                event_object_id: event_object_id.clone(),
+                catalog_sync_batch_id: batch_id,
+                event_object_id,
                 source_effective_at,
                 source_timestamp_quality: CatalogTimestampQuality::Source,
                 source_created_at: Some(source_effective_at - Duration::days(1)),
@@ -570,7 +570,7 @@ fn membership_commit(
 
     CatalogBatchCommit {
         batch: NewCatalogSyncBatch {
-            catalog_sync_batch_id: batch_id.clone(),
+            catalog_sync_batch_id: batch_id,
             sync_kind,
             started_at: available_at,
             fetched_at: available_at,
@@ -615,7 +615,7 @@ fn set_market_disposition(
         CanonicalDigest::content_hash_typed("quant-pivot/catalog-market-object", 1, &payload)
             .expect("hash typed market fixture");
     candidate.object.market_object_id = CatalogMarketObjectId::from_content_hash(&content_hash);
-    candidate.object.content_hash = content_hash.clone();
+    candidate.object.content_hash = content_hash;
     candidate.object.payload = payload.into();
     candidate.projection = UpsertMarket::from_registry(&source).expect("normalize market fixture");
     candidate.projection.content_hash = content_hash;
@@ -635,7 +635,7 @@ fn event_object_fixture(
         status: EventStatus::Active,
         market_ids: market_ids.clone(),
         categories: CategorySet::from(MarketCategory::Politics),
-        tags: vec![MarketCategory::Politics.as_str().to_owned()],
+        tags: vec![MarketCategory::Politics.to_string()],
         neg_risk: false,
         end_date: None,
         created_at: source_effective_at - Duration::days(1),
@@ -661,7 +661,7 @@ fn event_object_fixture(
             neg_risk: source.neg_risk,
             catalog_market_ids: market_ids.into(),
             end_date: source.end_date,
-            content_hash: content_hash.clone(),
+            content_hash,
         },
         NewCatalogEventObject {
             event_object_id,
@@ -728,7 +728,7 @@ fn market_object_fixture(
             .expect("hash typed market fixture");
     let market_object_id = CatalogMarketObjectId::from_content_hash(&content_hash);
     let mut projection = UpsertMarket::from_registry(&source).expect("normalize market fixture");
-    projection.content_hash = content_hash.clone();
+    projection.content_hash = content_hash;
     (
         projection,
         NewCatalogMarketObject {
@@ -790,5 +790,5 @@ fn snapshot_revisions(snapshots: &[CatalogSnapshotInfo]) -> BTreeSet<&str> {
 }
 
 fn hash(seed: u8) -> ContentHash {
-    ContentHash::parse(format!("blake3:{seed:064x}")).expect("valid content hash")
+    ContentHash::parse(&format!("blake3:{seed:064x}")).expect("valid content hash")
 }

@@ -105,8 +105,8 @@ impl ResearchJobPort for CoreResearchJobPort {
         if request.training_dataset_id.is_none() {
             request.training_dataset_id = Some(TrainingDatasetId::from_v7());
         }
-        let model_spec_id = Some(request.model_spec_id.clone());
-        let decision_policy_snapshot_id = Some(request.decision_policy_snapshot_id.clone());
+        let model_spec_id = Some(request.model_spec_id);
+        let decision_policy_snapshot_id = Some(request.decision_policy_snapshot_id);
         let job = self.new_job(
             ResearchJobParams::DatasetBuild(request),
             model_spec_id,
@@ -131,8 +131,8 @@ impl ResearchJobPort for CoreResearchJobPort {
                 entity: "training_dataset",
                 id: request.training_dataset_id.to_string(),
             })?;
-        let model_spec_id = Some(dataset.model_spec_id.clone());
-        let decision_policy_snapshot_id = Some(dataset.decision_policy_snapshot_id.clone());
+        let model_spec_id = Some(dataset.model_spec_id);
+        let decision_policy_snapshot_id = Some(dataset.decision_policy_snapshot_id);
         let params = ResearchJobParams::ModelTrain(ModelTrainJobParams {
             model_version_id: ModelVersionId::from_v7(),
             request,
@@ -156,7 +156,7 @@ impl ResearchJobPort for CoreResearchJobPort {
         if request.backtest_report_id.is_none() {
             request.backtest_report_id = Some(BacktestReportId::from_v7());
         }
-        let decision_policy_snapshot_id = Some(request.decision_policy_snapshot_id.clone());
+        let decision_policy_snapshot_id = Some(request.decision_policy_snapshot_id);
         let params = ResearchJobParams::Backtest(BacktestJobParams {
             model_version_id,
             request,
@@ -174,7 +174,7 @@ impl ResearchJobPort for CoreResearchJobPort {
         if request.path_set_id.is_none() {
             request.path_set_id = Some(BacktestPathSetId::from_v7());
         }
-        let decision_policy_snapshot_id = Some(request.decision_policy_snapshot_id.clone());
+        let decision_policy_snapshot_id = Some(request.decision_policy_snapshot_id);
         let params = ResearchJobParams::CpcvBacktest(CpcvBacktestJobParams {
             model_version_id,
             request,
@@ -191,7 +191,7 @@ impl ResearchJobPort for CoreResearchJobPort {
     ) -> QuantResult<ResearchJobView> {
         let params = ResearchJobParams::BiasTableFit(BiasTableFitJobParams {
             request,
-            decision_policy_snapshot_id: decision_policy_snapshot_id.clone(),
+            decision_policy_snapshot_id,
         });
         let job = self.new_job(params, None, Some(decision_policy_snapshot_id), None, &ctx);
         self.enqueue(job).await
@@ -205,7 +205,7 @@ impl ResearchJobPort for CoreResearchJobPort {
     ) -> QuantResult<ResearchJobView> {
         let params = ResearchJobParams::ModelCalibrationFit(ModelCalibrationFitJobParams {
             request,
-            decision_policy_snapshot_id: decision_policy_snapshot_id.clone(),
+            decision_policy_snapshot_id,
         });
         let job = self.new_job(params, None, Some(decision_policy_snapshot_id), None, &ctx);
         self.enqueue(job).await
@@ -334,9 +334,9 @@ impl ResearchJobPort for CoreResearchJobPort {
         }
         let job = self.new_job(
             info.params_json.clone(),
-            info.model_spec_id.clone(),
-            info.decision_policy_snapshot_id.clone(),
-            Some(info.job_id.clone()),
+            info.model_spec_id,
+            info.decision_policy_snapshot_id,
+            Some(info.job_id),
             &ctx,
         );
         self.enqueue(job).await

@@ -256,7 +256,7 @@ impl CryptoRtdsIngestWorker {
         let checkpoint = DomainSourceCheckpoint::PolymarketRtds {
             source_timestamp: report.event_time,
             envelope_timestamp: report.published_at,
-            report_hash: report.report_hash.clone(),
+            report_hash: report.report_hash,
         };
         self.projections
             .apply_crypto_report(report, checkpoint, gap_generation, true)

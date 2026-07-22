@@ -244,8 +244,8 @@ impl DefaultReportBuilder {
             return self.compose_empty(EmptyComposeInput {
                 request: &request,
                 context: &context,
-                market_selection_id: selection.market_selection_id.clone(),
-                market_selection_hash: selection.selector_hash.clone(),
+                market_selection_id: selection.market_selection_id,
+                market_selection_hash: selection.selector_hash,
                 selection: &selection,
                 account: &account,
                 equity: &equity,
@@ -261,7 +261,7 @@ impl DefaultReportBuilder {
                     )?,
                     warnings: Vec::new(),
                 },
-                model_run_id: Some(model_outcome.model_run_id.clone()),
+                model_run_id: Some(model_outcome.model_run_id),
                 market_selection_count: market_selection_count(&selection.included)?,
                 captures: artifacts.captures,
                 feature_vector_by_market: feature_vector_by_market(&features),
@@ -339,8 +339,8 @@ impl DefaultReportBuilder {
         self.compose_empty(EmptyComposeInput {
             request,
             context,
-            market_selection_id: selection.market_selection_id.clone(),
-            market_selection_hash: selection.selector_hash.clone(),
+            market_selection_id: selection.market_selection_id,
+            market_selection_hash: selection.selector_hash,
             selection,
             account,
             equity,
@@ -384,8 +384,8 @@ impl DefaultReportBuilder {
         self.compose_empty(EmptyComposeInput {
             request,
             context,
-            market_selection_id: selection.market_selection_id.clone(),
-            market_selection_hash: selection.selector_hash.clone(),
+            market_selection_id: selection.market_selection_id,
+            market_selection_hash: selection.selector_hash,
             selection,
             account,
             equity,
@@ -433,8 +433,8 @@ impl DefaultReportBuilder {
         self.compose_empty(EmptyComposeInput {
             request,
             context,
-            market_selection_id: selection.market_selection_id.clone(),
-            market_selection_hash: selection.selector_hash.clone(),
+            market_selection_id: selection.market_selection_id,
+            market_selection_hash: selection.selector_hash,
             selection,
             account,
             equity,
@@ -477,8 +477,8 @@ impl DefaultReportBuilder {
         self.compose_empty(EmptyComposeInput {
             request: stage.request,
             context: stage.context,
-            market_selection_id: stage.selection.market_selection_id.clone(),
-            market_selection_hash: stage.selection.selector_hash.clone(),
+            market_selection_id: stage.selection.market_selection_id,
+            market_selection_hash: stage.selection.selector_hash,
             selection: stage.selection,
             account: stage.account,
             equity: stage.equity,
@@ -517,8 +517,8 @@ impl DefaultReportBuilder {
         self.compose_empty(EmptyComposeInput {
             request: stage.request,
             context: stage.context,
-            market_selection_id: stage.selection.market_selection_id.clone(),
-            market_selection_hash: stage.selection.selector_hash.clone(),
+            market_selection_id: stage.selection.market_selection_id,
+            market_selection_hash: stage.selection.selector_hash,
             selection: stage.selection,
             account: stage.account,
             equity: stage.equity,
@@ -528,7 +528,7 @@ impl DefaultReportBuilder {
                 rejected_count: 0,
                 warnings: vec!["active model emitted no positive candidate".to_owned()],
             },
-            model_run_id: Some(model_outcome.model_run_id.clone()),
+            model_run_id: Some(model_outcome.model_run_id),
             market_selection_count: market_selection_count(&stage.selection.included)?,
             captures: artifacts.captures,
             feature_vector_by_market: feature_vector_by_market(stage.features),
@@ -689,10 +689,7 @@ impl DefaultReportBuilder {
             .build_snapshot(
                 MarketSelectionBuildRequest {
                     decision_at: context.boundary.decision_at(),
-                    decision_policy_snapshot_id: context
-                        .version
-                        .decision_policy_snapshot_id
-                        .clone(),
+                    decision_policy_snapshot_id: context.version.decision_policy_snapshot_id,
                     selection: context.config.recommendation.selection.clone(),
                     data_quality: context.config.recommendation.data_quality.clone(),
                     features: context.config.profile_artifacts.features.definition.clone(),
@@ -721,7 +718,7 @@ impl DefaultReportBuilder {
             .run(FeaturePipelineRequest {
                 included: &selection.included,
                 boundary: context.boundary.clone(),
-                decision_policy_snapshot_id: context.version.decision_policy_snapshot_id.clone(),
+                decision_policy_snapshot_id: context.version.decision_policy_snapshot_id,
                 features: &context.config.profile_artifacts.features.definition,
                 domain: &context.config.profile_artifacts.domain.definition,
                 data_quality: &context.config.recommendation.data_quality,
@@ -749,13 +746,13 @@ impl DefaultReportBuilder {
         let feature_vector_ids = features
             .persisted
             .iter()
-            .map(|info| info.feature_vector_id.clone())
+            .map(|info| info.feature_vector_id)
             .collect::<Vec<_>>();
         self.deps
             .model_runner
             .run(ModelRunRequest {
-                decision_policy_snapshot_id: context.version.decision_policy_snapshot_id.clone(),
-                market_selection_id: Some(selection.market_selection_id.clone()),
+                decision_policy_snapshot_id: context.version.decision_policy_snapshot_id,
+                market_selection_id: Some(selection.market_selection_id),
                 selection: &selection.included,
                 feature_vectors: &features.accepted,
                 feature_vector_ids: &feature_vector_ids,
@@ -797,8 +794,8 @@ impl DefaultReportBuilder {
         );
         planner.plan(PortfolioPlanInput {
             portfolio_plan_id: PortfolioPlanId::from_v7(),
-            model_run_id: model_outcome.model_run_id.clone(),
-            market_selection_id: selection.market_selection_id.clone(),
+            model_run_id: model_outcome.model_run_id,
+            market_selection_id: selection.market_selection_id,
             decision_at: context.boundary.decision_at(),
             candidates: plan_candidates,
             account,
@@ -881,7 +878,7 @@ impl DefaultReportBuilder {
         for row in rows {
             if let Some(price) = row.mid_price {
                 by_token
-                    .entry(row.token_id.as_str().to_owned())
+                    .entry(row.token_id.to_string())
                     .or_default()
                     .insert(row.bucket_ms, price.to_price().inner());
                 grid.insert(row.bucket_ms);
@@ -990,13 +987,13 @@ impl DefaultReportBuilder {
             knowledge_lag_secs: input.context.boundary.knowledge_lag_secs(),
             decision_at: input.context.boundary.decision_at(),
             published_at: Utc::now(),
-            decision_policy_snapshot_id: input.context.version.decision_policy_snapshot_id.clone(),
+            decision_policy_snapshot_id: input.context.version.decision_policy_snapshot_id,
             runtime_config: &input.context.config,
             runtime_mode: self.deps.runtime_mode.current(),
-            model_version_id: input.context.active.model_version_id.clone(),
+            model_version_id: input.context.active.model_version_id,
             profile_ref: input.context.active.version.profile_ref.clone(),
-            market_selection_id: input.selection.market_selection_id.clone(),
-            market_selection_hash: input.selection.selector_hash.clone(),
+            market_selection_id: input.selection.market_selection_id,
+            market_selection_hash: input.selection.selector_hash,
             selection: input.selection,
             account: input.account,
             account_snapshot: input.equity.account_snapshot.clone(),
@@ -1056,8 +1053,8 @@ impl DefaultReportBuilder {
         let portfolio_plan = match input.portfolio_plan {
             Some(portfolio_plan) => portfolio_plan,
             None => empty_plan_for_report(
-                input.model_run_id.clone(),
-                input.market_selection_id.clone(),
+                input.model_run_id,
+                input.market_selection_id,
                 input.context.boundary.decision_at(),
                 input.account,
                 &input.context.config,
@@ -1077,10 +1074,10 @@ impl DefaultReportBuilder {
             knowledge_lag_secs: input.context.boundary.knowledge_lag_secs(),
             decision_at: input.context.boundary.decision_at(),
             published_at: Utc::now(),
-            decision_policy_snapshot_id: input.context.version.decision_policy_snapshot_id.clone(),
+            decision_policy_snapshot_id: input.context.version.decision_policy_snapshot_id,
             runtime_config: &input.context.config,
             runtime_mode: self.deps.runtime_mode.current(),
-            model_version_id: input.context.active.model_version_id.clone(),
+            model_version_id: input.context.active.model_version_id,
             profile_ref: input.context.active.version.profile_ref.clone(),
             market_selection_id: input.market_selection_id,
             market_selection_hash: input.market_selection_hash,
@@ -1302,7 +1299,7 @@ fn empty_data_quality_snapshot(
     NewReportDataQualitySnapshot {
         report_data_quality_snapshot_id: ReportDataQualitySnapshotId::from_v7(),
         decision_at,
-        decision_policy_snapshot_id: context.version.decision_policy_snapshot_id.clone(),
+        decision_policy_snapshot_id: context.version.decision_policy_snapshot_id,
         tokens_json: ReportDataQualityTokens(Vec::new()),
     }
 }
@@ -1314,7 +1311,7 @@ fn feature_vector_by_market(
         .persisted
         .iter()
         .zip(features.accepted.iter())
-        .map(|(info, vector)| (vector.market_id.clone(), info.feature_vector_id.clone()))
+        .map(|(info, vector)| (vector.market_id.clone(), info.feature_vector_id))
         .collect()
 }
 

@@ -31,7 +31,7 @@ pub fn resolve_model_route(category: MarketCategory, model: &ModelConfig) -> Mod
     if let Some(reference) = model.category_model_pointers.get(&category) {
         return ModelRouting::CategorySpecific {
             category,
-            artifact: reference.id.clone(),
+            artifact: reference.id,
         };
     }
     ModelRouting::GenericWeighted
@@ -43,7 +43,7 @@ pub fn generic_model_version_id(model: &ModelConfig) -> Option<ModelVersionId> {
     model
         .active_model_version_id
         .as_ref()
-        .map(|reference| reference.id.clone())
+        .map(|reference| reference.id)
 }
 
 /// Resolve the model version id that should score a market in this category.
@@ -85,13 +85,13 @@ mod tests {
         let mut model = ModelConfig::default();
         model
             .category_model_pointers
-            .insert(MarketCategory::Crypto, version_ref(version.clone()));
+            .insert(MarketCategory::Crypto, version_ref(version));
 
         assert_eq!(
             resolve_model_route(MarketCategory::Crypto, &model),
             ModelRouting::CategorySpecific {
                 category: MarketCategory::Crypto,
-                artifact: version.clone(),
+                artifact: version,
             }
         );
         assert_eq!(
@@ -108,7 +108,7 @@ mod tests {
     fn absent_category_pointer_uses_generic_route() {
         let generic = ModelVersionId::from_v7();
         let model = ModelConfig {
-            active_model_version_id: Some(version_ref(generic.clone())),
+            active_model_version_id: Some(version_ref(generic)),
             category_model_pointers: iter::empty().collect(),
             ..ModelConfig::default()
         };

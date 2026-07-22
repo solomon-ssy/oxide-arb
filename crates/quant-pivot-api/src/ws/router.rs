@@ -162,17 +162,18 @@ fn publish(ledger: &RouterLedger, dirty: &HashSet<usize>) {
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::Arc, time::Duration};
+    use std::{
+        sync::{Arc, atomic::AtomicU64},
+        time::{Duration, Instant},
+    };
 
-    use parking_lot::Mutex;
+    use polymarket_client_sdk_v2::types::U256;
+    use quant_pivot_models::types::TokenKey;
     use tokio::sync::Semaphore;
     use tokio_util::sync::CancellationToken;
 
     use super::*;
-    use crate::ws::{
-        health::{ShardHealthBoard, TokenFreshnessBoard},
-        reconnect::ReconnectPolicy,
-    };
+    use crate::ws::{health::ShardHealthBoard, reconnect::ReconnectPolicy};
 
     fn test_router(max_per_shard: usize) -> ShardRouter {
         let (output_tx, _output_rx) = flume::bounded(64);
@@ -180,9 +181,12 @@ mod tests {
             max_per_shard,
             ShardDeps {
                 output_tx,
+                ingress_budget: Arc::new(Semaphore::new(256)),
                 ws_url: "ws://test".into(),
                 shutdown: CancellationToken::new(),
-                last_message_at: Arc::new(Mutex::new(None)),
+                message_epoch: Arc::new(Instant::now()),
+                last_message_tick: Arc::new(AtomicU64::new(0)),
+                token_resolver: Arc::new(|token: U256| Some(TokenKey::new(token.to::<u32>()))),
                 on_session_invalidated: None,
                 on_book_level_rejected: None,
                 reconnect_policy: ReconnectPolicy::default(),
@@ -190,7 +194,6 @@ mod tests {
                 sdk_max_backoff: Duration::from_secs(30),
                 connect_limiter: Arc::new(Semaphore::new(4)),
                 health: Arc::new(ShardHealthBoard::default()),
-                token_freshness: Arc::new(TokenFreshnessBoard::default()),
             },
         )
     }
@@ -214,6 +217,7 @@ mod tests {
             router.shard_tokens(0),
             HashSet::from([tok("1"), tok("2"), tok("3")])
         );
+        drop(router);
     }
 
     #[tokio::test]
@@ -228,6 +232,7 @@ mod tests {
         router.remove_tokens(&[tok("2")]);
         assert!(router.shard_tokens(0).is_empty());
         assert_eq!(router.shard_count(), 1);
+        drop(router);
     }
 
     #[tokio::test]
@@ -243,5 +248,6 @@ mod tests {
         router.assign_tokens(&[tok("4")]);
         assert_eq!(router.shard_count(), 2);
         assert_eq!(router.shard_tokens(0), HashSet::from([tok("2"), tok("4")]));
+        drop(router);
     }
 }

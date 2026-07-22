@@ -50,7 +50,7 @@ impl ModelComparisonReportRepository for PgModelComparisonReportRepository {
         &self,
         comparison_report_id: &ModelComparisonReportId,
     ) -> Result<Option<ModelComparisonReportInfo>, StorageError> {
-        Entity::find_by_id(comparison_report_id.clone())
+        Entity::find_by_id(*comparison_report_id)
             .one(&self.db)
             .await
             .map_err(StorageError::from)
@@ -64,7 +64,7 @@ impl ModelComparisonReportRepository for PgModelComparisonReportRepository {
         list_by_fk_ordered_desc::<Entity, _, _, _>(
             &self.db,
             Column::CandidateModelVersionId,
-            candidate_model_version_id.clone(),
+            *candidate_model_version_id,
             Column::CreatedAt,
             Into::into,
         )
@@ -79,7 +79,6 @@ impl ModelComparisonReportRepository for PgModelComparisonReportRepository {
             .add_option(
                 query
                     .candidate_model_version_id
-                    .clone()
                     .map(|id| Column::CandidateModelVersionId.eq(id)),
             )
             .add_option(query.from.map(|from| Column::CreatedAt.gte(from)))
@@ -102,8 +101,8 @@ impl ModelComparisonReportRepository for PgModelComparisonReportRepository {
         Entity::find()
             .filter(
                 Condition::any()
-                    .add(Column::CandidateReportId.eq(backtest_report_id.clone()))
-                    .add(Column::BaselineReportId.eq(backtest_report_id.clone())),
+                    .add(Column::CandidateReportId.eq(*backtest_report_id))
+                    .add(Column::BaselineReportId.eq(*backtest_report_id)),
             )
             .order_by_desc(Column::CreatedAt)
             .one(&self.db)
@@ -132,10 +131,10 @@ impl ModelComparisonReportRepository for PgModelComparisonReportRepository {
         let mut map = HashMap::new();
         for row in rows {
             let info = ModelComparisonReportInfo::from(row);
-            map.entry(info.candidate_report_id.clone())
-                .or_insert_with(|| info.comparison_report_id.clone());
-            map.entry(info.baseline_report_id.clone())
-                .or_insert_with(|| info.comparison_report_id.clone());
+            map.entry(info.candidate_report_id)
+                .or_insert_with(|| info.comparison_report_id);
+            map.entry(info.baseline_report_id)
+                .or_insert_with(|| info.comparison_report_id);
         }
         Ok(map)
     }

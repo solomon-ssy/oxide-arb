@@ -133,7 +133,7 @@ fn expand_core(
         impl #impl_generics From<#name #ty_generics> for String #where_clause {
             #[inline]
             fn from(id: #name #ty_generics) -> Self {
-                id.as_str().to_owned()
+                id.to_string()
             }
         }
     }
@@ -171,14 +171,14 @@ fn expand_seaorm(
         impl #impl_generics From<#name #ty_generics> for sea_orm::sea_query::Value #where_clause {
             #[inline]
             fn from(id: #name #ty_generics) -> Self {
-                sea_orm::sea_query::Value::String(Some(id.as_str().to_owned()))
+                sea_orm::sea_query::Value::String(Some(id.to_string()))
             }
         }
 
         impl #impl_generics From<&#name #ty_generics> for sea_orm::sea_query::Value #where_clause {
             #[inline]
             fn from(id: &#name #ty_generics) -> Self {
-                sea_orm::sea_query::Value::String(Some(id.as_str().to_owned()))
+                sea_orm::sea_query::Value::String(Some(id.to_string()))
             }
         }
 

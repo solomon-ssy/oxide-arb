@@ -34,7 +34,7 @@ use sea_orm::{
 fn content_hash(seed: char) -> ContentHash {
     let pair = format!("{:02x}", seed as u32);
     let hex: String = pair.chars().cycle().take(64).collect();
-    ContentHash::parse(format!("blake3:{hex}")).expect("hash")
+    ContentHash::parse(&format!("blake3:{hex}")).expect("hash")
 }
 
 fn new_spec(name: &str, family: ModelFamily) -> NewModelSpec {
@@ -110,7 +110,7 @@ pub async fn model_spec_rejects_forged_hash_and_is_append_only() {
         .create_model_spec(new_spec("append-only-spec", ModelFamily::WeightedFactor))
         .await
         .expect("create immutable model spec");
-    let row = Entity::find_by_id(created.model_spec_id.clone())
+    let row = Entity::find_by_id(created.model_spec_id)
         .one(&db)
         .await
         .expect("load model spec")
@@ -135,7 +135,7 @@ pub async fn create_model_version_allocates_monotonic_versions_under_lock() {
     let repo = PgModelRegistryRepository::new(pool.connection().clone());
     let model_spec_id = ModelSpecId::from_v7();
     repo.create_model_spec(model_spec_fixtures::new_model_spec_fixture(
-        model_spec_id.clone(),
+        model_spec_id,
         "version-alloc-spec",
         ModelFamily::HoldVsExitWeighted,
         86_400,
@@ -146,11 +146,11 @@ pub async fn create_model_version_allocates_monotonic_versions_under_lock() {
     .expect("model spec");
 
     let first = repo
-        .create_model_version(new_version(model_spec_id.clone(), 'a'))
+        .create_model_version(new_version(model_spec_id, 'a'))
         .await
         .expect("first version");
     let second = repo
-        .create_model_version(new_version(model_spec_id.clone(), 'b'))
+        .create_model_version(new_version(model_spec_id, 'b'))
         .await
         .expect("second version");
 
@@ -174,11 +174,11 @@ pub async fn find_and_page_versions_join_model_family_from_spec() {
         .expect("sell spec");
 
     let buy = repo
-        .create_model_version(new_version(buy_spec.model_spec_id.clone(), 'c'))
+        .create_model_version(new_version(buy_spec.model_spec_id, 'c'))
         .await
         .expect("buy version");
     let sell = repo
-        .create_model_version(new_version(sell_spec.model_spec_id.clone(), 'd'))
+        .create_model_version(new_version(sell_spec.model_spec_id, 'd'))
         .await
         .expect("sell version");
 
@@ -249,7 +249,7 @@ pub async fn model_version_typed_documents_fail_closed_at_database_boundary() {
             r#"{"format_version":1,"definition":{"kind":"future_algorithm"}}"#
                 .to_owned()
                 .into(),
-            version.model_version_id.clone().into(),
+            version.model_version_id.into(),
         ],
     );
     assert!(
@@ -260,10 +260,7 @@ pub async fn model_version_typed_documents_fail_closed_at_database_boundary() {
     let wrong_shape = Statement::from_sql_and_values(
         DatabaseBackend::Postgres,
         "UPDATE quant_model_version SET training_objective = $1::jsonb WHERE model_version_id = $2",
-        [
-            "[]".to_owned().into(),
-            version.model_version_id.clone().into(),
-        ],
+        ["[]".to_owned().into(), version.model_version_id.into()],
     );
     assert!(
         db.execute_raw(wrong_shape).await.is_err(),
@@ -277,7 +274,7 @@ pub async fn model_version_typed_documents_fail_closed_at_database_boundary() {
             r#"{"format_version":2,"definition":{"kind":"hand_authored","rationale":"wrong version"}}"#
                 .to_owned()
                 .into(),
-            version.model_version_id.clone().into(),
+            version.model_version_id.into(),
         ],
     );
     assert!(
@@ -292,7 +289,7 @@ pub async fn model_version_typed_documents_fail_closed_at_database_boundary() {
             r#"{"format_version":1,"definition":{"kind":"future_metrics"}}"#
                 .to_owned()
                 .into(),
-            version.model_version_id.clone().into(),
+            version.model_version_id.into(),
         ],
     );
     assert!(
@@ -307,7 +304,7 @@ pub async fn model_version_typed_documents_fail_closed_at_database_boundary() {
             r#"{"format_version":1,"definition":{"kind":"learning_to_rank","in_sample":{},"validation":{},"artifact_lineage":{"kind":"factor_native"}}}"#
                 .to_owned()
                 .into(),
-            version.model_version_id.clone().into(),
+            version.model_version_id.into(),
         ],
     );
     assert!(
@@ -338,7 +335,7 @@ pub async fn model_version_typed_documents_fail_closed_at_database_boundary() {
         "UPDATE quant_model_version SET training_objective = training_objective || $1::jsonb WHERE model_version_id = $2",
         [
             r#"{"future_field":true}"#.to_owned().into(),
-            version.model_version_id.clone().into(),
+            version.model_version_id.into(),
         ],
     );
     db.execute_raw(unknown_field)
@@ -363,12 +360,12 @@ pub async fn published_artifacts_coexist_until_model_routing_moves_and_retiremen
         .await
         .expect("model spec");
 
-    let mut first = new_version(spec.model_spec_id.clone(), 'e');
+    let mut first = new_version(spec.model_spec_id, 'e');
     first.publication_status = PublicationStatus::Published;
     repo.create_model_version(first)
         .await
         .expect("first published artifact");
-    let mut second = new_version(spec.model_spec_id.clone(), 'f');
+    let mut second = new_version(spec.model_spec_id, 'f');
     second.publication_status = PublicationStatus::Published;
     repo.create_model_version(second)
         .await
@@ -395,14 +392,14 @@ pub async fn published_picker_catalog_is_one_typed_join_with_side_and_scope_filt
         .await
         .expect("sell spec");
 
-    let mut generic_buy = new_version(buy_spec.model_spec_id.clone(), 'g');
+    let mut generic_buy = new_version(buy_spec.model_spec_id, 'g');
     generic_buy.publication_status = PublicationStatus::Published;
     let generic_buy = repo
         .create_model_version(generic_buy)
         .await
         .expect("generic buy");
 
-    let mut crypto_buy = new_version(buy_spec.model_spec_id.clone(), 'h');
+    let mut crypto_buy = new_version(buy_spec.model_spec_id, 'h');
     crypto_buy.category_scope = Some(MarketCategory::Crypto);
     crypto_buy.publication_status = PublicationStatus::Published;
     let crypto_buy = repo
@@ -410,14 +407,14 @@ pub async fn published_picker_catalog_is_one_typed_join_with_side_and_scope_filt
         .await
         .expect("crypto buy");
 
-    let mut weather_buy = new_version(buy_spec.model_spec_id.clone(), 'i');
+    let mut weather_buy = new_version(buy_spec.model_spec_id, 'i');
     weather_buy.category_scope = Some(MarketCategory::Weather);
     weather_buy.publication_status = PublicationStatus::Published;
     repo.create_model_version(weather_buy)
         .await
         .expect("weather buy");
 
-    let mut sell = new_version(sell_spec.model_spec_id.clone(), 'j');
+    let mut sell = new_version(sell_spec.model_spec_id, 'j');
     sell.publication_status = PublicationStatus::Published;
     let sell = repo.create_model_version(sell).await.expect("sell");
 

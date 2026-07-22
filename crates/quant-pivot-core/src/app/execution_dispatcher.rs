@@ -317,8 +317,8 @@ fn boot_recovery_reconciliation(order: &ExecutionOrderInfo) -> NewReconciliation
     }]);
     NewReconciliation {
         reconciliation_id: ReconciliationId::from_v7(),
-        execution_order_id: order.execution_order_id.clone(),
-        order_intent_id: order.order_intent_id.clone(),
+        execution_order_id: order.execution_order_id,
+        order_intent_id: order.order_intent_id,
         // Truth is not yet known at boot — this is `Pending` (awaiting the
         // recon worker), never `Unresolvable` (that is the worker's terminal
         // verdict). The fail-closed block on truly truth-unknown exposure keys

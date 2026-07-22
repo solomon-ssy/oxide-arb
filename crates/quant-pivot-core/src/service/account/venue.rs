@@ -90,6 +90,7 @@ mod tests {
     use rust_decimal_macros::dec;
 
     use super::*;
+    use crate::ingest::data_plane_index::DataPlane;
 
     struct StubClient {
         collateral: Usd,
@@ -151,7 +152,7 @@ mod tests {
                 positions,
                 fail,
             }),
-            Arc::new(MarketRegistry::new()),
+            Arc::new(MarketRegistry::new(Arc::new(DataPlane::new()))),
             Arc::new(StubReserved(reserved)),
             budget_cap,
             "0xfunder".to_owned(),

@@ -127,8 +127,8 @@ pub(super) async fn reinfer_frozen_policy_signals(
     examples: &[TrainingExample],
 ) -> QuantResult<FrozenPolicySignals> {
     let factory = factory_builder.build(ActiveSchemaBinding {
-        feature_schema_hash: feature_schema_hash.clone(),
-        factor_schema_hash: factor_schema_hash.clone(),
+        feature_schema_hash: *feature_schema_hash,
+        factor_schema_hash: *factor_schema_hash,
         bias_table_hash: None,
     });
     let runtime = factory.load(model_version, None).await?;
@@ -334,7 +334,7 @@ impl WeatherPolicyEvidence {
                             "{}:{}:{}:{}:{:?}",
                             row.cohort_hash
                                 .as_ref()
-                                .map_or("global", ContentHash::as_str),
+                                .map_or_else(|| "global".to_owned(), ToString::to_string),
                             row.example_id,
                             row.candidate_id.as_deref().unwrap_or("all"),
                             row.latency_multiplier
@@ -468,7 +468,7 @@ pub(super) fn evaluate_weather_policy_evidence(
             .ok_or_else(|| methodology("selected Weather candidate is unavailable".to_owned()))?;
         evidence.cohorts.push(fitted_cohort(FittedCohortRequest {
             key: cohort,
-            cohort_hash: cohort_hash.clone(),
+            cohort_hash,
             selected,
             one_x: &first.summary,
             two_x: &second.summary,
@@ -481,7 +481,7 @@ pub(super) fn evaluate_weather_policy_evidence(
         evidence
             .statistical_runs
             .extend(runs.into_iter().map(|run| PolicyStatisticalRun {
-                cohort_hash: cohort_hash.clone(),
+                cohort_hash,
                 latency_multiplier: run.latency_multiplier,
                 summary: run.summary,
             }));
@@ -571,7 +571,7 @@ fn append_weather_latency_evidence(
         )?;
         evidence.cohort_trials.push(TradePolicyCohortTrialRow {
             cohort: cohort.clone(),
-            cohort_hash: cohort_hash.clone(),
+            cohort_hash: *cohort_hash,
             candidate_id: candidate_performance.candidate_id.clone(),
             latency_multiplier: run.latency_multiplier,
             sample_count: metrics.sample_count,
@@ -590,7 +590,7 @@ fn append_weather_latency_evidence(
             .cpcv_paths
             .iter()
             .map(|path| TradePolicyCpcvPathRow {
-                cohort_hash: cohort_hash.clone(),
+                cohort_hash: *cohort_hash,
                 latency_multiplier: run.latency_multiplier,
                 path_index: path.path_index,
                 group_returns: path.group_returns.clone(),
@@ -602,7 +602,7 @@ fn append_weather_latency_evidence(
     evidence
         .statistical_summaries
         .push(TradePolicyStatisticalSummaryRow {
-            cohort_hash: cohort_hash.clone(),
+            cohort_hash: *cohort_hash,
             selected_candidate_id: run.summary.selected_candidate_id.clone(),
             latency_multiplier: run.latency_multiplier,
             sample_count: run.summary.sample_count,
@@ -682,12 +682,12 @@ fn append_row_evidence(
         evidence
             .observation_eligibility
             .push(TradePolicyObservationEligibilityRow {
-                example_id: replay.example.example_id.clone(),
+                example_id: replay.example.example_id,
                 market_id: replay.example.market_id.clone(),
                 token_id: replay.token_id.clone(),
                 decision_at: replay.example.decision_at(),
                 label_horizon_end: horizon_end,
-                cohort_hash: cohort_hash.clone(),
+                cohort_hash: *cohort_hash,
                 candidate_count: u32::try_from(candidate_ids.len()).map_err(|error| {
                     methodology(format!("candidate count does not fit u32: {error}"))
                 })?,
@@ -702,11 +702,11 @@ fn append_row_evidence(
             evidence
                 .candidate_trials
                 .push(TradePolicyCandidateTrialRow {
-                    example_id: replay.example.example_id.clone(),
+                    example_id: replay.example.example_id,
                     market_id: replay.example.market_id.clone(),
                     token_id: replay.token_id.clone(),
                     candidate_id: outcome.candidate_id.clone(),
-                    cohort_hash: cohort_hash.clone(),
+                    cohort_hash: *cohort_hash,
                     outcome_side: outcome.outcome_side,
                     latency_multiplier: outcome.latency.stress_multiplier,
                     entry_triggered_at: outcome.entry_triggered_at,
@@ -727,11 +727,11 @@ fn append_row_evidence(
                 });
             if let Some(gap) = outcome.gap {
                 evidence.coverage_gaps.push(TradePolicyCoverageGapRow {
-                    example_id: replay.example.example_id.clone(),
+                    example_id: replay.example.example_id,
                     market_id: replay.example.market_id.clone(),
                     token_id: replay.token_id.clone(),
                     candidate_id: Some(outcome.candidate_id.clone()),
-                    cohort_hash: Some(cohort_hash.clone()),
+                    cohort_hash: Some(*cohort_hash),
                     latency_multiplier: Some(outcome.latency.stress_multiplier),
                     decision_at: replay.example.decision_at(),
                     gap,
@@ -740,8 +740,8 @@ fn append_row_evidence(
             }
             for fill in &outcome.fills {
                 evidence.fills.push(TradePolicyFillEvidenceRow {
-                    example_id: replay.example.example_id.clone(),
-                    cohort_hash: cohort_hash.clone(),
+                    example_id: replay.example.example_id,
+                    cohort_hash: *cohort_hash,
                     candidate_id: outcome.candidate_id.clone(),
                     outcome_side: outcome.outcome_side,
                     latency_multiplier: outcome.latency.stress_multiplier,
@@ -769,10 +769,10 @@ fn append_row_evidence(
                     gross_amount: fill.gross_amount,
                     fee: fill.fee,
                     cash_delta: fill.cash_delta,
-                    fee_schedule_hash: fill.fee_schedule_hash.clone(),
+                    fee_schedule_hash: fill.fee_schedule_hash,
                     stream_session_id: fill.stream_session_id,
                     token_sequence: fill.token_sequence,
-                    source_event_hash: fill.source_event_hash.clone(),
+                    source_event_hash: fill.source_event_hash,
                 });
             }
         }
@@ -931,7 +931,7 @@ fn pooled_weather_cohort(
     ))?;
     let dimension = |name: &str| TradePolicyCohortDimension {
         methodology_id: format!("weather_{name}_pooled_v1"),
-        methodology_hash: methodology_hash.clone(),
+        methodology_hash,
         bucket_id: "all".to_owned(),
     };
     Ok(TradePolicyCohortKey {
@@ -1612,12 +1612,12 @@ fn materialize_condition_artifact(
             market_id: example.market_id.clone(),
             token_id: signal.token_id.clone(),
             outcome_side: signal.outcome_side,
-            market_linkage_id: Some(linkage.linkage_id.clone()),
-            market_linkage_hash: Some(linkage.content_hash.clone()),
+            market_linkage_id: Some(linkage.linkage_id),
+            market_linkage_hash: Some(linkage.content_hash),
             catalog_snapshot_id: market_selection_id,
             catalog_snapshot_hash,
-            model_version_id: request.model_version_id.clone(),
-            decision_policy_snapshot_id: request.decision_policy_snapshot_id.clone(),
+            model_version_id: *request.model_version_id,
+            decision_policy_snapshot_id: *request.decision_policy_snapshot_id,
             factor_bindings,
             source_bindings,
         },
@@ -1680,9 +1680,9 @@ fn materialize_condition_tree(
             minimum_confidence,
             max_input_age_ms,
         } => Ok(EntryConditionV1::Factor(FactorCondition {
-            definition_id: definition_id.clone(),
-            definition_hash: definition_hash.clone(),
-            model_version_id: model_version_id.clone(),
+            definition_id: *definition_id,
+            definition_hash: *definition_hash,
+            model_version_id: *model_version_id,
             measure: *measure,
             comparison: *comparison,
             threshold: *threshold,
@@ -1747,7 +1747,7 @@ fn materialize_weather_event(
         .map(|source| EntryConditionSourceBinding {
             source_id: source.source_id.clone(),
             instrument_key: source.instrument_key.clone(),
-            binding_hash: source.binding_hash.clone(),
+            binding_hash: source.binding_hash,
         })
         .ok_or_else(|| methodology("Weather linkage has no live-event source".to_owned()))?;
     let MarketEventTemplate::WeatherDailyTemperaturePredicate { max_input_age_ms } = template
@@ -1765,7 +1765,7 @@ fn materialize_weather_event(
                 temperature_statistic: subject.decision_group.temperature_statistic,
                 unit: subject.decision_group.market_unit,
                 band: subject.outcome_band.clone(),
-                proxy_methodology_hash: subject.decision_group.proxy_methodology_hash.clone(),
+                proxy_methodology_hash: subject.decision_group.proxy_methodology_hash,
                 max_input_age_ms,
             },
         ),
@@ -1782,10 +1782,7 @@ fn materialize_weather_event(
                         temperature_statistic: subject.decision_group.temperature_statistic,
                         unit: subject.decision_group.market_unit,
                         terminal_bound,
-                        proxy_methodology_hash: subject
-                            .decision_group
-                            .proxy_methodology_hash
-                            .clone(),
+                        proxy_methodology_hash: subject.decision_group.proxy_methodology_hash,
                         max_input_age_ms,
                     },
                 )
@@ -1798,7 +1795,7 @@ fn materialize_weather_event(
                     temperature_statistic: subject.decision_group.temperature_statistic,
                     unit: subject.decision_group.market_unit,
                     band: subject.outcome_band.clone(),
-                    proxy_methodology_hash: subject.decision_group.proxy_methodology_hash.clone(),
+                    proxy_methodology_hash: subject.decision_group.proxy_methodology_hash,
                 },
             ),
         },
@@ -1844,7 +1841,7 @@ fn condition_inputs(
     .collect();
     Ok(EntryConditionInputSet {
         binding: binding.clone(),
-        binding_revision: linkage.content_hash.clone(),
+        binding_revision: linkage.content_hash,
         binding_unavailable_reason: None,
         fold_state,
         evaluated_at: observation.at,
@@ -1893,9 +1890,9 @@ fn factor_inputs(
         })
         .map(|(factor_binding, factor, raw_value, normalized_value)| {
             Ok(FactorSnapshotInput {
-                definition_id: factor_binding.definition_id.clone(),
-                definition_hash: factor_binding.definition_hash.clone(),
-                model_version_id: binding.model_version_id.clone(),
+                definition_id: factor_binding.definition_id,
+                definition_hash: factor_binding.definition_hash,
+                model_version_id: binding.model_version_id,
                 raw_value,
                 normalized_value,
                 confidence: factor.confidence.inner(),
@@ -2008,7 +2005,7 @@ fn weather_input(
         source: EntryConditionSourceBinding {
             source_id: source.source_id.clone(),
             instrument_key: source.instrument_key.clone(),
-            binding_hash: source.binding_hash.clone(),
+            binding_hash: source.binding_hash,
         },
         station: subject.decision_group.station.to_string(),
         local_date: subject.decision_group.local_date,
@@ -2078,8 +2075,8 @@ fn collect_bindings(
 ) {
     match node {
         EntryConditionV1::Factor(condition) => factors.push(EntryConditionFactorBinding {
-            definition_id: condition.definition_id.clone(),
-            definition_hash: condition.definition_hash.clone(),
+            definition_id: condition.definition_id,
+            definition_hash: condition.definition_hash,
         }),
         EntryConditionV1::MarketEvent { event } => sources.push(match event {
             MarketEventCondition::CryptoSubjectPredicateEntered(condition) => {
@@ -2124,7 +2121,8 @@ fn deterministic_recommendation_id(example: &TrainingExample) -> RecommendationI
 
 fn deterministic_market_selection_id(hash: &ContentHash) -> MarketSelectionId {
     const NAMESPACE: Uuid = Uuid::from_u128(0x93ca_7564_5b4d_4788_a748_3114_b8df_3226);
-    MarketSelectionId::new(Uuid::new_v5(&NAMESPACE, hash.as_str().as_bytes()))
+    let canonical = hash.canonical_text();
+    MarketSelectionId::new(Uuid::new_v5(&NAMESPACE, canonical.as_bytes()))
 }
 
 fn methodology(detail: String) -> QuantError {

@@ -47,7 +47,7 @@ impl ExecutionOrderRepository for PgExecutionOrderRepository {
         order_intent_id: &OrderIntentId,
     ) -> Result<Vec<ExecutionOrderInfo>, StorageError> {
         Entity::find()
-            .filter(Column::OrderIntentId.eq(order_intent_id.clone()))
+            .filter(Column::OrderIntentId.eq(*order_intent_id))
             .all(&self.db)
             .await
             .map_err(StorageError::from)
@@ -58,7 +58,7 @@ impl ExecutionOrderRepository for PgExecutionOrderRepository {
         &self,
         execution_order_id: &ExecutionOrderId,
     ) -> Result<Option<ExecutionOrderInfo>, StorageError> {
-        Entity::find_by_id(execution_order_id.clone())
+        Entity::find_by_id(*execution_order_id)
             .one(&self.db)
             .await
             .map_err(StorageError::from)
@@ -108,7 +108,7 @@ impl ExecutionOrderRepository for PgExecutionOrderRepository {
         execution_order_id: &ExecutionOrderId,
         patch: ExecutionOrderPatch,
     ) -> Result<ExecutionOrderInfo, StorageError> {
-        let Some(row) = Entity::find_by_id(execution_order_id.clone())
+        let Some(row) = Entity::find_by_id(*execution_order_id)
             .one(&self.db)
             .await
             .map_err(StorageError::from)?
@@ -210,7 +210,6 @@ fn page_condition(query: &ExecutionOrderListQuery) -> Condition {
         .add_option(
             query
                 .order_intent_id
-                .clone()
                 .map(|order_intent_id| Column::OrderIntentId.eq(order_intent_id)),
         )
         .add_option(

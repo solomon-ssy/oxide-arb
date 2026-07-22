@@ -422,9 +422,9 @@ impl ModelCalibrationFitService {
         let (_report, samples) = backtest
             .run_for_calibration(
                 BacktestInput {
-                    model_version_id: request.model_version_id.clone(),
-                    training_dataset_id: request.calibration_dataset_id.clone(),
-                    decision_policy_snapshot_id: decision_policy_snapshot_id.clone(),
+                    model_version_id: request.model_version_id,
+                    training_dataset_id: request.calibration_dataset_id,
+                    decision_policy_snapshot_id: *decision_policy_snapshot_id,
                     calibrate: false,
                     backtest_report_id: None,
                 },
@@ -487,8 +487,8 @@ impl ModelCalibrationFitService {
         )?;
 
         let payload = ModelScoreCalibrationPayload {
-            model_version_id: request.model_version_id.clone(),
-            calibration_dataset_id: request.calibration_dataset_id.clone(),
+            model_version_id: request.model_version_id,
+            calibration_dataset_id: request.calibration_dataset_id,
             mapping,
             reliability,
         };
@@ -509,7 +509,7 @@ impl ModelCalibrationFitService {
         let created = self
             .calibration_repo
             .create(NewCalibrationArtifact {
-                artifact_id: artifact_id.clone(),
+                artifact_id,
                 kind: CalibrationKind::ModelScore,
                 content_hash,
                 calibration_split_hash: split_hash,

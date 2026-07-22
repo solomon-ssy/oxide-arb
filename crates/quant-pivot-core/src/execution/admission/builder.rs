@@ -165,7 +165,9 @@ impl AdmissionInputBuilder {
             manual_block: fetched.manual_block,
         };
 
-        let book = deps.book_store.load(&intent.entry_order_json.token_id);
+        let book = deps
+            .book_store
+            .load_by_id(&intent.entry_order_json.token_id);
         let data_quality = deps.data_quality.snapshot();
         let mode = deps.runtime_mode.current();
         let kill_switch = deps.kill_switch.current();
@@ -225,10 +227,10 @@ impl AdmissionInputBuilder {
         now: DateTime<Utc>,
     ) -> QuantResult<ParallelAdmissionFetch> {
         let deps = &self.deps;
-        let report_id = recommendation.recommendation_report_id.clone();
+        let report_id = recommendation.recommendation_report_id;
         let market_id = recommendation.market_id.clone();
-        let order_intent_id = intent.order_intent_id.clone();
-        let model_version_id = intent.model_version_id.clone();
+        let order_intent_id = intent.order_intent_id;
+        let model_version_id = intent.model_version_id;
         let account_factory = Arc::clone(&deps.account_factory);
         let clob = Arc::clone(&deps.clob);
         let token_id = intent.entry_order_json.token_id.clone();
@@ -275,7 +277,7 @@ impl AdmissionInputBuilder {
                 reason: "no point-in-time CLOB market-info observation is available".to_owned(),
             })?;
         let venue_metadata = venue_metadata_result?;
-        let clob_market_info_hash = clob_market_info.payload_hash.clone();
+        let clob_market_info_hash = clob_market_info.payload_hash;
         let active_version = active_version_result?
             .ok_or_else(|| not_found("decision_policy_snapshot", "current".to_owned()))?;
 

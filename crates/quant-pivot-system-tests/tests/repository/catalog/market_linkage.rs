@@ -63,9 +63,9 @@ fn linkage(
 ) -> NewMarketLinkage {
     let market_id = MarketId::new(market_id);
     let metadata_hash =
-        ContentHash::parse(format!("blake3:{}", format!("{seed:02x}").repeat(32))).expect("hash");
+        ContentHash::parse(&format!("blake3:{}", format!("{seed:02x}").repeat(32))).expect("hash");
     let capability_registry_hash =
-        ContentHash::parse(format!("blake3:{}", "f".repeat(64))).expect("hash");
+        ContentHash::parse(&format!("blake3:{}", "f".repeat(64))).expect("hash");
     NewMarketLinkage::from_derivation(MarketLinkageDerivation {
         market_id,
         domain_family: DomainFamily::Crypto,

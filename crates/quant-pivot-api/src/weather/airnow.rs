@@ -199,7 +199,7 @@ fn parse_pm25_reporting_area(
     timezone: Tz,
     available_at: DateTime<Utc>,
 ) -> QuantResult<AirNowPm25ReportingAreaSnapshot> {
-    let file_hash = ContentHash::parse(CanonicalDigest::prefixed_bytes(body.as_bytes()))?;
+    let file_hash = CanonicalDigest::content_hash_bytes(body.as_bytes());
     let records = matching_records(body, area, state)?;
     let mut groups = BTreeMap::<GroupKey, Vec<AirNowRecord>>::new();
     for record in records {
@@ -275,8 +275,8 @@ fn parse_pm25_reporting_area(
                 lead_hours: forecast_lead_hours(reference_time, key.valid_at)?,
                 member: None,
                 revision: 0,
-                grid_binding_hash: binding_hash.clone(),
-                run_manifest_hash: file_hash.clone(),
+                grid_binding_hash: binding_hash,
+                run_manifest_hash: file_hash,
                 report_hash,
             });
         } else {

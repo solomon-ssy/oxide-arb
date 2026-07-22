@@ -33,7 +33,7 @@ pub fn factor_definition_identity(
     Ok(FactorDefinitionIdentity {
         factor_definition_id,
         definition_hash,
-        feature_contract_hash: feature_contract_hash.clone(),
+        feature_contract_hash: *feature_contract_hash,
     })
 }
 
@@ -62,7 +62,7 @@ mod tests {
     };
 
     fn hash(seed: char) -> ContentHash {
-        ContentHash::parse(format!("blake3:{}", seed.to_string().repeat(64))).expect("hash")
+        ContentHash::parse(&format!("blake3:{}", seed.to_string().repeat(64))).expect("hash")
     }
 
     fn definition() -> FactorDefinitionDocument {

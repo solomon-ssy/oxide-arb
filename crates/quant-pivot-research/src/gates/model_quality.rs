@@ -924,7 +924,7 @@ mod tests {
     };
 
     fn hash() -> ContentHash {
-        ContentHash::parse(format!("blake3:{}", "0".repeat(64))).expect("hash")
+        ContentHash::parse(&format!("blake3:{}", "0".repeat(64))).expect("hash")
     }
 
     /// A healthy backtest report that clears every hard + soft gate.

@@ -129,10 +129,8 @@ pub fn domain_capability_registry(
     for contract in &mut weather_contracts {
         contract
             .dependency_hashes
-            .push(weather_station_registry_hash.clone());
-        contract
-            .dependency_hashes
-            .push(vertical_bindings_hash.clone());
+            .push(*weather_station_registry_hash);
+        contract.dependency_hashes.push(vertical_bindings_hash);
     }
     contracts.extend(weather_contracts);
     let registry = DomainCapabilityRegistryArtifact::new(DOMAIN_RESOLVER_VERSION, contracts)?;
@@ -759,9 +757,9 @@ mod tests {
     #[test]
     fn weather_station_registry_hash_is_a_capability_dependency() {
         let first_station_hash =
-            ContentHash::parse(format!("blake3:{}", "a".repeat(64))).expect("first station hash");
+            ContentHash::parse(&format!("blake3:{}", "a".repeat(64))).expect("first station hash");
         let second_station_hash =
-            ContentHash::parse(format!("blake3:{}", "b".repeat(64))).expect("second station hash");
+            ContentHash::parse(&format!("blake3:{}", "b".repeat(64))).expect("second station hash");
         let bindings = WeatherVerticalBindingsConfig::default();
         let first =
             domain_capability_registry(&first_station_hash, &bindings).expect("first registry");

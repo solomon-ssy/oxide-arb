@@ -56,7 +56,7 @@ impl CryptoPriceReport {
                 .observations_timestamp
                 .map(|value| value.timestamp_millis()),
             expires_at: self.expires_at.map(|value| value.timestamp_millis()),
-            report_hash: self.report_hash.clone(),
+            report_hash: self.report_hash,
             raw_report: self.raw_report.clone(),
             schema_version: ChSchemaVersion::FIRST,
         }
@@ -182,7 +182,7 @@ impl WeatherObservationReport {
             published_at: self.published_at.timestamp_millis(),
             available_at: self.available_at.timestamp_millis(),
             revision,
-            report_hash: self.report_hash.clone(),
+            report_hash: self.report_hash,
             supersedes_report_hash,
             raw_report: self.raw_report.clone(),
             schema_version: ChSchemaVersion::FIRST,
@@ -335,9 +335,9 @@ impl WeatherForecastPoint {
             lead_hours: self.lead_hours,
             member: self.member,
             revision: self.revision,
-            grid_binding_hash: self.grid_binding_hash.clone(),
-            run_manifest_hash: self.run_manifest_hash.clone(),
-            report_hash: self.report_hash.clone(),
+            grid_binding_hash: self.grid_binding_hash,
+            run_manifest_hash: self.run_manifest_hash,
+            report_hash: self.report_hash,
             schema_version: ChSchemaVersion::FIRST,
         }
     }

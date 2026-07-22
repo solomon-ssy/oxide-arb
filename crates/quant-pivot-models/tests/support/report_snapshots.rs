@@ -142,7 +142,7 @@ fn limit_entry_plan() -> EntryPlan {
     EntryPlan {
         condition: EntryConditionPlan::Conditional {
             artifact_id: EntryConditionArtifactId::new(seeded_uuid("snapshot-condition")),
-            content_hash: ContentHash::parse(format!("blake3:{}", "c".repeat(64)))
+            content_hash: ContentHash::parse(&format!("blake3:{}", "c".repeat(64)))
                 .expect("condition hash"),
         },
         order_policy: EntryOrderPolicy::Passive {

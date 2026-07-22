@@ -34,7 +34,7 @@ impl FeatureGroupBuilder for MicrostructureFeatureBuilder {
         let window = ctx.window;
         let evidence = EvidenceSourceRef {
             source_kind: EvidenceSourceKind::ClickHouseFact,
-            reference: window.token_id.as_str().to_owned(),
+            reference: window.token_id.to_string(),
             // Anchor on the freshest fact so the fact-lag staleness check sees the
             // true age; an empty window falls back to the PIT cutoff.
             effective_at: window

@@ -342,7 +342,7 @@ pub fn verify_frozen_dataset_artifact(
             ),
         })?;
     let expected_bytes_hash = materialization.artifact_bytes_hash;
-    let actual_bytes_hash = ContentHash::parse(CanonicalDigest::prefixed_bytes(bytes))?;
+    let actual_bytes_hash = CanonicalDigest::content_hash_bytes(bytes);
     if &actual_bytes_hash != expected_bytes_hash {
         return Err(ResearchError::DatasetBuild {
             detail: format!(
@@ -577,7 +577,6 @@ impl TrainingDatasetService {
         let samples = plan_samples(&request, &plan_markets)?;
         let training_dataset_id = request
             .training_dataset_id
-            .clone()
             .unwrap_or_else(TrainingDatasetId::from_v7);
         let label_names =
             label_names_for_sources(&request.sample_sources, trade_policy_artifact_id.is_some());
@@ -632,7 +631,7 @@ impl TrainingDatasetService {
             let observed = [&info.token_yes, &info.token_no].iter().any(|token| {
                 prefetched.books.get(*token).is_some_and(|rows| {
                     rows.iter().any(|row| {
-                        DateTime::from_timestamp_millis(row.event_time).is_some_and(|at| {
+                        DateTime::from_timestamp_millis(row.venue_event_time).is_some_and(|at| {
                             at < request.window_end
                                 && at
                                     + ChronoDuration::from_std(self.max_book_staleness)
@@ -1211,7 +1210,6 @@ impl TrainingDatasetPlanner for TrainingDatasetService {
         }
         let training_dataset_id = request
             .training_dataset_id
-            .clone()
             .unwrap_or_else(TrainingDatasetId::from_v7);
         let label_names =
             label_names_for_sources(&request.sample_sources, trade_policy_artifact_id.is_some());
@@ -1281,7 +1279,7 @@ impl TrainingDatasetService {
         cancel: CancellationToken,
     ) -> QuantResult<TrainingDatasetArtifact> {
         self.prepare_build_ledger(&plan).await?;
-        let training_dataset_id = plan.training_dataset_id.clone();
+        let training_dataset_id = plan.training_dataset_id;
         let result = historical_window_from_prefetched(source.prefetched, self.max_book_staleness)
             .and_then(|window| {
                 if source.invalid_sessions.is_empty() {
@@ -1298,8 +1296,14 @@ impl TrainingDatasetService {
             });
         let result = match result {
             Ok(window) => {
-                self.materialize_window(plan, sink, cancel, window, source.clob_market_info)
-                    .await
+                Box::pin(self.materialize_window(
+                    plan,
+                    sink,
+                    cancel,
+                    window,
+                    source.clob_market_info,
+                ))
+                .await
             }
             Err(error) => Err(error),
         };
@@ -1314,7 +1318,7 @@ impl TrainingDatasetService {
         cancel: CancellationToken,
     ) -> QuantResult<TrainingDatasetArtifact> {
         self.prepare_build_ledger(&plan).await?;
-        let training_dataset_id = plan.training_dataset_id.clone();
+        let training_dataset_id = plan.training_dataset_id;
         let result = Box::pin(self.materialize_inner(plan, sink, cancel)).await;
         self.persist_build_failure(&training_dataset_id, result)
             .await
@@ -1349,8 +1353,7 @@ impl TrainingDatasetService {
             .load(&context.window_spec(&plan, &self.domain))
             .await?;
         let clob_market_info = self.load_clob_market_info(&plan).await?;
-        self.materialize_window(plan, sink, cancel, window, clob_market_info)
-            .await
+        Box::pin(self.materialize_window(plan, sink, cancel, window, clob_market_info)).await
     }
 
     async fn materialize_window(
@@ -1472,9 +1475,9 @@ impl TrainingDatasetService {
             let create_result = self
                 .dataset_repo
                 .create_plan(NewTrainingDatasetPlan {
-                    training_dataset_id: plan.training_dataset_id.clone(),
-                    model_spec_id: plan.request.model_spec_id.clone(),
-                    model_spec_definition_hash: plan.model_spec_definition_hash.clone(),
+                    training_dataset_id: plan.training_dataset_id,
+                    model_spec_id: plan.request.model_spec_id,
+                    model_spec_definition_hash: plan.model_spec_definition_hash,
                     window_start: plan.request.window_start,
                     window_end: plan.request.window_end,
                     purpose: plan.request.purpose,
@@ -1485,7 +1488,7 @@ impl TrainingDatasetService {
                     sample_sources: Some(TrainingSampleSources(
                         plan.request.sample_sources.clone(),
                     )),
-                    decision_policy_snapshot_id: plan.request.decision_policy_snapshot_id.clone(),
+                    decision_policy_snapshot_id: plan.request.decision_policy_snapshot_id,
                 })
                 .await;
             match create_result {
@@ -1569,7 +1572,7 @@ impl TrainingDatasetService {
         pit: &dyn PointInTimeSnapshotSource,
     ) -> QuantResult<TrainingDatasetArtifact> {
         self.prepare_build_ledger(&plan).await?;
-        let training_dataset_id = plan.training_dataset_id.clone();
+        let training_dataset_id = plan.training_dataset_id;
         let result = self.materialize_with_pit_source(plan, pit).await;
         self.persist_build_failure(&training_dataset_id, result)
             .await
@@ -1785,7 +1788,7 @@ impl TrainingDatasetService {
             &self.selection,
             &self.data_quality,
             &self.features,
-            request.decision_policy_snapshot_id.clone(),
+            request.decision_policy_snapshot_id,
             request.knowledge_lag_secs,
             model_requirements,
         )
@@ -1823,32 +1826,29 @@ impl TrainingDatasetService {
             return Ok(());
         }
 
-        let recommendation_ids: Vec<_> = attributions
-            .iter()
-            .map(|a| a.recommendation_id.clone())
-            .collect();
+        let recommendation_ids: Vec<_> = attributions.iter().map(|a| a.recommendation_id).collect();
         let recommendations = self
             .recommendation_repo
             .find_by_ids(&recommendation_ids)
             .await?;
         let recommendation_by_id: HashMap<_, _> = recommendations
             .into_iter()
-            .map(|r| (r.recommendation_id.clone(), r))
+            .map(|r| (r.recommendation_id, r))
             .collect();
 
         let feature_vector_ids: Vec<_> = recommendation_by_id
             .values()
-            .map(|r| r.evidence_refs.feature_vector_id.clone())
+            .map(|r| r.evidence_refs.feature_vector_id)
             .collect();
         let feature_infos = self.feature_repo.find_by_ids(&feature_vector_ids).await?;
         let feature_by_id: HashMap<_, _> = feature_infos
             .into_iter()
-            .map(|f| (f.feature_vector_id.clone(), f))
+            .map(|f| (f.feature_vector_id, f))
             .collect();
 
         let selection_ids = recommendation_by_id
             .values()
-            .map(|recommendation| recommendation.evidence_refs.market_selection_id.clone())
+            .map(|recommendation| recommendation.evidence_refs.market_selection_id)
             .collect::<HashSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
@@ -1860,7 +1860,7 @@ impl TrainingDatasetService {
             .into_iter()
             .map(|member| {
                 (
-                    (member.market_selection_id.clone(), member.market_id.clone()),
+                    (member.market_selection_id, member.market_id.clone()),
                     member,
                 )
             })
@@ -1912,7 +1912,7 @@ impl TrainingDatasetService {
             .plan
             .exit_training_lots
             .iter()
-            .map(|lot| (lot.order_intent_id.clone(), lot))
+            .map(|lot| (lot.order_intent_id, lot))
             .collect();
         let exit_labelers = exit_decision_labelers();
         let builder = ConfiguredFeatureBuilder::new(&self.features, &self.domain)?;
@@ -2044,8 +2044,8 @@ impl TrainingDatasetService {
             source_refs: vector.evidence_refs(),
             decision_capture: Some(decision_capture),
             lot_context: Some(LotTrainingContext {
-                order_intent_id: input.sample.order_intent_id.clone(),
-                position_id: input.sample.position_id.clone(),
+                order_intent_id: input.sample.order_intent_id,
+                position_id: input.sample.position_id,
                 remaining_shares: remaining,
                 avg_price: input.lot.avg_price,
                 peak_mark: evidence.peak_mark,
@@ -2154,11 +2154,11 @@ impl TrainingDatasetService {
                 &plan,
                 &examples,
                 DatasetSchemaHashes {
-                    feature: feature_schema_hash.clone(),
-                    factor: factor_schema_hash.clone(),
-                    label: label_schema_hash.clone(),
+                    feature: feature_schema_hash,
+                    factor: factor_schema_hash,
+                    label: label_schema_hash,
                 },
-                dataset_hash.clone(),
+                dataset_hash,
             )
             .await?;
 
@@ -2171,13 +2171,13 @@ impl TrainingDatasetService {
                 &plan.training_dataset_id,
                 CompleteTrainingDatasetBuild {
                     status: integrity.status,
-                    feature_schema_hash: feature_schema_hash.clone(),
-                    factor_schema_hash: factor_schema_hash.clone(),
-                    label_schema_hash: label_schema_hash.clone(),
-                    dataset_hash: dataset_hash.clone(),
+                    feature_schema_hash,
+                    factor_schema_hash,
+                    label_schema_hash,
+                    dataset_hash,
                     manifest_hash: persisted.manifest_hash,
                     manifest_json: persisted.manifest.clone(),
-                    artifact_bytes_hash: persisted.artifact_bytes_hash.clone(),
+                    artifact_bytes_hash: persisted.artifact_bytes_hash,
                     parquet_uri: persisted.parquet_uri.clone(),
                     sample_count: sample_count_i64,
                     coverage_json: coverage.clone(),
@@ -2271,10 +2271,7 @@ impl TrainingDatasetService {
         target_horizon_secs: u64,
         mut coverage: DatasetCoverage,
     ) -> QuantResult<DatasetCoverage> {
-        coverage.bias_table_hash = self
-            .bias_table
-            .as_ref()
-            .map(|table| table.content_hash.clone());
+        coverage.bias_table_hash = self.bias_table.as_ref().map(|table| table.content_hash);
         coverage.feature_state_counts = dataset_feature_state_counts(examples);
         coverage.matrix_probe = Some(probe_matrix_coverage(
             examples,
@@ -2299,15 +2296,15 @@ impl TrainingDatasetService {
             })?;
         let manifest = DatasetManifest {
             format_version: DATASET_ARTIFACT_FORMAT_VERSION,
-            training_dataset_id: plan.training_dataset_id.clone(),
+            training_dataset_id: plan.training_dataset_id,
             profile_ref: plan.request.profile_ref.clone(),
-            research_program_hash: plan.request.research_program_hash.clone(),
+            research_program_hash: plan.request.research_program_hash,
             source_slice: plan.request.source_slice.clone(),
-            model_spec_id: plan.request.model_spec_id.clone(),
-            model_spec_definition_hash: plan.model_spec_definition_hash.clone(),
-            trade_policy_artifact_id: plan.trade_policy_artifact_id.clone(),
-            trade_policy_hash: plan.trade_policy_hash.clone(),
-            decision_policy_snapshot_id: plan.request.decision_policy_snapshot_id.clone(),
+            model_spec_id: plan.request.model_spec_id,
+            model_spec_definition_hash: plan.model_spec_definition_hash,
+            trade_policy_artifact_id: plan.trade_policy_artifact_id,
+            trade_policy_hash: plan.trade_policy_hash,
+            decision_policy_snapshot_id: plan.request.decision_policy_snapshot_id,
             window_start: plan.request.window_start,
             window_end: plan.request.window_end,
             purpose: plan.request.purpose,
@@ -2323,8 +2320,7 @@ impl TrainingDatasetService {
         };
         let manifest_hash = dataset_manifest_hash(&manifest)?;
         let parquet_bytes = DatasetParquetCodec::encode(examples, &manifest)?;
-        let artifact_bytes_hash =
-            ContentHash::parse(CanonicalDigest::prefixed_bytes(&parquet_bytes))?;
+        let artifact_bytes_hash = CanonicalDigest::content_hash_bytes(&parquet_bytes);
         let key = ArtifactKey::new(
             ArtifactNamespace::Dataset,
             plan.training_dataset_id.as_uuid().to_string(),
@@ -2332,7 +2328,7 @@ impl TrainingDatasetService {
         )?;
         let parquet_uri = self.artifact_store.put(key, &parquet_bytes).await?;
         let persisted_bytes = self.artifact_store.get(&parquet_uri).await?;
-        let persisted_hash = ContentHash::parse(CanonicalDigest::prefixed_bytes(&persisted_bytes))?;
+        let persisted_hash = CanonicalDigest::content_hash_bytes(&persisted_bytes);
         if persisted_hash != artifact_bytes_hash {
             return Err(ResearchError::DatasetBuild {
                 detail: format!(
@@ -2607,7 +2603,7 @@ async fn run_historical_spine(
         params.selection,
         params.data_quality,
         params.features,
-        params.request.decision_policy_snapshot_id.clone(),
+        params.request.decision_policy_snapshot_id,
         params.request.knowledge_lag_secs,
         params.model_requirements.clone(),
     );
@@ -2953,7 +2949,7 @@ fn live_attribution_bindings<'a>(
             None
         })?;
     let selection_key = (
-        recommendation.evidence_refs.market_selection_id.clone(),
+        recommendation.evidence_refs.market_selection_id,
         recommendation.market_id.clone(),
     );
     let selection_member = selections.get(&selection_key).or_else(|| {
@@ -3058,11 +3054,10 @@ fn frozen_feature_vector(info: &FeatureVectorInfo) -> Option<FeatureVector> {
 fn frozen_factor_values(recommendation: &RecommendationInfo) -> Option<Vec<FactorValue>> {
     let mut values = Vec::with_capacity(recommendation.factor_breakdown.0.len());
     for (index, entry) in recommendation.factor_breakdown.0.iter().enumerate() {
-        let definition_id = recommendation
+        let definition_id = *recommendation
             .evidence_refs
             .factor_definition_versions
-            .get(index)?
-            .clone();
+            .get(index)?;
         let normalization = match (
             entry.normalized_score,
             entry.normalization_source,

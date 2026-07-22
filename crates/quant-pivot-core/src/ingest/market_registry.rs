@@ -1,128 +1,60 @@
 use std::{collections::HashSet, sync::Arc};
 
-use arc_swap::ArcSwap;
-use dashmap::DashMap;
 use quant_pivot_models::{
     domain::market::{
         EventRegistryInfo, MarketRegistryInfo,
         registry::{CatalogMarketLeg, NegRiskLegSet},
     },
     enums::market::MarketStatus,
-    types::{EventId, MarketId, TokenId},
+    types::{EventId, MarketId, TokenId, TokenKey},
 };
 
-use crate::ingest::market_filter::MarketFilter;
+use crate::ingest::{
+    data_plane_index::{DataPlane, DataPlaneIndex},
+    market_filter::MarketFilter,
+};
 
 /// Market metadata registry with bidirectional token ↔ market lookup.
 ///
 /// Populated by Gamma API sync; read by the data pipeline and selection paths.
 pub struct MarketRegistry {
-    markets: DashMap<MarketId, Arc<MarketRegistryInfo>>,
-    token_to_market: DashMap<TokenId, MarketId>,
-    events: DashMap<EventId, EventRegistryInfo>,
-    active_markets: ArcSwap<Vec<MarketId>>,
+    data_plane: Arc<DataPlane>,
 }
 
 impl MarketRegistry {
-    pub fn new() -> Self {
-        Self {
-            markets: DashMap::new(),
-            token_to_market: DashMap::new(),
-            events: DashMap::new(),
-            active_markets: ArcSwap::from_pointee(Vec::new()),
-        }
+    pub const fn new(data_plane: Arc<DataPlane>) -> Self {
+        Self { data_plane }
     }
 
-    fn store_active_ids(&self, ids: Vec<MarketId>) {
-        self.active_markets.store(Arc::new(ids));
+    #[must_use]
+    pub const fn data_plane(&self) -> &Arc<DataPlane> {
+        &self.data_plane
     }
 
-    fn push_active(&self, market_id: &MarketId) {
-        self.active_markets.rcu(|current| {
-            if current.iter().any(|id| id == market_id) {
-                return current.clone();
-            }
-            let mut next = current.to_vec();
-            next.push(market_id.clone());
-            Arc::new(next)
-        });
-    }
-
-    fn remove_active(&self, market_id: &MarketId) {
-        self.active_markets.rcu(|current| {
-            if !current.iter().any(|id| id == market_id) {
-                return current.clone();
-            }
-            Arc::new(
-                current
-                    .iter()
-                    .filter(|id| *id != market_id)
-                    .cloned()
-                    .collect(),
-            )
-        });
-    }
-
-    /// Register a single market. Rebuilds token→market index.
+    /// Register a single market and atomically publish a complete new index.
     pub fn register_market(&self, entry: MarketRegistryInfo) {
-        if entry.resolve_token_pair().is_err() {
-            tracing::warn!(market_id = %entry.market_id, "skipping market with invalid token pair");
-            return;
-        }
-        for td in &entry.tokens {
-            self.token_to_market
-                .insert(td.token_id.clone(), entry.market_id.clone());
-        }
-        let is_active = entry.status == MarketStatus::Active;
         let market_id = entry.market_id.clone();
-        self.markets.insert(market_id.clone(), Arc::new(entry));
-
-        if is_active {
-            self.push_active(&market_id);
-        } else {
-            self.remove_active(&market_id);
+        if self.data_plane.register_markets(vec![entry]) == 0 {
+            tracing::warn!(%market_id, "skipping market with invalid token pair");
         }
     }
 
-    /// Batch register markets (after Gamma full sync). Rebuilds active list once at the end.
+    /// Batch register markets and publish the resulting catalog once.
     pub fn register_markets(&self, entries: Vec<MarketRegistryInfo>) {
-        if entries.is_empty() {
-            return;
+        let expected = entries.len();
+        let registered = self.data_plane.register_markets(entries);
+        if registered != expected {
+            tracing::warn!(
+                expected,
+                registered,
+                "skipped markets with invalid token pairs"
+            );
         }
-
-        let mut active = self.active_markets().iter().cloned().collect::<Vec<_>>();
-
-        for entry in entries {
-            if entry.resolve_token_pair().is_err() {
-                tracing::warn!(market_id = %entry.market_id, "skipping market with invalid token pair");
-                continue;
-            }
-            for td in &entry.tokens {
-                self.token_to_market
-                    .insert(td.token_id.clone(), entry.market_id.clone());
-            }
-
-            let is_active = entry.status == MarketStatus::Active;
-            let market_id = entry.market_id.clone();
-            self.markets.insert(market_id.clone(), Arc::new(entry));
-
-            if is_active {
-                if !active.iter().any(|id| id == &market_id) {
-                    active.push(market_id);
-                }
-            } else {
-                active.retain(|id| id != &market_id);
-            }
-        }
-
-        self.store_active_ids(active);
     }
 
     /// Batch register events from Gamma sync.
     pub fn register_events(&self, events: impl IntoIterator<Item = EventRegistryInfo>) {
-        for event in events {
-            self.register_event(event);
-        }
+        self.data_plane.register_events(events);
     }
 
     /// Mark active markets absent from the latest full sync as paused.
@@ -155,30 +87,48 @@ impl MarketRegistry {
 
     /// Register or update an event.
     pub fn register_event(&self, entry: EventRegistryInfo) {
-        self.events.insert(entry.event_id.clone(), entry);
+        self.data_plane.register_events([entry]);
     }
 
     /// Reverse lookup: token → market.
     pub fn market_for_token(&self, token_id: &TokenId) -> Option<MarketId> {
-        self.token_to_market
-            .get(token_id)
-            .map(|r| r.value().clone())
+        self.data_plane.with_index(|index| {
+            let token = index.token_key(token_id)?;
+            Some(index.token_metadata(token)?.market_id.clone())
+        })
+    }
+
+    /// Dense hot-path token → market lookup.
+    #[must_use]
+    pub fn market_for_key(&self, token: TokenKey) -> Option<MarketId> {
+        self.data_plane
+            .with_index(|index| Some(index.token_metadata(token)?.market_id.clone()))
+    }
+
+    /// Resolve a process-local key back to its boundary identifier.
+    #[must_use]
+    pub fn token_id(&self, token: TokenKey) -> Option<TokenId> {
+        self.data_plane
+            .with_index(|index| Some(index.token_metadata(token)?.token_id.clone()))
     }
 
     /// Get a shared market entry.
     pub fn get_market(&self, market_id: &MarketId) -> Option<Arc<MarketRegistryInfo>> {
-        self.markets.get(market_id).map(|r| Arc::clone(r.value()))
+        self.data_plane
+            .with_index(|index| index.market(market_id).map(Arc::clone))
     }
 
     /// Return whether a market is negative-risk without cloning the full entry.
     pub fn neg_risk(&self, market_id: &MarketId) -> Option<bool> {
-        self.markets.get(market_id).map(|entry| entry.neg_risk)
+        self.data_plane
+            .with_index(|index| index.market(market_id).map(|entry| entry.neg_risk))
     }
 
     /// The event a market belongs to, if catalogued.
     #[must_use]
     pub fn get_event(&self, event_id: &EventId) -> Option<EventRegistryInfo> {
-        self.events.get(event_id).map(|entry| entry.value().clone())
+        self.data_plane
+            .with_index(|index| index.event(event_id).map(|entry| entry.as_ref().clone()))
     }
 
     /// Every YES-leg token of a neg-risk event, deterministically ordered by
@@ -187,21 +137,23 @@ impl MarketRegistry {
     /// Returns empty for an unknown event or a non-neg-risk event.
     #[must_use]
     pub fn neg_risk_leg_set(&self, event_id: &EventId) -> NegRiskLegSet {
-        let Some(event) = self.events.get(event_id) else {
-            return NegRiskLegSet::empty();
-        };
-        if !event.neg_risk {
-            return NegRiskLegSet::empty();
-        }
-        NegRiskLegSet::from_catalog(&event.market_ids, |market_id| {
-            self.markets.get(market_id).map(|entry| {
-                if entry.neg_risk {
-                    CatalogMarketLeg::NegRisk {
-                        yes_token_id: entry.token_yes.clone(),
+        self.data_plane.with_index(|index| {
+            let Some(event) = index.event(event_id) else {
+                return NegRiskLegSet::empty();
+            };
+            if !event.neg_risk {
+                return NegRiskLegSet::empty();
+            }
+            NegRiskLegSet::from_catalog(&event.market_ids, |market_id| {
+                index.market(market_id).map(|entry| {
+                    if entry.neg_risk {
+                        CatalogMarketLeg::NegRisk {
+                            yes_token_id: entry.token_yes.clone(),
+                        }
+                    } else {
+                        CatalogMarketLeg::NonNegRisk
                     }
-                } else {
-                    CatalogMarketLeg::NonNegRisk
-                }
+                })
             })
         })
     }
@@ -210,15 +162,20 @@ impl MarketRegistry {
     ///
     /// Tokens are identified by their `outcome` field: "Yes" and "No".
     pub fn token_pair(&self, market_id: &MarketId) -> Option<(TokenId, TokenId)> {
-        self.markets
-            .get(market_id)
-            .map(|entry| (entry.token_yes.clone(), entry.token_no.clone()))
+        self.data_plane.with_index(|index| {
+            let pair = index.market_token_pair(market_id)?;
+            Some((
+                index.token_metadata(pair.yes)?.token_id.clone(),
+                index.token_metadata(pair.no)?.token_id.clone(),
+            ))
+        })
     }
 
     /// Wait-free read of the active market ID list.
     #[must_use]
-    pub fn active_markets(&self) -> Arc<Vec<MarketId>> {
-        self.active_markets.load_full()
+    pub fn active_markets(&self) -> Arc<[MarketId]> {
+        self.data_plane
+            .with_index(DataPlaneIndex::active_markets_owned)
     }
 
     /// Active YES/NO catalog tokens bounded by the tradeable market filter.
@@ -227,46 +184,28 @@ impl MarketRegistry {
     /// subscriptions must go through `MarketDataSubscriptionPolicy`.
     #[must_use]
     pub fn active_catalog_tokens(&self, market_filter: &MarketFilter) -> Vec<TokenId> {
-        let active = self.active_markets();
-        let mut tokens = Vec::with_capacity(active.len() * 2);
-        for market_id in active.iter() {
-            let Some(market) = self.get_market(market_id) else {
-                continue;
-            };
-            if market.status != MarketStatus::Active {
-                continue;
+        let mut tokens = self.data_plane.with_index(|index| {
+            let mut tokens = Vec::with_capacity(index.active_markets().len() * 2);
+            for market_id in index.active_markets() {
+                let Some(market) = index.market(market_id) else {
+                    continue;
+                };
+                if !market_filter.is_enabled(market.categories) {
+                    continue;
+                }
+                tokens.push(market.token_yes.clone());
+                tokens.push(market.token_no.clone());
             }
-            if !market_filter.is_enabled(market.categories) {
-                continue;
-            }
-            tokens.push(market.token_yes.clone());
-            tokens.push(market.token_no.clone());
-        }
+            tokens
+        });
         tokens.sort_by(|a, b| a.as_str().cmp(b.as_str()));
         tokens.dedup_by(|a, b| a.as_str() == b.as_str());
         tokens
     }
 
-    /// Rebuild the active-market list from scratch by scanning all entries.
-    pub fn refresh_active(&self) {
-        let mut ids = Vec::new();
-        for entry in &self.markets {
-            if entry.value().status == MarketStatus::Active {
-                ids.push(entry.key().clone());
-            }
-        }
-        self.store_active_ids(ids);
-    }
-
     /// Total number of registered markets.
     pub fn market_count(&self) -> usize {
-        self.markets.len()
-    }
-}
-
-impl Default for MarketRegistry {
-    fn default() -> Self {
-        Self::new()
+        self.data_plane.with_index(DataPlaneIndex::market_count)
     }
 }
 
@@ -353,7 +292,7 @@ mod tests {
 
     #[test]
     fn register_and_lookup() {
-        let reg = MarketRegistry::new();
+        let reg = MarketRegistry::new(Arc::new(DataPlane::new()));
         reg.register_market(sample_market("m1", MarketStatus::Active));
         assert_eq!(reg.market_count(), 1);
         assert_eq!(reg.active_markets().len(), 1);
@@ -370,14 +309,14 @@ mod tests {
 
     #[test]
     fn inactive_market_not_in_active_list() {
-        let reg = MarketRegistry::new();
+        let reg = MarketRegistry::new(Arc::new(DataPlane::new()));
         reg.register_market(sample_market("m1", MarketStatus::Settled));
         assert!(reg.active_markets().is_empty());
     }
 
     #[test]
     fn batch_register() {
-        let reg = MarketRegistry::new();
+        let reg = MarketRegistry::new(Arc::new(DataPlane::new()));
         reg.register_markets(vec![
             sample_market("m1", MarketStatus::Active),
             sample_market("m2", MarketStatus::Active),
@@ -388,7 +327,7 @@ mod tests {
 
     #[test]
     fn active_markets_snapshot_is_wait_free() {
-        let reg = MarketRegistry::new();
+        let reg = MarketRegistry::new(Arc::new(DataPlane::new()));
         reg.register_market(sample_market("m1", MarketStatus::Active));
         let snapshot = reg.active_markets();
         assert_eq!(snapshot.len(), 1);
@@ -397,7 +336,7 @@ mod tests {
 
     #[test]
     fn neg_risk_leg_set_counts_only_neg_risk_event_members() {
-        let reg = MarketRegistry::new();
+        let reg = MarketRegistry::new(Arc::new(DataPlane::new()));
         let event_id = "evt-negrisk-mixed";
         reg.register_event(sample_neg_risk_event(
             event_id,
@@ -432,7 +371,7 @@ mod tests {
 
     #[test]
     fn neg_risk_leg_set_expects_unregistered_catalog_member() {
-        let reg = MarketRegistry::new();
+        let reg = MarketRegistry::new(Arc::new(DataPlane::new()));
         let event_id = "evt-negrisk-partial";
         reg.register_event(sample_neg_risk_event(
             event_id,

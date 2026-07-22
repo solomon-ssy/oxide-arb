@@ -23,7 +23,7 @@ pub fn make_event(id: &str, title: &str, slug: &str, category: MarketCategory) -
         slug: slug.into(),
         series_slug: None,
         status: EventStatus::Active,
-        tags: vec![category.as_str().to_owned()].into(),
+        tags: vec![category.to_string()].into(),
         neg_risk: false,
         catalog_market_ids: Vec::new().into(),
         end_date: None,

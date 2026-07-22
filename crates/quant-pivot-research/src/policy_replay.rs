@@ -615,7 +615,7 @@ fn passive_entry(
         gross_amount: gross,
         fee,
         cash_delta: -(gross.inner() + fee.inner()),
-        fee_schedule_hash: Some(schedule.schedule_hash.clone()),
+        fee_schedule_hash: Some(schedule.schedule_hash),
         stream_session_id: Some(book.stream_session_id),
         token_sequence: Some(book.token_sequence),
         source_event_hash,
@@ -1154,7 +1154,10 @@ fn execute_exit(
     Ok(ExitExecution { fills, gap })
 }
 
-fn replay_fill_from_walk(context: ReplayFillContext<'_>, walk: &BookWalkFill) -> PolicyReplayFill {
+const fn replay_fill_from_walk(
+    context: ReplayFillContext<'_>,
+    walk: &BookWalkFill,
+) -> PolicyReplayFill {
     PolicyReplayFill {
         leg_ordinal: context.leg_ordinal,
         side: context.side,
@@ -1169,10 +1172,10 @@ fn replay_fill_from_walk(context: ReplayFillContext<'_>, walk: &BookWalkFill) ->
         gross_amount: walk.gross_order_amount,
         fee: walk.expected_fee,
         cash_delta: walk.total_cash_delta,
-        fee_schedule_hash: Some(context.schedule.schedule_hash.clone()),
+        fee_schedule_hash: Some(context.schedule.schedule_hash),
         stream_session_id: Some(context.book.stream_session_id),
         token_sequence: Some(context.book.token_sequence),
-        source_event_hash: Some(context.book.source_event_hash.clone()),
+        source_event_hash: Some(context.book.source_event_hash),
     }
 }
 
@@ -1246,7 +1249,7 @@ mod tests {
     use crate::execution_semantics::PitFeeSchedule;
 
     fn hash(seed: char) -> ContentHash {
-        ContentHash::parse(format!("blake3:{}", seed.to_string().repeat(64))).expect("hash")
+        ContentHash::parse(&format!("blake3:{}", seed.to_string().repeat(64))).expect("hash")
     }
 
     fn at(seconds: i64) -> DateTime<Utc> {

@@ -137,8 +137,8 @@ impl DefaultModelRuntimeFactory {
         }
         if header.feature_schema_hash != self.binding.feature_schema_hash {
             return Err(ResearchError::FeatureSchemaMismatch {
-                expected: header.feature_schema_hash.as_str().to_owned(),
-                actual: self.binding.feature_schema_hash.as_str().to_owned(),
+                expected: header.feature_schema_hash.to_string(),
+                actual: self.binding.feature_schema_hash.to_string(),
             }
             .into());
         }
@@ -196,8 +196,8 @@ pub async fn load_hash_verified_artifact(
     let recomputed = artifact.content_hash()?;
     if recomputed != *recorded {
         return Err(ResearchError::ArtifactHashMismatch {
-            expected: recorded.as_str().to_owned(),
-            actual: recomputed.as_str().to_owned(),
+            expected: recorded.to_string(),
+            actual: recomputed.to_string(),
         }
         .into());
     }
@@ -352,7 +352,7 @@ mod tests {
             model_input_contract_hash(&input_contract).expect("input contract hash");
         ModelArtifact::WeightedFactor(Box::new(WeightedFactorModelArtifact {
             header: ModelArtifactHeader {
-                model_version_id: version.clone(),
+                model_version_id: *version,
                 model_spec_definition_hash: hash("spec"),
                 profile_ref: builtin_research_profiles()
                     .expect("built-in profiles")
@@ -385,7 +385,7 @@ mod tests {
 
     fn version_info(id: &ModelVersionId, artifact_hash: ContentHash) -> ModelVersionInfo {
         ModelVersionInfo {
-            model_version_id: id.clone(),
+            model_version_id: *id,
             model_spec_id: ModelSpecId::from_v7(),
             model_spec_name: "factory-test-spec".to_owned(),
             model_family: ModelFamily::WeightedFactor,
@@ -444,7 +444,7 @@ mod tests {
         let store = temp_store();
         let version = ModelVersionId::from_v7();
         let feature_hash = hash("feat");
-        let artifact = artifact(&version, feature_hash.clone());
+        let artifact = artifact(&version, feature_hash);
         let digest = artifact.content_hash().expect("hash");
         let key = ModelArtifact::artifact_key(&digest).expect("key");
         store
@@ -454,7 +454,7 @@ mod tests {
 
         let factory = DefaultModelRuntimeFactory::new(
             Arc::clone(&store),
-            binding(feature_hash.clone()),
+            binding(feature_hash),
             calibration_loader(),
         );
         let runtime = factory
@@ -470,7 +470,7 @@ mod tests {
         let store = temp_store();
         let version = ModelVersionId::from_v7();
         let feature_hash = hash("feat");
-        let artifact = artifact(&version, feature_hash.clone());
+        let artifact = artifact(&version, feature_hash);
         let digest = artifact.content_hash().expect("hash");
         let key = ModelArtifact::artifact_key(&digest).expect("key");
         store

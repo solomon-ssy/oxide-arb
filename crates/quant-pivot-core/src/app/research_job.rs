@@ -57,7 +57,7 @@ impl ResearchJobEngine {
 
     /// Register a live cancellation token for a running job.
     pub fn register_cancel(&self, job_id: &ResearchJobId, token: CancellationToken) {
-        self.cancels.insert(job_id.clone(), token);
+        self.cancels.insert(*job_id, token);
     }
 
     /// Drop a job's cancellation token once it has left the running state.

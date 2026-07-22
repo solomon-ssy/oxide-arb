@@ -48,7 +48,7 @@ fn assemble_tree(menus: Vec<MenuInfo>) -> Vec<MenuTreeNode> {
     let mut children: HashMap<MenuId, Vec<MenuInfo>> = HashMap::new();
     let mut roots: Vec<MenuInfo> = Vec::new();
     for node in menus {
-        match node.parent_id.clone() {
+        match node.parent_id {
             Some(parent) => children.entry(parent).or_default().push(node),
             None => roots.push(node),
         }
@@ -84,7 +84,7 @@ async fn do_accessible_for_roles(
     }
 
     let granted = RoleMenuEntity::find()
-        .filter(RoleMenuColumn::RoleId.is_in(role_ids.iter().cloned()))
+        .filter(RoleMenuColumn::RoleId.is_in(role_ids.iter().copied()))
         .all(db)
         .await
         .map_err(StorageError::from)?;
@@ -93,18 +93,16 @@ async fn do_accessible_for_roles(
     }
 
     let all = load_all(db).await?;
-    let parent_of: HashMap<MenuId, Option<MenuId>> = all
-        .iter()
-        .map(|menu| (menu.id.clone(), menu.parent_id.clone()))
-        .collect();
+    let parent_of: HashMap<MenuId, Option<MenuId>> =
+        all.iter().map(|menu| (menu.id, menu.parent_id)).collect();
 
     // Include each granted menu plus its full ancestor chain so the returned
     // forest is structurally complete (no orphaned children).
     let mut included: HashSet<MenuId> = HashSet::new();
     for row in &granted {
-        let mut cursor = Some(row.menu_id.clone());
+        let mut cursor = Some(row.menu_id);
         while let Some(id) = cursor {
-            if !included.insert(id.clone()) {
+            if !included.insert(id) {
                 break;
             }
             cursor = parent_of.get(&id).and_then(Clone::clone);
@@ -119,7 +117,7 @@ async fn do_accessible_for_roles(
 }
 
 async fn do_find_by_id(db: &impl ConnectionTrait, id: &MenuId) -> Result<MenuInfo, StorageError> {
-    Entity::find_by_id(id.clone())
+    Entity::find_by_id(*id)
         .one(db)
         .await
         .map_err(StorageError::from)?
@@ -141,7 +139,7 @@ async fn do_update(
     patch: MenuPatch,
 ) -> Result<MenuInfo, StorageError> {
     let mut active = patch.into_active_model();
-    active.id = Set(id.clone());
+    active.id = Set(*id);
     active.updated_at = Set(Utc::now());
     match active.update(db).await {
         Ok(model) => Ok(model.into()),
@@ -154,7 +152,7 @@ async fn do_delete(db: &DatabaseConnection, id: &MenuId) -> Result<(), StorageEr
     let txn = db.begin().await.map_err(StorageError::from)?;
 
     let child_count = Entity::find()
-        .filter(Column::ParentId.eq(id.clone()))
+        .filter(Column::ParentId.eq(*id))
         .count(&txn)
         .await
         .map_err(StorageError::from)?;
@@ -168,11 +166,11 @@ async fn do_delete(db: &DatabaseConnection, id: &MenuId) -> Result<(), StorageEr
     }
 
     RoleMenuEntity::delete_many()
-        .filter(RoleMenuColumn::MenuId.eq(id.clone()))
+        .filter(RoleMenuColumn::MenuId.eq(*id))
         .exec(&txn)
         .await
         .map_err(StorageError::from)?;
-    let result = Entity::delete_by_id(id.clone())
+    let result = Entity::delete_by_id(*id)
         .exec(&txn)
         .await
         .map_err(StorageError::from)?;

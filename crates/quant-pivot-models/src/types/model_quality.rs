@@ -240,7 +240,7 @@ mod tests {
             hard_failures: Vec::new(),
             soft_warnings: Vec::new(),
             passed: true,
-            report_hash: ContentHash::parse(format!("blake3:{}", "0".repeat(64)))
+            report_hash: ContentHash::parse(&format!("blake3:{}", "0".repeat(64)))
                 .expect("valid hash"),
         }
     }

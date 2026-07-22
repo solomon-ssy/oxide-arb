@@ -20,9 +20,9 @@ use quant_pivot_core::{
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError, storage::StorageError};
 use quant_pivot_models::{
     clickhouse::{
-        BookL2CheckpointRow, BookL2EventRow, BookMicrostructureRow, BookStreamSessionRow,
-        ChDecimal64, ChPrice, ChSchemaVersion, ChShares, ChUsd, DomainObservationRow,
-        MarketResolutionRow, MidPriceBucketRow, TradeTapeRow,
+        BookL2LedgerRow, BookMicrostructureRow, BookStreamSessionRow, ChDecimal64, ChDigest,
+        ChPrice, ChSchemaVersion, ChShares, ChUsd, DomainObservationRow, MarketResolutionRow,
+        MidPriceBucketRow, TradeTapeRow,
     },
     domain::{
         data_plane::{DecisionBoundary, DecisionSource},
@@ -169,33 +169,33 @@ fn ledger_manifest(input: LedgerManifestInput<'_>) -> DatasetManifest {
     } = input;
     DatasetManifest {
         format_version: DATASET_ARTIFACT_FORMAT_VERSION,
-        training_dataset_id: training_dataset_id.clone(),
+        training_dataset_id: *training_dataset_id,
         profile_ref: fixture_profile_ref(),
         research_program_hash: fixture_hash('4'),
         source_slice: execution_pg_seed::source_slice_ref('5'),
-        model_spec_id: model_spec_id.clone(),
-        model_spec_definition_hash: model_spec_definition_hash.clone(),
+        model_spec_id: *model_spec_id,
+        model_spec_definition_hash: *model_spec_definition_hash,
         trade_policy_artifact_id: None,
         trade_policy_hash: None,
-        decision_policy_snapshot_id: decision_policy_snapshot_id.clone(),
+        decision_policy_snapshot_id: *decision_policy_snapshot_id,
         window_start,
         window_end,
         purpose: DatasetPurpose::Training,
         knowledge_lag_secs: 10,
         sample_interval_secs: 3_600,
         horizons_secs: vec![3_600],
-        feature_schema_hash: hash.clone(),
-        factor_schema_hash: hash.clone(),
-        label_schema_hash: hash.clone(),
-        semantic_dataset_hash: hash.clone(),
-        source_fingerprint: hash.clone(),
+        feature_schema_hash: *hash,
+        factor_schema_hash: *hash,
+        label_schema_hash: *hash,
+        semantic_dataset_hash: *hash,
+        source_fingerprint: *hash,
         sample_count,
     }
 }
 
 #[derive(Default)]
 struct FactScenario {
-    books: HashMap<TokenId, Vec<BookL2CheckpointRow>>,
+    books: HashMap<TokenId, Vec<BookL2LedgerRow>>,
     micro: HashMap<TokenId, Vec<BookMicrostructureRow>>,
     resolutions: HashMap<MarketId, Vec<MarketResolutionRow>>,
     domain_observations: HashMap<DomainInstrumentKey, Vec<DomainObservationRow>>,
@@ -268,31 +268,33 @@ impl QuantFactReadRepository for ControllableFactRead {
         Ok(Vec::new())
     }
 
-    async fn book_checkpoint_at(
+    async fn book_ledger_snapshot_at(
         &self,
         token_id: &TokenId,
         source_cutoff_ms: i64,
         decision_at_ms: i64,
-    ) -> Result<Option<BookL2CheckpointRow>, StorageError> {
+    ) -> Result<Option<BookL2LedgerRow>, StorageError> {
         let scenario = self.scenario.lock().expect("lock");
         Ok(scenario.books.get(token_id).and_then(|rows| {
             rows.iter()
                 .filter(|row| {
-                    row.event_time <= source_cutoff_ms && row.created_at <= decision_at_ms
+                    row.event_type == ChCanonicalBookEventType::Snapshot
+                        && row.venue_event_time <= source_cutoff_ms
+                        && row.persisted_time <= decision_at_ms
                 })
-                .max_by_key(|row| (row.event_time, row.created_at, row.token_sequence))
+                .max_by_key(|row| (row.venue_event_time, row.persisted_time, row.token_sequence))
                 .cloned()
         }))
     }
 
-    async fn book_l2_events_from(
+    async fn book_l2_ledger_from(
         &self,
         token_id: &TokenId,
         stream_session_id: Uuid,
         from_sequence: u64,
         source_cutoff_ms: i64,
         decision_at_ms: i64,
-    ) -> Result<Vec<BookL2EventRow>, StorageError> {
+    ) -> Result<Vec<BookL2LedgerRow>, StorageError> {
         let scenario = self.scenario.lock().expect("lock");
         Ok(scenario
             .books
@@ -302,12 +304,12 @@ impl QuantFactReadRepository for ControllableFactRead {
                     .filter(|row| {
                         row.stream_session_id == stream_session_id
                             && row.token_sequence == from_sequence
-                            && row.event_time <= source_cutoff_ms
-                            && row.created_at <= decision_at_ms
+                            && row.venue_event_time <= source_cutoff_ms
+                            && row.persisted_time <= decision_at_ms
                     })
-                    .max_by_key(|row| (row.event_time, row.created_at))
+                    .max_by_key(|row| (row.venue_event_time, row.persisted_time))
+                    .cloned()
             })
-            .map(checkpoint_anchor_event)
             .into_iter()
             .collect())
     }
@@ -335,21 +337,22 @@ impl QuantFactReadRepository for ControllableFactRead {
         )
     }
 
-    async fn book_checkpoints_between(
+    async fn book_ledger_snapshots_between(
         &self,
         token_ids: Vec<TokenId>,
         from_ms: i64,
         to_ms: i64,
         available_by_ms: i64,
-    ) -> Result<Vec<BookL2CheckpointRow>, StorageError> {
+    ) -> Result<Vec<BookL2LedgerRow>, StorageError> {
         let scenario = self.scenario.lock().expect("lock");
         let mut rows = Vec::new();
         for token_id in token_ids {
             if let Some(series) = scenario.books.get(&token_id) {
                 for row in series {
-                    if row.event_time >= from_ms
-                        && row.event_time <= to_ms
-                        && row.created_at <= available_by_ms
+                    if row.event_type == ChCanonicalBookEventType::Snapshot
+                        && row.venue_event_time >= from_ms
+                        && row.venue_event_time <= to_ms
+                        && row.persisted_time <= available_by_ms
                     {
                         rows.push(row.clone());
                     }
@@ -413,9 +416,10 @@ impl QuantFactReadRepository for ControllableFactRead {
                 .values()
                 .flatten()
                 .filter(|row| {
-                    row.event_time >= from_ms
-                        && row.event_time <= to_ms
-                        && row.created_at <= decision_at_ms
+                    row.event_type == ChCanonicalBookEventType::Snapshot
+                        && row.venue_event_time >= from_ms
+                        && row.venue_event_time <= to_ms
+                        && row.persisted_time <= decision_at_ms
                 })
                 .filter_map(|row| row.market_id.clone())
                 .collect()
@@ -485,29 +489,6 @@ impl QuantFactReadRepository for ControllableFactRead {
     }
 }
 
-fn checkpoint_anchor_event(checkpoint: &BookL2CheckpointRow) -> BookL2EventRow {
-    BookL2EventRow {
-        stream_session_id: checkpoint.stream_session_id,
-        shard_id: 0,
-        token_id: checkpoint.token_id.clone(),
-        market_id: checkpoint.market_id.clone(),
-        token_sequence: checkpoint.token_sequence,
-        event_type: ChCanonicalBookEventType::Snapshot,
-        bid_prices: vec![ChPrice::from(Price::new(Decimal::new(48, 2)))],
-        bid_sizes: vec![ChShares::from(Decimal::from(100))],
-        ask_prices: vec![ChPrice::from(Price::new(Decimal::new(52, 2)))],
-        ask_sizes: vec![ChShares::from(Decimal::from(100))],
-        book_version: checkpoint.book_version,
-        old_tick_size: None,
-        new_tick_size: None,
-        venue_event_time: checkpoint.event_time,
-        ingress_time: checkpoint.created_at,
-        persisted_time: checkpoint.created_at,
-        payload_hash: checkpoint.source_event_hash.clone(),
-        schema_version: checkpoint.schema_version,
-    }
-}
-
 /// PIT engine that deliberately returns a book observed after the source cutoff.
 struct LeakyPitEngine {
     token_id: TokenId,
@@ -550,7 +531,7 @@ impl PointInTimeSnapshotSource for LeakyPitEngine {
             source_event: Some(CanonicalBookEventRef {
                 stream_session_id: Uuid::from_u128(1),
                 token_sequence: 1,
-                source_event_hash: ContentHash::parse(format!("blake3:{}", "d".repeat(64)))
+                source_event_hash: ContentHash::parse(&format!("blake3:{}", "d".repeat(64)))
                     .expect("canonical event hash"),
             }),
             available_at: boundary.decision_at(),
@@ -573,21 +554,32 @@ impl PointInTimeSnapshotSource for LeakyPitEngine {
     }
 }
 
-fn book_row(token: &str, event_time_ms: i64) -> BookL2CheckpointRow {
-    BookL2CheckpointRow {
+fn book_row(token: &str, event_time_ms: i64) -> BookL2LedgerRow {
+    BookL2LedgerRow {
+        stream_session_id: Uuid::nil(),
+        shard_id: 0,
         token_id: TokenId::new(token),
         market_id: Some(MarketId::new(MARKET_ID)),
-        stream_session_id: Uuid::nil(),
         token_sequence: 1,
-        bids_json: r#"[["0.48","100"]]"#.to_owned(),
-        asks_json: r#"[["0.52","100"]]"#.to_owned(),
-        book_version: 1,
-        source_event_hash: catalog_fixture_hash('1'),
-        checkpoint_hash: catalog_fixture_hash('2'),
-        event_time: event_time_ms,
-        created_at: event_time_ms,
-        schema_version: ChSchemaVersion(2),
+        event_type: ChCanonicalBookEventType::Snapshot,
+        bid_prices: vec![ChPrice::from(Price::new(Decimal::new(48, 2)))],
+        bid_sizes: vec![ChShares::from(Shares::new(Decimal::from(100)))],
+        ask_prices: vec![ChPrice::from(Price::new(Decimal::new(52, 2)))],
+        ask_sizes: vec![ChShares::from(Shares::new(Decimal::from(100)))],
+        old_tick_size: None,
+        new_tick_size: None,
+        trade_price: None,
+        trade_side: None,
+        trade_size: None,
+        fee_rate_bps: None,
+        venue_event_time: event_time_ms,
+        ingress_time: event_time_ms,
+        persisted_time: event_time_ms,
+        event_hash: ChDigest::new([0; 32]),
+        schema_version: BookL2LedgerRow::SCHEMA_VERSION,
     }
+    .seal()
+    .expect("seal ledger fixture")
 }
 
 fn micro_row(token: &str, bucket_time_ms: i64, mid: Decimal) -> BookMicrostructureRow {
@@ -720,7 +712,7 @@ impl CatalogSeedContext {
 }
 
 fn catalog_fixture_hash(seed: char) -> ContentHash {
-    ContentHash::parse(format!("blake3:{}", seed.to_string().repeat(64)))
+    ContentHash::parse(&format!("blake3:{}", seed.to_string().repeat(64)))
         .expect("catalog fixture hash")
 }
 
@@ -759,7 +751,7 @@ fn event_registry_payload(
         status: EventStatus::Active,
         market_ids: vec![context.market_id.clone()],
         categories: CategorySet::from(category),
-        tags: vec![category.as_str().to_owned()],
+        tags: vec![category.to_string()],
         neg_risk: false,
         end_date: Some(context.end_date),
         created_at: context.source_effective_at,
@@ -830,13 +822,13 @@ fn durable_catalog_commit(
     .expect("market content identity");
     let event_object_id = CatalogEventObjectId::from_content_hash(&event_hash);
     let mut event_projection = current_event_projection(context, category);
-    event_projection.content_hash = event_hash.clone();
+    event_projection.content_hash = event_hash;
     let mut market_projection = current_market_projection(context, category);
-    market_projection.content_hash = market_hash.clone();
+    market_projection.content_hash = market_hash;
 
     CatalogBatchCommit {
         batch: NewCatalogSyncBatch {
-            catalog_sync_batch_id: context.batch_id.clone(),
+            catalog_sync_batch_id: context.batch_id,
             sync_kind: CatalogSyncKind::Baseline,
             started_at: context.source_effective_at,
             fetched_at: context.source_effective_at,
@@ -848,15 +840,15 @@ fn durable_catalog_commit(
         events: vec![CatalogEventCandidate {
             projection: event_projection,
             object: NewCatalogEventObject {
-                event_object_id: event_object_id.clone(),
+                event_object_id,
                 content_hash: event_hash,
                 schema_version: CATALOG_OBJECT_SCHEMA_VERSION,
                 payload: event_payload.into(),
             },
             change: NewCatalogEventChange {
-                event_change_id: context.event_version_id.clone(),
-                catalog_sync_batch_id: context.batch_id.clone(),
-                event_object_id: event_object_id.clone(),
+                event_change_id: context.event_version_id,
+                catalog_sync_batch_id: context.batch_id,
+                event_object_id,
                 event_id: context.event_id.clone(),
                 source_effective_at: context.source_effective_at,
                 source_timestamp_quality: CatalogTimestampQuality::Source,
@@ -872,7 +864,7 @@ fn durable_catalog_commit(
                 payload: market_payload.into(),
             },
             market_change_id: CatalogMarketChangeId::from_v7(),
-            catalog_sync_batch_id: context.batch_id.clone(),
+            catalog_sync_batch_id: context.batch_id,
             event_object_id,
             source_effective_at: context.source_effective_at,
             source_timestamp_quality: CatalogTimestampQuality::Source,
@@ -915,7 +907,7 @@ async fn seed_model_spec_with_contract(
     let model_spec_id = ModelSpecId::from_v7();
     PgModelRegistryRepository::new(db.clone())
         .create_model_spec(model_spec_fixtures::new_model_spec_fixture(
-            model_spec_id.clone(),
+            model_spec_id,
             "dataset-e2e",
             ModelFamily::WeightedFactor,
             86_400,
@@ -1153,7 +1145,7 @@ pub async fn calibration_dataset_build_fails_closed_on_purge_overlap() {
     let model_spec_id = seed_model_spec(&db).await;
     let model_spec_definition_hash = model_spec_definition_hash(&db, &model_spec_id).await;
 
-    let hash = ContentHash::parse(format!("blake3:{}", "a".repeat(64))).expect("hash");
+    let hash = ContentHash::parse(&format!("blake3:{}", "a".repeat(64))).expect("hash");
     let dataset_id = TrainingDatasetId::from_v7();
     let manifest = ledger_manifest(LedgerManifestInput {
         training_dataset_id: &dataset_id,
@@ -1169,8 +1161,8 @@ pub async fn calibration_dataset_build_fails_closed_on_purge_overlap() {
     let dataset_repo = PgTrainingDatasetRepository::new(db.clone());
     dataset_repo
         .create_plan(NewTrainingDatasetPlan {
-            training_dataset_id: dataset_id.clone(),
-            model_spec_id: model_spec_id.clone(),
+            training_dataset_id: dataset_id,
+            model_spec_id,
             model_spec_definition_hash,
             window_start,
             window_end,
@@ -1180,7 +1172,7 @@ pub async fn calibration_dataset_build_fails_closed_on_purge_overlap() {
             horizons_secs: TrainingHorizonsSecs(vec![3600]),
             feature_schema_version: Some(SchemaVersion::FIRST),
             sample_sources: Some(TrainingSampleSources(default_sample_sources())),
-            decision_policy_snapshot_id: rc_id.clone(),
+            decision_policy_snapshot_id: rc_id,
         })
         .await
         .expect("seed existing training dataset plan");
@@ -1193,10 +1185,10 @@ pub async fn calibration_dataset_build_fails_closed_on_purge_overlap() {
             &dataset_id,
             CompleteTrainingDatasetBuild {
                 status: TrainingDatasetStatus::Ready,
-                feature_schema_hash: hash.clone(),
-                factor_schema_hash: hash.clone(),
-                label_schema_hash: hash.clone(),
-                dataset_hash: hash.clone(),
+                feature_schema_hash: hash,
+                factor_schema_hash: hash,
+                label_schema_hash: hash,
+                dataset_hash: hash,
                 manifest_hash,
                 manifest_json: manifest,
                 artifact_bytes_hash: hash,
@@ -1270,7 +1262,7 @@ pub async fn build_cancelled_before_spine_yields_cancelled_and_no_row() {
     );
 
     let plan = plan_request(&svc, model_spec_id, rc_id, window_start, window_end).await;
-    let dataset_id = plan.training_dataset_id.clone();
+    let dataset_id = plan.training_dataset_id;
 
     // A cancel observed at the first cross-section boundary unwinds the build
     // cooperatively (~one section): it fails closed with `Cancelled`, persists
@@ -1434,15 +1426,15 @@ fn resolved_crypto_linkage(
             source_id: DomainSourceId::binance(),
             instrument_key: crypto_instrument(),
             available_at: derived_at,
-            binding_hash: ContentHash::parse(format!("blake3:{}", "8".repeat(64)))
+            binding_hash: ContentHash::parse(&format!("blake3:{}", "8".repeat(64)))
                 .expect("binding hash"),
         }],
         grounding: GroundingProof { spans: Vec::new() },
         override_context: None,
     }));
-    let metadata_hash = ContentHash::parse(format!("blake3:{}", "7".repeat(64))).expect("hash");
+    let metadata_hash = ContentHash::parse(&format!("blake3:{}", "7".repeat(64))).expect("hash");
     let capability_registry_hash =
-        ContentHash::parse(format!("blake3:{}", "f".repeat(64))).expect("hash");
+        ContentHash::parse(&format!("blake3:{}", "f".repeat(64))).expect("hash");
     NewMarketLinkage::from_derivation(MarketLinkageDerivation {
         market_id,
         domain_family: DomainFamily::Crypto,
@@ -1459,10 +1451,10 @@ fn resolved_crypto_linkage(
 
 fn crypto_close_observation(event_time_ms: i64) -> DomainObservationRow {
     DomainObservationRow {
-        family: DomainFamily::Crypto.as_str().to_owned(),
+        family: DomainFamily::Crypto.to_string(),
         source_id: DomainSourceId::binance(),
         instrument_key: crypto_instrument(),
-        metric: DomainMetric::Close.as_str().to_owned(),
+        metric: DomainMetric::Close.to_string(),
         value: ChDecimal64::from(dec!(100_000)),
         event_time: event_time_ms,
         publish_time: event_time_ms,
@@ -1663,7 +1655,7 @@ pub async fn dataset_builder_rejects_future_features() {
         Arc::clone(&fact_read) as Arc<dyn QuantFactReadRepository>,
     );
     let plan = plan_request(&svc, model_spec_id, rc_id, window_start, window_end).await;
-    let dataset_id = plan.training_dataset_id.clone();
+    let dataset_id = plan.training_dataset_id;
 
     let leaky = LeakyPitEngine {
         token_id: TokenId::new(YES_TOKEN),
@@ -1794,14 +1786,7 @@ pub async fn plan_build_reuses_training_dataset_id() {
         Arc::new(ControllableFactRead::new(Arc::clone(&scenario))),
     );
 
-    let plan_a = plan_request(
-        &svc,
-        model_spec_id.clone(),
-        rc_id.clone(),
-        window_start,
-        window_end,
-    )
-    .await;
+    let plan_a = plan_request(&svc, model_spec_id, rc_id, window_start, window_end).await;
     let plan_b = plan_request(&svc, model_spec_id, rc_id, window_start, window_end).await;
     assert_ne!(
         plan_a.training_dataset_id, plan_b.training_dataset_id,
@@ -1809,18 +1794,18 @@ pub async fn plan_build_reuses_training_dataset_id() {
     );
 
     let mut build_request = plan_a.request.clone();
-    build_request.training_dataset_id = Some(plan_a.training_dataset_id.clone());
+    build_request.training_dataset_id = Some(plan_a.training_dataset_id);
     let artifact = svc
         .build(DatasetPlan {
             request: build_request,
-            training_dataset_id: plan_a.training_dataset_id.clone(),
-            model_spec_definition_hash: plan_a.model_spec_definition_hash.clone(),
+            training_dataset_id: plan_a.training_dataset_id,
+            model_spec_definition_hash: plan_a.model_spec_definition_hash,
             samples: plan_a.samples.clone(),
             lot_samples: plan_a.lot_samples.clone(),
             exit_training_lots: plan_a.exit_training_lots.clone(),
             label_names: plan_a.label_names.clone(),
-            trade_policy_artifact_id: plan_a.trade_policy_artifact_id.clone(),
-            trade_policy_hash: plan_a.trade_policy_hash.clone(),
+            trade_policy_artifact_id: plan_a.trade_policy_artifact_id,
+            trade_policy_hash: plan_a.trade_policy_hash,
             trade_policy: plan_a.trade_policy.clone(),
         })
         .await
@@ -1903,7 +1888,7 @@ pub async fn build_records_book_decode_failures() {
     let mut fact = pit_scenario(as_of_ms);
     let evidence_ms = as_of_ms - 15_000;
     let mut bad = book_row(YES_TOKEN, evidence_ms);
-    "not-json".clone_into(&mut bad.bids_json);
+    bad.bid_sizes.clear();
     fact.books.insert(
         TokenId::new(YES_TOKEN),
         vec![bad, book_row(YES_TOKEN, evidence_ms + 1)],
@@ -1921,7 +1906,7 @@ pub async fn build_records_book_decode_failures() {
     let artifact = svc.build(plan).await.expect("build");
     assert!(
         artifact.coverage.book_decode_failures > 0,
-        "malformed book JSON must increment decode failures"
+        "mismatched typed book arrays must increment decode failures"
     );
 }
 
@@ -1990,7 +1975,7 @@ pub async fn model_version_training_dataset_id_is_typed() {
     let model_spec_definition_hash = model_spec_definition_hash(&db, &model_spec_id).await;
     let dataset_id = TrainingDatasetId::from_v7();
     let (window_start, window_end) = dataset_window();
-    let hash = ContentHash::parse(format!("blake3:{}", "b".repeat(64))).expect("hash");
+    let hash = ContentHash::parse(&format!("blake3:{}", "b".repeat(64))).expect("hash");
     let manifest = ledger_manifest(LedgerManifestInput {
         training_dataset_id: &dataset_id,
         model_spec_id: &model_spec_id,
@@ -2006,8 +1991,8 @@ pub async fn model_version_training_dataset_id_is_typed() {
     let dataset_repo = PgTrainingDatasetRepository::new(db.clone());
     dataset_repo
         .create_plan(NewTrainingDatasetPlan {
-            training_dataset_id: dataset_id.clone(),
-            model_spec_id: model_spec_id.clone(),
+            training_dataset_id: dataset_id,
+            model_spec_id,
             model_spec_definition_hash,
             window_start,
             window_end,
@@ -2030,13 +2015,13 @@ pub async fn model_version_training_dataset_id_is_typed() {
             &dataset_id,
             CompleteTrainingDatasetBuild {
                 status: TrainingDatasetStatus::Ready,
-                feature_schema_hash: hash.clone(),
-                factor_schema_hash: hash.clone(),
-                label_schema_hash: hash.clone(),
-                dataset_hash: hash.clone(),
+                feature_schema_hash: hash,
+                factor_schema_hash: hash,
+                label_schema_hash: hash,
+                dataset_hash: hash,
                 manifest_hash,
                 manifest_json: manifest,
-                artifact_bytes_hash: hash.clone(),
+                artifact_bytes_hash: hash,
                 parquet_uri: ArtifactUri::parse("file:///tmp/dataset.parquet").expect("uri"),
                 sample_count: 10,
                 coverage_json: DatasetCoverage::default(),
@@ -2049,13 +2034,13 @@ pub async fn model_version_training_dataset_id_is_typed() {
     let version_id = ModelVersionId::from_v7();
     PgModelRegistryRepository::new(db.clone())
         .create_model_version(NewModelVersion {
-            model_version_id: version_id.clone(),
+            model_version_id: version_id,
             model_spec_id,
             version: 2,
             artifact_hash: hash,
             category_scope: None,
             profile_ref: fixture_profile_ref(),
-            training_dataset_id: Some(dataset_id.clone()),
+            training_dataset_id: Some(dataset_id),
             trade_policy_artifact_id: None,
             trade_policy_hash: None,
             publish_path_set_id: None,
@@ -2095,14 +2080,7 @@ pub async fn plan_count_respects_sample_sources() {
         Arc::new(ControllableFactRead::new(scenario)),
     );
 
-    let default_plan = plan_request(
-        &svc,
-        model_spec_id.clone(),
-        rc_id.clone(),
-        window_start,
-        window_end,
-    )
-    .await;
+    let default_plan = plan_request(&svc, model_spec_id, rc_id, window_start, window_end).await;
     let historical_only_plan = svc
         .plan(DatasetPlanRequest {
             model_spec_id,

@@ -166,7 +166,7 @@ impl ReportLifecycleService {
             .run_repo
             .find_by_id(&request.source_run_id)
             .await?
-            .ok_or_else(|| StorageError::not_found(QUANT_REPORT_RUN, &request.source_run_id))?;
+            .ok_or_else(|| StorageError::not_found(QUANT_REPORT_RUN, request.source_run_id))?;
         if source.trigger_kind != ReportTriggerKind::AdHoc
             || !matches!(
                 source.status,
@@ -460,7 +460,7 @@ impl ReportLifecycleService {
     }
 
     pub(crate) async fn fail_claimed_run(&self, run: &ReportRunInfo, error: &QuantError) {
-        let Some(worker_id) = run.lease_owner.clone() else {
+        let Some(worker_id) = run.lease_owner else {
             return;
         };
         let summary = durable_report_error_summary(error);
@@ -496,7 +496,6 @@ fn build_request_from_claimed_run(
         })?;
     let lease_owner = run
         .lease_owner
-        .clone()
         .ok_or_else(|| ReportError::InvariantViolation {
             stage: "report_run_claim",
             detail: "Running report run has no lease_owner".to_owned(),
@@ -555,7 +554,7 @@ fn build_request_from_claimed_run(
     Ok((
         request,
         ReportRunClaim {
-            report_run_id: run.report_run_id.clone(),
+            report_run_id: run.report_run_id,
             lease_owner,
             lease_expires_at,
         },

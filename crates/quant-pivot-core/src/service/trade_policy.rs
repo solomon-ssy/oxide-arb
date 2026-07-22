@@ -53,20 +53,20 @@ use quant_pivot_models::{
         POLICY_EVIDENCE_OBJECT_FORMAT_VERSION, ResearchEvaluationTrack, ResearchJobId,
         ResearchJobProgress, ResearchProfileArtifact, ResearchProfileId, ResearchProfileRef,
         ResearchReadinessEvidenceId, ResearchReadinessEvidencePayload, SchemaVersion,
-        ShadowLatencyProfileV1, SourceSliceManifestRef, SourceSliceManifestV1,
-        SourceSliceObjectKind, StructuralVolatilityOosFoldRow,
-        TRADE_POLICY_ARTIFACT_FORMAT_VERSION, TRADE_POLICY_EVIDENCE_BUNDLE_FORMAT_VERSION, TokenId,
-        TradePolicyArtifactId, TradePolicyArtifactPayload, TradePolicyCandidateId,
-        TradePolicyCandidateSpec, TradePolicyCandidateTrialRow, TradePolicyCohortTrialRow,
-        TradePolicyCoverageGapRow, TradePolicyCpcvPathRow, TradePolicyEvidenceBundleManifest,
-        TradePolicyEvidenceBundleRef, TradePolicyEvidenceObjectKind, TradePolicyEvidenceObjectRef,
-        TradePolicyExecutionEvidence, TradePolicyFillEvidenceRow, TradePolicyFitContract,
-        TradePolicyGovernanceAuditId, TradePolicyObservationEligibilityRow,
-        TradePolicyPitCutoffEvidence, TradePolicyStatisticalSummaryRow, TradePolicyTrialAttemptId,
-        TradePolicyTrialMetrics, TradePolicyValidationEvidence, TradePolicyValidationRunId,
-        TrainingDatasetId, TrainingExampleId, TrainingSampleSource, UserId,
-        VerticalActivationTarget, VerticalGateEvidence, builtin_research_profiles,
-        canonicalize_policy_candidates, resolve_builtin_research_profile,
+        ShadowLatencyProfileV1, SourceSliceManifest, SourceSliceManifestRef, SourceSliceObjectKind,
+        StructuralVolatilityOosFoldRow, TRADE_POLICY_ARTIFACT_FORMAT_VERSION,
+        TRADE_POLICY_EVIDENCE_BUNDLE_FORMAT_VERSION, TokenId, TradePolicyArtifactId,
+        TradePolicyArtifactPayload, TradePolicyCandidateId, TradePolicyCandidateSpec,
+        TradePolicyCandidateTrialRow, TradePolicyCohortTrialRow, TradePolicyCoverageGapRow,
+        TradePolicyCpcvPathRow, TradePolicyEvidenceBundleManifest, TradePolicyEvidenceBundleRef,
+        TradePolicyEvidenceObjectKind, TradePolicyEvidenceObjectRef, TradePolicyExecutionEvidence,
+        TradePolicyFillEvidenceRow, TradePolicyFitContract, TradePolicyGovernanceAuditId,
+        TradePolicyObservationEligibilityRow, TradePolicyPitCutoffEvidence,
+        TradePolicyStatisticalSummaryRow, TradePolicyTrialAttemptId, TradePolicyTrialMetrics,
+        TradePolicyValidationEvidence, TradePolicyValidationRunId, TrainingDatasetId,
+        TrainingExampleId, TrainingSampleSource, UserId, VerticalActivationTarget,
+        VerticalGateEvidence, builtin_research_profiles, canonicalize_policy_candidates,
+        resolve_builtin_research_profile,
     },
 };
 use quant_pivot_repository::traits::{
@@ -322,7 +322,7 @@ struct WeatherExperimentFamilyInput<'a> {
 
 struct PolicySourceSlice {
     manifest_ref: SourceSliceManifestRef,
-    manifest: SourceSliceManifestV1,
+    manifest: SourceSliceManifest,
 }
 
 struct ValidationCompletionInput<'a> {
@@ -423,7 +423,7 @@ impl TradePolicyService {
                     version_id, profile.profile_ref.id
                 ),
             })?;
-        let model_version_id = model_reference.id.clone();
+        let model_version_id = model_reference.id;
         let model_version = self
             .model_registry
             .find_model_version_by_id(&model_version_id)
@@ -875,11 +875,11 @@ impl TradePolicyService {
                 "source-slice evaluation track does not match the fit request",
             );
         }
-        let full_l2 = !frozen.l2_events.is_empty()
+        let full_l2 = !frozen.l2_ledger.is_empty()
             && !frozen.sessions.is_empty()
             && [
-                SourceSliceObjectKind::L2Event,
-                SourceSliceObjectKind::L2Checkpoint,
+                SourceSliceObjectKind::L2Ledger,
+                SourceSliceObjectKind::L2Ledger,
                 SourceSliceObjectKind::L2Session,
                 SourceSliceObjectKind::L2Gap,
                 SourceSliceObjectKind::TradeTape,
@@ -1024,9 +1024,7 @@ impl TradePolicyService {
                     || attempt.experiment_family_hash != expected_experiment_family
                     || attempt.research_program_hash != payload.fit_contract.research_program_hash
                     || !evidence_matches
-                    || attempt
-                        .expected_row_hash()
-                        .map_or(true, |expected| expected != attempt.row_hash)
+                    || (attempt.expected_row_hash() != Ok(attempt.row_hash))
             })
         {
             return Err(ResearchError::ValidationMethodology {
@@ -1061,7 +1059,7 @@ impl TradePolicyService {
         let mut records = BTreeMap::new();
         for object in &manifest.objects {
             let bytes = self.artifacts.get(&object.uri).await?;
-            let actual_hash = ContentHash::parse(CanonicalDigest::prefixed_bytes(&bytes))?;
+            let actual_hash = CanonicalDigest::content_hash_bytes(&bytes);
             if actual_hash != object.byte_hash {
                 return Err(ResearchError::ValidationMethodology {
                     detail: format!(
@@ -1117,7 +1115,7 @@ impl TradePolicyService {
                     })?;
             records.sort_by(|left, right| left.record_key.cmp(&right.record_key));
             let bytes = PolicyEvidenceParquetCodec::encode(&records)?;
-            let byte_hash = ContentHash::parse(CanonicalDigest::prefixed_bytes(&bytes))?;
+            let byte_hash = CanonicalDigest::content_hash_bytes(&bytes);
             let uri = self
                 .artifacts
                 .put(
@@ -1130,8 +1128,7 @@ impl TradePolicyService {
                 )
                 .await?;
             let verified_bytes = self.artifacts.get(&uri).await?;
-            let verified_hash =
-                ContentHash::parse(CanonicalDigest::prefixed_bytes(&verified_bytes))?;
+            let verified_hash = CanonicalDigest::content_hash_bytes(&verified_bytes);
             if verified_hash != byte_hash {
                 return Err(ResearchError::ValidationMethodology {
                     detail: format!("policy evidence {kind:?} changed after write"),
@@ -1229,7 +1226,7 @@ impl TradePolicyService {
                 })?;
             let candidate_hash = candidate_hashes
                 .get(&spec.candidate_id)
-                .cloned()
+                .copied()
                 .ok_or_else(|| ResearchError::ValidationMethodology {
                     detail: format!(
                         "trial ledger candidate {} is outside the frozen family",
@@ -1244,10 +1241,10 @@ impl TradePolicyService {
                     fit_job_id,
                     attempt_ordinal,
                 ),
-                fit_job_id: fit_job_id.clone(),
+                fit_job_id: *fit_job_id,
                 attempt_ordinal,
-                experiment_family_hash: experiment_family_hash.clone(),
-                research_program_hash: research_program_hash.clone(),
+                experiment_family_hash: *experiment_family_hash,
+                research_program_hash: *research_program_hash,
                 candidate_id: TradePolicyCandidateId::parse(spec.candidate_id).map_err(
                     |error| ResearchError::ValidationMethodology {
                         detail: error.to_string(),
@@ -1260,7 +1257,7 @@ impl TradePolicyService {
                 status: spec.status,
                 metrics_json: spec.metrics,
                 evidence_uri: evidence_object.map(|object| object.uri.clone()),
-                evidence_hash: evidence_object.map(|object| object.byte_hash.clone()),
+                evidence_hash: evidence_object.map(|object| object.byte_hash),
                 evidence_row_count: evidence_object
                     .map(|object| i64::try_from(object.row_count))
                     .transpose()
@@ -1311,10 +1308,10 @@ impl TradePolicyService {
                     fit_job_id,
                     attempt_ordinal,
                 ),
-                fit_job_id: fit_job_id.clone(),
+                fit_job_id: *fit_job_id,
                 attempt_ordinal,
-                experiment_family_hash: experiment_family_hash.clone(),
-                research_program_hash: research_program_hash.clone(),
+                experiment_family_hash: *experiment_family_hash,
+                research_program_hash: *research_program_hash,
                 candidate_id: TradePolicyCandidateId::parse(&candidate.candidate_id).map_err(
                     |error| ResearchError::ValidationMethodology {
                         detail: error.to_string(),
@@ -1358,18 +1355,17 @@ impl TradePolicyService {
                 &dataset_manifest.source_slice.manifest_hash,
             )
             .await?;
-        let manifest =
-            serde_json::from_slice::<SourceSliceManifestV1>(&bytes).map_err(|error| {
-                ResearchError::Serialization {
-                    detail: format!("invalid Source Slice manifest during validation: {error}"),
-                }
-            })?;
+        let manifest = serde_json::from_slice::<SourceSliceManifest>(&bytes).map_err(|error| {
+            ResearchError::Serialization {
+                detail: format!("invalid Source Slice manifest during validation: {error}"),
+            }
+        })?;
         let identity = SourceSliceIdentity::derive(SourceSliceIdentityInput {
             profile_ref: manifest.profile_ref.clone(),
             evaluation_track: manifest.evaluation_track,
-            research_program_hash: manifest.research_program_hash.clone(),
-            decision_policy_snapshot_id: manifest.decision_policy_snapshot_id.clone(),
-            runtime_config_hash: manifest.runtime_config_hash.clone(),
+            research_program_hash: manifest.research_program_hash,
+            decision_policy_snapshot_id: manifest.decision_policy_snapshot_id,
+            runtime_config_hash: manifest.runtime_config_hash,
             window_start: manifest.window_start,
             window_end: manifest.window_end,
             pit_cutoff: manifest.pit_cutoff,
@@ -1458,7 +1454,7 @@ impl TradePolicyService {
         cancel: CancellationToken,
     ) -> QuantResult<FitDatasetInputs> {
         let source_dataset_id = if let Some(id) = &plan.reusable_source_dataset_id {
-            id.clone()
+            *id
         } else {
             progress.report(ResearchJobProgress::indeterminate(
                 "materializing_source_slice",
@@ -1466,10 +1462,10 @@ impl TradePolicyService {
             ));
             let build_request = PolicyFitDatasetBuildRequest {
                 dataset: BuildTrainingDatasetRequest {
-                    model_spec_id: plan.runtime_limits.fit_model.model_spec_id.clone(),
+                    model_spec_id: plan.runtime_limits.fit_model.model_spec_id,
                     profile_ref: plan.profile.profile_ref.clone(),
                     purpose: DatasetPurpose::PolicyFit,
-                    decision_policy_snapshot_id: plan.decision_policy_snapshot_id.clone(),
+                    decision_policy_snapshot_id: plan.decision_policy_snapshot_id,
                     window_start: plan.fit_window_start,
                     window_end: plan.fit_window_end,
                     pit_cutoff: request.selection.pit_cutoff,
@@ -1479,10 +1475,10 @@ impl TradePolicyService {
                     feature_schema_version: plan.runtime_limits.fit_model.feature_schema_version,
                     sample_sources: vec![TrainingSampleSource::HistoricalPit],
                     reason: request.reason.clone(),
-                    training_dataset_id: Some(fit_dataset_id.clone()),
+                    training_dataset_id: Some(*fit_dataset_id),
                 },
                 evaluation_track: request.evaluation_track,
-                research_program_hash: plan.research_program_hash.clone(),
+                research_program_hash: plan.research_program_hash,
             };
             ensure_fit_active(&cancel, "before Source Slice materialization")?;
             self.dataset_builder
@@ -1523,10 +1519,10 @@ impl TradePolicyService {
         require_replayable_validation_source(&frozen_source)?;
         Ok(FitDatasetInputs {
             source_dataset_id,
-            dataset_hash: materialization.dataset_hash.clone(),
-            feature_schema_hash: materialization.feature_schema_hash.clone(),
-            factor_schema_hash: materialization.factor_schema_hash.clone(),
-            label_schema_hash: materialization.label_schema_hash.clone(),
+            dataset_hash: *materialization.dataset_hash,
+            feature_schema_hash: *materialization.feature_schema_hash,
+            factor_schema_hash: *materialization.factor_schema_hash,
+            label_schema_hash: *materialization.label_schema_hash,
             source_slice_ref: materialization.manifest.source_slice.clone(),
             examples,
             frozen_source,
@@ -1682,18 +1678,18 @@ impl TradePolicyService {
         let replay_kernel_hash = CanonicalDigest::content_hash_json(&POLICY_REPLAY_KERNEL_VERSION)?;
         let manifest = TradePolicyEvidenceBundleManifest {
             format_version: TRADE_POLICY_EVIDENCE_BUNDLE_FORMAT_VERSION,
-            source_dataset_hash: data.dataset_hash.clone(),
-            candidate_set_hash: plan.candidate_set_hash.clone(),
-            simulator_hash: simulator_hash.clone(),
-            replay_kernel_hash: replay_kernel_hash.clone(),
-            methodology_hash: plan.runtime_limits.methodology_hash.clone(),
-            latency_evidence_id: data.latency_evidence_id.clone(),
-            latency_profile_hash: data.latency_profile_hash.clone(),
-            catalog_ledger_hash: catalog_ledger_hash.clone(),
-            source_slice_manifest_hash: data.source_slice_ref.manifest_hash.clone(),
-            fit_job_id: fit_job_id.clone(),
+            source_dataset_hash: data.dataset_hash,
+            candidate_set_hash: plan.candidate_set_hash,
+            simulator_hash,
+            replay_kernel_hash,
+            methodology_hash: plan.runtime_limits.methodology_hash,
+            latency_evidence_id: data.latency_evidence_id,
+            latency_profile_hash: data.latency_profile_hash,
+            catalog_ledger_hash,
+            source_slice_manifest_hash: data.source_slice_ref.manifest_hash,
+            fit_job_id: *fit_job_id,
             trial_ledger_cutoff,
-            trial_ledger_hash: trial_ledger_hash.clone(),
+            trial_ledger_hash,
             objects,
         };
         let (manifest_uri, manifest_hash) = self.write_evidence_manifest(&manifest).await?;
@@ -1720,12 +1716,11 @@ impl TradePolicyService {
                 &source_slice_ref.manifest_hash,
             )
             .await?;
-        let manifest =
-            serde_json::from_slice::<SourceSliceManifestV1>(&bytes).map_err(|error| {
-                ResearchError::Serialization {
-                    detail: format!("invalid Source Slice manifest while sealing policy: {error}"),
-                }
-            })?;
+        let manifest = serde_json::from_slice::<SourceSliceManifest>(&bytes).map_err(|error| {
+            ResearchError::Serialization {
+                detail: format!("invalid Source Slice manifest while sealing policy: {error}"),
+            }
+        })?;
         manifest
             .validate()
             .map_err(|detail| ResearchError::ValidationMethodology { detail })?;
@@ -1742,7 +1737,7 @@ impl TradePolicyService {
         let bytes = serde_json::to_vec(manifest).map_err(|error| ResearchError::Serialization {
             detail: format!("policy evidence manifest serialization failed: {error}"),
         })?;
-        let hash = ContentHash::parse(CanonicalDigest::prefixed_bytes(&bytes))?;
+        let hash = CanonicalDigest::content_hash_bytes(&bytes);
         let uri = self
             .artifacts
             .put(
@@ -1875,7 +1870,7 @@ impl TradePolicyService {
         evidence.vertical_gate_evidence = vec![vertical_gate];
         Ok(WeatherPolicyRecomputeResult {
             evidence,
-            experiment_family_hash: input.experiment_family_hash.clone(),
+            experiment_family_hash: *input.experiment_family_hash,
             embargo_secs,
         })
     }
@@ -1928,12 +1923,11 @@ impl TradePolicyService {
         let bytes = self
             .read_and_hash_manifest(&manifest_ref.manifest_uri, &manifest_ref.manifest_hash)
             .await?;
-        let manifest =
-            serde_json::from_slice::<SourceSliceManifestV1>(&bytes).map_err(|error| {
-                ResearchError::Serialization {
-                    detail: format!("invalid policy Source Slice manifest: {error}"),
-                }
-            })?;
+        let manifest = serde_json::from_slice::<SourceSliceManifest>(&bytes).map_err(|error| {
+            ResearchError::Serialization {
+                detail: format!("invalid policy Source Slice manifest: {error}"),
+            }
+        })?;
         manifest
             .validate()
             .map_err(|detail| ResearchError::ValidationMethodology { detail })?;
@@ -1953,9 +1947,9 @@ impl TradePolicyService {
         let identity = SourceSliceIdentity::derive(SourceSliceIdentityInput {
             profile_ref: manifest.profile_ref.clone(),
             evaluation_track: manifest.evaluation_track,
-            research_program_hash: manifest.research_program_hash.clone(),
-            decision_policy_snapshot_id: manifest.decision_policy_snapshot_id.clone(),
-            runtime_config_hash: manifest.runtime_config_hash.clone(),
+            research_program_hash: manifest.research_program_hash,
+            decision_policy_snapshot_id: manifest.decision_policy_snapshot_id,
+            runtime_config_hash: manifest.runtime_config_hash,
             window_start: manifest.window_start,
             window_end: manifest.window_end,
             pit_cutoff: manifest.pit_cutoff,
@@ -2068,12 +2062,10 @@ impl TradePolicyService {
                 &source_manifest.manifest_hash,
             )
             .await?;
-        let source_manifest = serde_json::from_slice::<SourceSliceManifestV1>(
-            &source_manifest_bytes,
-        )
-        .map_err(|error| ResearchError::Serialization {
-            detail: format!("invalid Source Slice manifest during publish: {error}"),
-        })?;
+        let source_manifest = serde_json::from_slice::<SourceSliceManifest>(&source_manifest_bytes)
+            .map_err(|error| ResearchError::Serialization {
+                detail: format!("invalid Source Slice manifest during publish: {error}"),
+            })?;
         source_manifest
             .validate()
             .map_err(|detail| ResearchError::ValidationMethodology { detail })?;
@@ -2103,7 +2095,7 @@ impl TradePolicyService {
         ));
         let example_index = examples
             .iter()
-            .map(|example| (example.example_id.clone(), example))
+            .map(|example| (example.example_id, example))
             .collect::<HashMap<_, _>>();
         let mut batch = Vec::with_capacity(BATCH_SIZE);
         let mut row_chain = Hasher::new();
@@ -2154,8 +2146,8 @@ impl TradePolicyService {
                     }
                 })?;
                 let lineage = validation_row_lineage(kind, lineage_record, &example_index)?;
-                let expected_row_hash = expected_record.map(|record| record.row_hash.clone());
-                let actual_row_hash = actual_record.map(|record| record.row_hash.clone());
+                let expected_row_hash = expected_record.map(|record| record.row_hash);
+                let actual_row_hash = actual_record.map(|record| record.row_hash);
                 let evidence_kind = evidence_kind_name(kind).to_owned();
                 let row_hash = ResearchHasher::canonical(&(
                     "trade_policy_validation_row_v2",
@@ -2170,10 +2162,11 @@ impl TradePolicyService {
                     &diagnostic_kind,
                     &detail,
                 ))?;
-                row_chain.update(row_hash.as_str().as_bytes());
+                let row_hash_text = row_hash.canonical_text();
+                row_chain.update(row_hash_text.as_bytes());
                 row_chain.update(b"\n");
                 batch.push(NewTradePolicyValidationRow {
-                    validation_run_id: validation_run_id.clone(),
+                    validation_run_id: *validation_run_id,
                     row_ordinal: total_rows,
                     evidence_kind,
                     record_key,
@@ -2230,7 +2223,7 @@ impl TradePolicyService {
             total_rows,
             passed_rows,
             failed_rows,
-            row_chain_hash: content_hash_from_hasher(&row_chain)?,
+            row_chain_hash: content_hash_from_hasher(&row_chain),
         })
     }
 
@@ -2246,7 +2239,7 @@ impl TradePolicyService {
             .read_and_hash_manifest(&source_ref.manifest_uri, &source_ref.manifest_hash)
             .await?;
         let manifest =
-            serde_json::from_slice::<SourceSliceManifestV1>(&manifest_bytes).map_err(|error| {
+            serde_json::from_slice::<SourceSliceManifest>(&manifest_bytes).map_err(|error| {
                 ResearchError::Serialization {
                     detail: format!(
                         "invalid Source Slice manifest at validation durability boundary: {error}"
@@ -2329,7 +2322,7 @@ impl TradePolicyService {
         let source_slice_manifest_hash = dataset
             .manifest_json
             .as_ref()
-            .map(|manifest| manifest.source_slice.manifest_hash.clone())
+            .map(|manifest| manifest.source_slice.manifest_hash)
             .ok_or_else(|| ResearchError::ValidationMethodology {
                 detail: "Ready PolicyFit dataset has no manifest".to_owned(),
             })?;
@@ -2337,7 +2330,7 @@ impl TradePolicyService {
             .payload_json
             .evidence_bundle
             .as_ref()
-            .map(|bundle| bundle.manifest_hash.clone())
+            .map(|bundle| bundle.manifest_hash)
             .ok_or_else(|| ResearchError::ValidationMethodology {
                 detail: "trade policy has no evidence bundle".to_owned(),
             })?;
@@ -2507,11 +2500,11 @@ impl TradePolicyService {
                     validation_hash,
                     audit: NewTradePolicyGovernanceAudit {
                         audit_id: TradePolicyGovernanceAuditId::from_v7(),
-                        artifact_id: input.artifact_id.clone(),
+                        artifact_id: *input.artifact_id,
                         action: TradePolicyGovernanceAction::Validate,
                         from_status: TradePolicyStatus::Draft,
                         to_status: TradePolicyStatus::Validated,
-                        content_hash: input.current.content_hash.clone(),
+                        content_hash: input.current.content_hash,
                         actor_id: input.actor_id,
                         reason: input.reason,
                     },
@@ -2630,7 +2623,7 @@ impl TradePolicyService {
             hasher.update(&chunk);
             bytes.extend_from_slice(&chunk);
         }
-        let actual_hash = content_hash_from_hasher(&hasher)?;
+        let actual_hash = content_hash_from_hasher(&hasher);
         if &actual_hash != expected_hash {
             return Err(ResearchError::ValidationMethodology {
                 detail: "policy evidence manifest byte hash mismatch".to_owned(),
@@ -2742,23 +2735,23 @@ fn build_fit_artifact_payload(
         fit_contract: TradePolicyFitContract {
             profile_ref: plan.profile.profile_ref.clone(),
             evaluation_track: request.evaluation_track,
-            research_program_hash: plan.research_program_hash.clone(),
-            source_dataset_id: data.source_dataset_id.clone(),
-            model_version_id: plan.runtime_limits.fit_model.model_version_id.clone(),
-            decision_policy_snapshot_id: plan.decision_policy_snapshot_id.clone(),
+            research_program_hash: plan.research_program_hash,
+            source_dataset_id: data.source_dataset_id,
+            model_version_id: plan.runtime_limits.fit_model.model_version_id,
+            decision_policy_snapshot_id: plan.decision_policy_snapshot_id,
             fit_window_start: plan.fit_window_start,
             fit_window_end: plan.fit_window_end,
             pit_cutoff: request.selection.pit_cutoff,
             target_horizon_secs: plan.profile.spec.target_horizon_secs,
             cash_budget_tiers: plan.profile.spec.allowed_cash_budget_tiers.clone(),
-            methodology_hash: plan.runtime_limits.methodology_hash.clone(),
-            latency_evidence_id: data.latency_evidence_id.clone(),
-            latency_profile_hash: data.latency_profile_hash.clone(),
+            methodology_hash: plan.runtime_limits.methodology_hash,
+            latency_evidence_id: data.latency_evidence_id,
+            latency_profile_hash: data.latency_profile_hash,
             quality_gate: plan.profile.spec.quality_gate.clone(),
         },
-        source_dataset_hash: data.dataset_hash.clone(),
-        feature_schema_hash: data.feature_schema_hash.clone(),
-        label_schema_hash: data.label_schema_hash.clone(),
+        source_dataset_hash: data.dataset_hash,
+        feature_schema_hash: data.feature_schema_hash,
+        label_schema_hash: data.label_schema_hash,
         fill_simulator_version: EXECUTION_SEMANTICS_VERSION.to_owned(),
         embargo_secs,
         pit_cutoff_evidence: Some(TradePolicyPitCutoffEvidence {
@@ -2781,20 +2774,20 @@ fn build_fit_artifact_payload(
             fee_model_hash: Some(fee_model_hash),
             gaps: Vec::new(),
         },
-        candidate_set_hash: manifest.candidate_set_hash.clone(),
+        candidate_set_hash: manifest.candidate_set_hash,
         candidates: plan.candidates.clone(),
         evidence_bundle: Some(TradePolicyEvidenceBundleRef {
             manifest_uri,
             manifest_hash,
             simulator_hash,
             replay_kernel_hash,
-            methodology_hash: plan.runtime_limits.methodology_hash.clone(),
-            latency_evidence_id: data.latency_evidence_id.clone(),
-            latency_profile_hash: data.latency_profile_hash.clone(),
+            methodology_hash: plan.runtime_limits.methodology_hash,
+            latency_evidence_id: data.latency_evidence_id,
+            latency_profile_hash: data.latency_profile_hash,
             catalog_ledger_hash,
-            source_slice_manifest_hash: data.source_slice_ref.manifest_hash.clone(),
-            fit_job_id: manifest.fit_job_id.clone(),
-            trial_ledger_hash: trial_ledger_hash.clone(),
+            source_slice_manifest_hash: data.source_slice_ref.manifest_hash,
+            fit_job_id: manifest.fit_job_id,
+            trial_ledger_hash,
         }),
         vertical_gate_evidence: evidence.vertical_gate_evidence,
         structural_volatility_oos: evidence.structural_volatility_oos,
@@ -3203,7 +3196,7 @@ fn validation_example_lineage(
 ) -> ValidationRowLineage {
     let example = examples.get(example_id).copied();
     ValidationRowLineage {
-        example_id: Some(example_id.clone()),
+        example_id: Some(*example_id),
         market_id: example.map(|example| example.market_id.clone()),
         token_id: example.map(|example| example.token_id.clone()),
         decision_at: event_at.or_else(|| example.map(TrainingExample::decision_at)),
@@ -3234,7 +3227,7 @@ fn require_replayable_validation_source(source: &FrozenSourceSlice) -> QuantResu
         }
         .into());
     }
-    if source.l2_events.is_empty() || source.prefetched.books.is_empty() {
+    if source.l2_ledger.is_empty() || source.prefetched.books.is_empty() {
         return Err(ResearchError::ValidationMethodology {
             detail: "Source Slice has no replayable L2 event/checkpoint evidence".to_owned(),
         }
@@ -3271,8 +3264,8 @@ fn policy_simulator_hash() -> QuantResult<ContentHash> {
     .map_err(Into::into)
 }
 
-fn content_hash_from_hasher(hasher: &Hasher) -> QuantResult<ContentHash> {
-    ContentHash::parse(format!("blake3:{}", hasher.finalize().to_hex())).map_err(Into::into)
+fn content_hash_from_hasher(hasher: &Hasher) -> ContentHash {
+    ContentHash::from_bytes(*hasher.finalize().as_bytes())
 }
 
 async fn require_durable_artifact(
@@ -3532,9 +3525,9 @@ fn operational_evidence_view(
     info: &ResearchReadinessEvidenceInfo,
 ) -> TradePolicyOperationalEvidenceView {
     TradePolicyOperationalEvidenceView {
-        evidence_id: info.evidence_id.clone(),
+        evidence_id: info.evidence_id,
         kind: info.kind,
-        payload_hash: info.payload_hash.clone(),
+        payload_hash: info.payload_hash,
         artifact_version: info.artifact_version.clone(),
         attestation_key_id: info.attestation_key_id.clone(),
         observed_at: info.observed_at,
@@ -3632,9 +3625,9 @@ fn derive_contract_source_identity(
     SourceSliceIdentity::derive(SourceSliceIdentityInput {
         profile_ref: profile.profile_ref.clone(),
         evaluation_track: input.request.evaluation_track,
-        research_program_hash: program_hash.clone(),
-        decision_policy_snapshot_id: decision_policy_snapshot_id.clone(),
-        runtime_config_hash: limits.runtime_config_hash.clone(),
+        research_program_hash: *program_hash,
+        decision_policy_snapshot_id: *decision_policy_snapshot_id,
+        runtime_config_hash: limits.runtime_config_hash,
         window_start,
         window_end,
         pit_cutoff: input.request.selection.pit_cutoff,
@@ -3730,7 +3723,7 @@ fn assemble_preflight_view(
     let methodology_hash = contract
         .runtime_limits
         .as_ref()
-        .map(|limits| limits.methodology_hash.clone());
+        .map(|limits| limits.methodology_hash);
     let dataset_link = dataset_info.map(|dataset| {
         format!(
             "/research/training-datasets/{}",
@@ -3775,16 +3768,16 @@ fn assemble_preflight_view(
     };
     Ok(TradePolicyFitPreflightView {
         readiness,
-        reusable_source_dataset_id: dataset_info.map(|dataset| dataset.training_dataset_id.clone()),
+        reusable_source_dataset_id: dataset_info.map(|dataset| dataset.training_dataset_id),
         profile: contract.profile,
         fit_window_start: contract.fit_window_start,
         fit_window_end: contract.fit_window_end,
         research_program_hash: contract.research_program_hash,
-        source_slice_id: source_slice_info.map(|source_slice| source_slice.source_slice_id.clone()),
+        source_slice_id: source_slice_info.map(|source_slice| source_slice.source_slice_id),
         source_slice_identity_hash: contract
             .source_slice_identity
             .as_ref()
-            .map(|identity| identity.identity_hash.clone()),
+            .map(|identity| identity.identity_hash),
         estimated_candidate_trials,
         estimated_fold_evaluations,
         catalog_completeness_proven: dataset.source_slice_verified.is_pass().into(),
@@ -3903,15 +3896,15 @@ impl TradePolicyPort for TradePolicyService {
         let run = self
             .policies
             .begin_validation(NewTradePolicyValidationRun {
-                validation_run_id: validation_run_id.clone(),
-                artifact_id: artifact_id.clone(),
-                artifact_hash: inputs.current.content_hash.clone(),
-                source_dataset_id: inputs.dataset.training_dataset_id.clone(),
-                source_dataset_hash: inputs.current.payload_json.source_dataset_hash.clone(),
-                source_slice_manifest_hash: inputs.source_slice_manifest_hash.clone(),
-                evidence_manifest_hash: inputs.evidence_manifest_hash.clone(),
+                validation_run_id: *validation_run_id,
+                artifact_id: *artifact_id,
+                artifact_hash: inputs.current.content_hash,
+                source_dataset_id: inputs.dataset.training_dataset_id,
+                source_dataset_hash: inputs.current.payload_json.source_dataset_hash,
+                source_slice_manifest_hash: inputs.source_slice_manifest_hash,
+                evidence_manifest_hash: inputs.evidence_manifest_hash,
                 status: TradePolicyValidationStatus::Running,
-                actor_id: actor_id.clone(),
+                actor_id,
                 reason: reason.clone(),
             })
             .await?;
@@ -3975,7 +3968,7 @@ impl TradePolicyPort for TradePolicyService {
             return Ok(None);
         };
         Ok(Some(TradePolicySourceSliceView {
-            artifact_id: artifact_id.clone(),
+            artifact_id: *artifact_id,
             profile_ref: source.manifest.profile_ref,
             source_slice: source.manifest_ref,
         }))
@@ -4060,7 +4053,7 @@ impl TradePolicyPort for TradePolicyService {
             .signed_download_url(&object.uri, StdDuration::from_secs(SIGNED_DOWNLOAD_SECS))
             .await?;
         Ok(Some(TradePolicyEvidenceDownloadView {
-            artifact_id: artifact_id.clone(),
+            artifact_id: *artifact_id,
             kind,
             byte_hash: object.byte_hash,
             row_count: object.row_count,
@@ -4262,7 +4255,7 @@ impl TradePolicyPort for TradePolicyService {
                 target,
                 NewTradePolicyGovernanceAudit {
                     audit_id: TradePolicyGovernanceAuditId::from_v7(),
-                    artifact_id: artifact_id.clone(),
+                    artifact_id: *artifact_id,
                     action,
                     from_status: current.status,
                     to_status: target,
@@ -4386,12 +4379,12 @@ fn collect_weather_replay_inputs(
         })?;
         for linkage in &page.linkages {
             gate_linkages
-                .entry(linkage.content_hash.clone())
+                .entry(linkage.content_hash)
                 .or_insert_with(|| linkage.clone());
         }
         for observation in &page.weather_observations {
             gate_observations
-                .entry(observation.report_hash.clone())
+                .entry(observation.report_hash)
                 .or_insert_with(|| observation.clone());
         }
         for trade in &page.trade_tape {

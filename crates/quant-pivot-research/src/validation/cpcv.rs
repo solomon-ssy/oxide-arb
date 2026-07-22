@@ -22,6 +22,8 @@
 //! implementations; supplies lot-grouped implementations with
 //! zero changes here.
 
+use std::ops::Range;
+
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::types::{
     BacktestPathSetId,
@@ -118,7 +120,10 @@ fn binomial(n: u32, k: u32) -> QuantResult<u64> {
 /// to.
 #[derive(Debug, Clone, Default)]
 pub struct GroupRowFilter {
-    /// Indices into the original `groups` slice, unordered.
+    /// Strictly ascending, unique indices into the original `groups` slice.
+    /// Producers must normalize once before crossing the fold boundary; hot
+    /// consumers deliberately do not clone/sort this potentially million-row
+    /// vector again.
     pub group_indices: Vec<usize>,
 }
 
@@ -309,7 +314,7 @@ impl DefaultCombinatorialPurgedBacktester {
 /// A contiguous, roughly-equal partition of `groups`'s indices into
 /// `n_groups` buckets. Contiguous (not interleaved) so a partition's own
 /// interval span stays tight for purge/embargo purposes.
-fn partition_indices(group_count: usize, n_groups: usize) -> QuantResult<Vec<Vec<usize>>> {
+fn partition_indices(group_count: usize, n_groups: usize) -> QuantResult<Vec<Range<usize>>> {
     (0..n_groups)
         .map(|partition| {
             let start = group_count
@@ -323,7 +328,7 @@ fn partition_indices(group_count: usize, n_groups: usize) -> QuantResult<Vec<Vec
                 .checked_mul(next_partition)
                 .ok_or_else(|| methodology("CPCV partition end overflowed usize".to_owned()))?
                 / n_groups;
-            Ok((start..end).collect())
+            Ok(start..end)
         })
         .collect()
 }
@@ -361,18 +366,29 @@ impl CombinatorialPurgedBacktester for DefaultCombinatorialPurgedBacktester {
             .map(|test_partitions| -> QuantResult<FoldResult> {
                 let test_group_indices: Vec<usize> = test_partitions
                     .iter()
-                    .flat_map(|&p| partitions[p].iter().copied())
+                    .flat_map(|&partition| partitions[partition].clone())
                     .collect();
                 let split = splitter.split(groups, &test_group_indices, &purge)?;
                 let model = fold_source.train_fold(&GroupRowFilter {
                     group_indices: split.train_indices,
                 })?;
-                let evaluations = replay.evaluate(
-                    &model,
-                    &GroupRowFilter {
-                        group_indices: split.test_indices,
-                    },
-                )?;
+                let test_filter = GroupRowFilter {
+                    group_indices: split.test_indices,
+                };
+                let mut evaluations = replay.evaluate(&model, &test_filter)?;
+                evaluations.sort_unstable_by_key(|evaluation| evaluation.group_index);
+                if evaluations.len() != test_filter.group_indices.len()
+                    || evaluations
+                        .iter()
+                        .zip(&test_filter.group_indices)
+                        .any(|(evaluation, &expected)| evaluation.group_index != expected)
+                {
+                    return Err(methodology(format!(
+                        "CPCV replay returned {} evaluations for {} exact test groups",
+                        evaluations.len(),
+                        test_filter.group_indices.len()
+                    )));
+                }
                 Ok(FoldResult {
                     test_partitions: test_partitions.clone(),
                     evaluations,
@@ -438,7 +454,7 @@ fn reconstruct_paths(
     groups: &[TimelineGroup],
     n_groups: usize,
     path_count: usize,
-    partitions: &[Vec<usize>],
+    partitions: &[Range<usize>],
     folds: &[FoldResult],
 ) -> QuantResult<Vec<BacktestPath>> {
     let mut slots: Vec<Vec<Option<usize>>> = vec![vec![None; n_groups]; path_count];
@@ -460,7 +476,7 @@ fn reconstruct_paths(
 
     let mut paths = Vec::with_capacity(path_count);
     for (path_index, path_slots) in slots.into_iter().enumerate() {
-        let mut per_group: Vec<Option<GroupEvaluation>> = vec![None; groups.len()];
+        let mut per_group: Vec<Option<&GroupEvaluation>> = vec![None; groups.len()];
         for (partition, fold_idx) in path_slots.into_iter().enumerate() {
             let Some(fold_idx) = fold_idx else {
                 return Err(ResearchError::ValidationMethodology {
@@ -469,13 +485,37 @@ fn reconstruct_paths(
                 .into());
             };
             let fold = &folds[fold_idx];
-            for &group_index in &partitions[partition] {
-                let evaluation = fold
-                    .evaluations
-                    .iter()
-                    .find(|e| e.group_index == group_index)
-                    .cloned();
-                per_group[group_index] = evaluation;
+            let partition_range = partitions[partition].clone();
+            let start = fold
+                .evaluations
+                .binary_search_by_key(&partition_range.start, |evaluation| evaluation.group_index)
+                .map_err(|_| ResearchError::ValidationMethodology {
+                    detail: format!(
+                        "fold {fold_idx} has no evaluation for partition {partition} start {}",
+                        partition_range.start
+                    ),
+                })?;
+            let end = start.checked_add(partition_range.len()).ok_or_else(|| {
+                methodology("CPCV partition evaluation boundary overflowed usize".to_owned())
+            })?;
+            let evaluations = fold.evaluations.get(start..end).ok_or_else(|| {
+                ResearchError::ValidationMethodology {
+                    detail: format!(
+                        "fold {fold_idx} has too few evaluations for partition {partition}"
+                    ),
+                }
+            })?;
+            for (group_index, evaluation) in partition_range.zip(evaluations) {
+                if evaluation.group_index != group_index {
+                    return Err(ResearchError::ValidationMethodology {
+                        detail: format!(
+                            "fold {fold_idx} evaluation order diverged at group {group_index}: got {}",
+                            evaluation.group_index
+                        ),
+                    }
+                    .into());
+                }
+                per_group[group_index] = Some(evaluation);
             }
         }
         let path_index = u32::try_from(path_index)
@@ -485,7 +525,10 @@ fn reconstruct_paths(
     Ok(paths)
 }
 
-fn build_path(path_index: u32, per_group: &[Option<GroupEvaluation>]) -> QuantResult<BacktestPath> {
+fn build_path(
+    path_index: u32,
+    per_group: &[Option<&GroupEvaluation>],
+) -> QuantResult<BacktestPath> {
     let mut group_returns = Vec::with_capacity(per_group.len());
     let mut pooled_scores = Vec::new();
     let mut pooled_realized = Vec::new();
@@ -671,7 +714,7 @@ mod tests {
         }
 
         fn feature_schema_hash(&self) -> ContentHash {
-            ContentHash::parse(format!("blake3:{}", "0".repeat(64))).expect("hash")
+            ContentHash::parse(&format!("blake3:{}", "0".repeat(64))).expect("hash")
         }
 
         fn required_features(&self) -> Vec<FeatureName> {

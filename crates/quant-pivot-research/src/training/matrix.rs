@@ -6,7 +6,10 @@
 //! [`FittedInputTransform::apply_cells`] implementation is then used by fold
 //! validation, final training, backtests, and online serving.
 
-use std::collections::BTreeSet;
+use std::{
+    collections::BTreeSet,
+    ops::{Index, Range},
+};
 
 use chrono::{DateTime, Utc};
 use ndarray::Array1;
@@ -19,7 +22,10 @@ use rust_decimal::{
     Decimal,
     prelude::{FromPrimitive, ToPrimitive},
 };
-use serde::{Deserialize, Serialize};
+use serde::{
+    Deserialize, Serialize, Serializer,
+    ser::{SerializeSeq, SerializeTuple},
+};
 
 use super::{LabelName, TrainingExample, TrainingLabel};
 use crate::{
@@ -62,7 +68,7 @@ pub struct FeatureMatrixSpec {
 }
 
 /// State of one raw model input before imputation or encoding.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelInputCell {
     /// Genuine observed numeric value.
     Observed(Decimal),
@@ -78,6 +84,260 @@ pub enum ModelInputCell {
     NotApplicable,
 }
 
+/// Contiguous row-major raw model inputs.
+///
+/// The shape is established at construction and every row is a borrowed slice
+/// into one allocation. This avoids one heap allocation per training example
+/// and permits fold selection with one linear copy.
+#[derive(Debug, Clone)]
+pub struct RawInputMatrix {
+    values: Vec<ModelInputCell>,
+    rows: usize,
+    columns: usize,
+}
+
+impl RawInputMatrix {
+    /// Validate an owned row-major cell buffer against its declared shape.
+    pub fn from_flat(
+        values: Vec<ModelInputCell>,
+        rows: usize,
+        columns: usize,
+    ) -> QuantResult<Self> {
+        let expected = rows
+            .checked_mul(columns)
+            .ok_or_else(|| ResearchError::MatrixBuild {
+                detail: "raw input matrix shape overflowed usize".to_owned(),
+            })?;
+        if values.len() != expected {
+            return Err(ResearchError::MatrixBuild {
+                detail: format!(
+                    "raw input matrix has {} cells but shape {rows}x{columns} requires {expected}",
+                    values.len()
+                ),
+            }
+            .into());
+        }
+        Ok(Self {
+            values,
+            rows,
+            columns,
+        })
+    }
+
+    /// Construct a contiguous matrix from owned rows.
+    pub fn from_rows(rows: Vec<Vec<ModelInputCell>>) -> QuantResult<Self> {
+        let row_count = rows.len();
+        let columns = rows.first().map_or(0, Vec::len);
+        if rows.iter().any(|row| row.len() != columns) {
+            return Err(ResearchError::MatrixBuild {
+                detail: "raw input matrix rows have inconsistent widths".to_owned(),
+            }
+            .into());
+        }
+        let capacity =
+            row_count
+                .checked_mul(columns)
+                .ok_or_else(|| ResearchError::MatrixBuild {
+                    detail: "raw input matrix capacity overflowed usize".to_owned(),
+                })?;
+        let mut values = Vec::with_capacity(capacity);
+        for row in rows {
+            values.extend(row);
+        }
+        Self::from_flat(values, row_count, columns)
+    }
+
+    /// Number of rows.
+    #[must_use]
+    pub const fn row_count(&self) -> usize {
+        self.rows
+    }
+
+    /// Number of columns.
+    #[must_use]
+    pub const fn column_count(&self) -> usize {
+        self.columns
+    }
+
+    /// Borrow one row without allocation.
+    #[must_use]
+    pub fn row(&self, index: usize) -> Option<&[ModelInputCell]> {
+        let start = index.checked_mul(self.columns)?;
+        let end = start.checked_add(self.columns)?;
+        self.values.get(start..end)
+    }
+
+    /// Iterate borrowed rows in original order.
+    pub fn rows(&self) -> impl ExactSizeIterator<Item = &[ModelInputCell]> {
+        self.values
+            .chunks_exact(self.columns.max(1))
+            .take(self.rows)
+    }
+
+    pub(crate) fn row_range(
+        &self,
+        range: Range<usize>,
+    ) -> QuantResult<impl ExactSizeIterator<Item = &[ModelInputCell]>> {
+        let reversed = range.start > range.end;
+        let out_of_bounds = range.end > self.rows;
+        if reversed || out_of_bounds {
+            return Err(ResearchError::MatrixBuild {
+                detail: format!(
+                    "raw input row range {}..{} exceeds {} rows",
+                    range.start, range.end, self.rows
+                ),
+            }
+            .into());
+        }
+        let count = range.end - range.start;
+        Ok(self.rows().skip(range.start).take(count))
+    }
+
+    /// Copy selected rows into one new contiguous matrix.
+    pub fn select(&self, indices: &[usize]) -> QuantResult<Self> {
+        let capacity =
+            indices
+                .len()
+                .checked_mul(self.columns)
+                .ok_or_else(|| ResearchError::MatrixBuild {
+                    detail: "selected raw input matrix capacity overflowed usize".to_owned(),
+                })?;
+        let mut values = Vec::with_capacity(capacity);
+        for &index in indices {
+            let row = self.row(index).ok_or_else(|| ResearchError::MatrixBuild {
+                detail: format!("raw input row index {index} is out of bounds"),
+            })?;
+            values.extend_from_slice(row);
+        }
+        Self::from_flat(values, indices.len(), self.columns)
+    }
+}
+
+impl Index<usize> for RawInputMatrix {
+    type Output = [ModelInputCell];
+
+    fn index(&self, index: usize) -> &Self::Output {
+        self.row(index)
+            .unwrap_or_else(|| panic!("raw input row index {index} out of bounds"))
+    }
+}
+
+/// Contiguous row-major estimator input.
+#[derive(Debug, PartialEq)]
+pub struct DenseInputMatrix {
+    values: Vec<f64>,
+    rows: usize,
+    columns: usize,
+}
+
+impl Index<usize> for DenseInputMatrix {
+    type Output = [f64];
+
+    fn index(&self, index: usize) -> &Self::Output {
+        let start = index
+            .checked_mul(self.columns)
+            .unwrap_or_else(|| panic!("dense input row index {index} overflowed"));
+        let end = start
+            .checked_add(self.columns)
+            .unwrap_or_else(|| panic!("dense input row end {index} overflowed"));
+        self.values
+            .get(start..end)
+            .unwrap_or_else(|| panic!("dense input row index {index} out of bounds"))
+    }
+}
+
+impl DenseInputMatrix {
+    fn from_flat(values: Vec<f64>, rows: usize, columns: usize) -> QuantResult<Self> {
+        let expected = rows
+            .checked_mul(columns)
+            .ok_or_else(|| ResearchError::MatrixBuild {
+                detail: "dense input matrix shape overflowed usize".to_owned(),
+            })?;
+        if values.len() != expected {
+            return Err(ResearchError::MatrixBuild {
+                detail: format!(
+                    "dense input matrix has {} values but shape {rows}x{columns} requires {expected}",
+                    values.len()
+                ),
+            }
+            .into());
+        }
+        Ok(Self {
+            values,
+            rows,
+            columns,
+        })
+    }
+
+    #[cfg(any(feature = "ml-classical", test))]
+    pub(crate) fn from_rows(rows: Vec<Vec<f64>>) -> QuantResult<Self> {
+        let row_count = rows.len();
+        let columns = rows.first().map_or(0, Vec::len);
+        if rows.iter().any(|row| row.len() != columns) {
+            return Err(ResearchError::MatrixBuild {
+                detail: "dense input matrix rows have inconsistent widths".to_owned(),
+            }
+            .into());
+        }
+        let capacity =
+            row_count
+                .checked_mul(columns)
+                .ok_or_else(|| ResearchError::MatrixBuild {
+                    detail: "dense input matrix capacity overflowed usize".to_owned(),
+                })?;
+        let mut values = Vec::with_capacity(capacity);
+        for row in rows {
+            values.extend(row);
+        }
+        Self::from_flat(values, row_count, columns)
+    }
+
+    pub(crate) fn rows(&self) -> impl ExactSizeIterator<Item = &[f64]> {
+        self.values
+            .chunks_exact(self.columns.max(1))
+            .take(self.rows)
+    }
+
+    /// Number of transformed rows.
+    #[must_use]
+    pub const fn row_count(&self) -> usize {
+        self.rows
+    }
+
+    #[cfg(feature = "ml-classical")]
+    pub(crate) fn into_parts(self) -> (usize, usize, Vec<f64>) {
+        (self.rows, self.columns, self.values)
+    }
+}
+
+impl Serialize for DenseInputMatrix {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut rows = serializer.serialize_seq(Some(self.rows))?;
+        for row in self.rows() {
+            rows.serialize_element(&DenseRow(row))?;
+        }
+        rows.end()
+    }
+}
+
+struct DenseRow<'a>(&'a [f64]);
+
+impl Serialize for DenseRow<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut tuple = serializer.serialize_tuple(self.0.len())?;
+        for value in self.0 {
+            tuple.serialize_element(value)?;
+        }
+        tuple.end()
+    }
+}
+
 /// Raw, labelled rows for classical training.
 ///
 /// No placeholder floats or synthesized feature names are stored here. A fitted
@@ -85,7 +345,7 @@ pub enum ModelInputCell {
 #[derive(Debug, Clone)]
 pub struct TrainingMatrix {
     /// Ordered raw cells for every accepted example.
-    pub cells: Vec<Vec<ModelInputCell>>,
+    pub cells: RawInputMatrix,
     /// Label vector aligned with [`Self::cells`].
     pub labels: Array1<f64>,
     /// Governed raw input contract.
@@ -102,7 +362,7 @@ impl TrainingMatrix {
     /// Number of accepted raw rows.
     #[must_use]
     pub const fn row_count(&self) -> usize {
-        self.cells.len()
+        self.cells.row_count()
     }
 
     /// Number of governed raw input features.
@@ -118,12 +378,12 @@ impl TrainingMatrix {
 /// Final classical training and frozen-artifact parity both call this function;
 /// changing row order, any encoded byte, or label fails the binding.
 pub fn training_input_hash(
-    standardized_rows: &[Vec<f64>],
+    standardized_rows: &DenseInputMatrix,
     labels: &Array1<f64>,
 ) -> QuantResult<ContentHash> {
     #[derive(Serialize)]
     struct TrainingInput<'a> {
-        rows: &'a [Vec<f64>],
+        rows: &'a DenseInputMatrix,
         labels: &'a [f64],
     }
 
@@ -239,6 +499,23 @@ pub fn build_training_matrix(
     examples: &[TrainingExample],
     spec: &FeatureMatrixSpec,
 ) -> QuantResult<TrainingMatrix> {
+    build_training_matrix_iter(examples.iter(), examples.len(), spec)
+}
+
+/// Build a matrix from an already ordered borrowed selection without cloning
+/// the underlying training examples.
+pub fn build_training_matrix_from_refs(
+    examples: &[&TrainingExample],
+    spec: &FeatureMatrixSpec,
+) -> QuantResult<TrainingMatrix> {
+    build_training_matrix_iter(examples.iter().copied(), examples.len(), spec)
+}
+
+fn build_training_matrix_iter<'a>(
+    examples: impl Iterator<Item = &'a TrainingExample>,
+    example_count: usize,
+    spec: &FeatureMatrixSpec,
+) -> QuantResult<TrainingMatrix> {
     if spec.columns.is_empty() {
         return Err(ResearchError::MatrixBuild {
             detail: "feature matrix spec has no columns".to_owned(),
@@ -255,10 +532,16 @@ pub fn build_training_matrix(
         }
     }
 
-    let mut cells = Vec::with_capacity(examples.len());
-    let mut labels = Vec::with_capacity(examples.len());
-    let mut row_decision_at = Vec::with_capacity(examples.len());
-    let mut row_label_horizon_end = Vec::with_capacity(examples.len());
+    let matrix_capacity = example_count
+        .checked_mul(spec.columns.len())
+        .ok_or_else(|| ResearchError::MatrixBuild {
+            detail: "training matrix capacity overflowed usize".to_owned(),
+        })?;
+    let mut cells = Vec::with_capacity(matrix_capacity);
+    let mut row = Vec::with_capacity(spec.columns.len());
+    let mut labels = Vec::with_capacity(example_count);
+    let mut row_decision_at = Vec::with_capacity(example_count);
+    let mut row_label_horizon_end = Vec::with_capacity(example_count);
     let mut rejected_rows = 0usize;
 
     for example in examples {
@@ -270,11 +553,10 @@ pub fn build_training_matrix(
             rejected_rows += 1;
             continue;
         };
-        let row: Vec<ModelInputCell> = spec
-            .columns
-            .iter()
-            .map(|column| cell_from_example(example, column))
-            .collect::<QuantResult<_>>()?;
+        row.clear();
+        for column in &spec.columns {
+            row.push(cell_from_example(example, column)?);
+        }
         if spec.columns.iter().zip(&row).any(|(column, cell)| {
             column.required
                 && !matches!(
@@ -285,14 +567,15 @@ pub fn build_training_matrix(
             rejected_rows += 1;
             continue;
         }
-        cells.push(row);
+        cells.extend_from_slice(&row);
         labels.push(label);
         row_decision_at.push(example.decision_at());
         row_label_horizon_end.push(label_row.matured_at);
     }
 
+    let accepted_rows = labels.len();
     Ok(TrainingMatrix {
-        cells,
+        cells: RawInputMatrix::from_flat(cells, accepted_rows, spec.columns.len())?,
         labels: Array1::from_vec(labels),
         columns: spec.columns.clone(),
         rejected_rows,
@@ -399,8 +682,8 @@ fn encoded_contract(columns: &[FittedInputColumn]) -> Vec<EncodedColumn> {
     encoded
 }
 
-fn state_rates(rows: &[Vec<ModelInputCell>], index: usize) -> QuantResult<InputStateRates> {
-    let count = Decimal::from(rows.len());
+fn state_rates(rows: &RawInputMatrix, index: usize) -> QuantResult<InputStateRates> {
+    let count = Decimal::from(rows.row_count());
     if count.is_zero() {
         return Err(ResearchError::MatrixBuild {
             detail: "cannot fit input state rates from an empty training partition".to_owned(),
@@ -411,7 +694,7 @@ fn state_rates(rows: &[Vec<ModelInputCell>], index: usize) -> QuantResult<InputS
     let mut missing = 0u64;
     let mut not_applicable = 0u64;
     let mut substituted = 0u64;
-    for row in rows {
+    for row in rows.rows() {
         match row.get(index) {
             Some(ModelInputCell::Observed(_) | ModelInputCell::ObservedCategory(_)) => {
                 observed += 1;
@@ -438,30 +721,26 @@ fn state_rates(rows: &[Vec<ModelInputCell>], index: usize) -> QuantResult<InputS
 }
 
 fn validate_training_matrix(matrix: &TrainingMatrix) -> QuantResult<()> {
-    if matrix.cells.len() != matrix.labels.len()
-        || matrix.cells.len() != matrix.row_decision_at.len()
-        || matrix.cells.len() != matrix.row_label_horizon_end.len()
+    if matrix.cells.row_count() != matrix.labels.len()
+        || matrix.cells.row_count() != matrix.row_decision_at.len()
+        || matrix.cells.row_count() != matrix.row_label_horizon_end.len()
     {
         return Err(ResearchError::MatrixBuild {
             detail: "training matrix row metadata lengths are inconsistent".to_owned(),
         }
         .into());
     }
-    if matrix
-        .cells
-        .iter()
-        .any(|row| row.len() != matrix.columns.len())
-    {
+    if matrix.cells.column_count() != matrix.columns.len() {
         return Err(ResearchError::MatrixBuild {
             detail: "training matrix raw row width does not match input contract".to_owned(),
         }
         .into());
     }
-    if matrix.cells.len() < 2 || matrix.columns.is_empty() {
+    if matrix.cells.row_count() < 2 || matrix.columns.is_empty() {
         return Err(ResearchError::MatrixBuild {
             detail: format!(
                 "classical transform needs >= 2 rows and >= 1 input, got {}x{}",
-                matrix.cells.len(),
+                matrix.cells.row_count(),
                 matrix.columns.len()
             ),
         }
@@ -490,7 +769,7 @@ fn fit_category_column(
     state_rates: InputStateRates,
 ) -> QuantResult<FittedInputColumn> {
     let mut vocabulary = BTreeSet::new();
-    for row in &matrix.cells {
+    for row in matrix.cells.rows() {
         match row.get(index) {
             Some(ModelInputCell::ObservedCategory(category)) => {
                 vocabulary.insert(*category);
@@ -555,7 +834,7 @@ fn observed_numeric_values(
 ) -> QuantResult<Vec<Decimal>> {
     matrix
         .cells
-        .iter()
+        .rows()
         .map(|row| match row.get(index) {
             Some(ModelInputCell::Observed(value)) => Ok(Some(unit_scale(spec.unit, *value))),
             Some(
@@ -608,26 +887,37 @@ fn numeric_training_value(
     strict_f64(value, spec.feature.as_str())
 }
 
-fn numeric_mean_std(values: &[f64], feature: &FeatureName) -> QuantResult<(Decimal, Decimal)> {
-    let count = values
-        .len()
-        .to_f64()
-        .ok_or_else(|| ResearchError::MatrixBuild {
-            detail: format!(
-                "numeric input `{feature}` training count cannot be represented as f64"
-            ),
+fn numeric_mean_std(
+    matrix: &TrainingMatrix,
+    index: usize,
+    spec: &FeatureColumnSpec,
+    imputation: Option<Decimal>,
+) -> QuantResult<(Decimal, Decimal)> {
+    let mut count = 0.0_f64;
+    let mut mean = 0.0_f64;
+    let mut squared_deviation = 0.0_f64;
+    for row in matrix.cells.rows() {
+        let cell = row.get(index).ok_or_else(|| ResearchError::MatrixBuild {
+            detail: format!("row missing input `{}`", spec.feature),
         })?;
-    let mean = values.iter().sum::<f64>() / count;
-    let variance = values
-        .iter()
-        .map(|value| (value - mean).powi(2))
-        .sum::<f64>()
-        / count;
-    let std = variance.sqrt();
+        let value = numeric_training_value(cell, spec, imputation)?;
+        count += 1.0;
+        let delta = value - mean;
+        mean += delta / count;
+        squared_deviation = delta.mul_add(value - mean, squared_deviation);
+    }
+    if count < 2.0 {
+        return Err(ResearchError::MatrixBuild {
+            detail: format!("numeric input `{}` needs at least two rows", spec.feature),
+        }
+        .into());
+    }
+    let std = (squared_deviation / count).sqrt();
     if !std.is_finite() || std <= f64::EPSILON {
         return Err(ResearchError::MatrixBuild {
             detail: format!(
-                "numeric input `{feature}` has zero or invalid training-partition variance"
+                "numeric input `{}` has zero or invalid training-partition variance",
+                spec.feature
             ),
         }
         .into());
@@ -644,25 +934,15 @@ fn fit_numeric_column(
     spec: &FeatureColumnSpec,
     state_rates: InputStateRates,
 ) -> QuantResult<FittedInputColumn> {
-    let observed = observed_numeric_values(matrix, index, spec)?;
     let imputation = if spec.required {
         None
     } else {
-        Some(median(observed, &spec.feature)?)
+        Some(median(
+            observed_numeric_values(matrix, index, spec)?,
+            &spec.feature,
+        )?)
     };
-    let values = matrix
-        .cells
-        .iter()
-        .map(|row| {
-            row.get(index)
-                .ok_or_else(|| ResearchError::MatrixBuild {
-                    detail: format!("row missing input `{}`", spec.feature),
-                })
-                .map_err(Into::into)
-                .and_then(|cell| numeric_training_value(cell, spec, imputation))
-        })
-        .collect::<QuantResult<Vec<_>>>()?;
-    let (mean, std) = numeric_mean_std(&values, &spec.feature)?;
+    let (mean, std) = numeric_mean_std(matrix, index, spec, imputation)?;
     Ok(FittedInputColumn {
         feature: spec.feature.clone(),
         unit: spec.unit,
@@ -676,7 +956,11 @@ fn fit_numeric_column(
     })
 }
 
-fn apply_category_input(input: &FittedInputColumn, cell: &ModelInputCell) -> QuantResult<Vec<f64>> {
+fn apply_category_input(
+    input: &FittedInputColumn,
+    cell: &ModelInputCell,
+    output: &mut Vec<f64>,
+) -> QuantResult<()> {
     let category = match cell {
         ModelInputCell::ObservedCategory(category) => Some(*category),
         ModelInputCell::SubstitutedCategory(category) if !input.required => Some(*category),
@@ -706,11 +990,12 @@ fn apply_category_input(input: &FittedInputColumn, cell: &ModelInputCell) -> Qua
             .into());
         }
     };
-    let mut output = input
-        .category_vocabulary
-        .iter()
-        .map(|value| f64::from(category == Some(*value)))
-        .collect::<Vec<_>>();
+    output.extend(
+        input
+            .category_vocabulary
+            .iter()
+            .map(|value| f64::from(category == Some(*value))),
+    );
     output.push(f64::from(
         category.is_some_and(|value| !input.category_vocabulary.contains(&value)),
     ));
@@ -721,10 +1006,14 @@ fn apply_category_input(input: &FittedInputColumn, cell: &ModelInputCell) -> Qua
             f64::from(matches!(cell, ModelInputCell::SubstitutedCategory(_))),
         ]);
     }
-    Ok(output)
+    Ok(())
 }
 
-fn apply_numeric_input(input: &FittedInputColumn, cell: &ModelInputCell) -> QuantResult<Vec<f64>> {
+fn apply_numeric_input(
+    input: &FittedInputColumn,
+    cell: &ModelInputCell,
+    output: &mut Vec<f64>,
+) -> QuantResult<()> {
     let value = match cell {
         ModelInputCell::Observed(value) => unit_scale(input.unit, *value),
         ModelInputCell::Substituted(value) if !input.required => unit_scale(input.unit, *value),
@@ -791,7 +1080,7 @@ fn apply_numeric_input(input: &FittedInputColumn, cell: &ModelInputCell) -> Quan
         }
         .into());
     }
-    let mut output = vec![standardized];
+    output.push(standardized);
     if !input.required {
         output.extend([
             f64::from(matches!(cell, ModelInputCell::Missing)),
@@ -799,13 +1088,13 @@ fn apply_numeric_input(input: &FittedInputColumn, cell: &ModelInputCell) -> Quan
             f64::from(matches!(cell, ModelInputCell::Substituted(_))),
         ]);
     }
-    Ok(output)
+    Ok(())
 }
 
 impl FittedInputTransform {
     /// Fit medians and standardization on exactly `matrix`'s rows, then apply
     /// the fitted transform to those rows.
-    pub fn fit(matrix: &TrainingMatrix) -> QuantResult<(Self, Vec<Vec<f64>>)> {
+    pub fn fit(matrix: &TrainingMatrix) -> QuantResult<(Self, DenseInputMatrix)> {
         validate_training_matrix(matrix)?;
         let fitted = matrix
             .columns
@@ -817,12 +1106,18 @@ impl FittedInputTransform {
             encoded_columns: encoded_contract(&fitted),
             inputs: fitted,
         };
-        let rows = transform.apply_rows(&matrix.cells)?;
+        let rows = transform.apply_matrix(&matrix.cells)?;
         Ok((transform, rows))
     }
 
     /// Apply the fitted transform to one raw row.
     pub fn apply_cells(&self, cells: &[ModelInputCell]) -> QuantResult<Vec<f64>> {
+        let mut output = Vec::with_capacity(self.encoded_columns.len());
+        self.apply_cells_into(cells, &mut output)?;
+        Ok(output)
+    }
+
+    fn apply_cells_into(&self, cells: &[ModelInputCell], output: &mut Vec<f64>) -> QuantResult<()> {
         if cells.len() != self.inputs.len() {
             return Err(ResearchError::Inference {
                 detail: format!(
@@ -833,31 +1128,57 @@ impl FittedInputTransform {
             }
             .into());
         }
-        let mut output = Vec::with_capacity(self.encoded_columns.len());
+        let start = output.len();
         for (input, cell) in self.inputs.iter().zip(cells) {
-            let encoded = if input.value_kind == FeatureValueKind::Category {
-                apply_category_input(input, cell)?
+            if input.value_kind == FeatureValueKind::Category {
+                apply_category_input(input, cell, output)?;
             } else {
-                apply_numeric_input(input, cell)?
-            };
-            output.extend(encoded);
+                apply_numeric_input(input, cell, output)?;
+            }
         }
-        if output.len() != self.encoded_columns.len() {
+        let emitted = output.len() - start;
+        if emitted != self.encoded_columns.len() {
             return Err(ResearchError::InvalidModelArtifact {
                 detail: format!(
                     "classical transform emitted {} columns but declares {}",
-                    output.len(),
+                    emitted,
                     self.encoded_columns.len()
                 ),
             }
             .into());
         }
-        Ok(output)
+        Ok(())
     }
 
-    /// Apply the fitted transform to multiple rows without refitting.
-    pub fn apply_rows(&self, rows: &[Vec<ModelInputCell>]) -> QuantResult<Vec<Vec<f64>>> {
-        rows.iter().map(|row| self.apply_cells(row)).collect()
+    pub(crate) fn apply_matrix(&self, rows: &RawInputMatrix) -> QuantResult<DenseInputMatrix> {
+        self.apply_row_iter(rows.rows(), rows.row_count())
+    }
+
+    /// Apply this transform to a contiguous row range.
+    pub fn apply_range(
+        &self,
+        rows: &RawInputMatrix,
+        range: Range<usize>,
+    ) -> QuantResult<DenseInputMatrix> {
+        let row_count = range.end.saturating_sub(range.start);
+        self.apply_row_iter(rows.row_range(range)?, row_count)
+    }
+
+    fn apply_row_iter<'a>(
+        &self,
+        rows: impl Iterator<Item = &'a [ModelInputCell]>,
+        row_count: usize,
+    ) -> QuantResult<DenseInputMatrix> {
+        let capacity = row_count
+            .checked_mul(self.encoded_columns.len())
+            .ok_or_else(|| ResearchError::MatrixBuild {
+                detail: "dense input matrix capacity overflowed usize".to_owned(),
+            })?;
+        let mut values = Vec::with_capacity(capacity);
+        for row in rows {
+            self.apply_cells_into(row, &mut values)?;
+        }
+        DenseInputMatrix::from_flat(values, row_count, self.encoded_columns.len())
     }
 }
 
@@ -964,7 +1285,7 @@ pub fn probe_matrix_coverage(
             accepted_rows: 0,
             rejected_rows: 0,
             label_rows,
-            label_name: label_name.as_str().to_owned(),
+            label_name: label_name.to_string(),
             label_horizon_secs,
             feature_columns,
         });
@@ -982,7 +1303,7 @@ pub fn probe_matrix_coverage(
             }
         })?,
         label_rows,
-        label_name: label_name.as_str().to_owned(),
+        label_name: label_name.to_string(),
         label_horizon_secs,
         feature_columns,
     })
@@ -990,7 +1311,7 @@ pub fn probe_matrix_coverage(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::{collections::BTreeMap, mem::size_of};
 
     use chrono::{Duration, TimeZone};
     use proptest::{collection::vec as strategy_vec, prop_assert_eq, proptest};
@@ -1110,8 +1431,8 @@ mod tests {
         }
     }
 
-    fn encoded_bits(rows: &[Vec<f64>]) -> Vec<Vec<u64>> {
-        rows.iter()
+    fn encoded_bits(rows: &DenseInputMatrix) -> Vec<Vec<u64>> {
+        rows.rows()
             .map(|row| row.iter().map(|value| value.to_bits()).collect())
             .collect()
     }
@@ -1140,13 +1461,13 @@ mod tests {
             let (fitted, training_rows) = FittedInputTransform::fit(&matrix)
                 .expect("anchored observations guarantee a non-zero fitted variance");
             let serving_rows = fitted
-                .apply_rows(&matrix.cells)
+                .apply_matrix(&matrix.cells)
                 .expect("serving applies the frozen training transform");
             let serialized = serde_json::to_vec(&fitted).expect("serialize frozen transform");
             let reloaded: FittedInputTransform =
                 serde_json::from_slice(&serialized).expect("reload frozen transform");
             let replay_rows = reloaded
-                .apply_rows(&matrix.cells)
+                .apply_matrix(&matrix.cells)
                 .expect("replay applies the reloaded frozen transform");
 
             prop_assert_eq!(encoded_bits(&training_rows), encoded_bits(&serving_rows));
@@ -1169,7 +1490,7 @@ mod tests {
         let matrix = build_training_matrix(&examples, &spec(false)).expect("raw matrix");
         let (transform, fitted_rows) = FittedInputTransform::fit(&matrix).expect("fit");
         assert_eq!(transform.inputs[0].median, Some(dec!(0.02)));
-        let replayed = transform.apply_rows(&matrix.cells).expect("apply");
+        let replayed = transform.apply_matrix(&matrix.cells).expect("apply");
         assert_eq!(
             fitted_rows, replayed,
             "fit and apply must be byte-identical"
@@ -1252,6 +1573,33 @@ mod tests {
     }
 
     #[test]
+    fn contiguous_matrix_preserves_hash_contract_and_cell_budget() {
+        #[derive(Serialize)]
+        struct LegacyTrainingInput<'a> {
+            rows: &'a [Vec<f64>],
+            labels: &'a [f64],
+        }
+
+        let legacy_rows = vec![vec![1.0, -2.5], vec![3.25, 4.0]];
+        let dense = DenseInputMatrix::from_rows(legacy_rows.clone()).expect("dense matrix");
+        let labels = Array1::from_vec(vec![0.0, 1.0]);
+        let legacy = ResearchHasher::canonical(&LegacyTrainingInput {
+            rows: &legacy_rows,
+            labels: labels.as_slice().expect("contiguous labels"),
+        })
+        .expect("legacy hash");
+
+        assert_eq!(
+            training_input_hash(&dense, &labels).expect("dense hash"),
+            legacy
+        );
+        assert!(
+            size_of::<ModelInputCell>() <= 24,
+            "raw cell layout exceeded its 24-byte memory budget"
+        );
+    }
+
+    #[test]
     fn category_vocabulary_is_frozen_and_unknown_is_explicit() {
         let examples = vec![
             example(FeatureValue::Category(MarketCategory::Sports), false, 0),
@@ -1267,7 +1615,7 @@ mod tests {
         assert_eq!(
             fitted_rows,
             transform
-                .apply_rows(&matrix.cells)
+                .apply_matrix(&matrix.cells)
                 .expect("category replay")
         );
 

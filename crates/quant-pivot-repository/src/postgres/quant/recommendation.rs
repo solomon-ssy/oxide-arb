@@ -48,7 +48,7 @@ impl RecommendationRepository for PgRecommendationRepository {
         report_id: &RecommendationReportId,
     ) -> Result<Vec<RecommendationInfo>, StorageError> {
         Entity::find()
-            .filter(Column::RecommendationReportId.eq(report_id.clone()))
+            .filter(Column::RecommendationReportId.eq(*report_id))
             .order_by_asc(Column::Rank)
             .all(&self.db)
             .await
@@ -60,7 +60,7 @@ impl RecommendationRepository for PgRecommendationRepository {
         &self,
         recommendation_id: &RecommendationId,
     ) -> Result<Option<RecommendationInfo>, StorageError> {
-        Entity::find_by_id(recommendation_id.clone())
+        Entity::find_by_id(*recommendation_id)
             .one(&self.db)
             .await
             .map_err(StorageError::from)
@@ -123,7 +123,7 @@ impl RecommendationRepository for PgRecommendationRepository {
         operation_log: NewOperationLog,
     ) -> Result<(RecommendationInfo, Vec<OrderIntentInfo>), StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let row = Entity::find_by_id(recommendation_id.clone())
+        let row = Entity::find_by_id(*recommendation_id)
             .lock_exclusive()
             .one(&txn)
             .await

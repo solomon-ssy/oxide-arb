@@ -22,7 +22,7 @@ use quant_pivot_system_tests::{
 use sea_orm::{ActiveModelTrait, ActiveValue, DatabaseConnection, EntityTrait, IntoActiveModel};
 
 async fn mark_recommendation_expired(db: &DatabaseConnection, ids: &ExecutionTxnIds) {
-    let rec = Entity::find_by_id(ids.recommendation.clone())
+    let rec = Entity::find_by_id(ids.recommendation)
         .one(db)
         .await
         .expect("load recommendation")
@@ -40,7 +40,7 @@ async fn patch_intent_status(
     intent_id: &OrderIntentId,
     status: OrderIntentStatus,
 ) {
-    let row = QuantOrderIntentEntity::find_by_id(intent_id.clone())
+    let row = QuantOrderIntentEntity::find_by_id(*intent_id)
         .one(db)
         .await
         .expect("load intent")

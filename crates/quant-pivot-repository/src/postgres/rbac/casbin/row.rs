@@ -78,8 +78,8 @@ pub fn policy_row(role_code: &str, resource: ResourceType, operation: Operation)
     ActiveModel {
         ptype: Set(PTYPE_POLICY.to_owned()),
         v0: Set(role_code.to_owned()),
-        v1: Set(resource.as_str().to_owned()),
-        v2: Set(operation.as_str().to_owned()),
+        v1: Set(resource.to_string()),
+        v2: Set(operation.to_string()),
         v3: Set(OBJECT_TYPE_RESOURCE.to_owned()),
         v4: Set(String::new()),
         v5: Set(String::new()),

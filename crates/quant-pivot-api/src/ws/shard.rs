@@ -10,14 +10,16 @@ use std::{
     collections::{HashMap, HashSet},
     fmt::Display,
     str::FromStr,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 
 use chrono::Utc;
 use flume::Sender;
 use futures_util::StreamExt;
-use parking_lot::Mutex;
 use polymarket_client_sdk_v2::{
     clob::ws::{Client as SdkWsClient, types::response::WsMessage},
     types::U256,
@@ -27,7 +29,7 @@ use quant_pivot_models::{
     domain::data_plane::pipeline::{PipelineEvent, StreamSessionEndReason},
     enums::system::ShardConnectionStatus,
     hashing::CanonicalDigest,
-    types::{ContentHash, TokenId},
+    types::{ContentHash, TokenId, TokenKey},
 };
 use tokio::{
     sync::{
@@ -39,11 +41,13 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use super::{
-    health::{ShardHealthBoard, TokenFreshnessBoard},
+    health::ShardHealthBoard,
     ingest_hooks::BookLevelRejectHook,
+    ingress::{NormalizedIngressBatch, ingress_permits},
     normalize::normalize_ws_message,
     reconnect::{ReconnectPolicy, ReconnectState},
     session_hook::WsSessionInvalidationHook,
+    token_resolver::TokenKeyResolver,
 };
 
 /// Debounce window for token-set changes: bursts of assign/remove during a
@@ -65,10 +69,13 @@ const SESSION_LEDGER_TIMEOUT: Duration = Duration::from_secs(2);
 /// Shared construction dependencies, owned by the router and cloned per shard.
 #[derive(Clone)]
 pub(super) struct ShardDeps {
-    pub output_tx: Sender<PipelineEvent>,
+    pub output_tx: Sender<NormalizedIngressBatch>,
+    pub ingress_budget: Arc<Semaphore>,
     pub ws_url: String,
     pub shutdown: CancellationToken,
-    pub last_message_at: Arc<Mutex<Option<Instant>>>,
+    pub message_epoch: Arc<Instant>,
+    pub last_message_tick: Arc<AtomicU64>,
+    pub token_resolver: Arc<dyn TokenKeyResolver>,
     pub on_session_invalidated: Option<WsSessionInvalidationHook>,
     pub on_book_level_rejected: Option<BookLevelRejectHook>,
     /// Shard-level reconnect backoff (from `[market_data.websocket]`).
@@ -80,8 +87,6 @@ pub(super) struct ShardDeps {
     pub connect_limiter: Arc<Semaphore>,
     /// Aggregated connection-state board for health summaries.
     pub health: Arc<ShardHealthBoard>,
-    /// Per-token freshness is invalidated synchronously at every broken session boundary.
-    pub token_freshness: Arc<TokenFreshnessBoard>,
 }
 
 /// Why a streaming session ended.
@@ -301,7 +306,7 @@ async fn connect_and_stream(
         PipelineEvent::StreamSessionOpened {
             stream_session_id,
             shard_id: u32::try_from(shard_id).unwrap_or(u32::MAX),
-            subscription_token_hash: subscription_token_hash.clone(),
+            subscription_token_hash,
             subscription_token_count,
             subscription_tokens: Arc::clone(&subscription_tokens),
             opened_at_ms,
@@ -309,13 +314,12 @@ async fn connect_and_stream(
     )
     .await
     {
-        deps.token_freshness.invalidate_tokens(&subscription_tokens);
         if let Some(hook) = &deps.on_session_invalidated {
-            hook(1);
+            hook(&subscription_tokens);
         }
         return StreamEnd::Overflow("stream-session open ledger enqueue timed out".to_owned());
     }
-    let mut token_sequences = HashMap::<TokenId, u64>::new();
+    let mut token_sequences = HashMap::<TokenKey, u64>::new();
 
     macro_rules! stream_arm {
         ($item:expr, $name:literal, $variant:expr) => {
@@ -406,7 +410,7 @@ async fn on_stream_item<T, E: Display>(
     deps: &ShardDeps,
     shard_id: usize,
     stream_session_id: Uuid,
-    token_sequences: &mut HashMap<TokenId, u64>,
+    token_sequences: &mut HashMap<TokenKey, u64>,
     item: Option<Result<T, E>>,
     stream: &'static str,
     into_message: impl FnOnce(T) -> WsMessage,
@@ -414,18 +418,14 @@ async fn on_stream_item<T, E: Display>(
     match item {
         Some(Ok(payload)) => {
             let ws_ingress = Instant::now();
-            dispatch_events(
-                deps,
-                shard_id,
-                stream_session_id,
-                token_sequences,
-                normalize_ws_message(
-                    into_message(payload),
-                    ws_ingress,
-                    deps.on_book_level_rejected.as_ref(),
-                ),
+            let events = normalize_ws_message(
+                into_message(payload),
+                ws_ingress,
+                deps.on_book_level_rejected.as_ref(),
+                deps.token_resolver.as_ref(),
             )
-            .await
+            .map_err(|error| error.to_string())?;
+            dispatch_events(deps, shard_id, stream_session_id, token_sequences, events).await
         }
         Some(Err(error)) => {
             tracing::debug!(shard_id, %error, stream, "stream error");
@@ -439,16 +439,19 @@ async fn dispatch_events(
     deps: &ShardDeps,
     shard_id: usize,
     stream_session_id: Uuid,
-    token_sequences: &mut HashMap<TokenId, u64>,
-    events: Vec<PipelineEvent>,
+    token_sequences: &mut HashMap<TokenKey, u64>,
+    mut events: Vec<PipelineEvent>,
 ) -> Result<(), String> {
     let received_at = Instant::now();
     if !events.is_empty() {
-        *deps.last_message_at.lock() = Some(received_at);
+        let tick = u64::try_from(received_at.duration_since(*deps.message_epoch).as_millis())
+            .unwrap_or(u64::MAX - 1)
+            .saturating_add(1);
+        deps.last_message_tick.store(tick, Ordering::Release);
     }
-    for mut event in events {
-        let token_sequence = event.asset_id().map_or(0, |token_id| {
-            let sequence = token_sequences.entry(token_id.clone()).or_insert(0);
+    for event in &mut events {
+        let token_sequence = event.token().map_or(0, |token| {
+            let sequence = token_sequences.entry(token).or_insert(0);
             *sequence = sequence.saturating_add(1);
             *sequence
         });
@@ -457,15 +460,8 @@ async fn dispatch_events(
             u32::try_from(shard_id).unwrap_or(u32::MAX),
             token_sequence,
         );
-        let send = deps.output_tx.send_async(event);
-        if !matches!(timeout(OUTPUT_ENQUEUE_TIMEOUT, send).await, Ok(Ok(()))) {
-            if let Some(hook) = &deps.on_session_invalidated {
-                hook(1);
-            }
-            return Err("WS output queue timed out; canonical session invalidated".to_owned());
-        }
     }
-    Ok(())
+    send_event_batch(deps, events, OUTPUT_ENQUEUE_TIMEOUT).await
 }
 
 fn subscription_token_hash(tokens: &[TokenId]) -> Result<ContentHash, String> {
@@ -483,10 +479,40 @@ const fn stream_end_reason(end: &StreamEnd) -> StreamSessionEndReason {
 }
 
 async fn send_session_event(deps: &ShardDeps, event: PipelineEvent) -> bool {
-    matches!(
-        timeout(SESSION_LEDGER_TIMEOUT, deps.output_tx.send_async(event)).await,
-        Ok(Ok(()))
-    )
+    send_session_events(deps, vec![event]).await
+}
+
+async fn send_session_events(deps: &ShardDeps, events: Vec<PipelineEvent>) -> bool {
+    send_event_batch(deps, events, SESSION_LEDGER_TIMEOUT)
+        .await
+        .is_ok()
+}
+
+async fn send_event_batch(
+    deps: &ShardDeps,
+    events: Vec<PipelineEvent>,
+    enqueue_timeout: Duration,
+) -> Result<(), String> {
+    if events.is_empty() {
+        return Ok(());
+    }
+    let permits = ingress_permits(&events);
+    let batch = NormalizedIngressBatch::new(
+        events,
+        timeout(
+            enqueue_timeout,
+            Arc::clone(&deps.ingress_budget).acquire_many_owned(permits),
+        )
+        .await
+        .map_err(|_| {
+            "WS ingress memory budget timed out; canonical session invalidated".to_owned()
+        })?
+        .map_err(|_| "WS ingress memory budget closed".to_owned())?,
+    );
+    timeout(enqueue_timeout, deps.output_tx.send_async(batch))
+        .await
+        .map_err(|_| "WS output queue timed out; canonical session invalidated".to_owned())?
+        .map_err(|_| "WS output queue closed".to_owned())
 }
 
 struct ClosingStreamSession<'a> {
@@ -496,7 +522,7 @@ struct ClosingStreamSession<'a> {
     subscription_token_count: u32,
     subscription_tokens: &'a [TokenId],
     opened_at_ms: i64,
-    token_sequences: &'a HashMap<TokenId, u64>,
+    token_sequences: &'a HashMap<TokenKey, u64>,
 }
 
 async fn close_stream_session(
@@ -513,29 +539,44 @@ async fn close_stream_session(
         opened_at_ms,
         token_sequences,
     } = session;
-    if reason != StreamSessionEndReason::Normal {
-        deps.token_freshness.invalidate_tokens(subscription_tokens);
+    if reason != StreamSessionEndReason::Normal
+        && let Some(hook) = &deps.on_session_invalidated
+    {
+        hook(subscription_tokens);
     }
     let closed_at_ms = Utc::now().timestamp_millis();
     let mut received_sequences = token_sequences
         .iter()
-        .map(|(token_id, sequence)| (token_id.clone(), *sequence))
+        .map(|(token_id, sequence)| (*token_id, *sequence))
         .collect::<Vec<_>>();
-    received_sequences.sort_by(|left, right| left.0.as_str().cmp(right.0.as_str()));
+    received_sequences.sort_unstable_by_key(|entry| entry.0);
+    let received_sequences: Arc<[(TokenKey, u64)]> = Arc::from(received_sequences);
     let closed = PipelineEvent::StreamSessionClosed {
         stream_session_id,
         shard_id: u32::try_from(shard_id).unwrap_or(u32::MAX),
         subscription_token_hash,
         subscription_token_count,
-        received_sequences: Arc::from(received_sequences.clone()),
+        received_sequences: Arc::clone(&received_sequences),
         opened_at_ms,
         closed_at_ms,
         reason,
     };
-    if !send_session_event(deps, closed).await {
-        if let Some(hook) = &deps.on_session_invalidated {
-            hook(1);
-        }
+    let mut events = Vec::with_capacity(received_sequences.len().saturating_add(1));
+    events.push(closed);
+    if reason != StreamSessionEndReason::Normal {
+        events.extend(
+            received_sequences
+                .iter()
+                .map(|(token, last_received_sequence)| PipelineEvent::StreamGap {
+                    token: *token,
+                    stream_session_id,
+                    shard_id: u32::try_from(shard_id).unwrap_or(u32::MAX),
+                    last_received_sequence: *last_received_sequence,
+                    timestamp_ms: u64::try_from(closed_at_ms).unwrap_or(0),
+                }),
+        );
+    }
+    if !send_session_events(deps, events).await {
         tracing::error!(
             %stream_session_id,
             shard_id,
@@ -543,38 +584,18 @@ async fn close_stream_session(
             ?reason,
             "failed to enqueue stream-session close ledger; gap fan-out suppressed"
         );
-        return;
-    }
-    if reason == StreamSessionEndReason::Normal {
-        return;
-    }
-    let mut failed_gaps = 0_u64;
-    for (token_id, last_received_sequence) in received_sequences {
-        let gap = PipelineEvent::StreamGap {
-            asset_id: token_id,
-            stream_session_id,
-            shard_id: u32::try_from(shard_id).unwrap_or(u32::MAX),
-            last_received_sequence,
-            timestamp_ms: u64::try_from(closed_at_ms).unwrap_or(0),
-        };
-        if !send_session_event(deps, gap).await {
-            failed_gaps = failed_gaps.saturating_add(1);
-        }
-    }
-    if failed_gaps > 0 {
-        tracing::error!(
-            %stream_session_id,
-            shard_id,
-            failed_gaps,
-            "failed to enqueue one or more stream gaps"
-        );
     }
 }
 
 fn emit_status(deps: &ShardDeps, shard_id: usize, status: ShardConnectionStatus) {
+    let events = vec![PipelineEvent::ShardStatus { shard_id, status }];
+    let permits = ingress_permits(&events);
+    let Ok(permit) = Arc::clone(&deps.ingress_budget).try_acquire_many_owned(permits) else {
+        return;
+    };
     let _ = deps
         .output_tx
-        .try_send(PipelineEvent::ShardStatus { shard_id, status });
+        .try_send(NormalizedIngressBatch::new(events, permit));
 }
 
 #[cfg(test)]
@@ -585,20 +606,22 @@ mod tests {
     };
 
     use flume::Sender;
-    use parking_lot::Mutex;
     use tokio::sync::watch;
 
     use super::*;
 
     fn test_deps(
-        output_tx: Sender<PipelineEvent>,
+        output_tx: Sender<NormalizedIngressBatch>,
         hook: Option<WsSessionInvalidationHook>,
     ) -> ShardDeps {
         ShardDeps {
             output_tx,
+            ingress_budget: Arc::new(Semaphore::new(256)),
             ws_url: "ws://test".into(),
             shutdown: CancellationToken::new(),
-            last_message_at: Arc::new(Mutex::new(None)),
+            message_epoch: Arc::new(Instant::now()),
+            last_message_tick: Arc::new(AtomicU64::new(0)),
+            token_resolver: Arc::new(|token: U256| Some(TokenKey::new(token.to::<u32>()))),
             on_session_invalidated: hook,
             on_book_level_rejected: None,
             reconnect_policy: ReconnectPolicy::default(),
@@ -606,7 +629,6 @@ mod tests {
             sdk_max_backoff: Duration::from_secs(30),
             connect_limiter: Arc::new(Semaphore::new(4)),
             health: Arc::new(ShardHealthBoard::default()),
-            token_freshness: Arc::new(TokenFreshnessBoard::default()),
         }
     }
 
@@ -616,8 +638,11 @@ mod tests {
         let dropped = Arc::new(AtomicU64::new(0));
         let hook: WsSessionInvalidationHook = {
             let dropped = Arc::clone(&dropped);
-            Arc::new(move |n| {
-                dropped.fetch_add(n, Ordering::Relaxed);
+            Arc::new(move |tokens| {
+                dropped.fetch_add(
+                    u64::try_from(tokens.len()).unwrap_or(u64::MAX),
+                    Ordering::Relaxed,
+                );
             })
         };
         let deps = test_deps(tx, Some(hook));
@@ -638,30 +663,99 @@ mod tests {
         .await
         .expect("dispatch");
 
-        assert_eq!(rx.len(), 3);
+        assert_eq!(rx.len(), 1);
+        assert_eq!(rx.recv().expect("batch").events.len(), 3);
         assert_eq!(dropped.load(Ordering::Relaxed), 0);
     }
 
     #[tokio::test(start_paused = true)]
-    async fn failed_session_close_invalidates_freshness_without_gap_fanout() {
+    async fn data_batch_fails_closed_after_bounded_enqueue_wait() {
+        let (tx, _rx) = flume::bounded(1);
+        tx.send(NormalizedIngressBatch::new(
+            vec![PipelineEvent::ShardStatus {
+                shard_id: 0,
+                status: ShardConnectionStatus::Connected,
+            }],
+            Arc::new(Semaphore::new(1))
+                .try_acquire_owned()
+                .expect("permit"),
+        ))
+        .expect("fill output queue");
+        let deps = test_deps(tx, None);
+        let mut sequences = HashMap::new();
+
+        let error = dispatch_events(
+            &deps,
+            0,
+            Uuid::new_v4(),
+            &mut sequences,
+            vec![PipelineEvent::ShardStatus {
+                shard_id: 0,
+                status: ShardConnectionStatus::Connected,
+            }],
+        )
+        .await
+        .expect_err("full ingress queue must time out");
+        drop(deps);
+
+        assert!(error.contains("timed out"));
+    }
+
+    #[tokio::test]
+    async fn session_close_and_all_gaps_use_one_ingress_batch() {
         let (tx, rx) = flume::bounded(1);
-        tx.send(PipelineEvent::ShardStatus {
-            shard_id: 0,
-            status: ShardConnectionStatus::Connected,
-        })
+        let deps = test_deps(tx, None);
+        let token = TokenId::new("1");
+        let sequences = HashMap::from([(TokenKey::new(1), 7)]);
+
+        close_stream_session(
+            &deps,
+            ClosingStreamSession {
+                stream_session_id: Uuid::new_v4(),
+                shard_id: 0,
+                subscription_token_hash: subscription_token_hash(slice::from_ref(&token))
+                    .expect("subscription hash"),
+                subscription_token_count: 1,
+                subscription_tokens: slice::from_ref(&token),
+                opened_at_ms: 1,
+                token_sequences: &sequences,
+            },
+            StreamSessionEndReason::Overflow,
+        )
+        .await;
+
+        let batch = rx.recv().expect("close batch");
+        assert_eq!(batch.events.len(), 2, "one close plus one gap");
+        drop(batch);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn failed_session_close_notifies_full_token_scope_without_gap_fanout() {
+        let (tx, rx) = flume::bounded(1);
+        tx.send(NormalizedIngressBatch::new(
+            vec![PipelineEvent::ShardStatus {
+                shard_id: 0,
+                status: ShardConnectionStatus::Connected,
+            }],
+            Arc::new(Semaphore::new(1))
+                .try_acquire_owned()
+                .expect("permit"),
+        ))
         .expect("fill output queue");
         let invalidations = Arc::new(AtomicU64::new(0));
         let hook: WsSessionInvalidationHook = {
             let invalidations = Arc::clone(&invalidations);
-            Arc::new(move |count| {
-                invalidations.fetch_add(count, Ordering::Relaxed);
+            Arc::new(move |tokens| {
+                invalidations.fetch_add(
+                    u64::try_from(tokens.len()).unwrap_or(u64::MAX),
+                    Ordering::Relaxed,
+                );
             })
         };
         let deps = test_deps(tx, Some(hook));
         let token = TokenId::new("1");
-        deps.token_freshness.mark_token(&token, Instant::now());
         let session_id = Uuid::new_v4();
-        let sequences = HashMap::from([(token.clone(), 7)]);
+        let sequences = HashMap::from([(TokenKey::new(1), 7)]);
 
         close_stream_session(
             &deps,
@@ -685,7 +779,6 @@ mod tests {
             "no per-token gaps are queued after close failure"
         );
         assert_eq!(invalidations.load(Ordering::Relaxed), 1);
-        assert!(deps.token_freshness.token_age_ms(&token).is_none());
     }
 
     #[tokio::test(start_paused = true)]

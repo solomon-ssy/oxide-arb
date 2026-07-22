@@ -147,11 +147,11 @@ impl ModelVersionInfo {
     ) -> Result<ModelVersionDerivation, ModelVersionDerivationError> {
         ModelVersionDerivation::from_persistence(
             self.derivation_kind,
-            self.parent_model_version_id.clone(),
-            self.source_backtest_report_id.clone(),
-            self.calibration_artifact_id.clone(),
+            self.parent_model_version_id,
+            self.source_backtest_report_id,
+            self.calibration_artifact_id,
             self.score_multiplier_calibration_report.clone(),
-            self.derivation_evidence_hash.clone(),
+            self.derivation_evidence_hash,
         )
     }
 }
@@ -189,9 +189,9 @@ impl NewModelVersion {
     pub fn try_into_active_model(self) -> Result<ActiveModel, ModelVersionDerivationError> {
         let derivation_evidence_hash = self.derivation.evidence_hash()?;
         let derivation_kind = self.derivation.kind();
-        let parent_model_version_id = self.derivation.parent_model_version_id().cloned();
-        let source_backtest_report_id = self.derivation.source_backtest_report_id().cloned();
-        let calibration_artifact_id = self.derivation.calibration_artifact_id().cloned();
+        let parent_model_version_id = self.derivation.parent_model_version_id().copied();
+        let source_backtest_report_id = self.derivation.source_backtest_report_id().copied();
+        let calibration_artifact_id = self.derivation.calibration_artifact_id().copied();
         let score_multiplier_calibration_report =
             self.derivation.score_multiplier_report().cloned();
 

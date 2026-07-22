@@ -131,12 +131,8 @@ fn latest_historical_observations(
         latest
             .entry((station, fact.observed_at))
             .and_modify(|current| {
-                if (fact.revision, fact.available_at, fact.report_hash.as_str())
-                    > (
-                        current.revision,
-                        current.available_at,
-                        current.report_hash.as_str(),
-                    )
+                if (fact.revision, fact.available_at, fact.report_hash)
+                    > (current.revision, current.available_at, current.report_hash)
                 {
                     *current = fact;
                 }
@@ -175,10 +171,7 @@ fn group_forecasts(
                 point.lead_hours,
             ))
             .or_default()
-            .entry((
-                point.run_manifest_hash.clone(),
-                point.grid_binding_hash.clone(),
-            ))
+            .entry((point.run_manifest_hash, point.grid_binding_hash))
             .or_default()
             .push(point);
     }
@@ -267,12 +260,10 @@ fn pair_calibration_samples(
             reference_time,
             valid_time,
             lead,
-            manifest_hash.clone(),
-            observed.report_hash.clone(),
+            manifest_hash,
+            observed.report_hash,
         ));
-        samples
-            .observation_hashes
-            .insert(observed.report_hash.clone());
+        samples.observation_hashes.insert(observed.report_hash);
         samples.manifest_hashes.insert(manifest_hash);
         samples.grid_hashes.insert(grid_hash);
     }
@@ -602,12 +593,8 @@ fn daily_extremes(
         latest
             .entry(fact.observed_at)
             .and_modify(|current| {
-                if (fact.revision, fact.available_at, fact.report_hash.as_str())
-                    > (
-                        current.revision,
-                        current.available_at,
-                        current.report_hash.as_str(),
-                    )
+                if (fact.revision, fact.available_at, fact.report_hash)
+                    > (current.revision, current.available_at, current.report_hash)
                 {
                     *current = fact;
                 }
@@ -644,10 +631,10 @@ fn latest_observation_evidence(
             fact.local_date == local_date && (include_excluded || fact.report_kind != excluded)
         })
         .max_by(|left, right| {
-            (left.observed_at, left.revision, left.report_hash.as_str()).cmp(&(
+            (left.observed_at, left.revision, left.report_hash).cmp(&(
                 right.observed_at,
                 right.revision,
-                right.report_hash.as_str(),
+                right.report_hash,
             ))
         })
         .map(|fact| EvidenceSourceRef {
@@ -732,10 +719,10 @@ fn noaa_basis_risk(
         })
         .collect::<Vec<_>>();
     evidence_facts.sort_by(|left, right| {
-        (left.local_date, left.observed_at, left.report_hash.as_str()).cmp(&(
+        (left.local_date, left.observed_at, left.report_hash).cmp(&(
             right.local_date,
             right.observed_at,
-            right.report_hash.as_str(),
+            right.report_hash,
         ))
     });
     let effective_at = evidence_facts
@@ -823,7 +810,7 @@ mod tests {
     use super::{decimal_sqrt, ensemble_standard_deviation, fit_weather_station_lead_bias};
 
     fn hash(seed: char) -> ContentHash {
-        ContentHash::parse(format!("blake3:{}", seed.to_string().repeat(64))).expect("hash")
+        ContentHash::parse(&format!("blake3:{}", seed.to_string().repeat(64))).expect("hash")
     }
 
     #[test]

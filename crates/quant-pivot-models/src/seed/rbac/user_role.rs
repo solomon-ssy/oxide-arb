@@ -43,12 +43,11 @@ pub async fn load(db: &DatabaseTransaction, ctx: &mut SeedContext) -> Result<u64
         .map_err(|error| DbErr::Custom(error.to_string()))?;
     let super_admin_id = roles
         .get(ROLE_SUPER_ADMIN)
-        .cloned()
+        .copied()
         .ok_or_else(|| DbErr::Custom("super_admin role missing from seed context".to_owned()))?;
-    let admin_id = ctx
+    let admin_id = *ctx
         .require::<UserId>(ADMIN_USER_ARTIFACT)
-        .map_err(|error| DbErr::Custom(error.to_string()))?
-        .clone();
+        .map_err(|error| DbErr::Custom(error.to_string()))?;
 
     let model = ActiveModel {
         user_id: Set(admin_id),
@@ -72,12 +71,11 @@ async fn hydrate(db: &DatabaseTransaction, ctx: &SeedContext) -> Result<(), DbEr
         .map_err(|error| DbErr::Custom(error.to_string()))?;
     let role_id = roles
         .get(ROLE_SUPER_ADMIN)
-        .cloned()
+        .copied()
         .ok_or_else(|| DbErr::Custom("super_admin role missing from seed context".to_owned()))?;
-    let user_id = ctx
+    let user_id = *ctx
         .require::<UserId>(ADMIN_USER_ARTIFACT)
-        .map_err(|error| DbErr::Custom(error.to_string()))?
-        .clone();
+        .map_err(|error| DbErr::Custom(error.to_string()))?;
     let exists = Entity::find()
         .filter(Column::UserId.eq(user_id))
         .filter(Column::RoleId.eq(role_id))

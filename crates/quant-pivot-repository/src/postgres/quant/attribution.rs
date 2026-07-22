@@ -55,13 +55,13 @@ impl AttributionRepository for PgAttributionRepository {
         attribution: NewRecommendationAttribution,
     ) -> Result<InsertFinalOutcome, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let recommendation_id = attribution.recommendation_id.clone();
+        let recommendation_id = attribution.recommendation_id;
 
-        let recommendation_row = Entity::find_by_id(recommendation_id.clone())
+        let recommendation_row = Entity::find_by_id(recommendation_id)
             .one(&txn)
             .await
             .map_err(StorageError::from)?
-            .ok_or_else(|| not_found(QUANT_RECOMMENDATION, &recommendation_id))?;
+            .ok_or_else(|| not_found(QUANT_RECOMMENDATION, recommendation_id))?;
         if !recommendation_row.status.eligible_for_attribution() {
             txn.rollback().await.map_err(StorageError::from)?;
             return Err(StorageError::InvariantViolation {
@@ -107,7 +107,7 @@ impl AttributionRepository for PgAttributionRepository {
         recommendation_id: &RecommendationId,
     ) -> Result<Option<RecommendationAttributionInfo>, StorageError> {
         QuantRecommendationAttributionEntity::find()
-            .filter(Column::RecommendationId.eq(recommendation_id.clone()))
+            .filter(Column::RecommendationId.eq(*recommendation_id))
             .one(&self.db)
             .await
             .map_err(StorageError::from)
@@ -157,7 +157,7 @@ pub async fn blocks_attribution(
     recommendation_id: &RecommendationId,
 ) -> Result<bool, DbErr> {
     if QuantOrderIntentEntity::find()
-        .filter(QuantOrderIntentColumn::RecommendationId.eq(recommendation_id.clone()))
+        .filter(QuantOrderIntentColumn::RecommendationId.eq(*recommendation_id))
         .filter(QuantOrderIntentColumn::Status.is_in(non_terminal_intents()))
         .limit(1)
         .one(db)
@@ -169,7 +169,7 @@ pub async fn blocks_attribution(
 
     if QuantPositionEntity::find()
         .join(JoinType::InnerJoin, Relation::OrderIntent.def())
-        .filter(QuantOrderIntentColumn::RecommendationId.eq(recommendation_id.clone()))
+        .filter(QuantOrderIntentColumn::RecommendationId.eq(*recommendation_id))
         .filter(QuantPositionColumn::State.is_in(blocking_positions()))
         .limit(1)
         .one(db)
@@ -184,7 +184,7 @@ pub async fn blocks_attribution(
             JoinType::InnerJoin,
             QuantExecutionOrderRelation::OrderIntent.def(),
         )
-        .filter(QuantOrderIntentColumn::RecommendationId.eq(recommendation_id.clone()))
+        .filter(QuantOrderIntentColumn::RecommendationId.eq(*recommendation_id))
         .filter(QuantExecutionOrderColumn::State.is_in(blocking_orders()))
         .limit(1)
         .one(db)
@@ -199,7 +199,7 @@ pub async fn blocks_attribution(
             JoinType::InnerJoin,
             QuantReconciliationRelation::OrderIntent.def(),
         )
-        .filter(QuantOrderIntentColumn::RecommendationId.eq(recommendation_id.clone()))
+        .filter(QuantOrderIntentColumn::RecommendationId.eq(*recommendation_id))
         .filter(QuantReconciliationColumn::Result.is_in(blocking_recons()))
         .limit(1)
         .one(db)

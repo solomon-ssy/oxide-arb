@@ -9,8 +9,8 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{
     clickhouse::{
-        BookL2CheckpointRow, BookL2EventRow, BookMicrostructureRow, BookStreamSessionRow,
-        MarketResolutionRow, TradeTapeRow,
+        BookL2LedgerRow, BookMicrostructureRow, BookStreamSessionRow, MarketResolutionRow,
+        TradeTapeRow,
     },
     domain::{
         data_plane::{
@@ -20,6 +20,7 @@ use quant_pivot_models::{
         market::{CatalogEventChangeInfo, CatalogMarketChangeInfo},
         quant::{LinkageOutcome, MarketLinkage, MarketSubject},
     },
+    enums::clickhouse::ChCanonicalBookEventType,
     types::{
         ClobMarketInfoVersion, DomainInstrumentKey, IcaoStation, MarketId,
         SourceSliceInvalidSession, TokenId,
@@ -29,7 +30,7 @@ use quant_pivot_research::pit::BookSnapshotAt;
 use uuid::Uuid;
 
 use super::source_slice::FrozenSourceSlice;
-use crate::pit::platform::ch_historical::{reconstruct_checkpoint, reconstruct_checkpoint_series};
+use crate::pit::platform::ch_historical::{reconstruct_snapshot, reconstruct_snapshot_series};
 
 /// Maximum candidate markets in a single replay page. Callers page above this
 /// boundary; token and candidate cardinality never create per-row repository I/O.
@@ -92,10 +93,10 @@ pub struct ReplayPage {
     pub catalog_markets: Vec<CatalogMarketChangeInfo>,
     pub catalog_events: Vec<CatalogEventChangeInfo>,
     pub clob_market_info: Vec<ClobMarketInfoVersion>,
-    pub checkpoints: Vec<BookL2CheckpointRow>,
+    pub snapshots: Vec<BookL2LedgerRow>,
     pub sessions: Vec<BookStreamSessionRow>,
     pub gaps: Vec<SourceSliceInvalidSession>,
-    pub l2_events: Vec<BookL2EventRow>,
+    pub l2_ledger: Vec<BookL2LedgerRow>,
     pub microstructure: Vec<BookMicrostructureRow>,
     pub trade_tape: Vec<TradeTapeRow>,
     pub resolutions: Vec<MarketResolutionRow>,
@@ -138,7 +139,7 @@ impl ReplayPage {
     }
 
     /// Reconstruct the exact snapshot visible at one decision boundary without
-    /// touching a repository. The page must carry the pre-window checkpoint,
+    /// touching a repository. The page must carry the pre-window snapshot,
     /// all intervening canonical events/trades, and its session ledger.
     pub fn book_at_boundary(
         &self,
@@ -147,59 +148,37 @@ impl ReplayPage {
     ) -> QuantResult<Option<BookSnapshotAt>> {
         let source_cutoff = boundary.cutoff_for(DecisionSource::Book);
         let decision_at = boundary.decision_at();
-        let checkpoint = self.checkpoint_at(token_id, boundary).cloned();
-        let Some(checkpoint) = checkpoint else {
+        let snapshot = self.snapshot_at(token_id, boundary).cloned();
+        let Some(snapshot) = snapshot else {
             return Ok(None);
         };
-        self.validate_session(token_id, checkpoint.stream_session_id, decision_at)?;
+        self.validate_session(token_id, snapshot.stream_session_id, decision_at)?;
         let session = self
-            .session_at(checkpoint.stream_session_id, decision_at)
+            .session_at(snapshot.stream_session_id, decision_at)
             .ok_or_else(|| ResearchError::PitResolution {
                 detail: format!(
                     "Source Slice session ledger {} for token {} is unavailable",
-                    checkpoint.stream_session_id, token_id
+                    snapshot.stream_session_id, token_id
                 ),
             })?;
         let mut events = self
-            .l2_events
+            .l2_ledger
             .iter()
             .filter(|row| {
                 &row.token_id == token_id
-                    && row.stream_session_id == checkpoint.stream_session_id
-                    && row.token_sequence >= checkpoint.token_sequence
+                    && row.stream_session_id == snapshot.stream_session_id
+                    && row.token_sequence >= snapshot.token_sequence
                     && row.venue_event_time <= source_cutoff.timestamp_millis()
                     && row.persisted_time <= decision_at.timestamp_millis()
             })
             .cloned()
             .collect::<Vec<_>>();
         events.sort_by_key(|row| row.token_sequence);
-        let mut trades = self
-            .trade_tape
-            .iter()
-            .filter(|row| {
-                &row.token_id == token_id
-                    && row.stream_session_id == Some(checkpoint.stream_session_id)
-                    && row
-                        .token_sequence
-                        .is_some_and(|sequence| sequence >= checkpoint.token_sequence)
-                    && row.event_time <= source_cutoff.timestamp_millis()
-                    && row.ingestion_time <= decision_at.timestamp_millis()
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        trades.sort_by_key(|row| row.token_sequence);
-        reconstruct_checkpoint(
-            checkpoint,
-            session,
-            &events,
-            &trades,
-            source_cutoff,
-            decision_at,
-        )
+        reconstruct_snapshot(snapshot, session, &events, source_cutoff, decision_at)
     }
 
     /// Reconstruct a strictly monotonic timeline with one event-sequence walk
-    /// per stream session. Periodic checkpoints do not restart replay; a later
+    /// per stream session. Periodic snapshots do not restart replay; a later
     /// session starts a new independently verified chain.
     pub fn books_at_boundaries(
         &self,
@@ -218,7 +197,7 @@ impl ReplayPage {
             }
             .into());
         }
-        let selected = self.checkpoints_at_boundaries(token_id, boundaries);
+        let selected = self.snapshots_at_boundaries(token_id, boundaries);
         let mut books = vec![None; boundaries.len()];
         let mut start = 0_usize;
         while start < boundaries.len() {
@@ -237,8 +216,7 @@ impl ReplayPage {
                     detail: "ReplayPage session cursor overflow".to_owned(),
                 })?;
             while end < boundaries.len()
-                && selected[end]
-                    .is_some_and(|checkpoint| checkpoint.stream_session_id == session_id)
+                && selected[end].is_some_and(|snapshot| snapshot.stream_session_id == session_id)
             {
                 end = end
                     .checked_add(1)
@@ -262,7 +240,7 @@ impl ReplayPage {
                 })?;
             let final_cutoff = final_boundary.cutoff_for(DecisionSource::Book);
             let mut events = self
-                .l2_events
+                .l2_ledger
                 .iter()
                 .filter(|row| {
                     &row.token_id == token_id
@@ -274,26 +252,10 @@ impl ReplayPage {
                 .cloned()
                 .collect::<Vec<_>>();
             events.sort_by_key(|row| row.token_sequence);
-            let mut trades = self
-                .trade_tape
-                .iter()
-                .filter(|row| {
-                    &row.token_id == token_id
-                        && row.stream_session_id == Some(session_id)
-                        && row
-                            .token_sequence
-                            .is_some_and(|sequence| sequence >= anchor.token_sequence)
-                        && row.event_time <= final_cutoff.timestamp_millis()
-                        && row.ingestion_time <= final_boundary.decision_at().timestamp_millis()
-                })
-                .cloned()
-                .collect::<Vec<_>>();
-            trades.sort_by_key(|row| row.token_sequence);
-            let snapshots = reconstruct_checkpoint_series(
+            let snapshots = reconstruct_snapshot_series(
                 anchor.clone(),
                 session,
                 &events,
-                &trades,
                 &boundaries[start..end],
             )?;
             for (slot, snapshot) in books[start..end].iter_mut().zip(snapshots) {
@@ -304,42 +266,41 @@ impl ReplayPage {
         Ok(books)
     }
 
-    fn checkpoint_at(
+    fn snapshot_at(
         &self,
         token_id: &TokenId,
         boundary: &DecisionBoundary,
-    ) -> Option<&BookL2CheckpointRow> {
+    ) -> Option<&BookL2LedgerRow> {
         let source_cutoff = boundary.cutoff_for(DecisionSource::Book);
         let decision_at = boundary.decision_at();
-        self.checkpoints
+        self.snapshots
             .iter()
             .filter(|row| {
                 &row.token_id == token_id
-                    && row.event_time <= source_cutoff.timestamp_millis()
-                    && row.created_at <= decision_at.timestamp_millis()
+                    && row.event_type == ChCanonicalBookEventType::Snapshot
+                    && row.venue_event_time <= source_cutoff.timestamp_millis()
+                    && row.persisted_time <= decision_at.timestamp_millis()
             })
-            .max_by(|left, right| checkpoint_order(left, right))
+            .max_by(|left, right| snapshot_order(left, right))
     }
 
-    fn checkpoints_at_boundaries<'a>(
+    fn snapshots_at_boundaries<'a>(
         &'a self,
         token_id: &TokenId,
         boundaries: &[DecisionBoundary],
-    ) -> Vec<Option<&'a BookL2CheckpointRow>> {
-        let mut arrivals = vec![Vec::<&BookL2CheckpointRow>::new(); boundaries.len()];
-        for checkpoint in self
-            .checkpoints
-            .iter()
-            .filter(|row| &row.token_id == token_id)
-        {
+    ) -> Vec<Option<&'a BookL2LedgerRow>> {
+        let mut arrivals = vec![Vec::<&BookL2LedgerRow>::new(); boundaries.len()];
+        for snapshot in self.snapshots.iter().filter(|row| {
+            &row.token_id == token_id && row.event_type == ChCanonicalBookEventType::Snapshot
+        }) {
             let mut low = 0_usize;
             let mut high = boundaries.len();
             while low < high {
                 let middle = low + (high - low) / 2;
                 let boundary = &boundaries[middle];
-                let eligible = checkpoint.event_time
+                let eligible = snapshot.venue_event_time
                     <= boundary.cutoff_for(DecisionSource::Book).timestamp_millis()
-                    && checkpoint.created_at <= boundary.decision_at().timestamp_millis();
+                    && snapshot.persisted_time <= boundary.decision_at().timestamp_millis();
                 if eligible {
                     high = middle;
                 } else {
@@ -347,16 +308,16 @@ impl ReplayPage {
                 }
             }
             if let Some(bucket) = arrivals.get_mut(low) {
-                bucket.push(checkpoint);
+                bucket.push(snapshot);
             }
         }
         let mut latest = None;
         arrivals
             .into_iter()
             .map(|arrived| {
-                for checkpoint in arrived {
-                    if latest.is_none_or(|current| checkpoint_order(current, checkpoint).is_lt()) {
-                        latest = Some(checkpoint);
+                for snapshot in arrived {
+                    if latest.is_none_or(|current| snapshot_order(current, snapshot).is_lt()) {
+                        latest = Some(snapshot);
                     }
                 }
                 latest
@@ -400,11 +361,11 @@ impl ReplayPage {
     }
 }
 
-fn checkpoint_order(left: &BookL2CheckpointRow, right: &BookL2CheckpointRow) -> Ordering {
-    (left.event_time, left.token_sequence, &left.checkpoint_hash).cmp(&(
-        right.event_time,
+fn snapshot_order(left: &BookL2LedgerRow, right: &BookL2LedgerRow) -> Ordering {
+    (left.venue_event_time, left.token_sequence, left.event_hash).cmp(&(
+        right.venue_event_time,
         right.token_sequence,
-        &right.checkpoint_hash,
+        right.event_hash,
     ))
 }
 
@@ -423,10 +384,10 @@ impl FrozenSourceSlice {
             catalog_markets: catalog.markets,
             catalog_events: catalog.events,
             clob_market_info: catalog.clob_market_info,
-            checkpoints: books.checkpoints,
+            snapshots: books.snapshots,
             sessions: books.sessions,
             gaps: books.gaps,
-            l2_events: books.l2_events,
+            l2_ledger: books.l2_ledger,
             microstructure: market_facts.microstructure,
             trade_tape: market_facts.trade_tape,
             resolutions: market_facts.resolutions,
@@ -515,15 +476,15 @@ fn page_catalog(source: &FrozenSourceSlice, scope: &ReplayPageScope<'_>) -> Cata
 
 struct BookPage {
     replay_start_by_token: HashMap<TokenId, i64>,
-    checkpoints: Vec<BookL2CheckpointRow>,
+    snapshots: Vec<BookL2LedgerRow>,
     sessions: Vec<BookStreamSessionRow>,
     gaps: Vec<SourceSliceInvalidSession>,
-    l2_events: Vec<BookL2EventRow>,
+    l2_ledger: Vec<BookL2LedgerRow>,
 }
 
 fn page_books(source: &FrozenSourceSlice, scope: &ReplayPageScope<'_>) -> BookPage {
     let mut replay_start_by_token = HashMap::<TokenId, i64>::new();
-    let mut checkpoints = Vec::new();
+    let mut snapshots = Vec::new();
     for token in &scope.request.token_ids {
         let Some(rows) = source.prefetched.books.get(token) else {
             replay_start_by_token.insert(token.clone(), scope.start_ms);
@@ -531,47 +492,52 @@ fn page_books(source: &FrozenSourceSlice, scope: &ReplayPageScope<'_>) -> BookPa
         };
         let anchor = rows
             .iter()
-            .filter(|row| row.event_time <= scope.start_ms && row.created_at <= scope.available_ms)
+            .filter(|row| {
+                row.event_type == ChCanonicalBookEventType::Snapshot
+                    && row.venue_event_time <= scope.start_ms
+                    && row.persisted_time <= scope.available_ms
+            })
             .max_by(|left, right| {
-                (left.event_time, left.token_sequence, &left.checkpoint_hash).cmp(&(
-                    right.event_time,
+                (left.venue_event_time, left.token_sequence, left.event_hash).cmp(&(
+                    right.venue_event_time,
                     right.token_sequence,
-                    &right.checkpoint_hash,
+                    right.event_hash,
                 ))
             });
         replay_start_by_token.insert(
             token.clone(),
-            anchor.map_or(scope.start_ms, |row| row.event_time),
+            anchor.map_or(scope.start_ms, |row| row.venue_event_time),
         );
         if let Some(anchor) = anchor {
-            checkpoints.push(anchor.clone());
+            snapshots.push(anchor.clone());
         }
-        checkpoints.extend(
+        snapshots.extend(
             rows.iter()
                 .filter(|row| {
-                    row.event_time > scope.start_ms
-                        && row.event_time < scope.end_ms
-                        && row.created_at <= scope.available_ms
+                    row.event_type == ChCanonicalBookEventType::Snapshot
+                        && row.venue_event_time > scope.start_ms
+                        && row.venue_event_time < scope.end_ms
+                        && row.persisted_time <= scope.available_ms
                 })
                 .cloned(),
         );
     }
-    checkpoints.sort_by(|left, right| {
+    snapshots.sort_by(|left, right| {
         (
             &left.token_id,
-            left.event_time,
+            left.venue_event_time,
             left.token_sequence,
-            &left.checkpoint_hash,
+            left.event_hash,
         )
             .cmp(&(
                 &right.token_id,
-                right.event_time,
+                right.venue_event_time,
                 right.token_sequence,
-                &right.checkpoint_hash,
+                right.event_hash,
             ))
     });
-    let l2_events = source
-        .l2_events
+    let l2_ledger = source
+        .l2_ledger
         .iter()
         .filter(|row| {
             scope.tokens.contains(&row.token_id)
@@ -585,10 +551,10 @@ fn page_books(source: &FrozenSourceSlice, scope: &ReplayPageScope<'_>) -> BookPa
         })
         .cloned()
         .collect::<Vec<_>>();
-    let session_ids = checkpoints
+    let session_ids = snapshots
         .iter()
         .map(|row| row.stream_session_id)
-        .chain(l2_events.iter().map(|row| row.stream_session_id))
+        .chain(l2_ledger.iter().map(|row| row.stream_session_id))
         .collect::<HashSet<_>>();
     let sessions = source
         .sessions
@@ -625,10 +591,10 @@ fn page_books(source: &FrozenSourceSlice, scope: &ReplayPageScope<'_>) -> BookPa
         .collect();
     BookPage {
         replay_start_by_token,
-        checkpoints,
+        snapshots,
         sessions,
         gaps,
-        l2_events,
+        l2_ledger,
     }
 }
 
@@ -833,7 +799,7 @@ mod tests {
 
     use chrono::{TimeZone, Utc};
     use quant_pivot_models::{
-        clickhouse::{BookL2CheckpointRow, BookL2EventRow, ChSchemaVersion},
+        clickhouse::{BookL2LedgerRow, ChDigest},
         domain::market::CatalogWindowInfo,
         enums::clickhouse::ChCanonicalBookEventType,
         types::{
@@ -847,11 +813,11 @@ mod tests {
     use crate::prefetch::{historical_window::Prefetched, source_slice::FrozenSourceSlice};
 
     fn hash(byte: char) -> ContentHash {
-        ContentHash::parse(format!("blake3:{}", byte.to_string().repeat(64))).expect("hash")
+        ContentHash::parse(&format!("blake3:{}", byte.to_string().repeat(64))).expect("hash")
     }
 
-    fn event(token_id: &TokenId, session: Uuid, sequence: u64, at_ms: i64) -> BookL2EventRow {
-        BookL2EventRow {
+    fn event(token_id: &TokenId, session: Uuid, sequence: u64, at_ms: i64) -> BookL2LedgerRow {
+        BookL2LedgerRow {
             stream_session_id: session,
             shard_id: 0,
             token_id: token_id.clone(),
@@ -866,16 +832,19 @@ mod tests {
             bid_sizes: Vec::new(),
             ask_prices: Vec::new(),
             ask_sizes: Vec::new(),
-            book_version: sequence,
             old_tick_size: None,
             new_tick_size: None,
+            trade_price: None,
+            trade_side: None,
+            trade_size: None,
+            fee_rate_bps: None,
             venue_event_time: at_ms,
             ingress_time: at_ms + 1,
             persisted_time: at_ms + 2,
-            payload_hash: hash(
+            event_hash: ChDigest::from(hash(
                 char::from_digit(u32::try_from(sequence).expect("sequence"), 16).expect("hex"),
-            ),
-            schema_version: ChSchemaVersion(2),
+            )),
+            schema_version: BookL2LedgerRow::SCHEMA_VERSION,
         }
     }
 
@@ -884,22 +853,31 @@ mod tests {
         let token_id = TokenId::new("token");
         let market_id = MarketId::new("market");
         let session = Uuid::now_v7();
-        let checkpoint = BookL2CheckpointRow {
+        let snapshot = BookL2LedgerRow {
+            stream_session_id: session,
+            shard_id: 0,
             token_id: token_id.clone(),
             market_id: Some(market_id.clone()),
-            stream_session_id: session,
             token_sequence: 1,
-            bids_json: "[]".to_owned(),
-            asks_json: "[]".to_owned(),
-            book_version: 1,
-            source_event_hash: hash('1'),
-            checkpoint_hash: hash('a'),
-            event_time: 100_000,
-            created_at: 100_002,
-            schema_version: ChSchemaVersion(2),
+            event_type: ChCanonicalBookEventType::Snapshot,
+            bid_prices: Vec::new(),
+            bid_sizes: Vec::new(),
+            ask_prices: Vec::new(),
+            ask_sizes: Vec::new(),
+            old_tick_size: None,
+            new_tick_size: None,
+            trade_price: None,
+            trade_side: None,
+            trade_size: None,
+            fee_rate_bps: None,
+            venue_event_time: 100_000,
+            ingress_time: 100_001,
+            persisted_time: 100_002,
+            event_hash: ChDigest::from(hash('a')),
+            schema_version: BookL2LedgerRow::SCHEMA_VERSION,
         };
         let prefetched = Prefetched {
-            books: HashMap::from([(token_id.clone(), vec![checkpoint])]),
+            books: HashMap::from([(token_id.clone(), vec![snapshot])]),
             micro: HashMap::new(),
             trade_tape: HashMap::new(),
             resolutions: HashMap::new(),
@@ -920,7 +898,7 @@ mod tests {
             pit_cutoff: Utc.timestamp_opt(130, 0).single().expect("source cutoff"),
             prefetched,
             clob_market_info: Vec::new(),
-            l2_events: vec![
+            l2_ledger: vec![
                 event(&token_id, session, 1, 100_000),
                 event(&token_id, session, 2, 108_000),
                 event(&token_id, session, 3, 115_000),
@@ -945,9 +923,9 @@ mod tests {
             })
             .expect("replay page");
 
-        assert_eq!(page.checkpoints.len(), 1);
-        assert_eq!(page.l2_events.len(), 3);
-        assert_eq!(page.l2_events[1].venue_event_time, 108_000);
+        assert_eq!(page.snapshots.len(), 1);
+        assert_eq!(page.l2_ledger.len(), 3);
+        assert_eq!(page.l2_ledger[1].venue_event_time, 108_000);
         assert_eq!(page.gaps.len(), 1);
     }
 }

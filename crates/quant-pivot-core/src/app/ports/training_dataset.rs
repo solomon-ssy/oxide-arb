@@ -21,8 +21,8 @@ use quant_pivot_models::{
     runtime_config::DecisionPolicySnapshot,
     types::{
         ContentHash, DATASET_ARTIFACT_FORMAT_VERSION, DecisionPolicySnapshotId,
-        ResearchEvaluationTrack, ResearchProfileArtifact, SourceSliceManifestRef,
-        SourceSliceManifestV1, TrainingDatasetId, TrainingSampleSource,
+        ResearchEvaluationTrack, ResearchProfileArtifact, SourceSliceManifest,
+        SourceSliceManifestRef, TrainingDatasetId, TrainingSampleSource,
         resolve_builtin_research_profile,
     },
 };
@@ -167,7 +167,7 @@ impl CoreTrainingDatasetPort {
             .artifact_store
             .get(&request.source_slice.manifest_uri)
             .await?;
-        let actual_manifest_hash = ContentHash::parse(CanonicalDigest::prefixed_bytes(&bytes))?;
+        let actual_manifest_hash = CanonicalDigest::content_hash_bytes(&bytes);
         if actual_manifest_hash != request.source_slice.manifest_hash {
             return Err(ResearchError::DatasetPlan {
                 detail: format!(
@@ -177,12 +177,11 @@ impl CoreTrainingDatasetPort {
             }
             .into());
         }
-        let manifest =
-            serde_json::from_slice::<SourceSliceManifestV1>(&bytes).map_err(|error| {
-                ResearchError::DatasetPlan {
-                    detail: format!("source-slice manifest is not valid v2 JSON: {error}"),
-                }
-            })?;
+        let manifest = serde_json::from_slice::<SourceSliceManifest>(&bytes).map_err(|error| {
+            ResearchError::DatasetPlan {
+                detail: format!("source-slice manifest is not valid v2 JSON: {error}"),
+            }
+        })?;
         manifest
             .validate_for_profile(
                 &profile,
@@ -209,7 +208,7 @@ impl CoreTrainingDatasetPort {
             while let Some(chunk) = stream.next().await {
                 hasher.update(&chunk?);
             }
-            let actual = ContentHash::parse(format!("blake3:{}", hasher.finalize().to_hex()))?;
+            let actual = ContentHash::from_bytes(*hasher.finalize().as_bytes());
             if actual != object.byte_hash {
                 return Err(ResearchError::DatasetBuild {
                     detail: format!(
@@ -332,7 +331,7 @@ impl CoreTrainingDatasetPort {
                     "ready source slice has no manifest URI",
                 )
             })?,
-            manifest_hash: source_slice.manifest_hash.clone().ok_or_else(|| {
+            manifest_hash: source_slice.manifest_hash.ok_or_else(|| {
                 StorageError::invariant_violation(
                     Some("quant_source_slice"),
                     "ready source slice has no manifest hash",
@@ -341,11 +340,11 @@ impl CoreTrainingDatasetPort {
         };
         Ok((
             DatasetPlanRequest {
-                model_spec_id: body.model_spec_id.clone(),
+                model_spec_id: body.model_spec_id,
                 profile_ref: body.profile_ref.clone(),
                 research_program_hash,
                 source_slice: source_slice_ref,
-                decision_policy_snapshot_id: body.decision_policy_snapshot_id.clone(),
+                decision_policy_snapshot_id: body.decision_policy_snapshot_id,
                 window_start: body.window_start,
                 window_end: body.window_end,
                 pit_cutoff: body.pit_cutoff,
@@ -376,7 +375,7 @@ fn derive_dataset_source_identity(
     sample_sources: &[TrainingSampleSource],
 ) -> QuantResult<(SourceSliceIdentity, ContentHash)> {
     let research_program_hash = match policy_fit {
-        Some(frozen) => frozen.research_program_hash.clone(),
+        Some(frozen) => *frozen.research_program_hash,
         None => CanonicalDigest::content_hash_json(&(
             "training_dataset_program_v1",
             &profile.profile_ref,
@@ -437,9 +436,9 @@ fn derive_dataset_source_identity(
         evaluation_track: policy_fit.map_or(ResearchEvaluationTrack::ResearchOnly, |frozen| {
             frozen.evaluation_track
         }),
-        research_program_hash: research_program_hash.clone(),
-        decision_policy_snapshot_id: body.decision_policy_snapshot_id.clone(),
-        runtime_config_hash: runtime_config_hash.clone(),
+        research_program_hash,
+        decision_policy_snapshot_id: body.decision_policy_snapshot_id,
+        runtime_config_hash: *runtime_config_hash,
         window_start: source_window_start,
         window_end: source_window_end,
         pit_cutoff: body.pit_cutoff,
@@ -509,12 +508,7 @@ impl TrainingDatasetPort for CoreTrainingDatasetPort {
         cancel: CancellationToken,
     ) -> QuantResult<TrainingDatasetView> {
         let (plan_request, source_slice) = self
-            .resolve_plan_request(
-                &request,
-                request.training_dataset_id.clone(),
-                Some(&cancel),
-                None,
-            )
+            .resolve_plan_request(&request, request.training_dataset_id, Some(&cancel), None)
             .await?;
         self.verify_source_slice_request(&plan_request, true)
             .await?;
@@ -550,7 +544,7 @@ impl TrainingDatasetPort for CoreTrainingDatasetPort {
         let plan = service
             .plan_with_frozen_source(plan_request, &frozen)
             .await?;
-        let training_dataset_id = plan.training_dataset_id.clone();
+        let training_dataset_id = plan.training_dataset_id;
         Box::pin(service.build_with_frozen_source(plan, frozen, progress, cancel)).await?;
         let info = self
             .dataset_repo
@@ -575,12 +569,7 @@ impl TrainingDatasetPort for CoreTrainingDatasetPort {
         };
         let body = request.dataset;
         let (plan_request, source_slice) = self
-            .resolve_plan_request(
-                &body,
-                body.training_dataset_id.clone(),
-                Some(&cancel),
-                Some(frozen),
-            )
+            .resolve_plan_request(&body, body.training_dataset_id, Some(&cancel), Some(frozen))
             .await?;
         self.verify_source_slice_request(&plan_request, true)
             .await?;
@@ -612,7 +601,7 @@ impl TrainingDatasetPort for CoreTrainingDatasetPort {
         let plan = service
             .plan_with_frozen_source(plan_request, &frozen_source)
             .await?;
-        let training_dataset_id = plan.training_dataset_id.clone();
+        let training_dataset_id = plan.training_dataset_id;
         Box::pin(service.build_with_frozen_source(plan, frozen_source, progress, cancel)).await?;
         let info = self
             .dataset_repo

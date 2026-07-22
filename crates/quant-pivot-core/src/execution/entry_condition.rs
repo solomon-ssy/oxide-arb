@@ -101,7 +101,7 @@ fn unavailable_evaluation(
     };
     let input_fingerprint =
         CanonicalDigest::content_hash_json(&input.binding).map_err(QuantError::from)?;
-    let continuity_hash = input_fingerprint.clone();
+    let continuity_hash = input_fingerprint;
     let evaluation_hash =
         CanonicalDigest::content_hash_json(&(root, &tree)).map_err(QuantError::from)?;
     Ok(EntryConditionEvaluation {
@@ -452,7 +452,7 @@ fn fold_crypto_reports(
             if previous != condition.recommended_outcome && current == condition.recommended_outcome
             {
                 state.latched = true;
-                state.triggering_report_hash = Some(report.report_hash.clone());
+                state.triggering_report_hash = Some(report.report_hash);
                 state.triggering_at = Some(report.event_at);
             } else if previous == condition.recommended_outcome
                 && current != condition.recommended_outcome
@@ -465,7 +465,7 @@ fn fold_crypto_reports(
         }
         state.last_outcome = outcome;
         state.last_source_sequence = Some(report.source_sequence);
-        state.last_report_hash = Some(report.report_hash.clone());
+        state.last_report_hash = Some(report.report_hash);
         state.last_event_at = Some(report.event_at);
         state.last_available_at = Some(report.available_at);
     }
@@ -939,7 +939,7 @@ mod tests {
     }
 
     fn hash(seed: char) -> ContentHash {
-        ContentHash::parse(format!("blake3:{}", seed.to_string().repeat(64))).expect("hash")
+        ContentHash::parse(&format!("blake3:{}", seed.to_string().repeat(64))).expect("hash")
     }
 
     #[test]

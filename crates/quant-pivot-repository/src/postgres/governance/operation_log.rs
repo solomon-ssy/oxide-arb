@@ -68,7 +68,7 @@ fn page_condition(query: &OperationLogQuery) -> Condition {
             query
                 .actor_user_id
                 .as_ref()
-                .map(|id| Column::ActorUserId.eq(id.clone())),
+                .map(|id| Column::ActorUserId.eq(*id)),
         )
         .add_option(query.category.map(|category| Column::Category.eq(category)))
         .add_option(
@@ -89,7 +89,7 @@ fn page_condition(query: &OperationLogQuery) -> Condition {
             query
                 .governance_audit_event_id
                 .as_ref()
-                .map(|event_id| Column::GovernanceAuditEventId.eq(event_id.clone())),
+                .map(|event_id| Column::GovernanceAuditEventId.eq(*event_id)),
         )
         .add_option(query.from.map(|from| Column::OccurredAt.gte(from)))
         .add_option(query.to.map(|to| Column::OccurredAt.lt(to)))

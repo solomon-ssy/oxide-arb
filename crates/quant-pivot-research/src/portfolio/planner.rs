@@ -287,7 +287,7 @@ fn size_candidates<'a>(
         })?;
         match outcome {
             SizingOutcome::Rejected(reason) => rejected.push(RejectedCandidate {
-                signal_candidate_id: plan_candidate.candidate.signal_candidate_id.clone(),
+                signal_candidate_id: plan_candidate.candidate.signal_candidate_id,
                 market_id: plan_candidate.candidate.market_id.clone(),
                 reason,
                 detail: "sizing produced no fundable size".to_owned(),
@@ -337,7 +337,7 @@ fn classify_allocations<'a>(
                 rejection_for_binding(alloc.binding_constraint)
             };
             rejected.push(RejectedCandidate {
-                signal_candidate_id: candidate.signal_candidate_id.clone(),
+                signal_candidate_id: candidate.signal_candidate_id,
                 market_id: candidate.market_id.clone(),
                 reason,
                 detail: format!("allocated {} below minimum {min_rec}", alloc.allocated_usd),
@@ -357,7 +357,7 @@ fn classify_allocations<'a>(
                 rejection_for_binding(alloc.binding_constraint)
             };
             rejected.push(RejectedCandidate {
-                signal_candidate_id: candidate.signal_candidate_id.clone(),
+                signal_candidate_id: candidate.signal_candidate_id,
                 market_id: candidate.market_id.clone(),
                 reason,
                 detail: format!(
@@ -469,7 +469,7 @@ fn correlation_shrink_map(
             continue;
         }
         for market in members {
-            market_cluster.insert(market.as_str().to_owned(), (cluster_idx, batch_count));
+            market_cluster.insert(market.to_string(), (cluster_idx, batch_count));
         }
     }
     let mut out = BTreeMap::new();
@@ -658,9 +658,9 @@ fn build_plan_row(
     };
 
     NewPortfolioPlan {
-        portfolio_plan_id: input.portfolio_plan_id.clone(),
-        model_run_id: Some(input.model_run_id.clone()),
-        market_selection_id: input.market_selection_id.clone(),
+        portfolio_plan_id: input.portfolio_plan_id,
+        model_run_id: Some(input.model_run_id),
+        market_selection_id: input.market_selection_id,
         decision_at: input.decision_at,
         budget_usd: total_budget,
         allocated_usd: allocated_total,

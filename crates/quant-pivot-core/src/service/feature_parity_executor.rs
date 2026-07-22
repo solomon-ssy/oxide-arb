@@ -285,7 +285,7 @@ impl FeatureParityIncidentPort for ReportFeatureParityIncidentResponse {
         let reason = format!("feature parity containment for run {}", run.run_id);
         let mut affected = report_ids.to_vec();
         if let Some(report_id) = run.report_id.as_ref() {
-            affected.push(report_id.clone());
+            affected.push(*report_id);
         }
         if affected.is_empty() {
             affected = self
@@ -365,7 +365,7 @@ impl FeatureParityExecutor {
             .find_run(&params.parity_run_id)
             .await?
             .ok_or_else(|| {
-                StorageError::not_found("quant_feature_parity_run", &params.parity_run_id)
+                StorageError::not_found("quant_feature_parity_run", params.parity_run_id)
             })?;
         validate_job_binding(&queued, params)?;
         let pending_timeout = pending_timeout(params, self.minimum_pending_timeout)?;
@@ -645,8 +645,8 @@ impl FeatureParityExecutor {
                 matched_count: 0,
                 mismatched_count: 0,
                 pending_materialization_count: 0,
-                feature_contract_hash: run.feature_contract_hash.clone(),
-                transform_hash: run.transform_hash.clone(),
+                feature_contract_hash: run.feature_contract_hash,
+                transform_hash: run.transform_hash,
                 failure_code: Some(DiagnosticCode::new(code)),
                 failure_detail: Some(detail.to_owned()),
             },
@@ -932,11 +932,11 @@ impl OutcomeEvidence {
             if let Some(report_id) = comparison.report_id.as_ref()
                 && self.mismatched_report_keys.insert(report_id.to_string())
             {
-                self.mismatched_report_ids.push(report_id.clone());
+                self.mismatched_report_ids.push(*report_id);
             }
         }
         if let Some(hash) = comparison.transform_hash.as_ref() {
-            self.transform_hashes.insert(hash.as_str().to_owned());
+            self.transform_hashes.insert(hash.to_string());
         }
         let status = if matched {
             FeatureParityEventStatus::Matched
@@ -1044,7 +1044,7 @@ fn build_outcome(
     candidates: &[FeatureParityCandidate],
     attempt: FeatureParityReplayAttempt,
 ) -> QuantResult<BuiltOutcome> {
-    let feature_contract_hash = run.feature_contract_hash.clone().ok_or_else(|| {
+    let feature_contract_hash = run.feature_contract_hash.ok_or_else(|| {
         QuantError::from(ResearchError::Determinism {
             detail: "parity run has no feature contract hash".to_owned(),
         })
@@ -1169,10 +1169,10 @@ fn comparison_row(
     Ok(QuantFeatureParityEventRow {
         event_time: comparison.decision_at.timestamp_millis(),
         parity_event_id,
-        parity_run_id: run.run_id.clone(),
+        parity_run_id: run.run_id,
         decision_at: comparison.decision_at.timestamp_millis(),
-        stage: comparison.stage.as_str().to_owned(),
-        status: status.as_str().to_owned(),
+        stage: comparison.stage.to_string(),
+        status: status.to_string(),
         report_id: comparison.report_id,
         model_run_id: comparison.model_run_id,
         model_version_id: comparison.model_version_id,
@@ -1183,14 +1183,8 @@ fn comparison_row(
             (status == FeatureParityEventStatus::Mismatched)
                 .then(|| "audit_fingerprint_mismatch".to_owned())
         }),
-        online_state: comparison
-            .online
-            .state
-            .map(|state| state.as_str().to_owned()),
-        replay_state: comparison
-            .replay
-            .state
-            .map(|state| state.as_str().to_owned()),
+        online_state: comparison.online.state.map(|state| state.to_string()),
+        replay_state: comparison.replay.state.map(|state| state.to_string()),
         online_value: comparison.online.value,
         replay_value: comparison.replay.value,
         online_effective_at: comparison
@@ -1217,10 +1211,10 @@ fn comparison_row(
             .replay
             .cutoff
             .map(|value| value.timestamp_millis()),
-        feature_contract_hash: feature_contract_hash.as_str().to_owned(),
+        feature_contract_hash: feature_contract_hash.to_string(),
         transform_hash: comparison
             .transform_hash
-            .map_or_else(String::new, |hash| hash.as_str().to_owned()),
+            .map_or_else(String::new, |hash| hash.to_string()),
         online_fingerprint: comparison.online.fingerprint,
         replay_fingerprint: comparison.replay.fingerprint,
         detail_json,
@@ -1260,10 +1254,10 @@ fn pending_row(
     Ok(QuantFeatureParityEventRow {
         event_time: pending.decision_at.timestamp_millis(),
         parity_event_id,
-        parity_run_id: run.run_id.clone(),
+        parity_run_id: run.run_id,
         decision_at: pending.decision_at.timestamp_millis(),
-        stage: pending.stage.as_str().to_owned(),
-        status: status.as_str().to_owned(),
+        stage: pending.stage.to_string(),
+        status: status.to_string(),
         report_id: pending.report_id,
         model_run_id: pending.model_run_id,
         model_version_id: pending.model_version_id,
@@ -1275,7 +1269,7 @@ fn pending_row(
             .online
             .as_ref()
             .and_then(|online| online.state)
-            .map(|state| state.as_str().to_owned()),
+            .map(|state| state.to_string()),
         replay_state: None,
         online_value: pending
             .online
@@ -1302,7 +1296,7 @@ fn pending_row(
             .observed_watermark
             .map(|value| value.timestamp_millis()),
         replay_cutoff: Some(pending.required_watermark.timestamp_millis()),
-        feature_contract_hash: feature_contract_hash.as_str().to_owned(),
+        feature_contract_hash: feature_contract_hash.to_string(),
         transform_hash: String::new(),
         online_fingerprint: pending
             .online
@@ -1579,7 +1573,7 @@ mod tests {
                 state_id: FeatureParityStateId::from_v7(),
                 state: FeatureParityLatchState::Open,
                 transition,
-                cause_run_id: Some(cause_run_id.clone()),
+                cause_run_id: Some(*cause_run_id),
                 recovery_run_id: None,
                 previous_state_id: None,
                 actor: None,
@@ -1673,7 +1667,7 @@ mod tests {
             _reason: &str,
             _revoked_at: DateTime<Utc>,
         ) -> QuantResult<()> {
-            lock(&self.calls).push(report_id.clone());
+            lock(&self.calls).push(*report_id);
             if lock(&self.failures).contains(&report_id.to_string()) {
                 return Err(ResearchError::Determinism {
                     detail: format!("test revoke/cascade failed for {report_id}"),
@@ -1731,7 +1725,7 @@ mod tests {
             mismatched_count: 0,
             pending_materialization_count: 0,
             feature_contract_hash: Some(
-                ContentHash::parse(format!("blake3:{}", "1".repeat(64))).expect("hash"),
+                ContentHash::parse(&format!("blake3:{}", "1".repeat(64))).expect("hash"),
             ),
             transform_hash: None,
             failure_code: None,
@@ -1783,7 +1777,7 @@ mod tests {
 
     fn params(run: &FeatureParityRunInfo) -> FeatureParityJobParams {
         FeatureParityJobParams {
-            parity_run_id: run.run_id.clone(),
+            parity_run_id: run.run_id,
             materialization_timeout_secs: 600,
             request: RunFullFeatureParityRequest {
                 window_start: Some(run.window_start),
@@ -2018,9 +2012,9 @@ mod tests {
         };
         let online = evidence("online", now);
         let mut mismatch = comparison(now, online, evidence("replay", now));
-        mismatch.report_id = Some(report_id.clone());
+        mismatch.report_id = Some(report_id);
         mismatch.model_run_id = match &candidate.subject {
-            FeatureParitySubject::ModelRun(run_id) => Some(run_id.clone()),
+            FeatureParitySubject::ModelRun(run_id) => Some(*run_id),
             FeatureParitySubject::PreInferenceReport(_) => None,
         };
         mismatch.market_id.clone_from(&candidate.market_id);
@@ -2076,7 +2070,7 @@ mod tests {
             decision_at: now,
         };
         let candidate_run_id = match &candidate.subject {
-            FeatureParitySubject::ModelRun(run_id) => run_id.clone(),
+            FeatureParitySubject::ModelRun(run_id) => *run_id,
             FeatureParitySubject::PreInferenceReport(_) => unreachable!("test model subject"),
         };
         let pending = PendingFeatureParityComparison {
@@ -2148,7 +2142,7 @@ mod tests {
         run.status = FeatureParityRunStatus::Mismatched;
         let bound_report_id = RecommendationReportId::from_v7();
         let explicit_report_id = RecommendationReportId::from_v7();
-        run.report_id = Some(bound_report_id.clone());
+        run.report_id = Some(bound_report_id);
         let reports = Arc::new(RecordingReportContainment::default());
         let lookup = Arc::new(RecordingAffectedReportLookup::default());
         let alerts = Arc::new(Mutex::new(Vec::new()));
@@ -2162,11 +2156,7 @@ mod tests {
         response
             .contain(
                 &run,
-                &[
-                    explicit_report_id.clone(),
-                    bound_report_id.clone(),
-                    explicit_report_id.clone(),
-                ],
+                &[explicit_report_id, bound_report_id, explicit_report_id],
             )
             .await
             .expect("all affected reports revoked and cascaded");

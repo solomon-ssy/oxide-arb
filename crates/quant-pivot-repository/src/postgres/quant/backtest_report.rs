@@ -45,7 +45,7 @@ impl BacktestReportRepository for PgBacktestReportRepository {
         &self,
         backtest_report_id: &BacktestReportId,
     ) -> Result<Option<BacktestReportInfo>, StorageError> {
-        Entity::find_by_id(backtest_report_id.clone())
+        Entity::find_by_id(*backtest_report_id)
             .one(&self.db)
             .await
             .map_err(StorageError::from)
@@ -59,7 +59,7 @@ impl BacktestReportRepository for PgBacktestReportRepository {
         list_by_fk_ordered_desc::<Entity, _, _, _>(
             &self.db,
             Column::ModelVersionId,
-            model_version_id.clone(),
+            *model_version_id,
             Column::CreatedAt,
             Into::into,
         )
@@ -74,7 +74,6 @@ impl BacktestReportRepository for PgBacktestReportRepository {
             .add_option(
                 query
                     .model_version_id
-                    .clone()
                     .map(|id| Column::ModelVersionId.eq(id)),
             )
             .add_option(query.from.map(|from| Column::CreatedAt.gte(from)))

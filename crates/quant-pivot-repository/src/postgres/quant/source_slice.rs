@@ -34,7 +34,7 @@ impl SourceSliceRepository for PgSourceSliceRepository {
         source_slice: NewSourceSlice,
     ) -> Result<BeginSourceSliceOutcome, StorageError> {
         validate_new(&source_slice)?;
-        let identity_hash = source_slice.identity_hash.clone();
+        let identity_hash = source_slice.identity_hash;
         let mut active = source_slice.into_active_model();
         active.status = ActiveValue::Set(SourceSliceStatus::Materializing);
         let insert = Entity::insert(active)
@@ -65,7 +65,7 @@ impl SourceSliceRepository for PgSourceSliceRepository {
         &self,
         source_slice_id: &SourceSliceId,
     ) -> Result<Option<SourceSliceInfo>, StorageError> {
-        Entity::find_by_id(source_slice_id.clone())
+        Entity::find_by_id(*source_slice_id)
             .one(&self.db)
             .await
             .map_err(StorageError::from)
@@ -77,7 +77,7 @@ impl SourceSliceRepository for PgSourceSliceRepository {
         identity_hash: &ContentHash,
     ) -> Result<Option<SourceSliceInfo>, StorageError> {
         Entity::find()
-            .filter(Column::IdentityHash.eq(identity_hash.clone()))
+            .filter(Column::IdentityHash.eq(*identity_hash))
             .one(&self.db)
             .await
             .map_err(StorageError::from)
@@ -165,7 +165,7 @@ async fn load_for_update<C>(db: &C, source_slice_id: &SourceSliceId) -> Result<M
 where
     C: ConnectionTrait,
 {
-    Entity::find_by_id(source_slice_id.clone())
+    Entity::find_by_id(*source_slice_id)
         .lock_exclusive()
         .one(db)
         .await

@@ -154,10 +154,10 @@ pub struct ResolvedMarketSnapshot {
 /// Decode and validate one repository snapshot into the canonical PIT catalog
 /// value consumed by both streaming and materialized replay.
 pub fn resolve_catalog_snapshot(
-    snapshot: CatalogSnapshotInfo,
+    snapshot: &CatalogSnapshotInfo,
     boundary: &DecisionBoundary,
 ) -> QuantResult<ResolvedMarketSnapshot> {
-    validate_catalog_visibility(&snapshot, boundary)?;
+    validate_catalog_visibility(snapshot, boundary)?;
     let market: MarketRegistryInfo = decode_catalog_payload(
         "market",
         &snapshot.market.market_change_id,

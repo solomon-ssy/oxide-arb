@@ -1,7 +1,8 @@
 //! Conserved report-market funnel construction.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 
+use ahash::AHashMap;
 use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantResult, report::ReportError};
 use quant_pivot_models::{
@@ -121,7 +122,13 @@ impl DraftDecision {
 pub fn build_report_market_funnel(
     input: ReportFunnelInput<'_>,
 ) -> QuantResult<Vec<ReportMarketFunnelRow>> {
-    let mut decisions = BTreeMap::new();
+    let mut decisions = AHashMap::with_capacity(
+        input
+            .selection
+            .included
+            .len()
+            .saturating_add(input.selection.excluded.len()),
+    );
     for market in &input.selection.included {
         insert_unique(
             &mut decisions,
@@ -156,7 +163,7 @@ pub fn build_report_market_funnel(
     }
     for (market_id, feature_vector_id) in input.feature_vector_by_market {
         let decision = require_pending(&mut decisions, market_id)?;
-        decision.feature_vector_id = Some(feature_vector_id.clone());
+        decision.feature_vector_id = Some(*feature_vector_id);
     }
     for model in input.model_decisions {
         let decision = require_pending(&mut decisions, &model.market_id)?;
@@ -170,7 +177,7 @@ pub fn build_report_market_funnel(
             }
             .into());
         }
-        decision.signal_candidate_id = Some(model.signal_candidate_id.clone());
+        decision.signal_candidate_id = Some(model.signal_candidate_id);
         if !model.gate_passed {
             decision.terminate(
                 ReportFunnelStage::ModelGatePassed,
@@ -192,7 +199,7 @@ pub fn build_report_market_funnel(
     }
     for recommendation in input.recommendations {
         let decision = require_pending(&mut decisions, &recommendation.market_id)?;
-        decision.recommendation_id = Some(recommendation.recommendation_id.clone());
+        decision.recommendation_id = Some(recommendation.recommendation_id);
         decision.terminate(
             ReportFunnelStage::Published,
             ReportFunnelReason::Published,
@@ -253,14 +260,16 @@ pub fn build_report_market_funnel(
         .into());
     }
 
-    decisions
+    let mut rows = decisions
         .into_iter()
         .map(|(market_id, decision)| row_from_decision(&input, &market_id, decision))
-        .collect()
+        .collect::<QuantResult<Vec<_>>>()?;
+    rows.sort_unstable_by(|left, right| left.market_id.as_str().cmp(right.market_id.as_str()));
+    Ok(rows)
 }
 
 fn insert_unique(
-    decisions: &mut BTreeMap<MarketId, DraftDecision>,
+    decisions: &mut AHashMap<MarketId, DraftDecision>,
     market_id: &MarketId,
     decision: DraftDecision,
 ) -> QuantResult<()> {
@@ -275,7 +284,7 @@ fn insert_unique(
 }
 
 fn require_pending<'a>(
-    decisions: &'a mut BTreeMap<MarketId, DraftDecision>,
+    decisions: &'a mut AHashMap<MarketId, DraftDecision>,
     market_id: &MarketId,
 ) -> QuantResult<&'a mut DraftDecision> {
     let decision = decisions
@@ -342,14 +351,14 @@ fn row_from_decision(
         })?;
     Ok(ReportMarketFunnelRow {
         event_time: input.event_time.timestamp_millis(),
-        recommendation_report_id: input.report_id.clone(),
-        market_selection_id: input.selection.market_selection_id.clone(),
+        recommendation_report_id: *input.report_id,
+        market_selection_id: input.selection.market_selection_id,
         profile_id: input.profile_ref.id.to_string(),
         profile_version: input.profile_ref.version,
         profile_content_hash: input.profile_ref.content_hash.to_string(),
-        decision_policy_snapshot_id: input.decision_policy_snapshot_id.clone(),
-        model_version_id: input.model_version_id.clone(),
-        model_run_id: input.model_run_id.cloned(),
+        decision_policy_snapshot_id: *input.decision_policy_snapshot_id,
+        model_version_id: *input.model_version_id,
+        model_run_id: input.model_run_id.copied(),
         market_id: market_id.clone(),
         event_id: decision.event_id,
         token_id: decision.token_id,
@@ -523,7 +532,7 @@ mod tests {
             market_selection_id: MarketSelectionId::from_v7(),
             decision_at,
             decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
-            selector_hash: ContentHash::parse(format!("blake3:{}", "1".repeat(64))).expect("hash"),
+            selector_hash: ContentHash::parse(&format!("blake3:{}", "1".repeat(64))).expect("hash"),
             included: vec![SelectedMarket {
                 market_id: MarketId::new("included"),
                 event_id: EventId::new("event-included"),

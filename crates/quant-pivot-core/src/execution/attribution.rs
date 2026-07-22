@@ -111,7 +111,7 @@ impl AttributionService {
             if summary.considered >= batch_size {
                 break;
             }
-            if !seen.insert(intent.recommendation_id.clone()) {
+            if !seen.insert(intent.recommendation_id) {
                 continue;
             }
             summary.considered += 1;
@@ -137,7 +137,7 @@ impl AttributionService {
             if summary.considered >= batch_size {
                 break;
             }
-            if !seen.insert(recommendation.recommendation_id.clone()) {
+            if !seen.insert(recommendation.recommendation_id) {
                 continue;
             }
             summary.considered += 1;
@@ -183,7 +183,7 @@ impl AttributionService {
         let ingestion_time = Utc::now().timestamp_millis();
         let row = QuantRecommendationAttributionEventRow {
             event_time: info.created_at.timestamp_millis(),
-            recommendation_id: info.recommendation_id.clone(),
+            recommendation_id: info.recommendation_id,
             outcome: info.outcome.into(),
             realized_pnl_usd: ChUsd::from(info.realized_pnl_usd.unwrap_or(Usd::ZERO)),
             max_adverse_excursion_bps: info.max_adverse_excursion_bps.map(ChDecimal64::from),
@@ -204,7 +204,7 @@ impl AttributionService {
     ) -> QuantResult<HashMap<RecommendationId, RecommendationInfo>> {
         let recommendation_ids: Vec<RecommendationId> = intents
             .iter()
-            .map(|intent| intent.recommendation_id.clone())
+            .map(|intent| intent.recommendation_id)
             .collect::<HashSet<_>>()
             .into_iter()
             .collect();
@@ -214,7 +214,7 @@ impl AttributionService {
             .await?;
         Ok(rows
             .into_iter()
-            .map(|rec| (rec.recommendation_id.clone(), rec))
+            .map(|rec| (rec.recommendation_id, rec))
             .collect())
     }
 
@@ -299,7 +299,7 @@ impl AttributionService {
             ),
         };
         NewRecommendationAttribution {
-            recommendation_id: recommendation.recommendation_id.clone(),
+            recommendation_id: recommendation.recommendation_id,
             outcome,
             entry_outcome_json: EntryOutcome::default(),
             exit_outcome_json: ExitOutcome {
@@ -363,7 +363,7 @@ impl AttributionService {
         }
 
         Ok(Some(NewRecommendationAttribution {
-            recommendation_id: recommendation.recommendation_id.clone(),
+            recommendation_id: recommendation.recommendation_id,
             outcome,
             entry_outcome_json: entry_outcome(entry_order, entry_reconciliation.as_ref(), intent),
             exit_outcome_json: exit_outcome(
@@ -495,7 +495,7 @@ fn unfilled_row(
     intent_status: OrderIntentStatus,
 ) -> NewRecommendationAttribution {
     NewRecommendationAttribution {
-        recommendation_id: recommendation.recommendation_id.clone(),
+        recommendation_id: recommendation.recommendation_id,
         outcome,
         entry_outcome_json: EntryOutcome::default(),
         exit_outcome_json: ExitOutcome {

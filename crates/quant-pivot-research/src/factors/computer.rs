@@ -142,7 +142,7 @@ impl FactorEngine {
     pub fn feature_contract_hash(&self) -> QuantResult<ContentHash> {
         self.identities
             .as_ref()
-            .map(|(hash, _)| hash.clone())
+            .map(|(hash, _)| *hash)
             .map_err(|detail| {
                 ResearchError::FactorComputation {
                     detail: format!("factor definition identity construction failed: {detail}"),
@@ -380,7 +380,7 @@ fn build_raw_by_market(
             .zip(definition_ids)
             .map(|((_, computer), definition_id)| {
                 let mut raw = computer.compute_raw(vector)?;
-                raw.definition_id = definition_id.clone();
+                raw.definition_id = *definition_id;
                 Ok(raw)
             })
             .collect()
@@ -574,7 +574,7 @@ fn assemble(raw: &RawFactor, normalized: NormalizedFactor, floor: Decimal) -> Sc
         confidence = Probability::ZERO;
     }
     let value = FactorValue {
-        definition_id: raw.definition_id.clone(),
+        definition_id: raw.definition_id,
         name: raw.name.clone(),
         family: raw.family,
         raw_value: raw.raw_value,

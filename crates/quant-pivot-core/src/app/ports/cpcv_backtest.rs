@@ -239,15 +239,15 @@ impl CoreCpcvBacktestPort {
         let materialization = training_dataset::require_dataset_materialization(dataset)?;
         self.model_run_repo
             .create(NewModelRun {
-                model_run_id: model_run_id.clone(),
+                model_run_id: *model_run_id,
                 run_kind: ModelRunKind::Cpcv,
-                model_version_id: Some(model_version_id.clone()),
-                decision_policy_snapshot_id: request.decision_policy_snapshot_id.clone(),
+                model_version_id: Some(*model_version_id),
+                decision_policy_snapshot_id: request.decision_policy_snapshot_id,
                 market_selection_id: None,
                 window_start: dataset.window_start,
                 window_end: dataset.window_end,
                 status: ModelRunStatus::Running,
-                input_hash: materialization.dataset_hash.clone(),
+                input_hash: *materialization.dataset_hash,
                 output_hash: None,
                 error_code: None,
                 error_message: None,
@@ -281,11 +281,11 @@ impl CoreCpcvBacktestPort {
         let info = self
             .path_set_repo
             .create(NewBacktestPathSet {
-                path_set_id: path_set_id.clone(),
-                model_version_id: model_version_id.clone(),
+                path_set_id,
+                model_version_id,
                 model_run_id,
-                training_dataset_id: request.training_dataset_id.clone(),
-                decision_policy_snapshot_id: request.decision_policy_snapshot_id.clone(),
+                training_dataset_id: request.training_dataset_id,
+                decision_policy_snapshot_id: request.decision_policy_snapshot_id,
                 window_start: outcome.window_start,
                 window_end: outcome.window_end,
                 path_count: i64::try_from(outcome.path_set.paths.len()).unwrap_or(i64::MAX),
@@ -356,7 +356,7 @@ impl CoreCpcvBacktestPort {
         progress: Arc<dyn JobProgressSink>,
         cancel: CancellationToken,
     ) -> QuantResult<BacktestPathSetView> {
-        let model_version_id = contract.version.model_version_id.clone();
+        let model_version_id = contract.version.model_version_id;
         let model_family = contract.version.model_family;
         let runtime = self
             .load_runtime_config(&request.decision_policy_snapshot_id)
@@ -365,7 +365,6 @@ impl CoreCpcvBacktestPort {
 
         let path_set_id = request
             .path_set_id
-            .clone()
             .unwrap_or_else(BacktestPathSetId::from_v7);
         let category_scope = self.category_scope_for_version(&contract.version).await?;
         let coord_search_effective_n = Self::coord_search_effective_n(&contract.version);
@@ -382,15 +381,15 @@ impl CoreCpcvBacktestPort {
         let outcome = match service
             .run(
                 CpcvBacktestInput {
-                    model_run_id: model_run_id.clone(),
-                    training_dataset_id: request.training_dataset_id.clone(),
-                    decision_policy_snapshot_id: request.decision_policy_snapshot_id.clone(),
+                    model_run_id,
+                    training_dataset_id: request.training_dataset_id,
+                    decision_policy_snapshot_id: request.decision_policy_snapshot_id,
                     label: contract.label,
                     model_family,
                     prediction_horizon_secs: contract.prediction_horizon_secs,
                     category_scope,
                     input_contract: contract.input_contract,
-                    path_set_id: Some(path_set_id.clone()),
+                    path_set_id: Some(path_set_id),
                     coord_search_effective_n,
                 },
                 progress.as_ref(),
@@ -407,9 +406,9 @@ impl CoreCpcvBacktestPort {
 
         let view = match self
             .persist_path_set(
-                path_set_id.clone(),
-                model_version_id.clone(),
-                model_run_id.clone(),
+                path_set_id,
+                model_version_id,
+                model_run_id,
                 &request,
                 &outcome,
             )
@@ -425,7 +424,7 @@ impl CoreCpcvBacktestPort {
         self.model_run_repo
             .succeed(
                 &model_run_id,
-                view.path_set_hash.clone(),
+                view.path_set_hash,
                 Utc::now(),
                 Some(model_version_id),
             )

@@ -165,11 +165,11 @@ fn test_catalog_snapshot(
         catalog_sync_batch_id: CatalogSyncBatchId::from_v7(),
         market_change_id: CatalogMarketChangeId::from_v7(),
         event_change_id: CatalogEventChangeId::from_v7(),
-        market_content_hash: ContentHash::parse(format!("blake3:{}", "a".repeat(64)))
+        market_content_hash: ContentHash::parse(&format!("blake3:{}", "a".repeat(64)))
             .expect("valid market hash"),
-        event_content_hash: ContentHash::parse(format!("blake3:{}", "b".repeat(64)))
+        event_content_hash: ContentHash::parse(&format!("blake3:{}", "b".repeat(64)))
             .expect("valid event hash"),
-        membership_hash: ContentHash::parse(format!("blake3:{}", "c".repeat(64)))
+        membership_hash: ContentHash::parse(&format!("blake3:{}", "c".repeat(64)))
             .expect("valid membership hash"),
         market_timestamp_quality: CatalogTimestampQuality::Source,
         event_timestamp_quality: CatalogTimestampQuality::Source,
@@ -191,7 +191,7 @@ fn canonical_book_event(sequence: u64) -> CanonicalBookEventRef {
     CanonicalBookEventRef {
         stream_session_id: Uuid::from_u128(1),
         token_sequence: sequence,
-        source_event_hash: ContentHash::parse(format!("blake3:{}", "d".repeat(64)))
+        source_event_hash: ContentHash::parse(&format!("blake3:{}", "d".repeat(64)))
             .expect("canonical event hash"),
     }
 }
@@ -653,7 +653,7 @@ fn test_decision_capture(
     boundary: &DecisionBoundary,
 ) -> DecisionCaptureEvidence {
     let token_id = vector.token_id.clone().expect("test vector token");
-    let hash = ContentHash::parse(format!("blake3:{}", "d".repeat(64))).expect("test hash");
+    let hash = ContentHash::parse(&format!("blake3:{}", "d".repeat(64))).expect("test hash");
     DecisionCaptureEvidence {
         snapshot: DecisionSnapshotEvidence {
             boundary: boundary.clone(),
@@ -664,9 +664,9 @@ fn test_decision_capture(
                 catalog_sync_batch_id: CatalogSyncBatchId::from_v7(),
                 market_change_id: CatalogMarketChangeId::from_v7(),
                 event_change_id: CatalogEventChangeId::from_v7(),
-                market_content_hash: hash.clone(),
-                event_content_hash: hash.clone(),
-                membership_hash: hash.clone(),
+                market_content_hash: hash,
+                event_content_hash: hash,
+                membership_hash: hash,
                 market_effective_at: vector.decision_at,
                 market_available_at: vector.decision_at,
                 event_effective_at: vector.decision_at,
@@ -679,7 +679,7 @@ fn test_decision_capture(
                 source: BookSnapshotSource::CanonicalL2 {
                     stream_session_id: Uuid::nil(),
                     token_sequence: 1,
-                    source_event_hash: hash.clone(),
+                    source_event_hash: hash,
                     event_time_ms: vector.decision_at.timestamp_millis(),
                     ingestion_time_ms: vector.decision_at.timestamp_millis(),
                 },
@@ -1055,7 +1055,7 @@ fn feature_event_writer_emits_every_cell_state_with_full_audit_context() {
     );
     assert!(observed.per_source_cutoffs_json.contains("book"));
     assert!(!observed.feature_schema_hash.is_empty());
-    assert_eq!(observed.feature_hash, persisted.feature_hash.as_str());
+    assert_eq!(observed.feature_hash, persisted.feature_hash.to_string());
     assert_eq!(observed.data_quality, "fresh");
     assert!(observed.audit_fingerprint.starts_with("blake3:"));
     assert_eq!(observed.ingestion_time, 1_000);
@@ -1992,15 +1992,15 @@ fn sibling_leg_parity_fixture() -> (SiblingLegParityFixture, [NegRiskLeg; 3], Se
 
     let mut books = HashMap::new();
     books.insert(
-        primary.as_str().to_owned(),
+        primary.to_string(),
         sibling_book(&primary, as_of, Decimal::new(35, 2)),
     );
     books.insert(
-        leg1.as_str().to_owned(),
+        leg1.to_string(),
         sibling_book(&leg1, as_of, Decimal::new(33, 2)),
     );
     books.insert(
-        leg2.as_str().to_owned(),
+        leg2.to_string(),
         sibling_book(&leg2, as_of, Decimal::new(34, 2)),
     );
 
@@ -2181,7 +2181,7 @@ fn negrisk_from_catalog_excludes_non_neg_risk_members() {
             start_date: None,
             end_date: None,
             resolved_at: None,
-            content_hash: ContentHash::parse(format!("blake3:{}", "d".repeat(64)))
+            content_hash: ContentHash::parse(&format!("blake3:{}", "d".repeat(64)))
                 .expect("catalog hash"),
             created_at: now,
             updated_at: now,

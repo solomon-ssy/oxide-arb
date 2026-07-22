@@ -75,6 +75,7 @@ async fn infrastructure_contracts_share_one_disposable_stack() {
         run_scenario("infrastructure_clickhouse_storage::domain_event_rust_row_matches_clickhouse_schema", Box::pin(infrastructure_clickhouse_storage::domain_event_rust_row_matches_clickhouse_schema())).await;
         run_scenario("infrastructure_clickhouse_storage::report_fact_schema_accepts_decision_snapshot_and_superseded_censor", Box::pin(infrastructure_clickhouse_storage::report_fact_schema_accepts_decision_snapshot_and_superseded_censor())).await;
         run_scenario("infrastructure_clickhouse_storage::trade_tape_direct_insert_roundtrip", Box::pin(infrastructure_clickhouse_storage::trade_tape_direct_insert_roundtrip())).await;
+        run_scenario("infrastructure_clickhouse_storage::last_trade_ledger_retry_projects_exactly_once", Box::pin(infrastructure_clickhouse_storage::last_trade_ledger_retry_projects_exactly_once())).await;
         run_scenario("infrastructure_clickhouse_storage::async_writer_shutdown_drains_buffer", Box::pin(infrastructure_clickhouse_storage::async_writer_shutdown_drains_buffer())).await;
         run_scenario("infrastructure_clickhouse_storage::async_writer_channel_close_drains_buffer", Box::pin(infrastructure_clickhouse_storage::async_writer_channel_close_drains_buffer())).await;
     })

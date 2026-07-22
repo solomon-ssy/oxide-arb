@@ -285,20 +285,20 @@ pub fn build_domain_slice_inputs(
                 .filter(|artifact| artifact.published_at <= boundary.decision_at())
                 .max_by_key(|artifact| (artifact.published_at, artifact.artifact_id.as_uuid()))
                 .cloned();
-            DomainSliceData::Weather(WeatherFactWindow {
+            DomainSliceData::Weather(Box::new(WeatherFactWindow {
                 decision_at: boundary.decision_at(),
                 observations,
                 forecasts,
                 calibration,
-            })
+            }))
         }
         _ => return Ok(None),
     };
 
     Ok(Some(DomainSliceInputs {
         family,
-        linkage_id: linkage.linkage_id.clone(),
-        linkage_hash: linkage.content_hash.clone(),
+        linkage_id: linkage.linkage_id,
+        linkage_hash: linkage.content_hash,
         binding,
         linkage_evidence: linkage_evidence(linkage),
         data,
@@ -496,7 +496,7 @@ mod tests {
                     source_id: DomainSourceId::binance(),
                     instrument_key: instrument(),
                     available_at: now,
-                    binding_hash: ContentHash::parse(format!("blake3:{}", "1".repeat(64)))
+                    binding_hash: ContentHash::parse(&format!("blake3:{}", "1".repeat(64)))
                         .expect("hash"),
                 },
                 ResolvedSourceBinding {
@@ -506,7 +506,7 @@ mod tests {
                         &ChainlinkFeedKey::parse("BTC-USD").expect("feed"),
                     ),
                     available_at: now,
-                    binding_hash: ContentHash::parse(format!("blake3:{}", "2".repeat(64)))
+                    binding_hash: ContentHash::parse(&format!("blake3:{}", "2".repeat(64)))
                         .expect("hash"),
                 },
             ],
@@ -517,9 +517,10 @@ mod tests {
 
     fn linkage(outcome: LinkageOutcome, derived_minute: u32) -> MarketLinkage {
         let market_id = MarketId::new("0xmarket");
-        let metadata_hash = ContentHash::parse(format!("blake3:{}", "0".repeat(64))).expect("hash");
+        let metadata_hash =
+            ContentHash::parse(&format!("blake3:{}", "0".repeat(64))).expect("hash");
         let capability_registry_hash =
-            ContentHash::parse(format!("blake3:{}", "f".repeat(64))).expect("hash");
+            ContentHash::parse(&format!("blake3:{}", "f".repeat(64))).expect("hash");
         let content_hash = MarketLinkage::compute_content_hash(
             &market_id,
             DomainFamily::Crypto,

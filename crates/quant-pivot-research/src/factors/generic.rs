@@ -307,7 +307,7 @@ struct FeatureBackedFactor {
 
 impl FactorComputer for FeatureBackedFactor {
     fn definition_id(&self) -> FactorDefinitionId {
-        self.definition_id.clone()
+        self.definition_id
     }
 
     fn spec(&self) -> &FactorDefinitionDocument {
@@ -336,7 +336,7 @@ impl FactorComputer for FeatureBackedFactor {
             },
         );
         Ok(RawFactor {
-            definition_id: self.definition_id.clone(),
+            definition_id: self.definition_id,
             name: self.spec.name.clone(),
             family: self.spec.family,
             raw_value: raw,
@@ -359,7 +359,7 @@ struct DataQualityFactor {
 
 impl FactorComputer for DataQualityFactor {
     fn definition_id(&self) -> FactorDefinitionId {
-        self.definition_id.clone()
+        self.definition_id
     }
 
     fn spec(&self) -> &FactorDefinitionDocument {
@@ -405,7 +405,7 @@ impl FactorComputer for DataQualityFactor {
             },
         ];
         Ok(RawFactor {
-            definition_id: self.definition_id.clone(),
+            definition_id: self.definition_id,
             name: self.spec.name.clone(),
             family: self.spec.family,
             raw_value: Some(raw),

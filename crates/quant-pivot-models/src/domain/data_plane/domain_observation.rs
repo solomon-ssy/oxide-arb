@@ -48,10 +48,10 @@ impl DomainObservation {
     #[must_use]
     pub fn into_clickhouse_row(self, ingestion_time: DateTime<Utc>) -> DomainObservationRow {
         DomainObservationRow {
-            family: self.family.as_str().to_owned(),
+            family: self.family.to_string(),
             source_id: self.source_id,
             instrument_key: self.instrument_key,
-            metric: self.metric.as_str().to_owned(),
+            metric: self.metric.to_string(),
             value: ChDecimal64::from(self.value),
             event_time: self.observed_at.timestamp_millis(),
             publish_time: self.publish_time.timestamp_millis(),

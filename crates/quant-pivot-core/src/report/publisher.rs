@@ -170,7 +170,7 @@ impl ReportPublisher {
                     format!("Report run {}", run.status.as_str()),
                     run.error_summary
                         .clone()
-                        .or_else(|| run.terminal_reason.map(|reason| reason.as_str().to_owned()))
+                        .or_else(|| run.terminal_reason.map(|reason| reason.to_string()))
                         .unwrap_or_else(|| "durable report run terminated".to_owned()),
                     occurred_at,
                 )
@@ -562,7 +562,7 @@ mod tests {
             RecommendationReportStatus::Published,
         );
         let payload = ReportNotificationPayload {
-            report_id: report.recommendation_report_id.clone(),
+            report_id: report.recommendation_report_id,
             kind: ReportKind::TopN,
             status: "published".to_owned(),
             runtime_mode: QuantRuntimeMode::SemiAuto,

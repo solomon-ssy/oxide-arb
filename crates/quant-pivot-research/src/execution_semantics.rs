@@ -613,7 +613,7 @@ mod tests {
     fn schedule() -> PitFeeSchedule {
         let at = Utc.timestamp_opt(1_700_000_000, 0).single().expect("time");
         PitFeeSchedule {
-            schedule_hash: ContentHash::parse(format!("blake3:{}", "1".repeat(64))).expect("hash"),
+            schedule_hash: ContentHash::parse(&format!("blake3:{}", "1".repeat(64))).expect("hash"),
             effective_at: at,
             available_at: at,
             platform_rate: dec!(0.07),

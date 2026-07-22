@@ -7,13 +7,14 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+quant-pivot-allocator = { workspace = true }
 quant-pivot-api = { workspace = true }
 quant-pivot-core = { workspace = true }
 quant-pivot-error = { workspace = true, features = ["storage"] }
 quant-pivot-migration = { workspace = true }
 quant-pivot-models = { workspace = true }
 quant-pivot-repository = { workspace = true }
-quant-pivot-research = { workspace = true, default-features = false, features = ["dataframe"] }
+quant-pivot-research = { workspace = true, default-features = false, features = ["research-jobs"] }
 quant-pivot-storage = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }

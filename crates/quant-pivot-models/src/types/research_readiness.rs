@@ -167,16 +167,9 @@ fn source_bindings() -> Vec<ResearchSourceBinding> {
         ),
         ch_binding(
             Source::ClobL2,
-            "quant_book_l2_event",
+            "quant_book_l2_ledger",
             "venue_event_time",
             "toYYYYMM(event_date)",
-            None,
-        ),
-        ch_binding(
-            Source::ClobL2,
-            "quant_book_l2_checkpoint",
-            "event_time",
-            "toYYYYMM(checkpoint_date)",
             None,
         ),
         ch_binding(
@@ -464,7 +457,7 @@ mod tests {
             observations: vec![RetentionSourceObservationV1 {
                 source: ResearchReadinessSource::ClobL2,
                 storage: ResearchSourceStorageKind::ClickHouseTable,
-                object: "quant_book_l2_event".to_owned(),
+                object: "quant_book_l2_ledger".to_owned(),
                 time_column: "persisted_time".to_owned(),
                 earliest_event_time: Some(observed_at - Duration::days(220)),
                 latest_event_time: Some(observed_at),
@@ -478,7 +471,7 @@ mod tests {
     }
 
     fn hash(index: u8) -> ContentHash {
-        ContentHash::parse(format!("blake3:{index:064x}")).expect("hash")
+        ContentHash::parse(&format!("blake3:{index:064x}")).expect("hash")
     }
 
     #[test]
@@ -507,7 +500,7 @@ mod tests {
             bindings: vec![ResearchSourceBinding {
                 source: ResearchReadinessSource::ClobL2,
                 storage: ResearchSourceStorageKind::ClickHouseTable,
-                object: "quant_book_l2_event".to_owned(),
+                object: "quant_book_l2_ledger".to_owned(),
                 time_column: "persisted_time".to_owned(),
                 partition_key: Some("toYYYYMM(persisted_time)".to_owned()),
                 filter: None,

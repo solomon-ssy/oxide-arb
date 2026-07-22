@@ -83,12 +83,12 @@ fn load_reconcile_context(
         .intents_by_id
         .get(&order.order_intent_id)
         .cloned()
-        .ok_or_else(|| StorageError::not_found(QUANT_ORDER_INTENT, &order.order_intent_id))?;
+        .ok_or_else(|| StorageError::not_found(QUANT_ORDER_INTENT, order.order_intent_id))?;
     let recommendation = context
         .recommendations_by_id
         .get(&intent.recommendation_id)
         .cloned()
-        .ok_or_else(|| StorageError::not_found(QUANT_RECOMMENDATION, &intent.recommendation_id))?;
+        .ok_or_else(|| StorageError::not_found(QUANT_RECOMMENDATION, intent.recommendation_id))?;
     Ok((intent, recommendation))
 }
 
@@ -181,18 +181,18 @@ impl ReconciliationService {
     ) -> QuantResult<ReconcileContextMaps> {
         let intent_ids: Vec<OrderIntentId> = orders
             .iter()
-            .map(|order| order.order_intent_id.clone())
+            .map(|order| order.order_intent_id)
             .collect::<HashSet<_>>()
             .into_iter()
             .collect();
         let intents = self.deps.intents.find_by_ids(&intent_ids).await?;
         let intents_by_id: HashMap<OrderIntentId, OrderIntentInfo> = intents
             .into_iter()
-            .map(|intent| (intent.order_intent_id.clone(), intent))
+            .map(|intent| (intent.order_intent_id, intent))
             .collect();
         let recommendation_ids: Vec<RecommendationId> = intents_by_id
             .values()
-            .map(|intent| intent.recommendation_id.clone())
+            .map(|intent| intent.recommendation_id)
             .collect::<HashSet<_>>()
             .into_iter()
             .collect();
@@ -203,7 +203,7 @@ impl ReconciliationService {
             .await?;
         let recommendations_by_id = recommendations
             .into_iter()
-            .map(|rec| (rec.recommendation_id.clone(), rec))
+            .map(|rec| (rec.recommendation_id, rec))
             .collect();
         Ok(ReconcileContextMaps {
             intents_by_id,
@@ -295,7 +295,7 @@ impl ReconciliationService {
             .await?;
         self.mirror_ledger_events(
             order,
-            recommendation.recommendation_id.clone(),
+            recommendation.recommendation_id,
             ChQuantLedgerEventKind::Reconciled,
             now,
         )
@@ -326,21 +326,21 @@ impl ReconciliationService {
             .find_by_id(&resolution.execution_order_id)
             .await?
             .ok_or_else(|| {
-                StorageError::not_found(QUANT_EXECUTION_ORDER, &resolution.execution_order_id)
+                StorageError::not_found(QUANT_EXECUTION_ORDER, resolution.execution_order_id)
             })?;
         let intent = self
             .deps
             .intents
             .find_by_id(&order.order_intent_id)
             .await?
-            .ok_or_else(|| StorageError::not_found(QUANT_ORDER_INTENT, &order.order_intent_id))?;
+            .ok_or_else(|| StorageError::not_found(QUANT_ORDER_INTENT, order.order_intent_id))?;
         let recommendation = self
             .deps
             .recommendations
             .find_by_id(&intent.recommendation_id)
             .await?
             .ok_or_else(|| {
-                StorageError::not_found(QUANT_RECOMMENDATION, &intent.recommendation_id)
+                StorageError::not_found(QUANT_RECOMMENDATION, intent.recommendation_id)
             })?;
 
         let note = system_note(
@@ -377,7 +377,7 @@ impl ReconciliationService {
             .await?;
         self.mirror_ledger_events(
             &recorded,
-            recommendation.recommendation_id.clone(),
+            recommendation.recommendation_id,
             ChQuantLedgerEventKind::OperatorResolved,
             now,
         )
@@ -507,7 +507,7 @@ impl ReconciliationService {
 
         self.mirror_ledger_events(
             order,
-            recommendation.recommendation_id.clone(),
+            recommendation.recommendation_id,
             ChQuantLedgerEventKind::Unresolvable,
             Utc::now(),
         )
@@ -637,7 +637,7 @@ fn reconciliation_fee(
         LiquidityRole::Taker
     };
     let expected = PitFeeSchedule {
-        schedule_hash: prepared.schedule_hash.clone(),
+        schedule_hash: prepared.schedule_hash,
         effective_at: prepared.effective_at,
         available_at: prepared.available_at,
         platform_rate: prepared.platform_rate,
@@ -958,7 +958,7 @@ fn position_fill(
     now: DateTime<Utc>,
 ) -> PositionFill {
     PositionFill {
-        order_intent_id: order.order_intent_id.clone(),
+        order_intent_id: order.order_intent_id,
         token_id: order.token_id.clone(),
         market_id: order.market_id.clone(),
         event_id: Some(recommendation.event_id.clone()),

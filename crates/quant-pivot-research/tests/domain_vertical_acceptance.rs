@@ -80,7 +80,7 @@ use rust_decimal_macros::dec;
 use uuid::Uuid;
 
 fn content_hash(seed: char) -> ContentHash {
-    ContentHash::parse(format!("blake3:{}", seed.to_string().repeat(64))).expect("test hash")
+    ContentHash::parse(&format!("blake3:{}", seed.to_string().repeat(64))).expect("test hash")
 }
 
 fn source_binding(
@@ -196,7 +196,7 @@ fn domain_test_book(market: &SelectedMarket, cutoff: DateTime<Utc>) -> ResolvedB
         source_event: Some(CanonicalBookEventRef {
             stream_session_id: Uuid::from_u128(1),
             token_sequence: 1,
-            source_event_hash: ContentHash::parse(format!("blake3:{}", "d".repeat(64)))
+            source_event_hash: ContentHash::parse(&format!("blake3:{}", "d".repeat(64)))
                 .expect("canonical event hash"),
         }),
         effective_at: cutoff,
@@ -271,7 +271,7 @@ fn build_domain_test_vector(
     })?;
     let boundary = DecisionClock::new(lag_secs).boundary(as_of)?;
     let hash = |seed: char| {
-        ContentHash::parse(format!("blake3:{}", seed.to_string().repeat(64))).expect("test hash")
+        ContentHash::parse(&format!("blake3:{}", seed.to_string().repeat(64))).expect("test hash")
     };
     let capture = market_decision_capture_from_resolved(MarketDecisionCaptureInput {
         boundary: &boundary,
@@ -862,7 +862,7 @@ fn crypto_pit_linkage(
         grounding: GroundingProof { spans: Vec::new() },
         override_context: None,
     };
-    let content_hash = ContentHash::parse(format!("blake3:{}", "0".repeat(64))).expect("hash");
+    let content_hash = ContentHash::parse(&format!("blake3:{}", "0".repeat(64))).expect("hash");
     MarketLinkage {
         linkage_id: MarketLinkageId::from_v7(),
         market_id: MarketId::new("m"),
@@ -871,8 +871,8 @@ fn crypto_pit_linkage(
         confidence: Probability::ONE,
         resolver_tier: ResolverTier::Tier0Slug,
         resolver_version: ResolverVersion::FIRST,
-        metadata_hash: content_hash.clone(),
-        capability_registry_hash: Some(content_hash.clone()),
+        metadata_hash: content_hash,
+        capability_registry_hash: Some(content_hash),
         content_hash,
         effective_at: as_of - Duration::days(1),
         available_at: as_of - Duration::days(1),
@@ -966,7 +966,7 @@ fn linkage_pit_uses_metadata_version_not_future_revision() {
     // never a revision `derived_at` later than `as_of` ("future" relative to
     // the read).
     let market_id = MarketId::new("m");
-    let hash = |seed: &str| ContentHash::parse(format!("blake3:{seed:0<64}")).expect("hash");
+    let hash = |seed: &str| ContentHash::parse(&format!("blake3:{seed:0<64}")).expect("hash");
 
     let binding_for = |asset: &str| ResolvedBinding {
         subject: MarketSubject::Crypto(CryptoSubject {

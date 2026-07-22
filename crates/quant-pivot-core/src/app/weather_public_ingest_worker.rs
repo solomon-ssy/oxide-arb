@@ -463,7 +463,7 @@ impl WeatherPublicIngestWorker {
                 self.hko_config.daily_temperature_lookback_months
             ))
         })?;
-        let response_hash = month.response_hash.clone();
+        let response_hash = month.response_hash;
         let candidates = month
             .reports
             .into_iter()
@@ -637,7 +637,7 @@ impl WeatherPublicIngestWorker {
         Ok(DomainSourceCheckpoint::AirNowPm25Area {
             valid_time: latest.observed_at,
             available_at: latest.available_at,
-            report_hash: latest.report_hash.clone(),
+            report_hash: latest.report_hash,
             correction_scan_hour: scan_end,
         })
     }
@@ -665,7 +665,7 @@ impl WeatherPublicIngestWorker {
                     } => (
                         Some(*correction_scan_hour),
                         match (last_valid_time, last_report_hash) {
-                            (Some(time), Some(hash)) => Some((*time, *available_at, hash.clone())),
+                            (Some(time), Some(hash)) => Some((*time, *available_at, *hash)),
                             _ => None,
                         },
                     ),
@@ -705,25 +705,17 @@ impl WeatherPublicIngestWorker {
         let current_observation = reports
             .iter()
             .max_by_key(|report| (report.observed_at, report.available_at, &report.report_hash))
-            .map(|report| {
-                (
-                    report.observed_at,
-                    report.available_at,
-                    report.report_hash.clone(),
-                )
-            });
+            .map(|report| (report.observed_at, report.available_at, report.report_hash));
         let latest = [previous_observation, current_observation]
             .into_iter()
             .flatten()
-            .max_by_key(|(valid_time, available_at, hash)| {
-                (*valid_time, *available_at, hash.clone())
-            });
+            .max_by_key(|(valid_time, available_at, hash)| (*valid_time, *available_at, *hash));
         let checkpoint = DomainSourceCheckpoint::AirNowPm25Site {
             last_valid_time: latest.as_ref().map(|(valid_time, _, _)| *valid_time),
             available_at: latest
                 .as_ref()
                 .map_or_else(Utc::now, |(_, available_at, _)| *available_at),
-            last_report_hash: latest.as_ref().map(|(_, _, hash)| hash.clone()),
+            last_report_hash: latest.as_ref().map(|(_, _, hash)| *hash),
             correction_scan_hour: scan_end,
         };
         if latest.is_none() {
@@ -909,7 +901,7 @@ impl WeatherPublicIngestWorker {
                     })?,
                     storm_id: report.subject_key.clone(),
                     advisory_number,
-                    report_hash: report.report_hash.clone(),
+                    report_hash: report.report_hash,
                 })
             }
             .await;
@@ -1149,7 +1141,7 @@ impl WeatherPublicIngestWorker {
         Ok(DomainSourceCheckpoint::NwsObservation {
             observed_at: latest.observed_at,
             available_at: latest.available_at,
-            report_hash: latest.report_hash.clone(),
+            report_hash: latest.report_hash,
         })
     }
 

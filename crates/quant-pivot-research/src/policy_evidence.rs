@@ -1,8 +1,10 @@
 //! Deterministic Parquet envelope for sealed trade-policy evidence rows.
 
+#[cfg(feature = "research-jobs")]
 use std::io::Cursor;
 
 use chrono::{DateTime, Utc};
+#[cfg(feature = "research-jobs")]
 use polars::{
     error::PolarsError,
     prelude::{
@@ -62,14 +64,17 @@ impl PolicyEvidenceRecord {
 
 pub struct PolicyEvidenceParquetCodec;
 
+#[cfg(feature = "research-jobs")]
 pub struct PolicyEvidencePolarsError(PolarsError);
 
+#[cfg(feature = "research-jobs")]
 impl From<PolarsError> for PolicyEvidencePolarsError {
     fn from(error: PolarsError) -> Self {
         Self(error)
     }
 }
 
+#[cfg(feature = "research-jobs")]
 impl From<PolicyEvidencePolarsError> for ResearchError {
     fn from(error: PolicyEvidencePolarsError) -> Self {
         Self::ParquetCodec {
@@ -78,6 +83,7 @@ impl From<PolicyEvidencePolarsError> for ResearchError {
     }
 }
 
+#[cfg(feature = "research-jobs")]
 impl From<PolicyEvidencePolarsError> for QuantError {
     fn from(error: PolicyEvidencePolarsError) -> Self {
         ResearchError::from(error).into()
@@ -85,6 +91,7 @@ impl From<PolicyEvidencePolarsError> for QuantError {
 }
 
 impl PolicyEvidenceParquetCodec {
+    #[cfg(feature = "research-jobs")]
     pub fn encode(records: &[PolicyEvidenceRecord]) -> QuantResult<Vec<u8>> {
         let mut ordered = records.to_vec();
         ordered.sort_by(|left, right| left.record_key.cmp(&right.record_key));
@@ -110,7 +117,7 @@ impl PolicyEvidenceParquetCodec {
             .collect::<Result<Vec<_>, _>>()?;
         let row_hashes = ordered
             .iter()
-            .map(|record| record.row_hash.as_str().to_owned())
+            .map(|record| record.row_hash.to_string())
             .collect::<Vec<_>>();
         let frame = DataFrame::new(
             ordered.len(),
@@ -135,6 +142,7 @@ impl PolicyEvidenceParquetCodec {
         Ok(bytes)
     }
 
+    #[cfg(feature = "research-jobs")]
     pub fn decode(bytes: &[u8]) -> QuantResult<Vec<PolicyEvidenceRecord>> {
         let frame = ParquetReader::new(Cursor::new(bytes))
             .finish()
@@ -179,6 +187,16 @@ impl PolicyEvidenceParquetCodec {
         Ok(records)
     }
 
+    #[cfg(not(feature = "research-jobs"))]
+    pub fn encode(_records: &[PolicyEvidenceRecord]) -> QuantResult<Vec<u8>> {
+        Err(research_jobs_disabled())
+    }
+
+    #[cfg(not(feature = "research-jobs"))]
+    pub fn decode(_bytes: &[u8]) -> QuantResult<Vec<PolicyEvidenceRecord>> {
+        Err(research_jobs_disabled())
+    }
+
     pub fn row_chain_hash(records: &[PolicyEvidenceRecord]) -> QuantResult<ContentHash> {
         let mut chain = records
             .iter()
@@ -189,6 +207,17 @@ impl PolicyEvidenceParquetCodec {
     }
 }
 
+#[cfg(not(feature = "research-jobs"))]
+fn research_jobs_disabled() -> QuantError {
+    ResearchError::NotEligible {
+        code: "research_jobs_feature_disabled",
+        detail: "policy evidence Parquet requires the compile-time `research-jobs` feature"
+            .to_owned(),
+    }
+    .into()
+}
+
+#[cfg(feature = "research-jobs")]
 fn validate_records(records: &[PolicyEvidenceRecord]) -> QuantResult<()> {
     let mut prior = None;
     for record in records {
@@ -227,6 +256,7 @@ fn row_hash(
     .map_err(Into::into)
 }
 
+#[cfg(feature = "research-jobs")]
 fn string_column<'a>(frame: &'a DataFrame, name: &str) -> QuantResult<&'a StringChunked> {
     frame
         .column(name)
@@ -236,6 +266,7 @@ fn string_column<'a>(frame: &'a DataFrame, name: &str) -> QuantResult<&'a String
         .map_err(Into::into)
 }
 
+#[cfg(feature = "research-jobs")]
 fn i64_column<'a>(frame: &'a DataFrame, name: &str) -> QuantResult<&'a Int64Chunked> {
     frame
         .column(name)
@@ -245,6 +276,7 @@ fn i64_column<'a>(frame: &'a DataFrame, name: &str) -> QuantResult<&'a Int64Chun
         .map_err(Into::into)
 }
 
+#[cfg(feature = "research-jobs")]
 fn u32_column<'a>(frame: &'a DataFrame, name: &str) -> QuantResult<&'a UInt32Chunked> {
     frame
         .column(name)
@@ -254,6 +286,7 @@ fn u32_column<'a>(frame: &'a DataFrame, name: &str) -> QuantResult<&'a UInt32Chu
         .map_err(Into::into)
 }
 
+#[cfg(feature = "research-jobs")]
 fn required_string<'a>(
     column: &'a StringChunked,
     index: usize,
@@ -267,6 +300,7 @@ fn required_string<'a>(
     })
 }
 
+#[cfg(feature = "research-jobs")]
 fn timestamp(millis: Option<i64>, index: usize) -> QuantResult<Option<DateTime<Utc>>> {
     millis
         .map(|value| {
@@ -293,6 +327,7 @@ mod tests {
         value: u32,
     }
 
+    #[cfg(feature = "research-jobs")]
     #[test]
     fn round_trip_preserves_typed_rows_and_semantic_chain() {
         let at = Utc
@@ -317,6 +352,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "research-jobs")]
     #[test]
     fn tampered_semantic_row_is_rejected() {
         let mut record =
@@ -325,6 +361,7 @@ mod tests {
         assert!(PolicyEvidenceParquetCodec::encode(&[record]).is_err());
     }
 
+    #[cfg(feature = "research-jobs")]
     #[test]
     fn duplicate_keys_are_rejected() {
         let record =

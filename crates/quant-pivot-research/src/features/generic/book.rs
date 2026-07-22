@@ -35,7 +35,7 @@ impl FeatureGroupBuilder for PriceBookFeatureBuilder {
         let evidence = ctx.book_snapshot_ref.map_or_else(
             || EvidenceSourceRef {
                 source_kind: EvidenceSourceKind::Book,
-                reference: book.token_id.as_str().to_owned(),
+                reference: book.token_id.to_string(),
                 effective_at: book.effective_at,
                 available_at: Some(book.available_at),
             },
@@ -96,7 +96,7 @@ fn secondary_best_ask(ctx: &FeatureComputeCtx<'_>) -> RawFeature {
     let evidence = ctx.secondary_book_snapshot_ref.map_or_else(
         || EvidenceSourceRef {
             source_kind: EvidenceSourceKind::Book,
-            reference: secondary.token_id.as_str().to_owned(),
+            reference: secondary.token_id.to_string(),
             effective_at: secondary.effective_at,
             available_at: Some(secondary.available_at),
         },

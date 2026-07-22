@@ -135,13 +135,13 @@ impl MenuTree {
         self.next_sort += 1;
         let hide_in_menu = spec.hide_in_menu || matches!(spec.kind, MenuKind::Button);
         self.grants.push(MenuGrantSpec {
-            id: id.clone(),
+            id,
             kind: spec.kind,
             permission_code: spec.permission_code.clone(),
         });
         self.models.push(ActiveModel {
-            id: Set(id.clone()),
-            parent_id: Set(spec.parent.cloned()),
+            id: Set(id),
+            parent_id: Set(spec.parent.copied()),
             name: Set(spec.name.to_owned()),
             kind: Set(spec.kind),
             path: Set(spec.path.map(str::to_owned)),
@@ -156,7 +156,7 @@ impl MenuTree {
             status: Set(RoleStatus::Enabled),
             ..Default::default()
         });
-        self.ids.push(id.clone());
+        self.ids.push(id);
         id
     }
 

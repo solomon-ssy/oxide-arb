@@ -32,7 +32,7 @@ impl PgModelRunRepository {
     /// Load a `Running` run for finalization, rejecting a missing row or an
     /// already-terminal transition.
     async fn load_running(&self, model_run_id: &ModelRunId) -> Result<Model, StorageError> {
-        let Some(row) = Entity::find_by_id(model_run_id.clone())
+        let Some(row) = Entity::find_by_id(*model_run_id)
             .one(&self.db)
             .await
             .map_err(StorageError::from)?
@@ -67,7 +67,7 @@ impl ModelRunRepository for PgModelRunRepository {
         &self,
         model_run_id: &ModelRunId,
     ) -> Result<Option<ModelRunInfo>, StorageError> {
-        Entity::find_by_id(model_run_id.clone())
+        Entity::find_by_id(*model_run_id)
             .one(&self.db)
             .await
             .map_err(StorageError::from)

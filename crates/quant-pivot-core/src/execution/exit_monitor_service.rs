@@ -138,17 +138,16 @@ impl ExitMonitorService {
         HashMap<OrderIntentId, OrderIntentInfo>,
         HashMap<RecommendationId, RecommendationInfo>,
     )> {
-        let intent_ids: Vec<OrderIntentId> =
-            lots.iter().map(|lot| lot.order_intent_id.clone()).collect();
+        let intent_ids: Vec<OrderIntentId> = lots.iter().map(|lot| lot.order_intent_id).collect();
         let intents = self.deps.intents.find_by_ids(&intent_ids).await?;
         let intent_map: HashMap<OrderIntentId, OrderIntentInfo> = intents
             .into_iter()
-            .map(|intent| (intent.order_intent_id.clone(), intent))
+            .map(|intent| (intent.order_intent_id, intent))
             .collect();
 
         let recommendation_ids: Vec<RecommendationId> = intent_map
             .values()
-            .map(|intent| intent.recommendation_id.clone())
+            .map(|intent| intent.recommendation_id)
             .collect::<HashSet<_>>()
             .into_iter()
             .collect();
@@ -159,7 +158,7 @@ impl ExitMonitorService {
             .await?;
         let recommendation_map = recommendations
             .into_iter()
-            .map(|rec| (rec.recommendation_id.clone(), rec))
+            .map(|rec| (rec.recommendation_id, rec))
             .collect();
         Ok((intent_map, recommendation_map))
     }
@@ -185,7 +184,7 @@ impl ExitMonitorService {
             return Ok(());
         }
 
-        let snapshot = self.deps.book_store.load(&lot.token_id);
+        let snapshot = self.deps.book_store.load_by_id(&lot.token_id);
         let now_ms = u64::try_from(now.timestamp_millis()).map_err(|error| {
             ExecutionError::TimeConversion {
                 field: "exit_monitor.now_ms",

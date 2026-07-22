@@ -120,11 +120,7 @@ impl EntryConditionArtifactV1 {
             left.definition_id
                 .to_string()
                 .cmp(&right.definition_id.to_string())
-                .then_with(|| {
-                    left.definition_hash
-                        .as_str()
-                        .cmp(right.definition_hash.as_str())
-                })
+                .then_with(|| left.definition_hash.cmp(&right.definition_hash))
         });
         reject_adjacent_duplicates(
             &self.binding.factor_bindings,
@@ -187,11 +183,7 @@ fn validate_root_bindings(
         left.definition_id
             .to_string()
             .cmp(&right.definition_id.to_string())
-            .then_with(|| {
-                left.definition_hash
-                    .as_str()
-                    .cmp(right.definition_hash.as_str())
-            })
+            .then_with(|| left.definition_hash.cmp(&right.definition_hash))
     });
     factors.dedup();
     sources.sort();
@@ -251,8 +243,8 @@ fn validate_leaf_bindings(
                 ));
             }
             factors.push(EntryConditionFactorBinding {
-                definition_id: condition.definition_id.clone(),
-                definition_hash: condition.definition_hash.clone(),
+                definition_id: condition.definition_id,
+                definition_hash: condition.definition_hash,
             });
         }
         EntryConditionV1::MarketEvent { event } => {
@@ -432,7 +424,7 @@ fn canonicalize_group(
                 .map_err(|error| EntryConditionValidationError::Hash(error.to_string()))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    hashed.sort_by(|left, right| left.0.as_str().cmp(right.0.as_str()));
+    hashed.sort_by_key(|left| left.0);
     if hashed.windows(2).any(|pair| pair[0].0 == pair[1].0) {
         return Err(EntryConditionValidationError::DuplicateSubtree);
     }

@@ -18,6 +18,8 @@ pub enum TaskId {
     WebServer,
     /// Fans `CoreEvent`s out to subscribed WebSocket sessions.
     WsBroadcaster,
+    /// Single writer for WebSocket sessions and reverse subscription indexes.
+    SessionHub,
     /// Periodic + nudged `SystemStatusChanged` pushes for dashboard clients.
     SystemStatusBroadcaster,
     /// Coalesces per-market order-book changes into throttled `MarketBookUpdate`
@@ -108,9 +110,7 @@ pub enum TaskId {
     RiskAuditBatch,
     DetectionWriter,
     BookStreamSessionWriter,
-    BookL2EventWriter,
-    BookL2CheckpointWriter,
-    TradeTapeWsWriter,
+    BookL2LedgerWriter,
     BookMicrostructure1sWriter,
     MarketResolutionWriter,
     FactorEventsWriter,
@@ -153,6 +153,7 @@ impl TaskId {
         match self {
             Self::WebServer
             | Self::WsBroadcaster
+            | Self::SessionHub
             | Self::BookUpdateCoalescer
             | Self::SystemStatusBroadcaster => TaskKind::ApiIngress,
             Self::DataPipeline
@@ -199,9 +200,7 @@ impl TaskId {
             | Self::ReportFactDeliveryWorker
             | Self::EntryConditionEvaluationOutboxWorker
             | Self::BookStreamSessionWriter
-            | Self::BookL2EventWriter
-            | Self::BookL2CheckpointWriter
-            | Self::TradeTapeWsWriter
+            | Self::BookL2LedgerWriter
             | Self::BookMicrostructure1sWriter
             | Self::MarketResolutionWriter
             | Self::FactorEventsWriter

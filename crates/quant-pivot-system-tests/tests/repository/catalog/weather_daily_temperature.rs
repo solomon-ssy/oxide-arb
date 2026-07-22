@@ -23,7 +23,7 @@ use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 
 fn hash(fill: char) -> ContentHash {
-    ContentHash::parse(format!("blake3:{}", fill.to_string().repeat(64))).expect("hash")
+    ContentHash::parse(&format!("blake3:{}", fill.to_string().repeat(64))).expect("hash")
 }
 
 fn report(
@@ -64,13 +64,13 @@ fn extreme_value(
         .value()
 }
 
-fn checkpoint(report: &WeatherObservationReport, revision: u32) -> DomainSourceCheckpoint {
+const fn checkpoint(report: &WeatherObservationReport, revision: u32) -> DomainSourceCheckpoint {
     DomainSourceCheckpoint::AviationWeather {
         available_at: report.available_at,
         published_at: report.published_at,
         observation_time: report.observed_at,
         revision,
-        report_hash: report.report_hash.clone(),
+        report_hash: report.report_hash,
     }
 }
 

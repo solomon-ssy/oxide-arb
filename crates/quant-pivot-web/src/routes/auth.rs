@@ -86,7 +86,7 @@ pub async fn login(
     };
 
     // Promote the attribution to the fully-resolved actor on success.
-    op_ctx.set_actor(user.id.clone(), &user.username);
+    op_ctx.set_actor(user.id, &user.username);
     let pair = issue_pair(&state, &user, None, None, 0)?;
     state
         .jwt
@@ -126,7 +126,7 @@ pub async fn refresh(
         return Err(AuthError::InvalidToken.into());
     }
 
-    op_ctx.set_actor(user.id.clone(), &user.username);
+    op_ctx.set_actor(user.id, &user.username);
     let family_id = claims.family_id.clone();
     let child_generation = claims
         .generation
@@ -146,7 +146,7 @@ pub async fn refresh(
     {
         RefreshFamilyRotation::Rotated => {}
         RefreshFamilyRotation::ReplayOrStale | RefreshFamilyRotation::RevokedOrMissing => {
-            state.ws_sessions.close_family(&family_id);
+            state.ws_sessions.close_family(&family_id).await;
             return Err(AuthError::Blacklisted.into());
         }
     }
@@ -164,14 +164,17 @@ pub async fn logout(
     ensure_same_origin_mutation(&request, &state.deploy)?;
     state.jwt.revoke(&actor.claims).await?;
     state.jwt.revoke_family(&actor.claims.family_id).await?;
-    state.ws_sessions.close_family(&actor.claims.family_id);
+    state
+        .ws_sessions
+        .close_family(&actor.claims.family_id)
+        .await;
 
     if let Some(refresh_token) = request.cookie(REFRESH_COOKIE_NAME) {
         // Best-effort: only a well-formed refresh token can be revoked; a
         // malformed one is already useless.
         if let Ok(claims) = state.jwt.decode(refresh_token.value(), TokenUse::Refresh) {
             state.jwt.revoke_family(&claims.family_id).await?;
-            state.ws_sessions.close_family(&claims.family_id);
+            state.ws_sessions.close_family(&claims.family_id).await;
         }
     }
 

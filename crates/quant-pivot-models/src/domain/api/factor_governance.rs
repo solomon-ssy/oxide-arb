@@ -163,12 +163,12 @@ pub struct FactorDefinitionListQuery {
 impl From<FactorDefinitionInfo> for FactorDefinitionView {
     fn from(info: FactorDefinitionInfo) -> Self {
         let definition = info.definition;
-        let normalization = definition.normalization.as_str().to_owned();
-        let direction = definition.default_direction.as_str().to_owned();
+        let normalization = definition.normalization.to_string();
+        let direction = definition.default_direction.to_string();
         let input_features = definition
             .input_features
             .into_iter()
-            .map(|feature| feature.as_str().to_owned())
+            .map(|feature| feature.to_string())
             .collect();
         let quality_gates: Vec<_> = definition
             .quality_gates
@@ -180,11 +180,11 @@ impl From<FactorDefinitionInfo> for FactorDefinitionView {
             definition_hash: info.definition_hash.to_string(),
             feature_contract_hash: info.feature_contract_hash.to_string(),
             name: info.name,
-            factor_family: info.factor_family.as_str().to_owned(),
-            scope: info.scope.as_str().to_owned(),
+            factor_family: info.factor_family.to_string(),
+            scope: info.scope.to_string(),
             input_schema_version: info.input_schema_version.to_string(),
             output_schema_version: info.output_schema_version.to_string(),
-            status: info.status.as_str().to_owned(),
+            status: info.status.to_string(),
             required: !quality_gates.is_empty(),
             normalization,
             direction,

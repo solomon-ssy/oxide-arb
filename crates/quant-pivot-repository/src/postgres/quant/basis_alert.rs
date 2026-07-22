@@ -121,7 +121,7 @@ impl BasisAlertRepository for PgBasisAlertRepository {
         alert_id: &BasisAlertId,
         actor: String,
     ) -> Result<BasisAlertInfo, StorageError> {
-        let Some(row) = Entity::find_by_id(alert_id.clone())
+        let Some(row) = Entity::find_by_id(*alert_id)
             .one(&self.db)
             .await
             .map_err(StorageError::from)?

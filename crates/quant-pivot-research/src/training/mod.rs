@@ -13,8 +13,10 @@ mod labeler;
 mod leakage;
 mod lot_hold_value;
 mod matrix;
-#[cfg(feature = "dataframe")]
+#[cfg(feature = "research-jobs")]
 mod parquet;
+#[cfg(not(feature = "research-jobs"))]
+mod parquet_stub;
 mod planner;
 
 use std::sync::Arc;
@@ -36,12 +38,15 @@ pub use lot_hold_value::{
     LotExitEvent, LotTerminalSnapshot, hold_terminal_proceeds, proceeds_before, remaining_shares_at,
 };
 pub use matrix::{
-    FeatureColumnSpec, FeatureMatrixSpec, ModelInputCell, TrainingMatrix, build_training_matrix,
+    DenseInputMatrix, FeatureColumnSpec, FeatureMatrixSpec, ModelInputCell, RawInputMatrix,
+    TrainingMatrix, build_training_matrix, build_training_matrix_from_refs,
     matrix_spec_from_contract, matrix_spec_from_schema, model_input_cell, probe_matrix_coverage,
     training_input_hash,
 };
-#[cfg(feature = "dataframe")]
+#[cfg(feature = "research-jobs")]
 pub use parquet::{DatasetParquetCodec, DecodedDatasetParquet};
+#[cfg(not(feature = "research-jobs"))]
+pub use parquet_stub::{DatasetParquetCodec, DecodedDatasetParquet};
 pub use planner::{count_samples, plan_lot_timeline_samples, plan_samples};
 use quant_pivot_error::{QuantResult, research::ResearchError};
 pub(crate) use quant_pivot_models::{
@@ -1080,7 +1085,7 @@ pub(crate) mod fixtures {
         let catalog_effective_at = boundary.cutoff_for(DecisionSource::Catalog);
         let book_effective_at = boundary.cutoff_for(DecisionSource::Book);
         let hash = |seed: char| {
-            ContentHash::parse(format!("blake3:{}", seed.to_string().repeat(64)))
+            ContentHash::parse(&format!("blake3:{}", seed.to_string().repeat(64)))
                 .expect("fixture content hash")
         };
         let book_age_ms = u64::try_from((decision_at - book_effective_at).num_milliseconds())

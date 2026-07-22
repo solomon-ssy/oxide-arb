@@ -13,7 +13,7 @@ use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use prometheus::IntCounter;
 use quant_pivot_core::{
     governance::BiasTableApplicator,
-    ingest::{book_store::BookStore, market_registry::MarketRegistry},
+    ingest::{book_store::BookStore, data_plane_index::DataPlane, market_registry::MarketRegistry},
     observability::{
         factor_fact_writer::FactorEventWriter, feature_fact_writer::FeatureEventWriter,
         metrics_hub::MetricsHub,
@@ -27,13 +27,16 @@ use quant_pivot_core::{
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     clickhouse::{
-        BookL2CheckpointRow, BookMicrostructureRow, DomainObservationRow, MarketResolutionRow,
+        BookL2LedgerRow, BookMicrostructureRow, DomainObservationRow, MarketResolutionRow,
         MidPriceBucketRow, QuantFactorEventRow, TradeTapeRow,
     },
     config::TradeTapeOnChainConfig,
     domain::{
         data_plane::DecisionClock,
-        market::{EventRegistryInfo, MarketRegistryInfo, TokenInfo, book::BookLevel},
+        market::{
+            EventRegistryInfo, MarketRegistryInfo, TokenInfo,
+            book::{BookLevel, BookSnapshot},
+        },
         quant::NewModelRun,
     },
     enums::{
@@ -178,7 +181,7 @@ fn wire_live_book(registry: &MarketRegistry, book_store: &BookStore, catalog: &C
         status: EventStatus::Active,
         market_ids: vec![market.market_id.clone()],
         categories: CategorySet::from(MarketCategory::Sports),
-        tags: vec![MarketCategory::Sports.as_str().to_owned()],
+        tags: vec![MarketCategory::Sports.to_string()],
         neg_risk: false,
         end_date: market.end_date,
         created_at: Utc::now() - ChronoDuration::days(2),
@@ -186,20 +189,27 @@ fn wire_live_book(registry: &MarketRegistry, book_store: &BookStore, catalog: &C
     });
     registry.register_market(market);
     let yes = TokenId::new(catalog.yes_token);
-    book_store.apply_snapshot(
-        &yes,
-        Arc::from([BookLevel::from_decimal_unchecked(
-            Price::new(Decimal::new(47, 2)),
-            Shares::new(Decimal::from(120)),
-        )]),
-        Arc::from([BookLevel::from_decimal_unchecked(
-            Price::new(Decimal::new(53, 2)),
-            Shares::new(Decimal::from(80)),
-        )]),
-        u64::try_from(Utc::now().timestamp_millis())
-            .expect("test book timestamp must be non-negative"),
+    let yes = book_store.resolve(&yes).expect("registered YES token");
+    let timestamp_ms = u64::try_from(Utc::now().timestamp_millis())
+        .expect("test book timestamp must be non-negative");
+    assert!(book_store.publish(
+        yes,
+        BookSnapshot::new(
+            Arc::from([BookLevel::from_decimal_unchecked(
+                Price::new(Decimal::new(47, 2)),
+                Shares::new(Decimal::from(120)),
+            )]),
+            Arc::from([BookLevel::from_decimal_unchecked(
+                Price::new(Decimal::new(53, 2)),
+                Shares::new(Decimal::from(80)),
+            )]),
+            timestamp_ms,
+            1,
+        ),
+        1,
+        1,
         None,
-    );
+    ));
 }
 
 struct EmptyFactRead;
@@ -258,22 +268,22 @@ impl QuantFactReadRepository for EmptyFactRead {
         Ok(Vec::new())
     }
 
-    async fn book_checkpoint_at(
+    async fn book_ledger_snapshot_at(
         &self,
         _token_id: &TokenId,
         _as_of_ms: i64,
         _decision_at_ms: i64,
-    ) -> Result<Option<BookL2CheckpointRow>, StorageError> {
+    ) -> Result<Option<BookL2LedgerRow>, StorageError> {
         Ok(None)
     }
 
-    async fn book_checkpoints_between(
+    async fn book_ledger_snapshots_between(
         &self,
         _token_ids: Vec<TokenId>,
         _from_ms: i64,
         _to_ms: i64,
         _available_by_ms: i64,
-    ) -> Result<Vec<BookL2CheckpointRow>, StorageError> {
+    ) -> Result<Vec<BookL2LedgerRow>, StorageError> {
         Ok(Vec::new())
     }
 
@@ -358,8 +368,9 @@ fn selected_market() -> SelectedMarket {
 
 /// Run the feature plane and return the accepted vectors plus their persisted ids.
 async fn build_features(db: &DatabaseConnection) -> (Vec<FeatureVector>, Vec<FeatureVectorId>) {
-    let registry = Arc::new(MarketRegistry::new());
-    let book_store = Arc::new(BookStore::new(Arc::new(MetricsHub::new())));
+    let data_plane = Arc::new(DataPlane::new());
+    let registry = Arc::new(MarketRegistry::new(Arc::clone(&data_plane)));
+    let book_store = Arc::new(BookStore::new(data_plane, Arc::new(MetricsHub::new())));
     wire_live_book(&registry, &book_store, &CATALOG);
     let live_pit = InMemoryDecisionSnapshotSource::freeze(registry.as_ref(), book_store.as_ref());
 
@@ -401,7 +412,7 @@ async fn build_features(db: &DatabaseConnection) -> (Vec<FeatureVector>, Vec<Fea
     let ids = result
         .persisted
         .iter()
-        .map(|info| info.feature_vector_id.clone())
+        .map(|info| info.feature_vector_id)
         .collect();
     (result.accepted, ids)
 }
@@ -433,7 +444,7 @@ pub async fn create_definition_and_values_then_list_for_run() {
     let model_run_repo = PgModelRunRepository::new(db.clone());
     model_run_repo
         .create(NewModelRun {
-            model_run_id: model_run_id.clone(),
+            model_run_id,
             run_kind: ModelRunKind::LiveInference,
             model_version_id: None,
             decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
@@ -441,7 +452,7 @@ pub async fn create_definition_and_values_then_list_for_run() {
             window_start: Utc::now(),
             window_end: Utc::now(),
             status: ModelRunStatus::Running,
-            input_hash: ContentHash::parse(format!("blake3:{}", "0".repeat(64)))
+            input_hash: ContentHash::parse(&format!("blake3:{}", "0".repeat(64)))
                 .expect("zero hash"),
             output_hash: None,
             error_code: None,
@@ -466,7 +477,7 @@ pub async fn create_definition_and_values_then_list_for_run() {
     let result = service
         .run(FactorPipelineRequest {
             model_run_id: &model_run_id,
-            vectors: &vectors,
+            vectors: Arc::from(vectors.clone()),
             feature_vector_ids: &feature_vector_ids,
             factors: &factors,
             features: &features,
@@ -533,7 +544,7 @@ pub async fn unpublished_factor_definitions_block_pipeline() {
     let model_run_id = ModelRunId::from_v7();
     PgModelRunRepository::new(db.clone())
         .create(NewModelRun {
-            model_run_id: model_run_id.clone(),
+            model_run_id,
             run_kind: ModelRunKind::LiveInference,
             model_version_id: None,
             decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
@@ -541,7 +552,7 @@ pub async fn unpublished_factor_definitions_block_pipeline() {
             window_start: Utc::now(),
             window_end: Utc::now(),
             status: ModelRunStatus::Running,
-            input_hash: ContentHash::parse(format!("blake3:{}", "1".repeat(64))).expect("hash"),
+            input_hash: ContentHash::parse(&format!("blake3:{}", "1".repeat(64))).expect("hash"),
             output_hash: None,
             error_code: None,
             error_message: None,
@@ -559,7 +570,7 @@ pub async fn unpublished_factor_definitions_block_pipeline() {
     let unregistered = service
         .run(FactorPipelineRequest {
             model_run_id: &model_run_id,
-            vectors: &vectors,
+            vectors: Arc::from(vectors.clone()),
             feature_vector_ids: &feature_vector_ids,
             factors: &factors,
             features: &features,
@@ -586,7 +597,7 @@ pub async fn unpublished_factor_definitions_block_pipeline() {
     let draft = service
         .run(FactorPipelineRequest {
             model_run_id: &model_run_id,
-            vectors: &vectors,
+            vectors: Arc::from(vectors.clone()),
             feature_vector_ids: &feature_vector_ids,
             factors: &factors,
             features: &features,

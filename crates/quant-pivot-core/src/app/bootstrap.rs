@@ -66,6 +66,7 @@ pub async fn run(deploy: Arc<DeployConfig>) -> QuantResult<()> {
 
     let result = runner.run().await;
     ctx.infra.redis.close();
+    drop(ctx);
     tracing::info!("shared Redis pool closed");
     result
 }

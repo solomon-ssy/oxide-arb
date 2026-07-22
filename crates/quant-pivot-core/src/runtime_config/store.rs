@@ -152,8 +152,8 @@ mod tests {
     fn metadata(bundle: &ActivePolicyBundle) -> PublishedPolicyBundle {
         PublishedPolicyBundle {
             generation: bundle.generation,
-            decision_policy_snapshot_id: bundle.decision_policy_snapshot_id.clone(),
-            snapshot_hash: bundle.snapshot_hash.clone(),
+            decision_policy_snapshot_id: bundle.decision_policy_snapshot_id,
+            snapshot_hash: bundle.snapshot_hash,
         }
     }
 

@@ -1,5 +1,6 @@
 pub mod book_store;
 pub mod data_pipeline;
+pub mod data_plane_index;
 pub mod data_quality;
 pub mod event_source;
 pub mod market_cache;

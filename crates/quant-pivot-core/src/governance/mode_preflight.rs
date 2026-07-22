@@ -282,7 +282,7 @@ impl DefaultModePreflight {
                 "auto_execution requires an active published model",
             ));
         };
-        let id = reference.id.clone();
+        let id = reference.id;
         let Some(version) = self
             .deps
             .model_registry
@@ -313,7 +313,7 @@ impl DefaultModePreflight {
                 "no shadow configured; active model cleared its publish-time shadow gate",
             ));
         };
-        let id = reference.id.clone();
+        let id = reference.id;
         let required = config
             .profile_artifacts
             .research_method
@@ -390,7 +390,7 @@ impl DefaultModePreflight {
         min_age: u64,
         now: DateTime<Utc>,
     ) -> QuantResult<Result<(), String>> {
-        let id = reference.id.clone();
+        let id = reference.id;
         let Some(version) = self
             .deps
             .model_registry
@@ -408,7 +408,7 @@ impl DefaultModePreflight {
         min_age: u64,
         now: DateTime<Utc>,
     ) -> QuantResult<Result<(), String>> {
-        let id = reference.id.clone();
+        let id = reference.id;
         let Some(version) = self
             .deps
             .model_registry

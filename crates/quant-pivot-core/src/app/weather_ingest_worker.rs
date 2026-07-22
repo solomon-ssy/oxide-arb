@@ -530,7 +530,7 @@ impl WeatherIngestWorker {
                 published_at: item.report.published_at,
                 observation_time: item.report.observed_at,
                 revision: item.revision,
-                report_hash: item.report.report_hash.clone(),
+                report_hash: item.report.report_hash,
             };
             self.projections
                 .apply_weather_report(
@@ -642,7 +642,7 @@ impl WeatherIngestWorker {
                 .await?
             {
                 Some(year_file) => {
-                    partition_manifest.push((year, Some(year_file.file_hash.clone())));
+                    partition_manifest.push((year, Some(year_file.file_hash)));
                     year_files.push((year, year_file));
                 }
                 None if year == current_year => {
@@ -907,7 +907,7 @@ impl WeatherIngestWorker {
             let new_artifact = NewCalibrationArtifact {
                 artifact_id: CalibrationArtifactId::from_v7(),
                 kind: CalibrationKind::WeatherStationLeadBias,
-                content_hash: content_hash.clone(),
+                content_hash,
                 fit_window_start: fit_start,
                 fit_window_end: fit_end,
                 calibration_split_hash: fit.calibration_split_hash,
@@ -987,7 +987,7 @@ impl WeatherIngestWorker {
                 (
                     target.station.clone(),
                     target.local_date,
-                    target.station_profile_hash.clone(),
+                    target.station_profile_hash,
                 )
             })
             .collect::<Vec<_>>();
@@ -1020,21 +1020,15 @@ impl WeatherIngestWorker {
             &request_hash,
             decoded
                 .iter()
-                .map(|member| {
-                    (
-                        member.lead_hours,
-                        member.member,
-                        member.segment_hash.clone(),
-                    )
-                })
+                .map(|member| (member.lead_hours, member.member, member.segment_hash))
                 .collect::<Vec<_>>(),
         ))?;
         self.write_gefs_rows(decoded, &run_manifest_hash).await?;
         for station in weather_stations(bindings).keys() {
             let checkpoint = DomainSourceCheckpoint::Gefs {
                 reference_time,
-                request_hash: request_hash.clone(),
-                manifest_hash: run_manifest_hash.clone(),
+                request_hash,
+                manifest_hash: run_manifest_hash,
             };
             self.upsert_source_cursor(
                 DomainSourceId::gefs(),
@@ -1099,13 +1093,7 @@ impl WeatherIngestWorker {
             &request_hash,
             decoded
                 .iter()
-                .map(|member| {
-                    (
-                        member.lead_hours,
-                        member.member,
-                        member.segment_hash.clone(),
-                    )
-                })
+                .map(|member| (member.lead_hours, member.member, member.segment_hash))
                 .collect::<Vec<_>>(),
         ))?;
         self.write_gefs_rows(decoded, &run_manifest_hash).await?;
@@ -1115,8 +1103,8 @@ impl WeatherIngestWorker {
                 DomainInstrumentKey::gefs_backfill(station),
                 DomainSourceCheckpoint::GefsBackfill {
                     completed_reference_time: reference_time,
-                    request_hash: request_hash.clone(),
-                    manifest_hash: run_manifest_hash.clone(),
+                    request_hash,
+                    manifest_hash: run_manifest_hash,
                 },
             )
             .await?;
@@ -1300,8 +1288,8 @@ impl WeatherIngestWorker {
                         lead_hours: member.lead_hours,
                         member: Some(u16::from(member.member)),
                         revision: 0,
-                        grid_binding_hash: point.grid_binding_hash.clone(),
-                        run_manifest_hash: run_manifest_hash.clone(),
+                        grid_binding_hash: point.grid_binding_hash,
+                        run_manifest_hash: *run_manifest_hash,
                         report_hash,
                     });
                 }
@@ -1426,7 +1414,7 @@ fn configured_weather_targets(
                     latitude: profile.latitude,
                     longitude: profile.longitude,
                     ghcnh_station_id: profile.ghcnh_station_id.clone(),
-                    station_profile_hash: station_profile_hash.clone(),
+                    station_profile_hash,
                 },
             );
         }
@@ -1554,10 +1542,7 @@ fn weather_revision(
         .collect::<Vec<_>>();
     let revision = u32::try_from(prior.len())
         .map_err(|error| QuantError::config(format!("Weather revision overflow: {error}")))?;
-    Ok((
-        revision,
-        prior.last().map(|previous| previous.report_hash.clone()),
-    ))
+    Ok((revision, prior.last().map(|previous| previous.report_hash)))
 }
 
 fn weather_day_close_due(
@@ -1618,7 +1603,7 @@ mod tests {
     };
 
     fn hash(seed: char) -> ContentHash {
-        ContentHash::parse(format!("blake3:{}", seed.to_string().repeat(64))).expect("hash")
+        ContentHash::parse(&format!("blake3:{}", seed.to_string().repeat(64))).expect("hash")
     }
 
     fn report(
@@ -1715,7 +1700,7 @@ mod tests {
                 published_at: first.published_at,
                 observation_time: first.observed_at,
                 revision: 0,
-                report_hash: first.report_hash.clone(),
+                report_hash: first.report_hash,
             },
             checkpoint_hash: hash('c'),
             status: DomainCursorStatus::Live,

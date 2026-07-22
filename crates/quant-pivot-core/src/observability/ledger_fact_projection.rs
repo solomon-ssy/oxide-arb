@@ -21,8 +21,8 @@ pub fn project_execution_event(
 ) -> QuantExecutionEventRow {
     QuantExecutionEventRow {
         event_time: event_time.timestamp_millis(),
-        order_intent_id: order.order_intent_id.clone(),
-        execution_order_id: order.execution_order_id.clone(),
+        order_intent_id: order.order_intent_id,
+        execution_order_id: order.execution_order_id,
         recommendation_id,
         event_kind,
         market_id: order.market_id.clone(),
@@ -45,9 +45,9 @@ pub fn project_capital_event(
 ) -> QuantCapitalAllocationEventRow {
     QuantCapitalAllocationEventRow {
         event_time: event_time.timestamp_millis(),
-        capital_allocation_id: capital.capital_allocation_id.clone(),
-        order_intent_id: capital.order_intent_id.clone(),
-        recommendation_id: capital.recommendation_id.clone(),
+        capital_allocation_id: capital.capital_allocation_id,
+        order_intent_id: capital.order_intent_id,
+        recommendation_id: capital.recommendation_id,
         event_kind,
         state: capital.state.into(),
         allocated_usd: ChUsd::from(capital.allocated_usd),
@@ -67,8 +67,8 @@ pub fn project_position_event(
 ) -> QuantPositionEventRow {
     QuantPositionEventRow {
         event_time: event_time.timestamp_millis(),
-        position_id: position.position_id.clone(),
-        order_intent_id: position.order_intent_id.clone(),
+        position_id: position.position_id,
+        order_intent_id: position.order_intent_id,
         market_id: position.market_id.clone(),
         token_id: position.token_id.clone(),
         event_kind,

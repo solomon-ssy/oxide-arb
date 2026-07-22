@@ -35,9 +35,9 @@ impl FactorValue {
     pub fn try_to_new(&self, ctx: &FactorValueInsertContext<'_>) -> QuantResult<NewFactorValue> {
         Ok(NewFactorValue {
             factor_value_id: FactorValueId::from_v7(),
-            factor_definition_id: self.definition_id.clone(),
-            feature_vector_id: ctx.feature_vector_id.clone(),
-            model_run_id: ctx.model_run_id.clone(),
+            factor_definition_id: self.definition_id,
+            feature_vector_id: *ctx.feature_vector_id,
+            model_run_id: *ctx.model_run_id,
             market_id: ctx.market_id.clone(),
             decision_at: ctx.decision_at,
             value_state: self.value_state(),
@@ -78,10 +78,10 @@ pub fn factor_definition_to_new(
         .into());
     }
     Ok(NewFactorDefinition {
-        factor_definition_id: identity.factor_definition_id.clone(),
-        definition_hash: identity.definition_hash.clone(),
-        feature_contract_hash: identity.feature_contract_hash.clone(),
-        name: definition.name.as_str().to_owned(),
+        factor_definition_id: identity.factor_definition_id,
+        definition_hash: identity.definition_hash,
+        feature_contract_hash: identity.feature_contract_hash,
+        name: definition.name.to_string(),
         factor_family: definition.family,
         scope: definition.family.definition_scope(),
         input_schema_version,

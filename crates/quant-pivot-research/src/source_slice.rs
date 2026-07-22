@@ -1,8 +1,10 @@
 //! Deterministic Parquet envelope for immutable Source Slice objects.
 
+#[cfg(feature = "research-jobs")]
 use std::io::Cursor;
 
 use chrono::{DateTime, Utc};
+#[cfg(feature = "research-jobs")]
 use polars::{
     error::PolarsError,
     prelude::{
@@ -11,6 +13,7 @@ use polars::{
     },
 };
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
+#[cfg(feature = "research-jobs")]
 use quant_pivot_models::types::SOURCE_SLICE_MANIFEST_FORMAT_VERSION;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -27,14 +30,17 @@ pub struct SourceSliceRecord {
 
 pub struct SourceSliceParquetCodec;
 
+#[cfg(feature = "research-jobs")]
 pub struct SourceSlicePolarsError(PolarsError);
 
+#[cfg(feature = "research-jobs")]
 impl From<PolarsError> for SourceSlicePolarsError {
     fn from(error: PolarsError) -> Self {
         Self(error)
     }
 }
 
+#[cfg(feature = "research-jobs")]
 impl From<SourceSlicePolarsError> for ResearchError {
     fn from(error: SourceSlicePolarsError) -> Self {
         Self::ParquetCodec {
@@ -43,6 +49,7 @@ impl From<SourceSlicePolarsError> for ResearchError {
     }
 }
 
+#[cfg(feature = "research-jobs")]
 impl From<SourceSlicePolarsError> for QuantError {
     fn from(error: SourceSlicePolarsError) -> Self {
         ResearchError::from(error).into()
@@ -50,6 +57,7 @@ impl From<SourceSlicePolarsError> for QuantError {
 }
 
 impl SourceSliceParquetCodec {
+    #[cfg(feature = "research-jobs")]
     pub fn encode(records: &[SourceSliceRecord]) -> QuantResult<Vec<u8>> {
         let mut ordered = records.to_vec();
         ordered.sort_by(|left, right| {
@@ -120,6 +128,7 @@ impl SourceSliceParquetCodec {
         Ok(bytes)
     }
 
+    #[cfg(feature = "research-jobs")]
     pub fn decode(bytes: &[u8]) -> QuantResult<Vec<SourceSliceRecord>> {
         let frame = ParquetReader::new(Cursor::new(bytes))
             .finish()
@@ -166,8 +175,28 @@ impl SourceSliceParquetCodec {
         }
         Ok(records)
     }
+
+    #[cfg(not(feature = "research-jobs"))]
+    pub fn encode(_records: &[SourceSliceRecord]) -> QuantResult<Vec<u8>> {
+        Err(research_jobs_disabled())
+    }
+
+    #[cfg(not(feature = "research-jobs"))]
+    pub fn decode(_bytes: &[u8]) -> QuantResult<Vec<SourceSliceRecord>> {
+        Err(research_jobs_disabled())
+    }
 }
 
+#[cfg(not(feature = "research-jobs"))]
+fn research_jobs_disabled() -> QuantError {
+    ResearchError::NotEligible {
+        code: "research_jobs_feature_disabled",
+        detail: "source-slice Parquet requires the compile-time `research-jobs` feature".to_owned(),
+    }
+    .into()
+}
+
+#[cfg(feature = "research-jobs")]
 fn string_column<'a>(frame: &'a DataFrame, name: &str) -> QuantResult<&'a StringChunked> {
     frame
         .column(name)
@@ -177,6 +206,7 @@ fn string_column<'a>(frame: &'a DataFrame, name: &str) -> QuantResult<&'a String
         .map_err(Into::into)
 }
 
+#[cfg(feature = "research-jobs")]
 fn i64_column<'a>(frame: &'a DataFrame, name: &str) -> QuantResult<&'a Int64Chunked> {
     frame
         .column(name)
@@ -186,6 +216,7 @@ fn i64_column<'a>(frame: &'a DataFrame, name: &str) -> QuantResult<&'a Int64Chun
         .map_err(Into::into)
 }
 
+#[cfg(feature = "research-jobs")]
 fn u32_column<'a>(frame: &'a DataFrame, name: &str) -> QuantResult<&'a UInt32Chunked> {
     frame
         .column(name)
@@ -195,6 +226,7 @@ fn u32_column<'a>(frame: &'a DataFrame, name: &str) -> QuantResult<&'a UInt32Chu
         .map_err(Into::into)
 }
 
+#[cfg(feature = "research-jobs")]
 fn required_string<'a>(
     column: &'a StringChunked,
     index: usize,
@@ -208,6 +240,7 @@ fn required_string<'a>(
     })
 }
 
+#[cfg(feature = "research-jobs")]
 fn timestamp(millis: Option<i64>, index: usize, name: &str) -> QuantResult<Option<DateTime<Utc>>> {
     millis
         .map(|value| {
@@ -244,6 +277,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "research-jobs")]
     #[test]
     fn source_slice_parquet_is_deterministic_and_lossless() {
         let expected = vec![record("a", 1), record("b", 2)];
@@ -257,6 +291,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "research-jobs")]
     #[test]
     fn duplicate_source_identity_is_rejected() {
         let row = record("same", 1);

@@ -144,7 +144,7 @@ pub fn bid_depth_down_to(levels: &[BookLevel], limit_price: Price) -> Shares {
         })
 }
 
-/// Immutable published snapshot for a single token (Arc-backed, lock-free read).
+/// Immutable published snapshot for a single token (Arc-backed guard read).
 ///
 /// Sides use [`Arc<[BookLevel]>`] so readers share level storage without copying;
 /// writers use copy-on-write on the mutable order book before publish.
@@ -159,6 +159,22 @@ pub struct BookSnapshot {
     pub total_ask_depth_usd: MicroUsd,
     /// Sum of `price × size` across all bid levels (micro-USD).
     pub total_bid_depth_usd: MicroUsd,
+    /// Constant-time values computed once when this snapshot is published.
+    pub summary: BookSummary,
+}
+
+/// Precomputed hot-read and telemetry values for one immutable book snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BookSummary {
+    pub best_bid: Option<Price>,
+    pub best_ask: Option<Price>,
+    pub spread: Option<Price>,
+    pub mid: Option<Price>,
+    pub top1_depth_usd: MicroUsd,
+    pub top5_depth_usd: MicroUsd,
+    pub top20_depth_usd: MicroUsd,
+    pub imbalance: Option<Decimal>,
+    pub crossed: bool,
 }
 
 impl BookSnapshot {
@@ -169,9 +185,42 @@ impl BookSnapshot {
         timestamp_ms: u64,
         version: u64,
     ) -> Self {
+        let bid = summarize_side(&bids);
+        let ask = summarize_side(&asks);
+        let best_bid = bids.first().map(|level| level.price_decimal());
+        let best_ask = asks.first().map(|level| level.price_decimal());
+        let (spread, mid, crossed) = match (best_bid, best_ask) {
+            (Some(best_bid), Some(best_ask)) => (
+                Some(Price::new(best_ask.inner() - best_bid.inner())),
+                Some(Price::new(
+                    (best_bid.inner() + best_ask.inner()) / Decimal::TWO,
+                )),
+                best_bid >= best_ask,
+            ),
+            _ => (None, None, false),
+        };
+        let bid_top5 = Decimal::from(bid.top5_shares.micro());
+        let ask_top5 = Decimal::from(ask.top5_shares.micro());
+        let imbalance_total = bid_top5 + ask_top5;
+        let imbalance = if imbalance_total.is_zero() {
+            None
+        } else {
+            Some((bid_top5 - ask_top5) / imbalance_total)
+        };
         Self {
-            total_bid_depth_usd: total_depth_usd(&bids),
-            total_ask_depth_usd: total_depth_usd(&asks),
+            total_bid_depth_usd: bid.total_depth_usd,
+            total_ask_depth_usd: ask.total_depth_usd,
+            summary: BookSummary {
+                best_bid,
+                best_ask,
+                spread,
+                mid,
+                top1_depth_usd: bid.top1_depth_usd + ask.top1_depth_usd,
+                top5_depth_usd: bid.top5_depth_usd + ask.top5_depth_usd,
+                top20_depth_usd: bid.top20_depth_usd + ask.top20_depth_usd,
+                imbalance,
+                crossed,
+            },
             bids,
             asks,
             timestamp_ms,
@@ -201,14 +250,14 @@ impl BookSnapshot {
 
     #[must_use]
     #[inline]
-    pub fn best_bid(&self) -> Option<Price> {
-        self.bids.first().map(|l| l.price_decimal())
+    pub const fn best_bid(&self) -> Option<Price> {
+        self.summary.best_bid
     }
 
     #[must_use]
     #[inline]
-    pub fn best_ask(&self) -> Option<Price> {
-        self.asks.first().map(|l| l.price_decimal())
+    pub const fn best_ask(&self) -> Option<Price> {
+        self.summary.best_ask
     }
 
     /// Available bid depth fillable at or above `limit_price`.
@@ -217,6 +266,40 @@ impl BookSnapshot {
     pub fn bid_depth_down_to(&self, limit_price: Price) -> Shares {
         bid_depth_down_to(&self.bids, limit_price)
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SideSummary {
+    total_depth_usd: MicroUsd,
+    top1_depth_usd: MicroUsd,
+    top5_depth_usd: MicroUsd,
+    top20_depth_usd: MicroUsd,
+    top5_shares: MicroShares,
+}
+
+fn summarize_side(levels: &[BookLevel]) -> SideSummary {
+    let mut summary = SideSummary {
+        total_depth_usd: MicroUsd::ZERO,
+        top1_depth_usd: MicroUsd::ZERO,
+        top5_depth_usd: MicroUsd::ZERO,
+        top20_depth_usd: MicroUsd::ZERO,
+        top5_shares: MicroShares::ZERO,
+    };
+    for (index, level) in levels.iter().copied().enumerate() {
+        let depth = level.depth_usd();
+        summary.total_depth_usd += depth;
+        if index < 20 {
+            summary.top20_depth_usd += depth;
+        }
+        if index < 5 {
+            summary.top5_depth_usd += depth;
+            summary.top5_shares += level.size;
+        }
+        if index == 0 {
+            summary.top1_depth_usd = depth;
+        }
+    }
+    summary
 }
 
 /// Zero-copy view of one side of an orderbook.
@@ -466,6 +549,29 @@ mod tests {
         let asks = Arc::from([level(dec!(0.97))]);
         let snap = BookSnapshot::new(Arc::from([]), asks, 0, 0);
         assert_eq!(snap.total_ask_depth_usd.to_decimal(), dec!(9.7));
+    }
+
+    #[test]
+    fn publish_summary_matches_reference_scans() {
+        let bids = Arc::from([
+            level_with_size(dec!(0.55), dec!(10)),
+            level_with_size(dec!(0.54), dec!(20)),
+        ]);
+        let asks = Arc::from([
+            level_with_size(dec!(0.60), dec!(5)),
+            level_with_size(dec!(0.61), dec!(15)),
+        ]);
+        let snap = BookSnapshot::new(bids, asks, 0, 1);
+
+        assert_eq!(snap.summary.best_bid, Some(Price::new(dec!(0.55))));
+        assert_eq!(snap.summary.best_ask, Some(Price::new(dec!(0.60))));
+        assert_eq!(snap.summary.spread, Some(Price::new(dec!(0.05))));
+        assert_eq!(snap.summary.mid, Some(Price::new(dec!(0.575))));
+        assert_eq!(snap.summary.top1_depth_usd.to_decimal(), dec!(8.5));
+        assert_eq!(snap.summary.top5_depth_usd.to_decimal(), dec!(28.45));
+        assert_eq!(snap.summary.top20_depth_usd, snap.summary.top5_depth_usd);
+        assert_eq!(snap.summary.imbalance, Some(dec!(0.2)));
+        assert!(!snap.summary.crossed);
     }
 
     #[test]

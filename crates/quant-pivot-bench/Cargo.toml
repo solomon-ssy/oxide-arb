@@ -6,26 +6,48 @@ edition.workspace = true
 rust-version.workspace = true
 publish = false
 
+[features]
+# Preserve the normal workspace/all-target benchmark surface. Single-shot
+# offline gates pass `--no-default-features` so they do not link the serving
+# core, web, storage, Polars, and AWS dependency graph into an RSS measurement.
+default = ["online"]
+online = ["dep:quant-pivot-core"]
+
 [dependencies]
-quant-pivot-core = { workspace = true }
+quant-pivot-allocator = { workspace = true }
+quant-pivot-core = { workspace = true, optional = true }
+quant-pivot-error = { workspace = true }
 quant-pivot-models = { workspace = true }
 quant-pivot-research = { workspace = true }
+ndarray = { workspace = true }
 rust_decimal = { workspace = true }
 rust_decimal_macros = { workspace = true }
 chrono = { workspace = true }
 criterion = { workspace = true }
+rayon = { workspace = true }
 
 [[bench]]
 name = "hot_paths"
 harness = false
+required-features = ["online"]
 
 [[bench]]
 name = "e2e_paths"
 harness = false
+required-features = ["online"]
 
 [[bench]]
 name = "portfolio_lp"
 harness = false
+
+[[bench]]
+name = "training_matrix"
+harness = false
+
+[[bin]]
+name = "report_compute_gate"
+path = "src/bin/report_compute_gate.rs"
+required-features = ["online"]
 
 [lints]
 workspace = true

@@ -126,7 +126,7 @@ impl ActorRoles {
         self.0
             .iter()
             .filter(|role| role.status == RoleStatus::Enabled)
-            .map(|role| role.id.clone())
+            .map(|role| role.id)
             .collect()
     }
 

@@ -111,17 +111,16 @@ async fn assert_atomic_activation_ledger(
     db: &DatabaseConnection,
     committed: &PolicyActivationCommit,
 ) {
-    let audit = Entity::find_by_id(committed.activation.audit_event_id.clone())
+    let audit = Entity::find_by_id(committed.activation.audit_event_id)
         .one(db)
         .await
         .expect("load atomic activation audit")
         .expect("activation audit exists");
-    let outbox =
-        PolicyActivationEventOutboxEntity::find_by_id(committed.activation.audit_event_id.clone())
-            .one(db)
-            .await
-            .expect("load atomic activation outbox")
-            .expect("activation outbox exists");
+    let outbox = PolicyActivationEventOutboxEntity::find_by_id(committed.activation.audit_event_id)
+        .one(db)
+        .await
+        .expect("load atomic activation outbox")
+        .expect("activation outbox exists");
     assert_eq!(
         audit.policy_activation_id,
         committed.activation.policy_activation_id
@@ -221,15 +220,15 @@ pub async fn active_resources_are_loaded_in_one_typed_set_and_approvals_are_sing
     let mut candidate = current.snapshot;
     candidate.recommendation.data_quality.max_book_age_ms += 1;
     let revision_id = PolicyRevisionId::from_v7();
-    candidate.set_resource_revision_id(kind, revision_id.clone());
+    candidate.set_resource_revision_id(kind, revision_id);
     let document = candidate.resource_document(kind);
     let revision_hash =
         CanonicalDigest::content_hash_json(&document).expect("hash typed policy document");
     repo.create_revision(NewPolicyRevision {
-        policy_revision_id: revision_id.clone(),
+        policy_revision_id: revision_id,
         resource_kind: kind,
         schema_version: POLICY_RESOURCE_SCHEMA_VERSION,
-        revision_hash: revision_hash.clone(),
+        revision_hash,
         document,
         status: PolicyRevisionStatus::Draft,
         validation_evidence: None,
@@ -243,11 +242,9 @@ pub async fn active_resources_are_loaded_in_one_typed_set_and_approvals_are_sing
     })
     .await
     .expect("create revision");
-    let preflight_token_hash = CanonicalDigest::content_hash_json(&(
-        "policy-governance-it-preflight",
-        revision_hash.as_str(),
-    ))
-    .expect("hash preflight proof");
+    let preflight_token_hash =
+        CanonicalDigest::content_hash_json(&("policy-governance-it-preflight", revision_hash))
+            .expect("hash preflight proof");
     let candidate_hash = candidate
         .persistence_hash()
         .expect("hash candidate policy persistence document");
@@ -261,15 +258,15 @@ pub async fn active_resources_are_loaded_in_one_typed_set_and_approvals_are_sing
             }),
             ..PolicyValidationEvidence::default()
         },
-        preflight_token_hash.clone(),
+        preflight_token_hash,
         Utc::now() + Duration::minutes(10),
     )
     .await
     .expect("validate revision");
     let approval_id = PolicyApprovalId::from_v7();
     repo.record_approval(RecordPolicyApproval {
-        policy_approval_id: approval_id.clone(),
-        policy_revision_id: revision_id.clone(),
+        policy_approval_id: approval_id,
+        policy_revision_id: revision_id,
         resource_kind: kind,
         decision: PolicyApprovalDecision::Approved,
         decided_by_kind: PolicyActorKind::System,
@@ -291,23 +288,22 @@ pub async fn active_resources_are_loaded_in_one_typed_set_and_approvals_are_sing
 
     let snapshot_id = DecisionPolicySnapshotId::from_v7();
     let next_generation = base_generation.checked_next().expect("next generation");
-    let new_snapshot = persisted_snapshot(next_generation, snapshot_id.clone(), &candidate);
+    let new_snapshot = persisted_snapshot(next_generation, snapshot_id, &candidate);
     let first_activation = activation(ActivationFixture {
         bundle_generation: next_generation,
         expected_bundle_generation: base_generation,
         kind,
-        revision_id: revision_id.clone(),
-        snapshot_id: snapshot_id.clone(),
-        approval_id: approval_id.clone(),
+        revision_id,
+        snapshot_id,
+        approval_id,
         expected_active_revision_id: Some(
             active
                 .iter()
                 .find(|row| row.resource_kind == kind)
                 .expect("recommendation activation")
-                .policy_revision_id
-                .clone(),
+                .policy_revision_id,
         ),
-        preflight_token_hash: preflight_token_hash.clone(),
+        preflight_token_hash,
         idempotency_key: "policy-governance-it-activation-1",
     });
     let committed = repo
@@ -386,9 +382,9 @@ pub async fn outbox_failure_rolls_back_activation_snapshot_guard_and_approval_co
     .await
     .expect("install test-only outbox failure constraint");
 
-    let activation_id = candidate.activation.policy_activation_id.clone();
-    let audit_event_id = candidate.activation.audit_event_id.clone();
-    let snapshot_id = candidate.snapshot.decision_policy_snapshot_id.clone();
+    let activation_id = candidate.activation.policy_activation_id;
+    let audit_event_id = candidate.activation.audit_event_id;
+    let snapshot_id = candidate.snapshot.decision_policy_snapshot_id;
     assert!(
         repo.activate_resource(candidate.activation, candidate.snapshot)
             .await
@@ -416,7 +412,7 @@ pub async fn outbox_failure_rolls_back_activation_snapshot_guard_and_approval_co
             .is_none()
     );
     assert!(
-        policy_activation_audit::Entity::find_by_id(audit_event_id.clone())
+        policy_activation_audit::Entity::find_by_id(audit_event_id)
             .one(&db)
             .await
             .expect("look up rolled-back audit")
@@ -458,11 +454,10 @@ pub async fn rollback_records_a_new_generation_when_content_hash_matches_history
         .await
         .expect("load base activations");
     let kind = ConfigResourceKind::RecommendationPolicy;
-    let base_revision_id = base
+    let base_revision_id = *base
         .snapshot
         .resource_revision_id(kind)
-        .expect("base recommendation revision")
-        .clone();
+        .expect("base recommendation revision");
     let base_book_age = base.snapshot.recommendation.data_quality.max_book_age_ms;
     let forward = prepare_candidate(
         &repo,
@@ -632,7 +627,7 @@ pub async fn concurrent_resource_activations_fail_stale_then_rebase_without_lost
         &after_first,
         &current_activations,
         stale.0,
-        Some(stale_candidate.revision_id.clone()),
+        Some(stale_candidate.revision_id),
         "rebased-concurrent-loser",
         |candidate| match stale.0 {
             ConfigResourceKind::RecommendationPolicy => {
@@ -647,7 +642,7 @@ pub async fn concurrent_resource_activations_fail_stale_then_rebase_without_lost
     .await;
     let mut old_approval_replay = rebased.activation.clone();
     old_approval_replay.policy_activation_id = PolicyActivationId::from_v7();
-    old_approval_replay.policy_approval_id = stale_candidate.approval_id.clone();
+    old_approval_replay.policy_approval_id = stale_candidate.approval_id;
     old_approval_replay.idempotency_key = "stale-approval-after-revalidation"
         .parse::<PolicyIdempotencyKey>()
         .expect("valid stale approval replay key");
@@ -722,19 +717,17 @@ async fn prepare_candidate(
 ) -> PreparedCandidate {
     let mut candidate = base.snapshot.clone();
     mutate(&mut candidate);
-    let revision_id = existing_revision_id
-        .clone()
-        .unwrap_or_else(PolicyRevisionId::from_v7);
-    candidate.set_resource_revision_id(kind, revision_id.clone());
+    let revision_id = existing_revision_id.unwrap_or_else(PolicyRevisionId::from_v7);
+    candidate.set_resource_revision_id(kind, revision_id);
     let document = candidate.resource_document(kind);
     let revision_hash =
         CanonicalDigest::content_hash_json(&document).expect("hash candidate resource document");
     if existing_revision_id.is_none() {
         repo.create_revision(NewPolicyRevision {
-            policy_revision_id: revision_id.clone(),
+            policy_revision_id: revision_id,
             resource_kind: kind,
             schema_version: POLICY_RESOURCE_SCHEMA_VERSION,
-            revision_hash: revision_hash.clone(),
+            revision_hash,
             document,
             status: PolicyRevisionStatus::Draft,
             validation_evidence: None,
@@ -749,12 +742,9 @@ async fn prepare_candidate(
         .await
         .expect("create concurrent candidate revision");
     }
-    let preflight_token_hash = CanonicalDigest::content_hash_json(&(
-        "policy-concurrency-preflight",
-        key,
-        revision_hash.as_str(),
-    ))
-    .expect("hash candidate preflight token");
+    let preflight_token_hash =
+        CanonicalDigest::content_hash_json(&("policy-concurrency-preflight", key, revision_hash))
+            .expect("hash candidate preflight token");
     let candidate_hash = candidate
         .persistence_hash()
         .expect("hash complete concurrent candidate bundle");
@@ -768,15 +758,15 @@ async fn prepare_candidate(
             }),
             ..PolicyValidationEvidence::default()
         },
-        preflight_token_hash.clone(),
+        preflight_token_hash,
         Utc::now() + Duration::minutes(10),
     )
     .await
     .expect("validate concurrent candidate revision");
     let approval_id = PolicyApprovalId::from_v7();
     repo.record_approval(RecordPolicyApproval {
-        policy_approval_id: approval_id.clone(),
-        policy_revision_id: revision_id.clone(),
+        policy_approval_id: approval_id,
+        policy_revision_id: revision_id,
         resource_kind: kind,
         decision: PolicyApprovalDecision::Approved,
         decided_by_kind: PolicyActorKind::System,
@@ -790,21 +780,20 @@ async fn prepare_candidate(
     .expect("approve concurrent candidate revision");
     let next_generation = base.generation.checked_next().expect("next generation");
     let snapshot_id = DecisionPolicySnapshotId::from_v7();
-    let snapshot = persisted_snapshot(next_generation, snapshot_id.clone(), &candidate);
+    let snapshot = persisted_snapshot(next_generation, snapshot_id, &candidate);
     let activation = activation(ActivationFixture {
         bundle_generation: next_generation,
         expected_bundle_generation: base.generation,
         kind,
-        revision_id: revision_id.clone(),
+        revision_id,
         snapshot_id,
-        approval_id: approval_id.clone(),
+        approval_id,
         expected_active_revision_id: Some(
             active
                 .iter()
                 .find(|row| row.resource_kind == kind)
                 .expect("active revision for candidate resource")
-                .policy_revision_id
-                .clone(),
+                .policy_revision_id,
         ),
         preflight_token_hash,
         idempotency_key: key,
@@ -860,6 +849,7 @@ fn persisted_snapshot(
     }
 }
 
+#[derive(Clone, Copy)]
 struct ActivationFixture<'a> {
     bundle_generation: PolicyBundleGeneration,
     expected_bundle_generation: PolicyBundleGeneration,
@@ -905,12 +895,12 @@ fn activation(fixture: ActivationFixture<'_>) -> NewPolicyActivation {
     }
 }
 
-fn required_revision(
+const fn required_revision(
     snapshot: &DecisionPolicySnapshot,
     kind: ConfigResourceKind,
 ) -> PolicyRevisionId {
     snapshot
         .resource_revision_id(kind)
-        .cloned()
+        .copied()
         .expect("complete policy revision bundle")
 }

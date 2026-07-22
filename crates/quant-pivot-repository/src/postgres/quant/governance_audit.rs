@@ -41,7 +41,7 @@ impl ModelGovernanceAuditRepository for PgModelGovernanceAuditRepository {
         list_by_fk_ordered_desc::<Entity, _, _, _>(
             &self.db,
             Column::ModelVersionId,
-            model_version_id.clone(),
+            *model_version_id,
             Column::CreatedAt,
             Into::into,
         )

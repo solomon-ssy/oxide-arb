@@ -47,14 +47,14 @@ impl TrainingDatasetRepository for PgTrainingDatasetRepository {
         &self,
         plan: NewTrainingDatasetPlan,
     ) -> Result<TrainingDatasetInfo, StorageError> {
-        let stored_definition_hash = Entity::find_by_id(plan.model_spec_id.clone())
+        let stored_definition_hash = Entity::find_by_id(plan.model_spec_id)
             .select_only()
             .column(Column::DefinitionHash)
             .into_tuple::<ContentHash>()
             .one(&self.db)
             .await
             .map_err(StorageError::from)?
-            .ok_or_else(|| error::not_found(QUANT_MODEL_SPEC, &plan.model_spec_id))?;
+            .ok_or_else(|| error::not_found(QUANT_MODEL_SPEC, plan.model_spec_id))?;
         if plan.model_spec_definition_hash != stored_definition_hash {
             return Err(error::invariant_violation(
                 Some(QUANT_TRAINING_DATASET),
@@ -78,7 +78,7 @@ impl TrainingDatasetRepository for PgTrainingDatasetRepository {
         &self,
         training_dataset_id: &TrainingDatasetId,
     ) -> Result<Option<TrainingDatasetInfo>, StorageError> {
-        QuantTrainingDatasetEntity::find_by_id(training_dataset_id.clone())
+        QuantTrainingDatasetEntity::find_by_id(*training_dataset_id)
             .one(&self.db)
             .await
             .map_err(StorageError::from)
@@ -105,7 +105,7 @@ impl TrainingDatasetRepository for PgTrainingDatasetRepository {
         training_dataset_id: &TrainingDatasetId,
     ) -> Result<TrainingDatasetInfo, StorageError> {
         let transaction = self.db.begin().await.map_err(StorageError::from)?;
-        let Some(row) = QuantTrainingDatasetEntity::find_by_id(training_dataset_id.clone())
+        let Some(row) = QuantTrainingDatasetEntity::find_by_id(*training_dataset_id)
             .lock_exclusive()
             .one(&transaction)
             .await
@@ -158,7 +158,7 @@ impl TrainingDatasetRepository for PgTrainingDatasetRepository {
             ));
         }
         let transaction = self.db.begin().await.map_err(StorageError::from)?;
-        let Some(row) = QuantTrainingDatasetEntity::find_by_id(training_dataset_id.clone())
+        let Some(row) = QuantTrainingDatasetEntity::find_by_id(*training_dataset_id)
             .lock_exclusive()
             .one(&transaction)
             .await
@@ -206,7 +206,7 @@ impl TrainingDatasetRepository for PgTrainingDatasetRepository {
         detail: String,
     ) -> Result<TrainingDatasetInfo, StorageError> {
         let transaction = self.db.begin().await.map_err(StorageError::from)?;
-        let Some(row) = QuantTrainingDatasetEntity::find_by_id(training_dataset_id.clone())
+        let Some(row) = QuantTrainingDatasetEntity::find_by_id(*training_dataset_id)
             .lock_exclusive()
             .one(&transaction)
             .await
@@ -249,7 +249,7 @@ impl TrainingDatasetRepository for PgTrainingDatasetRepository {
         training_dataset_id: &TrainingDatasetId,
     ) -> Result<TrainingDatasetInfo, StorageError> {
         let transaction = self.db.begin().await.map_err(StorageError::from)?;
-        let Some(row) = QuantTrainingDatasetEntity::find_by_id(training_dataset_id.clone())
+        let Some(row) = QuantTrainingDatasetEntity::find_by_id(*training_dataset_id)
             .lock_exclusive()
             .one(&transaction)
             .await
@@ -335,7 +335,6 @@ fn page_condition(query: &TrainingDatasetListQuery) -> Condition {
         .add_option(
             query
                 .model_spec_id
-                .clone()
                 .map(|id| QuantTrainingDatasetColumn::ModelSpecId.eq(id)),
         )
         .add_option(

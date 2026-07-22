@@ -3,6 +3,8 @@
 //! It owns application composition for data ingest, research, reporting,
 //! governance, execution, and administration.
 
+use quant_pivot_allocator as _;
+
 pub mod app;
 pub mod execution;
 pub mod governance;

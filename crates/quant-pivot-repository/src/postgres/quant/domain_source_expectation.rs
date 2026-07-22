@@ -34,7 +34,7 @@ impl DomainSourceExpectationRepository for PgDomainSourceExpectationRepository {
         &self,
         expectation_id: &DomainSourceExpectationId,
     ) -> Result<Option<DomainSourceExpectationInfo>, StorageError> {
-        Entity::find_by_id(expectation_id.clone())
+        Entity::find_by_id(*expectation_id)
             .one(&self.db)
             .await
             .map_err(StorageError::from)
@@ -91,7 +91,7 @@ impl DomainSourceExpectationRepository for PgDomainSourceExpectationRepository {
             .col_expr(Column::Status, primitives::enum_value(&transition.to))
             .col_expr(Column::StatusReason, Expr::value(transition.reason))
             .col_expr(Column::UpdatedAt, Expr::value(Utc::now()))
-            .filter(Column::ExpectationId.eq(transition.expectation_id.clone()))
+            .filter(Column::ExpectationId.eq(transition.expectation_id))
             .filter(Column::Status.eq(transition.from))
             .exec(&self.db)
             .await

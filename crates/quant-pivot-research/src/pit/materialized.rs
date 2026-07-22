@@ -66,7 +66,7 @@ impl MaterializedPitEngine {
         let events: HashMap<_, _> = catalog
             .event_changes
             .into_iter()
-            .map(|event| (event.event_change_id.clone(), event))
+            .map(|event| (event.event_change_id, event))
             .collect();
         let mut markets: HashMap<MarketId, Vec<CatalogMarketChangeInfo>> = HashMap::new();
         for market in catalog.market_changes {
@@ -168,7 +168,7 @@ impl PointInTimeSnapshotSource for MaterializedPitEngine {
             .cloned()
             .collect();
         resolve_catalog_snapshot(
-            CatalogSnapshotInfo {
+            &CatalogSnapshotInfo {
                 market: market.clone(),
                 event,
                 event_markets,
@@ -293,7 +293,7 @@ mod tests {
     }
 
     fn hash(seed: char) -> ContentHash {
-        ContentHash::parse(format!("blake3:{}", seed.to_string().repeat(64))).expect("hash")
+        ContentHash::parse(&format!("blake3:{}", seed.to_string().repeat(64))).expect("hash")
     }
 
     fn catalog_window(
@@ -320,8 +320,8 @@ mod tests {
         };
         let event_hash = hash('e');
         let event_version = CatalogEventChangeInfo {
-            event_change_id: event_version_id.clone(),
-            catalog_sync_batch_id: batch_id.clone(),
+            event_change_id: event_version_id,
+            catalog_sync_batch_id: batch_id,
             event_object_id: CatalogEventObjectId::from_content_hash(&event_hash),
             event_id: event_id.clone(),
             source_effective_at: event_time,
@@ -370,8 +370,8 @@ mod tests {
                 });
                 CatalogMarketChangeInfo {
                     market_change_id: CatalogMarketChangeId::from_v7(),
-                    catalog_sync_batch_id: batch_id.clone(),
-                    event_change_id: event_version_id.clone(),
+                    catalog_sync_batch_id: batch_id,
+                    event_change_id: event_version_id,
                     market_object_id: CatalogMarketObjectId::from_content_hash(&market_hash),
                     market_id: market_id.clone(),
                     event_id: event_id.clone(),

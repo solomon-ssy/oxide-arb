@@ -21,7 +21,7 @@ schema catalog 是唯一事实源。storage migrations 只消费 catalog metadat
 ### 标识符三分法
 
 ```text
-是 UUID（系统内部生成）？ ── 是 ──> 原生 uuid 列；Rust = #[derive(UuidId)] (Arc<Uuid>)
+是 UUID（系统内部生成）？ ── 是 ──> 原生 uuid 列；Rust = #[derive(UuidId)] (Uuid, 16-byte Copy)
         │
         否
         │

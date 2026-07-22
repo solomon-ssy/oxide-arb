@@ -31,7 +31,7 @@ impl PgRolePermissionRepository {
 
 /// Resolve a role's immutable `code` by id, or `NotFound`.
 async fn role_code_of(conn: &impl ConnectionTrait, id: &RoleId) -> Result<RoleCode, StorageError> {
-    Entity::find_by_id(id.clone())
+    Entity::find_by_id(*id)
         .one(conn)
         .await
         .map_err(StorageError::from)?

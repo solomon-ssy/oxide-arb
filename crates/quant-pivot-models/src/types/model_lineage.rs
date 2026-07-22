@@ -221,8 +221,8 @@ mod tests {
         let parent = ModelVersionId::from_v7();
         let artifact = CalibrationArtifactId::from_v7();
         let derivation = ModelVersionDerivation::ReturnCalibration {
-            parent_model_version_id: parent.clone(),
-            calibration_artifact_id: artifact.clone(),
+            parent_model_version_id: parent,
+            calibration_artifact_id: artifact,
         };
         let hash = derivation.evidence_hash().expect("lineage hash");
         let restored = ModelVersionDerivation::from_persistence(
@@ -245,11 +245,13 @@ mod tests {
         };
         let error = ModelVersionDerivation::from_persistence(
             derivation.kind(),
-            derivation.parent_model_version_id().cloned(),
+            derivation.parent_model_version_id().copied(),
             None,
-            derivation.calibration_artifact_id().cloned(),
+            derivation.calibration_artifact_id().copied(),
             None,
-            Some(ContentHash::parse(format!("blake3:{}", "0".repeat(64))).expect("canonical hash")),
+            Some(
+                ContentHash::parse(&format!("blake3:{}", "0".repeat(64))).expect("canonical hash"),
+            ),
         )
         .expect_err("tampered hash");
         assert!(error.to_string().contains("hash mismatch"));

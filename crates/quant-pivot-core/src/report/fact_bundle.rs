@@ -9,7 +9,7 @@ use quant_pivot_models::{
     enums::quant::ReportFactDeliveryStatus,
     hashing::CanonicalDigest,
     types::{
-        ContentHash, REPORT_FACT_BUNDLE_FORMAT_VERSION, RecommendationReportId, ReportFactBundleV1,
+        REPORT_FACT_BUNDLE_FORMAT_VERSION, RecommendationReportId, ReportFactBundleV1,
         ReportFactNotificationRecommendationV1, ReportFactNotificationV1,
         ReportFactTableCommitment,
     },
@@ -26,7 +26,7 @@ pub async fn prepare_report_fact_bundle(
     artifacts: &Arc<dyn ArtifactStore>,
     composed: &mut ComposedReport,
 ) -> QuantResult<()> {
-    let report_id = composed.transaction.report.recommendation_report_id.clone();
+    let report_id = composed.transaction.report.recommendation_report_id;
     let mut recommendation_rows = composed.ch_rows.clone();
     recommendation_rows.sort_by(|left, right| {
         left.rank.cmp(&right.rank).then_with(|| {
@@ -43,7 +43,7 @@ pub async fn prepare_report_fact_bundle(
     let funnel_hash = CanonicalDigest::content_hash_json(&funnel_rows)?;
     let bundle = ReportFactBundleV1 {
         format_version: REPORT_FACT_BUNDLE_FORMAT_VERSION,
-        recommendation_report_id: report_id.clone(),
+        recommendation_report_id: report_id,
         created_at: composed.transaction.report.decision_at,
         delivery_policy: composed.delivery_policy,
         notify_operators: composed.notify_operators,
@@ -70,12 +70,12 @@ pub async fn prepare_report_fact_bundle(
         recommendation_commitment: ReportFactTableCommitment {
             table: RECOMMENDATION_TABLE.to_owned(),
             row_count: usize_to_u64("recommendation_row_count", recommendation_rows.len())?,
-            row_chain_hash: recommendation_hash.clone(),
+            row_chain_hash: recommendation_hash,
         },
         funnel_commitment: ReportFactTableCommitment {
             table: FUNNEL_TABLE.to_owned(),
             row_count: usize_to_u64("funnel_row_count", funnel_rows.len())?,
-            row_chain_hash: funnel_hash.clone(),
+            row_chain_hash: funnel_hash,
         },
         recommendation_rows,
         funnel_rows,
@@ -84,7 +84,7 @@ pub async fn prepare_report_fact_bundle(
         stage: "report_fact_bundle",
         detail: format!("bundle serialization failed: {error}"),
     })?;
-    let bundle_hash = ContentHash::parse(CanonicalDigest::prefixed_bytes(&bytes))?;
+    let bundle_hash = CanonicalDigest::content_hash_bytes(&bytes);
     let bundle_uri = artifacts
         .put(
             ArtifactKey::new(ArtifactNamespace::ReportFacts, bundle_hash.hex(), "json")?,
@@ -106,7 +106,7 @@ pub async fn prepare_report_fact_bundle(
         .into());
     }
     let persisted = artifacts.get(&bundle_uri).await?;
-    let persisted_hash = ContentHash::parse(CanonicalDigest::prefixed_bytes(&persisted))?;
+    let persisted_hash = CanonicalDigest::content_hash_bytes(&persisted);
     if persisted_hash != bundle_hash {
         return Err(ReportError::InvariantViolation {
             stage: "report_fact_bundle",

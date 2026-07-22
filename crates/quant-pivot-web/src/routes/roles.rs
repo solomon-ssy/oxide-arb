@@ -157,7 +157,7 @@ pub async fn delete(
     op_ctx: OperationCtx,
 ) -> Result<WebResponse<()>, WebError> {
     state.roles.delete(&id).await?;
-    state.ws_sessions.close_all();
+    state.ws_sessions.close_all().await;
     state.casbin.reload().await?;
     op_ctx.set_action(OperationCategory::Rbac, "role.delete");
     op_ctx.set_resource(ResourceType::Role, id.to_string());
@@ -177,7 +177,7 @@ pub async fn change_status(
 ) -> Result<WebResponse<()>, WebError> {
     let status = body.into_inner().status;
     state.roles.change_status(&id, status).await?;
-    state.ws_sessions.close_all();
+    state.ws_sessions.close_all().await;
     state.casbin.reload().await?;
     op_ctx.set_action(OperationCategory::Rbac, "role.change_status");
     op_ctx.set_resource(ResourceType::Role, id.to_string());
@@ -215,7 +215,7 @@ pub async fn set_permissions(
             permissions,
         })
         .await?;
-    state.ws_sessions.close_all();
+    state.ws_sessions.close_all().await;
     state.casbin.reload().await?;
     Ok(WebResponse::ok(()))
 }

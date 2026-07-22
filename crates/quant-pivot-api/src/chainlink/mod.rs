@@ -22,7 +22,7 @@ use quant_pivot_models::{
     config::{ChainlinkDataStreamFeedConfig, ChainlinkDataStreamsSourceConfig},
     domain::data_plane::CryptoPriceReport,
     hashing::CanonicalDigest,
-    types::{ChainlinkFeedKey, ContentHash, DomainInstrumentKey, DomainSourceId, Usd},
+    types::{ChainlinkFeedKey, DomainInstrumentKey, DomainSourceId, Usd},
 };
 use reqwest::{Client as ReqwestClient, header::DATE};
 use rust_decimal::Decimal;
@@ -283,7 +283,7 @@ impl ChainlinkDataStreamsSource {
         let observations_timestamp = utc_seconds(decoded.observations_timestamp, "observations")?;
         let valid_from = utc_seconds(decoded.valid_from_timestamp, "valid from")?;
         let expires_at = utc_seconds(decoded.expires_at, "expires at")?;
-        let report_hash = ContentHash::parse(CanonicalDigest::prefixed_bytes(&full_report))?;
+        let report_hash = CanonicalDigest::content_hash_bytes(&full_report);
         Ok(CryptoPriceReport {
             source_id: self.source_id(),
             instrument_key: DomainInstrumentKey::chainlink_data_streams(feed),

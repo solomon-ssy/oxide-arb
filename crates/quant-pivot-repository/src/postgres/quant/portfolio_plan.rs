@@ -26,7 +26,7 @@ impl PortfolioPlanRepository for PgPortfolioPlanRepository {
         &self,
         portfolio_plan_id: &PortfolioPlanId,
     ) -> Result<Option<PortfolioPlanInfo>, StorageError> {
-        Entity::find_by_id(portfolio_plan_id.clone())
+        Entity::find_by_id(*portfolio_plan_id)
             .one(&self.db)
             .await
             .map_err(StorageError::from)

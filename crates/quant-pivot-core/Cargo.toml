@@ -8,13 +8,14 @@ publish = false
 
 [dependencies]
 # ── Workspace internal ─────────────────────────────────────────────
+quant-pivot-allocator  = { workspace = true }
 quant-pivot-error      = { workspace = true, features = ["storage", "config", "serde"] }
 quant-pivot-models     = { workspace = true }
 quant-pivot-migration  = { workspace = true }
-quant-pivot-api        = { workspace = true }
+quant-pivot-api        = { workspace = true, default-features = false }
 quant-pivot-storage    = { workspace = true }
 quant-pivot-repository = { workspace = true }
-quant-pivot-research   = { workspace = true, default-features = false, features = ["dataframe"] }
+quant-pivot-research   = { workspace = true, default-features = false }
 quant-pivot-web        = { workspace = true }
 
 # ── Async runtime ──────────────────────────────────────────────────
@@ -37,6 +38,7 @@ rust_decimal_macros = { workspace = true }
 chrono = { workspace = true, features = ["serde"] }
 chrono-tz = { workspace = true }
 uuid   = { workspace = true, features = ["v4", "v7"] }
+alloy  = { workspace = true }
 
 # ── Errors / logging ──────────────────────────────────────────────
 tracing   = { workspace = true }
@@ -65,13 +67,18 @@ strum = { workspace = true, features = ["derive"] }
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 serde_json = { workspace = true }
+loom = { workspace = true }
+proptest = { workspace = true }
 
 [features]
+default = ["serving", "research-jobs", "domain-chainlink"]
+serving = []
+research-jobs = ["quant-pivot-research/research-jobs"]
+domain-chainlink = ["quant-pivot-api/domain-chainlink"]
 # Offline optimizer (argmin) for the weighted trainer's refinement step.
-optimize = ["quant-pivot-research/optimize"]
+optimize = ["research-jobs", "quant-pivot-research/optimize"]
 # Classical ML (smartcore) shadow candidates: trainer + runtime.
-ml-classical = ["quant-pivot-research/ml-classical"]
-default = []
+ml-classical = ["research-jobs", "quant-pivot-research/ml-classical"]
 
 [lints]
 workspace = true

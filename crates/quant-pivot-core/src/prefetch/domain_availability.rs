@@ -524,7 +524,7 @@ mod tests {
     use quant_pivot_error::storage::StorageError;
     use quant_pivot_models::{
         clickhouse::{
-            BookL2CheckpointRow, BookMicrostructureRow, ChSchemaVersion, DomainObservationRow,
+            BookL2LedgerRow, BookMicrostructureRow, ChSchemaVersion, DomainObservationRow,
             MarketResolutionRow, MidPriceBucketRow, TradeTapeRow,
         },
         domain::{
@@ -604,7 +604,7 @@ mod tests {
             start_date: None,
             end_date: None,
             resolved_at: None,
-            content_hash: ContentHash::parse(format!("blake3:{}", "d".repeat(64)))
+            content_hash: ContentHash::parse(&format!("blake3:{}", "d".repeat(64)))
                 .expect("market hash"),
             created_at: now,
             updated_at: now,
@@ -632,7 +632,7 @@ mod tests {
                 source_id: DomainSourceId::binance(),
                 instrument_key: instrument_for(symbol),
                 available_at: now,
-                binding_hash: ContentHash::parse(format!("blake3:{}", "c".repeat(64)))
+                binding_hash: ContentHash::parse(&format!("blake3:{}", "c".repeat(64)))
                     .expect("binding hash"),
             }],
             grounding: GroundingProof { spans: Vec::new() },
@@ -646,9 +646,10 @@ mod tests {
 
     fn linkage(market_id: &str, outcome: LinkageOutcome) -> MarketLinkage {
         let market_id = MarketId::new(market_id);
-        let metadata_hash = ContentHash::parse(format!("blake3:{}", "0".repeat(64))).expect("hash");
+        let metadata_hash =
+            ContentHash::parse(&format!("blake3:{}", "0".repeat(64))).expect("hash");
         let capability_registry_hash =
-            ContentHash::parse(format!("blake3:{}", "f".repeat(64))).expect("hash");
+            ContentHash::parse(&format!("blake3:{}", "f".repeat(64))).expect("hash");
         let content_hash = MarketLinkage::compute_content_hash(
             &market_id,
             DomainFamily::Crypto,
@@ -911,22 +912,22 @@ mod tests {
             Ok(Vec::new())
         }
 
-        async fn book_checkpoint_at(
+        async fn book_ledger_snapshot_at(
             &self,
             _token_id: &TokenId,
             _as_of_ms: i64,
             _decision_at_ms: i64,
-        ) -> Result<Option<BookL2CheckpointRow>, StorageError> {
+        ) -> Result<Option<BookL2LedgerRow>, StorageError> {
             Ok(None)
         }
 
-        async fn book_checkpoints_between(
+        async fn book_ledger_snapshots_between(
             &self,
             _token_ids: Vec<TokenId>,
             _from_ms: i64,
             _to_ms: i64,
             _available_by_ms: i64,
-        ) -> Result<Vec<BookL2CheckpointRow>, StorageError> {
+        ) -> Result<Vec<BookL2LedgerRow>, StorageError> {
             Ok(Vec::new())
         }
 
@@ -978,10 +979,10 @@ mod tests {
         ) -> Result<Option<DomainObservationRow>, StorageError> {
             if self.has_observation {
                 Ok(Some(DomainObservationRow {
-                    family: DomainFamily::Crypto.as_str().to_owned(),
+                    family: DomainFamily::Crypto.to_string(),
                     source_id: DomainSourceId::binance(),
                     instrument_key: instrument(),
-                    metric: DomainMetric::Close.as_str().to_owned(),
+                    metric: DomainMetric::Close.to_string(),
                     value: dec!(100000).into(),
                     event_time: 0,
                     publish_time: 0,

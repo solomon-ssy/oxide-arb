@@ -1,0 +1,13 @@
+[package]
+name = "quant-pivot-allocator"
+description = "Process-wide allocator policy for the quant-pivot workspace"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+tikv-jemallocator = { workspace = true }
+
+[lints]
+workspace = true

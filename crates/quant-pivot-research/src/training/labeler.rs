@@ -657,7 +657,7 @@ mod tests {
             fee_schedule: Some(MarketFeeSchedule {
                 market_id: market.clone(),
                 market_info_version_id: ClobMarketInfoVersionId::from_v7(),
-                market_info_payload_hash: ContentHash::parse(format!("blake3:{}", "f".repeat(64)))
+                market_info_payload_hash: ContentHash::parse(&format!("blake3:{}", "f".repeat(64)))
                     .expect("hash"),
                 platform_rate: Decimal::ZERO,
                 exponent: Decimal::ONE,

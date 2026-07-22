@@ -21,7 +21,7 @@ fn validate_row(row: &Model) -> Result<ResearchProfileRef, StorageError> {
     let profile_ref = ResearchProfileRef {
         id: row.research_profile_id.clone(),
         version,
-        content_hash: row.content_hash.clone(),
+        content_hash: row.content_hash,
     };
     let computed_hash = CanonicalDigest::content_hash_json(&row.spec).map_err(|error| {
         StorageError::invariant_violation(
@@ -81,7 +81,7 @@ async fn insert_or_verify(
         research_profile_artifact_id: Set(artifact_id.clone()),
         research_profile_id: Set(profile.profile_ref.id.clone()),
         version: Set(version),
-        content_hash: Set(profile.profile_ref.content_hash.clone()),
+        content_hash: Set(profile.profile_ref.content_hash),
         spec: Set(profile.spec.clone()),
         published_by: Set(profile.published_by.clone()),
         published_at: Set(profile.published_at),

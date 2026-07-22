@@ -15,7 +15,7 @@ use chrono::{Duration as ChronoDuration, Utc};
 use prometheus::IntCounter;
 use quant_pivot_core::{
     governance::{BiasTableApplicator, CoreCalibrationArtifactLoader, WeightOverlayApplicator},
-    ingest::{book_store::BookStore, market_registry::MarketRegistry},
+    ingest::{book_store::BookStore, data_plane_index::DataPlane, market_registry::MarketRegistry},
     observability::{
         factor_fact_writer::FactorEventWriter, feature_fact_writer::FeatureEventWriter,
         metrics_hub::MetricsHub, model_input_fact_writer::ModelInputEventWriter,
@@ -34,13 +34,16 @@ use quant_pivot_core::{
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     clickhouse::{
-        BookL2CheckpointRow, BookMicrostructureRow, DomainObservationRow, MarketResolutionRow,
+        BookL2LedgerRow, BookMicrostructureRow, DomainObservationRow, MarketResolutionRow,
         MidPriceBucketRow, TradeTapeRow,
     },
     config::TradeTapeOnChainConfig,
     domain::{
         data_plane::{DecisionBoundary, DecisionClock},
-        market::{EventRegistryInfo, MarketRegistryInfo, TokenInfo, book::BookLevel},
+        market::{
+            EventRegistryInfo, MarketRegistryInfo, TokenInfo,
+            book::{BookLevel, BookSnapshot},
+        },
         quant::{NewModelRun, NewModelVersion},
     },
     enums::{
@@ -175,22 +178,22 @@ impl QuantFactReadRepository for EmptyFactRead {
         Ok(Vec::new())
     }
 
-    async fn book_checkpoint_at(
+    async fn book_ledger_snapshot_at(
         &self,
         _token_id: &TokenId,
         _as_of_ms: i64,
         _decision_at_ms: i64,
-    ) -> Result<Option<BookL2CheckpointRow>, StorageError> {
+    ) -> Result<Option<BookL2LedgerRow>, StorageError> {
         Ok(None)
     }
 
-    async fn book_checkpoints_between(
+    async fn book_ledger_snapshots_between(
         &self,
         _token_ids: Vec<TokenId>,
         _from_ms: i64,
         _to_ms: i64,
         _available_by_ms: i64,
-    ) -> Result<Vec<BookL2CheckpointRow>, StorageError> {
+    ) -> Result<Vec<BookL2LedgerRow>, StorageError> {
         Ok(Vec::new())
     }
 
@@ -294,7 +297,7 @@ fn register_runtime_event(registry: &MarketRegistry, market_ids: Vec<MarketId>) 
         status: EventStatus::Active,
         market_ids,
         categories: CategorySet::from(MarketCategory::Sports),
-        tags: vec![MarketCategory::Sports.as_str().to_owned()],
+        tags: vec![MarketCategory::Sports.to_string()],
         neg_risk: false,
         end_date: Some(Utc::now() + ChronoDuration::days(2)),
         created_at: Utc::now() - ChronoDuration::days(2),
@@ -390,25 +393,35 @@ async fn build_features(
     FeatureEvidenceCommitment,
     DecisionBoundary,
 ) {
-    let registry = Arc::new(MarketRegistry::new());
-    let book_store = Arc::new(BookStore::new(Arc::new(MetricsHub::new())));
+    let data_plane = Arc::new(DataPlane::new());
+    let registry = Arc::new(MarketRegistry::new(Arc::clone(&data_plane)));
+    let book_store = Arc::new(BookStore::new(data_plane, Arc::new(MetricsHub::new())));
     let market = registry_market();
     register_runtime_event(&registry, vec![market.market_id.clone()]);
     registry.register_market(market);
-    book_store.apply_snapshot(
-        &TokenId::new(YES_TOKEN),
-        Arc::from([BookLevel::from_decimal_unchecked(
-            Price::new(Decimal::new(47, 2)),
-            Shares::new(Decimal::from(150)),
-        )]),
-        Arc::from([BookLevel::from_decimal_unchecked(
-            Price::new(Decimal::new(53, 2)),
-            Shares::new(Decimal::from(140)),
-        )]),
-        u64::try_from(Utc::now().timestamp_millis())
-            .expect("test book timestamp must be non-negative"),
+    let yes_token = book_store
+        .resolve(&TokenId::new(YES_TOKEN))
+        .expect("registered YES token");
+    let timestamp_ms = u64::try_from(Utc::now().timestamp_millis())
+        .expect("test book timestamp must be non-negative");
+    assert!(book_store.publish(
+        yes_token,
+        BookSnapshot::new(
+            Arc::from([BookLevel::from_decimal_unchecked(
+                Price::new(Decimal::new(47, 2)),
+                Shares::new(Decimal::from(150)),
+            )]),
+            Arc::from([BookLevel::from_decimal_unchecked(
+                Price::new(Decimal::new(53, 2)),
+                Shares::new(Decimal::from(140)),
+            )]),
+            timestamp_ms,
+            1,
+        ),
+        1,
+        1,
         None,
-    );
+    ));
     let live_pit = InMemoryDecisionSnapshotSource::freeze(registry.as_ref(), book_store.as_ref());
 
     let feature_repo = Arc::new(PgFeatureRepository::new(db.clone())) as Arc<dyn FeatureRepository>;
@@ -449,7 +462,7 @@ async fn build_features(
     let ids = result
         .persisted
         .iter()
-        .map(|info| info.feature_vector_id.clone())
+        .map(|info| info.feature_vector_id)
         .collect();
     (
         result.accepted,
@@ -577,19 +590,27 @@ fn apply_book(
     ask_shares: i64,
     ts_ms: u64,
 ) {
-    book_store.apply_snapshot(
-        &TokenId::new(token),
-        Arc::from([BookLevel::from_decimal_unchecked(
-            Price::new(bid_px),
-            Shares::new(Decimal::from(bid_shares)),
-        )]),
-        Arc::from([BookLevel::from_decimal_unchecked(
-            Price::new(ask_px),
-            Shares::new(Decimal::from(ask_shares)),
-        )]),
-        ts_ms,
+    let token = book_store
+        .resolve(&TokenId::new(token))
+        .expect("registered book token");
+    assert!(book_store.publish(
+        token,
+        BookSnapshot::new(
+            Arc::from([BookLevel::from_decimal_unchecked(
+                Price::new(bid_px),
+                Shares::new(Decimal::from(bid_shares)),
+            )]),
+            Arc::from([BookLevel::from_decimal_unchecked(
+                Price::new(ask_px),
+                Shares::new(Decimal::from(ask_shares)),
+            )]),
+            ts_ms,
+            1,
+        ),
+        1,
+        1,
         None,
-    );
+    ));
 }
 
 /// Build + persist feature vectors for the primary market plus dispersed peers,
@@ -603,8 +624,9 @@ async fn build_cross_section_features(
     FeatureEvidenceCommitment,
     DecisionBoundary,
 ) {
-    let registry = Arc::new(MarketRegistry::new());
-    let book_store = Arc::new(BookStore::new(Arc::new(MetricsHub::new())));
+    let data_plane = Arc::new(DataPlane::new());
+    let registry = Arc::new(MarketRegistry::new(Arc::clone(&data_plane)));
+    let book_store = Arc::new(BookStore::new(data_plane, Arc::new(MetricsHub::new())));
     let ts_ms = u64::try_from(Utc::now().timestamp_millis())
         .expect("test book timestamp must be non-negative");
     let primary = registry_market();
@@ -685,7 +707,7 @@ async fn build_cross_section_features(
     let ids = result
         .persisted
         .iter()
-        .map(|info| info.feature_vector_id.clone())
+        .map(|info| info.feature_vector_id)
         .collect();
     let selection = result
         .accepted
@@ -736,27 +758,27 @@ async fn publish_weighted_model(
         model_input_contract_hash(&input_contract).expect("input contract hash");
     let model_spec_id = ModelSpecId::from_v7();
     let spec = model_spec_fixtures::new_model_spec_fixture(
-        model_spec_id.clone(),
+        model_spec_id,
         "weighted-e2e",
         ModelFamily::WeightedFactor,
         86_400,
         input_contract.clone(),
         ModelTrainingContract::settlement_default(),
     );
-    let model_spec_definition_hash = spec.definition_hash.clone();
+    let model_spec_definition_hash = spec.definition_hash;
 
     let artifact = ModelArtifact::WeightedFactor(Box::new(WeightedFactorModelArtifact {
         header: ModelArtifactHeader {
-            model_version_id: model_version_id.clone(),
+            model_version_id,
             model_spec_definition_hash,
             profile_ref: execution_pg_seed::fixture_profile_ref(),
             model_family: ModelFamily::WeightedFactor,
             feature_schema_hash,
-            factor_schema_hash: factor_schema_hash.clone(),
+            factor_schema_hash,
             trade_policy_artifact_id: None,
             trade_policy_hash: None,
         },
-        training_dataset_hash: factor_schema_hash.clone(),
+        training_dataset_hash: factor_schema_hash,
         training_input_hash: factor_schema_hash,
         input_contract,
         input_contract_hash,
@@ -782,7 +804,7 @@ async fn publish_weighted_model(
     registry.create_model_spec(spec).await.expect("create spec");
     registry
         .create_model_version(NewModelVersion {
-            model_version_id: model_version_id.clone(),
+            model_version_id,
             model_spec_id,
             version: 1,
             artifact_hash,
@@ -828,13 +850,13 @@ async fn register_candidate_sibling(
     let candidate_id = ModelVersionId::from_v7();
     match &mut artifact {
         ModelArtifact::WeightedFactor(weighted) => {
-            weighted.header.model_version_id = candidate_id.clone();
+            weighted.header.model_version_id = candidate_id;
         }
         ModelArtifact::Classical(classical) => {
-            classical.header.model_version_id = candidate_id.clone();
+            classical.header.model_version_id = candidate_id;
         }
         ModelArtifact::SellScorer(sell) => {
-            sell.header.model_version_id = candidate_id.clone();
+            sell.header.model_version_id = candidate_id;
         }
     }
     artifact.validate().expect("candidate artifact valid");
@@ -849,15 +871,15 @@ async fn register_candidate_sibling(
         .expect("store candidate artifact");
     registry
         .create_model_version(NewModelVersion {
-            model_version_id: candidate_id.clone(),
-            model_spec_id: published.model_spec_id.clone(),
+            model_version_id: candidate_id,
+            model_spec_id: published.model_spec_id,
             version: published.version + 1,
             artifact_hash,
             category_scope: None,
             profile_ref: published.profile_ref.clone(),
-            training_dataset_id: published.training_dataset_id.clone(),
-            trade_policy_artifact_id: published.trade_policy_artifact_id.clone(),
-            trade_policy_hash: published.trade_policy_hash.clone(),
+            training_dataset_id: published.training_dataset_id,
+            trade_policy_artifact_id: published.trade_policy_artifact_id,
+            trade_policy_hash: published.trade_policy_hash,
             publish_path_set_id: None,
             derivation: NewModelVersion::training_derivation(),
             metrics: ModelVersionMetrics::not_measured("test fixture"),
@@ -892,7 +914,7 @@ fn factors_with_overlay_skew(
         let value = if index == lead_index { lead } else { tail };
         weights
             .weights
-            .insert(spec.name.as_str().to_owned(), DecimalValue::new(value));
+            .insert(spec.name.to_string(), DecimalValue::new(value));
     }
     let mut config = base.clone();
     config.factor_weights = weights;
@@ -901,8 +923,8 @@ fn factors_with_overlay_skew(
 
 fn model_config(active: &ModelVersionId, shadow: Option<&ModelVersionId>) -> ModelConfig {
     ModelConfig {
-        active_model_version_id: Some(ModelVersionRef::new(active.clone())),
-        shadow_model_version_id: shadow.cloned().map(ModelVersionRef::new),
+        active_model_version_id: Some(ModelVersionRef::new(*active)),
+        shadow_model_version_id: shadow.copied().map(ModelVersionRef::new),
         min_model_confidence: DecimalValue::new(rust_decimal_macros::dec!(0.00)),
         candidate_score_floor: DecimalValue::new(rust_decimal_macros::dec!(0.00)),
         ..ModelConfig::default()
@@ -974,10 +996,11 @@ pub async fn online_loop_selection_to_signal_candidates() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     seed_catalog(&db).await;
+    seed_peer_markets(&db).await;
 
     let factors = factors_config();
     let features = FeaturesConfig::default();
-    let (vectors, ids, evidence, boundary) = build_features(&db).await;
+    let (vectors, ids, selection, evidence, boundary) = build_cross_section_features(&db).await;
 
     let store = artifact_store();
     let active = publish_weighted_model(&db, &store, &factors, &features).await;
@@ -991,7 +1014,6 @@ pub async fn online_loop_selection_to_signal_candidates() {
         Arc::new(WeightOverlayApplicator::new()),
     );
 
-    let selection = vec![selected_market()];
     let outcome = runner
         .run(ModelRunRequest {
             decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
@@ -1047,10 +1069,11 @@ pub async fn inference_degradation_shadow_failure_keeps_active() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     seed_catalog(&db).await;
+    seed_peer_markets(&db).await;
 
     let factors = factors_config();
     let features = FeaturesConfig::default();
-    let (vectors, ids, evidence, boundary) = build_features(&db).await;
+    let (vectors, ids, selection, evidence, boundary) = build_cross_section_features(&db).await;
 
     let store = artifact_store();
     let active = publish_weighted_model(&db, &store, &factors, &features).await;
@@ -1067,7 +1090,6 @@ pub async fn inference_degradation_shadow_failure_keeps_active() {
     // Shadow points at a version that does not exist: the shadow path degrades,
     // the active result is unaffected, and no critical alert fires.
     let missing_shadow = ModelVersionId::from_v7();
-    let selection = vec![selected_market()];
     let outcome = runner
         .run(ModelRunRequest {
             decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
@@ -1235,7 +1257,7 @@ pub async fn hot_update_changes_candidate_weights_not_published_artifact() {
     let shadow_run_id = second
         .shadow
         .as_ref()
-        .and_then(|outcome| outcome.model_run_id.clone())
+        .and_then(|outcome| outcome.model_run_id)
         .expect("shadow run row");
     let shadow_run = PgModelRunRepository::new(db.clone())
         .find_by_id(&shadow_run_id)
@@ -1302,9 +1324,9 @@ pub async fn model_run_create_find_succeed_fail() {
     let db = pool.connection().clone();
     let repo = PgModelRunRepository::new(db.clone());
 
-    let zero = ContentHash::parse(format!("blake3:{}", "0".repeat(64))).expect("hash");
+    let zero = ContentHash::parse(&format!("blake3:{}", "0".repeat(64))).expect("hash");
     let new_run = |id: &ModelRunId| NewModelRun {
-        model_run_id: id.clone(),
+        model_run_id: *id,
         run_kind: ModelRunKind::LiveInference,
         model_version_id: None,
         decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
@@ -1312,7 +1334,7 @@ pub async fn model_run_create_find_succeed_fail() {
         window_start: Utc::now(),
         window_end: Utc::now(),
         status: ModelRunStatus::Running,
-        input_hash: zero.clone(),
+        input_hash: zero,
         output_hash: None,
         error_code: None,
         error_message: None,
@@ -1325,9 +1347,9 @@ pub async fn model_run_create_find_succeed_fail() {
     repo.create(new_run(&ok_id)).await.expect("create");
     let found = repo.find_by_id(&ok_id).await.expect("find").expect("row");
     assert_eq!(found.status, ModelRunStatus::Running);
-    let output = ContentHash::parse(format!("blake3:{}", "1".repeat(64))).expect("hash");
+    let output = ContentHash::parse(&format!("blake3:{}", "1".repeat(64))).expect("hash");
     let succeeded = repo
-        .succeed(&ok_id, output.clone(), Utc::now(), None)
+        .succeed(&ok_id, output, Utc::now(), None)
         .await
         .expect("succeed");
     assert_eq!(succeeded.status, ModelRunStatus::Succeeded);

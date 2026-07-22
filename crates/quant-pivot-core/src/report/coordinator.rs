@@ -90,7 +90,7 @@ impl ReportCoordinator {
         if let Some(run) = self
             .runs
             .claim_next_run(
-                self.worker_id.clone(),
+                self.worker_id,
                 self.config.lease_secs,
                 self.config.ad_hoc_ttl_secs,
                 claim_config,
@@ -98,7 +98,7 @@ impl ReportCoordinator {
             .await?
         {
             self.publisher.publish_run(&run, Utc::now());
-            self.execute_with_heartbeat(run).await?;
+            Box::pin(self.execute_with_heartbeat(run)).await?;
         }
         let health = self.runs.schedule_health().await?;
         self.publisher.record_schedule_health(&health)?;
@@ -193,7 +193,7 @@ impl ReportCoordinator {
                 })?;
             let command = MaterializeReportSchedule {
                 schedule_id: state.schedule_id,
-                decision_policy_snapshot_id: version_id.clone(),
+                decision_policy_snapshot_id: *version_id,
                 spec_hash: state.spec_hash,
                 expected_next_scheduled_for: window.first,
                 latest_scheduled_for: window.latest,
@@ -229,7 +229,7 @@ impl ReportCoordinator {
                     _ = timer.tick() => {
                         run = self.runs.heartbeat_run(
                             &run.report_run_id,
-                            self.worker_id.clone(),
+                            self.worker_id,
                             self.config.lease_secs,
                         ).await.map_err(QuantError::from)?;
                         self.publisher.publish_run(&run, Utc::now());
@@ -269,7 +269,7 @@ fn reconcile_commands(
                 })?;
             Ok(ReconcileReportSchedule {
                 schedule_id: schedule.schedule_id.clone(),
-                decision_policy_snapshot_id: version_id.clone(),
+                decision_policy_snapshot_id: *version_id,
                 spec_hash: CanonicalDigest::content_hash_json(schedule)?,
                 next_scheduled_for,
                 enabled: schedule.enabled,
@@ -321,7 +321,7 @@ fn claim_config(
         })
         .collect::<Result<Vec<_>, ReportError>>()?;
     Ok(ReportRunClaimConfig {
-        decision_policy_snapshot_id: version_id.clone(),
+        decision_policy_snapshot_id: *version_id,
         ad_hoc_default_top_n,
         ad_hoc_default_knowledge_lag_secs,
         schedules,

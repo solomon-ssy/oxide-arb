@@ -104,17 +104,16 @@ async fn resolve_idempotent_activation(
             "idempotency key is already bound to a different activation",
         ));
     }
-    let committed_snapshot =
-        SnapshotEntity::find_by_id(existing.decision_policy_snapshot_id.clone())
-            .one(db)
-            .await
-            .map_err(StorageError::from)?
-            .ok_or_else(|| {
-                StorageError::invariant_violation(
-                    Some("policy_activation"),
-                    "idempotent activation references a missing snapshot",
-                )
-            })?;
+    let committed_snapshot = SnapshotEntity::find_by_id(existing.decision_policy_snapshot_id)
+        .one(db)
+        .await
+        .map_err(StorageError::from)?
+        .ok_or_else(|| {
+            StorageError::invariant_violation(
+                Some("policy_activation"),
+                "idempotent activation references a missing snapshot",
+            )
+        })?;
     if existing.bundle_generation != committed_snapshot.bundle_generation {
         return Err(StorageError::invariant_violation(
             Some("policy_activation"),
@@ -137,16 +136,16 @@ async fn insert_activation_ledger(
     snapshot: &NewDecisionPolicySnapshot,
 ) -> Result<(), StorageError> {
     ActivationAuditEntity::insert(ActivationAuditActiveModel {
-        audit_event_id: Set(inserted.audit_event_id.clone()),
-        policy_activation_id: Set(inserted.policy_activation_id.clone()),
+        audit_event_id: Set(inserted.audit_event_id),
+        policy_activation_id: Set(inserted.policy_activation_id),
         bundle_generation: Set(inserted.bundle_generation),
         resource_kind: Set(inserted.resource_kind),
-        policy_revision_id: Set(inserted.policy_revision_id.clone()),
-        decision_policy_snapshot_id: Set(inserted.decision_policy_snapshot_id.clone()),
-        snapshot_hash: Set(snapshot.snapshot_hash.clone()),
-        activation_request_hash: Set(inserted.activation_request_hash.clone()),
+        policy_revision_id: Set(inserted.policy_revision_id),
+        decision_policy_snapshot_id: Set(inserted.decision_policy_snapshot_id),
+        snapshot_hash: Set(snapshot.snapshot_hash),
+        activation_request_hash: Set(inserted.activation_request_hash),
         actor_kind: Set(inserted.activated_by_kind),
-        actor_user_id: Set(inserted.activated_by_user_id.clone()),
+        actor_user_id: Set(inserted.activated_by_user_id),
         actor_label: Set(inserted.activated_by_label.clone()),
         reason: Set(inserted.reason.clone()),
         occurred_at: Set(inserted.activated_at),
@@ -156,11 +155,11 @@ async fn insert_activation_ledger(
     .await
     .map_err(StorageError::from)?;
     ActivationOutboxEntity::insert(ActivationOutboxActiveModel {
-        audit_event_id: Set(inserted.audit_event_id.clone()),
-        policy_activation_id: Set(inserted.policy_activation_id.clone()),
+        audit_event_id: Set(inserted.audit_event_id),
+        policy_activation_id: Set(inserted.policy_activation_id),
         bundle_generation: Set(inserted.bundle_generation),
-        decision_policy_snapshot_id: Set(inserted.decision_policy_snapshot_id.clone()),
-        snapshot_hash: Set(snapshot.snapshot_hash.clone()),
+        decision_policy_snapshot_id: Set(inserted.decision_policy_snapshot_id),
+        snapshot_hash: Set(snapshot.snapshot_hash),
         created_at: Set(inserted.created_at),
     })
     .exec(db)
@@ -198,7 +197,7 @@ async fn load_profile_documents(
     let ids = references
         .all()
         .into_iter()
-        .map(|reference| reference.profile_artifact_id.clone())
+        .map(|reference| reference.profile_artifact_id)
         .collect::<Vec<_>>();
     let rows = ProfileArtifactEntity::find()
         .filter(ProfileArtifactColumn::ProfileArtifactId.is_in(ids))
@@ -260,7 +259,7 @@ async fn resolve_snapshot_models(
     let ids = models
         .iter()
         .flat_map(|model| model.snapshot.profile_artifact_refs.all())
-        .map(|reference| reference.profile_artifact_id.clone())
+        .map(|reference| reference.profile_artifact_id)
         .collect::<Vec<_>>();
     let rows = if ids.is_empty() {
         Vec::new()
@@ -538,8 +537,8 @@ async fn insert_snapshot_if_absent(
     db: &impl ConnectionTrait,
     snapshot: NewDecisionPolicySnapshot,
 ) -> Result<(), StorageError> {
-    let snapshot_id = snapshot.decision_policy_snapshot_id.clone();
-    let expected_hash = snapshot.snapshot_hash.clone();
+    let snapshot_id = snapshot.decision_policy_snapshot_id;
+    let expected_hash = snapshot.snapshot_hash;
     let expected_snapshot = snapshot.snapshot.clone();
     let outcome = SnapshotEntity::insert(snapshot.into_active_model())
         .on_conflict_do_nothing_on([SnapshotColumn::DecisionPolicySnapshotId])
@@ -549,7 +548,7 @@ async fn insert_snapshot_if_absent(
     match outcome {
         TryInsertResult::Inserted(1) => Ok(()),
         TryInsertResult::Inserted(0) | TryInsertResult::Conflicted => {
-            let existing = SnapshotEntity::find_by_id(snapshot_id.clone())
+            let existing = SnapshotEntity::find_by_id(snapshot_id)
                 .one(db)
                 .await
                 .map_err(StorageError::from)?
@@ -583,10 +582,10 @@ async fn validate_activation_evidence(
     db: &impl ConnectionTrait,
     activation: &NewPolicyActivation,
 ) -> Result<RevisionModel, StorageError> {
-    let evidence = ApprovalEntity::find_by_id(activation.policy_approval_id.clone())
+    let evidence = ApprovalEntity::find_by_id(activation.policy_approval_id)
         .join(JoinType::LeftJoin, ApprovalRelation::Activation.def())
         .filter(ActivationColumn::PolicyActivationId.is_null())
-        .filter(ApprovalColumn::PolicyRevisionId.eq(activation.policy_revision_id.clone()))
+        .filter(ApprovalColumn::PolicyRevisionId.eq(activation.policy_revision_id))
         .filter(ApprovalColumn::ResourceKind.eq(activation.resource_kind))
         .filter(ApprovalColumn::Decision.eq(PolicyApprovalDecision::Approved))
         .filter(
@@ -600,9 +599,7 @@ async fn validate_activation_evidence(
         .find_also_related(RevisionEntity)
         .filter(RevisionColumn::ResourceKind.eq(activation.resource_kind))
         .filter(RevisionColumn::Status.eq(PolicyRevisionStatus::Validated))
-        .filter(
-            RevisionColumn::PreflightTokenHash.eq(Some(activation.preflight_token_hash.clone())),
-        )
+        .filter(RevisionColumn::PreflightTokenHash.eq(Some(activation.preflight_token_hash)))
         .filter(
             Expr::col((RevisionEntity, RevisionColumn::PreflightExpiresAt))
                 .gt(Expr::current_timestamp()),
@@ -769,11 +766,11 @@ impl PolicyRepository for PgPolicyRepository {
             let profile_artifact_id =
                 ProfileArtifactId::from_content_address(kind.as_str(), &content_hash);
             let insert = NewPolicyProfileArtifact {
-                profile_artifact_id: profile_artifact_id.clone(),
+                profile_artifact_id,
                 kind,
                 schema_version: document.schema_version(),
                 document: document.clone(),
-                content_hash: content_hash.clone(),
+                content_hash,
                 created_by_kind: PolicyActorKind::System,
                 created_by_user_id: None,
                 created_by_label: actor_label.to_owned(),
@@ -793,7 +790,7 @@ impl PolicyRepository for PgPolicyRepository {
                     "single profile artifact insert returned an invalid row count",
                 ));
             }
-            let persisted = ProfileArtifactEntity::find_by_id(profile_artifact_id.clone())
+            let persisted = ProfileArtifactEntity::find_by_id(profile_artifact_id)
                 .one(&transaction)
                 .await
                 .map_err(StorageError::from)?
@@ -857,7 +854,7 @@ impl PolicyRepository for PgPolicyRepository {
                 RevisionColumn::PreflightExpiresAt,
                 Expr::value(Some(preflight_expires_at)),
             )
-            .filter(RevisionColumn::PolicyRevisionId.eq(revision_id.clone()))
+            .filter(RevisionColumn::PolicyRevisionId.eq(*revision_id))
             .filter(
                 Condition::any()
                     .add(RevisionColumn::Status.eq(PolicyRevisionStatus::Draft))
@@ -879,7 +876,7 @@ impl PolicyRepository for PgPolicyRepository {
         &self,
         revision_id: &PolicyRevisionId,
     ) -> Result<Option<PolicyRevisionInfo>, StorageError> {
-        RevisionEntity::find_by_id(revision_id.clone())
+        RevisionEntity::find_by_id(*revision_id)
             .one(&self.db)
             .await
             .map(|row| row.map(Into::into))
@@ -927,7 +924,7 @@ impl PolicyRepository for PgPolicyRepository {
         approval: RecordPolicyApproval,
     ) -> Result<PolicyApprovalInfo, StorageError> {
         let transaction = self.db.begin().await.map_err(StorageError::from)?;
-        let mut query = RevisionEntity::find_by_id(approval.policy_revision_id.clone())
+        let mut query = RevisionEntity::find_by_id(approval.policy_revision_id)
             .filter(RevisionColumn::ResourceKind.eq(approval.resource_kind));
         if approval.decision == PolicyApprovalDecision::Approved {
             query = query
@@ -989,7 +986,7 @@ impl PolicyRepository for PgPolicyRepository {
         &self,
         approval_id: &PolicyApprovalId,
     ) -> Result<Option<PolicyApprovalInfo>, StorageError> {
-        ApprovalEntity::find_by_id(approval_id.clone())
+        ApprovalEntity::find_by_id(*approval_id)
             .one(&self.db)
             .await
             .map(|row| row.map(Into::into))
@@ -1132,7 +1129,7 @@ impl PolicyRepository for PgPolicyRepository {
             attaching_initial_ledger,
         )?;
         verify_resource_cas(&transaction, &activation).await?;
-        activation.previous_policy_revision_id = activation.expected_active_revision_id.clone();
+        activation.previous_policy_revision_id = activation.expected_active_revision_id;
         if activation.policy_revision_id != revision.policy_revision_id {
             return Err(StorageError::invariant_violation(
                 Some("policy_activation"),
@@ -1148,9 +1145,8 @@ impl PolicyRepository for PgPolicyRepository {
         if !attaching_initial_ledger {
             let mut guard_update = guard.into_active_model();
             guard_update.generation = Set(next_generation);
-            guard_update.current_snapshot_id =
-                Set(Some(snapshot.decision_policy_snapshot_id.clone()));
-            guard_update.current_snapshot_hash = Set(Some(snapshot.snapshot_hash.clone()));
+            guard_update.current_snapshot_id = Set(Some(snapshot.decision_policy_snapshot_id));
+            guard_update.current_snapshot_hash = Set(Some(snapshot.snapshot_hash));
             guard_update.updated_at = Set(Utc::now());
             guard_update
                 .update(&transaction)
@@ -1279,7 +1275,7 @@ impl PolicyRepository for PgPolicyRepository {
         &self,
         snapshot_id: &DecisionPolicySnapshotId,
     ) -> Result<Option<DecisionPolicySnapshotInfo>, StorageError> {
-        let model = SnapshotEntity::find_by_id(snapshot_id.clone())
+        let model = SnapshotEntity::find_by_id(*snapshot_id)
             .one(&self.db)
             .await
             .map_err(StorageError::from)?;

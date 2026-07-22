@@ -3,7 +3,7 @@
 //! The artifact is lossless and queryable: queryable meta columns
 //! (`example_id` / `market_id` / `token_id` / `decision_at_ms`) sit alongside a
 //! canonical-JSON `payload` column that fully reconstructs each
-//! [`TrainingExample`]. Offline only (`dataframe` feature); never on the hot path.
+//! [`TrainingExample`]. Offline only (`research-jobs` feature); never on the hot path.
 
 use std::io::Cursor;
 
@@ -280,8 +280,8 @@ impl DatasetParquetCodec {
         for example in examples {
             row_kinds.push(EXAMPLE_ROW.to_owned());
             example_ids.push(Some(example.example_id.as_uuid().to_string()));
-            market_ids.push(Some(example.market_id.as_str().to_owned()));
-            token_ids.push(Some(example.token_id.as_str().to_owned()));
+            market_ids.push(Some(example.market_id.to_string()));
+            token_ids.push(Some(example.token_id.to_string()));
             decision_at_ms.push(Some(example.decision_at().timestamp_millis()));
             let payload =
                 serde_json::to_string(example).map_err(|error| ResearchError::ParquetCodec {
@@ -368,7 +368,7 @@ mod tests {
 
     fn manifest(examples: &[TrainingExample]) -> DatasetManifest {
         let hash = |seed: char| {
-            ContentHash::parse(format!("blake3:{}", seed.to_string().repeat(64))).expect("hash")
+            ContentHash::parse(&format!("blake3:{}", seed.to_string().repeat(64))).expect("hash")
         };
         let model_spec_id = ModelSpecId::from_v7();
         let window_start = Utc::now() - Duration::days(1);

@@ -63,7 +63,7 @@ impl VenueEvidenceCollector {
         token_id: &TokenId,
         now: DateTime<Utc>,
     ) -> ReconciliationEvidence {
-        let detail = self.book_store.load(token_id).map_or_else(
+        let detail = self.book_store.load_by_id(token_id).map_or_else(
             || "no published book snapshot".to_owned(),
             |snapshot| {
                 format!(
@@ -94,7 +94,7 @@ fn authenticated_fee_evidence(
         FeeLiquidityRole::Taker => LiquidityRole::Taker,
     };
     let schedule = PitFeeSchedule {
-        schedule_hash: prepared.schedule_hash.clone(),
+        schedule_hash: prepared.schedule_hash,
         effective_at: prepared.effective_at,
         available_at: prepared.available_at,
         platform_rate: trade.fee_rate_bps.to_fraction(),

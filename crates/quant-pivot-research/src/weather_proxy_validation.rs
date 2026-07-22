@@ -196,12 +196,8 @@ fn daily_extremes(
         latest
             .entry((station, fact.observed_at))
             .and_modify(|current| {
-                if (fact.revision, fact.available_at, fact.report_hash.as_str())
-                    > (
-                        current.revision,
-                        current.available_at,
-                        current.report_hash.as_str(),
-                    )
+                if (fact.revision, fact.available_at, fact.report_hash)
+                    > (current.revision, current.available_at, current.report_hash)
                 {
                     *current = fact;
                 }

@@ -253,7 +253,7 @@ mod tests {
         let kept = snapshot
             .included
             .iter()
-            .map(|market| market.market_id.as_str().to_owned())
+            .map(|market| market.market_id.to_string())
             .collect::<Vec<_>>();
         assert!(kept.contains(&"0xsports".to_owned()));
         assert!(!kept.contains(&"0xpolitics".to_owned()));
@@ -409,7 +409,7 @@ mod tests {
         let kept: Vec<_> = snapshot
             .included
             .iter()
-            .map(|m| m.market_id.as_str().to_owned())
+            .map(|m| m.market_id.to_string())
             .collect();
         assert!(
             kept.contains(&"0xsports".to_owned()),
@@ -522,7 +522,13 @@ mod tests {
         assert_eq!(snapshot.excluded.len(), 1);
         assert_eq!(snapshot.excluded[0].reason, ExclusionReason::NotOpen);
         // Empty selection is still a valid, hashable snapshot.
-        assert!(!snapshot.selector_hash.as_str().is_empty());
+        assert!(
+            snapshot
+                .selector_hash
+                .as_bytes()
+                .iter()
+                .any(|byte| *byte != 0)
+        );
     }
 
     #[tokio::test]

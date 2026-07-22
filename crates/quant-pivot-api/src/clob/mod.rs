@@ -630,7 +630,7 @@ impl ClobClient {
         self.rate_limiter.acquire("DELETE /order").await;
 
         let sdk = Arc::clone(&self.sdk);
-        let oid = order_id.as_str().to_owned();
+        let oid = order_id.to_string();
 
         retry::retry_with_policy(&RetryPolicy::clob_default(), || {
             let sdk = Arc::clone(&sdk);

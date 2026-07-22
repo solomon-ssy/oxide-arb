@@ -171,7 +171,7 @@ impl CalibrationArtifactLoader for CoreCalibrationArtifactLoader {
         }
         validate_model_score_payload(payload, info.sample_count)?;
         Ok(ResolvedCalibration {
-            artifact_id: artifact_id.clone(),
+            artifact_id: *artifact_id,
             mapping: payload.mapping.clone(),
             reliability: payload.reliability.clone(),
         })
@@ -338,7 +338,7 @@ mod tests {
 
     fn fake_content_hash(seed: u8) -> ContentHash {
         let hex: String = format!("{seed:02x}").chars().cycle().take(64).collect();
-        ContentHash::parse(format!("blake3:{hex}")).expect("hash")
+        ContentHash::parse(&format!("blake3:{hex}")).expect("hash")
     }
 
     fn valid_row(active: bool) -> CalibrationArtifactInfo {
@@ -409,7 +409,7 @@ mod tests {
     async fn load_fails_closed_on_wrong_kind() {
         let mut row = valid_row(true);
         row.kind = CalibrationKind::MarketPriceBias;
-        let artifact_id = row.artifact_id.clone();
+        let artifact_id = row.artifact_id;
         let loader = loader(Some(row));
         let result = loader.load(&artifact_id).await;
         assert!(result.is_err());
@@ -418,7 +418,7 @@ mod tests {
     #[tokio::test]
     async fn load_rejects_inactive_artifact() {
         let row = valid_row(false);
-        let artifact_id = row.artifact_id.clone();
+        let artifact_id = row.artifact_id;
         let loader = loader(Some(row));
         let result = loader.load(&artifact_id).await;
         assert!(
@@ -441,7 +441,7 @@ mod tests {
             &payload,
         )
         .expect("hash");
-        let artifact_id = row.artifact_id.clone();
+        let artifact_id = row.artifact_id;
         assert!(loader(Some(row)).load(&artifact_id).await.is_err());
     }
 
@@ -454,7 +454,7 @@ mod tests {
         };
         payload.reliability.ece = dec!(0.99);
         row.payload = CalibrationArtifactPayload::ModelScore(payload);
-        let artifact_id = row.artifact_id.clone();
+        let artifact_id = row.artifact_id;
         let loader = loader(Some(row));
         let result = loader.load(&artifact_id).await;
         assert!(
@@ -466,7 +466,7 @@ mod tests {
     #[tokio::test]
     async fn load_succeeds_for_active_valid_artifact() {
         let row = valid_row(true);
-        let artifact_id = row.artifact_id.clone();
+        let artifact_id = row.artifact_id;
         let loader = loader(Some(row));
         let resolved = loader.load(&artifact_id).await.expect("resolve");
         assert_eq!(resolved.artifact_id, artifact_id);

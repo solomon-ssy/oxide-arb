@@ -30,10 +30,10 @@ pub fn map_snapshot_to_model(
         .collect::<HashMap<MarketId, MarketStatus>>();
 
     let snapshot_row = NewMarketSelection {
-        market_selection_id: snapshot.market_selection_id.clone(),
+        market_selection_id: snapshot.market_selection_id,
         decision_at: snapshot.decision_at,
-        decision_policy_snapshot_id: snapshot.decision_policy_snapshot_id.clone(),
-        selector_hash: snapshot.selector_hash.clone(),
+        decision_policy_snapshot_id: snapshot.decision_policy_snapshot_id,
+        selector_hash: snapshot.selector_hash,
         market_count: i32::try_from(snapshot.included.len()).map_err(|err| {
             ReportError::NumericOverflow {
                 field: "market_selection.market_count",
@@ -61,7 +61,7 @@ pub fn map_snapshot_to_model(
                     ),
                 })?;
             Ok(NewMarketSelectionMember {
-                market_selection_id: snapshot.market_selection_id.clone(),
+                market_selection_id: snapshot.market_selection_id,
                 market_id: selected.market_id.clone(),
                 event_id: selected.event_id.clone(),
                 category: selected.category,
@@ -132,7 +132,7 @@ mod tests {
             market_selection_id: MarketSelectionId::from_v7(),
             decision_at: as_of(),
             decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
-            selector_hash: ContentHash::parse(format!("blake3:{}", "b".repeat(64)))
+            selector_hash: ContentHash::parse(&format!("blake3:{}", "b".repeat(64)))
                 .expect("valid hash"),
             included: vec![SelectedMarket {
                 market_id: MarketId::new("0xok"),

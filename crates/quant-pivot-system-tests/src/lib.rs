@@ -5,6 +5,8 @@
 //! its scenarios against that stack; production crates keep only unit and
 //! deterministic contract tests.
 
+use quant_pivot_allocator as _;
+
 pub mod postgres;
 pub mod production_stack;
 pub mod resources;

@@ -6,8 +6,7 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{
     clickhouse::{
-        BookL2CheckpointRow, BookL2EventRow, BookStreamSessionRow, ChPrice, ChSchemaVersion,
-        ChShares,
+        BookL2LedgerRow, BookStreamSessionRow, ChDigest, ChPrice, ChSchemaVersion, ChShares,
     },
     domain::data_plane::DecisionSource,
     enums::{
@@ -24,7 +23,7 @@ use quant_pivot_models::{
         DecisionCaptureEvidence, DecisionPolicySnapshotId, DecisionSnapshotEvidence, MarketContext,
         Price, Probability, ReaderContractVersion, RecommendationIdentity, ResearchEvaluationTrack,
         ResearchProfileRef, SOURCE_SLICE_MANIFEST_FORMAT_VERSION, SchemaContractVersion, Shares,
-        SourceSliceCatalogProof, SourceSliceManifestRef, SourceSliceManifestV1,
+        SourceSliceCatalogProof, SourceSliceManifest, SourceSliceManifestRef,
         SourceSliceObjectKind, SourceSliceObjectRef, SourceSlicePitCutoffs, Usd,
     },
 };
@@ -52,7 +51,7 @@ fn source_hash(example: &TrainingExample, role: &str) -> ContentHash {
     .expect("canonical decision-capture source hash")
 }
 
-/// Bind a complete V1 capture to an already frozen training example.
+/// Bind a complete capture to an already frozen training example.
 ///
 /// All source clocks are derived from the example's `DecisionBoundary`; the
 /// fixture never subtracts knowledge lag independently or invents a second
@@ -158,8 +157,7 @@ fn source_record<T: Serialize>(
 const fn source_object_slug(kind: SourceSliceObjectKind) -> &'static str {
     match kind {
         SourceSliceObjectKind::ClobMarketInfo => "clob-market-info",
-        SourceSliceObjectKind::L2Event => "l2-event",
-        SourceSliceObjectKind::L2Checkpoint => "l2-checkpoint",
+        SourceSliceObjectKind::L2Ledger => "l2-ledger",
         SourceSliceObjectKind::L2Session => "l2-session",
         _ => "source-object",
     }
@@ -171,7 +169,7 @@ async fn persist_source_object(
     records: Vec<SourceSliceRecord>,
 ) -> QuantResult<SourceSliceObjectRef> {
     let bytes = SourceSliceParquetCodec::encode(&records)?;
-    let byte_hash = ContentHash::parse(CanonicalDigest::prefixed_bytes(&bytes))?;
+    let byte_hash = CanonicalDigest::content_hash_bytes(&bytes);
     let key = ArtifactKey::new(
         ArtifactNamespace::SourceSlice,
         format!("{}-{}", source_object_slug(kind), byte_hash.hex()),
@@ -181,14 +179,14 @@ async fn persist_source_object(
     let metadata = store.metadata(&uri).await?;
     let object_version = metadata
         .version_id
-        .unwrap_or_else(|| format!("local-content:{}", byte_hash.as_str()));
+        .unwrap_or_else(|| format!("local-content:{byte_hash}"));
     Ok(SourceSliceObjectRef {
         kind,
         uri,
         object_version,
         byte_hash,
         schema_hash: CanonicalDigest::content_hash_json(&(
-            "source_slice_parquet_envelope_v1",
+            "source_slice_parquet_envelope_v2",
             kind,
         ))?,
         row_count: u64::try_from(records.len()).map_err(|error| ResearchError::DatasetBuild {
@@ -202,7 +200,7 @@ async fn persist_source_object(
 }
 
 /// Persist the immutable market-info and canonical-L2 inputs consumed by
-/// backtest/CPCV integration tests, then seal a canonical V1 manifest.
+/// backtest/CPCV integration tests, then seal a canonical manifest.
 pub struct ReplayableSourceSliceFixture {
     pub profile_ref: ResearchProfileRef,
     pub research_program_hash: ContentHash,
@@ -214,8 +212,7 @@ pub struct ReplayableSourceSliceFixture {
 
 struct ReplayableSourceRecords {
     market_info: Vec<SourceSliceRecord>,
-    checkpoints: Vec<SourceSliceRecord>,
-    events: Vec<SourceSliceRecord>,
+    ledger: Vec<SourceSliceRecord>,
     sessions: Vec<SourceSliceRecord>,
 }
 
@@ -227,8 +224,7 @@ fn replayable_source_records(examples: &[TrainingExample]) -> QuantResult<Replay
             .or_insert(example);
     }
     let mut market_info_records = Vec::with_capacity(unique.len());
-    let mut checkpoints = Vec::with_capacity(unique.len());
-    let mut events = Vec::with_capacity(unique.len());
+    let mut ledger = Vec::with_capacity(unique.len());
     let mut sessions = Vec::with_capacity(unique.len());
     for ((market_id, token_id), example) in unique {
         let decision_at = example.decision_at();
@@ -237,28 +233,7 @@ fn replayable_source_records(examples: &[TrainingExample]) -> QuantResult<Replay
         let available_at_ms = decision_at.timestamp_millis();
         let scope = format!("{market_id}:{token_id}:{available_at_ms}");
         let stream_session_id = seeded_uuid(&format!("{scope}:stream-session"));
-        let source_event_hash = source_hash(example, "replay-book-event");
-        let checkpoint = BookL2CheckpointRow {
-            token_id: token_id.clone(),
-            market_id: Some(market_id.clone()),
-            stream_session_id,
-            token_sequence: 1,
-            bids_json: r#"[["0.49","100"]]"#.to_owned(),
-            asks_json: r#"[["0.51","100"]]"#.to_owned(),
-            book_version: 1,
-            source_event_hash: source_event_hash.clone(),
-            checkpoint_hash: source_hash(example, "replay-checkpoint"),
-            event_time: event_at_ms,
-            created_at: available_at_ms,
-            schema_version: ChSchemaVersion(2),
-        };
-        checkpoints.push(source_record(
-            format!("checkpoint:{token_id}:{event_at_ms}"),
-            event_at,
-            decision_at,
-            &checkpoint,
-        )?);
-        let event = BookL2EventRow {
+        let event = BookL2LedgerRow {
             stream_session_id,
             shard_id: 0,
             token_id: token_id.clone(),
@@ -269,17 +244,21 @@ fn replayable_source_records(examples: &[TrainingExample]) -> QuantResult<Replay
             bid_sizes: vec![ChShares::from(Shares::new(dec!(100)))],
             ask_prices: vec![ChPrice::from(Price::new(dec!(0.51)))],
             ask_sizes: vec![ChShares::from(Shares::new(dec!(100)))],
-            book_version: 1,
             old_tick_size: None,
             new_tick_size: None,
+            trade_price: None,
+            trade_side: None,
+            trade_size: None,
+            fee_rate_bps: None,
             venue_event_time: event_at_ms,
             ingress_time: available_at_ms,
             persisted_time: available_at_ms,
-            payload_hash: source_event_hash,
-            schema_version: ChSchemaVersion(2),
-        };
-        events.push(source_record(
-            format!("event:{token_id}:1"),
+            event_hash: ChDigest::new([0; 32]),
+            schema_version: BookL2LedgerRow::SCHEMA_VERSION,
+        }
+        .seal()?;
+        ledger.push(source_record(
+            format!("ledger:{token_id}:1"),
             event_at,
             decision_at,
             &event,
@@ -344,8 +323,7 @@ fn replayable_source_records(examples: &[TrainingExample]) -> QuantResult<Replay
     }
     Ok(ReplayableSourceRecords {
         market_info: market_info_records,
-        checkpoints,
-        events,
+        ledger,
         sessions,
     })
 }
@@ -361,13 +339,7 @@ async fn persist_replayable_objects(
             records.market_info,
         )
         .await?,
-        persist_source_object(store, SourceSliceObjectKind::L2Event, records.events).await?,
-        persist_source_object(
-            store,
-            SourceSliceObjectKind::L2Checkpoint,
-            records.checkpoints,
-        )
-        .await?,
+        persist_source_object(store, SourceSliceObjectKind::L2Ledger, records.ledger).await?,
         persist_source_object(store, SourceSliceObjectKind::L2Session, records.sessions).await?,
     ];
     objects.sort_by(|left, right| {
@@ -380,9 +352,9 @@ fn replayable_manifest(
     fixture: ReplayableSourceSliceFixture,
     market_count: usize,
     objects: Vec<SourceSliceObjectRef>,
-) -> QuantResult<SourceSliceManifestV1> {
+) -> QuantResult<SourceSliceManifest> {
     let pit_cutoff = fixture.window_end;
-    Ok(SourceSliceManifestV1 {
+    Ok(SourceSliceManifest {
         format_version: SOURCE_SLICE_MANIFEST_FORMAT_VERSION,
         profile_ref: fixture.profile_ref,
         evaluation_track: ResearchEvaluationTrack::ResearchOnly,
@@ -439,13 +411,13 @@ fn replayable_manifest(
 
 async fn persist_source_manifest(
     store: &Arc<dyn ArtifactStore>,
-    manifest: SourceSliceManifestV1,
+    manifest: SourceSliceManifest,
 ) -> QuantResult<SourceSliceManifestRef> {
     manifest
         .validate()
         .map_err(|detail| ResearchError::DatasetBuild { detail })?;
     let manifest_bytes = CanonicalDigest::canonical_json_bytes(&manifest)?;
-    let manifest_hash = ContentHash::parse(CanonicalDigest::prefixed_bytes(&manifest_bytes))?;
+    let manifest_hash = CanonicalDigest::content_hash_bytes(&manifest_bytes);
     let manifest_uri = store
         .put(
             ArtifactKey::new(

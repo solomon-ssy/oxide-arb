@@ -6,15 +6,15 @@ use chrono::Utc;
 use clickhouse::Client;
 use quant_pivot_models::{
     clickhouse::{
-        BookL2CheckpointRow, BookMicrostructureRow, ChDecimal64, ChPrice, ChProbability,
+        BookL2LedgerRow, BookMicrostructureRow, ChDecimal64, ChDigest, ChPrice, ChProbability,
         ChSchemaVersion, ChShares, ChUsd, EntryConditionEvaluationEventRow, MarketResolutionRow,
         QuantFeatureParityEventRow, QuantReportRecommendationFactRow, ReportMarketFunnelRow,
         TradeTapeRow, WeatherForecastFactRow, WeatherObservationFactRow,
     },
     domain::api::FeatureParityEventListQuery,
     enums::clickhouse::{
-        ChFactSource, ChOutcomeSide, ChTradeParticipantRole, ChTradeReconciliationStatus,
-        ChTradeSide, ChTradeTapeSource,
+        ChCanonicalBookEventType, ChFactSource, ChOutcomeSide, ChTradeParticipantRole,
+        ChTradeReconciliationStatus, ChTradeSide, ChTradeTapeSource,
     },
     types::{
         ContentHash, DecisionPolicySnapshotId, DomainInstrumentKey, DomainSourceId,
@@ -45,9 +45,9 @@ async fn setup_clickhouse() -> (Arc<ClickHousePool>, Client, ()) {
     (pool, client, ())
 }
 
-async fn insert_book_rows(client: &Client, rows: &[BookL2CheckpointRow]) {
+async fn insert_book_rows(client: &Client, rows: &[BookL2LedgerRow]) {
     let mut insert = client
-        .insert::<BookL2CheckpointRow>("quant_book_l2_checkpoint")
+        .insert::<BookL2LedgerRow>("quant_book_l2_ledger")
         .await
         .expect("insert");
     for row in rows {
@@ -67,7 +67,7 @@ async fn insert_microstructure_rows(client: &Client, rows: &[BookMicrostructureR
     insert.end().await.expect("end microstructure insert");
 }
 
-/// Wait until inserted checkpoint rows are query-visible.
+/// Wait until inserted snapshot rows are query-visible.
 ///
 /// Fresh `MergeTree` parts can lag briefly behind HTTP insert ack on a cold
 /// testcontainer; PIT reads that race this window return `None`.
@@ -76,17 +76,17 @@ async fn wait_for_book_snapshot_rows(client: &Client, token: &TokenId, expected:
     const PAUSE: Duration = Duration::from_millis(50);
     for attempt in 1..=ATTEMPTS {
         let count: u64 = client
-            .query("SELECT count() FROM quant_book_l2_checkpoint WHERE token_id = ?")
+            .query("SELECT count() FROM quant_book_l2_ledger WHERE token_id = ?")
             .bind(token.clone())
             .fetch_one()
             .await
-            .expect("count quant_book_l2_checkpoint");
+            .expect("count quant_book_l2_ledger");
         if count >= expected {
             return;
         }
         assert!(
             attempt < ATTEMPTS,
-            "checkpoint rows for {} not visible after insert \
+            "snapshot rows for {} not visible after insert \
              (count={count}, expected>={expected}, attempts={ATTEMPTS})",
             token.as_str()
         );
@@ -100,7 +100,7 @@ fn fresh_event_time_ms() -> i64 {
 }
 
 fn content_hash(digit: char) -> ContentHash {
-    ContentHash::parse(format!("blake3:{}", digit.to_string().repeat(64)))
+    ContentHash::parse(&format!("blake3:{}", digit.to_string().repeat(64)))
         .expect("valid content hash")
 }
 
@@ -242,8 +242,8 @@ async fn insert_evaluation_revisions(client: &Client, now: i64) -> EntryConditio
     let condition_instance_id = EntryConditionInstanceId::from_v7();
     let evaluation_id = content_hash('4');
     let evaluation = EntryConditionEvaluationEventRow {
-        evaluation_id: evaluation_id.clone(),
-        condition_instance_id: condition_instance_id.clone(),
+        evaluation_id,
+        condition_instance_id,
         base_revision: 1,
         applied_revision: Some(1),
         trace_kind: "applied".to_owned(),
@@ -302,8 +302,8 @@ async fn insert_parity_revisions(
     let parity_event_id = FeatureParityEventId::from_v7();
     let parity = QuantFeatureParityEventRow {
         event_time: now,
-        parity_event_id: parity_event_id.clone(),
-        parity_run_id: parity_run_id.clone(),
+        parity_event_id,
+        parity_run_id,
         decision_at: now,
         stage: "model_input".to_owned(),
         status: "matched".to_owned(),
@@ -492,25 +492,32 @@ fn book_row(
     ingestion_time_ms: i64,
     sequence: u64,
     mid: Decimal,
-) -> BookL2CheckpointRow {
-    let source_event_hash =
-        ContentHash::parse(format!("blake3:{}", "1".repeat(64))).expect("source event hash");
-    let checkpoint_hash =
-        ContentHash::parse(format!("blake3:{}", "2".repeat(64))).expect("checkpoint hash");
-    BookL2CheckpointRow {
+) -> BookL2LedgerRow {
+    BookL2LedgerRow {
+        stream_session_id: Uuid::nil(),
+        shard_id: 0,
         token_id: TokenId::new(token),
         market_id: Some(MarketId::new("0xchpit")),
-        stream_session_id: Uuid::nil(),
         token_sequence: sequence,
-        bids_json: format!(r#"[["{mid}","100"]]"#),
-        asks_json: r#"[["0.52","100"]]"#.to_owned(),
-        book_version: 1,
-        source_event_hash,
-        checkpoint_hash,
-        event_time: event_time_ms,
-        created_at: ingestion_time_ms,
-        schema_version: ChSchemaVersion(2),
+        event_type: ChCanonicalBookEventType::Snapshot,
+        bid_prices: vec![ChPrice::from(Price::new(mid))],
+        bid_sizes: vec![ChShares::from(Shares::new(Decimal::from(100)))],
+        ask_prices: vec![ChPrice::from(Price::new(Decimal::new(52, 2)))],
+        ask_sizes: vec![ChShares::from(Shares::new(Decimal::from(100)))],
+        old_tick_size: None,
+        new_tick_size: None,
+        trade_price: None,
+        trade_side: None,
+        trade_size: None,
+        fee_rate_bps: None,
+        venue_event_time: event_time_ms,
+        ingress_time: ingestion_time_ms,
+        persisted_time: ingestion_time_ms,
+        event_hash: ChDigest::new([0; 32]),
+        schema_version: BookL2LedgerRow::SCHEMA_VERSION,
     }
+    .seal()
+    .expect("seal ledger fixture")
 }
 
 fn microstructure_row(
@@ -585,28 +592,30 @@ pub async fn ch_read_orders_by_event_time_with_tiebreaker() {
     wait_for_book_snapshot_rows(&client, &token, 2).await;
 
     let before_late_arrival = read
-        .book_checkpoint_at(&token, event_time + 5, event_time + 1)
+        .book_ledger_snapshot_at(&token, event_time + 5, event_time + 1)
         .await
         .expect("read before late arrival")
         .expect("earlier visible revision");
     assert_eq!(
-        before_late_arrival.bids_json, r#"[["0.49","100"]]"#,
+        before_late_arrival.bid_prices[0].to_price().inner(),
+        Decimal::new(49, 2),
         "a backdated revision must not be visible before its ingestion time"
     );
 
     let row = read
-        .book_checkpoint_at(&token, event_time + 5, event_time + 5)
+        .book_ledger_snapshot_at(&token, event_time + 5, event_time + 5)
         .await
         .expect("read")
         .unwrap_or_else(|| {
             panic!(
-                "PIT book_checkpoint_at returned None for token={} as_of={}",
+                "PIT book_ledger_snapshot_at returned None for token={} as_of={}",
                 token.as_str(),
                 event_time + 5
             )
         });
     assert_eq!(
-        row.bids_json, r#"[["0.50","100"]]"#,
+        row.bid_prices[0].to_price().inner(),
+        Decimal::new(50, 2),
         "tie-breaker must prefer later ingestion_time at same event_time"
     );
 }
@@ -811,7 +820,7 @@ pub async fn weather_long_form_facts_are_pit_visible_and_revision_preserving() {
         published_at: observed_at,
         available_at: first_visible_at,
         revision: 1,
-        report_hash: original_hash.clone(),
+        report_hash: original_hash,
         supersedes_report_hash: None,
         raw_report: "METAR KJFK TEST".to_owned(),
         schema_version: ChSchemaVersion::FIRST,

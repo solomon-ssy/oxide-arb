@@ -116,10 +116,8 @@ impl GefsSource {
             get_range_with_retry(&self.http, &self.retry_policy, &url, maximum_range),
             get_range_with_retry(&self.http, &self.retry_policy, &url, minimum_range),
         )?;
-        let maximum_segment_hash =
-            ContentHash::parse(CanonicalDigest::prefixed_bytes(maximum_segment.as_slice()))?;
-        let minimum_segment_hash =
-            ContentHash::parse(CanonicalDigest::prefixed_bytes(minimum_segment.as_slice()))?;
+        let maximum_segment_hash = CanonicalDigest::content_hash_bytes(maximum_segment.as_slice());
+        let minimum_segment_hash = CanonicalDigest::content_hash_bytes(minimum_segment.as_slice());
         let segment_hash = CanonicalDigest::content_hash_json(&(
             "gefs_daily_temperature_segments_v1",
             &maximum_segment_hash,
@@ -546,11 +544,11 @@ mod tests {
     fn merges_station_fields_and_rejects_inverted_extremes() {
         let station = IcaoStation::parse("KLGA").expect("station");
         let grid_binding_hash =
-            ContentHash::parse(format!("blake3:{}", "a".repeat(64))).expect("hash");
+            ContentHash::parse(&format!("blake3:{}", "a".repeat(64))).expect("hash");
         let maximum = vec![DecodedStationTemperature {
             station: station.clone(),
             temperature_celsius: TemperatureCelsius::new(dec!(20)),
-            grid_binding_hash: grid_binding_hash.clone(),
+            grid_binding_hash,
         }];
         let minimum = vec![DecodedStationTemperature {
             station,
@@ -564,7 +562,7 @@ mod tests {
         let inverted = vec![DecodedStationTemperature {
             station: maximum[0].station.clone(),
             temperature_celsius: TemperatureCelsius::new(dec!(21)),
-            grid_binding_hash: maximum[0].grid_binding_hash.clone(),
+            grid_binding_hash: maximum[0].grid_binding_hash,
         }];
         assert!(merge_daily_temperature_points(maximum, inverted).is_err());
     }

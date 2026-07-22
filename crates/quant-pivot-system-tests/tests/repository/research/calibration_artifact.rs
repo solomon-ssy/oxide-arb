@@ -25,7 +25,7 @@ use rust_decimal::Decimal;
 
 fn content_hash(seed: u8) -> ContentHash {
     let hex: String = format!("{seed:02x}").chars().cycle().take(64).collect();
-    ContentHash::parse(format!("blake3:{hex}")).expect("hash")
+    ContentHash::parse(&format!("blake3:{hex}")).expect("hash")
 }
 
 fn new_artifact(kind: CalibrationKind, seed: u8) -> NewCalibrationArtifact {
@@ -85,7 +85,7 @@ pub async fn create_duplicate_content_hash_maps_to_storage_duplicate() {
     let repo = PgCalibrationArtifactRepository::new(pool.connection().clone());
 
     let first = new_artifact(CalibrationKind::ModelScore, 1);
-    let hash = first.content_hash.clone();
+    let hash = first.content_hash;
     repo.create(first).await.expect("first insert");
 
     let dup = repo

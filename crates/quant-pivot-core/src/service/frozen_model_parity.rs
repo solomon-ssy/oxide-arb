@@ -109,9 +109,9 @@ impl FrozenModelParityService {
         let materialization = require_dataset_materialization(&dataset)?;
         let run_id = FeatureParityRunId::from_v7();
         let frozen_subject = NewFrozenModelParitySubject {
-            model_version_id: version.model_version_id.clone(),
-            training_dataset_id: dataset.training_dataset_id.clone(),
-            subject_generation: version.artifact_hash.clone(),
+            model_version_id: version.model_version_id,
+            training_dataset_id: dataset.training_dataset_id,
+            subject_generation: version.artifact_hash,
             evidence_hash: model_version_parity_evidence_hash(&ModelVersionParityEvidence {
                 model_version_id: &version.model_version_id,
                 model_spec_id: &version.model_spec_id,
@@ -127,14 +127,14 @@ impl FrozenModelParityService {
             .parity_repo
             .create_frozen_model_run(
                 NewFeatureParityRun {
-                    run_id: run_id.clone(),
+                    run_id,
                     kind: FeatureParityRunKind::Full,
                     status: FeatureParityRunStatus::Queued,
                     window_start: dataset.window_start,
                     window_end: dataset.window_end,
                     report_id: None,
-                    model_version_id: Some(version.model_version_id.clone()),
-                    training_dataset_id: Some(dataset.training_dataset_id.clone()),
+                    model_version_id: Some(version.model_version_id),
+                    training_dataset_id: Some(dataset.training_dataset_id),
                     triggered_by: triggered_by.to_owned(),
                     requested_by: None,
                     acting_role: RoleCode::new("system"),
@@ -144,7 +144,7 @@ impl FrozenModelParityService {
                     matched_count: 0,
                     mismatched_count: 0,
                     pending_materialization_count: 0,
-                    feature_contract_hash: Some(materialization.feature_schema_hash.clone()),
+                    feature_contract_hash: Some(*materialization.feature_schema_hash),
                     transform_hash: None,
                     failure_code: None,
                     failure_detail: None,
@@ -390,7 +390,7 @@ impl FrozenModelParityService {
                 #[cfg(feature = "ml-classical")]
                 {
                     let transform_hash = self.verify_classical(&examples, spec, classical).await?;
-                    (transform_hash, classical.training_input_hash.clone())
+                    (transform_hash, classical.training_input_hash)
                 }
                 #[cfg(not(feature = "ml-classical"))]
                 {
@@ -418,7 +418,7 @@ impl FrozenModelParityService {
         };
         let evidence_rows = frozen_model_evidence_rows(&evidence_request)?;
         Ok(FrozenParityProof {
-            feature_contract_hash: materialization.feature_schema_hash.clone(),
+            feature_contract_hash: *materialization.feature_schema_hash,
             transform_hash,
             evidence_rows,
         })
@@ -486,7 +486,7 @@ impl FrozenModelParityService {
                     matched_count: 0,
                     mismatched_count: 1,
                     pending_materialization_count: 0,
-                    feature_contract_hash: Some(feature_contract_hash.clone()),
+                    feature_contract_hash: Some(*feature_contract_hash),
                     transform_hash: None,
                     failure_code: Some(DiagnosticCode::new("frozen_model_integrity")),
                     failure_detail: Some(error.to_string()),
@@ -760,18 +760,18 @@ fn frozen_model_evidence_rows(
             let fingerprint = ResearchHasher::canonical(&commitment)?;
             let event_identity = ResearchHasher::canonical(&(
                 request.run_id.to_string(),
-                fingerprint.as_str(),
+                fingerprint,
                 FeatureParityEventStatus::Matched.as_str(),
             ))?;
             let detail = FeatureParityDetail::Compared {
                 sampling_key: format!("{}/{}", request.run_id, example.example_id),
                 source: Box::new(FeatureParityDetailSource::FrozenModelCommitment {
-                    example_id: example.example_id.clone(),
+                    example_id: example.example_id,
                     decision_boundary: example.decision_boundary.clone(),
-                    feature_contract_hash: request.feature_contract_hash.clone(),
-                    transform_hash: request.transform_hash.clone(),
-                    dataset_hash: request.dataset_hash.clone(),
-                    training_input_hash: request.training_input_hash.clone(),
+                    feature_contract_hash: *request.feature_contract_hash,
+                    transform_hash: *request.transform_hash,
+                    dataset_hash: *request.dataset_hash,
+                    training_input_hash: *request.training_input_hash,
                 }),
             };
             detail
@@ -789,14 +789,14 @@ fn frozen_model_evidence_rows(
             Ok(QuantFeatureParityEventRow {
                 event_time: example.decision_at().timestamp_millis(),
                 parity_event_id: FeatureParityEventId::from_evidence_hash(&event_identity),
-                parity_run_id: request.run_id.clone(),
+                parity_run_id: *request.run_id,
                 decision_at: example.decision_at().timestamp_millis(),
-                stage: FeatureParityStage::ModelInput.as_str().to_owned(),
-                status: FeatureParityEventStatus::Matched.as_str().to_owned(),
+                stage: FeatureParityStage::ModelInput.to_string(),
+                status: FeatureParityEventStatus::Matched.to_string(),
                 report_id: None,
                 model_run_id: None,
-                model_version_id: Some(request.version.model_version_id.clone()),
-                training_dataset_id: Some(request.dataset.training_dataset_id.clone()),
+                model_version_id: Some(request.version.model_version_id),
+                training_dataset_id: Some(request.dataset.training_dataset_id),
                 market_id: Some(example.market_id.clone()),
                 feature_name: None,
                 reason: Some("global_canonical_commitment".to_owned()),
@@ -820,10 +820,10 @@ fn frozen_model_evidence_rows(
                         .knowledge_cutoff()
                         .timestamp_millis(),
                 ),
-                feature_contract_hash: request.feature_contract_hash.as_str().to_owned(),
-                transform_hash: request.transform_hash.as_str().to_owned(),
-                online_fingerprint: fingerprint.as_str().to_owned(),
-                replay_fingerprint: fingerprint.as_str().to_owned(),
+                feature_contract_hash: request.feature_contract_hash.to_string(),
+                transform_hash: request.transform_hash.to_string(),
+                online_fingerprint: fingerprint.to_string(),
+                replay_fingerprint: fingerprint.to_string(),
                 detail_json,
                 ingestion_time,
             })
@@ -906,7 +906,7 @@ mod tests {
     };
 
     fn hash(seed: char) -> ContentHash {
-        ContentHash::parse(format!("blake3:{}", seed.to_string().repeat(64)))
+        ContentHash::parse(&format!("blake3:{}", seed.to_string().repeat(64)))
             .expect("valid test hash")
     }
 
@@ -919,8 +919,8 @@ mod tests {
         let (model_spec_thesis, model_spec_definition_hash) =
             model_spec_lineage_fixture("frozen-parity-test-spec");
         let version = ModelVersionInfo {
-            model_version_id: model_version_id.clone(),
-            model_spec_id: model_spec_id.clone(),
+            model_version_id,
+            model_spec_id,
             model_spec_name: "frozen-parity-test-spec".to_owned(),
             model_family: ModelFamily::WeightedFactor,
             model_spec_thesis,
@@ -929,7 +929,7 @@ mod tests {
             artifact_hash: hash('b'),
             category_scope: None,
             profile_ref: fixture_profile_ref(),
-            training_dataset_id: Some(training_dataset_id.clone()),
+            training_dataset_id: Some(training_dataset_id),
             trade_policy_artifact_id: None,
             trade_policy_hash: None,
             publish_path_set_id: None,
@@ -948,14 +948,14 @@ mod tests {
             created_at: now,
         };
         let dataset = TrainingDatasetInfo {
-            training_dataset_id: training_dataset_id.clone(),
+            training_dataset_id,
             model_spec_id,
             model_spec_definition_hash: hash('d'),
             window_start: now - Duration::hours(2),
             window_end: now - Duration::hours(1),
             status: TrainingDatasetStatus::Ready,
             purpose: DatasetPurpose::Training,
-            feature_schema_hash: Some(feature_hash.clone()),
+            feature_schema_hash: Some(feature_hash),
             factor_schema_hash: None,
             label_schema_hash: None,
             dataset_hash: None,
@@ -1061,7 +1061,7 @@ mod tests {
         run.model_version_id = Some(ModelVersionId::from_v7());
         assert!(validate_passed_model_parity_run(&run, &version, &dataset).is_err());
 
-        run.model_version_id = Some(version.model_version_id.clone());
+        run.model_version_id = Some(version.model_version_id);
         run.transform_hash = None;
         assert!(validate_passed_model_parity_run(&run, &version, &dataset).is_err());
     }
@@ -1129,8 +1129,8 @@ mod tests {
             assert_eq!(row.online_fingerprint, row.replay_fingerprint);
             assert!(row.online_value.is_none() && row.replay_value.is_none());
             assert!(row.online_state.is_none() && row.replay_state.is_none());
-            assert_eq!(row.feature_contract_hash, feature_contract_hash.as_str());
-            assert_eq!(row.transform_hash, transform_hash.as_str());
+            assert_eq!(row.feature_contract_hash, feature_contract_hash.to_string());
+            assert_eq!(row.transform_hash, transform_hash.to_string());
             let detail: FeatureParityDetail =
                 serde_json::from_str(&row.detail_json).expect("structured evidence");
             let FeatureParityDetail::Compared { source, .. } = detail else {

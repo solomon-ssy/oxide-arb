@@ -13,15 +13,25 @@ path = "src/main.rs"
 [features]
 # The default feature set is the production profile: `report_only` is
 # not dry-run — report sizing runs the real portfolio optimizer and classical
-# model runtime, so a deployed binary must always link them. `dataframe` is
-# always linked transitively via quant-pivot-core's research dependency.
+# model runtime, so a full research deployment links them. S3/Polars/Parquet
+# are linked only by the explicit `research-jobs` deployment feature.
 #   - optimize:    argmin weight-refinement for the weighted trainer.
 #   - ml-classical: smartcore classical trainer + runtime for shadow candidates.
-default = ["optimize", "ml-classical"]
-ml-classical = ["quant-pivot-core/ml-classical"]
-optimize = ["quant-pivot-core/optimize"]
+default = [
+  "serving",
+  "research-jobs",
+  "domain-chainlink",
+  "optimize",
+  "ml-classical",
+]
+serving = ["quant-pivot-core/serving"]
+research-jobs = ["quant-pivot-core/research-jobs"]
+domain-chainlink = ["quant-pivot-core/domain-chainlink"]
+ml-classical = ["research-jobs", "quant-pivot-core/ml-classical"]
+optimize = ["research-jobs", "quant-pivot-core/optimize"]
 
 [dependencies]
+quant-pivot-allocator = { workspace = true }
 quant-pivot-core = { workspace = true, default-features = false }
 quant-pivot-models = { workspace = true }
 rustls = { workspace = true }
@@ -29,6 +39,7 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 clap = { workspace = true, features = ["derive", "env"] }
+rayon = { workspace = true }
 
 [lints]
 workspace = true

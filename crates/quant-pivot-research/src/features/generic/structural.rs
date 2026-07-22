@@ -78,7 +78,7 @@ fn shock_features(ctx: &FeatureComputeCtx<'_>) -> Vec<RawFeature> {
     let window = ctx.window;
     let evidence = EvidenceSourceRef {
         source_kind: EvidenceSourceKind::ClickHouseFact,
-        reference: window.token_id.as_str().to_owned(),
+        reference: window.token_id.to_string(),
         effective_at: window
             .freshest_bucket_time()
             .unwrap_or_else(|| window.cutoff()),
@@ -156,7 +156,7 @@ fn book_churn_intensity_feature(ctx: &FeatureComputeCtx<'_>) -> RawFeature {
                 FeatureValue::Decimal(churn),
                 EvidenceSourceRef {
                     source_kind: EvidenceSourceKind::ClickHouseFact,
-                    reference: window.token_id.as_str().to_owned(),
+                    reference: window.token_id.to_string(),
                     effective_at: window
                         .freshest_bucket_time()
                         .unwrap_or_else(|| window.cutoff()),
@@ -281,7 +281,7 @@ const fn trade_tape_feature_names() -> [FeatureName; 9] {
 fn trade_tape_evidence(ctx: &FeatureComputeCtx<'_>) -> EvidenceSourceRef {
     EvidenceSourceRef {
         source_kind: EvidenceSourceKind::TradeTape,
-        reference: ctx.trade_tape.market_id.as_str().to_owned(),
+        reference: ctx.trade_tape.market_id.to_string(),
         effective_at: ctx
             .trade_tape
             .freshest_trade_time()
@@ -449,7 +449,7 @@ fn negrisk_all_missing(reason: NullReason) -> Vec<RawFeature> {
 fn book_evidence(book: &ResolvedBook) -> EvidenceSourceRef {
     EvidenceSourceRef {
         source_kind: EvidenceSourceKind::Book,
-        reference: book.token_id.as_str().to_owned(),
+        reference: book.token_id.to_string(),
         effective_at: book.effective_at,
         available_at: Some(book.available_at),
     }

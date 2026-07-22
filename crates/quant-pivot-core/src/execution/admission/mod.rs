@@ -451,9 +451,9 @@ pub fn prepare_entry_order(input: &AdmissionInput) -> QuantResult<PreparedVenueO
         total_cash_delta,
         expected_filled_shares,
         book_hash,
-        clob_market_info_hash: input.venue_metadata.clob_market_info_hash.clone(),
+        clob_market_info_hash: input.venue_metadata.clob_market_info_hash,
         fee_schedule: PreparedFeeSchedule {
-            schedule_hash: input.fee_schedule.schedule_hash.clone(),
+            schedule_hash: input.fee_schedule.schedule_hash,
             effective_at: input.fee_schedule.effective_at,
             available_at: input.fee_schedule.available_at,
             platform_rate: input.fee_schedule.platform_rate,

@@ -39,14 +39,6 @@ pub struct TimelineGroup {
     pub label_horizon_end: DateTime<Utc>,
 }
 
-impl TimelineGroup {
-    /// Whether this group's `[decision_at, label_horizon_end]` interval overlaps `other`'s.
-    #[must_use]
-    fn overlaps(&self, other: &Self) -> bool {
-        self.decision_at <= other.label_horizon_end && other.decision_at <= self.label_horizon_end
-    }
-}
-
 /// Purge/embargo configuration.
 ///
 /// Whether to purge by label horizon is not configurable — a training row
@@ -150,35 +142,57 @@ impl PurgedSplitter for DefaultPurgedSplitter {
                 })
             })
             .collect::<QuantResult<Vec<_>>>()?;
-        let embargo_ends = test_groups
-            .iter()
-            .map(|test| {
-                test.label_horizon_end
-                    .checked_add_signed(embargo_duration)
-                    .ok_or_else(|| {
-                        methodology(format!(
-                            "embargo duration overflows test horizon {}",
-                            test.label_horizon_end
-                        ))
+        let purge_intervals = merge_intervals(test_groups.iter().map(|group| TimeInterval {
+            start: group.decision_at,
+            end: group.label_horizon_end,
+        }));
+        let embargo_intervals = merge_intervals(
+            test_groups
+                .iter()
+                .map(|group| {
+                    let end = group
+                        .label_horizon_end
+                        .checked_add_signed(embargo_duration)
+                        .ok_or_else(|| {
+                            methodology(format!(
+                                "embargo duration overflows test horizon {}",
+                                group.label_horizon_end
+                            ))
+                        })?;
+                    Ok(TimeInterval {
+                        start: group.label_horizon_end,
+                        end,
                     })
-            })
-            .collect::<QuantResult<Vec<_>>>()?;
+                })
+                .collect::<QuantResult<Vec<_>>>()?,
+        );
 
-        let mut train_indices = Vec::new();
+        let mut train_indices = Vec::with_capacity(groups.len().saturating_sub(test_indices.len()));
         let mut purged_indices = Vec::new();
         let mut embargoed_indices = Vec::new();
+        let mut test_cursor = 0;
+        let mut purge_cursor = 0;
+        let mut embargo_cursor = 0;
         for (i, group) in groups.iter().enumerate() {
-            if test_indices.contains(&i) {
+            while test_indices
+                .get(test_cursor)
+                .is_some_and(|&index| index < i)
+            {
+                test_cursor += 1;
+            }
+            if test_indices.get(test_cursor) == Some(&i) {
+                test_cursor += 1;
                 continue;
             }
-            if test_groups.iter().any(|test| group.overlaps(test)) {
+            if overlaps_interval_union(group, &purge_intervals, &mut purge_cursor) {
                 purged_indices.push(i);
                 continue;
             }
-            let embargoed = test_groups.iter().zip(&embargo_ends).any(|(test, end)| {
-                group.decision_at > test.label_horizon_end && group.decision_at <= *end
-            });
-            if embargoed {
+            if point_in_open_closed_union(
+                group.decision_at,
+                &embargo_intervals,
+                &mut embargo_cursor,
+            ) {
                 embargoed_indices.push(i);
                 continue;
             }
@@ -192,6 +206,59 @@ impl PurgedSplitter for DefaultPurgedSplitter {
             embargoed_indices,
         })
     }
+}
+
+#[derive(Clone, Copy)]
+struct TimeInterval {
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+}
+
+fn merge_intervals(intervals: impl IntoIterator<Item = TimeInterval>) -> Vec<TimeInterval> {
+    let mut intervals: Vec<_> = intervals.into_iter().collect();
+    intervals.sort_unstable_by_key(|interval| interval.start);
+    let mut merged: Vec<TimeInterval> = Vec::with_capacity(intervals.len());
+    for interval in intervals {
+        match merged.last_mut() {
+            Some(previous) if interval.start <= previous.end => {
+                previous.end = previous.end.max(interval.end);
+            }
+            _ => merged.push(interval),
+        }
+    }
+    merged
+}
+
+fn overlaps_interval_union(
+    group: &TimelineGroup,
+    intervals: &[TimeInterval],
+    cursor: &mut usize,
+) -> bool {
+    while intervals
+        .get(*cursor)
+        .is_some_and(|interval| interval.end < group.decision_at)
+    {
+        *cursor += 1;
+    }
+    intervals
+        .get(*cursor)
+        .is_some_and(|interval| interval.start <= group.label_horizon_end)
+}
+
+fn point_in_open_closed_union(
+    point: DateTime<Utc>,
+    intervals: &[TimeInterval],
+    cursor: &mut usize,
+) -> bool {
+    while intervals
+        .get(*cursor)
+        .is_some_and(|interval| interval.end < point)
+    {
+        *cursor += 1;
+    }
+    intervals
+        .get(*cursor)
+        .is_some_and(|interval| point > interval.start && point <= interval.end)
 }
 
 /// The embargo window as an absolute [`Duration`]: the larger of
@@ -253,7 +320,10 @@ mod tests {
     use chrono::{Duration, TimeZone, Utc};
     use rust_decimal_macros::dec;
 
-    use super::{DefaultPurgedSplitter, PurgeConfig, PurgedSplitter, TimelineGroup};
+    use super::{
+        DefaultPurgedSplitter, PurgeConfig, PurgedSplit, PurgedSplitter, TimelineGroup,
+        embargo_duration,
+    };
 
     /// Hourly groups whose label horizon extends 90 minutes forward (i.e. each
     /// group's interval overlaps the *next* group's `as_of`) — the canonical
@@ -405,6 +475,55 @@ mod tests {
             seen.iter().all(|&count| count == 1),
             "every group must land in exactly one bucket: {seen:?}"
         );
+    }
+
+    #[test]
+    fn interval_union_split_matches_the_quadratic_reference_semantics() {
+        let groups = (0_i64..64)
+            .map(|index| {
+                let decision_at = Utc.timestamp_opt(1_700_000_000 + index * 60, 0).unwrap();
+                TimelineGroup {
+                    decision_at,
+                    label_horizon_end: decision_at
+                        + Duration::seconds((index.rem_euclid(5) + 1) * 45),
+                }
+            })
+            .collect::<Vec<_>>();
+        let test_indices = vec![7, 8, 20, 40, 41];
+        let config = PurgeConfig::pct_only(dec!(0.03));
+        let actual = DefaultPurgedSplitter::new()
+            .split(&groups, &test_indices, &config)
+            .expect("optimized split");
+        let embargo = embargo_duration(&groups, &config).expect("embargo duration");
+        let test_groups = test_indices
+            .iter()
+            .map(|&index| groups[index])
+            .collect::<Vec<_>>();
+        let mut expected = PurgedSplit {
+            test_indices: test_indices.clone(),
+            ..PurgedSplit::default()
+        };
+        for (index, group) in groups.iter().enumerate() {
+            if test_indices.contains(&index) {
+                continue;
+            }
+            if test_groups.iter().any(|test| {
+                group.decision_at <= test.label_horizon_end
+                    && test.decision_at <= group.label_horizon_end
+            }) {
+                expected.purged_indices.push(index);
+                continue;
+            }
+            if test_groups.iter().any(|test| {
+                let end = test.label_horizon_end + embargo;
+                group.decision_at > test.label_horizon_end && group.decision_at <= end
+            }) {
+                expected.embargoed_indices.push(index);
+                continue;
+            }
+            expected.train_indices.push(index);
+        }
+        assert_eq!(actual, expected);
     }
 
     #[test]

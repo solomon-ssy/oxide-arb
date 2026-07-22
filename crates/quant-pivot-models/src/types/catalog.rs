@@ -1,6 +1,6 @@
 //! Catalog snapshot newtypes persisted as Postgres `text[]`.
 
-use std::ops::Deref;
+use std::{ops::Deref, string::ToString};
 
 use sea_orm::{
     ActiveValue, ColIdx, IntoActiveValue, QueryResult, TryGetError, TryGetable,
@@ -53,7 +53,7 @@ impl FromIterator<MarketId> for CatalogMarketIds {
 }
 
 fn wire_strings(ids: &CatalogMarketIds) -> Vec<String> {
-    ids.0.iter().map(|id| id.as_str().to_owned()).collect()
+    ids.0.iter().map(ToString::to_string).collect()
 }
 
 fn from_wire_strings(strings: Vec<String>) -> CatalogMarketIds {

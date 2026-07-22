@@ -51,7 +51,7 @@ impl CapitalAllocationRepository for PgCapitalAllocationRepository {
         order_intent_id: &OrderIntentId,
     ) -> Result<Option<CapitalAllocationInfo>, StorageError> {
         Entity::find()
-            .filter(Column::OrderIntentId.eq(order_intent_id.clone()))
+            .filter(Column::OrderIntentId.eq(*order_intent_id))
             .one(&self.db)
             .await
             .map_err(StorageError::from)
@@ -162,7 +162,7 @@ pub async fn load_capital(
     intent_id: &OrderIntentId,
 ) -> Result<Model, StorageError> {
     Entity::find()
-        .filter(Column::OrderIntentId.eq(intent_id.clone()))
+        .filter(Column::OrderIntentId.eq(*intent_id))
         .lock_exclusive()
         .one(db)
         .await

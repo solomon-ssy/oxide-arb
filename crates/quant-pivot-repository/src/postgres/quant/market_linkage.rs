@@ -84,7 +84,7 @@ async fn append_in_transaction(
     txn: &DatabaseTransaction,
     linkage: NewMarketLinkage,
 ) -> Result<MarketLinkageInfo, StorageError> {
-    let content_hash = linkage.content_hash.clone();
+    let content_hash = linkage.content_hash;
     let source_bindings = match linkage.outcome.clone() {
         LinkageOutcome::Resolved(binding) => binding.source_bindings,
         LinkageOutcome::Unresolved { .. } => Vec::new(),
@@ -97,7 +97,7 @@ async fn append_in_transaction(
         .await
         .map_err(StorageError::from)?;
     let row = Entity::find()
-        .filter(Column::ContentHash.eq(content_hash.clone()))
+        .filter(Column::ContentHash.eq(content_hash))
         .one(txn)
         .await
         .map_err(StorageError::from)?
@@ -107,7 +107,7 @@ async fn append_in_transaction(
         })?;
     for binding in source_bindings {
         QuantMarketLinkageSourceEntity::insert(ActiveModel {
-            linkage_id: ActiveValue::Set(row.linkage_id.clone()),
+            linkage_id: ActiveValue::Set(row.linkage_id),
             role: ActiveValue::Set(binding.role),
             source_id: ActiveValue::Set(binding.source_id),
             instrument_key: ActiveValue::Set(binding.instrument_key),
@@ -253,7 +253,7 @@ impl MarketLinkageRepository for PgMarketLinkageRepository {
         &self,
         linkage_id: &MarketLinkageId,
     ) -> Result<Option<MarketLinkageInfo>, StorageError> {
-        Entity::find_by_id(linkage_id.clone())
+        Entity::find_by_id(*linkage_id)
             .one(&self.db)
             .await
             .map_err(StorageError::from)

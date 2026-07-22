@@ -89,6 +89,8 @@ pub struct MetricsHub {
     pub book_snapshots_applied: IntCounter,
     pub price_changes_applied: IntCounter,
     pub ws_session_backpressure_invalidations: IntCounter,
+    pub ws_fanout_best_effort_dropped: IntCounter,
+    pub ws_fanout_reliable_disconnects: IntCounter,
     pub book_apply_backpressure_invalidations: IntCounter,
     pub markets_resolved_ws: IntCounter,
     pub shard_status_changes: IntCounter,
@@ -190,6 +192,8 @@ struct PipelineMetrics {
     book_snapshots_applied: IntCounter,
     price_changes_applied: IntCounter,
     ws_session_backpressure_invalidations: IntCounter,
+    ws_fanout_best_effort_dropped: IntCounter,
+    ws_fanout_reliable_disconnects: IntCounter,
     book_apply_backpressure_invalidations: IntCounter,
     markets_resolved_ws: IntCounter,
     shard_status_changes: IntCounter,
@@ -283,6 +287,16 @@ fn register_pipeline_metrics(registry: &Registry) -> PipelineMetrics {
             registry,
             "quant_pivot_ws_session_backpressure_invalidations_total",
             "WebSocket sessions invalidated after bounded output enqueue timeout"
+        ),
+        ws_fanout_best_effort_dropped: register_counter!(
+            registry,
+            "quant_pivot_ws_fanout_best_effort_dropped_total",
+            "Best-effort WebSocket frames dropped for full client queues"
+        ),
+        ws_fanout_reliable_disconnects: register_counter!(
+            registry,
+            "quant_pivot_ws_fanout_reliable_disconnects_total",
+            "Slow WebSocket clients disconnected before a reliable frame could be queued"
         ),
         book_apply_backpressure_invalidations: register_counter!(
             registry,
@@ -643,6 +657,8 @@ impl MetricsHub {
             book_snapshots_applied: pipeline.book_snapshots_applied,
             price_changes_applied: pipeline.price_changes_applied,
             ws_session_backpressure_invalidations: pipeline.ws_session_backpressure_invalidations,
+            ws_fanout_best_effort_dropped: pipeline.ws_fanout_best_effort_dropped,
+            ws_fanout_reliable_disconnects: pipeline.ws_fanout_reliable_disconnects,
             book_apply_backpressure_invalidations: pipeline.book_apply_backpressure_invalidations,
             markets_resolved_ws: pipeline.markets_resolved_ws,
             shard_status_changes: pipeline.shard_status_changes,

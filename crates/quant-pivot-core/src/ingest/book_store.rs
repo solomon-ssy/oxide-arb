@@ -1,44 +1,29 @@
-use std::{
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
-    time::Instant,
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
 };
 
-use arc_swap::ArcSwap;
-use dashmap::DashMap;
 use num_traits::ToPrimitive;
-use parking_lot::Mutex;
 use quant_pivot_models::{
     domain::{
         data_plane::latency::LatencyTrace,
-        market::{
-            BookLevel,
-            book::{BinaryBookPair, BookSnapshot, TopOfBook},
-        },
+        market::book::{BinaryBookPair, BookSnapshot, TopOfBook},
     },
-    enums::common::Side,
-    types::{MarketId, Price, Shares, TokenId},
+    types::{MarketId, TokenId, TokenKey},
 };
 use tokio::sync::Notify;
 
-use super::order_book::OrderBook;
-use crate::{ingest::market_registry::MarketRegistry, observability::metrics_hub::MetricsHub};
+use crate::{
+    ingest::{
+        data_plane_index::{DataPlane, DataPlaneIndex, TokenFreshness, TokenSlot, TokenSlotState},
+        market_registry::MarketRegistry,
+    },
+    observability::metrics_hub::MetricsHub,
+};
 
-struct TokenBookState {
-    live: Mutex<OrderBook>,
-    published: ArcSwap<BookSnapshot>,
-    version: AtomicU64,
-}
-
-/// Central orderbook store keyed by token.
-///
-/// Writers mutate `live` under a short mutex; readers load `published` via
-/// `ArcSwap` with zero locking. Publish bumps `version` and refcount-clones arcs.
+/// Read facade over stable [`TokenKey`] slots owned by the shared data plane.
 pub struct BookStore {
-    books: DashMap<TokenId, Arc<TokenBookState>>,
-    token_latency_traces: DashMap<TokenId, Arc<LatencyTrace>>,
+    data_plane: Arc<DataPlane>,
     metrics: Arc<MetricsHub>,
     metric_update_counter: AtomicU64,
     gap_generation: AtomicU64,
@@ -46,10 +31,9 @@ pub struct BookStore {
 }
 
 impl BookStore {
-    pub fn new(metrics: Arc<MetricsHub>) -> Self {
+    pub fn new(data_plane: Arc<DataPlane>, metrics: Arc<MetricsHub>) -> Self {
         Self {
-            books: DashMap::new(),
-            token_latency_traces: DashMap::new(),
+            data_plane,
             metrics,
             metric_update_counter: AtomicU64::new(0),
             gap_generation: AtomicU64::new(0),
@@ -57,68 +41,51 @@ impl BookStore {
         }
     }
 
-    fn get_or_create_state(&self, token_id: &TokenId) -> Arc<TokenBookState> {
-        if let Some(entry) = self.books.get(token_id) {
-            return Arc::clone(entry.value());
-        }
-
-        let empty: Arc<[BookLevel]> = Arc::from([]);
-        let state = Arc::new(TokenBookState {
-            live: Mutex::new(OrderBook::new(token_id.clone())),
-            published: ArcSwap::from_pointee(BookSnapshot::new(
-                Arc::clone(&empty),
-                Arc::clone(&empty),
-                0,
-                0,
-            )),
-            version: AtomicU64::new(0),
-        });
-        let inserted = self
-            .books
-            .entry(token_id.clone())
-            .or_insert_with(|| Arc::clone(&state));
-        let result = Arc::clone(inserted.value());
-        drop(inserted);
-        if Arc::ptr_eq(&result, &state) {
-            self.update_token_count_metric(true);
-        }
-        result
-    }
-
-    fn bump_and_publish(state: &TokenBookState, book: &OrderBook) -> u64 {
-        let version = state.version.fetch_add(1, Ordering::AcqRel) + 1;
-        state.published.store(Arc::new(book.publish_cow(version)));
-        version
-    }
-
-    fn update_token_count_metric(&self, force: bool) {
-        if force {
-            self.metrics
-                .book_store_token_count
-                .set(ToPrimitive::to_i64(&self.books.len()).unwrap_or(i64::MAX));
-            return;
-        }
+    fn update_token_count_metric(&self) {
         let n = self.metric_update_counter.fetch_add(1, Ordering::Relaxed);
         if n.is_multiple_of(1024) {
             self.metrics
                 .book_store_token_count
-                .set(ToPrimitive::to_i64(&self.books.len()).unwrap_or(i64::MAX));
+                .set(ToPrimitive::to_i64(&self.token_count()).unwrap_or(i64::MAX));
         }
     }
 
+    #[must_use]
     #[inline]
-    pub fn load(&self, token_id: &TokenId) -> Option<Arc<BookSnapshot>> {
-        self.books
-            .get(token_id)
-            .map(|entry| entry.value().published.load_full())
+    pub fn resolve(&self, token_id: &TokenId) -> Option<TokenKey> {
+        self.data_plane.token_key(token_id)
+    }
+
+    /// Borrow a snapshot without incrementing its `Arc` refcount.
+    ///
+    /// The callback must remain synchronous and must never retain the reference
+    /// across an `.await`.
+    #[inline]
+    pub fn read<R>(&self, token: TokenKey, read: impl FnOnce(&BookSnapshot) -> R) -> Option<R> {
+        self.data_plane.with_slot(token, |slot| {
+            let snapshot = slot.published.load();
+            read(&snapshot)
+        })
+    }
+
+    /// Load an owned snapshot for transfer across task or await boundaries.
+    #[must_use]
+    #[inline]
+    pub fn load_owned(&self, token: TokenKey) -> Option<Arc<BookSnapshot>> {
+        self.data_plane
+            .with_slot(token, |slot| slot.published.load_full())
+    }
+
+    /// Resolve a wire/catalog token at the boundary and return an owned snapshot.
+    #[must_use]
+    pub fn load_by_id(&self, token_id: &TokenId) -> Option<Arc<BookSnapshot>> {
+        self.load_owned(self.resolve(token_id)?)
     }
 
     /// Monotonic publish sequence for a token (0 if unknown).
     #[inline]
-    pub fn book_version(&self, token_id: &TokenId) -> u64 {
-        self.books
-            .get(token_id)
-            .map_or(0, |e| e.value().version.load(Ordering::Acquire))
+    pub fn book_version(&self, token: TokenKey) -> u64 {
+        self.read(token, |snapshot| snapshot.version).unwrap_or(0)
     }
 
     /// Source-discontinuity generation shared by all CLOB token books.
@@ -139,82 +106,165 @@ impl BookStore {
         self.update_notify.notified().await;
     }
 
-    pub fn apply_snapshot(
+    /// Publish a snapshot built by the token-affine partition actor.
+    ///
+    /// This is the only writer entry point. The store never owns or locks a
+    /// mutable order book; it atomically publishes immutable state and then
+    /// commits the matching freshness tuple under the slot version protocol.
+    pub fn publish(
         &self,
-        token_id: &TokenId,
-        bids: impl Into<Arc<[BookLevel]>>,
-        asks: impl Into<Arc<[BookLevel]>>,
-        timestamp_ms: u64,
+        token: TokenKey,
+        snapshot: BookSnapshot,
+        sequence: u64,
+        session_generation: u64,
         latency: Option<LatencyTrace>,
-    ) -> u64 {
-        let bids = bids.into();
-        let asks = asks.into();
-        let state = self.get_or_create_state(token_id);
-        let mut book = state.live.lock();
-        book.apply_snapshot_arc(&bids, &asks, timestamp_ms);
-        let version = Self::bump_and_publish(&state, &book);
-        drop(book);
-        if let Some(mut lat) = latency {
-            lat.book_applied = Some(Instant::now());
-            self.token_latency_traces
-                .insert(token_id.clone(), Arc::new(lat));
+    ) -> bool {
+        let applied_tick = self.data_plane.now_tick();
+        let latency_tick = latency.map_or(0, |_| applied_tick);
+        let published = self
+            .data_plane
+            .with_slot(token, |slot| {
+                slot.publish(
+                    Arc::new(snapshot),
+                    sequence,
+                    session_generation,
+                    applied_tick,
+                    latency_tick,
+                );
+            })
+            .is_some();
+        if !published {
+            return false;
         }
+        self.update_token_count_metric();
         self.update_notify.notify_one();
-        version
+        true
     }
 
-    pub fn apply_delta<I>(
-        &self,
-        token_id: &TokenId,
-        changes: I,
-        timestamp_ms: u64,
-        latency: Option<LatencyTrace>,
-    ) -> u64
-    where
-        I: IntoIterator<Item = (Side, Price, Shares)>,
-    {
-        let state = self.get_or_create_state(token_id);
-        let mut book = state.live.lock();
-        book.apply_delta(changes, timestamp_ms);
-        let version = Self::bump_and_publish(&state, &book);
-        drop(book);
-        if let Some(mut lat) = latency {
-            lat.book_applied = Some(Instant::now());
-            self.token_latency_traces
-                .insert(token_id.clone(), Arc::new(lat));
-        }
-        self.update_notify.notify_one();
-        version
-    }
-
+    #[must_use]
     #[inline]
-    pub fn token_latency_trace(&self, token_id: &TokenId) -> Option<Arc<LatencyTrace>> {
-        self.token_latency_traces
-            .get(token_id)
-            .map(|entry| Arc::clone(entry.value()))
+    pub fn freshness(&self, token: TokenKey) -> Option<TokenFreshness> {
+        self.data_plane.with_slot(token, TokenSlot::freshness)
     }
 
-    pub fn remove(&self, token_id: &TokenId) {
-        self.books.remove(token_id);
-        self.update_token_count_metric(true);
+    #[must_use]
+    pub fn freshness_age_ms(&self, token: TokenKey) -> Option<u64> {
+        let freshness = self.freshness(token)?;
+        if freshness.state != TokenSlotState::Fresh || freshness.freshness_tick == 0 {
+            return None;
+        }
+        Some(
+            self.data_plane
+                .now_tick()
+                .saturating_sub(freshness.freshness_tick),
+        )
+    }
+
+    pub fn mark_fresh(
+        &self,
+        token: TokenKey,
+        sequence: u64,
+        session_generation: u64,
+        latency_tick: u64,
+    ) -> bool {
+        self.data_plane
+            .with_slot(token, |slot| {
+                slot.mark_fresh(
+                    sequence,
+                    session_generation,
+                    self.data_plane.now_tick(),
+                    latency_tick,
+                );
+            })
+            .is_some()
+    }
+
+    /// Publish canonical stream provenance while preserving the apply latency tick.
+    pub fn mark_canonical_fresh(
+        &self,
+        token: TokenKey,
+        sequence: u64,
+        session_generation: u64,
+    ) -> bool {
+        self.data_plane
+            .with_slot(token, |slot| {
+                let current = slot.freshness();
+                slot.mark_fresh(
+                    sequence,
+                    session_generation,
+                    self.data_plane.now_tick(),
+                    current.latency_tick,
+                );
+            })
+            .is_some()
+    }
+
+    pub fn invalidate(&self, token: TokenKey, session_generation: u64) -> bool {
+        self.data_plane
+            .with_slot(token, |slot| slot.invalidate(session_generation))
+            .is_some()
+    }
+
+    /// Invalidate process-local token keys without boundary lookup or allocation.
+    pub fn invalidate_tokens(&self, tokens: &[TokenKey]) -> usize {
+        self.data_plane.with_index(|index| {
+            let mut invalidated = 0;
+            for token in tokens {
+                let Some(slot) = index.token_slot(*token) else {
+                    continue;
+                };
+                let next_generation = slot.freshness().session_generation.saturating_add(1);
+                slot.invalidate(next_generation);
+                invalidated += 1;
+            }
+            invalidated
+        })
+    }
+
+    /// Invalidate a complete transport session scope without allocating keys.
+    pub fn invalidate_ids(&self, token_ids: &[TokenId]) -> usize {
+        self.data_plane.with_index(|index| {
+            let mut invalidated = 0;
+            for token_id in token_ids {
+                let Some(token) = index.token_key(token_id) else {
+                    continue;
+                };
+                let Some(slot) = index.token_slot(token) else {
+                    continue;
+                };
+                let next_generation = slot.freshness().session_generation.saturating_add(1);
+                slot.invalidate(next_generation);
+                invalidated += 1;
+            }
+            invalidated
+        })
     }
 
     pub fn token_count(&self) -> usize {
-        self.books.len()
+        self.data_plane.with_index(DataPlaneIndex::token_count)
     }
 
-    pub fn published_snapshots(&self) -> Vec<(TokenId, Arc<BookSnapshot>)> {
-        self.books
-            .iter()
-            .map(|entry| (entry.key().clone(), entry.value().published.load_full()))
-            .collect()
+    pub fn published_snapshots(&self) -> Vec<(TokenKey, TokenId, Arc<BookSnapshot>)> {
+        self.data_plane.with_index(|index| {
+            (0..index.token_count())
+                .filter_map(|raw| {
+                    let token = TokenKey::new(u32::try_from(raw).ok()?);
+                    let metadata = index.token_metadata(token)?;
+                    let slot = index.token_slot(token)?;
+                    if slot.freshness().state == TokenSlotState::Unseen {
+                        return None;
+                    }
+                    Some((token, metadata.token_id.clone(), slot.published.load_full()))
+                })
+                .collect()
+        })
     }
 
     /// Load YES+NO published snapshots without copying level data.
     #[inline]
-    pub fn load_pair(&self, token_yes: &TokenId, token_no: &TokenId) -> Option<BinaryBookPair> {
-        let yes = self.load(token_yes)?;
-        let no = self.load(token_no)?;
+    pub fn load_pair(&self, token_yes: TokenKey, token_no: TokenKey) -> Option<BinaryBookPair> {
+        let yes = self.load_owned(token_yes)?;
+        let no = self.load_owned(token_no)?;
         Some(BinaryBookPair { yes, no })
     }
 
@@ -222,12 +272,12 @@ impl BookStore {
     #[inline]
     pub fn top_of_book_tokens(
         &self,
-        token_yes: &TokenId,
-        token_no: &TokenId,
+        token_yes: TokenKey,
+        token_no: TokenKey,
         now_ms: u64,
     ) -> Option<TopOfBook> {
-        let yes = self.load(token_yes)?;
-        let no = self.load(token_no)?;
+        let yes = self.load_owned(token_yes)?;
+        let no = self.load_owned(token_no)?;
         Some(TopOfBook {
             yes_best_bid: yes.best_bid(),
             yes_best_ask: yes.best_ask(),
@@ -248,14 +298,21 @@ impl BookStore {
         market_id: &MarketId,
         now_ms: u64,
     ) -> Option<TopOfBook> {
-        let (token_yes, token_no) = registry.token_pair(market_id)?;
-        self.top_of_book_tokens(&token_yes, &token_no, now_ms)
+        let pair = registry
+            .data_plane()
+            .with_index(|index| index.market_token_pair(market_id))?;
+        self.top_of_book_tokens(pair.yes, pair.no, now_ms)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use quant_pivot_models::enums::common::Side;
+    use std::slice;
+
+    use quant_pivot_models::{
+        domain::market::BookLevel,
+        types::{Price, Shares},
+    };
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
 
@@ -264,58 +321,95 @@ mod tests {
         BookLevel::from_decimal_unchecked(Price::new(price), Shares::new(size))
     }
 
+    fn publish(
+        store: &BookStore,
+        token: TokenKey,
+        bids: Vec<BookLevel>,
+        asks: Vec<BookLevel>,
+        version: u64,
+    ) {
+        assert!(store.publish(
+            token,
+            BookSnapshot::new(Arc::from(bids), Arc::from(asks), version, version),
+            version,
+            1,
+            None,
+        ));
+    }
+
     #[test]
     fn snapshot_creates_and_updates() {
         let metrics = Arc::new(MetricsHub::new());
-        let store = BookStore::new(metrics);
-
         let tid = TokenId::new("tok-1");
-        let v = store.apply_snapshot(
-            &tid,
+        let data_plane = Arc::new(DataPlane::new());
+        data_plane.register_test_tokens(slice::from_ref(&tid));
+        let store = BookStore::new(data_plane, metrics);
+        let token = store.resolve(&tid).expect("registered token");
+        publish(
+            &store,
+            token,
             vec![make_level(dec!(0.5), dec!(10))],
             vec![make_level(dec!(0.6), dec!(5))],
-            100,
-            None,
+            1,
         );
-        assert_eq!(v, 1);
         assert_eq!(store.token_count(), 1);
 
-        let snap = store.load(&tid).unwrap();
+        let snap = store.load_owned(token).unwrap();
         assert_eq!(snap.best_bid().unwrap().inner(), dec!(0.5));
         assert_eq!(snap.best_ask().unwrap().inner(), dec!(0.6));
-        assert_eq!(store.book_version(&tid), 1);
+        assert_eq!(store.book_version(token), 1);
     }
 
     #[test]
     fn load_pair_zero_copy() {
         let metrics = Arc::new(MetricsHub::new());
-        let store = BookStore::new(metrics);
         let yes = TokenId::new("yes");
         let no = TokenId::new("no");
-        store.apply_snapshot(
-            &yes,
+        let data_plane = Arc::new(DataPlane::new());
+        data_plane.register_test_tokens(&[yes.clone(), no.clone()]);
+        let store = BookStore::new(data_plane, metrics);
+        let yes_key = store.resolve(&yes).expect("registered YES token");
+        let no_key = store.resolve(&no).expect("registered NO token");
+        publish(
+            &store,
+            yes_key,
             vec![make_level(dec!(0.95), dec!(10))],
             vec![],
             1,
-            None,
         );
-        store.apply_snapshot(&no, vec![], vec![make_level(dec!(0.05), dec!(10))], 1, None);
-        let pair = store.load_pair(&yes, &no).unwrap();
+        publish(
+            &store,
+            no_key,
+            vec![],
+            vec![make_level(dec!(0.05), dec!(10))],
+            1,
+        );
+        let pair = store.load_pair(yes_key, no_key).unwrap();
         assert_eq!(pair.view().yes_bids.levels.len(), 1);
     }
 
     #[test]
-    fn version_increments_on_delta() {
+    fn publish_replaces_version() {
         let metrics = Arc::new(MetricsHub::new());
-        let store = BookStore::new(metrics);
         let tid = TokenId::new("t");
-        store.apply_snapshot(&tid, vec![make_level(dec!(0.5), dec!(1))], vec![], 1, None);
-        let v2 = store.apply_delta(
-            &tid,
-            [(Side::Buy, Price::new(dec!(0.55)), Shares::new(dec!(2)))],
-            2,
-            None,
+        let data_plane = Arc::new(DataPlane::new());
+        data_plane.register_test_tokens(slice::from_ref(&tid));
+        let store = BookStore::new(data_plane, metrics);
+        let token = store.resolve(&tid).expect("registered token");
+        publish(
+            &store,
+            token,
+            vec![make_level(dec!(0.5), dec!(1))],
+            vec![],
+            1,
         );
-        assert_eq!(v2, 2);
+        publish(
+            &store,
+            token,
+            vec![make_level(dec!(0.55), dec!(2))],
+            vec![],
+            2,
+        );
+        assert_eq!(store.book_version(token), 2);
     }
 }

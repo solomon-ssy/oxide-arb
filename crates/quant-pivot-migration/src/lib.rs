@@ -1,5 +1,7 @@
 //! Deploy-only `SeaORM` `PostgreSQL` migrator with immutable artifact checksums.
 
+use quant_pivot_allocator as _;
+
 mod audit;
 pub mod migrations;
 #[expect(

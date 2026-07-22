@@ -91,7 +91,7 @@ impl EquitySnapshotService {
         let open_lots = self.positions.find_open_lots().await?;
         let unrealized_pnl_usd = unrealized_pnl_usd(&open_lots, account)?;
 
-        let account_snapshot_ref = account_snapshot_id.clone();
+        let account_snapshot_ref = account_snapshot_id;
         let account_snapshot_id = account_snapshot_id.unwrap_or_else(AccountSnapshotId::from_v7);
 
         let account_snapshot = NewAccountSnapshot {

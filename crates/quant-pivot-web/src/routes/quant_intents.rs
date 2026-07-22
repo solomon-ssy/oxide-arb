@@ -205,7 +205,7 @@ pub async fn create(
     let intent = state
         .order_intents
         .create(CreateIntentCommand {
-            recommendation_id: request.recommendation_id.clone(),
+            recommendation_id: request.recommendation_id,
             operator_id,
             acting_role: RoleCode::new(acting_role.0.clone()),
             reason: request.reason.clone(),

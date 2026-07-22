@@ -42,7 +42,7 @@ use quant_pivot_web::{
     readiness::PgRedisReadiness,
     routes, spawn_web_server,
     state::{AppState, LiveSchemaVerifier},
-    ws::{SessionRegistry, spawn_ws_broadcaster},
+    ws::{SessionHubMetrics, SessionRegistry, spawn_ws_broadcaster},
 };
 
 use super::AppContext;
@@ -89,7 +89,18 @@ impl AppContext {
         research_jobs: Arc<dyn ResearchJobPort>,
     ) -> QuantResult<()> {
         let (operation_log, op_log_worker) = build_operation_log_writer(self);
-        let state = build_app_state(self, order_intents, research_jobs, operation_log).await?;
+        let (ws_sessions, session_hub) = SessionRegistry::new(SessionHubMetrics {
+            best_effort_dropped: self.infra.metrics.ws_fanout_best_effort_dropped.clone(),
+            reliable_disconnects: self.infra.metrics.ws_fanout_reliable_disconnects.clone(),
+        });
+        let state = build_app_state(
+            self,
+            order_intents,
+            research_jobs,
+            operation_log,
+            ws_sessions.clone(),
+        )
+        .await?;
 
         let event_rx = self
             .event_rx
@@ -99,6 +110,8 @@ impl AppContext {
                 detail: "event_rx already taken".into(),
             })?;
         let ws_sessions = state.ws_sessions.clone();
+
+        runner.spawn(TaskId::SessionHub, move |token| session_hub.run(token));
 
         let web_config = self.config.web.clone();
         let shutdown = self.shutdown.clone();
@@ -130,19 +143,20 @@ async fn build_app_state(
     order_intents: Arc<dyn OrderIntentPort>,
     research_jobs: Arc<dyn ResearchJobPort>,
     operation_log: OperationLogBuffer,
+    ws_sessions: SessionRegistry,
 ) -> QuantResult<AppState> {
     let repos = &ctx.infra.repos;
     let auth = build_web_auth(ctx).await?;
     let execution = build_web_execution_ports(ctx);
     let research_ports = build_research_web_ports(ctx);
-    let trade_policy_dataset_builder: Arc<dyn TrainingDatasetPort> =
-        research_ports.training_datasets.clone();
+    let trade_policy_dataset_builder =
+        Arc::clone(&research_ports.training_datasets) as Arc<dyn TrainingDatasetPort>;
     let research_readiness = build_research_readiness(ctx)?;
 
     Ok(AppState {
         deploy: Arc::clone(&ctx.config),
-        postgres_schema_fingerprint: ctx.infra.postgres_schema_fingerprint.clone(),
-        clickhouse_schema_fingerprint: ctx.infra.clickhouse_schema_fingerprint.clone(),
+        postgres_schema_fingerprint: ctx.infra.postgres_schema_fingerprint,
+        clickhouse_schema_fingerprint: ctx.infra.clickhouse_schema_fingerprint,
         build_identity: CompiledBuildIdentity::compiled()?,
         schema_verification: Arc::new(LiveSchemaVerifier::new(
             Arc::clone(&ctx.infra.pg),
@@ -178,14 +192,15 @@ async fn build_app_state(
         events: ctx.events.clone(),
         markets: Arc::clone(&ctx.data.market_repo),
         quant_facts: Arc::clone(&ctx.infra.quant_fact_read),
-        ws_sessions: SessionRegistry::default(),
+        ws_sessions,
         metrics: Arc::new(CoreMetricsScrape::new(ctx.infra.metrics.registry.clone())),
         readiness: Arc::new(PgRedisReadiness::new(
             ctx.infra.pg.connection().clone(),
             Arc::clone(&ctx.infra.jwt_blacklist) as Arc<dyn TokenBlacklist>,
             Some(Arc::clone(&ctx.data.catalog) as Arc<dyn CatalogStatusPort>),
         )),
-        training_datasets: research_ports.training_datasets.clone(),
+        training_datasets: Arc::clone(&research_ports.training_datasets)
+            as Arc<dyn TrainingDatasetPort>,
         model_training: research_ports.model_training,
         backtests: research_ports.backtests,
         cpcv_backtests: research_ports.cpcv_backtests,

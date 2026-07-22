@@ -144,7 +144,7 @@ pub async fn factor_register_then_publish_batch_seeds_catalog() {
     // Batch publish flips every registered definition to Published.
     let ids: Vec<_> = registered
         .iter()
-        .map(|def| def.factor_definition_id.clone())
+        .map(|def| def.factor_definition_id)
         .collect();
     let published = service
         .publish_batch(

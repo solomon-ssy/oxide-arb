@@ -261,7 +261,7 @@ async fn insert_schedule_gap(
     ActiveModel {
         gap_id: ActiveValue::Set(ReportScheduleGapId::from_v7()),
         schedule_id: ActiveValue::Set(gap.schedule_id.clone()),
-        decision_policy_snapshot_id: ActiveValue::Set(gap.decision_policy_snapshot_id.clone()),
+        decision_policy_snapshot_id: ActiveValue::Set(*gap.decision_policy_snapshot_id),
         reason: ActiveValue::Set(gap.reason),
         first_scheduled_for: ActiveValue::Set(gap.first),
         last_scheduled_for: ActiveValue::Set(gap.last),
@@ -357,18 +357,16 @@ impl ReportRunRepository for PgReportRunRepository {
             let mut active = row.into_active_model();
             if let Some(spec) = incoming {
                 visited.insert(schedule_id);
-                active.decision_policy_snapshot_id =
-                    ActiveValue::Set(decision_policy_snapshot_id.clone());
+                active.decision_policy_snapshot_id = ActiveValue::Set(*decision_policy_snapshot_id);
                 active.updated_at = ActiveValue::Set(now);
                 if spec_changed {
-                    active.spec_hash = ActiveValue::Set(spec.spec_hash.clone());
+                    active.spec_hash = ActiveValue::Set(spec.spec_hash);
                     active.next_scheduled_for = ActiveValue::Set(spec.next_scheduled_for);
                     active.last_materialized_for = ActiveValue::Set(None);
                     active.enabled = ActiveValue::Set(spec.enabled);
                 }
             } else {
-                active.decision_policy_snapshot_id =
-                    ActiveValue::Set(decision_policy_snapshot_id.clone());
+                active.decision_policy_snapshot_id = ActiveValue::Set(*decision_policy_snapshot_id);
                 active.enabled = ActiveValue::Set(false);
                 active.updated_at = ActiveValue::Set(now);
             }
@@ -384,7 +382,7 @@ impl ReportRunRepository for PgReportRunRepository {
             }
             let created = QuantReportScheduleStateActiveModel {
                 schedule_id: ActiveValue::Set(schedule_id),
-                decision_policy_snapshot_id: ActiveValue::Set(decision_policy_snapshot_id.clone()),
+                decision_policy_snapshot_id: ActiveValue::Set(*decision_policy_snapshot_id),
                 spec_hash: ActiveValue::Set(spec.spec_hash),
                 next_scheduled_for: ActiveValue::Set(spec.next_scheduled_for),
                 last_materialized_for: ActiveValue::Set(None),
@@ -722,7 +720,7 @@ impl ReportRunRepository for PgReportRunRepository {
         &self,
         run_id: &ReportRunId,
     ) -> Result<Option<ReportRunInfo>, StorageError> {
-        Entity::find_by_id(run_id.clone())
+        Entity::find_by_id(*run_id)
             .one(&self.db)
             .await
             .map_err(StorageError::from)
@@ -746,7 +744,7 @@ impl ReportRunRepository for PgReportRunRepository {
         report_id: &RecommendationReportId,
     ) -> Result<Option<ReportRunInfo>, StorageError> {
         Entity::find()
-            .filter(Column::OutputReportId.eq(report_id.clone()))
+            .filter(Column::OutputReportId.eq(*report_id))
             .one(&self.db)
             .await
             .map_err(StorageError::from)
@@ -874,7 +872,7 @@ impl ReportRunRepository for PgReportRunRepository {
         let lease = checked_duration("lease_secs", lease_secs)?;
         let txn = self.db.begin().await.map_err(StorageError::from)?;
         let now = primitives::statement_timestamp(&txn).await?;
-        let row = Entity::find_by_id(run_id.clone())
+        let row = Entity::find_by_id(*run_id)
             .lock_exclusive()
             .one(&txn)
             .await
@@ -915,7 +913,7 @@ impl ReportRunRepository for PgReportRunRepository {
         }
         let txn = self.db.begin().await.map_err(StorageError::from)?;
         let now = primitives::statement_timestamp(&txn).await?;
-        let row = Entity::find_by_id(run_id.clone())
+        let row = Entity::find_by_id(*run_id)
             .lock_exclusive()
             .one(&txn)
             .await
@@ -1000,7 +998,7 @@ impl ReportRunRepository for PgReportRunRepository {
             ));
         }
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let row = Entity::find_by_id(run_id.clone())
+        let row = Entity::find_by_id(*run_id)
             .lock_exclusive()
             .one(&txn)
             .await

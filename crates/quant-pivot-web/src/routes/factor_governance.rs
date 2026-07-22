@@ -189,7 +189,7 @@ pub async fn publish(
         .factor_governance
         .publish(
             PublishFactorCommand {
-                factor_definition_id: factor_definition_id.clone(),
+                factor_definition_id,
                 reason: request.reason.clone(),
             },
             governance_actor(&actor, &acting_role)?,
@@ -239,7 +239,7 @@ pub async fn retire(
         .factor_governance
         .retire(
             RetireFactorCommand {
-                factor_definition_id: factor_definition_id.clone(),
+                factor_definition_id,
                 reason: request.reason.clone(),
             },
             governance_actor(&actor, &acting_role)?,

@@ -744,8 +744,8 @@ fn fresh_signal_from_candidate(
     factor_snapshot_hash: &ContentHash,
 ) -> FreshSignal {
     FreshSignal {
-        model_artifact_hash: model_artifact_hash.clone(),
-        factor_snapshot_hash: factor_snapshot_hash.clone(),
+        model_artifact_hash: *model_artifact_hash,
+        factor_snapshot_hash: *factor_snapshot_hash,
         composite_score: candidate.composite_score,
         expected_return_bps: Bps::new(candidate.expected_return_bps),
         auto_exec_eligible: fresh_auto_exec_eligible(candidate, config),
@@ -930,11 +930,11 @@ mod tests {
             catalog_sync_batch_id: CatalogSyncBatchId::from_v7(),
             market_change_id: CatalogMarketChangeId::from_v7(),
             event_change_id: CatalogEventChangeId::from_v7(),
-            market_content_hash: ContentHash::parse(format!("blake3:{}", "a".repeat(64)))
+            market_content_hash: ContentHash::parse(&format!("blake3:{}", "a".repeat(64)))
                 .expect("hash"),
-            event_content_hash: ContentHash::parse(format!("blake3:{}", "b".repeat(64)))
+            event_content_hash: ContentHash::parse(&format!("blake3:{}", "b".repeat(64)))
                 .expect("hash"),
-            membership_hash: ContentHash::parse(format!("blake3:{}", "c".repeat(64)))
+            membership_hash: ContentHash::parse(&format!("blake3:{}", "c".repeat(64)))
                 .expect("hash"),
             market_timestamp_quality: CatalogTimestampQuality::Source,
             event_timestamp_quality: CatalogTimestampQuality::Source,

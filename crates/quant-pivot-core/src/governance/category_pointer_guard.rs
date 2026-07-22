@@ -48,7 +48,7 @@ impl CategoryPointerGuard {
     /// `category_scope` mismatch with the pointer's own category key.
     pub async fn validate(&self, model: &ModelConfig) -> Result<(), ControlError> {
         for (category, reference) in &model.category_model_pointers {
-            let version_id = reference.id.clone();
+            let version_id = reference.id;
             let version = self
                 .model_registry
                 .find_model_version_by_id(&version_id)
@@ -329,16 +329,16 @@ mod tests {
                 model_spec_definition_hash: spec().definition_hash,
                 profile_ref: fixture_profile_ref(),
                 model_family: ModelFamily::WeightedFactor,
-                feature_schema_hash: ContentHash::parse(format!("blake3:{}", "1".repeat(64)))
+                feature_schema_hash: ContentHash::parse(&format!("blake3:{}", "1".repeat(64)))
                     .expect("hash"),
-                factor_schema_hash: ContentHash::parse(format!("blake3:{}", "2".repeat(64)))
+                factor_schema_hash: ContentHash::parse(&format!("blake3:{}", "2".repeat(64)))
                     .expect("hash"),
                 trade_policy_artifact_id: None,
                 trade_policy_hash: None,
             },
-            training_dataset_hash: ContentHash::parse(format!("blake3:{}", "3".repeat(64)))
+            training_dataset_hash: ContentHash::parse(&format!("blake3:{}", "3".repeat(64)))
                 .expect("hash"),
-            training_input_hash: ContentHash::parse(format!("blake3:{}", "4".repeat(64)))
+            training_input_hash: ContentHash::parse(&format!("blake3:{}", "4".repeat(64)))
                 .expect("hash"),
             input_contract,
             input_contract_hash,
@@ -375,22 +375,22 @@ mod tests {
         let spec = spec();
         let store = temp_store();
         let model_version_id = ModelVersionId::from_v7();
-        let artifact = artifact(model_version_id.clone(), category_scope);
+        let artifact = artifact(model_version_id, category_scope);
         let digest = artifact.content_hash().expect("hash");
         let key = ModelArtifact::artifact_key(&digest).expect("key");
         store
             .put(key, &artifact.to_bytes().expect("bytes"))
             .await
             .expect("put");
-        let version = version(spec.model_spec_id.clone(), digest, status);
-        let version_id = version.model_version_id.clone();
+        let version = version(spec.model_spec_id, digest, status);
+        let version_id = version.model_version_id;
         let registry = Arc::new(FakeRegistry { version, spec });
         (CategoryPointerGuard::new(registry, store), version_id)
     }
 
     fn config_with(category: MarketCategory, version_id: &ModelVersionId) -> ModelConfig {
         let mut category_model_pointers = BTreeMap::new();
-        category_model_pointers.insert(category, ModelVersionRef::new(version_id.clone()));
+        category_model_pointers.insert(category, ModelVersionRef::new(*version_id));
         ModelConfig {
             category_model_pointers,
             ..ModelConfig::default()

@@ -45,6 +45,8 @@ Polymarket facts -> features -> factors/models -> portfolio plan
 8. [`08-third-party-crates-and-ml-stack.md`](08-third-party-crates-and-ml-stack.md)：第三方 crate、模型训练、推理、优化、依赖引入顺序和 MSRV/native 风险。
 9. [`09-account-capital-position-reconciliation.md`](09-account-capital-position-reconciliation.md)：账户/资本/持仓/对账平面——`AccountSnapshot`、planner 资金感知签名、资金状态机、对账证据链、Polymarket 余额/持仓数据源（设计先行，实现分相位到 Phase 4/5/6）。
 10. [`08-cold-start-production-closeout.md`](08-cold-start-production-closeout.md)：冷启动、schema、catalog、bootstrap、parity、认证和 UI 的生产收尾契约与验收矩阵。
+11. [`08-extreme-performance-design.md`](08-extreme-performance-design.md)：数据面、统一 L2 ledger、订单簿和 WebSocket fanout 的极致性能设计。
+12. [`09-extreme-performance-ledger.md`](09-extreme-performance-ledger.md)：性能重构执行状态、决策和中断恢复台账。
 
 **子phase实施目录（按 Phase 推进时读）：**
 

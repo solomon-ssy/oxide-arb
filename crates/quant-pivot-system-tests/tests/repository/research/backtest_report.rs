@@ -29,7 +29,7 @@ use rust_decimal_macros::dec;
 use sea_orm::DatabaseConnection;
 
 fn content_hash(seed: char) -> ContentHash {
-    ContentHash::parse(format!("blake3:{}", seed.to_string().repeat(64))).expect("hash")
+    ContentHash::parse(&format!("blake3:{}", seed.to_string().repeat(64))).expect("hash")
 }
 
 async fn seed_runtime_config(db: &DatabaseConnection) -> DecisionPolicySnapshotId {
@@ -44,7 +44,7 @@ async fn seed_model_version(
     let model_spec_id = ModelSpecId::from_v7();
     registry
         .create_model_spec(model_spec_fixtures::new_model_spec_fixture(
-            model_spec_id.clone(),
+            model_spec_id,
             "pg-backtest-it",
             ModelFamily::WeightedFactor,
             86_400,
@@ -57,7 +57,7 @@ async fn seed_model_version(
     let model_version_id = ModelVersionId::from_v7();
     registry
         .create_model_version(NewModelVersion {
-            model_version_id: model_version_id.clone(),
+            model_version_id,
             model_spec_id,
             version: 1,
             profile_ref: execution_pg_seed::fixture_profile_ref(),
@@ -82,10 +82,10 @@ async fn seed_model_version(
     let window_start = Utc::now() - ChronoDuration::hours(2);
     PgModelRunRepository::new(db.clone())
         .create(NewModelRun {
-            model_run_id: model_run_id.clone(),
+            model_run_id,
             run_kind: ModelRunKind::Backtest,
-            model_version_id: Some(model_version_id.clone()),
-            decision_policy_snapshot_id: rc_id.clone(),
+            model_version_id: Some(model_version_id),
+            decision_policy_snapshot_id: *rc_id,
             market_selection_id: None,
             window_start,
             window_end: window_start + ChronoDuration::hours(1),
@@ -154,12 +154,7 @@ pub async fn quant_backtest_report_migration_and_crud() {
     let report_id = BacktestReportId::from_v7();
 
     let created = repo
-        .create(new_report(
-            report_id.clone(),
-            model_version_id.clone(),
-            model_run_id,
-            rc_id,
-        ))
+        .create(new_report(report_id, model_version_id, model_run_id, rc_id))
         .await
         .expect("create");
     assert_eq!(created.backtest_report_id, report_id);

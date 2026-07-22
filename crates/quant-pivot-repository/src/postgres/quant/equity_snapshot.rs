@@ -46,7 +46,7 @@ impl EquitySnapshotRepository for PgEquitySnapshotRepository {
         &self,
         id: &EquitySnapshotId,
     ) -> Result<Option<EquitySnapshotInfo>, StorageError> {
-        Entity::find_by_id(id.clone())
+        Entity::find_by_id(*id)
             .one(&self.db)
             .await
             .map_err(StorageError::from)

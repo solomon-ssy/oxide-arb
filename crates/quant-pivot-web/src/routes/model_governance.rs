@@ -94,7 +94,7 @@ pub async fn publish(
         .model_governance
         .publish(
             PublishModelCommand {
-                model_version_id: model_version_id.clone(),
+                model_version_id,
                 reason: request.reason.clone(),
             },
             governance_actor(&actor, &acting_role)?,
@@ -139,7 +139,7 @@ pub async fn retire(
         .model_governance
         .retire(
             RetireModelCommand {
-                model_version_id: model_version_id.clone(),
+                model_version_id,
                 reason: request.reason.clone(),
             },
             governance_actor(&actor, &acting_role)?,

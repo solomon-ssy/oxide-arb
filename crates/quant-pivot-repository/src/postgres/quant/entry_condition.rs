@@ -107,15 +107,15 @@ impl EntryConditionRepository for PgEntryConditionRepository {
         validate_new_instance(&instance)?;
         let audit = NewEntryConditionAudit {
             audit_id: EntryConditionAuditId::from_v7(),
-            condition_instance_id: instance.condition_instance_id.clone(),
+            condition_instance_id: instance.condition_instance_id,
             revision: instance.revision,
             action: EntryConditionAuditAction::Created,
             from_state: None,
             to_state: instance.state,
             truth_json: instance.truth_json.clone(),
-            evaluation_hash: instance.evaluation_hash.clone(),
-            input_fingerprint: instance.input_fingerprint.clone(),
-            continuity_hash: instance.continuity_hash.clone(),
+            evaluation_hash: instance.evaluation_hash,
+            input_fingerprint: instance.input_fingerprint,
+            continuity_hash: instance.continuity_hash,
             lease_epoch: instance.lease_epoch,
             detail: None,
             occurred_at: now,
@@ -137,7 +137,7 @@ impl EntryConditionRepository for PgEntryConditionRepository {
         &self,
         artifact_id: &EntryConditionArtifactId,
     ) -> Result<Option<EntryConditionArtifactInfo>, StorageError> {
-        Entity::find_by_id(artifact_id.clone())
+        Entity::find_by_id(*artifact_id)
             .one(&self.db)
             .await
             .map_err(StorageError::from)
@@ -148,7 +148,7 @@ impl EntryConditionRepository for PgEntryConditionRepository {
         &self,
         instance_id: &EntryConditionInstanceId,
     ) -> Result<Option<EntryConditionInstanceInfo>, StorageError> {
-        QuantEntryConditionInstanceEntity::find_by_id(instance_id.clone())
+        QuantEntryConditionInstanceEntity::find_by_id(*instance_id)
             .one(&self.db)
             .await
             .map_err(StorageError::from)
@@ -160,9 +160,7 @@ impl EntryConditionRepository for PgEntryConditionRepository {
         recommendation_id: &RecommendationId,
     ) -> Result<Option<EntryConditionInstanceInfo>, StorageError> {
         QuantEntryConditionInstanceEntity::find()
-            .filter(
-                QuantEntryConditionInstanceColumn::RecommendationId.eq(recommendation_id.clone()),
-            )
+            .filter(QuantEntryConditionInstanceColumn::RecommendationId.eq(*recommendation_id))
             .one(&self.db)
             .await
             .map_err(StorageError::from)
@@ -174,7 +172,7 @@ impl EntryConditionRepository for PgEntryConditionRepository {
         instance_id: &EntryConditionInstanceId,
     ) -> Result<Vec<EntryConditionAuditInfo>, StorageError> {
         QuantEntryConditionAuditEntity::find()
-            .filter(QuantEntryConditionAuditColumn::ConditionInstanceId.eq(instance_id.clone()))
+            .filter(QuantEntryConditionAuditColumn::ConditionInstanceId.eq(*instance_id))
             .order_by_asc(QuantEntryConditionAuditColumn::Revision)
             .all(&self.db)
             .await
@@ -408,15 +406,15 @@ impl EntryConditionRepository for PgEntryConditionRepository {
                 &txn,
                 NewEntryConditionAudit {
                     audit_id: EntryConditionAuditId::from_v7(),
-                    condition_instance_id: leased.condition_instance_id.clone(),
+                    condition_instance_id: leased.condition_instance_id,
                     revision: next_revision,
                     action: EntryConditionAuditAction::LeaseTakenOver,
                     from_state: Some(from_state),
                     to_state: leased.state,
                     truth_json: leased.truth_json.clone(),
-                    evaluation_hash: leased.evaluation_hash.clone(),
-                    input_fingerprint: leased.input_fingerprint.clone(),
-                    continuity_hash: leased.continuity_hash.clone(),
+                    evaluation_hash: leased.evaluation_hash,
+                    input_fingerprint: leased.input_fingerprint,
+                    continuity_hash: leased.continuity_hash,
                     lease_epoch: next_epoch,
                     detail: Some("lease epoch changed; continuity reset".to_owned()),
                     occurred_at: now,
@@ -440,7 +438,7 @@ impl EntryConditionRepository for PgEntryConditionRepository {
                 QuantEntryConditionInstanceColumn::LeaseExpiresAt,
                 Expr::value(lease_expires_at),
             )
-            .filter(QuantEntryConditionInstanceColumn::ConditionInstanceId.eq(instance_id.clone()))
+            .filter(QuantEntryConditionInstanceColumn::ConditionInstanceId.eq(*instance_id))
             .filter(QuantEntryConditionInstanceColumn::LeaseOwner.eq(worker_id))
             .filter(QuantEntryConditionInstanceColumn::LeaseEpoch.eq(lease_epoch))
             .exec(&self.db)
@@ -494,9 +492,9 @@ impl EntryConditionRepository for PgEntryConditionRepository {
             active.state = ActiveValue::Set(evaluation.state);
             active.truth_json = ActiveValue::Set(Some(evaluation.truth.clone()));
             active.revision = ActiveValue::Set(revision);
-            active.evaluation_hash = ActiveValue::Set(Some(evaluation.evaluation_hash.clone()));
-            active.input_fingerprint = ActiveValue::Set(Some(evaluation.input_fingerprint.clone()));
-            active.continuity_hash = ActiveValue::Set(Some(evaluation.continuity_hash.clone()));
+            active.evaluation_hash = ActiveValue::Set(Some(evaluation.evaluation_hash));
+            active.input_fingerprint = ActiveValue::Set(Some(evaluation.input_fingerprint));
+            active.continuity_hash = ActiveValue::Set(Some(evaluation.continuity_hash));
             active.confirmation_started_at = ActiveValue::Set(evaluation.confirmation_started_at);
         }
         active.fold_state_json = ActiveValue::Set(evaluation.fold_state.clone());
@@ -510,15 +508,15 @@ impl EntryConditionRepository for PgEntryConditionRepository {
                 &txn,
                 NewEntryConditionAudit {
                     audit_id: EntryConditionAuditId::from_v7(),
-                    condition_instance_id: instance_id.clone(),
+                    condition_instance_id: *instance_id,
                     revision,
                     action: EntryConditionAuditAction::Evaluated,
                     from_state: Some(from_state),
                     to_state: evaluation.state,
                     truth_json: Some(evaluation.truth.clone()),
-                    evaluation_hash: Some(evaluation.evaluation_hash.clone()),
-                    input_fingerprint: Some(evaluation.input_fingerprint.clone()),
-                    continuity_hash: Some(evaluation.continuity_hash.clone()),
+                    evaluation_hash: Some(evaluation.evaluation_hash),
+                    input_fingerprint: Some(evaluation.input_fingerprint),
+                    continuity_hash: Some(evaluation.continuity_hash),
                     lease_epoch: evaluation.expected_lease_epoch,
                     detail: None,
                     occurred_at: evaluation.evaluated_at,
@@ -562,7 +560,7 @@ impl EntryConditionRepository for PgEntryConditionRepository {
                 .checked_add(1)
                 .ok_or_else(|| invariant(ENTITY_INSTANCE, "evaluation publish attempt overflow"))?;
             let mut active = row.into_active_model();
-            active.claim_owner = ActiveValue::Set(Some(worker_id.clone()));
+            active.claim_owner = ActiveValue::Set(Some(worker_id));
             active.lease_expires_at = ActiveValue::Set(Some(lease_expires_at));
             active.publish_attempts = ActiveValue::Set(attempts);
             let claimed = active.update(&txn).await.map_err(StorageError::from)?;
@@ -595,9 +593,7 @@ impl EntryConditionRepository for PgEntryConditionRepository {
                 QuantEntryConditionEvaluationOutboxColumn::LeaseExpiresAt,
                 Expr::value(Option::<DateTime<Utc>>::None),
             )
-            .filter(
-                QuantEntryConditionEvaluationOutboxColumn::EvaluationId.eq(evaluation_id.clone()),
-            )
+            .filter(QuantEntryConditionEvaluationOutboxColumn::EvaluationId.eq(*evaluation_id))
             .filter(QuantEntryConditionEvaluationOutboxColumn::ClaimOwner.eq(worker_id))
             .exec(&self.db)
             .await
@@ -624,9 +620,7 @@ impl EntryConditionRepository for PgEntryConditionRepository {
                 QuantEntryConditionEvaluationOutboxColumn::LeaseExpiresAt,
                 Expr::value(Option::<DateTime<Utc>>::None),
             )
-            .filter(
-                QuantEntryConditionEvaluationOutboxColumn::EvaluationId.eq(evaluation_id.clone()),
-            )
+            .filter(QuantEntryConditionEvaluationOutboxColumn::EvaluationId.eq(*evaluation_id))
             .filter(QuantEntryConditionEvaluationOutboxColumn::ClaimOwner.eq(worker_id))
             .exec(&self.db)
             .await
@@ -728,18 +722,18 @@ async fn insert_evaluation_outbox<C: ConnectionTrait>(
     ))
     .map_err(|error| invariant(ENTITY_INSTANCE, error.to_string()))?;
     let event = EntryConditionEvaluationEventRow {
-        evaluation_id: evaluation_id.clone(),
-        condition_instance_id: instance_id.clone(),
+        evaluation_id,
+        condition_instance_id: *instance_id,
         base_revision: evaluation.expected_revision,
         applied_revision: transitioned.then_some(revision),
         trace_kind: trace_kind.to_owned(),
         evaluator_version: evaluation.evaluator_version,
         evaluated_at: evaluation.evaluated_at.timestamp_millis(),
-        state: evaluation.state.as_str().to_owned(),
+        state: evaluation.state.to_string(),
         truth: truth_label(&evaluation.truth).to_owned(),
-        evaluation_hash: evaluation.evaluation_hash.clone(),
-        input_fingerprint: evaluation.input_fingerprint.clone(),
-        continuity_hash: evaluation.continuity_hash.clone(),
+        evaluation_hash: evaluation.evaluation_hash,
+        input_fingerprint: evaluation.input_fingerprint,
+        continuity_hash: evaluation.continuity_hash,
         tree_json: evaluation.tree_json.clone(),
         schema_version: ChSchemaVersion::FIRST,
     };
@@ -794,9 +788,8 @@ pub async fn claim_for_submission<C: ConnectionTrait>(
     let mut active = row.into_active_model();
     active.state = ActiveValue::Set(EntryConditionState::Consumed);
     active.revision = ActiveValue::Set(revision);
-    active.claimed_by_intent_id = ActiveValue::Set(Some(claim.order_intent_id.clone()));
-    active.claim_admission_state_version =
-        ActiveValue::Set(Some(claim.admission_state_version.clone()));
+    active.claimed_by_intent_id = ActiveValue::Set(Some(claim.order_intent_id));
+    active.claim_admission_state_version = ActiveValue::Set(Some(claim.admission_state_version));
     active.consumed_at = ActiveValue::Set(Some(claim.claimed_at));
     active.next_evaluation_at = ActiveValue::Set(None);
     active.lease_owner = ActiveValue::Set(None);
@@ -975,7 +968,7 @@ async fn load_for_update<C: ConnectionTrait>(
     db: &C,
     instance_id: &EntryConditionInstanceId,
 ) -> Result<Model, StorageError> {
-    QuantEntryConditionInstanceEntity::find_by_id(instance_id.clone())
+    QuantEntryConditionInstanceEntity::find_by_id(*instance_id)
         .lock_exclusive()
         .one(db)
         .await
@@ -1007,15 +1000,15 @@ fn audit_from_model(
 ) -> NewEntryConditionAudit {
     NewEntryConditionAudit {
         audit_id: EntryConditionAuditId::from_v7(),
-        condition_instance_id: model.condition_instance_id.clone(),
+        condition_instance_id: model.condition_instance_id,
         revision,
         action,
         from_state,
         to_state: model.state,
         truth_json: model.truth_json.clone(),
-        evaluation_hash: model.evaluation_hash.clone(),
-        input_fingerprint: model.input_fingerprint.clone(),
-        continuity_hash: model.continuity_hash.clone(),
+        evaluation_hash: model.evaluation_hash,
+        input_fingerprint: model.input_fingerprint,
+        continuity_hash: model.continuity_hash,
         lease_epoch: model.lease_epoch,
         detail,
         occurred_at,

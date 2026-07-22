@@ -133,7 +133,7 @@ impl CoreQuantReportPort {
         &self,
         model_run_id: &ModelRunId,
     ) -> QuantResult<RunServingEvidence> {
-        let run_ids = [model_run_id.clone()];
+        let run_ids = [*model_run_id];
         let marker =
             canonical_completion(self.serving_evidence.completions_for_runs(&run_ids).await?)?;
         let model_inputs = self
@@ -228,7 +228,7 @@ impl CoreQuantReportPort {
         let infos = self.feature_repo.find_by_ids(&vector_ids).await?;
         let mut infos_by_id = infos
             .into_iter()
-            .map(|info| (info.feature_vector_id.clone(), info))
+            .map(|info| (info.feature_vector_id, info))
             .collect::<HashMap<_, _>>();
         if infos_by_id.len() != vector_ids.len() {
             return Err(ResearchError::Determinism {
@@ -263,7 +263,7 @@ impl CoreQuantReportPort {
         let mut cells_by_vector = HashMap::<FeatureVectorId, Vec<QuantFeatureEventRow>>::new();
         for row in cells.iter().cloned() {
             cells_by_vector
-                .entry(row.feature_vector_id.clone())
+                .entry(row.feature_vector_id)
                 .or_default()
                 .push(row);
         }
@@ -327,18 +327,15 @@ fn pre_inference_vector_ids(
     let mut unique_ids = HashSet::with_capacity(snapshot.tokens_json.0.len());
     let mut unique_markets = HashSet::with_capacity(snapshot.tokens_json.0.len());
     for token in &snapshot.tokens_json.0 {
-        let vector_id =
-            token
-                .feature_vector_id
-                .clone()
-                .ok_or_else(|| ResearchError::Determinism {
-                    detail: format!(
-                        "report {} contains legacy-unbound data-quality evidence",
-                        report.recommendation_report_id
-                    ),
-                })?;
-        if !unique_ids.insert(vector_id.clone()) || !unique_markets.insert(token.market_id.clone())
-        {
+        let vector_id = token
+            .feature_vector_id
+            .ok_or_else(|| ResearchError::Determinism {
+                detail: format!(
+                    "report {} contains legacy-unbound data-quality evidence",
+                    report.recommendation_report_id
+                ),
+            })?;
+        if !unique_ids.insert(vector_id) || !unique_markets.insert(token.market_id.clone()) {
             return Err(ResearchError::Determinism {
                 detail: format!(
                     "report {} data-quality evidence contains duplicate vector or market bindings",
@@ -413,7 +410,7 @@ impl QuantReportPort for CoreQuantReportPort {
     ) -> QuantResult<EnqueueReportRunOutcome> {
         self.lifecycle
             .retry_ad_hoc(RetryAdHocReportRequest {
-                source_run_id: run_id.clone(),
+                source_run_id: *run_id,
                 request_id: request_id.to_owned(),
                 requested_at: Utc::now(),
             })
@@ -552,7 +549,7 @@ impl QuantReportPort for CoreQuantReportPort {
             .quant_fact_read
             .report_market_funnel_counts(report_id)
             .await?;
-        Ok(Some(funnel_summary(report_id.clone(), counts)?))
+        Ok(Some(funnel_summary(*report_id, counts)?))
     }
 
     async fn page_report_funnel_markets(
@@ -618,7 +615,7 @@ impl QuantReportPort for CoreQuantReportPort {
         Ok(recommendations
             .into_iter()
             .map(|rec| {
-                let active = blocking.get(&rec.recommendation_id).cloned();
+                let active = blocking.get(&rec.recommendation_id).copied();
                 Self::assemble_view(rec, report.status, active)
             })
             .collect())
@@ -1103,7 +1100,7 @@ fn unique_feature_vector_ids(inputs: &[QuantModelInputEventRow]) -> Vec<FeatureV
     let mut ids = Vec::new();
     for row in inputs {
         if !ids.contains(&row.feature_vector_id) {
-            ids.push(row.feature_vector_id.clone());
+            ids.push(row.feature_vector_id);
         }
     }
     ids
@@ -1224,7 +1221,7 @@ fn serving_feature_evidence_counts(
             }
             .into());
         }
-        match captures.entry(row.feature_vector_id.clone()) {
+        match captures.entry(row.feature_vector_id) {
             Vacant(entry) => {
                 entry.insert(row.decision_capture_hash.as_str());
             }

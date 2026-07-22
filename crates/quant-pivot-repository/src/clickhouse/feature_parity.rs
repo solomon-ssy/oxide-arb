@@ -238,10 +238,10 @@ impl EventFilters {
                 .map_or_else(String::new, ToString::to_string),
             status: query
                 .status
-                .map_or_else(String::new, |status| status.as_str().to_owned()),
+                .map_or_else(String::new, |status| status.to_string()),
             stage: query
                 .stage
-                .map_or_else(String::new, |stage| stage.as_str().to_owned()),
+                .map_or_else(String::new, |stage| stage.to_string()),
             feature_name: query.feature_name.clone().unwrap_or_default(),
             reason: query.reason.clone().unwrap_or_default(),
             report_id: query
@@ -394,7 +394,7 @@ mod tests {
         clickhouse::QuantFeatureParityEventRow,
         enums::quant::FeatureParityStage,
         types::{
-            ContentHash, FeatureParityDetail, FeatureParityDetailSource, FeatureParityEventId,
+            FeatureParityDetail, FeatureParityDetailSource, FeatureParityEventId,
             FeatureParityRunId,
         },
     };
@@ -440,9 +440,9 @@ mod tests {
     #[test]
     fn parity_event_view_preserves_contract_transform_and_structured_detail() {
         let view = row_to_view(row()).expect("valid parity event view");
-        assert_eq!(view.feature_contract_hash.as_str(), HASH);
+        assert_eq!(view.feature_contract_hash.to_string(), HASH);
         assert_eq!(
-            view.transform_hash.as_ref().map(ContentHash::as_str),
+            view.transform_hash.map(|hash| hash.to_string()).as_deref(),
             Some(HASH)
         );
         let FeatureParityDetail::Compared {

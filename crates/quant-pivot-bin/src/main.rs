@@ -1,10 +1,17 @@
 use std::{env, error::Error, sync::Arc};
 
 use clap::Parser;
+use quant_pivot_allocator as _;
 use quant_pivot_core::app::bootstrap;
 use quant_pivot_models::config::{DeployConfig, ObservabilityConfig};
+use rayon::ThreadPoolBuilder;
 use rustls::crypto::aws_lc_rs;
+use tokio::runtime::Builder;
 use tracing_subscriber::EnvFilter;
+
+const TOKIO_WORKER_THREADS: usize = 3;
+const TOKIO_MAX_BLOCKING_THREADS: usize = 4;
+const OFFLINE_RAYON_THREADS: usize = 2;
 
 #[derive(Parser)]
 #[command(
@@ -69,13 +76,22 @@ fn init_crypto_provider() {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
+fn main() -> Result<(), Box<dyn Error>> {
     let cli = Cli::parse();
     let deploy = Arc::new(DeployConfig::load(&cli.config_dir)?);
     init_tracing(&deploy.observability);
     init_crypto_provider();
+    ThreadPoolBuilder::new()
+        .num_threads(OFFLINE_RAYON_THREADS)
+        .thread_name(|index| format!("quant-rayon-{index}"))
+        .build_global()?;
+    let runtime = Builder::new_multi_thread()
+        .worker_threads(TOKIO_WORKER_THREADS)
+        .max_blocking_threads(TOKIO_MAX_BLOCKING_THREADS)
+        .thread_name("quant-tokio")
+        .enable_all()
+        .build()?;
     tracing::info!(config_dir = %cli.config_dir, "deploy config loaded");
-    bootstrap::run(deploy).await?;
+    runtime.block_on(bootstrap::run(deploy))?;
     Ok(())
 }

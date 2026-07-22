@@ -104,7 +104,7 @@ impl PositionRepository for PgPositionRepository {
         order_intent_id: &OrderIntentId,
     ) -> Result<Option<PositionInfo>, StorageError> {
         Entity::find()
-            .filter(Column::OrderIntentId.eq(order_intent_id.clone()))
+            .filter(Column::OrderIntentId.eq(*order_intent_id))
             .one(&self.db)
             .await
             .map_err(StorageError::from)
@@ -117,7 +117,7 @@ impl PositionRepository for PgPositionRepository {
     ) -> Result<Option<PositionSummary>, StorageError> {
         // N:1 join projects `recommendation_id` in one round-trip (same shape
         // as the page path's batch enrich, without a second query).
-        let Some((position, intent)) = Entity::find_by_id(position_id.clone())
+        let Some((position, intent)) = Entity::find_by_id(*position_id)
             .find_also_related(QuantOrderIntentEntity)
             .one(&self.db)
             .await
@@ -125,8 +125,8 @@ impl PositionRepository for PgPositionRepository {
         else {
             return Ok(None);
         };
-        let intent = intent
-            .ok_or_else(|| error::not_found(QUANT_ORDER_INTENT, &position.order_intent_id))?;
+        let intent =
+            intent.ok_or_else(|| error::not_found(QUANT_ORDER_INTENT, position.order_intent_id))?;
         Ok(Some(PositionSummary {
             recommendation_id: intent.recommendation_id,
             position: position.into(),
@@ -148,17 +148,15 @@ impl PositionRepository for PgPositionRepository {
         .await?;
         let recommendations = recommendation_ids_for(
             &self.db,
-            page.items
-                .iter()
-                .map(|position| position.order_intent_id.clone()),
+            page.items.iter().map(|position| position.order_intent_id),
         )
         .await?;
         let mut summaries = Vec::with_capacity(page.items.len());
         for position in page.items {
             let recommendation_id = recommendations
                 .get(&position.order_intent_id)
-                .cloned()
-                .ok_or_else(|| error::not_found(QUANT_ORDER_INTENT, &position.order_intent_id))?;
+                .copied()
+                .ok_or_else(|| error::not_found(QUANT_ORDER_INTENT, position.order_intent_id))?;
             summaries.push(PositionSummary {
                 position,
                 recommendation_id,
@@ -230,8 +228,7 @@ impl PositionRepository for PgPositionRepository {
             .await
             .map_err(StorageError::from)?;
 
-        let intent_ids: Vec<OrderIntentId> =
-            rows.iter().map(|row| row.order_intent_id.clone()).collect();
+        let intent_ids: Vec<OrderIntentId> = rows.iter().map(|row| row.order_intent_id).collect();
         let intents = intents_by_id(&self.db, &intent_ids).await?;
         let orders_by_intent = orders_by_intent_id(&self.db, &intent_ids).await?;
 
@@ -297,7 +294,7 @@ pub async fn apply_fill(
     }
 
     let existing = Entity::find()
-        .filter(Column::OrderIntentId.eq(fill.order_intent_id.clone()))
+        .filter(Column::OrderIntentId.eq(fill.order_intent_id))
         .lock_exclusive()
         .one(db)
         .await
@@ -377,7 +374,7 @@ pub async fn apply_exit(
     }
 
     let Some(row) = Entity::find()
-        .filter(Column::OrderIntentId.eq(order_intent_id.clone()))
+        .filter(Column::OrderIntentId.eq(*order_intent_id))
         .lock_exclusive()
         .one(db)
         .await
@@ -433,7 +430,7 @@ pub async fn mark_closing(
     order_intent_id: &OrderIntentId,
 ) -> Result<(), StorageError> {
     let Some(row) = Entity::find()
-        .filter(Column::OrderIntentId.eq(order_intent_id.clone()))
+        .filter(Column::OrderIntentId.eq(*order_intent_id))
         .one(db)
         .await
         .map_err(StorageError::from)?
@@ -463,7 +460,7 @@ pub async fn revert_lot_to_open(
     order_intent_id: &OrderIntentId,
 ) -> Result<(), StorageError> {
     let Some(row) = Entity::find()
-        .filter(Column::OrderIntentId.eq(order_intent_id.clone()))
+        .filter(Column::OrderIntentId.eq(*order_intent_id))
         .one(db)
         .await
         .map_err(StorageError::from)?
@@ -594,7 +591,7 @@ async fn intents_by_id(
             .map_err(StorageError::from)?;
         rows.extend(batch);
     }
-    Ok(map_by_key(rows, |row| row.order_intent_id.clone()))
+    Ok(map_by_key(rows, |row| row.order_intent_id))
 }
 
 async fn orders_by_intent_id(
@@ -613,7 +610,7 @@ async fn orders_by_intent_id(
             .map_err(StorageError::from)?;
         rows.extend(batch);
     }
-    Ok(group_by_key(rows, |row| row.order_intent_id.clone()))
+    Ok(group_by_key(rows, |row| row.order_intent_id))
 }
 
 fn page_condition(query: &PositionListQuery) -> Condition {
@@ -622,7 +619,6 @@ fn page_condition(query: &PositionListQuery) -> Condition {
         .add_option(
             query
                 .order_intent_id
-                .clone()
                 .map(|order_intent_id| Column::OrderIntentId.eq(order_intent_id)),
         )
         .add_option(

@@ -17,13 +17,15 @@ use crate::clickhouse::{
     ensure,
     query_limits::{CLICKHOUSE_SCHEMA_APPLY, CLICKHOUSE_SCHEMA_VERIFY},
     schema,
-    schema::{BOOTSTRAP_SOURCES, FORBIDDEN_SCHEMA_OBJECTS, REQUIRED_SCHEMA_OBJECTS},
+    schema::{BOOTSTRAP_SOURCES, REQUIRED_SCHEMA_OBJECTS},
 };
 
 const MIGRATION_TABLE: &str = "quant_pivot_schema_migration";
 const MIGRATION_CLAIM_PREFIX: &str = "quant_pivot_schema_migration_claim_";
 const DEPLOYMENT_LOCK_TABLE: &str = "quant_pivot_schema_deployment_lock";
 const SCHEMA_MANIFEST_FORMAT_VERSION: u32 = 1;
+const MINIMUM_CLICKHOUSE_MAJOR: u32 = 26;
+const MINIMUM_CLICKHOUSE_MINOR: u32 = 1;
 const EXPECTED_SCHEMA_MANIFEST: &str = include_str!("../../../../schema/clickhouse/manifest.json");
 const MIGRATION_TABLE_DDL: &str = "CREATE TABLE IF NOT EXISTS quant_pivot_schema_migration (
     version UInt32,
@@ -143,7 +145,7 @@ const fn migrations() -> [MigrationSpec; 1] {
         name: "bootstrap",
         safety: ClickHouseMigrationSafety::OnlineMetadata,
         sources: BOOTSTRAP_SOURCES,
-        expected_checksum: "blake3:5743af5991f934d52df632a094024bef0f9409ce46ccacb0c801b87cf21f448a",
+        expected_checksum: "blake3:60663c9ffc458f923d00297d2d4b37bad65948687147005077e238f553f11d8a",
         destructive_empty_tables: &[],
     }]
 }
@@ -165,7 +167,9 @@ pub fn schema_contract_hash() -> String {
 /// Inspect the deployed managed objects and render the normalized semantic
 /// manifest committed alongside the immutable migrations.
 pub async fn render_schema_manifest(config: &ClickHouseConfig) -> Result<String, StorageError> {
-    let manifest = inspect_schema_manifest(&client(config)).await?;
+    let client = client(config);
+    verify_server_version(&client).await?;
+    let manifest = inspect_schema_manifest(&client).await?;
     let mut rendered = serde_json::to_string_pretty(&manifest)
         .map_err(|error| StorageError::Migration(format!("render ClickHouse manifest: {error}")))?;
     rendered.push('\n');
@@ -185,6 +189,7 @@ pub async fn plan_schema(config: &ClickHouseConfig) -> Result<ClickHouseSchemaPl
     }
 
     let client = client(config);
+    verify_server_version(&client).await?;
     let names = schema_object_names(&client).await?;
     let migration_ledger_exists = names.contains(MIGRATION_TABLE);
     if !migration_ledger_exists {
@@ -230,6 +235,7 @@ async fn apply_schema_migrations(
     validate_migration_registry()?;
     ensure::ensure_database(config).await?;
     let client = client(config);
+    verify_server_version(&client).await?;
     let lock_owner = Uuid::now_v7().to_string();
     acquire_deployment_lock(&client, &lock_owner).await?;
     let result = apply_schema_migrations_locked(&client, allow_offline).await;
@@ -508,6 +514,7 @@ async fn verify_schema_client_with_lock_policy(
     client: &Client,
     deployment_lock_owned: bool,
 ) -> Result<ClickHouseSchemaStatus, StorageError> {
+    verify_server_version(client).await?;
     if !deployment_lock_owned && table_exists(client, DEPLOYMENT_LOCK_TABLE).await? {
         return Err(StorageError::Migration(format!(
             "ClickHouse schema deployment lock `{DEPLOYMENT_LOCK_TABLE}` is present; runtime startup is blocked until the deploy owner completes or an operator proves and clears a stale lock"
@@ -538,10 +545,44 @@ async fn verify_schema_client_with_lock_policy(
     Ok(ClickHouseSchemaStatus {
         current_version,
         required_object_count: REQUIRED_SCHEMA_OBJECTS.len(),
-        schema_fingerprint: ContentHash::parse(schema_contract_hash()).map_err(|error| {
+        schema_fingerprint: ContentHash::parse(&schema_contract_hash()).map_err(|error| {
             StorageError::Migration(format!("construct ClickHouse schema fingerprint: {error}"))
         })?,
     })
+}
+
+async fn verify_server_version(client: &Client) -> Result<(), StorageError> {
+    let version = CLICKHOUSE_SCHEMA_VERIFY
+        .query(client, "SELECT version()")
+        .fetch_one::<String>()
+        .await?;
+    ensure_supported_clickhouse_version(&version)
+}
+
+fn ensure_supported_clickhouse_version(version: &str) -> Result<(), StorageError> {
+    let (major, minor) = parse_clickhouse_version(version)?;
+    if (major, minor) < (MINIMUM_CLICKHOUSE_MAJOR, MINIMUM_CLICKHOUSE_MINOR) {
+        return Err(StorageError::Migration(format!(
+            "ClickHouse {version} is unsupported; version {MINIMUM_CLICKHOUSE_MAJOR}.{MINIMUM_CLICKHOUSE_MINOR} or newer is required for acknowledged async-insert deduplication across dependent materialized views"
+        )));
+    }
+    Ok(())
+}
+
+fn parse_clickhouse_version(version: &str) -> Result<(u32, u32), StorageError> {
+    let mut components = version.split('.');
+    let major = components
+        .next()
+        .and_then(|value| value.parse::<u32>().ok());
+    let minor = components
+        .next()
+        .and_then(|value| value.parse::<u32>().ok());
+    match (major, minor) {
+        (Some(major), Some(minor)) => Ok((major, minor)),
+        _ => Err(StorageError::Migration(format!(
+            "ClickHouse server returned an invalid version string `{version}`"
+        ))),
+    }
 }
 
 async fn claim_migration(
@@ -744,22 +785,15 @@ async fn verify_structure(client: &Client) -> Result<(), StorageError> {
             missing.join(", ")
         )));
     }
-    for name in FORBIDDEN_SCHEMA_OBJECTS {
-        if by_name.contains_key(name) {
+    for name in ["book_microstructure_1m_mv", "quant_book_l2_trade_tape_mv"] {
+        let materialized_view = by_name.get(name).ok_or_else(|| {
+            StorageError::Migration(format!("ClickHouse materialized view `{name}` is absent"))
+        })?;
+        if materialized_view.engine != "MaterializedView" {
             return Err(StorageError::Migration(format!(
-                "ClickHouse contains forbidden compatibility object `{name}`; recreate the pre-production database"
+                "ClickHouse object `{name}` is not a MaterializedView"
             )));
         }
-    }
-    let materialized_view = by_name.get("book_microstructure_1m_mv").ok_or_else(|| {
-        StorageError::Migration(
-            "ClickHouse canonical microstructure materialized view is absent".to_owned(),
-        )
-    })?;
-    if materialized_view.engine != "MaterializedView" {
-        return Err(StorageError::Migration(
-            "ClickHouse object `book_microstructure_1m_mv` is not a MaterializedView".to_owned(),
-        ));
     }
     for name in REQUIRED_SCHEMA_OBJECTS {
         let object = by_name.get(name).ok_or_else(|| {
@@ -1024,8 +1058,8 @@ struct TableNameRow {
 #[cfg(test)]
 mod tests {
     use super::{
-        ClickHouseMigrationSafety, MigrationSpec, validate_migration_registry,
-        validate_online_safe_statement,
+        ClickHouseMigrationSafety, MigrationSpec, ensure_supported_clickhouse_version,
+        parse_clickhouse_version, validate_migration_registry, validate_online_safe_statement,
     };
 
     const SAFE_ADD_COLUMN: &[&str] = &["ALTER TABLE events ADD COLUMN IF NOT EXISTS source String"];
@@ -1035,6 +1069,30 @@ mod tests {
     #[test]
     fn compiled_migration_registry_is_contiguous_and_valid() {
         validate_migration_registry().expect("compiled migration registry should be valid");
+    }
+
+    #[test]
+    fn clickhouse_version_parser_accepts_release_build_components() {
+        assert_eq!(
+            parse_clickhouse_version("26.5.1.882").expect("valid ClickHouse release"),
+            (26, 5)
+        );
+    }
+
+    #[test]
+    fn clickhouse_version_parser_rejects_incomplete_versions() {
+        let error = parse_clickhouse_version("26")
+            .expect_err("minor version is required for the deduplication contract");
+        assert!(error.to_string().contains("invalid version string"));
+    }
+
+    #[test]
+    fn clickhouse_version_contract_rejects_pre_26_1_servers() {
+        let error = ensure_supported_clickhouse_version("25.12.9.1")
+            .expect_err("dependent materialized-view deduplication is not end-to-end");
+        assert!(error.to_string().contains("26.1 or newer"));
+        ensure_supported_clickhouse_version("26.1.0.0").expect("minimum supported release");
+        ensure_supported_clickhouse_version("27.0.0.0").expect("future major release");
     }
 
     #[test]

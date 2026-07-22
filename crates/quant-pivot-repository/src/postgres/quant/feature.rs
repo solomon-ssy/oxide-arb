@@ -53,7 +53,7 @@ impl FeatureRepository for PgFeatureRepository {
         &self,
         id: &FeatureVectorId,
     ) -> Result<Option<FeatureVectorInfo>, StorageError> {
-        Entity::find_by_id(id.clone())
+        Entity::find_by_id(*id)
             .one(&self.db)
             .await
             .map_err(StorageError::from)

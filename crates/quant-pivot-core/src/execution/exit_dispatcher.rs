@@ -109,7 +109,7 @@ impl CoreExitDispatcher {
             .intents
             .find_by_id(&lot.order_intent_id)
             .await?
-            .ok_or_else(|| StorageError::not_found(QUANT_ORDER_INTENT, &lot.order_intent_id))?;
+            .ok_or_else(|| StorageError::not_found(QUANT_ORDER_INTENT, lot.order_intent_id))?;
         let prepared_order = self
             .prepare_exit_order(&lot, &order, &intent.profile_ref)
             .await?;
@@ -124,7 +124,7 @@ impl CoreExitDispatcher {
         let recommendation_id = intent.recommendation_id;
         self.deps.execution_events.write(project_execution_event(
             &execution_order,
-            recommendation_id.clone(),
+            recommendation_id,
             ChQuantLedgerEventKind::ExitSubmitted,
             Utc::now(),
         ));
@@ -139,7 +139,7 @@ impl CoreExitDispatcher {
             order_type: prepared_order.order_type,
             post_only: prepared_order.post_only,
             expected_fee: prepared_order.expected_fee,
-            fee_schedule_hash: prepared_order.fee_schedule.schedule_hash.clone(),
+            fee_schedule_hash: prepared_order.fee_schedule.schedule_hash,
         };
         let result = self
             .deps
@@ -190,11 +190,13 @@ impl CoreExitDispatcher {
         profile_ref: &ResearchProfileRef,
     ) -> QuantResult<PreparedVenueOrder> {
         let now = Utc::now();
-        let book = self.deps.book_store.load(&lot.token_id).ok_or_else(|| {
-            ExecutionError::IntentDenied {
+        let book = self
+            .deps
+            .book_store
+            .load_by_id(&lot.token_id)
+            .ok_or_else(|| ExecutionError::IntentDenied {
                 reason: "cannot prepare exit without a current L2 book".to_owned(),
-            }
-        })?;
+            })?;
         let market_info = self
             .deps
             .clob_market_info
@@ -290,7 +292,7 @@ fn build_exit_order(
 ) -> Result<NewExecutionOrder, ExecutionError> {
     Ok(NewExecutionOrder {
         execution_order_id: ExecutionOrderId::from_v7(),
-        order_intent_id: lot.order_intent_id.clone(),
+        order_intent_id: lot.order_intent_id,
         order_phase: ExecutionOrderPhase::Exit,
         market_id: lot.market_id.clone(),
         token_id: lot.token_id.clone(),
@@ -499,8 +501,8 @@ fn exit_reconciliation_row(
     }]);
     NewReconciliation {
         reconciliation_id: ReconciliationId::from_v7(),
-        execution_order_id: execution_order.execution_order_id.clone(),
-        order_intent_id: execution_order.order_intent_id.clone(),
+        execution_order_id: execution_order.execution_order_id,
+        order_intent_id: execution_order.order_intent_id,
         result: outcome.reconciliation_result(),
         evidence_json: evidence,
         venue_filled_shares: Some(result.filled_shares),

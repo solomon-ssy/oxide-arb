@@ -12,7 +12,8 @@
 //! ever touched and no current feature/factor code replaces frozen rows.
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashSet},
+    collections::{BTreeMap, BTreeSet},
+    ops::Range,
     sync::Arc,
 };
 
@@ -72,7 +73,7 @@ use quant_pivot_research::{
         min_track_record_length, probability_of_backtest_overfitting,
     },
 };
-use rayon::prelude::*;
+use rayon::{ThreadPool, ThreadPoolBuilder, prelude::*};
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 use tokio::{runtime::Handle, task};
 use tokio_util::sync::CancellationToken;
@@ -104,6 +105,8 @@ impl CpcvProgress {
     const TRIAL_GRID: ProgressPhase = ProgressPhase { start: 75 };
     const FINALIZE: ProgressPhase = ProgressPhase { start: 95 };
 }
+
+const OFFLINE_RAYON_THREADS: usize = 2;
 
 struct ProgressPhase {
     start: u64,
@@ -198,6 +201,7 @@ pub struct CpcvBacktestService {
     config: CpcvBacktestConfig,
     caps: PortfolioCaps,
     replay: ReplayConfig,
+    offline_pool: Arc<ThreadPool>,
 }
 
 impl CpcvBacktestService {
@@ -215,11 +219,19 @@ impl CpcvBacktestService {
         portfolio: &PortfolioConfig,
         replay: ReplayConfig,
     ) -> QuantResult<Self> {
+        let offline_pool = ThreadPoolBuilder::new()
+            .num_threads(OFFLINE_RAYON_THREADS)
+            .thread_name(|index| format!("quant-offline-{index}"))
+            .build()
+            .map_err(|error| ResearchError::ValidationMethodology {
+                detail: format!("failed to build governed offline Rayon pool: {error}"),
+            })?;
         Ok(Self {
             deps,
             config,
             caps: PortfolioCaps::try_from(portfolio)?,
             replay,
+            offline_pool: Arc::new(offline_pool),
         })
     }
 
@@ -323,7 +335,7 @@ impl CpcvBacktestService {
             CpcvProgress::LOAD.start,
             CpcvProgress::TOTAL,
         ));
-        let parquet_examples = self.decode_examples(dataset).await?;
+        let mut parquet_examples = self.decode_examples(dataset).await?;
 
         if input.model_family.is_exit_scorer() {
             return self.prepare_sell_templates(dataset, input, parquet_examples, progress);
@@ -334,9 +346,17 @@ impl CpcvBacktestService {
             CpcvProgress::MATERIALIZE_EXAMPLES.start,
             CpcvProgress::TOTAL,
         ));
-        let examples = parquet_examples.clone();
+        parquet_examples.sort_by(|left, right| {
+            left.decision_at()
+                .cmp(&right.decision_at())
+                .then_with(|| left.market_id.as_str().cmp(right.market_id.as_str()))
+                .then_with(|| left.token_id.as_str().cmp(right.token_id.as_str()))
+        });
+        let examples: Arc<[TrainingExample]> = parquet_examples.into();
 
         let groups: Arc<[TimelineGroup]> = build_timeline_groups(&examples, &input.label)?.into();
+        let group_example_ranges: Arc<[Range<usize>]> =
+            build_group_example_ranges(&examples, &groups)?.into();
         // Fail before the expensive CPCV fold loop when the timeline cannot
         // support CSCV/PBO (T < block_count).
         let pbo_block_count = validated_pbo_block_count(self.config.pbo.block_count)?;
@@ -359,8 +379,7 @@ impl CpcvBacktestService {
                 .ok_or_else(|| ResearchError::ValidationMethodology {
                     detail: "v5 CPCV dataset is missing its manifest".to_owned(),
                 })?
-                .model_spec_definition_hash
-                .clone(),
+                .model_spec_definition_hash,
             profile_ref: dataset
                 .manifest_json
                 .as_ref()
@@ -370,16 +389,16 @@ impl CpcvBacktestService {
                 .profile_ref
                 .clone(),
             model_family: input.model_family,
-            feature_schema_hash: materialization.feature_schema_hash.clone(),
-            factor_schema_hash: materialization.factor_schema_hash.clone(),
+            feature_schema_hash: *materialization.feature_schema_hash,
+            factor_schema_hash: *materialization.factor_schema_hash,
             trade_policy_artifact_id: dataset
                 .manifest_json
                 .as_ref()
-                .and_then(|manifest| manifest.trade_policy_artifact_id.clone()),
+                .and_then(|manifest| manifest.trade_policy_artifact_id),
             trade_policy_hash: dataset
                 .manifest_json
                 .as_ref()
-                .and_then(|manifest| manifest.trade_policy_hash.clone()),
+                .and_then(|manifest| manifest.trade_policy_hash),
         };
         progress.report(ResearchJobProgress::with_total(
             "frozen_input_ticks",
@@ -388,7 +407,7 @@ impl CpcvBacktestService {
         ));
         let probe_runtime = ProbeRuntime {
             model_family: header_template.model_family,
-            feature_schema_hash: header_template.feature_schema_hash.clone(),
+            feature_schema_hash: header_template.feature_schema_hash,
             input_contract: input.input_contract.clone(),
         };
         let source_slice = dataset
@@ -403,7 +422,7 @@ impl CpcvBacktestService {
             .read_ref(&source_slice)
             .await?;
         let ticks = frozen_ticks(
-            &parquet_examples,
+            &examples,
             &frozen_source,
             self.config.entry_max_slippage_bps,
             &probe_runtime,
@@ -438,12 +457,17 @@ impl CpcvBacktestService {
             }
             .into());
         }
+        let fold_build = FoldTemplateBuild {
+            examples,
+            group_example_ranges,
+            header_template,
+            groups,
+            handle,
+        };
         #[cfg(feature = "ml-classical")]
-        let fold_template =
-            self.build_fold_template(dataset, input, examples, header_template, groups, handle)?;
+        let fold_template = self.build_fold_template(dataset, input, fold_build)?;
         #[cfg(not(feature = "ml-classical"))]
-        let fold_template =
-            self.build_fold_template(dataset, input, examples, header_template, groups, handle);
+        let fold_template = self.build_fold_template(dataset, input, fold_build);
         Ok((fold_template, replay_template))
     }
 
@@ -500,29 +524,35 @@ impl CpcvBacktestService {
         &self,
         dataset: &TrainingDatasetInfo,
         input: &CpcvBacktestInput,
-        examples: Vec<TrainingExample>,
-        header_template: ModelArtifactHeader,
-        groups: Arc<[TimelineGroup]>,
-        handle: Handle,
+        build: FoldTemplateBuild,
     ) -> QuantResult<Arc<FoldTemplate>> {
+        let FoldTemplateBuild {
+            examples,
+            group_example_ranges,
+            header_template,
+            groups,
+            handle,
+        } = build;
         if let Some(kind) = input.model_family.classical_kind() {
             let materialization = require_dataset_materialization(dataset)?;
             return Ok(Arc::new(FoldTemplate::Classical(ClassicalFoldTemplate {
-                examples: examples.into(),
+                examples,
+                group_example_ranges,
                 label: input.label.clone(),
                 input_contract: Arc::new(input.input_contract.clone()),
                 header_template,
                 kind,
                 schema: Arc::new(FeatureSchema::build(&self.replay.features)?),
-                label_schema_hash: materialization.label_schema_hash.clone(),
-                training_dataset_hash: materialization.dataset_hash.clone(),
+                label_schema_hash: *materialization.label_schema_hash,
+                training_dataset_hash: *materialization.dataset_hash,
                 prediction_horizon_secs: input.prediction_horizon_secs,
                 groups,
             })));
         }
         let seed_weights = weighted_seed_weights(&self.config.factors, &examples);
         Ok(Arc::new(FoldTemplate::WeightedFactor(FoldTrainTemplate {
-            examples: examples.into(),
+            examples,
+            group_example_ranges,
             label: input.label.clone(),
             seed_weights,
             header_template,
@@ -542,14 +572,19 @@ impl CpcvBacktestService {
         &self,
         _dataset: &TrainingDatasetInfo,
         input: &CpcvBacktestInput,
-        examples: Vec<TrainingExample>,
-        header_template: ModelArtifactHeader,
-        groups: Arc<[TimelineGroup]>,
-        handle: Handle,
+        build: FoldTemplateBuild,
     ) -> Arc<FoldTemplate> {
+        let FoldTemplateBuild {
+            examples,
+            group_example_ranges,
+            header_template,
+            groups,
+            handle,
+        } = build;
         let seed_weights = weighted_seed_weights(&self.config.factors, &examples);
         Arc::new(FoldTemplate::WeightedFactor(FoldTrainTemplate {
-            examples: examples.into(),
+            examples,
+            group_example_ranges,
             label: input.label.clone(),
             seed_weights,
             header_template,
@@ -638,8 +673,7 @@ impl CpcvBacktestService {
                 .ok_or_else(|| ResearchError::ValidationMethodology {
                     detail: "v5 sell CPCV dataset is missing its manifest".to_owned(),
                 })?
-                .model_spec_definition_hash
-                .clone(),
+                .model_spec_definition_hash,
             profile_ref: dataset
                 .manifest_json
                 .as_ref()
@@ -649,16 +683,16 @@ impl CpcvBacktestService {
                 .profile_ref
                 .clone(),
             model_family: input.model_family,
-            feature_schema_hash: materialization.feature_schema_hash.clone(),
-            factor_schema_hash: materialization.factor_schema_hash.clone(),
+            feature_schema_hash: *materialization.feature_schema_hash,
+            factor_schema_hash: *materialization.factor_schema_hash,
             trade_policy_artifact_id: dataset
                 .manifest_json
                 .as_ref()
-                .and_then(|manifest| manifest.trade_policy_artifact_id.clone()),
+                .and_then(|manifest| manifest.trade_policy_artifact_id),
             trade_policy_hash: dataset
                 .manifest_json
                 .as_ref()
-                .and_then(|manifest| manifest.trade_policy_hash.clone()),
+                .and_then(|manifest| manifest.trade_policy_hash),
         };
         let fold_template = Arc::new(FoldTemplate::Sell(SellFoldTemplate {
             sequences: Arc::clone(&sequences),
@@ -667,7 +701,7 @@ impl CpcvBacktestService {
             header_template,
             base_objective: self.config.objective.clone(),
             prediction_horizon_secs: input.prediction_horizon_secs,
-            label_schema_hash: materialization.label_schema_hash.clone(),
+            label_schema_hash: *materialization.label_schema_hash,
             input_contract: Arc::new(input.input_contract.clone()),
             groups: Arc::clone(&groups),
             purge: self.config.purge,
@@ -694,18 +728,21 @@ impl CpcvBacktestService {
         let groups = Arc::clone(groups);
         let cpcv_config = self.config.cpcv;
         let purge_config = self.config.purge;
+        let offline_pool = Arc::clone(&self.offline_pool);
         task::spawn_blocking(move || -> QuantResult<BacktestPathSet> {
-            let fold_source = fold_template.fold_source(None)?;
-            let replay_engine = FoldReplayEngineAdapter {
-                template: &replay_template,
-            };
-            DefaultCombinatorialPurgedBacktester::new().run(CpcvRequest {
-                path_set_id,
-                groups: &groups,
-                cpcv: cpcv_config,
-                purge: purge_config,
-                fold_source: fold_source.as_ref(),
-                replay: &replay_engine,
+            offline_pool.install(|| {
+                let fold_source = fold_template.fold_source(None)?;
+                let replay_engine = FoldReplayEngineAdapter {
+                    template: &replay_template,
+                };
+                DefaultCombinatorialPurgedBacktester::new().run(CpcvRequest {
+                    path_set_id,
+                    groups: &groups,
+                    cpcv: cpcv_config,
+                    purge: purge_config,
+                    fold_source: fold_source.as_ref(),
+                    replay: &replay_engine,
+                })
             })
         })
         .await
@@ -733,14 +770,17 @@ impl CpcvBacktestService {
         let fold_template = Arc::clone(fold_template);
         let replay_template = Arc::clone(replay_template);
         let groups = Arc::clone(groups);
+        let offline_pool = Arc::clone(&self.offline_pool);
         let matrix = task::spawn_blocking(move || -> QuantResult<TrialPerformanceMatrix> {
-            run_trial_grid(
-                &trials,
-                &fold_template,
-                &replay_template,
-                &groups,
-                sample_interval_secs,
-            )
+            offline_pool.install(|| {
+                run_trial_grid(
+                    &trials,
+                    &fold_template,
+                    &replay_template,
+                    &groups,
+                    sample_interval_secs,
+                )
+            })
         })
         .await
         .map_err(|error| {
@@ -841,7 +881,7 @@ impl QuantModelRuntime for ProbeRuntime {
     }
 
     fn feature_schema_hash(&self) -> ContentHash {
-        self.feature_schema_hash.clone()
+        self.feature_schema_hash
     }
 
     fn required_features(&self) -> Vec<FeatureName> {
@@ -916,6 +956,40 @@ fn build_timeline_groups(
         .collect())
 }
 
+fn build_group_example_ranges(
+    examples: &[TrainingExample],
+    groups: &[TimelineGroup],
+) -> QuantResult<Vec<Range<usize>>> {
+    let mut ranges = Vec::with_capacity(groups.len());
+    let mut cursor = 0usize;
+    for group in groups {
+        while examples
+            .get(cursor)
+            .is_some_and(|example| example.decision_at() < group.decision_at)
+        {
+            cursor += 1;
+        }
+        let start = cursor;
+        while examples
+            .get(cursor)
+            .is_some_and(|example| example.decision_at() == group.decision_at)
+        {
+            cursor += 1;
+        }
+        if start == cursor {
+            return Err(ResearchError::ValidationMethodology {
+                detail: format!(
+                    "CPCV timeline group {} has no index-aligned training examples",
+                    group.decision_at
+                ),
+            }
+            .into());
+        }
+        ranges.push(start..cursor);
+    }
+    Ok(ranges)
+}
+
 /// The selected label's `matured_at`, taking the max across every row on
 /// `example` carrying `(label.name, label.horizon_secs)` (defensive; a Sell
 /// `ExitDecision` row carries exactly one row per label in practice).
@@ -978,7 +1052,7 @@ fn build_lot_timeline_groups(
             })
             .or_insert_with(|| {
                 (
-                    ctx.position_id.clone(),
+                    ctx.position_id,
                     TimelineGroup {
                         decision_at: example.decision_at(),
                         label_horizon_end: matured_at,
@@ -1064,7 +1138,7 @@ fn sell_seed_weights(examples: &[TrainingExample]) -> QuantResult<Vec<FactorWeig
     let mut names: BTreeSet<String> = BTreeSet::new();
     for example in examples {
         for factor in &example.factor_values {
-            names.insert(factor.name.as_str().to_owned());
+            names.insert(factor.name.to_string());
         }
     }
     for pseudo in [
@@ -1072,7 +1146,7 @@ fn sell_seed_weights(examples: &[TrainingExample]) -> QuantResult<Vec<FactorWeig
         POSITION_TIME_IN_TRADE,
         POSITION_PEAK_DRAWDOWN,
     ] {
-        names.insert(pseudo.as_str().to_owned());
+        names.insert(pseudo.to_string());
     }
     let count =
         u64::try_from(names.len()).map_err(|error| ResearchError::ValidationMethodology {
@@ -1094,6 +1168,14 @@ fn sell_seed_weights(examples: &[TrainingExample]) -> QuantResult<Vec<FactorWeig
         .collect())
 }
 
+struct FoldTemplateBuild {
+    examples: Arc<[TrainingExample]>,
+    group_example_ranges: Arc<[Range<usize>]>,
+    header_template: ModelArtifactHeader,
+    groups: Arc<[TimelineGroup]>,
+    handle: Handle,
+}
+
 /// Everything a [`FoldModelSource`] needs to train a `WeightedFactor` fold.
 /// `handle` lets [`WeightedFactorFoldSource::train_fold`] block on the async
 /// trainer from inside a rayon worker thread (rayon threads carry no tokio
@@ -1102,6 +1184,7 @@ fn sell_seed_weights(examples: &[TrainingExample]) -> QuantResult<Vec<FactorWeig
 /// through explicitly).
 struct FoldTrainTemplate {
     examples: Arc<[TrainingExample]>,
+    group_example_ranges: Arc<[Range<usize>]>,
     label: LabelSelector,
     seed_weights: Vec<FactorWeight>,
     header_template: ModelArtifactHeader,
@@ -1272,26 +1355,51 @@ struct WeightedFactorFoldSource<'a> {
     objective: &'a TrainingObjectiveSpec,
 }
 
+fn validated_group_indices(filter: &GroupRowFilter, range_count: usize) -> QuantResult<&[usize]> {
+    if filter
+        .group_indices
+        .windows(2)
+        .any(|window| window[0] >= window[1])
+    {
+        return Err(ResearchError::ValidationMethodology {
+            detail: "CPCV group filter must be strictly ascending and unique".to_owned(),
+        }
+        .into());
+    }
+    if let Some(&index) = filter
+        .group_indices
+        .last()
+        .filter(|&&index| index >= range_count)
+    {
+        return Err(ResearchError::ValidationMethodology {
+            detail: format!(
+                "CPCV group index {index} exceeds {range_count} precomputed example ranges"
+            ),
+        }
+        .into());
+    }
+    Ok(&filter.group_indices)
+}
+
 impl FoldModelSource for WeightedFactorFoldSource<'_> {
     fn train_fold(&self, filter: &GroupRowFilter) -> QuantResult<FoldRuntime> {
-        let allowed_as_of: HashSet<DateTime<Utc>> = filter
-            .group_indices
+        let group_indices =
+            validated_group_indices(filter, self.template.group_example_ranges.len())?;
+        let capacity = group_indices
             .iter()
-            .map(|&idx| self.template.groups[idx].decision_at)
-            .collect();
-        let fold_examples: Vec<TrainingExample> = self
-            .template
-            .examples
-            .iter()
-            .filter(|example| allowed_as_of.contains(&example.decision_at()))
-            .cloned()
-            .collect();
+            .map(|&index| self.template.group_example_ranges[index].len())
+            .sum();
+        let mut fold_examples = Vec::with_capacity(capacity);
+        for &index in group_indices {
+            let range = &self.template.group_example_ranges[index];
+            fold_examples.extend_from_slice(&self.template.examples[range.clone()]);
+        }
         let training_dataset_hash = ResearchHasher::canonical(&fold_examples)?;
 
         let mut header = self.template.header_template.clone();
         header.model_version_id = ModelVersionId::from_v7();
         let request = TrainModelRequest {
-            examples: fold_examples,
+            examples: fold_examples.into(),
             training_dataset_hash,
             label: self.template.label.clone(),
             seed_weights: self.template.seed_weights.clone(),
@@ -1355,7 +1463,7 @@ impl FoldModelSource for SellFoldSource<'_> {
         let mut header = self.template.header_template.clone();
         header.model_version_id = ModelVersionId::from_v7();
         let request = TrainSellScorerRequest {
-            examples: fold_examples,
+            examples: fold_examples.into(),
             training_dataset_hash,
             label: self.template.label.clone(),
             seed_weights: self.template.seed_weights.clone(),
@@ -1368,7 +1476,7 @@ impl FoldModelSource for SellFoldSource<'_> {
             header,
             prediction_horizon_secs: self.template.prediction_horizon_secs,
             output_spec: SellScorerOutputSpec::conservative(),
-            label_schema_hash: self.template.label_schema_hash.clone(),
+            label_schema_hash: self.template.label_schema_hash,
             input_contract: self.template.input_contract.as_ref().clone(),
         };
         let trained = SellScorerTrainer::new().train_sell_scorer(&request)?;
@@ -1391,6 +1499,7 @@ impl FoldModelSource for SellFoldSource<'_> {
 #[cfg(feature = "ml-classical")]
 struct ClassicalFoldTemplate {
     examples: Arc<[TrainingExample]>,
+    group_example_ranges: Arc<[Range<usize>]>,
     label: LabelSelector,
     input_contract: Arc<ModelInputContract>,
     header_template: ModelArtifactHeader,
@@ -1417,21 +1526,12 @@ struct ClassicalFoldSource<'a> {
 #[cfg(feature = "ml-classical")]
 impl FoldModelSource for ClassicalFoldSource<'_> {
     fn train_fold(&self, filter: &GroupRowFilter) -> QuantResult<FoldRuntime> {
-        let allowed_as_of: HashSet<DateTime<Utc>> = filter
-            .group_indices
-            .iter()
-            .map(|&idx| self.template.groups[idx].decision_at)
-            .collect();
-        let fold_examples: Vec<TrainingExample> = self
-            .template
-            .examples
-            .iter()
-            .filter(|example| allowed_as_of.contains(&example.decision_at()))
-            .cloned()
-            .collect();
-
+        let group_indices =
+            validated_group_indices(filter, self.template.group_example_ranges.len())?;
         let matrix = model_training::build_classical_matrix(
-            &fold_examples,
+            group_indices.iter().flat_map(|&index| {
+                self.template.examples[self.template.group_example_ranges[index].clone()].iter()
+            }),
             &self.template.label,
             &self.template.schema,
             &self.template.input_contract,
@@ -1462,16 +1562,16 @@ impl FoldModelSource for ClassicalFoldSource<'_> {
             kind: self.template.kind,
             crate_name: output.crate_name.clone(),
             crate_version: output.crate_version.clone(),
-            label_schema_hash: self.template.label_schema_hash.clone(),
-            training_dataset_hash: self.template.training_dataset_hash.clone(),
+            label_schema_hash: self.template.label_schema_hash,
+            training_dataset_hash: self.template.training_dataset_hash,
             prediction_horizon_secs: self.template.prediction_horizon_secs,
             output_semantics,
             multipliers: ScoreMultiplierSpec::conservative(),
             substitution_confidence_rules: SubstitutionConfidenceRules::conservative(),
             input_contract: output.input_contract.clone(),
-            input_contract_hash: output.input_contract_hash.clone(),
-            input_transform_hash: output.input_transform_hash.clone(),
-            training_input_hash: output.training_input_hash.clone(),
+            input_contract_hash: output.input_contract_hash,
+            input_transform_hash: output.input_transform_hash,
+            training_input_hash: output.training_input_hash,
             // Ephemeral validation fold: never persisted to the artifact
             // store, so this URI is never dereferenced — `ClassicalRuntime::load`
             // takes the estimator bytes directly, below.
@@ -1480,7 +1580,7 @@ impl FoldModelSource for ClassicalFoldSource<'_> {
                     detail: format!("ephemeral fold artifact URI failed to parse: {error}"),
                 },
             )?,
-            serialized_model_hash: output.model_bytes_hash.clone(),
+            serialized_model_hash: output.model_bytes_hash,
             serialization_format: output.serialization_format,
             input_transform: output.input_transform.clone(),
             metrics: output.metrics.clone(),
@@ -1693,15 +1793,31 @@ fn run_trial_grid(
             let fold_source = fold_template.fold_source(Some(trial))?;
             let model = fold_source.train_fold(&all_indices)?;
             let evaluations = replay_engine.evaluate(&model, &all_indices)?;
-            let mut by_group: BTreeMap<usize, Decimal> = BTreeMap::new();
+            let mut by_group = vec![None; groups.len()];
             for evaluation in evaluations {
-                by_group.insert(evaluation.group_index, evaluation.return_value);
+                let slot = by_group.get_mut(evaluation.group_index).ok_or_else(|| {
+                    ResearchError::ValidationMethodology {
+                        detail: format!(
+                            "trial-grid replay returned out-of-range group_index={}",
+                            evaluation.group_index
+                        ),
+                    }
+                })?;
+                if slot.replace(evaluation.return_value).is_some() {
+                    return Err(ResearchError::ValidationMethodology {
+                        detail: format!(
+                            "trial-grid replay returned duplicate group_index={}",
+                            evaluation.group_index
+                        ),
+                    }
+                    .into());
+                }
             }
             // Fail-closed: never invent zero returns for missing groups (same
             // invariant as CPCV fold replay). Silent zeros would bias PBO/DSR V.
             let mut column = Vec::with_capacity(groups.len());
-            for idx in 0..groups.len() {
-                let Some(return_value) = by_group.get(&idx).copied() else {
+            for (idx, return_value) in by_group.into_iter().enumerate() {
+                let Some(return_value) = return_value else {
                     return Err(ResearchError::ValidationMethodology {
                         detail: format!(
                             "trial-grid replay missing group_index={idx} — refuse to invent a zero return"
@@ -1746,11 +1862,7 @@ fn run_trial_grid(
         groups.iter().map(|group| group.decision_at).collect()
     };
 
-    // Transpose trial_returns (N_trials x T) into returns (T x N_trials).
-    let returns: Vec<Vec<Decimal>> = (0..periods.len())
-        .map(|period| trial_returns.iter().map(|column| column[period]).collect())
-        .collect();
-    Ok(TrialPerformanceMatrix { periods, returns })
+    TrialPerformanceMatrix::from_columns(periods, &trial_returns)
 }
 
 /// Rewrites Sell φ-path metrics from irregular lot returns into an
@@ -2028,7 +2140,7 @@ fn compute_dsr_and_pbo(
 fn trial_sharpe_series(matrix: &TrialPerformanceMatrix) -> Vec<Decimal> {
     (0..matrix.trial_count())
         .map(|trial| {
-            let column: Vec<Decimal> = matrix.returns.iter().map(|row| row[trial]).collect();
+            let column: Vec<Decimal> = matrix.rows().map(|row| row[trial]).collect();
             sharpe_ratio(&column, Decimal::ONE)
         })
         .collect()
@@ -2094,7 +2206,7 @@ mod tests {
         },
         validation::{
             BacktestPathSet, CombinatorialPurgedBacktester, CpcvConfig, CpcvRequest,
-            DefaultCombinatorialPurgedBacktester, PurgeConfig,
+            DefaultCombinatorialPurgedBacktester, GroupRowFilter, PurgeConfig,
         },
     };
     use rust_decimal::Decimal;
@@ -2104,7 +2216,7 @@ mod tests {
         FoldReplayEngineAdapter, FoldTemplate, LotDecisionSequence, ReplayTemplate,
         SellFoldTemplate, SellReplayTemplate, TimelineGroup, build_lot_timeline_groups,
         calendarize_sell_path_set, selected_label_matured_at, sell_seed_weights,
-        validate_sell_examples,
+        validate_sell_examples, validated_group_indices,
     };
     use crate::test_fixtures::execution_pg_seed::fixture_profile_ref;
 
@@ -2117,6 +2229,35 @@ mod tests {
             name: HOLD_VS_EXIT_ALPHA_BPS,
             horizon_secs: 0,
         }
+    }
+
+    #[test]
+    fn precomputed_group_indices_are_strictly_sorted_unique_and_bounded() {
+        let ranges = [0..2, 2..5, 5..6];
+        let filter = GroupRowFilter {
+            group_indices: vec![0, 2],
+        };
+        let selected =
+            validated_group_indices(&filter, ranges.len()).expect("selected group indices");
+        assert_eq!(selected, &[0, 2]);
+        assert!(
+            validated_group_indices(
+                &GroupRowFilter {
+                    group_indices: vec![2, 0, 2],
+                },
+                ranges.len(),
+            )
+            .is_err()
+        );
+        assert!(
+            validated_group_indices(
+                &GroupRowFilter {
+                    group_indices: vec![3],
+                },
+                ranges.len(),
+            )
+            .is_err()
+        );
     }
 
     fn lot_decision(
@@ -2190,9 +2331,9 @@ mod tests {
         let closed_a = ts(200);
         let closed_b = ts(300);
         let examples = vec![
-            lot_decision(lot_a.clone(), ts(0), closed_a),
-            lot_decision(lot_a.clone(), ts(60), closed_a),
-            lot_decision(lot_b.clone(), ts(30), closed_b),
+            lot_decision(lot_a, ts(0), closed_a),
+            lot_decision(lot_a, ts(60), closed_a),
+            lot_decision(lot_b, ts(30), closed_b),
         ];
         let (groups, sequences) = build_lot_timeline_groups(&examples, &label()).expect("groups");
         assert_eq!(groups.len(), 2, "two distinct lots ⇒ two groups");
@@ -2374,7 +2515,7 @@ mod tests {
 
     fn content_hash_seed(seed: u8) -> ContentHash {
         let hex = format!("{seed:02x}{}", "0".repeat(62));
-        ContentHash::parse(format!("blake3:{hex}")).expect("hash")
+        ContentHash::parse(&format!("blake3:{hex}")).expect("hash")
     }
 
     fn market_factor(score: Decimal) -> FactorValue {
@@ -2409,7 +2550,7 @@ mod tests {
             .map(|(i, &offset)| {
                 let as_of = ts(offset);
                 let scale = Decimal::from(n - u64::try_from(i).expect("i")) / Decimal::from(n);
-                let mut example = lot_decision(position_id.clone(), as_of, closed_at);
+                let mut example = lot_decision(*position_id, as_of, closed_at);
                 example.factor_values = vec![market_factor(momentum * scale)];
                 example.position_state = Some(PositionStateFeatures {
                     unrealized_pnl_pct: Some(momentum * dec!(0.5) * scale),

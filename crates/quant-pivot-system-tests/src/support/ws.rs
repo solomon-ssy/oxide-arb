@@ -3,7 +3,6 @@
 use std::sync::Arc;
 
 use quant_pivot_api::ws::{ShardHealthSummary, WsShardHealthPort};
-use quant_pivot_models::types::TokenId;
 
 /// Fixed shard connectivity for integration tests (no live socket or manager).
 #[derive(Debug, Clone, Copy)]
@@ -52,11 +51,6 @@ impl WsShardHealthPort for WsShardHealth {
     }
 
     fn last_message_age_ms(&self) -> Option<u64> {
-        self.last_message_age_ms
-    }
-
-    fn token_message_age_ms(&self, _token_id: &TokenId) -> Option<u64> {
-        // Test double: fall back to the global message age for every token.
         self.last_message_age_ms
     }
 }

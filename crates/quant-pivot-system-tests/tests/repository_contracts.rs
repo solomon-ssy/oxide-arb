@@ -71,7 +71,7 @@ mod weather_daily_temperature;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn repository_persistence_contracts_share_one_postgres_stack() {
-    with_postgres_suite(async {
+    Box::pin(with_postgres_suite(async {
         scenario("account_capital::account_snapshot_repo_create_find", Box::pin(account_capital::account_snapshot_repo_create_find())).await;
         scenario("account_capital::reserved_capital_reader_returns_zero_when_empty", Box::pin(account_capital::reserved_capital_reader_returns_zero_when_empty())).await;
         scenario("account_capital::report_transaction_persists_chain_and_reserved_capital_sums_pending_intents", Box::pin(account_capital::report_transaction_persists_chain_and_reserved_capital_sums_pending_intents())).await;
@@ -217,7 +217,7 @@ async fn repository_persistence_contracts_share_one_postgres_stack() {
         scenario("training_dataset::training_dataset_plan_rejects_model_spec_definition_drift", Box::pin(training_dataset::training_dataset_plan_rejects_model_spec_definition_drift())).await;
         scenario("training_dataset::training_dataset_status_transitions_enforce_state_machine", Box::pin(training_dataset::training_dataset_status_transitions_enforce_state_machine())).await;
         scenario("training_dataset::model_version_training_dataset_foreign_key", Box::pin(training_dataset::model_version_training_dataset_foreign_key())).await;
-    })
+    }))
     .await
     .expect("start shared repository PostgreSQL suite");
 }

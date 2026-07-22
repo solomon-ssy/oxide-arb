@@ -83,7 +83,7 @@ impl BootstrapService {
         let view = bootstrap_view(state);
         self.state.store(Arc::new(view.clone()));
         self.phase_tx.send_replace(view.clone());
-        let status = self.last_status.load_full();
+        let status = self.last_status.load();
         let serving_evidence = self.serving_evidence_present.load(Ordering::Acquire);
         self.publish_capabilities(self.derive_capabilities(&status, serving_evidence));
         view
@@ -243,7 +243,7 @@ fn require(condition: bool, reason: CapabilityReason, reasons: &mut Vec<Capabili
 #[async_trait]
 impl BootstrapPort for BootstrapService {
     fn view(&self) -> BootstrapView {
-        self.state.load_full().as_ref().clone()
+        self.state.load().as_ref().clone()
     }
 
     fn subscribe(&self) -> Receiver<BootstrapView> {

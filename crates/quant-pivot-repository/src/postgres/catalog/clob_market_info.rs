@@ -57,7 +57,7 @@ impl ClobMarketInfoRepository for PgClobMarketInfoRepository {
             .validate()
             .map_err(|detail| invariant("invalid observation", detail))?;
         let market_id = observation.market_id.clone();
-        let payload_hash = observation.payload_hash.clone();
+        let payload_hash = observation.payload_hash;
         let maker_bps = exact_i32(
             "builder_maker_fee_rate_bps",
             observation.builder_maker_fee_rate_bps,
@@ -248,7 +248,7 @@ async fn find_by_hash(
 ) -> Result<Option<Model>, StorageError> {
     Entity::find()
         .filter(Column::MarketId.eq(market_id.clone()))
-        .filter(Column::PayloadHash.eq(payload_hash.clone()))
+        .filter(Column::PayloadHash.eq(*payload_hash))
         .one(db)
         .await
         .map_err(StorageError::from)

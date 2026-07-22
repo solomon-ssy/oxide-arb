@@ -118,7 +118,7 @@ impl NhcSource {
         let body = get_text_with_retry(&self.http, &self.retry_policy, url.as_str())
             .await
             .map_err(QuantError::from)?;
-        let file_hash = ContentHash::parse(CanonicalDigest::prefixed_bytes(body.as_bytes()))?;
+        let file_hash = CanonicalDigest::content_hash_bytes(body.as_bytes());
         parse_hurdat2(&body, basin, storm_id, collection_date, available_at).map(|reports| {
             reports.map(|reports| NhcBestTrack {
                 file_hash,
@@ -345,7 +345,7 @@ fn map_hurdat_row(
         NaiveDateTime::parse_from_str(&format!("{} {}", fields[0], fields[1]), "%Y%m%d %H%M")
             .map(|value| value.and_utc())
             .map_err(|error| parse_error("NHC HURDAT2", error.to_string()))?;
-    let report_hash = ContentHash::parse(CanonicalDigest::prefixed_bytes(row.as_bytes()))?;
+    let report_hash = CanonicalDigest::content_hash_bytes(row.as_bytes());
     Ok(Some(WeatherObservationReport {
         source_id: DomainSourceId::nhc_hurdat2(),
         instrument_key: DomainInstrumentKey::nhc_hurdat2(basin.as_str(), storm_id),

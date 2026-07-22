@@ -170,12 +170,12 @@ pub struct ReportRunLifecycleEvent {
 
 impl ReportRunLifecycleEvent {
     #[must_use]
-    pub fn from_run(run: &ReportRunInfo, occurred_at: DateTime<Utc>) -> Self {
+    pub const fn from_run(run: &ReportRunInfo, occurred_at: DateTime<Utc>) -> Self {
         Self {
-            report_run_id: run.report_run_id.clone(),
+            report_run_id: run.report_run_id,
             status: run.status,
             terminal_reason: run.terminal_reason,
-            output_report_id: run.output_report_id.clone(),
+            output_report_id: run.output_report_id,
             occurred_at,
         }
     }

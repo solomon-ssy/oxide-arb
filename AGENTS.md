@@ -6,7 +6,7 @@ Primary onboarding guide for AI agents and contributors. Active architecture liv
 
 **quant-pivot** is a Polymarket-only quantitative system. It:
 
-1. Ingests Gamma metadata and CLOB L2 books into a lock-free **BookStore**.
+1. Ingests Gamma metadata and CLOB L2 books into a borrowed-read **BookStore** facade.
 2. Writes ClickHouse facts and data-quality signals (Phase 2+).
 3. Builds features, factors, and models (Phase 3+).
 4. Produces periodic **RecommendationReport** (TopN) as the primary artifact (Phase 4+).
@@ -21,7 +21,7 @@ Default mode: **`QuantRuntimeMode::ReportOnly`** — the report is the final art
 | Platform | Polymarket only — no `VenueId`, no multi-exchange |
 | Primary artifact | `RecommendationReport` / `Recommendation` — not `ScoredOpportunity` |
 | Runtime modes | `ReportOnly`, `SemiAuto`, `AutoExecution` — **no** DryRun/Paper/Live |
-| Compatibility | Zero re-export shim, zero runtime-config v2 parser |
+| Compatibility | Zero compatibility shim, forwarding re-export, legacy parser, or dual write |
 | Money | `rust_decimal` newtypes — never `f64` for prices/USD/shares |
 
 ## 3. Workspace Crates
@@ -57,6 +57,33 @@ quant-pivot/
 - **GovernanceBundle** — RuntimeConfigStore, RuntimeModeHandle
 
 No detection funnel, no FOK execution hot path, no post-trade relay.
+
+## 4.1 Performance architecture invariants
+
+- Internal UUID-backed IDs and `ContentHash` are fixed-width `Copy` values. `Arc<Uuid>` is
+  forbidden; string-backed venue IDs remain explicit boundary types.
+- `DataPlaneIndex` is an immutable `ArcSwap` snapshot. Hot routing uses `TokenKey`; mutable books
+  have exactly one owner among 8 token-affine partition actors.
+- Ingress is batched and bounded by both mailbox slots and a shared byte semaphore. Timeout,
+  unknown token, sequence discontinuity, or persistence failure invalidates the affected session
+  and fails closed.
+- `quant_book_l2_ledger` is the only canonical L2 table. It stores typed decimal arrays and a raw
+  32-byte domain-separated BLAKE3 digest. Legacy event/checkpoint tables, JSON checkpoints,
+  compatibility readers, dual writes, and version-suffixed table names are forbidden.
+- A partition publishes its `TokenSlot` only after the persistent commit cursor reports durable
+  success. `BookStore::read` uses an `ArcSwap` guard; owned loads are reserved for crossing an
+  `await` or task boundary.
+- WebSocket lifecycle and fanout have one `SessionHub` writer and topic/subject/family indexes.
+  Each event is encoded once as `ByteString`; scanning every session, per-session subscription
+  locks, and `Sender<String>` are forbidden.
+- All queues are bounded and document backpressure, cancellation, and drain semantics. New
+  `spawn_blocking` sites are rejected unless added to the architecture allowlist with explicit CPU
+  and memory budgets.
+- Hard SLOs, benchmark runner requirements, the fixed jemalloc policy, and inline evidence thresholds live in
+  [`docs/operations/performance.md`](docs/operations/performance.md). Work status is recovered only
+  from [`09-extreme-performance-ledger.md`](docs/plans/quant-pivot/09-extreme-performance-ledger.md),
+  which may contain at most one `in_progress` task; while execution is active it must contain
+  exactly one, and after completion/blocking it may contain none.
 
 ## 5. Domain Vocabulary
 

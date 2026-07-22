@@ -47,14 +47,14 @@ use rust_decimal_macros::dec;
 use super::execution_pg_seed::fixture_profile_ref;
 
 fn content_hash() -> ContentHash {
-    ContentHash::parse(format!("blake3:{}", "0".repeat(64))).expect("valid hash")
+    ContentHash::parse(&format!("blake3:{}", "0".repeat(64))).expect("valid hash")
 }
 
 /// Build a pending fixture outbox row for repository-level report tests.
 #[must_use]
 pub fn pending_fact_delivery(report_id: &RecommendationReportId) -> NewReportFactDelivery {
     NewReportFactDelivery {
-        recommendation_report_id: report_id.clone(),
+        recommendation_report_id: *report_id,
         status: ReportFactDeliveryStatus::Pending,
         bundle_uri: ArtifactUri::parse(format!("fixture://report-facts/{report_id}.json"))
             .expect("valid fixture URI"),
@@ -87,13 +87,13 @@ pub fn sampled_parity(report: &NewRecommendationReport) -> NewReportFeatureParit
         reason: reason.clone(),
     };
     let run = NewFeatureParityRun {
-        run_id: run_id.clone(),
+        run_id,
         kind: FeatureParityRunKind::Sampled,
         status: FeatureParityRunStatus::Queued,
         window_start: report.decision_at,
         window_end,
-        report_id: Some(report.recommendation_report_id.clone()),
-        model_version_id: Some(report.model_version_id.clone()),
+        report_id: Some(report.recommendation_report_id),
+        model_version_id: Some(report.model_version_id),
         training_dataset_id: None,
         triggered_by: "test:fixture".to_owned(),
         requested_by: None,
@@ -123,7 +123,7 @@ pub fn sampled_parity(report: &NewRecommendationReport) -> NewReportFeatureParit
         kind: ResearchJobKind::FeatureParity,
         status: ResearchJobStatus::Queued,
         model_spec_id: None,
-        decision_policy_snapshot_id: Some(report.decision_policy_snapshot_id.clone()),
+        decision_policy_snapshot_id: Some(report.decision_policy_snapshot_id),
         params_json: ResearchJobParams::FeatureParity(params),
         requested_by: None,
         acting_role: RoleCode::new("test"),
@@ -340,7 +340,7 @@ fn trade_policy_provenance() -> TradePolicyCohortProvenance {
     let artifact_hash = content_hash();
     let dimension = TradePolicyCohortDimension {
         methodology_id: "fixture-v1".to_owned(),
-        methodology_hash: artifact_hash.clone(),
+        methodology_hash: artifact_hash,
         bucket_id: "fixture".to_owned(),
     };
     TradePolicyCohortProvenance {

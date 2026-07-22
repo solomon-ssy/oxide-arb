@@ -1728,7 +1728,7 @@ mod tests {
         let calibrator_ref = CalibrationArtifactId::from_v7();
         let mut calibrated = sample_artifact();
         calibrated.return_model = ReturnModelSpec::Calibrated(CalibratedReturnModel {
-            calibrator_ref: calibrator_ref.clone(),
+            calibrator_ref,
             downside_source: DownsideSource::MfeMae,
         });
         let calibrated = ModelArtifact::WeightedFactor(Box::new(calibrated));

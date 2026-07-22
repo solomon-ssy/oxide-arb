@@ -2,15 +2,21 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    future::Future,
-    slice,
     sync::Arc,
     time::Duration as StdDuration,
 };
+#[cfg(feature = "domain-chainlink")]
+use std::{future::Future, slice};
 
-use chrono::{DateTime, NaiveDate, Utc};
-use quant_pivot_api::{binance::BinanceAggTradeSource, chainlink::ChainlinkDataStreamsSource};
+#[cfg(feature = "domain-chainlink")]
+use chrono::DateTime;
+use chrono::{NaiveDate, Utc};
+use quant_pivot_api::binance::BinanceAggTradeSource;
+#[cfg(feature = "domain-chainlink")]
+pub(crate) use quant_pivot_api::chainlink::ChainlinkDataStreamsSource;
 use quant_pivot_error::{QuantError, QuantResult};
+#[cfg(feature = "domain-chainlink")]
+use quant_pivot_models::types::ContentHash;
 use quant_pivot_models::{
     clickhouse::CryptoPriceReportRow,
     domain::{
@@ -18,7 +24,7 @@ use quant_pivot_models::{
         quant::{LinkageOutcome, MarketLinkage, MarketSubject},
     },
     enums::domain::{BinanceMarketSegment, LinkageSourceRole},
-    types::{BinanceSymbol, ChainlinkFeedKey, ContentHash, DomainInstrumentKey, DomainSourceId},
+    types::{BinanceSymbol, ChainlinkFeedKey, DomainInstrumentKey, DomainSourceId},
 };
 use quant_pivot_repository::traits::{
     DomainProjectionRepository, DomainSourceCursorRepository, FactWriter, MarketLinkageRepository,
@@ -56,6 +62,7 @@ pub struct CryptoLiveIngestWorker {
     crypto_writer: Arc<dyn FactWriter<CryptoPriceReportRow>>,
     binance: Option<Arc<BinanceAggTradeSource>>,
     binance_usdm_futures: Option<Arc<BinanceAggTradeSource>>,
+    #[cfg(feature = "domain-chainlink")]
     chainlink: Option<Arc<ChainlinkDataStreamsSource>>,
 }
 
@@ -67,6 +74,7 @@ pub struct CryptoLiveIngestDeps {
     pub crypto_writer: Arc<dyn FactWriter<CryptoPriceReportRow>>,
     pub binance: Option<Arc<BinanceAggTradeSource>>,
     pub binance_usdm_futures: Option<Arc<BinanceAggTradeSource>>,
+    #[cfg(feature = "domain-chainlink")]
     pub chainlink: Option<Arc<ChainlinkDataStreamsSource>>,
 }
 
@@ -81,6 +89,7 @@ impl CryptoLiveIngestWorker {
             crypto_writer: deps.crypto_writer,
             binance: deps.binance,
             binance_usdm_futures: deps.binance_usdm_futures,
+            #[cfg(feature = "domain-chainlink")]
             chainlink: deps.chainlink,
         }
     }
@@ -100,8 +109,13 @@ impl CryptoLiveIngestWorker {
             self.binance_usdm_futures.clone(),
             shutdown.child_token(),
         );
-        let chainlink = Arc::clone(&self).run_chainlink_supervisor(shutdown.child_token());
-        tokio::join!(binance, binance_usdm_futures, chainlink);
+        #[cfg(feature = "domain-chainlink")]
+        {
+            let chainlink = Arc::clone(&self).run_chainlink_supervisor(shutdown.child_token());
+            tokio::join!(binance, binance_usdm_futures, chainlink);
+        }
+        #[cfg(not(feature = "domain-chainlink"))]
+        tokio::join!(binance, binance_usdm_futures);
     }
 
     async fn discover(&self) -> QuantResult<CryptoBindings> {
@@ -596,6 +610,7 @@ impl CryptoLiveIngestWorker {
         }
     }
 
+    #[cfg(feature = "domain-chainlink")]
     async fn run_chainlink_supervisor(self: Arc<Self>, shutdown: CancellationToken) {
         let mut tasks = BTreeMap::<DomainInstrumentKey, SourceTask>::new();
         let mut interval = tokio::time::interval(DISCOVERY_INTERVAL);
@@ -645,6 +660,7 @@ impl CryptoLiveIngestWorker {
         stop_all(tasks).await;
     }
 
+    #[cfg(feature = "domain-chainlink")]
     async fn run_chainlink_feed(
         &self,
         source: Arc<ChainlinkDataStreamsSource>,
@@ -707,6 +723,7 @@ impl CryptoLiveIngestWorker {
         }
     }
 
+    #[cfg(feature = "domain-chainlink")]
     async fn run_chainlink_session(
         &self,
         source: &ChainlinkDataStreamsSource,
@@ -768,7 +785,7 @@ impl CryptoLiveIngestWorker {
             };
             if should_process_crypto(&report, last.as_ref()) {
                 self.persist_crypto(report.clone(), gap_generation).await?;
-                last = Some((report.event_time, report.report_hash.clone()));
+                last = Some((report.event_time, report.report_hash));
             }
         }
     }
@@ -795,7 +812,7 @@ impl CryptoLiveIngestWorker {
                 observations_timestamp: report.observations_timestamp.ok_or_else(|| {
                     QuantError::config("Chainlink report lacks observations timestamp")
                 })?,
-                report_hash: report.report_hash.clone(),
+                report_hash: report.report_hash,
             }
         } else {
             return Err(QuantError::config(format!(
@@ -857,6 +874,7 @@ impl CryptoLiveIngestWorker {
     }
 }
 
+#[cfg(feature = "domain-chainlink")]
 fn should_process_crypto(
     report: &CryptoPriceReport,
     last: Option<&(DateTime<Utc>, ContentHash)>,
@@ -866,6 +884,7 @@ fn should_process_crypto(
     })
 }
 
+#[cfg(feature = "domain-chainlink")]
 async fn catch_up_chainlink_pages<Fetch, FetchFuture, Persist, PersistFuture>(
     mut start: u128,
     page_limit: usize,
@@ -890,7 +909,7 @@ where
         let last_sequence = reports.last().map(|report| report.source_sequence);
         for report in reports {
             if should_process_crypto(&report, last.as_ref()) {
-                let checkpoint = (report.event_time, report.report_hash.clone());
+                let checkpoint = (report.event_time, report.report_hash);
                 persist(report).await?;
                 last = Some(checkpoint);
             }
@@ -948,7 +967,7 @@ async fn stop_all(tasks: BTreeMap<DomainInstrumentKey, SourceTask>) {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "domain-chainlink"))]
 mod tests {
     use std::{
         collections::BTreeMap,
@@ -966,7 +985,7 @@ mod tests {
     use super::{catch_up_chainlink_pages, should_process_crypto};
 
     fn hash(seed: char) -> ContentHash {
-        ContentHash::parse(format!("blake3:{}", seed.to_string().repeat(64))).expect("hash")
+        ContentHash::parse(&format!("blake3:{}", seed.to_string().repeat(64))).expect("hash")
     }
 
     fn report(sequence: u64, seconds: i64, seed: char) -> CryptoPriceReport {
@@ -995,7 +1014,7 @@ mod tests {
             report_hash: hash('b'),
             ..first.clone()
         };
-        let checkpoint = (first.event_time, first.report_hash.clone());
+        let checkpoint = (first.event_time, first.report_hash);
         assert!(!should_process_crypto(&first, Some(&checkpoint)));
         assert!(should_process_crypto(&correction, Some(&checkpoint)));
     }
