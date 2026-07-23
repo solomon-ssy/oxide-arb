@@ -249,57 +249,11 @@ async fn start_at(
     .await
     .context("bootstrap canonical fresh-boot policy bundle")?;
     let browser_report_id = if browser_fixture {
-        let infra = seed_shared_demo_infra(infrastructure.postgres.connection()).await;
-        enable_entry_admission_for_test(
-            infrastructure.postgres.connection(),
-            "browser-e2e-fixture",
+        Some(
+            Box::pin(seed_browser_fixture(infrastructure.postgres.connection()))
+                .await
+                .context("seed browser production fixture")?,
         )
-        .await;
-        let settlement_report = seed_report_on_infra(
-            infrastructure.postgres.connection(),
-            &infra,
-            ReportSeedConfig {
-                event_id: "browser-settlement-event".to_owned(),
-                market_id: "0xbrowser-settlement-market".to_owned(),
-                market_question: "Will the browser settlement fixture resolve?".to_owned(),
-                market_slug: "browser-settlement-fixture".to_owned(),
-                token_id: "12345".to_owned(),
-                trigger_key: format!(
-                    "scheduled:browser-settlement:{}",
-                    RecommendationReportId::from_v7()
-                ),
-            },
-        )
-        .await;
-        let settlement_intent =
-            seed_approved_intent(infrastructure.postgres.connection(), &settlement_report).await;
-        fill_entry_lot(
-            infrastructure.postgres.connection(),
-            &PgExecutionSubmissionRepository::new(infrastructure.postgres.connection().clone()),
-            &settlement_report,
-            &settlement_intent,
-        )
-        .await;
-        let market = MarketEntity::find_by_id(MarketId::new(&settlement_report.market))
-            .one(infrastructure.postgres.connection())
-            .await
-            .context("load browser settlement market")?
-            .context("browser settlement market is missing")?;
-        let mut active_market = market.into_active_model();
-        active_market.status = ActiveValue::Set(MarketStatus::Settled);
-        active_market.outcome = ActiveValue::Set(Some("Yes".to_owned()));
-        active_market.resolved_at = ActiveValue::Set(Some(Utc::now()));
-        active_market.content_hash = ActiveValue::Set(ContentHash::from_bytes([0x96; 32]));
-        active_market
-            .update(infrastructure.postgres.connection())
-            .await
-            .context("mark browser settlement market resolved")?;
-        // Publish the parity-containment fixture last so the settlement report
-        // cannot supersede its still-pending intent before the real worker
-        // atomically revokes it.
-        let report = seed_report_fixture(infrastructure.postgres.connection()).await;
-        seed_pending_intent(infrastructure.postgres.connection(), &report).await;
-        Some(report.report)
     } else {
         None
     };
@@ -369,6 +323,56 @@ async fn start_at(
         _upstream: upstream,
         infrastructure,
     })
+}
+
+async fn seed_browser_fixture(db: &DatabaseConnection) -> Result<RecommendationReportId> {
+    let infra = seed_shared_demo_infra(db).await;
+    enable_entry_admission_for_test(db, "browser-e2e-fixture").await;
+    let settlement_report = seed_report_on_infra(
+        db,
+        &infra,
+        ReportSeedConfig {
+            event_id: "browser-settlement-event".to_owned(),
+            market_id: "0xbrowser-settlement-market".to_owned(),
+            market_question: "Will the browser settlement fixture resolve?".to_owned(),
+            market_slug: "browser-settlement-fixture".to_owned(),
+            token_id: "12345".to_owned(),
+            trigger_key: format!(
+                "scheduled:browser-settlement:{}",
+                RecommendationReportId::from_v7()
+            ),
+        },
+    )
+    .await;
+    let settlement_intent = seed_approved_intent(db, &settlement_report).await;
+    fill_entry_lot(
+        db,
+        &PgExecutionSubmissionRepository::new(db.clone()),
+        &settlement_report,
+        &settlement_intent,
+    )
+    .await;
+    let market = MarketEntity::find_by_id(MarketId::new(&settlement_report.market))
+        .one(db)
+        .await
+        .context("load browser settlement market")?
+        .context("browser settlement market is missing")?;
+    let mut active_market = market.into_active_model();
+    active_market.status = ActiveValue::Set(MarketStatus::Settled);
+    active_market.outcome = ActiveValue::Set(Some("Yes".to_owned()));
+    active_market.resolved_at = ActiveValue::Set(Some(Utc::now()));
+    active_market.content_hash = ActiveValue::Set(ContentHash::from_bytes([0x96; 32]));
+    active_market
+        .update(db)
+        .await
+        .context("mark browser settlement market resolved")?;
+
+    // Publish the parity-containment fixture last so the settlement report
+    // cannot supersede its still-pending intent before the real worker
+    // atomically revokes it.
+    let report = seed_report_fixture(db).await;
+    seed_pending_intent(db, &report).await;
+    Ok(report.report)
 }
 
 async fn await_browser_settlement_discovery(db: &DatabaseConnection) -> Result<()> {
