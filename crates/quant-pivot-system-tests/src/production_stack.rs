@@ -48,8 +48,8 @@ use wiremock::{
 use crate::{
     stack::SystemStack,
     support::execution_pg_seed::{
-        ReportSeedConfig, SharedDemoInfra, enable_entry_admission_for_test, fill_entry_lot,
-        seed_approved_intent, seed_pending_intent, seed_report_fixture, seed_report_on_infra,
+        ReportSeedConfig, enable_entry_admission_for_test, fill_entry_lot, seed_approved_intent,
+        seed_pending_intent, seed_report_fixture, seed_report_on_infra, seed_shared_demo_infra,
     },
 };
 
@@ -249,22 +249,15 @@ async fn start_at(
     .await
     .context("bootstrap canonical fresh-boot policy bundle")?;
     let browser_report_id = if browser_fixture {
-        let report = seed_report_fixture(infrastructure.postgres.connection()).await;
+        let infra = seed_shared_demo_infra(infrastructure.postgres.connection()).await;
         enable_entry_admission_for_test(
             infrastructure.postgres.connection(),
             "browser-e2e-fixture",
         )
         .await;
-        seed_pending_intent(infrastructure.postgres.connection(), &report).await;
         let settlement_report = seed_report_on_infra(
             infrastructure.postgres.connection(),
-            &SharedDemoInfra {
-                feature_parity_state_id: report.feature_parity_state_id,
-                decision_policy_snapshot_id: report.decision_policy_snapshot,
-                model_version_id: report.model_version,
-                model_run_id: report.model_run,
-                trade_policy: report.trade_policy.clone(),
-            },
+            &infra,
             ReportSeedConfig {
                 event_id: "browser-settlement-event".to_owned(),
                 market_id: "0xbrowser-settlement-market".to_owned(),
@@ -301,6 +294,11 @@ async fn start_at(
             .update(infrastructure.postgres.connection())
             .await
             .context("mark browser settlement market resolved")?;
+        // Publish the parity-containment fixture last so the settlement report
+        // cannot supersede its still-pending intent before the real worker
+        // atomically revokes it.
+        let report = seed_report_fixture(infrastructure.postgres.connection()).await;
+        seed_pending_intent(infrastructure.postgres.connection(), &report).await;
         Some(report.report)
     } else {
         None
